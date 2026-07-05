@@ -58,7 +58,22 @@ const buildDataMirror = (built: BuiltResult | FrameSnapshot) => ({
   geom_xpos: built.geom_xpos!, geom_xmat: built.geom_xmat!,
 });
 
+// Proactive recycling: WASM linear memory only ever grows within a worker's
+// lifetime, and heavy scenes (many dynamic SCAD/mesh bodies) can eat through
+// the 2^31-byte ceiling in surprisingly few rebuilds. Rather than wait for a
+// hard "enlarge memory" failure, swap in a fresh worker on a schedule so
+// exhaustion is never actually reached during normal use — the same
+// terminate+respawn mechanism as the reactive recovery path, just run
+// preemptively. Any respawn (proactive or reactive) resets this counter.
+const RECYCLE_EVERY_N_BUILDS = 4;
+let buildsSinceRecycle = 0;
+
 let physicsWorkerClientSingleton: PhysicsWorkerClient | null = null;
+const recycleWorker = () => {
+  physicsWorkerClientSingleton?.terminate();
+  physicsWorkerClientSingleton = null;
+  buildsSinceRecycle = 0;
+};
 export const getPhysicsWorkerClient = (): PhysicsWorkerClient => {
   if (!physicsWorkerClientSingleton) {
     const client = new PhysicsWorkerClient();
@@ -1056,6 +1071,15 @@ export const useStore = create<PhysicsState>()((set, get) => ({
         (window as any).compiledXML = xml;
       }
 
+      // Proactively recycle before the ceiling is ever reached, rather than
+      // only reacting to a hard failure — see RECYCLE_EVERY_N_BUILDS comment.
+      buildsSinceRecycle++;
+      if (buildsSinceRecycle > RECYCLE_EVERY_N_BUILDS) {
+        console.warn(`Proactively recycling the physics worker after ${RECYCLE_EVERY_N_BUILDS} builds to stay well clear of the WASM heap ceiling.`);
+        recycleWorker();
+        buildsSinceRecycle = 1;
+      }
+
       const client = getPhysicsWorkerClient();
       client.setEnv(windX, windY);
       const built = await client.build(xml, sceneGraph, !forceReset);
@@ -1076,8 +1100,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
         // it. Only reload the page if that also fails.
         try {
           console.warn('MuJoCo WASM heap exhausted — terminating and respawning the physics worker (keeping scene/camera).');
-          physicsWorkerClientSingleton?.terminate();
-          physicsWorkerClientSingleton = null;
+          recycleWorker();
           const freshClient = getPhysicsWorkerClient();
           freshClient.setEnv(windX, windY);
           const xml = compileToMJCF(sceneGraph, gravityZ, floorFriction, windX, windY, density, floorBounce);
@@ -1110,8 +1133,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     // moment of the crash isn't reseeded, so the scene restarts from its
     // as-built initial pose rather than exactly where it crashed.
     console.warn('Fatal physics worker error — terminating and respawning worker:', message);
-    physicsWorkerClientSingleton?.terminate();
-    physicsWorkerClientSingleton = null;
+    recycleWorker();
     set({ isPlaying: false });
     await get().recompile(get().sceneGraph, undefined, true, true);
   },
