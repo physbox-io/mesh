@@ -1,4 +1,4 @@
-# Physics Sim
+# PhysBox: Mesh
 
 A browser-based rigid-body physics simulator powered by MuJoCo WASM. Build, simulate and interact with physics scenes in real time.
 

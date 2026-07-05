@@ -3,10 +3,11 @@ import { Canvas, useThree } from '@react-three/fiber';
 import { OrbitControls, Grid } from '@react-three/drei';
 import { useMuJoCoInit } from './hooks/useMuJoCo';
 import { useMCPBridge } from './hooks/useMCPBridge';
-import { useStore, scaleMeshGeoms } from './store/useStore';
+import { useStore, scaleMeshGeoms, getPhysicsWorkerClient } from './store/useStore';
 import type { SceneGraph, SceneNode } from './types/scene';
-import { Play, Square, Settings2, SlidersHorizontal, Settings, Box, Circle, X, RotateCcw, Eye, Trash2, Layers, CircleDot, Zap, Info, Triangle, Disc, Code, Menu, Shapes, Minimize2, Save, Download, Upload, FileText, ChevronDown, ChevronUp, Edit3, Printer, Scissors, Sparkles } from 'lucide-react';
+import { Play, Square, SlidersHorizontal, Settings, Box, Circle, X, RotateCcw, Eye, Trash2, Layers, CircleDot, Zap, Info, Triangle, Disc, Code, Menu, Shapes, Minimize2, Save, Download, Upload, FileText, ChevronDown, ChevronUp, Edit3, Printer, Scissors, Sparkles } from 'lucide-react';
 import { useRef, useMemo, useEffect, useCallback, useState, type RefObject } from 'react';
+import AICopilotPanel from './components/AICopilotPanel';
 import * as THREE from 'three';
 import { useFrame } from '@react-three/fiber';
 import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js';
@@ -110,83 +111,48 @@ function NoteCardOverlay({ card, isEditing, onToggleEdit, onToggleMinimize, onMa
 }
 
 // Physics Step Hook
-const PhysicsLoop = ({ model, data, mujoco, isPlaying }: { model: any, data: any, mujoco: any, isPlaying: boolean }) => {
-
-  const accumulator = useRef<number>(0);
-  const stepCount = useRef<number>(0);
-  const scriptCache = useRef<Record<string, Function>>({});
-  const sceneGraph = useStore(state => state.sceneGraph);
-
-  // Cached name→id maps rebuilt once per model compile, not every step
-  const bodyIdCache = useRef<Record<string, number>>({});
-  const jointIdCache = useRef<Record<string, number>>({});
-  const geomNameCache = useRef<Record<number, string>>({});
-  const geomIdCache = useRef<Record<string, number>>({});
-  const actuatorIdCache = useRef<Record<string, number>>({});
+//
+// Actual physics stepping, script execution (incl. aerodynamics), free-joint
+// damping, drag-force application, and history recording now all live in the
+// dedicated physics worker (src/workers/physicsWorker.ts) so that on
+// unrecoverable WASM memory exhaustion the worker can be terminated and a
+// fresh one spawned — a real memory reclaim. This component's only remaining
+// job is forwarding keyboard state to the worker, since scripts' `isKeyPressed`
+// needs it and the worker has no DOM access of its own.
+const PhysicsLoop = ({ isPlaying }: { model: any, data: any, mujoco: any, isPlaying: boolean }) => {
+  useFrame((_state, delta) => {
+    if ((window as any).DISABLE_USEFRAME) return;
+    if (!isPlaying) return;
+    getPhysicsWorkerClient().tick(delta);
+  });
 
   useEffect(() => {
-    if (!model || !mujoco) return;
-    const bCache: Record<string, number> = {};
-    const jCache: Record<string, number> = {};
-    const gCache: Record<number, string> = {};
-    const collectIds = (nodes: any[]) => {
-      if (!nodes) return;
-      for (const node of nodes) {
-        const bId = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY.value, node.id);
-        if (bId !== -1) {
-          bCache[node.id] = bId;
-          if (node.name && node.name !== node.id) bCache[node.name] = bId;
-        }
-        node.joints?.forEach((j: any) => {
-          const jId = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT.value, j.name);
-          if (jId !== -1) jCache[j.name] = jId;
-        });
-        collectIds(node.children || []);
-      }
-    };
-    collectIds(sceneGraph.nodes);
-    const giCache: Record<string, number> = {};
-    for (let g = 0; g < model.ngeom; g++) {
-      const name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM.value, g);
-      gCache[g] = name || `geom_${g}`;
-      if (name) giCache[name] = g;
-    }
-    const aCache: Record<string, number> = {};
-    for (let a = 0; a < model.nu; a++) {
-      const name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_ACTUATOR.value, a);
-      if (name) aCache[name] = a;
-    }
-    bodyIdCache.current = bCache;
-    jointIdCache.current = jCache;
-    geomNameCache.current = gCache;
-    geomIdCache.current = giCache;
-    actuatorIdCache.current = aCache;
-  }, [model, mujoco]);
+    const pressedKeys = new Set<string>();
+    const sync = () => getPhysicsWorkerClient().setKeys(Array.from(pressedKeys));
 
-  const pressedKeys = useRef<Set<string>>(new Set());
-
-  // Monitor key presses globally, ignoring keypresses inside form inputs and textareas
-  useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const active = document.activeElement;
       if (active && (
-        active.tagName === 'INPUT' || 
-        active.tagName === 'TEXTAREA' || 
+        active.tagName === 'INPUT' ||
+        active.tagName === 'TEXTAREA' ||
         active.getAttribute('contenteditable') === 'true'
       )) {
         return;
       }
-      pressedKeys.current.add(e.key.toLowerCase());
-      pressedKeys.current.add(e.code.toLowerCase());
+      pressedKeys.add(e.key.toLowerCase());
+      pressedKeys.add(e.code.toLowerCase());
+      sync();
     };
 
     const handleKeyUp = (e: KeyboardEvent) => {
-      pressedKeys.current.delete(e.key.toLowerCase());
-      pressedKeys.current.delete(e.code.toLowerCase());
+      pressedKeys.delete(e.key.toLowerCase());
+      pressedKeys.delete(e.code.toLowerCase());
+      sync();
     };
 
     const handleBlur = () => {
-      pressedKeys.current.clear();
+      pressedKeys.clear();
+      sync();
     };
 
     window.addEventListener('keydown', handleKeyDown);
@@ -199,684 +165,6 @@ const PhysicsLoop = ({ model, data, mujoco, isPlaying }: { model: any, data: any
     };
   }, []);
 
-  const findNodeByIdInLoop = (nodesList: any[], targetId: string): any => {
-    if (!nodesList) return null;
-    for (const n of nodesList) {
-      if (n.id === targetId) return n;
-      const c = findNodeByIdInLoop(n.children || [], targetId);
-      if (c) return c;
-    }
-    return null;
-  };
-
-  // Auto-clear cache when scene graph is edited (e.g. scripts saved)
-  useEffect(() => {
-    scriptCache.current = {};
-  }, [sceneGraph]);
-
-  const executeScripts = (nodes: any[], aeroDiagnostics?: Record<string, any>) => {
-    if (!nodes) return;
-    for (const node of nodes) {
-      if (node.isAerodynamic) {
-        // Generic aerodynamic logic for any geom type (box, mesh, ellipsoid, etc.)
-        const geom = node.geoms?.[0];
-        if (geom) {
-          const bId = bodyIdCache.current[node.id] ?? bodyIdCache.current[node.name] ?? -1;
-          if (bId !== -1) {
-            // Find parent independent body ID (ancestor with degrees of freedom)
-            let pId = bId;
-            while (pId > 0 && model.body_dofnum[pId] === 0) {
-              pId = model.body_parentid[pId];
-            }
-
-            const gId = geomIdCache.current[geom.name || ''] ?? -1;
-            let geomWorldX = data.xpos[bId * 3 + 0];
-            let geomWorldY = data.xpos[bId * 3 + 1];
-            let geomWorldZ = data.xpos[bId * 3 + 2];
-            if (gId !== -1) {
-              geomWorldX = data.geom_xpos[gId * 3 + 0];
-              geomWorldY = data.geom_xpos[gId * 3 + 1];
-              geomWorldZ = data.geom_xpos[gId * 3 + 2];
-            }
-
-            const rx = geomWorldX - data.xpos[pId * 3 + 0];
-            const ry = geomWorldY - data.xpos[pId * 3 + 1];
-            const rz = geomWorldZ - data.xpos[pId * 3 + 2];
-
-            const wx = data.cvel[bId * 6 + 0];
-            const wy = data.cvel[bId * 6 + 1];
-            const wz = data.cvel[bId * 6 + 2];
-            const vO_x = data.cvel[bId * 6 + 3];
-            const vO_y = data.cvel[bId * 6 + 4];
-            const vO_z = data.cvel[bId * 6 + 5];
-
-            const vx = vO_x + (wy * rz - wz * ry);
-            const vy = vO_y + (wz * rx - wx * rz);
-            const vz = vO_z + (wx * ry - wy * rx);
-            
-            const o = bId * 9;
-            const noseX = data.xmat[o+0], noseY = data.xmat[o+3], noseZ = data.xmat[o+6];
-            const spanX = data.xmat[o+1], spanY = data.xmat[o+4], spanZ = data.xmat[o+7];
-            const upX   = data.xmat[o+2], upY   = data.xmat[o+5], upZ   = data.xmat[o+8];
-            
-            const state = useStore.getState();
-            const windX = state.windX || 0;
-            const windY = state.windY || 0;
-            
-            const relVx = vx - windX;
-            const relVy = vy - windY;
-            const relVz = vz;
-            
-            // Project velocity perpendicular to local span axis to isolate 2D airfoil flow
-            const spanDotV = relVx*spanX + relVy*spanY + relVz*spanZ;
-            const airfoilVx = relVx - spanDotV*spanX;
-            const airfoilVy = relVy - spanDotV*spanY;
-            const airfoilVz = relVz - spanDotV*spanZ;
-            const relSpeed = Math.sqrt(airfoilVx*airfoilVx + airfoilVy*airfoilVy + airfoilVz*airfoilVz);
-            
-            if (relSpeed >= 0.05) {
-              // Derive wing area and chord from geom size
-              const s = geom.size || [];
-              const halfX = s[0] || 0.3;
-              const halfY = s[1] || 0.2;
-              const wingArea = (halfX * 2) * (halfY * 2);
-              const chord = halfX * 2;
-              
-              const q = 0.5 * 1.225 * relSpeed * relSpeed;
-              
-              // Normalized flow direction in airfoil plane
-              const vhx = airfoilVx / relSpeed;
-              const vhy = airfoilVy / relSpeed;
-              const vhz = airfoilVz / relSpeed;
-              
-              // Local velocity components
-              const u_nose = -(vhx*noseX + vhy*noseY + vhz*noseZ);
-              const u_up   = -(vhx*upX   + vhy*upY   + vhz*upZ);
-              
-              // Angle of attack
-              const alpha = Math.atan2(u_up, u_nose);
-              
-              // Lift and drag coefficients
-              const CL = 1.5 * Math.sin(2 * alpha);
-              const CD = 0.08 + 1.2 * Math.sin(alpha) * Math.sin(alpha);
-              
-              // Lift direction perpendicular to flow in airfoil plane
-              const ldx = -u_up * noseX + u_nose * upX;
-              const ldy = -u_up * noseY + u_nose * upY;
-              const ldz = -u_up * noseZ + u_nose * upZ;
-              
-              // Drag direction opposite to flow
-              const ddx = -vhx;
-              const ddy = -vhy;
-              const ddz = -vhz;
-              
-              // Force vectors
-              const fx = (CL * ldx + CD * ddx) * q * wingArea;
-              const fy = (CL * ldy + CD * ddy) * q * wingArea;
-              const fz = (CL * ldz + CD * ddz) * q * wingArea;
-              
-              // Aerodynamic pitch moment
-              const pitchMoment = -0.05 * alpha * q * wingArea * chord;
-              const tx_aero = pitchMoment * spanX;
-              const ty_aero = pitchMoment * spanY;
-              const tz_aero = pitchMoment * spanZ;
-              
-              // Aerodynamic roll restoring moment
-              const bankAngle = Math.atan2(upX*spanY - upY*spanX, upZ);
-              const rollRestoring = -0.1 * bankAngle * q * wingArea * chord;
-              const tx_roll = rollRestoring * noseX;
-              const ty_roll = rollRestoring * noseY;
-              const tz_roll = rollRestoring * noseZ;
-              
-              // Torque due to force lever arm: r x F
-              const tx_lever = ry * fz - rz * fy;
-              const ty_lever = rz * fx - rx * fz;
-              const tz_lever = rx * fy - ry * fx;
-              
-              // Apply linear forces to parent independent body
-              data.xfrc_applied[pId * 6 + 0] += fx;
-              data.xfrc_applied[pId * 6 + 1] += fy;
-              data.xfrc_applied[pId * 6 + 2] += fz;
-              
-              // Apply torque to parent independent body
-              data.xfrc_applied[pId * 6 + 3] += tx_aero + tx_roll + tx_lever;
-              data.xfrc_applied[pId * 6 + 4] += ty_aero + ty_roll + ty_lever;
-              data.xfrc_applied[pId * 6 + 5] += tz_aero + tz_roll + tz_lever;
-
-              if (aeroDiagnostics) {
-                aeroDiagnostics[node.name || node.id] = {
-                  relSpeed,
-                  alpha: alpha * 180 / Math.PI,
-                  CL,
-                  CD,
-                  force: [fx, fy, fz],
-                  torque: [tx_aero + tx_roll + tx_lever, ty_aero + ty_roll + ty_lever, tz_aero + tz_roll + tz_lever]
-                };
-              }
-            } else {
-              if (aeroDiagnostics) {
-                aeroDiagnostics[node.name || node.id] = {
-                  relSpeed,
-                  alpha: 0,
-                  CL: 0,
-                  CD: 0,
-                  force: [0, 0, 0],
-                  torque: [0, 0, 0]
-                };
-              }
-            }
-            
-            // Rotational damping (applied to the parent independent body)
-            const DAMPING = 0.0005;
-            data.xfrc_applied[pId * 6 + 3] -= DAMPING * wx;
-            data.xfrc_applied[pId * 6 + 4] -= DAMPING * wy;
-            data.xfrc_applied[pId * 6 + 5] -= DAMPING * wz;
-          }
-        }
-      }
- 
-      if (node.script && node.script.trim() !== '') {
-        let fn = scriptCache.current[node.id];
-        if (!fn) {
-          try {
-            fn = new Function('api', node.script);
-            scriptCache.current[node.id] = fn;
-          } catch (e: any) {
-            console.error(`[Script Compilation Error on node ${node.name}]:`, e);
-            fn = () => {}; // Cache dummy fallback to avoid infinite frame error logs
-            scriptCache.current[node.id] = fn;
-          }
-        }
- 
-        const _bCache = bodyIdCache.current;
-        const _jCache = jointIdCache.current;
-        const _resolveBody = (name: string) => _bCache[name] ?? mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY.value, name);
-        const _resolveJoint = (name: string) => _jCache[name] ?? mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT.value, name);
-
-        const api = {
-          id: node.id,
-          name: node.name,
-
-          // Returns true if the key (e.g. 'space', 'w', 'arrowup') is currently pressed
-          isKeyPressed: (keyName: string) => {
-            if (!keyName) return false;
-            return pressedKeys.current.has(keyName.toLowerCase());
-          },
- 
-          // Sets target body's position
-          setPosition: (pos: number[] | number, bodyName = node.id) => {
-            if (!model || !mujoco || !data) return;
-            const targetNode = findNodeByIdInLoop(sceneGraph.nodes, bodyName);
-            if (!targetNode || !targetNode.joints || targetNode.joints.length === 0) return;
-            const joint = targetNode.joints[0];
-            const jId = _resolveJoint(joint.name);
-            if (jId !== -1) {
-              const qposadr = model.jnt_qposadr[jId];
-              if (joint.type === 'free') {
-                if (Array.isArray(pos) && pos.length >= 3) {
-                  data.qpos[qposadr + 0] = pos[0];
-                  data.qpos[qposadr + 1] = pos[1];
-                  data.qpos[qposadr + 2] = pos[2];
-                }
-              } else if (joint.type === 'ball') {
-                if (Array.isArray(pos) && pos.length >= 4) {
-                  data.qpos[qposadr + 0] = pos[0];
-                  data.qpos[qposadr + 1] = pos[1];
-                  data.qpos[qposadr + 2] = pos[2];
-                  data.qpos[qposadr + 3] = pos[3];
-                }
-              } else {
-                data.qpos[qposadr] = typeof pos === 'number' ? pos : (Array.isArray(pos) ? pos[0] : 0);
-              }
-            }
-          },
- 
-          // Sets target body's linear velocity
-          setVelocity: (vel: number[] | number, bodyName = node.id) => {
-            if (!model || !mujoco || !data) return;
-            const targetNode = findNodeByIdInLoop(sceneGraph.nodes, bodyName);
-            if (!targetNode || !targetNode.joints || targetNode.joints.length === 0) return;
-            const joint = targetNode.joints[0];
-            const jId = _resolveJoint(joint.name);
-            if (jId !== -1) {
-              const dofadr = model.jnt_dofadr[jId];
-              if (joint.type === 'free') {
-                if (Array.isArray(vel) && vel.length >= 3) {
-                  data.qvel[dofadr + 0] = vel[0];
-                  data.qvel[dofadr + 1] = vel[1];
-                  data.qvel[dofadr + 2] = vel[2];
-                }
-              } else {
-                data.qvel[dofadr] = typeof vel === 'number' ? vel : (Array.isArray(vel) ? vel[0] : 0);
-              }
-            }
-          },
- 
-          // Sets target body's angular velocity
-          setAngularVelocity: (angvel: number[] | number, bodyName = node.id) => {
-            if (!model || !mujoco || !data) return;
-            const targetNode = findNodeByIdInLoop(sceneGraph.nodes, bodyName);
-            if (!targetNode || !targetNode.joints || targetNode.joints.length === 0) return;
-            const joint = targetNode.joints[0];
-            const jId = _resolveJoint(joint.name);
-            if (jId !== -1) {
-              const dofadr = model.jnt_dofadr[jId];
-              if (joint.type === 'free') {
-                if (Array.isArray(angvel) && angvel.length >= 3) {
-                  data.qvel[dofadr + 3] = angvel[0];
-                  data.qvel[dofadr + 4] = angvel[1];
-                  data.qvel[dofadr + 5] = angvel[2];
-                }
-              } else if (joint.type === 'ball') {
-                if (Array.isArray(angvel) && angvel.length >= 3) {
-                  data.qvel[dofadr + 0] = angvel[0];
-                  data.qvel[dofadr + 1] = angvel[1];
-                  data.qvel[dofadr + 2] = angvel[2];
-                }
-              } else if (joint.type === 'hinge') {
-                data.qvel[dofadr] = typeof angvel === 'number' ? angvel : (Array.isArray(angvel) ? angvel[0] : 0);
-              }
-            }
-          },
- 
-          // Reads physical position [X, Y, Z] of any body in the scene
-          getPosition: (bodyName = node.id) => {
-            if (!model || !mujoco || !data) return [0, 0, 0];
-            const bId = _resolveBody(bodyName);
-            if (bId !== -1) {
-              return [
-                data.xpos[bId * 3],
-                data.xpos[bId * 3 + 1],
-                data.xpos[bId * 3 + 2]
-              ];
-            }
-            return [0, 0, 0];
-          },
-
-          // Reads linear velocity [VX, VY, VZ] of any body
-          getVelocity: (bodyName = node.id) => {
-            if (!model || !mujoco || !data) return [0, 0, 0];
-            const bId = _resolveBody(bodyName);
-            if (bId !== -1) {
-              return [
-                data.cvel[bId * 6 + 3], // linear velocity X
-                data.cvel[bId * 6 + 4], // linear velocity Y
-                data.cvel[bId * 6 + 5]  // linear velocity Z
-              ];
-            }
-            return [0, 0, 0];
-          },
-
-          // Reads angular velocity [WX, WY, WZ] of any body
-          getAngularVelocity: (bodyName = node.id) => {
-            if (!model || !mujoco || !data) return [0, 0, 0];
-            const bId = _resolveBody(bodyName);
-            if (bId !== -1) {
-              return [
-                data.cvel[bId * 6 + 0], // angular X
-                data.cvel[bId * 6 + 1], // angular Y
-                data.cvel[bId * 6 + 2]  // angular Z
-              ];
-            }
-            return [0, 0, 0];
-          },
-
-          // Reads total body mass in kg
-          getMass: (bodyName = node.id) => {
-            if (!model || !mujoco || !data) return 0;
-            const bId = _resolveBody(bodyName);
-            return bId !== -1 ? model.body_mass[bId] : 0;
-          },
-
-          // Reads 1D joint position (translation in m for sliders, angle in rad for hinges)
-          getJointPosition: (jointName: string) => {
-            if (!model || !mujoco || !data) return 0;
-            const jId = _resolveJoint(jointName);
-            if (jId !== -1) {
-              const adr = model.jnt_qposadr[jId];
-              return data.qpos[adr];
-            }
-            return 0;
-          },
-
-          // Reads 1D joint velocity (translation speed for sliders, angular velocity for hinges)
-          getJointVelocity: (jointName: string) => {
-            if (!model || !mujoco || !data) return 0;
-            const jId = _resolveJoint(jointName);
-            if (jId !== -1) {
-              const adr = model.jnt_dofadr[jId];
-              return data.qvel[adr];
-            }
-            return 0;
-          },
-
-          // Applies a direct external force vector [FX, FY, FZ] to any body
-          applyForce: (forceVec: number[], bodyName = node.id) => {
-            if (!model || !mujoco || !data || !Array.isArray(forceVec)) return;
-            const bId = _resolveBody(bodyName);
-            if (bId !== -1) {
-              // xfrc_applied layout: [force_x, force_y, force_z, torque_x, torque_y, torque_z]
-              data.xfrc_applied[bId * 6 + 0] += forceVec[0] || 0;
-              data.xfrc_applied[bId * 6 + 1] += forceVec[1] || 0;
-              data.xfrc_applied[bId * 6 + 2] += forceVec[2] || 0;
-            }
-          },
-
-          // Applies a world-frame torque vector [TX, TY, TZ] to any body
-          applyTorque: (torqueVec: number[], bodyName = node.id) => {
-            if (!model || !mujoco || !data || !Array.isArray(torqueVec)) return;
-            const bId = _resolveBody(bodyName);
-            if (bId !== -1) {
-              // xfrc_applied layout: [force_x, force_y, force_z, torque_x, torque_y, torque_z]
-              data.xfrc_applied[bId * 6 + 3] += torqueVec[0] || 0;
-              data.xfrc_applied[bId * 6 + 4] += torqueVec[1] || 0;
-              data.xfrc_applied[bId * 6 + 5] += torqueVec[2] || 0;
-            }
-          },
-
-          // Returns the body's 3x3 rotation matrix as a flat 9-element row-major array
-          // Use this to transform vectors between world and body frames
-          getOrientation: (bodyName = node.id) => {
-            if (!model || !mujoco || !data) return [1,0,0, 0,1,0, 0,0,1];
-            const bId = _resolveBody(bodyName);
-            if (bId !== -1) {
-              const o = bId * 9;
-              return [
-                data.xmat[o+0], data.xmat[o+1], data.xmat[o+2],
-                data.xmat[o+3], data.xmat[o+4], data.xmat[o+5],
-                data.xmat[o+6], data.xmat[o+7], data.xmat[o+8]
-              ];
-            }
-            return [1,0,0, 0,1,0, 0,0,1];
-          },
-
-          // Applies an internal joint-aligned force (torque for hinges, linear thrust for sliders)
-          applyJointForce: (jointName: string, forceVal: number) => {
-            if (!model || !mujoco || !data || typeof forceVal !== 'number') return;
-            const jId = _resolveJoint(jointName);
-            if (jId !== -1) {
-              const adr = model.jnt_dofadr[jId];
-              data.qfrc_applied[adr] += forceVal;
-            }
-          },
-
-          // Sets active actuator control input (for motor speed/torque)
-          setActuatorControl: (actuatorName: string, ctrlVal: number) => {
-            if (!model || !mujoco || !data || typeof ctrlVal !== 'number') return;
-            const actId = actuatorIdCache.current[actuatorName] ?? -1;
-            if (actId !== -1) {
-              data.ctrl[actId] = ctrlVal;
-            }
-          },
-
-          // Queries elapsed simulation time
-          getTime: () => {
-            return data ? data.time : 0;
-          },
-
-          // Returns current wind velocity [windX, windY] from environment settings
-          getWind: () => {
-            const state = useStore.getState();
-            return [state.windX || 0, state.windY || 0];
-          },
-
-          // Safe debugger logging
-          log: (msg: any) => {
-            console.log(`[Script:${node.name}]`, msg);
-          }
-        };
-
-        try {
-          fn(api);
-        } catch (e: any) {
-          console.error(`[Script Runtime Error on node ${node.name}]:`, e);
-        }
-      }
-
-      if (node.children) {
-        executeScripts(node.children, aeroDiagnostics);
-      }
-    }
-  };
-  
-  useFrame((_state, delta) => {
-    if ((window as any).DISABLE_USEFRAME) return;
-    
-    // Safety check: ensure closure model/data match current store active ones
-    const activeModel = useStore.getState().model;
-    const activeData = useStore.getState().data;
-    if (model !== activeModel || data !== activeData) return;
-    
-    if (!isPlaying || !model || !data || !mujoco) return;
-    
-    // Accumulate elapsed real time (capped to avoid spiral of death on lag spikes)
-    const maxDelta = 0.1;
-    accumulator.current += Math.min(delta, maxDelta);
-    
-    const stepSize = model.opt.timestep;
-    const stepsNeeded = Math.floor(accumulator.current / stepSize);
-    accumulator.current -= stepsNeeded * stepSize;
-    
-    for (let i = 0; i < stepsNeeded; i++) {
-      try {
-        // Reset applied external forces and joint forces at step start
-        data.xfrc_applied.fill(0);
-        data.qfrc_applied.fill(0);
-
-        const { draggedNodeId, dragTarget } = useStore.getState();
-        if (draggedNodeId && dragTarget) {
-          // Resolve the body to apply force to: prefer the heaviest child body
-          // (e.g. cradle bob) rather than the low-mass pivot rope.
-          let targetBodyName = draggedNodeId;
-          let bestMass = -1;
-          const findHeaviestDescendant = (nodeId: string) => {
-            const bid = bodyIdCache.current[nodeId] ?? -1;
-            if (bid !== -1) {
-              const m = model.body_mass[bid] || 0;
-              if (m > bestMass) { bestMass = m; targetBodyName = nodeId; }
-            }
-            // Walk children via scene graph
-            const findNode = (nodes: any[], id: string): any => {
-              for (const n of nodes) {
-                if (n.id === id) return n;
-                const c = findNode(n.children || [], id);
-                if (c) return c;
-              }
-              return null;
-            };
-            const node = findNode(sceneGraph.nodes, nodeId);
-            for (const child of node?.children || []) findHeaviestDescendant(child.id);
-          };
-          findHeaviestDescendant(draggedNodeId);
-
-          const bId = bodyIdCache.current[targetBodyName] ?? -1;
-          if (bId !== -1) {
-            const bx = data.xpos[bId * 3];
-            const by = data.xpos[bId * 3 + 1];
-            const bz = data.xpos[bId * 3 + 2];
-            
-            // Get linear velocities of the body in MuJoCo coordinates
-            const vx = data.cvel[bId * 6 + 3];
-            const vy = data.cvel[bId * 6 + 4];
-            const vz = data.cvel[bId * 6 + 5];
-            
-            const mass = model.body_mass[bId] || 1.0;
-            const K = 200.0;
-            // Critically damped spring coefficient: D = 2 * sqrt(mass * K)
-            const D = 2.0 * Math.sqrt(mass * K);
-            
-            // Calculate spring + damping force components
-            let fx = K * (dragTarget.x - bx) - D * vx;
-            let fy = K * (dragTarget.y - by) - D * vy;
-            let fz = K * (dragTarget.z - bz) - D * vz;
-            
-            // Cap the net PD force to avoid rocket-like energy injection.
-            // Use 3×weight so the user can still pull meaningfully.
-            const maxForce = 3.0 * mass * 9.81;
-            const netMag = Math.sqrt(fx * fx + fy * fy + fz * fz);
-            if (netMag > maxForce) {
-              const scale = maxForce / netMag;
-              fx *= scale;
-              fy *= scale;
-              fz *= scale;
-            }
-            
-            data.xfrc_applied[bId * 6 + 0] = fx;
-            data.xfrc_applied[bId * 6 + 1] = fy;
-            data.xfrc_applied[bId * 6 + 2] = fz;
-          }
-        }
-        
-        // Execute active control scripts immediately prior to physics iteration
-        const aeroDiagnostics: Record<string, any> = {};
-        executeScripts(sceneGraph.nodes, aeroDiagnostics);
-
-        // Apply physical damping to free joints (since MuJoCo free joints don't natively support damping attributes)
-        const applyFreeJointDamping = (nodes: any[]) => {
-          if (!nodes) return;
-          for (const node of nodes) {
-            if (node.joints) {
-              for (const joint of node.joints) {
-                if (joint.type === 'free' && joint.damping !== undefined && joint.damping > 0) {
-                  const bId = bodyIdCache.current[node.id] ?? bodyIdCache.current[node.name] ?? -1;
-                  if (bId !== -1) {
-                    const wx = data.cvel[bId * 6 + 0];
-                    const wy = data.cvel[bId * 6 + 1];
-                    const wz = data.cvel[bId * 6 + 2];
-                    const vx = data.cvel[bId * 6 + 3];
-                    const vy = data.cvel[bId * 6 + 4];
-                    const vz = data.cvel[bId * 6 + 5];
-
-                    const c = joint.damping;
-                    const mass = model.body_mass[bId] || 1.0;
-                    const ix = model.body_inertia[bId * 3 + 0] || 1.0;
-                    const iy = model.body_inertia[bId * 3 + 1] || 1.0;
-                    const iz = model.body_inertia[bId * 3 + 2] || 1.0;
-
-                    // Apply linear damping force: F = -c * mass * v
-                    data.xfrc_applied[bId * 6 + 0] -= c * mass * vx;
-                    data.xfrc_applied[bId * 6 + 1] -= c * mass * vy;
-                    data.xfrc_applied[bId * 6 + 2] -= c * mass * vz;
-                    // Apply angular damping torque: T = -c * inertia * w
-                    data.xfrc_applied[bId * 6 + 3] -= c * ix * wx;
-                    data.xfrc_applied[bId * 6 + 4] -= c * iy * wy;
-                    data.xfrc_applied[bId * 6 + 5] -= c * iz * wz;
-                  }
-                }
-              }
-            }
-            applyFreeJointDamping(node.children || []);
-          }
-        };
-        applyFreeJointDamping(sceneGraph.nodes);
-
-        mujoco.mj_step(model, data);
-        stepCount.current++;
-
-        // Record physics history frame — throttled to every 10 steps (~100Hz) to avoid GC pressure
-        if (!(window as any)._physics_history) {
-          (window as any)._physics_history = [];
-        }
-        if (stepCount.current % 10 === 0 && data && data.time !== undefined && model && mujoco) {
-          const bodies: Record<string, any> = {};
-          const joints: Record<string, any> = {};
-          const bCache = bodyIdCache.current;
-          const jCache = jointIdCache.current;
-          const gCache = geomNameCache.current;
-          const collectNodeData = (nodesList: any[]) => {
-            if (!nodesList) return;
-            for (const node of nodesList) {
-              const bId = bCache[node.id];
-              if (bId !== undefined) {
-                const wx = data.cvel[bId * 6 + 0];
-                const wy = data.cvel[bId * 6 + 1];
-                const wz = data.cvel[bId * 6 + 2];
-                const vO_x = data.cvel[bId * 6 + 3];
-                const vO_y = data.cvel[bId * 6 + 4];
-                const vO_z = data.cvel[bId * 6 + 5];
-                const x_pos = data.xpos[bId * 3 + 0];
-                const y_pos = data.xpos[bId * 3 + 1];
-                const z_pos = data.xpos[bId * 3 + 2];
-                const vx = vO_x + (wy * z_pos - wz * y_pos);
-                const vy = vO_y + (wz * x_pos - wx * z_pos);
-                const vz = vO_z + (wx * y_pos - wy * x_pos);
-                bodies[node.id] = {
-                  pos: [x_pos, y_pos, z_pos],
-                  vel: [vx, vy, vz],
-                  angvel: [wx, wy, wz],
-                  xfrc_applied: [
-                    data.xfrc_applied[bId * 6 + 0], data.xfrc_applied[bId * 6 + 1],
-                    data.xfrc_applied[bId * 6 + 2], data.xfrc_applied[bId * 6 + 3],
-                    data.xfrc_applied[bId * 6 + 4], data.xfrc_applied[bId * 6 + 5]
-                  ]
-                };
-              }
-              node.joints?.forEach((j: any) => {
-                const jId = jCache[j.name];
-                if (jId !== undefined) {
-                  const qposadr = model.jnt_qposadr[jId];
-                  const dofadr = model.jnt_dofadr[jId];
-                  joints[j.name] = {
-                    pos: data.qpos[qposadr],
-                    vel: data.qvel[dofadr],
-                    qfrc_applied: data.qfrc_applied[dofadr]
-                  };
-                }
-              });
-              if (node.children) collectNodeData(node.children);
-            }
-          };
-          collectNodeData(sceneGraph.nodes);
-
-          const contacts: any[] = [];
-          const ncon = data.contact.size();
-          for (let c = 0; c < ncon; c++) {
-            const contact = data.contact.get(c);
-            if (contact) {
-              const g1 = contact.geom1;
-              const g2 = contact.geom2;
-              const dist = contact.dist;
-              contacts.push({
-                geom1: gCache[g1] ?? `geom_${g1}`,
-                geom2: gCache[g2] ?? `geom_${g2}`,
-                dist
-              });
-              contact.delete();
-            }
-          }
-
-          (window as any)._physics_history.push({
-            time: data.time,
-            bodies,
-            joints,
-            contacts,
-            aeroDiagnostics
-          });
-          if ((window as any)._physics_history.length > 5000) {
-            (window as any)._physics_history.shift();
-          }
-        }
-        
-        // Safety check for NaN values in positions
-        const nq = model.nq;
-        for (let j = 0; j < nq; j++) {
-          if (isNaN(data.qpos[j])) {
-            console.error(`[PhysicsLoop] NaN detected in qpos at index ${j}! Stopping simulation.`);
-            (window as any).DISABLE_USEFRAME = true;
-            // Force pause in state
-            useStore.setState({ isPlaying: false });
-            return;
-          }
-        }
-      } catch (e) {
-        console.error("Simulation step error:", e);
-        useStore.setState({ isPlaying: false });
-        (window as any).DISABLE_USEFRAME = true;
-        return;
-      }
-    }
-  });
-  
   return null;
 };
 
@@ -1344,7 +632,7 @@ const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, selectedN
     if (isDynamic) {
       // Dynamic mesh: transform tracked from MuJoCo via geom_xpos/geom_xmat (Z-up coords, handled by parent group rotation).
       return (
-        <group ref={meshRef} position={initialPos} quaternion={new THREE.Quaternion(...initialQuat)}>
+        <group name={nodeId} ref={meshRef} position={initialPos} quaternion={new THREE.Quaternion(...initialQuat)}>
           <mesh castShadow receiveShadow geometry={meshBufferGeometry} {...dragHandlers}>
             <meshStandardMaterial color={new THREE.Color(color[0], color[1], color[2])} emissive={isSelected ? '#3b82f6' : '#000'} emissiveIntensity={isSelected ? 0.2 : 0} side={THREE.DoubleSide} />
           </mesh>
@@ -1353,7 +641,7 @@ const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, selectedN
     }
     // Static mesh: vertices baked in Three.js world space — no position/rotation applied.
     return (
-      <group>
+      <group name={nodeId}>
         <mesh castShadow receiveShadow geometry={meshBufferGeometry} {...dragHandlers}>
           <meshStandardMaterial color={new THREE.Color(color[0], color[1], color[2])} emissive={isSelected ? '#3b82f6' : '#000'} emissiveIntensity={isSelected ? 0.2 : 0} side={THREE.DoubleSide} />
         </mesh>
@@ -1367,6 +655,7 @@ const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, selectedN
 
   return (
     <group
+      name={nodeId}
       ref={meshRef}
       position={initialPos}
       quaternion={new THREE.Quaternion(...initialQuat)}
@@ -1991,6 +1280,7 @@ function App() {
   }
   useMuJoCoInit();
   const [isDocsOpen, setIsDocsOpen] = useState(false);
+  const [showAICopilot, setShowAICopilot] = useState(false);
   const [docsTab, setDocsTab] = useState<'gravity' | 'coupling' | 'collision' | 'friction' | 'scripting'>('gravity');
   const [scriptText, setScriptText] = useState('');
   const [scriptError, setScriptError] = useState<string | null>(null);
@@ -2097,7 +1387,7 @@ function App() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = 'physics_expt_scene.json';
+      a.download = 'physics_physbox_scene.json';
       a.click();
       URL.revokeObjectURL(url);
     } catch (e) {
@@ -2112,7 +1402,22 @@ function App() {
     const scene = threeSceneRef.current;
     if (!scene) { alert('Scene not ready'); return; }
 
+    // Find the nearest ancestor tagged with a body's nodeId (set on DynamicGeom's
+    // wrapper <group name={nodeId}>), so multi-part scenes (e.g. an enclosure's
+    // box + lid sitting side by side) can be scaled by a single part's size
+    // rather than the combined footprint of everything visible.
+    const findNodeId = (obj: THREE.Object3D): string | null => {
+      let cur: THREE.Object3D | null = obj;
+      while (cur) {
+        if (cur.name) return cur.name;
+        cur = cur.parent;
+      }
+      return null;
+    };
+
     const exportGroup = new THREE.Group();
+    const partBboxes = new Map<string, THREE.Box3>();
+    let ungroupedIdx = 0;
     scene.traverse((obj) => {
       if (!(obj as THREE.Mesh).isMesh) return;
       const mesh = obj as THREE.Mesh;
@@ -2121,21 +1426,36 @@ function App() {
       mesh.updateWorldMatrix(true, false);
       const geo = mesh.geometry.clone().applyMatrix4(mesh.matrixWorld);
       exportGroup.add(new THREE.Mesh(geo));
+
+      const partKey = findNodeId(mesh) ?? `__ungrouped_${ungroupedIdx++}`;
+      const meshBbox = new THREE.Box3().setFromBufferAttribute(geo.attributes.position as THREE.BufferAttribute);
+      const existing = partBboxes.get(partKey);
+      if (existing) existing.union(meshBbox);
+      else partBboxes.set(partKey, meshBbox);
     });
 
-    // Normalize: fit the max dimension to a user-specified target in mm, centered at origin
+    // Normalize: fit the LONGEST SINGLE PART's longest side to a user-specified
+    // target in mm (not the combined bounding box of everything visible), centered
+    // at origin. Also convert from Three.js Y-up (the scene's convention) to the
+    // Z-up convention STL/slicers expect - otherwise the export comes out on its
+    // side even though the on-screen render (Y-up, handled natively by Three.js)
+    // looks correct.
     const bbox = new THREE.Box3().setFromObject(exportGroup);
-    const size = bbox.getSize(new THREE.Vector3());
-    const maxDim = Math.max(size.x, size.y, size.z);
-    if (maxDim > 0) {
-      const targetStr = window.prompt('Target max dimension (mm):', '150');
+    let longestPartDim = 0;
+    for (const partBbox of partBboxes.values()) {
+      const partSize = partBbox.getSize(new THREE.Vector3());
+      longestPartDim = Math.max(longestPartDim, partSize.x, partSize.y, partSize.z);
+    }
+    if (longestPartDim > 0) {
+      const targetStr = window.prompt("Longest part's longest side (mm):", '150');
       if (targetStr === null) return;
       const targetMm = parseFloat(targetStr);
       if (isNaN(targetMm) || targetMm <= 0) { alert('Invalid size'); return; }
-      const scale = targetMm / maxDim;
+      const scale = targetMm / longestPartDim;
       const center = bbox.getCenter(new THREE.Vector3());
       const transform = new THREE.Matrix4()
-        .makeScale(scale, scale, scale)
+        .makeRotationX(Math.PI / 2)
+        .multiply(new THREE.Matrix4().makeScale(scale, scale, scale))
         .multiply(new THREE.Matrix4().makeTranslation(-center.x, -center.y, -center.z));
       for (const child of exportGroup.children) {
         (child as THREE.Mesh).geometry.applyMatrix4(transform);
@@ -2506,24 +1826,13 @@ function App() {
     currentPos[axis] = cleanVal;
     updateNodePos(selectedNode.id, currentPos);
 
-    // Also directly write to qpos so only THIS body moves in the live sim,
-    // regardless of whether playing or paused. This avoids the full forceReset
-    // recompile (from updateNodePos alone) which was snapping all other bodies
-    // back to their initial positions.
-    if (model && mujoco && data) {
-      const freeJoint = selectedNode.joints?.find((j: any) => j.type === 'free');
-      if (freeJoint) {
-        const jointId = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT.value, freeJoint.name);
-        if (jointId !== -1) {
-          const adr = model.jnt_qposadr[jointId];
-          data.qpos[adr + axis] = cleanVal;
-          // Zero out velocities to prevent crazy snaps
-          const vadr = model.jnt_dofadr[jointId];
-          for (let i = 0; i < 6; i++) data.qvel[vadr + i] = 0;
-          // Force propagation to update positions in 3D visually
-          mujoco.mj_forward(model, data);
-        }
-      }
+    // Also directly move the body in the live sim (via the physics worker) so
+    // only THIS body moves, regardless of whether playing or paused. This
+    // avoids the full forceReset recompile (from updateNodePos alone) which
+    // was snapping all other bodies back to their initial positions.
+    const freeJoint = selectedNode.joints?.find((j: any) => j.type === 'free');
+    if (freeJoint) {
+      getPhysicsWorkerClient().setQpos(freeJoint.name, axis, cleanVal);
     }
   };
 
@@ -2608,28 +1917,82 @@ function App() {
 
   return (
     <div className="flex flex-col h-screen w-screen bg-slate-50 text-slate-900 font-sans">
-      <header className="glass-panel h-14 flex items-center justify-between px-3 md:px-6 z-10 border-b border-slate-200">
-        <div className="flex items-center gap-2 md:gap-3">
+      <header className="bg-gradient-to-b from-slate-50 to-white border-b border-slate-200 px-3 md:px-6 py-1.5 flex items-center justify-between shadow-sm z-10">
+        {/* Left: Logo, Title, Preset select, Simulate, Reset, View */}
+        <div className="flex items-center gap-2 md:gap-4">
           {/* Mobile Sidebar Toggle */}
           <button
             onClick={() => setIsLeftSidebarOpen(!isLeftSidebarOpen)}
-            className="p-1.5 rounded-lg text-slate-600 hover:bg-slate-100 hover:text-slate-900 transition-colors md:hidden focus:outline-none cursor-pointer flex-shrink-0"
+            className="p-1.5 rounded-md text-slate-600 hover:bg-slate-100 hover:text-slate-900 transition-colors md:hidden focus:outline-none cursor-pointer flex-shrink-0"
             title="Toggle Sidebar"
           >
             {isLeftSidebarOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
           </button>
 
-          <div className="w-8 h-8 rounded-lg bg-blue-500/10 flex items-center justify-center flex-shrink-0">
-            <Settings2 className="w-5 h-5 physics-accent" />
+          {/* Logo & Title */}
+          <div className="flex items-center gap-2">
+            <div className="w-8 h-8 rounded-lg bg-blue-500/10 flex items-center justify-center flex-shrink-0 p-1.5">
+              <svg viewBox="0 0 512 512" className="w-full h-full" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <defs>
+                  <linearGradient id="logo-cyan-blue" x1="0%" y1="0%" x2="100%" y2="100%">
+                    <stop offset="0%" stopColor="#00f2fe" />
+                    <stop offset="100%" stopColor="#3b82f6" />
+                  </linearGradient>
+                  <linearGradient id="logo-blue-purple" x1="0%" y1="0%" x2="100%" y2="100%">
+                    <stop offset="0%" stopColor="#3b82f6" />
+                    <stop offset="100%" stopColor="#7c3aed" />
+                  </linearGradient>
+                  <linearGradient id="logo-face-top" x1="0%" y1="0%" x2="100%" y2="100%">
+                    <stop offset="0%" stopColor="#00f2fe" stopOpacity="0.15" />
+                    <stop offset="100%" stopColor="#3b82f6" stopOpacity="0.15" />
+                  </linearGradient>
+                  <linearGradient id="logo-face-left" x1="0%" y1="0%" x2="100%" y2="100%">
+                    <stop offset="0%" stopColor="#3b82f6" stopOpacity="0.25" />
+                    <stop offset="100%" stopColor="#1d4ed8" stopOpacity="0.25" />
+                  </linearGradient>
+                  <linearGradient id="logo-face-right" x1="0%" y1="0%" x2="100%" y2="100%">
+                    <stop offset="0%" stopColor="#7c3aed" stopOpacity="0.20" />
+                    <stop offset="100%" stopColor="#4f46e5" stopOpacity="0.20" />
+                  </linearGradient>
+                </defs>
+                <polygon points="256,60 426,158 256,256 86,158" fill="url(#logo-face-top)" />
+                <polygon points="86,158 256,256 256,452 86,354" fill="url(#logo-face-left)" />
+                <polygon points="256,256 426,158 426,354 256,452" fill="url(#logo-face-right)" />
+                
+                <g stroke="url(#logo-cyan-blue)" strokeWidth="10" strokeOpacity="0.75" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="256" y1="60" x2="256" y2="256" />
+                  <line x1="86" y1="158" x2="426" y2="158" />
+                  <line x1="86" y1="158" x2="256" y2="452" />
+                  <line x1="256" y1="256" x2="86" y2="354" />
+                  <line x1="256" y1="256" x2="426" y2="354" />
+                  <line x1="426" y1="158" x2="256" y2="452" />
+                </g>
+                
+                <polygon points="256,60 426,158 426,354 256,452 86,354 86,158" stroke="url(#logo-blue-purple)" strokeWidth="22" strokeLinecap="round" strokeLinejoin="round" fill="none" />
+                <line x1="256" y1="256" x2="256" y2="452" stroke="url(#logo-blue-purple)" strokeWidth="22" strokeLinecap="round" strokeLinejoin="round" />
+                <line x1="256" y1="256" x2="86" y2="158" stroke="url(#logo-blue-purple)" strokeWidth="22" strokeLinecap="round" strokeLinejoin="round" />
+                <line x1="256" y1="256" x2="426" y2="158" stroke="url(#logo-blue-purple)" strokeWidth="22" strokeLinecap="round" strokeLinejoin="round" />
+                
+                <g fill="#ffffff">
+                  <circle cx="256" cy="60" r="18" stroke="#7c3aed" strokeWidth="8" />
+                  <circle cx="86" cy="158" r="18" stroke="#3b82f6" strokeWidth="8" />
+                  <circle cx="426" cy="158" r="18" stroke="#3b82f6" strokeWidth="8" />
+                  <circle cx="256" cy="256" r="20" stroke="#3b82f6" strokeWidth="9" />
+                  <circle cx="86" cy="354" r="18" stroke="#3b82f6" strokeWidth="8" />
+                  <circle cx="426" cy="354" r="18" stroke="#3b82f6" strokeWidth="8" />
+                  <circle cx="256" cy="452" r="18" stroke="#7c3aed" strokeWidth="8" />
+                </g>
+              </svg>
+            </div>
+            <h1 className="font-bold text-lg tracking-wide hidden sm:block">
+              PhysBox<span className="text-blue-500">: Mesh</span>
+            </h1>
           </div>
-          <h1 className="font-bold text-lg tracking-wide hidden sm:block">
-            Physics <span className="text-blue-500">Expt</span>
-          </h1>
-        </div>
-        
-        <div className="flex items-center gap-1.5 md:gap-4">
-          {/* Presets Select */}
-          <div className="flex items-center gap-1 md:gap-2">
+
+          <div className="h-6 w-px bg-slate-200 hidden md:block" />
+
+          {/* Preset Select Dropdown */}
+          <div className="flex items-center gap-1.5">
             <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider hidden lg:inline">Preset:</span>
             <select 
               value={activePreset || ''}
@@ -2638,7 +2001,7 @@ function App() {
                 if (v.startsWith('user:')) loadUserPresetWithCard(v);
                 else loadPresetWithCard(v);
               }}
-              className="px-2 md:px-3 py-1.5 rounded-full bg-white hover:bg-slate-100 transition-colors border border-slate-200 text-xs md:text-sm font-medium text-slate-700 shadow-sm outline-none cursor-pointer focus:border-blue-500 max-w-[100px] sm:max-w-[130px] md:max-w-none"
+              className="bg-slate-100 border border-slate-300 text-slate-900 text-xs md:text-sm rounded-md block p-1 md:px-2 md:py-1.5 focus:border-blue-500 max-w-[100px] sm:max-w-none font-medium cursor-pointer"
             >
               <optgroup label="⬜ Built-in Presets">
                 <option value="empty">🫙 Blank (Empty)</option>
@@ -2646,7 +2009,7 @@ function App() {
                 <option value="cubes">Stacked Cubes</option>
                 <option value="gears">Gear System</option>
                 <option value="machine">Gear Train Machine</option>
-                <option value="rack_pinion">Rack & Pinion</option>
+                <option value="rack_pinion">Rack &amp; Pinion</option>
                 <option value="inclined_plane">Inclined Plane</option>
                 <option value="pulley_system">Pulley Stand</option>
                 <option value="cartpole">Cartpole</option>
@@ -2684,100 +2047,140 @@ function App() {
                 }
               })()}
             </select>
-
-            <button 
-              onClick={handleSavePresetClick}
-              className="flex items-center justify-center w-8 h-8 md:w-9 md:h-9 rounded-full border-2 border-slate-200 text-slate-600 hover:bg-slate-50 hover:border-slate-300 transition-colors focus:outline-none flex-shrink-0 cursor-pointer"
-              title="Save scene preset"
-            >
-              <Save className="w-4 h-4" />
-            </button>
-
-            <button
-              onClick={exportJson}
-              className="flex items-center justify-center w-8 h-8 md:w-9 md:h-9 rounded-full border-2 border-slate-200 text-slate-600 hover:bg-slate-50 hover:border-slate-300 transition-colors focus:outline-none flex-shrink-0 cursor-pointer"
-              title="Export JSON"
-            >
-              <Download className="w-4 h-4" />
-            </button>
-
-            <button
-              onClick={exportStl}
-              className="flex items-center justify-center w-8 h-8 md:w-9 md:h-9 rounded-full border-2 border-slate-200 text-slate-600 hover:bg-slate-50 hover:border-slate-300 transition-colors focus:outline-none flex-shrink-0 cursor-pointer"
-              title="Export STL (3D print)"
-            >
-              <Printer className="w-4 h-4" />
-            </button>
-
-            <button
-              onClick={importJson}
-              className="flex items-center justify-center w-8 h-8 md:w-9 md:h-9 rounded-full border-2 border-slate-200 text-slate-600 hover:bg-slate-50 hover:border-slate-300 transition-colors focus:outline-none flex-shrink-0 cursor-pointer"
-              title="Import JSON"
-            >
-              <Upload className="w-4 h-4" />
-            </button>
           </div>
 
+          <div className="h-6 w-px bg-slate-200 hidden md:block" />
+
+          {/* Action Buttons: Simulate, Reset, View */}
+          <div className="flex items-center gap-1.5">
+            {/* Simulate / Stop */}
+            <button 
+              onClick={togglePlay}
+              disabled={!isLoaded}
+              className={`flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md font-semibold text-sm transition-colors disabled:opacity-50 flex-shrink-0 cursor-pointer ${
+                isPlaying
+                  ? 'bg-red-600 hover:bg-red-700 text-white'
+                  : 'bg-emerald-600 hover:bg-emerald-700 text-white'
+              }`}
+              title={isPlaying ? "Stop Simulation" : "Start Simulation"}
+            >
+              {isPlaying ? (
+                <><Square className="w-3.5 h-3.5" /><span className="hidden md:inline">Stop</span></>
+              ) : (
+                <><Play className="w-3.5 h-3.5" /><span className="hidden md:inline">Simulate</span></>
+              )}
+            </button>
+
+            {/* Reset */}
+            <button 
+              onClick={resetSimulation}
+              disabled={!isLoaded}
+              className="flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md font-semibold text-sm bg-slate-200 hover:bg-slate-300 text-slate-700 transition-colors disabled:opacity-50 flex-shrink-0 cursor-pointer"
+              title="Reset Simulation"
+            >
+              <RotateCcw className="w-3.5 h-3.5" /><span className="hidden md:inline">Reset</span>
+            </button>
+
+            {/* View Toggle */}
+            <button 
+              onClick={() => setCameraView(cameraView === 'topDown' ? 'perspective' : 'topDown')}
+              className={`flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md font-semibold text-sm transition-colors flex-shrink-0 cursor-pointer ${
+                cameraView === 'topDown'
+                  ? 'bg-violet-600 hover:bg-violet-700 text-white'
+                  : 'bg-slate-200 hover:bg-slate-300 text-slate-700'
+              }`}
+              title="Toggle Top Down / Perspective View"
+            >
+              <Eye className="w-3.5 h-3.5" /><span className="hidden lg:inline">{cameraView === 'topDown' ? 'Perspective' : 'Top Down'}</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Right: Presets actions (Save, Export, Import), Utilities (Docs, Settings), Github */}
+        <div className="flex items-center gap-1.5">
+          {/* Preset save & exports/import - round icons matching circuit */}
+          <button 
+            onClick={handleSavePresetClick}
+            className="flex items-center justify-center w-8 h-8 rounded-full border-2 border-amber-200 text-amber-600 bg-amber-50 hover:bg-amber-100 hover:border-amber-300 transition-colors focus:outline-none flex-shrink-0 cursor-pointer"
+            title="Save scene preset"
+          >
+            <Save className="w-4 h-4" />
+          </button>
+
+          <button
+            onClick={exportJson}
+            className="flex items-center justify-center w-8 h-8 rounded-full border-2 border-slate-200 text-slate-600 bg-white hover:bg-slate-50 hover:border-slate-300 transition-colors focus:outline-none flex-shrink-0 cursor-pointer"
+            title="Export JSON"
+          >
+            <Download className="w-4 h-4" />
+          </button>
+
+          <button
+            onClick={exportStl}
+            className="flex items-center justify-center w-8 h-8 rounded-full border-2 border-slate-200 text-slate-600 bg-white hover:bg-slate-50 hover:border-slate-300 transition-colors focus:outline-none flex-shrink-0 cursor-pointer"
+            title="Export STL (3D print)"
+          >
+            <Printer className="w-4 h-4" />
+          </button>
+
+          <button
+            onClick={importJson}
+            className="flex items-center justify-center w-8 h-8 rounded-full border-2 border-slate-200 text-slate-600 bg-white hover:bg-slate-50 hover:border-slate-300 transition-colors focus:outline-none flex-shrink-0 cursor-pointer"
+            title="Import JSON"
+          >
+            <Upload className="w-4 h-4" />
+          </button>
+
+          <div className="h-6 w-px bg-slate-200 mx-0.5 hidden sm:block" />
+
+          {/* Docs - round matching circuit */}
           <button
             onClick={() => setIsDocsOpen(true)}
-            className="flex items-center justify-center w-8 h-8 md:w-9 md:h-9 rounded-full border-2 border-blue-200 text-blue-600 hover:bg-blue-50 hover:border-blue-300 transition-colors focus:outline-none flex-shrink-0 cursor-pointer"
+            className="flex items-center justify-center w-8 h-8 rounded-full border-2 border-indigo-200 text-indigo-600 bg-indigo-50 hover:bg-indigo-100 hover:border-indigo-300 transition-colors focus:outline-none flex-shrink-0 cursor-pointer"
             title="Documentation"
           >
             <Info className="w-4 h-4" />
           </button>
 
+          {/* Settings - round matching circuit */}
           <button 
             onClick={() => setSettingsOpen(!isSettingsOpen)}
-            className={`flex items-center justify-center w-8 h-8 md:w-9 md:h-9 rounded-full border-2 transition-colors focus:outline-none flex-shrink-0 cursor-pointer ${
+            className={`flex items-center justify-center w-8 h-8 rounded-full border-2 transition-colors focus:outline-none flex-shrink-0 cursor-pointer ${
               isSettingsOpen 
-                ? 'bg-blue-50 border-blue-300 text-blue-600' 
-                : 'border-slate-200 text-slate-600 hover:bg-slate-50 hover:border-slate-300'
+                ? 'bg-blue-100 border-blue-400 text-blue-700' 
+                : 'border-slate-200 text-slate-600 bg-white hover:bg-slate-50 hover:border-slate-300'
             }`}
             title="Global Settings"
           >
             <Settings className="w-4 h-4" />
           </button>
 
-          <button 
-            onClick={togglePlay}
-            disabled={!isLoaded}
-            className="flex items-center justify-center gap-1.5 w-8 h-8 md:w-28 py-1.5 rounded-full bg-white hover:bg-slate-100 transition-colors border border-slate-200 disabled:opacity-50 shadow-sm flex-shrink-0 cursor-pointer"
-            title={isPlaying ? "Stop Simulation" : "Start Simulation"}
+          {/* AI Copilot - round matching circuit */}
+          <button
+            onClick={() => setShowAICopilot(!showAICopilot)}
+            className={`flex items-center justify-center w-8 h-8 rounded-full border-2 transition-colors focus:outline-none flex-shrink-0 cursor-pointer ${
+              showAICopilot 
+                ? 'bg-blue-100 border-blue-400 text-blue-700' 
+                : 'border-indigo-200 text-indigo-600 bg-indigo-50 hover:bg-indigo-100 hover:border-indigo-300'
+            }`}
+            title="AI Copilot Expert"
           >
-            {isPlaying ? (
-              <><Square className="w-4 h-4 text-red-500" /><span className="hidden md:inline text-sm font-medium">Stop</span></>
-            ) : (
-              <><Play className="w-4 h-4 text-emerald-500" /><span className="hidden md:inline text-sm font-medium text-slate-700">Simulate</span></>
-            )}
+            <Sparkles className="w-4 h-4" />
           </button>
 
-          <button 
-            onClick={resetSimulation}
-            disabled={!isLoaded}
-            className="flex items-center justify-center gap-1.5 w-8 h-8 md:w-auto md:px-4 py-1.5 rounded-full bg-white hover:bg-slate-100 transition-colors border border-slate-200 disabled:opacity-50 shadow-sm text-slate-600 hover:text-slate-900 flex-shrink-0 cursor-pointer"
-            title="Reset Simulation"
-          >
-            <RotateCcw className="w-4 h-4" /> <span className="hidden md:inline text-sm font-medium">Reset</span>
-          </button>
-
-          <button 
-            onClick={() => setCameraView(cameraView === 'topDown' ? 'perspective' : 'topDown')}
-            className={`flex items-center justify-center gap-1.5 w-8 h-8 md:w-auto md:px-4 py-1.5 rounded-full transition-colors border shadow-sm flex-shrink-0 cursor-pointer ${cameraView === 'topDown' ? 'bg-blue-100 text-blue-700 border-blue-200' : 'bg-white hover:bg-slate-100 border-slate-200 text-slate-600'}`}
-            title="Toggle Top Down View"
-          >
-            <Eye className="w-4 h-4" /> <span className="hidden md:inline text-sm font-medium">{cameraView === 'topDown' ? 'Perspective' : 'Top Down'}</span>
-          </button>
+          {/* GitHub - round rightmost matching circuit */}
           <a
             href="https://github.com/tomgrek/physicssim"
             target="_blank"
             rel="noopener noreferrer"
-            className="flex items-center justify-center w-8 h-8 md:w-9 md:h-9 rounded-full border-2 border-slate-200 text-slate-600 hover:bg-slate-50 hover:border-slate-300 transition-colors focus:outline-none flex-shrink-0 cursor-pointer"
+            className="flex items-center justify-center w-8 h-8 rounded-full border-2 border-slate-200 text-slate-600 bg-white hover:bg-slate-50 hover:border-slate-300 transition-colors focus:outline-none flex-shrink-0 cursor-pointer"
             title="View on GitHub"
           >
-            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.403 5.403 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4"/><path d="M9 18c-4.51 2-5-2-7-2"/></svg>
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.403 5.403 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4"/><path d="M9 18c-4.51 2-5-2-7-2"/></svg>
           </a>
         </div>
       </header>
+
 
       <div className="flex flex-1 overflow-hidden relative">
         {/* Global Settings */}
@@ -2811,6 +2214,22 @@ function App() {
               <div className="flex flex-col gap-1">
                 <label className="text-xs font-medium text-slate-500 flex justify-between">Floor Bounciness <span>{(floorBounce ?? 0).toFixed(2)}</span></label>
                 <input type="range" min="0" max="1" step="0.01" value={floorBounce ?? 0} onChange={(e) => setEnvironment({floorBounce: parseFloat(e.target.value)})} className="w-full accent-blue-500" />
+              </div>
+              <div className="pt-2.5 border-t border-slate-200 flex flex-col gap-1">
+                <label htmlFor="geminiApiKey" className="text-[10px] font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1">
+                  🔑 Gemini API Key
+                </label>
+                <input 
+                  type="password" 
+                  id="geminiApiKey"
+                  value={localStorage.getItem('gemini_api_key') || ''} 
+                  onChange={(e) => {
+                    localStorage.setItem('gemini_api_key', e.target.value);
+                    window.dispatchEvent(new Event('storage'));
+                  }} 
+                  placeholder="Paste AIzaSy... here" 
+                  className="w-full px-2 py-1.5 text-xs border border-slate-250 rounded bg-white shadow-inner focus:outline-none focus:ring-1 focus:ring-blue-500 font-mono" 
+                />
               </div>
             </div>
           </div>
@@ -3045,7 +2464,28 @@ function App() {
             <canvas ref={axisCanvasRef} width={76} height={76} style={{ display: 'block', borderRadius: '7px' }} />
           </div>
           
-          <Canvas camera={CAMERA_CONFIG} shadows onPointerMissed={handlePointerMissed}>
+          <Canvas
+            camera={CAMERA_CONFIG}
+            shadows
+            onPointerMissed={handlePointerMissed}
+            gl={{ preserveDrawingBuffer: true }}
+            onCreated={(state) => {
+              (window as any)._physics_gl = state.gl;
+              const canvas = state.gl.domElement;
+              // Without this, a lost WebGL context (GPU driver hiccup, memory
+              // pressure, etc.) leaves the canvas permanently blank with no way
+              // to recover in-app — preventDefault() tells the browser to try
+              // restoring the context instead of abandoning it.
+              canvas.addEventListener('webglcontextlost', (e) => {
+                e.preventDefault();
+                console.error('[Physics] WebGL context lost — attempting recovery');
+              });
+              canvas.addEventListener('webglcontextrestored', () => {
+                console.warn('[Physics] WebGL context restored — forcing scene recompile to redraw');
+                useStore.getState().recompile(useStore.getState().sceneGraph, undefined, false, true);
+              });
+            }}
+          >
             <SceneCapture sceneRef={threeSceneRef} />
             <DropHandler addComponent={addComponent} />
             <color attach="background" args={['#f8fafc']} />
@@ -3703,12 +3143,11 @@ function App() {
                           value={joint.actuator.ctrlValue || 0} 
                           onChange={(e) => {
                             const val = parseFloat(e.target.value);
-                            if (isPlaying && model && data && mujoco) {
-                              const actId = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR.value, `${joint.name}_actuator`);
-                              if (actId !== -1) data.ctrl[actId] = val;
+                            if (isPlaying) {
+                              getPhysicsWorkerClient().setCtrl(`${joint.name}_actuator`, val);
                             }
                             updateNodeJoint(selectedNode.id, { actuator: { ...joint.actuator, ctrlValue: val } });
-                          }} 
+                          }}
                           className="w-full accent-blue-500 cursor-pointer" 
                         />
                       </div>
@@ -5019,6 +4458,10 @@ api.applyForce([force, 0, 0]);
             </div>
           </aside>
         )}
+
+        {showAICopilot && (
+          <AICopilotPanel onClose={() => setShowAICopilot(false)} />
+        )}
       </div>
 
       {isDocsOpen && (
@@ -5028,7 +4471,7 @@ api.applyForce([force, 0, 0]);
             <div className="px-6 py-4 border-b border-slate-150 flex items-center justify-between bg-slate-50">
               <div className="flex items-center gap-2">
                 <Info className="w-5 h-5 text-blue-500" />
-                <h2 className="font-bold text-slate-800 text-base">Physics Expt Reference Guide</h2>
+                <h2 className="font-bold text-slate-800 text-base">PhysBox: Mesh Reference Guide</h2>
               </div>
               <button 
                 onClick={() => setIsDocsOpen(false)}

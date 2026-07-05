@@ -71,13 +71,45 @@ export const compileToMJCF = (
   density: number = 0,
   floorBounce: number = 0.0
 ) => {
+  if (!Array.isArray(scene?.nodes)) {
+    throw new Error('compileToMJCF: scene.nodes must be an array (got a malformed SceneGraph)');
+  }
   const sceneCopy = JSON.parse(JSON.stringify(scene)) as SceneGraph;
+
+  // MuJoCo resolves geom/body lookups by name (mj_name2id), and the renderer's
+  // DynamicGeom component caches a geom's id from its name once at mount. If two
+  // geoms or bodies ever share a name, MuJoCo silently binds both lookups to
+  // whichever one it registered first — every other geom "sharing" that name
+  // then renders forever at the wrong body's transform, with no compile error
+  // to explain it. Catch collisions here, loudly, instead of compiling
+  // ambiguous MJCF that corrupts rendering silently.
+  const seenBodyNames = new Set<string>();
+  const seenGeomNames = new Set<string>();
+  const checkNames = (nodes: SceneNode[]) => {
+    if (!nodes) return;
+    for (const node of nodes) {
+      if (node.isPulleyRope) { checkNames(node.children); continue; }
+      if (seenBodyNames.has(node.name)) {
+        throw new Error(`compileToMJCF: duplicate body name "${node.name}" — every body in the scene must have a unique name`);
+      }
+      seenBodyNames.add(node.name);
+      for (const g of node.geoms || []) {
+        if (seenGeomNames.has(g.name)) {
+          throw new Error(`compileToMJCF: duplicate geom name "${g.name}" (on body "${node.name}") — every geom in the scene must have a unique name`);
+        }
+        seenGeomNames.add(g.name);
+      }
+      checkNames(node.children);
+    }
+  };
+  checkNames(sceneCopy.nodes);
 
   // Collect all mesh geoms so we can emit <asset> entries for them
   const meshAssets: SceneGeom[] = [];
   const collectMeshAssets = (nodes: SceneNode[]) => {
+    if (!nodes) return;
     for (const node of nodes) {
-      for (const g of node.geoms) {
+      for (const g of node.geoms || []) {
         if (g.type === 'mesh' && g.vertices && g.faces) {
           meshAssets.push(g);
         }
@@ -135,13 +167,14 @@ export const compileToMJCF = (
   const nodeWorldData: { [id: string]: { pos: [number, number, number]; size: number[] } } = {};
 
   const getAbsolutePositions = (nodes: SceneNode[], parentPos: [number, number, number] = [0, 0, 0]) => {
+    if (!nodes) return;
     for (const node of nodes) {
       const worldPos: [number, number, number] = [
         parentPos[0] + node.pos[0],
         parentPos[1] + node.pos[1],
         parentPos[2] + node.pos[2]
       ];
-      const mainGeom = node.geoms[0];
+      const mainGeom = (node.geoms || [])[0];
       const size = mainGeom ? mainGeom.size : [0.1, 0.1, 0.1];
       nodeWorldData[node.id] = { pos: worldPos, size };
       getAbsolutePositions(node.children, worldPos);
@@ -159,6 +192,7 @@ export const compileToMJCF = (
   const nodeNamesMap: Record<string, string> = {};
 
   const traverse = (nodes: SceneNode[]) => {
+    if (!nodes) return;
     for (const node of nodes) {
       nodeNamesMap[node.id] = node.name;
       if (node.joints && node.joints.length > 0) {
@@ -178,7 +212,7 @@ export const compileToMJCF = (
       }
 
       const couplingAllowed = node.allowCoupling !== false;
-      node.joints.forEach(j => { 
+      (node.joints || []).forEach(j => {
         if (j.actuator) actuators.push(j); 
         if (couplingAllowed && node.id.includes('gear') && j.type === 'hinge') {
           const wData = nodeWorldData[node.id];
@@ -288,6 +322,7 @@ export const compileToMJCF = (
           if (wheelJoint) {
             // Find the pulley wheel node to get its radius
             const findWheel = (nodes: SceneNode[]): SceneNode | null => {
+              if (!nodes) return null;
               for (const n of nodes) {
                 if (n.id === pulleyWheelId) return n;
                 const found = findWheel(n.children);

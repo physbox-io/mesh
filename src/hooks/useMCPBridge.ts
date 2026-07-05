@@ -4,34 +4,120 @@
  */
 
 import { useEffect } from 'react';
-import { useStore } from '../store/useStore';
+import { useStore, getPhysicsWorkerClient } from '../store/useStore';
 import { compileToMJCF } from '../utils/mjcf';
 import { compileSCAD } from '../utils/openscad';
 
 const autoCompileScad = async (nodes: any[]) => {
-  const promises: Promise<void>[] = [];
-  const traverseAndCompile = (nodesList: any[]) => {
+  // openscad-wasm has shared global state across instances - compiling multiple
+  // scad nodes concurrently (Promise.all) has been observed to silently return
+  // an empty mesh for one of them. Compile sequentially instead.
+  const scadNodes: any[] = [];
+  const collect = (nodesList: any[]) => {
     if (!nodesList) return;
     for (const node of nodesList) {
-      if (node.scad) {
-        const promise = (async () => {
-          try {
-            const compiled = await compileSCAD(node.scad);
-            useStore.getState().updateNodeScad(node.id, node.scad, compiled);
-          } catch (err) {
-            console.error(`Failed to auto-compile SCAD for node ${node.id}:`, err);
-          }
-        })();
-        promises.push(promise);
-      }
-      traverseAndCompile(node.children);
+      if (node.scad) scadNodes.push(node);
+      collect(node.children);
     }
   };
-  traverseAndCompile(nodes);
-  if (promises.length > 0) {
-    await Promise.all(promises);
+  collect(nodes);
+
+  for (const node of scadNodes) {
+    // openscad-wasm has been observed to intermittently fail (throw, or return
+    // empty output) on a compile immediately following another one, even when
+    // run strictly sequentially with a fresh instance each time - some global
+    // state in the library isn't fully torn down between calls. Retry a couple
+    // of times before giving up, since a clean retry reliably succeeds.
+    let compiled: { vertices: number[]; faces: number[]; renderVertices: number[] } | null = null;
+    let lastErr: unknown = null;
+    for (let attempt = 0; attempt < 3 && !compiled; attempt++) {
+      if (attempt > 0) await new Promise(r => setTimeout(r, 100));
+      try {
+        const result = await compileSCAD(node.scad);
+        // A technically-valid but empty STL (zero triangles) doesn't throw in
+        // compileSCAD but is just as much a failed compile - retry it too.
+        if (result.faces.length === 0) {
+          lastErr = new Error('Compile produced an empty mesh (0 faces)');
+          continue;
+        }
+        compiled = result;
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+    if (compiled) {
+      // skipRecompile: the caller (settleScene) runs a single recompile after
+      // every node is done. Without this, each node's own recompile fires an
+      // unawaited MJCF/WASM build using whatever the scene looked like at that
+      // moment - e.g. compiled while a later node's mesh doesn't exist yet - and
+      // these overlapping builds race. Letting one of the stale/erroring ones
+      // finish last silently corrupts lastCompileError even when the scene is fine.
+      useStore.getState().updateNodeScad(node.id, node.scad, compiled, true);
+    } else {
+      console.error(`Failed to auto-compile SCAD for node ${node.id} after 3 attempts:`, lastErr);
+    }
   }
 };
+
+// Loads a scene and waits for it to fully settle before responding: SCAD bodies
+// compile asynchronously, so a caller that gets an immediate ok:true has no way
+// to know whether the scene it just loaded actually built successfully. This
+// awaits the whole pipeline (all scad compiles, then a single final recompile)
+// and reports the real MJCF compile result instead.
+const settleScene = async (nodes: any[]): Promise<{ ok: boolean; error?: string; nodeCount: number }> => {
+  const store = useStore.getState();
+  // skipRecompile: this initial set uses placeholder (pre-scad) mesh geoms, so
+  // an immediate recompile here would be both wasted work and another stale
+  // build racing against the final one below.
+  store.updateScene({ nodes }, true);
+  await autoCompileScad(nodes);
+  // This is now the ONLY recompile triggered by this load, so there's nothing
+  // left to race against. forceReset is false so recompile() preserves qpos/qvel
+  // when the edit didn't change the DOF count (e.g. tweaking a color or adding a
+  // fixed body) instead of always snapping the sim back to its initial state.
+  await useStore.getState().recompile(useStore.getState().sceneGraph, undefined, false, true);
+  const error = useStore.getState().lastCompileError;
+  return { ok: !error, ...(error ? { error } : {}), nodeCount: nodes.length };
+};
+
+const bboxOf = (flatVerts: number[] | undefined) => {
+  if (!flatVerts || flatVerts.length === 0) return undefined;
+  const min = [Infinity, Infinity, Infinity];
+  const max = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < flatVerts.length; i += 3) {
+    for (let a = 0; a < 3; a++) {
+      const v = flatVerts[i + a];
+      if (v < min[a]) min[a] = v;
+      if (v > max[a]) max[a] = v;
+    }
+  }
+  return { min, max };
+};
+
+const summarizeGeom = (g: any) => ({
+  name: g.name,
+  type: g.type,
+  ...(g.pos ? { pos: g.pos } : {}),
+  ...(g.type === 'mesh'
+    ? {
+        vertCount: (g.renderVertices || g.vertices || []).length / 3,
+        faceCount: (g.faces || []).length / 3,
+        bbox: bboxOf(g.renderVertices || g.vertices),
+      }
+    : { size: g.size }),
+});
+
+const summarizeNode = (node: any): any => ({
+  id: node.id,
+  name: node.name,
+  pos: node.pos,
+  ...(node.quat ? { quat: node.quat } : {}),
+  ...(node.euler ? { euler: node.euler } : {}),
+  ...(node.scad ? { hasScad: true } : {}),
+  joints: (node.joints || []).map((j: any) => ({ name: j.name, type: j.type })),
+  geoms: (node.geoms || []).map(summarizeGeom),
+  children: (node.children || []).map(summarizeNode),
+});
 
 export function useMCPBridge() {
   useEffect(() => {
@@ -84,10 +170,14 @@ export function useMCPBridge() {
             density:      store.density,
             floorFriction: store.floorFriction,
             floorBounce:   store.floorBounce,
+            lastCompileError: store.lastCompileError,
           };
 
         case 'GET_SCENE':
           return store.sceneGraph;
+
+        case 'GET_SCENE_SUMMARY':
+          return { nodes: (store.sceneGraph.nodes || []).map(summarizeNode) };
 
         case 'GET_TELEMETRY': {
           const history = (window as any)._physics_history || [];
@@ -99,580 +189,16 @@ export function useMCPBridge() {
 
         case 'RUN_HEADLESS': {
           const ticks = Number(msg.ticks) || 300;
-          const { mujoco, sceneGraph, gravityZ, floorFriction, windX, windY, density } = store;
-          if (!mujoco) return { error: 'MuJoCo library not loaded' };
-          
-          let warnings: string[] = [];
-          try {
-            mujoco.on_warning = (msg: string) => {
-              warnings.push(msg);
-            };
-            const xml = compileToMJCF(sceneGraph, gravityZ, floorFriction, windX, windY, density);
-            const headlessModel = mujoco.MjModel.from_xml_string(xml);
-            const headlessData = new mujoco.MjData(headlessModel);
-            
-            mujoco.mj_forward(headlessModel, headlessData);
-
-            // Inject initial velocities (without compiler-level magic randomness)
-            const initVelJoints: { name: string; vel: number[] }[] = [];
-            const traverseVel = (nodes: any[]) => {
-              if (!nodes) return;
-              for (const node of nodes) {
-                node.joints?.forEach((j: any) => { if (j.initialVelocity) initVelJoints.push({ name: j.name, vel: j.initialVelocity }); });
-                traverseVel(node.children);
-              }
-            };
-            traverseVel(sceneGraph.nodes);
-            
-            let needForward = false;
-            for (const j of initVelJoints) {
-              const jntId = mujoco.mj_name2id(headlessModel, mujoco.mjtObj.mjOBJ_JOINT.value, j.name);
-              if (jntId !== -1) {
-                const dofAdr = headlessModel.jnt_dofadr[jntId];
-                for (let i = 0; i < j.vel.length; i++) {
-                  headlessData.qvel[dofAdr + i] = j.vel[i];
-                }
-                needForward = true;
-              }
-            }
-            if (needForward) {
-              mujoco.mj_forward(headlessModel, headlessData);
-            }
-            
-            const trajectory: any[] = [];
-            
-            const scriptCache: Record<string, Function> = {};
-            const findNodeByIdInLoop = (nodes: any[], targetId: string): any => {
-              if (!nodes) return null;
-              for (const n of nodes) {
-                if (n.id === targetId) return n;
-                const c = findNodeByIdInLoop(n.children || [], targetId);
-                if (c) return c;
-              }
-              return null;
-            };
-
-            const executeScripts = (nodes: any[], aeroDiagnostics?: Record<string, any>) => {
-              if (!nodes) return;
-              for (const node of nodes) {
-                if (node.isAerodynamic) {
-                  // Generic aerodynamic logic for any geom type (box, mesh, ellipsoid, etc.)
-                  const geom = node.geoms?.[0];
-                  if (geom) {
-                    const bId = mujoco.mj_name2id(headlessModel, mujoco.mjtObj.mjOBJ_BODY.value, node.name || node.id);
-                    if (bId !== -1) {
-                      // Find parent independent body ID (ancestor with degrees of freedom)
-                      let parentId = bId;
-                      while (parentId > 0 && headlessModel.body_dofnum[parentId] === 0) {
-                        parentId = headlessModel.body_parentid[parentId];
-                      }
-
-                      const gId = mujoco.mj_name2id(headlessModel, mujoco.mjtObj.mjOBJ_GEOM.value, geom.name || '');
-                      let geomWorldX = headlessData.xpos[bId * 3 + 0];
-                      let geomWorldY = headlessData.xpos[bId * 3 + 1];
-                      let geomWorldZ = headlessData.xpos[bId * 3 + 2];
-                      if (gId !== -1) {
-                        geomWorldX = headlessData.geom_xpos[gId * 3 + 0];
-                        geomWorldY = headlessData.geom_xpos[gId * 3 + 1];
-                        geomWorldZ = headlessData.geom_xpos[gId * 3 + 2];
-                      }
-
-                      const rx = geomWorldX - headlessData.xpos[parentId * 3 + 0];
-                      const ry = geomWorldY - headlessData.xpos[parentId * 3 + 1];
-                      const rz = geomWorldZ - headlessData.xpos[parentId * 3 + 2];
-
-                      const wx = headlessData.cvel[bId * 6 + 0];
-                      const wy = headlessData.cvel[bId * 6 + 1];
-                      const wz = headlessData.cvel[bId * 6 + 2];
-                      const vO_x = headlessData.cvel[bId * 6 + 3];
-                      const vO_y = headlessData.cvel[bId * 6 + 4];
-                      const vO_z = headlessData.cvel[bId * 6 + 5];
-
-                      const vx = vO_x + (wy * rz - wz * ry);
-                      const vy = vO_y + (wz * rx - wx * rz);
-                      const vz = vO_z + (wx * ry - wy * rx);
-                      
-                      const o = bId * 9;
-                      const noseX = headlessData.xmat[o+0], noseY = headlessData.xmat[o+3], noseZ = headlessData.xmat[o+6];
-                      const spanX = headlessData.xmat[o+1], spanY = headlessData.xmat[o+4], spanZ = headlessData.xmat[o+7];
-                      const upX   = headlessData.xmat[o+2], upY   = headlessData.xmat[o+5], upZ   = headlessData.xmat[o+8];
-                      
-                      const relVx = vx - (windX || 0);
-                      const relVy = vy - (windY || 0);
-                      const relVz = vz;
-                      
-                      // Project velocity perpendicular to local span axis to isolate 2D airfoil flow
-                      const spanDotV = relVx*spanX + relVy*spanY + relVz*spanZ;
-                      const airfoilVx = relVx - spanDotV*spanX;
-                      const airfoilVy = relVy - spanDotV*spanY;
-                      const airfoilVz = relVz - spanDotV*spanZ;
-                      const relSpeed = Math.sqrt(airfoilVx*airfoilVx + airfoilVy*airfoilVy + airfoilVz*airfoilVz);
-                      
-                      if (relSpeed >= 0.05) {
-                        // Derive wing area and chord from geom size
-                        const s = geom.size || [];
-                        const halfX = s[0] || 0.3;
-                        const halfY = s[1] || 0.2;
-                        const wingArea = (halfX * 2) * (halfY * 2);
-                        const chord = halfX * 2;
-                        
-                        const q = 0.5 * 1.225 * relSpeed * relSpeed;
-                        
-                        // Normalized flow direction in airfoil plane
-                        const vhx = airfoilVx / relSpeed;
-                        const vhy = airfoilVy / relSpeed;
-                        const vhz = airfoilVz / relSpeed;
-                        
-                        // Local velocity components
-                        const u_nose = -(vhx*noseX + vhy*noseY + vhz*noseZ);
-                        const u_up   = -(vhx*upX   + vhy*upY   + vhz*upZ);
-                        
-                        // Angle of attack
-                        const alpha = Math.atan2(u_up, u_nose);
-                        
-                        // Lift and drag coefficients
-                        const CL = 1.5 * Math.sin(2 * alpha);
-                        const CD = 0.08 + 1.2 * Math.sin(alpha) * Math.sin(alpha);
-                        
-                        // Lift direction perpendicular to flow in airfoil plane
-                        const ldx = -u_up * noseX + u_nose * upX;
-                        const ldy = -u_up * noseY + u_nose * upY;
-                        const ldz = -u_up * noseZ + u_nose * upZ;
-                        
-                        // Drag direction opposite to flow
-                        const ddx = -vhx;
-                        const ddy = -vhy;
-                        const ddz = -vhz;
-                        
-                        // Force vectors
-                        const fx = (CL * ldx + CD * ddx) * q * wingArea;
-                        const fy = (CL * ldy + CD * ddy) * q * wingArea;
-                        const fz = (CL * ldz + CD * ddz) * q * wingArea;
-                        
-                        // Aerodynamic pitch moment
-                        const pitchMoment = -0.05 * alpha * q * wingArea * chord;
-                        const tx_aero = pitchMoment * spanX;
-                        const ty_aero = pitchMoment * spanY;
-                        const tz_aero = pitchMoment * spanZ;
-                        
-                        // Aerodynamic roll restoring moment
-                        const bankAngle = Math.atan2(upX*spanY - upY*spanX, upZ);
-                        const rollRestoring = -0.1 * bankAngle * q * wingArea * chord;
-                        const tx_roll = rollRestoring * noseX;
-                        const ty_roll = rollRestoring * noseY;
-                        const tz_roll = rollRestoring * noseZ;
-                        
-
-                        
-                        // Torque due to force lever arm: r x F
-                        const tx_lever = ry * fz - rz * fy;
-                        const ty_lever = rz * fx - rx * fz;
-                        const tz_lever = rx * fy - ry * fx;
-                        
-                        // Apply linear forces to parent independent body
-                        headlessData.xfrc_applied[parentId * 6 + 0] += fx;
-                        headlessData.xfrc_applied[parentId * 6 + 1] += fy;
-                        headlessData.xfrc_applied[parentId * 6 + 2] += fz;
-                        
-                        // Apply torque to parent independent body
-                        headlessData.xfrc_applied[parentId * 6 + 3] += tx_aero + tx_roll + tx_lever;
-                        headlessData.xfrc_applied[parentId * 6 + 4] += ty_aero + ty_roll + ty_lever;
-                        headlessData.xfrc_applied[parentId * 6 + 5] += tz_aero + tz_roll + tz_lever;
-
-                        if (aeroDiagnostics) {
-                          aeroDiagnostics[node.name || node.id] = {
-                            relSpeed,
-                            alpha: alpha * 180 / Math.PI,
-                            CL,
-                            CD,
-                            force: [fx, fy, fz],
-                            torque: [tx_aero + tx_roll + tx_lever, ty_aero + ty_roll + ty_lever, tz_aero + tz_roll + tz_lever]
-                          };
-                        }
-                      } else {
-                        if (aeroDiagnostics) {
-                          aeroDiagnostics[node.name || node.id] = {
-                            relSpeed,
-                            alpha: 0,
-                            CL: 0,
-                            CD: 0,
-                            force: [0, 0, 0],
-                            torque: [0, 0, 0]
-                          };
-                        }
-                      }
-
-                      // Rotational damping (applied to the parent independent body)
-                      const DAMPING = 0.0005;
-                      headlessData.xfrc_applied[parentId * 6 + 3] -= DAMPING * wx;
-                      headlessData.xfrc_applied[parentId * 6 + 4] -= DAMPING * wy;
-                      headlessData.xfrc_applied[parentId * 6 + 5] -= DAMPING * wz;
-                    }
-                  }
-                }
-
-                if (node.script && node.script.trim() !== '') {
-                  let fn = scriptCache[node.id];
-                  if (!fn) {
-                    try {
-                      fn = new Function('api', node.script);
-                      scriptCache[node.id] = fn;
-                    } catch (e: any) {
-                      console.error(`[Headless Script Compilation Error on node ${node.name}]:`, e);
-                      fn = () => {};
-                      scriptCache[node.id] = fn;
-                    }
-                  }
-
-                  const api = {
-                    id: node.id,
-                    name: node.name,
-                    isKeyPressed: (_keyName: string) => false,
-                    setPosition: (pos: number[] | number, bodyName = node.id) => {
-                      if (!headlessModel || !mujoco || !headlessData) return;
-                      const targetNode = findNodeByIdInLoop(sceneGraph.nodes, bodyName);
-                      if (!targetNode || !targetNode.joints || targetNode.joints.length === 0) return;
-                      const joint = targetNode.joints[0];
-                      const jId = mujoco.mj_name2id(headlessModel, mujoco.mjtObj.mjOBJ_JOINT.value, joint.name);
-                      if (jId !== -1) {
-                        const qposadr = headlessModel.jnt_qposadr[jId];
-                        if (joint.type === 'free') {
-                          if (Array.isArray(pos) && pos.length >= 3) {
-                            headlessData.qpos[qposadr + 0] = pos[0];
-                            headlessData.qpos[qposadr + 1] = pos[1];
-                            headlessData.qpos[qposadr + 2] = pos[2];
-                          }
-                        } else if (joint.type === 'ball') {
-                          if (Array.isArray(pos) && pos.length >= 4) {
-                            headlessData.qpos[qposadr + 0] = pos[0];
-                            headlessData.qpos[qposadr + 1] = pos[1];
-                            headlessData.qpos[qposadr + 2] = pos[2];
-                            headlessData.qpos[qposadr + 3] = pos[3];
-                          }
-                        } else {
-                          headlessData.qpos[qposadr] = typeof pos === 'number' ? pos : (Array.isArray(pos) ? pos[0] : 0);
-                        }
-                      }
-                    },
-                    setVelocity: (vel: number[] | number, bodyName = node.id) => {
-                      if (!headlessModel || !mujoco || !headlessData) return;
-                      const targetNode = findNodeByIdInLoop(sceneGraph.nodes, bodyName);
-                      if (!targetNode || !targetNode.joints || targetNode.joints.length === 0) return;
-                      const joint = targetNode.joints[0];
-                      const jId = mujoco.mj_name2id(headlessModel, mujoco.mjtObj.mjOBJ_JOINT.value, joint.name);
-                      if (jId !== -1) {
-                        const dofadr = headlessModel.jnt_dofadr[jId];
-                        if (joint.type === 'free') {
-                          if (Array.isArray(vel) && vel.length >= 3) {
-                            headlessData.qvel[dofadr + 0] = vel[0];
-                            headlessData.qvel[dofadr + 1] = vel[1];
-                            headlessData.qvel[dofadr + 2] = vel[2];
-                          }
-                        } else {
-                          headlessData.qvel[dofadr] = typeof vel === 'number' ? vel : (Array.isArray(vel) ? vel[0] : 0);
-                        }
-                      }
-                    },
-                    setAngularVelocity: (angvel: number[] | number, bodyName = node.id) => {
-                      if (!headlessModel || !mujoco || !headlessData) return;
-                      const targetNode = findNodeByIdInLoop(sceneGraph.nodes, bodyName);
-                      if (!targetNode || !targetNode.joints || targetNode.joints.length === 0) return;
-                      const joint = targetNode.joints[0];
-                      const jId = mujoco.mj_name2id(headlessModel, mujoco.mjtObj.mjOBJ_JOINT.value, joint.name);
-                      if (jId !== -1) {
-                        const dofadr = headlessModel.jnt_dofadr[jId];
-                        if (joint.type === 'free') {
-                          if (Array.isArray(angvel) && angvel.length >= 3) {
-                            headlessData.qvel[dofadr + 3] = angvel[0];
-                            headlessData.qvel[dofadr + 4] = angvel[1];
-                            headlessData.qvel[dofadr + 5] = angvel[2];
-                          }
-                        } else if (joint.type === 'ball') {
-                          if (Array.isArray(angvel) && angvel.length >= 3) {
-                            headlessData.qvel[dofadr + 0] = angvel[0];
-                            headlessData.qvel[dofadr + 1] = angvel[1];
-                            headlessData.qvel[dofadr + 2] = angvel[2];
-                          }
-                        } else if (joint.type === 'hinge') {
-                          headlessData.qvel[dofadr] = typeof angvel === 'number' ? angvel : (Array.isArray(angvel) ? angvel[0] : 0);
-                        }
-                      }
-                    },
-                    getPosition: (bodyName = node.id) => {
-                      if (!headlessModel || !mujoco || !headlessData) return [0, 0, 0];
-                      const bId = mujoco.mj_name2id(headlessModel, mujoco.mjtObj.mjOBJ_BODY.value, bodyName);
-                      if (bId !== -1) {
-                        return [
-                          headlessData.xpos[bId * 3],
-                          headlessData.xpos[bId * 3 + 1],
-                          headlessData.xpos[bId * 3 + 2]
-                        ];
-                      }
-                      return [0, 0, 0];
-                    },
-                    getVelocity: (bodyName = node.id) => {
-                      if (!headlessModel || !mujoco || !headlessData) return [0, 0, 0];
-                      const bId = mujoco.mj_name2id(headlessModel, mujoco.mjtObj.mjOBJ_BODY.value, bodyName);
-                      if (bId !== -1) {
-                        return [
-                          headlessData.cvel[bId * 6 + 3],
-                          headlessData.cvel[bId * 6 + 4],
-                          headlessData.cvel[bId * 6 + 5]
-                        ];
-                      }
-                      return [0, 0, 0];
-                    },
-                    getAngularVelocity: (bodyName = node.id) => {
-                      if (!headlessModel || !mujoco || !headlessData) return [0, 0, 0];
-                      const bId = mujoco.mj_name2id(headlessModel, mujoco.mjtObj.mjOBJ_BODY.value, bodyName);
-                      if (bId !== -1) {
-                        return [
-                          headlessData.cvel[bId * 6 + 0],
-                          headlessData.cvel[bId * 6 + 1],
-                          headlessData.cvel[bId * 6 + 2]
-                        ];
-                      }
-                      return [0, 0, 0];
-                    },
-                    getMass: (bodyName = node.id) => {
-                      if (!headlessModel || !mujoco || !headlessData) return 0;
-                      const bId = mujoco.mj_name2id(headlessModel, mujoco.mjtObj.mjOBJ_BODY.value, bodyName);
-                      return bId !== -1 ? headlessModel.body_mass[bId] : 0;
-                    },
-                    getJointPosition: (jointName: string) => {
-                      if (!headlessModel || !mujoco || !headlessData) return 0;
-                      const jId = mujoco.mj_name2id(headlessModel, mujoco.mjtObj.mjOBJ_JOINT.value, jointName);
-                      if (jId !== -1) {
-                        const adr = headlessModel.jnt_qposadr[jId];
-                        return headlessData.qpos[adr];
-                      }
-                      return 0;
-                    },
-                    getJointVelocity: (jointName: string) => {
-                      if (!headlessModel || !mujoco || !headlessData) return 0;
-                      const jId = mujoco.mj_name2id(headlessModel, mujoco.mjtObj.mjOBJ_JOINT.value, jointName);
-                      if (jId !== -1) {
-                        const adr = headlessModel.jnt_dofadr[jId];
-                        return headlessData.qvel[adr];
-                      }
-                      return 0;
-                    },
-                    applyForce: (forceVec: number[], bodyName = node.id) => {
-                      if (!headlessModel || !mujoco || !headlessData || !Array.isArray(forceVec)) return;
-                      const bId = mujoco.mj_name2id(headlessModel, mujoco.mjtObj.mjOBJ_BODY.value, bodyName);
-                      if (bId !== -1) {
-                        headlessData.xfrc_applied[bId * 6 + 0] += forceVec[0] || 0;
-                        headlessData.xfrc_applied[bId * 6 + 1] += forceVec[1] || 0;
-                        headlessData.xfrc_applied[bId * 6 + 2] += forceVec[2] || 0;
-                      }
-                    },
-                    applyTorque: (torqueVec: number[], bodyName = node.id) => {
-                      if (!headlessModel || !mujoco || !headlessData || !Array.isArray(torqueVec)) return;
-                      const bId = mujoco.mj_name2id(headlessModel, mujoco.mjtObj.mjOBJ_BODY.value, bodyName);
-                      if (bId !== -1) {
-                        headlessData.xfrc_applied[bId * 6 + 3] += torqueVec[0] || 0;
-                        headlessData.xfrc_applied[bId * 6 + 4] += torqueVec[1] || 0;
-                        headlessData.xfrc_applied[bId * 6 + 5] += torqueVec[2] || 0;
-                      }
-                    },
-                    getOrientation: (bodyName = node.id) => {
-                      if (!headlessModel || !mujoco || !headlessData) return [1,0,0, 0,1,0, 0,0,1];
-                      const bId = mujoco.mj_name2id(headlessModel, mujoco.mjtObj.mjOBJ_BODY.value, bodyName);
-                      if (bId !== -1) {
-                        const o = bId * 9;
-                        return [
-                          headlessData.xmat[o+0], headlessData.xmat[o+1], headlessData.xmat[o+2],
-                          headlessData.xmat[o+3], headlessData.xmat[o+4], headlessData.xmat[o+5],
-                          headlessData.xmat[o+6], headlessData.xmat[o+7], headlessData.xmat[o+8]
-                        ];
-                      }
-                      return [1,0,0, 0,1,0, 0,0,1];
-                    },
-                    applyJointForce: (jointName: string, forceVal: number) => {
-                      if (!headlessModel || !mujoco || !headlessData || typeof forceVal !== 'number') return;
-                      const jId = mujoco.mj_name2id(headlessModel, mujoco.mjtObj.mjOBJ_JOINT.value, jointName);
-                      if (jId !== -1) {
-                        const adr = headlessModel.jnt_dofadr[jId];
-                        headlessData.qfrc_applied[adr] += forceVal;
-                      }
-                    },
-                    setActuatorControl: (actuatorName: string, ctrlVal: number) => {
-                      if (!headlessModel || !mujoco || !headlessData || typeof ctrlVal !== 'number') return;
-                      const actId = mujoco.mj_name2id(headlessModel, mujoco.mjtObj.mjOBJ_ACTUATOR.value, actuatorName);
-                      if (actId !== -1) {
-                        headlessData.ctrl[actId] = ctrlVal;
-                      }
-                    },
-                    getTime: () => {
-                      return headlessData ? headlessData.time : 0;
-                    },
-                    getWind: () => {
-                      return [windX || 0, windY || 0];
-                    },
-                    log: (msg: any) => {
-                      console.log(`[HeadlessScript:${node.name}]`, msg);
-                    }
-                  };
-
-                  try {
-                    fn(api);
-                  } catch (e: any) {
-                    console.error(`[Headless Script Runtime Error on node ${node.name}]:`, e);
-                  }
-                }
-
-                if (node.children) {
-                  executeScripts(node.children, aeroDiagnostics);
-                }
-              }
-            };
-
-            const applyFreeJointDamping = (nodes: any[]) => {
-              if (!nodes) return;
-              for (const node of nodes) {
-                if (node.joints) {
-                  for (const joint of node.joints) {
-                    if (joint.type === 'free' && joint.damping !== undefined && joint.damping > 0) {
-                      const bId = mujoco.mj_name2id(headlessModel, mujoco.mjtObj.mjOBJ_BODY.value, node.name || node.id);
-                      if (bId !== -1) {
-                        const wx = headlessData.cvel[bId * 6 + 0];
-                        const wy = headlessData.cvel[bId * 6 + 1];
-                        const wz = headlessData.cvel[bId * 6 + 2];
-                        const vx = headlessData.cvel[bId * 6 + 3];
-                        const vy = headlessData.cvel[bId * 6 + 4];
-                        const vz = headlessData.cvel[bId * 6 + 5];
-
-                        const c = joint.damping;
-                        const mass = headlessModel.body_mass[bId] || 1.0;
-                        const ix = headlessModel.body_inertia[bId * 3 + 0] || 1.0;
-                        const iy = headlessModel.body_inertia[bId * 3 + 1] || 1.0;
-                        const iz = headlessModel.body_inertia[bId * 3 + 2] || 1.0;
-
-                        headlessData.xfrc_applied[bId * 6 + 0] -= c * mass * vx;
-                        headlessData.xfrc_applied[bId * 6 + 1] -= c * mass * vy;
-                        headlessData.xfrc_applied[bId * 6 + 2] -= c * mass * vz;
-                        headlessData.xfrc_applied[bId * 6 + 3] -= c * ix * wx;
-                        headlessData.xfrc_applied[bId * 6 + 4] -= c * iy * wy;
-                        headlessData.xfrc_applied[bId * 6 + 5] -= c * iz * wz;
-                      }
-                    }
-                  }
-                }
-                applyFreeJointDamping(node.children || []);
-              }
-            };
-
-            for (let i = 0; i < ticks; i++) {
-              headlessData.xfrc_applied.fill(0);
-              headlessData.qfrc_applied.fill(0);
-              
-              const aeroDiagnostics: Record<string, any> = {};
-              executeScripts(sceneGraph.nodes, aeroDiagnostics);
-              applyFreeJointDamping(sceneGraph.nodes);
-              
-              mujoco.mj_step(headlessModel, headlessData);
-              
-              if (isNaN(headlessData.qpos[0])) {
-                break;
-              }
-              
-              const bodies: Record<string, any> = {};
-              const joints: Record<string, any> = {};
-              
-              const collectNodeData = (nodesList: any[]) => {
-                if (!nodesList) return;
-                for (const node of nodesList) {
-                  const bodyName = node.id;
-                  const bId = mujoco.mj_name2id(headlessModel, mujoco.mjtObj.mjOBJ_BODY.value, bodyName);
-                  if (bId !== -1) {
-                    const wx = headlessData.cvel[bId * 6 + 0];
-                    const wy = headlessData.cvel[bId * 6 + 1];
-                    const wz = headlessData.cvel[bId * 6 + 2];
-                    const vO_x = headlessData.cvel[bId * 6 + 3];
-                    const vO_y = headlessData.cvel[bId * 6 + 4];
-                    const vO_z = headlessData.cvel[bId * 6 + 5];
-                    const x_pos = headlessData.xpos[bId * 3 + 0];
-                    const y_pos = headlessData.xpos[bId * 3 + 1];
-                    const z_pos = headlessData.xpos[bId * 3 + 2];
-                    
-                    const vx = vO_x + (wy * z_pos - wz * y_pos);
-                    const vy = vO_y + (wz * x_pos - wx * z_pos);
-                    const vz = vO_z + (wx * y_pos - wy * x_pos);
-
-                    bodies[bodyName] = {
-                      pos: [x_pos, y_pos, z_pos],
-                      vel: [vx, vy, vz],
-                      angvel: [wx, wy, wz],
-                      xfrc_applied: [
-                        headlessData.xfrc_applied[bId * 6 + 0],
-                        headlessData.xfrc_applied[bId * 6 + 1],
-                        headlessData.xfrc_applied[bId * 6 + 2],
-                        headlessData.xfrc_applied[bId * 6 + 3],
-                        headlessData.xfrc_applied[bId * 6 + 4],
-                        headlessData.xfrc_applied[bId * 6 + 5]
-                      ]
-                    };
-                  }
-                  
-                  node.joints?.forEach((j: any) => {
-                    const jId = mujoco.mj_name2id(headlessModel, mujoco.mjtObj.mjOBJ_JOINT.value, j.name);
-                    if (jId !== -1) {
-                      const qposadr = headlessModel.jnt_qposadr[jId];
-                      const dofadr = headlessModel.jnt_dofadr[jId];
-                      joints[j.name] = {
-                        pos: headlessData.qpos[qposadr],
-                        vel: headlessData.qvel[dofadr],
-                        qfrc_applied: headlessData.qfrc_applied[dofadr]
-                      };
-                    }
-                  });
-                  
-                  if (node.children) collectNodeData(node.children);
-                }
-              };
-              
-              collectNodeData(sceneGraph.nodes);
-              
-              const contacts: any[] = [];
-              for (let c = 0; c < headlessData.contact.size(); c++) {
-                const contact = headlessData.contact.get(c);
-                if (contact) {
-                  const g1 = contact.geom1;
-                  const g2 = contact.geom2;
-                  const dist = contact.dist;
-                  const geom1Name = mujoco.mj_id2name(headlessModel, mujoco.mjtObj.mjOBJ_GEOM.value, g1) || `geom_${g1}`;
-                  const geom2Name = mujoco.mj_id2name(headlessModel, mujoco.mjtObj.mjOBJ_GEOM.value, g2) || `geom_${g2}`;
-                  contacts.push({
-                    geom1: geom1Name,
-                    geom2: geom2Name,
-                    dist
-                  });
-                  contact.delete();
-                }
-              }
-
-              trajectory.push({
-                time: headlessData.time,
-                bodies,
-                joints,
-                contacts,
-                aeroDiagnostics
-              });
-            }
-            
-            headlessModel.delete();
-            headlessData.delete();
-            
-            return {
-              ok: true,
-              ticksSimulated: trajectory.length,
-              trajectory,
-              warnings
-            };
-          } catch (e: any) {
-            return { ok: false, error: e.message, warnings };
-          }
+          const { sceneGraph, gravityZ, floorFriction, windX, windY, density } = store;
+          // Runs inside the same physics worker that owns the live simulation
+          // (see src/workers/physicsWorker.ts's runHeadless) — its own isolated
+          // model/data built from the one already-loaded mujoco module, so a
+          // headless "what-if" run can never diverge from what's actually
+          // rendered live, and never costs a second loaded WASM module.
+          const xml = compileToMJCF(sceneGraph, gravityZ, floorFriction, windX, windY, density);
+          return getPhysicsWorkerClient().runHeadless(xml, sceneGraph, ticks);
         }
+
 
         case 'TOGGLE_PLAY':
           store.togglePlay();
@@ -707,6 +233,16 @@ export function useMCPBridge() {
                   'coin_flip', 'windmill', 'physics_only_windmill', 'traditional_windmill',
                   'drone', 'bouncy_balls'];
 
+        case 'SCREENSHOT': {
+          const gl = (window as any)._physics_gl;
+          if (!gl || !gl.domElement) return { ok: false, error: 'Renderer not ready yet' };
+          // r3f's default frameloop ("always") keeps redrawing every animation
+          // frame, and preserveDrawingBuffer keeps that last-drawn frame around
+          // for toDataURL to read synchronously — no manual render needed here.
+          const dataUrl = gl.domElement.toDataURL('image/png');
+          return { ok: true, dataUrl, width: gl.domElement.width, height: gl.domElement.height };
+        }
+
         case 'GET_NOTE_CARDS': {
           const getter = (window as any)._physics_getNoteCards;
           return { ok: true, noteCards: getter ? getter() : [] };
@@ -722,13 +258,13 @@ export function useMCPBridge() {
 
         case 'UPDATE_SCENE': {
           if (!msg.sceneGraph) return { ok: false, error: 'Missing sceneGraph' };
-          store.updateScene(msg.sceneGraph);
-          if (msg.sceneGraph.nodes) {
-            autoCompileScad(msg.sceneGraph.nodes).catch(err => {
-              console.error('Error auto-compiling SCAD in UPDATE_SCENE:', err);
-            });
+          // The MCP tool schema passes sceneGraph as a bare array of nodes (matching
+          // BUILD_SCENE's convention); also accept the internal { nodes: [...] } shape.
+          const nodes = Array.isArray(msg.sceneGraph) ? msg.sceneGraph : msg.sceneGraph.nodes;
+          if (!Array.isArray(nodes)) {
+            return { ok: false, error: 'sceneGraph must be an array of nodes, or an object of the form { nodes: SceneNode[] }' };
           }
-          return { ok: true };
+          return settleScene(nodes);
         }
 
         case 'SET_ENVIRONMENT': {
@@ -891,11 +427,7 @@ export function useMCPBridge() {
           };
 
           const nodes = bodies.map(fillBodyDefaults);
-          store.updateScene({ nodes });
-          autoCompileScad(nodes).catch(err => {
-            console.error('Error auto-compiling SCAD in BUILD_SCENE:', err);
-          });
-          return { ok: true, nodeCount: nodes.length };
+          return settleScene(nodes);
         }
 
         default:

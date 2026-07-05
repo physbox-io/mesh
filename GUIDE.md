@@ -1,6 +1,6 @@
-# Physics Expt Development Guide & Preferences
+# PhysBox: Mesh Development Guide & Preferences
 
-Welcome to the **Physics Expt** development reference guide. This document centralizes key technical decisions, user preferences, and implementation architecture learned across sessions to maintain long-term codebase health.
+Welcome to the **PhysBox: Mesh** development reference guide. This document centralizes key technical decisions, user preferences, and implementation architecture learned across sessions to maintain long-term codebase health.
 
 ---
 

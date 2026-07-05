@@ -1,10 +1,95 @@
 import { create } from 'zustand';
-import load_mujoco from '@mujoco/mujoco';
 import type { SceneGraph, SceneNode } from '../types/scene';
 import { compileToMJCF } from '../utils/mjcf';
 import { PRESETS, pendulumPreset, generateGearGeoms } from '../presets/presetScenes';
+import { PhysicsWorkerClient, type BuiltResult, type FrameSnapshot } from './physicsWorkerClient';
 
 const initialScene: SceneGraph = pendulumPreset;
+
+// The live MuJoCo module/model/data now live inside a dedicated Worker (see
+// src/workers/physicsWorker.ts) so that on unrecoverable WASM memory
+// exhaustion the worker can be terminated and a fresh one spawned — a real
+// memory reclaim, since a Worker is a separate JS realm, unlike reinstantiating
+// a WASM module in place on the main thread (which doesn't reliably return
+// abandoned linear memory to the OS). `mujoco`/`model`/`data` in the store are
+// now plain-JS mirrors kept in sync via postMessage, not live WASM objects —
+// this shim preserves the exact field names/shapes the rest of the app
+// (DynamicGeom, PulleyRopesRenderer, MouseDragForceRenderer, getSyncedSceneGraph,
+// etc.) already reads, so those call sites need no changes.
+const MUJOCO_SHIM = {
+  mjtObj: {
+    mjOBJ_BODY: { value: 'body' },
+    mjOBJ_JOINT: { value: 'joint' },
+    mjOBJ_GEOM: { value: 'geom' },
+    mjOBJ_ACTUATOR: { value: 'actuator' },
+  },
+  mj_name2id: (model: any, typeVal: string, name: string) => model?._idMaps?.[typeVal]?.[name] ?? -1,
+  mj_id2name: (model: any, typeVal: string, id: number) => model?._idMaps?.[`${typeVal}Rev`]?.[id] ?? null,
+  // Nothing on the main thread should call these directly anymore — the worker
+  // owns stepping/forward-kinematics. Kept as safe no-ops in case of a stray call.
+  mj_step: () => {},
+  mj_forward: () => {},
+};
+
+const buildModelMirror = (built: BuiltResult) => ({
+  nq: built.nq, nv: built.nv, nu: built.nu, ngeom: built.ngeom, nbody: built.nbody,
+  opt: { timestep: built.timestep },
+  geom_size: built.geom_size,
+  body_mass: built.body_mass,
+  body_inertia: built.body_inertia,
+  body_dofnum: built.body_dofnum,
+  body_parentid: built.body_parentid,
+  jnt_qposadr: built.jnt_qposadr,
+  jnt_dofadr: built.jnt_dofadr,
+  _idMaps: built.idMaps,
+});
+
+// A stable object whose typed-array contents get mutated in place on every
+// FRAME message (see getPhysicsWorkerClient below) rather than replaced —
+// existing per-frame readers (DynamicGeom etc.) already fetch `data` via
+// `useStore.getState().data` inside useFrame (not a reactive selector), so
+// mutating in place keeps the exact same performance characteristics as the
+// original live-WASM-view approach: no React re-render on every physics tick.
+const buildDataMirror = (built: BuiltResult | FrameSnapshot) => ({
+  time: built.time,
+  qpos: built.qpos!, qvel: built.qvel!, ctrl: built.ctrl!,
+  xfrc_applied: built.xfrc_applied!, qfrc_applied: built.qfrc_applied!,
+  xpos: built.xpos!, xmat: built.xmat!, cvel: built.cvel!,
+  geom_xpos: built.geom_xpos!, geom_xmat: built.geom_xmat!,
+});
+
+let physicsWorkerClientSingleton: PhysicsWorkerClient | null = null;
+export const getPhysicsWorkerClient = (): PhysicsWorkerClient => {
+  if (!physicsWorkerClientSingleton) {
+    const client = new PhysicsWorkerClient();
+    client.onFrame = (snap) => {
+      const data = useStore.getState().data;
+      if (data) {
+        data.time = snap.time;
+        data.qpos.set(snap.qpos); data.qvel.set(snap.qvel); data.ctrl.set(snap.ctrl);
+        data.xfrc_applied.set(snap.xfrc_applied); data.qfrc_applied.set(snap.qfrc_applied);
+        data.xpos.set(snap.xpos); data.xmat.set(snap.xmat); data.cvel.set(snap.cvel);
+        data.geom_xpos.set(snap.geom_xpos); data.geom_xmat.set(snap.geom_xmat);
+      }
+      if (snap.historyEntry) {
+        const w = window as any;
+        if (!w._physics_history) w._physics_history = [];
+        w._physics_history.push(snap.historyEntry);
+        if (w._physics_history.length > 5000) w._physics_history.shift();
+      }
+    };
+    client.onError = (message, fatal, lastState) => {
+      console.error('[PhysicsWorker]', message);
+      if (fatal) {
+        useStore.getState().recoverFromFatalWorkerError(message, lastState);
+      } else {
+        useStore.setState({ isPlaying: false, lastCompileError: message });
+      }
+    };
+    physicsWorkerClientSingleton = client;
+  }
+  return physicsWorkerClientSingleton;
+};
 
 // Returns true if every geom on a node is a mesh (so pos/euler are meaningless for rendering)
 const isAllMeshNode = (node: any) =>
@@ -136,6 +221,7 @@ export interface PhysicsState {
   
   isPlaying: boolean;
   isLoaded: boolean;
+  lastCompileError: string | null;
   isSettingsOpen: boolean;
   cameraView: 'perspective' | 'topDown';
   
@@ -159,7 +245,6 @@ export interface PhysicsState {
   dragDistance: number;
   
   // Actions
-  setEngine: (mujoco: any, model: any, data: any) => void;
   togglePlay: () => void;
   setLoaded: (loaded: boolean) => void;
   setSettingsOpen: (open: boolean) => void;
@@ -167,7 +252,7 @@ export interface PhysicsState {
   setEnvironment: (env: Partial<{gravityZ: number, windX: number, windY: number, density: number, floorFriction: number, floorBounce: number}>) => void;
   
   setSelectedNodeId: (id: string | null) => void;
-  updateScene: (sceneGraph: SceneGraph) => void;
+  updateScene: (sceneGraph: SceneGraph, skipRecompile?: boolean) => void;
   updateNodePos: (id: string, newPos: [number, number, number]) => void;
   updateNodeGeom: (id: string, updates: any, geomIndex?: number) => void;
   updateNodeJoint: (id: string, updates: any) => void;
@@ -192,10 +277,11 @@ export interface PhysicsState {
   
   setParentUnderSelected: (val: boolean) => void;
   addComponent: (type: 'box' | 'sphere' | 'capsule' | 'cylinder' | 'bob' | 'gear' | 'wedge' | 'pulley_wheel' | 'pulley_rope' | 'mesh' | 'openscad', position: number[]) => void;
-  updateNodeScad: (id: string, scadCode: string, compiledData: { vertices: number[], faces: number[], renderVertices: number[] }) => void;
-  recompile: (overrideScene?: SceneGraph, overrideSelectedId?: string | null, forceReset?: boolean, keepPreset?: boolean) => void;
+  updateNodeScad: (id: string, scadCode: string, compiledData: { vertices: number[], faces: number[], renderVertices: number[] }, skipRecompile?: boolean) => void;
+  recompile: (overrideScene?: SceneGraph, overrideSelectedId?: string | null, forceReset?: boolean, keepPreset?: boolean) => Promise<void>;
   loadPreset: (name: string) => void;
   resetSimulation: () => void;
+  recoverFromFatalWorkerError: (message: string, lastState?: { qpos: number[]; qvel: number[]; time: number }) => Promise<void>;
 }
 
 export const useStore = create<PhysicsState>()((set, get) => ({
@@ -206,6 +292,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
 
   isPlaying: false,
   isLoaded: false,
+  lastCompileError: null,
   isSettingsOpen: false,
   cameraView: 'perspective',
   
@@ -225,9 +312,12 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   dragDistance: 0,
 
   setParentUnderSelected: (val) => set({ parentUnderSelected: val }),
-  setEngine: (mujoco, model, data) => set({ mujoco, model, data, isLoaded: true }),
-  
-  togglePlay: () => set((state) => ({ isPlaying: !state.isPlaying })),
+
+  togglePlay: () => set((state) => {
+    const isPlaying = !state.isPlaying;
+    getPhysicsWorkerClient().setPlaying(isPlaying);
+    return { isPlaying };
+  }),
   setLoaded: (loaded) => set({ isLoaded: loaded }),
   setSettingsOpen: (open) => set({ isSettingsOpen: open }),
   setCameraView: (view) => set({ cameraView: view }),
@@ -269,8 +359,14 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   
   setSelectedNodeId: (id) => set({ selectedNodeId: id }),
   
-  setDraggedNodeId: (id) => set({ draggedNodeId: id }),
-  setDragTarget: (target) => set({ dragTarget: target }),
+  setDraggedNodeId: (id) => {
+    set({ draggedNodeId: id });
+    getPhysicsWorkerClient().setDrag(id, get().dragTarget);
+  },
+  setDragTarget: (target) => {
+    set({ dragTarget: target });
+    getPhysicsWorkerClient().setDrag(get().draggedNodeId, target);
+  },
   setDragDistance: (distance) => set({ dragDistance: distance }),
 
   updateWedgeParams: (id, params) => {
@@ -366,9 +462,11 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     get().recompile(newScene, get().selectedNodeId);
   },
   
-  updateScene: (newScene) => {
+  updateScene: (newScene, skipRecompile) => {
     set({ sceneGraph: newScene });
-    get().recompile(newScene);
+    if (!skipRecompile) {
+      get().recompile(newScene);
+    }
   },
   
   renameNode: (id, newName) => {
@@ -644,10 +742,13 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     };
     traverse(newScene.nodes);
     set({ sceneGraph: newScene });
-    // Note: Live updates do not force model recompiles to support hot-editing of control gains!
+    // Note: Live updates do not force model recompiles to support hot-editing of
+    // control gains! The worker keeps its own copy of the scene for script
+    // execution, so it needs telling directly rather than via a recompile.
+    getPhysicsWorkerClient().updateScript(id, script);
   },
 
-  updateNodeScad: (id, scad, compiledData) => {
+  updateNodeScad: (id, scad, compiledData, skipRecompile) => {
     const newScene = JSON.parse(JSON.stringify(get().sceneGraph));
     const traverse = (nodes: any[]) => {
       if (!nodes) return false;
@@ -670,7 +771,15 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     };
     if (traverse(newScene.nodes)) {
       set({ sceneGraph: newScene });
-      get().recompile(newScene, id, true);
+      // Bulk callers (e.g. compiling several scad bodies in sequence) pass
+      // skipRecompile: firing a recompile per node here creates overlapping,
+      // unawaited MJCF/WASM builds that race - a stale one (compiled before a
+      // later node's mesh existed) can finish last and silently overwrite the
+      // correct final state. Bulk callers run a single recompile after all
+      // nodes are updated instead.
+      if (!skipRecompile) {
+        get().recompile(newScene, id, true);
+      }
     }
   },
 
@@ -924,138 +1033,86 @@ export const useStore = create<PhysicsState>()((set, get) => ({
         (window as any)._recompileTimeoutId = setTimeout(resolve, 50);
       });
     }
-    
-    console.log("recompile START");
+
     if (typeof window !== 'undefined') {
       (window as any).DISABLE_USEFRAME = false;
     }
-    const { gravityZ, windX, windY, density, floorFriction, floorBounce, model: oldModel, data: oldData } = get();
+    const { gravityZ, windX, windY, density, floorFriction, floorBounce } = get();
     const sceneGraph = overrideScene ?? get().sceneGraph;
 
-    const xml = compileToMJCF(sceneGraph, gravityZ, floorFriction, windX, windY, density, floorBounce);
-    console.log("XML generated:\n", xml);
-    if (typeof window !== 'undefined') {
-      (window as any).compiledXML = xml;
-    }
-    
-    try {
-      let freshMujoco = get().mujoco;
-      if (!freshMujoco) {
-        console.log("Loading a fresh MuJoCo WASM module...");
-        freshMujoco = await load_mujoco();
-      }
-      
-      // Free old model/data to prevent WASM heap exhaustion across recompiles
-      if (oldModel) { try { oldModel.free(); } catch (_) {} }
-      if (oldData)  { try { oldData.free();  } catch (_) {} }
-
-      const newModel = freshMujoco.MjModel.from_xml_string(xml);
-      console.log("newModel created");
-      
-      console.log("body_mass:", Array.from(newModel.body_mass).join(', '));
-      console.log("body_inertia:", Array.from(newModel.body_inertia).join(', '));
-      
-      const newData = new freshMujoco.MjData(newModel);
-      console.log("newData created");
-      
-      if (!forceReset && oldModel && oldData && oldModel.nq === newModel.nq && oldModel.nv === newModel.nv) {
-        console.log("Copying old state");
-        const nq = Math.min(oldModel.nq, newModel.nq);
-        const nv = Math.min(oldModel.nv, newModel.nv);
-        const nu = Math.min(oldModel.nu, newModel.nu);
-        for (let i = 0; i < nq; i++) newData.qpos[i] = oldData.qpos[i];
-        for (let i = 0; i < nv; i++) newData.qvel[i] = oldData.qvel[i];
-        for (let i = 0; i < nu; i++) newData.ctrl[i] = oldData.ctrl[i];
-        
-        console.log("newData qpos:", Array.from(newData.qpos).join(', '));
-        console.log("newData qvel:", Array.from(newData.qvel).join(', '));
-        
-        freshMujoco.mj_forward(newModel, newData);
-        console.log("newData geom_xpos:", Array.from(newData.geom_xpos).join(', '));
-        console.log("newData geom_xmat:", Array.from(newData.geom_xmat).join(', '));
-      } else {
-        console.log("Initial qpos:", Array.from(newData.qpos).join(', '));
-        console.log("Initial qvel:", Array.from(newData.qvel).join(', '));
-        
-        // Initialize control values from actuators
-        const actuators: any[] = [];
-        const traverse = (nodes: any[]) => {
-          if (!nodes) return;
-          for (const node of nodes) {
-            node.joints?.forEach((j: any) => { if (j.actuator) actuators.push(j); });
-            traverse(node.children);
-          }
-        };
-        traverse(sceneGraph.nodes);
-        console.log("TRAVERSE SCENE NODES COUNT:", sceneGraph.nodes.length);
-        console.log("FOUND ACTUATORS:", actuators.length);
-        actuators.forEach((j, idx) => {
-          console.log(`ACTUATOR ${idx} name:`, j.name, "ctrlValue:", j.actuator?.ctrlValue);
-          if (j.actuator && j.actuator.ctrlValue !== undefined) {
-            newData.ctrl[idx] = j.actuator.ctrlValue;
-            console.log(`SET newData.ctrl[${idx}] =`, newData.ctrl[idx]);
-          }
-        });
-
-        freshMujoco.mj_forward(newModel, newData);
-        console.log("Initial geom_xpos:", Array.from(newData.geom_xpos).join(', '));
-        
-        // Inject generic initial velocities defined on any joints
-        const initVelJoints: { name: string; vel: number[] }[] = [];
-        const traverseVel = (nodes: any[]) => {
-          if (!nodes) return;
-          for (const node of nodes) {
-            node.joints?.forEach((j: any) => { if (j.initialVelocity) initVelJoints.push({ name: j.name, vel: j.initialVelocity }); });
-            traverseVel(node.children);
-          }
-        };
-        traverseVel(sceneGraph.nodes);
-        
-        let needForward = false;
-        for (const j of initVelJoints) {
-          const jntId = freshMujoco.mj_name2id(newModel, freshMujoco.mjtObj.mjOBJ_JOINT.value, j.name);
-          if (jntId !== -1) {
-            const dofAdr = newModel.jnt_dofadr[jntId];
-            for (let i = 0; i < j.vel.length; i++) {
-              newData.qvel[dofAdr + i] = j.vel[i];
-            }
-            needForward = true;
-          }
-        }
-        
-        if (needForward) {
-          freshMujoco.mj_forward(newModel, newData);
-          console.log("Initial velocities injected for:", initVelJoints.map(j => j.name));
-        }
-      }
-      
-      // ONE atomic set — sceneGraph, model, data, mujoco, recompileId and selectedNodeId all update together
-      // Deferred to next animation frame to avoid blocking the event loop
-      const updates: Partial<PhysicsState> = { mujoco: freshMujoco, model: newModel, data: newData, sceneGraph, recompileId: Date.now() };
+    const applyBuilt = (built: BuiltResult) => {
+      const updates: Partial<PhysicsState> = {
+        mujoco: MUJOCO_SHIM, model: buildModelMirror(built), data: buildDataMirror(built),
+        sceneGraph, recompileId: Date.now(), lastCompileError: null, isLoaded: true,
+      };
       if (overrideSelectedId !== undefined) updates.selectedNodeId = overrideSelectedId;
-      if (!keepPreset) {
-        updates.activePreset = '';
+      if (!keepPreset) updates.activePreset = '';
+      requestAnimationFrame(() => set(updates));
+    };
+
+    try {
+      const xml = compileToMJCF(sceneGraph, gravityZ, floorFriction, windX, windY, density, floorBounce);
+      if (typeof window !== 'undefined') {
+        (window as any).compiledXML = xml;
       }
-      requestAnimationFrame(() => {
-        console.log("Atomic set: fresh mujoco + model + scene together");
-        set(updates);
-      });
+
+      const client = getPhysicsWorkerClient();
+      client.setEnv(windX, windY);
+      const built = await client.build(xml, sceneGraph, !forceReset);
+      if (!built.ok) {
+        throw new Error(built.error || 'Unknown physics worker build error');
+      }
+      applyBuilt(built);
     } catch (e) {
       console.error("Failed to compile MJCF:", e);
-      // MuJoCo WASM heap is exhausted — only a full page reload can recover
-      const msg = String(e);
-      if (msg.includes('Aborted') || msg.includes('enlarge memory') || msg.includes('abort')) {
-        alert('The physics engine ran out of memory after loading several heavy scenes.\n\nThe page will reload to free memory — your scene will be lost unless you saved it first.');
-        window.location.reload();
-        return;
+      const msg = String(e instanceof Error ? e.message : e);
+      if (/Aborted|enlarge memory|abort|bad_alloc/i.test(msg)) {
+        // The WASM module's linear memory only ever grows across a session, and
+        // the @mujoco/mujoco build has a hard 2^31-byte ceiling it can never
+        // exceed. Reinstantiating a module in the SAME worker/realm isn't
+        // guaranteed to actually return that memory to the OS, so recover by
+        // terminating the whole worker (a separate JS realm) and spawning a
+        // fresh one — a real reclaim — then rebuilding the same scene against
+        // it. Only reload the page if that also fails.
+        try {
+          console.warn('MuJoCo WASM heap exhausted — terminating and respawning the physics worker (keeping scene/camera).');
+          physicsWorkerClientSingleton?.terminate();
+          physicsWorkerClientSingleton = null;
+          const freshClient = getPhysicsWorkerClient();
+          freshClient.setEnv(windX, windY);
+          const xml = compileToMJCF(sceneGraph, gravityZ, floorFriction, windX, windY, density, floorBounce);
+          const built = await freshClient.build(xml, sceneGraph, false);
+          if (!built.ok) throw new Error(built.error || 'Unknown physics worker build error');
+          applyBuilt(built);
+          return;
+        } catch (recoveryError) {
+          console.error('Worker respawn recovery failed, falling back to full page reload:', recoveryError);
+          alert('The physics engine ran out of memory and could not recover, even after restarting the physics worker.\n\nThe page will reload to free memory — your scene will be lost unless you saved it first.');
+          window.location.reload();
+          return;
+        }
       }
       // Still update the sceneGraph so the UI reflects the change even if MuJoCo rejects it
-      const updates: Partial<PhysicsState> = { sceneGraph };
+      const updates: Partial<PhysicsState> = { sceneGraph, lastCompileError: msg };
       if (overrideSelectedId !== undefined) updates.selectedNodeId = overrideSelectedId;
       if (!keepPreset) {
         updates.activePreset = '';
       }
       set(updates);
     }
-  }
+  },
+
+  recoverFromFatalWorkerError: async (message, _lastState) => {
+    // Mirrors recompile()'s memory-exhaustion recovery, but triggered from a
+    // fatal error reported by the worker mid-simulation (not during a build):
+    // terminate the exhausted worker (real memory reclaim) and rebuild the
+    // current scene fresh. Best-effort only — the precise qpos/qvel at the
+    // moment of the crash isn't reseeded, so the scene restarts from its
+    // as-built initial pose rather than exactly where it crashed.
+    console.warn('Fatal physics worker error — terminating and respawning worker:', message);
+    physicsWorkerClientSingleton?.terminate();
+    physicsWorkerClientSingleton = null;
+    set({ isPlaying: false });
+    await get().recompile(get().sceneGraph, undefined, true, true);
+  },
 }));
