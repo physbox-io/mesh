@@ -73,11 +73,16 @@ export class PhysicsWorkerClient {
     };
   }
 
-  build(xml: string, sceneGraph: any, preserveState: boolean): Promise<BuiltResult> {
+  build(
+    xml: string,
+    sceneGraph: any,
+    preserveState: boolean,
+    seedState?: { qpos: number[]; qvel: number[]; ctrl?: number[]; time: number },
+  ): Promise<BuiltResult> {
     const id = Math.random().toString(36).slice(2);
     return new Promise((resolve) => {
       this.pendingBuilds.set(id, { resolve });
-      this.worker.postMessage({ type: 'BUILD', id, xml, sceneGraph, preserveState });
+      this.worker.postMessage({ type: 'BUILD', id, xml, sceneGraph, preserveState, seedState });
     });
   }
 

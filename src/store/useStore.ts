@@ -297,6 +297,7 @@ export interface PhysicsState {
   loadPreset: (name: string) => void;
   resetSimulation: () => void;
   recoverFromFatalWorkerError: (message: string, lastState?: { qpos: number[]; qvel: number[]; time: number }) => Promise<void>;
+  recycleWorkerSeamlessly: () => Promise<void>;
 }
 
 export const useStore = create<PhysicsState>()((set, get) => ({
@@ -1125,16 +1126,71 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     }
   },
 
-  recoverFromFatalWorkerError: async (message, _lastState) => {
+  recoverFromFatalWorkerError: async (message, lastState) => {
     // Mirrors recompile()'s memory-exhaustion recovery, but triggered from a
     // fatal error reported by the worker mid-simulation (not during a build):
     // terminate the exhausted worker (real memory reclaim) and rebuild the
-    // current scene fresh. Best-effort only — the precise qpos/qvel at the
-    // moment of the crash isn't reseeded, so the scene restarts from its
-    // as-built initial pose rather than exactly where it crashed.
+    // current scene fresh, reseeding the last qpos/qvel/time the worker
+    // reported right before it died (best-effort — if that report itself
+    // failed to arrive, this falls back to the as-built initial pose).
     console.warn('Fatal physics worker error — terminating and respawning worker:', message);
+    const wasPlaying = get().isPlaying;
     recycleWorker();
     set({ isPlaying: false });
-    await get().recompile(get().sceneGraph, undefined, true, true);
+    const { sceneGraph, gravityZ, windX, windY, density, floorFriction, floorBounce } = get();
+    try {
+      const xml = compileToMJCF(sceneGraph, gravityZ, floorFriction, windX, windY, density, floorBounce);
+      const client = getPhysicsWorkerClient();
+      client.setEnv(windX, windY);
+      const built = await client.build(xml, sceneGraph, false, lastState);
+      if (!built.ok) throw new Error(built.error || 'Unknown physics worker build error');
+      set({ mujoco: MUJOCO_SHIM, model: buildModelMirror(built), data: buildDataMirror(built), recompileId: Date.now(), lastCompileError: null });
+      if (wasPlaying) { client.setPlaying(true); set({ isPlaying: true }); }
+    } catch (e) {
+      console.error('Recovery rebuild after fatal worker error failed:', e);
+    }
+  },
+
+  recycleWorkerSeamlessly: async () => {
+    // Periodic proactive recycle while actively simulating: MuJoCo's own
+    // internal contact/constraint memory can grow over the course of a long
+    // play session — not just across explicit rebuilds — and, like
+    // everything else in a WASM realm, never shrinks back down on its own.
+    // Swap in a fresh worker before that ever becomes a problem, carrying
+    // over the exact current qpos/qvel/time (from the live `data` mirror,
+    // kept up to date by FRAME messages) so it's invisible rather than a
+    // visible reset. See the periodic timer below this store definition.
+    const { data, sceneGraph, gravityZ, windX, windY, density, floorFriction, floorBounce, isPlaying } = get();
+    if (!data) return;
+    const seedState = {
+      qpos: Array.from(data.qpos as Float64Array),
+      qvel: Array.from(data.qvel as Float64Array),
+      ctrl: Array.from(data.ctrl as Float64Array),
+      time: data.time as number,
+    };
+    recycleWorker();
+    try {
+      const xml = compileToMJCF(sceneGraph, gravityZ, floorFriction, windX, windY, density, floorBounce);
+      const client = getPhysicsWorkerClient();
+      client.setEnv(windX, windY);
+      const built = await client.build(xml, sceneGraph, false, seedState);
+      if (!built.ok) throw new Error(built.error || 'Unknown physics worker build error');
+      set({ mujoco: MUJOCO_SHIM, model: buildModelMirror(built), data: buildDataMirror(built), recompileId: Date.now(), lastCompileError: null });
+      if (isPlaying) client.setPlaying(true);
+    } catch (e) {
+      console.error('Seamless proactive worker recycle failed:', e);
+    }
   },
 }));
+
+if (typeof window !== 'undefined') {
+  // Every 20s while actively playing, seamlessly recycle the physics worker
+  // (see recycleWorkerSeamlessly above) — this is what actually addresses
+  // memory growth from long-running simulation, as opposed to the
+  // build-counter recycle in recompile() which only helps across rebuilds.
+  setInterval(() => {
+    if (useStore.getState().isPlaying) {
+      useStore.getState().recycleWorkerSeamlessly();
+    }
+  }, 20000);
+}

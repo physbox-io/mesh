@@ -575,7 +575,12 @@ const buildIdMaps = () => {
   };
 };
 
-const doBuild = (xml: string, newSceneGraph: { nodes: SceneNode[] }, preserveState: boolean) => {
+const doBuild = (
+  xml: string,
+  newSceneGraph: { nodes: SceneNode[] },
+  preserveState: boolean,
+  seedState?: { qpos: number[]; qvel: number[]; ctrl?: number[]; time: number },
+) => {
   const oldModel = model;
   const oldData = data;
 
@@ -593,7 +598,18 @@ const doBuild = (xml: string, newSceneGraph: { nodes: SceneNode[] }, preserveSta
   rebuildIdCaches();
   scriptCache && Object.keys(scriptCache).forEach(k => delete scriptCache[k]);
 
-  if (preserveState && oldModel && oldData && oldModel.nq === newModel.nq && oldModel.nv === newModel.nv) {
+  // Explicit seed state (from the main thread's live mirror) takes priority
+  // over the same-worker oldModel/oldData copy-forward below — this is what
+  // lets a *freshly spawned* worker (no oldModel of its own) still carry over
+  // exactly where the simulation was, e.g. for a seamless proactive memory
+  // recycle mid-play rather than a visible reset to the initial pose.
+  if (seedState && seedState.qpos.length === newModel.nq && seedState.qvel.length === newModel.nv) {
+    for (let i = 0; i < seedState.qpos.length; i++) newData.qpos[i] = seedState.qpos[i];
+    for (let i = 0; i < seedState.qvel.length; i++) newData.qvel[i] = seedState.qvel[i];
+    if (seedState.ctrl) for (let i = 0; i < Math.min(seedState.ctrl.length, newModel.nu); i++) newData.ctrl[i] = seedState.ctrl[i];
+    newData.time = seedState.time;
+    mujoco.mj_forward(newModel, newData);
+  } else if (preserveState && oldModel && oldData && oldModel.nq === newModel.nq && oldModel.nv === newModel.nv) {
     const nq = Math.min(oldModel.nq, newModel.nq);
     const nv = Math.min(oldModel.nv, newModel.nv);
     const nu = Math.min(oldModel.nu, newModel.nu);
@@ -745,7 +761,7 @@ const runHeadless = (xml: string, headlessSceneGraph: { nodes: SceneNode[] }, ti
       case 'BUILD': {
         if (!mujoco) mujoco = await load_mujoco();
         try {
-          const result = doBuild(msg.xml, msg.sceneGraph, msg.preserveState);
+          const result = doBuild(msg.xml, msg.sceneGraph, msg.preserveState, msg.seedState);
           post({ type: 'BUILT', id: msg.id, ok: true, ...result });
         } catch (e: any) {
           const errMsg = String(e?.message || e);
