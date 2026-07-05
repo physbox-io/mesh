@@ -5,8 +5,22 @@ import { mcpBridgePlugin } from '../expt_mcp/vite-plugin-mcp-bridge'
 
 export default defineConfig({
   plugins: [react(), tailwindcss(), mcpBridgePlugin()],
-  server: { port: 5175, strictPort: true },
+  server: {
+    port: 5175,
+    strictPort: true,
+    headers: {
+      'Cross-Origin-Opener-Policy': 'same-origin',
+      'Cross-Origin-Embedder-Policy': 'require-corp',
+    },
+  },
+  preview: {
+    headers: {
+      'Cross-Origin-Opener-Policy': 'same-origin',
+      'Cross-Origin-Embedder-Policy': 'require-corp',
+    },
+  },
   optimizeDeps: {
     exclude: ['@mujoco/mujoco']
   }
 })
+

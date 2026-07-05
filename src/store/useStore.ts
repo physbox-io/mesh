@@ -81,10 +81,12 @@ export const getPhysicsWorkerClient = (): PhysicsWorkerClient => {
       const data = useStore.getState().data;
       if (data) {
         data.time = snap.time;
-        data.qpos.set(snap.qpos); data.qvel.set(snap.qvel); data.ctrl.set(snap.ctrl);
-        data.xfrc_applied.set(snap.xfrc_applied); data.qfrc_applied.set(snap.qfrc_applied);
-        data.xpos.set(snap.xpos); data.xmat.set(snap.xmat); data.cvel.set(snap.cvel);
-        data.geom_xpos.set(snap.geom_xpos); data.geom_xmat.set(snap.geom_xmat);
+        if (!snap.isShared && snap.qpos && snap.qvel && snap.ctrl && snap.xfrc_applied && snap.qfrc_applied && snap.xpos && snap.xmat && snap.cvel && snap.geom_xpos && snap.geom_xmat) {
+          data.qpos.set(snap.qpos); data.qvel.set(snap.qvel); data.ctrl.set(snap.ctrl);
+          data.xfrc_applied.set(snap.xfrc_applied); data.qfrc_applied.set(snap.qfrc_applied);
+          data.xpos.set(snap.xpos); data.xmat.set(snap.xmat); data.cvel.set(snap.cvel);
+          data.geom_xpos.set(snap.geom_xpos); data.geom_xmat.set(snap.geom_xmat);
+        }
       }
       if (snap.historyEntry) {
         const w = window as any;
@@ -1057,6 +1059,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     const sceneGraph = overrideScene ?? get().sceneGraph;
 
     const applyBuilt = (built: BuiltResult) => {
+      console.log(`[PhysicsWorker] Model built successfully. Shared memory (COOP/COEP) active: ${!!built.isShared}`);
       const updates: Partial<PhysicsState> = {
         mujoco: MUJOCO_SHIM, model: buildModelMirror(built), data: buildDataMirror(built),
         sceneGraph, recompileId: Date.now(), lastCompileError: null, isLoaded: true,

@@ -36,6 +36,38 @@ let pressedKeys = new Set<string>();
 let stepCount = 0;
 let accumulator = 0;
 
+const isSharedSupported = typeof SharedArrayBuffer !== 'undefined';
+
+let sharedBuffers: {
+  qpos?: Float64Array;
+  qvel?: Float64Array;
+  ctrl?: Float64Array;
+  xfrc_applied?: Float64Array;
+  qfrc_applied?: Float64Array;
+  xpos?: Float64Array;
+  xmat?: Float64Array;
+  cvel?: Float64Array;
+  geom_xpos?: Float64Array;
+  geom_xmat?: Float64Array;
+} = {};
+
+const updateSharedBuffers = () => {
+  if (!isSharedSupported || !data) return;
+  const { qpos, qvel, ctrl, xfrc_applied, qfrc_applied, xpos, xmat, cvel, geom_xpos, geom_xmat } = sharedBuffers;
+  if (!qpos || !qvel || !ctrl || !xfrc_applied || !qfrc_applied || !xpos || !xmat || !cvel || !geom_xpos || !geom_xmat) return;
+  qpos.set(data.qpos);
+  qvel.set(data.qvel);
+  ctrl.set(data.ctrl);
+  xfrc_applied.set(data.xfrc_applied);
+  qfrc_applied.set(data.qfrc_applied);
+  xpos.set(data.xpos);
+  xmat.set(data.xmat);
+  cvel.set(data.cvel);
+  geom_xpos.set(data.geom_xpos);
+  geom_xmat.set(data.geom_xmat);
+};
+
+
 // Name -> id caches, rebuilt once per successful build (mirrors the caches
 // PhysicsLoop/DynamicGeom/PulleyRopesRenderer/MouseDragForceRenderer used to
 // build on the main thread via mj_name2id/mj_id2name).
@@ -485,19 +517,39 @@ let envWindX = 0;
 let envWindY = 0;
 
 // Snapshot everything the main thread needs to render + mirror `model`/`data`.
-const snapshot = () => ({
-  time: data.time,
-  qpos: Float64Array.from(data.qpos),
-  qvel: Float64Array.from(data.qvel),
-  ctrl: Float64Array.from(data.ctrl),
-  xfrc_applied: Float64Array.from(data.xfrc_applied),
-  qfrc_applied: Float64Array.from(data.qfrc_applied),
-  xpos: Float64Array.from(data.xpos),
-  xmat: Float64Array.from(data.xmat),
-  cvel: Float64Array.from(data.cvel),
-  geom_xpos: Float64Array.from(data.geom_xpos),
-  geom_xmat: Float64Array.from(data.geom_xmat),
-});
+const snapshot = () => {
+  const { qpos, qvel, ctrl, xfrc_applied, qfrc_applied, xpos, xmat, cvel, geom_xpos, geom_xmat } = sharedBuffers;
+  if (isSharedSupported && qpos && qvel && ctrl && xfrc_applied && qfrc_applied && xpos && xmat && cvel && geom_xpos && geom_xmat) {
+    updateSharedBuffers();
+    return {
+      time: data.time,
+      qpos,
+      qvel,
+      ctrl,
+      xfrc_applied,
+      qfrc_applied,
+      xpos,
+      xmat,
+      cvel,
+      geom_xpos,
+      geom_xmat,
+    };
+  }
+  return {
+    time: data.time,
+    qpos: Float64Array.from(data.qpos),
+    qvel: Float64Array.from(data.qvel),
+    ctrl: Float64Array.from(data.ctrl),
+    xfrc_applied: Float64Array.from(data.xfrc_applied),
+    qfrc_applied: Float64Array.from(data.qfrc_applied),
+    xpos: Float64Array.from(data.xpos),
+    xmat: Float64Array.from(data.xmat),
+    cvel: Float64Array.from(data.cvel),
+    geom_xpos: Float64Array.from(data.geom_xpos),
+    geom_xmat: Float64Array.from(data.geom_xmat),
+  };
+};
+
 
 const post = (msg: any, transfer: Transferable[] = []) => (self as unknown as Worker).postMessage(msg, transfer as any);
 
@@ -556,7 +608,16 @@ const stepTick = (delta: number) => {
 
   if (stepsNeeded > 0) {
     const snap = snapshot();
-    post({ type: 'FRAME', ...snap, historyEntry }, [snap.qpos.buffer, snap.qvel.buffer, snap.ctrl.buffer, snap.xfrc_applied.buffer, snap.qfrc_applied.buffer, snap.xpos.buffer, snap.xmat.buffer, snap.cvel.buffer, snap.geom_xpos.buffer, snap.geom_xmat.buffer]);
+    if (isSharedSupported) {
+      post({ type: 'FRAME', time: snap.time, historyEntry, isShared: true });
+    } else {
+      post({ type: 'FRAME', ...snap, historyEntry, isShared: false }, [
+        snap.qpos.buffer, snap.qvel.buffer, snap.ctrl.buffer,
+        snap.xfrc_applied.buffer, snap.qfrc_applied.buffer,
+        snap.xpos.buffer, snap.xmat.buffer, snap.cvel.buffer,
+        snap.geom_xpos.buffer, snap.geom_xmat.buffer
+      ]);
+    }
   }
 };
 
@@ -656,6 +717,24 @@ const doBuild = (
     if (needForward) mujoco.mj_forward(newModel, newData);
   }
 
+  if (isSharedSupported) {
+    const createSharedArray = (size: number) => new Float64Array(new SharedArrayBuffer(size * 8));
+    sharedBuffers = {
+      qpos: createSharedArray(newModel.nq),
+      qvel: createSharedArray(newModel.nv),
+      ctrl: createSharedArray(newModel.nu),
+      xfrc_applied: createSharedArray(newModel.nbody * 6),
+      qfrc_applied: createSharedArray(newModel.nv),
+      xpos: createSharedArray(newModel.nbody * 3),
+      xmat: createSharedArray(newModel.nbody * 9),
+      cvel: createSharedArray(newModel.nbody * 6),
+      geom_xpos: createSharedArray(newModel.ngeom * 3),
+      geom_xmat: createSharedArray(newModel.ngeom * 9),
+    };
+  } else {
+    sharedBuffers = {};
+  }
+
   accumulator = 0;
 
   return {
@@ -669,6 +748,7 @@ const doBuild = (
     jnt_qposadr: Array.from(newModel.jnt_qposadr as ArrayLike<number>),
     jnt_dofadr: Array.from(newModel.jnt_dofadr as ArrayLike<number>),
     idMaps: buildIdMaps(),
+    isShared: isSharedSupported,
     ...snapshot(),
   };
 };
@@ -802,7 +882,16 @@ const runHeadless = (xml: string, headlessSceneGraph: { nodes: SceneNode[] }, ti
           for (let i = 0; i < 6; i++) data.qvel[vadr + i] = 0;
           mujoco.mj_forward(model, data);
           const snap = snapshot();
-          post({ type: 'FRAME', ...snap, historyEntry: null }, [snap.qpos.buffer, snap.qvel.buffer, snap.ctrl.buffer, snap.xfrc_applied.buffer, snap.qfrc_applied.buffer, snap.xpos.buffer, snap.xmat.buffer, snap.cvel.buffer, snap.geom_xpos.buffer, snap.geom_xmat.buffer]);
+          if (isSharedSupported) {
+            post({ type: 'FRAME', time: snap.time, historyEntry: null, isShared: true });
+          } else {
+            post({ type: 'FRAME', ...snap, historyEntry: null, isShared: false }, [
+              snap.qpos.buffer, snap.qvel.buffer, snap.ctrl.buffer,
+              snap.xfrc_applied.buffer, snap.qfrc_applied.buffer,
+              snap.xpos.buffer, snap.xmat.buffer, snap.cvel.buffer,
+              snap.geom_xpos.buffer, snap.geom_xmat.buffer
+            ]);
+          }
         }
         break;
       }

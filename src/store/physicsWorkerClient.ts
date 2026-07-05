@@ -16,6 +16,7 @@ export interface BuiltResult {
   jnt_qposadr?: number[]; jnt_dofadr?: number[];
   idMaps?: { body: Record<string, number>; joint: Record<string, number>; geom: Record<string, number>; actuator: Record<string, number> };
   time?: number;
+  isShared?: boolean;
   qpos?: Float64Array; qvel?: Float64Array; ctrl?: Float64Array;
   xfrc_applied?: Float64Array; qfrc_applied?: Float64Array;
   xpos?: Float64Array; xmat?: Float64Array; cvel?: Float64Array;
@@ -24,10 +25,11 @@ export interface BuiltResult {
 
 export interface FrameSnapshot {
   time: number;
-  qpos: Float64Array; qvel: Float64Array; ctrl: Float64Array;
-  xfrc_applied: Float64Array; qfrc_applied: Float64Array;
-  xpos: Float64Array; xmat: Float64Array; cvel: Float64Array;
-  geom_xpos: Float64Array; geom_xmat: Float64Array;
+  isShared?: boolean;
+  qpos?: Float64Array; qvel?: Float64Array; ctrl?: Float64Array;
+  xfrc_applied?: Float64Array; qfrc_applied?: Float64Array;
+  xpos?: Float64Array; xmat?: Float64Array; cvel?: Float64Array;
+  geom_xpos?: Float64Array; geom_xmat?: Float64Array;
   historyEntry?: any;
 }
 
