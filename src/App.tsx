@@ -123,7 +123,9 @@ const PhysicsLoop = ({ isPlaying }: { model: any, data: any, mujoco: any, isPlay
   useFrame((_state, delta) => {
     if ((window as any).DISABLE_USEFRAME) return;
     if (!isPlaying) return;
-    getPhysicsWorkerClient().tick(delta);
+    if (typeof SharedArrayBuffer === 'undefined') {
+      getPhysicsWorkerClient().tick(delta);
+    }
   });
 
   useEffect(() => {
@@ -631,10 +633,20 @@ const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, selectedN
     if (!meshBufferGeometry) return null;
     if (isDynamic) {
       // Dynamic mesh: transform tracked from MuJoCo via geom_xpos/geom_xmat (Z-up coords, handled by parent group rotation).
+      // Deliberately FrontSide (not DoubleSide): these come from OpenSCAD's
+      // CSG boolean STL export (difference/union/intersection), which is
+      // always a closed, watertight solid in principle — you never see its
+      // inside from outside the shape. CSG boundaries commonly leave
+      // imperfect/ambiguous face winding, and DoubleSide renders those
+      // back-facing (inverted-normal) triangles too; since they face away
+      // from the light they render solid black, and they z-fight with the
+      // correctly-lit front face at the same depth — the "black flashing"
+      // seen on OpenSCAD-compiled shapes. FrontSide only ever draws the
+      // correctly-wound outer surface, which is all a closed solid needs.
       return (
         <group name={nodeId} ref={meshRef} position={initialPos} quaternion={new THREE.Quaternion(...initialQuat)}>
           <mesh castShadow receiveShadow geometry={meshBufferGeometry} {...dragHandlers}>
-            <meshStandardMaterial color={new THREE.Color(color[0], color[1], color[2])} emissive={isSelected ? '#3b82f6' : '#000'} emissiveIntensity={isSelected ? 0.2 : 0} side={THREE.DoubleSide} />
+            <meshStandardMaterial color={new THREE.Color(color[0], color[1], color[2])} emissive={isSelected ? '#3b82f6' : '#000'} emissiveIntensity={isSelected ? 0.2 : 0} side={THREE.FrontSide} />
           </mesh>
         </group>
       );

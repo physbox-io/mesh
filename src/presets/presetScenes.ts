@@ -2136,13 +2136,31 @@ export const openscadDemoPreset: SceneGraph = {
       pos: [0, 0, 0.4],
       joints: [{ name: 'scad_container_free', type: 'free', initialVelocity: [0, 0, 0, 0, 0, 0] }],
       geoms: [
+        // Primitive collision proxies (floor + 4 walls) — each box is
+        // individually convex, so together they form an actual hollow container.
+        // A single dynamic mesh geom can't do this: MuJoCo collides dynamic
+        // meshes via their convex hull, and the hull of a hollow box's vertices
+        // is just the solid outer box (the hull fills in the concave interior),
+        // so balls would land on what is effectively a solid block. The pretty
+        // CSG mesh below stays purely visual (contype/conaffinity 0) and rides
+        // along kinematically with the body. These proxies are colored to match
+        // the mesh (not alpha:0 — this renderer's meshStandardMaterial never
+        // reads the rgba alpha channel, so a=0 still rendered fully opaque,
+        // as solid black, causing z-fighting with the visual mesh) so they
+        // blend in seamlessly instead.
+        { name: 'scad_container_floor', type: 'box', size: [0.4, 0.4, 0.0375], pos: [0, 0, 0.0375], rgba: [0.2, 0.5, 0.8, 1], mass: 0.4 },
+        { name: 'scad_container_wall_px', type: 'box', size: [0.0375, 0.4, 0.2125], pos: [0.3625, 0, 0.2875], rgba: [0.2, 0.5, 0.8, 1], mass: 0.4 },
+        { name: 'scad_container_wall_nx', type: 'box', size: [0.0375, 0.4, 0.2125], pos: [-0.3625, 0, 0.2875], rgba: [0.2, 0.5, 0.8, 1], mass: 0.4 },
+        { name: 'scad_container_wall_py', type: 'box', size: [0.4, 0.0375, 0.2125], pos: [0, 0.3625, 0.2875], rgba: [0.2, 0.5, 0.8, 1], mass: 0.4 },
+        { name: 'scad_container_wall_ny', type: 'box', size: [0.4, 0.0375, 0.2125], pos: [0, -0.3625, 0.2875], rgba: [0.2, 0.5, 0.8, 1], mass: 0.4 },
         {
           name: 'scad_container_geom',
           type: 'mesh',
           size: [1],
           rgba: [0.2, 0.5, 0.8, 1], // blue container
-          mass: 2.0,
-          condim: 3,
+          mass: 0.001,
+          contype: 0,
+          conaffinity: 0,
           dynamic: true,
           vertices: [
             -0.4, 0, -0.4,

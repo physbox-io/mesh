@@ -626,6 +626,35 @@ const stepTick = (delta: number) => {
   }
 };
 
+let workerTimerId: any = null;
+let lastTickTime = 0;
+
+const startWorkerLoop = () => {
+  if (workerTimerId) return;
+  lastTickTime = performance.now();
+  const workerTick = () => {
+    if (!isPlaying || !model || !data || !mujoco) {
+      workerTimerId = null;
+      return;
+    }
+    const now = performance.now();
+    const elapsedSeconds = (now - lastTickTime) / 1000;
+    lastTickTime = now;
+    
+    stepTick(elapsedSeconds);
+    workerTimerId = setTimeout(workerTick, 4);
+  };
+  workerTimerId = setTimeout(workerTick, 4);
+};
+
+const stopWorkerLoop = () => {
+  if (workerTimerId) {
+    clearTimeout(workerTimerId);
+    workerTimerId = null;
+  }
+};
+
+
 const buildIdMaps = () => {
   const toPlain = (rec: Record<string, number>) => ({ ...rec });
   const toRev = (rec: Record<string, number>) => {
@@ -855,6 +884,9 @@ const runHeadless = (xml: string, headlessSceneGraph: { nodes: SceneNode[] }, ti
         try {
           const result = doBuild(msg.xml, msg.sceneGraph, msg.preserveState, msg.seedState);
           post({ type: 'BUILT', id: msg.id, ok: true, ...result });
+          if (isPlaying && isSharedSupported) {
+            startWorkerLoop();
+          }
         } catch (e: any) {
           const errMsg = String(e?.message || e);
           post({ type: 'BUILT', id: msg.id, ok: false, error: errMsg, fatal: /Aborted|enlarge memory|abort|bad_alloc/i.test(errMsg) });
@@ -868,11 +900,22 @@ const runHeadless = (xml: string, headlessSceneGraph: { nodes: SceneNode[] }, ti
       }
       case 'SET_PLAYING': {
         isPlaying = !!msg.isPlaying;
-        if (isPlaying) accumulator = 0;
+        if (isPlaying) {
+          accumulator = 0;
+          if (isSharedSupported) {
+            startWorkerLoop();
+          }
+        } else {
+          if (isSharedSupported) {
+            stopWorkerLoop();
+          }
+        }
         break;
       }
       case 'TICK': {
-        stepTick(msg.delta);
+        if (!isSharedSupported) {
+          stepTick(msg.delta);
+        }
         break;
       }
       case 'SET_DRAG': {

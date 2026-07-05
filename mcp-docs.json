@@ -134,7 +134,33 @@
     "openScadNotes": {
       "definition": "You can define procedural shapes using the scad property on a body node. Example: scad: 'difference() { cube([0.5,0.5,0.5], center=true); sphere(d=0.6); }'.",
       "automaticCompilation": "If a body node specifies a scad property and geoms is omitted, the simulator automatically registers it as a dynamic mesh geom and compiles it to vertices and faces. The resulting dynamic mesh behaves as a physical body with collision detection."
-    }
+    },
+    "tips": [
+      "Compound shapes: add multiple geoms to one body with different pos/quat/euler offsets",
+      "Asymmetric shapes: combine box + sphere + cylinder geoms on a single body",
+      "Torus-like shapes: ring of capsule geoms arranged with pos+euler offsets",
+      "L/T/cross shapes: multiple box geoms with offset positions on one body",
+      "fromto on capsule lets you specify start/end points directly in local space",
+      "Use rgba to color each geom independently for visual variety",
+      "ellipsoid semi-axes let you squash/stretch independently on all 3 axes",
+      "Children without joints are rigid offsets — useful for adding detail geometry",
+      "Arbitrary mesh: type=mesh with vertices=[x0,y0,z0,...] and faces=[i0,j0,k0,...] (triangles)",
+      "CRITICAL — mesh vertex coordinate system: X=right, Y=up (height), Z=toward camera. This is Three.js world space, NOT MuJoCo Z-up. The ground plane is at Y=0.",
+      "Mesh vertical post example: vertices centred at (cx, halfHeight, cz) with hy=halfHeight (tall in Y)",
+      "Mesh flat plank example: box(cx, 0.3, cz, halfSpan, 0.06, halfWidth) — small hy=thickness, large hx=span",
+      "Mesh tetrahedron example: vertices=[0,0,0, 1,0,0, 0.5,1,0, 0.5,0.5,1], faces=[0,1,2, 0,1,3, 1,2,3, 0,2,3]",
+      "Static mesh (no dynamic field): visual-only. Vertices in Three.js Y-up world space. Never moves, never collides. Good for scenery and decorative structures.",
+      "Dynamic mesh (dynamic:true): full physics+collision. MuJoCo takes convex hull — concave shapes will not collide correctly. Requires renderVertices.",
+      "CRITICAL — hollow/concave containers (cups, boxes-with-open-tops, tubes): a single dynamic mesh geom can NEVER act as a real container, no matter how the vertices are shaped. MuJoCo collides dynamic meshes via their convex hull, and the hull of a hollow shape's vertices is just the solid outer envelope (it fills in the concave interior) — anything dropped on it lands on what is effectively a solid block. Build the hollow shape as a compound body instead: a floor + walls as separate primitive box/cylinder geoms on the same body (each primitive is individually convex, so together they form a real cavity). If you also want a nicer-looking CSG/OpenSCAD shell, add it as an EXTRA geom on the same body with contype:0 and conaffinity:0 (dynamic:true so it still tracks the body kinematically, but doesn't participate in collision) so the primitives handle physics while the mesh handles looks.",
+      "GOTCHA — rgba alpha is NOT rendered as transparency in this app: the renderer's material always uses full opacity regardless of the 4th rgba value, so rgba:[r,g,b,0] does NOT make a geom invisible — it renders as solid opaque black (r=g=b=0), which commonly causes flickering/z-fighting where it overlaps another geom. To hide a primitive collision proxy, do NOT rely on alpha — either color it to match the geom it's layered under (e.g. same rgba as a decorative mesh sitting on top of it) or set contype:0/conaffinity:0 on whichever geom you don't want colliding and accept both are visible.",
+      "Dynamic mesh renderVertices: just swap Y↔Z on each Y-up vertex: (x,y,z)→(x,-z,y). Do NOT subtract centroid. MuJoCo recenters internally.",
+      "Dynamic mesh face winding: use outward-facing CCW winding. Wrong winding causes inside-out contacts and objects sinking through surfaces.",
+      "Dynamic mesh body pos: set body_pos=[0,0,0] to place mesh where its Y-up base sits. Adjust body_pos.z to raise/lower.",
+      "OpenSCAD shapes: set scad=\"cube([0.5,0.5,0.5]);\" on a body node. If geoms is omitted, it automatically creates a dynamic mesh geom and compiles the SCAD code to vertices/faces.",
+      "Working example: mesh_collision preset (pyramid + ramp with full collision).",
+      "Bouncy objects: set solref=[0.04, 0.2] and solimp=[0.99, 0.9999, 0.0001, 0.5, 2]. dampingRatio 0.2 = lively bounce. The floor has dampingRatio=0.0 so ball+floor averages to 0.1 (still bouncy).",
+      "Contact blending: two geoms in contact average their solref/solimp. Keep this in mind when tuning — a non-bouncy floor (dampingRatio=1.0) will halve any ball's effective bounce."
+    ]
   },
   "examples": [
     {
