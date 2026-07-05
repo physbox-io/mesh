@@ -179,13 +179,11 @@ export function useMCPBridge() {
         case 'GET_SCENE_SUMMARY':
           return { nodes: (store.sceneGraph.nodes || []).map(summarizeNode) };
 
-        case 'GET_TELEMETRY': {
-          const history = (window as any)._physics_history || [];
-          return history.length > 0 ? history[history.length - 1] : { error: 'No simulation telemetry available' };
-        }
+        case 'GET_TELEMETRY':
+          return getPhysicsWorkerClient().getTelemetry().then(t => t || { error: 'No simulation telemetry available' });
 
         case 'GET_HISTORY':
-          return (window as any)._physics_history || [];
+          return getPhysicsWorkerClient().getHistory();
 
         case 'RUN_HEADLESS': {
           const ticks = Number(msg.ticks) || 300;
@@ -214,14 +212,14 @@ export function useMCPBridge() {
 
         case 'RESET':
           store.resetSimulation();
-          if ((window as any)._physics_history) (window as any)._physics_history = [];
+          getPhysicsWorkerClient().clearHistory();
           return { ok: true };
 
         case 'LOAD_PRESET': {
           const name = msg.preset as Parameters<typeof store.loadPreset>[0];
           if (!name) return { ok: false, error: 'Missing preset name' };
           store.loadPreset(name);
-          if ((window as any)._physics_history) (window as any)._physics_history = [];
+          getPhysicsWorkerClient().clearHistory();
           return { ok: true, preset: name };
         }
 

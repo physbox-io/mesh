@@ -30,13 +30,14 @@ export interface FrameSnapshot {
   xfrc_applied?: Float64Array; qfrc_applied?: Float64Array;
   xpos?: Float64Array; xmat?: Float64Array; cvel?: Float64Array;
   geom_xpos?: Float64Array; geom_xmat?: Float64Array;
-  historyEntry?: any;
 }
 
 export class PhysicsWorkerClient {
   private worker: Worker;
   private pendingBuilds = new Map<string, { resolve: (r: BuiltResult) => void }>();
   private pendingHeadless = new Map<string, { resolve: (r: any) => void }>();
+  private pendingHistory = new Map<string, { resolve: (r: any[]) => void }>();
+  private pendingTelemetry = new Map<string, { resolve: (r: any) => void }>();
   onFrame: ((snap: FrameSnapshot) => void) | null = null;
   onError: ((message: string, fatal: boolean, lastState?: { qpos: number[]; qvel: number[]; time: number }) => void) | null = null;
 
@@ -66,6 +67,22 @@ export class PhysicsWorkerClient {
             this.pendingHeadless.delete(msg.id);
             const { type: _t, id: _id, ...rest } = msg;
             pending.resolve(rest);
+          }
+          break;
+        }
+        case 'HISTORY_RESULT': {
+          const pending = this.pendingHistory.get(msg.id);
+          if (pending) {
+            this.pendingHistory.delete(msg.id);
+            pending.resolve(msg.history);
+          }
+          break;
+        }
+        case 'TELEMETRY_RESULT': {
+          const pending = this.pendingTelemetry.get(msg.id);
+          if (pending) {
+            this.pendingTelemetry.delete(msg.id);
+            pending.resolve(msg.telemetry);
           }
           break;
         }
@@ -106,6 +123,26 @@ export class PhysicsWorkerClient {
       this.pendingHeadless.set(id, { resolve });
       this.worker.postMessage({ type: 'RUN_HEADLESS', id, xml, sceneGraph, ticks });
     });
+  }
+
+  getHistory(): Promise<any[]> {
+    const id = Math.random().toString(36).slice(2);
+    return new Promise((resolve) => {
+      this.pendingHistory.set(id, { resolve });
+      this.worker.postMessage({ type: 'GET_HISTORY', id });
+    });
+  }
+
+  getTelemetry(): Promise<any> {
+    const id = Math.random().toString(36).slice(2);
+    return new Promise((resolve) => {
+      this.pendingTelemetry.set(id, { resolve });
+      this.worker.postMessage({ type: 'GET_TELEMETRY', id });
+    });
+  }
+
+  clearHistory() {
+    this.worker.postMessage({ type: 'CLEAR_HISTORY' });
   }
 
   terminate() {

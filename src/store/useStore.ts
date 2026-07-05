@@ -88,12 +88,6 @@ export const getPhysicsWorkerClient = (): PhysicsWorkerClient => {
           data.geom_xpos.set(snap.geom_xpos); data.geom_xmat.set(snap.geom_xmat);
         }
       }
-      if (snap.historyEntry) {
-        const w = window as any;
-        if (!w._physics_history) w._physics_history = [];
-        w._physics_history.push(snap.historyEntry);
-        if (w._physics_history.length > 5000) w._physics_history.shift();
-      }
     };
     client.onError = (message, fatal, lastState) => {
       console.error('[PhysicsWorker]', message);

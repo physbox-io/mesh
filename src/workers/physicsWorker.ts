@@ -36,6 +36,9 @@ let pressedKeys = new Set<string>();
 let stepCount = 0;
 let accumulator = 0;
 
+let historyBuffer: any[] = [];
+const MAX_HISTORY_SIZE = 5000;
+
 const isSharedSupported = typeof SharedArrayBuffer !== 'undefined';
 
 let sharedBuffers: {
@@ -569,8 +572,6 @@ const stepTick = (delta: number) => {
   const stepsNeeded = Math.floor(accumulator / stepSize);
   accumulator -= stepsNeeded * stepSize;
 
-  let historyEntry: any = null;
-
   for (let i = 0; i < stepsNeeded; i++) {
     try {
       data.xfrc_applied.fill(0);
@@ -586,7 +587,11 @@ const stepTick = (delta: number) => {
       stepCount++;
 
       if (stepCount % 10 === 0) {
-        historyEntry = buildHistoryEntry(aeroDiagnostics);
+        const entry = buildHistoryEntry(aeroDiagnostics);
+        historyBuffer.push(entry);
+        if (historyBuffer.length > MAX_HISTORY_SIZE) {
+          historyBuffer.shift();
+        }
       }
 
       const nq = model.nq;
@@ -609,9 +614,9 @@ const stepTick = (delta: number) => {
   if (stepsNeeded > 0) {
     const snap = snapshot();
     if (isSharedSupported) {
-      post({ type: 'FRAME', time: snap.time, historyEntry, isShared: true });
+      post({ type: 'FRAME', time: snap.time, isShared: true });
     } else {
-      post({ type: 'FRAME', ...snap, historyEntry, isShared: false }, [
+      post({ type: 'FRAME', ...snap, isShared: false }, [
         snap.qpos.buffer, snap.qvel.buffer, snap.ctrl.buffer,
         snap.xfrc_applied.buffer, snap.qfrc_applied.buffer,
         snap.xpos.buffer, snap.xmat.buffer, snap.cvel.buffer,
@@ -735,6 +740,13 @@ const doBuild = (
     sharedBuffers = {};
   }
 
+  // Note: history is NOT cleared here. Every rebuild goes through doBuild —
+  // ordinary scene edits, the every-4-builds proactive recycle, and the
+  // every-20s seamless mid-play recycle all call this. Wiping history
+  // unconditionally would silently truncate physics_get_history/telemetry
+  // on every one of those, defeating the "seamless" point of the proactive
+  // recycles. Only an explicit RESET/LOAD_PRESET should clear history — see
+  // the CLEAR_HISTORY message handler, which those already call.
   accumulator = 0;
 
   return {
@@ -883,9 +895,9 @@ const runHeadless = (xml: string, headlessSceneGraph: { nodes: SceneNode[] }, ti
           mujoco.mj_forward(model, data);
           const snap = snapshot();
           if (isSharedSupported) {
-            post({ type: 'FRAME', time: snap.time, historyEntry: null, isShared: true });
+            post({ type: 'FRAME', time: snap.time, isShared: true });
           } else {
-            post({ type: 'FRAME', ...snap, historyEntry: null, isShared: false }, [
+            post({ type: 'FRAME', ...snap, isShared: false }, [
               snap.qpos.buffer, snap.qvel.buffer, snap.ctrl.buffer,
               snap.xfrc_applied.buffer, snap.qfrc_applied.buffer,
               snap.xpos.buffer, snap.xmat.buffer, snap.cvel.buffer,
@@ -913,6 +925,19 @@ const runHeadless = (xml: string, headlessSceneGraph: { nodes: SceneNode[] }, ti
         if (!mujoco) mujoco = await load_mujoco();
         const result = runHeadless(msg.xml, msg.sceneGraph, msg.ticks);
         post({ type: 'HEADLESS_RESULT', id: msg.id, ...result });
+        break;
+      }
+      case 'GET_HISTORY': {
+        post({ type: 'HISTORY_RESULT', id: msg.id, history: historyBuffer });
+        break;
+      }
+      case 'GET_TELEMETRY': {
+        const latest = historyBuffer.length > 0 ? historyBuffer[historyBuffer.length - 1] : null;
+        post({ type: 'TELEMETRY_RESULT', id: msg.id, telemetry: latest });
+        break;
+      }
+      case 'CLEAR_HISTORY': {
+        historyBuffer = [];
         break;
       }
       default:
