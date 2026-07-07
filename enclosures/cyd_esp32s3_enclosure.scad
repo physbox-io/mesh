@@ -1,13 +1,14 @@
 // ============================================================================
 // Enclosure for Hosyond ESP32-S3 CYD (Cheap Yellow Display)
-// Portrait orientation, screw-together lid + box.
+// Portrait orientation, snap-fit lid + box (4 cantilever tabs, no screws).
 //
-// ASSUMPTIONS (board hole pattern is not published by Hosyond - verify against
-// your physical board before printing, adjust board_hole_inset/board_hole_d
-// if needed):
-//   - 4 mounting holes, inset `board_hole_inset` from each board edge, M3 clearance
-//   - Screen (69x49) is flush with the board's top 69mm and full 49mm width,
-//     leaving the remaining 15mm at the bottom edge for USB-C + GPIO header
+// ASSUMPTIONS (verify against your physical board before printing):
+//   - Board is 8mm of bare PCB above the screen (board_top_gap), then the 69mm
+//     screen, then whatever remains of the 15mm board/screen length difference
+//     at the bottom for USB-C + GPIO header (board_l - board_top_gap - screen_l)
+//   - 4 mounting holes at the board's corners, positioned relative to the lid's
+//     screen window: board_hole_offset_x (4mm) inset from the window's left/right
+//     edges, board_hole_offset_y (4mm) out beyond the window's top/bottom edges
 //
 // Render one part at a time: set `part` below to "box", "lid", or "both"
 // (both = side-by-side preview, not print-safe as one plate)
@@ -16,14 +17,19 @@
 part = "both"; // "box" | "lid" | "both"
 
 // ---- Board & display -------------------------------------------------------
-board_l = 84;           // board length (portrait long axis)
-board_w = 49;           // board width
-screen_l = 69;          // screen length
-screen_w = 49;          // screen width
+board_l = 86.00;        // board length (portrait long axis)
+board_w = 50.00;        // board width
+screen_l = 74.20;       // screen length (69.20 + 5mm safety padding)
+screen_w = 53.00;       // screen width (50.00 + 3mm safety padding)
 comfort = 15;           // extra room added to interior length & width
 
-board_hole_inset = 4;   // board corner mounting holes, inset from board edge
-board_hole_d = 3.2;     // M3 clearance
+board_top_gap = 8.22;   // bare PCB between the board's top edge and the screen's top edge
+                        // (remaining board_l - board_top_gap - screen_l sits below the screen)
+
+board_hole_offset_x = 4; // mounting hole inset from the window's left/right (longer) edges
+board_hole_offset_y = 4; // mounting hole offset out beyond the window's top/bottom (shorter) edges
+board_screw_d = 3.20;   // screw goes straight through the board into a blind hole in the lid (M3 screw size)
+board_hole_depth = 2;   // blind depth into the lid (lid_h - 1mm skin, keeps the front face intact)
 
 // ---- Enclosure shell --------------------------------------------------------
 wall = 2.5;                       // side wall thickness
@@ -33,29 +39,23 @@ outer_l = interior_l + 2*wall;    // 104  (portrait long axis)
 outer_w = interior_w + 2*wall;    // 69   (portrait short axis)
 
 total_depth = 45;   // overall assembled depth (box_h + lid_h)
-lid_h = 8;           // lid = thin front bezel with screen window + pillars
-box_h = total_depth - lid_h; // 37, deep back cover
+lid_h = 3;           // lid = thin front bezel with screen window; board sits flush against its inner face
+box_h = total_depth - lid_h; // 42, deep back cover
 
-// ---- Corner screw posts (M6, lid <-> box) -----------------------------------
-// Box-side hole is a snug M6 slip-fit, not a self-tap pilot: the screw is glued
-// in (superglue) rather than relying on threads cut into the plastic, so it's
-// sized to the screw's actual diameter rather than undersized for tapping.
-// It's also blind (pilot_depth < box_h) so it doesn't break through the box's
-// exterior floor.
-corner_post = 14;        // square post cross-section at each corner
-post_inset = 9;          // diagonal inset of hole center from the true corner, per spec
-post_offset = post_inset / sqrt(2); // ~6.364mm component offset in x and y
-m6_clear_d = 6.5;        // clearance hole (lid side, screw head/shaft passes through)
-m6_pilot_d = 6.0;        // box side, snug M6 slip-fit for a glued (not threaded) joint
-pilot_depth = 20;        // box-side hole depth from the top - blind, leaves box_h-pilot_depth solid below
-                         // (~25mm M6 screw: (lid_h - m6_head_h) engaging the lid + pilot_depth into the box)
-m6_head_d = 11;          // countersink diameter for screw head, lid side
-m6_head_h = 3;           // countersink depth
-
-// ---- Board standoff pillars (in lid) ----------------------------------------
-pillar_od = 8;
-pillar_pilot_d = 2.5;    // self-tap pilot for M3 into pillar
-pillar_h = 5;            // stands board off the inner lid face
+// ---- Snap-fit tabs (lid <-> box, replaces screws) ---------------------------
+// 4 cantilever tabs on the lid (2 per long/side wall) reach into the box past
+// its inner wall surface and hook into a matching notch recessed into that
+// wall. tab_gap must be < hook_d so the hook actually protrudes past the wall's
+// inner face at rest - that's what makes it require force (and flex) to seat,
+// giving the "click" instead of just sliding freely.
+tab_width = 8;           // flexible arm width, along the wall
+tab_thickness = 1.6;     // arm thickness (the dimension that flexes)
+tab_length = 6;          // how far the tab reaches past the lid's inner face into the box
+tab_gap = 0.2;           // clearance between the tab's rest position and the box's inner wall
+hook_d = 0.8;            // how far the hook protrudes past the tab's rest face into the notch
+hook_h = 1.5;            // height of the hook engagement feature at the tab's tip
+notch_h = hook_h + 1;    // matching notch height in the box wall - a bit taller for easy engagement
+tab_y = [30, 74];        // 2 tab positions along the box's length, mirrored on both side walls
 
 // ---- Screen window (lid) -----------------------------------------------------
 window_margin = 2;       // bezel overlap over screen edge, per side
@@ -63,7 +63,7 @@ window_margin = 2;       // bezel overlap over screen edge, per side
 // ---- Antenna holes (box, top wall = far end from USB/GPIO) ------------------
 whip_hole_d = 7;         // small whip antenna (SMA-style) hole
 phone_hole_d = 13;       // solid plastic cellphone-style antenna base
-antenna_hole_margin = 9; // clearance from corner post edge
+antenna_hole_margin = 23; // inset from the box's side edges
 
 // ---- USB-C / GPIO slot (box, bottom wall) ------------------------------------
 usb_slot_w = 32;
@@ -93,11 +93,11 @@ module rounded_slot(width, height, thickness, r) {
 }
 
 // ============================================================================
-// BOX (deep back cover: walls + floor + antenna holes + USB/GPIO slot + posts)
+// BOX (deep back cover: walls + floor + antenna holes + USB/GPIO slot + snap notches)
 // ============================================================================
 module box_with_antenna_holes() {
-    antenna_x1 = corner_post + antenna_hole_margin;               // whip, near left post
-    antenna_x2 = outer_w - corner_post - antenna_hole_margin;     // phone-style, near right post
+    antenna_x1 = antenna_hole_margin;               // whip, near left wall
+    antenna_x2 = outer_w - antenna_hole_margin;     // phone-style, near right wall
 
     difference() {
         cube([outer_w, outer_l, box_h]);
@@ -116,74 +116,95 @@ module box_with_antenna_holes() {
         // USB-C / GPIO slot - bottom wall (near end, y = 0)
         translate([outer_w/2 - usb_slot_w/2, wall+1, box_h - usb_slot_z_from_top - usb_slot_h/2])
             rounded_slot(usb_slot_w, usb_slot_h, wall+2, usb_slot_r);
-    }
 
-    // re-add corner posts as solid reinforcement blocks (so the screw boss has
-    // enough surrounding material even though the hollow above ate into the corner),
-    // with a blind M6 hole cut from the top only (see corner_post_solid)
-    corner_post_solid(box_h, m6_pilot_d, pilot_depth);
+        // snap-fit notches in both side walls (see snap_tab for the matching lid hook)
+        box_snap_notches();
+    }
 }
 
-// hole_depth < height cuts a BLIND hole from the top face only, leaving
-// (height - hole_depth) of solid material below - use height itself for a
-// full through-hole (e.g. the thin lid, which needs clearance all the way through)
-module corner_post_solid(height, hole_d, hole_depth) {
-    for (cx = [0, 1]) for (cy = [0, 1]) {
-        ox = cx==0 ? 0 : outer_w - corner_post;
-        oy = cy==0 ? 0 : outer_l - corner_post;
-        hx = cx==0 ? post_offset : outer_w - post_offset;
-        hy = cy==0 ? post_offset : outer_l - post_offset;
-        difference() {
-            translate([ox, oy, 0])
-                cube([corner_post, corner_post, height]);
-            translate([hx, hy, height - hole_depth])
-                cylinder(h=hole_depth+1, d=hole_d, $fn=32);
+// Blind pockets recessed into the inner face of both side walls, one per tab_y
+// position per side. notch_z is measured down from the box's open top edge, at
+// the depth where each tab's hook sits once the lid is fully seated (tab_length
+// past the lid's inner face, minus the hook's own height along the tab).
+module box_snap_notches() {
+    notch_depth = hook_d + 0.5;     // how far into the wall material the pocket cuts
+    notch_width = tab_width + 1;    // a little clearance beyond the tab's own width
+    notch_z = box_h - tab_length + hook_h/2; // hook center, translated into box-frame z
+
+    for (side = [0, 1]) {
+        wall_face_x = side == 0 ? wall : outer_w - wall; // inner wall surface
+        cut_x0 = side == 0 ? wall_face_x - notch_depth : wall_face_x;
+        for (ny = tab_y) {
+            translate([cut_x0, ny - notch_width/2, notch_z - notch_h/2])
+                cube([notch_depth, notch_width, notch_h]);
         }
     }
 }
 
 // ============================================================================
-// LID (thin front bezel: screen window + M6 clearance holes + board pillars)
+// LID (thin front bezel: screen window + blind M6 board mounting holes + snap
+// tabs - board sits flush against the inner face, no standoff)
 // ============================================================================
 module lid() {
-    screen_y0_local = board_l - screen_l; // screen sits flush with the top edge
+    screen_y0_local = board_l - board_top_gap - screen_l; // board_top_gap of bare PCB above the screen
     window_w = screen_w - 2*window_margin;
     window_l = screen_l - 2*window_margin;
     window_x0 = board_x0 + (board_w - window_w) / 2;
     window_y0 = board_y0 + screen_y0_local + window_margin;
 
+    // board mounting hole positions, directly relative to the board boundaries
+    // placed exactly 2mm inset from PCB edges to provide window clearance
+    board_hole_x = [board_x0 + 2.00, board_x0 + board_w - 2.00];
+    board_hole_y = [board_y0 + 2.00, board_y0 + board_l - 2.00];
+
+    // board mounting holes are cut in an OUTER difference(), after the snap
+    // tabs are unioned in, in case a tab and a board hole ever land close
+    // enough for the tab's own solid body to partially fill a hole back in
     difference() {
-        cube([outer_w, outer_l, lid_h]);
+        union() {
+            difference() {
+                cube([outer_w, outer_l, lid_h]);
 
-        // screen window, full through-cut
-        translate([window_x0, window_y0, -1])
-            cube([window_w, window_l, lid_h + 2]);
+                // screen window, full through-cut
+                translate([window_x0, window_y0, -1])
+                    cube([window_w, window_l, lid_h + 2]);
+            }
 
-        // M6 clearance + countersink at all 4 corners
-        for (cx = [0, 1]) for (cy = [0, 1]) {
-            hx = cx==0 ? post_offset : outer_w - post_offset;
-            hy = cy==0 ? post_offset : outer_l - post_offset;
-            translate([hx, hy, -1])
-                cylinder(h=lid_h+2, d=m6_clear_d, $fn=32);
-            translate([hx, hy, lid_h - m6_head_h])
-                cylinder(h=m6_head_h+1, d=m6_head_d, $fn=32);
+            // snap-fit tabs reaching into the box (see box_snap_notches for the
+            // matching notch) - 2 per side wall
+            for (ny = tab_y) {
+                snap_tab(wall, +1, ny);              // left wall: cavity increases with +x
+                snap_tab(outer_w - wall, -1, ny);     // right wall: cavity increases with -x
+            }
         }
+
+        // board mounting screws - straight through the board's own holes into a
+        // blind M6 hole bored directly into the lid (no standoff, board sits flush
+        // against the inner face at z=lid_h)
+        for (hx = board_hole_x)
+            for (hy = board_hole_y)
+                translate([hx, hy, lid_h - board_hole_depth])
+                    cylinder(h=board_hole_depth+1, d=board_screw_d, $fn=32);
     }
+}
 
-    // corner reinforcement (lid is thin, keep posts solid around the M6 holes) -
-    // full through-hole (hole_depth = lid_h) since the lid needs clearance all the way
-    corner_post_solid(lid_h, m6_clear_d, lid_h);
+// A single cantilever snap tab, extending from the lid's inner face (z=lid_h)
+// further into the box by tab_length. wall_x is the box's inner wall surface
+// x-position; dir is +1 if the box cavity is in the +x direction from wall_x
+// (left wall) or -1 if it's in the -x direction (right wall). The arm sits
+// tab_gap inside the cavity from the wall at rest; the hook on its outer face
+// protrudes hook_d back toward the wall - since hook_d > tab_gap, the hook
+// tip normally reaches past the wall's inner surface, so the tab must flex
+// away from the wall to slide past it before snapping into the notch pocket.
+module snap_tab(wall_x, dir, y_center) {
+    arm_near_x = wall_x + dir*tab_gap;             // face closest to the wall
+    arm_far_x  = wall_x + dir*(tab_gap+tab_thickness); // face furthest from the wall
+    translate([min(arm_near_x, arm_far_x), y_center - tab_width/2, lid_h])
+        cube([tab_thickness, tab_width, tab_length]);
 
-    // board standoff pillars at the 4 board mounting holes
-    for (px = [board_hole_inset, board_w - board_hole_inset])
-        for (py = [board_hole_inset, board_l - board_hole_inset]) {
-            translate([board_x0 + px, board_y0 + py, lid_h])
-                difference() {
-                    cylinder(h=pillar_h, d=pillar_od, $fn=32);
-                    translate([0,0,-1])
-                        cylinder(h=pillar_h+2, d=pillar_pilot_d, $fn=32);
-                }
-        }
+    hook_tip_x = wall_x + dir*(tab_gap - hook_d);  // protrudes toward/past the wall
+    translate([min(arm_near_x, hook_tip_x), y_center - tab_width/2, lid_h + tab_length - hook_h])
+        cube([abs(arm_near_x - hook_tip_x), tab_width, hook_h]);
 }
 
 // ============================================================================
