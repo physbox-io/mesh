@@ -28,7 +28,7 @@ Open [http://localhost:5175](http://localhost:5175).
 To connect an AI agent via MCP:
 
 ```bash
-cd ~/expt_mcp
+cd ~/physbox_mcp
 venv/bin/python server.py --stdio   # stdio mode for Claude Code
 # or
 venv/bin/python server.py           # HTTP on port 3141

@@ -4246,11 +4246,46 @@ function App() {
                       onClick={async () => {
                         setIsCompilerLoading(true);
                         try {
-                          const createOpenSCAD = await loadCompiler();
-                          const compiler = await createOpenSCAD();
-                          const stlText = await compiler.renderToStl(scadText);
+                          const compiled = await compileSCAD(scadText);
+                          if (!compiled.vertices || compiled.vertices.length === 0) {
+                            throw new Error('Compilation produced no vertices.');
+                          }
+
+                          const geo = new THREE.BufferGeometry();
+                          geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(compiled.vertices), 3));
+                          geo.setIndex(new THREE.BufferAttribute(new Uint32Array(compiled.faces), 1));
+                          geo.computeVertexNormals();
+
+                          const mesh = new THREE.Mesh(geo);
+                          const bbox = new THREE.Box3().setFromObject(mesh);
+                          const size = bbox.getSize(new THREE.Vector3());
+                          const longestSide = Math.max(size.x, size.y, size.z);
+
+                          let defaultPrompt = '150';
+                          if (longestSide > 0) {
+                            defaultPrompt = Math.round(longestSide * 1000).toString();
+                          }
+
+                          const targetStr = window.prompt("Longest part's longest side (mm):", defaultPrompt);
+                          if (targetStr === null) return;
+                          const targetMm = parseFloat(targetStr);
+                          if (isNaN(targetMm) || targetMm <= 0) { alert('Invalid size'); return; }
+
+                          const scale = targetMm / longestSide;
+                          const center = bbox.getCenter(new THREE.Vector3());
+                          const transform = new THREE.Matrix4()
+                            .makeRotationX(Math.PI / 2)
+                            .multiply(new THREE.Matrix4().makeScale(scale, scale, scale))
+                            .multiply(new THREE.Matrix4().makeTranslation(-center.x, -center.y, -center.z));
                           
-                          const blob = new Blob([stlText], { type: 'text/plain' });
+                          geo.applyMatrix4(transform);
+
+                          const exportGroup = new THREE.Group();
+                          exportGroup.add(mesh);
+
+                          const exporter = new STLExporter();
+                          const result = exporter.parse(exportGroup, { binary: true }) as DataView;
+                          const blob = new Blob([result.buffer as ArrayBuffer], { type: 'application/octet-stream' });
                           const url = URL.createObjectURL(blob);
                           const a = document.createElement('a');
                           a.href = url;

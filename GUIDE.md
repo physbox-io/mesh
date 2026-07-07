@@ -229,7 +229,7 @@ function toRenderVerts(yupVerts) {
 
 The MCP server dynamically loads tool descriptions and simulator schemas from JSON documentation. When tool capabilities, presets, or schema fields change, you MUST update:
 1. **`mcp-docs.json`** at the root of the simulator repository (e.g. `physics/mcp-docs.json`).
-2. **`mcp-docs/physics.json`** inside the MCP server repository (`expt_mcp/mcp-docs/physics.json`). This is a fallback copy committed to the MCP repo so users can run it standalone without cloning the simulator.
+2. **`mcp-docs/physics.json`** inside the MCP server repository (`physbox_mcp/mcp-docs/physics.json`). This is a fallback copy committed to the MCP repo so users can run it standalone without cloning the simulator.
 
 If you also change the React hook commands:
 - Update **`src/hooks/useMCPBridge.ts`** to handle the new command and map it to Zustand store mutations or selectors.

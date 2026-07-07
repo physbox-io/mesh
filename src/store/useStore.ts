@@ -842,8 +842,10 @@ export const useStore = create<PhysicsState>()((set, get) => ({
       }
       return false;
     };
-    traverseAndRemove(newScene.nodes);
-    get().recompile(newScene, null);
+    if (traverseAndRemove(newScene.nodes)) {
+      set({ sceneGraph: newScene, selectedNodeId: null });
+      get().recompile(newScene, null);
+    }
   },
 
   addComponent: (type, position) => {
