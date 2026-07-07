@@ -119,6 +119,20 @@ const summarizeNode = (node: any): any => ({
   children: (node.children || []).map(summarizeNode),
 });
 
+const stripMeshArrays = (node: any): any => {
+  const cloned = { ...node };
+  if (cloned.geoms) {
+    cloned.geoms = cloned.geoms.map((g: any) => {
+      const { vertices, faces, renderVertices, ...rest } = g;
+      return rest;
+    });
+  }
+  if (cloned.children) {
+    cloned.children = cloned.children.map(stripMeshArrays);
+  }
+  return cloned;
+};
+
 export function useMCPBridge() {
   useEffect(() => {
     let ws: WebSocket | null = null;
@@ -154,7 +168,7 @@ export function useMCPBridge() {
       ws.onerror = () => ws?.close();
     };
 
-    const handle = (cmd: string, msg: any): unknown => {
+    const handle = async (cmd: string, msg: any): Promise<unknown> => {
       // Access Zustand store directly — works outside React render
       const store = useStore.getState();
 
@@ -197,6 +211,59 @@ export function useMCPBridge() {
           return getPhysicsWorkerClient().runHeadless(xml, sceneGraph, ticks);
         }
 
+        case 'GET_OBJECTS':
+          return (store.sceneGraph.nodes || []).map(stripMeshArrays);
+
+        case 'GET_OBJECT': {
+          const targetId = msg.id;
+          if (!targetId) throw new Error('Missing object id');
+          const findNode = (nodesList: any[]): any => {
+            if (!nodesList) return null;
+            for (const node of nodesList) {
+              if (node.id === targetId) return node;
+              const child = findNode(node.children);
+              if (child) return child;
+            }
+            return null;
+          };
+          const found = findNode(store.sceneGraph.nodes);
+          if (!found) throw new Error(`Object not found: ${targetId}`);
+          return stripMeshArrays(found);
+        }
+
+        case 'UPDATE_OBJECT': {
+          const targetId = msg.id;
+          const updates = msg.updates;
+          if (!targetId) throw new Error('Missing object id');
+          if (!updates) throw new Error('Missing updates payload');
+
+          if (updates.scad !== undefined) {
+            let compiled: any = null;
+            let lastErr: any = null;
+            for (let attempt = 0; attempt < 3 && !compiled; attempt++) {
+              if (attempt > 0) await new Promise(r => setTimeout(r, 100));
+              try {
+                const result = await compileSCAD(updates.scad);
+                if (result.faces.length === 0) {
+                  lastErr = new Error('Compile produced an empty mesh (0 faces)');
+                  continue;
+                }
+                compiled = result;
+              } catch (err) {
+                lastErr = err;
+              }
+            }
+            if (!compiled) {
+              throw new Error(`Failed to compile SCAD: ${lastErr?.message || String(lastErr)}`);
+            }
+            store.updateNodeScad(targetId, updates.scad, compiled, false);
+          } else {
+            store.updateNode(targetId, updates);
+            await store.recompile(store.sceneGraph, undefined, false, true);
+          }
+          const error = store.lastCompileError;
+          return { ok: !error, ...(error ? { error } : {}) };
+        }
 
         case 'TOGGLE_PLAY':
           store.togglePlay();
