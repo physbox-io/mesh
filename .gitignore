@@ -25,3 +25,4 @@ scratch
 *.sw?
 
 enclosures/**
+.mcp.json
