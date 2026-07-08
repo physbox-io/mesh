@@ -2003,65 +2003,94 @@ function App() {
 
           <div className="h-6 w-px bg-slate-200 hidden md:block" />
 
-          {/* Preset Select Dropdown */}
-          <div className="flex items-center gap-1.5">
-            <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider hidden lg:inline">Preset:</span>
-            <select 
-              value={activePreset || ''}
-              onChange={(e) => {
-                const v = e.target.value;
-                if (v.startsWith('user:')) loadUserPresetWithCard(v);
-                else loadPresetWithCard(v);
-              }}
-              className="bg-slate-100 border border-slate-300 text-slate-900 text-xs md:text-sm rounded-md block p-1 md:px-2 md:py-1.5 focus:border-blue-500 max-w-[100px] sm:max-w-none font-medium cursor-pointer"
-            >
-              <optgroup label="⬜ Built-in Presets">
-                <option value="empty">🫙 Blank (Empty)</option>
-                <option value="pendulum">Double Pendulum</option>
-                <option value="cubes">Stacked Cubes</option>
-                <option value="gears">Gear System</option>
-                <option value="machine">Gear Train Machine</option>
-                <option value="rack_pinion">Rack &amp; Pinion</option>
-                <option value="inclined_plane">Inclined Plane</option>
-                <option value="pulley_system">Pulley Stand</option>
-                <option value="cartpole">Cartpole</option>
-                <option value="newtons_cradle">Newton's Cradle</option>
-                <option value="suspension_bridge">Suspension Bridge</option>
-                <option value="paper_plane">✈ Paper Plane</option>
-                <option value="monkey_head">🐵 Monkey Head</option>
-                <option value="golden_gate">🌉 Golden Gate Bridge</option>
-                <option value="golden_gate_mesh">🌉 Golden Gate (Mesh)</option>
-                <option value="mesh_collision">🔺 Mesh Collision Demo</option>
-                <option value="coin_flip">🪙 Coin Flip</option>
-                <option value="windmill">💨 Wind Turbine</option>
-                <option value="physics_only_windmill">💨 Wind Turbine (No Aero)</option>
-                <option value="traditional_windmill">💨 Traditional Windmill (4-Blade)</option>
-                <option value="drone">🛸 Quadcopter Drone</option>
-                <option value="bouncy_balls">🎱 Bouncy Balls</option>
-                <option value="openscad_demo">🛠️ OpenSCAD Showcase</option>
-              </optgroup>
+          {/* Preset Select Dropdown & Divider Group */}
+          <div className="flex items-center">
+            {/* Inner Dropdown Container */}
+            <div className="flex items-center gap-1.5">
+              <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider hidden lg:inline">Preset:</span>
+              <select 
+                value={activePreset || ''}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  if (v.startsWith('user:')) loadUserPresetWithCard(v);
+                  else loadPresetWithCard(v);
+                }}
+                className="bg-slate-100 border border-slate-300 text-slate-900 text-xs md:text-sm rounded-md block p-1 md:px-2 md:py-1.5 focus:border-blue-500 max-w-[100px] sm:max-w-none font-medium cursor-pointer"
+              >
+                <optgroup label="⬜ Built-in Presets">
+                  <option value="empty">🫙 Blank (Empty)</option>
+                  <option value="pendulum">Double Pendulum</option>
+                  <option value="cubes">Stacked Cubes</option>
+                  <option value="gears">Gear System</option>
+                  <option value="machine">Gear Train Machine</option>
+                  <option value="rack_pinion">Rack &amp; Pinion</option>
+                  <option value="inclined_plane">Inclined Plane</option>
+                  <option value="pulley_system">Pulley Stand</option>
+                  <option value="cartpole">Cartpole</option>
+                  <option value="newtons_cradle">Newton's Cradle</option>
+                  <option value="suspension_bridge">Suspension Bridge</option>
+                  <option value="paper_plane">✈ Paper Plane</option>
+                  <option value="monkey_head">🐵 Monkey Head</option>
+                  <option value="golden_gate">🌉 Golden Gate Bridge</option>
+                  <option value="golden_gate_mesh">🌉 Golden Gate (Mesh)</option>
+                  <option value="mesh_collision">🔺 Mesh Collision Demo</option>
+                  <option value="coin_flip">🪙 Coin Flip</option>
+                  <option value="windmill">💨 Wind Turbine</option>
+                  <option value="physics_only_windmill">💨 Wind Turbine (No Aero)</option>
+                  <option value="traditional_windmill">💨 Traditional Windmill (4-Blade)</option>
+                  <option value="drone">🛸 Quadcopter Drone</option>
+                  <option value="bouncy_balls">🎱 Bouncy Balls</option>
+                  <option value="openscad_demo">🛠️ OpenSCAD Showcase</option>
+                </optgroup>
 
-              {/* User Presets */}
-              {(() => {
-                try {
-                  const userPresets = JSON.parse(localStorage.getItem('physics_user_presets') || '{}');
-                  const keys = Object.keys(userPresets);
-                  if (keys.length === 0) return null;
-                  return (
-                    <optgroup label="📁 Saved Presets">
-                      {keys.sort().map(k => (
-                        <option key={`user:${k}`} value={`user:${k}`}>💾 {k}</option>
-                      ))}
-                    </optgroup>
-                  );
-                } catch {
-                  return null;
-                }
-              })()}
-            </select>
+                {/* User Presets */}
+                {(() => {
+                  try {
+                    const userPresets = JSON.parse(localStorage.getItem('physics_user_presets') || '{}');
+                    const keys = Object.keys(userPresets);
+                    if (keys.length === 0) return null;
+                    return (
+                      <optgroup label="📁 Saved Presets">
+                        {keys.sort().map(k => (
+                          <option key={`user:${k}`} value={`user:${k}`}>💾 {k}</option>
+                        ))}
+                      </optgroup>
+                    );
+                  } catch {
+                    return null;
+                  }
+                })()}
+              </select>
+            </div>
+
+            {/* Trashcan button space centered between select and divider */}
+            <div className="w-12 flex items-center justify-center">
+              <button
+                onClick={() => {
+                  const presetName = activePreset?.replace('user:', '') || '';
+                  if (window.confirm(`Are you sure you want to delete the preset "${presetName}"?`)) {
+                    try {
+                      const userPresets = JSON.parse(localStorage.getItem('physics_user_presets') || '{}');
+                      delete userPresets[presetName];
+                      localStorage.setItem('physics_user_presets', JSON.stringify(userPresets));
+                      loadPresetWithCard('empty');
+                    } catch (e) {
+                      console.error('Failed to delete preset', e);
+                    }
+                  }
+                }}
+                className={`flex items-center justify-center w-8 h-8 rounded-full border-2 border-red-200 text-red-600 bg-red-50 hover:bg-red-100 hover:border-red-300 transition-colors focus:outline-none flex-shrink-0 cursor-pointer ${
+                  activePreset && activePreset.startsWith('user:') ? 'visible' : 'invisible pointer-events-none'
+                }`}
+                title={activePreset && activePreset.startsWith('user:') ? `Delete preset "${activePreset.replace('user:', '')}"` : undefined}
+              >
+                <Trash2 className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Divider line */}
+            <div className="h-6 w-px bg-slate-200 hidden md:block" />
           </div>
-
-          <div className="h-6 w-px bg-slate-200 hidden md:block" />
 
           {/* Action Buttons: Simulate, Reset, View */}
           <div className="flex items-center gap-1.5">
@@ -2483,6 +2512,7 @@ function App() {
             gl={{ preserveDrawingBuffer: true }}
             onCreated={(state) => {
               (window as any)._physics_gl = state.gl;
+              (window as any)._physics_state = state;
               const canvas = state.gl.domElement;
               // Without this, a lost WebGL context (GPU driver hiccup, memory
               // pressure, etc.) leaves the canvas permanently blank with no way
