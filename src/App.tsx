@@ -5,7 +5,7 @@ import { useMuJoCoInit } from './hooks/useMuJoCo';
 import { useMCPBridge } from './hooks/useMCPBridge';
 import { useStore, scaleMeshGeoms, getPhysicsWorkerClient } from './store/useStore';
 import type { SceneGraph, SceneNode } from './types/scene';
-import { Play, Square, SlidersHorizontal, Settings, Box, Circle, X, RotateCcw, Trash2, Layers, CircleDot, Zap, Info, Triangle, Disc, Code, Menu, Shapes, Minimize2, Save, Download, Upload, FileText, ChevronDown, ChevronUp, Edit3, Printer, Scissors, Sparkles, Sun, Moon } from 'lucide-react';
+import { Play, Square, SlidersHorizontal, Settings, Box, Circle, X, RotateCcw, Trash2, Layers, CircleDot, Zap, Info, Triangle, Disc, Code, Menu, Shapes, Minimize2, Save, Download, Upload, FileText, ChevronDown, ChevronUp, Edit3, Printer, Scissors, Sparkles, Sun, Moon, Pyramid, Cone, Donut } from 'lucide-react';
 import { useRef, useMemo, useEffect, useCallback, useState, type RefObject } from 'react';
 import AICopilotPanel from './components/AICopilotPanel';
 import * as THREE from 'three';
@@ -1252,12 +1252,44 @@ function generateScadForNode(node: any): string {
     return `// Wedge shape\nlinear_extrude(height=${d}, center=true)\n  polygon([[0,0], [${w},0], [0,${h}]]);`;
   }
   
+  if (node.isPyramid) {
+    const w = node.width || 0.5;
+    const d = node.depth || 0.5;
+    const h = node.height || 0.5;
+    return `// Pyramid shape\nlinear_extrude(height=${h.toFixed(3)}, scale=0)\n  square([${w.toFixed(3)}, ${d.toFixed(3)}], center=true);`;
+  }
+  
+  if (node.isCone) {
+    const r = node.radius || 0.3;
+    const h = node.height || 0.6;
+    return `// Cone shape\ncylinder(h=${h.toFixed(3)}, r1=${r.toFixed(3)}, r2=0, center=false, $fn=24);`;
+  }
+
+  if (node.isTorus) {
+    const R = node.majorRadius || 0.4;
+    const r = node.tubeRadius || 0.1;
+    return `// Torus shape\nrotate_extrude($fn=24) translate([${R.toFixed(3)}, 0, 0]) circle(r=${r.toFixed(3)}, $fn=16);`;
+  }
+
+  if (node.isTube) {
+    const r1 = node.innerRadius || 0.2;
+    const r2 = node.outerRadius || 0.3;
+    const h = node.height || 0.5;
+    return `// Tube shape\ndifference() {\n  cylinder(h=${h.toFixed(3)}, r=${r2.toFixed(3)}, center=true, $fn=24);\n  cylinder(h=${(h + 0.02).toFixed(3)}, r=${r1.toFixed(3)}, center=true, $fn=24);\n}`;
+  }
+  
   if (node.id.includes('gear')) {
     const r = geom.size?.[0] || 0.5;
     return `// Gear shape\ndifference() {\n  cylinder(h=0.08, r=${r}, center=true, $fn=30);\n  cylinder(h=0.12, r=0.08, center=true, $fn=16);\n}`;
   }
 
   switch (geom.type) {
+    case 'ellipsoid': {
+      const rx = geom.size?.[0] || 0.3;
+      const ry = geom.size?.[1] || 0.2;
+      const rz = geom.size?.[2] || 0.15;
+      return `// Ellipsoid shape\nscale([${rx.toFixed(3)}, ${ry.toFixed(3)}, ${rz.toFixed(3)}]) sphere(r=1, $fn=24);`;
+    }
     case 'box': {
       const sx = (geom.size?.[0] || 0.2) * 2;
       const sy = (geom.size?.[1] || 0.2) * 2;
@@ -1341,6 +1373,8 @@ function App() {
     (window as any)._physics_setNoteCards = (cards: typeof noteCards) => setNoteCards(cards);
   }, [noteCards]);
 
+
+
   // Pre-load the OpenSCAD compiler in the background after app initialization
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -1376,9 +1410,65 @@ function App() {
     resetSimulation, updateNodePos,
     updateNodeJointsList, deleteNode, renameNode,
     addPusherPeg, deletePusherPeg, updatePusherPeg, updateNodeRotation,
-    updateWedgeParams, updatePulleyParams, updateRopeParams,
+    updateWedgeParams, updatePyramidParams, updateConeParams, updateTorusParams, updateTubeParams, updatePulleyParams, updateRopeParams,
     parentUnderSelected, setParentUnderSelected, updateNodeScript, updateNode
   } = useStore();
+
+  // Collapsible properties cards drawer listener
+  useEffect(() => {
+    let active = true;
+    
+    const setupCollapse = () => {
+      const aside = document.querySelector('aside.glass-panel');
+      if (!aside || !active) return;
+
+      // Inject indicator spans
+      const headers = aside.querySelectorAll('div > h3');
+      headers.forEach(h => {
+        if (!h.querySelector('.collapse-indicator') && !h.closest('aside.glass-panel > h2')) {
+          const indicator = document.createElement('span');
+          indicator.className = 'collapse-indicator text-[9px] font-mono text-slate-400 dark:text-slate-500 ml-1.5 float-right font-normal normal-case';
+          indicator.style.userSelect = 'none';
+          indicator.textContent = ' [−]';
+          h.appendChild(indicator);
+          const hHtml = h as HTMLElement;
+          hHtml.style.cursor = 'pointer';
+        }
+      });
+    };
+
+    const timer = setTimeout(setupCollapse, 100);
+
+    const handleHeaderClick = (e: Event) => {
+      const target = e.target as HTMLElement;
+      const header = target.closest('h3');
+      if (!header) return;
+      if (target.closest('button') || target.closest('a') || target.closest('input') || target.closest('select')) return;
+      
+      const card = header.parentElement;
+      if (!card) return;
+      
+      card.classList.toggle('is-collapsed');
+      
+      const indicator = header.querySelector('.collapse-indicator');
+      if (indicator) {
+        indicator.textContent = card.classList.contains('is-collapsed') ? ' [+]' : ' [−]';
+      }
+    };
+
+    const asideContainer = document.querySelector('aside.glass-panel');
+    if (asideContainer) {
+      asideContainer.addEventListener('click', handleHeaderClick);
+    }
+
+    return () => {
+      active = false;
+      clearTimeout(timer);
+      if (asideContainer) {
+        asideContainer.removeEventListener('click', handleHeaderClick);
+      }
+    };
+  }, [selectedNodeId]);
 
   // Show the note card for whichever preset is active on first load
   useEffect(() => {
@@ -1644,7 +1734,7 @@ function App() {
       setScriptError(null);
       
       let currentScad = selectedNode.scad;
-      if (currentScad === undefined) {
+      if (currentScad === undefined && (selectedNode.id.includes('openscad') || selectedNode.id.includes('scad'))) {
         currentScad = generateScadForNode(selectedNode);
         // Persist the generated scad field to the node in store
         useStore.getState().updateNode(selectedNode.id, { scad: currentScad });
@@ -1867,7 +1957,7 @@ function App() {
     }
   };
 
-  const handleAddComponentClick = (type: 'box' | 'sphere' | 'capsule' | 'cylinder' | 'bob' | 'gear' | 'wedge' | 'pulley_wheel' | 'pulley_rope' | 'mesh' | 'openscad') => {
+  const handleAddComponentClick = (type: 'box' | 'sphere' | 'capsule' | 'cylinder' | 'bob' | 'gear' | 'wedge' | 'pulley_wheel' | 'pulley_rope' | 'mesh' | 'openscad' | 'pyramid' | 'cone' | 'torus' | 'tube' | 'ellipsoid') => {
     if (selectedNodeId) {
       const parentNode = findNodeById(sceneGraph.nodes, selectedNodeId);
       if (parentNode) {
@@ -1894,6 +1984,11 @@ function App() {
     else if (node.id.includes('cylinder')) emoji = '🛢️';
     else if (node.id.includes('sphere')) emoji = '🟢';
     else if (node.id.includes('wedge')) emoji = '📐';
+    else if (node.id.includes('pyramid')) emoji = '🔺';
+    else if (node.id.includes('cone')) emoji = '🍦';
+    else if (node.id.includes('torus')) emoji = '🍩';
+    else if (node.id.includes('tube')) emoji = '🛢️';
+    else if (node.id.includes('ellipsoid')) emoji = '🥚';
     else if (node.id.includes('pulley_wheel')) emoji = '🛞';
     else if (node.isPulleyRope) emoji = '🧵';
 
@@ -1928,6 +2023,14 @@ function App() {
               if (g.type === 'cylinder') subEmoji = '🛢️';
               else if (g.type === 'box') subEmoji = '📦';
               else if (g.type === 'sphere') subEmoji = '🟢';
+              else if (g.type === 'ellipsoid') subEmoji = '🥚';
+              else if (g.type === 'mesh') {
+                if (node.isPyramid) subEmoji = '🔺';
+                else if (node.isCone) subEmoji = '🍦';
+                else if (node.isTorus) subEmoji = '🍩';
+                else if (node.isTube) subEmoji = '🛢️';
+                else subEmoji = '📐';
+              }
               
               return (
                 <div 
@@ -2436,6 +2539,76 @@ function App() {
               <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Wedge</span>
             </div>
 
+            {/* Pyramid */}
+            <div 
+              draggable 
+              onDragStart={(e) => handleDragStart(e, 'pyramid')} 
+              onClick={() => handleAddComponentClick('pyramid')}
+              className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-blue-400 dark:hover:border-blue-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
+              title="Pyramid (Convex mesh)"
+            >
+              <div className="p-1.5 bg-rose-50 dark:bg-rose-950/30 rounded-lg mb-1 group-hover:scale-105 transition-transform">
+                <Pyramid className="w-4 h-4 text-rose-600 dark:text-rose-400" />
+              </div>
+              <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Pyramid</span>
+            </div>
+
+            {/* Cone */}
+            <div 
+              draggable 
+              onDragStart={(e) => handleDragStart(e, 'cone')} 
+              onClick={() => handleAddComponentClick('cone')}
+              className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-blue-400 dark:hover:border-blue-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
+              title="Cone (Convex mesh)"
+            >
+              <div className="p-1.5 bg-sky-50 dark:bg-sky-950/30 rounded-lg mb-1 group-hover:scale-105 transition-transform">
+                <Cone className="w-4 h-4 text-sky-600 dark:text-sky-400" />
+              </div>
+              <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Cone</span>
+            </div>
+
+            {/* Torus */}
+            <div 
+              draggable 
+              onDragStart={(e) => handleDragStart(e, 'torus')} 
+              onClick={() => handleAddComponentClick('torus')}
+              className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-blue-400 dark:hover:border-blue-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
+              title="Torus (Ring mesh)"
+            >
+              <div className="p-1.5 bg-violet-50 dark:bg-violet-950/30 rounded-lg mb-1 group-hover:scale-105 transition-transform">
+                <Donut className="w-4 h-4 text-violet-600 dark:text-violet-400" />
+              </div>
+              <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Torus</span>
+            </div>
+
+            {/* Tube */}
+            <div 
+              draggable 
+              onDragStart={(e) => handleDragStart(e, 'tube')} 
+              onClick={() => handleAddComponentClick('tube')}
+              className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-blue-400 dark:hover:border-blue-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
+              title="Tube (Hollow cylinder)"
+            >
+              <div className="p-1.5 bg-emerald-50 dark:bg-emerald-950/30 rounded-lg mb-1 group-hover:scale-105 transition-transform">
+                <CircleDot className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+              </div>
+              <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Tube</span>
+            </div>
+
+            {/* Ellipsoid */}
+            <div 
+              draggable 
+              onDragStart={(e) => handleDragStart(e, 'ellipsoid')} 
+              onClick={() => handleAddComponentClick('ellipsoid')}
+              className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-blue-400 dark:hover:border-blue-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
+              title="Ellipsoid primitive"
+            >
+              <div className="p-1.5 bg-amber-50 dark:bg-amber-950/30 rounded-lg mb-1 group-hover:scale-105 transition-transform">
+                <Circle className="w-4 h-4 text-amber-600 dark:text-amber-400 scale-x-125 scale-y-75" />
+              </div>
+              <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Ellipsoid</span>
+            </div>
+
             {/* Pulley Wheel */}
             <div 
               draggable 
@@ -2697,6 +2870,108 @@ function App() {
                 <span className="text-[9px] font-mono text-slate-400 mt-0.5">ID: {selectedNode.id}</span>
               </div>
 
+              {/* Position Coordinates (Applicable to all nodes!) */}
+              <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-3">
+                <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2">Position Offset</h3>
+                <div className="flex flex-col gap-3">
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-xs text-slate-500 flex items-center justify-between font-medium">X Position
+                      <span>{selectedNode.pos[0].toFixed(2)} m</span>
+                    </label>
+                    <input 
+                      type="range" 
+                      min="-10" 
+                      max="10" 
+                      step="0.05" 
+                      className="w-full accent-blue-500 cursor-pointer" 
+                      value={selectedNode.pos[0]} 
+                      onChange={(e) => handleMove(0, parseFloat(e.target.value))} 
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-xs text-slate-500 flex items-center justify-between font-medium">Y Position
+                      <span>{selectedNode.pos[1].toFixed(2)} m</span>
+                    </label>
+                    <input 
+                      type="range" 
+                      min="-10" 
+                      max="10" 
+                      step="0.05" 
+                      className="w-full accent-blue-500 cursor-pointer" 
+                      value={selectedNode.pos[1]} 
+                      onChange={(e) => handleMove(1, parseFloat(e.target.value))} 
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1.5">
+                    {(() => {
+                      // For dynamic mesh bodies, pos[2] = centroid Z, not base Z.
+                      // Compute centroid offset from renderVertices so slider 0 = base on ground.
+                      const dynMesh = selectedNode.geoms?.find((g: any) => g.dynamic && g.renderVertices);
+                      const centroidZ = dynMesh
+                        ? -Math.min(...(dynMesh.renderVertices as number[]).filter((_: number, i: number) => i % 3 === 2))
+                        : 0;
+                      const displayZ = selectedNode.pos[2] - centroidZ;
+                      return (<>
+                        <label className="text-xs text-slate-500 flex items-center justify-between font-medium">Z Position (Height)
+                          <span>{displayZ.toFixed(2)} m{centroidZ > 0 ? <span className="text-slate-300 ml-1">(+{centroidZ.toFixed(3)} centroid)</span> : null}</span>
+                        </label>
+                        <input
+                          type="range"
+                          min="0"
+                          max="10"
+                          step="0.05"
+                          className="w-full accent-blue-500 cursor-pointer"
+                          value={displayZ}
+                          onChange={(e) => handleMove(2, parseFloat(e.target.value) + centroidZ)}
+                        />
+                      </>);
+                    })()}
+                  </div>
+                  <div className="flex flex-col gap-1.5 mt-1 border-t border-slate-100 pt-2">
+                    <label className="text-xs text-slate-500 flex items-center justify-between font-medium">X Rotation
+                      <span>{(selectedNode.euler ? selectedNode.euler[0] : 0).toFixed(0)}°</span>
+                    </label>
+                    <input 
+                      type="range" 
+                      min="0" 
+                      max="360" 
+                      step="1" 
+                      className="w-full accent-blue-500 cursor-pointer" 
+                      value={selectedNode.euler ? selectedNode.euler[0] : 0} 
+                      onChange={(e) => updateNodeRotation(selectedNode.id, 0, parseFloat(e.target.value))} 
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1.5 mt-1">
+                    <label className="text-xs text-slate-500 flex items-center justify-between font-medium">Y Rotation
+                      <span>{(selectedNode.euler ? selectedNode.euler[1] : 0).toFixed(0)}°</span>
+                    </label>
+                    <input 
+                      type="range" 
+                      min="0" 
+                      max="360" 
+                      step="1" 
+                      className="w-full accent-blue-500 cursor-pointer" 
+                      value={selectedNode.euler ? selectedNode.euler[1] : 0} 
+                      onChange={(e) => updateNodeRotation(selectedNode.id, 1, parseFloat(e.target.value))} 
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1.5 mt-1">
+                    <label className="text-xs text-slate-500 flex items-center justify-between font-medium">Z Rotation
+                      <span>{(selectedNode.euler ? selectedNode.euler[2] : 0).toFixed(0)}°</span>
+                    </label>
+                    <input 
+                      type="range" 
+                      min="0" 
+                      max="360" 
+                      step="1" 
+                      className="w-full accent-blue-500 cursor-pointer" 
+                      value={selectedNode.euler ? selectedNode.euler[2] : 0} 
+                      onChange={(e) => updateNodeRotation(selectedNode.id, 2, parseFloat(e.target.value))} 
+                    />
+                  </div>
+                </div>
+              </div>
+
               {/* Joint Type Configuration */}
               <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-2">
                 <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 mb-1 flex items-center justify-between">
@@ -2881,107 +3156,7 @@ function App() {
                 </div>
               )}
 
-              {/* Position Coordinates (Applicable to all nodes!) */}
-              <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-3">
-                <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2">Position Offset</h3>
-                <div className="flex flex-col gap-3">
-                  <div className="flex flex-col gap-1.5">
-                    <label className="text-xs text-slate-500 flex items-center justify-between font-medium">X Position
-                      <span>{selectedNode.pos[0].toFixed(2)} m</span>
-                    </label>
-                    <input 
-                      type="range" 
-                      min="-10" 
-                      max="10" 
-                      step="0.05" 
-                      className="w-full accent-blue-500 cursor-pointer" 
-                      value={selectedNode.pos[0]} 
-                      onChange={(e) => handleMove(0, parseFloat(e.target.value))} 
-                    />
-                  </div>
-                  <div className="flex flex-col gap-1.5">
-                    <label className="text-xs text-slate-500 flex items-center justify-between font-medium">Y Position
-                      <span>{selectedNode.pos[1].toFixed(2)} m</span>
-                    </label>
-                    <input 
-                      type="range" 
-                      min="-10" 
-                      max="10" 
-                      step="0.05" 
-                      className="w-full accent-blue-500 cursor-pointer" 
-                      value={selectedNode.pos[1]} 
-                      onChange={(e) => handleMove(1, parseFloat(e.target.value))} 
-                    />
-                  </div>
-                  <div className="flex flex-col gap-1.5">
-                    {(() => {
-                      // For dynamic mesh bodies, pos[2] = centroid Z, not base Z.
-                      // Compute centroid offset from renderVertices so slider 0 = base on ground.
-                      const dynMesh = selectedNode.geoms?.find((g: any) => g.dynamic && g.renderVertices);
-                      const centroidZ = dynMesh
-                        ? -Math.min(...(dynMesh.renderVertices as number[]).filter((_: number, i: number) => i % 3 === 2))
-                        : 0;
-                      const displayZ = selectedNode.pos[2] - centroidZ;
-                      return (<>
-                        <label className="text-xs text-slate-500 flex items-center justify-between font-medium">Z Position (Height)
-                          <span>{displayZ.toFixed(2)} m{centroidZ > 0 ? <span className="text-slate-300 ml-1">(+{centroidZ.toFixed(3)} centroid)</span> : null}</span>
-                        </label>
-                        <input
-                          type="range"
-                          min="0"
-                          max="10"
-                          step="0.05"
-                          className="w-full accent-blue-500 cursor-pointer"
-                          value={displayZ}
-                          onChange={(e) => handleMove(2, parseFloat(e.target.value) + centroidZ)}
-                        />
-                      </>);
-                    })()}
-                  </div>
-                  <div className="flex flex-col gap-1.5 mt-1 border-t border-slate-100 pt-2">
-                    <label className="text-xs text-slate-500 flex items-center justify-between font-medium">X Rotation
-                      <span>{(selectedNode.euler ? selectedNode.euler[0] : 0).toFixed(0)}°</span>
-                    </label>
-                    <input 
-                      type="range" 
-                      min="0" 
-                      max="360" 
-                      step="1" 
-                      className="w-full accent-blue-500 cursor-pointer" 
-                      value={selectedNode.euler ? selectedNode.euler[0] : 0} 
-                      onChange={(e) => updateNodeRotation(selectedNode.id, 0, parseFloat(e.target.value))} 
-                    />
-                  </div>
-                  <div className="flex flex-col gap-1.5 mt-1">
-                    <label className="text-xs text-slate-500 flex items-center justify-between font-medium">Y Rotation
-                      <span>{(selectedNode.euler ? selectedNode.euler[1] : 0).toFixed(0)}°</span>
-                    </label>
-                    <input 
-                      type="range" 
-                      min="0" 
-                      max="360" 
-                      step="1" 
-                      className="w-full accent-blue-500 cursor-pointer" 
-                      value={selectedNode.euler ? selectedNode.euler[1] : 0} 
-                      onChange={(e) => updateNodeRotation(selectedNode.id, 1, parseFloat(e.target.value))} 
-                    />
-                  </div>
-                  <div className="flex flex-col gap-1.5 mt-1">
-                    <label className="text-xs text-slate-500 flex items-center justify-between font-medium">Z Rotation
-                      <span>{(selectedNode.euler ? selectedNode.euler[2] : 0).toFixed(0)}°</span>
-                    </label>
-                    <input 
-                      type="range" 
-                      min="0" 
-                      max="360" 
-                      step="1" 
-                      className="w-full accent-blue-500 cursor-pointer" 
-                      value={selectedNode.euler ? selectedNode.euler[2] : 0} 
-                      onChange={(e) => updateNodeRotation(selectedNode.id, 2, parseFloat(e.target.value))} 
-                    />
-                  </div>
-                </div>
-              </div>
+
 
               {/* Gear Config */}
               {selectedNode.id.includes('gear') && selectedNode.geoms && (() => {
@@ -3418,6 +3593,226 @@ function App() {
                                 onChange={(e) => {
                                   const val = parseFloat(e.target.value);
                                   updateWedgeParams(selectedNode.id, { wedgeAngle: val });
+                                }}
+                                className="w-full accent-blue-500 cursor-pointer" 
+                              />
+                            </div>
+                          </div>
+                        )}
+
+                        {selectedNode.isPyramid && (
+                          <div className="flex flex-col gap-3">
+                            <div className="flex flex-col gap-1">
+                              <label className="text-xs font-medium text-slate-500 flex justify-between">Base Width (X) <span>{(selectedNode.width || 0.5).toFixed(2)} m</span></label>
+                              <input 
+                                type="range" 
+                                min="0.1" 
+                                max="3.0" 
+                                step="0.01" 
+                                value={selectedNode.width || 0.5} 
+                                onChange={(e) => {
+                                  const val = parseFloat(e.target.value);
+                                  updatePyramidParams(selectedNode.id, { width: val });
+                                }}
+                                className="w-full accent-blue-500 cursor-pointer" 
+                              />
+                            </div>
+                            <div className="flex flex-col gap-1">
+                              <label className="text-xs font-medium text-slate-500 flex justify-between">Base Depth (Y) <span>{(selectedNode.depth || 0.5).toFixed(2)} m</span></label>
+                              <input 
+                                type="range" 
+                                min="0.1" 
+                                max="3.0" 
+                                step="0.01" 
+                                value={selectedNode.depth || 0.5} 
+                                onChange={(e) => {
+                                  const val = parseFloat(e.target.value);
+                                  updatePyramidParams(selectedNode.id, { depth: val });
+                                }}
+                                className="w-full accent-blue-500 cursor-pointer" 
+                              />
+                            </div>
+                            <div className="flex flex-col gap-1">
+                              <label className="text-xs font-medium text-slate-500 flex justify-between">Height (Z) <span>{(selectedNode.height || 0.5).toFixed(2)} m</span></label>
+                              <input 
+                                type="range" 
+                                min="0.1" 
+                                max="3.0" 
+                                step="0.01" 
+                                value={selectedNode.height || 0.5} 
+                                onChange={(e) => {
+                                  const val = parseFloat(e.target.value);
+                                  updatePyramidParams(selectedNode.id, { height: val });
+                                }}
+                                className="w-full accent-blue-500 cursor-pointer" 
+                              />
+                            </div>
+                          </div>
+                        )}
+
+                        {selectedNode.isCone && (
+                          <div className="flex flex-col gap-3">
+                            <div className="flex flex-col gap-1">
+                              <label className="text-xs font-medium text-slate-500 flex justify-between">Radius <span>{(selectedNode.radius || 0.3).toFixed(2)} m</span></label>
+                              <input 
+                                type="range" 
+                                min="0.05" 
+                                max="2.0" 
+                                step="0.01" 
+                                value={selectedNode.radius || 0.3} 
+                                onChange={(e) => {
+                                  const val = parseFloat(e.target.value);
+                                  updateConeParams(selectedNode.id, { radius: val });
+                                }}
+                                className="w-full accent-blue-500 cursor-pointer" 
+                              />
+                            </div>
+                            <div className="flex flex-col gap-1">
+                              <label className="text-xs font-medium text-slate-500 flex justify-between">Height <span>{(selectedNode.height || 0.6).toFixed(2)} m</span></label>
+                              <input 
+                                type="range" 
+                                min="0.1" 
+                                max="3.0" 
+                                step="0.01" 
+                                value={selectedNode.height || 0.6} 
+                                onChange={(e) => {
+                                  const val = parseFloat(e.target.value);
+                                  updateConeParams(selectedNode.id, { height: val });
+                                }}
+                                className="w-full accent-blue-500 cursor-pointer" 
+                              />
+                            </div>
+                          </div>
+                        )}
+
+                        {selectedNode.isTorus && (
+                          <div className="flex flex-col gap-3">
+                            <div className="flex flex-col gap-1">
+                              <label className="text-xs font-medium text-slate-500 flex justify-between">Major Radius (Ring) <span>{(selectedNode.majorRadius || 0.4).toFixed(2)} m</span></label>
+                              <input 
+                                type="range" 
+                                min="0.1" 
+                                max="3.0" 
+                                step="0.01" 
+                                value={selectedNode.majorRadius || 0.4} 
+                                onChange={(e) => {
+                                  const val = parseFloat(e.target.value);
+                                  updateTorusParams(selectedNode.id, { majorRadius: val });
+                                }}
+                                className="w-full accent-blue-500 cursor-pointer" 
+                              />
+                            </div>
+                            <div className="flex flex-col gap-1">
+                              <label className="text-xs font-medium text-slate-500 flex justify-between">Tube Radius <span>{(selectedNode.tubeRadius || 0.1).toFixed(2)} m</span></label>
+                              <input 
+                                type="range" 
+                                min="0.02" 
+                                max="1.0" 
+                                step="0.01" 
+                                value={selectedNode.tubeRadius || 0.1} 
+                                onChange={(e) => {
+                                  const val = parseFloat(e.target.value);
+                                  updateTorusParams(selectedNode.id, { tubeRadius: val });
+                                }}
+                                className="w-full accent-blue-500 cursor-pointer" 
+                              />
+                            </div>
+                          </div>
+                        )}
+
+                        {selectedNode.isTube && (
+                          <div className="flex flex-col gap-3">
+                            <div className="flex flex-col gap-1">
+                              <label className="text-xs font-medium text-slate-500 flex justify-between">Inner Radius <span>{(selectedNode.innerRadius || 0.2).toFixed(2)} m</span></label>
+                              <input 
+                                type="range" 
+                                min="0.02" 
+                                max={selectedNode.outerRadius ? selectedNode.outerRadius - 0.01 : 0.29} 
+                                step="0.01" 
+                                value={selectedNode.innerRadius || 0.2} 
+                                onChange={(e) => {
+                                  const val = parseFloat(e.target.value);
+                                  updateTubeParams(selectedNode.id, { innerRadius: val });
+                                }}
+                                className="w-full accent-blue-500 cursor-pointer" 
+                              />
+                            </div>
+                            <div className="flex flex-col gap-1">
+                              <label className="text-xs font-medium text-slate-500 flex justify-between">Outer Radius <span>{(selectedNode.outerRadius || 0.3).toFixed(2)} m</span></label>
+                              <input 
+                                type="range" 
+                                min={selectedNode.innerRadius ? selectedNode.innerRadius + 0.01 : 0.21} 
+                                max="2.0" 
+                                step="0.01" 
+                                value={selectedNode.outerRadius || 0.3} 
+                                onChange={(e) => {
+                                  const val = parseFloat(e.target.value);
+                                  updateTubeParams(selectedNode.id, { outerRadius: val });
+                                }}
+                                className="w-full accent-blue-500 cursor-pointer" 
+                              />
+                            </div>
+                            <div className="flex flex-col gap-1">
+                              <label className="text-xs font-medium text-slate-500 flex justify-between">Height (Z) <span>{(selectedNode.height || 0.5).toFixed(2)} m</span></label>
+                              <input 
+                                type="range" 
+                                min="0.1" 
+                                max="3.0" 
+                                step="0.01" 
+                                value={selectedNode.height || 0.5} 
+                                onChange={(e) => {
+                                  const val = parseFloat(e.target.value);
+                                  updateTubeParams(selectedNode.id, { height: val });
+                                }}
+                                className="w-full accent-blue-500 cursor-pointer" 
+                              />
+                            </div>
+                          </div>
+                        )}
+
+                        {geom.type === 'ellipsoid' && (
+                          <div className="flex flex-col gap-3">
+                            <div className="flex flex-col gap-1">
+                              <label className="text-xs font-medium text-slate-500 flex justify-between">Radius X <span>{geom.size[0].toFixed(2)} m</span></label>
+                              <input 
+                                type="range" 
+                                min="0.05" 
+                                max="2.0" 
+                                step="0.01" 
+                                value={geom.size[0]} 
+                                onChange={(e) => {
+                                  const val = parseFloat(e.target.value);
+                                  updateNodeGeom(selectedNode.id, { size: [val, geom.size[1], geom.size[2]] }, activeIndex);
+                                }}
+                                className="w-full accent-blue-500 cursor-pointer" 
+                              />
+                            </div>
+                            <div className="flex flex-col gap-1">
+                              <label className="text-xs font-medium text-slate-500 flex justify-between">Radius Y <span>{geom.size[1].toFixed(2)} m</span></label>
+                              <input 
+                                type="range" 
+                                min="0.05" 
+                                max="2.0" 
+                                step="0.01" 
+                                value={geom.size[1]} 
+                                onChange={(e) => {
+                                  const val = parseFloat(e.target.value);
+                                  updateNodeGeom(selectedNode.id, { size: [geom.size[0], val, geom.size[2]] }, activeIndex);
+                                }}
+                                className="w-full accent-blue-500 cursor-pointer" 
+                              />
+                            </div>
+                            <div className="flex flex-col gap-1">
+                              <label className="text-xs font-medium text-slate-500 flex justify-between">Radius Z <span>{geom.size[2].toFixed(2)} m</span></label>
+                              <input 
+                                type="range" 
+                                min="0.05" 
+                                max="2.0" 
+                                step="0.01" 
+                                value={geom.size[2]} 
+                                onChange={(e) => {
+                                  const val = parseFloat(e.target.value);
+                                  updateNodeGeom(selectedNode.id, { size: [geom.size[0], geom.size[1], val] }, activeIndex);
                                 }}
                                 className="w-full accent-blue-500 cursor-pointer" 
                               />

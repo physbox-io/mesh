@@ -71,6 +71,15 @@ export interface SceneNode {
   depth?: number;
   height?: number;
   wedgeAngle?: number;
+  isPyramid?: boolean;
+  isCone?: boolean;
+  isTorus?: boolean;
+  isTube?: boolean;
+  radius?: number;
+  majorRadius?: number;
+  tubeRadius?: number;
+  innerRadius?: number;
+  outerRadius?: number;
   isPulleyWheel?: boolean;
   leftTargetId?: string;
   rightTargetId?: string;

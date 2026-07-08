@@ -3,6 +3,7 @@ import type { SceneGraph, SceneNode } from '../types/scene';
 import { compileToMJCF } from '../utils/mjcf';
 import { PRESETS, pendulumPreset, generateGearGeoms } from '../presets/presetScenes';
 import { PhysicsWorkerClient, type BuiltResult, type FrameSnapshot } from './physicsWorkerClient';
+import { generatePyramidMeshData, generateConeMeshData, generateTorusMeshData, generateTubeMeshData } from '../utils/geom';
 
 const initialScene: SceneGraph = pendulumPreset;
 
@@ -283,11 +284,15 @@ export interface PhysicsState {
   setDragTarget: (target: { x: number; y: number; z: number } | null) => void;
   setDragDistance: (distance: number) => void;
   updateWedgeParams: (id: string, params: { width?: number; depth?: number; height?: number; wedgeAngle?: number }) => void;
+  updatePyramidParams: (id: string, params: { width?: number; depth?: number; height?: number }) => void;
+  updateConeParams: (id: string, params: { radius?: number; height?: number }) => void;
+  updateTorusParams: (id: string, params: { majorRadius?: number; tubeRadius?: number }) => void;
+  updateTubeParams: (id: string, params: { innerRadius?: number; outerRadius?: number; height?: number }) => void;
   updatePulleyParams: (id: string, params: { leftTargetId?: string; rightTargetId?: string; pulleyRadius?: number }) => void;
   updateRopeParams: (id: string, params: { pulleyWheelId?: string; leftTargetId?: string; rightTargetId?: string }) => void;
   
   setParentUnderSelected: (val: boolean) => void;
-  addComponent: (type: 'box' | 'sphere' | 'capsule' | 'cylinder' | 'bob' | 'gear' | 'wedge' | 'pulley_wheel' | 'pulley_rope' | 'mesh' | 'openscad', position: number[]) => void;
+  addComponent: (type: 'box' | 'sphere' | 'capsule' | 'cylinder' | 'bob' | 'gear' | 'wedge' | 'pulley_wheel' | 'pulley_rope' | 'mesh' | 'openscad' | 'pyramid' | 'cone' | 'torus' | 'tube' | 'ellipsoid', position: number[]) => void;
   updateNodeScad: (id: string, scadCode: string, compiledData: { vertices: number[], faces: number[], renderVertices: number[] }, skipRecompile?: boolean) => void;
   recompile: (overrideScene?: SceneGraph, overrideSelectedId?: string | null, forceReset?: boolean, keepPreset?: boolean) => Promise<void>;
   loadPreset: (name: string) => void;
@@ -427,6 +432,118 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     get().recompile(newScene);
   },
   
+  updatePyramidParams: (id, params) => {
+    const newScene = JSON.parse(JSON.stringify(get().sceneGraph)) as SceneGraph;
+    const traverse = (nodes: any[]) => {
+      if (!nodes) return false;
+      for (const node of nodes) {
+        if (node.id === id) {
+          if (params.width !== undefined) node.width = params.width;
+          if (params.depth !== undefined) node.depth = params.depth;
+          if (params.height !== undefined) node.height = params.height;
+          
+          if (node.geoms && node.geoms.length > 0) {
+            const w = node.width || 0.5;
+            const d = node.depth || 0.5;
+            const h = node.height || 0.5;
+            const { vertices, faces, renderVertices } = generatePyramidMeshData(w, d, h);
+            node.geoms[0].vertices = vertices;
+            node.geoms[0].faces = faces;
+            node.geoms[0].renderVertices = renderVertices;
+          }
+          return true;
+        }
+        if (traverse(node.children)) return true;
+      }
+      return false;
+    };
+    traverse(newScene.nodes);
+    get().recompile(newScene);
+  },
+
+  updateConeParams: (id, params) => {
+    const newScene = JSON.parse(JSON.stringify(get().sceneGraph)) as SceneGraph;
+    const traverse = (nodes: any[]) => {
+      if (!nodes) return false;
+      for (const node of nodes) {
+        if (node.id === id) {
+          if (params.radius !== undefined) node.radius = params.radius;
+          if (params.height !== undefined) node.height = params.height;
+          
+          if (node.geoms && node.geoms.length > 0) {
+            const r = node.radius || 0.3;
+            const h = node.height || 0.6;
+            const { vertices, faces, renderVertices } = generateConeMeshData(r, h, 16);
+            node.geoms[0].vertices = vertices;
+            node.geoms[0].faces = faces;
+            node.geoms[0].renderVertices = renderVertices;
+          }
+          return true;
+        }
+        if (traverse(node.children)) return true;
+      }
+      return false;
+    };
+    traverse(newScene.nodes);
+    get().recompile(newScene);
+  },
+
+  updateTorusParams: (id, params) => {
+    const newScene = JSON.parse(JSON.stringify(get().sceneGraph)) as SceneGraph;
+    const traverse = (nodes: any[]) => {
+      if (!nodes) return false;
+      for (const node of nodes) {
+        if (node.id === id) {
+          if (params.majorRadius !== undefined) node.majorRadius = params.majorRadius;
+          if (params.tubeRadius !== undefined) node.tubeRadius = params.tubeRadius;
+          
+          if (node.geoms && node.geoms.length > 0) {
+            const R = node.majorRadius || 0.4;
+            const r = node.tubeRadius || 0.1;
+            const { vertices, faces, renderVertices } = generateTorusMeshData(R, r, 24, 16);
+            node.geoms[0].vertices = vertices;
+            node.geoms[0].faces = faces;
+            node.geoms[0].renderVertices = renderVertices;
+          }
+          return true;
+        }
+        if (traverse(node.children)) return true;
+      }
+      return false;
+    };
+    traverse(newScene.nodes);
+    get().recompile(newScene);
+  },
+
+  updateTubeParams: (id, params) => {
+    const newScene = JSON.parse(JSON.stringify(get().sceneGraph)) as SceneGraph;
+    const traverse = (nodes: any[]) => {
+      if (!nodes) return false;
+      for (const node of nodes) {
+        if (node.id === id) {
+          if (params.innerRadius !== undefined) node.innerRadius = params.innerRadius;
+          if (params.outerRadius !== undefined) node.outerRadius = params.outerRadius;
+          if (params.height !== undefined) node.height = params.height;
+          
+          if (node.geoms && node.geoms.length > 0) {
+            const r1 = node.innerRadius || 0.2;
+            const r2 = node.outerRadius || 0.3;
+            const h = node.height || 0.5;
+            const { vertices, faces, renderVertices } = generateTubeMeshData(r1, r2, h, 24);
+            node.geoms[0].vertices = vertices;
+            node.geoms[0].faces = faces;
+            node.geoms[0].renderVertices = renderVertices;
+          }
+          return true;
+        }
+        if (traverse(node.children)) return true;
+      }
+      return false;
+    };
+    traverse(newScene.nodes);
+    get().recompile(newScene);
+  },
+
   updatePulleyParams: (id, params) => {
     const newScene = JSON.parse(JSON.stringify(get().sceneGraph)) as SceneGraph;
     const traverse = (nodes: any[]) => {
@@ -995,8 +1112,83 @@ export const useStore = create<PhysicsState>()((set, get) => ({
           ]
         }];
         joints = [{ name: `${id}_free`, type: 'free' }];
+      } else if (type === 'pyramid') {
+        const w = 0.5;
+        const d = 0.5;
+        const h = 0.5;
+        const { vertices, faces, renderVertices } = generatePyramidMeshData(w, d, h);
+        geoms = [{
+          name: `${id}_mesh`,
+          type: 'mesh',
+          size: [1],
+          rgba: [0.85, 0.35, 0.15, 1], // reddish orange
+          mass: 1,
+          condim: 3,
+          dynamic: true,
+          vertices,
+          faces,
+          renderVertices
+        }];
+        joints = [{ name: `${id}_free`, type: 'free' }];
+      } else if (type === 'cone') {
+        const r = 0.3;
+        const h = 0.6;
+        const { vertices, faces, renderVertices } = generateConeMeshData(r, h, 16);
+        geoms = [{
+          name: `${id}_mesh`,
+          type: 'mesh',
+          size: [1],
+          rgba: [0.15, 0.65, 0.85, 1], // cyan blue
+          mass: 1,
+          condim: 3,
+          dynamic: true,
+          vertices,
+          faces,
+          renderVertices
+        }];
+        joints = [{ name: `${id}_free`, type: 'free' }];
+      } else if (type === 'torus') {
+        const R = 0.4;
+        const r = 0.1;
+        const { vertices, faces, renderVertices } = generateTorusMeshData(R, r, 24, 16);
+        geoms = [{
+          name: `${id}_mesh`,
+          type: 'mesh',
+          size: [1],
+          rgba: [0.55, 0.35, 0.85, 1], // purple
+          mass: 1,
+          condim: 3,
+          dynamic: true,
+          vertices,
+          faces,
+          renderVertices
+        }];
+        joints = [{ name: `${id}_free`, type: 'free' }];
+      } else if (type === 'tube') {
+        const r1 = 0.2;
+        const r2 = 0.3;
+        const h = 0.5;
+        const { vertices, faces, renderVertices } = generateTubeMeshData(r1, r2, h, 24);
+        geoms = [{
+          name: `${id}_mesh`,
+          type: 'mesh',
+          size: [1],
+          rgba: [0.35, 0.75, 0.35, 1], // green
+          mass: 1,
+          condim: 3,
+          dynamic: true,
+          vertices,
+          faces,
+          renderVertices
+        }];
+        joints = [{ name: `${id}_free`, type: 'free' }];
+      } else if (type === 'ellipsoid') {
+        geomType = 'ellipsoid';
+        size = [0.3, 0.2, 0.15];
+        rgba = [0.85, 0.55, 0.15, 1]; // yellow/orange
+        joints = isChildJoint ? [{ name: `${id}_hinge`, type: 'hinge', axis: [0, 1, 0], pos: [0, 0, 0], damping: 0.5 }] : [{ name: `${id}_free`, type: 'free' }];
       }
-      if (type !== 'mesh' && type !== 'openscad') {
+      if (type !== 'mesh' && type !== 'openscad' && type !== 'pyramid' && type !== 'cone' && type !== 'torus' && type !== 'tube') {
         geoms = [{ name: `${id}_geom`, type: geomType, size, mass, rgba }];
       }
     }
@@ -1012,6 +1204,28 @@ export const useStore = create<PhysicsState>()((set, get) => ({
         depth: 1.0,
         height: 0.5,
         wedgeAngle: 14.036
+      } : {}),
+      ...(type === 'pyramid' ? {
+        isPyramid: true,
+        width: 0.5,
+        depth: 0.5,
+        height: 0.5
+      } : {}),
+      ...(type === 'cone' ? {
+        isCone: true,
+        radius: 0.3,
+        height: 0.6
+      } : {}),
+      ...(type === 'torus' ? {
+        isTorus: true,
+        majorRadius: 0.4,
+        tubeRadius: 0.1
+      } : {}),
+      ...(type === 'tube' ? {
+        isTube: true,
+        innerRadius: 0.2,
+        outerRadius: 0.3,
+        height: 0.5
       } : {}),
       ...(type === 'pulley_wheel' ? {
         isPulleyWheel: true,

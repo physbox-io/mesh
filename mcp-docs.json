@@ -33,6 +33,7 @@
     "meshVertices": "EXCEPTION: mesh geom vertices are in Three.js Y-up world space (X=right, Y=up, Z=toward camera). See mesh section."
   },
   "tools": {
+    "physics_validate_scad": "Validate OpenSCAD code and return whether it compiles successfully, along with any compile error message.",
     "physics_get_state": "Return full Physics Sim state: sceneGraph, isPlaying, isLoaded, gravity, wind, density, lastCompileError (string | null — the most recent MJCF/MuJoCo compile failure message, or null if the last compile succeeded).",
     "physics_get_scene": "Return the full scene graph (bodies, joints, geoms, scripts), including raw mesh vertex/face arrays. Can be a very large payload for scad/mesh-heavy scenes — prefer physics_get_scene_summary unless you actually need the raw arrays.",
     "physics_get_scene_summary": "Return a lightweight scene summary: per-node id/name/pos/quat/euler/joints, and per-geom type/size, or for mesh geoms vertCount/faceCount/bbox instead of the raw vertices/faces arrays. Use this for routine checks (did it compile, roughly what size/shape is it) instead of physics_get_scene.",

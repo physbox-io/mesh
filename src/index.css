@@ -174,13 +174,33 @@ aside.glass-panel h3 {
   text-transform: uppercase;
   letter-spacing: 0.05em;
   border-bottom: 1px solid #f1f5f9;
-  padding-bottom: 6px;
+  padding: 6px 8px;
+  margin-top: -6px;
   margin-bottom: 6px;
+  margin-left: -8px;
+  margin-right: -8px;
+  border-radius: 4px;
   transition: all 0.15s ease;
+  user-select: none;
 }
 .dark aside.glass-panel h3 {
   color: #e2e8f0;
   border-bottom-color: #1e293b;
+}
+aside.glass-panel h3:hover {
+  background-color: rgba(226, 232, 240, 0.4);
+}
+.dark aside.glass-panel h3:hover {
+  background-color: rgba(30, 41, 59, 0.4);
+}
+
+/* Collapsible Card styles */
+aside.glass-panel div.is-collapsed > *:not(h3) {
+  display: none !important;
+}
+aside.glass-panel div.is-collapsed h3 {
+  border-bottom: none;
+  margin-bottom: 0px;
 }
 
 /* API Ref code blocks */

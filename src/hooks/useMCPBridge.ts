@@ -321,6 +321,22 @@ export function useMCPBridge() {
           return { ok: true };
         }
 
+        case 'VALIDATE_SCAD': {
+          const scadCode = msg.scad;
+          if (scadCode === undefined) {
+            return { ok: false, error: 'Missing scad parameter' };
+          }
+          try {
+            const result = await compileSCAD(scadCode);
+            if (!result || result.faces.length === 0) {
+              return { ok: false, error: 'Compilation produced an empty mesh (0 faces)' };
+            }
+            return { ok: true };
+          } catch (e) {
+            return { ok: false, error: String(e) };
+          }
+        }
+
         case 'UPDATE_SCENE': {
           if (!msg.sceneGraph) return { ok: false, error: 'Missing sceneGraph' };
           // The MCP tool schema passes sceneGraph as a bare array of nodes (matching
