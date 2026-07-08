@@ -298,21 +298,9 @@ export function useMCPBridge() {
                   'coin_flip', 'windmill', 'physics_only_windmill', 'traditional_windmill',
                   'drone', 'bouncy_balls'];
 
-        case 'GET_USER_PRESETS': {
-          try {
-            return JSON.parse(localStorage.getItem('physics_user_presets') || '{}');
-          } catch (e) {
-            return { error: String(e) };
-          }
-        }
-
         case 'SCREENSHOT': {
           const gl = (window as any)._physics_gl;
           if (!gl || !gl.domElement) return { ok: false, error: 'Renderer not ready yet' };
-          const state = (window as any)._physics_state;
-          if (state && state.scene && state.camera) {
-            gl.render(state.scene, state.camera);
-          }
           // r3f's default frameloop ("always") keeps redrawing every animation
           // frame, and preserveDrawingBuffer keeps that last-drawn frame around
           // for toDataURL to read synchronously — no manual render needed here.

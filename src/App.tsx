@@ -5,7 +5,7 @@ import { useMuJoCoInit } from './hooks/useMuJoCo';
 import { useMCPBridge } from './hooks/useMCPBridge';
 import { useStore, scaleMeshGeoms, getPhysicsWorkerClient } from './store/useStore';
 import type { SceneGraph, SceneNode } from './types/scene';
-import { Play, Square, SlidersHorizontal, Settings, Box, Circle, X, RotateCcw, Eye, Trash2, Layers, CircleDot, Zap, Info, Triangle, Disc, Code, Menu, Shapes, Minimize2, Save, Download, Upload, FileText, ChevronDown, ChevronUp, Edit3, Printer, Scissors, Sparkles } from 'lucide-react';
+import { Play, Square, SlidersHorizontal, Settings, Box, Circle, X, RotateCcw, Trash2, Layers, CircleDot, Zap, Info, Triangle, Disc, Code, Menu, Shapes, Minimize2, Save, Download, Upload, FileText, ChevronDown, ChevronUp, Edit3, Printer, Scissors, Sparkles, Sun, Moon } from 'lucide-react';
 import { useRef, useMemo, useEffect, useCallback, useState, type RefObject } from 'react';
 import AICopilotPanel from './components/AICopilotPanel';
 import * as THREE from 'three';
@@ -19,18 +19,18 @@ import { loadCompiler, compileSCAD, isCompilerReady } from './utils/openscad';
 function parseNoteMarkdown(md: string): string {
   if (!md) return '';
   let html = md.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  html = html.replace(/^### (.*$)/gim, '<h3 class="text-xs font-bold text-slate-800 mt-2 mb-1 uppercase tracking-wide">$1</h3>');
-  html = html.replace(/^## (.*$)/gim, '<h2 class="text-sm font-bold text-slate-800 mt-3 mb-1 border-b border-slate-100 pb-0.5">$1</h2>');
-  html = html.replace(/^# (.*$)/gim, '<h1 class="text-base font-extrabold text-slate-900 mt-3 mb-2 border-b border-slate-200 pb-1">$1</h1>');
-  html = html.replace(/\*\*(.*?)\*\*/g, '<strong class="font-bold text-slate-900">$1</strong>');
-  html = html.replace(/\*(.*?)\*/g, '<em class="italic text-slate-700">$1</em>');
-  html = html.replace(/`(.*?)`/g, '<code class="px-1 py-0.5 bg-slate-100 border border-slate-200 rounded text-[10px] font-mono text-pink-600">$1</code>');
-  html = html.replace(/\[(.*?)\]\((.*?)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline">$1</a>');
-  html = html.replace(/^\s*-\s+(.*$)/gim, '<li class="ml-4 list-disc text-slate-600 text-xs mb-0.5">$1</li>');
+  html = html.replace(/^### (.*$)/gim, '<h3 class="text-xs font-bold text-slate-800 dark:text-slate-200 mt-2 mb-1 uppercase tracking-wide">$1</h3>');
+  html = html.replace(/^## (.*$)/gim, '<h2 class="text-sm font-bold text-slate-800 dark:text-slate-200 mt-3 mb-1 border-b border-slate-100 dark:border-slate-800 pb-0.5">$1</h2>');
+  html = html.replace(/^# (.*$)/gim, '<h1 class="text-base font-extrabold text-slate-900 dark:text-slate-100 mt-3 mb-2 border-b border-slate-200 dark:border-slate-800 pb-1">$1</h1>');
+  html = html.replace(/\*\*(.*?)\*\*/g, '<strong class="font-bold text-slate-900 dark:text-slate-100">$1</strong>');
+  html = html.replace(/\*(.*?)\*/g, '<em class="italic text-slate-700 dark:text-slate-300">$1</em>');
+  html = html.replace(/`(.*?)`/g, '<code class="px-1 py-0.5 bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded text-[10px] font-mono text-pink-600 dark:text-pink-400">$1</code>');
+  html = html.replace(/\[(.*?)\]\((.*?)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer" class="text-blue-600 dark:text-blue-400 hover:underline">$1</a>');
+  html = html.replace(/^\s*-\s+(.*$)/gim, '<li class="ml-4 list-disc text-slate-600 dark:text-slate-300 text-xs mb-0.5">$1</li>');
   html = html.split('\n').map(line => {
     const t = line.trim();
     if (t.startsWith('<h') || t.startsWith('<li') || t === '') return line;
-    return `<p class="text-xs text-slate-600 mb-1.5 leading-relaxed">${line}</p>`;
+    return `<p class="text-xs text-slate-600 dark:text-slate-300 mb-1.5 leading-relaxed">${line}</p>`;
   }).join('\n');
   return html;
 }
@@ -62,26 +62,26 @@ function NoteCardOverlay({ card, isEditing, onToggleEdit, onToggleMinimize, onMa
   return (
     <div
       style={{ position: 'absolute', left: card.x, top: card.y, zIndex: 25, width: 300 }}
-      className="bg-white/95 backdrop-blur-md border border-slate-200 shadow-2xl rounded-2xl overflow-hidden"
+      className="bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border border-slate-200 dark:border-slate-800 shadow-2xl rounded-2xl overflow-hidden"
     >
       {/* Title bar */}
       <div
-        className="flex items-center justify-between px-3 py-2 bg-slate-50/80 border-b border-slate-100 cursor-move select-none"
+        className="flex items-center justify-between px-3 py-2 bg-slate-50/80 dark:bg-slate-950/40 border-b border-slate-100 dark:border-slate-800 cursor-move select-none"
         onMouseDown={handleTitleMouseDown}
       >
         <div className="flex items-center gap-1.5">
-          <FileText className="w-3.5 h-3.5 text-violet-600" />
-          <span className="text-xs font-semibold text-slate-700">Note Card</span>
+          <FileText className="w-3.5 h-3.5 text-violet-600 dark:text-violet-400" />
+          <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">Note Card</span>
         </div>
         <div className="flex items-center gap-1">
-          <button onClick={onToggleEdit} className="p-0.5 rounded hover:bg-slate-200 transition-colors" title={isEditing ? 'Preview' : 'Edit'}>
-            <Edit3 className="w-3 h-3 text-slate-500" />
+          <button onClick={onToggleEdit} className="p-0.5 rounded hover:bg-slate-200 dark:hover:bg-slate-800 transition-colors" title={isEditing ? 'Preview' : 'Edit'}>
+            <Edit3 className="w-3 h-3 text-slate-500 dark:text-slate-400" />
           </button>
-          <button onClick={onToggleMinimize} className="p-0.5 rounded hover:bg-slate-200 transition-colors" title={card.minimized ? 'Expand' : 'Minimize'}>
-            {card.minimized ? <ChevronDown className="w-3 h-3 text-slate-500" /> : <ChevronUp className="w-3 h-3 text-slate-500" />}
+          <button onClick={onToggleMinimize} className="p-0.5 rounded hover:bg-slate-200 dark:hover:bg-slate-800 transition-colors" title={card.minimized ? 'Expand' : 'Minimize'}>
+            {card.minimized ? <ChevronDown className="w-3 h-3 text-slate-500 dark:text-slate-400" /> : <ChevronUp className="w-3 h-3 text-slate-500 dark:text-slate-400" />}
           </button>
-          <button onClick={onClose} className="p-0.5 rounded hover:bg-red-100 transition-colors" title="Close">
-            <X className="w-3 h-3 text-slate-500 hover:text-red-500" />
+          <button onClick={onClose} className="p-0.5 rounded hover:bg-red-100 dark:hover:bg-red-950/40 transition-colors" title="Close">
+            <X className="w-3 h-3 text-slate-500 dark:text-slate-400 hover:text-red-500" />
           </button>
         </div>
       </div>
@@ -95,12 +95,12 @@ function NoteCardOverlay({ card, isEditing, onToggleEdit, onToggleMinimize, onMa
               rows={8}
               value={card.markdown}
               onChange={(e) => onMarkdownChange(e.target.value)}
-              className="w-full px-2 py-1.5 border border-slate-200 rounded text-xs bg-white text-slate-700 outline-none focus:border-violet-400 font-mono resize-y shadow-sm"
+              className="w-full px-2 py-1.5 border border-slate-200 dark:border-slate-800 rounded text-xs bg-white dark:bg-slate-950 text-slate-700 dark:text-slate-200 outline-none focus:border-violet-400 font-mono resize-y shadow-sm"
               placeholder="Write markdown here..."
             />
           ) : (
             <div
-              className="prose-sm max-h-64 overflow-y-auto"
+              className="prose-sm dark:prose-invert max-h-64 overflow-y-auto text-slate-700 dark:text-slate-300"
               dangerouslySetInnerHTML={{ __html: parseNoteMarkdown(card.markdown) }}
             />
           )}
@@ -1291,6 +1291,25 @@ function App() {
     (window as any).useStore = useStore;
   }
   useMuJoCoInit();
+  const [darkMode, setDarkMode] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('physics_dark_mode') === 'true';
+    }
+    return false;
+  });
+
+  useEffect(() => {
+    if (darkMode) {
+      document.documentElement.classList.add('dark');
+      localStorage.setItem('physics_dark_mode', 'true');
+    } else {
+      document.documentElement.classList.remove('dark');
+      localStorage.setItem('physics_dark_mode', 'false');
+    }
+  }, [darkMode]);
+
+  const toggleDarkMode = () => setDarkMode(prev => !prev);
+
   const [isDocsOpen, setIsDocsOpen] = useState(false);
   const [showAICopilot, setShowAICopilot] = useState(false);
   const [docsTab, setDocsTab] = useState<'gravity' | 'coupling' | 'collision' | 'friction' | 'scripting'>('gravity');
@@ -1886,41 +1905,58 @@ function App() {
             setActiveGeomIndex(0);
             setIsLeftSidebarOpen(false);
           }} 
-          style={{ paddingLeft: `${depth * 14 + 8}px` }}
-          className={`flex items-center px-2 py-1.5 rounded-md border cursor-pointer transition-colors shadow-sm mb-1 ${isSelected && activeGeomIndex === 0 ? 'bg-blue-50 border-blue-200 text-blue-600 font-semibold' : isSelected ? 'bg-blue-50/40 border-blue-100/50 text-blue-500 font-semibold' : 'bg-white border-transparent hover:bg-slate-100/70 text-slate-600'}`}
+          style={{ paddingLeft: `${depth === 0 ? 8 : 4}px` }}
+          className={`flex items-center px-2 py-1.5 rounded-md border cursor-pointer transition-colors shadow-sm mb-1 ${
+            isSelected && activeGeomIndex === 0 
+              ? 'bg-blue-50 border-blue-200 text-blue-600 dark:bg-blue-950/40 dark:border-blue-800 dark:text-blue-400 font-semibold' 
+              : isSelected 
+                ? 'bg-blue-50/40 border-blue-100/50 text-blue-500 dark:bg-blue-950/20 dark:border-blue-900/50 dark:text-blue-400 font-semibold' 
+                : 'bg-white dark:bg-slate-900/90 border-transparent dark:border-slate-800/40 hover:bg-slate-100/70 dark:hover:bg-slate-800/70 text-slate-650 dark:text-slate-300'
+          }`}
         >
-          <span className="text-sm flex items-center gap-1.5">
-            <span>{emoji}</span> {node.name}
+          <span className="text-xs flex items-center gap-1.5 font-medium truncate">
+            <span>{emoji}</span> <span className="truncate">{node.name}</span>
           </span>
         </div>
         
         {/* Render sub-geoms nested under body if there are multiple geoms */}
-        {node.geoms && node.geoms.length > 1 && node.geoms.map((g: any, idx: number) => {
-          const isGeomSelected = isSelected && activeGeomIndex === idx;
-          let subEmoji = '🔹';
-          if (g.type === 'cylinder') subEmoji = '🛢️';
-          else if (g.type === 'box') subEmoji = '📦';
-          else if (g.type === 'sphere') subEmoji = '🟢';
-          
-          return (
-            <div 
-              key={`${node.id}-geom-${idx}`}
-              onClick={() => {
-                setSelectedNodeId(node.id);
-                setActiveGeomIndex(idx);
-                setIsLeftSidebarOpen(false);
-              }}
-              style={{ paddingLeft: `${(depth + 1) * 14 + 8}px` }}
-              className={`flex items-center px-2 py-1 rounded-md border border-dotted cursor-pointer transition-colors shadow-sm mb-0.5 text-xs ${isGeomSelected ? 'bg-indigo-50 border-indigo-200 text-indigo-600 font-semibold' : 'bg-white/80 border-transparent hover:bg-slate-50 text-slate-500'}`}
-            >
-              <span className="flex items-center gap-1.5">
-                <span>{subEmoji}</span> {g.name || `Geom ${idx + 1}`}
-              </span>
-            </div>
-          );
-        })}
+        {node.geoms && node.geoms.length > 1 && (
+          <div className="pl-3 ml-2.5 border-l border-slate-200 dark:border-slate-800/60 flex flex-col gap-0.5 mb-1">
+            {node.geoms.map((g: any, idx: number) => {
+              const isGeomSelected = isSelected && activeGeomIndex === idx;
+              let subEmoji = '🔹';
+              if (g.type === 'cylinder') subEmoji = '🛢️';
+              else if (g.type === 'box') subEmoji = '📦';
+              else if (g.type === 'sphere') subEmoji = '🟢';
+              
+              return (
+                <div 
+                  key={`${node.id}-geom-${idx}`}
+                  onClick={() => {
+                    setSelectedNodeId(node.id);
+                    setActiveGeomIndex(idx);
+                    setIsLeftSidebarOpen(false);
+                  }}
+                  className={`flex items-center px-2 py-1 rounded-md border cursor-pointer transition-colors shadow-sm text-xs ${
+                    isGeomSelected 
+                      ? 'bg-indigo-50 border-indigo-200 text-indigo-650 dark:bg-indigo-950/40 dark:border-indigo-800 dark:text-indigo-400 font-semibold' 
+                      : 'bg-white/80 dark:bg-slate-900/50 border-transparent dark:border-slate-800/80 hover:bg-slate-50 dark:hover:bg-slate-800/50 text-slate-500 dark:text-slate-400'
+                  }`}
+                >
+                  <span className="flex items-center gap-1.5 text-[11px] font-medium truncate">
+                    <span>{subEmoji}</span> <span className="truncate">{g.name || `Geom ${idx + 1}`}</span>
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        )}
 
-        {node.children && node.children.map((child: any) => renderHierarchyNode(child, depth + 1))}
+        {node.children && node.children.length > 0 && (
+          <div className="pl-3 ml-2.5 border-l border-slate-200 dark:border-slate-800/60 flex flex-col gap-0.5">
+            {node.children.map((child: any) => renderHierarchyNode(child, depth + 1))}
+          </div>
+        )}
       </div>
     );
   }, [selectedNodeId, setSelectedNodeId, findNodeById, setIsLeftSidebarOpen, activeGeomIndex, setActiveGeomIndex]);
@@ -1928,14 +1964,14 @@ function App() {
   useMCPBridge();
 
   return (
-    <div className="flex flex-col h-screen w-screen bg-slate-50 text-slate-900 font-sans">
-      <header className="bg-gradient-to-b from-slate-50 to-white border-b border-slate-200 px-3 md:px-6 py-1.5 flex items-center justify-between shadow-sm z-10">
-        {/* Left: Logo, Title, Preset select, Simulate, Reset, View */}
+    <div className={`flex flex-col h-screen w-screen transition-colors duration-200 ${darkMode ? 'dark bg-slate-950 text-slate-100' : 'bg-slate-50 text-slate-900'} font-sans`}>
+      <header className="bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 px-3 md:px-6 py-2 flex items-center justify-between shadow-xs z-10 transition-colors">
+        {/* Left: Logo, Title & Preset Selector */}
         <div className="flex items-center gap-2 md:gap-4">
           {/* Mobile Sidebar Toggle */}
           <button
             onClick={() => setIsLeftSidebarOpen(!isLeftSidebarOpen)}
-            className="p-1.5 rounded-md text-slate-600 hover:bg-slate-100 hover:text-slate-900 transition-colors md:hidden focus:outline-none cursor-pointer flex-shrink-0"
+            className="p-1.5 rounded-md text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-slate-900 dark:hover:text-slate-200 transition-colors md:hidden focus:outline-none cursor-pointer flex-shrink-0"
             title="Toggle Sidebar"
           >
             {isLeftSidebarOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
@@ -1996,78 +2032,73 @@ function App() {
                 </g>
               </svg>
             </div>
-            <h1 className="font-bold text-lg tracking-wide hidden sm:block">
+            <h1 className="font-bold text-sm tracking-tight hidden sm:block text-slate-800 dark:text-slate-100">
               PhysBox<span className="text-blue-500">: Mesh</span>
             </h1>
           </div>
 
-          <div className="h-6 w-px bg-slate-200 hidden md:block" />
+          <div className="h-5 w-px bg-slate-200 dark:bg-slate-800 hidden md:block" />
 
-          {/* Preset Select Dropdown & Divider Group */}
-          <div className="flex items-center">
-            {/* Inner Dropdown Container */}
-            <div className="flex items-center gap-1.5">
-              <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider hidden lg:inline">Preset:</span>
-              <select 
-                value={activePreset || ''}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  if (v.startsWith('user:')) loadUserPresetWithCard(v);
-                  else loadPresetWithCard(v);
-                }}
-                className="bg-slate-100 border border-slate-300 text-slate-900 text-xs md:text-sm rounded-md block p-1 md:px-2 md:py-1.5 focus:border-blue-500 max-w-[100px] sm:max-w-none font-medium cursor-pointer"
-              >
-                <optgroup label="⬜ Built-in Presets">
-                  <option value="empty">🫙 Blank (Empty)</option>
-                  <option value="pendulum">Double Pendulum</option>
-                  <option value="cubes">Stacked Cubes</option>
-                  <option value="gears">Gear System</option>
-                  <option value="machine">Gear Train Machine</option>
-                  <option value="rack_pinion">Rack &amp; Pinion</option>
-                  <option value="inclined_plane">Inclined Plane</option>
-                  <option value="pulley_system">Pulley Stand</option>
-                  <option value="cartpole">Cartpole</option>
-                  <option value="newtons_cradle">Newton's Cradle</option>
-                  <option value="suspension_bridge">Suspension Bridge</option>
-                  <option value="paper_plane">✈ Paper Plane</option>
-                  <option value="monkey_head">🐵 Monkey Head</option>
-                  <option value="golden_gate">🌉 Golden Gate Bridge</option>
-                  <option value="golden_gate_mesh">🌉 Golden Gate (Mesh)</option>
-                  <option value="mesh_collision">🔺 Mesh Collision Demo</option>
-                  <option value="coin_flip">🪙 Coin Flip</option>
-                  <option value="windmill">💨 Wind Turbine</option>
-                  <option value="physics_only_windmill">💨 Wind Turbine (No Aero)</option>
-                  <option value="traditional_windmill">💨 Traditional Windmill (4-Blade)</option>
-                  <option value="drone">🛸 Quadcopter Drone</option>
-                  <option value="bouncy_balls">🎱 Bouncy Balls</option>
-                  <option value="openscad_demo">🛠️ OpenSCAD Showcase</option>
-                </optgroup>
+          {/* Preset Select Segmented Group */}
+          <div className="flex items-center bg-slate-100 dark:bg-slate-800/80 p-0.5 rounded-lg border border-slate-200/80 dark:border-slate-700/60 shadow-inner">
+            <select 
+              value={activePreset || ''}
+              onChange={(e) => {
+                const v = e.target.value;
+                if (v.startsWith('user:')) loadUserPresetWithCard(v);
+                else loadPresetWithCard(v);
+              }}
+              className="bg-transparent text-slate-700 dark:text-slate-100 text-xs rounded-md block px-2 py-1 outline-none font-medium cursor-pointer border-none"
+            >
+              <optgroup label="⬜ Built-in Presets" className="bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300">
+                <option value="empty">🫙 Blank (Empty)</option>
+                <option value="pendulum">Double Pendulum</option>
+                <option value="cubes">Stacked Cubes</option>
+                <option value="gears">Gear System</option>
+                <option value="machine">Gear Train Machine</option>
+                <option value="rack_pinion">Rack &amp; Pinion</option>
+                <option value="inclined_plane">Inclined Plane</option>
+                <option value="pulley_system">Pulley Stand</option>
+                <option value="cartpole">Cartpole</option>
+                <option value="newtons_cradle">Newton's Cradle</option>
+                <option value="suspension_bridge">Suspension Bridge</option>
+                <option value="paper_plane">✈ Paper Plane</option>
+                <option value="monkey_head">🐵 Monkey Head</option>
+                <option value="golden_gate">🌉 Golden Gate Bridge</option>
+                <option value="golden_gate_mesh">🌉 Golden Gate (Mesh)</option>
+                <option value="mesh_collision">🔺 Mesh Collision Demo</option>
+                <option value="coin_flip">🪙 Coin Flip</option>
+                <option value="windmill">💨 Wind Turbine</option>
+                <option value="physics_only_windmill">💨 Wind Turbine (No Aero)</option>
+                <option value="traditional_windmill">💨 Traditional Windmill (4-Blade)</option>
+                <option value="drone">🛸 Quadcopter Drone</option>
+                <option value="bouncy_balls">🎱 Bouncy Balls</option>
+                <option value="openscad_demo">🛠️ OpenSCAD Showcase</option>
+              </optgroup>
 
-                {/* User Presets */}
-                {(() => {
-                  try {
-                    const userPresets = JSON.parse(localStorage.getItem('physics_user_presets') || '{}');
-                    const keys = Object.keys(userPresets);
-                    if (keys.length === 0) return null;
-                    return (
-                      <optgroup label="📁 Saved Presets">
-                        {keys.sort().map(k => (
-                          <option key={`user:${k}`} value={`user:${k}`}>💾 {k}</option>
-                        ))}
-                      </optgroup>
-                    );
-                  } catch {
-                    return null;
-                  }
-                })()}
-              </select>
-            </div>
+              {/* User Presets */}
+              {(() => {
+                try {
+                  const userPresets = JSON.parse(localStorage.getItem('physics_user_presets') || '{}');
+                  const keys = Object.keys(userPresets);
+                  if (keys.length === 0) return null;
+                  return (
+                    <optgroup label="📁 Saved Presets" className="bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300">
+                      {keys.sort().map(k => (
+                        <option key={`user:${k}`} value={`user:${k}`}>💾 {k}</option>
+                      ))}
+                    </optgroup>
+                  );
+                } catch {
+                  return null;
+                }
+              })()}
+            </select>
 
-            {/* Trashcan button space centered between select and divider */}
-            <div className="w-12 flex items-center justify-center">
+            {activePreset && activePreset.startsWith('user:') && (
               <button
                 onClick={() => {
-                  const presetName = activePreset?.replace('user:', '') || '';
+                  const presetName = activePreset.replace('user:', '');
                   if (window.confirm(`Are you sure you want to delete the preset "${presetName}"?`)) {
                     try {
                       const userPresets = JSON.parse(localStorage.getItem('physics_user_presets') || '{}');
@@ -2079,146 +2110,140 @@ function App() {
                     }
                   }
                 }}
-                className={`flex items-center justify-center w-8 h-8 rounded-full border-2 border-red-200 text-red-600 bg-red-50 hover:bg-red-100 hover:border-red-300 transition-colors focus:outline-none flex-shrink-0 cursor-pointer ${
-                  activePreset && activePreset.startsWith('user:') ? 'visible' : 'invisible pointer-events-none'
-                }`}
-                title={activePreset && activePreset.startsWith('user:') ? `Delete preset "${activePreset.replace('user:', '')}"` : undefined}
+                className="flex items-center justify-center p-1 rounded-md text-red-500 hover:bg-red-50 dark:hover:bg-red-950/50 transition-colors focus:outline-none cursor-pointer"
+                title={`Delete preset "${activePreset.replace('user:', '')}"`}
               >
-                <Trash2 className="w-4 h-4" />
+                <Trash2 className="w-3.5 h-3.5" />
               </button>
-            </div>
-
-            {/* Divider line */}
-            <div className="h-6 w-px bg-slate-200 hidden md:block" />
+            )}
           </div>
+        </div>
 
-          {/* Action Buttons: Simulate, Reset, View */}
-          <div className="flex items-center gap-1.5">
+        {/* Center/Right: Simulation Toolbar & Files */}
+        <div className="flex items-center gap-2 md:gap-3">
+          {/* Simulation Controller Block */}
+          <div className="flex items-center bg-slate-100 dark:bg-slate-800/80 p-0.5 rounded-lg border border-slate-200/80 dark:border-slate-700/60 shadow-inner">
             {/* Simulate / Stop */}
             <button 
               onClick={togglePlay}
               disabled={!isLoaded}
-              className={`flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md font-semibold text-sm transition-colors disabled:opacity-50 flex-shrink-0 cursor-pointer ${
+              className={`flex items-center justify-center gap-1.5 px-3 py-1 rounded-md font-semibold text-xs transition-all disabled:opacity-50 flex-shrink-0 cursor-pointer ${
                 isPlaying
-                  ? 'bg-red-600 hover:bg-red-700 text-white'
-                  : 'bg-emerald-600 hover:bg-emerald-700 text-white'
+                  ? 'bg-red-500 hover:bg-red-600 text-white shadow-xs'
+                  : 'hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-100'
               }`}
               title={isPlaying ? "Stop Simulation" : "Start Simulation"}
             >
-              {isPlaying ? (
-                <><Square className="w-3.5 h-3.5" /><span className="hidden md:inline">Stop</span></>
-              ) : (
-                <><Play className="w-3.5 h-3.5" /><span className="hidden md:inline">Simulate</span></>
-              )}
+              {isPlaying ? <Square className="w-3 h-3" /> : <Play className="w-3 h-3 text-emerald-500 dark:text-emerald-400" />}
+              <span className="hidden md:inline">{isPlaying ? 'Stop' : 'Run'}</span>
             </button>
 
             {/* Reset */}
             <button 
               onClick={resetSimulation}
               disabled={!isLoaded}
-              className="flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md font-semibold text-sm bg-slate-200 hover:bg-slate-300 text-slate-700 transition-colors disabled:opacity-50 flex-shrink-0 cursor-pointer"
+              className="flex items-center justify-center gap-1.5 px-3 py-1 rounded-md font-semibold text-xs hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 transition-colors disabled:opacity-50 flex-shrink-0 cursor-pointer"
               title="Reset Simulation"
             >
-              <RotateCcw className="w-3.5 h-3.5" /><span className="hidden md:inline">Reset</span>
-            </button>
-
-            {/* View Toggle */}
-            <button 
-              onClick={() => setCameraView(cameraView === 'topDown' ? 'perspective' : 'topDown')}
-              className={`flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md font-semibold text-sm transition-colors flex-shrink-0 cursor-pointer ${
-                cameraView === 'topDown'
-                  ? 'bg-violet-600 hover:bg-violet-700 text-white'
-                  : 'bg-slate-200 hover:bg-slate-300 text-slate-700'
-              }`}
-              title="Toggle Top Down / Perspective View"
-            >
-              <Eye className="w-3.5 h-3.5" /><span className="hidden lg:inline">{cameraView === 'topDown' ? 'Perspective' : 'Top Down'}</span>
+              <RotateCcw className="w-3 h-3" />
+              <span className="hidden md:inline">Reset</span>
             </button>
           </div>
-        </div>
 
-        {/* Right: Presets actions (Save, Export, Import), Utilities (Docs, Settings), Github */}
-        <div className="flex items-center gap-1.5">
-          {/* Preset save & exports/import - round icons matching circuit */}
-          <button 
-            onClick={handleSavePresetClick}
-            className="flex items-center justify-center w-8 h-8 rounded-full border-2 border-amber-200 text-amber-600 bg-amber-50 hover:bg-amber-100 hover:border-amber-300 transition-colors focus:outline-none flex-shrink-0 cursor-pointer"
-            title="Save scene preset"
-          >
-            <Save className="w-4 h-4" />
-          </button>
+          {/* Files Segmented Group */}
+          <div className="flex items-center bg-slate-100 dark:bg-slate-800/80 p-0.5 rounded-lg border border-slate-200/80 dark:border-slate-700/60 shadow-inner">
+            <button 
+              onClick={handleSavePresetClick}
+              className="flex items-center justify-center p-1 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 transition-colors focus:outline-none cursor-pointer"
+              title="Save scene preset"
+            >
+              <Save className="w-3.5 h-3.5" />
+            </button>
 
-          <button
-            onClick={exportJson}
-            className="flex items-center justify-center w-8 h-8 rounded-full border-2 border-slate-200 text-slate-600 bg-white hover:bg-slate-50 hover:border-slate-300 transition-colors focus:outline-none flex-shrink-0 cursor-pointer"
-            title="Export JSON"
-          >
-            <Download className="w-4 h-4" />
-          </button>
+            <button
+              onClick={exportJson}
+              className="flex items-center justify-center p-1 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 transition-colors focus:outline-none cursor-pointer"
+              title="Export JSON"
+            >
+              <Download className="w-3.5 h-3.5" />
+            </button>
 
-          <button
-            onClick={exportStl}
-            className="flex items-center justify-center w-8 h-8 rounded-full border-2 border-slate-200 text-slate-600 bg-white hover:bg-slate-50 hover:border-slate-300 transition-colors focus:outline-none flex-shrink-0 cursor-pointer"
-            title="Export STL (3D print)"
-          >
-            <Printer className="w-4 h-4" />
-          </button>
+            <button
+              onClick={exportStl}
+              className="flex items-center justify-center p-1 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 transition-colors focus:outline-none cursor-pointer"
+              title="Export STL (3D print)"
+            >
+              <Printer className="w-3.5 h-3.5" />
+            </button>
 
-          <button
-            onClick={importJson}
-            className="flex items-center justify-center w-8 h-8 rounded-full border-2 border-slate-200 text-slate-600 bg-white hover:bg-slate-50 hover:border-slate-300 transition-colors focus:outline-none flex-shrink-0 cursor-pointer"
-            title="Import JSON"
-          >
-            <Upload className="w-4 h-4" />
-          </button>
+            <button
+              onClick={importJson}
+              className="flex items-center justify-center p-1 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 transition-colors focus:outline-none cursor-pointer"
+              title="Import JSON"
+            >
+              <Upload className="w-3.5 h-3.5" />
+            </button>
+          </div>
 
-          <div className="h-6 w-px bg-slate-200 mx-0.5 hidden sm:block" />
+          <div className="h-5 w-px bg-slate-200 dark:bg-slate-800 mx-0.5 hidden sm:block" />
 
-          {/* Docs - round matching circuit */}
-          <button
-            onClick={() => setIsDocsOpen(true)}
-            className="flex items-center justify-center w-8 h-8 rounded-full border-2 border-indigo-200 text-indigo-600 bg-indigo-50 hover:bg-indigo-100 hover:border-indigo-300 transition-colors focus:outline-none flex-shrink-0 cursor-pointer"
-            title="Documentation"
-          >
-            <Info className="w-4 h-4" />
-          </button>
+          {/* Right Utilities (Dark Mode, Docs, Settings, Copilot, GitHub) */}
+          <div className="flex items-center gap-1.5">
+            {/* Dark Mode Toggle - immediately left of Docs button */}
+            <button
+              onClick={toggleDarkMode}
+              className="flex items-center justify-center w-8 h-8 rounded-full border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors focus:outline-none flex-shrink-0 cursor-pointer shadow-xs"
+              title={darkMode ? "Switch to Light Mode" : "Switch to Dark Mode"}
+            >
+              {darkMode ? <Sun className="w-4 h-4 text-amber-500" /> : <Moon className="w-4 h-4 text-indigo-500 dark:text-indigo-400" />}
+            </button>
 
-          {/* Settings - round matching circuit */}
-          <button 
-            onClick={() => setSettingsOpen(!isSettingsOpen)}
-            className={`flex items-center justify-center w-8 h-8 rounded-full border-2 transition-colors focus:outline-none flex-shrink-0 cursor-pointer ${
-              isSettingsOpen 
-                ? 'bg-blue-100 border-blue-400 text-blue-700' 
-                : 'border-slate-200 text-slate-600 bg-white hover:bg-slate-50 hover:border-slate-300'
-            }`}
-            title="Global Settings"
-          >
-            <Settings className="w-4 h-4" />
-          </button>
+            {/* Docs (Info) */}
+            <button
+              onClick={() => setIsDocsOpen(true)}
+              className="flex items-center justify-center w-8 h-8 rounded-full border border-indigo-200 dark:border-indigo-800 text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/30 hover:bg-indigo-100 dark:hover:bg-indigo-900/40 transition-colors focus:outline-none flex-shrink-0 cursor-pointer shadow-xs"
+              title="Documentation"
+            >
+              <Info className="w-4 h-4" />
+            </button>
 
-          {/* AI Copilot - round matching circuit */}
-          <button
-            onClick={() => setShowAICopilot(!showAICopilot)}
-            className={`flex items-center justify-center w-8 h-8 rounded-full border-2 transition-colors focus:outline-none flex-shrink-0 cursor-pointer ${
-              showAICopilot 
-                ? 'bg-blue-100 border-blue-400 text-blue-700' 
-                : 'border-indigo-200 text-indigo-600 bg-indigo-50 hover:bg-indigo-100 hover:border-indigo-300'
-            }`}
-            title="AI Copilot Expert"
-          >
-            <Sparkles className="w-4 h-4" />
-          </button>
+            {/* Settings */}
+            <button 
+              onClick={() => setSettingsOpen(!isSettingsOpen)}
+              className={`flex items-center justify-center w-8 h-8 rounded-full border transition-colors focus:outline-none flex-shrink-0 cursor-pointer shadow-xs ${
+                isSettingsOpen 
+                  ? 'bg-blue-100 border-blue-400 text-blue-700 dark:bg-blue-950 dark:border-blue-700 dark:text-blue-400' 
+                  : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800'
+              }`}
+              title="Global Settings"
+            >
+              <Settings className="w-4 h-4" />
+            </button>
 
-          {/* GitHub - round rightmost matching circuit */}
-          <a
-            href="https://github.com/tomgrek/physicssim"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="flex items-center justify-center w-8 h-8 rounded-full border-2 border-slate-200 text-slate-600 bg-white hover:bg-slate-50 hover:border-slate-300 transition-colors focus:outline-none flex-shrink-0 cursor-pointer"
-            title="View on GitHub"
-          >
-            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.403 5.403 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4"/><path d="M9 18c-4.51 2-5-2-7-2"/></svg>
-          </a>
+            {/* AI Copilot */}
+            <button
+              onClick={() => setShowAICopilot(!showAICopilot)}
+              className={`flex items-center justify-center w-8 h-8 rounded-full border transition-colors focus:outline-none flex-shrink-0 cursor-pointer shadow-xs ${
+                showAICopilot 
+                  ? 'bg-blue-100 border-blue-400 text-blue-700 dark:bg-blue-950 dark:border-blue-700 dark:text-blue-400' 
+                  : 'border-indigo-200 dark:border-indigo-800 text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/30 hover:bg-indigo-100 dark:hover:bg-indigo-900/40'
+              }`}
+              title="AI Copilot Expert"
+            >
+              <Sparkles className="w-4 h-4" />
+            </button>
+
+            {/* GitHub */}
+            <a
+              href="https://github.com/tomgrek/physicssim"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center justify-center w-8 h-8 rounded-full border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors focus:outline-none flex-shrink-0 cursor-pointer shadow-xs"
+              title="View on GitHub"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.403 5.403 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4"/><path d="M9 18c-4.51 2-5-2-7-2"/></svg>
+            </a>
+          </div>
         </div>
       </header>
 
@@ -2226,38 +2251,38 @@ function App() {
       <div className="flex flex-1 overflow-hidden relative">
         {/* Global Settings */}
         {isSettingsOpen && (
-          <div className="absolute top-4 right-6 w-64 glass-panel rounded-lg p-4 z-30 shadow-lg border border-slate-200">
-            <h3 className="font-semibold text-sm mb-4 flex items-center justify-between">
-              <span className="flex items-center gap-2"><Settings className="w-4 h-4 text-slate-500" /> Environment</span>
-              <button onClick={() => setSettingsOpen(false)}><X className="w-4 h-4 text-slate-400 hover:text-slate-600" /></button>
+          <div className="absolute top-4 right-6 w-64 glass-panel rounded-lg p-4 z-30 shadow-lg border border-slate-200 dark:border-slate-800 bg-white/90 dark:bg-slate-900/90 text-slate-800 dark:text-slate-100">
+            <h3 className="font-semibold text-sm mb-4 flex items-center justify-between text-slate-800 dark:text-slate-100">
+              <span className="flex items-center gap-2"><Settings className="w-4 h-4 text-slate-500 dark:text-slate-400" /> Environment</span>
+              <button onClick={() => setSettingsOpen(false)}><X className="w-4 h-4 text-slate-400 dark:text-slate-500 hover:text-slate-600 dark:hover:text-slate-300 cursor-pointer" /></button>
             </h3>
             <div className="flex flex-col gap-4">
               <div className="flex flex-col gap-1">
-                <label className="text-xs font-medium text-slate-500 flex justify-between">Gravity Z <span>{gravityZ.toFixed(1)}</span></label>
-                <input type="range" min="-20" max="20" step="0.1" value={gravityZ} onChange={(e) => setEnvironment({gravityZ: parseFloat(e.target.value)})} className="w-full accent-blue-500" />
+                <label className="text-xs font-medium text-slate-500 dark:text-slate-400 flex justify-between">Gravity Z <span>{gravityZ.toFixed(1)} m/s²</span></label>
+                <input type="range" min="-20" max="20" step="0.1" value={gravityZ} onChange={(e) => setEnvironment({gravityZ: parseFloat(e.target.value)})} className="w-full accent-blue-500 cursor-pointer" />
               </div>
               <div className="flex flex-col gap-1">
-                <label className="text-xs font-medium text-slate-500 flex justify-between">Wind X <span>{windX.toFixed(1)}</span></label>
-                <input type="range" min="-10" max="10" step="0.1" value={windX} onChange={(e) => setEnvironment({windX: parseFloat(e.target.value)})} className="w-full accent-blue-500" />
+                <label className="text-xs font-medium text-slate-500 dark:text-slate-400 flex justify-between">Wind X <span>{windX.toFixed(1)} m/s</span></label>
+                <input type="range" min="-10" max="10" step="0.1" value={windX} onChange={(e) => setEnvironment({windX: parseFloat(e.target.value)})} className="w-full accent-blue-500 cursor-pointer" />
               </div>
               <div className="flex flex-col gap-1">
-                <label className="text-xs font-medium text-slate-500 flex justify-between">Wind Y <span>{windY.toFixed(1)}</span></label>
-                <input type="range" min="-10" max="10" step="0.1" value={windY} onChange={(e) => setEnvironment({windY: parseFloat(e.target.value)})} className="w-full accent-blue-500" />
+                <label className="text-xs font-medium text-slate-500 dark:text-slate-400 flex justify-between">Wind Y <span>{windY.toFixed(1)} m/s</span></label>
+                <input type="range" min="-10" max="10" step="0.1" value={windY} onChange={(e) => setEnvironment({windY: parseFloat(e.target.value)})} className="w-full accent-blue-500 cursor-pointer" />
               </div>
               <div className="flex flex-col gap-1">
-                <label className="text-xs font-medium text-slate-500 flex justify-between">Air Density (Drag) <span>{density.toFixed(2)}</span></label>
-                <input type="range" min="0" max="5" step="0.01" value={density} onChange={(e) => setEnvironment({density: parseFloat(e.target.value)})} className="w-full accent-blue-500" />
+                <label className="text-xs font-medium text-slate-500 dark:text-slate-400 flex justify-between">Air Density (Drag) <span>{density.toFixed(2)} kg/m³</span></label>
+                <input type="range" min="0" max="5" step="0.01" value={density} onChange={(e) => setEnvironment({density: parseFloat(e.target.value)})} className="w-full accent-blue-500 cursor-pointer" />
               </div>
               <div className="flex flex-col gap-1">
-                <label className="text-xs font-medium text-slate-500 flex justify-between">Floor Friction <span>{floorFriction.toFixed(2)}</span></label>
-                <input type="range" min="0" max="2" step="0.01" value={floorFriction} onChange={(e) => setEnvironment({floorFriction: parseFloat(e.target.value)})} className="w-full accent-blue-500" />
+                <label className="text-xs font-medium text-slate-500 dark:text-slate-400 flex justify-between">Floor Friction <span>{floorFriction.toFixed(2)}</span></label>
+                <input type="range" min="0" max="2" step="0.01" value={floorFriction} onChange={(e) => setEnvironment({floorFriction: parseFloat(e.target.value)})} className="w-full accent-blue-500 cursor-pointer" />
               </div>
               <div className="flex flex-col gap-1">
-                <label className="text-xs font-medium text-slate-500 flex justify-between">Floor Bounciness <span>{(floorBounce ?? 0).toFixed(2)}</span></label>
-                <input type="range" min="0" max="1" step="0.01" value={floorBounce ?? 0} onChange={(e) => setEnvironment({floorBounce: parseFloat(e.target.value)})} className="w-full accent-blue-500" />
+                <label className="text-xs font-medium text-slate-500 dark:text-slate-400 flex justify-between">Floor Bounciness <span>{(floorBounce ?? 0).toFixed(2)}</span></label>
+                <input type="range" min="0" max="1" step="0.01" value={floorBounce ?? 0} onChange={(e) => setEnvironment({floorBounce: parseFloat(e.target.value)})} className="w-full accent-blue-500 cursor-pointer" />
               </div>
-              <div className="pt-2.5 border-t border-slate-200 flex flex-col gap-1">
-                <label htmlFor="geminiApiKey" className="text-[10px] font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1">
+              <div className="pt-2.5 border-t border-slate-200 dark:border-slate-800 flex flex-col gap-1">
+                <label htmlFor="geminiApiKey" className="text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider flex items-center gap-1">
                   🔑 Gemini API Key
                 </label>
                 <input 
@@ -2269,7 +2294,7 @@ function App() {
                     window.dispatchEvent(new Event('storage'));
                   }} 
                   placeholder="Paste AIzaSy... here" 
-                  className="w-full px-2 py-1.5 text-xs border border-slate-250 rounded bg-white shadow-inner focus:outline-none focus:ring-1 focus:ring-blue-500 font-mono" 
+                  className="w-full px-2 py-1.5 text-xs border border-slate-200 dark:border-slate-800 rounded bg-white dark:bg-slate-950 text-slate-800 dark:text-slate-200 shadow-inner focus:outline-none focus:ring-1 focus:ring-blue-500 font-mono" 
                 />
               </div>
             </div>
@@ -2279,182 +2304,195 @@ function App() {
         {/* Mobile Sidebar Backdrop Scrim */}
         {isLeftSidebarOpen && (
           <div 
-            className="fixed inset-0 bg-slate-950/40 backdrop-blur-xs z-15 md:hidden transition-all duration-300"
             onClick={() => setIsLeftSidebarOpen(false)}
+            className="fixed inset-0 bg-slate-900/20 backdrop-blur-xs z-10 md:hidden"
           />
         )}
 
         {/* Left Sidebar */}
-        <aside className={`w-64 md:w-56 shrink-0 glass-panel border-r border-slate-200 flex-col p-4 bg-white/95 md:bg-white/50 overflow-y-auto transition-transform duration-200 ease-in-out fixed md:relative inset-y-14 md:inset-auto left-0 z-20 shadow-2xl md:shadow-none ${
+        <aside className={`w-64 md:w-56 shrink-0 glass-panel border-r border-slate-200 dark:border-slate-800 flex flex-col p-4 bg-white/90 dark:bg-slate-900/90 overflow-y-auto transition-transform duration-200 ease-in-out fixed md:relative inset-y-14 md:inset-auto left-0 z-20 shadow-2xl md:shadow-none ${
           isLeftSidebarOpen ? 'flex translate-x-0' : 'hidden md:flex -translate-x-full md:translate-x-0'
         }`}>
-          <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Hierarchy</h2>
+          <h2 className="text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider mb-2.5">Hierarchy</h2>
           <div className="flex flex-col gap-1.5 mb-6">
             <div 
-              className={`px-3 py-1.5 rounded-md border cursor-pointer transition-colors shadow-sm flex items-center gap-1.5 ${!selectedNodeId ? 'bg-blue-50 border-blue-200 text-blue-600 font-bold' : 'bg-white border-transparent hover:bg-slate-50 text-slate-600'}`}
+              className={`px-3 py-1.5 rounded-md border cursor-pointer transition-colors shadow-sm flex items-center gap-1.5 ${
+                !selectedNodeId 
+                  ? 'bg-blue-50 border-blue-200 text-blue-600 dark:bg-blue-950/40 dark:border-blue-800 dark:text-blue-400 font-bold' 
+                  : 'bg-white dark:bg-slate-900 border-transparent dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300'
+              }`}
               onClick={() => {
                 setSelectedNodeId(null);
                 setIsLeftSidebarOpen(false);
               }}
             >
-              <span>🌍</span> <span className="text-sm font-medium">Worldbody</span>
+              <span>🌍</span> <span className="text-xs font-semibold">Worldbody</span>
             </div>
             <div className="flex flex-col mt-1">
               {sceneGraph.nodes.map(node => renderHierarchyNode(node, 0))}
             </div>
           </div>
 
-          <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1 flex items-center justify-between">
-            <span>Components</span>
-          </h2>
-          <div className="text-[11px] font-medium text-slate-500 mb-2 bg-slate-100/80 px-2 py-1.5 rounded-lg border border-slate-200/50">
-            Adding to: <span className="text-blue-600 font-semibold">{selectedNode && parentUnderSelected ? selectedNode.name : '🌍 Worldbody'}</span>
+          <h2 className="text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider mb-1">Components</h2>
+          
+          <div className="text-[10px] font-medium text-slate-500 dark:text-slate-400 mb-2.5 bg-slate-50 dark:bg-slate-950/40 px-2 py-1.5 rounded-lg border border-slate-200/50 dark:border-slate-800/50">
+            Adding to: <span className="text-blue-600 dark:text-blue-400 font-semibold truncate block">{selectedNode && parentUnderSelected ? selectedNode.name : '🌍 Worldbody'}</span>
           </div>
 
           {selectedNode && (
-            <label className="text-[11px] font-semibold text-slate-600 flex items-center gap-2 mb-3 bg-slate-50 border border-slate-200/60 p-2 rounded-lg cursor-pointer select-none hover:bg-slate-100/50 transition-colors shadow-sm">
+            <label className="text-[10px] font-semibold text-slate-600 dark:text-slate-400 flex items-center gap-2 mb-3 bg-slate-50 dark:bg-slate-950/40 border border-slate-200/60 dark:border-slate-800/60 p-2 rounded-lg cursor-pointer select-none hover:bg-slate-100/50 dark:hover:bg-slate-800/50 transition-colors shadow-sm">
               <input 
                 type="checkbox" 
                 checked={parentUnderSelected} 
                 onChange={(e) => setParentUnderSelected(e.target.checked)} 
-                className="w-4 h-4 rounded text-blue-600 border-slate-300 focus:ring-blue-400 accent-blue-500 cursor-pointer"
+                className="w-3.5 h-3.5 rounded text-blue-600 border-slate-300 dark:border-slate-700 focus:ring-blue-400 dark:focus:ring-blue-900 accent-blue-500 cursor-pointer"
               />
               <span>Nest under selected</span>
             </label>
           )}
 
-          <div className="flex flex-col gap-2.5">
+          <div className="grid grid-cols-2 gap-2">
+            {/* Cube (Box) */}
             <div 
               draggable 
               onDragStart={(e) => handleDragStart(e, 'box')} 
               onClick={() => handleAddComponentClick('box')}
-              className="p-2.5 border border-slate-200 rounded-lg bg-white shadow-sm flex items-center gap-3 cursor-pointer hover:border-blue-300 hover:shadow transition-all group"
+              className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-blue-400 dark:hover:border-blue-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
+              title="Cube (Box geom)"
             >
-              <Box className="w-4 h-4 text-rose-500 group-hover:scale-110 transition-transform" />
-              <div className="flex flex-col">
-                <span className="text-xs font-semibold text-slate-700">Cube</span>
-                <span className="text-[10px] text-slate-400">Box element</span>
+              <div className="p-1.5 bg-rose-50 dark:bg-rose-950/30 rounded-lg mb-1 group-hover:scale-105 transition-transform">
+                <Box className="w-4 h-4 text-rose-500 dark:text-rose-400" />
               </div>
+              <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Cube</span>
             </div>
 
+            {/* Sphere */}
             <div 
               draggable 
               onDragStart={(e) => handleDragStart(e, 'sphere')} 
               onClick={() => handleAddComponentClick('sphere')}
-              className="p-2.5 border border-slate-200 rounded-lg bg-white shadow-sm flex items-center gap-3 cursor-pointer hover:border-blue-300 hover:shadow transition-all group"
+              className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-blue-400 dark:hover:border-blue-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
+              title="Sphere (Ball geom)"
             >
-              <Circle className="w-4 h-4 text-emerald-500 group-hover:scale-110 transition-transform" />
-              <div className="flex flex-col">
-                <span className="text-xs font-semibold text-slate-700">Sphere</span>
-                <span className="text-[10px] text-slate-400">Regular ball</span>
+              <div className="p-1.5 bg-emerald-50 dark:bg-emerald-950/30 rounded-lg mb-1 group-hover:scale-105 transition-transform">
+                <Circle className="w-4 h-4 text-emerald-500 dark:text-emerald-400" />
               </div>
+              <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Sphere</span>
             </div>
 
+            {/* Cylinder */}
             <div 
               draggable 
               onDragStart={(e) => handleDragStart(e, 'cylinder')} 
               onClick={() => handleAddComponentClick('cylinder')}
-              className="p-2.5 border border-slate-200 rounded-lg bg-white shadow-sm flex items-center gap-3 cursor-pointer hover:border-blue-300 hover:shadow transition-all group"
+              className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-blue-400 dark:hover:border-blue-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
+              title="Cylinder block"
             >
-              <Layers className="w-4 h-4 text-amber-500 group-hover:scale-110 transition-transform" />
-              <div className="flex flex-col">
-                <span className="text-xs font-semibold text-slate-700">Cylinder</span>
-                <span className="text-[10px] text-slate-400">3D cylinder block</span>
+              <div className="p-1.5 bg-amber-50 dark:bg-amber-950/30 rounded-lg mb-1 group-hover:scale-105 transition-transform">
+                <Layers className="w-4 h-4 text-amber-600 dark:text-amber-400" />
               </div>
+              <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Cylinder</span>
             </div>
 
+            {/* Pole (Capsule) */}
             <div 
               draggable 
               onDragStart={(e) => handleDragStart(e, 'capsule')} 
               onClick={() => handleAddComponentClick('capsule')}
-              className="p-2.5 border border-slate-200 rounded-lg bg-white shadow-sm flex items-center gap-3 cursor-pointer hover:border-blue-300 hover:shadow transition-all group"
+              className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-blue-400 dark:hover:border-blue-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
+              title="Capsule rod (Pole)"
             >
-              <Zap className="w-4 h-4 text-indigo-500 group-hover:scale-110 transition-transform" />
-              <div className="flex flex-col">
-                <span className="text-xs font-semibold text-slate-700">Pole</span>
-                <span className="text-[10px] text-slate-400">Capsule rod</span>
+              <div className="p-1.5 bg-indigo-50 dark:bg-indigo-950/30 rounded-lg mb-1 group-hover:scale-105 transition-transform">
+                <Zap className="w-4 h-4 text-indigo-500 dark:text-indigo-400" />
               </div>
+              <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Pole</span>
             </div>
 
-
+            {/* Gear */}
             <div 
               draggable 
               onDragStart={(e) => handleDragStart(e, 'gear')} 
               onClick={() => handleAddComponentClick('gear')}
-              className="p-2.5 border border-slate-200 rounded-lg bg-white shadow-sm flex items-center gap-3 cursor-pointer hover:border-blue-300 hover:shadow transition-all group"
+              className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-blue-400 dark:hover:border-blue-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
+              title="Gear cog"
             >
-              <Settings className="w-4 h-4 text-slate-500 group-hover:rotate-45 transition-transform" />
-              <div className="flex flex-col">
-                <span className="text-xs font-semibold text-slate-700">Gear</span>
-                <span className="text-[10px] text-slate-400">Cogs with square teeth</span>
+              <div className="p-1.5 bg-slate-100 dark:bg-slate-800 rounded-lg mb-1 group-hover:rotate-45 transition-transform duration-300">
+                <Settings className="w-4 h-4 text-slate-500 dark:text-slate-400" />
               </div>
+              <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Gear</span>
             </div>
 
+            {/* Wedge */}
             <div 
               draggable 
               onDragStart={(e) => handleDragStart(e, 'wedge')} 
               onClick={() => handleAddComponentClick('wedge')}
-              className="p-2.5 border border-slate-200 rounded-lg bg-white shadow-sm flex items-center gap-3 cursor-pointer hover:border-blue-300 hover:shadow transition-all group"
+              className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-blue-400 dark:hover:border-blue-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
+              title="Wedge (Inclined plane)"
             >
-              <Triangle className="w-4 h-4 text-amber-600 rotate-90 group-hover:scale-110 transition-transform" />
-              <div className="flex flex-col">
-                <span className="text-xs font-semibold text-slate-700">Wedge</span>
-                <span className="text-[10px] text-slate-400">Procedural inclined plane</span>
+              <div className="p-1.5 bg-amber-50 dark:bg-amber-950/20 rounded-lg mb-1 group-hover:scale-105 transition-transform">
+                <Triangle className="w-4 h-4 text-amber-600 dark:text-amber-500 rotate-90" />
               </div>
+              <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Wedge</span>
             </div>
 
+            {/* Pulley Wheel */}
             <div 
               draggable 
               onDragStart={(e) => handleDragStart(e, 'pulley_wheel')} 
               onClick={() => handleAddComponentClick('pulley_wheel')}
-              className="p-2.5 border border-slate-200 rounded-lg bg-white shadow-sm flex items-center gap-3 cursor-pointer hover:border-blue-300 hover:shadow transition-all group"
+              className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-blue-400 dark:hover:border-blue-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
+              title="Pulley Stand system disk"
             >
-              <Disc className="w-4 h-4 text-cyan-600 group-hover:spin transition-transform" />
-              <div className="flex flex-col">
-                <span className="text-xs font-semibold text-slate-700">Pulley Wheel</span>
-                <span className="text-[10px] text-slate-400">Pulley stand system disk</span>
+              <div className="p-1.5 bg-cyan-50 dark:bg-cyan-950/30 rounded-lg mb-1 group-hover:scale-105 transition-transform">
+                <Disc className="w-4 h-4 text-cyan-600 dark:text-cyan-400" />
               </div>
+              <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Pulley</span>
             </div>
 
-            <div
-              draggable
-              onDragStart={(e) => handleDragStart(e, 'pulley_rope')}
+            {/* Rope */}
+            <div 
+              draggable 
+              onDragStart={(e) => handleDragStart(e, 'pulley_rope')} 
               onClick={() => handleAddComponentClick('pulley_rope')}
-              className="p-2.5 border border-slate-200 rounded-lg bg-white shadow-sm flex items-center gap-3 cursor-pointer hover:border-blue-300 hover:shadow transition-all group"
+              className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-blue-400 dark:hover:border-blue-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
+              title="Coupler Rope"
             >
-              <CircleDot className="w-4 h-4 text-emerald-600 group-hover:scale-110 transition-transform" />
-              <div className="flex flex-col">
-                <span className="text-xs font-semibold text-slate-700">Rope</span>
-                <span className="text-[10px] text-slate-400">Couples two bodies together</span>
+              <div className="p-1.5 bg-emerald-50 dark:bg-emerald-950/30 rounded-lg mb-1 group-hover:scale-105 transition-transform">
+                <CircleDot className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
               </div>
+              <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Rope</span>
             </div>
 
-            <div
-              draggable
-              onDragStart={(e) => handleDragStart(e, 'mesh')}
+            {/* Mesh */}
+            <div 
+              draggable 
+              onDragStart={(e) => handleDragStart(e, 'mesh')} 
               onClick={() => handleAddComponentClick('mesh')}
-              className="p-2.5 border border-slate-200 rounded-lg bg-white shadow-sm flex items-center gap-3 cursor-pointer hover:border-blue-300 hover:shadow transition-all group"
+              className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-blue-400 dark:hover:border-blue-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
+              title="Custom static Mesh"
             >
-              <Shapes className="w-4 h-4 text-violet-500 group-hover:scale-110 transition-transform" />
-              <div className="flex flex-col">
-                <span className="text-xs font-semibold text-slate-700">Mesh</span>
-                <span className="text-[10px] text-slate-400">Custom geometry (visual)</span>
+              <div className="p-1.5 bg-violet-50 dark:bg-violet-950/30 rounded-lg mb-1 group-hover:scale-105 transition-transform">
+                <Shapes className="w-4 h-4 text-violet-500 dark:text-violet-400" />
               </div>
+              <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Mesh</span>
             </div>
 
-            <div
-              draggable
-              onDragStart={(e) => handleDragStart(e, 'openscad')}
+            {/* OpenSCAD */}
+            <div 
+              draggable 
+              onDragStart={(e) => handleDragStart(e, 'openscad')} 
               onClick={() => handleAddComponentClick('openscad')}
-              className="p-2.5 border border-slate-200 rounded-lg bg-white shadow-sm flex items-center gap-3 cursor-pointer hover:border-blue-300 hover:shadow transition-all group"
+              className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-blue-400 dark:hover:border-blue-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
+              title="Procedural OpenSCAD shape"
             >
-              <Settings className="w-4 h-4 text-blue-500 group-hover:scale-110 transition-transform animate-spin-slow" />
-              <div className="flex flex-col">
-                <span className="text-xs font-semibold text-slate-700">OpenSCAD Shape</span>
-                <span className="text-[10px] text-slate-400">Procedural CAD shape</span>
+              <div className="p-1.5 bg-blue-50 dark:bg-blue-950/30 rounded-lg mb-1 group-hover:scale-105 transition-transform">
+                <Code className="w-4 h-4 text-blue-500 dark:text-blue-400" />
               </div>
+              <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">SCAD</span>
             </div>
 
+            {/* Note Card - spans 2 cols */}
             <div
               onClick={() => {
                 const id = `card_${Date.now()}`;
@@ -2462,15 +2500,11 @@ function App() {
                 setEditingCardId(id);
                 setIsLeftSidebarOpen(false);
               }}
-              className="p-2.5 border border-dashed border-violet-300 rounded-lg bg-violet-50/40 flex items-center gap-3 cursor-pointer hover:border-violet-400 hover:bg-violet-50 transition-all group select-none"
+              className="col-span-2 p-2 border border-dashed border-violet-305 dark:border-violet-850 rounded-lg bg-violet-50/20 dark:bg-violet-955/10 flex items-center justify-center gap-2 cursor-pointer hover:border-violet-400 dark:hover:border-violet-700 hover:bg-violet-50/40 dark:hover:bg-violet-950/30 transition-all group select-none mt-1"
             >
-              <FileText className="w-4 h-4 text-violet-600 group-hover:scale-110 transition-transform" />
-              <div className="flex flex-col">
-                <span className="text-xs font-semibold text-slate-700 pointer-events-none">Note Card</span>
-                <span className="text-[10px] text-violet-400 pointer-events-none">Click to add overlay</span>
-              </div>
+              <FileText className="w-3.5 h-3.5 text-violet-600 dark:text-violet-400 group-hover:scale-105 transition-transform" />
+              <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Add Note Card</span>
             </div>
-
           </div>
         </aside>
 
@@ -2493,14 +2527,11 @@ function App() {
               right: '0.75rem',
               zIndex: 15,
               pointerEvents: 'none',
-              background: 'rgba(248, 250, 252, 0.85)',
-              backdropFilter: 'blur(6px)',
-              WebkitBackdropFilter: 'blur(6px)',
-              border: '1px solid rgba(203, 213, 225, 0.7)',
               borderRadius: '10px',
               boxShadow: '0 2px 10px rgba(0,0,0,0.10)',
               padding: '3px',
             }}
+            className="bg-slate-50/85 dark:bg-slate-900/85 backdrop-blur-md border border-slate-200/70 dark:border-slate-800/70"
           >
             <canvas ref={axisCanvasRef} width={76} height={76} style={{ display: 'block', borderRadius: '7px' }} />
           </div>
@@ -2512,7 +2543,6 @@ function App() {
             gl={{ preserveDrawingBuffer: true }}
             onCreated={(state) => {
               (window as any)._physics_gl = state.gl;
-              (window as any)._physics_state = state;
               const canvas = state.gl.domElement;
               // Without this, a lost WebGL context (GPU driver hiccup, memory
               // pressure, etc.) leaves the canvas permanently blank with no way
@@ -2530,10 +2560,16 @@ function App() {
           >
             <SceneCapture sceneRef={threeSceneRef} />
             <DropHandler addComponent={addComponent} />
-            <color attach="background" args={['#f8fafc']} />
-            <ambientLight intensity={0.6} />
-            <directionalLight position={[5, 10, 5]} intensity={1.2} castShadow />
-            <Grid infiniteGrid fadeDistance={20} cellColor="#e2e8f0" sectionColor="#cbd5e1" position={[0, -0.01, 0]} />
+            <color attach="background" args={[darkMode ? '#0b0f19' : '#f8fafc']} />
+            <ambientLight intensity={darkMode ? 0.35 : 0.6} />
+            <directionalLight position={[5, 10, 5]} intensity={darkMode ? 1.4 : 1.2} castShadow />
+            <Grid 
+              infiniteGrid 
+              fadeDistance={20} 
+              cellColor={darkMode ? '#1e293b' : '#e2e8f0'} 
+              sectionColor={darkMode ? '#334155' : '#cbd5e1'} 
+              position={[0, -0.01, 0]} 
+            />
             
             {model && data && mujoco && (
               <PhysicsLoop 
@@ -2568,6 +2604,30 @@ function App() {
             <DragInteractionController />
           </Canvas>
 
+          {/* Floating Viewport Camera Controls */}
+          <div className="absolute bottom-4 right-4 z-10 flex items-center gap-1 bg-white/80 dark:bg-slate-900/80 backdrop-blur-md border border-slate-200 dark:border-slate-800 p-1 rounded-lg shadow-sm">
+            <button
+              onClick={() => setCameraView('perspective')}
+              className={`px-2.5 py-1 rounded text-[10px] font-bold tracking-wide transition-all cursor-pointer ${
+                cameraView === 'perspective'
+                  ? 'bg-blue-500 text-white shadow-xs'
+                  : 'text-slate-650 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+              }`}
+            >
+              Perspective
+            </button>
+            <button
+              onClick={() => setCameraView('topDown')}
+              className={`px-2.5 py-1 rounded text-[10px] font-bold tracking-wide transition-all cursor-pointer ${
+                cameraView === 'topDown'
+                  ? 'bg-blue-500 text-white shadow-xs'
+                  : 'text-slate-655 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+              }`}
+            >
+              Top Down
+            </button>
+          </div>
+
           {/* Floating Note Card Overlays */}
           {noteCards.map(card => (
             <NoteCardOverlay
@@ -2587,7 +2647,7 @@ function App() {
         {selectedNode && (
           <aside 
             style={{ width: `${propertiesWidth}px` }} 
-            className="shrink-0 glass-panel border-l border-slate-200 flex flex-col p-4 z-20 bg-white/50 overflow-y-auto"
+            className="shrink-0 glass-panel border-l border-slate-200 dark:border-slate-800 flex flex-col p-4 z-20 bg-white/55 dark:bg-slate-900/55 overflow-y-auto relative"
           >
             {/* Elegant Resize Handle */}
             <div
@@ -2595,7 +2655,7 @@ function App() {
               className="absolute top-0 left-0 bottom-0 w-1.5 cursor-col-resize hover:bg-blue-500/20 active:bg-blue-500/40 transition-colors z-20 group hidden md:flex items-center justify-center"
               title="Drag to resize panel"
             >
-              <div className="w-[2px] h-8 bg-slate-300 group-hover:bg-blue-500 group-active:bg-blue-600 rounded transition-colors" />
+              <div className="w-[2px] h-8 bg-slate-300 dark:bg-slate-700 group-hover:bg-blue-500 group-active:bg-blue-600 rounded transition-colors" />
             </div>
 
             <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-4 flex items-center justify-between">
