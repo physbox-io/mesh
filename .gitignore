@@ -26,4 +26,4 @@ scratch
 
 enclosures/**
 .mcp.json
-.agents/physbox-mcp-wsl
+.agents/skills/physbox-mcp-wsl

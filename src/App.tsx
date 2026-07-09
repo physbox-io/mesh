@@ -2538,7 +2538,7 @@ function App() {
 
             {/* GitHub */}
             <a
-              href="https://github.com/tomgrek/physicssim"
+              href="https://github.com/physbox-io/physicssim"
               target="_blank"
               rel="noopener noreferrer"
               className="flex items-center justify-center w-8 h-8 rounded-full border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors focus:outline-none flex-shrink-0 cursor-pointer shadow-xs"
