@@ -36,6 +36,8 @@ const buildModelMirror = (built: BuiltResult) => ({
   nq: built.nq, nv: built.nv, nu: built.nu, ngeom: built.ngeom, nbody: built.nbody,
   opt: { timestep: built.timestep },
   geom_size: built.geom_size,
+  geom_type: built.geom_type,
+  geom_rgba: built.geom_rgba,
   body_mass: built.body_mass,
   body_inertia: built.body_inertia,
   body_dofnum: built.body_dofnum,
@@ -226,10 +228,35 @@ const addChildNode = (nodes: any[], parentId: string, newNode: any): boolean => 
   return false;
 };
 
+export interface UndoRedoState {
+  sceneGraph: SceneGraph;
+  gravityZ: number;
+  windX: number;
+  windY: number;
+  density: number;
+  floorFriction: number;
+  floorBounce: number;
+  selectedNodeId: string | null;
+}
+
 export interface PhysicsState {
   mujoco: any;
   model: any;
   data: any;
+  
+  // History State
+  undoStack: UndoRedoState[];
+  redoStack: UndoRedoState[];
+  tempUndoState: UndoRedoState | null;
+  historyDebounceTimer: any | null;
+  lastInteractionType: string | null;
+
+  // History Actions
+  undo: () => void;
+  redo: () => void;
+  recordInteraction: (type: string) => void;
+  flushPendingUndo: () => void;
+  prepareForDiscreteChange: () => void;
   
   isPlaying: boolean;
   isLoaded: boolean;
@@ -300,14 +327,189 @@ export interface PhysicsState {
   recoverFromFatalWorkerError: (message: string, lastState?: { qpos: number[]; qvel: number[]; time: number }) => Promise<void>;
   recycleWorkerSeamlessly: () => Promise<void>;
 }
-
 export const useStore = create<PhysicsState>()((set, get) => ({
   mujoco: null,
   model: null,
   data: null,
   recompileId: 0,
 
-  isPlaying: false,
+  // History State
+  undoStack: [],
+  redoStack: [],
+  tempUndoState: null,
+  historyDebounceTimer: null,
+  lastInteractionType: null,
+
+  // History Actions
+  recordInteraction: (type: string) => {
+    const state = get();
+    if (state.lastInteractionType && state.lastInteractionType !== type) {
+      state.flushPendingUndo();
+    }
+
+    if (!get().tempUndoState) {
+      const snapshot: UndoRedoState = {
+        sceneGraph: JSON.parse(JSON.stringify(get().sceneGraph)),
+        gravityZ: get().gravityZ,
+        windX: get().windX,
+        windY: get().windY,
+        density: get().density,
+        floorFriction: get().floorFriction,
+        floorBounce: get().floorBounce,
+        selectedNodeId: get().selectedNodeId
+      };
+      set({
+        tempUndoState: snapshot,
+        lastInteractionType: type
+      });
+    }
+
+    if (get().historyDebounceTimer) {
+      clearTimeout(get().historyDebounceTimer);
+    }
+
+    const timer = setTimeout(() => {
+      get().flushPendingUndo();
+    }, 800);
+
+    set({ historyDebounceTimer: timer });
+  },
+
+  flushPendingUndo: () => {
+    const { tempUndoState, undoStack, historyDebounceTimer } = get();
+    if (historyDebounceTimer) {
+      clearTimeout(historyDebounceTimer);
+    }
+
+    if (tempUndoState) {
+      const current = get();
+      const isDifferent =
+        tempUndoState.gravityZ !== current.gravityZ ||
+        tempUndoState.windX !== current.windX ||
+        tempUndoState.windY !== current.windY ||
+        tempUndoState.density !== current.density ||
+        tempUndoState.floorFriction !== current.floorFriction ||
+        tempUndoState.floorBounce !== current.floorBounce ||
+        JSON.stringify(tempUndoState.sceneGraph) !== JSON.stringify(current.sceneGraph);
+
+      if (isDifferent) {
+        const newUndoStack = [...undoStack, tempUndoState];
+        if (newUndoStack.length > 20) {
+          newUndoStack.shift();
+        }
+        set({
+          undoStack: newUndoStack,
+          redoStack: [],
+          tempUndoState: null,
+          lastInteractionType: null,
+          historyDebounceTimer: null
+        });
+      } else {
+        set({
+          tempUndoState: null,
+          lastInteractionType: null,
+          historyDebounceTimer: null
+        });
+      }
+    }
+  },
+
+  prepareForDiscreteChange: () => {
+    get().flushPendingUndo();
+    const { sceneGraph, gravityZ, windX, windY, density, floorFriction, floorBounce, selectedNodeId, undoStack } = get();
+    const snapshot: UndoRedoState = {
+      sceneGraph: JSON.parse(JSON.stringify(sceneGraph)),
+      gravityZ,
+      windX,
+      windY,
+      density,
+      floorFriction,
+      floorBounce,
+      selectedNodeId
+    };
+    const newUndoStack = [...undoStack, snapshot];
+    if (newUndoStack.length > 20) {
+      newUndoStack.shift();
+    }
+    set({
+      undoStack: newUndoStack,
+      redoStack: [],
+      tempUndoState: null,
+      lastInteractionType: null
+    });
+  },
+
+  undo: () => {
+    get().flushPendingUndo();
+    const { undoStack, redoStack, sceneGraph, gravityZ, windX, windY, density, floorFriction, floorBounce, selectedNodeId } = get();
+    if (undoStack.length === 0) return;
+
+    const previousState = undoStack[undoStack.length - 1];
+    const newUndoStack = undoStack.slice(0, -1);
+
+    const currentStateSnapshot: UndoRedoState = {
+      sceneGraph: JSON.parse(JSON.stringify(sceneGraph)),
+      gravityZ,
+      windX,
+      windY,
+      density,
+      floorFriction,
+      floorBounce,
+      selectedNodeId
+    };
+
+    set({
+      sceneGraph: previousState.sceneGraph,
+      gravityZ: previousState.gravityZ,
+      windX: previousState.windX,
+      windY: previousState.windY,
+      density: previousState.density,
+      floorFriction: previousState.floorFriction,
+      floorBounce: previousState.floorBounce,
+      selectedNodeId: previousState.selectedNodeId,
+      undoStack: newUndoStack,
+      redoStack: [...redoStack, currentStateSnapshot],
+      isPlaying: false
+    });
+
+    get().recompile(previousState.sceneGraph, previousState.selectedNodeId, true, true);
+  },
+
+  redo: () => {
+    get().flushPendingUndo();
+    const { undoStack, redoStack, sceneGraph, gravityZ, windX, windY, density, floorFriction, floorBounce, selectedNodeId } = get();
+    if (redoStack.length === 0) return;
+
+    const nextState = redoStack[redoStack.length - 1];
+    const newRedoStack = redoStack.slice(0, -1);
+
+    const currentStateSnapshot: UndoRedoState = {
+      sceneGraph: JSON.parse(JSON.stringify(sceneGraph)),
+      gravityZ,
+      windX,
+      windY,
+      density,
+      floorFriction,
+      floorBounce,
+      selectedNodeId
+    };
+
+    set({
+      sceneGraph: nextState.sceneGraph,
+      gravityZ: nextState.gravityZ,
+      windX: nextState.windX,
+      windY: nextState.windY,
+      density: nextState.density,
+      floorFriction: nextState.floorFriction,
+      floorBounce: nextState.floorBounce,
+      selectedNodeId: nextState.selectedNodeId,
+      undoStack: [...undoStack, currentStateSnapshot],
+      redoStack: newRedoStack,
+      isPlaying: false
+    });
+
+    get().recompile(nextState.sceneGraph, nextState.selectedNodeId, true, true);
+  },  isPlaying: false,
   isLoaded: false,
   lastCompileError: null,
   isSettingsOpen: false,
@@ -345,6 +547,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   },
   
   loadPreset: (name) => {
+    get().prepareForDiscreteChange();
     set({ isPlaying: false, selectedNodeId: null, activePreset: name });
     if (name.startsWith('user:')) {
       const presetName = name.replace('user:', '');
@@ -370,6 +573,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   },
   
   setEnvironment: (env) => {
+    get().recordInteraction('environment');
     set(env);
     get().recompile(get().sceneGraph);
   },
@@ -377,6 +581,9 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   setSelectedNodeId: (id) => set({ selectedNodeId: id }),
   
   setDraggedNodeId: (id) => {
+    if (id !== null && get().draggedNodeId === null) {
+      get().recordInteraction('drag-node');
+    }
     set({ draggedNodeId: id });
     getPhysicsWorkerClient().setDrag(id, get().dragTarget);
   },
@@ -387,6 +594,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   setDragDistance: (distance) => set({ dragDistance: distance }),
 
   updateWedgeParams: (id, params) => {
+    get().recordInteraction('node-params');
     const newScene = JSON.parse(JSON.stringify(get().sceneGraph)) as SceneGraph;
     const traverse = (nodes: any[]) => {
       if (!nodes) return false;
@@ -433,6 +641,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   },
   
   updatePyramidParams: (id, params) => {
+    get().recordInteraction('node-params');
     const newScene = JSON.parse(JSON.stringify(get().sceneGraph)) as SceneGraph;
     const traverse = (nodes: any[]) => {
       if (!nodes) return false;
@@ -462,6 +671,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   },
 
   updateConeParams: (id, params) => {
+    get().recordInteraction('node-params');
     const newScene = JSON.parse(JSON.stringify(get().sceneGraph)) as SceneGraph;
     const traverse = (nodes: any[]) => {
       if (!nodes) return false;
@@ -489,6 +699,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   },
 
   updateTorusParams: (id, params) => {
+    get().recordInteraction('node-params');
     const newScene = JSON.parse(JSON.stringify(get().sceneGraph)) as SceneGraph;
     const traverse = (nodes: any[]) => {
       if (!nodes) return false;
@@ -516,6 +727,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   },
 
   updateTubeParams: (id, params) => {
+    get().recordInteraction('node-params');
     const newScene = JSON.parse(JSON.stringify(get().sceneGraph)) as SceneGraph;
     const traverse = (nodes: any[]) => {
       if (!nodes) return false;
@@ -545,6 +757,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   },
 
   updatePulleyParams: (id, params) => {
+    get().recordInteraction('node-params');
     const newScene = JSON.parse(JSON.stringify(get().sceneGraph)) as SceneGraph;
     const traverse = (nodes: any[]) => {
       if (!nodes) return false;
@@ -573,6 +786,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   },
 
   updateRopeParams: (id, params) => {
+    get().recordInteraction('node-params');
     const newScene = JSON.parse(JSON.stringify(get().sceneGraph)) as SceneGraph;
     const traverse = (nodes: any[]) => {
       if (!nodes) return false;
@@ -592,6 +806,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   },
   
   updateScene: (newScene, skipRecompile) => {
+    get().prepareForDiscreteChange();
     set({ sceneGraph: newScene });
     if (!skipRecompile) {
       get().recompile(newScene);
@@ -599,6 +814,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   },
   
   renameNode: (id, newName) => {
+    get().prepareForDiscreteChange();
     const newScene = JSON.parse(JSON.stringify(get().sceneGraph));
     const traverse = (nodes: any[]) => {
       if (!nodes) return false;
@@ -617,6 +833,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   },
   
   updateNodePos: (id, newPos) => {
+    get().recordInteraction('node-pos');
     const newScene = JSON.parse(JSON.stringify(get().sceneGraph));
     const traverse = (nodes: any[]) => {
       if (!nodes) return false; for (const node of nodes) {
@@ -639,6 +856,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   },
 
   updateNodeRotation: (id, axis, deg) => {
+    get().recordInteraction('node-rotation');
     const newScene = JSON.parse(JSON.stringify(get().sceneGraph)) as SceneGraph;
     const traverse = (nodes: any[]) => {
       if (!nodes) return false;
@@ -667,6 +885,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   },
 
   updateNodeGeom: (id, updates, geomIndex) => {
+    get().recordInteraction('node-geom');
     const newScene = JSON.parse(JSON.stringify(get().sceneGraph));
     const traverse = (nodes: any[]) => {
       if (!nodes) return false; for (const node of nodes) {
@@ -739,6 +958,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   },
 
   updateGearTeeth: (id, teeth) => {
+    get().recordInteraction('gear-teeth');
     const newScene = JSON.parse(JSON.stringify(get().sceneGraph)) as SceneGraph;
     const traverse = (nodes: any[]): boolean => {
       if (!nodes) return false;
@@ -765,6 +985,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   },
 
   addPusherPeg: (gearId) => {
+    get().prepareForDiscreteChange();
     const newScene = JSON.parse(JSON.stringify(get().sceneGraph)) as SceneGraph;
     const traverse = (nodes: any[]): boolean => {
       if (!nodes) return false;
@@ -795,6 +1016,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   },
 
   deletePusherPeg: (gearId) => {
+    get().prepareForDiscreteChange();
     const newScene = JSON.parse(JSON.stringify(get().sceneGraph)) as SceneGraph;
     const traverse = (nodes: any[]): boolean => {
       if (!nodes) return false;
@@ -813,6 +1035,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   },
 
   updatePusherPeg: (gearId, updates) => {
+    get().recordInteraction('pusher-peg');
     const newScene = JSON.parse(JSON.stringify(get().sceneGraph)) as SceneGraph;
     const traverse = (nodes: any[]): boolean => {
       if (!nodes) return false;
@@ -840,6 +1063,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   },
 
   updateNodeJoint: (id, updates) => {
+    get().recordInteraction('node-joint');
     const newScene = JSON.parse(JSON.stringify(get().sceneGraph));
     const traverse = (nodes: any[]) => {
       if (!nodes) return false; for (const node of nodes) {
@@ -857,6 +1081,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   },
 
   updateNodeScript: (id, script) => {
+    get().recordInteraction('node-script');
     const newScene = JSON.parse(JSON.stringify(get().sceneGraph));
     const traverse = (nodes: any[]) => {
       if (!nodes) return false;
@@ -878,6 +1103,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   },
 
   updateNodeScad: (id, scad, compiledData, skipRecompile) => {
+    get().recordInteraction('node-scad');
     const newScene = JSON.parse(JSON.stringify(get().sceneGraph));
     const traverse = (nodes: any[]) => {
       if (!nodes) return false;
@@ -913,6 +1139,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   },
 
   updateNode: (id, updates) => {
+    get().recordInteraction('node');
     const newScene = JSON.parse(JSON.stringify(get().sceneGraph));
     const traverse = (nodes: any[]): boolean => {
       for (const node of nodes) {
@@ -929,6 +1156,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   },
 
   updateNodeJointsList: (id, joints) => {
+    get().recordInteraction('node-joints-list');
     const newScene = JSON.parse(JSON.stringify(get().sceneGraph)) as SceneGraph;
     const traverse = (nodes: any[]): boolean => {
       if (!nodes) return false;
@@ -947,6 +1175,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   },
 
   deleteNode: (id) => {
+    get().prepareForDiscreteChange();
     const newScene = JSON.parse(JSON.stringify(get().sceneGraph)) as SceneGraph;
     const traverseAndRemove = (nodes: any[]): boolean => {
       if (!nodes) return false;
@@ -966,6 +1195,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   },
 
   addComponent: (type, position) => {
+    get().prepareForDiscreteChange();
     console.log("addComponent START", type, position);
     const { sceneGraph, selectedNodeId, parentUnderSelected } = get();
     const newScene = JSON.parse(JSON.stringify(sceneGraph)) as SceneGraph;

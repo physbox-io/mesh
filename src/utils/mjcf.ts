@@ -46,6 +46,35 @@ const buildNode = (node: SceneNode): string => {
   // emit a <body> into MJCF — a bodyless body causes implicit inertia artefacts.
   if (node.isPulleyRope) return '';
 
+  if (node.isComposite) {
+    const type = node.compositeType === 'rope' ? 'cable' : (node.compositeType || 'cable');
+    const count = node.compositeCount || '15 1 1';
+    const size = node.compositeSize !== undefined ? node.compositeSize : '1.5';
+    const prefix = node.compositePrefix || `${node.name}_`;
+    const curve = node.compositeCurve || 's 0 0';
+
+    const damping = node.joints?.[0]?.damping !== undefined ? node.joints[0].damping : 0.05;
+    const stiffness = node.joints?.[0]?.stiffness !== undefined ? node.joints[0].stiffness : 0.0;
+
+    const geom = node.geoms?.[0];
+    const geomType = geom?.type || 'capsule';
+    const geomSize = geom?.size ? geom.size.join(' ') : '0.02';
+    const geomRgba = geom?.rgba ? geom.rgba.join(' ') : '0.8 0.4 0.2 1';
+
+    const compositeXml = `<composite type="${type}" count="${count}" size="${size}" curve="${curve}" prefix="${prefix}"><joint kind="main" damping="${damping}" stiffness="${stiffness}" /><geom type="${geomType}" size="${geomSize}" rgba="${geomRgba}" /></composite>`;
+
+    let attrs = `name="${node.name}" pos="${node.pos.join(' ')}"`;
+    if (node.quat) {
+      attrs += ` quat="${node.quat.join(' ')}"`;
+    } else if (node.euler) {
+      attrs += ` euler="${node.euler.join(' ')}"`;
+    }
+    
+    let childrenXml = '';
+    node.children.forEach(c => childrenXml += buildNode(c));
+    return `<body ${attrs}>${compositeXml}${childrenXml}</body>`;
+  }
+
   let innerXml = '';
   
   node.joints.forEach(j => innerXml += buildJoint(j));
@@ -206,6 +235,9 @@ export const compileToMJCF = (
       }
       if (node.weldTargetId) {
         weldConstraintsList.push({ bodyName: node.name, targetId: node.weldTargetId });
+      }
+      if (node.isComposite && node.weldLastToId) {
+        weldConstraintsList.push({ bodyName: (node.compositePrefix || `${node.name}_`) + 'B_last', targetId: node.weldLastToId });
       }
       if (node.connectTargetId && node.connectAnchor) {
         connectConstraintsList.push({ bodyId: node.id, bodyName: node.name, targetId: node.connectTargetId, anchor: node.connectAnchor });

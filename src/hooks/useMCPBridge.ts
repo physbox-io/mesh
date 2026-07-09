@@ -215,7 +215,7 @@ export function useMCPBridge() {
           return (store.sceneGraph.nodes || []).map(stripMeshArrays);
 
         case 'GET_OBJECT': {
-          const targetId = msg.id;
+          const targetId = msg.targetId;
           if (!targetId) throw new Error('Missing object id');
           const findNode = (nodesList: any[]): any => {
             if (!nodesList) return null;
@@ -232,7 +232,7 @@ export function useMCPBridge() {
         }
 
         case 'UPDATE_OBJECT': {
-          const targetId = msg.id;
+          const targetId = msg.targetId;
           const updates = msg.updates;
           if (!targetId) throw new Error('Missing object id');
           if (!updates) throw new Error('Missing updates payload');
@@ -259,7 +259,7 @@ export function useMCPBridge() {
             store.updateNodeScad(targetId, updates.scad, compiled, false);
           } else {
             store.updateNode(targetId, updates);
-            await store.recompile(store.sceneGraph, undefined, false, true);
+            await useStore.getState().recompile(useStore.getState().sceneGraph, undefined, false, true);
           }
           const error = store.lastCompileError;
           return { ok: !error, ...(error ? { error } : {}) };

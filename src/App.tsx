@@ -5,7 +5,7 @@ import { useMuJoCoInit } from './hooks/useMuJoCo';
 import { useMCPBridge } from './hooks/useMCPBridge';
 import { useStore, scaleMeshGeoms, getPhysicsWorkerClient } from './store/useStore';
 import type { SceneGraph, SceneNode } from './types/scene';
-import { Play, Square, SlidersHorizontal, Settings, Box, Circle, X, RotateCcw, Trash2, Layers, CircleDot, Zap, Info, Triangle, Disc, Code, Menu, Shapes, Minimize2, Save, Download, Upload, FileText, ChevronDown, ChevronUp, Edit3, Printer, Scissors, Sparkles, Sun, Moon, Pyramid, Cone, Donut } from 'lucide-react';
+import { Play, Square, SlidersHorizontal, Settings, Box, Circle, X, RotateCcw, Trash2, Layers, CircleDot, Zap, Info, Triangle, Disc, Code, Menu, Shapes, Minimize2, Save, Download, Upload, Undo, Redo, FileText, ChevronDown, ChevronUp, Edit3, Printer, Scissors, Sparkles, Sun, Moon, Pyramid, Cone, Donut } from 'lucide-react';
 import { useRef, useMemo, useEffect, useCallback, useState, type RefObject } from 'react';
 import AICopilotPanel from './components/AICopilotPanel';
 import * as THREE from 'three';
@@ -426,11 +426,12 @@ const WedgeGeometry = ({ width = 2.0, depth = 1.0, height = 0.5 }: { width: numb
 
 
 // Dynamic Geom Renderer
-const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, selectedNodeId, setSelectedNodeId, vertices, faces, dynamic: isDynamic }: any) => {
+const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, selectedNodeId, setSelectedNodeId, vertices, faces, dynamic: isDynamic, providedGeomId }: any) => {
   const meshRef = useRef<THREE.Group>(null);
   const isPlaying = useStore(state => state.isPlaying);
   
   const node = useStore(state => {
+    if (!nodeId) return null;
     const find = (nodes: any[]): any => {
       if (!nodes) return null;
       for (const n of nodes) {
@@ -444,11 +445,12 @@ const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, selectedN
   });
   
   const geomId = useMemo(() => {
+    if (providedGeomId !== undefined) return providedGeomId;
     if (!model || !mujoco) return -1;
     const id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM.value, name);
     console.log(`[DynamicGeom ${name}] computed geomId:`, id);
     return id;
-  }, [model, mujoco, name]);
+  }, [providedGeomId, model, mujoco, name]);
 
   const geometryArgs = useMemo(() => {
     if (geomId === -1 || !model) return [];
@@ -1054,6 +1056,39 @@ const SceneVisuals = ({ model, data, mujoco, sceneGraph, selectedNodeId, setSele
   const staticMeshGeoms = geoms.filter(g => g.type === 'mesh' && !g.dynamic);
   const dynamicMeshGeoms = geoms.filter(g => g.type === 'mesh' && g.dynamic);
 
+  const implicitGeoms = useMemo(() => {
+    if (!model || !mujoco || !model.geom_type) return [];
+    const list: any[] = [];
+    const ngeom = model.ngeom;
+    const explicitNames = new Set(geoms.map(g => g.name));
+    for (let i = 0; i < ngeom; i++) {
+      const name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM.value, i);
+      if (name && !explicitNames.has(name) && name !== 'floor') {
+        const typeId = model.geom_type[i];
+        let typeStr = 'sphere';
+        if (typeId === 2) typeStr = 'sphere';
+        else if (typeId === 3) typeStr = 'capsule';
+        else if (typeId === 4) typeStr = 'ellipsoid';
+        else if (typeId === 5) typeStr = 'cylinder';
+        else if (typeId === 6) typeStr = 'box';
+        else if (typeId === 7) typeStr = 'mesh';
+        
+        const offset = i * 4;
+        const color = model.geom_rgba 
+          ? Array.from(model.geom_rgba.slice(offset, offset + 4)) 
+          : [0.6, 0.4, 0.8, 1];
+
+        list.push({
+          providedGeomId: i,
+          name,
+          type: typeStr,
+          rgba: color,
+        });
+      }
+    }
+    return list;
+  }, [model, mujoco, geoms]);
+
   return (
     <>
       {/* Primitive geoms and dynamic meshes live in a Z-up→Y-up rotated group */}
@@ -1065,6 +1100,20 @@ const SceneVisuals = ({ model, data, mujoco, sceneGraph, selectedNodeId, setSele
             name={g.name}
             type={g.type}
             color={g.rgba || [0.8,0.8,0.8,1]}
+            mujoco={mujoco}
+            model={model}
+            data={data}
+            selectedNodeId={selectedNodeId}
+            setSelectedNodeId={setSelectedNodeId}
+          />
+        ))}
+        {implicitGeoms.map(g => (
+          <DynamicGeom
+            key={g.name}
+            providedGeomId={g.providedGeomId}
+            name={g.name}
+            type={g.type}
+            color={g.rgba}
             mujoco={mujoco}
             model={model}
             data={data}
@@ -1249,38 +1298,38 @@ function generateScadForNode(node: any): string {
     const w = node.width || 2.0;
     const h = node.height || 0.5;
     const d = node.depth || 1.0;
-    return `// Wedge shape\nlinear_extrude(height=${d}, center=true)\n  polygon([[0,0], [${w},0], [0,${h}]]);`;
+    return `// Wedge shape\nwidth = ${w.toFixed(3)}; // [0.1:0.05:3.0]\nheight = ${h.toFixed(3)}; // [0.1:0.05:2.0]\ndepth = ${d.toFixed(3)}; // [0.1:0.05:2.0]\nlinear_extrude(height=depth, center=true)\n  polygon([[0,0], [width,0], [0,height]]);`;
   }
   
   if (node.isPyramid) {
     const w = node.width || 0.5;
     const d = node.depth || 0.5;
     const h = node.height || 0.5;
-    return `// Pyramid shape\nlinear_extrude(height=${h.toFixed(3)}, scale=0)\n  square([${w.toFixed(3)}, ${d.toFixed(3)}], center=true);`;
+    return `// Pyramid shape\nwidth = ${w.toFixed(3)}; // [0.1:0.05:2.0]\ndepth = ${d.toFixed(3)}; // [0.1:0.05:2.0]\nheight = ${h.toFixed(3)}; // [0.1:0.05:2.0]\nlinear_extrude(height=height, scale=0)\n  square([width, depth], center=true);`;
   }
   
   if (node.isCone) {
     const r = node.radius || 0.3;
     const h = node.height || 0.6;
-    return `// Cone shape\ncylinder(h=${h.toFixed(3)}, r1=${r.toFixed(3)}, r2=0, center=false, $fn=24);`;
+    return `// Cone shape\nradius = ${r.toFixed(3)}; // [0.1:0.05:2.0]\nheight = ${h.toFixed(3)}; // [0.1:0.05:2.0]\ncylinder(h=height, r1=radius, r2=0, center=false, $fn=24);`;
   }
 
   if (node.isTorus) {
     const R = node.majorRadius || 0.4;
     const r = node.tubeRadius || 0.1;
-    return `// Torus shape\nrotate_extrude($fn=24) translate([${R.toFixed(3)}, 0, 0]) circle(r=${r.toFixed(3)}, $fn=16);`;
+    return `// Torus shape\nmajor_r = ${R.toFixed(3)}; // [0.1:0.05:2.0]\ntube_r = ${r.toFixed(3)}; // [0.02:0.01:1.0]\nrotate_extrude($fn=24) translate([major_r, 0, 0]) circle(r=tube_r, $fn=16);`;
   }
 
   if (node.isTube) {
     const r1 = node.innerRadius || 0.2;
     const r2 = node.outerRadius || 0.3;
     const h = node.height || 0.5;
-    return `// Tube shape\ndifference() {\n  cylinder(h=${h.toFixed(3)}, r=${r2.toFixed(3)}, center=true, $fn=24);\n  cylinder(h=${(h + 0.02).toFixed(3)}, r=${r1.toFixed(3)}, center=true, $fn=24);\n}`;
+    return `// Tube shape\ninner_r = ${r1.toFixed(3)}; // [0.05:0.05:2.0]\nouter_r = ${r2.toFixed(3)}; // [0.1:0.05:2.5]\nheight = ${h.toFixed(3)}; // [0.1:0.05:2.0]\ndifference() {\n  cylinder(h=height, r=outer_r, center=true, $fn=24);\n  cylinder(h=height + 0.02, r=inner_r, center=true, $fn=24);\n}`;
   }
   
   if (node.id.includes('gear')) {
     const r = geom.size?.[0] || 0.5;
-    return `// Gear shape\ndifference() {\n  cylinder(h=0.08, r=${r}, center=true, $fn=30);\n  cylinder(h=0.12, r=0.08, center=true, $fn=16);\n}`;
+    return `// Gear shape\nradius = ${r}; // [0.1:0.05:2.0]\ndifference() {\n  cylinder(h=0.08, r=radius, center=true, $fn=30);\n  cylinder(h=0.12, r=0.08, center=true, $fn=16);\n}`;
   }
 
   switch (geom.type) {
@@ -1288,27 +1337,27 @@ function generateScadForNode(node: any): string {
       const rx = geom.size?.[0] || 0.3;
       const ry = geom.size?.[1] || 0.2;
       const rz = geom.size?.[2] || 0.15;
-      return `// Ellipsoid shape\nscale([${rx.toFixed(3)}, ${ry.toFixed(3)}, ${rz.toFixed(3)}]) sphere(r=1, $fn=24);`;
+      return `// Ellipsoid shape\nrx = ${rx.toFixed(3)}; // [0.05:0.05:2.0]\nry = ${ry.toFixed(3)}; // [0.05:0.05:2.0]\nrz = ${rz.toFixed(3)}; // [0.05:0.05:2.0]\nscale([rx, ry, rz]) sphere(r=1, $fn=24);`;
     }
     case 'box': {
       const sx = (geom.size?.[0] || 0.2) * 2;
       const sy = (geom.size?.[1] || 0.2) * 2;
       const sz = (geom.size?.[2] || 0.2) * 2;
-      return `// Box shape\ncube([${sx.toFixed(3)}, ${sy.toFixed(3)}, ${sz.toFixed(3)}], center=true);`;
+      return `// Box shape\nsx = ${sx.toFixed(3)}; // [0.1:0.05:3.0]\nsy = ${sy.toFixed(3)}; // [0.1:0.05:3.0]\nsz = ${sz.toFixed(3)}; // [0.1:0.05:3.0]\ncube([sx, sy, sz], center=true);`;
     }
     case 'sphere': {
       const r = geom.size?.[0] || 0.2;
-      return `// Sphere shape\nsphere(r=${r.toFixed(3)}, $fn=24);`;
+      return `// Sphere shape\nradius = ${r.toFixed(3)}; // [0.1:0.05:2.0]\nsphere(r=radius, $fn=24);`;
     }
     case 'cylinder': {
       const r = geom.size?.[0] || 0.2;
       const h = (geom.size?.[1] || 0.1) * 2;
-      return `// Cylinder shape\ncylinder(h=${h.toFixed(3)}, r=${r.toFixed(3)}, center=true, $fn=24);`;
+      return `// Cylinder shape\nradius = ${r.toFixed(3)}; // [0.1:0.05:2.0]\nheight = ${h.toFixed(3)}; // [0.1:0.05:3.0]\ncylinder(h=height, r=radius, center=true, $fn=24);`;
     }
     case 'capsule': {
       const r = geom.size?.[0] || 0.04;
       const h = geom.size?.[1] || 0.2;
-      return `// Capsule shape\nhull() {\n  translate([0, 0, -${h.toFixed(3)}]) sphere(r=${r.toFixed(3)}, $fn=16);\n  translate([0, 0, ${h.toFixed(3)}]) sphere(r=${r.toFixed(3)}, $fn=16);\n}`;
+      return `// Capsule shape\nradius = ${r.toFixed(3)}; // [0.01:0.01:1.0]\nheight = ${h.toFixed(3)}; // [0.05:0.05:2.0]\nhull() {\n  translate([0, 0, -height]) sphere(r=radius, $fn=16);\n  translate([0, 0, height]) sphere(r=radius, $fn=16);\n}`;
     }
     case 'mesh': {
       return `// Mesh geometry representation\n// Note: editing this will overwrite the manual vertices\ncube([0.5, 0.5, 0.5], center=true);`;
@@ -1316,6 +1365,80 @@ function generateScadForNode(node: any): string {
     default:
       return `// Primitive shape (${geom.type})\ncube([0.4, 0.4, 0.4], center=true);`;
   }
+}
+
+interface ScadVariable {
+  name: string;
+  value: number;
+  min: number;
+  max: number;
+  step: number;
+  lineIndex: number;
+}
+
+function parseScadVariables(code: string): ScadVariable[] {
+  const variables: ScadVariable[] = [];
+  if (!code) return variables;
+  const lines = code.split('\n');
+  let braceDepth = 0;
+
+  const varRegex = /^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(-?\d+(?:\.\d+)?)\s*;\s*(?:\/\/\s*\[\s*(-?\d+(?:\.\d+)?)(?::(-?\d+(?:\.\d+)?))?:\s*(-?\d+(?:\.\d+)?)\s*\])?/;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const openBraces = (line.match(/{/g) || []).length;
+    const closeBraces = (line.match(/}/g) || []).length;
+
+    if (braceDepth === 0) {
+      const match = line.match(varRegex);
+      if (match) {
+        const name = match[1];
+        const value = parseFloat(match[2]);
+        const parsedStep = match[4] ? parseFloat(match[4]) : undefined;
+
+        const min = value === 0 ? -0.2 : value - Math.abs(value) * 0.2;
+        const max = value === 0 ? 0.2 : value + Math.abs(value) * 0.2;
+        let step = parsedStep;
+        if (step === undefined) {
+          const range = max - min;
+          step = parseFloat((range / 100).toPrecision(2));
+        }
+
+        variables.push({
+          name,
+          value,
+          min,
+          max,
+          step: step || 0.01,
+          lineIndex: i
+        });
+      }
+    }
+
+    braceDepth += openBraces - closeBraces;
+  }
+
+  return variables;
+}
+
+function replaceVarInCode(code: string, varName: string, newValue: number): string {
+  const lines = code.split('\n');
+  let braceDepth = 0;
+  const varRegex = new RegExp(`^(\\s*${varName}\\s*=\\s*)-?\\d+(?:\\.\\d+)?`);
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const openBraces = (line.match(/{/g) || []).length;
+    const closeBraces = (line.match(/}/g) || []).length;
+    if (braceDepth === 0) {
+      const match = line.match(varRegex);
+      if (match) {
+        lines[i] = line.replace(varRegex, `$1${newValue}`);
+        break;
+      }
+    }
+    braceDepth += openBraces - closeBraces;
+  }
+  return lines.join('\n');
 }
 
 function App() {
@@ -1367,6 +1490,63 @@ function App() {
   const [isCompilerLoading, setIsCompilerLoading] = useState(false);
   const axisCanvasRef = useRef<HTMLCanvasElement>(null);
 
+  const scadVars = useMemo(() => parseScadVariables(scadText), [scadText]);
+  const compileTimeoutRef = useRef<number | null>(null);
+
+  // OpenSCAD Slider Debouncing State
+  const [slidingValues, setSlidingValues] = useState<Record<string, number>>({});
+
+  const scadTextRef = useRef(scadText);
+  useEffect(() => {
+    scadTextRef.current = scadText;
+  }, [scadText]);
+
+  const slidingValuesRef = useRef(slidingValues);
+  useEffect(() => {
+    slidingValuesRef.current = slidingValues;
+  }, [slidingValues]);
+
+  const updateCodeTimeoutRef = useRef<number | null>(null);
+
+  const debouncedUpdateCode = useCallback(() => {
+    if (updateCodeTimeoutRef.current) {
+      window.clearTimeout(updateCodeTimeoutRef.current);
+    }
+    updateCodeTimeoutRef.current = window.setTimeout(async () => {
+      let updated = scadTextRef.current;
+      for (const [name, value] of Object.entries(slidingValuesRef.current)) {
+        updated = replaceVarInCode(updated, name, value);
+      }
+      setScadText(updated);
+
+      const selectedNodeId = useStore.getState().selectedNodeId;
+      if (!selectedNodeId) return;
+      setIsScadCompiling(true);
+      setScadError(null);
+      try {
+        const compiled = await compileSCAD(updated);
+        useStore.getState().updateNodeScad(selectedNodeId, updated, compiled);
+      } catch (e: any) {
+        console.error('OpenSCAD Auto-Compilation Error:', e);
+        setScadError(e.message || 'Auto-compilation failed.');
+      } finally {
+        setIsScadCompiling(false);
+        setSlidingValues({});
+      }
+    }, 300);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (compileTimeoutRef.current) {
+        window.clearTimeout(compileTimeoutRef.current);
+      }
+      if (updateCodeTimeoutRef.current) {
+        window.clearTimeout(updateCodeTimeoutRef.current);
+      }
+    };
+  }, []);
+
   // Expose noteCards state to MCP bridge
   useEffect(() => {
     (window as any)._physics_getNoteCards = () => noteCards;
@@ -1411,7 +1591,8 @@ function App() {
     updateNodeJointsList, deleteNode, renameNode,
     addPusherPeg, deletePusherPeg, updatePusherPeg, updateNodeRotation,
     updateWedgeParams, updatePyramidParams, updateConeParams, updateTorusParams, updateTubeParams, updatePulleyParams, updateRopeParams,
-    parentUnderSelected, setParentUnderSelected, updateNodeScript, updateNode
+    parentUnderSelected, setParentUnderSelected, updateNodeScript, updateNode,
+    undo, redo, undoStack, redoStack
   } = useStore();
 
   // Collapsible properties cards drawer listener
@@ -1749,7 +1930,7 @@ function App() {
       setScadError(null);
     }
     setActiveGeomIndex(0);
-  }, [selectedNodeId, selectedNode?.id]);
+  }, [selectedNodeId, selectedNode?.id, selectedNode?.scad, selectedNode?.script]);
 
   const handleSaveScript = useCallback(() => {
     if (!selectedNode) return;
@@ -2177,6 +2358,7 @@ function App() {
                 <option value="drone">🛸 Quadcopter Drone</option>
                 <option value="bouncy_balls">🎱 Bouncy Balls</option>
                 <option value="openscad_demo">🛠️ OpenSCAD Showcase</option>
+                <option value="rope_bridge">🎗️ Interactive Rope Bridge</option>
               </optgroup>
 
               {/* User Presets */}
@@ -2285,6 +2467,24 @@ function App() {
               title="Import JSON"
             >
               <Upload className="w-3.5 h-3.5" />
+            </button>
+
+            <button
+              onClick={undo}
+              disabled={undoStack.length === 0}
+              className="flex items-center justify-center p-1 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 disabled:opacity-30 disabled:hover:bg-transparent transition-colors focus:outline-none cursor-pointer"
+              title="Undo"
+            >
+              <Undo className="w-3.5 h-3.5" />
+            </button>
+
+            <button
+              onClick={redo}
+              disabled={redoStack.length === 0}
+              className="flex items-center justify-center p-1 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 disabled:opacity-30 disabled:hover:bg-transparent transition-colors focus:outline-none cursor-pointer"
+              title="Redo"
+            >
+              <Redo className="w-3.5 h-3.5" />
             </button>
           </div>
 
@@ -4680,13 +4880,13 @@ function App() {
                       onChange={(e) => {
                         const templateVal = e.target.value;
                         if (templateVal === 'hollow_cube') {
-                          setScadText(`// Hollow Cube\ndifference() {\n  cube([0.6, 0.6, 0.6], center=true);\n  sphere(d=0.75, $fn=24);\n}`);
+                          setScadText(`// Hollow Cube\nsize = 0.6; // [0.2:0.05:1.2]\nhole_d = 0.75; // [0.3:0.05:1.5]\ndifference() {\n  cube([size, size, size], center=true);\n  sphere(d=hole_d, $fn=24);\n}`);
                         } else if (templateVal === 'wheel') {
-                          setScadText(`// Wheel with Hole\ndifference() {\n  cylinder(h=0.15, r=0.35, center=true, $fn=30);\n  cylinder(h=0.2, r=0.08, center=true, $fn=16);\n}`);
+                          setScadText(`// Wheel with Hole\nheight = 0.15; // [0.05:0.05:0.5]\nouter_r = 0.35; // [0.1:0.05:1.0]\ninner_r = 0.08; // [0.02:0.02:0.5]\ndifference() {\n  cylinder(h=height, r=outer_r, center=true, $fn=30);\n  cylinder(h=height*1.5, r=inner_r, center=true, $fn=16);\n}`);
                         } else if (templateVal === 'wedge') {
-                          setScadText(`// Wedge with multiple holes\ndifference() {\n  // Base wedge block\n  linear_extrude(height=0.4, center=true)\n    polygon([[0,0], [1.0,0], [0,0.5]]);\n  \n  // Cylindrical holes\n  translate([0.2, 0.1, 0])\n    cylinder(h=0.5, r=0.08, center=true, $fn=16);\n  translate([0.5, 0.15, 0])\n    cylinder(h=0.5, r=0.08, center=true, $fn=16);\n}`);
+                          setScadText(`// Wedge with multiple holes\nwidth = 1.0; // [0.5:0.1:2.0]\nheight = 0.5; // [0.2:0.1:1.5]\nthickness = 0.4; // [0.1:0.1:1.0]\nhole_r = 0.08; // [0.02:0.01:0.2]\ndifference() {\n  // Base wedge block\n  linear_extrude(height=thickness, center=true)\n    polygon([[0,0], [width,0], [0,height]]);\n  \n  // Cylindrical holes\n  translate([width*0.2, height*0.2, 0])\n    cylinder(h=thickness*1.5, r=hole_r, center=true, $fn=16);\n  translate([width*0.5, height*0.3, 0])\n    cylinder(h=thickness*1.5, r=hole_r, center=true, $fn=16);\n}`);
                         } else if (templateVal === 'funnel') {
-                          setScadText(`// Funnel / Bowl\ndifference() {\n  cylinder(h=0.4, r1=0.15, r2=0.4, center=true, $fn=24);\n  translate([0, 0, 0.05])\n    cylinder(h=0.4, r1=0.1, r2=0.38, center=true, $fn=24);\n  // vertical passage hole\n  cylinder(h=0.5, r=0.05, center=true, $fn=16);\n}`);
+                          setScadText(`// Funnel / Bowl\nheight = 0.4; // [0.2:0.05:1.0]\nbase_r = 0.15; // [0.05:0.05:0.5]\ntop_r = 0.4; // [0.2:0.05:1.0]\npassage_r = 0.05; // [0.02:0.01:0.2]\ndifference() {\n  cylinder(h=height, r1=base_r, r2=top_r, center=true, $fn=24);\n  translate([0, 0, height*0.125])\n    cylinder(h=height, r1=base_r*0.66, r2=top_r*0.95, center=true, $fn=24);\n  // vertical passage hole\n  cylinder(h=height*1.5, r=passage_r, center=true, $fn=16);\n}`);
                         } else if (templateVal === 'clear') {
                           setScadText('');
                         }
@@ -4702,6 +4902,44 @@ function App() {
                       <option value="clear">Clear Editor</option>
                     </select>
                   </div>
+
+                  {/* Procedural parameters sliders */}
+                  {scadVars.length > 0 && (
+                    <div className="flex flex-col gap-2 p-2 bg-slate-50 dark:bg-slate-900/50 rounded-lg border border-slate-100 dark:border-slate-800 mb-1">
+                      <span className="text-[9px] font-bold text-slate-500 uppercase tracking-wider">
+                        Procedural Parameters
+                      </span>
+                      <div className="grid grid-cols-1 gap-2">
+                        {scadVars.map((v) => (
+                          <div key={v.name} className="flex flex-col gap-1">
+                            <div className="flex justify-between items-center text-xs">
+                              <span className="font-mono text-slate-700 dark:text-slate-300 font-medium">{v.name}</span>
+                              <span className="font-mono text-violet-600 dark:text-violet-400 font-bold bg-violet-50 dark:bg-violet-950/40 px-1.5 py-0.5 rounded border border-violet-100 dark:border-violet-900/50">
+                                {Number((slidingValues[v.name] ?? v.value).toFixed(4))}
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <span className="text-[9px] text-slate-400 font-mono w-8 text-right">{v.min}</span>
+                              <input
+                                type="range"
+                                min={v.min}
+                                max={v.max}
+                                step={v.step}
+                                value={slidingValues[v.name] ?? v.value}
+                                onChange={(e) => {
+                                  const val = parseFloat(e.target.value);
+                                  setSlidingValues(prev => ({ ...prev, [v.name]: val }));
+                                  debouncedUpdateCode();
+                                }}
+                                className="flex-1 h-1 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-violet-600"
+                              />
+                              <span className="text-[9px] text-slate-400 font-mono w-8">{v.max}</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
 
                   {/* Text Area Code Editor */}
                   <div className="relative">

@@ -13,6 +13,7 @@ export interface BuiltResult {
   timestep?: number;
   geom_size?: number[]; body_mass?: number[]; body_inertia?: number[];
   body_dofnum?: number[]; body_parentid?: number[];
+  geom_type?: number[]; geom_rgba?: number[];
   jnt_qposadr?: number[]; jnt_dofadr?: number[];
   idMaps?: { body: Record<string, number>; joint: Record<string, number>; geom: Record<string, number>; actuator: Record<string, number> };
   time?: number;

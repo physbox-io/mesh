@@ -143,7 +143,7 @@
       "goodUseCases": ["Static background scenery", "Decorative structures", "Dynamic convex polyhedra (pyramids, crystals, custom shapes)", "Multi-geom bodies (mesh + primitive sub-components)"]
     },
     "openScadNotes": {
-      "definition": "You can define procedural shapes using the scad property on a body node. Example: scad: 'difference() { cube([0.5,0.5,0.5], center=true); sphere(d=0.6); }'.",
+      "definition": "You can define procedural shapes using the scad property on a body node. Example: scad: 'size = 0.5; // [0.1:0.05:1.0]\\ndifference() {\\n  cube([size, size, size], center=true);\\n  sphere(d=size * 1.2);\\n}'.",
       "automaticCompilation": "If a body node specifies a scad property and geoms is omitted, the simulator automatically registers it as a dynamic mesh geom and compiles it to vertices and faces. The resulting dynamic mesh behaves as a physical body with collision detection.",
       "scalingWarning": "MuJoCo units are in meters, whereas standard OpenSCAD designs are in millimeters. You MUST wrap your top-level modules or calls in a scale([0.001, 0.001, 0.001]) block. Failing to do so compiles the mesh 1000x larger, which breaks rendering, zoom bounds, and physics stability."
     },
@@ -397,7 +397,7 @@
     {
       "title": "Procedural OpenSCAD Shape Spawning",
       "description": "Spawn a procedural OpenSCAD body at height 2.5m using raw SCAD code, automatically compiling it into a dynamic mesh.",
-      "code": "physics_build_scene(bodies=[{\"id\":\"scad_gear\",\"name\":\"scad_gear\",\"pos\":[0,0,2.5],\"joints\":[{\"name\":\"gear_free\",\"type\":\"free\"}],\"scad\":\"difference() { cylinder(r=0.4, h=0.2, center=true, $fn=24); for(i=[0:5]) { rotate(i*60) translate([0.4,0,0]) cube([0.1,0.1,0.3], center=true); } }\"}])"
+      "code": "physics_build_scene(bodies=[{\"id\":\"scad_gear\",\"name\":\"scad_gear\",\"pos\":[0,0,2.5],\"joints\":[{\"name\":\"gear_free\",\"type\":\"free\"}],\"scad\":\"gear_radius = 0.4; // [0.1:1.0]\\ngear_height = 0.2; // [0.05:0.5]\\ntooth_count = 6; // [3:12]\\ndifference() {\\n  cylinder(r=gear_radius, h=gear_height, center=true, $fn=24);\\n  for(i=[0:tooth_count-1]) {\\n    rotate(i*360/tooth_count) translate([gear_radius,0,0]) cube([0.1,0.1,gear_height*1.5], center=true);\\n  }\\n}\"}])"
     }
   ]
 }

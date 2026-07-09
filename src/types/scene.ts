@@ -89,6 +89,13 @@ export interface SceneNode {
   isAerodynamic?: boolean;
   script?: string;
   scad?: string;
+  isComposite?: boolean;
+  compositeType?: 'cable' | 'grid' | 'rope' | 'cloth';
+  compositeCount?: string;
+  compositeSize?: string;
+  compositePrefix?: string;
+  compositeCurve?: string;
+  weldLastToId?: string;
 }
 
 export interface SceneGraph {

@@ -782,6 +782,8 @@ const doBuild = (
     nq: newModel.nq, nv: newModel.nv, nu: newModel.nu, ngeom: newModel.ngeom, nbody: newModel.nbody,
     timestep: newModel.opt.timestep,
     geom_size: Array.from(newModel.geom_size as ArrayLike<number>),
+    geom_type: Array.from(newModel.geom_type as ArrayLike<number>),
+    geom_rgba: Array.from(newModel.geom_rgba as ArrayLike<number>),
     body_mass: Array.from(newModel.body_mass as ArrayLike<number>),
     body_inertia: Array.from(newModel.body_inertia as ArrayLike<number>),
     body_dofnum: Array.from(newModel.body_dofnum as ArrayLike<number>),

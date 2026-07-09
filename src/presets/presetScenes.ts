@@ -2216,7 +2216,7 @@ export const openscadDemoPreset: SceneGraph = {
           ]
         }
       ],
-      scad: `// OpenSCAD Showcase Scene\n// A hollow box that catches falling spheres!\ndifference() {\n  cube([0.8, 0.8, 0.5], center=true);\n  translate([0, 0, 0.075]) cube([0.65, 0.65, 0.5], center=true);\n}`,
+      scad: `// OpenSCAD Showcase Scene\n// A hollow box that catches falling spheres!\nbox_size = 0.8; // [0.4:0.05:1.5]\nbox_height = 0.5; // [0.2:0.05:1.0]\ninner_size = 0.65; // [0.3:0.05:1.3]\ndifference() {\n  cube([box_size, box_size, box_height], center=true);\n  translate([0, 0, 0.075]) cube([inner_size, inner_size, box_height], center=true);\n}`,
       children: []
     },
     {
@@ -2244,6 +2244,44 @@ export const openscadDemoPreset: SceneGraph = {
       pos: [0, 0, 2.8],
       joints: [{ name: 'ball_yellow_free', type: 'free', initialVelocity: [0, 0, 0, 0, 0, 0] }],
       geoms: [{ name: 'ball_yellow_geom', type: 'sphere', size: [0.15], rgba: [0.8, 0.8, 0.2, 1], mass: 0.8 }],
+      children: []
+    }
+  ]
+};
+
+export const ropeBridgePreset: SceneGraph = {
+  nodes: [
+    {
+      id: 'rope_left_anchor',
+      name: 'rope_left_anchor',
+      type: 'body',
+      pos: [-1.2, 0, 1.2],
+      joints: [],
+      geoms: [{ name: 'left_anchor_geom', type: 'box', size: [0.08, 0.08, 0.08], rgba: [0.4, 0.4, 0.4, 1] }],
+      isComposite: true,
+      compositeType: 'cable',
+      compositeCount: '25 1 1',
+      compositeSize: '2.4',
+      compositePrefix: 'rope_',
+      weldLastToId: 'rope_right_anchor',
+      children: []
+    },
+    {
+      id: 'rope_right_anchor',
+      name: 'rope_right_anchor',
+      type: 'body',
+      pos: [1.2, 0, 1.2],
+      joints: [],
+      geoms: [{ name: 'right_anchor_geom', type: 'box', size: [0.08, 0.08, 0.08], rgba: [0.4, 0.4, 0.4, 1] }],
+      children: []
+    },
+    {
+      id: 'heavy_ball',
+      name: 'heavy_ball',
+      type: 'body',
+      pos: [0, 0, 2.0],
+      joints: [{ name: 'ball_free', type: 'free', initialVelocity: [0, 0, 0, 0, 0, 0] }],
+      geoms: [{ name: 'ball_geom', type: 'sphere', size: [0.18], rgba: [0.9, 0.2, 0.2, 1], mass: 3.5 }],
       children: []
     }
   ]
@@ -2345,5 +2383,9 @@ export const PRESETS = {
   openscad_demo: {
     name: 'OpenSCAD Showcase',
     scene: openscadDemoPreset
+  },
+  rope_bridge: {
+    name: 'Interactive Rope Bridge',
+    scene: ropeBridgePreset
   }
 };
