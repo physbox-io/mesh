@@ -263,6 +263,8 @@ export interface PhysicsState {
   lastCompileError: string | null;
   isSettingsOpen: boolean;
   cameraView: 'perspective' | 'topDown';
+  mcpActiveCount: number;
+  scadCompileCount: number;
   
   // Environment
   gravityZ: number;
@@ -326,6 +328,10 @@ export interface PhysicsState {
   resetSimulation: () => void;
   recoverFromFatalWorkerError: (message: string, lastState?: { qpos: number[]; qvel: number[]; time: number }) => Promise<void>;
   recycleWorkerSeamlessly: () => Promise<void>;
+  incrementMcpActive: () => void;
+  decrementMcpActive: () => void;
+  incrementScadCompile: () => void;
+  decrementScadCompile: () => void;
 }
 export const useStore = create<PhysicsState>()((set, get) => ({
   mujoco: null,
@@ -514,6 +520,8 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   lastCompileError: null,
   isSettingsOpen: false,
   cameraView: 'perspective',
+  mcpActiveCount: 0,
+  scadCompileCount: 0,
   
   gravityZ: -9.81,
   windX: 0,
@@ -531,6 +539,10 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   dragDistance: 0,
 
   setParentUnderSelected: (val) => set({ parentUnderSelected: val }),
+  incrementMcpActive: () => set((state) => ({ mcpActiveCount: state.mcpActiveCount + 1 })),
+  decrementMcpActive: () => set((state) => ({ mcpActiveCount: Math.max(0, state.mcpActiveCount - 1) })),
+  incrementScadCompile: () => set((state) => ({ scadCompileCount: state.scadCompileCount + 1 })),
+  decrementScadCompile: () => set((state) => ({ scadCompileCount: Math.max(0, state.scadCompileCount - 1) })),
 
   togglePlay: () => set((state) => {
     const isPlaying = !state.isPlaying;

@@ -1582,6 +1582,7 @@ function App() {
   const { 
     model, data, mujoco, recompileId, activePreset,
     isPlaying, togglePlay, isLoaded, 
+    mcpActiveCount, scadCompileCount,
     isSettingsOpen, setSettingsOpen, 
     gravityZ, windX, windY, density, floorFriction, floorBounce, setEnvironment,
     cameraView, setCameraView,
@@ -2891,6 +2892,30 @@ function App() {
               </div>
             </div>
           )}
+
+          {/* Floating Status Indicators */}
+          <div className="absolute top-4 left-1/2 transform -translate-x-1/2 z-20 flex flex-col gap-2 pointer-events-none items-center">
+            {scadCompileCount > 0 && (
+              <div className="bg-white/90 dark:bg-slate-900/90 text-slate-800 dark:text-slate-100 border border-slate-200/80 dark:border-slate-800/80 px-3.5 py-1.5 rounded-full shadow-md flex items-center gap-2.5 text-xs font-semibold backdrop-blur-md transition-all duration-300 pointer-events-auto">
+                <div className="relative flex h-2 w-2">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-405 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500"></span>
+                </div>
+                <Code className="w-3.5 h-3.5 text-blue-500 dark:text-blue-400" />
+                <span className="tracking-wide">SCAD Compiling</span>
+              </div>
+            )}
+            {mcpActiveCount > 0 && (
+              <div className="bg-white/90 dark:bg-slate-900/90 text-slate-800 dark:text-slate-100 border border-slate-200/80 dark:border-slate-800/80 px-3.5 py-1.5 rounded-full shadow-md flex items-center gap-2.5 text-xs font-semibold backdrop-blur-md transition-all duration-300 pointer-events-auto">
+                <div className="relative flex h-2 w-2">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-405 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                </div>
+                <Zap className="w-3.5 h-3.5 text-emerald-500 dark:text-emerald-400" />
+                <span className="tracking-wide">MCP Active</span>
+              </div>
+            )}
+          </div>
 
           {/* Axis Legend — HTML overlay, drawn to from inside the R3F Canvas via shared ref */}
           <div

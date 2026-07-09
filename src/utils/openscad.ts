@@ -1,4 +1,5 @@
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
+import { useStore } from '../store/useStore';
 
 let createOpenSCADFn: any = null;
 let loadingPromise: Promise<any> | null = null;
@@ -57,86 +58,91 @@ export async function compileSCAD(scadCode: string): Promise<CompiledScad> {
   const cached = compileCache.get(scadCode);
   if (cached) return cached;
 
-  // Ensure the script loader function is loaded
-  const createOpenSCAD = await loadCompiler();
-  if (!createOpenSCAD) {
-    throw new Error('OpenSCAD compiler failed to initialize.');
-  }
-
-  // Instantiate a fresh compiler instance for this compilation
-  const compiler = await createOpenSCAD();
-
-  // Render the OpenSCAD code to ASCII STL string format
-  const stlText = await compiler.renderToStl(scadCode);
-  if (!stlText || stlText.length === 0) {
-    throw new Error('Compilation produced empty output.');
-  }
-
-  // Parse STL data into a BufferGeometry using STLLoader
-  const loader = new STLLoader();
-  const geometry = loader.parse(stlText);
-
-  const positionAttr = geometry.attributes.position;
-  if (!positionAttr) {
-    throw new Error('Parsed STL geometry does not contain position attributes.');
-  }
-
-  const rawVerts = positionAttr.array;
-  const uniqueVerts: number[] = [];
-  const faces: number[] = [];
-  const vertMap = new Map<string, number>();
-
-  // Deduplicate vertices and index the face array.
-  // OpenSCAD's STL output is in its own Z-up convention (X=right, Y=depth, Z=up),
-  // but the `vertices` field is expected downstream in Three.js Y-up convention
-  // (X=right, Y=up, Z=toward camera) - the renderVertices conversion below assumes
-  // Y-up input and swaps it back to MuJoCo Z-up. Remap here (x,y,z)->(x,z,-y) so that
-  // round-tripping through that conversion reproduces OpenSCAD's original Z-up
-  // orientation instead of rotating every scad-compiled mesh 90° about X.
-  for (let i = 0; i < rawVerts.length; i += 3) {
-    const x = rawVerts[i];
-    const y = rawVerts[i + 1];
-    const z = rawVerts[i + 2];
-    const yUpX = x;
-    const yUpY = z;
-    const yUpZ = -y;
-
-    const key = `${yUpX.toFixed(5)},${yUpY.toFixed(5)},${yUpZ.toFixed(5)}`;
-    let idx = vertMap.get(key);
-    if (idx === undefined) {
-      idx = uniqueVerts.length / 3;
-      uniqueVerts.push(yUpX, yUpY, yUpZ);
-      vertMap.set(key, idx);
+  useStore.getState().incrementScadCompile();
+  try {
+    // Ensure the script loader function is loaded
+    const createOpenSCAD = await loadCompiler();
+    if (!createOpenSCAD) {
+      throw new Error('OpenSCAD compiler failed to initialize.');
     }
-    faces.push(idx);
-  }
 
-  // Swap Y and Z for MuJoCo's Z-up space representation
-  const renderVertices: number[] = [];
-  for (let i = 0; i < uniqueVerts.length; i += 3) {
-    const x = uniqueVerts[i];
-    const y = uniqueVerts[i + 1];
-    const z = uniqueVerts[i + 2];
-    renderVertices.push(
-      Number(x.toFixed(5)),
-      Number((-z).toFixed(5)),
-      Number(y.toFixed(5))
-    );
-  }
+    // Instantiate a fresh compiler instance for this compilation
+    const compiler = await createOpenSCAD();
 
-  const result: CompiledScad = { vertices: uniqueVerts, faces, renderVertices };
-
-  // Don't cache a degenerate empty-mesh result - openscad-wasm has been observed
-  // to intermittently return a valid-but-empty STL for a legitimately non-empty
-  // model. Caching that would make a caller's retry-on-empty logic pointless,
-  // since the retry would just hit the same bad cached result forever.
-  if (faces.length > 0) {
-    if (compileCache.size >= COMPILE_CACHE_MAX) {
-      const oldestKey = compileCache.keys().next().value;
-      if (oldestKey !== undefined) compileCache.delete(oldestKey);
+    // Render the OpenSCAD code to ASCII STL string format
+    const stlText = await compiler.renderToStl(scadCode);
+    if (!stlText || stlText.length === 0) {
+      throw new Error('Compilation produced empty output.');
     }
-    compileCache.set(scadCode, result);
-  }
 
-  return result;
+    // Parse STL data into a BufferGeometry using STLLoader
+    const loader = new STLLoader();
+    const geometry = loader.parse(stlText);
+
+    const positionAttr = geometry.attributes.position;
+    if (!positionAttr) {
+      throw new Error('Parsed STL geometry does not contain position attributes.');
+    }
+
+    const rawVerts = positionAttr.array;
+    const uniqueVerts: number[] = [];
+    const faces: number[] = [];
+    const vertMap = new Map<string, number>();
+
+    // Deduplicate vertices and index the face array.
+    // OpenSCAD's STL output is in its own Z-up convention (X=right, Y=depth, Z=up),
+    // but the `vertices` field is expected downstream in Three.js Y-up convention
+    // (X=right, Y=up, Z=toward camera) - the renderVertices conversion below assumes
+    // Y-up input and swaps it back to MuJoCo Z-up. Remap here (x,y,z)->(x,z,-y) so that
+    // round-tripping through that conversion reproduces OpenSCAD's original Z-up
+    // orientation instead of rotating every scad-compiled mesh 90° about X.
+    for (let i = 0; i < rawVerts.length; i += 3) {
+      const x = rawVerts[i];
+      const y = rawVerts[i + 1];
+      const z = rawVerts[i + 2];
+      const yUpX = x;
+      const yUpY = z;
+      const yUpZ = -y;
+
+      const key = `${yUpX.toFixed(5)},${yUpY.toFixed(5)},${yUpZ.toFixed(5)}`;
+      let idx = vertMap.get(key);
+      if (idx === undefined) {
+        idx = uniqueVerts.length / 3;
+        uniqueVerts.push(yUpX, yUpY, yUpZ);
+        vertMap.set(key, idx);
+      }
+      faces.push(idx);
+    }
+
+    // Swap Y and Z for MuJoCo's Z-up space representation
+    const renderVertices: number[] = [];
+    for (let i = 0; i < uniqueVerts.length; i += 3) {
+      const x = uniqueVerts[i];
+      const y = uniqueVerts[i + 1];
+      const z = uniqueVerts[i + 2];
+      renderVertices.push(
+        Number(x.toFixed(5)),
+        Number((-z).toFixed(5)),
+        Number(y.toFixed(5))
+      );
+    }
+
+    const result: CompiledScad = { vertices: uniqueVerts, faces, renderVertices };
+
+    // Don't cache a degenerate empty-mesh result - openscad-wasm has been observed
+    // to intermittently return a valid-but-empty STL for a legitimately non-empty
+    // model. Caching that would make a caller's retry-on-empty logic pointless,
+    // since the retry would just hit the same bad cached result forever.
+    if (faces.length > 0) {
+      if (compileCache.size >= COMPILE_CACHE_MAX) {
+        const oldestKey = compileCache.keys().next().value;
+        if (oldestKey !== undefined) compileCache.delete(oldestKey);
+      }
+      compileCache.set(scadCode, result);
+    }
+
+    return result;
+  } finally {
+    useStore.getState().decrementScadCompile();
+  }
 }
