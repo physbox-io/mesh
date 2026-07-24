@@ -2373,17 +2373,50 @@ pringles_head();`,
 // loop decomposed into convex box segments, banked so a circulating marble is
 // held in the turns. The marble is launched tangentially on the first tick at
 // roughly the banked-equilibrium speed (v² ≈ g·r·tan(bank)).
+// Mild eccentricity on purpose: an ellipse's radius of curvature varies as
+// b²/a (tight ends) to a²/b (flat sides), and the banked-equilibrium speed
+// varies with √R. Two rules learned by simulation: keep the oval near-circular
+// (a=1.5/b=1.35 keeps R within ~1.2–1.7m) and launch AT OR ABOVE the highest
+// local equilibrium speed — riding fast pushes the marble OUT and up the bank,
+// where growing R self-corrects; riding slow slides it IN and off the low
+// inner edge, which nothing corrects.
 const OVAL_TRACK_POINTS: number[][] = [
-  [1.8, 0, 0.12],
-  [1.27, 0.78, 0.12],
-  [0, 1.1, 0.12],
-  [-1.27, 0.78, 0.12],
-  [-1.8, 0, 0.12],
-  [-1.27, -0.78, 0.12],
-  [0, -1.1, 0.12],
-  [1.27, -0.78, 0.12],
+  [1.5, 0, 0.12],
+  [1.061, 0.955, 0.12],
+  [0, 1.35, 0.12],
+  [-1.061, 0.955, 0.12],
+  [-1.5, 0, 0.12],
+  [-1.061, -0.955, 0.12],
+  [0, -1.35, 0.12],
+  [1.061, -0.955, 0.12],
 ];
-const OVAL_TRACK_BANK = -18; // negative raises the outside edge for counter-clockwise travel
+const OVAL_TRACK_BANK = -16;
+// Curb aprons: steeper counter-banked strips meeting the track edges, so the
+// cross-section reads 40°/16°/16°/40° — a velodrome-style gutter. A flat
+// banked strip cannot damp the marble's side-to-side oscillation: with no
+// curbs it rolls off the (nearly floor-level) inner edge twice a lap, and
+// with vertical curb WALLS it wedges into the wall/bank corner and stops
+// dead. Smooth aprons let it ride up, shed lateral speed, and roll back.
+const OVAL_CURB_INNER_POINTS: number[][] = [
+  [0.99, 0, 0.09],
+  [0.7, 0.594, 0.09],
+  [0, 0.84, 0.09],
+  [-0.7, 0.594, 0.09],
+  [-0.99, 0, 0.09],
+  [-0.7, -0.594, 0.09],
+  [0, -0.84, 0.09],
+  [0.7, -0.594, 0.09],
+];
+const OVAL_CURB_OUTER_POINTS: number[][] = [
+  [2.01, 0, 0.317],
+  [1.421, 1.315, 0.317],
+  [0, 1.86, 0.317],
+  [-1.421, 1.315, 0.317],
+  [-2.01, 0, 0.317],
+  [-1.421, -1.315, 0.317],
+  [0, -1.86, 0.317],
+  [1.421, -1.315, 0.317],
+]; // negative raises the outside edge for counter-clockwise travel
 export const ovalTrackPreset: SceneGraph = {
   nodes: [
     {
@@ -2392,21 +2425,53 @@ export const ovalTrackPreset: SceneGraph = {
       type: 'body',
       pos: [0, 0, 0],
       joints: [],
-      geoms: generateCurveGeoms('oval_track', OVAL_TRACK_POINTS, 0.6, 0.06, 48, [0.85, 0.45, 0.15, 1], true, OVAL_TRACK_BANK) as SceneGeom[],
+      geoms: generateCurveGeoms('oval_track', OVAL_TRACK_POINTS, 0.85, 0.06, 48, [0.85, 0.45, 0.15, 1], true, OVAL_TRACK_BANK) as SceneGeom[],
       children: [],
       isCurve: true,
       curvePoints: OVAL_TRACK_POINTS.map(p => [...p]),
-      curveWidth: 0.6,
+      curveWidth: 0.85,
       curveThickness: 0.06,
       curveSegments: 48,
       curveClosed: true,
       curveBank: OVAL_TRACK_BANK
     },
     {
+      id: 'oval_curb_inner',
+      name: 'oval_curb_inner',
+      type: 'body',
+      pos: [0, 0, 0],
+      joints: [],
+      geoms: generateCurveGeoms('oval_curb_inner', OVAL_CURB_INNER_POINTS, 0.25, 0.06, 48, [0.55, 0.28, 0.08, 1], true, 40) as SceneGeom[],
+      children: [],
+      isCurve: true,
+      curvePoints: OVAL_CURB_INNER_POINTS.map(p => [...p]),
+      curveWidth: 0.25,
+      curveThickness: 0.06,
+      curveSegments: 48,
+      curveClosed: true,
+      curveBank: 40
+    },
+    {
+      id: 'oval_curb_outer',
+      name: 'oval_curb_outer',
+      type: 'body',
+      pos: [0, 0, 0],
+      joints: [],
+      geoms: generateCurveGeoms('oval_curb_outer', OVAL_CURB_OUTER_POINTS, 0.25, 0.06, 48, [0.55, 0.28, 0.08, 1], true, -40) as SceneGeom[],
+      children: [],
+      isCurve: true,
+      curvePoints: OVAL_CURB_OUTER_POINTS.map(p => [...p]),
+      curveWidth: 0.25,
+      curveThickness: 0.06,
+      curveSegments: 48,
+      curveClosed: true,
+      curveBank: -40
+    },
+    {
       id: 'marble',
       name: 'marble',
       type: 'body',
-      pos: [1.75, 0, 0.3],
+      pos: [1.45, 0, 0.3],
       joints: [
         { name: 'marble_free', type: 'free' }
       ],
@@ -2414,7 +2479,7 @@ export const ovalTrackPreset: SceneGraph = {
         { name: 'marble_geom', type: 'sphere', size: [0.12], mass: 1, rgba: [0.2, 0.6, 1.0, 1], friction: [1.0, 0.005, 0.0001] }
       ],
       children: [],
-      script: "if (api.getTime() === 0) { api.setVelocity([0, 2.3, 0], 'marble'); }"
+      script: "if (api.getTime() === 0) { api.setVelocity([0, 2.2, 0], 'marble'); }"
     }
   ]
 };

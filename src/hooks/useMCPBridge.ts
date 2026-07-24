@@ -365,7 +365,26 @@ export function useMCPBridge() {
           // headless "what-if" run can never diverge from what's actually
           // rendered live, and never costs a second loaded WASM module.
           const xml = compileToMJCF(sceneGraph, gravityZ, floorFriction, windX, windY, density);
-          return getPhysicsWorkerClient().runHeadless(xml, sceneGraph, ticks);
+          const result: any = await getPhysicsWorkerClient().runHeadless(xml, sceneGraph, ticks);
+          // Decimate/filter the trajectory before it crosses the websocket: a
+          // full per-tick, per-body trajectory is ~500KB per 900 ticks and was
+          // the main reason long runs blew the bridge's 30s response window.
+          const stride = Math.max(1, Math.floor(Number(msg.stride) || 1));
+          const bodyFilter = Array.isArray(msg.bodies) && msg.bodies.length > 0 ? new Set(msg.bodies) : null;
+          if (result?.trajectory && (stride > 1 || bodyFilter)) {
+            const t = result.trajectory;
+            let frames = stride > 1
+              ? t.filter((_: any, i: number) => i % stride === 0 || i === t.length - 1)
+              : t;
+            if (bodyFilter) {
+              frames = frames.map((fr: any) => ({
+                ...fr,
+                bodies: Object.fromEntries(Object.entries(fr.bodies || {}).filter(([k]) => bodyFilter.has(k))),
+              }));
+            }
+            result.trajectory = frames;
+          }
+          return result;
         }
 
         case 'GET_OBJECTS':

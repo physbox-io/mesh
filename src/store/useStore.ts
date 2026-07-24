@@ -198,6 +198,36 @@ export const scaleMeshGeoms = (node: any, sx: number, sy: number = sx, sz: numbe
   }
 };
 
+// Structural clone of a scene graph that SHARES the large mesh arrays
+// (vertices/faces/renderVertices) by reference instead of copying them.
+// Every code path that changes mesh data replaces these arrays wholesale
+// (scaleMeshGeoms, update*Params, scad compile) rather than mutating them in
+// place, so sharing is safe — and it turns per-edit cloning from O(mesh bytes)
+// into O(node count). This matters: the old JSON.parse(JSON.stringify(...))
+// ran on every slider tick / handle drag and every undo snapshot, copying
+// potentially megabytes of SCAD mesh data each time.
+const cloneGeom = (g: any): any => {
+  const { vertices, faces, renderVertices, ...rest } = g;
+  const out: any = JSON.parse(JSON.stringify(rest));
+  if (vertices !== undefined) out.vertices = vertices;
+  if (faces !== undefined) out.faces = faces;
+  if (renderVertices !== undefined) out.renderVertices = renderVertices;
+  return out;
+};
+
+const cloneNode = (n: any): any => {
+  const { geoms, children, ...rest } = n;
+  const out: any = JSON.parse(JSON.stringify(rest));
+  out.geoms = (geoms || []).map(cloneGeom);
+  out.children = (children || []).map(cloneNode);
+  return out;
+};
+
+export const cloneSceneGraph = (sg: SceneGraph): SceneGraph => ({
+  ...sg,
+  nodes: (sg.nodes || []).map(cloneNode),
+});
+
 const getNodeWorldPos = (nodes: any[], targetId: string, currentOffset: [number, number, number] = [0, 0, 0]): [number, number, number] | null => {
   for (const node of nodes) {
     const nodeWorld: [number, number, number] = [
@@ -364,7 +394,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
 
     if (!get().tempUndoState) {
       const snapshot: UndoRedoState = {
-        sceneGraph: JSON.parse(JSON.stringify(get().sceneGraph)),
+        sceneGraph: cloneSceneGraph(get().sceneGraph),
         gravityZ: get().gravityZ,
         windX: get().windX,
         windY: get().windY,
@@ -433,7 +463,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     get().flushPendingUndo();
     const { sceneGraph, gravityZ, windX, windY, density, floorFriction, floorBounce, selectedNodeId, undoStack } = get();
     const snapshot: UndoRedoState = {
-      sceneGraph: JSON.parse(JSON.stringify(sceneGraph)),
+      sceneGraph: cloneSceneGraph(sceneGraph),
       gravityZ,
       windX,
       windY,
@@ -463,7 +493,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     const newUndoStack = undoStack.slice(0, -1);
 
     const currentStateSnapshot: UndoRedoState = {
-      sceneGraph: JSON.parse(JSON.stringify(sceneGraph)),
+      sceneGraph: cloneSceneGraph(sceneGraph),
       gravityZ,
       windX,
       windY,
@@ -499,7 +529,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     const newRedoStack = redoStack.slice(0, -1);
 
     const currentStateSnapshot: UndoRedoState = {
-      sceneGraph: JSON.parse(JSON.stringify(sceneGraph)),
+      sceneGraph: cloneSceneGraph(sceneGraph),
       gravityZ,
       windX,
       windY,
@@ -618,7 +648,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
 
   updateWedgeParams: (id, params) => {
     get().recordInteraction('node-params');
-    const newScene = JSON.parse(JSON.stringify(get().sceneGraph)) as SceneGraph;
+    const newScene = cloneSceneGraph(get().sceneGraph);
     const traverse = (nodes: any[]) => {
       if (!nodes) return false;
       for (const node of nodes) {
@@ -665,7 +695,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   
   updatePyramidParams: (id, params) => {
     get().recordInteraction('node-params');
-    const newScene = JSON.parse(JSON.stringify(get().sceneGraph)) as SceneGraph;
+    const newScene = cloneSceneGraph(get().sceneGraph);
     const traverse = (nodes: any[]) => {
       if (!nodes) return false;
       for (const node of nodes) {
@@ -695,7 +725,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
 
   updateConeParams: (id, params) => {
     get().recordInteraction('node-params');
-    const newScene = JSON.parse(JSON.stringify(get().sceneGraph)) as SceneGraph;
+    const newScene = cloneSceneGraph(get().sceneGraph);
     const traverse = (nodes: any[]) => {
       if (!nodes) return false;
       for (const node of nodes) {
@@ -723,7 +753,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
 
   updateTorusParams: (id, params) => {
     get().recordInteraction('node-params');
-    const newScene = JSON.parse(JSON.stringify(get().sceneGraph)) as SceneGraph;
+    const newScene = cloneSceneGraph(get().sceneGraph);
     const traverse = (nodes: any[]) => {
       if (!nodes) return false;
       for (const node of nodes) {
@@ -751,7 +781,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
 
   updateTubeParams: (id, params) => {
     get().recordInteraction('node-params');
-    const newScene = JSON.parse(JSON.stringify(get().sceneGraph)) as SceneGraph;
+    const newScene = cloneSceneGraph(get().sceneGraph);
     const traverse = (nodes: any[]) => {
       if (!nodes) return false;
       for (const node of nodes) {
@@ -781,7 +811,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
 
   updateCurveParams: (id, params) => {
     get().recordInteraction('node-params');
-    const newScene = JSON.parse(JSON.stringify(get().sceneGraph)) as SceneGraph;
+    const newScene = cloneSceneGraph(get().sceneGraph);
     const traverse = (nodes: any[]) => {
       if (!nodes) return false;
       for (const node of nodes) {
@@ -816,7 +846,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
 
   updatePulleyParams: (id, params) => {
     get().recordInteraction('node-params');
-    const newScene = JSON.parse(JSON.stringify(get().sceneGraph)) as SceneGraph;
+    const newScene = cloneSceneGraph(get().sceneGraph);
     const traverse = (nodes: any[]) => {
       if (!nodes) return false;
       for (const node of nodes) {
@@ -845,7 +875,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
 
   updateRopeParams: (id, params) => {
     get().recordInteraction('node-params');
-    const newScene = JSON.parse(JSON.stringify(get().sceneGraph)) as SceneGraph;
+    const newScene = cloneSceneGraph(get().sceneGraph);
     const traverse = (nodes: any[]) => {
       if (!nodes) return false;
       for (const node of nodes) {
@@ -865,7 +895,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
 
   updateNodeComposite: (id, params) => {
     get().recordInteraction('node-composite');
-    const newScene = JSON.parse(JSON.stringify(get().sceneGraph));
+    const newScene = cloneSceneGraph(get().sceneGraph);
     const findAndMutate = (nodes: any[]): boolean => {
       if (!nodes) return false;
       for (const n of nodes) {
@@ -891,7 +921,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   
   renameNode: (id, newName) => {
     get().prepareForDiscreteChange();
-    const newScene = JSON.parse(JSON.stringify(get().sceneGraph));
+    const newScene = cloneSceneGraph(get().sceneGraph);
     const traverse = (nodes: any[]) => {
       if (!nodes) return false;
       for (const node of nodes) {
@@ -910,7 +940,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   
   updateNodePos: (id, newPos) => {
     get().recordInteraction('node-pos');
-    const newScene = JSON.parse(JSON.stringify(get().sceneGraph));
+    const newScene = cloneSceneGraph(get().sceneGraph);
     const traverse = (nodes: any[]) => {
       if (!nodes) return false; for (const node of nodes) {
         if (node.id === id) {
@@ -933,7 +963,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
 
   updateNodeRotation: (id, axis, deg) => {
     get().recordInteraction('node-rotation');
-    const newScene = JSON.parse(JSON.stringify(get().sceneGraph)) as SceneGraph;
+    const newScene = cloneSceneGraph(get().sceneGraph);
     const traverse = (nodes: any[]) => {
       if (!nodes) return false;
       for (const node of nodes) {
@@ -962,7 +992,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
 
   updateNodeGeom: (id, updates, geomIndex) => {
     get().recordInteraction('node-geom');
-    const newScene = JSON.parse(JSON.stringify(get().sceneGraph));
+    const newScene = cloneSceneGraph(get().sceneGraph);
     const traverse = (nodes: any[]) => {
       if (!nodes) return false; for (const node of nodes) {
         if (node.id === id && node.geoms?.length > 0) {
@@ -1035,7 +1065,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
 
   updateGearTeeth: (id, teeth) => {
     get().recordInteraction('gear-teeth');
-    const newScene = JSON.parse(JSON.stringify(get().sceneGraph)) as SceneGraph;
+    const newScene = cloneSceneGraph(get().sceneGraph);
     const traverse = (nodes: any[]): boolean => {
       if (!nodes) return false;
       for (const node of nodes) {
@@ -1062,7 +1092,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
 
   addPusherPeg: (gearId) => {
     get().prepareForDiscreteChange();
-    const newScene = JSON.parse(JSON.stringify(get().sceneGraph)) as SceneGraph;
+    const newScene = cloneSceneGraph(get().sceneGraph);
     const traverse = (nodes: any[]): boolean => {
       if (!nodes) return false;
       for (const node of nodes) {
@@ -1093,7 +1123,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
 
   deletePusherPeg: (gearId) => {
     get().prepareForDiscreteChange();
-    const newScene = JSON.parse(JSON.stringify(get().sceneGraph)) as SceneGraph;
+    const newScene = cloneSceneGraph(get().sceneGraph);
     const traverse = (nodes: any[]): boolean => {
       if (!nodes) return false;
       for (const node of nodes) {
@@ -1112,7 +1142,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
 
   updatePusherPeg: (gearId, updates) => {
     get().recordInteraction('pusher-peg');
-    const newScene = JSON.parse(JSON.stringify(get().sceneGraph)) as SceneGraph;
+    const newScene = cloneSceneGraph(get().sceneGraph);
     const traverse = (nodes: any[]): boolean => {
       if (!nodes) return false;
       for (const node of nodes) {
@@ -1140,7 +1170,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
 
   updateNodeJoint: (id, updates) => {
     get().recordInteraction('node-joint');
-    const newScene = JSON.parse(JSON.stringify(get().sceneGraph));
+    const newScene = cloneSceneGraph(get().sceneGraph);
     const traverse = (nodes: any[]) => {
       if (!nodes) return false; for (const node of nodes) {
         if (node.id === id && node.joints?.length > 0) {
@@ -1158,7 +1188,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
 
   updateNodeScript: (id, script) => {
     get().recordInteraction('node-script');
-    const newScene = JSON.parse(JSON.stringify(get().sceneGraph));
+    const newScene = cloneSceneGraph(get().sceneGraph);
     const traverse = (nodes: any[]) => {
       if (!nodes) return false;
       for (const node of nodes) {
@@ -1180,7 +1210,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
 
   updateNodeScad: (id, scad, compiledData, skipRecompile) => {
     get().recordInteraction('node-scad');
-    const newScene = JSON.parse(JSON.stringify(get().sceneGraph));
+    const newScene = cloneSceneGraph(get().sceneGraph);
     const traverse = (nodes: any[]) => {
       if (!nodes) return false;
       for (const node of nodes) {
@@ -1216,7 +1246,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
 
   updateNode: (id, updates) => {
     get().recordInteraction('node');
-    const newScene = JSON.parse(JSON.stringify(get().sceneGraph));
+    const newScene = cloneSceneGraph(get().sceneGraph);
     const traverse = (nodes: any[]): boolean => {
       for (const node of nodes) {
         if (node.id === id) { Object.assign(node, updates); return true; }
@@ -1233,7 +1263,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
 
   updateNodeJointsList: (id, joints) => {
     get().recordInteraction('node-joints-list');
-    const newScene = JSON.parse(JSON.stringify(get().sceneGraph)) as SceneGraph;
+    const newScene = cloneSceneGraph(get().sceneGraph);
     const traverse = (nodes: any[]): boolean => {
       if (!nodes) return false;
       for (const node of nodes) {
@@ -1252,7 +1282,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
 
   deleteNode: (id) => {
     get().prepareForDiscreteChange();
-    const newScene = JSON.parse(JSON.stringify(get().sceneGraph)) as SceneGraph;
+    const newScene = cloneSceneGraph(get().sceneGraph);
     const traverseAndRemove = (nodes: any[]): boolean => {
       if (!nodes) return false;
       for (let i = 0; i < nodes.length; i++) {
@@ -1272,9 +1302,8 @@ export const useStore = create<PhysicsState>()((set, get) => ({
 
   addComponent: (type, position) => {
     get().prepareForDiscreteChange();
-    console.log("addComponent START", type, position);
     const { sceneGraph, selectedNodeId, parentUnderSelected } = get();
-    const newScene = JSON.parse(JSON.stringify(sceneGraph)) as SceneGraph;
+    const newScene = cloneSceneGraph(sceneGraph);
     
     // 8-character random unique suffix (no millisecond timestamp)
     const id = `${type}_${Math.random().toString(36).substring(2, 10)}`;
@@ -1567,7 +1596,6 @@ export const useStore = create<PhysicsState>()((set, get) => ({
       newScene.nodes.push(newNode);
     }
     
-    console.log("addComponent DONE, calling recompile");
     const selectId = typeof window !== 'undefined' && (window as any).NO_SELECT ? null : id;
     get().recompile(newScene, selectId);
   },

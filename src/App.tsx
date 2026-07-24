@@ -3,7 +3,7 @@ import { Canvas, useThree } from '@react-three/fiber';
 import { OrbitControls, Grid } from '@react-three/drei';
 import { useMuJoCoInit } from './hooks/useMuJoCo';
 import { useMCPBridge } from './hooks/useMCPBridge';
-import { useStore, scaleMeshGeoms, getPhysicsWorkerClient } from './store/useStore';
+import { useStore, scaleMeshGeoms, getPhysicsWorkerClient, cloneSceneGraph } from './store/useStore';
 import type { SceneGraph, SceneNode } from './types/scene';
 import { Play, Square, SlidersHorizontal, Settings, Box, Circle, X, RotateCcw, Trash2, Layers, CircleDot, Zap, Info, Triangle, Disc, Code, Menu, Shapes, Minimize2, Save, Download, Upload, Undo, Redo, FileText, ChevronDown, ChevronUp, Edit3, Printer, Scissors, Sparkles, Sun, Moon, Pyramid, Cone, Donut, ChartSpline } from 'lucide-react';
 import { useRef, useMemo, useEffect, useCallback, useState, type RefObject } from 'react';
@@ -428,7 +428,7 @@ const WedgeGeometry = ({ width = 2.0, depth = 1.0, height = 0.5 }: { width: numb
 
 
 // Dynamic Geom Renderer
-const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, selectedNodeId, setSelectedNodeId, vertices, faces, dynamic: isDynamic, providedGeomId }: any) => {
+const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, selectedNodeId, setSelectedNodeId, vertices, faces, dynamic: isDynamic, providedGeomId, staticBody }: any) => {
   const meshRef = useRef<THREE.Group>(null);
   const isPlaying = useStore(state => state.isPlaying);
   
@@ -450,7 +450,6 @@ const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, selectedN
     if (providedGeomId !== undefined) return providedGeomId;
     if (!model || !mujoco) return -1;
     const id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM.value, name);
-    console.log(`[DynamicGeom ${name}] computed geomId:`, id);
     return id;
   }, [providedGeomId, model, mujoco, name]);
 
@@ -577,6 +576,11 @@ const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, selectedN
     if (model !== activeModel || data !== activeData) return;
 
     if ((window as any).DISABLE_USEFRAME) return;
+    // Jointless bodies (and bodies under jointless ancestors) can never move —
+    // their transform was already set once via initialPos/initialQuat, so
+    // skip the per-frame geom_xpos/geom_xmat read + matrix rebuild entirely.
+    // A 48-segment curve otherwise costs 48 of these every frame for nothing.
+    if (staticBody) return;
     if (type === 'mesh' && !isDynamic) return;
     if (!meshRef.current || !model || !data) return;
 
@@ -1142,28 +1146,95 @@ const CurveControlHandles = () => {
   );
 };
 
+// All static (jointless, under jointless ancestors) box geoms drawn as ONE
+// InstancedMesh: one draw call instead of one mesh+material per segment. This
+// is the common repeated-primitive case — curve tracks (28-48 boxes each),
+// bridges, scenery. Transforms are read from MuJoCo once per model build, not
+// per frame. Clicking an instance selects its owning body; the selected
+// body's boxes drop back to individual DynamicGeoms so the highlight and
+// per-geom selection still work.
+const StaticBoxInstances = ({ geoms, model, data, mujoco, setSelectedNodeId }: any) => {
+  const meshRef = useRef<THREE.InstancedMesh>(null);
+  const nodeIdByInstance = useMemo(() => geoms.map((g: any) => g.nodeId), [geoms]);
+
+  useEffect(() => {
+    const mesh = meshRef.current;
+    if (!mesh || !model || !data || !mujoco) return;
+    const mat = new THREE.Matrix4();
+    const scale = new THREE.Matrix4();
+    const color = new THREE.Color();
+    geoms.forEach((g: any, idx: number) => {
+      const gid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM.value, g.name);
+      if (gid === -1 || gid >= model.ngeom) {
+        mesh.setMatrixAt(idx, mat.makeScale(0, 0, 0));
+        return;
+      }
+      const m = data.geom_xmat;
+      const o = gid * 9;
+      mat.set(
+        m[o],     m[o + 1], m[o + 2], data.geom_xpos[gid * 3],
+        m[o + 3], m[o + 4], m[o + 5], data.geom_xpos[gid * 3 + 1],
+        m[o + 6], m[o + 7], m[o + 8], data.geom_xpos[gid * 3 + 2],
+        0, 0, 0, 1
+      );
+      const so = gid * 3;
+      mat.multiply(scale.makeScale(model.geom_size[so] * 2, model.geom_size[so + 1] * 2, model.geom_size[so + 2] * 2));
+      mesh.setMatrixAt(idx, mat);
+      const c = g.rgba || [0.8, 0.8, 0.8, 1];
+      mesh.setColorAt(idx, color.setRGB(c[0], c[1], c[2]));
+    });
+    mesh.instanceMatrix.needsUpdate = true;
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    mesh.computeBoundingSphere();
+  }, [geoms, model, data, mujoco]);
+
+  if (geoms.length === 0) return null;
+  return (
+    <instancedMesh
+      key={geoms.length}
+      ref={meshRef}
+      args={[undefined, undefined, geoms.length]}
+      castShadow
+      receiveShadow
+      onClick={(e: any) => {
+        e.stopPropagation();
+        const nid = nodeIdByInstance[e.instanceId];
+        if (nid) setSelectedNodeId(nid);
+      }}
+    >
+      <boxGeometry args={[1, 1, 1]} />
+      <meshStandardMaterial />
+    </instancedMesh>
+  );
+};
+
 const SceneVisuals = ({ model, data, mujoco, sceneGraph, selectedNodeId, setSelectedNodeId }: any) => {
   const geoms = useMemo(() => {
     if (!sceneGraph) return [];
     const list: any[] = [];
-    const traverse = (nodes: any[]) => {
+    const traverse = (nodes: any[], ancestorJointed: boolean) => {
       if (!nodes) return;
       for (const node of nodes) {
+        const jointed = ancestorJointed || (node.joints && node.joints.length > 0) || node.isComposite === true;
         if (node.geoms) {
           for (const geom of node.geoms) {
-            list.push({ nodeId: node.id, ...geom });
+            list.push({ nodeId: node.id, staticBody: !jointed, ...geom });
           }
         }
-        traverse(node.children);
+        traverse(node.children, jointed);
       }
     };
-    traverse(sceneGraph.nodes);
+    traverse(sceneGraph.nodes, false);
     return list;
   }, [sceneGraph]);
 
   if (!model || !data || !mujoco) return null;
-  
-  const primitiveGeoms = geoms.filter(g => g.type !== 'mesh');
+
+  const allPrimitiveGeoms = geoms.filter(g => g.type !== 'mesh');
+  // Static boxes not on the selected body render as one InstancedMesh.
+  const instancedBoxGeoms = allPrimitiveGeoms.filter(g => g.type === 'box' && g.staticBody && g.nodeId !== selectedNodeId);
+  const instancedNames = new Set(instancedBoxGeoms.map(g => g.name));
+  const primitiveGeoms = allPrimitiveGeoms.filter(g => !instancedNames.has(g.name));
   const staticMeshGeoms = geoms.filter(g => g.type === 'mesh' && !g.dynamic);
   const dynamicMeshGeoms = geoms.filter(g => g.type === 'mesh' && g.dynamic);
 
@@ -1216,8 +1287,10 @@ const SceneVisuals = ({ model, data, mujoco, sceneGraph, selectedNodeId, setSele
             data={data}
             selectedNodeId={selectedNodeId}
             setSelectedNodeId={setSelectedNodeId}
+            staticBody={g.staticBody}
           />
         ))}
+        <StaticBoxInstances geoms={instancedBoxGeoms} model={model} data={data} mujoco={mujoco} setSelectedNodeId={setSelectedNodeId} />
         {implicitGeoms.map(g => (
           <DynamicGeom
             key={g.name}
@@ -1247,6 +1320,7 @@ const SceneVisuals = ({ model, data, mujoco, sceneGraph, selectedNodeId, setSele
             vertices={g.renderVertices}
             faces={g.faces}
             dynamic={true}
+            staticBody={g.staticBody}
           />
         ))}
         <PulleyRopesRenderer model={model} data={data} mujoco={mujoco} sceneGraph={sceneGraph} />
@@ -1284,7 +1358,7 @@ const getSyncedSceneGraph = (
 ): SceneGraph => {
   if (!model || !data || !mujoco) return scene;
 
-  const sceneCopy = JSON.parse(JSON.stringify(scene)) as SceneGraph;
+  const sceneCopy = cloneSceneGraph(scene);
 
   const syncNode = (
     node: SceneNode,
@@ -2000,7 +2074,6 @@ function App() {
 
   const handlePointerMissed = useCallback(() => setSelectedNodeId(null), [setSelectedNodeId]);
 
-  console.log("App rendering, selectedNodeId:", selectedNodeId);
 
   const handleDragStart = (e: React.DragEvent, type: string) => {
     e.dataTransfer.setData('type', type);
@@ -2018,7 +2091,6 @@ function App() {
       }
     };
     traverse(sceneGraph.nodes);
-    console.log("evaluated selectedNode:", found);
     return found as any;
   }, [selectedNodeId, sceneGraph]);
 
@@ -2205,7 +2277,7 @@ function App() {
       }
 
       // 7. Update the sceneGraph with the new simplified vertices/faces
-      const newScene = JSON.parse(JSON.stringify(useStore.getState().sceneGraph));
+      const newScene = cloneSceneGraph(useStore.getState().sceneGraph);
       const traverse = (nodes: any[]): boolean => {
         for (const node of nodes) {
           const idx = node.geoms?.findIndex((ng: any) => ng.name === g.name);
@@ -3816,7 +3888,7 @@ function App() {
                               onMouseUp={(e) => {
                                 const scale = parseFloat((e.target as HTMLInputElement).value);
                                 (e.target as HTMLInputElement).value = '1.0';
-                                const newScene = JSON.parse(JSON.stringify(useStore.getState().sceneGraph));
+                                const newScene = cloneSceneGraph(useStore.getState().sceneGraph);
                                 const find = (nodes: any[]): any => {
                                   for (const n of nodes) {
                                     if (n.id === selectedNode.id) return n;
@@ -4640,7 +4712,7 @@ function App() {
                             checked={selectedNode.allowCoupling !== false}
                             onChange={(e) => {
                               const enabled = e.target.checked;
-                              const newScene = JSON.parse(JSON.stringify(sceneGraph));
+                              const newScene = cloneSceneGraph(sceneGraph);
                               const traverse = (nodes: any[]) => {
                                 if (!nodes) return false;
                                 for (const node of nodes) {
@@ -4683,7 +4755,7 @@ function App() {
                                   value={selectedNode.coupleTargetId || ''}
                                   onChange={(e) => {
                                     const val = e.target.value || undefined;
-                                    const newScene = JSON.parse(JSON.stringify(sceneGraph));
+                                    const newScene = cloneSceneGraph(sceneGraph);
                                     const traverse2 = (nodes: any[]) => {
                                       if (!nodes) return false;
                                       for (const node of nodes) {
@@ -4732,7 +4804,7 @@ function App() {
                                         else if (type === 'direct') ratio = 1.0;
                                         else ratio = selectedNode.coupleRatio !== undefined ? selectedNode.coupleRatio : -1.0;
 
-                                        const newScene = JSON.parse(JSON.stringify(sceneGraph));
+                                        const newScene = cloneSceneGraph(sceneGraph);
                                         const traverse2 = (nodes: any[]) => {
                                           if (!nodes) return false;
                                           for (const node of nodes) {
@@ -4762,7 +4834,7 @@ function App() {
                                       onChange={(e) => {
                                         const val = parseFloat(e.target.value);
                                         if (isNaN(val)) return;
-                                        const newScene = JSON.parse(JSON.stringify(sceneGraph));
+                                        const newScene = cloneSceneGraph(sceneGraph);
                                         const traverse2 = (nodes: any[]) => {
                                           if (!nodes) return false;
                                           for (const node of nodes) {
@@ -4883,7 +4955,7 @@ function App() {
                                   const a=remap[g.faces[i]], b=remap[g.faces[i+1]], c=remap[g.faces[i+2]];
                                   if (a!==b && b!==c && a!==c) filteredFaces.push(a,b,c);
                                 }
-                                const newScene = JSON.parse(JSON.stringify(useStore.getState().sceneGraph));
+                                const newScene = cloneSceneGraph(useStore.getState().sceneGraph);
                                 const traverse = (nodes: any[]): boolean => { for (const node of nodes) { const idx = node.geoms?.findIndex((ng: any) => ng.name === g.name); if (idx >= 0) { node.geoms[idx] = {...node.geoms[idx], vertices: newVerts, faces: filteredFaces}; return true; } if (traverse(node.children)) return true; } return false; };
                                 traverse(newScene.nodes);
                                 useStore.getState().updateScene(newScene);
@@ -4942,7 +5014,7 @@ function App() {
                                         newRenderVerts.push(+x.toFixed(5), +(-z).toFixed(5), +y.toFixed(5));
                                       }
                                     }
-                                    const newScene = JSON.parse(JSON.stringify(useStore.getState().sceneGraph));
+                                    const newScene = cloneSceneGraph(useStore.getState().sceneGraph);
                                     const traverse = (nodes: any[]): boolean => {
                                       for (const node of nodes) {
                                         const idx = node.geoms?.findIndex((ng: any) => ng.name === g.name);
