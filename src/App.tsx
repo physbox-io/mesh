@@ -5,7 +5,7 @@ import { useMuJoCoInit } from './hooks/useMuJoCo';
 import { useMCPBridge } from './hooks/useMCPBridge';
 import { useStore, scaleMeshGeoms, getPhysicsWorkerClient } from './store/useStore';
 import type { SceneGraph, SceneNode } from './types/scene';
-import { Play, Square, SlidersHorizontal, Settings, Box, Circle, X, RotateCcw, Trash2, Layers, CircleDot, Zap, Info, Triangle, Disc, Code, Menu, Shapes, Minimize2, Save, Download, Upload, Undo, Redo, FileText, ChevronDown, ChevronUp, Edit3, Printer, Scissors, Sparkles, Sun, Moon, Pyramid, Cone, Donut } from 'lucide-react';
+import { Play, Square, SlidersHorizontal, Settings, Box, Circle, X, RotateCcw, Trash2, Layers, CircleDot, Zap, Info, Triangle, Disc, Code, Menu, Shapes, Minimize2, Save, Download, Upload, Undo, Redo, FileText, ChevronDown, ChevronUp, Edit3, Printer, Scissors, Sparkles, Sun, Moon, Pyramid, Cone, Donut, ChartSpline } from 'lucide-react';
 import { useRef, useMemo, useEffect, useCallback, useState, type RefObject } from 'react';
 import AICopilotPanel from './components/AICopilotPanel';
 import * as THREE from 'three';
@@ -13,6 +13,8 @@ import { useFrame } from '@react-three/fiber';
 import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js';
 import { SimplifyModifier } from 'three/examples/jsm/modifiers/SimplifyModifier.js';
 import { loadCompiler, compileSCAD, isCompilerReady } from './utils/openscad';
+import { sampleCatmullRom } from './utils/geom';
+import { PRESETS } from './presets/presetScenes';
 
 // Simple robust markdown parser to convert basic markdown text to safe HTML
 // Markdown parser for note cards
@@ -1031,6 +1033,115 @@ const SceneCapture = ({ sceneRef }: { sceneRef: React.MutableRefObject<THREE.Sce
   return null;
 };
 
+// Draggable control-point handles + spline preview for the selected curve
+// body. Rendered INSIDE the Z-up→Y-up rotated group, so all positions here are
+// raw MuJoCo Z-up coords. Left-drag is free for handle dragging because
+// OrbitControls maps LEFT to a no-op in this app.
+const CurveControlHandles = () => {
+  const sceneGraph = useStore(s => s.sceneGraph);
+  const selectedNodeId = useStore(s => s.selectedNodeId);
+  const isPlaying = useStore(s => s.isPlaying);
+  const updateCurveParams = useStore(s => s.updateCurveParams);
+  const { camera } = useThree();
+  const [dragIdx, setDragIdx] = useState<number | null>(null);
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+  const dragPlane = useRef(new THREE.Plane());
+
+  // Find the selected curve node and its accumulated world offset (curve
+  // bodies are static, so parent offsets are pure translations).
+  const found = useMemo(() => {
+    let result: { node: any; world: number[] } | null = null;
+    const walk = (nodes: any[], base: number[]) => {
+      if (!nodes || result) return;
+      for (const n of nodes) {
+        const world = [base[0] + (n.pos?.[0] || 0), base[1] + (n.pos?.[1] || 0), base[2] + (n.pos?.[2] || 0)];
+        if (n.id === selectedNodeId && n.isCurve) { result = { node: n, world }; return; }
+        walk(n.children, world);
+        if (result) return;
+      }
+    };
+    walk(sceneGraph?.nodes, [0, 0, 0]);
+    return result as { node: any; world: number[] } | null;
+  }, [sceneGraph, selectedNodeId]);
+
+  const splineLine = useMemo(() => {
+    if (!found) return null;
+    const closed = found.node.curveClosed === true;
+    const pts = sampleCatmullRom(found.node.curvePoints || [], 120, closed);
+    const arr = pts.map((p: number[]) => new THREE.Vector3(found.world[0] + p[0], found.world[1] + p[1], found.world[2] + p[2]));
+    if (closed && arr.length) arr.push(arr[0].clone());
+    const geo = new THREE.BufferGeometry().setFromPoints(arr);
+    const mat = new THREE.LineBasicMaterial({ color: 0x3b82f6, transparent: true, opacity: 0.8, depthTest: false });
+    return new THREE.Line(geo, mat);
+  }, [found]);
+
+  if (!found || isPlaying) return null;
+  const pts: number[][] = found.node.curvePoints || [];
+
+  const toWorldMj = (p: number[]) => [found.world[0] + p[0], found.world[1] + p[1], found.world[2] + p[2]];
+
+  const startDrag = (i: number, e: any) => {
+    e.stopPropagation();
+    try { (e.target as HTMLElement).setPointerCapture(e.pointerId); } catch (err) {}
+    // Camera-facing drag plane through the handle (in Three.js world space:
+    // MuJoCo (x,y,z) → three (x, z, -y))
+    const w = toWorldMj(pts[i]);
+    const p3 = new THREE.Vector3(w[0], w[2], -w[1]);
+    const normal = new THREE.Vector3();
+    camera.getWorldDirection(normal);
+    dragPlane.current.setFromNormalAndCoplanarPoint(normal, p3);
+    setDragIdx(i);
+  };
+
+  const moveDrag = (e: any) => {
+    if (dragIdx === null) return;
+    e.stopPropagation();
+    const hit = new THREE.Vector3();
+    if (!e.ray.intersectPlane(dragPlane.current, hit)) return;
+    // three world → MuJoCo: (x, y, z) → (x, -z, y)
+    const local = [
+      Math.round((hit.x - found.world[0]) * 1000) / 1000,
+      Math.round((-hit.z - found.world[1]) * 1000) / 1000,
+      Math.round((hit.y - found.world[2]) * 1000) / 1000,
+    ];
+    const newPts = pts.map(p => [...p]);
+    newPts[dragIdx] = local;
+    updateCurveParams(found.node.id, { points: newPts });
+  };
+
+  const endDrag = (e: any) => {
+    if (dragIdx === null) return;
+    e.stopPropagation();
+    try { (e.target as HTMLElement).releasePointerCapture(e.pointerId); } catch (err) {}
+    setDragIdx(null);
+  };
+
+  return (
+    <group>
+      {splineLine && <primitive object={splineLine} />}
+      {pts.map((p, i) => {
+        const w = toWorldMj(p);
+        const active = dragIdx === i || hoverIdx === i;
+        return (
+          <mesh
+            key={i}
+            position={[w[0], w[1], w[2]]}
+            onPointerDown={(e) => startDrag(i, e)}
+            onPointerMove={moveDrag}
+            onPointerUp={endDrag}
+            onPointerCancel={endDrag}
+            onPointerOver={(e) => { e.stopPropagation(); setHoverIdx(i); }}
+            onPointerOut={() => setHoverIdx(h => (h === i ? null : h))}
+          >
+            <sphereGeometry args={[active ? 0.08 : 0.06, 16, 16]} />
+            <meshBasicMaterial color={dragIdx === i ? '#f59e0b' : '#3b82f6'} depthTest={false} transparent opacity={0.9} />
+          </mesh>
+        );
+      })}
+    </group>
+  );
+};
+
 const SceneVisuals = ({ model, data, mujoco, sceneGraph, selectedNodeId, setSelectedNodeId }: any) => {
   const geoms = useMemo(() => {
     if (!sceneGraph) return [];
@@ -1140,6 +1251,7 @@ const SceneVisuals = ({ model, data, mujoco, sceneGraph, selectedNodeId, setSele
         ))}
         <PulleyRopesRenderer model={model} data={data} mujoco={mujoco} sceneGraph={sceneGraph} />
         <MouseDragForceRenderer model={model} data={data} mujoco={mujoco} />
+        <CurveControlHandles />
       </group>
       {/* Static mesh geoms: vertices already in Three.js Y-up space, no rotation needed */}
       {staticMeshGeoms.map(g => (
@@ -1252,6 +1364,7 @@ const PRESET_NOTE_CARDS: Record<string, string> = {
   rack_pinion: `# Rack and Pinion\n\nConverts **rotary motion** (pinion gear) to **linear motion** (rack).\n\n## Physics\n- Pinion hinge rotation is coupled to rack slide translation via a **joint equality constraint** when the bodies are within 0.5 m\n- Linear displacement = pinion angle × pinion pitch radius\n\n## Try it\n- Drive the pinion with a script: \`api.applyJointForce('pinion_hinge', 5)\`\n- Add a load mass to the rack to see force requirements increase`,
 
   inclined_plane: `# Inclined Plane\n\nClassic mechanics: a block sliding down a ramp under gravity.\n\n## Physics\n- Net force along the plane: *F = mg sin θ − μmg cos θ*\n- **Static friction** prevents motion when *tan θ < μ*\n- Once sliding, **kinetic friction** is lower than static\n\n## Try it\n- Adjust the wedge angle to find the critical slip angle\n- Change the block's friction coefficient in the properties panel`,
+  oval_track: `# Oval Curve Track\n\nA marble circulating on a **banked oval** built from the Curve component — a closed Catmull-Rom spline decomposed into convex box segments.\n\n## Physics\n- **Banked turns**: the −18° bank tilts the contact normal inward, supplying centripetal force\n- Equilibrium speed: *v² = g·r·tan θ* — the marble is launched near this speed\n- Too fast → drifts up the bank; too slow → slides down it (self-correcting within the track width)\n\n## Try it\n- Select the track and **drag the blue control-point handles** to reshape the oval live\n- Adjust Bank Angle in the properties panel and watch the marble's line change\n- Increase the launch speed in the marble's script to see it climb the bank`,
 
   pulley_system: `# Pulley System\n\nA compound pulley demonstrating **mechanical advantage**.\n\n## Physics\n- The rope is simulated as a length-constrained rigid segment via **joint equality**\n- A compound pulley with N rope segments reduces the required force by ×N\n- Rope tension is transferred through the pulley wheel hinge\n\n## Key concepts\n- Ideal mechanical advantage = number of rope segments supporting the load\n- Energy is conserved: you pull further but with less force`,
 
@@ -1591,7 +1704,7 @@ function App() {
     resetSimulation, updateNodePos,
     updateNodeJointsList, deleteNode, renameNode,
     addPusherPeg, deletePusherPeg, updatePusherPeg, updateNodeRotation,
-    updateWedgeParams, updatePyramidParams, updateConeParams, updateTorusParams, updateTubeParams, updatePulleyParams, updateRopeParams,
+    updateWedgeParams, updatePyramidParams, updateConeParams, updateTorusParams, updateTubeParams, updateCurveParams, updatePulleyParams, updateRopeParams,
     parentUnderSelected, setParentUnderSelected, updateNodeScript, updateNode,
     undo, redo, undoStack, redoStack
   } = useStore();
@@ -2139,7 +2252,7 @@ function App() {
     }
   };
 
-  const handleAddComponentClick = (type: 'box' | 'sphere' | 'capsule' | 'cylinder' | 'bob' | 'gear' | 'wedge' | 'pulley_wheel' | 'pulley_rope' | 'mesh' | 'openscad' | 'pyramid' | 'cone' | 'torus' | 'tube' | 'ellipsoid') => {
+  const handleAddComponentClick = (type: 'box' | 'sphere' | 'capsule' | 'cylinder' | 'bob' | 'gear' | 'wedge' | 'pulley_wheel' | 'pulley_rope' | 'mesh' | 'openscad' | 'pyramid' | 'cone' | 'torus' | 'tube' | 'ellipsoid' | 'curve') => {
     if (selectedNodeId) {
       const parentNode = findNodeById(sceneGraph.nodes, selectedNodeId);
       if (parentNode) {
@@ -2173,6 +2286,7 @@ function App() {
     else if (node.id.includes('ellipsoid')) emoji = '🥚';
     else if (node.id.includes('pulley_wheel')) emoji = '🛞';
     else if (node.isPulleyRope) emoji = '🧵';
+    else if (node.isCurve || node.id.includes('curve')) emoji = '🎢';
 
     return (
       <div key={node.id} className="flex flex-col">
@@ -2196,8 +2310,10 @@ function App() {
           </span>
         </div>
         
-        {/* Render sub-geoms nested under body if there are multiple geoms */}
-        {node.geoms && node.geoms.length > 1 && (
+        {/* Render sub-geoms nested under body if there are multiple geoms.
+            Curves are one logical shape built from dozens of segment boxes —
+            listing each segment would swamp the tree, so skip them. */}
+        {node.geoms && node.geoms.length > 1 && !node.isCurve && (
           <div className="pl-3 ml-2.5 border-l border-slate-200 dark:border-slate-800/60 flex flex-col gap-0.5 mb-1">
             {node.geoms.map((g: any, idx: number) => {
               const isGeomSelected = isSelected && activeGeomIndex === idx;
@@ -2336,30 +2452,9 @@ function App() {
               className="bg-transparent text-slate-700 dark:text-slate-100 text-xs rounded-md block px-2 py-1 outline-none font-medium cursor-pointer border-none"
             >
               <optgroup label="⬜ Built-in Presets" className="bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300">
-                <option value="empty">🫙 Blank (Empty)</option>
-                <option value="pendulum">Double Pendulum</option>
-                <option value="cubes">Stacked Cubes</option>
-                <option value="gears">Gear System</option>
-                <option value="machine">Gear Train Machine</option>
-                <option value="rack_pinion">Rack &amp; Pinion</option>
-                <option value="inclined_plane">Inclined Plane</option>
-                <option value="pulley_system">Pulley Stand</option>
-                <option value="cartpole">Cartpole</option>
-                <option value="newtons_cradle">Newton's Cradle</option>
-                <option value="suspension_bridge">Suspension Bridge</option>
-                <option value="paper_plane">✈ Paper Plane</option>
-                <option value="monkey_head">🐵 Monkey Head</option>
-                <option value="golden_gate">🌉 Golden Gate Bridge</option>
-                <option value="golden_gate_mesh">🌉 Golden Gate (Mesh)</option>
-                <option value="mesh_collision">🔺 Mesh Collision Demo</option>
-                <option value="coin_flip">🪙 Coin Flip</option>
-                <option value="windmill">💨 Wind Turbine</option>
-                <option value="physics_only_windmill">💨 Wind Turbine (No Aero)</option>
-                <option value="traditional_windmill">💨 Traditional Windmill (4-Blade)</option>
-                <option value="drone">🛸 Quadcopter Drone</option>
-                <option value="bouncy_balls">🎱 Bouncy Balls</option>
-                <option value="openscad_demo">🛠️ OpenSCAD Showcase</option>
-                <option value="rope_bridge">🎗️ Interactive Rope Bridge</option>
+                {Object.entries(PRESETS).map(([id, p]: [string, any]) => (
+                  <option key={id} value={id}>{p.emoji ? `${p.emoji} ` : ''}{p.name}</option>
+                ))}
               </optgroup>
 
               {/* User Presets */}
@@ -2808,6 +2903,20 @@ function App() {
                 <Circle className="w-4 h-4 text-amber-600 dark:text-amber-400 scale-x-125 scale-y-75" />
               </div>
               <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Ellipsoid</span>
+            </div>
+
+            {/* Curve (rigid curved track) */}
+            <div
+              draggable
+              onDragStart={(e) => handleDragStart(e, 'curve')}
+              onClick={() => handleAddComponentClick('curve')}
+              className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-blue-400 dark:hover:border-blue-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
+              title="Curve (Rigid spline track — balls roll along it)"
+            >
+              <div className="p-1.5 bg-orange-50 dark:bg-orange-950/30 rounded-lg mb-1 group-hover:scale-105 transition-transform">
+                <ChartSpline className="w-4 h-4 text-orange-600 dark:text-orange-400" />
+              </div>
+              <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Curve</span>
             </div>
 
             {/* Pulley Wheel */}
@@ -3989,8 +4098,134 @@ function App() {
                                   const val = parseFloat(e.target.value);
                                   updateTubeParams(selectedNode.id, { height: val });
                                 }}
-                                className="w-full accent-blue-500 cursor-pointer" 
+                                className="w-full accent-blue-500 cursor-pointer"
                               />
+                            </div>
+                          </div>
+                        )}
+
+                        {selectedNode.isCurve && (
+                          <div className="flex flex-col gap-3">
+                            <div className="flex flex-col gap-1">
+                              <label className="text-xs font-medium text-slate-500 flex justify-between">Track Width <span>{(selectedNode.curveWidth || 0.5).toFixed(2)} m</span></label>
+                              <input
+                                type="range"
+                                min="0.1"
+                                max="2.0"
+                                step="0.01"
+                                value={selectedNode.curveWidth || 0.5}
+                                onChange={(e) => {
+                                  const val = parseFloat(e.target.value);
+                                  updateCurveParams(selectedNode.id, { width: val });
+                                }}
+                                className="w-full accent-blue-500 cursor-pointer"
+                              />
+                            </div>
+                            <div className="flex flex-col gap-1">
+                              <label className="text-xs font-medium text-slate-500 flex justify-between">Thickness <span>{(selectedNode.curveThickness || 0.06).toFixed(2)} m</span></label>
+                              <input
+                                type="range"
+                                min="0.02"
+                                max="0.4"
+                                step="0.01"
+                                value={selectedNode.curveThickness || 0.06}
+                                onChange={(e) => {
+                                  const val = parseFloat(e.target.value);
+                                  updateCurveParams(selectedNode.id, { thickness: val });
+                                }}
+                                className="w-full accent-blue-500 cursor-pointer"
+                              />
+                            </div>
+                            <div className="flex flex-col gap-1">
+                              <label className="text-xs font-medium text-slate-500 flex justify-between">Smoothness <span>{selectedNode.curveSegments || 28} segments</span></label>
+                              <input
+                                type="range"
+                                min="6"
+                                max="60"
+                                step="1"
+                                value={selectedNode.curveSegments || 28}
+                                onChange={(e) => {
+                                  const val = parseInt(e.target.value, 10);
+                                  updateCurveParams(selectedNode.id, { segments: val });
+                                }}
+                                className="w-full accent-blue-500 cursor-pointer"
+                              />
+                            </div>
+                            <div className="flex flex-col gap-1">
+                              <label className="text-xs font-medium text-slate-500 flex justify-between">Bank Angle <span>{(selectedNode.curveBank || 0).toFixed(0)}°</span></label>
+                              <input
+                                type="range"
+                                min="-45"
+                                max="45"
+                                step="1"
+                                value={selectedNode.curveBank || 0}
+                                onChange={(e) => {
+                                  const val = parseFloat(e.target.value);
+                                  updateCurveParams(selectedNode.id, { bank: val });
+                                }}
+                                className="w-full accent-blue-500 cursor-pointer"
+                              />
+                            </div>
+                            <label className="flex items-center gap-2 text-xs font-medium text-slate-500 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={selectedNode.curveClosed === true}
+                                onChange={(e) => {
+                                  updateCurveParams(selectedNode.id, { closed: e.target.checked });
+                                }}
+                                className="accent-blue-500"
+                              />
+                              Closed loop (join ends)
+                            </label>
+                            <div className="flex flex-col gap-1.5">
+                              <label className="text-xs font-medium text-slate-500">Control Points (x, y, z) — drag the blue handles in the viewport, or edit here</label>
+                              {(selectedNode.curvePoints || []).map((pt: number[], pi: number) => (
+                                <div key={pi} className="flex items-center gap-1">
+                                  {[0, 1, 2].map((axis) => (
+                                    <input
+                                      key={axis}
+                                      type="number"
+                                      step="0.1"
+                                      value={pt[axis]}
+                                      onChange={(e) => {
+                                        const val = parseFloat(e.target.value);
+                                        if (isNaN(val)) return;
+                                        const pts = (selectedNode.curvePoints || []).map((p: number[]) => [...p]);
+                                        pts[pi][axis] = val;
+                                        updateCurveParams(selectedNode.id, { points: pts });
+                                      }}
+                                      className="w-full min-w-0 px-1.5 py-1 text-xs rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300"
+                                    />
+                                  ))}
+                                  <button
+                                    onClick={() => {
+                                      const pts = (selectedNode.curvePoints || []).map((p: number[]) => [...p]);
+                                      if (pts.length <= 2) return; // spline needs at least 2 points
+                                      pts.splice(pi, 1);
+                                      updateCurveParams(selectedNode.id, { points: pts });
+                                    }}
+                                    disabled={(selectedNode.curvePoints || []).length <= 2}
+                                    className="p-1 text-slate-400 hover:text-red-500 disabled:opacity-30 disabled:hover:text-slate-400"
+                                    title="Remove point"
+                                  >
+                                    <X className="w-3 h-3" />
+                                  </button>
+                                </div>
+                              ))}
+                              <button
+                                onClick={() => {
+                                  const pts = (selectedNode.curvePoints || []).map((p: number[]) => [...p]);
+                                  const n = pts.length;
+                                  // extend past the last point along the last span direction
+                                  const last = pts[n - 1];
+                                  const prev = pts[n - 2] || [last[0] - 1, last[1], last[2]];
+                                  pts.push([last[0] + (last[0] - prev[0]), last[1] + (last[1] - prev[1]), last[2] + (last[2] - prev[2])]);
+                                  updateCurveParams(selectedNode.id, { points: pts });
+                                }}
+                                className="mt-1 px-2 py-1 text-xs font-medium rounded border border-dashed border-slate-300 dark:border-slate-700 text-slate-500 hover:border-blue-400 hover:text-blue-500 transition-colors"
+                              >
+                                + Add Point
+                              </button>
                             </div>
                           </div>
                         )}

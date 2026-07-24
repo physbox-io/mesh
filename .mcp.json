@@ -1,10 +1,10 @@
 {
     "mcpServers": {
-        "local-apps-mcp": {
+        "physbox-mcp": {
             "type": "stdio",
-            "command": "/home/boab/expt_mcp/venv/bin/python",
+            "command": "/home/boab/physbox_mcp/venv/bin/python",
             "args": [
-                "/home/boab/expt_mcp/server.py",
+                "/home/boab/physbox_mcp/server.py",
                 "--stdio"
             ]
         }

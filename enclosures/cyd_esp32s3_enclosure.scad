@@ -49,13 +49,16 @@ box_h = total_depth - lid_h; // 42, deep back cover
 // inner face at rest - that's what makes it require force (and flex) to seat,
 // giving the "click" instead of just sliding freely.
 tab_width = 8;           // flexible arm width, along the wall
-tab_thickness = 1.6;     // arm thickness (the dimension that flexes)
+tab_thickness = 1.6;     // base arm thickness (the dimension that flexes)
+tab_tip_thickness = 1.0; // tip thickness (tapered for strength and flexibility)
 tab_length = 6;          // how far the tab reaches past the lid's inner face into the box
 tab_gap = 0.2;           // clearance between the tab's rest position and the box's inner wall
 hook_d = 0.8;            // how far the hook protrudes past the tab's rest face into the notch
 hook_h = 1.5;            // height of the hook engagement feature at the tab's tip
 notch_h = hook_h + 1;    // matching notch height in the box wall - a bit taller for easy engagement
 tab_y = [30, 74];        // 2 tab positions along the box's length, mirrored on both side walls
+tab_chamfer_w = 1.2;     // chamfer width at root (prevents snapping off)
+tab_chamfer_h = 1.2;     // chamfer height at root (prevents snapping off)
 
 // ---- Screen window (lid) -----------------------------------------------------
 window_margin = 2;       // bezel overlap over screen edge, per side
@@ -198,9 +201,18 @@ module lid() {
 // away from the wall to slide past it before snapping into the notch pocket.
 module snap_tab(wall_x, dir, y_center) {
     arm_near_x = wall_x + dir*tab_gap;             // face closest to the wall
-    arm_far_x  = wall_x + dir*(tab_gap+tab_thickness); // face furthest from the wall
-    translate([min(arm_near_x, arm_far_x), y_center - tab_width/2, lid_h])
-        cube([tab_thickness, tab_width, tab_length]);
+    
+    // Continuously tapered arm (trapezoidal profile in XZ plane) with chamfer at the base
+    translate([arm_near_x, y_center + tab_width/2, lid_h])
+        rotate([90, 0, 0])
+            linear_extrude(height = tab_width)
+                polygon([
+                    [0, 0],
+                    [dir * (tab_thickness + tab_chamfer_w), 0],
+                    [dir * tab_thickness, tab_chamfer_h],
+                    [dir * tab_tip_thickness, tab_length],
+                    [0, tab_length]
+                ]);
 
     hook_tip_x = wall_x + dir*(tab_gap - hook_d);  // protrudes toward/past the wall
     translate([min(arm_near_x, hook_tip_x), y_center - tab_width/2, lid_h + tab_length - hook_h])

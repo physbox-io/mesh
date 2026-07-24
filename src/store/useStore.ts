@@ -3,7 +3,7 @@ import type { SceneGraph, SceneNode } from '../types/scene';
 import { compileToMJCF } from '../utils/mjcf';
 import { PRESETS, pendulumPreset, generateGearGeoms } from '../presets/presetScenes';
 import { PhysicsWorkerClient, type BuiltResult, type FrameSnapshot } from './physicsWorkerClient';
-import { generatePyramidMeshData, generateConeMeshData, generateTorusMeshData, generateTubeMeshData } from '../utils/geom';
+import { generatePyramidMeshData, generateConeMeshData, generateTorusMeshData, generateTubeMeshData, generateCurveGeoms, DEFAULT_CURVE_POINTS, DEFAULT_CURVE_WIDTH, DEFAULT_CURVE_THICKNESS, DEFAULT_CURVE_SEGMENTS } from '../utils/geom';
 
 const initialScene: SceneGraph = pendulumPreset;
 
@@ -171,8 +171,8 @@ const rotateMeshGeoms = (node: any, axis: 0 | 1 | 2, deltaDeg: number) => {
   }
 };
 
-// Scale mesh geoms uniformly about their centroid
-export const scaleMeshGeoms = (node: any, scale: number) => {
+// Scale mesh geoms about their centroid (uniformly or per-axis)
+export const scaleMeshGeoms = (node: any, sx: number, sy: number = sx, sz: number = sx) => {
   for (const g of node.geoms) {
     if (isStaticMesh(g)) {
       const v = [...g.vertices] as number[];
@@ -180,11 +180,11 @@ export const scaleMeshGeoms = (node: any, scale: number) => {
       const n = v.length / 3;
       for (let i = 0; i < v.length; i += 3) { cx += v[i]; cy += v[i+1]; cz += v[i+2]; }
       cx /= n; cy /= n; cz /= n;
-      g.vertices = mapVerts(v, (x,y,z) => [cx+(x-cx)*scale, cy+(y-cy)*scale, cz+(z-cz)*scale]);
+      g.vertices = mapVerts(v, (x,y,z) => [cx+(x-cx)*sx, cy+(y-cy)*sy, cz+(z-cz)*sz]);
     }
     if (isDynamicMesh(g)) {
       // renderVertices are raw Z-up — scale about origin
-      g.renderVertices = mapVerts([...g.renderVertices], (x,y,z) => [x*scale, y*scale, z*scale]);
+      g.renderVertices = mapVerts([...g.renderVertices], (x,y,z) => [x*sx, y*sy, z*sz]);
       // Also scale the MuJoCo collision vertices (Y-up world space) about their centroid
       if (g.vertices) {
         const v = [...g.vertices] as number[];
@@ -192,7 +192,7 @@ export const scaleMeshGeoms = (node: any, scale: number) => {
         const n = v.length / 3;
         for (let i = 0; i < v.length; i += 3) { cx += v[i]; cy += v[i+1]; cz += v[i+2]; }
         cx /= n; cy /= n; cz /= n;
-        g.vertices = mapVerts(v, (x,y,z) => [cx+(x-cx)*scale, cy+(y-cy)*scale, cz+(z-cz)*scale]);
+        g.vertices = mapVerts(v, (x,y,z) => [cx+(x-cx)*sx, cy+(y-cy)*sy, cz+(z-cz)*sz]);
       }
     }
   }
@@ -263,6 +263,12 @@ export interface PhysicsState {
   lastCompileError: string | null;
   isSettingsOpen: boolean;
   cameraView: 'perspective' | 'topDown';
+  // When set, CameraController points the camera at this explicit pose instead
+  // of the cameraView preset. Position/target are in MuJoCo world space (same
+  // convention as every other pos field in the app) — CameraController converts
+  // to Three.js space itself. Set by the MCP SET_CAMERA bridge command so an
+  // agent can frame a specific body without guessing preset rotations.
+  cameraOverride: { position: [number, number, number]; target: [number, number, number] } | null;
   mcpActiveCount: number;
   scadCompileCount: number;
   
@@ -290,6 +296,7 @@ export interface PhysicsState {
   setLoaded: (loaded: boolean) => void;
   setSettingsOpen: (open: boolean) => void;
   setCameraView: (view: 'perspective' | 'topDown') => void;
+  setCameraOverride: (override: { position: [number, number, number]; target: [number, number, number] } | null) => void;
   setEnvironment: (env: Partial<{gravityZ: number, windX: number, windY: number, density: number, floorFriction: number, floorBounce: number}>) => void;
   
   setSelectedNodeId: (id: string | null) => void;
@@ -317,11 +324,13 @@ export interface PhysicsState {
   updateConeParams: (id: string, params: { radius?: number; height?: number }) => void;
   updateTorusParams: (id: string, params: { majorRadius?: number; tubeRadius?: number }) => void;
   updateTubeParams: (id: string, params: { innerRadius?: number; outerRadius?: number; height?: number }) => void;
+  updateCurveParams: (id: string, params: { points?: number[][]; width?: number; thickness?: number; segments?: number; closed?: boolean; bank?: number }) => void;
   updatePulleyParams: (id: string, params: { leftTargetId?: string; rightTargetId?: string; pulleyRadius?: number }) => void;
   updateRopeParams: (id: string, params: { pulleyWheelId?: string; leftTargetId?: string; rightTargetId?: string }) => void;
+  updateNodeComposite: (id: string, params: Partial<any>) => void;
   
   setParentUnderSelected: (val: boolean) => void;
-  addComponent: (type: 'box' | 'sphere' | 'capsule' | 'cylinder' | 'bob' | 'gear' | 'wedge' | 'pulley_wheel' | 'pulley_rope' | 'mesh' | 'openscad' | 'pyramid' | 'cone' | 'torus' | 'tube' | 'ellipsoid', position: number[]) => void;
+  addComponent: (type: 'box' | 'sphere' | 'capsule' | 'cylinder' | 'bob' | 'gear' | 'wedge' | 'pulley_wheel' | 'pulley_rope' | 'mesh' | 'openscad' | 'pyramid' | 'cone' | 'torus' | 'tube' | 'ellipsoid' | 'curve', position: number[]) => void;
   updateNodeScad: (id: string, scadCode: string, compiledData: { vertices: number[], faces: number[], renderVertices: number[] }, skipRecompile?: boolean) => void;
   recompile: (overrideScene?: SceneGraph, overrideSelectedId?: string | null, forceReset?: boolean, keepPreset?: boolean) => Promise<void>;
   loadPreset: (name: string) => void;
@@ -520,6 +529,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   lastCompileError: null,
   isSettingsOpen: false,
   cameraView: 'perspective',
+  cameraOverride: null,
   mcpActiveCount: 0,
   scadCompileCount: 0,
   
@@ -551,7 +561,8 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   }),
   setLoaded: (loaded) => set({ isLoaded: loaded }),
   setSettingsOpen: (open) => set({ isSettingsOpen: open }),
-  setCameraView: (view) => set({ cameraView: view }),
+  setCameraView: (view) => set({ cameraView: view, cameraOverride: null }),
+  setCameraOverride: (override) => set({ cameraOverride: override }),
   
   resetSimulation: () => {
     set({ isPlaying: false });
@@ -768,6 +779,41 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     get().recompile(newScene);
   },
 
+  updateCurveParams: (id, params) => {
+    get().recordInteraction('node-params');
+    const newScene = JSON.parse(JSON.stringify(get().sceneGraph)) as SceneGraph;
+    const traverse = (nodes: any[]) => {
+      if (!nodes) return false;
+      for (const node of nodes) {
+        if (node.id === id) {
+          if (params.points !== undefined) node.curvePoints = params.points.map((p: number[]) => [...p]);
+          if (params.width !== undefined) node.curveWidth = params.width;
+          if (params.thickness !== undefined) node.curveThickness = params.thickness;
+          if (params.segments !== undefined) node.curveSegments = Math.round(params.segments);
+          if (params.closed !== undefined) node.curveClosed = params.closed;
+          if (params.bank !== undefined) node.curveBank = params.bank;
+
+          const rgba = node.geoms?.[0]?.rgba || [0.85, 0.45, 0.15, 1];
+          node.geoms = generateCurveGeoms(
+            node.id,
+            node.curvePoints || DEFAULT_CURVE_POINTS,
+            node.curveWidth || DEFAULT_CURVE_WIDTH,
+            node.curveThickness || DEFAULT_CURVE_THICKNESS,
+            node.curveSegments || DEFAULT_CURVE_SEGMENTS,
+            rgba,
+            node.curveClosed === true,
+            node.curveBank || 0
+          );
+          return true;
+        }
+        if (traverse(node.children)) return true;
+      }
+      return false;
+    };
+    traverse(newScene.nodes);
+    get().recompile(newScene);
+  },
+
   updatePulleyParams: (id, params) => {
     get().recordInteraction('node-params');
     const newScene = JSON.parse(JSON.stringify(get().sceneGraph)) as SceneGraph;
@@ -815,6 +861,24 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     };
     traverse(newScene.nodes);
     get().recompile(newScene, get().selectedNodeId);
+  },
+
+  updateNodeComposite: (id, params) => {
+    get().recordInteraction('node-composite');
+    const newScene = JSON.parse(JSON.stringify(get().sceneGraph));
+    const findAndMutate = (nodes: any[]): boolean => {
+      if (!nodes) return false;
+      for (const n of nodes) {
+        if (n.id === id) {
+          Object.assign(n, params);
+          return true;
+        }
+        if (n.children && findAndMutate(n.children)) return true;
+      }
+      return false;
+    };
+    findAndMutate(newScene.nodes);
+    get().recompile(newScene, id, false, true);
   },
   
   updateScene: (newScene, skipRecompile) => {
@@ -1263,6 +1327,12 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     } else if (type === 'pulley_rope') {
       geoms = [];
       joints = [];
+    } else if (type === 'curve') {
+      // Rigid curved track: spline through control points, decomposed into
+      // convex box segments so collision follows the real curve.
+      geoms = generateCurveGeoms(id, DEFAULT_CURVE_POINTS, DEFAULT_CURVE_WIDTH, DEFAULT_CURVE_THICKNESS, DEFAULT_CURVE_SEGMENTS);
+      joints = []; // static — welded to world like the wedge
+      localPos = [localPos[0], localPos[1], 0]; // tracks sit on the ground, not in the air
     } else {
       if (type === 'box') {
         geomType = 'box';
@@ -1481,6 +1551,13 @@ export const useStore = create<PhysicsState>()((set, get) => ({
       } : {}),
       ...(type === 'openscad' ? {
         scad: `// Example OpenSCAD Code\ndifference() {\n  cube([0.5, 0.5, 0.5], center=true);\n  sphere(d=0.6, $fn=16);\n}`
+      } : {}),
+      ...(type === 'curve' ? {
+        isCurve: true,
+        curvePoints: DEFAULT_CURVE_POINTS.map(p => [...p]),
+        curveWidth: DEFAULT_CURVE_WIDTH,
+        curveThickness: DEFAULT_CURVE_THICKNESS,
+        curveSegments: DEFAULT_CURVE_SEGMENTS
       } : {}),
     };
 

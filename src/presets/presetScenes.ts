@@ -1,4 +1,5 @@
 import type { SceneGraph, SceneNode, SceneGeom } from '../types/scene';
+import { generateCurveGeoms } from '../utils/geom';
 
 export const pendulumPreset: SceneGraph = {
   nodes: [
@@ -2287,9 +2288,144 @@ export const ropeBridgePreset: SceneGraph = {
   ]
 };
 
+export const pringlesScadPreset: SceneGraph = {
+  nodes: [
+    {
+      id: 'pringles_scad_head',
+      name: 'pringles_scad_head',
+      type: 'body',
+      pos: [0, 0, 1.2],
+      joints: [],
+      geoms: [{ name: 'head_mesh', type: 'sphere', size: [0.35], rgba: [0.98, 0.94, 0.86, 1], mass: 5.0 }],
+      scad: `$fn = 32;
+
+module pringles_head() {
+    // 1. Oval Head Base
+    color([0.98, 0.94, 0.86])
+        scale([1.0, 0.85, 1.1])
+            sphere(r=0.35);
+    
+    // 2. Parted Hair Swoops
+    color([0.22, 0.12, 0.05]) {
+        translate([-0.12, -0.02, 0.24])
+            rotate([0, 20, -10])
+                scale([1.2, 0.8, 0.6])
+                    sphere(r=0.16);
+
+        translate([0.12, -0.02, 0.24])
+            rotate([0, -20, 10])
+                scale([1.2, 0.8, 0.6])
+                    sphere(r=0.16);
+    }
+
+    // 3. Oval Eyes
+    color([0.08, 0.08, 0.08]) {
+        translate([-0.10, 0.25, 0.08])
+            scale([0.8, 0.4, 1.1])
+                sphere(r=0.065);
+
+        translate([0.10, 0.25, 0.08])
+            scale([0.8, 0.4, 1.1])
+                sphere(r=0.065);
+    }
+
+    // 4. Iconic Curled Handlebar Mustache
+    color([0.20, 0.10, 0.04]) {
+        hull() {
+            translate([0, 0.28, -0.05]) sphere(r=0.045);
+            translate([-0.14, 0.26, -0.06]) sphere(r=0.055);
+            translate([-0.24, 0.22, -0.03]) sphere(r=0.045);
+            translate([-0.30, 0.16, 0.03]) sphere(r=0.032);
+        }
+
+        hull() {
+            translate([0, 0.28, -0.05]) sphere(r=0.045);
+            translate([0.14, 0.26, -0.06]) sphere(r=0.055);
+            translate([0.24, 0.22, -0.03]) sphere(r=0.045);
+            translate([0.30, 0.16, 0.03]) sphere(r=0.032);
+        }
+    }
+
+    // 5. Classic Red Bow Tie
+    color([0.85, 0.15, 0.15]) {
+        translate([0, 0.24, -0.32])
+            sphere(r=0.05);
+
+        hull() {
+            translate([0, 0.24, -0.32]) sphere(r=0.03);
+            translate([-0.16, 0.22, -0.30]) scale([1, 0.6, 1.4]) sphere(r=0.065);
+        }
+
+        hull() {
+            translate([0, 0.24, -0.32]) sphere(r=0.03);
+            translate([0.16, 0.22, -0.30]) scale([1, 0.6, 1.4]) sphere(r=0.065);
+        }
+    }
+}
+
+pringles_head();`,
+      children: []
+    }
+  ]
+};
+
+// Banked oval racetrack built from the curve component: a closed Catmull-Rom
+// loop decomposed into convex box segments, banked so a circulating marble is
+// held in the turns. The marble is launched tangentially on the first tick at
+// roughly the banked-equilibrium speed (v² ≈ g·r·tan(bank)).
+const OVAL_TRACK_POINTS: number[][] = [
+  [1.8, 0, 0.12],
+  [1.27, 0.78, 0.12],
+  [0, 1.1, 0.12],
+  [-1.27, 0.78, 0.12],
+  [-1.8, 0, 0.12],
+  [-1.27, -0.78, 0.12],
+  [0, -1.1, 0.12],
+  [1.27, -0.78, 0.12],
+];
+const OVAL_TRACK_BANK = -18; // negative raises the outside edge for counter-clockwise travel
+export const ovalTrackPreset: SceneGraph = {
+  nodes: [
+    {
+      id: 'oval_track',
+      name: 'oval_track',
+      type: 'body',
+      pos: [0, 0, 0],
+      joints: [],
+      geoms: generateCurveGeoms('oval_track', OVAL_TRACK_POINTS, 0.6, 0.06, 48, [0.85, 0.45, 0.15, 1], true, OVAL_TRACK_BANK) as SceneGeom[],
+      children: [],
+      isCurve: true,
+      curvePoints: OVAL_TRACK_POINTS.map(p => [...p]),
+      curveWidth: 0.6,
+      curveThickness: 0.06,
+      curveSegments: 48,
+      curveClosed: true,
+      curveBank: OVAL_TRACK_BANK
+    },
+    {
+      id: 'marble',
+      name: 'marble',
+      type: 'body',
+      pos: [1.75, 0, 0.3],
+      joints: [
+        { name: 'marble_free', type: 'free' }
+      ],
+      geoms: [
+        { name: 'marble_geom', type: 'sphere', size: [0.12], mass: 1, rgba: [0.2, 0.6, 1.0, 1], friction: [1.0, 0.005, 0.0001] }
+      ],
+      children: [],
+      script: "if (api.getTime() === 0) { api.setVelocity([0, 2.3, 0], 'marble'); }"
+    }
+  ]
+};
+
+// Single source of truth for built-in presets. The App's preset dropdown and
+// the MCP bridge's LIST_PRESETS both derive from this map — add a preset here
+// and it appears everywhere. `emoji` is an optional display prefix for UI.
 export const PRESETS = {
   empty: {
     name: 'Blank (Empty)',
+    emoji: '🫙',
     scene: emptyPreset
   },
   pendulum: {
@@ -2316,6 +2452,11 @@ export const PRESETS = {
     name: 'Inclined Plane',
     scene: inclinedPlanePreset
   },
+  oval_track: {
+    name: 'Oval Curve Track',
+    emoji: '🎢',
+    scene: ovalTrackPreset
+  },
   pulley_system: {
     name: 'Pulley System Stand',
     scene: pulleySystemPreset
@@ -2334,58 +2475,76 @@ export const PRESETS = {
   },
   paper_plane: {
     name: 'Paper Plane',
+    emoji: '✈',
     scene: paperPlanePreset
   },
   monkey_head: {
     name: 'Monkey Head',
+    emoji: '🐵',
     scene: monkeyHeadPreset
   },
   golden_gate: {
     name: 'Golden Gate Bridge',
+    emoji: '🌉',
     scene: goldenGateBridgePreset
   },
   golden_gate_mesh: {
     name: 'Golden Gate (Mesh)',
+    emoji: '🌉',
     scene: goldenGateMeshPreset
   },
   mesh_collision: {
     name: 'Mesh Collision Demo',
+    emoji: '🔺',
     scene: meshCollisionPreset
   },
   coin_flip: {
     name: 'Coin Flip',
+    emoji: '🪙',
     scene: coinFlipPreset
   },
   windmill: {
     name: 'Wind Turbine',
+    emoji: '💨',
     scene: windmillPreset,
     environment: { windX: 5.0, windY: 0.0 }
   },
   physics_only_windmill: {
     name: 'Wind Turbine (No Aero)',
+    emoji: '💨',
     scene: physicsOnlyWindmillPreset,
     environment: { windX: 5.0, windY: 0.0 }
   },
   traditional_windmill: {
     name: 'Traditional Windmill (4-Blade)',
+    emoji: '💨',
     scene: traditionalWindmillPreset,
     environment: { windX: 5.0, windY: 0.0 }
   },
   drone: {
     name: 'Quadcopter Drone',
+    emoji: '🛸',
     scene: dronePreset
   },
   bouncy_balls: {
     name: 'Bouncy Balls',
+    emoji: '🎱',
     scene: bouncyBallsPreset,
     environment: { floorBounce: 0.85 }
   },
   openscad_demo: {
     name: 'OpenSCAD Showcase',
+    emoji: '🛠️',
     scene: openscadDemoPreset
   },
   rope_bridge: {
     name: 'Interactive Rope Bridge',
+    emoji: '🎗️',
     scene: ropeBridgePreset
+  },
+  pringles_scad: {
+    name: 'Mr Pringles (OpenSCAD)',
+    emoji: '🥔',
+    scene: pringlesScadPreset
   }
 };

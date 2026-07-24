@@ -7,6 +7,10 @@ import { useEffect } from 'react';
 import { useStore, getPhysicsWorkerClient } from '../store/useStore';
 import { compileToMJCF } from '../utils/mjcf';
 import { compileSCAD } from '../utils/openscad';
+import { getLiveCameraPose } from '../utils/liveCamera';
+import { makePresetNoteCard } from '../utils/noteCards';
+import { generateCurveGeoms, DEFAULT_CURVE_POINTS, DEFAULT_CURVE_WIDTH, DEFAULT_CURVE_THICKNESS, DEFAULT_CURVE_SEGMENTS } from '../utils/geom';
+import { PRESETS } from '../presets/presetScenes';
 
 const autoCompileScad = async (nodes: any[]) => {
   // openscad-wasm has shared global state across instances - compiling multiple
@@ -66,6 +70,11 @@ const autoCompileScad = async (nodes: any[]) => {
 // and reports the real MJCF compile result instead.
 const settleScene = async (nodes: any[]): Promise<{ ok: boolean; error?: string; nodeCount: number }> => {
   const store = useStore.getState();
+  // A freshly built/replaced scene (BUILD_SCENE/UPDATE_SCENE) is never a preset
+  // load, so any note card left over from a previously-loaded preset (e.g.
+  // "Double Pendulum") is now describing a scene that no longer exists. Clear
+  // it here rather than relying on callers to remember to.
+  (window as any)._physics_setNoteCards?.([]);
   // skipRecompile: this initial set uses placeholder (pre-scad) mesh geoms, so
   // an immediate recompile here would be both wasted work and another stale
   // build racing against the final one below.
@@ -133,6 +142,109 @@ const stripMeshArrays = (node: any): any => {
   return cloned;
 };
 
+// Shared by BUILD_SCENE and UPDATE_SCENE: fills in the fields compileToMJCF's
+// buildNode() unconditionally calls .forEach on (joints, geoms, children).
+// UPDATE_SCENE used to skip this and pass nodes straight through, so any
+// hand-authored node missing one of those fields (e.g. a leaf body with no
+// `children` at all) crashed recompile with a bare "Cannot read properties
+// of undefined (reading 'forEach')" and no indication of which field or node
+// was at fault.
+const fillGeomDefaults = (g: any, bodyName: string, idx: number) => ({
+  name:    g.name    ?? `${bodyName}_geom_${idx}`,
+  type:    g.type    ?? 'box',
+  size:    g.size    ?? [0.25, 0.25, 0.25],
+  rgba:    g.rgba    ?? [0.6, 0.6, 0.9, 1],
+  ...(g.pos         !== undefined ? { pos: g.pos }         : {}),
+  ...(g.quat        !== undefined ? { quat: g.quat }       : {}),
+  ...(g.euler       !== undefined ? { euler: g.euler }     : {}),
+  ...(g.fromto      !== undefined ? { fromto: g.fromto }   : {}),
+  ...(g.mass        !== undefined ? { mass: g.mass }       : {}),
+  ...(g.friction    !== undefined ? { friction: g.friction }: {}),
+  ...(g.contype     !== undefined ? { contype: g.contype } : {}),
+  ...(g.conaffinity !== undefined ? { conaffinity: g.conaffinity } : {}),
+  ...(g.condim      !== undefined ? { condim: g.condim }   : {}),
+  ...(g.solref      !== undefined ? { solref: g.solref }   : {}),
+  ...(g.solimp      !== undefined ? { solimp: g.solimp }   : {}),
+  ...(g.vertices    !== undefined ? { vertices: g.vertices }: {}),
+  ...(g.faces       !== undefined ? { faces: g.faces }     : {}),
+  ...(g.dynamic     !== undefined ? { dynamic: g.dynamic } : {}),
+  ...(g.renderVertices !== undefined ? { renderVertices: g.renderVertices } : {}),
+});
+
+const fillJointDefaults = (j: any, bodyName: string, idx: number) => ({
+  name:    j.name    ?? `${bodyName}_joint_${idx}`,
+  type:    j.type    ?? 'free',
+  ...(j.axis     !== undefined ? { axis: j.axis }         : {}),
+  ...(j.pos      !== undefined ? { pos: j.pos }           : {}),
+  ...(j.damping  !== undefined ? { damping: j.damping }   : {}),
+  ...(j.stiffness!== undefined ? { stiffness: j.stiffness}: {}),
+  ...(j.limited  !== undefined ? { limited: j.limited }   : {}),
+  ...(j.range    !== undefined ? { range: j.range }       : {}),
+  ...(j.actuator !== undefined ? { actuator: j.actuator } : {}),
+});
+
+const fillBodyDefaults = (b: any): any => {
+  const name = b.name ?? b.id ?? `body_${Math.random().toString(36).slice(2, 7)}`;
+  const id   = b.id   ?? name;
+  // Curve (rigid curved track): generate convex box segments from the spline
+  // params so agents can author curves declaratively without hand-placing geoms.
+  const curveGeoms = (b.isCurve === true && b.geoms === undefined)
+    ? generateCurveGeoms(
+        id,
+        b.curvePoints ?? DEFAULT_CURVE_POINTS,
+        b.curveWidth ?? DEFAULT_CURVE_WIDTH,
+        b.curveThickness ?? DEFAULT_CURVE_THICKNESS,
+        b.curveSegments ?? DEFAULT_CURVE_SEGMENTS,
+        b.rgba ?? [0.85, 0.45, 0.15, 1],
+        b.curveClosed === true,
+        b.curveBank ?? 0
+      )
+    : null;
+  return {
+    id,
+    name,
+    type:     'body',
+    pos:      b.pos     ?? [0, 0, 1],
+    ...(b.quat  !== undefined ? { quat: b.quat }   : {}),
+    ...(b.euler !== undefined ? { euler: b.euler } : {}),
+    geoms:    (curveGeoms ?? b.geoms ?? (b.scad !== undefined ? [{ type: 'mesh', size: [1], dynamic: true }] : [{ type: 'box', size: [0.25, 0.25, 0.25] }]))
+                .map((g: any, i: number) => fillGeomDefaults(g, name, i)),
+    joints:   (b.joints  ?? (b.isCurve === true ? [] : [{ type: 'free' }]))
+                .map((j: any, i: number) => fillJointDefaults(j, name, i)),
+    children: (b.children ?? []).map(fillBodyDefaults),
+    ...(b.coupleTargetId  !== undefined ? { coupleTargetId: b.coupleTargetId }   : {}),
+    ...(b.coupleRatio     !== undefined ? { coupleRatio: b.coupleRatio }         : {}),
+    ...(b.weldTargetId    !== undefined ? { weldTargetId: b.weldTargetId }       : {}),
+    ...(b.connectTargetId !== undefined ? { connectTargetId: b.connectTargetId } : {}),
+    ...(b.connectAnchor   !== undefined ? { connectAnchor: b.connectAnchor }     : {}),
+    ...(b.script          !== undefined ? { script: b.script }                   : {}),
+    ...(b.scad            !== undefined ? { scad: b.scad }                       : {}),
+    ...(b.isComposite     !== undefined ? { isComposite: b.isComposite }         : {}),
+    ...(b.compositeType   !== undefined ? { compositeType: b.compositeType }     : {}),
+    ...(b.compositeCount  !== undefined ? { compositeCount: b.compositeCount }   : {}),
+    ...(b.compositeSize   !== undefined ? { compositeSize: b.compositeSize }     : {}),
+    ...(b.compositePrefix !== undefined ? { compositePrefix: b.compositePrefix } : {}),
+    ...(b.compositeCurve  !== undefined ? { compositeCurve: b.compositeCurve }   : {}),
+    ...(b.weldLastToId    !== undefined ? { weldLastToId: b.weldLastToId }       : {}),
+    ...(b.isCurve === true ? {
+      isCurve: true,
+      curvePoints:    b.curvePoints    ?? DEFAULT_CURVE_POINTS.map((p: number[]) => [...p]),
+      curveWidth:     b.curveWidth     ?? DEFAULT_CURVE_WIDTH,
+      curveThickness: b.curveThickness ?? DEFAULT_CURVE_THICKNESS,
+      curveSegments:  b.curveSegments  ?? DEFAULT_CURVE_SEGMENTS,
+      curveClosed:    b.curveClosed === true,
+      curveBank:      b.curveBank      ?? 0,
+    } : {}),
+  };
+};
+
+// Bounding-box diagonal above this (in MuJoCo meters) on a freshly-compiled
+// SCAD mesh almost always means the source forgot the required
+// scale([0.001,0.001,0.001]) wrapper and compiled at millimeter scale by
+// mistake (a 183x132x11mm part is ~0.2m across; the same part un-scaled
+// is ~183m across) rather than an intentionally huge object.
+const SUSPICIOUSLY_LARGE_DIAGONAL_M = 20;
+
 export function useMCPBridge() {
   useEffect(() => {
     let ws: WebSocket | null = null;
@@ -194,6 +306,43 @@ export function useMCPBridge() {
             floorBounce:   store.floorBounce,
             lastCompileError: store.lastCompileError,
           };
+
+        case 'GET_CAMERA': {
+          // Prefer the live pose (reflects manual orbiting/panning done in the
+          // browser since the last SET_CAMERA/preset change); fall back to the
+          // last-known override/preset if the viewport hasn't mounted yet.
+          const live = getLiveCameraPose();
+          return {
+            ...(live ?? {}),
+            preset: store.cameraOverride ? null : store.cameraView,
+            isOverride: store.cameraOverride !== null,
+          };
+        }
+
+        case 'SET_CAMERA': {
+          // Two mutually exclusive forms: { preset: 'perspective'|'topDown' } to
+          // reset to a built-in view, or { position:[x,y,z], target?:[x,y,z] }
+          // for an explicit pose. Both position and target are in MuJoCo world
+          // space, same convention as every other pos field in this API.
+          if (msg.preset !== undefined) {
+            if (msg.preset !== 'perspective' && msg.preset !== 'topDown') {
+              return { ok: false, error: "preset must be 'perspective' or 'topDown'" };
+            }
+            store.setCameraView(msg.preset);
+            return { ok: true };
+          }
+          if (!Array.isArray(msg.position) || msg.position.length !== 3) {
+            return { ok: false, error: 'position must be a [x,y,z] array in MuJoCo world space (or pass preset instead)' };
+          }
+          if (msg.target !== undefined && (!Array.isArray(msg.target) || msg.target.length !== 3)) {
+            return { ok: false, error: 'target must be a [x,y,z] array in MuJoCo world space' };
+          }
+          store.setCameraOverride({
+            position: msg.position as [number, number, number],
+            target: (msg.target ?? [0, 0, 0]) as [number, number, number],
+          });
+          return { ok: true };
+        }
 
         case 'GET_SCENE':
           return store.sceneGraph;
@@ -295,16 +444,31 @@ export function useMCPBridge() {
           if (!name) return { ok: false, error: 'Missing preset name' };
           store.loadPreset(name);
           getPhysicsWorkerClient().clearHistory();
+          // Mirror App.tsx's loadPresetWithCard/loadUserPresetWithCard: replace
+          // whatever note card is showing with this preset's own card (or clear
+          // it) instead of leaving a stale card from whatever was loaded before -
+          // this path (MCP LOAD_PRESET) used to skip that entirely, since it
+          // calls store.loadPreset directly rather than through those UI wrappers.
+          const setter = (window as any)._physics_setNoteCards;
+          if (setter) {
+            if (name.startsWith('user:')) {
+              try {
+                const userPresets = JSON.parse(localStorage.getItem('physics_user_presets') || '{}');
+                const saved = userPresets[name.replace('user:', '')];
+                setter(saved && Array.isArray(saved.noteCards) ? saved.noteCards : []);
+              } catch {
+                setter([]);
+              }
+            } else {
+              const presetCard = makePresetNoteCard(name);
+              setter(presetCard ? [presetCard] : []);
+            }
+          }
           return { ok: true, preset: name };
         }
 
         case 'LIST_PRESETS':
-          return ['empty', 'pendulum', 'cubes', 'gears', 'machine', 'rack_pinion',
-                  'inclined_plane', 'pulley_system', 'cartpole', 'newtons_cradle',
-                  'suspension_bridge', 'paper_plane', 'monkey_head',
-                  'golden_gate', 'golden_gate_mesh', 'mesh_collision',
-                  'coin_flip', 'windmill', 'physics_only_windmill', 'traditional_windmill',
-                  'drone', 'bouncy_balls'];
+          return Object.keys(PRESETS);
 
         case 'SCREENSHOT': {
           const gl = (window as any)._physics_gl;
@@ -339,7 +503,19 @@ export function useMCPBridge() {
             if (!result || result.faces.length === 0) {
               return { ok: false, error: 'Compilation produced an empty mesh (0 faces)' };
             }
-            return { ok: true };
+            const bbox = bboxOf(result.renderVertices || result.vertices);
+            const sizeM = bbox ? [0, 1, 2].map(a => bbox.max[a] - bbox.min[a]) : undefined;
+            const diagonalM = sizeM ? Math.hypot(...sizeM) : undefined;
+            const warning = diagonalM !== undefined && diagonalM > SUSPICIOUSLY_LARGE_DIAGONAL_M
+              ? `Compiled mesh bounding box is ${sizeM!.map(v => v.toFixed(2)).join(' x ')} meters (diagonal ${diagonalM.toFixed(1)}m) — did you forget to wrap your design in scale([0.001,0.001,0.001])? MuJoCo units are meters, so millimeter-scale OpenSCAD designs compile 1000x too large without it.`
+              : undefined;
+            return {
+              ok: true,
+              vertCount: (result.renderVertices || result.vertices || []).length / 3,
+              faceCount: (result.faces || []).length / 3,
+              boundingBoxM: bbox,
+              ...(warning ? { warning } : {}),
+            };
           } catch (e) {
             return { ok: false, error: String(e) };
           }
@@ -349,10 +525,15 @@ export function useMCPBridge() {
           if (!msg.sceneGraph) return { ok: false, error: 'Missing sceneGraph' };
           // The MCP tool schema passes sceneGraph as a bare array of nodes (matching
           // BUILD_SCENE's convention); also accept the internal { nodes: [...] } shape.
-          const nodes = Array.isArray(msg.sceneGraph) ? msg.sceneGraph : msg.sceneGraph.nodes;
-          if (!Array.isArray(nodes)) {
+          const rawNodes = Array.isArray(msg.sceneGraph) ? msg.sceneGraph : msg.sceneGraph.nodes;
+          if (!Array.isArray(rawNodes)) {
             return { ok: false, error: 'sceneGraph must be an array of nodes, or an object of the form { nodes: SceneNode[] }' };
           }
+          // Run through the same default-filling as BUILD_SCENE so a node missing
+          // joints/geoms/children (very easy to hand-author without, e.g. by
+          // editing the output of GET_SCENE_SUMMARY, which strips these arrays)
+          // doesn't crash compileToMJCF's unconditional .forEach on those fields.
+          const nodes = rawNodes.map(fillBodyDefaults);
           return settleScene(nodes);
         }
 
@@ -387,7 +568,7 @@ export function useMCPBridge() {
               type:        'GeomType (see geomTypes)',
               size:        'number[] — interpretation depends on type (see geomSizes)',
               rgba:        'number[4] — [r, g, b, a] each 0-1, default white opaque',
-              pos:         'number[3] — local offset from body origin',
+              pos:         'number[3] — local offset from body origin, NOT world-space (e.g. a box half-extent 0.4 spans local z -0.4..+0.4 regardless of the body\'s world pos)',
               quat:        'number[4] — [w, x, y, z] rotation quaternion',
               euler:       'number[3] — [roll, pitch, yaw] in degrees, alternative to quat',
               fromto:      'number[6] — [x1,y1,z1, x2,y2,z2] for capsule/cylinder endpoints (overrides size/pos/quat)',
@@ -419,8 +600,24 @@ export function useMCPBridge() {
               connectAnchor: 'number[3] — world-space anchor point for the connect constraint',
               script:        'string — JavaScript control script running at 1000 Hz',
               scad:          'string — raw OpenSCAD code to compile into a dynamic mesh geometry',
+              isComposite:   'boolean — emit this body as a MuJoCo <composite> (auto-jointed chain forming a smooth curve) instead of using its own geoms/joints/children directly. See compositeType/compositeCount/compositeSize/compositeCurve. Prefer this over manually chaining capsule fromto segments for rope/cable/mustache/tentacle curves.',
+              compositeType: `'cable'|'grid'|'rope'|'cloth' — default 'cable'. 'rope' is remapped to MuJoCo's 'cable' type.`,
+              compositeCount:'string (not array) — space-separated segment counts, e.g. "25 1 1". Default "15 1 1".',
+              compositeSize: 'string (not number) — total extent before curving, e.g. "1.5". Default "1.5".',
+              compositeCurve:'string — MuJoCo composite curve-shape spec, e.g. "s 0 0" for straight. Passed verbatim to MuJoCo, not validated here.',
+              compositePrefix:'string — name prefix for auto-generated segment bodies (default `${name}_`). Last segment auto-name is `${compositePrefix}B_last`.',
+              weldLastToId:  'string — id of another body to weld the composite\'s LAST segment to (e.g. anchoring a rope/cable end). Only used when isComposite is true.',
+              isCurve:       'boolean — RIGID curved track: a Catmull-Rom spline through curvePoints is decomposed into many small convex box geoms, so collision follows the real (even concave) curve — balls roll along it. Omit geoms and joints: geoms are auto-generated and the body defaults to static (welded to world). Contrast with isComposite (a floppy rope/cable).',
+              curvePoints:   'number[][] — body-local Z-up control points, e.g. [[-1.6,0,1.4],[-0.55,0,0.45],[0.45,0,0.12],[1.6,0,0.7]]. The spline IS the rolling surface (boxes sit half a thickness below it). Default is a ramp-with-valley demo curve.',
+              curveWidth:    'number — track width in meters (default 0.5)',
+              curveThickness:'number — slab thickness in meters (default 0.06)',
+              curveSegments: 'number — how many box segments approximate the spline (default 28; more = smoother)',
+              curveClosed:   'boolean — wrap the spline into a seamless closed loop (oval/circuit tracks). Default false.',
+              curveBank:     'number — bank (roll) angle in degrees about the travel direction; positive raises the left-of-travel edge. For a counter-clockwise loop use a NEGATIVE bank to raise the outside edge (see the oval_track preset, which uses -18).',
             },
             tips: [
+              'GOTCHA — geom pos is body-local, not world-space: for a body at pos [0,0,0.4] with a box half-extent of 0.4, local z=0 is the box center (world z=0.4) and local z=+0.4 is the top face (world z=0.8). Do not pick pos values as if they were world heights. When placing decoration on a face, set the face-normal coordinate to ~half-extent and keep the other two coordinates well inside ±half-extent.',
+              'PREFER over manual capsule-chain curves: for rope/cable/mustache/tentacle/vine shapes, set isComposite:true + compositeType:\'cable\' + compositeCount/compositeSize/compositeCurve on one body instead of hand-placing many capsule fromto segments.',
               'Compound shapes: add multiple geoms to one body with different pos/quat/euler offsets',
               'Asymmetric shapes: combine box + sphere + cylinder geoms on a single body',
               'Torus-like shapes: ring of capsule geoms arranged with pos+euler offsets',
@@ -457,65 +654,6 @@ export function useMCPBridge() {
           if (!Array.isArray(bodies) || bodies.length === 0) {
             return { ok: false, error: 'bodies must be a non-empty array' };
           }
-
-          const fillGeomDefaults = (g: any, bodyName: string, idx: number) => ({
-            name:    g.name    ?? `${bodyName}_geom_${idx}`,
-            type:    g.type    ?? 'box',
-            size:    g.size    ?? [0.25, 0.25, 0.25],
-            rgba:    g.rgba    ?? [0.6, 0.6, 0.9, 1],
-            ...(g.pos         !== undefined ? { pos: g.pos }         : {}),
-            ...(g.quat        !== undefined ? { quat: g.quat }       : {}),
-            ...(g.euler       !== undefined ? { euler: g.euler }     : {}),
-            ...(g.fromto      !== undefined ? { fromto: g.fromto }   : {}),
-            ...(g.mass        !== undefined ? { mass: g.mass }       : {}),
-            ...(g.friction    !== undefined ? { friction: g.friction }: {}),
-            ...(g.contype     !== undefined ? { contype: g.contype } : {}),
-            ...(g.conaffinity !== undefined ? { conaffinity: g.conaffinity } : {}),
-            ...(g.condim      !== undefined ? { condim: g.condim }   : {}),
-            ...(g.solref      !== undefined ? { solref: g.solref }   : {}),
-            ...(g.solimp      !== undefined ? { solimp: g.solimp }   : {}),
-            ...(g.vertices    !== undefined ? { vertices: g.vertices }: {}),
-            ...(g.faces       !== undefined ? { faces: g.faces }     : {}),
-            ...(g.dynamic     !== undefined ? { dynamic: g.dynamic } : {}),
-            ...(g.renderVertices !== undefined ? { renderVertices: g.renderVertices } : {}),
-          });
-
-          const fillJointDefaults = (j: any, bodyName: string, idx: number) => ({
-            name:    j.name    ?? `${bodyName}_joint_${idx}`,
-            type:    j.type    ?? 'free',
-            ...(j.axis     !== undefined ? { axis: j.axis }         : {}),
-            ...(j.pos      !== undefined ? { pos: j.pos }           : {}),
-            ...(j.damping  !== undefined ? { damping: j.damping }   : {}),
-            ...(j.stiffness!== undefined ? { stiffness: j.stiffness}: {}),
-            ...(j.limited  !== undefined ? { limited: j.limited }   : {}),
-            ...(j.range    !== undefined ? { range: j.range }       : {}),
-            ...(j.actuator !== undefined ? { actuator: j.actuator } : {}),
-          });
-
-          const fillBodyDefaults = (b: any): any => {
-            const name = b.name ?? b.id ?? `body_${Math.random().toString(36).slice(2, 7)}`;
-            const id   = b.id   ?? name;
-            return {
-              id,
-              name,
-              type:     'body',
-              pos:      b.pos     ?? [0, 0, 1],
-              ...(b.quat  !== undefined ? { quat: b.quat }   : {}),
-              ...(b.euler !== undefined ? { euler: b.euler } : {}),
-              geoms:    (b.geoms   ?? (b.scad !== undefined ? [{ type: 'mesh', size: [1], dynamic: true }] : [{ type: 'box', size: [0.25, 0.25, 0.25] }]))
-                          .map((g: any, i: number) => fillGeomDefaults(g, name, i)),
-              joints:   (b.joints  ?? [{ type: 'free' }])
-                          .map((j: any, i: number) => fillJointDefaults(j, name, i)),
-              children: (b.children ?? []).map(fillBodyDefaults),
-              ...(b.coupleTargetId  !== undefined ? { coupleTargetId: b.coupleTargetId }   : {}),
-              ...(b.coupleRatio     !== undefined ? { coupleRatio: b.coupleRatio }         : {}),
-              ...(b.weldTargetId    !== undefined ? { weldTargetId: b.weldTargetId }       : {}),
-              ...(b.connectTargetId !== undefined ? { connectTargetId: b.connectTargetId } : {}),
-              ...(b.connectAnchor   !== undefined ? { connectAnchor: b.connectAnchor }     : {}),
-              ...(b.script          !== undefined ? { script: b.script }                   : {}),
-              ...(b.scad            !== undefined ? { scad: b.scad }                       : {}),
-            };
-          };
 
           const nodes = bodies.map(fillBodyDefaults);
           return settleScene(nodes);

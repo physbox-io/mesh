@@ -80,6 +80,13 @@ export interface SceneNode {
   tubeRadius?: number;
   innerRadius?: number;
   outerRadius?: number;
+  isCurve?: boolean;
+  curvePoints?: number[][]; // body-local Z-up control points; spline = rolling surface
+  curveWidth?: number;
+  curveThickness?: number;
+  curveSegments?: number;
+  curveClosed?: boolean; // wrap the spline into a seamless loop
+  curveBank?: number; // bank (roll) angle in degrees; positive raises the left-of-travel edge
   isPulleyWheel?: boolean;
   leftTargetId?: string;
   rightTargetId?: string;
