@@ -306,6 +306,26 @@ const CameraController = () => {
     camera.updateProjectionMatrix();
   }, [cameraView, camera]);
 
+  // Explicit pose from the MCP SET_CAMERA bridge command. The store held this
+  // field (and GET_CAMERA reported it) but nothing ever applied it to the
+  // actual camera. Values are MuJoCo world space; convert Z-up→Y-up here:
+  // (x, y, z) → (x, z, -y).
+  const cameraOverride = useStore(state => state.cameraOverride);
+  useEffect(() => {
+    if (!cameraOverride) return;
+    const [px, py, pz] = cameraOverride.position;
+    const [tx, ty, tz] = cameraOverride.target;
+    camera.up.set(0, 1, 0);
+    camera.position.set(px, pz, -py);
+    if (controlsRef.current) {
+      controlsRef.current.target.set(tx, tz, -ty);
+      controlsRef.current.update();
+    } else {
+      camera.lookAt(tx, tz, -ty);
+    }
+    camera.updateProjectionMatrix();
+  }, [cameraOverride, camera]);
+
   const draggedNodeId = useStore((state) => state.draggedNodeId);
   return <OrbitControls enabled={draggedNodeId === null} ref={controlsRef} makeDefault enableDamping dampingFactor={0.1} mouseButtons={{ LEFT: 99 as any, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE }} />;
 };
@@ -1438,7 +1458,7 @@ const PRESET_NOTE_CARDS: Record<string, string> = {
   rack_pinion: `# Rack and Pinion\n\nConverts **rotary motion** (pinion gear) to **linear motion** (rack).\n\n## Physics\n- Pinion hinge rotation is coupled to rack slide translation via a **joint equality constraint** when the bodies are within 0.5 m\n- Linear displacement = pinion angle × pinion pitch radius\n\n## Try it\n- Drive the pinion with a script: \`api.applyJointForce('pinion_hinge', 5)\`\n- Add a load mass to the rack to see force requirements increase`,
 
   inclined_plane: `# Inclined Plane\n\nClassic mechanics: a block sliding down a ramp under gravity.\n\n## Physics\n- Net force along the plane: *F = mg sin θ − μmg cos θ*\n- **Static friction** prevents motion when *tan θ < μ*\n- Once sliding, **kinetic friction** is lower than static\n\n## Try it\n- Adjust the wedge angle to find the critical slip angle\n- Change the block's friction coefficient in the properties panel`,
-  oval_track: `# Oval Curve Track\n\nA marble circulating on a **banked oval** built from the Curve component — a closed Catmull-Rom spline decomposed into convex box segments.\n\n## Physics\n- **Banked turns**: the −18° bank tilts the contact normal inward, supplying centripetal force\n- Equilibrium speed: *v² = g·r·tan θ* — the marble is launched near this speed\n- Too fast → drifts up the bank; too slow → slides down it (self-correcting within the track width)\n\n## Try it\n- Select the track and **drag the blue control-point handles** to reshape the oval live\n- Adjust Bank Angle in the properties panel and watch the marble's line change\n- Increase the launch speed in the marble's script to see it climb the bank`,
+  oval_track: `# Oval Curve Track\n\nA marble circulating on a **banked oval** built from the Curve component — a closed Catmull-Rom spline decomposed into convex box segments.\n\n## Physics\n- **Banked turns**: the −18° bank tilts the contact normal inward, supplying centripetal force\n- Equilibrium speed: *v² = g·r·tan θ* — the marble is launched near this speed\n- Too fast → drifts up the bank; too slow → slides down it (self-correcting within the track width)\n\n## Try it\n- Select the track and **drag the blue control-point handles** to reshape the oval live\n- Adjust Bank Angle in the properties panel and watch the marble's line change\n- Increase the marble's **Launch Velocity** (joint panel) to see it climb the bank`,
 
   pulley_system: `# Pulley System\n\nA compound pulley demonstrating **mechanical advantage**.\n\n## Physics\n- The rope is simulated as a length-constrained rigid segment via **joint equality**\n- A compound pulley with N rope segments reduces the required force by ×N\n- Rope tension is transferred through the pulley wheel hinge\n\n## Key concepts\n- Ideal mechanical advantage = number of rope segments supporting the load\n- Energy is conserved: you pull further but with less force`,
 

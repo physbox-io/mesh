@@ -2473,13 +2473,16 @@ export const ovalTrackPreset: SceneGraph = {
       type: 'body',
       pos: [1.45, 0, 0.3],
       joints: [
-        { name: 'marble_free', type: 'free' }
+        // initialVelocity (not a first-tick script): the worker applies this at
+        // build, and the Launch Velocity sliders in the joint panel read/write
+        // it — a script calling api.setVelocity at t=0 would stomp whatever
+        // the user sets there.
+        { name: 'marble_free', type: 'free', initialVelocity: [0, 2.2, 0, 0, 0, 0] }
       ],
       geoms: [
         { name: 'marble_geom', type: 'sphere', size: [0.12], mass: 1, rgba: [0.2, 0.6, 1.0, 1], friction: [1.0, 0.005, 0.0001] }
       ],
-      children: [],
-      script: "if (api.getTime() === 0) { api.setVelocity([0, 2.2, 0], 'marble'); }"
+      children: []
     }
   ]
 };
