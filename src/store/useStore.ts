@@ -600,8 +600,12 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   },
   
   loadPreset: (name) => {
+    const prev = get().activePreset;
     get().prepareForDiscreteChange();
     set({ isPlaying: false, selectedNodeId: null, activePreset: name });
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('physics:preset-loaded', { detail: { name, prev } }));
+    }
     if (name.startsWith('user:')) {
       const presetName = name.replace('user:', '');
       try {
@@ -1214,11 +1218,16 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     const traverse = (nodes: any[]) => {
       if (!nodes) return false;
       for (const node of nodes) {
-        if (node.id === id) {
+        if (node.id === id || node.name === id) {
           node.scad = scad;
           if (node.geoms && node.geoms.length > 0) {
-            const meshGeom = node.geoms.find((g: any) => g.type === 'mesh');
+            let meshGeom = node.geoms.find((g: any) => g.type === 'mesh');
+            if (!meshGeom && node.geoms[0]) {
+              meshGeom = node.geoms[0];
+            }
             if (meshGeom) {
+              meshGeom.type = 'mesh';
+              meshGeom.dynamic = true;
               meshGeom.vertices = compiledData.vertices;
               meshGeom.faces = compiledData.faces;
               meshGeom.renderVertices = compiledData.renderVertices;
@@ -1377,7 +1386,9 @@ export const useStore = create<PhysicsState>()((set, get) => ({
         geomType = 'capsule';
         size = [0.04, 0.4];
         rgba = [0.6, 0.6, 0.6, 1];
-        joints = [{ name: `${id}_hinge`, type: 'hinge', axis: [0, 1, 0], pos: [0, 0, 0], damping: 0.1 }];
+        // Standalone poles are free bodies and fall like any other shape; only
+        // when nested under a parent does a hinge (pendulum rod) make sense.
+        joints = isChildJoint ? [{ name: `${id}_hinge`, type: 'hinge', axis: [0, 1, 0], pos: [0, 0, 0], damping: 0.1 }] : [{ name: `${id}_free`, type: 'free' }];
       } else if (type === 'cylinder') {
         geomType = 'cylinder';
         size = [0.2, 0.1];
@@ -1393,7 +1404,9 @@ export const useStore = create<PhysicsState>()((set, get) => ({
         geomType = 'box';
         size = [1.0, 0.5, 0.25];
         rgba = [0.8, 0.5, 0.2, 1];
-        joints = []; // static by default
+        // A wedge is a solid object, not a fixture: it falls and can be tipped
+        // over like anything else. Set the joint to Fixed to weld it in place.
+        joints = isChildJoint ? [{ name: `${id}_hinge`, type: 'hinge', axis: [0, 1, 0], pos: [0, 0, 0], damping: 0.5 }] : [{ name: `${id}_free`, type: 'free' }];
       } else if (type === 'mesh') {
         // Dynamic icosahedron: radius 0.3, centred at body origin.
         // body pos = localPos handles spawn placement.
@@ -1622,7 +1635,6 @@ export const useStore = create<PhysicsState>()((set, get) => ({
         sceneGraph, recompileId: Date.now(), lastCompileError: null, isLoaded: true,
       };
       if (overrideSelectedId !== undefined) updates.selectedNodeId = overrideSelectedId;
-      if (!keepPreset) updates.activePreset = '';
       requestAnimationFrame(() => set(updates));
     };
 
@@ -1679,9 +1691,6 @@ export const useStore = create<PhysicsState>()((set, get) => ({
       // Still update the sceneGraph so the UI reflects the change even if MuJoCo rejects it
       const updates: Partial<PhysicsState> = { sceneGraph, lastCompileError: msg };
       if (overrideSelectedId !== undefined) updates.selectedNodeId = overrideSelectedId;
-      if (!keepPreset) {
-        updates.activePreset = '';
-      }
       set(updates);
     }
   },

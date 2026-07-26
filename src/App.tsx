@@ -1238,7 +1238,10 @@ const SceneVisuals = ({ model, data, mujoco, sceneGraph, selectedNodeId, setSele
         const jointed = ancestorJointed || (node.joints && node.joints.length > 0) || node.isComposite === true;
         if (node.geoms) {
           for (const geom of node.geoms) {
-            list.push({ nodeId: node.id, staticBody: !jointed, ...geom });
+            // isWedge bodies draw a bespoke triangular prism via WedgeGeometry.
+            // Their MJCF geom is only a thin slab along the slanted face, so they
+            // must never fall through to a generic box renderer.
+            list.push({ nodeId: node.id, staticBody: !jointed, customRender: !!node.isWedge, ...geom });
           }
         }
         traverse(node.children, jointed);
@@ -1252,7 +1255,7 @@ const SceneVisuals = ({ model, data, mujoco, sceneGraph, selectedNodeId, setSele
 
   const allPrimitiveGeoms = geoms.filter(g => g.type !== 'mesh');
   // Static boxes not on the selected body render as one InstancedMesh.
-  const instancedBoxGeoms = allPrimitiveGeoms.filter(g => g.type === 'box' && g.staticBody && g.nodeId !== selectedNodeId);
+  const instancedBoxGeoms = allPrimitiveGeoms.filter(g => g.type === 'box' && g.staticBody && !g.customRender && g.nodeId !== selectedNodeId);
   const instancedNames = new Set(instancedBoxGeoms.map(g => g.name));
   const primitiveGeoms = allPrimitiveGeoms.filter(g => !instancedNames.has(g.name));
   const staticMeshGeoms = geoms.filter(g => g.type === 'mesh' && !g.dynamic);
@@ -1443,6 +1446,51 @@ const getSyncedSceneGraph = (
 
   return sceneCopy;
 };
+
+// Every panel in the properties sidebar should be able to point at an
+// explainer. Tabs are grouped so the nav stays readable as the list grows.
+const DOCS_TABS = [
+  { group: 'Simulation', items: [
+    { id: 'gravity', label: '🪐 Gravity & Inertia' },
+    { id: 'collision', label: '💥 Collision Physics' },
+    { id: 'material', label: '🧪 Physical Material' },
+    { id: 'friction', label: '🛷 Friction Controls' },
+  ]},
+  { group: 'Bodies & Joints', items: [
+    { id: 'launch', label: '🚀 Launch Velocity' },
+    { id: 'damping', label: '🔗 Joint Damping' },
+    { id: 'springs', label: '🌸 Springs & Limits' },
+    { id: 'coupling', label: '⚙️ Joint Coupling' },
+  ]},
+  { group: 'Geometry', items: [
+    { id: 'resize', label: '📏 Resize Component' },
+    { id: 'offset', label: '📍 Position Offset' },
+  ]},
+  { group: 'Scripting', items: [
+    { id: 'scripting', label: '💻 Names & Basics' },
+    { id: 'tutorial', label: '🎓 Scripting Tutorial' },
+    { id: 'apiref', label: '📚 Full API Reference' },
+  ]},
+] as const;
+
+type DocsTabId = typeof DOCS_TABS[number]['items'][number]['id'];
+
+// Small reusable (i) affordance that deep-links a sidebar panel to its docs tab.
+const DocsInfoButton = ({ tab, onOpen, className = '', size = 'w-3.5 h-3.5' }: {
+  tab: DocsTabId;
+  onOpen: (tab: DocsTabId) => void;
+  className?: string;
+  size?: string;
+}) => (
+  <button
+    type="button"
+    onClick={(e) => { e.stopPropagation(); onOpen(tab); }}
+    className={`text-slate-400 hover:text-blue-600 transition-colors cursor-pointer shrink-0 ${className}`}
+    title="Click for documentation"
+  >
+    <Info className={size} />
+  </button>
+);
 
 const PRESET_NOTE_CARDS: Record<string, string> = {
   empty: `# Blank Scene\n\nAn empty world with just the ground plane.\n\n## Getting started\n- Drag components from the left sidebar into the scene\n- Select a body to edit its mass, size, and material\n- Press **Play** to start the simulation`,
@@ -1674,7 +1722,8 @@ function App() {
 
   const [isDocsOpen, setIsDocsOpen] = useState(false);
   const [showAICopilot, setShowAICopilot] = useState(false);
-  const [docsTab, setDocsTab] = useState<'gravity' | 'coupling' | 'collision' | 'friction' | 'scripting'>('gravity');
+  const [docsTab, setDocsTab] = useState<DocsTabId>('gravity');
+  const openDocs = useCallback((tab: DocsTabId) => { setDocsTab(tab); setIsDocsOpen(true); }, []);
   const [scriptText, setScriptText] = useState('');
   const [scriptError, setScriptError] = useState<string | null>(null);
   const [meshEditorGeom, setMeshEditorGeom] = useState<string | null>(null);
@@ -2543,6 +2592,13 @@ function App() {
               }}
               className="bg-transparent text-slate-700 dark:text-slate-100 text-xs rounded-md block px-2 py-1 outline-none font-medium cursor-pointer border-none"
             >
+              {/* Editing the scene clears activePreset. Without a real option
+                  bound to '', the browser falls back to showing option 0 as the
+                  current selection, so re-picking that preset fires no change
+                  event and the scene never resets. */}
+              {!activePreset && (
+                <option value="" disabled hidden>✏️ Modified scene</option>
+              )}
               <optgroup label="⬜ Built-in Presets" className="bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300">
                 {Object.entries(PRESETS).map(([id, p]: [string, any]) => (
                   <option key={id} value={id}>{p.emoji ? `${p.emoji} ` : ''}{p.name}</option>
@@ -2772,21 +2828,65 @@ function App() {
                 <label className="text-xs font-medium text-slate-500 dark:text-slate-400 flex justify-between">Floor Bounciness <span>{(floorBounce ?? 0).toFixed(2)}</span></label>
                 <input type="range" min="0" max="1" step="0.01" value={floorBounce ?? 0} onChange={(e) => setEnvironment({floorBounce: parseFloat(e.target.value)})} className="w-full accent-blue-500 cursor-pointer" />
               </div>
-              <div className="pt-2.5 border-t border-slate-200 dark:border-slate-800 flex flex-col gap-1">
-                <label htmlFor="geminiApiKey" className="text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider flex items-center gap-1">
-                  🔑 Gemini API Key
-                </label>
-                <input 
-                  type="password" 
-                  id="geminiApiKey"
-                  value={localStorage.getItem('gemini_api_key') || ''} 
-                  onChange={(e) => {
-                    localStorage.setItem('gemini_api_key', e.target.value);
-                    window.dispatchEvent(new Event('storage'));
-                  }} 
-                  placeholder="Paste AIzaSy... here" 
-                  className="w-full px-2 py-1.5 text-xs border border-slate-200 dark:border-slate-800 rounded bg-white dark:bg-slate-950 text-slate-800 dark:text-slate-200 shadow-inner focus:outline-none focus:ring-1 focus:ring-blue-500 font-mono" 
-                />
+              <div className="pt-2.5 border-t border-slate-200 dark:border-slate-800 flex flex-col gap-2.5">
+                <div className="flex flex-col gap-1">
+                  <label htmlFor="geminiApiKey" className="text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider flex items-center gap-1">
+                    🔑 Google Gemini API Key
+                  </label>
+                  <input 
+                    type="password" 
+                    id="geminiApiKey"
+                    value={localStorage.getItem('gemini_api_key') || ''} 
+                    onChange={(e) => {
+                      localStorage.setItem('gemini_api_key', e.target.value);
+                      window.dispatchEvent(new Event('storage'));
+                    }} 
+                    placeholder="Paste AIzaSy... here" 
+                    className="w-full px-2 py-1.5 text-xs border border-slate-200 dark:border-slate-800 rounded bg-white dark:bg-slate-950 text-slate-800 dark:text-slate-200 shadow-inner focus:outline-none focus:ring-1 focus:ring-blue-500 font-mono" 
+                  />
+                </div>
+                <div className="flex flex-col gap-1">
+                  <label htmlFor="claudeApiKey" className="text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider flex items-center gap-1">
+                    🔑 Anthropic Claude API Key
+                  </label>
+                  <input 
+                    type="password" 
+                    id="claudeApiKey"
+                    value={localStorage.getItem('anthropic_api_key') || ''} 
+                    onChange={(e) => {
+                      localStorage.setItem('anthropic_api_key', e.target.value);
+                      window.dispatchEvent(new Event('storage'));
+                    }} 
+                    placeholder="Paste sk-ant-... here" 
+                    className="w-full px-2 py-1.5 text-xs border border-slate-200 dark:border-slate-800 rounded bg-white dark:bg-slate-950 text-slate-800 dark:text-slate-200 shadow-inner focus:outline-none focus:ring-1 focus:ring-amber-500 font-mono" 
+                  />
+                </div>
+                <div className="flex flex-col gap-1">
+                  <label htmlFor="geminiModel" className="text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider flex items-center gap-1">
+                    🤖 Copilot AI Model
+                  </label>
+                  <select 
+                    id="geminiModel"
+                    value={localStorage.getItem('gemini_model') || 'gemini-3.6-flash'} 
+                    onChange={(e) => {
+                      localStorage.setItem('gemini_model', e.target.value);
+                      window.dispatchEvent(new Event('storage'));
+                    }} 
+                    className="w-full px-2 py-1.5 text-xs border border-slate-200 dark:border-slate-800 rounded bg-white dark:bg-slate-950 text-slate-800 dark:text-slate-200 shadow-inner focus:outline-none focus:ring-1 focus:ring-blue-500 cursor-pointer" 
+                  >
+                    <optgroup label="Google Gemini">
+                      <option value="gemini-3.6-flash">Gemini 3.6 Flash (Recommended)</option>
+                      <option value="gemini-3.5-flash">Gemini 3.5 Flash</option>
+                      <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                      <option value="gemini-1.5-pro">Gemini 1.5 Pro</option>
+                    </optgroup>
+                    <optgroup label="Anthropic Claude">
+                      <option value="claude-3-5-sonnet-20241022">Claude 3.5 Sonnet</option>
+                      <option value="claude-3-5-haiku-20241022">Claude 3.5 Haiku</option>
+                      <option value="claude-3-opus-20240229">Claude 3 Opus</option>
+                    </optgroup>
+                  </select>
+                </div>
               </div>
             </div>
           </div>
@@ -3298,7 +3398,10 @@ function App() {
 
               {/* Position Coordinates (Applicable to all nodes!) */}
               <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-3">
-                <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2">Position Offset</h3>
+                <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 flex items-center justify-between">
+                  <span>Position Offset</span>
+                  <DocsInfoButton tab="offset" onOpen={openDocs} />
+                </h3>
                 <div className="flex flex-col gap-3">
                   <div className="flex flex-col gap-1.5">
                     <label className="text-xs text-slate-500 flex items-center justify-between font-medium">X Position
@@ -3402,16 +3505,7 @@ function App() {
               <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-2">
                 <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 mb-1 flex items-center justify-between">
                   <span className="flex items-center gap-1">🔗 Joint Type</span>
-                  <button 
-                    onClick={() => {
-                      setDocsTab('gravity');
-                      setIsDocsOpen(true);
-                    }} 
-                    className="text-slate-400 hover:text-slate-600 transition-colors cursor-pointer" 
-                    title="Click for documentation"
-                  >
-                    <Info className="w-3.5 h-3.5" />
-                  </button>
+                  <DocsInfoButton tab="gravity" onOpen={openDocs} />
                 </h3>
                 <select 
                   value={selectedNode.joints?.length > 0 ? selectedNode.joints[0].type : 'fixed'}
@@ -3465,7 +3559,10 @@ function App() {
                 {/* Free Joint Launch Velocity */}
                 {selectedNode.joints?.length > 0 && selectedNode.joints[0].type === 'free' && (
                   <div className="flex flex-col gap-2 mt-2 pt-2 border-t border-slate-100">
-                    <h3 className="text-xs font-semibold text-slate-600 mb-1">Launch Velocity (m/s)</h3>
+                    <h3 className="text-xs font-semibold text-slate-600 mb-1 flex items-center justify-between">
+                      <span>Launch Velocity (m/s)</span>
+                      <DocsInfoButton tab="launch" onOpen={openDocs} size="w-3 h-3" />
+                    </h3>
                     {['X (Forward)', 'Y (Side)', 'Z (Up)'].map((label, i) => (
                       <div key={label} className="flex flex-col gap-1">
                         <label className="text-xs font-medium text-slate-500 flex justify-between">
@@ -3487,7 +3584,10 @@ function App() {
                       </div>
                     ))}
 
-                    <h3 className="text-xs font-semibold text-slate-600 mt-2 mb-1 pt-2 border-t border-slate-100">Launch Spin / Angular Velocity (rad/s)</h3>
+                    <h3 className="text-xs font-semibold text-slate-600 mt-2 mb-1 pt-2 border-t border-slate-100 flex items-center justify-between">
+                      <span>Launch Spin / Angular Velocity (rad/s)</span>
+                      <DocsInfoButton tab="launch" onOpen={openDocs} size="w-3 h-3" />
+                    </h3>
                     {['X (Roll)', 'Y (Pitch)', 'Z (Yaw)'].map((label, i) => {
                       const idx = i + 3;
                       return (
@@ -3696,8 +3796,9 @@ function App() {
                 <div key={`joint-${i}`} className="flex flex-col gap-4">
                   {(joint.damping !== undefined || joint.type === 'free') && (
                     <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-2">
-                      <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 mb-1 flex items-center gap-1.5">
-                        <span>🔗 Joint Damping</span>
+                      <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 mb-1 flex items-center justify-between">
+                        <span className="flex items-center gap-1">🔗 Joint Damping</span>
+                        <DocsInfoButton tab="damping" onOpen={openDocs} />
                       </h3>
                       <label className="text-xs font-medium text-slate-500 flex justify-between">Damping <span>{(joint.damping !== undefined ? joint.damping : 0.0).toFixed(2)}</span></label>
                       <input 
@@ -3714,8 +3815,9 @@ function App() {
 
                   {(joint.type === 'hinge' || joint.type === 'slide' || joint.type === 'ball') && (
                     <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-3">
-                      <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 mb-1 flex items-center gap-1.5">
-                        <span>🌸 Joint Springs</span>
+                      <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 mb-1 flex items-center justify-between">
+                        <span className="flex items-center gap-1">🌸 Joint Springs</span>
+                        <DocsInfoButton tab="springs" onOpen={openDocs} />
                       </h3>
                       
                       <div className="flex flex-col gap-1">
@@ -3754,8 +3856,9 @@ function App() {
 
                   {(joint.type === 'hinge' || joint.type === 'slide') && (
                     <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-3">
-                      <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 mb-1 flex items-center gap-1.5">
-                        <span>🔒 Joint Limits</span>
+                      <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 mb-1 flex items-center justify-between">
+                        <span className="flex items-center gap-1">🔒 Joint Limits</span>
+                        <DocsInfoButton tab="springs" onOpen={openDocs} />
                       </h3>
                       
                       <label className="text-xs font-semibold text-slate-500 flex items-center gap-2 cursor-pointer py-1">
@@ -3892,7 +3995,10 @@ function App() {
 
                     {!selectedNode.id.includes('gear') && (
                       <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-3">
-                        <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2">📏 Resize Component</h3>
+                        <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 flex items-center justify-between">
+                          <span className="flex items-center gap-1">📏 Resize Component</span>
+                          <DocsInfoButton tab="resize" onOpen={openDocs} />
+                        </h3>
 
                         {hasMeshGeom && (
                           <div className="flex flex-col gap-2">
@@ -4503,7 +4609,10 @@ function App() {
                       const pos = geom.pos || [0, 0, 0];
                       return (
                         <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-3">
-                          <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2">📍 Geom Position Offset</h3>
+                          <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 flex items-center justify-between">
+                            <span className="flex items-center gap-1">📍 Geom Position Offset</span>
+                            <DocsInfoButton tab="offset" onOpen={openDocs} />
+                          </h3>
                           <div className="flex flex-col gap-3">
                             <div className="flex flex-col gap-1">
                               <label className="text-xs font-medium text-slate-500 flex justify-between">X Offset <span>{pos[0].toFixed(3)} m</span></label>
@@ -4556,7 +4665,10 @@ function App() {
                     })()}
 
                     <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-2">
-                      <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 mb-1">Mass</h3>
+                      <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 mb-1 flex items-center justify-between">
+                        <span>Mass</span>
+                        <DocsInfoButton tab="gravity" onOpen={openDocs} />
+                      </h3>
                       <label className="text-xs font-medium text-slate-500 flex justify-between">Value <span>{geom.mass} kg</span></label>
                       <input type="range" min="0" max="50" step="0.01" value={geom.mass} onChange={(e) => updateNodeGeom(selectedNode.id, {mass: parseFloat(e.target.value)}, activeIndex)} className="w-full accent-blue-500 cursor-pointer" />
                     </div>
@@ -4564,16 +4676,7 @@ function App() {
                     <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-2">
                       <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 mb-1 flex items-center justify-between">
                         <span className="flex items-center gap-1">💥 Collision Physics</span>
-                        <button 
-                          onClick={() => {
-                            setDocsTab('collision');
-                            setIsDocsOpen(true);
-                          }} 
-                          className="text-slate-400 hover:text-slate-600 transition-colors cursor-pointer" 
-                          title="Click for documentation"
-                        >
-                          <Info className="w-3.5 h-3.5" />
-                        </button>
+                        <DocsInfoButton tab="collision" onOpen={openDocs} />
                       </h3>
                       <label className="text-xs font-semibold text-slate-500 flex items-center gap-2 cursor-pointer py-1">
                         <input 
@@ -4596,16 +4699,7 @@ function App() {
                     <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-3">
                       <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 mb-1 flex items-center justify-between">
                         <span className="flex items-center gap-1">🧪 Physical Material</span>
-                        <button 
-                          onClick={() => {
-                            setDocsTab('friction');
-                            setIsDocsOpen(true);
-                          }} 
-                          className="text-slate-400 hover:text-slate-600 transition-colors cursor-pointer" 
-                          title="Click for documentation"
-                        >
-                          <Info className="w-3.5 h-3.5" />
-                        </button>
+                        <DocsInfoButton tab="material" onOpen={openDocs} />
                       </h3>
 
                       {/* Contact spring timeconst — solref[0] */}
@@ -4714,16 +4808,7 @@ function App() {
                       <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-2.5">
                         <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 mb-1 flex items-center justify-between">
                           <span className="flex items-center gap-1">⚙️ Mechanical Coupling</span>
-                          <button 
-                            onClick={() => {
-                              setDocsTab('coupling');
-                              setIsDocsOpen(true);
-                            }} 
-                            className="text-slate-400 hover:text-slate-600 transition-colors cursor-pointer" 
-                            title="Click for documentation"
-                          >
-                            <Info className="w-3.5 h-3.5" />
-                          </button>
+                          <DocsInfoButton tab="coupling" onOpen={openDocs} />
                         </h3>
 
                         <label className="text-xs font-semibold text-slate-500 flex items-center gap-2 cursor-pointer py-1">
@@ -5398,6 +5483,15 @@ function App() {
                   <span className="flex items-center gap-1.5 font-semibold text-slate-800">
                     <Code className="w-4 h-4 text-blue-500" />
                     Component Script
+                    <button
+                      type="button"
+                      onClick={() => openDocs('tutorial')}
+                      className="ml-0.5 flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-semibold text-blue-600 bg-blue-50 border border-blue-200 hover:bg-blue-100 hover:border-blue-300 transition-colors cursor-pointer"
+                      title="Open the scripting tutorial"
+                    >
+                      <Info className="w-3.5 h-3.5" />
+                      Tutorial
+                    </button>
                   </span>
                   <div className="flex items-center gap-1.5">
                     {selectedNode.script ? (
@@ -5518,54 +5612,61 @@ api.applyForce([force, 0, 0]);
 
                 {/* API Reference Collapsible */}
                 {showApiRef && (
-                  <div className="text-[10px] bg-slate-50 border border-slate-150 rounded-lg p-2.5 flex flex-col gap-2 font-sans text-slate-600 max-h-48 overflow-y-auto">
-                    <div className="font-semibold text-slate-700 border-b border-slate-200 pb-1 mb-1">Available API Methods:</div>
-                    <div className="flex flex-col gap-1.5">
-                      <div>
-                        <code className="font-mono text-blue-600 bg-blue-50 px-1 rounded">api.getPosition(bodyName?)</code>
-                        <p className="text-slate-500 mt-0.5">Returns array <code className="font-mono">[x, y, z]</code> of body position.</p>
-                      </div>
-                      <div>
-                        <code className="font-mono text-blue-600 bg-blue-50 px-1 rounded">api.getVelocity(bodyName?)</code>
-                        <p className="text-slate-500 mt-0.5">Returns array <code className="font-mono">[vx, vy, vz]</code> of body velocity.</p>
-                      </div>
-                      <div>
-                        <code className="font-mono text-blue-600 bg-blue-50 px-1 rounded">api.getAngularVelocity(bodyName?)</code>
-                        <p className="text-slate-500 mt-0.5">Returns array <code className="font-mono">[wx, wy, wz]</code> of body angular velocity.</p>
-                      </div>
-                      <div>
-                        <code className="font-mono text-blue-600 bg-blue-50 px-1 rounded">api.getMass(bodyName?)</code>
-                        <p className="text-slate-500 mt-0.5">Returns body mass in kg.</p>
-                      </div>
-                      <div>
-                        <code className="font-mono text-blue-600 bg-blue-50 px-1 rounded">api.getJointPosition(jointName)</code>
-                        <p className="text-slate-500 mt-0.5">Returns joint position (m for slide, rad for hinge).</p>
-                      </div>
-                      <div>
-                        <code className="font-mono text-blue-600 bg-blue-50 px-1 rounded">api.getJointVelocity(jointName)</code>
-                        <p className="text-slate-500 mt-0.5">Returns joint velocity (m/s for slide, rad/s for hinge).</p>
-                      </div>
-                      <div>
-                        <code className="font-mono text-blue-600 bg-blue-50 px-1 rounded">api.applyForce(forceVec, bodyName?)</code>
-                        <p className="text-slate-500 mt-0.5">Applies external force <code className="font-mono">[fx, fy, fz]</code> to a body.</p>
-                      </div>
-                      <div>
-                        <code className="font-mono text-blue-600 bg-blue-50 px-1 rounded">api.applyJointForce(jointName, forceVal)</code>
-                        <p className="text-slate-500 mt-0.5">Applies joint-aligned torque or force.</p>
-                      </div>
-                      <div>
-                        <code className="font-mono text-blue-600 bg-blue-50 px-1 rounded">api.setActuatorControl(actuatorName, ctrlVal)</code>
-                        <p className="text-slate-500 mt-0.5">Sets input control value on an actuator.</p>
-                      </div>
-                      <div>
-                        <code className="font-mono text-blue-600 bg-blue-50 px-1 rounded">api.getTime()</code>
-                        <p className="text-slate-500 mt-0.5">Returns elapsed simulation time in seconds.</p>
-                      </div>
-                      <div>
-                        <code className="font-mono text-blue-600 bg-blue-50 px-1 rounded">api.log(msg)</code>
-                        <p className="text-slate-500 mt-0.5">Logs message to browser developer console.</p>
-                      </div>
+                  <div className="text-[10px] bg-slate-50 border border-slate-150 rounded-lg p-2.5 flex flex-col gap-2 font-sans text-slate-600 max-h-64 overflow-y-auto">
+                    <div className="flex items-center justify-between border-b border-slate-200 pb-1 mb-1">
+                      <span className="font-semibold text-slate-700">Available API Methods</span>
+                      <button
+                        type="button"
+                        onClick={() => openDocs('apiref')}
+                        className="text-blue-600 hover:text-blue-700 font-semibold cursor-pointer"
+                      >
+                        Full reference →
+                      </button>
                     </div>
+                    <p className="text-slate-400 leading-tight -mt-1">
+                      Runs once per physics step. <code className="font-mono">bodyName?</code> defaults to this component.
+                    </p>
+                    {[
+                      { group: 'Read body state', rows: [
+                        ['api.getPosition(bodyName?)', 'World position [x, y, z] in metres.'],
+                        ['api.getVelocity(bodyName?)', 'Linear velocity [vx, vy, vz] in m/s.'],
+                        ['api.getAngularVelocity(bodyName?)', 'Angular velocity [wx, wy, wz] in rad/s.'],
+                        ['api.getOrientation(bodyName?)', 'Rotation as a flat 9-element matrix.'],
+                        ['api.getMass(bodyName?)', 'Body mass in kg.'],
+                      ]},
+                      { group: 'Read joint state', rows: [
+                        ['api.getJointPosition(jointName)', 'Metres for slide, radians for hinge.'],
+                        ['api.getJointVelocity(jointName)', 'm/s for slide, rad/s for hinge.'],
+                      ]},
+                      { group: 'Apply forces', rows: [
+                        ['api.applyForce(forceVec, bodyName?)', 'World-space force [fx, fy, fz] in newtons.'],
+                        ['api.applyTorque(torqueVec, bodyName?)', 'World-space torque [tx, ty, tz] in N·m.'],
+                        ['api.applyJointForce(jointName, value)', 'Force/torque along the joint axis.'],
+                        ['api.setActuatorControl(name, ctrl)', 'Command a motor actuator.'],
+                      ]},
+                      { group: 'Override state', rows: [
+                        ['api.setPosition(pos, bodyName?)', 'Teleport. [x,y,z] for free, number for hinge/slide.'],
+                        ['api.setVelocity(vel, bodyName?)', 'Force a linear velocity, bypassing the solver.'],
+                        ['api.setAngularVelocity(v, bodyName?)', 'Force an angular velocity.'],
+                      ]},
+                      { group: 'Environment & utilities', rows: [
+                        ['api.getTime()', 'Simulation time in seconds.'],
+                        ['api.isKeyPressed(key)', "True while held — 'space', 'w', 'arrowup'…"],
+                        ['api.getWind()', 'Current wind as [windX, windY].'],
+                        ['api.log(msg)', 'Log to the browser console.'],
+                        ['api.id / api.name', "This component's id and display name."],
+                      ]},
+                    ].map(({ group, rows }) => (
+                      <div key={group} className="flex flex-col gap-1.5">
+                        <div className="text-[9px] font-bold uppercase tracking-wider text-slate-400 mt-1">{group}</div>
+                        {rows.map(([sig, desc]) => (
+                          <div key={sig}>
+                            <code className="font-mono text-blue-600 bg-blue-50 px-1 rounded">{sig}</code>
+                            <p className="text-slate-500 mt-0.5">{desc}</p>
+                          </div>
+                        ))}
+                      </div>
+                    ))}
                   </div>
                 )}
               </div>
@@ -5593,7 +5694,7 @@ api.applyForce([force, 0, 0]);
             <div className="px-6 py-4 border-b border-slate-150 flex items-center justify-between bg-slate-50">
               <div className="flex items-center gap-2">
                 <Info className="w-5 h-5 text-blue-500" />
-                <h2 className="font-bold text-slate-800 text-base">PhysBox: Mesh Reference Guide</h2>
+                <h2 className="font-bold text-slate-800 text-base">PhysBox Reference Guide</h2>
               </div>
               <button 
                 onClick={() => setIsDocsOpen(false)}
@@ -5606,37 +5707,21 @@ api.applyForce([force, 0, 0]);
             {/* Modal Content Split */}
             <div className="flex flex-1 overflow-hidden min-h-0">
               {/* Tab Navigation */}
-              <div className="w-48 bg-slate-50 border-r border-slate-150 p-3 flex flex-col gap-1.5 shrink-0 overflow-y-auto">
-                <button 
-                  onClick={() => setDocsTab('gravity')}
-                  className={`px-3 py-2 text-left rounded-lg text-xs font-semibold transition-all ${docsTab === 'gravity' ? 'bg-blue-500 text-white shadow' : 'text-slate-600 hover:bg-slate-100'}`}
-                >
-                  🪐 Gravity & Inertia
-                </button>
-                <button 
-                  onClick={() => setDocsTab('coupling')}
-                  className={`px-3 py-2 text-left rounded-lg text-xs font-semibold transition-all ${docsTab === 'coupling' ? 'bg-blue-500 text-white shadow' : 'text-slate-600 hover:bg-slate-100'}`}
-                >
-                  ⚙️ Joint Coupling
-                </button>
-                <button 
-                  onClick={() => setDocsTab('collision')}
-                  className={`px-3 py-2 text-left rounded-lg text-xs font-semibold transition-all ${docsTab === 'collision' ? 'bg-blue-500 text-white shadow' : 'text-slate-600 hover:bg-slate-100'}`}
-                >
-                  💥 Collision Physics
-                </button>
-                <button 
-                  onClick={() => setDocsTab('friction')}
-                  className={`px-3 py-2 text-left rounded-lg text-xs font-semibold transition-all ${docsTab === 'friction' ? 'bg-blue-500 text-white shadow' : 'text-slate-600 hover:bg-slate-100'}`}
-                >
-                  🛷 Friction Controls
-                </button>
-                <button 
-                  onClick={() => setDocsTab('scripting')}
-                  className={`px-3 py-2 text-left rounded-lg text-xs font-semibold transition-all ${docsTab === 'scripting' ? 'bg-blue-500 text-white shadow' : 'text-slate-600 hover:bg-slate-100'}`}
-                >
-                  💻 Control Scripting
-                </button>
+              <div className="w-48 bg-slate-50 border-r border-slate-150 p-3 flex flex-col gap-1 shrink-0 overflow-y-auto">
+                {DOCS_TABS.map(({ group, items }) => (
+                  <div key={group} className="flex flex-col gap-1 mb-1.5">
+                    <span className="px-1 pt-1.5 text-[9px] font-bold uppercase tracking-wider text-slate-400">{group}</span>
+                    {items.map(({ id, label }) => (
+                      <button
+                        key={id}
+                        onClick={() => setDocsTab(id)}
+                        className={`px-3 py-1.5 text-left rounded-lg text-xs font-semibold transition-all ${docsTab === id ? 'bg-blue-500 text-white shadow' : 'text-slate-600 hover:bg-slate-100'}`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                ))}
               </div>
 
               {/* Tab Panel */}
@@ -5783,6 +5868,372 @@ api.setAngularVelocity([0, 15.0, 0], 'cart'); // Sets angular velocities`}
                         </pre>
                       </div>
                     </div>
+                  </div>
+                )}
+
+                {docsTab === 'launch' && (
+                  <div className="flex flex-col gap-4">
+                    <h3 className="font-bold text-slate-800 text-lg flex items-center gap-1.5">🚀 Launch Velocity & Launch Spin</h3>
+                    <p className="text-xs text-slate-600 leading-relaxed">
+                      These sliders set the <strong>initial conditions</strong> of a free body — the velocity it already has at
+                      the instant the simulation starts. They are not a continuous force: gravity, drag and contacts take over
+                      immediately after t = 0. Press <strong>Reset</strong> to re-apply them.
+                    </p>
+                    <div className="bg-slate-50 border border-slate-200/60 rounded-xl p-4 flex flex-col gap-3">
+                      <div className="text-xs">
+                        <strong className="text-slate-700">➡️ Launch Velocity (m/s)</strong>
+                        <p className="text-slate-500 mt-1">Linear velocity along each world axis. <strong>X</strong> is forward, <strong>Y</strong> is sideways, <strong>Z</strong> is up. Setting Z positive throws the body upward; it decelerates at <em>g</em> = 9.81 m/s² and peaks after <em>v/g</em> seconds.</p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">🌀 Launch Spin (rad/s)</strong>
+                        <p className="text-slate-500 mt-1">Angular velocity about each axis — <strong>Roll</strong> (X), <strong>Pitch</strong> (Y), <strong>Yaw</strong> (Z). One full turn per second is 2π ≈ 6.28 rad/s. Spin is conserved in free flight, so a tumbling body keeps tumbling until something touches it.</p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">🎓 Why only free joints?</strong>
+                        <p className="text-slate-500 mt-1">A free joint carries all 6 degrees of freedom, so all six numbers are meaningful. Hinge and slide joints have a single DOF, and their starting motion is set by the joint's own controls instead.</p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">🧪 Try it</strong>
+                        <p className="text-slate-500 mt-1">Give a ball X = 6 m/s and Z = 6 m/s for a classic 45° projectile arc. Add Pitch spin and increase <em>rolling friction</em> in Physical Material to see the spin bite when it lands.</p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {docsTab === 'damping' && (
+                  <div className="flex flex-col gap-4">
+                    <h3 className="font-bold text-slate-800 text-lg flex items-center gap-1.5">🔗 Joint Damping</h3>
+                    <p className="text-xs text-slate-600 leading-relaxed">
+                      Damping is a resistive force proportional to <strong>velocity</strong> — the joint equivalent of friction in
+                      a hinge or air resistance on a pendulum. It always opposes motion, so it removes energy from the system and
+                      never adds any.
+                    </p>
+                    <div className="bg-slate-50 border border-slate-200/60 rounded-xl p-4 flex flex-col gap-3">
+                      <div className="text-xs">
+                        <strong className="text-slate-700">📐 The maths</strong>
+                        <p className="text-slate-500 mt-1">The joint feels a force <code className="font-mono text-blue-600 bg-blue-50 px-1 rounded">F = −c·v</code>, where <em>c</em> is this slider. Doubling the value roughly halves the time an oscillation takes to die away.</p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">🎚️ Choosing a value</strong>
+                        <p className="text-slate-500 mt-1"><strong>0</strong> is a frictionless ideal joint that swings forever. Small values (0.1–1) give a realistic slowly-decaying pendulum. Large values (50+) make the joint feel like it is moving through treacle.</p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">📦 Free joints are different</strong>
+                        <p className="text-slate-500 mt-1">On a free (6-DOF) body the slider tops out at 5.0 and acts as a general <strong>drag</strong> on both linear and angular motion, scaled by the body's own mass and inertia. It is a quick stand-in for air resistance.</p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">⚠️ Stability</strong>
+                        <p className="text-slate-500 mt-1">Very large damping combined with a large timestep can overshoot and oscillate. If a joint starts buzzing, reduce damping before reaching for other fixes.</p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {docsTab === 'springs' && (
+                  <div className="flex flex-col gap-4">
+                    <h3 className="font-bold text-slate-800 text-lg flex items-center gap-1.5">🌸 Joint Springs & Limits</h3>
+                    <p className="text-xs text-slate-600 leading-relaxed">
+                      Springs pull a joint back toward a rest pose; limits stop it leaving a range entirely.
+                    </p>
+                    <div className="bg-slate-50 border border-slate-200/60 rounded-xl p-4 flex flex-col gap-3">
+                      <div className="text-xs">
+                        <strong className="text-slate-700">🌸 Spring Stiffness (K)</strong>
+                        <p className="text-slate-500 mt-1">Restoring force per unit of displacement, <code className="font-mono text-blue-600 bg-blue-50 px-1 rounded">F = −K·(q − q₀)</code>. Higher K means a faster, tighter oscillation. With mass <em>m</em>, the natural frequency is <em>√(K/m)</em> rad/s.</p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">🎯 Spring Rest Position (q₀)</strong>
+                        <p className="text-slate-500 mt-1">The pose the spring pulls toward — degrees for a hinge, metres for a slider. With K = 0 this has no effect at all.</p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">🤝 Pair it with damping</strong>
+                        <p className="text-slate-500 mt-1">A spring on its own oscillates forever. Add <strong>Joint Damping</strong> to get a realistic suspension: too little and it bounces, too much and it never returns. Critical damping is around <em>c = 2√(K·m)</em>.</p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">🔒 Joint Limits</strong>
+                        <p className="text-slate-500 mt-1">A hard range the joint cannot travel beyond — a knee that will not bend backwards, or a drawer that stops when closed. Limits are enforced by the constraint solver, so they hold firmly without needing a huge spring.</p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {docsTab === 'material' && (
+                  <div className="flex flex-col gap-4">
+                    <h3 className="font-bold text-slate-800 text-lg flex items-center gap-1.5">🧪 Physical Material</h3>
+                    <p className="text-xs text-slate-600 leading-relaxed">
+                      Contacts here are not infinitely rigid — every touch is modelled as a stiff <strong>spring-damper</strong>.
+                      These six numbers shape that contact, and together they decide whether a body feels like steel, rubber or ice.
+                    </p>
+                    <div className="bg-slate-50 border border-slate-200/60 rounded-xl p-4 flex flex-col gap-3">
+                      <div className="text-xs">
+                        <strong className="text-slate-700">⏱️ Contact Stiffness — <code className="font-mono">solref[0]</code></strong>
+                        <p className="text-slate-500 mt-1">The contact spring's <em>time constant</em> in seconds — how long it takes to correct a penetration. <strong>Lower is stiffer.</strong> Keep it at or above 5× the timestep (≈ 0.005 s); going lower makes contacts explosive and jittery.</p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">🏀 Damping Ratio (Bounciness) — <code className="font-mono">solref[1]</code></strong>
+                        <p className="text-slate-500 mt-1"><strong>1.0</strong> is critically damped: the body lands dead with no bounce. Values below 1 are underdamped and bounce, and <strong>0</strong> bounces the most. Around <strong>0.2</strong> gives a lively rubber ball.</p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">🧱 Contact Impedance — <code className="font-mono">solimp[0]</code></strong>
+                        <p className="text-slate-500 mt-1">How strictly the solver enforces non-penetration, from 0 (soft and squishy) to 1 (rigid). Higher values mean less visible sinking under heavy loads, at the cost of a harder problem to solve. 0.99 is a good default.</p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">🛷 Sliding Friction — <code className="font-mono">friction[0]</code></strong>
+                        <p className="text-slate-500 mt-1">The classic Coulomb coefficient μ resisting tangential sliding. Ice is about 0.05, wood on wood about 0.4, rubber on tarmac over 1.0. A block only slides down a ramp once <em>tan θ &gt; μ</em>.</p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">🔄 Torsional Friction — <code className="font-mono">friction[1]</code></strong>
+                        <p className="text-slate-500 mt-1">Resists spinning about the contact normal — a coin pirouetting on its face. Values are small because it scales with the contact patch. Raise it to stop tops spinning forever.</p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">⚽ Rolling Friction — <code className="font-mono">friction[2]</code></strong>
+                        <p className="text-slate-500 mt-1">Resists rolling. Without it a perfect sphere on a flat plane rolls forever, which looks wrong. Values are tiny — 0.0001 is usually enough to bring a ball to rest naturally.</p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">🤝 Contacts combine two bodies</strong>
+                        <p className="text-slate-500 mt-1">Both surfaces contribute. A ball will not slide on a sticky floor no matter how slippery you make the ball — check <strong>Floor Friction</strong> in the environment settings too.</p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {docsTab === 'resize' && (
+                  <div className="flex flex-col gap-4">
+                    <h3 className="font-bold text-slate-800 text-lg flex items-center gap-1.5">📏 Resize Component</h3>
+                    <p className="text-xs text-slate-600 leading-relaxed">
+                      Resizing changes the geometry the solver collides against, so it has real physical consequences beyond looks.
+                    </p>
+                    <div className="bg-slate-50 border border-slate-200/60 rounded-xl p-4 flex flex-col gap-3">
+                      <div className="text-xs">
+                        <strong className="text-slate-700">📐 Half-sizes, not full sizes</strong>
+                        <p className="text-slate-500 mt-1">Following MuJoCo's convention, box dimensions are <strong>half-extents</strong>: a size of 0.2 makes a box 0.4 m wide. Sphere size is a radius; a capsule takes a radius and a half-length.</p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">⚖️ Mass does not follow size</strong>
+                        <p className="text-slate-500 mt-1">Mass is set independently, so scaling a body up leaves it just as heavy unless you change it. Real objects scale as the <strong>cube</strong> of length — double the size, eight times the mass — so adjust Mass to match if you want believable behaviour.</p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">🌀 Inertia is recomputed</strong>
+                        <p className="text-slate-500 mt-1">The inertia tensor is derived from the geometry and mass, so a resized body genuinely becomes harder or easier to spin. A long thin rod resists rotation about its centre far more than a compact one.</p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">🔗 Uniform Scale on compound bodies</strong>
+                        <p className="text-slate-500 mt-1">For multi-geom bodies the Uniform Scale slider scales every sub-geom <em>and</em> their position offsets together, so the assembly keeps its shape. It springs back to 1.0 after each drag because it applies a relative multiplier.</p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">⚠️ Very small geoms</strong>
+                        <p className="text-slate-500 mt-1">Anything below roughly 0.01 m can slip through other objects between timesteps (tunnelling). Prefer scaling the whole scene up over making one part tiny.</p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {docsTab === 'offset' && (
+                  <div className="flex flex-col gap-4">
+                    <h3 className="font-bold text-slate-800 text-lg flex items-center gap-1.5">📍 Geom Position Offset</h3>
+                    <p className="text-xs text-slate-600 leading-relaxed">
+                      This moves a single <strong>geom</strong> within its body, rather than moving the body itself. It is the tool for
+                      building compound shapes out of primitives.
+                    </p>
+                    <div className="bg-slate-50 border border-slate-200/60 rounded-xl p-4 flex flex-col gap-3">
+                      <div className="text-xs">
+                        <strong className="text-slate-700">🧩 Body frame vs world frame</strong>
+                        <p className="text-slate-500 mt-1">The offset is measured in the body's own rotating frame. If the body tips over, the offset tips with it — unlike <strong>Position Offset</strong> at the top of the panel, which moves the whole body in the world.</p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">⚖️ It shifts the centre of mass</strong>
+                        <p className="text-slate-500 mt-1">A body's centre of mass is the mass-weighted average of its geoms. Pushing one heavy geom off to one side makes the body <strong>lopsided</strong>, so it will topple or swing rather than balance — exactly how you build a weeble or a loaded die.</p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">🔗 Joints stay put</strong>
+                        <p className="text-slate-500 mt-1">Offsetting a geom does not move the body's joint anchor. Sliding mass away from a hinge increases the gravitational torque about it, which is how you tune a pendulum's period without touching the joint.</p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">🧪 Try it</strong>
+                        <p className="text-slate-500 mt-1">Add a second geom to a body, offset it upward, and give it a large mass. The body becomes top-heavy and will refuse to stand up.</p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {docsTab === 'tutorial' && (
+                  <div className="flex flex-col gap-4">
+                    <h3 className="font-bold text-slate-800 text-lg flex items-center gap-1.5">🎓 Scripting Tutorial</h3>
+                    <p className="text-xs text-slate-600 leading-relaxed">
+                      A component script is a snippet of JavaScript that runs <strong>once per physics step</strong> (about 1000×
+                      per second) for the body it is attached to. It is the same loop a real controller runs in, which is what
+                      makes closed-loop control possible here.
+                    </p>
+
+                    <div className="bg-slate-50 border border-slate-200/60 rounded-xl p-4 flex flex-col gap-4">
+                      <div className="text-xs">
+                        <strong className="text-slate-800 font-semibold">1️⃣ Your first script</strong>
+                        <p className="text-slate-500 mt-1 leading-relaxed">
+                          Select a body, paste this, and press <strong>Save &amp; Execute</strong>. There is no <code className="font-mono">function</code> wrapper
+                          and no <code className="font-mono">return</code> — the body of the script <em>is</em> the loop.
+                        </p>
+                        <pre className="mt-2 bg-slate-950 text-emerald-400 p-2.5 rounded-lg font-mono text-[10px] leading-relaxed shadow-inner overflow-x-auto">
+{`// Push this body steadily along +X, forever.
+api.applyForce([5, 0, 0]);`}
+                        </pre>
+                        <p className="text-slate-500 mt-1.5 leading-relaxed">
+                          Note it accelerates rather than moving at constant speed: a constant force on a mass gives constant
+                          acceleration, exactly as <em>F = ma</em> promises.
+                        </p>
+                      </div>
+
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-800 font-semibold">2️⃣ Read state, then react</strong>
+                        <p className="text-slate-500 mt-1 leading-relaxed">
+                          Every call without a body name refers to the body the script is attached to. Reading state before acting
+                          is what turns an open-loop push into a controller.
+                        </p>
+                        <pre className="mt-2 bg-slate-950 text-emerald-400 p-2.5 rounded-lg font-mono text-[10px] leading-relaxed shadow-inner overflow-x-auto">
+{`// A hovering thruster: hold this body at z = 3 m.
+const [x, y, z] = api.getPosition();
+const [vx, vy, vz] = api.getVelocity();
+
+const kp = 40.0;   // how hard to correct height error
+const kd = 10.0;   // how hard to resist vertical speed
+const mass = api.getMass();
+
+// Cancel gravity, then add the correction on top.
+const hold = mass * 9.81;
+const correct = kp * (3.0 - z) - kd * vz;
+
+api.applyForce([0, 0, hold + correct]);`}
+                        </pre>
+                      </div>
+
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-800 font-semibold">3️⃣ Understanding PD control</strong>
+                        <p className="text-slate-500 mt-1 leading-relaxed">
+                          That pattern — <code className="font-mono text-blue-600 bg-blue-50 px-1 rounded">kp × (target − actual) − kd × velocity</code> — is a
+                          <strong> PD controller</strong>, and it covers most of what you will build.
+                        </p>
+                        <ul className="list-disc pl-4 mt-1.5 text-slate-500 flex flex-col gap-1">
+                          <li><strong>kp</strong> (proportional) pulls toward the target. Too high and it overshoots and oscillates.</li>
+                          <li><strong>kd</strong> (derivative) opposes motion and damps that oscillation. Too high and it becomes sluggish.</li>
+                          <li>Tune <strong>kp first</strong> until it reaches the target briskly, then raise kd until the wobble stops.</li>
+                        </ul>
+                      </div>
+
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-800 font-semibold">4️⃣ Driving joints and motors</strong>
+                        <p className="text-slate-500 mt-1 leading-relaxed">
+                          For jointed mechanisms, work in joint space — it is one number instead of three vectors. Joint names come
+                          from the <strong>Joint Name (for API)</strong> field; actuators append <code className="font-mono">_actuator</code>.
+                        </p>
+                        <pre className="mt-2 bg-slate-950 text-emerald-400 p-2.5 rounded-lg font-mono text-[10px] leading-relaxed shadow-inner overflow-x-auto">
+{`// Hold a hinge at 45 degrees using a PD law.
+const target = 45 * Math.PI / 180;   // API angles are RADIANS
+const q  = api.getJointPosition('arm_hinge');
+const qd = api.getJointVelocity('arm_hinge');
+
+api.applyJointForce('arm_hinge', 60 * (target - q) - 8 * qd);
+
+// Or, if the joint has "Enable Motor Drive" ticked:
+api.setActuatorControl('arm_hinge_actuator', target);`}
+                        </pre>
+                      </div>
+
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-800 font-semibold">5️⃣ Keyboard input &amp; time</strong>
+                        <pre className="mt-2 bg-slate-950 text-emerald-400 p-2.5 rounded-lg font-mono text-[10px] leading-relaxed shadow-inner overflow-x-auto">
+{`// Drive with the arrow keys; jump on space.
+let fx = 0;
+if (api.isKeyPressed('arrowleft'))  fx -= 20;
+if (api.isKeyPressed('arrowright')) fx += 20;
+api.applyForce([fx, 0, 0]);
+
+if (api.isKeyPressed('space') && api.getPosition()[2] < 0.3) {
+  api.setVelocity([0, 0, 4.0]);
+}
+
+// getTime() is SIMULATION time, so it is unaffected by frame rate.
+const wobble = Math.sin(api.getTime() * 4) * 3;`}
+                        </pre>
+                      </div>
+
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-800 font-semibold">⚠️ Pitfalls worth knowing</strong>
+                        <ul className="list-disc pl-4 mt-1.5 text-slate-500 flex flex-col gap-1">
+                          <li><strong>Forces vs state.</strong> <code className="font-mono">applyForce</code> asks the solver politely; <code className="font-mono">setVelocity</code> overrides physics outright. Prefer forces unless you are teleporting or resetting.</li>
+                          <li><strong>Angles are radians.</strong> Multiply degrees by <code className="font-mono">Math.PI / 180</code>.</li>
+                          <li><strong>Forces do not accumulate across steps.</strong> Applied force is cleared each step, so a force you want held must be re-applied every step — which happens naturally, since your script <em>is</em> the loop.</li>
+                          <li><strong>Keep it cheap.</strong> This runs ~1000×/second. Avoid allocating large arrays or doing heavy work per step.</li>
+                          <li><strong>Errors are silent-ish.</strong> A throwing script is caught and logged to the browser console rather than halting the sim — use <code className="font-mono">api.log()</code> and open DevTools if nothing seems to happen.</li>
+                          <li><strong>Gravity is still on.</strong> To hover you must actively cancel weight (<em>m·g</em>), as in the example above.</li>
+                        </ul>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {docsTab === 'apiref' && (
+                  <div className="flex flex-col gap-4">
+                    <h3 className="font-bold text-slate-800 text-lg flex items-center gap-1.5">📚 Full Script API Reference</h3>
+                    <p className="text-xs text-slate-600 leading-relaxed">
+                      Every method available on <code className="font-mono text-blue-600 bg-blue-50 px-1 rounded">api</code> inside a component script.
+                      Arguments marked <code className="font-mono">?</code> are optional; where a <code className="font-mono">bodyName</code> is
+                      omitted it defaults to the body the script is attached to.
+                    </p>
+
+                    {[
+                      {
+                        title: '📖 Reading body state',
+                        rows: [
+                          ['api.getPosition(bodyName?)', 'World position as [x, y, z], in metres.'],
+                          ['api.getVelocity(bodyName?)', 'Linear velocity as [vx, vy, vz], in m/s.'],
+                          ['api.getAngularVelocity(bodyName?)', 'Angular velocity as [wx, wy, wz], in rad/s.'],
+                          ['api.getOrientation(bodyName?)', 'Orientation as a flat 9-element row-major rotation matrix.'],
+                          ['api.getMass(bodyName?)', 'Body mass in kg, as computed from its geoms.'],
+                        ],
+                      },
+                      {
+                        title: '📖 Reading joint state',
+                        rows: [
+                          ['api.getJointPosition(jointName)', 'Joint coordinate — metres for a slide, radians for a hinge.'],
+                          ['api.getJointVelocity(jointName)', 'Joint rate — m/s for a slide, rad/s for a hinge.'],
+                        ],
+                      },
+                      {
+                        title: '⚡ Applying forces',
+                        rows: [
+                          ['api.applyForce(forceVec, bodyName?)', 'Adds a world-space force [fx, fy, fz] in newtons for this step.'],
+                          ['api.applyTorque(torqueVec, bodyName?)', 'Adds a world-space torque [tx, ty, tz] in N·m for this step.'],
+                          ['api.applyJointForce(jointName, value)', 'Adds force/torque along a joint axis — the usual choice for control.'],
+                          ['api.setActuatorControl(actuatorName, ctrl)', 'Sets the control input of a motor actuator (jointName + "_actuator").'],
+                        ],
+                      },
+                      {
+                        title: '🎯 Overriding state directly',
+                        rows: [
+                          ['api.setPosition(pos, bodyName?)', 'Teleports the body. Free joints take [x, y, z]; hinge/slide take a single number.'],
+                          ['api.setVelocity(vel, bodyName?)', 'Overrides linear velocity, bypassing the solver.'],
+                          ['api.setAngularVelocity(angvel, bodyName?)', 'Overrides angular velocity. Free/ball take a vector, hinge takes a number.'],
+                        ],
+                      },
+                      {
+                        title: '🌍 Environment & utilities',
+                        rows: [
+                          ['api.getTime()', 'Elapsed simulation time in seconds (not wall-clock time).'],
+                          ['api.isKeyPressed(key)', "True while a key is held — 'space', 'w', 'arrowup', … Ignores typing in editors."],
+                          ['api.getWind()', 'Current wind as [windX, windY].'],
+                          ['api.log(msg)', 'Logs to the browser console, prefixed with the component name.'],
+                          ['api.id / api.name', "This component's id and display name, as strings."],
+                        ],
+                      },
+                    ].map(({ title, rows }) => (
+                      <div key={title} className="bg-slate-50 border border-slate-200/60 rounded-xl p-4 flex flex-col gap-2.5">
+                        <strong className="text-slate-800 font-semibold text-xs">{title}</strong>
+                        {rows.map(([sig, desc]) => (
+                          <div key={sig} className="text-xs border-t border-slate-150 pt-2 first:border-t-0 first:pt-0">
+                            <code className="font-mono text-[10px] text-blue-600 bg-blue-50 px-1 py-0.5 rounded border border-blue-100">{sig}</code>
+                            <p className="text-slate-500 mt-1 leading-relaxed">{desc}</p>
+                          </div>
+                        ))}
+                      </div>
+                    ))}
                   </div>
                 )}
               </div>

@@ -1,11 +1,38 @@
 import type { SceneGraph, SceneNode, SceneGeom, SceneJoint } from '../types/scene';
+import { generateWedgeMeshData } from './geom';
+
+const formatGeomSize = (type: string, rawSize: any): string => {
+  const arr = Array.isArray(rawSize)
+    ? rawSize.map((v: any) => (typeof v === 'number' && !isNaN(v) && v > 0) ? v : 0.1)
+    : [0.1, 0.1, 0.1];
+
+  if (type === 'sphere') {
+    return `${arr[0] || 0.1}`;
+  }
+  if (type === 'cylinder' || type === 'capsule') {
+    const r = arr[0] || 0.1;
+    const h = arr[1] || arr[0] || 0.1;
+    return `${r} ${h}`;
+  }
+  // For 'box', 'plane', or fallback primitive shapes
+  const x = arr[0] || 0.1;
+  const y = arr[1] || arr[0] || x;
+  const z = arr[2] || arr[0] || x;
+  return `${x} ${y} ${z}`;
+};
 
 const buildGeom = (geom: SceneGeom) => {
-  // mesh geoms reference an asset by name; size is not emitted for mesh type
-  const isMesh = geom.type === 'mesh';
-  let attrs = `name="${geom.name}" type="${geom.type}"`;
-  if (!isMesh) attrs += ` size="${geom.size.join(' ')}"`;
-  if (isMesh) attrs += ` mesh="${geom.name}"`;
+  // A mesh geom is only valid in MJCF if vertex/face array data exists to populate the <asset> block
+  const hasMeshData = Array.isArray(geom.vertices) && geom.vertices.length > 0 && Array.isArray(geom.faces) && geom.faces.length > 0;
+  const isMesh = geom.type === 'mesh' && hasMeshData;
+  const geomType = isMesh ? 'mesh' : (geom.type === 'mesh' ? 'box' : (geom.type || 'box'));
+
+  let attrs = `name="${geom.name}" type="${geomType}"`;
+  if (!isMesh) {
+    attrs += ` size="${formatGeomSize(geomType, geom.size)}"`;
+  } else {
+    attrs += ` mesh="${geom.name}"`;
+  }
   if (geom.rgba) attrs += ` rgba="${geom.rgba.join(' ')}"`;
   if (!isMesh && geom.fromto) attrs += ` fromto="${geom.fromto.join(' ')}"`;
   if (geom.pos) attrs += ` pos="${geom.pos.join(' ')}"`;
@@ -42,15 +69,19 @@ const buildJoint = (joint: SceneJoint) => {
 };
 
 const buildNode = (node: SceneNode): string => {
+  if (!node) return '';
   // Logical-only nodes (e.g. pulley ropes) have no geoms or joints and must not
   // emit a <body> into MJCF — a bodyless body causes implicit inertia artefacts.
   if (node.isPulleyRope) return '';
+
+  const nameStr = node.name || node.id || 'body';
+  const posStr = Array.isArray(node.pos) ? node.pos.join(' ') : '0 0 0';
 
   if (node.isComposite) {
     const type = node.compositeType === 'rope' ? 'cable' : (node.compositeType || 'cable');
     const count = node.compositeCount || '15 1 1';
     const size = node.compositeSize !== undefined ? node.compositeSize : '1.5';
-    const prefix = node.compositePrefix || `${node.name}_`;
+    const prefix = node.compositePrefix || `${nameStr}_`;
     const curve = node.compositeCurve || 's 0 0';
 
     const damping = node.joints?.[0]?.damping !== undefined ? node.joints[0].damping : 0.05;
@@ -63,7 +94,7 @@ const buildNode = (node: SceneNode): string => {
 
     const compositeXml = `<composite type="${type}" count="${count}" size="${size}" curve="${curve}" prefix="${prefix}"><joint kind="main" damping="${damping}" stiffness="${stiffness}" /><geom type="${geomType}" size="${geomSize}" rgba="${geomRgba}" /></composite>`;
 
-    let attrs = `name="${node.name}" pos="${node.pos.join(' ')}"`;
+    let attrs = `name="${nameStr}" pos="${posStr}"`;
     if (node.quat) {
       attrs += ` quat="${node.quat.join(' ')}"`;
     } else if (node.euler) {
@@ -71,17 +102,17 @@ const buildNode = (node: SceneNode): string => {
     }
     
     let childrenXml = '';
-    node.children.forEach(c => childrenXml += buildNode(c));
+    (node.children || []).forEach(c => childrenXml += buildNode(c));
     return `<body ${attrs}>${compositeXml}${childrenXml}</body>`;
   }
 
   let innerXml = '';
   
-  node.joints.forEach(j => innerXml += buildJoint(j));
-  node.geoms.forEach(g => innerXml += buildGeom(g));
-  node.children.forEach(c => innerXml += buildNode(c));
+  (node.joints || []).forEach(j => innerXml += buildJoint(j));
+  (node.geoms || []).forEach(g => innerXml += buildGeom(g));
+  (node.children || []).forEach(c => innerXml += buildNode(c));
   
-  let attrs = `name="${node.name}" pos="${node.pos.join(' ')}"`;
+  let attrs = `name="${nameStr}" pos="${posStr}"`;
   if (node.quat) {
     attrs += ` quat="${node.quat.join(' ')}"`;
   } else if (node.euler) {
@@ -105,33 +136,69 @@ export const compileToMJCF = (
   }
   const sceneCopy = JSON.parse(JSON.stringify(scene)) as SceneGraph;
 
-  // MuJoCo resolves geom/body lookups by name (mj_name2id), and the renderer's
   // DynamicGeom component caches a geom's id from its name once at mount. If two
   // geoms or bodies ever share a name, MuJoCo silently binds both lookups to
   // whichever one it registered first — every other geom "sharing" that name
   // then renders forever at the wrong body's transform, with no compile error
-  // to explain it. Catch collisions here, loudly, instead of compiling
-  // ambiguous MJCF that corrupts rendering silently.
+  // to explain it. Catch collisions here and ensure unique body/geom names.
   const seenBodyNames = new Set<string>();
   const seenGeomNames = new Set<string>();
   const checkNames = (nodes: SceneNode[]) => {
     if (!nodes) return;
     for (const node of nodes) {
-      if (node.isPulleyRope) { checkNames(node.children); continue; }
-      if (seenBodyNames.has(node.name)) {
-        throw new Error(`compileToMJCF: duplicate body name "${node.name}" — every body in the scene must have a unique name`);
+      if (node.isPulleyRope) { checkNames(node.children || []); continue; }
+      let bodyName = node.name || node.id || 'body';
+      if (seenBodyNames.has(bodyName)) {
+        bodyName = `${bodyName}_${Math.random().toString(36).substr(2, 4)}`;
+        node.name = bodyName;
       }
-      seenBodyNames.add(node.name);
+      seenBodyNames.add(bodyName);
       for (const g of node.geoms || []) {
-        if (seenGeomNames.has(g.name)) {
-          throw new Error(`compileToMJCF: duplicate geom name "${g.name}" (on body "${node.name}") — every geom in the scene must have a unique name`);
+        let gName = g.name || `${bodyName}_geom`;
+        if (seenGeomNames.has(gName)) {
+          gName = `${gName}_${Math.random().toString(36).substr(2, 4)}`;
+          g.name = gName;
         }
-        seenGeomNames.add(g.name);
+        seenGeomNames.add(gName);
       }
-      checkNames(node.children);
+      checkNames(node.children || []);
     }
   };
   checkNames(sceneCopy.nodes);
+
+  // Runs BEFORE mesh-asset collection: a wedge is rewritten into a mesh geom
+  // here, and that mesh still needs to land in the <asset> block below.
+  const preprocessNodes = (nodes: SceneNode[]) => {
+    if (!nodes) return;
+    for (const node of nodes) {
+      if (node.isWedge) {
+        const w = node.width || 2.0;
+        const h = node.height || 0.5;
+        const d = node.depth || 1.0;
+        const theta = node.wedgeAngle !== undefined ? node.wedgeAngle : (Math.atan(h / w) * 180 / Math.PI);
+
+        if (node.geoms && node.geoms.length > 0) {
+          // Collide as the solid triangular prism the user actually sees, not as
+          // a thin plate along the slanted face. The top face lands in the same
+          // plane either way, so ramps behave as before while the wedge now has
+          // real volume to rest and tip on.
+          const { vertices, faces, renderVertices } = generateWedgeMeshData(w, d, h);
+          const g = node.geoms[0];
+          g.type = 'mesh';
+          g.vertices = vertices;
+          g.faces = faces;
+          g.renderVertices = renderVertices;
+        }
+        node.euler = [0, theta, 0];
+
+        // Dynamically lift the Z position of the wedge so its base is perfectly flush with the ground plane
+        const zOffset = h / 2;
+        node.pos[2] += zOffset;
+      }
+      preprocessNodes(node.children);
+    }
+  };
+  preprocessNodes(sceneCopy.nodes);
 
   // Collect all mesh geoms so we can emit <asset> entries for them
   const meshAssets: SceneGeom[] = [];
@@ -163,30 +230,6 @@ export const compileToMJCF = (
         `    <mesh name="${g.name}" vertex="${toMjcfVerts(g.vertices!).join(' ')}" face="${g.faces!.join(' ')}" />`
       ).join('\n')}\n  </asset>`
     : '';
-
-  const preprocessNodes = (nodes: SceneNode[]) => {
-    if (!nodes) return;
-    for (const node of nodes) {
-      if (node.isWedge) {
-        const w = node.width || 2.0;
-        const h = node.height || 0.5;
-        const d = node.depth || 1.0;
-        const L = Math.sqrt(w * w + h * h);
-        const theta = node.wedgeAngle !== undefined ? node.wedgeAngle : (Math.atan(h / w) * 180 / Math.PI);
-        
-        if (node.geoms && node.geoms.length > 0) {
-          node.geoms[0].size = [L / 2, d / 2, 0.025];
-        }
-        node.euler = [0, theta, 0];
-        
-        // Dynamically lift the Z position of the wedge so its base is perfectly flush with the ground plane
-        const zOffset = h / 2;
-        node.pos[2] += zOffset;
-      }
-      preprocessNodes(node.children);
-    }
-  };
-  preprocessNodes(sceneCopy.nodes);
 
   const actuators: SceneJoint[] = [];
   let pinionJoint: string | null = null;

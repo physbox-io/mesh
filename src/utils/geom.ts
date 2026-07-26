@@ -332,3 +332,59 @@ export function generateCurveGeoms(
   }
   return geoms;
 }
+
+// Solid triangular-prism collision mesh for a wedge body, authored in the same
+// "pre-tilted" local frame as the WedgeGeometry renderer in App.tsx: the slanted
+// top face lies on the local z = 0 plane and the solid bulk hangs below it, so a
+// body euler of [0, theta, 0] lands the base flat on the ground.
+//
+// Before this existed the wedge collided as a thin slab straddling the slanted
+// face, which is fine for something welded in place but leaves a free-jointed
+// wedge resting on a 5cm plate with its visible bulk buried underground.
+export function generateWedgeMeshData(width: number, depth: number, height: number): MeshData {
+  const L = Math.sqrt(width * width + height * height);
+  const cosTheta = width / L;
+  const H_local = height / cosTheta;
+  const halfL = L / 2;
+  const halfD = depth / 2;
+
+  // The slab this replaced was half a centimetre thick either side of the
+  // slanted plane, so anything riding the ramp contacted it at z = +PAD, not
+  // z = 0. Lifting the whole prism by PAD keeps that contact surface bit-exact
+  // and leaves ramp presets behaving precisely as they did before.
+  const PAD = 0.025;
+  const top = PAD;
+  const bottom = PAD - H_local;
+
+  // Z-up, used directly by the renderer / stored for reference.
+  const renderVertices = [
+    -halfL, -halfD, top,
+     halfL, -halfD, top,
+     halfL,  halfD, top,
+    -halfL,  halfD, top,
+    -halfL, -halfD, bottom,
+    -halfL,  halfD, bottom,
+  ];
+
+  // Three.js Y-up: the inverse of the (x, y, z) -> (x, -z, y) swap that
+  // compileToMJCF applies to `vertices` on its way into the <asset> block.
+  const vertices = [
+    -halfL, top,    halfD,
+     halfL, top,    halfD,
+     halfL, top,   -halfD,
+    -halfL, top,   -halfD,
+    -halfL, bottom, halfD,
+    -halfL, bottom, -halfD,
+  ];
+
+  // MuJoCo takes the convex hull regardless, but keep the winding outward-facing.
+  const faces = [
+    0, 2, 1, 0, 3, 2, // slanted top
+    1, 5, 4, 1, 2, 5, // bottom
+    0, 4, 5, 0, 5, 3, // vertical back wall
+    0, 1, 4,          // front triangle
+    3, 5, 2,          // back triangle
+  ];
+
+  return { vertices, faces, renderVertices };
+}
