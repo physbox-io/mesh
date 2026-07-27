@@ -203,17 +203,27 @@ const executeScripts = (nodes: SceneNode[], aeroDiagnostics: Record<string, any>
             const vhy = airfoilVy / relSpeed;
             const vhz = airfoilVz / relSpeed;
 
-            const u_nose = -(vhx * noseX + vhy * noseY + vhz * noseZ);
-            const u_up = -(vhx * upX + vhy * upY + vhz * upZ);
+            const v_nose = vhx * noseX + vhy * noseY + vhz * noseZ;
+            const v_up = vhx * upX + vhy * upY + vhz * upZ;
 
-            const alpha = Math.atan2(u_up, u_nose);
+            const alpha = Math.atan2(-v_up, v_nose);
 
-            const CL = 1.5 * Math.sin(2 * alpha);
-            const CD = 0.08 + 1.2 * Math.sin(alpha) * Math.sin(alpha);
+            const alphaDeg = Math.abs(alpha * 180 / Math.PI);
+            let CL: number;
+            if (alphaDeg <= 15) {
+              CL = 5.7 * alpha;
+            } else if (alphaDeg <= 30) {
+              const sign = Math.sign(alpha) || 1;
+              const t = (alphaDeg - 15) / 15;
+              CL = sign * (1.1 * (1 - t) + 0.4 * t);
+            } else {
+              CL = Math.sin(2 * alpha);
+            }
+            const CD = 0.05 + 1.5 * Math.sin(alpha) * Math.sin(alpha);
 
-            const ldx = -u_up * noseX + u_nose * upX;
-            const ldy = -u_up * noseY + u_nose * upY;
-            const ldz = -u_up * noseZ + u_nose * upZ;
+            const ldx = -v_up * noseX + v_nose * upX;
+            const ldy = -v_up * noseY + v_nose * upY;
+            const ldz = -v_up * noseZ + v_nose * upZ;
 
             const ddx = -vhx;
             const ddy = -vhy;

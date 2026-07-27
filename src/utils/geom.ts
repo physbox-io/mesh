@@ -54,14 +54,21 @@ export function generateConeMeshData(r: number, h: number, segments: number = 16
   vertices.push(0, h, 0);
   renderVertices.push(0, 0, h);
   
+  // Wound CCW seen from OUTSIDE, so face normals point out of the solid. The
+  // comments here used to claim that while the indices said the opposite: the
+  // mesh's signed volume was negative, i.e. every normal pointed inwards.
   const apexIndex = segments;
   for (let i = 0; i < segments; i++) {
     const next = (i + 1) % segments;
-    faces.push(i, next, apexIndex); // CCW looking outward
+    faces.push(next, i, apexIndex); // side, normal pointing away from the axis
   }
   
+  // The base fan was already correct and is left alone. Note that signed volume
+  // CANNOT verify it: the base lies in the y=0 plane through the origin, so its
+  // tetrahedra have zero volume and an inverted base is invisible to that test.
+  // Only a directed-edge consistency check catches it.
   for (let i = 1; i < segments - 1; i++) {
-    faces.push(0, i, i + 1); // pointing down -Y
+    faces.push(0, i, i + 1); // base fan, normal pointing down -Y
   }
   
   return { vertices, faces, renderVertices };
@@ -159,13 +166,19 @@ export function generateTubeMeshData(
     const it_next = next * 4 + 2;
     const ib_next = next * 4 + 3;
 
-    // Outer wall faces (looking outward)
-    faces.push(ot_curr, ob_curr, ob_next);
-    faces.push(ot_curr, ob_next, ot_next);
+    // Outer wall — normal points away from the axis.
+    // These two triangles and the inner-wall pair below were both wound the
+    // wrong way round, while the caps were correct: the mesh had MIXED winding,
+    // so no single orientation convention could interpret it. That left the
+    // per-vertex normals wrong on all four walls (bad shading, and an STL export
+    // whose walls face inwards) and made the mesh's signed volume meaningless.
+    faces.push(ot_curr, ob_next, ob_curr);
+    faces.push(ot_curr, ot_next, ob_next);
 
-    // Inner wall faces (looking inward)
-    faces.push(it_curr, ib_next, ib_curr);
-    faces.push(it_curr, it_next, ib_next);
+    // Inner wall — normal points TOWARD the axis, i.e. out of the solid and into
+    // the hole.
+    faces.push(it_curr, ib_curr, ib_next);
+    faces.push(it_curr, ib_next, it_next);
 
     // Top cap (outer top to inner top, looking up)
     faces.push(ot_curr, it_curr, it_next);
@@ -355,16 +368,24 @@ export function generateWedgeMeshData(width: number, depth: number, height: numb
     -halfW, 0,       halfD, // 5: back-right bottom
   ];
 
-  // MuJoCo Z-up renderVertices (Z=UP, Y=DEPTH, X=RIGHT)
+  // MuJoCo Z-up renderVertices (Z=UP, Y=DEPTH, X=RIGHT).
+  // This is the Y-up list above mapped through (x,y,z) -> (x,-z,y), the same
+  // rotation every other generator here uses and the one mjcf.ts applies to
+  // `vertices`. It previously used (x,y,z) -> (x,z,y), which is a REFLECTION:
+  // the two arrays described mirror-image solids with opposite winding, so
+  // anything reading renderVertices got a wedge flipped in depth.
   const renderVertices = [
-    -halfW, -halfD, height, // 0
-    -halfW,  halfD, height, // 1
-     halfW, -halfD, 0,      // 2
-     halfW,  halfD, 0,      // 3
-    -halfW, -halfD, 0,      // 4
-    -halfW,  halfD, 0,      // 5
+    -halfW,  halfD, height, // 0
+    -halfW, -halfD, height, // 1
+     halfW,  halfD, 0,      // 2
+     halfW, -halfD, 0,      // 3
+    -halfW,  halfD, 0,      // 4
+    -halfW, -halfD, 0,      // 5
   ];
 
+  // Wound CCW seen from outside, matching the Y-up `vertices` above. (These were
+  // already correct: the earlier appearance of an inverted wedge came entirely
+  // from renderVertices being a mirror image, not from the winding.)
   const faces = [
     0, 1, 3,  0, 3, 2, // Slanted top face
     4, 2, 3,  4, 3, 5, // Bottom flat face

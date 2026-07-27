@@ -10,6 +10,7 @@ import { compileSCAD } from '../utils/openscad';
 import { getLiveCameraPose } from '../utils/liveCamera';
 import { makePresetNoteCard } from '../utils/noteCards';
 import { generateCurveGeoms, DEFAULT_CURVE_POINTS, DEFAULT_CURVE_WIDTH, DEFAULT_CURVE_THICKNESS, DEFAULT_CURVE_SEGMENTS } from '../utils/geom';
+import { compileCsgNodes } from './useCsgCompile';
 import { PRESETS } from '../presets/presetScenes';
 
 const autoCompileScad = async (nodes: any[]) => {
@@ -84,6 +85,11 @@ const settleScene = async (nodes: any[]): Promise<{ ok: boolean; error?: string;
   // build racing against the final one below.
   store.updateScene({ nodes }, true);
   await autoCompileScad(nodes);
+  // Boolean bodies compile through the same OpenSCAD pool, and just as
+  // asynchronously — a caller that got ok:true before they finished would be
+  // told a scene built when its geometry didn't exist yet. skipFinalRecompile:
+  // the single build below covers it.
+  await compileCsgNodes(true);
   // This is now the ONLY recompile triggered by this load, so there's nothing
   // left to race against. forceReset is false so recompile() preserves qpos/qvel
   // when the edit didn't change the DOF count (e.g. tweaking a color or adding a
@@ -91,6 +97,15 @@ const settleScene = async (nodes: any[]): Promise<{ ok: boolean; error?: string;
   await useStore.getState().recompile(useStore.getState().sceneGraph, undefined, false, true);
   const error = useStore.getState().lastCompileError;
   return { ok: !error, ...(error ? { error } : {}), nodeCount: nodes.length };
+};
+
+const findNodeInScene = (nodes: any[], id: string): any | null => {
+  for (const node of nodes || []) {
+    if (node.id === id || node.name === id) return node;
+    const child = findNodeInScene(node.children, id);
+    if (child) return child;
+  }
+  return null;
 };
 
 const bboxOf = (flatVerts: number[] | undefined) => {
@@ -110,6 +125,8 @@ const bboxOf = (flatVerts: number[] | undefined) => {
 const summarizeGeom = (g: any) => ({
   name: g.name,
   type: g.type,
+  ...(g.csg && g.csg !== 'union' ? { csg: g.csg } : {}),
+  ...(g.csgDerived ? { generated: g.csgDerived } : {}),
   ...(g.pos ? { pos: g.pos } : {}),
   ...(g.type === 'mesh'
     ? {
@@ -127,6 +144,14 @@ const summarizeNode = (node: any): any => ({
   ...(node.quat ? { quat: node.quat } : {}),
   ...(node.euler ? { euler: node.euler } : {}),
   ...(node.scad ? { hasScad: true } : {}),
+  ...(node.csgEnabled ? {
+    csg: {
+      collision: node.csgCollision ?? 'auto',
+      ...(node.csgVolume !== undefined ? { volumeM3: +node.csgVolume.toFixed(8) } : {}),
+      ...(node.csgWarning ? { warning: node.csgWarning } : {}),
+      ...(node.csgError ? { error: node.csgError } : {}),
+    },
+  } : {}),
   joints: (node.joints || []).map((j: any) => ({ name: j.name, type: j.type })),
   geoms: (node.geoms || []).map(summarizeGeom),
   children: (node.children || []).map(summarizeNode),
@@ -173,6 +198,8 @@ const fillGeomDefaults = (g: any, bodyName: string, idx: number) => ({
   ...(g.faces       !== undefined ? { faces: g.faces }     : {}),
   ...(g.dynamic     !== undefined ? { dynamic: g.dynamic } : {}),
   ...(g.renderVertices !== undefined ? { renderVertices: g.renderVertices } : {}),
+  ...(g.csg         !== undefined ? { csg: g.csg }           : {}),
+  ...(g.role        !== undefined ? { role: g.role }         : {}),
 });
 
 const fillJointDefaults = (j: any, bodyName: string, idx: number) => ({
@@ -230,6 +257,17 @@ const fillBodyDefaults = (b: any): any => {
     ...(b.compositePrefix !== undefined ? { compositePrefix: b.compositePrefix } : {}),
     ...(b.compositeCurve  !== undefined ? { compositeCurve: b.compositeCurve }   : {}),
     ...(b.weldLastToId    !== undefined ? { weldLastToId: b.weldLastToId }       : {}),
+    // Boolean modifiers: a body whose geoms carry csg:'difference' is compiled
+    // into a single mesh (see utils/csg.ts). csgEnabled is inferred when the
+    // caller marked a negative but forgot the flag, since a negative geom is
+    // meaningless without it and silently rendering it as a solid is worse.
+    ...((b.csgEnabled === true || (b.geoms || []).some((g: any) => g.csg === 'difference' || g.csg === 'intersection'))
+      ? { csgEnabled: true } : {}),
+    ...(b.csgCollision !== undefined ? { csgCollision: b.csgCollision } : {}),
+    ...(b.csgSectors   !== undefined ? { csgSectors: b.csgSectors }     : {}),
+    ...(b.csgHoleAxis  !== undefined ? { csgHoleAxis: b.csgHoleAxis }   : {}),
+    ...(b.csgMass      !== undefined ? { csgMass: b.csgMass }           : {}),
+    ...(b.csgFn        !== undefined ? { csgFn: b.csgFn }               : {}),
     ...(b.isCurve === true ? {
       isCurve: true,
       curvePoints:    b.curvePoints    ?? DEFAULT_CURVE_POINTS.map((p: number[]) => [...p]),
@@ -439,15 +477,24 @@ export function useMCPBridge() {
             store.updateNodeScad(targetId, updates.scad, compiled, false);
           } else {
             store.updateNode(targetId, updates);
+            // An update that touches a boolean body (its geoms, its collision
+            // mode, a csg marker) invalidates the generated mesh. The editor's
+            // debounced auto-compiler would get to it eventually, but an MCP
+            // caller is told ok:true synchronously — so do it here and await it.
+            const compiled = await compileCsgNodes(true);
             await useStore.getState().recompile(useStore.getState().sceneGraph, undefined, false, true);
+            if (compiled > 0) {
+              const node = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId);
+              if (node?.csgError) return { ok: false, error: `Boolean failed: ${node.csgError}` };
+            }
           }
-          const error = store.lastCompileError;
+          const error = useStore.getState().lastCompileError;
           return { ok: !error, ...(error ? { error } : {}) };
         }
 
         case 'TOGGLE_PLAY':
           store.togglePlay();
-          return { ok: true, isPlaying: !store.isPlaying };
+          return { ok: true, isPlaying: store.isPlaying };
 
         case 'PLAY':
           if (!store.isPlaying) store.togglePlay();
@@ -605,6 +652,8 @@ export function useMCPBridge() {
               vertices:    'number[] — flat array of vertex positions for mesh type: [x0,y0,z0, x1,y1,z1, ...] in Three.js Y-up space',
               faces:       'number[] — flat array of triangle indices for mesh type: [i0,j0,k0, i1,j1,k1, ...]',
               dynamic:     'boolean — if true, mesh participates in simulation and collision; requires renderVertices',
+              csg:         `'union'|'difference'|'intersection' — boolean modifier (default 'union'). A geom marked 'difference' is CUT OUT of the union of the body's other geoms instead of being added to it: one ellipsoid plus a slimmer ellipsoid marked 'difference' is a ring. The body is compiled to a single mesh; set csgCollision on the body to choose how it collides.`,
+              role:        `'visual'|'collision' — 'visual' draws but never collides (contype/conaffinity forced to 0), 'collision' simulates but is never drawn. Default (omitted) is both.`,
               renderVertices: 'number[] — dynamic mesh only: flat [x0,y0,z0,...] in raw MuJoCo Z-up space. Convert from Y-up vertices: (x,y,z)→(x,-z,y). Do NOT subtract centroid — MuJoCo recenters internally.',
             },
             nodeFields: {
@@ -637,12 +686,20 @@ export function useMCPBridge() {
               curveSegments: 'number — how many box segments approximate the spline (default 28; more = smoother)',
               curveClosed:   'boolean — wrap the spline into a seamless closed loop (oval/circuit tracks). Default false.',
               curveBank:     'number — bank (roll) angle in degrees about the travel direction; positive raises the left-of-travel edge. For a counter-clockwise loop use a NEGATIVE bank to raise the outside edge (see the oval_track preset, which uses -18).',
+              csgEnabled:    'boolean — evaluate this body\'s geoms as a boolean program (see the geom `csg` field). Inferred automatically when any geom is marked difference/intersection, so you rarely need to set it. The primitives remain the source of truth; the mesh is regenerated whenever they change.',
+              csgCollision:  `'auto'|'decompose'|'primitives'|'hull' — how the boolean result collides. MuJoCo takes the CONVEX HULL of any mesh geom, so a subtracted hole does not exist for contact unless it is decomposed. 'decompose' (and 'auto', when the negative shape is elongated enough to define a hole axis) slices the result into convex angular sectors so the hole is real and things can pass through it. 'primitives' makes the mesh visual-only and collides the source primitives (exact, but holes are solid). 'hull' collides the whole shape as one filled hull. Default 'auto'.`,
+              csgSectors:    'number — sector count for decomposition (default 16). Higher = tighter fit to the hole, more geoms.',
+              csgHoleAxis:   `'auto'|'x'|'y'|'z' — axis the hole runs along, for decomposition. 'auto' takes the longest axis of the largest negative geom.`,
+              csgMass:       'number — total mass of the boolean solid, split across its colliders by volume. Without this, MuJoCo would derive mass from the hull volume, which for a ring is far more material than there actually is.',
+              csgFn:         'number — OpenSCAD $fn (facet count) for the generated primitives (default 32).',
             },
             tips: [
               'GOTCHA — geom pos is body-local, not world-space: for a body at pos [0,0,0.4] with a box half-extent of 0.4, local z=0 is the box center (world z=0.4) and local z=+0.4 is the top face (world z=0.8). Do not pick pos values as if they were world heights. When placing decoration on a face, set the face-normal coordinate to ~half-extent and keep the other two coordinates well inside ±half-extent.',
               'PREFER over manual capsule-chain curves: for rope/cable/mustache/tentacle/vine shapes, set isComposite:true + compositeType:\'cable\' + compositeCount/compositeSize/compositeCurve on one body instead of hand-placing many capsule fromto segments.',
               'Compound shapes: add multiple geoms to one body with different pos/quat/euler offsets',
               'Asymmetric shapes: combine box + sphere + cylinder geoms on a single body',
+              'Rings/tubes/holes — PREFER boolean modifiers over hand-built approximations: put two geoms on one body and mark the inner one csg:\'difference\'. E.g. a washer: {type:\'cylinder\',size:[0.12,0.02]} plus {type:\'cylinder\',size:[0.06,0.1],csg:\'difference\'}. The negative MUST be longer than the solid along the hole axis so it pierces right through — a negative that fits entirely inside makes a hollow shell, not a hole, and cannot be decomposed for collision.',
+              'A boolean body collides as convex sectors by default (holes are real). Set csgCollision:\'primitives\' if you only care how it looks, or \'hull\' if you want the hole filled for contact.',
               'Torus-like shapes: ring of capsule geoms arranged with pos+euler offsets',
               'L/T/cross shapes: multiple box geoms with offset positions on one body',
               'fromto on capsule lets you specify start/end points directly in local space',

@@ -1,5 +1,6 @@
 import type { SceneGraph, SceneNode, SceneGeom, SceneJoint } from '../types/scene';
 import { generateWedgeMeshData } from './geom';
+import { resolveCsgGeoms } from './csg';
 
 const formatGeomSize = (type: string, rawSize: any): string => {
   const arr = Array.isArray(rawSize)
@@ -42,8 +43,15 @@ const buildGeom = (geom: SceneGeom) => {
     attrs += ` euler="${geom.euler.join(' ')}"`;
   }
   if (geom.mass !== undefined) attrs += ` mass="${geom.mass}"`;
-  if (geom.contype !== undefined) attrs += ` contype="${geom.contype}"`;
-  if (geom.conaffinity !== undefined) attrs += ` conaffinity="${geom.conaffinity}"`;
+  if (geom.role === 'visual') {
+    // A visual-only geom is drawn but must not take part in contact — the body's
+    // real colliders are elsewhere (see resolveCsgGeoms). Overrides any authored
+    // contype/conaffinity rather than merging with it: "visual" is unambiguous.
+    attrs += ` contype="0" conaffinity="0"`;
+  } else {
+    if (geom.contype !== undefined) attrs += ` contype="${geom.contype}"`;
+    if (geom.conaffinity !== undefined) attrs += ` conaffinity="${geom.conaffinity}"`;
+  }
   if (geom.condim !== undefined) attrs += ` condim="${geom.condim}"`;
   if (geom.friction !== undefined) attrs += ` friction="${geom.friction.join(' ')}"`;
   if (geom.solref) attrs += ` solref="${geom.solref.join(' ')}"`;
@@ -135,6 +143,20 @@ export const compileToMJCF = (
     throw new Error('compileToMJCF: scene.nodes must be an array (got a malformed SceneGraph)');
   }
   const sceneCopy = JSON.parse(JSON.stringify(scene)) as SceneGraph;
+
+  // Resolve boolean-modifier bodies down to the geoms that actually simulate:
+  // negatives are dropped, and depending on the collision mode the colliders are
+  // either the source primitives or the generated convex sectors. Runs before
+  // everything else so name-uniqueness and mesh-asset collection only ever see
+  // geoms that will really be emitted.
+  const resolveCsg = (nodes: SceneNode[]) => {
+    if (!nodes) return;
+    for (const node of nodes) {
+      if (node.csgEnabled) node.geoms = resolveCsgGeoms(node, 'physics');
+      resolveCsg(node.children || []);
+    }
+  };
+  resolveCsg(sceneCopy.nodes);
 
   // DynamicGeom component caches a geom's id from its name once at mount. If two
   // geoms or bodies ever share a name, MuJoCo silently binds both lookups to
@@ -369,7 +391,14 @@ export const compileToMJCF = (
         const pairKey = [pinionJoint, rackJoint].sort().join('::');
         if (!explicitlyCoupledJointPairs.has(pairKey)) {
           const pinionRadius = pInfo ? pInfo.size[0] : 0.08;
-          equalityConstraints += `\n    <joint name="pinion_rack_coupling" joint1="${pinionJoint}" joint2="${rackJoint}" polycoef="0 ${pinionRadius} 0 0 0" />`;
+          // MuJoCo's joint equality constrains joint1 = poly(joint2), so this
+          // polynomial has to give the PINION ANGLE as a function of the rack's
+          // displacement: theta = x / r. It used to emit r itself, which is the
+          // relationship the other way round — with r = 0.08 that asked the rack
+          // to travel 1/r^2 = 156x too far, so it slammed into its own limit and
+          // the whole mechanism bound up instead of driving.
+          const turnsPerMetre = pinionRadius > 1e-6 ? 1 / pinionRadius : 12.5;
+          equalityConstraints += `\n    <joint name="pinion_rack_coupling" joint1="${pinionJoint}" joint2="${rackJoint}" polycoef="0 ${turnsPerMetre} 0 0 0" />`;
         }
       }
     }
@@ -404,8 +433,19 @@ export const compileToMJCF = (
             const wheelNode = findWheel(sceneCopy.nodes);
             const radius = wheelNode?.pulleyRadius || 0.08;
             
-            // theta = x / radius -> angularRot = linearPos / radius
-            equalityConstraints += `\n    <joint name="rope_coupling_angular_${ropeCouplingIndex}" joint1="${leftJoint}" joint2="${wheelJoint}" polycoef="0 ${1.0 / radius} 0 0 0" />`;
+            // Rope kinematics: the weight travels the arc the rim turns through,
+            // x = r * theta.
+            //
+            // MuJoCo's joint equality is joint1 = poly(joint2), and joint1 here is
+            // the WEIGHT's slide while joint2 is the wheel's hinge — so the
+            // coefficient is the radius, not its reciprocal. It used to emit 1/r,
+            // which asked for 12.5m of weight travel per radian of wheel: off by
+            // 1/r^2 = 156x, impossible to satisfy alongside the left/right rope
+            // coupling and gravity, so the solver fought itself and the whole
+            // mechanism thrashed. (Same mistake as the rack-and-pinion coupling
+            // above; both directions of that relationship look plausible in
+            // isolation, which is exactly why they need a test asserting x/theta.)
+            equalityConstraints += `\n    <joint name="rope_coupling_angular_${ropeCouplingIndex}" joint1="${leftJoint}" joint2="${wheelJoint}" polycoef="0 ${radius} 0 0 0" />`;
           }
         }
       }
@@ -452,7 +492,14 @@ export const compileToMJCF = (
 
   return `
 <mujoco model="dynamic_scene">
-  <option timestep="0.001" gravity="0 0 ${gravityZ}" wind="${windX} ${windY} 0" density="${density}" iterations="50" tolerance="1e-10" ls_iterations="50" ls_tolerance="1e-12" />${assetXml}
+  <!-- integrator="implicitfast": joint damping and velocity-actuator gains are
+       integrated implicitly rather than explicitly. With the default Euler
+       integrator a velocity actuator is only stable while kv < 2*I/timestep, so
+       a small-but-stiff joint silently detonates: the gear presets (kv=20 on a
+       0.0018 kg.m^2 hub) hit "Nan, Inf or huge value in QACC" within 15ms and
+       simply never turned. This costs nothing and removes a whole class of
+       "the preset does nothing" failure that depends on a body's scale. -->
+  <option integrator="implicitfast" timestep="0.001" gravity="0 0 ${gravityZ}" wind="${windX} ${windY} 0" density="${density}" iterations="50" tolerance="1e-10" ls_iterations="50" ls_tolerance="1e-12" />${assetXml}
   <default>
     <geom solref="0.02 1" solimp="0.99 0.9999 0.0001 0.5 2" />
   </default>

@@ -1,10 +1,28 @@
 export type GeomType = 'capsule' | 'sphere' | 'box' | 'plane' | 'cylinder' | 'ellipsoid' | 'mesh';
 export type JointType = 'hinge' | 'slide' | 'ball' | 'free';
 
+// How a geom takes part in a body's CSG (boolean) program. Only meaningful on a
+// node with csgEnabled — elsewhere every geom is an independent solid, which is
+// what 'union' means anyway.
+export type CsgOp = 'union' | 'difference' | 'intersection';
+
+// What a geom is FOR. Undefined (the default, and every pre-CSG geom) means
+// both: it renders and it collides, as geoms always have.
+//   'visual'    — drawn, but contype/conaffinity forced to 0 and carries no mass
+//   'collision' — simulated, never drawn
+export type GeomRole = 'visual' | 'collision';
+
 export interface SceneGeom {
   name: string;
   type: GeomType;
   size: number[];
+  // CSG authoring (source primitives). 'difference' geoms are cut OUT of the
+  // union of the body's positive geoms; they are never emitted to MJCF.
+  csg?: CsgOp;
+  role?: GeomRole;
+  // Set on geoms *generated* by evaluating the body's CSG program, so a
+  // recompile can replace them wholesale and tell them from authored ones.
+  csgDerived?: 'visual' | 'collider';
   rgba?: number[];
   fromto?: number[];
   pos?: number[];
@@ -96,6 +114,32 @@ export interface SceneNode {
   isAerodynamic?: boolean;
   script?: string;
   scad?: string;
+  // --- CSG (boolean modifiers) ---------------------------------------------
+  // When true, the body's geoms are treated as a CSG program rather than as a
+  // set of independent solids: positives are unioned, geoms marked
+  // csg:'difference' are subtracted, csg:'intersection' geoms intersect. The
+  // result is compiled to a mesh via OpenSCAD; see src/utils/csg.ts.
+  csgEnabled?: boolean;
+  // How the boolean result collides:
+  //   'auto'       — decompose into convex angular sectors around the hole axis
+  //                  when one can be found, else fall back to 'primitives'
+  //   'decompose'  — force sector decomposition
+  //   'primitives' — the positive source primitives are the colliders; the
+  //                  boolean mesh is visual only (holes don't collide)
+  //   'hull'       — the boolean mesh itself collides, i.e. as its convex hull
+  csgCollision?: 'auto' | 'decompose' | 'primitives' | 'hull';
+  csgSectors?: number;      // sector count for decomposition (default 16)
+  csgFn?: number;           // OpenSCAD $fn for generated primitives (default 32)
+  csgHoleAxis?: 'x' | 'y' | 'z' | 'auto'; // hole axis for decomposition
+  csgMass?: number;         // total mass of the boolean solid, split across colliders
+  // Set by the evaluator, read by the UI. csgHash fingerprints the inputs the
+  // derived geoms were built from, so the auto-compiler knows when they're stale.
+  csgHash?: string;
+  csgScad?: string;         // the generated OpenSCAD source (read-only, for inspection)
+  csgVolume?: number;       // true volume of the boolean solid (m³)
+  csgHullVolume?: number;   // volume of its convex hull (m³) — the 'hull' mode figure
+  csgWarning?: string;      // e.g. "no hole axis found, colliding as primitives"
+  csgError?: string;
   isComposite?: boolean;
   compositeType?: 'cable' | 'grid' | 'rope' | 'cloth';
   compositeCount?: string;

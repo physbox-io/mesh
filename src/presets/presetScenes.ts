@@ -1,5 +1,5 @@
 import type { SceneGraph, SceneNode, SceneGeom } from '../types/scene';
-import { generateCurveGeoms, generateWedgeMeshData } from '../utils/geom';
+import { generateCurveGeoms, generateWedgeMeshData, generateConeMeshData } from '../utils/geom';
 
 export const pendulumPreset: SceneGraph = {
   nodes: [
@@ -68,7 +68,10 @@ export const stackedCubesPreset: SceneGraph = {
       id: 'cube2',
       name: 'cube2',
       type: 'body',
-      pos: [0, 0, 0.24],
+      // Dropped from a height, not pre-stacked. At 0.24 this sat exactly on
+      // cube1's top face (0.08 + 2*0.08) with zero gap, so nothing ever moved
+      // and the preset demonstrated nothing. 0.34 gives it a 10cm fall.
+      pos: [0, 0, 0.34],
       joints: [
         { name: 'cube2_free', type: 'free' }
       ],
@@ -295,12 +298,21 @@ const rackNode: SceneNode = {
 // Pinion gear with velocity motor
 const pinionNode = createGear('pinion', 'pinion', [0, 0, 0.03], 0.08, 8, [0.2, 0.6, 0.8, 1], true);
 
-// Shelf and block at the right end of the rack path, perfectly aligned in Y (-0.12)
+// A block for the rack to push, and a fixed stop at the end of its travel.
+//
+// These were both in the wrong place. The rack spans x = -0.18..0.18 and the
+// shelf's left face was at x = 0.30, so the rack advanced exactly 0.12m, jammed
+// against the immovable shelf (mass 10, no joints = welded to the world) and
+// stalled the pinion — while the block sat at z = 0.065..0.115, ABOVE the rack's
+// z = 0.01..0.05, where the rack could never touch it. Nothing was pushed and
+// the mechanism just bound up.
 const rackShelf: SceneNode = {
   id: 'rack_shelf',
   name: 'rack_shelf',
   type: 'body',
-  pos: [0.35, -0.12, 0.03],
+  // Beyond the rack's full travel (0.18 + 0.3), so it acts as an end stop
+  // instead of an obstruction.
+  pos: [0.55, -0.12, 0.03],
   joints: [],
   geoms: [
     {
@@ -320,7 +332,10 @@ const rackBlock: SceneNode = {
   id: 'rack_block',
   name: 'rack_block',
   type: 'body',
-  pos: [0.30, -0.12, 0.09],
+  // In the rack's path and at its height: resting on the floor (half-extent
+  // 0.025) just past the rack's leading face, so the rack picks it up early in
+  // its travel and shoves it along.
+  pos: [0.25, -0.12, 0.025],
   joints: [
     { name: 'rack_block_free', type: 'free' }
   ],
@@ -403,6 +418,33 @@ export const inclinedPlanePreset: SceneGraph = {
   ]
 };
 
+// Atwood machine: one wheel on an axle, two unequal weights on a rope.
+//
+// Rebuilt, because the previous version was incoherent rather than merely
+// mistuned:
+//   - the wheel and both weights sat at y = -0.12 while the support column was
+//     at y = 0, so the whole assembly hung off the side of its own stand
+//   - the axle ran through the wheel hub with contact enabled on both, and that
+//     interpenetration alone spun the wheel to 316 rad even with every rope
+//     constraint removed
+//   - the weights hung at x = +-0.1 against a 0.08 wheel radius, so the drawn
+//     rope did not meet the rim and the rope segments were not vertical
+//   - the slide joints had no limits, so the weights travelled into the floor
+//     and up through the wheel
+//   - its note card described a COMPOUND pulley with a mechanical advantage of
+//     N, which this never was: one wheel with two hanging weights has an
+//     advantage of 1
+//
+// The rope is still a joint-equality abstraction rather than a simulated cable
+// (see the couplings in mjcf.ts): left = -right ties the two ends together, and
+// x = r * theta turns the wheel with it. What that buys is exactness — the
+// motion obeys the ideal Atwood result a = g(m1-m2)/(m1+m2+I/r^2) — at the cost
+// of the rope being unable to go slack.
+const PULLEY_WHEEL_R = 0.08;
+const PULLEY_WHEEL_Z = 0.55;
+const PULLEY_WEIGHT_Z = 0.30;
+const PULLEY_WEIGHT_HALF = 0.03;
+
 export const pulleySystemPreset: SceneGraph = {
   nodes: [
     {
@@ -411,19 +453,25 @@ export const pulleySystemPreset: SceneGraph = {
       type: 'body',
       pos: [0, 0, 0],
       geoms: [
+        // Starts at z = 0.02, not 0: a capsule's cap is a hemisphere of its
+        // radius, so from 0 the base would sink through the floor.
         {
           name: 'support_column',
           type: 'capsule',
-          fromto: [0, 0, 0, 0, 0, 0.6],
+          fromto: [0, 0, 0.02, 0, 0, PULLEY_WHEEL_Z + 0.07],
           size: [0.02],
           rgba: [0.4, 0.4, 0.4, 1]
         },
+        // The axle. Non-colliding: it passes through the hub by design and is
+        // joined to it by the hinge, not by contact.
         {
-          name: 'support_peg',
-          type: 'capsule',
-          fromto: [0, 0, 0.55, 0, -0.15, 0.55],
-          size: [0.015],
-          rgba: [0.3, 0.3, 0.3, 1]
+          name: 'support_axle',
+          type: 'cylinder',
+          fromto: [0, -0.035, PULLEY_WHEEL_Z, 0, 0.035, PULLEY_WHEEL_Z],
+          size: [0.008],
+          rgba: [0.3, 0.3, 0.3, 1],
+          contype: 0,
+          conaffinity: 0
         }
       ],
       joints: [],
@@ -433,36 +481,45 @@ export const pulleySystemPreset: SceneGraph = {
       id: 'pulley_wheel',
       name: 'pulley_wheel',
       type: 'body',
-      pos: [0, -0.12, 0.55],
+      pos: [0, 0, PULLEY_WHEEL_Z],
       isPulleyWheel: true,
-      pulleyRadius: 0.08,
+      pulleyRadius: PULLEY_WHEEL_R,
+      // Structural, not a contact surface: the wheel is turned by the rope
+      // coupling, and letting it collide with its own axle is what wrecked the
+      // old version.
       geoms: [
-        { name: 'pulley_wheel_spindle', type: 'cylinder', size: [0.064, 0.01], pos: [0, 0, 0], euler: [90, 0, 0], rgba: [0.3, 0.4, 0.6, 1], mass: 0.2 },
-        { name: 'pulley_wheel_flange_l', type: 'cylinder', size: [0.08, 0.003], pos: [0, -0.015, 0], euler: [90, 0, 0], rgba: [0.2, 0.3, 0.5, 1], mass: 0.1 },
-        { name: 'pulley_wheel_flange_r', type: 'cylinder', size: [0.08, 0.003], pos: [0, 0.015, 0], euler: [90, 0, 0], rgba: [0.2, 0.3, 0.5, 1], mass: 0.1 }
+        { name: 'pulley_wheel_spindle', type: 'cylinder', size: [PULLEY_WHEEL_R * 0.8, 0.01], pos: [0, 0, 0], euler: [90, 0, 0], rgba: [0.3, 0.4, 0.6, 1], mass: 0.2, contype: 0, conaffinity: 0 },
+        { name: 'pulley_wheel_flange_l', type: 'cylinder', size: [PULLEY_WHEEL_R, 0.003], pos: [0, -0.015, 0], euler: [90, 0, 0], rgba: [0.2, 0.3, 0.5, 1], mass: 0.1, contype: 0, conaffinity: 0 },
+        { name: 'pulley_wheel_flange_r', type: 'cylinder', size: [PULLEY_WHEEL_R, 0.003], pos: [0, 0.015, 0], euler: [90, 0, 0], rgba: [0.2, 0.3, 0.5, 1], mass: 0.1, contype: 0, conaffinity: 0 }
       ],
       joints: [
-        { name: 'pulley_wheel_hinge', type: 'hinge', axis: [0, 1, 0], pos: [0, 0, 0], damping: 0.1 }
+        // Light damping so the measured acceleration stays close to the ideal
+        // Atwood value instead of being dominated by friction.
+        { name: 'pulley_wheel_hinge', type: 'hinge', axis: [0, 1, 0], pos: [0, 0, 0], damping: 0.02 }
       ],
       children: []
     },
+    // The weights hang at exactly +-r, so each rope run is vertical and meets
+    // the rim tangentially — which is both correct and what the rope renderer
+    // draws. Travel limits stand in for the rope length: down to just above the
+    // floor, up to just below the wheel.
     {
       id: 'left_weight',
       name: 'left_weight',
       type: 'body',
-      pos: [-0.1, -0.12, 0.28],
+      pos: [-PULLEY_WHEEL_R, 0, PULLEY_WEIGHT_Z],
       geoms: [
         {
           name: 'left_weight_geom',
           type: 'box',
-          size: [0.04, 0.04, 0.04],
+          size: [PULLEY_WEIGHT_HALF, PULLEY_WEIGHT_HALF, PULLEY_WEIGHT_HALF],
           rgba: [0.2, 0.6, 1.0, 1],
           mass: 2.0,
           condim: 3
         }
       ],
       joints: [
-        { name: 'left_weight_joint', type: 'slide', axis: [0, 0, 1], damping: 0.5 }
+        { name: 'left_weight_joint', type: 'slide', axis: [0, 0, 1], damping: 0.05, limited: true, range: [-0.25, 0.13] }
       ],
       children: []
     },
@@ -470,19 +527,19 @@ export const pulleySystemPreset: SceneGraph = {
       id: 'right_weight',
       name: 'right_weight',
       type: 'body',
-      pos: [0.1, -0.12, 0.28],
+      pos: [PULLEY_WHEEL_R, 0, PULLEY_WEIGHT_Z],
       geoms: [
         {
           name: 'right_weight_geom',
           type: 'box',
-          size: [0.04, 0.04, 0.04],
+          size: [PULLEY_WEIGHT_HALF, PULLEY_WEIGHT_HALF, PULLEY_WEIGHT_HALF],
           rgba: [0.95, 0.8, 0.2, 1],
           mass: 1.0,
           condim: 3
         }
       ],
       joints: [
-        { name: 'right_weight_joint', type: 'slide', axis: [0, 0, 1], damping: 0.5 }
+        { name: 'right_weight_joint', type: 'slide', axis: [0, 0, 1], damping: 0.05, limited: true, range: [-0.25, 0.13] }
       ],
       children: []
     },
@@ -490,7 +547,9 @@ export const pulleySystemPreset: SceneGraph = {
       id: 'pulley_rope_preset',
       name: 'pulley_rope_preset',
       type: 'body',
-      pos: [0, 0, 0],
+      // A rope is a logical node; this position only places its drag handle,
+      // which belongs on the wheel the rope runs over.
+      pos: [0, 0, PULLEY_WHEEL_Z],
       isPulleyRope: true,
       pulleyWheelId: 'pulley_wheel',
       leftTargetId: 'left_weight',
@@ -532,17 +591,30 @@ export const cartpolePreset: SceneGraph = {
         { name: 'cart_slide', type: 'slide', axis: [1, 0, 0], damping: 0.1, limited: true, range: [-0.35, 0.35] }
       ],
       script: `// Cartpole LQR Balancing Controller
+//
+// theta is the pole's tilt FROM VERTICAL, which only holds because the pole body
+// starts with euler [0,0,0]. It used to start at euler [0,5,0] — a lean baked
+// into the body frame, invisible to the joint — so getJointPosition returned 0
+// for a pole already 5 degrees over. The controller's setpoint was therefore a
+// tilted pole, i.e. not an equilibrium: it would chase the fall, run the cart
+// into the end of its rail and drop the pole every time, whatever the gains.
+// The perturbation is now an initialVelocity kick on the hinge instead.
+//
+// The position gains are POSITIVE, which looks wrong and isn't: a cart-pole
+// steers by leaning, so to get back to the centre the cart must first drive
+// AWAY to tip the pole toward it. Negative position feedback fights that and
+// slowly walks the cart off the end of the rail.
 const x = api.getJointPosition('cart_slide');
 const v = api.getJointVelocity('cart_slide');
 const theta = api.getJointPosition('pole_hinge');
 const omega = api.getJointVelocity('pole_hinge');
 
-const kx = 12.0;
-const kv = 8.0;
-const kTheta = 55.0;
-const kOmega = 14.0;
+const kx = 8.0;      // cart position -> commanded lean
+const kv = 8.0;      // cart velocity -> commanded lean
+const kTheta = 40.0; // must exceed (m_cart + m_pole) * g ~ 9.3 N to hold the pole up
+const kOmega = 4.0;  // angular damping
 
-const force = (-kx * x) + (-kv * v) + (kTheta * theta) + (kOmega * omega);
+const force = (kx * x) + (kv * v) + (kTheta * theta) + (kOmega * omega);
 api.applyJointForce('cart_slide', force);
 `,
       geoms: [
@@ -561,9 +633,11 @@ api.applyJointForce('cart_slide', force);
           name: 'pole',
           type: 'body',
           pos: [0, 0, 0.03],
-          euler: [0, 5, 0],
+          // Upright, so the hinge angle IS the tilt from vertical and the
+          // controller's zero is a real equilibrium. The demo's perturbation is
+          // the hinge's initialVelocity below — a nudge, not a permanent lean.
           joints: [
-            { name: 'pole_hinge', type: 'hinge', axis: [0, 1, 0], pos: [0, 0, 0], damping: 0.005 }
+            { name: 'pole_hinge', type: 'hinge', axis: [0, 1, 0], pos: [0, 0, 0], damping: 0.005, initialVelocity: [0.35] }
           ],
           geoms: [
             {
@@ -740,19 +814,19 @@ export const paperPlanePreset: SceneGraph = {
       id: 'paper_plane_wing',
       name: 'paper_plane_wing',
       type: 'body',
-      pos: [0, 0, 0.4],
-      euler: [0, 8, 0],
+      pos: [0, 0, 1.2],
+      euler: [0, -5, 0],
       isAerodynamic: true,
       joints: [
-        { name: 'plane_free', type: 'free', initialVelocity: [2.0, 0.0, 0.2, 0.0, 0.0, 0.0] }
+        { name: 'plane_free', type: 'free', initialVelocity: [4.0, 0.0, 0.3, 0.0, 0.0, 0.0] }
       ],
       geoms: [
         {
           name: 'wing_geom',
           type: 'box',
-          size: [0.03, 0.14, 0.003],
+          size: [0.04, 0.35, 0.002],
           rgba: [0.96, 0.96, 0.94, 1],
-          mass: 0.004,
+          mass: 0.003,
           condim: 3,
           friction: [0.3, 0.005, 0.0005]
         }
@@ -769,9 +843,9 @@ export const paperPlanePreset: SceneGraph = {
             {
               name: 'spine_geom',
               type: 'box',
-              size: [0.13, 0.018, 0.012],
+              size: [0.12, 0.012, 0.008],
               rgba: [0.88, 0.88, 0.86, 1],
-              mass: 0.003,
+              mass: 0.001,
               condim: 3
             }
           ],
@@ -781,17 +855,59 @@ export const paperPlanePreset: SceneGraph = {
           id: 'paper_plane_nose',
           name: 'paper_plane_nose',
           type: 'body',
-          pos: [0.13, 0, 0],
+          pos: [0.03, 0, 0],
           euler: [0, 0, 0],
           joints: [],
           geoms: [
             {
               name: 'nose_geom',
               type: 'sphere',
-              size: [0.011],
+              size: [0.008],
               rgba: [0.75, 0.75, 0.72, 1],
-              mass: 0.003,
+              mass: 0.0005,
               condim: 3
+            }
+          ],
+          children: []
+        },
+        {
+          id: 'paper_plane_elevon_l',
+          name: 'paper_plane_elevon_l',
+          type: 'body',
+          pos: [-0.035, 0.18, 0.003],
+          euler: [0, -15, 0],
+          isAerodynamic: true,
+          joints: [],
+          geoms: [
+            {
+              name: 'elevon_l_geom',
+              type: 'box',
+              size: [0.015, 0.12, 0.001],
+              rgba: [0.92, 0.92, 0.90, 1],
+              mass: 0.0002,
+              contype: 0,
+              conaffinity: 0
+            }
+          ],
+          children: []
+        },
+        {
+          id: 'paper_plane_elevon_r',
+          name: 'paper_plane_elevon_r',
+          type: 'body',
+          pos: [-0.035, -0.18, 0.003],
+          euler: [0, -15, 0],
+          isAerodynamic: true,
+          joints: [],
+          geoms: [
+            {
+              name: 'elevon_r_geom',
+              type: 'box',
+              size: [0.015, 0.12, 0.001],
+              rgba: [0.92, 0.92, 0.90, 1],
+              mass: 0.0002,
+              contype: 0,
+              conaffinity: 0
             }
           ],
           children: []
@@ -1298,6 +1414,16 @@ export const physicsOnlyWindmillPreset: SceneGraph = {
               name: 'rotor',
               type: 'body',
               pos: [0.1, 0, 0],
+              // A fixed shaft torque stands in for the aerodynamic version's
+              // lift. The rotor previously had no script, no actuator and no
+              // aerodynamic geoms, so nothing drove it and the turbine just
+              // stood still — while its note card described exactly this torque.
+              //
+              // Terminal speed is set by the hinge damping alone: omega = T/d,
+              // so 0.4 N.m against damping 0.05 settles at 8 rad/s (~76 rpm).
+              // That is the whole point of the preset: compare this against the
+              // aerodynamic turbine at the same wind speed.
+              script: `api.applyJointForce('rotor_hinge', 0.4);`,
               joints: [
                 { name: 'rotor_hinge', type: 'hinge', axis: [1, 0, 0], damping: 0.05 }
               ],
@@ -1376,27 +1502,27 @@ export const dronePreset: SceneGraph = {
             { name: 'drone_yaw', type: 'hinge', axis: [0, 0, 1], damping: 0.5 }
           ],
           geoms: [
-            { name: 'fuselage', type: 'box', size: [0.05, 0.05, 0.025], rgba: [0.2, 0.5, 0.8, 1], mass: 0.3 },
-            { name: 'arm1', type: 'cylinder', fromto: [0, 0, 0, 0.1, 0.1, 0], size: [0.006], rgba: [0.9, 0.9, 0.9, 1], mass: 0.02, contype: 0, conaffinity: 0 },
-            { name: 'arm2', type: 'cylinder', fromto: [0, 0, 0, 0.1, -0.1, 0], size: [0.006], rgba: [0.9, 0.9, 0.9, 1], mass: 0.02, contype: 0, conaffinity: 0 },
-            { name: 'arm3', type: 'cylinder', fromto: [0, 0, 0, -0.1, 0.1, 0], size: [0.006], rgba: [0.9, 0.9, 0.9, 1], mass: 0.02, contype: 0, conaffinity: 0 },
-            { name: 'arm4', type: 'cylinder', fromto: [0, 0, 0, -0.1, -0.1, 0], size: [0.006], rgba: [0.9, 0.9, 0.9, 1], mass: 0.02, contype: 0, conaffinity: 0 },
-            { name: 'pod1', type: 'cylinder', size: [0.012, 0.02], pos: [0.1, 0.1, 0.01], rgba: [0.3, 0.3, 0.3, 1], mass: 0.02 },
-            { name: 'pod2', type: 'cylinder', size: [0.012, 0.02], pos: [0.1, -0.1, 0.01], rgba: [0.3, 0.3, 0.3, 1], mass: 0.02 },
-            { name: 'pod3', type: 'cylinder', size: [0.012, 0.02], pos: [-0.1, 0.1, 0.01], rgba: [0.3, 0.3, 0.3, 1], mass: 0.02 },
-            { name: 'pod4', type: 'cylinder', size: [0.012, 0.02], pos: [-0.1, -0.1, 0.01], rgba: [0.3, 0.3, 0.3, 1], mass: 0.02 }
+            { name: 'fuselage', type: 'box', size: [0.05, 0.05, 0.025], rgba: [0.2, 0.5, 0.8, 1], mass: 0.2 },
+            { name: 'arm1', type: 'cylinder', fromto: [0, 0, 0, 0.1, 0.1, 0], size: [0.006], rgba: [0.9, 0.9, 0.9, 1], mass: 0.01, contype: 0, conaffinity: 0 },
+            { name: 'arm2', type: 'cylinder', fromto: [0, 0, 0, 0.1, -0.1, 0], size: [0.006], rgba: [0.9, 0.9, 0.9, 1], mass: 0.01, contype: 0, conaffinity: 0 },
+            { name: 'arm3', type: 'cylinder', fromto: [0, 0, 0, -0.1, 0.1, 0], size: [0.006], rgba: [0.9, 0.9, 0.9, 1], mass: 0.01, contype: 0, conaffinity: 0 },
+            { name: 'arm4', type: 'cylinder', fromto: [0, 0, 0, -0.1, -0.1, 0], size: [0.006], rgba: [0.9, 0.9, 0.9, 1], mass: 0.01, contype: 0, conaffinity: 0 },
+            { name: 'pod1', type: 'cylinder', size: [0.012, 0.02], pos: [0.1, 0.1, 0.01], rgba: [0.3, 0.3, 0.3, 1], mass: 0.01 },
+            { name: 'pod2', type: 'cylinder', size: [0.012, 0.02], pos: [0.1, -0.1, 0.01], rgba: [0.3, 0.3, 0.3, 1], mass: 0.01 },
+            { name: 'pod3', type: 'cylinder', size: [0.012, 0.02], pos: [-0.1, 0.1, 0.01], rgba: [0.3, 0.3, 0.3, 1], mass: 0.01 },
+            { name: 'pod4', type: 'cylinder', size: [0.012, 0.02], pos: [-0.1, -0.1, 0.01], rgba: [0.3, 0.3, 0.3, 1], mass: 0.01 }
           ],
           children: [
             {
               id: 'rotor1',
               name: 'rotor1',
               type: 'body',
-              pos: [0.25, 0.25, 0.06],
+              pos: [0.1, 0.1, 0.03],
               joints: [
                 { name: 'rotor1_joint', type: 'hinge', axis: [0, 0, 1], damping: 0.02, actuator: { type: 'velocity', kv: 2.0, ctrlValue: 90.0 } }
               ],
               geoms: [
-                { name: 'hub1', type: 'sphere', size: [0.02], rgba: [0.85, 0.25, 0.25, 1], mass: 0.1, contype: 0, conaffinity: 0 }
+                { name: 'hub1', type: 'sphere', size: [0.01], rgba: [0.85, 0.25, 0.25, 1], mass: 0.02, contype: 0, conaffinity: 0 }
               ],
               children: [
                 {
@@ -1408,8 +1534,8 @@ export const dronePreset: SceneGraph = {
                   isAerodynamic: true,
                   joints: [],
                   geoms: [
-                    { name: 'r1_b1_sail', type: 'box', size: [0.03, 0.2, 0.002], pos: [0, 0.22, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.05, contype: 0, conaffinity: 0 },
-                    { name: 'r1_b1_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.1, 0], size: [0.008], rgba: [0.7, 0.7, 0.7, 1], mass: 0.02, contype: 0, conaffinity: 0 }
+                    { name: 'r1_b1_sail', type: 'box', size: [0.025, 0.14, 0.001], pos: [0, 0.15, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
+                    { name: 'r1_b1_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.06, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 }
                   ],
                   children: []
                 },
@@ -1422,8 +1548,8 @@ export const dronePreset: SceneGraph = {
                   isAerodynamic: true,
                   joints: [],
                   geoms: [
-                    { name: 'r1_b2_sail', type: 'box', size: [0.03, 0.2, 0.002], pos: [0, 0.22, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.05, contype: 0, conaffinity: 0 },
-                    { name: 'r1_b2_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.1, 0], size: [0.008], rgba: [0.7, 0.7, 0.7, 1], mass: 0.02, contype: 0, conaffinity: 0 }
+                    { name: 'r1_b2_sail', type: 'box', size: [0.025, 0.14, 0.001], pos: [0, 0.15, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
+                    { name: 'r1_b2_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.06, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 }
                   ],
                   children: []
                 }
@@ -1433,12 +1559,12 @@ export const dronePreset: SceneGraph = {
               id: 'rotor2',
               name: 'rotor2',
               type: 'body',
-              pos: [0.25, -0.25, 0.06],
+              pos: [0.1, -0.1, 0.03],
               joints: [
                 { name: 'rotor2_joint', type: 'hinge', axis: [0, 0, 1], damping: 0.02, actuator: { type: 'velocity', kv: 2.0, ctrlValue: -90.0 } }
               ],
               geoms: [
-                { name: 'hub2', type: 'sphere', size: [0.02], rgba: [0.25, 0.85, 0.25, 1], mass: 0.1, contype: 0, conaffinity: 0 }
+                { name: 'hub2', type: 'sphere', size: [0.01], rgba: [0.25, 0.85, 0.25, 1], mass: 0.02, contype: 0, conaffinity: 0 }
               ],
               children: [
                 {
@@ -1450,8 +1576,8 @@ export const dronePreset: SceneGraph = {
                   isAerodynamic: true,
                   joints: [],
                   geoms: [
-                    { name: 'r2_b1_sail', type: 'box', size: [0.03, 0.2, 0.002], pos: [0, 0.22, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.05, contype: 0, conaffinity: 0 },
-                    { name: 'r2_b1_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.1, 0], size: [0.008], rgba: [0.7, 0.7, 0.7, 1], mass: 0.02, contype: 0, conaffinity: 0 }
+                    { name: 'r2_b1_sail', type: 'box', size: [0.025, 0.14, 0.001], pos: [0, 0.15, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
+                    { name: 'r2_b1_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.06, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 }
                   ],
                   children: []
                 },
@@ -1464,8 +1590,8 @@ export const dronePreset: SceneGraph = {
                   isAerodynamic: true,
                   joints: [],
                   geoms: [
-                    { name: 'r2_b2_sail', type: 'box', size: [0.03, 0.2, 0.002], pos: [0, 0.22, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.05, contype: 0, conaffinity: 0 },
-                    { name: 'r2_b2_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.1, 0], size: [0.008], rgba: [0.7, 0.7, 0.7, 1], mass: 0.02, contype: 0, conaffinity: 0 }
+                    { name: 'r2_b2_sail', type: 'box', size: [0.025, 0.14, 0.001], pos: [0, 0.15, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
+                    { name: 'r2_b2_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.06, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 }
                   ],
                   children: []
                 }
@@ -1475,12 +1601,12 @@ export const dronePreset: SceneGraph = {
               id: 'rotor3',
               name: 'rotor3',
               type: 'body',
-              pos: [-0.25, 0.25, 0.06],
+              pos: [-0.1, 0.1, 0.03],
               joints: [
                 { name: 'rotor3_joint', type: 'hinge', axis: [0, 0, 1], damping: 0.02, actuator: { type: 'velocity', kv: 2.0, ctrlValue: -90.0 } }
               ],
               geoms: [
-                { name: 'hub3', type: 'sphere', size: [0.02], rgba: [0.25, 0.85, 0.25, 1], mass: 0.1, contype: 0, conaffinity: 0 }
+                { name: 'hub3', type: 'sphere', size: [0.01], rgba: [0.25, 0.85, 0.25, 1], mass: 0.02, contype: 0, conaffinity: 0 }
               ],
               children: [
                 {
@@ -1492,8 +1618,8 @@ export const dronePreset: SceneGraph = {
                   isAerodynamic: true,
                   joints: [],
                   geoms: [
-                    { name: 'r3_b1_sail', type: 'box', size: [0.03, 0.2, 0.002], pos: [0, 0.22, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.05, contype: 0, conaffinity: 0 },
-                    { name: 'r3_b1_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.1, 0], size: [0.008], rgba: [0.7, 0.7, 0.7, 1], mass: 0.02, contype: 0, conaffinity: 0 }
+                    { name: 'r3_b1_sail', type: 'box', size: [0.025, 0.14, 0.001], pos: [0, 0.15, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
+                    { name: 'r3_b1_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.06, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 }
                   ],
                   children: []
                 },
@@ -1506,8 +1632,8 @@ export const dronePreset: SceneGraph = {
                   isAerodynamic: true,
                   joints: [],
                   geoms: [
-                    { name: 'r3_b2_sail', type: 'box', size: [0.03, 0.2, 0.002], pos: [0, 0.22, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.05, contype: 0, conaffinity: 0 },
-                    { name: 'r3_b2_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.1, 0], size: [0.008], rgba: [0.7, 0.7, 0.7, 1], mass: 0.02, contype: 0, conaffinity: 0 }
+                    { name: 'r3_b2_sail', type: 'box', size: [0.025, 0.14, 0.001], pos: [0, 0.15, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
+                    { name: 'r3_b2_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.06, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 }
                   ],
                   children: []
                 }
@@ -1517,12 +1643,12 @@ export const dronePreset: SceneGraph = {
               id: 'rotor4',
               name: 'rotor4',
               type: 'body',
-              pos: [-0.25, -0.25, 0.06],
+              pos: [-0.1, -0.1, 0.03],
               joints: [
                 { name: 'rotor4_joint', type: 'hinge', axis: [0, 0, 1], damping: 0.02, actuator: { type: 'velocity', kv: 2.0, ctrlValue: 90.0 } }
               ],
               geoms: [
-                { name: 'hub4', type: 'sphere', size: [0.02], rgba: [0.85, 0.25, 0.25, 1], mass: 0.1, contype: 0, conaffinity: 0 }
+                { name: 'hub4', type: 'sphere', size: [0.01], rgba: [0.85, 0.25, 0.25, 1], mass: 0.02, contype: 0, conaffinity: 0 }
               ],
               children: [
                 {
@@ -1534,8 +1660,8 @@ export const dronePreset: SceneGraph = {
                   isAerodynamic: true,
                   joints: [],
                   geoms: [
-                    { name: 'r4_b1_sail', type: 'box', size: [0.03, 0.2, 0.002], pos: [0, 0.22, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.05, contype: 0, conaffinity: 0 },
-                    { name: 'r4_b1_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.1, 0], size: [0.008], rgba: [0.7, 0.7, 0.7, 1], mass: 0.02, contype: 0, conaffinity: 0 }
+                    { name: 'r4_b1_sail', type: 'box', size: [0.025, 0.14, 0.001], pos: [0, 0.15, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
+                    { name: 'r4_b1_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.06, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 }
                   ],
                   children: []
                 },
@@ -1548,8 +1674,8 @@ export const dronePreset: SceneGraph = {
                   isAerodynamic: true,
                   joints: [],
                   geoms: [
-                    { name: 'r4_b2_sail', type: 'box', size: [0.03, 0.2, 0.002], pos: [0, 0.22, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.05, contype: 0, conaffinity: 0 },
-                    { name: 'r4_b2_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.1, 0], size: [0.008], rgba: [0.7, 0.7, 0.7, 1], mass: 0.02, contype: 0, conaffinity: 0 }
+                    { name: 'r4_b2_sail', type: 'box', size: [0.025, 0.14, 0.001], pos: [0, 0.15, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
+                    { name: 'r4_b2_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.06, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 }
                   ],
                   children: []
                 }
@@ -1579,15 +1705,15 @@ api.applyTorque([tx, ty, tz]);
         { name: 'free_drone_free', type: 'free', damping: 0.5 }
       ],
       geoms: [
-        { name: 'free_fuselage', type: 'box', size: [0.05, 0.05, 0.025], rgba: [0.8, 0.2, 0.5, 1], mass: 0.3 },
-        { name: 'free_arm1', type: 'cylinder', fromto: [0, 0, 0, 0.1, 0.1, 0], size: [0.006], rgba: [0.9, 0.9, 0.9, 1], mass: 0.02, contype: 0, conaffinity: 0 },
-        { name: 'free_arm2', type: 'cylinder', fromto: [0, 0, 0, 0.1, -0.1, 0], size: [0.006], rgba: [0.9, 0.9, 0.9, 1], mass: 0.02, contype: 0, conaffinity: 0 },
-        { name: 'free_arm3', type: 'cylinder', fromto: [0, 0, 0, -0.1, 0.1, 0], size: [0.006], rgba: [0.9, 0.9, 0.9, 1], mass: 0.02, contype: 0, conaffinity: 0 },
-        { name: 'free_arm4', type: 'cylinder', fromto: [0, 0, 0, -0.1, -0.1, 0], size: [0.006], rgba: [0.9, 0.9, 0.9, 1], mass: 0.02, contype: 0, conaffinity: 0 },
-        { name: 'free_pod1', type: 'cylinder', size: [0.012, 0.02], pos: [0.1, 0.1, 0.01], rgba: [0.3, 0.3, 0.3, 1], mass: 0.02 },
-        { name: 'free_pod2', type: 'cylinder', size: [0.012, 0.02], pos: [0.1, -0.1, 0.01], rgba: [0.3, 0.3, 0.3, 1], mass: 0.02 },
-        { name: 'free_pod3', type: 'cylinder', size: [0.012, 0.02], pos: [-0.1, 0.1, 0.01], rgba: [0.3, 0.3, 0.3, 1], mass: 0.02 },
-        { name: 'free_pod4', type: 'cylinder', size: [0.012, 0.02], pos: [-0.1, -0.1, 0.01], rgba: [0.3, 0.3, 0.3, 1], mass: 0.02 }
+        { name: 'free_fuselage', type: 'box', size: [0.05, 0.05, 0.025], rgba: [0.8, 0.2, 0.5, 1], mass: 0.2 },
+        { name: 'free_arm1', type: 'cylinder', fromto: [0, 0, 0, 0.1, 0.1, 0], size: [0.006], rgba: [0.9, 0.9, 0.9, 1], mass: 0.01, contype: 0, conaffinity: 0 },
+        { name: 'free_arm2', type: 'cylinder', fromto: [0, 0, 0, 0.1, -0.1, 0], size: [0.006], rgba: [0.9, 0.9, 0.9, 1], mass: 0.01, contype: 0, conaffinity: 0 },
+        { name: 'free_arm3', type: 'cylinder', fromto: [0, 0, 0, -0.1, 0.1, 0], size: [0.006], rgba: [0.9, 0.9, 0.9, 1], mass: 0.01, contype: 0, conaffinity: 0 },
+        { name: 'free_arm4', type: 'cylinder', fromto: [0, 0, 0, -0.1, -0.1, 0], size: [0.006], rgba: [0.9, 0.9, 0.9, 1], mass: 0.01, contype: 0, conaffinity: 0 },
+        { name: 'free_pod1', type: 'cylinder', size: [0.012, 0.02], pos: [0.1, 0.1, 0.01], rgba: [0.3, 0.3, 0.3, 1], mass: 0.01 },
+        { name: 'free_pod2', type: 'cylinder', size: [0.012, 0.02], pos: [0.1, -0.1, 0.01], rgba: [0.3, 0.3, 0.3, 1], mass: 0.01 },
+        { name: 'free_pod3', type: 'cylinder', size: [0.012, 0.02], pos: [-0.1, 0.1, 0.01], rgba: [0.3, 0.3, 0.3, 1], mass: 0.01 },
+        { name: 'free_pod4', type: 'cylinder', size: [0.012, 0.02], pos: [-0.1, -0.1, 0.01], rgba: [0.3, 0.3, 0.3, 1], mass: 0.01 }
       ],
       children: [
         {
@@ -1599,7 +1725,7 @@ api.applyTorque([tx, ty, tz]);
             { name: 'free_rotor1_joint', type: 'hinge', axis: [0, 0, 1], damping: 0.02, actuator: { type: 'velocity', kv: 2.0, ctrlValue: 90.0 } }
           ],
           geoms: [
-            { name: 'free_hub1', type: 'sphere', size: [0.01], rgba: [0.85, 0.25, 0.25, 1], mass: 0.05, contype: 0, conaffinity: 0 }
+            { name: 'free_hub1', type: 'sphere', size: [0.01], rgba: [0.85, 0.25, 0.25, 1], mass: 0.02, contype: 0, conaffinity: 0 }
           ],
           children: [
             {
@@ -1611,8 +1737,8 @@ api.applyTorque([tx, ty, tz]);
               isAerodynamic: true,
               joints: [],
               geoms: [
-                { name: 'free_r1_b1_sail', type: 'box', size: [0.015, 0.08, 0.001], pos: [0, 0.09, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.02, contype: 0, conaffinity: 0 },
-                { name: 'free_r1_b1_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.04, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.01, contype: 0, conaffinity: 0 }
+                { name: 'free_r1_b1_sail', type: 'box', size: [0.025, 0.14, 0.001], pos: [0, 0.15, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
+                { name: 'free_r1_b1_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.06, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 }
               ],
               children: []
             },
@@ -1625,8 +1751,8 @@ api.applyTorque([tx, ty, tz]);
               isAerodynamic: true,
               joints: [],
               geoms: [
-                { name: 'free_r1_b2_sail', type: 'box', size: [0.015, 0.08, 0.001], pos: [0, 0.09, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.02, contype: 0, conaffinity: 0 },
-                { name: 'free_r1_b2_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.04, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.01, contype: 0, conaffinity: 0 }
+                { name: 'free_r1_b2_sail', type: 'box', size: [0.025, 0.14, 0.001], pos: [0, 0.15, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
+                { name: 'free_r1_b2_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.06, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 }
               ],
               children: []
             }
@@ -1641,7 +1767,7 @@ api.applyTorque([tx, ty, tz]);
             { name: 'free_rotor2_joint', type: 'hinge', axis: [0, 0, 1], damping: 0.02, actuator: { type: 'velocity', kv: 2.0, ctrlValue: -90.0 } }
           ],
           geoms: [
-            { name: 'free_hub2', type: 'sphere', size: [0.01], rgba: [0.25, 0.85, 0.25, 1], mass: 0.05, contype: 0, conaffinity: 0 }
+            { name: 'free_hub2', type: 'sphere', size: [0.01], rgba: [0.25, 0.85, 0.25, 1], mass: 0.02, contype: 0, conaffinity: 0 }
           ],
           children: [
             {
@@ -1653,8 +1779,8 @@ api.applyTorque([tx, ty, tz]);
               isAerodynamic: true,
               joints: [],
               geoms: [
-                { name: 'free_r2_b1_sail', type: 'box', size: [0.015, 0.08, 0.001], pos: [0, 0.09, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.02, contype: 0, conaffinity: 0 },
-                { name: 'free_r2_b1_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.04, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.01, contype: 0, conaffinity: 0 }
+                { name: 'free_r2_b1_sail', type: 'box', size: [0.025, 0.14, 0.001], pos: [0, 0.15, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
+                { name: 'free_r2_b1_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.06, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 }
               ],
               children: []
             },
@@ -1667,8 +1793,8 @@ api.applyTorque([tx, ty, tz]);
               isAerodynamic: true,
               joints: [],
               geoms: [
-                { name: 'free_r2_b2_sail', type: 'box', size: [0.015, 0.08, 0.001], pos: [0, 0.09, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.02, contype: 0, conaffinity: 0 },
-                { name: 'free_r2_b2_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.04, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.01, contype: 0, conaffinity: 0 }
+                { name: 'free_r2_b2_sail', type: 'box', size: [0.025, 0.14, 0.001], pos: [0, 0.15, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
+                { name: 'free_r2_b2_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.06, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 }
               ],
               children: []
             }
@@ -1683,7 +1809,7 @@ api.applyTorque([tx, ty, tz]);
             { name: 'free_rotor3_joint', type: 'hinge', axis: [0, 0, 1], damping: 0.02, actuator: { type: 'velocity', kv: 2.0, ctrlValue: -90.0 } }
           ],
           geoms: [
-            { name: 'free_hub3', type: 'sphere', size: [0.01], rgba: [0.25, 0.85, 0.25, 1], mass: 0.05, contype: 0, conaffinity: 0 }
+            { name: 'free_hub3', type: 'sphere', size: [0.01], rgba: [0.25, 0.85, 0.25, 1], mass: 0.02, contype: 0, conaffinity: 0 }
           ],
           children: [
             {
@@ -1695,8 +1821,8 @@ api.applyTorque([tx, ty, tz]);
               isAerodynamic: true,
               joints: [],
               geoms: [
-                { name: 'free_r3_b1_sail', type: 'box', size: [0.015, 0.08, 0.001], pos: [0, 0.09, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.02, contype: 0, conaffinity: 0 },
-                { name: 'free_r3_b1_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.04, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.01, contype: 0, conaffinity: 0 }
+                { name: 'free_r3_b1_sail', type: 'box', size: [0.025, 0.14, 0.001], pos: [0, 0.15, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
+                { name: 'free_r3_b1_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.06, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 }
               ],
               children: []
             },
@@ -1709,8 +1835,8 @@ api.applyTorque([tx, ty, tz]);
               isAerodynamic: true,
               joints: [],
               geoms: [
-                { name: 'free_r3_b2_sail', type: 'box', size: [0.015, 0.08, 0.001], pos: [0, 0.09, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.02, contype: 0, conaffinity: 0 },
-                { name: 'free_r3_b2_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.04, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.01, contype: 0, conaffinity: 0 }
+                { name: 'free_r3_b2_sail', type: 'box', size: [0.025, 0.14, 0.001], pos: [0, 0.15, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
+                { name: 'free_r3_b2_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.06, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 }
               ],
               children: []
             }
@@ -1725,7 +1851,7 @@ api.applyTorque([tx, ty, tz]);
             { name: 'free_rotor4_joint', type: 'hinge', axis: [0, 0, 1], damping: 0.02, actuator: { type: 'velocity', kv: 2.0, ctrlValue: 90.0 } }
           ],
           geoms: [
-            { name: 'free_hub4', type: 'sphere', size: [0.01], rgba: [0.85, 0.25, 0.25, 1], mass: 0.05, contype: 0, conaffinity: 0 }
+            { name: 'free_hub4', type: 'sphere', size: [0.01], rgba: [0.85, 0.25, 0.25, 1], mass: 0.02, contype: 0, conaffinity: 0 }
           ],
           children: [
             {
@@ -1737,8 +1863,8 @@ api.applyTorque([tx, ty, tz]);
               isAerodynamic: true,
               joints: [],
               geoms: [
-                { name: 'free_r4_b1_sail', type: 'box', size: [0.015, 0.08, 0.001], pos: [0, 0.09, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.02, contype: 0, conaffinity: 0 },
-                { name: 'free_r4_b1_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.04, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.01, contype: 0, conaffinity: 0 }
+                { name: 'free_r4_b1_sail', type: 'box', size: [0.025, 0.14, 0.001], pos: [0, 0.15, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
+                { name: 'free_r4_b1_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.06, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 }
               ],
               children: []
             },
@@ -1751,8 +1877,8 @@ api.applyTorque([tx, ty, tz]);
               isAerodynamic: true,
               joints: [],
               geoms: [
-                { name: 'free_r4_b2_sail', type: 'box', size: [0.015, 0.08, 0.001], pos: [0, 0.09, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.02, contype: 0, conaffinity: 0 },
-                { name: 'free_r4_b2_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.04, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.01, contype: 0, conaffinity: 0 }
+                { name: 'free_r4_b2_sail', type: 'box', size: [0.025, 0.14, 0.001], pos: [0, 0.15, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
+                { name: 'free_r4_b2_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.06, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 }
               ],
               children: []
             }
@@ -1770,15 +1896,15 @@ api.applyTorque([tx, ty, tz]);
         { name: 'unstable_drone_free', type: 'free', damping: 0.5 }
       ],
       geoms: [
-        { name: 'unstable_fuselage', type: 'box', size: [0.05, 0.05, 0.025], rgba: [0.95, 0.85, 0.15, 1], mass: 0.3 },
-        { name: 'unstable_arm1', type: 'cylinder', fromto: [0, 0, 0, 0.1, 0.1, 0], size: [0.006], rgba: [0.9, 0.9, 0.9, 1], mass: 0.02, contype: 0, conaffinity: 0 },
-        { name: 'unstable_arm2', type: 'cylinder', fromto: [0, 0, 0, 0.1, -0.1, 0], size: [0.006], rgba: [0.9, 0.9, 0.9, 1], mass: 0.02, contype: 0, conaffinity: 0 },
-        { name: 'unstable_arm3', type: 'cylinder', fromto: [0, 0, 0, -0.1, 0.1, 0], size: [0.006], rgba: [0.9, 0.9, 0.9, 1], mass: 0.02, contype: 0, conaffinity: 0 },
-        { name: 'unstable_arm4', type: 'cylinder', fromto: [0, 0, 0, -0.1, -0.1, 0], size: [0.006], rgba: [0.9, 0.9, 0.9, 1], mass: 0.02, contype: 0, conaffinity: 0 },
-        { name: 'unstable_pod1', type: 'cylinder', size: [0.012, 0.02], pos: [0.1, 0.1, 0.01], rgba: [0.3, 0.3, 0.3, 1], mass: 0.02 },
-        { name: 'unstable_pod2', type: 'cylinder', size: [0.012, 0.02], pos: [0.1, -0.1, 0.01], rgba: [0.3, 0.3, 0.3, 1], mass: 0.02 },
-        { name: 'unstable_pod3', type: 'cylinder', size: [0.012, 0.02], pos: [-0.1, 0.1, 0.01], rgba: [0.3, 0.3, 0.3, 1], mass: 0.02 },
-        { name: 'unstable_pod4', type: 'cylinder', size: [0.012, 0.02], pos: [-0.1, -0.1, 0.01], rgba: [0.3, 0.3, 0.3, 1], mass: 0.02 }
+        { name: 'unstable_fuselage', type: 'box', size: [0.05, 0.05, 0.025], rgba: [0.95, 0.85, 0.15, 1], mass: 0.2 },
+        { name: 'unstable_arm1', type: 'cylinder', fromto: [0, 0, 0, 0.1, 0.1, 0], size: [0.006], rgba: [0.9, 0.9, 0.9, 1], mass: 0.01, contype: 0, conaffinity: 0 },
+        { name: 'unstable_arm2', type: 'cylinder', fromto: [0, 0, 0, 0.1, -0.1, 0], size: [0.006], rgba: [0.9, 0.9, 0.9, 1], mass: 0.01, contype: 0, conaffinity: 0 },
+        { name: 'unstable_arm3', type: 'cylinder', fromto: [0, 0, 0, -0.1, 0.1, 0], size: [0.006], rgba: [0.9, 0.9, 0.9, 1], mass: 0.01, contype: 0, conaffinity: 0 },
+        { name: 'unstable_arm4', type: 'cylinder', fromto: [0, 0, 0, -0.1, -0.1, 0], size: [0.006], rgba: [0.9, 0.9, 0.9, 1], mass: 0.01, contype: 0, conaffinity: 0 },
+        { name: 'unstable_pod1', type: 'cylinder', size: [0.012, 0.02], pos: [0.1, 0.1, 0.01], rgba: [0.3, 0.3, 0.3, 1], mass: 0.01 },
+        { name: 'unstable_pod2', type: 'cylinder', size: [0.012, 0.02], pos: [0.1, -0.1, 0.01], rgba: [0.3, 0.3, 0.3, 1], mass: 0.01 },
+        { name: 'unstable_pod3', type: 'cylinder', size: [0.012, 0.02], pos: [-0.1, 0.1, 0.01], rgba: [0.3, 0.3, 0.3, 1], mass: 0.01 },
+        { name: 'unstable_pod4', type: 'cylinder', size: [0.012, 0.02], pos: [-0.1, -0.1, 0.01], rgba: [0.3, 0.3, 0.3, 1], mass: 0.01 }
       ],
       children: [
         {
@@ -1790,7 +1916,7 @@ api.applyTorque([tx, ty, tz]);
             { name: 'unstable_rotor1_joint', type: 'hinge', axis: [0, 0, 1], damping: 0.02, actuator: { type: 'velocity', kv: 2.0, ctrlValue: 90.0 } }
           ],
           geoms: [
-            { name: 'unstable_hub1', type: 'sphere', size: [0.01], rgba: [0.85, 0.25, 0.25, 1], mass: 0.05, contype: 0, conaffinity: 0 }
+            { name: 'unstable_hub1', type: 'sphere', size: [0.01], rgba: [0.85, 0.25, 0.25, 1], mass: 0.02, contype: 0, conaffinity: 0 }
           ],
           children: [
             {
@@ -1802,8 +1928,8 @@ api.applyTorque([tx, ty, tz]);
               isAerodynamic: true,
               joints: [],
               geoms: [
-                { name: 'unstable_r1_b1_sail', type: 'box', size: [0.015, 0.08, 0.001], pos: [0, 0.09, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.02, contype: 0, conaffinity: 0 },
-                { name: 'unstable_r1_b1_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.04, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.01, contype: 0, conaffinity: 0 }
+                { name: 'unstable_r1_b1_sail', type: 'box', size: [0.025, 0.14, 0.001], pos: [0, 0.15, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
+                { name: 'unstable_r1_b1_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.06, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 }
               ],
               children: []
             },
@@ -1816,8 +1942,8 @@ api.applyTorque([tx, ty, tz]);
               isAerodynamic: true,
               joints: [],
               geoms: [
-                { name: 'unstable_r1_b2_sail', type: 'box', size: [0.015, 0.08, 0.001], pos: [0, 0.09, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.02, contype: 0, conaffinity: 0 },
-                { name: 'unstable_r1_b2_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.04, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.01, contype: 0, conaffinity: 0 }
+                { name: 'unstable_r1_b2_sail', type: 'box', size: [0.025, 0.14, 0.001], pos: [0, 0.15, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
+                { name: 'unstable_r1_b2_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.06, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 }
               ],
               children: []
             }
@@ -1832,7 +1958,7 @@ api.applyTorque([tx, ty, tz]);
             { name: 'unstable_rotor2_joint', type: 'hinge', axis: [0, 0, 1], damping: 0.02, actuator: { type: 'velocity', kv: 2.0, ctrlValue: -90.0 } }
           ],
           geoms: [
-            { name: 'unstable_hub2', type: 'sphere', size: [0.01], rgba: [0.25, 0.85, 0.25, 1], mass: 0.05, contype: 0, conaffinity: 0 }
+            { name: 'unstable_hub2', type: 'sphere', size: [0.01], rgba: [0.25, 0.85, 0.25, 1], mass: 0.02, contype: 0, conaffinity: 0 }
           ],
           children: [
             {
@@ -1844,8 +1970,8 @@ api.applyTorque([tx, ty, tz]);
               isAerodynamic: true,
               joints: [],
               geoms: [
-                { name: 'unstable_r2_b1_sail', type: 'box', size: [0.015, 0.08, 0.001], pos: [0, 0.09, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.02, contype: 0, conaffinity: 0 },
-                { name: 'unstable_r2_b1_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.04, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.01, contype: 0, conaffinity: 0 }
+                { name: 'unstable_r2_b1_sail', type: 'box', size: [0.025, 0.14, 0.001], pos: [0, 0.15, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
+                { name: 'unstable_r2_b1_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.06, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 }
               ],
               children: []
             },
@@ -1858,8 +1984,8 @@ api.applyTorque([tx, ty, tz]);
               isAerodynamic: true,
               joints: [],
               geoms: [
-                { name: 'unstable_r2_b2_sail', type: 'box', size: [0.015, 0.08, 0.001], pos: [0, 0.09, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.02, contype: 0, conaffinity: 0 },
-                { name: 'unstable_r2_b2_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.04, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.01, contype: 0, conaffinity: 0 }
+                { name: 'unstable_r2_b2_sail', type: 'box', size: [0.025, 0.14, 0.001], pos: [0, 0.15, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
+                { name: 'unstable_r2_b2_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.06, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 }
               ],
               children: []
             }
@@ -1874,7 +2000,7 @@ api.applyTorque([tx, ty, tz]);
             { name: 'unstable_rotor3_joint', type: 'hinge', axis: [0, 0, 1], damping: 0.02, actuator: { type: 'velocity', kv: 2.0, ctrlValue: -90.0 } }
           ],
           geoms: [
-            { name: 'unstable_hub3', type: 'sphere', size: [0.01], rgba: [0.25, 0.85, 0.25, 1], mass: 0.05, contype: 0, conaffinity: 0 }
+            { name: 'unstable_hub3', type: 'sphere', size: [0.01], rgba: [0.25, 0.85, 0.25, 1], mass: 0.02, contype: 0, conaffinity: 0 }
           ],
           children: [
             {
@@ -1886,8 +2012,8 @@ api.applyTorque([tx, ty, tz]);
               isAerodynamic: true,
               joints: [],
               geoms: [
-                { name: 'unstable_r3_b1_sail', type: 'box', size: [0.015, 0.08, 0.001], pos: [0, 0.09, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.02, contype: 0, conaffinity: 0 },
-                { name: 'unstable_r3_b1_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.04, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.01, contype: 0, conaffinity: 0 }
+                { name: 'unstable_r3_b1_sail', type: 'box', size: [0.025, 0.14, 0.001], pos: [0, 0.15, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
+                { name: 'unstable_r3_b1_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.06, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 }
               ],
               children: []
             },
@@ -1900,8 +2026,8 @@ api.applyTorque([tx, ty, tz]);
               isAerodynamic: true,
               joints: [],
               geoms: [
-                { name: 'unstable_r3_b2_sail', type: 'box', size: [0.015, 0.08, 0.001], pos: [0, 0.09, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.02, contype: 0, conaffinity: 0 },
-                { name: 'unstable_r3_b2_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.04, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.01, contype: 0, conaffinity: 0 }
+                { name: 'unstable_r3_b2_sail', type: 'box', size: [0.025, 0.14, 0.001], pos: [0, 0.15, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
+                { name: 'unstable_r3_b2_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.06, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 }
               ],
               children: []
             }
@@ -1916,7 +2042,7 @@ api.applyTorque([tx, ty, tz]);
             { name: 'unstable_rotor4_joint', type: 'hinge', axis: [0, 0, 1], damping: 0.02, actuator: { type: 'velocity', kv: 2.0, ctrlValue: 90.0 } }
           ],
           geoms: [
-            { name: 'unstable_hub4', type: 'sphere', size: [0.01], rgba: [0.85, 0.25, 0.25, 1], mass: 0.05, contype: 0, conaffinity: 0 }
+            { name: 'unstable_hub4', type: 'sphere', size: [0.01], rgba: [0.85, 0.25, 0.25, 1], mass: 0.02, contype: 0, conaffinity: 0 }
           ],
           children: [
             {
@@ -1928,8 +2054,8 @@ api.applyTorque([tx, ty, tz]);
               isAerodynamic: true,
               joints: [],
               geoms: [
-                { name: 'unstable_r4_b1_sail', type: 'box', size: [0.015, 0.08, 0.001], pos: [0, 0.09, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.02, contype: 0, conaffinity: 0 },
-                { name: 'unstable_r4_b1_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.04, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.01, contype: 0, conaffinity: 0 }
+                { name: 'unstable_r4_b1_sail', type: 'box', size: [0.025, 0.14, 0.001], pos: [0, 0.15, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
+                { name: 'unstable_r4_b1_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.06, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 }
               ],
               children: []
             },
@@ -1942,8 +2068,8 @@ api.applyTorque([tx, ty, tz]);
               isAerodynamic: true,
               joints: [],
               geoms: [
-                { name: 'unstable_r4_b2_sail', type: 'box', size: [0.015, 0.08, 0.001], pos: [0, 0.09, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.02, contype: 0, conaffinity: 0 },
-                { name: 'unstable_r4_b2_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.04, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.01, contype: 0, conaffinity: 0 }
+                { name: 'unstable_r4_b2_sail', type: 'box', size: [0.025, 0.14, 0.001], pos: [0, 0.15, 0], rgba: [0.95, 0.95, 0.95, 1], mass: 0.01, contype: 0, conaffinity: 0 },
+                { name: 'unstable_r4_b2_shaft', type: 'capsule', fromto: [0, 0, 0, 0, 0.06, 0], size: [0.004], rgba: [0.7, 0.7, 0.7, 1], mass: 0.005, contype: 0, conaffinity: 0 }
               ],
               children: []
             }
@@ -2267,81 +2393,6 @@ export const ropeBridgePreset: SceneGraph = {
   ]
 };
 
-export const pringlesScadPreset: SceneGraph = {
-  nodes: [
-    {
-      id: 'pringles_scad_head',
-      name: 'pringles_scad_head',
-      type: 'body',
-      pos: [0, 0, 0.3],
-      joints: [],
-      geoms: [{ name: 'head_mesh', type: 'sphere', size: [0.12], rgba: [0.98, 0.94, 0.86, 1], mass: 1.0 }],
-      scad: `$fn = 32;
-
-module pringles_head() {
-    color([0.98, 0.94, 0.86])
-        scale([1.0, 0.85, 1.1])
-            sphere(r=0.12);
-    
-    color([0.22, 0.12, 0.05]) {
-        translate([-0.04, -0.01, 0.08])
-            rotate([0, 20, -10])
-                scale([1.2, 0.8, 0.6])
-                    sphere(r=0.05);
-
-        translate([0.04, -0.01, 0.08])
-            rotate([0, -20, 10])
-                scale([1.2, 0.8, 0.6])
-                    sphere(r=0.05);
-    }
-
-    color([0.08, 0.08, 0.08]) {
-        translate([-0.035, 0.08, 0.025])
-            scale([0.8, 0.4, 1.1])
-                sphere(r=0.02);
-
-        translate([0.035, 0.08, 0.025])
-            scale([0.8, 0.4, 1.1])
-                sphere(r=0.02);
-    }
-
-    color([0.20, 0.10, 0.04]) {
-        hull() {
-            translate([0, 0.09, -0.015]) sphere(r=0.015);
-            translate([-0.05, 0.08, -0.02]) sphere(r=0.018);
-            translate([-0.08, 0.07, -0.01]) sphere(r=0.015);
-            translate([-0.10, 0.05, 0.01]) sphere(r=0.01);
-        }
-
-        hull() {
-            translate([0, 0.09, -0.015]) sphere(r=0.015);
-            translate([0.05, 0.08, -0.02]) sphere(r=0.018);
-            translate([0.08, 0.07, -0.01]) sphere(r=0.015);
-            translate([0.10, 0.05, 0.01]) sphere(r=0.01);
-        }
-    }
-
-    color([0.85, 0.15, 0.15]) {
-        translate([0, 0.08, -0.10])
-            sphere(r=0.016);
-
-        hull() {
-            translate([0, 0.08, -0.10]) sphere(r=0.01);
-            translate([-0.05, 0.07, -0.09]) scale([1, 0.6, 1.4]) sphere(r=0.02);
-        }
-
-        hull() {
-            translate([0, 0.08, -0.10]) sphere(r=0.01);
-            translate([0.05, 0.07, -0.09]) scale([1, 0.6, 1.4]) sphere(r=0.02);
-        }
-    }
-}
-
-pringles_head();`,
-      children: []
-    }
-  ]
-};
 
 const OVAL_TRACK_POINTS: number[][] = [
   [0.4, 0, 0.06],
@@ -2440,6 +2491,118 @@ export const ovalTrackPreset: SceneGraph = {
       children: []
     }
   ]
+};
+
+// Boolean modifiers: four bodies whose shape is defined by SUBTRACTING one
+// primitive from another, dropped onto the floor.
+//
+// Each negative overshoots its host by a modest margin — enough that the cut
+// faces are never coincident with the host's (which is how CSG produces
+// non-manifold output), and no more. Overshooting by multiples reads badly in the
+// editor, where negatives are drawn as outlines.
+//
+// Nothing here is a special shape type. Each body is two or three ordinary geoms
+// plus a `csg: 'difference'` marker, evaluated into a mesh by src/utils/csg.ts.
+// Every slider in the properties panel still reshapes them, because the
+// primitives — not the mesh — are the source of truth.
+//
+// The four deliberately exercise all three collision strategies, since MuJoCo
+// takes the convex hull of any mesh geom and a hole would otherwise not exist
+// for contact:
+//   ring, crescent, hollow cube -> 'auto', which finds a hole axis and slices
+//                                  the result into convex sectors, so the holes
+//                                  are real and things can fall through them
+//   chopped cone                -> 'hull', which is EXACT here: a frustum is
+//                                  already convex, so hulling changes nothing
+const csgFreeBody = (id: string) => [{ name: `${id}_free`, type: 'free' as const }];
+
+export const booleanShapesPreset: SceneGraph = {
+  nodes: [
+    // 1. RING — a flattened ellipsoid with a slimmer ellipsoid punched through
+    // it. The negative is much taller than the disc is thick, which is what
+    // makes it a hole straight through rather than a sealed internal cavity.
+    {
+      id: 'ring', name: 'ring', type: 'body',
+      pos: [-0.22, 0.05, 0.55],
+      euler: [22, 8, 0],   // tipped, so it lands on its rim and rolls
+      joints: csgFreeBody('ring'),
+      csgEnabled: true, csgCollision: 'auto', csgSectors: 20, csgMass: 0.4,
+      geoms: [
+        { name: 'ring_body', type: 'ellipsoid', size: [0.11, 0.11, 0.028], rgba: [0.95, 0.72, 0.18, 1], condim: 3 },
+        { name: 'ring_hole', type: 'ellipsoid', size: [0.062, 0.062, 0.05], csg: 'difference' },
+      ],
+      children: [],
+    },
+
+    // 2. CRESCENT MOON — a disc with an OFFSET cylinder bitten out of it. The
+    // negative sits off-centre, so instead of a closed hole you get a concave
+    // bite. Sector decomposition still handles it: the slices meet along the
+    // concave edge rather than bridging it, which a single hull would.
+    {
+      id: 'crescent', name: 'crescent', type: 'body',
+      pos: [0.2, -0.08, 0.62],
+      euler: [0, 0, 0],
+      joints: csgFreeBody('crescent'),
+      csgEnabled: true, csgCollision: 'auto', csgSectors: 24, csgMass: 0.35,
+      geoms: [
+        { name: 'crescent_body', type: 'cylinder', size: [0.1, 0.022], rgba: [0.93, 0.93, 0.82, 1], condim: 3 },
+        // Offset by 0.062 and slightly larger than the disc: a classic crescent.
+        { name: 'crescent_bite', type: 'cylinder', size: [0.085, 0.04], pos: [0.062, 0.0, 0], csg: 'difference' },
+      ],
+      children: [],
+    },
+
+    // 3. HOLLOW CUBE — a cube with a square shaft bored through all three axes,
+    // so you can see daylight through it whichever way it lands.
+    //
+    // Only ONE of the three shafts collides: decomposition happens about a single
+    // axis (the Z shaft, listed first), and the sector hulls fill the other two.
+    // The X and Y shafts are therefore visual. Set csgCollision to 'primitives'
+    // to collide as the plain cube instead, or leave it as is — for dropping and
+    // stacking, the Z shaft is the one that shows.
+    {
+      id: 'hollow_cube', name: 'hollow_cube', type: 'body',
+      pos: [-0.02, 0.24, 0.7],
+      euler: [14, 26, 8],
+      joints: csgFreeBody('hollow_cube'),
+      csgEnabled: true, csgCollision: 'auto', csgSectors: 16, csgMass: 0.5,
+      geoms: [
+        { name: 'cube_body', type: 'box', size: [0.075, 0.075, 0.075], rgba: [0.35, 0.62, 0.92, 1], condim: 3 },
+        // Longest axis of the largest negative picks the decomposition axis, and
+        // ties keep source order — so this Z shaft is the one that stays open.
+        { name: 'cube_shaft_z', type: 'box', size: [0.04, 0.04, 0.1], csg: 'difference' },
+        { name: 'cube_shaft_x', type: 'box', size: [0.1, 0.04, 0.04], csg: 'difference' },
+        { name: 'cube_shaft_y', type: 'box', size: [0.04, 0.1, 0.04], csg: 'difference' },
+      ],
+      children: [],
+    },
+
+    // 4. CHOPPED CONE (frustum) — a cone with a box subtracted from above the cut
+    // plane. The cone is a `mesh` geom, which the emitter writes out as an
+    // OpenSCAD polyhedron; MuJoCo primitives have no tapered shape to build this
+    // from. Cut at z = 0.14 of a 0.22-tall cone, leaving a top radius of
+    // 0.105 * (1 - 0.14/0.22) = 0.038.
+    {
+      id: 'chopped_cone', name: 'chopped_cone', type: 'body',
+      pos: [0.3, 0.26, 0.5],
+      euler: [0, 0, 0],
+      joints: csgFreeBody('chopped_cone'),
+      // 'hull' is not an approximation here — a frustum IS convex, so MuJoCo's
+      // hull of it is the frustum itself. One geom, exact contact.
+      csgEnabled: true, csgCollision: 'hull', csgMass: 0.45,
+      geoms: [
+        {
+          name: 'cone_body', type: 'mesh', size: [1], rgba: [0.86, 0.34, 0.36, 1], condim: 3,
+          ...(() => {
+            const { vertices, faces, renderVertices } = generateConeMeshData(0.105, 0.22, 40);
+            return { vertices, faces, renderVertices };
+          })(),
+        },
+        { name: 'cone_tip_cut', type: 'box', size: [0.15, 0.15, 0.09], pos: [0, 0, 0.23], csg: 'difference' },
+      ],
+      children: [],
+    },
+  ],
 };
 
 // Single source of truth for built-in presets. The App's preset dropdown and
@@ -2565,9 +2728,9 @@ export const PRESETS = {
     emoji: '🎗️',
     scene: ropeBridgePreset
   },
-  pringles_scad: {
-    name: 'Mr Pringles (OpenSCAD)',
-    emoji: '🥔',
-    scene: pringlesScadPreset
+  boolean_shapes: {
+    name: 'Boolean Cutouts',
+    emoji: '💠',
+    scene: booleanShapesPreset
   }
 };

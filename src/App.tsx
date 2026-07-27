@@ -14,6 +14,8 @@ import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js';
 import { SimplifyModifier } from 'three/examples/jsm/modifiers/SimplifyModifier.js';
 import { loadCompiler, compileSCAD, isCompilerReady } from './utils/openscad';
 import { sampleCatmullRom } from './utils/geom';
+import { resolveCsgGeoms, csgSourceGeoms, csgHashOf, positiveBounds, geomMatrixOf, clipSegmentsToBox, CSG_DEFAULT_SECTORS } from './utils/csg';
+import { useCsgAutoCompile } from './hooks/useCsgCompile';
 import { PRESETS } from './presets/presetScenes';
 
 // Simple robust markdown parser to convert basic markdown text to safe HTML
@@ -402,6 +404,9 @@ const WedgeGeometry = ({ width = 2.0, depth = 1.0, height = 0.5 }: { width: numb
   }, [width, depth, height]);
 
   const indices = useMemo(() => {
+    // Must match generateWedgeMeshData's faces exactly — this is the render copy
+    // of the same prism, and computeVertexNormals() below derives its normals
+    // from this winding.
     return new Uint16Array([
       0, 1, 3,  0, 3, 2, // Slanted top face
       4, 2, 3,  4, 3, 5, // Bottom flat face
@@ -814,9 +819,15 @@ const PulleyRopesRenderer = ({ model, data, mujoco, sceneGraph }: any) => {
             const wy = data.xpos[wheelId * 3 + 1];
             const wz = data.xpos[wheelId * 3 + 2];
             const wheelNode = findWheelNode(rope.pulleyWheelId);
-            const rad = wheelNode?.pulleyRadius || 0.4;
+            // 0.4 was a pre-rescale default: it drew a rope arcing over a
+            // 0.4m rim around a wheel whose geoms are 0.08.
+            const rad = wheelNode?.pulleyRadius || 0.08;
+            // Attach near the top of each weight rather than a fixed 0.15 above
+            // it — another pre-rescale constant, which left the rope ending in
+            // mid-air well clear of the weight it is supposed to hold.
+            const attach = rad * 0.5;
 
-            points.push(new THREE.Vector3(lx, ly, lz + 0.15));
+            points.push(new THREE.Vector3(lx, ly, lz + attach));
             points.push(new THREE.Vector3(wx - rad, wy, wz));
             const segments = 12;
             for (let i = 1; i < segments; i++) {
@@ -828,7 +839,7 @@ const PulleyRopesRenderer = ({ model, data, mujoco, sceneGraph }: any) => {
               ));
             }
             points.push(new THREE.Vector3(wx + rad, wy, wz));
-            points.push(new THREE.Vector3(rx, ry, rz + 0.15));
+            points.push(new THREE.Vector3(rx, ry, rz + attach));
           }
         } else {
           // No wheel — straight rope between the two bodies
@@ -984,6 +995,19 @@ const MouseDragForceRenderer = ({ model, data, mujoco }: any) => {
 const PulleyRopeMarkers = ({ sceneGraph, selectedNodeId, setSelectedNodeId }: any) => {
   const isPlaying = useStore(state => state.isPlaying);
 
+  // The wheel a rope runs over, so the handle can be sized relative to it.
+  const findWheelNode = useCallback((wheelId: string): any => {
+    const search = (nodes: any[]): any => {
+      for (const n of nodes || []) {
+        if (n.id === wheelId) return n;
+        const c = search(n.children);
+        if (c) return c;
+      }
+      return null;
+    };
+    return search(sceneGraph?.nodes || []);
+  }, [sceneGraph]);
+
   const ropeNodes = useMemo(() => {
     const ropes: any[] = [];
     const traverse = (nodes: any[]) => {
@@ -1009,6 +1033,15 @@ const PulleyRopeMarkers = ({ sceneGraph, selectedNodeId, setSelectedNodeId }: an
         const [mx, my, mz] = rope.pos;
         const threePos: [number, number, number] = [mx, mz, -my];
         const isSelected = selectedNodeId === rope.id;
+        // Size the handle from the wheel it runs over. It used to be a fixed
+        // 0.18-radius torus, which was fine when the presets were metres across
+        // but is now larger than the entire pulley stand — and a rope node left
+        // at pos [0,0,0] put that ring at the world origin, half of it under the
+        // floor, looking like a stray object rather than a drag handle.
+        const wheelNode = rope.pulleyWheelId ? findWheelNode(rope.pulleyWheelId) : null;
+        const wheelR = wheelNode?.pulleyRadius ?? rope.pulleyRadius ?? 0.08;
+        const ringR = Math.max(0.012, wheelR * 0.45);
+        const ringThickness = ringR * 0.2;
 
         return (
           <group key={rope.id} position={threePos}>
@@ -1033,7 +1066,7 @@ const PulleyRopeMarkers = ({ sceneGraph, selectedNodeId, setSelectedNodeId }: an
                 }
               }}
             >
-              <torusGeometry args={[0.18, 0.035, 12, 40]} />
+              <torusGeometry args={[ringR, ringThickness, 12, 40]} />
               <meshStandardMaterial
                 color={isSelected ? '#60a5fa' : '#10b981'}
                 emissive={isSelected ? '#3b82f6' : '#047857'}
@@ -1044,7 +1077,7 @@ const PulleyRopeMarkers = ({ sceneGraph, selectedNodeId, setSelectedNodeId }: an
             </mesh>
             {/* Small inner dot */}
             <mesh rotation={[Math.PI / 2, 0, 0]}>
-              <torusGeometry args={[0.07, 0.025, 8, 24]} />
+              <torusGeometry args={[ringR * 0.4, ringThickness * 0.7, 8, 24]} />
               <meshStandardMaterial
                 color={isSelected ? '#93c5fd' : '#6ee7b7'}
                 emissive={isSelected ? '#93c5fd' : '#6ee7b7'}
@@ -1238,7 +1271,204 @@ const StaticBoxInstances = ({ geoms, model, data, mujoco, setSelectedNodeId }: a
   );
 };
 
+// Negative (subtracted) shapes have no MuJoCo geom at all — they're holes, not
+// solids — so nothing would show where you're cutting. Draw them as red
+// wireframes on the selected body only: placing a hole you can't see is
+// guesswork, and drawing them always would clutter every other body.
+const CsgNegativeGhosts = ({ model, data, mujoco, sceneGraph, selectedNodeId }: any) => {
+  const groupRef = useRef<THREE.Group>(null);
+
+  const target = useMemo(() => {
+    if (!selectedNodeId) return null;
+    const find = (nodes: any[]): any => {
+      for (const n of nodes || []) {
+        if (n.id === selectedNodeId) return n;
+        const c = find(n.children);
+        if (c) return c;
+      }
+      return null;
+    };
+    const node = find(sceneGraph?.nodes || []);
+    if (!node?.csgEnabled) return null;
+    const negatives = (node.geoms || []).filter((g: any) => g.csg === 'difference' && !g.csgDerived);
+    const intersects = (node.geoms || []).filter((g: any) => g.csg === 'intersection' && !g.csgDerived);
+    if (negatives.length === 0 && intersects.length === 0) return null;
+    return {
+      node,
+      // Outlines are clipped to the solid's extent — see positiveBounds.
+      bounds: positiveBounds(node),
+      ghosts: [...negatives.map((g: any) => ({ g, kind: 'neg' })), ...intersects.map((g: any) => ({ g, kind: 'int' }))],
+    };
+  }, [sceneGraph, selectedNodeId]);
+
+  const bodyId = useMemo(() => {
+    if (!target || !model || !mujoco) return -1;
+    return mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY.value, target.node.name || target.node.id);
+  }, [target, model, mujoco]);
+
+  // The ghosts live in the body's frame, so the group tracks the body rather
+  // than any geom — a negative isn't in the model to have a geom_xpos of its own.
+  useFrame(() => {
+    if (!groupRef.current || bodyId === -1 || !data) return;
+    if ((window as any).DISABLE_USEFRAME) return;
+    const activeData = useStore.getState().data;
+    if (data !== activeData) return;
+    try {
+      const o = bodyId * 9;
+      const m = data.xmat;
+      const mat = new THREE.Matrix4().set(
+        m[o], m[o + 1], m[o + 2], 0,
+        m[o + 3], m[o + 4], m[o + 5], 0,
+        m[o + 6], m[o + 7], m[o + 8], 0,
+        0, 0, 0, 1
+      );
+      groupRef.current.position.set(data.xpos[bodyId * 3], data.xpos[bodyId * 3 + 1], data.xpos[bodyId * 3 + 2]);
+      groupRef.current.quaternion.setFromRotationMatrix(mat);
+    } catch { /* body deleted mid-frame */ }
+  });
+
+  if (!target || bodyId === -1) return null;
+
+  return (
+    <group ref={groupRef}>
+      {target.ghosts.map(({ g, kind }: any) => (
+        <CsgGhostOutline
+          key={g.name}
+          geom={g}
+          color={kind === 'neg' ? '#ef4444' : '#38bdf8'}
+          bounds={target.bounds}
+        />
+      ))}
+    </group>
+  );
+};
+
+// One negative shape, drawn as EDGES ONLY and clipped to the solid it cuts.
+//
+// Two deliberate choices:
+//
+// LineSegments over an EdgesGeometry, not a mesh with material.wireframe:
+// wireframe draws every triangle of the tessellation including the diagonal
+// splitting each quad, which on a sphere is dense enough to read as a shaded
+// solid. EdgesGeometry keeps only edges where faces actually meet at an angle.
+//
+// Clipped to the host's bounds: a negative MUST overshoot the solid (a flush cut
+// leaves coincident faces, i.e. non-manifold CSG output), but drawing it at full
+// length is actively misleading — a cylinder punched through a thin disc renders
+// as a tall tube floating in space with only a sliver of it doing any cutting.
+// The points are baked into body space here so the clip is a one-off in the
+// useMemo rather than per-frame renderer clipping-plane work.
+const CsgGhostOutline = ({ geom, color, bounds }: { geom: any; color: string; bounds: { min: number[]; max: number[] } | null }) => {
+  const key = JSON.stringify([geom.type, geom.size, geom.pos, geom.euler, geom.quat, bounds]);
+
+  const edges = useMemo(() => {
+    const s = geom.size || [];
+    const r = s[0] || 0.1;
+    let base: THREE.BufferGeometry;
+    // Segment counts are kept low on purpose: this is an annotation, not a
+    // surface, and a 32-segment outline is visual noise at this size.
+    switch (geom.type) {
+      case 'box':
+        base = new THREE.BoxGeometry(r * 2, (s[1] ?? r) * 2, (s[2] ?? r) * 2);
+        break;
+      case 'cylinder':
+        base = new THREE.CylinderGeometry(r, r, (s[1] ?? 0.1) * 2, 16);
+        base.rotateX(Math.PI / 2); // Three.js cylinders are Y-long; MuJoCo's are Z-long
+        break;
+      case 'capsule':
+        base = new THREE.CapsuleGeometry(r, (s[1] ?? 0.1) * 2, 4, 16);
+        base.rotateX(Math.PI / 2);
+        break;
+      case 'ellipsoid':
+        base = new THREE.SphereGeometry(1, 16, 10);
+        // Scale the geometry itself, not the mesh: edge angles have to be
+        // computed on the squashed shape or the outline won't match it.
+        base.scale(r, s[1] ?? r, s[2] ?? r);
+        break;
+      default:
+        base = new THREE.SphereGeometry(r, 16, 10);
+        break;
+    }
+
+    const e = new THREE.EdgesGeometry(base, 1);
+    base.dispose();
+
+    // Bake the geom's own pos/rotation in, so the segments are in body space and
+    // can be clipped against the body-space bounds directly.
+    const src = e.getAttribute('position').array as ArrayLike<number>;
+    const m = geomMatrixOf(geom);
+    const baked = new Array<number>(src.length);
+    const v = new THREE.Vector3();
+    for (let i = 0; i < src.length; i += 3) {
+      v.set(src[i], src[i + 1], src[i + 2]).applyMatrix4(m);
+      baked[i] = v.x; baked[i + 1] = v.y; baked[i + 2] = v.z;
+    }
+    e.dispose();
+
+    let clipped = bounds ? clipSegmentsToBox(baked, bounds.min, bounds.max) : baked;
+
+    // A cutting tool is often LARGER than the part in the directions across the
+    // cut — chopping the top off a cone needs a box wider than the cone. Every
+    // edge of such a box lies on a face outside the solid, so clipping the lines
+    // correctly removes all of them and the cut becomes invisible. When that
+    // happens, fall back to outlining the REGION being removed: the negative's
+    // bounding box intersected with the solid's. Indicative rather than exact,
+    // but it shows where material is going, which is the point of the overlay.
+    if (bounds && clipped.length === 0 && baked.length > 0) {
+      const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+      for (let i = 0; i < baked.length; i += 3) {
+        for (let a = 0; a < 3; a++) {
+          if (baked[i + a] < lo[a]) lo[a] = baked[i + a];
+          if (baked[i + a] > hi[a]) hi[a] = baked[i + a];
+        }
+      }
+      const o0 = [0, 1, 2].map(a => Math.max(lo[a], bounds.min[a]));
+      const o1 = [0, 1, 2].map(a => Math.min(hi[a], bounds.max[a]));
+      if ([0, 1, 2].every(a => o1[a] > o0[a])) {
+        const box = new THREE.BoxGeometry(o1[0] - o0[0], o1[1] - o0[1], o1[2] - o0[2]);
+        box.translate((o0[0] + o1[0]) / 2, (o0[1] + o1[1]) / 2, (o0[2] + o1[2]) / 2);
+        const be = new THREE.EdgesGeometry(box, 1);
+        clipped = Array.from(be.getAttribute('position').array as ArrayLike<number>);
+        box.dispose();
+        be.dispose();
+      }
+    }
+
+    const out = new THREE.BufferGeometry();
+    out.setAttribute('position', new THREE.Float32BufferAttribute(clipped, 3));
+    return out;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
+
+  useEffect(() => () => edges.dispose(), [edges]);
+
+  // No position/rotation: the segments are already in body-space coordinates.
+  return (
+    <lineSegments geometry={edges}>
+      <lineBasicMaterial color={color} transparent opacity={0.9} depthWrite={false} toneMapped={false} />
+    </lineSegments>
+  );
+};
+
 const SceneVisuals = ({ model, data, mujoco, sceneGraph, selectedNodeId, setSelectedNodeId }: any) => {
+  // Every geom name the scene graph accounts for, drawn or not. The implicit-geom
+  // pass below uses this — NOT the render list — to decide what in the MuJoCo
+  // model is unexplained. A collision-only geom (a boolean body's source
+  // primitives, in 'primitives' mode) is deliberately not rendered, and treating
+  // it as unexplained would draw the solid ellipsoid right over the mesh whose
+  // hole is the entire point.
+  const knownGeomNames = useMemo(() => {
+    const names = new Set<string>();
+    const walk = (nodes: any[]) => {
+      for (const node of nodes || []) {
+        for (const g of node.geoms || []) if (g.name) names.add(g.name);
+        walk(node.children);
+      }
+    };
+    walk(sceneGraph?.nodes || []);
+    return names;
+  }, [sceneGraph]);
+
   const geoms = useMemo(() => {
     if (!sceneGraph) return [];
     const list: any[] = [];
@@ -1247,7 +1477,9 @@ const SceneVisuals = ({ model, data, mujoco, sceneGraph, selectedNodeId, setSele
       for (const node of nodes) {
         const jointed = ancestorJointed || (node.joints && node.joints.length > 0) || node.isComposite === true;
         if (node.geoms) {
-          for (const geom of node.geoms) {
+          // Boolean bodies draw their generated mesh instead of the primitives it
+          // was cut from, and never draw the negatives (those are ghosts, below).
+          for (const geom of resolveCsgGeoms(node, 'render')) {
             // isWedge bodies draw a bespoke triangular prism via WedgeGeometry.
             // Their MJCF geom is only a thin slab along the slanted face, so they
             // must never fall through to a generic box renderer.
@@ -1275,10 +1507,9 @@ const SceneVisuals = ({ model, data, mujoco, sceneGraph, selectedNodeId, setSele
     if (!model || !mujoco || !model.geom_type) return [];
     const list: any[] = [];
     const ngeom = model.ngeom;
-    const explicitNames = new Set(geoms.map(g => g.name));
     for (let i = 0; i < ngeom; i++) {
       const name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM.value, i);
-      if (name && !explicitNames.has(name) && name !== 'floor') {
+      if (name && !knownGeomNames.has(name) && name !== 'floor') {
         const typeId = model.geom_type[i];
         let typeStr = 'sphere';
         if (typeId === 2) typeStr = 'sphere';
@@ -1302,7 +1533,7 @@ const SceneVisuals = ({ model, data, mujoco, sceneGraph, selectedNodeId, setSele
       }
     }
     return list;
-  }, [model, mujoco, geoms]);
+  }, [model, mujoco, knownGeomNames]);
 
   return (
     <>
@@ -1357,6 +1588,7 @@ const SceneVisuals = ({ model, data, mujoco, sceneGraph, selectedNodeId, setSele
           />
         ))}
         <PulleyRopesRenderer model={model} data={data} mujoco={mujoco} sceneGraph={sceneGraph} />
+        <CsgNegativeGhosts model={model} data={data} mujoco={mujoco} sceneGraph={sceneGraph} selectedNodeId={selectedNodeId} />
         <MouseDragForceRenderer model={model} data={data} mujoco={mujoco} />
         <CurveControlHandles />
       </group>
@@ -1520,7 +1752,7 @@ const PRESET_NOTE_CARDS: Record<string, string> = {
 
   pulley_system: `# Pulley System\n\nA compound pulley demonstrating **mechanical advantage**.\n\n## Physics\n- The rope is simulated as a length-constrained rigid segment via **joint equality**\n- A compound pulley with N rope segments reduces the required force by ×N\n- Rope tension is transferred through the pulley wheel hinge\n\n## Key concepts\n- Ideal mechanical advantage = number of rope segments supporting the load\n- Energy is conserved: you pull further but with less force`,
 
-  cartpole: `# Cartpole\n\nA cart-pole balancing system controlled by an **LQR controller**.\n\n## Physics\n- The cart slides on a frictionless track (slide joint)\n- The pole pivots on a hinge — an **inverted pendulum**, inherently unstable\n- A **Linear Quadratic Regulator (LQR)** applies horizontal force to keep the pole upright\n\n## Control law\n*F = −(k_x·x + k_v·ẋ + k_θ·θ + k_ω·θ̇)*\n\n| Gain | Value | Role |\n|------|-------|------|\n| k_x | 22.0 | Position centering |\n| k_θ | 80.0 | Vertical catch |\n\n## Try it\n- Increase the pole's mass to stress-test the controller\n- Modify gains in the control script`,
+  cartpole: `# Cartpole\n\nA cart-pole balancing system controlled by an **LQR controller**.\n\n## Physics\n- The cart slides on a frictionless track (slide joint)\n- The pole pivots on a hinge — an **inverted pendulum**, inherently unstable\n- A **Linear Quadratic Regulator (LQR)** applies horizontal force to keep the pole upright\n\n## Control law\n*F = −(k_x·x + k_v·ẋ + k_θ·θ + k_ω·θ̇)*\n\n| Gain | Value | Role |\n|------|-------|------|\n| k_x | 8.0 | Commanded lean from cart position |\n| k_θ | 40.0 | Vertical catch |\n\n## Try it\n- Increase the pole's mass to stress-test the controller\n- Modify gains in the control script`,
 
   newtons_cradle: `# Newton's Cradle\n\nConservation of **momentum and energy** in elastic collisions.\n\n## Physics\n- Each ball is a pendulum on a hinge joint\n- Collisions are nearly elastic (high restitution)\n- Momentum is transferred through the stationary balls — only the end ball swings out\n- *n* balls swung in → *n* balls swing out (momentum + energy conservation)\n\n## Try it\n- Pull back 2 balls instead of 1 and observe the output`,
 
@@ -1545,6 +1777,33 @@ const PRESET_NOTE_CARDS: Record<string, string> = {
   traditional_windmill: `# Traditional Windmill (4-Blade)\n\nA classic four-sail Dutch windmill driven by wind pressure.\n\n## Physics\n- Four flat sails create drag-driven rotation (not lift-driven)\n- Each sail is an aerodynamic flat plate; drag dominates at low tip-speed ratios\n- The main shaft hinge connects sail rotation to a milling load\n\n## Try it\n- Adjust sail area (size) to change torque at a given wind speed`,
 
   drone: `# Quadcopter Drone\n\nA quadrotor UAV with **PD attitude control** and per-rotor thrust.\n\n## Physics\n- Four rotors apply upward thrust and reaction torques\n- **PD controller** compares current orientation to target and commands differential thrust\n- Aerodynamic drag is applied to the frame body\n\n## Control law\n*τ = k_p × error + k_d × error_rate*\n\n## Try it\n- Use arrow keys / WASD to command pitch and roll\n- Adjust k_p and k_d gains in the control script to tune stability\n- Increase rotor drag coefficient to simulate thicker air`,
+
+  boolean_shapes: `# Boolean Cutouts
+
+Four bodies whose shape comes from **subtracting** one primitive from another, dropped onto the floor.
+
+## How they're built
+None of these is a special shape type. Each body is just two or three ordinary geoms with one marked \`csg: 'difference'\`, compiled into a mesh by OpenSCAD. The **primitives stay the source of truth** — select a body and every size slider still reshapes it, then the mesh is regenerated.
+
+| Body | Recipe |
+|------|--------|
+| Ring | ellipsoid − taller ellipsoid |
+| Crescent | disc − *offset* disc |
+| Hollow cube | cube − three square shafts |
+| Chopped cone | cone − box above the cut |
+
+## The physics catch
+MuJoCo takes the **convex hull** of every mesh geom, so a hole would not exist for contact — a ring would collide as a solid disc. Each body picks a strategy:
+
+- **Ring, crescent, hollow cube** — \`auto\`: the result is sliced into convex sectors around the hole axis, so the hole is *real*. At 20 sectors the colliders intrude only ~1.2% of the hole radius.
+- **Chopped cone** — \`hull\`: not an approximation at all, because a frustum is *already convex*.
+
+Only **one** of the hollow cube's three shafts collides (the Z one) — decomposition works about a single axis, so the other two are visual.
+
+## Try it
+- Select a body and drag the **negative shape** around — it's drawn as a red outline
+- Switch a body's **Collision** mode to \`Convex hull\` and watch the hole stop working
+- Drop a small sphere through the ring's hole while it lies flat`,
 
   bouncy_balls: `# Bouncy Balls\n\n20 multicolored spheres with **high restitution** colliding under gravity.\n\n## Physics\n- Each ball has a **free joint** (6-DOF) and a unique radius (0.18–0.27 m)\n- Uses MuJoCo's **spring-damper contact model**: \`solref=[timeconst, dampingRatio]\`\n- \`solref=[0.04, 0.2]\` = 40 ms contact spring, 20% damping → lively bounce\n- \`dampingRatio < 1\` = underdamped = bouncy; \`= 1\` = critically damped = no bounce\n\n## Try it\n- Use the **Bounciness slider** in the properties panel to tune each ball\n- Change gravity in Environment settings to see low-gravity chaos`,
 };
@@ -1962,6 +2221,7 @@ function App() {
     addPusherPeg, deletePusherPeg, updatePusherPeg, updateNodeRotation,
     updateWedgeParams, updatePyramidParams, updateConeParams, updateTorusParams, updateTubeParams, updateCurveParams, updatePulleyParams, updateRopeParams,
     parentUnderSelected, setParentUnderSelected, updateNodeScript, updateNode,
+    deleteNodeGeom, setGeomCsgOp,
     undo, redo, undoStack, redoStack
   } = useStore();
 
@@ -2506,7 +2766,7 @@ function App() {
     }
   };
 
-  const handleAddComponentClick = (type: 'box' | 'sphere' | 'capsule' | 'cylinder' | 'bob' | 'gear' | 'wedge' | 'pulley_wheel' | 'pulley_rope' | 'mesh' | 'openscad' | 'pyramid' | 'cone' | 'torus' | 'tube' | 'ellipsoid' | 'curve') => {
+  const handleAddComponentClick = (type: 'box' | 'sphere' | 'capsule' | 'cylinder' | 'bob' | 'gear' | 'wedge' | 'pulley_wheel' | 'pulley_rope' | 'mesh' | 'openscad' | 'pyramid' | 'cone' | 'torus' | 'tube' | 'ellipsoid' | 'curve' | 'ring') => {
     if (selectedNodeId) {
       const parentNode = findNodeById(sceneGraph.nodes, selectedNodeId);
       if (parentNode) {
@@ -2541,6 +2801,7 @@ function App() {
     else if (node.id.includes('pulley_wheel')) emoji = '🛞';
     else if (node.isPulleyRope) emoji = '🧵';
     else if (node.isCurve || node.id.includes('curve')) emoji = '🎢';
+    else if (node.csgEnabled || node.id.includes('ring')) emoji = '💠';
 
     return (
       <div key={node.id} className="flex flex-col">
@@ -2571,6 +2832,9 @@ function App() {
           <div className="pl-3 ml-2.5 border-l border-slate-200 dark:border-slate-800/60 flex flex-col gap-0.5 mb-1">
             {node.geoms.map((g: any, idx: number) => {
               const isGeomSelected = isSelected && activeGeomIndex === idx;
+              // Generated boolean output is derived data, not something to select
+              // and edit — the primitives above it are the real controls.
+              if (g.csgDerived) return null;
               let subEmoji = '🔹';
               if (g.type === 'cylinder') subEmoji = '🛢️';
               else if (g.type === 'box') subEmoji = '📦';
@@ -2583,7 +2847,10 @@ function App() {
                 else if (node.isTube) subEmoji = '🛢️';
                 else subEmoji = '📐';
               }
-              
+              // A boolean operator matters more than the shape it's applied to.
+              if (g.csg === 'difference') subEmoji = '➖';
+              else if (g.csg === 'intersection') subEmoji = '∩';
+
               return (
                 <div 
                   key={`${node.id}-geom-${idx}`}
@@ -2599,7 +2866,8 @@ function App() {
                   }`}
                 >
                   <span className="flex items-center gap-1.5 text-[11px] font-medium truncate">
-                    <span>{subEmoji}</span> <span className="truncate">{g.name || `Geom ${idx + 1}`}</span>
+                    <span>{subEmoji}</span>
+                    <span className={`truncate ${g.csg === 'difference' ? 'line-through decoration-rose-400/70' : ''}`}>{g.name || `Geom ${idx + 1}`}</span>
                   </span>
                 </div>
               );
@@ -2617,6 +2885,8 @@ function App() {
   }, [selectedNodeId, setSelectedNodeId, findNodeById, setIsLeftSidebarOpen, activeGeomIndex, setActiveGeomIndex]);
 
   useMCPBridge();
+  // Regenerates a boolean body's mesh whenever its primitives change.
+  useCsgAutoCompile();
 
   return (
     <div className={`flex flex-col h-screen w-screen transition-colors duration-200 ${darkMode ? 'dark bg-slate-950 text-slate-100' : 'bg-slate-50 text-slate-900'} font-sans`}>
@@ -3222,6 +3492,20 @@ function App() {
                 <Circle className="w-4 h-4 text-amber-600 dark:text-amber-400 scale-x-125 scale-y-75" />
               </div>
               <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Ellipsoid</span>
+            </div>
+
+            {/* Ring — a boolean body: ellipsoid minus a piercing ellipsoid */}
+            <div
+              draggable
+              onDragStart={(e) => handleDragStart(e, 'ring')}
+              onClick={() => handleAddComponentClick('ring')}
+              className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-blue-400 dark:hover:border-blue-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
+              title="Ring (ellipsoid with an ellipsoid subtracted — a boolean body you can reshape)"
+            >
+              <div className="p-1.5 bg-rose-50 dark:bg-rose-950/30 rounded-lg mb-1 group-hover:scale-105 transition-transform">
+                <Donut className="w-4 h-4 text-rose-600 dark:text-rose-400" />
+              </div>
+              <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Ring</span>
             </div>
 
             {/* Curve (rigid curved track) */}
@@ -4111,9 +4395,15 @@ function App() {
                           className="w-full px-2.5 py-1.5 border border-slate-200 rounded text-xs bg-white text-slate-700 outline-none focus:border-blue-500 cursor-pointer font-medium"
                         >
                           {selectedNode.geoms.map((g: any, idx: number) => (
+                            // Generated boolean geoms aren't editable — a body with
+                            // 16 sector colliders would otherwise bury its two real
+                            // shapes at the bottom of this list. Values stay the
+                            // real indices so activeGeomIndex still means one thing.
+                            g.csgDerived ? null : (
                             <option key={idx} value={idx}>
-                              {g.name || `Geom ${idx + 1}`} ({g.type})
+                              {g.csg === 'difference' ? '\u2796 ' : g.csg === 'intersection' ? '\u2229 ' : ''}{g.name || `Geom ${idx + 1}`} ({g.type})
                             </option>
+                            )
                           ))}
                         </select>
                         <div className="text-[10px] text-slate-400 font-semibold px-0.5 flex justify-between uppercase tracking-wider">
@@ -5112,6 +5402,186 @@ function App() {
                         />
                       </div>
                     </div>
+                  </div>
+                );
+              })()}
+
+              {/* Boolean Modifiers (CSG) — subtract/intersect one primitive with another */}
+              {(() => {
+                const source = csgSourceGeoms(selectedNode);
+                const solids = source.filter((g: any) => g.type !== 'plane');
+                const ops = source.filter((g: any) => g.csg === 'difference' || g.csg === 'intersection');
+                const isCsg = !!selectedNode.csgEnabled && ops.length > 0;
+                // Offer the section on anything made of primitives; a body that's
+                // already a single hand-authored mesh has nothing to boolean with.
+                if (!isCsg && (solids.length === 0 || selectedNode.scad !== undefined || selectedNode.isCurve || selectedNode.isPulleyRope)) return null;
+
+                const mode = selectedNode.csgCollision ?? 'auto';
+                const colliders = (selectedNode.geoms || []).filter((g: any) => g.csgDerived === 'collider');
+                const visual = (selectedNode.geoms || []).find((g: any) => g.csgDerived === 'visual');
+                const stale = isCsg && csgHashOf(selectedNode) !== selectedNode.csgHash;
+                const effectiveMode = colliders.length > 0 ? 'decompose' : (visual ? (visual.role === 'visual' ? 'primitives' : 'hull') : null);
+
+                return (
+                  <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-3">
+                    <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 mb-1 flex items-center gap-1.5">
+                      <Donut className="w-3.5 h-3.5 text-rose-500" /> Boolean Modifiers
+                      {stale && <span className="ml-auto text-[10px] font-semibold text-amber-600 animate-pulse">recompiling…</span>}
+                    </h3>
+                    <p className="text-[10px] text-slate-400 -mt-1 leading-snug">
+                      Set a shape to <strong>subtract</strong> and it's cut out of the others instead of added to them —
+                      an ellipsoid with a slimmer ellipsoid punched through it is a ring. Subtracted shapes are drawn
+                      as red outlines. To add another shape to this body, drag one in from the left sidebar.
+                    </p>
+
+                    {/* Per-geom operator */}
+                    <div className="flex flex-col gap-1.5">
+                      {source.map((g: any) => {
+                        const idx = (selectedNode.geoms || []).indexOf(g);
+                        return (
+                          <div key={g.name || idx} className="flex items-center gap-1.5">
+                            <span className={`flex-1 text-[10px] font-mono truncate ${g.csg === 'difference' ? 'text-rose-500' : 'text-slate-500'}`} title={g.name}>
+                              {g.name || `Geom ${idx + 1}`} <span className="text-slate-300">· {g.type}</span>
+                            </span>
+                            {/* Mirrors setGeomCsgOp's guard: a body must keep at
+                                least one positive shape, or there is nothing to
+                                cut into and no geometry left to emit. */}
+                            {(() => {
+                              const otherPositives = source.filter((o: any, i: number) =>
+                                i !== source.indexOf(g) && (!o.csg || o.csg === 'union')).length;
+                              const canSubtract = otherPositives > 0;
+                              return (
+                                <select
+                                  value={g.csg || 'union'}
+                                  onChange={(e) => setGeomCsgOp(selectedNode.id, idx, e.target.value as any)}
+                                  className="px-1.5 py-1 border border-slate-200 rounded text-[10px] bg-white text-slate-700 outline-none focus:border-blue-500 cursor-pointer font-semibold"
+                                  title={canSubtract ? undefined : 'This body has no other shape to cut into — drag another shape in first'}
+                                >
+                                  <option value="union">＋ add</option>
+                                  <option value="difference" disabled={!canSubtract}>－ subtract</option>
+                                  <option value="intersection" disabled={!canSubtract}>∩ intersect</option>
+                                </select>
+                              );
+                            })()}
+                            <button
+                              onClick={() => { deleteNodeGeom(selectedNode.id, idx); setActiveGeomIndex(0); }}
+                              disabled={solids.length <= 1}
+                              className="p-1 rounded border border-slate-200 text-slate-400 hover:text-rose-600 hover:border-rose-200 disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer transition-colors"
+                              title={solids.length <= 1 ? 'A body needs at least one shape' : 'Delete this shape'}
+                            >
+                              <Trash2 className="w-3 h-3" />
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {isCsg && (
+                      <>
+                        <div className="flex flex-col gap-1 pt-1 border-t border-slate-100">
+                          <label className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">Collision</label>
+                          <select
+                            value={mode}
+                            onChange={(e) => updateNode(selectedNode.id, { csgCollision: e.target.value as any })}
+                            className="w-full px-2.5 py-1.5 border border-slate-200 rounded text-xs bg-white text-slate-700 outline-none focus:border-blue-500 cursor-pointer font-medium"
+                          >
+                            <option value="auto">Auto — decompose if there's a hole axis</option>
+                            <option value="decompose">Convex sectors — holes collide</option>
+                            <option value="primitives">Source primitives — holes are solid</option>
+                            <option value="hull">Convex hull — whole shape is solid</option>
+                          </select>
+                          {/* MuJoCo hulls every mesh geom, so this trade-off is
+                              unavoidable and worth stating outright rather than
+                              letting it surprise someone mid-experiment. */}
+                          <p className="text-[10px] text-slate-400 leading-snug mt-0.5">
+                            {effectiveMode === 'decompose'
+                              ? `Colliding as ${colliders.length} convex sectors — the hole is real, and a peg can pass through it. Each sector spans a chord of the inner surface, so it intrudes ~${(100 * (1 - Math.cos(Math.PI / (selectedNode.csgSectors ?? CSG_DEFAULT_SECTORS)))).toFixed(1)}% of the hole radius.`
+                              : effectiveMode === 'hull'
+                                ? 'One mesh geom that both draws and collides. MuJoCo takes its convex hull, so every hole and dip is filled for contact.'
+                                : 'The boolean mesh is visual only; the source primitives collide. Exact convex contact, but holes are solid.'}
+                          </p>
+                        </div>
+
+                        {(mode === 'auto' || mode === 'decompose') && (
+                          <>
+                            <div className="flex flex-col gap-1">
+                              <label className="text-xs font-medium text-slate-500 flex justify-between">
+                                Sectors <span>{selectedNode.csgSectors ?? CSG_DEFAULT_SECTORS}</span>
+                              </label>
+                              <input
+                                type="range" min="4" max="48" step="1"
+                                value={selectedNode.csgSectors ?? CSG_DEFAULT_SECTORS}
+                                onChange={(e) => updateNode(selectedNode.id, { csgSectors: parseInt(e.target.value) })}
+                                className="w-full accent-blue-500 cursor-pointer"
+                              />
+                            </div>
+                            <div className="flex items-center justify-between gap-2">
+                              <label className="text-xs font-medium text-slate-500">Hole axis</label>
+                              <select
+                                value={selectedNode.csgHoleAxis ?? 'auto'}
+                                onChange={(e) => updateNode(selectedNode.id, { csgHoleAxis: e.target.value as any })}
+                                className="px-2 py-1 border border-slate-200 rounded text-[11px] bg-white text-slate-700 outline-none focus:border-blue-500 cursor-pointer font-medium"
+                              >
+                                <option value="auto">Auto</option>
+                                <option value="x">X</option>
+                                <option value="y">Y</option>
+                                <option value="z">Z</option>
+                              </select>
+                            </div>
+                          </>
+                        )}
+
+                        <div className="flex flex-col gap-1">
+                          <label className="text-xs font-medium text-slate-500 flex justify-between">
+                            Total mass <span>{(selectedNode.csgMass ?? 1).toFixed(3)} kg</span>
+                          </label>
+                          <input
+                            type="range" min="0.01" max="20" step="0.01"
+                            value={selectedNode.csgMass ?? 1}
+                            onChange={(e) => updateNode(selectedNode.id, { csgMass: parseFloat(e.target.value) })}
+                            className="w-full accent-blue-500 cursor-pointer"
+                          />
+                          {/* MuJoCo would derive mass from the hull's volume, which
+                              for a ring is wildly more material than there is. Show
+                              both figures so the number above is a choice, not a guess. */}
+                          {selectedNode.csgVolume !== undefined && (
+                            <p className="text-[10px] text-slate-400 leading-snug">
+                              True volume <span className="font-mono text-slate-500">{(selectedNode.csgVolume * 1e6).toFixed(1)} cm³</span>
+                              {selectedNode.csgHullVolume ? <> · convex hull <span className="font-mono text-slate-500">{(selectedNode.csgHullVolume * 1e6).toFixed(1)} cm³</span></> : null}
+                              {selectedNode.csgVolume > 0 && <> · density <span className="font-mono text-slate-500">{((selectedNode.csgMass ?? 1) / selectedNode.csgVolume).toFixed(0)} kg/m³</span></>}
+                            </p>
+                          )}
+                        </div>
+
+                        {selectedNode.csgWarning && (
+                          <div className="text-[10px] text-amber-800 bg-amber-50 border border-amber-200 rounded p-1.5 leading-snug">{selectedNode.csgWarning}</div>
+                        )}
+                        {selectedNode.csgError && (
+                          <div className="text-[10px] text-rose-800 bg-rose-50 border border-rose-200 rounded p-1.5 leading-snug">
+                            <strong>Boolean failed:</strong> <span className="font-mono break-all">{selectedNode.csgError}</span>
+                          </div>
+                        )}
+
+                        {visual && (
+                          <div className="text-[10px] text-slate-400 font-mono">
+                            {(visual.vertices?.length ?? 0) / 3} verts · {(visual.faces?.length ?? 0) / 3} tris
+                            {colliders.length > 0 ? ` · ${colliders.length} colliders` : ''}
+                          </div>
+                        )}
+
+                        {selectedNode.csgScad && (
+                          <details className="text-[10px]">
+                            <summary className="cursor-pointer text-slate-500 font-semibold select-none">Generated OpenSCAD</summary>
+                            <textarea
+                              readOnly
+                              value={selectedNode.csgScad}
+                              className="w-full h-32 mt-1.5 font-mono text-[10px] leading-relaxed p-2 bg-slate-950 text-emerald-300 rounded border border-slate-700 resize-y"
+                              spellCheck={false}
+                            />
+                          </details>
+                        )}
+                      </>
+                    )}
                   </div>
                 );
               })()}

@@ -1,5 +1,6 @@
 import { create } from 'zustand';
-import type { SceneGraph, SceneNode } from '../types/scene';
+import type { SceneGraph, SceneNode, CsgOp } from '../types/scene';
+import { type CsgResult, CSG_DEFAULT_SECTORS } from '../utils/csg';
 import { compileToMJCF } from '../utils/mjcf';
 import { PRESETS, pendulumPreset, generateGearGeoms } from '../presets/presetScenes';
 import { PhysicsWorkerClient, type BuiltResult, type FrameSnapshot } from './physicsWorkerClient';
@@ -244,6 +245,15 @@ const getNodeWorldPos = (nodes: any[], targetId: string, currentOffset: [number,
   return null;
 };
 
+const findNode = (nodes: any[], id: string): any | null => {
+  for (const node of nodes || []) {
+    if (node.id === id || node.name === id) return node;
+    const child = findNode(node.children, id);
+    if (child) return child;
+  }
+  return null;
+};
+
 const addChildNode = (nodes: any[], parentId: string, newNode: any): boolean => {
   for (const node of nodes) {
     if (node.id === parentId) {
@@ -360,8 +370,13 @@ export interface PhysicsState {
   updateNodeComposite: (id: string, params: Partial<any>) => void;
   
   setParentUnderSelected: (val: boolean) => void;
-  addComponent: (type: 'box' | 'sphere' | 'capsule' | 'cylinder' | 'bob' | 'gear' | 'wedge' | 'pulley_wheel' | 'pulley_rope' | 'mesh' | 'openscad' | 'pyramid' | 'cone' | 'torus' | 'tube' | 'ellipsoid' | 'curve', position: number[]) => void;
+  addComponent: (type: 'box' | 'sphere' | 'capsule' | 'cylinder' | 'bob' | 'gear' | 'wedge' | 'pulley_wheel' | 'pulley_rope' | 'mesh' | 'openscad' | 'pyramid' | 'cone' | 'torus' | 'tube' | 'ellipsoid' | 'curve' | 'ring', position: number[]) => void;
   updateNodeScad: (id: string, scadCode: string, compiledData: { vertices: number[], faces: number[], renderVertices: number[] }, skipRecompile?: boolean) => void;
+  // --- CSG (boolean modifiers) ---
+  deleteNodeGeom: (nodeId: string, geomIndex: number) => void;
+  setGeomCsgOp: (nodeId: string, geomIndex: number, csg: CsgOp) => void;
+  applyNodeCsg: (nodeId: string, result: CsgResult, skipRecompile?: boolean) => void;
+  setNodeCsgError: (nodeId: string, error: string | null, hash?: string) => void;
   recompile: (overrideScene?: SceneGraph, overrideSelectedId?: string | null, forceReset?: boolean, keepPreset?: boolean) => Promise<void>;
   loadPreset: (name: string) => void;
   resetSimulation: () => void;
@@ -595,6 +610,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   setCameraOverride: (override) => set({ cameraOverride: override }),
   
   resetSimulation: () => {
+    getPhysicsWorkerClient().setPlaying(false);
     set({ isPlaying: false });
     get().recompile(undefined, undefined, true, true);
   },
@@ -602,6 +618,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   loadPreset: (name) => {
     const prev = get().activePreset;
     get().prepareForDiscreteChange();
+    getPhysicsWorkerClient().setPlaying(false);
     set({ isPlaying: false, selectedNodeId: null, activePreset: name });
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('physics:preset-loaded', { detail: { name, prev } }));
@@ -1263,6 +1280,88 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     }
   },
 
+  // --- CSG (boolean modifiers) ---------------------------------------------
+  // A negative geom is an ordinary primitive with csg:'difference' — it's the
+  // node's csgEnabled flag plus that marker that turn the body into a boolean.
+  // Shapes get onto a body the ordinary ways (drag-in, presets, MCP); flipping
+  // one to 'difference' is what makes it a hole.
+  deleteNodeGeom: (nodeId, geomIndex) => {
+    get().prepareForDiscreteChange();
+    const newScene = cloneSceneGraph(get().sceneGraph);
+    const node = findNode(newScene.nodes, nodeId);
+    if (!node || !node.geoms || geomIndex < 0 || geomIndex >= node.geoms.length) return;
+    node.geoms = node.geoms.filter((_: any, i: number) => i !== geomIndex);
+    // Losing the last boolean operator leaves an ordinary compound body; drop
+    // the derived mesh with it so the primitives come back into view.
+    if (node.csgEnabled && !node.geoms.some((g: any) => !g.csgDerived && (g.csg === 'difference' || g.csg === 'intersection'))) {
+      node.geoms = node.geoms.filter((g: any) => !g.csgDerived);
+      node.csgEnabled = false;
+      delete node.csgHash;
+    }
+    set({ sceneGraph: newScene });
+    get().recompile(newScene, nodeId, false);
+  },
+
+  setGeomCsgOp: (nodeId, geomIndex, csg) => {
+    get().recordInteraction('geom-csg-op');
+    const newScene = cloneSceneGraph(get().sceneGraph);
+    const node = findNode(newScene.nodes, nodeId);
+    if (!node?.geoms?.[geomIndex]) return;
+    // There has to be something left to cut into. Subtracting a body's only
+    // shape would leave it with no positive geometry at all: nothing to render,
+    // nothing to collide, and a MuJoCo body with no geoms. Refuse instead.
+    if (csg !== 'union') {
+      const positivesLeft = node.geoms.filter((g: any, i: number) =>
+        !g.csgDerived && i !== geomIndex && (!g.csg || g.csg === 'union')).length;
+      if (positivesLeft === 0) return;
+    }
+    node.geoms[geomIndex].csg = csg;
+    const hasOps = node.geoms.some((g: any) => !g.csgDerived && (g.csg === 'difference' || g.csg === 'intersection'));
+    node.csgEnabled = hasOps;
+    if (hasOps) {
+      if (node.csgCollision === undefined) node.csgCollision = 'auto';
+      if (node.csgSectors === undefined) node.csgSectors = CSG_DEFAULT_SECTORS;
+    } else {
+      // Back to an ordinary compound body — the stale boolean mesh would
+      // otherwise keep drawing over the primitives.
+      node.geoms = node.geoms.filter((g: any) => !g.csgDerived);
+      delete node.csgHash;
+    }
+    set({ sceneGraph: newScene });
+    get().recompile(newScene, nodeId, false);
+  },
+
+  // Installs the output of evaluateNodeCsg: derived geoms replace the previous
+  // ones wholesale, source primitives are untouched.
+  applyNodeCsg: (nodeId, result, skipRecompile) => {
+    const newScene = cloneSceneGraph(get().sceneGraph);
+    const node = findNode(newScene.nodes, nodeId);
+    if (!node) return;
+    const source = (node.geoms || []).filter((g: any) => !g.csgDerived);
+    node.geoms = [...source, ...result.geoms];
+    node.csgHash = result.hash;
+    node.csgScad = result.scad;
+    node.csgVolume = result.volume;
+    node.csgHullVolume = result.hullVolume;
+    node.csgCollision = node.csgCollision ?? 'auto';
+    if (result.warning) node.csgWarning = result.warning; else delete node.csgWarning;
+    delete node.csgError;
+    set({ sceneGraph: newScene });
+    // Bulk callers recompile once at the end — see the same note on updateNodeScad.
+    if (!skipRecompile) get().recompile(newScene, undefined, false);
+  },
+
+  setNodeCsgError: (nodeId, error, hash) => {
+    const newScene = cloneSceneGraph(get().sceneGraph);
+    const node = findNode(newScene.nodes, nodeId);
+    if (!node) return;
+    if (error) node.csgError = error; else delete node.csgError;
+    // Record the hash that failed so the auto-compiler doesn't retry the same
+    // broken shape on every store update — only a real edit re-arms it.
+    if (error && hash) node.csgHash = hash;
+    set({ sceneGraph: newScene });
+  },
+
   updateNode: (id, updates) => {
     get().recordInteraction('node');
     const newScene = cloneSceneGraph(get().sceneGraph);
@@ -1551,8 +1650,21 @@ export const useStore = create<PhysicsState>()((set, get) => ({
         size = [0.12, 0.08, 0.06];
         rgba = [0.85, 0.55, 0.15, 1]; // yellow/orange
         joints = isChildJoint ? [{ name: `${id}_hinge`, type: 'hinge', axis: [0, 1, 0], pos: [0, 0, 0], damping: 0.5 }] : [{ name: `${id}_free`, type: 'free' }];
+      } else if (type === 'ring') {
+        // The canonical boolean: a flattened ellipsoid with a slimmer ellipsoid
+        // punched through it along Z. The negative is only a little taller than
+        // the disc: it has to pierce right through (a flush cut leaves coincident
+        // faces), but overshooting by multiples just makes a big outline in the
+        // editor for no benefit. Nothing here is special-cased downstream —
+        // it's just two ordinary primitives and a csg marker, so every slider in
+        // the panel reshapes it and the mesh is regenerated from scratch.
+        geoms = [
+          { name: `${id}_body`, type: 'ellipsoid', size: [0.12, 0.12, 0.04], mass: 1, rgba: [0.85, 0.65, 0.2, 1], condim: 3 },
+          { name: `${id}_hole`, type: 'ellipsoid', size: [0.06, 0.06, 0.07], csg: 'difference', pos: [0, 0, 0], rgba: [0.9, 0.25, 0.35, 1] },
+        ];
+        joints = [{ name: `${id}_free`, type: 'free' }];
       }
-      if (type !== 'mesh' && type !== 'openscad' && type !== 'pyramid' && type !== 'cone' && type !== 'torus' && type !== 'tube') {
+      if (type !== 'mesh' && type !== 'openscad' && type !== 'pyramid' && type !== 'cone' && type !== 'torus' && type !== 'tube' && type !== 'ring') {
         geoms = [{ name: `${id}_geom`, type: geomType, size, mass, rgba }];
       }
     }
@@ -1593,7 +1705,10 @@ export const useStore = create<PhysicsState>()((set, get) => ({
       } : {}),
       ...(type === 'pulley_wheel' ? {
         isPulleyWheel: true,
-        pulleyRadius: 0.4
+        // Must match the flange geoms above (r = 0.08). It was 0.4, so a
+        // dragged-in wheel drew its rope on a 0.4m rim around an 0.08m wheel
+        // and coupled the rope kinematics to the wrong radius.
+        pulleyRadius: 0.08
       } : {}),
       ...(type === 'pulley_rope' ? {
         isPulleyRope: true,
@@ -1603,6 +1718,12 @@ export const useStore = create<PhysicsState>()((set, get) => ({
       } : {}),
       ...(type === 'openscad' ? {
         scad: `// Example OpenSCAD Code\ndifference() {\n  cube([0.5, 0.5, 0.5], center=true);\n  sphere(d=0.6, $fn=16);\n}`
+      } : {}),
+      ...(type === 'ring' ? {
+        csgEnabled: true,
+        csgCollision: 'auto' as const,
+        csgSectors: CSG_DEFAULT_SECTORS,
+        csgMass: 1,
       } : {}),
       ...(type === 'curve' ? {
         isCurve: true,
@@ -1739,7 +1860,9 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     // over the exact current qpos/qvel/time (from the live `data` mirror,
     // kept up to date by FRAME messages) so it's invisible rather than a
     // visible reset. See the periodic timer below this store definition.
-    const { data, sceneGraph, gravityZ, windX, windY, density, floorFriction, floorBounce, isPlaying } = get();
+    // isPlaying is deliberately read later via get(), not destructured here: the
+    // await below means the snapshot could be stale by the time it's used.
+    const { data, sceneGraph, gravityZ, windX, windY, density, floorFriction, floorBounce } = get();
     if (!data) return;
     const seedState = {
       qpos: Array.from(data.qpos as Float64Array),
@@ -1755,7 +1878,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
       const built = await client.build(xml, sceneGraph, false, seedState);
       if (!built.ok) throw new Error(built.error || 'Unknown physics worker build error');
       set({ mujoco: MUJOCO_SHIM, model: buildModelMirror(built), data: buildDataMirror(built), recompileId: Date.now(), lastCompileError: null });
-      if (isPlaying) client.setPlaying(true);
+      if (get().isPlaying) client.setPlaying(true);
     } catch (e) {
       console.error('Seamless proactive worker recycle failed:', e);
     }
