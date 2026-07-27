@@ -1220,19 +1220,29 @@ export const useStore = create<PhysicsState>()((set, get) => ({
       for (const node of nodes) {
         if (node.id === id || node.name === id) {
           node.scad = scad;
-          if (node.geoms && node.geoms.length > 0) {
-            let meshGeom = node.geoms.find((g: any) => g.type === 'mesh');
-            if (!meshGeom && node.geoms[0]) {
-              meshGeom = node.geoms[0];
-            }
-            if (meshGeom) {
-              meshGeom.type = 'mesh';
-              meshGeom.dynamic = true;
-              meshGeom.vertices = compiledData.vertices;
-              meshGeom.faces = compiledData.faces;
-              meshGeom.renderVertices = compiledData.renderVertices;
-            }
+          if (!node.geoms) {
+            node.geoms = [];
           }
+          let meshGeom = node.geoms.find((g: any) => g.type === 'mesh');
+          if (!meshGeom && node.geoms.length > 0) {
+            meshGeom = node.geoms[0];
+          }
+          if (!meshGeom) {
+            meshGeom = {
+              id: `geom_${Math.random().toString(36).substring(2, 8)}`,
+              name: `${node.name || id}_mesh`,
+              type: 'mesh',
+              dynamic: true,
+              rgba: [0.3, 0.6, 0.9, 1],
+              mass: 1
+            };
+            node.geoms.push(meshGeom);
+          }
+          meshGeom.type = 'mesh';
+          meshGeom.dynamic = true;
+          meshGeom.vertices = compiledData.vertices;
+          meshGeom.faces = compiledData.faces;
+          meshGeom.renderVertices = compiledData.renderVertices;
           return true;
         }
         if (traverse(node.children)) return true;
@@ -1344,17 +1354,17 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     const isChildJoint = isChild;
     
     if (type === 'gear') {
-      const radius = 0.5;
+      const radius = 0.1;
       const teeth = 12;
       const color = [0.5, 0.5, 0.5, 1];
       geoms = generateGearGeoms(id, radius, teeth, color, false);
       joints = [{ name: `${id}_hinge`, type: 'hinge', axis: [0, 0, 1], damping: 0.5 }];
     } else if (type === 'pulley_wheel') {
-      const r = 0.4;
-      const thickness = 0.08;
+      const r = 0.08;
+      const thickness = 0.04;
       const spindle_r = r * 0.8;
-      const spindle_h = thickness / 2 - 0.01;
-      const flange_h = 0.01;
+      const spindle_h = thickness / 2 - 0.005;
+      const flange_h = 0.005;
       
       geoms = [
         { name: `${id}_spindle`, type: 'cylinder', size: [spindle_r, spindle_h], pos: [0, 0, 0], euler: [90, 0, 0], rgba: [0.3, 0.4, 0.6, 1], mass: 0.5 },
@@ -1374,35 +1384,35 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     } else {
       if (type === 'box') {
         geomType = 'box';
-        size = [0.2, 0.2, 0.2];
+        size = [0.05, 0.05, 0.05];
         rgba = [0.8, 0.2, 0.2, 1];
         joints = isChildJoint ? [{ name: `${id}_hinge`, type: 'hinge', axis: [0, 1, 0], pos: [0, 0, 0], damping: 0.5 }] : [{ name: `${id}_free`, type: 'free' }];
       } else if (type === 'sphere') {
         geomType = 'sphere';
-        size = [0.2];
+        size = [0.05];
         rgba = [0.2, 0.8, 0.2, 1];
         joints = isChildJoint ? [{ name: `${id}_hinge`, type: 'hinge', axis: [0, 1, 0], pos: [0, 0, 0], damping: 0.5 }] : [{ name: `${id}_free`, type: 'free' }];
       } else if (type === 'capsule') {
         geomType = 'capsule';
-        size = [0.04, 0.4];
+        size = [0.02, 0.15];
         rgba = [0.6, 0.6, 0.6, 1];
         // Standalone poles are free bodies and fall like any other shape; only
         // when nested under a parent does a hinge (pendulum rod) make sense.
         joints = isChildJoint ? [{ name: `${id}_hinge`, type: 'hinge', axis: [0, 1, 0], pos: [0, 0, 0], damping: 0.1 }] : [{ name: `${id}_free`, type: 'free' }];
       } else if (type === 'cylinder') {
         geomType = 'cylinder';
-        size = [0.2, 0.1];
+        size = [0.05, 0.04];
         rgba = [0.9, 0.6, 0.1, 1];
         joints = isChildJoint ? [{ name: `${id}_hinge`, type: 'hinge', axis: [0, 1, 0], pos: [0, 0, 0], damping: 0.5 }] : [{ name: `${id}_free`, type: 'free' }];
       } else if (type === 'bob') {
         geomType = 'sphere';
-        size = [0.15];
+        size = [0.06];
         rgba = [0.2, 0.6, 1.0, 1];
         mass = 10.0;
         joints = [{ name: `${id}_hinge`, type: 'hinge', axis: [0, 1, 0], pos: [0, 0, 0], damping: 0.1 }];
       } else if (type === 'wedge') {
         geomType = 'box';
-        size = [1.0, 0.5, 0.25];
+        size = [0.2, 0.1, 0.08];
         rgba = [0.8, 0.5, 0.2, 1];
         // A wedge is a solid object, not a fixture: it falls and can be tipped
         // over like anything else. Set the joint to Fixed to weld it in place.
@@ -1467,9 +1477,9 @@ export const useStore = create<PhysicsState>()((set, get) => ({
         }];
         joints = [{ name: `${id}_free`, type: 'free' }];
       } else if (type === 'pyramid') {
-        const w = 0.5;
-        const d = 0.5;
-        const h = 0.5;
+        const w = 0.2;
+        const d = 0.2;
+        const h = 0.2;
         const { vertices, faces, renderVertices } = generatePyramidMeshData(w, d, h);
         geoms = [{
           name: `${id}_mesh`,
@@ -1485,8 +1495,8 @@ export const useStore = create<PhysicsState>()((set, get) => ({
         }];
         joints = [{ name: `${id}_free`, type: 'free' }];
       } else if (type === 'cone') {
-        const r = 0.3;
-        const h = 0.6;
+        const r = 0.1;
+        const h = 0.2;
         const { vertices, faces, renderVertices } = generateConeMeshData(r, h, 16);
         geoms = [{
           name: `${id}_mesh`,
@@ -1502,8 +1512,8 @@ export const useStore = create<PhysicsState>()((set, get) => ({
         }];
         joints = [{ name: `${id}_free`, type: 'free' }];
       } else if (type === 'torus') {
-        const R = 0.4;
-        const r = 0.1;
+        const R = 0.15;
+        const r = 0.04;
         const { vertices, faces, renderVertices } = generateTorusMeshData(R, r, 24, 16);
         geoms = [{
           name: `${id}_mesh`,
@@ -1519,9 +1529,9 @@ export const useStore = create<PhysicsState>()((set, get) => ({
         }];
         joints = [{ name: `${id}_free`, type: 'free' }];
       } else if (type === 'tube') {
-        const r1 = 0.2;
-        const r2 = 0.3;
-        const h = 0.5;
+        const r1 = 0.06;
+        const r2 = 0.1;
+        const h = 0.15;
         const { vertices, faces, renderVertices } = generateTubeMeshData(r1, r2, h, 24);
         geoms = [{
           name: `${id}_mesh`,
@@ -1538,7 +1548,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
         joints = [{ name: `${id}_free`, type: 'free' }];
       } else if (type === 'ellipsoid') {
         geomType = 'ellipsoid';
-        size = [0.3, 0.2, 0.15];
+        size = [0.12, 0.08, 0.06];
         rgba = [0.85, 0.55, 0.15, 1]; // yellow/orange
         joints = isChildJoint ? [{ name: `${id}_hinge`, type: 'hinge', axis: [0, 1, 0], pos: [0, 0, 0], damping: 0.5 }] : [{ name: `${id}_free`, type: 'free' }];
       }
@@ -1613,7 +1623,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     get().recompile(newScene, selectId);
   },
   
-  recompile: async (overrideScene?: SceneGraph, overrideSelectedId?: string | null, forceReset?: boolean, keepPreset?: boolean) => {
+  recompile: async (overrideScene?: SceneGraph, overrideSelectedId?: string | null, forceReset?: boolean, _keepPreset?: boolean) => {
     // We only debounce if it's NOT a force reset (which is used by presets/loaders)
     if (!forceReset) {
       if ((window as any)._recompileTimeoutId) clearTimeout((window as any)._recompileTimeoutId);

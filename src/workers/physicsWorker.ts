@@ -98,10 +98,13 @@ const rebuildIdCaches = () => {
   const collectIds = (nodes: SceneNode[]) => {
     if (!nodes) return;
     for (const node of nodes) {
-      const bId = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY.value, node.id);
+      let bId = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY.value, node.name || node.id);
+      if (bId === -1 && node.id) {
+        bId = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY.value, node.id);
+      }
       if (bId !== -1) {
         bCache[node.id] = bId;
-        if (node.name && node.name !== node.id) bCache[node.name] = bId;
+        if (node.name) bCache[node.name] = bId;
       }
       node.joints?.forEach((j: any) => {
         const jId = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT.value, j.name);

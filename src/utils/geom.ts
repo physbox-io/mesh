@@ -342,48 +342,35 @@ export function generateCurveGeoms(
 // face, which is fine for something welded in place but leaves a free-jointed
 // wedge resting on a 5cm plate with its visible bulk buried underground.
 export function generateWedgeMeshData(width: number, depth: number, height: number): MeshData {
-  const L = Math.sqrt(width * width + height * height);
-  const cosTheta = width / L;
-  const H_local = height / cosTheta;
-  const halfL = L / 2;
+  const halfW = width / 2;
   const halfD = depth / 2;
 
-  // The slab this replaced was half a centimetre thick either side of the
-  // slanted plane, so anything riding the ramp contacted it at z = +PAD, not
-  // z = 0. Lifting the whole prism by PAD keeps that contact surface bit-exact
-  // and leaves ramp presets behaving precisely as they did before.
-  const PAD = 0.025;
-  const top = PAD;
-  const bottom = PAD - H_local;
-
-  // Z-up, used directly by the renderer / stored for reference.
-  const renderVertices = [
-    -halfL, -halfD, top,
-     halfL, -halfD, top,
-     halfL,  halfD, top,
-    -halfL,  halfD, top,
-    -halfL, -halfD, bottom,
-    -halfL,  halfD, bottom,
-  ];
-
-  // Three.js Y-up: the inverse of the (x, y, z) -> (x, -z, y) swap that
-  // compileToMJCF applies to `vertices` on its way into the <asset> block.
+  // Three.js Y-up vertices (Y=UP, Z=DEPTH, X=RIGHT)
   const vertices = [
-    -halfL, top,    halfD,
-     halfL, top,    halfD,
-     halfL, top,   -halfD,
-    -halfL, top,   -halfD,
-    -halfL, bottom, halfD,
-    -halfL, bottom, -halfD,
+    -halfW, height, -halfD, // 0: back-left top
+    -halfW, height,  halfD, // 1: back-right top
+     halfW, 0,      -halfD, // 2: toe-left bottom
+     halfW, 0,       halfD, // 3: toe-right bottom
+    -halfW, 0,      -halfD, // 4: back-left bottom
+    -halfW, 0,       halfD, // 5: back-right bottom
   ];
 
-  // MuJoCo takes the convex hull regardless, but keep the winding outward-facing.
+  // MuJoCo Z-up renderVertices (Z=UP, Y=DEPTH, X=RIGHT)
+  const renderVertices = [
+    -halfW, -halfD, height, // 0
+    -halfW,  halfD, height, // 1
+     halfW, -halfD, 0,      // 2
+     halfW,  halfD, 0,      // 3
+    -halfW, -halfD, 0,      // 4
+    -halfW,  halfD, 0,      // 5
+  ];
+
   const faces = [
-    0, 2, 1, 0, 3, 2, // slanted top
-    1, 5, 4, 1, 2, 5, // bottom
-    0, 4, 5, 0, 5, 3, // vertical back wall
-    0, 1, 4,          // front triangle
-    3, 5, 2,          // back triangle
+    0, 1, 3,  0, 3, 2, // Slanted top face
+    4, 2, 3,  4, 3, 5, // Bottom flat face
+    4, 5, 1,  4, 1, 0, // Back vertical wall
+    4, 0, 2,           // Left triangle side (z = -halfD)
+    5, 3, 1,           // Right triangle side (z = +halfD)
   ];
 
   return { vertices, faces, renderVertices };

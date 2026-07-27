@@ -175,7 +175,6 @@ export const compileToMJCF = (
         const w = node.width || 2.0;
         const h = node.height || 0.5;
         const d = node.depth || 1.0;
-        const theta = node.wedgeAngle !== undefined ? node.wedgeAngle : (Math.atan(h / w) * 180 / Math.PI);
 
         if (node.geoms && node.geoms.length > 0) {
           // Collide as the solid triangular prism the user actually sees, not as
@@ -189,11 +188,6 @@ export const compileToMJCF = (
           g.faces = faces;
           g.renderVertices = renderVertices;
         }
-        node.euler = [0, theta, 0];
-
-        // Dynamically lift the Z position of the wedge so its base is perfectly flush with the ground plane
-        const zOffset = h / 2;
-        node.pos[2] += zOffset;
       }
       preprocessNodes(node.children);
     }
@@ -346,13 +340,14 @@ export const compileToMJCF = (
       const dy = g1.pos[1] - g2.pos[1];
       const dz = g1.pos[2] - g2.pos[2];
       const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-      // Touch/meshing criteria: centers within sum of radii + 15% margin
-      const maxMeshingDist = (g1.radius + g2.radius) * 1.15;
+      // Touch/meshing criteria: centers within sum of radii + 20% margin
+      const maxMeshingDist = (g1.radius + g2.radius) * 1.2;
       if (dist <= maxMeshingDist) {
         const pairKey = [g1.jointName, g2.jointName].sort().join('::');
         if (!coupledPairs.has(pairKey) && !explicitlyCoupledJointPairs.has(pairKey)) {
           coupledPairs.add(pairKey);
-          equalityConstraints += `\n    <joint name="gear_coupling_${coupledPairs.size}" joint1="${g1.jointName}" joint2="${g2.jointName}" polycoef="0 -1 0 0 0" />`;
+          const ratio = -(g1.radius / (g2.radius || 0.1));
+          equalityConstraints += `\n    <joint name="gear_coupling_${coupledPairs.size}" joint1="${g1.jointName}" joint2="${g2.jointName}" polycoef="0 ${ratio.toFixed(6)} 0 0 0" />`;
         }
       }
     }
@@ -373,7 +368,8 @@ export const compileToMJCF = (
       if (dist <= 0.5) {
         const pairKey = [pinionJoint, rackJoint].sort().join('::');
         if (!explicitlyCoupledJointPairs.has(pairKey)) {
-          equalityConstraints += `\n    <joint name="pinion_rack_coupling" joint1="${pinionJoint}" joint2="${rackJoint}" polycoef="0 0.2 0 0 0" />`;
+          const pinionRadius = pInfo ? pInfo.size[0] : 0.08;
+          equalityConstraints += `\n    <joint name="pinion_rack_coupling" joint1="${pinionJoint}" joint2="${rackJoint}" polycoef="0 ${pinionRadius} 0 0 0" />`;
         }
       }
     }
@@ -406,7 +402,7 @@ export const compileToMJCF = (
               return null;
             };
             const wheelNode = findWheel(sceneCopy.nodes);
-            const radius = wheelNode?.pulleyRadius || 0.4;
+            const radius = wheelNode?.pulleyRadius || 0.08;
             
             // theta = x / radius -> angularRot = linearPos / radius
             equalityConstraints += `\n    <joint name="rope_coupling_angular_${ropeCouplingIndex}" joint1="${leftJoint}" joint2="${wheelJoint}" polycoef="0 ${1.0 / radius} 0 0 0" />`;
@@ -461,8 +457,8 @@ export const compileToMJCF = (
     <geom solref="0.02 1" solimp="0.99 0.9999 0.0001 0.5 2" />
   </default>
   <worldbody>
-    <light directional="true" pos="-0.5 0.5 3" dir="0.5 -0.5 -3" diffuse="0.8 0.8 0.8" />
-    <geom name="floor" type="plane" size="0 0 0.1" pos="0 0 0" rgba="0.9 0.9 0.9 1" friction="${floorFriction} 0.005 0.0001" solref="0.02 ${Math.max(0, 1 - floorBounce).toFixed(3)}" solimp="0.99 0.9999 0.0001 0.5 2" />
+    <light directional="true" pos="-0.3 0.3 1.5" dir="0.3 -0.3 -1.5" diffuse="0.8 0.8 0.8" />
+    <geom name="floor" type="plane" size="0.5 0.5 0.1" pos="0 0 0" rgba="0.9 0.9 0.9 1" friction="${floorFriction} 0.005 0.0001" solref="0.02 ${Math.max(0, 1 - floorBounce).toFixed(3)}" solimp="0.99 0.9999 0.0001 0.5 2" />
     
     ${sceneCopy.nodes.map(buildNode).join('\n')}
   </worldbody>

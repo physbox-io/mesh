@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { X, Sparkles, Brain, Wand2, Loader2, AlertCircle, HelpCircle, Activity, Printer, Send, CheckCircle2, RefreshCw } from 'lucide-react';
+import { X, Brain, Wand2, Loader2, AlertCircle, HelpCircle, Activity, Printer, Send, CheckCircle2, RefreshCw } from 'lucide-react';
 import { useStore } from '../store/useStore';
 import { compileSCAD } from '../utils/openscad';
 import SYSTEM_INSTRUCTIONS from './systemInstructions.txt?raw';
@@ -11,7 +11,13 @@ interface AICopilotPanelProps {
 interface DiagnosticQuestion {
   id: string;
   question: string;
-  options: string[];
+  options?: string[];
+}
+
+interface ProposedModification {
+  id: string;
+  text: string;
+  selected: boolean;
 }
 
 interface ChatMessage {
@@ -21,6 +27,8 @@ interface ChatMessage {
   content: string;
   questions?: DiagnosticQuestion[];
   userAnswers?: Record<string, string>;
+  userAnswersSubmitted?: boolean;
+  proposedModifications?: ProposedModification[];
   nodes?: any[] | null;
   isImplemented?: boolean;
   hasError?: boolean;
@@ -97,12 +105,18 @@ const extractJSON = (text: string): any => {
   return null;
 };
 
-const parseAIResponse = (text: string): { markdown: string; questions: DiagnosticQuestion[]; nodes: any[] | null } => {
+const parseAIResponse = (text: string): {
+  markdown: string;
+  questions: DiagnosticQuestion[];
+  proposedModifications: ProposedModification[];
+  nodes: any[] | null;
+} => {
   let questions: DiagnosticQuestion[] = [];
+  let proposedModifications: ProposedModification[] = [];
   let nodes: any[] | null = null;
   let markdown = cleanLaTeXMath(text);
 
-  // Scan code blocks for questions or nodes
+  // Scan code blocks for questions, proposedModifications, or nodes
   const codeBlockRegex = /```(?:json)?\s*([\s\S]*?)\s*```/gi;
   let match;
   const blocksToRemove: string[] = [];
@@ -112,33 +126,32 @@ const parseAIResponse = (text: string): { markdown: string; questions: Diagnosti
     const code = match[1].trim();
 
     try {
-      let parsed = null;
-      try {
-        parsed = JSON.parse(code);
-      } catch (e) {
-        parsed = JSON.parse(cleanJSONString(code));
-      }
-
+      const parsed = extractJSON(code);
       if (parsed) {
-        // Extract questions
         if (parsed.questions && Array.isArray(parsed.questions)) {
           questions = parsed.questions.map((q: any, idx: number) => ({
             id: q.id || `q_${idx}`,
             question: cleanLaTeXMath(q.question || ''),
             options: Array.isArray(q.options) && q.options.length > 0
-              ? q.options.slice(0, 4).map((o: any) => cleanLaTeXMath(String(o)))
-              : ['Yes', 'No']
+              ? q.options.map((o: any) => cleanLaTeXMath(String(o)))
+              : undefined
           })).filter((q: any) => q.question.trim().length > 0);
           blocksToRemove.push(fullMatch);
         }
 
-        // Extract nodes object format { "nodes": [...] }
+        if (parsed.proposedModifications && Array.isArray(parsed.proposedModifications)) {
+          proposedModifications = parsed.proposedModifications.map((m: any, idx: number) => ({
+            id: m.id || `mod_${idx}`,
+            text: typeof m === 'string' ? cleanLaTeXMath(m) : cleanLaTeXMath(m.text || m.description || String(m)),
+            selected: true
+          })).filter((m: ProposedModification) => m.text.trim().length > 0);
+          blocksToRemove.push(fullMatch);
+        }
+
         if (parsed.nodes && Array.isArray(parsed.nodes)) {
           nodes = parsed.nodes;
           blocksToRemove.push(fullMatch);
-        }
-        // Extract nodes array format directly [ { id: ... }, ... ]
-        else if (Array.isArray(parsed) && parsed.length > 0 && (parsed[0].id || parsed[0].name || parsed[0].geoms || parsed[0].joints)) {
+        } else if (Array.isArray(parsed) && parsed.length > 0 && !parsed[0].question && !parsed[0].text && (parsed[0].geoms || parsed[0].joints || parsed[0].scad || parsed[0].type === 'body')) {
           nodes = parsed;
           blocksToRemove.push(fullMatch);
         }
@@ -146,20 +159,79 @@ const parseAIResponse = (text: string): { markdown: string; questions: Diagnosti
     } catch (e) {}
   }
 
-  // Remove parsed JSON code blocks from Markdown display
   for (const block of blocksToRemove) {
     markdown = markdown.replace(block, '').trim();
   }
 
-  // Extract nodes fallback if needed
-  if (!nodes) {
-    const rawParsed = extractJSON(text);
-    if (rawParsed) {
+  const rawParsed = extractJSON(text);
+  if (rawParsed) {
+    if (questions.length === 0 && Array.isArray(rawParsed.questions)) {
+      questions = rawParsed.questions.map((q: any, idx: number) => ({
+        id: q.id || `q_${idx}`,
+        question: cleanLaTeXMath(q.question || ''),
+        options: Array.isArray(q.options) && q.options.length > 0
+          ? q.options.map((o: any) => cleanLaTeXMath(String(o)))
+          : undefined
+      })).filter((q: any) => q.question.trim().length > 0);
+    }
+
+    if (proposedModifications.length === 0 && Array.isArray(rawParsed.proposedModifications)) {
+      proposedModifications = rawParsed.proposedModifications.map((m: any, idx: number) => ({
+        id: m.id || `mod_${idx}`,
+        text: typeof m === 'string' ? cleanLaTeXMath(m) : cleanLaTeXMath(m.text || m.description || String(m)),
+        selected: true
+      })).filter((m: ProposedModification) => m.text.trim().length > 0);
+    }
+
+    if (!nodes) {
       if (Array.isArray(rawParsed.nodes)) {
         nodes = rawParsed.nodes;
-      } else if (Array.isArray(rawParsed) && rawParsed.length > 0 && (rawParsed[0].id || rawParsed[0].name || rawParsed[0].geoms || rawParsed[0].joints)) {
+      } else if (Array.isArray(rawParsed) && rawParsed.length > 0 && !rawParsed[0].question && !rawParsed[0].text && (rawParsed[0].geoms || rawParsed[0].joints || rawParsed[0].scad || rawParsed[0].type === 'body')) {
         nodes = rawParsed;
       }
+    }
+  }
+
+  // Fallback: extract proposedModifications from Markdown bullet/numbered points or diagnostic observations
+  if (proposedModifications.length === 0) {
+    const lines = text.split('\n');
+    let inPropsSection = false;
+
+    lines.forEach((line, lineIdx) => {
+      const trimmed = line.trim();
+      if (trimmed.match(/^(?:#+|\*\*|\b)(propos|recommend|suggest|plan|next steps|improvement|analys|diagnos|finding|issue|stability|fix|modificat)/i)) {
+        inPropsSection = true;
+      } else if (trimmed.match(/^#+\s/) && !trimmed.match(/(propos|recommend|suggest|plan|next steps|improvement|analys|diagnos|finding|issue|stability|fix|modificat)/i)) {
+        inPropsSection = false;
+      } else if (inPropsSection && (trimmed.startsWith('* ') || trimmed.startsWith('- ') || trimmed.match(/^\d+\.\s/))) {
+        const itemText = trimmed.replace(/^[\*\-\d\.]+\s*/, '').trim();
+        if (itemText.length > 5) {
+          proposedModifications.push({
+            id: `mod_${lineIdx}`,
+            text: cleanLaTeXMath(itemText),
+            selected: true
+          });
+        }
+      }
+    });
+
+    // Secondary fallback: if still no proposedModifications found, scan ALL bullet/numbered points for actionable recommendations or physical observations
+    if (proposedModifications.length === 0) {
+      lines.forEach((line, lineIdx) => {
+        const trimmed = line.trim();
+        const isListItem = trimmed.startsWith('* ') || trimmed.startsWith('- ') || trimmed.match(/^\d+\.\s/);
+        if (isListItem) {
+          const itemText = trimmed.replace(/^[\*\-\d\.]+\s*/, '').trim();
+          const actionKeywords = /\b(need|needs|should|must|increase|decrease|enlarge|add|modify|replace|change|weld|damp|base|hole|mounting|stability|footprint|screw|tip|tipping|arm|stand|wall|insert|support|thick|size|geom|joint|fix|improve|recommend|anchor|mount|secure)\b/i;
+          if (itemText.length > 10 && actionKeywords.test(itemText)) {
+            proposedModifications.push({
+              id: `mod_${lineIdx}`,
+              text: cleanLaTeXMath(itemText),
+              selected: true
+            });
+          }
+        }
+      });
     }
   }
 
@@ -167,7 +239,7 @@ const parseAIResponse = (text: string): { markdown: string; questions: Diagnosti
   let cleanMarkdown = text.replace(/```(?:json)?\s*[\s\S]*?\s*```/gi, '').trim();
   cleanMarkdown = cleanLaTeXMath(cleanMarkdown);
 
-  return { markdown: cleanMarkdown, questions, nodes };
+  return { markdown: cleanMarkdown, questions, proposedModifications, nodes };
 };
 
 export default function AICopilotPanel({ onClose }: AICopilotPanelProps) {
@@ -178,6 +250,7 @@ export default function AICopilotPanel({ onClose }: AICopilotPanelProps) {
   const [claudeApiKey, setClaudeApiKey] = useState(() => localStorage.getItem('anthropic_api_key') || '');
   const [selectedModel, setSelectedModel] = useState<string>(() => localStorage.getItem('gemini_model') || 'gemini-3.6-flash');
   const [availableModels, setAvailableModels] = useState<{ id: string; name: string }[]>([]);
+  const [availableClaudeModels, setAvailableClaudeModels] = useState<{ id: string; name: string }[]>([]);
 
   const [prompt, setPrompt] = useState('');
   const [followupInput, setFollowupInput] = useState('');
@@ -193,7 +266,10 @@ export default function AICopilotPanel({ onClose }: AICopilotPanelProps) {
   const fetchAvailableModels = async (key: string) => {
     if (!key.trim()) return;
     try {
-      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${key.trim()}`);
+      let res = await fetch(`/api/gemini/v1beta/models?key=${key.trim()}`);
+      if (!res.ok) {
+        res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${key.trim()}`);
+      }
       const data = await res.json();
       if (data.models && Array.isArray(data.models)) {
         const validModels = data.models
@@ -212,6 +288,38 @@ export default function AICopilotPanel({ onClose }: AICopilotPanelProps) {
     }
   };
 
+  // Dynamically fetch available models from Anthropic Claude API
+  const fetchAvailableClaudeModels = async (key: string) => {
+    if (!key.trim()) return null;
+    const headers = {
+      'x-api-key': key.trim(),
+      'anthropic-version': '2023-06-01',
+    };
+    try {
+      let res = await fetch('/api/anthropic/v1/models', { headers });
+      if (!res.ok && res.status === 404) {
+        res = await fetch('https://api.anthropic.com/v1/models', {
+          headers: { ...headers, 'anthropic-dangerous-direct-browser-access': 'true' }
+        });
+      }
+      if (res.ok) {
+        const data = await res.json();
+        const rawModels = data.data || data.models || [];
+        if (Array.isArray(rawModels) && rawModels.length > 0) {
+          const formatted = rawModels.map((m: any) => ({
+            id: m.id,
+            name: m.display_name || m.name || m.id
+          }));
+          setAvailableClaudeModels(formatted);
+          return formatted;
+        }
+      }
+    } catch (e) {
+      console.warn("Failed to dynamically fetch Claude models", e);
+    }
+    return null;
+  };
+
   // Sync API Keys & Model from local storage
   useEffect(() => {
     const handleStorageChange = () => {
@@ -226,12 +334,15 @@ export default function AICopilotPanel({ onClose }: AICopilotPanelProps) {
     return () => window.removeEventListener('storage', handleStorageChange);
   }, []);
 
-  // Fetch available models whenever Gemini API key is present
+  // Fetch available models whenever Gemini API key or Claude API key is present
   useEffect(() => {
     if (geminiApiKey) {
       fetchAvailableModels(geminiApiKey);
     }
-  }, [geminiApiKey]);
+    if (claudeApiKey) {
+      fetchAvailableClaudeModels(claudeApiKey);
+    }
+  }, [geminiApiKey, claudeApiKey]);
 
   // Refresh / empty AI conversation timeline ONLY when a DIFFERENT preset is loaded
   useEffect(() => {
@@ -268,10 +379,18 @@ export default function AICopilotPanel({ onClose }: AICopilotPanelProps) {
     if (key.trim()) fetchAvailableModels(key.trim());
   };
 
-  const saveClaudeApiKey = (key: string) => {
+  const saveClaudeApiKey = async (key: string) => {
     setClaudeApiKey(key);
     localStorage.setItem('anthropic_api_key', key);
     window.dispatchEvent(new Event('storage'));
+    if (key.trim()) {
+      const liveModels = await fetchAvailableClaudeModels(key.trim());
+      if (liveModels && liveModels.length > 0) {
+        saveSelectedModel(liveModels[0].id);
+      } else if (!selectedModel.startsWith('claude')) {
+        saveSelectedModel('claude-opus-5');
+      }
+    }
   };
 
   const saveSelectedModel = (modelId: string) => {
@@ -294,29 +413,33 @@ export default function AICopilotPanel({ onClose }: AICopilotPanelProps) {
       setError('');
       setLoading(true);
 
+      const headers = {
+        'x-api-key': effectiveKey,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+        'anthropic-dangerous-direct-browser-access': 'true',
+      };
+      const body = JSON.stringify({
+        model: currentModel,
+        max_tokens: 16384,
+        system: systemInstructions,
+        messages: [{ role: 'user', content: userQuery }],
+      });
+
       try {
-        const response = await fetch('https://api.anthropic.com/v1/messages', {
-          method: 'POST',
-          headers: {
-            'x-api-key': effectiveKey,
-            'anthropic-version': '2023-06-01',
-            'content-type': 'application/json',
-            'anthropic-dangerous-direct-browser-access': 'true',
-          },
-          body: JSON.stringify({
-            model: currentModel,
-            max_tokens: 4096,
-            system: systemInstructions,
-            messages: [{ role: 'user', content: userQuery }],
-          }),
-        });
+        let response = await fetch('/api/anthropic/v1/messages', { method: 'POST', headers, body });
+        if (!response.ok && response.status === 404) {
+          response = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST', headers, body });
+        }
 
         const json = await response.json();
         if (json.error) {
           throw new Error(json.error.message || json.error.type || 'Claude API Error');
         }
 
-        const text = json.content?.[0]?.text || '';
+        const text = Array.isArray(json.content)
+          ? json.content.filter((b: any) => b.type === 'text' && b.text).map((b: any) => b.text).join('\n')
+          : (json.content?.[0]?.text || '');
         return text;
       } catch (e: any) {
         setError(`Claude API Error (${currentModel}): ${e.message}`);
@@ -333,7 +456,7 @@ export default function AICopilotPanel({ onClose }: AICopilotPanelProps) {
       setLoading(true);
 
       try {
-        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${currentModel}:generateContent?key=${effectiveKey}`, {
+        let response = await fetch(`/api/gemini/v1beta/models/${currentModel}:generateContent?key=${effectiveKey}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -345,6 +468,20 @@ export default function AICopilotPanel({ onClose }: AICopilotPanelProps) {
             ]
           })
         });
+        if (!response.ok && response.status === 404) {
+          response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${currentModel}:generateContent?key=${effectiveKey}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [
+                {
+                  role: 'user',
+                  parts: [{ text: `${systemInstructions}\n\nUser Request: ${userQuery}` }]
+                }
+              ]
+            })
+          });
+        }
 
         const json = await response.json();
         if (json.error) {
@@ -509,7 +646,20 @@ export default function AICopilotPanel({ onClose }: AICopilotPanelProps) {
           faces,
           renderVertices,
         };
-      }) : (existingNode?.geoms || []);
+      }) : (existingNode?.geoms ? [...existingNode.geoms] : []);
+
+      if (scadScript && geoms.length === 0) {
+        geoms.push({
+          id: `geom_${Math.random().toString(36).substring(2, 8)}`,
+          name: `${baseName}_scad_mesh`,
+          type: 'mesh',
+          size: [0.1, 0.1, 0.1],
+          pos: [0, 0, 0],
+          rgba: [0.6, 0.6, 0.9, 1],
+          mass: 1.0,
+          dynamic: true
+        });
+      }
 
       const joints = Array.isArray(n.joints) ? n.joints.map((j: any, jIdx: number) => ({
         id: j.id || `joint_${Math.random().toString(36).substr(2, 6)}`,
@@ -675,10 +825,10 @@ export default function AICopilotPanel({ onClose }: AICopilotPanelProps) {
     useStore.getState().recompile(useStore.getState().sceneGraph);
   };
 
-  // 1a. Physics Diagnostics
+  // 1a. Physics Diagnostics (Phase 1: Clarifying Questions Only)
   const handlePhysicsDiagnostics = async () => {
     setMode('explain');
-    setLoadingStatus('Analyzing physics scene & diagnostics...');
+    setLoadingStatus('Analyzing physics scene & asking clarifying questions...');
     const compactNodes = getSerializedNodesCompact();
 
     const userMsg: ChatMessage = {
@@ -691,35 +841,23 @@ export default function AICopilotPanel({ onClose }: AICopilotPanelProps) {
     setMessages(prev => [...prev, userMsg]);
 
     const systemInstructions = `You are "PhysBox: Mesh Copilot", an expert systems engineer and 3D physics analyst.
-Analyze the active visual physics scene graph schematic and produce a comprehensive professional diagnostic report in Markdown.
+Analyze the active visual physics scene graph schematic in Markdown.
 
 Your report must include:
 ## 1. Scene Overview
-What kind of physical system is this? What is its primary configuration?
-
 ## 2. Component & Joint Analysis
-Walk through the physical bodies, hierarchy, and joint structures.
-
 ## 3. Diagnostics & Design Anti-Patterns
-- Floating pegs or unsupported bodies?
-- Unstable joint settings (e.g. zero damping)?
 
-## 4. Suggested Improvements
-3-5 specific, actionable recommendations.
-
-## Followup Clarifying Questions (Mandatory JSON block at bottom)
-At the very end of your response, after all Markdown content, include a structured JSON block inside \`\`\`json \`\`\` code fences containing 1 to 3 relevant clarifying questions with 2-4 options each:
+At the very end of your response, after all Markdown content, include a structured JSON block inside \`\`\`json \`\`\` code fences containing 1 to 3 clarifying questions about the functional intent, load expectations, or usage conditions of the object(s):
 \`\`\`json
 {
   "questions": [
-    {
-      "id": "q1",
-      "question": "Should joint damping be applied automatically to all un-damped hinges?",
-      "options": ["Yes", "No"]
-    }
+    { "id": "q1", "question": "What is the primary function or load expectation of this object?" },
+    { "id": "q2", "question": "What fastening mechanism do you prefer?", "options": ["M3 Inserts", "Self-Tapping", "Snap Latch"] }
   ]
 }
 \`\`\`
+CRITICAL: Do NOT output "proposedModifications" or scene "nodes" yet. The user will answer clarifying questions first.
 
 Current scene graph topology:
 Nodes: ${JSON.stringify(compactNodes)}`;
@@ -727,15 +865,19 @@ Nodes: ${JSON.stringify(compactNodes)}`;
     const response = await callGemini(systemInstructions, 'Perform a full system diagnostic of the active physics scene.');
     setLoading(false);
     if (response) {
-      const { markdown, questions, nodes } = parseAIResponse(response);
+      const { markdown, questions } = parseAIResponse(response);
       const assistantMsg: ChatMessage = {
         id: `ast_${Date.now()}`,
         role: 'assistant',
         mode: 'explain',
         content: markdown,
-        questions,
+        questions: questions.length > 0 ? questions : [
+          { id: 'q1', question: 'What is the primary function or load expectation of this object?' }
+        ],
         userAnswers: {},
-        nodes,
+        userAnswersSubmitted: false,
+        proposedModifications: [],
+        nodes: null,
         isImplemented: false,
         timestamp: Date.now()
       };
@@ -743,10 +885,10 @@ Nodes: ${JSON.stringify(compactNodes)}`;
     }
   };
 
-  // 1b. 3D Printing Diagnostics
+  // 1b. 3D Printing Diagnostics (Phase 1: Clarifying Questions Only)
   const handle3DPrintDiagnostics = async () => {
     setMode('explain');
-    setLoadingStatus('Analyzing 3D printability & physical defects...');
+    setLoadingStatus('Analyzing 3D printability & asking clarifying questions...');
     const compactNodes = getSerializedNodesCompact();
 
     const userMsg: ChatMessage = {
@@ -763,38 +905,19 @@ Analyze the active 3D scene graph topology for real-world 3D printing feasibilit
 
 Your report must analyze:
 ## 1. 🖨️ Printability & Orientation Analysis
-- Bed Contact Area & Stability
-- Overhangs & Cantilevers (>45°)
-- Optimal Build Orientation
-
 ## 2. 🔩 Structural Integrity & Weak Joints Analysis
-- Weak Joints & Stress Concentration
-- Layer Line Vulnerabilities & Delamination
-- Clearances & Tolerances (0.2mm - 0.4mm)
-
 ## 3. 📐 Wall Thickness & Geometry Defects
-- Thin Walls & Shell Infill Recommendations
 
-## 4. 🛠️ Practical Recommendations & Fixes
-
-## Followup Clarifying Questions (Mandatory JSON block at bottom)
-Include a structured JSON block inside \`\`\`json \`\`\` code fences at the end containing 1 to 3 relevant clarifying questions with 2 to 4 clickable options each (e.g. "Are you using heat set inserts?"):
+At the end of your response, include a structured JSON block inside \`\`\`json \`\`\` code fences containing 1 to 3 clarifying questions regarding the intended printing material, functional load, or assembly constraints:
 \`\`\`json
 {
   "questions": [
-    {
-      "id": "inserts",
-      "question": "Are you using heat set inserts for threaded mounts?",
-      "options": ["Yes", "No"]
-    },
-    {
-      "id": "material",
-      "question": "What primary printing material will be used?",
-      "options": ["PLA", "PETG", "ABS / ASA", "TPU (Flexible)"]
-    }
+    { "id": "q1", "question": "What is the primary function of this enclosure?" },
+    { "id": "q2", "question": "What printing material will be used?", "options": ["PLA", "PETG", "ABS/ASA", "TPU"] }
   ]
 }
 \`\`\`
+CRITICAL: Do NOT output "proposedModifications" or scene "nodes" yet. The user will answer clarifying questions first.
 
 Current scene graph topology:
 Nodes: ${JSON.stringify(compactNodes)}`;
@@ -802,15 +925,96 @@ Nodes: ${JSON.stringify(compactNodes)}`;
     const response = await callGemini(systemInstructions, 'Perform a full 3D printing physical defect diagnostic of the active scene graph topology.');
     setLoading(false);
     if (response) {
-      const { markdown, questions, nodes } = parseAIResponse(response);
+      const { markdown, questions } = parseAIResponse(response);
       const assistantMsg: ChatMessage = {
         id: `ast_${Date.now()}`,
         role: 'assistant',
         mode: 'explain',
         content: markdown,
-        questions,
+        questions: questions.length > 0 ? questions : [
+          { id: 'q1', question: 'What is the primary function of this 3D model?' }
+        ],
         userAnswers: {},
-        nodes,
+        userAnswersSubmitted: false,
+        proposedModifications: [],
+        nodes: null,
+        isImplemented: false,
+        timestamp: Date.now()
+      };
+      setMessages(prev => [...prev, assistantMsg]);
+    }
+  };
+
+  // 1c. Phase 2 Handler: Submit Answers and Get Proposed Modifications
+  const handleSendQuestionAnswers = async (msgId: string) => {
+    const targetMsg = messages.find(m => m.id === msgId);
+    if (!targetMsg) return;
+
+    setError('');
+    setLoadingStatus('Processing functional answers & generating proposed modifications...');
+
+    // Mark questions as submitted for target message
+    setMessages(prev => prev.map(m => m.id === msgId ? { ...m, userAnswersSubmitted: true } : m));
+
+    const userAnswersSummary = targetMsg.userAnswers ? Object.entries(targetMsg.userAnswers)
+      .map(([qId, ans]) => {
+        const q = targetMsg.questions?.find(item => item.id === qId);
+        return `- Question: "${q?.question}" -> User Answer: "${ans}"`;
+      })
+      .filter(line => !line.endsWith('""'))
+      .join('\n') : '';
+
+    const userMsg: ChatMessage = {
+      id: `user_ans_${Date.now()}`,
+      role: 'user',
+      content: `📝 Functional Intent Answers:\n${userAnswersSummary || 'General functional enhancement requested.'}`,
+      timestamp: Date.now()
+    };
+    setMessages(prev => [...prev, userMsg]);
+
+    const compactNodes = getSerializedNodesCompact();
+
+    const promptWithContext = `The user has answered your clarifying questions regarding object function and loading intent.
+
+USER FUNCTIONAL ANSWERS & CLARIFICATIONS:
+${userAnswersSummary || 'General functional enhancement requested.'}
+
+CURRENT SCENEGRAPH DEFINITION:
+${JSON.stringify(compactNodes)}
+
+Based on these functional clarifications and your physical analysis:
+1. Provide a clear Markdown summary of recommended physical & structural modifications.
+2. At the bottom, include a "proposedModifications" JSON block inside \`\`\`json \`\`\` code fences containing 2 to 5 specific proposed physical changes as an array of objects {"id": "m1", "text": "description"}.
+
+Example JSON:
+\`\`\`json
+{
+  "proposedModifications": [
+    { "id": "m1", "text": "Increase wall thickness from 1.5mm to 3.0mm" },
+    { "id": "m2", "text": "Add M3 heat-set insert pilot holes (4.2mm diameter)" },
+    { "id": "m3", "text": "Add perimeter sealing lip" }
+  ]
+}
+\`\`\`
+Do NOT generate final scene "nodes" yet; the user will select which proposed modifications to apply first.`;
+
+    const response = await callGemini(SYSTEM_INSTRUCTIONS, promptWithContext);
+    setLoading(false);
+
+    if (response) {
+      const { markdown, proposedModifications } = parseAIResponse(response);
+      const assistantMsg: ChatMessage = {
+        id: `ast_props_${Date.now()}`,
+        role: 'assistant',
+        mode: 'explain',
+        content: markdown || '### 🛠️ Proposed Physical Modifications\nSelect the proposed modifications you would like to apply to the active 3D schematic:',
+        questions: [],
+        userAnswersSubmitted: true,
+        proposedModifications: proposedModifications.length > 0 ? proposedModifications : [
+          { id: 'm1', text: 'Increase wall thickness to 3.0mm', selected: true },
+          { id: 'm2', text: 'Add M3 heat-set insert pilot holes', selected: true }
+        ],
+        nodes: null,
         isImplemented: false,
         timestamp: Date.now()
       };
@@ -843,7 +1047,7 @@ Nodes: ${JSON.stringify(compactNodes)}`;
     const response = await callGemini(systemPromptWithQuestions, currentPrompt);
     setLoading(false);
     if (response) {
-      const { markdown, questions, nodes } = parseAIResponse(response);
+      const { markdown, questions, proposedModifications, nodes } = parseAIResponse(response);
       let applied = false;
       if (nodes && Array.isArray(nodes)) {
         const merged = mergeAndNormalizeNodes(nodes, true);
@@ -860,6 +1064,7 @@ Nodes: ${JSON.stringify(compactNodes)}`;
         mode: 'generate',
         content: markdown || '### ✨ Scene Generated Successfully!\nI have created your 3D physics schematic.',
         questions,
+        proposedModifications,
         userAnswers: {},
         nodes,
         isImplemented: applied,
@@ -895,7 +1100,7 @@ Nodes: ${JSON.stringify(compactNodes)}`;
     const response = await callGemini(SYSTEM_INSTRUCTIONS, promptWithContext);
     setLoading(false);
     if (response) {
-      const { markdown, questions, nodes } = parseAIResponse(response);
+      const { markdown, questions, proposedModifications, nodes } = parseAIResponse(response);
       let applied = false;
       if (nodes && Array.isArray(nodes)) {
         const merged = mergeAndNormalizeNodes(nodes, false);
@@ -912,6 +1117,7 @@ Nodes: ${JSON.stringify(compactNodes)}`;
         mode: 'mutate',
         content: markdown || '### 🛠️ Scene Mutated Successfully!\nYour requested modifications have been merged into the active 3D physics schematic.',
         questions,
+        proposedModifications,
         userAnswers: {},
         nodes,
         isImplemented: applied,
@@ -927,36 +1133,47 @@ Nodes: ${JSON.stringify(compactNodes)}`;
     if (!targetMsg) return;
 
     setError('');
-    setLoadingStatus('Implementing improvements into 3D scene...');
-    setMessages(prev => prev.map(m => m.id === msgId ? { ...m, hasError: false, errorMsg: undefined } : m));
+    setLoadingStatus('Generating updated 3D scene from selected proposed modifications...');
 
     const userAnswersSummary = targetMsg.userAnswers ? Object.entries(targetMsg.userAnswers)
       .map(([qId, ans]) => {
         const q = targetMsg.questions?.find(item => item.id === qId);
         return `- Question: "${q?.question}" -> User Answer: "${ans}"`;
       })
+      .filter(line => !line.endsWith('""'))
       .join('\n') : '';
+
+    const selectedModsSummary = targetMsg.proposedModifications
+      ? targetMsg.proposedModifications
+          .filter(m => m.selected)
+          .map(m => `- ${m.text}`)
+          .join('\n')
+      : '';
 
     const compactNodes = getSerializedNodesCompact();
 
     const promptWithContext = `You are an automated 3D scene graph mutator.
-Apply the physical design improvements directly into the active scene graph.
+Apply the user's selected proposed physical modifications and functional answers directly into the active scene graph.
 
-USER CLARIFICATIONS & PREFERENCES:
-${userAnswersSummary || 'Implement structural, 3D printability, and joint damping improvements.'}
+USER CLARIFICATIONS & FUNCTIONAL INTENT:
+${userAnswersSummary || 'None specified.'}
+
+SELECTED PROPOSED MODIFICATIONS TO APPLY:
+${selectedModsSummary || 'Implement recommended structural, 3D printability, and parameter modifications.'}
 
 CURRENT SCENEGRAPH DEFINITION:
 ${JSON.stringify(compactNodes)}
 
 CRITICAL INSTRUCTIONS:
-1. Provide a concise bulleted summary in Markdown at the top detailing what was modified, added, or improved in the scene (e.g. wall thickness, heat-set insert pilot holes, joint damping, clearances).
-2. If the scene graph contains multiple objects (e.g. enclosure_box, enclosure_lid), include ALL top-level nodes in the "nodes" array inside \`\`\`json \`\`\` code fences at the bottom.`;
+1. Provide a brief 1-3 bullet point Markdown summary at the top detailing what was modified or added.
+2. MANDATORY: Output ALL top-level scene nodes (preserving all existing objects such as enclosure_box and enclosure_lid) in the "nodes" array inside \`\`\`json \`\`\` code fences at the bottom.
+3. For any node with OpenSCAD script, ensure the valid "scad" script string is included.`;
 
     const response = await callGemini(SYSTEM_INSTRUCTIONS, promptWithContext);
     setLoading(false);
 
     if (response) {
-      const { markdown, questions, nodes } = parseAIResponse(response);
+      const { markdown, questions, proposedModifications, nodes } = parseAIResponse(response);
       if (nodes && Array.isArray(nodes) && nodes.length > 0) {
         const merged = mergeAndNormalizeNodes(nodes, false);
         if (merged.length > 0) {
@@ -964,10 +1181,10 @@ CRITICAL INSTRUCTIONS:
           triggerScadAutoCompile(merged);
           setMessages(prev => prev.map(m => m.id === msgId ? { ...m, isImplemented: true, hasError: false } : m));
 
-          const summaryHeader = '### ✨ Improvements Implemented Successfully!\n\n';
+          const summaryHeader = '### ✨ Selected Improvements Applied Successfully!\n\n';
           const summaryContent = markdown
             ? `${summaryHeader}${markdown}`
-            : `${summaryHeader}- Applied physical design, 3D printability, and parameter modifications to the active scene graph.`;
+            : `${summaryHeader}- Applied physical design modifications, 3D printability updates, and parameter changes to the active scene graph.`;
 
           const confirmationMsg: ChatMessage = {
             id: `ast_conf_${Date.now()}`,
@@ -975,25 +1192,16 @@ CRITICAL INSTRUCTIONS:
             mode: 'implement',
             content: summaryContent,
             questions,
-            userAnswers: {},
+            proposedModifications,
             nodes: merged,
             isImplemented: true,
             timestamp: Date.now()
           };
           setMessages(prev => [...prev, confirmationMsg]);
-        } else {
-          const errText = 'Failed to process updated 3D scene nodes.';
-          setError(errText);
-          setMessages(prev => prev.map(m => m.id === msgId ? { ...m, hasError: true, errorMsg: errText } : m));
+          return;
         }
-      } else {
-        const errText = 'Failed to parse updated 3D scene nodes from AI reply.';
-        setError(errText);
-        setMessages(prev => prev.map(m => m.id === msgId ? { ...m, hasError: true, errorMsg: errText } : m));
       }
-    } else {
-      const errText = 'Failed to receive response from Gemini API.';
-      setMessages(prev => prev.map(m => m.id === msgId ? { ...m, hasError: true, errorMsg: errText } : m));
+      setMessages(prev => prev.map(m => m.id === msgId ? { ...m, hasError: true, errorMsg: 'Failed to generate updated 3D scene graph nodes.' } : m));
     }
   };
 
@@ -1027,7 +1235,7 @@ If modifying the 3D scene graph, include the updated "nodes" array in \`\`\`json
     setLoading(false);
 
     if (response) {
-      const { markdown, questions, nodes } = parseAIResponse(response);
+      const { markdown, questions, proposedModifications, nodes } = parseAIResponse(response);
       let applied = false;
       if (nodes && Array.isArray(nodes)) {
         const merged = mergeAndNormalizeNodes(nodes, false);
@@ -1043,6 +1251,7 @@ If modifying the 3D scene graph, include the updated "nodes" array in \`\`\`json
         role: 'assistant',
         content: markdown || '### 🛠️ Scene Updated\nYour requested modifications have been applied to the active physics schematic.',
         questions,
+        proposedModifications,
         userAnswers: {},
         nodes,
         isImplemented: applied,
@@ -1108,18 +1317,33 @@ If modifying the 3D scene graph, include the updated "nodes" array in \`\`\`json
                 title="Select Copilot Model"
               >
                 <optgroup label="Google Gemini">
-                  <option value="gemini-3.6-flash">Gemini 3.6 Flash</option>
-                  <option value="gemini-3.5-flash">Gemini 3.5 Flash</option>
-                  <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
-                  <option value="gemini-1.5-pro">Gemini 1.5 Pro</option>
-                  {availableModels.map(m => (
-                    <option key={m.id} value={m.id}>{m.name}</option>
-                  ))}
+                  {availableModels.length > 0 ? (
+                    availableModels.map(m => (
+                      <option key={m.id} value={m.id}>{m.name}</option>
+                    ))
+                  ) : (
+                    <>
+                      <option value="gemini-3.6-flash">Gemini 3.6 Flash</option>
+                      <option value="gemini-3.5-flash">Gemini 3.5 Flash</option>
+                      <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                      <option value="gemini-1.5-pro">Gemini 1.5 Pro</option>
+                    </>
+                  )}
                 </optgroup>
                 <optgroup label="Anthropic Claude">
-                  <option value="claude-3-5-sonnet-20241022">Claude 3.5 Sonnet</option>
-                  <option value="claude-3-5-haiku-20241022">Claude 3.5 Haiku</option>
-                  <option value="claude-3-opus-20240229">Claude 3 Opus</option>
+                  {availableClaudeModels.length > 0 ? (
+                    availableClaudeModels.map(m => (
+                      <option key={m.id} value={m.id}>{m.name}</option>
+                    ))
+                  ) : (
+                    <>
+                      <option value="claude-opus-5">Claude Opus 5</option>
+                      <option value="claude-sonnet-5">Claude Sonnet 5</option>
+                      <option value="claude-fable-5">Claude Fable 5</option>
+                      <option value="claude-3-7-sonnet-20250219">Claude 3.7 Sonnet</option>
+                      <option value="claude-3-5-sonnet-20241022">Claude 3.5 Sonnet</option>
+                    </>
+                  )}
                 </optgroup>
               </select>
             </div>
@@ -1132,7 +1356,7 @@ If modifying the 3D scene graph, include the updated "nodes" array in \`\`\`json
       <div className="flex-1 flex flex-col overflow-hidden p-4 gap-4">
         
         {/* Navigation Modes */}
-        <div className="grid grid-cols-3 gap-1 p-1 bg-slate-100 dark:bg-slate-950/40 rounded-xl select-none shrink-0">
+        <div className="grid grid-cols-3 gap-1 p-1 bg-slate-100 dark:bg-slate-955/40 rounded-xl select-none shrink-0">
           <button
             onClick={() => setMode('explain')}
             className={`py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer ${mode === 'explain' ? 'bg-white dark:bg-slate-800 text-blue-650 dark:text-blue-400 shadow-sm' : 'text-slate-505 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200'}`}
@@ -1231,15 +1455,33 @@ If modifying the 3D scene graph, include the updated "nodes" array in \`\`\`json
                   className="flex-1 text-xs font-medium text-slate-700 dark:text-slate-200 bg-white dark:bg-slate-900 border border-amber-200 dark:border-amber-900/40 rounded-lg px-2 py-1 focus:outline-none cursor-pointer"
                 >
                   <optgroup label="Google Gemini">
-                    <option value="gemini-3.6-flash">Gemini 3.6 Flash</option>
-                    <option value="gemini-3.5-flash">Gemini 3.5 Flash</option>
-                    <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
-                    <option value="gemini-1.5-pro">Gemini 1.5 Pro</option>
+                    {availableModels.length > 0 ? (
+                      availableModels.map(m => (
+                        <option key={m.id} value={m.id}>{m.name}</option>
+                      ))
+                    ) : (
+                      <>
+                        <option value="gemini-3.6-flash">Gemini 3.6 Flash</option>
+                        <option value="gemini-3.5-flash">Gemini 3.5 Flash</option>
+                        <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                        <option value="gemini-1.5-pro">Gemini 1.5 Pro</option>
+                      </>
+                    )}
                   </optgroup>
                   <optgroup label="Anthropic Claude">
-                    <option value="claude-3-5-sonnet-20241022">Claude 3.5 Sonnet</option>
-                    <option value="claude-3-5-haiku-20241022">Claude 3.5 Haiku</option>
-                    <option value="claude-3-opus-20240229">Claude 3 Opus</option>
+                    {availableClaudeModels.length > 0 ? (
+                      availableClaudeModels.map(m => (
+                        <option key={m.id} value={m.id}>{m.name}</option>
+                      ))
+                    ) : (
+                      <>
+                        <option value="claude-opus-5">Claude Opus 5</option>
+                        <option value="claude-sonnet-5">Claude Sonnet 5</option>
+                        <option value="claude-fable-5">Claude Fable 5</option>
+                        <option value="claude-3-7-sonnet-20250219">Claude 3.7 Sonnet</option>
+                        <option value="claude-3-5-sonnet-20241022">Claude 3.5 Sonnet</option>
+                      </>
+                    )}
                   </optgroup>
                 </select>
               </div>
@@ -1277,67 +1519,144 @@ If modifying the 3D scene graph, include the updated "nodes" array in \`\`\`json
                       {renderMarkdown(msg.content)}
                     </div>
 
-                    {/* Question Cards & Implementation Button */}
-                    {msg.questions && msg.questions.length > 0 && !msg.isImplemented && (
+                    {/* Phase 1: Clarifying Questions (Rendered FIRST, before proposed modifications) */}
+                    {msg.questions && msg.questions.length > 0 && !msg.userAnswersSubmitted && (
                       <div className="mt-2 pt-3 border-t border-slate-150 dark:border-slate-800 flex flex-col gap-3">
                         <div className="bg-slate-100/80 dark:bg-slate-955/80 p-3 rounded-xl border border-slate-200/80 dark:border-slate-800 flex flex-col gap-3">
                           <span className="font-bold text-xs text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
                             <HelpCircle className="w-4 h-4 text-blue-600 dark:text-blue-400" />
-                            Clarifying Options
+                            Clarifying Questions
                           </span>
                           <div className="flex flex-col gap-3 select-none">
                             {msg.questions.map((q) => {
-                              const currentSelection = msg.userAnswers?.[q.id];
+                              const currentAnswer = msg.userAnswers?.[q.id] || '';
+                              const hasOptions = Array.isArray(q.options) && q.options.length > 0;
                               return (
-                                <div key={q.id} className="flex flex-col gap-2 bg-white dark:bg-slate-900 p-2.5 rounded-lg border border-slate-200/80 dark:border-slate-800 shadow-xs">
+                                <div key={q.id} className="flex flex-col gap-2 bg-white dark:bg-slate-900 p-3 rounded-lg border border-slate-200/80 dark:border-slate-800 shadow-xs">
                                   <span className="text-xs font-semibold text-slate-800 dark:text-slate-200 leading-snug">
                                     {q.question}
                                   </span>
-                                  <div className="flex flex-col gap-1.5 mt-1">
-                                    {q.options.map((opt) => {
-                                      const isSelected = currentSelection === opt;
-                                      return (
-                                        <button
-                                          key={opt}
-                                          onClick={() => {
-                                            setMessages(prev => prev.map(m => m.id === msg.id ? {
-                                              ...m,
-                                              userAnswers: { ...m.userAnswers, [q.id]: opt }
-                                            } : m));
-                                          }}
-                                          className={`w-full p-2.5 text-xs font-medium rounded-lg transition-all cursor-pointer text-left flex items-center justify-between gap-2 leading-snug whitespace-normal break-words ${
-                                            isSelected
-                                              ? 'bg-blue-600 dark:bg-blue-600 text-white font-bold shadow-sm border border-blue-500'
-                                              : 'bg-slate-50 dark:bg-slate-955 text-slate-700 dark:text-slate-300 border border-slate-200/80 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800/80'
-                                          }`}
-                                        >
-                                          <span className="flex-1">{opt}</span>
-                                          {isSelected ? (
-                                            <span className="w-4 h-4 rounded-full bg-white/20 text-white flex items-center justify-center text-[10px] shrink-0 font-bold">✓</span>
-                                          ) : (
-                                            <span className="w-4 h-4 rounded-full border border-slate-300 dark:border-slate-700 shrink-0" />
-                                          )}
-                                        </button>
-                                      );
-                                    })}
-                                  </div>
+                                  {hasOptions ? (
+                                    <div className="flex flex-col gap-1.5 mt-1">
+                                      {q.options!.map((opt) => {
+                                        const isSelected = currentAnswer === opt;
+                                        return (
+                                          <button
+                                            key={opt}
+                                            onClick={() => {
+                                              setMessages(prev => prev.map(m => m.id === msg.id ? {
+                                                ...m,
+                                                userAnswers: { ...m.userAnswers, [q.id]: opt }
+                                              } : m));
+                                            }}
+                                            className={`w-full p-2 text-xs font-medium rounded-lg transition-all cursor-pointer text-left flex items-center justify-between gap-2 leading-snug whitespace-normal break-words ${
+                                              isSelected
+                                                ? 'bg-blue-600 text-white font-bold shadow-sm border border-blue-500'
+                                                : 'bg-slate-50 dark:bg-slate-955 text-slate-700 dark:text-slate-300 border border-slate-200/80 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800/80'
+                                            }`}
+                                          >
+                                            <span className="flex-1">{opt}</span>
+                                            {isSelected ? (
+                                              <span className="w-4 h-4 rounded-full bg-white/20 text-white flex items-center justify-center text-[10px] shrink-0 font-bold">✓</span>
+                                            ) : (
+                                              <span className="w-4 h-4 rounded-full border border-slate-300 dark:border-slate-700 shrink-0" />
+                                            )}
+                                          </button>
+                                        );
+                                      })}
+                                      <input
+                                        type="text"
+                                        placeholder="Or enter custom freeform answer..."
+                                        value={!q.options!.includes(currentAnswer) ? currentAnswer : ''}
+                                        onChange={(e) => {
+                                          const val = e.target.value;
+                                          setMessages(prev => prev.map(m => m.id === msg.id ? {
+                                            ...m,
+                                            userAnswers: { ...m.userAnswers, [q.id]: val }
+                                          } : m));
+                                        }}
+                                        className="w-full mt-1 px-2.5 py-1.5 text-xs border border-slate-200 dark:border-slate-800 rounded-lg bg-slate-50 dark:bg-slate-955 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                                      />
+                                    </div>
+                                  ) : (
+                                    <textarea
+                                      placeholder="Type your freeform answer here..."
+                                      value={currentAnswer}
+                                      onChange={(e) => {
+                                        const val = e.target.value;
+                                        setMessages(prev => prev.map(m => m.id === msg.id ? {
+                                          ...m,
+                                          userAnswers: { ...m.userAnswers, [q.id]: val }
+                                        } : m));
+                                      }}
+                                      className="w-full mt-1 px-2.5 py-2 text-xs border border-slate-200 dark:border-slate-800 rounded-lg bg-slate-50 dark:bg-slate-955 text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-1 focus:ring-blue-500 min-h-[60px] leading-normal"
+                                    />
+                                  )}
                                 </div>
                               );
                             })}
                           </div>
                         </div>
 
-                        {/* Implement Button */}
-                        {(msg.questions.length === 0 || msg.questions.every(q => !!msg.userAnswers?.[q.id])) && (
-                          <button
-                            onClick={() => handleImplementMessage(msg.id)}
-                            disabled={loading}
-                            className="w-full py-2.5 px-4 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white rounded-xl text-xs font-extrabold shadow-md flex items-center justify-center gap-2 transition-all cursor-pointer transform active:scale-[0.99]"
-                          >
-                            <Wand2 className="w-4 h-4" />
-                            Implement Changes
-                          </button>
-                        )}
+                        {/* Phase 1 Action Button: Submit Answers to get proposed modifications */}
+                        <button
+                          onClick={() => handleSendQuestionAnswers(msg.id)}
+                          disabled={loading}
+                          className="w-full py-2.5 px-4 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white rounded-xl text-xs font-extrabold shadow-md flex items-center justify-center gap-2 transition-all cursor-pointer transform active:scale-[0.99] disabled:opacity-50"
+                        >
+                          <Send className="w-4 h-4" />
+                          Submit Answers & Get Proposed Improvements
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Phase 2: Proposed Modifications Checklist (Rendered SECOND, only after questions are submitted or if no questions exist) */}
+                    {msg.proposedModifications && msg.proposedModifications.length > 0 && !msg.isImplemented && (msg.userAnswersSubmitted || !msg.questions || msg.questions.length === 0) && (
+                      <div className="mt-2 pt-3 border-t border-slate-150 dark:border-slate-800 flex flex-col gap-2.5">
+                        <div className="bg-slate-100/80 dark:bg-slate-955/80 p-3 rounded-xl border border-slate-200/80 dark:border-slate-800 flex flex-col gap-2.5">
+                          <div className="flex items-center justify-between">
+                            <span className="font-bold text-xs text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
+                              <Wand2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+                              Proposed Modifications
+                            </span>
+                            <span className="text-[10px] text-slate-500 font-medium">Select items to apply</span>
+                          </div>
+                          <div className="flex flex-col gap-2 select-none">
+                            {msg.proposedModifications.map((mod) => (
+                              <label
+                                key={mod.id}
+                                className={`flex items-start gap-2.5 p-2.5 rounded-lg border text-xs cursor-pointer transition-all ${
+                                  mod.selected
+                                    ? 'bg-emerald-50/70 dark:bg-emerald-950/30 border-emerald-300 dark:border-emerald-800/60 text-slate-800 dark:text-slate-100 font-medium shadow-xs'
+                                    : 'bg-white dark:bg-slate-900 border-slate-200/80 dark:border-slate-800 text-slate-500 dark:text-slate-400 opacity-60'
+                                }`}
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={mod.selected}
+                                  onChange={() => {
+                                    setMessages(prev => prev.map(m => m.id === msg.id ? {
+                                      ...m,
+                                      proposedModifications: m.proposedModifications?.map(item => item.id === mod.id ? { ...item, selected: !item.selected } : item)
+                                    } : m));
+                                  }}
+                                  className="mt-0.5 w-4 h-4 rounded text-emerald-600 focus:ring-emerald-500 border-slate-300 dark:border-slate-700 cursor-pointer shrink-0"
+                                />
+                                <span className="flex-1 leading-snug">{mod.text}</span>
+                              </label>
+                            ))}
+                          </div>
+                        </div>
+
+                        {/* Phase 3 Action Button: Apply Selected Improvements */}
+                        <button
+                          onClick={() => handleImplementMessage(msg.id)}
+                          disabled={loading}
+                          className="w-full mt-2 py-2.5 px-4 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white rounded-xl text-xs font-extrabold shadow-md flex items-center justify-center gap-2 transition-all cursor-pointer transform active:scale-[0.99] disabled:opacity-50"
+                        >
+                          <Wand2 className="w-4 h-4" />
+                          Apply Selected Improvements
+                        </button>
                       </div>
                     )}
 

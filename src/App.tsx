@@ -287,7 +287,7 @@ const CameraController = () => {
   
   useEffect(() => {
     if (cameraView === 'topDown') {
-      camera.position.set(0, 15, 0);
+      camera.position.set(0, 1.8, 0);
       camera.up.set(0, 0, -1);
       camera.lookAt(0, 0, 0);
       if (controlsRef.current) {
@@ -295,11 +295,11 @@ const CameraController = () => {
         controlsRef.current.update();
       }
     } else {
-      camera.position.set(5, 2, 5);
+      camera.position.set(0.8, 0.6, 0.8);
       camera.up.set(0, 1, 0);
-      camera.lookAt(0, 0, 0);
+      camera.lookAt(0, 0.15, 0);
       if (controlsRef.current) {
-        controlsRef.current.target.set(0, 0, 0);
+        controlsRef.current.target.set(0, 0.15, 0);
         controlsRef.current.update();
       }
     }
@@ -364,10 +364,10 @@ const DropHandler = ({ addComponent }: { addComponent: (type: any, pos: [number,
       
       if (isNaN(x) || isNaN(z)) return;
       
-      x = Math.max(-20, Math.min(20, x));
-      z = Math.max(-20, Math.min(20, z));
+      x = Math.max(-0.45, Math.min(0.45, x));
+      z = Math.max(-0.45, Math.min(0.45, z));
       
-      addComponent(type, [x, z, 2]);
+      addComponent(type, [x, z, 0.2]);
     };
     
     const dragOverHandler = (e: DragEvent) => e.preventDefault();
@@ -387,41 +387,27 @@ const DropHandler = ({ addComponent }: { addComponent: (type: any, pos: [number,
 // Custom Triangular Prism Wedge Geometry
 const WedgeGeometry = ({ width = 2.0, depth = 1.0, height = 0.5 }: { width: number; depth: number; height: number }) => {
   const vertices = useMemo(() => {
-    const L = Math.sqrt(width * width + height * height);
-    const D = depth;
-    const cosTheta = width / L;
-    const H_local = height / cosTheta;
-    const halfL = L / 2;
-    const halfD = D / 2;
+    const halfW = width / 2;
+    const halfD = depth / 2;
 
-    // 6 Vertices of the pre-tilted solid wedge prism:
-    // T0, T1, T2, T3 (top slanted face at z = 0)
-    // B0, B1 (bottom back vertices at z = -H_local so that base becomes perfectly horizontal after -theta rotation)
+    // Three.js Y-up space (Y = UP, Z = DEPTH, X = RIGHT):
     return new Float32Array([
-      -halfL, -halfD, 0,          // 0: T0
-       halfL, -halfD, 0,          // 1: T1
-       halfL,  halfD, 0,          // 2: T2
-      -halfL,  halfD, 0,          // 3: T3
-      -halfL, -halfD, -H_local,   // 4: B0
-      -halfL,  halfD, -H_local    // 5: B1
+      -halfW, height, -halfD, // 0: back-left top
+      -halfW, height,  halfD, // 1: back-right top
+       halfW, 0,      -halfD, // 2: toe-left bottom
+       halfW, 0,       halfD, // 3: toe-right bottom
+      -halfW, 0,      -halfD, // 4: back-left bottom
+      -halfW, 0,       halfD, // 5: back-right bottom
     ]);
   }, [width, depth, height]);
 
   const indices = useMemo(() => {
     return new Uint16Array([
-      // Slanted Top Face (looking up)
-      0, 2, 1,
-      0, 3, 2,
-      // Bottom Face (looking down)
-      1, 5, 4,
-      1, 2, 5,
-      // Back Vertical Wall (looking left)
-      0, 4, 5,
-      0, 5, 3,
-      // Front Triangle side (y = -halfD, looking front)
-      0, 1, 4,
-      // Back Triangle side (y = halfD, looking back)
-      3, 5, 2
+      0, 1, 3,  0, 3, 2, // Slanted top face
+      4, 2, 3,  4, 3, 5, // Bottom flat face
+      4, 5, 1,  4, 1, 0, // Back vertical wall
+      4, 0, 2,           // Front triangle side (y = -halfD)
+      5, 3, 1            // Back triangle side (y = +halfD)
     ]);
   }, []);
 
@@ -513,17 +499,23 @@ const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, selectedN
         const pt = e.point;
         // Transform standard Three.js world coordinates (Y-up) to MuJoCo coordinate space (Z-up)
         useStore.getState().setDragTarget({ x: pt.x, y: -pt.z, z: pt.y });
-        try {
-          (e.target as HTMLElement).setPointerCapture(e.pointerId);
-        } catch (err) {}
+        const canvasEl = e.nativeEvent?.target as HTMLElement;
+        if (canvasEl && typeof canvasEl.setPointerCapture === 'function') {
+          try {
+            canvasEl.setPointerCapture(e.pointerId);
+          } catch (err) {}
+        }
       }
     },
     onPointerUp: (e: any) => {
       if (useStore.getState().draggedNodeId === nodeId) {
         e.stopPropagation();
-        try {
-          (e.target as HTMLElement).releasePointerCapture(e.pointerId);
-        } catch (err) {}
+        const canvasEl = e.nativeEvent?.target as HTMLElement;
+        if (canvasEl && typeof canvasEl.releasePointerCapture === 'function') {
+          try {
+            canvasEl.releasePointerCapture(e.pointerId);
+          } catch (err) {}
+        }
         useStore.getState().setDraggedNodeId(null);
         useStore.getState().setDragTarget(null);
       }
@@ -531,9 +523,12 @@ const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, selectedN
     onPointerCancel: (e: any) => {
       if (useStore.getState().draggedNodeId === nodeId) {
         e.stopPropagation();
-        try {
-          (e.target as HTMLElement).releasePointerCapture(e.pointerId);
-        } catch (err) {}
+        const canvasEl = e.nativeEvent?.target as HTMLElement;
+        if (canvasEl && typeof canvasEl.releasePointerCapture === 'function') {
+          try {
+            canvasEl.releasePointerCapture(e.pointerId);
+          } catch (err) {}
+        }
         useStore.getState().setDraggedNodeId(null);
         useStore.getState().setDragTarget(null);
       }
@@ -932,6 +927,19 @@ const MouseDragForceRenderer = ({ model, data, mujoco }: any) => {
       const name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY.value, b);
       if (name) c[name] = b;
     }
+    const sceneGraph = useStore.getState().sceneGraph;
+    const mapIds = (nodes: any[]) => {
+      if (!nodes) return;
+      for (const n of nodes) {
+        const bId = c[n.name] ?? c[n.id];
+        if (bId !== undefined) {
+          c[n.id] = bId;
+          if (n.name) c[n.name] = bId;
+        }
+        mapIds(n.children);
+      }
+    };
+    mapIds(sceneGraph?.nodes || []);
     bodyIdCache.current = c;
   }, [model, mujoco]);
 
@@ -950,6 +958,8 @@ const MouseDragForceRenderer = ({ model, data, mujoco }: any) => {
       const py = data.xpos[bId * 3 + 1];
       const pz = data.xpos[bId * 3 + 2];
 
+      // Parent group has rotation={[-Math.PI / 2, 0, 0]} which converts MuJoCo Z-up space to Three.js Y-up.
+      // Inside this group, local coordinates ARE MuJoCo Z-up (x, y, z).
       const points = [
         new THREE.Vector3(px, py, pz),
         new THREE.Vector3(dragTarget.x, dragTarget.y, dragTarget.z)
@@ -1371,7 +1381,7 @@ const SceneVisuals = ({ model, data, mujoco, sceneGraph, selectedNodeId, setSele
   );
 };
 
-const CAMERA_CONFIG = { position: [5, 2, 5] as [number, number, number], fov: 50 };
+const CAMERA_CONFIG = { position: [0.8, 0.6, 0.8] as [number, number, number], fov: 45 };
 
 const getSyncedSceneGraph = (
   scene: SceneGraph,
@@ -1745,6 +1755,109 @@ function App() {
   const [isScadCompiling, setIsScadCompiling] = useState(false);
   const [isCompilerLoading, setIsCompilerLoading] = useState(false);
   const axisCanvasRef = useRef<HTMLCanvasElement>(null);
+
+  const [settingsGeminiKey, setSettingsGeminiKey] = useState(() => localStorage.getItem('gemini_api_key') || '');
+  const [settingsClaudeKey, setSettingsClaudeKey] = useState(() => localStorage.getItem('anthropic_api_key') || '');
+  const [settingsSelectedModel, setSettingsSelectedModel] = useState(() => localStorage.getItem('gemini_model') || 'gemini-3.6-flash');
+  const [liveSettingsClaudeModels, setLiveSettingsClaudeModels] = useState<{ id: string; name: string }[]>([]);
+  const [liveSettingsGeminiModels, setLiveSettingsGeminiModels] = useState<{ id: string; name: string }[]>([]);
+
+  const fetchSettingsClaudeModels = async (key: string) => {
+    if (!key.trim()) return null;
+    const headers = {
+      'x-api-key': key.trim(),
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true'
+    };
+    try {
+      let res = await fetch('/api/anthropic/v1/models', { headers });
+      if (!res.ok) {
+        res = await fetch('https://api.anthropic.com/v1/models', { headers });
+      }
+      if (res.ok) {
+        const data = await res.json();
+        const rawModels = data.data || data.models || [];
+        if (Array.isArray(rawModels) && rawModels.length > 0) {
+          const formatted = rawModels.map((m: any) => ({
+            id: m.id,
+            name: m.display_name || m.name || m.id
+          }));
+          setLiveSettingsClaudeModels(formatted);
+          return formatted;
+        }
+      }
+    } catch (e) {
+      console.warn("Failed to fetch Claude models in settings", e);
+    }
+    return null;
+  };
+
+  const fetchSettingsGeminiModels = async (key: string) => {
+    if (!key.trim()) return null;
+    try {
+      let res = await fetch(`/api/gemini/v1beta/models?key=${key.trim()}`);
+      if (!res.ok) {
+        res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${key.trim()}`);
+      }
+      const data = await res.json();
+      if (data.models && Array.isArray(data.models)) {
+        const validModels = data.models
+          .filter((m: any) => !m.supportedGenerationMethods || m.supportedGenerationMethods.includes('generateContent'))
+          .map((m: any) => ({
+            id: m.name.replace(/^models\//, ''),
+            name: m.displayName || m.name.replace(/^models\//, '')
+          }));
+        if (validModels.length > 0) {
+          setLiveSettingsGeminiModels(validModels);
+          return validModels;
+        }
+      }
+    } catch (e) {
+      console.warn("Failed to fetch Gemini models in settings", e);
+    }
+    return null;
+  };
+
+  useEffect(() => {
+    const syncSettingsState = () => {
+      const gk = localStorage.getItem('gemini_api_key') || '';
+      const ck = localStorage.getItem('anthropic_api_key') || '';
+      const m = localStorage.getItem('gemini_model') || 'gemini-3.6-flash';
+      setSettingsGeminiKey(gk);
+      setSettingsClaudeKey(ck);
+      setSettingsSelectedModel(m);
+      if (gk) fetchSettingsGeminiModels(gk);
+      if (ck) fetchSettingsClaudeModels(ck);
+    };
+
+    syncSettingsState();
+    window.addEventListener('storage', syncSettingsState);
+    return () => window.removeEventListener('storage', syncSettingsState);
+  }, []);
+
+  const handleUpdateClaudeKeyInSettings = async (newKey: string) => {
+    setSettingsClaudeKey(newKey);
+    localStorage.setItem('anthropic_api_key', newKey);
+    window.dispatchEvent(new Event('storage'));
+    if (newKey.trim()) {
+      const live = await fetchSettingsClaudeModels(newKey.trim());
+      if (live && live.length > 0) {
+        const topModel = live[0].id;
+        setSettingsSelectedModel(topModel);
+        localStorage.setItem('gemini_model', topModel);
+        window.dispatchEvent(new Event('storage'));
+      }
+    }
+  };
+
+  const handleUpdateGeminiKeyInSettings = async (newKey: string) => {
+    setSettingsGeminiKey(newKey);
+    localStorage.setItem('gemini_api_key', newKey);
+    window.dispatchEvent(new Event('storage'));
+    if (newKey.trim()) {
+      fetchSettingsGeminiModels(newKey.trim());
+    }
+  };
 
   const scadVars = useMemo(() => parseScadVariables(scadText), [scadText]);
   const compileTimeoutRef = useRef<number | null>(null);
@@ -2404,7 +2517,7 @@ function App() {
         return;
       }
     }
-    addComponent(type, [0, 0, 1.2]); // Spawn slightly above floor
+    addComponent(type, [0, 0, 0.15]); // Spawn slightly above floor
     setIsLeftSidebarOpen(false);
   };
 
@@ -2836,11 +2949,8 @@ function App() {
                   <input 
                     type="password" 
                     id="geminiApiKey"
-                    value={localStorage.getItem('gemini_api_key') || ''} 
-                    onChange={(e) => {
-                      localStorage.setItem('gemini_api_key', e.target.value);
-                      window.dispatchEvent(new Event('storage'));
-                    }} 
+                    value={settingsGeminiKey} 
+                    onChange={(e) => handleUpdateGeminiKeyInSettings(e.target.value)} 
                     placeholder="Paste AIzaSy... here" 
                     className="w-full px-2 py-1.5 text-xs border border-slate-200 dark:border-slate-800 rounded bg-white dark:bg-slate-950 text-slate-800 dark:text-slate-200 shadow-inner focus:outline-none focus:ring-1 focus:ring-blue-500 font-mono" 
                   />
@@ -2852,11 +2962,8 @@ function App() {
                   <input 
                     type="password" 
                     id="claudeApiKey"
-                    value={localStorage.getItem('anthropic_api_key') || ''} 
-                    onChange={(e) => {
-                      localStorage.setItem('anthropic_api_key', e.target.value);
-                      window.dispatchEvent(new Event('storage'));
-                    }} 
+                    value={settingsClaudeKey} 
+                    onChange={(e) => handleUpdateClaudeKeyInSettings(e.target.value)} 
                     placeholder="Paste sk-ant-... here" 
                     className="w-full px-2 py-1.5 text-xs border border-slate-200 dark:border-slate-800 rounded bg-white dark:bg-slate-950 text-slate-800 dark:text-slate-200 shadow-inner focus:outline-none focus:ring-1 focus:ring-amber-500 font-mono" 
                   />
@@ -2867,23 +2974,43 @@ function App() {
                   </label>
                   <select 
                     id="geminiModel"
-                    value={localStorage.getItem('gemini_model') || 'gemini-3.6-flash'} 
+                    value={settingsSelectedModel} 
                     onChange={(e) => {
-                      localStorage.setItem('gemini_model', e.target.value);
+                      const modelId = e.target.value;
+                      setSettingsSelectedModel(modelId);
+                      localStorage.setItem('gemini_model', modelId);
                       window.dispatchEvent(new Event('storage'));
                     }} 
                     className="w-full px-2 py-1.5 text-xs border border-slate-200 dark:border-slate-800 rounded bg-white dark:bg-slate-950 text-slate-800 dark:text-slate-200 shadow-inner focus:outline-none focus:ring-1 focus:ring-blue-500 cursor-pointer" 
                   >
                     <optgroup label="Google Gemini">
-                      <option value="gemini-3.6-flash">Gemini 3.6 Flash (Recommended)</option>
-                      <option value="gemini-3.5-flash">Gemini 3.5 Flash</option>
-                      <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
-                      <option value="gemini-1.5-pro">Gemini 1.5 Pro</option>
+                      {liveSettingsGeminiModels.length > 0 ? (
+                        liveSettingsGeminiModels.map(m => (
+                          <option key={m.id} value={m.id}>{m.name}</option>
+                        ))
+                      ) : (
+                        <>
+                          <option value="gemini-3.6-flash">Gemini 3.6 Flash (Recommended)</option>
+                          <option value="gemini-3.5-flash">Gemini 3.5 Flash</option>
+                          <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                          <option value="gemini-1.5-pro">Gemini 1.5 Pro</option>
+                        </>
+                      )}
                     </optgroup>
                     <optgroup label="Anthropic Claude">
-                      <option value="claude-3-5-sonnet-20241022">Claude 3.5 Sonnet</option>
-                      <option value="claude-3-5-haiku-20241022">Claude 3.5 Haiku</option>
-                      <option value="claude-3-opus-20240229">Claude 3 Opus</option>
+                      {liveSettingsClaudeModels.length > 0 ? (
+                        liveSettingsClaudeModels.map(m => (
+                          <option key={m.id} value={m.id}>{m.name}</option>
+                        ))
+                      ) : (
+                        <>
+                          <option value="claude-opus-5">Claude Opus 5</option>
+                          <option value="claude-sonnet-5">Claude Sonnet 5</option>
+                          <option value="claude-fable-5">Claude Fable 5</option>
+                          <option value="claude-3-7-sonnet-20250219">Claude 3.7 Sonnet</option>
+                          <option value="claude-3-5-sonnet-20241022">Claude 3.5 Sonnet</option>
+                        </>
+                      )}
                     </optgroup>
                   </select>
                 </div>
@@ -3261,13 +3388,16 @@ function App() {
             <DropHandler addComponent={addComponent} />
             <color attach="background" args={[darkMode ? '#0b0f19' : '#f8fafc']} />
             <ambientLight intensity={darkMode ? 0.35 : 0.6} />
-            <directionalLight position={[5, 10, 5]} intensity={darkMode ? 1.4 : 1.2} castShadow />
+            <directionalLight position={[1.5, 3, 1.5]} intensity={darkMode ? 1.4 : 1.2} castShadow />
             <Grid 
               infiniteGrid 
-              fadeDistance={20} 
-              cellColor={darkMode ? '#1e293b' : '#e2e8f0'} 
-              sectionColor={darkMode ? '#334155' : '#cbd5e1'} 
-              position={[0, -0.01, 0]} 
+              fadeDistance={12} 
+              fadeStrength={1}
+              sectionSize={0.5}
+              cellSize={0.1}
+              cellColor={darkMode ? '#334155' : '#cbd5e1'} 
+              sectionColor={darkMode ? '#64748b' : '#94a3b8'} 
+              position={[0, -0.005, 0]} 
             />
             
             {model && data && mujoco && (
