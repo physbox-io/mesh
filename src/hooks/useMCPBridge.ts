@@ -13,9 +13,6 @@ import { generateCurveGeoms, DEFAULT_CURVE_POINTS, DEFAULT_CURVE_WIDTH, DEFAULT_
 import { PRESETS } from '../presets/presetScenes';
 
 const autoCompileScad = async (nodes: any[]) => {
-  // openscad-wasm has shared global state across instances - compiling multiple
-  // scad nodes concurrently (Promise.all) has been observed to silently return
-  // an empty mesh for one of them. Compile sequentially instead.
   const scadNodes: any[] = [];
   const collect = (nodesList: any[]) => {
     if (!nodesList) return;
@@ -26,7 +23,14 @@ const autoCompileScad = async (nodes: any[]) => {
   };
   collect(nodes);
 
-  for (const node of scadNodes) {
+  // These used to be compiled strictly sequentially: openscad-wasm has shared
+  // global state, and running two compiles concurrently was observed to silently
+  // return an empty mesh for one of them. That constraint is per-realm, and
+  // compileSCAD now dispatches across a pool of workers that each get their own
+  // realm - so firing them together is safe, and a scene with several scad nodes
+  // compiles in parallel instead of paying the sum of every node's compile time.
+  // (Within any one worker compiles are still serialized; excess nodes queue.)
+  await Promise.all(scadNodes.map(async (node) => {
     // openscad-wasm has been observed to intermittently fail (throw, or return
     // empty output) on a compile immediately following another one, even when
     // run strictly sequentially with a fresh instance each time - some global
@@ -60,7 +64,7 @@ const autoCompileScad = async (nodes: any[]) => {
     } else {
       console.error(`Failed to auto-compile SCAD for node ${node.id} after 3 attempts:`, lastErr);
     }
-  }
+  }));
 };
 
 // Loads a scene and waits for it to fully settle before responding: SCAD bodies
