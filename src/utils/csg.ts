@@ -660,6 +660,7 @@ export interface CsgResult {
   geoms: SceneGeom[];      // derived geoms only — the visual mesh and any colliders
   volume: number;
   hullVolume: number;
+  centroid: number[];
   mode: 'decompose' | 'primitives' | 'hull';
   warning?: string;
 }
@@ -736,7 +737,7 @@ export async function evaluateNodeCsg(node: SceneNode): Promise<CsgResult | null
 
   if (requested === 'hull') {
     return {
-      hash, scad, volume, hullVolume, mode: 'hull',
+      hash, scad, volume, hullVolume, centroid, mode: 'hull',
       geoms: [{ ...visual, mass: totalMass }],
     };
   }
@@ -796,13 +797,13 @@ export async function evaluateNodeCsg(node: SceneNode): Promise<CsgResult | null
 
   if (mode === 'decompose') {
     // Colliders carry the mass; the visual shell must not double-count it.
-    return { hash, scad, volume, hullVolume, mode, warning, geoms: [{ ...visual, role: 'visual', mass: 0 }, ...colliders] };
+    return { hash, scad, volume, hullVolume, centroid, mode, warning, geoms: [{ ...visual, role: 'visual', mass: 0 }, ...colliders] };
   }
 
   // 'primitives': the authored positives stay as the colliders (mjcf.ts keeps
   // them and drops the negatives), and the boolean mesh is visual only.
   return {
-    hash, scad, volume, hullVolume, mode: 'primitives', warning,
+    hash, scad, volume, hullVolume, centroid, mode: 'primitives', warning,
     geoms: [{ ...visual, role: 'visual', mass: 0 }],
   };
 }
@@ -957,13 +958,16 @@ export function positiveBounds(node: SceneNode): { min: number[]; max: number[] 
   const min = [Infinity, Infinity, Infinity];
   const max = [-Infinity, -Infinity, -Infinity];
   let any = false;
+  const csgOff = node.csgCentroid || [0, 0, 0];
   for (const g of csgSourceGeoms(node)) {
     if (!isPositive(g)) continue;
     const b = geomBounds(g);
     if (!b) continue;
     for (let a = 0; a < 3; a++) {
-      if (b.min[a] < min[a]) min[a] = b.min[a];
-      if (b.max[a] > max[a]) max[a] = b.max[a];
+      const bMin = b.min[a] - (csgOff[a] || 0);
+      const bMax = b.max[a] - (csgOff[a] || 0);
+      if (bMin < min[a]) min[a] = bMin;
+      if (bMax > max[a]) max[a] = bMax;
     }
     any = true;
   }

@@ -1343,6 +1343,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     node.csgScad = result.scad;
     node.csgVolume = result.volume;
     node.csgHullVolume = result.hullVolume;
+    node.csgCentroid = result.centroid;
     node.csgCollision = node.csgCollision ?? 'auto';
     if (result.warning) node.csgWarning = result.warning; else delete node.csgWarning;
     delete node.csgError;

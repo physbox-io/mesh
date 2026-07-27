@@ -1337,6 +1337,7 @@ const CsgNegativeGhosts = ({ model, data, mujoco, sceneGraph, selectedNodeId }: 
           geom={g}
           color={kind === 'neg' ? '#ef4444' : '#38bdf8'}
           bounds={target.bounds}
+          csgCentroid={target.node.csgCentroid}
         />
       ))}
     </group>
@@ -1358,8 +1359,8 @@ const CsgNegativeGhosts = ({ model, data, mujoco, sceneGraph, selectedNodeId }: 
 // as a tall tube floating in space with only a sliver of it doing any cutting.
 // The points are baked into body space here so the clip is a one-off in the
 // useMemo rather than per-frame renderer clipping-plane work.
-const CsgGhostOutline = ({ geom, color, bounds }: { geom: any; color: string; bounds: { min: number[]; max: number[] } | null }) => {
-  const key = JSON.stringify([geom.type, geom.size, geom.pos, geom.euler, geom.quat, bounds]);
+const CsgGhostOutline = ({ geom, color, bounds, csgCentroid }: { geom: any; color: string; bounds: { min: number[]; max: number[] } | null; csgCentroid?: number[] }) => {
+  const key = JSON.stringify([geom.type, geom.size, geom.pos, geom.euler, geom.quat, bounds, csgCentroid]);
 
   const edges = useMemo(() => {
     const s = geom.size || [];
@@ -1397,6 +1398,10 @@ const CsgGhostOutline = ({ geom, color, bounds }: { geom: any; color: string; bo
     // can be clipped against the body-space bounds directly.
     const src = e.getAttribute('position').array as ArrayLike<number>;
     const m = geomMatrixOf(geom);
+    if (csgCentroid && csgCentroid.length >= 3) {
+      const p = geom.pos || [0, 0, 0];
+      m.setPosition(p[0] - csgCentroid[0], p[1] - csgCentroid[1], p[2] - csgCentroid[2]);
+    }
     const baked = new Array<number>(src.length);
     const v = new THREE.Vector3();
     for (let i = 0; i < src.length; i += 3) {
@@ -1414,24 +1419,8 @@ const CsgGhostOutline = ({ geom, color, bounds }: { geom: any; color: string; bo
     // happens, fall back to outlining the REGION being removed: the negative's
     // bounding box intersected with the solid's. Indicative rather than exact,
     // but it shows where material is going, which is the point of the overlay.
-    if (bounds && clipped.length === 0 && baked.length > 0) {
-      const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
-      for (let i = 0; i < baked.length; i += 3) {
-        for (let a = 0; a < 3; a++) {
-          if (baked[i + a] < lo[a]) lo[a] = baked[i + a];
-          if (baked[i + a] > hi[a]) hi[a] = baked[i + a];
-        }
-      }
-      const o0 = [0, 1, 2].map(a => Math.max(lo[a], bounds.min[a]));
-      const o1 = [0, 1, 2].map(a => Math.min(hi[a], bounds.max[a]));
-      if ([0, 1, 2].every(a => o1[a] > o0[a])) {
-        const box = new THREE.BoxGeometry(o1[0] - o0[0], o1[1] - o0[1], o1[2] - o0[2]);
-        box.translate((o0[0] + o1[0]) / 2, (o0[1] + o1[1]) / 2, (o0[2] + o1[2]) / 2);
-        const be = new THREE.EdgesGeometry(box, 1);
-        clipped = Array.from(be.getAttribute('position').array as ArrayLike<number>);
-        box.dispose();
-        be.dispose();
-      }
+    if (bounds && clipped.length < Math.max(12, baked.length * 0.45) && baked.length > 0) {
+      clipped = baked;
     }
 
     const out = new THREE.BufferGeometry();
@@ -2557,7 +2546,6 @@ function App() {
       setScadText('');
       setScadError(null);
     }
-    setActiveGeomIndex(0);
   }, [selectedNodeId, selectedNode?.id, selectedNode?.scad, selectedNode?.script]);
 
   const handleSaveScript = useCallback(() => {
@@ -5089,8 +5077,8 @@ function App() {
                         <span>Mass</span>
                         <DocsInfoButton tab="gravity" onOpen={openDocs} />
                       </h3>
-                      <label className="text-xs font-medium text-slate-500 flex justify-between">Value <span>{geom.mass} kg</span></label>
-                      <input type="range" min="0" max="50" step="0.01" value={geom.mass} onChange={(e) => updateNodeGeom(selectedNode.id, {mass: parseFloat(e.target.value)}, activeIndex)} className="w-full accent-blue-500 cursor-pointer" />
+                      <label className="text-xs font-medium text-slate-500 flex justify-between">Value <span>{(geom.mass ?? 0).toFixed(2)} kg</span></label>
+                      <input type="range" min="0" max="50" step="0.01" value={geom.mass ?? 0} onChange={(e) => updateNodeGeom(selectedNode.id, {mass: parseFloat(e.target.value)}, activeIndex)} className="w-full accent-blue-500 cursor-pointer" />
                     </div>
 
                     <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-2">
@@ -5386,22 +5374,30 @@ function App() {
                       </div>
                     )}
 
-                    <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-2">
-                      <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 mb-1">Appearance</h3>
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs text-slate-500">Color (RGB)</span>
-                        <input type="color" value={`#${Math.floor(geom.rgba[0]*255).toString(16).padStart(2,'0')}${Math.floor(geom.rgba[1]*255).toString(16).padStart(2,'0')}${Math.floor(geom.rgba[2]*255).toString(16).padStart(2,'0')}`} 
-                          onChange={(e) => {
-                            const hex = e.target.value;
-                            const r = parseInt(hex.slice(1,3), 16)/255;
-                            const g = parseInt(hex.slice(3,5), 16)/255;
-                            const b = parseInt(hex.slice(5,7), 16)/255;
-                            updateNodeGeom(selectedNode.id, {rgba: [r,g,b,1]}, activeIndex);
-                          }} 
-                          className="w-8 h-8 rounded cursor-pointer border-0 p-0 shadow-sm" 
-                        />
-                      </div>
-                    </div>
+                    {(() => {
+                      const rgba = geom.rgba || [0.5, 0.5, 0.5, 1];
+                      const rHex = Math.floor((rgba[0] ?? 0.5) * 255).toString(16).padStart(2, '0');
+                      const gHex = Math.floor((rgba[1] ?? 0.5) * 255).toString(16).padStart(2, '0');
+                      const bHex = Math.floor((rgba[2] ?? 0.5) * 255).toString(16).padStart(2, '0');
+                      return (
+                        <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-2">
+                          <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 mb-1">Appearance</h3>
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs text-slate-500">Color (RGB)</span>
+                            <input type="color" value={`#${rHex}${gHex}${bHex}`} 
+                              onChange={(e) => {
+                                const hex = e.target.value;
+                                const r = parseInt(hex.slice(1,3), 16)/255;
+                                const g = parseInt(hex.slice(3,5), 16)/255;
+                                const b = parseInt(hex.slice(5,7), 16)/255;
+                                updateNodeGeom(selectedNode.id, {rgba: [r,g,b,1]}, activeIndex);
+                              }} 
+                              className="w-8 h-8 rounded cursor-pointer border-0 p-0 shadow-sm" 
+                            />
+                          </div>
+                        </div>
+                      );
+                    })()}
                   </div>
                 );
               })()}

@@ -138,6 +138,7 @@ export interface SceneNode {
   csgScad?: string;         // the generated OpenSCAD source (read-only, for inspection)
   csgVolume?: number;       // true volume of the boolean solid (m³)
   csgHullVolume?: number;   // volume of its convex hull (m³) — the 'hull' mode figure
+  csgCentroid?: number[];   // centroid offset applied to the compiled body frame
   csgWarning?: string;      // e.g. "no hole axis found, colliding as primitives"
   csgError?: string;
   isComposite?: boolean;

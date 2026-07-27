@@ -2598,7 +2598,7 @@ export const booleanShapesPreset: SceneGraph = {
             return { vertices, faces, renderVertices };
           })(),
         },
-        { name: 'cone_tip_cut', type: 'box', size: [0.15, 0.15, 0.09], pos: [0, 0, 0.23], csg: 'difference' },
+        { name: 'cone_tip_cut', type: 'box', size: [0.15, 0.15, 0.09], pos: [0, 0, 0.16], csg: 'difference' },
       ],
       children: [],
     },

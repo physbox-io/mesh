@@ -62,6 +62,23 @@ describe('boolean_shapes preset', () => {
   it('exercises all three collision strategies', () => {
     expect(nodes.map(n => n.csgCollision)).toEqual(['auto', 'auto', 'auto', 'hull']);
   });
+
+  it('safely handles missing rgba and mass properties on negative cutout geoms without throwing', () => {
+    for (const node of nodes) {
+      for (const geom of node.geoms || []) {
+        const rgba = geom.rgba || [0.5, 0.5, 0.5, 1];
+        expect(rgba).toHaveLength(4);
+        const rHex = Math.floor((rgba[0] ?? 0.5) * 255).toString(16).padStart(2, '0');
+        const gHex = Math.floor((rgba[1] ?? 0.5) * 255).toString(16).padStart(2, '0');
+        const bHex = Math.floor((rgba[2] ?? 0.5) * 255).toString(16).padStart(2, '0');
+        expect(`#${rHex}${gHex}${bHex}`).toMatch(/^#[0-9a-f]{6}$/i);
+
+        const mass = geom.mass ?? 0;
+        expect(typeof mass).toBe('number');
+        expect(isNaN(mass)).toBe(false);
+      }
+    }
+  });
 });
 
 describe.each(nodes.map(n => [n.id, n] as const))('%s', (_id, node) => {
