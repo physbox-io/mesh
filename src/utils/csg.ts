@@ -208,7 +208,7 @@ export function csgDerivedGeoms(node: SceneNode): SceneGeom[] {
 
 const isNegative = (g: SceneGeom) => g.csg === 'difference';
 const isIntersect = (g: SceneGeom) => g.csg === 'intersection';
-const isPositive = (g: SceneGeom) => !g.csg || g.csg === 'union';
+const isPositive = (g: SceneGeom) => (!g.csg || g.csg === 'union') && g.role !== 'visual';
 
 /**
  * True if this node's geoms actually describe a boolean — i.e. there is
@@ -716,7 +716,7 @@ export async function evaluateNodeCsg(node: SceneNode): Promise<CsgResult | null
   const requested = node.csgCollision ?? 'auto';
   const totalMass = node.csgMass ?? template?.mass ?? 1;
 
-  const centeredZup = translateFlat(zup, [-centroid[0], -centroid[1], -centroid[2]]);
+  const centeredZup = translateFlat(zup, [-centroid[0], -centroid[1], 0]);
   const centeredYup = zupArrayToYup(centeredZup);
 
   const visual: SceneGeom = {
@@ -869,9 +869,10 @@ export function resolveCsgGeoms(node: SceneNode, target: 'physics' | 'render'): 
   const hasMesh = derived.some(g => g.csgDerived === 'visual');
   const collidingWithPrimitives = !hasMesh || derived.every(g => g.csgDerived !== 'collider');
 
+  const visualSource = source.filter(g => g.role === 'visual');
   if (target === 'render') {
-    if (hasMesh) return derived.filter(g => g.csgDerived === 'visual');
-    return source.filter(isPositive);
+    if (hasMesh) return [...derived.filter(g => g.csgDerived === 'visual'), ...visualSource];
+    return [...source.filter(isPositive), ...visualSource];
   }
 
   const out: SceneGeom[] = [];
@@ -891,7 +892,7 @@ export function resolveCsgGeoms(node: SceneNode, target: 'physics' | 'render'): 
         : {}),
     })));
   }
-  out.push(...derived);
+  out.push(...derived, ...visualSource);
   return out;
 }
 

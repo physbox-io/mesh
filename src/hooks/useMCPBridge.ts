@@ -8,7 +8,7 @@ import { useStore, getPhysicsWorkerClient } from '../store/useStore';
 import { compileToMJCF } from '../utils/mjcf';
 import { compileSCAD } from '../utils/openscad';
 import { getLiveCameraPose } from '../utils/liveCamera';
-import { makePresetNoteCard } from '../utils/noteCards';
+import { makePresetNoteCard, updateOrCreateNotecard } from '../utils/noteCards';
 import { generateCurveGeoms, DEFAULT_CURVE_POINTS, DEFAULT_CURVE_WIDTH, DEFAULT_CURVE_THICKNESS, DEFAULT_CURVE_SEGMENTS } from '../utils/geom';
 import { compileCsgNodes } from './useCsgCompile';
 import { PRESETS } from '../presets/presetScenes';
@@ -400,13 +400,13 @@ export function useMCPBridge() {
 
         case 'RUN_HEADLESS': {
           const ticks = Number(msg.ticks) || 300;
-          const { sceneGraph, gravityZ, floorFriction, windX, windY, density } = store;
+          const { sceneGraph, gravityZ, floorFriction, windX, windY, density, floorBounce } = store;
           // Runs inside the same physics worker that owns the live simulation
           // (see src/workers/physicsWorker.ts's runHeadless) — its own isolated
           // model/data built from the one already-loaded mujoco module, so a
           // headless "what-if" run can never diverge from what's actually
           // rendered live, and never costs a second loaded WASM module.
-          const xml = compileToMJCF(sceneGraph, gravityZ, floorFriction, windX, windY, density);
+          const xml = compileToMJCF(sceneGraph, gravityZ, floorFriction, windX, windY, density, floorBounce);
           const result: any = await getPhysicsWorkerClient().runHeadless(xml, sceneGraph, ticks);
           // Decimate/filter the trajectory before it crosses the websocket: a
           // full per-tick, per-body trajectory is ~500KB per 900 ticks and was
@@ -488,6 +488,10 @@ export function useMCPBridge() {
               if (node?.csgError) return { ok: false, error: `Boolean failed: ${node.csgError}` };
             }
           }
+          updateOrCreateNotecard({
+            mode: 'mcp',
+            nodes: useStore.getState().sceneGraph.nodes
+          });
           const error = useStore.getState().lastCompileError;
           return { ok: !error, ...(error ? { error } : {}) };
         }
@@ -534,6 +538,24 @@ export function useMCPBridge() {
               setter(presetCard ? [presetCard] : []);
             }
           }
+          const msgSetter = (window as any)._physics_setCopilotMessages;
+          if (msgSetter) {
+            if (name.startsWith('user:')) {
+              try {
+                const userPresets = JSON.parse(localStorage.getItem('physics_user_presets') || '{}');
+                const saved = userPresets[name.replace('user:', '')];
+                msgSetter(saved && Array.isArray(saved.copilotMessages) ? saved.copilotMessages : []);
+              } catch {
+                msgSetter([]);
+              }
+            } else {
+              msgSetter([]);
+            }
+          }
+          updateOrCreateNotecard({
+            mode: 'mcp',
+            nodes: useStore.getState().sceneGraph.nodes
+          });
           return { ok: true, preset: name };
         }
 
@@ -604,7 +626,12 @@ export function useMCPBridge() {
           // editing the output of GET_SCENE_SUMMARY, which strips these arrays)
           // doesn't crash compileToMJCF's unconditional .forEach on those fields.
           const nodes = rawNodes.map(fillBodyDefaults);
-          return settleScene(nodes);
+          const result = await settleScene(nodes);
+          updateOrCreateNotecard({
+            mode: 'mcp',
+            nodes: useStore.getState().sceneGraph.nodes
+          });
+          return result;
         }
 
         case 'SET_ENVIRONMENT': {
@@ -626,7 +653,7 @@ export function useMCPBridge() {
             geomSizes: {
               box:       'half-extents [hx, hy, hz]',
               sphere:    'radius [r]',
-              capsule:   'radius and half-height [r, hh] — cylinder between the two end-caps',
+              capsule:   'radius and half-height [r, hh] — cylinder between the two end-caps. ALWAYS give both elements (or use fromto): a 1-element [r] does not error, it silently falls back to hh=r and collapses the geom into a tiny stub pill at pos.',
               cylinder:  'radius and half-height [r, hh]',
               ellipsoid: 'semi-axes [rx, ry, rz]',
               plane:     'ignored by MuJoCo (infinite plane) — set to [0, 0, 1] or any non-zero',
@@ -719,6 +746,7 @@ export function useMCPBridge() {
               'Dynamic mesh face winding: use outward-facing CCW winding. Wrong winding causes inside-out contacts and objects sinking through surfaces.',
               'Dynamic mesh body pos: set body_pos=[0,0,0] to place mesh where its Y-up base sits. Adjust body_pos.z to raise/lower.',
               'OpenSCAD shapes: set scad="cube([0.5,0.5,0.5]);" on a body node. If geoms is omitted, it automatically creates a dynamic mesh geom and compiles the SCAD code to vertices/faces.',
+              'A scad body\'s mesh IS the whole part — when converting a primitive-built body to SCAD (or rewriting its SCAD), send an explicit geoms array holding ONLY that mesh geom. UPDATE_OBJECT with a scad payload refills the existing mesh geom but does NOT prune sibling primitives: leftovers still render and still collide over the mesh, and since they are usually unpositioned (pos [0,0,0], no fromto) they pile up as stray blobs at the body origin. A dynamic mesh already collides via its convex hull, so only keep a primitive if it is a deliberate proxy — positioned explicitly, with contype:0/conaffinity:0 on whichever geom must not collide.',
               'Working example: mesh_collision preset (pyramid + ramp with full collision).',
               'Bouncy objects: set solref=[0.04, 0.2] and solimp=[0.99, 0.9999, 0.0001, 0.5, 2]. dampingRatio 0.2 = lively bounce. The floor has dampingRatio=0.0 so ball+floor averages to 0.1 (still bouncy).',
               'Contact blending: two geoms in contact average their solref/solimp. Keep this in mind when tuning — a non-bouncy floor (dampingRatio=1.0) will halve any ball\'s effective bounce.',
@@ -736,7 +764,12 @@ export function useMCPBridge() {
           }
 
           const nodes = bodies.map(fillBodyDefaults);
-          return settleScene(nodes);
+          const result = await settleScene(nodes);
+          updateOrCreateNotecard({
+            mode: 'mcp',
+            nodes: useStore.getState().sceneGraph.nodes
+          });
+          return result;
         }
 
         default:

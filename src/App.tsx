@@ -17,6 +17,7 @@ import { sampleCatmullRom } from './utils/geom';
 import { resolveCsgGeoms, csgSourceGeoms, csgHashOf, positiveBounds, geomMatrixOf, clipSegmentsToBox, CSG_DEFAULT_SECTORS } from './utils/csg';
 import { useCsgAutoCompile } from './hooks/useCsgCompile';
 import { PRESETS } from './presets/presetScenes';
+import { makePresetNoteCard } from './utils/noteCards';
 
 // Simple robust markdown parser to convert basic markdown text to safe HTML
 // Markdown parser for note cards
@@ -489,6 +490,27 @@ const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, selectedN
   const rotationMatrix = useMemo(() => new THREE.Matrix4(), []);
   const isSelected = selectedNodeId === nodeId;
 
+  // A geom's rgba carries an alpha, and until now every material dropped it and
+  // drew fully opaque. A jar authored at 0.35 alpha then hides the very thing it
+  // exists to contain — a glass jar rendered as a solid white tub with whatever
+  // was inside it sealed invisibly away. depthWrite goes off with it, so what
+  // sits behind a translucent geom still reaches the frame buffer instead of
+  // being depth-rejected, and two coplanar translucent faces blend rather than
+  // z-fighting into stripes.
+  // Defaulted, not indexed blind: this hook runs for every geom, including the
+  // ones the early returns below drop, and a geom without an rgba would take
+  // the whole canvas down with it.
+  const alpha = color?.[3] ?? 1;
+  const materialProps = useMemo(() => {
+    const [r, g, b] = color ?? [0.8, 0.8, 0.8];
+    return {
+      color: new THREE.Color(r, g, b),
+      emissive: isSelected ? '#3b82f6' : '#000',
+      emissiveIntensity: isSelected ? 0.2 : 0,
+      ...(alpha < 1 ? { transparent: true, opacity: alpha, depthWrite: false } : {}),
+    };
+  }, [color, isSelected, alpha]);
+
   // Handlers for physical spring dragging, mapped from Three.js coordinates to MuJoCo coordinate space
   const dragHandlers = useMemo(() => ({
     onClick: (e: any) => {
@@ -674,7 +696,7 @@ const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, selectedN
       return (
         <group name={nodeId} ref={meshRef} position={initialPos} quaternion={new THREE.Quaternion(...initialQuat)}>
           <mesh castShadow receiveShadow geometry={meshBufferGeometry} {...dragHandlers}>
-            <meshStandardMaterial color={new THREE.Color(color[0], color[1], color[2])} emissive={isSelected ? '#3b82f6' : '#000'} emissiveIntensity={isSelected ? 0.2 : 0} side={THREE.FrontSide} />
+            <meshStandardMaterial key={alpha < 1 ? 'blend' : 'solid'} {...materialProps} side={THREE.FrontSide} />
           </mesh>
         </group>
       );
@@ -683,7 +705,7 @@ const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, selectedN
     return (
       <group name={nodeId}>
         <mesh castShadow receiveShadow geometry={meshBufferGeometry} {...dragHandlers}>
-          <meshStandardMaterial color={new THREE.Color(color[0], color[1], color[2])} emissive={isSelected ? '#3b82f6' : '#000'} emissiveIntensity={isSelected ? 0.2 : 0} side={THREE.DoubleSide} />
+          <meshStandardMaterial key={alpha < 1 ? 'blend' : 'solid'} {...materialProps} side={THREE.DoubleSide} />
         </mesh>
       </group>
     );
@@ -703,36 +725,36 @@ const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, selectedN
       {node?.isWedge ? (
         <mesh castShadow receiveShadow {...dragHandlers}>
           <WedgeGeometry width={node.width || 2.0} depth={node.depth || 1.0} height={node.height || 0.5} />
-          <meshStandardMaterial color={new THREE.Color(color[0], color[1], color[2])} emissive={isSelected ? '#3b82f6' : '#000'} emissiveIntensity={isSelected ? 0.2 : 0} />
+          <meshStandardMaterial key={alpha < 1 ? 'blend' : 'solid'} {...materialProps} />
         </mesh>
       ) : type === 'sphere' ? (
         <mesh castShadow receiveShadow {...dragHandlers}>
           <sphereGeometry args={geometryArgs as any} />
-          <meshStandardMaterial color={new THREE.Color(color[0], color[1], color[2])} emissive={isSelected ? '#3b82f6' : '#000'} emissiveIntensity={isSelected ? 0.2 : 0} />
+          <meshStandardMaterial key={alpha < 1 ? 'blend' : 'solid'} {...materialProps} />
         </mesh>
       ) : type === 'box' ? (
         <>
           <mesh castShadow receiveShadow {...dragHandlers}>
             <boxGeometry args={geometryArgs as any} />
-            <meshStandardMaterial color={new THREE.Color(color[0], color[1], color[2])} emissive={isSelected ? '#3b82f6' : '#000'} emissiveIntensity={isSelected ? 0.2 : 0} />
+            <meshStandardMaterial key={alpha < 1 ? 'blend' : 'solid'} {...materialProps} />
           </mesh>
         </>
       ) : type === 'ellipsoid' ? (
         <mesh castShadow receiveShadow scale={[geometryArgs[0], geometryArgs[1], geometryArgs[2]]} {...dragHandlers}>
           <sphereGeometry args={[1, 32, 32]} />
-          <meshStandardMaterial color={new THREE.Color(color[0], color[1], color[2])} emissive={isSelected ? '#3b82f6' : '#000'} emissiveIntensity={isSelected ? 0.2 : 0} />
+          <meshStandardMaterial key={alpha < 1 ? 'blend' : 'solid'} {...materialProps} />
         </mesh>
       ) : null}
       {type === 'capsule' && (
         <mesh castShadow receiveShadow rotation={[Math.PI / 2, 0, 0]} {...dragHandlers}>
           <capsuleGeometry args={geometryArgs as any} />
-          <meshStandardMaterial color={new THREE.Color(color[0], color[1], color[2])} emissive={isSelected ? '#3b82f6' : '#000'} emissiveIntensity={isSelected ? 0.2 : 0} />
+          <meshStandardMaterial key={alpha < 1 ? 'blend' : 'solid'} {...materialProps} />
         </mesh>
       )}
       {type === 'cylinder' && (
         <mesh castShadow receiveShadow rotation={[Math.PI / 2, 0, 0]} {...dragHandlers}>
           <cylinderGeometry args={[geometryArgs[0], geometryArgs[0], geometryArgs[1] * 2, 32]} />
-          <meshStandardMaterial color={new THREE.Color(color[0], color[1], color[2])} emissive={isSelected ? '#3b82f6' : '#000'} emissiveIntensity={isSelected ? 0.2 : 0} />
+          <meshStandardMaterial key={alpha < 1 ? 'blend' : 'solid'} {...materialProps} />
         </mesh>
       )}
     </group>
@@ -1723,85 +1745,7 @@ const DocsInfoButton = ({ tab, onOpen, className = '', size = 'w-3.5 h-3.5' }: {
   </button>
 );
 
-const PRESET_NOTE_CARDS: Record<string, string> = {
-  empty: `# Blank Scene\n\nAn empty world with just the ground plane.\n\n## Getting started\n- Drag components from the left sidebar into the scene\n- Select a body to edit its mass, size, and material\n- Press **Play** to start the simulation`,
 
-  pendulum: `# Double Pendulum\n\nTwo rigid rods connected by **hinge joints**, exhibiting chaotic motion.\n\n## Physics\n- **Hinge joints** constrain each rod to 1-DOF rotation\n- Small changes in initial angle lead to wildly different trajectories — a hallmark of **deterministic chaos**\n- Energy is conserved (no damping by default)\n\n## Try it\n- Change the initial angle of either bob to see chaos emerge\n- Add joint damping to watch energy decay`,
-
-  cubes: `# Stacked Cubes\n\nRigid-body stacking with contact forces and friction.\n\n## Physics\n- **Free joints** give each cube 6 degrees of freedom\n- Resting contact is resolved by the **constraint solver** (PGS)\n- Stack height is limited by friction and the solver's penetration tolerance\n\n## Try it\n- Reduce floor friction to watch the stack slide\n- Change cube masses to shift the centre of mass`,
-
-  gears: `# Gear System\n\nTwo meshing spur gears coupled by **proximity-aware equality constraints**.\n\n## Physics\n- Direct gear-tooth collision causes jitter; instead, angular velocities are linked via a **joint equality constraint** when gears are within meshing distance\n- Gear ratio is determined by the ratio of tooth counts\n- Uncheck *Allow Mechanical Coupling* to test raw contact\n\n## Key settings\n- **Teeth count** controls gear ratio\n- **Damping** prevents runaway spin`,
-
-  machine: `# Gear Train Machine\n\nA multi-stage gear train demonstrating **torque multiplication**.\n\n## Physics\n- Each meshing pair is proximity-coupled; a driving hinge torque propagates through the chain\n- Output speed = input speed × (product of driver teeth / product of driven teeth)\n- Larger driven gears turn slower but with more torque\n\n## Try it\n- Apply a control script torque to the first gear via \`api.applyJointForce()\`\n- Observe speed reduction at each stage`,
-
-  rack_pinion: `# Rack and Pinion\n\nConverts **rotary motion** (pinion gear) to **linear motion** (rack).\n\n## Physics\n- Pinion hinge rotation is coupled to rack slide translation via a **joint equality constraint** when the bodies are within 0.5 m\n- Linear displacement = pinion angle × pinion pitch radius\n\n## Try it\n- Drive the pinion with a script: \`api.applyJointForce('pinion_hinge', 5)\`\n- Add a load mass to the rack to see force requirements increase`,
-
-  inclined_plane: `# Inclined Plane\n\nClassic mechanics: a block sliding down a ramp under gravity.\n\n## Physics\n- Net force along the plane: *F = mg sin θ − μmg cos θ*\n- **Static friction** prevents motion when *tan θ < μ*\n- Once sliding, **kinetic friction** is lower than static\n\n## Try it\n- Adjust the wedge angle to find the critical slip angle\n- Change the block's friction coefficient in the properties panel`,
-  oval_track: `# Oval Curve Track\n\nA marble circulating on a **banked oval** built from the Curve component — a closed Catmull-Rom spline decomposed into convex box segments.\n\n## Physics\n- **Banked turns**: the −18° bank tilts the contact normal inward, supplying centripetal force\n- Equilibrium speed: *v² = g·r·tan θ* — the marble is launched near this speed\n- Too fast → drifts up the bank; too slow → slides down it (self-correcting within the track width)\n\n## Try it\n- Select the track and **drag the blue control-point handles** to reshape the oval live\n- Adjust Bank Angle in the properties panel and watch the marble's line change\n- Increase the marble's **Launch Velocity** (joint panel) to see it climb the bank`,
-
-  pulley_system: `# Pulley System\n\nA compound pulley demonstrating **mechanical advantage**.\n\n## Physics\n- The rope is simulated as a length-constrained rigid segment via **joint equality**\n- A compound pulley with N rope segments reduces the required force by ×N\n- Rope tension is transferred through the pulley wheel hinge\n\n## Key concepts\n- Ideal mechanical advantage = number of rope segments supporting the load\n- Energy is conserved: you pull further but with less force`,
-
-  cartpole: `# Cartpole\n\nA cart-pole balancing system controlled by an **LQR controller**.\n\n## Physics\n- The cart slides on a frictionless track (slide joint)\n- The pole pivots on a hinge — an **inverted pendulum**, inherently unstable\n- A **Linear Quadratic Regulator (LQR)** applies horizontal force to keep the pole upright\n\n## Control law\n*F = −(k_x·x + k_v·ẋ + k_θ·θ + k_ω·θ̇)*\n\n| Gain | Value | Role |\n|------|-------|------|\n| k_x | 8.0 | Commanded lean from cart position |\n| k_θ | 40.0 | Vertical catch |\n\n## Try it\n- Increase the pole's mass to stress-test the controller\n- Modify gains in the control script`,
-
-  newtons_cradle: `# Newton's Cradle\n\nConservation of **momentum and energy** in elastic collisions.\n\n## Physics\n- Each ball is a pendulum on a hinge joint\n- Collisions are nearly elastic (high restitution)\n- Momentum is transferred through the stationary balls — only the end ball swings out\n- *n* balls swung in → *n* balls swing out (momentum + energy conservation)\n\n## Try it\n- Pull back 2 balls instead of 1 and observe the output`,
-
-  suspension_bridge: `# Suspension Bridge\n\nA cable-stayed bridge demonstrating **static equilibrium** and structural load paths.\n\n## Physics\n- The deck is supported by angled cables under tension\n- Load is transferred: deck → cables → towers → ground\n- Cables can only pull, not push (tension-only members)\n\n## Try it\n- Drop a heavy object onto the deck\n- Remove a cable to see redistribution of load`,
-
-  paper_plane: `# Paper Plane\n\nAerodynamic flight with **lift, drag, and pitch stability**.\n\n## Physics\n- The plane is an **aerodynamic body** (isAerodynamic = true)\n- Lift: *L = ½ ρ v² C_L A sin(α)* where α is angle of attack\n- Drag: *D = ½ ρ v² C_D A*\n- Forces are applied each timestep via the control script\n\n## Key concepts\n- Too steep an angle of attack → stall (lift collapses)\n- Trim angle sets the glide ratio\n\n## Try it\n- Adjust launch velocity and angle in the joint initial velocity\n- Change wind speed in Environment settings`,
-
-  monkey_head: `# Monkey Head\n\nA physics-active body built from **compound primitive geoms** — no mesh required.\n\n## Physics\n- A **free joint** gives the head full 6-DOF motion — it falls, bounces, and rolls\n- The shape is approximated by ~15 ellipsoids, spheres, and boxes (skull, snout, cheeks, eyes, ears…)\n- MuJoCo computes the **composite inertia tensor** automatically from all geoms\n- Collision is handled per-geom — each primitive has its own contact normal\n\n## Key concepts\n- Complex shapes are best approximated by multiple primitives, not a single mesh\n- Compound bodies share one free joint on the root geom\n\n## Try it\n- Increase restitution (bounciness) in the geom friction settings\n- Drop it from different heights via Launch Velocity`,
-
-  golden_gate: `# Golden Gate Bridge (Primitive)\n\nA suspension bridge built from **primitive geoms** (boxes and capsules).\n\n## Physics\n- All structural members are static bodies (no joints = welded to world)\n- The bridge is a rigid visual reference — drop objects onto it!\n- Primitive collision hulls are exact for simple shapes\n\n## Try it\n- Add a free sphere above the deck and watch it roll off\n- Toggle solid/ephemeral collision on bridge members`,
-
-  golden_gate_mesh: `# Golden Gate Bridge (Mesh)\n\nThe same bridge reconstructed with **custom mesh geoms**.\n\n## Physics\n- Deck, towers, and cables are static mesh bodies\n- Mesh collision uses MuJoCo's **convex hull** approximation\n- Concave shapes require decomposition into multiple convex pieces\n\n## Key concepts\n- Mesh vertices authored in Three.js Y-up; Y↔Z swap is automatic\n- Face winding must be outward-facing (CCW viewed from outside)`,
-
-  mesh_collision: `# Mesh Collision Demo\n\nShows a **dynamic convex mesh** (pyramid) interacting with a static ramp.\n\n## Physics\n- The pyramid is a **dynamic mesh** (dynamic: true) with a free joint\n- MuJoCo takes the **convex hull** of the mesh for collision\n- renderVertices are in raw Z-up space for Three.js rendering alignment\n\n## Key concepts\n- Body position tracks the mesh's **volume centroid** (not the base)\n- Set body_pos.z to centroid height to sit flush with the ground`,
-
-  coin_flip: `# Coin Flip\n\nA probabilistic physics experiment demonstrating **initial condition sensitivity**.\n\n## Physics\n- The coin has a free joint (6-DOF)\n- A control script randomises angular velocity at *t = 0* using \`api.setAngularVelocity()\`\n- Heads/tails outcome is determined by which face is up when it lands\n\n## Key concepts\n- Coin toss is deterministic given exact initial conditions\n- Randomness comes from the random seed applied in the script\n\n## Try it\n- Run headless 1000× via MCP to measure heads/tails ratio`,
-
-  windmill: `# Wind Turbine (Aerodynamic)\n\nA three-blade turbine driven by **aerodynamic lift on the blades**.\n\n## Physics\n- Each blade is marked isAerodynamic = true\n- Lift is computed from relative wind velocity and angle of attack\n- The hub hinge converts blade lift torque to rotational speed\n- Wind is set globally via Environment → Wind X\n\n## Key equations\n*L = ½ ρ v_rel² C_L A sin(α)*\n*T = L × arm_length*\n\n## Try it\n- Increase wind speed to raise RPM\n- Change blade pitch angle to find optimal attack angle`,
-
-  physics_only_windmill: `# Wind Turbine (No Aerodynamics)\n\nThe same turbine geometry driven by a **direct script torque** instead of aerodynamics.\n\n## Physics\n- Aerodynamic forces are disabled; a fixed torque is applied via control script\n- Useful for isolating mechanical behaviour from aerodynamic complexity\n- Hinge damping limits maximum RPM\n\n## Try it\n- Compare RPM with the aerodynamic version at the same wind speed\n- Vary damping to tune the speed`,
-
-  traditional_windmill: `# Traditional Windmill (4-Blade)\n\nA classic four-sail Dutch windmill driven by wind pressure.\n\n## Physics\n- Four flat sails create drag-driven rotation (not lift-driven)\n- Each sail is an aerodynamic flat plate; drag dominates at low tip-speed ratios\n- The main shaft hinge connects sail rotation to a milling load\n\n## Try it\n- Adjust sail area (size) to change torque at a given wind speed`,
-
-  drone: `# Quadcopter Drone\n\nA quadrotor UAV with **PD attitude control** and per-rotor thrust.\n\n## Physics\n- Four rotors apply upward thrust and reaction torques\n- **PD controller** compares current orientation to target and commands differential thrust\n- Aerodynamic drag is applied to the frame body\n\n## Control law\n*τ = k_p × error + k_d × error_rate*\n\n## Try it\n- Use arrow keys / WASD to command pitch and roll\n- Adjust k_p and k_d gains in the control script to tune stability\n- Increase rotor drag coefficient to simulate thicker air`,
-
-  boolean_shapes: `# Boolean Cutouts
-
-Four bodies whose shape comes from **subtracting** one primitive from another, dropped onto the floor.
-
-## How they're built
-None of these is a special shape type. Each body is just two or three ordinary geoms with one marked \`csg: 'difference'\`, compiled into a mesh by OpenSCAD. The **primitives stay the source of truth** — select a body and every size slider still reshapes it, then the mesh is regenerated.
-
-| Body | Recipe |
-|------|--------|
-| Ring | ellipsoid − taller ellipsoid |
-| Crescent | disc − *offset* disc |
-| Hollow cube | cube − three square shafts |
-| Chopped cone | cone − box above the cut |
-
-## The physics catch
-MuJoCo takes the **convex hull** of every mesh geom, so a hole would not exist for contact — a ring would collide as a solid disc. Each body picks a strategy:
-
-- **Ring, crescent, hollow cube** — \`auto\`: the result is sliced into convex sectors around the hole axis, so the hole is *real*. At 20 sectors the colliders intrude only ~1.2% of the hole radius.
-- **Chopped cone** — \`hull\`: not an approximation at all, because a frustum is *already convex*.
-
-Only **one** of the hollow cube's three shafts collides (the Z one) — decomposition works about a single axis, so the other two are visual.
-
-## Try it
-- Select a body and drag the **negative shape** around — it's drawn as a red outline
-- Switch a body's **Collision** mode to \`Convex hull\` and watch the hole stop working
-- Drop a small sphere through the ring's hole while it lies flat`,
-
-  bouncy_balls: `# Bouncy Balls\n\n20 multicolored spheres with **high restitution** colliding under gravity.\n\n## Physics\n- Each ball has a **free joint** (6-DOF) and a unique radius (0.18–0.27 m)\n- Uses MuJoCo's **spring-damper contact model**: \`solref=[timeconst, dampingRatio]\`\n- \`solref=[0.04, 0.2]\` = 40 ms contact spring, 20% damping → lively bounce\n- \`dampingRatio < 1\` = underdamped = bouncy; \`= 1\` = critically damped = no bounce\n\n## Try it\n- Use the **Bounciness slider** in the properties panel to tune each ball\n- Change gravity in Environment settings to see low-gravity chaos`,
-};
-
-function makePresetNoteCard(presetKey: string): { id: string; markdown: string; minimized: boolean; x: number; y: number } | null {
-  const md = PRESET_NOTE_CARDS[presetKey];
-  if (!md) return null;
-  return { id: `preset_note_${presetKey}`, markdown: md, minimized: false, x: 16, y: 16 };
-}
 
 function generateScadForNode(node: any): string {
   const geom = node.geoms?.[0];
@@ -1997,6 +1941,7 @@ function App() {
   const [presetNameInput, setPresetNameInput] = useState('');
   const [activeGeomIndex, setActiveGeomIndex] = useState(0);
   const [noteCards, setNoteCards] = useState<{ id: string; markdown: string; minimized: boolean; x: number; y: number }[]>([]);
+  const [copilotMessages, setCopilotMessages] = useState<any[]>([]);
   const [editingCardId, setEditingCardId] = useState<string | null>(null);
   const [scadText, setScadText] = useState('');
   const [scadError, setScadError] = useState<string | null>(null);
@@ -2164,11 +2109,14 @@ function App() {
     };
   }, []);
 
-  // Expose noteCards state to MCP bridge
+  // Expose noteCards and copilotMessages state to MCP bridge and noteCard manager
   useEffect(() => {
     (window as any)._physics_getNoteCards = () => noteCards;
     (window as any)._physics_setNoteCards = (cards: typeof noteCards) => setNoteCards(cards);
-  }, [noteCards]);
+    (window as any)._physics_getCopilotMessages = () => copilotMessages;
+    (window as any)._physics_setCopilotMessages = (msgs: typeof copilotMessages) => setCopilotMessages(msgs);
+    (window as any)._physics_store = useStore;
+  }, [noteCards, copilotMessages]);
 
 
 
@@ -2279,6 +2227,40 @@ function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // intentionally only on mount
 
+  // Load a preset and replace the note card with the preset's built-in card (if any)
+  const loadPresetWithCard = useCallback((name: string) => {
+    loadPreset(name);
+    const builtinKey = name.startsWith('user:') ? null : name;
+    const presetCard = builtinKey ? makePresetNoteCard(builtinKey) : null;
+    setNoteCards(presetCard ? [presetCard] : []);
+    setCopilotMessages([]);
+    setEditingCardId(null);
+  }, [loadPreset]);
+
+  // Also load note cards from user presets (stored alongside the scene)
+  const loadUserPresetWithCard = useCallback((name: string) => {
+    loadPreset(name);
+    try {
+      const userPresets = JSON.parse(localStorage.getItem('physics_user_presets') || '{}');
+      const key = name.replace('user:', '');
+      const saved = userPresets[key];
+      if (saved && Array.isArray(saved.noteCards)) {
+        setNoteCards(saved.noteCards);
+      } else {
+        setNoteCards([]);
+      }
+      if (saved && Array.isArray(saved.copilotMessages)) {
+        setCopilotMessages(saved.copilotMessages);
+      } else {
+        setCopilotMessages([]);
+      }
+    } catch {
+      setNoteCards([]);
+      setCopilotMessages([]);
+    }
+    setEditingCardId(null);
+  }, [loadPreset]);
+
   const handleSavePresetClick = useCallback(() => {
     setPresetNameInput('');
     setIsSaveModalOpen(true);
@@ -2290,20 +2272,20 @@ function App() {
     try {
       const syncedScene = getSyncedSceneGraph(sceneGraph, model, data, mujoco);
       const userPresets = JSON.parse(localStorage.getItem('physics_user_presets') || '{}');
-      userPresets[name] = { ...syncedScene, noteCards };
+      userPresets[name] = { ...syncedScene, noteCards, copilotMessages };
       localStorage.setItem('physics_user_presets', JSON.stringify(userPresets));
-      loadPreset(`user:${name}`);
+      loadUserPresetWithCard(`user:${name}`);
     } catch (e) {
       console.error('Failed to save user preset', e);
     }
     setIsSaveModalOpen(false);
     setPresetNameInput('');
-  }, [presetNameInput, sceneGraph, model, data, mujoco, loadPreset, noteCards]);
+  }, [presetNameInput, sceneGraph, model, data, mujoco, loadUserPresetWithCard, noteCards, copilotMessages]);
 
   const exportJson = useCallback(() => {
     try {
       const syncedScene = getSyncedSceneGraph(sceneGraph, model, data, mujoco);
-      const dataStr = JSON.stringify({ ...syncedScene, noteCards }, null, 2);
+      const dataStr = JSON.stringify({ ...syncedScene, noteCards, copilotMessages }, null, 2);
       const blob = new Blob([dataStr], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -2409,6 +2391,8 @@ function App() {
             if (isPlaying) togglePlay();
             updateScene(parsed);
             if (Array.isArray(parsed.noteCards)) setNoteCards(parsed.noteCards);
+            if (Array.isArray(parsed.copilotMessages)) setCopilotMessages(parsed.copilotMessages);
+            else setCopilotMessages([]);
           } else {
             alert('Invalid scene JSON format. Must contain a "nodes" array.');
           }
@@ -2421,30 +2405,7 @@ function App() {
     input.click();
   }, [isPlaying, togglePlay, updateScene]);
 
-  // Load a preset and replace the note card with the preset's built-in card (if any)
-  const loadPresetWithCard = useCallback((name: string) => {
-    loadPreset(name);
-    const builtinKey = name.startsWith('user:') ? null : name;
-    const presetCard = builtinKey ? makePresetNoteCard(builtinKey) : null;
-    setNoteCards(presetCard ? [presetCard] : []);
-    setEditingCardId(null);
-  }, [loadPreset]);
 
-  // Also load note cards from user presets (stored alongside the scene)
-  const loadUserPresetWithCard = useCallback((name: string) => {
-    loadPreset(name);
-    try {
-      const userPresets = JSON.parse(localStorage.getItem('physics_user_presets') || '{}');
-      const key = name.replace('user:', '');
-      const saved = userPresets[key];
-      if (saved && Array.isArray(saved.noteCards)) {
-        setNoteCards(saved.noteCards);
-      } else {
-        setNoteCards([]);
-      }
-    } catch { setNoteCards([]); }
-    setEditingCardId(null);
-  }, [loadPreset]);
 
   // Helper to find a node by ID in hierarchy
   const findNodeById = useCallback((nodes: any[], targetId: string): any | null => {
@@ -5079,6 +5040,57 @@ function App() {
                       </h3>
                       <label className="text-xs font-medium text-slate-500 flex justify-between">Value <span>{(geom.mass ?? 0).toFixed(2)} kg</span></label>
                       <input type="range" min="0" max="50" step="0.01" value={geom.mass ?? 0} onChange={(e) => updateNodeGeom(selectedNode.id, {mass: parseFloat(e.target.value)}, activeIndex)} className="w-full accent-blue-500 cursor-pointer" />
+                      
+                      {(() => {
+                        let volM3 = 0;
+                        const sz = geom.size || [0.1, 0.1, 0.1];
+                        if (geom.type === 'sphere') {
+                          volM3 = (4 / 3) * Math.PI * Math.pow(sz[0], 3);
+                        } else if (geom.type === 'cylinder') {
+                          volM3 = Math.PI * Math.pow(sz[0], 2) * (sz[1] * 2);
+                        } else if (geom.type === 'capsule') {
+                          volM3 = (4 / 3) * Math.PI * Math.pow(sz[0], 3) + Math.PI * Math.pow(sz[0], 2) * (sz[1] * 2);
+                        } else if (geom.type === 'box') {
+                          volM3 = 8 * sz[0] * (sz[1] ?? sz[0]) * (sz[2] ?? sz[0]);
+                        } else if (geom.type === 'ellipsoid') {
+                          volM3 = (4 / 3) * Math.PI * sz[0] * (sz[1] ?? sz[0]) * (sz[2] ?? sz[0]);
+                        }
+                        if (volM3 <= 0) return null;
+                        const m = geom.mass ?? 0;
+                        const objDensity = m / volM3;
+                        const gAbs = Math.abs(gravityZ);
+                        // Against the ambient medium set in Environment.
+                        const buoyancyN = density * volM3 * gAbs;
+                        const weightN = m * gAbs;
+                        const status = buoyancyN > weightN * 1.02 ? 'floats' : buoyancyN < weightN * 0.98 ? 'sinks' : 'neutral';
+
+                        return (
+                          <div className="pt-2 border-t border-slate-100 flex flex-col gap-1 text-[11px] text-slate-600">
+                            <div className="flex justify-between items-center font-mono text-[10px]">
+                              <span>Volume:</span>
+                              <span>{(volM3 * 1000).toFixed(2)} L ({(volM3 * 1e6).toFixed(0)} cm³)</span>
+                            </div>
+                            <div className="flex justify-between items-center font-mono text-[10px]">
+                              <span>Object Density:</span>
+                              <span className="font-bold">{objDensity.toFixed(0)} kg/m³</span>
+                            </div>
+                            {density > 0 && (
+                              <>
+                                <div className="flex justify-between items-center font-mono text-[10px] text-slate-500">
+                                  <span>Buoyancy / Weight @ {density.toFixed(2)} kg/m³:</span>
+                                  <span>{buoyancyN.toFixed(2)}N / {weightN.toFixed(2)}N</span>
+                                </div>
+                                <div className="flex justify-between items-center mt-0.5">
+                                  <span className="font-semibold text-slate-500 text-[10px]">Fluid Status:</span>
+                                  {status === 'floats' && <span className="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 font-bold text-[10px]">🟢 FLOATS (F_b &gt; W)</span>}
+                                  {status === 'sinks' && <span className="px-1.5 py-0.5 rounded bg-rose-100 text-rose-800 font-bold text-[10px]">🔴 SINKS (W &gt; F_b)</span>}
+                                  {status === 'neutral' && <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 font-bold text-[10px]">🟡 NEUTRAL (F_b ≈ W)</span>}
+                                </div>
+                              </>
+                            )}
+                          </div>
+                        );
+                      })()}
                     </div>
 
                     <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-2">
@@ -5390,11 +5402,25 @@ function App() {
                                 const r = parseInt(hex.slice(1,3), 16)/255;
                                 const g = parseInt(hex.slice(3,5), 16)/255;
                                 const b = parseInt(hex.slice(5,7), 16)/255;
-                                updateNodeGeom(selectedNode.id, {rgba: [r,g,b,1]}, activeIndex);
+                                // Keep the alpha: picking a colour must not
+                                // silently turn a pane of glass back into a wall.
+                                updateNodeGeom(selectedNode.id, {rgba: [r, g, b, rgba[3] ?? 1]}, activeIndex);
                               }} 
                               className="w-8 h-8 rounded cursor-pointer border-0 p-0 shadow-sm" 
                             />
                           </div>
+                          <label className="text-xs font-medium text-slate-500 flex justify-between mt-1">
+                            Opacity <span>{Math.round((rgba[3] ?? 1) * 100)}%</span>
+                          </label>
+                          <input
+                            type="range" min="0" max="1" step="0.01" value={rgba[3] ?? 1}
+                            onChange={(e) => updateNodeGeom(
+                              selectedNode.id,
+                              {rgba: [rgba[0] ?? 0.5, rgba[1] ?? 0.5, rgba[2] ?? 0.5, parseFloat(e.target.value)]},
+                              activeIndex,
+                            )}
+                            className="w-full accent-blue-500 cursor-pointer"
+                          />
                         </div>
                       );
                     })()}
@@ -5948,11 +5974,11 @@ function App() {
                             <div className="flex justify-between items-center text-xs">
                               <span className="font-mono text-slate-700 dark:text-slate-300 font-medium">{v.name}</span>
                               <span className="font-mono text-violet-600 dark:text-violet-400 font-bold bg-violet-50 dark:bg-violet-950/40 px-1.5 py-0.5 rounded border border-violet-100 dark:border-violet-900/50">
-                                {Number((slidingValues[v.name] ?? v.value).toFixed(4))}
+                                {Number((slidingValues[v.name] ?? v.value).toFixed(2))}
                               </span>
                             </div>
                             <div className="flex items-center gap-2">
-                              <span className="text-[9px] text-slate-400 font-mono w-8 text-right">{v.min}</span>
+                              <span className="text-[9px] text-slate-400 font-mono w-8 text-right">{Number(v.min.toFixed(2))}</span>
                               <input
                                 type="range"
                                 min={v.min}
@@ -5960,13 +5986,13 @@ function App() {
                                 step={v.step}
                                 value={slidingValues[v.name] ?? v.value}
                                 onChange={(e) => {
-                                  const val = parseFloat(e.target.value);
+                                  const val = Number(parseFloat(e.target.value).toFixed(2));
                                   setSlidingValues(prev => ({ ...prev, [v.name]: val }));
                                   debouncedUpdateCode();
                                 }}
                                 className="flex-1 h-1 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-violet-600"
                               />
-                              <span className="text-[9px] text-slate-400 font-mono w-8">{v.max}</span>
+                              <span className="text-[9px] text-slate-400 font-mono w-8">{Number(v.max.toFixed(2))}</span>
                             </div>
                           </div>
                         ))}
@@ -6279,7 +6305,11 @@ api.applyForce([force, 0, 0]);
         )}
 
         {showAICopilot && (
-          <AICopilotPanel onClose={() => setShowAICopilot(false)} />
+          <AICopilotPanel
+            onClose={() => setShowAICopilot(false)}
+            messages={copilotMessages}
+            setMessages={setCopilotMessages}
+          />
         )}
       </div>
 

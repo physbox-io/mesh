@@ -16,10 +16,29 @@ export const PRESET_NOTE_CARDS: Record<string, string> = {
   rack_pinion: `# Rack and Pinion\n\nConverts **rotary motion** (pinion gear) to **linear motion** (rack).\n\n## Physics\n- Pinion hinge rotation is coupled to rack slide translation via a **joint equality constraint** when the bodies are within 0.5 m\n- Linear displacement = pinion angle × pinion pitch radius\n\n## Try it\n- Drive the pinion with a script: \`api.applyJointForce('pinion_hinge', 5)\`\n- Add a load mass to the rack to see force requirements increase`,
 
   inclined_plane: `# Inclined Plane\n\nClassic mechanics: a block sliding down a ramp under gravity.\n\n## Physics\n- Net force along the plane: *F = mg sin θ − μmg cos θ*\n- **Static friction** prevents motion when *tan θ < μ*\n- Once sliding, **kinetic friction** is lower than static\n\n## Try it\n- Adjust the wedge angle to find the critical slip angle\n- Change the block's friction coefficient in the properties panel`,
+  oval_track: `# Oval Curve Track\n\nA marble circulating on a **banked oval** built from the Curve component — a closed Catmull-Rom spline decomposed into convex box segments.\n\n## Physics\n- **Banked turns**: the −18° bank tilts the contact normal inward, supplying centripetal force\n- Equilibrium speed: *v² = g·r·tan θ* — the marble is launched near this speed\n- Too fast → drifts up the bank; too slow → slides down it (self-correcting within the track width)\n\n## Try it\n- Select the track and **drag the blue control-point handles** to reshape the oval live\n- Adjust Bank Angle in the properties panel and watch the marble's line change\n- Increase the marble's **Launch Velocity** (joint panel) to see it climb the bank`,
 
-  pulley_system: `# Pulley System\n\nA compound pulley demonstrating **mechanical advantage**.\n\n## Physics\n- The rope is simulated as a length-constrained rigid segment via **joint equality**\n- A compound pulley with N rope segments reduces the required force by ×N\n- Rope tension is transferred through the pulley wheel hinge\n\n## Key concepts\n- Ideal mechanical advantage = number of rope segments supporting the load\n- Energy is conserved: you pull further but with less force`,
+  pulley_system: `# Atwood Machine
 
-  cartpole: `# Cartpole\n\nA cart-pole balancing system controlled by an **LQR controller**.\n\n## Physics\n- The cart slides on a frictionless track (slide joint)\n- The pole pivots on a hinge — an **inverted pendulum**, inherently unstable\n- A **Linear Quadratic Regulator (LQR)** applies horizontal force to keep the pole upright\n\n## Control law\n*F = −(k_x·x + k_v·ẋ + k_θ·θ + k_ω·θ̇)*\n\n| Gain | Value | Role |\n|------|-------|------|\n| k_x | 22.0 | Position centering |\n| k_θ | 80.0 | Vertical catch |\n\n## Try it\n- Increase the pole's mass to stress-test the controller\n- Modify gains in the control script`,
+Two unequal weights on a rope over a single wheel — the classic demonstration that acceleration depends on the mass *difference* but inertia depends on the mass *sum*.
+
+## Physics
+- Left weight **2 kg**, right weight **1 kg**, joined by an inextensible rope
+- Acceleration *a = g(m₁ − m₂)/(m₁ + m₂ + I/r²)* ≈ **3.1 m/s²**, well under free fall
+- The rope constrains *x_left = −x_right*, and *x = r·θ* turns the wheel with it
+- Travel limits stand in for the rope's length
+
+## Key concepts
+- Adding equal mass to *both* sides slows it down without changing the net force
+- The wheel's own inertia *I/r²* adds to the system mass — a heavy pulley matters
+- This is a single fixed wheel, so there is **no mechanical advantage** (MA = 1); lifting the load still takes its full weight
+
+## Try it
+- Even the masses up and watch it hold still
+- Make the difference tiny (2.0 vs 1.9 kg) to slow the acceleration right down
+- Increase the wheel's mass to see *I/r²* drag the acceleration below the ideal`,
+
+  cartpole: `# Cartpole\n\nA cart-pole balancing system controlled by an **LQR controller**.\n\n## Physics\n- The cart slides on a frictionless track (slide joint)\n- The pole pivots on a hinge — an **inverted pendulum**, inherently unstable\n- A **Linear Quadratic Regulator (LQR)** applies horizontal force to keep the pole upright\n\n## Control law\n*F = −(k_x·x + k_v·ẋ + k_θ·θ + k_ω·θ̇)*\n\n| Gain | Value | Role |\n|------|-------|------|\n| k_x | 8.0 | Commanded lean from cart position |\n| k_θ | 40.0 | Vertical catch |\n\n## Try it\n- Increase the pole's mass to stress-test the controller\n- Modify gains in the control script`,
 
   newtons_cradle: `# Newton's Cradle\n\nConservation of **momentum and energy** in elastic collisions.\n\n## Physics\n- Each ball is a pendulum on a hinge joint\n- Collisions are nearly elastic (high restitution)\n- Momentum is transferred through the stationary balls — only the end ball swings out\n- *n* balls swung in → *n* balls swing out (momentum + energy conservation)\n\n## Try it\n- Pull back 2 balls instead of 1 and observe the output`,
 
@@ -45,11 +64,395 @@ export const PRESET_NOTE_CARDS: Record<string, string> = {
 
   drone: `# Quadcopter Drone\n\nA quadrotor UAV with **PD attitude control** and per-rotor thrust.\n\n## Physics\n- Four rotors apply upward thrust and reaction torques\n- **PD controller** compares current orientation to target and commands differential thrust\n- Aerodynamic drag is applied to the frame body\n\n## Control law\n*τ = k_p × error + k_d × error_rate*\n\n## Try it\n- Use arrow keys / WASD to command pitch and roll\n- Adjust k_p and k_d gains in the control script to tune stability\n- Increase rotor drag coefficient to simulate thicker air`,
 
+  boolean_shapes: `# Boolean Cutouts
+
+Four bodies whose shape comes from **subtracting** one primitive from another, dropped onto the floor.
+
+## How they're built
+None of these is a special shape type. Each body is just two or three ordinary geoms with one marked \`csg: 'difference'\`, compiled into a mesh by OpenSCAD. The **primitives stay the source of truth** — select a body and every size slider still reshapes it, then the mesh is regenerated.
+
+| Body | Recipe |
+|------|--------|
+| Ring | ellipsoid − taller ellipsoid |
+| Crescent | disc − *offset* disc |
+| Hollow cube | cube − three square shafts |
+| Chopped cone | cone − box above the cut |
+
+## The physics catch
+MuJoCo takes the **convex hull** of every mesh geom, so a hole would not exist for contact — a ring would collide as a solid disc. Each body picks a strategy:
+
+- **Ring, crescent, hollow cube** — \`auto\`: the result is sliced into convex sectors around the hole axis, so the hole is *real*. At 20 sectors the colliders intrude only ~1.2% of the hole radius.
+- **Chopped cone** — \`hull\`: not an approximation at all, because a frustum is *already convex*.
+
+Only **one** of the hollow cube's three shafts collides (the Z one) — decomposition works about a single axis, so the other two are visual.
+
+## Try it
+- Select a body and drag the **negative shape** around — it's drawn as a red outline
+- Switch a body's **Collision** mode to \`Convex hull\` and watch the hole stop working
+- Drop a small sphere through the ring's hole while it lies flat`,
+
   bouncy_balls: `# Bouncy Balls\n\n20 multicolored spheres with **high restitution** colliding under gravity.\n\n## Physics\n- Each ball has a **free joint** (6-DOF) and a unique radius (0.18–0.27 m)\n- Uses MuJoCo's **spring-damper contact model**: \`solref=[timeconst, dampingRatio]\`\n- \`solref=[0.04, 0.2]\` = 40 ms contact spring, 20% damping → lively bounce\n- \`dampingRatio < 1\` = underdamped = bouncy; \`= 1\` = critically damped = no bounce\n\n## Try it\n- Use the **Bounciness slider** in the properties panel to tune each ball\n- Change gravity in Environment settings to see low-gravity chaos`,
+
+  openscad_demo: `# OpenSCAD Showcase\n\nA tray whose shape is written as **code**, not dragged out of a palette.\n\n## How it works\n- The body's \`scad\` source is compiled by **openscad-wasm** into a triangle mesh\n- The mesh is drawn as-is, but MuJoCo collides any mesh as its **convex hull** — so the tray's walls are backed by five plain boxes that do the actual containing\n- Edit the source and it recompiles; the boxes stay where they are\n\n## Try it\n- Open the **SCAD editor** on the container and change a dimension\n- Drop a component in and watch it stay inside the walls, not the hull`,
+
+  rope_bridge: `# Rope Bridge\n\nA **cable composite** — 25 linked capsules with a heavy ball dropped onto it.\n\n## Physics\n- MuJoCo expands the composite into a chain of bodies joined by ball joints, welded to the anchor at each end\n- The chain has no bending stiffness, so it hangs in a **catenary** and carries load purely in tension\n- The ball's weight is shared along the span; the shallower the sag, the higher the tension\n\n## Try it\n- Increase the ball's mass and watch the sag deepen\n- Move an anchor apart to pull the rope taut — tension climbs steeply as it straightens`,
+
 };
 
+
+/** The note card shown when a built-in preset is loaded, or null if it has none. */
 export function makePresetNoteCard(presetKey: string): { id: string; markdown: string; minimized: boolean; x: number; y: number } | null {
   const md = PRESET_NOTE_CARDS[presetKey];
   if (!md) return null;
   return { id: `preset_note_${presetKey}`, markdown: md, minimized: false, x: 16, y: 16 };
 }
+
+export function computeNodeBoundingBox(node: any): { x: number; y: number; z: number } {
+  let minX = Infinity, maxX = -Infinity;
+  let minY = Infinity, maxY = -Infinity;
+  let minZ = Infinity, maxZ = -Infinity;
+
+  const includeBounds = (x0: number, x1: number, y0: number, y1: number, z0: number, z1: number) => {
+    if (x0 < minX) minX = x0;
+    if (x1 > maxX) maxX = x1;
+    if (y0 < minY) minY = y0;
+    if (y1 > maxY) maxY = y1;
+    if (z0 < minZ) minZ = z0;
+    if (z1 > maxZ) maxZ = z1;
+  };
+
+  if (node.width !== undefined || node.depth !== undefined || node.height !== undefined) {
+    const w = node.width ?? 0.1;
+    const d = node.depth ?? 0.1;
+    const h = node.height ?? 0.1;
+    includeBounds(-w / 2, w / 2, -d / 2, d / 2, -h / 2, h / 2);
+  }
+
+  if (node.radius !== undefined && node.height !== undefined) {
+    const r = node.radius;
+    const h = node.height;
+    includeBounds(-r, r, -r, r, -h / 2, h / 2);
+  }
+
+  if (node.majorRadius !== undefined && node.tubeRadius !== undefined) {
+    const R = node.majorRadius;
+    const r = node.tubeRadius;
+    includeBounds(-(R + r), R + r, -(R + r), R + r, -r, r);
+  }
+
+  if (Array.isArray(node.geoms)) {
+    for (const g of node.geoms) {
+      const gx = g.pos ? g.pos[0] : 0;
+      const gy = g.pos ? g.pos[1] : 0;
+      const gz = g.pos ? g.pos[2] : 0;
+
+      const verts = g.renderVertices || g.vertices;
+      if (Array.isArray(verts) && verts.length >= 3) {
+        for (let i = 0; i < verts.length; i += 3) {
+          const vx = verts[i] + gx;
+          const vy = verts[i + 1] + gy;
+          const vz = verts[i + 2] + gz;
+          includeBounds(vx, vx, vy, vy, vz, vz);
+        }
+      } else if (g.fromto && g.fromto.length >= 6) {
+        const [x1, y1, z1, x2, y2, z2] = g.fromto;
+        const r = (g.size && g.size[0]) ? g.size[0] : 0.05;
+        includeBounds(
+          Math.min(x1, x2) - r + gx, Math.max(x1, x2) + r + gx,
+          Math.min(y1, y2) - r + gy, Math.max(y1, y2) + r + gy,
+          Math.min(z1, z2) - r + gz, Math.max(z1, z2) + r + gz
+        );
+      } else if (g.size && Array.isArray(g.size)) {
+        let sx = 0.05, sy = 0.05, sz = 0.05;
+        if (g.type === 'box') {
+          sx = g.size[0] ?? 0.05;
+          sy = g.size[1] ?? sx;
+          sz = g.size[2] ?? sx;
+        } else if (g.type === 'sphere') {
+          sx = sy = sz = g.size[0] ?? 0.05;
+        } else if (g.type === 'cylinder' || g.type === 'capsule') {
+          sx = sy = g.size[0] ?? 0.05;
+          sz = g.size[1] ?? sx;
+        } else if (g.type === 'ellipsoid') {
+          sx = g.size[0] ?? 0.05;
+          sy = g.size[1] ?? sx;
+          sz = g.size[2] ?? sx;
+        } else {
+          sx = g.size[0] ?? 0.05;
+          sy = g.size[1] ?? sx;
+          sz = g.size[2] ?? sx;
+        }
+        includeBounds(gx - sx, gx + sx, gy - sy, gy + sy, gz - sz, gz + sz);
+      }
+    }
+  }
+
+  if (Array.isArray(node.children)) {
+    for (const child of node.children) {
+      const cb = computeNodeBoundingBox(child);
+      const cx = child.pos ? child.pos[0] : 0;
+      const cy = child.pos ? child.pos[1] : 0;
+      const cz = child.pos ? child.pos[2] : 0;
+      includeBounds(cx - cb.x / 2, cx + cb.x / 2, cy - cb.y / 2, cy + cb.y / 2, cz - cb.z / 2, cz + cb.z / 2);
+    }
+  }
+
+  if (minX === Infinity) {
+    return { x: 0.1, y: 0.1, z: 0.1 };
+  }
+
+  const dx = Math.max(0.001, maxX - minX);
+  const dy = Math.max(0.001, maxY - minY);
+  const dz = Math.max(0.001, maxZ - minZ);
+
+  return { x: dx, y: dy, z: dz };
+}
+
+export function formatComponentBoundingBoxes(nodes: any[]): string {
+  if (!Array.isArray(nodes) || nodes.length === 0) {
+    return 'No major components in scene.';
+  }
+
+  const majorNodes = nodes.filter(n => {
+    const name = (n.name || n.id || '').toLowerCase();
+    if (name === 'floor' || name === 'ground' || name === 'world') {
+      if (n.geoms && n.geoms.some((g: any) => g.type === 'plane')) return false;
+    }
+    return true;
+  });
+
+  const targets = majorNodes.length > 0 ? majorNodes : nodes;
+
+  const formatMm = (valM: number) => {
+    const mm = valM * 1000;
+    return mm >= 100 ? `${Math.round(mm)}mm` : `${mm.toFixed(1).replace(/\.0$/, '')}mm`;
+  };
+
+  const lines = targets.map(n => {
+    const bbox = computeNodeBoundingBox(n);
+    const displayName = n.name || n.id || 'Component';
+    const dimStr = `${formatMm(bbox.x)} × ${formatMm(bbox.y)} × ${formatMm(bbox.z)}`;
+    return `- **${displayName}**: ${dimStr}`;
+  });
+
+  return lines.join('\n');
+}
+
+export function extractTitle(assistantMarkdown?: string, userPrompt?: string, nodes?: any[]): string {
+  // 1. Check primary node name from active scene nodes (excluding ground/floor/world)
+  if (Array.isArray(nodes) && nodes.length > 0) {
+    const primaryNode = nodes.find(n => {
+      const nm = (n.name || n.id || '').toLowerCase();
+      return nm !== 'floor' && nm !== 'ground' && nm !== 'world';
+    });
+    if (primaryNode) {
+      const name = primaryNode.name || primaryNode.id;
+      if (name && name.length <= 40 && !/^(node_\d+|body_\d+)/i.test(name)) {
+        return name.charAt(0).toUpperCase() + name.slice(1);
+      }
+    }
+  }
+
+  // 2. Check assistant Markdown header
+  if (assistantMarkdown) {
+    const firstLine = assistantMarkdown.split('\n')[0]?.trim();
+    if (firstLine && firstLine.startsWith('# ')) {
+      const extracted = firstLine.substring(2).trim();
+      if (extracted && !/^(Generated|MCP|Physics|Scene Summary|What is this|Explain|Diagnostics)/i.test(extracted)) {
+        return extracted;
+      }
+    }
+  }
+
+  // 3. Check user prompt if it's not a generic query
+  if (userPrompt) {
+    const clean = userPrompt
+      .replace(/^🪄\s*Generate\s*Scene:\s*/i, '')
+      .replace(/^🛠️\s*Mutate\s*Scene:\s*/i, '')
+      .replace(/^⚡\s*/i, '')
+      .replace(/^🖨️\s*/i, '')
+      .trim();
+    
+    const isQuestion = /^(what|how|why|explain|is|can|run|diagnose|tell|does)\b/i.test(clean) || clean.endsWith('?');
+    if (!isQuestion && clean.length > 0 && clean.length <= 40) {
+      return clean.charAt(0).toUpperCase() + clean.slice(1);
+    }
+  }
+
+  return 'Physics Scene';
+}
+
+export function extractConciseSummary(assistantMarkdown?: string, userPrompt?: string): string {
+  if (assistantMarkdown) {
+    let cleanText = assistantMarkdown
+      .replace(/```[\s\S]*?```/g, '')
+      .replace(/^\|[\s\S]*?\|$/gm, '')
+      .replace(/\|.*\|/g, '')
+      .replace(/---+/g, '')
+      .replace(/modeled using a combined OpenSCAD procedural CSG definition and a MuJoCo [a-z]+ collision hull\.?/gi, '')
+      .replace(/using a combined OpenSCAD procedural CSG definition\.?/gi, '')
+      .replace(/MuJoCo [a-z]+ collision hull\.?/gi, '')
+      .split('\n')
+      .map(line => line.trim())
+      .filter(line => line.length > 0 && !line.startsWith('#'))
+      .join(' ')
+      .replace(/\s+/g, ' ');
+    
+    if (cleanText.length > 0) {
+      const sentences = cleanText.match(/[^.!?]+[.!?]+/g);
+      if (sentences && sentences.length > 0) {
+        return sentences.slice(0, 2).join(' ').trim();
+      }
+      return cleanText.length > 180 ? cleanText.substring(0, 180) + '...' : cleanText;
+    }
+  }
+
+  if (userPrompt) {
+    const cleanPrompt = userPrompt
+      .replace(/^🪄\s*Generate\s*Scene:\s*/i, '')
+      .replace(/^🛠️\s*Mutate\s*Scene:\s*/i, '')
+      .trim();
+    if (!/^(what|explain|how|diagnose)\b/i.test(cleanPrompt)) {
+      return `Physics scene configured for: ${cleanPrompt.length > 100 ? cleanPrompt.substring(0, 100) + '...' : cleanPrompt}`;
+    }
+  }
+
+  return 'Interactive 3D rigid-body physics scene.';
+}
+
+export function extractCustomSections(assistantMarkdown?: string): string {
+  if (!assistantMarkdown) return '';
+  // Extract custom Markdown sections (e.g. ## Physics, ## Design Decisions, ## Component Details, ## Try it)
+  // excluding ## Component Bounding Boxes or ## Latest Summary
+  const lines = assistantMarkdown.split('\n');
+  const customLines: string[] = [];
+  let capturing = false;
+
+  for (const line of lines) {
+    if (line.startsWith('## ')) {
+      const sectionName = line.substring(3).trim();
+      if (/^(Component Bounding Boxes|Latest Summary)/i.test(sectionName)) {
+        capturing = false;
+      } else {
+        capturing = true;
+        customLines.push(line);
+      }
+    } else if (capturing) {
+      if (line.startsWith('# ') && !line.startsWith('## ')) {
+        capturing = false;
+      } else {
+        customLines.push(line);
+      }
+    }
+  }
+
+  return customLines.join('\n').trim();
+}
+
+export function updateOrCreateNotecard(options: {
+  mode: 'generate' | 'explain' | 'mutate' | 'mcp';
+  userPrompt?: string;
+  assistantMarkdown?: string;
+  nodes?: any[];
+}) {
+  const getter = (window as any)._physics_getNoteCards;
+  const setter = (window as any)._physics_setNoteCards;
+  if (!setter) return;
+
+  const currentCards: { id: string; markdown: string; minimized: boolean; x: number; y: number }[] = getter ? getter() : [];
+
+  let nodeArray: any[] = (options.nodes && options.nodes.length > 0)
+    ? options.nodes
+    : ((window as any)._physics_store?.getState ? (window as any)._physics_store.getState().sceneGraph?.nodes || [] : []);
+
+  const title = extractTitle(options.assistantMarkdown, options.userPrompt, nodeArray);
+  // An 'mcp' call is a programmatic scene edit, not a conversation turn: its
+  // userPrompt (when a caller passes one at all) is an internal command label
+  // like "MCP UPDATE_OBJECT (pentacle_pendant)", never something a human wrote.
+  // Feeding that to extractConciseSummary turns it into prose on the card
+  // ("Physics scene configured for: MCP UPDATE_OBJECT (...)"), which describes
+  // the plumbing rather than the scene. An MCP caller that wants to say
+  // something about the scene passes assistantMarkdown, or writes the card
+  // itself via SET_NOTE_CARDS.
+  const summaryText = extractConciseSummary(
+    options.assistantMarkdown,
+    options.mode === 'mcp' ? undefined : options.userPrompt
+  );
+  const bboxMarkdown = formatComponentBoundingBoxes(nodeArray);
+  const customSections = extractCustomSections(options.assistantMarkdown);
+
+  if (currentCards.length > 0) {
+    const existingCard = currentCards[0];
+    const existingMd = existingCard.markdown || '';
+
+    // Check if the existing card is a "Blank Scene" or getting started placeholder
+    const isBlankCard = /#\s*Blank\s+Scene/i.test(existingMd) || /An\s+empty\s+world/i.test(existingMd) || /Drag\s+components/i.test(existingMd);
+
+    // 'mcp' used to be lumped in here, which made every programmatic edit -
+    // including a one-geom tweak via UPDATE_OBJECT - discard the card's whole
+    // body (Design Decisions, Physics, Printability, anything the LLM or user
+    // had written) and rebuild it from the auto-derived title/summary alone.
+    // It also silently clobbered the card LOAD_PRESET had just installed. MCP
+    // edits now take the preserving path below, which keeps existing prose and
+    // refreshes only the derived Component Bounding Boxes; a caller that really
+    // does want to rewrite the card has SET_NOTE_CARDS for that.
+    if (options.mode === 'generate' || isBlankCard) {
+      // Completely replace stale preset / Blank Scene card with the new scene title & summary!
+      const contentMiddle = customSections ? `${summaryText}\n\n${customSections}` : summaryText;
+      const updatedMd = `# ${title}\n\n${contentMiddle}\n\n## Component Bounding Boxes\n${bboxMarkdown}`.trim();
+
+      const updatedCards = [
+        { ...existingCard, markdown: updatedMd },
+        ...currentCards.slice(1)
+      ];
+      setter(updatedCards);
+      return;
+    }
+
+    // For Mutate or Explain on an active custom card:
+    let cardTitle = title;
+    const firstLine = existingMd.split('\n')[0]?.trim();
+    if (firstLine && firstLine.startsWith('# ')) {
+      const existingTitle = firstLine.substring(2).trim();
+      if (existingTitle && !/^(Blank Scene|What is this)/i.test(existingTitle)) {
+        cardTitle = existingTitle;
+      }
+    }
+
+    const bboxIdx = existingMd.search(/##\s+Component\s+Bounding\s+Boxes/i);
+    let baseSections = '';
+    if (bboxIdx !== -1) {
+      const parts = existingMd.substring(0, bboxIdx).split('\n\n');
+      if (parts.length > 1 && parts[0].startsWith('# ')) {
+        baseSections = parts.slice(1).join('\n\n').trim();
+      }
+    } else {
+      const parts = existingMd.split('\n\n');
+      if (parts.length > 1 && parts[0].startsWith('# ')) {
+        baseSections = parts.slice(1).join('\n\n').trim();
+      }
+    }
+
+    const sectionsToInclude = customSections || baseSections || summaryText;
+    const updatedMd = `# ${cardTitle}\n\n${sectionsToInclude}\n\n## Component Bounding Boxes\n${bboxMarkdown}`.trim();
+
+    const updatedCards = [
+      { ...existingCard, markdown: updatedMd },
+      ...currentCards.slice(1)
+    ];
+    setter(updatedCards);
+  } else {
+    // Create a new notecard if none exists!
+    const contentMiddle = customSections ? `${summaryText}\n\n${customSections}` : summaryText;
+    const newCard = {
+      id: `note_card_${Date.now()}`,
+      markdown: `# ${title}\n\n${contentMiddle}\n\n## Component Bounding Boxes\n${bboxMarkdown}`,
+      minimized: false,
+      x: 16,
+      y: 16
+    };
+    setter([newCard]);
+  }
+}
+
+

@@ -22,7 +22,7 @@ const formatGeomSize = (type: string, rawSize: any): string => {
   return `${x} ${y} ${z}`;
 };
 
-const buildGeom = (geom: SceneGeom) => {
+const buildGeom = (geom: SceneGeom, massless = false) => {
   // A mesh geom is only valid in MJCF if vertex/face array data exists to populate the <asset> block
   const hasMeshData = Array.isArray(geom.vertices) && geom.vertices.length > 0 && Array.isArray(geom.faces) && geom.faces.length > 0;
   const isMesh = geom.type === 'mesh' && hasMeshData;
@@ -43,6 +43,7 @@ const buildGeom = (geom: SceneGeom) => {
     attrs += ` euler="${geom.euler.join(' ')}"`;
   }
   if (geom.mass !== undefined) attrs += ` mass="${geom.mass}"`;
+  else if (massless) attrs += ` mass="0"`;
   if (geom.role === 'visual') {
     // A visual-only geom is drawn but must not take part in contact — the body's
     // real colliders are elsewhere (see resolveCsgGeoms). Overrides any authored
@@ -117,7 +118,13 @@ const buildNode = (node: SceneNode): string => {
   let innerXml = '';
   
   (node.joints || []).forEach(j => innerXml += buildJoint(j));
-  (node.geoms || []).forEach(g => innerXml += buildGeom(g));
+  // A visual-only geom is scenery and must weigh nothing. MuJoCo infers a
+  // geom's mass from its volume at a default density of 1000 unless told
+  // otherwise, so a decorative shell the size of a jar arrives as a real 27kg
+  // bolted to that body. Only when something else in the body carries the mass,
+  // though: MuJoCo will not accept a moving body that ends up with none at all.
+  const hasSolid = (node.geoms || []).some(g => g.role !== 'visual');
+  (node.geoms || []).forEach(g => innerXml += buildGeom(g, hasSolid && g.role === 'visual'));
   (node.children || []).forEach(c => innerXml += buildNode(c));
   
   let attrs = `name="${nameStr}" pos="${posStr}"`;

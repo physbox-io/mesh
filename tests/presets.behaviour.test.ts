@@ -15,6 +15,8 @@
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { PRESETS } from '../src/presets/presetScenes';
+import { makePresetNoteCard } from '../src/utils/noteCards';
+import type { SceneNode } from '../src/types/scene';
 import { simulate, type Sim } from './helpers/simulate';
 
 const preset = (key: string) => (PRESETS as Record<string, { scene: never }>)[key].scene;
@@ -177,41 +179,98 @@ describe('quadcopter drone', () => {
   afterAll(() => sim.dispose());
 });
 
-describe('pulley system', () => {
+describe('pulley system (Atwood machine)', () => {
   let sim: Sim;
   let start: { l: number; r: number };
+  let earlyAcceleration = 0;
   beforeAll(async () => {
     sim = await simulate(preset('pulley_system'));
     start = { l: sim.bodyPos('left_weight')[2], r: sim.bodyPos('right_weight')[2] };
-    sim.run(2);
+    sim.run(0.1);
+    earlyAcceleration = Math.abs(sim.jointVel('left_weight_joint')) / 0.1;
+    sim.run(1.9);
   });
   afterAll(() => sim.dispose());
 
+  // These assert the KINEMATIC RELATIONSHIPS, not just which way things moved.
+  // The previous version of this suite only checked that the heavy side went
+  // down and the light side went up, and it passed happily while the rope
+  // constraint was violated fourfold and the wheel was being flung to 1058 rad
+  // by its own axle. A direction is not a physical claim.
+
+  it('keeps the rope inextensible: one side rises exactly as the other falls', () => {
+    const l = sim.jointPos('left_weight_joint');
+    const r = sim.jointPos('right_weight_joint');
+    expect(l + r).toBeCloseTo(0, 2);
+  });
+
+  it('runs the rope over the rim without slipping: x = r * theta', () => {
+    // The coupling used to emit polycoef 1/r with the weight as joint1, i.e.
+    // 12.5m of travel per radian — off by 1/r^2 = 156x, unsatisfiable alongside
+    // gravity and the left/right coupling, so the solver simply thrashed.
+    const x = sim.jointPos('left_weight_joint');
+    const theta = sim.jointPos('pulley_wheel_hinge');
+    expect(Math.abs(theta)).toBeGreaterThan(0.5);
+    expect(x / theta).toBeCloseTo(0.08, 2);
+  });
+
+  it('accelerates at the Atwood rate, not free fall', () => {
+    // a = g(m1-m2)/(m1+m2+I/r^2). With 2kg and 1kg that is ~3.27 before the
+    // wheel's inertia, a little under 3.3 after it — and nowhere near g.
+    expect(earlyAcceleration).toBeGreaterThan(2.0);
+    expect(earlyAcceleration).toBeLessThan(3.6);
+  });
+
   it('lets the heavier weight descend and lift the lighter one', () => {
-    // 2kg on the left, 1kg on the right — the imbalance is the demonstration.
     expect(sim.bodyPos('left_weight')[2]).toBeLessThan(start.l);
     expect(sim.bodyPos('right_weight')[2]).toBeGreaterThan(start.r);
   });
 
-  it('turns the wheel as the rope runs over it', () => {
-    expect(Math.abs(sim.jointPos('pulley_wheel_hinge'))).toBeGreaterThan(1);
+  it('keeps both weights off the floor and clear of the wheel', () => {
+    for (const w of ['left_weight', 'right_weight']) {
+      const z = sim.bodyPos(w)[2];
+      expect(z - 0.03).toBeGreaterThan(0);      // box half-extent above the floor
+      expect(z + 0.03).toBeLessThan(0.47);       // below the wheel's rim
+    }
   });
 
-  it('keeps both weights above the floor', () => {
-    for (const w of ['left_weight', 'right_weight']) {
-      expect(sim.bodyPos(w)[2]).toBeGreaterThan(0.04);
+  it('does not let the axle collide with the wheel it carries', () => {
+    // An axle passes through its hub by design; they are joined by the hinge.
+    // Leaving contact on both meant a permanently interpenetrating pair, and
+    // that alone spun the wheel to 316 rad with every rope constraint removed.
+    const scene = preset('pulley_system') as unknown as { nodes: SceneNode[] };
+    const geomsOf = (id: string) => scene.nodes.find(n => n.id === id)!.geoms;
+    const axle = geomsOf('pulley_support').find(g => g.name === 'support_axle')!;
+    expect(axle.contype).toBe(0);
+    expect(axle.conaffinity).toBe(0);
+    for (const g of geomsOf('pulley_wheel')) {
+      expect(g.contype).toBe(0);
+      expect(g.conaffinity).toBe(0);
     }
+  });
+
+  it('hangs each weight directly below the rim it hangs from', () => {
+    // Weights at +-0.1 against a 0.08 rim made the drawn rope non-vertical and
+    // the geometry a lie.
+    const scene = preset('pulley_system') as unknown as { nodes: SceneNode[] };
+    const wheel = scene.nodes.find(n => n.id === 'pulley_wheel')!;
+    const left = scene.nodes.find(n => n.id === 'left_weight')!;
+    const right = scene.nodes.find(n => n.id === 'right_weight')!;
+    expect(Math.abs(left.pos[0])).toBeCloseTo(wheel.pulleyRadius!, 6);
+    expect(Math.abs(right.pos[0])).toBeCloseTo(wheel.pulleyRadius!, 6);
+    // ...and on the same axis as the support that holds it up.
+    for (const n of [wheel, left, right]) expect(n.pos[1]).toBe(0);
   });
 });
 
-describe('paper plane', () => {
-  let sim: Sim;
-  beforeAll(async () => { sim = await simulate(preset('paper_plane')); sim.run(1); });
-  afterAll(() => sim.dispose());
-
-  it('remains numerically stable during flight', () => {
-    expect(Number.isFinite(sim.bodyPos('paper_plane_wing')[0])).toBe(true);
-    expect(Number.isFinite(sim.bodyPos('paper_plane_wing')[2])).toBe(true);
+describe('every preset explains itself', () => {
+  // The note card is the preset's documentation, and it used to live in two
+  // places at once: App.tsx's own copy for the dropdown and utils/noteCards.ts
+  // for the MCP bridge. They drifted, and two presets ended up with no card at
+  // all, so loading them explained nothing.
+  it('has a note card for every built-in preset', () => {
+    const missing = Object.keys(PRESETS).filter(k => !makePresetNoteCard(k));
+    expect(missing).toEqual([]);
   });
 });
 

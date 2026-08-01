@@ -1,11 +1,14 @@
 import { useState, useEffect, useRef } from 'react';
-import { X, Brain, Wand2, Loader2, AlertCircle, HelpCircle, Activity, Printer, Send, CheckCircle2, RefreshCw } from 'lucide-react';
+import { X, Brain, Wand2, Loader2, AlertCircle, HelpCircle, Activity, Printer, Send, CheckCircle2, RefreshCw, Trash2 } from 'lucide-react';
 import { useStore } from '../store/useStore';
 import { compileSCAD } from '../utils/openscad';
+import { updateOrCreateNotecard } from '../utils/noteCards';
 import SYSTEM_INSTRUCTIONS from './systemInstructions.txt?raw';
 
 interface AICopilotPanelProps {
   onClose: () => void;
+  messages?: ChatMessage[];
+  setMessages?: React.Dispatch<React.SetStateAction<ChatMessage[]>>;
 }
 
 interface DiagnosticQuestion {
@@ -110,25 +113,37 @@ const parseAIResponse = (text: string): {
   questions: DiagnosticQuestion[];
   proposedModifications: ProposedModification[];
   nodes: any[] | null;
+  noteCardMarkdown: string | null;
 } => {
   let questions: DiagnosticQuestion[] = [];
   let proposedModifications: ProposedModification[] = [];
   let nodes: any[] | null = null;
+  let noteCardMarkdown: string | null = null;
   let markdown = cleanLaTeXMath(text);
 
   // Scan code blocks for questions, proposedModifications, or nodes
   const codeBlockRegex = /```(?:json)?\s*([\s\S]*?)\s*```/gi;
   let match;
   const blocksToRemove: string[] = [];
+  const jsonMatches: RegExpExecArray[] = [];
 
   while ((match = codeBlockRegex.exec(text)) !== null) {
+    jsonMatches.push(match);
+  }
+
+  for (const match of jsonMatches) {
     const fullMatch = match[0];
     const code = match[1].trim();
-
     try {
       const parsed = extractJSON(code);
-      if (parsed) {
-        if (parsed.questions && Array.isArray(parsed.questions)) {
+      if (parsed && typeof parsed === 'object') {
+        if (!noteCardMarkdown) {
+          if (typeof parsed.noteCardMarkdown === 'string') noteCardMarkdown = parsed.noteCardMarkdown;
+          else if (typeof parsed.noteCard === 'string') noteCardMarkdown = parsed.noteCard;
+          else if (typeof parsed.notecard === 'string') noteCardMarkdown = parsed.notecard;
+        }
+
+        if (questions.length === 0 && Array.isArray(parsed.questions)) {
           questions = parsed.questions.map((q: any, idx: number) => ({
             id: q.id || `q_${idx}`,
             question: cleanLaTeXMath(q.question || ''),
@@ -139,21 +154,23 @@ const parseAIResponse = (text: string): {
           blocksToRemove.push(fullMatch);
         }
 
-        if (parsed.proposedModifications && Array.isArray(parsed.proposedModifications)) {
+        if (proposedModifications.length === 0 && Array.isArray(parsed.proposedModifications)) {
           proposedModifications = parsed.proposedModifications.map((m: any, idx: number) => ({
-            id: m.id || `mod_${idx}`,
+            id: m.id || `m_${idx}`,
             text: typeof m === 'string' ? cleanLaTeXMath(m) : cleanLaTeXMath(m.text || m.description || String(m)),
             selected: true
           })).filter((m: ProposedModification) => m.text.trim().length > 0);
           blocksToRemove.push(fullMatch);
         }
 
-        if (parsed.nodes && Array.isArray(parsed.nodes)) {
-          nodes = parsed.nodes;
-          blocksToRemove.push(fullMatch);
-        } else if (Array.isArray(parsed) && parsed.length > 0 && !parsed[0].question && !parsed[0].text && (parsed[0].geoms || parsed[0].joints || parsed[0].scad || parsed[0].type === 'body')) {
-          nodes = parsed;
-          blocksToRemove.push(fullMatch);
+        if (nodes === null) {
+          if (Array.isArray(parsed.nodes)) {
+            nodes = parsed.nodes;
+            blocksToRemove.push(fullMatch);
+          } else if (Array.isArray(parsed) && parsed.length > 0 && !parsed[0].question && !parsed[0].text && (parsed[0].geoms || parsed[0].joints || parsed[0].scad || parsed[0].type === 'body')) {
+            nodes = parsed;
+            blocksToRemove.push(fullMatch);
+          }
         }
       }
     } catch (e) {}
@@ -163,36 +180,7 @@ const parseAIResponse = (text: string): {
     markdown = markdown.replace(block, '').trim();
   }
 
-  const rawParsed = extractJSON(text);
-  if (rawParsed) {
-    if (questions.length === 0 && Array.isArray(rawParsed.questions)) {
-      questions = rawParsed.questions.map((q: any, idx: number) => ({
-        id: q.id || `q_${idx}`,
-        question: cleanLaTeXMath(q.question || ''),
-        options: Array.isArray(q.options) && q.options.length > 0
-          ? q.options.map((o: any) => cleanLaTeXMath(String(o)))
-          : undefined
-      })).filter((q: any) => q.question.trim().length > 0);
-    }
-
-    if (proposedModifications.length === 0 && Array.isArray(rawParsed.proposedModifications)) {
-      proposedModifications = rawParsed.proposedModifications.map((m: any, idx: number) => ({
-        id: m.id || `mod_${idx}`,
-        text: typeof m === 'string' ? cleanLaTeXMath(m) : cleanLaTeXMath(m.text || m.description || String(m)),
-        selected: true
-      })).filter((m: ProposedModification) => m.text.trim().length > 0);
-    }
-
-    if (!nodes) {
-      if (Array.isArray(rawParsed.nodes)) {
-        nodes = rawParsed.nodes;
-      } else if (Array.isArray(rawParsed) && rawParsed.length > 0 && !rawParsed[0].question && !rawParsed[0].text && (rawParsed[0].geoms || rawParsed[0].joints || rawParsed[0].scad || rawParsed[0].type === 'body')) {
-        nodes = rawParsed;
-      }
-    }
-  }
-
-  // Fallback: extract proposedModifications from Markdown bullet/numbered points or diagnostic observations
+  // Fallback logic
   if (proposedModifications.length === 0) {
     const lines = text.split('\n');
     let inPropsSection = false;
@@ -214,35 +202,15 @@ const parseAIResponse = (text: string): {
         }
       }
     });
-
-    // Secondary fallback: if still no proposedModifications found, scan ALL bullet/numbered points for actionable recommendations or physical observations
-    if (proposedModifications.length === 0) {
-      lines.forEach((line, lineIdx) => {
-        const trimmed = line.trim();
-        const isListItem = trimmed.startsWith('* ') || trimmed.startsWith('- ') || trimmed.match(/^\d+\.\s/);
-        if (isListItem) {
-          const itemText = trimmed.replace(/^[\*\-\d\.]+\s*/, '').trim();
-          const actionKeywords = /\b(need|needs|should|must|increase|decrease|enlarge|add|modify|replace|change|weld|damp|base|hole|mounting|stability|footprint|screw|tip|tipping|arm|stand|wall|insert|support|thick|size|geom|joint|fix|improve|recommend|anchor|mount|secure)\b/i;
-          if (itemText.length > 10 && actionKeywords.test(itemText)) {
-            proposedModifications.push({
-              id: `mod_${lineIdx}`,
-              text: cleanLaTeXMath(itemText),
-              selected: true
-            });
-          }
-        }
-      });
-    }
   }
 
-  // Completely strip ALL ```json ... ``` code blocks from markdown display
   let cleanMarkdown = text.replace(/```(?:json)?\s*[\s\S]*?\s*```/gi, '').trim();
   cleanMarkdown = cleanLaTeXMath(cleanMarkdown);
 
-  return { markdown: cleanMarkdown, questions, proposedModifications, nodes };
+  return { markdown: cleanMarkdown, questions, proposedModifications, nodes, noteCardMarkdown };
 };
 
-export default function AICopilotPanel({ onClose }: AICopilotPanelProps) {
+export default function AICopilotPanel({ onClose, messages: propsMessages, setMessages: propsSetMessages }: AICopilotPanelProps) {
   const sceneGraph = useStore(state => state.sceneGraph);
   const updateScene = useStore(state => state.updateScene);
 
@@ -258,11 +226,71 @@ export default function AICopilotPanel({ onClose }: AICopilotPanelProps) {
   const [loadingStatus, setLoadingStatus] = useState('AI Copilot is processing...');
   const [error, setError] = useState('');
   const [mode, setMode] = useState<'explain' | 'generate' | 'mutate'>('explain');
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [localMessages, setLocalMessages] = useState<ChatMessage[]>([]);
+
+  const messages = propsMessages !== undefined ? propsMessages : localMessages;
+  const setMessages = propsSetMessages !== undefined ? propsSetMessages : setLocalMessages;
+
+  const handleClearModeHistory = (targetMode: 'explain' | 'generate' | 'mutate') => {
+    setMessages(prev => prev.filter(m => {
+      if (targetMode === 'mutate') return m.mode !== 'mutate' && m.mode !== 'implement';
+      if (targetMode === 'explain') return m.mode !== 'explain' && m.mode !== undefined;
+      return m.mode !== targetMode;
+    }));
+  };
+
+  const getModeHistoryStr = (targetMode: 'explain' | 'generate' | 'mutate') => {
+    const modeMsgs = messages.filter(m => {
+      if (targetMode === 'generate') return m.mode === 'generate';
+      if (targetMode === 'mutate') return m.mode === 'mutate' || m.mode === 'implement';
+      return m.mode === 'explain' || !m.mode;
+    }).filter(m => !m.hasError && m.content);
+
+    if (modeMsgs.length === 0) return '';
+    return '\n\nPAST ' + targetMode.toUpperCase() + ' CHAT HISTORY:\n' + modeMsgs.map(m => `[${m.role.toUpperCase()}] ${m.content}`).slice(-6).join('\n');
+  };
+
+  const getExistingCardContextStr = () => {
+    const getter = (window as any)._physics_getNoteCards;
+    const cards = getter ? getter() : [];
+    if (cards.length > 0 && cards[0].markdown) {
+      return `\n\nEXISTING NOTECARD IN SCENE:\n${cards[0].markdown}`;
+    }
+    return '\n\nEXISTING NOTECARD IN SCENE: None';
+  };
+
+  const handleNotecardUpdate = (modeType: 'explain' | 'generate' | 'mutate', promptText?: string, assistantText?: string, noteCardMd?: string | null, targetNodes?: any[] | null) => {
+    if (noteCardMd) {
+      const getter = (window as any)._physics_getNoteCards;
+      const setter = (window as any)._physics_setNoteCards;
+      const currentCards = getter ? getter() : [];
+      const existingCard = currentCards[0];
+      const updatedCard = {
+        id: existingCard?.id || `note_card_${Date.now()}`,
+        markdown: noteCardMd,
+        minimized: false,
+        x: 16,
+        y: 16
+      };
+      if (setter) setter([updatedCard, ...currentCards.slice(1)]);
+    } else {
+      updateOrCreateNotecard({
+        mode: modeType,
+        userPrompt: promptText,
+        assistantMarkdown: assistantText,
+        nodes: targetNodes || undefined
+      });
+    }
+  };
+
+  const modeMessages = messages.filter(m => {
+    if (mode === 'generate') return m.mode === 'generate';
+    if (mode === 'mutate') return m.mode === 'mutate' || m.mode === 'implement';
+    return m.mode === 'explain' || !m.mode;
+  });
 
   const responseContainerRef = useRef<HTMLDivElement>(null);
 
-  // Dynamically fetch available models from Gemini API
   const fetchAvailableModels = async (key: string) => {
     if (!key.trim()) return;
     try {
@@ -288,7 +316,6 @@ export default function AICopilotPanel({ onClose }: AICopilotPanelProps) {
     }
   };
 
-  // Dynamically fetch available models from Anthropic Claude API
   const fetchAvailableClaudeModels = async (key: string) => {
     if (!key.trim()) return null;
     const headers = {
@@ -320,7 +347,6 @@ export default function AICopilotPanel({ onClose }: AICopilotPanelProps) {
     return null;
   };
 
-  // Sync API Keys & Model from local storage
   useEffect(() => {
     const handleStorageChange = () => {
       const storedGeminiKey = localStorage.getItem('gemini_api_key') || '';
@@ -334,7 +360,6 @@ export default function AICopilotPanel({ onClose }: AICopilotPanelProps) {
     return () => window.removeEventListener('storage', handleStorageChange);
   }, []);
 
-  // Fetch available models whenever Gemini API key or Claude API key is present
   useEffect(() => {
     if (geminiApiKey) {
       fetchAvailableModels(geminiApiKey);
@@ -344,7 +369,6 @@ export default function AICopilotPanel({ onClose }: AICopilotPanelProps) {
     }
   }, [geminiApiKey, claudeApiKey]);
 
-  // Refresh / empty AI conversation timeline ONLY when a DIFFERENT preset is loaded
   useEffect(() => {
     const handlePresetLoaded = (e: any) => {
       const detail = e.detail;
@@ -362,7 +386,6 @@ export default function AICopilotPanel({ onClose }: AICopilotPanelProps) {
     return () => window.removeEventListener('physics:preset-loaded', handlePresetLoaded);
   }, []);
 
-  // Auto-scroll timeline
   useEffect(() => {
     if (responseContainerRef.current) {
       responseContainerRef.current.scrollTo({
@@ -399,7 +422,6 @@ export default function AICopilotPanel({ onClose }: AICopilotPanelProps) {
     window.dispatchEvent(new Event('storage'));
   };
 
-  // Dual API Call (Gemini & Claude support)
   const callGemini = async (systemInstructions: string, userQuery: string) => {
     const currentModel = selectedModel || localStorage.getItem('gemini_model') || 'gemini-3.6-flash';
     const isClaude = currentModel.startsWith('claude');
@@ -500,7 +522,6 @@ export default function AICopilotPanel({ onClose }: AICopilotPanelProps) {
 
   const roundNum = (n: number) => Math.round(n * 1000) / 1000;
 
-  // Lightweight compact scene definition serializer
   const getSerializedNodesCompact = () => {
     const serializeNode = (node: any): any => {
       const filteredChildren = node.children
@@ -564,7 +585,6 @@ export default function AICopilotPanel({ onClose }: AICopilotPanelProps) {
     const usedBodyNames = new Set<string>();
     const usedGeomNames = new Set<string>();
 
-    // Helper map of existing nodes in scene graph to preserve scad & compiled mesh buffers if AI omits them
     const existingNodeMap = new Map<string, any>();
     const collectExisting = (list: any[]) => {
       if (!Array.isArray(list)) return;
@@ -587,7 +607,6 @@ export default function AICopilotPanel({ onClose }: AICopilotPanelProps) {
       }
       usedBodyNames.add(baseName);
 
-      // Check if existing node had SCAD script or mesh data to preserve
       const existingNode = existingNodeMap.get(baseId) || existingNodeMap.get(baseName);
       const scadScript = n.scad !== undefined ? n.scad : existingNode?.scad;
 
@@ -699,18 +718,15 @@ export default function AICopilotPanel({ onClose }: AICopilotPanelProps) {
       return normalizedRaw;
     }
 
-    // Map existing nodes in current sceneGraph
     const resultMap = new Map<string, any>();
     sceneGraph.nodes.forEach((node, index) => {
       const key = node.id || node.name || `node_${index}`;
       resultMap.set(key, JSON.parse(JSON.stringify(node)));
     });
 
-    // Merge AI-mutated nodes in place, matching by ID, Name, or Index position
     normalizedRaw.forEach((newNode: any, idx: number) => {
       let matchedKey: string | null = null;
 
-      // 1. Match by exact ID or Name
       for (const [k, existing] of resultMap.entries()) {
         if (k === newNode.id || k === newNode.name || existing.name === newNode.name || existing.id === newNode.id) {
           matchedKey = k;
@@ -718,7 +734,6 @@ export default function AICopilotPanel({ onClose }: AICopilotPanelProps) {
         }
       }
 
-      // 2. Fallback match by index position if node count matches
       if (!matchedKey && idx < sceneGraph.nodes.length) {
         const existingAtIndex = sceneGraph.nodes[idx];
         if (existingAtIndex) {
@@ -752,7 +767,7 @@ export default function AICopilotPanel({ onClose }: AICopilotPanelProps) {
         resultMap.set(matchedKey, {
           ...existingNode,
           ...newNode,
-          id: existingNode.id, // Preserve original stable ID!
+          id: existingNode.id,
           name: newNode.name || existingNode.name,
           scad: newNode.scad !== undefined ? newNode.scad : existingNode.scad,
           geoms: mergedGeoms,
@@ -767,11 +782,9 @@ export default function AICopilotPanel({ onClose }: AICopilotPanelProps) {
 
     const finalNodes = Array.from(resultMap.values());
 
-    // HARD SAFETY GUARANTEE: Ensure zero existing top-level objects are deleted!
     for (const originalNode of sceneGraph.nodes) {
       const exists = finalNodes.some(fn => fn.id === originalNode.id || fn.name === originalNode.name);
       if (!exists) {
-        console.warn(`[Safety Guarantee] Restoring dropped scene object: ${originalNode.id || originalNode.name}`);
         finalNodes.push(JSON.parse(JSON.stringify(originalNode)));
       }
     }
@@ -779,7 +792,6 @@ export default function AICopilotPanel({ onClose }: AICopilotPanelProps) {
     return finalNodes;
   };
 
-  // Trigger auto-compilation of OpenSCAD scripts for nodes
   const triggerScadAutoCompile = async (nodesToProcess: any[]) => {
     const scadNodes: any[] = [];
     const collectScad = (list: any[]) => {
@@ -825,7 +837,6 @@ export default function AICopilotPanel({ onClose }: AICopilotPanelProps) {
     useStore.getState().recompile(useStore.getState().sceneGraph);
   };
 
-  // 1a. Physics Diagnostics (Phase 1: Clarifying Questions Only)
   const handlePhysicsDiagnostics = async () => {
     setMode('explain');
     setLoadingStatus('Analyzing physics scene & asking clarifying questions...');
@@ -848,24 +859,16 @@ Your report must include:
 ## 2. Component & Joint Analysis
 ## 3. Diagnostics & Design Anti-Patterns
 
-At the very end of your response, after all Markdown content, include a structured JSON block inside \`\`\`json \`\`\` code fences containing 1 to 3 clarifying questions about the functional intent, load expectations, or usage conditions of the object(s):
-\`\`\`json
-{
-  "questions": [
-    { "id": "q1", "question": "What is the primary function or load expectation of this object?" },
-    { "id": "q2", "question": "What fastening mechanism do you prefer?", "options": ["M3 Inserts", "Self-Tapping", "Snap Latch"] }
-  ]
-}
-\`\`\`
+At the very end of your response, include a structured JSON block inside \`\`\`json \`\`\` code fences containing 1 to 3 clarifying questions about the functional intent, load expectations, or usage conditions of the object(s).
 CRITICAL: Do NOT output "proposedModifications" or scene "nodes" yet. The user will answer clarifying questions first.
 
 Current scene graph topology:
-Nodes: ${JSON.stringify(compactNodes)}`;
+Nodes: ${JSON.stringify(compactNodes)}${getModeHistoryStr('explain')}${getExistingCardContextStr()}`;
 
-    const response = await callGemini(systemInstructions, 'Perform a full system diagnostic of the active physics scene.');
+    const response = await callGemini(systemInstructions, `Perform a full system diagnostic of the active physics scene.`);
     setLoading(false);
     if (response) {
-      const { markdown, questions } = parseAIResponse(response);
+      const { markdown, questions, noteCardMarkdown } = parseAIResponse(response);
       const assistantMsg: ChatMessage = {
         id: `ast_${Date.now()}`,
         role: 'assistant',
@@ -882,10 +885,10 @@ Nodes: ${JSON.stringify(compactNodes)}`;
         timestamp: Date.now()
       };
       setMessages(prev => [...prev, assistantMsg]);
+      handleNotecardUpdate('explain', 'Physics Diagnostics', markdown, noteCardMarkdown);
     }
   };
 
-  // 1b. 3D Printing Diagnostics (Phase 1: Clarifying Questions Only)
   const handle3DPrintDiagnostics = async () => {
     setMode('explain');
     setLoadingStatus('Analyzing 3D printability & asking clarifying questions...');
@@ -908,24 +911,16 @@ Your report must analyze:
 ## 2. 🔩 Structural Integrity & Weak Joints Analysis
 ## 3. 📐 Wall Thickness & Geometry Defects
 
-At the end of your response, include a structured JSON block inside \`\`\`json \`\`\` code fences containing 1 to 3 clarifying questions regarding the intended printing material, functional load, or assembly constraints:
-\`\`\`json
-{
-  "questions": [
-    { "id": "q1", "question": "What is the primary function of this enclosure?" },
-    { "id": "q2", "question": "What printing material will be used?", "options": ["PLA", "PETG", "ABS/ASA", "TPU"] }
-  ]
-}
-\`\`\`
+At the end of your response, include a structured JSON block inside \`\`\`json \`\`\` code fences containing 1 to 3 clarifying questions regarding the intended printing material, functional load, or assembly constraints.
 CRITICAL: Do NOT output "proposedModifications" or scene "nodes" yet. The user will answer clarifying questions first.
 
 Current scene graph topology:
-Nodes: ${JSON.stringify(compactNodes)}`;
+Nodes: ${JSON.stringify(compactNodes)}${getModeHistoryStr('explain')}${getExistingCardContextStr()}`;
 
-    const response = await callGemini(systemInstructions, 'Perform a full 3D printing physical defect diagnostic of the active scene graph topology.');
+    const response = await callGemini(systemInstructions, `Perform a full 3D printing physical defect diagnostic of the active scene graph topology.`);
     setLoading(false);
     if (response) {
-      const { markdown, questions } = parseAIResponse(response);
+      const { markdown, questions, noteCardMarkdown } = parseAIResponse(response);
       const assistantMsg: ChatMessage = {
         id: `ast_${Date.now()}`,
         role: 'assistant',
@@ -942,10 +937,10 @@ Nodes: ${JSON.stringify(compactNodes)}`;
         timestamp: Date.now()
       };
       setMessages(prev => [...prev, assistantMsg]);
+      handleNotecardUpdate('explain', '3D Printing Diagnostics', markdown, noteCardMarkdown);
     }
   };
 
-  // 1c. Phase 2 Handler: Submit Answers and Get Proposed Modifications
   const handleSendQuestionAnswers = async (msgId: string) => {
     const targetMsg = messages.find(m => m.id === msgId);
     if (!targetMsg) return;
@@ -953,7 +948,6 @@ Nodes: ${JSON.stringify(compactNodes)}`;
     setError('');
     setLoadingStatus('Processing functional answers & generating proposed modifications...');
 
-    // Mark questions as submitted for target message
     setMessages(prev => prev.map(m => m.id === msgId ? { ...m, userAnswersSubmitted: true } : m));
 
     const userAnswersSummary = targetMsg.userAnswers ? Object.entries(targetMsg.userAnswers)
@@ -980,29 +974,17 @@ USER FUNCTIONAL ANSWERS & CLARIFICATIONS:
 ${userAnswersSummary || 'General functional enhancement requested.'}
 
 CURRENT SCENEGRAPH DEFINITION:
-${JSON.stringify(compactNodes)}
+${JSON.stringify(compactNodes)}${getModeHistoryStr('explain')}${getExistingCardContextStr()}
 
 Based on these functional clarifications and your physical analysis:
 1. Provide a clear Markdown summary of recommended physical & structural modifications.
-2. At the bottom, include a "proposedModifications" JSON block inside \`\`\`json \`\`\` code fences containing 2 to 5 specific proposed physical changes as an array of objects {"id": "m1", "text": "description"}.
-
-Example JSON:
-\`\`\`json
-{
-  "proposedModifications": [
-    { "id": "m1", "text": "Increase wall thickness from 1.5mm to 3.0mm" },
-    { "id": "m2", "text": "Add M3 heat-set insert pilot holes (4.2mm diameter)" },
-    { "id": "m3", "text": "Add perimeter sealing lip" }
-  ]
-}
-\`\`\`
-Do NOT generate final scene "nodes" yet; the user will select which proposed modifications to apply first.`;
+2. At the bottom, include a "proposedModifications" JSON block inside \`\`\`json \`\`\` code fences.`;
 
     const response = await callGemini(SYSTEM_INSTRUCTIONS, promptWithContext);
     setLoading(false);
 
     if (response) {
-      const { markdown, proposedModifications } = parseAIResponse(response);
+      const { markdown, proposedModifications, noteCardMarkdown } = parseAIResponse(response);
       const assistantMsg: ChatMessage = {
         id: `ast_props_${Date.now()}`,
         role: 'assistant',
@@ -1019,10 +1001,10 @@ Do NOT generate final scene "nodes" yet; the user will select which proposed mod
         timestamp: Date.now()
       };
       setMessages(prev => [...prev, assistantMsg]);
+      handleNotecardUpdate('explain', 'Functional Intent Answers', markdown, noteCardMarkdown);
     }
   };
 
-  // 2. Generate scene
   const handleGenerate = async () => {
     if (!prompt.trim()) {
       setError('Please enter a description of the scene you want to generate.');
@@ -1042,19 +1024,21 @@ Do NOT generate final scene "nodes" yet; the user will select which proposed mod
     };
     setMessages(prev => [...prev, userMsg]);
 
-    const systemPromptWithQuestions = `${SYSTEM_INSTRUCTIONS}\n\nIn addition to the "nodes" JSON block, if there are optional design choices or follow-up options for the user, include a "questions" array JSON block at the bottom with 1-3 questions having 2-4 options each.`;
+    const systemPromptWithQuestions = `${SYSTEM_INSTRUCTIONS}${getModeHistoryStr('generate')}${getExistingCardContextStr()}\n\nIn addition to the "nodes" JSON block, if there are optional design choices or follow-up options for the user, include a "questions" array JSON block at the bottom with 1-3 questions having 2-4 options each.`;
 
     const response = await callGemini(systemPromptWithQuestions, currentPrompt);
     setLoading(false);
     if (response) {
-      const { markdown, questions, proposedModifications, nodes } = parseAIResponse(response);
+      const { markdown, questions, proposedModifications, nodes, noteCardMarkdown } = parseAIResponse(response);
       let applied = false;
+      let mergedNodes: any[] | null = null;
       if (nodes && Array.isArray(nodes)) {
         const merged = mergeAndNormalizeNodes(nodes, true);
         if (merged.length > 0) {
           updateScene({ nodes: merged });
           triggerScadAutoCompile(merged);
           applied = true;
+          mergedNodes = merged;
         }
       }
 
@@ -1071,10 +1055,10 @@ Do NOT generate final scene "nodes" yet; the user will select which proposed mod
         timestamp: Date.now()
       };
       setMessages(prev => [...prev, assistantMsg]);
+      handleNotecardUpdate('generate', currentPrompt, markdown, noteCardMarkdown, mergedNodes || nodes || undefined);
     }
   };
 
-  // 3. Mutate scene
   const handleMutate = async () => {
     if (!prompt.trim()) {
       setError('Please enter what changes you want to apply to the scene.');
@@ -1095,19 +1079,21 @@ Do NOT generate final scene "nodes" yet; the user will select which proposed mod
     setMessages(prev => [...prev, userMsg]);
 
     const compactNodes = getSerializedNodesCompact();
-    const promptWithContext = `The user wants to modify the active physics scene graph.\n\nActive SceneGraph Nodes:\n${JSON.stringify(compactNodes)}\n\nUser Request: ${currentPrompt}\n\nIf there are follow-up clarifying choices, append a "questions" JSON block at the bottom. Return the mutated "nodes" array in \`\`\`json \`\`\` code fences.`;
+    const promptWithContext = `The user wants to modify the active physics scene graph.\n\nActive SceneGraph Nodes:\n${JSON.stringify(compactNodes)}${getModeHistoryStr('mutate')}${getExistingCardContextStr()}\n\nUser Request: ${currentPrompt}\n\nIf there are follow-up clarifying choices, append a "questions" JSON block at the bottom. Return the mutated "nodes" array in \`\`\`json \`\`\` code fences.`;
 
     const response = await callGemini(SYSTEM_INSTRUCTIONS, promptWithContext);
     setLoading(false);
     if (response) {
-      const { markdown, questions, proposedModifications, nodes } = parseAIResponse(response);
+      const { markdown, questions, proposedModifications, nodes, noteCardMarkdown } = parseAIResponse(response);
       let applied = false;
+      let mergedNodes: any[] | null = null;
       if (nodes && Array.isArray(nodes)) {
         const merged = mergeAndNormalizeNodes(nodes, false);
         if (merged.length > 0) {
           updateScene({ nodes: merged });
           triggerScadAutoCompile(merged);
           applied = true;
+          mergedNodes = merged;
         }
       }
 
@@ -1124,10 +1110,10 @@ Do NOT generate final scene "nodes" yet; the user will select which proposed mod
         timestamp: Date.now()
       };
       setMessages(prev => [...prev, assistantMsg]);
+      handleNotecardUpdate('mutate', currentPrompt, markdown, noteCardMarkdown, mergedNodes || nodes || undefined);
     }
   };
 
-  // 4. Implement Improvements / Changes for a specific message
   const handleImplementMessage = async (msgId: string) => {
     const targetMsg = messages.find(m => m.id === msgId);
     if (!targetMsg) return;
@@ -1162,7 +1148,7 @@ SELECTED PROPOSED MODIFICATIONS TO APPLY:
 ${selectedModsSummary || 'Implement recommended structural, 3D printability, and parameter modifications.'}
 
 CURRENT SCENEGRAPH DEFINITION:
-${JSON.stringify(compactNodes)}
+${JSON.stringify(compactNodes)}${getModeHistoryStr('mutate')}${getExistingCardContextStr()}
 
 CRITICAL INSTRUCTIONS:
 1. Provide a brief 1-3 bullet point Markdown summary at the top detailing what was modified or added.
@@ -1173,7 +1159,7 @@ CRITICAL INSTRUCTIONS:
     setLoading(false);
 
     if (response) {
-      const { markdown, questions, proposedModifications, nodes } = parseAIResponse(response);
+      const { markdown, questions, proposedModifications, nodes, noteCardMarkdown } = parseAIResponse(response);
       if (nodes && Array.isArray(nodes) && nodes.length > 0) {
         const merged = mergeAndNormalizeNodes(nodes, false);
         if (merged.length > 0) {
@@ -1198,6 +1184,7 @@ CRITICAL INSTRUCTIONS:
             timestamp: Date.now()
           };
           setMessages(prev => [...prev, confirmationMsg]);
+          handleNotecardUpdate('mutate', 'Implemented Improvements', markdown, noteCardMarkdown, merged);
           return;
         }
       }
@@ -1205,7 +1192,6 @@ CRITICAL INSTRUCTIONS:
     }
   };
 
-  // 5. Open-ended follow-up message handler
   const handleSendFollowup = async () => {
     if (!followupInput.trim() || loading) return;
     const currentInput = followupInput;
@@ -1224,7 +1210,7 @@ CRITICAL INSTRUCTIONS:
     const promptWithContext = `The user is having an open-ended copilot conversation to modify or analyze the active 3D scene graph.
 
 ACTIVE SCENEGRAPH NODES:
-${JSON.stringify(compactNodes)}
+${JSON.stringify(compactNodes)}${getModeHistoryStr(mode)}${getExistingCardContextStr()}
 
 USER FOLLOWUP REQUEST:
 ${currentInput}
@@ -1235,14 +1221,16 @@ If modifying the 3D scene graph, include the updated "nodes" array in \`\`\`json
     setLoading(false);
 
     if (response) {
-      const { markdown, questions, proposedModifications, nodes } = parseAIResponse(response);
+      const { markdown, questions, proposedModifications, nodes, noteCardMarkdown } = parseAIResponse(response);
       let applied = false;
+      let mergedNodes: any[] | null = null;
       if (nodes && Array.isArray(nodes)) {
         const merged = mergeAndNormalizeNodes(nodes, false);
         if (merged.length > 0) {
           updateScene({ nodes: merged });
           triggerScadAutoCompile(merged);
           applied = true;
+          mergedNodes = merged;
         }
       }
 
@@ -1258,6 +1246,7 @@ If modifying the 3D scene graph, include the updated "nodes" array in \`\`\`json
         timestamp: Date.now()
       };
       setMessages(prev => [...prev, assistantMsg]);
+      handleNotecardUpdate(mode || 'explain', currentInput, markdown, noteCardMarkdown, mergedNodes || undefined);
     }
   };
 
@@ -1374,6 +1363,17 @@ If modifying the 3D scene graph, include the updated "nodes" array in \`\`\`json
             className={`py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer ${mode === 'mutate' ? 'bg-white dark:bg-slate-800 text-blue-655 dark:text-blue-450 shadow-sm' : 'text-slate-505 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200'}`}
           >
             🛠️ Mutate
+          </button>
+        </div>
+
+        <div className="flex items-center justify-between px-1 select-none">
+          <span className="text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider">{mode} Panel</span>
+          <button
+            onClick={() => handleClearModeHistory(mode)}
+            className="text-[10px] text-slate-400 hover:text-red-500 dark:text-slate-500 dark:hover:text-red-400 flex items-center gap-1 font-semibold transition-colors cursor-pointer"
+            title={`Clear ${mode} chat history`}
+          >
+            <Trash2 className="w-3 h-3" /> Clear {mode} history
           </button>
         </div>
 
@@ -1499,15 +1499,17 @@ If modifying the 3D scene graph, include the updated "nodes" array in \`\`\`json
 
         {/* Chat Stream Timeline */}
         <div ref={responseContainerRef} className="flex-1 border border-slate-100 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-950/40 p-3 rounded-xl overflow-y-auto leading-relaxed text-xs text-slate-700 dark:text-slate-300 shadow-inner flex flex-col gap-4 min-h-[150px]">
-          {messages.length === 0 ? (
+          {modeMessages.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full gap-2 text-slate-400 dark:text-slate-550 select-none py-8 text-center">
               <HelpCircle className="w-8 h-8 text-slate-350 dark:text-slate-700" />
               <p className="text-[11px] leading-normal px-4">
-                {(geminiApiKey || claudeApiKey) ? 'Run Diagnostics, Generate a scene, or type a request to start your open-ended copilot session.' : 'Configure your Gemini or Claude API key below to get started.'}
+                {(geminiApiKey || claudeApiKey)
+                  ? `No history in ${mode} mode. Ask a question or submit a request to start.`
+                  : 'Configure your Gemini or Claude API key below to get started.'}
               </p>
             </div>
           ) : (
-            messages.map((msg) => (
+            modeMessages.map((msg) => (
               <div key={msg.id} className="flex flex-col gap-2">
                 {msg.role === 'user' ? (
                   <div className="self-end bg-blue-600 text-white px-3 py-2 rounded-2xl rounded-tr-xs text-xs font-semibold max-w-[85%] shadow-sm">

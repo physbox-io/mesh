@@ -117,3 +117,35 @@ describe('bodies without booleans are unaffected', () => {
     expect(geomTag(compile([visual]), 'b_geom')).toMatch(/contype="0"/);
   });
 });
+
+describe('visual-only geoms weigh nothing', () => {
+  // MuJoCo infers a geom's mass from its volume and a default density of 1000
+  // unless told otherwise, so a decorative inner shell the size of a jar arrives
+  // as a real 27kg bolted to that jar's body. Scenery has to be weightless.
+  const jarLike = (): SceneNode => ({
+    id: 'jar', name: 'jar', type: 'body', pos: [0, 0, 0], children: [], joints: [],
+    geoms: [
+      { name: 'wall', type: 'cylinder', size: [0.2, 0.18], mass: 1.5 },
+      { name: 'inner_shell', type: 'cylinder', size: [0.183, 0.13], role: 'visual' },
+    ] as SceneGeom[],
+  });
+
+  it('pins a visual geom to mass 0', () => {
+    expect(geomTag(compile([jarLike()]), 'inner_shell')).toContain('mass="0"');
+  });
+
+  it('leaves an authored mass alone', () => {
+    const node = jarLike();
+    node.geoms[1].mass = 0.25;
+    expect(geomTag(compile([node]), 'inner_shell')).toContain('mass="0.25"');
+  });
+
+  it('will not zero out a body that is nothing but visual geoms', () => {
+    // Left massless, a moving body with no mass at all is rejected outright by
+    // MuJoCo — better a body that weighs something odd than a scene that fails
+    // to compile.
+    const node = jarLike();
+    node.geoms = [node.geoms[1]];
+    expect(geomTag(compile([node]), 'inner_shell')).not.toContain('mass=');
+  });
+});
