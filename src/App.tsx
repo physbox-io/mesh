@@ -2264,26 +2264,33 @@ function App() {
     setEditingCardId(null);
   }, [loadPreset]);
 
-  const handleSavePresetClick = useCallback(() => {
-    setPresetNameInput('');
-    setIsSaveModalOpen(true);
-  }, []);
-
-  const handleConfirmSavePreset = useCallback(() => {
-    const name = presetNameInput.trim();
-    if (!name) return;
+  const saveUserPresetByName = useCallback((name: string) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
     try {
       const syncedScene = getSyncedSceneGraph(sceneGraph, model, data, mujoco);
       const userPresets = JSON.parse(localStorage.getItem('physics_user_presets') || '{}');
-      userPresets[name] = { ...syncedScene, noteCards, copilotMessages };
+      userPresets[trimmed] = { ...syncedScene, noteCards, copilotMessages };
       localStorage.setItem('physics_user_presets', JSON.stringify(userPresets));
-      loadUserPresetWithCard(`user:${name}`);
+      loadUserPresetWithCard(`user:${trimmed}`);
     } catch (e) {
       console.error('Failed to save user preset', e);
     }
+  }, [sceneGraph, model, data, mujoco, noteCards, copilotMessages, loadUserPresetWithCard]);
+
+  const handleSavePresetClick = useCallback(() => {
+    const defaultName = activePreset && activePreset.startsWith('user:')
+      ? activePreset.replace('user:', '')
+      : '';
+    setPresetNameInput(defaultName);
+    setIsSaveModalOpen(true);
+  }, [activePreset]);
+
+  const handleConfirmSavePreset = useCallback(() => {
+    saveUserPresetByName(presetNameInput);
     setIsSaveModalOpen(false);
     setPresetNameInput('');
-  }, [presetNameInput, sceneGraph, model, data, mujoco, loadUserPresetWithCard, noteCards, copilotMessages]);
+  }, [presetNameInput, saveUserPresetByName]);
 
   const exportJson = useCallback(() => {
     try {
@@ -2353,7 +2360,8 @@ function App() {
       longestPartDim = Math.max(longestPartDim, partSize.x, partSize.y, partSize.z);
     }
     if (longestPartDim > 0) {
-      const targetStr = window.prompt("Longest part's longest side (mm):", '150');
+      const defaultMm = Math.round(longestPartDim * 1000).toString();
+      const targetStr = window.prompt("Longest part's longest side (mm):", defaultMm);
       if (targetStr === null) return;
       const targetMm = parseFloat(targetStr);
       if (isNaN(targetMm) || targetMm <= 0) { alert('Invalid size'); return; }
@@ -2372,12 +2380,41 @@ function App() {
     const result = exporter.parse(exportGroup, { binary: true }) as DataView;
     const blob = new Blob([result.buffer as ArrayBuffer], { type: 'application/octet-stream' });
     const url = URL.createObjectURL(blob);
+
+    let baseName = '';
+    if (noteCards && noteCards.length > 0) {
+      for (const card of noteCards) {
+        if (card.markdown) {
+          const match = card.markdown.match(/^\s*#\s+(.+)$/m);
+          if (match && match[1].trim()) {
+            baseName = match[1].trim().replace(/[*_`]/g, '').trim();
+            break;
+          }
+        }
+      }
+    }
+
+    if (!baseName && activePreset) {
+      if (activePreset.startsWith('user:')) {
+        baseName = activePreset.replace('user:', '').trim();
+      } else {
+        const presetObj = PRESETS[activePreset as keyof typeof PRESETS] as any;
+        baseName = presetObj?.name || activePreset;
+      }
+    }
+
+    if (!baseName) {
+      baseName = 'physics_scene';
+    }
+
+    const safeName = baseName.toLowerCase().replace(/[^a-z0-9_\-]+/g, '_').replace(/^_+|_+$/g, '') || 'physics_scene';
+
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'physics_scene.stl';
+    a.download = `${safeName}.stl`;
     a.click();
     URL.revokeObjectURL(url);
-  }, []);
+  }, [noteCards, activePreset]);
 
   const importJson = useCallback(() => {
     const input = document.createElement('input');
@@ -2960,25 +2997,37 @@ function App() {
             </select>
 
             {activePreset && activePreset.startsWith('user:') && (
-              <button
-                onClick={() => {
-                  const presetName = activePreset.replace('user:', '');
-                  if (window.confirm(`Are you sure you want to delete the preset "${presetName}"?`)) {
-                    try {
-                      const userPresets = JSON.parse(localStorage.getItem('physics_user_presets') || '{}');
-                      delete userPresets[presetName];
-                      localStorage.setItem('physics_user_presets', JSON.stringify(userPresets));
-                      loadPresetWithCard('empty');
-                    } catch (e) {
-                      console.error('Failed to delete preset', e);
+              <>
+                <button
+                  onClick={() => {
+                    const presetName = activePreset.replace('user:', '');
+                    saveUserPresetByName(presetName);
+                  }}
+                  className="flex items-center justify-center p-1 rounded-md text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors focus:outline-none cursor-pointer"
+                  title={`Update preset "${activePreset.replace('user:', '')}"`}
+                >
+                  <Save className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  onClick={() => {
+                    const presetName = activePreset.replace('user:', '');
+                    if (window.confirm(`Are you sure you want to delete the preset "${presetName}"?`)) {
+                      try {
+                        const userPresets = JSON.parse(localStorage.getItem('physics_user_presets') || '{}');
+                        delete userPresets[presetName];
+                        localStorage.setItem('physics_user_presets', JSON.stringify(userPresets));
+                        loadPresetWithCard('empty');
+                      } catch (e) {
+                        console.error('Failed to delete preset', e);
+                      }
                     }
-                  }
-                }}
-                className="flex items-center justify-center p-1 rounded-md text-red-500 hover:bg-red-50 dark:hover:bg-red-950/50 transition-colors focus:outline-none cursor-pointer"
-                title={`Delete preset "${activePreset.replace('user:', '')}"`}
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-              </button>
+                  }}
+                  className="flex items-center justify-center p-1 rounded-md text-red-500 hover:bg-red-50 dark:hover:bg-red-950/50 transition-colors focus:outline-none cursor-pointer"
+                  title={`Delete preset "${activePreset.replace('user:', '')}"`}
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              </>
             )}
           </div>
         </div>
