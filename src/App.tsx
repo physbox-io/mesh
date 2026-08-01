@@ -18,6 +18,7 @@ import { resolveCsgGeoms, csgSourceGeoms, csgHashOf, positiveBounds, geomMatrixO
 import { useCsgAutoCompile } from './hooks/useCsgCompile';
 import { PRESETS } from './presets/presetScenes';
 import { makePresetNoteCard } from './utils/noteCards';
+import { MIN_MAX_TOKENS, MAX_MAX_TOKENS, readMaxTokens, writeMaxTokens } from './utils/llmSettings';
 
 // Simple robust markdown parser to convert basic markdown text to safe HTML
 // Markdown parser for note cards
@@ -1952,6 +1953,7 @@ function App() {
   const [settingsGeminiKey, setSettingsGeminiKey] = useState(() => localStorage.getItem('gemini_api_key') || '');
   const [settingsClaudeKey, setSettingsClaudeKey] = useState(() => localStorage.getItem('anthropic_api_key') || '');
   const [settingsSelectedModel, setSettingsSelectedModel] = useState(() => localStorage.getItem('gemini_model') || 'gemini-3.6-flash');
+  const [settingsMaxTokens, setSettingsMaxTokens] = useState(() => readMaxTokens());
   const [liveSettingsClaudeModels, setLiveSettingsClaudeModels] = useState<{ id: string; name: string }[]>([]);
   const [liveSettingsGeminiModels, setLiveSettingsGeminiModels] = useState<{ id: string; name: string }[]>([]);
 
@@ -2019,6 +2021,7 @@ function App() {
       setSettingsGeminiKey(gk);
       setSettingsClaudeKey(ck);
       setSettingsSelectedModel(m);
+      setSettingsMaxTokens(readMaxTokens());
       if (gk) fetchSettingsGeminiModels(gk);
       if (ck) fetchSettingsClaudeModels(ck);
     };
@@ -3232,6 +3235,29 @@ function App() {
                       )}
                     </optgroup>
                   </select>
+                </div>
+                <div className="flex flex-col gap-1">
+                  <label htmlFor="copilotMaxTokens" className="text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider flex items-center justify-between gap-1">
+                    <span>📏 Copilot Max Response Tokens</span>
+                    <span className="font-mono normal-case tracking-normal text-slate-600 dark:text-slate-300">{settingsMaxTokens.toLocaleString()}</span>
+                  </label>
+                  <input
+                    type="range"
+                    id="copilotMaxTokens"
+                    min={MIN_MAX_TOKENS}
+                    max={MAX_MAX_TOKENS}
+                    step={1000}
+                    value={settingsMaxTokens}
+                    onChange={(e) => {
+                      const next = writeMaxTokens(parseInt(e.target.value, 10));
+                      setSettingsMaxTokens(next);
+                      window.dispatchEvent(new Event('storage'));
+                    }}
+                    className="w-full accent-blue-500 cursor-pointer"
+                  />
+                  <p className="text-[9px] text-slate-400 dark:text-slate-500 leading-snug">
+                    Output budget for one copilot reply. Raise this if scene changes come back cut off; lower it to cut cost and latency.
+                  </p>
                 </div>
               </div>
             </div>

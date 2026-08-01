@@ -3,6 +3,8 @@ import { X, Brain, Wand2, Loader2, AlertCircle, HelpCircle, Activity, Printer, S
 import { useStore } from '../store/useStore';
 import { compileSCAD } from '../utils/openscad';
 import { updateOrCreateNotecard } from '../utils/noteCards';
+import { mergeAndNormalizeNodes } from '../utils/sceneNodes';
+import { readMaxTokens } from '../utils/llmSettings';
 import SYSTEM_INSTRUCTIONS from './systemInstructions.txt?raw';
 
 interface AICopilotPanelProps {
@@ -108,6 +110,19 @@ const extractJSON = (text: string): any => {
   return null;
 };
 
+// Distinguishes a bare `nodes` array from the other bare arrays a response can
+// carry. Anything that identifies a body - an id/name, or any of the structural
+// keys - counts, so a minimal positional tweak is accepted; question and
+// modification objects are excluded by shape.
+const isLikelyNodeArray = (arr: any[]): boolean =>
+  arr.every(item =>
+    item && typeof item === 'object' && !Array.isArray(item) &&
+    item.question === undefined && item.options === undefined && item.text === undefined &&
+    (item.id !== undefined || item.name !== undefined ||
+     item.geoms !== undefined || item.joints !== undefined || item.scad !== undefined ||
+     item.pos !== undefined || item.euler !== undefined || item.type === 'body')
+  );
+
 const parseAIResponse = (text: string): {
   markdown: string;
   questions: DiagnosticQuestion[];
@@ -167,7 +182,13 @@ const parseAIResponse = (text: string): {
           if (Array.isArray(parsed.nodes)) {
             nodes = parsed.nodes;
             blocksToRemove.push(fullMatch);
-          } else if (Array.isArray(parsed) && parsed.length > 0 && !parsed[0].question && !parsed[0].text && (parsed[0].geoms || parsed[0].joints || parsed[0].scad || parsed[0].type === 'body')) {
+          // A bare array is nodes if it isn't one of the other two shapes we
+          // accept (questions / proposedModifications). The old test demanded
+          // geoms|joints|scad|type on the first element, which threw away the
+          // most natural way to express a small mutation - [{"id": "...",
+          // "pos": [0,0,0.3]}] - leaving nodes null while the chat still
+          // reported the change as applied.
+          } else if (Array.isArray(parsed) && parsed.length > 0 && isLikelyNodeArray(parsed)) {
             nodes = parsed;
             blocksToRemove.push(fullMatch);
           }
@@ -422,9 +443,16 @@ export default function AICopilotPanel({ onClose, messages: propsMessages, setMe
     window.dispatchEvent(new Event('storage'));
   };
 
-  const callGemini = async (systemInstructions: string, userQuery: string) => {
+  // A truncated reply is the single most common way a copilot request fails
+  // without looking like a failure: the prose arrives intact and only the
+  // trailing JSON is cut off, so the scene silently doesn't change. Callers
+  // check `truncated` and refuse to report success.
+  type LLMResult = { text: string; truncated: boolean };
+
+  const callGemini = async (systemInstructions: string, userQuery: string): Promise<LLMResult | null> => {
     const currentModel = selectedModel || localStorage.getItem('gemini_model') || 'gemini-3.6-flash';
     const isClaude = currentModel.startsWith('claude');
+    const maxTokens = readMaxTokens();
 
     if (isClaude) {
       const effectiveKey = claudeApiKey.trim() || localStorage.getItem('anthropic_api_key')?.trim() || '';
@@ -443,7 +471,7 @@ export default function AICopilotPanel({ onClose, messages: propsMessages, setMe
       };
       const body = JSON.stringify({
         model: currentModel,
-        max_tokens: 16384,
+        max_tokens: maxTokens,
         system: systemInstructions,
         messages: [{ role: 'user', content: userQuery }],
       });
@@ -462,7 +490,13 @@ export default function AICopilotPanel({ onClose, messages: propsMessages, setMe
         const text = Array.isArray(json.content)
           ? json.content.filter((b: any) => b.type === 'text' && b.text).map((b: any) => b.text).join('\n')
           : (json.content?.[0]?.text || '');
-        return text;
+
+        if (!text.trim()) {
+          throw new Error(json.stop_reason === 'refusal'
+            ? 'The model declined to answer this request.'
+            : 'The model returned an empty response.');
+        }
+        return { text, truncated: json.stop_reason === 'max_tokens' };
       } catch (e: any) {
         setError(`Claude API Error (${currentModel}): ${e.message}`);
         setLoading(false);
@@ -477,31 +511,27 @@ export default function AICopilotPanel({ onClose, messages: propsMessages, setMe
       setError('');
       setLoading(true);
 
+      const requestBody = JSON.stringify({
+        contents: [
+          {
+            role: 'user',
+            parts: [{ text: `${systemInstructions}\n\nUser Request: ${userQuery}` }]
+          }
+        ],
+        generationConfig: { maxOutputTokens: maxTokens },
+      });
+
       try {
         let response = await fetch(`/api/gemini/v1beta/models/${currentModel}:generateContent?key=${effectiveKey}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [
-              {
-                role: 'user',
-                parts: [{ text: `${systemInstructions}\n\nUser Request: ${userQuery}` }]
-              }
-            ]
-          })
+          body: requestBody,
         });
         if (!response.ok && response.status === 404) {
           response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${currentModel}:generateContent?key=${effectiveKey}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              contents: [
-                {
-                  role: 'user',
-                  parts: [{ text: `${systemInstructions}\n\nUser Request: ${userQuery}` }]
-                }
-              ]
-            })
+            body: requestBody,
           });
         }
 
@@ -510,8 +540,21 @@ export default function AICopilotPanel({ onClose, messages: propsMessages, setMe
           throw new Error(json.error.message);
         }
 
-        const text = json.candidates?.[0]?.content?.parts?.[0]?.text || '';
-        return text;
+        const candidate = json.candidates?.[0];
+        // Every text part, not just parts[0]: thinking models routinely split a
+        // reply across parts, and taking only the first one dropped whatever
+        // followed - usually the trailing JSON block the scene update needs.
+        const text = Array.isArray(candidate?.content?.parts)
+          ? candidate.content.parts.filter((pt: any) => typeof pt?.text === 'string' && pt.text).map((pt: any) => pt.text).join('\n')
+          : '';
+
+        if (!text.trim()) {
+          const blockReason = json.promptFeedback?.blockReason || candidate?.finishReason;
+          throw new Error(blockReason
+            ? `The model returned no content (${blockReason}).`
+            : 'The model returned an empty response.');
+        }
+        return { text, truncated: candidate?.finishReason === 'MAX_TOKENS' };
       } catch (e: any) {
         setError(`Gemini API Error (${currentModel}): ${e.message}`);
         setLoading(false);
@@ -519,6 +562,15 @@ export default function AICopilotPanel({ onClose, messages: propsMessages, setMe
       }
     }
   };
+
+  const describeScadFailure = (names: string[]): string =>
+    `Applied, but the OpenSCAD source for ${names.join(', ')} failed to compile - ${names.length > 1 ? 'those bodies' : 'that body'} still shows its previous geometry.`;
+
+  // Shared by every handler that expects a scene back. Turns "the model said it
+  // worked but nothing happened" into a visible, retryable error.
+  const describeApplyFailure = (truncated: boolean): string => truncated
+    ? `The response hit the ${readMaxTokens().toLocaleString()}-token limit and was cut off before the scene JSON was complete, so nothing was applied. Raise "Copilot Max Response Tokens" in Global Settings, or ask for a smaller change.`
+    : 'The response did not contain a usable scene graph, so nothing was applied.';
 
   const roundNum = (n: number) => Math.round(n * 1000) / 1000;
 
@@ -579,220 +631,12 @@ export default function AICopilotPanel({ onClose, messages: propsMessages, setMe
     return sceneGraph.nodes.map(serializeNode);
   };
 
-  const sanitizeAndNormalizeNodes = (rawNodes: any[]): any[] => {
-    if (!Array.isArray(rawNodes)) return [];
-
-    const usedBodyNames = new Set<string>();
-    const usedGeomNames = new Set<string>();
-
-    const existingNodeMap = new Map<string, any>();
-    const collectExisting = (list: any[]) => {
-      if (!Array.isArray(list)) return;
-      for (const item of list) {
-        if (item.id) existingNodeMap.set(item.id, item);
-        if (item.name) existingNodeMap.set(item.name, item);
-        if (item.children) collectExisting(item.children);
-      }
-    };
-    collectExisting(sceneGraph.nodes);
-
-    const normalizeNode = (n: any, idx: number): any => {
-      if (!n || typeof n !== 'object') return null;
-
-      const baseId = n.id || `node_${Date.now()}_${idx}_${Math.random().toString(36).substr(2, 4)}`;
-      let baseName = n.name || baseId;
-
-      if (usedBodyNames.has(baseName)) {
-        baseName = `${baseName}_${Math.random().toString(36).substr(2, 4)}`;
-      }
-      usedBodyNames.add(baseName);
-
-      const existingNode = existingNodeMap.get(baseId) || existingNodeMap.get(baseName);
-      const scadScript = n.scad !== undefined ? n.scad : existingNode?.scad;
-
-      let pos = Array.isArray(n.pos) && n.pos.length === 3
-        ? n.pos.map((v: any) => typeof v === 'number' ? v : 0)
-        : (existingNode?.pos || [0, 0, 0]);
-
-      if (pos.every((v: number) => v === 0) && existingNode?.pos && existingNode.pos.some((v: number) => v !== 0)) {
-        pos = existingNode.pos;
-      }
-
-      let euler = Array.isArray(n.euler) && n.euler.length === 3
-        ? n.euler.map((v: any) => typeof v === 'number' ? v : 0)
-        : (existingNode?.euler || [0, 0, 0]);
-
-      const geoms = Array.isArray(n.geoms) && n.geoms.length > 0 ? n.geoms.map((g: any, gIdx: number) => {
-        let gName = g.name || `${baseName}_geom_${gIdx}`;
-        if (usedGeomNames.has(gName)) {
-          gName = `${gName}_${Math.random().toString(36).substr(2, 4)}`;
-        }
-        usedGeomNames.add(gName);
-
-        const existingGeom = existingNode?.geoms?.[gIdx];
-        const vertices = g.vertices || existingGeom?.vertices;
-        const faces = g.faces || existingGeom?.faces;
-        const renderVertices = g.renderVertices || existingGeom?.renderVertices;
-
-        const hasMeshData = Array.isArray(vertices) && vertices.length > 0 && Array.isArray(faces) && faces.length > 0;
-        let gType = g.type || (scadScript || hasMeshData ? 'mesh' : 'box');
-        if (gType === 'mesh' && !hasMeshData) {
-          gType = 'box';
-        }
-
-        let rawSize = Array.isArray(g.size)
-          ? g.size.map((v: any) => typeof v === 'number' && !isNaN(v) && v > 0 ? v : 0.1)
-          : [0.1, 0.1, 0.1];
-
-        if (gType === 'box' && rawSize.length < 3) {
-          rawSize = [rawSize[0] || 0.1, rawSize[1] || rawSize[0] || 0.1, rawSize[2] || rawSize[0] || 0.1];
-        }
-
-        const isDynamic = g.dynamic !== undefined
-          ? g.dynamic
-          : (existingGeom?.dynamic !== undefined ? existingGeom.dynamic : (scadScript || hasMeshData ? true : false));
-
-        return {
-          id: g.id || existingGeom?.id || `geom_${Math.random().toString(36).substr(2, 6)}`,
-          name: gName,
-          type: gType,
-          size: rawSize,
-          pos: Array.isArray(g.pos) ? g.pos : (existingGeom?.pos || [0, 0, 0]),
-          rgba: Array.isArray(g.rgba) && g.rgba.length === 4 ? g.rgba : (existingGeom?.rgba || [0.6, 0.6, 0.9, 1]),
-          mass: typeof g.mass === 'number' ? g.mass : (existingGeom?.mass ?? 1.0),
-          dynamic: isDynamic,
-          vertices,
-          faces,
-          renderVertices,
-        };
-      }) : (existingNode?.geoms ? [...existingNode.geoms] : []);
-
-      if (scadScript && geoms.length === 0) {
-        geoms.push({
-          id: `geom_${Math.random().toString(36).substring(2, 8)}`,
-          name: `${baseName}_scad_mesh`,
-          type: 'mesh',
-          size: [0.1, 0.1, 0.1],
-          pos: [0, 0, 0],
-          rgba: [0.6, 0.6, 0.9, 1],
-          mass: 1.0,
-          dynamic: true
-        });
-      }
-
-      const joints = Array.isArray(n.joints) ? n.joints.map((j: any, jIdx: number) => ({
-        id: j.id || `joint_${Math.random().toString(36).substr(2, 6)}`,
-        name: j.name || `${baseName}_joint_${jIdx}`,
-        type: j.type || 'hinge',
-        axis: Array.isArray(j.axis) ? j.axis : [0, 0, 1],
-        pos: Array.isArray(j.pos) ? j.pos : [0, 0, 0],
-        damping: typeof j.damping === 'number' ? j.damping : 0.1,
-        stiffness: typeof j.stiffness === 'number' ? j.stiffness : 0.0,
-        actuator: j.actuator,
-      })) : (existingNode?.joints || []);
-
-      const children = Array.isArray(n.children)
-        ? n.children.map((c: any, cIdx: number) => normalizeNode(c, cIdx)).filter(Boolean)
-        : [];
-
-      return {
-        ...n,
-        id: baseId,
-        name: baseName,
-        pos,
-        euler,
-        geoms,
-        joints,
-        children,
-        ...(scadScript ? { scad: scadScript } : {}),
-      };
-    };
-
-    return rawNodes.map((n, idx) => normalizeNode(n, idx)).filter(Boolean);
-  };
-
-  const mergeAndNormalizeNodes = (rawNodes: any[], isFullReplacement: boolean = false): any[] => {
-    const normalizedRaw = sanitizeAndNormalizeNodes(rawNodes);
-
-    if (isFullReplacement || !sceneGraph.nodes || sceneGraph.nodes.length === 0) {
-      return normalizedRaw;
-    }
-
-    const resultMap = new Map<string, any>();
-    sceneGraph.nodes.forEach((node, index) => {
-      const key = node.id || node.name || `node_${index}`;
-      resultMap.set(key, JSON.parse(JSON.stringify(node)));
-    });
-
-    normalizedRaw.forEach((newNode: any, idx: number) => {
-      let matchedKey: string | null = null;
-
-      for (const [k, existing] of resultMap.entries()) {
-        if (k === newNode.id || k === newNode.name || existing.name === newNode.name || existing.id === newNode.id) {
-          matchedKey = k;
-          break;
-        }
-      }
-
-      if (!matchedKey && idx < sceneGraph.nodes.length) {
-        const existingAtIndex = sceneGraph.nodes[idx];
-        if (existingAtIndex) {
-          matchedKey = existingAtIndex.id || existingAtIndex.name;
-        }
-      }
-
-      if (matchedKey && resultMap.has(matchedKey)) {
-        const existingNode = resultMap.get(matchedKey);
-
-        const mergedGeoms = (newNode.geoms && newNode.geoms.length > 0)
-          ? newNode.geoms.map((g: any, gIdx: number) => {
-              const existingG = existingNode.geoms?.[gIdx];
-              const vertices = g.vertices || existingG?.vertices;
-              const faces = g.faces || existingG?.faces;
-              const renderVertices = g.renderVertices || existingG?.renderVertices;
-              const hasMesh = Array.isArray(vertices) && vertices.length > 0 && Array.isArray(faces) && faces.length > 0;
-              const scadScript = newNode.scad !== undefined ? newNode.scad : existingNode.scad;
-
-              return {
-                ...g,
-                type: g.type === 'box' && hasMesh ? 'mesh' : g.type,
-                dynamic: g.dynamic !== undefined ? g.dynamic : (existingG?.dynamic !== undefined ? existingG.dynamic : (scadScript || hasMesh ? true : false)),
-                vertices,
-                faces,
-                renderVertices,
-              };
-            })
-          : existingNode.geoms;
-
-        resultMap.set(matchedKey, {
-          ...existingNode,
-          ...newNode,
-          id: existingNode.id,
-          name: newNode.name || existingNode.name,
-          scad: newNode.scad !== undefined ? newNode.scad : existingNode.scad,
-          geoms: mergedGeoms,
-          joints: (newNode.joints && newNode.joints.length > 0) ? newNode.joints : existingNode.joints,
-          children: (newNode.children && newNode.children.length > 0) ? newNode.children : existingNode.children,
-        });
-      } else {
-        const key = newNode.id || newNode.name || `node_${Date.now()}_${idx}`;
-        resultMap.set(key, newNode);
-      }
-    });
-
-    const finalNodes = Array.from(resultMap.values());
-
-    for (const originalNode of sceneGraph.nodes) {
-      const exists = finalNodes.some(fn => fn.id === originalNode.id || fn.name === originalNode.name);
-      if (!exists) {
-        finalNodes.push(JSON.parse(JSON.stringify(originalNode)));
-      }
-    }
-
-    return finalNodes;
-  };
-
-  const triggerScadAutoCompile = async (nodesToProcess: any[]) => {
+  // Returns the names of any bodies whose SCAD failed to compile. Callers must
+  // surface these: updateScene has already committed the new scad source by the
+  // time this runs, so a failure here leaves the stored source and the rendered
+  // mesh disagreeing - the body keeps its OLD geometry while the chat reports
+  // the change as applied. This used to be a console.warn and nothing else.
+  const triggerScadAutoCompile = async (nodesToProcess: any[]): Promise<string[]> => {
     const scadNodes: any[] = [];
     const collectScad = (list: any[]) => {
       if (!Array.isArray(list)) return;
@@ -803,7 +647,9 @@ export default function AICopilotPanel({ onClose, messages: propsMessages, setMe
     };
     collectScad(nodesToProcess);
 
-    if (scadNodes.length === 0) return;
+    if (scadNodes.length === 0) return [];
+
+    const failedNodes: string[] = [];
 
     for (const node of scadNodes) {
       let compiled: { vertices: number[]; faces: number[]; renderVertices: number[] } | null = null;
@@ -831,10 +677,12 @@ export default function AICopilotPanel({ onClose, messages: propsMessages, setMe
         useStore.getState().updateNodeScad(targetId, node.scad, compiled, true);
       } else {
         console.warn(`Failed to auto-compile SCAD for node ${node.id || node.name} after 3 attempts:`, lastErr);
+        failedNodes.push(node.name || node.id || 'unnamed body');
       }
     }
 
     useStore.getState().recompile(useStore.getState().sceneGraph);
+    return failedNodes;
   };
 
   const handlePhysicsDiagnostics = async () => {
@@ -868,7 +716,7 @@ Nodes: ${JSON.stringify(compactNodes)}${getModeHistoryStr('explain')}${getExisti
     const response = await callGemini(systemInstructions, `Perform a full system diagnostic of the active physics scene.`);
     setLoading(false);
     if (response) {
-      const { markdown, questions, noteCardMarkdown } = parseAIResponse(response);
+      const { markdown, questions, noteCardMarkdown } = parseAIResponse(response.text);
       const assistantMsg: ChatMessage = {
         id: `ast_${Date.now()}`,
         role: 'assistant',
@@ -920,7 +768,7 @@ Nodes: ${JSON.stringify(compactNodes)}${getModeHistoryStr('explain')}${getExisti
     const response = await callGemini(systemInstructions, `Perform a full 3D printing physical defect diagnostic of the active scene graph topology.`);
     setLoading(false);
     if (response) {
-      const { markdown, questions, noteCardMarkdown } = parseAIResponse(response);
+      const { markdown, questions, noteCardMarkdown } = parseAIResponse(response.text);
       const assistantMsg: ChatMessage = {
         id: `ast_${Date.now()}`,
         role: 'assistant',
@@ -984,7 +832,7 @@ Based on these functional clarifications and your physical analysis:
     setLoading(false);
 
     if (response) {
-      const { markdown, proposedModifications, noteCardMarkdown } = parseAIResponse(response);
+      const { markdown, proposedModifications, noteCardMarkdown } = parseAIResponse(response.text);
       const assistantMsg: ChatMessage = {
         id: `ast_props_${Date.now()}`,
         role: 'assistant',
@@ -1029,14 +877,15 @@ Based on these functional clarifications and your physical analysis:
     const response = await callGemini(systemPromptWithQuestions, currentPrompt);
     setLoading(false);
     if (response) {
-      const { markdown, questions, proposedModifications, nodes, noteCardMarkdown } = parseAIResponse(response);
+      const { markdown, questions, proposedModifications, nodes, noteCardMarkdown } = parseAIResponse(response.text);
       let applied = false;
+      let scadFailures: string[] = [];
       let mergedNodes: any[] | null = null;
       if (nodes && Array.isArray(nodes)) {
-        const merged = mergeAndNormalizeNodes(nodes, true);
+        const merged = mergeAndNormalizeNodes(nodes, sceneGraph.nodes, true);
         if (merged.length > 0) {
           updateScene({ nodes: merged });
-          triggerScadAutoCompile(merged);
+          scadFailures = await triggerScadAutoCompile(merged);
           applied = true;
           mergedNodes = merged;
         }
@@ -1046,12 +895,22 @@ Based on these functional clarifications and your physical analysis:
         id: `ast_${Date.now()}`,
         role: 'assistant',
         mode: 'generate',
-        content: markdown || '### ✨ Scene Generated Successfully!\nI have created your 3D physics schematic.',
+        // Only claim success when a scene actually reached the store. The
+        // fallback used to assert 'Scene Generated Successfully!' regardless,
+        // which is how a request that produced no usable nodes still read as a
+        // win.
+        content: markdown || (applied
+          ? '### ✨ Scene Generated Successfully!\nI have created your 3D physics schematic.'
+          : '### ⚠️ Nothing was applied\nThe response did not include a scene graph.'),
         questions,
         proposedModifications,
         userAnswers: {},
         nodes,
         isImplemented: applied,
+        hasError: !applied || scadFailures.length > 0,
+        errorMsg: !applied
+          ? describeApplyFailure(response.truncated)
+          : (scadFailures.length > 0 ? describeScadFailure(scadFailures) : undefined),
         timestamp: Date.now()
       };
       setMessages(prev => [...prev, assistantMsg]);
@@ -1084,14 +943,15 @@ Based on these functional clarifications and your physical analysis:
     const response = await callGemini(SYSTEM_INSTRUCTIONS, promptWithContext);
     setLoading(false);
     if (response) {
-      const { markdown, questions, proposedModifications, nodes, noteCardMarkdown } = parseAIResponse(response);
+      const { markdown, questions, proposedModifications, nodes, noteCardMarkdown } = parseAIResponse(response.text);
       let applied = false;
+      let scadFailures: string[] = [];
       let mergedNodes: any[] | null = null;
       if (nodes && Array.isArray(nodes)) {
-        const merged = mergeAndNormalizeNodes(nodes, false);
+        const merged = mergeAndNormalizeNodes(nodes, sceneGraph.nodes, false);
         if (merged.length > 0) {
           updateScene({ nodes: merged });
-          triggerScadAutoCompile(merged);
+          scadFailures = await triggerScadAutoCompile(merged);
           applied = true;
           mergedNodes = merged;
         }
@@ -1101,12 +961,18 @@ Based on these functional clarifications and your physical analysis:
         id: `ast_${Date.now()}`,
         role: 'assistant',
         mode: 'mutate',
-        content: markdown || '### 🛠️ Scene Mutated Successfully!\nYour requested modifications have been merged into the active 3D physics schematic.',
+        content: markdown || (applied
+          ? '### 🛠️ Scene Mutated Successfully!\nYour requested modifications have been merged into the active 3D physics schematic.'
+          : '### ⚠️ Nothing was applied\nThe response did not include a mutated scene graph.'),
         questions,
         proposedModifications,
         userAnswers: {},
         nodes,
         isImplemented: applied,
+        hasError: !applied || scadFailures.length > 0,
+        errorMsg: !applied
+          ? describeApplyFailure(response.truncated)
+          : (scadFailures.length > 0 ? describeScadFailure(scadFailures) : undefined),
         timestamp: Date.now()
       };
       setMessages(prev => [...prev, assistantMsg]);
@@ -1159,13 +1025,15 @@ CRITICAL INSTRUCTIONS:
     setLoading(false);
 
     if (response) {
-      const { markdown, questions, proposedModifications, nodes, noteCardMarkdown } = parseAIResponse(response);
+      const { markdown, questions, proposedModifications, nodes, noteCardMarkdown } = parseAIResponse(response.text);
       if (nodes && Array.isArray(nodes) && nodes.length > 0) {
-        const merged = mergeAndNormalizeNodes(nodes, false);
+        const merged = mergeAndNormalizeNodes(nodes, sceneGraph.nodes, false);
         if (merged.length > 0) {
           updateScene({ nodes: merged });
-          triggerScadAutoCompile(merged);
-          setMessages(prev => prev.map(m => m.id === msgId ? { ...m, isImplemented: true, hasError: false } : m));
+          const scadFailures = await triggerScadAutoCompile(merged);
+          setMessages(prev => prev.map(m => m.id === msgId
+            ? { ...m, isImplemented: true, hasError: scadFailures.length > 0, errorMsg: scadFailures.length > 0 ? describeScadFailure(scadFailures) : undefined }
+            : m));
 
           const summaryHeader = '### ✨ Selected Improvements Applied Successfully!\n\n';
           const summaryContent = markdown
@@ -1181,6 +1049,8 @@ CRITICAL INSTRUCTIONS:
             proposedModifications,
             nodes: merged,
             isImplemented: true,
+            hasError: scadFailures.length > 0,
+            errorMsg: scadFailures.length > 0 ? describeScadFailure(scadFailures) : undefined,
             timestamp: Date.now()
           };
           setMessages(prev => [...prev, confirmationMsg]);
@@ -1188,7 +1058,7 @@ CRITICAL INSTRUCTIONS:
           return;
         }
       }
-      setMessages(prev => prev.map(m => m.id === msgId ? { ...m, hasError: true, errorMsg: 'Failed to generate updated 3D scene graph nodes.' } : m));
+      setMessages(prev => prev.map(m => m.id === msgId ? { ...m, hasError: true, errorMsg: describeApplyFailure(response.truncated) } : m));
     }
   };
 
@@ -1221,14 +1091,15 @@ If modifying the 3D scene graph, include the updated "nodes" array in \`\`\`json
     setLoading(false);
 
     if (response) {
-      const { markdown, questions, proposedModifications, nodes, noteCardMarkdown } = parseAIResponse(response);
+      const { markdown, questions, proposedModifications, nodes, noteCardMarkdown } = parseAIResponse(response.text);
       let applied = false;
+      let scadFailures: string[] = [];
       let mergedNodes: any[] | null = null;
       if (nodes && Array.isArray(nodes)) {
-        const merged = mergeAndNormalizeNodes(nodes, false);
+        const merged = mergeAndNormalizeNodes(nodes, sceneGraph.nodes, false);
         if (merged.length > 0) {
           updateScene({ nodes: merged });
-          triggerScadAutoCompile(merged);
+          scadFailures = await triggerScadAutoCompile(merged);
           applied = true;
           mergedNodes = merged;
         }
@@ -1237,12 +1108,21 @@ If modifying the 3D scene graph, include the updated "nodes" array in \`\`\`json
       const assistantMsg: ChatMessage = {
         id: `ast_${Date.now()}`,
         role: 'assistant',
-        content: markdown || '### 🛠️ Scene Updated\nYour requested modifications have been applied to the active physics schematic.',
+        content: markdown || (applied
+          ? '### 🛠️ Scene Updated\nYour requested modifications have been applied to the active physics schematic.'
+          : '### ⚠️ Nothing was applied\nThe response did not include an updated scene graph.'),
         questions,
         proposedModifications,
         userAnswers: {},
         nodes,
         isImplemented: applied,
+        // A follow-up is often just conversation ("why is it wobbling?"), so an
+        // absent scene graph is only an error when the model was asked to change
+        // something - i.e. when this turn is running in generate/mutate mode.
+        hasError: (!applied && (mode === 'generate' || mode === 'mutate')) || scadFailures.length > 0,
+        errorMsg: !applied
+          ? describeApplyFailure(response.truncated)
+          : (scadFailures.length > 0 ? describeScadFailure(scadFailures) : undefined),
         timestamp: Date.now()
       };
       setMessages(prev => [...prev, assistantMsg]);
