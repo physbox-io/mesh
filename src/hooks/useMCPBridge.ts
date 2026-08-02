@@ -559,8 +559,105 @@ export function useMCPBridge() {
           return { ok: true, preset: name };
         }
 
-        case 'LIST_PRESETS':
-          return Object.keys(PRESETS);
+        case 'SAVE_PRESET': {
+          const name = String(msg.preset || msg.name || '').trim();
+          if (!name) return { ok: false, error: 'Missing preset name' };
+          const userPresetKey = name.replace(/^user:/, '');
+          try {
+            const userPresets = JSON.parse(localStorage.getItem('physics_user_presets') || '{}');
+            userPresets[userPresetKey] = {
+              sceneGraph: store.sceneGraph,
+              noteCards: (window as any)._physics_getNoteCards?.() || [],
+              copilotMessages: (window as any)._physics_getCopilotMessages?.() || [],
+            };
+            localStorage.getItem('physics_user_presets');
+            localStorage.setItem('physics_user_presets', JSON.stringify(userPresets));
+            return { ok: true, preset: `user:${userPresetKey}` };
+          } catch (e) {
+            return { ok: false, error: String(e) };
+          }
+        }
+
+        case 'DELETE_PRESET': {
+          const name = String(msg.preset || msg.name || '').trim();
+          if (!name) return { ok: false, error: 'Missing preset name' };
+          const userPresetKey = name.replace(/^user:/, '');
+          try {
+            const userPresets = JSON.parse(localStorage.getItem('physics_user_presets') || '{}');
+            delete userPresets[userPresetKey];
+            localStorage.setItem('physics_user_presets', JSON.stringify(userPresets));
+            return { ok: true, preset: name };
+          } catch (e) {
+            return { ok: false, error: String(e) };
+          }
+        }
+
+        case 'CHECK_COLLISIONS': {
+          const nodes = store.sceneGraph.nodes || [];
+          const bodyBounds: Array<{ id: string; name: string; min: number[]; max: number[] }> = [];
+
+          const computeBounds = (nodeList: any[], parentPos: number[] = [0, 0, 0]) => {
+            for (const node of nodeList) {
+              const nodePos = [
+                (node.pos?.[0] || 0) + parentPos[0],
+                (node.pos?.[1] || 0) + parentPos[1],
+                (node.pos?.[2] || 0) + parentPos[2],
+              ];
+              const min = [nodePos[0] - 0.1, nodePos[1] - 0.1, nodePos[2] - 0.1];
+              const max = [nodePos[0] + 0.1, nodePos[1] + 0.1, nodePos[2] + 0.1];
+
+              (node.geoms || []).forEach((g: any) => {
+                const s = g.size || [0.1, 0.1, 0.1];
+                const halfX = s[0] || 0.1;
+                const halfY = s[1] || halfX;
+                const halfZ = s[2] || halfX;
+                min[0] = Math.min(min[0], nodePos[0] - halfX);
+                min[1] = Math.min(min[1], nodePos[1] - halfY);
+                min[2] = Math.min(min[2], nodePos[2] - halfZ);
+                max[0] = Math.max(max[0], nodePos[0] + halfX);
+                max[1] = Math.max(max[1], nodePos[1] + halfY);
+                max[2] = Math.max(max[2], nodePos[2] + halfZ);
+              });
+
+              bodyBounds.push({ id: node.id || node.name, name: node.name || node.id, min, max });
+              if (node.children) computeBounds(node.children, nodePos);
+            }
+          };
+
+          computeBounds(nodes);
+
+          const overlappingPairs: Array<{ bodyA: string; bodyB: string }> = [];
+          for (let i = 0; i < bodyBounds.length; i++) {
+            for (let j = i + 1; j < bodyBounds.length; j++) {
+              const a = bodyBounds[i];
+              const b = bodyBounds[j];
+              const overlap = (
+                a.min[0] <= b.max[0] && a.max[0] >= b.min[0] &&
+                a.min[1] <= b.max[1] && a.max[1] >= b.min[1] &&
+                a.min[2] <= b.max[2] && a.max[2] >= b.min[2]
+              );
+              if (overlap) {
+                overlappingPairs.push({ bodyA: a.name, bodyB: b.name });
+              }
+            }
+          }
+
+          return {
+            ok: true,
+            hasInterpenetrations: overlappingPairs.length > 0,
+            bodyCount: bodyBounds.length,
+            overlappingPairs,
+          };
+        }
+
+        case 'LIST_PRESETS': {
+          let userKeys: string[] = [];
+          try {
+            const userPresets = JSON.parse(localStorage.getItem('physics_user_presets') || '{}');
+            userKeys = Object.keys(userPresets).map(k => `user:${k}`);
+          } catch {}
+          return [...Object.keys(PRESETS), ...userKeys];
+        }
 
         case 'SCREENSHOT': {
           const gl = (window as any)._physics_gl;
