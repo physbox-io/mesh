@@ -1,10 +1,11 @@
 import { create } from 'zustand';
+import * as THREE from 'three';
 import type { SceneGraph, SceneNode, CsgOp } from '../types/scene';
 import { type CsgResult, CSG_DEFAULT_SECTORS } from '../utils/csg';
 import { compileToMJCF } from '../utils/mjcf';
 import { PRESETS, pendulumPreset, generateGearGeoms } from '../presets/presetScenes';
 import { PhysicsWorkerClient, type BuiltResult, type FrameSnapshot } from './physicsWorkerClient';
-import { generatePyramidMeshData, generateConeMeshData, generateTorusMeshData, generateTubeMeshData, generateCurveGeoms, DEFAULT_CURVE_POINTS, DEFAULT_CURVE_WIDTH, DEFAULT_CURVE_THICKNESS, DEFAULT_CURVE_SEGMENTS } from '../utils/geom';
+import { generatePyramidMeshData, generateConeMeshData, generateTorusMeshData, generateTubeMeshData, generateCurveGeoms, DEFAULT_CURVE_POINTS, DEFAULT_CURVE_WIDTH, DEFAULT_CURVE_THICKNESS, DEFAULT_CURVE_SEGMENTS, getStickyRotation } from '../utils/geom';
 
 const initialScene: SceneGraph = pendulumPreset;
 
@@ -132,42 +133,85 @@ const translateMeshGeoms = (node: any, dx: number, dy: number, dz: number) => {
   }
 };
 
-// Rotate static mesh geom vertices around axis (degrees) about their centroid
-// Dynamic mesh renderVertices are centroid-local — rotate them directly around origin
-const rotateMeshGeoms = (node: any, axis: 0 | 1 | 2, deltaDeg: number) => {
-  const rad = (deltaDeg * Math.PI) / 180;
-  const cos = Math.cos(rad), sin = Math.sin(rad);
+// Rotate static mesh geom vertices around axis (degrees) about their centroid (or origin)
+// Dynamic mesh renderVertices are centroid-local
+const rotateMeshGeomsAbsolute = (node: any, euler: [number, number, number], rotateAroundCOM = true) => {
+  const [rx, ry, rz] = euler;
+  const radX = (rx * Math.PI) / 180;
+  const radY = (ry * Math.PI) / 180;
+  const radZ = (rz * Math.PI) / 180;
 
-  const rotateAboutOrigin = (v: number[]) => mapVerts(v, (x, y, z) => {
-    if (axis === 0) return [x,  y*cos - z*sin,  y*sin + z*cos];
-    if (axis === 1) return [x*cos + z*sin,  y,  -x*sin + z*cos];
-    return [x*cos - y*sin,  x*sin + y*cos,  z];
-  });
+  // Build 3D rotation matrix for Y-up world space (Euler order: Z * Y * X)
+  const matX = new THREE.Matrix4().makeRotationX(radX);
+  const matY = new THREE.Matrix4().makeRotationY(radY);
+  const matZ = new THREE.Matrix4().makeRotationZ(radZ);
+  const rotMat = new THREE.Matrix4().multiplyMatrices(matZ, new THREE.Matrix4().multiplyMatrices(matY, matX));
 
   for (const g of node.geoms) {
     if (isStaticMesh(g)) {
-      const v = [...g.vertices] as number[];
+      if (!g.baseVertices) {
+        g.baseVertices = [...g.vertices];
+      }
+      const baseVerts = g.baseVertices as number[];
+      const n = baseVerts.length / 3;
+
       let cx = 0, cy = 0, cz = 0;
-      const n = v.length / 3;
-      for (let i = 0; i < v.length; i += 3) { cx += v[i]; cy += v[i+1]; cz += v[i+2]; }
+      for (let i = 0; i < baseVerts.length; i += 3) {
+        cx += baseVerts[i];
+        cy += baseVerts[i + 1];
+        cz += baseVerts[i + 2];
+      }
       cx /= n; cy /= n; cz /= n;
-      // Translate to origin, rotate, translate back
-      const centred = mapVerts([...v], (x,y,z) => [x-cx, y-cy, z-cz]);
-      const rotated = rotateAboutOrigin(centred);
-      g.vertices = mapVerts(rotated, (x,y,z) => [x+cx, y+cy, z+cz]);
+
+      const newVerts = new Array(baseVerts.length);
+      const v = new THREE.Vector3();
+
+      for (let i = 0; i < baseVerts.length; i += 3) {
+        if (rotateAroundCOM) {
+          v.set(baseVerts[i] - cx, baseVerts[i + 1] - cy, baseVerts[i + 2] - cz);
+          v.applyMatrix4(rotMat);
+          newVerts[i] = v.x + cx;
+          newVerts[i + 1] = v.y + cy;
+          newVerts[i + 2] = v.z + cz;
+        } else {
+          v.set(baseVerts[i], baseVerts[i + 1], baseVerts[i + 2]);
+          v.applyMatrix4(rotMat);
+          newVerts[i] = v.x;
+          newVerts[i + 1] = v.y;
+          newVerts[i + 2] = v.z;
+        }
+      }
+      g.vertices = newVerts;
     }
+
     if (isDynamicMesh(g)) {
-      // renderVertices are already centroid-local — rotate directly
-      // Note: renderVertices are Z-up (MuJoCo space), so axis mapping is different:
-      // UI axis 0=X, 1=Y(up in Three.js = Z in MuJoCo), 2=Z(depth in Three.js = -Y in MuJoCo)
-      const mujocoAxis = axis === 1 ? 2 : axis === 2 ? 1 : 0;
-      const v = [...g.renderVertices] as number[];
-      const rotateZup = mapVerts(v, (x, y, z) => {
-        if (mujocoAxis === 0) return [x,  y*cos - z*sin,  y*sin + z*cos];
-        if (mujocoAxis === 1) return [x*cos + z*sin,  y,  -x*sin + z*cos];
-        return [x*cos - y*sin,  x*sin + y*cos,  z];
-      });
-      g.renderVertices = rotateZup;
+      if (!g.baseRenderVertices) {
+        g.baseRenderVertices = [...g.renderVertices];
+      }
+      const baseRender = g.baseRenderVertices as number[];
+      // renderVertices are Z-up space in MuJoCo
+      const matXz = new THREE.Matrix4().makeRotationX(radX);
+      const matYz = new THREE.Matrix4().makeRotationZ(radY);
+      const matZz = new THREE.Matrix4().makeRotationY(-radZ);
+      const rotMatZup = new THREE.Matrix4().multiplyMatrices(matZz, new THREE.Matrix4().multiplyMatrices(matYz, matXz));
+
+      const newRender = new Array(baseRender.length);
+      const v = new THREE.Vector3();
+      for (let i = 0; i < baseRender.length; i += 3) {
+        v.set(baseRender[i], baseRender[i + 1], baseRender[i + 2]);
+        v.applyMatrix4(rotMatZup);
+        newRender[i] = v.x;
+        newRender[i + 1] = v.y;
+        newRender[i + 2] = v.z;
+      }
+      g.renderVertices = newRender;
+
+      if (!rotateAroundCOM && node.pos) {
+        if (!node.basePos) node.basePos = [...node.pos];
+        const bp = node.basePos;
+        v.set(bp[0], bp[1], bp[2]).applyMatrix4(rotMat);
+        node.pos = [v.x, v.y, v.z];
+      }
     }
   }
 };
@@ -208,11 +252,13 @@ export const scaleMeshGeoms = (node: any, sx: number, sy: number = sx, sz: numbe
 // ran on every slider tick / handle drag and every undo snapshot, copying
 // potentially megabytes of SCAD mesh data each time.
 const cloneGeom = (g: any): any => {
-  const { vertices, faces, renderVertices, ...rest } = g;
+  const { vertices, faces, renderVertices, baseVertices, baseRenderVertices, ...rest } = g;
   const out: any = JSON.parse(JSON.stringify(rest));
   if (vertices !== undefined) out.vertices = vertices;
   if (faces !== undefined) out.faces = faces;
   if (renderVertices !== undefined) out.renderVertices = renderVertices;
+  if (baseVertices !== undefined) out.baseVertices = baseVertices;
+  if (baseRenderVertices !== undefined) out.baseRenderVertices = baseRenderVertices;
   return out;
 };
 
@@ -303,6 +349,7 @@ export interface PhysicsState {
   lastCompileError: string | null;
   isSettingsOpen: boolean;
   cameraView: 'perspective' | 'topDown';
+  printAnalysisEnabled: boolean;
   // When set, CameraController points the camera at this explicit pose instead
   // of the cameraView preset. Position/target are in MuJoCo world space (same
   // convention as every other pos field in the app) — CameraController converts
@@ -336,6 +383,9 @@ export interface PhysicsState {
   setLoaded: (loaded: boolean) => void;
   setSettingsOpen: (open: boolean) => void;
   setCameraView: (view: 'perspective' | 'topDown') => void;
+  setPrintAnalysisEnabled: (enabled: boolean) => void;
+  togglePrintAnalysis: () => void;
+  addHardwareComponentNode: (hardwareNode: SceneNode) => void;
   setCameraOverride: (override: { position: [number, number, number]; target: [number, number, number] } | null) => void;
   setEnvironment: (env: Partial<{gravityZ: number, windX: number, windY: number, density: number, floorFriction: number, floorBounce: number}>) => void;
   
@@ -345,7 +395,9 @@ export interface PhysicsState {
   updateNodeGeom: (id: string, updates: any, geomIndex?: number) => void;
   updateNodeJoint: (id: string, updates: any) => void;
   updateGearTeeth: (id: string, teeth: number) => void;
-  updateNodeRotation: (id: string, axis: 0 | 1 | 2, deg: number) => void;
+  rotateAroundCOM: boolean;
+  setRotateAroundCOM: (val: boolean) => void;
+  updateNodeRotation: (id: string, axis: 0 | 1 | 2, deg: number, rotateAroundCOM?: boolean) => void;
   updateNodeScript: (id: string, script: string) => void;
   updateNode: (id: string, updates: Partial<SceneNode>) => void;
 
@@ -574,6 +626,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   lastCompileError: null,
   isSettingsOpen: false,
   cameraView: 'perspective',
+  printAnalysisEnabled: false,
   cameraOverride: null,
   mcpActiveCount: 0,
   scadCompileCount: 0,
@@ -585,6 +638,8 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   floorFriction: 1.0,
   floorBounce: 0.0,
   
+  rotateAroundCOM: true,
+  setRotateAroundCOM: (val) => set({ rotateAroundCOM: val }),
   sceneGraph: initialScene,
   selectedNodeId: null,
   parentUnderSelected: false,
@@ -607,6 +662,15 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   setLoaded: (loaded) => set({ isLoaded: loaded }),
   setSettingsOpen: (open) => set({ isSettingsOpen: open }),
   setCameraView: (view) => set({ cameraView: view, cameraOverride: null }),
+  setPrintAnalysisEnabled: (enabled) => set({ printAnalysisEnabled: enabled }),
+  togglePrintAnalysis: () => set((state) => ({ printAnalysisEnabled: !state.printAnalysisEnabled })),
+  addHardwareComponentNode: (hardwareNode) => {
+    get().prepareForDiscreteChange();
+    const sceneGraph = get().sceneGraph;
+    const newNodes = [...sceneGraph.nodes, hardwareNode];
+    const newGraph = { ...sceneGraph, nodes: newNodes };
+    get().recompile(newGraph, hardwareNode.id);
+  },
   setCameraOverride: (override) => set({ cameraOverride: override }),
   
   resetSimulation: () => {
@@ -619,11 +683,11 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     const prev = get().activePreset;
     get().prepareForDiscreteChange();
     getPhysicsWorkerClient().setPlaying(false);
-    set({ isPlaying: false, selectedNodeId: null, activePreset: name });
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(new CustomEvent('physics:preset-loaded', { detail: { name, prev } }));
-    }
     if (name.startsWith('user:')) {
+      set({ isPlaying: false, selectedNodeId: null, activePreset: name });
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('physics:preset-loaded', { detail: { name, prev } }));
+      }
       const presetName = name.replace('user:', '');
       try {
         const userPresets = JSON.parse(localStorage.getItem('physics_user_presets') || '{}');
@@ -638,12 +702,27 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     }
     const preset = PRESETS[name as keyof typeof PRESETS] as any;
     if (!preset) return;
+    // Clone: PRESETS holds module-level objects, and handing one straight to the
+    // store makes every later edit an edit of the preset itself — reloading it
+    // would then restore the edited scene rather than the original.
+    const scene: SceneGraph = name === 'empty'
+      ? { nodes: [] }
+      : cloneSceneGraph(preset.scene || get().sceneGraph);
+    set({
+      isPlaying: false,
+      selectedNodeId: null,
+      activePreset: name,
+      sceneGraph: scene,
+    });
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('physics:preset-loaded', { detail: { name, prev } }));
+    }
     if (preset.environment) {
       set({ windX: 0, windY: 0, floorBounce: 0, ...preset.environment });
     } else {
       set({ windX: 0, windY: 0, floorBounce: 0 });
     }
-    get().recompile(preset.scene, null, true, true);
+    get().recompile(scene, null, true, true);
   },
   
   setEnvironment: (env) => {
@@ -968,9 +1047,16 @@ export const useStore = create<PhysicsState>()((set, get) => ({
           if (isAllMeshNode(node)) {
             // Mesh vertices are baked in world space — translate them directly
             const [ox, oy, oz] = node.pos as number[];
-            translateMeshGeoms(node, newPos[0] - ox, newPos[1] - oy, newPos[2] - oz);
+            const dx = newPos[0] - ox, dy = newPos[1] - oy, dz = newPos[2] - oz;
+            translateMeshGeoms(node, dx, dy, dz);
+            for (const g of node.geoms) {
+              if (g.baseVertices) {
+                g.baseVertices = mapVerts([...g.baseVertices], (x, y, z) => [x + dx, y + dy, z + dz]);
+              }
+            }
           }
           node.pos = newPos;
+          node.basePos = [...newPos];
           return true;
         }
         if (traverse(node.children)) return true;
@@ -982,22 +1068,40 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     get().recompile(newScene, undefined, false);
   },
 
-  updateNodeRotation: (id, axis, deg) => {
+  updateNodeRotation: (id, axis, deg, rotateAroundCOMOverride) => {
     get().recordInteraction('node-rotation');
+    const rotateAroundCOM = rotateAroundCOMOverride ?? get().rotateAroundCOM ?? true;
     const newScene = cloneSceneGraph(get().sceneGraph);
     const traverse = (nodes: any[]) => {
       if (!nodes) return false;
       for (const node of nodes) {
         if (node.id === id) {
           const currentEuler = node.euler ? [...node.euler] : [0, 0, 0];
-          const prevDeg = currentEuler[axis] || 0;
           currentEuler[axis] = deg;
           node.euler = currentEuler as [number, number, number];
           delete node.quat;
+
+          const stickyEuler = currentEuler.map(a => getStickyRotation(a)) as [number, number, number];
+
           if (isAllMeshNode(node)) {
-            // Rotate mesh vertices in-place around their centroid
-            rotateMeshGeoms(node, axis, deg - prevDeg);
-            // Keep node.euler purely for UI display — it doesn't affect rendering
+            rotateMeshGeomsAbsolute(node, stickyEuler, rotateAroundCOM);
+          } else {
+            if (!node.basePos && node.pos) {
+              node.basePos = [...node.pos];
+            }
+            if (!rotateAroundCOM && node.basePos) {
+              const radX = (stickyEuler[0] * Math.PI) / 180;
+              const radY = (stickyEuler[1] * Math.PI) / 180;
+              const radZ = (stickyEuler[2] * Math.PI) / 180;
+              const matX = new THREE.Matrix4().makeRotationX(radX);
+              const matY = new THREE.Matrix4().makeRotationY(radY);
+              const matZ = new THREE.Matrix4().makeRotationZ(radZ);
+              const rotMat = new THREE.Matrix4().multiplyMatrices(matZ, new THREE.Matrix4().multiplyMatrices(matY, matX));
+              const v = new THREE.Vector3(node.basePos[0], node.basePos[1], node.basePos[2]).applyMatrix4(rotMat);
+              node.pos = [v.x, v.y, v.z];
+            } else if (rotateAroundCOM && node.basePos) {
+              node.pos = [...node.basePos];
+            }
           }
           return true;
         }

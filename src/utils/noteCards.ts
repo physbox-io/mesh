@@ -97,6 +97,9 @@ Only **one** of the hollow cube's three shafts collides (the Z one) — decompos
 
   rope_bridge: `# Rope Bridge\n\nA **cable composite** — 25 linked capsules with a heavy ball dropped onto it.\n\n## Physics\n- MuJoCo expands the composite into a chain of bodies joined by ball joints, welded to the anchor at each end\n- The chain has no bending stiffness, so it hangs in a **catenary** and carries load purely in tension\n- The ball's weight is shared along the span; the shallower the sag, the higher the tension\n\n## Try it\n- Increase the ball's mass and watch the sag deepen\n- Move an anchor apart to pull the rope taut — tension climbs steeply as it straightens`,
 
+  birdhouse: `# Birdhouse (Primitives)\n\nA 6-panel wooden birdhouse constructed out of primitive boxes and a CSG entrance cutout.\n\n## Laser Cutting\n- Designed for **laser cut face unwrapping**\n- Features interlocking **finger joints** or **glue edge** profiles\n- Front panel has a circular entrance hole cut via CSG boolean difference\n\n## Try it\n- Click **Export Laser Cut (SVG)** in the top toolbar to generate laser vector cut paths`,
+
+  birdhouse_scad: `# Birdhouse (OpenSCAD)\n\nA 3D birdhouse model generated from OpenSCAD code.\n\n## Laser Cutting\n- Evaluates OpenSCAD polyhedral mesh into 2D coplanar panel clusters\n- Extracts boundary cutouts and finger joint edges\n\n## Try it\n- Click **Export Laser Cut (SVG)** in the top toolbar to view unwrapped 2D sheet layout`,
 };
 
 

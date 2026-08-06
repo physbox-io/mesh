@@ -112,6 +112,10 @@ export interface SceneNode {
   isPulleyRope?: boolean;
   pulleyWheelId?: string;
   isAerodynamic?: boolean;
+  rot?: number[];
+  isHardwareComponent?: boolean;
+  hardwareType?: string;
+  hardwareSpec?: any;
   script?: string;
   scad?: string;
   // --- CSG (boolean modifiers) ---------------------------------------------

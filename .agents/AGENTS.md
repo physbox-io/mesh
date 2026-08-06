@@ -11,3 +11,4 @@
 - **PowerShell vs Bash Redirection**: When executing commands via `run_command` (default shell is PowerShell on Windows), NEVER use `> /dev/null` in top-level commands. PowerShell interprets `/dev/null` as a local Windows file `C:\dev\null`. Wrap bash redirections inside `wsl -e bash -c "..."` or use `| Out-Null` / `$null`.
 - **Statement Separators**: NEVER use `&&` in top-level PowerShell command strings (which triggers syntax errors). Wrap chained bash commands in `wsl -e bash -c "cmd1 && cmd2"`.
 - **WSL Path & Context**: Execute Linux/WSL operations through `wsl -e bash -c "..."` or target `/Ubuntu-20.04/home/boab/...` WSL paths cleanly.
+- **No `npx` Usage**: Do not use `npx` to execute commands. Run local binaries directly (e.g. `./node_modules/.bin/vitest`) or package scripts via `npm run <script>` inside the WSL environment.

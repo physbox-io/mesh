@@ -1,22 +1,49 @@
-# PhysBox: Mesh
+# PhysBox Studio
 
-A browser-based rigid-body physics simulator powered by MuJoCo WASM. Build, simulate and interact with physics scenes in real time.
+A browser-based rigid-body physics simulator and CAD fabrication studio powered by MuJoCo WASM, CSG boolean modeling, and WebSerial hardware control. Build, simulate, analyze, and export physical mechanisms in real time.
 
-## Features
+---
 
-- **MuJoCo WASM** — full contact dynamics, joints, actuators, equality constraints
-- **Primitive geoms** — box, sphere, capsule, cylinder, ellipsoid
-- **Dynamic mesh geoms** — arbitrary convex polyhedra with full collision
-- **Static mesh geoms** — visual-only scenery (decorative, no physics)
-- **Compound bodies** — multiple geoms per body for complex shapes (nested and selectable directly in Hierarchy)
-- **Joints** — free (with physical damping/drag decay), hinge, slide, ball (with stiffness/damping/limits/actuators)
-- **Constraints** — gear coupling, rack-and-pinion, pulley ropes, weld, connect
-- **Aerodynamics** — lift/drag model for winged bodies
-- **Control scripts** — per-body JavaScript running at 1000 Hz with API support for reading/writing positions/velocities and tracking keyboard input (`api.isKeyPressed`)
-- **Headless simulation** — run N ticks and return trajectory data without disturbing the live view
-- **MCP server integration** — external AI agents can build and control scenes via WebSocket
+## 🌟 Key Features
 
-## Running
+* **MuJoCo WASM Physics Engine** — Full contact dynamics, multi-axis joints, motor actuators, proximity mechanical constraints (gears, pinion-rack, pulley ropes, welds).
+* **3D CSG Parametric Modeling** — Manifold boolean operations (Union, Subtract, Intersect) and OpenSCAD web worker integration.
+* **Interactive 3D Mouse Spring Dragging** — Click and drag live objects in the 3D viewport during playback with real-time spring force lines.
+* **Fabrication Exporters**:
+  * **3D Print STL Exporter** — Binary `.stl` export centered and Z-up oriented for OrcaSlicer / PrusaSlicer.
+  * **3D Printability & Structural HUD** — Overhang visualizer, thin-wall alert, layer orientation stress visualizer, print time & filament cost estimator.
+  * **2D Laser Cut / CNC Exporter** — 3D-to-2D panel layout, finger/mortise-tenon joints, kerf compensation, dogbone reliefs, SVG & G-code output.
+  * **Contour Slicing Exporter** — Stackable relief contour slicing for laser/cardboard/foam, exporting SVG, G-code, and ZIP packages.
+* **Hardware Primitives** — Heat-set insert bosses (M2–M8), metric printed threads (M3–M16), hex nut traps (M3–M6), bearing pockets, snap-fits, D-shaft motor couplers.
+* **Hardware-in-the-Loop (HIL) WebSerial Control** — Direct browser serial connection to ESP32 / microcontrollers at configurable baud rates.
+* **AI Copilot & MCP Bridge** — In-app AI agent panel and WebSocket MCP server bridge (`physbox_mcp`) for external agent scene generation.
+
+---
+
+## 📈 Real-Time Telemetry & Oscilloscope Graphing Dock
+
+PhysBox Studio exposes real-time time-series telemetry streams from the MuJoCo WASM simulation state and incoming WebSerial HIL hardware streams:
+
+* **Energy Balance Curves** — Continuous tracking of system kinetic energy ($E_k = \frac{1}{2} m v^2 + \frac{1}{2} I \omega^2$), gravitational potential energy ($E_p = m g z$), and total mechanical energy dissipation over time ($\Delta t$).
+* **Kinematics & Dynamics Plotting** — Real-time signal graphing of individual rigid-body 6-DOF positions $(x, y, z)$, linear velocities $(v_x, v_y, v_z)$, angular rates $(\omega_x, \omega_y, \omega_z)$, and joint articulation angles.
+* **Actuator & Control Signals** — Plotting motor control inputs (`ctrl`), LQR cart-pole balancing forces, and user-scripted 1000 Hz outputs.
+* **HIL Hardware Oscilloscope** — Live graphing of real-world serial telemetry feeds (IMU orientation angles, encoder counts, strain gauge readings, potentiometer inputs) streamed directly over WebSerial.
+
+---
+
+## 🔮 Coming Soon
+
+* **TeknoBox Control Over Objects** — Direct physical device control and hardware manipulation over simulated objects via built-in Degree-of-Freedom (DOF) motion sensors.
+
+---
+
+## 📌 TODO
+
+* **System Status Dock** — Unify real-time FPS counter, MuJoCo WASM engine status, active collision solver pair count, WebSerial HIL serial connection indicator (`115200 baud`), and AI Copilot status into a sleek bottom status bar dock.
+
+---
+
+## 🚀 Getting Started
 
 ```bash
 npm install
@@ -25,7 +52,7 @@ npm run dev          # dev server on port 5175
 
 Open [http://localhost:5175](http://localhost:5175).
 
-To connect an AI agent via MCP:
+### Connecting AI Agents via MCP
 
 ```bash
 cd ~/physbox_mcp
@@ -34,13 +61,11 @@ venv/bin/python server.py --stdio   # stdio mode for Claude Code
 venv/bin/python server.py           # HTTP on port 3141
 ```
 
-Open the app with `?mcpPort=3142` appended to the URL so the browser connects to the MCP WebSocket relay:
+Open the app with `?mcpPort=3142` appended to the URL: `http://localhost:5175?mcpPort=3142`.
 
-```
-http://localhost:5175?mcpPort=3142
-```
+---
 
-## Presets
+## 📂 Preset Demos
 
 | Key | Scene |
 |-----|-------|
@@ -61,25 +86,20 @@ http://localhost:5175?mcpPort=3142
 | `mesh_collision` | Dynamic mesh pyramid sliding off a ramp |
 | `coin_flip` | Bouncy coin flipped into the air with angular spin |
 
-## Coordinate System
+---
+
+## 📐 Coordinate System
 
 MuJoCo is **Z-up**: X=right, Y=forward (into screen), Z=up. Ground plane at Z=0.
 
 Static mesh `vertices` are authored in **Three.js Y-up** space (X=right, Y=up, Z=toward camera). The MJCF compiler swaps Y↔Z automatically.
 
-Dynamic mesh `renderVertices` are in **raw MuJoCo Z-up** space (Y↔Z swap from Y-up, no centroid subtraction needed — MuJoCo recenters the mesh internally and `xpos` tracks the recentered body frame).
-
 See [GUIDE.md](GUIDE.md) for full mesh authoring workflow.
 
-## Architecture
+---
 
-```
-src/
-  App.tsx              — UI, Three.js canvas, geom renderers
-  store/useStore.ts    — Zustand state, scene mutations, recompile
-  hooks/useMuJoCo.ts   — MuJoCo WASM init
-  hooks/useMCPBridge.ts— WebSocket bridge to MCP server
-  utils/mjcf.ts        — SceneGraph → MJCF XML compiler
-  presets/             — Built-in scene presets
-  types/scene.ts       — SceneNode / SceneGeom / SceneJoint types
-```
+## 📜 License
+
+Distributed under the **Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0)** License.
+
+Free for personal, academic, educational, and non-commercial research use with mandatory attribution. Commercial licensing requires prior authorization. See [LICENSE](LICENSE) for full terms.

@@ -14,7 +14,8 @@
 // aerodynamic windmill, drone flight) are only checked for numerical sanity.
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { PRESETS } from '../src/presets/presetScenes';
+import { PRESETS, birdhouseScadPreset } from '../src/presets/presetScenes';
+import { needsScadBuild } from '../src/hooks/useCsgCompile';
 import { makePresetNoteCard } from '../src/utils/noteCards';
 import type { SceneNode } from '../src/types/scene';
 import { simulate, type Sim } from './helpers/simulate';
@@ -288,5 +289,27 @@ describe('every preset is numerically stable', () => {
     } finally {
       sim.dispose();
     }
+  });
+});
+
+describe('OpenSCAD presets build on load', () => {
+  it('marks the OpenSCAD birdhouse as needing an automatic build', () => {
+    // It ships with source and an empty mesh; without the automatic build it
+    // renders as nothing until someone presses Compile.
+    const node = birdhouseScadPreset.nodes[0];
+    expect(node.scad).toBeDefined();
+    expect(needsScadBuild(node)).toBe(true);
+  });
+
+  it('leaves an already-built body alone', () => {
+    const node = {
+      ...birdhouseScadPreset.nodes[0],
+      geoms: [{ name: 'm', type: 'mesh', vertices: [0, 0, 0], faces: [0, 0, 0] }],
+    } as any;
+    expect(needsScadBuild(node)).toBe(false);
+  });
+
+  it('ignores bodies with no OpenSCAD source', () => {
+    expect(needsScadBuild({ id: 'x', name: 'x', geoms: [] } as any)).toBe(false);
   });
 });

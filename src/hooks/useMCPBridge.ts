@@ -12,6 +12,7 @@ import { makePresetNoteCard, updateOrCreateNotecard } from '../utils/noteCards';
 import { generateCurveGeoms, DEFAULT_CURVE_POINTS, DEFAULT_CURVE_WIDTH, DEFAULT_CURVE_THICKNESS, DEFAULT_CURVE_SEGMENTS } from '../utils/geom';
 import { compileCsgNodes } from './useCsgCompile';
 import { PRESETS } from '../presets/presetScenes';
+import { parseSTL } from '../utils/stlParser';
 
 const autoCompileScad = async (nodes: any[]) => {
   const scadNodes: any[] = [];
@@ -647,6 +648,109 @@ export function useMCPBridge() {
             hasInterpenetrations: overlappingPairs.length > 0,
             bodyCount: bodyBounds.length,
             overlappingPairs,
+          };
+        }
+
+        case 'IMPORT_STL': {
+          const { stlData, name, importMode, pos, scale, dynamic } = msg;
+          if (!stlData) return { ok: false, error: 'Missing stlData (Base64 string or ASCII text)' };
+
+          let data: ArrayBuffer | string;
+          try {
+            if (typeof stlData === 'string' && stlData.startsWith('data:')) {
+              const b64 = stlData.split(',', 1)[1] || stlData;
+              const binary = atob(b64);
+              const bytes = new Uint8Array(binary.length);
+              for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+              data = bytes.buffer;
+            } else if (typeof stlData === 'string' && !stlData.includes('solid')) {
+              try {
+                const binary = atob(stlData.trim());
+                const bytes = new Uint8Array(binary.length);
+                for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+                data = bytes.buffer;
+              } catch {
+                data = stlData;
+              }
+            } else {
+              data = stlData;
+            }
+          } catch (e) {
+            return { ok: false, error: `Failed to decode STL payload: ${String(e)}` };
+          }
+
+          const baseName = name || 'imported_stl';
+          const parsed = parseSTL(data, { name: baseName, scale });
+
+          const mode = importMode || 'scad_parametric';
+          const nodePos = Array.isArray(pos) && pos.length === 3 ? pos : [0, 0, 1];
+          const id = `stl_${Math.random().toString(36).slice(2, 7)}`;
+          let newNode: any = null;
+
+          if (mode === 'scad_parametric') {
+            newNode = {
+              id,
+              name: baseName,
+              pos: nodePos,
+              scad: parsed.scadParametric,
+              geoms: [{ type: 'mesh', size: [1], dynamic: dynamic !== false }],
+              joints: [{ type: 'free' }],
+              children: [],
+            };
+          } else if (mode === 'scad_raw') {
+            newNode = {
+              id,
+              name: baseName,
+              pos: nodePos,
+              scad: parsed.scadRaw,
+              geoms: [{ type: 'mesh', size: [1], dynamic: dynamic !== false }],
+              joints: [{ type: 'free' }],
+              children: [],
+            };
+          } else if (mode === 'mesh') {
+            newNode = {
+              id,
+              name: baseName,
+              pos: nodePos,
+              geoms: [{
+                type: 'mesh',
+                vertices: parsed.vertices,
+                faces: parsed.faces,
+                renderVertices: parsed.renderVertices,
+                dynamic: dynamic !== false,
+              }],
+              joints: [{ type: 'free' }],
+              children: [],
+            };
+          } else {
+            newNode = {
+              id,
+              name: baseName,
+              pos: nodePos,
+              geoms: [{
+                type: parsed.primitiveGeom.type,
+                size: parsed.primitiveGeom.size,
+                rgba: [0.3, 0.7, 0.9, 1],
+              }],
+              joints: [{ type: 'free' }],
+              children: [],
+            };
+          }
+
+          const currentNodes = store.sceneGraph.nodes || [];
+          const updatedNodes = [...currentNodes, newNode];
+          const res = await settleScene(updatedNodes);
+
+          return {
+            ok: res.ok,
+            nodeId: id,
+            name: baseName,
+            vertCount: parsed.vertices.length / 3,
+            faceCount: parsed.faces.length / 3,
+            subComponentCount: parsed.subComponents.length,
+            inferredSpacing: parsed.inferredSpacing,
+            boundingBox: parsed.boundingBox,
+            scadCode: newNode.scad,
           };
         }
 

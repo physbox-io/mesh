@@ -13,12 +13,18 @@ import { useFrame } from '@react-three/fiber';
 import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js';
 import { SimplifyModifier } from 'three/examples/jsm/modifiers/SimplifyModifier.js';
 import { loadCompiler, compileSCAD, isCompilerReady } from './utils/openscad';
-import { sampleCatmullRom } from './utils/geom';
+import { sampleCatmullRom, getStickyRotation } from './utils/geom';
 import { resolveCsgGeoms, csgSourceGeoms, csgHashOf, positiveBounds, geomMatrixOf, clipSegmentsToBox, CSG_DEFAULT_SECTORS } from './utils/csg';
 import { useCsgAutoCompile } from './hooks/useCsgCompile';
 import { PRESETS } from './presets/presetScenes';
 import { makePresetNoteCard } from './utils/noteCards';
+import { ImportStlModal } from './components/ImportStlModal';
+import { ExportLaserCutModal } from './components/ExportLaserCutModal';
+import { ExportContourSliceModal } from './components/ExportContourSliceModal';
 import { MIN_MAX_TOKENS, MAX_MAX_TOKENS, readMaxTokens, writeMaxTokens } from './utils/llmSettings';
+import { PrintAnalysisOverlay } from './components/PrintAnalysisOverlay';
+import { PrintAnalysisHUD } from './components/PrintAnalysisHUD';
+import { createHeatSetBossNode, createHexNutTrapNode, createBearingPocketNode, createDShaftHubNode, createCounterboreHoleNode } from './utils/hardwareComponents';
 
 // Simple robust markdown parser to convert basic markdown text to safe HTML
 // Markdown parser for note cards
@@ -40,6 +46,9 @@ function parseNoteMarkdown(md: string): string {
   }).join('\n');
   return html;
 }
+
+
+
 
 // Floating note card overlay component
 function NoteCardOverlay({ card, isEditing, onToggleEdit, onToggleMinimize, onMarkdownChange, onClose, onMove }: {
@@ -334,13 +343,51 @@ const CameraController = () => {
   return <OrbitControls enabled={draggedNodeId === null} ref={controlsRef} makeDefault enableDamping dampingFactor={0.1} mouseButtons={{ LEFT: 99 as any, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE }} />;
 };
 
-// Drop Handler for precise spawning
-const DropHandler = ({ addComponent }: { addComponent: (type: any, pos: [number, number, number]) => void }) => {
+// Drop Handler for precise spawning & external file imports (.scad, .stl, .json)
+const DropHandler = ({ addComponent, onImportFile }: {
+  addComponent: (type: any, pos: [number, number, number]) => void;
+  onImportFile: (file: File) => void;
+}) => {
   const { camera, gl } = useThree();
   
   useEffect(() => {
-    const handler = (e: DragEvent) => {
+    const handler = async (e: DragEvent) => {
       e.preventDefault();
+      
+      // 1. External files dropped (e.g. from desktop or file explorer)
+      const files = e.dataTransfer?.files;
+      if (files && files.length > 0) {
+        for (let i = 0; i < files.length; i++) {
+          const file = files[i];
+          const fileName = file.name;
+          const ext = fileName.slice(fileName.lastIndexOf('.')).toLowerCase();
+
+          if (ext === '.json') {
+            try {
+              const text = await file.text();
+              const parsed = JSON.parse(text);
+              if (parsed && Array.isArray(parsed.nodes)) {
+                useStore.getState().updateScene(parsed);
+                if (Array.isArray(parsed.noteCards)) {
+                  (window as any)._physics_setNoteCards?.(parsed.noteCards);
+                }
+              }
+            } catch (err) {
+              console.error('Failed to import dropped JSON', err);
+            }
+          } else if (ext === '.scad' || ext === '.stl') {
+            // Hand the file to the import dialog rather than guessing: how an
+            // STL should come in (CSG primitives, polyhedron, raw mesh) is the
+            // whole point of that dialog, and a silent default import was
+            // indistinguishable from the drop having done nothing.
+            onImportFile(file);
+            break;
+          }
+        }
+        return;
+      }
+
+      // 2. Sidebar component drag
       const type = e.dataTransfer?.getData('type') as any;
       if (!type) return;
       
@@ -382,13 +429,39 @@ const DropHandler = ({ addComponent }: { addComponent: (type: any, pos: [number,
       window.removeEventListener('drop', handler);
       window.removeEventListener('dragover', dragOverHandler);
     };
-  }, [camera, gl, addComponent]);
+  }, [camera, gl, addComponent, onImportFile]);
   
   return null;
 };
 
 
-// Custom Triangular Prism Wedge Geometry
+// RGB Origin Dot at [0, 0, 0] (Red = +X right, Green = +Y depth in MuJoCo, Blue = +Z up in MuJoCo)
+const OriginDot = () => {
+  return (
+    <group position={[0, 0.001, 0]}>
+      {/* Center origin white dot */}
+      <mesh position={[0, 0, 0]}>
+        <sphereGeometry args={[0.008, 16, 16]} />
+        <meshBasicMaterial color="#ffffff" />
+      </mesh>
+      {/* Red dot (+X axis right) */}
+      <mesh position={[0.025, 0, 0]}>
+        <sphereGeometry args={[0.005, 16, 16]} />
+        <meshBasicMaterial color="#ef4444" />
+      </mesh>
+      {/* Blue dot (+Z axis UP in MuJoCo world space) */}
+      <mesh position={[0, 0.025, 0]}>
+        <sphereGeometry args={[0.005, 16, 16]} />
+        <meshBasicMaterial color="#3b82f6" />
+      </mesh>
+      {/* Green dot (+Y axis depth in MuJoCo world space -> Three.js -Z) */}
+      <mesh position={[0, 0, -0.025]}>
+        <sphereGeometry args={[0.005, 16, 16]} />
+        <meshBasicMaterial color="#22c55e" />
+      </mesh>
+    </group>
+  );
+};
 const WedgeGeometry = ({ width = 2.0, depth = 1.0, height = 0.5 }: { width: number; depth: number; height: number }) => {
   const vertices = useMemo(() => {
     const halfW = width / 2;
@@ -1423,7 +1496,8 @@ const CsgGhostOutline = ({ geom, color, bounds, csgCentroid }: { geom: any; colo
     const m = geomMatrixOf(geom);
     if (csgCentroid && csgCentroid.length >= 3) {
       const p = geom.pos || [0, 0, 0];
-      m.setPosition(p[0] - csgCentroid[0], p[1] - csgCentroid[1], p[2] - csgCentroid[2]);
+      // X and Y only — see csgFrameOffset: the compiled body is not re-origined in Z.
+      m.setPosition(p[0] - csgCentroid[0], p[1] - csgCentroid[1], p[2]);
     }
     const baked = new Array<number>(src.length);
     const v = new THREE.Vector3();
@@ -1462,7 +1536,7 @@ const CsgGhostOutline = ({ geom, color, bounds, csgCentroid }: { geom: any; colo
   );
 };
 
-const SceneVisuals = ({ model, data, mujoco, sceneGraph, selectedNodeId, setSelectedNodeId }: any) => {
+const SceneVisuals = ({ model, data, mujoco, sceneGraph, selectedNodeId, setSelectedNodeId, activeWeakSpot, setActiveWeakSpot }: any) => {
   // Every geom name the scene graph accounts for, drawn or not. The implicit-geom
   // pass below uses this — NOT the render list — to decide what in the MuJoCo
   // model is unexplained. A collision-only geom (a boolean body's source
@@ -1603,6 +1677,7 @@ const SceneVisuals = ({ model, data, mujoco, sceneGraph, selectedNodeId, setSele
         <CsgNegativeGhosts model={model} data={data} mujoco={mujoco} sceneGraph={sceneGraph} selectedNodeId={selectedNodeId} />
         <MouseDragForceRenderer model={model} data={data} mujoco={mujoco} />
         <CurveControlHandles />
+        <PrintAnalysisOverlay activeSpotId={activeWeakSpot?.id} onSelectSpot={setActiveWeakSpot} />
       </group>
       {/* Static mesh geoms: vertices already in Three.js Y-up space, no rotation needed */}
       {staticMeshGeoms.map(g => (
@@ -1939,6 +2014,14 @@ function App() {
   const [propertiesWidth, setPropertiesWidth] = useState(380);
   const [isLeftSidebarOpen, setIsLeftSidebarOpen] = useState(false);
   const [isSaveModalOpen, setIsSaveModalOpen] = useState(false);
+  const [isImportStlModalOpen, setIsImportStlModalOpen] = useState(false);
+  const [isLaserCutModalOpen, setIsLaserCutModalOpen] = useState(false);
+  const [isContourSliceModalOpen, setIsContourSliceModalOpen] = useState(false);
+  const [droppedImportFile, setDroppedImportFile] = useState<File | null>(null);
+  const handleDroppedImportFile = useCallback((file: File) => {
+    setDroppedImportFile(file);
+    setIsImportStlModalOpen(true);
+  }, []);
   const [presetNameInput, setPresetNameInput] = useState('');
   const [activeGeomIndex, setActiveGeomIndex] = useState(0);
   const [noteCards, setNoteCards] = useState<{ id: string; markdown: string; minimized: boolean; x: number; y: number }[]>([]);
@@ -2154,16 +2237,19 @@ function App() {
     isSettingsOpen, setSettingsOpen, 
     gravityZ, windX, windY, density, floorFriction, floorBounce, setEnvironment,
     cameraView, setCameraView,
+    printAnalysisEnabled, togglePrintAnalysis,
     sceneGraph, selectedNodeId, setSelectedNodeId,
-    updateNodeGeom, updateNodeJoint, updateGearTeeth, addComponent, loadPreset, updateScene,
+    updateNodeGeom, updateNodeJoint, updateGearTeeth, addPusherPeg, deletePusherPeg, updatePusherPeg, addComponent, loadPreset, updateScene,
     resetSimulation, updateNodePos,
     updateNodeJointsList, deleteNode, renameNode,
-    addPusherPeg, deletePusherPeg, updatePusherPeg, updateNodeRotation,
+    addHardwareComponentNode, updateNodeRotation, rotateAroundCOM, setRotateAroundCOM,
     updateWedgeParams, updatePyramidParams, updateConeParams, updateTorusParams, updateTubeParams, updateCurveParams, updatePulleyParams, updateRopeParams,
     parentUnderSelected, setParentUnderSelected, updateNodeScript, updateNode,
     deleteNodeGeom, setGeomCsgOp,
     undo, redo, undoStack, redoStack
   } = useStore();
+
+  const [activeWeakSpot, setActiveWeakSpot] = useState<any>(null);
 
   // Collapsible properties cards drawer listener
   useEffect(() => {
@@ -2229,6 +2315,15 @@ function App() {
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // intentionally only on mount
+
+  // What the (always-unselected) preset dropdown shows when closed.
+  const activePresetLabel = useMemo(() => {
+    if (!activePreset) return '✏️ Modified scene';
+    if (activePreset.startsWith('user:')) return `💾 ${activePreset.replace('user:', '')}`;
+    const preset = PRESETS[activePreset as keyof typeof PRESETS] as any;
+    if (!preset) return '✏️ Modified scene';
+    return `${preset.emoji ? `${preset.emoji} ` : ''}${preset.name}`;
+  }, [activePreset]);
 
   // Load a preset and replace the note card with the preset's built-in card (if any)
   const loadPresetWithCard = useCallback((name: string) => {
@@ -2955,22 +3050,22 @@ function App() {
 
           {/* Preset Select Segmented Group */}
           <div className="flex items-center bg-slate-100 dark:bg-slate-800/80 p-0.5 rounded-lg border border-slate-200/80 dark:border-slate-700/60 shadow-inner">
-            <select 
-              value={activePreset || ''}
+            {/* The select never *holds* the active preset: its value is always
+                the placeholder below, so picking any entry — including the one
+                already loaded — is a real change event and reloads the scene.
+                Bound to activePreset instead, re-picking Blank after adding a
+                body fires nothing at all and the scene is never cleared. */}
+            <select
+              value=""
               onChange={(e) => {
                 const v = e.target.value;
+                if (!v) return;
                 if (v.startsWith('user:')) loadUserPresetWithCard(v);
                 else loadPresetWithCard(v);
               }}
               className="bg-transparent text-slate-700 dark:text-slate-100 text-xs rounded-md block px-2 py-1 outline-none font-medium cursor-pointer border-none"
             >
-              {/* Editing the scene clears activePreset. Without a real option
-                  bound to '', the browser falls back to showing option 0 as the
-                  current selection, so re-picking that preset fires no change
-                  event and the scene never resets. */}
-              {!activePreset && (
-                <option value="" disabled hidden>✏️ Modified scene</option>
-              )}
+              <option value="" disabled hidden>{activePresetLabel}</option>
               <optgroup label="⬜ Built-in Presets" className="bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300">
                 {Object.entries(PRESETS).map(([id, p]: [string, any]) => (
                   <option key={id} value={id}>{p.emoji ? `${p.emoji} ` : ''}{p.name}</option>
@@ -3087,6 +3182,30 @@ function App() {
               title="Export STL (3D print)"
             >
               <Printer className="w-3.5 h-3.5" />
+            </button>
+
+            <button
+              onClick={() => setIsLaserCutModalOpen(true)}
+              className="flex items-center justify-center p-1 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700 text-amber-600 dark:text-amber-400 transition-colors focus:outline-none cursor-pointer"
+              title="Export Laser / CNC (SVG)"
+            >
+              <Scissors className="w-3.5 h-3.5" />
+            </button>
+
+            <button
+              onClick={() => setIsContourSliceModalOpen(true)}
+              className="flex items-center justify-center p-1 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700 text-emerald-600 dark:text-emerald-400 transition-colors focus:outline-none cursor-pointer"
+              title="Export contour slices (stacked relief map, SVG)"
+            >
+              <Layers className="w-3.5 h-3.5" />
+            </button>
+
+            <button
+              onClick={() => setIsImportStlModalOpen(true)}
+              className="flex items-center justify-center p-1 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 transition-colors focus:outline-none cursor-pointer"
+              title="Import STL (3D file)"
+            >
+              <Upload className="w-3.5 h-3.5" />
             </button>
 
             <button
@@ -3573,7 +3692,96 @@ function App() {
               </div>
               <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Rope</span>
             </div>
+          </div>
 
+          {/* 3D-Printed Mechanical Hardware Primitives */}
+          <div className="mt-4 pt-3 border-t border-slate-200 dark:border-slate-800">
+            <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2 flex items-center gap-1.5">
+              <span>🔩 3D Hardware Primitives</span>
+            </h3>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                onClick={() => {
+                  const node = createHeatSetBossNode('M3');
+                  addHardwareComponentNode(node);
+                  setIsLeftSidebarOpen(false);
+                }}
+                className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-emerald-400 dark:hover:border-emerald-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
+                title="M3 Heat-Set Insert Boss"
+              >
+                <div className="p-1.5 bg-emerald-50 dark:bg-emerald-950/30 rounded-lg mb-1 group-hover:scale-105 transition-transform">
+                  <span className="text-xs font-mono text-emerald-600 dark:text-emerald-400 font-bold">M3</span>
+                </div>
+                <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">M3 Insert Boss</span>
+              </button>
+
+              <button
+                onClick={() => {
+                  const node = createHexNutTrapNode('M3');
+                  addHardwareComponentNode(node);
+                  setIsLeftSidebarOpen(false);
+                }}
+                className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-blue-400 dark:hover:border-blue-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
+                title="M3 Hex Nut Trap Slot"
+              >
+                <div className="p-1.5 bg-blue-50 dark:bg-blue-950/30 rounded-lg mb-1 group-hover:scale-105 transition-transform">
+                  <span className="text-xs font-mono text-blue-600 dark:text-blue-400 font-bold">Nut</span>
+                </div>
+                <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">M3 Nut Trap</span>
+              </button>
+
+              <button
+                onClick={() => {
+                  const node = createCounterboreHoleNode('M3');
+                  addHardwareComponentNode(node);
+                  setIsLeftSidebarOpen(false);
+                }}
+                className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-cyan-400 dark:hover:border-cyan-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
+                title="M3 Counterbored Screw Hole (Cap Screw Recess + Shank Clearance)"
+              >
+                <div className="p-1.5 bg-cyan-50 dark:bg-cyan-950/30 rounded-lg mb-1 group-hover:scale-105 transition-transform">
+                  <span className="text-xs font-mono text-cyan-600 dark:text-cyan-400 font-bold">M3</span>
+                </div>
+                <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">M3 Cap Recess</span>
+              </button>
+
+              <button
+                onClick={() => {
+                  const node = createBearingPocketNode('608');
+                  addHardwareComponentNode(node);
+                  setIsLeftSidebarOpen(false);
+                }}
+                className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-amber-400 dark:hover:border-amber-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
+                title="608 Skate Bearing Pocket"
+              >
+                <div className="p-1.5 bg-amber-50 dark:bg-amber-950/30 rounded-lg mb-1 group-hover:scale-105 transition-transform">
+                  <Disc className="w-4 h-4 text-amber-600 dark:text-amber-400" />
+                </div>
+                <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">608 Bearing</span>
+              </button>
+
+              <button
+                onClick={() => {
+                  const node = createDShaftHubNode(5.0);
+                  addHardwareComponentNode(node);
+                  setIsLeftSidebarOpen(false);
+                }}
+                className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-purple-400 dark:hover:border-purple-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
+                title="5mm D-Shaft Motor Hub (NEMA17)"
+              >
+                <div className="p-1.5 bg-purple-50 dark:bg-purple-950/30 rounded-lg mb-1 group-hover:scale-105 transition-transform">
+                  <span className="text-xs font-mono text-purple-600 dark:text-purple-400 font-bold">D5</span>
+                </div>
+                <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">D-Shaft Hub</span>
+              </button>
+            </div>
+          </div>
+
+          <div className="mt-4 pt-3 border-t border-slate-200 dark:border-slate-800">
+            <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2 flex items-center gap-1.5">
+              <span>🔧 Others</span>
+            </h3>
+            <div className="grid grid-cols-2 gap-2">
             {/* Mesh */}
             <div 
               draggable 
@@ -3616,7 +3824,8 @@ function App() {
               <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Add Note Card</span>
             </div>
           </div>
-        </aside>
+        </div>
+      </aside>
 
         {/* Viewport */}
         <main className="flex-1 relative min-w-0">
@@ -3693,7 +3902,7 @@ function App() {
             }}
           >
             <SceneCapture sceneRef={threeSceneRef} />
-            <DropHandler addComponent={addComponent} />
+            <DropHandler addComponent={addComponent} onImportFile={handleDroppedImportFile} />
             <color attach="background" args={[darkMode ? '#0b0f19' : '#f8fafc']} />
             <ambientLight intensity={darkMode ? 0.35 : 0.6} />
             <directionalLight position={[1.5, 3, 1.5]} intensity={darkMode ? 1.4 : 1.2} castShadow />
@@ -3707,6 +3916,7 @@ function App() {
               sectionColor={darkMode ? '#64748b' : '#94a3b8'} 
               position={[0, -0.005, 0]} 
             />
+            <OriginDot />
             
             {model && data && mujoco && (
               <PhysicsLoop 
@@ -3726,6 +3936,8 @@ function App() {
                 sceneGraph={sceneGraph} 
                 selectedNodeId={selectedNodeId}
                 setSelectedNodeId={setSelectedNodeId}
+                activeWeakSpot={activeWeakSpot}
+                setActiveWeakSpot={setActiveWeakSpot}
               />
             )}
             
@@ -3763,7 +3975,21 @@ function App() {
             >
               Top Down
             </button>
+            <button
+              onClick={() => togglePrintAnalysis()}
+              className={`px-2.5 py-1 rounded text-[10px] font-bold tracking-wide transition-all cursor-pointer flex items-center gap-1 ${
+                printAnalysisEnabled
+                  ? 'bg-amber-500 text-white shadow-xs'
+                  : 'text-slate-655 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+              }`}
+            >
+              <Printer className="w-3 h-3" />
+              Weak Spots
+            </button>
           </div>
+
+          {/* Floating Mechanical & 3D Print Failure HUD */}
+          <PrintAnalysisHUD activeSpotId={activeWeakSpot?.id} onSelectSpot={setActiveWeakSpot} />
 
           {/* Floating Note Card Overlays */}
           {noteCards.map(card => (
@@ -3842,28 +4068,54 @@ function App() {
                 </h3>
                 <div className="flex flex-col gap-3">
                   <div className="flex flex-col gap-1.5">
-                    <label className="text-xs text-slate-500 flex items-center justify-between font-medium">X Position
-                      <span>{selectedNode.pos[0].toFixed(2)} m</span>
-                    </label>
+                    <div className="flex items-center justify-between">
+                      <label className="text-xs text-slate-500 font-medium">X Position</label>
+                      <div className="flex items-center gap-1">
+                        <input 
+                          type="number"
+                          step="0.001"
+                          className="w-20 px-1.5 py-0.5 border border-slate-200 dark:border-slate-700 rounded text-xs font-mono text-right outline-none focus:border-blue-500 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100"
+                          value={Number(selectedNode.pos[0].toFixed(3))}
+                          onChange={(e) => {
+                            const val = parseFloat(e.target.value);
+                            if (!isNaN(val)) handleMove(0, val);
+                          }}
+                        />
+                        <span className="text-[10px] font-mono text-slate-400">m</span>
+                      </div>
+                    </div>
                     <input 
                       type="range" 
                       min="-10" 
                       max="10" 
-                      step="0.05" 
+                      step="0.001" 
                       className="w-full accent-blue-500 cursor-pointer" 
                       value={selectedNode.pos[0]} 
                       onChange={(e) => handleMove(0, parseFloat(e.target.value))} 
                     />
                   </div>
                   <div className="flex flex-col gap-1.5">
-                    <label className="text-xs text-slate-500 flex items-center justify-between font-medium">Y Position
-                      <span>{selectedNode.pos[1].toFixed(2)} m</span>
-                    </label>
+                    <div className="flex items-center justify-between">
+                      <label className="text-xs text-slate-500 font-medium">Y Position</label>
+                      <div className="flex items-center gap-1">
+                        <input 
+                          type="number"
+                          step="0.001"
+                          className="w-20 px-1.5 py-0.5 border border-slate-200 dark:border-slate-700 rounded text-xs font-mono text-right outline-none focus:border-blue-500 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100"
+                          value={Number(selectedNode.pos[1].toFixed(3))}
+                          onChange={(e) => {
+                            const val = parseFloat(e.target.value);
+                            if (!isNaN(val)) handleMove(1, val);
+                          }}
+                        />
+                        <span className="text-[10px] font-mono text-slate-400">m</span>
+                      </div>
+                    </div>
                     <input 
                       type="range" 
                       min="-10" 
                       max="10" 
-                      step="0.05" 
+                      step="0.001" 
                       className="w-full accent-blue-500 cursor-pointer" 
                       value={selectedNode.pos[1]} 
                       onChange={(e) => handleMove(1, parseFloat(e.target.value))} 
@@ -3879,14 +4131,30 @@ function App() {
                         : 0;
                       const displayZ = selectedNode.pos[2] - centroidZ;
                       return (<>
-                        <label className="text-xs text-slate-500 flex items-center justify-between font-medium">Z Position (Height)
-                          <span>{displayZ.toFixed(2)} m{centroidZ > 0 ? <span className="text-slate-300 ml-1">(+{centroidZ.toFixed(3)} centroid)</span> : null}</span>
-                        </label>
+                        <div className="flex items-center justify-between">
+                          <label className="text-xs text-slate-500 font-medium flex items-center gap-1">
+                            Z Position (Height)
+                            {centroidZ > 0 ? <span className="text-slate-300 text-[10px]">(+{centroidZ.toFixed(3)} centroid)</span> : null}
+                          </label>
+                          <div className="flex items-center gap-1">
+                            <input 
+                              type="number"
+                              step="0.001"
+                              className="w-20 px-1.5 py-0.5 border border-slate-200 dark:border-slate-700 rounded text-xs font-mono text-right outline-none focus:border-blue-500 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100"
+                              value={Number(displayZ.toFixed(3))}
+                              onChange={(e) => {
+                                const val = parseFloat(e.target.value);
+                                if (!isNaN(val)) handleMove(2, val + centroidZ);
+                              }}
+                            />
+                            <span className="text-[10px] font-mono text-slate-400">m</span>
+                          </div>
+                        </div>
                         <input
                           type="range"
                           min="0"
                           max="10"
-                          step="0.05"
+                          step="0.001"
                           className="w-full accent-blue-500 cursor-pointer"
                           value={displayZ}
                           onChange={(e) => handleMove(2, parseFloat(e.target.value) + centroidZ)}
@@ -3894,9 +4162,24 @@ function App() {
                       </>);
                     })()}
                   </div>
+                  <div className="flex items-center justify-between mt-2 pt-2 border-t border-slate-100">
+                    <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">Rotation Pivot</span>
+                    <label 
+                      className="text-xs font-medium text-slate-600 flex items-center gap-1.5 cursor-pointer bg-slate-50 hover:bg-slate-100 px-2 py-0.5 rounded border border-slate-200 transition-colors"
+                      title={rotateAroundCOM ? "Rotate component in-place around its Center of Mass" : "Rotate component around World Origin (0,0,0)"}
+                    >
+                      <input 
+                        type="checkbox" 
+                        checked={rotateAroundCOM} 
+                        onChange={(e) => setRotateAroundCOM(e.target.checked)} 
+                        className="w-3.5 h-3.5 rounded text-blue-500 accent-blue-500 cursor-pointer"
+                      />
+                      Center of Mass
+                    </label>
+                  </div>
                   <div className="flex flex-col gap-1.5 mt-1 border-t border-slate-100 pt-2">
                     <label className="text-xs text-slate-500 flex items-center justify-between font-medium">X Rotation
-                      <span>{(selectedNode.euler ? selectedNode.euler[0] : 0).toFixed(0)}°</span>
+                      <span>{getStickyRotation(selectedNode.euler ? selectedNode.euler[0] : 0).toFixed(0)}°</span>
                     </label>
                     <input 
                       type="range" 
@@ -3910,7 +4193,7 @@ function App() {
                   </div>
                   <div className="flex flex-col gap-1.5 mt-1">
                     <label className="text-xs text-slate-500 flex items-center justify-between font-medium">Y Rotation
-                      <span>{(selectedNode.euler ? selectedNode.euler[1] : 0).toFixed(0)}°</span>
+                      <span>{getStickyRotation(selectedNode.euler ? selectedNode.euler[1] : 0).toFixed(0)}°</span>
                     </label>
                     <input 
                       type="range" 
@@ -3924,7 +4207,7 @@ function App() {
                   </div>
                   <div className="flex flex-col gap-1.5 mt-1">
                     <label className="text-xs text-slate-500 flex items-center justify-between font-medium">Z Rotation
-                      <span>{(selectedNode.euler ? selectedNode.euler[2] : 0).toFixed(0)}°</span>
+                      <span>{getStickyRotation(selectedNode.euler ? selectedNode.euler[2] : 0).toFixed(0)}°</span>
                     </label>
                     <input 
                       type="range" 
@@ -4284,7 +4567,11 @@ function App() {
                             max={joint.type === 'slide' ? 20.0 : 360} 
                             step={joint.type === 'slide' ? 0.05 : 1} 
                             value={joint.springref || 0} 
-                            onChange={(e) => updateNodeJoint(selectedNode.id, { springref: parseFloat(e.target.value) })}
+                            onChange={(e) => {
+                              const raw = parseFloat(e.target.value);
+                              const val = joint.type === 'slide' ? raw : getStickyRotation(raw);
+                              updateNodeJoint(selectedNode.id, { springref: val });
+                            }}
                             className="w-full accent-blue-500 cursor-pointer" 
                           />
                         </div>
@@ -4333,9 +4620,11 @@ function App() {
                                 min={isSlide ? -20.0 : -360}
                                 max={isSlide ? 20.0 : 360}
                                 step={isSlide ? 0.05 : 1}
+                                list={!isSlide ? 'rotation-snaps' : undefined}
                                 value={minVal}
                                 onChange={(e) => {
-                                  const val = parseFloat(e.target.value);
+                                  const raw = parseFloat(e.target.value);
+                                  const val = isSlide ? raw : getStickyRotation(raw);
                                   const newMin = Math.min(val, maxVal);
                                   updateNodeJoint(selectedNode.id, { range: [newMin, maxVal] });
                                 }}
@@ -4352,9 +4641,11 @@ function App() {
                                 min={isSlide ? -20.0 : -360}
                                 max={isSlide ? 20.0 : 360}
                                 step={isSlide ? 0.05 : 1}
+                                list={!isSlide ? 'rotation-snaps' : undefined}
                                 value={maxVal}
                                 onChange={(e) => {
-                                  const val = parseFloat(e.target.value);
+                                  const raw = parseFloat(e.target.value);
+                                  const val = isSlide ? raw : getStickyRotation(raw);
                                   const newMax = Math.max(val, minVal);
                                   updateNodeJoint(selectedNode.id, { range: [minVal, newMax] });
                                 }}
@@ -6985,6 +7276,34 @@ const wobble = Math.sin(api.getTime() * 4) * 3;`}
           </div>
         </div>
       )}
+
+      {/* Import STL Modal — mounted only while open so each import starts clean */}
+      {isImportStlModalOpen && (
+      <ImportStlModal
+        isOpen={isImportStlModalOpen}
+        initialFile={droppedImportFile}
+        onClose={() => {
+          setIsImportStlModalOpen(false);
+          setDroppedImportFile(null);
+        }}
+        onImportNode={(newNode) => {
+          const currentNodes = useStore.getState().sceneGraph.nodes || [];
+          useStore.getState().updateScene({ nodes: [...currentNodes, newNode] });
+        }}
+      />
+      )}
+
+      <ExportLaserCutModal
+        isOpen={isLaserCutModalOpen}
+        onClose={() => setIsLaserCutModalOpen(false)}
+        scene={sceneGraph}
+      />
+
+      <ExportContourSliceModal
+        isOpen={isContourSliceModalOpen}
+        onClose={() => setIsContourSliceModalOpen(false)}
+        scene={sceneGraph}
+      />
     </div>
   );
 }

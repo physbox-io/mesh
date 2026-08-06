@@ -4,6 +4,27 @@ export interface MeshData {
   renderVertices: number[];
 }
 
+/**
+ * Smoothly snaps a rotation angle (in degrees) to cardinal values (0, 90, 180, 270, 360, etc.)
+ * using a continuous magnetic attraction curve to eliminate step jumps and slider input traps.
+ */
+export function getStickyRotation(val: number, snapRadius = 1.5, magneticRange = 4.0): number {
+  const targetAngles = [0, 90, 180, 270, 360, -90, -180, -270, -360];
+  for (const target of targetAngles) {
+    const diff = val - target;
+    const absDiff = Math.abs(diff);
+    if (absDiff <= snapRadius) {
+      return target;
+    }
+    if (absDiff < magneticRange) {
+      const t = (absDiff - snapRadius) / (magneticRange - snapRadius);
+      const smoothFactor = t * t * (3 - 2 * t);
+      return target + Math.sign(diff) * (snapRadius + smoothFactor * (magneticRange - snapRadius));
+    }
+  }
+  return val;
+}
+
 export function generatePyramidMeshData(w: number, d: number, h: number): MeshData {
   const hw = w / 2;
   const hd = d / 2;

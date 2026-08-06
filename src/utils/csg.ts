@@ -91,7 +91,7 @@ function geomMatrix(geom: SceneGeom): THREE.Matrix4 {
 // capsule/cylinder geoms may be authored as fromto (two endpoints) instead of
 // pos+size[1]. Reduce that to the centre, the rotation taking local +Z onto the
 // axis, and the half-length — the form the scad emitter wants.
-function fromtoFrame(fromto: number[]): { matrix: THREE.Matrix4; halfLen: number } {
+export function fromtoFrame(fromto: number[]): { matrix: THREE.Matrix4; halfLen: number } {
   const a = new THREE.Vector3(fromto[0], fromto[1], fromto[2]);
   const b = new THREE.Vector3(fromto[3], fromto[4], fromto[5]);
   const dir = new THREE.Vector3().subVectors(b, a);
@@ -955,11 +955,26 @@ export function geomBounds(g: SceneGeom): { min: number[]; max: number[] } | nul
   return { min, max };
 }
 
+/**
+ * How far the compiled body frame is shifted from the source primitives' frame.
+ *
+ * evaluateNodeCsg re-origins a compiled solid on its centre of mass, but only in
+ * X and Y — Z is left alone so a body keeps sitting where it was modelled.
+ * Anything drawn in the source frame (ghost outlines, bounds) has to apply the
+ * same partial shift; subtracting the full centroid drops it by the solid's
+ * height, which is invisible for a shape modelled about the origin and glaring
+ * for one modelled from the ground up.
+ */
+export function csgFrameOffset(node: SceneNode): number[] {
+  const c = node.csgCentroid || [0, 0, 0];
+  return [c[0] || 0, c[1] || 0, 0];
+}
+
 export function positiveBounds(node: SceneNode): { min: number[]; max: number[] } | null {
   const min = [Infinity, Infinity, Infinity];
   const max = [-Infinity, -Infinity, -Infinity];
   let any = false;
-  const csgOff = node.csgCentroid || [0, 0, 0];
+  const csgOff = csgFrameOffset(node);
   for (const g of csgSourceGeoms(node)) {
     if (!isPositive(g)) continue;
     const b = geomBounds(g);

@@ -2605,6 +2605,259 @@ export const booleanShapesPreset: SceneGraph = {
   ],
 };
 
+// ---------------------------------------------------------------------------
+// Birdhouse (Primitives)
+// ---------------------------------------------------------------------------
+//
+// Dimensions are chosen so the model is actually buildable from 3 mm sheet:
+// every panel is a real slab, panels butt edge-to-edge rather than overlapping
+// arbitrarily, and the roof's underside plane passes exactly through the gable's
+// sloping edges. That last part is what lets the laser/CNC exporter find a joint
+// between the roof and the gable ends instead of treating the roof as loose.
+const BH_T = 0.003;             // sheet thickness
+const BH_HALF = 0.06;           // outer half-width of the box (120 mm square)
+const BH_PITCH = 25;            // roof pitch, degrees
+const BH_TAN = Math.tan(BH_PITCH * Math.PI / 180);
+const BH_COS = Math.cos(BH_PITCH * Math.PI / 180);
+// Shoulder height is set so the roof's underside just clears the side walls.
+const BH_SHOULDER = 0.115 + BH_T / 2 / BH_COS;
+const BH_APEX = BH_SHOULDER + BH_HALF * BH_TAN;
+const BH_SLOPE_LEN = BH_HALF / BH_COS;   // apex to shoulder, along the slope
+const BH_OVERHANG = 0.012;
+
+/**
+ * Pentagonal gable wall (rectangle below, roof triangle above) as a prism. The
+ * sloping edges lie on the roof panels' mid-planes so the two interlock.
+ *
+ * Vertices come back in both spaces the app uses: `vertices` is Y-up (what
+ * three.js draws and what MJCF converts from) and `renderVertices` is the Z-up
+ * copy that shares a frame with pos/euler/size.
+ */
+function birdhouseGableMesh(): { vertices: number[]; renderVertices: number[]; faces: number[] } {
+  // Profile in the wall's own plane, counter-clockwise.
+  const profile: [number, number][] = [
+    [-BH_HALF, 0],
+    [BH_HALF, 0],
+    [BH_HALF, BH_SHOULDER],
+    [0, BH_APEX],
+    [-BH_HALF, BH_SHOULDER],
+  ];
+  const n = profile.length;
+  const half = BH_T / 2;
+
+  const renderVertices: number[] = []; // Z-up
+  const vertices: number[] = [];       // Y-up: (x, y, z) -> (x, z, -y)
+  for (const y of [-half, half]) {
+    for (const [x, z] of profile) {
+      renderVertices.push(x, y, z);
+      vertices.push(x, z, -y);
+    }
+  }
+
+  const faces: number[] = [];
+  for (let i = 1; i < n - 1; i++) {
+    faces.push(0, i, i + 1);                    // back face, normal -y
+    faces.push(n, n + i + 1, n + i);            // front face, normal +y
+  }
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n;
+    faces.push(i, i + n, j, i + n, j + n, j);   // side wall of the prism
+  }
+
+  return { vertices, renderVertices, faces };
+}
+
+const birdhouseGable = birdhouseGableMesh();
+
+/** Roof panel: a plate whose mid-plane contains the apex line and the shoulder. */
+function birdhouseRoof(side: -1 | 1): SceneGeom {
+  const len = BH_SLOPE_LEN + BH_OVERHANG;
+  // Centre of the plate, measured down the slope from the apex.
+  const s = len / 2;
+  return {
+    name: side < 0 ? 'roof_left_panel' : 'roof_right_panel',
+    type: 'box',
+    size: [len / 2, BH_HALF - BH_T, BH_T / 2],
+    pos: [side * s * BH_COS, 0, BH_APEX - s * Math.sin(BH_PITCH * Math.PI / 180)],
+    euler: [0, side * BH_PITCH, 0],
+    rgba: [0.65, 0.25, 0.25, 1],
+  };
+}
+
+export const birdhousePreset: SceneGraph = {
+  nodes: [
+    {
+      id: 'birdhouse_root',
+      name: 'birdhouse_root',
+      type: 'body',
+      pos: [0, 0, 0],
+      joints: [],
+      geoms: [],
+      children: [
+        {
+          id: 'base_floor',
+          name: 'Floor Base',
+          type: 'body',
+          // Set 2 mm up from the bottom of the walls: the walls carry the load
+          // to the ground, and the gap leaves the mortised panels enough
+          // material for Tab & Slot to cut real slots rather than open notches.
+          pos: [0, 0, 0.0035],
+          joints: [],
+          geoms: [
+            { name: 'floor_panel', type: 'box', size: [BH_HALF, BH_HALF, BH_T / 2], pos: [0, 0, 0], rgba: [0.72, 0.52, 0.35, 1] }
+          ],
+          children: []
+        },
+        {
+          id: 'front_wall',
+          name: 'Front Wall',
+          type: 'body',
+          pos: [0, BH_HALF - BH_T / 2, 0],
+          joints: [],
+          csgEnabled: true,
+          csgCollision: 'primitives',
+          geoms: [
+            { name: 'front_panel', type: 'mesh', size: [1], dynamic: true, pos: [0, 0, 0], vertices: birdhouseGable.vertices, renderVertices: birdhouseGable.renderVertices, faces: birdhouseGable.faces, rgba: [0.82, 0.62, 0.45, 1] },
+            { name: 'entrance_hole', type: 'cylinder', size: [0.018, 0.01], pos: [0, 0, 0.075], euler: [90, 0, 0], csg: 'difference' }
+          ],
+          children: []
+        },
+        {
+          id: 'back_wall',
+          name: 'Back Wall',
+          type: 'body',
+          pos: [0, -(BH_HALF - BH_T / 2), 0],
+          joints: [],
+          geoms: [
+            { name: 'back_panel', type: 'mesh', size: [1], dynamic: true, pos: [0, 0, 0], vertices: birdhouseGable.vertices, renderVertices: birdhouseGable.renderVertices, faces: birdhouseGable.faces, rgba: [0.82, 0.62, 0.45, 1] }
+          ],
+          children: []
+        },
+        {
+          id: 'left_wall',
+          name: 'Left Wall',
+          type: 'body',
+          // Tucks between the gable ends, and runs from the ground to the eaves.
+          pos: [-(BH_HALF - BH_T / 2), 0, 0.0575],
+          joints: [],
+          geoms: [
+            { name: 'left_panel', type: 'box', size: [BH_T / 2, BH_HALF - BH_T, 0.0575], pos: [0, 0, 0], rgba: [0.78, 0.58, 0.41, 1] }
+          ],
+          children: []
+        },
+        {
+          id: 'right_wall',
+          name: 'Right Wall',
+          type: 'body',
+          pos: [BH_HALF - BH_T / 2, 0, 0.0575],
+          joints: [],
+          geoms: [
+            { name: 'right_panel', type: 'box', size: [BH_T / 2, BH_HALF - BH_T, 0.0575], pos: [0, 0, 0], rgba: [0.78, 0.58, 0.41, 1] }
+          ],
+          children: []
+        },
+        {
+          id: 'roof_left',
+          name: 'Roof Left',
+          type: 'body',
+          pos: [0, 0, 0],
+          joints: [],
+          geoms: [birdhouseRoof(-1)],
+          children: []
+        },
+        {
+          id: 'roof_right',
+          name: 'Roof Right',
+          type: 'body',
+          pos: [0, 0, 0],
+          joints: [],
+          geoms: [birdhouseRoof(1)],
+          children: []
+        }
+      ]
+    }
+  ]
+};
+
+// The parametric twin of birdhousePreset: same dimensions, same joinery logic,
+// but expressed as OpenSCAD so the shape can be driven from the variables at the
+// top. Kept as a hollow shell rather than a solid block so the laser/CNC
+// exporter recovers one panel per wall — it pairs each wall's inner and outer
+// skin into a single sheet of the measured thickness.
+export const birdhouseScadPreset: SceneGraph = {
+  nodes: [
+    {
+      id: 'birdhouse_scad_root',
+      name: 'birdhouse_scad_root',
+      type: 'body',
+      pos: [0, 0, 0],
+      // The mesh is filled in by the OpenSCAD auto-compile on load.
+      geoms: [{ name: 'birdhouse_scad_mesh', type: 'mesh', size: [1], dynamic: true, rgba: [0.82, 0.62, 0.45, 1] }],
+      scad: `// OpenSCAD Parametric Birdhouse
+//
+// Modelled as the seven flat panels it is actually built from, so the
+// laser/CNC export unwraps it into exactly those seven pieces. Change a
+// variable and the joinery follows.
+$fn = 48;
+
+t         = 3;    // sheet thickness (mm)
+half      = 60;   // half the outer width and depth
+eave      = 115;  // top of the side walls
+pitch     = 25;   // roof pitch, degrees
+floor_z   = 2;    // underside of the floor panel
+overhang  = 12;   // how far the roof projects past the gable
+hole_r    = 18;   // entrance hole radius
+hole_z    = 75;   // entrance hole height
+
+// The roof's mid-plane runs through the gable's sloping edge, and its underside
+// just clears the side walls. Everything else follows from that.
+shoulder  = eave + t / 2 / cos(pitch);
+apex      = shoulder + half * tan(pitch);
+slope_len = half / cos(pitch) + overhang;
+
+// Gable end: the full-width wall, peaked. Sits t thick, outer face at y = side.
+module gable(side) {
+  translate([0, side * (half - t / 2), 0]) rotate([90, 0, 0])
+    linear_extrude(height = t, center = true)
+      polygon([[-half, 0], [half, 0], [half, shoulder], [0, apex], [-half, shoulder]]);
+}
+
+// Side wall: tucks between the gable ends and stops at the eaves.
+module side_wall(side) {
+  translate([side * (half - t / 2), 0, eave / 2])
+    cube([t, 2 * (half - t), eave], center = true);
+}
+
+// Roof panel: lies on its mid-plane, pivoted about the apex.
+module roof(side) {
+  translate([0, 0, apex]) rotate([0, side * pitch, 0])
+    translate([side * slope_len / 2, 0, 0])
+      cube([slope_len, 2 * (half - t), t], center = true);
+}
+
+scale(0.001) {                  // model in mm, emit in metres
+  difference() {
+    union() {
+      translate([0, 0, floor_z + t / 2])
+        cube([2 * half, 2 * half, t], center = true);
+      gable(1);
+      gable(-1);
+      side_wall(1);
+      side_wall(-1);
+      roof(1);
+      roof(-1);
+    }
+    // Entrance hole through the front gable.
+    translate([0, half, hole_z]) rotate([90, 0, 0])
+      cylinder(r = hole_r, h = 4 * t, center = true);
+  }
+}`,
+      joints: [],
+      children: []
+    }
+  ]
+};
+
 // Single source of truth for built-in presets. The App's preset dropdown and
 // the MCP bridge's LIST_PRESETS both derive from this map — add a preset here
 // and it appears everywhere. `emoji` is an optional display prefix for UI.
@@ -2732,5 +2985,16 @@ export const PRESETS = {
     name: 'Boolean Cutouts',
     emoji: '💠',
     scene: booleanShapesPreset
+  },
+  birdhouse: {
+    name: 'Birdhouse (Primitives)',
+    emoji: '🐦',
+    scene: birdhousePreset
+  },
+  birdhouse_scad: {
+    name: 'Birdhouse (OpenSCAD)',
+    emoji: '📐',
+    scene: birdhouseScadPreset
   }
 };
+
