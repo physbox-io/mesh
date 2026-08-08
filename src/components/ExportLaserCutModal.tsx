@@ -539,7 +539,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
               >
                 <div className="flex items-center space-x-1.5">
                   <NumberInput
-                    step="10" min={10} max={5000}
+                    step="10" min={50} max={5000}
                     value={sheetWidthMm}
                     onChange={setSheetWidthMm}
                     className={`${inputClass} px-2`}
@@ -547,7 +547,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                   />
                   <span className="text-xs font-medium text-slate-400">&times;</span>
                   <NumberInput
-                    step="10" min={10} max={5000}
+                    step="10" min={50} max={5000}
                     value={sheetHeightMm}
                     onChange={setSheetHeightMm}
                     className={`${inputClass} px-2`}
