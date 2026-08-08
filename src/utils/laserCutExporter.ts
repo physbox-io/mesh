@@ -1280,7 +1280,16 @@ function detectJoints(panels: LaserPanel[], options: LaserCutOptions): RawJoint[
       // a panel can also be set into its neighbour's face (a floor sitting above
       // the bottom of its walls). Allowing a further thickness covers that
       // without admitting panels that merely cross each other far from an edge.
-      const tol = reach + Math.max(tA, tB, stockMm) + 0.6;
+      //
+      // Measured against the model's own slabs, never the stock. Whether two
+      // panels touch is a fact about the drawing; the stock only decides how deep
+      // the resulting fingers are cut. Sizing the search off a stock thicker than
+      // the model widens it until a roof sweeping over a wall lands inside the
+      // tolerance and sprouts fingers along an edge it never meets — which is
+      // exactly what a scaled-down cut does, shrinking the model away from a
+      // fixed sheet thickness.
+      const modelT = Math.max(tA, tB);
+      const tol = (modelT / 2) * invSin + modelT + 0.6;
       const mA = matchPanelEdgeToLine(A, p0, dirN, tol);
       if (!mA) continue;
       const mB = matchPanelEdgeToLine(B, p0, dirN, tol);
@@ -1328,10 +1337,33 @@ function detectJoints(panels: LaserPanel[], options: LaserCutOptions): RawJoint[
  * joint end, which panel needs to own the end cell so that its recesses on the
  * two edges never run into each other. A `null` means either panel will do.
  */
+/** What each end of a joint does about the corner it runs into. */
+interface CornerPlan {
+  lo: number | null;
+  hi: number | null;
+  insetLo: number;
+  insetHi: number;
+  /**
+   * Per end, per side: whether that panel's inset band should be pared back to
+   * the mate's near face instead of left at full width.
+   *
+   * A pull-back leaves the panel's plain edge running into the corner. Where the
+   * neighbouring cells recede past that edge — which is what happens once both
+   * panels want the corner and neither can have it — the untouched band is left
+   * standing proud of them: a small block, joined to nothing, that has to be
+   * snapped off the finished part. Cutting the band to the same depth as the
+   * cells beside it merges the two into one straight run and the block is never
+   * cut in the first place. Only sound where receding is safe at all, so an
+   * obtuse corner (which a recess would pare to a feather) keeps its material.
+   */
+  trimLo: [boolean, boolean];
+  trimHi: [boolean, boolean];
+}
+
 function resolveCornerOwners(
   panels: LaserPanel[],
   joints: RawJoint[]
-): { lo: number | null; hi: number | null; insetLo: number; insetHi: number }[] {
+): CornerPlan[] {
   // Index joints by the panel edge they sit on.
   const byPanelEdge = new Map<string, RawJoint[]>();
   for (const j of joints) {
@@ -1431,6 +1463,8 @@ function resolveCornerOwners(
     prefer: 'own' | 'recede' | null;
     softInset: number;
     hardInset: number;
+    /** Whether receding at this corner would pare it to a feather. */
+    recBad: boolean;
   }
 
   const cornerNeed = (j: RawJoint, side: 0 | 1, end: 'lo' | 'hi'): CornerNeed => {
@@ -1472,17 +1506,19 @@ function resolveCornerOwners(
         prefer: 'recede',
         softInset: recBad ? recH : 0,
         hardInset: Math.max(tabCrit, recBad ? recH : 0),
+        recBad,
       };
     }
     if (recBad || collides) {
-      return { prefer: 'own', softInset: 0, hardInset: recH };
+      return { prefer: 'own', softInset: 0, hardInset: recH, recBad };
     }
-    return { prefer: null, softInset: 0, hardInset: 0 };
+    return { prefer: null, softInset: 0, hardInset: 0, recBad };
   };
 
   return joints.map(j => {
-    const result: { lo: number | null; hi: number | null; insetLo: number; insetHi: number } = {
+    const result: CornerPlan = {
       lo: null, hi: null, insetLo: 0, insetHi: 0,
+      trimLo: [false, false], trimHi: [false, false],
     };
     for (const end of ['lo', 'hi'] as const) {
       const needA = cornerNeed(j, 0, end);
@@ -1506,6 +1542,15 @@ function resolveCornerOwners(
 
       if (end === 'lo') result.insetLo = inset;
       else result.insetHi = inset;
+
+      // Only a deadlock strands a band with recesses on both sides of it; a
+      // pull-back either panel asked for on its own has a reason to keep the
+      // material there.
+      if (deadlocked && inset > 0) {
+        const trim: [boolean, boolean] = [!needA.recBad, !needB.recBad];
+        if (end === 'lo') result.trimLo = trim;
+        else result.trimHi = trim;
+      }
 
       if (!deadlocked) {
         if (aOwns) result[end] = j.ia;
@@ -1541,7 +1586,6 @@ function buildJointWork(
   joints.forEach((j, jointIdx) => {
     const { ia, ib, mA, mB, offA, offB, onA, onB, tA, tB } = j;
     const owner = owners[jointIdx];
-
     const lo = j.lo + owner.insetLo;
     const hi = j.hi - owner.insetHi;
     const span = hi - lo;
@@ -1592,6 +1636,48 @@ function buildJointWork(
         depth,
       });
     };
+
+    // Pare back the bands the joint pulled away from its corners, so the outline
+    // runs straight from the corner into the first cell rather than stepping out
+    // over a block that mates with nothing. In Tab & Slot the female's edge is
+    // straight anyway — there is no recess beside its band to strand it, and
+    // notching it here would cut into the panel for no reason.
+    /** Whether `side`'s panel keeps the material in cell `k` rather than receding. */
+    const sideOwnsCell = (side: 0 | 1, k: number): boolean => {
+      const even = k % 2 === 0;
+      if (useSlot) {
+        const maleOwns = even === maleOwnsCell;
+        return (side === 0 ? ia : ib) === maleIdx ? maleOwns : !maleOwns;
+      }
+      const aOwns = even === aOwnsEvenCells;
+      return side === 0 ? aOwns : !aOwns;
+    };
+
+    for (const end of ['lo', 'hi'] as const) {
+      const trim = end === 'lo' ? owner.trimLo : owner.trimHi;
+      const k = end === 'lo' ? 0 : cells - 1;
+      for (const side of [0, 1] as const) {
+        if (!trim[side]) continue;
+        // Only the panel that recedes in the end cell gives up its band. Doing
+        // it to both would cut the corner away twice over; doing it to the one
+        // that keeps the cell would strand its tab on a pared-back edge. This
+        // way exactly one panel holds the contested corner, and its band is
+        // simply part of the tab beside it.
+        if (sideOwnsCell(side, k)) continue;
+        const p = jointPanel(j, side);
+        if (useSlot && p.idx === femaleIdx) continue;
+        // Runs from the panel's own corner — not merely from where the two
+        // edges stop overlapping — to where the receding cell starts, half a
+        // kerf inboard of the nominal boundary. Stopping anywhere short leaves
+        // a tooth of the old block behind.
+        push(
+          p.idx, p.m,
+          end === 'lo' ? p.m.s0 : hi - widthHalf,
+          end === 'lo' ? lo + widthHalf : p.m.s1,
+          p.off - depthHalf
+        );
+      }
+    }
 
     for (let k = 0; k < cells; k++) {
       const s0 = lo + k * step;
@@ -1731,12 +1817,23 @@ function applyEdgeFeatures(poly: Point2D[], features: EdgeFeature[]): Point2D[] 
       if (len - tb < MIN_FEATURE_MM) tb = len;
       if (tb - ta < MIN_FEATURE_MM) continue;
 
-      if (ta > cursor + 1e-9) runs.push({ t0: cursor, t1: ta, depth: 0 });
-      runs.push({ t0: ta, t1: tb, depth: f.depth });
+      // Neighbouring stretches at the same depth are one stretch. Keeping them
+      // apart emits a step of zero height, and the pair of points either side of
+      // it reads as a sub-kerf segment in the finished path.
+      const add = (t0: number, t1: number, depth: number) => {
+        const prev = runs[runs.length - 1];
+        if (prev && Math.abs(prev.depth - depth) < 1e-9) prev.t1 = t1;
+        else runs.push({ t0, t1, depth });
+      };
+
+      if (ta > cursor + 1e-9) add(cursor, ta, 0);
+      add(ta, tb, f.depth);
       cursor = tb;
     }
     if (cursor < len - 1e-9 || runs.length === 0) {
-      runs.push({ t0: cursor, t1: len, depth: 0 });
+      const prev = runs[runs.length - 1];
+      if (prev && Math.abs(prev.depth) < 1e-9) prev.t1 = len;
+      else runs.push({ t0: cursor, t1: len, depth: 0 });
     }
 
     profiles.push({ origin: e0, u, m, len, runs });
@@ -2072,7 +2169,20 @@ function applyJointsToPanels(panels: LaserPanel[], options: LaserCutOptions): st
   const stockMm = options.materialThickness * 1000;
   if (modelled.length > 0) {
     const typical = modelled[Math.floor(modelled.length / 2)];
-    if (Math.abs(typical - stockMm) > 0.25 * stockMm) {
+    if (stockMm > 1.5 * typical) {
+      // Past this point the stock is thicker than the gap the model leaves for
+      // it, so neighbouring panels overlap in space. Every joint then wants the
+      // material at the corner it shares with the next one, and both keep it —
+      // the small proud blocks that have to be snapped off after cutting. It is
+      // the model that has to change, so name the thickness that would suit it.
+      warnings.push(
+        `The model is drawn with ${typical.toFixed(1)} mm panels but joints are cut for ` +
+        `${stockMm.toFixed(1)} mm stock — too thick for the spacing the model leaves. ` +
+        `Panels will overlap where they meet, and corners come out with small proud ` +
+        `blocks that have to be broken off. Cut this from about ${typical.toFixed(1)} mm ` +
+        `stock, or scale the model up until it suits ${stockMm.toFixed(1)} mm.`
+      );
+    } else if (Math.abs(typical - stockMm) > 0.25 * stockMm) {
       warnings.push(
         `The model is drawn with ${typical.toFixed(1)} mm panels but joints are cut for ` +
         `${stockMm.toFixed(1)} mm stock. The joints themselves will fit, but panel spacing ` +
@@ -2111,6 +2221,11 @@ function clonePanels(panels: LaserPanel[]): LaserPanel[] {
 
 function scalePanels(panels: LaserPanel[], s: number): void {
   for (const panel of panels) {
+    // The slab shrinks with everything else. Leaving it at full size describes a
+    // model that no longer exists — one whose panels are thicker than the box
+    // they enclose — and every test that asks "do these two panels butt?" or
+    // "does the model match the stock?" then reads the wrong number.
+    panel.thickness *= s;
     for (const pt of panel.outerPolygon2D) {
       pt.x *= s;
       pt.y *= s;

@@ -451,6 +451,91 @@ describe('Laser cut corner quality', () => {
     }
   }
 
+  it('does not joint panels that only pass near each other once scaled down', () => {
+    // Auto-scale shrinks the model but not the sheet it is cut from, so a roof
+    // sweeping over a side wall ends up within a stock thickness of it. Sizing
+    // the edge search off the stock rather than the model let that near miss
+    // register as a joint, and the wall's top edge came out jagged where two
+    // unrelated joints fought over it.
+    const jointedNames = (opts: Partial<typeof DEFAULT_LASER_OPTIONS>) => {
+      const result = exportLaserCutSvg(birdhousePreset, { ...DEFAULT_LASER_OPTIONS, ...opts });
+      expect(result.success).toBe(true);
+      return result;
+    };
+
+    const full = jointedNames({});
+    const shrunk = jointedNames({
+      sheetWidth: 0.15, sheetHeight: 0.15, maxSheets: 1, autoScale: true,
+    });
+    expect(shrunk.scaleFactor).toBeLessThan(0.5);
+
+    // The side wall meets the floor and both gables — never a roof panel. Its
+    // top edge is a straight run, whatever the scale.
+    for (const result of [full, shrunk]) {
+      const wall = result.panels!.find(p => p.name === 'left_panel')!;
+      const topY = Math.max(...wall.outerPolygon2D.map(p => p.y));
+      const onTop = wall.outerPolygon2D.filter(p => topY - p.y < 0.01);
+      expect(onTop.length, `left_panel top edge at scale ${result.scaleFactor}`).toBe(2);
+    }
+  });
+
+  it('strands no blocks at the corners when the cut is scaled down', () => {
+    // Scaling shrinks the model but not the stock, so every joint ends up
+    // wanting the corner it shares with the next one. Where neither can have it
+    // both used to keep their material, leaving a small block standing proud of
+    // the recesses either side — joined to nothing, and snapped off by hand
+    // after cutting. Shrinking must not invent outward steps the full-size cut
+    // does not have (the gable's obtuse roof-line corners are one, by design).
+    const narrowSteps = (poly: { x: number; y: number }[], maxWidth: number) => {
+      const n = poly.length;
+      const turn = (a: typeof poly[0], b: typeof poly[0], c: typeof poly[0]) =>
+        (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x);
+      let count = 0;
+      for (let i = 0; i < n; i++) {
+        const a = poly[(i - 1 + n) % n], b = poly[i];
+        const c = poly[(i + 1) % n], d = poly[(i + 2) % n];
+        const w = Math.hypot(c.x - b.x, c.y - b.y);
+        // Two convex turns a short run apart: a tooth sticking out of the edge.
+        if (w > 1e-6 && w <= maxWidth && turn(a, b, c) > 1e-6 && turn(b, c, d) > 1e-6) count++;
+      }
+      return count;
+    };
+
+    const stepsByPanel = (opts: Partial<typeof DEFAULT_LASER_OPTIONS>) => {
+      const result = exportLaserCutSvg(birdhousePreset, { ...DEFAULT_LASER_OPTIONS, ...opts });
+      expect(result.success).toBe(true);
+      const width = DEFAULT_LASER_OPTIONS.materialThickness * 1000 * 1.2;
+      return new Map(result.panels!.map(p => [p.name, narrowSteps(p.outerPolygon2D, width)]));
+    };
+
+    const full = stepsByPanel({});
+    const shrunk = stepsByPanel({
+      sheetWidth: 0.15, sheetHeight: 0.15, maxSheets: 1, autoScale: true,
+    });
+
+    expect([...shrunk.keys()].sort()).toEqual([...full.keys()].sort());
+    for (const [name, count] of shrunk) {
+      expect(count, `${name} gained corner blocks when scaled down`)
+        .toBeLessThanOrEqual(full.get(name)!);
+    }
+  });
+
+  it('warns that stock thicker than the scaled model leaves blocks at the corners', () => {
+    const shrunk = exportLaserCutSvg(birdhousePreset, {
+      ...DEFAULT_LASER_OPTIONS,
+      sheetWidth: 0.15, sheetHeight: 0.15, maxSheets: 1, autoScale: true,
+    });
+    expect(shrunk.warnings!.some(w => /proud\s+blocks/.test(w))).toBe(true);
+
+    // Matching the stock to the shrunken model is the way out, and it cuts clean.
+    const matched = exportLaserCutSvg(birdhousePreset, {
+      ...DEFAULT_LASER_OPTIONS,
+      sheetWidth: 0.15, sheetHeight: 0.15, maxSheets: 1, autoScale: true,
+      materialThickness: 0.0009,
+    });
+    expect(matched.warnings!.some(w => /proud\s+blocks/.test(w))).toBe(false);
+  });
+
   it('cuts joints right up to a square corner but stops short of an obtuse one', () => {
     const jointed = exportLaserCutSvg(birdhousePreset, {
       ...DEFAULT_LASER_OPTIONS,

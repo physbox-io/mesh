@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { X, Download, AlertCircle, Layers, Scissors, Cpu, Play, Square, Home, ShieldAlert, Navigation, RefreshCw, Info } from 'lucide-react';
+import { X, Download, AlertCircle, Layers, Scissors, Cpu, Play, Square, Home, ShieldAlert, Navigation, RefreshCw, Info, ChevronRight } from 'lucide-react';
 import type { SceneGraph } from '../types/scene';
 import { exportLaserCutSvg, type LaserCutOptions } from '../utils/laserCutExporter';
 import { generateLaserCutGcode, DEFAULT_GCODE_OPTIONS } from '../utils/gcodeExporter';
@@ -72,6 +72,32 @@ function Field({
   );
 }
 
+/**
+ * Collapsed tail of a section, holding the controls whose defaults are already
+ * right for most jobs. The point is that a first-time user can read a section
+ * top to bottom without meeting kerf compensation or GRBL's `$30`.
+ */
+function Advanced({ children }: { children: React.ReactNode }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="pt-3 border-t border-slate-200 dark:border-slate-800">
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        aria-expanded={open}
+        className="flex items-center space-x-1 text-[11px] font-bold uppercase tracking-wider text-slate-400
+                   dark:text-slate-500 hover:text-amber-600 dark:hover:text-amber-400 cursor-pointer transition-colors"
+      >
+        <ChevronRight className={`w-3.5 h-3.5 transition-transform ${open ? 'rotate-90' : ''}`} />
+        <span>Advanced</span>
+      </button>
+      {open && (
+        <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-4">{children}</div>
+      )}
+    </div>
+  );
+}
+
 function Segmented<T extends string>({
   value, options, onChange,
 }: { value: T; options: readonly (readonly [T, string])[]; onChange: (v: T) => void }) {
@@ -95,6 +121,67 @@ function Segmented<T extends string>({
   );
 }
 
+/**
+ * Numeric field that lets you type.
+ *
+ * Clamping on every keystroke means the box can never hold a value on its way to
+ * a good one: emptying it snaps back to a default, and typing "150" into a field
+ * with a minimum of 50 goes through "1", which becomes "1000" before the "5" is
+ * even typed. So the box keeps whatever text is in it, and the value only leaves
+ * here when it is a number in range. Blur settles it — an empty or out-of-range
+ * box shows the value that is actually in force, which is the one that was there
+ * before the edit started.
+ */
+function NumberInput({
+  value, onChange, min, max, integer, ...rest
+}: {
+  value: number;
+  onChange: (v: number) => void;
+  min?: number;
+  max?: number;
+  integer?: boolean;
+} & Omit<React.InputHTMLAttributes<HTMLInputElement>, 'value' | 'onChange' | 'min' | 'max' | 'type'>) {
+  const [text, setText] = useState(String(value));
+  const [editing, setEditing] = useState(false);
+  const [seen, setSeen] = useState(value);
+
+  // Follow the value while the box is not being typed into, so a change made
+  // elsewhere (the max S-value clamping the power, say) still shows up.
+  if (!editing && value !== seen) {
+    setSeen(value);
+    setText(String(value));
+  }
+
+  const parse = (raw: string): number | null => {
+    const n = integer ? parseInt(raw, 10) : parseFloat(raw);
+    if (!Number.isFinite(n)) return null;
+    if (min !== undefined && n < min) return null;
+    if (max !== undefined && n > max) return null;
+    return n;
+  };
+
+  return (
+    <input
+      {...rest}
+      type="number"
+      min={min}
+      max={max}
+      value={text}
+      onFocus={() => setEditing(true)}
+      onChange={(e) => {
+        setText(e.target.value);
+        const n = parse(e.target.value);
+        if (n !== null) onChange(n);
+      }}
+      onBlur={() => {
+        setEditing(false);
+        setSeen(value);
+        setText(String(value));
+      }}
+    />
+  );
+}
+
 export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
   isOpen,
   onClose,
@@ -108,7 +195,6 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
   const [bitDiameterMm, setBitDiameterMm] = useState<number>(3.175);
   const [tabOverhangMm, setTabOverhangMm] = useState<number>(0);
   const [jointClearanceMm, setJointClearanceMm] = useState<number>(0);
-  const [sheetPreset, setSheetPreset] = useState<'600x400' | '300x300' | '150x150' | 'custom'>('600x400');
   const [sheetWidthMm, setSheetWidthMm] = useState<number>(600);
   const [sheetHeightMm, setSheetHeightMm] = useState<number>(400);
   const [autoScale, setAutoScale] = useState<boolean>(false);
@@ -119,7 +205,9 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
   // G-Code & WebSerial States
   const [machineMode, setMachineMode] = useState<'laser' | 'cnc'>('laser');
   const [cutFeedrate, setCutFeedrate] = useState<number>(1200);
-  const [laserPower, setLaserPower] = useState<number>(1000);
+  const [laserMaxPower, setLaserMaxPower] = useState<number>(DEFAULT_GCODE_OPTIONS.laserMaxPower);
+  const [laserPower, setLaserPower] = useState<number>(DEFAULT_GCODE_OPTIONS.laserPower);
+  const [laserPasses, setLaserPasses] = useState<number>(1);
   const [machineState, setMachineState] = useState<MachineState>(webSerialManager.getState());
 
   useEffect(() => {
@@ -128,18 +216,13 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
     return () => unsub();
   }, [isOpen]);
 
-  const handleSheetPresetChange = (preset: '600x400' | '300x300' | '150x150' | 'custom') => {
-    setSheetPreset(preset);
-    if (preset === '600x400') {
-      setSheetWidthMm(600);
-      setSheetHeightMm(400);
-    } else if (preset === '300x300') {
-      setSheetWidthMm(300);
-      setSheetHeightMm(300);
-    } else if (preset === '150x150') {
-      setSheetWidthMm(150);
-      setSheetHeightMm(150);
-    }
+  // $30 is a machine setting, not a power change: retarget the S-value so the
+  // percentage the user dialled in survives the switch.
+  const handleLaserMaxPowerChange = (next: number) => {
+    const ceiling = Math.max(1, next);
+    const fraction = laserPower / Math.max(1, laserMaxPower);
+    setLaserMaxPower(ceiling);
+    setLaserPower(Math.max(0, Math.min(ceiling, Math.round(fraction * ceiling))));
   };
 
   // Compute laser/cnc 2D panel export result
@@ -173,10 +256,12 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
       machineMode,
       cutFeedrate,
       laserPower,
+      laserMaxPower,
+      laserPasses,
       cutDepthZ: materialThicknessMm,
       zStepdown: Math.min(materialThicknessMm, 3.0),
     });
-  }, [exportResult, machineMode, cutFeedrate, laserPower, materialThicknessMm]);
+  }, [exportResult, machineMode, cutFeedrate, laserPower, laserMaxPower, laserPasses, materialThicknessMm]);
 
   // The sheet SVG is written at physical size — a 600 mm sheet is far wider than
   // the modal — so the preview is scaled to the panel instead of being dragged
@@ -198,19 +283,6 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
     const link = document.createElement('a');
     link.href = url;
     link.download = `laser_cnc_export_${jointMode}${cornerRelief === 'none' ? '' : `_${cornerRelief}`}.svg`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
-  };
-
-  const handleDownloadGcode = () => {
-    if (!gcodeResult || !gcodeResult.success || !gcodeResult.gcode) return;
-    const blob = new Blob([gcodeResult.gcode], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `physbox_cut_${machineMode}_${jointMode}.nc`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -247,10 +319,10 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
             </div>
             <div>
               <h2 className="text-base sm:text-lg font-bold text-slate-800 dark:text-slate-100">
-                Export to Laser / CNC (SVG &amp; G-Code)
+                Export to Laser / CNC
               </h2>
               <p className="hidden sm:block text-xs text-slate-500 dark:text-slate-400">
-                Unwrap 3D panel faces into 2D cut patterns &amp; stream live G-code directly over WebSerial USB (GRBL / Marlin)
+                Unwrap 3D panel faces into 2D cut patterns — download the SVG, or cut straight from here over WebSerial USB (GRBL / Marlin)
               </p>
             </div>
           </div>
@@ -285,10 +357,10 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                 label="Thickness (mm)"
                 hint="Thickness of the stock you are actually cutting. Finger length, slot depth and CNC cut depth are all derived from it."
               >
-                <input
-                  type="number" step="0.5" min="0.5" max="50"
+                <NumberInput
+                  step="0.5" min={0.5} max={50}
                   value={materialThicknessMm}
-                  onChange={(e) => setMaterialThicknessMm(parseFloat(e.target.value) || 3.0)}
+                  onChange={setMaterialThicknessMm}
                   className={inputClass}
                 />
               </Field>
@@ -297,40 +369,72 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                 label="Feedrate (mm/m)"
                 hint="How fast the head travels while cutting, in mm per minute. Slower burns/cuts deeper; it also sets the estimated job time."
               >
-                <input
-                  type="number" step="100" min="100" max="10000"
+                <NumberInput
+                  step="100" min={100} max={10000} integer
                   value={cutFeedrate}
-                  onChange={(e) => setCutFeedrate(parseInt(e.target.value) || 1200)}
+                  onChange={setCutFeedrate}
                   className={inputClass}
                 />
               </Field>
 
               <Field
                 label="Laser Power"
-                hint="Beam power written as GRBL S-value, 0–1000 (S1000 = full power). Ignored on a CNC router."
+                hint={`Beam power as a GRBL S-value — currently ${Math.round((laserPower / Math.max(1, laserMaxPower)) * 100)}% of this machine's S${laserMaxPower} maximum. Ignored on a CNC router.`}
               >
-                <input
-                  type="number" step="50" min="10" max="1000"
+                <NumberInput
+                  step={laserMaxPower >= 10000 ? 500 : 50} min={0} max={laserMaxPower} integer
                   disabled={machineMode !== 'laser'}
                   value={laserPower}
-                  onChange={(e) => setLaserPower(parseInt(e.target.value) || 1000)}
+                  onChange={setLaserPower}
                   className={inputClass}
                 />
               </Field>
 
               <Field
-                label="Kerf (mm)"
+                label="Passes"
                 hintAlign="end"
-                hint="Width of material the beam or bit removes. Cut paths are offset by half of it so parts come out at their drawn size."
+                hint="How many times the laser retraces each cut path. Raise it when one pass scores but does not cut through; slowing the feedrate is the other lever."
               >
-                <input
-                  type="number" step="0.05" min="0.00" max="2.0"
-                  value={kerfMm}
-                  onChange={(e) => setKerfMm(parseFloat(e.target.value) || 0.15)}
+                <NumberInput
+                  step="1" min={1} max={20} integer
+                  disabled={machineMode !== 'laser'}
+                  value={laserPasses}
+                  onChange={setLaserPasses}
                   className={inputClass}
                 />
               </Field>
             </div>
+
+            <Advanced>
+              <Field
+                className="lg:col-span-2"
+                label="Max S-value ($30)"
+                hint="Your controller's maximum spindle/laser S-value. Most diode boards ship 10000; stock GRBL is 1000. Getting it too low is what makes a strong laser act weak — send S1000 to a 10000 machine and you get 10% power. Run $$ on the machine and match its $30 line."
+              >
+                <select
+                  disabled={machineMode !== 'laser'}
+                  value={laserMaxPower}
+                  onChange={(e) => handleLaserMaxPowerChange(parseInt(e.target.value) || 10000)}
+                  className={`${inputClass} font-sans cursor-pointer`}
+                >
+                  <option value={10000}>10000 (most diode boards)</option>
+                  <option value={1000}>1000 (stock GRBL)</option>
+                  <option value={255}>255</option>
+                </select>
+              </Field>
+
+              <Field
+                label="Kerf (mm)"
+                hint="Width of material the beam or bit removes. Cut paths are offset by half of it so parts come out at their drawn size."
+              >
+                <NumberInput
+                  step="0.05" min={0} max={2.0}
+                  value={kerfMm}
+                  onChange={setKerfMm}
+                  className={inputClass}
+                />
+              </Field>
+            </Advanced>
           </div>
 
           {/* Joints */}
@@ -350,40 +454,47 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
               </Field>
 
               <Field
+                className="lg:col-span-3"
+                hintAlign="end"
                 label="Tab Width (mm)"
                 hint="Nominal width of a single finger along the joint. Wider means fewer, chunkier fingers; narrower gives more glue area but more cutting."
               >
-                <input
-                  type="number" step="1" min="3" max="50"
+                <NumberInput
+                  step="1" min={3} max={50}
                   disabled={jointMode === 'glue'}
                   value={fingerWidthMm}
-                  onChange={(e) => setFingerWidthMm(parseFloat(e.target.value) || 10.0)}
+                  onChange={setFingerWidthMm}
                   className={inputClass}
                 />
               </Field>
+            </div>
 
+            <Advanced>
               <Field
+                className="lg:col-span-3"
                 label="Joint Fit (mm)"
                 hint="Fit adjustment across each finger. Negative makes tabs wider than their slots for a press fit; positive leaves clearance for glue or a loose fit."
               >
-                <input
-                  type="number" step="0.05" min="-1" max="1"
+                <NumberInput
+                  step="0.05" min={-1} max={1}
                   disabled={jointMode === 'glue'}
                   value={jointClearanceMm}
-                  onChange={(e) => setJointClearanceMm(parseFloat(e.target.value) || 0)}
+                  onChange={setJointClearanceMm}
                   className={inputClass}
                 />
               </Field>
 
               <Field
+                className="lg:col-span-3"
+                hintAlign="end"
                 label="Overhang (mm)"
                 hint="Extra tab length past flush. At 0 a tab finishes level with the mating panel's outer face; raising it leaves tabs proud so they can be sanded back."
               >
-                <input
-                  type="number" step="0.5" min="0" max="20"
+                <NumberInput
+                  step="0.5" min={0} max={20}
                   disabled={jointMode === 'glue'}
                   value={tabOverhangMm}
-                  onChange={(e) => setTabOverhangMm(Math.max(0, parseFloat(e.target.value) || 0))}
+                  onChange={setTabOverhangMm}
                   className={inputClass}
                 />
               </Field>
@@ -406,15 +517,15 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                 label="Bit Ø (mm)"
                 hint="Diameter of the end mill. It sets how far the relief cuts have to reach into each inside corner. Only read when corner relief is on."
               >
-                <input
-                  type="number" step="0.1" min="0.1"
+                <NumberInput
+                  step="0.1" min={0.1} max={50}
                   disabled={cornerRelief === 'none'}
                   value={bitDiameterMm}
-                  onChange={(e) => setBitDiameterMm(Math.max(0.1, parseFloat(e.target.value) || 0.1))}
+                  onChange={setBitDiameterMm}
                   className={inputClass}
                 />
               </Field>
-            </div>
+            </Advanced>
           </div>
 
           {/* Sheet & nesting */}
@@ -423,95 +534,59 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-4">
               <Field
                 className="lg:col-span-2"
-                label="Sheet Preset"
-                hint="Common bed sizes. Picking one fills in the width and height below; typing your own switches this to Custom."
+                label="Sheet Size (mm)"
+                hint="Usable cutting area of one sheet of stock, width by height. Panels are nested left to right; when a row no longer fits, nesting starts a new sheet below."
               >
-                <select
-                  value={sheetPreset}
-                  onChange={(e) => handleSheetPresetChange(e.target.value as any)}
-                  className={`${inputClass} font-sans cursor-pointer`}
-                >
-                  <option value="600x400">600 x 400 mm (Standard)</option>
-                  <option value="300x300">300 x 300 mm (K40 / Small)</option>
-                  <option value="150x150">150 x 150 mm (Micro)</option>
-                  <option value="custom">Custom Size</option>
-                </select>
+                <div className="flex items-center space-x-1.5">
+                  <NumberInput
+                    step="10" min={10} max={5000}
+                    value={sheetWidthMm}
+                    onChange={setSheetWidthMm}
+                    className={`${inputClass} px-2`}
+                    aria-label="Sheet width in mm"
+                  />
+                  <span className="text-xs font-medium text-slate-400">&times;</span>
+                  <NumberInput
+                    step="10" min={10} max={5000}
+                    value={sheetHeightMm}
+                    onChange={setSheetHeightMm}
+                    className={`${inputClass} px-2`}
+                    aria-label="Sheet height in mm"
+                  />
+                </div>
               </Field>
 
               <Field
-                label="Sheet W (mm)"
-                hint="Usable cutting width of one sheet. Panels are nested left to right within it."
+                className="lg:col-span-2"
+                label="Auto-Scale Mode"
+                hint="Manual keeps the model at the scale you set. Auto-Fit searches for the largest scale whose finished cut patterns — joints included — still land within the sheet limit."
               >
-                <input
-                  type="number" step="10" min="50" max="5000"
-                  value={sheetWidthMm}
-                  onChange={(e) => {
-                    setSheetWidthMm(Math.max(10, parseFloat(e.target.value) || 100));
-                    setSheetPreset('custom');
-                  }}
-                  className={inputClass}
-                />
-              </Field>
-
-              <Field
-                label="Sheet H (mm)"
-                hintAlign="end"
-                hint="Usable cutting depth of one sheet. When a row no longer fits, the nesting starts a new sheet below."
-              >
-                <input
-                  type="number" step="10" min="50" max="5000"
-                  value={sheetHeightMm}
-                  onChange={(e) => {
-                    setSheetHeightMm(Math.max(10, parseFloat(e.target.value) || 100));
-                    setSheetPreset('custom');
-                  }}
-                  className={inputClass}
+                <Segmented
+                  value={autoScale ? 'auto' : 'manual'}
+                  onChange={(v) => setAutoScale(v === 'auto')}
+                  options={[['manual', 'Manual'], ['auto', 'Auto-Fit']] as const}
                 />
               </Field>
 
               <Field
                 className="lg:col-span-2"
                 hintAlign="end"
-                label="Annotations"
-                hint="What the SVG carries besides cut lines. Labels and sheet outlines help you sort parts, but they are engraved/drawn — strip them to Cut paths only before sending real material."
-              >
-                <Segmented
-                  value={annotations}
-                  onChange={setAnnotations}
-                  options={[['all', 'Labels'], ['sheets', 'Outlines'], ['none', 'Cuts only']] as const}
-                />
-              </Field>
-            </div>
-
-            <div className="pt-3 border-t border-slate-200 dark:border-slate-800 grid grid-cols-1 sm:grid-cols-3 gap-4">
-              <Field
-                label="Auto-Scale Mode"
-                hint="Manual keeps the model at the scale you set. Auto-Fit searches for the largest scale whose finished cut patterns — joints included — still land within the sheet limit below."
-              >
-                <Segmented
-                  value={autoScale ? 'auto' : 'manual'}
-                  onChange={(v) => setAutoScale(v === 'auto')}
-                  options={[['manual', 'Manual / Off'], ['auto', 'Auto-Fit to Sheet(s)']] as const}
-                />
-              </Field>
-
-              <Field
                 label="Max Sheet Limit"
                 hint="How many sheets of stock the job may use. Auto-Fit shrinks the model until the nested parts fit within this many sheets."
               >
                 <div className="flex items-center space-x-2">
-                  <input
-                    type="number" min="1" max="20" step="1"
+                  <NumberInput
+                    min={1} max={20} step="1" integer
                     disabled={!autoScale}
                     value={maxSheets}
-                    onChange={(e) => setMaxSheets(Math.max(1, parseInt(e.target.value) || 1))}
-                    className={inputClass}
+                    onChange={setMaxSheets}
+                    className={`${inputClass} px-2`}
                   />
                   <span className="text-xs text-slate-500 font-medium whitespace-nowrap">sheet(s)</span>
                 </div>
               </Field>
 
-              <div>
+              <div className="flex flex-col min-w-0 lg:col-span-3">
                 <div className="group relative flex justify-between items-center mb-1.5">
                   <div className="flex items-center space-x-1">
                     <label className={labelClass}>Scale Factor ({customScalePct}%)</label>
@@ -527,25 +602,105 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                     </span>
                   )}
                 </div>
-                <div className="flex items-center space-x-2">
-                  <input
-                    type="range" min="10" max="200" step="5"
-                    disabled={autoScale}
-                    value={customScalePct}
-                    onChange={(e) => setCustomScalePct(parseInt(e.target.value) || 100)}
-                    className="flex-1 h-1.5 bg-slate-300 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-amber-500 disabled:opacity-40"
-                  />
-                  <input
-                    type="number" min="10" max="200" step="5"
-                    disabled={autoScale}
-                    value={customScalePct}
-                    onChange={(e) => setCustomScalePct(Math.max(10, parseInt(e.target.value) || 100))}
-                    className={`${inputClass} w-16 px-2 py-1`}
-                  />
-                </div>
+                <input
+                  type="range" min="10" max="200" step="5"
+                  disabled={autoScale}
+                  value={customScalePct}
+                  onChange={(e) => setCustomScalePct(parseInt(e.target.value) || 100)}
+                  className="mt-auto w-full h-1.5 bg-slate-300 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-amber-500 disabled:opacity-40"
+                />
               </div>
+
+              <Field
+                className="lg:col-span-3"
+                hintAlign="end"
+                label="Annotations"
+                hint="What the SVG carries besides cut lines. Labels and sheet outlines help you sort parts, but they are engraved/drawn — strip them to Cut paths only before sending real material."
+              >
+                <Segmented
+                  value={annotations}
+                  onChange={(v) => setAnnotations(v)}
+                  options={[['all', 'Labels'], ['sheets', 'Outlines'], ['none', 'Cuts only']] as const}
+                />
+              </Field>
             </div>
           </div>
+
+          {/* Interactive Tool / Material Change Pause Modal Overlay */}
+          {machineState.status.startsWith('PAUSED') && (
+            <div className="p-4 rounded-xl bg-amber-500/10 border-2 border-amber-500 flex flex-col space-y-3 animate-pulse text-amber-800 dark:text-amber-300">
+              <div className="flex items-center space-x-3">
+                <AlertCircle className="w-6 h-6 text-amber-500 flex-shrink-0" />
+                <div>
+                  <h4 className="font-bold text-sm">Action Required: Machine Paused</h4>
+                  <p className="text-xs leading-relaxed font-semibold">{machineState.pauseMessage}</p>
+                </div>
+              </div>
+              <div className="flex items-center justify-end space-x-3 pt-2 border-t border-amber-500/30">
+                {machineState.status === 'PAUSED_TOOL' && (
+                  <button
+                    onClick={() => webSerialManager.zeroZ(15.0)}
+                    className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-100 text-xs font-semibold rounded-lg"
+                  >
+                    Auto-Zero Z (Touch Plate)
+                  </button>
+                )}
+                <button
+                  onClick={() => webSerialManager.resumeJob()}
+                  className="px-4 py-1.5 bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold text-xs rounded-lg flex items-center space-x-1.5"
+                >
+                  <Play className="w-3.5 h-3.5 fill-current" />
+                  <span>Resume Job (Cycle Start)</span>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {exportResult && !exportResult.success && (
+            <div className="p-4 rounded-xl bg-red-500/10 border border-red-500/40 flex items-start space-x-2 text-xs text-red-700 dark:text-red-300">
+              <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+              <span className="leading-relaxed">{exportResult.error}</span>
+            </div>
+          )}
+
+          {/* Nesting & joint warnings — these decide whether the cut is usable */}
+          {exportResult?.success && exportResult.warnings && exportResult.warnings.length > 0 && (
+            <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/40 space-y-1.5">
+              {exportResult.warnings.map((w, i) => (
+                <div key={i} className="flex items-start space-x-2 text-xs text-amber-800 dark:text-amber-300">
+                  <AlertCircle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+                  <span className="leading-relaxed">{w}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Results SVG Live Preview */}
+          {exportResult && exportResult.success && (
+            <div className="space-y-3">
+              <div className="flex items-center justify-between text-xs text-slate-600 dark:text-slate-400">
+                <div className="flex items-center space-x-4">
+                  <span className="flex items-center space-x-1.5 font-medium">
+                    <Layers className="w-4 h-4 text-amber-500" />
+                    <span>{exportResult.panels?.length || 0} Panels</span>
+                  </span>
+                  <span>Sheets: {exportResult.sheetCount}</span>
+                  {gcodeResult && (
+                    <span className="font-mono bg-slate-200 dark:bg-slate-800 px-2 py-0.5 rounded text-[10px] uppercase font-bold text-amber-600 dark:text-amber-400">
+                      Est. Time: {Math.round(gcodeResult.estimatedTimeSeconds / 60)} min ({gcodeResult.totalCutDistanceMm} mm cut)
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              <div className="w-full h-80 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-950 p-4 overflow-y-auto overflow-x-hidden">
+                <div
+                  className="w-full [&>svg]:w-full [&>svg]:h-auto"
+                  dangerouslySetInnerHTML={{ __html: previewSvg }}
+                />
+              </div>
+            </div>
+          )}
 
           {/* WebSerial USB Control Panel */}
           <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 text-white space-y-3">
@@ -648,88 +803,12 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
               </div>
             )}
           </div>
-
-          {/* Interactive Tool / Material Change Pause Modal Overlay */}
-          {machineState.status.startsWith('PAUSED') && (
-            <div className="p-4 rounded-xl bg-amber-500/10 border-2 border-amber-500 flex flex-col space-y-3 animate-pulse text-amber-800 dark:text-amber-300">
-              <div className="flex items-center space-x-3">
-                <AlertCircle className="w-6 h-6 text-amber-500 flex-shrink-0" />
-                <div>
-                  <h4 className="font-bold text-sm">Action Required: Machine Paused</h4>
-                  <p className="text-xs leading-relaxed font-semibold">{machineState.pauseMessage}</p>
-                </div>
-              </div>
-              <div className="flex items-center justify-end space-x-3 pt-2 border-t border-amber-500/30">
-                {machineState.status === 'PAUSED_TOOL' && (
-                  <button
-                    onClick={() => webSerialManager.zeroZ(15.0)}
-                    className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-100 text-xs font-semibold rounded-lg"
-                  >
-                    Auto-Zero Z (Touch Plate)
-                  </button>
-                )}
-                <button
-                  onClick={() => webSerialManager.resumeJob()}
-                  className="px-4 py-1.5 bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold text-xs rounded-lg flex items-center space-x-1.5"
-                >
-                  <Play className="w-3.5 h-3.5 fill-current" />
-                  <span>Resume Job (Cycle Start)</span>
-                </button>
-              </div>
-            </div>
-          )}
-
-          {exportResult && !exportResult.success && (
-            <div className="p-4 rounded-xl bg-red-500/10 border border-red-500/40 flex items-start space-x-2 text-xs text-red-700 dark:text-red-300">
-              <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
-              <span className="leading-relaxed">{exportResult.error}</span>
-            </div>
-          )}
-
-          {/* Nesting & joint warnings — these decide whether the cut is usable */}
-          {exportResult?.success && exportResult.warnings && exportResult.warnings.length > 0 && (
-            <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/40 space-y-1.5">
-              {exportResult.warnings.map((w, i) => (
-                <div key={i} className="flex items-start space-x-2 text-xs text-amber-800 dark:text-amber-300">
-                  <AlertCircle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
-                  <span className="leading-relaxed">{w}</span>
-                </div>
-              ))}
-            </div>
-          )}
-
-          {/* Results SVG Live Preview */}
-          {exportResult && exportResult.success && (
-            <div className="space-y-3">
-              <div className="flex items-center justify-between text-xs text-slate-600 dark:text-slate-400">
-                <div className="flex items-center space-x-4">
-                  <span className="flex items-center space-x-1.5 font-medium">
-                    <Layers className="w-4 h-4 text-amber-500" />
-                    <span>{exportResult.panels?.length || 0} Panels</span>
-                  </span>
-                  <span>Sheets: {exportResult.sheetCount}</span>
-                  {gcodeResult && (
-                    <span className="font-mono bg-slate-200 dark:bg-slate-800 px-2 py-0.5 rounded text-[10px] uppercase font-bold text-amber-600 dark:text-amber-400">
-                      Est. Time: {Math.round(gcodeResult.estimatedTimeSeconds / 60)} min ({gcodeResult.totalCutDistanceMm} mm cut)
-                    </span>
-                  )}
-                </div>
-              </div>
-
-              <div className="w-full h-80 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-950 p-4 overflow-y-auto overflow-x-hidden">
-                <div
-                  className="w-full [&>svg]:w-full [&>svg]:h-auto"
-                  dangerouslySetInnerHTML={{ __html: previewSvg }}
-                />
-              </div>
-            </div>
-          )}
         </div>
 
         {/* Modal Footer */}
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 px-4 sm:px-6 py-3 sm:py-4 border-t border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/50">
           <div className="hidden 2xl:block text-xs text-slate-500 dark:text-slate-400">
-            Vector SVG &amp; G-Code compatible with LightBurn, Inkscape, GRBL, Marlin, &amp; CNC routers.
+            Vector SVG opens in LightBurn, Inkscape, or any CAM tool — or cut it directly over USB.
           </div>
           <div className="flex flex-wrap items-center justify-end gap-2 sm:gap-3 sm:ml-auto">
             <button
@@ -737,14 +816,6 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
               className="px-4 py-2 text-xs font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-lg transition-colors"
             >
               Close
-            </button>
-            <button
-              onClick={handleDownloadGcode}
-              disabled={!gcodeResult || !gcodeResult.success}
-              className="flex items-center space-x-2 whitespace-nowrap px-4 py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-100 font-bold text-xs rounded-lg shadow-sm transition-all cursor-pointer"
-            >
-              <Download className="w-4 h-4" />
-              <span>Download G-Code (.nc)</span>
             </button>
             <button
               onClick={handleDownloadSvg}

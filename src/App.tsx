@@ -435,33 +435,6 @@ const DropHandler = ({ addComponent, onImportFile }: {
 };
 
 
-// RGB Origin Dot at [0, 0, 0] (Red = +X right, Green = +Y depth in MuJoCo, Blue = +Z up in MuJoCo)
-const OriginDot = () => {
-  return (
-    <group position={[0, 0.001, 0]}>
-      {/* Center origin white dot */}
-      <mesh position={[0, 0, 0]}>
-        <sphereGeometry args={[0.008, 16, 16]} />
-        <meshBasicMaterial color="#ffffff" />
-      </mesh>
-      {/* Red dot (+X axis right) */}
-      <mesh position={[0.025, 0, 0]}>
-        <sphereGeometry args={[0.005, 16, 16]} />
-        <meshBasicMaterial color="#ef4444" />
-      </mesh>
-      {/* Blue dot (+Z axis UP in MuJoCo world space) */}
-      <mesh position={[0, 0.025, 0]}>
-        <sphereGeometry args={[0.005, 16, 16]} />
-        <meshBasicMaterial color="#3b82f6" />
-      </mesh>
-      {/* Green dot (+Y axis depth in MuJoCo world space -> Three.js -Z) */}
-      <mesh position={[0, 0, -0.025]}>
-        <sphereGeometry args={[0.005, 16, 16]} />
-        <meshBasicMaterial color="#22c55e" />
-      </mesh>
-    </group>
-  );
-};
 const WedgeGeometry = ({ width = 2.0, depth = 1.0, height = 0.5 }: { width: number; depth: number; height: number }) => {
   const vertices = useMemo(() => {
     const halfW = width / 2;
@@ -3916,7 +3889,6 @@ function App() {
               sectionColor={darkMode ? '#64748b' : '#94a3b8'} 
               position={[0, -0.005, 0]} 
             />
-            <OriginDot />
             
             {model && data && mujoco && (
               <PhysicsLoop 

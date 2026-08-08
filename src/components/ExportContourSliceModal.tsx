@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { X, Download, AlertCircle, Layers, Mountain, Cpu, Play, Square, Home, ShieldAlert, Navigation, RefreshCw, Info } from 'lucide-react';
+import { X, Download, AlertCircle, Layers, Mountain, Cpu, Play, Square, Home, ShieldAlert, Navigation, RefreshCw, Info, ChevronRight } from 'lucide-react';
 import type { SceneGraph } from '../types/scene';
 import { exportContourSliceSvg, type ContourSliceOptions } from '../utils/contourSliceExporter';
 import { generateContourSliceGcode, DEFAULT_GCODE_OPTIONS } from '../utils/gcodeExporter';
@@ -72,6 +72,32 @@ function Field({
   );
 }
 
+/**
+ * Collapsed tail of a section, holding the controls whose defaults are already
+ * right for most jobs. The point is that a first-time user can read a section
+ * top to bottom without meeting kerf compensation or GRBL's `$30`.
+ */
+function Advanced({ children }: { children: React.ReactNode }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="pt-3 border-t border-slate-200 dark:border-slate-800">
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        aria-expanded={open}
+        className="flex items-center space-x-1 text-[11px] font-bold uppercase tracking-wider text-slate-400
+                   dark:text-slate-500 hover:text-emerald-600 dark:hover:text-emerald-400 cursor-pointer transition-colors"
+      >
+        <ChevronRight className={`w-3.5 h-3.5 transition-transform ${open ? 'rotate-90' : ''}`} />
+        <span>Advanced</span>
+      </button>
+      {open && (
+        <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-4">{children}</div>
+      )}
+    </div>
+  );
+}
+
 function Segmented<T extends string>({
   value, options, onChange,
 }: { value: T; options: readonly (readonly [T, string])[]; onChange: (v: T) => void }) {
@@ -106,7 +132,6 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
   const [kerfMm, setKerfMm] = useState(0.15);
   const [pinCount, setPinCount] = useState(2);
   const [pinDiameterMm, setPinDiameterMm] = useState(3.0);
-  const [sheetPreset, setSheetPreset] = useState<'600x400' | '300x300' | '150x150' | 'custom'>('600x400');
   const [sheetWidthMm, setSheetWidthMm] = useState<number>(600);
   const [sheetHeightMm, setSheetHeightMm] = useState<number>(400);
   const [autoScale, setAutoScale] = useState<boolean>(false);
@@ -118,7 +143,9 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
   // G-Code & WebSerial States
   const [machineMode, setMachineMode] = useState<'laser' | 'cnc'>('laser');
   const [cutFeedrate, setCutFeedrate] = useState<number>(1200);
-  const [laserPower] = useState<number>(1000);
+  const [laserMaxPower, setLaserMaxPower] = useState<number>(DEFAULT_GCODE_OPTIONS.laserMaxPower);
+  const [laserPower, setLaserPower] = useState<number>(DEFAULT_GCODE_OPTIONS.laserPower);
+  const [laserPasses, setLaserPasses] = useState<number>(1);
   const [machineState, setMachineState] = useState<MachineState>(webSerialManager.getState());
 
   useEffect(() => {
@@ -127,18 +154,13 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
     return () => unsub();
   }, [isOpen]);
 
-  const handleSheetPresetChange = (preset: '600x400' | '300x300' | '150x150' | 'custom') => {
-    setSheetPreset(preset);
-    if (preset === '600x400') {
-      setSheetWidthMm(600);
-      setSheetHeightMm(400);
-    } else if (preset === '300x300') {
-      setSheetWidthMm(300);
-      setSheetHeightMm(300);
-    } else if (preset === '150x150') {
-      setSheetWidthMm(150);
-      setSheetHeightMm(150);
-    }
+  // $30 is a machine setting, not a power change: retarget the S-value so the
+  // percentage the user dialled in survives the switch.
+  const handleLaserMaxPowerChange = (next: number) => {
+    const ceiling = Math.max(1, next);
+    const fraction = laserPower / Math.max(1, laserMaxPower);
+    setLaserMaxPower(ceiling);
+    setLaserPower(Math.max(0, Math.min(ceiling, Math.round(fraction * ceiling))));
   };
 
   const exportResult = useMemo(() => {
@@ -171,10 +193,12 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
       machineMode,
       cutFeedrate,
       laserPower,
+      laserMaxPower,
+      laserPasses,
       cutDepthZ: materialThicknessMm,
       zStepdown: Math.min(materialThicknessMm, 3.0),
     });
-  }, [exportResult, machineMode, cutFeedrate, laserPower, materialThicknessMm]);
+  }, [exportResult, machineMode, cutFeedrate, laserPower, laserMaxPower, laserPasses, materialThicknessMm]);
 
   const previewSvg = useMemo(() => {
     if (!exportResult?.success) return '';
@@ -193,19 +217,6 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
     const link = document.createElement('a');
     link.href = url;
     link.download = `contour_slices_${exportResult.layers?.length ?? 0}x${materialThicknessMm}mm.svg`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
-  };
-
-  const handleDownloadGcode = () => {
-    if (!gcodeResult || !gcodeResult.success || !gcodeResult.gcode) return;
-    const blob = new Blob([gcodeResult.gcode], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `contour_stack_${machineMode}_${exportResult?.layers?.length ?? 0}layers.nc`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -244,10 +255,10 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
             </div>
             <div>
               <h2 className="text-base sm:text-lg font-bold text-slate-800 dark:text-slate-100">
-                Export Contour Slices (SVG &amp; G-Code)
+                Export Contour Slices
               </h2>
               <p className="hidden sm:block text-xs text-slate-500 dark:text-slate-400">
-                Cut the model into stacked layers &amp; stream live G-code directly over WebSerial USB
+                Cut the model into stacked layers — download the SVG, or cut straight from here over WebSerial USB
               </p>
             </div>
           </div>
@@ -302,13 +313,27 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
               </Field>
 
               <Field
-                label="Kerf (mm)"
-                hint="Width of material the beam or bit removes. Contours are offset by half of it so each layer comes out at its true size."
+                label="Laser Power"
+                hint={`Beam power as a GRBL S-value — currently ${Math.round((laserPower / Math.max(1, laserMaxPower)) * 100)}% of this machine's S${laserMaxPower} maximum. Ignored on a CNC router.`}
               >
                 <input
-                  type="number" step="0.05" min="0" max="2"
-                  value={kerfMm}
-                  onChange={(e) => setKerfMm(parseFloat(e.target.value) || 0)}
+                  type="number" step={laserMaxPower >= 10000 ? 500 : 50} min="0" max={laserMaxPower}
+                  disabled={machineMode !== 'laser'}
+                  value={laserPower}
+                  onChange={(e) => setLaserPower(Math.min(laserMaxPower, parseInt(e.target.value) || 0))}
+                  className={inputClass}
+                />
+              </Field>
+
+              <Field
+                label="Passes"
+                hint="How many times the laser retraces each contour. Raise it when one pass scores but does not cut through; slowing the feedrate is the other lever."
+              >
+                <input
+                  type="number" step="1" min="1" max="20"
+                  disabled={machineMode !== 'laser'}
+                  value={laserPasses}
+                  onChange={(e) => setLaserPasses(Math.max(1, Math.min(20, parseInt(e.target.value) || 1)))}
                   className={inputClass}
                 />
               </Field>
@@ -327,6 +352,37 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                 />
               </Field>
             </div>
+
+            <Advanced>
+              <Field
+                className="lg:col-span-2"
+                label="Max S-value ($30)"
+                hint="Your controller's maximum spindle/laser S-value. Most diode boards ship 10000; stock GRBL is 1000. Getting it too low is what makes a strong laser act weak — send S1000 to a 10000 machine and you get 10% power. Run $$ on the machine and match its $30 line."
+              >
+                <select
+                  disabled={machineMode !== 'laser'}
+                  value={laserMaxPower}
+                  onChange={(e) => handleLaserMaxPowerChange(parseInt(e.target.value) || 10000)}
+                  className={`${inputClass} font-sans cursor-pointer`}
+                >
+                  <option value={10000}>10000 (most diode boards)</option>
+                  <option value={1000}>1000 (stock GRBL)</option>
+                  <option value={255}>255</option>
+                </select>
+              </Field>
+
+              <Field
+                label="Kerf (mm)"
+                hint="Width of material the beam or bit removes. Contours are offset by half of it so each layer comes out at its true size."
+              >
+                <input
+                  type="number" step="0.05" min="0" max="2"
+                  value={kerfMm}
+                  onChange={(e) => setKerfMm(parseFloat(e.target.value) || 0)}
+                  className={inputClass}
+                />
+              </Field>
+            </Advanced>
           </div>
 
           {/* Slicing & alignment */}
@@ -384,78 +440,43 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-4">
               <Field
                 className="lg:col-span-2"
-                label="Sheet Preset"
-                hint="Common bed sizes. Picking one fills in the width and height; typing your own switches this to Custom."
+                label="Sheet Size (mm)"
+                hint="Usable cutting area of one sheet of stock, width by height. Layers are nested left to right; when a row no longer fits, nesting starts a new sheet below."
               >
-                <select
-                  value={sheetPreset}
-                  onChange={(e) => handleSheetPresetChange(e.target.value as any)}
-                  className={`${inputClass} font-sans cursor-pointer`}
-                >
-                  <option value="600x400">600 x 400 mm (Standard)</option>
-                  <option value="300x300">300 x 300 mm (K40 / Small)</option>
-                  <option value="150x150">150 x 150 mm (Micro)</option>
-                  <option value="custom">Custom Size</option>
-                </select>
-              </Field>
-
-              <Field
-                label="Sheet W (mm)"
-                hint="Usable cutting width of one sheet. Layers are nested left to right within it."
-              >
-                <input
-                  type="number" step="10" min="50" max="5000"
-                  value={sheetWidthMm}
-                  onChange={(e) => {
-                    setSheetWidthMm(Math.max(10, parseFloat(e.target.value) || 100));
-                    setSheetPreset('custom');
-                  }}
-                  className={inputClass}
-                />
-              </Field>
-
-              <Field
-                label="Sheet H (mm)"
-                hint="Usable cutting depth of one sheet. When a row no longer fits, nesting starts a new sheet below."
-              >
-                <input
-                  type="number" step="10" min="50" max="5000"
-                  value={sheetHeightMm}
-                  onChange={(e) => {
-                    setSheetHeightMm(Math.max(10, parseFloat(e.target.value) || 100));
-                    setSheetPreset('custom');
-                  }}
-                  className={inputClass}
-                />
+                <div className="flex items-center space-x-1.5">
+                  <input
+                    type="number" step="10" min="50" max="5000"
+                    value={sheetWidthMm}
+                    onChange={(e) => setSheetWidthMm(Math.max(10, parseFloat(e.target.value) || 100))}
+                    className={`${inputClass} px-2`}
+                    aria-label="Sheet width in mm"
+                  />
+                  <span className="text-xs font-medium text-slate-400">&times;</span>
+                  <input
+                    type="number" step="10" min="50" max="5000"
+                    value={sheetHeightMm}
+                    onChange={(e) => setSheetHeightMm(Math.max(10, parseFloat(e.target.value) || 100))}
+                    className={`${inputClass} px-2`}
+                    aria-label="Sheet height in mm"
+                  />
+                </div>
               </Field>
 
               <Field
                 className="lg:col-span-2"
-                hintAlign="end"
-                label="Annotations"
-                hint="What the SVG carries besides cut lines. Layer numbers and sheet outlines are what let you stack the pieces in order, but they are engraved — strip to Cuts only before sending real material."
-              >
-                <Segmented
-                  value={annotations}
-                  onChange={setAnnotations}
-                  options={[['all', 'Numbers'], ['sheets', 'Outlines'], ['none', 'Cuts only']] as const}
-                />
-              </Field>
-            </div>
-
-            <div className="pt-3 border-t border-slate-200 dark:border-slate-800 grid grid-cols-1 sm:grid-cols-3 gap-4">
-              <Field
                 label="Auto-Scale Mode"
                 hint="Manual keeps the model at the scale you set. Auto-Fit searches for the largest scale whose nested layers still land within the sheet limit."
               >
                 <Segmented
                   value={autoScale ? 'auto' : 'manual'}
                   onChange={(v) => setAutoScale(v === 'auto')}
-                  options={[['manual', 'Manual / Off'], ['auto', 'Auto-Fit Sheet(s)']] as const}
+                  options={[['manual', 'Manual'], ['auto', 'Auto-Fit']] as const}
                 />
               </Field>
 
               <Field
+                className="lg:col-span-2"
+                hintAlign="end"
                 label="Max Sheet Limit"
                 hint="How many sheets of stock the job may use. Auto-Fit shrinks the model until every layer fits within this many."
               >
@@ -465,13 +486,13 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                     disabled={!autoScale}
                     value={maxSheets}
                     onChange={(e) => setMaxSheets(Math.max(1, parseInt(e.target.value) || 1))}
-                    className={inputClass}
+                    className={`${inputClass} px-2`}
                   />
                   <span className="text-xs text-slate-500 font-medium whitespace-nowrap">sheet(s)</span>
                 </div>
               </Field>
 
-              <div className="flex flex-col min-w-0">
+              <div className="flex flex-col min-w-0 lg:col-span-3">
                 <div className="group relative flex justify-between items-center mb-1.5">
                   <div className="flex items-center space-x-1">
                     <label className={labelClass}>Scale Factor ({customScalePct}%)</label>
@@ -487,25 +508,101 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                     height, so scaling down cuts smaller — and fewer — layers.
                   </span>
                 </div>
-                <div className="mt-auto flex items-center space-x-2">
-                  <input
-                    type="range" min="10" max="200" step="5"
-                    disabled={autoScale}
-                    value={customScalePct}
-                    onChange={(e) => setCustomScalePct(parseInt(e.target.value) || 100)}
-                    className="flex-1 h-1.5 bg-slate-300 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-emerald-500 disabled:opacity-40"
-                  />
-                  <input
-                    type="number" min="10" max="200" step="5"
-                    disabled={autoScale}
-                    value={customScalePct}
-                    onChange={(e) => setCustomScalePct(Math.max(10, parseInt(e.target.value) || 100))}
-                    className={`${inputClass} w-16 px-2 py-1`}
-                  />
-                </div>
+                <input
+                  type="range" min="10" max="200" step="5"
+                  disabled={autoScale}
+                  value={customScalePct}
+                  onChange={(e) => setCustomScalePct(parseInt(e.target.value) || 100)}
+                  className="mt-auto w-full h-1.5 bg-slate-300 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-emerald-500 disabled:opacity-40"
+                />
               </div>
+
+              <Field
+                className="lg:col-span-3"
+                hintAlign="end"
+                label="Annotations"
+                hint="What the SVG carries besides cut lines. Layer numbers and sheet outlines are what let you stack the pieces in order, but they are engraved — strip to Cuts only before sending real material."
+              >
+                <Segmented
+                  value={annotations}
+                  onChange={setAnnotations}
+                  options={[['all', 'Numbers'], ['sheets', 'Outlines'], ['none', 'Cuts only']] as const}
+                />
+              </Field>
             </div>
           </div>
+
+          {/* Interactive Pause Prompt */}
+          {machineState.status.startsWith('PAUSED') && (
+            <div className="p-4 rounded-xl bg-amber-500/10 border-2 border-amber-500 flex flex-col space-y-3 animate-pulse text-amber-800 dark:text-amber-300">
+              <div className="flex items-center space-x-3">
+                <AlertCircle className="w-6 h-6 text-amber-500 flex-shrink-0" />
+                <div>
+                  <h4 className="font-bold text-sm font-sans">Material Sheet Swap Required</h4>
+                  <p className="text-xs leading-relaxed font-semibold">{machineState.pauseMessage}</p>
+                </div>
+              </div>
+              <div className="flex items-center justify-end space-x-3 pt-2 border-t border-amber-500/30">
+                <button
+                  onClick={() => webSerialManager.resumeJob()}
+                  className="px-4 py-1.5 bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold text-xs rounded-lg flex items-center space-x-1.5"
+                >
+                  <Play className="w-3.5 h-3.5 fill-current" />
+                  <span>Resume Next Sheet (Cycle Start)</span>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {exportResult && !exportResult.success && (
+            <div className="p-4 rounded-xl bg-red-500/10 border border-red-500/40 flex items-start space-x-2 text-xs text-red-700 dark:text-red-300">
+              <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+              <span className="leading-relaxed">{exportResult.error}</span>
+            </div>
+          )}
+
+          {exportResult?.success && exportResult.warnings && exportResult.warnings.length > 0 && (
+            <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/40 space-y-1.5">
+              {exportResult.warnings.map((w, i) => (
+                <div key={i} className="flex items-start space-x-2 text-xs text-amber-800 dark:text-amber-300">
+                  <AlertCircle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+                  <span className="leading-relaxed">{w}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {exportResult?.success && (
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-slate-600 dark:text-slate-400">
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                  <span className="flex items-center space-x-1.5 font-medium">
+                    <Layers className="w-4 h-4 text-emerald-500" />
+                    <span>{exportResult.layers?.length ?? 0} layers</span>
+                  </span>
+                  <span>Sheets: {exportResult.sheetCount}</span>
+                  <span>Model {mm(exportResult.modelHeight)} tall → stack {mm(exportResult.stackHeight)}</span>
+                  {gcodeResult && (
+                    <span className="font-mono bg-slate-200 dark:bg-slate-800 px-2 py-0.5 rounded text-[10px] uppercase font-bold text-emerald-600 dark:text-emerald-400">
+                      Est. Time: {Math.round(gcodeResult.estimatedTimeSeconds / 60)} min
+                    </span>
+                  )}
+                </div>
+                <Segmented
+                  value={preview}
+                  onChange={setPreview}
+                  options={[['sheets', 'Cut sheets'], ['map', 'Relief map']] as const}
+                />
+              </div>
+
+              <div className="w-full h-80 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-950 p-4 overflow-y-auto overflow-x-hidden">
+                <div
+                  className="w-full [&>svg]:w-full [&>svg]:h-auto"
+                  dangerouslySetInnerHTML={{ __html: previewSvg }}
+                />
+              </div>
+            </div>
+          )}
 
           {/* WebSerial USB Control Panel */}
           <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 text-white space-y-3">
@@ -608,78 +705,6 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
               </div>
             )}
           </div>
-
-          {/* Interactive Pause Prompt */}
-          {machineState.status.startsWith('PAUSED') && (
-            <div className="p-4 rounded-xl bg-amber-500/10 border-2 border-amber-500 flex flex-col space-y-3 animate-pulse text-amber-800 dark:text-amber-300">
-              <div className="flex items-center space-x-3">
-                <AlertCircle className="w-6 h-6 text-amber-500 flex-shrink-0" />
-                <div>
-                  <h4 className="font-bold text-sm font-sans">Material Sheet Swap Required</h4>
-                  <p className="text-xs leading-relaxed font-semibold">{machineState.pauseMessage}</p>
-                </div>
-              </div>
-              <div className="flex items-center justify-end space-x-3 pt-2 border-t border-amber-500/30">
-                <button
-                  onClick={() => webSerialManager.resumeJob()}
-                  className="px-4 py-1.5 bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold text-xs rounded-lg flex items-center space-x-1.5"
-                >
-                  <Play className="w-3.5 h-3.5 fill-current" />
-                  <span>Resume Next Sheet (Cycle Start)</span>
-                </button>
-              </div>
-            </div>
-          )}
-
-          {exportResult && !exportResult.success && (
-            <div className="p-4 rounded-xl bg-red-500/10 border border-red-500/40 flex items-start space-x-2 text-xs text-red-700 dark:text-red-300">
-              <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
-              <span className="leading-relaxed">{exportResult.error}</span>
-            </div>
-          )}
-
-          {exportResult?.success && exportResult.warnings && exportResult.warnings.length > 0 && (
-            <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/40 space-y-1.5">
-              {exportResult.warnings.map((w, i) => (
-                <div key={i} className="flex items-start space-x-2 text-xs text-amber-800 dark:text-amber-300">
-                  <AlertCircle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
-                  <span className="leading-relaxed">{w}</span>
-                </div>
-              ))}
-            </div>
-          )}
-
-          {exportResult?.success && (
-            <div className="space-y-3">
-              <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-slate-600 dark:text-slate-400">
-                <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
-                  <span className="flex items-center space-x-1.5 font-medium">
-                    <Layers className="w-4 h-4 text-emerald-500" />
-                    <span>{exportResult.layers?.length ?? 0} layers</span>
-                  </span>
-                  <span>Sheets: {exportResult.sheetCount}</span>
-                  <span>Model {mm(exportResult.modelHeight)} tall → stack {mm(exportResult.stackHeight)}</span>
-                  {gcodeResult && (
-                    <span className="font-mono bg-slate-200 dark:bg-slate-800 px-2 py-0.5 rounded text-[10px] uppercase font-bold text-emerald-600 dark:text-emerald-400">
-                      Est. Time: {Math.round(gcodeResult.estimatedTimeSeconds / 60)} min
-                    </span>
-                  )}
-                </div>
-                <Segmented
-                  value={preview}
-                  onChange={setPreview}
-                  options={[['sheets', 'Cut sheets'], ['map', 'Relief map']] as const}
-                />
-              </div>
-
-              <div className="w-full h-80 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-950 p-4 overflow-y-auto overflow-x-hidden">
-                <div
-                  className="w-full [&>svg]:w-full [&>svg]:h-auto"
-                  dangerouslySetInnerHTML={{ __html: previewSvg }}
-                />
-              </div>
-            </div>
-          )}
         </div>
 
         {/* Footer */}
@@ -693,14 +718,6 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
               className="px-4 py-2 text-xs font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-lg transition-colors"
             >
               Close
-            </button>
-            <button
-              onClick={handleDownloadGcode}
-              disabled={!gcodeResult || !gcodeResult.success}
-              className="flex items-center space-x-2 whitespace-nowrap px-4 py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-100 font-bold text-xs rounded-lg shadow-sm transition-all cursor-pointer"
-            >
-              <Download className="w-4 h-4" />
-              <span>Download G-Code (.nc)</span>
             </button>
             <button
               onClick={handleDownloadSvg}

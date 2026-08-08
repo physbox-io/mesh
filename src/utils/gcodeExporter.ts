@@ -7,10 +7,20 @@ import type { ContourSliceResult } from './contourSliceExporter';
 
 export interface GcodeExportOptions {
   machineMode: 'laser' | 'cnc';
-  /** Laser power for cutting (0-1000, default 1000 = 100%). */
+  /**
+   * Controller's maximum S-value, i.e. GRBL's `$30` (default 1000). This is a
+   * per-machine setting, not a standard: stock GRBL ships 1000, but plenty of
+   * diode-laser boards ship 10000. Sending S1000 to a `$30=10000` machine runs
+   * the tube at 10% power, which looks like a weak laser rather than a
+   * misconfiguration. Check `$$` on the machine and set this to match.
+   */
+  laserMaxPower: number;
+  /** Laser power for cutting, as an S-value in 0..laserMaxPower. */
   laserPower: number;
-  /** Low laser power for guide framing (0-1000, default 5 = 0.5%). */
+  /** Low laser power for guide framing, as an S-value on the $30=1000 scale (default 5 = 0.5%). Rescaled to laserMaxPower on output. */
   laserGuidePower: number;
+  /** Number of times the laser retraces each cut path (default 1). */
+  laserPasses: number;
   /** Cut feedrate in mm/min (default 1200). */
   cutFeedrate: number;
   /** Travel rapid move feedrate in mm/min (default 3000). */
@@ -33,8 +43,13 @@ export interface GcodeExportOptions {
 
 export const DEFAULT_GCODE_OPTIONS: GcodeExportOptions = {
   machineMode: 'laser',
-  laserPower: 1000,
+  // 10000 is both the commoner diode-board $30 and the safer guess: GRBL clamps an
+  // S-value above $30 down to $30, so overshooting a $30=1000 machine still cuts at
+  // full power, while undershooting a $30=10000 machine quietly runs it at 10%.
+  laserMaxPower: 10000,
+  laserPower: 10000,
   laserGuidePower: 5,
+  laserPasses: 1,
   cutFeedrate: 1200,
   travelFeedrate: 3000,
   plungeFeedrate: 300,
@@ -63,6 +78,25 @@ export interface GcodeExportResult {
   operations: GcodeOperation[];
   bounds: { minX: number; minY: number; maxX: number; maxY: number };
   error?: string;
+}
+
+/** Cut S-value, clamped to the controller's $30 ceiling. */
+function laserS(options: GcodeExportOptions): number {
+  const ceiling = Math.max(1, Math.round(options.laserMaxPower));
+  return Math.max(0, Math.min(ceiling, Math.round(options.laserPower)));
+}
+
+/** Guide S-value, authored on the $30=1000 scale and rescaled to this machine. */
+function laserGuideS(options: GcodeExportOptions): number {
+  const ceiling = Math.max(1, Math.round(options.laserMaxPower));
+  const scaled = Math.round(options.laserGuidePower * (ceiling / 1000));
+  return Math.max(1, Math.min(ceiling, scaled));
+}
+
+/** How many times each cut path is traced. Only the laser retraces in XY; CNC steps down in Z instead. */
+function laserPassCount(options: GcodeExportOptions): number {
+  if (options.machineMode !== 'laser') return 1;
+  return Math.max(1, Math.round(options.laserPasses));
 }
 
 function polygonPerimeter(pts: Point2D[]): number {
@@ -128,6 +162,9 @@ export function generateLaserCutGcode(
   lines.push(`; PhysBox Generated G-Code (${options.machineMode.toUpperCase()} Mode)`);
   lines.push(`; Date: ${new Date().toISOString()}`);
   lines.push(`; Total Sheets: ${sheetCount}, Total Panels: ${panels.length}`);
+  if (options.machineMode === 'laser') {
+    lines.push(`; Laser: S${laserS(options)} of $30=${Math.round(options.laserMaxPower)} max, ${laserPassCount(options)} pass(es)`);
+  }
   lines.push(`; --------------------------------------------------`);
   lines.push(`G21 ; Units in millimeters`);
   lines.push(`G90 ; Absolute positioning`);
@@ -221,6 +258,9 @@ export function generateLaserCutGcode(
   }
   lines.push(`M30 ; End of program`);
 
+  // Every laser pass retraces the whole path, so the head really does travel that far.
+  totalCutDistanceMm *= laserPassCount(options);
+
   const estCutTimeSec = (totalCutDistanceMm / options.cutFeedrate) * 60;
   const estTravelTimeSec = sheetCount * 5;
   const estimatedTimeSeconds = Math.round(estCutTimeSec + estTravelTimeSec);
@@ -249,15 +289,21 @@ function generateLoopGcode(
   const startY = offset.y + loop[0].y;
 
   if (options.machineMode === 'laser') {
-    // Laser Mode: G0 to start, M3 S<power>, G1 around loop, M5
+    // Laser Mode: G0 to start, M3 S<power>, G1 around loop (once per pass), M5.
+    // The beam stays on between passes — the path is closed, so it ends where the
+    // next pass begins and there is nothing to re-pierce.
+    const passes = laserPassCount(options);
     lines.push(`G0 X${f(startX)} Y${f(startY)} F${options.travelFeedrate}`);
-    lines.push(`M3 S${Math.round(options.laserPower)}`);
-    for (let i = 1; i < loop.length; i++) {
-      const px = offset.x + loop[i].x;
-      const py = offset.y + loop[i].y;
-      lines.push(`G1 X${f(px)} Y${f(py)} F${options.cutFeedrate}`);
+    lines.push(`M3 S${laserS(options)}`);
+    for (let pass = 1; pass <= passes; pass++) {
+      if (passes > 1) lines.push(`; Pass ${pass}/${passes}`);
+      for (let i = 1; i < loop.length; i++) {
+        const px = offset.x + loop[i].x;
+        const py = offset.y + loop[i].y;
+        lines.push(`G1 X${f(px)} Y${f(py)} F${options.cutFeedrate}`);
+      }
+      lines.push(`G1 X${f(startX)} Y${f(startY)} F${options.cutFeedrate}`);
     }
-    lines.push(`G1 X${f(startX)} Y${f(startY)} F${options.cutFeedrate}`);
     lines.push(`M5`);
   } else {
     // CNC Mode: Multi-pass depth slicing
@@ -304,7 +350,7 @@ export function generateFramingGcode(
   ];
 
   if (options.machineMode === 'laser') {
-    lines.push(`M3 S${Math.round(options.laserGuidePower)} ; Low power guide dot`);
+    lines.push(`M3 S${laserGuideS(options)} ; Low power guide dot`);
     lines.push(`G1 X${formatNum(maxX)} Y${formatNum(minY)} F3000`);
     lines.push(`G1 X${formatNum(maxX)} Y${formatNum(maxY)} F3000`);
     lines.push(`G1 X${formatNum(minX)} Y${formatNum(maxY)} F3000`);
@@ -348,6 +394,9 @@ export function generateContourSliceGcode(
   lines.push(`; --------------------------------------------------`);
   lines.push(`; PhysBox Contour Slice Stack G-Code (${options.machineMode.toUpperCase()})`);
   lines.push(`; Layers: ${sheetCount}`);
+  if (options.machineMode === 'laser') {
+    lines.push(`; Laser: S${laserS(options)} of $30=${Math.round(options.laserMaxPower)} max, ${laserPassCount(options)} pass(es)`);
+  }
   lines.push(`; --------------------------------------------------`);
   lines.push(`G21 ; mm`);
   lines.push(`G90 ; absolute`);
@@ -422,6 +471,8 @@ export function generateContourSliceGcode(
   if (options.machineMode === 'laser') lines.push(`M5`, `G0 X0.000 Y0.000`);
   else lines.push(`G0 Z${f(options.safeZ)}`, `M5`, `G0 X0.000 Y0.000`);
   lines.push(`M30`);
+
+  totalCutDistanceMm *= laserPassCount(options);
 
   const estCutTimeSec = (totalCutDistanceMm / options.cutFeedrate) * 60;
   const estimatedTimeSeconds = Math.round(estCutTimeSec + sheetCount * 5);
