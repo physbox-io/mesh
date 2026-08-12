@@ -39,6 +39,23 @@ export interface GcodeExportOptions {
   pauseBetweenSheets: boolean;
   /** Insert T<N> M6 pause for tool changes. */
   pauseOnToolChange: boolean;
+  /**
+   * Leave short stretches of every part outline uncut, so finished parts stay
+   * held in the stock instead of dropping out mid-job. Nothing to do with the
+   * finger/mortise tabs of the joinery — these are sacrificial and get snapped
+   * or pared off after the sheet comes off the machine.
+   */
+  attachmentsEnabled: boolean;
+  /** Length of each attachment measured along the cut path, in mm. */
+  attachmentWidthMm: number;
+  /** Target distance between attachments along a cut path, in mm. */
+  attachmentSpacingMm: number;
+  /**
+   * CNC only: stock left under the cutter as it rides over an attachment, in mm.
+   * A laser has no Z, so its attachments are simply gaps in the cut and this is
+   * ignored.
+   */
+  attachmentHeightMm: number;
 }
 
 export const DEFAULT_GCODE_OPTIONS: GcodeExportOptions = {
@@ -59,6 +76,10 @@ export const DEFAULT_GCODE_OPTIONS: GcodeExportOptions = {
   spindleRpm: 12000,
   pauseBetweenSheets: true,
   pauseOnToolChange: true,
+  attachmentsEnabled: false,
+  attachmentWidthMm: 4.0,
+  attachmentSpacingMm: 80.0,
+  attachmentHeightMm: 0.6,
 };
 
 export interface GcodeOperation {
@@ -77,6 +98,8 @@ export interface GcodeExportResult {
   sheetCount: number;
   operations: GcodeOperation[];
   bounds: { minX: number; minY: number; maxX: number; maxY: number };
+  /** How many holding attachments were left across the whole job. */
+  attachmentCount: number;
   error?: string;
 }
 
@@ -114,6 +137,117 @@ function f(num: number): string {
   return num.toFixed(3);
 }
 
+// ---------------------------------------------------------------------------
+// Attachments — the uncut bridges that hold a finished part in the stock
+// ---------------------------------------------------------------------------
+
+/**
+ * One attachment, as four arc-length marks along its loop.
+ *
+ * The flat run between `flatStart` and `flatEnd` is the attachment proper. The
+ * ramps either side exist because a router cannot climb out of and drop back
+ * into its own slot instantly: without them the far edge of every attachment is
+ * a full-width plunge into uncut stock. A laser has nothing to lift, so its
+ * ramps are zero-length and the two pairs coincide.
+ */
+interface AttachmentSpan {
+  rampInStart: number;
+  flatStart: number;
+  flatEnd: number;
+  rampOutEnd: number;
+}
+
+/**
+ * Where to leave attachments around a loop of the given perimeter.
+ *
+ * Count comes from the requested spacing, but is capped so no attachment can
+ * take more than half of the run it sits in — that keeps two of them from
+ * merging into one long uncut stretch on a small part, and it is also what
+ * guarantees no span straddles the loop's start point, so the emitters below
+ * never have to deal with wrapping. A loop too short to hold even one gets
+ * none, which is how small mortises and slots stay clean.
+ */
+function planAttachments(perimeterMm: number, options: GcodeExportOptions): AttachmentSpan[] {
+  if (!options.attachmentsEnabled) return [];
+  const width = Math.max(0.1, options.attachmentWidthMm);
+  const ramp = options.machineMode === 'cnc'
+    ? Math.max(0, Math.min(width, options.attachmentHeightMm))
+    : 0;
+  const span = width + 2 * ramp;
+  const spacing = Math.max(span, options.attachmentSpacingMm);
+
+  const maxCount = Math.floor(perimeterMm / (2 * span));
+  const count = Math.min(maxCount, Math.round(perimeterMm / spacing));
+  if (count < 1) return [];
+
+  const spans: AttachmentSpan[] = [];
+  for (let k = 0; k < count; k++) {
+    const centre = ((k + 0.5) * perimeterMm) / count;
+    spans.push({
+      rampInStart: centre - span / 2,
+      flatStart: centre - width / 2,
+      flatEnd: centre + width / 2,
+      rampOutEnd: centre + span / 2,
+    });
+  }
+  return spans;
+}
+
+/** A loop vertex tagged with how far around the loop it sits. */
+interface LoopPoint { x: number; y: number; s: number }
+
+/**
+ * The loop closed back onto its first point, with an extra vertex inserted
+ * wherever an attachment starts or ends. Splitting the path up front means the
+ * emitters only ever switch state at a vertex.
+ */
+function resampleLoop(loop: Point2D[], spans: AttachmentSpan[]): LoopPoint[] {
+  const cuts: number[] = [];
+  for (const sp of spans) cuts.push(sp.rampInStart, sp.flatStart, sp.flatEnd, sp.rampOutEnd);
+  cuts.sort((a, b) => a - b);
+
+  const out: LoopPoint[] = [{ x: loop[0].x, y: loop[0].y, s: 0 }];
+  let s = 0;
+  let next = 0;
+  for (let i = 0; i < loop.length; i++) {
+    const a = loop[i];
+    const b = loop[(i + 1) % loop.length];
+    const len = Math.hypot(b.x - a.x, b.y - a.y);
+    const end = s + len;
+    while (next < cuts.length && cuts[next] < end) {
+      const cut = cuts[next++];
+      if (cut <= s || len <= 1e-9) continue; // already past it, or a zero-length edge
+      const t = (cut - s) / len;
+      out.push({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, s: cut });
+    }
+    s = end;
+    out.push({ x: b.x, y: b.y, s });
+  }
+  return out;
+}
+
+/** Whether an arc-length position falls in the uncut middle of an attachment. */
+function inFlat(s: number, spans: AttachmentSpan[]): boolean {
+  for (const sp of spans) if (s > sp.flatStart - 1e-6 && s < sp.flatEnd + 1e-6) return true;
+  return false;
+}
+
+/**
+ * Cutting depth at a point on the loop: `cutZ` everywhere except over an
+ * attachment, where the tool rises to `topZ` and ramps back down.
+ */
+function attachmentZ(s: number, spans: AttachmentSpan[], cutZ: number, topZ: number): number {
+  for (const sp of spans) {
+    if (s <= sp.rampInStart || s >= sp.rampOutEnd) continue;
+    if (s >= sp.flatStart && s <= sp.flatEnd) return topZ;
+    const t = s < sp.flatStart
+      ? (s - sp.rampInStart) / Math.max(1e-9, sp.flatStart - sp.rampInStart)
+      : (sp.rampOutEnd - s) / Math.max(1e-9, sp.rampOutEnd - sp.flatEnd);
+    return cutZ + (topZ - cutZ) * t;
+  }
+  return cutZ;
+}
+
 /**
  * Generates G-code from 2D LaserCut panels.
  * Interior holes/mortises are cut FIRST, outer polygon outlines are cut LAST.
@@ -132,6 +266,7 @@ export function generateLaserCutGcode(
       sheetCount: 0,
       operations: [],
       bounds: { minX: 0, minY: 0, maxX: 0, maxY: 0 },
+      attachmentCount: 0,
       error: 'No panels provided for G-code generation.',
     };
   }
@@ -165,6 +300,12 @@ export function generateLaserCutGcode(
   if (options.machineMode === 'laser') {
     lines.push(`; Laser: S${laserS(options)} of $30=${Math.round(options.laserMaxPower)} max, ${laserPassCount(options)} pass(es)`);
   }
+  if (options.attachmentsEnabled) {
+    lines.push(
+      `; Attachments: ${f(options.attachmentWidthMm)}mm every ~${f(options.attachmentSpacingMm)}mm` +
+        (options.machineMode === 'cnc' ? `, ${f(options.attachmentHeightMm)}mm of stock left under each` : ` (beam off)`)
+    );
+  }
   lines.push(`; --------------------------------------------------`);
   lines.push(`G21 ; Units in millimeters`);
   lines.push(`G90 ; Absolute positioning`);
@@ -177,6 +318,7 @@ export function generateLaserCutGcode(
   }
 
   let totalCutDistanceMm = 0;
+  let attachmentCount = 0;
 
   for (let sIdx = 0; sIdx < sheetIndices.length; sIdx++) {
     const sKey = sheetIndices[sIdx];
@@ -239,8 +381,12 @@ export function generateLaserCutGcode(
           sheetIndex: sIdx,
         });
 
+        // Only the outline gets attachments: it is the cut that frees the panel,
+        // and a bridge left across a mortise would block the tab meant to enter it.
+        const spans = planAttachments(polygonPerimeter(panel.outerPolygon2D), options);
+        attachmentCount += spans.length;
         totalCutDistanceMm += polygonPerimeter(panel.outerPolygon2D);
-        lines.push(...generateLoopGcode(panel.outerPolygon2D, pos, options));
+        lines.push(...generateLoopGcode(panel.outerPolygon2D, pos, options, spans));
       }
     }
   }
@@ -273,36 +419,57 @@ export function generateLaserCutGcode(
     sheetCount,
     operations,
     bounds: { minX, minY, maxX, maxY },
+    attachmentCount,
   };
 }
 
-/** Helper to generate G-code motion lines for a single closed loop. */
+/**
+ * Helper to generate G-code motion lines for a single closed loop.
+ *
+ * `spans` are the attachments to leave behind, empty for a loop that should be
+ * cut clean through. Callers pass them only for loops that free a part — a
+ * mortise slug is small enough to be harmless, and a bridge across one would
+ * stop its tab entering.
+ */
 function generateLoopGcode(
   loop: Point2D[],
   offset: Point2D,
-  options: GcodeExportOptions
+  options: GcodeExportOptions,
+  spans: AttachmentSpan[] = []
 ): string[] {
   const lines: string[] = [];
   if (loop.length < 3) return lines;
 
   const startX = offset.x + loop[0].x;
   const startY = offset.y + loop[0].y;
+  const path = resampleLoop(loop, spans);
 
   if (options.machineMode === 'laser') {
     // Laser Mode: G0 to start, M3 S<power>, G1 around loop (once per pass), M5.
     // The beam stays on between passes — the path is closed, so it ends where the
     // next pass begins and there is nothing to re-pierce.
+    //
+    // An attachment is just the beam going out for its length. The head keeps
+    // moving at the cut feedrate rather than rapiding across, so the gap really
+    // is the length asked for and the beam comes back on already up to speed.
     const passes = laserPassCount(options);
     lines.push(`G0 X${f(startX)} Y${f(startY)} F${options.travelFeedrate}`);
     lines.push(`M3 S${laserS(options)}`);
     for (let pass = 1; pass <= passes; pass++) {
       if (passes > 1) lines.push(`; Pass ${pass}/${passes}`);
-      for (let i = 1; i < loop.length; i++) {
-        const px = offset.x + loop[i].x;
-        const py = offset.y + loop[i].y;
-        lines.push(`G1 X${f(px)} Y${f(py)} F${options.cutFeedrate}`);
+      let beamOn = true;
+      for (let i = 1; i < path.length; i++) {
+        const p = path[i];
+        // A segment is entirely inside or entirely outside an attachment, so its
+        // midpoint decides — the resample already split it at every boundary.
+        const gap = spans.length > 0 && inFlat((path[i - 1].s + p.s) / 2, spans);
+        if (gap !== !beamOn) {
+          lines.push(gap ? `M5 ; attachment` : `M3 S${laserS(options)}`);
+          beamOn = !gap;
+        }
+        lines.push(`G1 X${f(offset.x + p.x)} Y${f(offset.y + p.y)} F${options.cutFeedrate}`);
       }
-      lines.push(`G1 X${f(startX)} Y${f(startY)} F${options.cutFeedrate}`);
+      if (!beamOn) lines.push(`M3 S${laserS(options)}`);
     }
     lines.push(`M5`);
   } else {
@@ -310,6 +477,9 @@ function generateLoopGcode(
     const totalDepth = Math.abs(options.cutDepthZ);
     const stepdown = Math.max(0.1, Math.abs(options.zStepdown));
     const passes = Math.ceil(totalDepth / stepdown);
+    // The attachment's top surface. Clamped below the stock surface so a height
+    // set at or above the cut depth cannot turn the whole outline into a no-op.
+    const attachTopZ = -Math.max(0.1, totalDepth - Math.max(0, options.attachmentHeightMm));
 
     lines.push(`G0 X${f(startX)} Y${f(startY)} F${options.travelFeedrate}`);
     lines.push(`G0 Z${f(options.safeZ)}`);
@@ -319,12 +489,20 @@ function generateLoopGcode(
       lines.push(`; Pass ${pass}/${passes} (Z = ${f(currentZ)}mm)`);
       lines.push(`G1 Z${f(currentZ)} F${options.plungeFeedrate}`);
 
-      for (let i = 1; i < loop.length; i++) {
-        const px = offset.x + loop[i].x;
-        const py = offset.y + loop[i].y;
-        lines.push(`G1 X${f(px)} Y${f(py)} F${options.cutFeedrate}`);
+      // Only passes that reach below the attachment tops have to ride over them;
+      // shallower ones are still cutting stock the attachment keeps anyway.
+      const riding = spans.length > 0 && currentZ < attachTopZ - 1e-6;
+      for (let i = 1; i < path.length; i++) {
+        const p = path[i];
+        const px = f(offset.x + p.x);
+        const py = f(offset.y + p.y);
+        if (riding) {
+          const z = attachmentZ(p.s, spans, currentZ, attachTopZ);
+          lines.push(`G1 X${px} Y${py} Z${f(z)} F${options.cutFeedrate}`);
+        } else {
+          lines.push(`G1 X${px} Y${py} F${options.cutFeedrate}`);
+        }
       }
-      lines.push(`G1 X${f(startX)} Y${f(startY)} F${options.cutFeedrate}`);
     }
     lines.push(`G0 Z${f(options.safeZ)}`);
   }
@@ -382,6 +560,7 @@ export function generateContourSliceGcode(
       sheetCount: 0,
       operations: [],
       bounds: { minX: 0, minY: 0, maxX: 0, maxY: 0 },
+      attachmentCount: 0,
       error: 'Invalid contour slice result provided.',
     };
   }
@@ -397,6 +576,12 @@ export function generateContourSliceGcode(
   if (options.machineMode === 'laser') {
     lines.push(`; Laser: S${laserS(options)} of $30=${Math.round(options.laserMaxPower)} max, ${laserPassCount(options)} pass(es)`);
   }
+  if (options.attachmentsEnabled) {
+    lines.push(
+      `; Attachments: ${f(options.attachmentWidthMm)}mm every ~${f(options.attachmentSpacingMm)}mm` +
+        (options.machineMode === 'cnc' ? `, ${f(options.attachmentHeightMm)}mm of stock left under each` : ` (beam off)`)
+    );
+  }
   lines.push(`; --------------------------------------------------`);
   lines.push(`G21 ; mm`);
   lines.push(`G90 ; absolute`);
@@ -409,6 +594,7 @@ export function generateContourSliceGcode(
   }
 
   let totalCutDistanceMm = 0;
+  let attachmentCount = 0;
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
 
   for (let lIdx = 0; lIdx < layers.length; lIdx++) {
@@ -461,8 +647,13 @@ export function generateContourSliceGcode(
         maxY = Math.max(maxY, pt.y);
       }
 
+      // Every contour gets attachments, holes included: a slice's holes are voids
+      // in the model rather than joinery, and their slugs are big enough to be
+      // worth holding down.
+      const spans = planAttachments(polygonPerimeter(contour), options);
+      attachmentCount += spans.length;
       totalCutDistanceMm += polygonPerimeter(contour);
-      lines.push(...generateLoopGcode(contour, { x: 0, y: 0 }, options));
+      lines.push(...generateLoopGcode(contour, { x: 0, y: 0 }, options, spans));
     }
   }
 
@@ -485,5 +676,6 @@ export function generateContourSliceGcode(
     sheetCount,
     operations,
     bounds: { minX: isFinite(minX) ? minX : 0, minY: isFinite(minY) ? minY : 0, maxX: isFinite(maxX) ? maxX : 0, maxY: isFinite(maxY) ? maxY : 0 },
+    attachmentCount,
   };
 }

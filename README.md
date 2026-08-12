@@ -14,6 +14,8 @@ A browser-based rigid-body physics simulator and CAD fabrication studio powered 
   * **3D Printability & Structural HUD** — Overhang visualizer, thin-wall alert, layer orientation stress visualizer, print time & filament cost estimator.
   * **2D Laser Cut / CNC Exporter** — 3D-to-2D panel layout, finger/mortise-tenon joints, kerf compensation, dogbone reliefs, SVG & G-code output.
   * **Contour Slicing Exporter** — Stackable relief contour slicing for laser/cardboard/foam, exporting SVG, G-code, and ZIP packages.
+  * **Relief Carve Exporter** — Heightmap roughing/finishing toolpaths with probed mesh levelling.
+* **Machine Control & Work Origin** — Jog pad (0.1/1/10 mm steps) to drive the tool to the job origin, `G10 L20` XY zeroing, touch-plate Z probing that refuses to set a datum when the probe never makes contact, and 3×3+ bed probing that warps G-code to follow an untrue bed. GRBL 1.1 / FluidNC / grblHAL over WebSerial. See **Docs → Fabrication → Machine Setup &amp; Zeroing** in the app.
 * **Hardware Primitives** — Heat-set insert bosses (M2–M8), metric printed threads (M3–M16), hex nut traps (M3–M6), bearing pockets, snap-fits, D-shaft motor couplers.
 * **Hardware-in-the-Loop (HIL) WebSerial Control** — Direct browser serial connection to ESP32 / microcontrollers at configurable baud rates.
 * **AI Copilot & MCP Bridge** — In-app AI agent panel and WebSocket MCP server bridge (`physbox_mcp`) for external agent scene generation.

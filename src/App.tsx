@@ -5,7 +5,7 @@ import { useMuJoCoInit } from './hooks/useMuJoCo';
 import { useMCPBridge } from './hooks/useMCPBridge';
 import { useStore, scaleMeshGeoms, getPhysicsWorkerClient, cloneSceneGraph } from './store/useStore';
 import type { SceneGraph, SceneNode } from './types/scene';
-import { Play, Square, SlidersHorizontal, Settings, Box, Circle, X, RotateCcw, Trash2, Layers, CircleDot, Zap, Info, Triangle, Disc, Code, Menu, Shapes, Minimize2, Save, Download, Upload, Undo, Redo, FileText, ChevronDown, ChevronUp, Edit3, Printer, Scissors, Sparkles, Sun, Moon, Pyramid, Cone, Donut, ChartSpline } from 'lucide-react';
+import { Play, Square, SlidersHorizontal, Settings, Box, Circle, X, RotateCcw, Trash2, Layers, CircleDot, Zap, Info, Triangle, Disc, Code, Menu, Shapes, Minimize2, Save, Download, Upload, Undo, Redo, FileText, ChevronDown, ChevronUp, Edit3, Printer, Scissors, Sparkles, Sun, Moon, Pyramid, Cone, Donut, ChartSpline, Cpu } from 'lucide-react';
 import { useRef, useMemo, useEffect, useCallback, useState, type RefObject } from 'react';
 import AICopilotPanel from './components/AICopilotPanel';
 import * as THREE from 'three';
@@ -21,6 +21,8 @@ import { makePresetNoteCard } from './utils/noteCards';
 import { ImportStlModal } from './components/ImportStlModal';
 import { ExportLaserCutModal } from './components/ExportLaserCutModal';
 import { ExportContourSliceModal } from './components/ExportContourSliceModal';
+import { ExportReliefCarveModal } from './components/ExportReliefCarveModal';
+import { UserProfileButton } from './components/UserProfileButton';
 import { MIN_MAX_TOKENS, MAX_MAX_TOKENS, readMaxTokens, writeMaxTokens } from './utils/llmSettings';
 import { PrintAnalysisOverlay } from './components/PrintAnalysisOverlay';
 import { PrintAnalysisHUD } from './components/PrintAnalysisHUD';
@@ -1768,6 +1770,9 @@ const DOCS_TABS = [
     { id: 'resize', label: '📏 Resize Component' },
     { id: 'offset', label: '📍 Position Offset' },
   ]},
+  { group: 'Fabrication', items: [
+    { id: 'zeroing', label: '🎯 Machine Setup & Zeroing' },
+  ]},
   { group: 'Scripting', items: [
     { id: 'scripting', label: '💻 Names & Basics' },
     { id: 'tutorial', label: '🎓 Scripting Tutorial' },
@@ -1990,6 +1995,7 @@ function App() {
   const [isImportStlModalOpen, setIsImportStlModalOpen] = useState(false);
   const [isLaserCutModalOpen, setIsLaserCutModalOpen] = useState(false);
   const [isContourSliceModalOpen, setIsContourSliceModalOpen] = useState(false);
+  const [isReliefCarveModalOpen, setIsReliefCarveModalOpen] = useState(false);
   const [droppedImportFile, setDroppedImportFile] = useState<File | null>(null);
   const handleDroppedImportFile = useCallback((file: File) => {
     setDroppedImportFile(file);
@@ -3174,6 +3180,14 @@ function App() {
             </button>
 
             <button
+              onClick={() => setIsReliefCarveModalOpen(true)}
+              className="flex items-center justify-center p-1 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700 text-blue-600 dark:text-blue-400 transition-colors focus:outline-none cursor-pointer"
+              title="Carve a 3D relief on a CNC router"
+            >
+              <Cpu className="w-3.5 h-3.5" />
+            </button>
+
+            <button
               onClick={() => setIsImportStlModalOpen(true)}
               className="flex items-center justify-center p-1 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 transition-colors focus:outline-none cursor-pointer"
               title="Import STL (3D file)"
@@ -3208,9 +3222,7 @@ function App() {
             </button>
           </div>
 
-          <div className="h-5 w-px bg-slate-200 dark:bg-slate-800 mx-0.5 hidden sm:block" />
-
-          {/* Right Utilities (Dark Mode, Docs, Settings, Copilot, GitHub) */}
+          {/* Right Utilities (Dark Mode, Docs, Settings, Copilot, User Profile, GitHub) */}
           <div className="flex items-center gap-1.5">
             {/* Dark Mode Toggle - immediately left of Docs button */}
             <button
@@ -3255,6 +3267,9 @@ function App() {
             >
               <Sparkles className="w-4 h-4" />
             </button>
+
+            {/* User Profile & Cloud Sync */}
+            <UserProfileButton />
 
             {/* GitHub */}
             <a
@@ -6652,7 +6667,9 @@ api.applyForce([force, 0, 0]);
       </div>
 
       {isDocsOpen && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+        // Above the export modals (z-50), which render later in the DOM and
+        // would otherwise paint over the docs they just opened.
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[60] flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl border border-slate-100 shadow-2xl max-w-2xl w-full max-h-[80vh] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-200">
             {/* Modal Header */}
             <div className="px-6 py-4 border-b border-slate-150 flex items-center justify-between bg-slate-50">
@@ -7200,6 +7217,51 @@ const wobble = Math.sin(api.getTime() * 4) * 3;`}
                     ))}
                   </div>
                 )}
+
+                {docsTab === 'zeroing' && (
+                  <div className="flex flex-col gap-4">
+                    <h3 className="font-bold text-slate-800 text-lg flex items-center gap-1.5">🎯 Machine Setup &amp; Zeroing</h3>
+                    <p className="text-xs text-slate-600 leading-relaxed">
+                      Before any laser or CNC job you have to tell the machine where the work actually is. The
+                      export modals do this under <strong>Set Work Origin</strong>, which appears once a machine
+                      is connected over USB. The origin is the corner (or centre) of your stock that the G-code
+                      treats as X0 Y0 Z0 — get it wrong and the job cuts in the wrong place, or into the bed.
+                    </p>
+                    <div className="bg-slate-50 border border-slate-200/60 rounded-xl p-4 flex flex-col gap-3">
+                      <div className="text-xs">
+                        <strong className="text-slate-700">1️⃣ Home first ($H)</strong>
+                        <p className="text-slate-500 mt-1">Homing establishes machine coordinates against the limit switches. Everything below sets a <em>work</em> offset (G54) on top of that, so homing after zeroing keeps the origin — a soft reset does too.</p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">2️⃣ Jog X/Y to the origin</strong>
+                        <p className="text-slate-500 mt-1">Use the arrow pad to drive the tool over the point on your stock that should be X0 Y0. Steps are 0.1 / 1 / 10 mm — take the last approach at 0.1 mm and sight down the tool. The red ⏹ button cancels a jog in flight. Then press <strong>Set XY Zero Here</strong>, and <strong>Go To Zero</strong> to confirm it landed where you meant.</p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">3️⃣ Zero Z with the touch plate</strong>
+                        <p className="text-slate-500 mt-1">Clip the probe lead to the tool, sit the plate on the stock's top face, park the tool a few mm above it, enter your plate's real thickness, and press <strong>Probe Z Zero</strong>. The tool descends slowly until the circuit closes, then work Z0 is set at the stock surface. <strong>Remove the plate before cutting.</strong></p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">4️⃣ Frame, then cut</strong>
+                        <p className="text-slate-500 mt-1">Frame Job traces the outline at low power so you can check the job fits the stock. For routing, Probe Bed measures a grid across the job so cut depth follows a bed that is not flat.</p>
+                      </div>
+                    </div>
+                    <div className="bg-amber-50 border border-amber-200/60 rounded-xl p-4 flex flex-col gap-2.5">
+                      <strong className="text-amber-800 font-semibold text-xs">⚠️ If the probe misses</strong>
+                      <p className="text-amber-700/80 text-xs leading-relaxed">
+                        A probe that runs its full travel without touching — clip off, lead broken, plate not
+                        under the tool — <strong>does not set Z zero</strong>, and says so in red. That is
+                        deliberate: zeroing on a missed probe would tell the machine the stock surface is
+                        wherever the tool ran to, and the next cut would plunge that far past it. Fix the probe
+                        and run it again rather than starting the job.
+                      </p>
+                    </div>
+                    <p className="text-xs text-slate-500 leading-relaxed">
+                      Requires a Chromium browser (WebSerial) and GRBL-compatible firmware — GRBL 1.1, FluidNC,
+                      or grblHAL. The plate thickness field defaults to 15 mm; set it to your own plate's
+                      measured thickness before the first cut.
+                    </p>
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -7265,16 +7327,27 @@ const wobble = Math.sin(api.getTime() * 4) * 3;`}
       />
       )}
 
+      {/* onOpenDocs lets the machine panel inside each modal deep-link to the
+          zeroing walkthrough, which is where a first-time user gets stuck. */}
       <ExportLaserCutModal
         isOpen={isLaserCutModalOpen}
         onClose={() => setIsLaserCutModalOpen(false)}
         scene={sceneGraph}
+        onOpenDocs={() => openDocs('zeroing')}
       />
 
       <ExportContourSliceModal
         isOpen={isContourSliceModalOpen}
         onClose={() => setIsContourSliceModalOpen(false)}
         scene={sceneGraph}
+        onOpenDocs={() => openDocs('zeroing')}
+      />
+
+      <ExportReliefCarveModal
+        isOpen={isReliefCarveModalOpen}
+        onClose={() => setIsReliefCarveModalOpen(false)}
+        scene={sceneGraph}
+        onOpenDocs={() => openDocs('zeroing')}
       />
     </div>
   );

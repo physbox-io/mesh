@@ -1,14 +1,18 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { X, Download, AlertCircle, Layers, Mountain, Cpu, Play, Square, Home, ShieldAlert, Navigation, RefreshCw, Info, ChevronRight } from 'lucide-react';
+import { X, Download, AlertCircle, Layers, Mountain, Cpu, Play, Square, Home, ShieldAlert, RefreshCw, Info, ChevronRight } from 'lucide-react';
 import type { SceneGraph } from '../types/scene';
 import { exportContourSliceSvg, type ContourSliceOptions } from '../utils/contourSliceExporter';
 import { generateContourSliceGcode, DEFAULT_GCODE_OPTIONS } from '../utils/gcodeExporter';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
+import { NumberInput } from './NumberInput';
+import { MachineWorkOriginPanel } from './MachineWorkOriginPanel';
 
 interface ExportContourSliceModalProps {
   isOpen: boolean;
   onClose: () => void;
   scene: SceneGraph;
+  /** Opens the app's zeroing walkthrough from the machine panel. */
+  onOpenDocs?: () => void;
 }
 
 const inputClass =
@@ -125,6 +129,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
   isOpen,
   onClose,
   scene,
+  onOpenDocs,
 }) => {
   const [materialThicknessMm, setMaterialThicknessMm] = useState(3.0);
   const [layerOverride, setLayerOverride] = useState('');
@@ -146,6 +151,10 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
   const [laserMaxPower, setLaserMaxPower] = useState<number>(DEFAULT_GCODE_OPTIONS.laserMaxPower);
   const [laserPower, setLaserPower] = useState<number>(DEFAULT_GCODE_OPTIONS.laserPower);
   const [laserPasses, setLaserPasses] = useState<number>(1);
+  const [attachments, setAttachments] = useState<boolean>(DEFAULT_GCODE_OPTIONS.attachmentsEnabled);
+  const [attachmentWidthMm, setAttachmentWidthMm] = useState<number>(DEFAULT_GCODE_OPTIONS.attachmentWidthMm);
+  const [attachmentSpacingMm, setAttachmentSpacingMm] = useState<number>(DEFAULT_GCODE_OPTIONS.attachmentSpacingMm);
+  const [attachmentHeightMm, setAttachmentHeightMm] = useState<number>(DEFAULT_GCODE_OPTIONS.attachmentHeightMm);
   const [machineState, setMachineState] = useState<MachineState>(webSerialManager.getState());
 
   useEffect(() => {
@@ -197,8 +206,13 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
       laserPasses,
       cutDepthZ: materialThicknessMm,
       zStepdown: Math.min(materialThicknessMm, 3.0),
+      attachmentsEnabled: attachments,
+      attachmentWidthMm,
+      attachmentSpacingMm,
+      attachmentHeightMm,
     });
-  }, [exportResult, machineMode, cutFeedrate, laserPower, laserMaxPower, laserPasses, materialThicknessMm]);
+  }, [exportResult, machineMode, cutFeedrate, laserPower, laserMaxPower, laserPasses, materialThicknessMm,
+      attachments, attachmentWidthMm, attachmentSpacingMm, attachmentHeightMm]);
 
   const previewSvg = useMemo(() => {
     if (!exportResult?.success) return '';
@@ -292,10 +306,10 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                 label="Thickness (mm)"
                 hint="Thickness of the stock. Each layer is one sheet thick, so this also sets how far apart the model is sliced."
               >
-                <input
-                  type="number" step="0.5" min="0.1" max="50"
+                <NumberInput
+                  step="0.5" min={0.1} max={50}
                   value={materialThicknessMm}
-                  onChange={(e) => setMaterialThicknessMm(parseFloat(e.target.value) || 3.0)}
+                  onChange={setMaterialThicknessMm}
                   className={inputClass}
                 />
               </Field>
@@ -304,10 +318,10 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                 label="Feedrate (mm/m)"
                 hint="How fast the head travels while cutting, in mm per minute. It also drives the estimated job time."
               >
-                <input
-                  type="number" step="100" min="100" max="10000"
+                <NumberInput
+                  step="100" min={100} max={10000} integer
                   value={cutFeedrate}
-                  onChange={(e) => setCutFeedrate(parseInt(e.target.value) || 1200)}
+                  onChange={setCutFeedrate}
                   className={inputClass}
                 />
               </Field>
@@ -316,11 +330,11 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                 label="Laser Power"
                 hint={`Beam power as a GRBL S-value — currently ${Math.round((laserPower / Math.max(1, laserMaxPower)) * 100)}% of this machine's S${laserMaxPower} maximum. Ignored on a CNC router.`}
               >
-                <input
-                  type="number" step={laserMaxPower >= 10000 ? 500 : 50} min="0" max={laserMaxPower}
+                <NumberInput
+                  step={laserMaxPower >= 10000 ? 500 : 50} min={0} max={laserMaxPower} integer
                   disabled={machineMode !== 'laser'}
                   value={laserPower}
-                  onChange={(e) => setLaserPower(Math.min(laserMaxPower, parseInt(e.target.value) || 0))}
+                  onChange={setLaserPower}
                   className={inputClass}
                 />
               </Field>
@@ -329,11 +343,11 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                 label="Passes"
                 hint="How many times the laser retraces each contour. Raise it when one pass scores but does not cut through; slowing the feedrate is the other lever."
               >
-                <input
-                  type="number" step="1" min="1" max="20"
+                <NumberInput
+                  step="1" min={1} max={20} integer
                   disabled={machineMode !== 'laser'}
                   value={laserPasses}
-                  onChange={(e) => setLaserPasses(Math.max(1, Math.min(20, parseInt(e.target.value) || 1)))}
+                  onChange={setLaserPasses}
                   className={inputClass}
                 />
               </Field>
@@ -375,10 +389,62 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                 label="Kerf (mm)"
                 hint="Width of material the beam or bit removes. Contours are offset by half of it so each layer comes out at its true size."
               >
-                <input
-                  type="number" step="0.05" min="0" max="2"
+                <NumberInput
+                  step="0.05" min={0} max={2}
                   value={kerfMm}
-                  onChange={(e) => setKerfMm(parseFloat(e.target.value) || 0)}
+                  onChange={setKerfMm}
+                  className={inputClass}
+                />
+              </Field>
+
+              <Field
+                className="lg:col-span-2"
+                label="Attachments"
+                hint="Leaves short stretches of each contour uncut, so a cut layer stays held in the sheet instead of dropping out or shifting mid-job. You snap or pare them off before gluing the stack. Affects the G-code only; the SVG download is unchanged."
+              >
+                <Segmented
+                  value={attachments ? 'on' : 'off'}
+                  onChange={(v) => setAttachments(v === 'on')}
+                  options={[['off', 'Cut Free'], ['on', 'Hold In Sheet']] as const}
+                />
+              </Field>
+
+              <Field
+                label="Attach Size (mm)"
+                hint="How long each attachment is along a contour. Big enough to hold the layer, small enough to snap — 2-5 mm suits thin ply and card."
+              >
+                <NumberInput
+                  step="0.5" min={0.5} max={30}
+                  disabled={!attachments}
+                  value={attachmentWidthMm}
+                  onChange={setAttachmentWidthMm}
+                  className={inputClass}
+                />
+              </Field>
+
+              <Field
+                label="Attach Every (mm)"
+                hint="Target spacing between attachments around a contour. A contour too short for even one at this spacing gets none, and they are never packed closer than half the run they sit in."
+              >
+                <NumberInput
+                  step="10" min={5} max={1000}
+                  disabled={!attachments}
+                  value={attachmentSpacingMm}
+                  onChange={setAttachmentSpacingMm}
+                  className={inputClass}
+                />
+              </Field>
+
+              <Field
+                label="Attach Depth (mm)"
+                hintAlign="end"
+                hint="CNC only: stock left under the bit as it rides over an attachment. The cutter ramps up and back down so it never plunges into uncut material. A laser has no Z, so it just stops firing for the attachment's length."
+              >
+                <NumberInput
+                  step="0.1" min={0.1} max={10}
+                  disabled={!attachments || machineMode !== 'cnc'}
+                  value={attachmentHeightMm}
+                  onChange={setAttachmentHeightMm}
                   className={inputClass}
                 />
               </Field>
@@ -423,11 +489,11 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                 label="Dowel ⌀ (mm)"
                 hint="Diameter of the rod you will thread the stack onto. Holes are cut a kerf undersize so the dowel is a push fit. A dowel only fits where every layer has material to spare around it."
               >
-                <input
-                  type="number" step="0.5" min="0.5" max="20"
+                <NumberInput
+                  step="0.5" min={0.5} max={20}
                   disabled={pinCount === 0}
                   value={pinDiameterMm}
-                  onChange={(e) => setPinDiameterMm(parseFloat(e.target.value) || 3.0)}
+                  onChange={setPinDiameterMm}
                   className={inputClass}
                 />
               </Field>
@@ -444,18 +510,18 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                 hint="Usable cutting area of one sheet of stock, width by height. Layers are nested left to right; when a row no longer fits, nesting starts a new sheet below."
               >
                 <div className="flex items-center space-x-1.5">
-                  <input
-                    type="number" step="10" min="50" max="5000"
+                  <NumberInput
+                    step="10" min={50} max={5000}
                     value={sheetWidthMm}
-                    onChange={(e) => setSheetWidthMm(Math.max(10, parseFloat(e.target.value) || 100))}
+                    onChange={setSheetWidthMm}
                     className={`${inputClass} px-2`}
                     aria-label="Sheet width in mm"
                   />
                   <span className="text-xs font-medium text-slate-400">&times;</span>
-                  <input
-                    type="number" step="10" min="50" max="5000"
+                  <NumberInput
+                    step="10" min={50} max={5000}
                     value={sheetHeightMm}
-                    onChange={(e) => setSheetHeightMm(Math.max(10, parseFloat(e.target.value) || 100))}
+                    onChange={setSheetHeightMm}
                     className={`${inputClass} px-2`}
                     aria-label="Sheet height in mm"
                   />
@@ -481,11 +547,11 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                 hint="How many sheets of stock the job may use. Auto-Fit shrinks the model until every layer fits within this many."
               >
                 <div className="flex items-center space-x-2">
-                  <input
-                    type="number" min="1" max="20" step="1"
+                  <NumberInput
+                    min={1} max={20} step="1" integer
                     disabled={!autoScale}
                     value={maxSheets}
-                    onChange={(e) => setMaxSheets(Math.max(1, parseInt(e.target.value) || 1))}
+                    onChange={setMaxSheets}
                     className={`${inputClass} px-2`}
                   />
                   <span className="text-xs text-slate-500 font-medium whitespace-nowrap">sheet(s)</span>
@@ -587,6 +653,11 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                       Est. Time: {Math.round(gcodeResult.estimatedTimeSeconds / 60)} min
                     </span>
                   )}
+                  {attachments && gcodeResult && (
+                    <span title="Uncut bridges holding cut layers in the sheet. Snap or pare them off before gluing the stack.">
+                      Attachments: {gcodeResult.attachmentCount}
+                    </span>
+                  )}
                 </div>
                 <Segmented
                   value={preview}
@@ -641,6 +712,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
 
             {/* Connected Controls */}
             {machineState.connected && (
+              <>
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 pt-2 border-t border-slate-800">
                 <div className="flex items-center space-x-2 bg-slate-950 p-2 rounded-lg border border-slate-800 text-xs font-mono">
                   <span className="text-slate-500">MPos:</span>
@@ -654,13 +726,6 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                   >
                     <Home className="w-3.5 h-3.5 text-blue-400" />
                     <span>Home ($H)</span>
-                  </button>
-                  <button
-                    onClick={() => webSerialManager.zeroXY()}
-                    className="flex-1 py-1.5 px-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-lg flex items-center justify-center space-x-1"
-                  >
-                    <Navigation className="w-3.5 h-3.5 text-emerald-400" />
-                    <span>Zero XY</span>
                   </button>
                 </div>
 
@@ -703,6 +768,8 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                   )}
                 </div>
               </div>
+              <MachineWorkOriginPanel machineState={machineState} showZProbe={machineMode === 'cnc'} onOpenDocs={onOpenDocs} />
+              </>
             )}
           </div>
         </div>

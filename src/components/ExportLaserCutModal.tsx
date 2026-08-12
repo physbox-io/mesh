@@ -1,14 +1,19 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { X, Download, AlertCircle, Layers, Scissors, Cpu, Play, Square, Home, ShieldAlert, Navigation, RefreshCw, Info, ChevronRight } from 'lucide-react';
+import { X, Download, AlertCircle, Layers, Scissors, Cpu, Play, Square, Home, ShieldAlert, RefreshCw, Info, ChevronRight } from 'lucide-react';
 import type { SceneGraph } from '../types/scene';
 import { exportLaserCutSvg, type LaserCutOptions } from '../utils/laserCutExporter';
 import { generateLaserCutGcode, DEFAULT_GCODE_OPTIONS } from '../utils/gcodeExporter';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
+import { NumberInput } from './NumberInput';
+import { MachineWorkOriginPanel } from './MachineWorkOriginPanel';
+import { warpGcode, type ProbeGrid } from '../utils/meshLeveler';
 
 interface ExportLaserCutModalProps {
   isOpen: boolean;
   onClose: () => void;
   scene: SceneGraph;
+  /** Opens the app's zeroing walkthrough from the machine panel. */
+  onOpenDocs?: () => void;
 }
 
 const inputClass =
@@ -121,71 +126,11 @@ function Segmented<T extends string>({
   );
 }
 
-/**
- * Numeric field that lets you type.
- *
- * Clamping on every keystroke means the box can never hold a value on its way to
- * a good one: emptying it snaps back to a default, and typing "150" into a field
- * with a minimum of 50 goes through "1", which becomes "1000" before the "5" is
- * even typed. So the box keeps whatever text is in it, and the value only leaves
- * here when it is a number in range. Blur settles it — an empty or out-of-range
- * box shows the value that is actually in force, which is the one that was there
- * before the edit started.
- */
-function NumberInput({
-  value, onChange, min, max, integer, ...rest
-}: {
-  value: number;
-  onChange: (v: number) => void;
-  min?: number;
-  max?: number;
-  integer?: boolean;
-} & Omit<React.InputHTMLAttributes<HTMLInputElement>, 'value' | 'onChange' | 'min' | 'max' | 'type'>) {
-  const [text, setText] = useState(String(value));
-  const [editing, setEditing] = useState(false);
-  const [seen, setSeen] = useState(value);
-
-  // Follow the value while the box is not being typed into, so a change made
-  // elsewhere (the max S-value clamping the power, say) still shows up.
-  if (!editing && value !== seen) {
-    setSeen(value);
-    setText(String(value));
-  }
-
-  const parse = (raw: string): number | null => {
-    const n = integer ? parseInt(raw, 10) : parseFloat(raw);
-    if (!Number.isFinite(n)) return null;
-    if (min !== undefined && n < min) return null;
-    if (max !== undefined && n > max) return null;
-    return n;
-  };
-
-  return (
-    <input
-      {...rest}
-      type="number"
-      min={min}
-      max={max}
-      value={text}
-      onFocus={() => setEditing(true)}
-      onChange={(e) => {
-        setText(e.target.value);
-        const n = parse(e.target.value);
-        if (n !== null) onChange(n);
-      }}
-      onBlur={() => {
-        setEditing(false);
-        setSeen(value);
-        setText(String(value));
-      }}
-    />
-  );
-}
-
 export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
   isOpen,
   onClose,
   scene,
+  onOpenDocs,
 }) => {
   const [jointMode, setJointMode] = useState<'finger' | 'slot' | 'glue'>('finger');
   const [materialThicknessMm, setMaterialThicknessMm] = useState<number>(3.0);
@@ -208,6 +153,12 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
   const [laserMaxPower, setLaserMaxPower] = useState<number>(DEFAULT_GCODE_OPTIONS.laserMaxPower);
   const [laserPower, setLaserPower] = useState<number>(DEFAULT_GCODE_OPTIONS.laserPower);
   const [laserPasses, setLaserPasses] = useState<number>(1);
+  const [attachments, setAttachments] = useState<boolean>(DEFAULT_GCODE_OPTIONS.attachmentsEnabled);
+  const [attachmentWidthMm, setAttachmentWidthMm] = useState<number>(DEFAULT_GCODE_OPTIONS.attachmentWidthMm);
+  const [attachmentSpacingMm, setAttachmentSpacingMm] = useState<number>(DEFAULT_GCODE_OPTIONS.attachmentSpacingMm);
+  const [attachmentHeightMm, setAttachmentHeightMm] = useState<number>(DEFAULT_GCODE_OPTIONS.attachmentHeightMm);
+  const [probedGrid, setProbedGrid] = useState<ProbeGrid | null>(null);
+  const [isProbing, setIsProbing] = useState<boolean>(false);
   const [machineState, setMachineState] = useState<MachineState>(webSerialManager.getState());
 
   useEffect(() => {
@@ -251,7 +202,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
   // Compute G-Code output result
   const gcodeResult = useMemo(() => {
     if (!exportResult?.success || !exportResult.panels) return null;
-    return generateLaserCutGcode(exportResult.panels, {
+    const res = generateLaserCutGcode(exportResult.panels, {
       ...DEFAULT_GCODE_OPTIONS,
       machineMode,
       cutFeedrate,
@@ -260,8 +211,18 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
       laserPasses,
       cutDepthZ: materialThicknessMm,
       zStepdown: Math.min(materialThicknessMm, 3.0),
+      attachmentsEnabled: attachments,
+      attachmentWidthMm,
+      attachmentSpacingMm,
+      attachmentHeightMm,
     });
-  }, [exportResult, machineMode, cutFeedrate, laserPower, laserMaxPower, laserPasses, materialThicknessMm]);
+
+    if (res.success && machineMode === 'cnc' && probedGrid) {
+      res.gcode = warpGcode(res.gcode, probedGrid);
+    }
+    return res;
+  }, [exportResult, machineMode, cutFeedrate, laserPower, laserMaxPower, laserPasses, materialThicknessMm, probedGrid,
+      attachments, attachmentWidthMm, attachmentSpacingMm, attachmentHeightMm]);
 
   // The sheet SVG is written at physical size — a 600 mm sheet is far wider than
   // the modal — so the preview is scaled to the panel instead of being dragged
@@ -305,6 +266,21 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
   const handleFrameTrace = async () => {
     if (!gcodeResult?.bounds) return;
     await webSerialManager.frameJob(gcodeResult.bounds, machineMode === 'laser' ? 5 : 0);
+  };
+
+  /**
+   * Probes the bed across the job's own bounds. The grid it returns is what
+   * `warpGcode` rides the Z axis on, so a bed that is not flat still cuts to a
+   * constant depth. Routing only — a laser has no Z to correct.
+   */
+  const handleProbeBed = async () => {
+    if (!gcodeResult?.bounds) return;
+    setIsProbing(true);
+    try {
+      setProbedGrid(await webSerialManager.probeGrid(gcodeResult.bounds, 3, 3));
+    } finally {
+      setIsProbing(false);
+    }
   };
 
   return (
@@ -431,6 +407,58 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                   step="0.05" min={0} max={2.0}
                   value={kerfMm}
                   onChange={setKerfMm}
+                  className={inputClass}
+                />
+              </Field>
+
+              <Field
+                className="lg:col-span-2"
+                label="Attachments"
+                hint="Leaves short stretches of each panel outline uncut, so finished panels stay held in the sheet instead of dropping out or shifting mid-job. You snap or pare them off afterwards. Nothing to do with joint tabs — joint mortises are always cut clean. Affects the G-code only; the SVG download is unchanged."
+              >
+                <Segmented
+                  value={attachments ? 'on' : 'off'}
+                  onChange={(v) => setAttachments(v === 'on')}
+                  options={[['off', 'Cut Free'], ['on', 'Hold In Sheet']] as const}
+                />
+              </Field>
+
+              <Field
+                label="Attach Size (mm)"
+                hint="How long each attachment is along the outline. Big enough to hold the panel, small enough to snap — 2-5 mm suits thin ply and acrylic."
+              >
+                <NumberInput
+                  step="0.5" min={0.5} max={30}
+                  disabled={!attachments}
+                  value={attachmentWidthMm}
+                  onChange={setAttachmentWidthMm}
+                  className={inputClass}
+                />
+              </Field>
+
+              <Field
+                label="Attach Every (mm)"
+                hint="Target spacing between attachments around an outline. An outline too short for even one at this spacing gets none, and they are never packed closer than half the run they sit in."
+              >
+                <NumberInput
+                  step="10" min={5} max={1000}
+                  disabled={!attachments}
+                  value={attachmentSpacingMm}
+                  onChange={setAttachmentSpacingMm}
+                  className={inputClass}
+                />
+              </Field>
+
+              <Field
+                label="Attach Depth (mm)"
+                hintAlign="end"
+                hint="CNC only: stock left under the bit as it rides over an attachment. The cutter ramps up and back down so it never plunges into uncut material. A laser has no Z, so it just stops firing for the attachment's length."
+              >
+                <NumberInput
+                  step="0.1" min={0.1} max={10}
+                  disabled={!attachments || machineMode !== 'cnc'}
+                  value={attachmentHeightMm}
+                  onChange={setAttachmentHeightMm}
                   className={inputClass}
                 />
               </Field>
@@ -690,6 +718,11 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                       Est. Time: {Math.round(gcodeResult.estimatedTimeSeconds / 60)} min ({gcodeResult.totalCutDistanceMm} mm cut)
                     </span>
                   )}
+                  {attachments && gcodeResult && (
+                    <span title="Uncut bridges holding panels in the sheet. Snap or pare them off after the job.">
+                      Attachments: {gcodeResult.attachmentCount}
+                    </span>
+                  )}
                 </div>
               </div>
 
@@ -739,6 +772,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
 
             {/* Connected Machine Controls */}
             {machineState.connected && (
+              <>
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 pt-2 border-t border-slate-800">
                 <div className="flex items-center space-x-2 bg-slate-950 p-2 rounded-lg border border-slate-800 text-xs font-mono">
                   <span className="text-slate-500">MPos:</span>
@@ -753,13 +787,6 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                     <Home className="w-3.5 h-3.5 text-blue-400" />
                     <span>Home ($H)</span>
                   </button>
-                  <button
-                    onClick={() => webSerialManager.zeroXY()}
-                    className="flex-1 py-1.5 px-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-lg flex items-center justify-center space-x-1"
-                  >
-                    <Navigation className="w-3.5 h-3.5 text-emerald-400" />
-                    <span>Zero XY</span>
-                  </button>
                 </div>
 
                 <div className="flex items-center space-x-2">
@@ -771,6 +798,19 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                     <RefreshCw className="w-3.5 h-3.5 text-amber-400" />
                     <span>Frame Laser</span>
                   </button>
+                  {machineMode === 'cnc' && (
+                    <button
+                      onClick={handleProbeBed}
+                      disabled={!gcodeResult?.bounds || isProbing}
+                      title={probedGrid
+                        ? 'Bed probed — cut depths follow the measured surface'
+                        : 'Probe a 3x3 grid over the job so cut depth follows the bed'}
+                      className="flex-1 py-1.5 px-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-200 text-xs font-semibold rounded-lg flex items-center justify-center space-x-1"
+                    >
+                      <Layers className={`w-3.5 h-3.5 ${probedGrid ? 'text-emerald-400' : 'text-blue-400'}`} />
+                      <span>{isProbing ? 'Probing…' : probedGrid ? 'Bed Levelled' : 'Probe Bed'}</span>
+                    </button>
+                  )}
                   <button
                     onClick={() => webSerialManager.unlockAlarm()}
                     className="py-1.5 px-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-lg flex items-center justify-center space-x-1"
@@ -801,6 +841,8 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                   )}
                 </div>
               </div>
+              <MachineWorkOriginPanel machineState={machineState} showZProbe={machineMode === 'cnc'} onOpenDocs={onOpenDocs} />
+              </>
             )}
           </div>
         </div>

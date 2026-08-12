@@ -12,3 +12,8 @@
 - **Statement Separators**: NEVER use `&&` in top-level PowerShell command strings (which triggers syntax errors). Wrap chained bash commands in `wsl -e bash -c "cmd1 && cmd2"`.
 - **WSL Path & Context**: Execute Linux/WSL operations through `wsl -e bash -c "..."` or target `/Ubuntu-20.04/home/boab/...` WSL paths cleanly.
 - **No `npx` Usage**: Do not use `npx` to execute commands. Run local binaries directly (e.g. `./node_modules/.bin/vitest`) or package scripts via `npm run <script>` inside the WSL environment.
+
+## 3. Multi-Agent Scope Discipline & Task Boundaries
+- **Do Not Touch Unrelated Broken Code during Builds / Multi-Agent Runs**: If a build command (e.g. `npm run build` or `tsc`) fails due to type or syntax errors in files unrelated to your assigned task scope, NEVER attempt to fix, modify, or patch those unrelated files.
+- **Immediate Reversion**: If unrelated files are modified by accident, revert them immediately using `git checkout <file>`.
+- **Scoped Verification**: Use targeted type checking and tests focused strictly on your assigned task files rather than modifying out-of-scope files to satisfy global build scripts.
