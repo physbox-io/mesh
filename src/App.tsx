@@ -5,7 +5,7 @@ import { useMuJoCoInit } from './hooks/useMuJoCo';
 import { useMCPBridge } from './hooks/useMCPBridge';
 import { useStore, scaleMeshGeoms, getPhysicsWorkerClient, cloneSceneGraph } from './store/useStore';
 import type { SceneGraph, SceneNode } from './types/scene';
-import { Play, Square, SlidersHorizontal, Settings, Box, Circle, X, RotateCcw, Trash2, Layers, CircleDot, Zap, Info, Triangle, Disc, Code, Menu, Shapes, Minimize2, Save, Download, Upload, Undo, Redo, FileText, ChevronDown, ChevronUp, Edit3, Printer, Scissors, Sparkles, Sun, Moon, Pyramid, Cone, Donut, ChartSpline, Cpu } from 'lucide-react';
+import { Play, Square, SlidersHorizontal, Settings, Box, Circle, X, RotateCcw, Trash2, Layers, CircleDot, Zap, Info, Triangle, Disc, Code, Menu, Shapes, Minimize2, Save, Download, Upload, Undo, Redo, FileText, ChevronDown, ChevronUp, Edit3, Printer, Scissors, Sparkles, Sun, Moon, Pyramid, Cone, Donut, ChartSpline, Cpu, Mountain } from 'lucide-react';
 import { useRef, useMemo, useEffect, useCallback, useState, type RefObject } from 'react';
 import AICopilotPanel from './components/AICopilotPanel';
 import * as THREE from 'three';
@@ -48,6 +48,17 @@ function parseNoteMarkdown(md: string): string {
   }).join('\n');
   return html;
 }
+
+// Precision Laser Beam Emitter Icon for Laser Export
+const LaserIcon: React.FC<{ className?: string }> = ({ className = 'w-4 h-4' }) => (
+  <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M9 3h6l1 4H8l1-4z" />
+    <line x1="8" y1="7" x2="16" y2="7" />
+    <line x1="12" y1="7" x2="12" y2="17" strokeWidth="2.5" />
+    <circle cx="12" cy="17" r="1.5" fill="currentColor" />
+    <line x1="4" y1="21" x2="20" y2="21" />
+  </svg>
+);
 
 
 
@@ -2230,6 +2241,25 @@ function App() {
 
   const [activeWeakSpot, setActiveWeakSpot] = useState<any>(null);
 
+  // Keyboard Shortcuts Handler (Delete / Backspace key to delete selected body)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (['INPUT', 'TEXTAREA', 'SELECT'].includes((e.target as HTMLElement).tagName)) {
+        return;
+      }
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        const selId = useStore.getState().selectedNodeId;
+        if (selId) {
+          useStore.getState().deleteNode(selId);
+          useStore.getState().setSelectedNodeId(null);
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
   // Collapsible properties cards drawer listener
   useEffect(() => {
     let active = true;
@@ -3020,9 +3050,17 @@ function App() {
                 </g>
               </svg>
             </div>
-            <h1 className="font-bold text-sm tracking-tight hidden sm:block text-slate-800 dark:text-slate-100">
-              PhysBox<span className="text-blue-500">: Mesh</span>
-            </h1>
+            <div>
+              <div className="flex items-center gap-2">
+                <h1 className="text-base font-extrabold tracking-tight text-slate-900 dark:text-white font-sans">
+                  Physbox <span className="text-blue-500 dark:text-blue-400 font-normal">Mesh</span>
+                </h1>
+                <span className="text-[10px] uppercase font-mono px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-950/80 border border-blue-200 dark:border-blue-800/50 text-blue-700 dark:text-blue-300">
+                  3D Studio
+                </span>
+              </div>
+              <p className="text-[10px] text-slate-500 dark:text-slate-400">Real World Physics &amp; Design Studio</p>
+            </div>
           </div>
 
           <div className="h-5 w-px bg-slate-200 dark:bg-slate-800 hidden md:block" />
@@ -3148,9 +3186,23 @@ function App() {
             </button>
 
             <button
+              onClick={() => {
+                if (selectedNodeId) {
+                  deleteNode(selectedNodeId);
+                  setSelectedNodeId(null);
+                }
+              }}
+              disabled={!selectedNodeId}
+              className="flex items-center justify-center p-1 rounded-md hover:bg-red-50 dark:hover:bg-red-950/40 text-red-500 disabled:opacity-30 disabled:hover:bg-transparent transition-colors focus:outline-none cursor-pointer"
+              title={selectedNodeId ? "Delete selected item (Delete / Backspace)" : "No item selected"}
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+            </button>
+
+            <button
               onClick={exportJson}
               className="flex items-center justify-center p-1 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 transition-colors focus:outline-none cursor-pointer"
-              title="Export JSON"
+              title="JSON"
             >
               <Download className="w-3.5 h-3.5" />
             </button>
@@ -3158,7 +3210,7 @@ function App() {
             <button
               onClick={exportStl}
               className="flex items-center justify-center p-1 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 transition-colors focus:outline-none cursor-pointer"
-              title="Export STL (3D print)"
+              title="3D Print (STL)"
             >
               <Printer className="w-3.5 h-3.5" />
             </button>
@@ -3166,15 +3218,15 @@ function App() {
             <button
               onClick={() => setIsLaserCutModalOpen(true)}
               className="flex items-center justify-center p-1 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700 text-amber-600 dark:text-amber-400 transition-colors focus:outline-none cursor-pointer"
-              title="Export Laser / CNC (SVG)"
+              title="Laser / CNC (SVG)"
             >
-              <Scissors className="w-3.5 h-3.5" />
+              <LaserIcon className="w-3.5 h-3.5" />
             </button>
 
             <button
               onClick={() => setIsContourSliceModalOpen(true)}
               className="flex items-center justify-center p-1 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700 text-emerald-600 dark:text-emerald-400 transition-colors focus:outline-none cursor-pointer"
-              title="Export contour slices (stacked relief map, SVG)"
+              title="Contour Slices (Stacked Relief Map, SVG)"
             >
               <Layers className="w-3.5 h-3.5" />
             </button>
@@ -3182,9 +3234,9 @@ function App() {
             <button
               onClick={() => setIsReliefCarveModalOpen(true)}
               className="flex items-center justify-center p-1 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700 text-blue-600 dark:text-blue-400 transition-colors focus:outline-none cursor-pointer"
-              title="Carve a 3D relief on a CNC router"
+              title="3D Relief Carve (CNC Router)"
             >
-              <Cpu className="w-3.5 h-3.5" />
+              <Mountain className="w-3.5 h-3.5" />
             </button>
 
             <button
@@ -7349,6 +7401,81 @@ const wobble = Math.sin(api.getTime() * 4) * 3;`}
         scene={sceneGraph}
         onOpenDocs={() => openDocs('zeroing')}
       />
+
+      {/* Bottom Status Bar matching Etch */}
+      <footer className="h-8 w-full bg-white dark:bg-slate-950 border-t border-slate-200 dark:border-slate-800/80 px-4 flex items-center justify-between z-20 text-[11px] text-slate-500 dark:text-slate-400 font-mono select-none transition-colors">
+        {/* Left: Component & Node Metrics */}
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2">
+            <span className="font-semibold text-slate-700 dark:text-slate-300">Components: {sceneGraph?.nodes?.length || 0}</span>
+            <span>·</span>
+            <span>Geoms: {(() => {
+              let count = 0;
+              const walk = (nodes: any[]) => {
+                if (!Array.isArray(nodes)) return;
+                for (const n of nodes) {
+                  if (Array.isArray(n.geoms) && n.geoms.length > 0) {
+                    count += n.geoms.length;
+                  } else {
+                    count += 1;
+                  }
+                  if (n.children) walk(n.children);
+                }
+              };
+              walk(sceneGraph?.nodes || []);
+              return count;
+            })()}</span>
+            <span>·</span>
+            <span>Vertices: {(() => {
+              let count = 0;
+              const walkGeom = (g: any) => {
+                if (!g) return;
+                if (Array.isArray(g.vertices) && g.vertices.length > 0) {
+                  count += Math.floor(g.vertices.length / 3);
+                } else if (Array.isArray(g.renderVertices) && g.renderVertices.length > 0) {
+                  count += Math.floor(g.renderVertices.length / 3);
+                } else if (g.type === 'box' || g.type === 'cube' || g.type === 'plane') {
+                  count += 24;
+                } else if (g.type === 'capsule') {
+                  count += 48;
+                } else if (g.type === 'cylinder') {
+                  count += 64;
+                } else if (g.type === 'sphere' || g.type === 'ellipsoid') {
+                  count += 128;
+                } else {
+                  count += 24;
+                }
+              };
+              const walkNodes = (nodes: any[]) => {
+                if (!Array.isArray(nodes)) return;
+                for (const n of nodes) {
+                  if (Array.isArray(n.geoms) && n.geoms.length > 0) {
+                    n.geoms.forEach(walkGeom);
+                  } else if (Array.isArray(n.meshVertices) && n.meshVertices.length > 0) {
+                    count += Math.floor(n.meshVertices.length / 3);
+                  } else {
+                    count += 24;
+                  }
+                  if (n.children) walkNodes(n.children);
+                }
+              };
+              walkNodes(sceneGraph?.nodes || []);
+              return count;
+            })().toLocaleString()}</span>
+          </div>
+        </div>
+
+        {/* Right: MuJoCo Physics & Engine Status */}
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800">
+            <span className={`w-2 h-2 rounded-full ${isPlaying ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400'}`}></span>
+            <span className="text-slate-700 dark:text-slate-300 font-semibold">{isPlaying ? 'Simulation Running' : 'Simulation Paused'}</span>
+          </div>
+          <div className="text-slate-500 dark:text-slate-400">
+            MuJoCo WASM (60Hz)
+          </div>
+        </div>
+      </footer>
     </div>
   );
 }
