@@ -3,9 +3,10 @@ import { Canvas, useThree } from '@react-three/fiber';
 import { OrbitControls, Grid } from '@react-three/drei';
 import { useMuJoCoInit } from './hooks/useMuJoCo';
 import { useMCPBridge } from './hooks/useMCPBridge';
+import { useCoarsePointer } from './hooks/useCoarsePointer';
 import { useStore, scaleMeshGeoms, getPhysicsWorkerClient, cloneSceneGraph } from './store/useStore';
 import type { SceneGraph, SceneNode } from './types/scene';
-import { Play, Square, SlidersHorizontal, Settings, Box, Circle, X, RotateCcw, Trash2, Layers, CircleDot, Zap, Info, Triangle, Disc, Code, Menu, Shapes, Minimize2, Save, Download, Upload, Undo, Redo, FileText, ChevronDown, ChevronUp, Edit3, Printer, Scissors, Sparkles, Sun, Moon, Pyramid, Cone, Donut, ChartSpline, Cpu, Mountain } from 'lucide-react';
+import { Play, Square, SlidersHorizontal, Settings, Box, Circle, X, RotateCcw, Trash2, Layers, CircleDot, Zap, Info, Triangle, Disc, Code, Menu, Shapes, Minimize2, Save, Download, Upload, Undo, Redo, FileText, ChevronDown, ChevronUp, PanelRight, Edit3, Printer, Scissors, Sparkles, Sun, Moon, Pyramid, Cone, Donut, ChartSpline, Cpu, Mountain } from 'lucide-react';
 import { useRef, useMemo, useEffect, useCallback, useState, type RefObject } from 'react';
 import AICopilotPanel from './components/AICopilotPanel';
 import * as THREE from 'three';
@@ -75,27 +76,38 @@ function NoteCardOverlay({ card, isEditing, onToggleEdit, onToggleMinimize, onMa
 }) {
   const dragRef = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null);
 
-  const handleTitleMouseDown = (e: React.MouseEvent) => {
+  // Pointer events, not mouse events: a finger and a stylus move the card
+  // through exactly the same code path as a mouse, which listening for
+  // mousedown alone left with no way to move a card at all.
+  const handleTitleMouseDown = (e: React.PointerEvent) => {
     if ((e.target as HTMLElement).closest('button')) return;
     dragRef.current = { startX: e.clientX, startY: e.clientY, origX: card.x, origY: card.y };
-    const handleMouseMove = (me: MouseEvent) => {
+    const handleMouseMove = (me: PointerEvent) => {
       if (!dragRef.current) return;
       onMove(dragRef.current.origX + me.clientX - dragRef.current.startX, dragRef.current.origY + me.clientY - dragRef.current.startY);
     };
-    const handleMouseUp = () => { dragRef.current = null; window.removeEventListener('mousemove', handleMouseMove); window.removeEventListener('mouseup', handleMouseUp); };
-    window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('mouseup', handleMouseUp);
+    const handleMouseUp = () => {
+      dragRef.current = null;
+      window.removeEventListener('pointermove', handleMouseMove);
+      window.removeEventListener('pointerup', handleMouseUp);
+      window.removeEventListener('pointercancel', handleMouseUp);
+    };
+    window.addEventListener('pointermove', handleMouseMove);
+    window.addEventListener('pointerup', handleMouseUp);
+    window.addEventListener('pointercancel', handleMouseUp);
   };
 
   return (
     <div
-      style={{ position: 'absolute', left: card.x, top: card.y, zIndex: 25, width: 300 }}
+      // `min(300px, ...)` so a card dropped near the right edge of a phone is
+      // still readable rather than a 300px card hanging half off the screen.
+      style={{ position: 'absolute', left: card.x, top: card.y, zIndex: 25, width: 'min(300px, calc(100vw - 2rem))', touchAction: 'none' }}
       className="bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border border-slate-200 dark:border-slate-800 shadow-2xl rounded-2xl overflow-hidden"
     >
       {/* Title bar */}
       <div
         className="flex items-center justify-between px-3 py-2 bg-slate-50/80 dark:bg-slate-950/40 border-b border-slate-100 dark:border-slate-800 cursor-move select-none"
-        onMouseDown={handleTitleMouseDown}
+        onPointerDown={handleTitleMouseDown}
       >
         <div className="flex items-center gap-1.5">
           <FileText className="w-3.5 h-3.5 text-violet-600 dark:text-violet-400" />
@@ -306,6 +318,29 @@ const AxisLegendDrawer = ({ externalRef }: { externalRef: RefObject<HTMLCanvasEl
 };
 
 // Camera Controller
+/**
+ * Switches the orbit controls off and on from inside a pointer handler.
+ *
+ * Dragging something in the scene already disables the controls through their
+ * `enabled` prop, but that only takes effect on the next render — fine for a
+ * mouse, whose left button does nothing to the camera in this app, and not
+ * fine for a finger, whose single-touch gesture *is* the orbit gesture. Called
+ * during the pointerdown itself, this makes the controls see `enabled ===
+ * false` when their own listener runs a moment later, so the body drags
+ * instead of the camera swinging.
+ *
+ * Reads through R3F's `get()` rather than holding the controls in a render
+ * value, so the instance is always the live one (they register themselves via
+ * `makeDefault` after the scene's meshes have already mounted).
+ */
+const useOrbitEnable = () => {
+  const getThree = useThree((state) => state.get);
+  return useCallback((on: boolean) => {
+    const controls = getThree().controls as { enabled?: boolean } | null;
+    if (controls) controls.enabled = on;
+  }, [getThree]);
+};
+
 const CameraController = () => {
   const { camera } = useThree();
   const cameraView = useStore(state => state.cameraView);
@@ -572,6 +607,7 @@ const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, selectedN
   }, [color, isSelected, alpha]);
 
   // Handlers for physical spring dragging, mapped from Three.js coordinates to MuJoCo coordinate space
+  const setOrbitEnabled = useOrbitEnable();
   const dragHandlers = useMemo(() => ({
     onClick: (e: any) => {
       e.stopPropagation();
@@ -580,6 +616,7 @@ const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, selectedN
     onPointerDown: (e: any) => {
       if (isPlaying) {
         e.stopPropagation();
+        setOrbitEnabled(false);
         useStore.getState().setDraggedNodeId(nodeId);
         useStore.getState().setDragDistance(e.distance);
         
@@ -605,6 +642,7 @@ const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, selectedN
         }
         useStore.getState().setDraggedNodeId(null);
         useStore.getState().setDragTarget(null);
+        setOrbitEnabled(true);
       }
     },
     onPointerCancel: (e: any) => {
@@ -618,9 +656,10 @@ const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, selectedN
         }
         useStore.getState().setDraggedNodeId(null);
         useStore.getState().setDragTarget(null);
+        setOrbitEnabled(true);
       }
     }
-  }), [isPlaying, nodeId, setSelectedNodeId]);
+  }), [isPlaying, nodeId, setSelectedNodeId, setOrbitEnabled]);
 
   // For dynamic meshes, use body xpos/xmat so renderVertices (centroid-local) align correctly.
   const bodyId = useMemo(() => {
@@ -957,7 +996,8 @@ const PulleyRopesRenderer = ({ model, data, mujoco, sceneGraph }: any) => {
 // Drag interaction controller that handles window-level mouse/pointer movements
 const DragInteractionController = () => {
   const { camera, raycaster, gl } = useThree();
-  
+  const setOrbitEnabled = useOrbitEnable();
+
   useEffect(() => {
     const handlePointerMove = (e: PointerEvent) => {
       const { draggedNodeId, dragDistance } = useStore.getState();
@@ -989,6 +1029,10 @@ const DragInteractionController = () => {
       if (draggedNodeId) {
         useStore.getState().setDraggedNodeId(null);
         useStore.getState().setDragTarget(null);
+        // Whoever turned the camera off owes it an on again — a finger lifted
+        // outside the body it grabbed comes through here rather than through
+        // the geom's own pointerup.
+        setOrbitEnabled(true);
       }
     };
 
@@ -1001,7 +1045,7 @@ const DragInteractionController = () => {
       window.removeEventListener('pointerup', handlePointerUp);
       window.removeEventListener('pointercancel', handlePointerUp);
     };
-  }, [camera, raycaster, gl]);
+  }, [camera, raycaster, gl, setOrbitEnabled]);
 
   return null;
 };
@@ -1076,6 +1120,7 @@ const MouseDragForceRenderer = ({ model, data, mujoco }: any) => {
 // Rope node placeholder marker – renders a glowing ring for each pulley_rope scene node
 const PulleyRopeMarkers = ({ sceneGraph, selectedNodeId, setSelectedNodeId }: any) => {
   const isPlaying = useStore(state => state.isPlaying);
+  const setOrbitEnabled = useOrbitEnable();
 
   // The wheel a rope runs over, so the handle can be sized relative to it.
   const findWheelNode = useCallback((wheelId: string): any => {
@@ -1134,6 +1179,11 @@ const PulleyRopeMarkers = ({ sceneGraph, selectedNodeId, setSelectedNodeId }: an
               onPointerDown={(e: any) => {
                 if (isPlaying) {
                   e.stopPropagation();
+                  // Same reason as the body drag handlers: the orbit gesture
+                  // and the drag gesture are the same single touch, so the
+                  // camera has to stand down within this event rather than on
+                  // the next render.
+                  setOrbitEnabled(false);
                   useStore.getState().setDraggedNodeId(rope.id);
                   useStore.getState().setDragDistance(e.distance);
                   const pt = e.point;
@@ -1145,6 +1195,7 @@ const PulleyRopeMarkers = ({ sceneGraph, selectedNodeId, setSelectedNodeId }: an
                   e.stopPropagation();
                   useStore.getState().setDraggedNodeId(null);
                   useStore.getState().setDragTarget(null);
+                  setOrbitEnabled(true);
                 }
               }}
             >
@@ -1185,13 +1236,17 @@ const SceneCapture = ({ sceneRef }: { sceneRef: React.MutableRefObject<THREE.Sce
 // Draggable control-point handles + spline preview for the selected curve
 // body. Rendered INSIDE the Z-up→Y-up rotated group, so all positions here are
 // raw MuJoCo Z-up coords. Left-drag is free for handle dragging because
-// OrbitControls maps LEFT to a no-op in this app.
+// OrbitControls maps LEFT to a no-op in this app — a single *touch*, though,
+// is the orbit gesture, so the drag has to switch the controls off for its
+// duration or the camera swings while the point is being placed.
 const CurveControlHandles = () => {
   const sceneGraph = useStore(s => s.sceneGraph);
   const selectedNodeId = useStore(s => s.selectedNodeId);
   const isPlaying = useStore(s => s.isPlaying);
   const updateCurveParams = useStore(s => s.updateCurveParams);
   const { camera } = useThree();
+  const setOrbitEnabled = useOrbitEnable();
+  const coarsePointer = useCoarsePointer();
   const [dragIdx, setDragIdx] = useState<number | null>(null);
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
   const dragPlane = useRef(new THREE.Plane());
@@ -1231,6 +1286,7 @@ const CurveControlHandles = () => {
 
   const startDrag = (i: number, e: any) => {
     e.stopPropagation();
+    setOrbitEnabled(false);
     try { (e.target as HTMLElement).setPointerCapture(e.pointerId); } catch (err) {}
     // Camera-facing drag plane through the handle (in Three.js world space:
     // MuJoCo (x,y,z) → three (x, z, -y))
@@ -1263,6 +1319,7 @@ const CurveControlHandles = () => {
     e.stopPropagation();
     try { (e.target as HTMLElement).releasePointerCapture(e.pointerId); } catch (err) {}
     setDragIdx(null);
+    setOrbitEnabled(true);
   };
 
   return (
@@ -1282,7 +1339,9 @@ const CurveControlHandles = () => {
             onPointerOver={(e) => { e.stopPropagation(); setHoverIdx(i); }}
             onPointerOut={() => setHoverIdx(h => (h === i ? null : h))}
           >
-            <sphereGeometry args={[active ? 0.08 : 0.06, 16, 16]} />
+            {/* A control point sized for a cursor is smaller than the
+                fingertip trying to grab it, so touch gets a bigger sphere. */}
+            <sphereGeometry args={[(active ? 0.08 : 0.06) * (coarsePointer ? 1.8 : 1), 16, 16]} />
             <meshBasicMaterial color={dragIdx === i ? '#f59e0b' : '#3b82f6'} depthTest={false} transparent opacity={0.9} />
           </mesh>
         );
@@ -2002,6 +2061,17 @@ function App() {
   const [showApiRef, setShowApiRef] = useState(false);
   const [propertiesWidth, setPropertiesWidth] = useState(380);
   const [isLeftSidebarOpen, setIsLeftSidebarOpen] = useState(false);
+  const coarsePointer = useCoarsePointer();
+  /**
+   * Whether the properties inspector is showing as an overlay drawer.
+   *
+   * Only consulted below the `lg` breakpoint — at desktop width the inspector
+   * is a permanent column and this is ignored, so nothing here can change the
+   * desktop layout. It opens only when the toolbar button is pressed: on a
+   * phone the drawer covers the model, so selecting a body to *see* it would
+   * otherwise immediately hide it behind the panel describing it.
+   */
+  const [isPropertiesOpen, setIsPropertiesOpen] = useState(false);
   const [isSaveModalOpen, setIsSaveModalOpen] = useState(false);
   const [isImportStlModalOpen, setIsImportStlModalOpen] = useState(false);
   const [isLaserCutModalOpen, setIsLaserCutModalOpen] = useState(false);
@@ -2982,10 +3052,22 @@ function App() {
   useCsgAutoCompile();
 
   return (
-    <div className={`flex flex-col h-screen w-screen transition-colors duration-200 ${darkMode ? 'dark bg-slate-950 text-slate-100' : 'bg-slate-50 text-slate-900'} font-sans`}>
-      <header className="bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 px-3 md:px-6 py-2 flex items-center justify-between shadow-xs z-10 transition-colors">
+    /*
+      `h-dvh`, not `h-screen`: on a phone `100vh` is the viewport with the URL
+      bar hidden, so the foot of the app sat underneath the browser chrome and
+      could not be reached. On a desktop the two are the same number.
+    */
+    <div className={`flex flex-col h-dvh w-screen transition-colors duration-200 ${darkMode ? 'dark bg-slate-950 text-slate-100' : 'bg-slate-50 text-slate-900'} font-sans`}>
+      {/*
+        Below `lg` the bar wraps onto as many rows as it needs rather than
+        squeezing. Everything in here is a file operation, an export or a
+        simulation control — deciding on the operator's behalf that they will
+        not want to export an STL on a phone is how a mobile layout ends up
+        being a demo of the app rather than the app.
+      */}
+      <header className="bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 px-3 md:px-6 py-2 flex items-center justify-between shadow-xs z-10 transition-colors shrink-0 max-lg:flex-wrap max-lg:justify-start max-lg:gap-y-1.5">
         {/* Left: Logo, Title & Preset Selector */}
-        <div className="flex items-center gap-2 md:gap-4">
+        <div className="flex items-center gap-2 md:gap-4 min-w-0 max-lg:w-full">
           {/* Mobile Sidebar Toggle */}
           <button
             onClick={() => setIsLeftSidebarOpen(!isLeftSidebarOpen)}
@@ -3050,7 +3132,9 @@ function App() {
                 </g>
               </svg>
             </div>
-            <div>
+            {/* The mark alone identifies the app on a phone; the wordmark and
+                tagline are the first thing to give up the width. */}
+            <div className="hidden md:block">
               <div className="flex items-center gap-2">
                 <h1 className="text-base font-extrabold tracking-tight text-slate-900 dark:text-white font-sans">
                   Physbox <span className="text-blue-500 dark:text-blue-400 font-normal">Mesh</span>
@@ -3066,7 +3150,7 @@ function App() {
           <div className="h-5 w-px bg-slate-200 dark:bg-slate-800 hidden md:block" />
 
           {/* Preset Select Segmented Group */}
-          <div className="flex items-center bg-slate-100 dark:bg-slate-800/80 p-0.5 rounded-lg border border-slate-200/80 dark:border-slate-700/60 shadow-inner">
+          <div className="flex items-center min-w-0 max-lg:flex-1 bg-slate-100 dark:bg-slate-800/80 p-0.5 rounded-lg border border-slate-200/80 dark:border-slate-700/60 shadow-inner">
             {/* The select never *holds* the active preset: its value is always
                 the placeholder below, so picking any entry — including the one
                 already loaded — is a real change event and reloads the scene.
@@ -3080,7 +3164,7 @@ function App() {
                 if (v.startsWith('user:')) loadUserPresetWithCard(v);
                 else loadPresetWithCard(v);
               }}
-              className="bg-transparent text-slate-700 dark:text-slate-100 text-xs rounded-md block px-2 py-1 outline-none font-medium cursor-pointer border-none"
+              className="bg-transparent text-slate-700 dark:text-slate-100 text-xs rounded-md block px-2 py-1 outline-none font-medium cursor-pointer border-none max-lg:flex-1 max-lg:min-w-0"
             >
               <option value="" disabled hidden>{activePresetLabel}</option>
               <optgroup label="⬜ Built-in Presets" className="bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300">
@@ -3145,9 +3229,9 @@ function App() {
         </div>
 
         {/* Center/Right: Simulation Toolbar & Files */}
-        <div className="flex items-center gap-2 md:gap-3">
+        <div className="flex items-center gap-2 md:gap-3 min-w-0 max-lg:w-full max-lg:flex-wrap max-lg:justify-between max-lg:gap-y-1.5">
           {/* Simulation Controller Block */}
-          <div className="flex items-center bg-slate-100 dark:bg-slate-800/80 p-0.5 rounded-lg border border-slate-200/80 dark:border-slate-700/60 shadow-inner">
+          <div className="flex items-center max-lg:shrink-0 bg-slate-100 dark:bg-slate-800/80 p-0.5 rounded-lg border border-slate-200/80 dark:border-slate-700/60 shadow-inner">
             {/* Simulate / Stop */}
             <button 
               onClick={togglePlay}
@@ -3176,7 +3260,7 @@ function App() {
           </div>
 
           {/* Files Segmented Group */}
-          <div className="flex items-center bg-slate-100 dark:bg-slate-800/80 p-0.5 rounded-lg border border-slate-200/80 dark:border-slate-700/60 shadow-inner">
+          <div className="flex items-center max-lg:shrink-0 bg-slate-100 dark:bg-slate-800/80 p-0.5 rounded-lg border border-slate-200/80 dark:border-slate-700/60 shadow-inner">
             <button 
               onClick={handleSavePresetClick}
               className="flex items-center justify-center p-1 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 transition-colors focus:outline-none cursor-pointer"
@@ -3275,7 +3359,7 @@ function App() {
           </div>
 
           {/* Right Utilities (Dark Mode, Docs, Settings, Copilot, User Profile, GitHub) */}
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-1.5 max-lg:shrink-0">
             {/* Dark Mode Toggle - immediately left of Docs button */}
             <button
               onClick={toggleDarkMode}
@@ -3283,6 +3367,27 @@ function App() {
               title={darkMode ? "Switch to Light Mode" : "Switch to Dark Mode"}
             >
               {darkMode ? <Sun className="w-4 h-4 text-amber-500" /> : <Moon className="w-4 h-4 text-indigo-500 dark:text-indigo-400" />}
+            </button>
+
+            {/*
+              Properties inspector — a permanent column at `lg`, a drawer below
+              it, opened from here. The mirror of the hierarchy hamburger on the
+              other end of the bar: one button for the palette going in, one for
+              the inspector coming out. Disabled rather than hidden with nothing
+              selected, so the bar does not reflow as things are picked and
+              dropped, and the button says why it is dark.
+            */}
+            <button
+              onClick={() => setIsPropertiesOpen(!isPropertiesOpen)}
+              disabled={!selectedNode}
+              className={`lg:hidden flex items-center justify-center w-8 h-8 rounded-full border transition-colors focus:outline-none flex-shrink-0 cursor-pointer shadow-xs disabled:opacity-40 disabled:cursor-not-allowed ${
+                isPropertiesOpen
+                  ? 'bg-blue-100 border-blue-400 text-blue-700 dark:bg-blue-950 dark:border-blue-700 dark:text-blue-400'
+                  : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 bg-white dark:bg-slate-900'
+              }`}
+              title={selectedNode ? 'Properties' : 'Select a component to see its properties'}
+            >
+              <PanelRight className="w-4 h-4" />
             </button>
 
             {/* Docs (Info) */}
@@ -3341,7 +3446,11 @@ function App() {
       <div className="flex flex-1 overflow-hidden relative">
         {/* Global Settings */}
         {isSettingsOpen && (
-          <div className="absolute top-4 right-6 w-64 glass-panel rounded-lg p-4 z-30 shadow-lg border border-slate-200 dark:border-slate-800 bg-white/90 dark:bg-slate-900/90 text-slate-800 dark:text-slate-100">
+          /* Anchored to the settings button on a desktop. Below `lg` there is
+             nothing reliable to anchor to — the header wraps, so the button
+             moves — and a 16rem popover in the corner of a phone is mostly
+             off-screen anyway, so it becomes a centred sheet instead. */
+          <div className="absolute top-4 right-6 w-64 max-lg:inset-x-2 max-lg:right-auto max-lg:top-1/2 max-lg:-translate-y-1/2 max-lg:w-auto max-lg:max-h-[80dvh] max-lg:overflow-y-auto glass-panel rounded-lg p-4 z-30 max-lg:z-50 shadow-lg border border-slate-200 dark:border-slate-800 bg-white/90 dark:bg-slate-900/90 text-slate-800 dark:text-slate-100">
             <h3 className="font-semibold text-sm mb-4 flex items-center justify-between text-slate-800 dark:text-slate-100">
               <span className="flex items-center gap-2"><Settings className="w-4 h-4 text-slate-500 dark:text-slate-400" /> Environment</span>
               <button onClick={() => setSettingsOpen(false)}><X className="w-4 h-4 text-slate-400 dark:text-slate-500 hover:text-slate-600 dark:hover:text-slate-300 cursor-pointer" /></button>
@@ -3472,19 +3581,36 @@ function App() {
           </div>
         )}
 
-        {/* Mobile Sidebar Backdrop Scrim */}
+        {/* Mobile Sidebar Backdrop Scrim. Covers the workspace, not the whole
+            page: the header above it stays live, so the hamburger that opened
+            the drawer is still the thing that closes it. */}
         {isLeftSidebarOpen && (
-          <div 
+          <div
             onClick={() => setIsLeftSidebarOpen(false)}
-            className="fixed inset-0 bg-slate-900/20 backdrop-blur-xs z-10 md:hidden"
+            className="absolute inset-0 bg-slate-900/20 backdrop-blur-xs z-[115] md:hidden"
           />
         )}
 
-        {/* Left Sidebar */}
-        <aside className={`w-64 md:w-56 shrink-0 glass-panel border-r border-slate-200 dark:border-slate-800 flex flex-col p-4 bg-white/90 dark:bg-slate-900/90 overflow-y-auto transition-transform duration-200 ease-in-out fixed md:relative inset-y-14 md:inset-auto left-0 z-20 shadow-2xl md:shadow-none ${
+        {/* Left Sidebar.
+            `absolute inset-y-0` against the workspace, not `fixed inset-y-14`:
+            below `lg` the header wraps onto as many rows as its contents need,
+            so its height is not knowable here and anything pinned 3.5rem from
+            the top of the page tucks under a two-row navbar. */}
+        <aside className={`w-64 md:w-56 max-w-[85vw] shrink-0 glass-panel border-r border-slate-200 dark:border-slate-800 flex flex-col p-4 bg-white/90 dark:bg-slate-900/90 overflow-y-auto transition-transform duration-200 ease-in-out absolute md:relative inset-y-0 md:inset-auto left-0 z-20 max-md:z-[120] shadow-xl md:shadow-none ${
           isLeftSidebarOpen ? 'flex translate-x-0' : 'hidden md:flex -translate-x-full md:translate-x-0'
         }`}>
-          <h2 className="text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider mb-2.5">Hierarchy</h2>
+          <div className="flex items-center justify-between mb-2.5">
+            <h2 className="text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider">Hierarchy</h2>
+            {/* As an overlay the drawer covers the model, so it carries its own
+                way out rather than relying on the hamburger it came from. */}
+            <button
+              onClick={() => setIsLeftSidebarOpen(false)}
+              className="md:hidden p-1 -m-1 rounded text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+              title="Close the hierarchy panel"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
           <div className="flex flex-col gap-1.5 mb-6">
             <div 
               className={`px-3 py-1.5 rounded-md border cursor-pointer transition-colors shadow-sm flex items-center gap-1.5 ${
@@ -3505,7 +3631,16 @@ function App() {
           </div>
 
           <h2 className="text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider mb-1">Components</h2>
-          
+
+          {/* The palette is drag-and-drop with a mouse, which a finger cannot
+              do onto a canvas it cannot see behind the drawer. Tapping already
+              adds the part at the origin — it just needed saying. */}
+          {coarsePointer && (
+            <p className="text-[10px] text-slate-400 dark:text-slate-500 leading-tight mb-1.5">
+              Tap a part to drop it into the scene.
+            </p>
+          )}
+
           <div className="text-[10px] font-medium text-slate-500 dark:text-slate-400 mb-2.5 bg-slate-50 dark:bg-slate-950/40 px-2 py-1.5 rounded-lg border border-slate-200/50 dark:border-slate-800/50">
             Adding to: <span className="text-blue-600 dark:text-blue-400 font-semibold truncate block">{selectedNode && parentUnderSelected ? selectedNode.name : '🌍 Worldbody'}</span>
           </div>
@@ -4045,16 +4180,41 @@ function App() {
           ))}
         </main>
 
+        {/* Dimmer behind the inspector drawer. Only exists below `lg`, where
+            the inspector is an overlay; tapping the model puts it away. */}
+        {isPropertiesOpen && selectedNode && (
+          <div
+            className="lg:hidden absolute inset-0 z-[105] bg-slate-950/30"
+            onClick={() => setIsPropertiesOpen(false)}
+          />
+        )}
+
         {/* Contextual Properties Sidebar */}
         {selectedNode && (
-          <aside 
-            style={{ width: `${propertiesWidth}px` }} 
-            className="shrink-0 glass-panel border-l border-slate-200 dark:border-slate-800 flex flex-col p-4 z-20 bg-white/55 dark:bg-slate-900/55 overflow-y-auto relative"
+          /*
+            Below `lg` there is not room for a permanent 380px column beside a
+            3D viewport, so the inspector slides in over it instead.
+
+            Written as `max-lg:` overrides on top of the original classes, so
+            that at desktop width this element carries exactly what it always
+            did — in particular no stray transform, which would otherwise make
+            the aside a containing block and re-anchor the absolutely
+            positioned popovers inside it. The drag-to-resize width is an
+            inline style, so the mobile width has to out-rank it explicitly.
+          */
+          <aside
+            style={{ width: `${propertiesWidth}px` }}
+            className={`shrink-0 glass-panel border-l border-slate-200 dark:border-slate-800 flex flex-col p-4 z-20 bg-white/55 dark:bg-slate-900/55 overflow-y-auto relative max-lg:absolute max-lg:inset-y-0 max-lg:right-0 max-lg:z-[110] max-lg:w-80! max-lg:max-w-[80vw] max-lg:shadow-xl max-lg:bg-white/95 max-lg:dark:bg-slate-900/95 max-lg:transition-transform max-lg:duration-200 ${
+              // Below `lg` the drawer waits off the right-hand edge until it is
+              // asked for. `pointer-events-none` as well as the translate, so a
+              // panel parked off screen cannot swallow taps meant for the model.
+              isPropertiesOpen ? 'max-lg:translate-x-0' : 'max-lg:translate-x-full max-lg:pointer-events-none'
+            }`}
           >
             {/* Elegant Resize Handle */}
             <div
               onMouseDown={handleMouseDown}
-              className="absolute top-0 left-0 bottom-0 w-1.5 cursor-col-resize hover:bg-blue-500/20 active:bg-blue-500/40 transition-colors z-20 group hidden md:flex items-center justify-center"
+              className="absolute top-0 left-0 bottom-0 w-1.5 cursor-col-resize hover:bg-blue-500/20 active:bg-blue-500/40 transition-colors z-20 group hidden lg:flex items-center justify-center"
               title="Drag to resize panel"
             >
               <div className="w-[2px] h-8 bg-slate-300 dark:bg-slate-700 group-hover:bg-blue-500 group-active:bg-blue-600 rounded transition-colors" />
@@ -4062,7 +4222,19 @@ function App() {
 
             <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-4 flex items-center justify-between">
               <span className="flex items-center gap-2"><SlidersHorizontal className="w-4 h-4" /> Properties</span>
-              <button onClick={() => setSelectedNodeId(null)}><X className="w-4 h-4 text-slate-400 hover:text-slate-600" /></button>
+              {/* Closes the drawer and leaves the component selected: the top
+                  bar's bin, undo and the keyboard all act on the selection, so
+                  putting the panel away must not throw that away too. The
+                  desktop column has nowhere to go, so there its X deselects,
+                  exactly as it always did. */}
+              <button
+                onClick={() => setIsPropertiesOpen(false)}
+                className="lg:hidden cursor-pointer"
+                title="Close Properties"
+              >
+                <X className="w-4 h-4 text-slate-400 hover:text-slate-600" />
+              </button>
+              <button onClick={() => setSelectedNodeId(null)} className="hidden lg:block cursor-pointer" title="Deselect"><X className="w-4 h-4 text-slate-400 hover:text-slate-600" /></button>
             </h2>
             
             <div className="flex flex-col gap-4">
@@ -6722,7 +6894,7 @@ api.applyForce([force, 0, 0]);
         // Above the export modals (z-50), which render later in the DOM and
         // would otherwise paint over the docs they just opened.
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[60] flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl border border-slate-100 shadow-2xl max-w-2xl w-full max-h-[80vh] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+          <div className="bg-white rounded-2xl border border-slate-100 shadow-2xl max-w-2xl w-full max-h-[85dvh] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-200">
             {/* Modal Header */}
             <div className="px-6 py-4 border-b border-slate-150 flex items-center justify-between bg-slate-50">
               <div className="flex items-center gap-2">
@@ -6740,7 +6912,10 @@ api.applyForce([force, 0, 0]);
             {/* Modal Content Split */}
             <div className="flex flex-1 overflow-hidden min-h-0">
               {/* Tab Navigation */}
-              <div className="w-48 bg-slate-50 border-r border-slate-150 p-3 flex flex-col gap-1 shrink-0 overflow-y-auto">
+              {/* The tab rail keeps every section reachable on a phone rather
+                  than collapsing into a picker, but at a width that leaves the
+                  prose it navigates worth reading. */}
+              <div className="w-48 max-sm:w-28 bg-slate-50 border-r border-slate-150 p-3 max-sm:p-2 flex flex-col gap-1 shrink-0 overflow-y-auto">
                 {DOCS_TABS.map(({ group, items }) => (
                   <div key={group} className="flex flex-col gap-1 mb-1.5">
                     <span className="px-1 pt-1.5 text-[9px] font-bold uppercase tracking-wider text-slate-400">{group}</span>
@@ -6758,7 +6933,7 @@ api.applyForce([force, 0, 0]);
               </div>
 
               {/* Tab Panel */}
-              <div className="flex-1 p-6 overflow-y-auto">
+              <div className="flex-1 p-6 max-sm:p-4 overflow-y-auto min-w-0">
                 {docsTab === 'gravity' && (
                   <div className="flex flex-col gap-4">
                     <h3 className="font-bold text-slate-800 text-lg flex items-center gap-1.5">🪐 Gravity, Active Joints & Inertia</h3>
@@ -7403,9 +7578,11 @@ const wobble = Math.sin(api.getTime() * 4) * 3;`}
       />
 
       {/* Bottom Status Bar matching Etch */}
-      <footer className="h-8 w-full bg-white dark:bg-slate-950 border-t border-slate-200 dark:border-slate-800/80 px-4 flex items-center justify-between z-20 text-[11px] text-slate-500 dark:text-slate-400 font-mono select-none transition-colors">
+      {/* Below `lg` the bar wraps rather than squeezing — the scene metrics and
+          whether the simulation is running are both worth keeping. */}
+      <footer className="h-8 shrink-0 w-full bg-white dark:bg-slate-950 border-t border-slate-200 dark:border-slate-800/80 px-4 flex items-center justify-between z-20 text-[11px] text-slate-500 dark:text-slate-400 font-mono select-none transition-colors max-lg:h-auto max-lg:flex-wrap max-lg:justify-start max-lg:px-2 max-lg:py-1 max-lg:gap-x-3 max-lg:gap-y-1">
         {/* Left: Component & Node Metrics */}
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 max-lg:shrink-0">
           <div className="flex items-center gap-2">
             <span className="font-semibold text-slate-700 dark:text-slate-300">Components: {sceneGraph?.nodes?.length || 0}</span>
             <span>·</span>
@@ -7465,14 +7642,11 @@ const wobble = Math.sin(api.getTime() * 4) * 3;`}
           </div>
         </div>
 
-        {/* Right: MuJoCo Physics & Engine Status */}
-        <div className="flex items-center gap-3">
+        {/* Right: Simulation Status */}
+        <div className="flex items-center gap-3 max-lg:shrink-0">
           <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800">
             <span className={`w-2 h-2 rounded-full ${isPlaying ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400'}`}></span>
             <span className="text-slate-700 dark:text-slate-300 font-semibold">{isPlaying ? 'Simulation Running' : 'Simulation Paused'}</span>
-          </div>
-          <div className="text-slate-500 dark:text-slate-400">
-            MuJoCo WASM (60Hz)
           </div>
         </div>
       </footer>

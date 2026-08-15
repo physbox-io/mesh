@@ -1169,7 +1169,10 @@ If modifying the 3D scene graph, include the updated "nodes" array in \`\`\`json
   };
 
   return (
-    <aside className="w-full sm:w-96 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-l border-slate-200 dark:border-slate-800 flex flex-col h-full shrink-0 shadow-2xl z-40 absolute right-0 inset-y-0 sm:relative animate-in slide-in-from-right-8 duration-300">
+    /* `max-lg:z-[110]`: below `lg` this is an overlay like the properties
+       drawer, and the two share the right-hand edge — whichever was asked for
+       last has to be the one on top, not whichever happens to render later. */
+    <aside className="w-full sm:w-96 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-l border-slate-200 dark:border-slate-800 flex flex-col h-full shrink-0 shadow-2xl z-40 max-lg:z-[110] absolute right-0 inset-y-0 sm:relative animate-in slide-in-from-right-8 duration-300">
       {/* Header */}
       <div className="p-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between bg-slate-50/80 dark:bg-slate-950/20 shrink-0">
         <div className="flex items-center gap-2">

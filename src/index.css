@@ -12,7 +12,18 @@ html, body, #root {
   background-color: #f8fafc;
   color: #0f172a;
   overflow: hidden;
+  /* Stops a drag that starts near the top of the viewport from being taken
+     over by pull-to-refresh, which reloads the page and loses the scene. */
+  overscroll-behavior: none;
   transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+/* The browser must not treat a finger on the 3D viewport as a scroll or a
+   double-tap zoom — OrbitControls sets this on its own dom element, but the
+   R3F canvas is also the target of the object-drag handlers, which run before
+   the controls are ever connected. */
+main canvas {
+  touch-action: none;
 }
 
 html.dark, html.dark body, html.dark #root {
