@@ -1,5 +1,7 @@
 import type { SceneGraph, SceneNode, SceneGeom } from '../types/scene';
 import { generateCurveGeoms, generateWedgeMeshData, generateConeMeshData } from '../utils/geom';
+import { californiaReliefPreset } from './californiaRelief';
+import { megaBustStudioPreset } from './megaBustStudio';
 
 export const pendulumPreset: SceneGraph = {
   nodes: [
@@ -2995,6 +2997,16 @@ export const PRESETS = {
     name: 'Birdhouse (OpenSCAD)',
     emoji: '📐',
     scene: birdhouseScadPreset
+  },
+  california_relief: {
+    name: 'California Relief Map',
+    emoji: '🗺️',
+    scene: californiaReliefPreset
+  },
+  mega_bust_studio: {
+    name: 'Mega Bust & Stress Studio',
+    emoji: '🗿',
+    scene: megaBustStudioPreset
   }
 };
 

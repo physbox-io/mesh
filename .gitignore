@@ -25,5 +25,7 @@ scratch
 *.sw?
 
 enclosures/**
+# Downloaded DEM tiles and boundary data for scripts/gen_california_relief.py
+scripts/.cache/
 .mcp.json
 .agents/skills/physbox-mcp-wsl

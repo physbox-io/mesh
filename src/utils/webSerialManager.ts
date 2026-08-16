@@ -4,6 +4,8 @@
 // and interactive pauses for Manual Tool Changes (M6) and Material Swaps (M0).
 // ---------------------------------------------------------------------------
 
+import { postMachineTelemetry } from './apiClient';
+
 export type MachineStatus =
   | 'DISCONNECTED'
   | 'CONNECTING'
@@ -25,6 +27,66 @@ export interface MachineState {
   progressPercent: number;
   pauseMessage?: string;
   lastError?: string;
+  /** Live feed and spindle, as reported in GRBL's `FS:` status field. */
+  feedRate: number;
+  spindleSpeed: number;
+}
+
+/**
+ * How often a running job's position is published to api.physbox.io.
+ *
+ * The dashboard is watched by someone who has walked away from the machine, so
+ * it wants seconds of latency, not milliseconds — and the status poll below
+ * runs at 5 Hz, so publishing on every state change would be a request every
+ * 200 ms for the length of a job. A relief carve runs for hours.
+ */
+const TELEMETRY_INTERVAL_MS = 2000;
+
+/** One prepared program line: what the controller gets, and what it was for. */
+export interface JobLine {
+  /** The command with its comment stripped. */
+  code: string;
+  /** The trailing comment, if the exporter wrote one. Never sent. */
+  note: string;
+}
+
+/**
+ * Strips a program down to the lines a controller should receive.
+ *
+ * GRBL's serial input buffer is 128 bytes and the stream is paced one `ok` at a
+ * time, so a comment sent down the wire costs a slot that a move could have had.
+ * A relief carve is tens of thousands of lines and stalls the spindle in the cut
+ * if it streams slower than it mills, which is the whole reason not to send
+ * text the machine will only throw away.
+ *
+ * The comments are kept rather than dropped, because the pause prompts are
+ * written in them: the exporter is the only thing that knows a `T2 M6` means the
+ * 3.175 mm ball nose.
+ */
+export function prepareJobLines(gcode: string): JobLine[] {
+  const out: JobLine[] = [];
+  for (const raw of gcode.split('\n')) {
+    const semi = raw.indexOf(';');
+    const code = (semi < 0 ? raw : raw.slice(0, semi)).trim();
+    if (!code) continue;
+    out.push({ code, note: semi < 0 ? '' : raw.slice(semi + 1).trim() });
+  }
+  return out;
+}
+
+/**
+ * Whether a line is a deliberate stop the operator has to act on.
+ *
+ * Matched on word boundaries rather than by substring: `M30` ends the program
+ * and `M03` starts the spindle, and a job that paused for either would sit
+ * waiting for a tool change that never comes, at the end of a carve that is
+ * already finished.
+ */
+export function classifyJobLine(line: string): 'tool-change' | 'stop' | 'motion' {
+  const code = line.toUpperCase();
+  if (/\bM0*6\b/.test(code)) return 'tool-change';
+  if (/\bM0*[01]\b/.test(code)) return 'stop';
+  return 'motion';
 }
 
 export type MachineStateListener = (state: MachineState) => void;
@@ -37,6 +99,8 @@ class WebSerialManager {
   private statusPollTimer: any = null;
 
   private gcodeQueue: string[] = [];
+  /** Trailing comments, index-aligned with `gcodeQueue`, for the pause prompts. */
+  private gcodeNotes: string[] = [];
   private currentQueueIndex = 0;
   private isJobRunning = false;
   private isPaused = false;
@@ -60,9 +124,16 @@ class WebSerialManager {
     currentLine: 0,
     totalLines: 0,
     progressPercent: 0,
+    feedRate: 0,
+    spindleSpeed: 0,
   };
 
   private listeners: Set<MachineStateListener> = new Set();
+
+  /** When the last telemetry POST went out, and whether one is still in flight. */
+  private lastTelemetryAt = 0;
+  private telemetryInFlight = false;
+  private lastTelemetryStatus: MachineStatus | null = null;
 
   public isSupported(): boolean {
     return typeof navigator !== 'undefined' && 'serial' in navigator;
@@ -81,6 +152,55 @@ class WebSerialManager {
   private notify() {
     const currentState = this.getState();
     this.listeners.forEach(l => l(currentState));
+    this.publishTelemetry(currentState);
+  }
+
+  /**
+   * Streams machine state to api.physbox.io so the remote dashboard has
+   * something to show.
+   *
+   * `RemoteMachiningModal` has always been able to read this endpoint; until now
+   * nothing in this app ever wrote to it, so the dashboard only ever showed
+   * machines driven by the other apps in the ecosystem.
+   *
+   * Three things keep it from becoming a firehose. Nothing is sent while
+   * disconnected, because a browser tab sitting on the editor is not a machine.
+   * Between sends there is a floor of `TELEMETRY_INTERVAL_MS`, so the 5 Hz status
+   * poll does not turn into 5 Hz of HTTP. And a status *change* — the alarm, the
+   * tool-change pause, the end of the job — jumps that floor, because those are
+   * exactly the moments the person watching the dashboard is waiting for, and
+   * making them wait out the interval is how a two-second delay becomes the
+   * reason nobody trusts the dashboard.
+   */
+  private publishTelemetry(state: MachineState) {
+    if (!state.connected) return;
+
+    const now = Date.now();
+    const changed = state.status !== this.lastTelemetryStatus;
+    if (!changed && now - this.lastTelemetryAt < TELEMETRY_INTERVAL_MS) return;
+    // One in flight at a time: a stalled network would otherwise queue up a
+    // backlog of stale positions that all land at once when it recovers.
+    if (this.telemetryInFlight) return;
+
+    this.lastTelemetryAt = now;
+    this.lastTelemetryStatus = state.status;
+    this.telemetryInFlight = true;
+
+    void postMachineTelemetry('physics', {
+      status: state.status,
+      jobName: state.portName,
+      progressPercent: state.progressPercent,
+      currentLine: state.currentLine,
+      totalLines: state.totalLines,
+      // Work coordinates, not machine: the dashboard is read against the job,
+      // and the job was posted about the work origin.
+      xyz: { ...state.wpos },
+      feedRate: state.feedRate,
+      spindleSpeed: state.spindleSpeed,
+      lastError: state.lastError ?? null,
+    }).finally(() => {
+      this.telemetryInFlight = false;
+    });
   }
 
   private updateState(patch: Partial<MachineState>) {
@@ -187,27 +307,7 @@ class WebSerialManager {
 
     // GRBL Status Parsing: <Idle|MPos:0.000,0.000,0.000|FS:0,0|WCO:0.000,0.000,0.000>
     if (line.startsWith('<') && line.endsWith('>')) {
-      const body = line.slice(1, -1);
-      const parts = body.split('|');
-      const grblState = parts[0];
-
-      if (grblState === 'Alarm') {
-        this.updateState({ status: 'ALARM' });
-      }
-
-      for (const part of parts) {
-        if (part.startsWith('MPos:')) {
-          const coords = part.slice(5).split(',').map(Number);
-          if (coords.length >= 3) {
-            this.updateState({ mpos: { x: coords[0], y: coords[1], z: coords[2] } });
-          }
-        } else if (part.startsWith('WPos:')) {
-          const coords = part.slice(5).split(',').map(Number);
-          if (coords.length >= 3) {
-            this.updateState({ wpos: { x: coords[0], y: coords[1], z: coords[2] } });
-          }
-        }
-      }
+      this.parseStatusReport(line.slice(1, -1));
       return;
     }
 
@@ -246,6 +346,63 @@ class WebSerialManager {
       for (const w of waiters) w();
     }
   }
+
+  /**
+   * Reads one `<...>` status report into machine state.
+   *
+   * The two position fields are alternatives, not a pair: `$10` selects which
+   * one the controller sends, and the default build sends `MPos` only. Work
+   * position therefore has to be *derived* — machine position minus the work
+   * coordinate offset — rather than waited for, which is why `wpos` used to sit
+   * at zero for the whole of a job on a stock GRBL.
+   *
+   * `WCO` itself only rides along every tenth report or so, because it rarely
+   * changes and the report is kept short, so the last one seen is retained.
+   */
+  private parseStatusReport(body: string) {
+    const parts = body.split('|');
+    // 'Hold:0' and 'Door:1' carry a sub-state after the colon.
+    if (parts[0].split(':')[0] === 'Alarm') this.updateState({ status: 'ALARM' });
+
+    let mpos: [number, number, number] | null = null;
+    let wpos: [number, number, number] | null = null;
+    const patch: Partial<MachineState> = {};
+
+    for (const part of parts.slice(1)) {
+      const sep = part.indexOf(':');
+      if (sep < 0) continue;
+      const key = part.slice(0, sep);
+      const nums = part.slice(sep + 1).split(',').map(Number);
+
+      if (key === 'MPos' && nums.length >= 3) mpos = [nums[0], nums[1], nums[2]];
+      else if (key === 'WPos' && nums.length >= 3) wpos = [nums[0], nums[1], nums[2]];
+      else if (key === 'WCO' && nums.length >= 3) this.workOffset = [nums[0], nums[1], nums[2]];
+      // `FS:500,12000` is feed and spindle; a controller built without the
+      // variable-spindle option reports `F:500` and no S at all.
+      else if (key === 'FS' && nums.length >= 2) {
+        patch.feedRate = nums[0] || 0;
+        patch.spindleSpeed = nums[1] || 0;
+      } else if (key === 'F' && nums.length >= 1) {
+        patch.feedRate = nums[0] || 0;
+      }
+    }
+
+    const [ox, oy, oz] = this.workOffset;
+    if (mpos) {
+      patch.mpos = { x: mpos[0], y: mpos[1], z: mpos[2] };
+      patch.wpos = { x: mpos[0] - ox, y: mpos[1] - oy, z: mpos[2] - oz };
+    } else if (wpos) {
+      patch.wpos = { x: wpos[0], y: wpos[1], z: wpos[2] };
+      patch.mpos = { x: wpos[0] + ox, y: wpos[1] + oy, z: wpos[2] + oz };
+    }
+
+    // One update for the whole report: each one notifies every listener, and
+    // the telemetry publisher hangs off that.
+    this.updateState(patch);
+  }
+
+  /** Last `WCO` seen, retained between the reports that carry one. */
+  private workOffset: [number, number, number] = [0, 0, 0];
 
   /**
    * Sends one line and waits for the controller to accept it, so a probing
@@ -335,7 +492,9 @@ class WebSerialManager {
   public startJob(gcode: string) {
     if (!this.state.connected) return;
 
-    this.gcodeQueue = gcode.split('\n').map(l => l.trim()).filter(l => l.length > 0 && !l.startsWith(';'));
+    const prepared = prepareJobLines(gcode);
+    this.gcodeQueue = prepared.map(l => l.code);
+    this.gcodeNotes = prepared.map(l => l.note);
     this.currentQueueIndex = 0;
     this.isJobRunning = true;
     this.isPaused = false;
@@ -361,25 +520,62 @@ class WebSerialManager {
     }
 
     const line = this.gcodeQueue[this.currentQueueIndex];
+    const note = this.gcodeNotes[this.currentQueueIndex] || '';
     this.currentQueueIndex++;
 
     const progressPercent = Math.round((this.currentQueueIndex / this.gcodeQueue.length) * 100);
     this.updateState({ currentLine: this.currentQueueIndex, progressPercent });
 
-    // Handle Tool Change (T<N> M6) or Material Swap (M0) Pauses
-    if (line.includes('M6') || line.startsWith('T') && line.includes('M6')) {
-      this.triggerPause('PAUSED_TOOL', `Tool Change Required (${line}). Replace tool and zero Z before resuming.`);
+    // A tool change or a programmed stop is the operator's cue, not a fault.
+    // Neither is sent on: GRBL rejects M6 unless it was built with it, and the
+    // pause has already been taken here.
+    const kind = classifyJobLine(line);
+
+    if (kind === 'tool-change') {
+      this.triggerPause('PAUSED_TOOL', this.describeToolChange(line, note));
       return;
     }
 
-    if (line.startsWith('M0') || line.includes('PAUSE: Insert Material Sheet')) {
-      const match = line.match(/Sheet (\d+ of \d+)/);
-      const msg = match ? `Insert Material Sheet ${match[1]}` : 'Insert Next Material Sheet into cutter.';
-      this.triggerPause('PAUSED_MATERIAL', msg);
+    if (kind === 'stop') {
+      // The contour-slice export puts one of these between sheets, and says
+      // which sheet in the comment.
+      const sheet = note.match(/Sheet (\d+ of \d+)/);
+      if (sheet) {
+        this.triggerPause('PAUSED_MATERIAL', `Insert Material Sheet ${sheet[1]}`);
+      } else {
+        this.triggerPause('PAUSED_MATERIAL', note || 'Programmed stop. Resume when ready.');
+      }
       return;
     }
 
     await this.sendLine(line);
+  }
+
+  /**
+   * Builds the tool-change prompt.
+   *
+   * "Tool Change Required (T2 M6)" tells the operator nothing they can act on —
+   * only the document knows what T2 is, and standing at the machine holding two
+   * end mills is the worst moment to have to go and look. So the exporter's own
+   * comment for the line is carried through, and the spindle speed is read out
+   * of the `M3 S` that follows, because on a router without closed-loop control
+   * that number is a dial the operator has to turn by hand.
+   */
+  private describeToolChange(line: string, note: string): string {
+    const tool = line.match(/\bT(\d+)/);
+    const what = note || (tool ? `tool T${tool[1]}` : 'the next tool');
+
+    let rpm = '';
+    for (let i = this.currentQueueIndex; i < Math.min(this.gcodeQueue.length, this.currentQueueIndex + 5); i++) {
+      const m = this.gcodeQueue[i].match(/\bM0*3\b.*?\bS(\d+)/i);
+      if (m) {
+        const s = parseInt(m[1], 10);
+        if (s > 0) rpm = `, set the spindle to ${s.toLocaleString()} RPM`;
+        break;
+      }
+    }
+
+    return `Tool change: ${what}${rpm}, then re-zero Z on the new tool before resuming.`;
   }
 
   /** Triggers an interactive pause for Tool or Material Changes. */

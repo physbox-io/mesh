@@ -28,6 +28,7 @@ import { MIN_MAX_TOKENS, MAX_MAX_TOKENS, readMaxTokens, writeMaxTokens } from '.
 import { PrintAnalysisOverlay } from './components/PrintAnalysisOverlay';
 import { PrintAnalysisHUD } from './components/PrintAnalysisHUD';
 import { createHeatSetBossNode, createHexNutTrapNode, createBearingPocketNode, createDShaftHubNode, createCounterboreHoleNode } from './utils/hardwareComponents';
+import { createPrintInspectionMaterial } from './utils/printShaders';
 
 // Simple robust markdown parser to convert basic markdown text to safe HTML
 // Markdown parser for note cards
@@ -606,6 +607,22 @@ const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, selectedN
     };
   }, [color, isSelected, alpha]);
 
+  const shadingMode = useStore(state => state.shadingMode);
+  const overhangThresholdAngle = useStore(state => state.overhangThresholdAngle);
+  const zSliceEnabled = useStore(state => state.zSliceEnabled);
+  const zSliceHeight = useStore(state => state.zSliceHeight);
+
+  const customShaderMaterial = useMemo(() => {
+    if (shadingMode === 0 && !zSliceEnabled) return null;
+    return createPrintInspectionMaterial({
+      shadingMode,
+      overhangThreshold: overhangThresholdAngle,
+      enableSlice: zSliceEnabled,
+      sliceZ: zSliceHeight,
+      baseColor: materialProps.color
+    });
+  }, [shadingMode, overhangThresholdAngle, zSliceEnabled, zSliceHeight, materialProps.color]);
+
   // Handlers for physical spring dragging, mapped from Three.js coordinates to MuJoCo coordinate space
   const setOrbitEnabled = useOrbitEnable();
   const dragHandlers = useMemo(() => ({
@@ -780,22 +797,17 @@ const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, selectedN
 
   if (type === 'mesh') {
     if (!meshBufferGeometry) return null;
+    const renderedMaterial = customShaderMaterial ? (
+      <primitive object={customShaderMaterial} attach="material" />
+    ) : (
+      <meshStandardMaterial key={alpha < 1 ? 'blend' : 'solid'} {...materialProps} side={THREE.FrontSide} />
+    );
+
     if (isDynamic) {
-      // Dynamic mesh: transform tracked from MuJoCo via geom_xpos/geom_xmat (Z-up coords, handled by parent group rotation).
-      // Deliberately FrontSide (not DoubleSide): these come from OpenSCAD's
-      // CSG boolean STL export (difference/union/intersection), which is
-      // always a closed, watertight solid in principle — you never see its
-      // inside from outside the shape. CSG boundaries commonly leave
-      // imperfect/ambiguous face winding, and DoubleSide renders those
-      // back-facing (inverted-normal) triangles too; since they face away
-      // from the light they render solid black, and they z-fight with the
-      // correctly-lit front face at the same depth — the "black flashing"
-      // seen on OpenSCAD-compiled shapes. FrontSide only ever draws the
-      // correctly-wound outer surface, which is all a closed solid needs.
       return (
         <group name={nodeId} ref={meshRef} position={initialPos} quaternion={new THREE.Quaternion(...initialQuat)}>
           <mesh castShadow receiveShadow geometry={meshBufferGeometry} {...dragHandlers}>
-            <meshStandardMaterial key={alpha < 1 ? 'blend' : 'solid'} {...materialProps} side={THREE.FrontSide} />
+            {renderedMaterial}
           </mesh>
         </group>
       );
@@ -804,7 +816,7 @@ const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, selectedN
     return (
       <group name={nodeId}>
         <mesh castShadow receiveShadow geometry={meshBufferGeometry} {...dragHandlers}>
-          <meshStandardMaterial key={alpha < 1 ? 'blend' : 'solid'} {...materialProps} side={THREE.DoubleSide} />
+          {renderedMaterial}
         </mesh>
       </group>
     );
@@ -813,6 +825,12 @@ const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, selectedN
   if (geomId === -1 || !geometryArgs || geometryArgs.length === 0 || geometryArgs.some(arg => arg === undefined || isNaN(arg))) {
     return null;
   }
+
+  const renderedGeomMaterial = customShaderMaterial ? (
+    <primitive object={customShaderMaterial} attach="material" />
+  ) : (
+    <meshStandardMaterial key={alpha < 1 ? 'blend' : 'solid'} {...materialProps} />
+  );
 
   return (
     <group
@@ -824,36 +842,36 @@ const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, selectedN
       {node?.isWedge ? (
         <mesh castShadow receiveShadow {...dragHandlers}>
           <WedgeGeometry width={node.width || 2.0} depth={node.depth || 1.0} height={node.height || 0.5} />
-          <meshStandardMaterial key={alpha < 1 ? 'blend' : 'solid'} {...materialProps} />
+          {renderedGeomMaterial}
         </mesh>
       ) : type === 'sphere' ? (
         <mesh castShadow receiveShadow {...dragHandlers}>
           <sphereGeometry args={geometryArgs as any} />
-          <meshStandardMaterial key={alpha < 1 ? 'blend' : 'solid'} {...materialProps} />
+          {renderedGeomMaterial}
         </mesh>
       ) : type === 'box' ? (
         <>
           <mesh castShadow receiveShadow {...dragHandlers}>
             <boxGeometry args={geometryArgs as any} />
-            <meshStandardMaterial key={alpha < 1 ? 'blend' : 'solid'} {...materialProps} />
+            {renderedGeomMaterial}
           </mesh>
         </>
       ) : type === 'ellipsoid' ? (
         <mesh castShadow receiveShadow scale={[geometryArgs[0], geometryArgs[1], geometryArgs[2]]} {...dragHandlers}>
           <sphereGeometry args={[1, 32, 32]} />
-          <meshStandardMaterial key={alpha < 1 ? 'blend' : 'solid'} {...materialProps} />
+          {renderedGeomMaterial}
         </mesh>
       ) : null}
       {type === 'capsule' && (
         <mesh castShadow receiveShadow rotation={[Math.PI / 2, 0, 0]} {...dragHandlers}>
           <capsuleGeometry args={geometryArgs as any} />
-          <meshStandardMaterial key={alpha < 1 ? 'blend' : 'solid'} {...materialProps} />
+          {renderedGeomMaterial}
         </mesh>
       )}
       {type === 'cylinder' && (
         <mesh castShadow receiveShadow rotation={[Math.PI / 2, 0, 0]} {...dragHandlers}>
           <cylinderGeometry args={[geometryArgs[0], geometryArgs[0], geometryArgs[1] * 2, 32]} />
-          <meshStandardMaterial key={alpha < 1 ? 'blend' : 'solid'} {...materialProps} />
+          {renderedGeomMaterial}
         </mesh>
       )}
     </group>
@@ -2298,6 +2316,9 @@ function App() {
     gravityZ, windX, windY, density, floorFriction, floorBounce, setEnvironment,
     cameraView, setCameraView,
     printAnalysisEnabled, togglePrintAnalysis,
+    shadingMode, setShadingMode,
+    zSliceEnabled, setZSliceEnabled,
+    zSliceHeight, setZSliceHeight,
     sceneGraph, selectedNodeId, setSelectedNodeId,
     updateNodeGeom, updateNodeJoint, updateGearTeeth, addPusherPeg, deletePusherPeg, updatePusherPeg, addComponent, loadPreset, updateScene,
     resetSimulation, updateNodePos,
@@ -4160,6 +4181,47 @@ function App() {
               <Printer className="w-3 h-3" />
               Weak Spots
             </button>
+
+            {/* GPU Shading Mode & 3D Print Overhang Selector */}
+            <div className="h-4 w-px bg-slate-300 dark:bg-slate-700 mx-1" />
+            <select
+              value={shadingMode}
+              onChange={(e) => setShadingMode(Number(e.target.value))}
+              className="bg-transparent text-[10px] font-bold text-slate-700 dark:text-slate-200 border-none outline-none cursor-pointer pr-1"
+              title="GPU Shading & Inspection Mode"
+            >
+              <option value={0} className="dark:bg-slate-900">Standard PBR</option>
+              <option value={1} className="dark:bg-slate-900">MatCap: Studio Clay</option>
+              <option value={2} className="dark:bg-slate-900">MatCap: SLA Resin</option>
+              <option value={3} className="dark:bg-slate-900">MatCap: Cast Bronze</option>
+              <option value={4} className="dark:bg-slate-900">GPU Overhang (&gt;45° Red Alert)</option>
+            </select>
+
+            <button
+              onClick={() => setZSliceEnabled(!zSliceEnabled)}
+              className={`px-2 py-1 rounded text-[10px] font-bold tracking-wide transition-all cursor-pointer flex items-center gap-1 ${
+                zSliceEnabled
+                  ? 'bg-orange-500 text-white shadow-xs'
+                  : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+              }`}
+              title="Toggle Dynamic Z-Slicing Plane"
+            >
+              <Scissors className="w-3 h-3" />
+              Z-Slice
+            </button>
+
+            {zSliceEnabled && (
+              <input
+                type="range"
+                min="0"
+                max="0.25"
+                step="0.002"
+                value={zSliceHeight}
+                onChange={(e) => setZSliceHeight(parseFloat(e.target.value))}
+                className="w-20 accent-orange-500 cursor-pointer h-1.5"
+                title={`Z-Slice Height: ${(zSliceHeight * 1000).toFixed(0)}mm`}
+              />
+            )}
           </div>
 
           {/* Floating Mechanical & 3D Print Failure HUD */}

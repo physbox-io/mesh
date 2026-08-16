@@ -9,7 +9,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "export:presets": "npx vite-node scripts/export-presets.ts"
   },
   "dependencies": {
     "@mujoco/mujoco": "^3.8.1",

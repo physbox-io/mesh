@@ -350,6 +350,14 @@ export interface PhysicsState {
   isSettingsOpen: boolean;
   cameraView: 'perspective' | 'topDown';
   printAnalysisEnabled: boolean;
+  shadingMode: number; // 0: PBR, 1: Clay, 2: Resin, 3: Bronze, 4: Overhang Heatmap
+  overhangThresholdAngle: number;
+  zSliceEnabled: boolean;
+  zSliceHeight: number;
+  setShadingMode: (mode: number) => void;
+  setOverhangThresholdAngle: (angle: number) => void;
+  setZSliceEnabled: (enabled: boolean) => void;
+  setZSliceHeight: (height: number) => void;
   // When set, CameraController points the camera at this explicit pose instead
   // of the cameraView preset. Position/target are in MuJoCo world space (same
   // convention as every other pos field in the app) — CameraController converts
@@ -627,6 +635,14 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   isSettingsOpen: false,
   cameraView: 'perspective',
   printAnalysisEnabled: false,
+  shadingMode: 0,
+  overhangThresholdAngle: 45,
+  zSliceEnabled: false,
+  zSliceHeight: 0.1,
+  setShadingMode: (mode) => set({ shadingMode: mode }),
+  setOverhangThresholdAngle: (angle) => set({ overhangThresholdAngle: angle }),
+  setZSliceEnabled: (enabled) => set({ zSliceEnabled: enabled }),
+  setZSliceHeight: (height) => set({ zSliceHeight: height }),
   cameraOverride: null,
   mcpActiveCount: 0,
   scadCompileCount: 0,
