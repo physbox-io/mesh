@@ -9,6 +9,7 @@ import type { SceneGraph } from '../types/scene';
 import {
   generateReliefCarveGcode,
   DEFAULT_RELIEF_OPTIONS,
+  recommendReliefTooling,
   type ReliefCarveOptions,
   type ReliefCarveResult,
 } from '../utils/reliefCarveExporter';
@@ -303,6 +304,22 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
     });
   }, [isOpen, scene, settled, probedGrid]);
 
+  // Tooling is a function of the carve, not of the model, so it is derived from
+  // what the carve actually came out as — the relief's real depth and the plan
+  // it landed on — rather than shipped alongside the mesh.
+  const applyRecommendedTooling = () => {
+    if (!result?.success) return;
+    setOptions((prev) => ({
+      ...prev,
+      ...recommendReliefTooling({
+        reliefDepthMm: result.reliefDepthMm,
+        planWidthMm: result.carveBounds.maxX - result.carveBounds.minX,
+        planDepthMm: result.carveBounds.maxY - result.carveBounds.minY,
+        spindleRpm: prev.spindleRpm,
+      }),
+    }));
+  };
+
   if (!isOpen) return null;
 
   const stats = probedGrid ? getGridStats(probedGrid) : null;
@@ -413,6 +430,30 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
               </Field>
 
               <Field
+                label="Height Scale"
+                hint="Fill Depth stretches the model's height range onto the relief depth, so the carve is always exactly that deep — but Z is then unrelated to X and Y, and fitting the model onto smaller stock shrinks the plan while leaving the height alone, which multiplies the exaggeration by the same factor. Model Proportions puts Z on the plan scale instead, so the carve keeps the shape the model was authored with and the exaggeration is the number you set, not one that falls out of the stock size."
+              >
+                <Segmented
+                  value={options.verticalScaleMode}
+                  onChange={(v) => set('verticalScaleMode', v)}
+                  options={[['fill', 'Fill Depth'], ['proportional', 'Model Proportions']] as const}
+                />
+              </Field>
+
+              <Field
+                label="Exaggeration (×)"
+                hint="How much the height is stretched relative to the plan when using Model Proportions. 1 is the model's own shape. Terrain wants more than that — real mountains over a map-sized plan are a flat board — but the exaggeration stays what you asked for instead of drifting with the stock size."
+              >
+                <NumberInput
+                  step="0.5" min={0.01} max={100}
+                  value={options.verticalExaggeration}
+                  onChange={(v) => set('verticalExaggeration', v)}
+                  className={inputClass}
+                  disabled={options.verticalScaleMode !== 'proportional'}
+                />
+              </Field>
+
+              <Field
                 label="Relief Depth (mm)"
                 hint="How deep the lowest point of the carve sits below the top face. The model's whole height is compressed into this — that compression is what makes it a relief instead of a full 3D machining job."
               >
@@ -481,7 +522,18 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
 
           {/* Finishing */}
           <div className={sectionClass}>
-            <h3 className={sectionTitleClass}>Finishing Pass</h3>
+            <div className="flex items-center justify-between gap-4">
+              <h3 className={sectionTitleClass}>Finishing Pass</h3>
+              <button
+                type="button"
+                onClick={applyRecommendedTooling}
+                disabled={!result?.success}
+                title="Pick bits, stepdowns and feeds that suit this relief's depth and size"
+                className="text-xs px-2 py-1 rounded border border-neutral-600 hover:bg-neutral-700 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                Suggest tooling
+              </button>
+            </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-4">
               <Field
                 className="lg:col-span-2"
@@ -503,6 +555,30 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                   step="0.1" min={0.1} max={30}
                   value={options.finishingToolDiaMm}
                   onChange={(v) => set('finishingToolDiaMm', v)}
+                  className={inputClass}
+                />
+              </Field>
+
+              <Field
+                className="lg:col-span-2"
+                label="Depth Strategy"
+                hint="One Sweep is depth-first: each point is cut to its final height the first time the raster reaches it. It is the quicker one, and the right choice when a roughing pass has already taken the waste out or the relief is shallow. Layered repeats the raster at lower and lower limits so the bit never has to swallow the whole relief at once — slower, but it is what keeps a small cutter alive when the finishing pass is clearing the relief on its own. Auto picks One Sweep when roughing is on and Layered when it is off."
+              >
+                <Segmented
+                  value={options.finishingDepthMode}
+                  onChange={(v) => set('finishingDepthMode', v)}
+                  options={[['auto', 'Auto'], ['single', 'One Sweep'], ['layered', 'Layered']] as const}
+                />
+              </Field>
+
+              <Field
+                label="Stepdown (mm)"
+                hint="Most depth one layered sweep may take. 0 uses the bit diameter. Ignored when the depth strategy is One Sweep."
+              >
+                <NumberInput
+                  step="0.5" min={0} max={20}
+                  value={options.finishingStepdownMm}
+                  onChange={(v) => set('finishingStepdownMm', v)}
                   className={inputClass}
                 />
               </Field>
@@ -554,6 +630,79 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                   step="50" min={10} max={2000} integer
                   value={options.finishingPlungeRate}
                   onChange={(v) => set('finishingPlungeRate', v)}
+                  className={inputClass}
+                />
+              </Field>
+
+              <Field
+                className="lg:col-span-2"
+                label="Shank & Holder Clearance"
+                hint="A bit is only slim for the length of its flutes — above that is a fatter shank, and above that the collet nut. With this on, the path is held clear of anything those would hit, so a pocket the bit cannot physically reach comes out with material left standing. Turn it off and only the cutting end is checked: the job will cut the pocket, by dragging the shank through the wall."
+              >
+                <Segmented
+                  value={options.toolBodyClearance ? 'on' : 'off'}
+                  onChange={(v) => set('toolBodyClearance', v === 'on')}
+                  options={[['on', 'Keep Clear'], ['off', 'Flutes Only']] as const}
+                />
+              </Field>
+
+              <Field
+                label="Shank Ø (mm)"
+                hint="Diameter of the finishing bit above its flutes. 0 assumes the usual: bits under 3.175 mm are ground on a 3.175 mm blank, anything bigger is its own diameter."
+              >
+                <NumberInput
+                  step="0.1" min={0} max={30}
+                  value={options.finishingShankDiaMm}
+                  onChange={(v) => set('finishingShankDiaMm', v)}
+                  className={inputClass}
+                />
+              </Field>
+
+              <Field
+                label="Flute Length (mm)"
+                hint="How far up the finishing bit the cutting edges actually run — below this it cuts, above it only rubs. 0 assumes three diameters, which is about what catalogue bits carry."
+              >
+                <NumberInput
+                  step="1" min={0} max={100}
+                  value={options.finishingFluteLengthMm}
+                  onChange={(v) => set('finishingFluteLengthMm', v)}
+                  className={inputClass}
+                />
+              </Field>
+
+              <Field
+                label="Stickout (mm)"
+                hint="Tip of the tool to the face of the collet nut. Together with the holder diameter it is what decides whether the nut clears a tall feature standing next to a deep cut. 0 leaves the holder unchecked."
+              >
+                <NumberInput
+                  step="1" min={0} max={200}
+                  value={options.toolStickoutMm}
+                  onChange={(v) => set('toolStickoutMm', v)}
+                  className={inputClass}
+                />
+              </Field>
+
+              <Field
+                label="Holder Ø (mm)"
+                hint="Widest part of the collet nut or tool holder — about 19 mm for ER11, 28 mm for ER16. 0 leaves the holder unchecked."
+              >
+                <NumberInput
+                  step="1" min={0} max={200}
+                  value={options.holderDiaMm}
+                  onChange={(v) => set('holderDiaMm', v)}
+                  className={inputClass}
+                />
+              </Field>
+
+              <Field
+                className="lg:col-span-2"
+                label="Lead-In Angle (°)"
+                hint="How steeply the cutter descends into the material at the head of a pass. A bit cuts badly straight down — that is the move that snaps small ones — so it ramps in along the path instead, then backs up to clear what the ramp rode over. 0 goes back to plunging straight down."
+              >
+                <NumberInput
+                  step="5" min={0} max={45}
+                  value={options.leadInAngleDeg}
+                  onChange={(v) => set('leadInAngleDeg', v)}
                   className={inputClass}
                 />
               </Field>

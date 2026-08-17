@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { generateReliefCarveGcode } from '../src/utils/reliefCarveExporter';
+import {
+  generateReliefCarveGcode,
+  recommendReliefTooling,
+} from '../src/utils/reliefCarveExporter';
 import { collectSceneTriangles } from '../src/utils/contourSliceExporter';
 import {
   californiaReliefPreset,
@@ -8,6 +11,11 @@ import {
   CA_MAP_HEIGHT_MM,
   CA_COLS,
   CA_ROWS,
+  CA_CARVE_DEPTH_MM,
+  CA_EXAGGERATION,
+  CA_PLINTH_FRACTION,
+  CA_ELEV_MIN_M,
+  CA_ELEV_MAX_M,
   buildCaliforniaMesh,
 } from '../src/presets/californiaRelief';
 
@@ -44,7 +52,7 @@ describe('California relief preset', () => {
     expect(unpaired).toBe(0);
   });
 
-  it('lands on the stock at exactly 120 mm north-south', () => {
+  it('lands on the stock at exactly its designed north-south size', () => {
     const { tris } = collectSceneTriangles(californiaReliefPreset);
     expect(tris.length).toBeGreaterThan(0);
 
@@ -60,7 +68,7 @@ describe('California relief preset', () => {
     expect(maxX - minX).toBeCloseTo(CA_MAP_WIDTH_MM, 3);
   });
 
-  it('carves at the designed size with no fit rescaling and no warnings', () => {
+  it('carves at the designed size with no fit rescaling, and only the warning it earns', () => {
     const result = generateReliefCarveGcode(californiaReliefPreset, CALIFORNIA_RELIEF_SETTINGS);
 
     expect(result.success).toBe(true);
@@ -69,17 +77,50 @@ describe('California relief preset', () => {
 
     // The footprint the exporter reports back is the map's own bounding box, so
     // a regression in the manual-scale path shows up here rather than on wood.
-    expect(result.carveBounds.maxY - result.carveBounds.minY).toBeCloseTo(120, 2);
+    expect(result.carveBounds.maxY - result.carveBounds.minY).toBeCloseTo(CA_MAP_HEIGHT_MM, 2);
     expect(result.carveBounds.maxX - result.carveBounds.minX).toBeCloseTo(CA_MAP_WIDTH_MM, 2);
 
-    // It has to fit inside 150 mm square stock with room for the cutter, and the
-    // work origin is that stock's near-left corner.
+    // It has to fit inside the stock with room for the cutter, and the work
+    // origin is that stock's near-left corner.
     expect(result.carveBounds.minX).toBeGreaterThan(0);
-    expect(result.carveBounds.maxX).toBeLessThan(150);
+    expect(result.carveBounds.maxX).toBeLessThan(CALIFORNIA_RELIEF_SETTINGS.stockWidthMm!);
 
-    expect(result.warnings).toEqual([]);
-    expect(result.finishingRasterLines).toBeGreaterThan(100);
-    expect(result.toolChange).toBe(true);
+    expect(result.finishingRasterLines).toBeGreaterThan(50);
+  });
+
+  it('carries geometry and no tooling, and is carvable once the app supplies some', () => {
+    // The preset says how big the object is and how deep it goes. It says
+    // nothing about bits, because which cutter reaches the bottom of a 20 mm
+    // wall is a fact about a workshop rather than about California.
+    const settings = CALIFORNIA_RELIEF_SETTINGS as Record<string, unknown>;
+    for (const key of [
+      'roughingToolDiaMm', 'finishingToolDiaMm', 'finishingShankDiaMm',
+      'finishingFluteLengthMm', 'finishingFeedrate', 'roughingFeedrate',
+      'roughingStepdownMm', 'toolStickoutMm', 'holderDiaMm', 'finishingDirection',
+    ]) {
+      expect(settings[key]).toBeUndefined();
+    }
+
+    // And the app's own advice is enough to cut it: geometry in, tooling
+    // derived, and the only thing left to say is that 20 mm is a lot of
+    // stickout. A shank fouling the wall or material left out of reach would
+    // mean the recommendation had not understood the depth.
+    const first = generateReliefCarveGcode(californiaReliefPreset, CALIFORNIA_RELIEF_SETTINGS);
+    const advised = generateReliefCarveGcode(californiaReliefPreset, {
+      ...CALIFORNIA_RELIEF_SETTINGS,
+      ...recommendReliefTooling({
+        reliefDepthMm: first.reliefDepthMm,
+        planWidthMm: first.carveBounds.maxX - first.carveBounds.minX,
+        planDepthMm: first.carveBounds.maxY - first.carveBounds.minY,
+      }),
+    });
+
+    expect(advised.success).toBe(true);
+    expect(advised.warnings).toHaveLength(1);
+    expect(advised.warnings[0]).toMatch(/diameters of stickout/);
+    expect(advised.toolChange).toBe(true);
+    // Sweeps the long way: the map is taller than it is wide.
+    expect(advised.gcode).toMatch(/along Y/);
   });
 
   it('cuts the full relief depth and never breaks through the stock', () => {
@@ -91,10 +132,45 @@ describe('California relief preset', () => {
       .map((m) => parseFloat(m![1]));
 
     const deepest = Math.min(...zs);
-    // The background floor is the deepest the job is allowed to go.
-    expect(deepest).toBeGreaterThanOrEqual(-10.001);
-    expect(deepest).toBeLessThan(-9.9);
-    // And 18 mm stock keeps 8 mm underneath it.
-    expect(deepest).toBeGreaterThan(-18);
+    // The background floor is the deepest the job is allowed to go, and it is
+    // reached: a relief that stopped short would not stand proud of anything.
+    expect(deepest).toBeGreaterThanOrEqual(-CA_CARVE_DEPTH_MM - 0.001);
+    expect(deepest).toBeLessThan(-CA_CARVE_DEPTH_MM + 0.1);
+    // And the stock keeps plenty underneath it.
+    expect(deepest).toBeGreaterThan(-CALIFORNIA_RELIEF_SETTINGS.stockThicknessMm!);
+  });
+
+  it('is carved at the exaggeration the design is pinned to, not one the stock implied', () => {
+    const result = generateReliefCarveGcode(californiaReliefPreset, CALIFORNIA_RELIEF_SETTINGS);
+
+    expect(result.reliefDepthMm).toBeCloseTo(CA_CARVE_DEPTH_MM, 3);
+
+    // The mesh is authored at the proportions it is carved at, so filling the
+    // depth is very nearly a no-op rather than a stretch. Not exactly one,
+    // because vertex heights are the mean of the cells meeting at that corner,
+    // which rounds a percent or two off the extremes; filling puts that back.
+    // What matters is that it is 1.0-ish and not, say, 5x, which is what a mesh
+    // authored at some unrelated height would silently produce.
+    expect(result.verticalExaggeration).toBeGreaterThan(0.9);
+    expect(result.verticalExaggeration).toBeLessThan(1.15);
+
+    // So asking for the model's own proportions instead gives the same carve to
+    // within that same couple of percent.
+    const proportional = generateReliefCarveGcode(californiaReliefPreset, {
+      ...CALIFORNIA_RELIEF_SETTINGS,
+      verticalScaleMode: 'proportional',
+      verticalExaggeration: 1,
+    });
+    expect(proportional.verticalExaggeration).toBeCloseTo(1, 6);
+    expect(proportional.reliefDepthMm / result.reliefDepthMm).toBeGreaterThan(0.9);
+    expect(proportional.reliefDepthMm / result.reliefDepthMm).toBeLessThan(1.0);
+  });
+
+  it('keeps the terrain at the documented exaggeration over true scale', () => {
+    // 1054.5 km of California across the map, and this much elevation in it.
+    const kmPerMm = 1054.5 / CA_MAP_HEIGHT_MM;
+    const trueReliefMm = (CA_ELEV_MAX_M - CA_ELEV_MIN_M) / 1000 / kmPerMm;
+    const carvedTerrainMm = CA_CARVE_DEPTH_MM * (1 - CA_PLINTH_FRACTION);
+    expect(carvedTerrainMm / trueReliefMm).toBeCloseTo(CA_EXAGGERATION, 0);
   });
 });

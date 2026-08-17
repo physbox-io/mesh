@@ -1866,6 +1866,9 @@ const DOCS_TABS = [
     { id: 'tutorial', label: '🎓 Scripting Tutorial' },
     { id: 'apiref', label: '📚 Full API Reference' },
   ]},
+  { group: 'Legal & Terms', items: [
+    { id: 'license', label: '⚖️ License & Disclaimers' },
+  ]},
 ] as const;
 
 type DocsTabId = typeof DOCS_TABS[number]['items'][number]['id'];
@@ -7549,6 +7552,34 @@ const wobble = Math.sin(api.getTime() * 4) * 3;`}
                       or grblHAL. The plate thickness field defaults to 12 mm; set it to your own plate's
                       measured thickness before the first cut.
                     </p>
+                  </div>
+                )}
+
+                {docsTab === 'license' && (
+                  <div className="flex flex-col gap-4">
+                    <h3 className="font-bold text-slate-800 text-lg flex items-center gap-1.5">⚖️ License &amp; Terms</h3>
+                    <p className="text-xs text-slate-600 leading-relaxed">
+                      PhysBox Mesh is distributed under the <strong>PhysBox Permissive Public License (PPPL-1.0)</strong>.
+                      Commercial use of generated 3D meshes, STL models, contour slices, relief carving toolpaths, and fabricated goods is fully permitted with attribution.
+                    </p>
+                    <div className="bg-slate-100 p-3.5 rounded-xl border border-slate-200 text-[11px] font-mono text-slate-700 whitespace-pre-wrap leading-relaxed max-h-[50vh] overflow-y-auto">
+{`PhysBox Permissive Public License (PPPL-1.0)
+Copyright (c) 2026 PhysBox Contributors and Authors. All Rights Reserved.
+
+1. PERMISSION AND SCOPE
+Permission is granted to access, execute, and use the Software for personal, educational, research, and commercial purposes, including the generation, export, and commercial utilization of output artifacts (such as 3D meshes, CAD models, STL files, SVG paths, toolpaths, CNC G-code, and laser/router instructions).
+
+2. PERMITTED COMMERCIAL USE OF OUTPUTS
+You are fully permitted to design, prototype, simulate, 3D print, CNC machine, sell, and monetize any physical workpieces or digital models produced using the Software.
+
+3. ATTRIBUTION & RESTRICTIONS ON SOFTWARE FORKING
+(a) Attribution: The copyright notice and license must be retained in all copies or substantial portions of the Software.
+(b) No Standalone Forking or Hosted Service Redistribution: You may NOT redistribute, sublicense, re-brand, or host the Software source as a competing standalone service or software fork without explicit prior written authorization.
+(c) Brand Protection: The names "PhysBox", "Etch", "Volt", "Mesh", "Flux", or the names of their contributors may not be used to endorse or promote third-party products without specific prior written permission.
+
+4. STRICT DISCLAIMER OF LIABILITY & PHYSICAL MACHINERY WARNING
+THE SOFTWARE, PHYSICS SOLVERS, CSG COMPILERS, TOOLPATH CALCULATORS, AND MACHINE CONTROLLERS ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND. IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CNC/LASER DAMAGE, SPINDLE CRASHES, 3D PRINTER HEAD CRASHES, FIRE, MATERIAL LOSS, BUSINESS INTERRUPTION, OR BODILY INJURY RESULTING FROM OPERATION OF MACHINERY. OPERATORS ASSUME SOLE RESPONSIBILITY FOR VERIFYING G-CODE, CLAMPING, TRAVEL LIMITS, EYE PROTECTION, AND PHYSICAL SAFETY.`}
+                    </div>
                   </div>
                 )}
               </div>

@@ -5,6 +5,7 @@ import {
   dilateForTool,
   sampleHeightmap,
   DEFAULT_RELIEF_OPTIONS,
+  recommendReliefTooling,
 } from '../src/utils/reliefCarveExporter';
 import type { SceneGraph, SceneGeom } from '../src/types/scene';
 
@@ -212,6 +213,345 @@ describe('Relief carve exporter', () => {
       carveDepthMm: 12,
     });
     expect(result.warnings.join(' ')).toMatch(/1 mm/);
+  });
+
+  it('warns when the relief is deeper than the finishing bit can reach', () => {
+    // The job that broke a real 1.6 mm bit: a 20 mm relief, no roughing, and
+    // nothing but a finishing pass to get there.
+    const result = generateReliefCarveGcode(dome, {
+      ...DEFAULT_RELIEF_OPTIONS,
+      stockWidthMm: 50,
+      stockDepthMm: 40,
+      stockThicknessMm: 40,
+      carveDepthMm: 20,
+      roughingEnabled: false,
+      finishingToolDiaMm: 1.6,
+    });
+
+    expect(result.success).toBe(true);
+    const warned = result.warnings.join(' ');
+    expect(warned).toMatch(/12\.5 diameters of stickout/);
+    expect(warned).toMatch(/5\.0 mm or more/);
+  });
+
+  it('separates the shank fouling the cut from the bit being whippy', () => {
+    const base = {
+      ...DEFAULT_RELIEF_OPTIONS,
+      stockThicknessMm: 40,
+      carveDepthMm: 20,
+      finishingToolDiaMm: 1.6,
+      toolBodyClearance: false,
+    };
+
+    // Stock 1.6 mm bit: 3.175 mm shank, so the shank is in the cut, and nothing
+    // is holding the path out of the wall.
+    const stock = generateReliefCarveGcode(dome, base).warnings.join(' ');
+    expect(stock).toMatch(/shank will be\s+in the cut|shank will be in the cut/);
+    expect(stock).toMatch(/diameters of stickout/);
+
+    // A necked long-reach bit — shank no wider than the cutter, 25 mm of it —
+    // has no step to foul, so only the stiffness caution is left.
+    const necked = generateReliefCarveGcode(dome, {
+      ...base,
+      finishingShankDiaMm: 1.6,
+      finishingFluteLengthMm: 25,
+    }).warnings.join(' ');
+    expect(necked).not.toMatch(/shank will be/);
+    expect(necked).toMatch(/diameters of stickout/);
+  });
+
+  it('layers the finishing raster when it has to clear the relief alone', () => {
+    const deep = {
+      ...DEFAULT_RELIEF_OPTIONS,
+      stockThicknessMm: 40,
+      carveDepthMm: 20,
+      finishingToolDiaMm: 3.175,
+    };
+    const layered = generateReliefCarveGcode(dome, { ...deep, roughingEnabled: false });
+    const roughed = generateReliefCarveGcode(dome, { ...deep, roughingEnabled: true });
+
+    // With roughing off the raster repeats at ~one bit diameter per layer.
+    expect(layered.gcode).toMatch(/; layer down to Z/);
+    expect(layered.finishingRasterLines).toBeGreaterThan(roughed.finishingRasterLines);
+    // Roughing leaves only the allowance, so the finisher stays a single sweep.
+    expect(roughed.gcode).not.toMatch(/; layer down to Z/);
+  });
+
+  it('still allows a depth-first sweep when it is asked for outright', () => {
+    const deep = {
+      ...DEFAULT_RELIEF_OPTIONS,
+      stockThicknessMm: 40,
+      carveDepthMm: 20,
+      roughingEnabled: false,
+      finishingToolDiaMm: 1.6,
+    };
+    const single = generateReliefCarveGcode(dome, { ...deep, finishingDepthMode: 'single' as const });
+    const auto = generateReliefCarveGcode(dome, { ...deep, finishingDepthMode: 'auto' as const });
+
+    expect(single.gcode).not.toMatch(/; layer down to Z/);
+    expect(single.finishingRasterLines).toBeLessThan(auto.finishingRasterLines);
+    expect(single.estimatedTimeSeconds).toBeLessThan(auto.estimatedTimeSeconds);
+    // Quicker, but it does not get to be quiet about what it is doing.
+    expect(single.warnings.join(' ')).toMatch(/first entry/);
+
+    // And 'layered' forces layers even when roughing would have covered it.
+    const forced = generateReliefCarveGcode(dome, {
+      ...deep,
+      roughingEnabled: true,
+      finishingDepthMode: 'layered' as const,
+      finishingStepdownMm: 3,
+    });
+    expect(forced.gcode).toMatch(/; layer down to Z/);
+  });
+
+  it('never drops more than one finishing stepdown in a single move', () => {
+    const result = generateReliefCarveGcode(dome, {
+      ...DEFAULT_RELIEF_OPTIONS,
+      stockThicknessMm: 40,
+      carveDepthMm: 20,
+      roughingEnabled: false,
+      finishingToolDiaMm: 1.6,
+      finishingStepdownMm: 2,
+    });
+
+    // Track Z through the whole program and check every downward cutting move.
+    // Before layering, the first G1 of the raster dived from the safe height to
+    // the floor of the relief — 20 mm straight down on a 1.6 mm bit. The bound
+    // is one stepdown plus the 0.5 mm the tool is rapided down to first.
+    let z = DEFAULT_RELIEF_OPTIONS.safeZ;
+    for (const line of result.gcode.split('\n')) {
+      const zw = /Z(-?[\d.]+)/.exec(line);
+      if (!zw) continue;
+      const next = parseFloat(zw[1]);
+      if (line.startsWith('G1 ') && next < z) {
+        expect(z - next).toBeLessThanOrEqual(2.5 + 1e-6);
+      }
+      z = next;
+    }
+  });
+
+  it('ramps into the cut instead of plunging, unless told not to', () => {
+    const opts = {
+      ...DEFAULT_RELIEF_OPTIONS,
+      stockThicknessMm: 40,
+      carveDepthMm: 20,
+      roughingEnabled: false,
+      finishingToolDiaMm: 1.6,
+      finishingStepdownMm: 2,
+    };
+    const ramped = generateReliefCarveGcode(dome, opts);
+    const plunged = generateReliefCarveGcode(dome, { ...opts, leadInAngleDeg: 0 });
+
+    // A ramp is a G1 that moves in X/Y and Z together; a plunge is Z alone.
+    // Passes whose head is already all but at depth keep plunging — there is no
+    // room to ramp and nothing to gain — so what matters is not that plunges are
+    // gone but that no deep one is left.
+    const deepestPlunge = (g: string) => {
+      let z = DEFAULT_RELIEF_OPTIONS.safeZ;
+      let worst = 0;
+      for (const line of g.split('\n')) {
+        const zw = /Z(-?[\d.]+)/.exec(line);
+        if (!zw) continue;
+        const next = parseFloat(zw[1]);
+        if (/^G1 Z/.test(line) && z - next > worst) worst = z - next;
+        z = next;
+      }
+      return worst;
+    };
+    expect(deepestPlunge(plunged.gcode)).toBeGreaterThan(2);
+    expect(deepestPlunge(ramped.gcode)).toBeLessThan(0.6);
+
+    // Ramping costs travel — it descends along the path and backs up over it.
+    expect(ramped.totalCutDistanceMm).toBeGreaterThan(plunged.totalCutDistanceMm);
+  });
+
+  it('holds the shank out of a wall the flutes alone would have cleared', () => {
+    // A narrow trench: the flutes fit, the shank does not.
+    // Towers either side of a 2 mm slot: wider than the 1.6 mm flutes, narrower
+    // than the 3.175 mm shank behind them.
+    const hm = buildHeightmap(
+      new Float64Array([
+        -20, -20, 0, -1, -20, 0, -1, 20, 0,
+        -20, -20, 0, -1, 20, 0, -20, 20, 0,
+        1, -20, 0, 20, -20, 0, 20, 20, 0,
+        1, -20, 0, 20, 20, 0, 1, 20, 0,
+      ]),
+      { minX: -20, minY: -20, maxX: 20, maxY: 20 },
+      161, 161, -20
+    );
+
+    // Checking the cutting end alone, the slot looks wide open: nothing within
+    // 0.8 mm of the centre is above the floor.
+    const flutesOnly = sampleHeightmap(dilateForTool(hm, 0.8, false), 0, 0);
+    expect(flutesOnly).toBeCloseTo(-20, 1);
+
+    // Add the shank and it is not: the towers are inside its 1.59 mm radius, so
+    // the tip is held 4.8 mm below their tops instead of 20 mm below.
+    const withShank = sampleHeightmap(
+      dilateForTool(hm, 0.8, false, [{ aboveTipMm: 4.8, radiusMm: 3.175 / 2 }]),
+      0, 0
+    );
+    expect(withShank).toBeCloseTo(-4.8, 1);
+
+    // The collet nut sees the towers too, but sits 20 mm up rather than 4.8, so
+    // it has slack the shank does not — the strictest section still wins.
+    const withHolder = sampleHeightmap(
+      dilateForTool(hm, 0.8, false, [
+        { aboveTipMm: 4.8, radiusMm: 3.175 / 2 },
+        { aboveTipMm: 20, radiusMm: 9.5 },
+      ]),
+      0, 0
+    );
+    expect(withHolder).toBeCloseTo(-4.8, 1);
+
+    // Body sections are extra constraints on the same max, so they can only ever
+    // hold the tool higher. A path that got deeper by adding one would be a bug.
+    const bare = dilateForTool(hm, 0.8, false);
+    const guarded = dilateForTool(hm, 0.8, false, [
+      { aboveTipMm: 4.8, radiusMm: 3.175 / 2 },
+      { aboveTipMm: 20, radiusMm: 9.5 },
+    ]);
+    let lifted = 0;
+    for (let i = 0; i < bare.z.length; i++) {
+      expect(guarded.z[i]).toBeGreaterThanOrEqual(bare.z[i] - 1e-4);
+      if (guarded.z[i] > bare.z[i] + 0.1) lifted++;
+    }
+    expect(lifted).toBeGreaterThan(0);
+  });
+
+  it('says how much of the relief the tool body puts out of reach', () => {
+    const opts = {
+      ...DEFAULT_RELIEF_OPTIONS,
+      stockWidthMm: 50,
+      stockDepthMm: 40,
+      stockThicknessMm: 40,
+      carveDepthMm: 20,
+      roughingEnabled: false,
+      finishingToolDiaMm: 1.6,
+    };
+    const guarded = generateReliefCarveGcode(dome, opts);
+    const bare = generateReliefCarveGcode(dome, { ...opts, toolBodyClearance: false });
+
+    expect(guarded.warnings.join(' ')).toMatch(/cannot reach into/);
+    expect(bare.warnings.join(' ')).not.toMatch(/cannot reach into/);
+
+    // Both still reach the floor out in the open background — the shank only
+    // binds where something tall is standing next to the cut — so the jobs
+    // differ without either being uniformly deeper in the G-code.
+    expect(guarded.gcode).not.toEqual(bare.gcode);
+  });
+
+  it('keeps height on the plan scale when asked to, instead of filling the depth', () => {
+    // Same model, same relief depth, two very different stock sizes.
+    const base = {
+      ...DEFAULT_RELIEF_OPTIONS,
+      fitMode: 'fit' as const,
+      carveDepthMm: 20,
+      stockThicknessMm: 40,
+    };
+    const big = { ...base, stockWidthMm: 200, stockDepthMm: 200 };
+    const small = { ...base, stockWidthMm: 50, stockDepthMm: 40 };
+
+    // Fill mode: the plan shrinks by 4x, the depth does not, so the exaggeration
+    // goes up by 4x. This is the trap.
+    const fillBig = generateReliefCarveGcode(dome, big);
+    const fillSmall = generateReliefCarveGcode(dome, small);
+    expect(fillBig.reliefDepthMm).toBeCloseTo(fillSmall.reliefDepthMm, 3);
+    expect(fillSmall.verticalExaggeration / fillBig.verticalExaggeration).toBeCloseTo(
+      fillBig.scaleFactor / fillSmall.scaleFactor,
+      2
+    );
+
+    // Proportional mode: the exaggeration is the number asked for on both, and
+    // the depth follows the plan instead. The dome is 100 mm tall and fits the
+    // big stock at ~2x, so the exaggeration has to be small for neither to run
+    // into the 20 mm ceiling and hide the effect.
+    const prop = { verticalScaleMode: 'proportional' as const, verticalExaggeration: 0.05 };
+    const propBig = generateReliefCarveGcode(dome, { ...big, ...prop });
+    const propSmall = generateReliefCarveGcode(dome, { ...small, ...prop });
+    expect(propBig.verticalExaggeration).toBeCloseTo(0.05, 3);
+    expect(propSmall.verticalExaggeration).toBeCloseTo(0.05, 3);
+    expect(propSmall.reliefDepthMm / propBig.reliefDepthMm).toBeCloseTo(
+      propSmall.scaleFactor / propBig.scaleFactor,
+      2
+    );
+
+    // And the exaggeration knob does what it says.
+    const doubled = generateReliefCarveGcode(dome, {
+      ...small,
+      ...prop,
+      verticalExaggeration: 0.1,
+    });
+    expect(doubled.reliefDepthMm).toBeCloseTo(propSmall.reliefDepthMm * 2, 2);
+  });
+
+  it('flattens rather than overshooting when proportional height exceeds the depth', () => {
+    const result = generateReliefCarveGcode(dome, {
+      ...DEFAULT_RELIEF_OPTIONS,
+      stockWidthMm: 200,
+      stockDepthMm: 200,
+      stockThicknessMm: 40,
+      carveDepthMm: 5,
+      verticalScaleMode: 'proportional',
+      verticalExaggeration: 4,
+    });
+
+    expect(result.reliefDepthMm).toBeCloseTo(5, 3);
+    expect(result.warnings.join(' ')).toMatch(/flattened onto the floor/);
+    const zs = [...result.gcode.matchAll(/Z(-?[\d.]+)/g)].map((m) => parseFloat(m[1]));
+    expect(Math.min(...zs)).toBeGreaterThanOrEqual(-5 - 1e-6);
+  });
+
+  it('recommends a bit that can actually reach the floor of the relief', () => {
+    const plan = { planWidthMm: 30, planDepthMm: 35 };
+
+    // Shallow: a small bit's flutes clear the whole depth, so detail wins.
+    const shallow = recommendReliefTooling({ ...plan, reliefDepthMm: 2.7 });
+    expect(shallow.finishingToolDiaMm).toBeLessThan(3.175);
+
+    // Deep: every bit under 3.175 mm is on a 3.175 mm shank, and past its flutes
+    // that shank is in the cut. So the smallest bit that reaches is the one whose
+    // shank is its own diameter — however much finer detail would like to be.
+    const deep = recommendReliefTooling({ ...plan, reliefDepthMm: 20 });
+    expect(deep.finishingToolDiaMm).toBe(3.175);
+    expect(deep.finishingShankDiaMm).toBe(3.175);
+    // And it has to be a long-reach one, which the recommendation says outright.
+    expect(deep.finishingFluteLengthMm).toBeGreaterThanOrEqual(22);
+
+    // Deeper still, and even that will not do.
+    const deeper = recommendReliefTooling({ ...plan, reliefDepthMm: 60 });
+    expect(deeper.finishingToolDiaMm!).toBeGreaterThan(3.175);
+  });
+
+  it('recommends tooling that carves the job without complaint', () => {
+    // The end-to-end claim: hand the exporter nothing but the model and the
+    // stock, take its own advice, and the only thing left to say about the job
+    // is that a 20 mm relief is a lot of stickout.
+    const base = {
+      ...DEFAULT_RELIEF_OPTIONS,
+      stockWidthMm: 50,
+      stockDepthMm: 40,
+      stockThicknessMm: 40,
+      carveDepthMm: 20,
+      fitMode: 'fit' as const,
+    };
+    const first = generateReliefCarveGcode(dome, base);
+    expect(first.success).toBe(true);
+
+    const advised = generateReliefCarveGcode(dome, {
+      ...base,
+      ...recommendReliefTooling({
+        reliefDepthMm: first.reliefDepthMm,
+        planWidthMm: first.carveBounds.maxX - first.carveBounds.minX,
+        planDepthMm: first.carveBounds.maxY - first.carveBounds.minY,
+        spindleRpm: base.spindleRpm,
+      }),
+    });
+
+    expect(advised.success).toBe(true);
+    expect(advised.warnings.every((w) => /diameters of stickout/.test(w))).toBe(true);
+    // Feeds are derated for how far the bit is hanging out, not left at default.
+    expect(advised.finishingRasterLines).toBeGreaterThan(0);
   });
 
   it('emits a job small enough to stream over serial', () => {
