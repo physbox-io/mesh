@@ -362,7 +362,7 @@ class WebSerialManager {
   private parseStatusReport(body: string) {
     const parts = body.split('|');
     // 'Hold:0' and 'Door:1' carry a sub-state after the colon.
-    if (parts[0].split(':')[0] === 'Alarm') this.updateState({ status: 'ALARM' });
+    const machineWord = parts[0].split(':')[0];
 
     let mpos: [number, number, number] | null = null;
     let wpos: [number, number, number] | null = null;
@@ -385,6 +385,32 @@ class WebSerialManager {
       } else if (key === 'F' && nums.length >= 1) {
         patch.feedRate = nums[0] || 0;
       }
+    }
+
+    // The controller's own state word, not just its alarms.
+    //
+    // Only 'Alarm' used to be read, and nothing else ever set the status back, so
+    // one limit switch left the app in ALARM for the rest of the session — `$X`
+    // cleared the machine while the UI still refused to start a job, and the only
+    // way out was a page reload. The local job states win over the report, since
+    // a tool-change pause is a state this side holds while GRBL sits Idle.
+    if (machineWord === 'Alarm') {
+      patch.status = 'ALARM';
+      // A limit switch mid-carve kills the job on the controller — GRBL will not
+      // run another line until it is unlocked. Dropping the queue here means the
+      // rest of it is not still sitting there to be resumed into a machine that
+      // has lost its position.
+      if (this.isJobRunning || this.isPaused) this.abandonJob();
+    } else if (!this.isPaused) {
+      // RUNNING here means "a job is streaming", not "the axes are moving" — a
+      // frame trace or a probing move must not light up the job progress bar.
+      // A streaming job likewise stays RUNNING through the Idle reports it sits
+      // in between lines.
+      if (['Idle', 'Run', 'Jog', 'Home', 'Check'].includes(machineWord)) {
+        patch.status = this.isJobRunning ? 'RUNNING' : 'IDLE';
+      }
+      // 'Hold' and 'Door' are left alone: the job is still the job, and the
+      // resume path owns that transition.
     }
 
     const [ox, oy, oz] = this.workOffset;
@@ -602,11 +628,11 @@ class WebSerialManager {
 
   /** Cancels the running job. */
   public async cancelJob() {
-    this.isJobRunning = false;
-    this.isPaused = false;
-    this.gcodeQueue = [];
+    this.abandonJob();
     await this.eStop();
-    this.updateState({ status: 'IDLE', progressPercent: 0 });
+    // The soft reset leaves GRBL in Alarm if it was moving, so the status the
+    // machine reports next is the truth here rather than an assumed IDLE.
+    this.updateState({ progressPercent: 0, pauseMessage: undefined });
   }
 
   /** Triggers hardware homing cycle ($H). */
@@ -614,8 +640,43 @@ class WebSerialManager {
     await this.sendLine('$H');
   }
 
-  /** Kills GRBL Alarm state ($X). */
+  /**
+   * Drops everything this side is holding about a job, without touching the
+   * machine. Used when the controller has already stopped on its own.
+   */
+  private abandonJob() {
+    this.isJobRunning = false;
+    this.isPaused = false;
+    this.gcodeQueue = [];
+    this.gcodeNotes = [];
+    this.currentQueueIndex = 0;
+    // Anything still waiting on an `ok` that will now never come.
+    const waiters = this.okWaiters;
+    this.okWaiters = [];
+    for (const w of waiters) w();
+    const probe = this.pendingProbe;
+    this.pendingProbe = null;
+    if (probe) probe(null);
+  }
+
+  /**
+   * Kills GRBL Alarm state ($X).
+   *
+   * The local state is cleared alongside it: the alarm arrived with a half-sent
+   * job behind it, and leaving that queue and its pause flag in place is what
+   * used to make the app unusable after a limit switch until it was reloaded.
+   * Status itself is not forced to IDLE — the next `<...>` report says whether
+   * the unlock actually took.
+   */
   public async unlockAlarm(): Promise<void> {
+    this.abandonJob();
+    this.updateState({
+      lastError: undefined,
+      pauseMessage: undefined,
+      currentLine: 0,
+      totalLines: 0,
+      progressPercent: 0,
+    });
     await this.sendLine('$X');
   }
 
@@ -667,7 +728,7 @@ class WebSerialManager {
    * which a soft reset or `$H` would discard while the job still assumed it.
    */
   public async zeroZ(
-    touchPlateThicknessMm = 15.0,
+    touchPlateThicknessMm = 12.0,
     searchDepthMm = 25,
     feedrate = 50
   ): Promise<{ success: boolean; message: string; machineZ?: number }> {

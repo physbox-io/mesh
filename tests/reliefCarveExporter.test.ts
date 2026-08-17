@@ -116,8 +116,31 @@ describe('Relief carve exporter', () => {
     expect(result.success).toBe(true);
     // A 100 mm cube in 100 mm of depth, minus the 2 mm tool radius each side.
     expect(result.scaleFactor).toBeCloseTo(0.96, 3);
-    expect(result.carveBounds.maxY).toBeCloseTo(48, 3);
-    expect(result.carveBounds.minY).toBeCloseTo(-48, 3);
+    // Centred on the stock, but the stock's own origin is its near-left corner,
+    // so the model straddles the 50 mm mid-line of a 100 mm depth.
+    expect(result.carveBounds.maxY).toBeCloseTo(98, 3);
+    expect(result.carveBounds.minY).toBeCloseTo(2, 3);
+  });
+
+  it('keeps the whole job in the +X +Y quadrant from the work origin', () => {
+    const result = generateReliefCarveGcode(dome, {
+      ...DEFAULT_RELIEF_OPTIONS,
+      stockWidthMm: 120,
+      stockDepthMm: 80,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.bounds.minX).toBe(0);
+    expect(result.bounds.minY).toBe(0);
+
+    // A job zeroed on the corner of the stock used to run from -W/2, -D/2, i.e.
+    // off the block down and to the left of the zero the operator had just set.
+    for (const line of result.gcode.split('\n')) {
+      const x = line.match(/^G[01] .*?X(-?[\d.]+)/);
+      const y = line.match(/^G[01] .*?Y(-?[\d.]+)/);
+      if (x) expect(parseFloat(x[1])).toBeGreaterThanOrEqual(0);
+      if (y) expect(parseFloat(y[1])).toBeGreaterThanOrEqual(0);
+    }
   });
 
   it('sweeps along the axis it is told to', () => {
@@ -151,9 +174,13 @@ describe('Relief carve exporter', () => {
     // must stay inside the dome's own footprint.
     const roughing = result.segments.filter((s) => s.type === 'roughing');
     expect(roughing.length).toBeGreaterThan(0);
+    // Measured from the stock's centre, which sits at 100,100 now that the work
+    // origin is the block's near-left corner.
     for (const seg of roughing) {
       for (const p of seg.points) {
-        expect(Math.hypot(p.x, p.y)).toBeLessThan(50 + DEFAULT_RELIEF_OPTIONS.roughingToolDiaMm);
+        expect(Math.hypot(p.x - 100, p.y - 100)).toBeLessThan(
+          50 + DEFAULT_RELIEF_OPTIONS.roughingToolDiaMm
+        );
       }
     }
   });

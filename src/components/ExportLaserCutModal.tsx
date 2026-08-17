@@ -667,7 +667,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
               <div className="flex items-center justify-end space-x-3 pt-2 border-t border-amber-500/30">
                 {machineState.status === 'PAUSED_TOOL' && (
                   <button
-                    onClick={() => webSerialManager.zeroZ(15.0)}
+                    onClick={() => webSerialManager.zeroZ(12.0)}
                     className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-100 text-xs font-semibold rounded-lg"
                   >
                     Auto-Zero Z (Touch Plate)

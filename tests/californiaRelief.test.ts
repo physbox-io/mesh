@@ -72,9 +72,10 @@ describe('California relief preset', () => {
     expect(result.carveBounds.maxY - result.carveBounds.minY).toBeCloseTo(120, 2);
     expect(result.carveBounds.maxX - result.carveBounds.minX).toBeCloseTo(CA_MAP_WIDTH_MM, 2);
 
-    // It has to fit inside 150 mm square stock with room for the cutter.
-    expect(result.carveBounds.minX).toBeGreaterThan(-75);
-    expect(result.carveBounds.maxX).toBeLessThan(75);
+    // It has to fit inside 150 mm square stock with room for the cutter, and the
+    // work origin is that stock's near-left corner.
+    expect(result.carveBounds.minX).toBeGreaterThan(0);
+    expect(result.carveBounds.maxX).toBeLessThan(150);
 
     expect(result.warnings).toEqual([]);
     expect(result.finishingRasterLines).toBeGreaterThan(100);

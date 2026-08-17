@@ -214,10 +214,21 @@ function ToolpathView({ result, options }: { result: ReliefCarveResult; options:
     group.clear();
     const dispose: (THREE.BufferGeometry | THREE.Material)[] = [];
 
+    // Everything inside the group is in work coordinates, where zero is the
+    // stock's near-left corner. The camera orbits the viewport's origin, so the
+    // group is slid back by half the stock to keep the block centred on screen.
+    group.position.set(-options.stockWidthMm / 2, -options.stockDepthMm / 2, 0);
+
     const stock = new THREE.BoxGeometry(options.stockWidthMm, options.stockDepthMm, options.stockThicknessMm);
     const stockMat = new THREE.MeshBasicMaterial({ color: 0x94a3b8, wireframe: true, transparent: true, opacity: 0.35 });
     const stockMesh = new THREE.Mesh(stock, stockMat);
-    stockMesh.position.set(0, 0, -options.stockThicknessMm / 2);
+    // Work zero is the stock's near-left corner, so the block sits in the +X +Y
+    // quadrant rather than straddling the origin.
+    stockMesh.position.set(
+      options.stockWidthMm / 2,
+      options.stockDepthMm / 2,
+      -options.stockThicknessMm / 2
+    );
     group.add(stockMesh);
     dispose.push(stock, stockMat);
 
@@ -247,7 +258,7 @@ function ToolpathView({ result, options }: { result: ReliefCarveResult; options:
       20, 0x64748b, 0x475569
     );
     grid.rotation.x = Math.PI / 2;
-    grid.position.z = -options.stockThicknessMm;
+    grid.position.set(options.stockWidthMm / 2, options.stockDepthMm / 2, -options.stockThicknessMm);
     (grid.material as THREE.Material).transparent = true;
     (grid.material as THREE.Material).opacity = 0.25;
     group.add(grid);
@@ -372,7 +383,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
               <Field
                 className="lg:col-span-3"
                 label="Stock Block (mm)"
-                hint="Width, depth and thickness of the block clamped on the bed. The job's origin is the centre of its top face, so zero the machine there before you start."
+                hint="Width, depth and thickness of the block clamped on the bed. The job's origin is the near-left corner of its top face, so zero the machine there before you start — the whole carve runs +X and +Y from zero."
               >
                 <div className="flex items-center space-x-1.5">
                   <NumberInput
@@ -768,7 +779,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
               <div className="flex items-center justify-end space-x-3 pt-2 border-t border-amber-500/30">
                 {machineState.status === 'PAUSED_TOOL' && (
                   <button
-                    onClick={() => webSerialManager.zeroZ(15.0)}
+                    onClick={() => webSerialManager.zeroZ(12.0)}
                     className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-100 text-xs font-semibold rounded-lg"
                   >
                     Auto-Zero Z (Touch Plate)
@@ -921,7 +932,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
         {/* Footer */}
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 px-4 sm:px-6 py-3 sm:py-4 border-t border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/50">
           <div className="hidden lg:block text-xs text-slate-500 dark:text-slate-400">
-            Zero the machine on the centre of the stock's top face, then carve.
+            Zero the machine on the near-left corner of the stock's top face, then carve.
           </div>
           <div className="flex flex-wrap items-center justify-end gap-2 sm:gap-3 sm:ml-auto">
             <button

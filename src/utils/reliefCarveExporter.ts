@@ -416,11 +416,15 @@ export function generateReliefCarveGcode(
 
   const stockW = Math.max(1, opts.stockWidthMm);
   const stockD = Math.max(1, opts.stockDepthMm);
+  // Work origin is the stock's near-left corner, top face — the same corner the
+  // machine panel tells you to jog to before zeroing, and the same convention the
+  // laser and contour exports already use. A centred origin here meant a job
+  // zeroed on the corner ran off the stock down and to the left of zero.
   const bounds = {
-    minX: -stockW / 2,
-    minY: -stockD / 2,
-    maxX: stockW / 2,
-    maxY: stockD / 2,
+    minX: 0,
+    minY: 0,
+    maxX: stockW,
+    maxY: stockD,
     minZ: -opts.stockThicknessMm,
     maxZ: 0,
   };
@@ -511,18 +515,23 @@ export function generateReliefCarveGcode(
   const cy = (mnY + mxY) / 2;
   const floorZ = -carveDepth;
 
+  // Centre of the stock in work coordinates, which with a corner origin is half
+  // the stock rather than zero.
+  const stockCx = stockW / 2;
+  const stockCy = stockD / 2;
+
   const tris = new Float64Array(sceneTris.length);
   for (let i = 0; i < sceneTris.length; i += 3) {
-    tris[i] = (sceneTris[i] * 1000 - cx) * scaleFactor;
-    tris[i + 1] = (sceneTris[i + 1] * 1000 - cy) * scaleFactor;
+    tris[i] = (sceneTris[i] * 1000 - cx) * scaleFactor + stockCx;
+    tris[i + 1] = (sceneTris[i + 1] * 1000 - cy) * scaleFactor + stockCy;
     tris[i + 2] = ((sceneTris[i + 2] * 1000 - mxZ) / modelH) * carveDepth;
   }
 
   const carveBounds = {
-    minX: Math.max(bounds.minX, -(modelW * scaleFactor) / 2),
-    minY: Math.max(bounds.minY, -(modelD * scaleFactor) / 2),
-    maxX: Math.min(bounds.maxX, (modelW * scaleFactor) / 2),
-    maxY: Math.min(bounds.maxY, (modelD * scaleFactor) / 2),
+    minX: Math.max(bounds.minX, stockCx - (modelW * scaleFactor) / 2),
+    minY: Math.max(bounds.minY, stockCy - (modelD * scaleFactor) / 2),
+    maxX: Math.min(bounds.maxX, stockCx + (modelW * scaleFactor) / 2),
+    maxY: Math.min(bounds.maxY, stockCy + (modelD * scaleFactor) / 2),
   };
 
   // --- Sample the surface ----------------------------------------------------
@@ -584,7 +593,8 @@ export function generateReliefCarveGcode(
   gcode.push(`; Stock       : ${stockW} x ${stockD} x ${opts.stockThicknessMm} mm`);
   gcode.push(`; Relief depth: ${carveDepth} mm below the top face`);
   gcode.push(`; Model scale : ${(scaleFactor * 100).toFixed(1)}% (${(modelW * scaleFactor).toFixed(1)} x ${(modelD * scaleFactor).toFixed(1)} mm)`);
-  gcode.push('; Origin      : centre of the stock, top face, Z0');
+  gcode.push('; Origin      : near-left corner of the stock, top face, Z0');
+  gcode.push(`; Extents     : X0..${f(stockW)}  Y0..${f(stockD)} (all cuts are +X +Y of zero)`);
   gcode.push('; ---------------------------------------------------------------');
   gcode.push('G21 ; millimetres');
   gcode.push('G90 ; absolute positioning');

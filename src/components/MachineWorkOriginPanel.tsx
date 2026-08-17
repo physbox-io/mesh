@@ -25,7 +25,7 @@ export const MachineWorkOriginPanel: React.FC<{
 }> = ({ machineState, showZProbe = true, onOpenDocs }) => {
   const [step, setStep] = useState(1);
   const [feedrate, setFeedrate] = useState(1000);
-  const [plateThickness, setPlateThickness] = useState(15.0);
+  const [plateThickness, setPlateThickness] = useState(12.0);
   const [isProbingZ, setIsProbingZ] = useState(false);
   const [probeMessage, setProbeMessage] = useState<{ ok: boolean; text: string } | null>(null);
   // Ticks the steps off as they are done. Which of the three you have actually

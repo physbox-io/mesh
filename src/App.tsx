@@ -7513,7 +7513,7 @@ const wobble = Math.sin(api.getTime() * 4) * 3;`}
                     <p className="text-xs text-slate-600 leading-relaxed">
                       Before any laser or CNC job you have to tell the machine where the work actually is. The
                       export modals do this under <strong>Set Work Origin</strong>, which appears once a machine
-                      is connected over USB. The origin is the corner (or centre) of your stock that the G-code
+                      is connected over USB. The origin is the near-left corner of your stock that the G-code
                       treats as X0 Y0 Z0 — get it wrong and the job cuts in the wrong place, or into the bed.
                     </p>
                     <div className="bg-slate-50 border border-slate-200/60 rounded-xl p-4 flex flex-col gap-3">
@@ -7546,7 +7546,7 @@ const wobble = Math.sin(api.getTime() * 4) * 3;`}
                     </div>
                     <p className="text-xs text-slate-500 leading-relaxed">
                       Requires a Chromium browser (WebSerial) and GRBL-compatible firmware — GRBL 1.1, FluidNC,
-                      or grblHAL. The plate thickness field defaults to 15 mm; set it to your own plate's
+                      or grblHAL. The plate thickness field defaults to 12 mm; set it to your own plate's
                       measured thickness before the first cut.
                     </p>
                   </div>
