@@ -27,6 +27,12 @@ interface IndexEntry {
   name: string;
   scene: string;
   golden: string;
+  // Per-preset environment overrides (windX/windY/gravityZ/density/
+  // floorFriction/floorBounce), the same object loadPreset spreads over the
+  // store's defaults. This is NOT part of the SceneGraph, so without carrying
+  // it here the native app has no way to know the windmills are meant to stand
+  // in a 5 m/s wind — they loaded in dead air and never turned.
+  environment: Record<string, number>;
 }
 
 const index: IndexEntry[] = [];
@@ -37,7 +43,13 @@ for (const [key, preset] of Object.entries(PRESETS as Record<string, any>)) {
     const xml = compileToMJCF(preset.scene);
     writeFileSync(join(outDir, `${key}.json`), JSON.stringify(preset.scene));
     writeFileSync(join(outDir, `${key}.xml`), xml);
-    index.push({ key, name: preset.name ?? key, scene: `${key}.json`, golden: `${key}.xml` });
+    index.push({
+      key,
+      name: preset.name ?? key,
+      scene: `${key}.json`,
+      golden: `${key}.xml`,
+      environment: preset.environment ?? {},
+    });
     console.log(`  ok    ${key.padEnd(24)} ${String(xml.length).padStart(9)} bytes mjcf`);
   } catch (err: any) {
     failures.push({ key, error: err?.message ?? String(err) });
@@ -49,9 +61,17 @@ writeFileSync(join(outDir, 'index.json'), JSON.stringify({ presets: index }, nul
 
 // TSV alongside the JSON purely so the C++ loader needs no JSON dependency to
 // enumerate presets (it does use one to parse the scenes themselves).
+//
+// The fifth column is the environment as compact JSON, or empty. A blob rather
+// than one column per setting so adding a setting does not change the format.
 writeFileSync(
   join(outDir, 'index.tsv'),
-  index.map(e => `${e.key}\t${e.name}\t${e.scene}\t${e.golden}`).join('\n') + '\n'
+  index
+    .map(e => {
+      const env = Object.keys(e.environment).length ? JSON.stringify(e.environment) : '';
+      return `${e.key}\t${e.name}\t${e.scene}\t${e.golden}\t${env}`;
+    })
+    .join('\n') + '\n'
 );
 
 console.log(`\n${index.length} preset(s) written to ${outDir}`);
