@@ -1,8 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
 import ReactDOM from 'react-dom';
 import { User, LogOut, Radio, Sparkles, ShieldCheck, CheckCircle } from 'lucide-react';
-import { getStoredUser, clearStoredAuth, loginWithGoogle, fetchCurrentUser } from '../utils/apiClient';
+import { getStoredUser, getStoredAuthToken, clearStoredAuth, loginWithGoogle, fetchCurrentUser } from '../utils/apiClient';
 import type { PhysBoxUser } from '../utils/apiClient';
+import { renderGoogleSignInButton, disableGoogleAutoSelect } from '../utils/googleAuth';
+import { pullCloudState } from '../utils/cloudSync';
+import { mergePulledPresets } from '../utils/userPresets';
 import { RemoteMachiningModal } from './RemoteMachiningModal';
 import { GuestListModal } from './GuestListModal';
 
@@ -12,11 +15,12 @@ export const UserProfileButton: React.FC = () => {
   const [showLoginModal, setShowLoginModal] = useState(false);
   const [showRemoteModal, setShowRemoteModal] = useState(false);
   const [showGuestModal, setShowGuestModal] = useState(false);
-  const [loginEmail, setLoginEmail] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
+  const [syncSummary, setSyncSummary] = useState<string | null>(null);
 
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const googleButtonRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     fetchCurrentUser().then((u) => {
@@ -34,31 +38,94 @@ export const UserProfileButton: React.FC = () => {
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  const handleLoginSubmit = async (e?: React.FormEvent, customEmail?: string) => {
-    if (e) e.preventDefault();
-    const targetEmail = (customEmail || loginEmail).trim();
-    if (!targetEmail) return;
-    setIsLoading(true);
-    setLoginError(null);
+  /**
+   * Pulls the account's settings and presets down.
+   *
+   * Runs on mount for an already-signed-in session as well as immediately after
+   * signing in, because the sync only ever ran upwards before: a browser that
+   * had never saved anything locally would show empty settings next to a menu
+   * claiming sync was active.
+   */
+  const pullAccountState = React.useCallback(async () => {
+    if (!getStoredAuthToken()) return;
     try {
-      const res = await loginWithGoogle({ email: targetEmail });
-      setUser(res.user);
-      setShowLoginModal(false);
-      setDropdownOpen(false);
-      if (!res.is_admin) {
-        setShowGuestModal(true);
-      }
-    } catch (err: any) {
-      console.error('Sign in failed:', err);
-      setLoginError(err?.message || 'Sign in failed. Please try again.');
-    } finally {
-      setIsLoading(false);
+      const { parameters, presets } = await pullCloudState();
+      const added = mergePulledPresets(presets);
+      setSyncSummary(
+        parameters === 0 && added === 0
+          ? 'Account is up to date'
+          : `Restored ${parameters} setting${parameters === 1 ? '' : 's'}` +
+              (added > 0 ? ` and ${added} preset${added === 1 ? '' : 's'}` : '')
+      );
+    } catch (e) {
+      console.warn('[PhysBox Cloud] Could not pull account state:', e);
+      setSyncSummary('Could not reach the sync service');
     }
-  };
+  }, []);
+
+  const handleCredential = React.useCallback(
+    async (credential: string) => {
+      setIsLoading(true);
+      setLoginError(null);
+      try {
+        const res = await loginWithGoogle(credential);
+        setUser(res.user);
+        setShowLoginModal(false);
+        setDropdownOpen(false);
+        await pullAccountState();
+        if (!res.is_admin) {
+          setShowGuestModal(true);
+        }
+      } catch (err) {
+        console.error('Sign in failed:', err);
+        setLoginError(err instanceof Error ? err.message : 'Sign in failed. Please try again.');
+      } finally {
+        setIsLoading(false);
+      }
+    },
+    [pullAccountState]
+  );
+
+  useEffect(() => {
+    // The rule sees a setState reachable from an effect body, but every one of
+    // them is behind an await on a network round-trip — this is a subscription
+    // to an external system, not derived state computed during render.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void pullAccountState();
+  }, [pullAccountState]);
+
+  /**
+   * Google renders its own button, so it can only be drawn once the modal's
+   * container is actually mounted.
+   */
+  useEffect(() => {
+    if (!showLoginModal || !googleButtonRef.current) return;
+    let cancelled = false;
+
+    renderGoogleSignInButton(
+      googleButtonRef.current,
+      (credential) => {
+        if (!cancelled) void handleCredential(credential);
+      },
+      (message) => {
+        if (!cancelled) setLoginError(message);
+      }
+    ).catch((err) => {
+      if (!cancelled) setLoginError(err instanceof Error ? err.message : 'Could not load Google sign-in.');
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [showLoginModal, handleCredential]);
 
   const handleLogout = () => {
     clearStoredAuth();
+    // Otherwise Google can hand the same account straight back on the next
+    // visit, and signing out looks like it did nothing.
+    disableGoogleAutoSelect();
     setUser(null);
+    setSyncSummary(null);
     setDropdownOpen(false);
   };
 
@@ -148,7 +215,7 @@ export const UserProfileButton: React.FC = () => {
 
                 <div className="px-3 py-1.5 text-[10px] text-slate-500 flex items-center gap-1.5">
                   <CheckCircle className="w-3 h-3 text-emerald-500 dark:text-emerald-400" />
-                  <span>Cloud Parameter & Preset Auto-Sync Active</span>
+                  <span>{syncSummary ?? 'Syncing parameters and presets…'}</span>
                 </div>
               </div>
 
@@ -206,34 +273,22 @@ export const UserProfileButton: React.FC = () => {
               </button>
               <div className="text-center space-y-1">
                 <h3 className="text-base sm:text-lg font-bold text-slate-800 dark:text-slate-100">PhysBox Account Sign In</h3>
-                <p className="text-xs text-slate-500 dark:text-slate-400">Enter your email address to sign in with Google or join the early access guest list.</p>
+                <p className="text-xs text-slate-500 dark:text-slate-400">Sign in with your Google account to sync your settings and saved scenes, or to join the early access guest list.</p>
               </div>
               {loginError && (
                 <div className="p-2.5 rounded-lg bg-rose-50 dark:bg-rose-500/10 border border-rose-200 dark:border-rose-500/30 text-rose-600 dark:text-rose-300 text-xs text-center">
                   {loginError}
                 </div>
               )}
-              <form onSubmit={(e) => handleLoginSubmit(e)} className="space-y-3 pt-1">
-                <div>
-                  <label className="block text-[11px] font-medium text-slate-600 dark:text-slate-300 mb-1">Email Address</label>
-                  <input
-                    type="email"
-                    required
-                    placeholder="you@gmail.com"
-                    value={loginEmail}
-                    onChange={(e) => setLoginEmail(e.target.value)}
-                    className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-700 focus:border-cyan-500 rounded-xl px-3.5 py-2.5 text-xs text-slate-800 dark:text-slate-100 focus:outline-none transition shadow-inner"
-                  />
-                </div>
-                <button
-                  type="submit"
-                  disabled={isLoading}
-                  className="w-full py-2.5 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-white rounded-xl text-xs font-semibold transition shadow-md shadow-cyan-600/20 flex items-center justify-center gap-2 cursor-pointer"
-                >
-                  <User className="w-4 h-4" />
-                  <span>{isLoading ? 'Signing In...' : 'Sign In with Google'}</span>
-                </button>
-              </form>
+              {/* Google draws its own button in here — the credential it
+                  produces is the only thing the API accepts, so there is
+                  deliberately no email field to type into. */}
+              <div className="flex justify-center pt-1">
+                <div ref={googleButtonRef} />
+              </div>
+              {isLoading && (
+                <p className="text-center text-xs text-slate-500 dark:text-slate-400">Signing in…</p>
+              )}
             </div>
           </div>,
           document.body
@@ -243,7 +298,7 @@ export const UserProfileButton: React.FC = () => {
       <GuestListModal
         isOpen={showGuestModal}
         onClose={() => setShowGuestModal(false)}
-        userEmail={user?.email || loginEmail}
+        userEmail={user?.email || ''}
       />
     </div>
   );

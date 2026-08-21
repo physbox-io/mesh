@@ -13,6 +13,7 @@ import { generateCurveGeoms, DEFAULT_CURVE_POINTS, DEFAULT_CURVE_WIDTH, DEFAULT_
 import { compileCsgNodes } from './useCsgCompile';
 import { PRESETS } from '../presets/presetScenes';
 import { parseSTL } from '../utils/stlParser';
+import { saveUserPreset, deleteUserPreset, readUserPreset, listUserPresetNames } from '../utils/userPresets';
 
 const autoCompileScad = async (nodes: any[]) => {
   const scadNodes: any[] = [];
@@ -527,13 +528,8 @@ export function useMCPBridge() {
           const setter = (window as any)._physics_setNoteCards;
           if (setter) {
             if (name.startsWith('user:')) {
-              try {
-                const userPresets = JSON.parse(localStorage.getItem('physics_user_presets') || '{}');
-                const saved = userPresets[name.replace('user:', '')];
-                setter(saved && Array.isArray(saved.noteCards) ? saved.noteCards : []);
-              } catch {
-                setter([]);
-              }
+              const saved = readUserPreset(name);
+              setter(saved && Array.isArray(saved.noteCards) ? saved.noteCards : []);
             } else {
               const presetCard = makePresetNoteCard(name);
               setter(presetCard ? [presetCard] : []);
@@ -542,13 +538,8 @@ export function useMCPBridge() {
           const msgSetter = (window as any)._physics_setCopilotMessages;
           if (msgSetter) {
             if (name.startsWith('user:')) {
-              try {
-                const userPresets = JSON.parse(localStorage.getItem('physics_user_presets') || '{}');
-                const saved = userPresets[name.replace('user:', '')];
-                msgSetter(saved && Array.isArray(saved.copilotMessages) ? saved.copilotMessages : []);
-              } catch {
-                msgSetter([]);
-              }
+              const saved = readUserPreset(name);
+              msgSetter(saved && Array.isArray(saved.copilotMessages) ? saved.copilotMessages : []);
             } else {
               msgSetter([]);
             }
@@ -564,33 +555,26 @@ export function useMCPBridge() {
           const name = String(msg.preset || msg.name || '').trim();
           if (!name) return { ok: false, error: 'Missing preset name' };
           const userPresetKey = name.replace(/^user:/, '');
-          try {
-            const userPresets = JSON.parse(localStorage.getItem('physics_user_presets') || '{}');
-            userPresets[userPresetKey] = {
-              sceneGraph: store.sceneGraph,
-              noteCards: (window as any)._physics_getNoteCards?.() || [],
-              copilotMessages: (window as any)._physics_getCopilotMessages?.() || [],
-            };
-            localStorage.getItem('physics_user_presets');
-            localStorage.setItem('physics_user_presets', JSON.stringify(userPresets));
-            return { ok: true, preset: `user:${userPresetKey}` };
-          } catch (e) {
-            return { ok: false, error: String(e) };
-          }
+          // Through the shared accessor, not localStorage directly: a preset an
+          // agent saves has to reach the account like any other, and this path
+          // is the one that used to bypass sync.
+          const saved = saveUserPreset(userPresetKey, {
+            sceneGraph: store.sceneGraph,
+            noteCards: (window as any)._physics_getNoteCards?.() || [],
+            copilotMessages: (window as any)._physics_getCopilotMessages?.() || [],
+          });
+          if (!saved) return { ok: false, error: 'Could not write the preset to local storage' };
+          return { ok: true, preset: `user:${userPresetKey}` };
         }
 
         case 'DELETE_PRESET': {
           const name = String(msg.preset || msg.name || '').trim();
           if (!name) return { ok: false, error: 'Missing preset name' };
           const userPresetKey = name.replace(/^user:/, '');
-          try {
-            const userPresets = JSON.parse(localStorage.getItem('physics_user_presets') || '{}');
-            delete userPresets[userPresetKey];
-            localStorage.setItem('physics_user_presets', JSON.stringify(userPresets));
-            return { ok: true, preset: name };
-          } catch (e) {
-            return { ok: false, error: String(e) };
+          if (!deleteUserPreset(userPresetKey)) {
+            return { ok: false, error: 'Could not write the preset list to local storage' };
           }
+          return { ok: true, preset: name };
         }
 
         case 'CHECK_COLLISIONS': {
@@ -755,11 +739,7 @@ export function useMCPBridge() {
         }
 
         case 'LIST_PRESETS': {
-          let userKeys: string[] = [];
-          try {
-            const userPresets = JSON.parse(localStorage.getItem('physics_user_presets') || '{}');
-            userKeys = Object.keys(userPresets).map(k => `user:${k}`);
-          } catch {}
+          const userKeys = listUserPresetNames().map(k => `user:${k}`);
           return [...Object.keys(PRESETS), ...userKeys];
         }
 

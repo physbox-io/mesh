@@ -100,36 +100,16 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
   return response.json();
 }
 
-export async function loginWithGoogle(payload: { credential?: string; email?: string; name?: string; picture?: string }): Promise<{ token: string; user: PhysBoxUser; is_admin: boolean; message: string }> {
-  const email = payload.email || 'tom.grek@gmail.com';
-  try {
-    const data = await request<{ token: string; user: PhysBoxUser; is_admin: boolean; message: string }>('/api/auth/google', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    });
-    if (data.token && data.user) {
-      setStoredAuth(data.token, data.user);
-    }
-    return data;
-  } catch (err) {
-    console.warn('[PhysBox Auth] Server unreachable, using local session for:', email);
-    const isAdmin = email.toLowerCase().trim() === 'tom.grek@gmail.com';
-    const fallbackUser: PhysBoxUser = {
-      id: `usr_${Date.now()}`,
-      email,
-      name: payload.name || (isAdmin ? 'Tom Grek' : email.split('@')[0]),
-      picture: payload.picture,
-      subscription_tier: isAdmin ? 'active' : 'early_access',
-    };
-    const fallbackToken = `token_${Date.now()}`;
-    setStoredAuth(fallbackToken, fallbackUser);
-    return {
-      token: fallbackToken,
-      user: fallbackUser,
-      is_admin: isAdmin,
-      message: isAdmin ? 'Signed in with Active Subscription' : "You're on the Guest List!",
-    };
+export async function loginWithGoogle(credential: string): Promise<{ token: string; user: PhysBoxUser; is_admin: boolean; message: string }> {
+  const data = await request<{ token: string; user: PhysBoxUser; is_admin: boolean; message: string }>('/api/auth/google', {
+    method: 'POST',
+    body: JSON.stringify({ credential }),
+  });
+  if (!data.token || !data.user) {
+    throw new Error('Sign-in did not return a session.');
   }
+  setStoredAuth(data.token, data.user);
+  return data;
 }
 
 export async function fetchCurrentUser(): Promise<PhysBoxUser | null> {

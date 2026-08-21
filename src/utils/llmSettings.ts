@@ -36,8 +36,47 @@ export const writeMaxTokens = (value: number): number => {
   const clamped = clampMaxTokens(value);
   try {
     localStorage.setItem(MAX_TOKENS_STORAGE_KEY, String(clamped));
+    pushGlobalParameter(MAX_TOKENS_STORAGE_KEY, clamped);
   } catch {
     // Non-fatal: the setting just won't persist across reloads.
   }
   return clamped;
+};
+
+// --- Cloud sync -------------------------------------------------------------
+
+export const GEMINI_KEY = 'gemini_api_key';
+export const ANTHROPIC_KEY = 'anthropic_api_key';
+export const MODEL_KEY = 'gemini_model';
+
+/**
+ * The copilot settings that follow the account, under the `global` app id.
+ *
+ * An allowlist rather than "whatever is in localStorage", for two reasons: what
+ * comes back from the server is only ever written to these keys, never to
+ * whatever key name the response happens to carry; and it keeps the decision
+ * about what leaves the machine in one visible place.
+ *
+ * The names are identical to the ones `etch` syncs, deliberately — `global` is
+ * a single shared namespace, so the copilot keys set in one app are the ones
+ * the other finds. Changing a name here silently unpairs the two.
+ */
+export const SYNCED_LLM_PARAMETER_KEYS: readonly string[] = [
+  GEMINI_KEY,
+  ANTHROPIC_KEY,
+  MODEL_KEY,
+  MAX_TOKENS_STORAGE_KEY,
+];
+
+/**
+ * Mirrors one copilot setting to the account.
+ *
+ * Fire-and-forget, and a no-op when signed out: the local write has already
+ * happened by the time this is called, and a failed upload must never be the
+ * reason a setting does not stick.
+ */
+export const pushGlobalParameter = (key: string, value: string | number): void => {
+  void import('./apiClient').then(({ syncCloudParameters }) => {
+    void syncCloudParameters('global', { [key]: value });
+  });
 };

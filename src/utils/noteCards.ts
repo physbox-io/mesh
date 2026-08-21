@@ -101,6 +101,31 @@ Only **one** of the hollow cube's three shafts collides (the Z one) — decompos
 
   birdhouse_scad: `# Birdhouse (OpenSCAD)\n\nA 3D birdhouse model generated from OpenSCAD code.\n\n## Laser Cutting\n- Evaluates OpenSCAD polyhedral mesh into 2D coplanar panel clusters\n- Extracts boundary cutouts and finger joint edges\n\n## Try it\n- Click **Export Laser Cut (SVG)** in the top toolbar to view unwrapped 2D sheet layout`,
 
+  mega_bust_studio: `# Mega Bust & Stress Studio
+
+A **solver stress test** dressed as a sculpture studio: one dense mesh standing still while 30-odd loose bodies fall over around it.
+
+## What is in the scene
+| Piece | Bodies | What it is for |
+|-------|--------|----------------|
+| Classical bust | 1, fixed | 120 x 80 procedural lathe — about **19,000 triangles** |
+| Wrecking pendulum | 2 | Hinged arm with a 0.8 kg bob, the heaviest single impact here |
+| Collapse tower | 16 | 8 tiers of two blocks, each tier laid across the one below |
+| Domino arc | 16 | A 270 degree arc; domino #1 starts leaning 15 degrees |
+
+## Physics
+- Every loose body carries a **free joint** (6-DOF), so this is roughly 34 free bodies and a hinge in one contact-rich scene — the interesting number is contacts per step, not bodies
+- The bust has **no joint at all**: it is welded to the world and acts as the anvil everything else works against
+- Its mesh geom collides as its **convex hull** — the nose and the undercut of the neck are visual only, so a domino resting against the chin touches the hull, not the face
+- The pendulum stand is \`contype: 0, conaffinity: 0\` — it holds the arm up without ever taking part in a contact
+- The hinge is damped at **0.0005**, low enough that the bob keeps swinging back through the wreckage
+
+## Try it
+- Press play and leave it: the leaning domino starts the cascade, which reaches the tower
+- Watch the **step time** climb as the tower comes down — peak contact count, not body count, is what costs
+- Raise the bob mass and drop it into the tower directly to skip the dominoes
+- Turn the friction on the dominoes down and watch the cascade slide out instead of toppling`,
+
   california_relief: `# California Relief Map\n\nThe real state, at real proportions, built to be carved into a **150 mm square** block.\n\n## Geography\n- Projected in **EPSG:3310 "California Albers"** — the state's own official projection, so the outline is the shape California is actually drawn as, and equal area everywhere on the block\n- Terrain from open 1 km DEM tiles: **-82 m** at Badwater to **3,973 m** on the Sierra crest\n- Carves **104.0 × 120.0 mm** — 1 mm to about 8.8 km\n\n## Relief Carving\n- Height is exaggerated roughly **18×**; at true scale the Sierra would stand 0.5 mm proud and the board would read as flat\n- The lowest 15% of the depth is a plinth, so the coastline steps up from the background instead of fading into it\n- Set **Fit** to *manual, 100%* — fitting would rescale it to fill the stock and lose the 120 mm\n\n## Try it\n- Click **Export Relief Carve (G-code)**, rough with a 6.35 mm flat mill, finish with a 3.175 mm ball nose`,
 };
 

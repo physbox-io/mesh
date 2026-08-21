@@ -270,8 +270,11 @@ describe('Laser cut panel extraction and nesting', () => {
     expect(result.success).toBe(true);
     expect(result.sheetCount!).toBeGreaterThan(1);
 
+    // Placements are sheet-local, so two panels only collide if they share a
+    // sheet — the same square of bed at the same time.
     const boxes = result.panels!.map(p => ({
       name: p.name,
+      sheet: p.sheetIndex!,
       x: p.placedPos2D!.x, y: p.placedPos2D!.y,
       w: p.width2D!, h: p.height2D!,
     }));
@@ -280,17 +283,19 @@ describe('Laser cut panel extraction and nesting', () => {
       for (let j = i + 1; j < boxes.length; j++) {
         const a = boxes[i];
         const b = boxes[j];
+        if (a.sheet !== b.sheet) continue;
         const overlaps = a.x < b.x + b.w && b.x < a.x + a.w &&
                          a.y < b.y + b.h && b.y < a.y + a.h;
-        expect(overlaps, `${a.name} overlaps ${b.name}`).toBe(false);
+        expect(overlaps, `${a.name} overlaps ${b.name} on sheet ${a.sheet}`).toBe(false);
       }
     }
 
-    // ...and every panel sits inside the overall sheet stack.
-    const totalHeight = 300 * result.sheetCount!;
+    // ...and every panel sits inside its own sheet, not merely inside the stack.
     for (const b of boxes) {
+      expect(b.sheet).toBeLessThan(result.sheetCount!);
       expect(b.x).toBeGreaterThanOrEqual(0);
-      expect(b.y + b.h).toBeLessThanOrEqual(totalHeight + 0.01);
+      expect(b.y).toBeGreaterThanOrEqual(0);
+      expect(b.y + b.h).toBeLessThanOrEqual(300 + 0.01);
     }
   });
 

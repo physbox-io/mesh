@@ -102,8 +102,13 @@ export interface LaserPanel {
    * sheet space. Add it back to recover model-space (u, v) coordinates.
    */
   modelOffset2D?: Point2D;
-  // Final placed 2D position on sheet
+  // Final placed 2D position, in the coordinates of its own sheet: every sheet
+  // is loaded against the same machine zero, so this is what the cut actually
+  // runs at. Which sheet it belongs to is `sheetIndex`; only the combined SVG
+  // adds that back as a y offset to stack the sheets down one drawing.
   placedPos2D?: Point2D;
+  /** Which sheet of stock this panel is nested on, counting from 0. */
+  sheetIndex?: number;
   width2D?: number;
   height2D?: number;
 }
@@ -2279,8 +2284,9 @@ function normalizePanelBounds(panels: LaserPanel[]): void {
 /**
  * Shelf-pack the panels down a vertical stack of sheets, tallest first so short
  * offcut panels fill the gaps beside a tall one instead of starting a new row.
- * Panels must already be normalized. Writes placedPos2D; sheet N is at
- * y = N * sheetHeightMm in the combined SVG.
+ * Panels must already be normalized. Writes placedPos2D in sheet-local
+ * coordinates plus the sheetIndex it belongs to; the combined SVG stacks sheet
+ * N at y = N * sheetHeightMm when it draws.
  */
 function packPanels(
   panels: LaserPanel[],
@@ -2317,7 +2323,8 @@ function packPanels(
       rowHeight = 0;
     }
 
-    panel.placedPos2D = { x: currentX, y: currentY + sheetIndex * sheetHeightMm };
+    panel.placedPos2D = { x: currentX, y: currentY };
+    panel.sheetIndex = sheetIndex;
     currentX += pw + marginMm;
     if (ph > rowHeight) rowHeight = ph;
   }
@@ -2466,8 +2473,15 @@ export function exportLaserCutSvg(
 
   svg += `  <g id="cut-paths" stroke="#FF0000" stroke-width="0.2" fill="none" stroke-linejoin="round" stroke-linecap="round">\n`;
 
-  for (const panel of panels) {
+  // Panels are packed in the coordinates of their own sheet. The drawing stacks
+  // the sheets one below the next, so that is where the offset goes back in.
+  const drawPos = (panel: LaserPanel): Point2D => {
     const pos = panel.placedPos2D || { x: 0, y: 0 };
+    return { x: pos.x, y: pos.y + (panel.sheetIndex || 0) * sheetHeightMm };
+  };
+
+  for (const panel of panels) {
+    const pos = drawPos(panel);
 
     if (panel.outerPolygon2D.length > 0) {
       let pathData = `M ${(pos.x + panel.outerPolygon2D[0].x).toFixed(2)} ${(pos.y + panel.outerPolygon2D[0].y).toFixed(2)}`;
@@ -2493,7 +2507,7 @@ export function exportLaserCutSvg(
   if (options.includeLabels) {
     svg += `  <g id="engrave-labels" fill="#0000FF" font-family="sans-serif" font-size="8" text-anchor="middle">\n`;
     for (const panel of panels) {
-      const pos = panel.placedPos2D || { x: 0, y: 0 };
+      const pos = drawPos(panel);
       const cx = pos.x + (panel.width2D || 50) / 2;
       const cy = pos.y + (panel.height2D || 50) / 2;
       svg += `    <text x="${cx.toFixed(2)}" y="${cy.toFixed(2)}">${escapeXml(panel.name)}</text>\n`;

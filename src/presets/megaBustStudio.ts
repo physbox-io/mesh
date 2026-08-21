@@ -7,7 +7,7 @@ function generateHighPolyBustMesh(slices = 100, stacks = 70): { vertices: number
 
   for (let i = 0; i <= stacks; ++i) {
     const v = i / stacks;
-    const z = v * 0.16; // 16cm height (Z-up in meters)
+    const z = v * 0.16; // 16 cm of height, laid along Y at the end of the loop
 
     for (let j = 0; j <= slices; ++j) {
       const u = j / slices;
@@ -53,8 +53,12 @@ function generateHighPolyBustMesh(slices = 100, stacks = 70): { vertices: number
       const x = r * Math.cos(theta);
       const y = r * Math.sin(theta);
 
-      // Three.js / MuJoCo coordinates (X, Y, Z)
-      vertices.push(x, y, z);
+      // Geom vertices are stored Y-up (three.js); the MJCF builder maps
+      // (x, y, z) -> (x, -z, y) for MuJoCo. So the lathe's height goes in Y,
+      // not Z, or the bust is compiled lying on its side. The remaining axis is
+      // negated rather than swapped so this stays a rotation about X: a bare
+      // swap flips the handedness and turns every face inside out.
+      vertices.push(x, z, -y);
     }
   }
 

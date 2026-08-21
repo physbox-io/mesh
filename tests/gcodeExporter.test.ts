@@ -227,3 +227,66 @@ describe('Holding attachments', () => {
     expect(res.attachmentCount).toBe(0);
   });
 });
+
+describe('Multi-sheet jobs', () => {
+  /** A 100 mm square nested at a sheet-local spot on the given sheet. */
+  const panelAt = (id: string, sheetIndex: number, x: number, y: number): LaserPanel => {
+    const base = squarePanel();
+    return {
+      ...base,
+      id,
+      name: id,
+      outerPolygon2D: [
+        { x: 0, y: 0 }, { x: 100, y: 0 }, { x: 100, y: 100 }, { x: 0, y: 100 },
+      ],
+      innerCutouts2D: [],
+      placedPos2D: { x, y },
+      sheetIndex,
+      width2D: 100,
+      height2D: 100,
+    };
+  };
+
+  const threeSheets = [panelAt('A', 0, 10, 10), panelAt('B', 1, 10, 10), panelAt('C', 2, 10, 10)];
+  const opts = { ...DEFAULT_GCODE_OPTIONS, machineMode: 'laser' as const };
+
+  it('runs one sheet after another in a single program', () => {
+    const res = generateLaserCutGcode(threeSheets, opts);
+    expect(res.sheetCount).toBe(3);
+    expect(res.gcode).toContain('; SHEET 1 of 3');
+    expect(res.gcode).toContain('; SHEET 3 of 3');
+  });
+
+  it('pauses for a sheet swap between sheets, but not before the first', () => {
+    const res = generateLaserCutGcode(threeSheets, opts);
+    const pauses = res.gcode.match(/M0 \(PAUSE: Insert Material Sheet .*?\)/g) || [];
+    expect(pauses).toEqual([
+      'M0 (PAUSE: Insert Material Sheet 2 of 3)',
+      'M0 (PAUSE: Insert Material Sheet 3 of 3)',
+    ]);
+  });
+
+  it('cuts every sheet against the same XY zero', () => {
+    const res = generateLaserCutGcode(threeSheets, opts);
+    // Each sheet is loaded against the same corner, so no cut may reach past
+    // the sheet height — sheet 3 at drawing y 810 belongs at machine y 10.
+    const ys = [...res.gcode.matchAll(/Y(-?\d+\.\d+)/g)].map((m) => parseFloat(m[1]));
+    expect(Math.max(...ys)).toBeLessThanOrEqual(400);
+    expect(res.bounds.maxY).toBeCloseTo(110);
+    // All three squares cut the identical path.
+    const perSheet = res.gcode.split(/; SHEET \d+ of 3/).slice(1);
+    expect(perSheet).toHaveLength(3);
+    const strip = (s: string) =>
+      s.split('; --- Panel')[1].split('; --- PAUSE')[0].split('; --- PROGRAM END')[0]
+        .replace(/^.*---\n/, ''); // drop the panel's own name line
+    expect(strip(perSheet[1])).toBe(strip(perSheet[0]));
+    expect(strip(perSheet[2])).toBe(strip(perSheet[0]));
+  });
+
+  it('asks for no swap when everything nested onto one sheet', () => {
+    const oneSheet = [panelAt('A', 0, 10, 10), panelAt('B', 0, 10, 610)];
+    const res = generateLaserCutGcode(oneSheet, opts);
+    expect(res.sheetCount).toBe(1);
+    expect(res.gcode).not.toContain('PAUSE: Insert Material Sheet');
+  });
+});

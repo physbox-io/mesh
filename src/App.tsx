@@ -29,6 +29,9 @@ import { MIN_MAX_TOKENS, MAX_MAX_TOKENS, readMaxTokens, writeMaxTokens } from '.
 import { PrintAnalysisOverlay } from './components/PrintAnalysisOverlay';
 import { PrintAnalysisHUD } from './components/PrintAnalysisHUD';
 import { createHeatSetBossNode, createHexNutTrapNode, createBearingPocketNode, createDShaftHubNode, createCounterboreHoleNode } from './utils/hardwareComponents';
+import { pushGlobalParameter } from './utils/llmSettings';
+import { saveUserPreset, deleteUserPreset, readUserPreset, listUserPresetNames } from './utils/userPresets';
+import { pushAppParameter } from './utils/cloudSync';
 
 // Simple robust markdown parser to convert basic markdown text to safe HTML
 // Markdown parser for note cards
@@ -2045,9 +2048,11 @@ function App() {
     if (darkMode) {
       document.documentElement.classList.add('dark');
       localStorage.setItem('physics_dark_mode', 'true');
+      pushAppParameter('physics_dark_mode', 'true');
     } else {
       document.documentElement.classList.remove('dark');
       localStorage.setItem('physics_dark_mode', 'false');
+      pushAppParameter('physics_dark_mode', 'false');
     }
   }, [darkMode]);
 
@@ -2190,6 +2195,7 @@ function App() {
   const handleUpdateClaudeKeyInSettings = async (newKey: string) => {
     setSettingsClaudeKey(newKey);
     localStorage.setItem('anthropic_api_key', newKey);
+    pushGlobalParameter('anthropic_api_key', newKey);
     window.dispatchEvent(new Event('storage'));
     if (newKey.trim()) {
       const live = await fetchSettingsClaudeModels(newKey.trim());
@@ -2197,6 +2203,7 @@ function App() {
         const topModel = live[0].id;
         setSettingsSelectedModel(topModel);
         localStorage.setItem('gemini_model', topModel);
+        pushGlobalParameter('gemini_model', topModel);
         window.dispatchEvent(new Event('storage'));
       }
     }
@@ -2205,6 +2212,7 @@ function App() {
   const handleUpdateGeminiKeyInSettings = async (newKey: string) => {
     setSettingsGeminiKey(newKey);
     localStorage.setItem('gemini_api_key', newKey);
+    pushGlobalParameter('gemini_api_key', newKey);
     window.dispatchEvent(new Event('storage'));
     if (newKey.trim()) {
       fetchSettingsGeminiModels(newKey.trim());
@@ -2431,9 +2439,7 @@ function App() {
   const loadUserPresetWithCard = useCallback((name: string) => {
     loadPreset(name);
     try {
-      const userPresets = JSON.parse(localStorage.getItem('physics_user_presets') || '{}');
-      const key = name.replace('user:', '');
-      const saved = userPresets[key];
+      const saved = readUserPreset(name);
       if (saved && Array.isArray(saved.noteCards)) {
         setNoteCards(saved.noteCards);
       } else {
@@ -2456,9 +2462,7 @@ function App() {
     if (!trimmed) return;
     try {
       const syncedScene = getSyncedSceneGraph(sceneGraph, model, data, mujoco);
-      const userPresets = JSON.parse(localStorage.getItem('physics_user_presets') || '{}');
-      userPresets[trimmed] = { ...syncedScene, noteCards, copilotMessages };
-      localStorage.setItem('physics_user_presets', JSON.stringify(userPresets));
+      saveUserPreset(trimmed, { ...syncedScene, noteCards, copilotMessages });
       loadUserPresetWithCard(`user:${trimmed}`);
     } catch (e) {
       console.error('Failed to save user preset', e);
@@ -3189,8 +3193,7 @@ function App() {
               {/* User Presets */}
               {(() => {
                 try {
-                  const userPresets = JSON.parse(localStorage.getItem('physics_user_presets') || '{}');
-                  const keys = Object.keys(userPresets);
+                  const keys = listUserPresetNames();
                   if (keys.length === 0) return null;
                   return (
                     <optgroup label="📁 Saved Presets" className="bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300">
@@ -3222,9 +3225,7 @@ function App() {
                     const presetName = activePreset.replace('user:', '');
                     if (window.confirm(`Are you sure you want to delete the preset "${presetName}"?`)) {
                       try {
-                        const userPresets = JSON.parse(localStorage.getItem('physics_user_presets') || '{}');
-                        delete userPresets[presetName];
-                        localStorage.setItem('physics_user_presets', JSON.stringify(userPresets));
+                        deleteUserPreset(presetName);
                         loadPresetWithCard('empty');
                       } catch (e) {
                         console.error('Failed to delete preset', e);
@@ -3539,6 +3540,7 @@ function App() {
                       const modelId = e.target.value;
                       setSettingsSelectedModel(modelId);
                       localStorage.setItem('gemini_model', modelId);
+                      pushGlobalParameter('gemini_model', modelId);
                       window.dispatchEvent(new Event('storage'));
                     }} 
                     className="w-full px-2 py-1.5 text-xs border border-slate-200 dark:border-slate-800 rounded bg-white dark:bg-slate-950 text-slate-800 dark:text-slate-200 shadow-inner focus:outline-none focus:ring-1 focus:ring-blue-500 cursor-pointer" 

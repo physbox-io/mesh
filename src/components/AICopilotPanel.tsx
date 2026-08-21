@@ -6,6 +6,7 @@ import { updateOrCreateNotecard } from '../utils/noteCards';
 import { mergeAndNormalizeNodes } from '../utils/sceneNodes';
 import { readMaxTokens } from '../utils/llmSettings';
 import SYSTEM_INSTRUCTIONS from './systemInstructions.txt?raw';
+import { pushGlobalParameter } from '../utils/llmSettings';
 
 interface AICopilotPanelProps {
   onClose: () => void;
@@ -419,6 +420,7 @@ export default function AICopilotPanel({ onClose, messages: propsMessages, setMe
   const saveGeminiApiKey = (key: string) => {
     setGeminiApiKey(key);
     localStorage.setItem('gemini_api_key', key);
+    pushGlobalParameter('gemini_api_key', key);
     window.dispatchEvent(new Event('storage'));
     if (key.trim()) fetchAvailableModels(key.trim());
   };
@@ -426,6 +428,7 @@ export default function AICopilotPanel({ onClose, messages: propsMessages, setMe
   const saveClaudeApiKey = async (key: string) => {
     setClaudeApiKey(key);
     localStorage.setItem('anthropic_api_key', key);
+    pushGlobalParameter('anthropic_api_key', key);
     window.dispatchEvent(new Event('storage'));
     if (key.trim()) {
       const liveModels = await fetchAvailableClaudeModels(key.trim());
@@ -440,6 +443,7 @@ export default function AICopilotPanel({ onClose, messages: propsMessages, setMe
   const saveSelectedModel = (modelId: string) => {
     setSelectedModel(modelId);
     localStorage.setItem('gemini_model', modelId);
+    pushGlobalParameter('gemini_model', modelId);
     window.dispatchEvent(new Event('storage'));
   };
 

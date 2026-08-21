@@ -271,14 +271,15 @@ export function generateLaserCutGcode(
     };
   }
 
-  // Group panels by sheet index based on placedPos2D
+  // Group by the sheet the packer nested each panel on. Placements are already
+  // in sheet-local coordinates: every sheet is loaded against the same machine
+  // zero, so sheet 3 cuts in the same square of bed that sheet 1 did.
   const sheetMap = new Map<number, LaserPanel[]>();
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
 
   for (const p of panels) {
     const pos = p.placedPos2D || { x: 0, y: 0 };
-    // Sheet index is determined by pos.y vs sheetHeight or placed sheet
-    const sheetIdx = Math.floor(pos.y / 1000); // normalized sheet grouping
+    const sheetIdx = p.sheetIndex || 0;
     if (!sheetMap.has(sheetIdx)) sheetMap.set(sheetIdx, []);
     sheetMap.get(sheetIdx)!.push(p);
 

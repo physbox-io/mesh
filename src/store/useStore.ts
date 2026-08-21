@@ -6,6 +6,7 @@ import { compileToMJCF } from '../utils/mjcf';
 import { PRESETS, pendulumPreset, generateGearGeoms } from '../presets/presetScenes';
 import { PhysicsWorkerClient, type BuiltResult, type FrameSnapshot } from './physicsWorkerClient';
 import { generatePyramidMeshData, generateConeMeshData, generateTorusMeshData, generateTubeMeshData, generateCurveGeoms, DEFAULT_CURVE_POINTS, DEFAULT_CURVE_WIDTH, DEFAULT_CURVE_THICKNESS, DEFAULT_CURVE_SEGMENTS, getStickyRotation } from '../utils/geom';
+import { readUserPreset } from '../utils/userPresets';
 
 const initialScene: SceneGraph = pendulumPreset;
 
@@ -688,12 +689,12 @@ export const useStore = create<PhysicsState>()((set, get) => ({
       if (typeof window !== 'undefined') {
         window.dispatchEvent(new CustomEvent('physics:preset-loaded', { detail: { name, prev } }));
       }
-      const presetName = name.replace('user:', '');
       try {
-        const userPresets = JSON.parse(localStorage.getItem('physics_user_presets') || '{}');
-        const savedScene = userPresets[presetName];
-        if (savedScene) {
-          get().recompile(savedScene, null, true, true);
+        const savedScene = readUserPreset(name);
+        // A preset with no nodes is a corrupt or half-written entry rather than
+        // an empty scene; recompiling it would throw inside the MJCF builder.
+        if (savedScene && Array.isArray(savedScene.nodes)) {
+          get().recompile(savedScene as SceneGraph, null, true, true);
         }
       } catch (e) {
         console.error('Failed to load user preset', e);

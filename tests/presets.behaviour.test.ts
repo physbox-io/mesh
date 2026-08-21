@@ -264,6 +264,37 @@ describe('pulley system (Atwood machine)', () => {
   });
 });
 
+describe('mega bust studio', () => {
+  // Geom vertices are stored Y-up and the MJCF builder maps (x, y, z) to
+  // (x, -z, y). A lathe written with its height in Z reads as perfectly
+  // sensible source and compiles lying on its side, which is how this one
+  // shipped — so the tall axis is worth pinning.
+  it('stands the bust up rather than laying it on its side', () => {
+    const scene = PRESETS['mega_bust_studio'].scene as unknown as { nodes: SceneNode[] };
+    const bust = scene.nodes.find(n => n.id === 'classical_bust_sculpt')!;
+    const v = bust.geoms![0].vertices!;
+
+    const span = (axis: number) => {
+      let lo = Infinity, hi = -Infinity;
+      for (let i = axis; i < v.length; i += 3) {
+        if (v[i] < lo) lo = v[i];
+        if (v[i] > hi) hi = v[i];
+      }
+      return hi - lo;
+    };
+
+    // 160 mm tall on a bust under 120 mm across: up is Y, and the two
+    // horizontal axes are the narrow ones.
+    expect(span(1)).toBeCloseTo(0.16, 3);
+    expect(span(0)).toBeLessThan(0.16);
+    expect(span(2)).toBeLessThan(0.16);
+    // It stands on the floor, not through it.
+    const ys: number[] = [];
+    for (let i = 1; i < v.length; i += 3) ys.push(v[i]);
+    expect(Math.min(...ys)).toBeCloseTo(0, 6);
+  });
+});
+
 describe('every preset explains itself', () => {
   // The note card is the preset's documentation, and it used to live in two
   // places at once: App.tsx's own copy for the dropdown and utils/noteCards.ts
