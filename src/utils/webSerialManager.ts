@@ -1,10 +1,17 @@
 // ---------------------------------------------------------------------------
 // WebSerial Connection & Machine Controller Manager
 // Supports GRBL / Marlin serial communication, homing, zeroing, framing trace,
-// and interactive pauses for Manual Tool Changes (M6) and Material Swaps (M0).
+// interactive pauses for Manual Tool Changes (M6) and Material Swaps (M0), and
+// an operator feed hold that can be lifted again without losing the program.
 // ---------------------------------------------------------------------------
 
 import { postMachineTelemetry } from './apiClient';
+import {
+  DEFAULT_MOTION_PROFILE,
+  motionProfileFromSettings,
+  parseGrblSettings,
+  type MotionProfile,
+} from './motionProfile';
 
 export type MachineStatus =
   | 'DISCONNECTED'
@@ -13,6 +20,7 @@ export type MachineStatus =
   | 'RUNNING'
   | 'PAUSED_MATERIAL'
   | 'PAUSED_TOOL'
+  | 'PAUSED_USER'
   | 'ALARM'
   | 'ERROR';
 
@@ -30,6 +38,42 @@ export interface MachineState {
   /** Live feed and spindle, as reported in GRBL's `FS:` status field. */
   feedRate: number;
   spindleSpeed: number;
+  /**
+   * Whether the work Z datum is known to be stale.
+   *
+   * A tool change invalidates it: two bits are never the same length, so the Z
+   * zero that was touched off on the roughing mill is wrong by whatever the
+   * difference is the moment the finishing bit goes in — and it is wrong in the
+   * direction of driving the new tool into the work. Nothing on the machine
+   * knows this has happened, so the app has to remember it and say so, rather
+   * than letting Resume look like an ordinary button.
+   *
+   * Set when a job pauses for a tool change, cleared by either zeroing route.
+   */
+  needsZZero: boolean;
+  /**
+   * What this machine can actually do, read from its own `$$` settings.
+   *
+   * Falls back to the assumed hobby-router profile while nothing is connected,
+   * and says which it is, because a run-time estimate built on invented
+   * acceleration figures is a guess and should not be dressed up as anything
+   * else. `$120` alone spans a factor of fifty across the machines this app
+   * drives.
+   */
+  motion: MotionProfile;
+  /** Every `$N=value` the controller reported, for anything else that needs one. */
+  grblSettings: Record<number, number>;
+  /**
+   * Live feed, rapid and spindle overrides as percentages, from the
+   * controller's own `Ov:` report.
+   *
+   * Read rather than tallied. An override survives a page reload, is cleared by
+   * a reset, and can be changed from a pendant while this app is watching, so a
+   * readout that counted its own clicks would be wrong after any of those.
+   * `Ov:` rides along every tenth status report or so, like `WCO`, so the last
+   * one seen is retained.
+   */
+  overrides: { feed: number; rapid: number; spindle: number };
 }
 
 /**
@@ -89,6 +133,35 @@ export function classifyJobLine(line: string): 'tool-change' | 'stop' | 'motion'
   return 'motion';
 }
 
+/**
+ * How far one nudge moves an override. GRBL implements exactly these four and
+ * nothing between, so this is the protocol rather than a choice of resolution.
+ */
+export type OverrideStep = 10 | 1 | -1 | -10;
+
+export const FEED_OVERRIDE_BYTES: Record<OverrideStep | 'reset', number> = {
+  reset: 0x90,
+  10: 0x91,
+  [-10]: 0x92,
+  1: 0x93,
+  [-1]: 0x94,
+};
+
+export const SPINDLE_OVERRIDE_BYTES: Record<OverrideStep | 'reset', number> = {
+  reset: 0x99,
+  10: 0x9a,
+  [-10]: 0x9b,
+  1: 0x9c,
+  [-1]: 0x9d,
+};
+
+/** Rapid traverse trim: GRBL implements full, half and quarter, and no more. */
+export const RAPID_OVERRIDE_BYTES: Record<100 | 50 | 25, number> = {
+  100: 0x95,
+  50: 0x96,
+  25: 0x97,
+};
+
 export type MachineStateListener = (state: MachineState) => void;
 
 class WebSerialManager {
@@ -116,6 +189,14 @@ class WebSerialManager {
   private okWaiters: (() => void)[] = [];
   private pendingProbe: ((z: number | null) => void) | null = null;
 
+  /**
+   * Lines collected while a `$$` dump is being read back.
+   *
+   * Non-null only for the moment the query is in flight, so ordinary traffic is
+   * not accumulated for the life of the connection.
+   */
+  private settingsSink: string[] | null = null;
+
   private state: MachineState = {
     status: 'DISCONNECTED',
     connected: false,
@@ -126,6 +207,10 @@ class WebSerialManager {
     progressPercent: 0,
     feedRate: 0,
     spindleSpeed: 0,
+    needsZZero: false,
+    motion: DEFAULT_MOTION_PROFILE,
+    grblSettings: {},
+    overrides: { feed: 100, rapid: 100, spindle: 100 },
   };
 
   private listeners: Set<MachineStateListener> = new Set();
@@ -234,6 +319,11 @@ class WebSerialManager {
       this.startStatusPolling();
 
       this.updateState({ status: 'IDLE', connected: true, portName: 'USB Machine' });
+
+      // Ask what it is before anything else needs to know. Not awaited: the
+      // connection is usable the moment it is open, and a controller that is
+      // slow to answer `$$` must not hold the UI on "connecting".
+      void this.refreshMachineSettings();
       return true;
     } catch (err: any) {
       this.updateState({
@@ -270,7 +360,17 @@ class WebSerialManager {
     this.port = null;
     this.reader = null;
     this.writer = null;
-    this.updateState({ status: 'DISCONNECTED', connected: false });
+    this.settingsSink = null;
+    // Back to assumptions: the numbers belonged to a machine that is no longer
+    // on the other end of the cable, and leaving them in place would have the
+    // next estimate quietly claiming to have been read off nothing.
+    this.updateState({
+      status: 'DISCONNECTED',
+      connected: false,
+      motion: DEFAULT_MOTION_PROFILE,
+      grblSettings: {},
+      overrides: { feed: 100, rapid: 100, spindle: 100 },
+    });
   }
 
   /** Sends a single G-code string line over serial. */
@@ -324,6 +424,14 @@ class WebSerialManager {
       const resolve = this.pendingProbe;
       this.pendingProbe = null;
       if (resolve) resolve(contact ? z : null);
+      return;
+    }
+
+    // `$N=value`, the reply to `$$`. Collected rather than acted on: the whole
+    // dump arrives as a hundred-odd lines followed by a single `ok`, and it is
+    // only worth anything read as a set.
+    if (this.settingsSink !== null && line.startsWith('$')) {
+      this.settingsSink.push(line);
       return;
     }
 
@@ -384,6 +492,10 @@ class WebSerialManager {
         patch.spindleSpeed = nums[1] || 0;
       } else if (key === 'F' && nums.length >= 1) {
         patch.feedRate = nums[0] || 0;
+      }
+      // `Ov:100,100,100` — feed, rapid and spindle trim, as percentages.
+      else if (key === 'Ov' && nums.length >= 3) {
+        patch.overrides = { feed: nums[0], rapid: nums[1], spindle: nums[2] };
       }
     }
 
@@ -530,6 +642,9 @@ class WebSerialManager {
       currentLine: 0,
       totalLines: this.gcodeQueue.length,
       progressPercent: 0,
+      // Whatever was outstanding from a previous job's tool change, starting a
+      // new program is a fresh setup and the operator has just said so.
+      needsZZero: false,
     });
 
     this.advanceJobQueue();
@@ -607,23 +722,127 @@ class WebSerialManager {
   /** Triggers an interactive pause for Tool or Material Changes. */
   private async triggerPause(type: 'PAUSED_TOOL' | 'PAUSED_MATERIAL', message: string) {
     this.isPaused = true;
-    this.updateState({ status: type, pauseMessage: message });
+    this.updateState({
+      status: type,
+      pauseMessage: message,
+      // A new bit is a new tool length, so the datum the job was started on no
+      // longer describes where the tip is. Resume is gated on this being dealt
+      // with, either by probing again or by touching off by hand.
+      needsZZero: type === 'PAUSED_TOOL' ? true : this.state.needsZZero,
+    });
 
-    // Send safety park commands
+    // Get clear of the work, then bring the spindle out where it can be reached.
+    //
+    // The lift is relative. It used to be `G0 Z25`, an absolute work
+    // coordinate, which assumes the datum leaves 25 mm of headroom above it —
+    // on a job zeroed near the top of Z travel that is a move into the machine's
+    // own limit, and the alarm that follows drops the rest of the program.
+    // `G91 G0 Z25` clears the work by 25 mm from wherever it actually is.
     await this.sendLine('M5'); // Laser/Spindle OFF
-    await this.sendLine('G0 Z25.000'); // Safe Z
-    await this.sendLine('G0 X0.000 Y0.000'); // Park XY
+    await this.sendLine('G91 G0 Z25.000'); // Lift clear, relative
+    await this.sendLine('G90'); // Back to absolute before anything else runs
+    await this.sendLine('G0 X0.000 Y0.000'); // Park XY where the collet is reachable
   }
 
-  /** Resumes a paused job after tool/material swap. */
+  /**
+   * Stops the job where it stands, without losing the program or the position.
+   *
+   * `!` is GRBL's feed hold: a real-time byte, so it is acted on immediately
+   * rather than queueing behind the lines already sent, and it decelerates the
+   * axes along the path instead of dropping them. That is the difference
+   * between a pause and a soft reset — the machine still knows where it is, so
+   * `~` picks the cut back up exactly where it left it.
+   *
+   * The queue is stopped on this side too. GRBL acknowledges a line when it
+   * parses it, not when it has moved, so without this the streamer would go on
+   * happily filling the planner buffer for the whole of the pause and the first
+   * seconds after resuming would be uninterruptible.
+   *
+   * The spindle is deliberately left running: it is sitting in the cut, and a
+   * stationary bit in contact with the work is what burns wood and welds itself
+   * into acrylic. Stopping it is a separate, explicit act.
+   */
+  public async pauseJob() {
+    if (!this.isJobRunning || this.isPaused) return;
+    this.isPaused = true;
+    await this.writeRealtime(0x21); // '!' — feed hold
+    this.updateState({
+      status: 'PAUSED_USER',
+      pauseMessage: 'Paused. The spindle is still running and the tool is still in the cut.',
+    });
+  }
+
+  /**
+   * Resumes a paused job — the operator's own pause, a tool change, or a
+   * material swap.
+   *
+   * `~` is sent in every case. After a feed hold it is what actually releases
+   * the machine; after a tool-change pause the controller was never held in the
+   * first place, and a cycle start it did not need is harmless.
+   */
   public async resumeJob() {
     if (!this.isPaused) return;
 
     this.isPaused = false;
     this.updateState({ status: 'RUNNING', pauseMessage: undefined });
-    // Out of band GRBL resume ~
-    if (this.writer) await this.writer.write('~');
+    // Out of band GRBL cycle start.
+    await this.writeRealtime(0x7e); // '~'
     this.advanceJobQueue();
+  }
+
+  /**
+   * Writes a single real-time byte.
+   *
+   * These are not commands and are not queued: GRBL acts on them the moment
+   * they arrive, ahead of the thousands of lines already in its buffer, which
+   * is the entire point — the buffered lines are exactly what needs slowing
+   * down.
+   */
+  private async writeRealtime(byte: number): Promise<void> {
+    if (!this.writer || !this.state.connected) return;
+    await this.writer.write(String.fromCharCode(byte));
+  }
+
+  /**
+   * Live feed trim while the job runs.
+   *
+   * What this replaces is aborting a job because it is cutting a little too
+   * fast, changing a number, and starting the whole thing again — on a piece
+   * that has already been cut into and can no longer be re-registered. A carve
+   * that is chattering can be backed off in the second it takes to notice.
+   *
+   * Steps rather than a slider, because that is what the protocol is: GRBL has
+   * no "set the feed to 87%" command, only nudges and a reset. A slider would
+   * have to walk there in ten-percent hops and would lie about where it had got
+   * to on the way.
+   */
+  public async nudgeFeedOverride(step: OverrideStep): Promise<void> {
+    await this.writeRealtime(FEED_OVERRIDE_BYTES[step]);
+  }
+
+  /** Back to the feed the program asked for. */
+  public async resetFeedOverride(): Promise<void> {
+    await this.writeRealtime(FEED_OVERRIDE_BYTES.reset);
+  }
+
+  /**
+   * Spindle speed trim, on the same contract as the feed.
+   *
+   * Only does anything on a machine whose controller owns the spindle. On a
+   * router with a dial it is the dial that matters, which is why the pre-flight
+   * panel states the RPM rather than relying on this.
+   */
+  public async nudgeSpindleOverride(step: OverrideStep): Promise<void> {
+    await this.writeRealtime(SPINDLE_OVERRIDE_BYTES[step]);
+  }
+
+  public async resetSpindleOverride(): Promise<void> {
+    await this.writeRealtime(SPINDLE_OVERRIDE_BYTES.reset);
+  }
+
+  /** Rapid traverse trim: full, half or quarter, and nothing between. */
+  public async setRapidOverride(percent: 100 | 50 | 25): Promise<void> {
+    await this.writeRealtime(RAPID_OVERRIDE_BYTES[percent]);
   }
 
   /** Cancels the running job. */
@@ -633,6 +852,43 @@ class WebSerialManager {
     // The soft reset leaves GRBL in Alarm if it was moving, so the status the
     // machine reports next is the truth here rather than an assumed IDLE.
     this.updateState({ progressPercent: 0, pauseMessage: undefined });
+  }
+
+  /**
+   * Asks the controller what it is, and remembers the answer.
+   *
+   * `$$` is the only way to find out, and until now nothing asked — so every
+   * run-time estimate in the app was built on an invented 500 mm/s² and
+   * 3000 mm/min, on machines whose real figures range from a stock GRBL's
+   * 10 mm/s² to a ballscrew mill's several thousand. The estimate is the number
+   * people use to decide whether to start a two-hour carve before dinner, and
+   * it was out by whatever that ratio happened to be.
+   *
+   * Failure is not an error state. A controller that does not answer `$$`, or
+   * answers something this does not understand, leaves the assumed profile in
+   * place and the app carries on saying it is assuming — which is exactly what
+   * it was doing before, only now it admits it.
+   */
+  public async refreshMachineSettings(timeoutMs = 4000): Promise<MotionProfile> {
+    if (!this.state.connected || !this.writer) return this.state.motion;
+
+    const sink: string[] = [];
+    this.settingsSink = sink;
+    try {
+      await this.sendAndWait('$$', timeoutMs);
+    } finally {
+      this.settingsSink = null;
+    }
+
+    const settings = parseGrblSettings(sink);
+    if (settings.size === 0) return this.state.motion;
+
+    const motion = motionProfileFromSettings(settings);
+    this.updateState({
+      motion,
+      grblSettings: Object.fromEntries(settings),
+    });
+    return motion;
   }
 
   /** Triggers hardware homing cycle ($H). */
@@ -676,6 +932,9 @@ class WebSerialManager {
       currentLine: 0,
       totalLines: 0,
       progressPercent: 0,
+      // The job it belonged to is gone, so a standing "re-zero before you
+      // resume" has nothing left to warn about.
+      needsZZero: false,
     });
     await this.sendLine('$X');
   }
@@ -683,6 +942,56 @@ class WebSerialManager {
   /** Sets current XY position as G54 Work Origin (0,0). */
   public async zeroXY(): Promise<void> {
     await this.sendLine('G10 L20 P1 X0 Y0');
+  }
+
+  /**
+   * Sets work Z zero from where the tool is standing right now, with no probe
+   * involved.
+   *
+   * This is how most people actually zero a router: wind the bit down onto the
+   * work — or onto a slip of paper, or a 1-2-3 block — until it just bites,
+   * then call that zero. It wants no touch plate, no continuity clip and no
+   * conductive stock, which between them rule the probe out on painted MDF, on
+   * anything held in a wooden jig, and on every machine whose probe input has
+   * never been wired up. Without it the only route to a Z datum in this app was
+   * one that a good half of the setups it runs on cannot use at all.
+   *
+   * `offsetMm` is how far the tip is *above* the surface it is being zeroed
+   * against, so a 0.1 mm feeler gauge is entered as 0.1 and the datum lands on
+   * the material rather than on the gauge. Zeroing on a block sat on the work
+   * is the same idea with a bigger number.
+   *
+   * `G10 L20 P1` writes the G54 offset, matching the probe path — `G92` is a
+   * temporary shift that `$H` or a soft reset would silently discard while the
+   * job carried on assuming it.
+   */
+  public async zeroZHere(offsetMm = 0): Promise<{ success: boolean; message: string }> {
+    if (!this.state.connected) {
+      return { success: false, message: 'Not connected to a machine.' };
+    }
+    await this.sendAndWait('G21 G90');
+    await this.sendAndWait(`G10 L20 P1 Z${offsetMm.toFixed(3)}`);
+    // The datum is now real, whichever bit is in the collet.
+    this.updateState({ needsZZero: false });
+    return {
+      success: true,
+      message:
+        offsetMm === 0
+          ? 'Work Z 0 set at the tool tip. Nothing moved — the machine has only been told where it is.'
+          : `Work Z 0 set ${offsetMm.toFixed(2)} mm below the tool tip, allowing for the gauge under it.`,
+    };
+  }
+
+  /**
+   * Sets all three axes' work zero where the tool is standing.
+   *
+   * The one-button version of the manual touch-off, for the common case where
+   * the tool has been jogged to the corner of the stock and rested on its top
+   * face: X, Y and Z all mean "here".
+   */
+  public async zeroAllHere(): Promise<void> {
+    await this.sendLine('G10 L20 P1 X0 Y0 Z0');
+    this.updateState({ needsZZero: false });
   }
 
   /**
@@ -705,7 +1014,7 @@ class WebSerialManager {
 
   /** Cancels an in-flight jog (GRBL real-time 0x85) without dropping the job state. */
   public async jogCancel(): Promise<void> {
-    if (this.writer) await this.writer.write('\x85');
+    await this.writeRealtime(0x85);
   }
 
   /** Retracts and drives to the current work XY origin, to check where zero landed. */
@@ -748,6 +1057,7 @@ class WebSerialManager {
     }
 
     await this.sendAndWait(`G10 L20 P1 Z${touchPlateThicknessMm.toFixed(3)}`);
+    this.updateState({ needsZZero: false });
     // Relative retract: it clears the plate by the same 5 mm wherever the datum
     // ended up, and does not depend on the offset that was just written.
     await this.sendAndWait('G91 G0 Z5.000');

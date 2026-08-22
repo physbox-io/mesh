@@ -1,17 +1,24 @@
 import React, { useState } from 'react';
-import { ArrowUp, ArrowDown, ArrowLeft, ArrowRight, ChevronsUp, ChevronsDown, Crosshair, Navigation, Octagon, Info, Check } from 'lucide-react';
+import { ArrowUp, ArrowDown, ArrowLeft, ArrowRight, ChevronsUp, ChevronsDown, Crosshair, Navigation, Octagon, Info, Check, Hand, AlertTriangle } from 'lucide-react';
 import { NumberInput } from './NumberInput';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
 
 /**
  * Setting the job's origin on a live machine: jog the tool where you want it,
- * zero X/Y there, then touch off Z on a plate.
+ * zero X/Y there, then set Z — either off a touch plate or by hand.
  *
  * The jog pad exists because "zero XY" on its own is only ever half an answer —
  * it fixes the origin at wherever the tool happens to be, and there is no way to
  * get it over the corner of the stock from the browser without driving it. Steps
  * are the usual coarse/medium/fine ladder, so the last approach is a tenth at a
  * time.
+ *
+ * Both Z routes are offered rather than just the probe, because the probe is
+ * the one that is often unavailable: it needs a touch plate, a continuity clip
+ * and stock the clip can see. Painted MDF, anything in a wooden jig, and every
+ * machine whose probe input was never wired up rule it out — and on those the
+ * only way to a datum is the one every router owner already knows, which is to
+ * wind the bit down until it just marks the surface and call that zero.
  *
  * Shared by the laser, contour and relief modals, which all sit on the same dark
  * machine panel.
@@ -28,6 +35,8 @@ export const MachineWorkOriginPanel: React.FC<{
   const [plateThickness, setPlateThickness] = useState(12.0);
   const [isProbingZ, setIsProbingZ] = useState(false);
   const [probeMessage, setProbeMessage] = useState<{ ok: boolean; text: string } | null>(null);
+  /** Thickness of whatever is between the tool tip and the surface for a manual touch-off. */
+  const [gaugeThickness, setGaugeThickness] = useState(0);
   // Ticks the steps off as they are done. Which of the three you have actually
   // finished is invisible on the machine itself, and getting it wrong is the
   // beginner's mistake that ends with a cut in the wrong place.
@@ -35,6 +44,10 @@ export const MachineWorkOriginPanel: React.FC<{
 
   const busy = machineState.status === 'RUNNING' || isProbingZ;
   const zZeroed = probeMessage?.ok === true;
+  // The manager raises this at a tool-change pause and drops it as soon as
+  // either zeroing route has run. Until then the datum on the machine belongs
+  // to the bit that just came out of the collet.
+  const staleZ = machineState.needsZZero;
 
   const jog = (x: number, y: number, z: number) => {
     setXyZeroed(false); // moved since zeroing, so the origin is no longer here
@@ -57,8 +70,14 @@ export const MachineWorkOriginPanel: React.FC<{
     }
   };
 
-  const jogBtn = 'flex items-center justify-center h-8 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-30 disabled:hover:bg-slate-800 text-slate-200 transition-colors';
-  const actionBtn = 'flex-1 py-1.5 px-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-200 text-xs font-semibold rounded-lg flex items-center justify-center space-x-1.5';
+  const handleZeroZHere = async () => {
+    setProbeMessage(null);
+    const result = await webSerialManager.zeroZHere(gaugeThickness);
+    setProbeMessage({ ok: result.success, text: result.message });
+  };
+
+  const jogBtn = 'flex items-center justify-center h-8 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-30 disabled:hover:bg-slate-800 disabled:cursor-not-allowed text-slate-200 transition-colors cursor-pointer';
+  const actionBtn = 'flex-1 py-1.5 px-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed text-slate-200 text-xs font-semibold rounded-lg flex items-center justify-center space-x-1.5 cursor-pointer';
 
   return (
     <div className="pt-3 border-t border-slate-800 space-y-3">
@@ -83,6 +102,18 @@ export const MachineWorkOriginPanel: React.FC<{
           </span>
         </div>
       </div>
+
+      {staleZ && showZProbe && (
+        <div className="flex items-start space-x-2 rounded-lg bg-amber-500/10 border border-amber-500/50 px-3 py-2 text-[11px] leading-relaxed text-amber-300">
+          <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+          <span>
+            <strong className="font-bold">Z zero belongs to the previous tool.</strong> The bit that
+            just came out was a different length, so the datum on the machine is wrong by that
+            difference — and wrong in the direction of driving the new tool into the work. Touch off
+            again below, by hand or on the plate, before resuming.
+          </span>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
         {/* Jog pad — XY on the left cluster, Z on its own column, as on a pendant */}
@@ -139,7 +170,7 @@ export const MachineWorkOriginPanel: React.FC<{
                 <button
                   key={s}
                   onClick={() => setStep(s)}
-                  className={`flex-1 py-1 text-xs font-bold rounded-lg transition-colors ${
+                  className={`flex-1 py-1 text-xs font-bold rounded-lg transition-colors cursor-pointer ${
                     step === s ? 'bg-emerald-500 text-slate-950' : 'bg-slate-800 hover:bg-slate-700 text-slate-300'
                   }`}
                 >
@@ -183,24 +214,56 @@ export const MachineWorkOriginPanel: React.FC<{
           </div>
 
           {showZProbe && (
-            <div className="flex items-center space-x-2">
-              <button onClick={handleZeroZ} disabled={busy} className={actionBtn}>
-                {zZeroed
-                  ? <Check className="w-3.5 h-3.5 text-emerald-400" />
-                  : <ChevronsDown className="w-3.5 h-3.5 text-amber-400" />}
-                <span>{isProbingZ ? 'Probing…' : <><span className="text-blue-400">3.</span> Probe Z Zero</>}</span>
-              </button>
-              <div className="flex items-center space-x-1">
-                <NumberInput
-                  min={0}
-                  max={100}
-                  step="0.1"
-                  value={plateThickness}
-                  onChange={setPlateThickness}
-                  title="Touch plate thickness — work Z 0 ends up this far below the plate's top face"
-                  className="w-16 bg-slate-950 border border-slate-800 rounded-lg px-2 py-1 text-xs font-mono text-slate-200"
-                />
-                <span className="text-[10px] text-slate-500 whitespace-nowrap">mm plate</span>
+            <div className="space-y-1.5">
+              <span className="block text-[10px] uppercase font-bold text-slate-500">
+                <span className="text-blue-400">3.</span> Set Z zero
+                {zZeroed && <Check className="inline w-3 h-3 ml-1 text-emerald-400" />}
+              </span>
+
+              {/* By hand first: it is the route that works on every machine and
+                  every material, and the one people reach for at a tool change
+                  with the touch plate still in a drawer. */}
+              <div className="flex items-center space-x-2">
+                <button
+                  onClick={handleZeroZHere}
+                  disabled={busy}
+                  title="Take work Z 0 from where the tool is standing right now — no probe, no touch plate"
+                  className={actionBtn}
+                >
+                  <Hand className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Set Z Zero Here</span>
+                </button>
+                <div className="flex items-center space-x-1">
+                  <NumberInput
+                    min={0}
+                    max={100}
+                    step="0.1"
+                    value={gaugeThickness}
+                    onChange={setGaugeThickness}
+                    title="Anything between the tip and the surface — a slip of paper is about 0.1 mm, a 1-2-3 block is 25.4. Leave at 0 when the bit is touching the work itself."
+                    className="w-16 bg-slate-950 border border-slate-800 rounded-lg px-2 py-1 text-xs font-mono text-slate-200"
+                  />
+                  <span className="text-[10px] text-slate-500 whitespace-nowrap">mm gauge</span>
+                </div>
+              </div>
+
+              <div className="flex items-center space-x-2">
+                <button onClick={handleZeroZ} disabled={busy} className={actionBtn}>
+                  <ChevronsDown className="w-3.5 h-3.5 text-amber-400" />
+                  <span>{isProbingZ ? 'Probing…' : 'Probe Z Zero'}</span>
+                </button>
+                <div className="flex items-center space-x-1">
+                  <NumberInput
+                    min={0}
+                    max={100}
+                    step="0.1"
+                    value={plateThickness}
+                    onChange={setPlateThickness}
+                    title="Touch plate thickness — work Z 0 ends up this far below the plate's top face"
+                    className="w-16 bg-slate-950 border border-slate-800 rounded-lg px-2 py-1 text-xs font-mono text-slate-200"
+                  />
+                  <span className="text-[10px] text-slate-500 whitespace-nowrap">mm plate</span>
+                </div>
               </div>
             </div>
           )}
@@ -225,7 +288,10 @@ export const MachineWorkOriginPanel: React.FC<{
 
       <p className="text-[11px] text-slate-500 leading-relaxed">
         Jog the tool over the corner of your stock where the job's origin should sit, then set XY zero.
-        {showZProbe && ' For Z, clip the probe lead to the tool, sit the plate on the stock, park the tool a few mm above it, and probe.'}
+        {showZProbe &&
+          ' For Z, either wind the bit down until it just marks the surface and press Set Z Zero Here' +
+          ' — putting a feeler under it and entering its thickness as the gauge — or clip the probe' +
+          ' lead to the tool, sit the plate on the stock, park the tool a few mm above it, and probe.'}
         {onOpenDocs && (
           <>
             {' '}

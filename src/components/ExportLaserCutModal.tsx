@@ -1,11 +1,23 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { X, Download, AlertCircle, Layers, Scissors, Cpu, Play, Square, Home, ShieldAlert, RefreshCw, Info, ChevronRight } from 'lucide-react';
+import {
+  X, Download, AlertCircle, Layers, Scissors, Cpu, Home, ShieldAlert, RefreshCw, Info, ChevronRight,
+} from 'lucide-react';
 import type { SceneGraph } from '../types/scene';
 import { exportLaserCutSvg, type LaserCutOptions } from '../utils/laserCutExporter';
 import { generateLaserCutGcode, DEFAULT_GCODE_OPTIONS } from '../utils/gcodeExporter';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
 import { NumberInput } from './NumberInput';
 import { MachineWorkOriginPanel } from './MachineWorkOriginPanel';
+import { JobOverrides, JobPauseBanner, JobPreflight, JobTransport } from './MachineJobControls';
+import { formatDuration } from '../utils/timeEstimate';
+import {
+  DEFAULT_MATERIAL,
+  MATERIALS,
+  describeSpeedRecommendation,
+  materialSpec,
+  recommendSpeeds,
+  type MaterialId,
+} from '../utils/feedsAndSpeeds';
 import { warpGcode, type ProbeGrid } from '../utils/meshLeveler';
 
 interface ExportLaserCutModalProps {
@@ -82,7 +94,7 @@ function Field({
  * right for most jobs. The point is that a first-time user can read a section
  * top to bottom without meeting kerf compensation or GRBL's `$30`.
  */
-function Advanced({ children }: { children: React.ReactNode }) {
+function Advanced({ label = 'Advanced', children }: { label?: string; children: React.ReactNode }) {
   const [open, setOpen] = useState(false);
   return (
     <div className="pt-3 border-t border-slate-200 dark:border-slate-800">
@@ -94,7 +106,7 @@ function Advanced({ children }: { children: React.ReactNode }) {
                    dark:text-slate-500 hover:text-amber-600 dark:hover:text-amber-400 cursor-pointer transition-colors"
       >
         <ChevronRight className={`w-3.5 h-3.5 transition-transform ${open ? 'rotate-90' : ''}`} />
-        <span>Advanced</span>
+        <span>{label}</span>
       </button>
       {open && (
         <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-4">{children}</div>
@@ -103,6 +115,19 @@ function Advanced({ children }: { children: React.ReactNode }) {
   );
 }
 
+/**
+ * A two- or three-way switch that fits the column it is put in.
+ *
+ * `min-w-0` and `truncate` rather than `whitespace-nowrap`: a flex child will
+ * not shrink below its content's width unless it is told it may, so a label a
+ * few characters too long for its grid cell used to push the whole control out
+ * past the field beside it. Now it ellipsizes instead, and the `title` keeps
+ * the full text reachable.
+ *
+ * That is the backstop, not the plan — a label people have to hover to read is
+ * a label that is too long. Keep them short enough that the ellipsis never
+ * appears at the widths these grids actually use.
+ */
 function Segmented<T extends string>({
   value, options, onChange,
 }: { value: T; options: readonly (readonly [T, string])[]; onChange: (v: T) => void }) {
@@ -113,7 +138,8 @@ function Segmented<T extends string>({
           key={v}
           type="button"
           onClick={() => onChange(v)}
-          className={`flex-1 py-1 px-2 rounded-md text-xs font-medium transition-all whitespace-nowrap ${
+          title={label}
+          className={`flex-1 min-w-0 py-1 px-2 rounded-md text-xs font-medium transition-all truncate ${
             value === v
               ? 'bg-white dark:bg-slate-800 text-amber-600 dark:text-amber-400 shadow-sm'
               : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
@@ -149,7 +175,25 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
 
   // G-Code & WebSerial States
   const [machineMode, setMachineMode] = useState<'laser' | 'cnc'>('laser');
-  const [cutFeedrate, setCutFeedrate] = useState<number>(1200);
+  /** What is on the bed. Routing feeds and spindle speed both come from it. */
+  const [material, setMaterial] = useState<MaterialId>(DEFAULT_MATERIAL);
+  /**
+   * Spindle speed, or null to take the one the material and the bit imply.
+   *
+   * Null by default because this is not a number a beginner should have to
+   * produce: it is surface speed over cutter diameter, and getting it wrong
+   * burns the work. Someone who wants to override it can, under Advanced.
+   */
+  const [spindleRpmOverride, setSpindleRpmOverride] = useState<number | null>(null);
+  /**
+   * Cutting feed, or null to take the one the material and the bit imply.
+   *
+   * Null by default in routing mode for the same reason the spindle speed is:
+   * feed is chip-per-tooth times teeth times RPM, and a beginner asked to pick
+   * one in a box will pick the number that was already there. The laser keeps a
+   * plain default, since a beam has no chipload.
+   */
+  const [cutFeedrateOverride, setCutFeedrateOverride] = useState<number | null>(null);
   const [laserMaxPower, setLaserMaxPower] = useState<number>(DEFAULT_GCODE_OPTIONS.laserMaxPower);
   const [laserPower, setLaserPower] = useState<number>(DEFAULT_GCODE_OPTIONS.laserPower);
   const [laserPasses, setLaserPasses] = useState<number>(1);
@@ -160,6 +204,30 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
   const [probedGrid, setProbedGrid] = useState<ProbeGrid | null>(null);
   const [isProbing, setIsProbing] = useState<boolean>(false);
   const [machineState, setMachineState] = useState<MachineState>(webSerialManager.getState());
+
+  /**
+   * What to run the spindle and the feed at, from the material and the cutter.
+   *
+   * The machine's own `$30`/`$31` bound it when a controller is connected — a
+   * recommendation of 24,000 RPM is no use to someone whose spindle tops out at
+   * 12,000, and the feed has to come down with it.
+   */
+  const speeds = useMemo(
+    () =>
+      recommendSpeeds({
+        diameterMm: bitDiameterMm,
+        flutes: 2,
+        material,
+        spindle: machineState.motion.spindle,
+        // A cut is a two-axis move, so the slower of X and Y governs it.
+        maxFeedMmMin: Math.min(machineState.motion.maxRate.x, machineState.motion.maxRate.y),
+      }),
+    [bitDiameterMm, material, machineState.motion.spindle, machineState.motion.maxRate]
+  );
+
+  const spindleRpm = spindleRpmOverride ?? speeds.rpm;
+  const cutFeedrate =
+    cutFeedrateOverride ?? (machineMode === 'cnc' ? speeds.feedMmMin : 1200);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -206,6 +274,8 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
       ...DEFAULT_GCODE_OPTIONS,
       machineMode,
       cutFeedrate,
+      spindleRpm,
+      motionProfile: machineState.motion,
       laserPower,
       laserMaxPower,
       laserPasses,
@@ -221,8 +291,9 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
       res.gcode = warpGcode(res.gcode, probedGrid);
     }
     return res;
-  }, [exportResult, machineMode, cutFeedrate, laserPower, laserMaxPower, laserPasses, materialThicknessMm, probedGrid,
-      attachments, attachmentWidthMm, attachmentSpacingMm, attachmentHeightMm]);
+  }, [exportResult, machineMode, cutFeedrate, spindleRpm, machineState.motion, laserPower, laserMaxPower,
+      laserPasses, materialThicknessMm, probedGrid, attachments, attachmentWidthMm, attachmentSpacingMm,
+      attachmentHeightMm]);
 
   // The sheet SVG is written at physical size — a 600 mm sheet is far wider than
   // the modal — so the preview is scaled to the panel instead of being dragged
@@ -325,7 +396,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                 <Segmented
                   value={machineMode}
                   onChange={setMachineMode}
-                  options={[['laser', 'Laser Cutter'], ['cnc', 'CNC Router / Mill']] as const}
+                  options={[['laser', 'Laser Cutter'], ['cnc', 'CNC Router']] as const}
                 />
               </Field>
 
@@ -342,16 +413,20 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
               </Field>
 
               <Field
-                label="Feedrate (mm/m)"
-                hint="How fast the head travels while cutting, in mm per minute. Slower burns/cuts deeper; it also sets the estimated job time."
+                label="Material"
+                hint="What is on the bed. In routing mode it sets the spindle speed and the feed: surface speed over cutter diameter gives the RPM, and chip-per-tooth times teeth times RPM gives the feed. Both are shown under Before You Start once a machine is connected."
               >
-                <NumberInput
-                  step="100" min={100} max={10000} integer
-                  value={cutFeedrate}
-                  onChange={setCutFeedrate}
-                  className={inputClass}
-                />
+                <select
+                  value={material}
+                  onChange={(e) => setMaterial(e.target.value as MaterialId)}
+                  className={`${inputClass} cursor-pointer`}
+                >
+                  {MATERIALS.map((mat) => (
+                    <option key={mat.id} value={mat.id}>{mat.label}</option>
+                  ))}
+                </select>
               </Field>
+
 
               <Field
                 label="Laser Power"
@@ -381,7 +456,66 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
               </Field>
             </div>
 
-            <Advanced>
+            {machineMode === 'cnc' && (
+              <div className="rounded-lg bg-slate-100 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800 px-2.5 py-2">
+                <span className="text-[9px] uppercase font-semibold text-slate-500 dark:text-slate-400">
+                  Derived for {materialSpec(material).label.toLowerCase()}
+                </span>
+                <p className="mt-0.5 font-mono text-[11px] text-slate-800 dark:text-slate-100">
+                  {spindleRpm.toLocaleString()} RPM · {cutFeedrate} mm/min ·{' '}
+                  {speeds.chiploadMm.toFixed(3)} mm per tooth
+                </p>
+                {speeds.clampedBy && (
+                  <p className="mt-1 flex items-start gap-1 text-[10px] text-amber-600 dark:text-amber-400 leading-snug">
+                    <AlertCircle className="w-3 h-3 mt-px flex-shrink-0" />
+                    <span>{describeSpeedRecommendation(speeds, material, bitDiameterMm)}</span>
+                  </p>
+                )}
+              </div>
+            )}
+
+            <Advanced label="Advanced — override the derived feeds">
+              <Field
+                className="lg:col-span-2"
+                hintAlign="end"
+                label="Bit Ø (mm)"
+                hint="Diameter of the end mill. It sets how far the relief cuts have to reach into each inside corner. Only read when corner relief is on."
+              >
+                <NumberInput
+                  step="0.1" min={0.1} max={50}
+                  disabled={cornerRelief === 'none'}
+                  value={bitDiameterMm}
+                  onChange={setBitDiameterMm}
+                  className={inputClass}
+                />
+              </Field>
+              <Field
+                label="Feedrate (mm/m)"
+                hint="How fast the head travels while cutting, in mm per minute. Slower burns/cuts deeper; it also sets the estimated job time."
+              >
+                <NumberInput
+                  step="100" min={100} max={10000} integer
+                  allowEmpty
+                  placeholder={String(machineMode === 'cnc' ? speeds.feedMmMin : 1200)}
+                  value={cutFeedrateOverride}
+                  onChange={setCutFeedrateOverride}
+                  className={inputClass}
+                />
+              </Field>
+              <Field
+                label="Spindle (RPM)"
+                hint="Routing only. Blank takes the speed the material and the cutter imply — surface speed over diameter — which is almost always the right answer. Set a number only if your spindle disagrees, and remember that on a router with a dial the S word in the file does nothing: this is what you turn the knob to."
+              >
+                <NumberInput
+                  step="1000" min={0} max={60000} integer
+                  disabled={machineMode !== 'cnc'}
+                  allowEmpty
+                  placeholder={String(speeds.rpm)}
+                  value={spindleRpmOverride}
+                  onChange={setSpindleRpmOverride}
+                  className={inputClass}
+                />
+              </Field>
               <Field
                 className="lg:col-span-2"
                 label="Max S-value ($30)"
@@ -539,20 +673,6 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                 />
               </Field>
 
-              <Field
-                className="lg:col-span-2"
-                hintAlign="end"
-                label="Bit Ø (mm)"
-                hint="Diameter of the end mill. It sets how far the relief cuts have to reach into each inside corner. Only read when corner relief is on."
-              >
-                <NumberInput
-                  step="0.1" min={0.1} max={50}
-                  disabled={cornerRelief === 'none'}
-                  value={bitDiameterMm}
-                  onChange={setBitDiameterMm}
-                  className={inputClass}
-                />
-              </Field>
             </Advanced>
           </div>
 
@@ -639,6 +759,8 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                 />
               </div>
 
+            </div>
+            <Advanced>
               <Field
                 className="lg:col-span-3"
                 hintAlign="end"
@@ -651,38 +773,15 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                   options={[['all', 'Labels'], ['sheets', 'Outlines'], ['none', 'Cuts only']] as const}
                 />
               </Field>
-            </div>
+            </Advanced>
           </div>
 
-          {/* Interactive Tool / Material Change Pause Modal Overlay */}
-          {machineState.status.startsWith('PAUSED') && (
-            <div className="p-4 rounded-xl bg-amber-500/10 border-2 border-amber-500 flex flex-col space-y-3 animate-pulse text-amber-800 dark:text-amber-300">
-              <div className="flex items-center space-x-3">
-                <AlertCircle className="w-6 h-6 text-amber-500 flex-shrink-0" />
-                <div>
-                  <h4 className="font-bold text-sm">Action Required: Machine Paused</h4>
-                  <p className="text-xs leading-relaxed font-semibold">{machineState.pauseMessage}</p>
-                </div>
-              </div>
-              <div className="flex items-center justify-end space-x-3 pt-2 border-t border-amber-500/30">
-                {machineState.status === 'PAUSED_TOOL' && (
-                  <button
-                    onClick={() => webSerialManager.zeroZ(12.0)}
-                    className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-100 text-xs font-semibold rounded-lg"
-                  >
-                    Auto-Zero Z (Touch Plate)
-                  </button>
-                )}
-                <button
-                  onClick={() => webSerialManager.resumeJob()}
-                  className="px-4 py-1.5 bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold text-xs rounded-lg flex items-center space-x-1.5"
-                >
-                  <Play className="w-3.5 h-3.5 fill-current" />
-                  <span>Resume Job (Cycle Start)</span>
-                </button>
-              </div>
-            </div>
-          )}
+          {/* Interactive Tool / Material Change Pause */}
+          <JobPauseBanner
+            machineState={machineState}
+            resumeLabel="Resume Job (Cycle Start)"
+            showZTools={machineMode === 'cnc'}
+          />
 
           {exportResult && !exportResult.success && (
             <div className="p-4 rounded-xl bg-red-500/10 border border-red-500/40 flex items-start space-x-2 text-xs text-red-700 dark:text-red-300">
@@ -715,7 +814,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                   <span>Sheets: {exportResult.sheetCount}</span>
                   {gcodeResult && (
                     <span className="font-mono bg-slate-200 dark:bg-slate-800 px-2 py-0.5 rounded text-[10px] uppercase font-bold text-amber-600 dark:text-amber-400">
-                      Est. Time: {Math.round(gcodeResult.estimatedTimeSeconds / 60)} min ({gcodeResult.totalCutDistanceMm} mm cut)
+                      Est. Time: {formatDuration(gcodeResult.estimatedTimeSeconds)} ({gcodeResult.totalCutDistanceMm} mm cut)
                     </span>
                   )}
                   {attachments && gcodeResult && (
@@ -821,26 +920,32 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                 </div>
 
                 <div className="flex items-center space-x-2">
-                  {machineState.status === 'RUNNING' ? (
-                    <button
-                      onClick={() => webSerialManager.cancelJob()}
-                      className="w-full py-1.5 px-3 bg-red-600 hover:bg-red-700 text-white font-bold text-xs rounded-lg flex items-center justify-center space-x-1.5"
-                    >
-                      <Square className="w-3.5 h-3.5" />
-                      <span>E-Stop / Cancel</span>
-                    </button>
-                  ) : (
-                    <button
-                      onClick={handleStartJob}
-                      disabled={!gcodeResult?.success}
-                      className="w-full py-1.5 px-3 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-40 text-slate-950 font-bold text-xs rounded-lg flex items-center justify-center space-x-1.5"
-                    >
-                      <Play className="w-3.5 h-3.5 fill-current" />
-                      <span>Start Cut Job</span>
-                    </button>
-                  )}
+                  <JobTransport
+                    machineState={machineState}
+                    canStart={!!gcodeResult?.success}
+                    onStart={handleStartJob}
+                    startLabel="Start Cut Job"
+                    variant="inline"
+                  />
                 </div>
               </div>
+              <JobPreflight
+                machineState={machineState}
+                tool={machineMode === 'cnc' ? `${bitDiameterMm} mm flat end mill, 2-flute upcut` : undefined}
+                rpm={machineMode === 'cnc' ? spindleRpm : undefined}
+                material={materialSpec(material).label.toLowerCase()}
+                origin={
+                  machineMode === 'cnc'
+                    ? "the near-left corner of the sheet's top face"
+                    : 'the near-left corner of the sheet'
+                }
+                caveat={
+                  machineMode === 'cnc' && speeds.clampedBy
+                    ? describeSpeedRecommendation(speeds, material, bitDiameterMm)
+                    : null
+                }
+              />
+              <JobOverrides machineState={machineState} />
               <MachineWorkOriginPanel machineState={machineState} showZProbe={machineMode === 'cnc'} onOpenDocs={onOpenDocs} />
               </>
             )}

@@ -1,22 +1,27 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import {
-  X, AlertCircle, Cpu, Play, Square, Home, ShieldAlert, RefreshCw,
-  Info, ChevronRight, Layers, Mountain,
+  X, AlertCircle, Cpu, Play, Home, ShieldAlert, RefreshCw, Info, ChevronRight, Layers, Mountain, Pause,
 } from 'lucide-react';
 import type { SceneGraph } from '../types/scene';
 import {
   generateReliefCarveGcode,
   DEFAULT_RELIEF_OPTIONS,
+  deriveReliefFeeds,
+  describeCutter,
   recommendReliefTooling,
   type ReliefCarveOptions,
   type ReliefCarveResult,
+  type ReliefOverrides,
 } from '../utils/reliefCarveExporter';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
+import { clockMoves, formatDuration, type ClockedMove, type TimedMove } from '../utils/timeEstimate';
+import { MATERIALS, describeSpeedRecommendation, recommendSpeeds } from '../utils/feedsAndSpeeds';
 import { getGridStats, type ProbeGrid } from '../utils/meshLeveler';
 import { NumberInput } from './NumberInput';
 import { MachineWorkOriginPanel } from './MachineWorkOriginPanel';
+import { JobOverrides, JobPauseBanner, JobPreflight, JobTransport } from './MachineJobControls';
 
 interface Props {
   isOpen: boolean;
@@ -77,7 +82,38 @@ function Field({
   );
 }
 
-function Advanced({ children }: { children: React.ReactNode }) {
+/**
+ * What the job will actually do, in the units the machine uses.
+ *
+ * The counterpart to hiding the feeds: a beginner should not have to fill six
+ * numbers in, but they should be able to see the six numbers that were chosen
+ * for them, and be told when one of them is a compromise. Modelled on the same
+ * card in the sibling editor, so the two apps read alike.
+ */
+function DerivedRecipe({
+  title, line, notes,
+}: { title: string; line: string; notes?: (string | null | undefined)[] }) {
+  const real = (notes ?? []).filter(Boolean) as string[];
+  return (
+    <div className="rounded-lg bg-slate-100 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800 px-2.5 py-2">
+      <span className="text-[9px] uppercase font-semibold text-slate-500 dark:text-slate-400">
+        {title}
+      </span>
+      <p className="mt-0.5 font-mono text-[11px] text-slate-800 dark:text-slate-100">{line}</p>
+      {real.map((n) => (
+        <p
+          key={n}
+          className="mt-1 flex items-start gap-1 text-[10px] text-amber-600 dark:text-amber-400 leading-snug"
+        >
+          <AlertCircle className="w-3 h-3 mt-px flex-shrink-0" />
+          <span>{n}</span>
+        </p>
+      ))}
+    </div>
+  );
+}
+
+function Advanced({ label = 'Advanced', children }: { label?: string; children: React.ReactNode }) {
   const [open, setOpen] = useState(false);
   return (
     <div className="pt-3 border-t border-slate-200 dark:border-slate-800">
@@ -89,7 +125,7 @@ function Advanced({ children }: { children: React.ReactNode }) {
                    dark:text-slate-500 hover:text-blue-600 dark:hover:text-blue-400 cursor-pointer transition-colors"
       >
         <ChevronRight className={`w-3.5 h-3.5 transition-transform ${open ? 'rotate-90' : ''}`} />
-        <span>Advanced</span>
+        <span>{label}</span>
       </button>
       {open && (
         <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-4">{children}</div>
@@ -98,6 +134,19 @@ function Advanced({ children }: { children: React.ReactNode }) {
   );
 }
 
+/**
+ * A two- or three-way switch that fits the column it is put in.
+ *
+ * `min-w-0` and `truncate` rather than `whitespace-nowrap`: a flex child will
+ * not shrink below its content's width unless it is told it may, so a label a
+ * few characters too long for its grid cell used to push the whole control out
+ * past the field beside it. Now it ellipsizes instead, and the `title` keeps
+ * the full text reachable.
+ *
+ * That is the backstop, not the plan — a label people have to hover to read is
+ * a label that is too long. Keep them short enough that the ellipsis never
+ * appears at the widths these grids actually use.
+ */
 function Segmented<T extends string>({
   value, options, onChange,
 }: { value: T; options: readonly (readonly [T, string])[]; onChange: (v: T) => void }) {
@@ -108,7 +157,8 @@ function Segmented<T extends string>({
           key={v}
           type="button"
           onClick={() => onChange(v)}
-          className={`flex-1 py-1 px-2 rounded-md text-xs font-medium transition-all whitespace-nowrap ${
+          title={label}
+          className={`flex-1 min-w-0 py-1 px-2 rounded-md text-xs font-medium transition-all truncate ${
             value === v
               ? 'bg-white dark:bg-slate-800 text-blue-600 dark:text-blue-400 shadow-sm'
               : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
@@ -119,6 +169,32 @@ function Segmented<T extends string>({
       ))}
     </div>
   );
+}
+
+/**
+ * Drops the settings a recommendation makes that are derived elsewhere.
+ *
+ * `recommendReliefTooling` answers one question — which cutters to fit — and
+ * returns a whole options patch. Writing the feeds it also computes into state
+ * would leave numbers sitting in `options` that `deriveReliefFeeds` immediately
+ * shadows, which is the kind of thing that reads as a bug six months later.
+ */
+const DERIVED_KEYS = [
+  'spindleRpm',
+  'finishingFeedrate',
+  'finishingPlungeRate',
+  'finishingStepoverPercent',
+  'finishingStepdownMm',
+  'roughingFeedrate',
+  'roughingPlungeRate',
+  'roughingStepdownMm',
+  'roughingAllowanceMm',
+] as const;
+
+function toolingOnly(patch: Partial<ReliefCarveOptions>): Partial<ReliefCarveOptions> {
+  const out = { ...patch };
+  for (const key of DERIVED_KEYS) delete out[key];
+  return out;
 }
 
 /**
@@ -137,17 +213,143 @@ function useSettled<T>(value: T, delayMs: number): T {
   return settled;
 }
 
+/** Rapid traverse the preview animates retracts at, mm/min. */
+const RAPID_MM_MIN = 3000;
+
+/** How long a full simulated run takes on screen, before the speed multiplier. */
+const PLAYBACK_SECONDS = 45;
+
 /**
- * Interactive toolpath viewport.
+ * The order the tool visits the preview's points, as one flat list of moves.
+ *
+ * The decimated segments are already in program order, so walking them and
+ * putting a rapid between each pair reproduces the shape of the program: cut
+ * the pass, lift, fly to the head of the next one, drop in. Those rapids are a
+ * real share of a raster job's clock and a real part of what the animation has
+ * to show, because a job whose retracts are invisible looks like it is cutting
+ * continuously when in fact it spends a third of its life in the air.
+ *
+ * This is a preview of the toolpath rather than a second parse of the file: the
+ * points are decimated and the lead-in ramps are not in them. The total is
+ * therefore rescaled to the exporter's own figure, which *is* taken off the
+ * finished program — so the clock at the bottom of the animation and the "Est.
+ * Time" above it are the same number, and the playhead's local pace still slows
+ * where the machine will slow.
+ */
+function buildPreviewPath(
+  result: ReliefCarveResult,
+  options: ReliefCarveOptions
+): { moves: ClockedMove[]; seconds: number } {
+  const raw: TimedMove[] = [];
+  let at: { x: number; y: number; z: number } | null = null;
+
+  for (const seg of result.segments) {
+    if (seg.points.length === 0) continue;
+    const feed = seg.type === 'roughing' ? options.roughingFeedrate : options.finishingFeedrate;
+    const head = seg.points[0];
+
+    if (at) {
+      // Up, across, down — the retract the exporter writes between passes.
+      raw.push({ x1: at.x, y1: at.y, z1: at.z, x2: at.x, y2: at.y, z2: options.safeZ, feed: RAPID_MM_MIN, rapid: true });
+      raw.push({ x1: at.x, y1: at.y, z1: options.safeZ, x2: head.x, y2: head.y, z2: options.safeZ, feed: RAPID_MM_MIN, rapid: true });
+      raw.push({ x1: head.x, y1: head.y, z1: options.safeZ, x2: head.x, y2: head.y, z2: head.z, feed: Math.max(1, options.finishingPlungeRate), rapid: false });
+    }
+
+    for (let i = 0; i + 1 < seg.points.length; i++) {
+      const a = seg.points[i];
+      const b = seg.points[i + 1];
+      raw.push({ x1: a.x, y1: a.y, z1: a.z, x2: b.x, y2: b.y, z2: b.z, feed, rapid: false });
+    }
+    at = seg.points[seg.points.length - 1];
+  }
+
+  const clocked = clockMoves(raw);
+  if (clocked.length === 0) return { moves: clocked, seconds: 0 };
+
+  const previewTotal = clocked[clocked.length - 1].t1;
+  const trueTotal = result.estimatedTimeSeconds;
+  const scale = previewTotal > 1e-6 && trueTotal > 0 ? trueTotal / previewTotal : 1;
+  if (scale !== 1) {
+    for (const m of clocked) {
+      m.t0 *= scale;
+      m.t1 *= scale;
+    }
+  }
+  return { moves: clocked, seconds: clocked[clocked.length - 1].t1 };
+}
+
+/** The move in flight at time `t`, by binary search over the cumulative clock. */
+function moveIndexAt(moves: ClockedMove[], t: number): number {
+  let lo = 0;
+  let hi = moves.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (moves[mid].t1 < t) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+/**
+ * Interactive toolpath viewport, with a dry run of the cut and a live trace of
+ * the real one.
  *
  * The renderer is built once for as long as the modal is open and only its
  * contents are swapped, because tearing a WebGL context down and standing a new
  * one up on every parameter change leaks canvases and GPU buffers.
+ *
+ * The whole path goes into one buffer in program order, so revealing "what has
+ * been cut so far" is a `setDrawRange` on a second pass over the same geometry
+ * rather than a rebuild every frame. At sixty thousand points a rebuild is the
+ * difference between an animation and a slideshow.
+ *
+ * Two things drive the playhead. With no machine running it is a simulation:
+ * the job's own clock, compressed into `PLAYBACK_SECONDS`, so a four-hour carve
+ * can be watched in under a minute and still spends its time where the machine
+ * will. With a job on the wire it is the machine — the marker sits at the
+ * position the controller is reporting, and the bright path is what has
+ * actually been cut. That is the view worth having open while a carve runs:
+ * where the tool is, and how much of the picture is already in the wood.
  */
-function ToolpathView({ result, options }: { result: ReliefCarveResult; options: ReliefCarveOptions }) {
+function ToolpathView({
+  result,
+  options,
+  machineState,
+}: {
+  result: ReliefCarveResult;
+  options: ReliefCarveOptions;
+  machineState: MachineState;
+}) {
   const mountRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<THREE.Group | null>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
+  /** Set by the geometry effect, read by the frame loop. */
+  const cutRef = useRef<THREE.LineSegments | null>(null);
+  const toolRef = useRef<THREE.Object3D | null>(null);
+
+  const path = useMemo(() => buildPreviewPath(result, options), [result, options]);
+
+  const [playing, setPlaying] = useState(true);
+  const [speed, setSpeed] = useState(1);
+  /** Job seconds, not wall-clock seconds. */
+  const [clock, setClock] = useState(0);
+
+  // A job on the machine takes the playhead over. Nothing simulated is worth
+  // watching while the real thing is running two feet away.
+  const live =
+    machineState.status === 'RUNNING' || machineState.status.startsWith('PAUSED');
+
+  // Mirrors of the three things the animation frame and the imperative Three.js
+  // code need to read but must not be restarted by. They are written in effects
+  // rather than during render, and declared in the order the readers below
+  // expect to find them fresh.
+  const pathRef = useRef(path);
+  const clockRef = useRef(0);
+  const liveRef = useRef({ live, wpos: machineState.wpos });
+
+  useEffect(() => { pathRef.current = path; }, [path]);
+  useEffect(() => { clockRef.current = clock; }, [clock]);
+  useEffect(() => { liveRef.current = { live, wpos: machineState.wpos }; }, [live, machineState.wpos]);
 
   useEffect(() => {
     const mount = mountRef.current;
@@ -166,6 +368,17 @@ function ToolpathView({ result, options }: { result: ReliefCarveResult; options:
 
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
+    controls.dampingFactor = 0.1;
+    // The same mapping as the main editor: middle drag pans, right drag orbits,
+    // and left is left alone. Two viewports in one app that answer the same
+    // gesture differently is worse than either mapping on its own — the hand
+    // that has learned the scene view arrives here and the model spins when it
+    // meant to pan.
+    controls.mouseButtons = {
+      LEFT: 99 as unknown as THREE.MOUSE,
+      MIDDLE: THREE.MOUSE.PAN,
+      RIGHT: THREE.MOUSE.ROTATE,
+    };
 
     const group = new THREE.Group();
     contentRef.current = group;
@@ -205,6 +418,8 @@ function ToolpathView({ result, options }: { result: ReliefCarveResult; options:
       renderer.domElement.remove();
       contentRef.current = null;
       sceneRef.current = null;
+      cutRef.current = null;
+      toolRef.current = null;
     };
   }, []);
 
@@ -233,26 +448,62 @@ function ToolpathView({ result, options }: { result: ReliefCarveResult; options:
     group.add(stockMesh);
     dispose.push(stock, stockMat);
 
-    // Every pass of one kind goes into a single buffer: a few hundred separate
-    // Line objects is a few hundred draw calls for the same picture.
-    for (const [type, color] of [['roughing', 0xf59e0b], ['finishing', 0x3b82f6]] as const) {
-      const positions: number[] = [];
-      for (const seg of result.segments) {
-        if (seg.type !== type) continue;
-        for (let i = 0; i + 1 < seg.points.length; i++) {
-          const a = seg.points[i];
-          const b = seg.points[i + 1];
-          positions.push(a.x, a.y, a.z, b.x, b.y, b.z);
-        }
-      }
-      if (positions.length === 0) continue;
-
-      const geo = new THREE.BufferGeometry();
-      geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-      const mat = new THREE.LineBasicMaterial({ color, transparent: type === 'roughing', opacity: 0.55 });
-      group.add(new THREE.LineSegments(geo, mat));
-      dispose.push(geo, mat);
+    // One buffer, in program order, two vertices per move. Everything the
+    // animation does — reveal, rewind, follow the machine — is then a draw
+    // range on this, and the colours say what each move is for.
+    const moves = path.moves;
+    const positions = new Float32Array(moves.length * 6);
+    const colours = new Float32Array(moves.length * 6);
+    const ROUGH = new THREE.Color(0xf59e0b);
+    const FINISH = new THREE.Color(0x3b82f6);
+    const TRAVEL = new THREE.Color(0x475569);
+    for (let i = 0; i < moves.length; i++) {
+      const m = moves[i];
+      positions.set([m.x1, m.y1, m.z1, m.x2, m.y2, m.z2], i * 6);
+      // A cut above the stock's top face can only be a plunge or a link; the
+      // roughing pass and the finishing raster are told apart by their feed.
+      const c = m.rapid
+        ? TRAVEL
+        : m.feed === options.roughingFeedrate
+          ? ROUGH
+          : FINISH;
+      colours.set([c.r, c.g, c.b, c.r, c.g, c.b], i * 6);
     }
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geo.setAttribute('color', new THREE.Float32BufferAttribute(colours, 3));
+    dispose.push(geo);
+
+    // The whole path, faint: where the tool is going.
+    const planMat = new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.18 });
+    group.add(new THREE.LineSegments(geo, planMat));
+    dispose.push(planMat);
+
+    // The same path at full strength, clipped to what has been cut. Drawn over
+    // the top without a depth test, because the two are the same line and would
+    // otherwise fight for the pixel.
+    const cutMat = new THREE.LineBasicMaterial({ vertexColors: true, depthTest: false });
+    const cut = new THREE.LineSegments(geo, cutMat);
+    cut.renderOrder = 1;
+    cut.frustumCulled = false;
+    group.add(cut);
+    cutRef.current = cut;
+    dispose.push(cutMat);
+
+    // The tool itself: a cone pointing down at where the tip is.
+    const toolGeo = new THREE.ConeGeometry(
+      Math.max(1.2, options.finishingToolDiaMm / 2),
+      Math.max(5, options.finishingToolDiaMm * 3),
+      12
+    );
+    const toolMat = new THREE.MeshBasicMaterial({ color: 0xf1f5f9, transparent: true, opacity: 0.85 });
+    const tool = new THREE.Mesh(toolGeo, toolMat);
+    tool.rotation.x = Math.PI / 2; // cone's axis is +Y by default; this points it down -Z
+    tool.renderOrder = 2;
+    group.add(tool);
+    toolRef.current = tool;
+    dispose.push(toolGeo, toolMat);
 
     const grid = new THREE.GridHelper(
       Math.max(options.stockWidthMm, options.stockDepthMm) * 1.5,
@@ -266,19 +517,198 @@ function ToolpathView({ result, options }: { result: ReliefCarveResult; options:
 
     return () => {
       group.clear();
+      cutRef.current = null;
+      toolRef.current = null;
       for (const d of dispose) d.dispose();
       grid.geometry.dispose();
       (grid.material as THREE.Material).dispose();
     };
-  }, [result, options.stockWidthMm, options.stockDepthMm, options.stockThicknessMm]);
+  }, [
+    path,
+    options.stockWidthMm,
+    options.stockDepthMm,
+    options.stockThicknessMm,
+    options.finishingToolDiaMm,
+    options.roughingFeedrate,
+  ]);
 
-  return <div ref={mountRef} className="w-full h-80 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-950 overflow-hidden" />;
+  // A new carve is a new path, so the playhead goes back to the start rather
+  // than sitting at a time the new job may not even have. Done during render
+  // rather than in an effect, so no frame is ever drawn with the old clock
+  // against the new geometry.
+  const [clockedPath, setClockedPath] = useState(path);
+  if (clockedPath !== path) {
+    setClockedPath(path);
+    setClock(0);
+  }
+
+  /**
+   * Moves the drawn state to a point on the job clock.
+   *
+   * Split out of the frame loop because the scrub bar and the machine both need
+   * it, and neither of them ticks.
+   */
+  const applyClock = useCallback((t: number) => {
+    const moves = pathRef.current.moves;
+    const cut = cutRef.current;
+    const tool = toolRef.current;
+    if (!cut || moves.length === 0) return;
+
+    const i = moveIndexAt(moves, t);
+    const m = moves[i];
+    const span = m.t1 - m.t0;
+    const f = span > 0 ? Math.min(1, Math.max(0, (t - m.t0) / span)) : 1;
+
+    cut.geometry.setDrawRange(0, i * 2 + 2);
+
+    if (tool) {
+      const state = liveRef.current;
+      // While a job is on the machine the tool marker is the machine's own
+      // reported position, not the simulation's: the point of watching it is to
+      // see where the spindle actually is, including the moments it is not
+      // where the program thinks.
+      if (state.live) {
+        tool.position.set(state.wpos.x, state.wpos.y, state.wpos.z);
+      } else {
+        tool.position.set(
+          m.x1 + (m.x2 - m.x1) * f,
+          m.y1 + (m.y2 - m.y1) * f,
+          m.z1 + (m.z2 - m.z1) * f
+        );
+      }
+      // The cone's tip is at its base, half its height below the origin.
+      tool.position.z += Math.max(5, options.finishingToolDiaMm * 3) / 2;
+    }
+  }, [options.finishingToolDiaMm]);
+
+  useEffect(() => {
+    applyClock(clock);
+  }, [clock, applyClock, path]);
+
+  // Follow the machine. Line count is what GRBL's progress is reported in and
+  // the program is very nearly one move per line, so it maps onto the path
+  // closely enough to show which passes are done.
+  useEffect(() => {
+    if (!live) return;
+    const moves = pathRef.current.moves;
+    if (moves.length === 0) return;
+    const frac = Math.min(1, Math.max(0, machineState.progressPercent / 100));
+    setClock(pathRef.current.seconds * frac);
+  }, [live, machineState.progressPercent, machineState.wpos.x, machineState.wpos.y, machineState.wpos.z]);
+
+  // The dry run. Compressed onto a fixed screen duration, because the thing
+  // being previewed can be a four-hour carve.
+  useEffect(() => {
+    if (live || !playing || path.seconds <= 0) return;
+    let raf = 0;
+    let last = performance.now();
+    const step = (now: number) => {
+      const dt = (now - last) / 1000;
+      last = now;
+      const advance = (path.seconds / PLAYBACK_SECONDS) * speed * dt;
+      const next = clockRef.current + advance;
+      setClock(next >= path.seconds ? 0 : next);
+      raf = requestAnimationFrame(step);
+    };
+    raf = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(raf);
+  }, [live, playing, speed, path]);
+
+  const done = path.seconds > 0 ? Math.round((clock / path.seconds) * 100) : 0;
+
+  return (
+    <div className="space-y-2">
+      <div className="w-full h-80 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-950 overflow-hidden" ref={mountRef} />
+
+      <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+        <button
+          type="button"
+          onClick={() => setPlaying((p) => !p)}
+          disabled={live}
+          title={live ? 'The machine is driving the playhead' : playing ? 'Pause the preview' : 'Play the preview'}
+          className="p-1.5 rounded-lg bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-300 dark:hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          {playing && !live ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5 fill-current" />}
+        </button>
+
+        <input
+          type="range"
+          min={0}
+          max={Math.max(0.001, path.seconds)}
+          step={Math.max(0.001, path.seconds / 2000)}
+          value={Math.min(clock, path.seconds)}
+          disabled={live}
+          onChange={(e) => {
+            setPlaying(false);
+            setClock(parseFloat(e.target.value));
+          }}
+          aria-label="Scrub the toolpath preview"
+          className="flex-1 min-w-[8rem] accent-blue-500 disabled:opacity-50"
+        />
+
+        <span className="font-mono text-[11px] tabular-nums text-slate-500 dark:text-slate-400 whitespace-nowrap">
+          {formatDuration(clock)} / {formatDuration(path.seconds)} ({done}%)
+        </span>
+
+        {live ? (
+          <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-emerald-500/20 text-emerald-500 border border-emerald-500/40 whitespace-nowrap">
+            Tracing the machine
+          </span>
+        ) : (
+          <div className="flex items-center space-x-1">
+            {([1, 4, 16] as const).map((s) => (
+              <button
+                key={s}
+                type="button"
+                onClick={() => setSpeed(s)}
+                className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                  speed === s
+                    ? 'bg-blue-500 text-slate-950'
+                    : 'bg-slate-200 dark:bg-slate-800 text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
+                }`}
+              >
+                {s}&times;
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }
 
 export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene, onOpenDocs }) => {
   const [options, setOptions] = useState<ReliefCarveOptions>(DEFAULT_RELIEF_OPTIONS);
   const set = <K extends keyof ReliefCarveOptions>(key: K, value: ReliefCarveOptions[K]) =>
     setOptions((prev) => ({ ...prev, [key]: value }));
+
+  /**
+   * Feeds and speeds the operator has taken over.
+   *
+   * Empty by default, and every field in it stays empty until somebody types in
+   * it — at which point that one number stops tracking the material and the bit
+   * and does exactly what it was told, including things the cutter will not
+   * survive. Everything not in here is worked out afresh on every change, so
+   * switching from pine to aluminium moves the whole recipe rather than leaving
+   * a pine feed sitting in a box above an aluminium job.
+   */
+  const [overrides, setOverrides] = useState<ReliefOverrides>({});
+  /** Typing a number takes a field over; clearing it hands it back to the recipe. */
+  const override = <K extends keyof ReliefOverrides>(key: K, value: number | null) =>
+    setOverrides((prev) => {
+      const next = { ...prev };
+      if (value === null) delete next[key];
+      else next[key] = value;
+      return next;
+    });
+  const _override = <K extends keyof ReliefOverrides>(key: K, value: number | null) =>
+    setOverrides((prev) => {
+      const next = { ...prev };
+      if (value === null) delete next[key];
+      else next[key] = value;
+      return next;
+    });
+  void _override;
 
   const [probeCols, setProbeCols] = useState(3);
   const [probeRows, setProbeRows] = useState(3);
@@ -292,35 +722,133 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
     return webSerialManager.addListener(setMachineState);
   }, [isOpen]);
 
-  const settled = useSettled(options, 250);
-  const pending = settled !== options;
+  /** What the bits and the material imply, before anyone overrides anything. */
+  /**
+   * Fastest the gantry tracks while cutting, mm/min.
+   *
+   * The lower of the machine's own X and Y maximum rates. A cut is a
+   * two-axis move, so the slower of the pair is the one that governs it.
+   */
+  const cuttingRateLimit = Math.min(machineState.motion.maxRate.x, machineState.motion.maxRate.y);
+
+  // Deliberately narrow: naming `options` entire would recompute the recipe on
+  // every keystroke in an unrelated box and restart the 250 ms settle behind it.
+  const {
+    material, finishingToolDiaMm, finishingFlutes, roughingToolDiaMm, roughingFlutes, carveDepthMm,
+  } = options;
+  const derived = useMemo(
+    () =>
+      deriveReliefFeeds(
+        { material, finishingToolDiaMm, finishingFlutes, roughingToolDiaMm, roughingFlutes, carveDepthMm },
+        machineState.motion.spindle,
+        cuttingRateLimit
+      ),
+    [
+      cuttingRateLimit,
+      material,
+      finishingToolDiaMm,
+      finishingFlutes,
+      roughingToolDiaMm,
+      roughingFlutes,
+      carveDepthMm,
+      machineState.motion.spindle,
+    ]
+  );
+
+  // What the job is actually cut with: the chosen tooling, the derived recipe
+  // for it, and then whatever the operator has said otherwise.
+  const effective = useMemo<ReliefCarveOptions>(
+    () => ({ ...options, ...derived, ...overrides }),
+    [options, derived, overrides]
+  );
+
+  const settled = useSettled(effective, 250);
+  const pending = settled !== effective;
 
   const result = useMemo(() => {
     if (!isOpen) return null;
     return generateReliefCarveGcode(scene, {
       ...settled,
+      // The connected machine's own acceleration and traverse limits, so the
+      // run-time estimate sharpens from a guess into a measurement the moment
+      // the USB lead goes in.
+      motionProfile: machineState.motion,
       meshLevelGrid: probedGrid,
       applyMeshLeveling: settled.applyMeshLeveling && probedGrid !== null,
     });
-  }, [isOpen, scene, settled, probedGrid]);
+  }, [isOpen, scene, settled, probedGrid, machineState.motion]);
 
   // Tooling is a function of the carve, not of the model, so it is derived from
   // what the carve actually came out as — the relief's real depth and the plan
   // it landed on — rather than shipped alongside the mesh.
   const applyRecommendedTooling = () => {
     if (!result?.success) return;
+    // Clearing the overrides is the point as much as the tooling is: a feed
+    // typed for the old bit must not survive a change of bit.
+    setOverrides({});
     setOptions((prev) => ({
       ...prev,
-      ...recommendReliefTooling({
+      // Tooling only. Feeds and speeds follow from it and are derived rather
+      // than stored, so the ones this returns are dropped instead of being
+      // written into state where they would sit shadowed and misleading.
+      ...toolingOnly(recommendReliefTooling({
         reliefDepthMm: result.reliefDepthMm,
         planWidthMm: result.carveBounds.maxX - result.carveBounds.minX,
         planDepthMm: result.carveBounds.maxY - result.carveBounds.minY,
-        spindleRpm: prev.spindleRpm,
-      }),
+        material: prev.material,
+        // What this spindle can be dialled to, from the controller when it said.
+        spindle: machineState.motion.spindle,
+        maxFeedMmMin: cuttingRateLimit,
+      })),
     }));
   };
 
   if (!isOpen) return null;
+
+  // What the operator has to do to the machine before this file will cut what
+  // it says it cuts. Derived from the settled options rather than the live ones
+  // so it describes the program that would actually be sent.
+  const materialLabel = (MATERIALS.find((m) => m.id === settled.material)?.label ?? settled.material).toLowerCase();
+  const finishTool = describeCutter(
+    settled.finishingToolDiaMm,
+    settled.finishingToolType,
+    settled.finishingFlutes,
+    settled.finishingGeometry,
+    settled.finishingVBitAngleDeg
+  );
+  const roughTool = describeCutter(
+    settled.roughingToolDiaMm,
+    'flat',
+    settled.roughingFlutes,
+    settled.roughingGeometry
+  );
+  const swaps = !!result?.toolChange;
+  const idealSpeeds = recommendSpeeds({
+    diameterMm: settled.finishingToolDiaMm,
+    flutes: settled.finishingFlutes,
+    material: settled.material,
+    spindle: machineState.motion.spindle,
+    maxFeedMmMin: cuttingRateLimit,
+  });
+  // Said once, on the finishing card and again before the start button: the
+  // recommendation had to give something up, or the number in the box is not
+  // the number the material and the bit ask for.
+  const speedNote =
+    overrides.spindleRpm !== undefined && Math.abs(idealSpeeds.rpm - effective.spindleRpm) > idealSpeeds.rpm * 0.15
+      ? `Overridden. ${describeSpeedRecommendation(idealSpeeds, settled.material, settled.finishingToolDiaMm)}`
+      : idealSpeeds.clampedBy
+        ? describeSpeedRecommendation(idealSpeeds, settled.material, settled.finishingToolDiaMm)
+        : null;
+
+  const preflight = {
+    material: materialLabel,
+    firstTool: settled.roughingEnabled ? roughTool : finishTool,
+    secondTool: swaps ? finishTool : undefined,
+    // Only worth saying when the number in the box is not the number the
+    // material and the bit ask for, or when the recommendation itself had to
+    // give something up.
+    caveat: speedNote,
+  };
 
   const stats = probedGrid ? getGridStats(probedGrid) : null;
   const canCarve = !!result?.success && machineState.connected && machineState.status === 'IDLE';
@@ -430,28 +958,33 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
               </Field>
 
               <Field
+                className="lg:col-span-3"
+                label="Material"
+                hint="What is clamped on the bed. It is the one setting here that is not a property of the model, and every feed and speed follows from it: surface speed over cutter diameter gives the spindle RPM, and chip-per-tooth times teeth times RPM gives the feed. 18,000 RPM is right for pine and ruinous for aluminium, and nothing about a mesh can tell the difference."
+              >
+                <select
+                  value={options.material}
+                  onChange={(e) => set('material', e.target.value as typeof options.material)}
+                  className={`${inputClass} cursor-pointer`}
+                >
+                  {MATERIALS.map((mat) => (
+                    <option key={mat.id} value={mat.id}>{mat.label}</option>
+                  ))}
+                </select>
+              </Field>
+
+              <Field
+                className="lg:col-span-2"
                 label="Height Scale"
-                hint="Fill Depth stretches the model's height range onto the relief depth, so the carve is always exactly that deep — but Z is then unrelated to X and Y, and fitting the model onto smaller stock shrinks the plan while leaving the height alone, which multiplies the exaggeration by the same factor. Model Proportions puts Z on the plan scale instead, so the carve keeps the shape the model was authored with and the exaggeration is the number you set, not one that falls out of the stock size."
+                hint="Fill Depth stretches the model's height range onto the relief depth, so the carve is always exactly that deep — but Z is then unrelated to X and Y, and fitting the model onto smaller stock shrinks the plan while leaving the height alone, which multiplies the exaggeration by the same factor. Proportional puts Z on the plan scale instead, so the carve keeps the shape the model was authored with and the exaggeration is the number you set, not one that falls out of the stock size."
               >
                 <Segmented
                   value={options.verticalScaleMode}
                   onChange={(v) => set('verticalScaleMode', v)}
-                  options={[['fill', 'Fill Depth'], ['proportional', 'Model Proportions']] as const}
+                  options={[['fill', 'Fill Depth'], ['proportional', 'Proportional']] as const}
                 />
               </Field>
 
-              <Field
-                label="Exaggeration (×)"
-                hint="How much the height is stretched relative to the plan when using Model Proportions. 1 is the model's own shape. Terrain wants more than that — real mountains over a map-sized plan are a flat board — but the exaggeration stays what you asked for instead of drifting with the stock size."
-              >
-                <NumberInput
-                  step="0.5" min={0.01} max={100}
-                  value={options.verticalExaggeration}
-                  onChange={(v) => set('verticalExaggeration', v)}
-                  className={inputClass}
-                  disabled={options.verticalScaleMode !== 'proportional'}
-                />
-              </Field>
 
               <Field
                 label="Relief Depth (mm)"
@@ -480,28 +1013,18 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
 
               <Field
                 className="lg:col-span-2"
-                label="Plan Scale"
-                hint="Fit to Stock sizes the model to the block. Manual holds a fixed scale, where 100% means one metre of scene is one millimetre of stock — anything hanging over the edge is cropped."
+                hintAlign="end"
+                label="Relief Polarity"
+                hint="Standard (Cameo) raises peaks toward the stock surface. Invert (Intaglio / Mold) carves peaks deepest into the block as negative cavities — ideal for casting molds or sunken engravings."
               >
                 <Segmented
-                  value={options.fitMode}
-                  onChange={(v) => set('fitMode', v)}
-                  options={[['fit', 'Fit to Stock'], ['manual', 'Manual']] as const}
+                  value={options.invertRelief ? 'invert' : 'normal'}
+                  onChange={(v) => set('invertRelief', v === 'invert')}
+                  options={[['normal', 'Cameo (Raised)'], ['invert', 'Intaglio (Sunken)']] as const}
                 />
               </Field>
 
-              <Field
-                label="Scale (%)"
-                hint="Manual plan-view scale. The relief depth is set separately, so changing this does not change how deep the carve goes."
-              >
-                <NumberInput
-                  step="5" min={1} max={1000}
-                  disabled={options.fitMode !== 'manual'}
-                  value={options.scalePercent}
-                  onChange={(v) => set('scalePercent', v)}
-                  className={inputClass}
-                />
-              </Field>
+
 
               <Field
                 className="lg:col-span-3"
@@ -518,6 +1041,43 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                 </div>
               </Field>
             </div>
+            <Advanced>
+              <Field
+                label="Exaggeration (×)"
+                hint="How much the height is stretched relative to the plan when using Model Proportions. 1 is the model's own shape. Terrain wants more than that — real mountains over a map-sized plan are a flat board — but the exaggeration stays what you asked for instead of drifting with the stock size."
+              >
+                <NumberInput
+                  step="0.5" min={0.01} max={100}
+                  value={options.verticalExaggeration}
+                  onChange={(v) => set('verticalExaggeration', v)}
+                  className={inputClass}
+                  disabled={options.verticalScaleMode !== 'proportional'}
+                />
+              </Field>
+              <Field
+                className="lg:col-span-2"
+                label="Plan Scale"
+                hint="Fit to Stock sizes the model to the block. Manual holds a fixed scale, where 100% means one metre of scene is one millimetre of stock — anything hanging over the edge is cropped."
+              >
+                <Segmented
+                  value={options.fitMode}
+                  onChange={(v) => set('fitMode', v)}
+                  options={[['fit', 'Fit to Stock'], ['manual', 'Manual']] as const}
+                />
+              </Field>
+              <Field
+                label="Scale (%)"
+                hint="Manual plan-view scale. The relief depth is set separately, so changing this does not change how deep the carve goes."
+              >
+                <NumberInput
+                  step="5" min={1} max={1000}
+                  disabled={options.fitMode !== 'manual'}
+                  value={options.scalePercent}
+                  onChange={(v) => set('scalePercent', v)}
+                  className={inputClass}
+                />
+              </Field>
+            </Advanced>
           </div>
 
           {/* Finishing */}
@@ -536,20 +1096,33 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-4">
               <Field
-                className="lg:col-span-2"
+                className="lg:col-span-3"
                 label="Cutter Shape"
-                hint="A ball nose leaves a smooth surface on curves, and the toolpath is lifted to keep its round tip on the surface. A flat mill has to clear the highest point under its whole diameter, so it rounds off fine detail."
+                hint="A ball nose leaves a smooth surface on curves, and the toolpath is lifted to keep its round tip on the surface. A flat mill has to clear the highest point under its whole diameter, so it rounds off fine detail. A V-bit is a cone: it drops into corners and grooves no round cutter can enter and holds detail far finer than its diameter, which is why lettering and ornament are cut with one — but it only cuts as deep as the cone is tall, and it leaves a ridge between passes."
               >
                 <Segmented
                   value={options.finishingToolType}
                   onChange={(v) => set('finishingToolType', v)}
-                  options={[['ball_nose', 'Ball-Nose'], ['flat', 'Flat End Mill']] as const}
+                  options={[['ball_nose', 'Ball-Nose'], ['flat', 'Flat'], ['v_bit', 'V-Bit']] as const}
                 />
               </Field>
 
+              {options.finishingToolType === 'v_bit' && (
+                <Field
+                  label="V Angle (deg)"
+                  hint="Included point angle, as it is written on the bit — 60 for a 60 degree V. It sets two things at once: how deep the bit can cut before the cone runs out and only the shank is left, and how tall a ridge the stepover leaves. Narrow holds finer detail and is more fragile."
+                >
+                  <Segmented
+                    value={String(options.finishingVBitAngleDeg)}
+                    onChange={(v) => set('finishingVBitAngleDeg', parseInt(v, 10))}
+                    options={[['30', '30'], ['60', '60'], ['90', '90']] as const}
+                  />
+                </Field>
+              )}
+
               <Field
                 label="Bit Ø (mm)"
-                hint="Diameter of the finishing cutter. It sets both the stepover and how much detail survives — nothing narrower than the bit can be cut."
+                hint="Diameter of the finishing cutter. It sets both the stepover and how much detail survives — nothing narrower than the bit can be cut. For a V-bit this is the diameter at the top of the cone, which is only reached at full depth."
               >
                 <NumberInput
                   step="0.1" min={0.1} max={30}
@@ -559,6 +1132,46 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                 />
               </Field>
 
+
+
+
+
+
+
+            </div>
+
+            <DerivedRecipe
+              title={`Derived for ${materialLabel}`}
+              line={
+                `${effective.spindleRpm.toLocaleString()} RPM · ${effective.finishingFeedrate} mm/min · ` +
+                `${((effective.finishingToolDiaMm * effective.finishingStepoverPercent) / 100).toFixed(2)} mm stepover · ` +
+                `${result?.success ? result.finishingRasterLines : '—'} passes`
+              }
+              notes={[speedNote]}
+            />
+            <Advanced label="Advanced — override the derived feeds">
+              <Field
+                label="Flutes"
+                hint="Cutting edges on the bit. Feed rate is chip-per-tooth x flutes x RPM, so the same feed is twice the load per edge on a two-flute cutter as on a four — this is what the app checks the feedrate against, and it is written into the file's header so the right bit gets fitted."
+              >
+                <NumberInput
+                  step="1" min={1} max={8} integer
+                  value={options.finishingFlutes}
+                  onChange={(v) => set('finishingFlutes', v)}
+                  className={inputClass}
+                />
+              </Field>
+              <Field
+                className="lg:col-span-3"
+                label="Helix"
+                hint="Which way the flutes throw the chip. Upcut lifts it out of the cut and is what clears depth. Downcut presses it down: a clean top edge, but the chips pack into the bottom of a deep relief and burn. Compression is upcut low and downcut high, which in a relief means it never leaves its upcut section. This does not change the coordinates, but it does change what the app will let a feed, a plunge and a stepdown be without warning you."
+              >
+                <Segmented
+                  value={options.finishingGeometry}
+                  onChange={(v) => set('finishingGeometry', v)}
+                  options={[['upcut', 'Up'], ['downcut', 'Down'], ['compression', 'Compr.'], ['straight', 'Straight']] as const}
+                />
+              </Field>
               <Field
                 className="lg:col-span-2"
                 label="Depth Strategy"
@@ -570,43 +1183,45 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                   options={[['auto', 'Auto'], ['single', 'One Sweep'], ['layered', 'Layered']] as const}
                 />
               </Field>
-
               <Field
                 label="Stepdown (mm)"
                 hint="Most depth one layered sweep may take. 0 uses the bit diameter. Ignored when the depth strategy is One Sweep."
               >
                 <NumberInput
                   step="0.5" min={0} max={20}
-                  value={options.finishingStepdownMm}
-                  onChange={(v) => set('finishingStepdownMm', v)}
+                  allowEmpty
+                  placeholder={String(derived.finishingStepdownMm)}
+                  value={overrides.finishingStepdownMm ?? null}
+                  onChange={(v) => override('finishingStepdownMm', v)}
                   className={inputClass}
                 />
               </Field>
-
               <Field
                 label="Stepover (%)"
                 hint="Spacing between passes, as a percentage of bit diameter. Lower is smoother and slower: 10% is a show surface, 40% leaves visible ridges you will have to sand."
               >
                 <NumberInput
                   step="5" min={2} max={50}
-                  value={options.finishingStepoverPercent}
-                  onChange={(v) => set('finishingStepoverPercent', v)}
+                  allowEmpty
+                  placeholder={String(derived.finishingStepoverPercent)}
+                  value={overrides.finishingStepoverPercent ?? null}
+                  onChange={(v) => override('finishingStepoverPercent', v)}
                   className={inputClass}
                 />
               </Field>
-
               <Field
                 label="Feedrate (mm/m)"
                 hint="How fast the cutter travels through the finishing pass, in mm per minute."
               >
                 <NumberInput
                   step="100" min={50} max={10000} integer
-                  value={options.finishingFeedrate}
-                  onChange={(v) => set('finishingFeedrate', v)}
+                  allowEmpty
+                  placeholder={String(derived.finishingFeedrate)}
+                  value={overrides.finishingFeedrate ?? null}
+                  onChange={(v) => override('finishingFeedrate', v)}
                   className={inputClass}
                 />
               </Field>
-
               <Field
                 hintAlign="end"
                 label="Sweep Axis"
@@ -615,12 +1230,9 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                 <Segmented
                   value={options.finishingDirection}
                   onChange={(v) => set('finishingDirection', v)}
-                  options={[['x', 'Along X'], ['y', 'Along Y']] as const}
+                  options={[['x', 'X'], ['y', 'Y']] as const}
                 />
               </Field>
-            </div>
-
-            <Advanced>
               <Field
                 className="lg:col-span-2"
                 label="Plunge Rate (mm/m)"
@@ -628,8 +1240,10 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
               >
                 <NumberInput
                   step="50" min={10} max={2000} integer
-                  value={options.finishingPlungeRate}
-                  onChange={(v) => set('finishingPlungeRate', v)}
+                  allowEmpty
+                  placeholder={String(derived.finishingPlungeRate)}
+                  value={overrides.finishingPlungeRate ?? null}
+                  onChange={(v) => override('finishingPlungeRate', v)}
                   className={inputClass}
                 />
               </Field>
@@ -724,12 +1338,14 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                 className="lg:col-span-2"
                 hintAlign="end"
                 label="Spindle (RPM)"
-                hint="Spindle speed sent with M3. Ignored by machines whose spindle is switched by hand."
+                hint="The speed to set before you press start. On a router with a dial rather than a controlled spindle the S word in the file does nothing at all, so this is a number you turn by hand — which is why the file writes it out as a comment and the machine panel repeats it. It comes from the material's surface speed and the finishing bit's diameter; Suggest tooling sets it."
               >
                 <NumberInput
                   step="1000" min={0} max={60000} integer
-                  value={options.spindleRpm}
-                  onChange={(v) => set('spindleRpm', v)}
+                  allowEmpty
+                  placeholder={String(derived.spindleRpm)}
+                  value={overrides.spindleRpm ?? null}
+                  onChange={(v) => override('spindleRpm', v)}
                   className={inputClass}
                 />
               </Field>
@@ -753,8 +1369,8 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
               </Field>
 
               <Field
-                label="Bit Ø (mm)"
-                hint="Diameter of the roughing mill. If it differs from the finishing bit the job pauses for a tool change between the two passes."
+                label="Flat End Mill Ø (mm)"
+                hint="Diameter of the roughing mill. The roughing path is planned around a flat bottom — every layer is a flat floor at a fixed Z — so this pass wants a flat end mill and nothing else: a ball nose fitted here would leave the corner of every layer uncut and the finishing pass would find more material than it was told to expect. If the diameter differs from the finishing bit the job pauses for a tool change between the two passes."
               >
                 <NumberInput
                   step="0.1" min={0.1} max={30}
@@ -765,6 +1381,45 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                 />
               </Field>
 
+
+
+
+
+            </div>
+
+            <DerivedRecipe
+              title={`Derived for ${materialLabel}`}
+              line={
+                effective.roughingEnabled
+                  ? `${effective.spindleRpm.toLocaleString()} RPM · ${effective.roughingFeedrate} mm/min · ` +
+                    `${effective.roughingStepdownMm} mm/pass · ${effective.roughingAllowanceMm} mm left on`
+                  : 'Skipped — the finishing bit clears the whole relief on its own'
+              }
+            />
+            <Advanced label="Advanced — override the derived feeds">
+              <Field
+                label="Flutes"
+                hint="Cutting edges on the roughing mill, used to check the feedrate makes a chip rather than a rub, and written into the file so the right bit is fitted."
+              >
+                <NumberInput
+                  step="1" min={1} max={8} integer
+                  disabled={!options.roughingEnabled}
+                  value={options.roughingFlutes}
+                  onChange={(v) => set('roughingFlutes', v)}
+                  className={inputClass}
+                />
+              </Field>
+              <Field
+                className="lg:col-span-3"
+                label="Helix"
+                hint="Roughing wants an upcut: the whole job of this pass is to get waste out of a pocket, and upcut is the only geometry that lifts it. A downcut here packs its own chips into the floor it is trying to clear."
+              >
+                <Segmented
+                  value={options.roughingGeometry}
+                  onChange={(v) => set('roughingGeometry', v)}
+                  options={[['upcut', 'Up'], ['downcut', 'Down'], ['compression', 'Compr.'], ['straight', 'Straight']] as const}
+                />
+              </Field>
               <Field
                 label="Stepdown (mm)"
                 hint="How much depth each roughing layer takes. Deeper is quicker but loads the cutter harder; 1–2 mm suits most wood on a hobby router."
@@ -772,12 +1427,13 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                 <NumberInput
                   step="0.5" min={0.1} max={20}
                   disabled={!options.roughingEnabled}
-                  value={options.roughingStepdownMm}
-                  onChange={(v) => set('roughingStepdownMm', v)}
+                  allowEmpty
+                  placeholder={String(derived.roughingStepdownMm)}
+                  value={overrides.roughingStepdownMm ?? null}
+                  onChange={(v) => override('roughingStepdownMm', v)}
                   className={inputClass}
                 />
               </Field>
-
               <Field
                 label="Leave On (mm)"
                 hint="Material the roughing pass leaves above the finished surface for the finishing bit to take off. Too little and the roughing marks show through."
@@ -785,12 +1441,13 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                 <NumberInput
                   step="0.1" min={0} max={5}
                   disabled={!options.roughingEnabled}
-                  value={options.roughingAllowanceMm}
-                  onChange={(v) => set('roughingAllowanceMm', v)}
+                  allowEmpty
+                  placeholder={String(derived.roughingAllowanceMm)}
+                  value={overrides.roughingAllowanceMm ?? null}
+                  onChange={(v) => override('roughingAllowanceMm', v)}
                   className={inputClass}
                 />
               </Field>
-
               <Field
                 hintAlign="end"
                 label="Feedrate (mm/m)"
@@ -799,14 +1456,13 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                 <NumberInput
                   step="100" min={50} max={10000} integer
                   disabled={!options.roughingEnabled}
-                  value={options.roughingFeedrate}
-                  onChange={(v) => set('roughingFeedrate', v)}
+                  allowEmpty
+                  placeholder={String(derived.roughingFeedrate)}
+                  value={overrides.roughingFeedrate ?? null}
+                  onChange={(v) => override('roughingFeedrate', v)}
                   className={inputClass}
                 />
               </Field>
-            </div>
-
-            <Advanced>
               <Field
                 className="lg:col-span-2"
                 label="Plunge Rate (mm/m)"
@@ -815,8 +1471,10 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                 <NumberInput
                   step="50" min={10} max={2000} integer
                   disabled={!options.roughingEnabled}
-                  value={options.roughingPlungeRate}
-                  onChange={(v) => set('roughingPlungeRate', v)}
+                  allowEmpty
+                  placeholder={String(derived.roughingPlungeRate)}
+                  value={overrides.roughingPlungeRate ?? null}
+                  onChange={(v) => override('roughingPlungeRate', v)}
                   className={inputClass}
                 />
               </Field>
@@ -916,34 +1574,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
           )}
 
           {/* Machine paused mid-job — the tool change between passes lands here */}
-          {machineState.status.startsWith('PAUSED') && (
-            <div className="p-4 rounded-xl bg-amber-500/10 border-2 border-amber-500 flex flex-col space-y-3 animate-pulse text-amber-800 dark:text-amber-300">
-              <div className="flex items-center space-x-3">
-                <AlertCircle className="w-6 h-6 text-amber-500 flex-shrink-0" />
-                <div>
-                  <h4 className="font-bold text-sm">Action Required: Machine Paused</h4>
-                  <p className="text-xs leading-relaxed font-semibold">{machineState.pauseMessage}</p>
-                </div>
-              </div>
-              <div className="flex items-center justify-end space-x-3 pt-2 border-t border-amber-500/30">
-                {machineState.status === 'PAUSED_TOOL' && (
-                  <button
-                    onClick={() => webSerialManager.zeroZ(12.0)}
-                    className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-100 text-xs font-semibold rounded-lg"
-                  >
-                    Auto-Zero Z (Touch Plate)
-                  </button>
-                )}
-                <button
-                  onClick={() => webSerialManager.resumeJob()}
-                  className="px-4 py-1.5 bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold text-xs rounded-lg flex items-center space-x-1.5"
-                >
-                  <Play className="w-3.5 h-3.5 fill-current" />
-                  <span>Resume Carve (Cycle Start)</span>
-                </button>
-              </div>
-            </div>
-          )}
+          <JobPauseBanner machineState={machineState} resumeLabel="Resume Carve (Cycle Start)" />
 
           {/* Toolpath preview */}
           {result?.success && (
@@ -955,7 +1586,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                 </span>
                 <span>{result.roughingPassCount} roughing layers</span>
                 <span className="font-mono bg-slate-200 dark:bg-slate-800 px-2 py-0.5 rounded text-[10px] uppercase font-bold text-blue-600 dark:text-blue-400">
-                  Est. Time: {Math.round(result.estimatedTimeSeconds / 60)} min
+                  Est. Time: {formatDuration(result.estimatedTimeSeconds)}
                   ({(result.totalCutDistanceMm / 1000).toFixed(1)} m cut)
                 </span>
                 {result.toolChange && (
@@ -966,7 +1597,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                 {pending && <span className="text-slate-400 italic">recalculating…</span>}
               </div>
 
-              <ToolpathView result={result} options={settled} />
+              <ToolpathView result={result} options={settled} machineState={machineState} />
 
               <div className="flex items-center space-x-4 text-[11px] text-slate-500 dark:text-slate-400">
                 <span className="flex items-center space-x-1.5">
@@ -977,7 +1608,11 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                   <span className="w-2.5 h-2.5 rounded-full bg-blue-500 inline-block" />
                   <span>Finishing</span>
                 </span>
-                <span>Drag to orbit — the wireframe box is the stock.</span>
+                <span className="flex items-center space-x-1.5">
+                  <span className="w-2.5 h-2.5 rounded-full bg-slate-600 inline-block" />
+                  <span>Rapids</span>
+                </span>
+                <span>Right-drag orbits, middle-drag pans, scroll zooms — the same as the scene view. The wireframe box is the stock.</span>
               </div>
             </div>
           )}
@@ -1057,6 +1692,16 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                   </button>
                 </div>
               </div>
+              <JobPreflight
+                machineState={machineState}
+                tool={preflight.firstTool}
+                secondTool={preflight.secondTool}
+                rpm={settled.spindleRpm}
+                material={preflight.material}
+                origin="the near-left corner of the stock's top face"
+                caveat={preflight.caveat}
+              />
+              <JobOverrides machineState={machineState} />
               <MachineWorkOriginPanel machineState={machineState} onOpenDocs={onOpenDocs} />
               </>
             )}
@@ -1091,23 +1736,13 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
               Close
             </button>
 
-            {machineState.status === 'RUNNING' || machineState.status.startsWith('PAUSED') ? (
-              <button
-                onClick={() => webSerialManager.cancelJob()}
-                className="flex items-center space-x-2 whitespace-nowrap px-4 py-2 bg-red-600 hover:bg-red-700 text-white font-bold text-xs rounded-lg shadow-sm transition-all cursor-pointer"
-              >
-                <Square className="w-4 h-4" />
-                <span>E-Stop / Cancel Carve</span>
-              </button>
-            ) : machineState.connected ? (
-              <button
-                onClick={handleStartCarve}
-                disabled={!canCarve}
-                className="flex items-center space-x-2 whitespace-nowrap px-4 py-2 bg-blue-500 hover:bg-blue-600 disabled:opacity-40 text-slate-950 font-bold text-xs rounded-lg shadow-sm transition-all cursor-pointer"
-              >
-                <Play className="w-4 h-4 fill-current" />
-                <span>Start Carving</span>
-              </button>
+            {machineState.connected ? (
+              <JobTransport
+                machineState={machineState}
+                canStart={canCarve}
+                onStart={handleStartCarve}
+                startLabel="Start Carving"
+              />
             ) : (
               <button
                 onClick={handleConnectUsb}

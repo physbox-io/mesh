@@ -4,6 +4,8 @@
 
 import type { LaserPanel, Point2D } from './laserCutExporter';
 import type { ContourSliceResult } from './contourSliceExporter';
+import { estimateGcodeTime } from './timeEstimate';
+import { DEFAULT_MOTION_PROFILE, type MotionProfile } from './motionProfile';
 
 export interface GcodeExportOptions {
   machineMode: 'laser' | 'cnc';
@@ -35,6 +37,11 @@ export interface GcodeExportOptions {
   zStepdown: number;
   /** Spindle speed in RPM for CNC (default 12000). */
   spindleRpm: number;
+  /**
+   * What the machine can accelerate and traverse at, for the run-time estimate.
+   * Read off the controller's `$$` when one is connected, assumed otherwise.
+   */
+  motionProfile?: MotionProfile;
   /** Insert M0 pause between material sheets. */
   pauseBetweenSheets: boolean;
   /** Insert T<N> M6 pause for tool changes. */
@@ -74,6 +81,7 @@ export const DEFAULT_GCODE_OPTIONS: GcodeExportOptions = {
   cutDepthZ: 3.0,
   zStepdown: 3.0,
   spindleRpm: 12000,
+  motionProfile: DEFAULT_MOTION_PROFILE,
   pauseBetweenSheets: true,
   pauseOnToolChange: true,
   attachmentsEnabled: false,
@@ -408,13 +416,18 @@ export function generateLaserCutGcode(
   // Every laser pass retraces the whole path, so the head really does travel that far.
   totalCutDistanceMm *= laserPassCount(options);
 
-  const estCutTimeSec = (totalCutDistanceMm / options.cutFeedrate) * 60;
-  const estTravelTimeSec = sheetCount * 5;
-  const estimatedTimeSeconds = Math.round(estCutTimeSec + estTravelTimeSec);
+  const gcodeText = lines.join('\n');
+  // Planned the way the controller plans it — accelerate, cruise, brake — not
+  // as cut length over feedrate. On a sheet of small parts the head spends most
+  // of its time getting up to speed and slowing down again for the next corner,
+  // and the old arithmetic could not see that at all.
+  const estimatedTimeSeconds = Math.round(
+    estimateGcodeTime(gcodeText, { profile: options.motionProfile ?? DEFAULT_MOTION_PROFILE }).seconds
+  );
 
   return {
     success: true,
-    gcode: lines.join('\n'),
+    gcode: gcodeText,
     totalCutDistanceMm: Math.round(totalCutDistanceMm),
     estimatedTimeSeconds,
     sheetCount,
@@ -666,12 +679,14 @@ export function generateContourSliceGcode(
 
   totalCutDistanceMm *= laserPassCount(options);
 
-  const estCutTimeSec = (totalCutDistanceMm / options.cutFeedrate) * 60;
-  const estimatedTimeSeconds = Math.round(estCutTimeSec + sheetCount * 5);
+  const gcodeText = lines.join('\n');
+  const estimatedTimeSeconds = Math.round(
+    estimateGcodeTime(gcodeText, { profile: options.motionProfile ?? DEFAULT_MOTION_PROFILE }).seconds
+  );
 
   return {
     success: true,
-    gcode: lines.join('\n'),
+    gcode: gcodeText,
     totalCutDistanceMm: Math.round(totalCutDistanceMm),
     estimatedTimeSeconds,
     sheetCount,

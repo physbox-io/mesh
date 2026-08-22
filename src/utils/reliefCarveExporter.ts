@@ -6,8 +6,8 @@
 // stacks the model out of horizontal slices. This one carves the model into the
 // face of a solid block, the way a relief plaque is carved: the scene is
 // sampled from directly above into a heightmap, that heightmap is squashed into
-// the depth the user is willing to cut, and a ball-nose (or flat) mill sweeps
-// it in parallel passes.
+// the depth the user is willing to cut, and a ball-nose, flat or V cutter
+// sweeps it in parallel passes.
 //
 // The pipeline is: tessellate the scene into world triangles, fit them onto the
 // stock, drop a ray down through every grid cell to get the surface height,
@@ -21,6 +21,73 @@
 import type { SceneGraph } from '../types/scene';
 import { collectSceneTriangles } from './contourSliceExporter';
 import { warpGcode, type ProbeGrid } from './meshLeveler';
+import { estimateGcodeTime } from './timeEstimate';
+import { DEFAULT_MOTION_PROFILE, type MotionProfile } from './motionProfile';
+import {
+  DEFAULT_MATERIAL,
+  materialSpec,
+  recommendSpeeds,
+  type MaterialId,
+  type SpindleRange,
+} from './feedsAndSpeeds';
+
+/**
+ * The shape of a cutter's business end, which is what decides the shape of the
+ * surface it can leave behind.
+ *
+ * A ball nose rides the surface and leaves scallops between passes; a flat mill
+ * has to clear the highest point under its whole diameter, so it rounds every
+ * convex feature off to its own radius. A V-bit is neither: it is a cone, so it
+ * reaches into an internal corner no round cutter can enter and holds detail far
+ * finer than its nominal diameter — the reason lettering and fine ornament are
+ * cut with one — at the cost of leaving a ridge between passes that grows as the
+ * point angle narrows.
+ */
+export type CutterShape = 'ball_nose' | 'flat' | 'v_bit';
+
+/**
+ * Which way a cutter's helix throws the chip, which is not a cosmetic detail:
+ * it decides where the waste ends up and therefore how hard the tool may be
+ * driven.
+ *
+ * 'upcut' lifts chips up and out of the cut. It is the one that clears a deep
+ * pocket, and the one that lifts thin stock off the bed and frays the top face
+ * of the material.
+ *
+ * 'downcut' presses down. It leaves a clean top edge and holds veneer and thin
+ * ply flat, and it packs its own chips into the bottom of the cut — so it wants
+ * shallower passes and a much gentler plunge, and it is the wrong tool for a
+ * deep relief.
+ *
+ * 'compression' is upcut for the first few millimetres and downcut above, so
+ * both faces of a through-cut come out clean. In a relief the tool never leaves
+ * the lower section, so it behaves as an upcut and is simply an expensive one.
+ *
+ * 'straight' has no helix at all. It neither lifts nor presses, clears poorly,
+ * and is mostly what a cheap V-bit or engraver is.
+ */
+export type CutterGeometry = 'upcut' | 'downcut' | 'compression' | 'straight';
+
+/** How a cutter's tip is shaped, for the dilation that fits it to a surface. */
+export interface CutterTip {
+  shape: CutterShape;
+  /** Included point angle in degrees. Only read when `shape` is 'v_bit'. */
+  vBitAngleDeg?: number;
+}
+
+/** Half the included angle, in radians, clamped to something a bit can be ground to. */
+export function vBitHalfAngleRad(includedDeg: number): number {
+  const included = Math.min(170, Math.max(10, includedDeg));
+  return ((included / 2) * Math.PI) / 180;
+}
+
+/**
+ * How far up the cone a V-bit reaches its nominal diameter — its usable
+ * cutting depth, past which what is in the cut is the shank.
+ */
+export function vBitConeHeight(diaMm: number, includedDeg: number): number {
+  return diaMm / 2 / Math.tan(vBitHalfAngleRad(includedDeg));
+}
 
 export interface ReliefCarveOptions {
   /** Stock width (X extent) in mm. */
@@ -68,8 +135,12 @@ export interface ReliefCarveOptions {
   backgroundMode: 'carve' | 'skip';
   /** Clear waste with a flat mill before the finishing raster. */
   roughingEnabled: boolean;
-  /** Roughing tool diameter in mm. */
+  /** Roughing tool diameter in mm. Always a flat end mill — see `roughingToolDiaMm`. */
   roughingToolDiaMm: number;
+  /** Cutting edges on the roughing mill. Feed is chipload x flutes x RPM. */
+  roughingFlutes: number;
+  /** Which way the roughing mill's helix throws chips. */
+  roughingGeometry: CutterGeometry;
   /** Roughing Z stepdown per layer in mm. */
   roughingStepdownMm: number;
   /** Roughing cut feedrate in mm/min. */
@@ -79,9 +150,18 @@ export interface ReliefCarveOptions {
   /** Material left on the surface for the finishing pass to take off, in mm. */
   roughingAllowanceMm: number;
   /** Finishing tool shape. A ball nose is what makes a curved surface smooth. */
-  finishingToolType: 'ball_nose' | 'flat';
-  /** Finishing tool diameter in mm. */
+  finishingToolType: CutterShape;
+  /**
+   * Included point angle of the finishing V-bit, in degrees — 60 for a 60 deg
+   * bit. Ignored unless `finishingToolType` is 'v_bit'.
+   */
+  finishingVBitAngleDeg: number;
+  /** Finishing tool diameter in mm. For a V-bit, the diameter at full depth. */
   finishingToolDiaMm: number;
+  /** Cutting edges on the finishing tool. Feed is chipload x flutes x RPM. */
+  finishingFlutes: number;
+  /** Which way the finishing tool's helix throws chips. */
+  finishingGeometry: CutterGeometry;
   /**
    * How the finishing raster gets down to the surface.
    *
@@ -136,11 +216,33 @@ export interface ReliefCarveOptions {
   safeZ: number;
   /** Spindle speed in RPM. */
   spindleRpm: number;
+  /**
+   * What is clamped on the bed.
+   *
+   * The only thing in this file that is a property of the workpiece rather than
+   * the model, and it has to be here because feeds, speeds and the warnings
+   * about them are meaningless without it: 18,000 RPM is right for pine and
+   * ruinous for aluminium, and nothing about a mesh can tell you which.
+   */
+  material: MaterialId;
+  /**
+   * What the machine can accelerate and traverse at, for the run-time estimate.
+   *
+   * Read off the controller's own `$$` when one is connected. Left at the
+   * assumed hobby-router profile otherwise, which is what the estimate silently
+   * used to assume on every machine.
+   */
+  motionProfile: MotionProfile;
+  /**
+   * Invert the relief depth: turn positive/raised features (cameo) into
+   * sunken cavities (intaglio / mold impression).
+   */
+  invertRelief?: boolean;
   /** Probed bed mesh, if the bed has been mapped. */
   meshLevelGrid: ProbeGrid | null;
   /** Ride the probed mesh so a warped bed still cuts to a constant depth. */
   applyMeshLeveling: boolean;
-}
+};
 
 export const DEFAULT_RELIEF_OPTIONS: ReliefCarveOptions = {
   stockWidthMm: 150,
@@ -152,14 +254,20 @@ export const DEFAULT_RELIEF_OPTIONS: ReliefCarveOptions = {
   fitMode: 'fit',
   scalePercent: 100,
   backgroundMode: 'carve',
+  invertRelief: false,
   roughingEnabled: true,
   roughingToolDiaMm: 6.35,
+  roughingFlutes: 2,
+  roughingGeometry: 'upcut',
   roughingStepdownMm: 2.0,
   roughingFeedrate: 1200,
   roughingPlungeRate: 300,
   roughingAllowanceMm: 0.5,
   finishingToolType: 'ball_nose',
+  finishingVBitAngleDeg: 60,
   finishingToolDiaMm: 3.175,
+  finishingFlutes: 2,
+  finishingGeometry: 'upcut',
   finishingDepthMode: 'auto',
   finishingStepdownMm: 0,
   finishingStepoverPercent: 15,
@@ -174,6 +282,8 @@ export const DEFAULT_RELIEF_OPTIONS: ReliefCarveOptions = {
   holderDiaMm: 0,
   safeZ: 5.0,
   spindleRpm: 12000,
+  material: DEFAULT_MATERIAL,
+  motionProfile: DEFAULT_MOTION_PROFILE,
   meshLevelGrid: null,
   applyMeshLeveling: false,
 };
@@ -215,9 +325,6 @@ export interface ReliefCarveResult {
 
 /** Beyond this the heightmap costs more than the extra fidelity is worth. */
 const MAX_HEIGHTMAP_CELLS = 260_000;
-/** Rapid rate assumed for time estimates (mm/min). */
-const RAPID_FEEDRATE = 3000;
-
 /** Stickout, in tool diameters, past which a bit is too whippy to hold a surface. */
 const MAX_REACH_DIAMETERS = 4;
 
@@ -235,9 +342,63 @@ function autoShankDia(diaMm: number): number {
   return diaMm < 3.175 ? 3.175 : diaMm;
 }
 
-/** Cutting length a bit that size is likely to carry. Catalogue bits run about this. */
-function autoFluteLength(diaMm: number): number {
+/**
+ * Cutting length a bit that size is likely to carry. Catalogue bits run about
+ * this.
+ *
+ * A V-bit is not a catalogue guess at all — its cutting length is a fact about
+ * the cone. The flank stops widening the instant it reaches the nominal
+ * diameter, and everything above that point is shank, so a 6 mm 60 deg bit has
+ * 5.2 mm of usable cutter and no more however long the blank is.
+ */
+function autoFluteLength(diaMm: number, tip?: CutterTip): number {
+  if (tip?.shape === 'v_bit') return vBitConeHeight(diaMm, tip.vBitAngleDeg ?? 60);
   return diaMm * 3;
+}
+
+/** How a cutter shape reads in a header comment and in a pause prompt. */
+const SHAPE_NAMES: Record<CutterShape, string> = {
+  ball_nose: 'ball-nose end mill',
+  flat: 'flat end mill',
+  v_bit: 'V-bit',
+};
+
+/**
+ * Names a cutter the way the operator standing at the machine holding a box of
+ * bits needs it named.
+ *
+ * "T2 M6" tells them nothing. "6 mm 60 deg V-bit, 2-flute downcut" is the label
+ * on the packet, and it is the difference between fitting the right tool and
+ * finding out at the end of the finishing pass that they did not.
+ */
+export function describeCutter(
+  diaMm: number,
+  shape: CutterShape,
+  flutes: number,
+  geometry: CutterGeometry,
+  vBitAngleDeg = 60
+): string {
+  const head =
+    shape === 'v_bit'
+      ? `${diaMm} mm ${Math.round(vBitAngleDeg)}\u00b0 V-bit`
+      : `${diaMm} mm ${SHAPE_NAMES[shape]}`;
+  const n = Math.max(1, Math.round(flutes));
+  const helix = geometry === 'straight' ? 'straight-flute' : geometry;
+  return `${head}, ${n}-flute ${helix}`;
+}
+
+/**
+ * Chip thickness per cutting edge, mm — the number a feed rate actually means.
+ *
+ * Feed, spindle speed and flute count are three views of one quantity, and the
+ * flute count is the one nothing in this app used to know: at 12,000 RPM a
+ * 1500 mm/min feed is 0.06 mm a tooth on a two-flute cutter and 0.03 mm on a
+ * four, which is the difference between cutting and rubbing. That is exactly
+ * why the number of flutes changes the program.
+ */
+export function chiploadMm(feedMmMin: number, rpm: number, flutes: number): number {
+  const n = Math.max(1, Math.round(flutes));
+  return feedMmMin / Math.max(1, rpm) / n;
 }
 
 /** Two decimals, so a derived setting lands in the UI as a number and not a float artefact. */
@@ -252,8 +413,15 @@ export interface ReliefToolingInput {
   /** Plan-view size of the carved area in mm. */
   planWidthMm: number;
   planDepthMm: number;
-  /** Spindle speed the feeds are worked out against. */
-  spindleRpm?: number;
+  /** What is being cut. Decides both the spindle speed and the chip it wants. */
+  material?: MaterialId;
+  /**
+   * What the spindle can actually be set to, from the controller's `$30`/`$31`
+   * when there is one. Without it a common hobby range is assumed.
+   */
+  spindle?: SpindleRange | null;
+  /** Fastest the gantry tracks while cutting, mm/min — `$110`/`$111`. */
+  maxFeedMmMin?: number;
 }
 
 /**
@@ -280,7 +448,7 @@ export interface ReliefToolingInput {
 export function recommendReliefTooling(input: ReliefToolingInput): Partial<ReliefCarveOptions> {
   const depth = Math.max(0.1, input.reliefDepthMm);
   const planMin = Math.max(1, Math.min(input.planWidthMm, input.planDepthMm));
-  const rpm = input.spindleRpm && input.spindleRpm > 0 ? input.spindleRpm : 12000;
+  const material = input.material ?? DEFAULT_MATERIAL;
 
   // Do not go finer than the part can use. A bit far below this turns a carving
   // into a week of raster lines for detail the wood will not hold anyway.
@@ -304,35 +472,180 @@ export function recommendReliefTooling(input: ReliefToolingInput): Partial<Relie
   const roughCandidates = STANDARD_BIT_DIAS.filter((d) => d <= planMin / 5 && d > finishDia);
   const roughDia = roughCandidates.length > 0 ? roughCandidates[roughCandidates.length - 1] : finishDia;
 
-  // Chipload, thence feed: two flutes, a chip that scales with the bit, and a
-  // derating for how far the bit is hanging out of the collet.
-  const feedFor = (d: number) => {
-    const chipload = Math.min(0.07, Math.max(0.015, d * 0.02));
-    const stickoutDerate = Math.min(1, Math.max(0.4, (MAX_REACH_DIAMETERS * d) / depth));
-    return Math.round((rpm * 2 * chipload * stickoutDerate) / 10) * 10;
-  };
+  // Flutes a bit that size is ground with, and the reason the feed depends on
+  // it. Under about 2 mm there is no room in the gullet for a second flute's
+  // worth of chip, so small cutters come single-fluted and are fed at half the
+  // rate a two-flute one of the same chipload would take.
+  const flutesFor = (d: number) => (d < 2 ? 1 : 2);
+
+  /**
+   * Speeds for a cutter of a given size, from the material rather than from a
+   * fixed RPM handed in.
+   *
+   * The spindle speed used to be an input to this function — whatever was in
+   * the box, usually the untouched 12,000 default — and the feed was derived
+   * from it. That is backwards. Surface speed is a property of the material and
+   * the cutter, so the RPM is an output, and the feed follows from the RPM that
+   * was actually chosen rather than from one nobody picked.
+   *
+   * The derate is stickout: a bit reaching down four diameters is already
+   * bending, and asking it for a full chip on top of that is how it snaps.
+   */
+  const speedsFor = (d: number) =>
+    recommendSpeeds({
+      diameterMm: d,
+      flutes: flutesFor(d),
+      material,
+      spindle: input.spindle,
+      maxFeedMmMin: input.maxFeedMmMin,
+      derate: Math.min(1, Math.max(0.4, (MAX_REACH_DIAMETERS * d) / depth)),
+    });
+
+  const roughSpeeds = speedsFor(roughDia);
+  const finishSpeeds = speedsFor(finishDia);
+
+  // Both passes run at one spindle speed, because on the machines this app
+  // drives the speed is a dial and the job only stops once. The finishing bit
+  // is the smaller and more fragile of the two, so it is the one the setting
+  // has to suit; the roughing feed is then worked back from that same speed
+  // rather than from the one the roughing bit would have preferred.
+  const rpm = finishSpeeds.rpm;
+  const feedAt = (rec: ReturnType<typeof speedsFor>) =>
+    Math.max(50, Math.round((rec.feedMmMin * (rpm / rec.rpm)) / 10) * 10);
 
   return {
+    material,
+    spindleRpm: rpm,
+
     roughingEnabled: roughDia > finishDia + 1e-6,
     roughingToolDiaMm: roughDia,
-    roughingStepdownMm: round2(Math.min(depth / 2, Math.max(0.2, roughDia * 0.3))),
+    roughingStepdownMm: round2(
+      Math.min(depth / 2, Math.max(0.2, roughDia * (material === 'aluminium' ? 0.1 : 0.3)))
+    ),
     roughingAllowanceMm: round2(Math.min(0.5, Math.max(0.1, finishDia / 8))),
-    roughingFeedrate: feedFor(roughDia),
-    roughingPlungeRate: Math.round(feedFor(roughDia) / 3),
+    roughingFeedrate: feedAt(roughSpeeds),
+    roughingPlungeRate: Math.max(30, Math.round(feedAt(roughSpeeds) / 3 / 10) * 10),
+    roughingFlutes: flutesFor(roughDia),
+    // Upcut for roughing, always: the job of this pass is to get waste out of a
+    // pocket, and that is the only geometry that lifts it.
+    roughingGeometry: 'upcut',
 
     finishingToolType: 'ball_nose',
     finishingToolDiaMm: finishDia,
+    finishingFlutes: flutesFor(finishDia),
+    finishingGeometry: 'upcut',
     // What the bit has to be, not what a catalogue default is: no step behind
     // the cutter, and enough flute to see the floor.
     finishingShankDiaMm: finishDia,
     finishingFluteLengthMm: round2(Math.max(autoFluteLength(finishDia), depth + 2)),
     finishingStepoverPercent: 12,
-    finishingFeedrate: feedFor(finishDia),
-    finishingPlungeRate: Math.round(feedFor(finishDia) / 3),
+    finishingFeedrate: finishSpeeds.feedMmMin,
+    finishingPlungeRate: finishSpeeds.plungeMmMin,
     // Sweep the long way: fewer, longer passes and fewer lead-ins.
     finishingDirection: input.planWidthMm >= input.planDepthMm ? 'x' : 'y',
   };
 }
+/**
+ * The settings a relief carve can work out for itself, given the bits and the
+ * material.
+ *
+ * Separated from `recommendReliefTooling` because they answer different
+ * questions. That one picks the *tools* — which is a decision, made once, that
+ * changes what the operator has to go and find in a drawer. These are the
+ * consequences of that decision, and they should never have been typed by
+ * anybody: spindle speed is surface speed over diameter, feed is chip per tooth
+ * times teeth times RPM, and stepdown and stepover are fractions of the cutter.
+ * Presenting them as empty boxes with plausible defaults in them is how a
+ * beginner ends up running a 1 mm bit at a feed meant for a 6 mm one.
+ */
+export type DerivedReliefSettings = Pick<
+  ReliefCarveOptions,
+  | 'spindleRpm'
+  | 'finishingFeedrate'
+  | 'finishingPlungeRate'
+  | 'finishingStepoverPercent'
+  | 'finishingStepdownMm'
+  | 'roughingFeedrate'
+  | 'roughingPlungeRate'
+  | 'roughingStepdownMm'
+  | 'roughingAllowanceMm'
+>;
+
+/** Which of a relief's settings are derived, and therefore overridable. */
+export type ReliefOverrides = Partial<DerivedReliefSettings>;
+
+/**
+ * Works the feeds and speeds out from the tools and the material that were
+ * actually chosen.
+ *
+ * One spindle speed for the whole job, set by the finishing bit — it is the
+ * smaller and more fragile of the two, and on the machines this app drives the
+ * speed is a dial that gets turned once. The roughing feed is then worked back
+ * from that same speed rather than from the one the roughing bit would have
+ * preferred on its own.
+ */
+export function deriveReliefFeeds(
+  opts: Pick<
+    ReliefCarveOptions,
+    | 'material'
+    | 'finishingToolDiaMm'
+    | 'finishingFlutes'
+    | 'roughingToolDiaMm'
+    | 'roughingFlutes'
+    | 'carveDepthMm'
+  >,
+  spindle?: SpindleRange | null,
+  /** Fastest the gantry tracks while cutting, mm/min — `$110`/`$111`. */
+  maxFeedMmMin?: number
+): DerivedReliefSettings {
+  const finishDia = Math.max(0.1, opts.finishingToolDiaMm);
+  const roughDia = Math.max(0.1, opts.roughingToolDiaMm);
+  const depth = Math.max(0.1, opts.carveDepthMm);
+
+  const finish = recommendSpeeds({
+    diameterMm: finishDia,
+    flutes: opts.finishingFlutes,
+    material: opts.material,
+    spindle,
+    maxFeedMmMin,
+    // Stickout: a bit reaching down four diameters is already bending, and a
+    // full chip on top of that is how it snaps.
+    derate: Math.min(1, Math.max(0.4, (MAX_REACH_DIAMETERS * finishDia) / depth)),
+  });
+  const rough = recommendSpeeds({
+    diameterMm: roughDia,
+    flutes: opts.roughingFlutes,
+    material: opts.material,
+    spindle,
+    maxFeedMmMin,
+  });
+
+  const rpm = finish.rpm;
+  // The roughing bit at the finishing bit's speed: same chip per tooth, so the
+  // feed scales with however far the speed had to move.
+  const roughFeed = Math.max(50, Math.round((rough.feedMmMin * (rpm / rough.rpm)) / 10) * 10);
+  const soft = opts.material === 'foam' || opts.material === 'softwood';
+  const metal = opts.material === 'aluminium';
+
+  return {
+    spindleRpm: rpm,
+    finishingFeedrate: finish.feedMmMin,
+    finishingPlungeRate: finish.plungeMmMin,
+    // A ball nose leaves a scallop of about 1/8 of its radius at this spacing,
+    // which sands out; a V-bit's ridge is set by its angle instead, and a flat
+    // mill leaves none at all so it can stride out.
+    finishingStepoverPercent: 12,
+    // 0 means "one bite as deep as the cutter is wide", which is what a
+    // finishing pass over already-roughed stock can take.
+    finishingStepdownMm: 0,
+    roughingFeedrate: roughFeed,
+    roughingPlungeRate: Math.max(30, Math.round(roughFeed / 3 / 10) * 10),
+    roughingStepdownMm:
+      Math.round(Math.min(depth / 2, Math.max(0.2, roughDia * (metal ? 0.1 : soft ? 0.4 : 0.3))) * 100) / 100,
+    roughingAllowanceMm: Math.round(Math.min(0.5, Math.max(0.1, finishDia / 8)) * 100) / 100,
+  };
+}
+
 /** A finishing point this close to the straight line through its neighbours is noise (mm). */
 const PATH_SIMPLIFY_MM = 0.01;
 /** How far the simplifier looks ahead before it commits to a point. */
@@ -506,9 +819,22 @@ export function buildHeightmap(
 export function dilateForTool(
   hm: Heightmap,
   toolRadiusMm: number,
-  ballNose: boolean,
+  /**
+   * The cutting end's shape. `true`/`false` is the old ball/flat switch, still
+   * accepted so that callers and tests that only ever knew about those two
+   * shapes read the same.
+   */
+  tip: boolean | CutterTip,
   body: ToolBodySection[] = []
 ): Heightmap {
+  const shape: CutterShape =
+    typeof tip === 'boolean' ? (tip ? 'ball_nose' : 'flat') : tip.shape;
+  // Rise per mm of radius on the cone's flank: the tip has to sit this much
+  // lower than a point one millimetre out for the flank to just graze it.
+  const coneSlope =
+    shape === 'v_bit'
+      ? 1 / Math.tan(vBitHalfAngleRad(typeof tip === 'boolean' ? 60 : tip.vBitAngleDeg ?? 60))
+      : 0;
   const out = new Float32Array(hm.z);
   if (toolRadiusMm <= 0) return { ...hm, z: out };
 
@@ -522,10 +848,8 @@ export function dilateForTool(
   // Lift is how far the tip has to sit above a neighbouring cell for the tool
   // to clear it, precomputed per kernel cell.
   //
-  // For the cutting end that is the tool's own shape: a ball of radius r
-  // touching a point d away rides with its centre at h + sqrt(r^2 - d^2), so
-  // its tip is one radius below that. A flat mill lifts by nothing — its whole
-  // flat bottom has to clear the highest point under it.
+  // For the cutting end that is the tool's own shape, worked out per shape
+  // below.
   //
   // For a body section — the shank above the flutes, the collet nut above that
   // — the section is a cylinder of radius R sitting H above the tip, so the tip
@@ -544,7 +868,20 @@ export function dilateForTool(
 
       let best = -Infinity;
       if (d2 <= toolRadiusMm * toolRadiusMm) {
-        best = ballNose ? Math.sqrt(toolRadiusMm * toolRadiusMm - d2) - toolRadiusMm : 0;
+        // A ball of radius r touching a point d away rides with its centre at
+        // h + sqrt(r^2 - d^2), so its tip is one radius below that. A cone of
+        // half-angle t has its flank d/tan(t) above the point, so the tip goes
+        // that far below — which is why a V-bit drops into a groove no ball
+        // nose of the same nominal size can enter. A flat mill lifts by
+        // nothing: its whole flat bottom has to clear the highest point under
+        // it.
+        if (shape === 'ball_nose') {
+          best = Math.sqrt(toolRadiusMm * toolRadiusMm - d2) - toolRadiusMm;
+        } else if (shape === 'v_bit') {
+          best = -Math.sqrt(d2) * coneSlope;
+        } else {
+          best = 0;
+        }
       }
       for (const s of body) {
         if (d2 <= s.radiusMm * s.radiusMm && -s.aboveTipMm > best) best = -s.aboveTipMm;
@@ -706,7 +1043,13 @@ export function generateReliefCarveGcode(
   // held four diameters out of the collet is already a wire. Catalogue flute
   // lengths for straight bits run about three diameters, so four is the point
   // past which no stock bit that size can do the job at all.
-  const reachWarn = (dia: number, shankDia: number, fluteLen: number, which: string) => {
+  const reachWarn = (
+    dia: number,
+    shankDia: number,
+    fluteLen: number,
+    which: string,
+    tip?: CutterTip
+  ) => {
     // Two different problems, and a bit can have either without the other.
     //
     // The geometric one is a shank fatter than the cutter having to follow it
@@ -715,7 +1058,7 @@ export function generateReliefCarveGcode(
     // raised when nothing is going to account for it, because with shank
     // clearance on the path is held out of the wall instead.
     const shank = shankDia > 0 ? shankDia : autoShankDia(dia);
-    const flutes = fluteLen > 0 ? fluteLen : autoFluteLength(dia);
+    const flutes = fluteLen > 0 ? fluteLen : autoFluteLength(dia, tip);
     if (!opts.toolBodyClearance && shank > dia + 1e-6 && reliefDepth > flutes) {
       warnings.push(
         `The ${dia} mm ${which} bit has about ${flutes.toFixed(1)} mm of flute on a ` +
@@ -723,6 +1066,25 @@ export function generateReliefCarveGcode(
           `in the cut. Shank clearance is off, so nothing in this path allows for that. A long-reach ` +
           `or necked bit — one whose shank is no wider than its cutting diameter — has no step to foul.`
       );
+    }
+
+    // A V-bit is a solid cone rather than a slender cylinder, so the bending
+    // rule below does not describe it. What does limit it is where the cone
+    // stops: past the point it reaches its nominal diameter there is only
+    // shank, so a relief deeper than that is being cut by the shank whatever
+    // the catalogue says the bit is for.
+    if (tip?.shape === 'v_bit') {
+      const cone = vBitConeHeight(dia, tip.vBitAngleDeg ?? 60);
+      if (reliefDepth > cone + 1e-6) {
+        warnings.push(
+          `The ${dia} mm ${tip.vBitAngleDeg ?? 60}\u00b0 V-bit only cuts for the ` +
+            `${cone.toFixed(1)} mm it takes the cone to reach full diameter, and the relief is ` +
+            `${reliefDepth.toFixed(1)} mm deep. Below that it is the shank in the cut. Use a wider ` +
+            `bit, a narrower point angle, or rough the depth out first and leave the V-bit the ` +
+            `detail near the surface.`
+        );
+      }
+      return;
     }
 
     // The stiffness one is unavoidable at any depth: bending goes with the cube
@@ -737,6 +1099,12 @@ export function generateReliefCarveGcode(
           `shallower relief, is what makes it rigid.`
       );
     }
+  };
+
+  /** The finishing cutter's end, as the dilation and the warnings both see it. */
+  const finishTip: CutterTip = {
+    shape: opts.finishingToolType,
+    vBitAngleDeg: opts.finishingVBitAngleDeg,
   };
 
   // The raster is inset by the finishing tool's radius so the cutter stays over
@@ -822,10 +1190,143 @@ export function generateReliefCarveGcode(
     opts.finishingToolDiaMm,
     opts.finishingShankDiaMm,
     opts.finishingFluteLengthMm,
-    'finishing'
+    'finishing',
+    finishTip
   );
   if (opts.roughingEnabled) {
     reachWarn(opts.roughingToolDiaMm, 0, 0, 'roughing');
+  }
+
+  // --- What the cutter's own specification implies --------------------------
+  //
+  // Flute count and helix direction are not labels on a drop-down. They are two
+  // of the three numbers that decide whether the feed rate in this file is a
+  // cut or a rub, and where the chips end up once it is.
+
+  const material = materialSpec(opts.material);
+
+  /** Feed, RPM and flutes are one quantity seen three ways; check the third. */
+  const chiploadWarn = (feed: number, flutes: number, which: string, dia: number) => {
+    const chip = chiploadMm(feed, opts.spindleRpm, flutes);
+    // The band is the material's own, scaled to the bit. A generic one is worse
+    // than useless here: 0.05 mm a tooth is a healthy chip in pine and roughly
+    // four times what a cutter should be taking in aluminium.
+    const ideal = material.chiploadPerDia * dia;
+    const floor = ideal * 0.25;
+    const ceiling = ideal * 2;
+    if (chip < floor) {
+      warnings.push(
+        `${feed} mm/min at ${opts.spindleRpm} RPM on ${Math.max(1, Math.round(flutes))} flutes is ` +
+          `${chip.toFixed(4)} mm of chip per tooth on the ${which} tool, against the ` +
+          `${ideal.toFixed(3)} mm a ${dia} mm cutter wants in ${material.label.toLowerCase()}. ` +
+          `Below about ${floor.toFixed(3)} mm the edge rubs instead of cutting, which is what ` +
+          `dulls a bit and burns the work. Feed faster, drop the spindle speed, or use a cutter ` +
+          `with fewer flutes.`
+      );
+    } else if (chip > ceiling) {
+      warnings.push(
+        `${feed} mm/min at ${opts.spindleRpm} RPM on ${Math.max(1, Math.round(flutes))} flutes is ` +
+          `${chip.toFixed(3)} mm of chip per tooth on the ${which} tool, past the ` +
+          `${ceiling.toFixed(3)} mm a ${dia} mm cutter will take in ${material.label.toLowerCase()}. ` +
+          `Expect deflection, a poor finish and a broken bit. Slow the feed or raise the spindle.`
+      );
+    }
+  };
+
+  // The spindle speed itself, which on these machines is a dial nobody is
+  // prompted to turn. Checked against surface speed rather than left implicit
+  // in the chipload, because "your feed is wrong" and "your dial is wrong" want
+  // different actions from the operator.
+  {
+    const ideal = (material.surfaceSpeedMMin * 1000) / (Math.PI * Math.max(0.1, opts.finishingToolDiaMm));
+    const capped = material.maxRpm !== undefined ? Math.min(ideal, material.maxRpm) : ideal;
+    if (opts.spindleRpm > capped * 1.6) {
+      warnings.push(
+        `${opts.spindleRpm.toLocaleString()} RPM is well above the ` +
+          `${Math.round(capped / 500) * 500} RPM a ${opts.finishingToolDiaMm} mm cutter wants in ` +
+          `${material.label.toLowerCase()}` +
+          (material.maxRpm !== undefined
+            ? ` — this material melts rather than wears, so the excess goes into the cut as heat.`
+            : ` — the edge is travelling faster than it can clear a chip, which burns the work and blunts the bit.`)
+      );
+    } else if (opts.spindleRpm < capped * 0.45) {
+      warnings.push(
+        `${opts.spindleRpm.toLocaleString()} RPM is well below the ` +
+          `${Math.round(capped / 500) * 500} RPM a ${opts.finishingToolDiaMm} mm cutter wants in ` +
+          `${material.label.toLowerCase()}. A cutter turning too slowly takes too big a bite per ` +
+          `tooth and deflects, which shows up as chatter marks across the finish.`
+      );
+    }
+  }
+
+  chiploadWarn(opts.finishingFeedrate, opts.finishingFlutes, 'finishing', opts.finishingToolDiaMm);
+  if (opts.roughingEnabled) {
+    chiploadWarn(opts.roughingFeedrate, opts.roughingFlutes, 'roughing', opts.roughingToolDiaMm);
+  }
+
+  /** What the helix direction means for a pocket this deep. */
+  const geometryWarn = (geometry: CutterGeometry, dia: number, which: string) => {
+    if (geometry === 'downcut' && reliefDepth > dia * 2) {
+      warnings.push(
+        `A downcut ${which} bit presses its chips into the bottom of the cut, and this relief is ` +
+          `${(reliefDepth / dia).toFixed(1)} diameters deep. The chips have nowhere to go, so the ` +
+          `cut packs, heats and burns. Downcut is the right choice for a clean top edge on thin ` +
+          `stock, not for clearing depth — use an upcut to rough and keep the downcut for the ` +
+          `finishing sweep if the top face is what matters.`
+      );
+    }
+    if (geometry === 'compression' && reliefDepth < 6) {
+      warnings.push(
+        `A compression ${which} bit is upcut for its first few millimetres and downcut above. ` +
+          `This relief never leaves that lower section, so it will behave exactly as an upcut — ` +
+          `the tool is doing nothing a plain upcut would not, at several times the price.`
+      );
+    }
+    if (geometry === 'straight' && reliefDepth > dia * 3) {
+      warnings.push(
+        `A straight-flute ${which} bit has no helix to move chips either way, so a cut ` +
+          `${(reliefDepth / dia).toFixed(1)} diameters deep relies entirely on dust extraction to ` +
+          `clear itself. Take shallower passes, or fit a helical cutter.`
+      );
+    }
+  };
+
+  geometryWarn(opts.finishingGeometry, opts.finishingToolDiaMm, 'finishing');
+  if (opts.roughingEnabled) {
+    geometryWarn(opts.roughingGeometry, opts.roughingToolDiaMm, 'roughing');
+  }
+
+  // A downcut cutter is at its very worst going straight down: the direction it
+  // throws waste is the direction it is trying to travel.
+  if (opts.finishingGeometry === 'downcut' && opts.leadInAngleDeg <= 0) {
+    warnings.push(
+      `The finishing bit is a downcut and the lead-in angle is 0, so every pass starts with a ` +
+        `vertical plunge. That is the one move a downcut cutter cannot make — it packs its own ` +
+        `chips under the tip. Set a lead-in of 10-20 degrees.`
+    );
+  }
+
+  // What the finishing stepover actually leaves behind between passes. This is
+  // the number people mean by "how smooth will it be", and for a V-bit it is
+  // not the ball-nose arithmetic the stepover box implies.
+  const half = stepover / 2;
+  const ridgeMm =
+    opts.finishingToolType === 'flat'
+      ? 0
+      : opts.finishingToolType === 'v_bit'
+        ? half / Math.tan(vBitHalfAngleRad(opts.finishingVBitAngleDeg))
+        : half >= finishRad
+          ? finishRad
+          : finishRad - Math.sqrt(finishRad * finishRad - half * half);
+  if (ridgeMm > 0.2) {
+    warnings.push(
+      `A ${stepover.toFixed(2)} mm stepover with this cutter leaves ${ridgeMm.toFixed(2)} mm ridges ` +
+        `between passes on a flat area — that is sanding, not a finish. ` +
+        (opts.finishingToolType === 'v_bit'
+          ? `A V-bit's ridge is set by its point angle: a wider angle, or a smaller stepover, ` +
+            `brings it down.`
+          : `Drop the stepover, or fit a larger-diameter ball nose.`)
+    );
   }
 
   // Model centre lands on the stock centre; the model's highest point lands on
@@ -873,9 +1374,20 @@ export function generateReliefCarveGcode(
   // background and left uncut.
   const surface = buildHeightmap(tris, bounds, cols, rows, -Infinity);
   const backgroundZ = opts.backgroundMode === 'skip' ? 0 : floorZ;
-  for (let i = 0; i < surface.z.length; i++) {
-    if (surface.z[i] === -Infinity) surface.z[i] = backgroundZ;
-    else if (surface.z[i] < floorZ) surface.z[i] = floorZ;
+  if (opts.invertRelief) {
+    for (let i = 0; i < surface.z.length; i++) {
+      if (surface.z[i] === -Infinity) {
+        surface.z[i] = backgroundZ;
+      } else {
+        const clampedZ = Math.max(floorZ, Math.min(0, surface.z[i]));
+        surface.z[i] = -reliefDepth - clampedZ;
+      }
+    }
+  } else {
+    for (let i = 0; i < surface.z.length; i++) {
+      if (surface.z[i] === -Infinity) surface.z[i] = backgroundZ;
+      else if (surface.z[i] < floorZ) surface.z[i] = floorZ;
+    }
   }
 
   // --- What the rest of the tool needs to clear ------------------------------
@@ -884,11 +1396,16 @@ export function generateReliefCarveGcode(
   // diameters. Those two are properties of the bit and can be guessed. The
   // stickout and the size of the nut are properties of how the user set the job
   // up, so those are only checked when they say.
-  const bodyFor = (dia: number, shankDia: number, fluteLen: number): ToolBodySection[] => {
+  const bodyFor = (
+    dia: number,
+    shankDia: number,
+    fluteLen: number,
+    tip?: CutterTip
+  ): ToolBodySection[] => {
     if (!opts.toolBodyClearance) return [];
     const sections: ToolBodySection[] = [];
     const shank = shankDia > 0 ? shankDia : autoShankDia(dia);
-    const flutes = fluteLen > 0 ? fluteLen : autoFluteLength(dia);
+    const flutes = fluteLen > 0 ? fluteLen : autoFluteLength(dia, tip);
     if (shank > dia + 1e-6) sections.push({ aboveTipMm: flutes, radiusMm: shank / 2 });
     if (opts.holderDiaMm > 0 && opts.toolStickoutMm > 0) {
       sections.push({ aboveTipMm: opts.toolStickoutMm, radiusMm: opts.holderDiaMm / 2 });
@@ -899,16 +1416,16 @@ export function generateReliefCarveGcode(
   const finishBody = bodyFor(
     opts.finishingToolDiaMm,
     opts.finishingShankDiaMm,
-    opts.finishingFluteLengthMm
+    opts.finishingFluteLengthMm,
+    finishTip
   );
-  const isBall = opts.finishingToolType === 'ball_nose';
-  const finishMap = dilateForTool(surface, finishRad, isBall, finishBody);
+  const finishMap = dilateForTool(surface, finishRad, finishTip, finishBody);
 
   // How much of the relief the tool's own body puts out of reach. Left silent
   // this reads as a carve that simply came out shallow, so it is measured
   // against the same pass with the body ignored and reported.
   if (finishBody.length > 0) {
-    const bare = dilateForTool(surface, finishRad, isBall);
+    const bare = dilateForTool(surface, finishRad, finishTip);
     let blocked = 0;
     let carved = 0;
     let worst = 0;
@@ -933,27 +1450,23 @@ export function generateReliefCarveGcode(
   const segments: ToolpathSegment[] = [];
   const gcode: string[] = [];
   let cutDistance = 0;
-  let cutSeconds = 0;
-  let rapidDistance = 0;
 
-  // Rapids and plunges are a real share of a raster job's clock, so they are
-  // tracked rather than assumed away.
+  // Where the tool is, so a path can be built relative to it. The clock used to
+  // be kept here as well, as distance over feedrate; it is now taken off the
+  // finished program by `estimateGcodeTime`, which plans acceleration the way
+  // the controller does instead of pretending every move runs at its feed.
   let atX = 0;
   let atY = 0;
   let atZ = opts.safeZ;
 
   const rapidTo = (x: number, y: number, z: number) => {
-    rapidDistance += Math.hypot(x - atX, y - atY) + Math.abs(z - atZ);
     atX = x; atY = y; atZ = z;
   };
-  const plungeTo = (z: number, rate: number) => {
-    cutSeconds += (Math.abs(z - atZ) / Math.max(1, rate)) * 60;
+  const plungeTo = (z: number) => {
     atZ = z;
   };
-  const cutTo = (x: number, y: number, z: number, rate: number) => {
-    const d = Math.hypot(x - atX, y - atY, z - atZ);
-    cutDistance += d;
-    cutSeconds += (d / Math.max(1, rate)) * 60;
+  const cutTo = (x: number, y: number, z: number) => {
+    cutDistance += Math.hypot(x - atX, y - atY, z - atZ);
     atX = x; atY = y; atZ = z;
   };
 
@@ -989,7 +1502,7 @@ export function generateReliefCarveGcode(
     if (approachZ < opts.safeZ - 1e-6) gcode.push(`G0 Z${f(approachZ)}`);
 
     const plunge = () => {
-      plungeTo(head.z, rate);
+      plungeTo(head.z);
       gcode.push(`G1 Z${f(head.z)} F${Math.round(rate)}`);
     };
 
@@ -1030,15 +1543,15 @@ export function generateReliefCarveGcode(
     // Down the ramp, never below the surface the pass is tracing.
     for (const w of walk) {
       const z = Math.max(w.pz, entryZ - drop * (w.d / rampLen));
-      cutTo(w.x, w.y, z, rate);
+      cutTo(w.x, w.y, z);
       gcode.push(`G1 X${f(w.x)} Y${f(w.y)} Z${f(z)} F${Math.round(rate)}`);
     }
     // Back to the head at full depth, clearing what the ramp rode over.
     for (let i = walk.length - 2; i >= 0; i--) {
-      cutTo(walk[i].x, walk[i].y, walk[i].pz, rate);
+      cutTo(walk[i].x, walk[i].y, walk[i].pz);
       gcode.push(`G1 X${f(walk[i].x)} Y${f(walk[i].y)} Z${f(walk[i].pz)}`);
     }
-    cutTo(head.x, head.y, head.z, rate);
+    cutTo(head.x, head.y, head.z);
     gcode.push(`G1 X${f(head.x)} Y${f(head.y)} Z${f(head.z)}`);
   };
 
@@ -1049,12 +1562,34 @@ export function generateReliefCarveGcode(
   gcode.push(`; Model scale : ${(scaleFactor * 100).toFixed(1)}% (${(modelW * scaleFactor).toFixed(1)} x ${(modelD * scaleFactor).toFixed(1)} mm)`);
   gcode.push(`; Height      : ${(zScale / Math.max(1e-9, scaleFactor)).toFixed(1)}x the plan scale`);
   gcode.push('; Origin      : near-left corner of the stock, top face, Z0');
+  if (opts.roughingEnabled) {
+    gcode.push(
+      `; T1 rough    : ${describeCutter(opts.roughingToolDiaMm, 'flat', opts.roughingFlutes, opts.roughingGeometry)}`
+    );
+  }
+  gcode.push(`; Material    : ${material.label}`);
+  gcode.push(
+    `; T2 finish   : ${describeCutter(
+      opts.finishingToolDiaMm,
+      opts.finishingToolType,
+      opts.finishingFlutes,
+      opts.finishingGeometry,
+      opts.finishingVBitAngleDeg
+    )}`
+  );
   gcode.push(`; Extents     : X0..${f(stockW)}  Y0..${f(stockD)} (all cuts are +X +Y of zero)`);
   gcode.push('; ---------------------------------------------------------------');
   gcode.push('G21 ; millimetres');
   gcode.push('G90 ; absolute positioning');
   gcode.push('G94 ; feed per minute');
   gcode.push(`G0 Z${f(opts.safeZ)}`);
+  // Written out as its own line because on a router with a dial rather than a
+  // controlled spindle the `S` word below does nothing at all, and this comment
+  // is the only place the number appears in a form anybody reads.
+  gcode.push(
+    `; SET THE SPINDLE TO ${Math.round(opts.spindleRpm).toLocaleString('en-GB')} RPM ` +
+      `before starting — the S word is ignored by a hand-dialled router`
+  );
   gcode.push(`M3 S${Math.round(opts.spindleRpm)} ; spindle on`);
   gcode.push('G4 P2 ; let the spindle come up to speed');
 
@@ -1083,7 +1618,16 @@ export function generateReliefCarveGcode(
 
     if (layers.length > 0) {
       gcode.push('; --- OP 1: roughing ---------------------------------------------');
-      gcode.push(`; ${opts.roughingToolDiaMm} mm flat end mill, ${stepdown} mm stepdown, ${allowance} mm left on`);
+      // Named as a flat end mill because that is what the roughing path is
+      // planned as: it is dilated with a flat bottom, so a ball nose fitted
+      // here would leave the corners of every layer uncut, and the job would
+      // silently be roughing to the wrong depth. The tool number goes in the
+      // header rather than out on the wire as a bare `T1`, because a Marlin
+      // build reads that as "select extruder 1" and errors on it.
+      gcode.push(
+        `; T1: ${describeCutter(opts.roughingToolDiaMm, 'flat', opts.roughingFlutes, opts.roughingGeometry)}, ` +
+          `${stepdown} mm stepdown, ${allowance} mm left on`
+      );
     }
 
     const xs = axisSamples(bounds.minX + roughRad, bounds.maxX - roughRad, res);
@@ -1106,7 +1650,7 @@ export function generateReliefCarveGcode(
             // where the ramp starts — one stepdown, not the whole depth so far.
             leadIn([run[0], last], Math.min(0, layerZ + stepdown), opts.roughingPlungeRate);
 
-            cutTo(last.x, last.y, layerZ, opts.roughingFeedrate);
+            cutTo(last.x, last.y, layerZ);
             gcode.push(`G1 X${f(last.x)} Y${f(last.y)} F${Math.round(opts.roughingFeedrate)}`);
             gcode.push(`G0 Z${f(opts.safeZ)}`);
             atZ = opts.safeZ;
@@ -1134,7 +1678,15 @@ export function generateReliefCarveGcode(
   if (toolChange) {
     gcode.push('M5 ; spindle off for the tool change');
     gcode.push(`G0 Z${f(Math.max(opts.safeZ, 20))}`);
-    gcode.push(`T2 M6 ; fit the ${opts.finishingToolDiaMm} mm ${opts.finishingToolType === 'ball_nose' ? 'ball-nose' : 'flat'} mill and re-zero Z`);
+    gcode.push(
+      `T2 M6 ; fit the ${describeCutter(
+        opts.finishingToolDiaMm,
+        opts.finishingToolType,
+        opts.finishingFlutes,
+        opts.finishingGeometry,
+        opts.finishingVBitAngleDeg
+      )} and re-zero Z`
+    );
     gcode.push(`M3 S${Math.round(opts.spindleRpm)}`);
     gcode.push('G4 P2');
     atZ = Math.max(opts.safeZ, 20);
@@ -1192,7 +1744,13 @@ export function generateReliefCarveGcode(
 
   gcode.push('; --- OP 2: finishing raster -------------------------------------');
   gcode.push(
-    `; ${opts.finishingToolDiaMm} mm ${opts.finishingToolType === 'ball_nose' ? 'ball-nose' : 'flat'} mill, ` +
+    `; ${describeCutter(
+      opts.finishingToolDiaMm,
+      opts.finishingToolType,
+      opts.finishingFlutes,
+      opts.finishingGeometry,
+      opts.finishingVBitAngleDeg
+    )}, ` +
       `${stepover.toFixed(2)} mm stepover along ${opts.finishingDirection.toUpperCase()}` +
       (finishLimits.length > 1
         ? `, ${finishLimits.length} layers of ${finishStepdown.toFixed(2)} mm`
@@ -1262,7 +1820,7 @@ export function generateReliefCarveGcode(
         let first = true;
         for (let i = 1; i < pass.length; i++) {
           const p = pass[i];
-          cutTo(p.x, p.y, p.z, opts.finishingFeedrate);
+          cutTo(p.x, p.y, p.z);
           gcode.push(
             `G1 X${f(p.x)} Y${f(p.y)} Z${f(p.z)}${first ? ` F${Math.round(opts.finishingFeedrate)}` : ''}`
           );
@@ -1311,7 +1869,15 @@ export function generateReliefCarveGcode(
     success: true,
     gcode: text,
     totalCutDistanceMm: cutDistance,
-    estimatedTimeSeconds: cutSeconds + (rapidDistance / RAPID_FEEDRATE) * 60,
+    // Timed from the finished program rather than from the path builder's own
+    // running totals. Those totals were distance over feedrate, which on a
+    // raster of tens of thousands of short reversing moves is out by a factor
+    // of several: the machine never gets close to the programmed feed before it
+    // has to brake for the end of the scanline. `estimateGcodeTime` runs the
+    // controller's own trapezoidal plan over the moves, and counts the lead-in
+    // ramps, the retracts and the mesh-levelling subdivision that the running
+    // totals never saw at all.
+    estimatedTimeSeconds: estimateGcodeTime(text, { profile: opts.motionProfile }).seconds,
     roughingPassCount,
     finishingRasterLines,
     toolChange,

@@ -24,6 +24,7 @@ import { ImportImageModal } from './components/ImportImageModal';
 import { ExportLaserCutModal } from './components/ExportLaserCutModal';
 import { ExportContourSliceModal } from './components/ExportContourSliceModal';
 import { ExportReliefCarveModal } from './components/ExportReliefCarveModal';
+import { ExportMoldModal } from './components/ExportMoldModal';
 import { UserProfileButton } from './components/UserProfileButton';
 import { MIN_MAX_TOKENS, MAX_MAX_TOKENS, readMaxTokens, writeMaxTokens } from './utils/llmSettings';
 import { PrintAnalysisOverlay } from './components/PrintAnalysisOverlay';
@@ -2089,6 +2090,7 @@ function App() {
   const [isLaserCutModalOpen, setIsLaserCutModalOpen] = useState(false);
   const [isContourSliceModalOpen, setIsContourSliceModalOpen] = useState(false);
   const [isReliefCarveModalOpen, setIsReliefCarveModalOpen] = useState(false);
+  const [isMoldModalOpen, setIsMoldModalOpen] = useState(false);
   const [isImportImageModalOpen, setIsImportImageModalOpen] = useState(false);
   const [droppedImportFile, setDroppedImportFile] = useState<File | null>(null);
   const [droppedImageFile, setDroppedImageFile] = useState<File | null>(null);
@@ -3335,6 +3337,14 @@ function App() {
               title="3D Relief Carve (CNC Router)"
             >
               <Mountain className="w-3.5 h-3.5" />
+            </button>
+
+            <button
+              onClick={() => setIsMoldModalOpen(true)}
+              className="flex items-center justify-center p-1 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700 text-purple-600 dark:text-purple-400 transition-colors focus:outline-none cursor-pointer"
+              title="Export 3D Printable Casting Mold (STL)"
+            >
+              <Box className="w-3.5 h-3.5" />
             </button>
 
             <button
@@ -7488,12 +7498,23 @@ const wobble = Math.sin(api.getTime() * 4) * 3;`}
                         <p className="text-slate-500 mt-1">Use the arrow pad to drive the tool over the point on your stock that should be X0 Y0. Steps are 0.1 / 1 / 10 mm — take the last approach at 0.1 mm and sight down the tool. The red ⏹ button cancels a jog in flight. Then press <strong>Set XY Zero Here</strong>, and <strong>Go To Zero</strong> to confirm it landed where you meant.</p>
                       </div>
                       <div className="text-xs border-t border-slate-150 pt-3">
-                        <strong className="text-slate-700">3️⃣ Zero Z with the touch plate</strong>
-                        <p className="text-slate-500 mt-1">Clip the probe lead to the tool, sit the plate on the stock's top face, park the tool a few mm above it, enter your plate's real thickness, and press <strong>Probe Z Zero</strong>. The tool descends slowly until the circuit closes, then work Z0 is set at the stock surface. <strong>Remove the plate before cutting.</strong></p>
+                        <strong className="text-slate-700">3️⃣ Zero Z — by hand, or on a plate</strong>
+                        <p className="text-slate-500 mt-1"><strong>By hand</strong> works on any machine and any material, and needs nothing but the bit: jog Z down at 0.1 mm until the tip just marks the surface — or until it just nips a slip of paper — and press <strong>Set Z Zero Here</strong>. If something is under the tip, enter its thickness in the <em>gauge</em> box (paper is about 0.1 mm, a 1‑2‑3 block is 25.4) and zero lands on the material rather than on the gauge. Nothing moves: the machine is only being told where it already is.</p>
+                        <p className="text-slate-500 mt-1"><strong>On a plate</strong> is more repeatable but needs a touch plate, a clip and stock the circuit can see. Clip the lead to the tool, sit the plate on the stock's top face, park the tool a few mm above it, enter your plate's real thickness, and press <strong>Probe Z Zero</strong>. <strong>Remove the plate before cutting.</strong></p>
                       </div>
                       <div className="text-xs border-t border-slate-150 pt-3">
-                        <strong className="text-slate-700">4️⃣ Frame, then cut</strong>
+                        <strong className="text-slate-700">4️⃣ Set the spindle speed by hand</strong>
+                        <p className="text-slate-500 mt-1">On a trim router or a VFD-and-a-dial spindle the <code>S</code> word in the G-code does nothing at all — the speed is a knob, and it stays wherever the last job left it. Each export modal states the number under <strong>Before You Start</strong> once a machine is connected, and writes it into the file as a comment. It is worked out from the material you picked and the cutter's diameter (surface speed ÷ diameter), so change the material and the number moves.</p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">5️⃣ Frame, then cut</strong>
                         <p className="text-slate-500 mt-1">Frame Job traces the outline at low power so you can check the job fits the stock. For routing, Probe Bed measures a grid across the job so cut depth follows a bed that is not flat.</p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">6️⃣ Pausing, and re-zeroing after a tool change</strong>
+                        <p className="text-slate-500 mt-1"><strong>Pause</strong> is a feed hold: the machine decelerates along the path and keeps its position, so <strong>Resume</strong> picks the cut up exactly where it stopped. That is not what <strong>E‑Stop</strong> does — a soft reset drops the position, and a part that has been cut into cannot be re-registered, so the piece is finished.</p>
+                        <p className="text-slate-500 mt-1"><strong>Live Trim</strong> appears while the job runs. It nudges the feed and the spindle on the motion already in the buffer, so a cut that is chattering or burning can be backed off without stopping — which is the alternative to scrapping the piece. Burn marks mean the feed and the speed are wrong for each other; trim until it sounds right, then set those numbers for next time.</p>
+                        <p className="text-slate-500 mt-1">A job that changes tools stops on its own and says which bit to fit. The new bit is a different length, so the Z datum from the old one is now wrong — and wrong in the direction of driving the tool into the work. Resume stays shut until you have zeroed Z again, by either route, right there in the pause banner.</p>
                       </div>
                     </div>
                     <div className="bg-amber-50 border border-amber-200/60 rounded-xl p-4 flex flex-col gap-2.5">
@@ -7509,7 +7530,12 @@ const wobble = Math.sin(api.getTime() * 4) * 3;`}
                     <p className="text-xs text-slate-500 leading-relaxed">
                       Requires a Chromium browser (WebSerial) and GRBL-compatible firmware — GRBL 1.1, FluidNC,
                       or grblHAL. The plate thickness field defaults to 12 mm; set it to your own plate's
-                      measured thickness before the first cut.
+                      measured thickness before the first cut. If you have no probe wired up at all, the
+                      manual route above is the whole answer — nothing else in the app needs one.
+                      Connecting a machine also reads its <code>$$</code> settings, so the job-time
+                      estimates switch from an assumed acceleration to your own <code>$120</code>-
+                      <code>$122</code> and rapid rates, and the spindle recommendation is bounded by
+                      your <code>$30</code>/<code>$31</code>.
                     </p>
                   </div>
                 )}
@@ -7643,6 +7669,12 @@ THE SOFTWARE, PHYSICS SOLVERS, CSG COMPILERS, TOOLPATH CALCULATORS, AND MACHINE 
         onClose={() => setIsReliefCarveModalOpen(false)}
         scene={sceneGraph}
         onOpenDocs={() => openDocs('zeroing')}
+      />
+
+      <ExportMoldModal
+        isOpen={isMoldModalOpen}
+        onClose={() => setIsMoldModalOpen(false)}
+        scene={sceneGraph}
       />
 
       {/* Bottom Status Bar matching Etch */}

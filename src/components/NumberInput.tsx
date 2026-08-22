@@ -14,24 +14,54 @@ import React, { useState } from 'react';
  * Styling comes from the caller's `className`, so the export modals keep their
  * own accent colours.
  */
-export function NumberInput({
-  value, onChange, min, max, integer, ...rest
-}: {
-  value: number;
-  onChange: (v: number) => void;
+type NumberInputBase = Omit<
+  React.InputHTMLAttributes<HTMLInputElement>,
+  'value' | 'onChange' | 'min' | 'max' | 'type'
+> & {
   min?: number;
   max?: number;
   integer?: boolean;
-} & Omit<React.InputHTMLAttributes<HTMLInputElement>, 'value' | 'onChange' | 'min' | 'max' | 'type'>) {
-  const [text, setText] = useState(String(value));
+};
+
+/**
+ * The blank-means-derived variant.
+ *
+ * A field whose value the app can work out for itself should not arrive
+ * pre-filled with that value, because a number sitting in a box reads as a
+ * decision someone made and invites being nudged. Left empty it shows the
+ * derived figure as a placeholder and keeps tracking it as the inputs change;
+ * typed into, it becomes an override and stops.
+ */
+export function NumberInput(
+  props: NumberInputBase & {
+    allowEmpty: true;
+    value: number | null;
+    onChange: (v: number | null) => void;
+  }
+): React.ReactElement;
+export function NumberInput(
+  props: NumberInputBase & {
+    allowEmpty?: false;
+    value: number;
+    onChange: (v: number) => void;
+  }
+): React.ReactElement;
+export function NumberInput({
+  value, onChange, min, max, integer, allowEmpty, ...rest
+}: NumberInputBase & {
+  value: number | null;
+  onChange: (v: never) => void;
+  allowEmpty?: boolean;
+}) {
+  const [text, setText] = useState(value === null ? '' : String(value));
   const [editing, setEditing] = useState(false);
-  const [seen, setSeen] = useState(value);
+  const [seen, setSeen] = useState<number | null>(value);
 
   // Follow the value while the box is not being typed into, so a change made
   // elsewhere (the max S-value clamping the power, say) still shows up.
   if (!editing && value !== seen) {
     setSeen(value);
-    setText(String(value));
+    setText(value === null ? '' : String(value));
   }
 
   const parse = (raw: string): number | null => {
@@ -52,13 +82,19 @@ export function NumberInput({
       onFocus={() => setEditing(true)}
       onChange={(e) => {
         setText(e.target.value);
+        // Emptying a derivable field is a real edit — it hands the value back
+        // to whatever derives it — rather than a half-typed number to ignore.
+        if (allowEmpty && e.target.value.trim() === '') {
+          (onChange as (v: number | null) => void)(null);
+          return;
+        }
         const n = parse(e.target.value);
-        if (n !== null) onChange(n);
+        if (n !== null) (onChange as (v: number) => void)(n);
       }}
       onBlur={() => {
         setEditing(false);
         setSeen(value);
-        setText(String(value));
+        setText(value === null ? '' : String(value));
       }}
     />
   );
