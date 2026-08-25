@@ -1,12 +1,15 @@
 import { create } from 'zustand';
 import * as THREE from 'three';
 import type { SceneGraph, SceneNode, CsgOp } from '../types/scene';
+import { DEFAULT_BRUSH, toSceneGeom, type BrushSettings } from '../utils/sculptMesh';
+import { buildSculptBase, DEFAULT_SCULPT_BASE, type SculptBaseId } from '../utils/sculptBases';
 import { type CsgResult, CSG_DEFAULT_SECTORS } from '../utils/csg';
 import { compileToMJCF } from '../utils/mjcf';
 import { PRESETS, pendulumPreset, generateGearGeoms } from '../presets/presetScenes';
 import { PhysicsWorkerClient, type BuiltResult, type FrameSnapshot } from './physicsWorkerClient';
 import { generatePyramidMeshData, generateConeMeshData, generateTorusMeshData, generateTubeMeshData, generateCurveGeoms, DEFAULT_CURVE_POINTS, DEFAULT_CURVE_WIDTH, DEFAULT_CURVE_THICKNESS, DEFAULT_CURVE_SEGMENTS, getStickyRotation } from '../utils/geom';
 import { readUserPreset } from '../utils/userPresets';
+import { DEFAULT_MATERIAL, type MaterialId } from '../utils/feedsAndSpeeds';
 
 const initialScene: SceneGraph = pendulumPreset;
 
@@ -383,6 +386,23 @@ export interface PhysicsState {
   togglePlay: () => void;
   setLoaded: (loaded: boolean) => void;
   setSettingsOpen: (open: boolean) => void;
+
+  /*
+   * What is on the bench, and what is on it.
+   *
+   * These used to be picked separately inside each export modal, so the machine
+   * and the material were answered once per operation and could disagree
+   * between them — a relief carved for hardwood and a contour slice cut for
+   * acrylic, from the same scene, on the same machine, in the same session.
+   * They are properties of the workshop rather than of one export, so they live
+   * here and every exporter reads them.
+   */
+  machineTarget: 'laser' | 'cnc';
+  material: MaterialId;
+  isMachineConfigOpen: boolean;
+  setMachineTarget: (target: 'laser' | 'cnc') => void;
+  setMaterial: (material: MaterialId) => void;
+  setMachineConfigOpen: (open: boolean) => void;
   setCameraView: (view: 'perspective' | 'topDown') => void;
   setPrintAnalysisEnabled: (enabled: boolean) => void;
   togglePrintAnalysis: () => void;
@@ -423,7 +443,20 @@ export interface PhysicsState {
   updateNodeComposite: (id: string, params: Partial<any>) => void;
   
   setParentUnderSelected: (val: boolean) => void;
-  addComponent: (type: 'box' | 'sphere' | 'capsule' | 'cylinder' | 'bob' | 'gear' | 'wedge' | 'pulley_wheel' | 'pulley_rope' | 'mesh' | 'openscad' | 'pyramid' | 'cone' | 'torus' | 'tube' | 'ellipsoid' | 'curve' | 'ring', position: number[]) => void;
+  addComponent: (type: 'box' | 'sphere' | 'capsule' | 'cylinder' | 'bob' | 'gear' | 'wedge' | 'pulley_wheel' | 'pulley_rope' | 'mesh' | 'openscad' | 'pyramid' | 'cone' | 'torus' | 'tube' | 'ellipsoid' | 'curve' | 'ring' | 'sculpt', position: number[]) => void;
+
+  // --- Sculpting ----------------------------------------------------------
+  /** The body being sculpted, or null when the sculpt tools are closed. */
+  sculptNodeId: string | null;
+  /** The brush the sculpt tools are holding. */
+  sculptBrush: BrushSettings;
+  /** Live vertex/face counts and watertightness of the mesh being sculpted. */
+  sculptStats: { vertices: number; faces: number; watertight: boolean; atBudget: boolean } | null;
+  setSculptNodeId: (id: string | null) => void;
+  setSculptBrush: (patch: Partial<BrushSettings>) => void;
+  setSculptStats: (stats: { vertices: number; faces: number; watertight: boolean; atBudget: boolean } | null) => void;
+  /** Replaces a sculpt body's mesh with a different base shape, discarding the old one. */
+  setSculptBase: (nodeId: string, base: SculptBaseId) => void;
   updateNodeScad: (id: string, scadCode: string, compiledData: { vertices: number[], faces: number[], renderVertices: number[] }, skipRecompile?: boolean) => void;
   // --- CSG (boolean modifiers) ---
   deleteNodeGeom: (nodeId: string, geomIndex: number) => void;
@@ -626,6 +659,9 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   isLoaded: false,
   lastCompileError: null,
   isSettingsOpen: false,
+  machineTarget: 'cnc',
+  material: DEFAULT_MATERIAL,
+  isMachineConfigOpen: false,
   cameraView: 'perspective',
   printAnalysisEnabled: false,
   cameraOverride: null,
@@ -662,6 +698,9 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   }),
   setLoaded: (loaded) => set({ isLoaded: loaded }),
   setSettingsOpen: (open) => set({ isSettingsOpen: open }),
+  setMachineTarget: (machineTarget) => set({ machineTarget }),
+  setMaterial: (material) => set({ material }),
+  setMachineConfigOpen: (isMachineConfigOpen) => set({ isMachineConfigOpen }),
   setCameraView: (view) => set({ cameraView: view, cameraOverride: null }),
   setPrintAnalysisEnabled: (enabled) => set({ printAnalysisEnabled: enabled }),
   togglePrintAnalysis: () => set((state) => ({ printAnalysisEnabled: !state.printAnalysisEnabled })),
@@ -733,6 +772,32 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   },
   
   setSelectedNodeId: (id) => set({ selectedNodeId: id }),
+
+  sculptNodeId: null,
+  sculptBrush: DEFAULT_BRUSH,
+  // Sculpting a body that is being simulated means chasing it around the scene,
+  // so entering the tools pauses the sim. Leaving them does not restart it —
+  // that is the user's call, and starting a sim behind someone's back is how a
+  // half-finished shape ends up on the floor.
+  sculptStats: null,
+  setSculptNodeId: (id) => set(id ? { sculptNodeId: id, selectedNodeId: id, isPlaying: false } : { sculptNodeId: null, sculptStats: null }),
+  setSculptStats: (stats) => set({ sculptStats: stats }),
+
+  // Wholesale replacement, not an edit: the version bump is what tells the
+  // viewport to load the new mesh rather than carry on with the one it holds.
+  setSculptBase: (nodeId, base) => {
+    const mesh = buildSculptBase(base);
+    const { vertices, renderVertices, faces } = toSceneGeom(mesh);
+    const node = findNode(get().sceneGraph.nodes, nodeId);
+    const geomIndex = Math.max(0, (node?.geoms ?? []).findIndex((g: any) => g.type === 'mesh'));
+    get().updateNodeGeom(nodeId, { vertices, renderVertices, faces }, geomIndex);
+    get().updateNode(nodeId, {
+      sculptBase: base,
+      sculptVersion: (node?.sculptVersion ?? 1) + 1,
+      sculptEdited: false,
+    });
+  },
+  setSculptBrush: (patch) => set((state) => ({ sculptBrush: { ...state.sculptBrush, ...patch } })),
   
   setDraggedNodeId: (id) => {
     if (id !== null && get().draggedNodeId === null) {
@@ -1756,6 +1821,26 @@ export const useStore = create<PhysicsState>()((set, get) => ({
         size = [0.12, 0.08, 0.06];
         rgba = [0.85, 0.55, 0.15, 1]; // yellow/orange
         joints = isChildJoint ? [{ name: `${id}_hinge`, type: 'hinge', axis: [0, 1, 0], pos: [0, 0, 0], damping: 0.5 }] : [{ name: `${id}_free`, type: 'free' }];
+      } else if (type === 'sculpt') {
+        // A ball of clay: a subdivided icosahedron, uniform enough all over
+        // that the first stroke lands the same wherever it is put. Detail is
+        // added by the brush as it goes (see utils/sculptMesh.ts), so the base
+        // is deliberately coarse — starting dense would only make every stroke
+        // slower without making any of them finer.
+        const { vertices, renderVertices, faces } = toSceneGeom(buildSculptBase(DEFAULT_SCULPT_BASE));
+        geoms = [{
+          name: `${id}_mesh`,
+          type: 'mesh',
+          size: [1],
+          rgba: [0.82, 0.72, 0.62, 1], // unfired clay
+          mass: 1,
+          condim: 3,
+          dynamic: true,
+          vertices,
+          faces,
+          renderVertices,
+        }];
+        joints = [{ name: `${id}_free`, type: 'free' }];
       } else if (type === 'ring') {
         // The canonical boolean: a flattened ellipsoid with a slimmer ellipsoid
         // punched through it along Z. The negative is only a little taller than
@@ -1770,7 +1855,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
         ];
         joints = [{ name: `${id}_free`, type: 'free' }];
       }
-      if (type !== 'mesh' && type !== 'openscad' && type !== 'pyramid' && type !== 'cone' && type !== 'torus' && type !== 'tube' && type !== 'ring') {
+      if (type !== 'mesh' && type !== 'openscad' && type !== 'pyramid' && type !== 'cone' && type !== 'torus' && type !== 'tube' && type !== 'ring' && type !== 'sculpt') {
         geoms = [{ name: `${id}_geom`, type: geomType, size, mass, rgba }];
       }
     }
@@ -1830,6 +1915,11 @@ export const useStore = create<PhysicsState>()((set, get) => ({
         csgCollision: 'auto' as const,
         csgSectors: CSG_DEFAULT_SECTORS,
         csgMass: 1,
+      } : {}),
+      ...(type === 'sculpt' ? {
+        isSculpt: true,
+        sculptBase: DEFAULT_SCULPT_BASE,
+        sculptVersion: 1,
       } : {}),
       ...(type === 'curve' ? {
         isCurve: true,

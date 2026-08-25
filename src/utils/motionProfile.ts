@@ -34,6 +34,33 @@ export interface MotionProfile {
    */
   spindle: { min: number; max: number } | null;
   /**
+   * How far each axis can actually go, mm. GRBL `$130` / `$131` / `$132`.
+   *
+   * Null when the controller did not report them, which is the honest state to
+   * be in: a machine whose travel is unknown cannot be told that a job will not
+   * fit on it, and inventing a bed size would produce exactly the false alarm
+   * that teaches people to ignore the warning.
+   */
+  travel: AxisTriple | null;
+  /**
+   * Whether homing is configured, GRBL `$22`.
+   *
+   * This is what decides whether machine coordinates mean anything. Without
+   * homing, machine zero is wherever the controller happened to power up, so
+   * the machine position in a status report says nothing about where the job
+   * sits between the limit switches — the size of a job can still be checked
+   * against the size of the machine, but where it lands cannot.
+   */
+  homingEnabled: boolean;
+  /**
+   * Whether the controller enforces soft limits itself, GRBL `$20`.
+   *
+   * When it does, a job that runs off the end throws an alarm and stops rather
+   * than driving into the stop — worth knowing, because it changes the warning
+   * from "this will crash" to "this will halt partway through".
+   */
+  softLimits: boolean;
+  /**
    * Where these came from. A number read off the machine and a number this file
    * made up should never be presented as the same kind of thing — an estimate
    * built on the second is a guess, and the UI says so.
@@ -53,11 +80,19 @@ export const DEFAULT_MOTION_PROFILE: MotionProfile = {
   accel: { x: 500, y: 500, z: 200 },
   maxRate: { x: 3000, y: 3000, z: 1000 },
   spindle: null,
+  // Deliberately not guessed. Every other field here has a sane default because
+  // a wrong acceleration only skews an estimate; a wrong bed size would reject
+  // jobs that fit perfectly well.
+  travel: null,
+  homingEnabled: false,
+  softLimits: false,
   source: 'assumed',
 };
 
 /** GRBL setting numbers this app reads. */
 const SETTING = {
+  softLimits: 20,
+  homing: 22,
   spindleMax: 30,
   spindleMin: 31,
   maxRateX: 110,
@@ -66,6 +101,9 @@ const SETTING = {
   accelX: 120,
   accelY: 121,
   accelZ: 122,
+  travelX: 130,
+  travelY: 131,
+  travelZ: 132,
 } as const;
 
 /**
@@ -112,6 +150,9 @@ export function motionProfileFromSettings(settings: Map<number, number>): Motion
 
   const spindleMax = settings.get(SETTING.spindleMax);
   const spindleMin = settings.get(SETTING.spindleMin);
+  const travelX = settings.get(SETTING.travelX);
+  const travelY = settings.get(SETTING.travelY);
+  const travelZ = settings.get(SETTING.travelZ);
 
   return {
     accel: {
@@ -128,6 +169,14 @@ export function motionProfileFromSettings(settings: Map<number, number>): Motion
       spindleMax !== undefined && spindleMax > 0
         ? { min: spindleMin !== undefined && spindleMin > 0 ? spindleMin : 0, max: spindleMax }
         : null,
+    // All three axes or none: a travel figure for X with nothing for Y is far
+    // more likely to be a controller that numbers its settings differently than
+    // a machine with no Y axis, and half an envelope is worse than none.
+    travel: travelX !== undefined && travelX > 0 && travelY !== undefined && travelY > 0
+      ? { x: travelX, y: travelY, z: travelZ !== undefined && travelZ > 0 ? travelZ : 0 }
+      : null,
+    homingEnabled: (settings.get(SETTING.homing) ?? 0) > 0,
+    softLimits: (settings.get(SETTING.softLimits) ?? 0) > 0,
     source: gotMotion ? 'machine' : 'assumed',
   };
 }

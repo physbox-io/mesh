@@ -1,22 +1,20 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import {
-  X, Download, AlertCircle, Layers, Scissors, Cpu, Home, ShieldAlert, RefreshCw, Info, ChevronRight,
+  X, Download, AlertCircle, Layers, Scissors, Cpu, RefreshCw, Info, ChevronRight,
 } from 'lucide-react';
 import type { SceneGraph } from '../types/scene';
 import { exportLaserCutSvg, type LaserCutOptions } from '../utils/laserCutExporter';
 import { generateLaserCutGcode, DEFAULT_GCODE_OPTIONS } from '../utils/gcodeExporter';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
 import { NumberInput } from './NumberInput';
-import { MachineWorkOriginPanel } from './MachineWorkOriginPanel';
-import { JobOverrides, JobPauseBanner, JobPreflight, JobTransport } from './MachineJobControls';
+import { useStore } from '../store/useStore';
+import { JobPauseBanner, JobPreflight, JobResumeBanner, JobTransport } from './MachineJobControls';
 import { formatDuration } from '../utils/timeEstimate';
 import {
-  DEFAULT_MATERIAL,
   MATERIALS,
   describeSpeedRecommendation,
   materialSpec,
   recommendSpeeds,
-  type MaterialId,
 } from '../utils/feedsAndSpeeds';
 import { warpGcode, type ProbeGrid } from '../utils/meshLeveler';
 
@@ -25,7 +23,6 @@ interface ExportLaserCutModalProps {
   onClose: () => void;
   scene: SceneGraph;
   /** Opens the app's zeroing walkthrough from the machine panel. */
-  onOpenDocs?: () => void;
 }
 
 const inputClass =
@@ -156,8 +153,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
   isOpen,
   onClose,
   scene,
-  onOpenDocs,
-}) => {
+  }) => {
   const [jointMode, setJointMode] = useState<'finger' | 'slot' | 'glue'>('finger');
   const [materialThicknessMm, setMaterialThicknessMm] = useState<number>(3.0);
   const [fingerWidthMm, setFingerWidthMm] = useState<number>(10.0);
@@ -174,9 +170,16 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
   const [annotations, setAnnotations] = useState<'all' | 'sheets' | 'none'>('all');
 
   // G-Code & WebSerial States
-  const [machineMode, setMachineMode] = useState<'laser' | 'cnc'>('laser');
+  /*
+   * The machine and the material describe the bench, not this export, so they
+   * are chosen once in the status bar and read from the store here. They used
+   * to be local state in each modal, which let a laser cut and a contour slice
+   * of the same scene disagree about what they were being cut on.
+   */
+  const machineMode = useStore((s) => s.machineTarget);
+  const material = useStore((s) => s.material);
+  const setMachineConfigOpen = useStore((s) => s.setMachineConfigOpen);
   /** What is on the bed. Routing feeds and spindle speed both come from it. */
-  const [material, setMaterial] = useState<MaterialId>(DEFAULT_MATERIAL);
   /**
    * Spindle speed, or null to take the one the material and the bit imply.
    *
@@ -285,6 +288,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
       attachmentWidthMm,
       attachmentSpacingMm,
       attachmentHeightMm,
+      bitDiameterMm,
     });
 
     if (res.success && machineMode === 'cnc' && probedGrid) {
@@ -293,7 +297,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
     return res;
   }, [exportResult, machineMode, cutFeedrate, spindleRpm, machineState.motion, laserPower, laserMaxPower,
       laserPasses, materialThicknessMm, probedGrid, attachments, attachmentWidthMm, attachmentSpacingMm,
-      attachmentHeightMm]);
+      attachmentHeightMm, bitDiameterMm]);
 
   // The sheet SVG is written at physical size — a 600 mm sheet is far wider than
   // the modal — so the preview is scaled to the panel instead of being dragged
@@ -321,17 +325,10 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
     URL.revokeObjectURL(url);
   };
 
-  const handleConnectUsb = async () => {
-    if (machineState.connected) {
-      await webSerialManager.disconnect();
-    } else {
-      await webSerialManager.connect();
-    }
-  };
 
   const handleStartJob = () => {
     if (!gcodeResult?.gcode) return;
-    webSerialManager.startJob(gcodeResult.gcode);
+    webSerialManager.startJob(gcodeResult.gcode, gcodeResult.estimatedTimeSeconds);
   };
 
   const handleFrameTrace = async () => {
@@ -391,13 +388,12 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
               <Field
                 className="lg:col-span-2"
                 label="Target Cutter Type"
-                hint="Laser fires a beam and cuts sharp inside corners. CNC spins an end mill, so it needs corner relief and cuts in depth passes."
+                hint="Chosen in the status bar along the bottom of the window, because it is the same machine for every export. Laser fires a beam and cuts sharp inside corners. CNC spins an end mill, so it needs corner relief and cuts in depth passes."
               >
-                <Segmented
-                  value={machineMode}
-                  onChange={setMachineMode}
-                  options={[['laser', 'Laser Cutter'], ['cnc', 'CNC Router']] as const}
-                />
+                <div className={`${inputClass} flex items-center justify-between`}>
+                  <span className="font-semibold">{machineMode === 'laser' ? 'Laser Cutter' : 'CNC Router'}</span>
+                  <span className="text-[10px] text-slate-500">set in the status bar</span>
+                </div>
               </Field>
 
               <Field
@@ -414,17 +410,14 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
 
               <Field
                 label="Material"
-                hint="What is on the bed. In routing mode it sets the spindle speed and the feed: surface speed over cutter diameter gives the RPM, and chip-per-tooth times teeth times RPM gives the feed. Both are shown under Before You Start once a machine is connected."
+                hint="What is on the bed, chosen in the status bar. In routing mode it sets the spindle speed and the feed: surface speed over cutter diameter gives the RPM, and chip-per-tooth times teeth times RPM gives the feed. Both are shown under Before You Start once a machine is connected."
               >
-                <select
-                  value={material}
-                  onChange={(e) => setMaterial(e.target.value as MaterialId)}
-                  className={`${inputClass} cursor-pointer`}
-                >
-                  {MATERIALS.map((mat) => (
-                    <option key={mat.id} value={mat.id}>{mat.label}</option>
-                  ))}
-                </select>
+                <div className={`${inputClass} flex items-center justify-between`}>
+                  <span className="font-semibold">
+                    {MATERIALS.find((m) => m.id === material)?.label ?? material}
+                  </span>
+                  <span className="text-[10px] text-slate-500">set in the status bar</span>
+                </div>
               </Field>
 
 
@@ -479,11 +472,15 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                 className="lg:col-span-2"
                 hintAlign="end"
                 label="Bit Ø (mm)"
-                hint="Diameter of the end mill. It sets how far the relief cuts have to reach into each inside corner. Only read when corner relief is on."
+                hint={
+                  machineMode === 'cnc'
+                    ? 'Diameter of the end mill. In CNC mode every path is offset by half of this — outlines run outside the line and holes inside it — so that the cut edge lands where the model says. Get it wrong and every part is out by the difference.'
+                    : 'Diameter of the end mill. It sets how far the relief cuts have to reach into each inside corner. Only read when corner relief is on.'
+                }
               >
                 <NumberInput
                   step="0.1" min={0.1} max={50}
-                  disabled={cornerRelief === 'none'}
+                  disabled={machineMode !== 'cnc' && cornerRelief === 'none'}
                   value={bitDiameterMm}
                   onChange={setBitDiameterMm}
                   className={inputClass}
@@ -783,6 +780,9 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
             showZTools={machineMode === 'cnc'}
           />
 
+          {/* The offer to pick a stopped job back up rather than recut it all */}
+          <JobResumeBanner machineState={machineState} showZTools={machineMode === 'cnc'} />
+
           {exportResult && !exportResult.success && (
             <div className="p-4 rounded-xl bg-red-500/10 border border-red-500/40 flex items-start space-x-2 text-xs text-red-700 dark:text-red-300">
               <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
@@ -795,6 +795,23 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
             <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/40 space-y-1.5">
               {exportResult.warnings.map((w, i) => (
                 <div key={i} className="flex items-start space-x-2 text-xs text-amber-800 dark:text-amber-300">
+                  <AlertCircle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+                  <span className="leading-relaxed">{w}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Features the cutter is too fat to reach. Separate from the nesting
+              warnings above because these are not a fit problem to be tuned —
+              they are geometry that will not be on the finished part at all. */}
+          {gcodeResult?.warnings && gcodeResult.warnings.length > 0 && (
+            <div className="p-3 rounded-xl bg-red-500/10 border border-red-500/40 space-y-1.5">
+              <div className="text-[10px] uppercase font-semibold tracking-wide text-red-700 dark:text-red-300">
+                Left out of the program
+              </div>
+              {gcodeResult.warnings.map((w, i) => (
+                <div key={i} className="flex items-start space-x-2 text-xs text-red-800 dark:text-red-300">
                   <AlertCircle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
                   <span className="leading-relaxed">{w}</span>
                 </div>
@@ -834,14 +851,19 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
             </div>
           )}
 
-          {/* WebSerial USB Control Panel */}
+          {/* What this job needs of the machine.
+              Connecting, homing, unlocking and zeroing moved to the shared
+              Machine Setup dialog off the status bar — they are the machine's
+              business and were repeated identically in every export modal.
+              What stays is what cannot be answered without the job: which
+              cutter it wants, where its outline falls, and starting it. */}
           <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 text-white space-y-3">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center space-x-3">
                 <Cpu className="w-5 h-5 text-amber-400" />
                 <div>
                   <h3 className="text-sm font-bold flex items-center space-x-2">
-                    <span>WebSerial USB Machine Interface</span>
+                    <span>Machine</span>
                     <span className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase ${
                       machineState.status === 'RUNNING' ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40' :
                       machineState.status.startsWith('PAUSED') ? 'bg-amber-500/20 text-amber-400 border border-amber-500/40 animate-pulse' :
@@ -851,75 +873,48 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                     </span>
                   </h3>
                   <p className="text-xs text-slate-400">
-                    {machineState.connected ? `Connected via USB serial (${machineState.portName})` : 'Connect your USB machine (GRBL/Marlin/FluidNC) to cut directly from your browser'}
+                    {machineState.connected
+                      ? `Connected via USB serial (${machineState.portName})`
+                      : 'Not connected. Open Machine Setup to connect, home and zero.'}
                   </p>
                 </div>
               </div>
 
-              <div className="flex items-center space-x-2">
-                <button
-                  onClick={handleConnectUsb}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center space-x-1.5 cursor-pointer ${
-                    machineState.connected ? 'bg-slate-800 hover:bg-slate-700 text-slate-300' : 'bg-amber-500 hover:bg-amber-600 text-slate-950'
-                  }`}
-                >
-                  <Cpu className="w-3.5 h-3.5" />
-                  <span>{machineState.connected ? 'Disconnect USB' : 'Connect USB Machine'}</span>
-                </button>
-              </div>
+              <button
+                onClick={() => setMachineConfigOpen(true)}
+                className="px-3 py-1.5 rounded-lg text-xs font-bold bg-amber-500 hover:bg-amber-600 text-slate-950 flex items-center gap-1.5 cursor-pointer"
+              >
+                <Cpu className="w-3.5 h-3.5" />
+                <span>Machine Setup</span>
+              </button>
             </div>
 
-            {/* Connected Machine Controls */}
             {machineState.connected && (
               <>
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 pt-2 border-t border-slate-800">
-                <div className="flex items-center space-x-2 bg-slate-950 p-2 rounded-lg border border-slate-800 text-xs font-mono">
-                  <span className="text-slate-500">MPos:</span>
-                  <span>X:{machineState.mpos.x.toFixed(1)} Y:{machineState.mpos.y.toFixed(1)} Z:{machineState.mpos.z.toFixed(1)}</span>
-                </div>
-
-                <div className="flex items-center space-x-2">
+              <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-800">
+                <button
+                  onClick={handleFrameTrace}
+                  disabled={!gcodeResult?.bounds}
+                  title="Trace the job's outline so you can check it lands on the sheet"
+                  className="py-1.5 px-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-200 text-xs font-semibold rounded-lg flex items-center justify-center space-x-1 cursor-pointer"
+                >
+                  <RefreshCw className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Frame Laser</span>
+                </button>
+                {machineMode === 'cnc' && (
                   <button
-                    onClick={() => webSerialManager.homeMachine()}
-                    className="flex-1 py-1.5 px-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-lg flex items-center justify-center space-x-1"
+                    onClick={handleProbeBed}
+                    disabled={!gcodeResult?.bounds || isProbing}
+                    title={probedGrid
+                      ? 'Bed probed — cut depths follow the measured surface'
+                      : 'Probe a 3x3 grid over the job so cut depth follows the bed'}
+                    className="py-1.5 px-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-200 text-xs font-semibold rounded-lg flex items-center justify-center space-x-1 cursor-pointer"
                   >
-                    <Home className="w-3.5 h-3.5 text-blue-400" />
-                    <span>Home ($H)</span>
+                    <Layers className={`w-3.5 h-3.5 ${probedGrid ? 'text-emerald-400' : 'text-blue-400'}`} />
+                    <span>{isProbing ? 'Probing…' : probedGrid ? 'Bed Levelled' : 'Probe Bed'}</span>
                   </button>
-                </div>
-
-                <div className="flex items-center space-x-2">
-                  <button
-                    onClick={handleFrameTrace}
-                    disabled={!gcodeResult?.bounds}
-                    className="flex-1 py-1.5 px-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-200 text-xs font-semibold rounded-lg flex items-center justify-center space-x-1"
-                  >
-                    <RefreshCw className="w-3.5 h-3.5 text-amber-400" />
-                    <span>Frame Laser</span>
-                  </button>
-                  {machineMode === 'cnc' && (
-                    <button
-                      onClick={handleProbeBed}
-                      disabled={!gcodeResult?.bounds || isProbing}
-                      title={probedGrid
-                        ? 'Bed probed — cut depths follow the measured surface'
-                        : 'Probe a 3x3 grid over the job so cut depth follows the bed'}
-                      className="flex-1 py-1.5 px-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-200 text-xs font-semibold rounded-lg flex items-center justify-center space-x-1"
-                    >
-                      <Layers className={`w-3.5 h-3.5 ${probedGrid ? 'text-emerald-400' : 'text-blue-400'}`} />
-                      <span>{isProbing ? 'Probing…' : probedGrid ? 'Bed Levelled' : 'Probe Bed'}</span>
-                    </button>
-                  )}
-                  <button
-                    onClick={() => webSerialManager.unlockAlarm()}
-                    className="py-1.5 px-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-lg flex items-center justify-center space-x-1"
-                  >
-                    <ShieldAlert className="w-3.5 h-3.5 text-red-400" />
-                    <span>Unlock ($X)</span>
-                  </button>
-                </div>
-
-                <div className="flex items-center space-x-2">
+                )}
+                <div className="ml-auto">
                   <JobTransport
                     machineState={machineState}
                     canStart={!!gcodeResult?.success}
@@ -944,9 +939,19 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                     ? describeSpeedRecommendation(speeds, material, bitDiameterMm)
                     : null
                 }
+                extent={
+                  gcodeResult
+                    ? {
+                        ...gcodeResult.bounds,
+                        // A laser has no Z to check; a router sweeps from its
+                        // retract height down to the full depth of cut.
+                        ...(machineMode === 'cnc'
+                          ? { minZ: -materialThicknessMm, maxZ: DEFAULT_GCODE_OPTIONS.safeZ }
+                          : {}),
+                      }
+                    : undefined
+                }
               />
-              <JobOverrides machineState={machineState} />
-              <MachineWorkOriginPanel machineState={machineState} showZProbe={machineMode === 'cnc'} onOpenDocs={onOpenDocs} />
               </>
             )}
           </div>

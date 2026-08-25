@@ -188,15 +188,66 @@ describe('Relief carve exporter', () => {
 
   it('stops for a tool change only when the two tools differ', () => {
     const twoTool = generateReliefCarveGcode(dome, DEFAULT_RELIEF_OPTIONS);
+    // Genuinely one tool: same diameter *and* the same kind of cutter. Matching
+    // the diameter alone leaves a flat roughing mill against a ball-nose
+    // finisher, which is two bits.
     const oneTool = generateReliefCarveGcode(dome, {
       ...DEFAULT_RELIEF_OPTIONS,
       roughingToolDiaMm: DEFAULT_RELIEF_OPTIONS.finishingToolDiaMm,
+      finishingToolType: 'flat',
+      finishingFlutes: DEFAULT_RELIEF_OPTIONS.roughingFlutes,
+      finishingGeometry: DEFAULT_RELIEF_OPTIONS.roughingGeometry,
     });
 
     expect(twoTool.toolChange).toBe(true);
     expect(twoTool.gcode).toContain('M6');
     expect(oneTool.toolChange).toBe(false);
     expect(oneTool.gcode).not.toContain('M6');
+  });
+
+  it('stops for a V-bit finisher that happens to match the roughing diameter', () => {
+    /*
+     * The intaglio failure. A V-bit is chosen for detail the roughing cutter
+     * cannot reach, and it is sold by the same nominal diameter as the end
+     * mill — so gating the tool change on diameter alone let the job run its
+     * finishing raster with the roughing bit still in the collet. Nothing
+     * faulted: the program simply carved the rough pass twice and reported
+     * success.
+     */
+    const result = generateReliefCarveGcode(dome, {
+      ...DEFAULT_RELIEF_OPTIONS,
+      roughingToolDiaMm: 6,
+      finishingToolDiaMm: 6,
+      finishingToolType: 'v_bit',
+      finishingVBitAngleDeg: 60,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.toolChange).toBe(true);
+    expect(result.gcode).toContain('M6');
+    // The prompt has to name the bit the operator is being asked to fit.
+    expect(result.gcode).toContain('V-bit');
+  });
+
+  it('stops when only the flute count or the helix differs', () => {
+    const flutes = generateReliefCarveGcode(dome, {
+      ...DEFAULT_RELIEF_OPTIONS,
+      roughingToolDiaMm: DEFAULT_RELIEF_OPTIONS.finishingToolDiaMm,
+      finishingToolType: 'flat',
+      finishingFlutes: DEFAULT_RELIEF_OPTIONS.roughingFlutes + 1,
+      finishingGeometry: DEFAULT_RELIEF_OPTIONS.roughingGeometry,
+    });
+    expect(flutes.toolChange).toBe(true);
+
+    const helix = generateReliefCarveGcode(dome, {
+      ...DEFAULT_RELIEF_OPTIONS,
+      roughingToolDiaMm: DEFAULT_RELIEF_OPTIONS.finishingToolDiaMm,
+      finishingToolType: 'flat',
+      finishingFlutes: DEFAULT_RELIEF_OPTIONS.roughingFlutes,
+      roughingGeometry: 'upcut',
+      finishingGeometry: 'downcut',
+    });
+    expect(helix.toolChange).toBe(true);
   });
 
   it('reports a scene it cannot carve rather than emitting an empty job', () => {
@@ -564,5 +615,199 @@ describe('Relief carve exporter', () => {
     // enough to keep the cut moving.
     expect(result.gcode.split('\n').length).toBeLessThan(60_000);
     expect(result.estimatedTimeSeconds).toBeGreaterThan(60);
+  });
+});
+
+describe('Adaptive roughing', () => {
+  /** A deep relief: the case adaptive clearing exists for. */
+  const deep = {
+    ...DEFAULT_RELIEF_OPTIONS,
+    stockWidthMm: 200,
+    stockDepthMm: 200,
+    stockThicknessMm: 60,
+    fitMode: 'manual' as const,
+    scalePercent: 100,
+    backgroundMode: 'carve' as const,
+    carveDepthMm: 30,
+  };
+
+  const roughingOf = (gcode: string) => {
+    const start = gcode.indexOf('OP 1: roughing');
+    const end = gcode.indexOf('OP 2');
+    return gcode.slice(start, end > start ? end : undefined);
+  };
+
+  it('takes far fewer, much deeper layers than the raster it replaces', () => {
+    const raster = generateReliefCarveGcode(dome, { ...deep, roughingStrategy: 'raster' });
+    const adaptive = generateReliefCarveGcode(dome, { ...deep, roughingStrategy: 'adaptive' });
+
+    expect(raster.success && adaptive.success).toBe(true);
+    expect(adaptive.roughingPassCount).toBeLessThan(raster.roughingPassCount / 2);
+  });
+
+  it('comes out ahead on time, which is the only reason to do it', () => {
+    // A smaller radial bite means proportionally more path to walk, so the
+    // deeper cut has to more than pay for it. If this ever inverts, adaptive
+    // clearing is just a slower raster and the default should change back.
+    const raster = generateReliefCarveGcode(dome, { ...deep, roughingStrategy: 'raster' });
+    const adaptive = generateReliefCarveGcode(dome, { ...deep, roughingStrategy: 'adaptive' });
+    expect(adaptive.estimatedTimeSeconds).toBeLessThan(raster.estimatedTimeSeconds);
+  });
+
+  it('does not drown the controller in short segments', () => {
+    // GRBL swallows a few hundred lines a second; a contour with a vertex on
+    // every grid cell would be tens of times that, and a job that streams
+    // slower than it cuts stalls the spindle in the cut.
+    const raster = generateReliefCarveGcode(dome, { ...deep, roughingStrategy: 'raster' });
+    const adaptive = generateReliefCarveGcode(dome, { ...deep, roughingStrategy: 'adaptive' });
+
+    const lines = (g: string) => roughingOf(g).split('\n').length;
+    expect(lines(adaptive.gcode)).toBeLessThan(lines(raster.gcode) * 1.5);
+  });
+
+  it('says what bite it is taking and what that buys', () => {
+    const adaptive = generateReliefCarveGcode(dome, { ...deep, roughingStrategy: 'adaptive' });
+    expect(adaptive.gcode).toMatch(/adaptive clear, [\d.]+ mm bite \(\d+% of the cutter\)/);
+  });
+
+  it('honours an explicit stepover', () => {
+    const res = generateReliefCarveGcode(dome, {
+      ...deep, roughingStrategy: 'adaptive', roughingToolDiaMm: 6, roughingStepoverMm: 1.5,
+    });
+    expect(res.gcode).toMatch(/1\.5 mm bite \(25% of the cutter\)/);
+  });
+
+  it('still roughs a shallow relief, where the deep stepdown does not fit', () => {
+    // The last roughing layer sits at the floor and clears almost nothing, so a
+    // stepdown as deep as the relief leaves no useful layer at all. A shallow
+    // relief plus an ambitious adaptive stepdown is exactly that case.
+    const shallow = generateReliefCarveGcode(dome, {
+      ...DEFAULT_RELIEF_OPTIONS,
+      stockWidthMm: 200, stockDepthMm: 200,
+      fitMode: 'manual', scalePercent: 100,
+      backgroundMode: 'skip', carveDepthMm: 10,
+      roughingStrategy: 'adaptive',
+    });
+
+    expect(shallow.success).toBe(true);
+    expect(shallow.segments.filter((s) => s.type === 'roughing').length).toBeGreaterThan(0);
+  });
+
+  it('keeps the roughing inside the model footprint, same as the raster does', () => {
+    const res = generateReliefCarveGcode(dome, {
+      ...DEFAULT_RELIEF_OPTIONS,
+      stockWidthMm: 200, stockDepthMm: 200,
+      fitMode: 'manual', scalePercent: 100,
+      backgroundMode: 'skip', carveDepthMm: 10,
+      roughingStrategy: 'adaptive',
+    });
+
+    for (const seg of res.segments.filter((s) => s.type === 'roughing')) {
+      for (const p of seg.points) {
+        expect(Math.hypot(p.x - 100, p.y - 100)).toBeLessThan(
+          50 + DEFAULT_RELIEF_OPTIONS.roughingToolDiaMm
+        );
+      }
+    }
+  });
+
+  it('ramps into each ring rather than plunging the tool centre in', () => {
+    const res = generateReliefCarveGcode(dome, { ...deep, roughingStrategy: 'adaptive' });
+    const rough = roughingOf(res.gcode);
+    // A ramp is a feed move that changes X or Y as well as Z.
+    expect(rough).toMatch(/^G1 X-?[\d.]+ Y-?[\d.]+ Z-?[\d.]+/m);
+  });
+});
+
+describe('Finishing pass strategies', () => {
+  const base = {
+    ...DEFAULT_RELIEF_OPTIONS,
+    stockWidthMm: 120,
+    stockDepthMm: 120,
+    carveDepthMm: 8,
+  };
+
+  it('cuts the dome with every strategy', () => {
+    for (const finishingStrategy of ['raster', 'crosshatch', 'concentric', 'spiral', 'contour', 'hybrid'] as const) {
+      const res = generateReliefCarveGcode(dome, { ...base, finishingStrategy });
+      expect(res.success, finishingStrategy).toBe(true);
+      expect(res.gcode, finishingStrategy).toContain(`; --- OP 2: finishing pass`);
+      expect(res.totalCutDistanceMm, finishingStrategy).toBeGreaterThan(0);
+    }
+  });
+
+  it('names the strategy in the G-code header, so a file says how it was cut', () => {
+    const waterline = generateReliefCarveGcode(dome, { ...base, finishingStrategy: 'contour' });
+    expect(waterline.gcode).toContain('waterline');
+    const angled = generateReliefCarveGcode(dome, {
+      ...base,
+      finishingStrategy: 'raster',
+      finishingAngleDeg: 45,
+    });
+    expect(angled.gcode).toContain('raster at 45 degrees');
+  });
+
+  it('takes the raster angle from the sweep axis when none is given', () => {
+    const alongY = generateReliefCarveGcode(dome, { ...base, finishingDirection: 'y' });
+    expect(alongY.gcode).toContain('raster at 90 degrees');
+  });
+
+  it('leaves the default raster byte-for-byte as it was', () => {
+    // The new machinery is a generalisation, not a change: the strategy every
+    // existing project already has selected has to produce the file it did.
+    const explicit = generateReliefCarveGcode(dome, { ...base, finishingStrategy: 'raster', finishingAngleDeg: 0 });
+    const defaulted = generateReliefCarveGcode(dome, base);
+    expect(defaulted.gcode).toBe(explicit.gcode);
+  });
+
+  it('cuts an angled raster off both axes', () => {
+    const res = generateReliefCarveGcode(dome, {
+      ...base,
+      finishingStrategy: 'raster',
+      finishingAngleDeg: 45,
+    });
+    const finishing = res.gcode.slice(res.gcode.indexOf('OP 2'));
+    const moves = finishing
+      .split('\n')
+      .map((l) => /^G1 X(-?[\d.]+) Y(-?[\d.]+)/.exec(l))
+      .filter((m): m is RegExpExecArray => m !== null)
+      .map((m) => ({ x: parseFloat(m[1]), y: parseFloat(m[2]) }));
+    expect(moves.length).toBeGreaterThan(10);
+
+    // A 45-degree raster moves in X and Y together; an axis raster never does.
+    const diagonal = moves.filter((p, i) => i > 0 && Math.abs(p.x - moves[i - 1].x) > 1e-6 && Math.abs(p.y - moves[i - 1].y) > 1e-6);
+    expect(diagonal.length).toBeGreaterThan(moves.length / 2);
+  });
+
+  it('spirals with far fewer retracts than a raster of the same stepover', () => {
+    const retracts = (g: string) => (g.slice(g.indexOf('OP 2')).match(/^G0 Z/gm) ?? []).length;
+    const raster = generateReliefCarveGcode(dome, { ...base, finishingStrategy: 'raster' });
+    const spiral = generateReliefCarveGcode(dome, { ...base, finishingStrategy: 'spiral' });
+    expect(retracts(spiral.gcode)).toBeLessThan(retracts(raster.gcode));
+  });
+
+  it('keeps every strategy inside the stock', () => {
+    for (const finishingStrategy of ['crosshatch', 'concentric', 'spiral', 'contour', 'hybrid'] as const) {
+      const res = generateReliefCarveGcode(dome, { ...base, finishingStrategy });
+      // The work origin is the stock's near-left corner, so the stock is
+      // 0..width by 0..depth rather than centred on zero.
+      for (const m of cutMoves(res.gcode)) {
+        if (m.x !== undefined) {
+          expect(m.x, finishingStrategy).toBeGreaterThanOrEqual(-1e-6);
+          expect(m.x, finishingStrategy).toBeLessThanOrEqual(base.stockWidthMm + 1e-6);
+        }
+        if (m.y !== undefined) {
+          expect(m.y, finishingStrategy).toBeGreaterThanOrEqual(-1e-6);
+          expect(m.y, finishingStrategy).toBeLessThanOrEqual(base.stockDepthMm + 1e-6);
+        }
+      }
+    }
+  });
+
+  it('never cuts below the floor, whichever strategy laid the passes down', () => {
+    for (const finishingStrategy of ['crosshatch', 'concentric', 'spiral', 'contour', 'hybrid'] as const) {
+      const res = generateReliefCarveGcode(dome, { ...base, finishingStrategy });
+      expect(Math.min(...zValues(res.gcode)), finishingStrategy).toBeGreaterThanOrEqual(-base.carveDepthMm - 1e-6);
+    }
   });
 });

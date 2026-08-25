@@ -12,7 +12,13 @@ function attachFakeGrbl(surface: (x: number, y: number) => number | null) {
   // The manager's serial plumbing is private; a test has to reach past it to
   // stand in for hardware.
   const mgr = webSerialManager as unknown as {
-    writer: { write: (s: string) => Promise<void> } | null;
+    transport: {
+      label: string;
+      writeLine: (line: string) => Promise<void>;
+      writeRealtime: (byte: number) => Promise<void>;
+      open: () => Promise<void>;
+      close: () => Promise<void>;
+    } | null;
     state: { connected: boolean; lastError?: string };
     handleIncomingLine: (line: string) => void;
   };
@@ -23,8 +29,14 @@ function attachFakeGrbl(surface: (x: number, y: number) => number | null) {
 
   mgr.state.connected = true;
   mgr.state.lastError = undefined;
-  mgr.writer = {
-    async write(line: string) {
+  mgr.transport = {
+    label: 'Fake GRBL',
+    async open() {},
+    async close() {},
+    // Nothing here probes with a realtime byte; `?` polling is off in these
+    // tests and a status request would only add noise to `sent`.
+    async writeRealtime() {},
+    async writeLine(line: string) {
       const trimmed = line.trim();
       if (!trimmed) return;
       sent.push(trimmed);
@@ -57,7 +69,7 @@ function attachFakeGrbl(surface: (x: number, y: number) => number | null) {
   return {
     sent,
     detach() {
-      mgr.writer = null;
+      mgr.transport = null;
       mgr.state.connected = false;
       mgr.state.lastError = undefined;
     },

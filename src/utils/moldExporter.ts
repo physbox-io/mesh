@@ -46,8 +46,6 @@ export interface MoldOptions {
   ventDiaMm: number;
   /** Whether to include corner pry notches on the parting seam. */
   includePryNotches: boolean;
-  /** 'combined_plate' lays both halves side-by-side at Z=0; 'separate' generates separate buffers. */
-  layout: 'combined_plate' | 'separate_halves';
 }
 
 export const DEFAULT_MOLD_OPTIONS: MoldOptions = {
@@ -64,7 +62,6 @@ export const DEFAULT_MOLD_OPTIONS: MoldOptions = {
   includeVents: true,
   ventDiaMm: 1.5,
   includePryNotches: true,
-  layout: 'combined_plate',
 };
 
 export interface Triangle3D {
@@ -87,8 +84,6 @@ export interface MoldMeshHalf {
 export interface MoldExportResult {
   success: boolean;
   binarySTL: Uint8Array;
-  topHalfSTL?: Uint8Array;
-  bottomHalfSTL?: Uint8Array;
   partBounds: { minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number };
   moldBounds: { minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number };
   partWidthMm: number;
@@ -492,7 +487,7 @@ export function generateMoldMeshes(
   }
 
   // --- 2. BUILD TOP HALF MOLD (For Two-Part Clamshell) ----------------------
-  let topTris: Triangle3D[] = [];
+  const topTris: Triangle3D[] = [];
   if (opts.moldType === 'clamshell') {
     // Top mold parting plane is at Z = 0 (bottom face of top block).
     // Top block roof is at Z = topBoxHeight.
@@ -625,8 +620,6 @@ export function generateMoldMeshes(
   }
 
   const binarySTL = exportBinarySTL(combinedTriangles, 'PhysBox 3D Mold Plate');
-  const bottomHalfSTL = exportBinarySTL(plateBottomTris, 'PhysBox 3D Mold Bottom');
-  const topHalfSTL = plateTopTris.length > 0 ? exportBinarySTL(plateTopTris, 'PhysBox 3D Mold Top') : undefined;
 
   const totalWidth = opts.moldType === 'clamshell' ? moldWidthMm * 2 + plateGapMm : moldWidthMm;
   const totalHeight = Math.max(bottomBoxHeight, topBoxHeight);
@@ -634,8 +627,6 @@ export function generateMoldMeshes(
   return {
     success: true,
     binarySTL,
-    topHalfSTL,
-    bottomHalfSTL,
     partBounds: { minX: mnX, minY: mnY, minZ: mnZ, maxX: mxX, maxY: mxY, maxZ: mxZ },
     moldBounds: {
       minX: -totalWidth / 2,

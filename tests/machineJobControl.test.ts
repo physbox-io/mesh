@@ -11,7 +11,13 @@ import { webSerialManager } from '../src/utils/webSerialManager';
  */
 function attachFakeGrbl() {
   const mgr = webSerialManager as unknown as {
-    writer: { write: (s: string) => Promise<void> } | null;
+    transport: {
+      label: string;
+      writeLine: (line: string) => Promise<void>;
+      writeRealtime: (byte: number) => Promise<void>;
+      open: () => Promise<void>;
+      close: () => Promise<void>;
+    } | null;
     state: Record<string, unknown>;
     handleIncomingLine: (line: string) => void;
   };
@@ -22,14 +28,20 @@ function attachFakeGrbl() {
   mgr.state.status = 'IDLE';
   mgr.state.lastError = undefined;
   mgr.state.needsZZero = false;
-  mgr.writer = {
-    async write(chunk: string) {
-      // Real-time bytes carry no newline and are not lines.
-      if (chunk === '!' || chunk === '~' || chunk === '?' || chunk === '\x18' || chunk === '\x85') {
-        sent.push(chunk);
-        return;
-      }
-      const trimmed = chunk.trim();
+
+  // Stands in for a `MachineTransport`. The two write paths are kept apart
+  // because that is the distinction the transport interface exists to preserve:
+  // a `!` that arrived behind ten thousand buffered moves would be a pause that
+  // took a minute to happen.
+  mgr.transport = {
+    label: 'Fake GRBL',
+    async open() {},
+    async close() {},
+    async writeRealtime(byte: number) {
+      sent.push(String.fromCharCode(byte));
+    },
+    async writeLine(line: string) {
+      const trimmed = line.trim();
       if (!trimmed) return;
       sent.push(trimmed);
       // Acknowledged on a timer rather than a microtask, so a test can let the
@@ -46,7 +58,7 @@ function attachFakeGrbl() {
     sent,
     lines: () => sent.filter((s) => s.length > 1),
     detach() {
-      mgr.writer = null;
+      mgr.transport = null;
       mgr.state.connected = false;
       mgr.state.status = 'DISCONNECTED';
       mgr.state.needsZZero = false;

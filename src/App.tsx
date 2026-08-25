@@ -1,12 +1,16 @@
 
 import { Canvas, useThree } from '@react-three/fiber';
 import { OrbitControls, Grid } from '@react-three/drei';
+import SculptSurface from './components/SculptSurface';
+import { SCULPT_BASES, type SculptBaseId } from './utils/sculptBases';
+import { downloadMeshGeomStl } from './utils/meshStlExport';
+import SculptPanel from './components/SculptPanel';
 import { useMuJoCoInit } from './hooks/useMuJoCo';
 import { useMCPBridge } from './hooks/useMCPBridge';
 import { useCoarsePointer } from './hooks/useCoarsePointer';
 import { useStore, scaleMeshGeoms, getPhysicsWorkerClient, cloneSceneGraph } from './store/useStore';
 import type { SceneGraph, SceneNode } from './types/scene';
-import { Play, Square, SlidersHorizontal, Settings, Box, Circle, X, RotateCcw, Trash2, Layers, CircleDot, Zap, Info, Triangle, Disc, Code, Menu, Shapes, Minimize2, Save, Download, Upload, Undo, Redo, FileText, ChevronDown, ChevronUp, PanelRight, Edit3, Printer, Scissors, Sparkles, Sun, Moon, Pyramid, Cone, Donut, ChartSpline, Mountain, Image as ImageIcon } from 'lucide-react';
+import { Play, Square, SlidersHorizontal, Settings, Box, Circle, X, RotateCcw, Trash2, Layers, CircleDot, Zap, Info, Triangle, Disc, Code, Menu, Shapes, Minimize2, Save, Download, Upload, Undo, Redo, FileText, ChevronDown, ChevronUp, PanelRight, Edit3, Printer, Scissors, Sparkles, Sun, Moon, Pyramid, Cone, Donut, ChartSpline, Mountain, Paintbrush, Image as ImageIcon } from 'lucide-react';
 import { useRef, useMemo, useEffect, useCallback, useState, type RefObject } from 'react';
 import AICopilotPanel from './components/AICopilotPanel';
 import * as THREE from 'three';
@@ -25,6 +29,8 @@ import { ExportLaserCutModal } from './components/ExportLaserCutModal';
 import { ExportContourSliceModal } from './components/ExportContourSliceModal';
 import { ExportReliefCarveModal } from './components/ExportReliefCarveModal';
 import { ExportMoldModal } from './components/ExportMoldModal';
+import { BottomStatusBar } from './components/BottomStatusBar';
+import { MachineConfigModal } from './components/MachineConfigModal';
 import { UserProfileButton } from './components/UserProfileButton';
 import { MIN_MAX_TOKENS, MAX_MAX_TOKENS, readMaxTokens, writeMaxTokens } from './utils/llmSettings';
 import { PrintAnalysisOverlay } from './components/PrintAnalysisOverlay';
@@ -1589,6 +1595,16 @@ const CsgGhostOutline = ({ geom, color, bounds, csgCentroid }: { geom: any; colo
   );
 };
 
+/** Depth-first lookup by id, for the renderer's own use. */
+const findSceneNode = (nodes: any[], id: string): any | null => {
+  for (const node of nodes || []) {
+    if (node.id === id) return node;
+    const found = findSceneNode(node.children, id);
+    if (found) return found;
+  }
+  return null;
+};
+
 const SceneVisuals = ({ model, data, mujoco, sceneGraph, selectedNodeId, setSelectedNodeId, activeWeakSpot, setActiveWeakSpot }: any) => {
   // Every geom name the scene graph accounts for, drawn or not. The implicit-geom
   // pass below uses this — NOT the render list — to decide what in the MuJoCo
@@ -1607,6 +1623,10 @@ const SceneVisuals = ({ model, data, mujoco, sceneGraph, selectedNodeId, setSele
     walk(sceneGraph?.nodes || []);
     return names;
   }, [sceneGraph]);
+
+  // Subscribed rather than read once: entering and leaving the sculpt tools has
+  // to swap which renderer draws the body.
+  const sculptNodeId = useStore((state) => state.sculptNodeId);
 
   const geoms = useMemo(() => {
     if (!sceneGraph) return [];
@@ -1639,8 +1659,15 @@ const SceneVisuals = ({ model, data, mujoco, sceneGraph, selectedNodeId, setSele
   const instancedBoxGeoms = allPrimitiveGeoms.filter(g => g.type === 'box' && g.staticBody && !g.customRender && g.nodeId !== selectedNodeId);
   const instancedNames = new Set(instancedBoxGeoms.map(g => g.name));
   const primitiveGeoms = allPrimitiveGeoms.filter(g => !instancedNames.has(g.name));
-  const staticMeshGeoms = geoms.filter(g => g.type === 'mesh' && !g.dynamic);
-  const dynamicMeshGeoms = geoms.filter(g => g.type === 'mesh' && g.dynamic);
+  // The body under the sculpt tools is drawn by SculptSurface, which owns the
+  // live mesh mid-stroke; the ordinary renderer would draw the last committed
+  // stroke right through it.
+  const sculptGeom = sculptNodeId ? geoms.find(g => g.type === 'mesh' && g.nodeId === sculptNodeId) : undefined;
+  // Picking a different base replaces the mesh wholesale, so the sculpting
+  // surface has to be remounted rather than left holding the old one.
+  const sculptVersion = sculptNodeId ? (findSceneNode(sceneGraph?.nodes ?? [], sculptNodeId)?.sculptVersion ?? 1) : 1;
+  const staticMeshGeoms = geoms.filter(g => g.type === 'mesh' && !g.dynamic && g !== sculptGeom);
+  const dynamicMeshGeoms = geoms.filter(g => g.type === 'mesh' && g.dynamic && g !== sculptGeom);
 
   const implicitGeoms = useMemo(() => {
     if (!model || !mujoco || !model.geom_type) return [];
@@ -1726,6 +1753,19 @@ const SceneVisuals = ({ model, data, mujoco, sceneGraph, selectedNodeId, setSele
             staticBody={g.staticBody}
           />
         ))}
+        {sculptGeom && (
+          <SculptSurface
+            key={`${sculptGeom.nodeId}:${sculptVersion}`}
+            nodeId={sculptGeom.nodeId}
+            geomName={sculptGeom.name}
+            color={sculptGeom.rgba || [0.82, 0.72, 0.62, 1]}
+            mujoco={mujoco}
+            model={model}
+            data={data}
+            renderVertices={sculptGeom.renderVertices || []}
+            faces={sculptGeom.faces || []}
+          />
+        )}
         <PulleyRopesRenderer model={model} data={data} mujoco={mujoco} sceneGraph={sceneGraph} />
         <CsgNegativeGhosts model={model} data={data} mujoco={mujoco} sceneGraph={sceneGraph} selectedNodeId={selectedNodeId} />
         <MouseDragForceRenderer model={model} data={data} mujoco={mujoco} />
@@ -2091,6 +2131,12 @@ function App() {
   const [isContourSliceModalOpen, setIsContourSliceModalOpen] = useState(false);
   const [isReliefCarveModalOpen, setIsReliefCarveModalOpen] = useState(false);
   const [isMoldModalOpen, setIsMoldModalOpen] = useState(false);
+  // The machine setup lives in the store rather than in local state: the bottom
+  // bar opens it, and the export modals link to it when a job needs a machine
+  // that is not connected yet.
+  const isMachineConfigOpen = useStore((s) => s.isMachineConfigOpen);
+  const setMachineConfigOpen = useStore((s) => s.setMachineConfigOpen);
+  const machineTarget = useStore((s) => s.machineTarget);
   const [isImportImageModalOpen, setIsImportImageModalOpen] = useState(false);
   const [droppedImportFile, setDroppedImportFile] = useState<File | null>(null);
   const [droppedImageFile, setDroppedImageFile] = useState<File | null>(null);
@@ -2329,6 +2375,7 @@ function App() {
     updateWedgeParams, updatePyramidParams, updateConeParams, updateTorusParams, updateTubeParams, updateCurveParams, updatePulleyParams, updateRopeParams,
     parentUnderSelected, setParentUnderSelected, updateNodeScript, updateNode,
     deleteNodeGeom, setGeomCsgOp,
+    sculptNodeId, setSculptNodeId, setSculptBase,
     undo, redo, undoStack, redoStack
   } = useStore();
 
@@ -2948,7 +2995,7 @@ function App() {
     }
   };
 
-  const handleAddComponentClick = (type: 'box' | 'sphere' | 'capsule' | 'cylinder' | 'bob' | 'gear' | 'wedge' | 'pulley_wheel' | 'pulley_rope' | 'mesh' | 'openscad' | 'pyramid' | 'cone' | 'torus' | 'tube' | 'ellipsoid' | 'curve' | 'ring') => {
+  const handleAddComponentClick = (type: 'box' | 'sphere' | 'capsule' | 'cylinder' | 'bob' | 'gear' | 'wedge' | 'pulley_wheel' | 'pulley_rope' | 'mesh' | 'openscad' | 'pyramid' | 'cone' | 'torus' | 'tube' | 'ellipsoid' | 'curve' | 'ring' | 'sculpt') => {
     if (selectedNodeId) {
       const parentNode = findNodeById(sceneGraph.nodes, selectedNodeId);
       if (parentNode) {
@@ -2961,6 +3008,34 @@ function App() {
     }
     addComponent(type, [0, 0, 0.15]); // Spawn slightly above floor
     setIsLeftSidebarOpen(false);
+  };
+
+  /**
+   * Adds a ball of clay and opens the sculpt tools on it.
+   *
+   * Making the object and then having to go and find the tools that act on it is
+   * two steps where the intent was one — nobody adds a sculpt in order to look
+   * at a sphere. The new node is picked out of the store afterwards because
+   * `addComponent` mints the id itself and does not hand it back.
+   */
+  const handleAddSculptClick = () => {
+    addComponent('sculpt', [0, 0, 0.2]);
+    setIsLeftSidebarOpen(false);
+    const created = [...useStore.getState().sceneGraph.nodes].reverse().find((n) => n.isSculpt);
+    if (created) useStore.getState().setSculptNodeId(created.id);
+  };
+
+  /**
+   * Switches a sculpt body to a different base.
+   *
+   * Confirmed only once there is something to lose. Asking before the first
+   * stroke would be a dialog in front of the one action every new sculpt starts
+   * with — trying the shapes to see which one fits.
+   */
+  const handleSculptBaseClick = (node: any, base: SculptBaseId, label: string) => {
+    if ((node.sculptBase || 'sphere') === base) return;
+    if (node.sculptEdited && !window.confirm(`Start over from the ${label} base? The sculpting on this body will be discarded.`)) return;
+    setSculptBase(node.id, base);
   };
 
   const renderHierarchyNode = useCallback((node: any, depth: number = 0): React.ReactNode => {
@@ -3859,6 +3934,20 @@ function App() {
               <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Ring</span>
             </div>
 
+            {/* Sculpt (free-form clay — the one shape not made from parameters) */}
+            <div
+              draggable
+              onDragStart={(e) => handleDragStart(e, 'sculpt')}
+              onClick={() => handleAddSculptClick()}
+              className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-blue-400 dark:hover:border-blue-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
+              title="Sculpt (a ball of clay you push into shape by hand — detail is added as you brush)"
+            >
+              <div className="p-1.5 bg-sky-50 dark:bg-sky-950/30 rounded-lg mb-1 group-hover:scale-105 transition-transform">
+                <Paintbrush className="w-4 h-4 text-sky-600 dark:text-sky-400" />
+              </div>
+              <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Sculpt</span>
+            </div>
+
             {/* Curve (rigid curved track) */}
             <div
               draggable
@@ -4196,6 +4285,9 @@ function App() {
 
           </div>
 
+          {/* Sculpt tool palette — only mounted while a body is open for sculpting */}
+          <SculptPanel />
+
           {/* Floating Mechanical & 3D Print Failure HUD */}
           <PrintAnalysisHUD activeSpotId={activeWeakSpot?.id} onSelectSpot={setActiveWeakSpot} />
 
@@ -4272,6 +4364,58 @@ function App() {
             </h2>
             
             <div className="flex flex-col gap-4">
+                {/* Sculpt: offered for any body carrying a mesh, not only for one
+                    that started as clay — an imported STL or a boolean result is
+                    a perfectly good thing to push around by hand. */}
+                {selectedNode.geoms?.some((g: any) => g.type === 'mesh' && g.renderVertices?.length) && (
+                  <button
+                    type="button"
+                    onClick={() => setSculptNodeId(selectedNode.id)}
+                    disabled={sculptNodeId === selectedNode.id}
+                    className="flex items-center justify-center gap-2 w-full py-2 rounded-lg text-xs font-bold transition-all bg-sky-600 hover:bg-sky-500 disabled:bg-slate-200 disabled:text-slate-400 text-white cursor-pointer disabled:cursor-default"
+                    title="Open the sculpting tools on this mesh. Pauses the simulation."
+                  >
+                    <Paintbrush className="w-3.5 h-3.5" />
+                    {sculptNodeId === selectedNode.id ? 'Sculpting…' : 'Sculpt This Mesh'}
+                  </button>
+                )}
+
+                {/* Base shape. Only for bodies that started as clay: replacing
+                    the mesh of an imported STL with a humanoid would be a
+                    delete wearing a dropdown's clothes. */}
+                {selectedNode.isSculpt && (
+                  <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-2">
+                    <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 flex items-center gap-1.5">
+                      <Shapes className="w-3.5 h-3.5 text-sky-500" /> Base Shape
+                    </h3>
+                    <div className="grid grid-cols-3 gap-1.5">
+                      {SCULPT_BASES.map((base) => (
+                        <button
+                          key={base.id}
+                          type="button"
+                          onClick={() => handleSculptBaseClick(selectedNode, base.id, base.label)}
+                          title={base.description}
+                          className={`py-1.5 px-1 rounded-lg border text-[10px] font-semibold transition-all cursor-pointer truncate ${
+                            (selectedNode.sculptBase || 'sphere') === base.id
+                              ? 'bg-sky-50 border-sky-400 text-sky-700'
+                              : 'bg-white border-slate-200 text-slate-500 hover:border-slate-300'
+                          }`}
+                        >
+                          {base.label}
+                        </button>
+                      ))}
+                    </div>
+                    <p className="text-[10px] leading-snug text-slate-500">
+                      {(SCULPT_BASES.find((b) => b.id === (selectedNode.sculptBase || 'sphere')) ?? SCULPT_BASES[0]).description}
+                    </p>
+                    {selectedNode.sculptEdited && (
+                      <p className="text-[10px] leading-snug text-amber-600">
+                        This one has been sculpted — changing the base starts it over.
+                      </p>
+                    )}
+                  </div>
+                )}
+
                 <div className="flex items-center justify-between p-3 bg-slate-50 border border-slate-200/60 rounded-lg">
                   <div>
                     <div className="text-xs font-semibold text-slate-700">Aerodynamics</div>
@@ -6303,6 +6447,13 @@ function App() {
                             >
                               <Minimize2 className="w-3 h-3" />
                             </button>
+                            <button
+                              onClick={() => downloadMeshGeomStl(g, g.name || selectedNode.name || 'mesh')}
+                              className="flex items-center justify-center gap-1 px-2 py-1.5 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded text-[10px] font-semibold text-emerald-700 transition-colors cursor-pointer"
+                              title="Download this geom on its own as a binary STL, in millimetres — not the whole scene the toolbar's STL export writes."
+                            >
+                              <Download className="w-3 h-3" /> STL
+                            </button>
                           </div>
                           {meshEditorGeom === g.name && (
                             <div className="flex flex-col gap-1.5">
@@ -7648,27 +7799,25 @@ THE SOFTWARE, PHYSICS SOLVERS, CSG COMPILERS, TOOLPATH CALCULATORS, AND MACHINE 
       />
       )}
 
-      {/* onOpenDocs lets the machine panel inside each modal deep-link to the
-          zeroing walkthrough, which is where a first-time user gets stuck. */}
+      {/* The zeroing walkthrough is deep-linked from the shared Machine Setup
+          dialog now, rather than from a copy of the machine panel in each of
+          these — see MachineConfigModal below. */}
       <ExportLaserCutModal
         isOpen={isLaserCutModalOpen}
         onClose={() => setIsLaserCutModalOpen(false)}
         scene={sceneGraph}
-        onOpenDocs={() => openDocs('zeroing')}
       />
 
       <ExportContourSliceModal
         isOpen={isContourSliceModalOpen}
         onClose={() => setIsContourSliceModalOpen(false)}
         scene={sceneGraph}
-        onOpenDocs={() => openDocs('zeroing')}
       />
 
       <ExportReliefCarveModal
         isOpen={isReliefCarveModalOpen}
         onClose={() => setIsReliefCarveModalOpen(false)}
         scene={sceneGraph}
-        onOpenDocs={() => openDocs('zeroing')}
       />
 
       <ExportMoldModal
@@ -7677,79 +7826,14 @@ THE SOFTWARE, PHYSICS SOLVERS, CSG COMPILERS, TOOLPATH CALCULATORS, AND MACHINE 
         scene={sceneGraph}
       />
 
-      {/* Bottom Status Bar matching Etch */}
-      {/* Below `lg` the bar wraps rather than squeezing — the scene metrics and
-          whether the simulation is running are both worth keeping. */}
-      <footer className="h-8 shrink-0 w-full bg-white dark:bg-slate-950 border-t border-slate-200 dark:border-slate-800/80 px-4 flex items-center justify-between z-20 text-[11px] text-slate-500 dark:text-slate-400 font-mono select-none transition-colors max-lg:h-auto max-lg:flex-wrap max-lg:justify-start max-lg:px-2 max-lg:py-1 max-lg:gap-x-3 max-lg:gap-y-1">
-        {/* Left: Component & Node Metrics */}
-        <div className="flex items-center gap-3 max-lg:shrink-0">
-          <div className="flex items-center gap-2">
-            <span className="font-semibold text-slate-700 dark:text-slate-300">Components: {sceneGraph?.nodes?.length || 0}</span>
-            <span>·</span>
-            <span>Geoms: {(() => {
-              let count = 0;
-              const walk = (nodes: any[]) => {
-                if (!Array.isArray(nodes)) return;
-                for (const n of nodes) {
-                  if (Array.isArray(n.geoms) && n.geoms.length > 0) {
-                    count += n.geoms.length;
-                  } else {
-                    count += 1;
-                  }
-                  if (n.children) walk(n.children);
-                }
-              };
-              walk(sceneGraph?.nodes || []);
-              return count;
-            })()}</span>
-            <span>·</span>
-            <span>Vertices: {(() => {
-              let count = 0;
-              const walkGeom = (g: any) => {
-                if (!g) return;
-                if (Array.isArray(g.vertices) && g.vertices.length > 0) {
-                  count += Math.floor(g.vertices.length / 3);
-                } else if (Array.isArray(g.renderVertices) && g.renderVertices.length > 0) {
-                  count += Math.floor(g.renderVertices.length / 3);
-                } else if (g.type === 'box' || g.type === 'cube' || g.type === 'plane') {
-                  count += 24;
-                } else if (g.type === 'capsule') {
-                  count += 48;
-                } else if (g.type === 'cylinder') {
-                  count += 64;
-                } else if (g.type === 'sphere' || g.type === 'ellipsoid') {
-                  count += 128;
-                } else {
-                  count += 24;
-                }
-              };
-              const walkNodes = (nodes: any[]) => {
-                if (!Array.isArray(nodes)) return;
-                for (const n of nodes) {
-                  if (Array.isArray(n.geoms) && n.geoms.length > 0) {
-                    n.geoms.forEach(walkGeom);
-                  } else if (Array.isArray(n.meshVertices) && n.meshVertices.length > 0) {
-                    count += Math.floor(n.meshVertices.length / 3);
-                  } else {
-                    count += 24;
-                  }
-                  if (n.children) walkNodes(n.children);
-                }
-              };
-              walkNodes(sceneGraph?.nodes || []);
-              return count;
-            })().toLocaleString()}</span>
-          </div>
-        </div>
+      <BottomStatusBar onOpenMachineConfig={() => setMachineConfigOpen(true)} />
 
-        {/* Right: Simulation Status */}
-        <div className="flex items-center gap-3 max-lg:shrink-0">
-          <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800">
-            <span className={`w-2 h-2 rounded-full ${isPlaying ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400'}`}></span>
-            <span className="text-slate-700 dark:text-slate-300 font-semibold">{isPlaying ? 'Simulation Running' : 'Simulation Paused'}</span>
-          </div>
-        </div>
-      </footer>
+      <MachineConfigModal
+        isOpen={isMachineConfigOpen}
+        onClose={() => setMachineConfigOpen(false)}
+        onOpenDocs={() => openDocs('zeroing')}
+        machineTarget={machineTarget}
+      />
     </div>
   );
 }

@@ -1,22 +1,20 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import {
-  X, Download, AlertCircle, Layers, Mountain, Cpu, Home, ShieldAlert, RefreshCw, Info, ChevronRight,
+  X, Download, AlertCircle, Layers, Mountain, Cpu, RefreshCw, Info, ChevronRight,
 } from 'lucide-react';
 import type { SceneGraph } from '../types/scene';
 import { exportContourSliceSvg, type ContourSliceOptions } from '../utils/contourSliceExporter';
 import { generateContourSliceGcode, DEFAULT_GCODE_OPTIONS } from '../utils/gcodeExporter';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
 import { NumberInput } from './NumberInput';
-import { MachineWorkOriginPanel } from './MachineWorkOriginPanel';
-import { JobOverrides, JobPauseBanner, JobPreflight, JobTransport } from './MachineJobControls';
+import { useStore } from '../store/useStore';
+import { JobPauseBanner, JobPreflight, JobResumeBanner, JobTransport } from './MachineJobControls';
 import { formatDuration } from '../utils/timeEstimate';
 import {
-  DEFAULT_MATERIAL,
   MATERIALS,
   describeSpeedRecommendation,
   materialSpec,
   recommendSpeeds,
-  type MaterialId,
 } from '../utils/feedsAndSpeeds';
 
 interface ExportContourSliceModalProps {
@@ -24,7 +22,6 @@ interface ExportContourSliceModalProps {
   onClose: () => void;
   scene: SceneGraph;
   /** Opens the app's zeroing walkthrough from the machine panel. */
-  onOpenDocs?: () => void;
 }
 
 const inputClass =
@@ -155,8 +152,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
   isOpen,
   onClose,
   scene,
-  onOpenDocs,
-}) => {
+  }) => {
   const [materialThicknessMm, setMaterialThicknessMm] = useState(3.0);
   const [layerOverride, setLayerOverride] = useState('');
   const [slicePosition, setSlicePosition] = useState<ContourSliceOptions['slicePosition']>('middle');
@@ -172,9 +168,16 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
   const [preview, setPreview] = useState<'sheets' | 'map'>('sheets');
 
   // G-Code & WebSerial States
-  const [machineMode, setMachineMode] = useState<'laser' | 'cnc'>('laser');
+  /*
+   * The machine and the material describe the bench, not this export, so they
+   * are chosen once in the status bar and read from the store here. They used
+   * to be local state in each modal, which let a laser cut and a contour slice
+   * of the same scene disagree about what they were being cut on.
+   */
+  const machineMode = useStore((s) => s.machineTarget);
+  const material = useStore((s) => s.material);
+  const setMachineConfigOpen = useStore((s) => s.setMachineConfigOpen);
   /** What is on the bed. Routing feeds and spindle speed both come from it. */
-  const [material, setMaterial] = useState<MaterialId>(DEFAULT_MATERIAL);
   /**
    * Spindle speed, or null to take the one the material and the bit imply.
    *
@@ -282,9 +285,10 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
       attachmentWidthMm,
       attachmentSpacingMm,
       attachmentHeightMm,
+      bitDiameterMm,
     });
   }, [exportResult, machineMode, cutFeedrate, spindleRpm, machineState.motion, laserPower, laserMaxPower, laserPasses, materialThicknessMm,
-      attachments, attachmentWidthMm, attachmentSpacingMm, attachmentHeightMm]);
+      attachments, attachmentWidthMm, attachmentSpacingMm, attachmentHeightMm, bitDiameterMm]);
 
   const previewSvg = useMemo(() => {
     if (!exportResult?.success) return '';
@@ -309,17 +313,10 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
     URL.revokeObjectURL(url);
   };
 
-  const handleConnectUsb = async () => {
-    if (machineState.connected) {
-      await webSerialManager.disconnect();
-    } else {
-      await webSerialManager.connect();
-    }
-  };
 
   const handleStartJob = () => {
     if (!gcodeResult?.gcode) return;
-    webSerialManager.startJob(gcodeResult.gcode);
+    webSerialManager.startJob(gcodeResult.gcode, gcodeResult.estimatedTimeSeconds);
   };
 
   const handleFrameTrace = async () => {
@@ -365,13 +362,12 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
               <Field
                 className="lg:col-span-2"
                 label="Target Cutter Type"
-                hint="Laser fires a beam straight through the sheet. CNC spins an end mill and cuts each layer in depth passes."
+                hint="Chosen in the status bar along the bottom of the window, because it is the same machine for every export. Laser fires a beam and cuts sharp inside corners. CNC spins an end mill, so it needs corner relief and cuts in depth passes."
               >
-                <Segmented
-                  value={machineMode}
-                  onChange={setMachineMode}
-                  options={[['laser', 'Laser Cutter'], ['cnc', 'CNC Router']] as const}
-                />
+                <div className={`${inputClass} flex items-center justify-between`}>
+                  <span className="font-semibold">{machineMode === 'laser' ? 'Laser Cutter' : 'CNC Router'}</span>
+                  <span className="text-[10px] text-slate-500">set in the status bar</span>
+                </div>
               </Field>
 
               <Field
@@ -388,17 +384,14 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
 
               <Field
                 label="Material"
-                hint="What is on the bed. In routing mode it sets the spindle speed and the feed: surface speed over cutter diameter gives the RPM, and chip-per-tooth times teeth times RPM gives the feed. Both are shown under Before You Start once a machine is connected."
+                hint="What is on the bed, chosen in the status bar. In routing mode it sets the spindle speed and the feed: surface speed over cutter diameter gives the RPM, and chip-per-tooth times teeth times RPM gives the feed. Both are shown under Before You Start once a machine is connected."
               >
-                <select
-                  value={material}
-                  onChange={(e) => setMaterial(e.target.value as MaterialId)}
-                  className={`${inputClass} cursor-pointer`}
-                >
-                  {MATERIALS.map((mat) => (
-                    <option key={mat.id} value={mat.id}>{mat.label}</option>
-                  ))}
-                </select>
+                <div className={`${inputClass} flex items-center justify-between`}>
+                  <span className="font-semibold">
+                    {MATERIALS.find((m) => m.id === material)?.label ?? material}
+                  </span>
+                  <span className="text-[10px] text-slate-500">set in the status bar</span>
+                </div>
               </Field>
 
 
@@ -741,6 +734,9 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
             showZTools={machineMode === 'cnc'}
           />
 
+          {/* The offer to pick a stopped job back up rather than recut it all */}
+          <JobResumeBanner machineState={machineState} showZTools={machineMode === 'cnc'} />
+
           {exportResult && !exportResult.success && (
             <div className="p-4 rounded-xl bg-red-500/10 border border-red-500/40 flex items-start space-x-2 text-xs text-red-700 dark:text-red-300">
               <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
@@ -752,6 +748,23 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
             <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/40 space-y-1.5">
               {exportResult.warnings.map((w, i) => (
                 <div key={i} className="flex items-start space-x-2 text-xs text-amber-800 dark:text-amber-300">
+                  <AlertCircle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+                  <span className="leading-relaxed">{w}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Contours the cutter is too fat to follow. Not a fit problem to be
+              tuned like the warnings above — this is geometry that will not be
+              on the finished stack at all. */}
+          {gcodeResult?.warnings && gcodeResult.warnings.length > 0 && (
+            <div className="p-3 rounded-xl bg-red-500/10 border border-red-500/40 space-y-1.5">
+              <div className="text-[10px] uppercase font-semibold tracking-wide text-red-700 dark:text-red-300">
+                Left out of the program
+              </div>
+              {gcodeResult.warnings.map((w, i) => (
+                <div key={i} className="flex items-start space-x-2 text-xs text-red-800 dark:text-red-300">
                   <AlertCircle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
                   <span className="leading-relaxed">{w}</span>
                 </div>
@@ -796,14 +809,19 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
             </div>
           )}
 
-          {/* WebSerial USB Control Panel */}
+          {/* What this job needs of the machine.
+              Connecting, homing, unlocking and zeroing live in the shared
+              Machine Setup dialog off the status bar — they describe the
+              machine rather than this job, and were repeated identically in
+              every export modal. What stays is job-specific: the cutter, where
+              the outline falls, and starting it. */}
           <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 text-white space-y-3">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center space-x-3">
                 <Cpu className="w-5 h-5 text-emerald-400" />
                 <div>
                   <h3 className="text-sm font-bold flex items-center space-x-2">
-                    <span>WebSerial USB Machine Interface</span>
+                    <span>Machine</span>
                     <span className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase ${
                       machineState.status === 'RUNNING' ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40' :
                       machineState.status.startsWith('PAUSED') ? 'bg-amber-500/20 text-amber-400 border border-amber-500/40 animate-pulse' :
@@ -813,62 +831,35 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                     </span>
                   </h3>
                   <p className="text-xs text-slate-400">
-                    {machineState.connected ? `Connected via USB serial (${machineState.portName})` : 'Connect your USB machine to cut contour slice layers directly'}
+                    {machineState.connected
+                      ? `Connected via USB serial (${machineState.portName})`
+                      : 'Not connected. Open Machine Setup to connect, home and zero.'}
                   </p>
                 </div>
               </div>
 
-              <div className="flex items-center space-x-2">
-                <button
-                  onClick={handleConnectUsb}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center space-x-1.5 cursor-pointer ${
-                    machineState.connected ? 'bg-slate-800 hover:bg-slate-700 text-slate-300' : 'bg-emerald-500 hover:bg-emerald-600 text-slate-950'
-                  }`}
-                >
-                  <Cpu className="w-3.5 h-3.5" />
-                  <span>{machineState.connected ? 'Disconnect USB' : 'Connect USB Machine'}</span>
-                </button>
-              </div>
+              <button
+                onClick={() => setMachineConfigOpen(true)}
+                className="px-3 py-1.5 rounded-lg text-xs font-bold bg-emerald-500 hover:bg-emerald-600 text-slate-950 flex items-center gap-1.5 cursor-pointer"
+              >
+                <Cpu className="w-3.5 h-3.5" />
+                <span>Machine Setup</span>
+              </button>
             </div>
 
-            {/* Connected Controls */}
             {machineState.connected && (
               <>
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 pt-2 border-t border-slate-800">
-                <div className="flex items-center space-x-2 bg-slate-950 p-2 rounded-lg border border-slate-800 text-xs font-mono">
-                  <span className="text-slate-500">MPos:</span>
-                  <span>X:{machineState.mpos.x.toFixed(1)} Y:{machineState.mpos.y.toFixed(1)} Z:{machineState.mpos.z.toFixed(1)}</span>
-                </div>
-
-                <div className="flex items-center space-x-2">
-                  <button
-                    onClick={() => webSerialManager.homeMachine()}
-                    className="flex-1 py-1.5 px-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-lg flex items-center justify-center space-x-1"
-                  >
-                    <Home className="w-3.5 h-3.5 text-blue-400" />
-                    <span>Home ($H)</span>
-                  </button>
-                </div>
-
-                <div className="flex items-center space-x-2">
-                  <button
-                    onClick={handleFrameTrace}
-                    disabled={!gcodeResult?.bounds}
-                    className="flex-1 py-1.5 px-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-200 text-xs font-semibold rounded-lg flex items-center justify-center space-x-1"
-                  >
-                    <RefreshCw className="w-3.5 h-3.5 text-emerald-400" />
-                    <span>Frame Laser</span>
-                  </button>
-                  <button
-                    onClick={() => webSerialManager.unlockAlarm()}
-                    className="py-1.5 px-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-lg flex items-center justify-center space-x-1"
-                  >
-                    <ShieldAlert className="w-3.5 h-3.5 text-red-400" />
-                    <span>Unlock ($X)</span>
-                  </button>
-                </div>
-
-                <div className="flex items-center space-x-2">
+              <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-800">
+                <button
+                  onClick={handleFrameTrace}
+                  disabled={!gcodeResult?.bounds}
+                  title="Trace the job's outline so you can check it lands on the sheet"
+                  className="py-1.5 px-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-200 text-xs font-semibold rounded-lg flex items-center justify-center space-x-1 cursor-pointer"
+                >
+                  <RefreshCw className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Frame Laser</span>
+                </button>
+                <div className="ml-auto">
                   <JobTransport
                     machineState={machineState}
                     canStart={!!gcodeResult?.success}
@@ -893,9 +884,19 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                     ? describeSpeedRecommendation(speeds, material, bitDiameterMm)
                     : null
                 }
+                extent={
+                  gcodeResult
+                    ? {
+                        ...gcodeResult.bounds,
+                        // A laser has no Z to check; a router sweeps from its
+                        // retract height down through the sheet.
+                        ...(machineMode === 'cnc'
+                          ? { minZ: -materialThicknessMm, maxZ: DEFAULT_GCODE_OPTIONS.safeZ }
+                          : {}),
+                      }
+                    : undefined
+                }
               />
-              <JobOverrides machineState={machineState} />
-              <MachineWorkOriginPanel machineState={machineState} showZProbe={machineMode === 'cnc'} onOpenDocs={onOpenDocs} />
               </>
             )}
           </div>

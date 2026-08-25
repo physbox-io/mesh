@@ -6,6 +6,7 @@ import type { LaserPanel, Point2D } from './laserCutExporter';
 import type { ContourSliceResult } from './contourSliceExporter';
 import { estimateGcodeTime } from './timeEstimate';
 import { DEFAULT_MOTION_PROFILE, type MotionProfile } from './motionProfile';
+import { offsetRegion, offsetNestedLoops } from './polygonOffset';
 
 export interface GcodeExportOptions {
   machineMode: 'laser' | 'cnc';
@@ -63,6 +64,24 @@ export interface GcodeExportOptions {
    * ignored.
    */
   attachmentHeightMm: number;
+  /**
+   * Whether to run the cutter's edge along the geometry instead of its centre.
+   *
+   * A laser beam is thin enough that the exporter can treat it as a line and
+   * correct for its width only where two parts have to meet. An end mill is a
+   * 3 or 6 mm circle, and driving its centre along a part's outline cuts a path
+   * a full radius inside that outline — every part undersized, every mortise
+   * oversized, by half the bit. So on a router the outline is offset outward by
+   * the radius and the holes inward by it, which is what puts the *edge* of the
+   * tool on the line the model drew.
+   *
+   * 'auto' does that whenever the machine is a router. 'off' cuts on the line,
+   * which is only right when the geometry has been compensated somewhere else.
+   * Ignored entirely in laser mode.
+   */
+  cutterCompensation: 'auto' | 'off';
+  /** Cutter diameter in mm, which is what the compensation is half of. */
+  bitDiameterMm: number;
 }
 
 export const DEFAULT_GCODE_OPTIONS: GcodeExportOptions = {
@@ -88,6 +107,8 @@ export const DEFAULT_GCODE_OPTIONS: GcodeExportOptions = {
   attachmentWidthMm: 4.0,
   attachmentSpacingMm: 80.0,
   attachmentHeightMm: 0.6,
+  cutterCompensation: 'auto',
+  bitDiameterMm: 3.175,
 };
 
 export interface GcodeOperation {
@@ -108,6 +129,17 @@ export interface GcodeExportResult {
   bounds: { minX: number; minY: number; maxX: number; maxY: number };
   /** How many holding attachments were left across the whole job. */
   attachmentCount: number;
+  /**
+   * How far the toolpath was offset from the geometry, in mm. Zero on a laser
+   * and whenever compensation is off; half the bit diameter otherwise.
+   */
+  compensationMm: number;
+  /**
+   * Features the cutter is too fat to enter, and which therefore are not in the
+   * output at all. Worth showing rather than swallowing: a panel that quietly
+   * comes off the machine with none of its bolt holes is a wasted sheet.
+   */
+  warnings?: string[];
   error?: string;
 }
 
@@ -128,6 +160,30 @@ function laserGuideS(options: GcodeExportOptions): number {
 function laserPassCount(options: GcodeExportOptions): number {
   if (options.machineMode !== 'laser') return 1;
   return Math.max(1, Math.round(options.laserPasses));
+}
+
+/**
+ * How far the toolpath has to stand off the geometry, in mm.
+ *
+ * Zero for a laser: the beam's width is already accounted for upstream, where
+ * the kerf is folded into the joint geometry itself, and offsetting again here
+ * would correct for it twice.
+ */
+function compensationRadius(options: GcodeExportOptions): number {
+  if (options.machineMode !== 'cnc') return 0;
+  if (options.cutterCompensation === 'off') return 0;
+  return Math.max(0, options.bitDiameterMm / 2);
+}
+
+/**
+ * The narrow dimension of a loop's bounding box — a good enough answer to "how
+ * wide is this feature" for telling someone their bit will not fit into it.
+ */
+function featureWidth(pts: Point2D[]): number {
+  if (!pts || pts.length === 0) return 0;
+  const xs = pts.map((p) => p.x);
+  const ys = pts.map((p) => p.y);
+  return Math.min(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys));
 }
 
 function polygonPerimeter(pts: Point2D[]): number {
@@ -275,6 +331,7 @@ export function generateLaserCutGcode(
       operations: [],
       bounds: { minX: 0, minY: 0, maxX: 0, maxY: 0 },
       attachmentCount: 0,
+      compensationMm: 0,
       error: 'No panels provided for G-code generation.',
     };
   }
@@ -301,6 +358,9 @@ export function generateLaserCutGcode(
   const sheetCount = sheetIndices.length;
   const operations: GcodeOperation[] = [];
 
+  const radius = compensationRadius(options);
+  const warnings: string[] = [];
+
   let lines: string[] = [];
   lines.push(`; --------------------------------------------------`);
   lines.push(`; PhysBox Generated G-Code (${options.machineMode.toUpperCase()} Mode)`);
@@ -313,6 +373,12 @@ export function generateLaserCutGcode(
     lines.push(
       `; Attachments: ${f(options.attachmentWidthMm)}mm every ~${f(options.attachmentSpacingMm)}mm` +
         (options.machineMode === 'cnc' ? `, ${f(options.attachmentHeightMm)}mm of stock left under each` : ` (beam off)`)
+    );
+  }
+  if (radius > 0) {
+    lines.push(
+      `; Cutter comp: paths offset ${f(radius)}mm for a ${f(options.bitDiameterMm)}mm bit` +
+        ` — outlines run outside the line, holes inside it`
     );
   }
   lines.push(`; --------------------------------------------------`);
@@ -365,9 +431,35 @@ export function generateLaserCutGcode(
       const pos = panel.placedPos2D || { x: 0, y: 0 };
       lines.push(`; --- Panel: ${panel.name} ---`);
 
+      // What the tool actually follows. On a laser that is the geometry itself;
+      // on a router it stands half a bit outside the outline and half a bit
+      // inside every hole, so that the cut edge lands on the modelled line.
+      let outerPaths: Point2D[][] = panel.outerPolygon2D.length >= 3 ? [panel.outerPolygon2D] : [];
+      let holePaths: Point2D[][] = panel.innerCutouts2D.filter((c) => c.length >= 3);
+
+      if (radius > 0) {
+        const comp = offsetRegion(panel.outerPolygon2D, holePaths, radius);
+        outerPaths = comp.outer;
+        holePaths = comp.holes;
+
+        for (const i of comp.droppedHoles) {
+          const dropped = panel.innerCutouts2D[i];
+          warnings.push(
+            `${panel.name}: a cutout ${f(featureWidth(dropped))}mm across is narrower than the ` +
+              `${f(options.bitDiameterMm)}mm cutter and has been left out of the program.`
+          );
+        }
+        if (panel.outerPolygon2D.length >= 3 && outerPaths.length === 0) {
+          warnings.push(
+            `${panel.name}: the whole panel is narrower than the ${f(options.bitDiameterMm)}mm ` +
+              `cutter and cannot be cut.`
+          );
+        }
+      }
+
       // 1. Cut inner cutouts/mortises FIRST so material doesn't shift
-      for (let cIdx = 0; cIdx < panel.innerCutouts2D.length; cIdx++) {
-        const cutout = panel.innerCutouts2D[cIdx];
+      for (let cIdx = 0; cIdx < holePaths.length; cIdx++) {
+        const cutout = holePaths[cIdx];
         if (cutout.length < 3) continue;
 
         operations.push({
@@ -382,20 +474,25 @@ export function generateLaserCutGcode(
       }
 
       // 2. Cut outer boundary polygon LAST
-      if (panel.outerPolygon2D.length >= 3) {
+      for (let oIdx = 0; oIdx < outerPaths.length; oIdx++) {
+        const outline = outerPaths[oIdx];
+        if (outline.length < 3) continue;
+
         operations.push({
-          id: `${panel.id}_outer`,
-          name: `${panel.name} Outline`,
+          id: outerPaths.length > 1 ? `${panel.id}_outer_${oIdx}` : `${panel.id}_outer`,
+          name: outerPaths.length > 1
+            ? `${panel.name} Outline (part ${oIdx + 1} of ${outerPaths.length})`
+            : `${panel.name} Outline`,
           type: 'cut',
           sheetIndex: sIdx,
         });
 
         // Only the outline gets attachments: it is the cut that frees the panel,
         // and a bridge left across a mortise would block the tab meant to enter it.
-        const spans = planAttachments(polygonPerimeter(panel.outerPolygon2D), options);
+        const spans = planAttachments(polygonPerimeter(outline), options);
         attachmentCount += spans.length;
-        totalCutDistanceMm += polygonPerimeter(panel.outerPolygon2D);
-        lines.push(...generateLoopGcode(panel.outerPolygon2D, pos, options, spans));
+        totalCutDistanceMm += polygonPerimeter(outline);
+        lines.push(...generateLoopGcode(outline, pos, options, spans));
       }
     }
   }
@@ -432,8 +529,18 @@ export function generateLaserCutGcode(
     estimatedTimeSeconds,
     sheetCount,
     operations,
-    bounds: { minX, minY, maxX, maxY },
+    // The tool runs a radius outside the outermost outline, so that is what the
+    // job really occupies — which is what the framing trace and the travel
+    // check downstream both need to know.
+    bounds: {
+      minX: minX - radius,
+      minY: minY - radius,
+      maxX: maxX + radius,
+      maxY: maxY + radius,
+    },
     attachmentCount,
+    compensationMm: radius,
+    warnings: warnings.length > 0 ? warnings : undefined,
   };
 }
 
@@ -575,6 +682,7 @@ export function generateContourSliceGcode(
       operations: [],
       bounds: { minX: 0, minY: 0, maxX: 0, maxY: 0 },
       attachmentCount: 0,
+      compensationMm: 0,
       error: 'Invalid contour slice result provided.',
     };
   }
@@ -582,6 +690,7 @@ export function generateContourSliceGcode(
   const layers = result.layers;
   const sheetCount = layers.length;
   const operations: GcodeOperation[] = [];
+  const radius = compensationRadius(options);
 
   let lines: string[] = [];
   lines.push(`; --------------------------------------------------`);
@@ -594,6 +703,11 @@ export function generateContourSliceGcode(
     lines.push(
       `; Attachments: ${f(options.attachmentWidthMm)}mm every ~${f(options.attachmentSpacingMm)}mm` +
         (options.machineMode === 'cnc' ? `, ${f(options.attachmentHeightMm)}mm of stock left under each` : ` (beam off)`)
+    );
+  }
+  if (radius > 0) {
+    lines.push(
+      `; Cutter comp: paths offset ${f(radius)}mm for a ${f(options.bitDiameterMm)}mm bit`
     );
   }
   lines.push(`; --------------------------------------------------`);
@@ -610,6 +724,7 @@ export function generateContourSliceGcode(
   let totalCutDistanceMm = 0;
   let attachmentCount = 0;
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  const warnings: string[] = [];
 
   for (let lIdx = 0; lIdx < layers.length; lIdx++) {
     const layer = layers[lIdx];
@@ -643,8 +758,25 @@ export function generateContourSliceGcode(
     lines.push(`; CONTOUR LAYER ${lIdx + 1} of ${sheetCount} (Z = ${f(layer.z * 1000)}mm)`);
     lines.push(`; ==================================================`);
 
-    for (let cIdx = 0; cIdx < loops.length; cIdx++) {
-      const contour = loops[cIdx];
+    // On a router the tool has to stand off each contour by its own radius, and
+    // which side to stand off on depends on whether the contour bounds material
+    // or a void — which is what the nesting says. A layer's holes are genuine
+    // holes in the slice, so the tool goes inside them and outside everything
+    // else.
+    let cutPaths: Point2D[][] = loops.filter((l) => l.length >= 3);
+    if (radius > 0) {
+      const comp = offsetNestedLoops(cutPaths, radius);
+      for (const i of comp.dropped) {
+        warnings.push(
+          `Layer ${lIdx + 1}: a contour ${f(featureWidth(cutPaths[i]))}mm across is smaller than ` +
+            `the ${f(options.bitDiameterMm)}mm cutter and has been left out of the program.`
+        );
+      }
+      cutPaths = comp.paths;
+    }
+
+    for (let cIdx = 0; cIdx < cutPaths.length; cIdx++) {
+      const contour = cutPaths[cIdx];
       if (contour.length < 3) continue;
 
       operations.push({
@@ -693,5 +825,7 @@ export function generateContourSliceGcode(
     operations,
     bounds: { minX: isFinite(minX) ? minX : 0, minY: isFinite(minY) ? minY : 0, maxX: isFinite(maxX) ? maxX : 0, maxY: isFinite(maxY) ? maxY : 0 },
     attachmentCount,
+    compensationMm: radius,
+    warnings: warnings.length > 0 ? warnings : undefined,
   };
 }

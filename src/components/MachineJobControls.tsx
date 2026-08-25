@@ -1,6 +1,7 @@
 import React from 'react';
 import { AlertCircle, Play, Pause, Square, Hand, ChevronsDown, Gauge, RotateCcw } from 'lucide-react';
 import { webSerialManager, type MachineState, type OverrideStep } from '../utils/webSerialManager';
+import { checkJobEnvelope, type JobExtent } from '../utils/workEnvelope';
 
 /**
  * Running a job from the browser: stop it, pick it up again, and deal with what
@@ -122,6 +123,131 @@ export const JobPauseBanner: React.FC<{
 };
 
 /**
+ * The offer to pick a job back up where it stopped.
+ *
+ * This is the banner that saves the afternoon. Everything that kills a carve
+ * early — a snapped cutter, a limit switch, a nudged USB cable — kills it hours
+ * in, and until now the only way back was to run the whole file again from the
+ * top, recutting hours of finished surface to reach the point it stopped at.
+ *
+ * Two things have to be said plainly before anyone presses it. The first is the
+ * depth: a resume rapids across the work and then descends to whatever Z the
+ * program had reached, and the operator is the only one who can confirm that
+ * the stock in front of them is still the shape the program thinks it is. The
+ * second is the tool. A resume after a snapped bit is a resume onto a new bit
+ * of a different length, which makes the existing Z datum wrong in the
+ * direction of driving it into the work — so the line number is offered as an
+ * editable field rather than a fait accompli, and the Z warning is not
+ * dismissible.
+ */
+export const JobResumeBanner: React.FC<{
+  machineState: MachineState;
+  /** A laser has no Z to descend to, so it gets none of the depth talk. */
+  showZTools?: boolean;
+}> = ({ machineState, showZTools = true }) => {
+  const resume = machineState.resume;
+  const [line, setLine] = React.useState<number | null>(null);
+  const [error, setError] = React.useState<string | null>(null);
+
+  const running = machineState.status === 'RUNNING' || machineState.status.startsWith('PAUSED');
+  const target = line ?? resume?.fromLine ?? 0;
+  const preview = React.useMemo(
+    () => (resume ? webSerialManager.previewResume(target) : null),
+    [resume, target]
+  );
+
+  if (!resume || running) return null;
+
+  const why =
+    resume.reason === 'alarm'
+      ? 'The controller alarmed — a limit switch, or a reset part way through.'
+      : resume.reason === 'disconnected'
+        ? 'The connection to the machine dropped.'
+        : 'The job was stopped.';
+
+  const depth = preview?.state.position.z;
+  const done = Math.round((resume.fromLine / Math.max(1, resume.totalLines)) * 100);
+
+  const go = () => {
+    const res = webSerialManager.resumeFromLine(target);
+    setError(res.ok ? null : res.message);
+  };
+
+  return (
+    <div className="p-4 rounded-xl bg-sky-500/10 border-2 border-sky-500 flex flex-col space-y-3 text-sky-900 dark:text-sky-200">
+      <div className="flex items-center space-x-3">
+        <RotateCcw className="w-6 h-6 text-sky-500 flex-shrink-0" />
+        <div>
+          <h4 className="font-bold text-sm">Job stopped {done}% of the way through</h4>
+          <p className="text-xs leading-relaxed font-semibold">
+            {why} It reached line {resume.fromLine.toLocaleString()} of{' '}
+            {resume.totalLines.toLocaleString()} — it can be picked up from there instead of
+            starting again.
+          </p>
+        </div>
+      </div>
+
+      {showZTools && (
+        <p className="text-[11px] leading-relaxed">
+          Before resuming: clear the tool from the work by hand, and re-home the machine if it
+          alarmed. If the bit was changed, its length is different and the Z zero is now wrong —
+          touch off again first.
+          {depth !== null && depth !== undefined && (
+            <> Resuming will move over the stopping point and descend to <strong>Z{depth.toFixed(2)} mm</strong>.</>
+          )}
+        </p>
+      )}
+
+      {preview?.state.uncertain && (
+        <p className="text-[11px] leading-relaxed font-semibold text-amber-700 dark:text-amber-300">
+          {preview.state.uncertainBecause}
+        </p>
+      )}
+
+      {error && (
+        <p className="text-[11px] leading-relaxed font-semibold text-red-700 dark:text-red-300">{error}</p>
+      )}
+
+      <div className="flex flex-wrap items-center justify-end gap-2 pt-2 border-t border-sky-500/30">
+        <label className="flex items-center gap-1.5 text-[11px] font-semibold mr-auto">
+          <span>Resume from line</span>
+          <input
+            type="number"
+            min={0}
+            max={resume.totalLines}
+            value={target}
+            onChange={(e) => setLine(Math.max(0, Math.min(resume.totalLines, parseInt(e.target.value, 10) || 0)))}
+            className="w-24 bg-white dark:bg-slate-900 border border-sky-500/40 rounded px-1.5 py-1 font-mono text-[11px]"
+            title="Back this off a little to recut the last stretch, which is usually safer than trying to land exactly on the break"
+          />
+        </label>
+        <button
+          onClick={() => webSerialManager.clearResumePoint()}
+          className="px-3 py-1.5 bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-100 text-xs font-semibold rounded-lg cursor-pointer"
+        >
+          Discard
+        </button>
+        <button
+          onClick={go}
+          disabled={!machineState.connected || machineState.needsZZero}
+          title={
+            !machineState.connected
+              ? 'Connect to the machine first'
+              : machineState.needsZZero
+                ? 'Set Z zero for the tool that is in the spindle now'
+                : 'Rebuild the machine state and carry on from this line'
+          }
+          className="px-3 py-1.5 bg-sky-500 hover:bg-sky-600 disabled:opacity-40 disabled:cursor-not-allowed text-slate-950 text-xs font-bold rounded-lg flex items-center space-x-1.5 cursor-pointer"
+        >
+          <Play className="w-3.5 h-3.5 fill-current" />
+          <span>Resume from line {target.toLocaleString()}</span>
+        </button>
+      </div>
+    </div>
+  );
+};
+
+/**
  * Start / pause / resume / stop, as one control that knows which of the four is
  * meaningful right now.
  *
@@ -141,6 +267,7 @@ export const JobTransport: React.FC<{
 }> = ({ machineState, canStart, onStart, startLabel, variant = 'footer' }) => {
   const running = machineState.status === 'RUNNING';
   const paused = machineState.status.startsWith('PAUSED');
+  const parked = machineState.status === 'PAUSED_PARKED';
 
   const base =
     variant === 'footer'
@@ -158,6 +285,34 @@ export const JobTransport: React.FC<{
         <Play className={`${icon} fill-current`} />
         <span>{startLabel}</span>
       </button>
+    );
+  }
+
+  if (parked) {
+    return (
+      <div className={variant === 'footer' ? 'flex items-center gap-2' : 'flex items-center gap-2 w-full'}>
+        <button
+          onClick={() => webSerialManager.resumeFromPark()}
+          disabled={machineState.needsZZero}
+          title={
+            machineState.needsZZero
+              ? 'Set Z zero for the new tool first'
+              : 'Drive back over the parked point and carry on cutting from the line that was actually reached'
+          }
+          className={`${base} bg-emerald-500 hover:bg-emerald-600 disabled:opacity-40 disabled:cursor-not-allowed text-slate-950`}
+        >
+          <Play className={`${icon} fill-current`} />
+          <span>Resume Here</span>
+        </button>
+        <button
+          onClick={() => webSerialManager.discardPark()}
+          title="Give up on the parked job. The machine stays where it is; the program is let go."
+          className={`${base} bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200`}
+        >
+          <Square className={icon} />
+          <span>Discard</span>
+        </button>
+      </div>
     );
   }
 
@@ -183,9 +338,20 @@ export const JobTransport: React.FC<{
           <span>Resume</span>
         </button>
       )}
+      {/* The gap between "pause" and "abandon". A feed hold leaves the tool
+          sitting in the cut and GRBL refuses to jog in Hold, so pausing to
+          actually look at the work used to mean scrapping the job. */}
+      <button
+        onClick={() => webSerialManager.parkJob()}
+        title="Stop the cut, retract, and hand the machine back so you can jog it about. The line actually reached is kept, so it can carry on from there."
+        className={`${base} bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200`}
+      >
+        <ChevronsDown className={icon} />
+        <span>Park</span>
+      </button>
       <button
         onClick={() => webSerialManager.cancelJob()}
-        title="Soft reset. This stops the machine now and loses the position — the job cannot be picked back up"
+        title="Soft reset. This stops the machine now and loses the position — the line it reached is kept, so the job can be resumed once the machine has been re-homed and re-zeroed"
         className={`${base} bg-red-600 hover:bg-red-700 text-white`}
       >
         <Square className={icon} />
@@ -224,7 +390,18 @@ export const JobPreflight: React.FC<{
   origin: string;
   /** Anything the recommendation had to compromise on, in one sentence. */
   caveat?: string | null;
-}> = ({ machineState, tool, secondTool, rpm, material, origin, caveat }) => {
+  /**
+   * The box the job sweeps, in work coordinates, checked against the machine's
+   * own travel limits.
+   *
+   * The controller has been asked what it can do since the motion profile went
+   * in; three more settings in the same `$$` dump — `$130` to `$132` — say how
+   * far it can go, and nothing was reading them. So a 600 mm layout exported
+   * cheerfully onto a 400 mm machine and the first anyone heard of it was the
+   * gantry arriving at the end of its rail.
+   */
+  extent?: JobExtent;
+}> = ({ machineState, tool, secondTool, rpm, material, origin, caveat, extent }) => {
   // Only while it is worth reading: mid-job the pause banner and the progress
   // bar are what matters, and a checklist for a job already running is noise.
   if (!machineState.connected) return null;
@@ -261,6 +438,18 @@ export const JobPreflight: React.FC<{
   }
   rows.push({ n: rows.length + 1, label: 'Zero on', value: origin });
 
+  // The work origin in machine coordinates is the difference between where the
+  // machine says it is and where the job says it is — which is exactly the
+  // offset the job will be run at.
+  const workOrigin = {
+    x: machineState.mpos.x - machineState.wpos.x,
+    y: machineState.mpos.y - machineState.wpos.y,
+    z: machineState.mpos.z - machineState.wpos.z,
+  };
+  const envelope = extent
+    ? checkJobEnvelope(extent, machineState.motion, workOrigin, machineState.mpos)
+    : null;
+
   return (
     <div className="pt-3 border-t border-slate-800 space-y-2">
       <h4 className="text-xs font-bold uppercase tracking-wide text-slate-400">Before you start</h4>
@@ -274,6 +463,38 @@ export const JobPreflight: React.FC<{
         ))}
       </ol>
       {caveat && <p className="text-[11px] leading-relaxed text-amber-400">{caveat}</p>}
+
+      {envelope && envelope.problems.length > 0 && (
+        <div className="rounded-lg bg-red-500/10 border border-red-500/40 px-2.5 py-2 space-y-1.5">
+          <div className="flex items-center gap-1.5 text-[10px] uppercase font-bold tracking-wide text-red-400">
+            <AlertCircle className="w-3.5 h-3.5" />
+            <span>This job does not fit the machine</span>
+          </div>
+          {envelope.problems.map((p, i) => (
+            <p key={i} className="text-[11px] leading-relaxed text-red-300">{p.message}</p>
+          ))}
+          {machineState.motion.softLimits && (
+            <p className="text-[11px] leading-relaxed text-red-400/80">
+              Soft limits are on, so the controller will alarm and stop rather than drive into the
+              stop — but it will do so partway through, with the work already cut into.
+            </p>
+          )}
+        </div>
+      )}
+
+      {envelope && envelope.problems.length === 0 && envelope.sizeChecked && (
+        <p className="text-[11px] leading-relaxed text-slate-500">
+          {envelope.placementChecked
+            ? `Fits the machine, and fits from this work origin.`
+            : `Fits the machine. ${envelope.placementSkippedBecause ?? ''}`}
+        </p>
+      )}
+
+      {envelope && !envelope.sizeChecked && (
+        <p className="text-[11px] leading-relaxed text-slate-500">
+          {envelope.placementSkippedBecause}
+        </p>
+      )}
     </div>
   );
 };

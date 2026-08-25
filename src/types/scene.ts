@@ -145,6 +145,22 @@ export interface SceneNode {
   csgCentroid?: number[];   // centroid offset applied to the compiled body frame
   csgWarning?: string;      // e.g. "no hole axis found, colliding as primitives"
   csgError?: string;
+  /**
+   * A free-form sculpted body: its mesh geom is not derived from parameters, so
+   * nothing may regenerate it. The sculpt tools own it, and the primitive
+   * sliders in the inspector have nothing to act on.
+   */
+  isSculpt?: boolean;
+  /** Which base shape it was started from. See utils/sculptBases.ts. */
+  sculptBase?: string;
+  /**
+   * Bumped whenever the mesh is replaced wholesale rather than edited — picking
+   * a different base. The viewport keys its sculpting surface on this, so the
+   * new mesh is loaded instead of the old one being carried on with.
+   */
+  sculptVersion?: number;
+  /** Set once a stroke has landed, so switching base can warn before discarding it. */
+  sculptEdited?: boolean;
   isComposite?: boolean;
   compositeType?: 'cable' | 'grid' | 'rope' | 'cloth';
   compositeCount?: string;

@@ -119,8 +119,10 @@ describe('California relief preset', () => {
     expect(advised.warnings).toHaveLength(1);
     expect(advised.warnings[0]).toMatch(/diameters of stickout/);
     expect(advised.toolChange).toBe(true);
-    // Sweeps the long way: the map is taller than it is wide.
-    expect(advised.gcode).toMatch(/along Y/);
+    // Sweeps the long way: the map is taller than it is wide. 90 degrees from
+    // +X is the Y sweep, which is how the header names it now that a raster can
+    // run at any angle.
+    expect(advised.gcode).toMatch(/raster at 90 degrees/);
   });
 
   it('cuts the full relief depth and never breaks through the stock', () => {

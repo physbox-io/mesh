@@ -21,6 +21,17 @@
 import type { SceneGraph } from '../types/scene';
 import { collectSceneTriangles } from './contourSliceExporter';
 import { warpGcode, type ProbeGrid } from './meshLeveler';
+import {
+  clearingRings,
+  feedForEngagement,
+  stepdownForEngagement,
+  type ClearingRegion,
+} from './adaptiveClearing';
+import {
+  finishingPasses,
+  describeFinishingStrategy,
+  type FinishingStrategy,
+} from './finishingPaths';
 import { estimateGcodeTime } from './timeEstimate';
 import { DEFAULT_MOTION_PROFILE, type MotionProfile } from './motionProfile';
 import {
@@ -143,6 +154,27 @@ export interface ReliefCarveOptions {
   roughingGeometry: CutterGeometry;
   /** Roughing Z stepdown per layer in mm. */
   roughingStepdownMm: number;
+  /**
+   * How the roughing tool gets through each slab of waste.
+   *
+   * 'raster' sweeps back and forth in parallel lines. Simple, and the stepover
+   * describes the bite only in the middle of a long straight line: every time a
+   * line meets a concave part of the boundary or crosses a narrow channel the
+   * tool is suddenly cutting full width. The stepdown then has to be set for
+   * that worst case and paid for over the whole job.
+   *
+   * 'adaptive' walks the region's own contours instead, outermost ring first,
+   * so every ring but the first has open air on its outer side and the bite
+   * really is the stepover — in corners too. With the spike gone the stepdown
+   * goes up several times over, which is where the time is saved.
+   */
+  roughingStrategy: 'raster' | 'adaptive';
+  /**
+   * Radial bite for the roughing pass, mm. Zero derives one from the strategy:
+   * 45% of the cutter for a raster, 20% for an adaptive clear, which is the
+   * trade the deeper stepdown pays for.
+   */
+  roughingStepoverMm: number;
   /** Roughing cut feedrate in mm/min. */
   roughingFeedrate: number;
   /** Z plunge rate in mm/min. */
@@ -186,8 +218,33 @@ export interface ReliefCarveOptions {
   finishingFeedrate: number;
   /** Finishing Z plunge rate in mm/min. */
   finishingPlungeRate: number;
-  /** Which axis the finishing passes sweep along. */
+  /** Which axis the finishing passes sweep along. The base angle for a raster. */
   finishingDirection: 'x' | 'y';
+  /**
+   * How the finishing passes are laid out in plan: a parallel raster, a
+   * crosshatch, rings, a spiral, a waterline, or the hybrid of waterline and
+   * raster that picks whichever suits each part of the surface.
+   *
+   * A raster is the cheapest to cut and the one whose direction you can see in
+   * the finished surface. Everything else here trades cutting time for a
+   * surface that does not carry a single direction across the whole model. See
+   * utils/finishingPaths.ts.
+   */
+  finishingStrategy: FinishingStrategy;
+  /**
+   * Raster angle in degrees from +X, for the strategies that use one. Undefined
+   * takes the angle from `finishingDirection`, so 0 for 'x' and 90 for 'y'.
+   *
+   * An angle is not a cosmetic choice on wood: passes running across the grain
+   * tear it, and 45 degrees is the usual compromise when a feature's long axis
+   * and the grain do not agree.
+   */
+  finishingAngleDeg?: number;
+  /**
+   * Slope, in degrees from horizontal, at which the hybrid strategy hands over
+   * from raster to waterline. Ignored by every other strategy.
+   */
+  finishingSteepAngleDeg: number;
   /**
    * Angle below horizontal at which the cutter descends into the material at
    * the head of a pass. 0 plunges straight down, which is what a cutter is
@@ -260,6 +317,8 @@ export const DEFAULT_RELIEF_OPTIONS: ReliefCarveOptions = {
   roughingFlutes: 2,
   roughingGeometry: 'upcut',
   roughingStepdownMm: 2.0,
+  roughingStrategy: 'adaptive',
+  roughingStepoverMm: 0,
   roughingFeedrate: 1200,
   roughingPlungeRate: 300,
   roughingAllowanceMm: 0.5,
@@ -274,6 +333,8 @@ export const DEFAULT_RELIEF_OPTIONS: ReliefCarveOptions = {
   finishingFeedrate: 1500,
   finishingPlungeRate: 300,
   finishingDirection: 'x',
+  finishingStrategy: 'raster',
+  finishingSteepAngleDeg: 35,
   leadInAngleDeg: 15,
   toolBodyClearance: true,
   finishingShankDiaMm: 0,
@@ -648,6 +709,17 @@ export function deriveReliefFeeds(
 
 /** A finishing point this close to the straight line through its neighbours is noise (mm). */
 const PATH_SIMPLIFY_MM = 0.01;
+
+/**
+ * The same idea for roughing, an order of magnitude looser.
+ *
+ * Roughing leaves an allowance for the finishing pass to take off, so a
+ * deviation of a twentieth of a millimetre on a roughing ring is invisible in
+ * the finished piece — it comes off anyway. Holding roughing to the finishing
+ * tolerance costs tens of thousands of lines to describe curves that nothing
+ * will ever see.
+ */
+const ROUGH_SIMPLIFY_MM = 0.05;
 /** How far the simplifier looks ahead before it commits to a point. */
 const SIMPLIFY_LOOKAHEAD = 48;
 /** Preview vertex budget — past this the viewport, not the mill, is the bottleneck. */
@@ -1600,8 +1672,25 @@ export function generateReliefCarveGcode(
 
   if (opts.roughingEnabled) {
     const roughMap = dilateForTool(surface, roughRad, false, bodyFor(opts.roughingToolDiaMm, 0, 0));
-    const stepdown = Math.max(0.1, opts.roughingStepdownMm);
-    const roughStepover = Math.max(0.2, opts.roughingToolDiaMm * 0.45);
+    const adaptive = opts.roughingStrategy === 'adaptive';
+
+    // A raster's bite is only the stepover on a straight run; an adaptive clear
+    // holds it everywhere, corners included. That is what lets the radial bite
+    // come down and the depth go up.
+    const roughStepover = Math.max(
+      0.2,
+      opts.roughingStepoverMm > 0
+        ? opts.roughingStepoverMm
+        : opts.roughingToolDiaMm * (adaptive ? 0.2 : 0.45)
+    );
+    const engagement = roughStepover / Math.max(1e-6, opts.roughingToolDiaMm);
+    const baseStepdown = Math.max(0.1, opts.roughingStepdownMm);
+    // The whole point of holding the engagement down is being able to take the
+    // depth up; taking the one without the other is strictly slower than the
+    // raster it replaced.
+    const stepdown = adaptive
+      ? stepdownForEngagement(opts.roughingToolDiaMm, engagement, baseStepdown)
+      : baseStepdown;
 
     // Deepest the roughing tool is allowed to go: the allowance above the
     // lowest point it can reach at all.
@@ -1611,8 +1700,20 @@ export function generateReliefCarveGcode(
     }
     const roughFloor = deepest + allowance;
 
+    // The last layer sits exactly at the floor, where the only material left to
+    // take is at the single deepest point of the relief — so it clears next to
+    // nothing, and all the real work happens on the layers above it. A stepdown
+    // as deep as the relief therefore leaves no useful layer at all: the loop
+    // below produces none, and roughing quietly does nothing.
+    //
+    // Halving is the guard. It matters more now than it did, because an
+    // adaptive clear asks for a much deeper stepdown and a shallow relief is
+    // exactly where that ambition outruns the material available to cut.
+    const roughDepth = Math.abs(Math.min(0, roughFloor));
+    const layerStep = Math.min(stepdown, Math.max(0.1, roughDepth / 2));
+
     const layers: number[] = [];
-    for (let z = -stepdown; z > roughFloor + 1e-6; z -= stepdown) layers.push(z);
+    for (let z = -layerStep; z > roughFloor + 1e-6; z -= layerStep) layers.push(z);
     if (roughFloor < -1e-6) layers.push(roughFloor);
     roughingPassCount = layers.length;
 
@@ -1626,14 +1727,129 @@ export function generateReliefCarveGcode(
       // build reads that as "select extruder 1" and errors on it.
       gcode.push(
         `; T1: ${describeCutter(opts.roughingToolDiaMm, 'flat', opts.roughingFlutes, opts.roughingGeometry)}, ` +
-          `${stepdown} mm stepdown, ${allowance} mm left on`
+          `${round2(layerStep)} mm stepdown, ${allowance} mm left on`
+      );
+      gcode.push(
+        adaptive
+          ? `;     adaptive clear, ${round2(roughStepover)} mm bite ` +
+            `(${Math.round(engagement * 100)}% of the cutter) — held in corners too, which is ` +
+            `what the ${round2(layerStep)} mm depth is bought with`
+          : `;     raster, ${round2(roughStepover)} mm stepover`
       );
     }
 
     const xs = axisSamples(bounds.minX + roughRad, bounds.maxX - roughRad, res);
     const ys = axisSamples(bounds.minY + roughRad, bounds.maxY - roughRad, roughStepover);
 
+    /**
+     * Where the tool's centre may sit at a given layer, as a grid.
+     *
+     * A one-cell border of empty is left all the way round on purpose. The
+     * contour of a region that runs right up to the edge of its grid has
+     * nowhere to close, so it comes back as an open path and is discarded — and
+     * a relief that fills its stock is exactly the case where that would throw
+     * the outermost ring of every layer away.
+     */
+    const layerRegion = (layerZ: number): ClearingRegion => {
+      const gxs = axisSamples(bounds.minX + roughRad, bounds.maxX - roughRad, res);
+      const gys = axisSamples(bounds.minY + roughRad, bounds.maxY - roughRad, res);
+      const cols = gxs.length + 2;
+      const rows = gys.length + 2;
+      const mask = new Uint8Array(cols * rows);
+
+      for (let j = 0; j < gys.length; j++) {
+        for (let i = 0; i < gxs.length; i++) {
+          const target = sampleHeightmap(roughMap, gxs[i], gys[j]) + allowance;
+          if (target <= layerZ - 1e-6) mask[(j + 1) * cols + (i + 1)] = 1;
+        }
+      }
+
+      const cell = gxs.length > 1 ? gxs[1] - gxs[0] : res;
+      return {
+        mask, cols, rows,
+        mmPerCell: cell,
+        // The grid was padded by a cell, so its own origin sits a cell before
+        // the first sample.
+        originMm: { x: gxs[0] - cell, y: gys[0] - cell },
+      };
+    };
+
+    /*
+     * The window the roughing tool's centre may occupy.
+     *
+     * The clearing grid above is deliberately padded by an empty cell all round
+     * so that a region filling the stock still produces a closed contour. That
+     * pad lies outside the safe inset, and marching squares interpolates the
+     * contour *into* it — so a region running up to the first real sample comes
+     * back as a ring up to half a cell further out than the tool is allowed to
+     * go. On a 6.35 mm cutter that put the tool's centre 2.41 mm from the edge
+     * of the stock and hung three quarters of a millimetre of it off the board,
+     * over the clamps and the spoilboard, on every layer of every roughing
+     * pass. The finishing raster never had the problem because it is laid out
+     * from `axisSamples` directly rather than read back off a contour.
+     *
+     * Clamping the emitted points is the fix rather than shrinking the grid: it
+     * holds whatever the cell size works out to, and it is the tool's actual
+     * constraint stated where the toolpath is written.
+     */
+    const safeX = (x: number) =>
+      Math.min(Math.max(x, bounds.minX + roughRad), bounds.maxX - roughRad);
+    const safeY = (y: number) =>
+      Math.min(Math.max(y, bounds.minY + roughRad), bounds.maxY - roughRad);
+
+    /** One layer cleared by walking the region's contours inward. */
+    const emitAdaptiveLayer = (layerZ: number) => {
+      const rings = clearingRings(layerRegion(layerZ), roughStepover, opts.roughingToolDiaMm);
+
+      for (const ring of rings) {
+        // The first ring of a slab is a slot however it is approached — nothing
+        // has opened the material either side of it yet — so it is fed for the
+        // chip it is actually taking rather than the one the stepover implies.
+        const feed = feedForEngagement(opts.roughingFeedrate, ring.engagement);
+
+        for (const loop of ring.loops) {
+          if (loop.length < 2) continue;
+
+          // Marching squares puts a vertex on every grid cell the contour
+          // crosses, so a ring round a 200 mm region arrives as a couple of
+          // thousand moves of a third of a millimetre each. GRBL swallows a few
+          // hundred lines a second, and a job that streams slower than it cuts
+          // stalls the spindle in the cut — the same reason the finishing
+          // raster is thinned, and far more pressing here, since a roughing
+          // ring is mostly long gentle curves that a handful of points describe
+          // to well inside the machine's own resolution.
+          const path = simplifyPass(
+            loop.map((p) => ({ x: safeX(p.x), y: safeY(p.y), z: layerZ })),
+            ROUGH_SIMPLIFY_MM
+          );
+          if (path.length < 2) continue;
+
+          // Ramp in along the ring rather than plunging: the centre of an end
+          // mill cuts at zero surface speed, and a deep layer pulls hard on it.
+          leadIn(path, Math.min(0, layerZ + layerStep), opts.roughingPlungeRate);
+
+          for (let i = 1; i < path.length; i++) {
+            cutTo(path[i].x, path[i].y, layerZ);
+            gcode.push(`G1 X${f(path[i].x)} Y${f(path[i].y)} F${Math.round(feed)}`);
+          }
+          // Closed: back to where it started, so the ring leaves nothing behind.
+          cutTo(path[0].x, path[0].y, layerZ);
+          gcode.push(`G1 X${f(path[0].x)} Y${f(path[0].y)} F${Math.round(feed)}`);
+
+          gcode.push(`G0 Z${f(opts.safeZ)}`);
+          atZ = opts.safeZ;
+
+          segments.push({ type: 'roughing', points: path });
+        }
+      }
+    };
+
     for (const layerZ of layers) {
+      if (adaptive) {
+        emitAdaptiveLayer(layerZ);
+        continue;
+      }
+
       let forward = true;
 
       for (const y of ys) {
@@ -1648,7 +1864,7 @@ export function generateReliefCarveGcode(
             const last = run[run.length - 1];
             // The layer above is what the tool is dropping through, so that is
             // where the ramp starts — one stepdown, not the whole depth so far.
-            leadIn([run[0], last], Math.min(0, layerZ + stepdown), opts.roughingPlungeRate);
+            leadIn([run[0], last], Math.min(0, layerZ + layerStep), opts.roughingPlungeRate);
 
             cutTo(last.x, last.y, layerZ);
             gcode.push(`G1 X${f(last.x)} Y${f(last.y)} F${Math.round(opts.roughingFeedrate)}`);
@@ -1673,8 +1889,31 @@ export function generateReliefCarveGcode(
   }
 
   // --- Tool change -----------------------------------------------------------
+  /*
+   * Whether the operator has to fit a different bit between the two passes.
+   *
+   * Diameter alone is not the question, and asking only that is how a job
+   * carves its roughing pass with the right cutter and then rasters the
+   * finishing pass with it too. Roughing is always a flat end mill, so a
+   * ball-nose or a V-bit finisher is a different tool no matter how wide it
+   * is — and a 6 mm end mill followed by a 6 mm V-bit is exactly the case that
+   * used to slip through, because the two diameters are identical. It is also
+   * the case that matters most: a V-bit finisher is chosen for detail the
+   * roughing cutter physically cannot reach, so running the raster with the
+   * roughing bit still fitted throws away the whole point of the second pass
+   * while looking, from the outside, like the job completed.
+   *
+   * Flute count and helix are here for the same reason. They mean a different
+   * cutter in the collet even at the same diameter, and the feeds for the
+   * finishing pass were derived for that cutter and not for the one still in
+   * the spindle.
+   */
   const toolChange =
-    opts.roughingEnabled && Math.abs(opts.roughingToolDiaMm - opts.finishingToolDiaMm) > 0.01;
+    opts.roughingEnabled &&
+    (Math.abs(opts.roughingToolDiaMm - opts.finishingToolDiaMm) > 0.01 ||
+      opts.finishingToolType !== 'flat' ||
+      Math.round(opts.roughingFlutes) !== Math.round(opts.finishingFlutes) ||
+      opts.roughingGeometry !== opts.finishingGeometry);
   if (toolChange) {
     gcode.push('M5 ; spindle off for the tool change');
     gcode.push(`G0 Z${f(Math.max(opts.safeZ, 20))}`);
@@ -1742,7 +1981,10 @@ export function generateReliefCarveGcode(
     );
   }
 
-  gcode.push('; --- OP 2: finishing raster -------------------------------------');
+  const rasterAngle = opts.finishingAngleDeg ?? (opts.finishingDirection === 'y' ? 90 : 0);
+  const strategy: FinishingStrategy = opts.finishingStrategy ?? 'raster';
+
+  gcode.push('; --- OP 2: finishing pass ---------------------------------------');
   gcode.push(
     `; ${describeCutter(
       opts.finishingToolDiaMm,
@@ -1751,27 +1993,40 @@ export function generateReliefCarveGcode(
       opts.finishingGeometry,
       opts.finishingVBitAngleDeg
     )}, ` +
-      `${stepover.toFixed(2)} mm stepover along ${opts.finishingDirection.toUpperCase()}` +
+      `${stepover.toFixed(2)} mm stepover, ${describeFinishingStrategy(strategy, rasterAngle)}` +
       (finishLimits.length > 1
         ? `, ${finishLimits.length} layers of ${finishStepdown.toFixed(2)} mm`
         : '')
   );
 
-  const alongX = opts.finishingDirection === 'x';
-  // The sweep runs the full width of the stock; the passes step across it.
-  const sweep = axisSamples(
-    (alongX ? bounds.minX : bounds.minY) + finishRad,
-    (alongX ? bounds.maxX : bounds.maxY) - finishRad,
-    res
-  );
-  const across = axisSamples(
-    (alongX ? bounds.minY : bounds.minX) + finishRad,
-    (alongX ? bounds.maxY : bounds.maxX) - finishRad,
-    stepover
-  );
+  // The rectangle the tool *centre* may enter: the stock, inset by the tool's
+  // own radius. On stock narrower than the cutter it collapses to the centre
+  // line rather than inverting.
+  const passRect = {
+    minX: Math.min(bounds.minX + finishRad, (bounds.minX + bounds.maxX) / 2),
+    maxX: Math.max(bounds.maxX - finishRad, (bounds.minX + bounds.maxX) / 2),
+    minY: Math.min(bounds.minY + finishRad, (bounds.minY + bounds.maxY) / 2),
+    maxY: Math.max(bounds.maxY - finishRad, (bounds.minY + bounds.maxY) / 2),
+  };
+
+  // Plan-view only. Z stays this function's business: every point that comes
+  // back is sampled against the dilated surface, clamped to the layer limit and
+  // dropped where there is nothing under it, exactly as the raster always was.
+  const planPasses = finishingPasses(strategy, {
+    bounds: passRect,
+    stepover,
+    resolution: res,
+    angleDeg: rasterAngle,
+    surface: finishMap,
+    floorZ,
+    steepAngleDeg: opts.finishingSteepAngleDeg,
+  });
+
+  if (planPasses.length === 0) {
+    return empty('The chosen finishing strategy produced no passes over this stock.');
+  }
 
   let finishingRasterLines = 0;
-  let forward = true;
   // The height the material stands at when a layer starts: the stock's top face
   // for the first, whatever the layer before it left for the rest.
   let prevLimit = 0;
@@ -1781,21 +2036,16 @@ export function generateReliefCarveGcode(
       gcode.push(`; layer down to Z${f(limit)}`);
     }
 
-    for (const a of across) {
-      const line = forward ? sweep : [...sweep].reverse();
-      forward = !forward;
-
+    for (const plan of planPasses) {
       // `surface` is where the pass ends up; `z` is as far as this layer is
       // allowed to go towards it. A point the layer above already took to its
       // surface is finished, and is left out of this layer entirely — which is
-      // what stops the raster re-tracing the whole background on every layer.
+      // what stops the pass re-tracing the whole background on every layer.
       const raw: PathPoint[] = [];
-      for (const s of line) {
-        const x = alongX ? s : a;
-        const y = alongX ? a : s;
-        const surface = Math.min(0, Math.max(floorZ, sampleHeightmap(finishMap, x, y)));
+      for (const pt of plan) {
+        const surface = Math.min(0, Math.max(floorZ, sampleHeightmap(finishMap, pt.x, pt.y)));
         const done = surface >= prevLimit - 1e-6;
-        raw.push({ x, y, z: done ? 0 : Math.max(surface, limit) });
+        raw.push({ x: pt.x, y: pt.y, z: done ? 0 : Math.max(surface, limit) });
       }
 
       // Stretches where the tool would only skim the stock's own top face have

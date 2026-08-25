@@ -88,8 +88,13 @@ describe('3D Mold Generator', () => {
     expect(res.topHalf).toBeDefined();
     expect(res.topHalf!.triangles.length).toBeGreaterThan(50);
 
-    expect(res.topHalfSTL).toBeDefined();
-    expect(res.bottomHalfSTL).toBeDefined();
+    // Both halves come out in the one plate. They used to be serialised again
+    // as a pair of separate STLs for a second download button; the slicer that
+    // opens the plate lays both out anyway, so the extra copies were work done
+    // for nothing on every export.
+    expect(res.combinedTriangles.length).toBe(
+      res.bottomHalf.triangles.length + res.topHalf!.triangles.length
+    );
 
     // Mold dimensions enclose the 60mm dome + 20mm margin (10mm per side)
     expect(res.moldWidthMm).toBeGreaterThanOrEqual(75);

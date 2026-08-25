@@ -173,7 +173,7 @@ function blur(grid: Float32Array, cols: number, rows: number, passes: number): F
  * at INF, which is what lets a shape run off the edge of the image without the
  * border being mistaken for a boundary to slope away from.
  */
-function squaredDistanceTransform(seed: Uint8Array, cols: number, rows: number): Float64Array {
+export function squaredDistanceTransform(seed: Uint8Array, cols: number, rows: number): Float64Array {
   const INF = 1e20;
   const f = new Float64Array(cols * rows);
   for (let i = 0; i < f.length; i++) f[i] = seed[i] ? 0 : INF;

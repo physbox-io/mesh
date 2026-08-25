@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react'
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import {
-  X, AlertCircle, Cpu, Play, Home, ShieldAlert, RefreshCw, Info, ChevronRight, Layers, Mountain, Pause,
+  X, AlertCircle, Cpu, Play, RefreshCw, Info, ChevronRight, Layers, Mountain, Pause,
 } from 'lucide-react';
 import type { SceneGraph } from '../types/scene';
 import {
@@ -20,15 +20,14 @@ import { clockMoves, formatDuration, type ClockedMove, type TimedMove } from '..
 import { MATERIALS, describeSpeedRecommendation, recommendSpeeds } from '../utils/feedsAndSpeeds';
 import { getGridStats, type ProbeGrid } from '../utils/meshLeveler';
 import { NumberInput } from './NumberInput';
-import { MachineWorkOriginPanel } from './MachineWorkOriginPanel';
-import { JobOverrides, JobPauseBanner, JobPreflight, JobTransport } from './MachineJobControls';
+import { useStore } from '../store/useStore';
+import { JobPauseBanner, JobPreflight, JobResumeBanner, JobTransport } from './MachineJobControls';
 
 interface Props {
   isOpen: boolean;
   onClose: () => void;
   scene: SceneGraph;
   /** Opens the app's zeroing walkthrough from the machine panel. */
-  onOpenDocs?: () => void;
 }
 
 const inputClass =
@@ -148,17 +147,26 @@ function Advanced({ label = 'Advanced', children }: { label?: string; children: 
  * appears at the widths these grids actually use.
  */
 function Segmented<T extends string>({
-  value, options, onChange,
-}: { value: T; options: readonly (readonly [T, string])[]; onChange: (v: T) => void }) {
+  value, options, onChange, disabled = false,
+}: {
+  value: T;
+  options: readonly (readonly [T, string])[];
+  onChange: (v: T) => void;
+  /** Greys the whole switch out, to match the number fields beside it. */
+  disabled?: boolean;
+}) {
   return (
-    <div className="flex bg-slate-200 dark:bg-slate-700/60 p-0.5 rounded-lg">
+    <div className={`flex bg-slate-200 dark:bg-slate-700/60 p-0.5 rounded-lg ${disabled ? 'opacity-40' : ''}`}>
       {options.map(([v, label]) => (
         <button
           key={v}
           type="button"
+          disabled={disabled}
           onClick={() => onChange(v)}
           title={label}
           className={`flex-1 min-w-0 py-1 px-2 rounded-md text-xs font-medium transition-all truncate ${
+            disabled ? 'cursor-not-allowed' : ''
+          } ${
             value === v
               ? 'bg-white dark:bg-slate-800 text-blue-600 dark:text-blue-400 shadow-sm'
               : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
@@ -278,6 +286,149 @@ function buildPreviewPath(
   return { moves: clocked, seconds: clocked[clocked.length - 1].t1 };
 }
 
+/**
+ * A depth ramp: where the tool is on the surface, and where it is at the floor.
+ *
+ * Sampled from viridis, which is perceptually uniform — equal steps in depth
+ * look like equal steps in colour — and keeps its ordering when read by a
+ * colourblind eye or printed in grey. That matters more here than prettiness:
+ * the whole reason to colour a relief by depth is to be able to see, at a
+ * glance, that the tool goes deepest where the model is highest, and a ramp
+ * with a bright band in the middle of it invents a feature that is not there.
+ */
+const DEPTH_RAMP: [number, number, number][] = [
+  [0.267, 0.005, 0.329],
+  [0.283, 0.141, 0.458],
+  [0.254, 0.265, 0.530],
+  [0.207, 0.372, 0.553],
+  [0.164, 0.471, 0.558],
+  [0.128, 0.567, 0.551],
+  [0.135, 0.659, 0.518],
+  [0.267, 0.749, 0.441],
+  [0.478, 0.821, 0.318],
+  [0.741, 0.873, 0.150],
+  [0.993, 0.906, 0.144],
+];
+
+/**
+ * Colour for a cut at height `z`, with the stock's top face at 0.
+ *
+ * `deepest` is taken from the path itself rather than from the carve depth
+ * setting, so the ramp always spans what is actually on screen: a relief that
+ * only uses half its allowance still gets the full range of colour, instead of
+ * coming out uniformly pale against a scale nothing reaches the end of.
+ */
+function depthColour(z: number, deepest: number, out: THREE.Color): THREE.Color {
+  const span = Math.abs(deepest);
+  // Deep is the ramp's dark end, surface its bright one.
+  const t = span > 1e-6 ? Math.min(1, Math.max(0, 1 - Math.abs(z) / span)) : 1;
+  const pos = t * (DEPTH_RAMP.length - 1);
+  const i = Math.min(DEPTH_RAMP.length - 2, Math.floor(pos));
+  const f = pos - i;
+  const a = DEPTH_RAMP[i];
+  const b = DEPTH_RAMP[i + 1];
+  return out.setRGB(
+    a[0] + (b[0] - a[0]) * f,
+    a[1] + (b[1] - a[1]) * f,
+    a[2] + (b[2] - a[2]) * f
+  );
+}
+
+/** Squared distance from a point to the segment a move sweeps. */
+function distanceSqToMove(m: ClockedMove, x: number, y: number, z: number): number {
+  const dx = m.x2 - m.x1;
+  const dy = m.y2 - m.y1;
+  const dz = m.z2 - m.z1;
+  const lenSq = dx * dx + dy * dy + dz * dz;
+  let t = 0;
+  if (lenSq > 1e-12) {
+    t = ((x - m.x1) * dx + (y - m.y1) * dy + (z - m.z1) * dz) / lenSq;
+    t = Math.min(1, Math.max(0, t));
+  }
+  const px = m.x1 + dx * t - x;
+  const py = m.y1 + dy * t - y;
+  const pz = m.z1 + dz * t - z;
+  return px * px + py * py + pz * pz;
+}
+
+/** How far off the path the machine may report before the search gives up and re-syncs, mm. */
+const LIVE_SNAP_TOLERANCE_MM = 6;
+/** How many moves ahead of the last match the forward search looks. */
+const LIVE_SEARCH_WINDOW = 4000;
+
+/**
+ * Where on the program the machine actually is, from the position it reports.
+ *
+ * The obvious source — GRBL's line count, scaled onto the clock — is wrong
+ * twice over, and both errors run the same way. Lines are counted as they are
+ * *sent*, and the controller holds a planner buffer of them, so the count runs
+ * ahead of the cutter by as much as the buffer is deep. And a line is not a
+ * unit of time: a rapid across the stock is one line and a fraction of a
+ * second, a raster pass is one line and several seconds, so mapping "62% of
+ * the lines" onto "62% of the clock" skews wherever the two kinds are not
+ * evenly mixed — which on a relief is everywhere, because roughing and
+ * finishing have quite different mixes.
+ *
+ * The reported position has neither problem: it is where the tool is. So the
+ * playhead is found by projecting that position onto the path and taking the
+ * clock of the point it lands on.
+ *
+ * The search runs forward from the last match rather than over the whole path,
+ * because a raster crosses its own neighbours constantly and the globally
+ * nearest point to the spindle is very often on the pass beside the one being
+ * cut, a stepover away. Going forward-only also stops the bright "already cut"
+ * region flickering backwards. When nothing within the window is close enough
+ * — after a jog, a resume, or a lost connection — it falls back to a search of
+ * the whole path, which is the one case where being wrong about which pass is
+ * worse than being slow.
+ */
+function projectOntoPath(
+  moves: ClockedMove[],
+  x: number,
+  y: number,
+  z: number,
+  from: number
+): { index: number; clock: number } | null {
+  if (moves.length === 0) return null;
+
+  const scan = (lo: number, hi: number) => {
+    let bestI = -1;
+    let bestD = Infinity;
+    for (let i = lo; i < hi; i++) {
+      const d = distanceSqToMove(moves[i], x, y, z);
+      if (d < bestD) {
+        bestD = d;
+        bestI = i;
+      }
+    }
+    return { bestI, bestD };
+  };
+
+  const start = Math.min(Math.max(0, from), moves.length - 1);
+  const near = scan(start, Math.min(moves.length, start + LIVE_SEARCH_WINDOW));
+  let bestI = near.bestI;
+
+  if (near.bestD > LIVE_SNAP_TOLERANCE_MM * LIVE_SNAP_TOLERANCE_MM) {
+    const global = scan(0, moves.length);
+    if (global.bestI >= 0 && global.bestD < near.bestD) bestI = global.bestI;
+  }
+  if (bestI < 0) return null;
+
+  // Interpolate the clock across the move, so the readout advances smoothly
+  // along a long pass instead of stepping once per move.
+  const m = moves[bestI];
+  const dx = m.x2 - m.x1;
+  const dy = m.y2 - m.y1;
+  const dz = m.z2 - m.z1;
+  const lenSq = dx * dx + dy * dy + dz * dz;
+  let f = 0;
+  if (lenSq > 1e-12) {
+    f = ((x - m.x1) * dx + (y - m.y1) * dy + (z - m.z1) * dz) / lenSq;
+    f = Math.min(1, Math.max(0, f));
+  }
+  return { index: bestI, clock: m.t0 + (m.t1 - m.t0) * f };
+}
+
 /** The move in flight at time `t`, by binary search over the cumulative clock. */
 function moveIndexAt(moves: ClockedMove[], t: number): number {
   let lo = 0;
@@ -331,6 +482,32 @@ function ToolpathView({
 
   const [playing, setPlaying] = useState(true);
   const [speed, setSpeed] = useState(1);
+  /**
+   * What the toolpath's colour means.
+   *
+   * Depth by default. A relief is a surface, and the question being asked of
+   * this viewport is almost always "did the shape come out the way I meant it
+   * to" — which the operation colours cannot answer at all, because the whole
+   * finishing raster is one colour whatever it is cutting.
+   */
+  const [colourMode, setColourMode] = useState<'depth' | 'operation'>('depth');
+
+  /**
+   * The deepest cutting move in the path — the far end of the depth ramp.
+   *
+   * Rapids are left out: they run at the retract height, above the stock, and
+   * including them would stretch the scale over air and wash out the range the
+   * carve actually occupies.
+   */
+  const deepest = useMemo(() => {
+    let z = 0;
+    for (const m of path.moves) {
+      if (m.rapid) continue;
+      if (m.z1 < z) z = m.z1;
+      if (m.z2 < z) z = m.z2;
+    }
+    return z;
+  }, [path]);
   /** Job seconds, not wall-clock seconds. */
   const [clock, setClock] = useState(0);
 
@@ -457,17 +634,33 @@ function ToolpathView({
     const ROUGH = new THREE.Color(0xf59e0b);
     const FINISH = new THREE.Color(0x3b82f6);
     const TRAVEL = new THREE.Color(0x475569);
+    const scratch = new THREE.Color();
+
     for (let i = 0; i < moves.length; i++) {
       const m = moves[i];
       positions.set([m.x1, m.y1, m.z1, m.x2, m.y2, m.z2], i * 6);
-      // A cut above the stock's top face can only be a plunge or a link; the
-      // roughing pass and the finishing raster are told apart by their feed.
-      const c = m.rapid
-        ? TRAVEL
-        : m.feed === options.roughingFeedrate
-          ? ROUGH
-          : FINISH;
-      colours.set([c.r, c.g, c.b, c.r, c.g, c.b], i * 6);
+
+      if (m.rapid) {
+        // Travel stays grey in both modes. It is the one thing on screen that
+        // is not cutting, and colouring it by the height it happens to fly at
+        // would put it at the bright end of the depth ramp — the loudest
+        // colour on the screen given to the moves that remove no material.
+        colours.set([TRAVEL.r, TRAVEL.g, TRAVEL.b, TRAVEL.r, TRAVEL.g, TRAVEL.b], i * 6);
+        continue;
+      }
+
+      if (colourMode === 'depth') {
+        // Per end, not per move: a plunge or a ramp spans a range of depths,
+        // and giving it one flat colour is exactly the moment the relief stops
+        // reading as a surface.
+        const a = depthColour(m.z1, deepest, scratch).clone();
+        const b = depthColour(m.z2, deepest, scratch);
+        colours.set([a.r, a.g, a.b, b.r, b.g, b.b], i * 6);
+      } else {
+        // The roughing pass and the finishing raster are told apart by feed.
+        const c = m.feed === options.roughingFeedrate ? ROUGH : FINISH;
+        colours.set([c.r, c.g, c.b, c.r, c.g, c.b], i * 6);
+      }
     }
 
     const geo = new THREE.BufferGeometry();
@@ -530,6 +723,8 @@ function ToolpathView({
     options.stockThicknessMm,
     options.finishingToolDiaMm,
     options.roughingFeedrate,
+    colourMode,
+    deepest,
   ]);
 
   // A new carve is a new path, so the playhead goes back to the start rather
@@ -585,16 +780,33 @@ function ToolpathView({
     applyClock(clock);
   }, [clock, applyClock, path]);
 
-  // Follow the machine. Line count is what GRBL's progress is reported in and
-  // the program is very nearly one move per line, so it maps onto the path
-  // closely enough to show which passes are done.
+  // Named individually so the effect below depends on the three numbers it
+  // actually reads, rather than on a `wpos` object rebuilt on every status poll.
+  const { x: wposX, y: wposY, z: wposZ } = machineState.wpos;
+
+  /**
+   * Where the forward search starts. Reset when the job stops, so the next run
+   * does not begin hunting from the end of the last one.
+   */
+  const liveIndexRef = useRef(0);
+  useEffect(() => {
+    if (!live) liveIndexRef.current = 0;
+  }, [live]);
+
+  // Follow the machine by where it says the tool is, not by how many lines have
+  // been sent to it. See `projectOntoPath` for why the line count cannot do
+  // this job.
   useEffect(() => {
     if (!live) return;
     const moves = pathRef.current.moves;
     if (moves.length === 0) return;
-    const frac = Math.min(1, Math.max(0, machineState.progressPercent / 100));
-    setClock(pathRef.current.seconds * frac);
-  }, [live, machineState.progressPercent, machineState.wpos.x, machineState.wpos.y, machineState.wpos.z]);
+
+    const hit = projectOntoPath(moves, wposX, wposY, wposZ, liveIndexRef.current);
+    if (!hit) return;
+
+    liveIndexRef.current = hit.index;
+    setClock(hit.clock);
+  }, [live, wposX, wposY, wposZ]);
 
   // The dry run. Compressed onto a fixed screen duration, because the thing
   // being previewed can be a four-hour carve.
@@ -618,7 +830,70 @@ function ToolpathView({
 
   return (
     <div className="space-y-2">
-      <div className="w-full h-80 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-950 overflow-hidden" ref={mountRef} />
+      <div className="relative w-full h-80 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-950 overflow-hidden">
+        <div className="absolute inset-0" ref={mountRef} />
+
+        {/* What the colours mean, over the viewport rather than beside it —
+            a scale the eye has to leave the picture to read is one nobody
+            reads. */}
+        <div className="absolute left-2 bottom-2 flex items-end gap-3 pointer-events-none">
+          {colourMode === 'depth' ? (
+            <div className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-slate-900/80 border border-slate-700">
+              <span className="text-[9px] font-mono text-slate-400">0</span>
+              <div
+                className="h-1.5 w-24 rounded-full"
+                style={{
+                  background: `linear-gradient(to left, ${DEPTH_RAMP.map(
+                    ([r, g, b]) => `rgb(${Math.round(r * 255)},${Math.round(g * 255)},${Math.round(b * 255)})`
+                  ).join(',')})`,
+                }}
+              />
+              <span className="text-[9px] font-mono text-slate-400">
+                {deepest.toFixed(1)} mm
+              </span>
+            </div>
+          ) : (
+            <div className="flex items-center gap-2 px-2 py-1 rounded-lg bg-slate-900/80 border border-slate-700">
+              <span className="flex items-center gap-1 text-[9px] font-mono text-slate-400">
+                <span className="w-2.5 h-1.5 rounded-sm bg-amber-500" /> Rough
+              </span>
+              <span className="flex items-center gap-1 text-[9px] font-mono text-slate-400">
+                <span className="w-2.5 h-1.5 rounded-sm bg-blue-500" /> Finish
+              </span>
+            </div>
+          )}
+          <span className="flex items-center gap-1 px-2 py-1 rounded-lg bg-slate-900/80 border border-slate-700 text-[9px] font-mono text-slate-400">
+            <span className="w-2.5 h-1.5 rounded-sm bg-slate-600" /> Travel
+          </span>
+        </div>
+
+        <div className="absolute right-2 top-2 flex items-center gap-0.5 p-0.5 rounded-lg bg-slate-900/80 border border-slate-700">
+          {(
+            [
+              ['depth', 'Depth'],
+              ['operation', 'Pass'],
+            ] as const
+          ).map(([mode, label]) => (
+            <button
+              key={mode}
+              type="button"
+              onClick={() => setColourMode(mode)}
+              title={
+                mode === 'depth'
+                  ? 'Colour the toolpath by how deep each move cuts'
+                  : 'Colour the toolpath by which pass each move belongs to'
+              }
+              className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                colourMode === mode
+                  ? 'bg-blue-500 text-slate-950'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
 
       <div className="flex flex-wrap items-center gap-2 sm:gap-3">
         <button
@@ -677,8 +952,28 @@ function ToolpathView({
   );
 }
 
-export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene, onOpenDocs }) => {
+export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene }) => {
   const [options, setOptions] = useState<ReliefCarveOptions>(DEFAULT_RELIEF_OPTIONS);
+
+  /*
+   * The material is the workshop's, not this carve's.
+   *
+   * It stays inside `options` because every feed and speed derivation below
+   * takes it from there, but the status bar owns the value — so changing it
+   * once re-derives the tooling for every export rather than for whichever
+   * modal happened to be open.
+   */
+  const storeMaterial = useStore((s) => s.material);
+  const setMachineConfigOpen = useStore((s) => s.setMachineConfigOpen);
+
+  // Folded in during render rather than from an effect, so no frame is ever
+  // drawn with feeds derived for the material that was selected a moment ago.
+  // Same shape as the playhead reset in ToolpathView above.
+  const [syncedMaterial, setSyncedMaterial] = useState(storeMaterial);
+  if (syncedMaterial !== storeMaterial) {
+    setSyncedMaterial(storeMaterial);
+    setOptions((prev) => ({ ...prev, material: storeMaterial }));
+  }
   const set = <K extends keyof ReliefCarveOptions>(key: K, value: ReliefCarveOptions[K]) =>
     setOptions((prev) => ({ ...prev, [key]: value }));
 
@@ -761,6 +1056,13 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
     () => ({ ...options, ...derived, ...overrides }),
     [options, derived, overrides]
   );
+
+  // The ring, spiral and waterline patterns lay their passes out from the
+  // surface or the boundary, so the raster angle controls have nothing to act on.
+  const usesRasterAngle =
+    options.finishingStrategy === 'raster' ||
+    options.finishingStrategy === 'crosshatch' ||
+    options.finishingStrategy === 'hybrid';
 
   const settled = useSettled(effective, 250);
   const pending = settled !== effective;
@@ -853,14 +1155,10 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
   const stats = probedGrid ? getGridStats(probedGrid) : null;
   const canCarve = !!result?.success && machineState.connected && machineState.status === 'IDLE';
 
-  const handleConnectUsb = async () => {
-    if (machineState.connected) await webSerialManager.disconnect();
-    else await webSerialManager.connect();
-  };
 
   const handleStartCarve = () => {
     if (!result?.gcode) return;
-    webSerialManager.startJob(result.gcode);
+    webSerialManager.startJob(result.gcode, result.estimatedTimeSeconds);
   };
 
   const handleFrameTrace = async () => {
@@ -957,20 +1255,22 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                 </div>
               </Field>
 
+              {/* Material is set once, in the status bar, and every export reads
+                  it from there — it describes what is clamped on the bed rather
+                  than anything about this carve. Named here anyway, because
+                  every feed and speed below is derived from it and a number
+                  whose origin is off-screen looks arbitrary. */}
               <Field
                 className="lg:col-span-3"
                 label="Material"
-                hint="What is clamped on the bed. It is the one setting here that is not a property of the model, and every feed and speed follows from it: surface speed over cutter diameter gives the spindle RPM, and chip-per-tooth times teeth times RPM gives the feed. 18,000 RPM is right for pine and ruinous for aluminium, and nothing about a mesh can tell the difference."
+                hint="What is clamped on the bed, chosen in the status bar along the bottom of the window. Every feed and speed follows from it: surface speed over cutter diameter gives the spindle RPM, and chip-per-tooth times teeth times RPM gives the feed. 18,000 RPM is right for pine and ruinous for aluminium, and nothing about a mesh can tell the difference."
               >
-                <select
-                  value={options.material}
-                  onChange={(e) => set('material', e.target.value as typeof options.material)}
-                  className={`${inputClass} cursor-pointer`}
-                >
-                  {MATERIALS.map((mat) => (
-                    <option key={mat.id} value={mat.id}>{mat.label}</option>
-                  ))}
-                </select>
+                <div className={`${inputClass} flex items-center justify-between`}>
+                  <span className="font-semibold">
+                    {MATERIALS.find((m) => m.id === options.material)?.label ?? options.material}
+                  </span>
+                  <span className="text-[10px] text-slate-500">set in the status bar</span>
+                </div>
               </Field>
 
               <Field
@@ -1224,13 +1524,58 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
               </Field>
               <Field
                 hintAlign="end"
+                label="Pass Pattern"
+                hint="How the finishing passes are laid out. A raster is the fastest to cut and the one whose direction you can see in the finished surface. Waterline follows the surface's own level lines, which is far better on steep ground and useless on flat. Hybrid uses each where it wins, and is the one to pick for a sculpted or organic relief."
+              >
+                <select
+                  value={options.finishingStrategy}
+                  onChange={(e) => set('finishingStrategy', e.target.value as ReliefCarveOptions['finishingStrategy'])}
+                  className={inputClass}
+                >
+                  <option value="raster">Parallel raster</option>
+                  <option value="crosshatch">Crosshatch (two rasters, 90° apart)</option>
+                  <option value="concentric">Concentric rings</option>
+                  <option value="spiral">Continuous spiral</option>
+                  <option value="contour">Waterline (follows level lines)</option>
+                  <option value="hybrid">Hybrid (waterline + raster)</option>
+                </select>
+              </Field>
+              <Field
+                hintAlign="end"
                 label="Sweep Axis"
-                hint="Which way the parallel passes run. Sweeping across a feature's long axis rather than along it usually leaves a better surface."
+                hint="Which way the parallel passes run. Sweeping across a feature's long axis rather than along it usually leaves a better surface. Unused by the ring, spiral and waterline patterns."
               >
                 <Segmented
                   value={options.finishingDirection}
                   onChange={(v) => set('finishingDirection', v)}
+                  disabled={!usesRasterAngle}
                   options={[['x', 'X'], ['y', 'Y']] as const}
+                />
+              </Field>
+              <Field
+                label="Pass Angle (°)"
+                hint="Rotates the raster off its axis. Blank follows the sweep axis — 0° for X, 90° for Y. On wood this is not cosmetic: passes running across the grain tear it, and 45° is the usual compromise when the grain and a feature's long axis disagree."
+              >
+                <NumberInput
+                  step="5" min={-180} max={180}
+                  allowEmpty
+                  disabled={!usesRasterAngle}
+                  placeholder={String(options.finishingDirection === 'y' ? 90 : 0)}
+                  value={options.finishingAngleDeg ?? null}
+                  onChange={(v) => set('finishingAngleDeg', v ?? undefined)}
+                  className={inputClass}
+                />
+              </Field>
+              <Field
+                label="Steep Cutover (°)"
+                hint="The slope at which the hybrid pattern hands over from raster to waterline. Lower sends more of the model to the waterline pass. 30-45° is the usual band."
+              >
+                <NumberInput
+                  step="5" min={5} max={85} integer
+                  disabled={options.finishingStrategy !== 'hybrid'}
+                  value={options.finishingSteepAngleDeg}
+                  onChange={(v) => set('finishingSteepAngleDeg', v ?? 35)}
+                  className={inputClass}
                 />
               </Field>
               <Field
@@ -1381,8 +1726,19 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                 />
               </Field>
 
-
-
+              <Field
+                className="lg:col-span-2"
+                hintAlign="end"
+                label="Clearing Path"
+                hint="Raster sweeps back and forth in parallel lines. Its stepover only describes the bite on a long straight run: every time a line meets a corner or crosses a narrow channel the tool is suddenly cutting full width, so the depth per pass has to be set for that worst case and paid for over the whole job. Adaptive walks the region's own contours instead, outermost ring first, so the bite really is the stepover everywhere — and with the worst case gone the depth per pass goes up several times over."
+              >
+                <Segmented
+                  value={options.roughingStrategy}
+                  onChange={(v) => set('roughingStrategy', v)}
+                  disabled={!options.roughingEnabled}
+                  options={[['adaptive', 'Adaptive'], ['raster', 'Raster']] as const}
+                />
+              </Field>
 
 
             </div>
@@ -1392,7 +1748,15 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
               line={
                 effective.roughingEnabled
                   ? `${effective.spindleRpm.toLocaleString()} RPM · ${effective.roughingFeedrate} mm/min · ` +
-                    `${effective.roughingStepdownMm} mm/pass · ${effective.roughingAllowanceMm} mm left on`
+                    `${effective.roughingStepdownMm} mm/pass · ${effective.roughingAllowanceMm} mm left on` +
+                    (effective.roughingStrategy === 'adaptive'
+                      ? ` · ${Math.round(
+                          ((effective.roughingStepoverMm > 0
+                            ? effective.roughingStepoverMm
+                            : effective.roughingToolDiaMm * 0.2) /
+                            Math.max(0.01, effective.roughingToolDiaMm)) * 100
+                        )}% bite, held in corners too`
+                      : '')
                   : 'Skipped — the finishing bit clears the whole relief on its own'
               }
             />
@@ -1576,6 +1940,10 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
           {/* Machine paused mid-job — the tool change between passes lands here */}
           <JobPauseBanner machineState={machineState} resumeLabel="Resume Carve (Cycle Start)" />
 
+          {/* A relief is the longest job this app produces and the one that hurts
+              most to restart from scratch. */}
+          <JobResumeBanner machineState={machineState} />
+
           {/* Toolpath preview */}
           {result?.success && (
             <div className="space-y-3">
@@ -1600,31 +1968,24 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
               <ToolpathView result={result} options={settled} machineState={machineState} />
 
               <div className="flex items-center space-x-4 text-[11px] text-slate-500 dark:text-slate-400">
-                <span className="flex items-center space-x-1.5">
-                  <span className="w-2.5 h-2.5 rounded-full bg-amber-500 inline-block" />
-                  <span>Roughing</span>
-                </span>
-                <span className="flex items-center space-x-1.5">
-                  <span className="w-2.5 h-2.5 rounded-full bg-blue-500 inline-block" />
-                  <span>Finishing</span>
-                </span>
-                <span className="flex items-center space-x-1.5">
-                  <span className="w-2.5 h-2.5 rounded-full bg-slate-600 inline-block" />
-                  <span>Rapids</span>
-                </span>
                 <span>Right-drag orbits, middle-drag pans, scroll zooms — the same as the scene view. The wireframe box is the stock.</span>
               </div>
             </div>
           )}
 
-          {/* Machine */}
+          {/* What this job needs of the machine.
+              Connecting, homing and zeroing are the machine's business rather
+              than this carve's, and live in the setup dialog off the status
+              bar. What is left here is what cannot be answered without the
+              job: which cutters it wants, and whether its outline lands on the
+              stock. */}
           <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 text-white space-y-3">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center space-x-3">
                 <Cpu className="w-5 h-5 text-blue-400" />
                 <div>
                   <h3 className="text-sm font-bold flex items-center space-x-2">
-                    <span>WebSerial USB Machine Interface</span>
+                    <span>Machine</span>
                     <span className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase ${
                       machineState.status === 'RUNNING' ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40' :
                       machineState.status.startsWith('PAUSED') ? 'bg-amber-500/20 text-amber-400 border border-amber-500/40 animate-pulse' :
@@ -1636,90 +1997,41 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                   <p className="text-xs text-slate-400">
                     {machineState.connected
                       ? `Connected via USB serial (${machineState.portName})`
-                      : webSerialManager.isSupported()
-                        ? 'Connect your CNC router (GRBL/Marlin/FluidNC) to carve straight from the browser'
-                        : 'WebSerial is not available in this browser — use Chrome, Edge, or Opera to carve'}
+                      : 'Not connected. Open Machine Setup to connect, home and zero.'}
                   </p>
                 </div>
               </div>
 
-              <button
-                onClick={handleConnectUsb}
-                disabled={!webSerialManager.isSupported()}
-                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center space-x-1.5 cursor-pointer disabled:opacity-40 ${
-                  machineState.connected ? 'bg-slate-800 hover:bg-slate-700 text-slate-300' : 'bg-blue-500 hover:bg-blue-600 text-slate-950'
-                }`}
-              >
-                <Cpu className="w-3.5 h-3.5" />
-                <span>{machineState.connected ? 'Disconnect USB' : 'Connect USB Machine'}</span>
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={handleFrameTrace}
+                  disabled={!result?.success || !machineState.connected}
+                  title="Trace the carve's outline so you can check it lands on the stock"
+                  className="py-1.5 px-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-200 text-xs font-semibold rounded-lg flex items-center gap-1 cursor-pointer"
+                >
+                  <RefreshCw className="w-3.5 h-3.5 text-blue-400" />
+                  <span>Frame Job</span>
+                </button>
+                <button
+                  onClick={() => setMachineConfigOpen(true)}
+                  className="px-3 py-1.5 rounded-lg text-xs font-bold bg-blue-500 hover:bg-blue-600 text-slate-950 flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Cpu className="w-3.5 h-3.5" />
+                  <span>Machine Setup</span>
+                </button>
+              </div>
             </div>
 
-            {machineState.connected && (
-              <>
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 pt-2 border-t border-slate-800">
-                <div className="flex items-center space-x-2 bg-slate-950 p-2 rounded-lg border border-slate-800 text-xs font-mono">
-                  <span className="text-slate-500">MPos:</span>
-                  <span>X:{machineState.mpos.x.toFixed(1)} Y:{machineState.mpos.y.toFixed(1)} Z:{machineState.mpos.z.toFixed(1)}</span>
-                </div>
-
-                <div className="flex items-center space-x-2">
-                  <button
-                    onClick={() => webSerialManager.homeMachine()}
-                    className="flex-1 py-1.5 px-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-lg flex items-center justify-center space-x-1"
-                  >
-                    <Home className="w-3.5 h-3.5 text-blue-400" />
-                    <span>Home ($H)</span>
-                  </button>
-                </div>
-
-                <div className="flex items-center space-x-2">
-                  <button
-                    onClick={handleFrameTrace}
-                    disabled={!result?.success}
-                    title="Trace the carve's outline so you can check it lands on the stock"
-                    className="flex-1 py-1.5 px-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-200 text-xs font-semibold rounded-lg flex items-center justify-center space-x-1"
-                  >
-                    <RefreshCw className="w-3.5 h-3.5 text-blue-400" />
-                    <span>Frame Job</span>
-                  </button>
-                  <button
-                    onClick={() => webSerialManager.unlockAlarm()}
-                    className="py-1.5 px-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-lg flex items-center justify-center space-x-1"
-                  >
-                    <ShieldAlert className="w-3.5 h-3.5 text-red-400" />
-                    <span>Unlock ($X)</span>
-                  </button>
-                </div>
-              </div>
-              <JobPreflight
-                machineState={machineState}
-                tool={preflight.firstTool}
-                secondTool={preflight.secondTool}
-                rpm={settled.spindleRpm}
-                material={preflight.material}
-                origin="the near-left corner of the stock's top face"
-                caveat={preflight.caveat}
-              />
-              <JobOverrides machineState={machineState} />
-              <MachineWorkOriginPanel machineState={machineState} onOpenDocs={onOpenDocs} />
-              </>
-            )}
-
-            {machineState.status === 'RUNNING' && (
-              <div className="space-y-1 pt-2 border-t border-slate-800">
-                <div className="flex justify-between text-[11px] font-mono text-slate-400">
-                  <span>Line {machineState.currentLine} of {machineState.totalLines}</span>
-                  <span>{machineState.progressPercent}%</span>
-                </div>
-                <div className="h-1.5 bg-slate-800 rounded-full overflow-hidden">
-                  <div
-                    className="h-full bg-emerald-500 transition-all"
-                    style={{ width: `${machineState.progressPercent}%` }}
-                  />
-                </div>
-              </div>
-            )}
+            <JobPreflight
+              machineState={machineState}
+              tool={preflight.firstTool}
+              secondTool={preflight.secondTool}
+              rpm={settled.spindleRpm}
+              material={preflight.material}
+              origin="the near-left corner of the stock's top face"
+              caveat={preflight.caveat}
+              extent={result?.bounds}
+            />
           </div>
         </div>
 
@@ -1744,10 +2056,13 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                 startLabel="Start Carving"
               />
             ) : (
+              /* Opens the shared setup rather than connecting here: which wire
+                 to use — the USB cable or a Tekno Box over WiFi — is a choice
+                 that lives there, and a button that silently picked USB would
+                 be wrong for half the benches. */
               <button
-                onClick={handleConnectUsb}
-                disabled={!webSerialManager.isSupported()}
-                className="flex items-center space-x-2 whitespace-nowrap px-4 py-2 bg-blue-500 hover:bg-blue-600 disabled:opacity-40 text-slate-950 font-bold text-xs rounded-lg shadow-sm transition-all cursor-pointer"
+                onClick={() => setMachineConfigOpen(true)}
+                className="flex items-center space-x-2 whitespace-nowrap px-4 py-2 bg-blue-500 hover:bg-blue-600 text-slate-950 font-bold text-xs rounded-lg shadow-sm transition-all cursor-pointer"
               >
                 <Cpu className="w-4 h-4" />
                 <span>Connect CNC to Carve</span>

@@ -7,6 +7,13 @@
 
 import { postMachineTelemetry } from './apiClient';
 import {
+  SerialTransport,
+  TeknoBoxTransport,
+  isWebSerialSupported,
+  type MachineTransport,
+} from './machineTransport';
+import { locateExecutedLine, planResume, type ResumeOptions } from './jobResume';
+import {
   DEFAULT_MOTION_PROFILE,
   motionProfileFromSettings,
   parseGrblSettings,
@@ -21,6 +28,7 @@ export type MachineStatus =
   | 'PAUSED_MATERIAL'
   | 'PAUSED_TOOL'
   | 'PAUSED_USER'
+  | 'PAUSED_PARKED'
   | 'ALARM'
   | 'ERROR';
 
@@ -33,6 +41,24 @@ export interface MachineState {
   currentLine: number;
   totalLines: number;
   progressPercent: number;
+  /**
+   * Seconds since the job started cutting, and the run time it was quoted at.
+   *
+   * The line count cannot answer "how much longer" and never could. GRBL acks a
+   * line when it has parsed it, so the count runs ahead of the cut by whatever
+   * is sitting in the planner; and a line is not a unit of time either — a
+   * rapid across the stock is one line and a fraction of a second, a raster
+   * pass is one line and several. On a relief, where the mix of the two changes
+   * completely between roughing and finishing, "62% of the lines" and "62% of
+   * the way through" are simply different numbers.
+   *
+   * The clock is not a guess in the same way: the estimate comes off the
+   * finished program and the machine's own `$$` limits, and the elapsed time is
+   * measured. `estimatedSeconds` is null when the job was started by something
+   * that did not quote one, and the UI says so rather than inventing a figure.
+   */
+  elapsedSeconds: number;
+  estimatedSeconds: number | null;
   pauseMessage?: string;
   lastError?: string;
   /** Live feed and spindle, as reported in GRBL's `FS:` status field. */
@@ -74,6 +100,44 @@ export interface MachineState {
    * one seen is retained.
    */
   overrides: { feed: number; rapid: number; spindle: number };
+  /**
+   * The program that stopped early, and where it got to.
+   *
+   * Everything that ends a carve early ends it three hours in, and until now
+   * every one of those meant running the whole file again from the top. Holding
+   * on to the line it reached costs nothing and is the difference between
+   * losing twenty minutes and losing an afternoon.
+   *
+   * Null whenever there is nothing to pick up: before the first job, and after
+   * one runs to its end.
+   */
+  resume: ResumePoint | null;
+  /**
+   * A job stood down mid-cut so the machine can be driven around.
+   *
+   * Distinct from `resume`, which is the wreckage of a job that ended badly.
+   * This one is deliberate and is expected to be picked up again, and it
+   * carries the position the tool was standing at so it can be put back.
+   */
+  park: ParkPoint | null;
+}
+
+/** A job set aside mid-cut, with the machine free to be moved. */
+export interface ParkPoint {
+  /** The line the machine had actually finished, not the line last sent. */
+  fromLine: number;
+  totalLines: number;
+  /** Where the tool was standing when the cut stopped, in work coordinates. */
+  at: { x: number; y: number; z: number };
+}
+
+/** A program that stopped early, kept so it can be picked back up. */
+export interface ResumePoint {
+  /** The line it stopped on, in the numbering the progress display counts in. */
+  fromLine: number;
+  totalLines: number;
+  /** What ended it, which is what decides how alarming to make the offer. */
+  reason: 'alarm' | 'cancelled' | 'disconnected';
 }
 
 /**
@@ -164,17 +228,45 @@ export const RAPID_OVERRIDE_BYTES: Record<100 | 50 | 25, number> = {
 
 export type MachineStateListener = (state: MachineState) => void;
 
+/** Which wire to open, and where. */
+export type MachineLink =
+  | { kind: 'usb'; baudRate?: number }
+  | {
+      kind: 'teknobox';
+      /** Hostname or IP of the box, e.g. `192.168.1.42` or `teknobox.local`. */
+      host: string;
+      /** How the box reaches the controller: hosting its USB adapter, or a spare UART. */
+      backend?: 'usb' | 'uart';
+      baudRate?: number;
+    };
+
 class WebSerialManager {
-  private port: any = null;
-  private reader: ReadableStreamDefaultReader<string> | null = null;
-  private writer: WritableStreamDefaultWriter<string> | null = null;
-  private isReading = false;
+  /** The wire currently open, or null. See `machineTransport.ts`. */
+  private transport: MachineTransport | null = null;
   private statusPollTimer: any = null;
 
   private gcodeQueue: string[] = [];
   /** Trailing comments, index-aligned with `gcodeQueue`, for the pause prompts. */
   private gcodeNotes: string[] = [];
   private currentQueueIndex = 0;
+  /**
+   * The whole program as it was handed over, kept for the length of the session.
+   *
+   * Separate from `gcodeQueue` because the queue is what is left to send, and a
+   * resume rewrites it: it becomes a preamble that puts the machine back into
+   * the state the program had reached, followed by the tail of the program. The
+   * original has to survive that so a second resume — the bit snapped twice —
+   * still has something to count lines against.
+   */
+  private program: JobLine[] = [];
+  /**
+   * The program-line number that `gcodeQueue[0]` corresponds to.
+   *
+   * Zero for a job run from the start. Negative during a resume's preamble,
+   * which is lines that are not in the program at all, so the reported progress
+   * clamps rather than counting backwards.
+   */
+  private jobLineBase = 0;
   private isJobRunning = false;
   private isPaused = false;
 
@@ -197,6 +289,34 @@ class WebSerialManager {
    */
   private settingsSink: string[] | null = null;
 
+  /** Wall clock the current job started cutting at, or null between jobs. */
+  private jobStartedAt: number | null = null;
+  private elapsedTimer: ReturnType<typeof setInterval> | null = null;
+
+  /**
+   * Publishes the elapsed clock once a second while a job runs.
+   *
+   * A second is the resolution the readout is written at, and polling faster
+   * would only re-render the same string. Paused time still counts: the piece
+   * is still on the machine and the operator is still waiting on it.
+   */
+  private startElapsedTicker() {
+    if (this.elapsedTimer) clearInterval(this.elapsedTimer);
+    this.elapsedTimer = setInterval(() => {
+      if (this.jobStartedAt === null) return;
+      this.updateState({ elapsedSeconds: Math.round((Date.now() - this.jobStartedAt) / 1000) });
+    }, 1000);
+  }
+
+  private stopElapsedTicker() {
+    if (this.elapsedTimer) clearInterval(this.elapsedTimer);
+    this.elapsedTimer = null;
+    this.jobStartedAt = null;
+  }
+
+  /** Set from the status report; see `parseStatusReport`. */
+  private lastHoldState: 'decelerating' | 'complete' | null = null;
+
   private state: MachineState = {
     status: 'DISCONNECTED',
     connected: false,
@@ -211,6 +331,10 @@ class WebSerialManager {
     motion: DEFAULT_MOTION_PROFILE,
     grblSettings: {},
     overrides: { feed: 100, rapid: 100, spindle: 100 },
+    elapsedSeconds: 0,
+    estimatedSeconds: null,
+    resume: null,
+    park: null,
   };
 
   private listeners: Set<MachineStateListener> = new Set();
@@ -220,8 +344,9 @@ class WebSerialManager {
   private telemetryInFlight = false;
   private lastTelemetryStatus: MachineStatus | null = null;
 
+  /** Whether a USB cable is an option in this browser. WiFi always is. */
   public isSupported(): boolean {
-    return typeof navigator !== 'undefined' && 'serial' in navigator;
+    return isWebSerialSupported();
   }
 
   public getState(): MachineState {
@@ -293,32 +418,31 @@ class WebSerialManager {
     this.notify();
   }
 
-  /** Requests USB port from user and opens connection at 115200 baud. */
-  public async connect(baudRate = 115200): Promise<boolean> {
-    if (!this.isSupported()) {
-      this.updateState({ status: 'ERROR', lastError: 'WebSerial API is not supported in this browser. Use Chrome, Edge, or Opera.' });
-      return false;
-    }
+  /**
+   * Opens a wire to the machine.
+   *
+   * With no argument this is the USB cable it always was. Given a Tekno Box
+   * address it goes over WiFi instead, through the box's WebSocket relay — the
+   * same GRBL on the other end either way, which is why everything below this
+   * point is unchanged by the choice. See `machineTransport.ts`.
+   */
+  public async connect(link: MachineLink = { kind: 'usb' }): Promise<boolean> {
+    const transport =
+      link.kind === 'teknobox'
+        ? new TeknoBoxTransport(link.host, link.backend ?? 'usb', link.baudRate ?? 115200)
+        : new SerialTransport(link.baudRate ?? 115200);
 
     try {
       this.updateState({ status: 'CONNECTING' });
-      // Request serial port from user browser picker
-      this.port = await (navigator as any).serial.requestPort();
-      await this.port!.open({ baudRate });
 
-      const textDecoder = new TextDecoderStream();
-      this.port!.readable!.pipeTo(textDecoder.writable);
-      this.reader = textDecoder.readable.getReader();
+      await transport.open(
+        (line: string) => this.handleIncomingLine(line),
+        () => void this.handleTransportDropped()
+      );
 
-      const textEncoder = new TextEncoderStream();
-      textEncoder.readable.pipeTo(this.port!.writable!);
-      this.writer = textEncoder.writable.getWriter();
-
-      this.isReading = true;
-      this.startReadingLoop();
+      this.transport = transport;
       this.startStatusPolling();
-
-      this.updateState({ status: 'IDLE', connected: true, portName: 'USB Machine' });
+      this.updateState({ status: 'IDLE', connected: true, portName: transport.label });
 
       // Ask what it is before anything else needs to know. Not awaited: the
       // connection is usable the moment it is open, and a controller that is
@@ -326,40 +450,47 @@ class WebSerialManager {
       void this.refreshMachineSettings();
       return true;
     } catch (err: any) {
+      await transport.close().catch(() => {});
       this.updateState({
         status: 'DISCONNECTED',
         connected: false,
-        lastError: err?.message || 'Failed to connect to USB serial device.',
+        lastError: err?.message || 'Failed to connect to the machine.',
       });
       return false;
     }
   }
 
+  /**
+   * The wire went away on its own — a pulled cable, a box that lost WiFi.
+   *
+   * Routed through `disconnect` so a drop and a deliberate close leave exactly
+   * the same state behind, including keeping the line a running job reached so
+   * it can be picked up once the cable is back in.
+   */
+  private async handleTransportDropped(): Promise<void> {
+    if (!this.state.connected) return;
+    await this.disconnect();
+    this.updateState({
+      lastError: 'The connection to the machine dropped.',
+    });
+  }
+
   /** Closes serial connection. */
   public async disconnect(): Promise<void> {
     this.stopStatusPolling();
-    this.isReading = false;
+    // Before the flag is cleared, so the line it reached is kept: a nudged USB
+    // cable is the commonest way a long carve dies, and the program is still
+    // right here.
+    if (this.isJobRunning || this.isPaused) this.abandonJob('disconnected');
     this.isJobRunning = false;
 
     try {
-      if (this.reader) {
-        await this.reader.cancel();
-        this.reader.releaseLock();
-      }
-      if (this.writer) {
-        await this.writer.close();
-        this.writer.releaseLock();
-      }
-      if (this.port) {
-        await this.port.close();
-      }
+      if (this.transport) await this.transport.close();
     } catch {
       // ignore cleanup errors
     }
 
-    this.port = null;
-    this.reader = null;
-    this.writer = null;
+    this.transport = null;
     this.settingsSink = null;
     // Back to assumptions: the numbers belonged to a machine that is no longer
     // on the other end of the cable, and leaving them in place would have the
@@ -373,32 +504,11 @@ class WebSerialManager {
     });
   }
 
-  /** Sends a single G-code string line over serial. */
+  /** Sends a single G-code line to the machine, however it is connected. */
   public async sendLine(command: string): Promise<void> {
-    if (!this.writer || !this.state.connected) return;
-    const line = command.trim() + '\n';
-    await this.writer.write(line);
-  }
-
-  /** Reads incoming serial messages from GRBL / Marlin. */
-  private async startReadingLoop() {
-    let buffer = '';
-    while (this.isReading && this.reader) {
-      try {
-        const { value, done } = await this.reader.read();
-        if (done) break;
-        if (value) {
-          buffer += value;
-          const lines = buffer.split('\n');
-          buffer = lines.pop() || '';
-          for (const line of lines) {
-            this.handleIncomingLine(line.trim());
-          }
-        }
-      } catch (err) {
-        break;
-      }
-    }
+    if (!this.transport || !this.state.connected) return;
+    // Bare: each transport frames the line the way its own wire needs.
+    await this.transport.writeLine(command);
   }
 
   /** Parses GRBL response lines like 'ok', 'error:', or '<Idle|MPos:10,20,0|WPos:10,20,0>'. */
@@ -471,6 +581,21 @@ class WebSerialManager {
     const parts = body.split('|');
     // 'Hold:0' and 'Door:1' carry a sub-state after the colon.
     const machineWord = parts[0].split(':')[0];
+    const subState = parts[0].split(':')[1];
+
+    /*
+     * Whether a feed hold has finished decelerating.
+     *
+     * GRBL says 'Hold:1' while the axes are still slowing and 'Hold:0' once
+     * they have stopped. Parking waits on this: a soft reset taken while
+     * anything is still moving loses the position and comes back in alarm,
+     * which is the one outcome parking exists to avoid.
+     */
+    if (machineWord === 'Hold') {
+      this.lastHoldState = subState === '0' ? 'complete' : 'decelerating';
+    } else {
+      this.lastHoldState = null;
+    }
 
     let mpos: [number, number, number] | null = null;
     let wpos: [number, number, number] | null = null;
@@ -509,10 +634,11 @@ class WebSerialManager {
     if (machineWord === 'Alarm') {
       patch.status = 'ALARM';
       // A limit switch mid-carve kills the job on the controller — GRBL will not
-      // run another line until it is unlocked. Dropping the queue here means the
-      // rest of it is not still sitting there to be resumed into a machine that
-      // has lost its position.
-      if (this.isJobRunning || this.isPaused) this.abandonJob();
+      // run another line until it is unlocked. The queue is dropped so nothing
+      // streams on into a machine that has lost its position; the line it
+      // reached is kept, so the operator can deliberately pick it back up once
+      // the machine has been rehomed and the tool re-zeroed.
+      if (this.isJobRunning || this.isPaused) this.abandonJob('alarm');
     } else if (!this.isPaused) {
       // RUNNING here means "a job is streaming", not "the axes are moving" — a
       // frame trace or a probing move must not light up the job progress bar.
@@ -553,7 +679,7 @@ class WebSerialManager {
    * single slot would let the second one satisfy the next command's wait.
    */
   private sendAndWait(command: string, timeoutMs = 30000): Promise<void> {
-    if (!this.writer || !this.state.connected) return Promise.resolve();
+    if (!this.transport || !this.state.connected) return Promise.resolve();
     return new Promise<void>((resolve) => {
       let done = false;
       const finish = () => {
@@ -581,7 +707,7 @@ class WebSerialManager {
    * set — under G90 a `Z-20` on a machine zeroed high is a 20 mm dive past it.
    */
   public async probePoint(searchDepthMm = 20, feedrate = 50, timeoutMs = 120000): Promise<number | null> {
-    if (!this.writer || !this.state.connected) return null;
+    if (!this.transport || !this.state.connected) return null;
 
     let settle: (z: number | null) => void;
     const reported = new Promise<number | null>((resolve) => { settle = resolve; });
@@ -613,8 +739,8 @@ class WebSerialManager {
   private startStatusPolling() {
     this.stopStatusPolling();
     this.statusPollTimer = setInterval(() => {
-      if (this.state.connected && this.writer) {
-        this.writer.write('?');
+      if (this.state.connected && this.transport) {
+        void this.transport.writeRealtime(0x3f); // '?'
       }
     }, 300);
   }
@@ -627,13 +753,18 @@ class WebSerialManager {
   }
 
   /** Starts streaming a full G-code job. */
-  public startJob(gcode: string) {
+  public startJob(gcode: string, estimatedSeconds?: number) {
     if (!this.state.connected) return;
 
+    this.jobStartedAt = Date.now();
+    this.startElapsedTicker();
+
     const prepared = prepareJobLines(gcode);
+    this.program = prepared;
     this.gcodeQueue = prepared.map(l => l.code);
     this.gcodeNotes = prepared.map(l => l.note);
     this.currentQueueIndex = 0;
+    this.jobLineBase = 0;
     this.isJobRunning = true;
     this.isPaused = false;
 
@@ -642,6 +773,12 @@ class WebSerialManager {
       currentLine: 0,
       totalLines: this.gcodeQueue.length,
       progressPercent: 0,
+      elapsedSeconds: 0,
+      estimatedSeconds: estimatedSeconds ?? null,
+      // A new program is a new job; whatever stopped the last one is no longer
+      // something anyone can pick up.
+      resume: null,
+    park: null,
       // Whatever was outstanding from a previous job's tool change, starting a
       // new program is a fresh setup and the operator has just said so.
       needsZZero: false,
@@ -650,13 +787,107 @@ class WebSerialManager {
     this.advanceJobQueue();
   }
 
+  /**
+   * Throws away the offer to pick a stopped job back up.
+   *
+   * The program itself is kept — the operator may still want to run it from the
+   * start — but the offer stops being made.
+   */
+  public clearResumePoint(): void {
+    if (this.state.resume) this.updateState({ resume: null });
+  }
+
+  /** How many lines the program has, which is what progress is measured against. */
+  private programLength(): number {
+    return this.program.length;
+  }
+
+  /**
+   * Restarts the stored program part way through.
+   *
+   * The hard part is not the streaming, it is that line eleven thousand of a
+   * G-code file means nothing on its own — the units, the coordinate system,
+   * the feedrate, the spindle speed and the depth the tool is meant to be at
+   * were all established thousands of lines earlier. So the program is replayed
+   * without being sent (see `jobResume`), and what comes back is a short
+   * preamble that puts the machine into that state: retract, spindle back up to
+   * speed, move over the point it stopped at, and only then descend into the
+   * cut at a feedrate rather than a rapid.
+   *
+   * The preamble is prepended to the tail of the program and the whole thing is
+   * streamed as one job, so a pause or a second failure part way through a
+   * resumed job behaves exactly like any other.
+   *
+   * What this deliberately does *not* do is check that the operator is ready.
+   * A resume after a snapped cutter is a resume onto a different tool, whose
+   * length is different, which makes the existing Z datum wrong in the
+   * direction of driving the new tool into the work. That is what `needsZZero`
+   * is for, and the caller is expected to have dealt with it.
+   */
+  public resumeFromLine(fromLine: number, options?: ResumeOptions): { ok: boolean; message: string } {
+    if (!this.state.connected) {
+      return { ok: false, message: 'Not connected to a machine.' };
+    }
+    if (this.isJobRunning || this.isPaused) {
+      return { ok: false, message: 'A job is already running. Cancel it before resuming another.' };
+    }
+    if (this.program.length === 0) {
+      return { ok: false, message: 'There is no program to resume — nothing has been sent this session.' };
+    }
+
+    const plan = planResume(this.program.map((l) => l.code), fromLine, options);
+    const preamble = prepareJobLines(plan.preamble.join('\n'));
+    const tail = this.program.slice(plan.fromLine);
+
+    this.gcodeQueue = [...preamble.map((l) => l.code), ...tail.map((l) => l.code)];
+    this.gcodeNotes = [...preamble.map((l) => l.note), ...tail.map((l) => l.note)];
+    this.currentQueueIndex = 0;
+    // The preamble's lines are not in the program, so the program line that
+    // queue position 0 corresponds to is behind where it picks up.
+    this.jobLineBase = plan.fromLine - preamble.length;
+    this.isJobRunning = true;
+    this.isPaused = false;
+
+    this.updateState({
+      status: 'RUNNING',
+      currentLine: plan.fromLine,
+      totalLines: this.programLength(),
+      progressPercent: Math.round((plan.fromLine / Math.max(1, this.programLength())) * 100),
+      resume: null,
+      pauseMessage: undefined,
+    });
+
+    this.advanceJobQueue();
+
+    return {
+      ok: true,
+      message: plan.state.uncertain
+        ? `Resuming at line ${plan.fromLine}. ${plan.state.uncertainBecause}`
+        : `Resuming at line ${plan.fromLine} of ${this.programLength()}.`,
+    };
+  }
+
+  /**
+   * What a resume from a given line would do, without doing it.
+   *
+   * The preamble is the part worth reading before committing to it: it names
+   * the depth the tool is about to be sent back down to, and that is the number
+   * an operator wants to check against the workpiece in front of them.
+   */
+  public previewResume(fromLine: number, options?: ResumeOptions) {
+    if (this.program.length === 0) return null;
+    return planResume(this.program.map((l) => l.code), fromLine, options);
+  }
+
   /** Processes and sends the next line in the G-code queue. */
   private async advanceJobQueue() {
     if (!this.isJobRunning || this.isPaused) return;
 
     if (this.currentQueueIndex >= this.gcodeQueue.length) {
       this.isJobRunning = false;
-      this.updateState({ status: 'IDLE', progressPercent: 100 });
+      this.stopElapsedTicker();
+      // It finished. There is nothing left to resume into.
+      this.updateState({ status: 'IDLE', progressPercent: 100, resume: null });
       return;
     }
 
@@ -664,8 +895,13 @@ class WebSerialManager {
     const note = this.gcodeNotes[this.currentQueueIndex] || '';
     this.currentQueueIndex++;
 
-    const progressPercent = Math.round((this.currentQueueIndex / this.gcodeQueue.length) * 100);
-    this.updateState({ currentLine: this.currentQueueIndex, progressPercent });
+    // Reported against the original program rather than the queue, so a resumed
+    // job carries on from 61% instead of restarting the bar at zero. During the
+    // preamble the sum is below where the program picks up, and clamping there
+    // is what stops the progress running backwards.
+    const programLine = Math.max(0, Math.min(this.programLength(), this.jobLineBase + this.currentQueueIndex));
+    const progressPercent = Math.round((programLine / Math.max(1, this.programLength())) * 100);
+    this.updateState({ currentLine: programLine, progressPercent });
 
     // A tool change or a programmed stop is the operator's cue, not a fault.
     // Neither is sent on: GRBL rejects M6 unless it was built with it, and the
@@ -791,6 +1027,144 @@ class WebSerialManager {
   }
 
   /**
+   * How far ahead of the cut the streamer can be when a hold lands.
+   *
+   * GRBL answers `ok` on parse and executes later out of its planner buffer, so
+   * the line last sent is not the line last cut. Fifteen blocks is the stock
+   * planner depth; the window searched is wider than that because a program
+   * line is not always a motion block — comments, modal words and dwells all
+   * consume a line without consuming a block, so the line offset can exceed the
+   * block offset. Being generous costs a longer search and nothing else, since
+   * the position match is what actually picks the line.
+   */
+  private static readonly PARK_LOOKBACK_LINES = 64;
+
+  /**
+   * Stands the job down so the machine can be driven around, without losing it.
+   *
+   * A feed hold alone is not enough to be useful. GRBL will not accept a jog in
+   * `Hold`, so "pause and have a look" currently means the tool sits in the cut
+   * and nothing can be moved — and the only way out is to abandon the job,
+   * which on a carve that has been running two hours means the piece is scrap,
+   * because it can no longer be re-registered.
+   *
+   * The sequence that gets out of that:
+   *
+   *   1. Feed hold, and wait for motion to actually stop. Decelerating along
+   *      the path keeps the position true, which everything below depends on.
+   *   2. Work out which line was really cut, from where the tool is standing
+   *      rather than from what has been sent. See `locateExecutedLine`.
+   *   3. Soft reset. From a *stationary* hold this is clean — GRBL keeps its
+   *      machine position and comes back in `Idle` rather than `Alarm`, which
+   *      is the whole reason for waiting in step 1.
+   *   4. Retract to safe Z, so the tool is out of the cut and the work can be
+   *      looked at, brushed out, or measured.
+   *
+   * After this the machine is idle and free: jog it anywhere, re-zero Z for a
+   * fresh tool, whatever is needed. `resumeFromPark` puts it back.
+   */
+  public async parkJob(): Promise<boolean> {
+    if (!this.isJobRunning || this.state.status === 'PAUSED_PARKED') return false;
+
+    // 1. Hold, and let the deceleration finish.
+    if (!this.isPaused) {
+      this.isPaused = true;
+      await this.writeRealtime(0x21); // '!'
+    }
+    this.updateState({
+      status: 'PAUSED_USER',
+      pauseMessage: 'Stopping the axes before standing the job down…',
+    });
+    const stopped = await this.waitForHoldComplete();
+
+    // 2. Where it really got to, before the reset throws the buffer away.
+    const at = { ...this.state.wpos };
+    const sentLine = Math.max(0, Math.min(this.programLength(), this.jobLineBase + this.currentQueueIndex));
+    const fromLine = this.program.length
+      ? locateExecutedLine(
+          this.program.map((l) => l.code),
+          at,
+          sentLine,
+          WebSerialManager.PARK_LOOKBACK_LINES
+        )
+      : sentLine;
+
+    // 3. Let go of the program. The queue stops here; the park point is what
+    //    carries the job forward now.
+    this.isJobRunning = false;
+    this.isPaused = false;
+    this.okWaiters = [];
+    await this.writeRealtime(0x18); // Ctrl-X, soft reset
+
+    this.updateState({
+      status: 'PAUSED_PARKED',
+      park: { fromLine, totalLines: this.programLength(), at },
+      pauseMessage: stopped
+        ? `Job parked at line ${fromLine} of ${this.programLength()}. The machine is free to move — ` +
+          `jog it where you like, then resume.`
+        : `Job parked at line ${fromLine}, but the machine did not confirm it had stopped. Check ` +
+          `where the tool is before resuming.`,
+    });
+
+    // 4. Out of the cut. After a soft reset GRBL needs the modes restating
+    //    before it will take a move.
+    await this.sendLine('G21 G90');
+    await this.sendLine('G0 Z5');
+    return true;
+  }
+
+  /**
+   * Puts a parked job back on the machine and carries on cutting.
+   *
+   * The tool is driven back over the parked point at safe height and lowered
+   * before the program restarts, rather than being left wherever the operator
+   * jogged it — `planResume` writes a preamble that restores the modal state,
+   * but it cannot know that the machine has been moved several hundred
+   * millimetres since, and the first cutting move of the resumed program would
+   * otherwise be a straight line across the work to get back.
+   */
+  public async resumeFromPark(): Promise<boolean> {
+    const park = this.state.park;
+    if (!park || this.state.status !== 'PAUSED_PARKED') return false;
+
+    await this.sendLine('G21 G90');
+    await this.sendLine('G0 Z5');
+    await this.sendLine(`G0 X${park.at.x.toFixed(3)} Y${park.at.y.toFixed(3)}`);
+
+    this.updateState({ park: null, pauseMessage: undefined });
+    return this.resumeFromLine(park.fromLine).ok;
+  }
+
+  /** Throws away a parked job without resuming it. */
+  public discardPark(): void {
+    if (!this.state.park) return;
+    this.updateState({
+      park: null,
+      status: 'IDLE',
+      pauseMessage: undefined,
+      progressPercent: 0,
+    });
+  }
+
+  /**
+   * Waits for a feed hold to finish decelerating.
+   *
+   * GRBL reports `Hold:1` while it is still slowing down and `Hold:0` once the
+   * axes are stopped. The difference matters: a soft reset sent while anything
+   * is still moving loses the position and comes back in alarm, which is
+   * exactly the outcome parking exists to avoid.
+   */
+  private async waitForHoldComplete(timeoutMs = 5000): Promise<boolean> {
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+      await this.writeRealtime(0x3f); // '?' — status request
+      await new Promise((r) => setTimeout(r, 120));
+      if (this.lastHoldState === 'complete') return true;
+    }
+    return false;
+  }
+
+  /**
    * Writes a single real-time byte.
    *
    * These are not commands and are not queued: GRBL acts on them the moment
@@ -799,8 +1173,8 @@ class WebSerialManager {
    * down.
    */
   private async writeRealtime(byte: number): Promise<void> {
-    if (!this.writer || !this.state.connected) return;
-    await this.writer.write(String.fromCharCode(byte));
+    if (!this.transport || !this.state.connected) return;
+    await this.transport.writeRealtime(byte);
   }
 
   /**
@@ -847,7 +1221,7 @@ class WebSerialManager {
 
   /** Cancels the running job. */
   public async cancelJob() {
-    this.abandonJob();
+    this.abandonJob('cancelled');
     await this.eStop();
     // The soft reset leaves GRBL in Alarm if it was moving, so the status the
     // machine reports next is the truth here rather than an assumed IDLE.
@@ -870,7 +1244,7 @@ class WebSerialManager {
    * it was doing before, only now it admits it.
    */
   public async refreshMachineSettings(timeoutMs = 4000): Promise<MotionProfile> {
-    if (!this.state.connected || !this.writer) return this.state.motion;
+    if (!this.state.connected || !this.transport) return this.state.motion;
 
     const sink: string[] = [];
     this.settingsSink = sink;
@@ -900,7 +1274,19 @@ class WebSerialManager {
    * Drops everything this side is holding about a job, without touching the
    * machine. Used when the controller has already stopped on its own.
    */
-  private abandonJob() {
+  private abandonJob(reason: ResumePoint['reason'] = 'cancelled') {
+    // Where it got to, before the queue that knows it is thrown away. The line
+    // that was in flight is the one to come back to rather than the one after
+    // it: a move that was cut off partway through did not finish, and running
+    // it again only recuts a path that has already been cut, while skipping it
+    // leaves a gap in the work.
+    if ((this.isJobRunning || this.isPaused) && this.program.length > 0) {
+      const stoppedAt = Math.max(0, Math.min(this.programLength(), this.jobLineBase + this.currentQueueIndex - 1));
+      this.updateState({
+        resume: { fromLine: stoppedAt, totalLines: this.programLength(), reason },
+      });
+    }
+
     this.isJobRunning = false;
     this.isPaused = false;
     this.gcodeQueue = [];
@@ -925,7 +1311,7 @@ class WebSerialManager {
    * the unlock actually took.
    */
   public async unlockAlarm(): Promise<void> {
-    this.abandonJob();
+    this.abandonJob('alarm');
     this.updateState({
       lastError: undefined,
       pauseMessage: undefined,
@@ -1190,8 +1576,8 @@ class WebSerialManager {
 
   /** Emergency Stop (Ctrl+X and M5). */
   public async eStop(): Promise<void> {
-    if (this.writer) {
-      await this.writer.write('\x18'); // Ctrl+X soft reset
+    if (this.transport) {
+      await this.transport.writeRealtime(0x18); // Ctrl+X soft reset
       await this.sendLine('M5');
     }
   }

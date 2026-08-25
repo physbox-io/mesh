@@ -290,3 +290,126 @@ describe('Multi-sheet jobs', () => {
     expect(res.gcode).not.toContain('PAUSE: Insert Material Sheet');
   });
 });
+
+describe('Cutter compensation', () => {
+  /** Every X the program actually moves to. */
+  const xsOf = (gcode: string): number[] =>
+    gcode.split('\n')
+      .map((l) => l.match(/^G[01] X(-?[\d.]+)/))
+      .filter((m): m is RegExpMatchArray => m !== null)
+      .map((m) => parseFloat(m[1]));
+
+  it('runs the tool outside the outline and inside the holes on a router', () => {
+    const res = generateLaserCutGcode([squarePanel()], {
+      ...DEFAULT_GCODE_OPTIONS,
+      machineMode: 'cnc',
+      bitDiameterMm: 6,
+    });
+
+    expect(res.compensationMm).toBe(3);
+    const xs = xsOf(res.gcode);
+    // The 200mm outline is cut with the tool 3mm outside it on both sides...
+    expect(Math.min(...xs)).toBeCloseTo(-3, 3);
+    expect(Math.max(...xs)).toBeCloseTo(203, 3);
+    // ...and the 40mm cutout at x=80..120 with the tool 3mm inside it.
+    const insideHole = xs.filter((x) => x > 50 && x < 150);
+    expect(Math.min(...insideHole)).toBeCloseTo(83, 3);
+    expect(Math.max(...insideHole)).toBeCloseTo(117, 3);
+  });
+
+  it('cuts on the line when switched off', () => {
+    const res = generateLaserCutGcode([squarePanel()], {
+      ...DEFAULT_GCODE_OPTIONS,
+      machineMode: 'cnc',
+      bitDiameterMm: 6,
+      cutterCompensation: 'off',
+    });
+
+    expect(res.compensationMm).toBe(0);
+    const xs = xsOf(res.gcode);
+    expect(Math.min(...xs)).toBeCloseTo(0, 3);
+    expect(Math.max(...xs)).toBeCloseTo(200, 3);
+  });
+
+  it('leaves a laser alone, since its kerf is already in the geometry', () => {
+    const res = generateLaserCutGcode([squarePanel()], {
+      ...DEFAULT_GCODE_OPTIONS,
+      machineMode: 'laser',
+      bitDiameterMm: 6,
+    });
+
+    expect(res.compensationMm).toBe(0);
+    const xs = xsOf(res.gcode);
+    expect(Math.min(...xs)).toBeCloseTo(0, 3);
+    expect(Math.max(...xs)).toBeCloseTo(200, 3);
+  });
+
+  it('reports the bounds the tool reaches, not the bounds of the parts', () => {
+    const res = generateLaserCutGcode([squarePanel()], {
+      ...DEFAULT_GCODE_OPTIONS,
+      machineMode: 'cnc',
+      bitDiameterMm: 6,
+    });
+    expect(res.bounds.minX).toBeCloseTo(-3, 3);
+    expect(res.bounds.maxX).toBeCloseTo(203, 3);
+  });
+
+  it('warns about a cutout the bit cannot enter instead of dropping it silently', () => {
+    const panel = squarePanel();
+    panel.innerCutouts2D.push([
+      { x: 10, y: 10 }, { x: 14, y: 10 }, { x: 14, y: 14 }, { x: 10, y: 14 },
+    ]);
+
+    const res = generateLaserCutGcode([panel], {
+      ...DEFAULT_GCODE_OPTIONS,
+      machineMode: 'cnc',
+      bitDiameterMm: 6,
+    });
+
+    expect(res.warnings).toBeDefined();
+    expect(res.warnings!.join(' ')).toMatch(/4\.000mm across is narrower than the 6\.000mm cutter/);
+    // The cutout that does fit is still cut.
+    expect(res.operations.filter((o) => o.id.includes('cutout'))).toHaveLength(1);
+  });
+
+  it('keeps the joinery at nominal size, which is the whole point', () => {
+    // A 10mm-wide tab on the outline and a 10mm mortise. Cut on the line with a
+    // 6mm bit the tab would come out 4mm and the mortise 16mm — neither would
+    // ever fit. Compensated, both stay 10mm.
+    const zero = { x: 0, y: 0, z: 0 };
+    const tabbed: LaserPanel = {
+      id: 't', name: 'Tabbed', thickness: 0.003,
+      origin3D: zero, normal3D: { x: 0, y: 0, z: 1 },
+      uAxis3D: { x: 1, y: 0, z: 0 }, vAxis3D: { x: 0, y: 1, z: 0 },
+      outerPolygon2D: [
+        { x: 0, y: 0 }, { x: 100, y: 0 }, { x: 100, y: 50 },
+        { x: 55, y: 50 }, { x: 55, y: 60 }, { x: 45, y: 60 }, { x: 45, y: 50 },
+        { x: 0, y: 50 },
+      ],
+      innerCutouts2D: [],
+      edges3D: [], placedPos2D: { x: 0, y: 0 }, width2D: 100, height2D: 60,
+    };
+
+    const res = generateLaserCutGcode([tabbed], {
+      ...DEFAULT_GCODE_OPTIONS,
+      machineMode: 'cnc',
+      bitDiameterMm: 6,
+    });
+
+    // The tool's centre passes 3mm either side of the 10mm tab, so the path
+    // spans 16mm there and the tab it leaves behind is 10mm.
+    const ys = res.gcode.split('\n')
+      .map((l) => l.match(/^G[01] X(-?[\d.]+) Y(-?[\d.]+)/))
+      .filter((m): m is RegExpMatchArray => m !== null)
+      .map((m) => ({ x: parseFloat(m[1]), y: parseFloat(m[2]) }));
+
+    // The tab's two top corners are convex, so the path rounds them at the
+    // cutter's radius: the extremes in x sit at the tangent points, level with
+    // the base of the arc at y = 60.
+    const atTab = ys.filter((p) => p.y >= 59.999).map((p) => p.x);
+    expect(Math.min(...atTab)).toBeCloseTo(42, 3);
+    expect(Math.max(...atTab)).toBeCloseTo(58, 3);
+    // And the top of the tab is cleared by a full radius.
+    expect(Math.max(...ys.map((p) => p.y))).toBeCloseTo(63, 3);
+  });
+});

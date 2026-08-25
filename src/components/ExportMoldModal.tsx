@@ -699,25 +699,13 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
               Cancel
             </button>
 
-            {options.moldType === 'clamshell' && result.topHalfSTL && result.bottomHalfSTL && (
-              <button
-                onClick={() => {
-                  handleDownload(result.bottomHalfSTL!, 'mold_bottom_cavity.stl');
-                  setTimeout(() => handleDownload(result.topHalfSTL!, 'mold_top_core.stl'), 250);
-                }}
-                className="px-3.5 py-2 text-xs font-semibold rounded-xl border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
-              >
-                Download 2 Separate STLs
-              </button>
-            )}
-
             <button
               onClick={() => handleDownload(result.binarySTL, 'casting_mold_plate.stl')}
               disabled={!result.success || result.totalTriangles === 0}
               className="flex items-center gap-2 px-5 py-2 text-xs font-semibold text-white bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 rounded-xl shadow-md hover:shadow-lg disabled:opacity-50 transition-all cursor-pointer"
             >
               <Download className="w-4 h-4" />
-              <span>Download Combined STL Plate</span>
+              <span>Download STL</span>
             </button>
           </div>
         </div>
