@@ -102,6 +102,11 @@ See [GUIDE.md](GUIDE.md) for full mesh authoring workflow.
 
 ## 📜 License
 
-Distributed under the **Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0)** License.
+Distributed under the **PhysBox Permissive Public License (PPPL-1.0)**.
 
-Free for personal, academic, educational, and non-commercial research use with mandatory attribution. Commercial licensing requires prior authorization. See [LICENSE](LICENSE) for full terms.
+Free for personal, academic, educational, research, and commercial use, including the
+commercial sale of anything you produce with it — meshes, STLs, CAD models, toolpaths,
+G-code, and machined or printed parts. Attribution must be retained. Redistributing,
+re-branding, or hosting the software itself as a standalone or competing product or
+SaaS requires prior written authorization. See [LICENSE](LICENSE) for full terms,
+including the machinery and hardware safety disclaimer.
