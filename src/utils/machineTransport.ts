@@ -97,6 +97,34 @@ export function isWebSerialSupported(): boolean {
   return typeof navigator !== 'undefined' && serialApi() !== null;
 }
 
+/**
+ * Why the USB cable is not on offer, or null when it is.
+ *
+ * There are two quite different reasons and they send you looking in opposite
+ * places. WebSerial is gated on a *secure context*, so it is missing from a page
+ * served over plain http at a LAN address — nothing to do with the browser, and
+ * telling someone to switch browsers there wastes an afternoon. It is genuinely
+ * absent in Firefox and Safari whatever the origin.
+ *
+ * The two are told apart by `isSecureContext`, which is exactly the condition
+ * the API is gated on. Note that `http://localhost` is a secure context by
+ * definition, which is why the machine running the app can use the cable while
+ * a phone on the same network cannot.
+ */
+export function webSerialUnavailableReason(): string | null {
+  if (isWebSerialSupported()) return null;
+
+  const secure = typeof window !== 'undefined' && window.isSecureContext;
+  if (!secure) {
+    return (
+      'USB needs a secure page. This one is served over plain http, so the browser hides the ' +
+      'serial API — open the app on localhost or over https to use the cable, or connect over ' +
+      'WiFi instead, which works from here.'
+    );
+  }
+  return 'This browser has no WebSerial. Use Chrome, Edge or Opera for the cable — or connect over WiFi, which works in any of them.';
+}
+
 /** A USB cable straight into the machine's controller. */
 export class SerialTransport implements MachineTransport {
   readonly label = 'USB Machine';
@@ -115,9 +143,7 @@ export class SerialTransport implements MachineTransport {
 
   async open(onLine: (line: string) => void, onClosed: () => void): Promise<void> {
     if (!isWebSerialSupported()) {
-      throw new Error(
-        'WebSerial is not available in this browser. Use Chrome, Edge, or Opera — or connect over WiFi through a Tekno Box.'
-      );
+      throw new Error(webSerialUnavailableReason() ?? 'USB serial is not available here.');
     }
 
     const serial = serialApi();
@@ -193,6 +219,27 @@ export class SerialTransport implements MachineTransport {
   }
 }
 
+/**
+ * Whether an address is one the browser treats as "potentially trustworthy".
+ *
+ * These are the origins exempt from mixed-content blocking, so they are the
+ * ones an https page may open a plain `ws://` to. Everything else on the local
+ * network is not — which is the whole of the difference between a Tekno Box
+ * that connects from the deployed app and one that does not.
+ */
+export function loopbackHost(host: string): boolean {
+  const bare = host.trim().replace(/^[a-z]+:\/\//i, '').replace(/\/+$/, '');
+  // Strip a port, minding the brackets IPv6 literals carry.
+  const name = bare.startsWith('[')
+    ? bare.slice(0, bare.indexOf(']') + 1)
+    : bare.split(':')[0];
+
+  if (name === 'localhost' || name.endsWith('.localhost')) return true;
+  if (name === '[::1]') return true;
+  // The whole of 127.0.0.0/8, not just 127.0.0.1.
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(name);
+}
+
 /** How long to wait for the box to report the machine link open, ms. */
 const TEKNOBOX_OPEN_TIMEOUT_MS = 8000;
 
@@ -241,11 +288,11 @@ export class TeknoBoxTransport implements MachineTransport {
   }
 
   private url(): string {
-    const trimmed = this.host.trim().replace(/^wss?:\/\//i, '').replace(/\/+$/, '');
+    const trimmed = this.host.trim().replace(/^[a-z]+:\/\//i, '').replace(/\/+$/, '');
     // Plain ws:, because the box serves plain http on port 80 and has no
-    // certificate to offer. A page served over https cannot open one — that is
-    // a browser rule rather than something this can work around — so the app
-    // has to be reached over http for the WiFi link to be usable.
+    // certificate to offer. From an https page that is mixed content and is
+    // refused; from an http one it is fine. See `loopbackHost` for the one
+    // exception, and `unreachableMessage` for saying so when it bites.
     return `ws://${trimmed}/ws`;
   }
 
@@ -340,13 +387,7 @@ export class TeknoBoxTransport implements MachineTransport {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
-        reject(
-          new Error(
-            `Could not reach a Tekno Box at ${this.host}. Check the address, and that this page is ` +
-              `served over http rather than https — a secure page is not allowed to open a plain ` +
-              `WebSocket to it.`
-          )
-        );
+        reject(new Error(this.unreachableMessage()));
       };
 
       socket.onclose = () => {
@@ -359,6 +400,31 @@ export class TeknoBoxTransport implements MachineTransport {
         if (!this.closing) onClosed();
       };
     });
+  }
+
+  /**
+   * What to say when the socket would not open.
+   *
+   * Worth telling apart, because one of the two causes is invisible: a page on
+   * https is not allowed to open a plain connection to a machine on the local
+   * network, and the browser reports that refusal as an ordinary connection
+   * failure. Someone checking cables and power for a problem the browser
+   * decided before a packet moved will not find it.
+   */
+  private unreachableMessage(): string {
+    const blockedByMixedContent =
+      typeof window !== 'undefined' &&
+      window.location?.protocol === 'https:' &&
+      !loopbackHost(this.host);
+
+    if (blockedByMixedContent) {
+      return (
+        `This page is on https, and browsers will not let a secure page open a plain connection to ` +
+        `a machine on your network — so ${this.host} was refused before anything was tried. Open ` +
+        `physbox over http to use the WiFi link.`
+      );
+    }
+    return `Could not reach a Tekno Box at ${this.host}. Check the address and that the box is powered up on this network.`;
   }
 
   async close(): Promise<void> {

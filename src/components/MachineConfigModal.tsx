@@ -4,6 +4,7 @@ import { webSerialManager, type MachineState } from '../utils/webSerialManager';
 import { MachineWorkOriginPanel } from './MachineWorkOriginPanel';
 import { JobOverrides } from './MachineJobControls';
 import { describeMotionProfile } from '../utils/motionProfile';
+import { loopbackHost, webSerialUnavailableReason } from '../utils/machineTransport';
 
 /**
  * The machine itself, in one place.
@@ -130,9 +131,8 @@ export const MachineConfigModal: React.FC<{
                       ? `Connected (${machineState.portName})`
                       : link === 'teknobox'
                         ? 'The box plugs into the controller and relays GRBL over your network'
-                        : webSerialManager.isSupported()
-                          ? 'Connect a GRBL / Marlin / FluidNC controller to run jobs from the browser'
-                          : 'WebSerial is not available in this browser — use Chrome, Edge, or Opera, or go over WiFi'}
+                        : (webSerialUnavailableReason() ??
+                          'Connect a GRBL / Marlin / FluidNC controller to run jobs from the browser')}
                   </p>
                 </div>
               </div>
@@ -197,10 +197,21 @@ export const MachineConfigModal: React.FC<{
                       title="The address shown on the box's own screen. Just the host — no http:// and no path."
                       className="flex-1 min-w-[10rem] px-2 py-1 text-xs font-mono rounded-lg bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 text-slate-900 dark:text-slate-100"
                     />
-                    <span className="text-[10px] text-slate-500 dark:text-slate-400 basis-full">
-                      The address on the box's own screen. This page has to be served over http, not
-                      https — a secure page is not allowed to open a plain connection to the box.
-                    </span>
+                    {/* Only when it will actually be a problem — on an http
+                        page there is nothing to warn about. */}
+                    {typeof window !== 'undefined' &&
+                    window.location.protocol === 'https:' &&
+                    host.trim().length > 0 &&
+                    !loopbackHost(host) ? (
+                      <span className="text-[10px] text-amber-600 dark:text-amber-400 basis-full">
+                        This page is on https, which browsers will not let open a plain connection to
+                        a machine on your network. Open physbox over http to use the WiFi link.
+                      </span>
+                    ) : (
+                      <span className="text-[10px] text-slate-500 dark:text-slate-400 basis-full">
+                        The address shown on the box's own screen, e.g. 192.168.1.42
+                      </span>
+                    )}
                   </>
                 )}
               </div>
