@@ -1,3 +1,4 @@
+import type { PaintLayer } from '../utils/vertexPaint';
 export type GeomType = 'capsule' | 'sphere' | 'box' | 'plane' | 'cylinder' | 'ellipsoid' | 'mesh';
 export type JointType = 'hinge' | 'slide' | 'ball' | 'free';
 
@@ -24,6 +25,10 @@ export interface SceneGeom {
   // recompile can replace them wholesale and tell them from authored ones.
   csgDerived?: 'visual' | 'collider';
   rgba?: number[];
+  // Colour brushed onto part of this geom's surface (see utils/vertexPaint).
+  // Purely decorative: nothing in the physics, the MJCF emitter or any exporter
+  // reads it.
+  paint?: PaintLayer;
   fromto?: number[];
   pos?: number[];
   quat?: number[];

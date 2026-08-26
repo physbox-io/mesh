@@ -5,17 +5,22 @@ import SculptSurface from './components/SculptSurface';
 import { SCULPT_BASES, type SculptBaseId } from './utils/sculptBases';
 import { downloadMeshGeomStl } from './utils/meshStlExport';
 import SculptPanel from './components/SculptPanel';
+import ColoringSection from './components/ColoringSection';
 import { useMuJoCoInit } from './hooks/useMuJoCo';
 import { useMCPBridge } from './hooks/useMCPBridge';
 import { useCoarsePointer } from './hooks/useCoarsePointer';
 import { useStore, scaleMeshGeoms, getPhysicsWorkerClient, cloneSceneGraph } from './store/useStore';
+import { useVertexPaint } from './hooks/useVertexPaint';
+import { buildPaintGeometry, isPaintable, paintArgsFromSize, paintResolution, type PaintLayer } from './utils/vertexPaint';
 import type { SceneGraph, SceneNode } from './types/scene';
-import { Play, Square, SlidersHorizontal, Settings, Box, Circle, X, RotateCcw, Trash2, Layers, CircleDot, Zap, Info, Triangle, Disc, Code, Menu, Shapes, Minimize2, Save, Download, Upload, Undo, Redo, FileText, ChevronDown, ChevronUp, PanelRight, Edit3, Printer, Scissors, Sparkles, Sun, Moon, Pyramid, Cone, Donut, ChartSpline, Mountain, Paintbrush, Image as ImageIcon } from 'lucide-react';
+import { Play, Square, SlidersHorizontal, Settings, Box, Circle, X, RotateCcw, Trash2, Layers, CircleDot, Zap, Info, Triangle, Disc, Code, Menu, Shapes, Minimize2, Save, Download, Upload, Undo, Redo, FileText, ChevronDown, ChevronUp, PanelRight, Edit3, Printer, Scissors, Sparkles, Sun, Moon, Pyramid, Cone, Donut, ChartSpline, Mountain, Paintbrush, Grid3x3, Package, Boxes, Image as ImageIcon } from 'lucide-react';
 import { useRef, useMemo, useEffect, useCallback, useState, type RefObject } from 'react';
 import AICopilotPanel from './components/AICopilotPanel';
 import * as THREE from 'three';
 import { useFrame } from '@react-three/fiber';
 import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js';
+import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js';
+import { exportThreeMf, type ThreeMfMesh } from './utils/threeMfExporter';
 import { SimplifyModifier } from 'three/examples/jsm/modifiers/SimplifyModifier.js';
 import { loadCompiler, compileSCAD, isCompilerReady } from './utils/openscad';
 import { sampleCatmullRom, getStickyRotation } from './utils/geom';
@@ -352,6 +357,43 @@ const useOrbitEnable = () => {
   }, [getThree]);
 };
 
+/**
+ * Ends a paint stroke wherever it is let go.
+ *
+ * A stroke starts on a body's own pointerdown, but it can end anywhere — over
+ * empty space, over a panel, or outside the window entirely. Left open it would
+ * keep colouring every body the cursor merely passed over, with the camera
+ * still frozen from when the stroke began.
+ */
+const PaintStrokeController = () => {
+  const paintMode = useStore(state => state.paintMode);
+  const setOrbitEnabled = useOrbitEnable();
+
+  useEffect(() => {
+    const end = () => {
+      if (!paintStrokeActive) return;
+      paintStrokeActive = false;
+      setOrbitEnabled(true);
+    };
+    // Leaving paint mode mid-stroke is the same as letting go of it.
+    if (!paintMode) end();
+
+    window.addEventListener('pointerup', end);
+    window.addEventListener('pointercancel', end);
+    // A window that loses focus mid-stroke never sees the pointerup, and the
+    // camera would stay dead with nothing on screen explaining why.
+    window.addEventListener('blur', end);
+    return () => {
+      window.removeEventListener('pointerup', end);
+      window.removeEventListener('pointercancel', end);
+      window.removeEventListener('blur', end);
+      end();
+    };
+  }, [paintMode, setOrbitEnabled]);
+
+  return null;
+};
+
 const CameraController = () => {
   const { camera } = useThree();
   const cameraView = useStore(state => state.cameraView);
@@ -551,6 +593,19 @@ const WedgeGeometry = ({ width = 2.0, depth = 1.0, height = 0.5 }: { width: numb
 };
 
 
+/**
+ * Whether a paint stroke is currently down.
+ *
+ * Module scope rather than store state on purpose: every geom in the scene
+ * needs to see it, it changes twice per stroke, and nothing renders from it —
+ * putting it in the store would re-render every body in the viewport at the
+ * start and end of every stroke to no visible effect. PaintStrokeController
+ * owns clearing it.
+ */
+let paintStrokeActive = false;
+
+const beginPaintStroke = () => { paintStrokeActive = true; };
+
 // Dynamic Geom Renderer
 const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, selectedNodeId, setSelectedNodeId, vertices, faces, dynamic: isDynamic, providedGeomId, staticBody }: any) => {
   const meshRef = useRef<THREE.Group>(null);
@@ -613,21 +668,51 @@ const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, selectedN
   // ones the early returns below drop, and a geom without an rgba would take
   // the whole canvas down with it.
   const alpha = color?.[3] ?? 1;
+  const wireframe = useStore(state => state.wireframe);
+
+  // --- Painting -------------------------------------------------------------
+  // A geom holds paint on its vertices, so it has to be drawn from a surface
+  // dense enough to carry it (see utils/vertexPaint). That denser surface is
+  // built while the brush is out, and kept from then on by anything that has
+  // been painted — a body nobody has painted goes straight back to six quads
+  // the moment the brush is put down.
+  const paintMode = useStore(state => state.paintMode);
+  const geomEntry = useMemo(
+    () => node?.geoms?.find((g: any) => g.name === name),
+    [node, name]
+  );
+  const paintLayer = geomEntry?.paint as PaintLayer | undefined;
+  const showPaint = !!nodeId && isPaintable(type, !!node?.isWedge) && (paintMode || !!paintLayer);
   const materialProps = useMemo(() => {
     const [r, g, b] = color ?? [0.8, 0.8, 0.8];
     return {
       color: new THREE.Color(r, g, b),
       emissive: isSelected ? '#3b82f6' : '#000',
       emissiveIntensity: isSelected ? 0.2 : 0,
+      // Every geom in the scene funnels through this one memo, so the whole
+      // viewport switches to wireframe from a single flag. Note this is the
+      // material's own wireframe — every triangle of the tessellation, the
+      // diagonals included — which is the point here: it is a view of the mesh
+      // the machine sees, not the tidied silhouette CsgGhostOutline draws.
+      wireframe,
+      // Painted surfaces carry their colour per vertex, and Three multiplies the
+      // material's colour into it — so the material goes white and the body's
+      // own colour is mixed into the attribute instead. That is what keeps the
+      // base colour live: change it in the properties panel and the paint stays
+      // exactly where it is, over the new colour.
+      ...(showPaint ? { vertexColors: true, color: new THREE.Color(1, 1, 1) } : {}),
       ...(alpha < 1 ? { transparent: true, opacity: alpha, depthWrite: false } : {}),
     };
-  }, [color, isSelected, alpha]);
+  }, [color, isSelected, alpha, wireframe, showPaint]);
 
   // Handlers for physical spring dragging, mapped from Three.js coordinates to MuJoCo coordinate space
   const setOrbitEnabled = useOrbitEnable();
   const dragHandlers = useMemo(() => ({
     onClick: (e: any) => {
       e.stopPropagation();
+      // A paint dab is not a selection: swapping the properties panel out from
+      // under every body you colour would make a colouring pass unusable.
+      if (useStore.getState().paintMode) return;
       setSelectedNodeId(nodeId);
     },
     onPointerDown: (e: any) => {
@@ -676,7 +761,7 @@ const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, selectedN
         setOrbitEnabled(true);
       }
     }
-  }), [isPlaying, nodeId, setSelectedNodeId, setOrbitEnabled]);
+  }), [isPlaying, nodeId, name, setSelectedNodeId, setOrbitEnabled]);
 
   // For dynamic meshes, use body xpos/xmat so renderVertices (centroid-local) align correctly.
   const bodyId = useMemo(() => {
@@ -795,17 +880,76 @@ const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, selectedN
     return geo;
   }, [type, vertices, faces]);
 
+  // The argument list buildPaintGeometry needs, taken from the geom's own
+  // half-extents rather than from geometryArgs — the same rule the MCP bridge
+  // paints by, so an agent's dab and a user's stroke land on the same surface.
+  const paintArgs = useMemo(() => {
+    if (geomId === -1 || !model?.geom_size) return [];
+    return paintArgsFromSize(type, [
+      model.geom_size[geomId * 3],
+      model.geom_size[geomId * 3 + 1],
+      model.geom_size[geomId * 3 + 2],
+    ]);
+  }, [geomId, model, type]);
+
+  // The stored tessellation wins over a freshly computed one. Resizing a
+  // painted die rebuilds the box at the new size with the same subdivisions, so
+  // vertex N is still the same point on the same face and the pips scale with
+  // it instead of being dropped for a length mismatch.
+  const paintRes = useMemo(
+    () => (paintLayer?.res?.length ? paintLayer.res : paintResolution(type, paintArgs)),
+    [paintLayer, type, paintArgs]
+  );
+
+  const paintGeometry = useMemo(() => {
+    if (!showPaint) return null;
+    // A mesh already has vertices of its own, at whatever density it was made
+    // or sculpted at; there is nothing to re-tessellate.
+    if (type === 'mesh') return meshBufferGeometry;
+    if (!paintArgs.length || paintArgs.some((a: number) => a === undefined || isNaN(a))) return null;
+    return buildPaintGeometry(type, paintArgs, paintRes);
+  }, [showPaint, type, meshBufferGeometry, paintArgs, paintRes]);
+
+  useEffect(() => {
+    // Only the geometries built here are ours to free — the mesh branch hands
+    // back one it owns and disposes itself.
+    if (!paintGeometry || type === 'mesh') return;
+    return () => paintGeometry.dispose();
+  }, [paintGeometry, type]);
+
+  const { handlers: paintHandlers, cursorRef } = useVertexPaint({
+    nodeId,
+    name,
+    geometry: paintGeometry,
+    baseColor: color ?? [0.8, 0.8, 0.8, 1],
+    layer: paintLayer,
+    res: paintRes,
+    enabled: showPaint && paintMode,
+    setOrbitEnabled,
+    onStrokeStart: beginPaintStroke,
+  });
+
+  // The ring showing where the brush will land. Drawn on top of the surface so
+  // it stays readable in a hollow that would otherwise occlude it.
+  const brushCursor = showPaint && paintMode ? (
+    <mesh ref={cursorRef} visible={false} raycast={() => null}>
+      <ringGeometry args={[0.9, 1, 48]} />
+      <meshBasicMaterial color="#f0abfc" transparent opacity={0.95} side={THREE.DoubleSide} depthTest={false} toneMapped={false} />
+    </mesh>
+  ) : null;
+
   if (type === 'mesh') {
     if (!meshBufferGeometry) return null;
     const renderedMaterial = (
-      <meshStandardMaterial key={alpha < 1 ? 'blend' : 'solid'} {...materialProps} side={THREE.FrontSide} />
+      <meshStandardMaterial key={`${alpha < 1 ? 'blend' : 'solid'}:${showPaint}`} {...materialProps} side={THREE.FrontSide} />
     );
 
     if (isDynamic) {
       return (
         <group name={nodeId} ref={meshRef} position={initialPos} quaternion={new THREE.Quaternion(...initialQuat)}>
-          <mesh castShadow receiveShadow geometry={meshBufferGeometry} {...dragHandlers}>
+          <mesh castShadow receiveShadow geometry={meshBufferGeometry} {...dragHandlers} {...paintHandlers}>
             {renderedMaterial}
+            {brushCursor}
           </mesh>
         </group>
       );
@@ -813,8 +957,9 @@ const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, selectedN
     // Static mesh: vertices baked in Three.js world space — no position/rotation applied.
     return (
       <group name={nodeId}>
-        <mesh castShadow receiveShadow geometry={meshBufferGeometry} {...dragHandlers}>
+        <mesh castShadow receiveShadow geometry={meshBufferGeometry} {...dragHandlers} {...paintHandlers}>
           {renderedMaterial}
+          {brushCursor}
         </mesh>
       </group>
     );
@@ -825,8 +970,34 @@ const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, selectedN
   }
 
   const renderedGeomMaterial = (
-    <meshStandardMaterial key={alpha < 1 ? 'blend' : 'solid'} {...materialProps} />
+    <meshStandardMaterial key={`${alpha < 1 ? 'blend' : 'solid'}:${showPaint}`} {...materialProps} />
   );
+
+  if (paintGeometry) {
+    return (
+      <group
+        name={nodeId}
+        ref={meshRef}
+        position={initialPos}
+        quaternion={new THREE.Quaternion(...initialQuat)}
+      >
+        <mesh
+          castShadow
+          receiveShadow
+          geometry={paintGeometry}
+          // The same orientation and scaling the JSX primitives are given, so
+          // that turning the brush on does not move the body a millimetre.
+          rotation={type === 'capsule' || type === 'cylinder' ? [Math.PI / 2, 0, 0] : undefined}
+          scale={type === 'ellipsoid' ? [geometryArgs[0], geometryArgs[1], geometryArgs[2]] : undefined}
+          {...dragHandlers}
+          {...paintHandlers}
+        >
+          {renderedGeomMaterial}
+          {brushCursor}
+        </mesh>
+      </group>
+    );
+  }
 
   return (
     <group
@@ -1374,6 +1545,7 @@ const CurveControlHandles = () => {
 const StaticBoxInstances = ({ geoms, model, data, mujoco, setSelectedNodeId }: any) => {
   const meshRef = useRef<THREE.InstancedMesh>(null);
   const nodeIdByInstance = useMemo(() => geoms.map((g: any) => g.nodeId), [geoms]);
+  const wireframe = useStore(state => state.wireframe);
 
   useEffect(() => {
     const mesh = meshRef.current;
@@ -1416,12 +1588,13 @@ const StaticBoxInstances = ({ geoms, model, data, mujoco, setSelectedNodeId }: a
       receiveShadow
       onClick={(e: any) => {
         e.stopPropagation();
+        if (useStore.getState().paintMode) return;
         const nid = nodeIdByInstance[e.instanceId];
         if (nid) setSelectedNodeId(nid);
       }}
     >
       <boxGeometry args={[1, 1, 1]} />
-      <meshStandardMaterial />
+      <meshStandardMaterial wireframe={wireframe} />
     </instancedMesh>
   );
 };
@@ -1627,6 +1800,11 @@ const SceneVisuals = ({ model, data, mujoco, sceneGraph, selectedNodeId, setSele
   // Subscribed rather than read once: entering and leaving the sculpt tools has
   // to swap which renderer draws the body.
   const sculptNodeId = useStore((state) => state.sculptNodeId);
+  // Static boxes are drawn as one InstancedMesh, which shares a single geometry
+  // between every box in it — there is nowhere for one box's paint to live. So
+  // they come out of the instancing while the brush is out, and stay out for
+  // good once they carry paint.
+  const paintMode = useStore((state) => state.paintMode);
 
   const geoms = useMemo(() => {
     if (!sceneGraph) return [];
@@ -1656,7 +1834,9 @@ const SceneVisuals = ({ model, data, mujoco, sceneGraph, selectedNodeId, setSele
 
   const allPrimitiveGeoms = geoms.filter(g => g.type !== 'mesh');
   // Static boxes not on the selected body render as one InstancedMesh.
-  const instancedBoxGeoms = allPrimitiveGeoms.filter(g => g.type === 'box' && g.staticBody && !g.customRender && g.nodeId !== selectedNodeId);
+  const instancedBoxGeoms = paintMode
+    ? []
+    : allPrimitiveGeoms.filter(g => g.type === 'box' && g.staticBody && !g.customRender && g.nodeId !== selectedNodeId && !g.paint);
   const instancedNames = new Set(instancedBoxGeoms.map(g => g.name));
   const primitiveGeoms = allPrimitiveGeoms.filter(g => !instancedNames.has(g.name));
   // The body under the sculpt tools is drawn by SculptSurface, which owns the
@@ -2367,6 +2547,7 @@ function App() {
     gravityZ, windX, windY, density, floorFriction, floorBounce, setEnvironment,
     cameraView, setCameraView,
     printAnalysisEnabled, togglePrintAnalysis,
+    wireframe, toggleWireframe, paintMode,
     sceneGraph, selectedNodeId, setSelectedNodeId,
     updateNodeGeom, updateNodeJoint, updateGearTeeth, addPusherPeg, deletePusherPeg, updatePusherPeg, addComponent, loadPreset, updateScene,
     resetSimulation, updateNodePos,
@@ -2551,9 +2732,20 @@ function App() {
 
   const threeSceneRef = useRef<THREE.Scene | null>(null);
 
-  const exportStl = useCallback(() => {
+  /**
+   * The scene, as meshes ready to be written to a file.
+   *
+   * Shared by every mesh export rather than copied per format: they all want
+   * the same thing — world-space geometry, scaled to a real size, Z-up — and
+   * the only difference between them is what gets written afterwards. Materials
+   * come along, because two of the three formats can carry colour and the one
+   * that cannot simply ignores them.
+   *
+   * Returns null when the user cancels the size prompt.
+   */
+  const buildExportGroup = useCallback((): THREE.Group | null => {
     const scene = threeSceneRef.current;
-    if (!scene) { alert('Scene not ready'); return; }
+    if (!scene) { alert('Scene not ready'); return null; }
 
     // Find the nearest ancestor tagged with a body's nodeId (set on DynamicGeom's
     // wrapper <group name={nodeId}>), so multi-part scenes (e.g. an enclosure's
@@ -2575,10 +2767,20 @@ function App() {
       if (!(obj as THREE.Mesh).isMesh) return;
       const mesh = obj as THREE.Mesh;
       const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-      if (!mats.some(m => (m as any).isMeshStandardMaterial)) return;
+      const standard = mats.find(m => (m as any).isMeshStandardMaterial) as THREE.MeshStandardMaterial | undefined;
+      // Only lit surfaces are the model. The brush ring, the CSG ghosts and the
+      // shadow catcher are all basic/shadow materials and stay out of the file.
+      if (!standard) return;
       mesh.updateWorldMatrix(true, false);
       const geo = mesh.geometry.clone().applyMatrix4(mesh.matrixWorld);
-      exportGroup.add(new THREE.Mesh(geo));
+      // The material is cloned so that turning the viewport to wireframe does
+      // not export a wireframe — that is a way of looking at the model, not a
+      // property of it.
+      const material = standard.clone();
+      material.wireframe = false;
+      const exported = new THREE.Mesh(geo, material);
+      exported.name = findNodeId(mesh) ?? mesh.name ?? `part_${ungroupedIdx}`;
+      exportGroup.add(exported);
 
       const partKey = findNodeId(mesh) ?? `__ungrouped_${ungroupedIdx++}`;
       const meshBbox = new THREE.Box3().setFromBufferAttribute(geo.attributes.position as THREE.BufferAttribute);
@@ -2602,9 +2804,9 @@ function App() {
     if (longestPartDim > 0) {
       const defaultMm = Math.round(longestPartDim * 1000).toString();
       const targetStr = window.prompt("Longest part's longest side (mm):", defaultMm);
-      if (targetStr === null) return;
+      if (targetStr === null) return null;
       const targetMm = parseFloat(targetStr);
-      if (isNaN(targetMm) || targetMm <= 0) { alert('Invalid size'); return; }
+      if (isNaN(targetMm) || targetMm <= 0) { alert('Invalid size'); return null; }
       const scale = targetMm / longestPartDim;
       const center = bbox.getCenter(new THREE.Vector3());
       const transform = new THREE.Matrix4()
@@ -2616,11 +2818,11 @@ function App() {
       }
     }
 
-    const exporter = new STLExporter();
-    const result = exporter.parse(exportGroup, { binary: true }) as DataView;
-    const blob = new Blob([result.buffer as ArrayBuffer], { type: 'application/octet-stream' });
-    const url = URL.createObjectURL(blob);
+    return exportGroup;
+  }, []);
 
+  /** The scene's name, cleaned up into something that can be a filename. */
+  const exportBaseName = useCallback(() => {
     let baseName = '';
     if (noteCards && noteCards.length > 0) {
       for (const card of noteCards) {
@@ -2647,14 +2849,85 @@ function App() {
       baseName = 'physics_scene';
     }
 
-    const safeName = baseName.toLowerCase().replace(/[^a-z0-9_\-]+/g, '_').replace(/^_+|_+$/g, '') || 'physics_scene';
+    return baseName.toLowerCase().replace(/[^a-z0-9_\-]+/g, '_').replace(/^_+|_+$/g, '') || 'physics_scene';
+  }, [noteCards, activePreset]);
 
+  const downloadBlob = useCallback((blob: Blob, filename: string) => {
+    const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${safeName}.stl`;
+    a.download = filename;
     a.click();
     URL.revokeObjectURL(url);
-  }, [noteCards, activePreset]);
+  }, []);
+
+  const exportStl = useCallback(() => {
+    const exportGroup = buildExportGroup();
+    if (!exportGroup) return;
+
+    const exporter = new STLExporter();
+    const result = exporter.parse(exportGroup, { binary: true }) as DataView;
+    downloadBlob(new Blob([result.buffer as ArrayBuffer], { type: 'application/octet-stream' }), `${exportBaseName()}.stl`);
+  }, [buildExportGroup, exportBaseName, downloadBlob]);
+
+  /**
+   * The same model, in the format that can carry what it looks like.
+   *
+   * Both halves of the colour go in — per-corner colour for anything that
+   * renders the file, and a filament slot per triangle for a slicer that
+   * prints it. See utils/threeMfExporter.
+   */
+  const export3mf = useCallback(() => {
+    const exportGroup = buildExportGroup();
+    if (!exportGroup) return;
+
+    const meshes: ThreeMfMesh[] = [];
+    exportGroup.traverse((obj) => {
+      const mesh = obj as THREE.Mesh;
+      if (!mesh.isMesh) return;
+      const material = mesh.material as THREE.MeshStandardMaterial;
+      const position = mesh.geometry.getAttribute('position');
+      if (!position) return;
+      const color = mesh.geometry.getAttribute('color');
+      meshes.push({
+        name: mesh.name || 'part',
+        positions: position.array as Float32Array,
+        indices: (mesh.geometry.getIndex()?.array as Uint32Array | undefined) ?? null,
+        // Present exactly when the body carries paint: the painted material is
+        // white and holds the body's own colour in the attribute instead.
+        colors: material.vertexColors && color ? (color.array as Float32Array) : null,
+        baseColor: [material.color.r, material.color.g, material.color.b],
+      });
+    });
+
+    if (!meshes.length) { alert('Nothing to export'); return; }
+
+    const result = exportThreeMf(meshes);
+    downloadBlob(new Blob([result.data.buffer as ArrayBuffer], { type: 'application/vnd.ms-package.3dmanufacturing-3dmodel+xml' }), `${exportBaseName()}.3mf`);
+
+    // Said out loud because it is the one thing about the file a user cannot
+    // see by looking at it: how many filaments the paint was reduced to.
+    const slots = result.palette.filter(p => p.triangles > 0);
+    if (slots.length > 1) {
+      console.info(`[Export] 3MF written with ${slots.length} filament slots:`,
+        slots.map(p => `${p.extruder}: ${p.hex} (${p.triangles} triangles)`).join(', '));
+    }
+  }, [buildExportGroup, exportBaseName, downloadBlob]);
+
+  /** For a viewer or Blender, where vertex colour survives as it is. */
+  const exportGlb = useCallback(async () => {
+    const exportGroup = buildExportGroup();
+    if (!exportGroup) return;
+
+    try {
+      const exporter = new GLTFExporter();
+      const result = await exporter.parseAsync(exportGroup, { binary: true }) as ArrayBuffer;
+      downloadBlob(new Blob([result], { type: 'model/gltf-binary' }), `${exportBaseName()}.glb`);
+    } catch (e) {
+      console.error('Failed to export GLB', e);
+      alert('Failed to export GLB');
+    }
+  }, [buildExportGroup, exportBaseName, downloadBlob]);
 
   const importJson = useCallback(() => {
     const input = document.createElement('input');
@@ -3385,9 +3658,25 @@ function App() {
             <button
               onClick={exportStl}
               className="flex items-center justify-center p-1 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 transition-colors focus:outline-none cursor-pointer"
-              title="3D Print (STL)"
+              title="3D Print (STL) — geometry only. STL cannot carry colour; use 3MF if the model is painted."
             >
               <Printer className="w-3.5 h-3.5" />
+            </button>
+
+            <button
+              onClick={export3mf}
+              className="flex items-center justify-center p-1 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700 text-fuchsia-600 dark:text-fuchsia-400 transition-colors focus:outline-none cursor-pointer"
+              title="3D Print in colour (3MF) — carries painted colour two ways: per-vertex for viewers, and a filament slot per triangle for a multi-material slicer."
+            >
+              <Package className="w-3.5 h-3.5" />
+            </button>
+
+            <button
+              onClick={exportGlb}
+              className="flex items-center justify-center p-1 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 transition-colors focus:outline-none cursor-pointer"
+              title="Render / Blender (GLB) — the model with its colours exactly as they look on screen."
+            >
+              <Boxes className="w-3.5 h-3.5" />
             </button>
 
             <button
@@ -4122,6 +4411,9 @@ function App() {
             </div>
           </div>
         </div>
+
+        {/* Colour, which is looks only — see ColoringSection. */}
+        <ColoringSection onArmed={() => setIsLeftSidebarOpen(false)} />
       </aside>
 
         {/* Viewport */}
@@ -4178,8 +4470,9 @@ function App() {
           
           <Canvas
             camera={CAMERA_CONFIG}
-            shadows
+            shadows="soft"
             onPointerMissed={handlePointerMissed}
+            style={paintMode ? { cursor: 'crosshair' } : undefined}
             gl={{ preserveDrawingBuffer: true }}
             onCreated={(state) => {
               (window as any)._physics_gl = state.gl;
@@ -4202,7 +4495,28 @@ function App() {
             <DropHandler addComponent={addComponent} onImportFile={handleDroppedImportFile} onImportImageFile={handleDroppedImageFile} />
             <color attach="background" args={[darkMode ? '#0b0f19' : '#f8fafc']} />
             <ambientLight intensity={darkMode ? 0.35 : 0.6} />
-            <directionalLight position={[1.5, 3, 1.5]} intensity={darkMode ? 1.4 : 1.2} castShadow />
+            {/* The shadow camera is an orthographic box, and its default is +/-5m
+                with a 512px map. This scene lives at bench scale — the grid's
+                cells are 100mm and the camera sits 800mm out — so the default
+                spends its whole depth texture on empty space and resolves a
+                part's shadow at roughly 20mm per texel, which is mush. Bounded
+                to +/-2m at 2048px it lands near 2mm per texel instead.
+                normalBias offsets the lookup along the surface normal, which is
+                what keeps a body resting flat on the ground from shadow-acneing
+                itself into stripes. */}
+            <directionalLight
+              position={[1.5, 3, 1.5]}
+              intensity={darkMode ? 1.4 : 1.2}
+              castShadow
+              shadow-mapSize={[2048, 2048]}
+              shadow-camera-left={-2}
+              shadow-camera-right={2}
+              shadow-camera-top={2}
+              shadow-camera-bottom={-2}
+              shadow-camera-near={0.1}
+              shadow-camera-far={12}
+              shadow-normalBias={0.01}
+            />
             <Grid 
               infiniteGrid 
               fadeDistance={12} 
@@ -4213,6 +4527,30 @@ function App() {
               sectionColor={darkMode ? '#64748b' : '#94a3b8'} 
               position={[0, -0.005, 0]} 
             />
+
+            {/* Every geom already casts and receives, but until now nothing on
+                the ground caught any of it: drei's Grid is a custom shader that
+                doesn't receive shadows, so bodies only shadowed each other and
+                the floor stayed clean. That's the one place the eye reads
+                contact and height from, so a part hovering 20mm up looked
+                identical to one sitting down.
+                ShadowMaterial draws nothing but the shadow itself, so the grid
+                still shows through underneath. Sized to match the shadow
+                camera's 4m footprint exactly — a larger plane would sample
+                outside the depth texture and smear its edge texels outward.
+                raycast is stubbed off deliberately: a 4m plane across the
+                viewport floor would otherwise swallow every background click,
+                and onPointerMissed — the only thing that clears the selection —
+                would never fire again. */}
+            <mesh
+              rotation={[-Math.PI / 2, 0, 0]}
+              position={[0, 0, 0]}
+              receiveShadow
+              raycast={() => null}
+            >
+              <planeGeometry args={[4, 4]} />
+              <shadowMaterial transparent opacity={darkMode ? 0.5 : 0.32} depthWrite={false} />
+            </mesh>
             
             {model && data && mujoco && (
               <PhysicsLoop 
@@ -4247,6 +4585,7 @@ function App() {
             <AxisLegendDrawer externalRef={axisCanvasRef} />
             <CameraController />
             <DragInteractionController />
+            <PaintStrokeController />
           </Canvas>
 
           {/* Floating Viewport Camera Controls */}
@@ -4281,6 +4620,18 @@ function App() {
             >
               <Printer className="w-3 h-3" />
               Weak Spots
+            </button>
+            <button
+              onClick={() => toggleWireframe()}
+              title="Draw every body as the edges of its triangles. Shows the tessellation a slicer or a CAM job actually receives — and lets you see through the model to what is inside it."
+              className={`px-2.5 py-1 rounded text-[10px] font-bold tracking-wide transition-all cursor-pointer flex items-center gap-1 ${
+                wireframe
+                  ? 'bg-violet-500 text-white shadow-xs'
+                  : 'text-slate-655 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+              }`}
+            >
+              <Grid3x3 className="w-3 h-3" />
+              Wireframe
             </button>
 
           </div>

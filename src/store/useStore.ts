@@ -4,6 +4,7 @@ import type { SceneGraph, SceneNode, CsgOp } from '../types/scene';
 import { DEFAULT_BRUSH, toSceneGeom, type BrushSettings } from '../utils/sculptMesh';
 import { buildSculptBase, DEFAULT_SCULPT_BASE, type SculptBaseId } from '../utils/sculptBases';
 import { type CsgResult, CSG_DEFAULT_SECTORS } from '../utils/csg';
+import type { PaintLayer } from '../utils/vertexPaint';
 import { compileToMJCF } from '../utils/mjcf';
 import { PRESETS, pendulumPreset, generateGearGeoms } from '../presets/presetScenes';
 import { PhysicsWorkerClient, type BuiltResult, type FrameSnapshot } from './physicsWorkerClient';
@@ -256,8 +257,13 @@ export const scaleMeshGeoms = (node: any, sx: number, sy: number = sx, sz: numbe
 // ran on every slider tick / handle drag and every undo snapshot, copying
 // potentially megabytes of SCAD mesh data each time.
 const cloneGeom = (g: any): any => {
-  const { vertices, faces, renderVertices, baseVertices, baseRenderVertices, ...rest } = g;
+  // `paint` joins the mesh arrays in being shared rather than copied, for the
+  // same reason: it is thousands of numbers, it is replaced wholesale rather
+  // than mutated in place, and this clone runs on every slider tick and every
+  // undo snapshot.
+  const { vertices, faces, renderVertices, baseVertices, baseRenderVertices, paint, ...rest } = g;
   const out: any = JSON.parse(JSON.stringify(rest));
+  if (paint !== undefined) out.paint = paint;
   if (vertices !== undefined) out.vertices = vertices;
   if (faces !== undefined) out.faces = faces;
   if (renderVertices !== undefined) out.renderVertices = renderVertices;
@@ -354,6 +360,34 @@ export interface PhysicsState {
   isSettingsOpen: boolean;
   cameraView: 'perspective' | 'topDown';
   printAnalysisEnabled: boolean;
+
+  // --- Viewport display ---------------------------------------------------
+  /** Draw every body as the edges of its triangles rather than a shaded solid. */
+  wireframe: boolean;
+  toggleWireframe: () => void;
+
+  // --- Coloring -----------------------------------------------------------
+  //
+  // Brushed onto part of a surface, not applied to a whole body — see
+  // utils/vertexPaint. Purely how the scene looks: a geom's colour has never
+  // fed the physics or any exporter.
+  /** Whether a drag in the viewport paints bodies instead of selecting them. */
+  paintMode: boolean;
+  /** The colour the brush is holding, as 0..1 rgb to match a geom's rgba. */
+  paintColor: [number, number, number];
+  /** Brush radius in metres. */
+  paintRadius: number;
+  /** Coverage one dab lays down at the centre of the brush, 0..1. */
+  paintFlow: number;
+  togglePaintMode: () => void;
+  setPaintColor: (rgb: [number, number, number]) => void;
+  setPaintBrush: (patch: { radius?: number; flow?: number }) => void;
+  /** Stores a finished stroke. Passing undefined strips a geom back to bare. */
+  setGeomPaint: (nodeId: string, geomName: string, layer: PaintLayer | undefined) => void;
+  /** Takes the paint off every geom of the scene. */
+  clearAllPaint: () => void;
+  /** Sets a body's base colour — one geom by name, or all of them. */
+  setGeomColor: (nodeId: string, geomName: string | undefined, rgba: number[]) => void;
   // When set, CameraController points the camera at this explicit pose instead
   // of the cameraView preset. Position/target are in MuJoCo world space (same
   // convention as every other pos field in the app) — CameraController converts
@@ -704,6 +738,82 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   setCameraView: (view) => set({ cameraView: view, cameraOverride: null }),
   setPrintAnalysisEnabled: (enabled) => set({ printAnalysisEnabled: enabled }),
   togglePrintAnalysis: () => set((state) => ({ printAnalysisEnabled: !state.printAnalysisEnabled })),
+
+  wireframe: false,
+  toggleWireframe: () => set((state) => ({ wireframe: !state.wireframe })),
+
+  paintMode: false,
+  paintColor: [0.91, 0.30, 0.24],
+  paintRadius: 0.008,
+  paintFlow: 0.35,
+  togglePaintMode: () => set((state) => ({ paintMode: !state.paintMode })),
+  setPaintColor: (paintColor) => set({ paintColor }),
+  setPaintBrush: (patch) => set((state) => ({
+    paintRadius: patch.radius ?? state.paintRadius,
+    paintFlow: patch.flow ?? state.paintFlow,
+  })),
+
+  setGeomPaint: (nodeId, geomName, layer) => {
+    const existing = findNode(get().sceneGraph.nodes, nodeId);
+    const index = existing?.geoms?.findIndex((geom: any) => geom.name === geomName) ?? -1;
+    if (index === -1) return;
+
+    get().recordInteraction('paint');
+    const newScene = cloneSceneGraph(get().sceneGraph);
+    const node = findNode(newScene.nodes, nodeId);
+    if (!node?.geoms?.[index]) return;
+    if (layer) node.geoms[index].paint = layer;
+    else delete node.geoms[index].paint;
+
+    // Deliberately no recompile.
+    //
+    // Every other geom edit has to rebuild the MJCF and swap the model in the
+    // physics worker, because every other geom edit changes something MuJoCo
+    // reads. Paint is not one: the emitter names the attributes it writes, no
+    // exporter reads vertex colour, and the viewport takes a geom's colour off
+    // the scene graph rather than out of the compiled model. Rebuilding here
+    // would drop the simulation back to its initial pose once per stroke to
+    // change nothing the simulation can see.
+    set({ sceneGraph: newScene });
+  },
+
+  setGeomColor: (nodeId, geomName, rgba) => {
+    get().recordInteraction('node-geom');
+    const newScene = cloneSceneGraph(get().sceneGraph);
+    const node = findNode(newScene.nodes, nodeId);
+    if (!node?.geoms?.length) return;
+
+    // No name means the whole body, which is what colouring an imported mesh or
+    // a boolean body usually means — those arrive as several geoms and leaving
+    // some of them the old colour is never what was asked for.
+    const targets = geomName ? node.geoms.filter((g: any) => g.name === geomName) : node.geoms;
+    if (!targets.length) return;
+    for (const geom of targets) {
+      geom.rgba = [rgba[0] ?? 0.8, rgba[1] ?? 0.8, rgba[2] ?? 0.8, rgba[3] ?? geom.rgba?.[3] ?? 1];
+    }
+
+    // Base colour does go into the MJCF, unlike paint, so this one recompiles —
+    // once for the whole body rather than once per geom.
+    set({ sceneGraph: newScene });
+    get().recompile(newScene, undefined, true);
+  },
+
+  clearAllPaint: () => {
+    get().recordInteraction('paint');
+    const newScene = cloneSceneGraph(get().sceneGraph);
+    let found = false;
+    const walk = (nodes: any[]) => {
+      for (const node of nodes || []) {
+        for (const geom of node.geoms || []) {
+          if (geom.paint) { delete geom.paint; found = true; }
+        }
+        walk(node.children);
+      }
+    };
+    walk(newScene.nodes);
+    if (found) set({ sceneGraph: newScene });
+  },
+
   addHardwareComponentNode: (hardwareNode) => {
     get().prepareForDiscreteChange();
     const sceneGraph = get().sceneGraph;

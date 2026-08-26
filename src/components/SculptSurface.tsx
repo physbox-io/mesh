@@ -69,6 +69,9 @@ export function SculptSurface({
   const cursorRef = useRef<THREE.Mesh>(null);
 
   const brush = useStore((s) => s.sculptBrush);
+  // The viewport-wide wireframe applies here too — a sculpt is the one body
+  // whose tessellation you most want to be able to look at.
+  const wireframe = useStore((s) => s.wireframe);
   const updateNodeGeom = useStore((s) => s.updateNodeGeom);
   const { gl } = useThree();
   // Same trick the rest of the app uses to stop the camera mid-gesture: reach
@@ -439,7 +442,7 @@ export function SculptSurface({
         onPointerUp={onPointerUp}
         onPointerLeave={onPointerLeave}
       >
-        <meshStandardMaterial color={rgb} roughness={0.85} metalness={0.02} side={THREE.FrontSide} />
+        <meshStandardMaterial color={rgb} roughness={0.85} metalness={0.02} side={THREE.FrontSide} wireframe={wireframe} />
       </mesh>
 
       {/* The brush ring. Drawn on top of the surface so it stays readable in a

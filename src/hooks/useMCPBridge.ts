@@ -13,6 +13,10 @@ import { generateCurveGeoms, DEFAULT_CURVE_POINTS, DEFAULT_CURVE_WIDTH, DEFAULT_
 import { compileCsgNodes } from './useCsgCompile';
 import { PRESETS } from '../presets/presetScenes';
 import { parseSTL } from '../utils/stlParser';
+import {
+  applyDab, buildPaintGeometry, canvasFromLayer, isPaintable, layerFromCanvas,
+  paintArgsFromSize, paintResolution, toGeometrySpace,
+} from '../utils/vertexPaint';
 import { saveUserPreset, deleteUserPreset, readUserPreset, listUserPresetNames } from '../utils/userPresets';
 
 const autoCompileScad = async (nodes: any[]) => {
@@ -496,6 +500,97 @@ export function useMCPBridge() {
           });
           const error = useStore.getState().lastCompileError;
           return { ok: !error, ...(error ? { error } : {}) };
+        }
+
+        case 'SET_COLOR': {
+          // The base colour of a body — what "make the imported bracket blue"
+          // means. Paint (below) sits on top of this and is not disturbed by it.
+          const { targetId, geomName, rgba } = msg;
+          if (!targetId) throw new Error('Missing targetId');
+          if (!Array.isArray(rgba) || rgba.length < 3) throw new Error('rgba must be [r, g, b] or [r, g, b, a], each 0..1');
+          const node = findNodeInScene(store.sceneGraph.nodes, targetId);
+          if (!node) throw new Error(`No object with id '${targetId}'`);
+          if (geomName && !(node.geoms || []).some((g: any) => g.name === geomName)) {
+            throw new Error(`Object '${targetId}' has no geom named '${geomName}'`);
+          }
+          store.setGeomColor(targetId, geomName, rgba);
+          return { ok: true, geomsColored: geomName ? 1 : (node.geoms || []).length };
+        }
+
+        case 'PAINT': {
+          // Brushed colour, laid down the way a human stroke is: dabs of
+          // coverage at points on the surface, building up where they overlap.
+          //
+          // `at` is one point or a list of them, in the geom's own frame — so
+          // the five pips of a die face are one call rather than five.
+          const { targetId, geomName, at, radius, rgba, flow, erase } = msg;
+          if (!targetId) throw new Error('Missing targetId');
+          const node = findNodeInScene(store.sceneGraph.nodes, targetId);
+          if (!node) throw new Error(`No object with id '${targetId}'`);
+
+          const geom = geomName
+            ? (node.geoms || []).find((g: any) => g.name === geomName)
+            : (node.geoms || []).find((g: any) => isPaintable(g.type, !!node.isWedge));
+          if (!geom) throw new Error(geomName ? `No geom named '${geomName}' on '${targetId}'` : `Nothing paintable on '${targetId}'`);
+          if (!isPaintable(geom.type, !!node.isWedge)) {
+            throw new Error(`A '${geom.type}' geom cannot hold paint — paintable types are box, sphere, ellipsoid, cylinder, capsule and mesh`);
+          }
+          if (!Array.isArray(rgba) || rgba.length < 3) throw new Error('rgba must be [r, g, b], each 0..1');
+
+          const points: number[][] = Array.isArray(at?.[0]) ? at : [at];
+          if (!points.length || points.some((p: any) => !Array.isArray(p) || p.length < 3)) {
+            throw new Error("at must be [x, y, z] or a list of them, in the geom's own frame (metres)");
+          }
+          const brush = typeof radius === 'number' ? radius : 0.008;
+
+          // The surface is rebuilt exactly as the renderer builds it, so a dab
+          // placed here lands on the vertices the viewport is drawing. A mesh is
+          // painted on the vertices it already has.
+          const args = paintArgsFromSize(geom.type, geom.size || []);
+          const res = geom.paint?.res?.length ? geom.paint.res : paintResolution(geom.type, args);
+          const built = geom.type === 'mesh' ? null : buildPaintGeometry(geom.type, args, res);
+          const positions: ArrayLike<number> | undefined = geom.type === 'mesh'
+            ? (geom.dynamic ? geom.renderVertices : geom.vertices)
+            : (built?.getAttribute('position')?.array as Float32Array | undefined);
+          if (!positions?.length) throw new Error('That geom has no surface to paint');
+
+          const canvas = canvasFromLayer(geom.paint, positions.length / 3, res);
+          let landed = 0;
+          for (const point of points) {
+            const [x, y, z] = toGeometrySpace(geom.type, point);
+            if (applyDab(canvas, positions, {
+              x, y, z,
+              radius: brush,
+              color: rgba,
+              // An agent places a mark once and expects it to be there, so a dab
+              // covers fully unless asked to be lighter — the opposite default
+              // from the brush in the panel, which is held down and dragged.
+              flow: typeof flow === 'number' ? flow : 1,
+              erase: !!erase,
+            })) landed++;
+          }
+          built?.dispose();
+
+          if (!landed) {
+            throw new Error(`No vertices within ${brush} m of any of those points — the point has to be on the surface, in the geom's own frame`);
+          }
+          store.setGeomPaint(targetId, geom.name, layerFromCanvas(canvas));
+          return { ok: true, geomName: geom.name, dabsLanded: landed, dabsRequested: points.length };
+        }
+
+        case 'CLEAR_PAINT': {
+          const { targetId, geomName } = msg;
+          if (!targetId) {
+            store.clearAllPaint();
+            return { ok: true, scope: 'scene' };
+          }
+          const node = findNodeInScene(store.sceneGraph.nodes, targetId);
+          if (!node) throw new Error(`No object with id '${targetId}'`);
+          for (const geom of node.geoms || []) {
+            if (geomName && geom.name !== geomName) continue;
+            if (geom.paint) store.setGeomPaint(targetId, geom.name, undefined);
+          }
+          return { ok: true, scope: geomName || targetId };
         }
 
         case 'TOGGLE_PLAY':
