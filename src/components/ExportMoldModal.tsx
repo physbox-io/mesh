@@ -8,10 +8,12 @@ import {
   Info,
   Eye,
   EyeOff,
+  AlertTriangle,
 } from 'lucide-react';
 import type { SceneGraph } from '../types/scene';
 import {
   generateMoldMeshes,
+  emptyMoldResult,
   computeNormal,
   DEFAULT_MOLD_OPTIONS,
   type MoldOptions,
@@ -19,6 +21,7 @@ import {
   type Triangle3D,
 } from '../utils/moldExporter';
 import { NumberInput } from './NumberInput';
+import { CastingGuide } from './CastingGuide';
 
 interface ExportMoldModalProps {
   isOpen: boolean;
@@ -159,24 +162,7 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
 
   // Generate mold meshes when options or scene changes
   const result: MoldExportResult = useMemo(() => {
-    if (!isOpen) {
-      return {
-        success: false,
-        binarySTL: new Uint8Array(0),
-        partBounds: { minX: 0, minY: 0, minZ: 0, maxX: 0, maxY: 0, maxZ: 0 },
-        moldBounds: { minX: 0, minY: 0, minZ: 0, maxX: 0, maxY: 0, maxZ: 0 },
-        partWidthMm: 0,
-        partDepthMm: 0,
-        partHeightMm: 0,
-        moldWidthMm: 0,
-        moldDepthMm: 0,
-        moldHeightMm: 0,
-        totalTriangles: 0,
-        bottomHalf: { name: 'bottom', triangles: [], bounds: { minX: 0, minY: 0, minZ: 0, maxX: 0, maxY: 0, maxZ: 0 }, widthMm: 0, depthMm: 0, heightMm: 0, triangleCount: 0 },
-        combinedTriangles: [],
-        warnings: [],
-      };
-    }
+    if (!isOpen) return emptyMoldResult();
     return generateMoldMeshes(scene, options);
   }, [isOpen, scene, options]);
 
@@ -507,7 +493,7 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
             </div>
 
             {/* Geometry Info Stats */}
-            <div className="grid grid-cols-3 gap-2 text-xs">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
               <div className="bg-slate-100 dark:bg-slate-800 p-2.5 rounded-lg">
                 <span className="text-slate-400 block text-[10px] uppercase font-semibold">Part Size</span>
                 <span className="font-mono font-medium truncate block">
@@ -524,7 +510,37 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
                 <span className="text-slate-400 block text-[10px] uppercase font-semibold">STL Triangles</span>
                 <span className="font-mono font-medium">{result.totalTriangles.toLocaleString()}</span>
               </div>
+              <div className="bg-slate-100 dark:bg-slate-800 p-2.5 rounded-lg">
+                <span className="text-slate-400 block text-[10px] uppercase font-semibold">Cavity</span>
+                <span className="font-mono font-medium truncate block">
+                  {result.cavityDepthMm} mm deep · {result.minDraftDeg}° draft
+                </span>
+              </div>
             </div>
+
+            {result.warnings.length > 0 && (
+              <div className="space-y-1.5">
+                {result.warnings.map((w, i) => (
+                  <div
+                    key={i}
+                    className="flex items-start gap-2 text-[11px] leading-snug rounded-lg px-2.5 py-2 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 text-amber-800 dark:text-amber-200"
+                  >
+                    <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-px" />
+                    <span>{w}</span>
+                  </div>
+                ))}
+                {result.lidIsBackingPlate && options.moldType === 'clamshell' && (
+                  <button
+                    type="button"
+                    onClick={() => set('moldType', 'open')}
+                    className="text-[11px] font-semibold px-2.5 py-1.5 rounded-lg border border-purple-300 dark:border-purple-800
+                               text-purple-700 dark:text-purple-300 hover:bg-purple-50 dark:hover:bg-purple-950/40 cursor-pointer transition-colors"
+                  >
+                    Drop the lid — switch to a one-part open mold
+                  </button>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Right Column: Mold Configuration Form */}
@@ -566,16 +582,37 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
                 </Field>
               </div>
 
-              <Field label="Cavity Depth (mm)" hint="0 uses the scene's natural height. Set a value to scale total depth." hintAlign="end">
-                <NumberInput
-                  min={0}
-                  max={200}
-                  step="1"
-                  value={options.cavityDepthMm}
-                  onChange={(v) => set('cavityDepthMm', v)}
-                  className={inputClass}
-                />
-              </Field>
+              <div className="grid grid-cols-2 gap-3 min-w-0">
+                <Field label="Cavity Depth (mm)" hint="0 uses the scene's natural height. Set a value to scale total depth." hintAlign="start">
+                  <NumberInput
+                    min={0}
+                    max={200}
+                    step="1"
+                    value={options.cavityDepthMm}
+                    onChange={(v) => set('cavityDepthMm', v)}
+                    className={inputClass}
+                  />
+                </Field>
+                <Field
+                  label="Draft (deg)"
+                  hint={
+                    'Taper on the cavity walls, off the pull direction. A vertical wall grips the casting; ' +
+                    'a couple of degrees lets a rigid mold let go. It costs depth x tan(angle) of lateral ' +
+                    `detail — here ${(result.cavityDepthMm * Math.tan((Math.max(options.draftAngleDeg, 0.0001) * Math.PI) / 180)).toFixed(2)} mm at the deepest wall. ` +
+                    'Set 0 to reproduce the part exactly and demold by hand.'
+                  }
+                  hintAlign="end"
+                >
+                  <NumberInput
+                    min={0}
+                    max={15}
+                    step="0.5"
+                    value={options.draftAngleDeg}
+                    onChange={(v) => set('draftAngleDeg', v)}
+                    className={inputClass}
+                  />
+                </Field>
+              </div>
             </div>
 
             {/* Registration Pins & Tolerances (Clamshell only) */}
@@ -682,6 +719,7 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
                 </div>
               </div>
             )}
+            <CastingGuide result={result} />
           </div>
         </div>
 

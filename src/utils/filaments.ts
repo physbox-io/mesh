@@ -13,7 +13,7 @@
 // knowing while choosing what to model in. The printing itself happens in a
 // slicer, from the 3MF or STL exported here.
 
-export type FilamentId = 'pla' | 'petg' | 'abs' | 'asa';
+export type FilamentId = 'pla' | 'petg' | 'abs' | 'asa' | 'tpu';
 
 export interface FilamentSpec {
   id: FilamentId;
@@ -42,6 +42,11 @@ export const FILAMENTS: FilamentSpec[] = [
     id: 'asa',
     label: 'ASA',
     note: 'ABS that survives sunlight. The usual answer for parts that live outside and would otherwise go chalky and brittle within a season.',
+  },
+  {
+    id: 'tpu',
+    label: 'TPU',
+    note: 'Rubber, near enough — a hundred times less stiff than the rest of this list rather than the factor of two that separates them from each other. That is what makes it the filament for a casting mold: it peels off the casting instead of gripping it. Slow to print and it will not bridge.',
   },
 ];
 
