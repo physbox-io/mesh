@@ -418,7 +418,7 @@ export const MachineConfigModal: React.FC<{
                 isLaser={machineTarget === 'laser'}
                 onOpenDocs={onOpenDocs}
               />
-              <MachineConsole machineState={machineState} />
+              <MachineConsole />
             </>
           )}
         </div>

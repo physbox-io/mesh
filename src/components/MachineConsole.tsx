@@ -14,27 +14,18 @@ import { webSerialManager, type MachineLogEntry, type MachineState } from '../ut
  * ever while the app shows it as running.
  *
  * None of that is guessable from a progress bar, and all of it is one glance at
- * this. The console also takes typed commands, because the answer to most of
- * those causes is one line of G-code — `$X` to unlock, `$$` to read the
- * settings back, `M5` to be sure the beam is out.
+ * this. Reading only: the buttons around it already send everything worth
+ * sending, and a G-code prompt in the middle of the setup panel invites typing
+ * into a machine rather than watching one.
  */
-export const MachineConsole: React.FC<{ machineState: MachineState }> = ({ machineState }) => {
+export const MachineConsole: React.FC = () => {
   const [log, setLog] = useState<MachineLogEntry[]>(() => webSerialManager.getLog());
-  const [input, setInput] = useState('');
   const endRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => webSerialManager.addLogListener(setLog), []);
   useEffect(() => {
     endRef.current?.scrollIntoView({ block: 'end' });
   }, [log]);
-
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    const command = input.trim();
-    if (!command) return;
-    void webSerialManager.sendLine(command);
-    setInput('');
-  };
 
   return (
     <div className="rounded-xl border border-slate-200 dark:border-slate-800 p-4 space-y-2">
@@ -66,24 +57,6 @@ export const MachineConsole: React.FC<{ machineState: MachineState }> = ({ machi
         )}
         <div ref={endRef} />
       </div>
-
-      <form onSubmit={handleSubmit} className="flex gap-2">
-        <input
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          placeholder="G-code or a $ command, e.g. $X"
-          spellCheck={false}
-          disabled={!machineState.connected}
-          className="flex-1 min-w-0 px-2 py-1 text-xs font-mono rounded-lg bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 text-slate-900 dark:text-slate-100 disabled:opacity-40"
-        />
-        <button
-          type="submit"
-          disabled={!machineState.connected || !input.trim()}
-          className="px-3 py-1 rounded-lg text-xs font-bold bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 disabled:opacity-40 cursor-pointer"
-        >
-          Send
-        </button>
-      </form>
     </div>
   );
 };
@@ -132,9 +105,11 @@ export const ControllerSilenceBanner: React.FC<{ machineState: MachineState }> =
       <span>
         <strong className="font-bold">The controller is not answering.</strong> Commands are going
         out — the machine may well still move — but nothing has come back for several seconds, and a
-        job cannot stream without the replies: it will stop on its first line and sit there. Usually
-        the baud rate (GRBL is 115200), a lead with no receive line in it, or a controller that needs
-        power-cycling. The machine console shows what, if anything, is arriving.
+        job cannot stream without the replies: it will stop on its first line and sit there. Seen in
+        the wild from a second controller sharing a USB hub, a lead with no receive line in it, the
+        wrong baud rate (GRBL is 115200), and a controller that needed power-cycling — the hub is
+        worth ruling out first, by going straight into the machine. The console below shows what, if
+        anything, is arriving.
       </span>
     </div>
   );
