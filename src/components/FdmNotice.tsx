@@ -1,5 +1,6 @@
 import React from 'react';
-import { Info, Package, Printer } from 'lucide-react';
+import { Package, Printer } from 'lucide-react';
+import { Hint } from './ExportFields';
 
 /**
  * Why the app does not drive the printer on the bench.
@@ -22,14 +23,23 @@ import { Info, Package, Printer } from 'lucide-react';
  */
 export const FdmNotice: React.FC<{ compact?: boolean }> = ({ compact = false }) => {
   if (compact) {
+    /*
+     * Green, and the app's own hint bubble rather than a `title`.
+     *
+     * Amber is what the machine panel uses for a job that has stopped and wants
+     * somebody, and this is not that — nothing is wrong, the app simply hands
+     * printing over to a slicer. It opens upwards because the status bar is at
+     * the foot of the window.
+     */
     return (
-      <span
-        title="This app exports meshes for a printer; it does not drive one. Slice the 3MF or STL in your own slicer."
-        className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide bg-amber-500/15 text-amber-600 dark:text-amber-400"
+      <Hint
+        hint="You can direct drive CNC and laser cutters with Mesh, but for 3D printing you need to export STL or 3MF to your own slicer."
+        placement="above"
       >
-        <Info className="w-3 h-3" />
-        <span>Export only</span>
-      </span>
+        <span className="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide bg-emerald-500/15 text-emerald-700 dark:text-emerald-400">
+          Export only
+        </span>
+      </Hint>
     );
   }
 
@@ -50,7 +60,7 @@ export const FdmNotice: React.FC<{ compact?: boolean }> = ({ compact = false }) 
           <span>
             Export 3MF — it carries the painted colour, a filament slot per triangle — or STL for
             geometry alone, and slice it as you normally would. Or change the machine type in the
-            status bar to CNC Router or Laser, and cut the thing instead.
+            status bar to CNC Router or Laser.
           </span>
         </p>
       </div>

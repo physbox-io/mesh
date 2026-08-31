@@ -36,19 +36,62 @@ export const inputClass =
  * width, and a bubble hanging off the right drags a horizontal scrollbar under
  * the whole modal.
  */
-const hintBubbleClass =
-  'pointer-events-none absolute top-full z-30 mt-1.5 w-max max-w-[min(14rem,70vw)] rounded-lg ' +
+const hintBubbleBase =
+  'pointer-events-none absolute z-30 w-max max-w-[min(14rem,70vw)] rounded-lg ' +
   'bg-slate-900 dark:bg-slate-950 px-2.5 py-2 text-[11px] font-normal leading-snug text-slate-100 ' +
   'shadow-xl ring-1 ring-slate-700 opacity-0 transition-opacity ' +
   'group-hover:opacity-100 group-focus-within:opacity-100';
 
-function HintIcon() {
+/**
+ * Which side it opens on. `above` is for controls near the foot of the window —
+ * the status bar most of all, where a bubble opening downwards would be drawn
+ * off the bottom of the screen.
+ */
+export type HintPlacement = 'below' | 'above';
+
+function hintBubbleClassFor(placement: HintPlacement, align: 'start' | 'end'): string {
+  return [
+    hintBubbleBase,
+    placement === 'above' ? 'bottom-full mb-1.5' : 'top-full mt-1.5',
+    align === 'end' ? 'right-0' : 'left-0',
+  ].join(' ');
+}
+
+export function HintIcon() {
   return (
     <Info
       className="w-3.5 h-3.5 flex-shrink-0 text-slate-400 hover:text-emerald-500 cursor-help"
       tabIndex={0}
       aria-label="What is this?"
     />
+  );
+}
+
+/**
+ * Anything at all, with the app's own hint bubble hung off it.
+ *
+ * `Field` is the common case — a labelled control in an export grid — but the
+ * same bubble belongs on a chip in the status bar, and a `title` attribute
+ * there was a different thing wearing the same icon: a different delay, a
+ * different typeface, and no styling of ours at all.
+ */
+export function Hint({
+  hint, align = 'start', placement = 'below', className, children,
+}: {
+  hint: string;
+  align?: 'start' | 'end';
+  placement?: HintPlacement;
+  className?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <span className={`group relative flex items-center gap-1 ${className ?? ''}`}>
+      {children}
+      <HintIcon />
+      <span role="tooltip" className={hintBubbleClassFor(placement, align)}>
+        {hint}
+      </span>
+    </span>
   );
 }
 
@@ -66,7 +109,7 @@ export function Field({
       <div className="group relative flex items-center space-x-1 mb-1.5">
         <label className={labelClass}>{label}</label>
         <HintIcon />
-        <span role="tooltip" className={`${hintBubbleClass} ${hintAlign === 'end' ? 'right-0' : 'left-0'}`}>
+        <span role="tooltip" className={hintBubbleClassFor('below', hintAlign)}>
           {hint}
         </span>
       </div>

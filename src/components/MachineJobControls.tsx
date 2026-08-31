@@ -57,14 +57,8 @@ export const JobPauseBanner: React.FC<{
     setOverrideFor(machineState.pauseMessage ?? null);
   };
 
-  /*
-   * Written for a dark ground. Both banners sit inside the export modals'
-   * machine card, which is `bg-slate-900` whatever theme the app is in, so a
-   * `dark:` variant here would pick the light colour on a light page and put
-   * amber-800 text on a near-black panel.
-   */
   return (
-    <div className="p-4 rounded-xl bg-amber-500/10 border-2 border-amber-500 flex flex-col space-y-3 text-amber-200">
+    <div className="p-4 rounded-xl bg-amber-500/10 border-2 border-amber-500 flex flex-col space-y-3 text-amber-800 dark:text-amber-300">
       <div className="flex items-center space-x-3">
         <AlertCircle className="w-6 h-6 text-amber-500 flex-shrink-0" />
         <div>
@@ -89,14 +83,14 @@ export const JobPauseBanner: React.FC<{
             <button
               onClick={() => webSerialManager.zeroZHere()}
               title="Take work Z 0 from where the tool is standing right now"
-              className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-100 text-xs font-semibold rounded-lg flex items-center space-x-1.5 cursor-pointer"
+              className="px-3 py-1.5 bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-100 text-xs font-semibold rounded-lg flex items-center space-x-1.5 cursor-pointer"
             >
               <Hand className="w-3.5 h-3.5 text-emerald-400" />
               <span>Set Z Zero Here</span>
             </button>
             <button
               onClick={() => webSerialManager.zeroZ(plateThicknessMm)}
-              className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-100 text-xs font-semibold rounded-lg flex items-center space-x-1.5 cursor-pointer"
+              className="px-3 py-1.5 bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-100 text-xs font-semibold rounded-lg flex items-center space-x-1.5 cursor-pointer"
             >
               <ChevronsDown className="w-3.5 h-3.5 text-amber-400" />
               <span>Probe Z Zero</span>
@@ -108,7 +102,7 @@ export const JobPauseBanner: React.FC<{
           <button
             onClick={allowResume}
             title="Only if the Z datum is already right for the tool now in the spindle"
-            className="px-3 py-1.5 text-amber-400 hover:underline text-xs font-semibold cursor-pointer"
+            className="px-3 py-1.5 text-amber-700 dark:text-amber-400 hover:underline text-xs font-semibold cursor-pointer"
           >
             Z is already set — let me resume
           </button>
@@ -180,7 +174,7 @@ export const JobResumeBanner: React.FC<{
   };
 
   return (
-    <div className="p-4 rounded-xl bg-sky-500/10 border-2 border-sky-500 flex flex-col space-y-3 text-sky-200">
+    <div className="p-4 rounded-xl bg-sky-500/10 border-2 border-sky-500 flex flex-col space-y-3 text-sky-900 dark:text-sky-200">
       <div className="flex items-center space-x-3">
         <RotateCcw className="w-6 h-6 text-sky-500 flex-shrink-0" />
         <div>
@@ -205,13 +199,13 @@ export const JobResumeBanner: React.FC<{
       )}
 
       {preview?.state.uncertain && (
-        <p className="text-[11px] leading-relaxed font-semibold text-amber-300">
+        <p className="text-[11px] leading-relaxed font-semibold text-amber-700 dark:text-amber-300">
           {preview.state.uncertainBecause}
         </p>
       )}
 
       {error && (
-        <p className="text-[11px] leading-relaxed font-semibold text-red-300">{error}</p>
+        <p className="text-[11px] leading-relaxed font-semibold text-red-700 dark:text-red-300">{error}</p>
       )}
 
       <div className="flex flex-wrap items-center justify-end gap-2 pt-2 border-t border-sky-500/30">
@@ -223,13 +217,13 @@ export const JobResumeBanner: React.FC<{
             max={resume.totalLines}
             value={target}
             onChange={(e) => setLine(Math.max(0, Math.min(resume.totalLines, parseInt(e.target.value, 10) || 0)))}
-            className="w-24 bg-slate-900 border border-sky-500/40 rounded px-1.5 py-1 font-mono text-[11px] text-slate-100"
+            className="w-24 bg-white dark:bg-slate-900 border border-sky-500/40 rounded px-1.5 py-1 font-mono text-[11px] text-slate-800 dark:text-slate-100"
             title="Back this off a little to recut the last stretch, which is usually safer than trying to land exactly on the break"
           />
         </label>
         <button
           onClick={() => webSerialManager.clearResumePoint()}
-          className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-100 text-xs font-semibold rounded-lg cursor-pointer"
+          className="px-3 py-1.5 bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-100 text-xs font-semibold rounded-lg cursor-pointer"
         >
           Discard
         </button>
@@ -430,7 +424,7 @@ export const JobPreflight: React.FC<{
         <span>
           {tool}
           {secondTool && (
-            <span className="text-slate-400">
+            <span className="text-slate-500 dark:text-slate-400">
               {' '}— the job stops partway to swap to {secondTool}
             </span>
           )}
@@ -445,7 +439,7 @@ export const JobPreflight: React.FC<{
       value: (
         <span>
           <span className="font-bold text-base text-emerald-400">{rpm.toLocaleString()} RPM</span>
-          {material && <span className="text-slate-400"> for {material}</span>}
+          {material && <span className="text-slate-500 dark:text-slate-400"> for {material}</span>}
         </span>
       ),
     });
@@ -465,13 +459,13 @@ export const JobPreflight: React.FC<{
     : null;
 
   return (
-    <div className="pt-3 border-t border-slate-800 space-y-2">
-      <h4 className="text-xs font-bold uppercase tracking-wide text-slate-400">Before you start</h4>
+    <div className="pt-3 border-t border-slate-200 dark:border-slate-800 space-y-2">
+      <h4 className="text-xs font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">Before you start</h4>
       <ol className="space-y-1.5">
         {rows.map((r) => (
-          <li key={r.n} className="flex items-baseline gap-2 text-xs text-slate-200">
+          <li key={r.n} className="flex items-baseline gap-2 text-xs text-slate-700 dark:text-slate-200">
             <span className="flex-shrink-0 w-4 text-blue-400 font-bold">{r.n}.</span>
-            <span className="text-slate-400 whitespace-nowrap">{r.label}</span>
+            <span className="text-slate-500 dark:text-slate-400 whitespace-nowrap">{r.label}</span>
             <span className="min-w-0">{r.value}</span>
           </li>
         ))}
@@ -539,7 +533,7 @@ export const JobOverrides: React.FC<{ machineState: MachineState }> = ({ machine
   if (!machineState.connected || !running) return null;
 
   const step =
-    'px-1.5 py-1 rounded border border-slate-700 bg-slate-950 hover:bg-slate-800 text-slate-200 ' +
+    'px-1.5 py-1 rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-950 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 ' +
     'font-mono text-[10px] leading-none cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed';
 
   const row = (
@@ -553,7 +547,7 @@ export const JobOverrides: React.FC<{ machineState: MachineState }> = ({ machine
       <span className="w-14 shrink-0 text-[10px] uppercase font-semibold text-slate-500">{label}</span>
       <span
         className={`w-11 shrink-0 text-right font-mono text-[11px] font-bold ${
-          percent === 100 ? 'text-slate-200' : 'text-amber-400'
+          percent === 100 ? 'text-slate-700 dark:text-slate-200' : 'text-amber-600 dark:text-amber-400'
         }`}
         title={hint}
       >
@@ -572,10 +566,10 @@ export const JobOverrides: React.FC<{ machineState: MachineState }> = ({ machine
   );
 
   return (
-    <div className="pt-3 border-t border-slate-800 space-y-2">
+    <div className="pt-3 border-t border-slate-200 dark:border-slate-800 space-y-2">
       <div className="flex items-center gap-1.5">
         <Gauge className="w-3.5 h-3.5 text-blue-400" />
-        <h4 className="text-xs font-bold uppercase tracking-wide text-slate-400">Live Trim</h4>
+        <h4 className="text-xs font-bold uppercase tracking-wide text-slate-500 dark:text-slate-400">Live Trim</h4>
       </div>
       {row(
         'Feed',
