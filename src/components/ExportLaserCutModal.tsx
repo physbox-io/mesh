@@ -857,7 +857,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                 </div>
               </div>
 
-              <div className="w-full h-80 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-950 p-4 overflow-y-auto overflow-x-hidden">
+              <div className="w-full h-80 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 p-4 overflow-y-auto overflow-x-hidden">
                 <div
                   className="w-full [&>svg]:w-full [&>svg]:h-auto"
                   dangerouslySetInnerHTML={{ __html: previewSvg }}
