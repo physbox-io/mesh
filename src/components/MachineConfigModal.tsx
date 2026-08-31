@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { Cpu, Home, Link2, RefreshCw, ShieldAlert, X, Gauge, Wifi, WifiOff } from 'lucide-react';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
 import { MachineWorkOriginPanel } from './MachineWorkOriginPanel';
-import { ControllerSilenceBanner, MachineConsole } from './MachineConsole';
+import { ControllerSilenceBanner } from './MachineFaultBanner';
 import { JobOverrides } from './MachineJobControls';
 import { describeMotionProfile } from '../utils/motionProfile';
 import { webSerialUnavailableReason } from '../utils/machineTransport';
@@ -418,7 +418,6 @@ export const MachineConfigModal: React.FC<{
                 isLaser={machineTarget === 'laser'}
                 onOpenDocs={onOpenDocs}
               />
-              <MachineConsole />
             </>
           )}
         </div>

@@ -150,14 +150,6 @@ export interface MachineState {
   controllerSilent: boolean;
 }
 
-/** One line of machine traffic, for the terminal. */
-export interface MachineLogEntry {
-  /** 'tx' is what this app sent, 'rx' what the controller answered. */
-  dir: 'tx' | 'rx';
-  text: string;
-  at: number;
-}
-
 /** A job set aside mid-cut, with the machine free to be moved. */
 export interface ParkPoint {
   /** The line the machine had actually finished, not the line last sent. */
@@ -282,7 +274,7 @@ export function describeGrblError(line: string): string {
     case 33:
       return 'The move is not geometrically valid — usually an arc whose radius does not reach its end point.';
     default:
-      return 'Check the machine console for what it was answering.';
+      return 'The controller did not say more than that.';
   }
 }
 
@@ -317,21 +309,6 @@ export const SPINDLE_OVERRIDE_BYTES: Record<OverrideStep | 'reset', number> = {
  * on a large machine can be a couple of seconds of not answering.
  */
 const CONTROLLER_SILENCE_MS = 3000;
-
-/**
- * What the real-time bytes are called, for the terminal.
- *
- * They have no printable form — `0x18` in a log of G-code reads as noise — and
- * these are exactly the moments an operator is trying to account for: a feed
- * hold that was taken, a soft reset that went out, a jog that was cancelled.
- */
-const REALTIME_BYTE_NAMES: Record<number, string> = {
-  0x18: '[soft reset]',
-  0x21: '[feed hold]',
-  0x3f: '?',
-  0x7e: '[cycle start]',
-  0x85: '[jog cancel]',
-};
 
 /** Rapid traverse trim: GRBL implements full, half and quarter, and no more. */
 export const RAPID_OVERRIDE_BYTES: Record<100 | 50 | 25, number> = {
@@ -454,24 +431,6 @@ class WebSerialManager {
 
   private listeners: Set<MachineStateListener> = new Set();
 
-  // -------------------------------------------------------------------------
-  // The terminal
-  // -------------------------------------------------------------------------
-  //
-  // Every line in and out, kept in a ring buffer so the machine panel can show
-  // what the controller is actually saying. This exists because "I pressed play
-  // and nothing happened" has half a dozen causes that are indistinguishable
-  // from the front and immediately obvious from the traffic: a line refused
-  // with `error:`, a controller in `Alarm`, or — the one that reads as a broken
-  // button — a machine that takes commands and never answers at all.
-  //
-  // Its own listener list rather than a field on `MachineState`: a status
-  // report arrives five times a second, and re-rendering every panel in the app
-  // on each one is not what the readouts want.
-  private log: MachineLogEntry[] = [];
-  private logListeners: Set<(entries: MachineLogEntry[]) => void> = new Set();
-  private static readonly LOG_LIMIT = 400;
-
   /** When something last arrived from the controller, for `controllerSilent`. */
   private lastRxAt = 0;
 
@@ -498,46 +457,6 @@ class WebSerialManager {
     this.listeners.add(listener);
     listener(this.getState());
     return () => this.listeners.delete(listener);
-  }
-
-  /** The machine traffic so far, oldest first. */
-  public getLog(): MachineLogEntry[] {
-    return [...this.log];
-  }
-
-  /** Subscribes to machine traffic. Called immediately with what is already there. */
-  public addLogListener(listener: (entries: MachineLogEntry[]) => void): () => void {
-    this.logListeners.add(listener);
-    listener(this.getLog());
-    return () => this.logListeners.delete(listener);
-  }
-
-  public clearLog(): void {
-    this.log = [];
-    const snapshot = this.getLog();
-    this.logListeners.forEach((l) => l(snapshot));
-  }
-
-  /**
-   * Records one line of traffic.
-   *
-   * The status poll and its answers are dropped rather than recorded: `?` goes
-   * out five times a second and a `<Idle|...>` comes back for each, which would
-   * push everything worth reading off the end of the buffer within seconds. The
-   * position they carry is on screen already.
-   */
-  private record(dir: 'tx' | 'rx', text: string) {
-    const trimmed = text.trim();
-    if (!trimmed) return;
-    if (trimmed === '?' || (trimmed.startsWith('<') && trimmed.endsWith('>'))) return;
-
-    this.log.push({ dir, text: trimmed, at: Date.now() });
-    if (this.log.length > WebSerialManager.LOG_LIMIT) {
-      this.log.splice(0, this.log.length - WebSerialManager.LOG_LIMIT);
-    }
-    if (this.logListeners.size === 0) return;
-    const snapshot = this.getLog();
-    this.logListeners.forEach((l) => l(snapshot));
   }
 
   private notify() {
@@ -694,7 +613,6 @@ class WebSerialManager {
   /** Sends a single G-code line to the machine, however it is connected. */
   public async sendLine(command: string): Promise<void> {
     if (!this.transport || !this.state.connected) return;
-    this.record('tx', command);
     // Bare: each transport frames the line the way its own wire needs.
     await this.transport.writeLine(command);
   }
@@ -708,7 +626,6 @@ class WebSerialManager {
     // for, since they arrive whether or not a job is running.
     this.lastRxAt = Date.now();
     if (this.state.controllerSilent) this.updateState({ controllerSilent: false });
-    this.record('rx', line);
 
     // GRBL Status Parsing: <Idle|MPos:0.000,0.000,0.000|FS:0,0|WCO:0.000,0.000,0.000>
     if (line.startsWith('<') && line.endsWith('>')) {
@@ -770,14 +687,13 @@ class WebSerialManager {
        */
       if (this.isJobRunning || this.isPaused) {
         const at = Math.max(0, this.jobLineBase + this.currentQueueIndex);
-        const refused = this.gcodeQueue[this.currentQueueIndex - 1] ?? '';
         this.abandonJob('alarm');
         this.stopElapsedTicker();
         this.updateState({
           status: 'IDLE',
           lastError:
-            `The machine refused line ${at}${refused ? ` (${refused})` : ''} with ${line}, so the job ` +
-            `has stopped there. ${describeGrblError(line)}`,
+            `The machine refused line ${at} of the program (${line}), so the job has stopped ` +
+            `there. ${describeGrblError(line)}`,
         });
       } else {
         this.updateState({ lastError: `Machine Error: ${line}` });
@@ -1473,7 +1389,6 @@ class WebSerialManager {
    */
   private async writeRealtime(byte: number): Promise<void> {
     if (!this.transport || !this.state.connected) return;
-    this.record('tx', REALTIME_BYTE_NAMES[byte] ?? `0x${byte.toString(16)}`);
     await this.transport.writeRealtime(byte);
   }
 

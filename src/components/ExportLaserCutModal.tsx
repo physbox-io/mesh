@@ -9,7 +9,7 @@ import { webSerialManager, type MachineState } from '../utils/webSerialManager';
 import { NumberInput } from './NumberInput';
 import { useStore } from '../store/useStore';
 import { JobPauseBanner, JobPreflight, JobResumeBanner, JobTransport } from './MachineJobControls';
-import { MachineFaultBanner } from './MachineConsole';
+import { MachineFaultBanner } from './MachineFaultBanner';
 import { formatDuration } from '../utils/timeEstimate';
 import {
   MATERIALS,

@@ -22,7 +22,7 @@ import { getGridStats, type ProbeGrid } from '../utils/meshLeveler';
 import { NumberInput } from './NumberInput';
 import { useStore } from '../store/useStore';
 import { JobPauseBanner, JobPreflight, JobResumeBanner, JobTransport } from './MachineJobControls';
-import { MachineFaultBanner } from './MachineConsole';
+import { MachineFaultBanner } from './MachineFaultBanner';
 
 interface Props {
   isOpen: boolean;
