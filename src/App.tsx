@@ -13,13 +13,12 @@ import { useStore, scaleMeshGeoms, getPhysicsWorkerClient, cloneSceneGraph } fro
 import { useVertexPaint } from './hooks/useVertexPaint';
 import { buildPaintGeometry, isPaintable, paintArgsFromSize, paintResolution, type PaintLayer } from './utils/vertexPaint';
 import type { SceneGraph, SceneNode } from './types/scene';
-import { Play, Square, SlidersHorizontal, Settings, Box, Circle, X, RotateCcw, Trash2, Layers, CircleDot, Zap, Info, Triangle, Disc, Code, Menu, Shapes, Minimize2, Save, Download, Upload, Undo, Redo, FileText, ChevronDown, ChevronUp, PanelRight, Edit3, Printer, Scissors, Sparkles, Sun, Moon, Pyramid, Cone, Donut, ChartSpline, Mountain, Paintbrush, Grid3x3, Package, Boxes, Image as ImageIcon } from 'lucide-react';
+import { Play, Square, SlidersHorizontal, Settings, Box, Circle, X, RotateCcw, Trash2, Layers, CircleDot, Zap, Info, Triangle, Disc, Code, Menu, Shapes, Minimize2, Save, Download, Upload, Undo, Redo, FileText, ChevronDown, ChevronUp, PanelRight, Edit3, Printer, Scissors, Sparkles, Sun, Moon, Pyramid, Cone, Donut, ChartSpline, Mountain, Paintbrush, Grid3x3, Package, Image as ImageIcon } from 'lucide-react';
 import { useRef, useMemo, useEffect, useCallback, useState, type RefObject } from 'react';
 import AICopilotPanel from './components/AICopilotPanel';
 import * as THREE from 'three';
 import { useFrame } from '@react-three/fiber';
 import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js';
-import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js';
 import { exportThreeMf, type ThreeMfMesh } from './utils/threeMfExporter';
 import { SimplifyModifier } from 'three/examples/jsm/modifiers/SimplifyModifier.js';
 import { loadCompiler, compileSCAD, isCompilerReady } from './utils/openscad';
@@ -2914,21 +2913,6 @@ function App() {
     }
   }, [buildExportGroup, exportBaseName, downloadBlob]);
 
-  /** For a viewer or Blender, where vertex colour survives as it is. */
-  const exportGlb = useCallback(async () => {
-    const exportGroup = buildExportGroup();
-    if (!exportGroup) return;
-
-    try {
-      const exporter = new GLTFExporter();
-      const result = await exporter.parseAsync(exportGroup, { binary: true }) as ArrayBuffer;
-      downloadBlob(new Blob([result], { type: 'model/gltf-binary' }), `${exportBaseName()}.glb`);
-    } catch (e) {
-      console.error('Failed to export GLB', e);
-      alert('Failed to export GLB');
-    }
-  }, [buildExportGroup, exportBaseName, downloadBlob]);
-
   const importJson = useCallback(() => {
     const input = document.createElement('input');
     input.type = 'file';
@@ -3669,14 +3653,6 @@ function App() {
               title="3D Print in colour (3MF) — carries painted colour two ways: per-vertex for viewers, and a filament slot per triangle for a multi-material slicer."
             >
               <Package className="w-3.5 h-3.5" />
-            </button>
-
-            <button
-              onClick={exportGlb}
-              className="flex items-center justify-center p-1 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 transition-colors focus:outline-none cursor-pointer"
-              title="Render / Blender (GLB) — the model with its colours exactly as they look on screen."
-            >
-              <Boxes className="w-3.5 h-3.5" />
             </button>
 
             <button

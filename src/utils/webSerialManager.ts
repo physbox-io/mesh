@@ -533,7 +533,16 @@ class WebSerialManager {
         : new SerialTransport(link.baudRate ?? 115200);
 
     try {
-      this.updateState({ status: 'CONNECTING' });
+      /*
+       * Whatever went wrong last time is not true any more.
+       *
+       * Nothing ever cleared this, so the message from a dropped cable — or a
+       * connection attempt that failed once — outlived the machine coming back
+       * and sat there for the rest of the session, telling someone looking at a
+       * live connection that it had dropped. An error describes a moment, and
+       * this is a new one.
+       */
+      this.updateState({ status: 'CONNECTING', lastError: undefined });
 
       await transport.open(
         (line: string) => this.handleIncomingLine(line),
@@ -990,6 +999,9 @@ class WebSerialManager {
       progressPercent: 0,
       elapsedSeconds: 0,
       estimatedSeconds: estimatedSeconds ?? null,
+      // Pressing start is a new moment too: whatever the last attempt was
+      // refused for is not what this one is doing.
+      lastError: undefined,
       // A new program is a new job; whatever stopped the last one is no longer
       // something anyone can pick up.
       resume: null,

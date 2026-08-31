@@ -21,6 +21,7 @@ import { MATERIALS, describeSpeedRecommendation, recommendSpeeds } from '../util
 import { getGridStats, type ProbeGrid } from '../utils/meshLeveler';
 import { NumberInput } from './NumberInput';
 import { useStore } from '../store/useStore';
+import { FdmNotice } from './FdmNotice';
 import { JobPauseBanner, JobPreflight, JobResumeBanner, JobTransport } from './MachineJobControls';
 import { MachineFaultBanner } from './MachineFaultBanner';
 
@@ -966,6 +967,10 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
    */
   const storeMaterial = useStore((s) => s.material);
   const setMachineConfigOpen = useStore((s) => s.setMachineConfigOpen);
+  // A relief is a routing operation whatever the bench is set to; what the
+  // setting changes is whether the machine section is the right answer for
+  // the person reading it. See `FdmNotice`.
+  const isFdm = useStore((s) => s.machineTarget) === 'fdm';
 
   // Folded in during render rather than from an effect, so no frame is ever
   // drawn with feeds derived for the material that was selected a moment ago.
@@ -1941,13 +1946,6 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
             </div>
           )}
 
-          {/* Machine paused mid-job — the tool change between passes lands here */}
-          <JobPauseBanner machineState={machineState} resumeLabel="Resume Carve (Cycle Start)" />
-
-          {/* A relief is the longest job this app produces and the one that hurts
-              most to restart from scratch. */}
-          <JobResumeBanner machineState={machineState} />
-
           {/* Toolpath preview */}
           {result?.success && (
             <div className="space-y-3">
@@ -1983,6 +1981,8 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
               bar. What is left here is what cannot be answered without the
               job: which cutters it wants, and whether its outline lands on the
               stock. */}
+          {isFdm && <FdmNotice />}
+
           <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 text-white space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center space-x-3">
@@ -2027,6 +2027,15 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
             </div>
 
             <MachineFaultBanner machineState={machineState} />
+
+            {/* The pause prompt belongs with the machine, not a scroll above
+                it: a carve stopped for its tool change said so in one place and
+                offered the way out of it in another. */}
+            <JobPauseBanner machineState={machineState} resumeLabel="Resume Carve (Cycle Start)" />
+
+            {/* A relief is the longest job this app produces and the one that
+                hurts most to restart from scratch. */}
+            <JobResumeBanner machineState={machineState} />
 
             <JobPreflight
               machineState={machineState}

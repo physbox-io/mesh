@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Cpu, Home, Link2, RefreshCw, ShieldAlert, X, Gauge, Wifi, WifiOff } from 'lucide-react';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
+import { type MachineTarget } from '../store/useStore';
+import { FdmNotice } from './FdmNotice';
 import { MachineWorkOriginPanel } from './MachineWorkOriginPanel';
 import { ControllerSilenceBanner } from './MachineFaultBanner';
 import { JobOverrides } from './MachineJobControls';
@@ -41,8 +43,11 @@ export const MachineConfigModal: React.FC<{
   onClose: () => void;
   /** Deep-links to the zeroing walkthrough in the app's Reference Guide. */
   onOpenDocs?: () => void;
-  /** A laser has no touch plate and no Z datum, so it gets no probe section. */
-  machineTarget: 'laser' | 'cnc';
+  /**
+   * What is on the bench. A laser has no touch plate and no Z datum, so it gets
+   * no probe section; a printer is not driven from here at all, and is told so.
+   */
+  machineTarget: MachineTarget;
 }> = ({ isOpen, onClose, onOpenDocs, machineTarget }) => {
   const [machineState, setMachineState] = useState<MachineState>(webSerialManager.getState());
 
@@ -192,6 +197,8 @@ export const MachineConfigModal: React.FC<{
         </div>
 
         <div className="flex-1 overflow-y-auto p-6 space-y-4 text-slate-700 dark:text-slate-300">
+          {machineTarget === 'fdm' && <FdmNotice />}
+
           <ControllerSilenceBanner machineState={machineState} />
 
           {/* Connection */}

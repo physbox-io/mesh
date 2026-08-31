@@ -8,6 +8,7 @@ import { generateLaserCutGcode, DEFAULT_GCODE_OPTIONS } from '../utils/gcodeExpo
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
 import { NumberInput } from './NumberInput';
 import { useStore } from '../store/useStore';
+import { FdmNotice } from './FdmNotice';
 import { JobPauseBanner, JobPreflight, JobResumeBanner, JobTransport } from './MachineJobControls';
 import { MachineFaultBanner } from './MachineFaultBanner';
 import { formatDuration } from '../utils/timeEstimate';
@@ -177,8 +178,19 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
    * to be local state in each modal, which let a laser cut and a contour slice
    * of the same scene disagree about what they were being cut on.
    */
-  const machineMode = useStore((s) => s.machineTarget);
+  /*
+   * A printer on the bench does not change what this export is.
+   *
+   * The G-code is still written for whatever would cut it, so FDM reads as a
+   * router here — depth passes, a spindle, corner relief. What changes is that
+   * the machine section is not the answer for this operator, and `FdmNotice`
+   * says so rather than letting them look for a Start button.
+   */
+  const machineTarget = useStore((s) => s.machineTarget);
+  const isFdm = machineTarget === 'fdm';
+  const machineMode = machineTarget === 'laser' ? 'laser' : 'cnc';
   const material = useStore((s) => s.material);
+  const materialLabel = MATERIALS.find((m) => m.id === material)?.label ?? material;
   const setMachineConfigOpen = useStore((s) => s.setMachineConfigOpen);
   /** What is on the bed. Routing feeds and spindle speed both come from it. */
   /**
@@ -387,20 +399,29 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
           
           {/* Machine & material */}
           <div className={sectionClass}>
-            <h3 className={sectionTitleClass}>Machine &amp; Material</h3>
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-4">
+            <h3 className={sectionTitleClass}>
+              Machine &amp; Material
+              <span className="ml-2 normal-case tracking-normal font-normal text-slate-400 dark:text-slate-500">
+                — the first and third are set in the status bar
+              </span>
+            </h3>
+            {/* Twelve columns rather than six. The two readouts hold words and
+                the three number boxes hold at most five digits, so an even
+                split gave "Hardwood (oak, maple, walnut)" four lines of wrapping
+                while `Passes` sat in a column wide enough for a sentence. */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-12 gap-4">
               <Field
-                className="lg:col-span-2"
+                className="lg:col-span-3"
                 label="Target Cutter Type"
                 hint="Chosen in the status bar along the bottom of the window, because it is the same machine for every export. Laser fires a beam and cuts sharp inside corners. CNC spins an end mill, so it needs corner relief and cuts in depth passes."
               >
-                <div className={`${inputClass} flex items-center justify-between`}>
-                  <span className="font-semibold">{machineMode === 'laser' ? 'Laser Cutter' : 'CNC Router'}</span>
-                  <span className="text-[10px] text-slate-500">set in the status bar</span>
+                <div className={`${inputClass} flex items-center`}>
+                  <span className="font-semibold truncate">{machineMode === 'laser' ? 'Laser Cutter' : 'CNC Router'}</span>
                 </div>
               </Field>
 
               <Field
+                className="lg:col-span-2"
                 label="Thickness (mm)"
                 hint="Thickness of the stock you are actually cutting. Finger length, slot depth and CNC cut depth are all derived from it."
               >
@@ -413,19 +434,18 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
               </Field>
 
               <Field
+                className="lg:col-span-3"
                 label="Material"
                 hint="What is on the bed, chosen in the status bar. In routing mode it sets the spindle speed and the feed: surface speed over cutter diameter gives the RPM, and chip-per-tooth times teeth times RPM gives the feed. Both are shown under Before You Start once a machine is connected."
               >
-                <div className={`${inputClass} flex items-center justify-between`}>
-                  <span className="font-semibold">
-                    {MATERIALS.find((m) => m.id === material)?.label ?? material}
-                  </span>
-                  <span className="text-[10px] text-slate-500">set in the status bar</span>
+                <div className={`${inputClass} flex items-center`} title={materialLabel}>
+                  <span className="font-semibold truncate">{materialLabel}</span>
                 </div>
               </Field>
 
 
               <Field
+                className="lg:col-span-2"
                 label="Laser Power"
                 hint={`Beam power as a GRBL S-value — currently ${Math.round((laserPower / Math.max(1, laserMaxPower)) * 100)}% of this machine's S${laserMaxPower} maximum. Ignored on a CNC router.`}
               >
@@ -439,6 +459,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
               </Field>
 
               <Field
+                className="lg:col-span-2"
                 label="Passes"
                 hintAlign="end"
                 hint="How many times the laser retraces each cut path. Raise it when one pass scores but does not cut through; slowing the feedrate is the other lever."
@@ -777,16 +798,6 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
             </Advanced>
           </div>
 
-          {/* Interactive Tool / Material Change Pause */}
-          <JobPauseBanner
-            machineState={machineState}
-            resumeLabel="Resume Job (Cycle Start)"
-            showZTools={machineMode === 'cnc'}
-          />
-
-          {/* The offer to pick a stopped job back up rather than recut it all */}
-          <JobResumeBanner machineState={machineState} showZTools={machineMode === 'cnc'} />
-
           {exportResult && !exportResult.success && (
             <div className="p-4 rounded-xl bg-red-500/10 border border-red-500/40 flex items-start space-x-2 text-xs text-red-700 dark:text-red-300">
               <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
@@ -861,6 +872,8 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
               business and were repeated identically in every export modal.
               What stays is what cannot be answered without the job: which
               cutter it wants, where its outline falls, and starting it. */}
+          {isFdm && <FdmNotice />}
+
           <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 text-white space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center space-x-3">
@@ -896,6 +909,18 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
             {machineState.connected && (
               <>
               <MachineFaultBanner machineState={machineState} />
+              {/* The pause prompt belongs with the buttons that answer it.
+                  It used to sit near the top of the modal, a scroll away from
+                  the Resume and E-Stop it is asking about — so a machine
+                  stopped mid-job said so in one place and offered the way out
+                  of it in another. */}
+              <JobPauseBanner
+                machineState={machineState}
+                resumeLabel="Resume Job (Cycle Start)"
+                showZTools={machineMode === 'cnc'}
+              />
+              {/* The offer to pick a stopped job back up rather than recut it all */}
+              <JobResumeBanner machineState={machineState} showZTools={machineMode === 'cnc'} />
               <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-800">
                 <button
                   onClick={handleFrameTrace}

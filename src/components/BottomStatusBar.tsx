@@ -1,6 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { Cpu, Layers2, Pause, Play, Square, Wrench } from 'lucide-react';
-import { useStore } from '../store/useStore';
+import { useStore, type MachineTarget } from '../store/useStore';
+import { FILAMENTS, filamentSpec, type FilamentId } from '../utils/filaments';
+import { FdmNotice } from './FdmNotice';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
 import { MATERIALS, type MaterialId } from '../utils/feedsAndSpeeds';
 import { formatDuration } from '../utils/timeEstimate';
@@ -94,6 +96,9 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void }> = ({
   const setMachineTarget = useStore((s) => s.setMachineTarget);
   const material = useStore((s) => s.material);
   const setMaterial = useStore((s) => s.setMaterial);
+  const filament = useStore((s) => s.filament);
+  const setFilament = useStore((s) => s.setFilament);
+  const printing = machineTarget === 'fdm';
 
   // Seeded from the manager rather than a literal, so a bar that mounts after a
   // connection shows the real state instead of a disconnected one.
@@ -134,10 +139,11 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void }> = ({
           <Cpu className="w-3.5 h-3.5 text-amber-500" />
           <select
             value={machineTarget}
-            onChange={(e) => setMachineTarget(e.target.value === 'laser' ? 'laser' : 'cnc')}
-            title="What this scene is cut on. A laser has no Z depth; a router does."
+            onChange={(e) => setMachineTarget(e.target.value as MachineTarget)}
+            title="What is on the bench. A laser has no Z depth; a router does; a printer is not driven from here at all."
             className={selectClass}
           >
+            <option value="fdm">3D Printer (FDM)</option>
             <option value="cnc">CNC Router</option>
             <option value="laser">Laser</option>
           </select>
@@ -145,18 +151,45 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void }> = ({
           <div className="w-px h-3 bg-slate-200 dark:bg-slate-800 mx-0.5" />
 
           <Layers2 className="w-3.5 h-3.5 text-emerald-500" />
-          <select
-            value={material}
-            onChange={(e) => setMaterial(e.target.value as MaterialId)}
-            title="What the stock is. Feeds, speeds and spindle RPM are derived from it."
-            className={selectClass}
-          >
-            {MATERIALS.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.label}
-              </option>
-            ))}
-          </select>
+          {/* Two lists, because they are two different questions. A filament
+              has no surface speed and no chip load, so it cannot be an option
+              in the list the feeds arithmetic reads from. */}
+          {printing ? (
+            <select
+              value={filament}
+              onChange={(e) => setFilament(e.target.value as FilamentId)}
+              title={filamentSpec(filament).note}
+              className={selectClass}
+            >
+              {FILAMENTS.map((f) => (
+                <option key={f.id} value={f.id}>
+                  {f.label}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <select
+              value={material}
+              onChange={(e) => setMaterial(e.target.value as MaterialId)}
+              title="What the stock is. Feeds, speeds and spindle RPM are derived from it."
+              className={selectClass}
+            >
+              {MATERIALS.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.label}
+                </option>
+              ))}
+            </select>
+          )}
+
+          {/* Said here as well as in the export dialogs, because this is where
+              the printer was chosen and the bar is on screen the whole time. */}
+          {printing && (
+            <>
+              <div className="w-px h-3 bg-slate-200 dark:bg-slate-800 mx-0.5" />
+              <FdmNotice compact />
+            </>
+          )}
         </div>
       </div>
 

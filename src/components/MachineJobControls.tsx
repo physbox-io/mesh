@@ -57,8 +57,14 @@ export const JobPauseBanner: React.FC<{
     setOverrideFor(machineState.pauseMessage ?? null);
   };
 
+  /*
+   * Written for a dark ground. Both banners sit inside the export modals'
+   * machine card, which is `bg-slate-900` whatever theme the app is in, so a
+   * `dark:` variant here would pick the light colour on a light page and put
+   * amber-800 text on a near-black panel.
+   */
   return (
-    <div className="p-4 rounded-xl bg-amber-500/10 border-2 border-amber-500 flex flex-col space-y-3 text-amber-800 dark:text-amber-300">
+    <div className="p-4 rounded-xl bg-amber-500/10 border-2 border-amber-500 flex flex-col space-y-3 text-amber-200">
       <div className="flex items-center space-x-3">
         <AlertCircle className="w-6 h-6 text-amber-500 flex-shrink-0" />
         <div>
@@ -102,7 +108,7 @@ export const JobPauseBanner: React.FC<{
           <button
             onClick={allowResume}
             title="Only if the Z datum is already right for the tool now in the spindle"
-            className="px-3 py-1.5 text-amber-700 dark:text-amber-400 hover:underline text-xs font-semibold cursor-pointer"
+            className="px-3 py-1.5 text-amber-400 hover:underline text-xs font-semibold cursor-pointer"
           >
             Z is already set — let me resume
           </button>
@@ -174,7 +180,7 @@ export const JobResumeBanner: React.FC<{
   };
 
   return (
-    <div className="p-4 rounded-xl bg-sky-500/10 border-2 border-sky-500 flex flex-col space-y-3 text-sky-900 dark:text-sky-200">
+    <div className="p-4 rounded-xl bg-sky-500/10 border-2 border-sky-500 flex flex-col space-y-3 text-sky-200">
       <div className="flex items-center space-x-3">
         <RotateCcw className="w-6 h-6 text-sky-500 flex-shrink-0" />
         <div>
@@ -199,13 +205,13 @@ export const JobResumeBanner: React.FC<{
       )}
 
       {preview?.state.uncertain && (
-        <p className="text-[11px] leading-relaxed font-semibold text-amber-700 dark:text-amber-300">
+        <p className="text-[11px] leading-relaxed font-semibold text-amber-300">
           {preview.state.uncertainBecause}
         </p>
       )}
 
       {error && (
-        <p className="text-[11px] leading-relaxed font-semibold text-red-700 dark:text-red-300">{error}</p>
+        <p className="text-[11px] leading-relaxed font-semibold text-red-300">{error}</p>
       )}
 
       <div className="flex flex-wrap items-center justify-end gap-2 pt-2 border-t border-sky-500/30">
@@ -217,13 +223,13 @@ export const JobResumeBanner: React.FC<{
             max={resume.totalLines}
             value={target}
             onChange={(e) => setLine(Math.max(0, Math.min(resume.totalLines, parseInt(e.target.value, 10) || 0)))}
-            className="w-24 bg-white dark:bg-slate-900 border border-sky-500/40 rounded px-1.5 py-1 font-mono text-[11px]"
+            className="w-24 bg-slate-900 border border-sky-500/40 rounded px-1.5 py-1 font-mono text-[11px] text-slate-100"
             title="Back this off a little to recut the last stretch, which is usually safer than trying to land exactly on the break"
           />
         </label>
         <button
           onClick={() => webSerialManager.clearResumePoint()}
-          className="px-3 py-1.5 bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-100 text-xs font-semibold rounded-lg cursor-pointer"
+          className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-100 text-xs font-semibold rounded-lg cursor-pointer"
         >
           Discard
         </button>
@@ -269,10 +275,18 @@ export const JobTransport: React.FC<{
   const paused = machineState.status.startsWith('PAUSED');
   const parked = machineState.status === 'PAUSED_PARKED';
 
+  /*
+   * `whitespace-nowrap` on both, and `px-2` inline rather than `px-3`.
+   *
+   * The inline row is three buttons sharing whatever width the machine panel
+   * has left, and without this the narrowest of them broke its label at the
+   * hyphen — an emergency stop rendered as "E-" above "Stop". A control that is
+   * pressed in a hurry has to read as one word at a glance.
+   */
   const base =
     variant === 'footer'
       ? 'flex items-center justify-center space-x-2 whitespace-nowrap px-4 py-2 font-bold text-xs rounded-lg shadow-sm transition-all cursor-pointer'
-      : 'flex items-center justify-center space-x-1.5 w-full py-1.5 px-3 font-bold text-xs rounded-lg cursor-pointer';
+      : 'flex items-center justify-center space-x-1.5 whitespace-nowrap w-full py-1.5 px-2 font-bold text-xs rounded-lg cursor-pointer';
   const icon = variant === 'footer' ? 'w-4 h-4' : 'w-3.5 h-3.5';
 
   if (!running && !paused) {

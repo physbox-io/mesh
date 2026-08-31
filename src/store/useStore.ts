@@ -11,6 +11,18 @@ import { PhysicsWorkerClient, type BuiltResult, type FrameSnapshot } from './phy
 import { generatePyramidMeshData, generateConeMeshData, generateTorusMeshData, generateTubeMeshData, generateCurveGeoms, DEFAULT_CURVE_POINTS, DEFAULT_CURVE_WIDTH, DEFAULT_CURVE_THICKNESS, DEFAULT_CURVE_SEGMENTS, getStickyRotation } from '../utils/geom';
 import { readUserPreset } from '../utils/userPresets';
 import { DEFAULT_MATERIAL, type MaterialId } from '../utils/feedsAndSpeeds';
+import { DEFAULT_FILAMENT, type FilamentId } from '../utils/filaments';
+
+/**
+ * What is on the bench.
+ *
+ * `fdm` is the default because it is what most people who open this app own,
+ * and saying so is more honest than presenting a router as the assumption. It
+ * is not a machine this app drives — see `FdmNotice` — and everything that
+ * writes G-code treats it as it treats a router, because the one thing an FDM
+ * user does here is export a mesh.
+ */
+export type MachineTarget = 'fdm' | 'laser' | 'cnc';
 
 const initialScene: SceneGraph = pendulumPreset;
 
@@ -431,11 +443,21 @@ export interface PhysicsState {
    * They are properties of the workshop rather than of one export, so they live
    * here and every exporter reads them.
    */
-  machineTarget: 'laser' | 'cnc';
+  machineTarget: MachineTarget;
   material: MaterialId;
+  /**
+   * What it would be printed in, kept separate from what it would be cut from.
+   *
+   * Two lists rather than one widened one: a filament has no surface speed and
+   * no chip load, and adding PLA to the table the feeds arithmetic reads from
+   * would mean inventing both. Switching the bench between a printer and a
+   * router also should not silently reinterpret "PETG" as a milling stock.
+   */
+  filament: FilamentId;
   isMachineConfigOpen: boolean;
-  setMachineTarget: (target: 'laser' | 'cnc') => void;
+  setMachineTarget: (target: MachineTarget) => void;
   setMaterial: (material: MaterialId) => void;
+  setFilament: (filament: FilamentId) => void;
   setMachineConfigOpen: (open: boolean) => void;
   setCameraView: (view: 'perspective' | 'topDown') => void;
   setPrintAnalysisEnabled: (enabled: boolean) => void;
@@ -693,8 +715,9 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   isLoaded: false,
   lastCompileError: null,
   isSettingsOpen: false,
-  machineTarget: 'cnc',
+  machineTarget: 'fdm',
   material: DEFAULT_MATERIAL,
+  filament: DEFAULT_FILAMENT,
   isMachineConfigOpen: false,
   cameraView: 'perspective',
   printAnalysisEnabled: false,
@@ -733,6 +756,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   setLoaded: (loaded) => set({ isLoaded: loaded }),
   setSettingsOpen: (open) => set({ isSettingsOpen: open }),
   setMachineTarget: (machineTarget) => set({ machineTarget }),
+  setFilament: (filament) => set({ filament }),
   setMaterial: (material) => set({ material }),
   setMachineConfigOpen: (isMachineConfigOpen) => set({ isMachineConfigOpen }),
   setCameraView: (view) => set({ cameraView: view, cameraOverride: null }),
