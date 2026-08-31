@@ -9,6 +9,7 @@ import { webSerialManager, type MachineState } from '../utils/webSerialManager';
 import { NumberInput } from './NumberInput';
 import { useStore } from '../store/useStore';
 import { JobPauseBanner, JobPreflight, JobResumeBanner, JobTransport } from './MachineJobControls';
+import { MachineFaultBanner } from './MachineConsole';
 import { formatDuration } from '../utils/timeEstimate';
 import {
   MATERIALS,
@@ -316,7 +317,10 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
 
   const handleStartJob = () => {
     if (!gcodeResult?.gcode) return;
-    webSerialManager.startJob(gcodeResult.gcode, gcodeResult.estimatedTimeSeconds);
+    void webSerialManager.runJob(gcodeResult.gcode, {
+      name: 'Contour slices',
+      estimatedSeconds: gcodeResult.estimatedTimeSeconds,
+    });
   };
 
   const handleFrameTrace = async () => {
@@ -849,6 +853,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
 
             {machineState.connected && (
               <>
+              <MachineFaultBanner machineState={machineState} />
               <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-800">
                 <button
                   onClick={handleFrameTrace}

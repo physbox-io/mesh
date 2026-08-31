@@ -1,7 +1,14 @@
-import React, { useState } from 'react';
-import { ArrowUp, ArrowDown, ArrowLeft, ArrowRight, ChevronsUp, ChevronsDown, Crosshair, Navigation, Octagon, Info, Check, Hand, AlertTriangle } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { ArrowUp, ArrowDown, ArrowLeft, ArrowRight, ChevronsUp, ChevronsDown, Crosshair, Lightbulb, Navigation, Octagon, Info, Check, Hand, AlertTriangle } from 'lucide-react';
 import { NumberInput } from './NumberInput';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
+import {
+  MAX_GUIDE_POWER_PCT,
+  readGuideJiggle,
+  readGuidePower,
+  writeGuideJiggle,
+  writeGuidePower,
+} from '../utils/guideSpot';
 
 /**
  * Setting the job's origin on a live machine: jog the tool where you want it,
@@ -27,9 +34,17 @@ export const MachineWorkOriginPanel: React.FC<{
   machineState: MachineState;
   /** Laser has no touch plate, so the Z section is hidden for it. */
   showZProbe?: boolean;
+  /**
+   * Whether the head on this machine is a laser.
+   *
+   * Decides the guide spot, which exists for lasers and only for lasers: a
+   * router's cutter is a thing you can look at, and firing a spindle to find
+   * out where it is standing would be a poor way of asking.
+   */
+  isLaser?: boolean;
   /** Deep-links to the zeroing walkthrough in the app's Reference Guide. */
   onOpenDocs?: () => void;
-}> = ({ machineState, showZProbe = true, onOpenDocs }) => {
+}> = ({ machineState, showZProbe = true, isLaser = false, onOpenDocs }) => {
   const [step, setStep] = useState(1);
   const [feedrate, setFeedrate] = useState(1000);
   const [plateThickness, setPlateThickness] = useState(12.0);
@@ -41,6 +56,25 @@ export const MachineWorkOriginPanel: React.FC<{
   // finished is invisible on the machine itself, and getting it wrong is the
   // beginner's mistake that ends with a cut in the wrong place.
   const [xyZeroed, setXyZeroed] = useState(false);
+  const [guidePower, setGuidePower] = useState(readGuidePower);
+  const [guideJiggle, setGuideJiggle] = useState(readGuideJiggle);
+
+  // The beam does not outlive the panel. The manager's own timeout would catch
+  // this eventually; putting the spot out here means it happens the moment the
+  // window they were sighting through goes away. Read live rather than from
+  // this render's state: an unconditional M5 would stop a *spindle* if the
+  // panel unmounted mid-job.
+  useEffect(
+    () => () => {
+      if (webSerialManager.getState().guideSpot) void webSerialManager.guideSpotOff();
+    },
+    []
+  );
+
+  const handleGuideSpot = () => {
+    if (machineState.guideSpot) void webSerialManager.guideSpotOff();
+    else void webSerialManager.guideSpotOn(guidePower);
+  };
 
   const busy = machineState.status === 'RUNNING' || isProbingZ;
   const zZeroed = probeMessage?.ok === true;
@@ -212,6 +246,93 @@ export const MachineWorkOriginPanel: React.FC<{
               <span>Go To Zero</span>
             </button>
           </div>
+
+          {/* The guide spot. A laser's cutting point is invisible until it
+              fires: the head is a lump of metal several millimetres across, and
+              the red pointer diode some machines carry sits off the optical
+              axis — so jogging by eye against either sets zero a fixed distance
+              from where the beam actually lands, and every job then cuts that
+              far off, in the same direction, every time. */}
+          {isLaser && (
+            <div className="space-y-1.5">
+              <div className="flex items-center gap-2 flex-wrap">
+                <button
+                  onClick={handleGuideSpot}
+                  disabled={!machineState.connected || busy}
+                  title={
+                    machineState.guideSpot
+                      ? 'Switch the beam off'
+                      : 'Fire the beam at pointer power so you can see exactly where the origin will be'
+                  }
+                  className={
+                    machineState.guideSpot
+                      ? 'flex-1 py-1.5 px-2 bg-amber-500 hover:bg-amber-600 text-slate-950 text-xs font-bold rounded-lg flex items-center justify-center space-x-1.5 cursor-pointer'
+                      : actionBtn
+                  }
+                >
+                  <Lightbulb className={`w-3.5 h-3.5 ${machineState.guideSpot ? '' : 'text-amber-400'}`} />
+                  <span>{machineState.guideSpot ? 'Guide Spot On — Switch Off' : 'Guide Spot'}</span>
+                </button>
+                <div className="flex items-center space-x-1.5">
+                  <NumberInput
+                    min={0.1}
+                    max={MAX_GUIDE_POWER_PCT}
+                    step="0.1"
+                    value={guidePower}
+                    onChange={(v) => {
+                      const next = writeGuidePower(v);
+                      setGuidePower(next);
+                      // Re-fired at the new power while it is lit, so "raise it
+                      // until you can see the dot" is one number box rather
+                      // than a toggle-off-edit-toggle-on cycle.
+                      if (machineState.guideSpot) void webSerialManager.guideSpotOn(next);
+                    }}
+                    title={`Pointer power, as a percentage of your controller's full scale ($30). Capped at ${MAX_GUIDE_POWER_PCT}%.`}
+                    className="w-14 bg-slate-950 border border-slate-800 rounded-lg px-2 py-1 text-xs font-mono text-slate-200"
+                  />
+                  {/* The S word as well as the percentage: it is what actually
+                      goes down the wire, and it is the number every other laser
+                      tool and forum post is quoted in. */}
+                  <span className="text-[10px] text-slate-500 whitespace-nowrap">
+                    % (S{webSerialManager.guidePowerAsS(guidePower)})
+                  </span>
+                </div>
+              </div>
+
+              {/* Some controllers gate the laser on motion below anything a `$`
+                  setting reaches, so the dot only exists while the head moves.
+                  Nothing can detect that — it is observed once, by the person
+                  watching the dot blink out. */}
+              <label
+                title="For machines whose laser only fires while moving: traces a 0.1 mm cross around the spot to keep it lit. The cross returns to its own centre, so the point you are sighting does not move."
+                className="flex items-center space-x-1.5 text-[10px] text-slate-500 cursor-pointer select-none"
+              >
+                <input
+                  type="checkbox"
+                  checked={guideJiggle}
+                  onChange={(e) => {
+                    const next = writeGuideJiggle(e.target.checked);
+                    setGuideJiggle(next);
+                    // Applied to a spot that is already lit, so the answer to
+                    // "is this what my machine needs" is the dot in front of
+                    // them. Unticking needs no call: the loop reads the setting
+                    // each cycle and stops on its own, beam still commanded on.
+                    if (next && machineState.guideSpot) void webSerialManager.guideSpotOn(guidePower);
+                  }}
+                  className="accent-amber-500 cursor-pointer"
+                />
+                <span>Jiggle to stay lit</span>
+              </label>
+
+              <p className="text-[10px] text-slate-500 leading-snug">
+                Wear your glasses, put scrap under the head, and jog the <em>dot</em> onto the corner
+                of the stock before zeroing — not the head. Raise the percentage until you can see
+                it. Laser mode (<code>$32</code>) is switched off while the spot is lit and back on
+                the moment it goes out, because GRBL will not fire a stationary head with it on. The
+                spot times out after two minutes on its own.
+              </p>
+            </div>
+          )}
 
           {showZProbe && (
             <div className="space-y-1.5">

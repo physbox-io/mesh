@@ -1,12 +1,19 @@
+import { machineSocketUrl, submitMachineJob } from './apiClient';
+
 // ---------------------------------------------------------------------------
 // How the app reaches the machine
 // ---------------------------------------------------------------------------
 //
-// There are two wires now. One is a USB cable into the laptop; the other is a
-// Tekno Box sitting on the machine with the USB cable plugged into *it*,
-// relaying over WiFi. Everything above this file is the same either way — GRBL
-// is GRBL, and the streamer, the resume logic and the status parser do not care
-// how the bytes arrive.
+// There are two wires. One is a USB cable into the laptop; the other is a Tekno
+// Box plugged into the machine, reached through api.physbox.io. Everything
+// above this file is the same either way — GRBL is GRBL, and the streamer, the
+// resume logic and the status parser do not care how the bytes arrive.
+//
+// There is deliberately no third wire straight to a box on the local network.
+// It was tried and removed: it cannot work from the deployed https app at all
+// (a secure page may not open a plain connection to a home network), so it was
+// an option that worked on a developer's laptop and nowhere else. WiFi means
+// the Tekno Box, and the Tekno Box is reached through the cloud.
 //
 // So the difference is confined here, to two implementations of one small
 // interface. The interface is deliberately line-oriented rather than
@@ -24,6 +31,24 @@
 
 /** What a wire to the machine has to be able to do. */
 export interface MachineTransport {
+  /**
+   * Hands a whole program over for the far end to run by itself.
+   *
+   * Only some wires can do this, and the difference is fundamental rather than
+   * a detail. Over USB or on the LAN this browser *is* the streamer: it sends a
+   * line, waits for `ok`, sends the next, and the job lives exactly as long as
+   * the tab does. Through the cloud the device runs the program instead —
+   * because a round trip per line would be unusable, and because a four-hour
+   * carve must not depend on a laptop staying open.
+   *
+   * Absent on the transports that stream. `webSerialManager` checks for it and
+   * takes the other path, rather than every caller having to know which kind of
+   * connection it is looking at.
+   */
+  runJob?(gcode: string, options: { name?: string; estimatedSeconds?: number }): Promise<{
+    delivered: boolean;
+    message: string;
+  }>;
   /** Shown in the UI as what is on the other end. */
   readonly label: string;
   /**
@@ -152,12 +177,25 @@ export class SerialTransport implements MachineTransport {
     await this.port.open({ baudRate: this.baudRate });
 
     const decoder = new TextDecoderStream();
-    // `TextDecoderStream` declares its input as `BufferSource` while the port
-    // yields `Uint8Array`. The two are compatible at run time; the cast is the
-    // narrowest way to say so without loosening the port's own type.
+    /*
+     * `TextDecoderStream` declares its input as `BufferSource` while the port
+     * yields `Uint8Array`. The two are compatible at run time; the cast is the
+     * narrowest way to say so without loosening the port's own type.
+     *
+     * The rejection is not swallowed. This pipe failing is the one fault that
+     * leaves everything else looking healthy: writes still succeed, the machine
+     * still moves, and nothing ever comes back — so `$$` goes unanswered, the
+     * position readout sits at zero, and the first line of a job waits for an
+     * `ok` for ever while the app shows it as running. Reported as a drop,
+     * because that is what it is: half the wire is gone.
+     */
     this.port.readable
       .pipeTo(decoder.writable as WritableStream<Uint8Array>)
-      .catch(() => {});
+      .catch(() => {
+        if (!this.reading) return;
+        this.reading = false;
+        onClosed();
+      });
     this.reader = decoder.readable.getReader();
 
     const encoder = new TextEncoderStream();
@@ -220,95 +258,46 @@ export class SerialTransport implements MachineTransport {
 }
 
 /**
- * Whether an address is one the browser treats as "potentially trustworthy".
+ * A machine reached through api.physbox.io.
  *
- * These are the origins exempt from mixed-content blocking, so they are the
- * ones an https page may open a plain `ws://` to. Everything else on the local
- * network is not — which is the whole of the difference between a Tekno Box
- * that connects from the deployed app and one that does not.
+ * The device holds an outbound connection to the relay; this opens the other
+ * side of it. Nothing here touches the customer's network, so it works from the
+ * deployed https app — which the direct-LAN transport above cannot, and never
+ * will, because a secure page may not open a plain connection to a home
+ * network.
+ *
+ * The division of labour is the thing to understand. Interactive commands —
+ * jog, home, zero, a status poll, stop — go over this link, and a hundred
+ * milliseconds of round trip is neither here nor there for those. Running a
+ * program does *not*: `runJob` hands the G-code to the API and the device cuts
+ * it on its own. See the interface's comment on `runJob`.
  */
-export function loopbackHost(host: string): boolean {
-  const bare = host.trim().replace(/^[a-z]+:\/\//i, '').replace(/\/+$/, '');
-  // Strip a port, minding the brackets IPv6 literals carry.
-  const name = bare.startsWith('[')
-    ? bare.slice(0, bare.indexOf(']') + 1)
-    : bare.split(':')[0];
-
-  if (name === 'localhost' || name.endsWith('.localhost')) return true;
-  if (name === '[::1]') return true;
-  // The whole of 127.0.0.0/8, not just 127.0.0.1.
-  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(name);
-}
-
-/** How long to wait for the box to report the machine link open, ms. */
-const TEKNOBOX_OPEN_TIMEOUT_MS = 8000;
-
-/**
- * A Tekno Box on the network, hosting the machine's USB adapter.
- *
- * The box plugs into the controller's USB port and speaks to it over its own
- * USB-host stack (or a spare UART), then relays the traffic to whoever connects
- * to its WebSocket. From this side it is a transparent pipe with a JSON
- * envelope: `grbl_line` carries a line, `grbl_raw` carries realtime bytes, and
- * `grbl_data` brings back whatever the machine said.
- *
- * The envelope is worth one caution. `grbl_line` is *framed* by the box, which
- * appends the newline itself — so the line goes out bare, unlike the serial
- * transport where this side has to terminate it. Sending a terminated line
- * through the box puts a blank line on the wire after every command, and GRBL
- * answers a blank line with its own `ok`, which would desynchronise the
- * streamer's one-line-one-ack accounting within a few dozen lines.
- */
-export class TeknoBoxTransport implements MachineTransport {
+export class CloudMachineTransport implements MachineTransport {
   readonly label: string;
 
   private socket: WebSocket | null = null;
   private lines = new LineBuffer();
   private closing = false;
+  private readonly deviceId: string;
 
-  /**
-   * Hostname or IP of the box, with an optional port. The scheme and the `/ws`
-   * path are added in `url()`, so the operator types what is on the box's own
-   * screen and nothing more.
-   */
-  private readonly host: string;
-  /**
-   * How the box reaches the controller: 'usb' has it hosting the machine's own
-   * USB adapter, 'uart' is the fallback for boards without USB host, wired to
-   * the controller's TX/RX directly.
-   */
-  private readonly backend: 'usb' | 'uart';
-  private readonly baudRate: number;
-
-  constructor(host: string, backend: 'usb' | 'uart' = 'usb', baudRate = 115200) {
-    this.host = host;
-    this.backend = backend;
-    this.baudRate = baudRate;
-    this.label = `Tekno Box (${host})`;
-  }
-
-  private url(): string {
-    const trimmed = this.host.trim().replace(/^[a-z]+:\/\//i, '').replace(/\/+$/, '');
-    // Plain ws:, because the box serves plain http on port 80 and has no
-    // certificate to offer. From an https page that is mixed content and is
-    // refused; from an http one it is fine. See `loopbackHost` for the one
-    // exception, and `unreachableMessage` for saying so when it bites.
-    return `ws://${trimmed}/ws`;
+  constructor(deviceId: string, deviceName = 'machine') {
+    this.deviceId = deviceId;
+    this.label = `${deviceName} (physbox cloud)`;
   }
 
   open(onLine: (line: string) => void, onClosed: () => void): Promise<void> {
     return new Promise((resolve, reject) => {
+      const url = machineSocketUrl(this.deviceId);
+      if (!url) {
+        reject(new Error('Sign in to physbox to reach a machine over the internet.'));
+        return;
+      }
+
       let settled = false;
       this.closing = false;
       this.lines.reset();
 
-      let socket: WebSocket;
-      try {
-        socket = new WebSocket(this.url());
-      } catch {
-        reject(new Error(`${this.host} is not a usable address for a Tekno Box.`));
-        return;
-      }
+      const socket = new WebSocket(url);
       this.socket = socket;
 
       const timer = setTimeout(() => {
@@ -319,67 +308,40 @@ export class TeknoBoxTransport implements MachineTransport {
         } catch {
           // already gone
         }
-        reject(
-          new Error(
-            `The Tekno Box at ${this.host} did not answer within ${TEKNOBOX_OPEN_TIMEOUT_MS / 1000} seconds. ` +
-              `Check it is powered up and on the same network.`
-          )
-        );
-      }, TEKNOBOX_OPEN_TIMEOUT_MS);
-
-      socket.onopen = () => {
-        // Reaching the box is not the same as reaching the machine: the box is
-        // on the network whether or not anything is plugged into it. So the
-        // link is only "open" once it says the machine side came up.
-        socket.send(
-          JSON.stringify({
-            cmd: 'grbl_open',
-            baud: this.baudRate,
-            backend: this.backend,
-            timeout_ms: 3000,
-          })
-        );
-      };
+        reject(new Error('physbox did not answer. Check your internet connection.'));
+      }, 15000);
 
       socket.onmessage = (event) => {
-        let msg: { type?: string; data?: unknown; open?: unknown; err?: unknown };
+        let msg: { type?: string; data?: unknown; error?: unknown };
         try {
           msg = JSON.parse(typeof event.data === 'string' ? event.data : '');
         } catch {
-          return; // The box also broadcasts traffic this app has no interest in.
+          return;
         }
 
-        if (msg?.type === 'grbl_data' && typeof msg.data === 'string') {
+        if (msg?.type === 'welcome') {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolve();
+          return;
+        }
+
+        if (msg?.type === 'machine_data' && typeof msg.data === 'string') {
           this.lines.push(msg.data, onLine);
           return;
         }
 
-        if (msg?.type === 'grbl_status') {
-          if (!settled) {
-            settled = true;
-            clearTimeout(timer);
-            if (msg.open) {
-              resolve();
-            } else {
-              try {
-                socket.close();
-              } catch {
-                // already gone
-              }
-              reject(
-                new Error(
-                  msg.err
-                    ? `The Tekno Box could not reach the machine: ${msg.err}`
-                    : `The Tekno Box at ${this.host} is running, but nothing is answering on its ` +
-                      `machine port. Check the USB lead into the controller.`
-                )
-              );
-            }
-          } else if (!msg.open && !this.closing) {
-            // The machine went away while the box stayed up — an unplugged USB
-            // lead at the controller end. That is a drop like any other.
-            onClosed();
-          }
+        if (msg?.type === 'device_offline') {
+          /*
+           * The relay is still there; the machine is not.
+           *
+           * Reported as a dropped link rather than swallowed, because from up
+           * here the two are the same thing — commands will not reach the
+           * cutter either way, and a panel that goes on showing "connected"
+           * while the machine is unplugged is worse than one that says so.
+           */
+          if (settled && !this.closing) onClosed();
         }
       };
 
@@ -387,44 +349,19 @@ export class TeknoBoxTransport implements MachineTransport {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
-        reject(new Error(this.unreachableMessage()));
+        reject(new Error('Could not reach physbox.'));
       };
 
       socket.onclose = () => {
         if (!settled) {
           settled = true;
           clearTimeout(timer);
-          reject(new Error(`The Tekno Box at ${this.host} closed the connection.`));
+          reject(new Error('physbox closed the connection. Your session may have expired.'));
           return;
         }
         if (!this.closing) onClosed();
       };
     });
-  }
-
-  /**
-   * What to say when the socket would not open.
-   *
-   * Worth telling apart, because one of the two causes is invisible: a page on
-   * https is not allowed to open a plain connection to a machine on the local
-   * network, and the browser reports that refusal as an ordinary connection
-   * failure. Someone checking cables and power for a problem the browser
-   * decided before a packet moved will not find it.
-   */
-  private unreachableMessage(): string {
-    const blockedByMixedContent =
-      typeof window !== 'undefined' &&
-      window.location?.protocol === 'https:' &&
-      !loopbackHost(this.host);
-
-    if (blockedByMixedContent) {
-      return (
-        `This page is on https, and browsers will not let a secure page open a plain connection to ` +
-        `a machine on your network — so ${this.host} was refused before anything was tried. Open ` +
-        `physbox over http to use the WiFi link.`
-      );
-    }
-    return `Could not reach a Tekno Box at ${this.host}. Check the address and that the box is powered up on this network.`;
   }
 
   async close(): Promise<void> {
@@ -434,12 +371,9 @@ export class TeknoBoxTransport implements MachineTransport {
     this.lines.reset();
     if (!socket) return;
     try {
-      if (socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ cmd: 'grbl_close' }));
-      }
       socket.close();
     } catch {
-      // The socket is going away regardless.
+      // Going away regardless.
     }
   }
 
@@ -450,11 +384,20 @@ export class TeknoBoxTransport implements MachineTransport {
   }
 
   async writeLine(line: string): Promise<void> {
-    // Bare: the box appends the newline. See the class comment.
-    this.send({ cmd: 'grbl_line', data: line.trim() });
+    this.send({ type: 'machine_line', data: line.trim() });
   }
 
   async writeRealtime(byte: number): Promise<void> {
-    this.send({ cmd: 'grbl_raw', bytes: [byte] });
+    this.send({ type: 'machine_realtime', bytes: [byte] });
+  }
+
+  async runJob(gcode: string, options: { name?: string; estimatedSeconds?: number }) {
+    const result = await submitMachineJob({
+      deviceId: this.deviceId,
+      gcode,
+      name: options.name,
+      estimatedSeconds: options.estimatedSeconds,
+    });
+    return { delivered: result.delivered, message: result.message };
   }
 }

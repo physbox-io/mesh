@@ -8,11 +8,24 @@
 import { postMachineTelemetry } from './apiClient';
 import {
   SerialTransport,
-  TeknoBoxTransport,
+  CloudMachineTransport,
   isWebSerialSupported,
   type MachineTransport,
 } from './machineTransport';
 import { locateExecutedLine, planResume, type ResumeOptions } from './jobResume';
+import {
+  DEFAULT_SPINDLE_PWM_MAX,
+  GUIDE_JIGGLE_FEED_MM_MIN,
+  GUIDE_JIGGLE_PATTERN,
+  GUIDE_JIGGLE_REPLY_TIMEOUT_MS,
+  GUIDE_JIGGLE_STEP_MM,
+  GUIDE_SPOT_TIMEOUT_MS,
+  guidePowerToS,
+  readGuideJiggle,
+  readGuidePower,
+  readLaserModeBorrowed,
+  writeLaserModeBorrowed,
+} from './guideSpot';
 import {
   DEFAULT_MOTION_PROFILE,
   motionProfileFromSettings,
@@ -120,6 +133,29 @@ export interface MachineState {
    * carries the position the tool was standing at so it can be put back.
    */
   park: ParkPoint | null;
+  /** Whether the laser is lit at pointer power. See `src/utils/guideSpot.ts`. */
+  guideSpot: boolean;
+  /**
+   * Nothing has come back from the controller for several seconds.
+   *
+   * Worth a state of its own because it is invisible otherwise, and because it
+   * is the difference between the two failures that look identical from the
+   * front: a job that is streaming slowly, and a job that is not streaming at
+   * all. The app pushes a `?` at the controller five times a second, so silence
+   * for seconds means the link back is dead — a wrong baud rate, a lead with no
+   * receive line in it, a controller that has crashed — and a program stopped
+   * at line one waiting for an `ok` that is never coming looks exactly like a
+   * button that did nothing.
+   */
+  controllerSilent: boolean;
+}
+
+/** One line of machine traffic, for the terminal. */
+export interface MachineLogEntry {
+  /** 'tx' is what this app sent, 'rx' what the controller answered. */
+  dir: 'tx' | 'rx';
+  text: string;
+  at: number;
 }
 
 /** A job set aside mid-cut, with the machine free to be moved. */
@@ -175,9 +211,26 @@ export function prepareJobLines(gcode: string): JobLine[] {
   const out: JobLine[] = [];
   for (const raw of gcode.split('\n')) {
     const semi = raw.indexOf(';');
-    const code = (semi < 0 ? raw : raw.slice(0, semi)).trim();
+    let code = (semi < 0 ? raw : raw.slice(0, semi)).trim();
+    let note = semi < 0 ? '' : raw.slice(semi + 1).trim();
+
+    /*
+     * Parenthesised comments count too.
+     *
+     * G-code has two comment syntaxes and this file used to know about one of
+     * them, which mattered more than it sounds: the sheet-swap pause is written
+     * `M0 (PAUSE: Insert Material Sheet 2 of 3)`, and with the parens unread
+     * the prompt at the machine said "Programmed stop. Resume when ready." to
+     * an operator holding three sheets of ply and no way to tell which one.
+     */
+    const parens = [...code.matchAll(/\(([^)]*)\)/g)].map((m) => m[1].trim()).filter(Boolean);
+    if (parens.length > 0) {
+      code = code.replace(/\([^)]*\)/g, ' ').replace(/\s+/g, ' ').trim();
+      note = [note, ...parens].filter(Boolean).join(' ');
+    }
+
     if (!code) continue;
-    out.push({ code, note: semi < 0 ? '' : raw.slice(semi + 1).trim() });
+    out.push({ code, note });
   }
   return out;
 }
@@ -195,6 +248,42 @@ export function classifyJobLine(line: string): 'tool-change' | 'stop' | 'motion'
   if (/\bM0*6\b/.test(code)) return 'tool-change';
   if (/\bM0*[01]\b/.test(code)) return 'stop';
   return 'motion';
+}
+
+/**
+ * What GRBL's error numbers mean, for the ones a job actually hits.
+ *
+ * `error:9` on its own sends an operator to a forum. Written out, it is a
+ * machine that needs unlocking and a job that can be run again in ten seconds —
+ * and the same is true of most of these. Only the codes a streaming program can
+ * realistically produce are here; the rest fall back to saying so plainly
+ * rather than being guessed at.
+ */
+export function describeGrblError(line: string): string {
+  const code = Number(/error:\s*(\d+)/i.exec(line)?.[1]);
+  switch (code) {
+    case 1:
+    case 20:
+      return 'The controller did not recognise a command in the program — check the machine profile it was exported for.';
+    case 2:
+      return 'A number in that line was malformed.';
+    case 8:
+      return 'That setting can only be changed while the machine is idle.';
+    case 9:
+      return 'The machine is locked out — it is in alarm, and will refuse G-code until it is homed or unlocked ($X).';
+    case 15:
+      return 'The move runs outside the machine\'s travel. Check where work zero is set.';
+    case 22:
+      return 'No feed rate was in effect for a cutting move.';
+    case 24:
+      return 'Two motions were commanded on one line.';
+    case 25:
+      return 'A G-code word was repeated on one line.';
+    case 33:
+      return 'The move is not geometrically valid — usually an arc whose radius does not reach its end point.';
+    default:
+      return 'Check the machine console for what it was answering.';
+  }
 }
 
 /**
@@ -219,6 +308,31 @@ export const SPINDLE_OVERRIDE_BYTES: Record<OverrideStep | 'reset', number> = {
   [-1]: 0x9d,
 };
 
+/**
+ * How long the controller may say nothing before the app says so, ms.
+ *
+ * Three seconds is ten missed status polls. Short enough that pressing start
+ * and getting nothing is explained while the operator is still looking at the
+ * screen; long enough to ride out a controller busy with a homing cycle, which
+ * on a large machine can be a couple of seconds of not answering.
+ */
+const CONTROLLER_SILENCE_MS = 3000;
+
+/**
+ * What the real-time bytes are called, for the terminal.
+ *
+ * They have no printable form — `0x18` in a log of G-code reads as noise — and
+ * these are exactly the moments an operator is trying to account for: a feed
+ * hold that was taken, a soft reset that went out, a jog that was cancelled.
+ */
+const REALTIME_BYTE_NAMES: Record<number, string> = {
+  0x18: '[soft reset]',
+  0x21: '[feed hold]',
+  0x3f: '?',
+  0x7e: '[cycle start]',
+  0x85: '[jog cancel]',
+};
+
 /** Rapid traverse trim: GRBL implements full, half and quarter, and no more. */
 export const RAPID_OVERRIDE_BYTES: Record<100 | 50 | 25, number> = {
   100: 0x95,
@@ -232,12 +346,11 @@ export type MachineStateListener = (state: MachineState) => void;
 export type MachineLink =
   | { kind: 'usb'; baudRate?: number }
   | {
-      kind: 'teknobox';
-      /** Hostname or IP of the box, e.g. `192.168.1.42` or `teknobox.local`. */
-      host: string;
-      /** How the box reaches the controller: hosting its USB adapter, or a spare UART. */
-      backend?: 'usb' | 'uart';
-      baudRate?: number;
+      kind: 'cloud';
+      /** The paired machine's id, from `fetchMachineDevices`. */
+      deviceId: string;
+      /** Shown in the UI; falls back to a generic label. */
+      deviceName?: string;
     };
 
 class WebSerialManager {
@@ -335,9 +448,37 @@ class WebSerialManager {
     estimatedSeconds: null,
     resume: null,
     park: null,
+    guideSpot: false,
+    controllerSilent: false,
   };
 
   private listeners: Set<MachineStateListener> = new Set();
+
+  // -------------------------------------------------------------------------
+  // The terminal
+  // -------------------------------------------------------------------------
+  //
+  // Every line in and out, kept in a ring buffer so the machine panel can show
+  // what the controller is actually saying. This exists because "I pressed play
+  // and nothing happened" has half a dozen causes that are indistinguishable
+  // from the front and immediately obvious from the traffic: a line refused
+  // with `error:`, a controller in `Alarm`, or — the one that reads as a broken
+  // button — a machine that takes commands and never answers at all.
+  //
+  // Its own listener list rather than a field on `MachineState`: a status
+  // report arrives five times a second, and re-rendering every panel in the app
+  // on each one is not what the readouts want.
+  private log: MachineLogEntry[] = [];
+  private logListeners: Set<(entries: MachineLogEntry[]) => void> = new Set();
+  private static readonly LOG_LIMIT = 400;
+
+  /** When something last arrived from the controller, for `controllerSilent`. */
+  private lastRxAt = 0;
+
+  /** The guide spot's own deadline, and the `$32` it borrowed to exist. */
+  private guideSpotTimer: ReturnType<typeof setTimeout> | null = null;
+  private guideSpotRestoreLaserMode = false;
+  private guideJiggleRunning = false;
 
   /** When the last telemetry POST went out, and whether one is still in flight. */
   private lastTelemetryAt = 0;
@@ -357,6 +498,46 @@ class WebSerialManager {
     this.listeners.add(listener);
     listener(this.getState());
     return () => this.listeners.delete(listener);
+  }
+
+  /** The machine traffic so far, oldest first. */
+  public getLog(): MachineLogEntry[] {
+    return [...this.log];
+  }
+
+  /** Subscribes to machine traffic. Called immediately with what is already there. */
+  public addLogListener(listener: (entries: MachineLogEntry[]) => void): () => void {
+    this.logListeners.add(listener);
+    listener(this.getLog());
+    return () => this.logListeners.delete(listener);
+  }
+
+  public clearLog(): void {
+    this.log = [];
+    const snapshot = this.getLog();
+    this.logListeners.forEach((l) => l(snapshot));
+  }
+
+  /**
+   * Records one line of traffic.
+   *
+   * The status poll and its answers are dropped rather than recorded: `?` goes
+   * out five times a second and a `<Idle|...>` comes back for each, which would
+   * push everything worth reading off the end of the buffer within seconds. The
+   * position they carry is on screen already.
+   */
+  private record(dir: 'tx' | 'rx', text: string) {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    if (trimmed === '?' || (trimmed.startsWith('<') && trimmed.endsWith('>'))) return;
+
+    this.log.push({ dir, text: trimmed, at: Date.now() });
+    if (this.log.length > WebSerialManager.LOG_LIMIT) {
+      this.log.splice(0, this.log.length - WebSerialManager.LOG_LIMIT);
+    }
+    if (this.logListeners.size === 0) return;
+    const snapshot = this.getLog();
+    this.logListeners.forEach((l) => l(snapshot));
   }
 
   private notify() {
@@ -428,8 +609,8 @@ class WebSerialManager {
    */
   public async connect(link: MachineLink = { kind: 'usb' }): Promise<boolean> {
     const transport =
-      link.kind === 'teknobox'
-        ? new TeknoBoxTransport(link.host, link.backend ?? 'usb', link.baudRate ?? 115200)
+      link.kind === 'cloud'
+        ? new CloudMachineTransport(link.deviceId, link.deviceName)
         : new SerialTransport(link.baudRate ?? 115200);
 
     try {
@@ -478,6 +659,10 @@ class WebSerialManager {
   /** Closes serial connection. */
   public async disconnect(): Promise<void> {
     this.stopStatusPolling();
+    // The beam is out because the machine is gone. `$32` cannot be put back
+    // over a wire that has closed, which is what the breadcrumb in local
+    // storage is for — the next connection restores it.
+    this.clearGuideSpotTimeout();
     // Before the flag is cleared, so the line it reached is kept: a nudged USB
     // cable is the commonest way a long carve dies, and the program is still
     // right here.
@@ -501,12 +686,15 @@ class WebSerialManager {
       motion: DEFAULT_MOTION_PROFILE,
       grblSettings: {},
       overrides: { feed: 100, rapid: 100, spindle: 100 },
+      guideSpot: false,
+      controllerSilent: false,
     });
   }
 
   /** Sends a single G-code line to the machine, however it is connected. */
   public async sendLine(command: string): Promise<void> {
     if (!this.transport || !this.state.connected) return;
+    this.record('tx', command);
     // Bare: each transport frames the line the way its own wire needs.
     await this.transport.writeLine(command);
   }
@@ -514,6 +702,13 @@ class WebSerialManager {
   /** Parses GRBL response lines like 'ok', 'error:', or '<Idle|MPos:10,20,0|WPos:10,20,0>'. */
   private handleIncomingLine(line: string) {
     if (!line) return;
+
+    // Anything at all counts as the controller being alive, status reports
+    // included — they are the thing the silence watchdog is really listening
+    // for, since they arrive whether or not a job is running.
+    this.lastRxAt = Date.now();
+    if (this.state.controllerSilent) this.updateState({ controllerSilent: false });
+    this.record('rx', line);
 
     // GRBL Status Parsing: <Idle|MPos:0.000,0.000,0.000|FS:0,0|WCO:0.000,0.000,0.000>
     if (line.startsWith('<') && line.endsWith('>')) {
@@ -555,13 +750,38 @@ class WebSerialManager {
     } else if (line.startsWith('error:')) {
       // A refused command never completes, so release whoever is waiting on it
       // rather than hanging the cycle until its timeout.
-      this.updateState({ lastError: `Machine Error: ${line}` });
       const failProbe = this.pendingProbe;
       this.pendingProbe = null;
       if (failProbe) failProbe(null);
       const waiters = this.okWaiters;
       this.okWaiters = [];
       for (const w of waiters) w();
+
+      /*
+       * A refused line ends the job, and says so.
+       *
+       * The refusal *is* the missing `ok`: the stream is paced one ack at a
+       * time, so a line GRBL will not take leaves the queue waiting for a reply
+       * that has already been given and will not come again. Nothing more was
+       * ever sent after it, and the app went on showing RUNNING at whatever
+       * percentage it had reached — a job that had stopped dead, presented as
+       * one still cutting. Standing it down keeps the resume point, so the
+       * operator can fix whatever was refused and pick the program back up.
+       */
+      if (this.isJobRunning || this.isPaused) {
+        const at = Math.max(0, this.jobLineBase + this.currentQueueIndex);
+        const refused = this.gcodeQueue[this.currentQueueIndex - 1] ?? '';
+        this.abandonJob('alarm');
+        this.stopElapsedTicker();
+        this.updateState({
+          status: 'IDLE',
+          lastError:
+            `The machine refused line ${at}${refused ? ` (${refused})` : ''} with ${line}, so the job ` +
+            `has stopped there. ${describeGrblError(line)}`,
+        });
+      } else {
+        this.updateState({ lastError: `Machine Error: ${line}` });
+      }
     }
   }
 
@@ -738,9 +958,19 @@ class WebSerialManager {
   /** Polls GRBL status with '?' every 300ms. */
   private startStatusPolling() {
     this.stopStatusPolling();
+    this.lastRxAt = Date.now();
     this.statusPollTimer = setInterval(() => {
-      if (this.state.connected && this.transport) {
-        void this.transport.writeRealtime(0x3f); // '?'
+      if (!this.state.connected || !this.transport) return;
+      void this.transport.writeRealtime(0x3f); // '?'
+
+      // The poll doubles as a heartbeat. A controller that is listening answers
+      // every one of these, so several seconds without a word back means the
+      // return path is dead however healthy the outgoing one looks — and the
+      // outgoing one always looks healthy, because writing to a serial port
+      // succeeds whether or not anything is reading it.
+      const silent = Date.now() - this.lastRxAt > CONTROLLER_SILENCE_MS;
+      if (silent !== this.state.controllerSilent) {
+        this.updateState({ controllerSilent: silent });
       }
     }, 300);
   }
@@ -752,9 +982,78 @@ class WebSerialManager {
     }
   }
 
-  /** Starts streaming a full G-code job. */
+  /**
+   * Runs a program, whichever way this connection runs programs.
+   *
+   * Over USB or on the LAN the browser is the streamer and everything below
+   * applies. Through the cloud the device does it instead — see `runJob` on
+   * `MachineTransport` — and the difference is checked here rather than in
+   * every export modal, because which kind of wire is attached is not something
+   * a modal should have to know.
+   *
+   * Resolves to null when the job was streamed from here, or to the relay's
+   * answer when it was handed over.
+   */
+  public async runJob(
+    gcode: string,
+    options: { name?: string; estimatedSeconds?: number } = {}
+  ): Promise<{ delivered: boolean; message: string } | null> {
+    if (!this.transport || !this.state.connected) {
+      this.updateState({ lastError: 'No machine is connected, so there was nothing to send the job to.' });
+      return null;
+    }
+
+    if (this.transport.runJob) {
+      let result: { delivered: boolean; message: string };
+      try {
+        result = await this.transport.runJob(gcode, options);
+      } catch (err: unknown) {
+        // Handing a job over is a network request, and a request that fails has
+        // to land somewhere the operator can see. Swallowed, it is a play
+        // button that does nothing at all.
+        const message =
+          err instanceof Error ? err.message : 'The job could not be sent to the machine.';
+        this.updateState({ status: 'IDLE', lastError: message });
+        return { delivered: false, message };
+      }
+      // The device owns the clock now. What comes back arrives as progress over
+      // the relay rather than being counted out here.
+      this.updateState({
+        status: result.delivered ? 'RUNNING' : 'IDLE',
+        estimatedSeconds: options.estimatedSeconds ?? null,
+        elapsedSeconds: 0,
+        pauseMessage: result.delivered ? undefined : result.message,
+      });
+      if (result.delivered) {
+        this.jobStartedAt = Date.now();
+        this.startElapsedTicker();
+      }
+      return result;
+    }
+
+    this.startJob(gcode, options.estimatedSeconds);
+    return null;
+  }
+
   public startJob(gcode: string, estimatedSeconds?: number) {
     if (!this.state.connected) return;
+
+    /*
+     * The stream owns the ack channel from here.
+     *
+     * Every `ok` is one line's worth of permission to send the next, and a
+     * waiter left over from a probe or a zeroing move that timed out would eat
+     * the first one — after which the program sits at line one, for ever,
+     * showing RUNNING. There is nothing left for those waiters to wait for
+     * anyway: whatever they were pacing finished before this program started.
+     */
+    const stale = this.okWaiters;
+    this.okWaiters = [];
+    for (const w of stale) w();
+
+    // The beam does not stay lit into the cut: its S word would fight the
+    // program's own, and `$32` has to go back before the job's first rapid.
+    if (this.state.guideSpot) void this.guideSpotOff();
 
     this.jobStartedAt = Date.now();
     this.startElapsedTicker();
@@ -1174,6 +1473,7 @@ class WebSerialManager {
    */
   private async writeRealtime(byte: number): Promise<void> {
     if (!this.transport || !this.state.connected) return;
+    this.record('tx', REALTIME_BYTE_NAMES[byte] ?? `0x${byte.toString(16)}`);
     await this.transport.writeRealtime(byte);
   }
 
@@ -1243,26 +1543,57 @@ class WebSerialManager {
    * place and the app carries on saying it is assuming — which is exactly what
    * it was doing before, only now it admits it.
    */
-  public async refreshMachineSettings(timeoutMs = 4000): Promise<MotionProfile> {
+  public async refreshMachineSettings(timeoutMs = 4000, attempts = 3): Promise<MotionProfile> {
     if (!this.state.connected || !this.transport) return this.state.motion;
 
-    const sink: string[] = [];
-    this.settingsSink = sink;
-    try {
-      await this.sendAndWait('$$', timeoutMs);
-    } finally {
-      this.settingsSink = null;
+    /*
+     * Asked more than once, because the first ask is made at the worst possible
+     * moment.
+     *
+     * Opening a serial port asserts DTR, and on every Arduino-based controller
+     * — which is most of them — that resets the board. It spends the next
+     * second or two booting, deaf, and the `$$` sent the instant the port
+     * opened goes into the void. One attempt meant the app then spent the whole
+     * session quoting run times off invented acceleration figures while
+     * displaying a note about reading them from the machine "once connected",
+     * on a machine that was connected.
+     */
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      if (!this.state.connected || !this.transport) return this.state.motion;
+
+      const sink: string[] = [];
+      this.settingsSink = sink;
+      try {
+        await this.sendAndWait('$$', timeoutMs);
+      } finally {
+        this.settingsSink = null;
+      }
+
+      const settings = parseGrblSettings(sink);
+      if (settings.size === 0) {
+        // A board that is still booting answers nothing at all. Give it time to
+        // get to its prompt rather than hammering the same question at it.
+        if (attempt < attempts - 1) await new Promise((r) => setTimeout(r, 1200));
+        continue;
+      }
+
+      const motion = motionProfileFromSettings(settings);
+      this.updateState({
+        motion,
+        grblSettings: Object.fromEntries(settings),
+      });
+      // A `$32` this app switched off to light a guide spot, on a session that
+      // ended before it could switch it back on. Cutting with laser mode off
+      // burns a line through every rapid, so it is put right at the first
+      // opportunity — which is here, the first moment the setting is known.
+      if (settings.get(32) === 0 && readLaserModeBorrowed()) {
+        this.guideSpotRestoreLaserMode = true;
+        this.restoreLaserMode();
+      }
+      return motion;
     }
 
-    const settings = parseGrblSettings(sink);
-    if (settings.size === 0) return this.state.motion;
-
-    const motion = motionProfileFromSettings(settings);
-    this.updateState({
-      motion,
-      grblSettings: Object.fromEntries(settings),
-    });
-    return motion;
+    return this.state.motion;
   }
 
   /** Triggers hardware homing cycle ($H). */
@@ -1401,6 +1732,239 @@ class WebSerialManager {
   /** Cancels an in-flight jog (GRBL real-time 0x85) without dropping the job state. */
   public async jogCancel(): Promise<void> {
     await this.writeRealtime(0x85);
+  }
+
+  // -------------------------------------------------------------------------
+  // The guide spot
+  // -------------------------------------------------------------------------
+
+  /**
+   * Lights the laser at pointer power, so the operator can see where the head
+   * is standing and jog the *beam* — not the gantry — onto the corner of the
+   * stock before zeroing.
+   *
+   * Without this there is no way to set XY zero on a laser accurately. You jog
+   * by eye against the head, or against a red pointer diode mounted a few
+   * millimetres off the optical axis, and the whole job comes out shifted by
+   * that offset — the same amount, in the same direction, every time.
+   *
+   * `M3` and not `M4`: in GRBL's laser mode `M4` is dynamic power, which scales
+   * with feed and is therefore *off* on a stationary head — exactly the case
+   * here. `M3` is constant power and fires immediately at idle.
+   *
+   * The beam is left burning at the operator's discretion on a head that is not
+   * moving, so it carries its own deadline: `GUIDE_SPOT_TIMEOUT_MS` after being
+   * lit it goes out on its own. Every other exit from this state — disconnect,
+   * E-stop, starting a job — kills it too, through `guideSpotOff`.
+   */
+  public async guideSpotOn(power: number = readGuidePower()): Promise<void> {
+    if (!this.state.connected) {
+      this.updateState({ lastError: 'Not connected to a machine.' });
+      return;
+    }
+    // Firing into a running job would fight the program's own S words, and the
+    // spot would be indistinguishable from the cut anyway.
+    if (this.isJobRunning) {
+      this.updateState({ lastError: 'Cannot light the guide spot while a job is running.' });
+      return;
+    }
+    // GRBL refuses everything in alarm, `M3` included, and refuses it *quietly*
+    // as far as the operator is concerned — the beam simply never appears,
+    // which reads as a broken button rather than a machine that needs
+    // unlocking.
+    if (this.state.status === 'ALARM') {
+      this.updateState({
+        lastError: 'The machine is in alarm and will refuse to fire. Home it, or unlock ($X), first.',
+      });
+      return;
+    }
+
+    /*
+     * Laser mode has to come off for a spot to exist at all.
+     *
+     * With `$32=1` GRBL only energises the laser during a G1/G2/G3 feed move
+     * and turns it off everywhere else — rapids, and standing still. That is
+     * right for cutting and exactly wrong for a pointer: the head is stationary
+     * by definition. `M3 S<n>` is accepted, answers `ok`, and produces no
+     * light, which is what a first attempt at this looks like on real hardware.
+     *
+     * So laser mode goes off for as long as the spot is lit and is restored the
+     * moment it goes out. `$32` is only accepted in Idle, which the state check
+     * above has already established.
+     */
+    if (this.laserModeEnabled() && !this.guideSpotRestoreLaserMode) {
+      // Written down before the setting is changed, not after: the case this
+      // covers is the page disappearing between the two.
+      writeLaserModeBorrowed(true);
+      await this.sendLine('$32=0');
+      this.updateState({ grblSettings: { ...this.state.grblSettings, 32: 0 } });
+      this.guideSpotRestoreLaserMode = true;
+    }
+
+    // Scaled here as well as in the UI: this is a public method, and the
+    // percentage means nothing until it is against this machine's `$30`.
+    await this.sendLine(`M3 S${this.guidePowerAsS(power)}`);
+    this.updateState({ guideSpot: true });
+    this.armGuideSpotTimeout();
+    if (readGuideJiggle()) void this.runGuideJiggle();
+  }
+
+  /**
+   * Keeps the spot lit on a machine that only fires while moving, by tracing a
+   * cross a tenth of a millimetre across, over and over, centred on the point
+   * being sighted.
+   *
+   * `$32=0` is meant to make this unnecessary, and on many controllers it does.
+   * On others the PWM is gated on motion below the level any `$` setting
+   * reaches, and the dot blinks out the instant the head stops. Motion is then
+   * the only way to hold it, so the motion is made small enough to be no motion
+   * at all — ±0.1 mm is inside the beam's own spot size — and the cross returns
+   * to its own centre every cycle rather than walking the origin across the
+   * bed.
+   *
+   * `G1` and not `$J`: a jog is not a feed move, and a controller that only
+   * lights the laser during feed moves will not light it for a jog either.
+   *
+   * `G91` is restored to `G90` at the end of every cycle rather than once at
+   * the end of the loop. Relative mode left set is how a later positioning move
+   * gets read as an offset and walks the head off the job, and this loop can
+   * stop at a disconnect, an alarm or a timeout — none of which run cleanup.
+   */
+  private async runGuideJiggle(): Promise<void> {
+    if (this.guideJiggleRunning) return;
+    this.guideJiggleRunning = true;
+    try {
+      while (
+        this.state.guideSpot &&
+        this.state.connected &&
+        !this.isJobRunning &&
+        this.state.status !== 'ALARM' &&
+        // Re-read per cycle rather than captured on entry, so unticking the box
+        // stops the movement without putting the beam out — which is the answer
+        // on a machine that turns out not to need it.
+        readGuideJiggle()
+      ) {
+        await this.sendAndWait('G91', GUIDE_JIGGLE_REPLY_TIMEOUT_MS);
+        for (const [dx, dy] of GUIDE_JIGGLE_PATTERN) {
+          // Checked per move rather than per cycle: this loop shares the serial
+          // channel with everything else, so how fast it notices it should stop
+          // is how long anything else has to wait to have the channel to
+          // itself.
+          if (!this.state.guideSpot || !this.state.connected) break;
+          await this.sendAndWait(
+            `G1 X${(dx * GUIDE_JIGGLE_STEP_MM).toFixed(3)} Y${(dy * GUIDE_JIGGLE_STEP_MM).toFixed(3)} ` +
+              `F${GUIDE_JIGGLE_FEED_MM_MIN}`,
+            GUIDE_JIGGLE_REPLY_TIMEOUT_MS
+          );
+        }
+        await this.sendAndWait('G90', GUIDE_JIGGLE_REPLY_TIMEOUT_MS);
+      }
+    } finally {
+      this.guideJiggleRunning = false;
+      // Whatever ended the loop, absolute mode is not optional. Cheap to assert
+      // twice; expensive exactly once, if the cycle above was cut short.
+      if (this.state.connected) void this.sendLine('G90');
+    }
+  }
+
+  /** Puts the guide spot out. Safe to call when it was never lit. */
+  public async guideSpotOff(): Promise<void> {
+    this.clearGuideSpotTimeout();
+    if (!this.state.connected) {
+      // Nothing to send to, but the flag must not survive: the beam is out
+      // because the machine is gone.
+      if (this.state.guideSpot) this.updateState({ guideSpot: false });
+      this.guideSpotRestoreLaserMode = false;
+      return;
+    }
+    // The flag goes down *first*, and is what the jiggle loop watches. Sending
+    // M5 while that loop is still feeding moves in would put the tail of its
+    // cross on the far side of the beam going out — and, worse, leave its `G91`
+    // and the commands after it racing whatever runs next.
+    this.updateState({ guideSpot: false });
+    await this.awaitJiggleStopped();
+
+    await this.sendLine('M5');
+    // S0 as well as M5, so the next `M3` in a hand-typed command or a program
+    // header does not inherit the pointer's S word and fire at it.
+    await this.sendLine('S0');
+    // Laser mode back on before anything else can run. A job streamed with
+    // `$32=0` still cuts, but it burns through every rapid on the way, so
+    // leaving it off would be a far worse bug than the one it was turned off to
+    // fix.
+    this.restoreLaserMode();
+  }
+
+  /**
+   * Waits for the jiggle loop to finish whatever move it is in the middle of,
+   * so the caller has the serial link to itself.
+   *
+   * Capped rather than open-ended: a controller that has stopped answering
+   * would otherwise hold up switching the beam off, which is the one thing that
+   * must not be made to wait on anything.
+   */
+  private async awaitJiggleStopped(maxWaitMs = 1500): Promise<void> {
+    const deadline = Date.now() + maxWaitMs;
+    while (this.guideJiggleRunning && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 30));
+    }
+  }
+
+  /**
+   * Puts `$32` back if the guide spot borrowed it, without the `M5`/`S0` of a
+   * full `guideSpotOff`.
+   *
+   * For the paths that have already killed output by other means — a job's own
+   * header, a soft reset — where what still has to happen is restoring laser
+   * mode, and where restoring it *late* would mean a job streaming with the
+   * beam burning through its rapids.
+   */
+  private restoreLaserMode(): void {
+    if (!this.guideSpotRestoreLaserMode) return;
+    this.guideSpotRestoreLaserMode = false;
+    writeLaserModeBorrowed(false);
+    this.updateState({ grblSettings: { ...this.state.grblSettings, 32: 1 } });
+    void this.sendLine('$32=1');
+  }
+
+  /** Full-scale S for this controller — `$30`, or the usual 1000 if unasked. */
+  private spindlePwmMax(): number {
+    const reported = this.state.grblSettings[30];
+    return reported && reported > 0 ? reported : DEFAULT_SPINDLE_PWM_MAX;
+  }
+
+  /**
+   * What a pointer percentage comes out as in S words on this machine, so the
+   * UI can show the number that actually goes down the wire. An operator
+   * comparing settings against LightBurn or a forum post is comparing S words,
+   * and a percentage alone is not translatable without `$30`.
+   */
+  public guidePowerAsS(percent: number): number {
+    return guidePowerToS(percent, this.spindlePwmMax());
+  }
+
+  /**
+   * Whether `$32` laser mode is on. Unknown counts as off: turning it back on
+   * afterwards on a machine that never had it would be changing a setting the
+   * operator did not ask us to touch.
+   */
+  private laserModeEnabled(): boolean {
+    return this.state.grblSettings[32] === 1;
+  }
+
+  private armGuideSpotTimeout(): void {
+    this.clearGuideSpotTimeout();
+    this.guideSpotTimer = setTimeout(() => {
+      this.guideSpotTimer = null;
+      void this.guideSpotOff();
+    }, GUIDE_SPOT_TIMEOUT_MS);
+  }
+
+  private clearGuideSpotTimeout(): void {
+    if (this.guideSpotTimer) {
+      clearTimeout(this.guideSpotTimer);
+      this.guideSpotTimer = null;
+    }
   }
 
   /** Retracts and drives to the current work XY origin, to check where zero landed. */
@@ -1577,8 +2141,13 @@ class WebSerialManager {
   /** Emergency Stop (Ctrl+X and M5). */
   public async eStop(): Promise<void> {
     if (this.transport) {
+      this.clearGuideSpotTimeout();
       await this.transport.writeRealtime(0x18); // Ctrl+X soft reset
       await this.sendLine('M5');
+      // The reset has already killed the output, so what is left is the flag
+      // and the `$32` the spot borrowed — which must not be left off.
+      if (this.state.guideSpot) this.updateState({ guideSpot: false });
+      this.restoreLaserMode();
     }
   }
 }

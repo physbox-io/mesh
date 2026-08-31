@@ -233,9 +233,24 @@ export function maxRateAlong(profile: MotionProfile, dx: number, dy: number, dz:
   return Number.isFinite(limit) ? limit : profile.maxRate.x;
 }
 
-/** One line describing where the estimate's numbers came from. */
-export function describeMotionProfile(profile: MotionProfile): string {
+/**
+ * One line describing where the estimate's numbers came from.
+ *
+ * `connected` matters because the two cases read completely differently to
+ * whoever is standing at the machine. With nothing plugged in, "connect the
+ * machine and this is read from it" is an instruction. With the machine
+ * connected and answering everything else, the same sentence is the app telling
+ * someone to do a thing they have already done — so it says what is actually
+ * true instead: the controller did not answer, and here is the button.
+ */
+export function describeMotionProfile(profile: MotionProfile, connected = false): string {
   if (profile.source !== 'machine') {
+    if (connected) {
+      return (
+        `Assuming ${profile.accel.x} mm/s² and ${profile.maxRate.x} mm/min rapids. This machine has ` +
+        `not answered \`$$\` with figures we recognise, so run times are estimates — try reading them again.`
+      );
+    }
     return `Assuming ${profile.accel.x} mm/s² and ${profile.maxRate.x} mm/min rapids — connect the machine and this is read from it.`;
   }
   return (

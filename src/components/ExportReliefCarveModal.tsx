@@ -22,6 +22,7 @@ import { getGridStats, type ProbeGrid } from '../utils/meshLeveler';
 import { NumberInput } from './NumberInput';
 import { useStore } from '../store/useStore';
 import { JobPauseBanner, JobPreflight, JobResumeBanner, JobTransport } from './MachineJobControls';
+import { MachineFaultBanner } from './MachineConsole';
 
 interface Props {
   isOpen: boolean;
@@ -1158,7 +1159,10 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
 
   const handleStartCarve = () => {
     if (!result?.gcode) return;
-    webSerialManager.startJob(result.gcode, result.estimatedTimeSeconds);
+    void webSerialManager.runJob(result.gcode, {
+      name: 'Relief carve',
+      estimatedSeconds: result.estimatedTimeSeconds,
+    });
   };
 
   const handleFrameTrace = async () => {
@@ -2021,6 +2025,8 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                 </button>
               </div>
             </div>
+
+            <MachineFaultBanner machineState={machineState} />
 
             <JobPreflight
               machineState={machineState}
