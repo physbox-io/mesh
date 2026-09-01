@@ -220,45 +220,76 @@ export function signInWithGooglePopup(): Promise<void> {
     );
   }
 
+  /*
+   * What the handoff key held before we started.
+   *
+   * Completion is "this value changed", not "a token exists" — somebody signing
+   * in to a second account already has a token, and would otherwise be reported
+   * as finished the instant the window opened.
+   */
+  const before = localStorage.getItem(HANDOFF_KEY);
+
   const url = `/signin.html?client_id=${encodeURIComponent(clientId)}`;
   const popup = window.open(url, 'physbox-signin', 'width=460,height=620,menubar=no,toolbar=no');
   if (!popup) {
-    return Promise.reject(new Error('Your browser blocked the sign-in window. Allow pop-ups for this site and try again.'));
+    return Promise.reject(
+      new Error('Your browser blocked the sign-in window. Allow pop-ups for this site and try again.')
+    );
   }
 
+  /*
+   * Whether the handle we were given is worth anything.
+   *
+   * The sign-in page carries a different COOP value from this one — that is the
+   * entire point of it — and differing COOP swaps the browsing context group
+   * even between same-origin documents. The window opens and works, but the
+   * handle back to it is severed, and `closed` reads true immediately.
+   *
+   * Treating that as "the user closed it" is what made the app announce
+   * "Sign-in was cancelled." before anybody had touched anything. So the handle
+   * is only trusted for that if it still looks alive right after opening.
+   */
+  const handleIsUsable = !popup.closed;
+
+  /** How long to wait before giving up. Long: a password and 2FA take a while. */
+  const TIMEOUT_MS = 5 * 60 * 1000;
+
   return new Promise<void>((resolve, reject) => {
+    const startedAt = Date.now();
     let settled = false;
 
     const finish = (err?: Error) => {
       if (settled) return;
       settled = true;
       window.removeEventListener('storage', onStorage);
-      clearInterval(closedTimer);
+      clearInterval(timer);
       if (err) reject(err);
       else resolve();
     };
 
-    // `storage` fires in *other* same-origin documents, which is exactly what
-    // the popup is. The key it writes is a timestamp, so a second sign-in in
-    // the same session still raises an event.
+    const done = () => localStorage.getItem(HANDOFF_KEY) !== before && Boolean(getStoredAuthToken());
+
+    // `storage` fires in other same-origin documents, which the sign-in page
+    // is. This is the fast path.
     const onStorage = (event: StorageEvent) => {
-      if (event.key === HANDOFF_KEY) finish();
+      if (event.key === HANDOFF_KEY && done()) finish();
     };
     window.addEventListener('storage', onStorage);
 
     /*
-     * Watch for the window going away.
-     *
-     * Two jobs. It reports a sign-in the user abandoned, rather than leaving
-     * the modal waiting forever. And it covers the case where the event was
-     * missed — the popup closes itself immediately after writing, and a
-     * `storage` listener attached in a background tab is not guaranteed to have
-     * run first, so the token is checked directly before calling it a failure.
+     * And a poll behind it, because the event is not guaranteed to arrive: a
+     * background tab may have it coalesced, and the popup closes itself
+     * immediately after writing. Reading the value directly is cheap and does
+     * not depend on being woken.
      */
-    const closedTimer = setInterval(() => {
-      if (!popup.closed) return;
-      if (getStoredAuthToken()) finish();
-      else finish(new Error('Sign-in was cancelled.'));
-    }, 400);
+    const timer = setInterval(() => {
+      if (done()) {
+        finish();
+      } else if (handleIsUsable && popup.closed) {
+        finish(new Error('Sign-in was cancelled.'));
+      } else if (Date.now() - startedAt > TIMEOUT_MS) {
+        finish(new Error('Sign-in timed out. Please try again.'));
+      }
+    }, 300);
   });
 }

@@ -18,6 +18,8 @@ export const UserProfileButton: React.FC = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
   const [syncSummary, setSyncSummary] = useState<string | null>(null);
+  /** Set when the avatar URL will not load; the icon stands in for it. */
+  const [avatarBroken, setAvatarBroken] = useState(false);
 
   const dropdownRef = useRef<HTMLDivElement>(null);
 
@@ -82,6 +84,29 @@ export const UserProfileButton: React.FC = () => {
    * cannot talk back. What is left to do here is what the app cares about: the
    * profile, the cloud pull, and the early-access notice.
    */
+  /*
+   * A session appearing closes the modal, however it got there.
+   *
+   * `handleSignIn` already does this on its own success path, but that path is
+   * one promise resolving — and when it rejected wrongly, the modal stayed open
+   * over an account that was in fact signed in. This watches the state itself
+   * rather than the flow that produced it, so the window agrees with reality
+   * even if the flow above is wrong again.
+   */
+  useEffect(() => {
+    const onStorage = (event: StorageEvent) => {
+      if (event.key !== 'physbox_auth_handoff') return;
+      const signedIn = getStoredUser();
+      if (!signedIn) return;
+      setUser(signedIn);
+      setAvatarBroken(false);
+      setLoginError(null);
+      setShowLoginModal(false);
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
+
   const handleSignIn = React.useCallback(async () => {
     setIsLoading(true);
     setLoginError(null);
@@ -123,8 +148,21 @@ export const UserProfileButton: React.FC = () => {
         className="relative flex items-center justify-center w-8 h-8 rounded-full border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors focus:outline-none flex-shrink-0 cursor-pointer shadow-xs"
         title={user ? `Account (${user.email})` : 'Sign In / Early Access'}
       >
-        {user?.picture ? (
-          <img src={user.picture} alt="Avatar" className="w-5 h-5 rounded-full" />
+        {user?.picture && !avatarBroken ? (
+          <img
+            src={user.picture}
+            alt="Avatar"
+            /*
+             * `no-referrer` and a fallback, because a Google avatar fails in two
+             * ways that both end as a broken-image glyph. It 403s when the
+             * Referer is not one it expects, and the URL goes stale on its own
+             * schedule. Neither is worth showing as a broken picture when there
+             * is a perfectly good icon to fall back to.
+             */
+            referrerPolicy="no-referrer"
+            className="w-5 h-5 rounded-full"
+            onError={() => setAvatarBroken(true)}
+          />
         ) : (
           <User className="w-4 h-4 text-cyan-600 dark:text-cyan-400" />
         )}
@@ -150,8 +188,14 @@ export const UserProfileButton: React.FC = () => {
               {/* Logged-In Profile Header */}
               <div className="p-2.5 rounded-lg bg-slate-50 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800">
                 <div className="flex items-center gap-3">
-                  {user.picture ? (
-                    <img src={user.picture} alt="Avatar" className="w-8 h-8 rounded-full border border-cyan-500/30" />
+                  {user.picture && !avatarBroken ? (
+                    <img
+                      src={user.picture}
+                      alt="Avatar"
+                      referrerPolicy="no-referrer"
+                      className="w-8 h-8 rounded-full border border-cyan-500/30"
+                      onError={() => setAvatarBroken(true)}
+                    />
                   ) : (
                     <div className="p-2 bg-cyan-50 dark:bg-cyan-500/20 text-cyan-600 dark:text-cyan-400 rounded-lg">
                       <User className="w-4 h-4" />
