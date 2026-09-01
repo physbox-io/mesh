@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import {
@@ -12,16 +12,17 @@ import {
 } from 'lucide-react';
 import type { SceneGraph } from '../types/scene';
 import {
-  generateMoldMeshes,
   emptyMoldResult,
-  computeNormal,
+  moldSummary,
   DEFAULT_MOLD_OPTIONS,
   type MoldOptions,
-  type MoldExportResult,
-  type Triangle3D,
+  type MoldSummary,
+  type MoldHalfBuffers,
 } from '../utils/moldExporter';
+import { MoldWorkerClient, type MoldPreview } from '../utils/moldWorkerClient';
 import { NumberInput } from './NumberInput';
 import { CastingGuide } from './CastingGuide';
+import { HintAnchor } from './ExportFields';
 
 interface ExportMoldModalProps {
   isOpen: boolean;
@@ -54,29 +55,23 @@ function Field({
   children: React.ReactNode;
   className?: string;
 }) {
+  // The bubble is portalled rather than absolutely positioned: this column
+  // scrolls, and a scroll container clips its positioned descendants whatever
+  // their z-index says, which is what cut the longer hints off at the card's edge.
   return (
     <div className={`space-y-1.5 min-w-0 relative ${className}`}>
-      <div className="flex items-center justify-between gap-1">
+      <HintAnchor hint={hint} align={hintAlign} className="flex items-center justify-between gap-1">
         <label className="text-xs font-semibold text-slate-600 dark:text-slate-300 truncate">{label}</label>
         {hint && (
-          <div className="relative group/hint shrink-0">
-            <button
-              type="button"
-              tabIndex={-1}
-              className="text-slate-400 hover:text-slate-200 cursor-help focus:outline-none p-0.5"
-            >
-              <Info className="w-3.5 h-3.5" />
-            </button>
-            <div
-              className={`pointer-events-none absolute top-full z-50 mt-1.5 w-max max-w-[min(14rem,65vw)] rounded-lg bg-slate-900 dark:bg-slate-950 px-2.5 py-2 text-[11px] font-normal leading-snug text-slate-100 shadow-xl ring-1 ring-slate-700 opacity-0 transition-opacity group-hover/hint:opacity-100 group-focus-within/hint:opacity-100 ${
-                hintAlign === 'end' ? 'right-0' : 'left-0'
-              }`}
-            >
-              {hint}
-            </div>
-          </div>
+          <span
+            tabIndex={0}
+            aria-label={hint}
+            className="shrink-0 text-slate-400 hover:text-slate-200 focus:text-slate-200 cursor-help p-0.5 focus:outline-none"
+          >
+            <Info className="w-3.5 h-3.5" />
+          </span>
         )}
-      </div>
+      </HintAnchor>
       {children}
     </div>
   );
@@ -111,40 +106,31 @@ function Segmented<T extends string>({
   );
 }
 
-/** Converts Triangle3D array into Three.js BufferGeometry. */
-function trianglesToBufferGeometry(tris: Triangle3D[]): THREE.BufferGeometry {
-  const positions = new Float32Array(tris.length * 9);
-  const normals = new Float32Array(tris.length * 9);
-
-  for (let i = 0; i < tris.length; i++) {
-    const t = tris[i];
-    const n = t.normal ?? computeNormal(t.a, t.b, t.c);
-    const idx = i * 9;
-
-    positions[idx] = t.a[0];
-    positions[idx + 1] = t.a[1];
-    positions[idx + 2] = t.a[2];
-
-    positions[idx + 3] = t.b[0];
-    positions[idx + 4] = t.b[1];
-    positions[idx + 5] = t.b[2];
-
-    positions[idx + 6] = t.c[0];
-    positions[idx + 7] = t.c[1];
-    positions[idx + 8] = t.c[2];
-
-    for (let k = 0; k < 3; k++) {
-      normals[idx + k * 3] = n[0];
-      normals[idx + k * 3 + 1] = n[1];
-      normals[idx + k * 3 + 2] = n[2];
-    }
-  }
-
+/** Wraps the worker's transferred arrays as geometry, without copying them. */
+function buffersToGeometry(buf: MoldHalfBuffers): THREE.BufferGeometry {
   const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  geo.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+  geo.setAttribute('position', new THREE.BufferAttribute(buf.positions, 3));
+  geo.setAttribute('normal', new THREE.BufferAttribute(buf.normals, 3));
   return geo;
 }
+
+/**
+ * Holds a value still until it stops changing.
+ *
+ * Every keystroke in a number field is a new options object and so a new mold.
+ * Typing "12" into the wall margin asks for a mold at 1 mm and then at 12; the
+ * first is work nobody wanted, and on a relief it is most of a second of it.
+ */
+function useDebounced<T>(value: T, delayMs: number): T {
+  const [settled, setSettled] = useState(value);
+  useEffect(() => {
+    const timer = setTimeout(() => setSettled(value), delayMs);
+    return () => clearTimeout(timer);
+  }, [value, delayMs]);
+  return settled;
+}
+
+const EMPTY_SUMMARY: MoldSummary = moldSummary(emptyMoldResult());
 
 export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClose, scene }) => {
   const [options, setOptions] = useState<MoldOptions>(DEFAULT_MOLD_OPTIONS);
@@ -160,11 +146,54 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
   const contentRef = useRef<THREE.Group | null>(null);
   const controlsRef = useRef<OrbitControls | null>(null);
 
-  // Generate mold meshes when options or scene changes
-  const result: MoldExportResult = useMemo(() => {
-    if (!isOpen) return emptyMoldResult();
-    return generateMoldMeshes(scene, options);
-  }, [isOpen, scene, options]);
+  // Mold generation runs in a worker, and the modal keeps showing the last mold
+  // it finished while the next one is on its way — a preview that blanks on
+  // every keystroke is worse than one that is a moment out of date.
+  const clientRef = useRef<MoldWorkerClient | null>(null);
+  const [preview, setPreview] = useState<MoldPreview | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null);
+  const settledOptions = useDebounced(options, 250);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const client = new MoldWorkerClient();
+    clientRef.current = client;
+    return () => {
+      client.dispose();
+      clientRef.current = null;
+      setPreview(null);
+    };
+  }, [isOpen]);
+
+  useEffect(() => {
+    const client = clientRef.current;
+    if (!isOpen || !client) return;
+
+    let live = true;
+    setBusy(true);
+    client
+      .generate(scene, settledOptions)
+      .then((next) => {
+        if (!live) return;
+        setPreview(next);
+        setFailure(null);
+      })
+      .catch((e: Error) => {
+        if (live) setFailure(e.message);
+      })
+      .finally(() => {
+        if (live) setBusy(false);
+      });
+
+    // The worker answers in order, so an unmounted or superseded request is
+    // dropped here rather than racing the one that replaced it.
+    return () => {
+      live = false;
+    };
+  }, [isOpen, scene, settledOptions]);
+
+  const result = preview?.summary ?? EMPTY_SUMMARY;
 
   // Setup WebGL Three.js Scene and OrbitControls
   useEffect(() => {
@@ -253,8 +282,8 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
 
     group.clear();
 
-    const bottomTris = result.bottomHalf.triangles;
-    const topTris = result.topHalf?.triangles;
+    const bottomBuf = preview?.bottom ?? null;
+    const topBuf = preview?.top ?? null;
 
     // Materials
     const bottomMat = new THREE.MeshStandardMaterial({
@@ -279,28 +308,24 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
 
     if (viewMode === 'plate' || options.moldType === 'open') {
       // Build Plate Layout: Both halves flat side-by-side at Z=0
-      if (bottomTris.length > 0) {
-        const botGeo = trianglesToBufferGeometry(bottomTris);
-        group.add(new THREE.Mesh(botGeo, bottomMat));
+      if (bottomBuf) {
+        group.add(new THREE.Mesh(buffersToGeometry(bottomBuf), bottomMat));
       }
-      if (topTris && topTris.length > 0 && options.moldType === 'clamshell') {
-        const topGeo = trianglesToBufferGeometry(topTris);
-        group.add(new THREE.Mesh(topGeo, topMat));
+      if (topBuf && options.moldType === 'clamshell') {
+        group.add(new THREE.Mesh(buffersToGeometry(topBuf), topMat));
       }
     } else if (viewMode === 'clamshell_exploded') {
       // Exploded View: Bottom cavity at Z=0, Top core/lid elevated above it facing downward
-      if (bottomTris.length > 0) {
+      if (bottomBuf) {
         // Center bottom half at origin
-        const botGeo = trianglesToBufferGeometry(bottomTris);
-        const botMesh = new THREE.Mesh(botGeo, bottomMat);
+        const botMesh = new THREE.Mesh(buffersToGeometry(bottomBuf), bottomMat);
         const mb = result.moldWidthMm / 2;
         botMesh.position.set(mb, 0, 0); // Undo plate offset
         group.add(botMesh);
       }
-      if (topTris && topTris.length > 0) {
+      if (topBuf) {
         // Un-plate and position elevated facing down
-        const topGeo = trianglesToBufferGeometry(topTris);
-        const topMesh = new THREE.Mesh(topGeo, topMat);
+        const topMesh = new THREE.Mesh(buffersToGeometry(topBuf), topMat);
         const mb = result.moldWidthMm / 2;
         // Flip back and lift by explodeGap
         topMesh.rotation.x = Math.PI;
@@ -308,16 +333,14 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
         group.add(topMesh);
       }
     } else if (viewMode === 'bottom_only') {
-      if (bottomTris.length > 0) {
-        const botGeo = trianglesToBufferGeometry(bottomTris);
-        const botMesh = new THREE.Mesh(botGeo, bottomMat);
+      if (bottomBuf) {
+        const botMesh = new THREE.Mesh(buffersToGeometry(bottomBuf), bottomMat);
         botMesh.position.set(result.moldWidthMm / 2, 0, 0);
         group.add(botMesh);
       }
     } else if (viewMode === 'top_only') {
-      if (topTris && topTris.length > 0) {
-        const topGeo = trianglesToBufferGeometry(topTris);
-        const topMesh = new THREE.Mesh(topGeo, topMat);
+      if (topBuf) {
+        const topMesh = new THREE.Mesh(buffersToGeometry(topBuf), topMat);
         topMesh.position.set(-result.moldWidthMm / 2, 0, 0);
         group.add(topMesh);
       }
@@ -329,9 +352,22 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
     grid.rotation.x = Math.PI / 2; // Lie flat in XY plane
     group.add(grid);
 
-  }, [result, viewMode, isXRay, explodeGap, options.moldType]);
+  }, [preview, result, viewMode, isXRay, explodeGap, options.moldType]);
 
-  const handleDownload = (bytes: Uint8Array, filename: string) => {
+  const [saving, setSaving] = useState(false);
+
+  const handleDownload = async (filename: string) => {
+    const client = clientRef.current;
+    if (!client) return;
+    setSaving(true);
+    try {
+      saveBytes(await client.stl(), filename);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const saveBytes = (bytes: Uint8Array, filename: string) => {
     const blob = new Blob([bytes.buffer as ArrayBuffer], { type: 'application/octet-stream' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -468,6 +504,14 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
                 </div>
               )}
 
+              {/* Says the preview is a moment behind, without blanking it. */}
+              {busy && (
+                <div className="absolute top-3 left-1/2 -translate-x-1/2 bg-slate-900/85 backdrop-blur-md px-2.5 py-1 rounded-md text-[10px] font-semibold text-slate-200 border border-slate-700 flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-purple-400 animate-pulse" />
+                  Rebuilding
+                </div>
+              )}
+
               {/* Mouse Controls Hint */}
               <div className="absolute bottom-3 left-3 bg-slate-900/80 backdrop-blur-md px-2.5 py-1 rounded-md text-[10px] text-slate-300 border border-slate-700 flex items-center gap-2">
                 <span>Left/Right: Rotate</span>
@@ -517,6 +561,13 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
                 </span>
               </div>
             </div>
+
+            {failure && (
+              <div className="flex items-start gap-2 text-[11px] leading-snug rounded-lg px-2.5 py-2 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 text-rose-800 dark:text-rose-200">
+                <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-px" />
+                <span>The mold could not be built: {failure}</span>
+              </div>
+            )}
 
             {result.warnings.length > 0 && (
               <div className="space-y-1.5">
@@ -738,12 +789,12 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
             </button>
 
             <button
-              onClick={() => handleDownload(result.binarySTL, 'casting_mold_plate.stl')}
-              disabled={!result.success || result.totalTriangles === 0}
+              onClick={() => void handleDownload('casting_mold_plate.stl')}
+              disabled={!result.success || result.totalTriangles === 0 || busy || saving}
               className="flex items-center gap-2 px-5 py-2 text-xs font-semibold text-white bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 rounded-xl shadow-md hover:shadow-lg disabled:opacity-50 transition-all cursor-pointer"
             >
               <Download className="w-4 h-4" />
-              <span>Download STL</span>
+              <span>{saving ? 'Encoding STL…' : 'Download STL'}</span>
             </button>
           </div>
         </div>

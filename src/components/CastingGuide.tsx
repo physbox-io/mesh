@@ -2,6 +2,12 @@ import React from 'react';
 import { Droplets, Layers, Hand, TriangleAlert } from 'lucide-react';
 import type { MoldExportResult } from '../utils/moldExporter';
 
+/** Only the findings are needed here, so a summary from the worker will do. */
+type CastingFacts = Pick<
+  MoldExportResult,
+  'cavityDepthMm' | 'minDraftDeg' | 'flexibleMoldAdvised' | 'lidIsBackingPlate'
+>;
+
 /**
  * What to actually do with the two blocks once they are printed.
  *
@@ -39,7 +45,7 @@ import type { MoldExportResult } from '../utils/moldExporter';
 /** Deepest lift most casting epoxies will take without cooking themselves, mm. */
 const SAFE_LIFT_MM = 10;
 
-export const CastingGuide: React.FC<{ result: MoldExportResult }> = ({ result }) => {
+export const CastingGuide: React.FC<{ result: CastingFacts }> = ({ result }) => {
   const lifts = Math.max(1, Math.ceil(result.cavityDepthMm / SAFE_LIFT_MM));
 
   return (

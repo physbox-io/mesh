@@ -4,8 +4,11 @@ import {
   exportBinarySTL,
   computeNormal,
   DEFAULT_MOLD_OPTIONS,
+  trianglesToBuffers,
+  moldSummary,
   type Triangle3D,
 } from '../src/utils/moldExporter';
+import { MoldWorkerClient } from '../src/utils/moldWorkerClient';
 import type { SceneGraph, SceneGeom } from '../src/types/scene';
 
 function bodyWith(geom: Partial<SceneGeom> & { type: SceneGeom['type']; size: number[] }, pos = [0, 0, 0]): SceneGraph {
@@ -286,5 +289,57 @@ describe('Draft', () => {
     const res = generateMoldMeshes(plaque, { ...DEFAULT_MOLD_OPTIONS, draftAngleDeg: 6 });
     expect(unpairedEdges(res.bottomHalf.triangles)).toBe(0);
     expect(unpairedEdges(res.topHalf!.triangles)).toBe(0);
+  });
+});
+
+describe('Worker boundary', () => {
+  it('encodes the STL only when it is asked for', () => {
+    const res = generateMoldMeshes(plaque, DEFAULT_MOLD_OPTIONS);
+    // The preview never reads a byte of it, so nothing should be paid for it
+    // until the download button. Reading twice must not encode twice.
+    const first = res.binarySTL;
+    expect(first).toBe(res.binarySTL);
+    expect(first.length).toBe(84 + res.totalTriangles * 50);
+  });
+
+  it('flattens a half into transferable arrays that match its triangles', () => {
+    const res = generateMoldMeshes(plaque, DEFAULT_MOLD_OPTIONS);
+    const buf = trianglesToBuffers(res.bottomHalf.triangles);
+
+    expect(buf.positions.length).toBe(res.bottomHalf.triangles.length * 9);
+    expect(buf.normals.length).toBe(buf.positions.length);
+
+    const t = res.bottomHalf.triangles[0];
+    expect(Array.from(buf.positions.slice(0, 3))).toEqual(t.a.map((v) => Math.fround(v)));
+    expect(Array.from(buf.positions.slice(3, 6))).toEqual(t.b.map((v) => Math.fround(v)));
+    // One normal per vertex, all three the face's own.
+    expect(Array.from(buf.normals.slice(0, 3))).toEqual(Array.from(buf.normals.slice(3, 6)));
+  });
+
+  it('summarises a mold without carrying its geometry across', () => {
+    const res = generateMoldMeshes(plaque, DEFAULT_MOLD_OPTIONS);
+    const summary = moldSummary(res);
+
+    expect(summary.cavityDepthMm).toBe(res.cavityDepthMm);
+    expect(summary.bottomHalf.triangleCount).toBe(res.bottomHalf.triangleCount);
+    expect(summary.topHalf!.heightMm).toBe(res.topHalf!.heightMm);
+    expect('triangles' in summary.bottomHalf).toBe(false);
+    expect('binarySTL' in summary).toBe(false);
+    // Whatever it holds has to survive being posted between threads.
+    expect(() => structuredClone(summary)).not.toThrow();
+  });
+
+  it('generates inline where there is no Worker to hand', async () => {
+    // Node has none, which is also the path an old browser takes.
+    const client = new MoldWorkerClient();
+    const out = await client.generate(plaque, DEFAULT_MOLD_OPTIONS);
+
+    expect(out.summary.success).toBe(true);
+    expect(out.bottom.positions.length).toBe(out.summary.bottomHalf.triangleCount * 9);
+    expect(out.top!.positions.length).toBe(out.summary.topHalf!.triangleCount * 9);
+
+    const stl = await client.stl();
+    expect(stl.length).toBe(84 + out.summary.totalTriangles * 50);
+    client.dispose();
   });
 });

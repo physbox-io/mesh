@@ -857,7 +857,11 @@ export function generateMoldMeshes(
   const plateTopTris = lid ? toPlate(lid.triangles, plateOffset, lid.blockHeightMm) : [];
 
   const combinedTriangles = lid ? [...plateBottomTris, ...plateTopTris] : plateBottomTris;
-  const binarySTL = exportBinarySTL(combinedTriangles, 'PhysBox 3D Mold Plate');
+
+  // Encoded on first read rather than here. Every option change regenerates the
+  // mold, and on a relief that is eight megabytes of STL written out and thrown
+  // away for a preview that never looks at a byte of it.
+  let stlBytes: Uint8Array | null = null;
 
   const totalWidth = lid ? moldWidthMm * 2 + plateGapMm : moldWidthMm;
   const totalHeight = Math.max(
@@ -892,7 +896,10 @@ export function generateMoldMeshes(
 
   return {
     success: true,
-    binarySTL,
+    get binarySTL() {
+      if (!stlBytes) stlBytes = exportBinarySTL(combinedTriangles, 'PhysBox 3D Mold Plate');
+      return stlBytes;
+    },
     partBounds: { minX: mnX, minY: mnY, minZ: mnZ, maxX: mxX, maxY: mxY, maxZ: mxZ },
     moldBounds: {
       minX: -totalWidth / 2,
@@ -935,5 +942,85 @@ export function generateMoldMeshes(
       : undefined,
     combinedTriangles,
     warnings,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Crossing the worker boundary
+// ---------------------------------------------------------------------------
+//
+// A mold is a few hundred thousand `Triangle3D` objects, and structured-cloning
+// that many small objects out of a worker costs more than generating them did.
+// So a worker sends back two things instead: a summary, which is small and plain
+// enough to clone, and the halves as flat typed arrays that transfer with no
+// copy at all and go straight into a BufferGeometry.
+
+export type MoldHalfSummary = Omit<MoldMeshHalf, 'triangles'>;
+
+export type MoldSummary = Omit<
+  MoldExportResult,
+  'binarySTL' | 'combinedTriangles' | 'bottomHalf' | 'topHalf'
+> & {
+  bottomHalf: MoldHalfSummary;
+  topHalf?: MoldHalfSummary;
+};
+
+/** Positions and per-vertex normals, ready for a BufferGeometry. */
+export interface MoldHalfBuffers {
+  positions: Float32Array;
+  normals: Float32Array;
+}
+
+export function trianglesToBuffers(tris: Triangle3D[]): MoldHalfBuffers {
+  const positions = new Float32Array(tris.length * 9);
+  const normals = new Float32Array(tris.length * 9);
+
+  for (let i = 0; i < tris.length; i++) {
+    const t = tris[i];
+    const n = t.normal ?? computeNormal(t.a, t.b, t.c);
+    const o = i * 9;
+    for (let v = 0; v < 3; v++) {
+      const src = v === 0 ? t.a : v === 1 ? t.b : t.c;
+      positions[o + v * 3] = src[0];
+      positions[o + v * 3 + 1] = src[1];
+      positions[o + v * 3 + 2] = src[2];
+      normals[o + v * 3] = n[0];
+      normals[o + v * 3 + 1] = n[1];
+      normals[o + v * 3 + 2] = n[2];
+    }
+  }
+  return { positions, normals };
+}
+
+/** Everything about a mold except the geometry itself. */
+export function moldSummary(r: MoldExportResult): MoldSummary {
+  const half = (h: MoldMeshHalf): MoldHalfSummary => ({
+    name: h.name,
+    bounds: h.bounds,
+    widthMm: h.widthMm,
+    depthMm: h.depthMm,
+    heightMm: h.heightMm,
+    triangleCount: h.triangleCount,
+  });
+
+  return {
+    success: r.success,
+    error: r.error,
+    warnings: r.warnings,
+    partBounds: r.partBounds,
+    moldBounds: r.moldBounds,
+    partWidthMm: r.partWidthMm,
+    partDepthMm: r.partDepthMm,
+    partHeightMm: r.partHeightMm,
+    moldWidthMm: r.moldWidthMm,
+    moldDepthMm: r.moldDepthMm,
+    moldHeightMm: r.moldHeightMm,
+    totalTriangles: r.totalTriangles,
+    cavityDepthMm: r.cavityDepthMm,
+    minDraftDeg: r.minDraftDeg,
+    flexibleMoldAdvised: r.flexibleMoldAdvised,
+    lidIsBackingPlate: r.lidIsBackingPlate,
+    bottomHalf: half(r.bottomHalf),
+    topHalf: r.topHalf ? half(r.topHalf) : undefined,
   };
 }
