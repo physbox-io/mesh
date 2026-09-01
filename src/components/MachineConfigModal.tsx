@@ -1,5 +1,5 @@
-import React, { useCallback, useEffect, useState } from 'react';
-import { Cpu, Home, Link2, RefreshCw, ShieldAlert, X, Gauge, Wifi, WifiOff } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { Cpu, Home, RefreshCw, ShieldAlert, X, Gauge, Wifi, WifiOff } from 'lucide-react';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
 import { type MachineTarget } from '../store/useStore';
 import { FdmNotice } from './FdmNotice';
@@ -8,12 +8,7 @@ import { ControllerSilenceBanner } from './MachineFaultBanner';
 import { JobOverrides } from './MachineJobControls';
 import { describeMotionProfile } from '../utils/motionProfile';
 import { webSerialUnavailableReason } from '../utils/machineTransport';
-import {
-  claimMachineDevice,
-  fetchMachineDevices,
-  getStoredAuthToken,
-  type MachineDevice,
-} from '../utils/apiClient';
+import { TeknoBoxPicker } from './TeknoBoxPicker';
 
 /** The three ways this app can reach a machine. */
 type MachineLinkKind = 'usb' | 'cloud';
@@ -64,59 +59,13 @@ export const MachineConfigModal: React.FC<{
   );
   const [connecting, setConnecting] = useState(false);
 
-  /*
-   * The machines on this account, and pairing a new one.
-   *
-   * Only meaningful for the cloud link — a USB cable has nothing to pair and no
-   * list to be on — so the whole section is hidden for the other two rather
-   * than shown greyed out.
-   */
-  const [devices, setDevices] = useState<MachineDevice[]>([]);
   const [selectedDevice, setSelectedDevice] = useState(
     () => localStorage.getItem('physbox.cloudDeviceId') || ''
   );
-  const [pairCode, setPairCode] = useState('');
-  const [pairing, setPairing] = useState(false);
-  const [pairError, setPairError] = useState<string | null>(null);
-  const signedIn = Boolean(getStoredAuthToken());
 
   useEffect(() => webSerialManager.addListener(setMachineState), []);
 
-  const refreshDevices = useCallback(async () => {
-    if (!signedIn) return;
-    const list = await fetchMachineDevices();
-    setDevices(list);
-    // Pick something sensible rather than leaving the operator to choose from a
-    // list of one: a machine that is on and reachable, failing that the first.
-    setSelectedDevice((current) => {
-      if (current && list.some((d) => d.deviceId === current)) return current;
-      return list.find((d) => d.online)?.deviceId ?? list[0]?.deviceId ?? '';
-    });
-  }, [signedIn]);
 
-  /*
-   * Load the machine list when the cloud panel is opened.
-   *
-   * The result is discarded if it arrives after the panel has been closed or
-   * switched away from — otherwise a slow reply lands on a modal that has moved
-   * on, and picks a machine the operator is no longer looking at.
-   */
-  useEffect(() => {
-    if (!isOpen || link !== 'cloud' || !signedIn) return;
-    let live = true;
-    void fetchMachineDevices().then((list) => {
-      if (!live) return;
-      setDevices(list);
-      setSelectedDevice((current) =>
-        current && list.some((d) => d.deviceId === current)
-          ? current
-          : list.find((d) => d.online)?.deviceId ?? list[0]?.deviceId ?? ''
-      );
-    });
-    return () => {
-      live = false;
-    };
-  }, [isOpen, link, signedIn]);
 
   if (!isOpen) return null;
 
@@ -130,11 +79,8 @@ export const MachineConfigModal: React.FC<{
       localStorage.setItem('physbox.machineLink', link);
       if (link === 'cloud') localStorage.setItem('physbox.cloudDeviceId', selectedDevice);
 
-      const chosen = devices.find((d) => d.deviceId === selectedDevice);
       await webSerialManager.connect(
-        link === 'cloud'
-          ? { kind: 'cloud', deviceId: selectedDevice, deviceName: chosen?.name }
-          : { kind: 'usb' }
+        link === 'cloud' ? { kind: 'cloud', deviceId: selectedDevice } : { kind: 'usb' }
       );
     } finally {
       setConnecting(false);
@@ -145,22 +91,6 @@ export const MachineConfigModal: React.FC<{
     machineState.connected ||
     (link === 'cloud' ? Boolean(selectedDevice) : webSerialManager.isSupported());
 
-  const handlePair = async () => {
-    const code = pairCode.trim().toUpperCase();
-    if (!code) return;
-    setPairing(true);
-    setPairError(null);
-    try {
-      const { deviceId } = await claimMachineDevice(code);
-      setPairCode('');
-      await refreshDevices();
-      setSelectedDevice(deviceId);
-    } catch (err: unknown) {
-      setPairError(err instanceof Error ? err.message : 'Could not pair that machine.');
-    } finally {
-      setPairing(false);
-    }
-  };
 
   const statusClass =
     machineState.status === 'RUNNING'
@@ -277,81 +207,15 @@ export const MachineConfigModal: React.FC<{
                   ))}
                 </div>
 
-                {link === 'cloud' && !signedIn && (
-                  <span className="text-[11px] text-amber-600 dark:text-amber-400 basis-full">
-                    Sign in to physbox to reach a machine over the internet — the connection is made
-                    through your account, which is what stops it being anyone else's machine.
-                  </span>
-                )}
-
-                {link === 'cloud' && signedIn && (
-                  <div className="basis-full space-y-2">
-                    {devices.length > 0 ? (
-                      <div className="flex flex-wrap items-center gap-2">
-                        <select
-                          value={selectedDevice}
-                          onChange={(e) => setSelectedDevice(e.target.value)}
-                          className="flex-1 min-w-[12rem] px-2 py-1 text-xs rounded-lg bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 text-slate-900 dark:text-slate-100 cursor-pointer"
-                        >
-                          {devices.map((d) => (
-                            <option key={d.deviceId} value={d.deviceId}>
-                              {d.name} {d.online ? '— online' : '— offline'}
-                            </option>
-                          ))}
-                        </select>
-                        <button
-                          onClick={() => void refreshDevices()}
-                          title="Check again which machines are online"
-                          className="p-1.5 rounded-lg text-slate-500 hover:bg-slate-200 dark:hover:bg-slate-800 cursor-pointer"
-                        >
-                          <RefreshCw className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    ) : (
-                      <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                        No machines paired to this account yet.
-                      </p>
-                    )}
-
-                    {/* Pairing. The code is on the machine's own screen, which
-                        is what proves the person typing it is standing in front
-                        of it — the whole reason it is a code rather than a
-                        setting. */}
-                    <div className="flex flex-wrap items-center gap-2">
-                      <Link2 className="w-3.5 h-3.5 text-blue-500" />
-                      <input
-                        value={pairCode}
-                        onChange={(e) => setPairCode(e.target.value.toUpperCase())}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') void handlePair();
-                        }}
-                        placeholder="Code from the machine's screen"
-                        maxLength={8}
-                        spellCheck={false}
-                        aria-label="Pairing code"
-                        className="flex-1 min-w-[11rem] px-2 py-1 text-xs font-mono tracking-widest uppercase rounded-lg bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-700 text-slate-900 dark:text-slate-100"
-                      />
-                      <button
-                        onClick={() => void handlePair()}
-                        disabled={!pairCode.trim() || pairing}
-                        className="px-3 py-1 rounded-lg text-xs font-bold bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 disabled:opacity-40 cursor-pointer"
-                      >
-                        {pairing ? 'Pairing…' : 'Pair machine'}
-                      </button>
-                    </div>
-
-                    {pairError && (
-                      <p className="text-[11px] text-red-600 dark:text-red-400">{pairError}</p>
-                    )}
-
-                    <p className="text-[10px] text-slate-500 dark:text-slate-400 leading-relaxed">
-                      The machine connects out to physbox itself, so this works from anywhere and
-                      needs nothing opened on your router. A job sent this way is cut by the machine
-                      on its own — you can close this page and the cut carries on.
-                    </p>
+                {link === 'cloud' && (
+                  <div className="basis-full">
+                    <TeknoBoxPicker
+                      value={selectedDevice}
+                      onChange={(deviceId) => setSelectedDevice(deviceId)}
+                      disabled={machineState.connected}
+                    />
                   </div>
                 )}
-
               </div>
             )}
 
