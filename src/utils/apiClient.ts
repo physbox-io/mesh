@@ -69,6 +69,12 @@ export function clearStoredAuth(): void {
   try {
     localStorage.removeItem(AUTH_TOKEN_KEY);
     localStorage.removeItem(USER_KEY);
+    // Everything the sign-in window leaves behind goes too. A cached avatar
+    // outliving the account it belongs to means the next person to sign in on
+    // this machine is greeted by the last one's face.
+    localStorage.removeItem('physbox_user_avatar');
+    localStorage.removeItem('physbox_auth_is_admin');
+    localStorage.removeItem('physbox_auth_handoff');
   } catch (e) {
     console.error('Failed to clear auth session', e);
   }

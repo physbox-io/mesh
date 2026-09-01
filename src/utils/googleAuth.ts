@@ -230,6 +230,7 @@ export function signInWithGooglePopup(): Promise<void> {
   const before = localStorage.getItem(HANDOFF_KEY);
 
   const url = `/signin.html?client_id=${encodeURIComponent(clientId)}`;
+  // The handle is opened and then deliberately not relied upon; see below.
   const popup = window.open(url, 'physbox-signin', 'width=460,height=620,menubar=no,toolbar=no');
   if (!popup) {
     return Promise.reject(
@@ -238,19 +239,26 @@ export function signInWithGooglePopup(): Promise<void> {
   }
 
   /*
-   * Whether the handle we were given is worth anything.
+   * `popup.closed` is not usable here, and no amount of checking makes it so.
    *
    * The sign-in page carries a different COOP value from this one — that is the
-   * entire point of it — and differing COOP swaps the browsing context group
-   * even between same-origin documents. The window opens and works, but the
-   * handle back to it is severed, and `closed` reads true immediately.
+   * entire point of it — and differing COOP swaps the browsing context group,
+   * severing the handle the opener was given. The trap is the timing: at the
+   * moment `window.open` returns, the window is still `about:blank` and shares
+   * this document's COOP, so it looks perfectly healthy. The swap happens when
+   * it *navigates* to the sign-in page a moment later, and `closed` then reads
+   * true for a window that is open and working.
    *
-   * Treating that as "the user closed it" is what made the app announce
-   * "Sign-in was cancelled." before anybody had touched anything. So the handle
-   * is only trusted for that if it still looks alive right after opening.
+   * Checking the handle "right after opening" therefore proves nothing, which
+   * is why that attempt still announced a cancellation the instant the popup
+   * appeared. The window reports its own liveness instead, by writing a
+   * timestamp to localStorage every second.
    */
-  const handleIsUsable = !popup.closed;
-
+  const ALIVE_KEY = 'physbox_auth_alive';
+  /** No pulse for this long means the window is gone. */
+  const ALIVE_TIMEOUT_MS = 4000;
+  /** Grace while the page is still loading and has not pulsed yet. */
+  const STARTUP_GRACE_MS = 8000;
   /** How long to wait before giving up. Long: a password and 2FA take a while. */
   const TIMEOUT_MS = 5 * 60 * 1000;
 
@@ -285,10 +293,22 @@ export function signInWithGooglePopup(): Promise<void> {
     const timer = setInterval(() => {
       if (done()) {
         finish();
-      } else if (handleIsUsable && popup.closed) {
-        finish(new Error('Sign-in was cancelled.'));
-      } else if (Date.now() - startedAt > TIMEOUT_MS) {
+        return;
+      }
+
+      const age = Date.now() - startedAt;
+      if (age > TIMEOUT_MS) {
         finish(new Error('Sign-in timed out. Please try again.'));
+        return;
+      }
+
+      // Only once the window has had time to load and start pulsing. Before
+      // that a missing heartbeat means nothing.
+      if (age < STARTUP_GRACE_MS) return;
+
+      const beat = Number(localStorage.getItem(ALIVE_KEY) ?? 0);
+      if (!beat || Date.now() - beat > ALIVE_TIMEOUT_MS) {
+        finish(new Error('Sign-in was cancelled.'));
       }
     }, 300);
   });

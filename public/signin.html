@@ -73,6 +73,65 @@
       // to show the early-access notice. Carried across because the app never
       // sees the sign-in response itself.
       var ADMIN_KEY = 'physbox_auth_is_admin';
+      // The avatar, inlined as a data URI. Fetched here because this page is
+      // not cross-origin isolated: the app is, and an <img> pointing at
+      // googleusercontent is fetched in no-cors mode, which COEP then refuses
+      // (ERR_BLOCKED_BY_RESPONSE.NotSameOriginAfterDefaultedToSameOriginByCoep).
+      // A data URI is same-origin, so none of that applies — and it also
+      // outlives Google rotating the URL.
+      var AVATAR_KEY = 'physbox_user_avatar';
+      // A pulse while this window is alive. The app cannot ask whether the
+      // window is still open: this page carries a different COOP value, which
+      // swaps the browsing context group on navigation and severs the handle
+      // the opener was given. So the window says so itself.
+      var ALIVE_KEY = 'physbox_auth_alive';
+
+      function beat() {
+        try {
+          localStorage.setItem(ALIVE_KEY, String(Date.now()));
+        } catch (e) {
+          /* storage full or blocked; the app falls back to its timeout */
+        }
+      }
+      beat();
+      var heartbeat = setInterval(beat, 1000);
+      window.addEventListener('beforeunload', function () {
+        clearInterval(heartbeat);
+        try {
+          localStorage.removeItem(ALIVE_KEY);
+        } catch (e) {
+          /* nothing useful to do */
+        }
+      });
+
+      /**
+       * Downloads the avatar and returns it as a data URI.
+       *
+       * Never rejects: an avatar is decoration, and a picture that will not
+       * load must not stop somebody signing in.
+       */
+      function inlineAvatar(url) {
+        if (!url) return Promise.resolve(null);
+        return fetch(url, { mode: 'cors', referrerPolicy: 'no-referrer' })
+          .then(function (res) {
+            if (!res.ok) throw new Error('avatar ' + res.status);
+            return res.blob();
+          })
+          .then(function (blob) {
+            // Roughly 200 kB of base64. Avatars are a few kB; anything far
+            // larger is not one, and localStorage is a small shared budget.
+            if (blob.size > 150 * 1024) throw new Error('avatar too large');
+            return new Promise(function (resolve) {
+              var reader = new FileReader();
+              reader.onload = function () { resolve(String(reader.result)); };
+              reader.onerror = function () { resolve(null); };
+              reader.readAsDataURL(blob);
+            });
+          })
+          .catch(function () {
+            return null;
+          });
+      }
 
       function apiBase() {
         var host = window.location.hostname;
@@ -102,13 +161,27 @@
             localStorage.setItem(AUTH_TOKEN_KEY, data.token);
             localStorage.setItem(USER_KEY, JSON.stringify(data.user));
             localStorage.setItem(ADMIN_KEY, data.is_admin ? '1' : '0');
-            // Always a new value, so two sign-ins in a row both raise a
-            // `storage` event — an identical value would not.
-            localStorage.setItem(HANDOFF_KEY, String(Date.now()));
-            say('Signed in. Closing…', 'ok');
-            setTimeout(function () {
-              window.close();
-            }, 600);
+
+            // The avatar is fetched before the handoff is announced, so the app
+            // never renders a profile with a picture that is still on its way.
+            return inlineAvatar(data.user && data.user.picture).then(function (dataUri) {
+              try {
+                if (dataUri) localStorage.setItem(AVATAR_KEY, dataUri);
+                else localStorage.removeItem(AVATAR_KEY);
+              } catch (e) {
+                /* over quota: the app falls back to the icon */
+              }
+              // Always a new value, so two sign-ins in a row both raise a
+              // `storage` event — an identical value would not. Written last,
+              // after everything it announces is already in place.
+              localStorage.setItem(HANDOFF_KEY, String(Date.now()));
+              clearInterval(heartbeat);
+              localStorage.removeItem(ALIVE_KEY);
+              say('Signed in. Closing…', 'ok');
+              setTimeout(function () {
+                window.close();
+              }, 600);
+            });
           })
           .catch(function (err) {
             // Left open on failure rather than closed: a window that vanishes

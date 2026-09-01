@@ -18,8 +18,27 @@ export const UserProfileButton: React.FC = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
   const [syncSummary, setSyncSummary] = useState<string | null>(null);
-  /** Set when the avatar URL will not load; the icon stands in for it. */
+  /** Set when the avatar will not load; the icon stands in for it. */
   const [avatarBroken, setAvatarBroken] = useState(false);
+  /**
+   * The avatar the sign-in window downloaded for us, as a data URI.
+   *
+   * Preferred over Google's URL because this document is cross-origin isolated:
+   * an <img> pointing straight at googleusercontent is fetched in no-cors mode,
+   * and COEP refuses it outright — that is the
+   * ERR_BLOCKED_BY_RESPONSE.NotSameOriginAfterDefaultedToSameOriginByCoep in
+   * the console. A data URI is same-origin, so none of it applies, and it
+   * survives Google rotating the URL.
+   */
+  const [avatarData, setAvatarData] = useState<string | null>(
+    () => localStorage.getItem('physbox_user_avatar')
+  );
+  /**
+   * `crossOrigin` matters on the fallback and is not decoration: it is what
+   * makes the request CORS-mode, which is the only way COEP will accept a
+   * cross-origin image. Google answers with `access-control-allow-origin: *`.
+   */
+  const avatarSrc = avatarData ?? user?.picture ?? null;
 
   const dropdownRef = useRef<HTMLDivElement>(null);
 
@@ -99,6 +118,7 @@ export const UserProfileButton: React.FC = () => {
       const signedIn = getStoredUser();
       if (!signedIn) return;
       setUser(signedIn);
+      setAvatarData(localStorage.getItem('physbox_user_avatar'));
       setAvatarBroken(false);
       setLoginError(null);
       setShowLoginModal(false);
@@ -116,6 +136,8 @@ export const UserProfileButton: React.FC = () => {
       if (!signedIn) throw new Error('Sign in did not complete.');
 
       setUser(signedIn);
+      setAvatarData(localStorage.getItem('physbox_user_avatar'));
+      setAvatarBroken(false);
       setShowLoginModal(false);
       setDropdownOpen(false);
       await pullAccountState();
@@ -131,6 +153,8 @@ export const UserProfileButton: React.FC = () => {
 
   const handleLogout = () => {
     clearStoredAuth();
+    setAvatarData(null);
+    setAvatarBroken(false);
     // Otherwise Google can hand the same account straight back on the next
     // visit, and signing out looks like it did nothing.
     disableGoogleAutoSelect();
@@ -148,10 +172,11 @@ export const UserProfileButton: React.FC = () => {
         className="relative flex items-center justify-center w-8 h-8 rounded-full border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors focus:outline-none flex-shrink-0 cursor-pointer shadow-xs"
         title={user ? `Account (${user.email})` : 'Sign In / Early Access'}
       >
-        {user?.picture && !avatarBroken ? (
+        {avatarSrc && !avatarBroken ? (
           <img
-            src={user.picture}
+            src={avatarSrc}
             alt="Avatar"
+            crossOrigin={avatarData ? undefined : 'anonymous'}
             /*
              * `no-referrer` and a fallback, because a Google avatar fails in two
              * ways that both end as a broken-image glyph. It 403s when the
@@ -188,10 +213,11 @@ export const UserProfileButton: React.FC = () => {
               {/* Logged-In Profile Header */}
               <div className="p-2.5 rounded-lg bg-slate-50 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800">
                 <div className="flex items-center gap-3">
-                  {user.picture && !avatarBroken ? (
+                  {avatarSrc && !avatarBroken ? (
                     <img
-                      src={user.picture}
+                      src={avatarSrc}
                       alt="Avatar"
+                      crossOrigin={avatarData ? undefined : 'anonymous'}
                       referrerPolicy="no-referrer"
                       className="w-8 h-8 rounded-full border border-cyan-500/30"
                       onError={() => setAvatarBroken(true)}
