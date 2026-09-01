@@ -16,6 +16,8 @@
  * ever reached the server.
  */
 
+import { getStoredAuthToken } from './apiClient';
+
 const GSI_SRC = 'https://accounts.google.com/gsi/client';
 
 interface GoogleCredentialResponse {
@@ -185,4 +187,78 @@ export function disableGoogleAutoSelect(): void {
   } catch {
     // Nothing to disable if the script never loaded.
   }
+}
+
+// ---------------------------------------------------------------------------
+// Signing in from a cross-origin isolated page
+// ---------------------------------------------------------------------------
+
+/** Where the popup leaves the finished session; see `public/signin.html`. */
+const HANDOFF_KEY = 'physbox_auth_handoff';
+
+/**
+ * Signs in through `public/signin.html`, in a window of its own.
+ *
+ * The app sends `Cross-Origin-Opener-Policy: same-origin` — that is what earns
+ * it `SharedArrayBuffer`, and what lets the physics worker run on shared memory
+ * rather than copying a snapshot of the world every frame. The same header
+ * severs `window.opener` for a cross-origin popup, so Google's sign-in window
+ * came up blank: its script had nothing to post the credential back to.
+ *
+ * Both requirements cannot hold in one document, so they are met in two. The
+ * sign-in page is served without the isolation headers, does the ordinary
+ * Google flow there, and leaves the session in `localStorage` — shared by every
+ * same-origin document whether isolated or not, and needing no window handle.
+ *
+ * Resolves when the session lands, rejects if the window is closed first.
+ */
+export function signInWithGooglePopup(): Promise<void> {
+  const clientId = getGoogleClientId();
+  if (!clientId) {
+    return Promise.reject(
+      new Error('Google sign-in is not configured for this build (VITE_GOOGLE_CLIENT_ID is unset).')
+    );
+  }
+
+  const url = `/signin.html?client_id=${encodeURIComponent(clientId)}`;
+  const popup = window.open(url, 'physbox-signin', 'width=460,height=620,menubar=no,toolbar=no');
+  if (!popup) {
+    return Promise.reject(new Error('Your browser blocked the sign-in window. Allow pop-ups for this site and try again.'));
+  }
+
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+
+    const finish = (err?: Error) => {
+      if (settled) return;
+      settled = true;
+      window.removeEventListener('storage', onStorage);
+      clearInterval(closedTimer);
+      if (err) reject(err);
+      else resolve();
+    };
+
+    // `storage` fires in *other* same-origin documents, which is exactly what
+    // the popup is. The key it writes is a timestamp, so a second sign-in in
+    // the same session still raises an event.
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === HANDOFF_KEY) finish();
+    };
+    window.addEventListener('storage', onStorage);
+
+    /*
+     * Watch for the window going away.
+     *
+     * Two jobs. It reports a sign-in the user abandoned, rather than leaving
+     * the modal waiting forever. And it covers the case where the event was
+     * missed — the popup closes itself immediately after writing, and a
+     * `storage` listener attached in a background tab is not guaranteed to have
+     * run first, so the token is checked directly before calling it a failure.
+     */
+    const closedTimer = setInterval(() => {
+      if (!popup.closed) return;
+      if (getStoredAuthToken()) finish();
+      else finish(new Error('Sign-in was cancelled.'));
+    }, 400);
+  });
 }

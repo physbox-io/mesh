@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sign in — physbox</title>
+    <!--
+      Sign-in lives on its own page, and that is the whole point of it.
+
+      The app is cross-origin isolated: it sends `Cross-Origin-Opener-Policy:
+      same-origin`, which is what earns it `SharedArrayBuffer` and lets the
+      physics worker run on shared memory instead of copying a snapshot every
+      frame. That same header severs `window.opener` for any cross-origin popup
+      — so Google's sign-in window came up blank with a null `postMessage`,
+      because it had nothing to talk back to.
+
+      The two requirements are irreconcilable in one document. So they are put
+      in two: this page is served WITHOUT the isolation headers (see the
+      `signin.html` cases in vite.config.ts and nginx.conf), Google's popup
+      works here exactly as it does in Etch and Volt, and the session it
+      produces is handed to the app through `localStorage` — which is shared by
+      every same-origin document regardless of isolation, and needs no window
+      handle at all.
+
+      The alternative was giving up cross-origin isolation across the whole app
+      to make a login button work, which is a bad trade in a simulator.
+    -->
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+        background: #0f172a;
+        color: #e2e8f0;
+      }
+      .card { text-align: center; padding: 2rem; max-width: 22rem; }
+      h1 { font-size: 1rem; font-weight: 700; margin: 0 0 0.25rem; }
+      p { font-size: 0.8rem; line-height: 1.5; color: #94a3b8; margin: 0 0 1.5rem; }
+      #button { display: flex; justify-content: center; min-height: 44px; }
+      #status { font-size: 0.8rem; margin-top: 1rem; min-height: 1.2em; }
+      .err { color: #f87171; }
+      .ok { color: #4ade80; }
+      @media (prefers-color-scheme: light) {
+        body { background: #f8fafc; color: #0f172a; }
+        p { color: #475569; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>Sign in to physbox</h1>
+      <p>This window closes itself once you are signed in.</p>
+      <div id="button"></div>
+      <div id="status"></div>
+    </div>
+
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
+    <script>
+      // Kept in step with utils/apiClient.ts and utils/googleAuth.ts. They are
+      // not importable here: this page is deliberately outside the bundle so it
+      // can be served with different headers from the app.
+      var AUTH_TOKEN_KEY = 'physbox_auth_token';
+      var USER_KEY = 'physbox_user_profile';
+      // The signal the app waits on. Written last, after the token and profile
+      // are already in place, so a listener that wakes on it never reads a
+      // half-written session.
+      var HANDOFF_KEY = 'physbox_auth_handoff';
+      // Whether this account is an admin, which the app uses to decide whether
+      // to show the early-access notice. Carried across because the app never
+      // sees the sign-in response itself.
+      var ADMIN_KEY = 'physbox_auth_is_admin';
+
+      function apiBase() {
+        var host = window.location.hostname;
+        if (host === 'localhost' || host === '127.0.0.1') return 'http://localhost:3000';
+        return 'https://api.physbox.io';
+      }
+
+      function say(text, cls) {
+        var el = document.getElementById('status');
+        el.textContent = text;
+        el.className = cls || '';
+      }
+
+      function onCredential(credential) {
+        say('Signing in…');
+        fetch(apiBase() + '/api/auth/google', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ credential: credential }),
+        })
+          .then(function (res) {
+            if (!res.ok) throw new Error('Sign-in was refused (HTTP ' + res.status + ').');
+            return res.json();
+          })
+          .then(function (data) {
+            if (!data.token || !data.user) throw new Error('Sign-in did not return a session.');
+            localStorage.setItem(AUTH_TOKEN_KEY, data.token);
+            localStorage.setItem(USER_KEY, JSON.stringify(data.user));
+            localStorage.setItem(ADMIN_KEY, data.is_admin ? '1' : '0');
+            // Always a new value, so two sign-ins in a row both raise a
+            // `storage` event — an identical value would not.
+            localStorage.setItem(HANDOFF_KEY, String(Date.now()));
+            say('Signed in. Closing…', 'ok');
+            setTimeout(function () {
+              window.close();
+            }, 600);
+          })
+          .catch(function (err) {
+            // Left open on failure rather than closed: a window that vanishes
+            // having done nothing is indistinguishable from one that worked.
+            say(err.message || 'Sign-in failed.', 'err');
+          });
+      }
+
+      function start() {
+        var id = window.google && window.google.accounts && window.google.accounts.id;
+        if (!id) {
+          say('Could not load Google sign-in. Check your connection.', 'err');
+          return;
+        }
+        var params = new URLSearchParams(window.location.search);
+        var clientId = params.get('client_id');
+        if (!clientId) {
+          say('Google sign-in is not configured for this build.', 'err');
+          return;
+        }
+
+        id.initialize({
+          client_id: clientId,
+          callback: function (response) {
+            if (response && response.credential) onCredential(response.credential);
+            else say('Google did not return a credential. Please try again.', 'err');
+          },
+          auto_select: false,
+          cancel_on_tap_outside: true,
+        });
+        id.renderButton(document.getElementById('button'), {
+          type: 'standard',
+          theme: 'filled_black',
+          size: 'large',
+          text: 'signin_with',
+          shape: 'pill',
+          logo_alignment: 'left',
+          width: 280,
+        });
+      }
+
+      // The GSI script is async; wait for it rather than racing it.
+      var waited = 0;
+      var timer = setInterval(function () {
+        if (window.google && window.google.accounts && window.google.accounts.id) {
+          clearInterval(timer);
+          start();
+        } else if ((waited += 100) > 10000) {
+          clearInterval(timer);
+          say('Could not load Google sign-in. Check your connection.', 'err');
+        }
+      }, 100);
+    </script>
+  </body>
+</html>

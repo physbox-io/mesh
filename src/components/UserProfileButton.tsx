@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import ReactDOM from 'react-dom';
 import { User, LogOut, Radio, Sparkles, ShieldCheck, CheckCircle } from 'lucide-react';
-import { getStoredUser, getStoredAuthToken, clearStoredAuth, loginWithGoogle, fetchCurrentUser } from '../utils/apiClient';
+import { getStoredUser, getStoredAuthToken, clearStoredAuth, fetchCurrentUser } from '../utils/apiClient';
 import type { PhysBoxUser } from '../utils/apiClient';
-import { renderGoogleSignInButton, disableGoogleAutoSelect } from '../utils/googleAuth';
+import { signInWithGooglePopup, disableGoogleAutoSelect } from '../utils/googleAuth';
 import { pullCloudState } from '../utils/cloudSync';
 import { mergePulledPresets } from '../utils/userPresets';
 import { RemoteMachiningModal } from './RemoteMachiningModal';
@@ -20,7 +20,6 @@ export const UserProfileButton: React.FC = () => {
   const [syncSummary, setSyncSummary] = useState<string | null>(null);
 
   const dropdownRef = useRef<HTMLDivElement>(null);
-  const googleButtonRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     fetchCurrentUser().then((u) => {
@@ -63,29 +62,6 @@ export const UserProfileButton: React.FC = () => {
     }
   }, []);
 
-  const handleCredential = React.useCallback(
-    async (credential: string) => {
-      setIsLoading(true);
-      setLoginError(null);
-      try {
-        const res = await loginWithGoogle(credential);
-        setUser(res.user);
-        setShowLoginModal(false);
-        setDropdownOpen(false);
-        await pullAccountState();
-        if (!res.is_admin) {
-          setShowGuestModal(true);
-        }
-      } catch (err) {
-        console.error('Sign in failed:', err);
-        setLoginError(err instanceof Error ? err.message : 'Sign in failed. Please try again.');
-      } finally {
-        setIsLoading(false);
-      }
-    },
-    [pullAccountState]
-  );
-
   useEffect(() => {
     // The rule sees a setState reachable from an effect body, but every one of
     // them is behind an await on a network round-trip — this is a subscription
@@ -98,26 +74,35 @@ export const UserProfileButton: React.FC = () => {
    * Google renders its own button, so it can only be drawn once the modal's
    * container is actually mounted.
    */
-  useEffect(() => {
-    if (!showLoginModal || !googleButtonRef.current) return;
-    let cancelled = false;
+  /**
+   * Signs in through the popup page, and picks up the session it leaves behind.
+   *
+   * The credential exchange happens over there — see `signInWithGooglePopup` —
+   * because this document is cross-origin isolated and a popup opened from it
+   * cannot talk back. What is left to do here is what the app cares about: the
+   * profile, the cloud pull, and the early-access notice.
+   */
+  const handleSignIn = React.useCallback(async () => {
+    setIsLoading(true);
+    setLoginError(null);
+    try {
+      await signInWithGooglePopup();
+      const signedIn = getStoredUser();
+      if (!signedIn) throw new Error('Sign in did not complete.');
 
-    renderGoogleSignInButton(
-      googleButtonRef.current,
-      (credential) => {
-        if (!cancelled) void handleCredential(credential);
-      },
-      (message) => {
-        if (!cancelled) setLoginError(message);
+      setUser(signedIn);
+      setShowLoginModal(false);
+      setDropdownOpen(false);
+      await pullAccountState();
+      if (localStorage.getItem('physbox_auth_is_admin') !== '1') {
+        setShowGuestModal(true);
       }
-    ).catch((err) => {
-      if (!cancelled) setLoginError(err instanceof Error ? err.message : 'Could not load Google sign-in.');
-    });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [showLoginModal, handleCredential]);
+    } catch (err) {
+      setLoginError(err instanceof Error ? err.message : 'Sign in failed. Please try again.');
+    } finally {
+      setIsLoading(false);
+    }
+  }, [pullAccountState]);
 
   const handleLogout = () => {
     clearStoredAuth();
@@ -280,11 +265,26 @@ export const UserProfileButton: React.FC = () => {
                   {loginError}
                 </div>
               )}
-              {/* Google draws its own button in here — the credential it
-                  produces is the only thing the API accepts, so there is
-                  deliberately no email field to type into. */}
+              {/* Opens the sign-in window rather than drawing Google's button
+                  here. This document is cross-origin isolated, and a popup it
+                  opens cannot talk back to it — Google's own button would
+                  produce a blank window that never returns a credential. See
+                  `signInWithGooglePopup`. There is deliberately no email field:
+                  a Google-signed token is the only thing the API accepts. */}
               <div className="flex justify-center pt-1">
-                <div ref={googleButtonRef} />
+                <button
+                  onClick={() => void handleSignIn()}
+                  disabled={isLoading}
+                  className="flex items-center gap-2 px-5 py-2.5 rounded-full bg-white dark:bg-slate-100 hover:bg-slate-50 dark:hover:bg-white border border-slate-300 text-slate-800 text-sm font-semibold shadow-sm disabled:opacity-50 cursor-pointer transition-colors"
+                >
+                  <svg className="w-4 h-4" viewBox="0 0 18 18" aria-hidden="true">
+                    <path fill="#4285F4" d="M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84a4.14 4.14 0 0 1-1.8 2.72v2.26h2.91c1.7-1.57 2.69-3.88 2.69-6.62z" />
+                    <path fill="#34A853" d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.91-2.26c-.81.54-1.84.86-3.05.86-2.35 0-4.34-1.58-5.05-3.71H.96v2.33A9 9 0 0 0 9 18z" />
+                    <path fill="#FBBC05" d="M3.95 10.71a5.41 5.41 0 0 1 0-3.42V4.96H.96a9 9 0 0 0 0 8.08l2.99-2.33z" />
+                    <path fill="#EA4335" d="M9 3.58c1.32 0 2.51.45 3.44 1.35l2.58-2.59C13.46.89 11.43 0 9 0A9 9 0 0 0 .96 4.96l2.99 2.33C4.66 5.16 6.65 3.58 9 3.58z" />
+                  </svg>
+                  <span>Sign in with Google</span>
+                </button>
               </div>
               {isLoading && (
                 <p className="text-center text-xs text-slate-500 dark:text-slate-400">Signing in…</p>
