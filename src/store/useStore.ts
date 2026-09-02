@@ -1317,6 +1317,19 @@ export const useStore = create<PhysicsState>()((set, get) => ({
 
   updateNodeGeom: (id, updates, geomIndex) => {
     get().recordInteraction('node-geom');
+    /*
+     * Whether this edit changes the shape, or only how it behaves on contact.
+     *
+     * `recompile`'s third argument does two things: it skips the 50ms debounce,
+     * and it rebuilds without carrying the simulation state over. Both are right
+     * for a change of geometry — the old state may not even be valid against the
+     * new model. Both are wrong for a material property: dragging the contact
+     * stiffness slider rebuilt MuJoCo on every pixel of travel and threw the
+     * world back to its start each time, which is what made those sliders feel
+     * like they were fighting the mouse.
+     */
+    const STRUCTURAL = ['size', 'vertices', 'faces', 'renderVertices', 'type', 'pos', 'euler', 'quat', 'csg'] as const;
+    const structural = STRUCTURAL.some(k => (updates as Record<string, unknown>)[k] !== undefined);
     const newScene = cloneSceneGraph(get().sceneGraph);
     const traverse = (nodes: any[]) => {
       if (!nodes) return false; for (const node of nodes) {
@@ -1385,7 +1398,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     };
     traverse(newScene.nodes);
     set({ sceneGraph: newScene });
-    get().recompile(newScene, undefined, true);
+    get().recompile(newScene, undefined, structural);
   },
 
   updateGearTeeth: (id, teeth) => {
@@ -2008,25 +2021,30 @@ export const useStore = create<PhysicsState>()((set, get) => ({
       } : {}),
       ...(type === 'pyramid' ? {
         isPyramid: true,
-        width: 0.5,
-        depth: 0.5,
-        height: 0.5
+        // These must match the mesh built above. They are what the properties
+        // panel shows and what a slider regenerates from, so a disagreement
+        // makes the shape jump the first time one is touched — and a shape that
+        // grows while its body stays put ends up inside the floor, which MuJoCo
+        // resolves by ejecting it through.
+        width: 0.2,
+        depth: 0.2,
+        height: 0.2
       } : {}),
       ...(type === 'cone' ? {
         isCone: true,
-        radius: 0.3,
-        height: 0.6
+        radius: 0.1,
+        height: 0.2
       } : {}),
       ...(type === 'torus' ? {
         isTorus: true,
-        majorRadius: 0.4,
-        tubeRadius: 0.1
+        majorRadius: 0.15,
+        tubeRadius: 0.04
       } : {}),
       ...(type === 'tube' ? {
         isTube: true,
-        innerRadius: 0.2,
-        outerRadius: 0.3,
-        height: 0.5
+        innerRadius: 0.06,
+        outerRadius: 0.1,
+        height: 0.15
       } : {}),
       ...(type === 'pulley_wheel' ? {
         isPulleyWheel: true,
