@@ -213,6 +213,13 @@ export const MachineConfigModal: React.FC<{
                       value={selectedDevice}
                       onChange={(deviceId) => setSelectedDevice(deviceId)}
                       disabled={machineState.connected}
+                      onPaired={(deviceId) => {
+                        // Straight on to the machine. Having just proved you are
+                        // standing in front of it, being asked to press Connect
+                        // is a step with nothing behind it.
+                        localStorage.setItem('physbox.cloudDeviceId', deviceId);
+                        void webSerialManager.connect({ kind: 'cloud', deviceId });
+                      }}
                     />
                   </div>
                 )}
