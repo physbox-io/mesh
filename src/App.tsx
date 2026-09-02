@@ -1,7 +1,6 @@
 
 import { Canvas, useThree } from '@react-three/fiber';
-import { OrbitControls, Grid } from '@react-three/drei';
-import SculptSurface from './components/SculptSurface';
+import { Grid } from '@react-three/drei';
 import { SCULPT_BASES, type SculptBaseId } from './utils/sculptBases';
 import { downloadMeshGeomStl } from './utils/meshStlExport';
 import SculptPanel from './components/SculptPanel';
@@ -10,8 +9,6 @@ import { useMuJoCoInit } from './hooks/useMuJoCo';
 import { useMCPBridge } from './hooks/useMCPBridge';
 import { useCoarsePointer } from './hooks/useCoarsePointer';
 import { useStore, scaleMeshGeoms, getPhysicsWorkerClient, cloneSceneGraph } from './store/useStore';
-import { useVertexPaint } from './hooks/useVertexPaint';
-import { buildPaintGeometry, isPaintable, paintArgsFromSize, paintResolution, type PaintLayer } from './utils/vertexPaint';
 import type { SceneGraph, SceneNode } from './types/scene';
 import { Play, Square, SlidersHorizontal, Settings, Box, Circle, X, RotateCcw, Trash2, Layers, CircleDot, Zap, Info, Triangle, Disc, Code, Menu, Shapes, Minimize2, Save, Download, Upload, Undo, Redo, FileText, ChevronDown, ChevronUp, PanelRight, Edit3, Printer, Scissors, Sparkles, Sun, Moon, Pyramid, Cone, Donut, ChartSpline, Mountain, Paintbrush, Grid3x3, Package, Image as ImageIcon } from 'lucide-react';
 import { useRef, useMemo, useEffect, useCallback, useState, type RefObject } from 'react';
@@ -22,8 +19,8 @@ import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js';
 import { exportThreeMf, type ThreeMfMesh } from './utils/threeMfExporter';
 import { SimplifyModifier } from 'three/examples/jsm/modifiers/SimplifyModifier.js';
 import { loadCompiler, compileSCAD, isCompilerReady } from './utils/openscad';
-import { sampleCatmullRom, getStickyRotation } from './utils/geom';
-import { resolveCsgGeoms, csgSourceGeoms, csgHashOf, positiveBounds, geomMatrixOf, clipSegmentsToBox, CSG_DEFAULT_SECTORS } from './utils/csg';
+import { getStickyRotation } from './utils/geom';
+import { csgSourceGeoms, csgHashOf, CSG_DEFAULT_SECTORS } from './utils/csg';
 import { useCsgAutoCompile } from './hooks/useCsgCompile';
 import { PRESETS } from './presets/presetScenes';
 import { makePresetNoteCard } from './utils/noteCards';
@@ -33,11 +30,16 @@ import { ExportLaserCutModal } from './components/ExportLaserCutModal';
 import { ExportContourSliceModal } from './components/ExportContourSliceModal';
 import { ExportReliefCarveModal } from './components/ExportReliefCarveModal';
 import { ExportMoldModal } from './components/ExportMoldModal';
+import { PulleyRopeMarkers } from './components/scene/PulleyRopes';
+import { SliderValue } from './components/SliderValue';
+import {
+  PaintStrokeController, CameraController, DragInteractionController,
+  SceneCapture, SceneVisuals,
+} from './components/scene/SceneLayer';
 import { BottomStatusBar } from './components/BottomStatusBar';
 import { MachineConfigModal } from './components/MachineConfigModal';
 import { UserProfileButton } from './components/UserProfileButton';
 import { MIN_MAX_TOKENS, MAX_MAX_TOKENS, readMaxTokens, writeMaxTokens } from './utils/llmSettings';
-import { PrintAnalysisOverlay } from './components/PrintAnalysisOverlay';
 import { PrintAnalysisHUD } from './components/PrintAnalysisHUD';
 import { createHeatSetBossNode, createHexNutTrapNode, createBearingPocketNode, createDShaftHubNode, createCounterboreHoleNode } from './utils/hardwareComponents';
 import { pushGlobalParameter } from './utils/llmSettings';
@@ -332,116 +334,6 @@ const AxisLegendDrawer = ({ externalRef }: { externalRef: RefObject<HTMLCanvasEl
   return null;
 };
 
-// Camera Controller
-/**
- * Switches the orbit controls off and on from inside a pointer handler.
- *
- * Dragging something in the scene already disables the controls through their
- * `enabled` prop, but that only takes effect on the next render — fine for a
- * mouse, whose left button does nothing to the camera in this app, and not
- * fine for a finger, whose single-touch gesture *is* the orbit gesture. Called
- * during the pointerdown itself, this makes the controls see `enabled ===
- * false` when their own listener runs a moment later, so the body drags
- * instead of the camera swinging.
- *
- * Reads through R3F's `get()` rather than holding the controls in a render
- * value, so the instance is always the live one (they register themselves via
- * `makeDefault` after the scene's meshes have already mounted).
- */
-const useOrbitEnable = () => {
-  const getThree = useThree((state) => state.get);
-  return useCallback((on: boolean) => {
-    const controls = getThree().controls as { enabled?: boolean } | null;
-    if (controls) controls.enabled = on;
-  }, [getThree]);
-};
-
-/**
- * Ends a paint stroke wherever it is let go.
- *
- * A stroke starts on a body's own pointerdown, but it can end anywhere — over
- * empty space, over a panel, or outside the window entirely. Left open it would
- * keep colouring every body the cursor merely passed over, with the camera
- * still frozen from when the stroke began.
- */
-const PaintStrokeController = () => {
-  const paintMode = useStore(state => state.paintMode);
-  const setOrbitEnabled = useOrbitEnable();
-
-  useEffect(() => {
-    const end = () => {
-      if (!paintStrokeActive) return;
-      paintStrokeActive = false;
-      setOrbitEnabled(true);
-    };
-    // Leaving paint mode mid-stroke is the same as letting go of it.
-    if (!paintMode) end();
-
-    window.addEventListener('pointerup', end);
-    window.addEventListener('pointercancel', end);
-    // A window that loses focus mid-stroke never sees the pointerup, and the
-    // camera would stay dead with nothing on screen explaining why.
-    window.addEventListener('blur', end);
-    return () => {
-      window.removeEventListener('pointerup', end);
-      window.removeEventListener('pointercancel', end);
-      window.removeEventListener('blur', end);
-      end();
-    };
-  }, [paintMode, setOrbitEnabled]);
-
-  return null;
-};
-
-const CameraController = () => {
-  const { camera } = useThree();
-  const cameraView = useStore(state => state.cameraView);
-  const controlsRef = useRef<any>(null);
-  
-  useEffect(() => {
-    if (cameraView === 'topDown') {
-      camera.position.set(0, 1.8, 0);
-      camera.up.set(0, 0, -1);
-      camera.lookAt(0, 0, 0);
-      if (controlsRef.current) {
-        controlsRef.current.target.set(0, 0, 0);
-        controlsRef.current.update();
-      }
-    } else {
-      camera.position.set(0.8, 0.6, 0.8);
-      camera.up.set(0, 1, 0);
-      camera.lookAt(0, 0.15, 0);
-      if (controlsRef.current) {
-        controlsRef.current.target.set(0, 0.15, 0);
-        controlsRef.current.update();
-      }
-    }
-    camera.updateProjectionMatrix();
-  }, [cameraView, camera]);
-
-  // Explicit pose from the MCP SET_CAMERA bridge command. The store held this
-  // field (and GET_CAMERA reported it) but nothing ever applied it to the
-  // actual camera. Values are MuJoCo world space; convert Z-up→Y-up here:
-  // (x, y, z) → (x, z, -y).
-  const cameraOverride = useStore(state => state.cameraOverride);
-  useEffect(() => {
-    if (!cameraOverride) return;
-    const [px, py, pz] = cameraOverride.position;
-    const [tx, ty, tz] = cameraOverride.target;
-    camera.up.set(0, 1, 0);
-    camera.position.set(px, pz, -py);
-    if (controlsRef.current) {
-      controlsRef.current.target.set(tx, tz, -ty);
-      controlsRef.current.update();
-    } else {
-      camera.lookAt(tx, tz, -ty);
-    }
-    camera.updateProjectionMatrix();
-  }, [cameraOverride, camera]);
-
-  const draggedNodeId = useStore((state) => state.draggedNodeId);
-  return <OrbitControls enabled={draggedNodeId === null} ref={controlsRef} makeDefault enableDamping dampingFactor={0.1} mouseButtons={{ LEFT: 99 as any, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE }} />;
-};
 
 // Drop Handler for precise spawning & external file imports (.scad, .stl, .json)
 const DropHandler = ({ addComponent, onImportFile, onImportImageFile }: {
@@ -541,1436 +433,6 @@ const DropHandler = ({ addComponent, onImportFile, onImportImageFile }: {
 };
 
 
-const WedgeGeometry = ({ width = 2.0, depth = 1.0, height = 0.5 }: { width: number; depth: number; height: number }) => {
-  const vertices = useMemo(() => {
-    const halfW = width / 2;
-    const halfD = depth / 2;
-
-    // Three.js Y-up space (Y = UP, Z = DEPTH, X = RIGHT):
-    return new Float32Array([
-      -halfW, height, -halfD, // 0: back-left top
-      -halfW, height,  halfD, // 1: back-right top
-       halfW, 0,      -halfD, // 2: toe-left bottom
-       halfW, 0,       halfD, // 3: toe-right bottom
-      -halfW, 0,      -halfD, // 4: back-left bottom
-      -halfW, 0,       halfD, // 5: back-right bottom
-    ]);
-  }, [width, depth, height]);
-
-  const indices = useMemo(() => {
-    // Must match generateWedgeMeshData's faces exactly — this is the render copy
-    // of the same prism, and computeVertexNormals() below derives its normals
-    // from this winding.
-    return new Uint16Array([
-      0, 1, 3,  0, 3, 2, // Slanted top face
-      4, 2, 3,  4, 3, 5, // Bottom flat face
-      4, 5, 1,  4, 1, 0, // Back vertical wall
-      4, 0, 2,           // Front triangle side (y = -halfD)
-      5, 3, 1            // Back triangle side (y = +halfD)
-    ]);
-  }, []);
-
-  const geomRef = useRef<THREE.BufferGeometry>(null);
-  useEffect(() => {
-    if (geomRef.current) {
-      geomRef.current.computeVertexNormals();
-    }
-  }, [vertices]);
-
-  return (
-    <bufferGeometry ref={geomRef}>
-      <bufferAttribute
-        attach="attributes-position"
-        args={[vertices, 3]}
-      />
-      <bufferAttribute
-        attach="index"
-        args={[indices, 1]}
-      />
-    </bufferGeometry>
-  );
-};
-
-
-/**
- * Whether a paint stroke is currently down.
- *
- * Module scope rather than store state on purpose: every geom in the scene
- * needs to see it, it changes twice per stroke, and nothing renders from it —
- * putting it in the store would re-render every body in the viewport at the
- * start and end of every stroke to no visible effect. PaintStrokeController
- * owns clearing it.
- */
-let paintStrokeActive = false;
-
-const beginPaintStroke = () => { paintStrokeActive = true; };
-
-// Dynamic Geom Renderer
-const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, selectedNodeId, setSelectedNodeId, vertices, faces, dynamic: isDynamic, providedGeomId, staticBody }: any) => {
-  const meshRef = useRef<THREE.Group>(null);
-  const isPlaying = useStore(state => state.isPlaying);
-  
-  const node = useStore(state => {
-    if (!nodeId) return null;
-    const find = (nodes: any[]): any => {
-      if (!nodes) return null;
-      for (const n of nodes) {
-        if (n.id === nodeId) return n;
-        const c = find(n.children);
-        if (c) return c;
-      }
-      return null;
-    };
-    return find(state.sceneGraph.nodes);
-  });
-  
-  const geomId = useMemo(() => {
-    if (providedGeomId !== undefined) return providedGeomId;
-    if (!model || !mujoco) return -1;
-    const id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM.value, name);
-    return id;
-  }, [providedGeomId, model, mujoco, name]);
-
-  const geometryArgs = useMemo(() => {
-    if (geomId === -1 || !model) return [];
-    try {
-      const ngeom = model.ngeom;
-      if (geomId >= ngeom) return [];
-
-      const r = model.geom_size[geomId * 3];
-      const hl = model.geom_size[geomId * 3 + 1];
-      const hz = model.geom_size[geomId * 3 + 2];
-      
-      if (type === 'sphere') return [r, 32, 32];
-      if (type === 'box') return [r * 2, hl * 2, hz * 2];
-      if (type === 'capsule') return [r, hl * 2, 4, 16];
-      if (type === 'cylinder') return [r, hl];
-      if (type === 'ellipsoid') return [r, hl, hz];
-      return [r];
-    } catch (e) {
-      console.error(`[DynamicGeom ${name}] geometryArgs Error:`, e);
-      return [];
-    }
-  }, [geomId, type, model]);
-
-  const rotationMatrix = useMemo(() => new THREE.Matrix4(), []);
-  const isSelected = selectedNodeId === nodeId;
-
-  // A geom's rgba carries an alpha, and until now every material dropped it and
-  // drew fully opaque. A jar authored at 0.35 alpha then hides the very thing it
-  // exists to contain — a glass jar rendered as a solid white tub with whatever
-  // was inside it sealed invisibly away. depthWrite goes off with it, so what
-  // sits behind a translucent geom still reaches the frame buffer instead of
-  // being depth-rejected, and two coplanar translucent faces blend rather than
-  // z-fighting into stripes.
-  // Defaulted, not indexed blind: this hook runs for every geom, including the
-  // ones the early returns below drop, and a geom without an rgba would take
-  // the whole canvas down with it.
-  const alpha = color?.[3] ?? 1;
-  const wireframe = useStore(state => state.wireframe);
-
-  // --- Painting -------------------------------------------------------------
-  // A geom holds paint on its vertices, so it has to be drawn from a surface
-  // dense enough to carry it (see utils/vertexPaint). That denser surface is
-  // built while the brush is out, and kept from then on by anything that has
-  // been painted — a body nobody has painted goes straight back to six quads
-  // the moment the brush is put down.
-  const paintMode = useStore(state => state.paintMode);
-  const geomEntry = useMemo(
-    () => node?.geoms?.find((g: any) => g.name === name),
-    [node, name]
-  );
-  const paintLayer = geomEntry?.paint as PaintLayer | undefined;
-  const showPaint = !!nodeId && isPaintable(type, !!node?.isWedge) && (paintMode || !!paintLayer);
-  const materialProps = useMemo(() => {
-    const [r, g, b] = color ?? [0.8, 0.8, 0.8];
-    return {
-      color: new THREE.Color(r, g, b),
-      emissive: isSelected ? '#3b82f6' : '#000',
-      emissiveIntensity: isSelected ? 0.2 : 0,
-      // Every geom in the scene funnels through this one memo, so the whole
-      // viewport switches to wireframe from a single flag. Note this is the
-      // material's own wireframe — every triangle of the tessellation, the
-      // diagonals included — which is the point here: it is a view of the mesh
-      // the machine sees, not the tidied silhouette CsgGhostOutline draws.
-      wireframe,
-      // Painted surfaces carry their colour per vertex, and Three multiplies the
-      // material's colour into it — so the material goes white and the body's
-      // own colour is mixed into the attribute instead. That is what keeps the
-      // base colour live: change it in the properties panel and the paint stays
-      // exactly where it is, over the new colour.
-      ...(showPaint ? { vertexColors: true, color: new THREE.Color(1, 1, 1) } : {}),
-      ...(alpha < 1 ? { transparent: true, opacity: alpha, depthWrite: false } : {}),
-    };
-  }, [color, isSelected, alpha, wireframe, showPaint]);
-
-  // Handlers for physical spring dragging, mapped from Three.js coordinates to MuJoCo coordinate space
-  const setOrbitEnabled = useOrbitEnable();
-  const dragHandlers = useMemo(() => ({
-    onClick: (e: any) => {
-      e.stopPropagation();
-      // A paint dab is not a selection: swapping the properties panel out from
-      // under every body you colour would make a colouring pass unusable.
-      if (useStore.getState().paintMode) return;
-      setSelectedNodeId(nodeId);
-    },
-    onPointerDown: (e: any) => {
-      if (isPlaying) {
-        e.stopPropagation();
-        setOrbitEnabled(false);
-        useStore.getState().setDraggedNodeId(nodeId);
-        useStore.getState().setDragDistance(e.distance);
-        
-        const pt = e.point;
-        // Transform standard Three.js world coordinates (Y-up) to MuJoCo coordinate space (Z-up)
-        useStore.getState().setDragTarget({ x: pt.x, y: -pt.z, z: pt.y });
-        const canvasEl = e.nativeEvent?.target as HTMLElement;
-        if (canvasEl && typeof canvasEl.setPointerCapture === 'function') {
-          try {
-            canvasEl.setPointerCapture(e.pointerId);
-          } catch (err) {}
-        }
-      }
-    },
-    onPointerUp: (e: any) => {
-      if (useStore.getState().draggedNodeId === nodeId) {
-        e.stopPropagation();
-        const canvasEl = e.nativeEvent?.target as HTMLElement;
-        if (canvasEl && typeof canvasEl.releasePointerCapture === 'function') {
-          try {
-            canvasEl.releasePointerCapture(e.pointerId);
-          } catch (err) {}
-        }
-        useStore.getState().setDraggedNodeId(null);
-        useStore.getState().setDragTarget(null);
-        setOrbitEnabled(true);
-      }
-    },
-    onPointerCancel: (e: any) => {
-      if (useStore.getState().draggedNodeId === nodeId) {
-        e.stopPropagation();
-        const canvasEl = e.nativeEvent?.target as HTMLElement;
-        if (canvasEl && typeof canvasEl.releasePointerCapture === 'function') {
-          try {
-            canvasEl.releasePointerCapture(e.pointerId);
-          } catch (err) {}
-        }
-        useStore.getState().setDraggedNodeId(null);
-        useStore.getState().setDragTarget(null);
-        setOrbitEnabled(true);
-      }
-    }
-  }), [isPlaying, nodeId, name, setSelectedNodeId, setOrbitEnabled]);
-
-  // For dynamic meshes, use body xpos/xmat so renderVertices (centroid-local) align correctly.
-  const bodyId = useMemo(() => {
-    if (!isDynamic || !model || !mujoco) return -1;
-    return mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY.value, nodeId);
-  }, [isDynamic, model, mujoco, nodeId]);
-
-  // Compute initial position and rotation from the model/data
-  const [initialPos, initialQuat] = useMemo(() => {
-    if (!model || !data) return [[0, 0, 0] as [number, number, number], [0, 0, 0, 1] as [number, number, number, number]];
-    try {
-      // Dynamic meshes: use body xpos/xmat (renderVertices are in body-local space)
-      if (isDynamic && bodyId !== -1) {
-        const px = data.xpos[bodyId * 3];
-        const py = data.xpos[bodyId * 3 + 1];
-        const pz = data.xpos[bodyId * 3 + 2];
-        const m = data.xmat;
-        const offset = bodyId * 9;
-        const mat = new THREE.Matrix4().set(
-          m[offset], m[offset+1], m[offset+2], 0,
-          m[offset+3], m[offset+4], m[offset+5], 0,
-          m[offset+6], m[offset+7], m[offset+8], 0,
-          0, 0, 0, 1
-        );
-        const q = new THREE.Quaternion().setFromRotationMatrix(mat);
-        return [[px, py, pz] as [number, number, number], [q.x, q.y, q.z, q.w] as [number, number, number, number]];
-      }
-      if (geomId === -1) return [[0, 0, 0] as [number, number, number], [0, 0, 0, 1] as [number, number, number, number]];
-      const ngeom = model.ngeom;
-      if (geomId >= ngeom) return [[0, 0, 0] as [number, number, number], [0, 0, 0, 1] as [number, number, number, number]];
-
-      const px = data.geom_xpos[geomId * 3];
-      const py = data.geom_xpos[geomId * 3 + 1];
-      const pz = data.geom_xpos[geomId * 3 + 2];
-
-      const m = data.geom_xmat;
-      const offset = geomId * 9;
-      const mat = new THREE.Matrix4().set(
-        m[offset],     m[offset + 1], m[offset + 2], 0,
-        m[offset + 3], m[offset + 4], m[offset + 5], 0,
-        m[offset + 6], m[offset + 7], m[offset + 8], 0,
-        0,             0,             0,             1
-      );
-      const q = new THREE.Quaternion().setFromRotationMatrix(mat);
-      return [[px, py, pz] as [number, number, number], [q.x, q.y, q.z, q.w] as [number, number, number, number]];
-    } catch (e) {
-      return [[0, 0, 0] as [number, number, number], [0, 0, 0, 1] as [number, number, number, number]];
-    }
-  }, [isDynamic, bodyId, geomId, model, data]);
-
-  useFrame(() => {
-    // Safety check: ensure closure model/data match current store active ones
-    const activeModel = useStore.getState().model;
-    const activeData = useStore.getState().data;
-    if (model !== activeModel || data !== activeData) return;
-
-    if ((window as any).DISABLE_USEFRAME) return;
-    // Jointless bodies (and bodies under jointless ancestors) can never move —
-    // their transform was already set once via initialPos/initialQuat, so
-    // skip the per-frame geom_xpos/geom_xmat read + matrix rebuild entirely.
-    // A 48-segment curve otherwise costs 48 of these every frame for nothing.
-    if (staticBody) return;
-    if (type === 'mesh' && !isDynamic) return;
-    if (!meshRef.current || !model || !data) return;
-
-    try {
-      // Dynamic meshes: track body xpos/xmat (renderVertices are in body-local space)
-      if (isDynamic && bodyId !== -1) {
-        const px = data.xpos[bodyId * 3];
-        const py = data.xpos[bodyId * 3 + 1];
-        const pz = data.xpos[bodyId * 3 + 2];
-        const m = data.xmat;
-        const offset = bodyId * 9;
-        rotationMatrix.set(
-          m[offset], m[offset+1], m[offset+2], 0,
-          m[offset+3], m[offset+4], m[offset+5], 0,
-          m[offset+6], m[offset+7], m[offset+8], 0,
-          0, 0, 0, 1
-        );
-        meshRef.current.position.set(px, py, pz);
-        meshRef.current.quaternion.setFromRotationMatrix(rotationMatrix);
-        return;
-      }
-
-      if (geomId === -1) return;
-      const ngeom = model.ngeom;
-      if (geomId >= ngeom) return;
-
-      const px = data.geom_xpos[geomId * 3];
-      const py = data.geom_xpos[geomId * 3 + 1];
-      const pz = data.geom_xpos[geomId * 3 + 2];
-
-      const m = data.geom_xmat;
-      const offset = geomId * 9;
-      rotationMatrix.set(
-        m[offset],     m[offset + 1], m[offset + 2], 0,
-        m[offset + 3], m[offset + 4], m[offset + 5], 0,
-        m[offset + 6], m[offset + 7], m[offset + 8], 0,
-        0,             0,             0,             1
-      );
-
-      meshRef.current.position.set(px, py, pz);
-      meshRef.current.quaternion.setFromRotationMatrix(rotationMatrix);
-    } catch (e) {
-      // Safely ignore deleted object or transition errors
-    }
-  });
-
-  // Build Three.js BufferGeometry from inline vertex/face arrays for mesh type
-  const meshBufferGeometry = useMemo(() => {
-    if (type !== 'mesh' || !vertices || !faces) return null;
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(vertices), 3));
-    geo.setIndex(new THREE.BufferAttribute(new Uint32Array(faces), 1));
-    geo.computeVertexNormals();
-    return geo;
-  }, [type, vertices, faces]);
-
-  // The argument list buildPaintGeometry needs, taken from the geom's own
-  // half-extents rather than from geometryArgs — the same rule the MCP bridge
-  // paints by, so an agent's dab and a user's stroke land on the same surface.
-  const paintArgs = useMemo(() => {
-    if (geomId === -1 || !model?.geom_size) return [];
-    return paintArgsFromSize(type, [
-      model.geom_size[geomId * 3],
-      model.geom_size[geomId * 3 + 1],
-      model.geom_size[geomId * 3 + 2],
-    ]);
-  }, [geomId, model, type]);
-
-  // The stored tessellation wins over a freshly computed one. Resizing a
-  // painted die rebuilds the box at the new size with the same subdivisions, so
-  // vertex N is still the same point on the same face and the pips scale with
-  // it instead of being dropped for a length mismatch.
-  const paintRes = useMemo(
-    () => (paintLayer?.res?.length ? paintLayer.res : paintResolution(type, paintArgs)),
-    [paintLayer, type, paintArgs]
-  );
-
-  const paintGeometry = useMemo(() => {
-    if (!showPaint) return null;
-    // A mesh already has vertices of its own, at whatever density it was made
-    // or sculpted at; there is nothing to re-tessellate.
-    if (type === 'mesh') return meshBufferGeometry;
-    if (!paintArgs.length || paintArgs.some((a: number) => a === undefined || isNaN(a))) return null;
-    return buildPaintGeometry(type, paintArgs, paintRes);
-  }, [showPaint, type, meshBufferGeometry, paintArgs, paintRes]);
-
-  useEffect(() => {
-    // Only the geometries built here are ours to free — the mesh branch hands
-    // back one it owns and disposes itself.
-    if (!paintGeometry || type === 'mesh') return;
-    return () => paintGeometry.dispose();
-  }, [paintGeometry, type]);
-
-  const { handlers: paintHandlers, cursorRef } = useVertexPaint({
-    nodeId,
-    name,
-    geometry: paintGeometry,
-    baseColor: color ?? [0.8, 0.8, 0.8, 1],
-    layer: paintLayer,
-    res: paintRes,
-    enabled: showPaint && paintMode,
-    setOrbitEnabled,
-    onStrokeStart: beginPaintStroke,
-  });
-
-  // The ring showing where the brush will land. Drawn on top of the surface so
-  // it stays readable in a hollow that would otherwise occlude it.
-  const brushCursor = showPaint && paintMode ? (
-    <mesh ref={cursorRef} visible={false} raycast={() => null}>
-      <ringGeometry args={[0.9, 1, 48]} />
-      <meshBasicMaterial color="#f0abfc" transparent opacity={0.95} side={THREE.DoubleSide} depthTest={false} toneMapped={false} />
-    </mesh>
-  ) : null;
-
-  if (type === 'mesh') {
-    if (!meshBufferGeometry) return null;
-    const renderedMaterial = (
-      <meshStandardMaterial key={`${alpha < 1 ? 'blend' : 'solid'}:${showPaint}`} {...materialProps} side={THREE.FrontSide} />
-    );
-
-    if (isDynamic) {
-      return (
-        <group name={nodeId} ref={meshRef} position={initialPos} quaternion={new THREE.Quaternion(...initialQuat)}>
-          <mesh castShadow receiveShadow geometry={meshBufferGeometry} {...dragHandlers} {...paintHandlers}>
-            {renderedMaterial}
-            {brushCursor}
-          </mesh>
-        </group>
-      );
-    }
-    // Static mesh: vertices baked in Three.js world space — no position/rotation applied.
-    return (
-      <group name={nodeId}>
-        <mesh castShadow receiveShadow geometry={meshBufferGeometry} {...dragHandlers} {...paintHandlers}>
-          {renderedMaterial}
-          {brushCursor}
-        </mesh>
-      </group>
-    );
-  }
-
-  if (geomId === -1 || !geometryArgs || geometryArgs.length === 0 || geometryArgs.some(arg => arg === undefined || isNaN(arg))) {
-    return null;
-  }
-
-  const renderedGeomMaterial = (
-    <meshStandardMaterial key={`${alpha < 1 ? 'blend' : 'solid'}:${showPaint}`} {...materialProps} />
-  );
-
-  if (paintGeometry) {
-    return (
-      <group
-        name={nodeId}
-        ref={meshRef}
-        position={initialPos}
-        quaternion={new THREE.Quaternion(...initialQuat)}
-      >
-        <mesh
-          castShadow
-          receiveShadow
-          geometry={paintGeometry}
-          // The same orientation and scaling the JSX primitives are given, so
-          // that turning the brush on does not move the body a millimetre.
-          rotation={type === 'capsule' || type === 'cylinder' ? [Math.PI / 2, 0, 0] : undefined}
-          scale={type === 'ellipsoid' ? [geometryArgs[0], geometryArgs[1], geometryArgs[2]] : undefined}
-          {...dragHandlers}
-          {...paintHandlers}
-        >
-          {renderedGeomMaterial}
-          {brushCursor}
-        </mesh>
-      </group>
-    );
-  }
-
-  return (
-    <group
-      name={nodeId}
-      ref={meshRef}
-      position={initialPos}
-      quaternion={new THREE.Quaternion(...initialQuat)}
-    >
-      {node?.isWedge ? (
-        <mesh castShadow receiveShadow {...dragHandlers}>
-          <WedgeGeometry width={node.width || 2.0} depth={node.depth || 1.0} height={node.height || 0.5} />
-          {renderedGeomMaterial}
-        </mesh>
-      ) : type === 'sphere' ? (
-        <mesh castShadow receiveShadow {...dragHandlers}>
-          <sphereGeometry args={geometryArgs as any} />
-          {renderedGeomMaterial}
-        </mesh>
-      ) : type === 'box' ? (
-        <>
-          <mesh castShadow receiveShadow {...dragHandlers}>
-            <boxGeometry args={geometryArgs as any} />
-            {renderedGeomMaterial}
-          </mesh>
-        </>
-      ) : type === 'ellipsoid' ? (
-        <mesh castShadow receiveShadow scale={[geometryArgs[0], geometryArgs[1], geometryArgs[2]]} {...dragHandlers}>
-          <sphereGeometry args={[1, 32, 32]} />
-          {renderedGeomMaterial}
-        </mesh>
-      ) : null}
-      {type === 'capsule' && (
-        <mesh castShadow receiveShadow rotation={[Math.PI / 2, 0, 0]} {...dragHandlers}>
-          <capsuleGeometry args={geometryArgs as any} />
-          {renderedGeomMaterial}
-        </mesh>
-      )}
-      {type === 'cylinder' && (
-        <mesh castShadow receiveShadow rotation={[Math.PI / 2, 0, 0]} {...dragHandlers}>
-          <cylinderGeometry args={[geometryArgs[0], geometryArgs[0], geometryArgs[1] * 2, 32]} />
-          {renderedGeomMaterial}
-        </mesh>
-      )}
-    </group>
-  );
-};
-
-// Dynamic glowing pulley cable/rope renderer
-const PulleyRopesRenderer = ({ model, data, mujoco, sceneGraph }: any) => {
-  const lineRefs = useRef<{ [ropeId: string]: any }>({});
-  const bodyIdCache = useRef<Record<string, number>>({});
-  useEffect(() => {
-    if (!model || !mujoco) return;
-    const c: Record<string, number> = {};
-    for (let b = 0; b < model.nbody; b++) {
-      const name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY.value, b);
-      if (name) c[name] = b;
-    }
-    bodyIdCache.current = c;
-  }, [model, mujoco]);
-  
-  // Find all pulley rope nodes in the scene
-  const pulleyRopes = useMemo(() => {
-    const ropes: any[] = [];
-    const traverse = (nodes: any[]) => {
-      if (!nodes) return;
-      for (const n of nodes) {
-        if (n.isPulleyRope && n.leftTargetId && n.rightTargetId) {
-          ropes.push(n);
-        }
-        traverse(n.children);
-      }
-    };
-    traverse(sceneGraph.nodes);
-    return ropes;
-  }, [sceneGraph]);
-
-  // Helper to find wheel node radius reactively
-  const findWheelNode = useCallback((wheelId: string) => {
-    const traverse = (nodes: any[]): any => {
-      if (!nodes) return null;
-      for (const n of nodes) {
-        if (n.id === wheelId) return n;
-        const c = traverse(n.children);
-        if (c) return c;
-      }
-      return null;
-    };
-    return traverse(sceneGraph.nodes);
-  }, [sceneGraph]);
-
-  useFrame(() => {
-    const activeModel = useStore.getState().model;
-    const activeData = useStore.getState().data;
-    if (model !== activeModel || data !== activeData) return;
-    if ((window as any).DISABLE_USEFRAME) return;
-    if (!model || !data || !mujoco) return;
-
-    for (const rope of pulleyRopes) {
-      try {
-        const leftId = bodyIdCache.current[rope.leftTargetId] ?? -1;
-        const rightId = bodyIdCache.current[rope.rightTargetId] ?? -1;
-
-        if (leftId === -1 || rightId === -1) continue;
-
-        const lx = data.xpos[leftId * 3];
-        const ly = data.xpos[leftId * 3 + 1];
-        const lz = data.xpos[leftId * 3 + 2];
-
-        const rx = data.xpos[rightId * 3];
-        const ry = data.xpos[rightId * 3 + 1];
-        const rz = data.xpos[rightId * 3 + 2];
-
-        const points: THREE.Vector3[] = [];
-
-        if (rope.pulleyWheelId) {
-          // Pulley wheel present: arc-over-wheel geometry
-          const wheelId = bodyIdCache.current[rope.pulleyWheelId] ?? -1;
-          if (wheelId === -1) {
-            // Wheel not yet spawned — fall back to straight line
-            points.push(new THREE.Vector3(lx, ly, lz));
-            points.push(new THREE.Vector3(rx, ry, rz));
-          } else {
-            const wx = data.xpos[wheelId * 3];
-            const wy = data.xpos[wheelId * 3 + 1];
-            const wz = data.xpos[wheelId * 3 + 2];
-            const wheelNode = findWheelNode(rope.pulleyWheelId);
-            // 0.4 was a pre-rescale default: it drew a rope arcing over a
-            // 0.4m rim around a wheel whose geoms are 0.08.
-            const rad = wheelNode?.pulleyRadius || 0.08;
-            // Attach near the top of each weight rather than a fixed 0.15 above
-            // it — another pre-rescale constant, which left the rope ending in
-            // mid-air well clear of the weight it is supposed to hold.
-            const attach = rad * 0.5;
-
-            points.push(new THREE.Vector3(lx, ly, lz + attach));
-            points.push(new THREE.Vector3(wx - rad, wy, wz));
-            const segments = 12;
-            for (let i = 1; i < segments; i++) {
-              const phi = Math.PI - (Math.PI * i) / segments;
-              points.push(new THREE.Vector3(
-                wx + rad * Math.cos(phi),
-                wy,
-                wz + rad * Math.sin(phi)
-              ));
-            }
-            points.push(new THREE.Vector3(wx + rad, wy, wz));
-            points.push(new THREE.Vector3(rx, ry, rz + attach));
-          }
-        } else {
-          // No wheel — straight rope between the two bodies
-          points.push(new THREE.Vector3(lx, ly, lz));
-          points.push(new THREE.Vector3(rx, ry, rz));
-        }
-
-        const line = lineRefs.current[rope.id];
-        if (line) {
-          line.geometry.setFromPoints(points);
-        }
-      } catch (e) {
-        // Safe check
-      }
-    }
-  });
-
-  if (pulleyRopes.length === 0) return null;
-
-  return (
-    <>
-      {pulleyRopes.map((rope) => (
-        <line key={rope.id} ref={(el) => { lineRefs.current[rope.id] = el; }}>
-          <bufferGeometry />
-          <lineBasicMaterial color="#3b82f6" linewidth={3.5} transparent opacity={0.9} />
-        </line>
-      ))}
-    </>
-  );
-};
-
-
-// Drag interaction controller that handles window-level mouse/pointer movements
-const DragInteractionController = () => {
-  const { camera, raycaster, gl } = useThree();
-  const setOrbitEnabled = useOrbitEnable();
-
-  useEffect(() => {
-    const handlePointerMove = (e: PointerEvent) => {
-      const { draggedNodeId, dragDistance } = useStore.getState();
-      if (!draggedNodeId) return;
-
-      // Project mouse screen coordinates relative to canvas bounding client rect
-      const rect = gl.domElement.getBoundingClientRect();
-      const x = e.clientX - rect.left;
-      const y = e.clientY - rect.top;
-      
-      const ndcX = (x / rect.width) * 2 - 1;
-      const ndcY = -(y / rect.height) * 2 + 1;
-
-      raycaster.setFromCamera(new THREE.Vector2(ndcX, ndcY), camera);
-      
-      const targetPt = new THREE.Vector3();
-      raycaster.ray.at(dragDistance, targetPt);
-
-      // Transform standard Three.js world coordinates (Y-up) to MuJoCo coordinate space (Z-up)
-      useStore.getState().setDragTarget({
-        x: targetPt.x,
-        y: -targetPt.z,
-        z: targetPt.y
-      });
-    };
-
-    const handlePointerUp = () => {
-      const { draggedNodeId } = useStore.getState();
-      if (draggedNodeId) {
-        useStore.getState().setDraggedNodeId(null);
-        useStore.getState().setDragTarget(null);
-        // Whoever turned the camera off owes it an on again — a finger lifted
-        // outside the body it grabbed comes through here rather than through
-        // the geom's own pointerup.
-        setOrbitEnabled(true);
-      }
-    };
-
-    window.addEventListener('pointermove', handlePointerMove);
-    window.addEventListener('pointerup', handlePointerUp);
-    window.addEventListener('pointercancel', handlePointerUp);
-
-    return () => {
-      window.removeEventListener('pointermove', handlePointerMove);
-      window.removeEventListener('pointerup', handlePointerUp);
-      window.removeEventListener('pointercancel', handlePointerUp);
-    };
-  }, [camera, raycaster, gl, setOrbitEnabled]);
-
-  return null;
-};
-
-
-// Real-time mouse drag physical spring force line renderer
-const MouseDragForceRenderer = ({ model, data, mujoco }: any) => {
-  const draggedNodeId = useStore((state) => state.draggedNodeId);
-  const dragTarget = useStore((state) => state.dragTarget);
-  const lineRef = useRef<any>(null);
-  const bodyIdCache = useRef<Record<string, number>>({});
-  useEffect(() => {
-    if (!model || !mujoco) return;
-    const c: Record<string, number> = {};
-    for (let b = 0; b < model.nbody; b++) {
-      const name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY.value, b);
-      if (name) c[name] = b;
-    }
-    const sceneGraph = useStore.getState().sceneGraph;
-    const mapIds = (nodes: any[]) => {
-      if (!nodes) return;
-      for (const n of nodes) {
-        const bId = c[n.name] ?? c[n.id];
-        if (bId !== undefined) {
-          c[n.id] = bId;
-          if (n.name) c[n.name] = bId;
-        }
-        mapIds(n.children);
-      }
-    };
-    mapIds(sceneGraph?.nodes || []);
-    bodyIdCache.current = c;
-  }, [model, mujoco]);
-
-  useFrame(() => {
-    const activeModel = useStore.getState().model;
-    const activeData = useStore.getState().data;
-    if (model !== activeModel || data !== activeData) return;
-    if ((window as any).DISABLE_USEFRAME) return;
-    if (!model || !data || !mujoco || !draggedNodeId || !dragTarget || !lineRef.current) return;
-
-    try {
-      const bId = bodyIdCache.current[draggedNodeId] ?? -1;
-      if (bId === -1) return;
-
-      const px = data.xpos[bId * 3];
-      const py = data.xpos[bId * 3 + 1];
-      const pz = data.xpos[bId * 3 + 2];
-
-      // Parent group has rotation={[-Math.PI / 2, 0, 0]} which converts MuJoCo Z-up space to Three.js Y-up.
-      // Inside this group, local coordinates ARE MuJoCo Z-up (x, y, z).
-      const points = [
-        new THREE.Vector3(px, py, pz),
-        new THREE.Vector3(dragTarget.x, dragTarget.y, dragTarget.z)
-      ];
-      lineRef.current.geometry.setFromPoints(points);
-    } catch (e) {
-      // Safe check
-    }
-  });
-
-  if (!draggedNodeId || !dragTarget) return null;
-
-  return (
-    <line ref={lineRef}>
-      <bufferGeometry />
-      <lineBasicMaterial color="#f43f5e" linewidth={4} transparent opacity={0.9} />
-    </line>
-  );
-};
-
-// Rope node placeholder marker – renders a glowing ring for each pulley_rope scene node
-const PulleyRopeMarkers = ({ sceneGraph, selectedNodeId, setSelectedNodeId }: any) => {
-  const isPlaying = useStore(state => state.isPlaying);
-  const setOrbitEnabled = useOrbitEnable();
-
-  // The wheel a rope runs over, so the handle can be sized relative to it.
-  const findWheelNode = useCallback((wheelId: string): any => {
-    const search = (nodes: any[]): any => {
-      for (const n of nodes || []) {
-        if (n.id === wheelId) return n;
-        const c = search(n.children);
-        if (c) return c;
-      }
-      return null;
-    };
-    return search(sceneGraph?.nodes || []);
-  }, [sceneGraph]);
-
-  const ropeNodes = useMemo(() => {
-    const ropes: any[] = [];
-    const traverse = (nodes: any[]) => {
-      if (!nodes) return;
-      for (const n of nodes) {
-        if (n.isPulleyRope) ropes.push(n);
-        traverse(n.children);
-      }
-    };
-    traverse(sceneGraph.nodes);
-    return ropes;
-  }, [sceneGraph]);
-
-  if (ropeNodes.length === 0) return null;
-
-  return (
-    <>
-      {ropeNodes.map((rope) => {
-        // pos is [x, y_mujoco, z_mujoco] in scene graph space.
-        // The SceneVisuals group is rotated [-PI/2, 0, 0], so we skip that rotation
-        // and place markers in raw world space (no group rotation wrapper here).
-        // MuJoCo X→Three.js X, MuJoCo Y→Three.js -Z, MuJoCo Z→Three.js Y
-        const [mx, my, mz] = rope.pos;
-        const threePos: [number, number, number] = [mx, mz, -my];
-        const isSelected = selectedNodeId === rope.id;
-        // Size the handle from the wheel it runs over. It used to be a fixed
-        // 0.18-radius torus, which was fine when the presets were metres across
-        // but is now larger than the entire pulley stand — and a rope node left
-        // at pos [0,0,0] put that ring at the world origin, half of it under the
-        // floor, looking like a stray object rather than a drag handle.
-        const wheelNode = rope.pulleyWheelId ? findWheelNode(rope.pulleyWheelId) : null;
-        const wheelR = wheelNode?.pulleyRadius ?? rope.pulleyRadius ?? 0.08;
-        const ringR = Math.max(0.012, wheelR * 0.45);
-        const ringThickness = ringR * 0.2;
-
-        return (
-          <group key={rope.id} position={threePos}>
-            {/* Outer glowing torus ring */}
-            <mesh
-              rotation={[Math.PI / 2, 0, 0]}
-              onClick={(e: any) => { e.stopPropagation(); setSelectedNodeId(rope.id); }}
-              onPointerDown={(e: any) => {
-                if (isPlaying) {
-                  e.stopPropagation();
-                  // Same reason as the body drag handlers: the orbit gesture
-                  // and the drag gesture are the same single touch, so the
-                  // camera has to stand down within this event rather than on
-                  // the next render.
-                  setOrbitEnabled(false);
-                  useStore.getState().setDraggedNodeId(rope.id);
-                  useStore.getState().setDragDistance(e.distance);
-                  const pt = e.point;
-                  useStore.getState().setDragTarget({ x: pt.x, y: -pt.z, z: pt.y });
-                }
-              }}
-              onPointerUp={(e: any) => {
-                if (useStore.getState().draggedNodeId === rope.id) {
-                  e.stopPropagation();
-                  useStore.getState().setDraggedNodeId(null);
-                  useStore.getState().setDragTarget(null);
-                  setOrbitEnabled(true);
-                }
-              }}
-            >
-              <torusGeometry args={[ringR, ringThickness, 12, 40]} />
-              <meshStandardMaterial
-                color={isSelected ? '#60a5fa' : '#10b981'}
-                emissive={isSelected ? '#3b82f6' : '#047857'}
-                emissiveIntensity={isSelected ? 0.8 : 0.4}
-                transparent
-                opacity={0.92}
-              />
-            </mesh>
-            {/* Small inner dot */}
-            <mesh rotation={[Math.PI / 2, 0, 0]}>
-              <torusGeometry args={[ringR * 0.4, ringThickness * 0.7, 8, 24]} />
-              <meshStandardMaterial
-                color={isSelected ? '#93c5fd' : '#6ee7b7'}
-                emissive={isSelected ? '#93c5fd' : '#6ee7b7'}
-                emissiveIntensity={0.5}
-                transparent
-                opacity={0.85}
-              />
-            </mesh>
-          </group>
-        );
-      })}
-    </>
-  );
-};
-
-
-const SceneCapture = ({ sceneRef }: { sceneRef: React.MutableRefObject<THREE.Scene | null> }) => {
-  const { scene } = useThree();
-  useEffect(() => { sceneRef.current = scene; }, [scene, sceneRef]);
-  return null;
-};
-
-// Draggable control-point handles + spline preview for the selected curve
-// body. Rendered INSIDE the Z-up→Y-up rotated group, so all positions here are
-// raw MuJoCo Z-up coords. Left-drag is free for handle dragging because
-// OrbitControls maps LEFT to a no-op in this app — a single *touch*, though,
-// is the orbit gesture, so the drag has to switch the controls off for its
-// duration or the camera swings while the point is being placed.
-const CurveControlHandles = () => {
-  const sceneGraph = useStore(s => s.sceneGraph);
-  const selectedNodeId = useStore(s => s.selectedNodeId);
-  const isPlaying = useStore(s => s.isPlaying);
-  const updateCurveParams = useStore(s => s.updateCurveParams);
-  const { camera } = useThree();
-  const setOrbitEnabled = useOrbitEnable();
-  const coarsePointer = useCoarsePointer();
-  const [dragIdx, setDragIdx] = useState<number | null>(null);
-  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
-  const dragPlane = useRef(new THREE.Plane());
-
-  // Find the selected curve node and its accumulated world offset (curve
-  // bodies are static, so parent offsets are pure translations).
-  const found = useMemo(() => {
-    let result: { node: any; world: number[] } | null = null;
-    const walk = (nodes: any[], base: number[]) => {
-      if (!nodes || result) return;
-      for (const n of nodes) {
-        const world = [base[0] + (n.pos?.[0] || 0), base[1] + (n.pos?.[1] || 0), base[2] + (n.pos?.[2] || 0)];
-        if (n.id === selectedNodeId && n.isCurve) { result = { node: n, world }; return; }
-        walk(n.children, world);
-        if (result) return;
-      }
-    };
-    walk(sceneGraph?.nodes, [0, 0, 0]);
-    return result as { node: any; world: number[] } | null;
-  }, [sceneGraph, selectedNodeId]);
-
-  const splineLine = useMemo(() => {
-    if (!found) return null;
-    const closed = found.node.curveClosed === true;
-    const pts = sampleCatmullRom(found.node.curvePoints || [], 120, closed);
-    const arr = pts.map((p: number[]) => new THREE.Vector3(found.world[0] + p[0], found.world[1] + p[1], found.world[2] + p[2]));
-    if (closed && arr.length) arr.push(arr[0].clone());
-    const geo = new THREE.BufferGeometry().setFromPoints(arr);
-    const mat = new THREE.LineBasicMaterial({ color: 0x3b82f6, transparent: true, opacity: 0.8, depthTest: false });
-    return new THREE.Line(geo, mat);
-  }, [found]);
-
-  if (!found || isPlaying) return null;
-  const pts: number[][] = found.node.curvePoints || [];
-
-  const toWorldMj = (p: number[]) => [found.world[0] + p[0], found.world[1] + p[1], found.world[2] + p[2]];
-
-  const startDrag = (i: number, e: any) => {
-    e.stopPropagation();
-    setOrbitEnabled(false);
-    try { (e.target as HTMLElement).setPointerCapture(e.pointerId); } catch (err) {}
-    // Camera-facing drag plane through the handle (in Three.js world space:
-    // MuJoCo (x,y,z) → three (x, z, -y))
-    const w = toWorldMj(pts[i]);
-    const p3 = new THREE.Vector3(w[0], w[2], -w[1]);
-    const normal = new THREE.Vector3();
-    camera.getWorldDirection(normal);
-    dragPlane.current.setFromNormalAndCoplanarPoint(normal, p3);
-    setDragIdx(i);
-  };
-
-  const moveDrag = (e: any) => {
-    if (dragIdx === null) return;
-    e.stopPropagation();
-    const hit = new THREE.Vector3();
-    if (!e.ray.intersectPlane(dragPlane.current, hit)) return;
-    // three world → MuJoCo: (x, y, z) → (x, -z, y)
-    const local = [
-      Math.round((hit.x - found.world[0]) * 1000) / 1000,
-      Math.round((-hit.z - found.world[1]) * 1000) / 1000,
-      Math.round((hit.y - found.world[2]) * 1000) / 1000,
-    ];
-    const newPts = pts.map(p => [...p]);
-    newPts[dragIdx] = local;
-    updateCurveParams(found.node.id, { points: newPts });
-  };
-
-  const endDrag = (e: any) => {
-    if (dragIdx === null) return;
-    e.stopPropagation();
-    try { (e.target as HTMLElement).releasePointerCapture(e.pointerId); } catch (err) {}
-    setDragIdx(null);
-    setOrbitEnabled(true);
-  };
-
-  return (
-    <group>
-      {splineLine && <primitive object={splineLine} />}
-      {pts.map((p, i) => {
-        const w = toWorldMj(p);
-        const active = dragIdx === i || hoverIdx === i;
-        return (
-          <mesh
-            key={i}
-            position={[w[0], w[1], w[2]]}
-            onPointerDown={(e) => startDrag(i, e)}
-            onPointerMove={moveDrag}
-            onPointerUp={endDrag}
-            onPointerCancel={endDrag}
-            onPointerOver={(e) => { e.stopPropagation(); setHoverIdx(i); }}
-            onPointerOut={() => setHoverIdx(h => (h === i ? null : h))}
-          >
-            {/* A control point sized for a cursor is smaller than the
-                fingertip trying to grab it, so touch gets a bigger sphere. */}
-            <sphereGeometry args={[(active ? 0.08 : 0.06) * (coarsePointer ? 1.8 : 1), 16, 16]} />
-            <meshBasicMaterial color={dragIdx === i ? '#f59e0b' : '#3b82f6'} depthTest={false} transparent opacity={0.9} />
-          </mesh>
-        );
-      })}
-    </group>
-  );
-};
-
-// All static (jointless, under jointless ancestors) box geoms drawn as ONE
-// InstancedMesh: one draw call instead of one mesh+material per segment. This
-// is the common repeated-primitive case — curve tracks (28-48 boxes each),
-// bridges, scenery. Transforms are read from MuJoCo once per model build, not
-// per frame. Clicking an instance selects its owning body; the selected
-// body's boxes drop back to individual DynamicGeoms so the highlight and
-// per-geom selection still work.
-const StaticBoxInstances = ({ geoms, model, data, mujoco, setSelectedNodeId }: any) => {
-  const meshRef = useRef<THREE.InstancedMesh>(null);
-  const nodeIdByInstance = useMemo(() => geoms.map((g: any) => g.nodeId), [geoms]);
-  const wireframe = useStore(state => state.wireframe);
-
-  useEffect(() => {
-    const mesh = meshRef.current;
-    if (!mesh || !model || !data || !mujoco) return;
-    const mat = new THREE.Matrix4();
-    const scale = new THREE.Matrix4();
-    const color = new THREE.Color();
-    geoms.forEach((g: any, idx: number) => {
-      const gid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM.value, g.name);
-      if (gid === -1 || gid >= model.ngeom) {
-        mesh.setMatrixAt(idx, mat.makeScale(0, 0, 0));
-        return;
-      }
-      const m = data.geom_xmat;
-      const o = gid * 9;
-      mat.set(
-        m[o],     m[o + 1], m[o + 2], data.geom_xpos[gid * 3],
-        m[o + 3], m[o + 4], m[o + 5], data.geom_xpos[gid * 3 + 1],
-        m[o + 6], m[o + 7], m[o + 8], data.geom_xpos[gid * 3 + 2],
-        0, 0, 0, 1
-      );
-      const so = gid * 3;
-      mat.multiply(scale.makeScale(model.geom_size[so] * 2, model.geom_size[so + 1] * 2, model.geom_size[so + 2] * 2));
-      mesh.setMatrixAt(idx, mat);
-      const c = g.rgba || [0.8, 0.8, 0.8, 1];
-      mesh.setColorAt(idx, color.setRGB(c[0], c[1], c[2]));
-    });
-    mesh.instanceMatrix.needsUpdate = true;
-    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-    mesh.computeBoundingSphere();
-  }, [geoms, model, data, mujoco]);
-
-  if (geoms.length === 0) return null;
-  return (
-    <instancedMesh
-      key={geoms.length}
-      ref={meshRef}
-      args={[undefined, undefined, geoms.length]}
-      castShadow
-      receiveShadow
-      onClick={(e: any) => {
-        e.stopPropagation();
-        if (useStore.getState().paintMode) return;
-        const nid = nodeIdByInstance[e.instanceId];
-        if (nid) setSelectedNodeId(nid);
-      }}
-    >
-      <boxGeometry args={[1, 1, 1]} />
-      <meshStandardMaterial wireframe={wireframe} />
-    </instancedMesh>
-  );
-};
-
-// Negative (subtracted) shapes have no MuJoCo geom at all — they're holes, not
-// solids — so nothing would show where you're cutting. Draw them as red
-// wireframes on the selected body only: placing a hole you can't see is
-// guesswork, and drawing them always would clutter every other body.
-const CsgNegativeGhosts = ({ model, data, mujoco, sceneGraph, selectedNodeId }: any) => {
-  const groupRef = useRef<THREE.Group>(null);
-
-  const target = useMemo(() => {
-    if (!selectedNodeId) return null;
-    const find = (nodes: any[]): any => {
-      for (const n of nodes || []) {
-        if (n.id === selectedNodeId) return n;
-        const c = find(n.children);
-        if (c) return c;
-      }
-      return null;
-    };
-    const node = find(sceneGraph?.nodes || []);
-    if (!node?.csgEnabled) return null;
-    const negatives = (node.geoms || []).filter((g: any) => g.csg === 'difference' && !g.csgDerived);
-    const intersects = (node.geoms || []).filter((g: any) => g.csg === 'intersection' && !g.csgDerived);
-    if (negatives.length === 0 && intersects.length === 0) return null;
-    return {
-      node,
-      // Outlines are clipped to the solid's extent — see positiveBounds.
-      bounds: positiveBounds(node),
-      ghosts: [...negatives.map((g: any) => ({ g, kind: 'neg' })), ...intersects.map((g: any) => ({ g, kind: 'int' }))],
-    };
-  }, [sceneGraph, selectedNodeId]);
-
-  const bodyId = useMemo(() => {
-    if (!target || !model || !mujoco) return -1;
-    return mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY.value, target.node.name || target.node.id);
-  }, [target, model, mujoco]);
-
-  // The ghosts live in the body's frame, so the group tracks the body rather
-  // than any geom — a negative isn't in the model to have a geom_xpos of its own.
-  useFrame(() => {
-    if (!groupRef.current || bodyId === -1 || !data) return;
-    if ((window as any).DISABLE_USEFRAME) return;
-    const activeData = useStore.getState().data;
-    if (data !== activeData) return;
-    try {
-      const o = bodyId * 9;
-      const m = data.xmat;
-      const mat = new THREE.Matrix4().set(
-        m[o], m[o + 1], m[o + 2], 0,
-        m[o + 3], m[o + 4], m[o + 5], 0,
-        m[o + 6], m[o + 7], m[o + 8], 0,
-        0, 0, 0, 1
-      );
-      groupRef.current.position.set(data.xpos[bodyId * 3], data.xpos[bodyId * 3 + 1], data.xpos[bodyId * 3 + 2]);
-      groupRef.current.quaternion.setFromRotationMatrix(mat);
-    } catch { /* body deleted mid-frame */ }
-  });
-
-  if (!target || bodyId === -1) return null;
-
-  return (
-    <group ref={groupRef}>
-      {target.ghosts.map(({ g, kind }: any) => (
-        <CsgGhostOutline
-          key={g.name}
-          geom={g}
-          color={kind === 'neg' ? '#ef4444' : '#38bdf8'}
-          bounds={target.bounds}
-          csgCentroid={target.node.csgCentroid}
-        />
-      ))}
-    </group>
-  );
-};
-
-// One negative shape, drawn as EDGES ONLY and clipped to the solid it cuts.
-//
-// Two deliberate choices:
-//
-// LineSegments over an EdgesGeometry, not a mesh with material.wireframe:
-// wireframe draws every triangle of the tessellation including the diagonal
-// splitting each quad, which on a sphere is dense enough to read as a shaded
-// solid. EdgesGeometry keeps only edges where faces actually meet at an angle.
-//
-// Clipped to the host's bounds: a negative MUST overshoot the solid (a flush cut
-// leaves coincident faces, i.e. non-manifold CSG output), but drawing it at full
-// length is actively misleading — a cylinder punched through a thin disc renders
-// as a tall tube floating in space with only a sliver of it doing any cutting.
-// The points are baked into body space here so the clip is a one-off in the
-// useMemo rather than per-frame renderer clipping-plane work.
-const CsgGhostOutline = ({ geom, color, bounds, csgCentroid }: { geom: any; color: string; bounds: { min: number[]; max: number[] } | null; csgCentroid?: number[] }) => {
-  const key = JSON.stringify([geom.type, geom.size, geom.pos, geom.euler, geom.quat, bounds, csgCentroid]);
-
-  const edges = useMemo(() => {
-    const s = geom.size || [];
-    const r = s[0] || 0.1;
-    let base: THREE.BufferGeometry;
-    // Segment counts are kept low on purpose: this is an annotation, not a
-    // surface, and a 32-segment outline is visual noise at this size.
-    switch (geom.type) {
-      case 'box':
-        base = new THREE.BoxGeometry(r * 2, (s[1] ?? r) * 2, (s[2] ?? r) * 2);
-        break;
-      case 'cylinder':
-        base = new THREE.CylinderGeometry(r, r, (s[1] ?? 0.1) * 2, 16);
-        base.rotateX(Math.PI / 2); // Three.js cylinders are Y-long; MuJoCo's are Z-long
-        break;
-      case 'capsule':
-        base = new THREE.CapsuleGeometry(r, (s[1] ?? 0.1) * 2, 4, 16);
-        base.rotateX(Math.PI / 2);
-        break;
-      case 'ellipsoid':
-        base = new THREE.SphereGeometry(1, 16, 10);
-        // Scale the geometry itself, not the mesh: edge angles have to be
-        // computed on the squashed shape or the outline won't match it.
-        base.scale(r, s[1] ?? r, s[2] ?? r);
-        break;
-      default:
-        base = new THREE.SphereGeometry(r, 16, 10);
-        break;
-    }
-
-    const e = new THREE.EdgesGeometry(base, 1);
-    base.dispose();
-
-    // Bake the geom's own pos/rotation in, so the segments are in body space and
-    // can be clipped against the body-space bounds directly.
-    const src = e.getAttribute('position').array as ArrayLike<number>;
-    const m = geomMatrixOf(geom);
-    if (csgCentroid && csgCentroid.length >= 3) {
-      const p = geom.pos || [0, 0, 0];
-      // X and Y only — see csgFrameOffset: the compiled body is not re-origined in Z.
-      m.setPosition(p[0] - csgCentroid[0], p[1] - csgCentroid[1], p[2]);
-    }
-    const baked = new Array<number>(src.length);
-    const v = new THREE.Vector3();
-    for (let i = 0; i < src.length; i += 3) {
-      v.set(src[i], src[i + 1], src[i + 2]).applyMatrix4(m);
-      baked[i] = v.x; baked[i + 1] = v.y; baked[i + 2] = v.z;
-    }
-    e.dispose();
-
-    let clipped = bounds ? clipSegmentsToBox(baked, bounds.min, bounds.max) : baked;
-
-    // A cutting tool is often LARGER than the part in the directions across the
-    // cut — chopping the top off a cone needs a box wider than the cone. Every
-    // edge of such a box lies on a face outside the solid, so clipping the lines
-    // correctly removes all of them and the cut becomes invisible. When that
-    // happens, fall back to outlining the REGION being removed: the negative's
-    // bounding box intersected with the solid's. Indicative rather than exact,
-    // but it shows where material is going, which is the point of the overlay.
-    if (bounds && clipped.length < Math.max(12, baked.length * 0.45) && baked.length > 0) {
-      clipped = baked;
-    }
-
-    const out = new THREE.BufferGeometry();
-    out.setAttribute('position', new THREE.Float32BufferAttribute(clipped, 3));
-    return out;
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key]);
-
-  useEffect(() => () => edges.dispose(), [edges]);
-
-  // No position/rotation: the segments are already in body-space coordinates.
-  return (
-    <lineSegments geometry={edges}>
-      <lineBasicMaterial color={color} transparent opacity={0.9} depthWrite={false} toneMapped={false} />
-    </lineSegments>
-  );
-};
-
-/** Depth-first lookup by id, for the renderer's own use. */
-const findSceneNode = (nodes: any[], id: string): any | null => {
-  for (const node of nodes || []) {
-    if (node.id === id) return node;
-    const found = findSceneNode(node.children, id);
-    if (found) return found;
-  }
-  return null;
-};
-
-const SceneVisuals = ({ model, data, mujoco, sceneGraph, selectedNodeId, setSelectedNodeId, activeWeakSpot, setActiveWeakSpot }: any) => {
-  // Every geom name the scene graph accounts for, drawn or not. The implicit-geom
-  // pass below uses this — NOT the render list — to decide what in the MuJoCo
-  // model is unexplained. A collision-only geom (a boolean body's source
-  // primitives, in 'primitives' mode) is deliberately not rendered, and treating
-  // it as unexplained would draw the solid ellipsoid right over the mesh whose
-  // hole is the entire point.
-  const knownGeomNames = useMemo(() => {
-    const names = new Set<string>();
-    const walk = (nodes: any[]) => {
-      for (const node of nodes || []) {
-        for (const g of node.geoms || []) if (g.name) names.add(g.name);
-        walk(node.children);
-      }
-    };
-    walk(sceneGraph?.nodes || []);
-    return names;
-  }, [sceneGraph]);
-
-  // Subscribed rather than read once: entering and leaving the sculpt tools has
-  // to swap which renderer draws the body.
-  const sculptNodeId = useStore((state) => state.sculptNodeId);
-  // Static boxes are drawn as one InstancedMesh, which shares a single geometry
-  // between every box in it — there is nowhere for one box's paint to live. So
-  // they come out of the instancing while the brush is out, and stay out for
-  // good once they carry paint.
-  const paintMode = useStore((state) => state.paintMode);
-
-  const geoms = useMemo(() => {
-    if (!sceneGraph) return [];
-    const list: any[] = [];
-    const traverse = (nodes: any[], ancestorJointed: boolean) => {
-      if (!nodes) return;
-      for (const node of nodes) {
-        const jointed = ancestorJointed || (node.joints && node.joints.length > 0) || node.isComposite === true;
-        if (node.geoms) {
-          // Boolean bodies draw their generated mesh instead of the primitives it
-          // was cut from, and never draw the negatives (those are ghosts, below).
-          for (const geom of resolveCsgGeoms(node, 'render')) {
-            // isWedge bodies draw a bespoke triangular prism via WedgeGeometry.
-            // Their MJCF geom is only a thin slab along the slanted face, so they
-            // must never fall through to a generic box renderer.
-            list.push({ nodeId: node.id, staticBody: !jointed, customRender: !!node.isWedge, ...geom });
-          }
-        }
-        traverse(node.children, jointed);
-      }
-    };
-    traverse(sceneGraph.nodes, false);
-    return list;
-  }, [sceneGraph]);
-
-  if (!model || !data || !mujoco) return null;
-
-  const allPrimitiveGeoms = geoms.filter(g => g.type !== 'mesh');
-  // Static boxes not on the selected body render as one InstancedMesh.
-  const instancedBoxGeoms = paintMode
-    ? []
-    : allPrimitiveGeoms.filter(g => g.type === 'box' && g.staticBody && !g.customRender && g.nodeId !== selectedNodeId && !g.paint);
-  const instancedNames = new Set(instancedBoxGeoms.map(g => g.name));
-  const primitiveGeoms = allPrimitiveGeoms.filter(g => !instancedNames.has(g.name));
-  // The body under the sculpt tools is drawn by SculptSurface, which owns the
-  // live mesh mid-stroke; the ordinary renderer would draw the last committed
-  // stroke right through it.
-  const sculptGeom = sculptNodeId ? geoms.find(g => g.type === 'mesh' && g.nodeId === sculptNodeId) : undefined;
-  // Picking a different base replaces the mesh wholesale, so the sculpting
-  // surface has to be remounted rather than left holding the old one.
-  const sculptVersion = sculptNodeId ? (findSceneNode(sceneGraph?.nodes ?? [], sculptNodeId)?.sculptVersion ?? 1) : 1;
-  const staticMeshGeoms = geoms.filter(g => g.type === 'mesh' && !g.dynamic && g !== sculptGeom);
-  const dynamicMeshGeoms = geoms.filter(g => g.type === 'mesh' && g.dynamic && g !== sculptGeom);
-
-  const implicitGeoms = useMemo(() => {
-    if (!model || !mujoco || !model.geom_type) return [];
-    const list: any[] = [];
-    const ngeom = model.ngeom;
-    for (let i = 0; i < ngeom; i++) {
-      const name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM.value, i);
-      if (name && !knownGeomNames.has(name) && name !== 'floor') {
-        const typeId = model.geom_type[i];
-        let typeStr = 'sphere';
-        if (typeId === 2) typeStr = 'sphere';
-        else if (typeId === 3) typeStr = 'capsule';
-        else if (typeId === 4) typeStr = 'ellipsoid';
-        else if (typeId === 5) typeStr = 'cylinder';
-        else if (typeId === 6) typeStr = 'box';
-        else if (typeId === 7) typeStr = 'mesh';
-        
-        const offset = i * 4;
-        const color = model.geom_rgba 
-          ? Array.from(model.geom_rgba.slice(offset, offset + 4)) 
-          : [0.6, 0.4, 0.8, 1];
-
-        list.push({
-          providedGeomId: i,
-          name,
-          type: typeStr,
-          rgba: color,
-        });
-      }
-    }
-    return list;
-  }, [model, mujoco, knownGeomNames]);
-
-  return (
-    <>
-      {/* Primitive geoms and dynamic meshes live in a Z-up→Y-up rotated group */}
-      <group rotation={[-Math.PI / 2, 0, 0]}>
-        {primitiveGeoms.map(g => (
-          <DynamicGeom
-            key={g.name}
-            nodeId={g.nodeId}
-            name={g.name}
-            type={g.type}
-            color={g.rgba || [0.8,0.8,0.8,1]}
-            mujoco={mujoco}
-            model={model}
-            data={data}
-            selectedNodeId={selectedNodeId}
-            setSelectedNodeId={setSelectedNodeId}
-            staticBody={g.staticBody}
-          />
-        ))}
-        <StaticBoxInstances geoms={instancedBoxGeoms} model={model} data={data} mujoco={mujoco} setSelectedNodeId={setSelectedNodeId} />
-        {implicitGeoms.map(g => (
-          <DynamicGeom
-            key={g.name}
-            providedGeomId={g.providedGeomId}
-            name={g.name}
-            type={g.type}
-            color={g.rgba}
-            mujoco={mujoco}
-            model={model}
-            data={data}
-            selectedNodeId={selectedNodeId}
-            setSelectedNodeId={setSelectedNodeId}
-          />
-        ))}
-        {dynamicMeshGeoms.map(g => (
-          <DynamicGeom
-            key={g.name}
-            nodeId={g.nodeId}
-            name={g.name}
-            type={g.type}
-            color={g.rgba || [0.8,0.8,0.8,1]}
-            mujoco={mujoco}
-            model={model}
-            data={data}
-            selectedNodeId={selectedNodeId}
-            setSelectedNodeId={setSelectedNodeId}
-            vertices={g.renderVertices}
-            faces={g.faces}
-            dynamic={true}
-            staticBody={g.staticBody}
-          />
-        ))}
-        {sculptGeom && (
-          <SculptSurface
-            key={`${sculptGeom.nodeId}:${sculptVersion}`}
-            nodeId={sculptGeom.nodeId}
-            geomName={sculptGeom.name}
-            color={sculptGeom.rgba || [0.82, 0.72, 0.62, 1]}
-            mujoco={mujoco}
-            model={model}
-            data={data}
-            renderVertices={sculptGeom.renderVertices || []}
-            faces={sculptGeom.faces || []}
-          />
-        )}
-        <PulleyRopesRenderer model={model} data={data} mujoco={mujoco} sceneGraph={sceneGraph} />
-        <CsgNegativeGhosts model={model} data={data} mujoco={mujoco} sceneGraph={sceneGraph} selectedNodeId={selectedNodeId} />
-        <MouseDragForceRenderer model={model} data={data} mujoco={mujoco} />
-        <CurveControlHandles />
-        <PrintAnalysisOverlay activeSpotId={activeWeakSpot?.id} onSelectSpot={setActiveWeakSpot} />
-      </group>
-      {/* Static mesh geoms: vertices already in Three.js Y-up space, no rotation needed */}
-      {staticMeshGeoms.map(g => (
-        <DynamicGeom
-          key={g.name}
-          nodeId={g.nodeId}
-          name={g.name}
-          type={g.type}
-          color={g.rgba || [0.8,0.8,0.8,1]}
-          mujoco={mujoco}
-          model={model}
-          data={data}
-          selectedNodeId={selectedNodeId}
-          setSelectedNodeId={setSelectedNodeId}
-          vertices={g.vertices}
-          faces={g.faces}
-        />
-      ))}
-    </>
-  );
-};
 
 const CAMERA_CONFIG = { position: [0.8, 0.6, 0.8] as [number, number, number], fov: 45 };
 
@@ -3802,7 +2264,7 @@ function App() {
 
             {/* GitHub */}
             <a
-              href="https://github.com/physbox-io/physicssim"
+              href="https://github.com/physbox-io/mesh"
               target="_blank"
               rel="noopener noreferrer"
               className="flex items-center justify-center w-8 h-8 rounded-full border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors focus:outline-none flex-shrink-0 cursor-pointer shadow-xs"
@@ -3829,27 +2291,27 @@ function App() {
             </h3>
             <div className="flex flex-col gap-4">
               <div className="flex flex-col gap-1">
-                <label className="text-xs font-medium text-slate-500 dark:text-slate-400 flex justify-between">Gravity Z <span>{gravityZ.toFixed(1)} m/s²</span></label>
+                <label className="text-xs font-medium text-slate-500 dark:text-slate-400 flex justify-between">Gravity Z <SliderValue value={gravityZ} onChange={(v) => setEnvironment({gravityZ: v})} decimals={1} unit="m/s²" min={-20} max={20} /></label>
                 <input type="range" min="-20" max="20" step="0.1" value={gravityZ} onChange={(e) => setEnvironment({gravityZ: parseFloat(e.target.value)})} className="w-full accent-blue-500 cursor-pointer" />
               </div>
               <div className="flex flex-col gap-1">
-                <label className="text-xs font-medium text-slate-500 dark:text-slate-400 flex justify-between">Wind X <span>{windX.toFixed(1)} m/s</span></label>
+                <label className="text-xs font-medium text-slate-500 dark:text-slate-400 flex justify-between">Wind X <SliderValue value={windX} onChange={(v) => setEnvironment({windX: v})} decimals={1} unit="m/s" min={-10} max={10} /></label>
                 <input type="range" min="-10" max="10" step="0.1" value={windX} onChange={(e) => setEnvironment({windX: parseFloat(e.target.value)})} className="w-full accent-blue-500 cursor-pointer" />
               </div>
               <div className="flex flex-col gap-1">
-                <label className="text-xs font-medium text-slate-500 dark:text-slate-400 flex justify-between">Wind Y <span>{windY.toFixed(1)} m/s</span></label>
+                <label className="text-xs font-medium text-slate-500 dark:text-slate-400 flex justify-between">Wind Y <SliderValue value={windY} onChange={(v) => setEnvironment({windY: v})} decimals={1} unit="m/s" min={-10} max={10} /></label>
                 <input type="range" min="-10" max="10" step="0.1" value={windY} onChange={(e) => setEnvironment({windY: parseFloat(e.target.value)})} className="w-full accent-blue-500 cursor-pointer" />
               </div>
               <div className="flex flex-col gap-1">
-                <label className="text-xs font-medium text-slate-500 dark:text-slate-400 flex justify-between">Air Density (Drag) <span>{density.toFixed(2)} kg/m³</span></label>
+                <label className="text-xs font-medium text-slate-500 dark:text-slate-400 flex justify-between">Air Density (Drag) <SliderValue value={density} onChange={(v) => setEnvironment({density: v})} decimals={2} unit="kg/m³" min={0} max={5} /></label>
                 <input type="range" min="0" max="5" step="0.01" value={density} onChange={(e) => setEnvironment({density: parseFloat(e.target.value)})} className="w-full accent-blue-500 cursor-pointer" />
               </div>
               <div className="flex flex-col gap-1">
-                <label className="text-xs font-medium text-slate-500 dark:text-slate-400 flex justify-between">Floor Friction <span>{floorFriction.toFixed(2)}</span></label>
+                <label className="text-xs font-medium text-slate-500 dark:text-slate-400 flex justify-between">Floor Friction <SliderValue value={floorFriction} onChange={(v) => setEnvironment({floorFriction: v})} decimals={2} min={0} max={2} /></label>
                 <input type="range" min="0" max="2" step="0.01" value={floorFriction} onChange={(e) => setEnvironment({floorFriction: parseFloat(e.target.value)})} className="w-full accent-blue-500 cursor-pointer" />
               </div>
               <div className="flex flex-col gap-1">
-                <label className="text-xs font-medium text-slate-500 dark:text-slate-400 flex justify-between">Floor Bounciness <span>{(floorBounce ?? 0).toFixed(2)}</span></label>
+                <label className="text-xs font-medium text-slate-500 dark:text-slate-400 flex justify-between">Floor Bounciness <SliderValue value={floorBounce ?? 0} onChange={(v) => setEnvironment({floorBounce: v})} decimals={2} min={0} max={1} /></label>
                 <input type="range" min="0" max="1" step="0.01" value={floorBounce ?? 0} onChange={(e) => setEnvironment({floorBounce: parseFloat(e.target.value)})} className="w-full accent-blue-500 cursor-pointer" />
               </div>
               <div className="pt-2.5 border-t border-slate-200 dark:border-slate-800 flex flex-col gap-2.5">
@@ -4786,19 +3248,13 @@ function App() {
                   <div className="flex flex-col gap-1.5">
                     <div className="flex items-center justify-between">
                       <label className="text-xs text-slate-500 font-medium">X Position</label>
-                      <div className="flex items-center gap-1">
-                        <input 
-                          type="number"
-                          step="0.001"
-                          className="w-20 px-1.5 py-0.5 border border-slate-200 dark:border-slate-700 rounded text-xs font-mono text-right outline-none focus:border-blue-500 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100"
-                          value={Number(selectedNode.pos[0].toFixed(3))}
-                          onChange={(e) => {
-                            const val = parseFloat(e.target.value);
-                            if (!isNaN(val)) handleMove(0, val);
-                          }}
-                        />
-                        <span className="text-[10px] font-mono text-slate-400">m</span>
-                      </div>
+                      <SliderValue
+                        value={selectedNode.pos[0]}
+                        onChange={(v) => handleMove(0, v)}
+                        decimals={3}
+                        unit="m"
+                        className="text-xs text-slate-500"
+                      />
                     </div>
                     <input 
                       type="range" 
@@ -4813,19 +3269,13 @@ function App() {
                   <div className="flex flex-col gap-1.5">
                     <div className="flex items-center justify-between">
                       <label className="text-xs text-slate-500 font-medium">Y Position</label>
-                      <div className="flex items-center gap-1">
-                        <input 
-                          type="number"
-                          step="0.001"
-                          className="w-20 px-1.5 py-0.5 border border-slate-200 dark:border-slate-700 rounded text-xs font-mono text-right outline-none focus:border-blue-500 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100"
-                          value={Number(selectedNode.pos[1].toFixed(3))}
-                          onChange={(e) => {
-                            const val = parseFloat(e.target.value);
-                            if (!isNaN(val)) handleMove(1, val);
-                          }}
-                        />
-                        <span className="text-[10px] font-mono text-slate-400">m</span>
-                      </div>
+                      <SliderValue
+                        value={selectedNode.pos[1]}
+                        onChange={(v) => handleMove(1, v)}
+                        decimals={3}
+                        unit="m"
+                        className="text-xs text-slate-500"
+                      />
                     </div>
                     <input 
                       type="range" 
@@ -4852,19 +3302,13 @@ function App() {
                             Z Position (Height)
                             {centroidZ > 0 ? <span className="text-slate-300 text-[10px]">(+{centroidZ.toFixed(3)} centroid)</span> : null}
                           </label>
-                          <div className="flex items-center gap-1">
-                            <input 
-                              type="number"
-                              step="0.001"
-                              className="w-20 px-1.5 py-0.5 border border-slate-200 dark:border-slate-700 rounded text-xs font-mono text-right outline-none focus:border-blue-500 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100"
-                              value={Number(displayZ.toFixed(3))}
-                              onChange={(e) => {
-                                const val = parseFloat(e.target.value);
-                                if (!isNaN(val)) handleMove(2, val + centroidZ);
-                              }}
-                            />
-                            <span className="text-[10px] font-mono text-slate-400">m</span>
-                          </div>
+                          <SliderValue
+                            value={displayZ}
+                            onChange={(v) => handleMove(2, v + centroidZ)}
+                            decimals={3}
+                            unit="m"
+                            className="text-xs text-slate-500"
+                          />
                         </div>
                         <input
                           type="range"
@@ -4895,7 +3339,7 @@ function App() {
                   </div>
                   <div className="flex flex-col gap-1.5 mt-1 border-t border-slate-100 pt-2">
                     <label className="text-xs text-slate-500 flex items-center justify-between font-medium">X Rotation
-                      <span>{getStickyRotation(selectedNode.euler ? selectedNode.euler[0] : 0).toFixed(0)}°</span>
+                      <SliderValue value={getStickyRotation(selectedNode.euler ? selectedNode.euler[0] : 0)} onChange={(v) => updateNodeRotation(selectedNode.id, 0, v)} decimals={0} unit="°" min={0} max={360} />
                     </label>
                     <input 
                       type="range" 
@@ -4909,7 +3353,7 @@ function App() {
                   </div>
                   <div className="flex flex-col gap-1.5 mt-1">
                     <label className="text-xs text-slate-500 flex items-center justify-between font-medium">Y Rotation
-                      <span>{getStickyRotation(selectedNode.euler ? selectedNode.euler[1] : 0).toFixed(0)}°</span>
+                      <SliderValue value={getStickyRotation(selectedNode.euler ? selectedNode.euler[1] : 0)} onChange={(v) => updateNodeRotation(selectedNode.id, 1, v)} decimals={0} unit="°" min={0} max={360} />
                     </label>
                     <input 
                       type="range" 
@@ -4923,7 +3367,7 @@ function App() {
                   </div>
                   <div className="flex flex-col gap-1.5 mt-1">
                     <label className="text-xs text-slate-500 flex items-center justify-between font-medium">Z Rotation
-                      <span>{getStickyRotation(selectedNode.euler ? selectedNode.euler[2] : 0).toFixed(0)}°</span>
+                      <SliderValue value={getStickyRotation(selectedNode.euler ? selectedNode.euler[2] : 0)} onChange={(v) => updateNodeRotation(selectedNode.id, 2, v)} decimals={0} unit="°" min={0} max={360} />
                     </label>
                     <input 
                       type="range" 
@@ -5145,7 +3589,10 @@ function App() {
                         className="w-full accent-blue-500 cursor-pointer" 
                       />
                       <label className="text-xs font-medium text-slate-500 flex justify-between mt-2">
-                        Gear Radius <span>{gearRadius.toFixed(2)} m</span>
+                        Gear Radius <SliderValue value={gearRadius} onChange={(v) => {
+                          const r = v;
+                          updateNodeGeom(selectedNode.id, { size: [r, selectedNode.geoms[0].size[1]] });
+                        }} decimals={2} unit="m" min={0.05} max={5.0} />
                       </label>
                       <input 
                         type="range" 
@@ -5165,7 +3612,10 @@ function App() {
                       <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-2">
                         <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 mb-1">📍 Pusher Peg Properties</h3>
                         <label className="text-xs font-medium text-slate-500 flex justify-between">
-                          Peg Offset (Radius) <span>{pegGeom.pos[0].toFixed(2)} m</span>
+                          Peg Offset (Radius) <SliderValue value={pegGeom.pos[0]} onChange={(v) => {
+                            const offsetVal = v;
+                            updatePusherPeg(selectedNode.id, { offset: offsetVal });
+                          }} decimals={2} unit="m" min={0.01} max={5.0} />
                         </label>
                         <input 
                           type="range" 
@@ -5180,7 +3630,10 @@ function App() {
                           className="w-full accent-blue-500 cursor-pointer" 
                         />
                         <label className="text-xs font-medium text-slate-500 flex justify-between mt-2">
-                          Peg Thickness <span>{pegGeom.size[0].toFixed(3)} m</span>
+                          Peg Thickness <SliderValue value={pegGeom.size[0]} onChange={(v) => {
+                            const rVal = v;
+                            updatePusherPeg(selectedNode.id, { size: [rVal, pegGeom.size[1]] });
+                          }} decimals={3} unit="m" min={0.005} max={0.5} />
                         </label>
                         <input 
                           type="range" 
@@ -5195,7 +3648,10 @@ function App() {
                           className="w-full accent-blue-500 cursor-pointer" 
                         />
                         <label className="text-xs font-medium text-slate-500 flex justify-between mt-2">
-                          Peg Length <span>{pegGeom.size[1].toFixed(2)} m</span>
+                          Peg Length <SliderValue value={pegGeom.size[1]} onChange={(v) => {
+                            const hVal = v;
+                            updatePusherPeg(selectedNode.id, { size: [pegGeom.size[0], hVal] });
+                          }} decimals={2} unit="m" min={0.01} max={1.0} />
                         </label>
                         <input 
                           type="range" 
@@ -5237,7 +3693,7 @@ function App() {
                         <span className="flex items-center gap-1">🔗 Joint Damping</span>
                         <DocsInfoButton tab="damping" onOpen={openDocs} />
                       </h3>
-                      <label className="text-xs font-medium text-slate-500 flex justify-between">Damping <span>{(joint.damping !== undefined ? joint.damping : 0.0).toFixed(2)}</span></label>
+                      <label className="text-xs font-medium text-slate-500 flex justify-between">Damping <SliderValue value={joint.damping !== undefined ? joint.damping : 0.0} onChange={(v) => updateNodeJoint(selectedNode.id, {damping: v})} decimals={2} min={0} /></label>
                       <input 
                         type="range" 
                         min="0" 
@@ -5259,7 +3715,7 @@ function App() {
                       
                       <div className="flex flex-col gap-1">
                         <label className="text-xs font-medium text-slate-500 flex justify-between">
-                          Spring Stiffness (K) <span>{(joint.stiffness || 0).toFixed(0)} N/m</span>
+                          Spring Stiffness (K) <SliderValue value={joint.stiffness || 0} onChange={(v) => updateNodeJoint(selectedNode.id, { stiffness: v })} decimals={0} unit="N/m" min={0} max={5000} />
                         </label>
                         <input 
                           type="range" 
@@ -5502,13 +3958,16 @@ function App() {
                         
                         {geom.type === 'sphere' && (
                           <div className="flex flex-col gap-2">
-                            <label className="text-xs font-medium text-slate-500 flex justify-between">Radius <span>{geom.size[0].toFixed(2)} m</span></label>
-                            <input 
+                            <label className="text-xs font-medium text-slate-500 flex justify-between">Radius <SliderValue value={geom.size[0]} onChange={(v) => {
+                                const r = v;
+                                updateNodeGeom(selectedNode.id, { size: [r] }, activeIndex);
+                              }} decimals={2} unit="m" min={0.05} max={2.0} /></label>
+                            <input
                               type="range" 
                               min="0.05" 
                               max="2.0" 
                               step="0.01" 
-                              value={geom.size[0]} 
+                              value={geom.size[0]}
                               onChange={(e) => {
                                 const r = parseFloat(e.target.value);
                                 updateNodeGeom(selectedNode.id, { size: [r] }, activeIndex);
@@ -5521,13 +3980,16 @@ function App() {
                         {geom.type === 'box' && selectedNode.isWedge && (
                           <div className="flex flex-col gap-3">
                             <div className="flex flex-col gap-1">
-                              <label className="text-xs font-medium text-slate-500 flex justify-between">Base Width (X) <span>{(selectedNode.width || 2.0).toFixed(2)} m</span></label>
-                              <input 
+                              <label className="text-xs font-medium text-slate-500 flex justify-between">Base Width (X) <SliderValue value={selectedNode.width || 2.0} onChange={(v) => {
+                                  const val = v;
+                                  updateWedgeParams(selectedNode.id, { width: val });
+                                }} decimals={2} unit="m" min={0.5} max={5.0} /></label>
+                              <input
                                 type="range" 
                                 min="0.5" 
                                 max="5.0" 
                                 step="0.05" 
-                                value={selectedNode.width || 2.0} 
+                                value={selectedNode.width || 2.0}
                                 onChange={(e) => {
                                   const val = parseFloat(e.target.value);
                                   updateWedgeParams(selectedNode.id, { width: val });
@@ -5536,13 +3998,16 @@ function App() {
                               />
                             </div>
                             <div className="flex flex-col gap-1">
-                              <label className="text-xs font-medium text-slate-500 flex justify-between">Depth (Y) <span>{(selectedNode.depth || 1.0).toFixed(2)} m</span></label>
-                              <input 
+                              <label className="text-xs font-medium text-slate-500 flex justify-between">Depth (Y) <SliderValue value={selectedNode.depth || 1.0} onChange={(v) => {
+                                  const val = v;
+                                  updateWedgeParams(selectedNode.id, { depth: val });
+                                }} decimals={2} unit="m" min={0.2} max={4.0} /></label>
+                              <input
                                 type="range" 
                                 min="0.2" 
                                 max="4.0" 
                                 step="0.05" 
-                                value={selectedNode.depth || 1.0} 
+                                value={selectedNode.depth || 1.0}
                                 onChange={(e) => {
                                   const val = parseFloat(e.target.value);
                                   updateWedgeParams(selectedNode.id, { depth: val });
@@ -5551,13 +4016,16 @@ function App() {
                               />
                             </div>
                             <div className="flex flex-col gap-1">
-                              <label className="text-xs font-medium text-slate-500 flex justify-between">Height (Z) <span>{(selectedNode.height || 0.5).toFixed(2)} m</span></label>
-                              <input 
+                              <label className="text-xs font-medium text-slate-500 flex justify-between">Height (Z) <SliderValue value={selectedNode.height || 0.5} onChange={(v) => {
+                                  const val = v;
+                                  updateWedgeParams(selectedNode.id, { height: val });
+                                }} decimals={2} unit="m" min={0.1} max={3.0} /></label>
+                              <input
                                 type="range" 
                                 min="0.1" 
                                 max="3.0" 
                                 step="0.05" 
-                                value={selectedNode.height || 0.5} 
+                                value={selectedNode.height || 0.5}
                                 onChange={(e) => {
                                   const val = parseFloat(e.target.value);
                                   updateWedgeParams(selectedNode.id, { height: val });
@@ -5566,13 +4034,16 @@ function App() {
                               />
                             </div>
                             <div className="flex flex-col gap-1 border-t border-slate-100 pt-2">
-                              <label className="text-xs font-medium text-slate-600 flex justify-between">Wedge Angle <span>{(selectedNode.wedgeAngle !== undefined ? selectedNode.wedgeAngle : 14.036).toFixed(1)}°</span></label>
-                              <input 
+                              <label className="text-xs font-medium text-slate-600 flex justify-between">Wedge Angle <SliderValue value={selectedNode.wedgeAngle !== undefined ? selectedNode.wedgeAngle : 14.036} onChange={(v) => {
+                                  const val = v;
+                                  updateWedgeParams(selectedNode.id, { wedgeAngle: val });
+                                }} decimals={1} unit="°" min={2} max={85} /></label>
+                              <input
                                 type="range" 
                                 min="2" 
                                 max="85" 
                                 step="1" 
-                                value={selectedNode.wedgeAngle !== undefined ? selectedNode.wedgeAngle : 14.036} 
+                                value={selectedNode.wedgeAngle !== undefined ? selectedNode.wedgeAngle : 14.036}
                                 onChange={(e) => {
                                   const val = parseFloat(e.target.value);
                                   updateWedgeParams(selectedNode.id, { wedgeAngle: val });
@@ -5586,13 +4057,16 @@ function App() {
                         {selectedNode.isPyramid && (
                           <div className="flex flex-col gap-3">
                             <div className="flex flex-col gap-1">
-                              <label className="text-xs font-medium text-slate-500 flex justify-between">Base Width (X) <span>{(selectedNode.width || 0.5).toFixed(2)} m</span></label>
-                              <input 
+                              <label className="text-xs font-medium text-slate-500 flex justify-between">Base Width (X) <SliderValue value={selectedNode.width || 0.5} onChange={(v) => {
+                                  const val = v;
+                                  updatePyramidParams(selectedNode.id, { width: val });
+                                }} decimals={2} unit="m" min={0.1} max={3.0} /></label>
+                              <input
                                 type="range" 
                                 min="0.1" 
                                 max="3.0" 
                                 step="0.01" 
-                                value={selectedNode.width || 0.5} 
+                                value={selectedNode.width || 0.5}
                                 onChange={(e) => {
                                   const val = parseFloat(e.target.value);
                                   updatePyramidParams(selectedNode.id, { width: val });
@@ -5601,13 +4075,16 @@ function App() {
                               />
                             </div>
                             <div className="flex flex-col gap-1">
-                              <label className="text-xs font-medium text-slate-500 flex justify-between">Base Depth (Y) <span>{(selectedNode.depth || 0.5).toFixed(2)} m</span></label>
-                              <input 
+                              <label className="text-xs font-medium text-slate-500 flex justify-between">Base Depth (Y) <SliderValue value={selectedNode.depth || 0.5} onChange={(v) => {
+                                  const val = v;
+                                  updatePyramidParams(selectedNode.id, { depth: val });
+                                }} decimals={2} unit="m" min={0.1} max={3.0} /></label>
+                              <input
                                 type="range" 
                                 min="0.1" 
                                 max="3.0" 
                                 step="0.01" 
-                                value={selectedNode.depth || 0.5} 
+                                value={selectedNode.depth || 0.5}
                                 onChange={(e) => {
                                   const val = parseFloat(e.target.value);
                                   updatePyramidParams(selectedNode.id, { depth: val });
@@ -5616,13 +4093,16 @@ function App() {
                               />
                             </div>
                             <div className="flex flex-col gap-1">
-                              <label className="text-xs font-medium text-slate-500 flex justify-between">Height (Z) <span>{(selectedNode.height || 0.5).toFixed(2)} m</span></label>
-                              <input 
+                              <label className="text-xs font-medium text-slate-500 flex justify-between">Height (Z) <SliderValue value={selectedNode.height || 0.5} onChange={(v) => {
+                                  const val = v;
+                                  updatePyramidParams(selectedNode.id, { height: val });
+                                }} decimals={2} unit="m" min={0.1} max={3.0} /></label>
+                              <input
                                 type="range" 
                                 min="0.1" 
                                 max="3.0" 
                                 step="0.01" 
-                                value={selectedNode.height || 0.5} 
+                                value={selectedNode.height || 0.5}
                                 onChange={(e) => {
                                   const val = parseFloat(e.target.value);
                                   updatePyramidParams(selectedNode.id, { height: val });
@@ -5636,13 +4116,16 @@ function App() {
                         {selectedNode.isCone && (
                           <div className="flex flex-col gap-3">
                             <div className="flex flex-col gap-1">
-                              <label className="text-xs font-medium text-slate-500 flex justify-between">Radius <span>{(selectedNode.radius || 0.3).toFixed(2)} m</span></label>
-                              <input 
+                              <label className="text-xs font-medium text-slate-500 flex justify-between">Radius <SliderValue value={selectedNode.radius || 0.3} onChange={(v) => {
+                                  const val = v;
+                                  updateConeParams(selectedNode.id, { radius: val });
+                                }} decimals={2} unit="m" min={0.05} max={2.0} /></label>
+                              <input
                                 type="range" 
                                 min="0.05" 
                                 max="2.0" 
                                 step="0.01" 
-                                value={selectedNode.radius || 0.3} 
+                                value={selectedNode.radius || 0.3}
                                 onChange={(e) => {
                                   const val = parseFloat(e.target.value);
                                   updateConeParams(selectedNode.id, { radius: val });
@@ -5651,13 +4134,16 @@ function App() {
                               />
                             </div>
                             <div className="flex flex-col gap-1">
-                              <label className="text-xs font-medium text-slate-500 flex justify-between">Height <span>{(selectedNode.height || 0.6).toFixed(2)} m</span></label>
-                              <input 
+                              <label className="text-xs font-medium text-slate-500 flex justify-between">Height <SliderValue value={selectedNode.height || 0.6} onChange={(v) => {
+                                  const val = v;
+                                  updateConeParams(selectedNode.id, { height: val });
+                                }} decimals={2} unit="m" min={0.1} max={3.0} /></label>
+                              <input
                                 type="range" 
                                 min="0.1" 
                                 max="3.0" 
                                 step="0.01" 
-                                value={selectedNode.height || 0.6} 
+                                value={selectedNode.height || 0.6}
                                 onChange={(e) => {
                                   const val = parseFloat(e.target.value);
                                   updateConeParams(selectedNode.id, { height: val });
@@ -5671,13 +4157,16 @@ function App() {
                         {selectedNode.isTorus && (
                           <div className="flex flex-col gap-3">
                             <div className="flex flex-col gap-1">
-                              <label className="text-xs font-medium text-slate-500 flex justify-between">Major Radius (Ring) <span>{(selectedNode.majorRadius || 0.4).toFixed(2)} m</span></label>
-                              <input 
+                              <label className="text-xs font-medium text-slate-500 flex justify-between">Major Radius (Ring) <SliderValue value={selectedNode.majorRadius || 0.4} onChange={(v) => {
+                                  const val = v;
+                                  updateTorusParams(selectedNode.id, { majorRadius: val });
+                                }} decimals={2} unit="m" min={0.1} max={3.0} /></label>
+                              <input
                                 type="range" 
                                 min="0.1" 
                                 max="3.0" 
                                 step="0.01" 
-                                value={selectedNode.majorRadius || 0.4} 
+                                value={selectedNode.majorRadius || 0.4}
                                 onChange={(e) => {
                                   const val = parseFloat(e.target.value);
                                   updateTorusParams(selectedNode.id, { majorRadius: val });
@@ -5686,13 +4175,16 @@ function App() {
                               />
                             </div>
                             <div className="flex flex-col gap-1">
-                              <label className="text-xs font-medium text-slate-500 flex justify-between">Tube Radius <span>{(selectedNode.tubeRadius || 0.1).toFixed(2)} m</span></label>
-                              <input 
+                              <label className="text-xs font-medium text-slate-500 flex justify-between">Tube Radius <SliderValue value={selectedNode.tubeRadius || 0.1} onChange={(v) => {
+                                  const val = v;
+                                  updateTorusParams(selectedNode.id, { tubeRadius: val });
+                                }} decimals={2} unit="m" min={0.02} max={1.0} /></label>
+                              <input
                                 type="range" 
                                 min="0.02" 
                                 max="1.0" 
                                 step="0.01" 
-                                value={selectedNode.tubeRadius || 0.1} 
+                                value={selectedNode.tubeRadius || 0.1}
                                 onChange={(e) => {
                                   const val = parseFloat(e.target.value);
                                   updateTorusParams(selectedNode.id, { tubeRadius: val });
@@ -5706,7 +4198,10 @@ function App() {
                         {selectedNode.isTube && (
                           <div className="flex flex-col gap-3">
                             <div className="flex flex-col gap-1">
-                              <label className="text-xs font-medium text-slate-500 flex justify-between">Inner Radius <span>{(selectedNode.innerRadius || 0.2).toFixed(2)} m</span></label>
+                              <label className="text-xs font-medium text-slate-500 flex justify-between">Inner Radius <SliderValue value={selectedNode.innerRadius || 0.2} onChange={(v) => {
+                                  const val = v;
+                                  updateTubeParams(selectedNode.id, { innerRadius: val });
+                                }} decimals={2} unit="m" min={0.02} /></label>
                               <input 
                                 type="range" 
                                 min="0.02" 
@@ -5721,7 +4216,10 @@ function App() {
                               />
                             </div>
                             <div className="flex flex-col gap-1">
-                              <label className="text-xs font-medium text-slate-500 flex justify-between">Outer Radius <span>{(selectedNode.outerRadius || 0.3).toFixed(2)} m</span></label>
+                              <label className="text-xs font-medium text-slate-500 flex justify-between">Outer Radius <SliderValue value={selectedNode.outerRadius || 0.3} onChange={(v) => {
+                                  const val = v;
+                                  updateTubeParams(selectedNode.id, { outerRadius: val });
+                                }} decimals={2} unit="m" max={2.0} /></label>
                               <input 
                                 type="range" 
                                 min={selectedNode.innerRadius ? selectedNode.innerRadius + 0.01 : 0.21} 
@@ -5736,13 +4234,16 @@ function App() {
                               />
                             </div>
                             <div className="flex flex-col gap-1">
-                              <label className="text-xs font-medium text-slate-500 flex justify-between">Height (Z) <span>{(selectedNode.height || 0.5).toFixed(2)} m</span></label>
-                              <input 
+                              <label className="text-xs font-medium text-slate-500 flex justify-between">Height (Z) <SliderValue value={selectedNode.height || 0.5} onChange={(v) => {
+                                  const val = v;
+                                  updateTubeParams(selectedNode.id, { height: val });
+                                }} decimals={2} unit="m" min={0.1} max={3.0} /></label>
+                              <input
                                 type="range" 
                                 min="0.1" 
                                 max="3.0" 
                                 step="0.01" 
-                                value={selectedNode.height || 0.5} 
+                                value={selectedNode.height || 0.5}
                                 onChange={(e) => {
                                   const val = parseFloat(e.target.value);
                                   updateTubeParams(selectedNode.id, { height: val });
@@ -5756,7 +4257,10 @@ function App() {
                         {selectedNode.isCurve && (
                           <div className="flex flex-col gap-3">
                             <div className="flex flex-col gap-1">
-                              <label className="text-xs font-medium text-slate-500 flex justify-between">Track Width <span>{(selectedNode.curveWidth || 0.5).toFixed(2)} m</span></label>
+                              <label className="text-xs font-medium text-slate-500 flex justify-between">Track Width <SliderValue value={selectedNode.curveWidth || 0.5} onChange={(v) => {
+                                  const val = v;
+                                  updateCurveParams(selectedNode.id, { width: val });
+                                }} decimals={2} unit="m" min={0.1} max={2.0} /></label>
                               <input
                                 type="range"
                                 min="0.1"
@@ -5771,7 +4275,10 @@ function App() {
                               />
                             </div>
                             <div className="flex flex-col gap-1">
-                              <label className="text-xs font-medium text-slate-500 flex justify-between">Thickness <span>{(selectedNode.curveThickness || 0.06).toFixed(2)} m</span></label>
+                              <label className="text-xs font-medium text-slate-500 flex justify-between">Thickness <SliderValue value={selectedNode.curveThickness || 0.06} onChange={(v) => {
+                                  const val = v;
+                                  updateCurveParams(selectedNode.id, { thickness: val });
+                                }} decimals={2} unit="m" min={0.02} max={0.4} /></label>
                               <input
                                 type="range"
                                 min="0.02"
@@ -5801,7 +4308,10 @@ function App() {
                               />
                             </div>
                             <div className="flex flex-col gap-1">
-                              <label className="text-xs font-medium text-slate-500 flex justify-between">Bank Angle <span>{(selectedNode.curveBank || 0).toFixed(0)}°</span></label>
+                              <label className="text-xs font-medium text-slate-500 flex justify-between">Bank Angle <SliderValue value={selectedNode.curveBank || 0} onChange={(v) => {
+                                  const val = v;
+                                  updateCurveParams(selectedNode.id, { bank: val });
+                                }} decimals={0} unit="°" min={-45} max={45} /></label>
                               <input
                                 type="range"
                                 min="-45"
@@ -5882,13 +4392,16 @@ function App() {
                         {geom.type === 'ellipsoid' && (
                           <div className="flex flex-col gap-3">
                             <div className="flex flex-col gap-1">
-                              <label className="text-xs font-medium text-slate-500 flex justify-between">Radius X <span>{geom.size[0].toFixed(2)} m</span></label>
-                              <input 
+                              <label className="text-xs font-medium text-slate-500 flex justify-between">Radius X <SliderValue value={geom.size[0]} onChange={(v) => {
+                                  const val = v;
+                                  updateNodeGeom(selectedNode.id, { size: [val, geom.size[1], geom.size[2]] }, activeIndex);
+                                }} decimals={2} unit="m" min={0.05} max={2.0} /></label>
+                              <input
                                 type="range" 
                                 min="0.05" 
                                 max="2.0" 
                                 step="0.01" 
-                                value={geom.size[0]} 
+                                value={geom.size[0]}
                                 onChange={(e) => {
                                   const val = parseFloat(e.target.value);
                                   updateNodeGeom(selectedNode.id, { size: [val, geom.size[1], geom.size[2]] }, activeIndex);
@@ -5897,13 +4410,16 @@ function App() {
                               />
                             </div>
                             <div className="flex flex-col gap-1">
-                              <label className="text-xs font-medium text-slate-500 flex justify-between">Radius Y <span>{geom.size[1].toFixed(2)} m</span></label>
-                              <input 
+                              <label className="text-xs font-medium text-slate-500 flex justify-between">Radius Y <SliderValue value={geom.size[1]} onChange={(v) => {
+                                  const val = v;
+                                  updateNodeGeom(selectedNode.id, { size: [geom.size[0], val, geom.size[2]] }, activeIndex);
+                                }} decimals={2} unit="m" min={0.05} max={2.0} /></label>
+                              <input
                                 type="range" 
                                 min="0.05" 
                                 max="2.0" 
                                 step="0.01" 
-                                value={geom.size[1]} 
+                                value={geom.size[1]}
                                 onChange={(e) => {
                                   const val = parseFloat(e.target.value);
                                   updateNodeGeom(selectedNode.id, { size: [geom.size[0], val, geom.size[2]] }, activeIndex);
@@ -5912,13 +4428,16 @@ function App() {
                               />
                             </div>
                             <div className="flex flex-col gap-1">
-                              <label className="text-xs font-medium text-slate-500 flex justify-between">Radius Z <span>{geom.size[2].toFixed(2)} m</span></label>
-                              <input 
+                              <label className="text-xs font-medium text-slate-500 flex justify-between">Radius Z <SliderValue value={geom.size[2]} onChange={(v) => {
+                                  const val = v;
+                                  updateNodeGeom(selectedNode.id, { size: [geom.size[0], geom.size[1], val] }, activeIndex);
+                                }} decimals={2} unit="m" min={0.05} max={2.0} /></label>
+                              <input
                                 type="range" 
                                 min="0.05" 
                                 max="2.0" 
                                 step="0.01" 
-                                value={geom.size[2]} 
+                                value={geom.size[2]}
                                 onChange={(e) => {
                                   const val = parseFloat(e.target.value);
                                   updateNodeGeom(selectedNode.id, { size: [geom.size[0], geom.size[1], val] }, activeIndex);
@@ -5932,13 +4451,16 @@ function App() {
                         {geom.type === 'box' && !selectedNode.isWedge && (
                           <div className="flex flex-col gap-3">
                             <div className="flex flex-col gap-1">
-                              <label className="text-xs font-medium text-slate-500 flex justify-between">Width (X) <span>{geom.size[0].toFixed(2)} m</span></label>
-                              <input 
+                              <label className="text-xs font-medium text-slate-500 flex justify-between">Width (X) <SliderValue value={geom.size[0]} onChange={(v) => {
+                                  const val = v;
+                                  updateNodeGeom(selectedNode.id, { size: [val, geom.size[1], geom.size[2]] }, activeIndex);
+                                }} decimals={2} unit="m" min={0.05} max={2.0} /></label>
+                              <input
                                 type="range" 
                                 min="0.05" 
                                 max="2.0" 
                                 step="0.01" 
-                                value={geom.size[0]} 
+                                value={geom.size[0]}
                                 onChange={(e) => {
                                   const val = parseFloat(e.target.value);
                                   updateNodeGeom(selectedNode.id, { size: [val, geom.size[1], geom.size[2]] }, activeIndex);
@@ -5947,13 +4469,16 @@ function App() {
                               />
                             </div>
                             <div className="flex flex-col gap-1">
-                              <label className="text-xs font-medium text-slate-500 flex justify-between">Depth (Y) <span>{geom.size[1].toFixed(2)} m</span></label>
-                              <input 
+                              <label className="text-xs font-medium text-slate-500 flex justify-between">Depth (Y) <SliderValue value={geom.size[1]} onChange={(v) => {
+                                  const val = v;
+                                  updateNodeGeom(selectedNode.id, { size: [geom.size[0], val, geom.size[2]] }, activeIndex);
+                                }} decimals={2} unit="m" min={0.05} max={2.0} /></label>
+                              <input
                                 type="range" 
                                 min="0.05" 
                                 max="2.0" 
                                 step="0.01" 
-                                value={geom.size[1]} 
+                                value={geom.size[1]}
                                 onChange={(e) => {
                                   const val = parseFloat(e.target.value);
                                   updateNodeGeom(selectedNode.id, { size: [geom.size[0], val, geom.size[2]] }, activeIndex);
@@ -5962,13 +4487,16 @@ function App() {
                               />
                             </div>
                             <div className="flex flex-col gap-1">
-                              <label className="text-xs font-medium text-slate-500 flex justify-between">Height (Z) <span>{geom.size[2].toFixed(2)} m</span></label>
-                              <input 
+                              <label className="text-xs font-medium text-slate-500 flex justify-between">Height (Z) <SliderValue value={geom.size[2]} onChange={(v) => {
+                                  const val = v;
+                                  updateNodeGeom(selectedNode.id, { size: [geom.size[0], geom.size[1], val] }, activeIndex);
+                                }} decimals={2} unit="m" min={0.05} max={2.0} /></label>
+                              <input
                                 type="range" 
                                 min="0.05" 
                                 max="2.0" 
                                 step="0.01" 
-                                value={geom.size[2]} 
+                                value={geom.size[2]}
                                 onChange={(e) => {
                                   const val = parseFloat(e.target.value);
                                   updateNodeGeom(selectedNode.id, { size: [geom.size[0], geom.size[1], val] }, activeIndex);
@@ -5982,13 +4510,18 @@ function App() {
                         {(geom.type === 'capsule' || geom.type === 'cylinder') && !selectedNode.isPulleyWheel && (
                           <div className="flex flex-col gap-3">
                             <div className="flex flex-col gap-1">
-                              <label className="text-xs font-medium text-slate-500 flex justify-between">Radius <span>{geom.size[0].toFixed(3)} m</span></label>
-                              <input 
+                              <label className="text-xs font-medium text-slate-500 flex justify-between">Radius <SliderValue value={geom.size[0]} onChange={(v) => {
+                                  const val = v;
+                                  updateNodeGeom(selectedNode.id, { 
+                                    size: geom.size[1] !== undefined ? [val, geom.size[1]] : [val] 
+                                  }, activeIndex);
+                                }} decimals={3} unit="m" min={0.01} max={0.8} /></label>
+                              <input
                                 type="range" 
                                 min="0.01" 
                                 max="0.8" 
                                 step="0.005" 
-                                value={geom.size[0]} 
+                                value={geom.size[0]}
                                 onChange={(e) => {
                                   const val = parseFloat(e.target.value);
                                   updateNodeGeom(selectedNode.id, { 
@@ -6000,13 +4533,16 @@ function App() {
                             </div>
                             {geom.size[1] !== undefined && (
                               <div className="flex flex-col gap-1">
-                                <label className="text-xs font-medium text-slate-500 flex justify-between">Length (Half-Height) <span>{geom.size[1].toFixed(2)} m</span></label>
-                                <input 
+                                <label className="text-xs font-medium text-slate-500 flex justify-between">Length (Half-Height) <SliderValue value={geom.size[1]} onChange={(v) => {
+                                    const val = v;
+                                    updateNodeGeom(selectedNode.id, { size: [geom.size[0], val] }, activeIndex);
+                                  }} decimals={2} unit="m" min={0.05} max={3.0} /></label>
+                                <input
                                   type="range" 
                                   min="0.05" 
                                   max="3.0" 
                                   step="0.01" 
-                                  value={geom.size[1]} 
+                                  value={geom.size[1]}
                                   onChange={(e) => {
                                     const val = parseFloat(e.target.value);
                                     updateNodeGeom(selectedNode.id, { size: [geom.size[0], val] }, activeIndex);
@@ -6024,7 +4560,19 @@ function App() {
                               return (
                                 <div className="flex flex-col gap-1">
                                   <label className="text-xs font-medium text-slate-500 flex justify-between">
-                                    Length (Segment) <span>{currentLength.toFixed(2)} m</span>
+                                    Length (Segment) <SliderValue value={currentLength} onChange={(v) => {
+                                      const newVal = v;
+                                      const scale = newVal / currentLength;
+                                      const newFromto = [
+                                        geom.fromto[0],
+                                        geom.fromto[1],
+                                        geom.fromto[2],
+                                        geom.fromto[0] + dirX * scale,
+                                        geom.fromto[1] + dirY * scale,
+                                        geom.fromto[2] + dirZ * scale
+                                      ];
+                                      updateNodeGeom(selectedNode.id, { fromto: newFromto }, activeIndex);
+                                    }} decimals={2} unit="m" min={0.1} max={5.0} />
                                   </label>
                                   <input 
                                     type="range" 
@@ -6066,13 +4614,16 @@ function App() {
                           </h3>
                           <div className="flex flex-col gap-3">
                             <div className="flex flex-col gap-1">
-                              <label className="text-xs font-medium text-slate-500 flex justify-between">X Offset <span>{pos[0].toFixed(3)} m</span></label>
-                              <input 
+                              <label className="text-xs font-medium text-slate-500 flex justify-between">X Offset <SliderValue value={pos[0]} onChange={(v) => {
+                                  const val = v;
+                                  updateNodeGeom(selectedNode.id, { pos: [val, pos[1], pos[2]] }, activeIndex);
+                                }} decimals={3} unit="m" min={-1.0} max={1.0} /></label>
+                              <input
                                 type="range" 
                                 min="-1.0" 
                                 max="1.0" 
                                 step="0.005" 
-                                value={pos[0]} 
+                                value={pos[0]}
                                 onChange={(e) => {
                                   const val = parseFloat(e.target.value);
                                   updateNodeGeom(selectedNode.id, { pos: [val, pos[1], pos[2]] }, activeIndex);
@@ -6081,13 +4632,16 @@ function App() {
                               />
                             </div>
                             <div className="flex flex-col gap-1">
-                              <label className="text-xs font-medium text-slate-500 flex justify-between">Y Offset <span>{pos[1].toFixed(3)} m</span></label>
-                              <input 
+                              <label className="text-xs font-medium text-slate-500 flex justify-between">Y Offset <SliderValue value={pos[1]} onChange={(v) => {
+                                  const val = v;
+                                  updateNodeGeom(selectedNode.id, { pos: [pos[0], val, pos[2]] }, activeIndex);
+                                }} decimals={3} unit="m" min={-1.0} max={1.0} /></label>
+                              <input
                                 type="range" 
                                 min="-1.0" 
                                 max="1.0" 
                                 step="0.005" 
-                                value={pos[1]} 
+                                value={pos[1]}
                                 onChange={(e) => {
                                   const val = parseFloat(e.target.value);
                                   updateNodeGeom(selectedNode.id, { pos: [pos[0], val, pos[2]] }, activeIndex);
@@ -6096,13 +4650,16 @@ function App() {
                               />
                             </div>
                             <div className="flex flex-col gap-1">
-                              <label className="text-xs font-medium text-slate-500 flex justify-between">Z Offset <span>{pos[2].toFixed(3)} m</span></label>
-                              <input 
+                              <label className="text-xs font-medium text-slate-500 flex justify-between">Z Offset <SliderValue value={pos[2]} onChange={(v) => {
+                                  const val = v;
+                                  updateNodeGeom(selectedNode.id, { pos: [pos[0], pos[1], val] }, activeIndex);
+                                }} decimals={3} unit="m" min={-1.0} max={1.0} /></label>
+                              <input
                                 type="range" 
                                 min="-1.0" 
                                 max="1.0" 
                                 step="0.005" 
-                                value={pos[2]} 
+                                value={pos[2]}
                                 onChange={(e) => {
                                   const val = parseFloat(e.target.value);
                                   updateNodeGeom(selectedNode.id, { pos: [pos[0], pos[1], val] }, activeIndex);
@@ -6120,7 +4677,7 @@ function App() {
                         <span>Mass</span>
                         <DocsInfoButton tab="gravity" onOpen={openDocs} />
                       </h3>
-                      <label className="text-xs font-medium text-slate-500 flex justify-between">Value <span>{(geom.mass ?? 0).toFixed(2)} kg</span></label>
+                      <label className="text-xs font-medium text-slate-500 flex justify-between">Value <SliderValue value={geom.mass ?? 0} onChange={(v) => updateNodeGeom(selectedNode.id, {mass: v}, activeIndex)} decimals={2} unit="kg" min={0} max={50} /></label>
                       <input type="range" min="0" max="50" step="0.01" value={geom.mass ?? 0} onChange={(e) => updateNodeGeom(selectedNode.id, {mass: parseFloat(e.target.value)}, activeIndex)} className="w-full accent-blue-500 cursor-pointer" />
                       
                       {(() => {
@@ -6637,7 +5194,7 @@ function App() {
 
                         <div className="flex flex-col gap-1">
                           <label className="text-xs font-medium text-slate-500 flex justify-between">
-                            Total mass <span>{(selectedNode.csgMass ?? 1).toFixed(3)} kg</span>
+                            Total mass <SliderValue value={selectedNode.csgMass ?? 1} onChange={(v) => updateNode(selectedNode.id, { csgMass: v })} decimals={3} unit="kg" min={0.01} max={20} />
                           </label>
                           <input
                             type="range" min="0.01" max="20" step="0.01"
@@ -6911,7 +5468,10 @@ function App() {
                 <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-2">
                   <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 mb-1">🛞 Pulley Properties</h3>
                   <label className="text-xs font-medium text-slate-500 flex justify-between">
-                    Pulley Radius <span>{(selectedNode.pulleyRadius || 0.4).toFixed(2)} m</span>
+                    Pulley Radius <SliderValue value={selectedNode.pulleyRadius || 0.4} onChange={(v) => {
+                      const radVal = v;
+                      updatePulleyParams(selectedNode.id, { pulleyRadius: radVal });
+                    }} decimals={2} unit="m" min={0.15} max={1.5} />
                   </label>
                   <input 
                     type="range" 

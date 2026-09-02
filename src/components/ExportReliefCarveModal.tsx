@@ -1239,7 +1239,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
               >
                 <div className="flex items-center space-x-1.5">
                   <NumberInput
-                    step="10" min={10} max={2000}
+                    step={10} min={10} max={2000}
                     value={options.stockWidthMm}
                     onChange={(v) => set('stockWidthMm', v)}
                     className={`${inputClass} px-2`}
@@ -1247,7 +1247,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                   />
                   <span className="text-xs font-medium text-slate-400">&times;</span>
                   <NumberInput
-                    step="10" min={10} max={2000}
+                    step={10} min={10} max={2000}
                     value={options.stockDepthMm}
                     onChange={(v) => set('stockDepthMm', v)}
                     className={`${inputClass} px-2`}
@@ -1255,7 +1255,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                   />
                   <span className="text-xs font-medium text-slate-400">&times;</span>
                   <NumberInput
-                    step="1" min={1} max={300}
+                    step={1} min={1} max={300}
                     value={options.stockThicknessMm}
                     onChange={(v) => set('stockThicknessMm', v)}
                     className={`${inputClass} px-2`}
@@ -1300,7 +1300,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                 hint="How deep the lowest point of the carve sits below the top face. The model's whole height is compressed into this — that compression is what makes it a relief instead of a full 3D machining job."
               >
                 <NumberInput
-                  step="1" min={0.5} max={200}
+                  step={1} min={0.5} max={200}
                   value={options.carveDepthMm}
                   onChange={(v) => set('carveDepthMm', v)}
                   className={inputClass}
@@ -1356,7 +1356,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                 hint="How much the height is stretched relative to the plan when using Model Proportions. 1 is the model's own shape. Terrain wants more than that — real mountains over a map-sized plan are a flat board — but the exaggeration stays what you asked for instead of drifting with the stock size."
               >
                 <NumberInput
-                  step="0.5" min={0.01} max={100}
+                  step={0.5} min={0.01} max={100}
                   value={options.verticalExaggeration}
                   onChange={(v) => set('verticalExaggeration', v)}
                   className={inputClass}
@@ -1379,7 +1379,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                 hint="Manual plan-view scale. The relief depth is set separately, so changing this does not change how deep the carve goes."
               >
                 <NumberInput
-                  step="5" min={1} max={1000}
+                  step={5} min={1} max={1000}
                   disabled={options.fitMode !== 'manual'}
                   value={options.scalePercent}
                   onChange={(v) => set('scalePercent', v)}
@@ -1434,7 +1434,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                 hint="Diameter of the finishing cutter. It sets both the stepover and how much detail survives — nothing narrower than the bit can be cut. For a V-bit this is the diameter at the top of the cone, which is only reached at full depth."
               >
                 <NumberInput
-                  step="0.1" min={0.1} max={30}
+                  step={0.1} min={0.1} max={30}
                   value={options.finishingToolDiaMm}
                   onChange={(v) => set('finishingToolDiaMm', v)}
                   className={inputClass}
@@ -1464,7 +1464,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                 hint="Cutting edges on the bit. Feed rate is chip-per-tooth x flutes x RPM, so the same feed is twice the load per edge on a two-flute cutter as on a four — this is what the app checks the feedrate against, and it is written into the file's header so the right bit gets fitted."
               >
                 <NumberInput
-                  step="1" min={1} max={8} integer
+                  step={1} min={1} max={8} integer
                   value={options.finishingFlutes}
                   onChange={(v) => set('finishingFlutes', v)}
                   className={inputClass}
@@ -1497,7 +1497,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                 hint="Most depth one layered sweep may take. 0 uses the bit diameter. Ignored when the depth strategy is One Sweep."
               >
                 <NumberInput
-                  step="0.5" min={0} max={20}
+                  step={0.5} min={0} max={20}
                   allowEmpty
                   placeholder={String(derived.finishingStepdownMm)}
                   value={overrides.finishingStepdownMm ?? null}
@@ -1510,7 +1510,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                 hint="Spacing between passes, as a percentage of bit diameter. Lower is smoother and slower: 10% is a show surface, 40% leaves visible ridges you will have to sand."
               >
                 <NumberInput
-                  step="5" min={2} max={50}
+                  step={5} min={2} max={50}
                   allowEmpty
                   placeholder={String(derived.finishingStepoverPercent)}
                   value={overrides.finishingStepoverPercent ?? null}
@@ -1523,7 +1523,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                 hint="How fast the cutter travels through the finishing pass, in mm per minute."
               >
                 <NumberInput
-                  step="100" min={50} max={10000} integer
+                  step={100} min={50} max={10000} integer
                   allowEmpty
                   placeholder={String(derived.finishingFeedrate)}
                   value={overrides.finishingFeedrate ?? null}
@@ -1566,7 +1566,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                 hint="Rotates the raster off its axis. Blank follows the sweep axis — 0° for X, 90° for Y. On wood this is not cosmetic: passes running across the grain tear it, and 45° is the usual compromise when the grain and a feature's long axis disagree."
               >
                 <NumberInput
-                  step="5" min={-180} max={180}
+                  step={5} min={-180} max={180}
                   allowEmpty
                   disabled={!usesRasterAngle}
                   placeholder={String(options.finishingDirection === 'y' ? 90 : 0)}
@@ -1580,7 +1580,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                 hint="The slope at which the hybrid pattern hands over from raster to waterline. Lower sends more of the model to the waterline pass. 30-45° is the usual band."
               >
                 <NumberInput
-                  step="5" min={5} max={85} integer
+                  step={5} min={5} max={85} integer
                   disabled={options.finishingStrategy !== 'hybrid'}
                   value={options.finishingSteepAngleDeg}
                   onChange={(v) => set('finishingSteepAngleDeg', v ?? 35)}
@@ -1593,7 +1593,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                 hint="How fast the cutter is driven straight down into the material at the start of a pass. Slower than the cutting feedrate, because the tip of an end mill cuts badly."
               >
                 <NumberInput
-                  step="50" min={10} max={2000} integer
+                  step={50} min={10} max={2000} integer
                   allowEmpty
                   placeholder={String(derived.finishingPlungeRate)}
                   value={overrides.finishingPlungeRate ?? null}
@@ -1619,7 +1619,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                 hint="Diameter of the finishing bit above its flutes. 0 assumes the usual: bits under 3.175 mm are ground on a 3.175 mm blank, anything bigger is its own diameter."
               >
                 <NumberInput
-                  step="0.1" min={0} max={30}
+                  step={0.1} min={0} max={30}
                   value={options.finishingShankDiaMm}
                   onChange={(v) => set('finishingShankDiaMm', v)}
                   className={inputClass}
@@ -1631,7 +1631,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                 hint="How far up the finishing bit the cutting edges actually run — below this it cuts, above it only rubs. 0 assumes three diameters, which is about what catalogue bits carry."
               >
                 <NumberInput
-                  step="1" min={0} max={100}
+                  step={1} min={0} max={100}
                   value={options.finishingFluteLengthMm}
                   onChange={(v) => set('finishingFluteLengthMm', v)}
                   className={inputClass}
@@ -1643,7 +1643,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                 hint="Tip of the tool to the face of the collet nut. Together with the holder diameter it is what decides whether the nut clears a tall feature standing next to a deep cut. 0 leaves the holder unchecked."
               >
                 <NumberInput
-                  step="1" min={0} max={200}
+                  step={1} min={0} max={200}
                   value={options.toolStickoutMm}
                   onChange={(v) => set('toolStickoutMm', v)}
                   className={inputClass}
@@ -1655,7 +1655,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                 hint="Widest part of the collet nut or tool holder — about 19 mm for ER11, 28 mm for ER16. 0 leaves the holder unchecked."
               >
                 <NumberInput
-                  step="1" min={0} max={200}
+                  step={1} min={0} max={200}
                   value={options.holderDiaMm}
                   onChange={(v) => set('holderDiaMm', v)}
                   className={inputClass}
@@ -1668,7 +1668,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                 hint="How steeply the cutter descends into the material at the head of a pass. A bit cuts badly straight down — that is the move that snaps small ones — so it ramps in along the path instead, then backs up to clear what the ramp rode over. 0 goes back to plunging straight down."
               >
                 <NumberInput
-                  step="5" min={0} max={45}
+                  step={5} min={0} max={45}
                   value={options.leadInAngleDeg}
                   onChange={(v) => set('leadInAngleDeg', v)}
                   className={inputClass}
@@ -1681,7 +1681,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                 hint="Retract height above the stock's top face for moves between passes. It has to clear the clamps."
               >
                 <NumberInput
-                  step="1" min={1} max={100}
+                  step={1} min={1} max={100}
                   value={options.safeZ}
                   onChange={(v) => set('safeZ', v)}
                   className={inputClass}
@@ -1695,7 +1695,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                 hint="The speed to set before you press start. On a router with a dial rather than a controlled spindle the S word in the file does nothing at all, so this is a number you turn by hand — which is why the file writes it out as a comment and the machine panel repeats it. It comes from the material's surface speed and the finishing bit's diameter; Suggest tooling sets it."
               >
                 <NumberInput
-                  step="1000" min={0} max={60000} integer
+                  step={1000} min={0} max={60000} integer
                   allowEmpty
                   placeholder={String(derived.spindleRpm)}
                   value={overrides.spindleRpm ?? null}
@@ -1727,7 +1727,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                 hint="Diameter of the roughing mill. The roughing path is planned around a flat bottom — every layer is a flat floor at a fixed Z — so this pass wants a flat end mill and nothing else: a ball nose fitted here would leave the corner of every layer uncut and the finishing pass would find more material than it was told to expect. If the diameter differs from the finishing bit the job pauses for a tool change between the two passes."
               >
                 <NumberInput
-                  step="0.1" min={0.1} max={30}
+                  step={0.1} min={0.1} max={30}
                   disabled={!options.roughingEnabled}
                   value={options.roughingToolDiaMm}
                   onChange={(v) => set('roughingToolDiaMm', v)}
@@ -1775,7 +1775,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                 hint="Cutting edges on the roughing mill, used to check the feedrate makes a chip rather than a rub, and written into the file so the right bit is fitted."
               >
                 <NumberInput
-                  step="1" min={1} max={8} integer
+                  step={1} min={1} max={8} integer
                   disabled={!options.roughingEnabled}
                   value={options.roughingFlutes}
                   onChange={(v) => set('roughingFlutes', v)}
@@ -1798,7 +1798,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                 hint="How much depth each roughing layer takes. Deeper is quicker but loads the cutter harder; 1–2 mm suits most wood on a hobby router."
               >
                 <NumberInput
-                  step="0.5" min={0.1} max={20}
+                  step={0.5} min={0.1} max={20}
                   disabled={!options.roughingEnabled}
                   allowEmpty
                   placeholder={String(derived.roughingStepdownMm)}
@@ -1812,7 +1812,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                 hint="Material the roughing pass leaves above the finished surface for the finishing bit to take off. Too little and the roughing marks show through."
               >
                 <NumberInput
-                  step="0.1" min={0} max={5}
+                  step={0.1} min={0} max={5}
                   disabled={!options.roughingEnabled}
                   allowEmpty
                   placeholder={String(derived.roughingAllowanceMm)}
@@ -1827,7 +1827,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                 hint="Cutting feedrate for the roughing layers, in mm per minute."
               >
                 <NumberInput
-                  step="100" min={50} max={10000} integer
+                  step={100} min={50} max={10000} integer
                   disabled={!options.roughingEnabled}
                   allowEmpty
                   placeholder={String(derived.roughingFeedrate)}
@@ -1842,7 +1842,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                 hint="How fast the roughing bit is driven down into the stock at the start of each cut."
               >
                 <NumberInput
-                  step="50" min={10} max={2000} integer
+                  step={50} min={10} max={2000} integer
                   disabled={!options.roughingEnabled}
                   allowEmpty
                   placeholder={String(derived.roughingPlungeRate)}
@@ -1865,7 +1865,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
               >
                 <div className="flex items-center space-x-1.5">
                   <NumberInput
-                    step="1" min={2} max={15} integer
+                    step={1} min={2} max={15} integer
                     value={probeCols}
                     onChange={setProbeCols}
                     className={`${inputClass} px-2`}
@@ -1873,7 +1873,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                   />
                   <span className="text-xs font-medium text-slate-400">&times;</span>
                   <NumberInput
-                    step="1" min={2} max={15} integer
+                    step={1} min={2} max={15} integer
                     value={probeRows}
                     onChange={setProbeRows}
                     className={`${inputClass} px-2`}

@@ -185,7 +185,7 @@ export const UserProfileButton: React.FC = () => {
              * is a perfectly good icon to fall back to.
              */
             referrerPolicy="no-referrer"
-            className="w-5 h-5 rounded-full"
+            className="absolute inset-0 h-full w-full rounded-full object-cover"
             onError={() => setAvatarBroken(true)}
           />
         ) : (

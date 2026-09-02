@@ -231,7 +231,7 @@ export const MachineWorkOriginPanel: React.FC<{
             <NumberInput
               min={10}
               max={5000}
-              step="50"
+              step={50}
               integer
               value={feedrate}
               onChange={setFeedrate}
@@ -290,7 +290,7 @@ export const MachineWorkOriginPanel: React.FC<{
                   <NumberInput
                     min={0.1}
                     max={MAX_GUIDE_POWER_PCT}
-                    step="0.1"
+                    step={0.1}
                     value={guidePower}
                     onChange={(v) => {
                       const next = writeGuidePower(v);
@@ -371,7 +371,7 @@ export const MachineWorkOriginPanel: React.FC<{
                   <NumberInput
                     min={0}
                     max={100}
-                    step="0.1"
+                    step={0.1}
                     value={gaugeThickness}
                     onChange={setGaugeThickness}
                     title="Anything between the tip and the surface — a slip of paper is about 0.1 mm, a 1-2-3 block is 25.4. Leave at 0 when the bit is touching the work itself."
@@ -390,7 +390,7 @@ export const MachineWorkOriginPanel: React.FC<{
                   <NumberInput
                     min={0}
                     max={100}
-                    step="0.1"
+                    step={0.1}
                     value={plateThickness}
                     onChange={setPlateThickness}
                     title="Touch plate thickness — work Z 0 ends up this far below the plate's top face"

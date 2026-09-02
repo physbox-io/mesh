@@ -2,6 +2,7 @@ import React from 'react';
 import { AlertCircle, Play, Pause, Square, Hand, ChevronsDown, Gauge, RotateCcw } from 'lucide-react';
 import { webSerialManager, type MachineState, type OverrideStep } from '../utils/webSerialManager';
 import { checkJobEnvelope, type JobExtent } from '../utils/workEnvelope';
+import { NumberInput } from './NumberInput';
 
 /**
  * Running a job from the browser: stop it, pick it up again, and deal with what
@@ -211,15 +212,15 @@ export const JobResumeBanner: React.FC<{
       <div className="flex flex-wrap items-center justify-end gap-2 pt-2 border-t border-sky-500/30">
         <label className="flex items-center gap-1.5 text-[11px] font-semibold mr-auto">
           <span>Resume from line</span>
-          <input
-            type="number"
+          <NumberInput
             min={0}
             max={resume.totalLines}
             value={target}
-            onChange={(e) => setLine(Math.max(0, Math.min(resume.totalLines, parseInt(e.target.value, 10) || 0)))}
-            className="w-24 bg-white dark:bg-slate-900 border border-sky-500/40 rounded px-1.5 py-1 font-mono text-[11px] text-slate-800 dark:text-slate-100"
+            onChange={v => setLine(Math.max(0, Math.min(resume.totalLines, v)))}
+                      className="w-24 bg-white dark:bg-slate-900 border border-sky-500/40 rounded px-1.5 py-1 font-mono text-[11px] text-slate-800 dark:text-slate-100"
             title="Back this off a little to recut the last stretch, which is usually safer than trying to land exactly on the break"
-          />
+                      integer
+                    />
         </label>
         <button
           onClick={() => webSerialManager.clearResumePoint()}

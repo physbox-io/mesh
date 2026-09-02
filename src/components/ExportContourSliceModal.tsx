@@ -400,7 +400,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                 hint="Thickness of the stock. Each layer is one sheet thick, so this also sets how far apart the model is sliced."
               >
                 <NumberInput
-                  step="0.5" min={0.1} max={50}
+                  step={0.5} min={0.1} max={50}
                   value={materialThicknessMm}
                   onChange={setMaterialThicknessMm}
                   className={inputClass}
@@ -438,7 +438,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                 hint="How many times the laser retraces each contour. Raise it when one pass scores but does not cut through; slowing the feedrate is the other lever."
               >
                 <NumberInput
-                  step="1" min={1} max={20} integer
+                  step={1} min={1} max={20} integer
                   disabled={machineMode !== 'laser'}
                   value={laserPasses}
                   onChange={setLaserPasses}
@@ -486,7 +486,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                 hint="How fast the head travels while cutting, in mm per minute. It also drives the estimated job time."
               >
                 <NumberInput
-                  step="100" min={100} max={10000} integer
+                  step={100} min={100} max={10000} integer
                   allowEmpty
                   placeholder={String(machineMode === 'cnc' ? speeds.feedMmMin : 1200)}
                   value={cutFeedrateOverride}
@@ -499,7 +499,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                 hint="Routing only. Blank takes the speed the material and the cutter imply — surface speed over diameter — which is almost always the right answer. Set a number only if your spindle disagrees, and remember that on a router with a dial the S word in the file does nothing: this is what you turn the knob to."
               >
                 <NumberInput
-                  step="1000" min={0} max={60000} integer
+                  step={1000} min={0} max={60000} integer
                   disabled={machineMode !== 'cnc'}
                   allowEmpty
                   placeholder={String(speeds.rpm)}
@@ -514,7 +514,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                 hint="Routing only. The cutter that will do the cutting — it is what the spindle speed and the feed are worked out from, since both scale with diameter."
               >
                 <NumberInput
-                  step="0.1" min={0.1} max={30}
+                  step={0.1} min={0.1} max={30}
                   disabled={machineMode !== 'cnc'}
                   value={bitDiameterMm}
                   onChange={setBitDiameterMm}
@@ -543,7 +543,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                 hint="Width of material the beam or bit removes. Contours are offset by half of it so each layer comes out at its true size."
               >
                 <NumberInput
-                  step="0.05" min={0} max={2}
+                  step={0.05} min={0} max={2}
                   value={kerfMm}
                   onChange={setKerfMm}
                   className={inputClass}
@@ -567,7 +567,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                 hint="How long each attachment is along a contour. Big enough to hold the layer, small enough to snap — 2-5 mm suits thin ply and card."
               >
                 <NumberInput
-                  step="0.5" min={0.5} max={30}
+                  step={0.5} min={0.5} max={30}
                   disabled={!attachments}
                   value={attachmentWidthMm}
                   onChange={setAttachmentWidthMm}
@@ -580,7 +580,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                 hint="Target spacing between attachments around a contour. A contour too short for even one at this spacing gets none, and they are never packed closer than half the run they sit in."
               >
                 <NumberInput
-                  step="10" min={5} max={1000}
+                  step={10} min={5} max={1000}
                   disabled={!attachments}
                   value={attachmentSpacingMm}
                   onChange={setAttachmentSpacingMm}
@@ -594,7 +594,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                 hint="CNC only: stock left under the bit as it rides over an attachment. The cutter ramps up and back down so it never plunges into uncut material. A laser has no Z, so it just stops firing for the attachment's length."
               >
                 <NumberInput
-                  step="0.1" min={0.1} max={10}
+                  step={0.1} min={0.1} max={10}
                   disabled={!attachments || machineMode !== 'cnc'}
                   value={attachmentHeightMm}
                   onChange={setAttachmentHeightMm}
@@ -643,7 +643,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                 hint="Diameter of the rod you will thread the stack onto. Holes are cut a kerf undersize so the dowel is a push fit. A dowel only fits where every layer has material to spare around it."
               >
                 <NumberInput
-                  step="0.5" min={0.5} max={20}
+                  step={0.5} min={0.5} max={20}
                   disabled={pinCount === 0}
                   value={pinDiameterMm}
                   onChange={setPinDiameterMm}
@@ -664,7 +664,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
               >
                 <div className="flex items-center space-x-1.5">
                   <NumberInput
-                    step="10" min={50} max={5000}
+                    step={10} min={50} max={5000}
                     value={sheetWidthMm}
                     onChange={setSheetWidthMm}
                     className={`${inputClass} px-2`}
@@ -672,7 +672,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                   />
                   <span className="text-xs font-medium text-slate-400">&times;</span>
                   <NumberInput
-                    step="10" min={50} max={5000}
+                    step={10} min={50} max={5000}
                     value={sheetHeightMm}
                     onChange={setSheetHeightMm}
                     className={`${inputClass} px-2`}
@@ -701,7 +701,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
               >
                 <div className="flex items-center space-x-2">
                   <NumberInput
-                    min={1} max={20} step="1" integer
+                    min={1} max={20} step={1} integer
                     disabled={!autoScale}
                     value={maxSheets}
                     onChange={setMaxSheets}

@@ -413,16 +413,16 @@ export const ImportImageModal: React.FC<ImportImageModalProps> = ({
                 <div className="p-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/40 space-y-3">
                   <div className="grid grid-cols-2 gap-3">
                     <Field label="Levels">
-                      <NumberInput step="1" min={2} max={16} integer value={slopeLevels} onChange={setSlopeLevels} className={inputClass} aria-label="Number of flat levels" />
+                      <NumberInput step={1} min={2} max={16} integer value={slopeLevels} onChange={setSlopeLevels} className={inputClass} aria-label="Number of flat levels" />
                     </Field>
                     <Field label="Slope run (mm)">
-                      <NumberInput step="0.5" min={0} max={200} value={slopeWidthMm} onChange={setSlopeWidthMm} className={inputClass} aria-label="Horizontal run of the slope in mm" />
+                      <NumberInput step={0.5} min={0} max={200} value={slopeWidthMm} onChange={setSlopeWidthMm} className={inputClass} aria-label="Horizontal run of the slope in mm" />
                     </Field>
                     {/* Above two levels the cuts are evenly spaced, so a single
                         threshold has nothing left to say. */}
                     {slopeLevels === 2 && (
                       <Field label="Threshold (%)">
-                        <NumberInput step="5" min={1} max={99} value={thresholdPct} onChange={setThresholdPct} className={inputClass} aria-label="Black/white cut threshold percent" />
+                        <NumberInput step={5} min={1} max={99} value={thresholdPct} onChange={setThresholdPct} className={inputClass} aria-label="Black/white cut threshold percent" />
                       </Field>
                     )}
                     {toneStats && toneStats.levels !== slopeLevels && (
@@ -464,22 +464,22 @@ export const ImportImageModal: React.FC<ImportImageModalProps> = ({
               {/* Dimensions */}
               <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
                 <Field label="Width (mm)">
-                  <NumberInput step="5" min={1} max={5000} value={widthMm} onChange={setWidthMm} className={inputClass} aria-label="Plaque width in mm" />
+                  <NumberInput step={5} min={1} max={5000} value={widthMm} onChange={setWidthMm} className={inputClass} aria-label="Plaque width in mm" />
                 </Field>
                 <Field label="Relief height (mm)">
-                  <NumberInput step="1" min={0} max={500} value={maxHeightMm} onChange={setMaxHeightMm} className={inputClass} aria-label="Relief height in mm" />
+                  <NumberInput step={1} min={0} max={500} value={maxHeightMm} onChange={setMaxHeightMm} className={inputClass} aria-label="Relief height in mm" />
                 </Field>
                 <Field label="Base thickness (mm)">
-                  <NumberInput step="0.5" min={0.2} max={200} value={baseMm} onChange={setBaseMm} className={inputClass} aria-label="Base thickness in mm" />
+                  <NumberInput step={0.5} min={0.2} max={200} value={baseMm} onChange={setBaseMm} className={inputClass} aria-label="Base thickness in mm" />
                 </Field>
                 <Field label="Resolution (columns)">
-                  <NumberInput step="20" min={2} max={400} integer value={gridCols} onChange={setGridCols} className={inputClass} aria-label="Sample columns" />
+                  <NumberInput step={20} min={2} max={400} integer value={gridCols} onChange={setGridCols} className={inputClass} aria-label="Sample columns" />
                 </Field>
                 <Field label="Smoothing passes">
-                  <NumberInput step="1" min={0} max={8} integer value={smoothPasses} onChange={setSmoothPasses} className={inputClass} aria-label="Smoothing passes" />
+                  <NumberInput step={1} min={0} max={8} integer value={smoothPasses} onChange={setSmoothPasses} className={inputClass} aria-label="Smoothing passes" />
                 </Field>
                 <Field label="Height floor (%)">
-                  <NumberInput step="5" min={0} max={99} value={floorPct} onChange={setFloorPct} className={inputClass} aria-label="Height floor percent" />
+                  <NumberInput step={5} min={0} max={99} value={floorPct} onChange={setFloorPct} className={inputClass} aria-label="Height floor percent" />
                 </Field>
               </div>
             </div>

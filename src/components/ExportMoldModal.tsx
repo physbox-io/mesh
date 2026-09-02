@@ -615,7 +615,7 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
                   <NumberInput
                     min={4}
                     max={50}
-                    step="1"
+                    step={1}
                     value={options.wallMarginMm}
                     onChange={(v) => set('wallMarginMm', v)}
                     className={inputClass}
@@ -625,7 +625,7 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
                   <NumberInput
                     min={2}
                     max={30}
-                    step="1"
+                    step={1}
                     value={options.baseThicknessMm}
                     onChange={(v) => set('baseThicknessMm', v)}
                     className={inputClass}
@@ -638,7 +638,7 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
                   <NumberInput
                     min={0}
                     max={200}
-                    step="1"
+                    step={1}
                     value={options.cavityDepthMm}
                     onChange={(v) => set('cavityDepthMm', v)}
                     className={inputClass}
@@ -657,7 +657,7 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
                   <NumberInput
                     min={0}
                     max={15}
-                    step="0.5"
+                    step={0.5}
                     value={options.draftAngleDeg}
                     onChange={(v) => set('draftAngleDeg', v)}
                     className={inputClass}
@@ -675,7 +675,7 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
                     <NumberInput
                       min={3}
                       max={20}
-                      step="0.5"
+                      step={0.5}
                       value={options.pinDiameterMm}
                       onChange={(v) => set('pinDiameterMm', v)}
                       className={inputClass}
@@ -685,7 +685,7 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
                     <NumberInput
                       min={2}
                       max={15}
-                      step="0.5"
+                      step={0.5}
                       value={options.pinHeightMm}
                       onChange={(v) => set('pinHeightMm', v)}
                       className={inputClass}
@@ -695,7 +695,7 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
                     <NumberInput
                       min={0.1}
                       max={1.0}
-                      step="0.05"
+                      step={0.05}
                       value={options.pinToleranceMm}
                       onChange={(v) => set('pinToleranceMm', v)}
                       className={inputClass}
@@ -729,7 +729,7 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
                         <NumberInput
                           min={4}
                           max={30}
-                          step="1"
+                          step={1}
                           value={options.sprueTopDiaMm}
                           onChange={(v) => set('sprueTopDiaMm', v)}
                           className={inputClass}
@@ -739,7 +739,7 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
                         <NumberInput
                           min={2}
                           max={15}
-                          step="0.5"
+                          step={0.5}
                           value={options.sprueBottomDiaMm}
                           onChange={(v) => set('sprueBottomDiaMm', v)}
                           className={inputClass}
