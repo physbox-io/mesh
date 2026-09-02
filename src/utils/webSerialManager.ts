@@ -310,6 +310,21 @@ export const SPINDLE_OVERRIDE_BYTES: Record<OverrideStep | 'reset', number> = {
  */
 const CONTROLLER_SILENCE_MS = 3000;
 
+/**
+ * How long the return path has to stay healthy before the warning is withdrawn.
+ *
+ * The warning has one threshold going up and another coming down on purpose. A
+ * single late reply used to clear it and the next gap raised it again, so over
+ * a link with any jitter — a Tekno Box relaying through the cloud, say — it
+ * blinked in and out while nothing was wrong, which is worse than not showing
+ * it: a banner that cries wolf is a banner nobody reads when the machine really
+ * has stopped answering.
+ *
+ * Going up stays immediate. Being told late that a machine is unresponsive is
+ * the failure that costs a workpiece.
+ */
+const CONTROLLER_RECOVERED_MS = 1500;
+
 /** Rapid traverse trim: GRBL implements full, half and quarter, and no more. */
 export const RAPID_OVERRIDE_BYTES: Record<100 | 50 | 25, number> = {
   100: 0x95,
@@ -893,7 +908,15 @@ class WebSerialManager {
       // return path is dead however healthy the outgoing one looks — and the
       // outgoing one always looks healthy, because writing to a serial port
       // succeeds whether or not anything is reading it.
-      const silent = Date.now() - this.lastRxAt > CONTROLLER_SILENCE_MS;
+      /*
+       * Asymmetric on purpose — see CONTROLLER_RECOVERED_MS. Raised the moment
+       * the machine has been quiet too long; withdrawn only once it has been
+       * answering again for a while, so ordinary jitter cannot make it blink.
+       */
+      const quietFor = Date.now() - this.lastRxAt;
+      const silent = this.state.controllerSilent
+        ? quietFor > CONTROLLER_RECOVERED_MS
+        : quietFor > CONTROLLER_SILENCE_MS;
       if (silent !== this.state.controllerSilent) {
         this.updateState({ controllerSilent: silent });
       }
