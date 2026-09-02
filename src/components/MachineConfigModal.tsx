@@ -65,6 +65,25 @@ export const MachineConfigModal: React.FC<{
 
   useEffect(() => webSerialManager.addListener(setMachineState), []);
 
+  /*
+   * Pick the machine back up when the app opens.
+   *
+   * Only for a Tekno Box, and only one attempt. A cloud link is reconnectable
+   * without anyone present — the box is on the far end waiting — whereas USB
+   * needs a port permission prompt that must never be raised unprompted.
+   *
+   * A failure here is silent on purpose: the box may simply be asleep, and an
+   * error banner on every launch for a machine nobody is about to use is noise
+   * that teaches people to ignore banners.
+   */
+  useEffect(() => {
+    if (link !== 'cloud' || !selectedDevice) return;
+    if (webSerialManager.getState().connected) return;
+    void webSerialManager.connect({ kind: 'cloud', deviceId: selectedDevice }).catch(() => {});
+    // Once per mount, deliberately: this is a resume, not a retry loop.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
 
 
   if (!isOpen) return null;
