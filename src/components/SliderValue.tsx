@@ -41,7 +41,7 @@ export const SliderValue: React.FC<{
   }
 
   return (
-    <span className="flex items-center gap-0.5 font-mono tabular-nums">
+    <span className="flex shrink items-center gap-0.5 font-mono tabular-nums min-w-0">
       <input
         type="text"
         inputMode="decimal"
@@ -76,8 +76,14 @@ export const SliderValue: React.FC<{
          * content where it is supported; the width is the fallback everywhere
          * else, and is set in `ch` so it tracks the font rather than a guess at
          * it.
+         *
+         * `slider-value` is not decoration: the inspector styles every text
+         * input inside it as a bordered, padded field, and that selector beats a
+         * utility class. A readout dressed as a field is both wrong to read and
+         * wide enough to push the row off the side of the panel, so it opts out
+         * by name — see `aside.glass-panel input[type="text"]` in index.css.
          */
-        className={`w-[6ch] [field-sizing:content] bg-transparent text-right outline-none border-b border-transparent hover:border-slate-300 dark:hover:border-slate-600 focus:border-blue-500 focus:text-blue-600 dark:focus:text-blue-400 cursor-text ${className}`}
+        className={`slider-value w-[5ch] max-w-[7ch] [field-sizing:content] bg-transparent p-0 border-0 text-right outline-none border-b border-transparent hover:border-slate-300 dark:hover:border-slate-600 focus:border-blue-500 focus:text-blue-600 dark:focus:text-blue-400 cursor-text ${className}`}
       />
       {unit && <span className="text-slate-400">{unit}</span>}
     </span>

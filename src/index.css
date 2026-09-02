@@ -62,7 +62,7 @@ html.dark, html.dark body, html.dark #root {
 
 /* CAD Properties Inspector Elements */
 aside.glass-panel select,
-aside.glass-panel input[type="text"],
+aside.glass-panel input[type="text"]:not(.slider-value),
 aside.glass-panel input[type="password"],
 aside.glass-panel input[type="number"],
 aside.glass-panel textarea {
@@ -79,7 +79,7 @@ aside.glass-panel textarea {
 }
 
 .dark aside.glass-panel select,
-.dark aside.glass-panel input[type="text"],
+.dark aside.glass-panel input[type="text"]:not(.slider-value),
 .dark aside.glass-panel input[type="password"],
 .dark aside.glass-panel input[type="number"],
 .dark aside.glass-panel textarea {
@@ -89,7 +89,7 @@ aside.glass-panel textarea {
 }
 
 aside.glass-panel select:focus,
-aside.glass-panel input[type="text"]:focus,
+aside.glass-panel input[type="text"]:not(.slider-value):focus,
 aside.glass-panel input[type="password"]:focus,
 aside.glass-panel input[type="number"]:focus,
 aside.glass-panel textarea:focus {
@@ -98,7 +98,7 @@ aside.glass-panel textarea:focus {
 }
 
 .dark aside.glass-panel select:focus,
-.dark aside.glass-panel input[type="text"]:focus,
+.dark aside.glass-panel input[type="text"]:not(.slider-value):focus,
 .dark aside.glass-panel input[type="password"]:focus,
 .dark aside.glass-panel input[type="number"]:focus,
 .dark aside.glass-panel textarea:focus {
