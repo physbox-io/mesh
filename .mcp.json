@@ -2,9 +2,8 @@
     "mcpServers": {
         "physbox-mcp": {
             "type": "stdio",
-            "command": "/home/boab/physbox_mcp/venv/bin/python",
+            "command": "/home/boab/physbox_mcp/venv/bin/physbox-mcp",
             "args": [
-                "/home/boab/physbox_mcp/server.py",
                 "--stdio"
             ]
         }

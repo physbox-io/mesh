@@ -17,31 +17,31 @@ A browser-based rigid-body physics simulator and CAD fabrication studio powered 
   * **Relief Carve Exporter** — Heightmap roughing/finishing toolpaths with probed mesh levelling.
 * **Machine Control & Work Origin** — Jog pad (0.1/1/10 mm steps) to drive the tool to the job origin, `G10 L20` XY zeroing, touch-plate Z probing that refuses to set a datum when the probe never makes contact, and 3×3+ bed probing that warps G-code to follow an untrue bed. GRBL 1.1 / FluidNC / grblHAL over WebSerial. See **Docs → Fabrication → Machine Setup &amp; Zeroing** in the app.
 * **Hardware Primitives** — Heat-set insert bosses (M2–M8), metric printed threads (M3–M16), hex nut traps (M3–M6), bearing pockets, snap-fits, D-shaft motor couplers.
-* **Hardware-in-the-Loop (HIL) WebSerial Control** — Direct browser serial connection to ESP32 / microcontrollers at configurable baud rates.
 * **AI Copilot & MCP Bridge** — In-app AI agent panel and WebSocket MCP server bridge (`physbox_mcp`) for external agent scene generation.
 
 ---
 
-## 📈 Real-Time Telemetry & Oscilloscope Graphing Dock
+## 📈 Simulation Telemetry
 
-PhysBox Studio exposes real-time time-series telemetry streams from the MuJoCo WASM simulation state and incoming WebSerial HIL hardware streams:
+The physics worker keeps a rolling history of the simulation state, sampled every
+10 steps and capped in length, readable from the app or by an external agent over
+MCP (`physics_get_telemetry` for the latest sample, `physics_get_history` for the
+buffer, `physics_run_headless` for a trajectory with no viewport at all):
 
-* **Energy Balance Curves** — Continuous tracking of system kinetic energy ($E_k = \frac{1}{2} m v^2 + \frac{1}{2} I \omega^2$), gravitational potential energy ($E_p = m g z$), and total mechanical energy dissipation over time ($\Delta t$).
-* **Kinematics & Dynamics Plotting** — Real-time signal graphing of individual rigid-body 6-DOF positions $(x, y, z)$, linear velocities $(v_x, v_y, v_z)$, angular rates $(\omega_x, \omega_y, \omega_z)$, and joint articulation angles.
-* **Actuator & Control Signals** — Plotting motor control inputs (`ctrl`), LQR cart-pole balancing forces, and user-scripted 1000 Hz outputs.
-* **HIL Hardware Oscilloscope** — Live graphing of real-world serial telemetry feeds (IMU orientation angles, encoder counts, strain gauge readings, potentiometer inputs) streamed directly over WebSerial.
+* **Per-body** — world position, linear velocity, angular velocity, and the applied 6-DOF force/torque (`xfrc_applied`).
+* **Per-joint** — articulation angle (`qpos`), rate (`qvel`), and applied force (`qfrc_applied`).
+* **Contacts** — the active contact set as MuJoCo resolves it each step.
+
+The bottom status bar carries the scene and machine readouts: component, geom and
+vertex counts on the left; machine target, stock material, connection status and
+live job progress on the right.
 
 ---
 
 ## 🔮 Coming Soon
 
 * **TeknoBox Control Over Objects** — Direct physical device control and hardware manipulation over simulated objects via built-in Degree-of-Freedom (DOF) motion sensors.
-
----
-
-## 📌 TODO
-
-* **System Status Dock** — Unify real-time FPS counter, MuJoCo WASM engine status, active collision solver pair count, WebSerial HIL serial connection indicator (`115200 baud`), and AI Copilot status into a sleek bottom status bar dock.
+* **Telemetry Graphing** — Plotting the buffer above as live curves in the app: energy balance, per-body kinematics, and actuator control signals. The data is recorded today; nothing draws it yet. (Signals from real hardware belong in Volt, where a scope node wired to a Heltec pin already plots them live.)
 
 ---
 
