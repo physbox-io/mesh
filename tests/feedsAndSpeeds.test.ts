@@ -40,7 +40,10 @@ describe('what RPM to set', () => {
     });
     expect(rec.rpm).toBe(10000);
     expect(rec.clampedBy).toBe('spindle-min');
-    expect(describeSpeedRecommendation(rec, 'hardwood', 12)).toMatch(/hot/i);
+    // The wording changed with the hint rewrite; what matters is that it still
+    // warns about the edge running hot and says what to do about it.
+    expect(describeSpeedRecommendation(rec, 'hardwood', 12)).toMatch(/heat|hot/i);
+    expect(describeSpeedRecommendation(rec, 'hardwood', 12)).toMatch(/shallow pass/i);
   });
 
   it('lands near the 12,000 that used to be hard-coded, for the bit that was assumed', () => {
@@ -61,7 +64,10 @@ describe('what RPM to set', () => {
     });
     expect(rec.rpm).toBe(24000);
     expect(rec.clampedBy).toBe('spindle-max');
-    expect(describeSpeedRecommendation(rec, 'softwood', 1.5)).toMatch(/under\s+speed/i);
+    // Says the spindle tops out below the ideal, and that the feed already
+    // accounts for it.
+    expect(describeSpeedRecommendation(rec, 'softwood', 1.5)).toMatch(/maximum RPM is lower|under\s+speed/i);
+    expect(describeSpeedRecommendation(rec, 'softwood', 1.5)).toMatch(/feed rate has been adjusted|allows for that/i);
   });
 
   it('holds acrylic down rather than up, because it melts rather than wears', () => {
@@ -153,7 +159,10 @@ describe('when the machine cannot track the ideal feed', () => {
       material: 'softwood',
       maxFeedMmMin: SLOW_GANTRY,
     });
-    expect(describeSpeedRecommendation(rec, 'softwood', 6)).toMatch(/turned down|cannot track/i);
+    // Says the RPM was moved to suit the machine's feed limit, and that chip
+    // thickness is what is being held.
+    expect(describeSpeedRecommendation(rec, 'softwood', 6)).toMatch(/machine feed rate|turned down|cannot track/i);
+    expect(describeSpeedRecommendation(rec, 'softwood', 6)).toMatch(/chip thickness/i);
   });
 
   it('leaves a machine that can keep up alone', () => {
