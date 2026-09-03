@@ -262,24 +262,13 @@ export function describeSpeedRecommendation(
 
   switch (rec.clampedBy) {
     case 'spindle-max':
-      return (
-        `${base} A bit that size wants more RPM than the spindle has, so it is running under ` +
-        `speed — the feed above already allows for that. Do not make up the difference by ` +
-        `feeding faster.`
-      );
+      return `${base} Spindle maximum RPM is lower than ideal; feed rate has been adjusted accordingly.`;
     case 'spindle-min':
-      return (
-        `${base} The spindle will not go slow enough for this material and bit, so the edge is ` +
-        `running hot. Take shallow passes and keep it moving.`
-      );
+      return `${base} Spindle minimum RPM is higher than ideal; use shallow passes to prevent heat buildup.`;
     case 'material':
       return `${base} Held down deliberately: ${spec.note}`;
     case 'gantry':
-      return (
-        `${base} The spindle is turned down from the textbook speed on purpose. Holding the right ` +
-        `chip thickness at the ideal RPM would need a feed this machine cannot track, and feeding ` +
-        `slower at the higher speed would thin the chip until the edge rubbed instead of cutting.`
-      );
+      return `${base} Spindle RPM adjusted to match maximum machine feed rate while maintaining target chip thickness.`;
     default:
       return base;
   }

@@ -526,7 +526,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
               </Field>
               <Field
                 label="Spindle (RPM)"
-                hint="Routing only. Blank takes the speed the material and the cutter imply — surface speed over diameter — which is almost always the right answer. Set a number only if your spindle disagrees, and remember that on a router with a dial the S word in the file does nothing: this is what you turn the knob to."
+                hint="Recommended spindle speed for this tool and material. If your router has a manual speed dial, set it to this RPM."
               >
                 <NumberInput
                   step={1000} min={0} max={60000} integer

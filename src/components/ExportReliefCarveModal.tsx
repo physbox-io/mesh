@@ -1605,7 +1605,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
               <Field
                 className="lg:col-span-2"
                 label="Shank & Holder Clearance"
-                hint="A bit is only slim for the length of its flutes — above that is a fatter shank, and above that the collet nut. With this on, the path is held clear of anything those would hit, so a pocket the bit cannot physically reach comes out with material left standing. Turn it off and only the cutting end is checked: the job will cut the pocket, by dragging the shank through the wall."
+                hint="Checks toolpath against shank and collet nut diameter to prevent collisions in deep pockets."
               >
                 <Segmented
                   value={options.toolBodyClearance ? 'on' : 'off'}
@@ -1724,7 +1724,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
 
               <Field
                 label="Flat End Mill Ø (mm)"
-                hint="Diameter of the roughing mill. The roughing path is planned around a flat bottom — every layer is a flat floor at a fixed Z — so this pass wants a flat end mill and nothing else: a ball nose fitted here would leave the corner of every layer uncut and the finishing pass would find more material than it was told to expect. If the diameter differs from the finishing bit the job pauses for a tool change between the two passes."
+                hint="Diameter of the flat end mill used for bulk material removal before the finishing pass."
               >
                 <NumberInput
                   step={0.1} min={0.1} max={30}

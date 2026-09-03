@@ -532,9 +532,9 @@ export function analyzeSceneMechanicalWeaknesses(sceneGraph: SceneGraph): Analys
         nodeName: node.name,
         category: 'manufacturing',
         severity: 'critical',
-        title: 'Implausibly Large Dimensions (>20m)',
+        title: 'Model Exceeds Build Envelope (>20m)',
         description: `Model extents are ${maxExtent.toFixed(1)}m wide. Authored in millimeters without scaling to meters.`,
-        recommendation: 'Wrap OpenSCAD design in scale([0.001, 0.001, 0.001]) or scale mesh by 0.001.',
+        recommendation: 'Check model scale units (meters vs millimeters) or scale by 0.001.',
         position: center,
         surfacePoint: center,
       });
@@ -553,7 +553,7 @@ export function analyzeSceneMechanicalWeaknesses(sceneGraph: SceneGraph): Analys
       });
     }
 
-    // High Aspect Ratio Column Buckling (>8:1)
+    // High Aspect Ratio Column (>8:1)
     const minCross = Math.min(dx, dy);
     if (dz > 0.05 && minCross > 0 && dz / minCross > 8.0) {
       weakSpots.push({
@@ -562,9 +562,9 @@ export function analyzeSceneMechanicalWeaknesses(sceneGraph: SceneGraph): Analys
         nodeName: node.name,
         category: 'structural',
         severity: 'warning',
-        title: `Slender Column Buckling Risk (${(dz / minCross).toFixed(1)}:1 Ratio)`,
-        description: `Tall slender feature (${(dz * 1000).toFixed(0)}mm height vs ${(minCross * 1000).toFixed(0)}mm width). Prone to Euler buckling under compressive load and print bed wobble.`,
-        recommendation: 'Increase cross-sectional thickness or add triangular gusset ribs.',
+        title: `High Aspect Ratio Feature (${(dz / minCross).toFixed(1)}:1 Ratio)`,
+        description: `Tall slender feature (${(dz * 1000).toFixed(0)}mm height vs ${(minCross * 1000).toFixed(0)}mm width). Prone to bending or print wobble.`,
+        recommendation: 'Consider thicker walls or reinforcing ribs to prevent bending during printing or under load.',
         position: [center[0], center[1], max[2]],
         surfacePoint: [center[0], center[1], max[2]],
       });
@@ -580,9 +580,9 @@ export function analyzeSceneMechanicalWeaknesses(sceneGraph: SceneGraph): Analys
           nodeName: node.name,
           category: 'structural',
           severity: 'warning',
-          title: 'Un-braced Cantilever Bending Risk',
-          description: `Long horizontal span (${(horizontalSpan * 1000).toFixed(0)}mm) with high flexural bending moment.`,
-          recommendation: 'Add angled support struts, stiffening ribs, or a fillet root.',
+          title: 'Unsupported Cantilever',
+          description: `Long horizontal span (${(horizontalSpan * 1000).toFixed(0)}mm) may sag or deflect.`,
+          recommendation: 'Add angled support struts, stiffening ribs, or print supports.',
           position: [max[0], center[1], center[2]],
           surfacePoint: [max[0], center[1], center[2]],
         });

@@ -47,20 +47,16 @@ export const FdmNotice: React.FC<{ compact?: boolean }> = ({ compact = false }) 
     <div className="p-4 rounded-xl bg-sky-500/10 border border-sky-500/40 flex items-start gap-3 text-xs leading-relaxed text-sky-900 dark:text-sky-200">
       <Printer className="w-5 h-5 flex-shrink-0 text-sky-500 mt-0.5" />
       <div className="space-y-1.5">
-        <h4 className="font-bold text-sm">Printing is done in your slicer, not here.</h4>
+        <h4 className="font-bold text-sm">Export to your slicer for 3D printing</h4>
         <p>
-          A cutter takes a path and a depth. A printer takes a path, a temperature, a flow rate, a
-          fan curve, a retraction distance, a pressure-advance figure, and start and end scripts
-          written for that firmware — all of it specific to your machine, your filament, and often
-          the spool. Doing that half-well would be worse than not doing it, so this app does not
-          drive printers.
+          Mesh exports clean 3MF and STL models for your 3D printer slicer. Slicers calculate
+          temperatures, retractions, and motion paths tuned to your specific printer and filament.
         </p>
         <p className="flex items-start gap-1.5 font-semibold">
           <Package className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
           <span>
-            Export 3MF — it carries the painted colour, a filament slot per triangle — or STL for
-            geometry alone, and slice it as you normally would. Or change the machine type in the
-            status bar to CNC Router or Laser.
+            Export 3MF to preserve painted colors and multi-material slots, or STL for geometry
+            alone, and slice in PrusaSlicer, OrcaSlicer, Bambu Studio, or Cura.
           </span>
         </p>
       </div>

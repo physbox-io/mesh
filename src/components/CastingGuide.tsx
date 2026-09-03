@@ -56,15 +56,10 @@ export const CastingGuide: React.FC<{ result: CastingFacts }> = ({ result }) => 
         <p className="flex items-start gap-2 rounded-lg px-2.5 py-2 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 text-amber-800 dark:text-amber-200">
           <TriangleAlert className="w-3.5 h-3.5 shrink-0 mt-0.5" />
           <span>
-            <strong>A rigid mold will fight you here.</strong> At {result.cavityDepthMm} mm deep with{' '}
-            {result.minDraftDeg}° on its steepest wall, the casting has to slide the full depth along
-            walls that are nearly parallel to the pull. Three ways out: raise <strong>Draft</strong> to
-            3°, which frees a rigid mold and costs{' '}
-            {(result.cavityDepthMm * Math.tan((3 * Math.PI) / 180)).toFixed(1)} mm of lateral detail;
-            print it in <strong>TPU</strong>, which peels off instead of gripping; or take a silicone
-            negative off the printed mold and cast into that. Switching between rigid filaments will
-            not do it — PLA, PETG and ASA are all within a factor of two on stiffness, where TPU is a
-            hundred times softer.
+            <strong>Steep mold walls detected.</strong> At {result.cavityDepthMm} mm deep with{' '}
+            {result.minDraftDeg}° draft, demolding a rigid print will be difficult. Consider raising{' '}
+            <strong>Draft</strong> to 3°, printing in flexible <strong>TPU</strong>, or casting silicone
+            into this mold to create a flexible negative.
           </span>
         </p>
       )}
@@ -81,10 +76,9 @@ export const CastingGuide: React.FC<{ result: CastingFacts }> = ({ result }) => 
         <li className="flex items-start gap-2">
           <Droplets className="w-3.5 h-3.5 shrink-0 mt-0.5 text-purple-500" />
           <span>
-            <strong>Seal, then release.</strong> A printed mold is porous and its layer lines key into
-            the resin. Seal the cavity — a brush-on epoxy print coating is what the release-agent
-            charts assume for FDM — then work a wax or a PVA/silicone release spray into every valley.
-            This is the step that decides whether you get a casting or a ruined mold.
+            <strong>Seal, then release.</strong> Printed FDM layer lines can mechanically bond with
+            casting resin. Apply an epoxy sealer or primer coat to the cavity, then apply mold
+            release wax or spray before pouring.
           </span>
         </li>
         <li className="flex items-start gap-2">
@@ -95,20 +89,15 @@ export const CastingGuide: React.FC<{ result: CastingFacts }> = ({ result }) => 
             </strong>{' '}
             {result.cavityDepthMm > SAFE_LIFT_MM ? (
               <>
-                — the cavity is {result.cavityDepthMm} mm deep and most casting epoxies want no more
-                than ~{SAFE_LIFT_MM} mm at a time, or the middle of the pour overheats. Let each lift
-                go tacky first, or use a slow deep-pour hardener and do it in one. That heat is also
-                the one place the rigid filaments differ: PLA softens around 60 °C, PETG nearer 80 and
-                ASA around 100, so a fast hardener in a pour this deep is an argument for printing the
-                mold in something other than PLA.
+                — cavity depth is {result.cavityDepthMm} mm. Most standard casting epoxies recommend
+                pouring in layers up to ~{SAFE_LIFT_MM} mm, or using a deep-pour epoxy system.
               </>
             ) : (
               <>
-                — {result.cavityDepthMm} mm is inside the ~{SAFE_LIFT_MM} mm most casting epoxies take
-                in one go. Check your resin's datasheet.
+                — {result.cavityDepthMm} mm is within standard single-pour depths for most casting resins.
               </>
             )}{' '}
-            Brush a thin skim coat into the detail first to break surface tension, then fill.
+            Brush a thin coat into the details first to release bubbles, then fill.
           </span>
         </li>
         <li className="flex items-start gap-2">

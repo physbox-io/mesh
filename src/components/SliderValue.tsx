@@ -35,7 +35,12 @@ export const SliderValue: React.FC<{
 
   // Track the value while the box is idle, so dragging the slider moves the
   // number, but never overwrite what someone is part-way through typing.
-  if (!editing && value !== seen) {
+  /*
+   * `Object.is`, not `!==`: NaN is never equal to itself, so a value that
+   * arrives non-finite would make this condition true on every render and the
+   * state update would loop until React gave up with "Too many re-renders".
+   */
+  if (!editing && !Object.is(value, seen)) {
     setSeen(value);
     setText(shown);
   }
