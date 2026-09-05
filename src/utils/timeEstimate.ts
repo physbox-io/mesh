@@ -217,7 +217,15 @@ export interface ClockedMove extends TimedMove {
 export interface TimingOptions {
   /** What the machine can do. Defaults to the assumed hobby-router profile. */
   profile?: MotionProfile;
-  /** GRBL `$11`, mm. */
+  /**
+   * GRBL `$11`, mm. Defaults to the profile's own, which is the machine's when
+   * the profile was read off one.
+   *
+   * Here only so a caller can ask what a job *would* cost at another setting —
+   * which is the honest way to show someone that their corner tolerance, not
+   * their feed, is what the job is waiting on. Nothing should pass it to supply
+   * a value the profile already carries.
+   */
   junctionDeviationMm?: number;
 }
 
@@ -233,7 +241,7 @@ export interface TimingOptions {
 export function clockMoves(moves: TimedMove[], opts: TimingOptions = {}): ClockedMove[] {
   if (moves.length === 0) return [];
   const profile = opts.profile ?? DEFAULT_MOTION_PROFILE;
-  const jd = opts.junctionDeviationMm ?? DEFAULT_JUNCTION_DEVIATION_MM;
+  const jd = opts.junctionDeviationMm ?? profile.junctionDeviation;
 
   const limits = moves.map((m) => limitsFor(m, profile));
   const speeds = planSpeeds(limits, jd);

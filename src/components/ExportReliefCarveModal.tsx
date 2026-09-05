@@ -273,7 +273,11 @@ function buildPreviewPath(
     at = seg.points[seg.points.length - 1];
   }
 
-  const clocked = clockMoves(raw);
+  // The machine's own dynamics, so the playhead crawls through the dense parts
+  // and flies through the open ones in the same places the tool will. The total
+  // is rescaled below either way, but the *shape* of the clock is only right if
+  // the acceleration and corner tolerance are the ones the controller reported.
+  const clocked = clockMoves(raw, { profile: options.motionProfile });
   if (clocked.length === 0) return { moves: clocked, seconds: 0 };
 
   const previewTotal = clocked[clocked.length - 1].t1;

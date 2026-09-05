@@ -43,6 +43,19 @@ export interface MotionProfile {
    */
   travel: AxisTriple | null;
   /**
+   * How far off a corner the controller may cut in exchange for carrying speed
+   * through it, mm. GRBL `$11`.
+   *
+   * A corner is taken at the speed a circular arc of that sagitta could hold,
+   * so the speed carried scales as `sqrt(accel × deviation)`. It is the setting
+   * that decides how long a traced outline takes — every vertex is a corner —
+   * and stock GRBL ships 0.010, which is conservative enough that raising it is
+   * the commonest free speed-up a hobby machine has. Reading it rather than
+   * assuming it is what stops the estimate insisting a job takes an hour on a
+   * machine set up to do it in forty minutes.
+   */
+  junctionDeviation: number;
+  /**
    * Whether homing is configured, GRBL `$22`.
    *
    * This is what decides whether machine coordinates mean anything. Without
@@ -80,6 +93,9 @@ export const DEFAULT_MOTION_PROFILE: MotionProfile = {
   accel: { x: 500, y: 500, z: 200 },
   maxRate: { x: 3000, y: 3000, z: 1000 },
   spindle: null,
+  // GRBL's own factory default, which is also the value a machine that has
+  // never been tuned is still running.
+  junctionDeviation: 0.01,
   // Deliberately not guessed. Every other field here has a sane default because
   // a wrong acceleration only skews an estimate; a wrong bed size would reject
   // jobs that fit perfectly well.
@@ -91,6 +107,7 @@ export const DEFAULT_MOTION_PROFILE: MotionProfile = {
 
 /** GRBL setting numbers this app reads. */
 const SETTING = {
+  junctionDeviation: 11,
   softLimits: 20,
   homing: 22,
   spindleMax: 30,
@@ -165,6 +182,7 @@ export function motionProfileFromSettings(settings: Map<number, number>): Motion
       y: read(SETTING.maxRateY, read(SETTING.maxRateX, d.maxRate.y)),
       z: read(SETTING.maxRateZ, d.maxRate.z),
     },
+    junctionDeviation: read(SETTING.junctionDeviation, d.junctionDeviation),
     spindle:
       spindleMax !== undefined && spindleMax > 0
         ? { min: spindleMin !== undefined && spindleMin > 0 ? spindleMin : 0, max: spindleMax }
@@ -255,6 +273,7 @@ export function describeMotionProfile(profile: MotionProfile, connected = false)
   }
   return (
     `From the machine: ${profile.accel.x} mm/s² X, ${profile.accel.y} mm/s² Y, ` +
-    `${profile.accel.z} mm/s² Z, rapids ${profile.maxRate.x}/${profile.maxRate.y}/${profile.maxRate.z} mm/min.`
+    `${profile.accel.z} mm/s² Z, rapids ${profile.maxRate.x}/${profile.maxRate.y}/${profile.maxRate.z} mm/min, ` +
+    `corners at $11=${profile.junctionDeviation} mm.`
   );
 }

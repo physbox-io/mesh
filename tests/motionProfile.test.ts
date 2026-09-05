@@ -7,7 +7,7 @@ import {
   DEFAULT_MOTION_PROFILE,
   type MotionProfile,
 } from '../src/utils/motionProfile';
-import { estimateMoveSeconds, estimateGcodeTime } from '../src/utils/timeEstimate';
+import { estimateMoveSeconds, estimateGcodeTime, type TimedMove } from '../src/utils/timeEstimate';
 
 /** A realistic `$$` dump, with the noise a live connection puts in it. */
 const DUMP = `
@@ -132,5 +132,47 @@ describe('the profile actually changes the estimate', () => {
   it('reports whether the numbers were read or invented', () => {
     expect(estimateGcodeTime('G90\nG1 X10 F600\n', { profile: ROUTER }).source).toBe('machine');
     expect(estimateGcodeTime('G90\nG1 X10 F600\n').source).toBe('assumed');
+  });
+});
+
+/**
+ * `$11` — the setting that decides how much speed survives a corner.
+ *
+ * Every vertex of a traced outline is a corner, so on that kind of work this
+ * number governs the job more than the feed does. Stock GRBL ships 0.010 and a
+ * tuned belt machine runs several times that, which is the difference between
+ * an estimate people trust and one they learn to ignore.
+ */
+describe('junction deviation', () => {
+  it('is read off the controller', () => {
+    const p = motionProfileFromSettings(parseGrblSettings(['$11=0.040', '$120=800', '$110=6000']));
+    expect(p.junctionDeviation).toBe(0.04);
+  });
+
+  it("falls back to GRBL's own default when the controller does not report it", () => {
+    const p = motionProfileFromSettings(parseGrblSettings(['$120=800', '$110=6000']));
+    expect(p.junctionDeviation).toBe(DEFAULT_MOTION_PROFILE.junctionDeviation);
+  });
+
+  it('is treated as absent when it is zero, which no machine means', () => {
+    const p = motionProfileFromSettings(parseGrblSettings(['$11=0', '$120=800']));
+    expect(p.junctionDeviation).toBe(DEFAULT_MOTION_PROFILE.junctionDeviation);
+  });
+
+  it('shortens the estimate for a job made of corners', () => {
+    // A zig-zag: every vertex is a full reversal-ish turn, so the whole job is
+    // corner-limited rather than feed-limited.
+    const moves: TimedMove[] = [];
+    for (let i = 0; i < 60; i++) {
+      moves.push({
+        x1: i, y1: i % 2 ? 0 : 4, z1: 0,
+        x2: i + 1, y2: i % 2 ? 4 : 0, z2: 0,
+        feed: 3000, rapid: false,
+      });
+    }
+    const settings = (jd: string) => parseGrblSettings([`$11=${jd}`, '$120=800', '$121=800', '$110=6000', '$111=6000']);
+    const slack = estimateMoveSeconds(moves, { profile: motionProfileFromSettings(settings('0.050')) });
+    const tight = estimateMoveSeconds(moves, { profile: motionProfileFromSettings(settings('0.010')) });
+    expect(slack).toBeLessThan(tight);
   });
 });
