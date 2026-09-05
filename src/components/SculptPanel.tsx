@@ -236,13 +236,39 @@ export function SculptPanel() {
       />
 
       <div className="flex gap-1.5">
+        {/*
+          The toggle turns mirroring on; the letter beside it says in which
+          plane, and cycles X → Y → Z.
+
+          It used to be X and only X, which is the wrong plane for most of what
+          gets sculpted here: every figure base faces +X, so a body's left and
+          right lie along Y. Mirroring X on a head reflects front to back — the
+          nose you are shaping grows a twin out of the back of the skull — and a
+          matching pair of ears was not possible at all.
+        */}
         <Toggle
           label="Symmetry"
           active={brush.symmetryX}
           onClick={() => setBrush({ symmetryX: !brush.symmetryX })}
           icon={FlipHorizontal2}
-          hint="Mirror every stroke across the body's X = 0 plane (X)."
+          hint="Mirror every stroke across a plane through the body's origin. The figure bases face +X, so Y is the plane that pairs left with right."
         />
+        <button
+          type="button"
+          onClick={() => {
+            const order = ['x', 'y', 'z'] as const;
+            const next = order[(order.indexOf(brush.symmetryAxis ?? 'x') + 1) % order.length];
+            setBrush({ symmetryAxis: next });
+          }}
+          title="Which plane symmetry mirrors in. Y pairs a figure's left and right."
+          className={`px-2 rounded-md text-xs font-semibold uppercase transition-colors ${
+            brush.symmetryX
+              ? 'bg-sky-500/15 text-sky-300 hover:bg-sky-500/25'
+              : 'bg-white/5 text-slate-500 hover:bg-white/10'
+          }`}
+        >
+          {brush.symmetryAxis ?? 'x'}
+        </button>
         <Toggle
           label="Detail"
           active={brush.dynamicTopology}

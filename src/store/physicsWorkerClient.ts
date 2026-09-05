@@ -33,12 +33,14 @@ export interface FrameSnapshot {
   geom_xpos?: Float64Array; geom_xmat?: Float64Array;
 }
 
+type Pending<T> = { resolve: (r: T) => void; reject: (e: Error) => void };
+
 export class PhysicsWorkerClient {
   private worker: Worker;
-  private pendingBuilds = new Map<string, { resolve: (r: BuiltResult) => void }>();
-  private pendingHeadless = new Map<string, { resolve: (r: any) => void }>();
-  private pendingHistory = new Map<string, { resolve: (r: any[]) => void }>();
-  private pendingTelemetry = new Map<string, { resolve: (r: any) => void }>();
+  private pendingBuilds = new Map<string, Pending<BuiltResult>>();
+  private pendingHeadless = new Map<string, Pending<any>>();
+  private pendingHistory = new Map<string, Pending<any[]>>();
+  private pendingTelemetry = new Map<string, Pending<any>>();
   onFrame: ((snap: FrameSnapshot) => void) | null = null;
   onError: ((message: string, fatal: boolean, lastState?: { qpos: number[]; qvel: number[]; time: number }) => void) | null = null;
 
@@ -100,8 +102,8 @@ export class PhysicsWorkerClient {
     seedState?: { qpos: number[]; qvel: number[]; ctrl?: number[]; time: number },
   ): Promise<BuiltResult> {
     const id = Math.random().toString(36).slice(2);
-    return new Promise((resolve) => {
-      this.pendingBuilds.set(id, { resolve });
+    return new Promise((resolve, reject) => {
+      this.pendingBuilds.set(id, { resolve, reject });
       this.worker.postMessage({ type: 'BUILD', id, xml, sceneGraph, preserveState, seedState });
     });
   }
@@ -120,26 +122,34 @@ export class PhysicsWorkerClient {
 
   runHeadless(xml: string, sceneGraph: any, ticks: number): Promise<any> {
     const id = Math.random().toString(36).slice(2);
-    return new Promise((resolve) => {
-      this.pendingHeadless.set(id, { resolve });
+    return new Promise((resolve, reject) => {
+      this.pendingHeadless.set(id, { resolve, reject });
       this.worker.postMessage({ type: 'RUN_HEADLESS', id, xml, sceneGraph, ticks });
     });
   }
 
   getHistory(): Promise<any[]> {
     const id = Math.random().toString(36).slice(2);
-    return new Promise((resolve) => {
-      this.pendingHistory.set(id, { resolve });
+    return new Promise((resolve, reject) => {
+      this.pendingHistory.set(id, { resolve, reject });
       this.worker.postMessage({ type: 'GET_HISTORY', id });
     });
   }
 
   getTelemetry(): Promise<any> {
     const id = Math.random().toString(36).slice(2);
-    return new Promise((resolve) => {
-      this.pendingTelemetry.set(id, { resolve });
+    return new Promise((resolve, reject) => {
+      this.pendingTelemetry.set(id, { resolve, reject });
       this.worker.postMessage({ type: 'GET_TELEMETRY', id });
     });
+  }
+
+  // True while the worker still owes an answer to a build/headless/history/
+  // telemetry request. The periodic recycle checks this so it doesn't
+  // terminate a worker mid-build and turn a legitimate request into a failure.
+  hasPendingWork(): boolean {
+    return this.pendingBuilds.size > 0 || this.pendingHeadless.size > 0
+        || this.pendingHistory.size > 0 || this.pendingTelemetry.size > 0;
   }
 
   clearHistory() {
@@ -148,5 +158,21 @@ export class PhysicsWorkerClient {
 
   terminate() {
     this.worker.terminate();
+    // A terminated worker will never answer anything it was already asked, so
+    // every in-flight request has to be settled here. Left pending they hang
+    // forever, and so does whatever is awaiting them - that's how an MCP
+    // command whose recompile was still running when the periodic recycle
+    // fired ended up never replying, leaving the "MCP Active" badge on screen
+    // for the rest of the session. The message deliberately avoids the words
+    // recompile() sniffs for when deciding a failure was WASM heap exhaustion.
+    const err = new Error('The physics worker was recycled before this request completed.');
+    const settle = (map: Map<string, Pending<any>>) => {
+      for (const pending of map.values()) pending.reject(err);
+      map.clear();
+    };
+    settle(this.pendingBuilds);
+    settle(this.pendingHeadless);
+    settle(this.pendingHistory);
+    settle(this.pendingTelemetry);
   }
 }

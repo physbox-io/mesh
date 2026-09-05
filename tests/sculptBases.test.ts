@@ -17,6 +17,8 @@ import {
   BASE_SIZE,
   DEFAULT_SCULPT_BASE,
 } from '../src/utils/sculptBases';
+import { recomputeNormals } from '../src/utils/sculptMesh';
+import { nearestSurfacePoint } from '../src/utils/sculptCommands';
 import { createSculptMesh, isWatertight, meshBounds, type SculptMesh } from '../src/utils/sculptMesh';
 import { meshGeomTriangles, meshGeomToStl, stlFileName } from '../src/utils/meshStlExport';
 
@@ -385,5 +387,38 @@ describe('STL export', () => {
   it('makes a filename a filesystem will take', () => {
     expect(stlFileName('Sculpt Body #3')).toBe('sculpt_body_3.stl');
     expect(stlFileName('///')).toBe('mesh.stl');
+  });
+});
+
+describe('a figure is the same on both sides', () => {
+  /*
+   * `mirrored` used to flip X while every figure faces +X, so a limb written at
+   * y = +0.026 was "paired" with a second one at y = +0.026 turned nose to tail.
+   * The bird had two left wings and two left legs and nothing at all on its
+   * right; the quadruped had four legs down one flank. Nobody could see it in
+   * the picture — a bird with both wings folded on one side still reads as a
+   * bird — but you cannot sculpt a matching pair of anything if there is no
+   * surface on the far side to sculpt, which is where it finally showed up.
+   *
+   * Bases whose subject is genuinely one-sided are exempt: a hand has a thumb.
+   */
+  const LOPSIDED = new Set(['hand']);
+
+  it.each(SCULPT_BASES.filter((b) => !LOPSIDED.has(b.id)).map((b) => b.id))('%s', (id) => {
+    const mesh = buildSculptBase(id);
+    recomputeNormals(mesh);
+
+    // Every vertex, mirrored across y=0, should land on the surface. One grid
+    // cell of slack (BASE_SIZE / 48), because surface nets place a vertex per
+    // cell and the two sides land on different cells' worth of rounding.
+    const tolerance = (BASE_SIZE / 48) * 1.2;
+    let worst = 0;
+    const step = Math.max(1, Math.floor(mesh.vertexCount / 250));
+    for (let i = 0; i < mesh.vertexCount; i += step) {
+      const mirror = [mesh.positions[i * 3], -mesh.positions[i * 3 + 1], mesh.positions[i * 3 + 2]];
+      const found = nearestSurfacePoint(mesh, mirror);
+      worst = Math.max(worst, found?.distance ?? Infinity);
+    }
+    expect(worst).toBeLessThan(tolerance);
   });
 });

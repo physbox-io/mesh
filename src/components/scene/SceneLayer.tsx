@@ -10,6 +10,7 @@ import React, { useRef, useMemo, useState, useEffect } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
 import { OrbitControls } from '@react-three/drei';
 import * as THREE from 'three';
+import { registerLiveCamera } from '../../utils/liveCamera';
 import { useStore } from '../../store/useStore';
 import { useOrbitEnable } from './useOrbitEnable';
 import { CsgNegativeGhosts } from './CsgGhosts';
@@ -106,6 +107,22 @@ export const CameraController = () => {
   }, [cameraOverride, camera]);
 
   const draggedNodeId = useStore((state) => state.draggedNodeId);
+  /*
+   * Hand the live camera and orbit target to the MCP bridge.
+   *
+   * utils/liveCamera.ts was written for exactly this and its registration was
+   * never called from anywhere, so physics_get_camera has always answered
+   * without a position or a target — while documenting that it returns both.
+   * An agent asking where the camera is pointing got nothing back and no error,
+   * which is the least useful of the possible answers.
+   *
+   * References, not snapshots: OrbitControls mutates these in place as a person
+   * drags, so a read at any later moment reflects the view actually on screen.
+   */
+  useEffect(() => {
+    if (controlsRef.current) registerLiveCamera(camera, controlsRef.current.target);
+  }, [camera, controlsRef.current]);
+
   return <OrbitControls enabled={draggedNodeId === null} ref={controlsRef} makeDefault enableDamping dampingFactor={0.1} mouseButtons={{ LEFT: 99 as any, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE }} />;
 };
 

@@ -44,6 +44,7 @@ import { PrintAnalysisHUD } from './components/PrintAnalysisHUD';
 import { createHeatSetBossNode, createHexNutTrapNode, createBearingPocketNode, createDShaftHubNode, createCounterboreHoleNode } from './utils/hardwareComponents';
 import { pushGlobalParameter } from './utils/llmSettings';
 import { saveUserPreset, deleteUserPreset, readUserPreset, listUserPresetNames } from './utils/userPresets';
+import { cloudAutosave } from './utils/cloudDocuments';
 import { pushAppParameter } from './utils/cloudSync';
 
 // Simple robust markdown parser to convert basic markdown text to safe HTML
@@ -1153,12 +1154,48 @@ function App() {
     if (!trimmed) return;
     try {
       const syncedScene = getSyncedSceneGraph(sceneGraph, model, data, mujoco);
-      saveUserPreset(trimmed, { ...syncedScene, noteCards, copilotMessages });
+      const preset = { ...syncedScene, noteCards, copilotMessages };
+      saveUserPreset(trimmed, preset);
+      // A deliberate save is also a named revision of the cloud document, which
+      // the pruner never discards — unlike the automatic checkpoints.
+      void cloudAutosave.saveExplicit(trimmed, preset, `Saved as “${trimmed}”`);
       loadUserPresetWithCard(`user:${trimmed}`);
     } catch (e) {
       console.error('Failed to save user preset', e);
     }
   }, [sceneGraph, model, data, mujoco, noteCards, copilotMessages, loadUserPresetWithCard]);
+
+  /*
+   * Cloud auto-save.
+   *
+   * The scene being worked on has never been persisted anywhere: presets are saved
+   * on purpose, and a reload drops back to the default pendulum. This offers it to
+   * the account after every edit.
+   *
+   * It has to live here rather than in the store or in userPresets.ts, because the
+   * serialised form is `getSyncedSceneGraph(...)` — the same function the manual
+   * save and the JSON export use, so an auto-saved scene is byte-for-byte what
+   * saving by hand would have produced — and that needs the live MuJoCo handles,
+   * which only exist in this component.
+   *
+   * Depending on `sceneGraph` rather than on simulation state is deliberate: the
+   * graph changes when somebody edits the scene, which is what is worth saving.
+   * Positions changing sixty times a second while a simulation runs are not edits.
+   *
+   * `cloudAutosave` does nothing at all unless the account is signed in with Pro,
+   * and every local save path is untouched, so nothing here is load-bearing.
+   */
+  useEffect(() => {
+    if (!mujoco) return;
+    try {
+      const synced = getSyncedSceneGraph(sceneGraph, model, data, mujoco);
+      const name = activePreset?.startsWith('user:') ? activePreset.slice('user:'.length) : 'Untitled scene';
+      cloudAutosave.schedule(name, { ...synced, noteCards, copilotMessages });
+    } catch {
+      // A scene that cannot be synced cannot be saved to anything; the local paths
+      // have the same problem and there is nothing useful to add here.
+    }
+  }, [sceneGraph, noteCards, copilotMessages, model, data, mujoco, activePreset]);
 
   const handleSavePresetClick = useCallback(() => {
     const defaultName = activePreset && activePreset.startsWith('user:')
@@ -2914,6 +2951,11 @@ function App() {
             gl={{ preserveDrawingBuffer: true }}
             onCreated={(state) => {
               (window as any)._physics_gl = state.gl;
+              // The scene and camera as well as the renderer, so a screenshot
+              // can draw a frame rather than read whatever the canvas last
+              // happened to hold — see SCREENSHOT in useMCPBridge.
+              (window as any)._physics_scene = state.scene;
+              (window as any)._physics_camera = state.camera;
               const canvas = state.gl.domElement;
               // Without this, a lost WebGL context (GPU driver hiccup, memory
               // pressure, etc.) leaves the canvas permanently blank with no way

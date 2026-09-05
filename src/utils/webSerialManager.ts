@@ -6,6 +6,7 @@
 // ---------------------------------------------------------------------------
 
 import { postMachineTelemetry } from './apiClient';
+import { cloudAutosave } from './cloudDocuments';
 import {
   SerialTransport,
   CloudMachineTransport,
@@ -523,6 +524,11 @@ class WebSerialManager {
       feedRate: state.feedRate,
       spindleSpeed: state.spindleSpeed,
       lastError: state.lastError ?? null,
+      // Which cloud document this browser is working on, so the archived run points
+      // back at the scene that produced it. Null when the account has no cloud
+      // document, which is the ordinary case for a free or signed-out session.
+      documentId: cloudAutosave.getStatus().documentId,
+      documentRevision: cloudAutosave.getStatus().revision,
     }).finally(() => {
       this.telemetryInFlight = false;
     });

@@ -1,12 +1,14 @@
 import React, { useState, useEffect, useRef } from 'react';
 import ReactDOM from 'react-dom';
-import { User, LogOut, Radio, Sparkles, ShieldCheck, CheckCircle } from 'lucide-react';
+import { User, LogOut, Radio, Sparkles, ShieldCheck, CheckCircle, History } from 'lucide-react';
 import { getStoredUser, getStoredAuthToken, clearStoredAuth, fetchCurrentUser } from '../utils/apiClient';
 import type { PhysBoxUser } from '../utils/apiClient';
 import { signInWithGooglePopup, disableGoogleAutoSelect } from '../utils/googleAuth';
 import { pullCloudState } from '../utils/cloudSync';
 import { mergePulledPresets } from '../utils/userPresets';
 import { RemoteMachiningModal } from './RemoteMachiningModal';
+import { JobHistoryModal } from './JobHistoryModal';
+import { CloudSaveStatus } from './CloudSaveStatus';
 import { GuestListModal } from './GuestListModal';
 
 export const UserProfileButton: React.FC = () => {
@@ -14,6 +16,7 @@ export const UserProfileButton: React.FC = () => {
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [showLoginModal, setShowLoginModal] = useState(false);
   const [showRemoteModal, setShowRemoteModal] = useState(false);
+  const [showHistoryModal, setShowHistoryModal] = useState(false);
   const [showGuestModal, setShowGuestModal] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
@@ -268,6 +271,20 @@ export const UserProfileButton: React.FC = () => {
                   <span>View Remote Machining Telemetry</span>
                 </button>
 
+                {/* The live view above is what a machine is doing now; this is what
+                    it has already done. Available to every signed-in account —
+                    what a free account sees inside is the offer, not an error. */}
+                <button
+                  onClick={() => {
+                    setDropdownOpen(false);
+                    setShowHistoryModal(true);
+                  }}
+                  className="w-full flex items-center gap-2 px-3 py-2 text-xs text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition cursor-pointer"
+                >
+                  <History className="w-4 h-4 text-cyan-600 dark:text-cyan-400" />
+                  <span>Job History</span>
+                </button>
+
                 <div className="px-3 py-1.5 text-[10px] text-slate-500 flex items-center gap-1.5">
                   <CheckCircle className="w-3 h-3 text-emerald-500 dark:text-emerald-400" />
                   <span>{syncSummary ?? 'Syncing parameters and presets…'}</span>
@@ -365,6 +382,14 @@ export const UserProfileButton: React.FC = () => {
         )}
 
       <RemoteMachiningModal isOpen={showRemoteModal} onClose={() => setShowRemoteModal(false)} />
+
+      {/* Job History Modal */}
+      <JobHistoryModal isOpen={showHistoryModal} onClose={() => setShowHistoryModal(false)} />
+
+      {/* Cloud auto-save status. Renders nothing unless there is something to say,
+          and mounted here only because this component is always on screen — it
+          paints itself into a corner through a portal. */}
+      <CloudSaveStatus />
       <GuestListModal
         isOpen={showGuestModal}
         onClose={() => setShowGuestModal(false)}

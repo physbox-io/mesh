@@ -457,8 +457,12 @@ describe('undo', () => {
     // The snapshot is several megabytes on a dense sculpt and is taken on every
     // pointer-down, so a brush that only moves vertices must not pay for one.
     expect(beginStroke(mesh, brush({ dynamicTopology: false })).before).toBeNull();
-    expect(beginStroke(mesh, brush({ type: 'grab', dynamicTopology: true })).before).toBeNull();
+    expect(beginStroke(mesh, brush({ type: 'grab', dynamicTopology: false })).before).toBeNull();
     expect(beginStroke(mesh, brush({ dynamicTopology: true })).before).not.toBeNull();
+    // Grab refines the span it drags now — that is what makes a pulled limb a
+    // limb rather than a fin — so it changes topology like any other brush and
+    // has to be undoable like one.
+    expect(beginStroke(mesh, brush({ type: 'grab', dynamicTopology: true })).before).not.toBeNull();
   });
 
   it('returns nothing for a stroke that touched nothing', () => {

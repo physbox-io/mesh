@@ -88,6 +88,9 @@ const buildDataMirror = (built: BuiltResult | FrameSnapshot) => ({
 // terminate+respawn mechanism as the reactive recovery path, just run
 // preemptively. Any respawn (proactive or reactive) resets this counter.
 const RECYCLE_EVERY_N_BUILDS = 4;
+/** Orders recompiles so a superseded one can bow out instead of building stale state. */
+let recompileToken = 0;
+
 let buildsSinceRecycle = 0;
 
 let physicsWorkerClientSingleton: PhysicsWorkerClient | null = null;
@@ -526,6 +529,7 @@ export interface PhysicsState {
   recycleWorkerSeamlessly: () => Promise<void>;
   incrementMcpActive: () => void;
   decrementMcpActive: () => void;
+  resetMcpActive: () => void;
   incrementScadCompile: () => void;
   decrementScadCompile: () => void;
 }
@@ -745,6 +749,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   setParentUnderSelected: (val) => set({ parentUnderSelected: val }),
   incrementMcpActive: () => set((state) => ({ mcpActiveCount: state.mcpActiveCount + 1 })),
   decrementMcpActive: () => set((state) => ({ mcpActiveCount: Math.max(0, state.mcpActiveCount - 1) })),
+  resetMcpActive: () => set({ mcpActiveCount: 0 }),
   incrementScadCompile: () => set((state) => ({ scadCompileCount: state.scadCompileCount + 1 })),
   decrementScadCompile: () => set((state) => ({ scadCompileCount: Math.max(0, state.scadCompileCount - 1) })),
 
@@ -2093,12 +2098,32 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   },
   
   recompile: async (overrideScene?: SceneGraph, overrideSelectedId?: string | null, forceReset?: boolean, _keepPreset?: boolean) => {
-    // We only debounce if it's NOT a force reset (which is used by presets/loaders)
+    /*
+     * We only debounce if it's NOT a force reset (which is used by presets/loaders).
+     *
+     * Superseding a pending recompile used to clear its timer and nothing else,
+     * so the `await` inside it was left holding a promise that could never
+     * settle: every caller that awaited a debounced recompile which a later one
+     * overtook simply hung, forever. Nothing noticed while the callers were
+     * fire-and-forget UI handlers, but an MCP command that awaits its own
+     * recompile before replying just stops responding.
+     *
+     * So the superseded call is woken and returns without building — the newer
+     * one is about to build the newer scene, and two builds of the same state is
+     * the other thing we do not want.
+     */
+    const token = ++recompileToken;
     if (!forceReset) {
-      if ((window as any)._recompileTimeoutId) clearTimeout((window as any)._recompileTimeoutId);
-      await new Promise(resolve => {
+      if ((window as any)._recompileTimeoutId) {
+        clearTimeout((window as any)._recompileTimeoutId);
+        (window as any)._recompileWake?.();
+      }
+      await new Promise<void>(resolve => {
+        (window as any)._recompileWake = resolve;
         (window as any)._recompileTimeoutId = setTimeout(resolve, 50);
       });
+      (window as any)._recompileWake = null;
+      if (token !== recompileToken) return;
     }
 
     if (typeof window !== 'undefined') {
@@ -2107,6 +2132,21 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     const { gravityZ, windX, windY, density, floorFriction, floorBounce } = get();
     const sceneGraph = overrideScene ?? get().sceneGraph;
 
+    /*
+     * What the store held when this build started.
+     *
+     * The scene is written back below on the next animation frame, from the
+     * snapshot this build was given — so any edit made while the build was in
+     * flight was thrown away when it landed. Renaming a body immediately after
+     * adding one did exactly that: the rename applied, the add's build finished
+     * a frame later, and the old name came back with no error anywhere.
+     *
+     * A build is authoritative about the model it produced, not about every
+     * other field of a node, so if the scene has moved on underneath us we keep
+     * the newer one and install only the compiled model.
+     */
+    const graphAtBuildStart = get().sceneGraph;
+
     const applyBuilt = (built: BuiltResult) => {
       console.log(`[PhysicsWorker] Model built successfully. Shared memory (COOP/COEP) active: ${!!built.isShared}`);
       const updates: Partial<PhysicsState> = {
@@ -2114,7 +2154,12 @@ export const useStore = create<PhysicsState>()((set, get) => ({
         sceneGraph, recompileId: Date.now(), lastCompileError: null, isLoaded: true,
       };
       if (overrideSelectedId !== undefined) updates.selectedNodeId = overrideSelectedId;
-      requestAnimationFrame(() => set(updates));
+      requestAnimationFrame(() => {
+        if (get().sceneGraph !== graphAtBuildStart && get().sceneGraph !== sceneGraph) {
+          delete updates.sceneGraph;
+        }
+        set(updates);
+      });
     };
 
     try {
@@ -2212,6 +2257,11 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     // await below means the snapshot could be stale by the time it's used.
     const { data, sceneGraph, gravityZ, windX, windY, density, floorFriction, floorBounce } = get();
     if (!data) return;
+    // Never recycle on top of a request the worker hasn't answered yet: killing
+    // the worker mid-build fails a rebuild that was about to succeed (and an
+    // MCP command driving one would be told its scene didn't build). The
+    // recycle is purely housekeeping — 20s later is just as good.
+    if (getPhysicsWorkerClient().hasPendingWork()) return;
     const seedState = {
       qpos: Array.from(data.qpos as Float64Array),
       qvel: Array.from(data.qvel as Float64Array),

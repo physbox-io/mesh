@@ -4,6 +4,7 @@
  */
 
 import { useEffect } from 'react';
+import { getStoredAuthToken } from '../utils/apiClient';
 import { useStore, getPhysicsWorkerClient } from '../store/useStore';
 import { compileToMJCF } from '../utils/mjcf';
 import { compileSCAD } from '../utils/openscad';
@@ -18,6 +19,21 @@ import {
   paintArgsFromSize, paintResolution, toGeometrySpace,
 } from '../utils/vertexPaint';
 import { saveUserPreset, deleteUserPreset, readUserPreset, listUserPresetNames } from '../utils/userPresets';
+import { SCULPT_BASES } from '../utils/sculptBases';
+import { fromSceneGeom, toSceneGeom } from '../utils/sculptMesh';
+import { applySculptStroke, probeSurface, sculptSummary, undoSculptStroke, BRUSH_TYPES } from '../utils/sculptCommands';
+import type { SculptUndoEntry } from '../utils/sculptMesh';
+
+/**
+ * The last few strokes on each sculpt, so they can be taken back off.
+ *
+ * Held here rather than in the store because it is the agent's own history:
+ * a person's undo stack belongs to the editor and is driven by Ctrl-Z, and
+ * mixing the two would let one of them silently swallow the other's work.
+ * Capped because each entry can hold a copy of the mesh.
+ */
+const sculptHistory = new Map<string, SculptUndoEntry[]>();
+const SCULPT_HISTORY_DEPTH = 8;
 
 const autoCompileScad = async (nodes: any[]) => {
   const scadNodes: any[] = [];
@@ -104,6 +120,57 @@ const settleScene = async (nodes: any[]): Promise<{ ok: boolean; error?: string;
   const error = useStore.getState().lastCompileError;
   return { ok: !error, ...(error ? { error } : {}), nodeCount: nodes.length };
 };
+
+/** Every id in a scene tree, at any depth. */
+function collectNodeIds(nodes: any[], into: Set<string> = new Set()): Set<string> {
+  for (const node of nodes || []) {
+    into.add(node.id);
+    collectNodeIds(node.children, into);
+  }
+  return into;
+}
+
+/**
+ * Wait for a node that was not in `before` to appear anywhere in the scene.
+ *
+ * The store's add path ends in a debounced recompile rather than a synchronous
+ * write, and there is no promise to await, so the arrival has to be observed.
+ * Polling rather than subscribing keeps this to a few lines and costs nothing:
+ * the wait is milliseconds in practice.
+ */
+async function waitForNewNode(before: Set<string>, timeoutMs: number): Promise<any | null> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const nodes = useStore.getState().sceneGraph.nodes;
+    const found = findNewNode(nodes, before);
+    if (found) return found;
+    if (Date.now() > deadline) return null;
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+}
+
+function findNewNode(nodes: any[], before: Set<string>): any | null {
+  for (const node of nodes || []) {
+    if (!before.has(node.id)) return node;
+    const child = findNewNode(node.children, before);
+    if (child) return child;
+  }
+  return null;
+}
+
+/**
+ * The sculptable mesh on a node, rebuilt from the geom arrays it is stored as.
+ *
+ * renderVertices, not vertices: that is the Z-up copy sculptMesh works in, and
+ * the one toSceneGeom will write back.
+ */
+function sculptMeshOf(node: any) {
+  const geom = (node?.geoms ?? []).find((g: any) => g.type === 'mesh');
+  if (!geom?.renderVertices?.length || !geom?.faces?.length) {
+    throw new Error(`'${node?.id}' has no sculptable mesh geom`);
+  }
+  return fromSceneGeom(geom.renderVertices, geom.faces);
+}
 
 const findNodeInScene = (nodes: any[], id: string): any | null => {
   for (const node of nodes || []) {
@@ -306,7 +373,23 @@ export function useMCPBridge() {
       ws = new WebSocket(`ws://localhost:${wsPort}`);
 
       ws.onopen = () =>
-        ws!.send(JSON.stringify({ event: 'HELLO', app: 'physics', port: location.port }));
+        /*
+         * The handshake also offers this tab's session, as a fallback
+         * credential for the MCP server's cloud tools — the ones that read the
+         * run archive over HTTPS rather than driving this tab. It means an
+         * agent can answer a question about last month's job with no setup at
+         * all, as long as the app is open.
+         *
+         * The server treats it as a last resort behind PHYSBOX_API_TOKEN and its
+         * config file, because this socket has no origin check. It is localhost
+         * only, and the server binds loopback.
+         */
+        ws!.send(JSON.stringify({
+          event: 'HELLO',
+          app: 'physics',
+          port: location.port,
+          token: getStoredAuthToken() ?? undefined,
+        }));
 
       ws.onmessage = (evt) => {
         let msg: any;
@@ -315,21 +398,30 @@ export function useMCPBridge() {
         if (!cmd) return;
 
         useStore.getState().incrementMcpActive();
+        // The counter drives the "MCP Active" badge, so this command's
+        // increment has to be paid back exactly once no matter which way the
+        // handler ends — including the synchronous-throw path below, which
+        // would otherwise double-decrement and hide a genuinely running
+        // command's badge.
+        let settled = false;
+        const done = () => {
+          if (settled) return;
+          settled = true;
+          useStore.getState().decrementMcpActive();
+        };
 
         let result: unknown;
         try {
           result = handle(cmd, msg);
         } catch (e) {
           ws?.send(JSON.stringify({ event: 'ERROR', cmd, id, error: String(e) }));
-          useStore.getState().decrementMcpActive();
+          done();
           return;
         }
         Promise.resolve(result)
           .then(data => ws?.send(JSON.stringify({ event: 'RESULT', cmd, id, data })))
           .catch(e  => ws?.send(JSON.stringify({ event: 'ERROR', cmd, id, error: String(e) })))
-          .finally(() => {
-            useStore.getState().decrementMcpActive();
-          });
+          .finally(done);
       };
 
       ws.onclose = () => { if (!dead) retryTimer = setTimeout(connect, 2000); };
@@ -576,6 +668,197 @@ export function useMCPBridge() {
           }
           store.setGeomPaint(targetId, geom.name, layerFromCanvas(canvas));
           return { ok: true, geomName: geom.name, dabsLanded: landed, dabsRequested: points.length };
+        }
+
+        /*
+          Sculpting, driven by coordinates.
+
+          Everything about the sculpt tools assumed a cursor: pick a brush, drag
+          on the surface, and the viewport's raycast supplies the position and
+          normal. None of that is available to a caller with no screen, so the
+          whole subsystem — nine bases, six brushes, symmetry, dynamic topology —
+          was unreachable over MCP. `at` is in the body's own frame in metres,
+          the same convention PAINT uses, and utils/sculptCommands.ts snaps each
+          point to the surface and reads the normal there.
+        */
+        case 'CREATE_SCULPT': {
+          const { name, base, pos } = msg;
+          const position = Array.isArray(pos) && pos.length === 3 ? pos : [0, 0, 0.3];
+          if (base !== undefined && !SCULPT_BASES.some(b => b.id === base)) {
+            throw new Error(`Unknown base '${base}'. Available: ${SCULPT_BASES.map(b => b.id).join(', ')}`);
+          }
+          /*
+            addComponent picks its own id and finishes with a DEBOUNCED, async
+            recompile, so the store still holds the old scene when it returns —
+            reading the node list straight afterwards gives you the scene as it
+            was. It also parents the new body under the current selection when
+            the editor is in that mode, so the new node is not necessarily last,
+            or even top level.
+
+            Taking "the last node" was both of those bugs at once: it returned
+            whatever the scene already ended with, and the rename below then
+            renamed the user's existing body. So: remember every id, ask for the
+            component, and wait for the one that appears.
+          */
+          const before = collectNodeIds(store.sceneGraph.nodes);
+          // A sculpt is a body in its own right, never a child of whatever
+          // happens to be selected — `pos` is a world position and would
+          // silently become a local one.
+          store.setParentUnderSelected(false);
+          store.addComponent('sculpt', position);
+
+          const created = await waitForNewNode(before, 10000);
+          if (!created) throw new Error('The sculpt body was not created (timed out waiting for the scene to settle)');
+
+          if (base && base !== created.sculptBase) store.setSculptBase(created.id, base);
+          if (typeof name === 'string' && name.trim()) store.renameNode(created.id, name.trim());
+
+          const after = findNodeInScene(useStore.getState().sceneGraph.nodes, created.id);
+          return {
+            ok: true,
+            id: created.id,
+            name: after?.name,
+            base: after?.sculptBase,
+            ...sculptSummary(sculptMeshOf(after)),
+          };
+        }
+
+        case 'SET_SCULPT_BASE': {
+          const { targetId, base } = msg;
+          if (!targetId) throw new Error('Missing targetId');
+          if (!SCULPT_BASES.some(b => b.id === base)) {
+            throw new Error(`Unknown base '${base}'. Available: ${SCULPT_BASES.map(b => b.id).join(', ')}`);
+          }
+          const node = findNodeInScene(store.sceneGraph.nodes, targetId);
+          if (!node) throw new Error(`No object with id '${targetId}'`);
+          if (!node.isSculpt) throw new Error(`'${targetId}' is not a sculpt body`);
+
+          // Wholesale replacement: whatever was sculpted is discarded.
+          store.setSculptBase(targetId, base);
+          const after = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId);
+          return { ok: true, id: targetId, base, ...sculptSummary(sculptMeshOf(after)) };
+        }
+
+        case 'SCULPT': {
+          const { targetId, brush, at, radius, strength, invert, symmetryX, symmetry, detail, dynamicTopology, delta } = msg;
+          if (!targetId) throw new Error('Missing targetId');
+          const node = findNodeInScene(store.sceneGraph.nodes, targetId);
+          if (!node) throw new Error(`No object with id '${targetId}'`);
+          if (!node.isSculpt) {
+            throw new Error(`'${targetId}' is not a sculpt body — make one with physics_create_sculpt, or convert nothing: an imported mesh or a primitive cannot be brushed`);
+          }
+          if (brush !== undefined && !BRUSH_TYPES.includes(brush)) {
+            throw new Error(`Unknown brush '${brush}'. Available: ${BRUSH_TYPES.join(', ')}`);
+          }
+
+          const points: number[][] = Array.isArray(at?.[0]) ? at : [at];
+          if (!points.length || points.some((p: any) => !Array.isArray(p) || p.length < 3)) {
+            throw new Error("at must be [x, y, z] or a list of them, in the body's own frame (metres)");
+          }
+
+          const mesh = sculptMeshOf(node);
+          const sink: { undo?: SculptUndoEntry | null } = {};
+          const result = applySculptStroke(mesh, {
+            brush, at: points, radius, strength, invert, symmetryX, symmetry, detail, dynamicTopology, delta,
+          }, sink);
+
+          if (sink.undo) {
+            const stack = sculptHistory.get(targetId) ?? [];
+            stack.push(sink.undo);
+            while (stack.length > SCULPT_HISTORY_DEPTH) stack.shift();
+            sculptHistory.set(targetId, stack);
+          }
+
+          /*
+            Metadata first, geometry second, and no recompile of our own.
+            updateNodeGeom treats a change of vertices as structural, so it
+            rebuilds immediately and without the debounce; asking for another
+            one here only queued a second build of the same state. The version
+            bump is what tells the viewport to pick the new mesh up rather than
+            carry on drawing the one it holds — the same signal setSculptBase
+            sends when it swaps a base out — and it has to be written before the
+            rebuild rather than after it.
+          */
+          store.updateNode(targetId, {
+            sculptEdited: true,
+            sculptVersion: (node.sculptVersion ?? 1) + 1,
+          });
+          const { vertices, renderVertices, faces } = toSceneGeom(mesh);
+          const geomIndex = Math.max(0, (node.geoms ?? []).findIndex((g: any) => g.type === 'mesh'));
+          store.updateNodeGeom(targetId, { vertices, renderVertices, faces }, geomIndex);
+
+          const error = useStore.getState().lastCompileError;
+          return {
+            ok: !error, ...(error ? { error } : {}), id: targetId, ...result,
+            undoDepth: (sculptHistory.get(targetId) ?? []).length,
+          };
+        }
+
+        case 'UNDO_SCULPT': {
+          const { targetId } = msg;
+          if (!targetId) throw new Error('Missing targetId');
+          const node = findNodeInScene(store.sceneGraph.nodes, targetId);
+          if (!node) throw new Error(`No object with id '${targetId}'`);
+          if (!node.isSculpt) throw new Error(`'${targetId}' is not a sculpt body`);
+
+          const stack = sculptHistory.get(targetId) ?? [];
+          const entry = stack.pop();
+          if (!entry) return { ok: false, error: 'No sculpt stroke of mine left to undo on this body', undoDepth: 0 };
+          sculptHistory.set(targetId, stack);
+
+          const mesh = sculptMeshOf(node);
+          undoSculptStroke(mesh, entry);
+          store.updateNode(targetId, { sculptVersion: (node.sculptVersion ?? 1) + 1 });
+          const { vertices, renderVertices, faces } = toSceneGeom(mesh);
+          const geomIndex = Math.max(0, (node.geoms ?? []).findIndex((g: any) => g.type === 'mesh'));
+          store.updateNodeGeom(targetId, { vertices, renderVertices, faces }, geomIndex);
+
+          return { ok: true, id: targetId, undoDepth: stack.length, ...sculptSummary(mesh) };
+        }
+
+        case 'PROBE_SCULPT': {
+          const { targetId, at } = msg;
+          if (!targetId) throw new Error('Missing targetId');
+          const node = findNodeInScene(store.sceneGraph.nodes, targetId);
+          if (!node) throw new Error(`No object with id '${targetId}'`);
+          if (!node.isSculpt) throw new Error(`'${targetId}' is not a sculpt body`);
+          const points: number[][] = Array.isArray(at?.[0]) ? at : [at];
+          if (!points.length || points.some((p: any) => !Array.isArray(p) || p.length < 3)) {
+            throw new Error("at must be [x, y, z] or a list of them, in the body's own frame (metres)");
+          }
+          return { ok: true, id: targetId, points: probeSurface(sculptMeshOf(node), points) };
+        }
+
+        case 'DELETE_OBJECT': {
+          const { targetId } = msg;
+          if (!targetId) throw new Error('Missing targetId');
+          const node = findNodeInScene(store.sceneGraph.nodes, targetId);
+          if (!node) throw new Error(`No object with id '${targetId}'`);
+          const name = node.name;
+          const childCount = (node.children ?? []).length;
+
+          store.deleteNode(targetId);
+          sculptHistory.delete(targetId);
+
+          const gone = !findNodeInScene(useStore.getState().sceneGraph.nodes, targetId);
+          if (!gone) return { ok: false, error: `'${targetId}' could not be deleted` };
+          return { ok: true, deleted: targetId, name, childrenRemoved: childCount };
+        }
+
+        case 'GET_SCULPT': {
+          const { targetId } = msg;
+          if (!targetId) throw new Error('Missing targetId');
+          const node = findNodeInScene(store.sceneGraph.nodes, targetId);
+          if (!node) throw new Error(`No object with id '${targetId}'`);
+          if (!node.isSculpt) throw new Error(`'${targetId}' is not a sculpt body`);
+          return {
+            ok: true,
+            id: targetId,
+            name: node.name,
+            base: node.sculptBase,
+            edited: !!node.sculptEdited,
+            ...sculptSummary(sculptMeshOf(node)),
+          };
         }
 
         case 'CLEAR_PAINT': {
@@ -841,11 +1124,43 @@ export function useMCPBridge() {
         case 'SCREENSHOT': {
           const gl = (window as any)._physics_gl;
           if (!gl || !gl.domElement) return { ok: false, error: 'Renderer not ready yet' };
-          // r3f's default frameloop ("always") keeps redrawing every animation
-          // frame, and preserveDrawingBuffer keeps that last-drawn frame around
-          // for toDataURL to read synchronously — no manual render needed here.
+
+          /*
+           * Draw a frame before reading one.
+           *
+           * This used to rely on r3f redrawing every animation frame and on
+           * preserveDrawingBuffer keeping the last one about. That holds while
+           * something is moving; it does not when the viewport goes idle — a
+           * paused simulation, a backgrounded tab — and then toDataURL returns
+           * whatever was last painted, which can be minutes old and framed by a
+           * camera that has since moved. The caller cannot tell: they get a
+           * perfectly good PNG of a scene that is not there any more. That is
+           * worse than an error, and it is exactly what happened while building
+           * a model through this bridge — five camera moves, five identical
+           * frames of empty floor, with the model sitting in the scene the whole
+           * time.
+           */
+          const scene = (window as any)._physics_scene;
+          const camera = (window as any)._physics_camera;
+          if (scene && camera) {
+            try {
+              gl.render(scene, camera);
+            } catch {
+              // A render can throw if the context is lost; the read below will
+              // fail honestly rather than returning a stale frame silently.
+            }
+          }
+
           const dataUrl = gl.domElement.toDataURL('image/png');
-          return { ok: true, dataUrl, width: gl.domElement.width, height: gl.domElement.height };
+          return {
+            ok: true,
+            dataUrl,
+            width: gl.domElement.width,
+            height: gl.domElement.height,
+            // Says whether the frame was drawn to order or is whatever the
+            // canvas happened to be holding.
+            rendered: Boolean(scene && camera),
+          };
         }
 
         case 'GET_NOTE_CARDS': {
@@ -1058,6 +1373,9 @@ export function useMCPBridge() {
       dead = true;
       clearTimeout(retryTimer);
       ws?.close();
+      // Nothing can reply for a command once the bridge is gone, so don't leave
+      // its badge behind (a dev-time remount would otherwise strand it).
+      useStore.getState().resetMcpActive();
     };
   }, []);
 }

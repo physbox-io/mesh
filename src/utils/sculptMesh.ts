@@ -660,8 +660,18 @@ export interface BrushSettings {
   strength: number;
   /** Pull in rather than push out — Ctrl, in every sculpting tool ever made. */
   invert: boolean;
-  /** Mirror every stroke across the body's own X = 0 plane. */
+  /** Mirror every stroke across a plane through the body's origin. */
   symmetryX: boolean;
+  /**
+   * Which plane that is: 'x' mirrors the X coordinate, and so on. Defaults to
+   * 'x', which is what this setting used to mean and all it used to do.
+   *
+   * It needs choosing because the figure bases all face +X — see
+   * utils/sculptBases.ts — so their left and right lie along Y, and mirroring X
+   * on a head reflects front to back: a nose sculpted with it on grows a second
+   * nose out of the back of the skull, and a pair of ears cannot be made at all.
+   */
+  symmetryAxis?: 'x' | 'y' | 'z';
   /**
    * Refine and collapse as the brush passes. Off, the brush only moves the
    * vertices that are already there, which is faster and is what you want when
@@ -688,6 +698,7 @@ export const DEFAULT_BRUSH: BrushSettings = {
   strength: 0.5,
   invert: false,
   symmetryX: false,
+  symmetryAxis: 'x',
   dynamicTopology: true,
   detail: 0.25,
   maxVertices: 250_000,
@@ -743,9 +754,21 @@ export interface SculptSession {
    * delta below and never needs it.
    */
   before: SculptMesh | null;
-  /** For 'grab': the vertices caught at the start, held for the whole drag. */
-  grabbed: number[] | null;
-  grabWeights: Float32Array | null;
+  /**
+   * For 'grab': the vertices caught at the start, held for the whole drag —
+   * one entry per stamp channel.
+   *
+   * Two channels, because a symmetric stroke lands twice: once where it was
+   * aimed and once mirrored. Holding a single set meant the mirrored stamp
+   * re-dragged the vertices the FIRST one had caught, in the opposite
+   * direction, so a symmetric grab never made a matching pair — it pulled one
+   * lump apart down the middle. Two legs, two wings, two horns: none of them
+   * could be made with symmetry on, which is exactly when you would want it.
+   */
+  grabbed: (number[] | null)[];
+  grabWeights: (Float32Array | null)[];
+  /** For 'grab': where each channel's drag began, so the span can be refined. */
+  grabOrigin: ([number, number, number] | null)[];
   /** Dabs so far, so decimation can run on every few rather than every one. */
   stampCount: number;
   /** Set once refinement has been turned away by the vertex budget. */
@@ -756,9 +779,23 @@ export interface SculptSession {
 const DECIMATE_EVERY = 4;
 
 export function beginStroke(mesh: SculptMesh, settings: BrushSettings): SculptSession {
-  // Grab never refines: it drags the vertices it already caught, so its stroke
-  // is pure movement whatever the detail setting says.
-  const canChangeTopology = settings.dynamicTopology && settings.type !== 'grab';
+  /*
+   * Grab used to be excluded from dynamic topology: it drags the vertices it
+   * caught and nothing else, so refining the disc under the brush before the
+   * drag adds nothing the drag will use.
+   *
+   * But that left the app with no way to draw a limb out of a body. Pulling a
+   * leg 5 cm out of a belly stretched the forty-odd vertices it started with
+   * across the whole distance, and forty vertices spread over 5 cm is not a leg,
+   * it is a fin — thin, sparse and flat, however carefully you pull it. Every
+   * other sculpting tool solves this by refining the surface as it is stretched
+   * (the snake-hook brush), and refineInRadius only ever appends, so the held
+   * grab indices survive it.
+   *
+   * So grab refines too now — not under the brush, but along the span it has
+   * dragged, which is where the new surface actually is.
+   */
+  const canChangeTopology = settings.dynamicTopology;
   return {
     mesh,
     hash: buildSpatialHash(mesh, Math.max(settings.radius * 0.5, 1e-4)),
@@ -768,8 +805,9 @@ export function beginStroke(mesh: SculptMesh, settings: BrushSettings): SculptSe
     undoSeen: new Set(),
     topologyChanged: false,
     before: canChangeTopology ? cloneSculptMesh(mesh) : null,
-    grabbed: null,
-    grabWeights: null,
+    grabbed: [null, null],
+    grabWeights: [null, null],
+    grabOrigin: [null, null],
     stampCount: 0,
     hitVertexBudget: false,
   };
@@ -798,21 +836,24 @@ export function applyBrush(session: SculptSession, settings: BrushSettings, stam
   stampOnce(session, settings, stamp);
 
   if (settings.symmetryX) {
+    const axis = settings.symmetryAxis ?? 'x';
+    const flip = (value: number, on: boolean) => (on ? -value : value);
+    const fx = axis === 'x', fy = axis === 'y', fz = axis === 'z';
     stampOnce(session, settings, {
-      x: -stamp.x,
-      y: stamp.y,
-      z: stamp.z,
-      nx: -stamp.nx,
-      ny: stamp.ny,
-      nz: stamp.nz,
-      dx: stamp.dx === undefined ? undefined : -stamp.dx,
-      dy: stamp.dy,
-      dz: stamp.dz,
-    });
+      x: flip(stamp.x, fx),
+      y: flip(stamp.y, fy),
+      z: flip(stamp.z, fz),
+      nx: flip(stamp.nx, fx),
+      ny: flip(stamp.ny, fy),
+      nz: flip(stamp.nz, fz),
+      dx: stamp.dx === undefined ? undefined : flip(stamp.dx, fx),
+      dy: stamp.dy === undefined ? undefined : flip(stamp.dy, fy),
+      dz: stamp.dz === undefined ? undefined : flip(stamp.dz, fz),
+    }, 1);
   }
 }
 
-function stampOnce(session: SculptSession, settings: BrushSettings, stamp: BrushStamp): void {
+function stampOnce(session: SculptSession, settings: BrushSettings, stamp: BrushStamp, channel = 0): void {
   const { mesh } = session;
   const radius = Math.max(1e-5, settings.radius);
 
@@ -850,9 +891,11 @@ function stampOnce(session: SculptSession, settings: BrushSettings, stamp: Brush
   let indices: number[];
   let weights: Float32Array;
 
-  if (settings.type === 'grab' && session.grabbed && session.grabWeights) {
-    indices = session.grabbed;
-    weights = session.grabWeights;
+  const held = session.grabbed[channel];
+  const heldWeights = session.grabWeights[channel];
+  if (settings.type === 'grab' && held && heldWeights) {
+    indices = held;
+    weights = heldWeights;
   } else {
     indices = queryRadius(mesh, session.hash, stamp.x, stamp.y, stamp.z, radius);
     weights = new Float32Array(indices.length);
@@ -864,8 +907,11 @@ function stampOnce(session: SculptSession, settings: BrushSettings, stamp: Brush
       weights[k] = falloff(Math.hypot(dx, dy, dz) / radius);
     }
     if (settings.type === 'grab') {
-      session.grabbed = indices;
-      session.grabWeights = weights;
+      session.grabbed[channel] = indices;
+      session.grabWeights[channel] = weights;
+      // Where the drag began, so refineAlongDrag knows which stretch of surface
+      // is the new one.
+      session.grabOrigin[channel] = [stamp.x, stamp.y, stamp.z];
     }
   }
 
@@ -996,11 +1042,81 @@ function stampOnce(session: SculptSession, settings: BrushSettings, stamp: Brush
         positions[i * 3 + 1] += gy * w;
         positions[i * 3 + 2] += gz * w;
       }
+      // The surface has just been stretched between where the grab started and
+      // where it is now, and that is the part with too few vertices in it. See
+      // beginStroke: this is what makes a pulled limb a limb.
+      if (settings.dynamicTopology && session.grabOrigin[channel]) {
+        refineAlongDrag(session, settings, stamp, radius, channel);
+      }
       break;
     }
   }
 
   mesh.revision++;
+}
+
+/**
+ * Subdivide the surface a grab has drawn out, along the span it was dragged.
+ *
+ * Refining under the brush (what every other brush does) is no use here: the
+ * vertices that need company are the ones strung out behind the tip. Walking the
+ * segment in brush-sized steps covers the whole neck of the limb, and refining
+ * appends, so the indices the drag is holding stay valid.
+ *
+ * Refine only, never collapse: decimation removes vertices, and the grab is
+ * holding a list of indices that would no longer mean what it thinks.
+ */
+function refineAlongDrag(
+  session: SculptSession,
+  settings: BrushSettings,
+  stamp: BrushStamp,
+  radius: number,
+  channel: number,
+): void {
+  const { mesh } = session;
+  const origin = session.grabOrigin[channel]!;
+  const budget = settings.maxVertices ?? DEFAULT_BRUSH.maxVertices;
+  if (mesh.vertexCount >= budget) {
+    session.hitVertexBudget = true;
+    return;
+  }
+
+  const tipX = stamp.x + (stamp.dx ?? 0);
+  const tipY = stamp.y + (stamp.dy ?? 0);
+  const tipZ = stamp.z + (stamp.dz ?? 0);
+  const spanX = tipX - origin[0];
+  const spanY = tipY - origin[1];
+  const spanZ = tipZ - origin[2];
+  const span = Math.hypot(spanX, spanY, spanZ);
+
+  const target = Math.max(1e-5, radius * Math.max(0.05, settings.detail));
+  // One sample per brush-width along the span, so consecutive spheres overlap;
+  // capped because a very long drag should not cost an unbounded number of
+  // passes over the mesh.
+  const steps = Math.min(8, Math.max(1, Math.ceil(span / Math.max(radius, 1e-6))));
+
+  let split = 0;
+  for (let step = 0; step <= steps; step++) {
+    if (mesh.vertexCount >= budget) {
+      session.hitVertexBudget = true;
+      break;
+    }
+    const t = step / steps;
+    split += refineInRadius(
+      mesh,
+      origin[0] + spanX * t,
+      origin[1] + spanY * t,
+      origin[2] + spanZ * t,
+      radius,
+      target * 1.5,
+    );
+  }
+
+  if (split > 0) {
+    session.topologyChanged = true;
+    session.hash = buildSpatialHash(mesh, Math.max(radius * 0.5, 1e-4));
+    session.adjacency = buildAdjacency(mesh);
+  }
 }
 
 /**

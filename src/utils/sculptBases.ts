@@ -208,9 +208,20 @@ export function cylinderBase(radius: number, height: number, radial = 32, height
  */
 const FIGURE_RESOLUTION = 48;
 
-/** Mirrors a bone across the X = 0 plane — a figure's limbs come in pairs. */
+/**
+ * Mirrors a bone across the Y = 0 plane — a figure's limbs come in pairs.
+ *
+ * Y, because every figure here faces +X, so left and right lie along Y. This
+ * mirrored across X, which is the front-to-back axis: a wing written at
+ * y = +0.026 was "paired" with a second wing at y = +0.026, flipped nose to
+ * tail. The bird had two left wings and two left legs, with nothing whatever on
+ * its right side; the quadruped had all four legs down one flank; the hand's
+ * fingers were stacked front to back. It cost the bases up to 43 mm of
+ * asymmetry on a body 110 mm wide, and it made a pair of anything impossible to
+ * sculpt symmetrically because there was no surface on the far side to sculpt.
+ */
 function mirrored(bone: Bone): Bone {
-  return { a: [-bone.a[0], bone.a[1], bone.a[2]], b: [-bone.b[0], bone.b[1], bone.b[2]], ra: bone.ra, rb: bone.rb };
+  return { a: [bone.a[0], -bone.a[1], bone.a[2]], b: [bone.b[0], -bone.b[1], bone.b[2]], ra: bone.ra, rb: bone.rb };
 }
 
 /** Both of a pair. */
@@ -261,26 +272,35 @@ function figure(bones: Bone[], blend: number): SculptMesh {
  * useful thing here is the proportion and the pose — head at the top, weight
  * over the feet, arms hanging where arms hang.
  */
+/*
+ * Turned a quarter turn about Z from how it was first written.
+ *
+ * This skeleton alone put its shoulders, hips and limbs along X and faced +Y,
+ * while its own doc comment — and every other figure here — said +X. It was the
+ * only one `mirrored`'s X-flip suited, which is presumably how the flip came to
+ * be written that way. Now it agrees with the rest: facing +X, left and right
+ * along Y, and one symmetry plane that works for every base.
+ */
 export function humanoidSkeleton(): Bone[] {
   return [
     // Spine, pelvis to the base of the neck.
     { a: [0, 0, -0.02], b: [0, 0, 0.06], ra: 0.034, rb: 0.030 },
     // Neck and head.
     { a: [0, 0, 0.06], b: [0, 0, 0.085], ra: 0.016, rb: 0.018 },
-    { a: [0, 0, 0.092], b: [0, 0.004, 0.108], ra: 0.026, rb: 0.024 },
+    { a: [0, 0, 0.092], b: [0.004, 0, 0.108], ra: 0.026, rb: 0.024 },
     // Shoulders.
-    { a: [0, 0, 0.055], b: [0.040, 0, 0.055], ra: 0.022, rb: 0.019 },
-    { a: [0, 0, 0.055], b: [-0.040, 0, 0.055], ra: 0.022, rb: 0.019 },
+    { a: [0, 0, 0.055], b: [0, -0.040, 0.055], ra: 0.022, rb: 0.019 },
+    { a: [0, 0, 0.055], b: [0, 0.040, 0.055], ra: 0.022, rb: 0.019 },
     // Arms: upper, fore, and a stub for the hand.
-    ...pair({ a: [0.042, 0, 0.052], b: [0.052, 0, 0.008], ra: 0.018, rb: 0.014 }),
-    ...pair({ a: [0.052, 0, 0.008], b: [0.058, 0.004, -0.034], ra: 0.014, rb: 0.011 }),
-    ...pair({ a: [0.058, 0.004, -0.034], b: [0.060, 0.006, -0.048], ra: 0.011, rb: 0.009 }),
+    ...pair({ a: [0, -0.042, 0.052], b: [0, -0.052, 0.008], ra: 0.018, rb: 0.014 }),
+    ...pair({ a: [0, -0.052, 0.008], b: [0.004, -0.058, -0.034], ra: 0.014, rb: 0.011 }),
+    ...pair({ a: [0.004, -0.058, -0.034], b: [0.006, -0.060, -0.048], ra: 0.011, rb: 0.009 }),
     // Hips.
-    { a: [-0.022, 0, -0.018], b: [0.022, 0, -0.018], ra: 0.028, rb: 0.028 },
+    { a: [0, 0.022, -0.018], b: [0, -0.022, -0.018], ra: 0.028, rb: 0.028 },
     // Legs: thigh, shin, foot.
-    ...pair({ a: [0.021, 0, -0.024], b: [0.023, 0, -0.076], ra: 0.023, rb: 0.017 }),
-    ...pair({ a: [0.023, 0, -0.076], b: [0.024, 0, -0.122], ra: 0.017, rb: 0.012 }),
-    ...pair({ a: [0.024, -0.004, -0.126], b: [0.024, 0.020, -0.128], ra: 0.013, rb: 0.010 }),
+    ...pair({ a: [0, -0.021, -0.024], b: [0, -0.023, -0.076], ra: 0.023, rb: 0.017 }),
+    ...pair({ a: [0, -0.023, -0.076], b: [0, -0.024, -0.122], ra: 0.017, rb: 0.012 }),
+    ...pair({ a: [-0.004, -0.024, -0.126], b: [0.020, -0.024, -0.128], ra: 0.013, rb: 0.010 }),
   ];
 }
 
