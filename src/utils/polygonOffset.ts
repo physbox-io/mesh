@@ -84,6 +84,60 @@ export function signedArea2(pts: Point2D[]): number {
   return a;
 }
 
+/**
+ * Which side of a closed loop holds the material the cutter is about to meet.
+ *
+ * Not the same question as "which side is the part". A ring of a clearing pass
+ * that steps inward has stock on its inner side because the ring outside it has
+ * already gone, whichever of those the finished piece is made of.
+ */
+export type MaterialSide = 'inside' | 'outside';
+
+/**
+ * A closed loop wound so the cutter climb-mills it.
+ *
+ * In climb milling the tooth enters the cut at full chip thickness and leaves
+ * at nothing, so the heat it makes goes out with the chip. Conventional milling
+ * is the other way round — every tooth starts at zero thickness and rubs its
+ * way in, and the heat that rubbing makes has nowhere to go but the tool and
+ * the work. In aluminium that is the mechanism by which swarf welds itself to
+ * the flutes, takes the edge with it, and snaps the cutter.
+ *
+ * Which winding gives it follows from the rotation. A spindle turns a
+ * right-hand cutter clockwise seen from above, and for that rotation the tooth
+ * enters thick when the material lies to the **right** of the direction of
+ * travel. A loop's interior is on the right when the loop is travelled
+ * clockwise, so:
+ *
+ *   - material inside the loop  → cut it clockwise
+ *   - material outside the loop → cut it anti-clockwise
+ *
+ * which is the pair of rules a machinist states directly: clockwise around the
+ * outside of a part, anti-clockwise around a hole.
+ *
+ * Everything in this app emits work coordinates directly, with Y up, so the
+ * winding here is the winding the machine sees. An exporter that mirrored an
+ * axis on the way out would be reversing the handedness of every one of these
+ * loops and would have to say so.
+ *
+ * Reversing a closed loop leaves its start point where it was, so anything
+ * already positioned to begin there stays correct.
+ */
+export function orientForClimb(loop: Point2D[], material: MaterialSide): Point2D[] {
+  if (loop.length < 3) return loop;
+  const closed =
+    Math.hypot(loop[0].x - loop[loop.length - 1].x, loop[0].y - loop[loop.length - 1].y) < 1e-9;
+  const ring = closed ? loop.slice(0, -1) : loop;
+  if (ring.length < 3) return loop;
+
+  const ccw = signedArea2(ring) > 0;
+  if (ccw === (material === 'outside')) return loop;
+
+  const flipped = [ring[0], ...ring.slice(1).reverse()];
+  if (closed) flipped.push({ ...flipped[0] });
+  return flipped;
+}
+
 /** Signed area proper. Sign is orientation, magnitude is the enclosed area. */
 export function polygonArea(pts: Point2D[]): number {
   return signedArea2(pts) / 2;
@@ -496,9 +550,15 @@ export function offsetRegion(
     else offsetHoles.push(...res);
   });
 
+  /*
+   * The tool goes round the outside of the part and round the inside of every
+   * hole, so the material — the side that becomes a finished wall — is inside
+   * the outer boundary and outside each hole. That is the whole of the climb
+   * decision; see `orientForClimb`.
+   */
   return {
-    outer: offsetLoop(outer, delta, options),
-    holes: offsetHoles,
+    outer: offsetLoop(outer, delta, options).map((l) => orientForClimb(l, 'inside')),
+    holes: offsetHoles.map((h) => orientForClimb(h, 'outside')),
     droppedHoles,
   };
 }
@@ -557,10 +617,14 @@ export function offsetNestedLoops(
 
   loops.forEach((loop, i) => {
     if (loop.length < 3) return;
-    const dir = depths[i] % 2 === 0 ? delta : -delta;
+    const isHole = depths[i] % 2 === 1;
+    const dir = isHole ? -delta : delta;
     const res = offsetLoop(loop, dir, options);
     if (res.length === 0) dropped.push(i);
-    else paths.push(...res);
+    // The nesting that decided which side to stand off on also decides which
+    // side the material is on, and therefore which way round to cut: a hole
+    // keeps its material outside it, everything else inside.
+    else paths.push(...res.map((l) => orientForClimb(l, isHole ? 'outside' : 'inside')));
   });
 
   return { paths, dropped };
@@ -592,7 +656,14 @@ export function offsetRings(
   let guard = 0;
 
   while (frontier.length > 0 && guard < maxRings) {
-    rings.push(...frontier);
+    /*
+     * These rings are cut outermost first, so every one after the first has
+     * open air outside it and stock within — material inside the loop, which
+     * climb-mills clockwise. It is the opposite hand from a pocket cleared
+     * outward from a slot, and the reason `orientForClimb` is told the side
+     * rather than asked to work it out.
+     */
+    rings.push(...frontier.map((r) => orientForClimb(r, 'inside')));
     guard += frontier.length;
     // Each surviving ring is offset again on its own: once the region has split
     // into separate lobes they shrink independently, and a lobe that vanishes

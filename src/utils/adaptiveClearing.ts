@@ -39,6 +39,7 @@
 import type { Point2D } from './laserCutExporter';
 import { squaredDistanceTransform } from './heightmapMesh';
 import { isoContours } from './marchingSquares';
+import { orientForClimb } from './polygonOffset';
 
 /** Where the tool's centre is allowed to be, on a grid. */
 export interface ClearingRegion {
@@ -134,10 +135,23 @@ export function clearingRings(
     rings.push({
       insetMm: inset,
       engagement: k === 0 ? 1 : steadyEngagement,
-      loops: loops.map((loop) => loop.map((p) => ({
-        x: region.originMm.x + p.x * region.mmPerCell,
-        y: region.originMm.y + p.y * region.mmPerCell,
-      }))),
+      /*
+       * Wound so the cutter climb-mills. Rings are cut outermost first, so
+       * every one after the first meets stock on its inner side only — the
+       * ring outside it has already gone — and material inside the loop means
+       * cutting it clockwise. Marching squares has no reason to prefer either
+       * winding, so without this the direction is whichever way the contour
+       * tracer happened to walk, and half the rings shave while the other half
+       * rub. Rubbing is heat in the tool, which on aluminium is what welds
+       * swarf to the flutes.
+       */
+      loops: loops.map((loop) => orientForClimb(
+        loop.map((p) => ({
+          x: region.originMm.x + p.x * region.mmPerCell,
+          y: region.originMm.y + p.y * region.mmPerCell,
+        })),
+        'inside'
+      )),
     });
   }
 
