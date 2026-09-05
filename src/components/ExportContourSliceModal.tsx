@@ -337,7 +337,9 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
 
   const handleFrameTrace = async () => {
     if (!gcodeResult?.bounds) return;
-    await webSerialManager.frameJob(gcodeResult.bounds, machineMode === 'laser' ? 5 : 0);
+    await webSerialManager.frameJob(gcodeResult.bounds, machineMode === 'laser' ? 5 : 0, {
+      laserMode: machineMode === 'laser',
+    });
   };
 
   const mm = (m?: number) => `${((m ?? 0) * 1000).toFixed(0)} mm`;

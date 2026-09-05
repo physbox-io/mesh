@@ -829,10 +829,39 @@ class WebSerialManager {
     // One update for the whole report: each one notifies every listener, and
     // the telemetry publisher hangs off that.
     this.updateState(patch);
+
+    // Anything waiting on a position from *now* rather than from up to a poll
+    // interval ago has one.
+    const waiters = [...this.statusWaiters];
+    this.statusWaiters.clear();
+    waiters.forEach(w => w());
   }
 
   /** Last `WCO` seen, retained between the reports that carry one. */
   private workOffset: [number, number, number] = [0, 0, 0];
+
+  /** One-shot callbacks awaiting the next status report. */
+  private statusWaiters = new Set<() => void>();
+
+  /**
+   * Asks for a status report and waits for it, so a caller about to reason
+   * about where the tool *is* reads a position from now. Resolves on timeout
+   * anyway: a stale reading is the caller's problem to be safe about, and
+   * hanging here would strand whatever it was doing.
+   */
+  private async nextStatusReport(timeoutMs = 1000): Promise<void> {
+    if (!this.transport || !this.state.connected) return;
+    await new Promise<void>((resolve) => {
+      const fire = () => {
+        clearTimeout(timer);
+        this.statusWaiters.delete(fire);
+        resolve();
+      };
+      const timer = setTimeout(fire, timeoutMs);
+      this.statusWaiters.add(fire);
+      void this.writeRealtime(0x3f); // '?'
+    });
+  }
 
   /**
    * Sends one line and waits for the controller to accept it, so a probing
@@ -2080,18 +2109,66 @@ class WebSerialManager {
     };
   }
 
-  /** Runs low-power laser framing trace around job bounding box. */
-  public async frameJob(bounds: { minX: number; minY: number; maxX: number; maxY: number }, guidePower = 5): Promise<void> {
+  /**
+   * Traces the job's bounding box so the operator can see where it will land.
+   *
+   * What that means depends on the machine, and getting it wrong is destructive
+   * in one direction only:
+   *
+   *  - **Laser** — trace at a low guide power so the dot is visible. There is no
+   *    Z in the toolpath, so none is commanded here either.
+   *  - **CNC** — retract clear first and trace with the spindle *off*. A router
+   *    sits at work Z0 after zeroing, which is the surface of the stock, and
+   *    framing from there drags the bit right around the outline of the part.
+   *
+   * The retract is clamped to where the tool already is. `safeZMm` is a *work*
+   * height, so it is only clear of the job when Z0 belongs to the stock clamped
+   * down now; against a zero left over from an earlier run it can sit below the
+   * tool, and the move meant to make framing safe becomes a plunge. Framing may
+   * only ever move Z away from the stock — a stale reading can leave it higher
+   * than asked for, never lower.
+   */
+  public async frameJob(
+    bounds: { minX: number; minY: number; maxX: number; maxY: number },
+    guidePower = 5,
+    opts: { laserMode?: boolean; safeZMm?: number } = {}
+  ): Promise<void> {
+    // Callers have always said "CNC" by asking for no guide power at all, so
+    // that stays the default reading of it.
+    const { laserMode = guidePower > 0, safeZMm = 5 } = opts;
     const { minX, minY, maxX, maxY } = bounds;
+
     await this.sendLine('G21');
     await this.sendLine('G90');
+
+    if (!laserMode) {
+      await this.nextStatusReport();
+      const retractZ = Math.max(safeZMm, this.state.wpos.z);
+      await this.sendLine(`G0 Z${retractZ.toFixed(3)}`);
+    }
+
     await this.sendLine(`G0 X${minX.toFixed(3)} Y${minY.toFixed(3)} F3000`);
-    await this.sendLine(`M3 S${Math.round(guidePower)}`);
-    await this.sendLine(`G1 X${maxX.toFixed(3)} Y${minY.toFixed(3)} F3000`);
-    await this.sendLine(`G1 X${maxX.toFixed(3)} Y${maxY.toFixed(3)} F3000`);
-    await this.sendLine(`G1 X${minX.toFixed(3)} Y${maxY.toFixed(3)} F3000`);
-    await this.sendLine(`G1 X${minX.toFixed(3)} Y${minY.toFixed(3)} F3000`);
-    await this.sendLine('M5');
+
+    const corners: Array<[number, number]> = [
+      [maxX, minY],
+      [maxX, maxY],
+      [minX, maxY],
+      [minX, minY],
+    ];
+
+    if (laserMode) {
+      await this.sendLine(`M3 S${Math.round(guidePower)}`);
+      for (const [x, y] of corners) {
+        await this.sendLine(`G1 X${x.toFixed(3)} Y${y.toFixed(3)} F3000`);
+      }
+      await this.sendLine('M5');
+    } else {
+      // No `M3` at all: a program with none in it cannot start a spindle by
+      // accident, and there is nothing to cut with here anyway.
+      for (const [x, y] of corners) {
+        await this.sendLine(`G0 X${x.toFixed(3)} Y${y.toFixed(3)} F3000`);
+      }
+    }
   }
 
   /** Emergency Stop (Ctrl+X and M5). */

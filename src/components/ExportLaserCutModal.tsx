@@ -349,7 +349,9 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
 
   const handleFrameTrace = async () => {
     if (!gcodeResult?.bounds) return;
-    await webSerialManager.frameJob(gcodeResult.bounds, machineMode === 'laser' ? 5 : 0);
+    await webSerialManager.frameJob(gcodeResult.bounds, machineMode === 'laser' ? 5 : 0, {
+      laserMode: machineMode === 'laser',
+    });
   };
 
   /**
