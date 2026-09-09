@@ -151,7 +151,7 @@ describe('creasing over MCP', () => {
     expect(result.changed).toBe(0);
     expect(result.skipped).toHaveLength(3);
     expect(result.skipped[1].reason).toMatch(/no corner of the shape/);
-    expect(result.skipped[2].reason).toMatch(/exactly two corners/);
+    expect(result.skipped[2].reason).toMatch(/two corners, or three and up/);
   });
 
   it('mirrors a crease when asked', () => {
@@ -190,5 +190,28 @@ describe('creasing a whole loop over MCP', () => {
     sharpenEdgesMm(l, [oneEdge], true, undefined, true);
     expect(sharpenEdgesMm(l, [oneEdge], false, undefined, true).changed).toBe(4);
     expect(latticeSummary(l).creases).toBe(0);
+  });
+});
+
+describe('creasing a face border over MCP', () => {
+  const top = [[-10, -10, 10], [10, -10, 10], [10, 10, 10], [-10, 10, 10]];
+
+  it('reads four corners as a face and marks its whole rim', () => {
+    const l = boxLattice(DEFAULT_UNIT, 100);
+    expect(sharpenEdgesMm(l, [top], true).changed).toBe(4);
+    expect(latticeSummary(l).creases).toBe(4);
+  });
+
+  it('is the answer where a loop is not — a cap has no loop through it', () => {
+    const l = boxLattice(DEFAULT_UNIT, 100);
+    // Every corner of a box is three-way, so growing an edge finds only itself.
+    expect(sharpenEdgesMm(l, [[top[0], top[1]]], true, undefined, true).changed).toBe(1);
+  });
+
+  it('refuses corners that are not a face', () => {
+    const l = boxLattice(DEFAULT_UNIT, 100);
+    const result = sharpenEdgesMm(l, [[top[0], top[1], [0, 0, 99]]], true);
+    expect(result.changed).toBe(0);
+    expect(result.skipped[0].reason).toMatch(/no corner of the shape/);
   });
 });

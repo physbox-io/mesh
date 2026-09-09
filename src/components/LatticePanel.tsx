@@ -17,7 +17,7 @@
 import { useEffect } from 'react';
 import {
   PenLine, MousePointer2, MoveVertical, Grid3x3, FlipHorizontal2,
-  Boxes, TriangleAlert, Check, Spline, Scissors, Layers,
+  Boxes, TriangleAlert, Check, Spline, Scissors, Layers, Lock,
 } from 'lucide-react';
 import { useStore } from '../store/useStore';
 import type { SceneNode } from '../types/scene';
@@ -33,7 +33,7 @@ interface ToolDefinition {
 
 const TOOLS: ToolDefinition[] = [
   { tool: 'place', label: 'Place', key: '1', icon: PenLine, hint: 'Click grid points to draw a face. Four corners closes it automatically; Enter closes a triangle; Esc abandons it.' },
-  { tool: 'select', label: 'Select', key: '2', icon: MousePointer2, hint: 'Drag a corner to move it; click a face or an edge to select it. L grows an edge to its whole loop, S keeps it sharp under smoothing, F turns a face inside out.' },
+  { tool: 'select', label: 'Select', key: '2', icon: MousePointer2, hint: 'Drag a corner to move it; click a face or an edge to select it. L grows an edge to its whole loop, S keeps it sharp under smoothing (on a face, its whole border), F turns a face inside out.' },
   { tool: 'extrude', label: 'Extrude', key: '3', icon: MoveVertical, hint: 'Drag a face along its own axis to push it out in whole grid steps — the fastest way to get from a plate to a solid.' },
 ];
 
@@ -57,6 +57,7 @@ export function LatticePanel() {
   const plane = useStore((s) => s.latticePlane);
   const snap = useStore((s) => s.latticeSnap);
   const mirror = useStore((s) => s.latticeMirror);
+  const planeLocked = useStore((s) => s.latticePlaneLocked);
   const stats = useStore((s) => s.latticeStats);
   const setTool = useStore((s) => s.setLatticeTool);
   const setPlane = useStore((s) => s.setLatticePlane);
@@ -142,7 +143,13 @@ export function LatticePanel() {
           brings this with it. */}
       <div className="space-y-1.5">
         <div className="flex items-baseline justify-between">
-          <span className={labelClass} title="Where a NEW point lands when you click empty space. Points that already exist can be clicked wherever they are, at any depth.">New Points At</span>
+          <span
+            className={`${labelClass} flex items-center gap-1 ${planeLocked ? 'text-sky-500 dark:text-sky-400' : ''}`}
+            title="Where a NEW point lands when you click empty space. Points that already exist can be clicked wherever they are, at any depth — unless Ctrl is held, which keeps everything on this plane."
+          >
+            {planeLocked && <Lock className="w-3 h-3" />}
+            {planeLocked ? 'Locked To' : 'New Points At'}
+          </span>
           <span className="text-[10px] font-mono text-slate-600 dark:text-slate-300">
             {plane.axis} = {formatStep(plane.index * unitMm)}
           </span>
@@ -165,9 +172,10 @@ export function LatticePanel() {
           ))}
         </div>
         <p className="text-[10px] leading-snug text-slate-400 dark:text-slate-500">
-          The lit slice of dots follows your pointer; clicking at a depth sets this to it.
+          The lit slice follows your pointer; clicking at a depth sets this to it.
+          Hold <kbd className="font-mono">Ctrl</kbd> to stay on this one — the slice stops
+          moving and only points on it can be clicked.
           <kbd className="font-mono"> [</kbd> / <kbd className="font-mono">]</kbd> moves it a step, Shift for five.
-          Points that already exist can be clicked at any depth.
         </p>
       </div>
 

@@ -200,6 +200,12 @@ export function extrudeMm(
  * usually is. Naming a dozen edges by their coordinates is a dozen chances to
  * get one wrong, and a single soft edge in a hard rim only shows itself after
  * the shape is smoothed, as a dent.
+ *
+ * An entry of THREE OR MORE corners is read as a face rather than an edge, and
+ * marks that face's whole border. It is the only cheap way to reach the rim of
+ * a cap: the corners around one are three-way, so no loop runs through them and
+ * none ever will, and the alternative is naming four edges that share eight
+ * corners between them.
  */
 export function sharpenEdgesMm(
   lattice: Lattice,
@@ -215,8 +221,8 @@ export function sharpenEdgesMm(
   const skipped: FaceReport[] = [];
 
   for (const edge of edges) {
-    if (!Array.isArray(edge) || edge.length !== 2 || !edge.every(validPoint)) {
-      skipped.push({ face: edge as number[][], reason: 'an edge is exactly two corners, each [x, y, z] in millimetres' });
+    if (!Array.isArray(edge) || edge.length < 2 || !edge.every(validPoint)) {
+      skipped.push({ face: edge as number[][], reason: 'an edge is two corners, or three and up for a whole face border, each [x, y, z] in millimetres' });
       continue;
     }
     const verts = edge.map((point) => {
@@ -227,7 +233,19 @@ export function sharpenEdgesMm(
       skipped.push({ face: edge, reason: 'no corner of the shape is at one of those points' });
       continue;
     }
-    const targets = loop ? edgeLoop(lattice, verts[0], verts[1]) : [[verts[0], verts[1]] as [number, number]];
+
+    let targets: [number, number][];
+    if (verts.length > 2) {
+      const face = findFaceMm(lattice, edge);
+      if (face === -1) {
+        skipped.push({ face: edge, reason: 'no face has those corners' });
+        continue;
+      }
+      const corners = lattice.faces[face]!;
+      targets = corners.map((v, i) => [v, corners[(i + 1) % corners.length]] as [number, number]);
+    } else {
+      targets = loop ? edgeLoop(lattice, verts[0], verts[1]) : [[verts[0], verts[1]] as [number, number]];
+    }
     let touched = 0;
     for (const [p, q] of targets) if (setCrease(lattice, p, q, sharp)) touched++;
     changed += touched;

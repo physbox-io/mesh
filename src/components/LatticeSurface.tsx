@@ -147,6 +147,21 @@ export function LatticeSurface({
    * fiddliest.
    */
   const hoverVertex = hover ? findVertex(lattice, hover[0], hover[1], hover[2]) : -1;
+  /**
+   * Whether the pointer is locked to the work plane, by holding Ctrl (or Cmd).
+   *
+   * Everything about this mode reaches across depths on purpose — any point can
+   * be joined to any other — and the cost of that is that the pointer keeps
+   * finding things at other depths: the lit slice jumps away from the one being
+   * worked on, and a click meant for empty space snaps to a corner behind it.
+   * Held, this says "I mean THIS plane", which is the other half the freedom
+   * needed.
+   *
+   * Tracked as state rather than read off each event because the lit slice has
+   * to settle the moment the key goes down, not on the next mouse move.
+   */
+  const [locked, setLocked] = useState(false);
+
   const [selectedFace, setSelectedFace] = useState<number | null>(null);
   const [selectedVertex, setSelectedVertex] = useState<number | null>(null);
   /**
@@ -407,7 +422,7 @@ export function LatticeSurface({
    * plane when the pointer is off the model, which is where a new point in
    * empty space would be born.
    */
-  const litIndex = hover ? hover[AXIS_INDEX[plane.axis]] : plane.index;
+  const litIndex = locked || !hover ? plane.index : hover[AXIS_INDEX[plane.axis]];
 
   const slice = useMemo(() => {
     const positions: number[] = [];
@@ -459,13 +474,20 @@ export function LatticeSurface({
    * the cage are given an edge over bare grid dots, because joining to a corner
    * that is already part of the model is nearly always the intent.
    */
-  const pickExisting = useCallback((ray: { origin: THREE.Vector3; direction: THREE.Vector3 }): LatticeCoord | null => {
+  const pickExisting = useCallback((
+    ray: { origin: THREE.Vector3; direction: THREE.Vector3 },
+    onlyOnPlane = false,
+  ): LatticeCoord | null => {
     // A fixed fraction of the grid step: tight enough that two adjacent dots are
     // never both candidates, loose enough to be hit without aiming.
     const threshold = unit * snap * 0.45;
     let best: { coord: LatticeCoord; score: number; along: number } | null = null;
 
     const consider = (coord: LatticeCoord, bias: number) => {
+      // Locked, a point at another depth is not a candidate at all — which is
+      // what stops a click meant for the plane being caught by the corner of
+      // something behind it.
+      if (onlyOnPlane && coord[AXIS_INDEX[plane.axis]] !== plane.index) return;
       const point = new THREE.Vector3(coord[0] * unit, coord[1] * unit, coord[2] * unit).sub(ray.origin);
       const along = point.dot(ray.direction);
       if (along <= 0) return;
@@ -483,7 +505,7 @@ export function LatticeSurface({
     for (const coord of volume.coords) consider(coord, 1);
 
     return best ? (best as { coord: LatticeCoord }).coord : null;
-  }, [handles, lattice, snap, unit, volume.coords]);
+  }, [handles, lattice, plane, snap, unit, volume.coords]);
 
   /** Where the ray crosses the work plane, rounded to the nearest grid node. */
   const snapFromPlane = useCallback((ray: { origin: THREE.Vector3; direction: THREE.Vector3 }): LatticeCoord | null => {
@@ -540,10 +562,16 @@ export function LatticeSurface({
     return best ? best.edge : null;
   }, [lattice, position, snap, unit]);
 
-  /** What the pointer is on: something already there, or the work plane. */
+  /**
+   * What the pointer is on: something already there, or the work plane.
+   *
+   * Locked, only points ON the work plane count as "already there" — so
+   * snapping to an existing corner still works, and only the ones at other
+   * depths stop competing for the click.
+   */
   const resolve = useCallback((ray: { origin: THREE.Vector3; direction: THREE.Vector3 }): LatticeCoord | null =>
-    pickExisting(ray) ?? snapFromPlane(ray),
-  [pickExisting, snapFromPlane]);
+    pickExisting(ray, locked) ?? snapFromPlane(ray),
+  [locked, pickExisting, snapFromPlane]);
 
   // -----------------------------------------------------------------------
   // Placing
@@ -676,7 +704,7 @@ export function LatticeSurface({
     // welded to another, and it is not confined to the work plane. Otherwise the
     // plane fixes only its own axis and the vertex keeps its depth, so a drag
     // never teleports a point onto the slice.
-    const existing = pickExisting(ray);
+    const existing = pickExisting(ray, locked);
     const coord: LatticeCoord = [...state.start];
     if (existing) {
       coord[0] = existing[0]; coord[1] = existing[1]; coord[2] = existing[2];
@@ -691,7 +719,7 @@ export function LatticeSurface({
     restoreLattice(lattice, state.snapshot);
     moveVertex(lattice, state.vertex, coord[0], coord[1], coord[2]);
     setRevision((r) => r + 1);
-  }, [lattice, localRay, pickExisting, plane.axis, snapFromPlane]);
+  }, [lattice, localRay, locked, pickExisting, plane.axis, snapFromPlane]);
 
   const endDrag = useCallback((event?: ThreeEvent<PointerEvent>) => {
     if (!drag.current) return;
@@ -747,9 +775,11 @@ export function LatticeSurface({
     // empty space appears beside the last one rather than back on whatever plane
     // the session started on.
     const axis = AXIS_INDEX[plane.axis];
-    if (coord[axis] !== plane.index) useStore.getState().setLatticePlane({ axis: plane.axis, index: coord[axis] });
+    if (!locked && coord[axis] !== plane.index) {
+      useStore.getState().setLatticePlane({ axis: plane.axis, index: coord[axis] });
+    }
     placeAt(coord);
-  }, [localRay, pickEdge, placeAt, plane, resolve, tool]);
+  }, [localRay, locked, pickEdge, placeAt, plane, resolve, tool]);
 
   const onFaceDown = useCallback((event: ThreeEvent<PointerEvent>) => {
     if (event.button !== 0 || event.faceIndex == null) return;
@@ -876,15 +906,30 @@ export function LatticeSurface({
         return;
       }
 
-      if (key === 's' && selectedEdges.length > 0) {
+      if (key === 's' && (selectedEdges.length > 0 || selectedFace !== null)) {
         // Sharpen. The one control that makes smoothing usable for a part
         // rather than a pebble: everything rounds except what is marked.
+        //
+        // With a FACE selected it marks that face's whole border, which is the
+        // only cheap way to reach the rim of a cap — the corners there are
+        // three-way, so L finds no loop through them and never will. Selecting
+        // the face and pressing S is four edges in one keystroke.
+        const face = selectedEdges.length > 0 ? null : selectedFace;
+        const edges: [number, number][] = selectedEdges.length > 0
+          ? selectedEdges
+          : (() => {
+            const verts = face === null ? null : lattice.faces[face];
+            if (!verts) return [];
+            return verts.map((v, i) => [v, verts[(i + 1) % verts.length]] as [number, number]);
+          })();
+        if (edges.length === 0) return;
+
         // Softening only when the WHOLE selection is already sharp, so pressing
-        // S on a loop that is half marked finishes the job rather than
-        // inverting it edge by edge into a different half.
-        const sharp = !selectedEdges.every(([a, b]) => isCrease(lattice, a, b));
+        // S on a rim that is half marked finishes the job rather than inverting
+        // it edge by edge into a different half.
+        const sharp = !edges.every(([a, b]) => isCrease(lattice, a, b));
         mutate(() => {
-          for (const [a, b] of selectedEdges) {
+          for (const [a, b] of edges) {
             setCrease(lattice, a, b, sharp);
             if (!mirror) continue;
             const reflect = (v: number) => {
@@ -914,6 +959,38 @@ export function LatticeSurface({
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
   }, [closePending, commit, hoverVertex, lattice, mirror, mutate, nudgeLatticePlane, selectedEdges, selectedFace, selectedVertex, snap]);
+
+  /**
+   * Ctrl (or Cmd) held, tracked on its own.
+   *
+   * A modifier that only takes effect on the next pointer move is a modifier
+   * nobody trusts: you press it to steady the plane, nothing happens, and you
+   * move the mouse to check — which is exactly the movement it was meant to
+   * make safe. Blur clears it, because a key-up that happens while the window
+   * is not focused never arrives, and a lock stuck on is worse than no lock.
+   */
+  useEffect(() => {
+    const down = (event: KeyboardEvent) => {
+      if (event.key === 'Control' || event.key === 'Meta') setLocked(true);
+    };
+    const up = (event: KeyboardEvent) => {
+      if (event.key === 'Control' || event.key === 'Meta') setLocked(false);
+    };
+    const clear = () => setLocked(false);
+    window.addEventListener('keydown', down);
+    window.addEventListener('keyup', up);
+    window.addEventListener('blur', clear);
+    return () => {
+      window.removeEventListener('keydown', down);
+      window.removeEventListener('keyup', up);
+      window.removeEventListener('blur', clear);
+    };
+  }, []);
+
+  useEffect(() => {
+    useStore.getState().setLatticePlaneLocked(locked);
+    return () => useStore.getState().setLatticePlaneLocked(false);
+  }, [locked]);
 
   // A drag left open by an unmount would leave the camera disabled.
   useEffect(() => () => {
@@ -1029,9 +1106,12 @@ export function LatticeSurface({
         />
       </points>
       <points geometry={slice} raycast={() => null}>
+        {/* Lit blue while it is being held, so the lock is visible on the thing
+            it locks rather than only in the panel. */}
         <pointsMaterial
-          map={dotTexture} color="#475569" size={step * 0.34} sizeAttenuation
-          transparent opacity={0.9} depthWrite={false}
+          map={dotTexture} color={locked ? '#0284c7' : '#475569'}
+          size={step * (locked ? 0.42 : 0.34)} sizeAttenuation
+          transparent opacity={locked ? 1 : 0.9} depthWrite={false}
         />
       </points>
 

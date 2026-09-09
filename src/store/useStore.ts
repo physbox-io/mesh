@@ -600,6 +600,9 @@ export interface PhysicsState {
   nudgeLatticePlane: (delta: number) => void;
   setLatticeSnap: (snap: SnapMultiple) => void;
   setLatticeMirror: (axis: LatticeAxis | null) => void;
+  /** Whether the pointer is being held to the work plane. Set by the viewport. */
+  latticePlaneLocked: boolean;
+  setLatticePlaneLocked: (locked: boolean) => void;
   setLatticeStats: (stats: { vertices: number; faces: number; quads: number; tris: number; creases: number; watertight: boolean } | null) => void;
   /**
    * Writes a cage to a node and rebuilds its mesh from it, in one go.
@@ -1051,6 +1054,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   // for detail without any of the coarse work having to move.
   latticeSnap: 100,
   latticeMirror: null,
+  latticePlaneLocked: false,
   latticeStats: null,
 
   // Opening one modelling mode closes the other: both take over the drawing of
@@ -1066,6 +1070,9 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   })),
   setLatticeSnap: (snap) => set({ latticeSnap: snap }),
   setLatticeMirror: (axis) => set({ latticeMirror: axis }),
+  setLatticePlaneLocked: (lockedNow) => set((state) => (
+    state.latticePlaneLocked === lockedNow ? {} : { latticePlaneLocked: lockedNow }
+  )),
   setLatticeStats: (stats) => set({ latticeStats: stats }),
 
   applyLattice: (nodeId, cage, subdiv) => {
