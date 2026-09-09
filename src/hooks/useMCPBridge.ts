@@ -23,7 +23,8 @@ import { SCULPT_BASES } from '../utils/sculptBases';
 import { fromSceneGeom, toSceneGeom } from '../utils/sculptMesh';
 import { applySculptStroke, probeSurface, sculptSummary, undoSculptStroke, BRUSH_TYPES } from '../utils/sculptCommands';
 import {
-  addFacesMm, describeLattice, extrudeMm, latticeSummary, removeFacesMm, sharpenEdgesMm,
+  addFacesMm, bevelFaceMm, bridgeFacesMm, describeLattice, extrudeMm, insetFaceMm,
+  latticeSummary, removeFacesMm, sharpenEdgesMm,
 } from '../utils/latticeCommands';
 import {
   boxLattice, cloneLattice, deserializeCage, orientFaces, serializeCage, DEFAULT_UNIT as LATTICE_UNIT,
@@ -1010,6 +1011,36 @@ export function useMCPBridge() {
             // from it, which is what everything downstream actually sees.
             meshTriangles: mesh?.faces ? mesh.faces.length / 3 : 0,
           };
+        }
+
+        case 'LATTICE_INSET': {
+          const { targetId, face, amountMm, mirror } = msg;
+          const { node, lattice } = latticeTarget(store, targetId);
+          const before = cloneLattice(lattice);
+          const result = insetFaceMm(lattice, face, amountMm, mirror as LatticeAxis | undefined);
+          pushLatticeHistory(targetId, before);
+          commitLattice(node, lattice);
+          return { ok: true, id: targetId, ...result, ...latticeSummary(lattice), undoDepth: (latticeHistory.get(targetId) ?? []).length };
+        }
+
+        case 'LATTICE_BEVEL': {
+          const { targetId, face, amountMm, mirror } = msg;
+          const { node, lattice } = latticeTarget(store, targetId);
+          const before = cloneLattice(lattice);
+          const result = bevelFaceMm(lattice, face, amountMm, mirror as LatticeAxis | undefined);
+          pushLatticeHistory(targetId, before);
+          commitLattice(node, lattice);
+          return { ok: true, id: targetId, ...result, ...latticeSummary(lattice), undoDepth: (latticeHistory.get(targetId) ?? []).length };
+        }
+
+        case 'LATTICE_BRIDGE': {
+          const { targetId, faceA, faceB } = msg;
+          const { node, lattice } = latticeTarget(store, targetId);
+          const before = cloneLattice(lattice);
+          const result = bridgeFacesMm(lattice, faceA, faceB);
+          pushLatticeHistory(targetId, before);
+          commitLattice(node, lattice);
+          return { ok: true, id: targetId, ...result, ...latticeSummary(lattice), undoDepth: (latticeHistory.get(targetId) ?? []).length };
         }
 
         case 'LATTICE_ORIENT': {

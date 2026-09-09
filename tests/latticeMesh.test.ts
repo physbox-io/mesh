@@ -3,7 +3,7 @@ import {
   createLattice, vertexAt, findVertex, addFace, findFace, removeFace, flipFace,
   moveVertex, moveVertices, removeVertex, faceNormal, dominantAxis, extrudeFace, mirrorFace,
   isWatertight, latticeStats, latticeBounds, toSceneGeom, toPolyMesh, cageEdges, coordOf,
-  signedVolume, orientFaces, inconsistentFaces, faceCentre,
+  signedVolume, orientFaces, inconsistentFaces, faceCentre, bridgeFaces, insetFace, bevelFace,
   serializeCage, deserializeCage, cloneLattice, restoreLattice, faceCount,
   boxLattice, SNAP_MULTIPLES, DEFAULT_UNIT, setCrease, isCrease, edgeLoop,
   facesAlong, edgeExists, type Lattice,
@@ -685,6 +685,216 @@ describe('turning faces the right way round', () => {
       addFace(l, moved.reverse());
     }
     expect(orientFaces(l)).toBe(6);
+    expect(inconsistentFaces(l)).toBe(0);
+  });
+});
+
+describe('bridging two faces', () => {
+  /** A box of `half` steps, its corners offset by `shift`. */
+  function boxAt(l: Lattice, half: number, shift: [number, number, number]): number[] {
+    const before = l.faces.length;
+    const box = boxLattice(l.unit, half);
+    for (const verts of box.faces) {
+      if (!verts) continue;
+      addFace(l, verts.map((v) => {
+        const [i, j, k] = coordOf(box, v);
+        return vertexAt(l, i + shift[0], j + shift[1], k + shift[2]);
+      }));
+    }
+    return l.faces.map((_, f) => f).filter((f) => f >= before);
+  }
+
+  /** The face of `faces` whose corners all sit at `value` on `axis`. */
+  function faceAt(l: Lattice, faces: number[], axis: 0 | 1 | 2, value: number): number {
+    return faces.find((f) => l.faces[f]?.every((v) => coordOf(l, v)[axis] === value)) ?? -1;
+  }
+
+  it('joins two separate boxes into one closed shape', () => {
+    const l = createLattice(0.01);
+    const left = boxAt(l, 2, [0, 0, 0]);     // -2..2
+    const right = boxAt(l, 2, [10, 0, 0]);   // 8..12
+    expect(isWatertight(l)).toBe(true);
+
+    const result = bridgeFaces(l, faceAt(l, left, 0, 2), faceAt(l, right, 0, 8))!;
+    expect(result.walls).toHaveLength(4);
+    expect(isWatertight(l)).toBe(true);
+    expect(inconsistentFaces(l)).toBe(0);
+    // Two 4-step boxes plus the 6-step neck between them.
+    const step = 0.01;
+    expect(signedVolume(l)).toBeCloseTo(2 * (4 * step) ** 3 + 6 * step * (4 * step) ** 2, 12);
+  });
+
+  it('refuses two whole walls of the same box', () => {
+    const l = createLattice(0.01);
+    const box = boxAt(l, 4, [0, 0, 0]);
+    // They share no corner, so the check for "already touching" lets them
+    // through — but every edge of both is an edge of the four walls between
+    // them, so a band joining their rims runs along faces that already exist.
+    // A tunnel through a solid needs a SMALLER opening on each wall: see the
+    // inset tests, where the two together bore a real hole.
+    expect(bridgeFaces(l, faceAt(l, box, 0, 4), faceAt(l, box, 0, -4))).toBeNull();
+    expect(isWatertight(l)).toBe(true);
+  });
+
+  it('refuses faces that cannot be joined', () => {
+    const l = createLattice(0.01);
+    const box = boxAt(l, 2, [0, 0, 0]);
+    const top = faceAt(l, box, 2, 2);
+    const side = faceAt(l, box, 0, 2);
+    expect(bridgeFaces(l, top, top)).toBeNull();          // the same face
+    expect(bridgeFaces(l, top, side)).toBeNull();         // they already meet
+
+    const a = vertexAt(l, 40, 0, 0), b = vertexAt(l, 41, 0, 0), c = vertexAt(l, 41, 1, 0);
+    const triangle = addFace(l, [a, b, c]);
+    expect(bridgeFaces(l, triangle, faceAt(l, box, 2, -2))).toBeNull(); // 3 corners to 4
+  });
+
+  it('picks the pairing that does not twist the band', () => {
+    const l = createLattice(0.01);
+    const left = boxAt(l, 2, [0, 0, 0]);
+    const right = boxAt(l, 2, [10, 0, 0]);
+    bridgeFaces(l, faceAt(l, left, 0, 2), faceAt(l, right, 0, 8));
+    // A twisted band would still be closed, so the tell is the walls: each is a
+    // flat quad, and a twisted one is not planar.
+    for (let f = 0; f < l.faces.length; f++) {
+      const verts = l.faces[f];
+      if (!verts || verts.length !== 4) continue;
+      const [p, q, r, t] = verts.map((v) => coordOf(l, v));
+      const u = [q[0] - p[0], q[1] - p[1], q[2] - p[2]];
+      const w = [r[0] - p[0], r[1] - p[1], r[2] - p[2]];
+      const d = [t[0] - p[0], t[1] - p[1], t[2] - p[2]];
+      const cross = [u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]];
+      expect(cross[0] * d[0] + cross[1] * d[1] + cross[2] * d[2]).toBe(0);
+    }
+  });
+});
+
+describe('insetting a face', () => {
+  it('leaves a border of quads and a smaller face, changing nothing about the shape', () => {
+    const l = boxLattice(0.01, 4);
+    const before = signedVolume(l);
+    const top = l.faces.findIndex((f) => f && f.every((v) => coordOf(l, v)[2] === 4));
+    const { inner, border } = insetFace(l, top, 1)!;
+
+    expect(border).toHaveLength(4);
+    expect(faceCount(l)).toBe(10); // five walls, four border quads, one inner
+    expect(isWatertight(l)).toBe(true);
+    expect(inconsistentFaces(l)).toBe(0);
+    expect(signedVolume(l)).toBeCloseTo(before, 12);
+    // The inner face is a step in from each edge, all the way round.
+    for (const v of l.faces[inner]!) {
+      const [i, j] = coordOf(l, v);
+      expect(Math.abs(i)).toBe(3);
+      expect(Math.abs(j)).toBe(3);
+    }
+  });
+
+  it('refuses to turn a face inside out', () => {
+    const l = boxLattice(0.01, 4);
+    const top = l.faces.findIndex((f) => f && f.every((v) => coordOf(l, v)[2] === 4));
+    expect(insetFace(l, top, 4)).toBeNull(); // the face is only 4 steps to the middle
+    expect(insetFace(l, top, 9)).toBeNull();
+  });
+
+  it('refuses a face that is not flat on to an axis', () => {
+    const l = createLattice(0.01);
+    const a = vertexAt(l, 0, 0, 0), b = vertexAt(l, 2, 0, 2);
+    const c = vertexAt(l, 2, 2, 2), d = vertexAt(l, 0, 2, 0);
+    expect(insetFace(l, addFace(l, [a, b, c, d]), 1)).toBeNull();
+  });
+
+  it('makes a hole in a plate when the middle is then deleted', () => {
+    const l = createLattice(0.01);
+    const v = (i: number, j: number) => vertexAt(l, i, j, 0);
+    const plate = addFace(l, [v(-4, -4), v(4, -4), v(4, 4), v(-4, 4)]);
+    const { inner } = insetFace(l, plate, 2)!;
+    removeFace(l, inner);
+    expect(faceCount(l)).toBe(4);
+    // A frame of four quads: four edges round the outside, four round the hole,
+    // and four across the corners where the quads meet each other.
+    expect(isWatertight(l)).toBe(false);
+    expect(cageEdges(l).length / 2).toBe(12);
+  });
+
+  it('with a bridge, drills a tunnel through a solid', () => {
+    const l = boxLattice(0.01, 4);
+    const wall = (sign: number) => l.faces.findIndex((f) => f && f.every((v) => coordOf(l, v)[0] === sign * 4));
+    const east = insetFace(l, wall(1), 2)!.inner;
+    const west = insetFace(l, wall(-1), 2)!.inner;
+
+    const result = bridgeFaces(l, east, west)!;
+    expect(result.walls).toHaveLength(4);
+    expect(isWatertight(l)).toBe(true);
+    expect(inconsistentFaces(l)).toBe(0);
+
+    // A 8x8x8 box with a 4x4 tunnel bored along its whole length.
+    const step = 0.01;
+    expect(signedVolume(l)).toBeCloseTo((8 * step) ** 3 - (4 * step) ** 2 * (8 * step), 12);
+  });
+});
+
+describe('bevelling a face', () => {
+  /** A square plate of side 2h on z = 0, belonging to nothing else. */
+  function plate(h: number): { l: Lattice; face: number } {
+    const l = createLattice(0.01);
+    const v = (i: number, j: number) => vertexAt(l, i, j, 0);
+    return { l, face: addFace(l, [v(-h, -h), v(h, -h), v(h, h), v(-h, h)]) };
+  }
+
+  it('turns a square into an octagon', () => {
+    const { l, face } = plate(4);
+    expect(bevelFace(l, face, 2)).toBe(true);
+    const ring = l.faces.find((f) => f && f.length === 8)!;
+    expect(ring).toHaveLength(8);
+    expect(latticeStats(l).vertices).toBe(8);
+    // A chamfered square: every corner is 2 or 4 from the middle on each axis.
+    for (const v of ring) {
+      const [i, j] = coordOf(l, v);
+      expect([Math.abs(i), Math.abs(j)].sort()).toEqual([2, 4]);
+    }
+  });
+
+  it('reads rounder the more it is cut, and is still one flat face', () => {
+    const { l, face } = plate(4);
+    bevelFace(l, face, 2);
+    const ring = l.faces.find((f) => f && f.length === 8)!;
+    // Every corner the same distance from the centre would be a circle; an
+    // octagon gets within 6%, where a square is out by 41%.
+    const radii = ring.map((v) => {
+      const [i, j] = coordOf(l, v);
+      return Math.hypot(i, j);
+    });
+    expect(Math.max(...radii) / Math.min(...radii)).toBeLessThan(1.06);
+    for (const v of ring) expect(coordOf(l, v)[2]).toBe(0);
+  });
+
+  it('refuses to cut deeper than the edges allow', () => {
+    const { l, face } = plate(4);
+    expect(bevelFace(l, face, 4)).toBe(false); // half of each 8-step edge, from both ends
+    expect(bevelFace(l, face, 9)).toBe(false);
+  });
+
+  it('refuses a face whose corners are shared', () => {
+    const l = boxLattice(0.01, 4);
+    const top = l.faces.findIndex((f) => f && f.every((v) => coordOf(l, v)[2] === 4));
+    expect(bevelFace(l, top, 1)).toBe(false);
+  });
+
+  it('keeps a creased edge sharp through the cut', () => {
+    const { l, face } = plate(4);
+    const verts = [...l.faces[face]!];
+    setCrease(l, verts[0], verts[1], true);
+    bevelFace(l, face, 2);
+    expect(latticeStats(l).creases).toBe(1);
+  });
+
+  it('extrudes into a cylinder-shaped cage', () => {
+    const { l, face } = plate(4);
+    bevelFace(l, face, 2);
+    const octagon = l.faces.findIndex((f) => f && f.length === 8);
+    extrudeFace(l, octagon, 8);
+    // Eight walls, a cap, and the open end where the plate was.
+    expect(latticeStats(l)).toMatchObject({ faces: 9, quads: 8 });
     expect(inconsistentFaces(l)).toBe(0);
   });
 });

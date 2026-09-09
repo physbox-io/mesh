@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   addFacesMm, removeFacesMm, extrudeMm, findFaceMm, coordFromMm, mmFromCoord,
-  describeLattice, latticeSummary, sharpenEdgesMm,
+  describeLattice, latticeSummary, sharpenEdgesMm, insetFaceMm, bevelFaceMm, bridgeFacesMm,
 } from '../src/utils/latticeCommands';
 import { boxLattice, createLattice, DEFAULT_UNIT, faceCount, findVertex, isWatertight } from '../src/utils/latticeMesh';
 
@@ -213,5 +213,58 @@ describe('creasing a face border over MCP', () => {
     const result = sharpenEdgesMm(l, [[top[0], top[1], [0, 0, 99]]], true);
     expect(result.changed).toBe(0);
     expect(result.skipped[0].reason).toMatch(/no corner of the shape/);
+  });
+});
+
+describe('holes and joins over MCP', () => {
+  const wall = (sign: number) => {
+    const x = sign * 20;
+    return [[x, -20, -20], [x, 20, -20], [x, 20, 20], [x, -20, 20]];
+  };
+
+  it('insets a face and reports the smaller one it made', () => {
+    const l = boxLattice(DEFAULT_UNIT, 200); // 40 mm cube
+    const result = insetFaceMm(l, wall(1), 5);
+    expect(result.amountMm).toBe(5);
+    expect(result.border).toBe(4);
+    for (const corner of result.inner) {
+      expect(corner[0]).toBe(20);
+      expect([Math.abs(corner[1]), Math.abs(corner[2])]).toEqual([15, 15]);
+    }
+    expect(latticeSummary(l).watertight).toBe(true);
+  });
+
+  it('bores a tunnel: inset both walls, then join the smaller faces', () => {
+    const l = boxLattice(DEFAULT_UNIT, 200);
+    const east = insetFaceMm(l, wall(1), 10).inner;
+    const west = insetFaceMm(l, wall(-1), 10).inner;
+    expect(bridgeFacesMm(l, east, west).walls).toBe(4);
+
+    const summary = latticeSummary(l);
+    expect(summary.watertight).toBe(true);
+    expect(summary.inconsistent).toBe(0);
+  });
+
+  it('refuses to join two whole walls, and says what to do instead', () => {
+    const l = boxLattice(DEFAULT_UNIT, 200);
+    expect(() => bridgeFacesMm(l, wall(1), wall(-1))).toThrow(/inset each of them first/);
+  });
+
+  it('bevels a lone plate towards a circle', () => {
+    const l = createLattice(DEFAULT_UNIT);
+    const plate = [[-20, -20, 0], [20, -20, 0], [20, 20, 0], [-20, 20, 0]];
+    addFacesMm(l, [plate]);
+    expect(bevelFaceMm(l, plate, 10).amountMm).toBe(10);
+    expect(latticeSummary(l)).toMatchObject({ vertices: 8, faces: 1 });
+  });
+
+  it('refuses to bevel a face that is part of a solid', () => {
+    const l = boxLattice(DEFAULT_UNIT, 200);
+    expect(() => bevelFaceMm(l, wall(1), 5)).toThrow(/belong to no other face/);
+  });
+
+  it('refuses a change smaller than the grid', () => {
+    const l = boxLattice(DEFAULT_UNIT, 200);
+    expect(() => insetFaceMm(l, wall(1), 0.04)).toThrow(/less than one grid step/);
   });
 });

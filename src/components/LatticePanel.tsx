@@ -14,10 +14,11 @@
 // machined and which nothing in the viewport shows.
 // ---------------------------------------------------------------------------
 
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import {
   PenLine, MousePointer2, MoveVertical, Grid3x3, FlipHorizontal2,
   Boxes, TriangleAlert, Check, Spline, Scissors, Layers, Lock, RefreshCw,
+  Keyboard, ChevronDown,
 } from 'lucide-react';
 import { useStore } from '../store/useStore';
 import type { SceneNode } from '../types/scene';
@@ -32,7 +33,7 @@ interface ToolDefinition {
 }
 
 const TOOLS: ToolDefinition[] = [
-  { tool: 'place', label: 'Place', key: '1', icon: PenLine, hint: 'Click grid points to draw a face. Four corners closes it automatically; Enter closes a triangle; Esc abandons it.' },
+  { tool: 'place', label: 'Place', key: '1', icon: PenLine, hint: 'Click grid points to draw a face, then click the first one again to close it — the cursor turns green when a click would. Enter closes it where it is; Esc abandons it.' },
   { tool: 'select', label: 'Select', key: '2', icon: MousePointer2, hint: 'Click a corner, face or edge to select it; drag a box to catch several (Shift adds to the selection), then drag any one of them to move the lot or Delete to remove them. L grows an edge to its whole loop, S keeps it sharp under smoothing (on a face, its whole border), F turns a face inside out.' },
   { tool: 'extrude', label: 'Extrude', key: '3', icon: MoveVertical, hint: 'Drag a face along its own axis to push it out in whole grid steps — the fastest way to get from a plate to a solid.' },
 ];
@@ -51,7 +52,67 @@ function formatStep(mm: number): string {
   return `${Number.isInteger(rounded) ? rounded : rounded.toFixed(1)} mm`;
 }
 
+/**
+ * Every shortcut, grouped by what you would be doing when you wanted it.
+ *
+ * Written out rather than gathered from the handlers: the grouping and the
+ * wording are the point, and a generated list would be alphabetical and useless.
+ */
+const KEYS: { title: string; keys: [string, string][] }[] = [
+  {
+    title: 'Tools',
+    keys: [
+      ['1 2 3', 'Place, Select, Extrude'],
+      ['Esc', 'Abandon the polygon being drawn, or clear the selection'],
+    ],
+  },
+  {
+    title: 'The grid',
+    keys: [
+      ['X Y Z', 'Turn the work plane, landing on whatever the pointer is on'],
+      ['[ ]', 'Move it a step along its axis — Shift for five'],
+      ['Ctrl', 'Hold to stay on the plane you are pointing at'],
+    ],
+  },
+  {
+    title: 'Placing',
+    keys: [
+      ['Click', 'Put a corner down. Nothing closes on its own'],
+      ['Click 1st', 'Come back to the corner you started at to close the face'],
+      ['Enter', 'Close it without going back — three corners or more'],
+    ],
+  },
+  {
+    title: 'Selecting',
+    keys: [
+      ['Drag', 'Box round several corners; Shift adds to what is selected'],
+      ['Shift+Click', 'Add a face to the selection — two of them can be joined'],
+      ['L', 'Grow a selected edge to its whole loop'],
+    ],
+  },
+  {
+    title: 'Changing the shape',
+    keys: [
+      ['Del', 'Remove the corner under the pointer, or whatever is selected'],
+      ['B', 'Cut the corners off a face — a square becomes an octagon'],
+      ['I', 'Inset a face: a smaller one inside it, ringed by quads'],
+      ['J', 'Join two selected faces — or bore a tunnel between them'],
+      ['F', 'Turn a face inside out'],
+      ['N', 'Turn every face the right way round'],
+      ['S', 'Keep an edge sharp under smoothing (on a face, its whole border)'],
+    ],
+  },
+  {
+    title: 'Always',
+    keys: [
+      ['Ctrl+Z', 'Undo — Shift to redo'],
+      ['Right-drag', 'Orbit the camera'],
+    ],
+  },
+];
+
 export function LatticePanel() {
+  const [keysOpen, setKeysOpen] = useState(false);
   const latticeNodeId = useStore((s) => s.latticeNodeId);
   const tool = useStore((s) => s.latticeTool);
   const plane = useStore((s) => s.latticePlane);
@@ -261,6 +322,12 @@ export function LatticePanel() {
             </button>
           ))}
         </div>
+        {subdiv > 0 && (
+          <p className="text-[10px] leading-snug text-slate-400 dark:text-slate-500">
+            Four corners smooth to a rounded square and never to a circle. Cut the corners
+            off first with <kbd className="font-mono">B</kbd> — eight of them read as round.
+          </p>
+        )}
       </div>
 
       {/* Wall thickness. A lattice is a surface, and a surface has no inside
@@ -370,10 +437,39 @@ export function LatticePanel() {
         </div>
       )}
 
-      <p className="text-[10px] leading-snug text-slate-400 dark:text-slate-500 pt-1 border-t border-slate-200 dark:border-slate-800">
-        <kbd className="font-mono">Del</kbd> removes the corner under the pointer, or whatever is
-        selected · Right-drag orbits · <kbd className="font-mono">Ctrl+Z</kbd> undoes an edit
-      </p>
+      {/* Every key, in one place. The mode has more of them than a tooltip can
+          carry, and a shortcut nobody can find is a shortcut nobody has — which
+          is how a tool that exists goes on being asked for. */}
+      <div className="pt-2 border-t border-slate-200 dark:border-slate-800">
+        <button
+          type="button"
+          onClick={() => setKeysOpen((open) => !open)}
+          className="flex items-center gap-1 w-full text-[10px] font-bold uppercase tracking-wider text-slate-400 dark:text-slate-500 hover:text-slate-600 dark:hover:text-slate-300 cursor-pointer"
+        >
+          <Keyboard className="w-3 h-3" />
+          Keys
+          <ChevronDown className={`w-3 h-3 ml-auto transition-transform ${keysOpen ? 'rotate-180' : ''}`} />
+        </button>
+
+        {keysOpen && (
+          <dl className="mt-2 space-y-2">
+            {KEYS.map((group) => (
+              <div key={group.title}>
+                <dt className="text-[9px] font-bold uppercase tracking-wider text-slate-300 dark:text-slate-600 mb-0.5">
+                  {group.title}
+                </dt>
+                {group.keys.map(([combo, what]) => (
+                  <dd key={combo} className="flex gap-2 text-[10px] leading-snug text-slate-500 dark:text-slate-400">
+                    <kbd className="font-mono font-semibold text-slate-600 dark:text-slate-300 shrink-0 w-14">{combo}</kbd>
+                    <span className="flex-1">{what}</span>
+                  </dd>
+                ))}
+              </div>
+            ))}
+          </dl>
+        )}
+      </div>
+
     </div>
   );
 }

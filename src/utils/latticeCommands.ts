@@ -24,7 +24,8 @@
 
 import {
   addFace, coordOf, edgeKey, extrudeFace, faceNormal, findFace, findMirrorFace, findVertex,
-  edgeLoop, isCrease, isWatertight, latticeBounds, latticeStats, mirrorCoord, mirrorFace,
+  bevelFace, bridgeFaces, edgeLoop, insetFace, isCrease, isWatertight, latticeBounds,
+  latticeStats, mirrorCoord, mirrorFace,
   removeFace, setCrease, vertexAt, dominantAxis,
   type Axis, type Lattice, type LatticeCoord,
 } from './latticeMesh';
@@ -265,6 +266,79 @@ export function sharpenEdgesMm(
   }
 
   return { changed, skipped };
+}
+
+/** Steps for a distance in millimetres, at least one. */
+function stepsFromMm(mm: unknown, unit: number): number {
+  const steps = Math.round((typeof mm === 'number' ? mm : 0) / (unit * 1000));
+  if (steps < 1) {
+    throw new Error(`That is less than one grid step (${unit * 1000} mm), so it would change nothing`);
+  }
+  return steps;
+}
+
+/**
+ * Shrinks a face inside itself, leaving a ring of quads around it.
+ *
+ * The start of every hole. A face cannot be bridged to another on the same
+ * solid until it is smaller than the wall it is in — bridging two whole walls
+ * runs the new band along faces that already exist — so this is what makes a
+ * tunnel possible, and on its own it is a raised or recessed panel.
+ */
+export function insetFaceMm(lattice: Lattice, face: unknown, amountMm: number, mirror?: Axis) {
+  const index = findFaceMm(lattice, face);
+  if (index === -1) {
+    throw new Error('No face has those corners — read the shape back with physics_get_lattice and use the corners it reports');
+  }
+  const steps = stepsFromMm(amountMm, lattice.unit);
+  const partner = mirror ? findMirrorFace(lattice, index, mirror) : -1;
+  const result = insetFace(lattice, index, steps);
+  if (!result) {
+    throw new Error('That face cannot be inset by that much — it must lie flat on to an axis, and the inset must be less than half its width');
+  }
+  if (partner !== -1) insetFace(lattice, partner, steps);
+  const innerVerts = lattice.faces[result.inner] ?? [];
+  return {
+    amountMm: Math.round(steps * lattice.unit * 1000 * 10) / 10,
+    border: result.border.length,
+    inner: innerVerts.map((v) => mmFromCoord(coordOf(lattice, v), lattice.unit)),
+  };
+}
+
+/**
+ * Cuts the corners off a face, doubling its corner count.
+ *
+ * How a square becomes a circle: smoothing turns four corners into a rounded
+ * square and no amount of it does better, so the roundness has to be in the
+ * cage. Bevel a square into an octagon, smooth that, and it reads as round;
+ * extrude first and the result is a cylinder.
+ */
+export function bevelFaceMm(lattice: Lattice, face: unknown, amountMm: number, mirror?: Axis) {
+  const index = findFaceMm(lattice, face);
+  if (index === -1) {
+    throw new Error('No face has those corners — read the shape back with physics_get_lattice and use the corners it reports');
+  }
+  const steps = stepsFromMm(amountMm, lattice.unit);
+  const partner = mirror ? findMirrorFace(lattice, index, mirror) : -1;
+  if (!bevelFace(lattice, index, steps)) {
+    throw new Error('That face cannot be bevelled — its corners must belong to no other face, its edges must run along an axis or at 45 degrees, and the cut must be under half of every edge');
+  }
+  if (partner !== -1) bevelFace(lattice, partner, steps);
+  return { amountMm: Math.round(steps * lattice.unit * 1000 * 10) / 10 };
+}
+
+/** Joins two faces with a band of quads, opening both. */
+export function bridgeFacesMm(lattice: Lattice, faceA: unknown, faceB: unknown) {
+  const a = findFaceMm(lattice, faceA);
+  const b = findFaceMm(lattice, faceB);
+  if (a === -1 || b === -1) {
+    throw new Error('One of those faces is not there — read the shape back with physics_get_lattice and use the corners it reports');
+  }
+  const result = bridgeFaces(lattice, a, b);
+  if (!result) {
+    throw new Error('Those two cannot be joined: a face cannot be joined to itself, they must have the same number of corners, and they must share none. Two whole walls of one solid share the edges of everything between them — inset each of them first, then join the smaller faces.');
+  }
+  return { walls: result.walls.length };
 }
 
 /** Counts, bounds and health — the reply every operation ends with. */

@@ -37,6 +37,7 @@ import {
   toSceneGeom, cageEdges, coordOf, vertexAt, findVertex, addFace,
   removeFace, removeVertex, moveVertex, moveVertices, flipFace, setCrease, isCrease, creaseEdges, edgeKey, edgeLoop, extrudeFace, mirrorFace, findMirrorFace,
   faceNormal, faceCentre, dominantAxis, latticeStats, latticeBounds, mirrorCoord, orientFaces,
+  bridgeFaces, insetFace, bevelFace,
   AXIS_INDEX, type Axis, type Lattice, type LatticeCage, type LatticeCoord,
 } from '../utils/latticeMesh';
 
@@ -148,6 +149,15 @@ export function LatticeSurface({
    */
   const hoverVertex = hover ? findVertex(lattice, hover[0], hover[1], hover[2]) : -1;
   /**
+   * Whether a click here would close the polygon being drawn.
+   *
+   * Worth its own colour: closing is the one click in this mode that finishes
+   * something rather than adding to it, and hunting for the corner you started
+   * at is a poor use of anybody's attention.
+   */
+  const wouldClose = !!hover && pending.length >= 3
+    && pending[0][0] === hover[0] && pending[0][1] === hover[1] && pending[0][2] === hover[2];
+  /**
    * Whether the pointer is locked to the work plane, by holding Ctrl (or Cmd).
    *
    * Everything about this mode reaches across depths on purpose — any point can
@@ -171,7 +181,14 @@ export function LatticeSurface({
    */
   const hoverRef = useRef<LatticeCoord | null>(null);
 
-  const [selectedFace, setSelectedFace] = useState<number | null>(null);
+  /**
+   * The selected faces. One for most work, two when joining them.
+   *
+   * Plural because bridging needs a pair, and because the operations that act
+   * on a face — crease its border, flip it, inset it — are as reasonable to want
+   * on several as on one.
+   */
+  const [selectedFaces, setSelectedFaces] = useState<number[]>([]);
   /** The face under the pointer, so extrude shows what it is about to move. */
   const [hoveredFace, setHoveredFace] = useState<number | null>(null);
   /**
@@ -634,15 +651,12 @@ export function LatticeSurface({
         return [];
       }
       if (points.some((p) => same(p, coord))) return points;
-      const next = [...points, coord];
-      // Four corners is the shape this mode wants; taking the quad
-      // automatically saves a click on the overwhelmingly common case, and a
-      // triangle is still reachable with Enter.
-      if (next.length === 4) {
-        closePending(next);
-        return [];
-      }
-      return next;
+      // Nothing closes on its own. Four corners used to take the quad
+      // automatically, which saved a click on the common case and made every
+      // other polygon impossible to draw — including the octagon a circle is
+      // made of. A face is finished when you say so, by coming back to the
+      // corner you started from or by pressing Enter.
+      return [...points, coord];
     });
   }, [closePending]);
 
@@ -821,16 +835,22 @@ export function LatticeSurface({
     // empty space around the thing you are trying to draw it around.
     if (right - left < 3 && bottom - top < 3) {
       if (state.click?.kind === 'face') {
-        setSelectedFace(state.click.face);
+        const face = state.click.face;
+        // Shift adds, so a pair can be built up for J — and clicking a face that
+        // is already in the selection takes it back out, which is the only way
+        // to correct a mis-aimed second click without starting again.
+        setSelectedFaces((current) => (state.additive
+          ? current.includes(face) ? current.filter((f) => f !== face) : [...current, face]
+          : [face]));
         setSelectedEdges([]);
         setSelectedVertices([]);
       } else if (state.click?.kind === 'edge') {
         setSelectedEdges([state.click.edge]);
-        setSelectedFace(null);
+        setSelectedFaces([]);
         setSelectedVertices([]);
       } else if (!state.additive) {
         setSelectedVertices([]);
-        setSelectedFace(null);
+        setSelectedFaces([]);
         setSelectedEdges([]);
       }
       return;
@@ -843,7 +863,7 @@ export function LatticeSurface({
       if (at.x >= left && at.x <= right && at.y >= top && at.y <= bottom) caught.push(v);
     }
     setSelectedVertices((current) => (state.additive ? [...new Set([...current, ...caught])] : caught));
-    setSelectedFace(null);
+    setSelectedFaces([]);
     setSelectedEdges([]);
   }, [handles, setOrbitEnabled, toScreen]);
 
@@ -911,7 +931,7 @@ export function LatticeSurface({
       const edge = ray && pickEdge(ray);
       if (edge) {
         setSelectedEdges([edge]);
-        setSelectedFace(null);
+        setSelectedFaces([]);
         setSelectedVertices([]);
         event.stopPropagation();
         return;
@@ -951,7 +971,7 @@ export function LatticeSurface({
       return;
     }
 
-    setSelectedFace(face);
+    setSelectedFaces([face]);
     setSelectedVertices([]);
     setSelectedEdges([]);
     if (tool === 'extrude') beginExtrude(face, event);
@@ -970,7 +990,7 @@ export function LatticeSurface({
     if (vertex === undefined) return;
     event.stopPropagation();
     setSelectedVertices((current) => (current.includes(vertex) ? current : [vertex]));
-    setSelectedFace(null);
+    setSelectedFaces([]);
     setSelectedEdges([]);
     beginVertexDrag(vertex, event);
   }, [beginVertexDrag, handles, tool]);
@@ -995,7 +1015,7 @@ export function LatticeSurface({
         event.stopPropagation();
         other.push(cloneLattice(lattice));
         restoreLattice(lattice, snapshot);
-        setSelectedFace(null);
+        setSelectedFaces([]);
         setSelectedVertices([]);
         setRevision((r) => r + 1);
         commit();
@@ -1005,7 +1025,7 @@ export function LatticeSurface({
 
       if (key === 'escape') {
         setPending([]);
-        setSelectedFace(null);
+        setSelectedFaces([]);
         setSelectedVertices([]);
         setSelectedEdges([]);
         return;
@@ -1051,13 +1071,15 @@ export function LatticeSurface({
         const vertices = selectedVertices.length > 0
           ? selectedVertices
           : hoverVertex !== -1 ? [hoverVertex] : [];
-        if (selectedFace === null && vertices.length === 0) return;
+        if (selectedFaces.length === 0 && vertices.length === 0) return;
 
         mutate(() => {
-          if (selectedFace !== null) {
-            const partner = mirror ? findMirrorFace(lattice, selectedFace, mirror) : -1;
-            removeFace(lattice, selectedFace);
-            if (partner !== -1) removeFace(lattice, partner);
+          if (selectedFaces.length > 0) {
+            for (const face of selectedFaces) {
+              const partner = mirror ? findMirrorFace(lattice, face, mirror) : -1;
+              removeFace(lattice, face);
+              if (partner !== -1) removeFace(lattice, partner);
+            }
             return;
           }
           for (const vertex of vertices) {
@@ -1067,7 +1089,7 @@ export function LatticeSurface({
             if (partner !== -1 && partner !== vertex) removeVertex(lattice, partner);
           }
         });
-        setSelectedFace(null);
+        setSelectedFaces([]);
         setSelectedVertices([]);
         return;
       }
@@ -1080,7 +1102,7 @@ export function LatticeSurface({
         return;
       }
 
-      if (key === 's' && (selectedEdges.length > 0 || selectedFace !== null)) {
+      if (key === 's' && (selectedEdges.length > 0 || selectedFaces.length > 0)) {
         // Sharpen. The one control that makes smoothing usable for a part
         // rather than a pebble: everything rounds except what is marked.
         //
@@ -1088,14 +1110,13 @@ export function LatticeSurface({
         // only cheap way to reach the rim of a cap — the corners there are
         // three-way, so L finds no loop through them and never will. Selecting
         // the face and pressing S is four edges in one keystroke.
-        const face = selectedEdges.length > 0 ? null : selectedFace;
         const edges: [number, number][] = selectedEdges.length > 0
           ? selectedEdges
-          : (() => {
-            const verts = face === null ? null : lattice.faces[face];
+          : selectedFaces.flatMap((face) => {
+            const verts = lattice.faces[face];
             if (!verts) return [];
             return verts.map((v, i) => [v, verts[(i + 1) % verts.length]] as [number, number]);
-          })();
+          });
         if (edges.length === 0) return;
 
         // Softening only when the WHOLE selection is already sharp, so pressing
@@ -1124,22 +1145,73 @@ export function LatticeSurface({
         return;
       }
 
-      if (key === 'f' && selectedFace !== null) {
+      if (key === 'f' && selectedFaces.length > 0) {
         // Flip: the fix for a face drawn from the wrong side, which is
         // otherwise invisible until it is exported and the solid has a hole.
-        const face = selectedFace;
+        // N does the whole shape; this is for the one you disagree with.
+        const faces = [...selectedFaces];
         mutate(() => {
-          const partner = mirror ? findMirrorFace(lattice, face, mirror) : -1;
-          flipFace(lattice, face);
-          if (partner !== -1) flipFace(lattice, partner);
+          for (const face of faces) {
+            const partner = mirror ? findMirrorFace(lattice, face, mirror) : -1;
+            flipFace(lattice, face);
+            if (partner !== -1) flipFace(lattice, partner);
+          }
         });
+        return;
+      }
+
+      if (key === 'i' && selectedFaces.length > 0) {
+        // Inset by one step of the current grid: a smaller face inside this
+        // one, with a border of quads around it. The start of a hole, and the
+        // only way to get a face small enough to bridge through a solid.
+        const faces = [...selectedFaces];
+        const inner: number[] = [];
+        mutate(() => {
+          for (const face of faces) {
+            const result = insetFace(lattice, face, snap);
+            if (result) inner.push(result.inner);
+            if (!mirror) continue;
+            const partner = findMirrorFace(lattice, face, mirror);
+            if (partner !== -1) insetFace(lattice, partner, snap);
+          }
+        });
+        // The new inner face is what anybody wants next — pushed in, pulled out
+        // or bridged — so the selection follows it rather than being lost.
+        setSelectedFaces(inner);
+        return;
+      }
+
+      if (key === 'b' && selectedFaces.length > 0) {
+        // Cut the corners off. A square becomes an octagon, and an octagon
+        // smoothed is a circle — which four corners can never be, however many
+        // times they are subdivided.
+        const faces = [...selectedFaces];
+        mutate(() => {
+          for (const face of faces) {
+            bevelFace(lattice, face, snap);
+            if (!mirror) continue;
+            const partner = findMirrorFace(lattice, face, mirror);
+            if (partner !== -1) bevelFace(lattice, partner, snap);
+          }
+        });
+        setSelectedFaces([]);
+        return;
+      }
+
+      if (key === 'j' && selectedFaces.length === 2) {
+        // Join. Two faces of two shapes make them one; two faces of the SAME
+        // shape bore a tunnel between them.
+        const [a, b] = selectedFaces;
+        mutate(() => { bridgeFaces(lattice, a, b); });
+        setSelectedFaces([]);
+        return;
       }
     };
     // Capture, so the app's own undo does not also fire while these tools are
     // open and own the shape.
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
-  }, [closePending, commit, hoverVertex, lattice, mirror, mutate, nudgeLatticePlane, selectedEdges, selectedFace, selectedVertices, snap]);
+  }, [closePending, commit, hoverVertex, lattice, mirror, mutate, nudgeLatticePlane, selectedEdges, selectedFaces, selectedVertices, snap]);
 
   /**
    * Ctrl (or Cmd) held, tracked on its own.
@@ -1240,14 +1312,16 @@ export function LatticeSurface({
     return geometry;
   }, [hover, pending, unit]);
 
-  const faceGeometry = useCallback((face: number | null) => {
-    if (face === null) return null;
-    const verts = lattice.faces[face];
-    if (!verts) return null;
+  const faceGeometry = useCallback((faces: number[]) => {
     const positions: number[] = [];
-    for (let i = 1; i + 1 < verts.length; i++) {
-      for (const v of [verts[0], verts[i], verts[i + 1]]) positions.push(...position(v));
+    for (const face of faces) {
+      const verts = lattice.faces[face];
+      if (!verts) continue;
+      for (let i = 1; i + 1 < verts.length; i++) {
+        for (const v of [verts[0], verts[i], verts[i + 1]]) positions.push(...position(v));
+      }
     }
+    if (positions.length === 0) return null;
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
     return geometry;
@@ -1257,10 +1331,10 @@ export function LatticeSurface({
   // the live cage, which is mutated in place, so the revision counter is the
   // only thing that says its contents have changed.
   /* eslint-disable react-hooks/exhaustive-deps */
-  const highlight = useMemo(() => faceGeometry(selectedFace), [faceGeometry, revision, selectedFace]);
+  const highlight = useMemo(() => faceGeometry(selectedFaces), [faceGeometry, revision, selectedFaces]);
   const hoverFaceGeometry = useMemo(
-    () => (hoveredFace === selectedFace ? null : faceGeometry(hoveredFace)),
-    [faceGeometry, hoveredFace, revision, selectedFace],
+    () => (hoveredFace === null || selectedFaces.includes(hoveredFace) ? null : faceGeometry([hoveredFace])),
+    [faceGeometry, hoveredFace, revision, selectedFaces],
   );
   /* eslint-enable react-hooks/exhaustive-deps */
 
@@ -1317,7 +1391,7 @@ export function LatticeSurface({
         </mesh>
       )}
 
-      {selectedFace !== null && highlight && (
+      {selectedFaces.length > 0 && highlight && (
         <mesh geometry={highlight} raycast={() => null}>
           <meshBasicMaterial color="#38bdf8" transparent opacity={0.35} side={THREE.DoubleSide} depthTest={false} />
         </mesh>
@@ -1360,8 +1434,11 @@ export function LatticeSurface({
               the pointer will join to, weld onto or delete — and a cursor that
               looks the same whether or not it has caught something makes all
               three of those a guess. */}
-          <sphereGeometry args={[hoverVertex !== -1 ? step * 0.24 : step * 0.15, 12, 8]} />
-          <meshBasicMaterial color={hoverVertex !== -1 ? '#f59e0b' : '#38bdf8'} depthTest={false} />
+          <sphereGeometry args={[wouldClose || hoverVertex !== -1 ? step * 0.24 : step * 0.15, 12, 8]} />
+          <meshBasicMaterial
+            color={wouldClose ? '#10b981' : hoverVertex !== -1 ? '#f59e0b' : '#38bdf8'}
+            depthTest={false}
+          />
         </mesh>
       )}
 

@@ -679,6 +679,236 @@ export function extrudeFace(
 }
 
 // ---------------------------------------------------------------------------
+// Bevel
+// ---------------------------------------------------------------------------
+
+/** The step from a to b reduced to its smallest whole form, or null if it is not one. */
+function unitStep(from: LatticeCoord, to: LatticeCoord): { dir: LatticeCoord; length: number } | null {
+  const delta: LatticeCoord = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
+  const gcd = (a: number, b: number): number => (b === 0 ? Math.abs(a) : gcd(b, a % b));
+  const divisor = delta.reduce((acc, d) => gcd(acc, d), 0);
+  if (divisor === 0) return null;
+  const dir = delta.map((d) => d / divisor) as LatticeCoord;
+  // An edge along an axis or a true 45 degrees can be walked in whole steps; a
+  // 2:1 slope cannot, and a corner cut off one would land between grid points.
+  if (dir.some((d) => Math.abs(d) > 1)) return null;
+  return { dir, length: divisor };
+}
+
+/**
+ * Cuts the corners off a face, turning an n-gon into a 2n-gon.
+ *
+ * This is how a square becomes a circle. Smoothing rounds a four-cornered cage
+ * into a rounded square and no amount of it will do better — the limit surface
+ * of four corners is a squircle, and the roundness has to come from the cage.
+ * Bevel a square into an octagon and smooth THAT, and it reads as a circle;
+ * extrude it first and the result is a cylinder.
+ *
+ * Only for a face whose corners belong to nothing else. A corner shared with
+ * another face cannot be replaced by two without tearing that face away from
+ * this one, and stitching the tear is a different operation (a proper bevel of
+ * a solid's edges) with different questions to answer.
+ */
+export function bevelFace(lattice: Lattice, face: number, steps: number): boolean {
+  const verts = lattice.faces[face];
+  if (!verts || steps <= 0) return false;
+  if (verts.some((v) => (lattice.vertexFaces.get(v)?.size ?? 0) > 1)) return false;
+
+  const ring = verts.map((v) => coordOf(lattice, v));
+  const cut: LatticeCoord[] = [];
+
+  for (let i = 0; i < ring.length; i++) {
+    const previous = ring[(i - 1 + ring.length) % ring.length];
+    const next = ring[(i + 1) % ring.length];
+    const back = unitStep(ring[i], previous);
+    const forward = unitStep(ring[i], next);
+    if (!back || !forward) return false;
+    // Cutting deeper than half an edge from both ends would cross over the
+    // corner coming the other way and turn the ring inside out.
+    if (steps * 2 > back.length || steps * 2 > forward.length) return false;
+    cut.push(
+      ring[i].map((c, k) => c + back.dir[k] * steps) as LatticeCoord,
+      ring[i].map((c, k) => c + forward.dir[k] * steps) as LatticeCoord,
+    );
+  }
+
+  const creased = verts.map((v, i) => isCrease(lattice, v, verts[(i + 1) % verts.length]));
+  removeFace(lattice, face);
+  for (const v of verts) removeVertex(lattice, v);
+
+  const corners = cut.map(([i, j, k]) => vertexAt(lattice, i, j, k));
+  const added = addFace(lattice, corners);
+  if (added === -1) return false;
+
+  // An edge that was sharp stays sharp: the cut leaves the middle of each
+  // original edge intact, and it is the same edge as far as anybody looking at
+  // it is concerned.
+  for (let i = 0; i < verts.length; i++) {
+    if (!creased[i]) continue;
+    setCrease(lattice, corners[i * 2 + 1], corners[((i + 1) % verts.length) * 2], true);
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Inset
+// ---------------------------------------------------------------------------
+
+/**
+ * Shrinks a face inside itself, leaving a border of quads around it.
+ *
+ * The other half of bridging. Two whole walls of a box cannot be joined into a
+ * tunnel — they share the edges of everything around them, and a band between
+ * them would run along faces that are already there. What a tunnel needs is a
+ * SMALLER face on each wall, and that is what this makes: the face is pulled in
+ * by `steps` on both of its in-plane axes, the gap becomes a ring of quads, and
+ * the shrunken face is left selected-shaped and ready to be pushed in, pulled
+ * out, or bridged to another.
+ *
+ * It is also the whole answer to a hole in a plate: inset a face, delete what
+ * is left in the middle.
+ *
+ * Only axis-aligned faces, because "inwards" for a face lying at an angle is a
+ * direction with no exact answer on a grid, and a corner that lands between
+ * grid points is the one thing this file exists to prevent.
+ */
+export function insetFace(lattice: Lattice, face: number, steps: number): { inner: number; border: number[] } | null {
+  const verts = lattice.faces[face];
+  if (!verts || steps === 0) return null;
+
+  const normal = faceNormal(lattice, face);
+  if (!normal) return null;
+  const { axis } = dominantAxis(normal);
+  const a = AXIS_INDEX[axis];
+  // Anything but flat-on to an axis has no whole-number "inwards".
+  if (Math.abs(normal[a]) < 0.999) return null;
+
+  const centre = faceCentre(lattice, face)!;
+  const moved: LatticeCoord[] = verts.map((v) => {
+    const coord = coordOf(lattice, v);
+    for (let k = 0; k < 3; k++) {
+      if (k === a) continue;
+      const away = coord[k] - centre[k];
+      // A corner already on the centre line has no side to come in from, so it
+      // stays: insetting a triangle moves two corners and pivots on the third.
+      if (away === 0) continue;
+      coord[k] += away > 0 ? -steps : steps;
+    }
+    return coord;
+  });
+
+  // Pulled in further than it is wide, the ring turns itself inside out.
+  const seen = new Set(moved.map(([i, j, k]) => `${i},${j},${k}`));
+  if (seen.size !== moved.length) return null;
+  for (let i = 0; i < verts.length; i++) {
+    const before = coordOf(lattice, verts[i]);
+    const after = moved[i];
+    for (let k = 0; k < 3; k++) {
+      if (k === a) continue;
+      const wasAway = before[k] - centre[k];
+      const nowAway = after[k] - centre[k];
+      if (wasAway !== 0 && Math.sign(nowAway) !== Math.sign(wasAway)) return null;
+    }
+  }
+
+  const inner = moved.map(([i, j, k]) => vertexAt(lattice, i, j, k));
+  removeFace(lattice, face);
+
+  const border: number[] = [];
+  for (let i = 0; i < verts.length; i++) {
+    const next = (i + 1) % verts.length;
+    const added = addFace(lattice, [verts[i], verts[next], inner[next], inner[i]]);
+    if (added !== -1) border.push(added);
+  }
+  const innerFace = addFace(lattice, inner);
+  return { inner: innerFace, border };
+}
+
+// ---------------------------------------------------------------------------
+// Bridging
+// ---------------------------------------------------------------------------
+
+/**
+ * Joins two faces with a band of quads, opening both.
+ *
+ * The band is easy; the PAIRING is the whole problem. Which corner of one face
+ * meets which corner of the other decides whether the result is a clean tube or
+ * a bowtie — a band with a twist in it, self-intersecting, watertight by every
+ * count and impossible to make. So the rings are matched by trying every
+ * rotation and taking the one where the paired corners are closest overall: a
+ * twisted pairing is always the longer one, which is what rules it out.
+ *
+ * One ring is reversed first. Two faces that bound the same span run opposite
+ * ways when seen from the same side — a cap on top of one shape and a cap on
+ * the bottom of another — so pairing them as given would twist the band by a
+ * whole face.
+ *
+ * Both faces are removed: they become the openings of what is now a tube. That
+ * is what makes this the tool for two different jobs at once — join two shapes
+ * into one, or, on two faces of the SAME shape, drill a tunnel through it.
+ */
+export function bridgeFaces(lattice: Lattice, faceA: number, faceB: number): { walls: number[] } | null {
+  const a = lattice.faces[faceA];
+  const b = lattice.faces[faceB];
+  if (!a || !b || faceA === faceB) return null;
+  if (a.length !== b.length) return null;
+  // Sharing a corner means they already meet; a band between them would be a
+  // wall of no width, which is a crease in the surface rather than a shape.
+  if (a.some((v) => b.includes(v))) return null;
+
+  const reversed = [...b].reverse();
+  const at = (v: number) => coordOf(lattice, v);
+
+  let bestOffset = 0;
+  let bestCost = Infinity;
+  for (let offset = 0; offset < reversed.length; offset++) {
+    let cost = 0;
+    for (let i = 0; i < a.length; i++) {
+      const [x1, y1, z1] = at(a[i]);
+      const [x2, y2, z2] = at(reversed[(i + offset) % reversed.length]);
+      cost += (x1 - x2) ** 2 + (y1 - y2) ** 2 + (z1 - z2) ** 2;
+    }
+    if (cost < bestCost) {
+      bestCost = cost;
+      bestOffset = offset;
+    }
+  }
+
+  // Corners that are already joined by an edge are corners the band would run
+  // alongside a face that exists — the two opposite walls of a box, where every
+  // pair is the two ends of an edge of the walls between them. Bridging those
+  // produces a surface folded onto itself: closed by every count, and nothing
+  // anybody can make. Inset them first and join the smaller faces.
+  for (let i = 0; i < a.length; i++) {
+    if (edgeExists(lattice, a[i], reversed[(i + bestOffset) % reversed.length])) return null;
+  }
+
+  removeFace(lattice, faceA);
+  removeFace(lattice, faceB);
+
+  const walls: number[] = [];
+  for (let i = 0; i < a.length; i++) {
+    const next = (i + 1) % a.length;
+    const wall = addFace(lattice, [
+      a[i],
+      a[next],
+      reversed[(next + bestOffset) % reversed.length],
+      reversed[(i + bestOffset) % reversed.length],
+    ]);
+    if (wall !== -1) walls.push(wall);
+  }
+
+  // The band's winding follows the face it was built from, and whether that
+  // makes it outward depends on which way the two faces were pointing — a tube
+  // between two shapes and a tunnel through one want opposite answers. Rather
+  // than reason about which case this is, make the surface agree with itself
+  // and let the piece as a whole decide which way is out.
+  orientFaces(lattice);
+
+  return { walls };
+}
+
+// ---------------------------------------------------------------------------
 // Mirror
 // ---------------------------------------------------------------------------
 
