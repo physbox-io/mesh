@@ -648,16 +648,33 @@ export function extrudeFace(
   // across the middle of the solid.
   removeFace(lattice, face);
 
+  /*
+    Which way round the new faces go.
+
+    Pushed ALONG its normal, a face sweeps a solid that lies behind it, and the
+    winding that made the original face outward makes the sides and the cap
+    outward too. Pushed the other way — dragged back through the shape, or given
+    a negative distance — the solid ends up on the other side of every one of
+    those faces, and keeping the same winding turns the whole extrusion
+    inside-out: it draws correctly in the editor, which is double-sided, and
+    then loses half its faces the moment the ordinary renderer culls backfaces.
+
+    So a backwards extrusion is wound backwards. This is not a matter of taste:
+    an inside-out solid is one nothing downstream will accept.
+  */
+  const backwards = travel * normal[a] < 0;
+
   const sides: number[] = [];
   for (let i = 0; i < verts.length; i++) {
     const next = (i + 1) % verts.length;
-    // Wound so the side quads face outwards given the cap keeps the original
-    // winding: base edge forwards, cap edge backwards.
-    const added = addFace(lattice, [verts[i], verts[next], moved[next], moved[i]]);
+    const wall = backwards
+      ? [verts[next], verts[i], moved[i], moved[next]]
+      : [verts[i], verts[next], moved[next], moved[i]];
+    const added = addFace(lattice, wall);
     if (added !== -1) sides.push(added);
   }
 
-  const cap = addFace(lattice, moved);
+  const cap = addFace(lattice, backwards ? [...moved].reverse() : moved);
   return { cap, sides };
 }
 
@@ -714,6 +731,154 @@ export function mirrorFace(lattice: Lattice, face: number, axis: Axis): number {
 // ---------------------------------------------------------------------------
 // Health
 // ---------------------------------------------------------------------------
+
+/**
+ * Six times the volume the faces enclose, signed.
+ *
+ * Positive when the surface is closed and wound outwards, negative when it is
+ * inside-out — which is the only way to tell the two apart, since they look
+ * identical anywhere backfaces are drawn. Meaningless in magnitude for an open
+ * surface, where `outwardness` is the question to ask instead.
+ */
+export function signedVolume(lattice: Lattice): number {
+  const poly = toPolyMesh(lattice);
+  const at = (v: number): [number, number, number] => [poly.positions[v * 3], poly.positions[v * 3 + 1], poly.positions[v * 3 + 2]];
+  let total = 0;
+  for (const face of poly.faces) {
+    for (let i = 1; i + 1 < face.length; i++) {
+      const a = at(face[0]);
+      const b = at(face[i]);
+      const c = at(face[i + 1]);
+      total +=
+        a[0] * (b[1] * c[2] - b[2] * c[1]) -
+        a[1] * (b[0] * c[2] - b[2] * c[0]) +
+        a[2] * (b[0] * c[1] - b[1] * c[0]);
+    }
+  }
+  return total / 6;
+}
+
+/**
+ * Makes every face agree with its neighbours about which side is out, and turns
+ * each connected piece the right way round.
+ *
+ * Two things go wrong on their own and neither is visible while you work. Faces
+ * drawn by hand take their winding from the order the corners were clicked, so
+ * a shape built by clicking can disagree with itself; and until it was fixed, a
+ * backwards extrusion produced a piece that was consistent and entirely
+ * inside-out. Both draw perfectly in the editor, which is double-sided, and
+ * then lose faces the moment anything culls backfaces — a part that looks
+ * finished and exports full of holes.
+ *
+ * Consistency comes first, by walking each piece and flipping any face that
+ * runs a shared edge in the same direction as its neighbour (agreeing faces
+ * traverse a shared edge in OPPOSITE directions). Then the piece as a whole is
+ * turned outwards, judged by whether its faces lean away from its own centre —
+ * which works for an open shell, where there is no volume to take the sign of.
+ *
+ * Returns how many faces were turned round.
+ */
+export function orientFaces(lattice: Lattice): number {
+  const alive: number[] = [];
+  lattice.faces.forEach((verts, f) => { if (verts) alive.push(f); });
+  if (alive.length === 0) return 0;
+
+  // Which faces meet along each edge, and which way each runs along it.
+  const along = new Map<string, { face: number; forwards: boolean }[]>();
+  for (const f of alive) {
+    const verts = lattice.faces[f]!;
+    for (let i = 0; i < verts.length; i++) {
+      const a = verts[i];
+      const b = verts[(i + 1) % verts.length];
+      const key = edgeKey(a, b);
+      const list = along.get(key) ?? [];
+      list.push({ face: f, forwards: a < b });
+      along.set(key, list);
+    }
+  }
+
+  const runsForwards = (f: number, key: string) =>
+    along.get(key)!.find((use) => use.face === f)!.forwards;
+
+  let flipped = 0;
+  const seen = new Set<number>();
+
+  for (const start of alive) {
+    if (seen.has(start)) continue;
+
+    const piece: number[] = [];
+    const queue = [start];
+    seen.add(start);
+    while (queue.length > 0) {
+      const f = queue.pop()!;
+      piece.push(f);
+      const verts = lattice.faces[f]!;
+      for (let i = 0; i < verts.length; i++) {
+        const key = edgeKey(verts[i], verts[(i + 1) % verts.length]);
+        for (const use of along.get(key) ?? []) {
+          if (use.face === f || seen.has(use.face)) continue;
+          seen.add(use.face);
+          // Both running the edge the same way means one of them is the wrong
+          // way round; the one being visited is the one that moves.
+          if (runsForwards(use.face, key) === runsForwards(f, key)) {
+            lattice.faces[use.face]!.reverse();
+            // The direction table describes the old winding, so it has to be
+            // corrected too or the next neighbour is judged against a lie.
+            for (const [, uses] of along) {
+              for (const entry of uses) if (entry.face === use.face) entry.forwards = !entry.forwards;
+            }
+            flipped++;
+          }
+          queue.push(use.face);
+        }
+      }
+    }
+
+    if (outwardness(lattice, piece) >= 0) continue;
+    for (const f of piece) {
+      lattice.faces[f]!.reverse();
+      flipped++;
+    }
+  }
+
+  if (flipped > 0) lattice.revision++;
+  return flipped;
+}
+
+/**
+ * How far a set of faces lean away from their own centre, area-weighted.
+ *
+ * Positive means they face outwards. For a closed shape this is three times its
+ * volume; for an open one it is still the right question, which a volume is
+ * not.
+ */
+function outwardness(lattice: Lattice, faces: number[]): number {
+  let cx = 0, cy = 0, cz = 0, count = 0;
+  for (const f of faces) {
+    for (const v of lattice.faces[f]!) {
+      const c = coordOf(lattice, v);
+      cx += c[0]; cy += c[1]; cz += c[2];
+      count++;
+    }
+  }
+  if (count === 0) return 0;
+  cx /= count; cy /= count; cz /= count;
+
+  let total = 0;
+  for (const f of faces) {
+    const centre = faceCentre(lattice, f);
+    const normal = faceNormal(lattice, f);
+    if (!centre || !normal) continue;
+    total += (centre[0] - cx) * normal[0] + (centre[1] - cy) * normal[1] + (centre[2] - cz) * normal[2];
+  }
+  return total;
+}
+
+/** How many faces disagree with their neighbours or face inwards. */
+export function inconsistentFaces(lattice: Lattice): number {
+  const copy = cloneLattice(lattice);
+  return orientFaces(copy);
+}
 
 /**
  * Whether the surface is closed.
@@ -781,6 +946,10 @@ export function latticeStats(lattice: Lattice) {
     quads,
     tris,
     creases: creaseEdges(lattice).length / 2,
+    // Faces that disagree with their neighbours or face inwards. Reported
+    // because the cost of not knowing is a part that looks finished and exports
+    // full of holes.
+    inconsistent: inconsistentFaces(lattice),
     watertight: isWatertight(lattice),
   };
 }

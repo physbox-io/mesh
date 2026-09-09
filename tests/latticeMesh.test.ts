@@ -3,6 +3,7 @@ import {
   createLattice, vertexAt, findVertex, addFace, findFace, removeFace, flipFace,
   moveVertex, moveVertices, removeVertex, faceNormal, dominantAxis, extrudeFace, mirrorFace,
   isWatertight, latticeStats, latticeBounds, toSceneGeom, toPolyMesh, cageEdges, coordOf,
+  signedVolume, orientFaces, inconsistentFaces, faceCentre,
   serializeCage, deserializeCage, cloneLattice, restoreLattice, faceCount,
   boxLattice, SNAP_MULTIPLES, DEFAULT_UNIT, setCrease, isCrease, edgeLoop,
   facesAlong, edgeExists, type Lattice,
@@ -583,5 +584,107 @@ describe('moving several corners at once', () => {
     const l = unitCube();
     expect(moveVertices(l, [0, 1], 0, 0, 0)).toBe(false);
     expect(moveVertices(l, [], 1, 0, 0)).toBe(false);
+  });
+});
+
+describe('extruding backwards', () => {
+  /** A quad on z = 0 facing +z. */
+  function plate(): { l: Lattice; face: number } {
+    const l = createLattice(0.01);
+    const a = vertexAt(l, 0, 0, 0), b = vertexAt(l, 1, 0, 0);
+    const c = vertexAt(l, 1, 1, 0), d = vertexAt(l, 0, 1, 0);
+    return { l, face: addFace(l, [a, b, c, d]) };
+  }
+
+  /** Every face's normal, as an axis and a sign. */
+  function facings(l: Lattice) {
+    return l.faces
+      .map((verts, f) => (verts ? dominantAxis(faceNormal(l, f)!) : null))
+      .filter(Boolean) as { axis: string; sign: number }[];
+  }
+
+  it('puts the cap on the far side, facing away from the solid', () => {
+    const { l, face } = plate();
+    const { cap } = extrudeFace(l, face, -3)!; // dragged back through the plate
+    expect(findVertex(l, 0, 0, -3)).toBeGreaterThan(-1);
+    // The solid now lies above the cap, so the cap faces down.
+    expect(dominantAxis(faceNormal(l, cap)!)).toEqual({ axis: 'z', sign: -1 });
+  });
+
+  it('leaves every face of a backwards extrusion facing outwards', () => {
+    const { l, face } = plate();
+    extrudeFace(l, face, -3);
+    addFace(l, [ // cap the open top, wound to face +z
+      findVertex(l, 0, 0, 0), findVertex(l, 1, 0, 0),
+      findVertex(l, 1, 1, 0), findVertex(l, 0, 1, 0),
+    ]);
+    expect(isWatertight(l)).toBe(true);
+    // A correctly wound closed solid encloses a positive volume; inside-out, the
+    // same shape encloses a negative one.
+    expect(signedVolume(l)).toBeGreaterThan(0);
+  });
+
+  it('leaves an open backwards shell with nothing to repair', () => {
+    const { l, face } = plate();
+    extrudeFace(l, face, -3);
+    // The shell is open where the plate was, so there is no volume to take the
+    // sign of — but every face still has to lean away from the middle.
+    expect(inconsistentFaces(l)).toBe(0);
+    expect(facings(l)).toHaveLength(5);
+  });
+});
+
+describe('turning faces the right way round', () => {
+  it('finds nothing to fix on a correctly built box', () => {
+    expect(inconsistentFaces(boxLattice(0.01, 2))).toBe(0);
+  });
+
+  it('turns an entirely inside-out solid outwards', () => {
+    const l = boxLattice(0.01, 2);
+    for (const verts of l.faces) verts?.reverse();
+    expect(signedVolume(l)).toBeLessThan(0);
+    expect(orientFaces(l)).toBe(6);
+    expect(signedVolume(l)).toBeGreaterThan(0);
+  });
+
+  it('makes one disagreeing face agree with the rest', () => {
+    const l = boxLattice(0.01, 2);
+    l.faces[3]!.reverse();
+    expect(orientFaces(l)).toBe(1);
+    expect(signedVolume(l)).toBeGreaterThan(0);
+    expect(inconsistentFaces(l)).toBe(0);
+  });
+
+  it('turns an open shell out, where there is no volume to judge by', () => {
+    // Five faces of a box, inside-out: exactly what a backwards extrude used to
+    // leave behind, and what a hand-built shape can still be.
+    const l = boxLattice(0.01, 2);
+    removeFace(l, 0);
+    for (const verts of l.faces) verts?.reverse();
+    expect(orientFaces(l)).toBe(5);
+    const centre = [0, 0, 0];
+    for (let f = 0; f < l.faces.length; f++) {
+      if (!l.faces[f]) continue;
+      const at = faceCentre(l, f)!;
+      const normal = faceNormal(l, f)!;
+      const lean = (at[0] - centre[0]) * normal[0] + (at[1] - centre[1]) * normal[1] + (at[2] - centre[2]) * normal[2];
+      expect(lean).toBeGreaterThan(0);
+    }
+  });
+
+  it('treats separate pieces separately', () => {
+    // Two boxes, one of them inside-out: only that one is turned.
+    const l = boxLattice(0.01, 2);
+    const far = boxLattice(0.01, 2);
+    for (const verts of far.faces) {
+      if (!verts) continue;
+      const moved = verts.map((v) => {
+        const [i, j, k] = coordOf(far, v);
+        return vertexAt(l, i + 20, j, k);
+      });
+      addFace(l, moved.reverse());
+    }
+    expect(orientFaces(l)).toBe(6);
+    expect(inconsistentFaces(l)).toBe(0);
   });
 });

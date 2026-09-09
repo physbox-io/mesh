@@ -17,7 +17,7 @@
 import { useEffect } from 'react';
 import {
   PenLine, MousePointer2, MoveVertical, Grid3x3, FlipHorizontal2,
-  Boxes, TriangleAlert, Check, Spline, Scissors, Layers, Lock,
+  Boxes, TriangleAlert, Check, Spline, Scissors, Layers, Lock, RefreshCw,
 } from 'lucide-react';
 import { useStore } from '../store/useStore';
 import type { SceneNode } from '../types/scene';
@@ -66,6 +66,7 @@ export function LatticePanel() {
   const setLatticeNodeId = useStore((s) => s.setLatticeNodeId);
   const setLatticeSubdiv = useStore((s) => s.setLatticeSubdiv);
   const setLatticeThickness = useStore((s) => s.setLatticeThickness);
+  const requestLatticeOrient = useStore((s) => s.requestLatticeOrient);
   const node = useStore((s) => {
     const find = (nodes: SceneNode[]): SceneNode | null => {
       for (const n of nodes) {
@@ -307,6 +308,23 @@ export function LatticePanel() {
               {stats.vertices} v · {stats.quads} q{stats.tris > 0 ? ` · ${stats.tris} t` : ''}
             </span>
           </div>
+          {/* Inside-out faces. Worth a button rather than a note: nothing in the
+              viewport used to show them, they cost nothing to fix, and the only
+              other way to find out is to close the tools and watch half the
+              part disappear. */}
+          {stats.inconsistent > 0 && (
+            <button
+              type="button"
+              onClick={requestLatticeOrient}
+              title="Turn every face to agree with its neighbours and point outwards. A face drawn from the wrong side is invisible from outside and a hole in anything exported — the editor shows the back of one in red."
+              className="flex items-center gap-1.5 w-full py-1.5 px-2 rounded-lg text-[10px] font-semibold transition-colors cursor-pointer bg-rose-50 dark:bg-rose-950/30 text-rose-600 dark:text-rose-400 hover:bg-rose-100 dark:hover:bg-rose-900/40"
+            >
+              <RefreshCw className="w-3 h-3 shrink-0" />
+              <span className="text-left">
+                {stats.inconsistent} face{stats.inconsistent === 1 ? '' : 's'} inside-out — turn {stats.inconsistent === 1 ? 'it' : 'them'} out (N)
+              </span>
+            </button>
+          )}
           {stats.creases > 0 && (
             <div
               className="flex items-center justify-between text-[10px]"

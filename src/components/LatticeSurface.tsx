@@ -36,7 +36,7 @@ import {
   deserializeCage, serializeCage, cloneLattice, restoreLattice,
   toSceneGeom, cageEdges, coordOf, vertexAt, findVertex, addFace,
   removeFace, removeVertex, moveVertex, moveVertices, flipFace, setCrease, isCrease, creaseEdges, edgeKey, edgeLoop, extrudeFace, mirrorFace, findMirrorFace,
-  faceNormal, faceCentre, dominantAxis, latticeStats, latticeBounds, mirrorCoord,
+  faceNormal, faceCentre, dominantAxis, latticeStats, latticeBounds, mirrorCoord, orientFaces,
   AXIS_INDEX, type Axis, type Lattice, type LatticeCage, type LatticeCoord,
 } from '../utils/latticeMesh';
 
@@ -172,6 +172,8 @@ export function LatticeSurface({
   const hoverRef = useRef<LatticeCoord | null>(null);
 
   const [selectedFace, setSelectedFace] = useState<number | null>(null);
+  /** The face under the pointer, so extrude shows what it is about to move. */
+  const [hoveredFace, setHoveredFace] = useState<number | null>(null);
   /**
    * The selected corners. Usually one, or a boxful after a drag across them.
    *
@@ -955,6 +957,13 @@ export function LatticeSurface({
     if (tool === 'extrude') beginExtrude(face, event);
   }, [beginExtrude, beginMarquee, localRay, pick.triangleFace, pickEdge, tool]);
 
+  const onFaceMove = useCallback((event: ThreeEvent<PointerEvent>) => {
+    // Only while extruding. Everywhere else the target is a corner or an edge,
+    // and lighting up the whole face behind them says the wrong thing.
+    if (tool !== 'extrude' || drag.current) return;
+    setHoveredFace(event.faceIndex == null ? null : pick.triangleFace[event.faceIndex] ?? null);
+  }, [pick.triangleFace, tool]);
+
   const onHandleDown = useCallback((event: ThreeEvent<PointerEvent>) => {
     if (event.button !== 0 || tool !== 'select' || event.instanceId == null) return;
     const vertex = handles[event.instanceId];
@@ -1108,6 +1117,13 @@ export function LatticeSurface({
         return;
       }
 
+      if (key === 'n') {
+        // Turn everything the right way round. On the N key because it is what
+        // "recalculate normals" is on everywhere else.
+        mutate(() => { orientFaces(lattice); });
+        return;
+      }
+
       if (key === 'f' && selectedFace !== null) {
         // Flip: the fix for a face drawn from the wrong side, which is
         // otherwise invisible until it is exported and the solid has a hole.
@@ -1169,6 +1185,15 @@ export function LatticeSurface({
     return () => useStore.getState().setLatticePlaneLocked(false);
   }, [locked]);
 
+  // The panel's repair button, and the N key below, land here.
+  const orientRequest = useStore((state) => state.latticeOrientRequest);
+  const orientSeen = useRef(orientRequest);
+  useEffect(() => {
+    if (orientRequest === orientSeen.current) return;
+    orientSeen.current = orientRequest;
+    mutate(() => { orientFaces(lattice); });
+  }, [lattice, mutate, orientRequest]);
+
   // A drag left open by an unmount would leave the camera disabled.
   useEffect(() => () => {
     if (drag.current) {
@@ -1215,9 +1240,9 @@ export function LatticeSurface({
     return geometry;
   }, [hover, pending, unit]);
 
-  const highlight = useMemo(() => {
-    if (selectedFace === null) return null;
-    const verts = lattice.faces[selectedFace];
+  const faceGeometry = useCallback((face: number | null) => {
+    if (face === null) return null;
+    const verts = lattice.faces[face];
     if (!verts) return null;
     const positions: number[] = [];
     for (let i = 1; i + 1 < verts.length; i++) {
@@ -1226,14 +1251,35 @@ export function LatticeSurface({
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
     return geometry;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lattice, position, revision, selectedFace]);
+  }, [lattice, position]);
+
+  // `revision` looks redundant to the linter and is not: `faceGeometry` reads
+  // the live cage, which is mutated in place, so the revision counter is the
+  // only thing that says its contents have changed.
+  /* eslint-disable react-hooks/exhaustive-deps */
+  const highlight = useMemo(() => faceGeometry(selectedFace), [faceGeometry, revision, selectedFace]);
+  const hoverFaceGeometry = useMemo(
+    () => (hoveredFace === selectedFace ? null : faceGeometry(hoveredFace)),
+    [faceGeometry, hoveredFace, revision, selectedFace],
+  );
+  /* eslint-enable react-hooks/exhaustive-deps */
 
   return (
     <group ref={groupRef} name={`${nodeId}_lattice`}>
-      {/* The shape itself. */}
+      {/* The shape itself, drawn front faces only — as every other renderer in
+          the app draws it. Double-sided was a kindness that cost more than it
+          gave: an inside-out face looked perfectly solid here and vanished the
+          moment the tools were closed. */}
       <mesh name={geomName} geometry={solid.geometry} castShadow receiveShadow raycast={() => null}>
-        <meshStandardMaterial color={rgb} roughness={0.6} metalness={0.05} side={THREE.DoubleSide} wireframe={wireframe} />
+        <meshStandardMaterial color={rgb} roughness={0.6} metalness={0.05} side={THREE.FrontSide} wireframe={wireframe} />
+      </mesh>
+
+      {/* And the backs of those faces, in a colour nobody would choose for a
+          part. Looking into an open shell you are genuinely seeing the inside of
+          it, so this is honest rather than alarming; a face that reads red from
+          OUTSIDE is one that will be a hole in the export. */}
+      <mesh geometry={solid.geometry} raycast={() => null}>
+        <meshStandardMaterial color="#e11d48" roughness={0.9} metalness={0} side={THREE.BackSide} wireframe={wireframe} />
       </mesh>
 
       <group ref={cageRef} position={[-solid.origin[0], -solid.origin[1], -solid.origin[2]]}>
@@ -1253,9 +1299,23 @@ export function LatticeSurface({
 
       {/* Face picking. Invisible, but not `visible={false}` — that would stop it
           being raycast, which is its entire job. */}
-      <mesh geometry={pick.geometry} onPointerDown={onFaceDown}>
+      <mesh
+        geometry={pick.geometry}
+        onPointerDown={onFaceDown}
+        onPointerMove={onFaceMove}
+        onPointerOut={() => setHoveredFace(null)}
+      >
         <meshBasicMaterial colorWrite={false} depthWrite={false} side={THREE.DoubleSide} />
       </mesh>
+
+      {/* What an extrude is about to take hold of. Shown before the drag,
+          because the face a drag starts on is decided by where the pointer is
+          when the button goes down and there is no undoing a look. */}
+      {hoverFaceGeometry && (
+        <mesh geometry={hoverFaceGeometry} raycast={() => null}>
+          <meshBasicMaterial color="#f59e0b" transparent opacity={0.3} side={THREE.DoubleSide} depthTest={false} />
+        </mesh>
+      )}
 
       {selectedFace !== null && highlight && (
         <mesh geometry={highlight} raycast={() => null}>

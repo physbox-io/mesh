@@ -592,7 +592,7 @@ export interface PhysicsState {
   /** Mirror every placement across this axis through the body origin. */
   latticeMirror: LatticeAxis | null;
   /** What the panel shows: counts and whether the surface has closed. */
-  latticeStats: { vertices: number; faces: number; quads: number; tris: number; creases: number; watertight: boolean } | null;
+  latticeStats: { vertices: number; faces: number; quads: number; tris: number; creases: number; inconsistent: number; watertight: boolean } | null;
   setLatticeNodeId: (id: string | null) => void;
   setLatticeTool: (tool: LatticeTool) => void;
   setLatticePlane: (plane: { axis: LatticeAxis; index: number }) => void;
@@ -603,7 +603,17 @@ export interface PhysicsState {
   /** Whether the pointer is being held to the work plane. Set by the viewport. */
   latticePlaneLocked: boolean;
   setLatticePlaneLocked: (locked: boolean) => void;
-  setLatticeStats: (stats: { vertices: number; faces: number; quads: number; tris: number; creases: number; watertight: boolean } | null) => void;
+  /**
+   * Bumped to ask the viewport to turn every face the right way round.
+   *
+   * A request rather than a scene-graph edit: the editor holds the live cage
+   * while it is open, so a repair written straight to the node would either be
+   * overwritten by the next commit or force a remount that throws away the
+   * undo history the repair most needs to be part of.
+   */
+  latticeOrientRequest: number;
+  requestLatticeOrient: () => void;
+  setLatticeStats: (stats: { vertices: number; faces: number; quads: number; tris: number; creases: number; inconsistent: number; watertight: boolean } | null) => void;
   /**
    * Writes a cage to a node and rebuilds its mesh from it, in one go.
    *
@@ -1055,6 +1065,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   latticeSnap: 100,
   latticeMirror: null,
   latticePlaneLocked: false,
+  latticeOrientRequest: 0,
   latticeStats: null,
 
   // Opening one modelling mode closes the other: both take over the drawing of
@@ -1073,6 +1084,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   setLatticePlaneLocked: (lockedNow) => set((state) => (
     state.latticePlaneLocked === lockedNow ? {} : { latticePlaneLocked: lockedNow }
   )),
+  requestLatticeOrient: () => set((state) => ({ latticeOrientRequest: state.latticeOrientRequest + 1 })),
   setLatticeStats: (stats) => set({ latticeStats: stats }),
 
   applyLattice: (nodeId, cage, subdiv) => {

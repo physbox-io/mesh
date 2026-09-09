@@ -26,7 +26,7 @@ import {
   addFacesMm, describeLattice, extrudeMm, latticeSummary, removeFacesMm, sharpenEdgesMm,
 } from '../utils/latticeCommands';
 import {
-  boxLattice, cloneLattice, deserializeCage, serializeCage, DEFAULT_UNIT as LATTICE_UNIT,
+  boxLattice, cloneLattice, deserializeCage, orientFaces, serializeCage, DEFAULT_UNIT as LATTICE_UNIT,
   type Axis as LatticeAxis, type Lattice,
 } from '../utils/latticeMesh';
 import type { SculptUndoEntry } from '../utils/sculptMesh';
@@ -1010,6 +1010,19 @@ export function useMCPBridge() {
             // from it, which is what everything downstream actually sees.
             meshTriangles: mesh?.faces ? mesh.faces.length / 3 : 0,
           };
+        }
+
+        case 'LATTICE_ORIENT': {
+          const { targetId } = msg;
+          const { node, lattice } = latticeTarget(store, targetId);
+          const before = cloneLattice(lattice);
+          const flipped = orientFaces(lattice);
+          if (flipped === 0) {
+            return { ok: true, id: targetId, flipped: 0, ...latticeSummary(lattice) };
+          }
+          pushLatticeHistory(targetId, before);
+          commitLattice(node, lattice);
+          return { ok: true, id: targetId, flipped, ...latticeSummary(lattice), undoDepth: (latticeHistory.get(targetId) ?? []).length };
         }
 
         case 'LATTICE_WALL': {
