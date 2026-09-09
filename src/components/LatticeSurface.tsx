@@ -35,7 +35,7 @@ import { useStore } from '../store/useStore';
 import {
   deserializeCage, serializeCage, cloneLattice, restoreLattice,
   toSceneGeom, cageEdges, coordOf, vertexAt, findVertex, addFace,
-  removeFace, removeVertex, moveVertex, flipFace, setCrease, isCrease, creaseEdges, edgeKey, edgeLoop, extrudeFace, mirrorFace, findMirrorFace,
+  removeFace, removeVertex, moveVertex, moveVertices, flipFace, setCrease, isCrease, creaseEdges, edgeKey, edgeLoop, extrudeFace, mirrorFace, findMirrorFace,
   faceNormal, faceCentre, dominantAxis, latticeStats, latticeBounds, mirrorCoord,
   AXIS_INDEX, type Axis, type Lattice, type LatticeCage, type LatticeCoord,
 } from '../utils/latticeMesh';
@@ -137,7 +137,7 @@ export function LatticeSurface({
   const redoStack = useRef<Lattice[]>([]);
 
   const [pending, setPending] = useState<LatticeCoord[]>([]);
-  const [hover, setHover] = useState<LatticeCoord | null>(null);
+  const [hover, setHoverState] = useState<LatticeCoord | null>(null);
   /**
    * The cage corner under the pointer, if the hovered point is one.
    *
@@ -161,9 +161,26 @@ export function LatticeSurface({
    * to settle the moment the key goes down, not on the next mouse move.
    */
   const [locked, setLocked] = useState(false);
+  /**
+   * The hovered point, for handlers that outlive a render.
+   *
+   * The key handlers below are registered once and have to know where the
+   * pointer is NOW: both "lock to this plane" and "switch axis" mean the plane
+   * through whatever is under the cursor, and a stale closure would put them on
+   * the plane it was under when the listener was made.
+   */
+  const hoverRef = useRef<LatticeCoord | null>(null);
 
   const [selectedFace, setSelectedFace] = useState<number | null>(null);
-  const [selectedVertex, setSelectedVertex] = useState<number | null>(null);
+  /**
+   * The selected corners. Usually one, or a boxful after a drag across them.
+   *
+   * A set rather than a single corner because the repairs that matter are
+   * plural: a row of points left behind by a change of mind, the whole end of a
+   * shape that should be a step further out. One at a time, each of those is a
+   * click and a keypress repeated until it is easier to start again.
+   */
+  const [selectedVertices, setSelectedVertices] = useState<number[]>([]);
   /**
    * The selected edges — usually one, or a whole loop once L has been pressed.
    *
@@ -177,9 +194,14 @@ export function LatticeSurface({
   /** What a drag is in the middle of doing, and what to rewind to per step. */
   const drag = useRef<
     | { kind: 'extrude'; face: number; axis: Axis; steps: number; snapshot: Lattice; centre: THREE.Vector3 }
-    | { kind: 'vertex'; vertex: number; snapshot: Lattice; start: LatticeCoord }
+    | { kind: 'vertex'; vertex: number; moving: number[]; snapshot: Lattice; start: LatticeCoord }
     | null
   >(null);
+
+  const setHover = useCallback((coord: LatticeCoord | null) => {
+    hoverRef.current = coord;
+    setHoverState(coord);
+  }, []);
 
   const commit = useCallback(() => {
     applyLattice(nodeId, serializeCage(lattice), subdiv);
@@ -343,14 +365,22 @@ export function LatticeSurface({
     const mesh = handleMeshRef.current;
     if (!mesh) return;
     const matrix = new THREE.Matrix4();
+    // Per-instance colour rather than a second mesh for the selected ones: they
+    // are the same handles, and splitting them into two draws would mean two
+    // index maps to keep in step for the sake of a hue.
+    const plain = new THREE.Color('#0ea5e9');
+    const chosen = new THREE.Color('#f59e0b');
+    const selected = new Set(selectedVertices);
     handles.forEach((v, i) => {
       const [x, y, z] = position(v);
       mesh.setMatrixAt(i, matrix.makeTranslation(x, y, z));
+      mesh.setColorAt(i, selected.has(v) ? chosen : plain);
     });
     mesh.count = handles.length;
     mesh.instanceMatrix.needsUpdate = true;
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
     mesh.computeBoundingSphere();
-  }, [handles, position, revision]);
+  }, [handles, position, revision, selectedVertices]);
 
   /** Where the dot field runs to, in grid steps, on each in-plane axis. */
   /**
@@ -688,12 +718,16 @@ export function LatticeSurface({
   }, [dragPlane, lattice, localRay, mirror, unit]);
 
   const beginVertexDrag = useCallback((vertex: number, event: ThreeEvent<PointerEvent>) => {
-    drag.current = { kind: 'vertex', vertex, snapshot: cloneLattice(lattice), start: coordOf(lattice, vertex) };
+    // Everything selected comes along, so a boxful of corners can be moved as a
+    // piece. Dragging one that is NOT in the selection is a fresh grab of that
+    // one, which is what clicking it just made the selection anyway.
+    const moving = selectedVertices.includes(vertex) ? [...selectedVertices] : [vertex];
+    drag.current = { kind: 'vertex', vertex, moving, snapshot: cloneLattice(lattice), start: coordOf(lattice, vertex) };
     undoStack.current.push(cloneLattice(lattice));
     redoStack.current.length = 0;
     gl.domElement.setPointerCapture?.(event.pointerId);
     setOrbitEnabled(false);
-  }, [gl, lattice, setOrbitEnabled]);
+  }, [gl, lattice, selectedVertices, setOrbitEnabled]);
 
   const updateVertexDrag = useCallback((event: ThreeEvent<PointerEvent>) => {
     const state = drag.current;
@@ -717,7 +751,13 @@ export function LatticeSurface({
     if (coord[0] === current[0] && coord[1] === current[1] && coord[2] === current[2]) return;
 
     restoreLattice(lattice, state.snapshot);
-    moveVertex(lattice, state.vertex, coord[0], coord[1], coord[2]);
+    if (state.moving.length > 1) {
+      // The whole selection travels by the step the grabbed corner took.
+      moveVertices(lattice, state.moving,
+        coord[0] - state.start[0], coord[1] - state.start[1], coord[2] - state.start[2]);
+    } else {
+      moveVertex(lattice, state.vertex, coord[0], coord[1], coord[2]);
+    }
     setRevision((r) => r + 1);
   }, [lattice, localRay, locked, pickExisting, plane.axis, snapFromPlane]);
 
@@ -739,6 +779,114 @@ export function LatticeSurface({
   }, [commit, gl, lattice, setOrbitEnabled]);
 
   // -----------------------------------------------------------------------
+  // Dragging a box round some corners
+  // -----------------------------------------------------------------------
+
+  type ClickTarget = { kind: 'face'; face: number } | { kind: 'edge'; edge: [number, number] } | null;
+  const marquee = useRef<{ x: number; y: number; additive: boolean; box: HTMLDivElement; click: ClickTarget } | null>(null);
+
+  /** Where a cage corner lands on screen, in client pixels. */
+  const toScreen = useCallback((vertex: number): { x: number; y: number } | null => {
+    const group = cageRef.current;
+    if (!group) return null;
+    const camera = getThree().camera;
+    const point = group.localToWorld(new THREE.Vector3(...position(vertex))).project(camera);
+    // Behind the camera: projection wraps a point round to the other side of the
+    // screen, and a corner behind you is not in the box you just drew.
+    if (point.z > 1) return null;
+    const rect = gl.domElement.getBoundingClientRect();
+    return {
+      x: rect.left + ((point.x + 1) / 2) * rect.width,
+      y: rect.top + ((1 - point.y) / 2) * rect.height,
+    };
+  }, [getThree, gl, position]);
+
+  const endMarquee = useCallback((event: PointerEvent | null) => {
+    const state = marquee.current;
+    if (!state) return;
+    marquee.current = null;
+    state.box.remove();
+    setOrbitEnabled(true);
+    if (!event) return;
+
+    const left = Math.min(state.x, event.clientX);
+    const right = Math.max(state.x, event.clientX);
+    const top = Math.min(state.y, event.clientY);
+    const bottom = Math.max(state.y, event.clientY);
+    // A box small enough to be a click IS a click, and picks whatever was under
+    // it — which is why selecting a face happens on the way up. Every drag has
+    // to be free to start over the model, or a box can only be drawn in the
+    // empty space around the thing you are trying to draw it around.
+    if (right - left < 3 && bottom - top < 3) {
+      if (state.click?.kind === 'face') {
+        setSelectedFace(state.click.face);
+        setSelectedEdges([]);
+        setSelectedVertices([]);
+      } else if (state.click?.kind === 'edge') {
+        setSelectedEdges([state.click.edge]);
+        setSelectedFace(null);
+        setSelectedVertices([]);
+      } else if (!state.additive) {
+        setSelectedVertices([]);
+        setSelectedFace(null);
+        setSelectedEdges([]);
+      }
+      return;
+    }
+
+    const caught: number[] = [];
+    for (const v of handles) {
+      const at = toScreen(v);
+      if (!at) continue;
+      if (at.x >= left && at.x <= right && at.y >= top && at.y <= bottom) caught.push(v);
+    }
+    setSelectedVertices((current) => (state.additive ? [...new Set([...current, ...caught])] : caught));
+    setSelectedFace(null);
+    setSelectedEdges([]);
+  }, [handles, setOrbitEnabled, toScreen]);
+
+  const beginMarquee = useCallback((event: ThreeEvent<PointerEvent>, click: ClickTarget = null) => {
+    // A plain div over the page rather than anything in the scene: the box is a
+    // screen rectangle, it has no position in the model, and drawing it as
+    // geometry would mean unprojecting it every frame to keep it flat.
+    const box = document.createElement('div');
+    box.style.cssText = [
+      'position:fixed', 'z-index:50', 'pointer-events:none',
+      'border:1px solid #0ea5e9', 'background:rgba(14,165,233,0.12)', 'border-radius:2px',
+      `left:${event.clientX}px`, `top:${event.clientY}px`, 'width:0px', 'height:0px',
+    ].join(';');
+    document.body.appendChild(box);
+    marquee.current = { x: event.clientX, y: event.clientY, additive: event.shiftKey, box, click };
+    setOrbitEnabled(false);
+  }, [setOrbitEnabled]);
+
+  useEffect(() => {
+    // On the window, not on the catcher: a box is usually dragged off the model
+    // and often off the canvas, and a selection that stops when the pointer
+    // leaves the mesh would be a box you can only draw over the thing you are
+    // trying to select around.
+    const move = (event: PointerEvent) => {
+      const state = marquee.current;
+      if (!state) return;
+      const { style } = state.box;
+      style.left = `${Math.min(state.x, event.clientX)}px`;
+      style.top = `${Math.min(state.y, event.clientY)}px`;
+      style.width = `${Math.abs(event.clientX - state.x)}px`;
+      style.height = `${Math.abs(event.clientY - state.y)}px`;
+    };
+    const up = (event: PointerEvent) => endMarquee(event);
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    return () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      // A box left on screen by an unmount is a rectangle nobody can get rid of.
+      marquee.current?.box.remove();
+      marquee.current = null;
+    };
+  }, [endMarquee]);
+
+  // -----------------------------------------------------------------------
   // Pointer handlers
   // -----------------------------------------------------------------------
 
@@ -750,21 +898,24 @@ export function LatticeSurface({
     }
     const ray = localRay(event);
     setHover(ray ? resolve(ray) : null);
-  }, [localRay, resolve, updateExtrude, updateVertexDrag]);
+  }, [localRay, resolve, setHover, updateExtrude, updateVertexDrag]);
 
   const onPlaneDown = useCallback((event: ThreeEvent<PointerEvent>) => {
     if (event.button !== 0) return;
     const ray = localRay(event);
     if (tool === 'select') {
-      // Off the model entirely: an edge seen against the background is still an
-      // edge, and clicking empty space clears the selection.
+      // An edge seen against the background is still an edge, so it gets first
+      // refusal; anything else starts a box.
       const edge = ray && pickEdge(ray);
-      setSelectedEdges(edge ? [edge] : []);
       if (edge) {
+        setSelectedEdges([edge]);
         setSelectedFace(null);
-        setSelectedVertex(null);
+        setSelectedVertices([]);
         event.stopPropagation();
+        return;
       }
+      event.stopPropagation();
+      beginMarquee(event);
       return;
     }
     if (tool !== 'place') return;
@@ -779,7 +930,7 @@ export function LatticeSurface({
       useStore.getState().setLatticePlane({ axis: plane.axis, index: coord[axis] });
     }
     placeAt(coord);
-  }, [localRay, locked, pickEdge, placeAt, plane, resolve, tool]);
+  }, [beginMarquee, localRay, locked, pickEdge, placeAt, plane, resolve, tool]);
 
   const onFaceDown = useCallback((event: ThreeEvent<PointerEvent>) => {
     if (event.button !== 0 || event.faceIndex == null) return;
@@ -794,26 +945,22 @@ export function LatticeSurface({
     if (tool === 'select') {
       const ray = localRay(event);
       const edge = ray && pickEdge(ray);
-      if (edge) {
-        setSelectedEdges([edge]);
-        setSelectedFace(null);
-        setSelectedVertex(null);
-        return;
-      }
+      beginMarquee(event, edge ? { kind: 'edge', edge } : { kind: 'face', face });
+      return;
     }
 
     setSelectedFace(face);
-    setSelectedVertex(null);
+    setSelectedVertices([]);
     setSelectedEdges([]);
     if (tool === 'extrude') beginExtrude(face, event);
-  }, [beginExtrude, localRay, pick.triangleFace, pickEdge, tool]);
+  }, [beginExtrude, beginMarquee, localRay, pick.triangleFace, pickEdge, tool]);
 
   const onHandleDown = useCallback((event: ThreeEvent<PointerEvent>) => {
     if (event.button !== 0 || tool !== 'select' || event.instanceId == null) return;
     const vertex = handles[event.instanceId];
     if (vertex === undefined) return;
     event.stopPropagation();
-    setSelectedVertex(vertex);
+    setSelectedVertices((current) => (current.includes(vertex) ? current : [vertex]));
     setSelectedFace(null);
     setSelectedEdges([]);
     beginVertexDrag(vertex, event);
@@ -840,7 +987,7 @@ export function LatticeSurface({
         other.push(cloneLattice(lattice));
         restoreLattice(lattice, snapshot);
         setSelectedFace(null);
-        setSelectedVertex(null);
+        setSelectedVertices([]);
         setRevision((r) => r + 1);
         commit();
         return;
@@ -850,7 +997,7 @@ export function LatticeSurface({
       if (key === 'escape') {
         setPending([]);
         setSelectedFace(null);
-        setSelectedVertex(null);
+        setSelectedVertices([]);
         setSelectedEdges([]);
         return;
       }
@@ -867,7 +1014,21 @@ export function LatticeSurface({
         return;
       }
       if (key === 'x' || key === 'y' || key === 'z') {
-        useStore.getState().setLatticePlane({ axis: key as Axis, index: 0 });
+        const axis = key as Axis;
+        const at = hoverRef.current;
+        // Turning the plane keeps you where you are working. Index 0 was the
+        // world origin, which on a part built anywhere else is a slice through
+        // nothing — the keys worked and felt like they had not, because the lit
+        // slice vanished off the model.
+        let index = at ? at[AXIS_INDEX[axis]] : 0;
+        if (!at) {
+          const bounds = latticeBounds(lattice);
+          if (bounds) {
+            const middle = (bounds.min[AXIS_INDEX[axis]] + bounds.max[AXIS_INDEX[axis]]) / 2;
+            index = Math.round(middle / snap) * snap;
+          }
+        }
+        useStore.getState().setLatticePlane({ axis, index });
         return;
       }
       if (key === 'delete' || key === 'backspace') {
@@ -878,15 +1039,19 @@ export function LatticeSurface({
         event.preventDefault();
         event.stopPropagation();
 
-        const vertex = selectedVertex !== null ? selectedVertex : hoverVertex !== -1 ? hoverVertex : null;
-        if (selectedFace === null && vertex === null) return;
+        const vertices = selectedVertices.length > 0
+          ? selectedVertices
+          : hoverVertex !== -1 ? [hoverVertex] : [];
+        if (selectedFace === null && vertices.length === 0) return;
 
         mutate(() => {
           if (selectedFace !== null) {
             const partner = mirror ? findMirrorFace(lattice, selectedFace, mirror) : -1;
             removeFace(lattice, selectedFace);
             if (partner !== -1) removeFace(lattice, partner);
-          } else if (vertex !== null) {
+            return;
+          }
+          for (const vertex of vertices) {
             const [i, j, k] = mirrorCoord(coordOf(lattice, vertex), mirror ?? 'x');
             const partner = mirror ? findVertex(lattice, i, j, k) : -1;
             removeVertex(lattice, vertex);
@@ -894,7 +1059,7 @@ export function LatticeSurface({
           }
         });
         setSelectedFace(null);
-        setSelectedVertex(null);
+        setSelectedVertices([]);
         return;
       }
       if (key === 'l' && selectedEdges.length > 0) {
@@ -958,7 +1123,7 @@ export function LatticeSurface({
     // open and own the shape.
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
-  }, [closePending, commit, hoverVertex, lattice, mirror, mutate, nudgeLatticePlane, selectedEdges, selectedFace, selectedVertex, snap]);
+  }, [closePending, commit, hoverVertex, lattice, mirror, mutate, nudgeLatticePlane, selectedEdges, selectedFace, selectedVertices, snap]);
 
   /**
    * Ctrl (or Cmd) held, tracked on its own.
@@ -971,7 +1136,19 @@ export function LatticeSurface({
    */
   useEffect(() => {
     const down = (event: KeyboardEvent) => {
-      if (event.key === 'Control' || event.key === 'Meta') setLocked(true);
+      if (event.key !== 'Control' && event.key !== 'Meta') return;
+      // Lock to the plane through whatever is under the pointer, not to
+      // wherever the work plane was left. Pressing Ctrl while hovering a corner
+      // means "hold me to THIS one" — locking to a plane somewhere else is the
+      // opposite of what the gesture asks for, and it takes the lit slice away
+      // from the thing being pointed at.
+      const at = hoverRef.current;
+      if (at) {
+        const { latticePlane } = useStore.getState();
+        const index = at[AXIS_INDEX[latticePlane.axis]];
+        if (index !== latticePlane.index) useStore.getState().setLatticePlane({ ...latticePlane, index });
+      }
+      setLocked(true);
     };
     const up = (event: KeyboardEvent) => {
       if (event.key === 'Control' || event.key === 'Meta') setLocked(false);
@@ -1094,7 +1271,8 @@ export function LatticeSurface({
         onPointerDown={onHandleDown}
       >
         <sphereGeometry args={[step * 0.12, 8, 6]} />
-        <meshBasicMaterial color="#0ea5e9" depthTest={false} />
+        {/* White, so the per-instance colours above come through unmixed. */}
+        <meshBasicMaterial color="#ffffff" depthTest={false} />
       </instancedMesh>
 
       {/* The grid, as a volume: the whole cube is drawn and the whole cube is

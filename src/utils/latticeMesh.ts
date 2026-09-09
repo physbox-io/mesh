@@ -298,6 +298,47 @@ export function moveVertex(lattice: Lattice, vertex: number, i: number, j: numbe
   return true;
 }
 
+/**
+ * Moves a whole set of corners by the same step, at once.
+ *
+ * Not a loop over `moveVertex`, and the difference matters: moved one at a
+ * time, the first corner can land on the second's old position and weld to it,
+ * so a selection dragged one step collapses instead of translating. So every
+ * corner leaves the index first, then they all move, then they are put back —
+ * and only then can a collision with a corner that ISN'T moving be a real weld.
+ *
+ * Two moving corners can never collide with each other: they share a
+ * translation, so they stay as far apart as they started.
+ */
+export function moveVertices(lattice: Lattice, vertices: number[], di: number, dj: number, dk: number): boolean {
+  if (di === 0 && dj === 0 && dk === 0) return false;
+  const moving = [...new Set(vertices)].filter((v) => v >= 0 && v < vertexCount(lattice));
+  if (moving.length === 0) return false;
+
+  for (const v of moving) {
+    const [i, j, k] = coordOf(lattice, v);
+    if (lattice.index.get(key(i, j, k)) === v) lattice.index.delete(key(i, j, k));
+  }
+
+  for (const v of moving) {
+    lattice.coords[v * 3] += di;
+    lattice.coords[v * 3 + 1] += dj;
+    lattice.coords[v * 3 + 2] += dk;
+  }
+
+  const welds: [number, number][] = [];
+  for (const v of moving) {
+    const [i, j, k] = coordOf(lattice, v);
+    const occupant = lattice.index.get(key(i, j, k));
+    if (occupant === undefined) lattice.index.set(key(i, j, k), v);
+    else welds.push([v, occupant]);
+  }
+  for (const [from, into] of welds) mergeVertex(lattice, from, into);
+
+  lattice.revision++;
+  return true;
+}
+
 /** Rewrites every use of `from` as `into`, dropping faces that degenerate. */
 function mergeVertex(lattice: Lattice, from: number, into: number) {
   const users = [...(lattice.vertexFaces.get(from) ?? [])];

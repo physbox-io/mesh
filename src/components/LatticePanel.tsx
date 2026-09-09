@@ -33,7 +33,7 @@ interface ToolDefinition {
 
 const TOOLS: ToolDefinition[] = [
   { tool: 'place', label: 'Place', key: '1', icon: PenLine, hint: 'Click grid points to draw a face. Four corners closes it automatically; Enter closes a triangle; Esc abandons it.' },
-  { tool: 'select', label: 'Select', key: '2', icon: MousePointer2, hint: 'Drag a corner to move it; click a face or an edge to select it. L grows an edge to its whole loop, S keeps it sharp under smoothing (on a face, its whole border), F turns a face inside out.' },
+  { tool: 'select', label: 'Select', key: '2', icon: MousePointer2, hint: 'Click a corner, face or edge to select it; drag a box to catch several (Shift adds to the selection), then drag any one of them to move the lot or Delete to remove them. L grows an edge to its whole loop, S keeps it sharp under smoothing (on a face, its whole border), F turns a face inside out.' },
   { tool: 'extrude', label: 'Extrude', key: '3', icon: MoveVertical, hint: 'Drag a face along its own axis to push it out in whole grid steps — the fastest way to get from a plate to a solid.' },
 ];
 
@@ -160,7 +160,7 @@ export function LatticePanel() {
               key={axis}
               type="button"
               onClick={() => setPlane({ axis, index: 0 })}
-              title={`Work on slices perpendicular to ${axis.toUpperCase()} (${axis})`}
+              title={`Work on slices perpendicular to ${axis.toUpperCase()}. Press ${axis.toUpperCase()} — the plane lands at whatever the pointer is on, so turning it keeps you where you are working.`}
               className={`flex-1 py-1 rounded-md text-[11px] font-bold uppercase transition-colors cursor-pointer ${
                 plane.axis === axis
                   ? 'bg-sky-500/15 text-sky-600 dark:text-sky-300'
@@ -168,13 +168,14 @@ export function LatticePanel() {
               }`}
             >
               {axis}
+              <span className="ml-0.5 opacity-40">{axis.toUpperCase()}</span>
             </button>
           ))}
         </div>
         <p className="text-[10px] leading-snug text-slate-400 dark:text-slate-500">
-          The lit slice follows your pointer; clicking at a depth sets this to it.
-          Hold <kbd className="font-mono">Ctrl</kbd> to stay on this one — the slice stops
-          moving and only points on it can be clicked.
+          The lit slice follows your pointer. Hold <kbd className="font-mono">Ctrl</kbd> to
+          stay on the one you are pointing at — it stops moving, and only points on it can
+          be clicked. <kbd className="font-mono">X</kbd>/<kbd className="font-mono">Y</kbd>/<kbd className="font-mono">Z</kbd> turns it,
           <kbd className="font-mono"> [</kbd> / <kbd className="font-mono">]</kbd> moves it a step, Shift for five.
         </p>
       </div>
@@ -352,8 +353,8 @@ export function LatticePanel() {
       )}
 
       <p className="text-[10px] leading-snug text-slate-400 dark:text-slate-500 pt-1 border-t border-slate-200 dark:border-slate-800">
-        <kbd className="font-mono">X</kbd>/<kbd className="font-mono">Y</kbd>/<kbd className="font-mono">Z</kbd> turns the plane · <kbd className="font-mono">Del</kbd> removes the corner
-        under the pointer, or whatever is selected · Right-drag orbits · <kbd className="font-mono">Ctrl+Z</kbd> undoes an edit
+        <kbd className="font-mono">Del</kbd> removes the corner under the pointer, or whatever is
+        selected · Right-drag orbits · <kbd className="font-mono">Ctrl+Z</kbd> undoes an edit
       </p>
     </div>
   );

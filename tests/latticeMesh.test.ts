@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   createLattice, vertexAt, findVertex, addFace, findFace, removeFace, flipFace,
-  moveVertex, removeVertex, faceNormal, dominantAxis, extrudeFace, mirrorFace,
+  moveVertex, moveVertices, removeVertex, faceNormal, dominantAxis, extrudeFace, mirrorFace,
   isWatertight, latticeStats, latticeBounds, toSceneGeom, toPolyMesh, cageEdges, coordOf,
   serializeCage, deserializeCage, cloneLattice, restoreLattice, faceCount,
   boxLattice, SNAP_MULTIPLES, DEFAULT_UNIT, setCrease, isCrease, edgeLoop,
@@ -540,5 +540,48 @@ describe('edge loops', () => {
   it('refuses an edge that is not there', () => {
     const l = unitCube();
     expect(edgeLoop(l, findVertex(l, 0, 0, 0), findVertex(l, 1, 1, 1))).toEqual([]);
+  });
+});
+
+describe('moving several corners at once', () => {
+  it('translates them all without welding them to each other', () => {
+    const l = unitCube();
+    const top = [
+      findVertex(l, 0, 0, 1), findVertex(l, 1, 0, 1),
+      findVertex(l, 1, 1, 1), findVertex(l, 0, 1, 1),
+    ];
+    expect(moveVertices(l, top, 0, 0, 3)).toBe(true);
+    expect(latticeStats(l).vertices).toBe(8);
+    expect(latticeBounds(l)).toEqual({ min: [0, 0, 0], max: [1, 1, 4] });
+    expect(isWatertight(l)).toBe(true);
+  });
+
+  it('would collapse if it moved them one at a time', () => {
+    // Two corners a step apart, moved a step: done singly the first welds onto
+    // the second's old position and one of them disappears.
+    const l = createLattice();
+    const a = vertexAt(l, 0, 0, 0), b = vertexAt(l, 1, 0, 0), c = vertexAt(l, 1, 1, 0);
+    addFace(l, [a, b, c]);
+    moveVertices(l, [a, b], 1, 0, 0);
+    expect(latticeStats(l).vertices).toBe(3);
+    expect(findVertex(l, 1, 0, 0)).toBe(a);
+    expect(findVertex(l, 2, 0, 0)).toBe(b);
+  });
+
+  it('welds onto a corner that is standing still', () => {
+    const l = createLattice();
+    const a = vertexAt(l, 0, 0, 0), b = vertexAt(l, 1, 0, 0);
+    const c = vertexAt(l, 2, 0, 0), d = vertexAt(l, 2, 1, 0);
+    addFace(l, [a, b, d]);
+    addFace(l, [b, c, d]);
+    // b moves onto c, which is not moving.
+    moveVertices(l, [b], 1, 0, 0);
+    expect(latticeStats(l).vertices).toBe(3);
+  });
+
+  it('does nothing for a zero step or an empty selection', () => {
+    const l = unitCube();
+    expect(moveVertices(l, [0, 1], 0, 0, 0)).toBe(false);
+    expect(moveVertices(l, [], 1, 0, 0)).toBe(false);
   });
 });
