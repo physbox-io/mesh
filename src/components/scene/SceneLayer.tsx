@@ -6,7 +6,7 @@
  * they share. Everything here runs inside the R3F canvas and talks to MuJoCo
  * through the store rather than through props from App.
  */
-import React, { useRef, useMemo, useState, useEffect } from 'react';
+import React, { useRef, useMemo, useState, useEffect, useLayoutEffect } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
 import { OrbitControls } from '@react-three/drei';
 import * as THREE from 'three';
@@ -899,7 +899,21 @@ export const StaticBoxInstances = ({ geoms, model, data, mujoco, setSelectedNode
   const nodeIdByInstance = useMemo(() => geoms.map((g: any) => g.nodeId), [geoms]);
   const wireframe = useStore(state => state.wireframe);
 
-  useEffect(() => {
+  /*
+   * A layout effect, not a passive one, and the difference is visible.
+   *
+   * Three initialises every instance of a new InstancedMesh to the identity
+   * matrix, so until the loop below runs each static box is the unit cube this
+   * mesh is built from: a metre on a side, at the origin, a little over a metre
+   * from where the camera starts. The mesh is new on every rebuild (SceneVisuals
+   * remounts on recompileId), and the rebuild lands from a requestAnimationFrame
+   * callback, where React defers passive effects to a later task that the next
+   * render frame can beat. When it did, the frame showed a dark block filling
+   * the window before the real boxes appeared — the "huge object over the
+   * camera" flash on preset load. A layout effect runs inside the commit, before
+   * any frame can be drawn.
+   */
+  useLayoutEffect(() => {
     const mesh = meshRef.current;
     if (!mesh || !model || !data || !mujoco) return;
     const mat = new THREE.Matrix4();
