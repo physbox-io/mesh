@@ -32,7 +32,7 @@ import type { Object3D } from 'three';
 import type { SceneNode, SceneGeom, SceneJoint } from '../types/scene';
 import type { RawGeom, RawJoint, RawNode } from '../utils/sceneNodes';
 import {
-  boxLattice, cloneLattice, deserializeCage, orientFaces, serializeCage, DEFAULT_UNIT as LATTICE_UNIT,
+  boxLattice, cloneLattice, deserializeCage, orientFaces, serializeCage, toSceneGeom as latticeToSceneGeom, DEFAULT_UNIT as LATTICE_UNIT,
   type Axis as LatticeAxis, type Lattice,
 } from '../utils/latticeMesh';
 import type { SculptUndoEntry } from '../utils/sculptMesh';
@@ -410,7 +410,12 @@ const fillBodyDefaults = (b: RawNode): SceneNode => {
         b.curveBank ?? 0
       )
     : null;
-  const resolvedJoints = (b.joints ?? (b.isCurve === true ? [] : [{ type: 'free' }]))
+  const isFixed = (b as any).dynamic === false ||
+    (b as any).static === true ||
+    (b as any).fixed === true ||
+    (Array.isArray(b.geoms) && b.geoms.length > 0 && b.geoms.every(g => g.dynamic === false));
+  const defaultJoints = (b.isCurve === true || isFixed) ? [] : [{ type: 'free' }];
+  const resolvedJoints = (b.joints ?? defaultJoints)
     .map((j: RawJoint, i: number) => fillJointDefaults(j, name, i));
   return {
     id,
@@ -937,33 +942,56 @@ export function useMCPBridge() {
         */
         case 'CREATE_LATTICE': {
           const { name, pos, sizeMm, edit } = msg;
-          const position = Array.isArray(pos) && pos.length === 3 ? pos : [0, 0, 0.2];
+          const position: [number, number, number] = Array.isArray(pos) && pos.length === 3 ? [pos[0], pos[1], pos[2]] : [0, 0, 0.2];
           const size = typeof sizeMm === 'number' && sizeMm > 0 ? sizeMm : 40;
           const halfSteps = Math.max(1, Math.round((size / 2) / (LATTICE_UNIT * 1000)));
 
-          // Same trap as CREATE_SCULPT: addComponent mints its own id, finishes
-          // asynchronously, and may parent the new body under the selection.
-          const before = collectNodeIds(store.sceneGraph.nodes);
-          store.setParentUnderSelected(false);
-          store.addComponent('lattice', position);
+          const id = `lattice_${Math.random().toString(36).substring(2, 10)}`;
+          const cage = serializeCage(boxLattice(LATTICE_UNIT, halfSteps));
+          const { vertices, renderVertices, faces, origin } = latticeToSceneGeom(deserializeCage(cage), 0);
 
-          const created = await waitForNewNode(before, 10000);
-          if (!created) throw new Error('The lattice body was not created (timed out waiting for the scene to settle)');
-          if (typeof name === 'string' && name.trim()) store.renameNode(created.id, name.trim());
+          const newNode: SceneNode = {
+            id,
+            name: (typeof name === 'string' && name.trim()) ? name.trim() : 'Lattice',
+            type: 'body',
+            pos: position,
+            joints: [{ name: `${id}_free`, type: 'free' }],
+            geoms: [{
+              name: `${id}_mesh`,
+              type: 'mesh',
+              size: [1],
+              rgba: [0.55, 0.68, 0.85, 1],
+              mass: 1,
+              condim: 3,
+              dynamic: true,
+              latticeGeom: true,
+              vertices,
+              faces,
+              renderVertices,
+            }],
+            children: [],
+            isLattice: true,
+            latticeCage: cage,
+            latticeSubdiv: 0,
+            latticeVersion: 1,
+            latticeOrigin: origin,
+          };
 
-          if (size !== 40) {
-            const cage = serializeCage(boxLattice(LATTICE_UNIT, halfSteps));
-            useStore.getState().applyLattice(created.id, cage, 0);
+          const currentNodes = useStore.getState().sceneGraph.nodes || [];
+          const updatedNodes = [...currentNodes, newNode];
+          const settleRes = await settleScene(updatedNodes);
+          if (!settleRes.ok) {
+            throw new Error(`The lattice body failed to compile: ${settleRes.error}`);
           }
+
           // Opening the tools is opt-in: it takes over the viewport and pauses
           // the simulation, which is rude to do to somebody mid-task, but it is
           // exactly what is wanted when a person is about to carry on by hand.
-          if (edit) useStore.getState().setLatticeNodeId(created.id);
+          if (edit) useStore.getState().setLatticeNodeId(id);
 
-          const after = findNodeInScene(useStore.getState().sceneGraph.nodes, created.id);
           return {
-            ok: true, id: created.id, name: after?.name,
-            ...latticeSummary(latticeOf(after)),
+            ok: true, id, name: newNode.name,
+            ...latticeSummary(deserializeCage(cage)),
           };
         }
 
