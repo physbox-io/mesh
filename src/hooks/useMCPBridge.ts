@@ -410,9 +410,12 @@ const fillBodyDefaults = (b: RawNode): SceneNode => {
         b.curveBank ?? 0
       )
     : null;
-  const isFixed = (b as any).dynamic === false ||
-    (b as any).static === true ||
-    (b as any).fixed === true ||
+  // Flags an agent may write on a body to mean "does not move", none of which
+  // is a SceneNode field: honoured here so the body gets no free joint.
+  const flags = b as RawNode & { dynamic?: boolean; static?: boolean; fixed?: boolean };
+  const isFixed = flags.dynamic === false ||
+    flags.static === true ||
+    flags.fixed === true ||
     (Array.isArray(b.geoms) && b.geoms.length > 0 && b.geoms.every(g => g.dynamic === false));
   const defaultJoints = (b.isCurve === true || isFixed) ? [] : [{ type: 'free' }];
   const resolvedJoints = (b.joints ?? defaultJoints)
