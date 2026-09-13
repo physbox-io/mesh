@@ -43,7 +43,7 @@ const BRUSHES: BrushDefinition[] = [
   { type: 'draw', label: 'Draw', key: '1', icon: Paintbrush, hint: 'Push the surface out along its normal. Hold Ctrl to carve in instead.' },
   { type: 'grab', label: 'Grab', key: '2', icon: Hand, hint: 'Take hold of the surface and drag it. The best brush for gross shape.' },
   { type: 'smooth', label: 'Smooth', key: '3', icon: Waves, hint: 'Average the surface towards its neighbours. Use it more than you think you need to.' },
-  { type: 'inflate', label: 'Inflate', key: '4', icon: Expand, hint: 'Push every vertex along its own normal — swells a form rather than raising a ridge.' },
+  { type: 'inflate', label: 'Inflate', key: '4', icon: Expand, hint: 'Push every vertex along its own normal. Swells a form rather than raising a ridge.' },
   { type: 'flatten', label: 'Flatten', key: '5', icon: Minimize2, hint: 'Pull the surface onto its own local plane. Makes a facet out of a bulge.' },
   { type: 'pinch', label: 'Pinch', key: '6', icon: Magnet, hint: 'Draw material sideways towards the cursor. Sharpens an edge that smoothing has softened.' },
 ];
@@ -307,7 +307,7 @@ export function SculptPanel() {
               title="Dynamic topology has stopped adding vertices. Lower the detail, use a smaller brush, or accept the density you have."
             >
               <TriangleAlert className="w-3 h-3 mt-px shrink-0" />
-              <span>Detail limit reached — the brush is no longer adding density.</span>
+              <span>Detail limit reached. The brush is not adding density.</span>
             </div>
           )}
           {!stats.watertight && (
@@ -316,7 +316,7 @@ export function SculptPanel() {
               title="Some edge is not shared by exactly two triangles. The viewport does not care; a slicer or a CAM job will refuse the file."
             >
               <TriangleAlert className="w-3 h-3 mt-px shrink-0" />
-              <span>Surface is not closed — it will not print or machine.</span>
+              <span>Surface is not closed. It will not print or machine.</span>
             </div>
           )}
         </div>

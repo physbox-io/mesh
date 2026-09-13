@@ -155,8 +155,8 @@ export const MachineWorkOriginPanel: React.FC<{
           <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
           <span>
             <strong className="font-bold">Z zero is not confirmed for this session.</strong> The
-            controller may still be holding a datum from a previous session, tool, or piece of stock
-            — connecting, and a tool change mid-job, both leave it untrusted until you touch off
+            controller may still be holding a datum from a previous session, tool, or piece of stock.
+            Connecting, and a tool change mid-job, both leave it untrusted until you touch off
             again. Any Z move (including Go To Zero, and starting a job) is blocked until you set Z
             zero below, by hand or on the plate.
           </span>
@@ -255,7 +255,7 @@ export const MachineWorkOriginPanel: React.FC<{
               disabled={busy || (showZProbe && staleZ)}
               title={
                 showZProbe && staleZ
-                  ? 'Set Z zero below first — the retract this uses is clamped to never move down, but it will not lift until Z is trusted'
+                  ? 'Set Z zero below first. The retract this uses never moves down, but it will not lift until Z is trusted'
                   : 'Retract and drive to the work origin to check where it landed'
               }
               className={actionBtn}
@@ -289,7 +289,7 @@ export const MachineWorkOriginPanel: React.FC<{
                   }
                 >
                   <Lightbulb className={`w-3.5 h-3.5 ${machineState.guideSpot ? '' : 'text-amber-500'}`} />
-                  <span>{machineState.guideSpot ? 'Guide Spot On — Switch Off' : 'Guide Spot'}</span>
+                  <span>{machineState.guideSpot ? 'Guide Spot On (Switch Off)' : 'Guide Spot'}</span>
                 </button>
                 <div className="flex items-center space-x-1.5">
                   <NumberInput
@@ -345,7 +345,7 @@ export const MachineWorkOriginPanel: React.FC<{
 
               <p className="text-[10px] text-slate-500 leading-snug">
                 Wear your glasses, put scrap under the head, and jog the <em>dot</em> onto the corner
-                of the stock before zeroing — not the head. Raise the percentage until you can see
+                of the stock before zeroing, not the head. Raise the percentage until you can see
                 it. Laser mode (<code>$32</code>) is switched off while the spot is lit and back on
                 the moment it goes out, because GRBL will not fire a stationary head with it on. The
                 spot times out after two minutes on its own.
@@ -367,7 +367,7 @@ export const MachineWorkOriginPanel: React.FC<{
                 <button
                   onClick={handleZeroZHere}
                   disabled={busy}
-                  title="Take work Z 0 from where the tool is standing right now — no probe, no touch plate"
+                  title="Take work Z 0 from where the tool is standing right now, with no probe or touch plate"
                   className={actionBtn}
                 >
                   <Hand className="w-3.5 h-3.5 text-emerald-500" />
@@ -380,7 +380,7 @@ export const MachineWorkOriginPanel: React.FC<{
                     step={0.1}
                     value={gaugeThickness}
                     onChange={(v) => v !== undefined && setGaugeThickness(v)}
-                    title="Anything between the tip and the surface — a slip of paper is about 0.1 mm, a 1-2-3 block is 25.4. Leave at 0 when the bit is touching the work itself."
+                    title="Anything between the tip and the surface: a slip of paper is about 0.1 mm, a 1-2-3 block is 25.4. Leave at 0 when the bit is touching the work itself."
                     className="w-16 bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg px-2 py-1 text-xs font-mono text-slate-800 dark:text-slate-200"
                   />
                   <span className="text-[10px] text-slate-500 whitespace-nowrap">mm gauge</span>
@@ -399,7 +399,7 @@ export const MachineWorkOriginPanel: React.FC<{
                     step={0.1}
                     value={plateThickness}
                     onChange={(v) => v !== undefined && setPlateThickness(v)}
-                    title="Touch plate thickness — work Z 0 ends up this far below the plate's top face"
+                    title="Touch plate thickness. Work Z 0 ends up this far below the plate's top face"
                     className="w-16 bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg px-2 py-1 text-xs font-mono text-slate-800 dark:text-slate-200"
                   />
                   <span className="text-[10px] text-slate-500 whitespace-nowrap">mm plate</span>
@@ -430,7 +430,7 @@ export const MachineWorkOriginPanel: React.FC<{
         Jog the tool over the corner of your stock where the job's origin should sit, then set XY zero.
         {showZProbe &&
           ' For Z, either wind the bit down until it just marks the surface and press Set Z Zero Here' +
-          ' — putting a feeler under it and entering its thickness as the gauge — or clip the probe' +
+          ' (with a feeler under it, enter its thickness as the gauge), or clip the probe' +
           ' lead to the tool, sit the plate on the stock, park the tool a few mm above it, and probe.'}
         {onOpenDocs && (
           <>

@@ -196,6 +196,19 @@ export interface ResumeOptions {
    * app follows.
    */
   currentZ?: number;
+  /**
+   * The line being resumed to is a tool change or a programmed stop, so the
+   * program's first act on restarting is to pause and park.
+   *
+   * That makes the descent back into the cut worse than pointless. A job
+   * stopped *at* its tool change — a limit switch tripped during the
+   * tool-change lift is the way that happens — resumes onto the `M6` line
+   * itself, and the preamble would send the tool back down to full cutting
+   * depth for a line that cuts nothing, then immediately lift and park. One
+   * plunge and one rapid across the work, both of them at a Z the operator has
+   * every reason to distrust, in service of a move the program never makes.
+   */
+  arrivingAtPause?: boolean;
 }
 
 /**
@@ -226,6 +239,7 @@ export function buildResumePreamble(
   const num = (v: number) => v.toFixed(3);
   const lines: string[] = [];
   const isLaser = state.position.z === null && state.safeZ === null;
+  const arrivingAtPause = options?.arrivingAtPause ?? false;
 
   lines.push(`; --- RESUME AT LINE ${fromLine} ---`);
   lines.push(state.units);
@@ -243,7 +257,10 @@ export function buildResumePreamble(
     const clearZ = options?.currentZ !== undefined ? Math.max(wantedZ, options.currentZ) : wantedZ;
     lines.push(`G0 Z${num(clearZ)} ; retract to the program's own clear height`);
 
-    if (spindleLine) {
+    // Nothing spins up for a pause: the program's own tool-change handling
+    // turns the spindle off as its first act, and a spindle started here would
+    // be started only to be stopped, with a two-second dwell in between.
+    if (spindleLine && !arrivingAtPause) {
       lines.push(`${spindleLine} ; spindle back to the speed the job was cut at`);
       if (opt.spindleWarmupSeconds > 0) lines.push(`G4 P${opt.spindleWarmupSeconds}`);
     }
@@ -254,7 +271,7 @@ export function buildResumePreamble(
       lines.push(`G0 X${num(x)} Y${num(y)} ; over the point it stopped at`);
     }
 
-    if (state.position.z !== null) {
+    if (state.position.z !== null && !arrivingAtPause) {
       // Down at feedrate, not rapid: the tool is descending into stock that is
       // still there, and this is the one move in the preamble that cuts.
       lines.push(`G1 Z${num(state.position.z)} F${Math.round(opt.plungeFeed)} ; back down into the cut`);
@@ -266,7 +283,11 @@ export function buildResumePreamble(
       // Beam still off — this traverse must not mark the work.
       lines.push(`G0 X${num(x)} Y${num(y)} ; over the point it stopped at, beam off`);
     }
-    if (spindleLine) lines.push(`${spindleLine} ; beam back on, now that it is in position`);
+    // Same as the router: a sheet swap's first act is `M5`, so a beam lit here
+    // is a beam lit over the work while the operator reaches into it.
+    if (spindleLine && !arrivingAtPause) {
+      lines.push(`${spindleLine} ; beam back on, now that it is in position`);
+    }
   }
 
   if (state.feed !== null) lines.push(`F${Math.round(state.feed)} ; restore the cutting feed`);
@@ -284,6 +305,16 @@ export interface ResumePlan {
   state: ModalState;
   /** The line the program itself picks up at. */
   fromLine: number;
+  /**
+   * The work Z the preamble descends to before the program restarts, or null
+   * when it makes no descent at all.
+   *
+   * The number an operator wants before committing to a resume, and the reason
+   * it is reported rather than read off `state.position.z`: a resume onto a
+   * tool change does not descend, and a warning about a depth the machine is
+   * not going to go to is a warning that teaches people to ignore warnings.
+   */
+  descendsToZ: number | null;
 }
 
 /**
@@ -301,10 +332,12 @@ export function planResume(
 ): ResumePlan {
   const clamped = Math.max(0, Math.min(fromLine, lines.length));
   const state = scanModalState(lines, clamped);
+  const descends = !options?.arrivingAtPause && state.position.z !== null;
   return {
     preamble: buildResumePreamble(state, clamped, options),
     state,
     fromLine: clamped,
+    descendsToZ: descends ? state.position.z : null,
   };
 }
 

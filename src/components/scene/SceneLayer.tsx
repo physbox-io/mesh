@@ -7,7 +7,7 @@
  * through the store rather than through props from App.
  */
 import React, { useRef, useMemo, useState, useEffect, useLayoutEffect } from 'react';
-import { useFrame, useThree } from '@react-three/fiber';
+import { useFrame, useThree, type ThreeEvent } from '@react-three/fiber';
 import { OrbitControls } from '@react-three/drei';
 import * as THREE from 'three';
 import { registerLiveCamera } from '../../utils/liveCamera';
@@ -23,6 +23,12 @@ import { useVertexPaint } from '../../hooks/useVertexPaint';
 import { buildPaintGeometry, isPaintable, paintArgsFromSize, paintResolution, type PaintLayer } from '../../utils/vertexPaint';
 import { sampleCatmullRom } from '../../utils/geom';
 import { resolveCsgGeoms } from '../../utils/csg';
+import { DEFAULT_UNIT } from '../../utils/latticeMesh';
+import type { GeomType, SceneGraph, SceneNode } from '../../types/scene';
+import type { WeakSpot } from '../../utils/printAnalysis';
+import type { DataMirror, FrameFlagWindow, ModelMirror, MujocoShim, RenderGeom } from '../../types/sceneLayer';
+
+type OrbitControlsImpl = React.ComponentRef<typeof OrbitControls>;
 
 /**
  * Ends a paint stroke wherever it is let go.
@@ -64,7 +70,11 @@ export const PaintStrokeController = () => {
 export const CameraController = () => {
   const { camera } = useThree();
   const cameraView = useStore(state => state.cameraView);
-  const controlsRef = useRef<any>(null);
+  // Loading a preset asks for the starting view back. See cameraResetToken:
+  // the view someone has orbited to is still `perspective`, so the state alone
+  // never changes and this effect would never re-run.
+  const cameraResetToken = useStore(state => state.cameraResetToken);
+  const controlsRef = useRef<OrbitControlsImpl>(null);
   
   useEffect(() => {
     if (cameraView === 'topDown') {
@@ -85,7 +95,7 @@ export const CameraController = () => {
       }
     }
     camera.updateProjectionMatrix();
-  }, [cameraView, camera]);
+  }, [cameraView, cameraResetToken, camera]);
 
   // Explicit pose from the MCP SET_CAMERA bridge command. The store held this
   // field (and GET_CAMERA reported it) but nothing ever applied it to the
@@ -109,6 +119,35 @@ export const CameraController = () => {
 
   const draggedNodeId = useStore((state) => state.draggedNodeId);
   /*
+   * How close the camera may come, and where the near plane sits.
+   *
+   * 20 mm is close enough for a part laid out in centimetres and nowhere near
+   * close enough for the 0.1 mm grid: at that distance the whole dot field is a
+   * couple of millimetres across — a smudge a hundred pixels wide, with its
+   * dots a fraction of a pixel each — which is why the finest grid read as not
+   * drawn at all rather than as too small. In lattice mode the limit follows
+   * the grid step, about sixty steps back, and the near plane follows the limit
+   * — a near plane further out than the closest orbit distance would clip the
+   * model away exactly as you reached it. Outside lattice mode both go back to
+   * what they were, so nothing else in the app sees a shallower depth buffer.
+   */
+  const latticeNodeId = useStore((state) => state.latticeNodeId);
+  const latticeSnap = useStore((state) => state.latticeSnap);
+  const minDistance = latticeNodeId
+    ? Math.min(0.02, Math.max(0.002, latticeSnap * DEFAULT_UNIT * 60))
+    : 0.02;
+  // Read through R3F's `get()` rather than the camera captured in render, the
+  // same way useOrbitEnable does: this writes to the live camera object, and a
+  // value taken during render is not ours to modify.
+  const getThree = useThree((state) => state.get);
+  useEffect(() => {
+    const perspective = getThree().camera as THREE.PerspectiveCamera;
+    const near = Math.min(0.01, minDistance / 2);
+    if (perspective.near === near) return;
+    perspective.near = near;
+    perspective.updateProjectionMatrix();
+  }, [getThree, minDistance]);
+  /*
    * Hand the live camera and orbit target to the MCP bridge.
    *
    * utils/liveCamera.ts was written for exactly this and its registration was
@@ -120,11 +159,13 @@ export const CameraController = () => {
    * References, not snapshots: OrbitControls mutates these in place as a person
    * drags, so a read at any later moment reflects the view actually on screen.
    */
+  // The controls are rendered right here, so their ref is set by the time
+  // this effect runs; drei makes a new instance per camera, hence the dep.
   useEffect(() => {
     if (controlsRef.current) registerLiveCamera(camera, controlsRef.current.target);
-  }, [camera, controlsRef.current]);
+  }, [camera]);
 
-  return <OrbitControls enabled={draggedNodeId === null} ref={controlsRef} makeDefault enableDamping dampingFactor={0.1} minDistance={0.02} mouseButtons={{ LEFT: 99 as any, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE }} />;
+  return <OrbitControls enabled={draggedNodeId === null} ref={controlsRef} makeDefault enableDamping dampingFactor={0.1} minDistance={minDistance} mouseButtons={{ LEFT: 99 as THREE.MOUSE, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE }} />;
 };
 
 export const WedgeGeometry = ({ width = 2.0, depth = 1.0, height = 0.5 }: { width: number; depth: number; height: number }) => {
@@ -192,13 +233,92 @@ let paintStrokeActive = false;
 const beginPaintStroke = () => { paintStrokeActive = true; };
 
 // Dynamic Geom Renderer
-export const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, selectedNodeId, setSelectedNodeId, vertices, faces, dynamic: isDynamic, providedGeomId, staticBody }: any) => {
+/**
+ * Turns a click on a body into a spot a cut can be put: a point on its surface
+ * and the outward normal there, both in the body's own frame.
+ *
+ * Three conversions, none of them optional. The event is in Three's world
+ * space, which is Y-up where every geom is written Z-up; the hit is in WORLD
+ * space where a geom's `pos` is body-local; and the face normal is in the
+ * object's own geometry space, which for an instanced or transformed mesh is
+ * not the body's. Getting any of them wrong puts the hole on the wrong face
+ * without complaining.
+ */
+function publishCutSpot(nodeId: string, event: ThreeEvent<MouseEvent>) {
+  const point: THREE.Vector3 | undefined = event?.point;
+  const object: THREE.Object3D | undefined = event?.object;
+  if (!point || !object) return;
+
+  const normalWorld = new THREE.Vector3(0, 1, 0);
+  if (event.face?.normal) {
+    normalWorld.copy(event.face.normal)
+      .applyNormalMatrix(new THREE.Matrix3().getNormalMatrix(object.matrixWorld))
+      .normalize();
+  } else {
+    // No face on the hit — a point or line — so fall back to facing the camera,
+    // which is at least the surface you can see.
+    normalWorld.copy(event.ray?.direction ?? new THREE.Vector3(0, 0, -1)).negate().normalize();
+  }
+
+  // Three (Y-up) -> MuJoCo (Z-up), for the point and the direction alike.
+  const toMujoco = (v: THREE.Vector3) => new THREE.Vector3(v.x, -v.z, v.y);
+  const hit = toMujoco(point);
+  const normal = toMujoco(normalWorld).normalize();
+
+  // Out of world space and into the body's. The body's pose comes from the
+  // model rather than the node, because a simulated body is wherever MuJoCo has
+  // put it, not where it was authored.
+  const state = useStore.getState();
+  const model = state.model as ModelMirror | null;
+  const data = state.data as DataMirror | null;
+  const mujoco = state.mujoco as MujocoShim | null;
+  if (model && data && mujoco) {
+    try {
+      const bodyId = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY.value, nodeId);
+      if (bodyId >= 0) {
+        const o = bodyId * 3;
+        const m = bodyId * 9;
+        const rotation = new THREE.Matrix3().set(
+          data.xmat[m], data.xmat[m + 1], data.xmat[m + 2],
+          data.xmat[m + 3], data.xmat[m + 4], data.xmat[m + 5],
+          data.xmat[m + 6], data.xmat[m + 7], data.xmat[m + 8],
+        ).transpose();
+        hit.sub(new THREE.Vector3(data.xpos[o], data.xpos[o + 1], data.xpos[o + 2])).applyMatrix3(rotation);
+        normal.applyMatrix3(rotation).normalize();
+      }
+    } catch {
+      // A model mid-rebuild: better no spot than one in the wrong frame.
+      return;
+    }
+  }
+  state.setCutSpot({ nodeId, at: hit.toArray(), normal: normal.toArray() });
+}
+
+interface DynamicGeomProps {
+  /** The owning body. Absent for a geom the model has but the scene graph does not. */
+  nodeId?: string;
+  name: string;
+  type: GeomType;
+  color?: number[];
+  mujoco: MujocoShim;
+  model: ModelMirror;
+  data: DataMirror;
+  selectedNodeId: string | null;
+  setSelectedNodeId: (id: string | null) => void;
+  vertices?: number[];
+  faces?: number[];
+  dynamic?: boolean;
+  providedGeomId?: number;
+  staticBody?: boolean;
+}
+
+export const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, selectedNodeId, setSelectedNodeId, vertices, faces, dynamic: isDynamic, providedGeomId, staticBody }: DynamicGeomProps) => {
   const meshRef = useRef<THREE.Group>(null);
   const isPlaying = useStore(state => state.isPlaying);
   
   const node = useStore(state => {
     if (!nodeId) return null;
-    const find = (nodes: any[]): any => {
+    const find = (nodes: SceneNode[]): SceneNode | null => {
       if (!nodes) return null;
       for (const n of nodes) {
         if (n.id === nodeId) return n;
@@ -237,10 +357,13 @@ export const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, se
       console.error(`[DynamicGeom ${name}] geometryArgs Error:`, e);
       return [];
     }
-  }, [geomId, type, model]);
+  }, [geomId, type, model, name]);
 
   const rotationMatrix = useMemo(() => new THREE.Matrix4(), []);
-  const isSelected = selectedNodeId === nodeId;
+  // Selected, or brought along by a Shift-click. A body about to be combined
+  // has to look picked, or the operation reads as acting on one body.
+  const alsoSelected = useStore((state) => !!nodeId && state.extraSelectedIds.includes(nodeId));
+  const isSelected = selectedNodeId === nodeId || alsoSelected;
 
   // A geom's rgba carries an alpha, and until now every material dropped it and
   // drew fully opaque. A jar authored at 0.35 alpha then hides the very thing it
@@ -263,7 +386,7 @@ export const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, se
   // the moment the brush is put down.
   const paintMode = useStore(state => state.paintMode);
   const geomEntry = useMemo(
-    () => node?.geoms?.find((g: any) => g.name === name),
+    () => node?.geoms?.find((g) => g.name === name),
     [node, name]
   );
   const paintLayer = geomEntry?.paint as PaintLayer | undefined;
@@ -299,14 +422,27 @@ export const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, se
   // Handlers for physical spring dragging, mapped from Three.js coordinates to MuJoCo coordinate space
   const setOrbitEnabled = useOrbitEnable();
   const dragHandlers = useMemo(() => ({
-    onClick: (e: any) => {
+    onClick: (e: ThreeEvent<MouseEvent>) => {
       e.stopPropagation();
       // A paint dab is not a selection: swapping the properties panel out from
       // under every body you colour would make a colouring pass unusable.
       if (useStore.getState().paintMode) return;
+      // Shift or Ctrl adds a body to the selection instead of replacing it,
+      // the same chord that adds to a selection everywhere else in the app.
+      // Two bodies selected is what a boolean between two bodies needs.
+      if (e.shiftKey || e.ctrlKey || e.metaKey) {
+        useStore.getState().toggleExtraSelected(nodeId);
+        return;
+      }
       setSelectedNodeId(nodeId);
+      // And remember WHERE on the body it landed, so a cut can go exactly
+      // there, square to the surface. The click already raycasts to select the
+      // body; this is the hit it had to compute anyway, and it is what lets one
+      // sentence — "click the spot, press Hole" — hold for a primitive, a mesh,
+      // an imported STL and a lattice alike.
+      publishCutSpot(nodeId, e);
     },
-    onPointerDown: (e: any) => {
+    onPointerDown: (e: ThreeEvent<PointerEvent>) => {
       if (isPlaying) {
         e.stopPropagation();
         setOrbitEnabled(false);
@@ -320,39 +456,39 @@ export const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, se
         if (canvasEl && typeof canvasEl.setPointerCapture === 'function') {
           try {
             canvasEl.setPointerCapture(e.pointerId);
-          } catch (err) {}
+          } catch { /* ignore: capture is best-effort */ }
         }
       }
     },
-    onPointerUp: (e: any) => {
+    onPointerUp: (e: ThreeEvent<PointerEvent>) => {
       if (useStore.getState().draggedNodeId === nodeId) {
         e.stopPropagation();
         const canvasEl = e.nativeEvent?.target as HTMLElement;
         if (canvasEl && typeof canvasEl.releasePointerCapture === 'function') {
           try {
             canvasEl.releasePointerCapture(e.pointerId);
-          } catch (err) {}
+          } catch { /* ignore: release is best-effort */ }
         }
         useStore.getState().setDraggedNodeId(null);
         useStore.getState().setDragTarget(null);
         setOrbitEnabled(true);
       }
     },
-    onPointerCancel: (e: any) => {
+    onPointerCancel: (e: ThreeEvent<PointerEvent>) => {
       if (useStore.getState().draggedNodeId === nodeId) {
         e.stopPropagation();
         const canvasEl = e.nativeEvent?.target as HTMLElement;
         if (canvasEl && typeof canvasEl.releasePointerCapture === 'function') {
           try {
             canvasEl.releasePointerCapture(e.pointerId);
-          } catch (err) {}
+          } catch { /* ignore: release is best-effort */ }
         }
         useStore.getState().setDraggedNodeId(null);
         useStore.getState().setDragTarget(null);
         setOrbitEnabled(true);
       }
     }
-  }), [isPlaying, nodeId, name, setSelectedNodeId, setOrbitEnabled]);
+  }), [isPlaying, nodeId, setSelectedNodeId, setOrbitEnabled]);
 
   // For dynamic meshes, use body xpos/xmat so renderVertices (centroid-local) align correctly.
   const bodyId = useMemo(() => {
@@ -398,7 +534,7 @@ export const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, se
       );
       const q = new THREE.Quaternion().setFromRotationMatrix(mat);
       return [[px, py, pz] as [number, number, number], [q.x, q.y, q.z, q.w] as [number, number, number, number]];
-    } catch (e) {
+    } catch {
       return [[0, 0, 0] as [number, number, number], [0, 0, 0, 1] as [number, number, number, number]];
     }
   }, [isDynamic, bodyId, geomId, model, data]);
@@ -409,7 +545,7 @@ export const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, se
     const activeData = useStore.getState().data;
     if (model !== activeModel || data !== activeData) return;
 
-    if ((window as any).DISABLE_USEFRAME) return;
+    if ((window as FrameFlagWindow).DISABLE_USEFRAME) return;
     // Jointless bodies (and bodies under jointless ancestors) can never move —
     // their transform was already set once via initialPos/initialQuat, so
     // skip the per-frame geom_xpos/geom_xmat read + matrix rebuild entirely.
@@ -456,7 +592,7 @@ export const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, se
 
       meshRef.current.position.set(px, py, pz);
       meshRef.current.quaternion.setFromRotationMatrix(rotationMatrix);
-    } catch (e) {
+    } catch {
       // Safely ignore deleted object or transition errors
     }
   });
@@ -604,13 +740,13 @@ export const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, se
         </mesh>
       ) : type === 'sphere' ? (
         <mesh castShadow receiveShadow {...dragHandlers}>
-          <sphereGeometry args={geometryArgs as any} />
+          <sphereGeometry args={geometryArgs as [number, number, number]} />
           {renderedGeomMaterial}
         </mesh>
       ) : type === 'box' ? (
         <>
           <mesh castShadow receiveShadow {...dragHandlers}>
-            <boxGeometry args={geometryArgs as any} />
+            <boxGeometry args={geometryArgs as [number, number, number]} />
             {renderedGeomMaterial}
           </mesh>
         </>
@@ -622,7 +758,7 @@ export const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, se
       ) : null}
       {type === 'capsule' && (
         <mesh castShadow receiveShadow rotation={[Math.PI / 2, 0, 0]} {...dragHandlers}>
-          <capsuleGeometry args={geometryArgs as any} />
+          <capsuleGeometry args={geometryArgs as [number, number, number, number]} />
           {renderedGeomMaterial}
         </mesh>
       )}
@@ -697,10 +833,10 @@ export const DragInteractionController = () => {
 
 
 // Real-time mouse drag physical spring force line renderer
-export const MouseDragForceRenderer = ({ model, data, mujoco }: any) => {
+export const MouseDragForceRenderer = ({ model, data, mujoco }: { model: ModelMirror | null; data: DataMirror | null; mujoco: MujocoShim | null }) => {
   const draggedNodeId = useStore((state) => state.draggedNodeId);
   const dragTarget = useStore((state) => state.dragTarget);
-  const lineRef = useRef<any>(null);
+  const lineRef = useRef<THREE.Line>(null);
   const bodyIdCache = useRef<Record<string, number>>({});
   useEffect(() => {
     if (!model || !mujoco) return;
@@ -710,7 +846,7 @@ export const MouseDragForceRenderer = ({ model, data, mujoco }: any) => {
       if (name) c[name] = b;
     }
     const sceneGraph = useStore.getState().sceneGraph;
-    const mapIds = (nodes: any[]) => {
+    const mapIds = (nodes: SceneNode[]) => {
       if (!nodes) return;
       for (const n of nodes) {
         const bId = c[n.name] ?? c[n.id];
@@ -729,7 +865,7 @@ export const MouseDragForceRenderer = ({ model, data, mujoco }: any) => {
     const activeModel = useStore.getState().model;
     const activeData = useStore.getState().data;
     if (model !== activeModel || data !== activeData) return;
-    if ((window as any).DISABLE_USEFRAME) return;
+    if ((window as FrameFlagWindow).DISABLE_USEFRAME) return;
     if (!model || !data || !mujoco || !draggedNodeId || !dragTarget || !lineRef.current) return;
 
     try {
@@ -747,7 +883,7 @@ export const MouseDragForceRenderer = ({ model, data, mujoco }: any) => {
         new THREE.Vector3(dragTarget.x, dragTarget.y, dragTarget.z)
       ];
       lineRef.current.geometry.setFromPoints(points);
-    } catch (e) {
+    } catch {
       // Safe check
     }
   });
@@ -791,8 +927,8 @@ export const CurveControlHandles = () => {
   // Find the selected curve node and its accumulated world offset (curve
   // bodies are static, so parent offsets are pure translations).
   const found = useMemo(() => {
-    let result: { node: any; world: number[] } | null = null;
-    const walk = (nodes: any[], base: number[]) => {
+    let result: { node: SceneNode; world: number[] } | null = null;
+    const walk = (nodes: SceneNode[], base: number[]) => {
       if (!nodes || result) return;
       for (const n of nodes) {
         const world = [base[0] + (n.pos?.[0] || 0), base[1] + (n.pos?.[1] || 0), base[2] + (n.pos?.[2] || 0)];
@@ -802,7 +938,7 @@ export const CurveControlHandles = () => {
       }
     };
     walk(sceneGraph?.nodes, [0, 0, 0]);
-    return result as { node: any; world: number[] } | null;
+    return result as { node: SceneNode; world: number[] } | null;
   }, [sceneGraph, selectedNodeId]);
 
   const splineLine = useMemo(() => {
@@ -821,10 +957,10 @@ export const CurveControlHandles = () => {
 
   const toWorldMj = (p: number[]) => [found.world[0] + p[0], found.world[1] + p[1], found.world[2] + p[2]];
 
-  const startDrag = (i: number, e: any) => {
+  const startDrag = (i: number, e: ThreeEvent<PointerEvent>) => {
     e.stopPropagation();
     setOrbitEnabled(false);
-    try { (e.target as HTMLElement).setPointerCapture(e.pointerId); } catch (err) {}
+    try { (e.target as HTMLElement).setPointerCapture(e.pointerId); } catch { /* ignore: capture is best-effort */ }
     // Camera-facing drag plane through the handle (in Three.js world space:
     // MuJoCo (x,y,z) → three (x, z, -y))
     const w = toWorldMj(pts[i]);
@@ -835,7 +971,7 @@ export const CurveControlHandles = () => {
     setDragIdx(i);
   };
 
-  const moveDrag = (e: any) => {
+  const moveDrag = (e: ThreeEvent<PointerEvent>) => {
     if (dragIdx === null) return;
     e.stopPropagation();
     const hit = new THREE.Vector3();
@@ -851,10 +987,10 @@ export const CurveControlHandles = () => {
     updateCurveParams(found.node.id, { points: newPts });
   };
 
-  const endDrag = (e: any) => {
+  const endDrag = (e: ThreeEvent<PointerEvent>) => {
     if (dragIdx === null) return;
     e.stopPropagation();
-    try { (e.target as HTMLElement).releasePointerCapture(e.pointerId); } catch (err) {}
+    try { (e.target as HTMLElement).releasePointerCapture(e.pointerId); } catch { /* ignore: release is best-effort */ }
     setDragIdx(null);
     setOrbitEnabled(true);
   };
@@ -894,9 +1030,17 @@ export const CurveControlHandles = () => {
 // per frame. Clicking an instance selects its owning body; the selected
 // body's boxes drop back to individual DynamicGeoms so the highlight and
 // per-geom selection still work.
-export const StaticBoxInstances = ({ geoms, model, data, mujoco, setSelectedNodeId }: any) => {
+interface StaticBoxInstancesProps {
+  geoms: RenderGeom[];
+  model: ModelMirror;
+  data: DataMirror;
+  mujoco: MujocoShim;
+  setSelectedNodeId: (id: string | null) => void;
+}
+
+export const StaticBoxInstances = ({ geoms, model, data, mujoco, setSelectedNodeId }: StaticBoxInstancesProps) => {
   const meshRef = useRef<THREE.InstancedMesh>(null);
-  const nodeIdByInstance = useMemo(() => geoms.map((g: any) => g.nodeId), [geoms]);
+  const nodeIdByInstance = useMemo(() => geoms.map((g) => g.nodeId), [geoms]);
   const wireframe = useStore(state => state.wireframe);
 
   /*
@@ -919,7 +1063,7 @@ export const StaticBoxInstances = ({ geoms, model, data, mujoco, setSelectedNode
     const mat = new THREE.Matrix4();
     const scale = new THREE.Matrix4();
     const color = new THREE.Color();
-    geoms.forEach((g: any, idx: number) => {
+    geoms.forEach((g, idx) => {
       const gid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM.value, g.name);
       if (gid === -1 || gid >= model.ngeom) {
         mesh.setMatrixAt(idx, mat.makeScale(0, 0, 0));
@@ -952,11 +1096,26 @@ export const StaticBoxInstances = ({ geoms, model, data, mujoco, setSelectedNode
       args={[undefined, undefined, geoms.length]}
       castShadow
       receiveShadow
-      onClick={(e: any) => {
+      /* Which body each instance belongs to. The click handler already reads it
+         off the closure; anything walking the scene from outside — the measure
+         tool, which has to name what it snapped to — cannot, and an instanced
+         box is the one geom in the app with no named group around it. */
+      userData={{ nodeIds: nodeIdByInstance }}
+      onClick={(e: ThreeEvent<MouseEvent>) => {
         e.stopPropagation();
         if (useStore.getState().paintMode) return;
-        const nid = nodeIdByInstance[e.instanceId];
-        if (nid) setSelectedNodeId(nid);
+        const nid = e.instanceId === undefined ? undefined : nodeIdByInstance[e.instanceId];
+        if (!nid) return;
+        if (e.shiftKey || e.ctrlKey || e.metaKey) {
+          useStore.getState().toggleExtraSelected(nid);
+          return;
+        }
+        setSelectedNodeId(nid);
+        // Same as the ordinary geom click: remember where on the body it landed
+        // so a cut can go there. Selecting takes a box out of the instanced mesh
+        // and into its own DynamicGeom, so without this the first click on one
+        // would aim nothing and the second would.
+        publishCutSpot(nid, e);
       }}
     >
       <boxGeometry args={[1, 1, 1]} />
@@ -967,7 +1126,7 @@ export const StaticBoxInstances = ({ geoms, model, data, mujoco, setSelectedNode
 
 
 /** Depth-first lookup by id, for the renderer's own use. */
-const findSceneNode = (nodes: any[], id: string): any | null => {
+const findSceneNode = (nodes: SceneNode[], id: string): SceneNode | null => {
   for (const node of nodes || []) {
     if (node.id === id) return node;
     const found = findSceneNode(node.children, id);
@@ -976,7 +1135,61 @@ const findSceneNode = (nodes: any[], id: string): any | null => {
   return null;
 };
 
-export const SceneVisuals = ({ model, data, mujoco, sceneGraph, selectedNodeId, setSelectedNodeId, activeWeakSpot, setActiveWeakSpot }: any) => {
+/**
+ * The lattice editor, mounted OUTSIDE the compile-keyed visuals.
+ *
+ * SceneVisuals is remounted on every recompile, and every lattice edit
+ * recompiles — so an editor mounted inside it was torn down by each of its
+ * own commits: its undo history, the outline it was holding, a freehand
+ * stroke in mid-drag, all gone the moment they were used. Here it is keyed
+ * only on the cage it edits, and survives its own commits. It draws in the
+ * same Z-up wrapper group as everything else.
+ */
+export const LatticeEditorLayer = ({ model, data, mujoco }: { model: ModelMirror | null; data: DataMirror | null; mujoco: MujocoShim | null }) => {
+  const sceneGraph = useStore((state) => state.sceneGraph);
+  const latticeNodeId = useStore((state) => state.latticeNodeId);
+  const node = latticeNodeId ? findSceneNode(sceneGraph?.nodes ?? [], latticeNodeId) : undefined;
+  const geom = node?.geoms?.find((g) => g.latticeGeom) ?? node?.geoms?.find((g) => g.type === 'mesh' && !g.csgDerived);
+  if (!node?.isLattice || !node.latticeCage || !geom || !model || !data || !mujoco) return null;
+  return (
+    <group rotation={[-Math.PI / 2, 0, 0]}>
+      <LatticeSurface
+        key={`${node.id}:${node.latticeVersion ?? 1}`}
+        nodeId={node.id}
+        version={node.latticeVersion ?? 1}
+        geomName={geom.name}
+        color={geom.rgba || [0.55, 0.68, 0.85, 1]}
+        mujoco={mujoco}
+        model={model}
+        data={data}
+        cage={node.latticeCage}
+        subdiv={node.latticeSubdiv ?? 0}
+        thickness={node.latticeThickness ?? 0}
+      />
+    </group>
+  );
+};
+
+interface SceneVisualsProps {
+  model: ModelMirror | null;
+  data: DataMirror | null;
+  mujoco: MujocoShim | null;
+  sceneGraph: SceneGraph | null;
+  selectedNodeId: string | null;
+  setSelectedNodeId: (id: string | null) => void;
+  activeWeakSpot: WeakSpot | null;
+  setActiveWeakSpot: (spot: WeakSpot | null) => void;
+}
+
+/** A geom the model has that no scene-graph node accounts for. */
+interface ImplicitGeom {
+  providedGeomId: number;
+  name: string;
+  type: GeomType;
+  rgba: number[];
+}
+
+export const SceneVisuals = ({ model, data, mujoco, sceneGraph, selectedNodeId, setSelectedNodeId, activeWeakSpot, setActiveWeakSpot }: SceneVisualsProps) => {
   // Every geom name the scene graph accounts for, drawn or not. The implicit-geom
   // pass below uses this — NOT the render list — to decide what in the MuJoCo
   // model is unexplained. A collision-only geom (a boolean body's source
@@ -985,7 +1198,7 @@ export const SceneVisuals = ({ model, data, mujoco, sceneGraph, selectedNodeId, 
   // hole is the entire point.
   const knownGeomNames = useMemo(() => {
     const names = new Set<string>();
-    const walk = (nodes: any[]) => {
+    const walk = (nodes: SceneNode[]) => {
       for (const node of nodes || []) {
         for (const g of node.geoms || []) if (g.name) names.add(g.name);
         walk(node.children);
@@ -1007,8 +1220,8 @@ export const SceneVisuals = ({ model, data, mujoco, sceneGraph, selectedNodeId, 
 
   const geoms = useMemo(() => {
     if (!sceneGraph) return [];
-    const list: any[] = [];
-    const traverse = (nodes: any[], ancestorJointed: boolean) => {
+    const list: RenderGeom[] = [];
+    const traverse = (nodes: SceneNode[], ancestorJointed: boolean) => {
       if (!nodes) return;
       for (const node of nodes) {
         const jointed = ancestorJointed || (node.joints && node.joints.length > 0) || node.isComposite === true;
@@ -1029,39 +1242,15 @@ export const SceneVisuals = ({ model, data, mujoco, sceneGraph, selectedNodeId, 
     return list;
   }, [sceneGraph]);
 
-  if (!model || !data || !mujoco) return null;
-
-  const allPrimitiveGeoms = geoms.filter(g => g.type !== 'mesh');
-  // Static boxes not on the selected body render as one InstancedMesh.
-  const instancedBoxGeoms = paintMode
-    ? []
-    : allPrimitiveGeoms.filter(g => g.type === 'box' && g.staticBody && !g.customRender && g.nodeId !== selectedNodeId && !g.paint);
-  const instancedNames = new Set(instancedBoxGeoms.map(g => g.name));
-  const primitiveGeoms = allPrimitiveGeoms.filter(g => !instancedNames.has(g.name));
-  // The body under the sculpt tools is drawn by SculptSurface, which owns the
-  // live mesh mid-stroke; the ordinary renderer would draw the last committed
-  // stroke right through it.
-  const sculptGeom = sculptNodeId ? geoms.find(g => g.type === 'mesh' && g.nodeId === sculptNodeId) : undefined;
-  // Picking a different base replaces the mesh wholesale, so the sculpting
-  // surface has to be remounted rather than left holding the old one.
-  const sculptVersion = sculptNodeId ? (findSceneNode(sceneGraph?.nodes ?? [], sculptNodeId)?.sculptVersion ?? 1) : 1;
-  // The same arrangement for the lattice tools: they own the body they are on,
-  // and they draw the cage over it, which the ordinary renderer knows nothing
-  // about.
-  const latticeGeom = latticeNodeId ? geoms.find(g => g.type === 'mesh' && g.nodeId === latticeNodeId) : undefined;
-  const latticeNode = latticeNodeId ? findSceneNode(sceneGraph?.nodes ?? [], latticeNodeId) : undefined;
-  const staticMeshGeoms = geoms.filter(g => g.type === 'mesh' && !g.dynamic && g !== sculptGeom && g !== latticeGeom);
-  const dynamicMeshGeoms = geoms.filter(g => g.type === 'mesh' && g.dynamic && g !== sculptGeom && g !== latticeGeom);
-
   const implicitGeoms = useMemo(() => {
     if (!model || !mujoco || !model.geom_type) return [];
-    const list: any[] = [];
+    const list: ImplicitGeom[] = [];
     const ngeom = model.ngeom;
     for (let i = 0; i < ngeom; i++) {
       const name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM.value, i);
       if (name && !knownGeomNames.has(name) && name !== 'floor') {
         const typeId = model.geom_type[i];
-        let typeStr = 'sphere';
+        let typeStr: GeomType = 'sphere';
         if (typeId === 2) typeStr = 'sphere';
         else if (typeId === 3) typeStr = 'capsule';
         else if (typeId === 4) typeStr = 'ellipsoid';
@@ -1084,6 +1273,30 @@ export const SceneVisuals = ({ model, data, mujoco, sceneGraph, selectedNodeId, 
     }
     return list;
   }, [model, mujoco, knownGeomNames]);
+
+  if (!model || !data || !mujoco) return null;
+
+  const allPrimitiveGeoms = geoms.filter(g => g.type !== 'mesh');
+  // Static boxes not on the selected body render as one InstancedMesh.
+  const instancedBoxGeoms = paintMode
+    ? []
+    : allPrimitiveGeoms.filter(g => g.type === 'box' && g.staticBody && !g.customRender && g.nodeId !== selectedNodeId && !g.paint);
+  const instancedNames = new Set(instancedBoxGeoms.map(g => g.name));
+  const primitiveGeoms = allPrimitiveGeoms.filter(g => !instancedNames.has(g.name));
+  // The body under the sculpt tools is drawn by SculptSurface, which owns the
+  // live mesh mid-stroke; the ordinary renderer would draw the last committed
+  // stroke right through it.
+  const sculptGeom = sculptNodeId ? geoms.find(g => g.type === 'mesh' && g.nodeId === sculptNodeId) : undefined;
+  // Picking a different base replaces the mesh wholesale, so the sculpting
+  // surface has to be remounted rather than left holding the old one.
+  const sculptVersion = sculptNodeId ? (findSceneNode(sceneGraph?.nodes ?? [], sculptNodeId)?.sculptVersion ?? 1) : 1;
+  // The same arrangement for the lattice tools: they own the body they are on,
+  // and they draw the cage over it, which the ordinary renderer knows nothing
+  // about.
+  const latticeGeom = latticeNodeId ? geoms.find(g => g.type === 'mesh' && g.nodeId === latticeNodeId) : undefined;
+  const staticMeshGeoms = geoms.filter(g => g.type === 'mesh' && !g.dynamic && g !== sculptGeom && g !== latticeGeom);
+  const dynamicMeshGeoms = geoms.filter(g => g.type === 'mesh' && g.dynamic && g !== sculptGeom && g !== latticeGeom);
+
 
   return (
     <>
@@ -1150,20 +1363,9 @@ export const SceneVisuals = ({ model, data, mujoco, sceneGraph, selectedNodeId, 
             faces={sculptGeom.faces || []}
           />
         )}
-        {latticeGeom && latticeNode?.latticeCage && (
-          <LatticeSurface
-            key={`${latticeGeom.nodeId}:${latticeNode.latticeVersion ?? 1}`}
-            nodeId={latticeGeom.nodeId}
-            geomName={latticeGeom.name}
-            color={latticeGeom.rgba || [0.55, 0.68, 0.85, 1]}
-            mujoco={mujoco}
-            model={model}
-            data={data}
-            cage={latticeNode.latticeCage}
-            subdiv={latticeNode.latticeSubdiv ?? 0}
-            thickness={latticeNode.latticeThickness ?? 0}
-          />
-        )}
+        {/* The lattice editor is NOT here: see LatticeEditorLayer below. Its
+            geom is still kept out of the dynamic meshes above, so the shape is
+            not drawn twice while it is being edited. */}
         <PulleyRopesRenderer model={model} data={data} mujoco={mujoco} sceneGraph={sceneGraph} />
         <CsgNegativeGhosts model={model} data={data} mujoco={mujoco} sceneGraph={sceneGraph} selectedNodeId={selectedNodeId} />
         <MouseDragForceRenderer model={model} data={data} mujoco={mujoco} />

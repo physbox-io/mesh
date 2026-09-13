@@ -12,7 +12,7 @@ let store: Record<string, string> = {};
 
 beforeEach(() => {
   store = {};
-  (globalThis as any).localStorage = {
+  (globalThis as unknown as { localStorage: unknown }).localStorage = {
     getItem: (k: string) => (k in store ? store[k] : null),
     setItem: (k: string, v: string) => { store[k] = v; },
   };
@@ -72,7 +72,7 @@ describe('readMaxTokens', () => {
   });
 
   it('survives a localStorage that throws', () => {
-    (globalThis as any).localStorage = {
+    (globalThis as unknown as { localStorage: unknown }).localStorage = {
       getItem: () => { throw new Error('denied'); },
       setItem: () => { throw new Error('denied'); },
     };

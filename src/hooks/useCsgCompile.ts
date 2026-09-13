@@ -43,7 +43,7 @@ const failedScad = new Set<string>();
 export function needsScadBuild(node: SceneNode): boolean {
   const scad = node.scad;
   if (scad === undefined || scad.trim() === '') return false;
-  const mesh = (node.geoms || []).find((g: any) => g.type === 'mesh');
+  const mesh = (node.geoms || []).find((g) => g.type === 'mesh');
   return !mesh || !mesh.faces || mesh.faces.length === 0;
 }
 

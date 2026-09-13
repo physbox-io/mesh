@@ -6,14 +6,29 @@
  * from the positions of the bodies it constrains.
  */
 import { useRef, useMemo, useEffect, useCallback } from 'react';
-import { useFrame } from '@react-three/fiber';
+import { useFrame, type ThreeEvent } from '@react-three/fiber';
 import * as THREE from 'three';
 import { useStore } from '../../store/useStore';
 import { useOrbitEnable } from './useOrbitEnable';
+import type { SceneGraph, SceneNode } from '../../types/scene';
+import type { DataMirror, FrameFlagWindow, ModelMirror, MujocoShim } from '../../types/sceneLayer';
+
+interface PulleyRopesRendererProps {
+  model: ModelMirror | null;
+  data: DataMirror | null;
+  mujoco: MujocoShim | null;
+  sceneGraph: SceneGraph;
+}
+
+interface PulleyRopeMarkersProps {
+  sceneGraph: SceneGraph;
+  selectedNodeId: string | null;
+  setSelectedNodeId: (id: string | null) => void;
+}
 
 // Dynamic glowing pulley cable/rope renderer
-export const PulleyRopesRenderer = ({ model, data, mujoco, sceneGraph }: any) => {
-  const lineRefs = useRef<{ [ropeId: string]: any }>({});
+export const PulleyRopesRenderer = ({ model, data, mujoco, sceneGraph }: PulleyRopesRendererProps) => {
+  const lineRefs = useRef<{ [ropeId: string]: THREE.Line | null }>({});
   const bodyIdCache = useRef<Record<string, number>>({});
   useEffect(() => {
     if (!model || !mujoco) return;
@@ -27,8 +42,8 @@ export const PulleyRopesRenderer = ({ model, data, mujoco, sceneGraph }: any) =>
   
   // Find all pulley rope nodes in the scene
   const pulleyRopes = useMemo(() => {
-    const ropes: any[] = [];
-    const traverse = (nodes: any[]) => {
+    const ropes: SceneNode[] = [];
+    const traverse = (nodes: SceneNode[]) => {
       if (!nodes) return;
       for (const n of nodes) {
         if (n.isPulleyRope && n.leftTargetId && n.rightTargetId) {
@@ -43,7 +58,7 @@ export const PulleyRopesRenderer = ({ model, data, mujoco, sceneGraph }: any) =>
 
   // Helper to find wheel node radius reactively
   const findWheelNode = useCallback((wheelId: string) => {
-    const traverse = (nodes: any[]): any => {
+    const traverse = (nodes: SceneNode[]): SceneNode | null => {
       if (!nodes) return null;
       for (const n of nodes) {
         if (n.id === wheelId) return n;
@@ -59,7 +74,7 @@ export const PulleyRopesRenderer = ({ model, data, mujoco, sceneGraph }: any) =>
     const activeModel = useStore.getState().model;
     const activeData = useStore.getState().data;
     if (model !== activeModel || data !== activeData) return;
-    if ((window as any).DISABLE_USEFRAME) return;
+    if ((window as FrameFlagWindow).DISABLE_USEFRAME) return;
     if (!model || !data || !mujoco) return;
 
     for (const rope of pulleyRopes) {
@@ -123,7 +138,7 @@ export const PulleyRopesRenderer = ({ model, data, mujoco, sceneGraph }: any) =>
         if (line) {
           line.geometry.setFromPoints(points);
         }
-      } catch (e) {
+      } catch {
         // Safe check
       }
     }
@@ -144,13 +159,13 @@ export const PulleyRopesRenderer = ({ model, data, mujoco, sceneGraph }: any) =>
 };
 
 // Rope node placeholder marker – renders a glowing ring for each pulley_rope scene node
-export const PulleyRopeMarkers = ({ sceneGraph, selectedNodeId, setSelectedNodeId }: any) => {
+export const PulleyRopeMarkers = ({ sceneGraph, selectedNodeId, setSelectedNodeId }: PulleyRopeMarkersProps) => {
   const isPlaying = useStore(state => state.isPlaying);
   const setOrbitEnabled = useOrbitEnable();
 
   // The wheel a rope runs over, so the handle can be sized relative to it.
-  const findWheelNode = useCallback((wheelId: string): any => {
-    const search = (nodes: any[]): any => {
+  const findWheelNode = useCallback((wheelId: string): SceneNode | null => {
+    const search = (nodes: SceneNode[]): SceneNode | null => {
       for (const n of nodes || []) {
         if (n.id === wheelId) return n;
         const c = search(n.children);
@@ -162,8 +177,8 @@ export const PulleyRopeMarkers = ({ sceneGraph, selectedNodeId, setSelectedNodeI
   }, [sceneGraph]);
 
   const ropeNodes = useMemo(() => {
-    const ropes: any[] = [];
-    const traverse = (nodes: any[]) => {
+    const ropes: SceneNode[] = [];
+    const traverse = (nodes: SceneNode[]) => {
       if (!nodes) return;
       for (const n of nodes) {
         if (n.isPulleyRope) ropes.push(n);
@@ -201,8 +216,8 @@ export const PulleyRopeMarkers = ({ sceneGraph, selectedNodeId, setSelectedNodeI
             {/* Outer glowing torus ring */}
             <mesh
               rotation={[Math.PI / 2, 0, 0]}
-              onClick={(e: any) => { e.stopPropagation(); setSelectedNodeId(rope.id); }}
-              onPointerDown={(e: any) => {
+              onClick={(e: ThreeEvent<MouseEvent>) => { e.stopPropagation(); setSelectedNodeId(rope.id); }}
+              onPointerDown={(e: ThreeEvent<PointerEvent>) => {
                 if (isPlaying) {
                   e.stopPropagation();
                   // Same reason as the body drag handlers: the orbit gesture
@@ -216,7 +231,7 @@ export const PulleyRopeMarkers = ({ sceneGraph, selectedNodeId, setSelectedNodeI
                   useStore.getState().setDragTarget({ x: pt.x, y: -pt.z, z: pt.y });
                 }
               }}
-              onPointerUp={(e: any) => {
+              onPointerUp={(e: ThreeEvent<PointerEvent>) => {
                 if (useStore.getState().draggedNodeId === rope.id) {
                   e.stopPropagation();
                   useStore.getState().setDraggedNodeId(null);

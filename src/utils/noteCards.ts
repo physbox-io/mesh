@@ -2,10 +2,220 @@
 // handler) so both paths produce the same note card for a given built-in preset
 // instead of App.tsx's copy silently diverging from — or simply not being reachable
 // from — the MCP bridge.
+export interface NoteCard { id: string; markdown: string; minimized: boolean; x: number; y: number }
+
+/** The geom fields the bounding-box estimate reads; any SceneGeom qualifies. */
+export interface BoundsGeom {
+  type?: string;
+  size?: number[];
+  pos?: number[];
+  fromto?: number[];
+  vertices?: number[];
+  renderVertices?: number[];
+}
+
+/** The node fields the note-card helpers read; any SceneNode qualifies. */
+export interface BoundsNode {
+  id?: string;
+  name?: string;
+  width?: number;
+  depth?: number;
+  height?: number;
+  radius?: number;
+  majorRadius?: number;
+  tubeRadius?: number;
+  geoms?: BoundsGeom[];
+}
+
+/** The accessors App.tsx hangs on `window` for the MCP bridge and the copilot. */
+interface PhysicsGlobals {
+  _physics_getNoteCards?: () => NoteCard[];
+  _physics_setNoteCards?: (cards: NoteCard[]) => void;
+  _physics_store?: { getState: () => { sceneGraph?: { nodes?: BoundsNode[] } } };
+}
+
 export const PRESET_NOTE_CARDS: Record<string, string> = {
+
+  cut_tutorial: `# Making an Exact Part
+
+An empty scene. You build everything below in ten short steps, about twenty
+minutes. Every size here is a number you type.
+
+---
+
+## 1. Say the size, don't drag it
+
+Click **Lattice** in the left sidebar: a 40 mm cube, with the modelling tools open.
+
+- Press **2** (Select), drag a box around the whole cube to catch all eight corners.
+- In **Dimensions**, type \`60\` into the X **Size** box, Enter.
+
+It stretches to 60 mm about its own middle. **At** moves the selection instead of
+resizing it. Works on a face, an edge, a loop or a handful of corners.
+
+*The grid is 0.1 mm, so a typed number lands on it: ask for 6.35 and the box
+reads back 6.4.*
+
+---
+
+## 2. Cut a hole where you point
+
+- Press **2** and click the **top face**.
+- **Cut → Hole**, then type \`6\` into **Ø mm**.
+- Press **Done** to leave the tools and see it.
+
+A 6 mm bore, straight through. The hole goes where you clicked, square to that
+surface.
+
+---
+
+## 3. Depth means depth
+
+Select the part; the same **Cut** controls are in **Boolean Modifiers** on the right.
+
+- Press **Thru** to turn the through-hole off.
+- Type \`10\` into **Deep mm**.
+
+10 mm into the material, measured from the surface under the hole.
+
+---
+
+## 4. Now check it
+
+Cut a second hole 30 mm from the first, then measure the pair.
+
+- Press **D**. The mode chip at the bottom-left says *Measure · Distance*.
+- Click near the middle of one hole, then near the middle of the other.
+
+It snaps to the nearest feature rather than the click itself: corners, edge
+midpoints, the axis of a cylinder, and the centre of any circle the surrounding
+surface lies on. Two rough clicks give you centre-to-centre, and the label shows
+the diameter it found on the way. This works on boolean results and imported
+meshes, where the hole is only a rim of triangles.
+
+- **A** measures an angle instead: one arm, the corner, the other arm.
+- Click off the part, or press **Esc**, to clear the reading. **Esc** again puts
+  the tape away.
+
+*The viewport still orbits on the right mouse button the whole time, so left-click
+is free for picking.*
+
+---
+
+## 5. Any surface, any angle
+
+- **Edit Lattice** again. Press **3** (Extrude) and drag the **+X side face** out ~40 mm.
+- Extrude the **top of that new arm** up ~40 mm. You have an L.
+- Press **2**, click the **top of the tall arm**, press **S**, move inward, click.
+
+The four walls under it are now slanted.
+
+- Click one slanted wall → **Cut → Hole**.
+
+Square to that wall. Try the same on the **low arm's top**: a 10 mm hole there
+is 10 mm into *that* arm, not measured from the tall one.
+
+---
+
+## 6. Round things are polygons, and that is fine
+
+A circle here is a polygon rounded onto the 0.1 mm grid, within 0.05 mm of the
+true arc.
+
+- Press **4** (Circle). Click a point on the top face for the centre, move out,
+  and watch the chip count the diameter. Click again to keep it.
+- Press **3** and drag that round face up. A cylinder.
+
+The **Corners** box decides how many sides. Leave it on **auto** and it works the
+count out from the radius, so a 2 mm hole stays light and a 60 mm disc is smooth.
+Set it to **6** for a hex boss, **4** for a square post.
+
+What you placed is an ordinary face. Extrude it, select it and type its diameter
+into **Dimensions**, mirror it. It behaves like any other face.
+
+---
+
+## 7. Put it on the lathe
+
+Extrude makes prisms. **Revolve** makes turned shapes (a boss, a spigot, a knob,
+the bell of a funnel) by taking a profile round an axis.
+
+- Press **1** (Place) and draw an open run of points that is the *side view* of
+  the thing you want: start on the axis, come out, curve back in. Press **Esc**
+  rather than closing it into a face.
+- Press **2** and click along that run, **Shift-clicking** to add each edge.
+- In **Revolve**, choose the axis, leave 360, press **Turn**.
+
+Each point's distance from the axis is its radius, so move the profile to set
+it. A point sitting *on* the axis becomes the pole: a cone is a two-point
+profile. Less than 360° leaves an arc, capped at both ends.
+
+---
+
+## 8. Break the edges
+
+Select an edge and give it a radius.
+
+- Press **2**, click an edge, press **L** to grow it to its whole loop.
+- Put \`2\` in **Edge radius**.
+- **Chamfer** for a flat, **Fillet** for a round, or press **B** or **R**.
+
+A chamfer stays flat under smoothing. A fillet is rounded by smoothing, so set
+**Smoothing 1×** to see the radius you asked for. At Smoothing 0 a fillet looks
+the same as a chamfer.
+
+Now go back to step 4 and measure the chamfer.
+
+---
+
+## 9. Booleans in general
+
+A body is a list of shapes, and **Cut** is how you add one that subtracts.
+
+- Drag a **Cube** into the scene, click a face, then **Cut → Dish**.
+
+That is a sphere subtracted from a cube. Both shapes now live on **one body**,
+which is what a boolean needs.
+
+In **Boolean Modifiers**, the list shows every shape the body is made of. Switch
+one to **subtract** and it becomes a hole; **intersect** keeps only the overlap.
+A body must keep at least one adding shape, or there would be nothing left.
+
+**Collision** decides how the result is felt: *Convex sectors* makes a hole real
+enough for a peg to pass through; *Source primitives* is exact contact with the
+holes filled in; *Convex hull* wraps the whole thing.
+
+---
+
+## 10. Two bodies you already built
+
+- Drag in a **Cube** and a **Sphere**. Move one so they overlap: drag it while
+  the simulation runs, or type a position in the panel.
+- Click the cube, then **Shift-click** the sphere. Both light up.
+- **Combine → － Subtract**.
+
+The sphere turns into a red outline, a hole in the cube where it was sitting,
+and one body is left. **Add** keeps both shapes as one body;
+**Intersect** keeps only the overlap.
+
+Anything can come in this way: a lattice part, a sculpt, an imported STL. Build
+the shape you want to remove, put it where you want it, and subtract it.
+
+---
+
+## Worth a poke
+
+- **Smoothing** 1× or 2× on a lattice with a hole already in it.
+- A circle, extruded, then filleted round the top rim.
+- **Slot** and **Dish** as well as Hole.
+- Move a face the hole sits in. The hole travels with the material.
+- Measure between two *corners* rather than two holes, and watch it snap to the
+  corner rather than to the face you were nearer.
+`,
+
   empty: `# Blank Scene\n\nAn empty world with just the ground plane.\n\n## Getting started\n- Drag components from the left sidebar into the scene\n- Select a body to edit its mass, size, and material\n- Press **Play** to start the simulation`,
 
-  pendulum: `# Double Pendulum\n\nTwo rigid rods connected by **hinge joints**, exhibiting chaotic motion.\n\n## Physics\n- **Hinge joints** constrain each rod to 1-DOF rotation\n- Small changes in initial angle lead to wildly different trajectories — a hallmark of **deterministic chaos**\n- Energy is conserved (no damping by default)\n\n## Try it\n- Change the initial angle of either bob to see chaos emerge\n- Add joint damping to watch energy decay`,
+  pendulum: `# Double Pendulum\n\nTwo rigid rods connected by **hinge joints**, exhibiting chaotic motion.\n\n## Physics\n- **Hinge joints** constrain each rod to 1-DOF rotation\n- Small changes in initial angle lead to wildly different trajectories (**deterministic chaos**)\n- Energy is conserved (no damping by default)\n\n## Try it\n- Change the initial angle of either bob to see chaos emerge\n- Add joint damping to watch energy decay`,
 
   cubes: `# Stacked Cubes\n\nRigid-body stacking with contact forces and friction.\n\n## Physics\n- **Free joints** give each cube 6 degrees of freedom\n- Resting contact is resolved by the **constraint solver** (PGS)\n- Stack height is limited by friction and the solver's penetration tolerance\n\n## Try it\n- Reduce floor friction to watch the stack slide\n- Change cube masses to shift the centre of mass`,
 
@@ -16,11 +226,11 @@ export const PRESET_NOTE_CARDS: Record<string, string> = {
   rack_pinion: `# Rack and Pinion\n\nConverts **rotary motion** (pinion gear) to **linear motion** (rack).\n\n## Physics\n- Pinion hinge rotation is coupled to rack slide translation via a **joint equality constraint** when the bodies are within 0.5 m\n- Linear displacement = pinion angle × pinion pitch radius\n\n## Try it\n- Drive the pinion with a script: \`api.applyJointForce('pinion_hinge', 5)\`\n- Add a load mass to the rack to see force requirements increase`,
 
   inclined_plane: `# Inclined Plane\n\nClassic mechanics: a block sliding down a ramp under gravity.\n\n## Physics\n- Net force along the plane: *F = mg sin θ − μmg cos θ*\n- **Static friction** prevents motion when *tan θ < μ*\n- Once sliding, **kinetic friction** is lower than static\n\n## Try it\n- Adjust the wedge angle to find the critical slip angle\n- Change the block's friction coefficient in the properties panel`,
-  oval_track: `# Oval Curve Track\n\nA marble circulating on a **banked oval** built from the Curve component — a closed Catmull-Rom spline decomposed into convex box segments.\n\n## Physics\n- **Banked turns**: the −18° bank tilts the contact normal inward, supplying centripetal force\n- Equilibrium speed: *v² = g·r·tan θ* — the marble is launched near this speed\n- Too fast → drifts up the bank; too slow → slides down it (self-correcting within the track width)\n\n## Try it\n- Select the track and **drag the blue control-point handles** to reshape the oval live\n- Adjust Bank Angle in the properties panel and watch the marble's line change\n- Increase the marble's **Launch Velocity** (joint panel) to see it climb the bank`,
+  oval_track: `# Oval Curve Track\n\nA marble circulating on a **banked oval** built from the Curve component, a closed Catmull-Rom spline decomposed into convex box segments.\n\n## Physics\n- **Banked turns**: the −18° bank tilts the contact normal inward, supplying centripetal force\n- Equilibrium speed: *v² = g·r·tan θ*. The marble is launched near this speed\n- Too fast → drifts up the bank; too slow → slides down it (self-correcting within the track width)\n\n## Try it\n- Select the track and **drag the blue control-point handles** to reshape the oval live\n- Adjust Bank Angle in the properties panel and watch the marble's line change\n- Increase the marble's **Launch Velocity** (joint panel) to see it climb the bank`,
 
   pulley_system: `# Atwood Machine
 
-Two unequal weights on a rope over a single wheel — the classic demonstration that acceleration depends on the mass *difference* but inertia depends on the mass *sum*.
+Two unequal weights on a rope over a single wheel. Acceleration depends on the mass *difference* but inertia depends on the mass *sum*.
 
 ## Physics
 - Left weight **2 kg**, right weight **1 kg**, joined by an inextensible rope
@@ -30,7 +240,7 @@ Two unequal weights on a rope over a single wheel — the classic demonstration 
 
 ## Key concepts
 - Adding equal mass to *both* sides slows it down without changing the net force
-- The wheel's own inertia *I/r²* adds to the system mass — a heavy pulley matters
+- The wheel's own inertia *I/r²* adds to the system mass, so a heavy pulley matters
 - This is a single fixed wheel, so there is **no mechanical advantage** (MA = 1); lifting the load still takes its full weight
 
 ## Try it
@@ -38,17 +248,17 @@ Two unequal weights on a rope over a single wheel — the classic demonstration 
 - Make the difference tiny (2.0 vs 1.9 kg) to slow the acceleration right down
 - Increase the wheel's mass to see *I/r²* drag the acceleration below the ideal`,
 
-  cartpole: `# Cartpole\n\nA cart-pole balancing system controlled by an **LQR controller**.\n\n## Physics\n- The cart slides on a frictionless track (slide joint)\n- The pole pivots on a hinge — an **inverted pendulum**, inherently unstable\n- A **Linear Quadratic Regulator (LQR)** applies horizontal force to keep the pole upright\n\n## Control law\n*F = −(k_x·x + k_v·ẋ + k_θ·θ + k_ω·θ̇)*\n\n| Gain | Value | Role |\n|------|-------|------|\n| k_x | 8.0 | Commanded lean from cart position |\n| k_θ | 40.0 | Vertical catch |\n\n## Try it\n- Increase the pole's mass to stress-test the controller\n- Modify gains in the control script`,
+  cartpole: `# Cartpole\n\nA cart-pole balancing system controlled by an **LQR controller**.\n\n## Physics\n- The cart slides on a frictionless track (slide joint)\n- The pole pivots on a hinge: an **inverted pendulum**, inherently unstable\n- A **Linear Quadratic Regulator (LQR)** applies horizontal force to keep the pole upright\n\n## Control law\n*F = −(k_x·x + k_v·ẋ + k_θ·θ + k_ω·θ̇)*\n\n| Gain | Value | Role |\n|------|-------|------|\n| k_x | 8.0 | Commanded lean from cart position |\n| k_θ | 40.0 | Vertical catch |\n\n## Try it\n- Increase the pole's mass to stress-test the controller\n- Modify gains in the control script`,
 
-  newtons_cradle: `# Newton's Cradle\n\nConservation of **momentum and energy** in elastic collisions.\n\n## Physics\n- Each ball is a pendulum on a hinge joint\n- Collisions are nearly elastic (high restitution)\n- Momentum is transferred through the stationary balls — only the end ball swings out\n- *n* balls swung in → *n* balls swing out (momentum + energy conservation)\n\n## Try it\n- Pull back 2 balls instead of 1 and observe the output`,
+  newtons_cradle: `# Newton's Cradle\n\nConservation of **momentum and energy** in elastic collisions.\n\n## Physics\n- Each ball is a pendulum on a hinge joint\n- Collisions are nearly elastic (high restitution)\n- Momentum is transferred through the stationary balls, so only the end ball swings out\n- *n* balls swung in → *n* balls swing out (momentum + energy conservation)\n\n## Try it\n- Pull back 2 balls instead of 1 and observe the output`,
 
   suspension_bridge: `# Suspension Bridge\n\nA cable-stayed bridge demonstrating **static equilibrium** and structural load paths.\n\n## Physics\n- The deck is supported by angled cables under tension\n- Load is transferred: deck → cables → towers → ground\n- Cables can only pull, not push (tension-only members)\n\n## Try it\n- Drop a heavy object onto the deck\n- Remove a cable to see redistribution of load`,
 
   paper_plane: `# Paper Plane\n\nAerodynamic flight with **lift, drag, and pitch stability**.\n\n## Physics\n- The plane is an **aerodynamic body** (isAerodynamic = true)\n- Lift: *L = ½ ρ v² C_L A sin(α)* where α is angle of attack\n- Drag: *D = ½ ρ v² C_D A*\n- Forces are applied each timestep via the control script\n\n## Key concepts\n- Too steep an angle of attack → stall (lift collapses)\n- Trim angle sets the glide ratio\n\n## Try it\n- Adjust launch velocity and angle in the joint initial velocity\n- Change wind speed in Environment settings`,
 
-  monkey_head: `# Monkey Head\n\nA physics-active body built from **compound primitive geoms** — no mesh required.\n\n## Physics\n- A **free joint** gives the head full 6-DOF motion — it falls, bounces, and rolls\n- The shape is approximated by ~15 ellipsoids, spheres, and boxes (skull, snout, cheeks, eyes, ears…)\n- MuJoCo computes the **composite inertia tensor** automatically from all geoms\n- Collision is handled per-geom — each primitive has its own contact normal\n\n## Key concepts\n- Complex shapes are best approximated by multiple primitives, not a single mesh\n- Compound bodies share one free joint on the root geom\n\n## Try it\n- Increase restitution (bounciness) in the geom friction settings\n- Drop it from different heights via Launch Velocity`,
+  monkey_head: `# Monkey Head\n\nA physics-active body built from **compound primitive geoms**, no mesh required.\n\n## Physics\n- A **free joint** gives the head full 6-DOF motion: it falls, bounces, and rolls\n- The shape is approximated by ~15 ellipsoids, spheres, and boxes (skull, snout, cheeks, eyes, ears…)\n- MuJoCo computes the **composite inertia tensor** automatically from all geoms\n- Collision is handled per geom, so each primitive has its own contact normal\n\n## Key concepts\n- Complex shapes are best approximated by multiple primitives, not a single mesh\n- Compound bodies share one free joint on the root geom\n\n## Try it\n- Increase restitution (bounciness) in the geom friction settings\n- Drop it from different heights via Launch Velocity`,
 
-  golden_gate: `# Golden Gate Bridge (Primitive)\n\nA suspension bridge built from **primitive geoms** (boxes and capsules).\n\n## Physics\n- All structural members are static bodies (no joints = welded to world)\n- The bridge is a rigid visual reference — drop objects onto it!\n- Primitive collision hulls are exact for simple shapes\n\n## Try it\n- Add a free sphere above the deck and watch it roll off\n- Toggle solid/ephemeral collision on bridge members`,
+  golden_gate: `# Golden Gate Bridge (Primitive)\n\nA suspension bridge built from **primitive geoms** (boxes and capsules).\n\n## Physics\n- All structural members are static bodies (no joints = welded to world)\n- The bridge is a rigid visual reference. Drop objects onto it\n- Primitive collision hulls are exact for simple shapes\n\n## Try it\n- Add a free sphere above the deck and watch it roll off\n- Toggle solid/ephemeral collision on bridge members`,
 
   golden_gate_mesh: `# Golden Gate Bridge (Mesh)\n\nThe same bridge reconstructed with **custom mesh geoms**.\n\n## Physics\n- Deck, towers, and cables are static mesh bodies\n- Mesh collision uses MuJoCo's **convex hull** approximation\n- Concave shapes require decomposition into multiple convex pieces\n\n## Key concepts\n- Mesh vertices authored in Three.js Y-up; Y↔Z swap is automatic\n- Face winding must be outward-facing (CCW viewed from outside)`,
 
@@ -69,7 +279,7 @@ Two unequal weights on a rope over a single wheel — the classic demonstration 
 Four bodies whose shape comes from **subtracting** one primitive from another, dropped onto the floor.
 
 ## How they're built
-None of these is a special shape type. Each body is just two or three ordinary geoms with one marked \`csg: 'difference'\`, compiled into a mesh by OpenSCAD. The **primitives stay the source of truth** — select a body and every size slider still reshapes it, then the mesh is regenerated.
+None of these is a special shape type. Each body is just two or three ordinary geoms with one marked \`csg: 'difference'\`, compiled into a mesh by OpenSCAD. The **primitives stay the source of truth**: select a body and every size slider still reshapes it, then the mesh is regenerated.
 
 | Body | Recipe |
 |------|--------|
@@ -79,27 +289,46 @@ None of these is a special shape type. Each body is just two or three ordinary g
 | Chopped cone | cone − box above the cut |
 
 ## The physics catch
-MuJoCo takes the **convex hull** of every mesh geom, so a hole would not exist for contact — a ring would collide as a solid disc. Each body picks a strategy:
+MuJoCo takes the **convex hull** of every mesh geom, so a hole would not exist for contact and a ring would collide as a solid disc. Each body picks a strategy:
 
-- **Ring, crescent, hollow cube** — \`auto\`: the result is sliced into convex sectors around the hole axis, so the hole is *real*. At 20 sectors the colliders intrude only ~1.2% of the hole radius.
-- **Chopped cone** — \`hull\`: not an approximation at all, because a frustum is *already convex*.
+- **Ring, crescent, hollow cube**, \`auto\`: the result is sliced into convex sectors around the hole axis, so the hole is *real*. At 20 sectors the colliders intrude only ~1.2% of the hole radius.
+- **Chopped cone**, \`hull\`: exact, because a frustum is already convex.
 
-Only **one** of the hollow cube's three shafts collides (the Z one) — decomposition works about a single axis, so the other two are visual.
+Only **one** of the hollow cube's three shafts collides (the Z one). Decomposition works about a single axis, so the other two are visual.
 
 ## Try it
-- Select a body and drag the **negative shape** around — it's drawn as a red outline
+- Select a body and drag the **negative shape** around (drawn as a red outline)
 - Switch a body's **Collision** mode to \`Convex hull\` and watch the hole stop working
 - Drop a small sphere through the ring's hole while it lies flat`,
 
   bouncy_balls: `# Bouncy Balls\n\n20 multicolored spheres with **high restitution** colliding under gravity.\n\n## Physics\n- Each ball has a **free joint** (6-DOF) and a unique radius (0.18–0.27 m)\n- Uses MuJoCo's **spring-damper contact model**: \`solref=[timeconst, dampingRatio]\`\n- \`solref=[0.04, 0.2]\` = 40 ms contact spring, 20% damping → lively bounce\n- \`dampingRatio < 1\` = underdamped = bouncy; \`= 1\` = critically damped = no bounce\n\n## Try it\n- Use the **Bounciness slider** in the properties panel to tune each ball\n- Change gravity in Environment settings to see low-gravity chaos`,
 
-  openscad_demo: `# OpenSCAD Showcase\n\nA tray whose shape is written as **code**, not dragged out of a palette.\n\n## How it works\n- The body's \`scad\` source is compiled by **openscad-wasm** into a triangle mesh\n- The mesh is drawn as-is, but MuJoCo collides any mesh as its **convex hull** — so the tray's walls are backed by five plain boxes that do the actual containing\n- Edit the source and it recompiles; the boxes stay where they are\n\n## Try it\n- Open the **SCAD editor** on the container and change a dimension\n- Drop a component in and watch it stay inside the walls, not the hull`,
+  openscad_demo: `# OpenSCAD Showcase\n\nA tray whose shape is written as **code**, not dragged out of a palette.\n\n## How it works\n- The body's \`scad\` source is compiled by **openscad-wasm** into a triangle mesh\n- The mesh is drawn as-is, but MuJoCo collides any mesh as its **convex hull**, so the tray's walls are backed by five plain boxes that do the actual containing\n- Edit the source and it recompiles; the boxes stay where they are\n\n## Try it\n- Open the **SCAD editor** on the container and change a dimension\n- Drop a component in and watch it stay inside the walls, not the hull`,
 
-  rope_bridge: `# Rope Bridge\n\nA **cable composite** — 25 linked capsules with a heavy ball dropped onto it.\n\n## Physics\n- MuJoCo expands the composite into a chain of bodies joined by ball joints, welded to the anchor at each end\n- The chain has no bending stiffness, so it hangs in a **catenary** and carries load purely in tension\n- The ball's weight is shared along the span; the shallower the sag, the higher the tension\n\n## Try it\n- Increase the ball's mass and watch the sag deepen\n- Move an anchor apart to pull the rope taut — tension climbs steeply as it straightens`,
+  rope_bridge: `# Rope Bridge\n\nA **cable composite**: 25 linked capsules with a heavy ball dropped onto it.\n\n## Physics\n- MuJoCo expands the composite into a chain of bodies joined by ball joints, welded to the anchor at each end\n- The chain has no bending stiffness, so it hangs in a **catenary** and carries load purely in tension\n- The ball's weight is shared along the span; the shallower the sag, the higher the tension\n\n## Try it\n- Increase the ball's mass and watch the sag deepen\n- Move an anchor apart to pull the rope taut. Tension climbs steeply as it straightens`,
 
   birdhouse: `# Birdhouse (Primitives)\n\nA 6-panel wooden birdhouse constructed out of primitive boxes and a CSG entrance cutout.\n\n## Laser Cutting\n- Designed for **laser cut face unwrapping**\n- Features interlocking **finger joints** or **glue edge** profiles\n- Front panel has a circular entrance hole cut via CSG boolean difference\n\n## Try it\n- Click **Export Laser Cut (SVG)** in the top toolbar to generate laser vector cut paths`,
 
   birdhouse_scad: `# Birdhouse (OpenSCAD)\n\nA 3D birdhouse model generated from OpenSCAD code.\n\n## Laser Cutting\n- Evaluates OpenSCAD polyhedral mesh into 2D coplanar panel clusters\n- Extracts boundary cutouts and finger joint edges\n\n## Try it\n- Click **Export Laser Cut (SVG)** in the top toolbar to view unwrapped 2D sheet layout`,
+
+  lattice_bracket: `# Wall Bracket (Lattice Modelling)
+
+A shelf bracket drawn on a grid: a **50 mm** arm off a **60 mm** wall plate, both **5 mm** thick, stiffened by a **4 mm** gusset. Every dimension is a whole millimetre: a lattice vertex is a triple of integers on the grid.
+
+## What it is made of
+- One **cage**: six quads pushed out from a side-view outline, plus the gusset's three.
+- The mesh you see is *derived* from that cage. Select the body and press **Edit Lattice** to get the cage back.
+- Edges around the outline are marked **sharp**, so turning smoothing on rounds the corners and leaves the mounting faces flat.
+
+## Try it
+- **Edit Lattice**, pick the *Select* tool (2), click the end face of the arm, then **E**-drag or the *Extrude* tool to make the shelf longer. It moves in whole grid steps.
+- Select the top face of the wall plate and press **I**, then move the pointer to size the inset and click to keep it. Then extrude the inner face downward for a recess.
+- Select a face and press **S**, then **X**, **Y** or **Z**, to scale it along one axis alone. **G** (or **M**) moves it instead: a whole face, a loop, or a boxful of corners.
+- Set **Smoothing** to 1x. The corners round; the flats stay flat, because of the creases. Press **H** on an edge to hold another one sharp.
+- Set the grid to **1 mm** and the part is detailed in tenths of a millimetre without any of the coarse work moving.
+
+## Why a lattice and not a primitive
+Lattice modelling is for parts like this: exact coordinates and arbitrary topology.`,
 
   mega_bust_studio: `# Mega Bust & Stress Studio
 
@@ -108,36 +337,36 @@ A **solver stress test** dressed as a sculpture studio: one dense mesh standing 
 ## What is in the scene
 | Piece | Bodies | What it is for |
 |-------|--------|----------------|
-| Classical bust | 1, fixed | 120 x 80 procedural lathe — about **19,000 triangles** |
+| Classical bust | 1, fixed | 120 x 80 procedural lathe, about **19,000 triangles** |
 | Wrecking pendulum | 2 | Hinged arm with a 0.8 kg bob, the heaviest single impact here |
 | Collapse tower | 16 | 8 tiers of two blocks, each tier laid across the one below |
 | Domino arc | 16 | A 270 degree arc; domino #1 starts leaning 15 degrees |
 
 ## Physics
-- Every loose body carries a **free joint** (6-DOF), so this is roughly 34 free bodies and a hinge in one contact-rich scene — the interesting number is contacts per step, not bodies
+- Every loose body carries a **free joint** (6-DOF), so this is roughly 34 free bodies and a hinge in one contact-rich scene. The number that matters is contacts per step, not bodies
 - The bust has **no joint at all**: it is welded to the world and acts as the anvil everything else works against
-- Its mesh geom collides as its **convex hull** — the nose and the undercut of the neck are visual only, so a domino resting against the chin touches the hull, not the face
-- The pendulum stand is \`contype: 0, conaffinity: 0\` — it holds the arm up without ever taking part in a contact
+- Its mesh geom collides as its **convex hull**, so the nose and the undercut of the neck are visual only, so a domino resting against the chin touches the hull, not the face
+- The pendulum stand is \`contype: 0, conaffinity: 0\`, so it holds the arm up without ever taking part in a contact
 - The hinge is damped at **0.0005**, low enough that the bob keeps swinging back through the wreckage
 
 ## Try it
 - Press play and leave it: the leaning domino starts the cascade, which reaches the tower
-- Watch the **step time** climb as the tower comes down — peak contact count, not body count, is what costs
+- Watch the **step time** climb as the tower comes down. Peak contact count, not body count, is what costs
 - Raise the bob mass and drop it into the tower directly to skip the dominoes
 - Turn the friction on the dominoes down and watch the cascade slide out instead of toppling`,
 
-  california_relief: `# California Relief Map\n\nThe real state, at real proportions, built to be carved into a **150 mm square** block.\n\n## Geography\n- Projected in **EPSG:3310 "California Albers"** — the state's own official projection, so the outline is the shape California is actually drawn as, and equal area everywhere on the block\n- Terrain from open 1 km DEM tiles: **-82 m** at Badwater to **3,973 m** on the Sierra crest\n- Carves **104.0 × 120.0 mm** — 1 mm to about 8.8 km\n\n## Relief Carving\n- Height is exaggerated roughly **18×**; at true scale the Sierra would stand 0.5 mm proud and the board would read as flat\n- The lowest 15% of the depth is a plinth, so the coastline steps up from the background instead of fading into it\n- Set **Fit** to *manual, 100%* — fitting would rescale it to fill the stock and lose the 120 mm\n\n## Try it\n- Click **Export Relief Carve (G-code)**, rough with a 6.35 mm flat mill, finish with a 3.175 mm ball nose`,
+  california_relief: `# California Relief Map\n\nThe real state, at real proportions, built to be carved into a **150 mm square** block.\n\n## Geography\n- Projected in **EPSG:3310 "California Albers"**, the state's official projection, equal area everywhere on the block\n- Terrain from open 1 km DEM tiles: **-82 m** at Badwater to **3,973 m** on the Sierra crest\n- Carves **104.0 × 120.0 mm**, 1 mm to about 8.8 km\n\n## Relief Carving\n- Height is exaggerated roughly **18×**; at true scale the Sierra would stand 0.5 mm proud and the board would read as flat\n- The lowest 15% of the depth is a plinth, so the coastline steps up from the background instead of fading into it\n- Set **Fit** to *manual, 100%* to keep the 120 mm size\n\n## Try it\n- Click **Export Relief Carve (G-code)**, rough with a 6.35 mm flat mill, finish with a 3.175 mm ball nose`,
 };
 
 
 /** The note card shown when a built-in preset is loaded, or null if it has none. */
-export function makePresetNoteCard(presetKey: string): { id: string; markdown: string; minimized: boolean; x: number; y: number } | null {
+export function makePresetNoteCard(presetKey: string): NoteCard | null {
   const md = PRESET_NOTE_CARDS[presetKey];
   if (!md) return null;
   return { id: `preset_note_${presetKey}`, markdown: md, minimized: false, x: 16, y: 16 };
 }
 
-export function computeNodeBoundingBox(node: any): { x: number; y: number; z: number } {
+export function computeNodeBoundingBox(node: BoundsNode): { x: number; y: number; z: number } {
   let minX = Infinity, maxX = -Infinity;
   let minY = Infinity, maxY = -Infinity;
   let minZ = Infinity, maxZ = -Infinity;
@@ -193,7 +422,7 @@ export function computeNodeBoundingBox(node: any): { x: number; y: number; z: nu
           Math.min(z1, z2) - r + gz, Math.max(z1, z2) + r + gz
         );
       } else if (g.size && Array.isArray(g.size)) {
-        let sx = 0.05, sy = 0.05, sz = 0.05;
+        let sx: number, sy: number, sz: number;
         if (g.type === 'box') {
           sx = g.size[0] ?? 0.05;
           sy = g.size[1] ?? sx;
@@ -238,7 +467,7 @@ export function computeNodeBoundingBox(node: any): { x: number; y: number; z: nu
   return { x: dx, y: dy, z: dz };
 }
 
-export function formatComponentBoundingBoxes(nodes: any[]): string {
+export function formatComponentBoundingBoxes(nodes: BoundsNode[]): string {
   if (!Array.isArray(nodes) || nodes.length === 0) {
     return 'No major components in scene.';
   }
@@ -246,7 +475,7 @@ export function formatComponentBoundingBoxes(nodes: any[]): string {
   const majorNodes = nodes.filter(n => {
     const name = (n.name || n.id || '').toLowerCase();
     if (name === 'floor' || name === 'ground' || name === 'world') {
-      if (n.geoms && n.geoms.some((g: any) => g.type === 'plane')) return false;
+      if (n.geoms && n.geoms.some(g => g.type === 'plane')) return false;
     }
     return true;
   });
@@ -268,7 +497,7 @@ export function formatComponentBoundingBoxes(nodes: any[]): string {
   return lines.join('\n');
 }
 
-export function extractTitle(assistantMarkdown?: string, userPrompt?: string, nodes?: any[]): string {
+export function extractTitle(assistantMarkdown?: string, userPrompt?: string, nodes?: BoundsNode[]): string {
   // 1. Check primary node name from active scene nodes (excluding ground/floor/world)
   if (Array.isArray(nodes) && nodes.length > 0) {
     const primaryNode = nodes.find(n => {
@@ -314,7 +543,7 @@ export function extractTitle(assistantMarkdown?: string, userPrompt?: string, no
 
 export function extractConciseSummary(assistantMarkdown?: string, userPrompt?: string): string {
   if (assistantMarkdown) {
-    let cleanText = assistantMarkdown
+    const cleanText = assistantMarkdown
       .replace(/```[\s\S]*?```/g, '')
       .replace(/^\|[\s\S]*?\|$/gm, '')
       .replace(/\|.*\|/g, '')
@@ -383,17 +612,18 @@ export function updateOrCreateNotecard(options: {
   mode: 'generate' | 'explain' | 'mutate' | 'mcp';
   userPrompt?: string;
   assistantMarkdown?: string;
-  nodes?: any[];
+  nodes?: BoundsNode[];
 }) {
-  const getter = (window as any)._physics_getNoteCards;
-  const setter = (window as any)._physics_setNoteCards;
+  const globals = window as Window & PhysicsGlobals;
+  const getter = globals._physics_getNoteCards;
+  const setter = globals._physics_setNoteCards;
   if (!setter) return;
 
-  const currentCards: { id: string; markdown: string; minimized: boolean; x: number; y: number }[] = getter ? getter() : [];
+  const currentCards: NoteCard[] = getter ? getter() : [];
 
-  let nodeArray: any[] = (options.nodes && options.nodes.length > 0)
+  const nodeArray: BoundsNode[] = (options.nodes && options.nodes.length > 0)
     ? options.nodes
-    : ((window as any)._physics_store?.getState ? (window as any)._physics_store.getState().sceneGraph?.nodes || [] : []);
+    : (globals._physics_store?.getState ? globals._physics_store.getState().sceneGraph?.nodes || [] : []);
 
   const title = extractTitle(options.assistantMarkdown, options.userPrompt, nodeArray);
   // An 'mcp' call is a programmatic scene edit, not a conversation turn: its

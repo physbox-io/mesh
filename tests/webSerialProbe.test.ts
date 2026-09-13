@@ -97,29 +97,39 @@ describe('probeGrid against a live machine', () => {
     expect(fake.lastError()).toBeUndefined();
   });
 
-  it('actually probes at each point and retracts', async () => {
+  it('probes each point with relative Z moves only, never an absolute one', async () => {
     fake = attachFakeGrbl(() => -5);
     await webSerialManager.probeGrid(bounds, 3, 3);
 
     expect(fake.sent.filter(l => l.includes('G38.2'))).toHaveLength(9);
-    // Every probe is bracketed by a positioning move and a retract. The lift
-    // and the traverse are now two separate moves rather than one combined
-    // G0 X Y Z: starting below clearance height, a coordinated move cuts the
-    // corner and drags the tool diagonally across the work.
+
+    // The safety property: not one absolute Z move in the whole run. An
+    // absolute `G0 Z<n>` trusts the work datum, and a wrong datum turns it into
+    // a plunge through the work. Every Z move here is relative (G91).
+    const absoluteZ = fake.sent.filter(l => /^G0\s+Z/.test(l));
+    expect(absoluteZ).toEqual([]);
+
+    // Each point is an XY-only traverse at the current height, a relative
+    // plunge, G90 to restore absolute, then a relative lift clear.
     const probeIdx = fake.sent.findIndex(l => l.includes('G38.2'));
-    expect(fake.sent[probeIdx - 2]).toMatch(/^G0 Z5\.000/);
     expect(fake.sent[probeIdx - 1]).toMatch(/^G0 X0\.000 Y0\.000 F3000/);
-    // G90 restores absolute mode after the relative probe, then we retract.
+    expect(fake.sent[probeIdx]).toMatch(/^G91 G38\.2 Z-10\.000 F50/);
     expect(fake.sent[probeIdx + 1]).toBe('G90');
-    expect(fake.sent[probeIdx + 2]).toMatch(/^G0 Z5\.000/);
+    expect(fake.sent[probeIdx + 2]).toMatch(/^G91 G0 Z5\.000/);
   });
 
-  it('reports points that never made contact instead of recording them as level', async () => {
-    fake = attachFakeGrbl((x, y) => (x === 100 && y === 100 ? null : -8));
-    const grid = await webSerialManager.probeGrid(bounds, 3, 3);
+  it('stops on the first missed contact instead of driving down at every point', async () => {
+    // The probe input never triggers — a clip that fell off, a broken wire, a
+    // non-conductive surface. Recording the miss and moving on used to drive
+    // the tool down at each of the remaining points in turn; it has to stop at
+    // the first miss instead, leaving the machine for the operator to recover.
+    fake = attachFakeGrbl(() => null);
 
-    expect(grid.points[2][2].z).toBe(0);
-    expect(fake.lastError()).toMatch(/no contact at 1 of 9/);
+    await expect(webSerialManager.probeGrid(bounds, 3, 3)).rejects.toThrow(/no contact/i);
+
+    // Exactly one probe move went out: it did not plunge again after the miss.
+    expect(fake.sent.filter(l => l.includes('G38.2'))).toHaveLength(1);
+    expect(fake.lastError()).toMatch(/made no contact/i);
   });
 
   it('feeds a grid the leveller can actually warp G-code with', async () => {

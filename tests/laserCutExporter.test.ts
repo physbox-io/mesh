@@ -1,7 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { exportLaserCutSvg, extractPanelsFromScene, DEFAULT_LASER_OPTIONS } from '../src/utils/laserCutExporter';
+import { exportLaserCutSvg, extractPanelsFromScene, DEFAULT_LASER_OPTIONS, type LaserCutResult } from '../src/utils/laserCutExporter';
 import { birdhousePreset, birdhouseScadPreset, stackedCubesPreset } from '../src/presets/presetScenes';
-import type { SceneGraph } from '../src/types/scene';
+import type { SceneGeom, SceneGraph } from '../src/types/scene';
+
+type Point2D = { x: number; y: number };
 
 describe('Laser Cut Exporter Engine', () => {
   it('unwraps Birdhouse (Primitives) scene into 2D SVG panels with finger joints', () => {
@@ -80,9 +82,9 @@ describe('Laser Cut Exporter Engine', () => {
 // Joint geometry
 // ---------------------------------------------------------------------------
 
-function segmentsCross(a: any, b: any, c: any, d: any) {
-  const cross = (p: any, q: any) => p.x * q.y - p.y * q.x;
-  const sub = (p: any, q: any) => ({ x: p.x - q.x, y: p.y - q.y });
+function segmentsCross(a: Point2D, b: Point2D, c: Point2D, d: Point2D) {
+  const cross = (p: Point2D, q: Point2D) => p.x * q.y - p.y * q.x;
+  const sub = (p: Point2D, q: Point2D) => ({ x: p.x - q.x, y: p.y - q.y });
   const d1 = cross(sub(d, c), sub(a, c));
   const d2 = cross(sub(d, c), sub(b, c));
   const d3 = cross(sub(b, a), sub(c, a));
@@ -91,7 +93,7 @@ function segmentsCross(a: any, b: any, c: any, d: any) {
          ((d3 > 1e-9 && d4 < -1e-9) || (d3 < -1e-9 && d4 > 1e-9));
 }
 
-function selfIntersects(poly: any[]) {
+function selfIntersects(poly: Point2D[]) {
   const n = poly.length;
   for (let i = 0; i < n; i++) {
     for (let j = i + 2; j < n; j++) {
@@ -105,8 +107,8 @@ function selfIntersects(poly: any[]) {
 
 // Duplicate points at a corner split a fold-back into two harmless-looking
 // turns, so any check for one has to collapse them first.
-function dedupe(poly: any[]) {
-  const out: any[] = [];
+function dedupe(poly: Point2D[]) {
+  const out: Point2D[] = [];
   for (const p of poly) {
     const q = out[out.length - 1];
     if (!q || Math.hypot(p.x - q.x, p.y - q.y) > 1e-7) out.push(p);
@@ -119,7 +121,7 @@ function dedupe(poly: any[]) {
 }
 
 /** Sharpest reversal anywhere in a closed outline, in degrees (180 = a spike). */
-function sharpestTurn(poly: any[]) {
+function sharpestTurn(poly: Point2D[]) {
   const pts = dedupe(poly);
   const n = pts.length;
   let worst = 0;
@@ -217,7 +219,7 @@ describe('Laser cut joint geometry', () => {
     const scene: SceneGraph = {
       nodes: [{
         id: 'sheet', name: 'sheet', type: 'body', pos: [0, 0, 0], joints: [],
-        geoms: [{ name: 'sheet', type: 'mesh', pos: [0, 0, 0], vertices, faces } as any],
+        geoms: [{ name: 'sheet', type: 'mesh', size: [1], pos: [0, 0, 0], vertices, faces }],
         children: [],
       }],
     };
@@ -351,7 +353,7 @@ describe('Laser cut SVG annotations', () => {
 
   it('escapes panel names so a stray character cannot break the XML', () => {
     const scene = JSON.parse(JSON.stringify(birdhousePreset)) as SceneGraph;
-    (scene.nodes[0] as any).children[0].geoms[0].name = 'floor <a & b> "x"';
+    scene.nodes[0].children[0].geoms[0].name = 'floor <a & b> "x"';
 
     const result = exportLaserCutSvg(scene, DEFAULT_LASER_OPTIONS);
     expect(result.svg).toContain('floor &lt;a &amp; b&gt; &quot;x&quot;');
@@ -724,7 +726,7 @@ describe('Laser cut joint fit', () => {
  * cutters the case under test needs. Its (u, v) frame is world (X, Y), so a
  * projected cutout can be reasoned about in millimetres directly.
  */
-function sheetWithCutters(cutters: any[]): SceneGraph {
+function sheetWithCutters(cutters: SceneGeom[]): SceneGraph {
   return {
     nodes: [
       {
@@ -741,17 +743,17 @@ function sheetWithCutters(cutters: any[]): SceneGraph {
         children: [],
       },
     ],
-  } as SceneGraph;
+  };
 }
 
-function sheetCutouts(cutters: any[]) {
+function sheetCutouts(cutters: SceneGeom[]) {
   const { panels } = extractPanelsFromScene(sheetWithCutters(cutters), DEFAULT_LASER_OPTIONS);
   const sheet = panels.find(p => p.name === 'sheet_panel');
   expect(sheet, 'sheet panel was not extracted').toBeDefined();
   return sheet!.innerCutouts2D;
 }
 
-const extent = (loop: any[], axis: 'x' | 'y') => ({
+const extent = (loop: Point2D[], axis: 'x' | 'y') => ({
   lo: Math.min(...loop.map(p => p[axis])),
   hi: Math.max(...loop.map(p => p[axis])),
 });
@@ -1012,9 +1014,9 @@ describe('CNC inside-corner relief', () => {
       expect(relieved.success).toBe(true);
       expect(relieved.svg).toContain(`Relief=${style}`);
 
-      const verts = (r: any) => r.panels.reduce(
-        (n: number, p: any) => n + p.outerPolygon2D.length +
-          p.innerCutouts2D.reduce((m: number, c: any[]) => m + c.length, 0), 0);
+      const verts = (r: LaserCutResult) => (r.panels ?? []).reduce(
+        (n, p) => n + p.outerPolygon2D.length +
+          p.innerCutouts2D.reduce((m, c) => m + c.length, 0), 0);
       expect(verts(relieved), mode).toBeGreaterThan(verts(plain));
 
       for (const panel of relieved.panels!) {

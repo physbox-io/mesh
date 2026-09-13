@@ -5,8 +5,8 @@ import {
   isWatertight, latticeStats, latticeBounds, toSceneGeom, toPolyMesh, cageEdges, coordOf,
   signedVolume, orientFaces, inconsistentFaces, faceCentre, bridgeFaces, insetFace, bevelFace,
   serializeCage, deserializeCage, cloneLattice, restoreLattice, faceCount,
-  boxLattice, SNAP_MULTIPLES, DEFAULT_UNIT, setCrease, isCrease, edgeLoop,
-  facesAlong, edgeExists, type Lattice,
+  boxLattice, SNAP_MULTIPLES, DEFAULT_UNIT, setCrease, isCrease, edgeLoop, triangulate,
+  facesAlong, edgeExists, scaleVertices, type Lattice,
 } from '../src/utils/latticeMesh';
 import { meshCentroid } from '../src/utils/latticeMesh';
 import { subdivide } from '../src/utils/subdivide';
@@ -133,7 +133,10 @@ describe('extrude', () => {
     const f = addFace(l, [a, b, c, d]); // faces +z
     const result = extrudeFace(l, f, 2)!;
     expect(result.sides.length).toBe(4);
-    expect(faceCount(l)).toBe(5); // four sides plus the cap, base consumed
+    // Four sides, the cap, and the floor it was drawn on. The floor used to be
+    // consumed here as well, which is right for a wall of a solid and wrong for
+    // a lone plate — it left a box you could see straight up into.
+    expect(faceCount(l)).toBe(6);
     // The face pointed at +z, so two steps "out" is two steps up.
     expect(findVertex(l, 0, 0, 2)).toBeGreaterThan(-1);
   });
@@ -148,15 +151,19 @@ describe('extrude', () => {
     expect(findVertex(l, 0, 0, 3)).toBeGreaterThan(-1);
   });
 
-  it('makes a closed solid out of an open quad plus its flip', () => {
+  it('makes a closed solid out of an open quad on its own', () => {
     const l = createLattice();
     const a = vertexAt(l, 0, 0, 0), b = vertexAt(l, 1, 0, 0);
     const c = vertexAt(l, 1, 1, 0), d = vertexAt(l, 0, 1, 0);
     const f = addFace(l, [a, b, c, d]); // +z
     extrudeFace(l, f, 1);
-    expect(isWatertight(l)).toBe(false); // open where the base was
-    addFace(l, [a, d, c, b]);            // close it, wound the other way
+    // Closed by itself. This used to need the base drawing back in by hand,
+    // wound the other way, and anybody who did not know that got a solid with
+    // no underside and no warning but the panel's watertight line.
     expect(isWatertight(l)).toBe(true);
+    // And the base is genuinely there rather than the old one left facing the
+    // wrong way: a face wound like that is refused as a duplicate.
+    expect(addFace(l, [a, d, c, b])).toBe(-1);
   });
 
   it('extrudes along a named axis when one is given', () => {
@@ -587,6 +594,76 @@ describe('moving several corners at once', () => {
   });
 });
 
+describe('triangulating a concave face', () => {
+  it('keeps every triangle inside the polygon', () => {
+    // Fanned from one corner, an L-shaped face produces triangles that cross
+    // the notch: overlapping geometry that flickers against its neighbours and
+    // fills in a gap that is meant to be empty.
+    const l = createLattice(0.001);
+    const outline: [number, number][] = [[0,0],[3,0],[3,1],[1,1],[1,4],[0,4]];
+    addFace(l, outline.map(([x, z]) => vertexAt(l, x, 0, z)));
+    const { faces, renderVertices } = toSceneGeom(l, 0, 0);
+
+    expect(faces.length / 3).toBe(4); // six corners, four ears
+    const centre = (i: number, axis: 0 | 2) =>
+      (renderVertices[faces[i] * 3 + axis]
+        + renderVertices[faces[i + 1] * 3 + axis]
+        + renderVertices[faces[i + 2] * 3 + axis]) / 3;
+    // Back to cage millimetres: toSceneGeom recentres on the corner average.
+    const offset = { x: 8 / 6, z: 10 / 6 };
+    for (let i = 0; i < faces.length; i += 3) {
+      const x = centre(i, 0) * 1000 + offset.x;
+      const z = centre(i, 2) * 1000 + offset.z;
+      const inNotch = x > 1 && z > 1;
+      expect(inNotch).toBe(false);
+    }
+  });
+});
+
+describe('scaling a set of corners', () => {
+  it('grows the cage about the point it is given', () => {
+    const l = unitCube();
+    const all = [0, 1, 2, 3, 4, 5, 6, 7];
+    expect(scaleVertices(l, all, [0.5, 0.5, 0.5], 3, 1)).toBe(true);
+    expect(latticeBounds(l)).toEqual({ min: [-1, -1, -1], max: [2, 2, 2] });
+    expect(latticeStats(l).vertices).toBe(8);
+    expect(isWatertight(l)).toBe(true);
+  });
+
+  it('confines itself to one axis when asked', () => {
+    const l = unitCube();
+    const all = [0, 1, 2, 3, 4, 5, 6, 7];
+    expect(scaleVertices(l, all, [0.5, 0.5, 0.5], 5, 1, 'z')).toBe(true);
+    expect(latticeBounds(l)).toEqual({ min: [0, 0, -2], max: [1, 1, 3] });
+  });
+
+  it('moves in whole steps of the grid it is given', () => {
+    const l = unitCube(0.0001);
+    const all = [0, 1, 2, 3, 4, 5, 6, 7];
+    // A tenth of a step of movement per corner, on a grid of 10: nothing moves,
+    // rather than corners drifting off the grid they were placed on.
+    expect(scaleVertices(l, all, [0.5, 0.5, 0.5], 1.2, 10)).toBe(false);
+    expect(latticeBounds(l)).toEqual({ min: [0, 0, 0], max: [1, 1, 1] });
+  });
+
+  it('refuses a factor that would weld the selection into itself', () => {
+    const l = unitCube();
+    const all = [0, 1, 2, 3, 4, 5, 6, 7];
+    // Everything lands on the centre point: a cube collapsed to a dot is not a
+    // resize, and nothing should have moved.
+    expect(scaleVertices(l, all, [0.5, 0.5, 0.5], 0, 1)).toBe(false);
+    expect(latticeStats(l).vertices).toBe(8);
+    expect(latticeBounds(l)).toEqual({ min: [0, 0, 0], max: [1, 1, 1] });
+  });
+
+  it('does nothing for an empty selection, a bad step or a factor of one', () => {
+    const l = unitCube();
+    expect(scaleVertices(l, [], [0, 0, 0], 2, 1)).toBe(false);
+    expect(scaleVertices(l, [0, 1], [0, 0, 0], 2, 0)).toBe(false);
+    expect(scaleVertices(l, [0, 1, 2, 3], [0.5, 0.5, 0.5], 1, 1)).toBe(false);
+  });
+});
+
 describe('extruding backwards', () => {
   /** A quad on z = 0 facing +z. */
   function plate(): { l: Lattice; face: number } {
@@ -624,13 +701,15 @@ describe('extruding backwards', () => {
     expect(signedVolume(l)).toBeGreaterThan(0);
   });
 
-  it('leaves an open backwards shell with nothing to repair', () => {
+  it('closes a backwards extrusion the right way round too', () => {
     const { l, face } = plate();
     extrudeFace(l, face, -3);
-    // The shell is open where the plate was, so there is no volume to take the
-    // sign of — but every face still has to lean away from the middle.
+    // Pushed against its normal the solid ends up under the plate, so the plate
+    // is already facing away from the material and is kept as it is.
     expect(inconsistentFaces(l)).toBe(0);
-    expect(facings(l)).toHaveLength(5);
+    expect(facings(l)).toHaveLength(6);
+    expect(isWatertight(l)).toBe(true);
+    expect(signedVolume(l)).toBeGreaterThan(0);
   });
 });
 
@@ -893,8 +972,145 @@ describe('bevelling a face', () => {
     bevelFace(l, face, 2);
     const octagon = l.faces.findIndex((f) => f && f.length === 8);
     extrudeFace(l, octagon, 8);
-    // Eight walls, a cap, and the open end where the plate was.
-    expect(latticeStats(l)).toMatchObject({ faces: 9, quads: 8 });
+    // Eight walls, a cap and the octagon it was pushed from: a closed cylinder.
+    expect(latticeStats(l)).toMatchObject({ faces: 10, quads: 8 });
+    expect(isWatertight(l)).toBe(true);
     expect(inconsistentFaces(l)).toBe(0);
   });
 });
+
+describe('extruding a plate, as opposed to a wall of a solid', () => {
+  /** A lone profile drawn on z = 0, with nothing else in the cage. */
+  function plate(profile: [number, number][], unit = 0.001): Lattice {
+    const l = createLattice(unit);
+    addFace(l, profile.map(([i, j]) => vertexAt(l, i, j, 0)));
+    return l;
+  }
+
+  const square: [number, number][] = [[0, 0], [20, 0], [20, 20], [0, 20]];
+  const tee: [number, number][] = [
+    [0, 30], [30, 30], [30, 20], [20, 20], [20, 0], [10, 0], [10, 20], [0, 20],
+  ];
+
+  it('keeps the profile as the floor, so the result is a solid', () => {
+    const l = plate(square);
+    const result = extrudeFace(l, 0, 10)!;
+    // Four walls, a cap, and the floor it was drawn on.
+    expect(faceCount(l)).toBe(6);
+    expect(result.floor).toBe(0);
+    expect(isWatertight(l)).toBe(true);
+  });
+
+  it('turns the floor round, so it faces away from the material', () => {
+    const l = plate(square);
+    const result = extrudeFace(l, 0, 10)!;
+    // Drawn facing +z and extruded up, the floor has to end up facing down or
+    // it is an inside-out face on the underside — which is exactly the hole
+    // that was reported: right from above, missing from below.
+    expect(faceNormal(l, result.floor)![2]).toBeCloseTo(-1, 9);
+    expect(inconsistentFaces(l)).toBe(0);
+    expect(signedVolume(l)).toBeGreaterThan(0);
+  });
+
+  it('does the same for a profile with more corners than four', () => {
+    const l = plate(tee);
+    extrudeFace(l, 0, 10)!;
+    expect(isWatertight(l)).toBe(true);
+    expect(inconsistentFaces(l)).toBe(0);
+    // Eight walls, a cap and a floor.
+    expect(faceCount(l)).toBe(10);
+  });
+
+  it('leaves the floor alone when the extrusion went the other way', () => {
+    const l = plate(square);
+    // Pushed against its normal the solid ends up underneath, and the profile
+    // is already facing away from it.
+    const result = extrudeFace(l, 0, -10)!;
+    expect(faceNormal(l, result.floor)![2]).toBeCloseTo(1, 9);
+    expect(isWatertight(l)).toBe(true);
+    expect(signedVolume(l)).toBeGreaterThan(0);
+  });
+
+  it('still swallows the face when it is a wall of a closed solid', () => {
+    const l = unitCube(0.001);
+    const top = findFace(l, [
+      findVertex(l, 0, 0, 1), findVertex(l, 1, 0, 1), findVertex(l, 1, 1, 1), findVertex(l, 0, 1, 1),
+    ]);
+    const result = extrudeFace(l, top, 3)!;
+    expect(result.floor).toBe(-1);
+    // Six faces less the one swallowed, plus four walls and a cap.
+    expect(faceCount(l)).toBe(10);
+    expect(isWatertight(l)).toBe(true);
+  });
+
+  it('swallows it when the face shares even one edge with another', () => {
+    // Two quads side by side. Keeping the floor here would put three faces
+    // along the edge they share — the neighbour, the floor, and the wall
+    // rising off it — which is worse than the hole it would fix.
+    const l = createLattice(0.001);
+    const v = (i: number, j: number) => vertexAt(l, i, j, 0);
+    const left = addFace(l, [v(0, 0), v(10, 0), v(10, 10), v(0, 10)]);
+    addFace(l, [v(10, 0), v(20, 0), v(20, 10), v(10, 10)]);
+    const result = extrudeFace(l, left, 5)!;
+    expect(result.floor).toBe(-1);
+  });
+})
+
+describe('triangulating a face that is not convex', () => {
+  /** Signed area of a triangle in the xy plane. */
+  const area2 = (p: number[], q: number[], r: number[]) =>
+    (q[0] - p[0]) * (r[1] - p[1]) - (r[0] - p[0]) * (q[1] - p[1]);
+
+  it('covers an L exactly, with no triangle crossing the notch', () => {
+    // An L: fanning this from the first corner puts a triangle straight over
+    // the missing quarter, which is what "the face extends outside itself"
+    // looks like on screen.
+    const coords = [0, 0, 0, 20, 0, 0, 20, 10, 0, 10, 10, 0, 10, 20, 0, 0, 20, 0];
+    const tris = triangulate([[0, 1, 2, 3, 4, 5]], coords);
+    expect(tris.length).toBe(4 * 3); // six corners clip to four triangles
+    const at = (v: number) => [coords[v * 3], coords[v * 3 + 1], coords[v * 3 + 2]];
+    let total = 0;
+    for (let t = 0; t < tris.length; t += 3) {
+      const a = area2(at(tris[t]), at(tris[t + 1]), at(tris[t + 2])) / 2;
+      // Every ear is wound the same way as the face, so none of them doubles
+      // back over ground another has already covered.
+      expect(a).toBeGreaterThan(0);
+      total += a;
+    }
+    // The L's own area: 20x20 less the 10x10 bite out of it.
+    expect(total).toBeCloseTo(300, 9);
+  });
+
+  it('covers a ribbon between two curves, which is what a pair of beziers makes', () => {
+    // Two offset arcs joined end to end: strongly concave, and every fan from
+    // one end spills over the inner curve.
+    const coords: number[] = [];
+    const outer: number[] = [];
+    const inner: number[] = [];
+    const N = 10;
+    for (let i = 0; i <= N; i++) {
+      const t = (Math.PI * i) / N;
+      outer.push(coords.length / 3);
+      coords.push(Math.round(100 * Math.cos(t)), Math.round(100 * Math.sin(t)), 0);
+    }
+    for (let i = N; i >= 0; i--) {
+      const t = (Math.PI * i) / N;
+      inner.push(coords.length / 3);
+      coords.push(Math.round(80 * Math.cos(t)), Math.round(80 * Math.sin(t)), 0);
+    }
+    const ring = [...outer, ...inner];
+    const tris = triangulate([ring], coords);
+    expect(tris.length).toBe((ring.length - 2) * 3);
+    const at = (v: number) => [coords[v * 3], coords[v * 3 + 1], coords[v * 3 + 2]];
+    let total = 0;
+    for (let t = 0; t < tris.length; t += 3) {
+      const a = area2(at(tris[t]), at(tris[t + 1]), at(tris[t + 2])) / 2;
+      expect(a).toBeGreaterThan(0);
+      total += a;
+    }
+    // Half an annulus between radius 80 and 100, to the accuracy of an 11-point
+    // arc: nothing like the area a fan would have claimed.
+    expect(total).toBeGreaterThan(0.9 * (Math.PI / 2) * (100 ** 2 - 80 ** 2));
+    expect(total).toBeLessThan((Math.PI / 2) * (100 ** 2 - 80 ** 2));
+  });
+})

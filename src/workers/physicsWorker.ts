@@ -20,13 +20,24 @@
 // phase with rendering instead of adding a whole extra frame of latency.
 
 import load_mujoco from '@mujoco/mujoco';
+import type { SceneGraph, SceneNode } from '../types/scene';
+import type {
+  AeroDiagnostic,
+  BodyHistory,
+  ContactHistory,
+  HistoryEntry,
+  JointHistory,
+  WorkerToMainMessage,
+} from './physicsWorkerProtocol';
 
-type SceneNode = any;
+type Mujoco = Awaited<ReturnType<typeof load_mujoco>>;
+type MjModel = InstanceType<Mujoco['MjModel']>;
+type MjData = InstanceType<Mujoco['MjData']>;
 
-let mujoco: any = null;
-let model: any = null;
-let data: any = null;
-let sceneGraph: { nodes: SceneNode[] } = { nodes: [] };
+let mujoco: Mujoco | null = null;
+let model: MjModel | null = null;
+let data: MjData | null = null;
+let sceneGraph: SceneGraph = { nodes: [] };
 
 let isPlaying = false;
 let draggedNodeId: string | null = null;
@@ -36,7 +47,7 @@ let pressedKeys = new Set<string>();
 let stepCount = 0;
 let accumulator = 0;
 
-let historyBuffer: any[] = [];
+let historyBuffer: HistoryEntry[] = [];
 const MAX_HISTORY_SIZE = 5000;
 
 const isSharedSupported = typeof SharedArrayBuffer !== 'undefined';
@@ -80,7 +91,7 @@ let geomIdCache: Record<string, number> = {};
 let geomNameCache: Record<number, string> = {};
 let actuatorIdCache: Record<string, number> = {};
 
-const scriptCache: Record<string, Function> = {};
+const scriptCache: Record<string, (api: Record<string, unknown>) => void> = {};
 
 const findNodeById = (nodes: SceneNode[], targetId: string): SceneNode | null => {
   if (!nodes) return null;
@@ -96,7 +107,7 @@ const rebuildIdCaches = () => {
   const bCache: Record<string, number> = {};
   const jCache: Record<string, number> = {};
   const collectIds = (nodes: SceneNode[]) => {
-    if (!nodes) return;
+    if (!nodes || !mujoco || !model) return;
     for (const node of nodes) {
       let bId = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY.value, node.name || node.id);
       if (bId === -1 && node.id) {
@@ -106,7 +117,8 @@ const rebuildIdCaches = () => {
         bCache[node.id] = bId;
         if (node.name) bCache[node.name] = bId;
       }
-      node.joints?.forEach((j: any) => {
+      node.joints?.forEach((j) => {
+        if (!mujoco || !model) return;
         const jId = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT.value, j.name);
         if (jId !== -1) jCache[j.name] = jId;
       });
@@ -137,7 +149,7 @@ const rebuildIdCaches = () => {
 
 // Ported verbatim from App.tsx's PhysicsLoop.executeScripts (aerodynamics +
 // user control scripts), operating on the worker's own model/data/sceneGraph.
-const executeScripts = (nodes: SceneNode[], aeroDiagnostics: Record<string, any>) => {
+const executeScripts = (nodes: SceneNode[], aeroDiagnostics: Record<string, AeroDiagnostic>) => {
   if (!nodes) return;
   for (const node of nodes) {
     if (node.isAerodynamic) {
@@ -277,9 +289,9 @@ const executeScripts = (nodes: SceneNode[], aeroDiagnostics: Record<string, any>
       let fn = scriptCache[node.id];
       if (!fn) {
         try {
-          fn = new Function('api', node.script);
+          fn = new Function('api', node.script) as (api: Record<string, unknown>) => void;
           scriptCache[node.id] = fn;
-        } catch (e: any) {
+        } catch (e) {
           console.error(`[Script Compilation Error on node ${node.name}]:`, e);
           fn = () => {};
           scriptCache[node.id] = fn;
@@ -404,10 +416,10 @@ const executeScripts = (nodes: SceneNode[], aeroDiagnostics: Record<string, any>
         },
         getTime: () => (data ? data.time : 0),
         getWind: () => [envWindX || 0, envWindY || 0],
-        log: (msg: any) => console.log(`[Script:${node.name}]`, msg),
+        log: (msg: unknown) => console.log(`[Script:${node.name}]`, msg),
       };
 
-      try { fn(api); } catch (e: any) { console.error(`[Script Runtime Error on node ${node.name}]:`, e); }
+      try { fn(api); } catch (e) { console.error(`[Script Runtime Error on node ${node.name}]:`, e); }
     }
 
     if (node.children) executeScripts(node.children, aeroDiagnostics);
@@ -483,11 +495,11 @@ const applyDragForce = () => {
   data.xfrc_applied[bId * 6 + 2] = fz;
 };
 
-const buildHistoryEntry = (aeroDiagnostics: Record<string, any>) => {
-  const bodies: Record<string, any> = {};
-  const joints: Record<string, any> = {};
+const buildHistoryEntry = (aeroDiagnostics: Record<string, AeroDiagnostic>): HistoryEntry => {
+  const bodies: Record<string, BodyHistory> = {};
+  const joints: Record<string, JointHistory> = {};
   const collectNodeData = (nodesList: SceneNode[]) => {
-    if (!nodesList) return;
+    if (!nodesList || !data || !model) return;
     for (const node of nodesList) {
       const bId = bodyIdCache[node.id];
       if (bId !== undefined) {
@@ -505,7 +517,8 @@ const buildHistoryEntry = (aeroDiagnostics: Record<string, any>) => {
           ],
         };
       }
-      node.joints?.forEach((j: any) => {
+      node.joints?.forEach((j) => {
+        if (!data || !model) return;
         const jId = jointIdCache[j.name];
         if (jId !== undefined) {
           joints[j.name] = { pos: data.qpos[model.jnt_qposadr[jId]], vel: data.qvel[model.jnt_dofadr[jId]], qfrc_applied: data.qfrc_applied[model.jnt_dofadr[jId]] };
@@ -516,7 +529,7 @@ const buildHistoryEntry = (aeroDiagnostics: Record<string, any>) => {
   };
   collectNodeData(sceneGraph.nodes);
 
-  const contacts: any[] = [];
+  const contacts: ContactHistory[] = [];
   const ncon = data.contact.size();
   for (let c = 0; c < ncon; c++) {
     const contact = data.contact.get(c);
@@ -567,7 +580,7 @@ const snapshot = () => {
 };
 
 
-const post = (msg: any, transfer: Transferable[] = []) => (self as unknown as Worker).postMessage(msg, transfer as any);
+const post = (msg: WorkerToMainMessage, transfer: Transferable[] = []) => self.postMessage(msg, transfer);
 
 // Stepping is driven by TICK messages from the main thread's own
 // requestAnimationFrame loop (see App.tsx's PhysicsLoop / physicsWorkerClient's
@@ -592,7 +605,7 @@ const stepTick = (delta: number) => {
 
       applyDragForce();
 
-      const aeroDiagnostics: Record<string, any> = {};
+      const aeroDiagnostics: Record<string, AeroDiagnostic> = {};
       executeScripts(sceneGraph.nodes, aeroDiagnostics);
       applyFreeJointDamping(sceneGraph.nodes);
 
@@ -615,8 +628,8 @@ const stepTick = (delta: number) => {
           return;
         }
       }
-    } catch (e: any) {
-      const msg = String(e?.message || e);
+    } catch (e) {
+      const msg = String((e as Error)?.message || e);
       const fatal = /Aborted|enlarge memory|abort|bad_alloc/i.test(msg);
       post({ type: 'ERROR', message: msg, fatal, lastState: fatal ? { qpos: Array.from(data.qpos), qvel: Array.from(data.qvel), time: data.time } : undefined });
       isPlaying = false;
@@ -639,7 +652,7 @@ const stepTick = (delta: number) => {
   }
 };
 
-let workerTimerId: any = null;
+let workerTimerId: ReturnType<typeof setTimeout> | null = null;
 let lastTickTime = 0;
 
 const startWorkerLoop = () => {
@@ -685,7 +698,7 @@ const buildIdMaps = () => {
 
 const doBuild = (
   xml: string,
-  newSceneGraph: { nodes: SceneNode[] },
+  newSceneGraph: SceneGraph,
   preserveState: boolean,
   seedState?: { qpos: number[]; qvel: number[]; ctrl?: number[]; time: number },
 ) => {
@@ -694,8 +707,8 @@ const doBuild = (
 
   if (!mujoco) throw new Error('MuJoCo module not loaded yet');
 
-  if (oldModel) { try { oldModel.free(); } catch (_) {} }
-  if (oldData) { try { oldData.free(); } catch (_) {} }
+  if (oldModel) { try { oldModel.free(); } catch { /* ignore */ } }
+  if (oldData) { try { oldData.free(); } catch { /* ignore */ } }
 
   const newModel = mujoco.MjModel.from_xml_string(xml);
   const newData = new mujoco.MjData(newModel);
@@ -704,7 +717,7 @@ const doBuild = (
   data = newData;
   sceneGraph = newSceneGraph;
   rebuildIdCaches();
-  scriptCache && Object.keys(scriptCache).forEach(k => delete scriptCache[k]);
+  for (const k of Object.keys(scriptCache)) delete scriptCache[k];
 
   // Explicit seed state (from the main thread's live mirror) takes priority
   // over the same-worker oldModel/oldData copy-forward below — this is what
@@ -727,11 +740,11 @@ const doBuild = (
     newData.time = oldData.time;
     mujoco.mj_forward(newModel, newData);
   } else {
-    const actuators: any[] = [];
+    const actuators: SceneJoint[] = [];
     const traverse = (nodes: SceneNode[]) => {
       if (!nodes) return;
       for (const node of nodes) {
-        node.joints?.forEach((j: any) => { if (j.actuator) actuators.push(j); });
+        node.joints?.forEach((j) => { if (j.actuator) actuators.push(j); });
         traverse(node.children);
       }
     };
@@ -746,7 +759,7 @@ const doBuild = (
     const traverseVel = (nodes: SceneNode[]) => {
       if (!nodes) return;
       for (const node of nodes) {
-        node.joints?.forEach((j: any) => { if (j.initialVelocity) initVelJoints.push({ name: j.name, vel: j.initialVelocity }); });
+        node.joints?.forEach((j) => { if (j.initialVelocity) initVelJoints.push({ name: j.name, vel: j.initialVelocity }); });
         traverseVel(node.children);
       }
     };
@@ -819,7 +832,7 @@ const doBuild = (
 // This guarantees a headless "what-if" run can never diverge from — or
 // disturb — what's actually rendered live, and never touches a second WASM
 // module (no doubled memory/network cost).
-const runHeadless = (xml: string, headlessSceneGraph: { nodes: SceneNode[] }, ticks: number) => {
+const runHeadless = (xml: string, headlessSceneGraph: SceneGraph, ticks: number) => {
   if (!mujoco) throw new Error('MuJoCo module not loaded yet');
 
   const savedModel = model, savedData = data, savedSceneGraph = sceneGraph;
@@ -829,8 +842,8 @@ const runHeadless = (xml: string, headlessSceneGraph: { nodes: SceneNode[] }, ti
   const warnings: string[] = [];
   mujoco.on_warning = (m: string) => warnings.push(m);
 
-  let headlessModel: any = null;
-  let headlessData: any = null;
+  let headlessModel: MjModel | null = null;
+  let headlessData: MjData | null = null;
   try {
     headlessModel = mujoco.MjModel.from_xml_string(xml);
     headlessData = new mujoco.MjData(headlessModel);
@@ -846,7 +859,7 @@ const runHeadless = (xml: string, headlessSceneGraph: { nodes: SceneNode[] }, ti
     const traverseVel = (nodes: SceneNode[]) => {
       if (!nodes) return;
       for (const node of nodes) {
-        node.joints?.forEach((j: any) => { if (j.initialVelocity) initVelJoints.push({ name: j.name, vel: j.initialVelocity }); });
+        node.joints?.forEach((j) => { if (j.initialVelocity) initVelJoints.push({ name: j.name, vel: j.initialVelocity }); });
         traverseVel(node.children);
       }
     };
@@ -862,12 +875,12 @@ const runHeadless = (xml: string, headlessSceneGraph: { nodes: SceneNode[] }, ti
     }
     if (needForward) mujoco.mj_forward(model, data);
 
-    const trajectory: any[] = [];
+    const trajectory: HistoryEntry[] = [];
     for (let i = 0; i < ticks; i++) {
       data.xfrc_applied.fill(0);
       data.qfrc_applied.fill(0);
 
-      const aeroDiagnostics: Record<string, any> = {};
+      const aeroDiagnostics: Record<string, AeroDiagnostic> = {};
       executeScripts(sceneGraph.nodes, aeroDiagnostics);
       applyFreeJointDamping(sceneGraph.nodes);
 
@@ -879,18 +892,18 @@ const runHeadless = (xml: string, headlessSceneGraph: { nodes: SceneNode[] }, ti
     }
 
     return { ok: true, ticksSimulated: trajectory.length, trajectory, warnings };
-  } catch (e: any) {
-    return { ok: false, error: String(e?.message || e), warnings };
+  } catch (e) {
+    return { ok: false, error: String((e as Error)?.message || e), warnings };
   } finally {
-    if (headlessModel) { try { headlessModel.delete(); } catch (_) {} }
-    if (headlessData) { try { headlessData.delete(); } catch (_) {} }
+    if (headlessModel) { try { headlessModel.delete(); } catch { /* ignore */ } }
+    if (headlessData) { try { headlessData.delete(); } catch { /* ignore */ } }
     model = savedModel; data = savedData; sceneGraph = savedSceneGraph;
     bodyIdCache = savedBodyIdCache; jointIdCache = savedJointIdCache;
     geomIdCache = savedGeomIdCache; geomNameCache = savedGeomNameCache; actuatorIdCache = savedActuatorIdCache;
   }
 };
 
-(self as unknown as Worker).onmessage = async (evt: MessageEvent) => {
+self.onmessage = async (evt: MessageEvent) => {
   const msg = evt.data;
   try {
     switch (msg.type) {
@@ -902,8 +915,8 @@ const runHeadless = (xml: string, headlessSceneGraph: { nodes: SceneNode[] }, ti
           if (isPlaying && isSharedSupported) {
             startWorkerLoop();
           }
-        } catch (e: any) {
-          const errMsg = String(e?.message || e);
+        } catch (e) {
+          const errMsg = String((e as Error)?.message || e);
           post({ type: 'BUILT', id: msg.id, ok: false, error: errMsg, fatal: /Aborted|enlarge memory|abort|bad_alloc/i.test(errMsg) });
         }
         break;
@@ -1001,7 +1014,7 @@ const runHeadless = (xml: string, headlessSceneGraph: { nodes: SceneNode[] }, ti
       default:
         break;
     }
-  } catch (e: any) {
-    post({ type: 'ERROR', message: String(e?.message || e), fatal: false });
+  } catch (e) {
+    post({ type: 'ERROR', message: String((e as Error)?.message || e), fatal: false });
   }
 };

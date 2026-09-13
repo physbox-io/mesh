@@ -9,6 +9,7 @@ import {
   probeSurface,
   undoSculptStroke,
   BRUSH_TYPES,
+  type SculptUndoEntry,
 } from '../src/utils/sculptCommands';
 
 /**
@@ -380,7 +381,7 @@ describe('probing and undoing', () => {
     const mesh = ball();
     const before = Float32Array.from(mesh.positions.subarray(0, mesh.vertexCount * 3));
 
-    const sink: { undo?: ReturnType<typeof applySculptStroke> extends never ? never : any } = {};
+    const sink: { undo?: SculptUndoEntry | null } = {};
     applySculptStroke(mesh, {
       brush: 'draw', at: [[0, 0, 0.1]], radius: 0.04, strength: 1, dynamicTopology: false,
     }, sink);
@@ -396,7 +397,7 @@ describe('probing and undoing', () => {
     const mesh = ball();
     const startVertices = mesh.vertexCount;
 
-    const sink: { undo?: any } = {};
+    const sink: { undo?: SculptUndoEntry | null } = {};
     applySculptStroke(mesh, {
       brush: 'draw', at: [[0, 0, 0.1]], radius: 0.05, strength: 1, dynamicTopology: true, detail: 0.2,
     }, sink);

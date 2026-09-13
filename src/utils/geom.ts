@@ -1,3 +1,4 @@
+import type { SceneGeom } from '../types/scene';
 export interface MeshData {
   vertices: number[];
   faces: number[];
@@ -302,14 +303,14 @@ export function generateCurveGeoms(
   rgba: number[] = [0.85, 0.45, 0.15, 1],
   closed: boolean = false,
   bankDeg: number = 0
-): any[] {
+): SceneGeom[] {
   const nSeg = Math.max(2, segments);
   const samples = closed
     ? sampleCatmullRom(points, nSeg, true)
     : sampleCatmullRom(points, nSeg + 1);
   const bank = (bankDeg * Math.PI) / 180;
   const cosB = Math.cos(bank), sinB = Math.sin(bank);
-  const geoms: any[] = [];
+  const geoms: SceneGeom[] = [];
   const pairCount = closed ? samples.length : samples.length - 1;
   for (let i = 0; i < pairCount; i++) {
     const a = samples[i], b = samples[(i + 1) % samples.length];

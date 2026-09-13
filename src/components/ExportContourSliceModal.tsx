@@ -357,7 +357,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                 Export Contour Slices
               </h2>
               <p className="hidden sm:block text-xs text-slate-500 dark:text-slate-400">
-                Cut the model into stacked layers — download the SVG, or cut straight from here over WebSerial USB
+                Cut the model into stacked layers. Download the SVG, or cut straight from here over WebSerial USB
               </p>
             </div>
           </div>
@@ -376,7 +376,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
             <h3 className={sectionTitleClass}>
               Machine &amp; Material
               <span className="ml-2 normal-case tracking-normal font-normal text-slate-400 dark:text-slate-500">
-                — the first and third are set in the status bar
+                (the first and third are set in the status bar)
               </span>
             </h3>
             {/* Twelve columns rather than six. The two readouts hold words and
@@ -421,7 +421,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
               <Field
                 className="lg:col-span-2"
                 label="Laser Power"
-                hint={`Beam power as a GRBL S-value — currently ${Math.round((laserPower / Math.max(1, laserMaxPower)) * 100)}% of this machine's S${laserMaxPower} maximum. Ignored on a CNC router.`}
+                hint={`Beam power as a GRBL S-value, currently ${Math.round((laserPower / Math.max(1, laserMaxPower)) * 100)}% of this machine's S${laserMaxPower} maximum. Ignored on a CNC router.`}
               >
                 <NumberInput
                   step={laserMaxPower >= 10000 ? 500 : 50} min={0} max={laserMaxPower} integer
@@ -450,7 +450,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                 className="lg:col-span-2"
                 hintAlign="end"
                 label="Layers"
-                hint="Leave empty to slice one layer per sheet thickness — the stack then matches the model's height. A number overrides that, which stretches or squashes the finished stack."
+                hint="Leave empty to slice one layer per sheet thickness, so the stack matches the model's height. A number overrides that, which stretches or squashes the finished stack."
               >
                 <input
                   type="number" min="1" max="600"
@@ -480,7 +480,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
               </div>
             )}
 
-            <Advanced label="Advanced — override the derived feeds">
+            <Advanced label="Advanced: override the derived feeds">
               <Field
                 label="Feedrate (mm/m)"
                 hint="How fast the head travels while cutting, in mm per minute. It also drives the estimated job time."
@@ -511,7 +511,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
 
               <Field
                 label="Bit Ø (mm)"
-                hint="Routing only. The cutter that will do the cutting — it is what the spindle speed and the feed are worked out from, since both scale with diameter."
+                hint="Routing only. The cutter that will do the cutting. Spindle speed and feed are worked out from its diameter."
               >
                 <NumberInput
                   step={0.1} min={0.1} max={30}
@@ -524,7 +524,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
               <Field
                 className="lg:col-span-2"
                 label="Max S-value ($30)"
-                hint="Your controller's maximum spindle/laser S-value. Most diode boards ship 10000; stock GRBL is 1000. Getting it too low is what makes a strong laser act weak — send S1000 to a 10000 machine and you get 10% power. Run $$ on the machine and match its $30 line."
+                hint="Your controller's maximum spindle/laser S-value. Most diode boards ship 10000; stock GRBL is 1000. Set it too low and a strong laser acts weak: send S1000 to a 10000 machine and you get 10% power. Run $$ on the machine and match its $30 line."
               >
                 <select
                   disabled={machineMode !== 'laser'}
@@ -564,7 +564,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
 
               <Field
                 label="Attach Size (mm)"
-                hint="How long each attachment is along a contour. Big enough to hold the layer, small enough to snap — 2-5 mm suits thin ply and card."
+                hint="How long each attachment is along a contour. Big enough to hold the layer, small enough to snap. 2-5 mm suits thin ply and card."
               >
                 <NumberInput
                   step={0.5} min={0.5} max={30}
@@ -622,7 +622,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
 
               <Field
                 label="Dowels"
-                hint="Alignment holes cut through every layer so the stack cannot shift as you glue it. Optional — set None to glue up freehand against the printed layer map."
+                hint="Alignment holes cut through every layer so the stack cannot shift as you glue it. Optional. Set None to glue up freehand against the printed layer map."
               >
                 <select
                   value={pinCount}
@@ -724,7 +724,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                   )}
                   <span role="tooltip" className={`${hintBubbleClass} left-0`}>
                     Manual scale applied to the model before slicing. The layer count follows the model's
-                    height, so scaling down cuts smaller — and fewer — layers.
+                    height, so scaling down cuts smaller, and fewer, layers.
                   </span>
                 </div>
                 <input
@@ -742,7 +742,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                 className="lg:col-span-3"
                 hintAlign="end"
                 label="Annotations"
-                hint="What the SVG carries besides cut lines. Layer numbers and sheet outlines are what let you stack the pieces in order, but they are engraved — strip to Cuts only before sending real material."
+                hint="What the SVG carries besides cut lines. Layer numbers and sheet outlines are what let you stack the pieces in order, but they are engraved. Strip to Cuts only before sending real material."
               >
                 <Segmented
                   value={annotations}

@@ -25,18 +25,19 @@ export const RemoteMachiningModal: React.FC<RemoteMachiningModalProps> = ({ isOp
 
   useEffect(() => {
     if (isOpen) {
-      loadData();
+      const initialTimer = setTimeout(loadData, 0);
       const interval = setInterval(loadData, 3000);
       const handleKeyDown = (e: KeyboardEvent) => {
         if (e.key === 'Escape') onClose();
       };
       window.addEventListener('keydown', handleKeyDown);
       return () => {
+        clearTimeout(initialTimer);
         clearInterval(interval);
         window.removeEventListener('keydown', handleKeyDown);
       };
     }
-  }, [isOpen]);
+  }, [isOpen, onClose]);
 
   if (!isOpen) return null;
 

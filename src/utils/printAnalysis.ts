@@ -256,8 +256,8 @@ function analyzeMeshOverhangClusters(
     const len = Math.hypot(nx, ny, nz);
     if (len < 1e-6) continue;
 
-    let spotMjX = 0, spotMjY = 0, spotMjZ = 0;
-    let isDownwardOverhang = false;
+    let spotMjX: number, spotMjY: number, spotMjZ: number;
+    let isDownwardOverhang: boolean;
 
     if (isRenderVerts) {
       // renderVertices: raw MuJoCo Z-up frame (x, y, z) where +Z is up
@@ -613,8 +613,8 @@ export function analyzeSceneMechanicalWeaknesses(sceneGraph: SceneGraph): Analys
     if (node.isHardwareComponent && node.hardwareType === 'heat_set_boss') {
       const spec = node.hardwareSpec;
       if (spec) {
-        const outerD = spec.outerDiameterMm || 8;
-        const innerH = spec.innerHoleMm || 4;
+        const outerD = Number(spec.outerDiameterMm) || 8;
+        const innerH = Number(spec.innerHoleMm) || 4;
         const bossWallMm = (outerD - innerH) / 2;
         if (bossWallMm < 1.8) {
           weakSpots.push({

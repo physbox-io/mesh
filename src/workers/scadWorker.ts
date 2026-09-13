@@ -12,10 +12,15 @@
 
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
 
-let createOpenSCADFn: any = null;
-let loadingPromise: Promise<any> | null = null;
+type OpenSCADInstance = {
+  renderToStl: (scadCode: string) => Promise<string>;
+};
+type CreateOpenSCADFn = () => Promise<OpenSCADInstance>;
 
-async function loadCompiler(): Promise<any> {
+let createOpenSCADFn: CreateOpenSCADFn | null = null;
+let loadingPromise: Promise<CreateOpenSCADFn> | null = null;
+
+async function loadCompiler(): Promise<CreateOpenSCADFn> {
   if (createOpenSCADFn) return createOpenSCADFn;
   if (loadingPromise) return loadingPromise;
 

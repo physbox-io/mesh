@@ -12,16 +12,16 @@ let created: SilentWorker[] = [];
 
 beforeEach(() => {
   created = [];
-  (globalThis as any).Worker = class {
+  (globalThis as unknown as { Worker: unknown }).Worker = class {
     constructor() {
       const w = new SilentWorker();
       created.push(w);
-      return w as any;
+      return w as unknown as Worker;
     }
   };
 });
 
-afterEach(() => { delete (globalThis as any).Worker; });
+afterEach(() => { delete (globalThis as Record<string, unknown>).Worker; });
 
 describe('PhysicsWorkerClient.terminate', () => {
   it('rejects requests the terminated worker can never answer', async () => {

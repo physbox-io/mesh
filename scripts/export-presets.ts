@@ -16,6 +16,7 @@ import { writeFileSync, mkdirSync, rmSync, existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { PRESETS } from '../src/presets/presetScenes';
 import { compileToMJCF } from '../src/utils/mjcf';
+import type { SceneGraph } from '../src/types/scene';
 
 const outDir = resolve(process.argv[2] ?? '../mesh_desktop/assets/presets');
 
@@ -35,10 +36,17 @@ interface IndexEntry {
   environment: Record<string, number>;
 }
 
+/** One entry of PRESETS, by the fields this script reads. */
+interface PresetEntry {
+  name?: string;
+  scene: SceneGraph;
+  environment?: Record<string, number>;
+}
+
 const index: IndexEntry[] = [];
 const failures: { key: string; error: string }[] = [];
 
-for (const [key, preset] of Object.entries(PRESETS as Record<string, any>)) {
+for (const [key, preset] of Object.entries<PresetEntry>(PRESETS)) {
   try {
     const xml = compileToMJCF(preset.scene);
     writeFileSync(join(outDir, `${key}.json`), JSON.stringify(preset.scene));
@@ -51,9 +59,10 @@ for (const [key, preset] of Object.entries(PRESETS as Record<string, any>)) {
       environment: preset.environment ?? {},
     });
     console.log(`  ok    ${key.padEnd(24)} ${String(xml.length).padStart(9)} bytes mjcf`);
-  } catch (err: any) {
-    failures.push({ key, error: err?.message ?? String(err) });
-    console.log(`  FAIL  ${key.padEnd(24)} ${err?.message ?? err}`);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    failures.push({ key, error: message });
+    console.log(`  FAIL  ${key.padEnd(24)} ${message}`);
   }
 }
 

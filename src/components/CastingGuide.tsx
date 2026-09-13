@@ -68,7 +68,7 @@ export const CastingGuide: React.FC<{ result: CastingFacts }> = ({ result }) => 
         <li className="flex items-start gap-2">
           <Layers className="w-3.5 h-3.5 shrink-0 mt-0.5 text-purple-500" />
           <span>
-            <strong>Print cavity-up</strong> — both halves are laid flat outer face down, so nothing
+            <strong>Print cavity-up.</strong> Both halves are laid flat outer face down, so nothing
             needs support. Fine layers on the cavity: every layer line prints itself into the casting.
             Four walls or more, or resin wicks into the infill.
           </span>
@@ -85,16 +85,16 @@ export const CastingGuide: React.FC<{ result: CastingFacts }> = ({ result }) => 
           <Droplets className="w-3.5 h-3.5 shrink-0 mt-0.5 text-purple-500" />
           <span>
             <strong>
-              Pour in {lifts} {lifts === 1 ? 'lift' : 'lifts'}
+              Pour in {lifts} {lifts === 1 ? 'lift' : 'lifts'}.
             </strong>{' '}
             {result.cavityDepthMm > SAFE_LIFT_MM ? (
               <>
-                — cavity depth is {result.cavityDepthMm} mm. Most standard casting epoxies recommend
+                Cavity depth is {result.cavityDepthMm} mm. Most standard casting epoxies recommend
                 pouring in layers up to ~{SAFE_LIFT_MM} mm, or using a deep-pour epoxy system.
               </>
             ) : (
               <>
-                — {result.cavityDepthMm} mm is within standard single-pour depths for most casting resins.
+                {result.cavityDepthMm} mm is within standard single-pour depths for most casting resins.
               </>
             )}{' '}
             Brush a thin coat into the details first to release bubbles, then fill.
@@ -105,8 +105,8 @@ export const CastingGuide: React.FC<{ result: CastingFacts }> = ({ result }) => 
           <span>
             <strong>Close it, or don't.</strong>{' '}
             {result.lidIsBackingPlate
-              ? 'The lid holds none of the shape here — screed the back flush and leave it off, or set it on afterwards as a press for a flat, glossy back. The vents let the excess out.'
-              : 'Seat the lid on the pins, band it lightly closed — there is no injection pressure to fight — and let the excess escape through the vents. Pour through the sprue.'}{' '}
+              ? 'The lid holds none of the shape here. Screed the back flush and leave it off, or set it on afterwards as a press for a flat, glossy back. The vents let the excess out.'
+              : 'Seat the lid on the pins, band it lightly closed (there is no injection pressure to fight) and let the excess escape through the vents. Pour through the sprue.'}{' '}
             Full cure, then pry at the corner notches.
           </span>
         </li>

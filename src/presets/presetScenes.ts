@@ -2,6 +2,7 @@ import type { SceneGraph, SceneNode, SceneGeom } from '../types/scene';
 import { generateCurveGeoms, generateWedgeMeshData, generateConeMeshData } from '../utils/geom';
 import { californiaReliefPreset } from './californiaRelief';
 import { megaBustStudioPreset } from './megaBustStudio';
+import { latticeBracketPreset } from './latticeBracket';
 
 export const pendulumPreset: SceneGraph = {
   nodes: [
@@ -3009,10 +3010,32 @@ export const PRESETS = {
     // millimetre dimensions (what the exporter cares about) are untouched.
     camera: { position: [0.05, -0.09, 0.07], target: [0, 0, 0.02] }
   },
+  lattice_bracket: {
+    name: 'Wall Bracket (Lattice)',
+    emoji: '📐',
+    scene: latticeBracketPreset,
+    // A 50x40x60 mm part, like the relief map: the default view is framed for
+    // objects a metre across and would show this as a speck.
+    camera: { position: [0.14, -0.18, 0.12], target: [0.01, 0, 0.03] }
+  },
   mega_bust_studio: {
     name: 'Mega Bust & Stress Studio',
     emoji: '🗿',
     scene: megaBustStudioPreset
+  },
+  // Deliberately empty. It is a lesson, not a scene: every step asks you to
+  // build the thing yourself, and a preset that arrived with the answer already
+  // on screen would let you read it and learn nothing. See PRESET_NOTE_CARDS.
+  // The key stays `cut_tutorial` though the lesson has outgrown the name: it is
+  // what physics_load_preset takes, and renaming it would break every reference
+  // to it that already exists for no gain a person can see.
+  cut_tutorial: {
+    name: 'Tutorial: Making an Exact Part',
+    emoji: '🎓',
+    scene: emptyPreset,
+    // Framed for a part 40 mm across rather than a metre, which is what the
+    // tutorial has you build in step one.
+    camera: { position: [0.12, -0.16, 0.13], target: [0, 0, 0.02] }
   }
 };
 

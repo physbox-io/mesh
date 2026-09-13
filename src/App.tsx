@@ -6,14 +6,16 @@ import { SCULPT_BASES, type SculptBaseId } from './utils/sculptBases';
 import { downloadMeshGeomStl } from './utils/meshStlExport';
 import SculptPanel from './components/SculptPanel';
 import LatticePanel from './components/LatticePanel';
+import { CutControls } from './components/CutControls';
 import ColoringSection from './components/ColoringSection';
 import { useMuJoCoInit } from './hooks/useMuJoCo';
 import { useMCPBridge } from './hooks/useMCPBridge';
 import { useCoarsePointer } from './hooks/useCoarsePointer';
-import { useStore, scaleMeshGeoms, getPhysicsWorkerClient, cloneSceneGraph } from './store/useStore';
-import type { SceneGraph, SceneNode } from './types/scene';
-import { Play, Square, SlidersHorizontal, Settings, Box, Circle, X, RotateCcw, Trash2, Layers, CircleDot, Zap, Info, Triangle, Disc, Code, Menu, Shapes, Minimize2, Save, Download, Upload, Undo, Redo, FileText, ChevronDown, ChevronUp, PanelRight, Edit3, Printer, Scissors, Sparkles, Sun, Moon, Pyramid, Cone, Donut, ChartSpline, Mountain, Paintbrush, Grid3x3, Package, Image as ImageIcon } from 'lucide-react';
-import { useRef, useMemo, useEffect, useCallback, useState, type RefObject } from 'react';
+import { useStore, getPhysicsWorkerClient, cloneSceneGraph } from './store/useStore';
+import type { SceneGraph, SceneNode, SceneGeom, SceneJoint, CsgOp } from './types/scene';
+import type { WeakSpot } from './utils/printAnalysis';
+import { Play, Square, SlidersHorizontal, Settings, Box, Circle, X, RotateCcw, Trash2, Layers, CircleDot, Zap, Info, Triangle, Disc, Code, Menu, Shapes, Minimize2, Save, Download, Upload, Undo, Redo, FileText, ChevronDown, ChevronUp, PanelRight, Edit3, Printer, Scissors, Sparkles, Sun, Moon, Pyramid, Cone, Donut, ChartSpline, Paintbrush, Grid3x3, Image as ImageIcon } from 'lucide-react';
+import { useRef, useMemo, useEffect, useCallback, useState, type RefObject, type ComponentProps, type ComponentRef } from 'react';
 import AICopilotPanel from './components/AICopilotPanel';
 import * as THREE from 'three';
 import { useFrame } from '@react-three/fiber';
@@ -32,13 +34,19 @@ import { ExportLaserCutModal } from './components/ExportLaserCutModal';
 import { ExportContourSliceModal } from './components/ExportContourSliceModal';
 import { ExportReliefCarveModal } from './components/ExportReliefCarveModal';
 import { ExportMoldModal } from './components/ExportMoldModal';
+import { ExportSolidMachiningModal } from './components/ExportSolidMachiningModal';
+import { ExportCastModal } from './components/ExportCastModal';
 import { PulleyRopeMarkers } from './components/scene/PulleyRopes';
 import { SliderValue } from './components/SliderValue';
+import { ScaleCard, ScaleControls } from './components/ScaleCard';
+import { ObjectGestureController } from './components/scene/ObjectGestures';
+import { MeasureTool } from './components/scene/MeasureTool';
 import {
   PaintStrokeController, CameraController, DragInteractionController,
   SceneCapture, SceneVisuals,
+  LatticeEditorLayer,
 } from './components/scene/SceneLayer';
-import { BottomStatusBar } from './components/BottomStatusBar';
+import { BottomStatusBar, SHOW_EXPORTS_EVENT } from './components/BottomStatusBar';
 import { MachineConfigModal } from './components/MachineConfigModal';
 import { UserProfileButton } from './components/UserProfileButton';
 import { MIN_MAX_TOKENS, MAX_MAX_TOKENS, readMaxTokens, writeMaxTokens } from './utils/llmSettings';
@@ -48,6 +56,51 @@ import { pushGlobalParameter } from './utils/llmSettings';
 import { saveUserPreset, deleteUserPreset, readUserPreset, listUserPresetNames } from './utils/userPresets';
 import { cloudAutosave } from './utils/cloudDocuments';
 import { pushAppParameter } from './utils/cloudSync';
+
+type NoteCard = { id: string; markdown: string; minimized: boolean; x: number; y: number };
+// AICopilotPanel keeps its ChatMessage type to itself; this is the same type,
+// read back off its props so the two cannot drift.
+type CopilotMessage = NonNullable<ComponentProps<typeof AICopilotPanel>['messages']>[number];
+type StoreState = ReturnType<typeof useStore.getState>;
+type AddComponentType = Parameters<StoreState['addComponent']>[0];
+type PresetEntry = { name: string; emoji?: string };
+type GeminiModelInfo = { name: string; displayName?: string; supportedGenerationMethods?: string[] };
+
+// The slice of the MuJoCo model/data mirror that scene syncing reads. The
+// store types the whole mirror loosely; only these members are touched here.
+interface SyncMujoco {
+  mj_name2id: (model: unknown, typeVal: string, name: string) => number;
+  mjtObj: { mjOBJ_BODY: { value: string } };
+}
+interface SyncData {
+  xpos: ArrayLike<number>;
+  xmat: ArrayLike<number>;
+}
+
+// Globals other modules (the MCP bridge, the note-card manager, tests) reach
+// through `window`. Typed here rather than declared globally so a differently
+// typed declaration elsewhere cannot conflict with this one.
+interface PhysicsGlobals {
+  DISABLE_USEFRAME?: boolean;
+  _physics_getNoteCards?: () => NoteCard[];
+  _physics_setNoteCards?: (cards: NoteCard[]) => void;
+  _physics_getCopilotMessages?: () => CopilotMessage[];
+  _physics_setCopilotMessages?: (msgs: CopilotMessage[]) => void;
+  _physics_store?: typeof useStore;
+  _physics_gl?: THREE.WebGLRenderer;
+  _physics_scene?: THREE.Scene;
+  _physics_camera?: THREE.Camera;
+  _physics_composer?: ComponentRef<typeof EffectComposer> | null;
+}
+const physicsGlobals = (typeof window !== 'undefined' ? window : {}) as unknown as PhysicsGlobals;
+
+declare global {
+  interface Window { useStore?: typeof useStore }
+}
+// Debug hook: the store is reachable from the browser console.
+if (typeof window !== 'undefined') {
+  window.useStore = useStore;
+}
 
 // Simple robust markdown parser to convert basic markdown text to safe HTML
 // Markdown parser for note cards
@@ -69,20 +122,6 @@ function parseNoteMarkdown(md: string): string {
   }).join('\n');
   return html;
 }
-
-// Precision Laser Beam Emitter Icon for Laser Export
-const LaserIcon: React.FC<{ className?: string }> = ({ className = 'w-4 h-4' }) => (
-  <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M9 3h6l1 4H8l1-4z" />
-    <line x1="8" y1="7" x2="16" y2="7" />
-    <line x1="12" y1="7" x2="12" y2="17" strokeWidth="2.5" />
-    <circle cx="12" cy="17" r="1.5" fill="currentColor" />
-    <line x1="4" y1="21" x2="20" y2="21" />
-  </svg>
-);
-
-
-
 
 // Floating note card overlay component
 function NoteCardOverlay({ card, isEditing, onToggleEdit, onToggleMinimize, onMarkdownChange, onClose, onMove }: {
@@ -179,9 +218,9 @@ function NoteCardOverlay({ card, isEditing, onToggleEdit, onToggleMinimize, onMa
 // fresh one spawned — a real memory reclaim. This component's only remaining
 // job is forwarding keyboard state to the worker, since scripts' `isKeyPressed`
 // needs it and the worker has no DOM access of its own.
-const PhysicsLoop = ({ isPlaying }: { model: any, data: any, mujoco: any, isPlaying: boolean }) => {
+const PhysicsLoop = ({ isPlaying }: { model: unknown, data: unknown, mujoco: unknown, isPlaying: boolean }) => {
   useFrame((_state, delta) => {
-    if ((window as any).DISABLE_USEFRAME) return;
+    if (physicsGlobals.DISABLE_USEFRAME) return;
     if (!isPlaying) return;
     if (typeof SharedArrayBuffer === 'undefined') {
       getPhysicsWorkerClient().tick(delta);
@@ -340,7 +379,7 @@ const AxisLegendDrawer = ({ externalRef }: { externalRef: RefObject<HTMLCanvasEl
 
 // Drop Handler for precise spawning & external file imports (.scad, .stl, .json)
 const DropHandler = ({ addComponent, onImportFile, onImportImageFile }: {
-  addComponent: (type: any, pos: [number, number, number]) => void;
+  addComponent: (type: AddComponentType, pos: [number, number, number]) => void;
   onImportFile: (file: File) => void;
   onImportImageFile: (file: File) => void;
 }) => {
@@ -365,7 +404,7 @@ const DropHandler = ({ addComponent, onImportFile, onImportImageFile }: {
               if (parsed && Array.isArray(parsed.nodes)) {
                 useStore.getState().updateScene(parsed);
                 if (Array.isArray(parsed.noteCards)) {
-                  (window as any)._physics_setNoteCards?.(parsed.noteCards);
+                  physicsGlobals._physics_setNoteCards?.(parsed.noteCards);
                 }
               }
             } catch (err) {
@@ -389,7 +428,7 @@ const DropHandler = ({ addComponent, onImportFile, onImportImageFile }: {
       }
 
       // 2. Sidebar component drag
-      const type = e.dataTransfer?.getData('type') as any;
+      const type = e.dataTransfer?.getData('type') as AddComponentType | undefined;
       if (!type) return;
       
       const rect = gl.domElement.getBoundingClientRect();
@@ -441,9 +480,9 @@ const CAMERA_CONFIG = { position: [0.8, 0.6, 0.8] as [number, number, number], f
 
 const getSyncedSceneGraph = (
   scene: SceneGraph,
-  model: any,
-  data: any,
-  mujoco: any
+  model: unknown,
+  data: SyncData | null,
+  mujoco: SyncMujoco | null
 ): SceneGraph => {
   if (!model || !data || !mujoco) return scene;
 
@@ -465,8 +504,8 @@ const getSyncedSceneGraph = (
 
     const bodyId = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY.value, node.name);
     
-    let currentWorldPos = parentWorldPos.clone();
-    let currentWorldQuat = parentWorldQuat.clone();
+    const currentWorldPos = parentWorldPos.clone();
+    const currentWorldQuat = parentWorldQuat.clone();
 
     if (bodyId !== -1) {
       const px = data.xpos[bodyId * 3];
@@ -532,6 +571,10 @@ const DOCS_TABS = [
     { id: 'resize', label: '📏 Resize Component' },
     { id: 'offset', label: '📍 Position Offset' },
   ]},
+  { group: 'Modelling', items: [
+    { id: 'lattice', label: '🔲 Lattice Modelling' },
+    { id: 'gestures', label: '⌨️ Scale, Inset & Modal Keys' },
+  ]},
   { group: 'Fabrication', items: [
     { id: 'zeroing', label: '🎯 Machine Setup & Zeroing' },
   ]},
@@ -566,7 +609,7 @@ const DocsInfoButton = ({ tab, onOpen, className = '', size = 'w-3.5 h-3.5' }: {
 
 
 
-function generateScadForNode(node: any): string {
+function generateScadForNode(node: SceneNode): string {
   const geom = node.geoms?.[0];
   if (!geom) return '// No geometry found';
   
@@ -717,10 +760,36 @@ function replaceVarInCode(code: string, varName: string, newValue: number): stri
   return lines.join('\n');
 }
 
-function App() {
-  if (typeof window !== 'undefined') {
-    (window as any).useStore = useStore;
+// Helper to find a node by ID in hierarchy
+function findNodeById(nodes: SceneNode[], targetId: string): SceneNode | null {
+  for (const node of nodes) {
+    if (node.id === targetId) return node;
+    if (node.children) {
+      const res = findNodeById(node.children, targetId);
+      if (res) return res;
+    }
   }
+  return null;
+}
+
+// Helper to get recursive world position of a node
+function getNodeWorldPos(nodes: SceneNode[], targetId: string, currentOffset: [number, number, number] = [0, 0, 0]): [number, number, number] | null {
+  for (const node of nodes) {
+    const nodeWorld: [number, number, number] = [
+      currentOffset[0] + node.pos[0],
+      currentOffset[1] + node.pos[1],
+      currentOffset[2] + node.pos[2]
+    ];
+    if (node.id === targetId) return nodeWorld;
+    if (node.children) {
+      const childResult = getNodeWorldPos(node.children, targetId, nodeWorld);
+      if (childResult) return childResult;
+    }
+  }
+  return null;
+}
+
+function App() {
   useMuJoCoInit();
   const [darkMode, setDarkMode] = useState(() => {
     if (typeof window !== 'undefined') {
@@ -775,6 +844,8 @@ function App() {
   const [isContourSliceModalOpen, setIsContourSliceModalOpen] = useState(false);
   const [isReliefCarveModalOpen, setIsReliefCarveModalOpen] = useState(false);
   const [isMoldModalOpen, setIsMoldModalOpen] = useState(false);
+  const [isSolidModalOpen, setIsSolidModalOpen] = useState(false);
+  const [isCastModalOpen, setIsCastModalOpen] = useState(false);
   // The machine setup lives in the store rather than in local state: the bottom
   // bar opens it, and the export modals link to it when a job needs a machine
   // that is not connected yet.
@@ -794,8 +865,15 @@ function App() {
   }, []);
   const [presetNameInput, setPresetNameInput] = useState('');
   const [activeGeomIndex, setActiveGeomIndex] = useState(0);
-  const [noteCards, setNoteCards] = useState<{ id: string; markdown: string; minimized: boolean; x: number; y: number }[]>([]);
-  const [copilotMessages, setCopilotMessages] = useState<any[]>([]);
+  const [noteCards, setNoteCards] = useState<NoteCard[]>(() => {
+    const initialPreset = useStore.getState().activePreset;
+    if (initialPreset && !initialPreset.startsWith('user:')) {
+      const card = makePresetNoteCard(initialPreset);
+      return card ? [card] : [];
+    }
+    return [];
+  });
+  const [copilotMessages, setCopilotMessages] = useState<CopilotMessage[]>([]);
   const [editingCardId, setEditingCardId] = useState<string | null>(null);
   const [scadText, setScadText] = useState('');
   const [scadError, setScadError] = useState<string | null>(null);
@@ -826,7 +904,7 @@ function App() {
         const data = await res.json();
         const rawModels = data.data || data.models || [];
         if (Array.isArray(rawModels) && rawModels.length > 0) {
-          const formatted = rawModels.map((m: any) => ({
+          const formatted = rawModels.map((m: { id: string; name?: string; display_name?: string }) => ({
             id: m.id,
             name: m.display_name || m.name || m.id
           }));
@@ -850,8 +928,8 @@ function App() {
       const data = await res.json();
       if (data.models && Array.isArray(data.models)) {
         const validModels = data.models
-          .filter((m: any) => !m.supportedGenerationMethods || m.supportedGenerationMethods.includes('generateContent'))
-          .map((m: any) => ({
+          .filter((m: GeminiModelInfo) => !m.supportedGenerationMethods || m.supportedGenerationMethods.includes('generateContent'))
+          .map((m: GeminiModelInfo) => ({
             id: m.name.replace(/^models\//, ''),
             name: m.displayName || m.name.replace(/^models\//, '')
           }));
@@ -947,9 +1025,9 @@ function App() {
       try {
         const compiled = await compileSCAD(updated);
         useStore.getState().updateNodeScad(selectedNodeId, updated, compiled);
-      } catch (e: any) {
+      } catch (e) {
         console.error('OpenSCAD Auto-Compilation Error:', e);
-        setScadError(e.message || 'Auto-compilation failed.');
+        setScadError((e as Error).message || 'Auto-compilation failed.');
       } finally {
         setIsScadCompiling(false);
         setSlidingValues({});
@@ -959,22 +1037,24 @@ function App() {
 
   useEffect(() => {
     return () => {
+      /* eslint-disable react-hooks/exhaustive-deps */
       if (compileTimeoutRef.current) {
         window.clearTimeout(compileTimeoutRef.current);
       }
       if (updateCodeTimeoutRef.current) {
         window.clearTimeout(updateCodeTimeoutRef.current);
       }
+      /* eslint-enable react-hooks/exhaustive-deps */
     };
   }, []);
 
   // Expose noteCards and copilotMessages state to MCP bridge and noteCard manager
   useEffect(() => {
-    (window as any)._physics_getNoteCards = () => noteCards;
-    (window as any)._physics_setNoteCards = (cards: typeof noteCards) => setNoteCards(cards);
-    (window as any)._physics_getCopilotMessages = () => copilotMessages;
-    (window as any)._physics_setCopilotMessages = (msgs: typeof copilotMessages) => setCopilotMessages(msgs);
-    (window as any)._physics_store = useStore;
+    physicsGlobals._physics_getNoteCards = () => noteCards;
+    physicsGlobals._physics_setNoteCards = (cards: typeof noteCards) => setNoteCards(cards);
+    physicsGlobals._physics_getCopilotMessages = () => copilotMessages;
+    physicsGlobals._physics_setCopilotMessages = (msgs: typeof copilotMessages) => setCopilotMessages(msgs);
+    physicsGlobals._physics_store = useStore;
   }, [noteCards, copilotMessages]);
 
 
@@ -1023,10 +1103,11 @@ function App() {
     deleteNodeGeom, setGeomCsgOp,
     sculptNodeId, setSculptNodeId, setSculptBase,
     latticeNodeId, setLatticeNodeId,
+    extraSelectedIds, combineBodies,
     undo, redo, undoStack, redoStack
   } = useStore();
 
-  const [activeWeakSpot, setActiveWeakSpot] = useState<any>(null);
+  const [activeWeakSpot, setActiveWeakSpot] = useState<WeakSpot | null>(null);
 
   // Keyboard Shortcuts Handler (Delete / Backspace key to delete selected body)
   useEffect(() => {
@@ -1034,13 +1115,41 @@ function App() {
       if (['INPUT', 'TEXTAREA', 'SELECT'].includes((e.target as HTMLElement).tagName)) {
         return;
       }
+      if ((e.target as HTMLElement)?.isContentEditable) return;
+
       if (e.key === 'Delete' || e.key === 'Backspace') {
         const selId = useStore.getState().selectedNodeId;
         if (selId) {
           useStore.getState().deleteNode(selId);
           useStore.getState().setSelectedNodeId(null);
         }
+        return;
       }
+
+      /*
+        Undo and redo on the keyboard.
+
+        There has been an undo BUTTON in the toolbar since the beginning and
+        never a shortcut for it, which is the one place a person does not look:
+        Ctrl-Z is muscle memory, and when it does nothing the conclusion is that
+        the app cannot undo rather than that it is on a button.
+
+        Bubble phase on purpose. The lattice and sculpt tools each keep their own
+        history and take Ctrl-Z in the CAPTURE phase while they are open, so
+        while you are modelling it takes back modelling; they stop the event only
+        when they actually had something to undo, so once their history runs out
+        it arrives here and steps the document back instead.
+      */
+      if (!(e.metaKey || e.ctrlKey)) return;
+      const key = e.key.toLowerCase();
+      // Ctrl-Y as well as Ctrl-Shift-Z: the first is what Windows does, the
+      // second is what everything else does, and both are cheap to answer.
+      const redoing = key === 'y' || (key === 'z' && e.shiftKey);
+      if (!redoing && key !== 'z') return;
+      e.preventDefault();
+      const store = useStore.getState();
+      if (redoing) store.redo();
+      else store.undo();
     };
 
     window.addEventListener('keydown', handleKeyDown);
@@ -1103,20 +1212,11 @@ function App() {
     };
   }, [selectedNodeId]);
 
-  // Show the note card for whichever preset is active on first load
-  useEffect(() => {
-    if (activePreset && !activePreset.startsWith('user:')) {
-      const card = makePresetNoteCard(activePreset);
-      setNoteCards(card ? [card] : []);
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // intentionally only on mount
-
   // What the (always-unselected) preset dropdown shows when closed.
   const activePresetLabel = useMemo(() => {
     if (!activePreset) return '✏️ Modified scene';
     if (activePreset.startsWith('user:')) return `💾 ${activePreset.replace('user:', '')}`;
-    const preset = PRESETS[activePreset as keyof typeof PRESETS] as any;
+    const preset = PRESETS[activePreset as keyof typeof PRESETS] as PresetEntry | undefined;
     if (!preset) return '✏️ Modified scene';
     return `${preset.emoji ? `${preset.emoji} ` : ''}${preset.name}`;
   }, [activePreset]);
@@ -1230,14 +1330,14 @@ function App() {
       console.error('Failed to export JSON', e);
       alert('Failed to export JSON');
     }
-  }, [sceneGraph, model, data, mujoco, noteCards]);
+  }, [sceneGraph, model, data, mujoco, noteCards, copilotMessages]);
 
   const threeSceneRef = useRef<THREE.Scene | null>(null);
   // The EffectComposer instance, so a screenshot can render through the same
   // post-processing pipeline the viewport uses (AO included) instead of a raw
   // gl.render() that would silently skip every effect — see SCREENSHOT in
   // useMCPBridge.
-  const composerRef = useRef<any>(null);
+  const composerRef = useRef<ComponentRef<typeof EffectComposer> | null>(null);
 
   /**
    * The scene, as meshes ready to be written to a file.
@@ -1274,7 +1374,7 @@ function App() {
       if (!(obj as THREE.Mesh).isMesh) return;
       const mesh = obj as THREE.Mesh;
       const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-      const standard = mats.find(m => (m as any).isMeshStandardMaterial) as THREE.MeshStandardMaterial | undefined;
+      const standard = mats.find(m => (m as THREE.MeshStandardMaterial).isMeshStandardMaterial) as THREE.MeshStandardMaterial | undefined;
       // Only lit surfaces are the model. The brush ring, the CSG ghosts and the
       // shadow catcher are all basic/shadow materials and stay out of the file.
       if (!standard) return;
@@ -1347,7 +1447,7 @@ function App() {
       if (activePreset.startsWith('user:')) {
         baseName = activePreset.replace('user:', '').trim();
       } else {
-        const presetObj = PRESETS[activePreset as keyof typeof PRESETS] as any;
+        const presetObj = PRESETS[activePreset as keyof typeof PRESETS] as PresetEntry | undefined;
         baseName = presetObj?.name || activePreset;
       }
     }
@@ -1356,7 +1456,7 @@ function App() {
       baseName = 'physics_scene';
     }
 
-    return baseName.toLowerCase().replace(/[^a-z0-9_\-]+/g, '_').replace(/^_+|_+$/g, '') || 'physics_scene';
+    return baseName.toLowerCase().replace(/[^a-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '') || 'physics_scene';
   }, [noteCards, activePreset]);
 
   const downloadBlob = useCallback((blob: Blob, filename: string) => {
@@ -1425,8 +1525,8 @@ function App() {
     const input = document.createElement('input');
     input.type = 'file';
     input.accept = '.json';
-    input.onchange = (e: any) => {
-      const file = e.target.files[0];
+    input.onchange = (e: Event) => {
+      const file = (e.target as HTMLInputElement).files?.[0];
       if (!file) return;
       const reader = new FileReader();
       reader.onload = (e) => {
@@ -1441,7 +1541,7 @@ function App() {
           } else {
             alert('Invalid scene JSON format. Must contain a "nodes" array.');
           }
-        } catch (err) {
+        } catch {
           alert('Failed to parse JSON file');
         }
       };
@@ -1452,38 +1552,9 @@ function App() {
 
 
 
-  // Helper to find a node by ID in hierarchy
-  const findNodeById = useCallback((nodes: any[], targetId: string): any | null => {
-    for (const node of nodes) {
-      if (node.id === targetId) return node;
-      if (node.children) {
-        const res = findNodeById(node.children, targetId);
-        if (res) return res;
-      }
-    }
-    return null;
-  }, []);
-
-  // Helper to get recursive world position of a node
-  const getNodeWorldPos = useCallback((nodes: any[], targetId: string, currentOffset: [number, number, number] = [0, 0, 0]): [number, number, number] | null => {
-    for (const node of nodes) {
-      const nodeWorld: [number, number, number] = [
-        currentOffset[0] + node.pos[0],
-        currentOffset[1] + node.pos[1],
-        currentOffset[2] + node.pos[2]
-      ];
-      if (node.id === targetId) return nodeWorld;
-      if (node.children) {
-        const childResult = getNodeWorldPos(node.children, targetId, nodeWorld);
-        if (childResult) return childResult;
-      }
-    }
-    return null;
-  }, []);
-
   const allPulleyWheels = useMemo(() => {
-    const list: any[] = [];
-    const traverse = (nodes: any[]) => {
+    const list: SceneNode[] = [];
+    const traverse = (nodes: SceneNode[]) => {
       if (!nodes) return;
       for (const n of nodes) {
         if (n.isPulleyWheel) list.push(n);
@@ -1495,8 +1566,8 @@ function App() {
   }, [sceneGraph]);
 
   const allJointedNodes = useMemo(() => {
-    const list: any[] = [];
-    const traverse = (nodes: any[]) => {
+    const list: SceneNode[] = [];
+    const traverse = (nodes: SceneNode[]) => {
       if (!nodes) return;
       for (const n of nodes) {
         if (n.joints && n.joints.length > 0 && !n.isPulleyWheel) {
@@ -1519,8 +1590,8 @@ function App() {
   // Find selected node details
   const selectedNode = useMemo(() => {
     if (!selectedNodeId) return null;
-    let found = null;
-    const traverse = (nodes: any[]) => {
+    let found: SceneNode | null = null;
+    const traverse = (nodes: SceneNode[]) => {
       if (!nodes) return;
       for (const node of nodes) {
         if (node.id === selectedNodeId) found = node;
@@ -1528,31 +1599,34 @@ function App() {
       }
     };
     traverse(sceneGraph.nodes);
-    return found as any;
+    return found;
   }, [selectedNodeId, sceneGraph]);
 
   // Sync selected node's script and scad code into local text state
   useEffect(() => {
-    if (selectedNode) {
-      setScriptText(selectedNode.script || '');
-      setScriptError(null);
-      
-      let currentScad = selectedNode.scad;
-      if (currentScad === undefined && (selectedNode.id.includes('openscad') || selectedNode.id.includes('scad'))) {
-        currentScad = generateScadForNode(selectedNode);
-        // Persist the generated scad field to the node in store
-        useStore.getState().updateNode(selectedNode.id, { scad: currentScad });
+    const timer = setTimeout(() => {
+      if (selectedNode) {
+        setScriptText(selectedNode.script || '');
+        setScriptError(null);
+        
+        let currentScad = selectedNode.scad;
+        if (currentScad === undefined && (selectedNode.id.includes('openscad') || selectedNode.id.includes('scad'))) {
+          currentScad = generateScadForNode(selectedNode);
+          // Persist the generated scad field to the node in store
+          useStore.getState().updateNode(selectedNode.id, { scad: currentScad });
+        }
+        
+        setScadText(currentScad || '');
+        setScadError(null);
+      } else {
+        setScriptText('');
+        setScriptError(null);
+        setScadText('');
+        setScadError(null);
       }
-      
-      setScadText(currentScad || '');
-      setScadError(null);
-    } else {
-      setScriptText('');
-      setScriptError(null);
-      setScadText('');
-      setScadError(null);
-    }
-  }, [selectedNodeId, selectedNode?.id, selectedNode?.scad, selectedNode?.script]);
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [selectedNodeId, selectedNode]);
 
   const handleSaveScript = useCallback(() => {
     if (!selectedNode) return;
@@ -1563,8 +1637,8 @@ function App() {
       }
       setScriptError(null);
       updateNodeScript(selectedNode.id, scriptText);
-    } catch (e: any) {
-      setScriptError(e.message || 'Compilation Error');
+    } catch (e) {
+      setScriptError((e as Error).message || 'Compilation Error');
     }
   }, [selectedNode, scriptText, updateNodeScript]);
 
@@ -1575,15 +1649,15 @@ function App() {
     try {
       const compiled = await compileSCAD(scadText);
       useStore.getState().updateNodeScad(selectedNode.id, scadText, compiled);
-    } catch (e: any) {
+    } catch (e) {
       console.error('OpenSCAD Compilation Error:', e);
-      setScadError(e.message || 'Compilation failed.');
+      setScadError((e as Error).message || 'Compilation failed.');
     } finally {
       setIsScadCompiling(false);
     }
   }, [selectedNode, scadText]);
 
-  const handleSimplifyMesh = useCallback((g: any) => {
+  const handleSimplifyMesh = useCallback((g: SceneGeom) => {
     try {
       setMeshSimplifierError(null);
       if (!g.vertices || g.vertices.length < 9) {
@@ -1714,9 +1788,9 @@ function App() {
 
       // 7. Update the sceneGraph with the new simplified vertices/faces
       const newScene = cloneSceneGraph(useStore.getState().sceneGraph);
-      const traverse = (nodes: any[]): boolean => {
+      const traverse = (nodes: SceneNode[]): boolean => {
         for (const node of nodes) {
-          const idx = node.geoms?.findIndex((ng: any) => ng.name === g.name);
+          const idx = node.geoms?.findIndex((ng) => ng.name === g.name);
           if (idx >= 0) {
             node.geoms[idx] = {
               ...node.geoms[idx],
@@ -1734,9 +1808,9 @@ function App() {
       useStore.getState().updateScene(newScene);
       
       setMeshSimplifierGeom(null);
-    } catch (err: any) {
+    } catch (err) {
       console.error('Mesh simplification failed:', err);
-      setMeshSimplifierError(err.message || 'Mesh simplification failed.');
+      setMeshSimplifierError((err as Error).message || 'Mesh simplification failed.');
     }
   }, [simplifyRatio]);
 
@@ -1754,7 +1828,7 @@ function App() {
     // only THIS body moves, regardless of whether playing or paused. This
     // avoids the full forceReset recompile (from updateNodePos alone) which
     // was snapping all other bodies back to their initial positions.
-    const freeJoint = selectedNode.joints?.find((j: any) => j.type === 'free');
+    const freeJoint = selectedNode.joints?.find((j) => j.type === 'free');
     if (freeJoint) {
       getPhysicsWorkerClient().setQpos(freeJoint.name, axis, cleanVal);
     }
@@ -1811,13 +1885,14 @@ function App() {
    * stroke would be a dialog in front of the one action every new sculpt starts
    * with — trying the shapes to see which one fits.
    */
-  const handleSculptBaseClick = (node: any, base: SculptBaseId, label: string) => {
+  const handleSculptBaseClick = (node: SceneNode, base: SculptBaseId, label: string) => {
     if ((node.sculptBase || 'sphere') === base) return;
     if (node.sculptEdited && !window.confirm(`Start over from the ${label} base? The sculpting on this body will be discarded.`)) return;
     setSculptBase(node.id, base);
   };
 
-  const renderHierarchyNode = useCallback((node: any, depth: number = 0): React.ReactNode => {
+  const renderHierarchyNode = useCallback((rootNode: SceneNode, rootDepth: number = 0): React.ReactNode => {
+    const render = (node: SceneNode, depth: number): React.ReactNode => {
     const isSelected = selectedNodeId === node.id;
     
     // Choose pretty visual emoji
@@ -1866,7 +1941,7 @@ function App() {
             listing each segment would swamp the tree, so skip them. */}
         {node.geoms && node.geoms.length > 1 && !node.isCurve && (
           <div className="pl-3 ml-2.5 border-l border-slate-200 dark:border-slate-800/60 flex flex-col gap-0.5 mb-1">
-            {node.geoms.map((g: any, idx: number) => {
+            {node.geoms.map((g, idx) => {
               const isGeomSelected = isSelected && activeGeomIndex === idx;
               // Generated boolean output is derived data, not something to select
               // and edit — the primitives above it are the real controls.
@@ -1913,12 +1988,14 @@ function App() {
 
         {node.children && node.children.length > 0 && (
           <div className="pl-3 ml-2.5 border-l border-slate-200 dark:border-slate-800/60 flex flex-col gap-0.5">
-            {node.children.map((child: any) => renderHierarchyNode(child, depth + 1))}
+            {node.children.map((child) => render(child, depth + 1))}
           </div>
         )}
       </div>
     );
-  }, [selectedNodeId, setSelectedNodeId, findNodeById, setIsLeftSidebarOpen, activeGeomIndex, setActiveGeomIndex]);
+    };
+    return render(rootNode, rootDepth);
+  }, [selectedNodeId, setSelectedNodeId, setIsLeftSidebarOpen, activeGeomIndex, setActiveGeomIndex]);
 
   useMCPBridge();
   // Regenerates a boolean body's mesh whenever its primitives change.
@@ -2041,26 +2118,27 @@ function App() {
             >
               <option value="" disabled hidden>{activePresetLabel}</option>
               <optgroup label="⬜ Built-in Presets" className="bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300">
-                {Object.entries(PRESETS).map(([id, p]: [string, any]) => (
+                {Object.entries(PRESETS as Record<string, PresetEntry>).map(([id, p]) => (
                   <option key={id} value={id}>{p.emoji ? `${p.emoji} ` : ''}{p.name}</option>
                 ))}
               </optgroup>
 
               {/* User Presets */}
               {(() => {
+                let keys: string[];
                 try {
-                  const keys = listUserPresetNames();
-                  if (keys.length === 0) return null;
-                  return (
-                    <optgroup label="📁 Saved Presets" className="bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300">
-                      {keys.sort().map(k => (
-                        <option key={`user:${k}`} value={`user:${k}`}>💾 {k}</option>
-                      ))}
-                    </optgroup>
-                  );
+                  keys = listUserPresetNames();
                 } catch {
                   return null;
                 }
+                if (keys.length === 0) return null;
+                return (
+                  <optgroup label="📁 Saved Presets" className="bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300">
+                    {keys.sort().map(k => (
+                      <option key={`user:${k}`} value={`user:${k}`}>💾 {k}</option>
+                    ))}
+                  </optgroup>
+                );
               })()}
             </select>
 
@@ -2161,52 +2239,15 @@ function App() {
               <Download className="w-3.5 h-3.5" />
             </button>
 
+            {/* Exporting is done from the status bar, beside the machine it
+                is exported for. This stays because it is where people look
+                for it, and it sends them there. */}
             <button
-              onClick={exportStl}
+              onClick={() => window.dispatchEvent(new CustomEvent(SHOW_EXPORTS_EVENT))}
               className="flex items-center justify-center p-1 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 transition-colors focus:outline-none cursor-pointer"
-              title="3D Print (STL) — geometry only. STL cannot carry colour; use 3MF if the model is painted."
+              title="Export for a printer, laser or router. The buttons are in the bar along the bottom, next to the machine chooser."
             >
               <Printer className="w-3.5 h-3.5" />
-            </button>
-
-            <button
-              onClick={export3mf}
-              className="flex items-center justify-center p-1 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700 text-fuchsia-600 dark:text-fuchsia-400 transition-colors focus:outline-none cursor-pointer"
-              title="3D Print in colour (3MF) — carries painted colour two ways: per-vertex for viewers, and a filament slot per triangle for a multi-material slicer."
-            >
-              <Package className="w-3.5 h-3.5" />
-            </button>
-
-            <button
-              onClick={() => setIsLaserCutModalOpen(true)}
-              className="flex items-center justify-center p-1 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700 text-amber-600 dark:text-amber-400 transition-colors focus:outline-none cursor-pointer"
-              title="Laser / CNC (SVG)"
-            >
-              <LaserIcon className="w-3.5 h-3.5" />
-            </button>
-
-            <button
-              onClick={() => setIsContourSliceModalOpen(true)}
-              className="flex items-center justify-center p-1 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700 text-emerald-600 dark:text-emerald-400 transition-colors focus:outline-none cursor-pointer"
-              title="Contour Slices (Stacked Relief Map, SVG)"
-            >
-              <Layers className="w-3.5 h-3.5" />
-            </button>
-
-            <button
-              onClick={() => setIsReliefCarveModalOpen(true)}
-              className="flex items-center justify-center p-1 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700 text-blue-600 dark:text-blue-400 transition-colors focus:outline-none cursor-pointer"
-              title="3D Relief Carve (CNC Router)"
-            >
-              <Mountain className="w-3.5 h-3.5" />
-            </button>
-
-            <button
-              onClick={() => setIsMoldModalOpen(true)}
-              className="flex items-center justify-center p-1 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700 text-purple-600 dark:text-purple-400 transition-colors focus:outline-none cursor-pointer"
-              title="Export 3D Printable Casting Mold (STL)"
-            >
-              <Box className="w-3.5 h-3.5" />
             </button>
 
             <button
@@ -2713,7 +2754,7 @@ function App() {
               onDragStart={(e) => handleDragStart(e, 'ring')}
               onClick={() => handleAddComponentClick('ring')}
               className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-blue-400 dark:hover:border-blue-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
-              title="Ring (ellipsoid with an ellipsoid subtracted — a boolean body you can reshape)"
+              title="Ring (an ellipsoid with a second ellipsoid subtracted; a boolean body you can reshape)"
             >
               <div className="p-1.5 bg-rose-50 dark:bg-rose-950/30 rounded-lg mb-1 group-hover:scale-105 transition-transform">
                 <Donut className="w-4 h-4 text-rose-600 dark:text-rose-400" />
@@ -2727,7 +2768,7 @@ function App() {
               onDragStart={(e) => handleDragStart(e, 'sculpt')}
               onClick={() => handleAddSculptClick()}
               className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-blue-400 dark:hover:border-blue-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
-              title="Sculpt (a ball of clay you push into shape by hand — detail is added as you brush)"
+              title="Sculpt (a ball of clay you push into shape by hand; detail is added as you brush)"
             >
               <div className="p-1.5 bg-sky-50 dark:bg-sky-950/30 rounded-lg mb-1 group-hover:scale-105 transition-transform">
                 <Paintbrush className="w-4 h-4 text-sky-600 dark:text-sky-400" />
@@ -2742,7 +2783,7 @@ function App() {
               onDragStart={(e) => handleDragStart(e, 'lattice')}
               onClick={() => handleAddLatticeClick()}
               className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-blue-400 dark:hover:border-blue-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
-              title="Lattice (connect points on a 3D grid into faces — exact dimensions, and smoothing to turn a coarse cage into curves)"
+              title="Lattice (connect points on a 3D grid into faces, with exact dimensions and optional smoothing)"
             >
               <div className="p-1.5 bg-indigo-50 dark:bg-indigo-950/30 rounded-lg mb-1 group-hover:scale-105 transition-transform">
                 <Grid3x3 className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
@@ -2756,7 +2797,7 @@ function App() {
               onDragStart={(e) => handleDragStart(e, 'curve')}
               onClick={() => handleAddComponentClick('curve')}
               className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-blue-400 dark:hover:border-blue-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
-              title="Curve (Rigid spline track — balls roll along it)"
+              title="Curve (rigid spline track that balls roll along)"
             >
               <div className="p-1.5 bg-orange-50 dark:bg-orange-950/30 rounded-lg mb-1 group-hover:scale-105 transition-transform">
                 <ChartSpline className="w-4 h-4 text-orange-600 dark:text-orange-400" />
@@ -2988,12 +3029,12 @@ function App() {
             style={paintMode ? { cursor: 'crosshair' } : undefined}
             gl={{ preserveDrawingBuffer: true, logarithmicDepthBuffer: true }}
             onCreated={(state) => {
-              (window as any)._physics_gl = state.gl;
+              physicsGlobals._physics_gl = state.gl;
               // The scene and camera as well as the renderer, so a screenshot
               // can draw a frame rather than read whatever the canvas last
               // happened to hold — see SCREENSHOT in useMCPBridge.
-              (window as any)._physics_scene = state.scene;
-              (window as any)._physics_camera = state.camera;
+              physicsGlobals._physics_scene = state.scene;
+              physicsGlobals._physics_camera = state.camera;
               const canvas = state.gl.domElement;
               // Without this, a lost WebGL context (GPU driver hiccup, memory
               // pressure, etc.) leaves the canvas permanently blank with no way
@@ -3051,8 +3092,14 @@ function App() {
               shadow-camera-far={12}
               shadow-normalBias={0.03}
             />
+            {/* Double-sided: drei's Grid defaults to BackSide, so the graph
+                paper vanished the moment the camera dropped below the floor —
+                which it does whenever you orbit under a part to look at its
+                underside, and losing the ground is losing the only reference
+                for where the part is. */}
             <Grid
               infiniteGrid
+              side={THREE.DoubleSide}
               fadeDistance={12}
               fadeStrength={1}
               sectionSize={(gridCellSizeMm / 1000) * 5}
@@ -3095,6 +3142,9 @@ function App() {
                 isPlaying={isPlaying} 
               />
             )}
+            {/* Outside the compile-keyed visuals on purpose: a lattice edit
+                recompiles, and the editor must outlive its own commits. */}
+            <LatticeEditorLayer model={model} data={data} mujoco={mujoco} />
             {model && data && mujoco && (
               <SceneVisuals 
                 key={`visuals-${recompileId}`}
@@ -3120,6 +3170,8 @@ function App() {
             <CameraController />
             <DragInteractionController />
             <PaintStrokeController />
+            <ObjectGestureController />
+            <MeasureTool />
 
             {/* Subtle contact-shadow AO — reads as "more depth", not a style
                 change. The composer takes over the render loop from r3f, so a
@@ -3129,7 +3181,7 @@ function App() {
             <EffectComposer
               ref={(instance) => {
                 composerRef.current = instance;
-                (window as any)._physics_composer = instance;
+                physicsGlobals._physics_composer = instance;
               }}
               multisampling={0}
               enableNormalPass
@@ -3182,7 +3234,7 @@ function App() {
             </button>
             <button
               onClick={() => toggleWireframe()}
-              title="Draw every body as the edges of its triangles. Shows the tessellation a slicer or a CAM job actually receives — and lets you see through the model to what is inside it."
+              title="Draw every body as the edges of its triangles. Shows the tessellation a slicer or CAM job receives, and lets you see through the model."
               className={`px-2.5 py-1 rounded text-[10px] font-bold tracking-wide transition-all cursor-pointer flex items-center gap-1 ${
                 wireframe
                   ? 'bg-violet-500 text-white shadow-xs'
@@ -3195,10 +3247,9 @@ function App() {
             <select
               value={gridCellSizeMm}
               onChange={(e) => setGridCellSizeMm(parseFloat(e.target.value))}
-              title="Grid cell size — a display setting only, does not change any body's dimensions"
+              title="Grid cell size (display only; does not change any body's dimensions)"
               className="px-1.5 py-1 rounded text-[10px] font-bold tracking-wide bg-transparent text-slate-650 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer outline-none border-none"
             >
-              <option value={0.1}>0.1mm grid</option>
               <option value={1}>1mm grid</option>
               <option value={10}>10mm grid</option>
               <option value={100}>100mm grid</option>
@@ -3209,7 +3260,7 @@ function App() {
           {/* Sculpt tool palette — only mounted while a body is open for sculpting */}
           <SculptPanel />
           {/* Lattice tool palette — likewise, only while a cage is open */}
-          <LatticePanel />
+          <LatticePanel onOpenDocs={() => openDocs('lattice')} />
 
           {/* Floating Mechanical & 3D Print Failure HUD */}
           <PrintAnalysisHUD activeSpotId={activeWeakSpot?.id} onSelectSpot={setActiveWeakSpot} />
@@ -3287,6 +3338,59 @@ function App() {
             </h2>
             
             <div className="flex flex-col gap-4">
+                {/* Combining. A boolean is a program over ONE body's shapes, so
+                    two bodies dragged in from the sidebar can never cut each
+                    other however they overlap — the shapes have to be on one
+                    body first. Shift-click a second body and this appears. */}
+                {extraSelectedIds.length > 0 && (
+                  <div className="p-3 bg-white dark:bg-slate-900 rounded-lg border border-indigo-200 dark:border-indigo-900 shadow-sm flex flex-col gap-2">
+                    <h3 className="text-sm font-medium text-slate-700 dark:text-slate-200 flex items-center gap-1.5">
+                      <Donut className="w-3.5 h-3.5 text-indigo-500" />
+                      Combine {extraSelectedIds.length + 1} bodies
+                    </h3>
+                    <p className="text-[10px] text-slate-400 leading-snug">
+                      The other {extraSelectedIds.length === 1 ? 'body is' : 'bodies are'} merged into
+                      <strong> {selectedNode.name || selectedNode.id}</strong>, keeping
+                      {extraSelectedIds.length === 1 ? ' its' : ' their'} place in the world. One body
+                      comes out.
+                    </p>
+                    {/* Said out loud, because a merged body takes its subtree
+                        with it and losing a child body you spent time on is not
+                        something to find out afterwards. */}
+                    {(() => {
+                      const withKids = extraSelectedIds.filter((id) => {
+                        const n = findNodeById(sceneGraph.nodes, id);
+                        return (n?.children?.length ?? 0) > 0;
+                      });
+                      if (withKids.length === 0) return null;
+                      return (
+                        <p className="text-[10px] leading-snug text-amber-600 dark:text-amber-400">
+                          <strong>Anything parented to {withKids.length === 1 ? 'it' : 'them'} goes too.</strong>{' '}
+                          {withKids.join(', ')} {withKids.length === 1 ? 'has' : 'have'} child bodies, and
+                          merging removes the body they hang from. Undo puts it all back.
+                        </p>
+                      );
+                    })()}
+                    <div className="flex gap-1">
+                      {([
+                        ['union', '＋ Add', 'One body made of both shapes.'],
+                        ['difference', '－ Subtract', 'The other shapes are cut out of this one.'],
+                        ['intersection', '∩ Intersect', 'Only the overlap is kept.'],
+                      ] as const).map(([op, label, hint]) => (
+                        <button
+                          key={op}
+                          type="button"
+                          onClick={() => combineBodies(selectedNode.id, extraSelectedIds, op)}
+                          title={hint}
+                          className="flex-1 py-1.5 rounded-md text-[10px] font-semibold bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-indigo-100 dark:hover:bg-indigo-950/50 hover:text-indigo-700 dark:hover:text-indigo-300 cursor-pointer transition-colors"
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 {/* Lattice: only for bodies that ARE one. Unlike sculpting,
                     this cannot be opened on an arbitrary mesh — the cage is the
                     document and an imported STL does not have one. */}
@@ -3303,19 +3407,49 @@ function App() {
                   </button>
                 )}
 
+                {/* Why the Edit Lattice button is gone. Without this the body
+                    simply stops offering the tools it offered a minute ago. */}
+                {selectedNode.latticeBaked && !selectedNode.isLattice && (
+                  <p className="text-[10px] leading-snug text-slate-400 px-1">
+                    <strong className="text-slate-500">Lattice applied.</strong> The mesh is now edited
+                    directly; the cage is kept in the file but does not drive the shape.
+                    <span className="whitespace-nowrap"> Ctrl+Z</span> puts it back.
+                  </p>
+                )}
+
                 {/* Sculpt: offered for any body carrying a mesh, not only for one
                     that started as clay — an imported STL or a boolean result is
-                    a perfectly good thing to push around by hand. */}
-                {selectedNode.geoms?.some((g: any) => g.type === 'mesh' && g.renderVertices?.length) && (
+                    a perfectly good thing to push around by hand.
+
+                    On a LATTICE body it first applies the cage. The two tools
+                    cannot share a mesh: the cage rebuilds it from scratch on
+                    every edit, so sculpting under a live cage is work that
+                    disappears the next time a face moves — silently, and long
+                    after the decision that cost it. Baking says so up front,
+                    and it is an ordinary undo step. */}
+                {selectedNode.geoms?.some((g) => g.type === 'mesh' && g.renderVertices?.length) && (
                   <button
                     type="button"
-                    onClick={() => setSculptNodeId(selectedNode.id)}
+                    onClick={() => {
+                      if (selectedNode.isLattice) {
+                        if (!window.confirm(
+                          'Sculpting applies the lattice: this mesh stops being built from its cage, '
+                          + 'and the lattice tools close on it for good. The cage stays in the file, '
+                          + 'and Ctrl+Z puts it back. Carry on?')) return;
+                        useStore.getState().bakeLattice(selectedNode.id);
+                      }
+                      setSculptNodeId(selectedNode.id);
+                    }}
                     disabled={sculptNodeId === selectedNode.id}
                     className="flex items-center justify-center gap-2 w-full py-2 rounded-lg text-xs font-bold transition-all bg-sky-600 hover:bg-sky-500 disabled:bg-slate-200 disabled:text-slate-400 text-white cursor-pointer disabled:cursor-default"
-                    title="Open the sculpting tools on this mesh. Pauses the simulation."
+                    title={selectedNode.isLattice
+                      ? 'Applies the lattice first: the cage stops driving this mesh, and sculpting takes over. Undoable.'
+                      : 'Open the sculpting tools on this mesh. Pauses the simulation.'}
                   >
                     <Paintbrush className="w-3.5 h-3.5" />
-                    {sculptNodeId === selectedNode.id ? 'Sculpting…' : 'Sculpt This Mesh'}
+                    {sculptNodeId === selectedNode.id
+                      ? 'Sculpting…'
+                      : selectedNode.isLattice ? 'Apply Lattice & Sculpt' : 'Sculpt This Mesh'}
                   </button>
                 )}
 
@@ -3349,7 +3483,7 @@ function App() {
                     </p>
                     {selectedNode.sculptEdited && (
                       <p className="text-[10px] leading-snug text-amber-600">
-                        This one has been sculpted — changing the base starts it over.
+                        This body has been sculpted. Changing the base starts it over.
                       </p>
                     )}
                   </div>
@@ -3441,7 +3575,7 @@ function App() {
                     {(() => {
                       // For dynamic mesh bodies, pos[2] = centroid Z, not base Z.
                       // Compute centroid offset from renderVertices so slider 0 = base on ground.
-                      const dynMesh = selectedNode.geoms?.find((g: any) => g.dynamic && g.renderVertices);
+                      const dynMesh = selectedNode.geoms?.find((g) => g.dynamic && g.renderVertices);
                       const centroidZ = dynMesh
                         ? -Math.min(...(dynMesh.renderVertices as number[]).filter((_: number, i: number) => i % 3 === 2))
                         : 0;
@@ -3532,6 +3666,19 @@ function App() {
                 </div>
               </div>
 
+              {/* Scale. Beside position and rotation because it is the third
+                  thing you do to a component and the fourth pane down is a long
+                  way to go for it — the Resize Component card further down keeps
+                  the same control alongside the per-primitive dimensions.
+                  Every kind of body, in the same place and with the same
+                  control — a primitive is asked in its own terms (a cylinder's
+                  radius is X and Y, its length is Z) and a generated shape has
+                  the numbers it was generated FROM scaled too, so nothing
+                  springs back the next time a parameter is touched. A gear is
+                  the exception: it is defined by its tooth count and has to
+                  stay in step with whatever it runs against. */}
+              {selectedNode.teeth === undefined && <ScaleCard nodeId={selectedNode.id} />}
+
               {/* Joint Type Configuration */}
               <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-2">
                 <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 mb-1 flex items-center justify-between">
@@ -3542,7 +3689,7 @@ function App() {
                   value={selectedNode.joints?.length > 0 ? selectedNode.joints[0].type : 'fixed'}
                   onChange={(e) => {
                     const jointType = e.target.value;
-                    let newJoints: any[] = [];
+                    let newJoints: SceneJoint[] = [];
                     if (jointType !== 'fixed') {
                       const name = `${selectedNode.id}_joint`;
                       if (jointType === 'free') {
@@ -3717,7 +3864,7 @@ function App() {
 
               {/* Gear Config */}
               {selectedNode.id.includes('gear') && selectedNode.geoms && (() => {
-                const pegGeom = selectedNode.geoms.find((g: any) => g.name.includes('peg'));
+                const pegGeom = selectedNode.geoms.find((g) => g.name.includes('peg'));
                 const gearRadius = selectedNode.geoms[0].size[0];
                 return (
                   <div className="flex flex-col gap-4">
@@ -3835,7 +3982,7 @@ function App() {
               })()}
 
               {/* Damping, Limits, and Actuator Target Speed properties */}
-              {selectedNode.joints?.map((joint: any, i: number) => (
+              {selectedNode.joints?.map((joint, i) => (
                 <div key={`joint-${i}`} className="flex flex-col gap-4">
                   {(joint.damping !== undefined || joint.type === 'free') && (
                     <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-2">
@@ -4019,7 +4166,6 @@ function App() {
                 const activeIndex = (activeGeomIndex >= 0 && activeGeomIndex < selectedNode.geoms.length) ? activeGeomIndex : 0;
                 const geom = selectedNode.geoms[activeIndex];
                 if (!geom) return null;
-                const hasMeshGeom = selectedNode.geoms?.some((g: any) => g.type === 'mesh');
                 return (
                   <div key="geom-properties" className="flex flex-col gap-4">
                     {/* Sub-Geometry dropdown selector if there are multiple geoms */}
@@ -4031,7 +4177,7 @@ function App() {
                           onChange={(e) => setActiveGeomIndex(parseInt(e.target.value))}
                           className="w-full px-2.5 py-1.5 border border-slate-200 rounded text-xs bg-white text-slate-700 outline-none focus:border-blue-500 cursor-pointer font-medium"
                         >
-                          {selectedNode.geoms.map((g: any, idx: number) => (
+                          {selectedNode.geoms.map((g, idx) => (
                             // Generated boolean geoms aren't editable — a body with
                             // 16 sector colliders would otherwise bury its two real
                             // shapes at the bottom of this list. Values stay the
@@ -4057,52 +4203,12 @@ function App() {
                           <DocsInfoButton tab="resize" onOpen={openDocs} />
                         </h3>
 
-                        {hasMeshGeom && (
-                          <div className="flex flex-col gap-2">
+                        {selectedNode.teeth === undefined && (
+                          <div className="flex flex-col gap-2 pb-1 border-b border-slate-100">
                             <label className="text-xs font-medium text-slate-500 flex justify-between">
-                              Uniform Scale <span>scales all sub-geoms together</span>
+                              Scale <span>applies to every sub-geom together</span>
                             </label>
-                            <input
-                              type="range"
-                              min="0.1"
-                              max="3.0"
-                              step="0.05"
-                              defaultValue="1.0"
-                              onMouseUp={(e) => {
-                                const scale = parseFloat((e.target as HTMLInputElement).value);
-                                (e.target as HTMLInputElement).value = '1.0';
-                                const newScene = cloneSceneGraph(useStore.getState().sceneGraph);
-                                const find = (nodes: any[]): any => {
-                                  for (const n of nodes) {
-                                    if (n.id === selectedNode.id) return n;
-                                    const c = find(n.children);
-                                    if (c) return c;
-                                  }
-                                  return null;
-                                };
-                                const node = find(newScene.nodes);
-                                if (!node) return;
-                                // Scale this node and all children recursively
-                                const scaleNode = (n: any) => {
-                                  scaleMeshGeoms(n, scale);
-                                  for (const g of n.geoms) {
-                                    if (g.type === 'mesh') continue;
-                                    if (g.size) g.size = g.size.map((s: number) => s * scale);
-                                    if (g.pos) g.pos = g.pos.map((p: number) => p * scale);
-                                    if (g.fromto) g.fromto = g.fromto.map((f: number) => f * scale);
-                                  }
-                                  // Scale child body pos offsets too
-                                  for (const child of (n.children || [])) {
-                                    if (child.pos) child.pos = child.pos.map((p: number) => p * scale);
-                                    scaleNode(child);
-                                  }
-                                };
-                                scaleNode(node);
-                                useStore.getState().updateScene(newScene);
-                              }}
-                              className="w-full accent-violet-500 cursor-pointer"
-                            />
-                            <p className="text-[10px] text-slate-400">Slider resets to 1× after release — each drag applies multiplicative scale to all sub-geoms.</p>
+                            <ScaleControls nodeId={selectedNode.id} />
                           </div>
                         )}
                         
@@ -4487,7 +4593,7 @@ function App() {
                               Closed loop (join ends)
                             </label>
                             <div className="flex flex-col gap-1.5">
-                              <label className="text-xs font-medium text-slate-500">Control Points (x, y, z) — drag the blue handles in the viewport, or edit here</label>
+                              <label className="text-xs font-medium text-slate-500">Control Points (x, y, z). Drag the blue handles in the viewport, or edit here.</label>
                               {(selectedNode.curvePoints || []).map((pt: number[], pi: number) => (
                                 <div key={pi} className="flex items-center gap-1">
                                   {[0, 1, 2].map((axis) => (
@@ -4973,7 +5079,7 @@ function App() {
                               onChange={(e) => {
                                 const si = geom.solimp ? [...geom.solimp] : [0.99, 0.9999, 0.0001, 0.5, 2];
                                 si[0] = parseFloat(e.target.value);
-                                updateNodeGeom(selectedNode.id, { solimp: si as any }, activeIndex);
+                                updateNodeGeom(selectedNode.id, { solimp: si }, activeIndex);
                               }}
                             />
                             <span className="text-[10px] text-slate-400 leading-tight">Controls how much the contact force can deviate from ideal. Higher = harder, less penetration.</span>
@@ -5027,7 +5133,7 @@ function App() {
                             onChange={(e) => {
                               const enabled = e.target.checked;
                               const newScene = cloneSceneGraph(sceneGraph);
-                              const traverse = (nodes: any[]) => {
+                              const traverse = (nodes: SceneNode[]) => {
                                 if (!nodes) return false;
                                 for (const node of nodes) {
                                   if (node.id === selectedNode.id) {
@@ -5070,7 +5176,7 @@ function App() {
                                   onChange={(e) => {
                                     const val = e.target.value || undefined;
                                     const newScene = cloneSceneGraph(sceneGraph);
-                                    const traverse2 = (nodes: any[]) => {
+                                    const traverse2 = (nodes: SceneNode[]) => {
                                       if (!nodes) return false;
                                       for (const node of nodes) {
                                         if (node.id === selectedNode.id) {
@@ -5119,7 +5225,7 @@ function App() {
                                         else ratio = selectedNode.coupleRatio !== undefined ? selectedNode.coupleRatio : -1.0;
 
                                         const newScene = cloneSceneGraph(sceneGraph);
-                                        const traverse2 = (nodes: any[]) => {
+                                        const traverse2 = (nodes: SceneNode[]) => {
                                           if (!nodes) return false;
                                           for (const node of nodes) {
                                             if (node.id === selectedNode.id) {
@@ -5149,7 +5255,7 @@ function App() {
                                         const val = parseFloat(e.target.value);
                                         if (isNaN(val)) return;
                                         const newScene = cloneSceneGraph(sceneGraph);
-                                        const traverse2 = (nodes: any[]) => {
+                                        const traverse2 = (nodes: SceneNode[]) => {
                                           if (!nodes) return false;
                                           for (const node of nodes) {
                                             if (node.id === selectedNode.id) {
@@ -5220,16 +5326,16 @@ function App() {
               {/* Boolean Modifiers (CSG) — subtract/intersect one primitive with another */}
               {(() => {
                 const source = csgSourceGeoms(selectedNode);
-                const solids = source.filter((g: any) => g.type !== 'plane');
-                const ops = source.filter((g: any) => g.csg === 'difference' || g.csg === 'intersection');
+                const solids = source.filter((g) => g.type !== 'plane');
+                const ops = source.filter((g) => g.csg === 'difference' || g.csg === 'intersection');
                 const isCsg = !!selectedNode.csgEnabled && ops.length > 0;
                 // Offer the section on anything made of primitives; a body that's
                 // already a single hand-authored mesh has nothing to boolean with.
                 if (!isCsg && (solids.length === 0 || selectedNode.scad !== undefined || selectedNode.isCurve || selectedNode.isPulleyRope)) return null;
 
                 const mode = selectedNode.csgCollision ?? 'auto';
-                const colliders = (selectedNode.geoms || []).filter((g: any) => g.csgDerived === 'collider');
-                const visual = (selectedNode.geoms || []).find((g: any) => g.csgDerived === 'visual');
+                const colliders = (selectedNode.geoms || []).filter((g) => g.csgDerived === 'collider');
+                const visual = (selectedNode.geoms || []).find((g) => g.csgDerived === 'visual');
                 const stale = isCsg && csgHashOf(selectedNode) !== selectedNode.csgHash;
                 const effectiveMode = colliders.length > 0 ? 'decompose' : (visual ? (visual.role === 'visual' ? 'primitives' : 'hull') : null);
 
@@ -5240,14 +5346,26 @@ function App() {
                       {stale && <span className="ml-auto text-[10px] font-semibold text-amber-600 animate-pulse">recompiling…</span>}
                     </h3>
                     <p className="text-[10px] text-slate-400 -mt-1 leading-snug">
-                      Set a shape to <strong>subtract</strong> and it's cut out of the others instead of added to them —
-                      an ellipsoid with a slimmer ellipsoid punched through it is a ring. Subtracted shapes are drawn
-                      as red outlines. To add another shape to this body, drag one in from the left sidebar.
+                      <strong>Cut</strong> takes a shape out of this body: click the part where you want it, then pick
+                      a shape. Subtracted shapes are drawn as red outlines. The list below is every shape this body is
+                      made of; switching one to <strong>subtract</strong> turns it into a hole.
                     </p>
+
+                    {/* Cut. The only way to put a shape ON a body: dragging one
+                        in from the sidebar makes a CHILD BODY, whose geoms
+                        belong to a different boolean program and are invisible
+                        to this one — which is what the line above used to
+                        advise, wrongly, for years. */}
+                    <div className="flex flex-col gap-1.5 pb-1 border-b border-slate-100">
+                      <label className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">
+                        Cut a shape out of it
+                      </label>
+                      <CutControls node={selectedNode} compact />
+                    </div>
 
                     {/* Per-geom operator */}
                     <div className="flex flex-col gap-1.5">
-                      {source.map((g: any) => {
+                      {source.map((g) => {
                         const idx = (selectedNode.geoms || []).indexOf(g);
                         return (
                           <div key={g.name || idx} className="flex items-center gap-1.5">
@@ -5258,15 +5376,15 @@ function App() {
                                 least one positive shape, or there is nothing to
                                 cut into and no geometry left to emit. */}
                             {(() => {
-                              const otherPositives = source.filter((o: any, i: number) =>
+                              const otherPositives = source.filter((o, i) =>
                                 i !== source.indexOf(g) && (!o.csg || o.csg === 'union')).length;
                               const canSubtract = otherPositives > 0;
                               return (
                                 <select
                                   value={g.csg || 'union'}
-                                  onChange={(e) => setGeomCsgOp(selectedNode.id, idx, e.target.value as any)}
+                                  onChange={(e) => setGeomCsgOp(selectedNode.id, idx, e.target.value as CsgOp)}
                                   className="px-1.5 py-1 border border-slate-200 rounded text-[10px] bg-white text-slate-700 outline-none focus:border-blue-500 cursor-pointer font-semibold"
-                                  title={canSubtract ? undefined : 'This body has no other shape to cut into — drag another shape in first'}
+                                  title={canSubtract ? undefined : 'This is the body\u2019s only shape, so there is nothing for it to be cut out of. Use Cut above to take a shape out of it.'}
                                 >
                                   <option value="union">＋ add</option>
                                   <option value="difference" disabled={!canSubtract}>－ subtract</option>
@@ -5293,20 +5411,20 @@ function App() {
                           <label className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">Collision</label>
                           <select
                             value={mode}
-                            onChange={(e) => updateNode(selectedNode.id, { csgCollision: e.target.value as any })}
+                            onChange={(e) => updateNode(selectedNode.id, { csgCollision: e.target.value as SceneNode['csgCollision'] })}
                             className="w-full px-2.5 py-1.5 border border-slate-200 rounded text-xs bg-white text-slate-700 outline-none focus:border-blue-500 cursor-pointer font-medium"
                           >
-                            <option value="auto">Auto — decompose if there's a hole axis</option>
-                            <option value="decompose">Convex sectors — holes collide</option>
-                            <option value="primitives">Source primitives — holes are solid</option>
-                            <option value="hull">Convex hull — whole shape is solid</option>
+                            <option value="auto">Auto (decompose if there is a hole axis)</option>
+                            <option value="decompose">Convex sectors (holes collide)</option>
+                            <option value="primitives">Source primitives (holes are solid)</option>
+                            <option value="hull">Convex hull (whole shape is solid)</option>
                           </select>
                           {/* MuJoCo hulls every mesh geom, so this trade-off is
                               unavoidable and worth stating outright rather than
                               letting it surprise someone mid-experiment. */}
                           <p className="text-[10px] text-slate-400 leading-snug mt-0.5">
                             {effectiveMode === 'decompose'
-                              ? `Colliding as ${colliders.length} convex sectors — the hole is real, and a peg can pass through it. Each sector spans a chord of the inner surface, so it intrudes ~${(100 * (1 - Math.cos(Math.PI / (selectedNode.csgSectors ?? CSG_DEFAULT_SECTORS)))).toFixed(1)}% of the hole radius.`
+                              ? `Colliding as ${colliders.length} convex sectors. The hole is real, and a peg can pass through it. Each sector spans a chord of the inner surface, so it intrudes ~${(100 * (1 - Math.cos(Math.PI / (selectedNode.csgSectors ?? CSG_DEFAULT_SECTORS)))).toFixed(1)}% of the hole radius.`
                               : effectiveMode === 'hull'
                                 ? 'One mesh geom that both draws and collides. MuJoCo takes its convex hull, so every hole and dip is filled for contact.'
                                 : 'The boolean mesh is visual only; the source primitives collide. Exact convex contact, but holes are solid.'}
@@ -5330,7 +5448,7 @@ function App() {
                               <label className="text-xs font-medium text-slate-500">Hole axis</label>
                               <select
                                 value={selectedNode.csgHoleAxis ?? 'auto'}
-                                onChange={(e) => updateNode(selectedNode.id, { csgHoleAxis: e.target.value as any })}
+                                onChange={(e) => updateNode(selectedNode.id, { csgHoleAxis: e.target.value as SceneNode['csgHoleAxis'] })}
                                 className="px-2 py-1 border border-slate-200 rounded text-[11px] bg-white text-slate-700 outline-none focus:border-blue-500 cursor-pointer font-medium"
                               >
                                 <option value="auto">Auto</option>
@@ -5399,10 +5517,10 @@ function App() {
 
               {/* Mesh Properties — shown when the body or any child has a mesh geom */}
               {(() => {
-                const allGeoms: any[] = [];
-                const collectGeoms = (node: any) => { node.geoms?.forEach((g: any) => allGeoms.push({...g, _fromChildId: node.id !== selectedNode.id ? node.id : null})); node.children?.forEach(collectGeoms); };
+                const allGeoms: (SceneGeom & { _fromChildId: string | null })[] = [];
+                const collectGeoms = (node: SceneNode) => { node.geoms?.forEach((g) => allGeoms.push({...g, _fromChildId: node.id !== selectedNode.id ? node.id : null})); node.children?.forEach(collectGeoms); };
                 collectGeoms(selectedNode);
-                if (!allGeoms.some((g: any) => g.type === 'mesh')) return null;
+                if (!allGeoms.some((g) => g.type === 'mesh')) return null;
                 return (
                 <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-3">
                   <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 mb-1 flex items-center gap-1.5">
@@ -5411,7 +5529,7 @@ function App() {
                   <p className="text-[10px] text-slate-400 -mt-1 leading-snug">
                     Static mesh geoms are <strong>visual only</strong>. Primitive geoms handle physics. Dynamic meshes simulate and collide.
                   </p>
-                  {allGeoms.map((g: any) => (
+                  {allGeoms.map((g) => (
                     <div key={g.name} className="flex flex-col gap-1.5 p-2 bg-slate-50 rounded border border-slate-100">
                       <div className="flex items-center justify-between">
                         <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">
@@ -5436,7 +5554,7 @@ function App() {
                                 const fLines = [];
                                 for (let i = 0; i < g.faces.length; i += 3)
                                   fLines.push(`${g.faces[i]} ${g.faces[i+1]} ${g.faces[i+2]}`);
-                                setMeshEditorText(`# vertices (x y z, one per line — Three.js Y-up space)\n${vLines.join('\n')}\n\n# faces (i j k triangle indices, one per line)\n${fLines.join('\n')}`);
+                                setMeshEditorText(`# vertices (x y z, one per line, Three.js Y-up space)\n${vLines.join('\n')}\n\n# faces (i j k triangle indices, one per line)\n${fLines.join('\n')}`);
                                 setMeshEditorError(null);
                                 setMeshEditorGeom(g.name);
                                 setMeshSimplifierGeom(null); // Close simplifier if open
@@ -5472,7 +5590,7 @@ function App() {
                                   if (a!==b && b!==c && a!==c) filteredFaces.push(a,b,c);
                                 }
                                 const newScene = cloneSceneGraph(useStore.getState().sceneGraph);
-                                const traverse = (nodes: any[]): boolean => { for (const node of nodes) { const idx = node.geoms?.findIndex((ng: any) => ng.name === g.name); if (idx >= 0) { node.geoms[idx] = {...node.geoms[idx], vertices: newVerts, faces: filteredFaces}; return true; } if (traverse(node.children)) return true; } return false; };
+                                const traverse = (nodes: SceneNode[]): boolean => { for (const node of nodes) { const idx = node.geoms?.findIndex((ng) => ng.name === g.name); if (idx >= 0) { node.geoms[idx] = {...node.geoms[idx], vertices: newVerts, faces: filteredFaces}; return true; } if (traverse(node.children)) return true; } return false; };
                                 traverse(newScene.nodes);
                                 useStore.getState().updateScene(newScene);
                               }}
@@ -5484,7 +5602,7 @@ function App() {
                             <button
                               onClick={() => downloadMeshGeomStl(g, g.name || selectedNode.name || 'mesh')}
                               className="flex items-center justify-center gap-1 px-2 py-1.5 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded text-[10px] font-semibold text-emerald-700 transition-colors cursor-pointer"
-                              title="Download this geom on its own as a binary STL, in millimetres — not the whole scene the toolbar's STL export writes."
+                              title="Download this geom on its own as a binary STL, in millimetres. The toolbar's STL export writes the whole scene."
                             >
                               <Download className="w-3 h-3" /> STL
                             </button>
@@ -5517,7 +5635,7 @@ function App() {
                                         continue;
                                       }
                                       const nums = line.split(/[\s,]+/).map(Number);
-                                      if (nums.length !== 3 || nums.some(isNaN)) throw new Error(`Bad line: "${raw.trim()}" — expected exactly 3 numbers`);
+                                      if (nums.length !== 3 || nums.some(isNaN)) throw new Error(`Bad line: "${raw.trim()}": expected exactly 3 numbers`);
                                       if (section === 'vertices') newVerts.push(...nums);
                                       else newFaces.push(...nums);
                                     }
@@ -5538,9 +5656,9 @@ function App() {
                                       }
                                     }
                                     const newScene = cloneSceneGraph(useStore.getState().sceneGraph);
-                                    const traverse = (nodes: any[]): boolean => {
+                                    const traverse = (nodes: SceneNode[]): boolean => {
                                       for (const node of nodes) {
-                                        const idx = node.geoms?.findIndex((ng: any) => ng.name === g.name);
+                                        const idx = node.geoms?.findIndex((ng) => ng.name === g.name);
                                         if (idx >= 0) {
                                           node.geoms[idx] = {...node.geoms[idx], vertices: newVerts, faces: newFaces, ...(newRenderVerts ? {renderVertices: newRenderVerts} : {})};
                                           return true;
@@ -5553,8 +5671,8 @@ function App() {
                                     useStore.getState().updateScene(newScene);
                                     setMeshEditorError(null);
                                     setMeshEditorGeom(null);
-                                  } catch (e: any) {
-                                    setMeshEditorError(e.message);
+                                  } catch (e) {
+                                    setMeshEditorError((e as Error).message);
                                   }
                                 }}
                                 className="px-3 py-1.5 bg-violet-600 hover:bg-violet-700 text-white rounded text-[10px] font-semibold cursor-pointer transition-colors"
@@ -5873,8 +5991,8 @@ function App() {
                           a.download = `${selectedNode.name || 'openscad_shape'}.stl`;
                           a.click();
                           URL.revokeObjectURL(url);
-                        } catch (e: any) {
-                          alert('Failed to export OpenSCAD STL: ' + e.message);
+                        } catch (e) {
+                          alert('Failed to export OpenSCAD STL: ' + (e as Error).message);
                         } finally {
                           setIsCompilerLoading(false);
                         }
@@ -6072,7 +6190,7 @@ api.applyForce([force, 0, 0]);
                       ]},
                       { group: 'Environment & utilities', rows: [
                         ['api.getTime()', 'Simulation time in seconds.'],
-                        ['api.isKeyPressed(key)', "True while held — 'space', 'w', 'arrowup'…"],
+                        ['api.isKeyPressed(key)', "True while held: 'space', 'w', 'arrowup'…"],
                         ['api.getWind()', 'Current wind as [windX, windY].'],
                         ['api.log(msg)', 'Log to the browser console.'],
                         ['api.id / api.name', "This component's id and display name."],
@@ -6160,7 +6278,7 @@ api.applyForce([force, 0, 0]);
                   <div className="flex flex-col gap-4">
                     <h3 className="font-bold text-slate-800 text-lg flex items-center gap-1.5">🪐 Gravity, Active Joints & Inertia</h3>
                     <p className="text-xs text-slate-600 leading-relaxed">
-                      In the physics solver (powered by MuJoCo), gravity exerts a continuous force vector downward along the Z-axis. However, how components react depends entirely on their <strong>Degrees of Freedom (joints)</strong> and <strong>Inertia</strong>:
+                      Gravity pulls downward along the Z axis. How a component reacts depends on its <strong>joints</strong> and <strong>inertia</strong>:
                     </p>
                     <div className="bg-slate-50 border border-slate-200/60 rounded-xl p-4 flex flex-col gap-3">
                       <div className="text-xs">
@@ -6169,11 +6287,11 @@ api.applyForce([force, 0, 0]);
                       </div>
                       <div className="text-xs border-t border-slate-150 pt-3">
                         <strong className="text-slate-700">⚙️ Hinge Gears (Rotational Hinge Joints)</strong>
-                        <p className="text-slate-500 mt-1">Gears are locked to a single pivot point. Because gravity acts straight down through the pivot, it produces zero torque around the rotation axis. Symmetrical shapes also have their center of mass balanced perfectly at the pivot, preventing gravity from inducing rotation.</p>
+                        <p className="text-slate-500 mt-1">A gear turns about a single pivot. Gravity acts through the pivot of a symmetrical gear, so it produces no torque about the axis and the gear does not turn on its own.</p>
                       </div>
                       <div className="text-xs border-t border-slate-150 pt-3">
                         <strong className="text-slate-700">📦 Unconstrained Bodies (Free Joints)</strong>
-                        <p className="text-slate-500 mt-1">A floating box (like the gold cube) has a free joint, allowing full 3D physics simulation to pull it down naturally.</p>
+                        <p className="text-slate-500 mt-1">A body with a free joint moves in all six degrees of freedom and falls under gravity.</p>
                       </div>
                     </div>
                   </div>
@@ -6181,22 +6299,22 @@ api.applyForce([force, 0, 0]);
 
                 {docsTab === 'coupling' && (
                   <div className="flex flex-col gap-4">
-                    <h3 className="font-bold text-slate-800 text-lg flex items-center gap-1.5">⚙️ Mechanical Joint Coupling vs Collision</h3>
+                    <h3 className="font-bold text-slate-800 text-lg flex items-center gap-1.5">⚙️ Mechanical Joint Coupling</h3>
                     <p className="text-xs text-slate-600 leading-relaxed">
-                      Why does this application use mathematical joint coupling rather than direct tooth-on-tooth rigid collisions?
+                      Gears and pinion-racks are driven by a joint constraint rather than by tooth-on-tooth contact.
                     </p>
                     <div className="bg-slate-50 border border-slate-200/60 rounded-xl p-4 flex flex-col gap-3">
                       <div className="text-xs">
-                        <strong className="text-slate-700">⚡ The Jitter & Penetration Problem</strong>
-                        <p className="text-slate-500 mt-1">In discrete time-step simulators, rigid teeth can slightly overlap between steps. Resolving these penetrations produces massive outward impulses, causing gears to lock up, vibrate, or explode.</p>
+                        <strong className="text-slate-700">⚡ Tooth contact</strong>
+                        <p className="text-slate-500 mt-1">Rigid teeth overlap slightly between time steps. Resolving those penetrations produces large impulses that make gears lock up, vibrate, or fly apart.</p>
                       </div>
                       <div className="text-xs border-t border-slate-150 pt-3">
-                        <strong className="text-slate-700">🔗 Mathematical Coupling</strong>
-                        <p className="text-slate-500 mt-1">By applying a mathematical joint relationship (bilateral constraint), the system simulates perfectly smooth, 100% stable, and silent transmission of energy at all speeds.</p>
+                        <strong className="text-slate-700">🔗 Joint coupling</strong>
+                        <p className="text-slate-500 mt-1">A bilateral joint constraint ties the two joint rates together by the gear ratio, giving smooth and stable transmission at any speed.</p>
                       </div>
                       <div className="text-xs border-t border-slate-150 pt-3">
-                        <strong className="text-slate-700">🎯 Dynamic Proximity Engine</strong>
-                        <p className="text-slate-500 mt-1">To ensure realistic spatial mechanics, the coupling is proximity-aware! Gears and pinion-racks only couple when they are touching. You can toggle this constraint using the "Allow Mechanical Coupling" checkbox in the sidebar.</p>
+                        <strong className="text-slate-700">🎯 Proximity</strong>
+                        <p className="text-slate-500 mt-1">Gears and pinion-racks only couple when they are close enough to mesh. Untick <strong>Allow Mechanical Coupling</strong> in the sidebar to turn the constraint off for a body.</p>
                       </div>
                     </div>
                   </div>
@@ -6204,18 +6322,18 @@ api.applyForce([force, 0, 0]);
 
                 {docsTab === 'collision' && (
                   <div className="flex flex-col gap-4">
-                    <h3 className="font-bold text-slate-800 text-lg flex items-center gap-1.5">💥 Collision Physics & Solid vs Ephemeral</h3>
+                    <h3 className="font-bold text-slate-800 text-lg flex items-center gap-1.5">💥 Solid and Ephemeral Bodies</h3>
                     <p className="text-xs text-slate-600 leading-relaxed">
-                      You can toggle whether components behave as solid, physical obstacles or ephemeral visual guides:
+                      A component can be a solid obstacle or a visual-only guide:
                     </p>
                     <div className="bg-slate-50 border border-slate-200/60 rounded-xl p-4 flex flex-col gap-3">
                       <div className="text-xs">
                         <strong className="text-slate-700">🛑 Solid Mode (Collision Enabled)</strong>
-                        <p className="text-slate-500 mt-1">The body participates in the contact solver. It blocks other objects, pushes them, and participates fully in normal physics collisions.</p>
+                        <p className="text-slate-500 mt-1">The body takes part in contact. It blocks and pushes other objects.</p>
                       </div>
                       <div className="text-xs border-t border-slate-150 pt-3">
                         <strong className="text-slate-700">👻 Ephemeral Mode (Collision Disabled)</strong>
-                        <p className="text-slate-500 mt-1">Sets <code>contype="0"</code> and <code>conaffinity="0"</code>. The body becomes completely non-solid. Other items can pass straight through it. Excellent for creating decorative supports or visual-only guides!</p>
+                        <p className="text-slate-500 mt-1">Sets <code>contype="0"</code> and <code>conaffinity="0"</code>. Other bodies pass straight through it. Use it for decorative supports or visual guides.</p>
                       </div>
                     </div>
                   </div>
@@ -6223,18 +6341,18 @@ api.applyForce([force, 0, 0]);
 
                  {docsTab === 'friction' && (
                   <div className="flex flex-col gap-4">
-                    <h3 className="font-bold text-slate-800 text-lg flex items-center gap-1.5">🛷 Dynamic Friction Tuning</h3>
+                    <h3 className="font-bold text-slate-800 text-lg flex items-center gap-1.5">🛷 Friction</h3>
                     <p className="text-xs text-slate-600 leading-relaxed">
-                      Friction coefficients dictate how easily objects slide against each other:
+                      Friction coefficients set how easily objects slide against each other:
                     </p>
                     <div className="bg-slate-50 border border-slate-200/60 rounded-xl p-4 flex flex-col gap-3">
                       <div className="text-xs">
                         <strong className="text-slate-700">🌍 Floor Friction</strong>
-                        <p className="text-slate-500 mt-1">Adjusts the grip of the ground plane. Setting it to 0.0 makes the ground an frictionless ice-sheet. Increased values yield high-traction surfaces.</p>
+                        <p className="text-slate-500 mt-1">The grip of the ground plane. 0.0 is frictionless; higher values give more traction.</p>
                       </div>
                       <div className="text-xs border-t border-slate-150 pt-3">
                         <strong className="text-slate-700">📦 Component Friction</strong>
-                        <p className="text-slate-500 mt-1">Sets the sliding friction coefficient of the selected object. Lower values allow materials to slip easily past support shelves and guide Rails, while high values prevent slipping.</p>
+                        <p className="text-slate-500 mt-1">The sliding friction coefficient of the selected body. Lower values slip more easily; higher values grip.</p>
                       </div>
                     </div>
                   </div>
@@ -6305,7 +6423,7 @@ api.setAngularVelocity([0, 15.0, 0], 'cart'); // Sets angular velocities`}
                   <div className="flex flex-col gap-4">
                     <h3 className="font-bold text-slate-800 text-lg flex items-center gap-1.5">🚀 Launch Velocity & Launch Spin</h3>
                     <p className="text-xs text-slate-600 leading-relaxed">
-                      These sliders set the <strong>initial conditions</strong> of a free body — the velocity it already has at
+                      These sliders set the <strong>initial conditions</strong> of a free body: the velocity it has at
                       the instant the simulation starts. They are not a continuous force: gravity, drag and contacts take over
                       immediately after t = 0. Press <strong>Reset</strong> to re-apply them.
                     </p>
@@ -6316,7 +6434,7 @@ api.setAngularVelocity([0, 15.0, 0], 'cart'); // Sets angular velocities`}
                       </div>
                       <div className="text-xs border-t border-slate-150 pt-3">
                         <strong className="text-slate-700">🌀 Launch Spin (rad/s)</strong>
-                        <p className="text-slate-500 mt-1">Angular velocity about each axis — <strong>Roll</strong> (X), <strong>Pitch</strong> (Y), <strong>Yaw</strong> (Z). One full turn per second is 2π ≈ 6.28 rad/s. Spin is conserved in free flight, so a tumbling body keeps tumbling until something touches it.</p>
+                        <p className="text-slate-500 mt-1">Angular velocity about each axis: <strong>Roll</strong> (X), <strong>Pitch</strong> (Y), <strong>Yaw</strong> (Z). One full turn per second is 2π ≈ 6.28 rad/s. Spin is conserved in free flight, so a tumbling body keeps tumbling until something touches it.</p>
                       </div>
                       <div className="text-xs border-t border-slate-150 pt-3">
                         <strong className="text-slate-700">🎓 Why only free joints?</strong>
@@ -6334,7 +6452,7 @@ api.setAngularVelocity([0, 15.0, 0], 'cart'); // Sets angular velocities`}
                   <div className="flex flex-col gap-4">
                     <h3 className="font-bold text-slate-800 text-lg flex items-center gap-1.5">🔗 Joint Damping</h3>
                     <p className="text-xs text-slate-600 leading-relaxed">
-                      Damping is a resistive force proportional to <strong>velocity</strong> — the joint equivalent of friction in
+                      Damping is a resistive force proportional to <strong>velocity</strong>, like friction in
                       a hinge or air resistance on a pendulum. It always opposes motion, so it removes energy from the system and
                       never adds any.
                     </p>
@@ -6372,7 +6490,7 @@ api.setAngularVelocity([0, 15.0, 0], 'cart'); // Sets angular velocities`}
                       </div>
                       <div className="text-xs border-t border-slate-150 pt-3">
                         <strong className="text-slate-700">🎯 Spring Rest Position (q₀)</strong>
-                        <p className="text-slate-500 mt-1">The pose the spring pulls toward — degrees for a hinge, metres for a slider. With K = 0 this has no effect at all.</p>
+                        <p className="text-slate-500 mt-1">The pose the spring pulls toward, in degrees for a hinge or metres for a slider. With K = 0 this has no effect at all.</p>
                       </div>
                       <div className="text-xs border-t border-slate-150 pt-3">
                         <strong className="text-slate-700">🤝 Pair it with damping</strong>
@@ -6380,7 +6498,7 @@ api.setAngularVelocity([0, 15.0, 0], 'cart'); // Sets angular velocities`}
                       </div>
                       <div className="text-xs border-t border-slate-150 pt-3">
                         <strong className="text-slate-700">🔒 Joint Limits</strong>
-                        <p className="text-slate-500 mt-1">A hard range the joint cannot travel beyond — a knee that will not bend backwards, or a drawer that stops when closed. Limits are enforced by the constraint solver, so they hold firmly without needing a huge spring.</p>
+                        <p className="text-slate-500 mt-1">A hard range the joint cannot travel beyond, like a knee that will not bend backwards or a drawer that stops when closed. Limits are enforced by the constraint solver, so they hold firmly without needing a huge spring.</p>
                       </div>
                     </div>
                   </div>
@@ -6390,37 +6508,37 @@ api.setAngularVelocity([0, 15.0, 0], 'cart'); // Sets angular velocities`}
                   <div className="flex flex-col gap-4">
                     <h3 className="font-bold text-slate-800 text-lg flex items-center gap-1.5">🧪 Physical Material</h3>
                     <p className="text-xs text-slate-600 leading-relaxed">
-                      Contacts here are not infinitely rigid — every touch is modelled as a stiff <strong>spring-damper</strong>.
+                      Every contact is modelled as a stiff <strong>spring-damper</strong>.
                       These six numbers shape that contact, and together they decide whether a body feels like steel, rubber or ice.
                     </p>
                     <div className="bg-slate-50 border border-slate-200/60 rounded-xl p-4 flex flex-col gap-3">
                       <div className="text-xs">
-                        <strong className="text-slate-700">⏱️ Contact Stiffness — <code className="font-mono">solref[0]</code></strong>
-                        <p className="text-slate-500 mt-1">The contact spring's <em>time constant</em> in seconds — how long it takes to correct a penetration. <strong>Lower is stiffer.</strong> Keep it at or above 5× the timestep (≈ 0.005 s); going lower makes contacts explosive and jittery.</p>
+                        <strong className="text-slate-700">⏱️ Contact Stiffness (<code className="font-mono">solref[0]</code>)</strong>
+                        <p className="text-slate-500 mt-1">The contact spring's <em>time constant</em> in seconds: how long it takes to correct a penetration. <strong>Lower is stiffer.</strong> Keep it at or above 5× the timestep (≈ 0.005 s); going lower makes contacts explosive and jittery.</p>
                       </div>
                       <div className="text-xs border-t border-slate-150 pt-3">
-                        <strong className="text-slate-700">🏀 Damping Ratio (Bounciness) — <code className="font-mono">solref[1]</code></strong>
+                        <strong className="text-slate-700">🏀 Damping Ratio, Bounciness (<code className="font-mono">solref[1]</code>)</strong>
                         <p className="text-slate-500 mt-1"><strong>1.0</strong> is critically damped: the body lands dead with no bounce. Values below 1 are underdamped and bounce, and <strong>0</strong> bounces the most. Around <strong>0.2</strong> gives a lively rubber ball.</p>
                       </div>
                       <div className="text-xs border-t border-slate-150 pt-3">
-                        <strong className="text-slate-700">🧱 Contact Impedance — <code className="font-mono">solimp[0]</code></strong>
+                        <strong className="text-slate-700">🧱 Contact Impedance (<code className="font-mono">solimp[0]</code>)</strong>
                         <p className="text-slate-500 mt-1">How strictly the solver enforces non-penetration, from 0 (soft and squishy) to 1 (rigid). Higher values mean less visible sinking under heavy loads, at the cost of a harder problem to solve. 0.99 is a good default.</p>
                       </div>
                       <div className="text-xs border-t border-slate-150 pt-3">
-                        <strong className="text-slate-700">🛷 Sliding Friction — <code className="font-mono">friction[0]</code></strong>
+                        <strong className="text-slate-700">🛷 Sliding Friction (<code className="font-mono">friction[0]</code>)</strong>
                         <p className="text-slate-500 mt-1">The classic Coulomb coefficient μ resisting tangential sliding. Ice is about 0.05, wood on wood about 0.4, rubber on tarmac over 1.0. A block only slides down a ramp once <em>tan θ &gt; μ</em>.</p>
                       </div>
                       <div className="text-xs border-t border-slate-150 pt-3">
-                        <strong className="text-slate-700">🔄 Torsional Friction — <code className="font-mono">friction[1]</code></strong>
-                        <p className="text-slate-500 mt-1">Resists spinning about the contact normal — a coin pirouetting on its face. Values are small because it scales with the contact patch. Raise it to stop tops spinning forever.</p>
+                        <strong className="text-slate-700">🔄 Torsional Friction (<code className="font-mono">friction[1]</code>)</strong>
+                        <p className="text-slate-500 mt-1">Resists spinning about the contact normal, like a coin pirouetting on its face. Values are small. Raise it to stop tops spinning forever.</p>
                       </div>
                       <div className="text-xs border-t border-slate-150 pt-3">
-                        <strong className="text-slate-700">⚽ Rolling Friction — <code className="font-mono">friction[2]</code></strong>
-                        <p className="text-slate-500 mt-1">Resists rolling. Without it a perfect sphere on a flat plane rolls forever, which looks wrong. Values are tiny — 0.0001 is usually enough to bring a ball to rest naturally.</p>
+                        <strong className="text-slate-700">⚽ Rolling Friction (<code className="font-mono">friction[2]</code>)</strong>
+                        <p className="text-slate-500 mt-1">Resists rolling. Without it a perfect sphere on a flat plane rolls forever. Values are tiny; 0.0001 is usually enough to bring a ball to rest.</p>
                       </div>
                       <div className="text-xs border-t border-slate-150 pt-3">
                         <strong className="text-slate-700">🤝 Contacts combine two bodies</strong>
-                        <p className="text-slate-500 mt-1">Both surfaces contribute. A ball will not slide on a sticky floor no matter how slippery you make the ball — check <strong>Floor Friction</strong> in the environment settings too.</p>
+                        <p className="text-slate-500 mt-1">Both surfaces contribute. A ball will not slide on a sticky floor no matter how slippery you make the ball, so check <strong>Floor Friction</strong> in the environment settings too.</p>
                       </div>
                     </div>
                   </div>
@@ -6439,15 +6557,19 @@ api.setAngularVelocity([0, 15.0, 0], 'cart'); // Sets angular velocities`}
                       </div>
                       <div className="text-xs border-t border-slate-150 pt-3">
                         <strong className="text-slate-700">⚖️ Mass does not follow size</strong>
-                        <p className="text-slate-500 mt-1">Mass is set independently, so scaling a body up leaves it just as heavy unless you change it. Real objects scale as the <strong>cube</strong> of length — double the size, eight times the mass — so adjust Mass to match if you want believable behaviour.</p>
+                        <p className="text-slate-500 mt-1">Mass is set independently, so scaling a body up leaves it just as heavy unless you change it. Real objects scale as the <strong>cube</strong> of length (double the size, eight times the mass), so adjust Mass to match.</p>
                       </div>
                       <div className="text-xs border-t border-slate-150 pt-3">
                         <strong className="text-slate-700">🌀 Inertia is recomputed</strong>
                         <p className="text-slate-500 mt-1">The inertia tensor is derived from the geometry and mass, so a resized body genuinely becomes harder or easier to spin. A long thin rod resists rotation about its centre far more than a compact one.</p>
                       </div>
                       <div className="text-xs border-t border-slate-150 pt-3">
-                        <strong className="text-slate-700">🔗 Uniform Scale on compound bodies</strong>
-                        <p className="text-slate-500 mt-1">For multi-geom bodies the Uniform Scale slider scales every sub-geom <em>and</em> their position offsets together, so the assembly keeps its shape. It springs back to 1.0 after each drag because it applies a relative multiplier.</p>
+                        <strong className="text-slate-700">🔗 Scale on compound bodies</strong>
+                        <p className="text-slate-500 mt-1">The <strong>Scale</strong> card scales every sub-geom <em>and</em> their position offsets and child bodies together, so an assembly keeps its shape. The factor is a multiplier on the current size, and returns to 1× after each Apply. Turn two of the X/Y/Z buttons off to stretch one axis alone; a sphere or a cylinder, having no per-axis radius, takes the average.</p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">⌨️ Or press S in the viewport</strong>
+                        <p className="text-slate-500 mt-1">With a body selected, <kbd className="font-mono">S</kbd> scales it by pointer, <kbd className="font-mono">X</kbd>/<kbd className="font-mono">Y</kbd>/<kbd className="font-mono">Z</kbd> confines it to one axis, and <kbd className="font-mono">I</kbd> hollows it out. Use the card when you want to type an exact figure. See <strong>Scale, Inset &amp; Modal Keys</strong>.</p>
                       </div>
                       <div className="text-xs border-t border-slate-150 pt-3">
                         <strong className="text-slate-700">⚠️ Very small geoms</strong>
@@ -6467,11 +6589,11 @@ api.setAngularVelocity([0, 15.0, 0], 'cart'); // Sets angular velocities`}
                     <div className="bg-slate-50 border border-slate-200/60 rounded-xl p-4 flex flex-col gap-3">
                       <div className="text-xs">
                         <strong className="text-slate-700">🧩 Body frame vs world frame</strong>
-                        <p className="text-slate-500 mt-1">The offset is measured in the body's own rotating frame. If the body tips over, the offset tips with it — unlike <strong>Position Offset</strong> at the top of the panel, which moves the whole body in the world.</p>
+                        <p className="text-slate-500 mt-1">The offset is measured in the body's own rotating frame. If the body tips over, the offset tips with it. <strong>Position Offset</strong> at the top of the panel moves the whole body in the world instead.</p>
                       </div>
                       <div className="text-xs border-t border-slate-150 pt-3">
                         <strong className="text-slate-700">⚖️ It shifts the centre of mass</strong>
-                        <p className="text-slate-500 mt-1">A body's centre of mass is the mass-weighted average of its geoms. Pushing one heavy geom off to one side makes the body <strong>lopsided</strong>, so it will topple or swing rather than balance — exactly how you build a weeble or a loaded die.</p>
+                        <p className="text-slate-500 mt-1">A body's centre of mass is the mass-weighted average of its geoms. Pushing one heavy geom off to one side makes the body <strong>lopsided</strong>, so it will topple or swing rather than balance. This is how to build a weeble or a loaded die.</p>
                       </div>
                       <div className="text-xs border-t border-slate-150 pt-3">
                         <strong className="text-slate-700">🔗 Joints stay put</strong>
@@ -6485,13 +6607,190 @@ api.setAngularVelocity([0, 15.0, 0], 'cart'); // Sets angular velocities`}
                   </div>
                 )}
 
+                {docsTab === 'lattice' && (
+                  <div className="flex flex-col gap-4">
+                    <h3 className="font-bold text-slate-800 text-lg flex items-center gap-1.5">🔲 Lattice Modelling</h3>
+                    <p className="text-xs text-slate-600 leading-relaxed">
+                      Lattice modelling is for crisp, dimensioned, hard-surface parts: a bracket, a housing, a mount,
+                      anything that has to be exactly 40&nbsp;mm across and meet another part squarely. You place
+                      points on a grid and build the shape by connecting them.
+                    </p>
+
+                    <div className="bg-slate-50 border border-slate-200/60 rounded-xl p-4 flex flex-col gap-3">
+                      <div className="text-xs">
+                        <strong className="text-slate-700">🧮 A vertex is three integers</strong>
+                        <p className="text-slate-500 mt-1">Every corner sits on integer grid coordinates. Two corners with the same numbers are the same corner, so faces built at different times meet exactly, and mirroring is <code className="font-mono bg-slate-100 px-1 rounded">i → −i</code>.</p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">📏 The grid is decades: 0.1 / 1 / 10 / 100 mm</strong>
+                        <p className="text-slate-500 mt-1">A corner placed on the 10&nbsp;mm grid is also on the 0.1&nbsp;mm grid. Lay a part out coarse, then switch to a finer grid for the details. Nothing already drawn moves.</p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">📄 The cage is the document</strong>
+                        <p className="text-slate-500 mt-1">What you edit is the cage. The mesh on screen is derived from it: smoothed, walled, and recentred on its own centre of mass. A saved lattice body reopens with its cage intact. The smoothed mesh itself cannot be edited directly.</p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">✋ Nothing closes on its own</strong>
+                        <p className="text-slate-500 mt-1">To finish a face, click back on the corner you started from (the cursor turns green), or press <kbd className="font-mono">Enter</kbd>. A face can have any number of corners.</p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">🔴 Red means you are seeing the back of a face</strong>
+                        <p className="text-slate-500 mt-1">The editor draws front faces only. A face drawn from the wrong side shows red and will be a hole in anything you export. Press <kbd className="font-mono">N</kbd> to turn every face the right way out, or <kbd className="font-mono">F</kbd> to flip the selected one.</p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">📐 Select something and type its size</strong>
+                        <p className="text-slate-500 mt-1">Select a face, an edge, a loop or a few corners and the panel's <strong>Dimensions</strong> box shows its size and position in millimetres, per axis. Type a <em>size</em> to scale the selection about its own middle, so both ends move and the rest of the part stays put. Type an <em>at</em> value to move the whole selection there. Both snap to the grid.</p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">🕳 Cut: holes at any diameter</strong>
+                        <p className="text-slate-500 mt-1">Holes drawn on the grid have grid-sized diameters. For a bore at an exact size, such as 6.35&nbsp;mm for a bearing, use <strong>Cut</strong>. It subtracts a cylinder, box or sphere at a diameter you type. Select a face and the cut lands in the middle of it, square to the face at whatever angle it lies. Depth is measured into the material under the hole. Cut is available once the surface is closed or walled. The cage stays editable underneath, and a cut follows its face when you move it.</p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">⭕ Circles</strong>
+                        <p className="text-slate-500 mt-1">The <strong>Circle</strong> tool (<kbd className="font-mono">4</kbd>) draws a polygon rounded to the grid; at 0.1&nbsp;mm it is within 0.05&nbsp;mm of a true arc. Click the centre, move out to size it, and click again. The <strong>Corners</strong> box sets how many sides: leave it on <em>auto</em> for a circle, or set 6 for a hex boss and 4 for a square post. The result is an ordinary face. Extrude it for a cylinder, bridge two of them for a taper, or type its diameter into <strong>Dimensions</strong>.</p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">🔄 Revolve</strong>
+                        <p className="text-slate-500 mt-1"><strong>Revolve</strong> sweeps a profile round an axis for turned features: a boss, a spigot, a knob, the bell of a funnel. Select a run of edges for a shell or one face for a solid, pick the axis, and press <em>Turn</em>. The distance from the profile to the axis is the radius, so move the profile to change it. A profile point on the axis becomes the pole, which gives a cone. Less than 360° leaves an arc, capped at both ends.</p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">🪚 Chamfer and fillet, on an edge of the solid</strong>
+                        <p className="text-slate-500 mt-1">Select an edge (<kbd className="font-mono">L</kbd> selects its whole loop), put a radius in the panel's <strong>Edge radius</strong> box, and press <kbd className="font-mono">B</kbd> to chamfer it or <kbd className="font-mono">R</kbd> to round it. A chamfer keeps its flat under smoothing. A fillet is left soft, so a pass of smoothing rounds it to about the radius you asked for.</p>
+                      </div>
+                    </div>
+
+                    <h4 className="font-bold text-slate-700 text-sm mt-1">A worked example: the shelf bracket</h4>
+                    <p className="text-xs text-slate-600 leading-relaxed">
+                      Load the <strong>Wall Bracket (Lattice)</strong> preset to see the finished part, or build one:
+                    </p>
+                    <ol className="text-xs text-slate-600 leading-relaxed list-decimal ml-4 flex flex-col gap-1.5">
+                      <li>Drop in a <strong>Lattice</strong> body. It starts as a 40&nbsp;mm box of six quads.</li>
+                      <li>Press <kbd className="font-mono">2</kbd> for <em>Select</em>, click the front face, then drag it with the <em>Extrude</em> tool (<kbd className="font-mono">3</kbd>). It moves in whole grid steps; the status bar counts the millimetres.</li>
+                      <li>Set the grid to <strong>1&nbsp;mm</strong> for the details. The coarse corners stay exactly where they are.</li>
+                      <li>Select the end face and press <kbd className="font-mono">I</kbd>, then move the pointer to size the inset and click. Extrude the inner face inward for a recess, or straight through for a slot.</li>
+                      <li>Select an edge, press <kbd className="font-mono">L</kbd> to grow it to its whole loop, then <kbd className="font-mono">H</kbd> to hold it sharp. Turn <strong>Smoothing</strong> to 1×: the corners round and the marked edges stay crisp.</li>
+                      <li>Check the panel's <strong>Surface is closed</strong> line. Exports and Cut need a closed surface; give it a <strong>Wall</strong> or cap it by hand.</li>
+                    </ol>
+
+                    <div className="bg-amber-50 border border-amber-200/70 rounded-xl p-4 flex flex-col gap-3">
+                      <div className="text-xs">
+                        <strong className="text-amber-800">🖌️ Lattice and sculpting on the same body</strong>
+                        <p className="text-amber-900/70 mt-1">
+                          The cage rebuilds the mesh on every edit, so sculpting on a live cage would be lost the next
+                          time a face moved. Pressing <strong>Sculpt</strong> on a lattice body therefore
+                          <strong> applies the lattice</strong> first: the mesh becomes its own document, the lattice tools
+                          close for that body, and the cage stays in the file without driving anything.
+                          <strong> Ctrl+Z puts it all back.</strong> A sculpted mesh cannot be turned back into a cage.
+                        </p>
+                      </div>
+                    </div>
+
+                    <h4 className="font-bold text-slate-700 text-sm mt-1">Every key</h4>
+                    <div className="bg-slate-50 border border-slate-200/60 rounded-xl p-4 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1.5 text-xs">
+                      {[
+                        ['1 2 3', 'Place, Select, Extrude'],
+                        ['X Y Z', 'Turn the work plane; it lands on whatever the pointer is on'],
+                        ['[ ]', 'Move the plane a step along its axis (Shift for five)'],
+                        ['Ctrl (hold)', 'Stay on the plane you are pointing at'],
+                        ['Click / Enter', 'Close the polygon being drawn'],
+                        ['Shift / Ctrl+click', 'Add a corner, face or edge to the selection'],
+                        ['Drag', 'Box-select corners; Shift adds to what is selected'],
+                        ['L', 'Grow a selected edge to its whole loop'],
+                        ['S', 'Scale the selection (then X/Y/Z to hold one axis)'],
+                        ['I', 'Inset a face, sized by the pointer'],
+                        ['B', 'Bevel: cut the corners off a face'],
+                        ['J', 'Join two selected faces, or bore a tunnel between them'],
+                        ['H', 'Hold an edge sharp under smoothing'],
+                        ['F / N', 'Flip one face / turn every face the right way out'],
+                        ['Del', 'Remove the corner under the pointer, or the selection'],
+                        ['Ctrl+Z', 'Undo (Shift to redo)'],
+                      ].map(([combo, what]) => (
+                        <div key={combo} className="contents">
+                          <kbd className="font-mono font-semibold text-slate-700 whitespace-nowrap">{combo}</kbd>
+                          <span className="text-slate-500">{what}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {docsTab === 'gestures' && (
+                  <div className="flex flex-col gap-4">
+                    <h3 className="font-bold text-slate-800 text-lg flex items-center gap-1.5">⌨️ Scale, Inset &amp; Modal Keys</h3>
+                    <div className="bg-amber-50 border border-amber-200/70 rounded-xl p-4 text-xs">
+                      <strong className="text-slate-700">📐 Measuring: <kbd className="font-mono">D</kbd> for a distance, <kbd className="font-mono">A</kbd> for an angle</strong>
+                      <p className="text-slate-500 mt-1">
+                        Two clicks give a distance and its per-axis parts; three give the angle at the middle one.
+                        Each click snaps to the nearest feature: a corner, the midpoint of an edge, the axis of a
+                        cylinder, or the centre of a circle the neighbouring vertices lie on. Hole centres snap
+                        this way on boolean results too.
+                        Click away from the model or press <kbd className="font-mono">Esc</kbd> to clear the reading;
+                        <kbd className="font-mono"> Esc</kbd> again puts the tape away. The viewport still orbits on
+                        the right mouse button throughout.
+                      </p>
+                    </div>
+                    <p className="text-xs text-slate-600 leading-relaxed">
+                      Scale and inset need a <strong>size</strong>. The key starts the operation and the pointer sizes
+                      it live. Nothing is held down while you move.
+                    </p>
+
+                    <div className="bg-slate-50 border border-slate-200/60 rounded-xl p-4 flex flex-col gap-3">
+                      <div className="text-xs">
+                        <strong className="text-slate-700">1. Press the key</strong>
+                        <p className="text-slate-500 mt-1"><kbd className="font-mono">S</kbd> to scale, <kbd className="font-mono">I</kbd> to inset. The gesture starts at 1× wherever the pointer is.</p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">2. Move the pointer</strong>
+                        <p className="text-slate-500 mt-1">Move away from the middle to grow (a wider inset, a bigger body) and back towards it to shrink. The <strong>status bar</strong> along the bottom shows which gesture is running and how far it has gone, for example <em>Scale 1.25× · Z</em>.</p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">3. Confine it, if you want</strong>
+                        <p className="text-slate-500 mt-1">Press <kbd className="font-mono">X</kbd>, <kbd className="font-mono">Y</kbd> or <kbd className="font-mono">Z</kbd> to scale along that world axis alone. Press the same key again to free the other two.</p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">4. Keep it or put it back</strong>
+                        <p className="text-slate-500 mt-1"><strong>Click</strong> or <kbd className="font-mono">Enter</kbd> keeps it; <strong>right-click</strong> or <kbd className="font-mono">Esc</kbd> puts everything back as it was. A cancelled gesture adds no undo step.</p>
+                      </div>
+                    </div>
+
+                    <h4 className="font-bold text-slate-700 text-sm mt-1">What they do where</h4>
+                    <div className="bg-slate-50 border border-slate-200/60 rounded-xl p-4 flex flex-col gap-3">
+                      <div className="text-xs">
+                        <strong className="text-slate-700">S on an ordinary body</strong>
+                        <p className="text-slate-500 mt-1">Scales the selected body and everything parented under it (mesh vertices, primitive sizes, geom offsets and child positions), so an assembly keeps its shape. To type an exact figure instead, use the <strong>Scale</strong> card in the sidebar.</p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">I on an ordinary body: boring a hole</strong>
+                        <p className="text-slate-500 mt-1">Puts a scaled copy of the body's own shape inside it, marked as a boolean <strong>hole</strong>, running right through: a cylinder becomes a pipe, a box becomes a square tube. The red ghost is the hole. Move the pointer out to widen it, and press <kbd className="font-mono">X</kbd>, <kbd className="font-mono">Y</kbd> or <kbd className="font-mono">Z</kbd> to change which way it runs (Z by default).</p>
+                        <p className="text-slate-500 mt-1">For a tray or a cup, bore it and then shorten the negative in the sidebar. It is an ordinary geom afterwards, with its own size, position and operator. Deleting it gives the solid back.</p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">S and I inside the lattice tools</strong>
+                        <p className="text-slate-500 mt-1">They act on the selected faces or corners rather than on the whole body. Scale moves corners in whole grid steps about the middle of the selection; inset makes a smaller face inside a selected one, ringed by quads. See the <strong>Lattice Modelling</strong> page.</p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">📍 Which mode has the keyboard</strong>
+                        <p className="text-slate-500 mt-1">The chip at the far left of the status bar always says: <em>Select</em>, <em>Grab</em>, <em>Lattice · Extrude</em>, <em>Sculpt · Smooth</em>, or the gesture in progress. Check it when you are unsure which mode has the keyboard.</p>
+                      </div>
+                    </div>
+
+                    <h4 className="font-bold text-slate-700 text-sm mt-1">Try it: a pipe in four seconds</h4>
+                    <ol className="text-xs text-slate-600 leading-relaxed list-decimal ml-4 flex flex-col gap-1.5">
+                      <li>Drop a <strong>cylinder</strong> into the scene and leave it selected.</li>
+                      <li>Press <kbd className="font-mono">S</kbd>, pull the pointer out to make it taller and wider, click to keep it.</li>
+                      <li>Press <kbd className="font-mono">I</kbd> and move the pointer <em>out</em> until the red ghost is the bore you want. Click.</li>
+                      <li>The body is now a boolean: solid minus a copy of itself that runs right through it. Give it a moment to build, then look at the <strong>Boolean</strong> card in the sidebar to choose how it should collide.</li>
+                    </ol>
+                  </div>
+                )}
+
+
                 {docsTab === 'tutorial' && (
                   <div className="flex flex-col gap-4">
                     <h3 className="font-bold text-slate-800 text-lg flex items-center gap-1.5">🎓 Scripting Tutorial</h3>
                     <p className="text-xs text-slate-600 leading-relaxed">
                       A component script is a snippet of JavaScript that runs <strong>once per physics step</strong> (about 1000×
-                      per second) for the body it is attached to. It is the same loop a real controller runs in, which is what
-                      makes closed-loop control possible here.
+                      per second) for the body it is attached to.
                     </p>
 
                     <div className="bg-slate-50 border border-slate-200/60 rounded-xl p-4 flex flex-col gap-4">
@@ -6499,23 +6798,22 @@ api.setAngularVelocity([0, 15.0, 0], 'cart'); // Sets angular velocities`}
                         <strong className="text-slate-800 font-semibold">1️⃣ Your first script</strong>
                         <p className="text-slate-500 mt-1 leading-relaxed">
                           Select a body, paste this, and press <strong>Save &amp; Execute</strong>. There is no <code className="font-mono">function</code> wrapper
-                          and no <code className="font-mono">return</code> — the body of the script <em>is</em> the loop.
+                          and no <code className="font-mono">return</code>; the script body is the loop.
                         </p>
                         <pre className="mt-2 bg-slate-950 text-emerald-400 p-2.5 rounded-lg font-mono text-[10px] leading-relaxed shadow-inner overflow-x-auto">
 {`// Push this body steadily along +X, forever.
 api.applyForce([5, 0, 0]);`}
                         </pre>
                         <p className="text-slate-500 mt-1.5 leading-relaxed">
-                          Note it accelerates rather than moving at constant speed: a constant force on a mass gives constant
-                          acceleration, exactly as <em>F = ma</em> promises.
+                          The body accelerates rather than moving at constant speed, since a constant force gives constant
+                          acceleration (<em>F = ma</em>).
                         </p>
                       </div>
 
                       <div className="text-xs border-t border-slate-150 pt-3">
                         <strong className="text-slate-800 font-semibold">2️⃣ Read state, then react</strong>
                         <p className="text-slate-500 mt-1 leading-relaxed">
-                          Every call without a body name refers to the body the script is attached to. Reading state before acting
-                          is what turns an open-loop push into a controller.
+                          Every call without a body name refers to the body the script is attached to.
                         </p>
                         <pre className="mt-2 bg-slate-950 text-emerald-400 p-2.5 rounded-lg font-mono text-[10px] leading-relaxed shadow-inner overflow-x-auto">
 {`// A hovering thruster: hold this body at z = 3 m.
@@ -6537,8 +6835,8 @@ api.applyForce([0, 0, hold + correct]);`}
                       <div className="text-xs border-t border-slate-150 pt-3">
                         <strong className="text-slate-800 font-semibold">3️⃣ Understanding PD control</strong>
                         <p className="text-slate-500 mt-1 leading-relaxed">
-                          That pattern — <code className="font-mono text-blue-600 bg-blue-50 px-1 rounded">kp × (target − actual) − kd × velocity</code> — is a
-                          <strong> PD controller</strong>, and it covers most of what you will build.
+                          The pattern <code className="font-mono text-blue-600 bg-blue-50 px-1 rounded">kp × (target − actual) − kd × velocity</code> is a
+                          <strong> PD controller</strong>. It covers most control tasks.
                         </p>
                         <ul className="list-disc pl-4 mt-1.5 text-slate-500 flex flex-col gap-1">
                           <li><strong>kp</strong> (proportional) pulls toward the target. Too high and it overshoots and oscillates.</li>
@@ -6550,7 +6848,7 @@ api.applyForce([0, 0, hold + correct]);`}
                       <div className="text-xs border-t border-slate-150 pt-3">
                         <strong className="text-slate-800 font-semibold">4️⃣ Driving joints and motors</strong>
                         <p className="text-slate-500 mt-1 leading-relaxed">
-                          For jointed mechanisms, work in joint space — it is one number instead of three vectors. Joint names come
+                          For jointed mechanisms, work in joint space: one number instead of three vectors. Joint names come
                           from the <strong>Joint Name (for API)</strong> field; actuators append <code className="font-mono">_actuator</code>.
                         </p>
                         <pre className="mt-2 bg-slate-950 text-emerald-400 p-2.5 rounded-lg font-mono text-[10px] leading-relaxed shadow-inner overflow-x-auto">
@@ -6589,9 +6887,9 @@ const wobble = Math.sin(api.getTime() * 4) * 3;`}
                         <ul className="list-disc pl-4 mt-1.5 text-slate-500 flex flex-col gap-1">
                           <li><strong>Forces vs state.</strong> <code className="font-mono">applyForce</code> asks the solver politely; <code className="font-mono">setVelocity</code> overrides physics outright. Prefer forces unless you are teleporting or resetting.</li>
                           <li><strong>Angles are radians.</strong> Multiply degrees by <code className="font-mono">Math.PI / 180</code>.</li>
-                          <li><strong>Forces do not accumulate across steps.</strong> Applied force is cleared each step, so a force you want held must be re-applied every step — which happens naturally, since your script <em>is</em> the loop.</li>
+                          <li><strong>Forces do not accumulate across steps.</strong> Applied force is cleared each step, so a force you want held must be re-applied every step. Your script already runs every step, so this happens naturally.</li>
                           <li><strong>Keep it cheap.</strong> This runs ~1000×/second. Avoid allocating large arrays or doing heavy work per step.</li>
-                          <li><strong>Errors are silent-ish.</strong> A throwing script is caught and logged to the browser console rather than halting the sim — use <code className="font-mono">api.log()</code> and open DevTools if nothing seems to happen.</li>
+                          <li><strong>Errors are silent-ish.</strong> A throwing script is caught and logged to the browser console rather than halting the sim. Use <code className="font-mono">api.log()</code> and open DevTools if nothing seems to happen.</li>
                           <li><strong>Gravity is still on.</strong> To hover you must actively cancel weight (<em>m·g</em>), as in the example above.</li>
                         </ul>
                       </div>
@@ -6622,8 +6920,8 @@ const wobble = Math.sin(api.getTime() * 4) * 3;`}
                       {
                         title: '📖 Reading joint state',
                         rows: [
-                          ['api.getJointPosition(jointName)', 'Joint coordinate — metres for a slide, radians for a hinge.'],
-                          ['api.getJointVelocity(jointName)', 'Joint rate — m/s for a slide, rad/s for a hinge.'],
+                          ['api.getJointPosition(jointName)', 'Joint coordinate: metres for a slide, radians for a hinge.'],
+                          ['api.getJointVelocity(jointName)', 'Joint rate: m/s for a slide, rad/s for a hinge.'],
                         ],
                       },
                       {
@@ -6631,7 +6929,7 @@ const wobble = Math.sin(api.getTime() * 4) * 3;`}
                         rows: [
                           ['api.applyForce(forceVec, bodyName?)', 'Adds a world-space force [fx, fy, fz] in newtons for this step.'],
                           ['api.applyTorque(torqueVec, bodyName?)', 'Adds a world-space torque [tx, ty, tz] in N·m for this step.'],
-                          ['api.applyJointForce(jointName, value)', 'Adds force/torque along a joint axis — the usual choice for control.'],
+                          ['api.applyJointForce(jointName, value)', 'Adds force/torque along a joint axis. The usual choice for control.'],
                           ['api.setActuatorControl(actuatorName, ctrl)', 'Sets the control input of a motor actuator (jointName + "_actuator").'],
                         ],
                       },
@@ -6647,7 +6945,7 @@ const wobble = Math.sin(api.getTime() * 4) * 3;`}
                         title: '🌍 Environment & utilities',
                         rows: [
                           ['api.getTime()', 'Elapsed simulation time in seconds (not wall-clock time).'],
-                          ['api.isKeyPressed(key)', "True while a key is held — 'space', 'w', 'arrowup', … Ignores typing in editors."],
+                          ['api.isKeyPressed(key)', "True while a key is held: 'space', 'w', 'arrowup', … Ignores typing in editors."],
                           ['api.getWind()', 'Current wind as [windX, windY].'],
                           ['api.log(msg)', 'Logs to the browser console, prefixed with the component name.'],
                           ['api.id / api.name', "This component's id and display name, as strings."],
@@ -6674,25 +6972,25 @@ const wobble = Math.sin(api.getTime() * 4) * 3;`}
                       Before any laser or CNC job you have to tell the machine where the work actually is. The
                       export modals do this under <strong>Set Work Origin</strong>, which appears once a machine
                       is connected over USB. The origin is the near-left corner of your stock that the G-code
-                      treats as X0 Y0 Z0 — get it wrong and the job cuts in the wrong place, or into the bed.
+                      treats as X0 Y0 Z0. Get it wrong and the job cuts in the wrong place, or into the bed.
                     </p>
                     <div className="bg-slate-50 border border-slate-200/60 rounded-xl p-4 flex flex-col gap-3">
                       <div className="text-xs">
                         <strong className="text-slate-700">1️⃣ Home first ($H)</strong>
-                        <p className="text-slate-500 mt-1">Homing establishes machine coordinates against the limit switches. Everything below sets a <em>work</em> offset (G54) on top of that, so homing after zeroing keeps the origin — a soft reset does too.</p>
+                        <p className="text-slate-500 mt-1">Homing establishes machine coordinates against the limit switches. Everything below sets a <em>work</em> offset (G54) on top of that, so homing after zeroing keeps the origin. A soft reset does too.</p>
                       </div>
                       <div className="text-xs border-t border-slate-150 pt-3">
                         <strong className="text-slate-700">2️⃣ Jog X/Y to the origin</strong>
-                        <p className="text-slate-500 mt-1">Use the arrow pad to drive the tool over the point on your stock that should be X0 Y0. Steps are 0.1 / 1 / 10 mm — take the last approach at 0.1 mm and sight down the tool. The red ⏹ button cancels a jog in flight. Then press <strong>Set XY Zero Here</strong>, and <strong>Go To Zero</strong> to confirm it landed where you meant.</p>
+                        <p className="text-slate-500 mt-1">Use the arrow pad to drive the tool over the point on your stock that should be X0 Y0. Steps are 0.1 / 1 / 10 mm. Take the last approach at 0.1 mm and sight down the tool. The red ⏹ button cancels a jog in flight. Then press <strong>Set XY Zero Here</strong>, and <strong>Go To Zero</strong> to confirm it landed where you meant.</p>
                       </div>
                       <div className="text-xs border-t border-slate-150 pt-3">
-                        <strong className="text-slate-700">3️⃣ Zero Z — by hand, or on a plate</strong>
-                        <p className="text-slate-500 mt-1"><strong>By hand</strong> works on any machine and any material, and needs nothing but the bit: jog Z down at 0.1 mm until the tip just marks the surface — or until it just nips a slip of paper — and press <strong>Set Z Zero Here</strong>. If something is under the tip, enter its thickness in the <em>gauge</em> box (paper is about 0.1 mm, a 1‑2‑3 block is 25.4) and zero lands on the material rather than on the gauge. Nothing moves: the machine is only being told where it already is.</p>
+                        <strong className="text-slate-700">3️⃣ Zero Z, by hand or on a plate</strong>
+                        <p className="text-slate-500 mt-1"><strong>By hand</strong> works on any machine and any material, and needs nothing but the bit: jog Z down at 0.1 mm until the tip just marks the surface, or just nips a slip of paper, and press <strong>Set Z Zero Here</strong>. If something is under the tip, enter its thickness in the <em>gauge</em> box (paper is about 0.1 mm, a 1‑2‑3 block is 25.4) and zero lands on the material rather than on the gauge. Nothing moves: the machine is only being told where it already is.</p>
                         <p className="text-slate-500 mt-1"><strong>On a plate</strong> is more repeatable but needs a touch plate, a clip and stock the circuit can see. Clip the lead to the tool, sit the plate on the stock's top face, park the tool a few mm above it, enter your plate's real thickness, and press <strong>Probe Z Zero</strong>. <strong>Remove the plate before cutting.</strong></p>
                       </div>
                       <div className="text-xs border-t border-slate-150 pt-3">
                         <strong className="text-slate-700">4️⃣ Set the spindle speed by hand</strong>
-                        <p className="text-slate-500 mt-1">On a trim router or a VFD-and-a-dial spindle the <code>S</code> word in the G-code does nothing at all — the speed is a knob, and it stays wherever the last job left it. Each export modal states the number under <strong>Before You Start</strong> once a machine is connected, and writes it into the file as a comment. It is worked out from the material you picked and the cutter's diameter (surface speed ÷ diameter), so change the material and the number moves.</p>
+                        <p className="text-slate-500 mt-1">On a trim router or a VFD-and-a-dial spindle the <code>S</code> word in the G-code does nothing. The speed is a knob, and it stays wherever the last job left it. Each export modal states the number under <strong>Before You Start</strong> once a machine is connected, and writes it into the file as a comment. It is worked out from the material you picked and the cutter's diameter (surface speed ÷ diameter), so change the material and the number moves.</p>
                       </div>
                       <div className="text-xs border-t border-slate-150 pt-3">
                         <strong className="text-slate-700">5️⃣ Frame, then cut</strong>
@@ -6700,26 +6998,25 @@ const wobble = Math.sin(api.getTime() * 4) * 3;`}
                       </div>
                       <div className="text-xs border-t border-slate-150 pt-3">
                         <strong className="text-slate-700">6️⃣ Pausing, and re-zeroing after a tool change</strong>
-                        <p className="text-slate-500 mt-1"><strong>Pause</strong> is a feed hold: the machine decelerates along the path and keeps its position, so <strong>Resume</strong> picks the cut up exactly where it stopped. That is not what <strong>E‑Stop</strong> does — a soft reset drops the position, and a part that has been cut into cannot be re-registered, so the piece is finished.</p>
-                        <p className="text-slate-500 mt-1"><strong>Live Trim</strong> appears while the job runs. It nudges the feed and the spindle on the motion already in the buffer, so a cut that is chattering or burning can be backed off without stopping — which is the alternative to scrapping the piece. Burn marks mean the feed and the speed are wrong for each other; trim until it sounds right, then set those numbers for next time.</p>
-                        <p className="text-slate-500 mt-1">A job that changes tools stops on its own and says which bit to fit. The new bit is a different length, so the Z datum from the old one is now wrong — and wrong in the direction of driving the tool into the work. Resume stays shut until you have zeroed Z again, by either route, right there in the pause banner.</p>
+                        <p className="text-slate-500 mt-1"><strong>Pause</strong> is a feed hold: the machine decelerates along the path and keeps its position, so <strong>Resume</strong> picks the cut up exactly where it stopped. <strong>E‑Stop</strong> is a soft reset: it drops the position, and a part that has been cut into cannot be re-registered.</p>
+                        <p className="text-slate-500 mt-1"><strong>Live Trim</strong> appears while the job runs. It nudges the feed and the spindle on the motion already in the buffer, so a cut that is chattering or burning can be backed off without stopping. Burn marks mean the feed and the speed are mismatched; trim until it sounds right, then set those numbers for next time.</p>
+                        <p className="text-slate-500 mt-1">A job that changes tools stops on its own and says which bit to fit. The new bit is a different length, so the Z datum from the old one is wrong. Resume stays disabled until you have zeroed Z again, by either route, from the pause banner.</p>
                       </div>
                     </div>
                     <div className="bg-amber-50 border border-amber-200/60 rounded-xl p-4 flex flex-col gap-2.5">
                       <strong className="text-amber-800 font-semibold text-xs">⚠️ If the probe misses</strong>
                       <p className="text-amber-700/80 text-xs leading-relaxed">
-                        A probe that runs its full travel without touching — clip off, lead broken, plate not
-                        under the tool — <strong>does not set Z zero</strong>, and says so in red. That is
-                        deliberate: zeroing on a missed probe would tell the machine the stock surface is
-                        wherever the tool ran to, and the next cut would plunge that far past it. Fix the probe
-                        and run it again rather than starting the job.
+                        A probe that runs its full travel without touching (clip off, lead broken, plate not
+                        under the tool) <strong>does not set Z zero</strong>, and says so in red. Zeroing on a
+                        missed probe would put the stock surface wherever the tool ran to, and the next cut would
+                        plunge that far past it. Fix the probe and run it again before starting the job.
                       </p>
                     </div>
                     <p className="text-xs text-slate-500 leading-relaxed">
-                      Requires a Chromium browser (WebSerial) and GRBL-compatible firmware — GRBL 1.1, FluidNC,
+                      Requires a Chromium browser (WebSerial) and GRBL-compatible firmware: GRBL 1.1, FluidNC,
                       or grblHAL. The plate thickness field defaults to 12 mm; set it to your own plate's
-                      measured thickness before the first cut. If you have no probe wired up at all, the
-                      manual route above is the whole answer — nothing else in the app needs one.
+                      measured thickness before the first cut. If you have no probe wired up, use the
+                      manual route above; nothing else in the app needs one.
                       Connecting a machine also reads its <code>$$</code> settings, so the job-time
                       estimates switch from an assumed acceleration to your own <code>$120</code>-
                       <code>$122</code> and rapid rates, and the spindle recommendation is bounded by
@@ -6862,8 +7159,30 @@ THE SOFTWARE, PHYSICS SOLVERS, CSG COMPILERS, TOOLPATH CALCULATORS, AND MACHINE 
         onClose={() => setIsMoldModalOpen(false)}
         scene={sceneGraph}
       />
+      <ExportSolidMachiningModal
+        isOpen={isSolidModalOpen}
+        onClose={() => setIsSolidModalOpen(false)}
+        scene={sceneGraph}
+      />
+      <ExportCastModal
+        isOpen={isCastModalOpen}
+        onClose={() => setIsCastModalOpen(false)}
+        scene={sceneGraph}
+      />
 
-      <BottomStatusBar onOpenMachineConfig={() => setMachineConfigOpen(true)} />
+      <BottomStatusBar
+        onOpenMachineConfig={() => setMachineConfigOpen(true)}
+        exports={{
+          stl: exportStl,
+          threeMf: export3mf,
+          mold: () => setIsMoldModalOpen(true),
+          unwrap: () => setIsLaserCutModalOpen(true),
+          contourSlices: () => setIsContourSliceModalOpen(true),
+          reliefCarve: () => setIsReliefCarveModalOpen(true),
+          solid: () => setIsSolidModalOpen(true),
+          cast: () => setIsCastModalOpen(true),
+        }}
+      />
 
       <MachineConfigModal
         isOpen={isMachineConfigOpen}

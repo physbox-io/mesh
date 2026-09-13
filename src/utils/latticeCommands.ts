@@ -27,19 +27,32 @@ import {
   bevelFace, bridgeFaces, edgeLoop, insetFace, isCrease, isWatertight, latticeBounds,
   latticeStats, mirrorCoord, mirrorFace,
   removeFace, setCrease, vertexAt, dominantAxis,
-  type Axis, type Lattice, type LatticeCoord,
+  moveVertices, scaleVertices, vertexCount, AXIS_INDEX,
+  bevelEdges, ringCoords, revolveChain,
+  type Axis, type Lattice, type LatticeCoord, type BevelMode,
 } from './latticeMesh';
 
 /** Millimetres per grid step. */
 const mmPerStep = (unit: number) => unit * 1000;
 
+/**
+ * Millimetres as a whole number of grid steps.
+ *
+ * The rounding goes through a nine-place round trip first, because the division
+ * that gets here is floating point and lands just under the halfway mark far
+ * more often than it lands just over: 6.35 / 0.1 is 63.49999999999999, which
+ * rounds DOWN to 6.3 mm — a tenth short of a number somebody typed, in the one
+ * part of the app whose whole purpose is saying an exact dimension.
+ */
+const stepsOf = (mm: number, step: number) => Math.round(Number((mm / step).toFixed(9)));
+
 /** A point in millimetres, as the nearest grid coordinate. */
 export function coordFromMm(point: number[], unit: number): LatticeCoord {
   const step = mmPerStep(unit);
   return [
-    Math.round(point[0] / step),
-    Math.round(point[1] / step),
-    Math.round(point[2] / step),
+    stepsOf(point[0], step),
+    stepsOf(point[1], step),
+    stepsOf(point[2], step),
   ];
 }
 
@@ -82,7 +95,7 @@ export function addFacesMm(
   mirror?: Axis,
 ): { added: number; skipped: FaceReport[]; snappedBy: number } {
   if (!Array.isArray(faces) || faces.length === 0) {
-    throw new Error('faces must be a list of faces, each a list of 3 or 4 corners [x, y, z] in millimetres');
+    throw new Error('faces must be a list of faces, each a list of three or more corners [x, y, z] in millimetres');
   }
 
   let added = 0;
@@ -90,8 +103,15 @@ export function addFacesMm(
   const skipped: FaceReport[] = [];
 
   for (const face of faces) {
-    if (!Array.isArray(face) || face.length < 3 || face.length > 4 || !face.every(validPoint)) {
-      skipped.push({ face: face as number[][], reason: 'a face is 3 or 4 corners, each [x, y, z] in millimetres' });
+    // Three corners and up. The cap of four this used to have was left over
+    // from when a cage was quads and triangles; the editor has drawn any
+    // polygon since the day it shipped ("nothing auto-closes" exists precisely
+    // so it can), physics_lattice_circle emits up to 64 corners, and the
+    // triangulator clips ears rather than fanning. A T-shaped profile is eight
+    // corners and was refused here for no reason the rest of the app agrees
+    // with.
+    if (!Array.isArray(face) || face.length < 3 || !face.every(validPoint)) {
+      skipped.push({ face: face as number[][], reason: 'a face is three or more corners, each [x, y, z] in millimetres' });
       continue;
     }
     const corners = face.map((point) => {
@@ -270,7 +290,7 @@ export function sharpenEdgesMm(
 
 /** Steps for a distance in millimetres, at least one. */
 function stepsFromMm(mm: unknown, unit: number): number {
-  const steps = Math.round((typeof mm === 'number' ? mm : 0) / (unit * 1000));
+  const steps = stepsOf(typeof mm === 'number' ? mm : 0, mmPerStep(unit));
   if (steps < 1) {
     throw new Error(`That is less than one grid step (${unit * 1000} mm), so it would change nothing`);
   }
@@ -327,6 +347,193 @@ export function bevelFaceMm(lattice: Lattice, face: unknown, amountMm: number, m
   return { amountMm: Math.round(steps * lattice.unit * 1000 * 10) / 10 };
 }
 
+/**
+ * Chamfers or rounds edges of the solid, given in millimetres.
+ *
+ * The operation `bevelFaceMm` could not do. That one cuts the corners off ONE
+ * face and only where those corners belong to nothing else, which on a real
+ * part is almost nowhere — every edge of a box is shared. This pulls both faces
+ * back from the edge and stitches the tear, which is what a chamfer on a solid
+ * actually is.
+ *
+ * An "edge" here is two corners, or three and up for a whole face's border —
+ * the same convenience `sharpenEdgesMm` has, and the reason "chamfer that rim"
+ * is one call. `loop` grows a single edge to its whole ring first.
+ *
+ * All of them go in ONE call to `bevelEdges`, deliberately: a bevel has to see
+ * its neighbours to get the corner where two of them meet right, and cutting
+ * them one at a time would cut the second from a shape the first had moved.
+ */
+export function bevelEdgesMm(
+  lattice: Lattice,
+  edges: unknown,
+  radiusMm: number,
+  mode: BevelMode = 'chamfer',
+  mirror?: Axis,
+  loop = false,
+): { radiusMm: number; edges: number; strips: number; patches: number } {
+  if (!Array.isArray(edges) || edges.length === 0) {
+    throw new Error('edges must be a list of edges, each a pair of corners [[x, y, z], [x, y, z]] in millimetres — or three corners and up for a whole face border');
+  }
+  const steps = stepsFromMm(radiusMm, lattice.unit);
+
+  const targets: [number, number][] = [];
+  const seen = new Set<string>();
+  const take = (a: number, b: number) => {
+    const key = edgeKey(a, b);
+    if (seen.has(key)) return;
+    seen.add(key);
+    targets.push([a, b]);
+  };
+
+  for (const edge of edges) {
+    if (!Array.isArray(edge) || edge.length < 2 || !edge.every(validPoint)) {
+      throw new Error('an edge is two corners, or three and up for a whole face border, each [x, y, z] in millimetres');
+    }
+    const verts = edge.map((point) => {
+      const [i, j, k] = coordFromMm(point, lattice.unit);
+      return findVertex(lattice, i, j, k);
+    });
+    if (verts.some((v) => v === -1)) {
+      throw new Error('No corner of the shape is at one of those points — read the shape back with physics_get_lattice and use the corners it reports');
+    }
+    if (verts.length > 2) {
+      const face = findFaceMm(lattice, edge);
+      if (face === -1) throw new Error('No face has those corners');
+      const corners = lattice.faces[face]!;
+      for (let i = 0; i < corners.length; i++) take(corners[i], corners[(i + 1) % corners.length]);
+    } else if (loop) {
+      for (const [a, b] of edgeLoop(lattice, verts[0], verts[1])) take(a, b);
+    } else {
+      take(verts[0], verts[1]);
+    }
+  }
+
+  if (mirror) {
+    const reflect = (v: number) => {
+      const [i, j, k] = mirrorCoord(coordOf(lattice, v), mirror);
+      return findVertex(lattice, i, j, k);
+    };
+    for (const [a, b] of [...targets]) {
+      const [ma, mb] = [reflect(a), reflect(b)];
+      // An edge lying in the mirror plane is its own reflection, and cutting it
+      // twice is cutting a shape that is no longer there.
+      if (ma !== -1 && mb !== -1 && !(ma === a && mb === b)) take(ma, mb);
+    }
+  }
+
+  const asked = targets.length;
+  const result = bevelEdges(lattice, targets, steps, mode);
+  if (!result) {
+    throw new Error(`Those edges cannot be ${mode === 'fillet' ? 'rounded' : 'chamfered'} by ${radiusMm} mm — every edge must have exactly two faces on it, run along an axis or at 45 degrees, and the cut must leave room on the edges either side of it (half of each where both ends are being cut). Try a smaller radius.`);
+  }
+  return {
+    radiusMm: Math.round(steps * lattice.unit * 1000 * 10) / 10,
+    edges: asked,
+    strips: result.strips.length,
+    patches: result.patches.length,
+  };
+}
+
+/**
+ * Places a circle — or any regular polygon — as one face.
+ *
+ * There is no circle on an integer grid, and there does not need to be one: at
+ * 0.1 mm a polygon rounded to the grid is within 0.05 mm of the true arc, which
+ * is finer than anything this app drives can cut. `sides` of 0 works out how
+ * many corners that takes from the radius, so a 2 mm hole is light and a 60 mm
+ * disc is smooth without either being a guess. Give it 6 for a hex boss, 4 for
+ * a square post.
+ *
+ * The corners come back in millimetres because that is how every other call
+ * here names a face: pass them to `physics_lattice_extrude` for a cylinder, or
+ * to `physics_lattice_inset` for a rim.
+ */
+export function addRingMm(
+  lattice: Lattice,
+  centre: unknown,
+  diameterMm: number,
+  axis: Axis,
+  sides = 0,
+  mirror?: Axis,
+): { corners: number[][]; sides: number; diameterMm: number } {
+  if (!validPoint(centre)) {
+    throw new Error('centre must be a point [x, y, z] in millimetres');
+  }
+  if (typeof diameterMm !== 'number' || !(diameterMm > 0)) {
+    throw new Error('diameterMm must be a positive number of millimetres');
+  }
+  const middle = coordFromMm(centre, lattice.unit);
+  const radius = stepsFromMm(diameterMm / 2, lattice.unit);
+  const ring = ringCoords(middle, radius, axis, sides);
+  if (!ring) {
+    throw new Error(`A ring of ${diameterMm} mm with ${sides || 'auto'} sides comes to fewer than three distinct grid points — make it bigger, or ask for fewer sides`);
+  }
+  const verts = ring.map(([i, j, k]) => vertexAt(lattice, i, j, k));
+  const face = addFace(lattice, verts);
+  if (face === -1) {
+    throw new Error('A face with those corners already exists');
+  }
+  if (mirror) mirrorFace(lattice, face, mirror);
+  return {
+    corners: ring.map((coord) => mmFromCoord(coord, lattice.unit)),
+    sides: ring.length,
+    diameterMm: Math.round(radius * 2 * lattice.unit * 1000 * 10) / 10,
+  };
+}
+
+/**
+ * Sweeps a profile about one of the body's axes, the way a lathe does.
+ *
+ * The operation extrude is not: extrude drags a face along its own normal and
+ * makes prisms, and every turned feature — a boss, a spigot, a knob, the bell
+ * of a funnel — is a profile taken round an axis.
+ *
+ * The profile is a run of points in order, and it does not have to be drawn
+ * first: corners that are not there yet are created, so a whole turned part is
+ * one call. How far each point sits from the axis IS its radius, so there is no
+ * second number to get wrong; a point sitting ON the axis becomes the pole,
+ * which is how a cone is a two-point profile. `closed` joins the last point
+ * back to the first, which is what makes a solid ring rather than a shell.
+ */
+export function revolveMm(
+  lattice: Lattice,
+  profile: unknown,
+  axis: Axis,
+  degrees = 360,
+  options: { throughMm?: number[]; segments?: number; closed?: boolean } = {},
+): { facesAdded: number; segments: number; degrees: number; closed: boolean } {
+  if (!Array.isArray(profile) || profile.length < 2 || !profile.every(validPoint)) {
+    throw new Error('profile must be two or more points [x, y, z] in millimetres, in the order they run along the profile');
+  }
+  const spin = typeof degrees === 'number' && Number.isFinite(degrees) ? degrees : 360;
+  if (Math.abs(spin) < 1 || Math.abs(spin) > 360) {
+    throw new Error('degrees must be between 1 and 360 — a full turn closes the shape onto itself, anything less leaves both ends open');
+  }
+  const through = validPoint(options.throughMm)
+    ? coordFromMm(options.throughMm, lattice.unit)
+    : ([0, 0, 0] as LatticeCoord);
+
+  const points = profile.map((point) => coordFromMm(point, lattice.unit));
+  const closed = options.closed === true;
+  const run = closed ? [...points, points[0]] : points;
+  const chain = run.map(([i, j, k]) => vertexAt(lattice, i, j, k));
+
+  const result = revolveChain(lattice, chain, axis, through, options.segments ?? 0, spin);
+  if (!result) {
+    throw new Error('That profile could not be swept — it needs at least two distinct points, and at least one of them off the axis');
+  }
+  return {
+    // `facesAdded`, not `faces`: the bridge spreads a whole-cage summary over
+    // this reply and that summary already has a `faces` in it. The one that
+    // survived was the total, silently, which is a different number.
+    facesAdded: result.faces.length,
+    segments: result.rings.length,
+    degrees: spin,
+    closed,
+  };
+}
+
 /** Joins two faces with a band of quads, opening both. */
 export function bridgeFacesMm(lattice: Lattice, faceA: unknown, faceB: unknown) {
   const a = findFaceMm(lattice, faceA);
@@ -339,6 +546,132 @@ export function bridgeFacesMm(lattice: Lattice, faceA: unknown, faceB: unknown) 
     throw new Error('Those two cannot be joined: a face cannot be joined to itself, they must have the same number of corners, and they must share none. Two whole walls of one solid share the edges of everything between them — inset each of them first, then join the smaller faces.');
   }
   return { walls: result.walls.length };
+}
+
+// ---------------------------------------------------------------------------
+// Dimensions
+// ---------------------------------------------------------------------------
+//
+// Everything above sizes a shape by saying how far to push it. This says how
+// big it should END UP, which is the number a part is actually specified by: a
+// bracket is 40 mm across because the thing it bolts to is, and arriving at
+// that by pushing a face 7 mm and then 3 mm more is arithmetic nobody should be
+// doing in their head.
+//
+// The corners stay integers throughout. A typed millimetre is rounded onto the
+// grid like any other placement, so a dimension can never introduce a corner
+// the rest of the mode could not have made.
+
+/** The corners of a selection, bounded, in millimetres on the cage's grid. */
+export function selectionBoundsMm(
+  lattice: Lattice,
+  vertices: number[],
+): { minMm: number[]; maxMm: number[] } | null {
+  const corners = [...new Set(vertices)].filter((v) => v >= 0 && v < vertexCount(lattice));
+  if (corners.length === 0) return null;
+  const min: LatticeCoord = [Infinity, Infinity, Infinity];
+  const max: LatticeCoord = [-Infinity, -Infinity, -Infinity];
+  for (const v of corners) {
+    const at = coordOf(lattice, v);
+    for (let k = 0; k < 3; k++) {
+      if (at[k] < min[k]) min[k] = at[k];
+      if (at[k] > max[k]) max[k] = at[k];
+    }
+  }
+  const step = mmPerStep(lattice.unit);
+  return { minMm: min.map((v) => v * step), maxMm: max.map((v) => v * step) };
+}
+
+/**
+ * Sets one dimension of a set of corners: either how far they reach along an
+ * axis, or where their middle sits on it.
+ *
+ * A size scales them about their own middle, so both ends move and the shape
+ * stays where it is; a position translates the lot. Returns false when the
+ * request cannot mean anything — a size for a selection that is flat on that
+ * axis (scaling zero by any factor is still zero), or a number that rounds to
+ * the grid position the corners are already on.
+ */
+export function dimensionMm(
+  lattice: Lattice,
+  vertices: number[],
+  axis: Axis,
+  mode: 'size' | 'position',
+  valueMm: number,
+): boolean {
+  const corners = [...new Set(vertices)].filter((v) => v >= 0 && v < vertexCount(lattice));
+  const bounds = selectionBoundsMm(lattice, corners);
+  if (!bounds) return false;
+
+  const k = AXIS_INDEX[axis];
+  const step = mmPerStep(lattice.unit);
+  const wanted = stepsOf(valueMm, step);
+  const min = stepsOf(bounds.minMm[k], step);
+  const max = stepsOf(bounds.maxMm[k], step);
+
+  if (mode === 'position') {
+    // The middle of the selection, which for a face is the plane it lies in —
+    // the number somebody means by "put this face at 20".
+    const move: LatticeCoord = [0, 0, 0];
+    move[k] = Math.round(wanted - (min + max) / 2);
+    return moveVertices(lattice, corners, move[0], move[1], move[2]);
+  }
+
+  const extent = max - min;
+  if (extent <= 0 || wanted <= 0) return false;
+  const about: LatticeCoord = [
+    (stepsOf(bounds.minMm[0], step) + stepsOf(bounds.maxMm[0], step)) / 2,
+    (stepsOf(bounds.minMm[1], step) + stepsOf(bounds.maxMm[1], step)) / 2,
+    (stepsOf(bounds.minMm[2], step) + stepsOf(bounds.maxMm[2], step)) / 2,
+  ];
+  // Whole steps of the FINEST grid, not of the snap the viewport happens to be
+  // set to: a dimension is a statement about the part, and rounding it to a
+  // 10 mm grid because that is what clicks are landing on would answer a
+  // different question than the one that was asked.
+  return scaleVertices(lattice, corners, about, wanted / extent, 1, axis);
+}
+
+/**
+ * The same dimension edit, addressed the way a caller without a pointer has to
+ * address things: by naming the corners in millimetres.
+ *
+ * Points that are not on the grid are snapped, and points that are not corners
+ * of this shape are reported rather than silently ignored — a dimension applied
+ * to three of the four corners you meant is a shape quietly pulled out of
+ * square, which is much worse than an error.
+ */
+export function dimensionSelectionMm(
+  lattice: Lattice,
+  selection: unknown,
+  axis: Axis,
+  mode: 'size' | 'position',
+  valueMm: number,
+): { changed: boolean; corners: number[][]; missing: number[][] } {
+  if (!Array.isArray(selection) || selection.length === 0) {
+    throw new Error('Give the corners to measure, as [x, y, z] points in millimetres — read them back with physics_get_lattice');
+  }
+  const vertices: number[] = [];
+  const missing: number[][] = [];
+  for (const point of selection) {
+    if (!Array.isArray(point) || point.length < 3) {
+      throw new Error('Every corner must be an [x, y, z] point in millimetres');
+    }
+    const coord = coordFromMm(point as number[], lattice.unit);
+    const found = findVertex(lattice, coord[0], coord[1], coord[2]);
+    if (found === -1) missing.push(mmFromCoord(coord, lattice.unit));
+    else vertices.push(found);
+  }
+  if (missing.length > 0) {
+    throw new Error(
+      `No corner of this shape is at ${missing.map(p => `[${p.join(', ')}]`).join(' or ')} — `
+      + 'read the shape back with physics_get_lattice and use the corners it reports',
+    );
+  }
+  return {
+    changed: dimensionMm(lattice, vertices, axis, mode, valueMm),
+    corners: vertices.map(v => mmFromCoord(coordOf(lattice, v), lattice.unit)),
+    missing,
+  };
 }
 
 /** Counts, bounds and health — the reply every operation ends with. */

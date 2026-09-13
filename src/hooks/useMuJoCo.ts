@@ -18,5 +18,5 @@ export const useMuJoCoInit = () => {
     recompile(undefined, undefined, true, true).finally(() => {
       isInitializing = false;
     });
-  }, []);
+  }, [mujoco, recompile]);
 };

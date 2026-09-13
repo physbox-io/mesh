@@ -184,6 +184,40 @@ describe('jobResume', () => {
       expect(joined).toMatch(/G1 Z-\d+\.\d+ F\d+/);
     });
 
+    it('does not descend when the line resumed to is the tool change itself', () => {
+      // How a carve stops at its own tool change: the lift that runs when the
+      // M6 is reached hits the top of Z travel, the controller alarms, and the
+      // line it stopped on is the M6.
+      const withToolChange = [
+        'G21', 'G90', 'G17',
+        'G0 Z5.000',
+        'M3 S18000',
+        'G1 Z-2.000 F300',
+        'G1 X40.000 Y0.000 F1200',
+        'T2 M6',
+        'M3 S12000',
+        'G1 X60.000',
+      ];
+      const at = withToolChange.indexOf('T2 M6');
+      const plan = planResume(withToolChange, at, { arrivingAtPause: true });
+      const joined = plan.preamble.join('\n');
+
+      // Clear of the work, and over the point it stopped at, both still wanted.
+      expect(joined).toContain('G0 Z5.000');
+      expect(joined).toContain('G0 X40.000 Y0.000');
+      // But nothing that puts the tool back in the cut for a line that cuts
+      // nothing, and no spindle started only for the M6's own M5 to stop it.
+      expect(joined).not.toMatch(/G1 Z-/);
+      expect(joined).not.toContain('M3 S');
+      expect(plan.descendsToZ).toBeNull();
+    });
+
+    it('still reports the depth it will descend to on an ordinary resume', () => {
+      const plan = planResume(router, 9); // mid-cut, three millimetres down
+      expect(plan.descendsToZ).toBe(-3);
+      expect(plan.preamble.join('\n')).toContain('G1 Z-3.000');
+    });
+
     it('clamps a line number past the end of the program', () => {
       const res = generateLaserCutGcode([panel], { ...DEFAULT_GCODE_OPTIONS, machineMode: 'laser' });
       const lines = prepareJobLines(res.gcode).map((l) => l.code);

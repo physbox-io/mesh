@@ -5,6 +5,20 @@
 // is passed in explicitly. They are the last line of defence between a model's
 // JSON and the store, and several silent scene-corruption bugs lived here.
 
+import type { SceneGeom, SceneJoint, SceneNode } from '../types/scene';
+
+// What the model hands back: any subset of the scene types, plus the ids the
+// merge keys on. A real SceneNode satisfies RawNode, so the current scene can
+// be passed in as the "existing" side without conversion.
+export type RawGeom = Partial<SceneGeom> & { id?: string };
+export type RawJoint = Partial<SceneJoint> & { id?: string };
+export type RawNode = Partial<Omit<SceneNode, 'geoms' | 'joints' | 'children'>> & {
+  geoms?: RawGeom[];
+  joints?: RawJoint[];
+  children?: RawNode[];
+  rgba?: number[];
+};
+
 const randomSuffix = (len: number) => Math.random().toString(36).substring(2, 2 + len);
 
 /**
@@ -12,14 +26,14 @@ const randomSuffix = (len: number) => Math.random().toString(36).substring(2, 2 
  * field against the matching node already in the scene so a model that restates
  * only what it changed doesn't blank out everything it left out.
  */
-export function sanitizeAndNormalizeNodes(rawNodes: any[], existingNodes: any[] = []): any[] {
+export function sanitizeAndNormalizeNodes(rawNodes: RawNode[], existingNodes: RawNode[] = []): SceneNode[] {
   if (!Array.isArray(rawNodes)) return [];
 
   const usedBodyNames = new Set<string>();
   const usedGeomNames = new Set<string>();
 
-  const existingNodeMap = new Map<string, any>();
-  const collectExisting = (list: any[]) => {
+  const existingNodeMap = new Map<string, RawNode>();
+  const collectExisting = (list: RawNode[]) => {
     if (!Array.isArray(list)) return;
     for (const item of list) {
       if (item.id) existingNodeMap.set(item.id, item);
@@ -29,7 +43,7 @@ export function sanitizeAndNormalizeNodes(rawNodes: any[], existingNodes: any[] 
   };
   collectExisting(existingNodes);
 
-  const normalizeNode = (n: any, idx: number): any => {
+  const normalizeNode = (n: RawNode, idx: number): RawNode | null => {
     if (!n || typeof n !== 'object') return null;
 
     const baseId = n.id || `node_${Date.now()}_${idx}_${randomSuffix(4)}`;
@@ -51,14 +65,14 @@ export function sanitizeAndNormalizeNodes(rawNodes: any[], existingNodes: any[] 
     // request while the chat still reported success. Do not reintroduce it: an
     // explicit zero is a real instruction.
     const pos = Array.isArray(n.pos) && n.pos.length === 3
-      ? n.pos.map((v: any) => typeof v === 'number' ? v : 0)
+      ? n.pos.map((v: unknown) => typeof v === 'number' ? v : 0)
       : (existingNode?.pos || [0, 0, 0]);
 
     const euler = Array.isArray(n.euler) && n.euler.length === 3
-      ? n.euler.map((v: any) => typeof v === 'number' ? v : 0)
+      ? n.euler.map((v: unknown) => typeof v === 'number' ? v : 0)
       : (existingNode?.euler || [0, 0, 0]);
 
-    const geoms = Array.isArray(n.geoms) && n.geoms.length > 0 ? n.geoms.map((g: any, gIdx: number) => {
+    const geoms = Array.isArray(n.geoms) && n.geoms.length > 0 ? n.geoms.map((g: RawGeom, gIdx: number): RawGeom => {
       let gName = g.name || `${baseName}_geom_${gIdx}`;
       if (usedGeomNames.has(gName)) {
         gName = `${gName}_${randomSuffix(4)}`;
@@ -84,7 +98,7 @@ export function sanitizeAndNormalizeNodes(rawNodes: any[], existingNodes: any[] 
         : (Array.isArray(existingGeom?.size) && existingGeom.size.length > 0 ? existingGeom.size : null);
 
       let rawSize = sourceSize
-        ? sourceSize.map((v: any) => typeof v === 'number' && !isNaN(v) && v > 0 ? v : 0.1)
+        ? sourceSize.map((v: unknown) => typeof v === 'number' && !isNaN(v) && v > 0 ? v : 0.1)
         : [0.1, 0.1, 0.1];
 
       if (gType === 'box' && rawSize.length < 3) {
@@ -145,7 +159,7 @@ export function sanitizeAndNormalizeNodes(rawNodes: any[], existingNodes: any[] 
       });
     }
 
-    const joints = Array.isArray(n.joints) ? n.joints.map((j: any, jIdx: number) => ({
+    const joints: RawJoint[] = Array.isArray(n.joints) ? n.joints.map((j: RawJoint, jIdx: number) => ({
       id: j.id || `joint_${randomSuffix(6)}`,
       name: j.name || `${baseName}_joint_${jIdx}`,
       type: j.type || 'hinge',
@@ -157,7 +171,7 @@ export function sanitizeAndNormalizeNodes(rawNodes: any[], existingNodes: any[] 
     })) : (existingNode?.joints || []);
 
     const children = Array.isArray(n.children)
-      ? n.children.map((c: any, cIdx: number) => normalizeNode(c, cIdx)).filter(Boolean)
+      ? n.children.map((c: RawNode, cIdx: number) => normalizeNode(c, cIdx)).filter((c): c is RawNode => c !== null)
       : [];
 
     return {
@@ -173,7 +187,7 @@ export function sanitizeAndNormalizeNodes(rawNodes: any[], existingNodes: any[] 
     };
   };
 
-  return rawNodes.map((n, idx) => normalizeNode(n, idx)).filter(Boolean);
+  return rawNodes.map((n, idx) => normalizeNode(n, idx)).filter((n): n is RawNode => n !== null) as SceneNode[];
 }
 
 /**
@@ -182,23 +196,23 @@ export function sanitizeAndNormalizeNodes(rawNodes: any[], existingNodes: any[] 
  * model didn't mention is carried through untouched.
  */
 export function mergeAndNormalizeNodes(
-  rawNodes: any[],
-  existingNodes: any[] = [],
+  rawNodes: RawNode[],
+  existingNodes: RawNode[] = [],
   isFullReplacement: boolean = false
-): any[] {
+): SceneNode[] {
   const normalizedRaw = sanitizeAndNormalizeNodes(rawNodes, existingNodes);
 
   if (isFullReplacement || !existingNodes || existingNodes.length === 0) {
     return normalizedRaw;
   }
 
-  const resultMap = new Map<string, any>();
+  const resultMap = new Map<string, RawNode>();
   existingNodes.forEach((node, index) => {
     const key = node.id || node.name || `node_${index}`;
     resultMap.set(key, JSON.parse(JSON.stringify(node)));
   });
 
-  normalizedRaw.forEach((newNode: any, idx: number) => {
+  normalizedRaw.forEach((newNode: RawNode, idx: number) => {
     let matchedKey: string | null = null;
 
     for (const [k, existing] of resultMap.entries()) {
@@ -220,7 +234,7 @@ export function mergeAndNormalizeNodes(
       const existingNode = resultMap.get(matchedKey);
 
       const mergedGeoms = (newNode.geoms && newNode.geoms.length > 0)
-        ? newNode.geoms.map((g: any, gIdx: number) => {
+        ? newNode.geoms.map((g: RawGeom, gIdx: number): RawGeom => {
             const existingG = existingNode.geoms?.[gIdx];
             const vertices = g.vertices || existingG?.vertices;
             const faces = g.faces || existingG?.faces;
@@ -264,5 +278,5 @@ export function mergeAndNormalizeNodes(
     }
   }
 
-  return finalNodes;
+  return finalNodes as SceneNode[];
 }

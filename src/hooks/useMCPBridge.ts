@@ -23,14 +23,31 @@ import { SCULPT_BASES } from '../utils/sculptBases';
 import { fromSceneGeom, toSceneGeom } from '../utils/sculptMesh';
 import { applySculptStroke, probeSurface, sculptSummary, undoSculptStroke, BRUSH_TYPES } from '../utils/sculptCommands';
 import {
-  addFacesMm, bevelFaceMm, bridgeFacesMm, describeLattice, extrudeMm, insetFaceMm,
-  latticeSummary, removeFacesMm, sharpenEdgesMm,
+  addFacesMm, addRingMm, bevelEdgesMm, bevelFaceMm, bridgeFacesMm, describeLattice,
+  dimensionSelectionMm, extrudeMm,
+  insetFaceMm, latticeSummary, removeFacesMm, revolveMm, sharpenEdgesMm,
 } from '../utils/latticeCommands';
+import { measureInScene } from '../utils/measureScene';
+import type { Object3D } from 'three';
+import type { SceneNode, SceneGeom, SceneJoint } from '../types/scene';
+import type { RawGeom, RawJoint, RawNode } from '../utils/sceneNodes';
 import {
   boxLattice, cloneLattice, deserializeCage, orientFaces, serializeCage, DEFAULT_UNIT as LATTICE_UNIT,
   type Axis as LatticeAxis, type Lattice,
 } from '../utils/latticeMesh';
 import type { SculptUndoEntry } from '../utils/sculptMesh';
+import type { HeadlessResult, HistoryEntry } from '../workers/physicsWorkerProtocol';
+
+interface PhysicsWindow extends Window {
+  _physics_setNoteCards?: (cards: unknown[]) => void;
+  _physics_getNoteCards?: () => unknown[];
+  _physics_setCopilotMessages?: (msgs: unknown[]) => void;
+  _physics_getCopilotMessages?: () => unknown[];
+  _physics_gl?: { domElement: HTMLCanvasElement; render: (scene: unknown, camera: unknown) => void };
+  _physics_scene?: unknown;
+  _physics_camera?: unknown;
+  _physics_composer?: { render: () => void };
+}
 
 /**
  * The last few strokes on each sculpt, so they can be taken back off.
@@ -54,13 +71,13 @@ const latticeHistory = new Map<string, Lattice[]>();
 const LATTICE_HISTORY_DEPTH = 8;
 const SCULPT_HISTORY_DEPTH = 8;
 
-const autoCompileScad = async (nodes: any[]) => {
-  const scadNodes: any[] = [];
-  const collect = (nodesList: any[]) => {
+const autoCompileScad = async (nodes: SceneNode[]) => {
+  const scadNodes: SceneNode[] = [];
+  const collect = (nodesList: SceneNode[]) => {
     if (!nodesList) return;
     for (const node of nodesList) {
       if (node.scad) scadNodes.push(node);
-      collect(node.children);
+      collect(node.children || []);
     }
   };
   collect(nodes);
@@ -114,13 +131,13 @@ const autoCompileScad = async (nodes: any[]) => {
 // to know whether the scene it just loaded actually built successfully. This
 // awaits the whole pipeline (all scad compiles, then a single final recompile)
 // and reports the real MJCF compile result instead.
-const settleScene = async (nodes: any[]): Promise<{ ok: boolean; error?: string; nodeCount: number }> => {
+const settleScene = async (nodes: SceneNode[]): Promise<{ ok: boolean; error?: string; nodeCount: number }> => {
   const store = useStore.getState();
   // A freshly built/replaced scene (BUILD_SCENE/UPDATE_SCENE) is never a preset
   // load, so any note card left over from a previously-loaded preset (e.g.
   // "Double Pendulum") is now describing a scene that no longer exists. Clear
   // it here rather than relying on callers to remember to.
-  (window as any)._physics_setNoteCards?.([]);
+  (window as unknown as PhysicsWindow)._physics_setNoteCards?.([]);
   // skipRecompile: this initial set uses placeholder (pre-scad) mesh geoms, so
   // an immediate recompile here would be both wasted work and another stale
   // build racing against the final one below.
@@ -141,10 +158,10 @@ const settleScene = async (nodes: any[]): Promise<{ ok: boolean; error?: string;
 };
 
 /** Every id in a scene tree, at any depth. */
-function collectNodeIds(nodes: any[], into: Set<string> = new Set()): Set<string> {
+function collectNodeIds(nodes: SceneNode[], into: Set<string> = new Set()): Set<string> {
   for (const node of nodes || []) {
     into.add(node.id);
-    collectNodeIds(node.children, into);
+    collectNodeIds(node.children || [], into);
   }
   return into;
 }
@@ -157,7 +174,7 @@ function collectNodeIds(nodes: any[], into: Set<string> = new Set()): Set<string
  * Polling rather than subscribing keeps this to a few lines and costs nothing:
  * the wait is milliseconds in practice.
  */
-async function waitForNewNode(before: Set<string>, timeoutMs: number): Promise<any | null> {
+async function waitForNewNode(before: Set<string>, timeoutMs: number): Promise<SceneNode | null> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     const nodes = useStore.getState().sceneGraph.nodes;
@@ -168,10 +185,10 @@ async function waitForNewNode(before: Set<string>, timeoutMs: number): Promise<a
   }
 }
 
-function findNewNode(nodes: any[], before: Set<string>): any | null {
+function findNewNode(nodes: SceneNode[], before: Set<string>): SceneNode | null {
   for (const node of nodes || []) {
     if (!before.has(node.id)) return node;
-    const child = findNewNode(node.children, before);
+    const child = findNewNode(node.children || [], before);
     if (child) return child;
   }
   return null;
@@ -184,7 +201,7 @@ function findNewNode(nodes: any[], before: Set<string>): any | null {
  * the one toSceneGeom will write back.
  */
 /** The editable cage on a node, or a refusal that says what to do instead. */
-function latticeOf(node: any): Lattice {
+function latticeOf(node: SceneNode | null | undefined): Lattice {
   if (!node?.latticeCage) {
     throw new Error(`'${node?.id}' has no lattice cage`);
   }
@@ -192,7 +209,7 @@ function latticeOf(node: any): Lattice {
 }
 
 /** Resolves an id to a lattice body and its cage, or explains why it is not one. */
-function latticeTarget(store: any, targetId: string): { node: any; lattice: Lattice } {
+function latticeTarget(store: ReturnType<typeof useStore.getState>, targetId: string): { node: SceneNode; lattice: Lattice } {
   if (!targetId) throw new Error('Missing targetId');
   const node = findNodeInScene(store.sceneGraph.nodes, targetId);
   if (!node) throw new Error(`No object with id '${targetId}'`);
@@ -217,24 +234,24 @@ function pushLatticeHistory(targetId: string, snapshot: Lattice) {
  * load this one rather than carry on with what it has — the same signal
  * setSculptBase sends when it swaps a mesh out.
  */
-function commitLattice(node: any, lattice: Lattice) {
+function commitLattice(node: SceneNode, lattice: Lattice) {
   const store = useStore.getState();
   store.updateNode(node.id, { latticeVersion: (node.latticeVersion ?? 1) + 1 });
   store.applyLattice(node.id, serializeCage(lattice), node.latticeSubdiv ?? 0);
 }
 
-function sculptMeshOf(node: any) {
-  const geom = (node?.geoms ?? []).find((g: any) => g.type === 'mesh');
+function sculptMeshOf(node: SceneNode) {
+  const geom = (node?.geoms ?? []).find((g) => g.type === 'mesh');
   if (!geom?.renderVertices?.length || !geom?.faces?.length) {
     throw new Error(`'${node?.id}' has no sculptable mesh geom`);
   }
   return fromSceneGeom(geom.renderVertices, geom.faces);
 }
 
-const findNodeInScene = (nodes: any[], id: string): any | null => {
+const findNodeInScene = (nodes: SceneNode[], id: string): SceneNode | null => {
   for (const node of nodes || []) {
     if (node.id === id || node.name === id) return node;
-    const child = findNodeInScene(node.children, id);
+    const child = findNodeInScene(node.children || [], id);
     if (child) return child;
   }
   return null;
@@ -254,7 +271,7 @@ const bboxOf = (flatVerts: number[] | undefined) => {
   return { min, max };
 };
 
-const summarizeGeom = (g: any) => ({
+const summarizeGeom = (g: SceneGeom) => ({
   name: g.name,
   type: g.type,
   ...(g.csg && g.csg !== 'union' ? { csg: g.csg } : {}),
@@ -269,7 +286,7 @@ const summarizeGeom = (g: any) => ({
     : { size: g.size }),
 });
 
-const summarizeNode = (node: any): any => ({
+const summarizeNode = (node: SceneNode): Record<string, unknown> => ({
   id: node.id,
   name: node.name,
   pos: node.pos,
@@ -284,16 +301,19 @@ const summarizeNode = (node: any): any => ({
       ...(node.csgError ? { error: node.csgError } : {}),
     },
   } : {}),
-  joints: (node.joints || []).map((j: any) => ({ name: j.name, type: j.type })),
+  joints: (node.joints || []).map((j) => ({ name: j.name, type: j.type })),
   geoms: (node.geoms || []).map(summarizeGeom),
   children: (node.children || []).map(summarizeNode),
 });
 
-const stripMeshArrays = (node: any): any => {
+const stripMeshArrays = (node: SceneNode): SceneNode => {
   const cloned = { ...node };
   if (cloned.geoms) {
-    cloned.geoms = cloned.geoms.map((g: any) => {
-      const { vertices, faces, renderVertices, ...rest } = g;
+    cloned.geoms = cloned.geoms.map((g) => {
+      const rest = { ...g };
+      delete rest.vertices;
+      delete rest.faces;
+      delete rest.renderVertices;
       return rest;
     });
   }
@@ -330,7 +350,7 @@ const toRenderVertices = (vertices: number[]): number[] => {
   return out;
 };
 
-const fillGeomDefaults = (g: any, bodyName: string, idx: number, bodyIsJointed: boolean) => {
+const fillGeomDefaults = (g: RawGeom, bodyName: string, idx: number, bodyIsJointed: boolean): SceneGeom => {
   const isMesh = (g.type ?? 'box') === 'mesh';
   const dynamic = g.dynamic !== undefined ? g.dynamic : (isMesh && bodyIsJointed ? true : undefined);
   const renderVertices = g.renderVertices !== undefined
@@ -361,7 +381,7 @@ const fillGeomDefaults = (g: any, bodyName: string, idx: number, bodyIsJointed: 
   };
 };
 
-const fillJointDefaults = (j: any, bodyName: string, idx: number) => ({
+const fillJointDefaults = (j: RawJoint, bodyName: string, idx: number): SceneJoint => ({
   name:    j.name    ?? `${bodyName}_joint_${idx}`,
   type:    j.type    ?? 'free',
   ...(j.axis     !== undefined ? { axis: j.axis }         : {}),
@@ -373,7 +393,7 @@ const fillJointDefaults = (j: any, bodyName: string, idx: number) => ({
   ...(j.actuator !== undefined ? { actuator: j.actuator } : {}),
 });
 
-const fillBodyDefaults = (b: any): any => {
+const fillBodyDefaults = (b: RawNode): SceneNode => {
   const name = b.name ?? b.id ?? `body_${Math.random().toString(36).slice(2, 7)}`;
   const id   = b.id   ?? name;
   // Curve (rigid curved track): generate convex box segments from the spline
@@ -391,7 +411,7 @@ const fillBodyDefaults = (b: any): any => {
       )
     : null;
   const resolvedJoints = (b.joints ?? (b.isCurve === true ? [] : [{ type: 'free' }]))
-    .map((j: any, i: number) => fillJointDefaults(j, name, i));
+    .map((j: RawJoint, i: number) => fillJointDefaults(j, name, i));
   return {
     id,
     name,
@@ -400,7 +420,7 @@ const fillBodyDefaults = (b: any): any => {
     ...(b.quat  !== undefined ? { quat: b.quat }   : {}),
     ...(b.euler !== undefined ? { euler: b.euler } : {}),
     geoms:    (curveGeoms ?? b.geoms ?? (b.scad !== undefined ? [{ type: 'mesh', size: [1], dynamic: true }] : [{ type: 'box', size: [0.25, 0.25, 0.25] }]))
-                .map((g: any, i: number) => fillGeomDefaults(g, name, i, resolvedJoints.length > 0)),
+                .map((g: RawGeom, i: number) => fillGeomDefaults(g, name, i, resolvedJoints.length > 0)),
     joints:   resolvedJoints,
     children: (b.children ?? []).map(fillBodyDefaults),
     ...(b.coupleTargetId  !== undefined ? { coupleTargetId: b.coupleTargetId }   : {}),
@@ -421,7 +441,7 @@ const fillBodyDefaults = (b: any): any => {
     // into a single mesh (see utils/csg.ts). csgEnabled is inferred when the
     // caller marked a negative but forgot the flag, since a negative geom is
     // meaningless without it and silently rendering it as a solid is worse.
-    ...((b.csgEnabled === true || (b.geoms || []).some((g: any) => g.csg === 'difference' || g.csg === 'intersection'))
+    ...((b.csgEnabled === true || (b.geoms || []).some((g: RawGeom) => g.csg === 'difference' || g.csg === 'intersection'))
       ? { csgEnabled: true } : {}),
     ...(b.csgCollision !== undefined ? { csgCollision: b.csgCollision } : {}),
     ...(b.csgSectors   !== undefined ? { csgSectors: b.csgSectors }     : {}),
@@ -479,9 +499,11 @@ export function useMCPBridge() {
         }));
 
       ws.onmessage = (evt) => {
-        let msg: any;
+        let msg: Record<string, unknown>;
         try { msg = JSON.parse(evt.data); } catch { return; }
-        const { cmd, id } = msg;
+        if (!msg || typeof msg !== 'object') return;
+        const cmd = typeof msg.cmd === 'string' ? msg.cmd : undefined;
+        const id = msg.id;
         if (!cmd) return;
 
         useStore.getState().incrementMcpActive();
@@ -515,7 +537,7 @@ export function useMCPBridge() {
       ws.onerror = () => ws?.close();
     };
 
-    const handle = async (cmd: string, msg: any): Promise<unknown> => {
+    const handle = async (cmd: string, msg: Record<string, unknown>): Promise<unknown> => {
       // Access Zustand store directly — works outside React render
       const store = useStore.getState();
 
@@ -592,19 +614,19 @@ export function useMCPBridge() {
           // headless "what-if" run can never diverge from what's actually
           // rendered live, and never costs a second loaded WASM module.
           const xml = compileToMJCF(sceneGraph, gravityZ, floorFriction, windX, windY, density, floorBounce);
-          const result: any = await getPhysicsWorkerClient().runHeadless(xml, sceneGraph, ticks);
+          const result: HeadlessResult = await getPhysicsWorkerClient().runHeadless(xml, sceneGraph, ticks);
           // Decimate/filter the trajectory before it crosses the websocket: a
           // full per-tick, per-body trajectory is ~500KB per 900 ticks and was
           // the main reason long runs blew the bridge's 30s response window.
           const stride = Math.max(1, Math.floor(Number(msg.stride) || 1));
-          const bodyFilter = Array.isArray(msg.bodies) && msg.bodies.length > 0 ? new Set(msg.bodies) : null;
-          if (result?.trajectory && (stride > 1 || bodyFilter)) {
+          const bodyFilter = Array.isArray(msg.bodies) && msg.bodies.length > 0 ? new Set(msg.bodies as string[]) : null;
+          if (result.ok && result.trajectory && (stride > 1 || bodyFilter)) {
             const t = result.trajectory;
-            let frames = stride > 1
-              ? t.filter((_: any, i: number) => i % stride === 0 || i === t.length - 1)
+            let frames: HistoryEntry[] = stride > 1
+              ? t.filter((_, i) => i % stride === 0 || i === t.length - 1)
               : t;
             if (bodyFilter) {
-              frames = frames.map((fr: any) => ({
+              frames = frames.map((fr: HistoryEntry) => ({
                 ...fr,
                 bodies: Object.fromEntries(Object.entries(fr.bodies || {}).filter(([k]) => bodyFilter.has(k))),
               }));
@@ -618,9 +640,9 @@ export function useMCPBridge() {
           return (store.sceneGraph.nodes || []).map(stripMeshArrays);
 
         case 'GET_OBJECT': {
-          const targetId = msg.targetId;
+          const targetId = typeof msg.targetId === 'string' ? msg.targetId : '';
           if (!targetId) throw new Error('Missing object id');
-          const findNode = (nodesList: any[]): any => {
+          const findNode = (nodesList: SceneNode[] | undefined): SceneNode | null => {
             if (!nodesList) return null;
             for (const node of nodesList) {
               if (node.id === targetId) return node;
@@ -635,14 +657,14 @@ export function useMCPBridge() {
         }
 
         case 'UPDATE_OBJECT': {
-          const targetId = msg.targetId;
-          const updates = msg.updates;
+          const targetId = typeof msg.targetId === 'string' ? msg.targetId : '';
+          const updates = msg.updates as Partial<SceneNode> & { scad?: string };
           if (!targetId) throw new Error('Missing object id');
           if (!updates) throw new Error('Missing updates payload');
 
           if (updates.scad !== undefined) {
-            let compiled: any = null;
-            let lastErr: any = null;
+            let compiled: Awaited<ReturnType<typeof compileSCAD>> | null = null;
+            let lastErr: unknown = null;
             for (let attempt = 0; attempt < 3 && !compiled; attempt++) {
               if (attempt > 0) await new Promise(r => setTimeout(r, 100));
               try {
@@ -657,7 +679,7 @@ export function useMCPBridge() {
               }
             }
             if (!compiled) {
-              throw new Error(`Failed to compile SCAD: ${lastErr?.message || String(lastErr)}`);
+              throw new Error(`Failed to compile SCAD: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`);
             }
             store.updateNodeScad(targetId, updates.scad, compiled, false);
           } else {
@@ -689,7 +711,7 @@ export function useMCPBridge() {
           if (!Array.isArray(rgba) || rgba.length < 3) throw new Error('rgba must be [r, g, b] or [r, g, b, a], each 0..1');
           const node = findNodeInScene(store.sceneGraph.nodes, targetId);
           if (!node) throw new Error(`No object with id '${targetId}'`);
-          if (geomName && !(node.geoms || []).some((g: any) => g.name === geomName)) {
+          if (geomName && !(node.geoms || []).some((g: SceneGeom) => g.name === geomName)) {
             throw new Error(`Object '${targetId}' has no geom named '${geomName}'`);
           }
           store.setGeomColor(targetId, geomName, rgba);
@@ -708,8 +730,8 @@ export function useMCPBridge() {
           if (!node) throw new Error(`No object with id '${targetId}'`);
 
           const geom = geomName
-            ? (node.geoms || []).find((g: any) => g.name === geomName)
-            : (node.geoms || []).find((g: any) => isPaintable(g.type, !!node.isWedge));
+            ? (node.geoms || []).find((g: SceneGeom) => g.name === geomName)
+            : (node.geoms || []).find((g: SceneGeom) => isPaintable(g.type, !!node.isWedge));
           if (!geom) throw new Error(geomName ? `No geom named '${geomName}' on '${targetId}'` : `Nothing paintable on '${targetId}'`);
           if (!isPaintable(geom.type, !!node.isWedge)) {
             throw new Error(`A '${geom.type}' geom cannot hold paint — paintable types are box, sphere, ellipsoid, cylinder, capsule and mesh`);
@@ -717,7 +739,7 @@ export function useMCPBridge() {
           if (!Array.isArray(rgba) || rgba.length < 3) throw new Error('rgba must be [r, g, b], each 0..1');
 
           const points: number[][] = Array.isArray(at?.[0]) ? at : [at];
-          if (!points.length || points.some((p: any) => !Array.isArray(p) || p.length < 3)) {
+          if (!points.length || points.some((p: unknown) => !Array.isArray(p) || p.length < 3)) {
             throw new Error("at must be [x, y, z] or a list of them, in the geom's own frame (metres)");
           }
           const brush = typeof radius === 'number' ? radius : 0.008;
@@ -839,7 +861,7 @@ export function useMCPBridge() {
           }
 
           const points: number[][] = Array.isArray(at?.[0]) ? at : [at];
-          if (!points.length || points.some((p: any) => !Array.isArray(p) || p.length < 3)) {
+          if (!points.length || points.some((p: unknown) => !Array.isArray(p) || p.length < 3)) {
             throw new Error("at must be [x, y, z] or a list of them, in the body's own frame (metres)");
           }
 
@@ -871,7 +893,7 @@ export function useMCPBridge() {
             sculptVersion: (node.sculptVersion ?? 1) + 1,
           });
           const { vertices, renderVertices, faces } = toSceneGeom(mesh);
-          const geomIndex = Math.max(0, (node.geoms ?? []).findIndex((g: any) => g.type === 'mesh'));
+          const geomIndex = Math.max(0, (node.geoms ?? []).findIndex((g: SceneGeom) => g.type === 'mesh'));
           store.updateNodeGeom(targetId, { vertices, renderVertices, faces }, geomIndex);
 
           const error = useStore.getState().lastCompileError;
@@ -897,7 +919,7 @@ export function useMCPBridge() {
           undoSculptStroke(mesh, entry);
           store.updateNode(targetId, { sculptVersion: (node.sculptVersion ?? 1) + 1 });
           const { vertices, renderVertices, faces } = toSceneGeom(mesh);
-          const geomIndex = Math.max(0, (node.geoms ?? []).findIndex((g: any) => g.type === 'mesh'));
+          const geomIndex = Math.max(0, (node.geoms ?? []).findIndex((g: SceneGeom) => g.type === 'mesh'));
           store.updateNodeGeom(targetId, { vertices, renderVertices, faces }, geomIndex);
 
           return { ok: true, id: targetId, undoDepth: stack.length, ...sculptSummary(mesh) };
@@ -1003,7 +1025,7 @@ export function useMCPBridge() {
           const wanted = Math.max(0, Math.min(2, Math.round(Number(level) || 0)));
           useStore.getState().setLatticeSubdiv(node.id, wanted);
           const after = findNodeInScene(useStore.getState().sceneGraph.nodes, node.id);
-          const mesh = after?.geoms?.find((g: any) => g.type === 'mesh');
+          const mesh = after?.geoms?.find((g: SceneGeom) => g.type === 'mesh');
           return {
             ok: true, id: node.id, level: wanted,
             ...latticeSummary(latticeOf(after)),
@@ -1033,6 +1055,77 @@ export function useMCPBridge() {
           return { ok: true, id: targetId, ...result, ...latticeSummary(lattice), undoDepth: (latticeHistory.get(targetId) ?? []).length };
         }
 
+        case 'LATTICE_BEVEL_EDGES': {
+          const { targetId, edges, radiusMm, mode, mirror, loop } = msg;
+          const { node, lattice } = latticeTarget(store, targetId);
+          const before = cloneLattice(lattice);
+          const result = bevelEdgesMm(
+            lattice, edges, radiusMm,
+            mode === 'fillet' ? 'fillet' : 'chamfer',
+            mirror as LatticeAxis | undefined,
+            loop === true,
+          );
+          pushLatticeHistory(targetId, before);
+          commitLattice(node, lattice);
+          return { ok: true, id: targetId, ...result, ...latticeSummary(lattice), undoDepth: (latticeHistory.get(targetId) ?? []).length };
+        }
+
+        case 'LATTICE_CIRCLE': {
+          const { targetId, centre, diameterMm, axis, sides, mirror } = msg;
+          const { node, lattice } = latticeTarget(store, targetId);
+          const before = cloneLattice(lattice);
+          const result = addRingMm(
+            lattice, centre, diameterMm,
+            (axis as LatticeAxis) || 'z',
+            typeof sides === 'number' ? sides : 0,
+            mirror as LatticeAxis | undefined,
+          );
+          pushLatticeHistory(targetId, before);
+          commitLattice(node, lattice);
+          return { ok: true, id: targetId, ...result, ...latticeSummary(lattice), undoDepth: (latticeHistory.get(targetId) ?? []).length };
+        }
+
+        case 'LATTICE_REVOLVE': {
+          const { targetId, profile, axis, degrees, throughMm, segments, closed } = msg;
+          const { node, lattice } = latticeTarget(store, targetId);
+          const before = cloneLattice(lattice);
+          const result = revolveMm(
+            lattice, profile, (axis as LatticeAxis) || 'z',
+            typeof degrees === 'number' ? degrees : 360,
+            {
+              throughMm: Array.isArray(throughMm) ? throughMm : undefined,
+              segments: typeof segments === 'number' ? segments : 0,
+              closed: closed === true,
+            },
+          );
+          pushLatticeHistory(targetId, before);
+          commitLattice(node, lattice);
+          return { ok: true, id: targetId, ...result, ...latticeSummary(lattice), undoDepth: (latticeHistory.get(targetId) ?? []).length };
+        }
+
+        case 'MEASURE': {
+          const { from, to, corner, snap, withinMm } = msg;
+          const point = (value: unknown, name: string): [number, number, number] => {
+            if (!Array.isArray(value) || value.length < 3 || !value.every((v) => typeof v === 'number' && Number.isFinite(v))) {
+              throw new Error(`${name} must be a point [x, y, z] in metres, in the world frame`);
+            }
+            return [value[0], value[1], value[2]];
+          };
+          // The DRAWN scene, not the document: that is where the transforms
+          // have been applied, where a boolean has been evaluated, and where a
+          // lattice cage has already become the mesh anybody would measure.
+          const root = (window as unknown as { _physics_scene?: Object3D })._physics_scene ?? null;
+          return {
+            ok: true,
+            ...measureInScene(root, point(from, 'from'), point(to, 'to'), {
+              corner: corner === undefined ? undefined : point(corner, 'corner'),
+              snap: snap !== false,
+              withinMm: typeof withinMm === 'number' ? withinMm : 3,
+            }),
+            snapped: snap !== false && root !== null,
+          };
+        }
+
         case 'LATTICE_BRIDGE': {
           const { targetId, faceA, faceB } = msg;
           const { node, lattice } = latticeTarget(store, targetId);
@@ -1041,6 +1134,104 @@ export function useMCPBridge() {
           pushLatticeHistory(targetId, before);
           commitLattice(node, lattice);
           return { ok: true, id: targetId, ...result, ...latticeSummary(lattice), undoDepth: (latticeHistory.get(targetId) ?? []).length };
+        }
+
+        case 'LATTICE_DIMENSION': {
+          const { targetId, corners, axis, mode, valueMm } = msg;
+          const { node, lattice } = latticeTarget(store, targetId);
+          const which = (axis === 'x' || axis === 'y' || axis === 'z') ? axis : null;
+          if (!which) return { ok: false, error: "axis must be 'x', 'y' or 'z'" };
+          const how = mode === 'position' ? 'position' : 'size';
+          if (typeof valueMm !== 'number' || !Number.isFinite(valueMm)) {
+            return { ok: false, error: 'valueMm must be a number, in millimetres' };
+          }
+          const before = cloneLattice(lattice);
+          const result = dimensionSelectionMm(lattice, corners, which, how, valueMm);
+          if (!result.changed) {
+            // Not an error. Asking for the size something already is, or for a
+            // size on an axis it is flat along, is a no-op and saying so is
+            // more use than a failure the caller has to interpret.
+            return { ok: true, id: targetId, ...result, ...latticeSummary(lattice) };
+          }
+          pushLatticeHistory(targetId, before);
+          commitLattice(node, lattice);
+          return {
+            ok: true, id: targetId, ...result, ...latticeSummary(lattice),
+            undoDepth: (latticeHistory.get(targetId) ?? []).length,
+          };
+        }
+
+        case 'BODY_CUT': {
+          const { targetId, shape, at, normal, diameterMm, widthMm, lengthMm, depthMm } = msg;
+          const node = findNodeInScene(store.sceneGraph.nodes, targetId);
+          if (!node) return { ok: false, error: `No object with id '${targetId}'` };
+          const kind = shape === 'slot' || shape === 'box' ? 'box'
+            : shape === 'dish' || shape === 'sphere' ? 'sphere' : 'cylinder';
+          const spot = Array.isArray(at) && at.length >= 3
+            ? {
+              at: [at[0] / 1000, at[1] / 1000, at[2] / 1000],
+              normal: Array.isArray(normal) && normal.length >= 3 ? [...normal] : [0, 0, 1],
+            }
+            : undefined;
+          const index = store.addBodyCut(targetId, kind, spot);
+          if (index < 0) return { ok: false, error: 'That body has no solid shape to cut into' };
+
+          // Size and depth after the fact, through the same actions the panel
+          // uses, so a cut made here and one made by hand cannot disagree.
+          if (kind === 'box') {
+            const wide = typeof widthMm === 'number' ? widthMm / 2000 : undefined;
+            const long = typeof lengthMm === 'number' ? lengthMm / 2000 : undefined;
+            if (wide !== undefined || long !== undefined) {
+              const now = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId)?.geoms?.[index];
+              store.setCutSection(targetId, index, [
+                wide ?? now?.size?.[0] ?? 0.005,
+                long ?? now?.size?.[1] ?? 0.005,
+              ]);
+            }
+          } else if (typeof diameterMm === 'number') {
+            store.setCutSection(targetId, index, [diameterMm / 2000]);
+          }
+          if (typeof depthMm === 'number') store.setCutDepth(targetId, index, depthMm);
+
+          const cut = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId)?.geoms?.[index];
+          return {
+            ok: true,
+            id: targetId,
+            geomIndex: index,
+            name: cut?.name,
+            shape: kind,
+            // Where it actually landed on the surface, which is not necessarily
+            // the point asked for — the line was cast through it to find the
+            // material, and on a stepped or curved part that moves.
+            atMm: (cut?.cutAt ?? []).map((v: number) => Math.round(v * 1000 * 1000) / 1000),
+            normal: cut?.cutNormal,
+            depthMm: cut?.cutDepth ? Math.round(cut.cutDepth * 1000 * 1000) / 1000 : 0,
+            through: !(cut?.cutDepth && cut.cutDepth > 0),
+          };
+        }
+
+        case 'COMBINE_BODIES': {
+          const { targetId, withIds, op } = msg;
+          const sources = Array.isArray(withIds) ? withIds.filter((v: unknown) => typeof v === 'string') : [];
+          if (sources.length === 0) return { ok: false, error: 'Give the ids of the bodies to merge in, as withIds' };
+          const target = findNodeInScene(store.sceneGraph.nodes, targetId);
+          if (!target) return { ok: false, error: `No object with id '${targetId}'` };
+          const missing = sources.filter((id: string) => !findNodeInScene(store.sceneGraph.nodes, id));
+          if (missing.length > 0) return { ok: false, error: `No object with id '${missing.join("', '")}'` };
+          const how = op === 'difference' || op === 'subtract' ? 'difference'
+            : op === 'intersection' || op === 'intersect' ? 'intersection' : 'union';
+
+          const before = (target.geoms || []).length;
+          store.combineBodies(targetId, sources, how);
+          const after = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId);
+          return {
+            ok: true,
+            id: targetId,
+            op: how,
+            merged: sources,
+            shapesAdded: (after?.geoms || []).filter((g: SceneGeom) => !g.csgDerived).length - before,
+            geoms: (after?.geoms || []).filter((g: SceneGeom) => !g.csgDerived).map((g: SceneGeom) => g.name),
+          };
         }
 
         case 'LATTICE_ORIENT': {
@@ -1062,7 +1253,7 @@ export function useMCPBridge() {
           const mm = Math.max(0, Number(thicknessMm) || 0);
           useStore.getState().setLatticeThickness(node.id, mm);
           const after = findNodeInScene(useStore.getState().sceneGraph.nodes, node.id);
-          const mesh = after?.geoms?.find((g: any) => g.type === 'mesh');
+          const mesh = after?.geoms?.find((g: SceneGeom) => g.type === 'mesh');
           return {
             ok: true, id: node.id, thicknessMm: mm,
             ...latticeSummary(latticeOf(after)),
@@ -1097,7 +1288,7 @@ export function useMCPBridge() {
           if (!node) throw new Error(`No object with id '${targetId}'`);
           if (!node.isSculpt) throw new Error(`'${targetId}' is not a sculpt body`);
           const points: number[][] = Array.isArray(at?.[0]) ? at : [at];
-          if (!points.length || points.some((p: any) => !Array.isArray(p) || p.length < 3)) {
+          if (!points.length || points.some((p: unknown) => !Array.isArray(p) || p.length < 3)) {
             throw new Error("at must be [x, y, z] or a list of them, in the body's own frame (metres)");
           }
           return { ok: true, id: targetId, points: probeSurface(sculptMeshOf(node), points) };
@@ -1177,7 +1368,7 @@ export function useMCPBridge() {
           // it) instead of leaving a stale card from whatever was loaded before -
           // this path (MCP LOAD_PRESET) used to skip that entirely, since it
           // calls store.loadPreset directly rather than through those UI wrappers.
-          const setter = (window as any)._physics_setNoteCards;
+          const setter = (window as unknown as PhysicsWindow)._physics_setNoteCards;
           if (setter) {
             if (name.startsWith('user:')) {
               const saved = readUserPreset(name);
@@ -1187,7 +1378,7 @@ export function useMCPBridge() {
               setter(presetCard ? [presetCard] : []);
             }
           }
-          const msgSetter = (window as any)._physics_setCopilotMessages;
+          const msgSetter = (window as unknown as PhysicsWindow)._physics_setCopilotMessages;
           if (msgSetter) {
             if (name.startsWith('user:')) {
               const saved = readUserPreset(name);
@@ -1212,8 +1403,8 @@ export function useMCPBridge() {
           // is the one that used to bypass sync.
           const saved = saveUserPreset(userPresetKey, {
             sceneGraph: store.sceneGraph,
-            noteCards: (window as any)._physics_getNoteCards?.() || [],
-            copilotMessages: (window as any)._physics_getCopilotMessages?.() || [],
+            noteCards: (window as unknown as PhysicsWindow)._physics_getNoteCards?.() || [],
+            copilotMessages: (window as unknown as PhysicsWindow)._physics_getCopilotMessages?.() || [],
           });
           if (!saved) return { ok: false, error: 'Could not write the preset to local storage' };
           return { ok: true, preset: `user:${userPresetKey}` };
@@ -1233,7 +1424,7 @@ export function useMCPBridge() {
           const nodes = store.sceneGraph.nodes || [];
           const bodyBounds: Array<{ id: string; name: string; min: number[]; max: number[] }> = [];
 
-          const computeBounds = (nodeList: any[], parentPos: number[] = [0, 0, 0]) => {
+          const computeBounds = (nodeList: SceneNode[], parentPos: number[] = [0, 0, 0]) => {
             for (const node of nodeList) {
               const nodePos = [
                 (node.pos?.[0] || 0) + parentPos[0],
@@ -1243,7 +1434,7 @@ export function useMCPBridge() {
               const min = [nodePos[0] - 0.1, nodePos[1] - 0.1, nodePos[2] - 0.1];
               const max = [nodePos[0] + 0.1, nodePos[1] + 0.1, nodePos[2] + 0.1];
 
-              (node.geoms || []).forEach((g: any) => {
+              (node.geoms || []).forEach((g: SceneGeom) => {
                 const s = g.size || [0.1, 0.1, 0.1];
                 const halfX = s[0] || 0.1;
                 const halfY = s[1] || halfX;
@@ -1321,7 +1512,7 @@ export function useMCPBridge() {
           const mode = importMode || 'scad_parametric';
           const nodePos = Array.isArray(pos) && pos.length === 3 ? pos : [0, 0, 1];
           const id = `stl_${Math.random().toString(36).slice(2, 7)}`;
-          let newNode: any = null;
+          let newNode: SceneNode;
 
           if (mode === 'scad_parametric') {
             newNode = {
@@ -1396,7 +1587,8 @@ export function useMCPBridge() {
         }
 
         case 'SCREENSHOT': {
-          const gl = (window as any)._physics_gl;
+          const win = window as unknown as PhysicsWindow;
+          const gl = win._physics_gl;
           if (!gl || !gl.domElement) return { ok: false, error: 'Renderer not ready yet' };
 
           /*
@@ -1414,13 +1606,13 @@ export function useMCPBridge() {
            * frames of empty floor, with the model sitting in the scene the whole
            * time.
            */
-          const scene = (window as any)._physics_scene;
-          const camera = (window as any)._physics_camera;
+          const scene = win._physics_scene;
+          const camera = win._physics_camera;
           // The EffectComposer (ambient occlusion) owns the render loop once it's
           // mounted, so a raw gl.render() below would draw a frame with no AO
           // applied — the screenshot would silently disagree with what's on
           // screen. Render through the composer when it's there.
-          const composer = (window as any)._physics_composer;
+          const composer = win._physics_composer;
           if (composer) {
             try {
               composer.render();
@@ -1449,12 +1641,12 @@ export function useMCPBridge() {
         }
 
         case 'GET_NOTE_CARDS': {
-          const getter = (window as any)._physics_getNoteCards;
+          const getter = (window as unknown as PhysicsWindow)._physics_getNoteCards;
           return { ok: true, noteCards: getter ? getter() : [] };
         }
 
         case 'SET_NOTE_CARDS': {
-          const setter = (window as any)._physics_setNoteCards;
+          const setter = (window as unknown as PhysicsWindow)._physics_setNoteCards;
           if (!setter) return { ok: false, error: 'Note card state not available' };
           if (!Array.isArray(msg.noteCards)) return { ok: false, error: 'noteCards must be an array' };
           setter(msg.noteCards);
@@ -1634,7 +1826,7 @@ export function useMCPBridge() {
           // Each descriptor can have the same fields as SceneNode but `geoms` may be a shorthand array
           // of plain objects — missing fields are filled with safe defaults so agents don't need to
           // supply every field.
-          const bodies: any[] = msg.bodies;
+          const bodies = msg.bodies as RawNode[];
           if (!Array.isArray(bodies) || bodies.length === 0) {
             return { ok: false, error: 'bodies must be a non-empty array' };
           }

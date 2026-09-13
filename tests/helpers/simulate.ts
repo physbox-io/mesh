@@ -17,9 +17,11 @@
 
 import load_mujoco from '@mujoco/mujoco';
 import { compileToMJCF } from '../../src/utils/mjcf';
-import type { SceneGraph, SceneNode } from '../../src/types/scene';
+import type { SceneGraph, SceneJoint, SceneNode } from '../../src/types/scene';
 
 type Mujoco = Awaited<ReturnType<typeof load_mujoco>>;
+type MjModel = InstanceType<Mujoco['MjModel']>;
+type MjData = InstanceType<Mujoco['MjData']>;
 let mujocoPromise: Promise<Mujoco> | null = null;
 const getMujoco = () => (mujocoPromise ??= load_mujoco());
 
@@ -53,8 +55,8 @@ export interface Sim {
   /** Peak absolute value of a joint's position over a run — for stability checks. */
   track<T>(fn: () => T): T;
   xml: string;
-  model: any;
-  data: any;
+  model: MjModel;
+  data: MjData;
 }
 
 const walk = (nodes: SceneNode[], fn: (n: SceneNode) => void) => {
@@ -80,8 +82,8 @@ export async function simulate(scene: SceneGraph, opts: SimOptions = {}): Promis
 
   // --- Seed actuator ctrl, exactly as physicsWorker's build does: actuators in
   // scene-graph traversal order, matched positionally to MuJoCo's ctrl indices.
-  const actuatorJoints: any[] = [];
-  walk(scene.nodes, n => n.joints?.forEach((j: any) => { if (j.actuator) actuatorJoints.push(j); }));
+  const actuatorJoints: SceneJoint[] = [];
+  walk(scene.nodes, n => n.joints?.forEach((j) => { if (j.actuator) actuatorJoints.push(j); }));
   actuatorJoints.forEach((j, idx) => {
     if (j.actuator?.ctrlValue !== undefined && idx < model.nu) data.ctrl[idx] = j.actuator.ctrlValue;
   });
@@ -89,7 +91,7 @@ export async function simulate(scene: SceneGraph, opts: SimOptions = {}): Promis
 
   // --- Seed initial joint velocities.
   let seeded = false;
-  walk(scene.nodes, n => n.joints?.forEach((j: any) => {
+  walk(scene.nodes, n => n.joints?.forEach((j) => {
     if (!j.initialVelocity) return;
     const jid = jointId(j.name);
     if (jid === -1) return;
@@ -100,12 +102,12 @@ export async function simulate(scene: SceneGraph, opts: SimOptions = {}): Promis
   if (seeded) mujoco.mj_forward(model, data);
 
   // --- Script API: the subset the presets actually use, mirroring the worker.
-  const scripted: Array<{ node: SceneNode; fn: (api: any) => void }> = [];
+  const scripted: Array<{ node: SceneNode; fn: (api: Record<string, unknown>) => void }> = [];
   if (opts.runScripts !== false) {
     walk(scene.nodes, n => {
       if (!n.script || !n.script.trim()) return;
-      // eslint-disable-next-line @typescript-eslint/no-implied-eval
-      scripted.push({ node: n, fn: new Function('api', n.script) as (api: any) => void });
+       
+      scripted.push({ node: n, fn: new Function('api', n.script) as (api: Record<string, unknown>) => void });
     });
   }
 

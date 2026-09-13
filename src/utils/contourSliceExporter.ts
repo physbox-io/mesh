@@ -228,7 +228,7 @@ function appendGeomTriangles(
 ): boolean {
   const s = geom.size || [];
   const r = s[0] || 0.01;
-  let geometry: THREE.BufferGeometry | null = null;
+  let geometry: THREE.BufferGeometry;
 
   switch (geom.type) {
     case 'box':

@@ -117,7 +117,7 @@ export function ColoringSection({ onArmed }: ColoringSectionProps) {
         }`}
       >
         <Palette className="w-3.5 h-3.5" />
-        {paintMode ? 'Painting — click to stop' : 'Paint'}
+        {paintMode ? 'Painting (click to stop)' : 'Paint'}
       </button>
 
       <div className="grid grid-cols-8 gap-1 mt-2.5">
@@ -125,7 +125,7 @@ export function ColoringSection({ onArmed }: ColoringSectionProps) {
           <button
             key={hex}
             onClick={() => choose(hex)}
-            title={`${name} — picking a colour picks up the brush`}
+            title={`${name}. Picking a colour picks up the brush`}
             style={{ backgroundColor: hex }}
             className={`aspect-square rounded-md border transition-transform cursor-pointer hover:scale-110 ${
               paintMode && currentHex.toLowerCase() === hex.toLowerCase()
@@ -194,7 +194,7 @@ export function ColoringSection({ onArmed }: ColoringSectionProps) {
         <span>
           {paintMode
             ? 'Drag on a body to paint · go over it again to build up · Ctrl erases · Alt picks a colour up · Ctrl+Z undoes a stroke'
-            : 'Colour is looks only — it changes nothing about the physics or what gets exported.'}
+            : 'Colour is looks only. It changes nothing about the physics or what gets exported.'}
         </span>
       </p>
 

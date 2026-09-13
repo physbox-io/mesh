@@ -3,7 +3,8 @@ import { X, Brain, Wand2, Loader2, AlertCircle, HelpCircle, Activity, Printer, S
 import { useStore } from '../store/useStore';
 import { compileSCAD } from '../utils/openscad';
 import { updateOrCreateNotecard } from '../utils/noteCards';
-import { mergeAndNormalizeNodes } from '../utils/sceneNodes';
+import { mergeAndNormalizeNodes, type RawGeom, type RawJoint, type RawNode } from '../utils/sceneNodes';
+import type { SceneGeom, SceneJoint, SceneNode } from '../types/scene';
 import { readMaxTokens } from '../utils/llmSettings';
 import SYSTEM_INSTRUCTIONS from './systemInstructions.txt?raw';
 import { pushGlobalParameter } from '../utils/llmSettings';
@@ -35,7 +36,7 @@ interface ChatMessage {
   userAnswers?: Record<string, string>;
   userAnswersSubmitted?: boolean;
   proposedModifications?: ProposedModification[];
-  nodes?: any[] | null;
+  nodes?: RawNode[] | null;
   isImplemented?: boolean;
   hasError?: boolean;
   errorMsg?: string;
@@ -61,7 +62,7 @@ const cleanJSONString = (str: string): string => {
   return str.replace(/,\s*([\]}])/g, '$1'); // Only remove trailing commas before ] or }
 };
 
-const extractJSON = (text: string): any => {
+const extractJSON = (text: string): unknown => {
   if (!text) return null;
 
   // 1. Check for code blocks ```json ... ``` or ``` ... ```
@@ -72,10 +73,12 @@ const extractJSON = (text: string): any => {
       const code = match[1].trim();
       try {
         return JSON.parse(code);
-      } catch (e) {
+      } catch {
         try {
           return JSON.parse(cleanJSONString(code));
-        } catch (e2) {}
+        } catch {
+          // ignore
+        }
       }
     }
   }
@@ -87,10 +90,12 @@ const extractJSON = (text: string): any => {
     const candidate = text.substring(arrayStart, arrayEnd + 1).trim();
     try {
       return JSON.parse(candidate);
-    } catch (e) {
+    } catch {
       try {
         return JSON.parse(cleanJSONString(candidate));
-      } catch (e2) {}
+      } catch {
+        // ignore
+      }
     }
   }
 
@@ -101,10 +106,12 @@ const extractJSON = (text: string): any => {
     const candidate = text.substring(objStart, objEnd + 1).trim();
     try {
       return JSON.parse(candidate);
-    } catch (e) {
+    } catch {
       try {
         return JSON.parse(cleanJSONString(candidate));
-      } catch (e2) {}
+      } catch {
+        // ignore
+      }
     }
   }
 
@@ -115,25 +122,26 @@ const extractJSON = (text: string): any => {
 // carry. Anything that identifies a body - an id/name, or any of the structural
 // keys - counts, so a minimal positional tweak is accepted; question and
 // modification objects are excluded by shape.
-const isLikelyNodeArray = (arr: any[]): boolean =>
-  arr.every(item =>
-    item && typeof item === 'object' && !Array.isArray(item) &&
-    item.question === undefined && item.options === undefined && item.text === undefined &&
-    (item.id !== undefined || item.name !== undefined ||
-     item.geoms !== undefined || item.joints !== undefined || item.scad !== undefined ||
-     item.pos !== undefined || item.euler !== undefined || item.type === 'body')
-  );
+const isLikelyNodeArray = (arr: unknown[]): boolean =>
+  arr.every(item => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return false;
+    const obj = item as Record<string, unknown>;
+    return obj.question === undefined && obj.options === undefined && obj.text === undefined &&
+      (obj.id !== undefined || obj.name !== undefined ||
+       obj.geoms !== undefined || obj.joints !== undefined || obj.scad !== undefined ||
+       obj.pos !== undefined || obj.euler !== undefined || obj.type === 'body');
+  });
 
 const parseAIResponse = (text: string): {
   markdown: string;
   questions: DiagnosticQuestion[];
   proposedModifications: ProposedModification[];
-  nodes: any[] | null;
+  nodes: RawNode[] | null;
   noteCardMarkdown: string | null;
 } => {
   let questions: DiagnosticQuestion[] = [];
   let proposedModifications: ProposedModification[] = [];
-  let nodes: any[] | null = null;
+  let nodes: RawNode[] | null = null;
   let noteCardMarkdown: string | null = null;
   let markdown = cleanLaTeXMath(text);
 
@@ -153,35 +161,36 @@ const parseAIResponse = (text: string): {
     try {
       const parsed = extractJSON(code);
       if (parsed && typeof parsed === 'object') {
+        const p = parsed as Record<string, unknown>;
         if (!noteCardMarkdown) {
-          if (typeof parsed.noteCardMarkdown === 'string') noteCardMarkdown = parsed.noteCardMarkdown;
-          else if (typeof parsed.noteCard === 'string') noteCardMarkdown = parsed.noteCard;
-          else if (typeof parsed.notecard === 'string') noteCardMarkdown = parsed.notecard;
+          if (typeof p.noteCardMarkdown === 'string') noteCardMarkdown = p.noteCardMarkdown;
+          else if (typeof p.noteCard === 'string') noteCardMarkdown = p.noteCard;
+          else if (typeof p.notecard === 'string') noteCardMarkdown = p.notecard;
         }
 
-        if (questions.length === 0 && Array.isArray(parsed.questions)) {
-          questions = parsed.questions.map((q: any, idx: number) => ({
-            id: q.id || `q_${idx}`,
-            question: cleanLaTeXMath(q.question || ''),
+        if (questions.length === 0 && Array.isArray(p.questions)) {
+          questions = (p.questions as Record<string, unknown>[]).map((q, idx: number) => ({
+            id: (typeof q.id === 'string' ? q.id : '') || `q_${idx}`,
+            question: cleanLaTeXMath(typeof q.question === 'string' ? q.question : ''),
             options: Array.isArray(q.options) && q.options.length > 0
-              ? q.options.map((o: any) => cleanLaTeXMath(String(o)))
+              ? q.options.map((o: unknown) => cleanLaTeXMath(String(o)))
               : undefined
-          })).filter((q: any) => q.question.trim().length > 0);
+          })).filter((q) => q.question.trim().length > 0);
           blocksToRemove.push(fullMatch);
         }
 
-        if (proposedModifications.length === 0 && Array.isArray(parsed.proposedModifications)) {
-          proposedModifications = parsed.proposedModifications.map((m: any, idx: number) => ({
-            id: m.id || `m_${idx}`,
-            text: typeof m === 'string' ? cleanLaTeXMath(m) : cleanLaTeXMath(m.text || m.description || String(m)),
+        if (proposedModifications.length === 0 && Array.isArray(p.proposedModifications)) {
+          proposedModifications = (p.proposedModifications as (Record<string, unknown> | string)[]).map((m, idx: number) => ({
+            id: (typeof m === 'object' && m && typeof m.id === 'string' ? m.id : '') || `m_${idx}`,
+            text: typeof m === 'string' ? cleanLaTeXMath(m) : cleanLaTeXMath(String(m.text || m.description || m)),
             selected: true
           })).filter((m: ProposedModification) => m.text.trim().length > 0);
           blocksToRemove.push(fullMatch);
         }
 
         if (nodes === null) {
-          if (Array.isArray(parsed.nodes)) {
-            nodes = parsed.nodes;
+          if (Array.isArray(p.nodes)) {
+            nodes = p.nodes as RawNode[];
             blocksToRemove.push(fullMatch);
           // A bare array is nodes if it isn't one of the other two shapes we
           // accept (questions / proposedModifications). The old test demanded
@@ -190,12 +199,14 @@ const parseAIResponse = (text: string): {
           // "pos": [0,0,0.3]}] - leaving nodes null while the chat still
           // reported the change as applied.
           } else if (Array.isArray(parsed) && parsed.length > 0 && isLikelyNodeArray(parsed)) {
-            nodes = parsed;
+            nodes = parsed as RawNode[];
             blocksToRemove.push(fullMatch);
           }
         }
       }
-    } catch (e) {}
+    } catch {
+      // ignore parse errors
+    }
   }
 
   for (const block of blocksToRemove) {
@@ -214,7 +225,7 @@ const parseAIResponse = (text: string): {
       } else if (trimmed.match(/^#+\s/) && !trimmed.match(/(propos|recommend|suggest|plan|next steps|improvement|analys|diagnos|finding|issue|stability|fix|modificat)/i)) {
         inPropsSection = false;
       } else if (inPropsSection && (trimmed.startsWith('* ') || trimmed.startsWith('- ') || trimmed.match(/^\d+\.\s/))) {
-        const itemText = trimmed.replace(/^[\*\-\d\.]+\s*/, '').trim();
+        const itemText = trimmed.replace(/^[*\-\d.]+\s*/, '').trim();
         if (itemText.length > 5) {
           proposedModifications.push({
             id: `mod_${lineIdx}`,
@@ -231,6 +242,31 @@ const parseAIResponse = (text: string): {
 
   return { markdown: cleanMarkdown, questions, proposedModifications, nodes, noteCardMarkdown };
 };
+
+const getTimestamp = () => Date.now();
+const makeId = (prefix: string) => `${prefix}_${Date.now()}`;
+
+interface PhysicsWindow extends Window {
+  _physics_setNoteCards?: (cards: unknown[]) => void;
+  _physics_getNoteCards?: () => { markdown?: string; id?: string }[];
+}
+
+interface GeminiModelItem {
+  name: string;
+  displayName?: string;
+  supportedGenerationMethods?: string[];
+}
+
+interface ClaudeModelItem {
+  id: string;
+  name?: string;
+  display_name?: string;
+}
+
+interface AnthropicContentBlock {
+  type: string;
+  text?: string;
+}
 
 export default function AICopilotPanel({ onClose, messages: propsMessages, setMessages: propsSetMessages }: AICopilotPanelProps) {
   const sceneGraph = useStore(state => state.sceneGraph);
@@ -273,22 +309,22 @@ export default function AICopilotPanel({ onClose, messages: propsMessages, setMe
   };
 
   const getExistingCardContextStr = () => {
-    const getter = (window as any)._physics_getNoteCards;
+    const getter = (window as unknown as PhysicsWindow)._physics_getNoteCards;
     const cards = getter ? getter() : [];
-    if (cards.length > 0 && cards[0].markdown) {
+    if (cards.length > 0 && cards[0]?.markdown) {
       return `\n\nEXISTING NOTECARD IN SCENE:\n${cards[0].markdown}`;
     }
     return '\n\nEXISTING NOTECARD IN SCENE: None';
   };
 
-  const handleNotecardUpdate = (modeType: 'explain' | 'generate' | 'mutate', promptText?: string, assistantText?: string, noteCardMd?: string | null, targetNodes?: any[] | null) => {
+  const handleNotecardUpdate = (modeType: 'explain' | 'generate' | 'mutate', promptText?: string, assistantText?: string, noteCardMd?: string | null, targetNodes?: RawNode[] | null) => {
     if (noteCardMd) {
-      const getter = (window as any)._physics_getNoteCards;
-      const setter = (window as any)._physics_setNoteCards;
+      const getter = (window as unknown as PhysicsWindow)._physics_getNoteCards;
+      const setter = (window as unknown as PhysicsWindow)._physics_setNoteCards;
       const currentCards = getter ? getter() : [];
       const existingCard = currentCards[0];
       const updatedCard = {
-        id: existingCard?.id || `note_card_${Date.now()}`,
+        id: existingCard?.id || makeId('note_card'),
         markdown: noteCardMd,
         minimized: false,
         x: 16,
@@ -322,9 +358,9 @@ export default function AICopilotPanel({ onClose, messages: propsMessages, setMe
       }
       const data = await res.json();
       if (data.models && Array.isArray(data.models)) {
-        const validModels = data.models
-          .filter((m: any) => !m.supportedGenerationMethods || m.supportedGenerationMethods.includes('generateContent'))
-          .map((m: any) => ({
+        const validModels = (data.models as GeminiModelItem[])
+          .filter((m) => !m.supportedGenerationMethods || m.supportedGenerationMethods.includes('generateContent'))
+          .map((m) => ({
             id: m.name.replace(/^models\//, ''),
             name: m.displayName || m.name.replace(/^models\//, '')
           }));
@@ -353,9 +389,9 @@ export default function AICopilotPanel({ onClose, messages: propsMessages, setMe
       }
       if (res.ok) {
         const data = await res.json();
-        const rawModels = data.data || data.models || [];
+        const rawModels = (data.data || data.models || []) as ClaudeModelItem[];
         if (Array.isArray(rawModels) && rawModels.length > 0) {
-          const formatted = rawModels.map((m: any) => ({
+          const formatted = rawModels.map((m) => ({
             id: m.id,
             name: m.display_name || m.name || m.id
           }));
@@ -383,17 +419,20 @@ export default function AICopilotPanel({ onClose, messages: propsMessages, setMe
   }, []);
 
   useEffect(() => {
-    if (geminiApiKey) {
-      fetchAvailableModels(geminiApiKey);
-    }
-    if (claudeApiKey) {
-      fetchAvailableClaudeModels(claudeApiKey);
-    }
+    const timer = setTimeout(() => {
+      if (geminiApiKey) {
+        void fetchAvailableModels(geminiApiKey);
+      }
+      if (claudeApiKey) {
+        void fetchAvailableClaudeModels(claudeApiKey);
+      }
+    }, 0);
+    return () => clearTimeout(timer);
   }, [geminiApiKey, claudeApiKey]);
 
   useEffect(() => {
-    const handlePresetLoaded = (e: any) => {
-      const detail = e.detail;
+    const handlePresetLoaded = (e: Event) => {
+      const detail = (e as CustomEvent<{ name?: string; prev?: string }>).detail;
       if (detail && typeof detail === 'object') {
         const { name, prev } = detail;
         if (name && name !== prev) {
@@ -406,7 +445,7 @@ export default function AICopilotPanel({ onClose, messages: propsMessages, setMe
     };
     window.addEventListener('physics:preset-loaded', handlePresetLoaded);
     return () => window.removeEventListener('physics:preset-loaded', handlePresetLoaded);
-  }, []);
+  }, [setMessages]);
 
   useEffect(() => {
     if (responseContainerRef.current) {
@@ -492,7 +531,7 @@ export default function AICopilotPanel({ onClose, messages: propsMessages, setMe
         }
 
         const text = Array.isArray(json.content)
-          ? json.content.filter((b: any) => b.type === 'text' && b.text).map((b: any) => b.text).join('\n')
+          ? (json.content as AnthropicContentBlock[]).filter((b) => b.type === 'text' && !!b.text).map((b) => b.text).join('\n')
           : (json.content?.[0]?.text || '');
 
         if (!text.trim()) {
@@ -501,8 +540,9 @@ export default function AICopilotPanel({ onClose, messages: propsMessages, setMe
             : 'The model returned an empty response.');
         }
         return { text, truncated: json.stop_reason === 'max_tokens' };
-      } catch (e: any) {
-        setError(`Claude API Error (${currentModel}): ${e.message}`);
+      } catch (e: unknown) {
+        const message = e instanceof Error ? e.message : String(e);
+        setError(`Claude API Error (${currentModel}): ${message}`);
         setLoading(false);
         return null;
       }
@@ -549,7 +589,10 @@ export default function AICopilotPanel({ onClose, messages: propsMessages, setMe
         // reply across parts, and taking only the first one dropped whatever
         // followed - usually the trailing JSON block the scene update needs.
         const text = Array.isArray(candidate?.content?.parts)
-          ? candidate.content.parts.filter((pt: any) => typeof pt?.text === 'string' && pt.text).map((pt: any) => pt.text).join('\n')
+          ? (candidate.content.parts as { text?: string }[])
+              .filter((pt) => typeof pt?.text === 'string' && !!pt.text)
+              .map((pt) => pt.text)
+              .join('\n')
           : '';
 
         if (!text.trim()) {
@@ -559,8 +602,9 @@ export default function AICopilotPanel({ onClose, messages: propsMessages, setMe
             : 'The model returned an empty response.');
         }
         return { text, truncated: candidate?.finishReason === 'MAX_TOKENS' };
-      } catch (e: any) {
-        setError(`Gemini API Error (${currentModel}): ${e.message}`);
+      } catch (e: unknown) {
+        const message = e instanceof Error ? e.message : String(e);
+        setError(`Gemini API Error (${currentModel}): ${message}`);
         setLoading(false);
         return null;
       }
@@ -579,12 +623,12 @@ export default function AICopilotPanel({ onClose, messages: propsMessages, setMe
   const roundNum = (n: number) => Math.round(n * 1000) / 1000;
 
   const getSerializedNodesCompact = () => {
-    const serializeNode = (node: any): any => {
+    const serializeNode = (node: SceneNode): RawNode => {
       const filteredChildren = node.children
-        ?.filter((child: any) => !child.name?.includes('tooth') && !child.id?.includes('cog_'))
+        ?.filter((child: SceneNode) => !child.name?.includes('tooth') && !child.id?.includes('cog_'))
         .map(serializeNode);
 
-      const compactNode: any = {
+      const compactNode: RawNode = {
         id: node.id,
         name: node.name,
         pos: node.pos?.map(roundNum),
@@ -598,8 +642,8 @@ export default function AICopilotPanel({ onClose, messages: propsMessages, setMe
       if (node.script) compactNode.script = node.script;
 
       if (node.geoms && node.geoms.length > 0) {
-        compactNode.geoms = node.geoms.map((g: any) => {
-          const geomObj: any = {
+        compactNode.geoms = node.geoms.map((g: SceneGeom) => {
+          const geomObj: RawGeom = {
             name: g.name,
             type: g.type,
             size: g.size?.map(roundNum),
@@ -612,8 +656,8 @@ export default function AICopilotPanel({ onClose, messages: propsMessages, setMe
       }
 
       if (node.joints && node.joints.length > 0) {
-        compactNode.joints = node.joints.map((j: any) => {
-          const jointObj: any = {
+        compactNode.joints = node.joints.map((j: SceneJoint) => {
+          const jointObj: RawJoint = {
             name: j.name,
             type: j.type,
           };
@@ -640,9 +684,9 @@ export default function AICopilotPanel({ onClose, messages: propsMessages, setMe
   // time this runs, so a failure here leaves the stored source and the rendered
   // mesh disagreeing - the body keeps its OLD geometry while the chat reports
   // the change as applied. This used to be a console.warn and nothing else.
-  const triggerScadAutoCompile = async (nodesToProcess: any[]): Promise<string[]> => {
-    const scadNodes: any[] = [];
-    const collectScad = (list: any[]) => {
+  const triggerScadAutoCompile = async (nodesToProcess: RawNode[]): Promise<string[]> => {
+    const scadNodes: RawNode[] = [];
+    const collectScad = (list: RawNode[]) => {
       if (!Array.isArray(list)) return;
       for (const node of list) {
         if (node.scad) scadNodes.push(node);
@@ -695,11 +739,11 @@ export default function AICopilotPanel({ onClose, messages: propsMessages, setMe
     const compactNodes = getSerializedNodesCompact();
 
     const userMsg: ChatMessage = {
-      id: `user_${Date.now()}`,
+      id: makeId('user'),
       role: 'user',
       mode: 'explain',
       content: '⚡ Perform Physics Diagnostics',
-      timestamp: Date.now()
+      timestamp: getTimestamp()
     };
     setMessages(prev => [...prev, userMsg]);
 
@@ -722,7 +766,7 @@ Nodes: ${JSON.stringify(compactNodes)}${getModeHistoryStr('explain')}${getExisti
     if (response) {
       const { markdown, questions, noteCardMarkdown } = parseAIResponse(response.text);
       const assistantMsg: ChatMessage = {
-        id: `ast_${Date.now()}`,
+        id: makeId('ast'),
         role: 'assistant',
         mode: 'explain',
         content: markdown,
@@ -734,7 +778,7 @@ Nodes: ${JSON.stringify(compactNodes)}${getModeHistoryStr('explain')}${getExisti
         proposedModifications: [],
         nodes: null,
         isImplemented: false,
-        timestamp: Date.now()
+        timestamp: getTimestamp()
       };
       setMessages(prev => [...prev, assistantMsg]);
       handleNotecardUpdate('explain', 'Physics Diagnostics', markdown, noteCardMarkdown);
@@ -747,11 +791,11 @@ Nodes: ${JSON.stringify(compactNodes)}${getModeHistoryStr('explain')}${getExisti
     const compactNodes = getSerializedNodesCompact();
 
     const userMsg: ChatMessage = {
-      id: `user_${Date.now()}`,
+      id: makeId('user'),
       role: 'user',
       mode: 'explain',
       content: '🖨️ Perform 3D Printing Diagnostics',
-      timestamp: Date.now()
+      timestamp: getTimestamp()
     };
     setMessages(prev => [...prev, userMsg]);
 
@@ -774,7 +818,7 @@ Nodes: ${JSON.stringify(compactNodes)}${getModeHistoryStr('explain')}${getExisti
     if (response) {
       const { markdown, questions, noteCardMarkdown } = parseAIResponse(response.text);
       const assistantMsg: ChatMessage = {
-        id: `ast_${Date.now()}`,
+        id: makeId('ast'),
         role: 'assistant',
         mode: 'explain',
         content: markdown,
@@ -786,7 +830,7 @@ Nodes: ${JSON.stringify(compactNodes)}${getModeHistoryStr('explain')}${getExisti
         proposedModifications: [],
         nodes: null,
         isImplemented: false,
-        timestamp: Date.now()
+        timestamp: getTimestamp()
       };
       setMessages(prev => [...prev, assistantMsg]);
       handleNotecardUpdate('explain', '3D Printing Diagnostics', markdown, noteCardMarkdown);
@@ -811,10 +855,10 @@ Nodes: ${JSON.stringify(compactNodes)}${getModeHistoryStr('explain')}${getExisti
       .join('\n') : '';
 
     const userMsg: ChatMessage = {
-      id: `user_ans_${Date.now()}`,
+      id: makeId('user_ans'),
       role: 'user',
       content: `📝 Functional Intent Answers:\n${userAnswersSummary || 'General functional enhancement requested.'}`,
-      timestamp: Date.now()
+      timestamp: getTimestamp()
     };
     setMessages(prev => [...prev, userMsg]);
 
@@ -838,7 +882,7 @@ Based on these functional clarifications and your physical analysis:
     if (response) {
       const { markdown, proposedModifications, noteCardMarkdown } = parseAIResponse(response.text);
       const assistantMsg: ChatMessage = {
-        id: `ast_props_${Date.now()}`,
+        id: makeId('ast_props'),
         role: 'assistant',
         mode: 'explain',
         content: markdown || '### 🛠️ Proposed Physical Modifications\nSelect the proposed modifications you would like to apply to the active 3D schematic:',
@@ -850,7 +894,7 @@ Based on these functional clarifications and your physical analysis:
         ],
         nodes: null,
         isImplemented: false,
-        timestamp: Date.now()
+        timestamp: getTimestamp()
       };
       setMessages(prev => [...prev, assistantMsg]);
       handleNotecardUpdate('explain', 'Functional Intent Answers', markdown, noteCardMarkdown);
@@ -868,11 +912,11 @@ Based on these functional clarifications and your physical analysis:
     setLoadingStatus('Generating 3D scene schematic...');
 
     const userMsg: ChatMessage = {
-      id: `user_${Date.now()}`,
+      id: makeId('user'),
       role: 'user',
       mode: 'generate',
       content: `🪄 Generate Scene: ${currentPrompt}`,
-      timestamp: Date.now()
+      timestamp: getTimestamp()
     };
     setMessages(prev => [...prev, userMsg]);
 
@@ -884,7 +928,7 @@ Based on these functional clarifications and your physical analysis:
       const { markdown, questions, proposedModifications, nodes, noteCardMarkdown } = parseAIResponse(response.text);
       let applied = false;
       let scadFailures: string[] = [];
-      let mergedNodes: any[] | null = null;
+      let mergedNodes: RawNode[] | null = null;
       if (nodes && Array.isArray(nodes)) {
         const merged = mergeAndNormalizeNodes(nodes, sceneGraph.nodes, true);
         if (merged.length > 0) {
@@ -896,7 +940,7 @@ Based on these functional clarifications and your physical analysis:
       }
 
       const assistantMsg: ChatMessage = {
-        id: `ast_${Date.now()}`,
+        id: makeId('ast'),
         role: 'assistant',
         mode: 'generate',
         // Only claim success when a scene actually reached the store. The
@@ -915,7 +959,7 @@ Based on these functional clarifications and your physical analysis:
         errorMsg: !applied
           ? describeApplyFailure(response.truncated)
           : (scadFailures.length > 0 ? describeScadFailure(scadFailures) : undefined),
-        timestamp: Date.now()
+        timestamp: getTimestamp()
       };
       setMessages(prev => [...prev, assistantMsg]);
       handleNotecardUpdate('generate', currentPrompt, markdown, noteCardMarkdown, mergedNodes || nodes || undefined);
@@ -933,11 +977,11 @@ Based on these functional clarifications and your physical analysis:
     setLoadingStatus('Mutating active 3D scene...');
 
     const userMsg: ChatMessage = {
-      id: `user_${Date.now()}`,
+      id: makeId('user'),
       role: 'user',
       mode: 'mutate',
       content: `🛠️ Mutate Scene: ${currentPrompt}`,
-      timestamp: Date.now()
+      timestamp: getTimestamp()
     };
     setMessages(prev => [...prev, userMsg]);
 
@@ -950,7 +994,7 @@ Based on these functional clarifications and your physical analysis:
       const { markdown, questions, proposedModifications, nodes, noteCardMarkdown } = parseAIResponse(response.text);
       let applied = false;
       let scadFailures: string[] = [];
-      let mergedNodes: any[] | null = null;
+      let mergedNodes: RawNode[] | null = null;
       if (nodes && Array.isArray(nodes)) {
         const merged = mergeAndNormalizeNodes(nodes, sceneGraph.nodes, false);
         if (merged.length > 0) {
@@ -962,7 +1006,7 @@ Based on these functional clarifications and your physical analysis:
       }
 
       const assistantMsg: ChatMessage = {
-        id: `ast_${Date.now()}`,
+        id: makeId('ast'),
         role: 'assistant',
         mode: 'mutate',
         content: markdown || (applied
@@ -977,7 +1021,7 @@ Based on these functional clarifications and your physical analysis:
         errorMsg: !applied
           ? describeApplyFailure(response.truncated)
           : (scadFailures.length > 0 ? describeScadFailure(scadFailures) : undefined),
-        timestamp: Date.now()
+        timestamp: getTimestamp()
       };
       setMessages(prev => [...prev, assistantMsg]);
       handleNotecardUpdate('mutate', currentPrompt, markdown, noteCardMarkdown, mergedNodes || nodes || undefined);
@@ -1045,7 +1089,7 @@ CRITICAL INSTRUCTIONS:
             : `${summaryHeader}- Applied physical design modifications, 3D printability updates, and parameter changes to the active scene graph.`;
 
           const confirmationMsg: ChatMessage = {
-            id: `ast_conf_${Date.now()}`,
+            id: makeId('ast_conf'),
             role: 'assistant',
             mode: 'implement',
             content: summaryContent,
@@ -1055,7 +1099,7 @@ CRITICAL INSTRUCTIONS:
             isImplemented: true,
             hasError: scadFailures.length > 0,
             errorMsg: scadFailures.length > 0 ? describeScadFailure(scadFailures) : undefined,
-            timestamp: Date.now()
+            timestamp: getTimestamp()
           };
           setMessages(prev => [...prev, confirmationMsg]);
           handleNotecardUpdate('mutate', 'Implemented Improvements', markdown, noteCardMarkdown, merged);
@@ -1073,10 +1117,10 @@ CRITICAL INSTRUCTIONS:
     setLoadingStatus('Processing follow-up request...');
 
     const userMsg: ChatMessage = {
-      id: `user_${Date.now()}`,
+      id: makeId('user'),
       role: 'user',
       content: currentInput,
-      timestamp: Date.now()
+      timestamp: getTimestamp()
     };
     setMessages(prev => [...prev, userMsg]);
 
@@ -1098,7 +1142,7 @@ If modifying the 3D scene graph, include the updated "nodes" array in \`\`\`json
       const { markdown, questions, proposedModifications, nodes, noteCardMarkdown } = parseAIResponse(response.text);
       let applied = false;
       let scadFailures: string[] = [];
-      let mergedNodes: any[] | null = null;
+      let mergedNodes: RawNode[] | null = null;
       if (nodes && Array.isArray(nodes)) {
         const merged = mergeAndNormalizeNodes(nodes, sceneGraph.nodes, false);
         if (merged.length > 0) {
@@ -1110,7 +1154,7 @@ If modifying the 3D scene graph, include the updated "nodes" array in \`\`\`json
       }
 
       const assistantMsg: ChatMessage = {
-        id: `ast_${Date.now()}`,
+        id: makeId('ast'),
         role: 'assistant',
         content: markdown || (applied
           ? '### 🛠️ Scene Updated\nYour requested modifications have been applied to the active physics schematic.'
@@ -1127,7 +1171,7 @@ If modifying the 3D scene graph, include the updated "nodes" array in \`\`\`json
         errorMsg: !applied
           ? describeApplyFailure(response.truncated)
           : (scadFailures.length > 0 ? describeScadFailure(scadFailures) : undefined),
-        timestamp: Date.now()
+        timestamp: getTimestamp()
       };
       setMessages(prev => [...prev, assistantMsg]);
       handleNotecardUpdate(mode || 'explain', currentInput, markdown, noteCardMarkdown, mergedNodes || undefined);

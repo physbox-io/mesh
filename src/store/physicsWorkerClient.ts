@@ -5,44 +5,27 @@
 // mirror what useStore.ts's recompile()/action methods used to do directly
 // against a same-thread MjModel/MjData.
 
-export interface BuiltResult {
-  ok: boolean;
-  error?: string;
-  fatal?: boolean;
-  nq?: number; nv?: number; nu?: number; ngeom?: number; nbody?: number;
-  timestep?: number;
-  geom_size?: number[]; body_mass?: number[]; body_inertia?: number[];
-  body_dofnum?: number[]; body_parentid?: number[];
-  geom_type?: number[]; geom_rgba?: number[];
-  jnt_qposadr?: number[]; jnt_dofadr?: number[];
-  idMaps?: { body: Record<string, number>; joint: Record<string, number>; geom: Record<string, number>; actuator: Record<string, number> };
-  time?: number;
-  isShared?: boolean;
-  qpos?: Float64Array; qvel?: Float64Array; ctrl?: Float64Array;
-  xfrc_applied?: Float64Array; qfrc_applied?: Float64Array;
-  xpos?: Float64Array; xmat?: Float64Array; cvel?: Float64Array;
-  geom_xpos?: Float64Array; geom_xmat?: Float64Array;
-}
+import type { SceneGraph } from '../types/scene';
+import type {
+  BuiltResult,
+  FrameSnapshot,
+  HeadlessResult,
+  HistoryEntry,
+  SeedState,
+} from '../workers/physicsWorkerProtocol';
 
-export interface FrameSnapshot {
-  time: number;
-  isShared?: boolean;
-  qpos?: Float64Array; qvel?: Float64Array; ctrl?: Float64Array;
-  xfrc_applied?: Float64Array; qfrc_applied?: Float64Array;
-  xpos?: Float64Array; xmat?: Float64Array; cvel?: Float64Array;
-  geom_xpos?: Float64Array; geom_xmat?: Float64Array;
-}
+export type { BuiltResult, FrameSnapshot } from '../workers/physicsWorkerProtocol';
 
 type Pending<T> = { resolve: (r: T) => void; reject: (e: Error) => void };
 
 export class PhysicsWorkerClient {
   private worker: Worker;
   private pendingBuilds = new Map<string, Pending<BuiltResult>>();
-  private pendingHeadless = new Map<string, Pending<any>>();
-  private pendingHistory = new Map<string, Pending<any[]>>();
-  private pendingTelemetry = new Map<string, Pending<any>>();
+  private pendingHeadless = new Map<string, Pending<HeadlessResult>>();
+  private pendingHistory = new Map<string, Pending<HistoryEntry[]>>();
+  private pendingTelemetry = new Map<string, Pending<HistoryEntry | null>>();
   onFrame: ((snap: FrameSnapshot) => void) | null = null;
-  onError: ((message: string, fatal: boolean, lastState?: { qpos: number[]; qvel: number[]; time: number }) => void) | null = null;
+  onError: ((message: string, fatal: boolean, lastState?: SeedState) => void) | null = null;
 
   constructor() {
     this.worker = new Worker(new URL('../workers/physicsWorker.ts', import.meta.url), { type: 'module' });
@@ -53,8 +36,7 @@ export class PhysicsWorkerClient {
           const pending = this.pendingBuilds.get(msg.id);
           if (pending) {
             this.pendingBuilds.delete(msg.id);
-            const { type: _t, id: _id, ...rest } = msg;
-            pending.resolve(rest);
+            pending.resolve(msg);
           }
           break;
         }
@@ -68,8 +50,7 @@ export class PhysicsWorkerClient {
           const pending = this.pendingHeadless.get(msg.id);
           if (pending) {
             this.pendingHeadless.delete(msg.id);
-            const { type: _t, id: _id, ...rest } = msg;
-            pending.resolve(rest);
+            pending.resolve(msg);
           }
           break;
         }
@@ -97,9 +78,9 @@ export class PhysicsWorkerClient {
 
   build(
     xml: string,
-    sceneGraph: any,
+    sceneGraph: SceneGraph,
     preserveState: boolean,
-    seedState?: { qpos: number[]; qvel: number[]; ctrl?: number[]; time: number },
+    seedState?: SeedState,
   ): Promise<BuiltResult> {
     const id = Math.random().toString(36).slice(2);
     return new Promise((resolve, reject) => {
@@ -120,7 +101,7 @@ export class PhysicsWorkerClient {
   setCtrl(actuatorName: string, value: number) { this.worker.postMessage({ type: 'SET_CTRL', actuatorName, value }); }
   updateScript(nodeId: string, script: string) { this.worker.postMessage({ type: 'UPDATE_SCRIPT', nodeId, script }); }
 
-  runHeadless(xml: string, sceneGraph: any, ticks: number): Promise<any> {
+  runHeadless(xml: string, sceneGraph: SceneGraph, ticks: number): Promise<HeadlessResult> {
     const id = Math.random().toString(36).slice(2);
     return new Promise((resolve, reject) => {
       this.pendingHeadless.set(id, { resolve, reject });
@@ -128,7 +109,7 @@ export class PhysicsWorkerClient {
     });
   }
 
-  getHistory(): Promise<any[]> {
+  getHistory(): Promise<HistoryEntry[]> {
     const id = Math.random().toString(36).slice(2);
     return new Promise((resolve, reject) => {
       this.pendingHistory.set(id, { resolve, reject });
@@ -136,7 +117,7 @@ export class PhysicsWorkerClient {
     });
   }
 
-  getTelemetry(): Promise<any> {
+  getTelemetry(): Promise<HistoryEntry | null> {
     const id = Math.random().toString(36).slice(2);
     return new Promise((resolve, reject) => {
       this.pendingTelemetry.set(id, { resolve, reject });
@@ -166,7 +147,7 @@ export class PhysicsWorkerClient {
     // for the rest of the session. The message deliberately avoids the words
     // recompile() sniffs for when deciding a failure was WASM heap exhaustion.
     const err = new Error('The physics worker was recycled before this request completed.');
-    const settle = (map: Map<string, Pending<any>>) => {
+    const settle = (map: Map<string, { reject: (e: Error) => void }>) => {
       for (const pending of map.values()) pending.reject(err);
       map.clear();
     };

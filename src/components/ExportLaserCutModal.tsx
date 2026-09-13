@@ -382,7 +382,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                 Export to Laser / CNC
               </h2>
               <p className="hidden sm:block text-xs text-slate-500 dark:text-slate-400">
-                Unwrap 3D panel faces into 2D cut patterns — download the SVG, or cut straight from here over WebSerial USB (GRBL / Marlin)
+                Unwrap 3D panel faces into 2D cut patterns. Download the SVG, or cut straight from here over WebSerial USB (GRBL / Marlin)
               </p>
             </div>
           </div>
@@ -402,7 +402,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
             <h3 className={sectionTitleClass}>
               Machine &amp; Material
               <span className="ml-2 normal-case tracking-normal font-normal text-slate-400 dark:text-slate-500">
-                — the first and third are set in the status bar
+                (the first and third are set in the status bar)
               </span>
             </h3>
             {/* Twelve columns rather than six. The two readouts hold words and
@@ -447,7 +447,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
               <Field
                 className="lg:col-span-2"
                 label="Laser Power"
-                hint={`Beam power as a GRBL S-value — currently ${Math.round((laserPower / Math.max(1, laserMaxPower)) * 100)}% of this machine's S${laserMaxPower} maximum. Ignored on a CNC router.`}
+                hint={`Beam power as a GRBL S-value, currently ${Math.round((laserPower / Math.max(1, laserMaxPower)) * 100)}% of this machine's S${laserMaxPower} maximum. Ignored on a CNC router.`}
               >
                 <NumberInput
                   step={laserMaxPower >= 10000 ? 500 : 50} min={0} max={laserMaxPower} integer
@@ -492,14 +492,14 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
               </div>
             )}
 
-            <Advanced label="Advanced — override the derived feeds">
+            <Advanced label="Advanced: override the derived feeds">
               <Field
                 className="lg:col-span-2"
                 hintAlign="end"
                 label="Bit Ø (mm)"
                 hint={
                   machineMode === 'cnc'
-                    ? 'Diameter of the end mill. In CNC mode every path is offset by half of this — outlines run outside the line and holes inside it — so that the cut edge lands where the model says. Get it wrong and every part is out by the difference.'
+                    ? 'Diameter of the end mill. In CNC mode every path is offset by half of this (outlines run outside the line and holes inside it) so that the cut edge lands where the model says. Get it wrong and every part is out by the difference.'
                     : 'Diameter of the end mill. It sets how far the relief cuts have to reach into each inside corner. Only read when corner relief is on.'
                 }
               >
@@ -541,7 +541,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
               <Field
                 className="lg:col-span-2"
                 label="Max S-value ($30)"
-                hint="Your controller's maximum spindle/laser S-value. Most diode boards ship 10000; stock GRBL is 1000. Getting it too low is what makes a strong laser act weak — send S1000 to a 10000 machine and you get 10% power. Run $$ on the machine and match its $30 line."
+                hint="Your controller's maximum spindle/laser S-value. Most diode boards ship 10000; stock GRBL is 1000. Set it too low and a strong laser acts weak: send S1000 to a 10000 machine and you get 10% power. Run $$ on the machine and match its $30 line."
               >
                 <select
                   disabled={machineMode !== 'laser'}
@@ -570,7 +570,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
               <Field
                 className="lg:col-span-2"
                 label="Attachments"
-                hint="Leaves short stretches of each panel outline uncut, so finished panels stay held in the sheet instead of dropping out or shifting mid-job. You snap or pare them off afterwards. Nothing to do with joint tabs — joint mortises are always cut clean. Affects the G-code only; the SVG download is unchanged."
+                hint="Leaves short stretches of each panel outline uncut, so finished panels stay held in the sheet instead of dropping out or shifting mid-job. You snap or pare them off afterwards. Joint mortises are always cut clean. Affects the G-code only; the SVG download is unchanged."
               >
                 <Segmented
                   value={attachments ? 'on' : 'off'}
@@ -581,7 +581,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
 
               <Field
                 label="Attach Size (mm)"
-                hint="How long each attachment is along the outline. Big enough to hold the panel, small enough to snap — 2-5 mm suits thin ply and acrylic."
+                hint="How long each attachment is along the outline. Big enough to hold the panel, small enough to snap. 2-5 mm suits thin ply and acrylic."
               >
                 <NumberInput
                   step={0.5} min={0.5} max={30}
@@ -729,7 +729,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
               <Field
                 className="lg:col-span-2"
                 label="Auto-Scale Mode"
-                hint="Manual keeps the model at the scale you set. Auto-Fit searches for the largest scale whose finished cut patterns — joints included — still land within the sheet limit."
+                hint="Manual keeps the model at the scale you set. Auto-Fit searches for the largest scale whose finished cut patterns, joints included, still land within the sheet limit."
               >
                 <Segmented
                   value={autoScale ? 'auto' : 'manual'}
@@ -787,7 +787,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                 className="lg:col-span-3"
                 hintAlign="end"
                 label="Annotations"
-                hint="What the SVG carries besides cut lines. Labels and sheet outlines help you sort parts, but they are engraved/drawn — strip them to Cut paths only before sending real material."
+                hint="What the SVG carries besides cut lines. Labels and sheet outlines help you sort parts, but they are engraved/drawn. Strip them to Cut paths only before sending real material."
               >
                 <Segmented
                   value={annotations}
@@ -935,7 +935,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                     onClick={handleProbeBed}
                     disabled={!gcodeResult?.bounds || isProbing}
                     title={probedGrid
-                      ? 'Bed probed — cut depths follow the measured surface'
+                      ? 'Bed probed: cut depths follow the measured surface'
                       : 'Probe a 3x3 grid over the job so cut depth follows the bed'}
                     className="py-1.5 px-2 bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 disabled:opacity-40 text-slate-700 dark:text-slate-200 text-xs font-semibold rounded-lg flex items-center justify-center space-x-1 cursor-pointer"
                   >
@@ -991,7 +991,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
         {/* Modal Footer */}
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 px-4 sm:px-6 py-3 sm:py-4 border-t border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/50">
           <div className="hidden 2xl:block text-xs text-slate-500 dark:text-slate-400">
-            Vector SVG opens in LightBurn, Inkscape, or any CAM tool — or cut it directly over USB.
+            Vector SVG opens in LightBurn, Inkscape, or any CAM tool. Or cut it directly over USB.
           </div>
           <div className="flex flex-wrap items-center justify-end gap-2 sm:gap-3 sm:ml-auto">
             <button

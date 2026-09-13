@@ -25,7 +25,7 @@ const card = (markdown: string): Card => ({ id: 'c1', markdown, minimized: false
 // than importing the store (it is called from the MCP bridge, outside render).
 beforeEach(() => {
   cards = [];
-  (globalThis as any).window = {
+  (globalThis as unknown as { window: unknown }).window = {
     _physics_getNoteCards: () => cards,
     _physics_setNoteCards: (next: Card[]) => { cards = next; },
   };

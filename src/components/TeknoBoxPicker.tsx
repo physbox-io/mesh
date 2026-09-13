@@ -160,8 +160,8 @@ export const TeknoBoxPicker: React.FC<{
   if (!signedIn) {
     return (
       <p className="text-[11px] leading-relaxed text-amber-600 dark:text-amber-400">
-        Sign in to reach a Tekno Box over the internet — the connection is made through your
-        account, which is what stops it being anyone else's machine.
+        Sign in to reach a Tekno Box over the internet. The connection is made through your
+        account.
       </p>
     );
   }
@@ -180,7 +180,7 @@ export const TeknoBoxPicker: React.FC<{
           >
             {devices.map((d) => (
               <option key={d.deviceId} value={d.deviceId}>
-                {d.name} {d.online ? '— online' : '— offline'}
+                {d.name} {d.online ? '(online)' : '(offline)'}
               </option>
             ))}
           </select>
@@ -247,7 +247,7 @@ export const TeknoBoxPicker: React.FC<{
 
       <p className="text-[10px] leading-relaxed text-slate-500 dark:text-slate-400">
         The machine connects out to physbox itself, so this works from anywhere and needs nothing
-        opened on your router. A job sent this way is cut by the machine on its own — you can close
+        opened on your router. A job sent this way is cut by the machine on its own, so you can close
         this page and the cut carries on.
       </p>
     </div>

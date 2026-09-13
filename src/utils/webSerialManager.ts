@@ -13,7 +13,7 @@ import {
   isWebSerialSupported,
   type MachineTransport,
 } from './machineTransport';
-import { locateExecutedLine, planResume, type ResumeOptions } from './jobResume';
+import { locateExecutedLine, planResume, scanModalState, type ResumeOptions } from './jobResume';
 import {
   DEFAULT_SPINDLE_PWM_MAX,
   GUIDE_JIGGLE_FEED_MM_MIN,
@@ -370,6 +370,34 @@ const CONTROLLER_SILENCE_MS = 3000;
  */
 const CONTROLLER_RECOVERED_MS = 1500;
 
+/**
+ * How far the tool is lifted clear of the work when a job stops for a tool.
+ *
+ * Enough to get a spanner and two fingers past a workpiece and to see what has
+ * been cut, and a height the machine is asked for rather than assumed to have:
+ * see `retractClearOfWork`.
+ */
+const TOOL_CHANGE_LIFT_MM = 25;
+
+/**
+ * How far below the top of Z travel a machine-referenced retract stops.
+ *
+ * A millimetre, because on a homed machine the ceiling is a number the
+ * controller itself reported and the only thing being allowed for is the switch
+ * having a few tenths of hysteresis.
+ */
+const RETRACT_CEILING_MARGIN_MM = 1;
+
+/**
+ * The same margin for a machine that has not been homed.
+ *
+ * Wider, because the headroom is worked out from an `MPos` read up to a status
+ * poll ago and the lift itself executes several moves later, out of the planner
+ * buffer — so the position it was computed against is not the position it runs
+ * from.
+ */
+const UNHOMED_CEILING_MARGIN_MM = 3;
+
 /** Rapid traverse trim: GRBL implements full, half and quarter, and no more. */
 export const RAPID_OVERRIDE_BYTES: Record<100 | 50 | 25, number> = {
   100: 0x95,
@@ -393,7 +421,7 @@ export type MachineLink =
 class WebSerialManager {
   /** The wire currently open, or null. See `machineTransport.ts`. */
   private transport: MachineTransport | null = null;
-  private statusPollTimer: any = null;
+  private statusPollTimer: ReturnType<typeof setInterval> | null = null;
 
   private gcodeQueue: string[] = [];
   /** Trailing comments, index-aligned with `gcodeQueue`, for the pause prompts. */
@@ -484,6 +512,21 @@ class WebSerialManager {
 
   /** Set from the status report; see `parseStatusReport`. */
   private lastHoldState: 'decelerating' | 'complete' | null = null;
+
+  /**
+   * Whether a homing cycle has completed since this machine was connected.
+   *
+   * Homing is what makes machine coordinates mean anything: until it has run,
+   * `MPos` is wherever the controller happened to power up, and a `G53` move is
+   * a move to an arbitrary height. Taken off the controller's own state word
+   * rather than off the button in this app, so a cycle run from a pendant
+   * counts too — and dropped the moment an alarm arrives, because a hard limit
+   * stops the axes by cutting the drive rather than by decelerating, and the
+   * steps lost between the trip and the stop take the reference with them.
+   */
+  private hasHomed = false;
+  /** A homing cycle seen running, waiting on the `Idle` that completes it. */
+  private homingInProgress = false;
 
   private state: MachineState = {
     status: 'DISCONNECTED',
@@ -646,12 +689,12 @@ class WebSerialManager {
       // slow to answer `$$` must not hold the UI on "connecting".
       void this.refreshMachineSettings();
       return true;
-    } catch (err: any) {
+    } catch (err) {
       await transport.close().catch(() => {});
       this.updateState({
         status: 'DISCONNECTED',
         connected: false,
-        lastError: err?.message || 'Failed to connect to the machine.',
+        lastError: (err instanceof Error && err.message) || 'Failed to connect to the machine.',
       });
       return false;
     }
@@ -693,6 +736,10 @@ class WebSerialManager {
 
     this.transport = null;
     this.settingsSink = null;
+    // The next machine on the end of the cable is not this one, and has not
+    // been homed by anybody.
+    this.hasHomed = false;
+    this.homingInProgress = false;
     // Back to assumptions: the numbers belonged to a machine that is no longer
     // on the other end of the cable, and leaving them in place would have the
     // next estimate quietly claiming to have been read off nothing.
@@ -892,6 +939,15 @@ class WebSerialManager {
     // cleared the machine while the UI still refused to start a job, and the only
     // way out was a page reload. The local job states win over the report, since
     // a tool-change pause is a state this side holds while GRBL sits Idle.
+    // `Home` is only reported while a homing cycle is actually running, so the
+    // Idle that follows one is the moment machine coordinates become real.
+    if (machineWord === 'Home') {
+      this.homingInProgress = true;
+    } else if (machineWord === 'Idle' && this.homingInProgress) {
+      this.homingInProgress = false;
+      this.hasHomed = true;
+    }
+
     if (machineWord === 'Alarm') {
       patch.status = 'ALARM';
       // A limit switch mid-carve kills the job on the controller — GRBL will not
@@ -900,6 +956,11 @@ class WebSerialManager {
       // reached is kept, so the operator can deliberately pick it back up once
       // the machine has been rehomed and the tool re-zeroed.
       if (this.isJobRunning || this.isPaused) this.abandonJob('alarm');
+      // Whatever the controller now thinks `MPos` is, it is not where the tool
+      // is: `G53` stops being a safe way to ask for a height until the machine
+      // has been homed again.
+      this.hasHomed = false;
+      this.homingInProgress = false;
     } else if (!this.isPaused) {
       // RUNNING here means "a job is streaming", not "the axes are moving" — a
       // frame trace or a probing move must not light up the job progress bar.
@@ -1239,6 +1300,7 @@ class WebSerialManager {
     const plan = planResume(this.program.map((l) => l.code), fromLine, {
       ...options,
       currentZ: this.state.wpos.z,
+      arrivingAtPause: this.lineIsPause(fromLine),
     });
     const preamble = prepareJobLines(plan.preamble.join('\n'));
     const tail = this.program.slice(plan.fromLine);
@@ -1280,7 +1342,23 @@ class WebSerialManager {
    */
   public previewResume(fromLine: number, options?: ResumeOptions) {
     if (this.program.length === 0) return null;
-    return planResume(this.program.map((l) => l.code), fromLine, options);
+    return planResume(this.program.map((l) => l.code), fromLine, {
+      ...options,
+      arrivingAtPause: this.lineIsPause(fromLine),
+    });
+  }
+
+  /**
+   * Whether the program line a resume would restart on is one that pauses.
+   *
+   * The line, not the lines around it: a resume restarts the stream *at*
+   * `fromLine`, so it is that line's own classification which decides whether
+   * the first thing to happen is a cut or a stop.
+   */
+  private lineIsPause(fromLine: number): boolean {
+    const line = this.program[Math.max(0, Math.min(fromLine, this.program.length - 1))];
+    if (!line) return false;
+    return classifyJobLine(line.code) !== 'motion';
   }
 
   /**
@@ -1385,7 +1463,12 @@ class WebSerialManager {
    */
   private describeToolChange(line: string, note: string): string {
     const tool = line.match(/\bT(\d+)/);
-    const what = note || (tool ? `tool T${tool[1]}` : 'the next tool');
+    // The comment in the file ends "and re-zero Z" and is right to: it is read
+    // by whatever sender opens the file, most of which say nothing else about
+    // it. Here it is one of three places that were saying it, so it comes off
+    // the front line and is left to the banner, which has room to say why.
+    const named = note.replace(/[\s,]*and re-?zero( the)? Z\b\.?$/i, '').trim();
+    const what = named || (tool ? `tool T${tool[1]}` : 'the next tool');
 
     let rpm = '';
     for (let i = this.currentQueueIndex; i < Math.min(this.gcodeQueue.length, this.currentQueueIndex + 5); i++) {
@@ -1397,7 +1480,12 @@ class WebSerialManager {
       }
     }
 
-    return `Tool change: ${what}${rpm}, then re-zero Z on the new tool before resuming.`;
+    // Not a word about re-zeroing Z. The exporter's own comment for the line
+    // usually ends "and re-zero Z", and the banner this message appears in
+    // spells the whole thing out underneath — so saying it here made a prompt
+    // that gave the same instruction three times over and buried the two
+    // things only this line knows: which cutter, and what to set the dial to.
+    return `Tool change: ${what}${rpm}.`;
   }
 
   /** Triggers an interactive pause for Tool or Material Changes. */
@@ -1414,14 +1502,14 @@ class WebSerialManager {
 
     // Get clear of the work, then bring the spindle out where it can be reached.
     //
-    // The lift is relative. It used to be `G0 Z25`, an absolute work
-    // coordinate, which assumes the datum leaves 25 mm of headroom above it —
-    // on a job zeroed near the top of Z travel that is a move into the machine's
-    // own limit, and the alarm that follows drops the rest of the program.
-    // `G91 G0 Z25` clears the work by 25 mm from wherever it actually is.
+    // Neither the lift nor the park may assume anything about where the tool is
+    // standing: the park is a rapid across the work at whatever height the lift
+    // left, so a lift that did not happen — because it ran into the top of Z
+    // travel and alarmed — is a rapid through the job. `retractClearOfWork`
+    // owns that problem; see the note on it.
     await this.sendLine('M5'); // Laser/Spindle OFF
-    await this.sendLine('G91 G0 Z25.000'); // Lift clear, relative
-    await this.sendLine('G90'); // Back to absolute before anything else runs
+    await this.retractClearOfWork(TOOL_CHANGE_LIFT_MM);
+    await this.sendLine('G90'); // Absolute, whichever way the lift was made
     await this.sendLine('G0 X0.000 Y0.000'); // Park XY where the collet is reachable
   }
 
@@ -1464,11 +1552,51 @@ class WebSerialManager {
   public async resumeJob() {
     if (!this.isPaused) return;
 
+    // A pause the machine was free to be driven around in is a pause it has to
+    // be put back from. A feed hold is not one of those — GRBL refuses to jog
+    // in `Hold`, the tool is still in the cut, and `~` picks the same move back
+    // up — so only the two that park get the retract.
+    if (this.state.status === 'PAUSED_TOOL' || this.state.status === 'PAUSED_MATERIAL') {
+      await this.retractToProgramClearZ();
+    }
+
     this.isPaused = false;
     this.updateState({ status: 'RUNNING', pauseMessage: undefined });
     // Out of band GRBL cycle start.
     await this.writeRealtime(0x7e); // '~'
     this.pumpJobQueue();
+  }
+
+  /**
+   * Puts Z back where the program believes it is, before the stream restarts.
+   *
+   * A tool change leaves the program's idea of the tool's height and the tool's
+   * actual height with nothing to do with each other. The exporter writes the
+   * lift before the `M6` and then assumes the machine is still up there, so the
+   * first traverse of the next operation is a bare `G0 X Y` with no Z word in
+   * it — while the machine is standing wherever the operator left it, which
+   * after touching off a new bit is *on the work*, by definition. That traverse
+   * is then a rapid across the job at the surface of it.
+   *
+   * The height is the program's own: `safeZ` is the highest Z it ever commands,
+   * which is the height it treats as clear. Clamped so it can only ever move
+   * away from the work — someone who jogged up 100 mm to get a spanner in stays
+   * where they are, and the program's own next plunge brings them back down.
+   */
+  private async retractToProgramClearZ(): Promise<void> {
+    if (this.program.length === 0) return;
+    const at = Math.max(0, Math.min(this.programLength(), this.jobLineBase + this.currentQueueIndex));
+    const scan = scanModalState(this.program.map((l) => l.code), at);
+    // A program that never commands Z is a laser job, which has no height to
+    // put back and no spindle to hold clear of anything.
+    if (scan.safeZ === null) return;
+
+    await this.nextStatusReport();
+    // `safeZ` is in the program's units and the controller reports millimetres,
+    // so the comparison has to happen in one or the other.
+    const mmPerUnit = scan.units === 'G20' ? 25.4 : 1;
+    const currentZ = this.state.wpos.z / mmPerUnit;
+    await this.sendLine(`G0 Z${Math.max(scan.safeZ, currentZ).toFixed(3)}`);
   }
 
   /**
@@ -2130,6 +2258,63 @@ class WebSerialManager {
     return Math.max(safeZMm, this.state.wpos.z);
   }
 
+  /**
+   * The machine Z at the top of Z travel, or null when the settings do not say.
+   *
+   * GRBL homes Z to a limit switch and calls that position machine zero, so on
+   * the usual setup — switch at the top — the whole of Z travel is negative and
+   * the ceiling is 0. `$23` bit 2 inverts the Z homing direction, which puts
+   * the switch at the bottom and the ceiling at `$132` instead. Both are read
+   * off the controller rather than assumed, because guessing the sign here is
+   * guessing which end of the machine the tool gets driven into.
+   */
+  private topOfZTravel(): number | null {
+    const invertMask = this.state.grblSettings[23];
+    if (invertMask === undefined) return null;
+    if ((invertMask & 4) === 0) return 0;
+    const maxTravel = this.state.grblSettings[132];
+    return maxTravel !== undefined && maxTravel > 0 ? maxTravel : null;
+  }
+
+  /**
+   * Lifts the tool clear of the work without driving it into the top of travel.
+   *
+   * A relative `G91 G0 Z25` clears the work from wherever the tool happens to
+   * be, which is what makes it right for a tool change: the alternative, an
+   * absolute work Z, assumes the datum leaves headroom above it. But relative
+   * is unbounded in the other direction, and on a carve that ends its last pass
+   * near the top of Z the same 25 mm is a move straight into the limit switch —
+   * a hard limit alarm, a dropped program, and a position the controller can no
+   * longer vouch for.
+   *
+   * So the lift is asked for against the machine's own envelope. On a homed
+   * machine that is exact and needs no arithmetic: `G53` names a height in
+   * machine coordinates, and a millimetre below the ceiling is as high as it is
+   * legal to go, whatever the work offset says. Un-homed, machine coordinates
+   * are meaningless and the relative lift stands, trimmed by whatever headroom
+   * `MPos` claims — which is why the trim keeps a wider margin than the `G53`
+   * path does, since the lift executes out of the planner buffer some moves
+   * after the position it was computed from.
+   */
+  private async retractClearOfWork(liftMm: number): Promise<void> {
+    const top = this.topOfZTravel();
+
+    if (this.hasHomed && top !== null) {
+      await this.sendLine(`G53 G0 Z${(top - RETRACT_CEILING_MARGIN_MM).toFixed(3)}`);
+      return;
+    }
+
+    const headroom = top === null ? null : top - this.state.mpos.z - UNHOMED_CEILING_MARGIN_MM;
+    // No usable headroom figure means an un-referenced controller reporting
+    // `MPos` of zero, not a machine with nowhere to go: the requested lift is
+    // no worse than what it would have got anyway.
+    const lift = headroom !== null && headroom > 0 ? Math.min(liftMm, headroom) : liftMm;
+    // Left in G91: the caller restates the distance mode it wants, because a
+    // caller that forgot to would have `G0 X0 Y0` mean a nudge of nothing
+    // rather than a move to the origin either way.
+    await this.sendLine(`G91 G0 Z${lift.toFixed(3)}`);
+  }
+
   /** Retracts and drives to the current work XY origin, to check where zero landed. */
   public async gotoWorkOrigin(safeZ = 5): Promise<void> {
     await this.sendLine('G21 G90');
@@ -2219,16 +2404,42 @@ class WebSerialManager {
     const totalPoints = gx * gy;
     let probed = 0;
 
-    const isLive = this.state.connected;
-
-    if (isLive) {
-      await this.sendAndWait('G21 G90');
+    // Probing is a physical measurement: `G38.2` moves down until the
+    // controller's probe input triggers, which only happens when something
+    // completes that circuit — a conductive touch plate or bed with the tool
+    // clipped to it, or a mechanical/inductive touch probe on the input. There
+    // is nothing to fabricate without a machine, so this refuses rather than
+    // inventing a heightmap that would then warp a real job.
+    if (!this.state.connected) {
+      throw new Error('No machine is connected, so the bed cannot be probed.');
     }
+
+    // Every Z move here is relative, and there is not one absolute Z rapid in
+    // the whole routine. That is the safety property that matters: an absolute
+    // `G0 Z<n>` trusts the work datum, and a wrong datum — a Z zeroed on the
+    // wrong face, a G54 offset left over from another job — turns that rapid
+    // into a full-speed plunge through the work before any probe move even
+    // begins. This drove a tool through the plate once; it cannot here, because
+    // nothing moves Z to an assumed height.
+    //
+    // The contract instead: the operator jogs the tool to a small clearance
+    // above the surface (a few mm) before starting. From there the routine only
+    // ever moves XY across at that height and plunges *down* slowly under
+    // `G38.2`, which stops the instant the probe triggers — or, if it never
+    // does, at a bounded search depth, after which the first miss aborts the
+    // whole grid. After each contact it lifts back up by a fixed relative step,
+    // so the clearance tracks the surface from point to point rather than being
+    // trusted to an absolute number.
+    const PROBE_SEARCH_MM = 10; // most the tool can plunge before the move ends
+    const PROBE_LIFT_MM = 5; // relative lift after each contact, kept for the next hop
+    const PROBE_FEED = 50; // slow, so the probe has time to stop the move
+    const LIFT_FEED = 1000;
+
+    await this.sendAndWait('G21 G90');
 
     // Machine Z of the first contact. Every later point is reported against it,
     // so the grid comes out as offsets whatever the tool length or datum.
     let referenceZ: number | null = null;
-    let missed = 0;
 
     for (let row = 0; row < gy; row++) {
       const rowPoints: { x: number; y: number; z: number }[] = [];
@@ -2236,37 +2447,41 @@ class WebSerialManager {
 
       for (let col = 0; col < gx; col++) {
         const x = bounds.minX + col * stepX;
-        let probedZ = 0;
 
-        if (isLive) {
-          // Not clamped like a retract: `probePoint` below travels a fixed
-          // 20 mm down from wherever this leaves the tool, and clamping this
-          // to "never below the tool's current position" can move it *up*
-          // instead whenever the work offset happens to sit well above the
-          // nominal 5 mm — which then searches too little to reach the
-          // surface. This routine's precondition is a Z zeroed just before it
-          // runs, same as `zeroZ`.
-          await this.sendAndWait(`G0 Z5.000 F3000`);
-          await this.sendAndWait(`G0 X${x.toFixed(3)} Y${y.toFixed(3)} F3000`);
-          const contactZ = await this.probePoint(20, 50);
-          const retractZ = await this.clampedRetractZ(5);
-          await this.sendAndWait(`G0 Z${retractZ.toFixed(3)} F1000`);
+        // Across to the point at the current clearance — an XY-only move, no Z
+        // word, so the height the operator (or the last lift) set is kept.
+        await this.sendAndWait(`G0 X${x.toFixed(3)} Y${y.toFixed(3)} F3000`);
+        // Straight down, slowly, until the probe triggers or the search runs
+        // out. `probePoint` issues `G91 G38.2 Z-<search>`, a relative plunge.
+        const contactZ = await this.probePoint(PROBE_SEARCH_MM, PROBE_FEED);
 
-          if (contactZ === null) {
-            missed++;
-          } else {
-            if (referenceZ === null) referenceZ = contactZ;
-            probedZ = parseFloat((contactZ - referenceZ).toFixed(3));
-          }
-        } else {
-          // Simulated heightmap: slight 0.15mm bed tilt + 0.08mm dish warp
-          const normX = gx > 1 ? col / (gx - 1) : 0.5;
-          const normY = gy > 1 ? row / (gy - 1) : 0.5;
-          const tilt = (normX - 0.5) * 0.18 + (normY - 0.5) * 0.12;
-          const warp = Math.sin(normX * Math.PI) * Math.sin(normY * Math.PI) * -0.08;
-          probedZ = parseFloat((tilt + warp).toFixed(3));
-          await new Promise((r) => setTimeout(r, 120)); // Small delay for visual progress feedback
+        // A miss means the plunge ran its whole length without the probe
+        // triggering: a clip that fell off, a broken wire, a non-conductive
+        // surface, or a clearance set too high to reach in one search. GRBL is
+        // now in a probe-fail alarm with the tool at the bottom of the move.
+        //
+        // Stop here. Recording the miss and moving on (the old behaviour) drove
+        // the tool down again at every remaining point; aborting on the first
+        // miss makes it a single slow plunge the operator can watch and stop.
+        // Left where it stopped, on purpose: retracting into an alarm is
+        // refused, and jogging clear is the operator's call, not this routine's.
+        if (contactZ === null) {
+          this.updateState({
+            lastError:
+              `Bed probe made no contact at X${x.toFixed(1)} Y${y.toFixed(1)}, so it stopped before ` +
+              `probing further. Check the probe clip and wiring, that the surface is conductive, and ` +
+              `that the tool started within ${PROBE_SEARCH_MM} mm of it — then clear the alarm and try again.`,
+          });
+          throw new Error('Bed probe made no contact — stopped to avoid driving the tool into the work.');
         }
+
+        // Lift clear before the next hop, relative to where it just touched, so
+        // the clearance follows the surface instead of an assumed height.
+        await this.sendAndWait(`G91 G0 Z${PROBE_LIFT_MM.toFixed(3)} F${LIFT_FEED}`);
+        await this.sendAndWait('G90');
+
+        if (referenceZ === null) referenceZ = contactZ;
+        const probedZ = parseFloat((contactZ - referenceZ).toFixed(3));
 
         rowPoints.push({ x, y, z: probedZ });
         probed++;
@@ -2275,17 +2490,11 @@ class WebSerialManager {
       points.push(rowPoints);
     }
 
-    if (isLive) {
-      const finalRetractZ = await this.clampedRetractZ(10);
-      await this.sendAndWait(`G0 Z${finalRetractZ.toFixed(3)} F3000`);
-      if (missed > 0) {
-        this.updateState({
-          lastError:
-            `Probe made no contact at ${missed} of ${totalPoints} points — those are recorded flat, ` +
-            `so levelling will be wrong there. Check the probe clip and the starting Z.`,
-        });
-      }
-    }
+    // Every point contacted (a miss would have thrown), so the tool is one lift
+    // above the last one. A final relative lift leaves it clear for the operator
+    // — still no absolute Z move.
+    await this.sendAndWait(`G91 G0 Z${PROBE_LIFT_MM.toFixed(3)} F3000`);
+    await this.sendAndWait('G90');
 
     return {
       minX: bounds.minX,

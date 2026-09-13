@@ -1,11 +1,12 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { X, Upload, Sliders, Box, Layers, Check, AlertCircle, Code } from 'lucide-react';
 import { parseSTL, type ParsedSTLResult } from '../utils/stlParser';
+import type { SceneNode } from '../types/scene';
 
 interface ImportStlModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onImportNode: (node: any) => void;
+  onImportNode: (node: SceneNode) => void;
   /** File dropped onto the app window, loaded as soon as the dialog opens. */
   initialFile?: File | null;
 }
@@ -69,10 +70,14 @@ export const ImportStlModal: React.FC<ImportStlModalProps> = ({
   // already fresh on every open; all that is left is to pick up a file that was
   // dropped onto the app window.
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- reading and
     // parsing the file is the async work this mount exists to kick off; the
     // synchronous part of it is just raising the "processing" flag.
-    if (initialFile) void handleFile(initialFile);
+    if (initialFile) {
+      const timer = setTimeout(() => {
+        void handleFile(initialFile);
+      }, 0);
+      return () => clearTimeout(timer);
+    }
   }, [initialFile, handleFile]);
 
   // Below every hook: React forbids a conditional hook.
@@ -134,7 +139,7 @@ export const ImportStlModal: React.FC<ImportStlModalProps> = ({
 
     const baseName = fileName || 'imported_stl';
     const id = `stl_${Math.random().toString(36).slice(2, 7)}`;
-    let node: any = null;
+    let node: SceneNode;
 
     if (importMode === 'scad_csg') {
       node = {

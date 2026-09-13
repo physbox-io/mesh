@@ -2,9 +2,9 @@ import type { SceneGraph, SceneNode, SceneGeom, SceneJoint } from '../types/scen
 import { generateWedgeMeshData } from './geom';
 import { resolveCsgGeoms } from './csg';
 
-const formatGeomSize = (type: string, rawSize: any): string => {
+const formatGeomSize = (type: string, rawSize: unknown): string => {
   const arr = Array.isArray(rawSize)
-    ? rawSize.map((v: any) => (typeof v === 'number' && !isNaN(v) && v > 0) ? v : 0.1)
+    ? rawSize.map((v: unknown) => (typeof v === 'number' && !isNaN(v) && v > 0) ? v : 0.1)
     : [0.1, 0.1, 0.1];
 
   if (type === 'sphere') {

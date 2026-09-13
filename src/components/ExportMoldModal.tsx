@@ -493,7 +493,13 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
             <div
               className="relative flex-1 min-h-[300px] lg:min-h-[420px] rounded-xl overflow-hidden border border-slate-200 dark:border-slate-800 bg-slate-950 select-none"
             >
-              <div ref={mountRef} className="w-full h-full cursor-grab active:cursor-grabbing" />
+              {/* Absolute, not `w-full h-full`: in the flow the canvas resolves
+                  its `height:100%` against the grid cell's indefinite height,
+                  which renders it blank AND feeds the ResizeObserver a height
+                  that grows every frame. Taken out of the flow it fills the
+                  relative box instead and cannot push it taller. Same reason
+                  ToolpathView mounts its canvas this way. */}
+              <div ref={mountRef} className="absolute inset-0 cursor-grab active:cursor-grabbing" />
 
               {/* Explode Distance Slider (when in exploded view) */}
               {viewMode === 'clamshell_exploded' && options.moldType === 'clamshell' && (
@@ -595,7 +601,7 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
                     className="text-[11px] font-semibold px-2.5 py-1.5 rounded-lg border border-purple-300 dark:border-purple-800
                                text-purple-700 dark:text-purple-300 hover:bg-purple-50 dark:hover:bg-purple-950/40 cursor-pointer transition-colors"
                   >
-                    Drop the lid — switch to a one-part open mold
+                    Drop the lid: switch to a one-part open mold
                   </button>
                 )}
               </div>
@@ -657,7 +663,7 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
                   hint={
                     'Taper on the cavity walls, off the pull direction. A vertical wall grips the casting; ' +
                     'a couple of degrees lets a rigid mold let go. It costs depth x tan(angle) of lateral ' +
-                    `detail — here ${(result.cavityDepthMm * Math.tan((Math.max(options.draftAngleDeg, 0.0001) * Math.PI) / 180)).toFixed(2)} mm at the deepest wall. ` +
+                    `detail, here ${(result.cavityDepthMm * Math.tan((Math.max(options.draftAngleDeg, 0.0001) * Math.PI) / 180)).toFixed(2)} mm at the deepest wall. ` +
                     'Set 0 to reproduce the part exactly and demold by hand.'
                   }
                   hintAlign="end"

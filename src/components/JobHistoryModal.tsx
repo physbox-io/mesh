@@ -350,13 +350,13 @@ export const JobHistoryModal: React.FC<JobHistoryModalProps> = ({ isOpen, onClos
               <span>Job history is part of PhysBox Pro</span>
             </div>
             <p className="text-slate-600 dark:text-slate-300 leading-relaxed">
-              Everything you use today keeps working exactly as it does now — the engines, machine
+              Everything you use today keeps working exactly as it does now: the engines, machine
               control, local saves and live remote monitoring. Nothing is being taken away.
             </p>
             <p className="mt-3 text-slate-600 dark:text-slate-300 leading-relaxed">
               What Pro adds is memory. Every job is archived as it runs: how long it took, how far it
               got, the feed and spindle trace, the line an alarm stopped it on, and the material and
-              power it was cut at. Then it is readable here, on physbox.io, and by your own AI agent —
+              power it was cut at. Then it is readable here, on physbox.io, and by your own AI agent,
               so <em>“what did I cut that walnut at in March”</em> has an answer.
             </p>
             <a

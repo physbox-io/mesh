@@ -26,9 +26,9 @@ describe('why USB is unavailable', () => {
 
   afterEach(() => {
     if (priorNavigator) Object.defineProperty(globalThis, 'navigator', priorNavigator);
-    else delete (globalThis as any).navigator;
+    else delete (globalThis as Record<string, unknown>).navigator;
     if (priorWindow) Object.defineProperty(globalThis, 'window', priorWindow);
-    else delete (globalThis as any).window;
+    else delete (globalThis as Record<string, unknown>).window;
   });
 
   it('blames the origin, not the browser, on a plain-http page', () => {

@@ -50,13 +50,15 @@ interface SurfacePoint {
   nx: number; ny: number; nz: number;
 }
 
+import type { DataMirror, ModelMirror, MujocoShim } from '../types/sceneLayer';
+
 export interface SculptSurfaceProps {
   nodeId: string;
   geomName: string;
   color: number[];
-  mujoco: any;
-  model: any;
-  data: any;
+  mujoco: MujocoShim | null;
+  model: ModelMirror | null;
+  data: DataMirror | null;
   renderVertices: number[];
   faces: number[];
 }

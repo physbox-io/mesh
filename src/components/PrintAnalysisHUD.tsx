@@ -25,7 +25,7 @@ export const PrintAnalysisHUD: React.FC<PrintAnalysisHUDProps> = ({
   const setSelectedNodeId = useStore(state => state.setSelectedNodeId);
 
   const [selectedCategoryFilter, setSelectedCategoryFilter] = useState<string>('all');
-  const [severityFilter, _setSeverityFilter] = useState<string>('all');
+  const severityFilter = 'all';
 
   const analysis = useMemo(() => {
     if (!printAnalysisEnabled || !sceneGraph) return null;

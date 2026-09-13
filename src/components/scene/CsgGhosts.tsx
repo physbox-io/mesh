@@ -10,17 +10,27 @@ import { useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
 import { useStore } from '../../store/useStore';
 import { positiveBounds, geomMatrixOf, clipSegmentsToBox } from '../../utils/csg';
+import type { SceneGeom, SceneGraph, SceneNode } from '../../types/scene';
+import type { DataMirror, FrameFlagWindow, ModelMirror, MujocoShim } from '../../types/sceneLayer';
+
+interface CsgNegativeGhostsProps {
+  model: ModelMirror | null;
+  data: DataMirror | null;
+  mujoco: MujocoShim | null;
+  sceneGraph: SceneGraph | null;
+  selectedNodeId: string | null;
+}
 
 // Negative (subtracted) shapes have no MuJoCo geom at all — they're holes, not
 // solids — so nothing would show where you're cutting. Draw them as red
 // wireframes on the selected body only: placing a hole you can't see is
 // guesswork, and drawing them always would clutter every other body.
-export const CsgNegativeGhosts = ({ model, data, mujoco, sceneGraph, selectedNodeId }: any) => {
+export const CsgNegativeGhosts = ({ model, data, mujoco, sceneGraph, selectedNodeId }: CsgNegativeGhostsProps) => {
   const groupRef = useRef<THREE.Group>(null);
 
   const target = useMemo(() => {
     if (!selectedNodeId) return null;
-    const find = (nodes: any[]): any => {
+    const find = (nodes: SceneNode[]): SceneNode | null => {
       for (const n of nodes || []) {
         if (n.id === selectedNodeId) return n;
         const c = find(n.children);
@@ -30,14 +40,14 @@ export const CsgNegativeGhosts = ({ model, data, mujoco, sceneGraph, selectedNod
     };
     const node = find(sceneGraph?.nodes || []);
     if (!node?.csgEnabled) return null;
-    const negatives = (node.geoms || []).filter((g: any) => g.csg === 'difference' && !g.csgDerived);
-    const intersects = (node.geoms || []).filter((g: any) => g.csg === 'intersection' && !g.csgDerived);
+    const negatives = (node.geoms || []).filter((g) => g.csg === 'difference' && !g.csgDerived);
+    const intersects = (node.geoms || []).filter((g) => g.csg === 'intersection' && !g.csgDerived);
     if (negatives.length === 0 && intersects.length === 0) return null;
     return {
       node,
       // Outlines are clipped to the solid's extent — see positiveBounds.
       bounds: positiveBounds(node),
-      ghosts: [...negatives.map((g: any) => ({ g, kind: 'neg' })), ...intersects.map((g: any) => ({ g, kind: 'int' }))],
+      ghosts: [...negatives.map((g) => ({ g, kind: 'neg' as const })), ...intersects.map((g) => ({ g, kind: 'int' as const }))],
     };
   }, [sceneGraph, selectedNodeId]);
 
@@ -50,7 +60,7 @@ export const CsgNegativeGhosts = ({ model, data, mujoco, sceneGraph, selectedNod
   // than any geom — a negative isn't in the model to have a geom_xpos of its own.
   useFrame(() => {
     if (!groupRef.current || bodyId === -1 || !data) return;
-    if ((window as any).DISABLE_USEFRAME) return;
+    if ((window as FrameFlagWindow).DISABLE_USEFRAME) return;
     const activeData = useStore.getState().data;
     if (data !== activeData) return;
     try {
@@ -71,7 +81,7 @@ export const CsgNegativeGhosts = ({ model, data, mujoco, sceneGraph, selectedNod
 
   return (
     <group ref={groupRef}>
-      {target.ghosts.map(({ g, kind }: any) => (
+      {target.ghosts.map(({ g, kind }) => (
         <CsgGhostOutline
           key={g.name}
           geom={g}
@@ -99,8 +109,14 @@ export const CsgNegativeGhosts = ({ model, data, mujoco, sceneGraph, selectedNod
 // as a tall tube floating in space with only a sliver of it doing any cutting.
 // The points are baked into body space here so the clip is a one-off in the
 // useMemo rather than per-frame renderer clipping-plane work.
-export const CsgGhostOutline = ({ geom, color, bounds, csgCentroid }: { geom: any; color: string; bounds: { min: number[]; max: number[] } | null; csgCentroid?: number[] }) => {
-  const key = JSON.stringify([geom.type, geom.size, geom.pos, geom.euler, geom.quat, bounds, csgCentroid]);
+export const CsgGhostOutline = ({ geom, color, bounds, csgCentroid }: { geom: SceneGeom; color: string; bounds: { min: number[]; max: number[] } | null; csgCentroid?: number[] }) => {
+  // A mesh's shape is in its vertices, not in `size`, so those have to be part
+  // of what the memo keys on — otherwise a negative whose mesh changed keeps
+  // drawing the outline of the mesh it used to be.
+  const key = JSON.stringify([
+    geom.type, geom.size, geom.pos, geom.euler, geom.quat, bounds, csgCentroid,
+    geom.renderVertices?.length ?? 0, geom.faces?.length ?? 0,
+  ]);
 
   const edges = useMemo(() => {
     const s = geom.size || [];
@@ -126,18 +142,42 @@ export const CsgGhostOutline = ({ geom, color, bounds, csgCentroid }: { geom: an
         // computed on the squashed shape or the outline won't match it.
         base.scale(r, s[1] ?? r, s[2] ?? r);
         break;
+      case 'mesh': {
+        // A whole body merged in as a subtract — a lattice part, a sculpt, an
+        // imported STL. Its shape is in its vertices; `size` is [1] and means
+        // nothing, so the fallback below would draw a one-metre sphere over the
+        // model instead of the hole being cut.
+        const verts = geom.renderVertices;
+        if (!verts || !geom.faces || geom.faces.length === 0) return null;
+        base = new THREE.BufferGeometry();
+        base.setAttribute('position', new THREE.Float32BufferAttribute(Float32Array.from(verts), 3));
+        base.setIndex(Array.from(geom.faces));
+        break;
+      }
       default:
         base = new THREE.SphereGeometry(r, 16, 10);
         break;
     }
 
-    const e = new THREE.EdgesGeometry(base, 1);
+    // A generous angle on a mesh: a smoothed lattice or a sculpt has thousands
+    // of nearly-coplanar triangles, and keeping every edge between them draws a
+    // solid grey blob rather than an outline. Primitives keep the tight
+    // threshold, where every edge that survives is a real one.
+    const e = new THREE.EdgesGeometry(base, geom.type === 'mesh' ? 25 : 1);
     base.dispose();
 
     // Bake the geom's own pos/rotation in, so the segments are in body space and
     // can be clipped against the body-space bounds directly.
     const src = e.getAttribute('position').array as ArrayLike<number>;
-    const m = geomMatrixOf(geom);
+    // A mesh is never turned by its own quat — its vertices are already in the
+    // body frame and only an explicit pos shifts them, which is the same rule
+    // geomBounds and the ray probe follow. Composing a rotation here would spin
+    // the outline off the hole it is drawn for.
+    const m = geom.type === 'mesh'
+      ? new THREE.Matrix4().setPosition(
+        geom.pos?.[0] ?? 0, geom.pos?.[1] ?? 0, geom.pos?.[2] ?? 0,
+      )
+      : geomMatrixOf(geom);
     if (csgCentroid && csgCentroid.length >= 3) {
       const p = geom.pos || [0, 0, 0];
       // X and Y only — see csgFrameOffset: the compiled body is not re-origined in Z.
@@ -170,7 +210,12 @@ export const CsgGhostOutline = ({ geom, color, bounds, csgCentroid }: { geom: an
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
 
-  useEffect(() => () => edges.dispose(), [edges]);
+  useEffect(() => () => edges?.dispose(), [edges]);
+
+  // A mesh negative with nothing in it yet — an empty cage merged in — has no
+  // outline to draw, and drawing the fallback sphere would be worse than
+  // drawing nothing.
+  if (!edges) return null;
 
   // No position/rotation: the segments are already in body-space coordinates.
   return (

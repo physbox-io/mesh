@@ -13,8 +13,8 @@ import {
   primitiveToScad, csgProgram, hasBooleanOps, csgHashOf,
   meshVolumeAndCentroid, convexHullOf, primitiveVolume,
   detectHoleAxis, decomposeAroundAxis,
-  positiveBounds, geomBounds, clipSegmentsToBox, geomMatrixOf,
-  resolveCsgGeoms,
+  positiveBounds, sourcePositiveBounds, geomBounds, clipSegmentsToBox, geomMatrixOf,
+  resolveCsgGeoms, cutGeometry, cutDepthOf, reconcileCuts, surfaceUnder, pickCutSpot,
 } from '../src/utils/csg';
 import type { SceneGeom, SceneNode } from '../src/types/scene';
 
@@ -429,5 +429,284 @@ describe('resolveCsgGeoms', () => {
     const masses = resolveCsgGeoms(n, 'physics').map(g => g.mass!);
     expect(masses[0] + masses[1]).toBeCloseTo(9, 6);
     expect(masses[0] / masses[1]).toBeCloseTo(8, 6);   // radius ratio 2 -> volume ratio 8
+  });
+});
+// ---------------------------------------------------------------------------
+// Cuts
+// ---------------------------------------------------------------------------
+//
+// A cut is stated as a spot on the surface, the way that surface faces, and a
+// depth into the material. Everything the primitive is made of — where its
+// middle is, how long it is, which way it is turned — is derived from those.
+//
+// Two things these exist to prevent, both of which shipped and had to be found:
+//
+//   Measuring depth from the bounding box. Right on a cube and wrong on
+//   everything else — on an L-bracket a hole over the low arm was measured from
+//   the top of the TALL arm, and when the step was deeper than the hole the
+//   cutter never reached the material and the hole silently did not happen.
+//
+//   Snapping the direction to the nearest axis. A lattice VERTEX is three
+//   integers, but a face joining any three of them can point anywhere; so can a
+//   bevel, a smoothed surface, an imported STL. Snapping gives a hole that is
+//   not square to the face it was asked for, and says nothing about it.
+
+const block = (halfX = 0.02, halfY = 0.02, halfZ = 0.02) => body([
+  { name: 'block', type: 'box', size: [halfX, halfY, halfZ], mass: 1 },
+], { csgEnabled: true });
+
+/** A 40 mm cube with a 40 mm tower on its +X half: a step 20 mm down at x < 0. */
+const bracket = () => body([
+  { name: 'low', type: 'box', size: [0.02, 0.02, 0.01], pos: [-0.02, 0, 0], mass: 1 },
+  { name: 'tall', type: 'box', size: [0.02, 0.02, 0.02], pos: [0.02, 0, 0], mass: 1 },
+], { csgEnabled: true });
+
+const cut = (extra: Partial<SceneGeom> = {}): SceneGeom => ({
+  name: 'cut', type: 'cylinder', size: [0.003, 0], csg: 'difference',
+  cutNormal: [0, 0, 1], cutAt: [0, 0, 0.02], ...extra,
+} as SceneGeom);
+
+/** The cutter's two ends along its own axis, as points. */
+function cutSpan(geom: SceneGeom): { out: number[]; in: number[] } {
+  const n = geom.cutNormal!;
+  const half = geom.size[geom.type === 'box' ? 2 : 1];
+  const p = geom.pos!;
+  return {
+    out: [0, 1, 2].map(a => p[a] + n[a] * half),
+    in: [0, 1, 2].map(a => p[a] - n[a] * half),
+  };
+}
+
+describe('probing a body', () => {
+  it('finds the top of whatever is actually under the spot', () => {
+    const node = bracket();
+    expect(surfaceUnder(node, [0.02, 0, 0], [0, 0, 1])!.entry[2]).toBeCloseTo(0.02, 9);
+    expect(surfaceUnder(node, [-0.02, 0, 0], [0, 0, 1])!.entry[2]).toBeCloseTo(0.01, 9);
+  });
+
+  it('measures a curved surface where the hole is, not at its pole', () => {
+    const dome = body([{ name: 'ball', type: 'sphere', size: [0.02], mass: 1 }], { csgEnabled: true });
+    expect(surfaceUnder(dome, [0, 0, 0], [0, 0, 1])!.entry[2]).toBeCloseTo(0.02, 9);
+    // 12 mm off centre on a 20 mm sphere: sqrt(20² − 12²) = 16.
+    expect(surfaceUnder(dome, [0.012, 0, 0], [0, 0, 1])!.entry[2]).toBeCloseTo(0.016, 6);
+  });
+
+  it('reads a cylinder analytically, whichever way it is turned', () => {
+    const rod = body([
+      { name: 'rod', type: 'cylinder', size: [0.01, 0.05], euler: [0, 90, 0], mass: 1 },
+    ], { csgEnabled: true });
+    expect(surfaceUnder(rod, [0, 0, 0], [0, 0, 1])!.entry[2]).toBeCloseTo(0.01, 9);
+    expect(surfaceUnder(rod, [0.03, 0.006, 0], [0, 0, 1])!.entry[2]).toBeCloseTo(0.008, 6);
+    // Straight down the axis, i.e. onto a flat end cap.
+    expect(surfaceUnder(rod, [0, 0, 0], [1, 0, 0])!.entry[0]).toBeCloseTo(0.05, 9);
+  });
+
+  it('reports how much material a line passes through, not the part height', () => {
+    // The low arm is 20 mm thick; the bounding box is 40 mm tall.
+    expect(surfaceUnder(bracket(), [-0.02, 0, 0], [0, 0, 1])!.thickness).toBeCloseTo(0.02, 9);
+    expect(surfaceUnder(bracket(), [0.02, 0, 0], [0, 0, 1])!.thickness).toBeCloseTo(0.04, 9);
+  });
+
+  it('says nothing when the line misses the part', () => {
+    expect(surfaceUnder(bracket(), [10, 0, 0], [0, 0, 1])).toBeNull();
+  });
+});
+
+describe('pickCutSpot', () => {
+  it('turns a look into a point and the way the surface faces there', () => {
+    const spot = pickCutSpot(block(), [0, 0, 1], [0, 0, -1])!;
+    expect(spot.at[2]).toBeCloseTo(0.02, 9);
+    expect(spot.normal).toEqual([0, 0, 1]);
+  });
+
+  it('faces the normal back at the ray, whatever the winding says', () => {
+    // A mesh wound the wrong way round — which the lattice editor draws in red
+    // precisely because it happens — would otherwise hand back an inward normal
+    // and put the hole on the far side of the surface.
+    const flipped = body([{
+      name: 'plate', type: 'mesh', size: [1], mass: 1,
+      renderVertices: [-0.02, -0.02, 0.005, 0.02, -0.02, 0.005, 0.02, 0.02, 0.005, -0.02, 0.02, 0.005],
+      faces: [0, 2, 1, 0, 3, 2],
+    }], { csgEnabled: true });
+    const spot = pickCutSpot(flipped, [0, 0, 1], [0, 0, -1])!;
+    expect(spot.normal[2]).toBeGreaterThan(0);
+  });
+
+  it('reads a mesh from its own triangles, and misses when it should', () => {
+    const plate = body([{
+      name: 'plate', type: 'mesh', size: [1], mass: 1,
+      renderVertices: [-0.02, -0.02, 0.005, 0.02, -0.02, 0.005, 0.02, 0.02, 0.005, -0.02, 0.02, 0.005],
+      faces: [0, 1, 2, 0, 2, 3],
+    }], { csgEnabled: true });
+    expect(pickCutSpot(plate, [0, 0, 1], [0, 0, -1])!.at[2]).toBeCloseTo(0.005, 9);
+    expect(pickCutSpot(plate, [0.5, 0, 1], [0, 0, -1])).toBeNull();
+  });
+});
+
+describe('cutGeometry', () => {
+  it('turns a depth into a cutter that overshoots the surface it enters', () => {
+    // 40 mm cube, 10 mm deep into the top. The hole runs 20 down to 10; the
+    // cutter runs from 10 up past 20, so it breaks the surface rather than
+    // ending flush on it — coincident faces are how a boolean stops being solid.
+    const geom = cut({ cutDepth: 0.01 });
+    Object.assign(geom, cutGeometry(block(), geom));
+    const span = cutSpan(geom);
+    expect(span.in[2]).toBeCloseTo(0.01, 6);        // bottoms out 10 mm down
+    expect(span.out[2]).toBeGreaterThan(0.02);      // and pokes out past the top
+    expect(geom.size[1] * 2).toBeLessThan(0.013);   // barely longer than the hole
+  });
+
+  it('goes clear out of both sides when it goes through', () => {
+    const geom = cut({ cutDepth: 0 });
+    Object.assign(geom, cutGeometry(block(), geom));
+    const span = cutSpan(geom);
+    expect(span.out[2]).toBeGreaterThan(0.02);
+    expect(span.in[2]).toBeLessThan(-0.02);
+  });
+
+  /*
+   * The whole point of the rewrite. A face at 45 degrees is ordinary here — a
+   * bevel makes them deliberately, and a face joining any three grid points can
+   * point anywhere at all — and a hole in one has to be square to it.
+   */
+  it('runs square to a slanted surface, not to the nearest axis', () => {
+    const root = Math.SQRT1_2;
+    const geom = cut({ cutNormal: [root, 0, root], cutAt: [0.02, 0, 0.02], cutDepth: 0.01 });
+    Object.assign(geom, cutGeometry(block(), geom));
+    const span = cutSpan(geom);
+    // 10 mm along the diagonal is 7.07 mm on each of the two axes.
+    const travelled = Math.hypot(span.out[0] - span.in[0], span.out[2] - span.in[2]);
+    expect(travelled).toBeCloseTo(geom.size[1] * 2, 9);
+    expect(span.out[0] - span.in[0]).toBeCloseTo(span.out[2] - span.in[2], 9);
+    // And the quaternion turns the cylinder's own +Z onto that same line.
+    const axis = new THREE.Vector3(0, 0, 1).applyQuaternion(
+      new THREE.Quaternion(geom.quat![1], geom.quat![2], geom.quat![3], geom.quat![0]),
+    );
+    expect(axis.x).toBeCloseTo(root, 6);
+    expect(axis.z).toBeCloseTo(root, 6);
+  });
+
+  it('keeps a slot square to the surface, sized in its own frame', () => {
+    const geom = cut({ type: 'box', size: [0.004, 0.006, 0], cutDepth: 0.01 });
+    Object.assign(geom, cutGeometry(block(), geom));
+    expect(geom.size[0]).toBeCloseTo(0.004, 9);   // across, untouched
+    expect(geom.size[1]).toBeCloseTo(0.006, 9);
+    expect(cutSpan(geom).in[2]).toBeCloseTo(0.01, 6);
+  });
+
+  it('sinks a dish so its deepest point is the depth asked for', () => {
+    const geom = cut({ type: 'sphere', size: [0.005], cutDepth: 0.003 });
+    Object.assign(geom, cutGeometry(block(), geom));
+    expect(geom.pos![2] - 0.005).toBeCloseTo(0.017, 6);  // 3 mm below the top face
+    expect(geom.pos![2] + 0.005).toBeGreaterThan(0.02);  // and still breaks it
+  });
+
+  it('will not sink a dish deeper than the ball can reach', () => {
+    // Past its own diameter the sphere would clear the surface entirely and cut
+    // a bubble inside the part — a void nobody asked for and nothing can see.
+    const geom = cut({ type: 'sphere', size: [0.005], cutDepth: 0.05 });
+    Object.assign(geom, cutGeometry(block(), geom));
+    expect(geom.pos![2] + 0.005).toBeCloseTo(0.02, 6);
+  });
+
+  it('scales the overshoot to the part, with a floor under it', () => {
+    // 2% of the part's diagonal, so turning a hole does not change it, with a
+    // floor far below: a fixed 1 mm is invisible on a 2 m beam and half the
+    // model on a 2 mm one.
+    const big = cut({ cutAt: [0, 0, 1], cutDepth: 0.5 });
+    Object.assign(big, cutGeometry(block(1, 1, 1), big));
+    expect(cutSpan(big).out[2] - 1).toBeCloseTo(2 * Math.sqrt(3) * 0.02, 6);
+    const tiny = cut({ cutAt: [0, 0, 0.001], cutDepth: 0.0005 });
+    Object.assign(tiny, cutGeometry(block(0.001, 0.001, 0.001), tiny));
+    expect(cutSpan(tiny).out[2] - 0.001).toBeCloseTo(0.0001, 9);
+  });
+});
+
+describe('cutDepthOf', () => {
+  it('reports the hole, not the cutter', () => {
+    expect(cutDepthOf(block(), cut({ cutDepth: 0.01 }))).toBeCloseTo(0.01, 9);
+    // A hole with no depth of its own is as deep as the material under it —
+    // and on a stepped part that is not the height of the whole thing.
+    expect(cutDepthOf(block(), cut({ cutDepth: 0 }))).toBeCloseTo(0.04, 9);
+    expect(cutDepthOf(bracket(), cut({ cutDepth: 0, cutAt: [-0.02, 0, 0.01] }))).toBeCloseTo(0.02, 9);
+  });
+});
+
+describe('reconcileCuts', () => {
+  it('keeps a hole in the surface it names when the part grows', () => {
+    const node = block();
+    node.geoms.push(cut({ cutDepth: 0.01 }));
+    reconcileCuts(node);
+    expect(cutSpan(node.geoms[1]).in[2]).toBeCloseTo(0.01, 6);
+
+    // The block gets 20 mm taller. Left alone the hole would stay where it was
+    // and end up sealed inside the material, 20 mm under the new surface.
+    node.geoms[0].size = [0.02, 0.02, 0.04];
+    expect(reconcileCuts(node)).toBe(true);
+    expect(cutSpan(node.geoms[1]).in[2]).toBeCloseTo(0.03, 6);      // still 10 mm down
+    expect(cutSpan(node.geoms[1]).out[2]).toBeGreaterThan(0.04);    // still breaks the top
+  });
+
+  it('goes the depth asked for into the arm it is over', () => {
+    const node = bracket();
+    // 10 mm into the low arm, whose top is at 10 mm. Before this, the cutter
+    // ran from the tall arm's 20 mm down to 10 mm and removed nothing at all.
+    node.geoms.push(cut({ cutDepth: 0.01, cutAt: [-0.02, 0, 0.01] }));
+    reconcileCuts(node);
+    expect(cutSpan(node.geoms[2]).in[2]).toBeCloseTo(0, 6);
+    expect(cutSpan(node.geoms[2]).out[2]).toBeGreaterThan(0.01);
+  });
+
+  it('passes through only the thickness it is actually in', () => {
+    const node = bracket();
+    node.geoms.push(cut({ cutDepth: 0, cutAt: [-0.02, 0, 0.01] }));
+    reconcileCuts(node);
+    const geom = node.geoms[2];
+    // The low arm is 20 mm thick, not the 40 mm the bounding box would claim.
+    expect(cutSpan(geom).out[2]).toBeGreaterThan(0.01);
+    expect(cutSpan(geom).in[2]).toBeLessThan(-0.01);
+    expect(geom.size[1] * 2).toBeLessThan(0.04);
+  });
+
+  it('says when it changed nothing, so a recompile can be skipped', () => {
+    const node = block();
+    node.geoms.push(cut({ cutDepth: 0.01 }));
+    reconcileCuts(node);
+    expect(reconcileCuts(node)).toBe(false);
+  });
+
+  /*
+   * The ring preset, every hand-authored scene, and every negative an agent has
+   * ever placed by coordinates. They carry no direction, so there is no intent
+   * to honour and their numbers are theirs.
+   */
+  it('will not touch a negative that never claimed a direction', () => {
+    const node = block();
+    node.geoms.push({ name: 'authored', type: 'cylinder', size: [0.003, 0.05], csg: 'difference', pos: [0, 0, 0.1] });
+    expect(reconcileCuts(node)).toBe(false);
+    expect(node.geoms[1].pos).toEqual([0, 0, 0.1]);
+  });
+
+  it('leaves a cut alone when its line has stopped meeting the part', () => {
+    // Not an error, and not a reason to move it somewhere arbitrary: the
+    // outline stays visible where it was, which is what lets you drag it back.
+    const node = block();
+    node.geoms.push(cut({ cutDepth: 0.01, cutAt: [10, 0, 0.02] }));
+    const before = cutGeometry(node, node.geoms[1]);
+    expect(before).not.toBeNull();
+    expect(before!.pos[0]).toBeCloseTo(10, 6);
+  });
+});
+
+describe('source and compiled bounds', () => {
+  it('differ by the shift a compiled solid was re-origined with', () => {
+    const node = block();
+    node.csgCentroid = [0.01, -0.02, 0.5];
+    const source = sourcePositiveBounds(node)!;
+    const compiled = positiveBounds(node)!;
+    // X and Y move; Z is deliberately left where it was modelled.
+    expect(compiled.min[0]).toBeCloseTo(source.min[0] - 0.01, 9);
+    expect(compiled.min[1]).toBeCloseTo(source.min[1] + 0.02, 9);
+    expect(compiled.min[2]).toBeCloseTo(source.min[2], 9);
   });
 });

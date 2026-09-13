@@ -361,7 +361,7 @@ export function generateLaserCutGcode(
   const radius = compensationRadius(options);
   const warnings: string[] = [];
 
-  let lines: string[] = [];
+  const lines: string[] = [];
   lines.push(`; --------------------------------------------------`);
   lines.push(`; PhysBox Generated G-Code (${options.machineMode.toUpperCase()} Mode)`);
   lines.push(`; Date: ${new Date().toISOString()}`);
@@ -692,7 +692,7 @@ export function generateContourSliceGcode(
   const operations: GcodeOperation[] = [];
   const radius = compensationRadius(options);
 
-  let lines: string[] = [];
+  const lines: string[] = [];
   lines.push(`; --------------------------------------------------`);
   lines.push(`; PhysBox Contour Slice Stack G-Code (${options.machineMode.toUpperCase()})`);
   lines.push(`; Layers: ${sheetCount}`);

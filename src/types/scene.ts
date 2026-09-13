@@ -50,6 +50,42 @@ export interface SceneGeom {
   // When true, the mesh participates in simulation and its transform is tracked from MuJoCo.
   // The renderer uses renderVertices (Z-up, centroid at origin) inside the rotated group.
   dynamic?: boolean;
+  /**
+   * For a geom that cuts (csg:'difference'): where it goes into the part, and
+   * how far.
+   *
+   * The authoring intent, from which `pos`, `quat` and the length in `size` are
+   * DERIVED — see cutGeometry in utils/csg.ts. Stored because those cannot be
+   * read back into it: a cylinder from 10 to 22 is a 12 mm cutter centred at 16,
+   * and recovering "10 mm in, perpendicular to that face" from it would mean
+   * knowing which end was the entry and how much was overshoot.
+   *
+   * `cutNormal` is the OUTWARD direction of the surface, and it is a direction
+   * rather than a choice of six axes on purpose. A lattice vertex is three
+   * integers, but a face joining any three of them can point anywhere, and a
+   * bevelled, smoothed or imported surface certainly does — snapping to the
+   * nearest axis puts the hole at an angle to the face it was asked for,
+   * quietly.
+   *
+   * Nothing downstream reads these. The boolean, the MJCF and every exporter
+   * see an ordinary positioned primitive, exactly as they did before.
+   */
+  cutNormal?: number[];
+  /** The point on that surface the cut is centred on, in the body frame. */
+  cutAt?: number[];
+  /** Depth in metres into the material from `cutAt`. 0 or absent cuts through. */
+  cutDepth?: number;
+  /**
+   * This is the geom the body's lattice cage owns — the one `applyLattice`
+   * rewrites on every edit.
+   *
+   * It exists so a lattice body can carry OTHER geoms: the moment a cut is
+   * added to one, "the body's mesh geom" stops naming one thing, because the
+   * boolean evaluator's own output is a mesh too. Picking the first mesh in the
+   * list would eventually pick the derived one and overwrite the boolean result
+   * with the un-cut cage.
+   */
+  latticeGeom?: boolean;
   // Centroid-recentered vertices in MuJoCo Z-up space for dynamic mesh rendering.
   renderVertices?: number[];
 }
@@ -120,7 +156,7 @@ export interface SceneNode {
   rot?: number[];
   isHardwareComponent?: boolean;
   hardwareType?: string;
-  hardwareSpec?: any;
+  hardwareSpec?: Record<string, number | string>;
   script?: string;
   scad?: string;
   // --- CSG (boolean modifiers) ---------------------------------------------
@@ -197,6 +233,17 @@ export interface SceneNode {
   latticeOrigin?: number[];
   /** Bumped when the cage is replaced wholesale, to remount the editor on it. */
   latticeVersion?: number;
+  /**
+   * The cage has been APPLIED: this body's mesh is now its own document, and
+   * the lattice tools are closed on it for good.
+   *
+   * Sculpting is what asks for this. The two cannot both own the same mesh —
+   * the cage regenerates it from scratch on every edit, so a sculpted lattice
+   * body loses its sculpting the moment a face is moved, silently and much
+   * later. So sculpting a lattice body bakes it: `isLattice` goes off, this
+   * goes on, and the cage stays in the file. Undo puts all three back.
+   */
+  latticeBaked?: boolean;
   /** Set once a face has been drawn, so a reset can warn before discarding it. */
   latticeEdited?: boolean;
   isComposite?: boolean;

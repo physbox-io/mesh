@@ -333,14 +333,15 @@ describe('OpenSCAD presets build on load', () => {
   });
 
   it('leaves an already-built body alone', () => {
-    const node = {
+    const node: SceneNode = {
       ...birdhouseScadPreset.nodes[0],
-      geoms: [{ name: 'm', type: 'mesh', vertices: [0, 0, 0], faces: [0, 0, 0] }],
-    } as any;
+      geoms: [{ name: 'm', type: 'mesh', size: [1], vertices: [0, 0, 0], faces: [0, 0, 0] }],
+    };
     expect(needsScadBuild(node)).toBe(false);
   });
 
   it('ignores bodies with no OpenSCAD source', () => {
-    expect(needsScadBuild({ id: 'x', name: 'x', geoms: [] } as any)).toBe(false);
+    const node: SceneNode = { id: 'x', name: 'x', type: 'body', pos: [0, 0, 0], geoms: [], joints: [], children: [] };
+    expect(needsScadBuild(node)).toBe(false);
   });
 });

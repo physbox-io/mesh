@@ -257,6 +257,497 @@ export function csgProgram(node: SceneNode): string | null {
   return `// Generated from ${node.name || node.id}'s primitives — edit the shapes, not this.\n${body}\n`;
 }
 
+/**
+ * The program with its mesh literals stood down to a one-line note.
+ *
+ * A lattice body's polyhedron runs to tens of thousands of numbers. It has to
+ * be in the source that goes to OpenSCAD, and it must not be in the source that
+ * goes on the node: that string is shown in the inspector, kept in undo history
+ * and written into every save of the document. The interesting half of the
+ * program — what is being cut out of what — is the half that survives here.
+ */
+export function scadForDisplay(scad: string): string {
+  return scad.replace(
+    /polyhedron\(points=\[([\s\S]*?)\], faces=\[([\s\S]*?)\], convexity=4\);/g,
+    (_match, points: string, faces: string) => {
+      const count = (text: string) => (text.match(/\[/g) || []).length;
+      return `polyhedron(/* the modelled mesh: ${count(points)} points, ${count(faces)} triangles */);`;
+    },
+  );
+}
+// ---------------------------------------------------------------------------
+// Cuts
+// ---------------------------------------------------------------------------
+//
+// A cut is an ordinary negative primitive. What makes it worth a section of its
+// own is that the numbers a person means are not the numbers a primitive is
+// made of: "6 mm across, 10 mm into that face" becomes a 12 mm cylinder centred
+// 16 mm up and turned to match, and nobody should be doing that conversion in
+// their head.
+//
+// A cut is therefore stated as three things:
+//
+//   cutNormal — the OUTWARD direction of the surface it enters. Any direction,
+//               not one of six. A lattice vertex is three integers, but a face
+//               joining any three of them can point anywhere, and a bevelled or
+//               smoothed or imported surface certainly does. Snapping that to
+//               the nearest axis gives a hole that is not perpendicular to the
+//               face it was asked for, quietly.
+//   cutAt     — the point on that surface the hole is centred on.
+//   cutDepth  — how far into the material, from there. 0 goes right through.
+//
+// Everything the primitive is actually made of — position, length, orientation
+// — is derived from those by cutGeometry, and re-derived whenever the part
+// changes by reconcileCuts.
+//
+// The millimetre or two the cutter is longer than the hole is not an optional
+// nicety. A negative that stops exactly flush with the surface leaves two
+// coincident faces, and a boolean of two coincident faces is not reliably a
+// solid — it is the classic way to get a mesh with its hole in the wrong sense.
+// So the cutter always breaks out past the surface, and the depth still
+// measures from the surface, because that is the depth of the hole.
+
+/** Where a ray met a surface: how far along it, and which way that surface faces. */
+export interface SurfaceHit {
+  /** Distance along the ray's direction vector. */
+  t: number;
+  /** Outward unit normal in the body frame. */
+  normal: number[];
+}
+
+/** A place a cut can go: a point on the part, and the way the part faces there. */
+export interface CutSpot {
+  at: number[];
+  normal: number[];
+}
+
+/**
+ * How far a cutter pokes out past the surface it enters.
+ *
+ * A proportion of the part, with a floor a long way under it. 2% of a 40 mm
+ * block is over a millimetre: far more than any tolerance needs, and still
+ * small enough that the red outline reads as belonging to the part rather than
+ * skewering it. A fixed distance cannot do both jobs — a millimetre is
+ * invisible on a 2 m beam and half the model on a 2 mm one — and the floor is
+ * only there so that something microscopic still gets a gap it cannot round
+ * away.
+ *
+ * Measured on the part's diagonal rather than on one axis, because a cut no
+ * longer runs along an axis and the overshoot should not change when you turn
+ * the hole.
+ */
+function cutOvershoot(node: SceneNode): number {
+  const bounds = sourcePositiveBounds(node);
+  if (!bounds) return 0.001;
+  const diagonal = Math.hypot(
+    bounds.max[0] - bounds.min[0],
+    bounds.max[1] - bounds.min[1],
+    bounds.max[2] - bounds.min[2],
+  );
+  return Math.max(0.0001, diagonal * 0.02);
+}
+
+// ---------------------------------------------------------------------------
+// Where the surface actually is
+// ---------------------------------------------------------------------------
+//
+// A cut's depth has to be measured from the material, not from a bounding box.
+// The two are the same on a cube and nowhere else: on a dome the box only
+// touches at the pole, so a hole off to one side would come out shallower than
+// the number typed; on an L-bracket the box's lid is the top of the TALL arm,
+// and a hole over the low arm would be measured from a plane hanging in the air
+// above it — if the step were deeper than the hole, the cutter would never
+// reach the material and the hole would silently not happen.
+//
+// So the surface is found by casting a ray and taking the first thing it meets.
+// Under the middle of the hole, which is the rule a person would state: a
+// counterbore on a slope is measured at its centre.
+
+/** Möller–Trumbore, returning the ray parameter or null. */
+function rayTriangle(
+  origin: THREE.Vector3, dir: THREE.Vector3,
+  a: THREE.Vector3, b: THREE.Vector3, c: THREE.Vector3,
+): number | null {
+  const e1 = b.clone().sub(a);
+  const e2 = c.clone().sub(a);
+  const p = dir.clone().cross(e2);
+  const det = e1.dot(p);
+  if (Math.abs(det) < 1e-12) return null;   // parallel to the triangle
+  const inv = 1 / det;
+  const t0 = origin.clone().sub(a);
+  const u = t0.dot(p) * inv;
+  if (u < -1e-9 || u > 1 + 1e-9) return null;
+  const q = t0.cross(e1);
+  const v = dir.dot(q) * inv;
+  if (v < -1e-9 || u + v > 1 + 1e-9) return null;
+  const t = e2.dot(q) * inv;
+  return t >= 0 ? t : null;
+}
+
+/** Roots of at² + bt + c, in order, ignoring the imaginary ones. */
+function quadratic(a: number, b: number, c: number): number[] {
+  if (Math.abs(a) < 1e-15) return Math.abs(b) < 1e-15 ? [] : [-c / b];
+  const disc = b * b - 4 * a * c;
+  if (disc < 0) return [];
+  const root = Math.sqrt(disc);
+  return [(-b - root) / (2 * a), (-b + root) / (2 * a)];
+}
+
+/**
+ * Every point a ray enters or leaves one geom, with the surface normal there.
+ *
+ * Analytic rather than tessellated: a sphere approximated by triangles would
+ * report a depth and a normal that depend on how finely it happened to be
+ * divided, and the error would be worst exactly where a hole usually goes — the
+ * top of a dome. Meshes are the one case with no closed form, and there the
+ * triangles ARE the surface, so intersecting them is exact.
+ */
+function geomRayHits(geom: SceneGeom, origin: THREE.Vector3, dir: THREE.Vector3): SurfaceHit[] {
+  const s = geom.size || [];
+  const hits: SurfaceHit[] = [];
+
+  if (geom.type === 'mesh') {
+    const verts = geom.renderVertices;
+    if (!verts || !geom.faces) return hits;
+    const off = geom.pos || [0, 0, 0];
+    const at = (i: number) => new THREE.Vector3(
+      verts[i * 3] + (off[0] || 0), verts[i * 3 + 1] + (off[1] || 0), verts[i * 3 + 2] + (off[2] || 0),
+    );
+    for (let f = 0; f < geom.faces.length; f += 3) {
+      const a = at(geom.faces[f]);
+      const b = at(geom.faces[f + 1]);
+      const c = at(geom.faces[f + 2]);
+      const t = rayTriangle(origin, dir, a, b, c);
+      if (t === null) continue;
+      // Wound counter-clockwise seen from outside, so this points out.
+      const n = b.clone().sub(a).cross(c.clone().sub(a));
+      if (n.lengthSq() < 1e-24) continue;
+      hits.push({ t, normal: n.normalize().toArray() });
+    }
+    return hits;
+  }
+
+  // Everything else is solved in the geom's own frame, where it is centred and
+  // axis-aligned. The frame is rigid, so a ray parameter means the same thing
+  // in both — no rescaling on the way back out — and a normal only needs
+  // turning, not moving.
+  let matrix = geomMatrix(geom);
+  let halfLen = s[1] ?? s[0] ?? 0.1;
+  if ((geom.type === 'cylinder' || geom.type === 'capsule') && geom.fromto && geom.fromto.length >= 6) {
+    const f = fromtoFrame(geom.fromto);
+    matrix = f.matrix;
+    halfLen = f.halfLen;
+  }
+  const inverse = matrix.clone().invert();
+  const o = origin.clone().applyMatrix4(inverse);
+  const d = dir.clone().transformDirection(inverse);
+
+  const rotation = new THREE.Matrix3().setFromMatrix4(matrix);
+  const local: { t: number; normal: THREE.Vector3 }[] = [];
+  const at = (t: number) => new THREE.Vector3(o.x + t * d.x, o.y + t * d.y, o.z + t * d.z);
+  const withinZ = (t: number, h: number) => Math.abs(o.z + t * d.z) <= h + 1e-9;
+
+  switch (geom.type) {
+    case 'box': {
+      // Slabs. A ray parallel to a slab either misses it or is inside it for
+      // the whole of its length, which is what the degenerate branch says.
+      const half = [s[0] ?? 0.1, s[1] ?? s[0] ?? 0.1, s[2] ?? s[0] ?? 0.1];
+      const oa = [o.x, o.y, o.z];
+      const da = [d.x, d.y, d.z];
+      let near = -Infinity;
+      let far = Infinity;
+      let nearAxis = 0;
+      let farAxis = 0;
+      for (let a = 0; a < 3; a++) {
+        if (Math.abs(da[a]) < 1e-12) {
+          if (Math.abs(oa[a]) > half[a]) return hits;
+          continue;
+        }
+        const t1 = (-half[a] - oa[a]) / da[a];
+        const t2 = (half[a] - oa[a]) / da[a];
+        if (Math.min(t1, t2) > near) { near = Math.min(t1, t2); nearAxis = a; }
+        if (Math.max(t1, t2) < far) { far = Math.max(t1, t2); farAxis = a; }
+      }
+      if (near > far) break;
+      // The face a slab boundary belongs to is the one the ray is heading away
+      // from on entry, and towards on exit.
+      const faceNormal = (axis: number, sign: number) => {
+        const n = new THREE.Vector3();
+        n.setComponent(axis, sign);
+        return n;
+      };
+      local.push({ t: near, normal: faceNormal(nearAxis, -Math.sign(da[nearAxis] || 1)) });
+      local.push({ t: far, normal: faceNormal(farAxis, Math.sign(da[farAxis] || 1)) });
+      break;
+    }
+    case 'sphere': {
+      const r = s[0] ?? 0.1;
+      for (const t of quadratic(d.lengthSq(), 2 * o.dot(d), o.lengthSq() - r * r)) {
+        local.push({ t, normal: at(t).normalize() });
+      }
+      break;
+    }
+    case 'ellipsoid': {
+      // Squashed onto the unit sphere. Scaling origin and direction by the same
+      // factors leaves the ray parameter alone, so the roots need no undoing —
+      // but the normal does, and it is the gradient rather than the point.
+      const r = [s[0] ?? 0.1, s[1] ?? s[0] ?? 0.1, s[2] ?? s[0] ?? 0.1];
+      const oe = new THREE.Vector3(o.x / r[0], o.y / r[1], o.z / r[2]);
+      const de = new THREE.Vector3(d.x / r[0], d.y / r[1], d.z / r[2]);
+      for (const t of quadratic(de.lengthSq(), 2 * oe.dot(de), oe.lengthSq() - 1)) {
+        const p = at(t);
+        local.push({
+          t,
+          normal: new THREE.Vector3(p.x / (r[0] * r[0]), p.y / (r[1] * r[1]), p.z / (r[2] * r[2])).normalize(),
+        });
+      }
+      break;
+    }
+    case 'cylinder':
+    case 'capsule': {
+      const r = s[0] ?? (geom.type === 'capsule' ? 0.05 : 0.1);
+      for (const t of quadratic(
+        d.x * d.x + d.y * d.y,
+        2 * (o.x * d.x + o.y * d.y),
+        o.x * o.x + o.y * o.y - r * r,
+      )) {
+        if (!withinZ(t, halfLen)) continue;
+        const p = at(t);
+        local.push({ t, normal: new THREE.Vector3(p.x, p.y, 0).normalize() });
+      }
+      if (geom.type === 'cylinder') {
+        // The flat ends, which is how a ray straight down the axis hits at all.
+        for (const end of [-halfLen, halfLen]) {
+          if (Math.abs(d.z) < 1e-12) continue;
+          const t = (end - o.z) / d.z;
+          const p = at(t);
+          if (p.x * p.x + p.y * p.y <= r * r + 1e-12) {
+            local.push({ t, normal: new THREE.Vector3(0, 0, Math.sign(end) || 1) });
+          }
+        }
+      } else {
+        // The rounded ends are whole spheres; only the half beyond the barrel
+        // is really surface, which is what the z test keeps.
+        for (const end of [-halfLen, halfLen]) {
+          const centre = new THREE.Vector3(0, 0, end);
+          const oc = o.clone().sub(centre);
+          for (const t of quadratic(d.lengthSq(), 2 * oc.dot(d), oc.lengthSq() - r * r)) {
+            const p = at(t);
+            if ((end > 0 && p.z >= end - 1e-9) || (end < 0 && p.z <= end + 1e-9)) {
+              local.push({ t, normal: p.clone().sub(centre).normalize() });
+            }
+          }
+        }
+      }
+      break;
+    }
+    default:
+      break; // a plane has no inside to enter
+  }
+
+  for (const hit of local) {
+    if (hit.t < 0) continue;
+    hits.push({ t: hit.t, normal: hit.normal.applyMatrix3(rotation).normalize().toArray() });
+  }
+  return hits;
+}
+
+/**
+ * Every surface of a body's positive shapes that a ray meets, nearest first.
+ *
+ * Coordinates are the body's own frame — the frame a geom's `pos` is written
+ * in — so a caller has only to say where the ray starts and which way it goes.
+ */
+export function probeRay(node: SceneNode, origin: number[], direction: number[]): SurfaceHit[] {
+  const o = new THREE.Vector3(origin[0] ?? 0, origin[1] ?? 0, origin[2] ?? 0);
+  const d = new THREE.Vector3(direction[0] ?? 0, direction[1] ?? 0, direction[2] ?? 0);
+  if (d.lengthSq() < 1e-18) return [];
+  d.normalize();
+  const hits: SurfaceHit[] = [];
+  for (const geom of csgSourceGeoms(node)) {
+    if (!isPositive(geom)) continue;
+    hits.push(...geomRayHits(geom, o, d));
+  }
+  return hits.sort((a, b) => a.t - b.t);
+}
+
+/** How far outside a body a ray has to start to be certain it starts outside. */
+function clearOf(node: SceneNode): number {
+  const bounds = sourcePositiveBounds(node);
+  if (!bounds) return 1;
+  return Math.hypot(
+    bounds.max[0] - bounds.min[0],
+    bounds.max[1] - bounds.min[1],
+    bounds.max[2] - bounds.min[2],
+  ) + 1;
+}
+
+/**
+ * The spot a ray from outside lands on: where it meets the part, and which way
+ * the part faces there.
+ *
+ * This is what a click on a body, or a look down the camera, turns into. The
+ * normal is forced to face the ray, because a mesh whose winding disagrees with
+ * its neighbours — which the lattice editor draws in red precisely because it
+ * happens — would otherwise hand back an inward normal and put the hole on the
+ * wrong side of the surface.
+ */
+export function pickCutSpot(node: SceneNode, origin: number[], direction: number[]): CutSpot | null {
+  const hits = probeRay(node, origin, direction);
+  if (hits.length === 0) return null;
+  const d = new THREE.Vector3(direction[0] ?? 0, direction[1] ?? 0, direction[2] ?? 0).normalize();
+  const first = hits[0];
+  const at = [
+    (origin[0] ?? 0) + d.x * first.t,
+    (origin[1] ?? 0) + d.y * first.t,
+    (origin[2] ?? 0) + d.z * first.t,
+  ];
+  const normal = new THREE.Vector3(first.normal[0], first.normal[1], first.normal[2]);
+  if (normal.dot(d) > 0) normal.negate();
+  return { at, normal: normal.toArray() };
+}
+
+/**
+ * Where a cut's own line meets the part, and how much material is under it.
+ *
+ * The ray is the cut's line: it starts well outside along the stored normal and
+ * travels back down it, so a hole re-measures itself against whatever is under
+ * it now. `thickness` is from the first surface to the last, which is what a
+ * hole going right through has to clear.
+ *
+ * Returns null when the line misses the part altogether — a hole hanging off
+ * the edge — and the caller keeps whatever the cut had.
+ */
+export function surfaceUnder(
+  node: SceneNode,
+  at: number[],
+  normal: number[],
+): { entry: number[]; thickness: number } | null {
+  const n = new THREE.Vector3(normal[0] ?? 0, normal[1] ?? 0, normal[2] ?? 1);
+  if (n.lengthSq() < 1e-18) return null;
+  n.normalize();
+  const away = clearOf(node);
+  const origin = [
+    (at[0] ?? 0) + n.x * away,
+    (at[1] ?? 0) + n.y * away,
+    (at[2] ?? 0) + n.z * away,
+  ];
+  const hits = probeRay(node, origin, [-n.x, -n.y, -n.z]);
+  if (hits.length === 0) return null;
+  const first = hits[0].t;
+  const last = hits[hits.length - 1].t;
+  return {
+    entry: [origin[0] - n.x * first, origin[1] - n.y * first, origin[2] - n.z * first],
+    thickness: Math.max(0, last - first),
+  };
+}
+
+/**
+ * `pos`, `size` and `quat` for a cut, from where it enters and how deep it goes.
+ *
+ * The cross-section comes from the geom's own `size`, so resizing a hole is an
+ * ordinary size edit; the length, the place along the cut's line and the turn
+ * onto it are what is worked out here.
+ */
+export function cutGeometry(
+  node: SceneNode,
+  geom: SceneGeom,
+): { pos: number[]; size: number[]; quat: number[] } | null {
+  const normal = geom.cutNormal ?? [0, 0, 1];
+  const n = new THREE.Vector3(normal[0] ?? 0, normal[1] ?? 0, normal[2] ?? 1);
+  if (n.lengthSq() < 1e-18) return null;
+  n.normalize();
+
+  const under = surfaceUnder(node, geom.cutAt ?? [0, 0, 0], n.toArray());
+  const entry = new THREE.Vector3(...(under ? under.entry : (geom.cutAt ?? [0, 0, 0])));
+  const s = geom.size || [];
+  const over = cutOvershoot(node);
+
+  // A shape's own +Z turned onto the cut's line. Every solid here is a body of
+  // revolution about that axis or a box, so one rotation orients all of them.
+  const quat = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), n);
+  const mjQuat = [quat.w, quat.x, quat.y, quat.z].map(v => +v.toFixed(9));
+
+  if (geom.type === 'sphere') {
+    // A scoop, not a bore: a sphere has no length to run, so it is always
+    // blind. Its deepest point sits at the depth asked for, which puts its
+    // centre most of a radius short of that.
+    const r = Math.max(1e-6, s[0] ?? 0.005);
+    // Deeper than its own diameter is a hole that has left the ball behind: the
+    // sphere would stop short of the surface and cut a bubble inside the part.
+    const depth = Math.min(Math.max(geom.cutDepth || r, 1e-6), 2 * r);
+    const centre = entry.clone().addScaledVector(n, r - depth);
+    return { pos: centre.toArray().map(v => +v.toFixed(6)), size: [r], quat: mjQuat };
+  }
+
+  // Through, or in by the depth asked for. Through is measured from the surface
+  // to the far side of the part and then some, so both ends are clear of it
+  // however thick the part turned out to be.
+  const through = !(geom.cutDepth && geom.cutDepth > 0);
+  const reach = through ? (under?.thickness ?? 0) + over : geom.cutDepth!;
+  const length = reach + over;
+  const centre = entry.clone().addScaledVector(n, (over - reach) / 2);
+  const pos = centre.toArray().map(v => +v.toFixed(6));
+
+  if (geom.type === 'box') {
+    // The two cross-section numbers are the slot's own width and breadth, in
+    // its own frame — they turn with it rather than staying world X and Y.
+    return { pos, size: [s[0] ?? 0.005, s[1] ?? 0.005, length / 2], quat: mjQuat };
+  }
+  return { pos, size: [s[0] ?? 0.005, length / 2], quat: mjQuat };
+}
+
+/**
+ * The depth a cut is set to, in metres, as the panel should show it — the
+ * length of the hole, never the length of the cutter.
+ */
+export function cutDepthOf(node: SceneNode, geom: SceneGeom): number {
+  if (geom.cutDepth && geom.cutDepth > 0) return geom.cutDepth;
+  const under = surfaceUnder(node, geom.cutAt ?? [0, 0, 0], geom.cutNormal ?? [0, 0, 1]);
+  return under ? under.thickness : 0;
+}
+
+/**
+ * Brings a body's cuts back into agreement with the part they cut into.
+ *
+ * "10 mm into that face" has to go on meaning that after the face moves, or it
+ * was never a statement about the part — only a way of arriving at a number
+ * once. Push the top of a block up by 20 mm and an unreconciled cut stays where
+ * it was in space, which is no longer a hole at all: it is a sealed void 20 mm
+ * under the surface, and nothing in the viewport shows it.
+ *
+ * Only cuts that carry a direction are touched. A negative authored by hand — a
+ * preset, an older scene, an agent placing a shape by coordinates — has no such
+ * intent to honour, and its numbers are left exactly alone.
+ *
+ * Returns whether anything moved, so a caller can skip a recompile.
+ */
+export function reconcileCuts(node: SceneNode): boolean {
+  const cuts = (node.geoms || []).filter(g => g.csg === 'difference' && !g.csgDerived && g.cutNormal);
+  if (cuts.length === 0) return false;
+
+  let changed = false;
+  for (const geom of cuts) {
+    const next = cutGeometry(node, geom);
+    if (!next) continue;
+    // The anchor follows the surface too, so the next reconcile measures from
+    // where the material is now rather than from where it used to be.
+    const under = surfaceUnder(node, geom.cutAt ?? [0, 0, 0], geom.cutNormal!);
+    if (under) geom.cutAt = under.entry.map(v => +v.toFixed(6));
+
+    const samePos = (geom.pos || []).length === 3
+      && next.pos.every((v, a) => Math.abs(v - (geom.pos![a] ?? 0)) < 1e-9);
+    const sameSize = (geom.size || []).length === next.size.length
+      && next.size.every((v, i) => Math.abs(v - (geom.size![i] ?? 0)) < 1e-9);
+    const sameQuat = (geom.quat || []).length === 4
+      && next.quat.every((v, i) => Math.abs(v - (geom.quat![i] ?? 0)) < 1e-9);
+    if (samePos && sameSize && sameQuat) continue;
+    Object.assign(geom, next);
+    changed = true;
+  }
+  return changed;
+}
+
 // ---------------------------------------------------------------------------
 // Mesh measurement
 // ---------------------------------------------------------------------------
@@ -302,7 +793,7 @@ interface Hull {
  */
 export function convexHullOf(points: number[][]): Hull | null {
   if (points.length < 4) return null;
-  let hull: any;
+  let hull: ConvexHull;
   try {
     hull = new ConvexHull().setFromPoints(points.map(p => new THREE.Vector3(p[0], p[1], p[2])));
   } catch {
@@ -324,7 +815,7 @@ export function convexHullOf(points: number[][]): Hull | null {
     return i;
   };
 
-  for (const face of hull.faces as any[]) {
+  for (const face of hull.faces) {
     const ring: number[] = [];
     let edge = face.edge;
     do {
@@ -633,18 +1124,60 @@ export function decomposeAroundAxis(
 // Evaluation
 // ---------------------------------------------------------------------------
 
+/**
+ * True if this geom would emit a solid into the program at all. Planes have no
+ * volume, and a mesh with no faces yet — a lattice body whose cage is still
+ * empty — has nothing to emit either.
+ */
+function emitsSolid(g: SceneGeom): boolean {
+  if (g.type === 'plane') return false;
+  if (g.type === 'mesh') {
+    const v = g.renderVertices ?? g.vertices;
+    return !!v && v.length > 0 && !!g.faces && g.faces.length > 0;
+  }
+  return true;
+}
+
+/**
+ * A geom's contribution to the boolean's fingerprint.
+ *
+ * Everything `primitiveToScad` reads, and nothing else. A mesh is summarized by
+ * a numeric checksum rather than by its vertices: this runs on EVERY store
+ * update for every boolean body, and a lattice mesh is tens of thousands of
+ * numbers — serializing them would build a megabyte of string per keystroke to
+ * throw it away again.
+ */
+function geomCsgKey(g: SceneGeom): unknown[] {
+  const shape = g.type === 'mesh' ? meshChecksum(g) : g.size;
+  return [g.type, shape, g.pos, g.quat, g.euler, g.fromto, g.csg ?? 'union', g.role ?? null];
+}
+
+function meshChecksum(g: SceneGeom): string {
+  const v = g.renderVertices ?? g.vertices ?? [];
+  let h = 0x811c9dc5;
+  for (let i = 0; i < v.length; i++) {
+    // Rounded to the micron the emitter prints at, so a change too small to
+    // reach the .scad source cannot invalidate the mesh that was built from it.
+    h ^= Math.round(v[i] * 1e6) | 0;
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return `${v.length}:${g.faces?.length ?? 0}:${h.toString(16)}`;
+}
+
 // Cheap, stable fingerprint of everything the derived geoms depend on. When
 // this matches node.csgHash the mesh on the node is already correct.
 export function csgHashOf(node: SceneNode): string {
-  const program = csgProgram(node);
-  if (!program) return '';
+  if (!hasBooleanOps(node)) return '';
+  const src = csgSourceGeoms(node);
+  if (!src.filter(isPositive).some(emitsSolid)) return '';
   const key = JSON.stringify([
-    program,
+    src.filter(emitsSolid).map(geomCsgKey),
+    node.csgFn ?? CSG_DEFAULT_FN,
     node.csgCollision ?? 'auto',
     node.csgSectors ?? CSG_DEFAULT_SECTORS,
     node.csgHoleAxis ?? 'auto',
     node.csgMass ?? null,
-    csgSourceGeoms(node).filter(isPositive).map(g => [g.rgba, g.mass, g.friction, g.condim, g.solref, g.solimp]),
+    src.filter(isPositive).map(g => [g.rgba, g.mass, g.friction, g.condim, g.solref, g.solimp]),
   ]);
   let h = 0x811c9dc5;
   for (let i = 0; i < key.length; i++) {
@@ -970,24 +1503,39 @@ export function csgFrameOffset(node: SceneNode): number[] {
   return [c[0] || 0, c[1] || 0, 0];
 }
 
-export function positiveBounds(node: SceneNode): { min: number[]; max: number[] } | null {
+/**
+ * Bounds of a body's positive source geoms, in the frame those geoms are
+ * AUTHORED in — before the compiled solid is re-origined on its centre of mass.
+ *
+ * This is the frame a negative's `pos` is written in, so it is the one a cut is
+ * worked out in. `positiveBounds` below is the same box moved into the compiled
+ * frame, which is what anything drawn alongside the compiled mesh wants.
+ */
+export function sourcePositiveBounds(node: SceneNode): { min: number[]; max: number[] } | null {
   const min = [Infinity, Infinity, Infinity];
   const max = [-Infinity, -Infinity, -Infinity];
   let any = false;
-  const csgOff = csgFrameOffset(node);
   for (const g of csgSourceGeoms(node)) {
     if (!isPositive(g)) continue;
     const b = geomBounds(g);
     if (!b) continue;
     for (let a = 0; a < 3; a++) {
-      const bMin = b.min[a] - (csgOff[a] || 0);
-      const bMax = b.max[a] - (csgOff[a] || 0);
-      if (bMin < min[a]) min[a] = bMin;
-      if (bMax > max[a]) max[a] = bMax;
+      if (b.min[a] < min[a]) min[a] = b.min[a];
+      if (b.max[a] > max[a]) max[a] = b.max[a];
     }
     any = true;
   }
   return any ? { min, max } : null;
+}
+
+export function positiveBounds(node: SceneNode): { min: number[]; max: number[] } | null {
+  const source = sourcePositiveBounds(node);
+  if (!source) return null;
+  const csgOff = csgFrameOffset(node);
+  return {
+    min: source.min.map((v, a) => v - (csgOff[a] || 0)),
+    max: source.max.map((v, a) => v - (csgOff[a] || 0)),
+  };
 }
 
 /**

@@ -19,6 +19,7 @@
 
 import { fetchCloudParameters, fetchCloudPresets, syncCloudPreset, deleteCloudPreset } from './apiClient';
 import { SYNCED_LLM_PARAMETER_KEYS } from './llmSettings';
+import type { UserPreset } from './userPresets';
 
 /** UI preferences that follow the account, under this app's own id. */
 export const SYNCED_APP_PARAMETER_KEYS: readonly string[] = ['physics_dark_mode'];
@@ -111,7 +112,7 @@ export interface CloudPullResult {
   /** Number of settings restored from the account. */
   parameters: number;
   /** Presets found in the account, keyed by name. */
-  presets: Record<string, any>;
+  presets: Record<string, UserPreset>;
 }
 
 /**
@@ -145,7 +146,7 @@ export async function pullCloudState(): Promise<CloudPullResult> {
   for (const preset of presets) {
     if (!preset?.name || !preset?.data) continue;
     if (preset.id) rememberPresetId(preset.name, preset.id);
-    result.presets[preset.name] = preset.data;
+    result.presets[preset.name] = preset.data as UserPreset;
   }
 
   return result;

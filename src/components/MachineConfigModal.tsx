@@ -362,12 +362,12 @@ export const MachineConfigModal: React.FC<{
             <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
               This connects to a real machine that moves and cuts under its own power. Keep clear of
               moving parts, wear eye protection{machineTarget === 'laser' ? ' rated for the beam' : ''},
-              and never leave a running job unattended. Use your own judgment — you are responsible
+              and never leave a running job unattended. Use your own judgment. You are responsible
               for the machine&apos;s safe operation.
             </p>
             <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
               Provided with no warranty and no liability for injury, loss, or damage of any kind. Full
-              terms: PhysBox Permissive Public License (PPPL-1.0) — see License &amp; Disclaimers in
+              terms: PhysBox Permissive Public License (PPPL-1.0), see License &amp; Disclaimers in
               this app&apos;s Reference Guide.
             </p>
             <div className="flex justify-end gap-2 pt-1">

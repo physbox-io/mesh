@@ -12,11 +12,12 @@ import {
   type HeightProfile,
   type SlopeStyle,
 } from '../utils/heightmapMesh';
+import type { SceneNode } from '../types/scene';
 
 interface ImportImageModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onImportNode: (node: any) => void;
+  onImportNode: (node: SceneNode) => void;
   /** File dropped onto the app window, loaded as soon as the dialog opens. */
   initialFile?: File | null;
 }
@@ -293,7 +294,7 @@ export const ImportImageModal: React.FC<ImportImageModalProps> = ({
               <span className="font-medium text-sm text-slate-700 dark:text-slate-200">
                 {isDragging
                   ? 'Drop to import'
-                  : image ? `${image.name} — ${image.width}×${image.height}px` : 'Click to select or drag a PNG / JPG / WebP'}
+                  : image ? `${image.name}, ${image.width}×${image.height}px` : 'Click to select or drag a PNG / JPG / WebP'}
               </span>
               <span className="text-xs text-slate-400 dark:text-slate-500">Grayscale brightness becomes height</span>
             </label>
@@ -337,7 +338,7 @@ export const ImportImageModal: React.FC<ImportImageModalProps> = ({
                     <div className="font-semibold text-slate-700 dark:text-slate-200">{aspectNote}</div>
                   </div>
                   <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
-                    The plaque is a watertight solid: relief on top, flat bottom, closed sides — ready for
+                    The plaque is a watertight solid: relief on top, flat bottom, closed sides, ready for
                     3D print, relief carving or contour slicing.
                   </p>
                 </div>
@@ -362,7 +363,7 @@ export const ImportImageModal: React.FC<ImportImageModalProps> = ({
                       <div className="font-bold text-slate-800 dark:text-slate-100 flex items-center gap-1">
                         <Waves className="w-3.5 h-3.5 text-fuchsia-500" /> White is z = 0
                       </div>
-                      <div className="text-slate-500 text-[11px] mt-0.5">Dark areas rise — engraved look, and what a backlit lithophane wants</div>
+                      <div className="text-slate-500 text-[11px] mt-0.5">Dark areas rise: an engraved look, and what a backlit lithophane wants</div>
                     </div>
                   </label>
                 </div>
@@ -382,8 +383,8 @@ export const ImportImageModal: React.FC<ImportImageModalProps> = ({
                     >
                       <Sparkles className="w-3 h-3" />
                       {toneStats && toneStats.levels > 2
-                        ? `${toneStats.levels}-tone image — try sloped edges`
-                        : 'Two-tone image — try sloped edges'}
+                        ? `${toneStats.levels}-tone image: try sloped edges`
+                        : 'Two-tone image: try sloped edges'}
                     </button>
                   )}
                 </div>
@@ -394,7 +395,7 @@ export const ImportImageModal: React.FC<ImportImageModalProps> = ({
                       <div className="font-bold text-slate-800 dark:text-slate-100 flex items-center gap-1">
                         <ImageIcon className="w-3.5 h-3.5 text-fuchsia-500" /> Grayscale tones
                       </div>
-                      <div className="text-slate-500 text-[11px] mt-0.5">Every tone is its own height — for photos and gradients</div>
+                      <div className="text-slate-500 text-[11px] mt-0.5">Every tone is its own height. For photos and gradients</div>
                     </div>
                   </label>
                   <label className={`p-3 border rounded-xl cursor-pointer transition-colors flex items-start gap-2.5 ${profile === 'sloped' ? 'border-fuchsia-500 bg-fuchsia-50/50 dark:bg-fuchsia-950/30' : 'border-slate-200 dark:border-slate-800'}`}>
@@ -403,7 +404,7 @@ export const ImportImageModal: React.FC<ImportImageModalProps> = ({
                       <div className="font-bold text-slate-800 dark:text-slate-100 flex items-center gap-1">
                         <Triangle className="w-3.5 h-3.5 text-fuchsia-500" /> Sloped edges
                       </div>
-                      <div className="text-slate-500 text-[11px] mt-0.5">Cut at a threshold, then ramp between top and bottom — for line art and logos</div>
+                      <div className="text-slate-500 text-[11px] mt-0.5">Cut at a threshold, then ramp between top and bottom. For line art and logos</div>
                     </div>
                   </label>
                 </div>
@@ -431,7 +432,7 @@ export const ImportImageModal: React.FC<ImportImageModalProps> = ({
                           onClick={() => setSlopeLevels(toneStats.levels)}
                           className="w-full px-2 py-1 rounded-md border border-slate-200 dark:border-slate-700 text-[11px] font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
                         >
-                          Detected {toneStats.levels} tones — use
+                          Detected {toneStats.levels} tones: use
                         </button>
                       </div>
                     )}
@@ -452,8 +453,8 @@ export const ImportImageModal: React.FC<ImportImageModalProps> = ({
                     ))}
                   </div>
                   <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
-                    {slopeStyle === 'centred' && 'Half the ramp each side of the outline — the shape keeps its original size.'}
-                    {slopeStyle === 'inward' && 'Ramp is carved out of the shape — the footprint stays, the flat top shrinks.'}
+                    {slopeStyle === 'centred' && 'Half the ramp each side of the outline, so the shape keeps its original size.'}
+                    {slopeStyle === 'inward' && 'Ramp is carved out of the shape: the footprint stays, the flat top shrinks.'}
                     {slopeStyle === 'outward' && 'Shape keeps its flat top and the ramp spreads into the background.'}
                     {slopeWidthMm > 0 && ` Draft angle ≈ ${(Math.atan2(maxHeightMm / (slopeLevels - 1), slopeWidthMm) * 180 / Math.PI).toFixed(0)}° from horizontal.`}
                     {slopeLevels > 2 && ` ${slopeLevels} flat treads, each riser climbing ${(maxHeightMm / (slopeLevels - 1)).toFixed(1)}mm.`}

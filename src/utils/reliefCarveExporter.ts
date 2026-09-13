@@ -1061,31 +1061,77 @@ function axisSamples(from: number, to: number, step: number): number[] {
 // ---------------------------------------------------------------------------
 
 /**
- * Turns a scene into a relief carving job for a 3-axis CNC router.
+ * What `machineSurface` needs to know about the job that is not a tooling
+ * option: the surface itself, and how to introduce the program.
  */
-export function generateReliefCarveGcode(
-  scene: SceneGraph,
-  userOptions?: Partial<ReliefCarveOptions>
-): ReliefCarveResult {
-  const opts: ReliefCarveOptions = { ...DEFAULT_RELIEF_OPTIONS, ...userOptions };
-  const warnings: string[] = [];
+export interface SurfaceJob {
+  /**
+   * The surface the finished part presents to the spindle, undilated: the
+   * height the material is to be left at under every cell, with the stock's
+   * top face at 0 and nothing above it. Every cell finite.
+   */
+  surface: Heightmap;
+  /** The stock block, in work coordinates. */
+  bounds: { minX: number; minY: number; maxX: number; maxY: number; minZ: number; maxZ: number };
+  /** Deepest the cut goes below the top face, as a positive number of mm. */
+  depthMm: number;
+  /** Pitch the surface was sampled at, mm. Passes are laid out on it. */
+  resolution: number;
+  /** Comment lines describing the job, written at the head of the program. */
+  header: string[];
+  /**
+   * Lines run after the spindle is up and before roughing begins. Anything
+   * here must leave the tool at safe Z over the work origin, because the path
+   * that follows assumes that is where it is.
+   */
+  prelude?: string[];
+  /** What the depth is called in warnings: 'relief' or 'cut'. */
+  noun?: string;
+}
 
-  const stockW = Math.max(1, opts.stockWidthMm);
-  const stockD = Math.max(1, opts.stockDepthMm);
-  // Work origin is the stock's near-left corner, top face — the same corner the
-  // machine panel tells you to jog to before zeroing, and the same convention the
-  // laser and contour exports already use. A centred origin here meant a job
-  // zeroed on the corner ran off the stock down and to the left of zero.
-  const bounds = {
-    minX: 0,
-    minY: 0,
-    maxX: stockW,
-    maxY: stockD,
-    minZ: -opts.stockThicknessMm,
-    maxZ: 0,
-  };
+/** What `machineSurface` hands back — the program and the numbers about it. */
+export interface SurfaceMachiningResult {
+  success: boolean;
+  error?: string;
+  gcode: string;
+  /** Cutting travel in mm — rapids excluded. */
+  totalCutDistanceMm: number;
+  /** Cutting time plus rapids and plunges, in seconds. */
+  estimatedTimeSeconds: number;
+  roughingPassCount: number;
+  finishingRasterLines: number;
+  /** Whether the job stops for a tool change between the two passes. */
+  toolChange: boolean;
+  /** Decimated toolpath polylines for the 3D preview. */
+  segments: ToolpathSegment[];
+}
 
-  const empty = (error: string): ReliefCarveResult => ({
+/**
+ * Cuts a surface into the top of a block: roughing layers, a tool change, and
+ * the finishing passes, as one program.
+ *
+ * This is the half of a relief carve that has nothing to do with reliefs. It
+ * takes a heightmap and the tooling and writes the G-code that machines it,
+ * which is the same job whether the heightmap is a squashed landscape or one
+ * face of a solid part — so the relief exporter and the solid machining
+ * exporter share it rather than each carrying a copy.
+ *
+ * Every warning it raises goes onto the `warnings` it is handed, after
+ * whatever the caller has already put there.
+ */
+export function machineSurface(
+  job: SurfaceJob,
+  opts: ReliefCarveOptions,
+  warnings: string[]
+): SurfaceMachiningResult {
+  const noun = job.noun ?? 'relief';
+  const depthMm = job.depthMm;
+  const bounds = job.bounds;
+  const surface = job.surface;
+  const res = job.resolution;
+  const floorZ = -depthMm;
+
+  const fail = (error: string): SurfaceMachiningResult => ({
     success: false,
     error,
     gcode: '',
@@ -1094,31 +1140,15 @@ export function generateReliefCarveGcode(
     roughingPassCount: 0,
     finishingRasterLines: 0,
     toolChange: false,
-    scaleFactor: 1,
-    reliefDepthMm: 0,
-    verticalExaggeration: 1,
-    carveBounds: { minX: 0, minY: 0, maxX: 0, maxY: 0 },
-    bounds,
     segments: [],
-    warnings,
   });
 
-  const { tris: sceneTris, skipped, warnings: sceneWarnings } = collectSceneTriangles(scene);
-  warnings.push(...sceneWarnings);
-  if (skipped.length > 0) {
-    warnings.push(`Skipped (no solid volume to carve): ${skipped.join(', ')}.`);
-  }
-  if (sceneTris.length === 0) {
-    return empty('No solid geometry found in the scene to carve.');
-  }
 
-  const carveDepth = Math.max(0.1, opts.carveDepthMm);
-
-  // These all turn on how deep the relief actually ends up, which in
+  // These all turn on how deep the ${noun} actually ends up, which in
   // proportional mode is not the depth that was asked for, so they are defined
-  // here and called once `reliefDepth` is known.
+  // here and called once `depthMm` is known.
   //
-  // A cutter has to reach the floor of the relief with its flutes, not its
+  // A cutter has to reach the floor of the ${noun} with its flutes, not its
   // shank, and it goes soft long before it runs out of flute: bending stiffness
   // falls with the cube of stickout and the fourth power of diameter, so a bit
   // held four diameters out of the collet is already a wire. Catalogue flute
@@ -1140,10 +1170,10 @@ export function generateReliefCarveGcode(
     // clearance on the path is held out of the wall instead.
     const shank = shankDia > 0 ? shankDia : autoShankDia(dia);
     const flutes = fluteLen > 0 ? fluteLen : autoFluteLength(dia, tip);
-    if (!opts.toolBodyClearance && shank > dia + 1e-6 && reliefDepth > flutes) {
+    if (!opts.toolBodyClearance && shank > dia + 1e-6 && depthMm > flutes) {
       warnings.push(
         `The ${dia} mm ${which} bit has about ${flutes.toFixed(1)} mm of flute on a ` +
-          `${shank.toFixed(3)} mm shank, and the relief is ${reliefDepth.toFixed(1)} mm deep, so the shank will be ` +
+          `${shank.toFixed(3)} mm shank, and the ${noun} is ${depthMm.toFixed(1)} mm deep, so the shank will be ` +
           `in the cut. Shank clearance is off, so nothing in this path allows for that. A long-reach ` +
           `or necked bit — one whose shank is no wider than its cutting diameter — has no step to foul.`
       );
@@ -1156,11 +1186,11 @@ export function generateReliefCarveGcode(
     // the catalogue says the bit is for.
     if (tip?.shape === 'v_bit') {
       const cone = vBitConeHeight(dia, tip.vBitAngleDeg ?? 60);
-      if (reliefDepth > cone + 1e-6) {
+      if (depthMm > cone + 1e-6) {
         warnings.push(
           `The ${dia} mm ${tip.vBitAngleDeg ?? 60}\u00b0 V-bit only cuts for the ` +
-            `${cone.toFixed(1)} mm it takes the cone to reach full diameter, and the relief is ` +
-            `${reliefDepth.toFixed(1)} mm deep. Below that it is the shank in the cut. Use a wider ` +
+            `${cone.toFixed(1)} mm it takes the cone to reach full diameter, and the ${noun} is ` +
+            `${depthMm.toFixed(1)} mm deep. Below that it is the shank in the cut. Use a wider ` +
             `bit, a narrower point angle, or rough the depth out first and leave the V-bit the ` +
             `detail near the surface.`
         );
@@ -1171,13 +1201,13 @@ export function generateReliefCarveGcode(
     // The stiffness one is unavoidable at any depth: bending goes with the cube
     // of stickout, so a bit hung this far out chatters and wanders whatever its
     // shank looks like.
-    const ratio = reliefDepth / Math.max(0.05, dia);
+    const ratio = depthMm / Math.max(0.05, dia);
     if (ratio > MAX_REACH_DIAMETERS) {
       warnings.push(
-        `A ${reliefDepth.toFixed(1)} mm relief is ${ratio.toFixed(1)} diameters of stickout for the ` +
+        `A ${depthMm.toFixed(1)} mm ${noun} is ${ratio.toFixed(1)} diameters of stickout for the ` +
           `${dia} mm ${which} bit. Stiffness falls with the cube of that, so expect chatter and ` +
-          `wander. A bit of ${(reliefDepth / MAX_REACH_DIAMETERS).toFixed(1)} mm or more, or a ` +
-          `shallower relief, is what makes it rigid.`
+          `wander. A bit of ${(depthMm / MAX_REACH_DIAMETERS).toFixed(1)} mm or more, or a ` +
+          `shallower ${noun}, is what makes it rigid.`
       );
     }
   };
@@ -1195,90 +1225,7 @@ export function generateReliefCarveGcode(
     0.05,
     (opts.finishingToolDiaMm * Math.min(50, Math.max(2, opts.finishingStepoverPercent))) / 100
   );
-  const usableW = Math.max(1, stockW - 2 * finishRad);
-  const usableD = Math.max(1, stockD - 2 * finishRad);
 
-  // --- Fit the model onto the stock -----------------------------------------
-  // Scene units are metres; 1 m maps to 1000 mm before any user scaling.
-  let mnX = Infinity, mnY = Infinity, mnZ = Infinity;
-  let mxX = -Infinity, mxY = -Infinity, mxZ = -Infinity;
-  for (let i = 0; i < sceneTris.length; i += 3) {
-    const x = sceneTris[i] * 1000;
-    const y = sceneTris[i + 1] * 1000;
-    const z = sceneTris[i + 2] * 1000;
-    if (x < mnX) mnX = x;
-    if (x > mxX) mxX = x;
-    if (y < mnY) mnY = y;
-    if (y > mxY) mxY = y;
-    if (z < mnZ) mnZ = z;
-    if (z > mxZ) mxZ = z;
-  }
-
-  const modelW = mxX - mnX;
-  const modelD = mxY - mnY;
-  const modelH = mxZ - mnZ;
-  if (modelW <= 1e-6 || modelD <= 1e-6) {
-    return empty('The scene has no plan-view area, so there is no surface to carve.');
-  }
-  if (modelH <= 1e-6) {
-    return empty('The scene is flat along Z, so a relief of it would be a flat pocket.');
-  }
-
-  const fitScale = Math.min(usableW / modelW, usableD / modelD);
-  const scaleFactor = opts.fitMode === 'fit' ? fitScale : Math.max(0.01, opts.scalePercent / 100);
-
-  if (opts.fitMode === 'manual' && scaleFactor > fitScale * 1.0001) {
-    warnings.push(
-      `At ${opts.scalePercent}% the model is ${(modelW * scaleFactor).toFixed(0)} x ` +
-        `${(modelD * scaleFactor).toFixed(0)} mm and overhangs the stock — anything past the edge is ` +
-        `cropped. It fits at ${(fitScale * 100).toFixed(0)}%.`
-    );
-  }
-
-  // --- How deep the model gets carved ---------------------------------------
-  // 'fill' stretches the model's whole height range onto the carve depth, so the
-  // relief is always exactly as deep as asked for whatever the plan scale does.
-  // That is what makes a relief a relief — carved true, terrain is a flat board
-  // — but it means Z is not on the same scale as X and Y, and shrinking the plan
-  // to fit small stock silently exaggerates the height by the same factor.
-  //
-  // 'proportional' puts Z on the plan scale, so the model keeps the shape it was
-  // authored with however it is fitted, and the exaggeration is a number the
-  // user sets rather than one that falls out of the stock size. Carve depth stops
-  // being a target and becomes a limit.
-  const proportional = opts.verticalScaleMode === 'proportional';
-  const exaggeration = Math.max(0.01, opts.verticalExaggeration);
-  const zScale = proportional ? scaleFactor * exaggeration : carveDepth / modelH;
-  const wantedDepth = modelH * zScale;
-  let reliefDepth = Math.min(carveDepth, wantedDepth);
-
-  if (proportional && wantedDepth > carveDepth + 1e-6) {
-    warnings.push(
-      `At ${(scaleFactor * 100).toFixed(0)}% plan scale and ${exaggeration}x exaggeration the model ` +
-        `wants ${wantedDepth.toFixed(1)} mm of depth, more than the ${carveDepth} mm allowed, so ` +
-        `everything below that is flattened onto the floor. Raise the relief depth or drop the ` +
-        `exaggeration to ${(carveDepth / (modelH * scaleFactor)).toFixed(2)}x.`
-    );
-  }
-
-  // 'fill' targets carveDepthMm directly, unrelated to the X/Y fit-to-stock scale
-  // above, so a depth that no longer fits the stock is auto-reduced the same way
-  // the footprint is — the operator set a stock size, not a depth percentage.
-  // 'proportional' ties depth to plan scale and exaggeration instead; clamping it
-  // here would silently change that ratio, so it stays a warning to fix by hand.
-  const maxDepthForStock = Math.max(0.1, opts.stockThicknessMm - 1);
-  if (!proportional && reliefDepth > maxDepthForStock) {
-    warnings.push(
-      `Relief depth reduced to ${maxDepthForStock.toFixed(1)} mm to leave 1 mm under the ` +
-        `${opts.stockThicknessMm} mm stock (requested ${reliefDepth.toFixed(1)} mm).`
-    );
-    reliefDepth = maxDepthForStock;
-  } else if (proportional && reliefDepth > opts.stockThicknessMm - 1) {
-    warnings.push(
-      `A ${reliefDepth.toFixed(1)} mm relief in ${opts.stockThicknessMm} mm stock leaves under 1 mm ` +
-        `underneath. Cut the relief depth, lower the exaggeration, or use thicker stock.`
-    );
-  }
   reachWarn(
     opts.finishingToolDiaMm,
     opts.finishingShankDiaMm,
@@ -1289,6 +1236,7 @@ export function generateReliefCarveGcode(
   if (opts.roughingEnabled) {
     reachWarn(opts.roughingToolDiaMm, 0, 0, 'roughing');
   }
+
 
   // --- What the cutter's own specification implies --------------------------
   //
@@ -1359,26 +1307,26 @@ export function generateReliefCarveGcode(
 
   /** What the helix direction means for a pocket this deep. */
   const geometryWarn = (geometry: CutterGeometry, dia: number, which: string) => {
-    if (geometry === 'downcut' && reliefDepth > dia * 2) {
+    if (geometry === 'downcut' && depthMm > dia * 2) {
       warnings.push(
-        `A downcut ${which} bit presses its chips into the bottom of the cut, and this relief is ` +
-          `${(reliefDepth / dia).toFixed(1)} diameters deep. The chips have nowhere to go, so the ` +
+        `A downcut ${which} bit presses its chips into the bottom of the cut, and this ${noun} is ` +
+          `${(depthMm / dia).toFixed(1)} diameters deep. The chips have nowhere to go, so the ` +
           `cut packs, heats and burns. Downcut is the right choice for a clean top edge on thin ` +
           `stock, not for clearing depth — use an upcut to rough and keep the downcut for the ` +
           `finishing sweep if the top face is what matters.`
       );
     }
-    if (geometry === 'compression' && reliefDepth < 6) {
+    if (geometry === 'compression' && depthMm < 6) {
       warnings.push(
         `A compression ${which} bit is upcut for its first few millimetres and downcut above. ` +
-          `This relief never leaves that lower section, so it will behave exactly as an upcut — ` +
+          `This ${noun} never leaves that lower section, so it will behave exactly as an upcut — ` +
           `the tool is doing nothing a plain upcut would not, at several times the price.`
       );
     }
-    if (geometry === 'straight' && reliefDepth > dia * 3) {
+    if (geometry === 'straight' && depthMm > dia * 3) {
       warnings.push(
         `A straight-flute ${which} bit has no helix to move chips either way, so a cut ` +
-          `${(reliefDepth / dia).toFixed(1)} diameters deep relies entirely on dust extraction to ` +
+          `${(depthMm / dia).toFixed(1)} diameters deep relies entirely on dust extraction to ` +
           `clear itself. Take shallower passes, or fit a helical cutter.`
       );
     }
@@ -1398,6 +1346,7 @@ export function generateReliefCarveGcode(
         `chips under the tip. Set a lead-in of 10-20 degrees.`
     );
   }
+
 
   // What the finishing stepover actually leaves behind between passes. This is
   // the number people mean by "how smooth will it be", and for a V-bit it is
@@ -1422,66 +1371,6 @@ export function generateReliefCarveGcode(
     );
   }
 
-  // Model centre lands on the stock centre; the model's highest point lands on
-  // the stock's top face, and its lowest on the floor of the relief.
-  const cx = (mnX + mxX) / 2;
-  const cy = (mnY + mxY) / 2;
-  const floorZ = -reliefDepth;
-
-  // Centre of the stock in work coordinates, which with a corner origin is half
-  // the stock rather than zero.
-  const stockCx = stockW / 2;
-  const stockCy = stockD / 2;
-
-  const tris = new Float64Array(sceneTris.length);
-  for (let i = 0; i < sceneTris.length; i += 3) {
-    tris[i] = (sceneTris[i] * 1000 - cx) * scaleFactor + stockCx;
-    tris[i + 1] = (sceneTris[i + 1] * 1000 - cy) * scaleFactor + stockCy;
-    tris[i + 2] = (sceneTris[i + 2] * 1000 - mxZ) * zScale;
-  }
-
-  const carveBounds = {
-    minX: Math.max(bounds.minX, stockCx - (modelW * scaleFactor) / 2),
-    minY: Math.max(bounds.minY, stockCy - (modelD * scaleFactor) / 2),
-    maxX: Math.min(bounds.maxX, stockCx + (modelW * scaleFactor) / 2),
-    maxY: Math.min(bounds.maxY, stockCy + (modelD * scaleFactor) / 2),
-  };
-
-  // --- Sample the surface ----------------------------------------------------
-  let res = Math.min(stepover, 0.6);
-  let cols = Math.ceil(stockW / res) + 1;
-  let rows = Math.ceil(stockD / res) + 1;
-  if (cols * rows > MAX_HEIGHTMAP_CELLS) {
-    const shrink = Math.sqrt((cols * rows) / MAX_HEIGHTMAP_CELLS);
-    res *= shrink;
-    cols = Math.ceil(stockW / res) + 1;
-    rows = Math.ceil(stockD / res) + 1;
-    warnings.push(
-      `Surface sampled every ${res.toFixed(2)} mm — the stock is too large to sample at the ` +
-        `${stepover.toFixed(2)} mm stepover. Detail finer than that is smoothed out.`
-    );
-  }
-
-  // Cells the model does not cover are marked, not floored, so that a model
-  // whose own lowest face sits exactly on the floor is not mistaken for bare
-  // background and left uncut.
-  const surface = buildHeightmap(tris, bounds, cols, rows, -Infinity);
-  const backgroundZ = opts.backgroundMode === 'skip' ? 0 : floorZ;
-  if (opts.invertRelief) {
-    for (let i = 0; i < surface.z.length; i++) {
-      if (surface.z[i] === -Infinity) {
-        surface.z[i] = backgroundZ;
-      } else {
-        const clampedZ = Math.max(floorZ, Math.min(0, surface.z[i]));
-        surface.z[i] = -reliefDepth - clampedZ;
-      }
-    }
-  } else {
-    for (let i = 0; i < surface.z.length; i++) {
-      if (surface.z[i] === -Infinity) surface.z[i] = backgroundZ;
-      else if (surface.z[i] < floorZ) surface.z[i] = floorZ;
-    }
-  }
 
   // --- What the rest of the tool needs to clear ------------------------------
   // Small bits come on a shank fatter than the bit — a 1.6 mm cutter is ground
@@ -1514,7 +1403,7 @@ export function generateReliefCarveGcode(
   );
   const finishMap = dilateForTool(surface, finishRad, finishTip, finishBody);
 
-  // How much of the relief the tool's own body puts out of reach. Left silent
+  // How much of the ${noun} the tool's own body puts out of reach. Left silent
   // this reads as a carve that simply came out shallow, so it is measured
   // against the same pass with the body ignored and reported.
   if (finishBody.length > 0) {
@@ -1532,9 +1421,9 @@ export function generateReliefCarveGcode(
     if (carved > 0 && blocked / carved > 0.02) {
       warnings.push(
         `The ${opts.finishingToolDiaMm} mm bit's shank or holder cannot reach into ` +
-          `${((100 * blocked) / carved).toFixed(0)}% of the relief, up to ${worst.toFixed(1)} mm ` +
+          `${((100 * blocked) / carved).toFixed(0)}% of the ${noun}, up to ${worst.toFixed(1)} mm ` +
           `short of the surface, so the path is lifted clear and that material is left standing. ` +
-          `A longer-reach bit, a shallower relief, or turning off shank clearance under Advanced ` +
+          `A longer-reach bit, a shallower ${noun}, or turning off shank clearance under Advanced ` +
           `are the ways out — the last one will cut it, by dragging the shank through the wall.`
       );
     }
@@ -1707,14 +1596,8 @@ export function generateReliefCarveGcode(
     cutTo(head.x, head.y, head.z);
     gcode.push(`G1 X${f(head.x)} Y${f(head.y)} Z${f(head.z)}${withRate()}`);
   };
-
   gcode.push('; ---------------------------------------------------------------');
-  gcode.push('; 3D CNC Relief Carving');
-  gcode.push(`; Stock       : ${stockW} x ${stockD} x ${opts.stockThicknessMm} mm`);
-  gcode.push(`; Relief depth: ${reliefDepth.toFixed(2)} mm below the top face`);
-  gcode.push(`; Model scale : ${(scaleFactor * 100).toFixed(1)}% (${(modelW * scaleFactor).toFixed(1)} x ${(modelD * scaleFactor).toFixed(1)} mm)`);
-  gcode.push(`; Height      : ${(zScale / Math.max(1e-9, scaleFactor)).toFixed(1)}x the plan scale`);
-  gcode.push('; Origin      : near-left corner of the stock, top face, Z0');
+  for (const line of job.header) gcode.push(line);
   if (opts.roughingEnabled) {
     gcode.push(
       `; T1 rough    : ${describeCutter(opts.roughingToolDiaMm, 'flat', opts.roughingFlutes, opts.roughingGeometry)}`
@@ -1730,7 +1613,6 @@ export function generateReliefCarveGcode(
       opts.finishingVBitAngleDeg
     )}`
   );
-  gcode.push(`; Extents     : X0..${f(stockW)}  Y0..${f(stockD)} (all cuts are +X +Y of zero)`);
   gcode.push('; ---------------------------------------------------------------');
   gcode.push('G21 ; millimetres');
   gcode.push('G90 ; absolute positioning');
@@ -1745,6 +1627,8 @@ export function generateReliefCarveGcode(
   );
   gcode.push(`M3 S${Math.round(opts.spindleRpm)} ; spindle on`);
   gcode.push('G4 P2 ; let the spindle come up to speed');
+  // Whatever the caller wants done first — registration holes, say.
+  for (const line of job.prelude ?? []) gcode.push(line);
 
   // --- Roughing --------------------------------------------------------------
   let roughingPassCount = 0;
@@ -1801,9 +1685,9 @@ export function generateReliefCarveGcode(
       Math.min(0, Math.max(roughFloor, sampleHeightmap(roughMap, x, y) + allowance));
 
     // The last layer sits exactly at the floor, where the only material left to
-    // take is at the single deepest point of the relief — so it clears next to
+    // take is at the single deepest point of the ${noun} — so it clears next to
     // nothing, and all the real work happens on the layers above it. A stepdown
-    // as deep as the relief therefore leaves no useful layer at all: the loop
+    // as deep as the ${noun} therefore leaves no useful layer at all: the loop
     // below produces none, and roughing quietly does nothing.
     //
     // Halving is the guard. It matters more now than it did, because an
@@ -2068,6 +1952,15 @@ export function generateReliefCarveGcode(
     );
     gcode.push(`M3 S${Math.round(opts.spindleRpm)}`);
     gcode.push('G4 P2');
+    // Back up to the travel height, said out loud rather than assumed.
+    //
+    // Everything after this point traverses at whatever Z it thinks the tool is
+    // already at, and emits no Z word when it believes it is high enough. But a
+    // tool change ends with the operator having jogged the tip down onto the
+    // work to touch off the new bit, so what the file assumes and where the
+    // machine is standing are as far apart as they ever get — and the next
+    // traverse would be a rapid across the job at the surface of it.
+    gcode.push(`G0 Z${f(Math.max(opts.safeZ, 20))} ; back to travel height after the change`);
     atZ = Math.max(opts.safeZ, 20);
   }
 
@@ -2107,16 +2000,16 @@ export function generateReliefCarveGcode(
 
   if (finishLimits.length > 1) {
     warnings.push(
-      `The finishing pass clears the full ${reliefDepth.toFixed(1)} mm on its own, so it runs as ` +
+      `The finishing pass clears the full ${depthMm.toFixed(1)} mm on its own, so it runs as ` +
         `${finishLimits.length} layered sweeps of at most ${finishStepdown.toFixed(2)} mm each. ` +
         `A roughing pass with a bigger bit would be much faster.`
     );
-  } else if (!opts.roughingEnabled && reliefDepth > MAX_REACH_DIAMETERS * opts.finishingToolDiaMm) {
+  } else if (!opts.roughingEnabled && depthMm > MAX_REACH_DIAMETERS * opts.finishingToolDiaMm) {
     // Asked for explicitly, so it is emitted — but a single sweep with nothing
     // ahead of it means the first move into the stock goes to the floor.
     warnings.push(
       `One depth-first sweep with no roughing ahead of it takes the ${opts.finishingToolDiaMm} mm bit ` +
-        `to the full ${reliefDepth.toFixed(1)} mm on its first entry. Layer the finishing pass, or rough first, ` +
+        `to the full ${depthMm.toFixed(1)} mm on its first entry. Layer the finishing pass, or rough first, ` +
         `unless you know this cutter can take it.`
     );
   }
@@ -2163,7 +2056,7 @@ export function generateReliefCarveGcode(
   });
 
   if (planPasses.length === 0) {
-    return empty('The chosen finishing strategy produced no passes over this stock.');
+    return fail('The chosen finishing strategy produced no passes over this stock.');
   }
 
   let finishingRasterLines = 0;
@@ -2208,7 +2101,7 @@ export function generateReliefCarveGcode(
          * Where the material actually is at the head of this pass.
          *
          * This used to be told `Z0` — the stock's top face — whatever roughing
-         * had already taken off. With a 10 mm relief and roughing on, the real
+         * had already taken off. With a 10 mm ${noun} and roughing on, the real
          * material stands at about `surface + 0.5 mm`, so the ramp was handed a
          * 10 mm drop instead of half a millimetre and spent 37 mm descending
          * through open air at the plunge rate before it touched anything, then
@@ -2246,7 +2139,7 @@ export function generateReliefCarveGcode(
   }
 
   if (finishingRasterLines === 0) {
-    return empty('The chosen stock and stepover produced no finishing passes.');
+    return fail('The chosen stock and stepover produced no finishing passes.');
   }
 
   gcode.push('; ---------------------------------------------------------------');
@@ -2273,7 +2166,6 @@ export function generateReliefCarveGcode(
           if (points[points.length - 1] !== last) points.push(last);
           return { type: s.type, points };
         });
-
   return {
     success: true,
     gcode: text,
@@ -2290,12 +2182,252 @@ export function generateReliefCarveGcode(
     roughingPassCount,
     finishingRasterLines,
     toolChange,
+    segments: previewSegments,
+  };
+}
+
+/**
+ * Turns a scene into a relief carving job for a 3-axis CNC router.
+ */
+export function generateReliefCarveGcode(
+  scene: SceneGraph,
+  userOptions?: Partial<ReliefCarveOptions>
+): ReliefCarveResult {
+  const opts: ReliefCarveOptions = { ...DEFAULT_RELIEF_OPTIONS, ...userOptions };
+  const warnings: string[] = [];
+
+  const stockW = Math.max(1, opts.stockWidthMm);
+  const stockD = Math.max(1, opts.stockDepthMm);
+  // Work origin is the stock's near-left corner, top face — the same corner the
+  // machine panel tells you to jog to before zeroing, and the same convention the
+  // laser and contour exports already use. A centred origin here meant a job
+  // zeroed on the corner ran off the stock down and to the left of zero.
+  const bounds = {
+    minX: 0,
+    minY: 0,
+    maxX: stockW,
+    maxY: stockD,
+    minZ: -opts.stockThicknessMm,
+    maxZ: 0,
+  };
+
+  const empty = (error: string): ReliefCarveResult => ({
+    success: false,
+    error,
+    gcode: '',
+    totalCutDistanceMm: 0,
+    estimatedTimeSeconds: 0,
+    roughingPassCount: 0,
+    finishingRasterLines: 0,
+    toolChange: false,
+    scaleFactor: 1,
+    reliefDepthMm: 0,
+    verticalExaggeration: 1,
+    carveBounds: { minX: 0, minY: 0, maxX: 0, maxY: 0 },
+    bounds,
+    segments: [],
+    warnings,
+  });
+
+  const { tris: sceneTris, skipped, warnings: sceneWarnings } = collectSceneTriangles(scene);
+  warnings.push(...sceneWarnings);
+  if (skipped.length > 0) {
+    warnings.push(`Skipped (no solid volume to carve): ${skipped.join(', ')}.`);
+  }
+  if (sceneTris.length === 0) {
+    return empty('No solid geometry found in the scene to carve.');
+  }
+
+  const carveDepth = Math.max(0.1, opts.carveDepthMm);
+
+  // The raster is inset by the finishing tool's radius so the cutter stays over
+  // the stock, which is also the area a fitted model has to land inside. The
+  // dilation itself is `machineSurface`'s business; this wrapper only fits the
+  // model into the reachable rectangle.
+  const finishRad = Math.max(0.05, opts.finishingToolDiaMm / 2);
+  const stepover = Math.max(
+    0.05,
+    (opts.finishingToolDiaMm * Math.min(50, Math.max(2, opts.finishingStepoverPercent))) / 100
+  );
+  const usableW = Math.max(1, stockW - 2 * finishRad);
+  const usableD = Math.max(1, stockD - 2 * finishRad);
+
+
+  // --- Fit the model onto the stock -----------------------------------------
+  // Scene units are metres; 1 m maps to 1000 mm before any user scaling.
+  let mnX = Infinity, mnY = Infinity, mnZ = Infinity;
+  let mxX = -Infinity, mxY = -Infinity, mxZ = -Infinity;
+  for (let i = 0; i < sceneTris.length; i += 3) {
+    const x = sceneTris[i] * 1000;
+    const y = sceneTris[i + 1] * 1000;
+    const z = sceneTris[i + 2] * 1000;
+    if (x < mnX) mnX = x;
+    if (x > mxX) mxX = x;
+    if (y < mnY) mnY = y;
+    if (y > mxY) mxY = y;
+    if (z < mnZ) mnZ = z;
+    if (z > mxZ) mxZ = z;
+  }
+
+  const modelW = mxX - mnX;
+  const modelD = mxY - mnY;
+  const modelH = mxZ - mnZ;
+  if (modelW <= 1e-6 || modelD <= 1e-6) {
+    return empty('The scene has no plan-view area, so there is no surface to carve.');
+  }
+  if (modelH <= 1e-6) {
+    return empty('The scene is flat along Z, so a relief of it would be a flat pocket.');
+  }
+
+  const fitScale = Math.min(usableW / modelW, usableD / modelD);
+  const scaleFactor = opts.fitMode === 'fit' ? fitScale : Math.max(0.01, opts.scalePercent / 100);
+
+  if (opts.fitMode === 'manual' && scaleFactor > fitScale * 1.0001) {
+    warnings.push(
+      `At ${opts.scalePercent}% the model is ${(modelW * scaleFactor).toFixed(0)} x ` +
+        `${(modelD * scaleFactor).toFixed(0)} mm and overhangs the stock — anything past the edge is ` +
+        `cropped. It fits at ${(fitScale * 100).toFixed(0)}%.`
+    );
+  }
+
+  // --- How deep the model gets carved ---------------------------------------
+  // 'fill' stretches the model's whole height range onto the carve depth, so the
+  // relief is always exactly as deep as asked for whatever the plan scale does.
+  // That is what makes a relief a relief — carved true, terrain is a flat board
+  // — but it means Z is not on the same scale as X and Y, and shrinking the plan
+  // to fit small stock silently exaggerates the height by the same factor.
+  //
+  // 'proportional' puts Z on the plan scale, so the model keeps the shape it was
+  // authored with however it is fitted, and the exaggeration is a number the
+  // user sets rather than one that falls out of the stock size. Carve depth stops
+  // being a target and becomes a limit.
+  const proportional = opts.verticalScaleMode === 'proportional';
+  const exaggeration = Math.max(0.01, opts.verticalExaggeration);
+  const zScale = proportional ? scaleFactor * exaggeration : carveDepth / modelH;
+  const wantedDepth = modelH * zScale;
+  let reliefDepth = Math.min(carveDepth, wantedDepth);
+
+  if (proportional && wantedDepth > carveDepth + 1e-6) {
+    warnings.push(
+      `At ${(scaleFactor * 100).toFixed(0)}% plan scale and ${exaggeration}x exaggeration the model ` +
+        `wants ${wantedDepth.toFixed(1)} mm of depth, more than the ${carveDepth} mm allowed, so ` +
+        `everything below that is flattened onto the floor. Raise the relief depth or drop the ` +
+        `exaggeration to ${(carveDepth / (modelH * scaleFactor)).toFixed(2)}x.`
+    );
+  }
+
+  // 'fill' targets carveDepthMm directly, unrelated to the X/Y fit-to-stock scale
+  // above, so a depth that no longer fits the stock is auto-reduced the same way
+  // the footprint is — the operator set a stock size, not a depth percentage.
+  // 'proportional' ties depth to plan scale and exaggeration instead; clamping it
+  // here would silently change that ratio, so it stays a warning to fix by hand.
+  const maxDepthForStock = Math.max(0.1, opts.stockThicknessMm - 1);
+  if (!proportional && reliefDepth > maxDepthForStock) {
+    warnings.push(
+      `Relief depth reduced to ${maxDepthForStock.toFixed(1)} mm to leave 1 mm under the ` +
+        `${opts.stockThicknessMm} mm stock (requested ${reliefDepth.toFixed(1)} mm).`
+    );
+    reliefDepth = maxDepthForStock;
+  } else if (proportional && reliefDepth > opts.stockThicknessMm - 1) {
+    warnings.push(
+      `A ${reliefDepth.toFixed(1)} mm relief in ${opts.stockThicknessMm} mm stock leaves under 1 mm ` +
+        `underneath. Cut the relief depth, lower the exaggeration, or use thicker stock.`
+    );
+  }
+
+
+  // Model centre lands on the stock centre; the model's highest point lands on
+  // the stock's top face, and its lowest on the floor of the relief.
+  const cx = (mnX + mxX) / 2;
+  const cy = (mnY + mxY) / 2;
+  const floorZ = -reliefDepth;
+
+  // Centre of the stock in work coordinates, which with a corner origin is half
+  // the stock rather than zero.
+  const stockCx = stockW / 2;
+  const stockCy = stockD / 2;
+
+  const tris = new Float64Array(sceneTris.length);
+  for (let i = 0; i < sceneTris.length; i += 3) {
+    tris[i] = (sceneTris[i] * 1000 - cx) * scaleFactor + stockCx;
+    tris[i + 1] = (sceneTris[i + 1] * 1000 - cy) * scaleFactor + stockCy;
+    tris[i + 2] = (sceneTris[i + 2] * 1000 - mxZ) * zScale;
+  }
+
+  const carveBounds = {
+    minX: Math.max(bounds.minX, stockCx - (modelW * scaleFactor) / 2),
+    minY: Math.max(bounds.minY, stockCy - (modelD * scaleFactor) / 2),
+    maxX: Math.min(bounds.maxX, stockCx + (modelW * scaleFactor) / 2),
+    maxY: Math.min(bounds.maxY, stockCy + (modelD * scaleFactor) / 2),
+  };
+
+  // --- Sample the surface ----------------------------------------------------
+  let res = Math.min(stepover, 0.6);
+  let cols = Math.ceil(stockW / res) + 1;
+  let rows = Math.ceil(stockD / res) + 1;
+  if (cols * rows > MAX_HEIGHTMAP_CELLS) {
+    const shrink = Math.sqrt((cols * rows) / MAX_HEIGHTMAP_CELLS);
+    res *= shrink;
+    cols = Math.ceil(stockW / res) + 1;
+    rows = Math.ceil(stockD / res) + 1;
+    warnings.push(
+      `Surface sampled every ${res.toFixed(2)} mm — the stock is too large to sample at the ` +
+        `${stepover.toFixed(2)} mm stepover. Detail finer than that is smoothed out.`
+    );
+  }
+
+  // Cells the model does not cover are marked, not floored, so that a model
+  // whose own lowest face sits exactly on the floor is not mistaken for bare
+  // background and left uncut.
+  const surface = buildHeightmap(tris, bounds, cols, rows, -Infinity);
+  const backgroundZ = opts.backgroundMode === 'skip' ? 0 : floorZ;
+  if (opts.invertRelief) {
+    for (let i = 0; i < surface.z.length; i++) {
+      if (surface.z[i] === -Infinity) {
+        surface.z[i] = backgroundZ;
+      } else {
+        const clampedZ = Math.max(floorZ, Math.min(0, surface.z[i]));
+        surface.z[i] = -reliefDepth - clampedZ;
+      }
+    }
+  } else {
+    for (let i = 0; i < surface.z.length; i++) {
+      if (surface.z[i] === -Infinity) surface.z[i] = backgroundZ;
+      else if (surface.z[i] < floorZ) surface.z[i] = floorZ;
+    }
+  }
+
+  const header = [
+    '; 3D CNC Relief Carving',
+    `; Stock       : ${stockW} x ${stockD} x ${opts.stockThicknessMm} mm`,
+    `; Relief depth: ${reliefDepth.toFixed(2)} mm below the top face`,
+    `; Model scale : ${(scaleFactor * 100).toFixed(1)}% (${(modelW * scaleFactor).toFixed(1)} x ${(modelD * scaleFactor).toFixed(1)} mm)`,
+    `; Height      : ${(zScale / Math.max(1e-9, scaleFactor)).toFixed(1)}x the plan scale`,
+    '; Origin      : near-left corner of the stock, top face, Z0',
+    `; Extents     : X0..${f(stockW)}  Y0..${f(stockD)} (all cuts are +X +Y of zero)`,
+  ];
+
+  const cut = machineSurface(
+    { surface, bounds, depthMm: reliefDepth, resolution: res, header },
+    opts,
+    warnings
+  );
+  if (!cut.success) return empty(cut.error ?? 'The carve produced no toolpath.');
+
+  return {
+    success: true,
+    gcode: cut.gcode,
+    totalCutDistanceMm: cut.totalCutDistanceMm,
+    estimatedTimeSeconds: cut.estimatedTimeSeconds,
+    roughingPassCount: cut.roughingPassCount,
+    finishingRasterLines: cut.finishingRasterLines,
+    toolChange: cut.toolChange,
     scaleFactor,
     reliefDepthMm: reliefDepth,
     verticalExaggeration: zScale / Math.max(1e-9, scaleFactor),
     carveBounds,
     bounds,
-    segments: previewSegments,
+    segments: cut.segments,
     warnings,
   };
 }

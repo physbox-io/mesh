@@ -1,14 +1,21 @@
 import { create } from 'zustand';
 import * as THREE from 'three';
-import type { SceneGraph, SceneNode, CsgOp } from '../types/scene';
+import type { SceneGraph, SceneNode, SceneGeom, SceneJoint, GeomType, CsgOp } from '../types/scene';
+import { type CombineOp, cageInFrame, geomsForCombine, nodeWorldMatrix } from '../utils/combineBodies';
 import { DEFAULT_BRUSH, toSceneGeom, type BrushSettings } from '../utils/sculptMesh';
 import { buildSculptBase, DEFAULT_SCULPT_BASE, type SculptBaseId } from '../utils/sculptBases';
 import {
-  boxLattice, deserializeCage, serializeCage, toSceneGeom as latticeToSceneGeom,
+  boxLattice, deserializeCage, faceCount, serializeCage,
+  separablePieces, DRAWING_TOOLS, toSceneGeom as latticeToSceneGeom,
   DEFAULT_UNIT as LATTICE_UNIT, type Axis as LatticeAxis, type LatticeCage,
   type SnapMultiple, type LatticeTool,
 } from '../utils/latticeMesh';
-import { type CsgResult, CSG_DEFAULT_SECTORS } from '../utils/csg';
+import { latticeBoolean } from '../utils/latticeBoolean';
+import {
+  type CsgResult, type CutSpot, CSG_DEFAULT_SECTORS, scadForDisplay,
+  cutGeometry, sourcePositiveBounds, reconcileCuts, pickCutSpot,
+} from '../utils/csg';
+import { insetNegatives } from '../utils/scaleNode';
 import type { PaintLayer } from '../utils/vertexPaint';
 import { compileToMJCF } from '../utils/mjcf';
 import { PRESETS, pendulumPreset, generateGearGeoms } from '../presets/presetScenes';
@@ -29,6 +36,37 @@ import { DEFAULT_FILAMENT, type FilamentId } from '../utils/filaments';
  */
 export type MachineTarget = 'fdm' | 'laser' | 'cnc';
 
+/**
+ * The scratch fields the rotate helpers keep on a geom and a body between
+ * absolute rotations: the unrotated vertices, so repeated rotations compound
+ * from the same base rather than accumulating drift. Not part of the saved
+ * document, but cloneGeom carries them across an edit.
+ */
+type WorkingGeom = SceneGeom & { baseVertices?: number[]; baseRenderVertices?: number[] };
+type WorkingNode = SceneNode & { basePos?: number[] };
+
+/** Name<->id lookup tables the worker builds; `${type}Rev` maps ids back to names. */
+type IdMaps = Record<string, Record<string, number> | Record<number, string> | undefined>;
+
+/** A preset as listed in PRESETS: a scene, and optionally a camera framing and an environment. */
+interface Preset {
+  name: string;
+  emoji?: string;
+  scene?: SceneGraph;
+  camera?: { position: [number, number, number]; target: [number, number, number] };
+  environment?: Partial<{ gravityZ: number; windX: number; windY: number; density: number; floorFriction: number; floorBounce: number }>;
+}
+
+/** The globals the viewport and the recompile debounce hang off `window`. */
+type PhysicsWindow = Window & {
+  _physics_camera?: THREE.Camera;
+  _recompileTimeoutId?: ReturnType<typeof setTimeout>;
+  _recompileWake?: (() => void) | null;
+  DISABLE_USEFRAME?: boolean;
+  NO_SELECT?: boolean;
+  compiledXML?: string;
+};
+
 const initialScene: SceneGraph = pendulumPreset;
 
 // The live MuJoCo module/model/data now live inside a dedicated Worker (see
@@ -48,8 +86,10 @@ const MUJOCO_SHIM = {
     mjOBJ_GEOM: { value: 'geom' },
     mjOBJ_ACTUATOR: { value: 'actuator' },
   },
-  mj_name2id: (model: any, typeVal: string, name: string) => model?._idMaps?.[typeVal]?.[name] ?? -1,
-  mj_id2name: (model: any, typeVal: string, id: number) => model?._idMaps?.[`${typeVal}Rev`]?.[id] ?? null,
+  mj_name2id: (model: ModelMirror | null | undefined, typeVal: string, name: string): number =>
+    (model?._idMaps as IdMaps | undefined)?.[typeVal]?.[name] ?? -1,
+  mj_id2name: (model: ModelMirror | null | undefined, typeVal: string, id: number): string | null =>
+    (model?._idMaps as IdMaps | undefined)?.[`${typeVal}Rev`]?.[id] ?? null,
   // Nothing on the main thread should call these directly anymore — the worker
   // owns stepping/forward-kinematics. Kept as safe no-ops in case of a stray call.
   mj_step: () => {},
@@ -84,6 +124,8 @@ const buildDataMirror = (built: BuiltResult | FrameSnapshot) => ({
   xpos: built.xpos!, xmat: built.xmat!, cvel: built.cvel!,
   geom_xpos: built.geom_xpos!, geom_xmat: built.geom_xmat!,
 });
+type ModelMirror = ReturnType<typeof buildModelMirror>;
+type DataMirror = ReturnType<typeof buildDataMirror>;
 
 // Proactive recycling: WASM linear memory only ever grows within a worker's
 // lifetime, and heavy scenes (many dynamic SCAD/mesh bodies) can eat through
@@ -95,6 +137,21 @@ const buildDataMirror = (built: BuiltResult | FrameSnapshot) => ({
 const RECYCLE_EVERY_N_BUILDS = 4;
 /** Orders recompiles so a superseded one can bow out instead of building stale state. */
 let recompileToken = 0;
+/**
+ * How many recompiles have been asked for and not yet landed.
+ *
+ * The undo history needs this. A snapshot is taken before a change and pushed a
+ * tick later, ONLY if the scene actually moved — which is right for the MCP
+ * bridge, where most commands change nothing. But `addComponent` and everything
+ * like it never write the scene themselves: they hand it to `recompile`, which
+ * lands it fifty milliseconds and a build later, long after that tick. The
+ * snapshot found the scene unchanged, threw itself away, and adding a body was
+ * not undoable at all.
+ *
+ * So while a recompile is in flight the snapshot is held rather than discarded,
+ * and the landing itself pushes it.
+ */
+let recompilesInFlight = 0;
 
 let buildsSinceRecycle = 0;
 
@@ -133,11 +190,11 @@ export const getPhysicsWorkerClient = (): PhysicsWorkerClient => {
 };
 
 // Returns true if every geom on a node is a mesh (so pos/euler are meaningless for rendering)
-const isAllMeshNode = (node: any) =>
-  node.geoms?.length > 0 && node.geoms.every((g: any) => g.type === 'mesh');
+const isAllMeshNode = (node: SceneNode) =>
+  node.geoms?.length > 0 && node.geoms.every((g: SceneGeom) => g.type === 'mesh');
 
-const isDynamicMesh = (g: any) => g.type === 'mesh' && g.dynamic && g.renderVertices;
-const isStaticMesh  = (g: any) => g.type === 'mesh' && !g.dynamic && g.vertices;
+const isDynamicMesh = (g: SceneGeom) => g.type === 'mesh' && g.dynamic && g.renderVertices;
+const isStaticMesh  = (g: SceneGeom) => g.type === 'mesh' && !g.dynamic && g.vertices;
 
 // A mesh geom authored (by hand, by a preset file, or over MCP) without an
 // explicit dynamic:true sits in the static render path forever, even once a
@@ -159,7 +216,7 @@ const toRenderVertices = (vertices: number[]): number[] => {
   return out;
 };
 
-const promoteMeshGeomsToDynamic = (node: any) => {
+const promoteMeshGeomsToDynamic = (node: SceneNode) => {
   for (const g of node.geoms || []) {
     if (g.type !== 'mesh' || g.dynamic) continue;
     g.dynamic = true;
@@ -176,7 +233,7 @@ const promoteMeshGeomsToDynamic = (node: any) => {
 // added" event for any of those to hook. Loading a scene graph sweeps for
 // that case once, up front, covering every entry point at once instead of
 // requiring yet another call site to remember this.
-const promoteJointedMeshGeomsDeep = (nodes: any[], ancestorJointed = false) => {
+const promoteJointedMeshGeomsDeep = (nodes: SceneNode[], ancestorJointed = false) => {
   if (!nodes) return;
   for (const node of nodes) {
     const jointed = ancestorJointed || (node.joints && node.joints.length > 0);
@@ -195,7 +252,7 @@ const mapVerts = (v: number[], fn: (x: number, y: number, z: number) => [number,
 };
 
 // Translate static mesh geom vertices (Y-up world space)
-const translateMeshGeoms = (node: any, dx: number, dy: number, dz: number) => {
+const translateMeshGeoms = (node: SceneNode, dx: number, dy: number, dz: number) => {
   for (const g of node.geoms) {
     if (isStaticMesh(g)) {
       g.vertices = mapVerts([...g.vertices], (x,y,z) => [x+dx, y+dy, z+dz]);
@@ -206,7 +263,7 @@ const translateMeshGeoms = (node: any, dx: number, dy: number, dz: number) => {
 
 // Rotate static mesh geom vertices around axis (degrees) about their centroid (or origin)
 // Dynamic mesh renderVertices are centroid-local
-const rotateMeshGeomsAbsolute = (node: any, euler: [number, number, number], rotateAroundCOM = true) => {
+const rotateMeshGeomsAbsolute = (node: WorkingNode, euler: [number, number, number], rotateAroundCOM = true) => {
   const [rx, ry, rz] = euler;
   const radX = (rx * Math.PI) / 180;
   const radY = (ry * Math.PI) / 180;
@@ -287,31 +344,63 @@ const rotateMeshGeomsAbsolute = (node: any, euler: [number, number, number], rot
   }
 };
 
-// Scale mesh geoms about their centroid (uniformly or per-axis)
-export const scaleMeshGeoms = (node: any, sx: number, sy: number = sx, sz: number = sx) => {
+// Scale mesh geoms about their centroid (uniformly or per-axis).
+//
+// The factors are world (Z-up) axes, the ones the inspector's position and
+// rotation rows use. renderVertices are already in that space; the collision
+// vertices are Y-up, where (x, y, z) maps to Z-up (x, -z, y), so their factors
+// have to be permuted to match. Uniform scaling never noticed the difference,
+// and per-axis scaling would silently stretch collision and render geometry
+// along different axes without it.
+export const scaleMeshGeoms = (node: SceneNode, sx: number, sy: number = sx, sz: number = sx) => {
+  const scaleAboutCentroid = (vertices: number[], fx: number, fy: number, fz: number) => {
+    const v = [...vertices];
+    let cx = 0, cy = 0, cz = 0;
+    const n = v.length / 3;
+    for (let i = 0; i < v.length; i += 3) { cx += v[i]; cy += v[i+1]; cz += v[i+2]; }
+    cx /= n; cy /= n; cz /= n;
+    return mapVerts(v, (x,y,z) => [cx+(x-cx)*fx, cy+(y-cy)*fy, cz+(z-cz)*fz]);
+  };
   for (const g of node.geoms) {
     if (isStaticMesh(g)) {
-      const v = [...g.vertices] as number[];
-      let cx = 0, cy = 0, cz = 0;
-      const n = v.length / 3;
-      for (let i = 0; i < v.length; i += 3) { cx += v[i]; cy += v[i+1]; cz += v[i+2]; }
-      cx /= n; cy /= n; cz /= n;
-      g.vertices = mapVerts(v, (x,y,z) => [cx+(x-cx)*sx, cy+(y-cy)*sy, cz+(z-cz)*sz]);
+      g.vertices = scaleAboutCentroid(g.vertices as number[], sx, sz, sy);
     }
     if (isDynamicMesh(g)) {
       // renderVertices are raw Z-up — scale about origin
       g.renderVertices = mapVerts([...g.renderVertices], (x,y,z) => [x*sx, y*sy, z*sz]);
       // Also scale the MuJoCo collision vertices (Y-up world space) about their centroid
-      if (g.vertices) {
-        const v = [...g.vertices] as number[];
-        let cx = 0, cy = 0, cz = 0;
-        const n = v.length / 3;
-        for (let i = 0; i < v.length; i += 3) { cx += v[i]; cy += v[i+1]; cz += v[i+2]; }
-        cx /= n; cy /= n; cz /= n;
-        g.vertices = mapVerts(v, (x,y,z) => [cx+(x-cx)*sx, cy+(y-cy)*sy, cz+(z-cz)*sz]);
-      }
+      if (g.vertices) g.vertices = scaleAboutCentroid(g.vertices as number[], sx, sz, sy);
     }
   }
+};
+
+/**
+ * Deep equality for scene-graph data, by reference wherever it can be.
+ *
+ * The comparison this replaces was `JSON.stringify(a) !== JSON.stringify(b)`,
+ * which allocates two copies of every mesh in the scene — megabytes of vertex
+ * data — to answer a question that is usually settled by the first `===`:
+ * cloneSceneGraph shares those arrays by reference, so an untouched mesh is
+ * literally the same array. Only data that genuinely arrived from somewhere
+ * else (an MCP payload, a loaded file) is walked element by element.
+ */
+const sameValue = (a: unknown, b: unknown): boolean => {
+  if (a === b) return true;
+  if (a === null || b === null || typeof a !== 'object' || typeof b !== 'object') return false;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) if (!sameValue(a[i], b[i])) return false;
+    return true;
+  }
+  const left = a as Record<string, unknown>;
+  const right = b as Record<string, unknown>;
+  const keys = Object.keys(left);
+  if (keys.length !== Object.keys(right).length) return false;
+  for (const key of keys) {
+    if (!Object.prototype.hasOwnProperty.call(right, key)) return false;
+    if (!sameValue(left[key], right[key])) return false;
+  }
+  return true;
 };
 
 // Structural clone of a scene graph that SHARES the large mesh arrays
@@ -322,13 +411,13 @@ export const scaleMeshGeoms = (node: any, sx: number, sy: number = sx, sz: numbe
 // into O(node count). This matters: the old JSON.parse(JSON.stringify(...))
 // ran on every slider tick / handle drag and every undo snapshot, copying
 // potentially megabytes of SCAD mesh data each time.
-const cloneGeom = (g: any): any => {
+const cloneGeom = (g: SceneGeom): SceneGeom => {
   // `paint` joins the mesh arrays in being shared rather than copied, for the
   // same reason: it is thousands of numbers, it is replaced wholesale rather
   // than mutated in place, and this clone runs on every slider tick and every
   // undo snapshot.
   const { vertices, faces, renderVertices, baseVertices, baseRenderVertices, paint, ...rest } = g;
-  const out: any = JSON.parse(JSON.stringify(rest));
+  const out: WorkingGeom = JSON.parse(JSON.stringify(rest));
   if (paint !== undefined) out.paint = paint;
   if (vertices !== undefined) out.vertices = vertices;
   if (faces !== undefined) out.faces = faces;
@@ -338,9 +427,9 @@ const cloneGeom = (g: any): any => {
   return out;
 };
 
-const cloneNode = (n: any): any => {
+const cloneNode = (n: SceneNode): SceneNode => {
   const { geoms, children, ...rest } = n;
-  const out: any = JSON.parse(JSON.stringify(rest));
+  const out: SceneNode = JSON.parse(JSON.stringify(rest));
   out.geoms = (geoms || []).map(cloneGeom);
   out.children = (children || []).map(cloneNode);
   return out;
@@ -351,7 +440,7 @@ export const cloneSceneGraph = (sg: SceneGraph): SceneGraph => ({
   nodes: (sg.nodes || []).map(cloneNode),
 });
 
-const getNodeWorldPos = (nodes: any[], targetId: string, currentOffset: [number, number, number] = [0, 0, 0]): [number, number, number] | null => {
+const getNodeWorldPos = (nodes: SceneNode[], targetId: string, currentOffset: [number, number, number] = [0, 0, 0]): [number, number, number] | null => {
   for (const node of nodes) {
     const nodeWorld: [number, number, number] = [
       currentOffset[0] + node.pos[0],
@@ -367,7 +456,7 @@ const getNodeWorldPos = (nodes: any[], targetId: string, currentOffset: [number,
   return null;
 };
 
-const findNode = (nodes: any[], id: string): any | null => {
+const findNode = (nodes: SceneNode[] | undefined, id: string): SceneNode | null => {
   for (const node of nodes || []) {
     if (node.id === id || node.name === id) return node;
     const child = findNode(node.children, id);
@@ -376,7 +465,83 @@ const findNode = (nodes: any[], id: string): any | null => {
   return null;
 };
 
-const addChildNode = (nodes: any[], parentId: string, newNode: any): boolean => {
+// ---------------------------------------------------------------------------
+// Cuts
+// ---------------------------------------------------------------------------
+
+/**
+ * The spot on a body the camera is looking at, or null when there is no
+ * viewport to ask or the look misses.
+ *
+ * A new hole belongs where you are looking. This is the fallback when nothing
+ * has been picked: a ray from the eye to the middle of the part, landing on
+ * whatever surface it meets first, facing whichever way that surface faces.
+ *
+ * The camera is read off the window global the viewport publishes, the same one
+ * the screenshot bridge uses: this runs in the store, which is outside the
+ * canvas and has no other way to reach it. The body's own rotation is undone
+ * first, so the ray is cast in the frame the geoms are written in.
+ */
+function cutSpotFromCamera(node: SceneNode): CutSpot | null {
+  const camera = typeof window !== 'undefined' ? (window as PhysicsWindow)._physics_camera : null;
+  const bounds = sourcePositiveBounds(node);
+  if (!camera?.position || !bounds) return null;
+  try {
+    // The viewport is Y-up and MuJoCo is Z-up; the geoms this is cast against
+    // are in MuJoCo's axes, so the camera is brought over rather than the other
+    // way round.
+    const eye = new THREE.Vector3(camera.position.x, -camera.position.z, camera.position.y);
+    eye.sub(new THREE.Vector3(node.pos?.[0] ?? 0, node.pos?.[1] ?? 0, node.pos?.[2] ?? 0));
+    if (node.quat) {
+      eye.applyQuaternion(
+        new THREE.Quaternion(node.quat[1], node.quat[2], node.quat[3], node.quat[0]).invert(),
+      );
+    } else if (node.euler) {
+      const rad = (d: number) => (d * Math.PI) / 180;
+      const euler = new THREE.Euler(rad(node.euler[0]), rad(node.euler[1]), rad(node.euler[2]), 'XYZ');
+      eye.applyQuaternion(new THREE.Quaternion().setFromEuler(euler).invert());
+    }
+    const middle = [0, 1, 2].map(a => (bounds.min[a] + bounds.max[a]) / 2);
+    const dir = new THREE.Vector3(middle[0], middle[1], middle[2]).sub(eye);
+    if (dir.lengthSq() < 1e-18) return null;
+    return pickCutSpot(node, eye.toArray(), dir.normalize().toArray());
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Edits one cut and re-derives the primitive underneath it.
+ *
+ * Every cut edit is the same three steps — change the intent, work the geometry
+ * out again from the part's own surface, publish — and doing them in one place
+ * is what keeps `pos`, `quat` and `size` from ever disagreeing with the spot
+ * and depth they are supposed to express.
+ */
+function reshapeCut(
+  get: () => PhysicsState,
+  set: (partial: Partial<PhysicsState>) => void,
+  nodeId: string,
+  geomIndex: number,
+  kind: string,
+  edit: (geom: SceneGeom) => void,
+) {
+  // Coalesced by kind rather than snapshotted outright: these fields report
+  // every keystroke, and one undo step per digit of "6.35" makes Ctrl+Z useless
+  // exactly where a typed number is most likely to be a typo.
+  get().recordInteraction(kind);
+  const newScene = cloneSceneGraph(get().sceneGraph);
+  const node = findNode(newScene.nodes, nodeId);
+  const geom = node?.geoms?.[geomIndex];
+  if (!node || !geom || geom.csg !== 'difference' || geom.csgDerived) return;
+  edit(geom);
+  const next = cutGeometry(node, geom);
+  if (next) Object.assign(geom, next);
+  set({ sceneGraph: newScene });
+  get().recompile(newScene, nodeId, false);
+}
+
+const addChildNode = (nodes: SceneNode[], parentId: string, newNode: SceneNode): boolean => {
   for (const node of nodes) {
     if (node.id === parentId) {
       if (!node.children) node.children = [];
@@ -399,18 +564,42 @@ export interface UndoRedoState {
   floorFriction: number;
   floorBounce: number;
   selectedNodeId: string | null;
+  /**
+   * Whether the lattice tools were open, and on what.
+   *
+   * Part of the state an undo restores, because opening them is a thing a
+   * person did and undo is how you take a thing you did back. Without it,
+   * stepping back past the point where a body was made left the editor open on
+   * a body that no longer existed — and the editor holds its own copy of the
+   * cage, so it would happily commit the ghost back into the scene.
+   */
+  latticeNodeId: string | null;
+}
+
+/**
+ * What the lattice tools should be looking at after stepping to `state`.
+ *
+ * Clearing the rest of the tools' state alongside it, because they are all
+ * about a body that may be gone: stats describing a shape nobody can see, a
+ * selection of corners that no longer exist, a cut spot on a missing surface.
+ */
+function latticeAfterUndo(state: UndoRedoState) {
+  const id = state.latticeNodeId;
+  const stillThere = id !== null && findNode(state.sceneGraph.nodes, id) !== null;
+  if (stillThere) return { latticeNodeId: id };
+  return { latticeNodeId: null, latticeStats: null, latticeSelection: null, cutSpot: null };
 }
 
 export interface PhysicsState {
-  mujoco: any;
-  model: any;
-  data: any;
+  mujoco: typeof MUJOCO_SHIM | null;
+  model: ModelMirror | null;
+  data: DataMirror | null;
   
   // History State
   undoStack: UndoRedoState[];
   redoStack: UndoRedoState[];
   tempUndoState: UndoRedoState | null;
-  historyDebounceTimer: any | null;
+  historyDebounceTimer: ReturnType<typeof setTimeout> | null;
   lastInteractionType: string | null;
 
   // History Actions
@@ -465,6 +654,16 @@ export interface PhysicsState {
   // to Three.js space itself. Set by the MCP SET_CAMERA bridge command so an
   // agent can frame a specific body without guessing preset rotations.
   cameraOverride: { position: [number, number, number]; target: [number, number, number] } | null;
+  /**
+   * Bumped whenever the camera should go back to the view it starts in.
+   *
+   * A token rather than a flag or a call: the camera lives inside the canvas
+   * and the thing that wants it moved (loading a preset) is nowhere near it, and
+   * "put it back where it starts" is not expressible as a state to be in — the
+   * view a person has orbited to is also `perspective`, so nothing changes and
+   * no effect re-runs. A number that only goes up always re-runs.
+   */
+  cameraResetToken: number;
   mcpActiveCount: number;
   scadCompileCount: number;
   
@@ -526,10 +725,37 @@ export interface PhysicsState {
   setEnvironment: (env: Partial<{gravityZ: number, windX: number, windY: number, density: number, floorFriction: number, floorBounce: number}>) => void;
   
   setSelectedNodeId: (id: string | null) => void;
+  /**
+   * Bodies selected ALONGSIDE selectedNodeId, for operations that take more
+   * than one — combining, so far.
+   *
+   * Kept beside the single selection rather than replacing it, because
+   * everything else in the app asks "which body's properties am I showing" and
+   * that has exactly one answer. This is the rest of the set; the panel shows
+   * the primary, and an operation acts on primary plus these.
+   */
+  extraSelectedIds: string[];
+  /** Adds a body to the selection, or takes it out again. */
+  toggleExtraSelected: (id: string) => void;
+  /**
+   * Merges other bodies into this one and applies a boolean between them.
+   *
+   * The move the boolean tools were missing. A body's geoms ARE its boolean
+   * program, so two separate bodies could never cut each other however they
+   * overlapped — the only way to subtract a sphere from a cube was to create
+   * the sphere on the cube. This brings the sphere over: its shapes are
+   * rewritten into the cube's frame, marked with the operation, and the body
+   * they came from is removed.
+   *
+   * `union` leaves them as ordinary added shapes, which is a compound body and
+   * needs no boolean at all. `difference` and `intersection` turn the boolean
+   * on, and the result is compiled like any other.
+   */
+  combineBodies: (targetId: string, sourceIds: string[], op: CombineOp) => void;
   updateScene: (sceneGraph: SceneGraph, skipRecompile?: boolean) => void;
   updateNodePos: (id: string, newPos: [number, number, number]) => void;
-  updateNodeGeom: (id: string, updates: any, geomIndex?: number) => void;
-  updateNodeJoint: (id: string, updates: any) => void;
+  updateNodeGeom: (id: string, updates: Partial<SceneGeom>, geomIndex?: number) => void;
+  updateNodeJoint: (id: string, updates: Partial<SceneJoint>) => void;
   updateGearTeeth: (id: string, teeth: number) => void;
   rotateAroundCOM: boolean;
   setRotateAroundCOM: (val: boolean) => void;
@@ -538,7 +764,7 @@ export interface PhysicsState {
   updateNode: (id: string, updates: Partial<SceneNode>) => void;
 
   renameNode: (id: string, newName: string) => void;
-  updateNodeJointsList: (id: string, joints: any[]) => void;
+  updateNodeJointsList: (id: string, joints: SceneJoint[]) => void;
   deleteNode: (id: string) => void;
   addPusherPeg: (gearId: string) => void;
   deletePusherPeg: (gearId: string) => void;
@@ -555,7 +781,7 @@ export interface PhysicsState {
   updateCurveParams: (id: string, params: { points?: number[][]; width?: number; thickness?: number; segments?: number; closed?: boolean; bank?: number }) => void;
   updatePulleyParams: (id: string, params: { leftTargetId?: string; rightTargetId?: string; pulleyRadius?: number }) => void;
   updateRopeParams: (id: string, params: { pulleyWheelId?: string; leftTargetId?: string; rightTargetId?: string }) => void;
-  updateNodeComposite: (id: string, params: Partial<any>) => void;
+  updateNodeComposite: (id: string, params: Partial<SceneNode>) => void;
   
   setParentUnderSelected: (val: boolean) => void;
   addComponent: (type: 'box' | 'sphere' | 'capsule' | 'cylinder' | 'bob' | 'gear' | 'wedge' | 'pulley_wheel' | 'pulley_rope' | 'mesh' | 'openscad' | 'pyramid' | 'cone' | 'torus' | 'tube' | 'ellipsoid' | 'curve' | 'ring' | 'sculpt' | 'lattice', position: number[]) => void;
@@ -578,6 +804,32 @@ export interface PhysicsState {
   // The state here is the state of the TOOL, not of the shape: the shape lives
   // on the node as `latticeCage`, because it has to survive being saved and the
   // tool does not. See utils/latticeMesh.ts.
+  /**
+   * What the app is in the middle of, in the words a person would use: "Scale
+   * 1.25x", "Inset 3.0 mm", "Extrude". Null when nothing modal is running.
+   *
+   * A gesture that is sized by the pointer has no dialog and no handle to read
+   * a number off — the shape follows the mouse and that is the whole interface.
+   * That works right up until you want to know WHICH gesture is running and how
+   * far it has gone, which is what the status bar reads from here.
+   */
+  gestureStatus: string | null;
+  setGestureStatus: (status: string | null) => void;
+
+  /**
+   * The measure tool: 'distance' wants two points, 'angle' wants three, null
+   * is not measuring.
+   *
+   * A mode rather than a gesture, because a measurement is not an edit. Every
+   * other modal thing in the app ends by changing the model or putting it back,
+   * so it can be transient; this one ends by having told you a number, and the
+   * number has to stay on screen while you go and do something about it. It
+   * also outranks selection while it is on — a click is a pick, not a
+   * selection — which is why it lives beside the tools rather than inside one.
+   */
+  measureMode: 'distance' | 'angle' | null;
+  setMeasureMode: (mode: 'distance' | 'angle' | null) => void;
+
   /** The body being modelled, or null when the lattice tools are closed. */
   latticeNodeId: string | null;
   latticeTool: LatticeTool;
@@ -592,7 +844,7 @@ export interface PhysicsState {
   /** Mirror every placement across this axis through the body origin. */
   latticeMirror: LatticeAxis | null;
   /** What the panel shows: counts and whether the surface has closed. */
-  latticeStats: { vertices: number; faces: number; quads: number; tris: number; creases: number; inconsistent: number; watertight: boolean } | null;
+  latticeStats: { vertices: number; faces: number; quads: number; tris: number; creases: number; inconsistent: number; watertight: boolean; parts: number } | null;
   setLatticeNodeId: (id: string | null) => void;
   setLatticeTool: (tool: LatticeTool) => void;
   setLatticePlane: (plane: { axis: LatticeAxis; index: number }) => void;
@@ -600,9 +852,23 @@ export interface PhysicsState {
   nudgeLatticePlane: (delta: number) => void;
   setLatticeSnap: (snap: SnapMultiple) => void;
   setLatticeMirror: (axis: LatticeAxis | null) => void;
-  /** Whether the pointer is being held to the work plane. Set by the viewport. */
+  /**
+   * Whether the pointer is being held to the work plane, for whatever reason:
+   * Ctrl held, the hold below switched on, or a drawing tool in hand. Set by
+   * the viewport, which is the only thing that knows all three.
+   */
   latticePlaneLocked: boolean;
   setLatticePlaneLocked: (locked: boolean) => void;
+  /**
+   * The work plane held still without a key held down — the panel's lock
+   * button, or Caps Lock, whose light then says whether the plane is held.
+   *
+   * Separate from `latticePlaneLocked` because that is the EFFECT and this is
+   * one of its causes: Ctrl is a moment, this is a decision, and a decision has
+   * to survive letting go of the keyboard.
+   */
+  latticePlaneHold: boolean;
+  setLatticePlaneHold: (hold: boolean) => void;
   /**
    * Bumped to ask the viewport to turn every face the right way round.
    *
@@ -613,7 +879,78 @@ export interface PhysicsState {
    */
   latticeOrientRequest: number;
   requestLatticeOrient: () => void;
-  setLatticeStats: (stats: { vertices: number; faces: number; quads: number; tris: number; creases: number; inconsistent: number; watertight: boolean } | null) => void;
+  /**
+   * What is selected in the editor, measured — the numbers the panel puts in
+   * boxes you can type into.
+   *
+   * Published by the viewport rather than derived from the node, because the
+   * selection and the live cage both belong to the editor while it is open; the
+   * scene graph only hears about whole operations.
+   *
+   * Extents and positions are in millimetres on the cage's own grid, which is
+   * the frame every lattice tool already speaks. An axis whose extent is zero —
+   * a face seen edge-on, a loop lying in a plane — has a position and no size,
+   * and the panel says so rather than offering a box that cannot do anything.
+   */
+  latticeSelection: {
+    kind: 'face' | 'faces' | 'edge' | 'loop' | 'corner' | 'corners';
+    corners: number;
+    minMm: number[];
+    maxMm: number[];
+  } | null;
+  setLatticeSelection: (selection: PhysicsState['latticeSelection']) => void;
+  /**
+   * Asks the viewport to make the selection a given size, or to put it at a
+   * given place, on one axis.
+   *
+   * A request for the same reason orienting is one: the cage the numbers would
+   * be written to is the editor's, not the node's. `nonce` is what makes two
+   * identical edits in a row two edits — typing 20 twice on a selection that
+   * has drifted has to work the second time.
+   */
+  latticeResizeRequest: { axis: LatticeAxis; mode: 'size' | 'position'; mm: number; nonce: number } | null;
+  requestLatticeResize: (axis: LatticeAxis, mode: 'size' | 'position', mm: number) => void;
+  /**
+   * How much a chamfer or fillet takes off a selected edge, in millimetres.
+   *
+   * A setting rather than a gesture. Every other size in the lattice tools is
+   * dragged out with the pointer, but a fillet radius is almost always a number
+   * somebody already has — it is the cutter they own, or the radius the mating
+   * part needs — and dragging until the readout says 3.00 is a poor way to ask
+   * for 3 mm. It is also the one number that has to survive between operations,
+   * because a part wants the same radius on every edge.
+   */
+  latticeBevelMm: number;
+  setLatticeBevelMm: (mm: number) => void;
+  /** Asks the viewport to chamfer or round the edges it has selected. */
+  latticeBevelRequest: { mode: 'chamfer' | 'fillet'; mm: number; nonce: number } | null;
+  requestLatticeBevel: (mode: 'chamfer' | 'fillet', mm: number) => void;
+  /**
+   * How many corners the shape tool's ring gets. Zero means "as many as it
+   * takes to be round", which is what a circle is on a grid — see circleSides.
+   */
+  latticeShapeSides: number;
+  setLatticeShapeSides: (sides: number) => void;
+  /** Asks the viewport to sweep the selected profile about one of the axes. */
+  latticeRevolveRequest: { axis: LatticeAxis; degrees: number; nonce: number } | null;
+  requestLatticeRevolve: (axis: LatticeAxis, degrees: number) => void;
+  /**
+   * Where the next cut on this body should go: a point on its surface and the
+   * way the surface faces there, both in the BODY's frame.
+   *
+   * Published by the viewport, because that is where surfaces are picked. Two
+   * things feed it — the face selected in the lattice editor, and an ordinary
+   * click on any other body, which already raycasts to select it and now says
+   * where it landed. Either way a hole goes exactly where you pointed, square
+   * to the surface, and that is the same sentence for a lattice, a mesh, an
+   * imported STL and a primitive.
+   *
+   * Not on the cage's grid, unlike the figures in `latticeSelection`: the two
+   * differ by however far a lattice mesh was recentred on its centre of mass.
+   */
+  cutSpot: { nodeId: string; at: number[]; normal: number[] } | null;
+  setCutSpot: (spot: { nodeId: string; at: number[]; normal: number[] } | null) => void;
+  setLatticeStats: (stats: { vertices: number; faces: number; quads: number; tris: number; creases: number; inconsistent: number; watertight: boolean; parts: number } | null) => void;
   /**
    * Writes a cage to a node and rebuilds its mesh from it, in one go.
    *
@@ -621,15 +958,68 @@ export interface PhysicsState {
    * those are two scene-graph writes and therefore two MuJoCo recompiles for
    * what is one edit.
    */
-  applyLattice: (nodeId: string, cage: LatticeCage, subdiv?: number) => void;
+  applyLattice: (nodeId: string, cage: LatticeCage, subdiv?: number, quiet?: boolean) => void;
+  /**
+   * Applies the cage: the mesh stops being derived and becomes the document.
+   *
+   * Sculpting is the only thing that asks for this, and it has to ask, because
+   * the two tools cannot both own one mesh — see SceneNode.latticeBaked. An
+   * ordinary undo step, so the cage comes back with Ctrl+Z.
+   */
+  bakeLattice: (nodeId: string) => void;
+  /**
+   * Breaks a lattice that is several separate pieces into one body per piece,
+   * each with its own cage, at the same place in the world. The first piece
+   * keeps the body; the rest are new bodies beside it. Nothing moves — this
+   * is what makes it possible to move one piece against another afterwards,
+   * or hand one to the other with Subtract.
+   */
+  separateLattice: (nodeId: string) => void;
   /** Changes how many smoothing passes a lattice body's mesh is built with. */
   setLatticeSubdiv: (nodeId: string, level: number) => void;
   /** Sets a lattice body's wall thickness in millimetres; 0 leaves it a surface. */
   setLatticeThickness: (nodeId: string, mm: number) => void;
+  /**
+   * Cuts a shape out of a body — any body, not only a lattice one.
+   *
+   * This is the missing half of the boolean tools. A body's geoms are its
+   * boolean program, and until now nothing in the app could put a geom ON a
+   * body: dragging a shape in while one was selected made a CHILD BODY, whose
+   * geoms belong to a different program entirely and are invisible to the
+   * parent's. So a hole could be authored in a preset, in OpenSCAD or over MCP,
+   * and nowhere else.
+   *
+   * On a lattice body it is also the one thing a grid cannot do. Every corner
+   * of a cage is a triple of integers, so every shape it can describe lands on
+   * the grid — and a 6.35 mm bore does not, at any step worth modelling at. The
+   * cage stays editable underneath: the boolean is re-evaluated from the mesh
+   * the cage produces, so moving a face moves the material around the hole.
+   *
+   * `spot` says where on the surface it goes and which way that surface faces;
+   * without one it uses whatever was last picked on this body, and failing that
+   * the spot the camera is looking at. Returns the index of the geom it added,
+   * or -1.
+   */
+  addBodyCut: (nodeId: string, shape: 'cylinder' | 'box' | 'sphere', spot?: CutSpot) => number;
+  /** Moves a cut to another spot on the part, square to the surface there. */
+  moveCutTo: (nodeId: string, geomIndex: number, spot: CutSpot) => void;
+  /** Sets how deep a cut goes, in millimetres in from the surface; 0 goes through. */
+  setCutDepth: (nodeId: string, geomIndex: number, mm: number) => void;
+  /** Resizes a cut's cross-section, in millimetres, and re-derives its length. */
+  setCutSection: (nodeId: string, geomIndex: number, section: number[]) => void;
   updateNodeScad: (id: string, scadCode: string, compiledData: { vertices: number[], faces: number[], renderVertices: number[] }, skipRecompile?: boolean) => void;
   // --- CSG (boolean modifiers) ---
   deleteNodeGeom: (nodeId: string, geomIndex: number) => void;
   setGeomCsgOp: (nodeId: string, geomIndex: number, csg: CsgOp) => void;
+  /**
+   * Puts a scaled copy of a body's own shape inside it, marked as a hole.
+   *
+   * The shortest path from a solid to a hollow one. Factors are per-axis, and
+   * an axis above 1 is how the copy is made to pass right through — a cylinder
+   * with a [0.8, 0.8, 1.05] copy of itself subtracted is a pipe, where the same
+   * copy shrunk on all three would be a sealed cavity nobody can see.
+   */
+  insetNodeGeoms: (nodeId: string, factor: [number, number, number]) => void;
   applyNodeCsg: (nodeId: string, result: CsgResult, skipRecompile?: boolean) => void;
   setNodeCsgError: (nodeId: string, error: string | null, hash?: string) => void;
   recompile: (overrideScene?: SceneGraph, overrideSelectedId?: string | null, forceReset?: boolean, keepPreset?: boolean) => Promise<void>;
@@ -672,7 +1062,8 @@ export const useStore = create<PhysicsState>()((set, get) => ({
         density: get().density,
         floorFriction: get().floorFriction,
         floorBounce: get().floorBounce,
-        selectedNodeId: get().selectedNodeId
+        selectedNodeId: get().selectedNodeId,
+        latticeNodeId: get().latticeNodeId,
       };
       set({
         tempUndoState: snapshot,
@@ -706,7 +1097,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
         tempUndoState.density !== current.density ||
         tempUndoState.floorFriction !== current.floorFriction ||
         tempUndoState.floorBounce !== current.floorBounce ||
-        JSON.stringify(tempUndoState.sceneGraph) !== JSON.stringify(current.sceneGraph);
+        !sameValue(tempUndoState.sceneGraph, current.sceneGraph);
 
       if (isDifferent) {
         const newUndoStack = [...undoStack, tempUndoState];
@@ -720,6 +1111,10 @@ export const useStore = create<PhysicsState>()((set, get) => ({
           lastInteractionType: null,
           historyDebounceTimer: null
         });
+      } else if (recompilesInFlight > 0) {
+        // Nothing has moved YET. The change is still on its way through the
+        // compiler, and the landing calls back here.
+        set({ historyDebounceTimer: null });
       } else {
         set({
           tempUndoState: null,
@@ -730,9 +1125,24 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     }
   },
 
+  /*
+   * Snapshot before a change that happens all at once, rather than over a drag.
+   *
+   * Held for a tick rather than pushed on the spot, and then pushed only if the
+   * scene actually moved. Everything that writes to the scene comes through
+   * here — including the MCP bridge, which calls updateScene/updateNode for
+   * every command an agent sends, whether or not the command changes anything.
+   * Pushing unconditionally filled the undo stack with entries that undo to
+   * exactly what is already on screen: twenty presses of Ctrl+Z that appear to
+   * do nothing, with the edit you wanted back pushed off the end of the stack.
+   *
+   * The timer is zero, so the entry lands as soon as the change that follows
+   * this call has been made — and any further discrete change flushes it first,
+   * so a run of them still gets one entry each rather than being swallowed.
+   */
   prepareForDiscreteChange: () => {
     get().flushPendingUndo();
-    const { sceneGraph, gravityZ, windX, windY, density, floorFriction, floorBounce, selectedNodeId, undoStack } = get();
+    const { sceneGraph, gravityZ, windX, windY, density, floorFriction, floorBounce, selectedNodeId, latticeNodeId } = get();
     const snapshot: UndoRedoState = {
       sceneGraph: cloneSceneGraph(sceneGraph),
       gravityZ,
@@ -741,23 +1151,19 @@ export const useStore = create<PhysicsState>()((set, get) => ({
       density,
       floorFriction,
       floorBounce,
-      selectedNodeId
+      selectedNodeId,
+      latticeNodeId,
     };
-    const newUndoStack = [...undoStack, snapshot];
-    if (newUndoStack.length > 20) {
-      newUndoStack.shift();
-    }
     set({
-      undoStack: newUndoStack,
-      redoStack: [],
-      tempUndoState: null,
-      lastInteractionType: null
+      tempUndoState: snapshot,
+      lastInteractionType: 'discrete',
+      historyDebounceTimer: setTimeout(() => get().flushPendingUndo(), 0),
     });
   },
 
   undo: () => {
     get().flushPendingUndo();
-    const { undoStack, redoStack, sceneGraph, gravityZ, windX, windY, density, floorFriction, floorBounce, selectedNodeId } = get();
+    const { undoStack, redoStack, sceneGraph, gravityZ, windX, windY, density, floorFriction, floorBounce, selectedNodeId, latticeNodeId } = get();
     if (undoStack.length === 0) return;
 
     const previousState = undoStack[undoStack.length - 1];
@@ -771,7 +1177,8 @@ export const useStore = create<PhysicsState>()((set, get) => ({
       density,
       floorFriction,
       floorBounce,
-      selectedNodeId
+      selectedNodeId,
+      latticeNodeId,
     };
 
     set({
@@ -783,6 +1190,10 @@ export const useStore = create<PhysicsState>()((set, get) => ({
       floorFriction: previousState.floorFriction,
       floorBounce: previousState.floorBounce,
       selectedNodeId: previousState.selectedNodeId,
+      // The tools follow the document back. A body that has just stopped
+      // existing cannot be the one being modelled, and the editor holding its
+      // own copy of the cage is exactly how a ghost gets committed back in.
+      ...latticeAfterUndo(previousState),
       undoStack: newUndoStack,
       redoStack: [...redoStack, currentStateSnapshot],
       isPlaying: false
@@ -793,7 +1204,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
 
   redo: () => {
     get().flushPendingUndo();
-    const { undoStack, redoStack, sceneGraph, gravityZ, windX, windY, density, floorFriction, floorBounce, selectedNodeId } = get();
+    const { undoStack, redoStack, sceneGraph, gravityZ, windX, windY, density, floorFriction, floorBounce, selectedNodeId, latticeNodeId } = get();
     if (redoStack.length === 0) return;
 
     const nextState = redoStack[redoStack.length - 1];
@@ -807,7 +1218,8 @@ export const useStore = create<PhysicsState>()((set, get) => ({
       density,
       floorFriction,
       floorBounce,
-      selectedNodeId
+      selectedNodeId,
+      latticeNodeId,
     };
 
     set({
@@ -819,13 +1231,16 @@ export const useStore = create<PhysicsState>()((set, get) => ({
       floorFriction: nextState.floorFriction,
       floorBounce: nextState.floorBounce,
       selectedNodeId: nextState.selectedNodeId,
+      ...latticeAfterUndo(nextState),
       undoStack: [...undoStack, currentStateSnapshot],
       redoStack: newRedoStack,
       isPlaying: false
     });
 
     get().recompile(nextState.sceneGraph, nextState.selectedNodeId, true, true);
-  },  isPlaying: false,
+  },
+
+  isPlaying: false,
   isLoaded: false,
   lastCompileError: null,
   isSettingsOpen: false,
@@ -836,6 +1251,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   cameraView: 'perspective',
   printAnalysisEnabled: false,
   cameraOverride: null,
+  cameraResetToken: 0,
   mcpActiveCount: 0,
   scadCompileCount: 0,
   
@@ -850,6 +1266,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   setRotateAroundCOM: (val) => set({ rotateAroundCOM: val }),
   sceneGraph: initialScene,
   selectedNodeId: null,
+  extraSelectedIds: [],
   parentUnderSelected: false,
   activePreset: 'pendulum',
   draggedNodeId: null,
@@ -881,7 +1298,11 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   wireframe: false,
   toggleWireframe: () => set((state) => ({ wireframe: !state.wireframe })),
   gridCellSizeMm: 100,
-  setGridCellSizeMm: (mm) => set({ gridCellSizeMm: mm }),
+  // The one grid. The lattice used to have its own step beside this, and two
+  // controls that both said "grid" and meant different things was one too
+  // many: 1 mm on the floor and 10 mm in the lattice looked like a bug in the
+  // lattice. Cells are millimetres; lattice steps are tenths, hence the ten.
+  setGridCellSizeMm: (mm) => set({ gridCellSizeMm: mm, latticeSnap: (Math.round(mm * 10) || 10) as SnapMultiple }),
 
   paintMode: false,
   paintColor: [0.91, 0.30, 0.24],
@@ -896,7 +1317,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
 
   setGeomPaint: (nodeId, geomName, layer) => {
     const existing = findNode(get().sceneGraph.nodes, nodeId);
-    const index = existing?.geoms?.findIndex((geom: any) => geom.name === geomName) ?? -1;
+    const index = existing?.geoms?.findIndex((geom: SceneGeom) => geom.name === geomName) ?? -1;
     if (index === -1) return;
 
     get().recordInteraction('paint');
@@ -927,7 +1348,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     // No name means the whole body, which is what colouring an imported mesh or
     // a boolean body usually means — those arrive as several geoms and leaving
     // some of them the old colour is never what was asked for.
-    const targets = geomName ? node.geoms.filter((g: any) => g.name === geomName) : node.geoms;
+    const targets = geomName ? node.geoms.filter((g: SceneGeom) => g.name === geomName) : node.geoms;
     if (!targets.length) return;
     for (const geom of targets) {
       geom.rgba = [rgba[0] ?? 0.8, rgba[1] ?? 0.8, rgba[2] ?? 0.8, rgba[3] ?? geom.rgba?.[3] ?? 1];
@@ -943,7 +1364,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     get().recordInteraction('paint');
     const newScene = cloneSceneGraph(get().sceneGraph);
     let found = false;
-    const walk = (nodes: any[]) => {
+    const walk = (nodes: SceneNode[]) => {
       for (const node of nodes || []) {
         for (const geom of node.geoms || []) {
           if (geom.paint) { delete geom.paint; found = true; }
@@ -975,7 +1396,18 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     get().prepareForDiscreteChange();
     getPhysicsWorkerClient().setPlaying(false);
     if (name.startsWith('user:')) {
-      set({ isPlaying: false, selectedNodeId: null, activePreset: name });
+      set((state) => ({
+        isPlaying: false,
+        selectedNodeId: null,
+        activePreset: name,
+        cameraOverride: null,
+        cameraResetToken: state.cameraResetToken + 1,
+        latticeNodeId: null,
+        latticeStats: null,
+        sculptNodeId: null,
+        sculptStats: null,
+        gestureStatus: null,
+      }));
       if (typeof window !== 'undefined') {
         window.dispatchEvent(new CustomEvent('physics:preset-loaded', { detail: { name, prev } }));
       }
@@ -992,7 +1424,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
       }
       return;
     }
-    const preset = PRESETS[name as keyof typeof PRESETS] as any;
+    const preset: Preset | undefined = (PRESETS as Record<string, Preset>)[name];
     if (!preset) return;
     // Clone: PRESETS holds module-level objects, and handing one straight to the
     // store makes every later edit an edit of the preset itself — reloading it
@@ -1001,17 +1433,38 @@ export const useStore = create<PhysicsState>()((set, get) => ({
       ? { nodes: [] }
       : cloneSceneGraph(preset.scene || get().sceneGraph);
     promoteJointedMeshGeomsDeep(scene.nodes);
-    set({
+    /*
+     * Most presets rely on the default bench-scale framing, but a small one
+     * (california_relief, lattice_bracket) can specify its own so it does not
+     * read as a speck at that distance.
+     *
+     * It is applied AFTER the rebuild, not with the scene. The scene graph
+     * changes here and now; the model the viewport draws is built by the worker
+     * and arrives later, so moving the camera in this breath framed the OLD
+     * scene from 120 mm away — a dark shape filling the window for a frame or
+     * two before the new one appeared. Cleared immediately either way, so a
+     * stale override from the previous preset cannot leak into one that did not
+     * ask for it.
+     */
+    const framing = preset.camera ?? null;
+    set((state) => ({
       isPlaying: false,
       selectedNodeId: null,
       activePreset: name,
       sceneGraph: scene,
-      // Most presets rely on the default bench-scale framing, but a small
-      // preset (e.g. california_relief) can specify its own so it doesn't
-      // read as a speck at that distance — cleared here so a stale override
-      // from a previous preset doesn't leak into one that didn't ask for it.
-      cameraOverride: (preset as any).camera ?? null,
-    });
+      cameraOverride: null,
+      // Back to the view every scene starts in. Whatever the camera was doing
+      // belonged to the scene that has just gone: a view orbited round a 40 mm
+      // part, or zoomed to six millimetres inside a lattice, frames the next
+      // preset as a wall of geometry across the window.
+      cameraResetToken: state.cameraResetToken + 1,
+      // The modelling tools were open on a body that no longer exists.
+      latticeNodeId: null,
+      latticeStats: null,
+      sculptNodeId: null,
+      sculptStats: null,
+      gestureStatus: null,
+    }));
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('physics:preset-loaded', { detail: { name, prev } }));
     }
@@ -1020,7 +1473,11 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     } else {
       set({ windX: 0, windY: 0, floorBounce: 0 });
     }
-    get().recompile(scene, null, true, true);
+    void get().recompile(scene, null, true, true).then(() => {
+      // Unless something else has been loaded in the meantime, in which case
+      // this framing belongs to a scene that is no longer on screen.
+      if (framing && get().activePreset === name) set({ cameraOverride: framing });
+    });
   },
   
   setEnvironment: (env) => {
@@ -1029,7 +1486,124 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     get().recompile(get().sceneGraph);
   },
   
-  setSelectedNodeId: (id) => set({ selectedNodeId: id }),
+  setSelectedNodeId: (id) => set({ selectedNodeId: id, extraSelectedIds: [] }),
+  combineBodies: (targetId, sourceIds, op) => {
+    const scene = get().sceneGraph;
+    const target = findNode(scene.nodes, targetId);
+    const sources = sourceIds
+      .filter(id => id !== targetId)
+      .map(id => findNode(scene.nodes, id))
+      .filter(Boolean);
+    if (!target || sources.length === 0) return;
+
+    // Every geom is written relative to the body carrying it, so moving one to
+    // another body means composing three transforms: the source body's pose,
+    // the geom's own, and the inverse of the destination's. This is the first
+    // and last of those; utils/combineBodies does the middle one per geom.
+    const targetWorld = nodeWorldMatrix(scene.nodes, targetId);
+    if (!targetWorld) return;
+    const intoTarget = targetWorld.clone().invert();
+
+    get().prepareForDiscreteChange();
+    const newScene = cloneSceneGraph(scene);
+    const node = findNode(newScene.nodes, targetId);
+    if (!node) return;
+
+    /*
+      Two lattice bodies combined become ONE CAGE, not one cage with the other's
+      frozen mesh bolted on. The mesh route worked in the sense that the shape
+      was there, and failed in the sense that mattered: open the lattice tools
+      afterwards and only the first body's corners could be touched, because the
+      second was a mesh geom the cage knew nothing about.
+
+      A cage corner lives in its body's frame at `coord * unit - latticeOrigin`
+      (the mesh is recentred on its centre of mass; the origin is how far).
+      That point goes through the same three transforms as any other geom and
+      lands on the target's grid, rounded — so a source turned by something
+      other than a right angle comes across as the nearest grid shape, which is
+      what the grid means.
+
+      The cages are then put through a real boolean (utils/latticeBoolean),
+      which is the difference between a join and a union: concatenating them
+      left the surface where the two solids met buried inside the result, along
+      with every corner of it. All three operations go this way now — a cage
+      cannot carry a 'subtract' marker, but it can be subtracted FROM.
+    */
+    const merged = node.isLattice && node.latticeCage
+      ? deserializeCage(node.latticeCage)
+      : null;
+    let mergedFaces = 0;
+    let mergedResult: ReturnType<typeof deserializeCage> | null = null;
+
+    const taken = new Set<string>((node.geoms || []).map((g: SceneGeom) => g.name).filter(Boolean));
+    const brought: SceneGeom[] = [];
+    for (const source of sources) {
+      const sourceWorld = nodeWorldMatrix(scene.nodes, source.id);
+      if (!sourceWorld) continue;
+      const relative = intoTarget.clone().multiply(sourceWorld);
+      const cage = merged && source.isLattice && source.latticeCage ? deserializeCage(source.latticeCage) : null;
+      let combined = false;
+      if (cage && merged) {
+        // Into a cage of its own rather than straight onto the target's: a
+        // boolean compares two solids, and concatenating them first is exactly
+        // the join that left a wall buried down the seam.
+        const moved = cageInFrame(cage, relative, source.latticeOrigin, node.latticeOrigin, merged.unit);
+        const result = latticeBoolean(mergedResult ?? merged, moved, op);
+        if (result) {
+          mergedResult = result;
+          mergedFaces = faceCount(result);
+          combined = true;
+        }
+      }
+      // Only the cage went across, so the source's mesh stays behind. If the
+      // boolean refused — an open shell, or a difference that removed
+      // everything — nothing was combined and the geoms have to come the old
+      // way, or the shape would simply vanish.
+      brought.push(...geomsForCombine(source, relative, op, taken, combined));
+    }
+    if (brought.length === 0 && mergedFaces === 0) return;
+
+    node.geoms = [...(node.geoms || []), ...brought];
+    if (mergedResult && mergedFaces > 0) {
+      node.latticeCage = serializeCage(mergedResult);
+      // A new cage is a new document to the editor, which remounts on this.
+      node.latticeVersion = (node.latticeVersion ?? 1) + 1;
+    }
+    // A boolean that happened on the cage has already happened; turning the
+    // evaluator on as well would subtract the source a second time.
+    if (op !== 'union' && !mergedResult) {
+      node.csgEnabled = true;
+      if (node.csgCollision === undefined) node.csgCollision = 'auto';
+      if (node.csgSectors === undefined) node.csgSectors = CSG_DEFAULT_SECTORS;
+    }
+
+    // The bodies that were merged in are gone: their shapes are on the target
+    // now, and leaving the originals behind would draw every one of them twice
+    // and simulate them as separate objects that happen to overlap.
+    const prune = (list: SceneNode[]): SceneNode[] => list
+      .filter(n => !sourceIds.includes(n.id) || n.id === targetId)
+      .map(n => ({ ...n, children: prune(n.children || []) }));
+    newScene.nodes = prune(newScene.nodes);
+
+    set({ sceneGraph: newScene, extraSelectedIds: [], selectedNodeId: targetId });
+    if (mergedResult && mergedFaces > 0) {
+      // Rebuilds the mesh from the merged cage, recentres the body on it, and
+      // recompiles — the same path an edit in the lattice tools takes.
+      get().applyLattice(targetId, node.latticeCage, node.latticeSubdiv);
+      return;
+    }
+    get().recompile(newScene, targetId, true);
+  },
+
+  toggleExtraSelected: (id) => set((state) => {
+    // The primary is already selected; asking for it again is not a second
+    // selection, and letting it into the list would let a body be combined
+    // with itself.
+    if (!id || id === state.selectedNodeId) return {};
+    return state.extraSelectedIds.includes(id)
+      ? { extraSelectedIds: state.extraSelectedIds.filter(other => other !== id) }
+      : { extraSelectedIds: [...state.extraSelectedIds, id] };
+  }),
 
   sculptNodeId: null,
   sculptBrush: DEFAULT_BRUSH,
@@ -1047,7 +1621,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     const mesh = buildSculptBase(base);
     const { vertices, renderVertices, faces } = toSceneGeom(mesh);
     const node = findNode(get().sceneGraph.nodes, nodeId);
-    const geomIndex = Math.max(0, (node?.geoms ?? []).findIndex((g: any) => g.type === 'mesh'));
+    const geomIndex = Math.max(0, (node?.geoms ?? []).findIndex((g: SceneGeom) => g.type === 'mesh'));
     get().updateNodeGeom(nodeId, { vertices, renderVertices, faces }, geomIndex);
     get().updateNode(nodeId, {
       sculptBase: base,
@@ -1057,24 +1631,36 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   },
   setSculptBrush: (patch) => set((state) => ({ sculptBrush: { ...state.sculptBrush, ...patch } })),
 
+  gestureStatus: null,
+  setGestureStatus: (status) => set((state) => (state.gestureStatus === status ? {} : { gestureStatus: status })),
+
+  measureMode: null,
+  setMeasureMode: (mode) => set((state) => (state.measureMode === mode ? {} : { measureMode: mode })),
+
   latticeNodeId: null,
   latticeTool: 'place',
   latticePlane: { axis: 'z', index: 0 },
   // 10 mm to start: the step most parts are laid out on, with 0.1 mm available
   // for detail without any of the coarse work having to move.
-  latticeSnap: 100,
+  latticeSnap: 1000,
   latticeMirror: null,
   latticePlaneLocked: false,
+  latticePlaneHold: false,
   latticeOrientRequest: 0,
   latticeStats: null,
+  latticeSelection: null,
+  latticeResizeRequest: null,
+  cutSpot: null,
 
   // Opening one modelling mode closes the other: both take over the drawing of
   // the body they are on and both bind the pointer, and two of them at once is
   // two components fighting over one mesh.
   setLatticeNodeId: (id) => set(id
     ? { latticeNodeId: id, sculptNodeId: null, selectedNodeId: id, isPlaying: false }
-    : { latticeNodeId: null, latticeStats: null }),
-  setLatticeTool: (tool) => set({ latticeTool: tool }),
+    : { latticeNodeId: null, latticeStats: null, latticeSelection: null, latticePlaneHold: false, cutSpot: null }),
+  // Picking up a drawing tool holds the plane, since a stroke is flat; it is
+  // the hold that can be let go of again, not a lock the tool insists on.
+  setLatticeTool: (tool) => set(DRAWING_TOOLS.has(tool) ? { latticeTool: tool, latticePlaneHold: true } : { latticeTool: tool }),
   setLatticePlane: (plane) => set({ latticePlane: plane }),
   nudgeLatticePlane: (delta) => set((state) => ({
     latticePlane: { ...state.latticePlane, index: state.latticePlane.index + delta },
@@ -1084,13 +1670,31 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   setLatticePlaneLocked: (lockedNow) => set((state) => (
     state.latticePlaneLocked === lockedNow ? {} : { latticePlaneLocked: lockedNow }
   )),
+  setLatticePlaneHold: (hold) => set((state) => (state.latticePlaneHold === hold ? {} : { latticePlaneHold: hold })),
   requestLatticeOrient: () => set((state) => ({ latticeOrientRequest: state.latticeOrientRequest + 1 })),
+  setLatticeSelection: (selection) => set({ latticeSelection: selection }),
+  setCutSpot: (spot) => set({ cutSpot: spot }),
+  requestLatticeResize: (axis, mode, mm) => set((state) => ({
+    latticeResizeRequest: { axis, mode, mm, nonce: (state.latticeResizeRequest?.nonce ?? 0) + 1 },
+  })),
+  latticeBevelMm: 1,
+  setLatticeBevelMm: (mm) => set({ latticeBevelMm: Math.max(0, mm) }),
+  latticeBevelRequest: null,
+  requestLatticeBevel: (mode, mm) => set((state) => ({
+    latticeBevelRequest: { mode, mm, nonce: (state.latticeBevelRequest?.nonce ?? 0) + 1 },
+  })),
+  latticeShapeSides: 0,
+  setLatticeShapeSides: (sides) => set({ latticeShapeSides: Math.max(0, Math.floor(sides)) }),
+  latticeRevolveRequest: null,
+  requestLatticeRevolve: (axis, degrees) => set((state) => ({
+    latticeRevolveRequest: { axis, degrees, nonce: (state.latticeRevolveRequest?.nonce ?? 0) + 1 },
+  })),
   setLatticeStats: (stats) => set({ latticeStats: stats }),
 
-  applyLattice: (nodeId, cage, subdiv) => {
+  applyLattice: (nodeId, cage, subdiv, quiet) => {
     get().recordInteraction('lattice');
     const newScene = cloneSceneGraph(get().sceneGraph);
-    const traverse = (nodes: any[]): boolean => {
+    const traverse = (nodes: SceneNode[]): boolean => {
       if (!nodes) return false;
       for (const node of nodes) {
         if (node.id === nodeId) {
@@ -1098,8 +1702,17 @@ export const useStore = create<PhysicsState>()((set, get) => ({
           const { vertices, renderVertices, faces, origin } = latticeToSceneGeom(
             deserializeCage(cage), level, node.latticeThickness ?? 0,
           );
-          const geom = node.geoms?.find((g: any) => g.type === 'mesh') ?? node.geoms?.[0];
-          if (geom) Object.assign(geom, { vertices, renderVertices, faces });
+          /*
+            The cage owns ONE geom, and it says so. A lattice body may now carry
+            other shapes — a cut to subtract, and the boolean evaluator's own
+            output, which is a mesh too — so "the first mesh geom" long ago
+            stopped naming one thing. Older saves have no marker, so the first
+            mesh that isn't generated is adopted as the cage's and marked.
+          */
+          const geom = node.geoms?.find((g: SceneGeom) => g.latticeGeom)
+            ?? node.geoms?.find((g: SceneGeom) => g.type === 'mesh' && !g.csgDerived)
+            ?? node.geoms?.[0];
+          if (geom) Object.assign(geom, { vertices, renderVertices, faces, latticeGeom: true });
 
           /*
             The mesh comes back centred on its own centre of mass, so the body
@@ -1115,12 +1728,26 @@ export const useStore = create<PhysicsState>()((set, get) => ({
             it from scratch.
           */
           const previous = node.latticeOrigin ?? [0, 0, 0];
-          const delta = new THREE.Vector3(
+          const local = [
             origin[0] - previous[0],
             origin[1] - previous[1],
             origin[2] - previous[2],
-          );
+          ];
+          const delta = new THREE.Vector3(local[0], local[1], local[2]);
           if (delta.lengthSq() > 0) {
+            /*
+              Everything else on the body is positioned in the body's frame, and
+              the recentring below moves the body out from under it. A cut sits
+              where it was put ON THE SHAPE — so the shapes that aren't the cage's
+              are walked back by the same amount the cage's vertices just moved,
+              or extruding a face on one side of a part would drag the hole on
+              the other side along with it.
+            */
+            for (const other of node.geoms ?? []) {
+              if (other === geom || other.csgDerived) continue;
+              const at = other.pos ?? [0, 0, 0];
+              other.pos = [at[0] - local[0], at[1] - local[1], at[2] - local[2]];
+            }
             if (node.quat) {
               delta.applyQuaternion(new THREE.Quaternion(node.quat[1], node.quat[2], node.quat[3], node.quat[0]));
             } else if (node.euler) {
@@ -1138,6 +1765,15 @@ export const useStore = create<PhysicsState>()((set, get) => ({
             if (node.basePos) node.basePos = [...node.pos];
           }
 
+          /*
+            And the cuts follow the shape. The walk-back above keeps a cut where
+            it was put ACROSS its face; this puts it back at the right depth
+            INTO it, now that the face has moved. Without it, pushing the top of
+            a part up leaves a hole sealed inside the material — a void nothing
+            in the viewport shows.
+          */
+          reconcileCuts(node);
+
           node.latticeOrigin = origin;
           node.latticeCage = cage;
           node.latticeSubdiv = level;
@@ -1150,7 +1786,105 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     };
     if (traverse(newScene.nodes)) {
       set({ sceneGraph: newScene });
-      get().recompile(newScene, undefined, true);
+      // `quiet` for all but the last of a batch: several bodies rebuilt in a
+      // row each asking for a compile recycles the worker under the earlier
+      // ones, which fail, loudly, for nothing.
+      if (!quiet) get().recompile(newScene, undefined, true);
+    }
+  },
+
+  separateLattice: (nodeId) => {
+    const node = findNode(get().sceneGraph.nodes, nodeId);
+    if (!node?.isLattice || !node.latticeCage) return;
+    const pieces = separablePieces(deserializeCage(node.latticeCage));
+    if (pieces.length < 2) return;
+
+    get().prepareForDiscreteChange();
+    const newScene = cloneSceneGraph(get().sceneGraph);
+    const first = findNode(newScene.nodes, nodeId);
+    if (!first) return;
+    first.latticeCage = serializeCage(pieces[0]);
+    first.latticeVersion = (first.latticeVersion ?? 1) + 1;
+
+    const cageGeom = (first.geoms || []).find((g: SceneGeom) => g.latticeGeom) ?? first.geoms?.[0];
+    const ids: string[] = [nodeId];
+    // The parent the original hangs from, so the pieces hang there too and
+    // the copied pose means the same thing.
+    const siblings = (() => {
+      const walk = (list: SceneNode[]): SceneNode[] | null => {
+        for (const n of list) {
+          if (n.id === nodeId) return list;
+          const found = walk(n.children || []);
+          if (found) return found;
+        }
+        return null;
+      };
+      return walk(newScene.nodes) ?? newScene.nodes;
+    })();
+    pieces.slice(1).forEach((piece) => {
+      const id = `lattice_${Math.random().toString(36).substring(2, 10)}`;
+      ids.push(id);
+      /*
+        The same pose and the same cage frame: every piece's coordinates are
+        the original cage's, so a copy of the original's origin puts the piece
+        exactly where it was drawn, and applyLattice then recentres each body
+        on its own piece by the difference — which is how the original works
+        after any edit.
+      */
+      siblings.push({
+        id,
+        name: id,
+        type: 'body',
+        pos: [...(first.pos ?? [0, 0, 0])],
+        ...(first.quat ? { quat: [...first.quat] } : {}),
+        ...(first.euler ? { euler: [...first.euler] } : {}),
+        joints: (first.joints || []).map((j: SceneJoint) => ({ ...j, name: `${id}_${String(j.name || 'joint').split('_').pop()}` })),
+        isLattice: true,
+        latticeCage: serializeCage(piece),
+        latticeSubdiv: first.latticeSubdiv ?? 0,
+        latticeThickness: first.latticeThickness,
+        latticeVersion: 1,
+        latticeOrigin: [...(first.latticeOrigin ?? [0, 0, 0])],
+        geoms: [{
+          name: `${id}_mesh`,
+          type: 'mesh',
+          size: [1],
+          rgba: [...(cageGeom?.rgba ?? [0.55, 0.68, 0.85, 1])],
+          mass: cageGeom?.mass ?? 1,
+          condim: cageGeom?.condim ?? 3,
+          dynamic: true,
+          vertices: [],
+          faces: [],
+          renderVertices: [],
+          latticeGeom: true,
+        }],
+        children: [],
+      });
+    });
+    set({ sceneGraph: newScene, extraSelectedIds: [] });
+    // Rebuilds each body's mesh from its cage and recentres it; the last one
+    // recompiles with all of them in place.
+    ids.forEach((id, i) => {
+      const n = findNode(get().sceneGraph.nodes, id);
+      if (n?.latticeCage) get().applyLattice(id, n.latticeCage, n.latticeSubdiv ?? 0, i < ids.length - 1);
+    });
+  },
+
+  bakeLattice: (nodeId) => {
+    const node = findNode(get().sceneGraph.nodes, nodeId);
+    if (!node?.isLattice) return;
+    get().prepareForDiscreteChange();
+    const newScene = cloneSceneGraph(get().sceneGraph);
+    const baked = findNode(newScene.nodes, nodeId);
+    if (!baked) return;
+    baked.isLattice = false;
+    baked.latticeBaked = true;
+    // The cage itself is left alone. It costs a few hundred integers, it is
+    // the only record of how the shape was built, and undo needs it to be
+    // there when it turns `isLattice` back on.
+    set({ sceneGraph: newScene });
+    if (get().latticeNodeId === nodeId) {
+      set({ latticeNodeId: null, latticeStats: null, latticeSelection: null, latticePlaneHold: false, cutSpot: null });
     }
   },
 
@@ -1169,7 +1903,95 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     get().updateNode(nodeId, { latticeThickness: Math.max(0, mm) / 1000 });
     get().applyLattice(nodeId, node.latticeCage, node.latticeSubdiv ?? 0);
   },
-  
+
+  addBodyCut: (nodeId, shape, spot) => {
+    const target = findNode(get().sceneGraph.nodes, nodeId);
+    if (!target) return -1;
+    const bounds = sourcePositiveBounds(target);
+    if (!bounds) return -1;
+    const span = [0, 1, 2].map(a => Math.max(1e-4, bounds.max[a] - bounds.min[a]));
+
+    /*
+      Where it goes, in order of how much the app actually knows:
+
+        the spot handed in;
+        the last surface picked on this body — the face selected in the lattice
+        editor, or wherever an ordinary click landed on it;
+        the spot the camera is looking at;
+        and failing all of that the middle of the top, which is only reached
+        with no viewport at all.
+    */
+    const picked = get().cutSpot;
+    const where = spot
+      ?? (picked?.nodeId === nodeId ? { at: picked.at, normal: picked.normal } : null)
+      ?? cutSpotFromCamera(target)
+      ?? {
+        at: [0, 1, 2].map(a => +((bounds.min[a] + bounds.max[a]) / 2).toFixed(6)),
+        normal: [0, 0, 1],
+      };
+
+    // Sized off the part: a hole that arrives at a seventh of the part's width
+    // is one typed number from what you wanted, where a fixed 10 mm is off the
+    // model entirely on anything small and a speck on anything large.
+    const across = Math.min(span[0], span[1], span[2]);
+
+    get().prepareForDiscreteChange();
+    const newScene = cloneSceneGraph(get().sceneGraph);
+    const node = findNode(newScene.nodes, nodeId);
+    if (!node) return -1;
+
+    const used = (node.geoms || []).filter((g: SceneGeom) => g.csg === 'difference' && !g.csgDerived).length;
+    const geom: SceneGeom = {
+      name: `${node.id}_cut${used + 1}`,
+      type: shape,
+      size: shape === 'box'
+        ? [+(across * 0.15).toFixed(6), +(across * 0.15).toFixed(6), 0]
+        : [+(across * 0.15).toFixed(6), 0],
+      csg: 'difference' as const,
+      cutAt: where.at.map(v => +v.toFixed(6)),
+      cutNormal: where.normal,
+      // Straight through to begin with. A hole that goes all the way is the
+      // common one, and it is the only starting depth that cannot look like it
+      // did nothing.
+      cutDepth: 0,
+      rgba: [0.9, 0.25, 0.35, 1],
+    };
+    const derived = cutGeometry(node, geom);
+    if (!derived) return -1;
+    Object.assign(geom, derived);
+
+    node.geoms = [...(node.geoms || []), geom];
+    node.csgEnabled = true;
+    if (node.csgCollision === undefined) node.csgCollision = 'auto';
+    if (node.csgSectors === undefined) node.csgSectors = CSG_DEFAULT_SECTORS;
+
+    set({ sceneGraph: newScene });
+    get().recompile(newScene, nodeId, false);
+    return node.geoms.length - 1;
+  },
+
+  moveCutTo: (nodeId, geomIndex, spot) => reshapeCut(get, set, nodeId, geomIndex, 'cut-move', (geom) => {
+    geom.cutAt = spot.at.map(v => +v.toFixed(6));
+    geom.cutNormal = spot.normal;
+  }),
+
+  setCutDepth: (nodeId, geomIndex, mm) => reshapeCut(get, set, nodeId, geomIndex, 'cut-depth', (geom) => {
+    geom.cutDepth = Math.max(0, mm) / 1000;
+  }),
+
+  setCutSection: (nodeId, geomIndex, section) => reshapeCut(get, set, nodeId, geomIndex, 'cut-section', (geom) => {
+    const size = [...(geom.size || [])];
+    if (geom.type === 'box') {
+      // The slot's own width and breadth, in its own frame — they turn with it
+      // rather than staying world X and Y.
+      size[0] = Math.max(1e-6, section[0] ?? size[0] ?? 0.005);
+      size[1] = Math.max(1e-6, section[1] ?? size[1] ?? 0.005);
+    } else {
+      size[0] = Math.max(1e-6, section[0] ?? size[0] ?? 0.005);
+    }
+    geom.size = size;
+  }),
+
   setDraggedNodeId: (id) => {
     if (id !== null && get().draggedNodeId === null) {
       get().recordInteraction('drag-node');
@@ -1186,7 +2008,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   updateWedgeParams: (id, params) => {
     get().recordInteraction('node-params');
     const newScene = cloneSceneGraph(get().sceneGraph);
-    const traverse = (nodes: any[]) => {
+    const traverse = (nodes: SceneNode[]) => {
       if (!nodes) return false;
       for (const node of nodes) {
         if (node.id === id) {
@@ -1233,7 +2055,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   updatePyramidParams: (id, params) => {
     get().recordInteraction('node-params');
     const newScene = cloneSceneGraph(get().sceneGraph);
-    const traverse = (nodes: any[]) => {
+    const traverse = (nodes: SceneNode[]) => {
       if (!nodes) return false;
       for (const node of nodes) {
         if (node.id === id) {
@@ -1263,7 +2085,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   updateConeParams: (id, params) => {
     get().recordInteraction('node-params');
     const newScene = cloneSceneGraph(get().sceneGraph);
-    const traverse = (nodes: any[]) => {
+    const traverse = (nodes: SceneNode[]) => {
       if (!nodes) return false;
       for (const node of nodes) {
         if (node.id === id) {
@@ -1291,7 +2113,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   updateTorusParams: (id, params) => {
     get().recordInteraction('node-params');
     const newScene = cloneSceneGraph(get().sceneGraph);
-    const traverse = (nodes: any[]) => {
+    const traverse = (nodes: SceneNode[]) => {
       if (!nodes) return false;
       for (const node of nodes) {
         if (node.id === id) {
@@ -1319,7 +2141,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   updateTubeParams: (id, params) => {
     get().recordInteraction('node-params');
     const newScene = cloneSceneGraph(get().sceneGraph);
-    const traverse = (nodes: any[]) => {
+    const traverse = (nodes: SceneNode[]) => {
       if (!nodes) return false;
       for (const node of nodes) {
         if (node.id === id) {
@@ -1349,7 +2171,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   updateCurveParams: (id, params) => {
     get().recordInteraction('node-params');
     const newScene = cloneSceneGraph(get().sceneGraph);
-    const traverse = (nodes: any[]) => {
+    const traverse = (nodes: SceneNode[]) => {
       if (!nodes) return false;
       for (const node of nodes) {
         if (node.id === id) {
@@ -1384,7 +2206,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   updatePulleyParams: (id, params) => {
     get().recordInteraction('node-params');
     const newScene = cloneSceneGraph(get().sceneGraph);
-    const traverse = (nodes: any[]) => {
+    const traverse = (nodes: SceneNode[]) => {
       if (!nodes) return false;
       for (const node of nodes) {
         if (node.id === id) {
@@ -1413,7 +2235,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   updateRopeParams: (id, params) => {
     get().recordInteraction('node-params');
     const newScene = cloneSceneGraph(get().sceneGraph);
-    const traverse = (nodes: any[]) => {
+    const traverse = (nodes: SceneNode[]) => {
       if (!nodes) return false;
       for (const node of nodes) {
         if (node.id === id) {
@@ -1433,7 +2255,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   updateNodeComposite: (id, params) => {
     get().recordInteraction('node-composite');
     const newScene = cloneSceneGraph(get().sceneGraph);
-    const findAndMutate = (nodes: any[]): boolean => {
+    const findAndMutate = (nodes: SceneNode[]): boolean => {
       if (!nodes) return false;
       for (const n of nodes) {
         if (n.id === id) {
@@ -1459,7 +2281,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   renameNode: (id, newName) => {
     get().prepareForDiscreteChange();
     const newScene = cloneSceneGraph(get().sceneGraph);
-    const traverse = (nodes: any[]) => {
+    const traverse = (nodes: SceneNode[]) => {
       if (!nodes) return false;
       for (const node of nodes) {
         if (node.id === id) {
@@ -1478,7 +2300,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   updateNodePos: (id, newPos) => {
     get().recordInteraction('node-pos');
     const newScene = cloneSceneGraph(get().sceneGraph);
-    const traverse = (nodes: any[]) => {
+    const traverse = (nodes: SceneNode[]) => {
       if (!nodes) return false; for (const node of nodes) {
         if (node.id === id) {
           if (isAllMeshNode(node)) {
@@ -1509,7 +2331,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     get().recordInteraction('node-rotation');
     const rotateAroundCOM = rotateAroundCOMOverride ?? get().rotateAroundCOM ?? true;
     const newScene = cloneSceneGraph(get().sceneGraph);
-    const traverse = (nodes: any[]) => {
+    const traverse = (nodes: SceneNode[]) => {
       if (!nodes) return false;
       for (const node of nodes) {
         if (node.id === id) {
@@ -1568,7 +2390,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     const STRUCTURAL = ['size', 'vertices', 'faces', 'renderVertices', 'type', 'pos', 'euler', 'quat', 'csg'] as const;
     const structural = STRUCTURAL.some(k => (updates as Record<string, unknown>)[k] !== undefined);
     const newScene = cloneSceneGraph(get().sceneGraph);
-    const traverse = (nodes: any[]) => {
+    const traverse = (nodes: SceneNode[]) => {
       if (!nodes) return false; for (const node of nodes) {
         if (node.id === id && node.geoms?.length > 0) {
           if (id.includes('gear')) {
@@ -1608,7 +2430,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
             if (geomIndex !== undefined && geomIndex >= 0 && geomIndex < node.geoms.length) {
               targetGeom = node.geoms[geomIndex];
             } else {
-              const mainGeom = node.geoms.find((g: any) => g.type === 'sphere' || g.type === 'box' || g.type === 'cylinder');
+              const mainGeom = node.geoms.find((g: SceneGeom) => g.type === 'sphere' || g.type === 'box' || g.type === 'cylinder');
               if (mainGeom) {
                 targetGeom = mainGeom;
               }
@@ -1620,12 +2442,20 @@ export const useStore = create<PhysicsState>()((set, get) => ({
               const newLen = Math.sqrt((newFromto[3]-newFromto[0])**2 + (newFromto[4]-newFromto[1])**2 + (newFromto[5]-newFromto[2])**2) || 1.0;
               const ratio = newLen / oldLen;
               if (node.children) {
-                node.children.forEach((child: any) => {
+                node.children.forEach((child: SceneNode) => {
                   child.pos = [child.pos[0] * ratio, child.pos[1] * ratio, child.pos[2] * ratio];
                 });
               }
             }
             Object.assign(targetGeom, updates);
+            /*
+              A cut is stated as a face and a depth, so resizing or moving the
+              shape it cuts into has to move the cut with it — a hole 10 mm into
+              the top of a block is still 10 mm into the top when the block gets
+              taller. Only geoms carrying that intent are touched; a negative
+              placed by hand keeps its own numbers. See reconcileCuts.
+            */
+            if (structural) reconcileCuts(node);
           }
           return true;
         }
@@ -1641,7 +2471,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   updateGearTeeth: (id, teeth) => {
     get().recordInteraction('gear-teeth');
     const newScene = cloneSceneGraph(get().sceneGraph);
-    const traverse = (nodes: any[]): boolean => {
+    const traverse = (nodes: SceneNode[]): boolean => {
       if (!nodes) return false;
       for (const node of nodes) {
         if (node.id === id && node.geoms?.length > 0) {
@@ -1668,11 +2498,11 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   addPusherPeg: (gearId) => {
     get().prepareForDiscreteChange();
     const newScene = cloneSceneGraph(get().sceneGraph);
-    const traverse = (nodes: any[]): boolean => {
+    const traverse = (nodes: SceneNode[]): boolean => {
       if (!nodes) return false;
       for (const node of nodes) {
         if (node.id === gearId && node.geoms?.length > 0) {
-          const hasPeg = node.geoms.some((g: any) => g.name.includes('peg'));
+          const hasPeg = node.geoms.some((g: SceneGeom) => g.name.includes('peg'));
           if (!hasPeg) {
             const radius = node.geoms[0].size[0];
             node.geoms.push({
@@ -1699,11 +2529,11 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   deletePusherPeg: (gearId) => {
     get().prepareForDiscreteChange();
     const newScene = cloneSceneGraph(get().sceneGraph);
-    const traverse = (nodes: any[]): boolean => {
+    const traverse = (nodes: SceneNode[]): boolean => {
       if (!nodes) return false;
       for (const node of nodes) {
         if (node.id === gearId && node.geoms?.length > 1) {
-          node.geoms = node.geoms.filter((g: any) => !g.name.includes('peg'));
+          node.geoms = node.geoms.filter((g: SceneGeom) => !g.name.includes('peg'));
           return true;
         }
         if (traverse(node.children)) return true;
@@ -1718,11 +2548,11 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   updatePusherPeg: (gearId, updates) => {
     get().recordInteraction('pusher-peg');
     const newScene = cloneSceneGraph(get().sceneGraph);
-    const traverse = (nodes: any[]): boolean => {
+    const traverse = (nodes: SceneNode[]): boolean => {
       if (!nodes) return false;
       for (const node of nodes) {
         if (node.id === gearId && node.geoms?.length > 1) {
-          const peg = node.geoms.find((g: any) => g.name.includes('peg'));
+          const peg = node.geoms.find((g: SceneGeom) => g.name.includes('peg'));
           if (peg) {
             if (updates.offset !== undefined) {
               peg.pos = [updates.offset, 0, peg.pos[2]];
@@ -1746,7 +2576,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   updateNodeJoint: (id, updates) => {
     get().recordInteraction('node-joint');
     const newScene = cloneSceneGraph(get().sceneGraph);
-    const traverse = (nodes: any[]) => {
+    const traverse = (nodes: SceneNode[]) => {
       if (!nodes) return false; for (const node of nodes) {
         if (node.id === id && node.joints?.length > 0) {
           Object.assign(node.joints[0], updates);
@@ -1764,7 +2594,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   updateNodeScript: (id, script) => {
     get().recordInteraction('node-script');
     const newScene = cloneSceneGraph(get().sceneGraph);
-    const traverse = (nodes: any[]) => {
+    const traverse = (nodes: SceneNode[]) => {
       if (!nodes) return false;
       for (const node of nodes) {
         if (node.id === id) {
@@ -1786,7 +2616,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   updateNodeScad: (id, scad, compiledData, skipRecompile) => {
     get().recordInteraction('node-scad');
     const newScene = cloneSceneGraph(get().sceneGraph);
-    const traverse = (nodes: any[]) => {
+    const traverse = (nodes: SceneNode[]) => {
       if (!nodes) return false;
       for (const node of nodes) {
         if (node.id === id || node.name === id) {
@@ -1794,7 +2624,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
           if (!node.geoms) {
             node.geoms = [];
           }
-          let meshGeom = node.geoms.find((g: any) => g.type === 'mesh');
+          let meshGeom = node.geoms.find((g: SceneGeom) => g.type === 'mesh');
           if (!meshGeom && node.geoms.length > 0) {
             meshGeom = node.geoms[0];
           }
@@ -1844,14 +2674,33 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     const newScene = cloneSceneGraph(get().sceneGraph);
     const node = findNode(newScene.nodes, nodeId);
     if (!node || !node.geoms || geomIndex < 0 || geomIndex >= node.geoms.length) return;
-    node.geoms = node.geoms.filter((_: any, i: number) => i !== geomIndex);
+    node.geoms = node.geoms.filter((_: SceneGeom, i: number) => i !== geomIndex);
     // Losing the last boolean operator leaves an ordinary compound body; drop
     // the derived mesh with it so the primitives come back into view.
-    if (node.csgEnabled && !node.geoms.some((g: any) => !g.csgDerived && (g.csg === 'difference' || g.csg === 'intersection'))) {
-      node.geoms = node.geoms.filter((g: any) => !g.csgDerived);
+    if (node.csgEnabled && !node.geoms.some((g: SceneGeom) => !g.csgDerived && (g.csg === 'difference' || g.csg === 'intersection'))) {
+      node.geoms = node.geoms.filter((g: SceneGeom) => !g.csgDerived);
       node.csgEnabled = false;
       delete node.csgHash;
     }
+    set({ sceneGraph: newScene });
+    get().recompile(newScene, nodeId, false);
+  },
+
+  insetNodeGeoms: (nodeId, factor) => {
+    const target = findNode(get().sceneGraph.nodes, nodeId);
+    if (!target || insetNegatives(target, factor).length === 0) return;
+    get().prepareForDiscreteChange();
+    const newScene = cloneSceneGraph(get().sceneGraph);
+    const node = findNode(newScene.nodes, nodeId);
+    if (!node) return;
+    const copies = insetNegatives(node, factor);
+    if (copies.length === 0) return;
+
+    node.geoms = [...node.geoms, ...copies];
+    node.csgEnabled = true;
+    if (node.csgCollision === undefined) node.csgCollision = 'auto';
+    if (node.csgSectors === undefined) node.csgSectors = CSG_DEFAULT_SECTORS;
+
     set({ sceneGraph: newScene });
     get().recompile(newScene, nodeId, false);
   },
@@ -1865,12 +2714,12 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     // shape would leave it with no positive geometry at all: nothing to render,
     // nothing to collide, and a MuJoCo body with no geoms. Refuse instead.
     if (csg !== 'union') {
-      const positivesLeft = node.geoms.filter((g: any, i: number) =>
+      const positivesLeft = node.geoms.filter((g: SceneGeom, i: number) =>
         !g.csgDerived && i !== geomIndex && (!g.csg || g.csg === 'union')).length;
       if (positivesLeft === 0) return;
     }
     node.geoms[geomIndex].csg = csg;
-    const hasOps = node.geoms.some((g: any) => !g.csgDerived && (g.csg === 'difference' || g.csg === 'intersection'));
+    const hasOps = node.geoms.some((g: SceneGeom) => !g.csgDerived && (g.csg === 'difference' || g.csg === 'intersection'));
     node.csgEnabled = hasOps;
     if (hasOps) {
       if (node.csgCollision === undefined) node.csgCollision = 'auto';
@@ -1878,7 +2727,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     } else {
       // Back to an ordinary compound body — the stale boolean mesh would
       // otherwise keep drawing over the primitives.
-      node.geoms = node.geoms.filter((g: any) => !g.csgDerived);
+      node.geoms = node.geoms.filter((g: SceneGeom) => !g.csgDerived);
       delete node.csgHash;
     }
     set({ sceneGraph: newScene });
@@ -1891,10 +2740,12 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     const newScene = cloneSceneGraph(get().sceneGraph);
     const node = findNode(newScene.nodes, nodeId);
     if (!node) return;
-    const source = (node.geoms || []).filter((g: any) => !g.csgDerived);
+    const source = (node.geoms || []).filter((g: SceneGeom) => !g.csgDerived);
     node.geoms = [...source, ...result.geoms];
     node.csgHash = result.hash;
-    node.csgScad = result.scad;
+    // Summarized, not stored whole: a lattice mesh operand is megabytes of
+    // polyhedron literal, and this field is shown, undone and saved.
+    node.csgScad = scadForDisplay(result.scad);
     node.csgVolume = result.volume;
     node.csgHullVolume = result.hullVolume;
     node.csgCentroid = result.centroid;
@@ -1920,7 +2771,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   updateNode: (id, updates) => {
     get().recordInteraction('node');
     const newScene = cloneSceneGraph(get().sceneGraph);
-    const traverse = (nodes: any[]): boolean => {
+    const traverse = (nodes: SceneNode[]): boolean => {
       for (const node of nodes) {
         if (node.id === id) {
           Object.assign(node, updates);
@@ -1947,7 +2798,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   updateNodeJointsList: (id, joints) => {
     get().recordInteraction('node-joints-list');
     const newScene = cloneSceneGraph(get().sceneGraph);
-    const traverse = (nodes: any[]): boolean => {
+    const traverse = (nodes: SceneNode[]): boolean => {
       if (!nodes) return false;
       for (const node of nodes) {
         if (node.id === id) {
@@ -1967,7 +2818,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   deleteNode: (id) => {
     get().prepareForDiscreteChange();
     const newScene = cloneSceneGraph(get().sceneGraph);
-    const traverseAndRemove = (nodes: any[]): boolean => {
+    const traverseAndRemove = (nodes: SceneNode[]): boolean => {
       if (!nodes) return false;
       for (let i = 0; i < nodes.length; i++) {
         if (nodes[i].id === id) {
@@ -2009,12 +2860,12 @@ export const useStore = create<PhysicsState>()((set, get) => ({
       }
     }
 
-    let geomType: any = type;
+    let geomType: GeomType = type as GeomType;
     let size: number[] = [0.2];
     let rgba = [0.5, 0.5, 0.5, 1];
     let mass = 1;
-    let joints: any[] = [];
-    let geoms: any[] = [];
+    let joints: SceneJoint[] = [];
+    let geoms: SceneGeom[] = [];
     
     const isChildJoint = isChild;
     
@@ -2256,6 +3107,9 @@ export const useStore = create<PhysicsState>()((set, get) => ({
           vertices,
           faces,
           renderVertices,
+          // The cage's own geom, named as such from the start — a body that
+          // later carries a cut has more than one mesh on it. See applyLattice.
+          latticeGeom: true,
         }];
         joints = [{ name: `${id}_free`, type: 'free' }];
       } else if (type === 'ring') {
@@ -2365,11 +3219,11 @@ export const useStore = create<PhysicsState>()((set, get) => ({
       newScene.nodes.push(newNode);
     }
     
-    const selectId = typeof window !== 'undefined' && (window as any).NO_SELECT ? null : id;
+    const selectId = typeof window !== 'undefined' && (window as PhysicsWindow).NO_SELECT ? null : id;
     get().recompile(newScene, selectId);
   },
   
-  recompile: async (overrideScene?: SceneGraph, overrideSelectedId?: string | null, forceReset?: boolean, _keepPreset?: boolean) => {
+  recompile: async (overrideScene?: SceneGraph, overrideSelectedId?: string | null, forceReset?: boolean) => {
     /*
      * We only debounce if it's NOT a force reset (which is used by presets/loaders).
      *
@@ -2385,21 +3239,28 @@ export const useStore = create<PhysicsState>()((set, get) => ({
      * the other thing we do not want.
      */
     const token = ++recompileToken;
+    // Counted from the CALL, not from the build: the debounce below is fifty
+    // milliseconds, and the undo snapshot is offered for flushing on the very
+    // next tick. Counting any later and the snapshot is gone before the change
+    // it belongs to has even started compiling.
+    recompilesInFlight++;
+    let counted = true;
+    const done = () => { if (counted) { counted = false; recompilesInFlight = Math.max(0, recompilesInFlight - 1); } };
     if (!forceReset) {
-      if ((window as any)._recompileTimeoutId) {
-        clearTimeout((window as any)._recompileTimeoutId);
-        (window as any)._recompileWake?.();
+      if ((window as PhysicsWindow)._recompileTimeoutId) {
+        clearTimeout((window as PhysicsWindow)._recompileTimeoutId);
+        (window as PhysicsWindow)._recompileWake?.();
       }
       await new Promise<void>(resolve => {
-        (window as any)._recompileWake = resolve;
-        (window as any)._recompileTimeoutId = setTimeout(resolve, 50);
+        (window as PhysicsWindow)._recompileWake = resolve;
+        (window as PhysicsWindow)._recompileTimeoutId = setTimeout(resolve, 50);
       });
-      (window as any)._recompileWake = null;
-      if (token !== recompileToken) return;
+      (window as PhysicsWindow)._recompileWake = null;
+      if (token !== recompileToken) { done(); return; }
     }
 
     if (typeof window !== 'undefined') {
-      (window as any).DISABLE_USEFRAME = false;
+      (window as PhysicsWindow).DISABLE_USEFRAME = false;
     }
     const { gravityZ, windX, windY, density, floorFriction, floorBounce } = get();
     const sceneGraph = overrideScene ?? get().sceneGraph;
@@ -2431,13 +3292,17 @@ export const useStore = create<PhysicsState>()((set, get) => ({
           delete updates.sceneGraph;
         }
         set(updates);
+        done();
+        // The scene has moved at last; this is the moment the snapshot taken
+        // before it is worth keeping.
+        get().flushPendingUndo();
       });
     };
 
     try {
       const xml = compileToMJCF(sceneGraph, gravityZ, floorFriction, windX, windY, density, floorBounce);
       if (typeof window !== 'undefined') {
-        (window as any).compiledXML = xml;
+        (window as PhysicsWindow).compiledXML = xml;
       }
 
       // Proactively recycle before the ceiling is ever reached, rather than
@@ -2474,13 +3339,14 @@ export const useStore = create<PhysicsState>()((set, get) => ({
           freshClient.setEnv(windX, windY);
           const xml = compileToMJCF(sceneGraph, gravityZ, floorFriction, windX, windY, density, floorBounce);
           const built = await freshClient.build(xml, sceneGraph, false);
-          if (!built.ok) throw new Error(built.error || 'Unknown physics worker build error');
+          if (!built.ok) throw new Error(built.error || 'Unknown physics worker build error', { cause: e });
           applyBuilt(built);
           return;
         } catch (recoveryError) {
           console.error('Worker respawn recovery failed, falling back to full page reload:', recoveryError);
           alert('The physics engine ran out of memory and could not recover, even after restarting the physics worker.\n\nThe page will reload to free memory — your scene will be lost unless you saved it first.');
           window.location.reload();
+          done();
           return;
         }
       }
@@ -2488,6 +3354,8 @@ export const useStore = create<PhysicsState>()((set, get) => ({
       const updates: Partial<PhysicsState> = { sceneGraph, lastCompileError: msg };
       if (overrideSelectedId !== undefined) updates.selectedNodeId = overrideSelectedId;
       set(updates);
+      done();
+      get().flushPendingUndo();
     }
   },
 

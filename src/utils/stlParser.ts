@@ -588,7 +588,7 @@ export function parseSTL(
   options: STLParseOptions = {}
 ): ParsedSTLResult {
   const loader = new STLLoader();
-  const geometry = loader.parse(data as any);
+  const geometry = loader.parse(data);
   const positionAttr = geometry.attributes.position;
 
   if (!positionAttr) {

@@ -74,8 +74,19 @@ export const JobPauseBanner: React.FC<{
       {toolChange && showZTools && (
         <p className="text-[11px] leading-relaxed">
           The new bit is a different length from the one that came out, so the machine's Z zero no
-          longer describes where the tip is. Touch off again before resuming — jog the tip down onto
-          the work and take zero from there, or probe it on the plate.
+          longer describes where the tip is. Touch off again before resuming: jog the tip down onto
+          the work and take zero from there, or probe it on the plate. The machine is free to move
+          while it waits: jog it where you like, and resuming lifts back to the job's own clear
+          height before it carries on.
+        </p>
+      )}
+
+      {/* The same freedom, for a stop that needs no touching off: the sheet
+          being swapped is the one the tool is parked over. */}
+      {machineState.status === 'PAUSED_MATERIAL' && (
+        <p className="text-[11px] leading-relaxed">
+          The machine is stopped and free to move. Jog it where you like. Resuming lifts back to the
+          job's own clear height before it carries on.
         </p>
       )}
 
@@ -106,7 +117,7 @@ export const JobPauseBanner: React.FC<{
             title="Only if the Z datum is already right for the tool now in the spindle"
             className="px-3 py-1.5 text-amber-700 dark:text-amber-400 hover:underline text-xs font-semibold cursor-pointer"
           >
-            Z is already set — let me resume
+            Z is already set, let me resume
           </button>
         )}
 
@@ -162,12 +173,14 @@ export const JobResumeBanner: React.FC<{
 
   const why =
     resume.reason === 'alarm'
-      ? 'The controller alarmed — a limit switch, or a reset part way through.'
+      ? 'The controller alarmed (a limit switch, or a reset part way through).'
       : resume.reason === 'disconnected'
         ? 'The connection to the machine dropped.'
         : 'The job was stopped.';
 
-  const depth = preview?.state.position.z;
+  // What the preamble will actually do, not what the program was doing when it
+  // stopped: a resume onto a tool change makes no descent at all.
+  const depth = preview?.descendsToZ;
   const done = Math.round((resume.fromLine / Math.max(1, resume.totalLines)) * 100);
 
   const go = () => {
@@ -183,7 +196,7 @@ export const JobResumeBanner: React.FC<{
           <h4 className="font-bold text-sm">Job stopped {done}% of the way through</h4>
           <p className="text-xs leading-relaxed font-semibold">
             {why} It reached line {resume.fromLine.toLocaleString()} of{' '}
-            {resume.totalLines.toLocaleString()} — it can be picked up from there instead of
+            {resume.totalLines.toLocaleString()}. It can be picked up from there instead of
             starting again.
           </p>
         </div>
@@ -192,10 +205,12 @@ export const JobResumeBanner: React.FC<{
       {showZTools && (
         <p className="text-[11px] leading-relaxed">
           Before resuming: clear the tool from the work by hand, and re-home the machine if it
-          alarmed. If the bit was changed, its length is different and the Z zero is now wrong —
-          touch off again first.
-          {depth !== null && depth !== undefined && (
+          alarmed. If the bit was changed, its length is different and the Z zero is now wrong.
+          Touch off again first.
+          {depth !== null && depth !== undefined ? (
             <> Resuming will move over the stopping point and descend to <strong>Z{depth.toFixed(2)} mm</strong>.</>
+          ) : (
+            <> Resuming will move over the stopping point without going back down into the cut.</>
           )}
         </p>
       )}
@@ -335,7 +350,7 @@ export const JobTransport: React.FC<{
       {running ? (
         <button
           onClick={() => webSerialManager.pauseJob()}
-          title="Feed hold — decelerates and stops without losing position, so the cut resumes exactly where it stopped"
+          title="Feed hold. Decelerates and stops without losing position, so the cut resumes exactly where it stopped"
           className={`${base} bg-amber-500 hover:bg-amber-600 text-slate-950`}
         >
           <Pause className={icon} />
@@ -365,7 +380,7 @@ export const JobTransport: React.FC<{
       </button>
       <button
         onClick={() => webSerialManager.cancelJob()}
-        title="Soft reset. This stops the machine now and loses the position — the line it reached is kept, so the job can be resumed once the machine has been re-homed and re-zeroed"
+        title="Soft reset. This stops the machine now and loses the position. The line it reached is kept, so the job can be resumed once the machine has been re-homed and re-zeroed"
         className={`${base} bg-red-600 hover:bg-red-700 text-white`}
       >
         <Square className={icon} />
@@ -431,7 +446,7 @@ export const JobPreflight: React.FC<{
           {tool}
           {secondTool && (
             <span className="text-slate-500 dark:text-slate-400">
-              {' '}— the job stops partway to swap to {secondTool}
+              {' '}(the job stops partway to swap to {secondTool})
             </span>
           )}
         </span>
@@ -490,7 +505,7 @@ export const JobPreflight: React.FC<{
           {machineState.motion.softLimits && (
             <p className="text-[11px] leading-relaxed text-red-400/80">
               Soft limits are on, so the controller will alarm and stop rather than drive into the
-              stop — but it will do so partway through, with the work already cut into.
+              stop, but it will do so partway through, with the work already cut into.
             </p>
           )}
         </div>
@@ -573,7 +588,7 @@ export const JobProgress: React.FC<{ machineState: MachineState }> = ({ machineS
         title={
           estimate !== null
             ? 'Elapsed against the estimated run time'
-            : 'Lines sent to the controller — the job did not quote a run time'
+            : 'Lines sent to the controller (the job did not quote a run time)'
         }
       >
         <div
@@ -636,13 +651,13 @@ export const JobOverrides: React.FC<{ machineState: MachineState }> = ({ machine
         {percent}%
       </span>
       <div className="flex gap-1">
-        <button className={step} onClick={() => nudge(-10)} title={`${hint} — down 10%`}>−10</button>
-        <button className={step} onClick={() => nudge(-1)} title={`${hint} — down 1%`}>−1</button>
-        <button className={step} onClick={reset} title={`${hint} — back to what the program asked for`}>
+        <button className={step} onClick={() => nudge(-10)} title={`${hint}: down 10%`}>−10</button>
+        <button className={step} onClick={() => nudge(-1)} title={`${hint}: down 1%`}>−1</button>
+        <button className={step} onClick={reset} title={`${hint}: back to what the program asked for`}>
           <RotateCcw className="w-3 h-3" />
         </button>
-        <button className={step} onClick={() => nudge(1)} title={`${hint} — up 1%`}>+1</button>
-        <button className={step} onClick={() => nudge(10)} title={`${hint} — up 10%`}>+10</button>
+        <button className={step} onClick={() => nudge(1)} title={`${hint}: up 1%`}>+1</button>
+        <button className={step} onClick={() => nudge(10)} title={`${hint}: up 10%`}>+10</button>
       </div>
     </div>
   );
@@ -665,12 +680,12 @@ export const JobOverrides: React.FC<{ machineState: MachineState }> = ({ machine
         machineState.overrides.spindle,
         (by) => webSerialManager.nudgeSpindleOverride(by),
         () => webSerialManager.resetSpindleOverride(),
-        'Spindle speed — only on a machine whose controller owns the spindle'
+        'Spindle speed (only on a machine whose controller owns the spindle)'
       )}
       <p className="text-[10px] leading-relaxed text-slate-500">
         Applied to the motion already in the buffer, so a cut that is chattering or burning can be
         backed off without stopping the job. Chatter or burn marks mean the feed and the speed are
-        wrong for each other — trim here to find the pair that works, then set them for next time.
+        wrong for each other. Trim here to find the pair that works, then set them for next time.
       </p>
     </div>
   );

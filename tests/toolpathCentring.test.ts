@@ -22,10 +22,12 @@ function dome(): SceneGraph {
         name: 'dome',
         type: 'body',
         pos: [0, 0, 0],
-        geoms: [{ type: 'sphere', size: [0.05], pos: [0, 0, 0] } as any],
-      } as any,
+        geoms: [{ name: 'dome_geom', type: 'sphere', size: [0.05], pos: [0, 0, 0] }],
+        joints: [],
+        children: [],
+      },
     ],
-  } as any;
+  };
 }
 
 /** Stock sizes and stepovers chosen so the pass pitch does not divide evenly. */

@@ -14,15 +14,24 @@
  */
 
 import { saveCloudPreset, removeCloudPreset } from './cloudSync';
+import type { SceneNode } from '../types/scene';
+import type { NoteCard } from './noteCards';
 
 export const USER_PRESETS_KEY = 'physics_user_presets';
 
 /** A saved scene: the graph, plus the annotations shown alongside it. */
+/** The fields of a copilot chat message a preset carries; the panel's own type has more. */
+export interface SavedCopilotMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+}
+
 export interface UserPreset {
-  nodes?: any[];
-  noteCards?: any[];
-  copilotMessages?: any[];
-  [key: string]: any;
+  nodes?: SceneNode[];
+  noteCards?: NoteCard[];
+  copilotMessages?: SavedCopilotMessage[];
+  [key: string]: unknown;
 }
 
 export function readUserPresets(): Record<string, UserPreset> {
