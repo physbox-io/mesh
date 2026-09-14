@@ -1375,7 +1375,7 @@ export function useMCPBridge() {
         }
 
         case 'BODY_CUT': {
-          const { targetId, shape, at, normal, diameterMm, widthMm, lengthMm, depthMm } = msg as Msg<{ targetId: string }>;
+          const { targetId, shape, at, normal, diameterMm, widthMm, lengthMm, depthMm, threadPitchMm } = msg as Msg<{ targetId: string }>;
           const node = findNodeInScene(store.sceneGraph.nodes, targetId);
           if (!node) return { ok: false, error: `No object with id '${targetId}'` };
           const kind = shape === 'slot' || shape === 'box' ? 'box'
@@ -1405,6 +1405,9 @@ export function useMCPBridge() {
             store.setCutSection(targetId, index, [diameterMm / 2000]);
           }
           if (typeof depthMm === 'number') store.setCutDepth(targetId, index, depthMm);
+          // A thread only means something on a round hole; on a slot or a dish
+          // the store drops it, and the reply's missing threadPitchMm says so.
+          if (typeof threadPitchMm === 'number' && kind === 'cylinder') store.setCutThread(targetId, index, threadPitchMm);
 
           const cut = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId)?.geoms?.[index];
           return {
@@ -1418,6 +1421,7 @@ export function useMCPBridge() {
             // material, and on a stepped or curved part that moves.
             atMm: (cut?.cutAt ?? []).map((v: number) => Math.round(v * 1000 * 1000) / 1000),
             normal: cut?.cutNormal,
+            ...(cut?.thread?.pitch ? { threadPitchMm: Math.round(cut.thread.pitch * 1000 * 1000) / 1000 } : {}),
             depthMm: cut?.cutDepth ? Math.round(cut.cutDepth * 1000 * 1000) / 1000 : 0,
             through: !(cut?.cutDepth && cut.cutDepth > 0),
           };
@@ -2091,6 +2095,7 @@ export function useMCPBridge() {
               faces:       'number[] — flat array of triangle indices for mesh type: [i0,j0,k0, i1,j1,k1, ...]',
               dynamic:     'boolean — if true, mesh participates in simulation and collision; requires renderVertices',
               csg:         `'union'|'difference'|'intersection' — boolean modifier (default 'union'). A geom marked 'difference' is CUT OUT of the union of the body's other geoms instead of being added to it: one ellipsoid plus a slimmer ellipsoid marked 'difference' is a ring. The body is compiled to a single mesh; set csgCollision on the body to choose how it collides.`,
+              thread:      `{ pitch: number } — on a cylinder marked 'difference' only: the hole is tapped, pitch in METRES (M6 coarse is 0.001). The cylinder's radius is the thread's major radius. Easier through physics_cut's threadPitchMm.`,
               role:        `'visual'|'collision' — 'visual' draws but never collides (contype/conaffinity forced to 0), 'collision' simulates but is never drawn. Default (omitted) is both.`,
               renderVertices: 'number[] — dynamic mesh only: flat [x0,y0,z0,...] in raw MuJoCo Z-up space. Convert from Y-up vertices: (x,y,z)→(x,-z,y). Do NOT subtract centroid — MuJoCo recenters internally.',
             },

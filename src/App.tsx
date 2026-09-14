@@ -863,7 +863,8 @@ function App() {
     setIsImportImageModalOpen(true);
   }, []);
   const [presetNameInput, setPresetNameInput] = useState('');
-  const [activeGeomIndex, setActiveGeomIndex] = useState(0);
+  const activeGeomIndex = useStore((s) => s.activeGeomIndex);
+  const setActiveGeomIndex = useStore((s) => s.setActiveGeomIndex);
   const [noteCards, setNoteCards] = useState<NoteCard[]>(() => {
     const initialPreset = useStore.getState().activePreset;
     if (initialPreset && !initialPreset.startsWith('user:')) {

@@ -15,6 +15,7 @@ import {
   detectHoleAxis, decomposeAroundAxis,
   positiveBounds, sourcePositiveBounds, geomBounds, clipSegmentsToBox, geomMatrixOf,
   resolveCsgGeoms, cutGeometry, cutDepthOf, reconcileCuts, surfaceUnder, pickCutSpot,
+  threadProfile, threadSlices, THREAD_DEPTH_PER_PITCH, THREAD_SLICES_PER_TURN, THREAD_MAX_SLICES, THREAD_MIN_SLICES_PER_TURN,
 } from '../src/utils/csg';
 import type { SceneGeom, SceneNode } from '../src/types/scene';
 
@@ -708,5 +709,50 @@ describe('source and compiled bounds', () => {
     expect(compiled.min[0]).toBeCloseTo(source.min[0] - 0.01, 9);
     expect(compiled.min[1]).toBeCloseTo(source.min[1] + 0.02, 9);
     expect(compiled.min[2]).toBeCloseTo(source.min[2], 9);
+  });
+});
+
+describe('threaded holes', () => {
+  it('cuts the ISO form: major radius at the crest, minor radius at the root, 60° flanks', () => {
+    // M6 × 1: major 3 mm, internal minor 3 − 0.5413 = 2.4587 mm.
+    const pts = threadProfile(0.003, 0.001, 64);
+    const radii = pts.map(([x, y]) => Math.hypot(x, y));
+    expect(Math.max(...radii)).toBeCloseTo(0.003, 6);
+    expect(Math.min(...radii)).toBeCloseTo(0.003 - THREAD_DEPTH_PER_PITCH * 0.001, 6);
+    // The crest flat is the first eighth of the turn: every one of those
+    // points is at the major radius.
+    for (let i = 0; i < 8; i++) expect(radii[i]).toBeCloseTo(0.003, 6);
+    // A flank drops the full depth over 5/16 of a pitch — the slope of a 60°
+    // thread's flank — so midway down it is halfway.
+    const midFlank = radii[Math.round(64 * (1 / 8 + 5 / 32))];
+    expect(midFlank).toBeCloseTo(0.003 - THREAD_DEPTH_PER_PITCH * 0.001 / 2, 4);
+  });
+
+  it('emits one twisted extrusion, a full turn per pitch, right-handed', () => {
+    const scad = primitiveToScad({ name: 'tap', type: 'cylinder', size: [0.003, 0.01], csg: 'difference', thread: { pitch: 0.001 } } as SceneGeom);
+    expect(scad).toContain('linear_extrude(height=0.02');
+    // 20 mm at 1 mm pitch is twenty turns, turned the negative way — which in
+    // OpenSCAD's convention is the right-hand helix.
+    expect(scad).toContain('twist=-7200');
+    expect(scad).toContain(`slices=${20 * THREAD_SLICES_PER_TURN}`);
+    // A fine pitch through a thick part is thinned rather than refused.
+    expect(threadSlices(20)).toBe(20 * THREAD_SLICES_PER_TURN);
+    expect(threadSlices(200)).toBeLessThanOrEqual(Math.max(THREAD_MAX_SLICES, 200 * THREAD_MIN_SLICES_PER_TURN));
+    expect(threadSlices(200)).toBeGreaterThanOrEqual(200 * THREAD_MIN_SLICES_PER_TURN);
+    expect(scad).not.toContain('cylinder(');
+    // A plain hole is untouched by the field being absent.
+    expect(primitiveToScad({ name: 'plain', type: 'cylinder', size: [0.003, 0.01], csg: 'difference' } as SceneGeom)).toContain('cylinder(');
+  });
+
+  it('changes the boolean hash, so tapping a hole recompiles it', () => {
+    const plain = body([
+      { name: 'block', type: 'box', size: [0.02, 0.02, 0.02] },
+      { name: 'hole', type: 'cylinder', size: [0.003, 0.03], csg: 'difference' },
+    ], { csgEnabled: true });
+    const tapped = body([
+      { name: 'block', type: 'box', size: [0.02, 0.02, 0.02] },
+      { name: 'hole', type: 'cylinder', size: [0.003, 0.03], csg: 'difference', thread: { pitch: 0.001 } },
+    ], { csgEnabled: true });
+    expect(csgHashOf(plain)).not.toBe(csgHashOf(tapped));
   });
 });

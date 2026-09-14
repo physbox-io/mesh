@@ -82,6 +82,20 @@ export interface SceneGeom {
   /** Depth in metres into the material from `cutAt`. 0 or absent cuts through. */
   cutDepth?: number;
   /**
+   * A modifier on a round cut: the hole is tapped. `pitch` is the thread pitch
+   * in metres; the geom's own radius is the thread's MAJOR radius (the size a
+   * bolt is named by — M6 is a 6 mm major diameter), and the minor diameter
+   * follows from the pitch by the ISO 60° form. Only the OpenSCAD emitter reads
+   * it: the cutter becomes a helical solid instead of a plain cylinder, and
+   * everything downstream sees the boolean result as usual.
+   *
+   * One field rather than a `modifiers` list because every modifier a hole can
+   * take — a thread, a countersink, a counterbore — is a different thing with
+   * different numbers, and they are not stacked in an order that matters. Each
+   * gets its own optional field beside this one.
+   */
+  thread?: { pitch: number };
+  /**
    * This is the geom the body's lattice cage owns — the one `applyLattice`
    * rewrites on every edit.
    *

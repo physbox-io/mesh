@@ -1050,6 +1050,16 @@ export interface PhysicsState {
   setCutDepth: (nodeId: string, geomIndex: number, mm: number) => void;
   /** Resizes a cut's cross-section, in millimetres, and re-derives its length. */
   setCutSection: (nodeId: string, geomIndex: number, section: number[]) => void;
+  /** Taps a round cut with a thread of this pitch in millimetres, or null to make it plain again. */
+  setCutThread: (nodeId: string, geomIndex: number, pitchMm: number | null) => void;
+  /**
+   * Which of the selected body's geoms the sidebar is showing, and the one a
+   * gesture acts on: G with a cut selected here moves the cut rather than the
+   * body. Reset to 0 — the body's first shape — whenever the body itself is
+   * picked.
+   */
+  activeGeomIndex: number;
+  setActiveGeomIndex: (index: number) => void;
   updateNodeScad: (id: string, scadCode: string, compiledData: { vertices: number[], faces: number[], renderVertices: number[] }, skipRecompile?: boolean) => void;
   // --- CSG (boolean modifiers) ---
   deleteNodeGeom: (nodeId: string, geomIndex: number) => void;
@@ -2035,6 +2045,14 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   setCutDepth: (nodeId, geomIndex, mm) => reshapeCut(get, set, nodeId, geomIndex, 'cut-depth', (geom) => {
     geom.cutDepth = Math.max(0, mm) / 1000;
   }),
+
+  setCutThread: (nodeId, geomIndex, pitchMm) => reshapeCut(get, set, nodeId, geomIndex, 'cut-thread', (geom) => {
+    if (geom.type !== 'cylinder' || pitchMm === null || !(pitchMm > 0)) delete geom.thread;
+    else geom.thread = { pitch: pitchMm / 1000 };
+  }),
+
+  activeGeomIndex: 0,
+  setActiveGeomIndex: (index) => set({ activeGeomIndex: index }),
 
   setCutSection: (nodeId, geomIndex, section) => reshapeCut(get, set, nodeId, geomIndex, 'cut-section', (geom) => {
     const size = [...(geom.size || [])];

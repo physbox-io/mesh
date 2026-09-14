@@ -34,7 +34,7 @@
 //   not happen.
 // ---------------------------------------------------------------------------
 
-import { Circle, Square, Donut, Trash2 } from 'lucide-react';
+import { Circle, Square, Donut, Trash2, Move } from 'lucide-react';
 import { NumberInput } from '@physbox-io/ui';
 import { useStore } from '../store/useStore';
 import { cutDepthOf, sourcePositiveBounds } from '../utils/csg';
@@ -45,6 +45,15 @@ const SHAPES = [
   ['box', 'Slot', Square, 'A rectangular pocket or slot, sized in millimetres, square to the surface you last clicked.'],
   ['sphere', 'Dish', Circle, 'A spherical scoop: a seat for a ball, or a rounded pocket. Always blind.'],
 ] as const;
+
+/**
+ * ISO metric coarse threads, by name: [major diameter mm, pitch mm]. The sizes
+ * a hobbyist's drawer actually holds; anything else is typed as a pitch.
+ */
+const METRIC_THREADS: [string, number, number][] = [
+  ['M2', 2, 0.4], ['M2.5', 2.5, 0.45], ['M3', 3, 0.5], ['M4', 4, 0.7], ['M5', 5, 0.8],
+  ['M6', 6, 1], ['M8', 8, 1.25], ['M10', 10, 1.5], ['M12', 12, 1.75],
+];
 
 /** Metres in, millimetres out, to a tenth of a micron and no trailing noise. */
 const mm = (metres: number | undefined) => Math.round((metres ?? 0) * 1000 * 10000) / 10000;
@@ -80,6 +89,8 @@ function CutRow({ node, geom, index }: {
   const setCutDepth = useStore((s) => s.setCutDepth);
   const setCutSection = useStore((s) => s.setCutSection);
   const moveCutTo = useStore((s) => s.moveCutTo);
+  const setCutThread = useStore((s) => s.setCutThread);
+  const setActiveGeomIndex = useStore((s) => s.setActiveGeomIndex);
   const spot = useStore((s) => s.cutSpot);
 
   const through = !(geom.cutDepth && geom.cutDepth > 0);
@@ -96,10 +107,37 @@ function CutRow({ node, geom, index }: {
   const elsewhere = spot?.nodeId === node.id
     && (geom.cutAt || []).some((v, a) => Math.abs(v - (spot.at[a] ?? 0)) > 1e-6);
 
+  // The thread as the menu names it: a standard size when both numbers match
+  // one, "custom" when there is a pitch that no standard has, "none" otherwise.
+  const pitchMm = geom.thread?.pitch ? mm(geom.thread.pitch) : 0;
+  const standard = pitchMm > 0
+    ? METRIC_THREADS.find(([, d, p]) => Math.abs(d - mm((size[0] ?? 0) * 2)) < 1e-3 && Math.abs(p - pitchMm) < 1e-3)
+    : undefined;
+  const threadChoice = pitchMm > 0 ? (standard?.[0] ?? 'custom') : 'none';
+
+  /** Lets the pointer take the cut across the part: the same gesture G starts. */
+  const grab = () => {
+    setActiveGeomIndex(index);
+    window.dispatchEvent(new CustomEvent('physbox:gesture', { detail: { kind: 'move' } }));
+  };
+  const setAt = (axis: number, valueMm: number) => {
+    const at = [...(geom.cutAt || [0, 0, 0])];
+    at[axis] = metres(valueMm);
+    moveCutTo(node.id, index, { at, normal: [...(geom.cutNormal ?? [0, 0, 1])] });
+  };
+
   return (
     <div className="rounded-lg border border-rose-200 dark:border-rose-900/60 bg-rose-50/50 dark:bg-rose-950/20 p-1.5 space-y-1">
       <div className="flex items-center gap-1">
         <span className="flex-1 text-[10px] font-semibold text-rose-600 dark:text-rose-400">{label}</span>
+        <button
+          type="button"
+          onClick={grab}
+          title="Slide this cut across the part with the pointer. Click to put it down, Esc to put it back. G does the same once the cut is picked in the list."
+          className="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase cursor-pointer bg-white dark:bg-slate-800 text-slate-400 hover:text-rose-600 transition-colors flex items-center gap-0.5"
+        >
+          <Move className="w-2.5 h-2.5" />Move
+        </button>
         {elsewhere && (
           <button
             type="button"
@@ -173,14 +211,59 @@ function CutRow({ node, geom, index }: {
         )}
       </div>
 
+      {geom.type === 'cylinder' && (
+        <div className="flex gap-1 items-end">
+          <label className="flex-1 min-w-0" title="Tap the hole. Pick a bolt size and the diameter becomes that bolt's, with its coarse pitch; the hole is cut with the bolt's own form so a printed or machined part threads straight onto it. Custom keeps your diameter and takes a pitch.">
+            <span className="block text-[9px] font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500">Thread</span>
+            <select
+              value={threadChoice}
+              onChange={(e) => {
+                const pick = e.target.value;
+                if (pick === 'none') { setCutThread(node.id, index, null); return; }
+                const found = METRIC_THREADS.find(([name]) => name === pick);
+                if (found) {
+                  setCutSection(node.id, index, [metres(found[1]) / 2]);
+                  setCutThread(node.id, index, found[2]);
+                } else {
+                  // Custom: a pitch in proportion to the hole, to be typed over.
+                  setCutThread(node.id, index, Math.max(0.1, Math.round(mm((size[0] ?? 0) * 2) * 0.15 * 100) / 100));
+                }
+              }}
+              className={fieldClass}
+            >
+              <option value="none">None</option>
+              {METRIC_THREADS.map(([name]) => <option key={name} value={name}>{name}</option>)}
+              <option value="custom">Custom</option>
+            </select>
+          </label>
+          {pitchMm > 0 && (
+            <CutField
+              label="Pitch mm"
+              min={0.05}
+              value={pitchMm}
+              title="Distance from one thread to the next. A bolt's coarse pitch is in its name's tables: M6 is 1 mm, M8 is 1.25."
+              onChange={(v) => setCutThread(node.id, index, v)}
+            />
+          )}
+        </div>
+      )}
+
       {/* Where it is and which way it runs. A readout rather than fields: the
           spot is a point on a surface, and three boxes of millimetres cannot
           say "on that face" — clicking the face can, so that is how it moves. */}
       <div
         className="flex items-center gap-1 text-[9px] font-mono text-slate-400 dark:text-slate-500 tabular-nums"
-        title="Where the cut enters, and the direction it runs, in the body's own axes. Click somewhere else on the part to move it."
+        title="Where the cut enters, in the body's own axes, and the direction it runs. Type a number to move it that way; it stays on the surface under that point. Or press Move and slide it."
       >
-        <span>at {at.map((v) => mm(v).toFixed(1)).join(', ')}</span>
+        <span>at</span>
+        {([0, 1, 2] as const).map((axis) => (
+          <NumberInput
+            key={axis}
+            value={mm(at[axis])}
+            onChange={(v) => v !== undefined && setAt(axis, v)}
+            className="w-14 min-w-0 px-0.5 py-0 rounded bg-transparent border border-transparent hover:border-slate-200 dark:hover:border-slate-700 focus:border-rose-300 outline-none text-[9px] font-mono tabular-nums"
+          />
+        ))}
         <span className="ml-auto">↧ {(geom.cutNormal ?? [0, 0, 1]).map((v) => v.toFixed(2)).join(', ')}</span>
       </div>
     </div>

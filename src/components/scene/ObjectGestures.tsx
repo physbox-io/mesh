@@ -25,6 +25,8 @@ import * as THREE from 'three';
 import { useStore, getPhysicsWorkerClient } from '../../store/useStore';
 import type { SceneNode } from '../../types/scene';
 import { scaleNodeTree } from '../../utils/scaleNode';
+import { pickCutSpot, type CutSpot } from '../../utils/csg';
+import { bodyPoseOf } from './bodyPose';
 import { useOrbitEnable } from './useOrbitEnable';
 
 type Axis = 'x' | 'y' | 'z';
@@ -36,7 +38,7 @@ interface Held {
 }
 
 interface Gesture {
-  kind: 'scale' | 'inset' | 'move';
+  kind: 'scale' | 'inset' | 'move' | 'moveCut';
   nodeId: string;
   /** Screen position of the body, and how far the pointer was from it. */
   centre: { x: number; y: number };
@@ -54,6 +56,9 @@ interface Gesture {
   joint?: string;
   /** Move only: where the body has been moved to, as the pointer stands. */
   to?: [number, number, number];
+  /** Move-cut only: which of the body's geoms is the cut, and where it is going. */
+  geomIndex?: number;
+  spot?: CutSpot | null;
 }
 
 /** The node with this id, anywhere in the tree. */
@@ -203,6 +208,41 @@ export const ObjectGestureController = () => {
     const state = gesture.current;
     if (!state) return;
 
+    if (state.kind === 'moveCut') {
+      /*
+       * A hole slides over the part it is in. The pointer's ray is taken into
+       * the body's own frame and probed against the body's SOURCE shapes — the
+       * same probe a click uses to aim a new cut — so the hole lands on
+       * whatever face is under the pointer, square to it, and cannot come off
+       * the part: off the part there is nothing to hit, and the hole stays
+       * where it last was.
+       */
+      const ghost = state.ghosts[0];
+      const parent = ghost?.parent;
+      if (!ghost || !parent) return;
+      const node = findNode(useStore.getState().sceneGraph.nodes, state.nodeId);
+      if (!node) return;
+      const ray = rayIn(parent, pointer.current.x, pointer.current.y);
+      const pose = bodyPoseOf(state.nodeId, node.pos);
+      const toBody = pose.rot.clone().transpose();
+      const origin = ray.origin.clone().sub(pose.pos).applyMatrix3(toBody);
+      const direction = ray.direction.clone().applyMatrix3(toBody).normalize();
+      const spot = pickCutSpot(node, origin.toArray(), direction.toArray());
+      if (spot) state.spot = spot;
+      const shown = state.spot;
+      if (shown) {
+        const at = new THREE.Vector3(...(shown.at as [number, number, number])).applyMatrix3(pose.rot).add(pose.pos);
+        const normal = new THREE.Vector3(...(shown.normal as [number, number, number])).applyMatrix3(pose.rot).normalize();
+        ghost.position.copy(at);
+        ghost.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
+        const mm = (v: number) => (v * 1000).toFixed(1);
+        setGestureStatus(`Move cut · at ${shown.at.map(mm).join(', ')} mm`);
+      } else {
+        setGestureStatus('Move cut · point at the part');
+      }
+      return;
+    }
+
     if (state.kind === 'move') {
       const parent = state.held[0]?.object.parent;
       if (!parent || !state.from || !state.startPos) return;
@@ -266,7 +306,7 @@ export const ObjectGestureController = () => {
     setGestureStatus(state.kind === 'scale'
       ? `Scale ${state.factor.toFixed(2)}×${state.axis ? ` · ${state.axis.toUpperCase()}` : ''}`
       : `Inset ${state.factor.toFixed(2)}× · bore ${(state.axis ?? 'z').toUpperCase()}`);
-  }, [planeHit, setGestureStatus]);
+  }, [planeHit, rayIn, setGestureStatus]);
 
   const clear = useCallback(() => {
     const state = gesture.current;
@@ -295,6 +335,11 @@ export const ObjectGestureController = () => {
     // The cancel path inside clear() puts a previewed move back; a kept move is
     // written from the numbers held here, which clear() does not touch.
     clear();
+    if (kind === 'moveCut') {
+      if (!keep || !state.spot || state.geomIndex === undefined) return;
+      useStore.getState().moveCutTo(nodeId, state.geomIndex, state.spot);
+      return;
+    }
     if (kind === 'move') {
       const to = state.to;
       if (!keep || !to || !state.startPos) return;
@@ -358,8 +403,36 @@ export const ObjectGestureController = () => {
     const held = groups.map((object) => ({ object, position: object.position.clone() }));
 
     if (kind === 'move') {
-      const parent = groups[0].parent;
+      // With a cut picked in the hierarchy, G moves the cut, not the body it
+      // is in: a hole is the thing most often in the wrong place by a few
+      // millimetres, and the body is not.
       const node = findNode(store.sceneGraph.nodes, nodeId);
+      const cut = node?.geoms?.[store.activeGeomIndex];
+      if (node && cut && cut.csg === 'difference' && !cut.csgDerived && cut.cutAt) {
+        const parent = groups[0].parent;
+        if (!parent) return;
+        // A stub of the cutter, drawn where the pointer says the hole would
+        // go. Three times its own radius long: enough to read as "this way
+        // in", short enough not to hide the face it is on.
+        const size = cut.size || [];
+        const r = Math.max(1e-4, size[0] ?? 0.005);
+        let geometry: THREE.BufferGeometry;
+        if (cut.type === 'box') geometry = new THREE.BoxGeometry(2 * r, 2 * Math.max(1e-4, size[1] ?? r), 3 * r);
+        else if (cut.type === 'sphere') geometry = new THREE.SphereGeometry(r, 24, 16);
+        else geometry = new THREE.CylinderGeometry(r, r, 3 * r, 32).rotateX(Math.PI / 2);
+        const ghost = new THREE.Mesh(geometry, GHOST_MATERIAL);
+        parent.add(ghost);
+        gesture.current = {
+          kind: 'moveCut', nodeId, centre, pivot, held: [], ghosts: [ghost], axis: null, factor: 1,
+          radius: 0, geomIndex: store.activeGeomIndex,
+          spot: { at: [...cut.cutAt], normal: [...(cut.cutNormal ?? [0, 0, 1])] },
+        };
+        setOrbitEnabled(false);
+        draw();
+        return;
+      }
+      const parent = groups[0].parent;
+      // `node` was found above, for the cut check.
       if (!parent || !node) return;
       // The body's own position, not the bounding box centre: that is the
       // number being changed, and a mesh's box centre is somewhere else.

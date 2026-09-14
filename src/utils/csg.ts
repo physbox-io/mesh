@@ -132,6 +132,78 @@ function multmatrixWrap(m: THREE.Matrix4, inner: string, indent: string): string
  * Sizes follow MuJoCo's conventions: box size is HALF-extents, cylinder and
  * capsule are [radius, half-length] along local Z, ellipsoid is three radii.
  */
+/**
+ * Slices of extrusion per turn of thread, and points around the profile.
+ *
+ * Each slice is one layer of the twisted polygon, so the cutter has
+ * slices × points vertices and the boolean pays for every one of them — the
+ * openscad-wasm build in use is CGAL, whose time grows faster than the vertex
+ * count. Sixteen of each made an M6 through a 100 mm block (110 turns, 51k
+ * vertices) take a minute and a half; eight and sixteen is a quarter of the
+ * vertices, and the flank still reads as a helix. THREAD_MAX_SLICES caps the
+ * absurd case — a fine pitch through a thick part — by thinning the layers
+ * rather than refusing, down to THREAD_MIN_SLICES_PER_TURN.
+ */
+export const THREAD_SLICES_PER_TURN = 8;
+export const THREAD_MIN_SLICES_PER_TURN = 4;
+export const THREAD_MAX_SLICES = 640;
+export const THREAD_PROFILE_POINTS = 16;
+
+/** Layers for a cutter of this many turns, under the cap. */
+export function threadSlices(turns: number): number {
+  const wanted = turns * THREAD_SLICES_PER_TURN;
+  const perTurn = wanted <= THREAD_MAX_SLICES
+    ? THREAD_SLICES_PER_TURN
+    : Math.max(THREAD_MIN_SLICES_PER_TURN, Math.floor(THREAD_MAX_SLICES / turns));
+  return Math.max(4, Math.ceil(turns * perTurn));
+}
+
+/**
+ * Radial depth of an ISO metric thread as a multiple of its pitch: 5/8 of the
+ * fundamental triangle height H = 0.866 P. This is the depth of the INTERNAL
+ * thread — the one a tapped hole has — so the minor diameter of the hole is
+ * D − 2 × 0.5413 P, which for M6 × 1 is 4.917 mm, the tables' 4.917.
+ */
+export const THREAD_DEPTH_PER_PITCH = 0.541266;
+
+/**
+ * The cross-section of a single-start 60° thread, as a polygon.
+ *
+ * The trick, and why a thread costs one linear_extrude rather than a sweep:
+ * cut a helical thread square to its axis and the section is a shape whose
+ * radius varies with angle exactly as the thread's profile varies with height,
+ * one pitch per turn. Extrude that shape and twist it a full turn per pitch,
+ * and every layer sits where the helix puts it. The section is exact for any
+ * profile that is a function of axial position, which a V thread is.
+ *
+ * The profile over one pitch, in fractions of the pitch: a crest flat of 1/8
+ * at the major radius, a flank of 5/16, a root flat of 1/4 at the minor
+ * radius, and the other flank — the ISO basic form. The flank drops
+ * THREAD_DEPTH_PER_PITCH × P over 5P/16 of travel, which is tan 60°: the
+ * flanks meet at the 60° the thread is named for.
+ *
+ * Points go anticlockwise from angle 0, which is what polygon() wants.
+ */
+export function threadProfile(majorRadius: number, pitch: number, segments: number = THREAD_PROFILE_POINTS): [number, number][] {
+  const depth = THREAD_DEPTH_PER_PITCH * pitch;
+  const minor = Math.max(1e-6, majorRadius - depth);
+  const radiusAt = (t: number): number => {
+    // t is the fraction of one pitch, 0..1, taken from the angle.
+    if (t < 1 / 8) return majorRadius;
+    if (t < 7 / 16) return majorRadius - depth * ((t - 1 / 8) / (5 / 16));
+    if (t < 11 / 16) return minor;
+    return minor + depth * ((t - 11 / 16) / (5 / 16));
+  };
+  const pts: [number, number][] = [];
+  for (let i = 0; i < segments; i++) {
+    const t = i / segments;
+    const r = radiusAt(t);
+    const a = t * 2 * Math.PI;
+    pts.push([fmt(r * Math.cos(a)), fmt(r * Math.sin(a))]);
+  }
+  return pts;
+}
+
 export function primitiveToScad(geom: SceneGeom, fn: number = CSG_DEFAULT_FN, indent = '  '): string | null {
   const s = geom.size || [];
   let matrix = geomMatrix(geom);
@@ -154,7 +226,18 @@ export function primitiveToScad(geom: SceneGeom, fn: number = CSG_DEFAULT_FN, in
         matrix = f.matrix;
         halfLen = f.halfLen;
       }
-      body = `cylinder(h=${fmt(halfLen * 2)}, r=${fmt(s[0] ?? 0.1)}, center=true, $fn=${fn});`;
+      const pitch = geom.thread?.pitch;
+      if (pitch && pitch > 0) {
+        // A tapped hole: the cutter is the bolt's own form at nominal size,
+        // right-handed. OpenSCAD's twist turns clockwise as it goes up, so a
+        // negative twist is what climbs the way a right-hand thread does.
+        const length = halfLen * 2;
+        const turns = length / pitch;
+        const profile = threadProfile(s[0] ?? 0.1, pitch, Math.min(fn, THREAD_PROFILE_POINTS)).map(([x, y]) => `[${x},${y}]`).join(',');
+        body = `linear_extrude(height=${fmt(length)}, center=true, twist=${fmt(-360 * turns)}, slices=${threadSlices(turns)}, convexity=10) polygon([${profile}]);`;
+      } else {
+        body = `cylinder(h=${fmt(halfLen * 2)}, r=${fmt(s[0] ?? 0.1)}, center=true, $fn=${fn});`;
+      }
       break;
     }
     case 'capsule': {
@@ -1259,7 +1342,7 @@ function emitsSolid(g: SceneGeom): boolean {
  */
 function geomCsgKey(g: SceneGeom): unknown[] {
   const shape = g.type === 'mesh' ? meshChecksum(g) : g.size;
-  return [g.type, shape, g.pos, g.quat, g.euler, g.fromto, g.csg ?? 'union', g.role ?? null];
+  return [g.type, shape, g.pos, g.quat, g.euler, g.fromto, g.csg ?? 'union', g.role ?? null, g.thread?.pitch ?? null];
 }
 
 function meshChecksum(g: SceneGeom): string {
