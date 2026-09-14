@@ -13,6 +13,7 @@ import { useMCPBridge } from './hooks/useMCPBridge';
 import { useCoarsePointer } from './hooks/useCoarsePointer';
 import { useStore, getPhysicsWorkerClient, cloneSceneGraph } from './store/useStore';
 import type { SceneGraph, SceneNode, SceneGeom, SceneJoint, CsgOp } from './types/scene';
+import type { ModelMirror, MujocoShim } from './types/sceneLayer';
 import type { WeakSpot } from './utils/printAnalysis';
 import { Play, Square, SlidersHorizontal, Settings, Box, Circle, X, RotateCcw, Trash2, Layers, CircleDot, Zap, Info, Triangle, Disc, Code, Menu, Shapes, Minimize2, Save, Download, Upload, Undo, Redo, FileText, ChevronDown, ChevronUp, PanelRight, Edit3, Printer, Scissors, Sparkles, Sun, Moon, Pyramid, Cone, Donut, ChartSpline, Paintbrush, Grid3x3, Image as ImageIcon } from 'lucide-react';
 import { useRef, useMemo, useEffect, useCallback, useState, type RefObject, type ComponentProps, type ComponentRef } from 'react';
@@ -66,12 +67,10 @@ type AddComponentType = Parameters<StoreState['addComponent']>[0];
 type PresetEntry = { name: string; emoji?: string };
 type GeminiModelInfo = { name: string; displayName?: string; supportedGenerationMethods?: string[] };
 
-// The slice of the MuJoCo model/data mirror that scene syncing reads. The
-// store types the whole mirror loosely; only these members are touched here.
-interface SyncMujoco {
-  mj_name2id: (model: unknown, typeVal: string, name: string) => number;
-  mjtObj: { mjOBJ_BODY: { value: string } };
-}
+// The slice of the MuJoCo model/data mirror that scene syncing reads. Only
+// these members are touched here, but they are the store's own mirror types so
+// the shim can be handed straight over.
+type SyncMujoco = Pick<MujocoShim, 'mj_name2id'> & { mjtObj: Pick<MujocoShim['mjtObj'], 'mjOBJ_BODY'> };
 interface SyncData {
   xpos: ArrayLike<number>;
   xmat: ArrayLike<number>;
@@ -480,7 +479,7 @@ const CAMERA_CONFIG = { position: [0.8, 0.6, 0.8] as [number, number, number], f
 
 const getSyncedSceneGraph = (
   scene: SceneGraph,
-  model: unknown,
+  model: ModelMirror | null,
   data: SyncData | null,
   mujoco: SyncMujoco | null
 ): SceneGraph => {
@@ -1588,7 +1587,7 @@ function App() {
   };
 
   // Find selected node details
-  const selectedNode = useMemo(() => {
+  const selectedNode = useMemo<SceneNode | null>(() => {
     if (!selectedNodeId) return null;
     let found: SceneNode | null = null;
     const traverse = (nodes: SceneNode[]) => {
@@ -2245,7 +2244,7 @@ function App() {
             <button
               onClick={() => window.dispatchEvent(new CustomEvent(SHOW_EXPORTS_EVENT))}
               className="flex items-center justify-center p-1 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 transition-colors focus:outline-none cursor-pointer"
-              title="Export for a printer, laser or router. The buttons are in the bar along the bottom, next to the machine chooser."
+              title="Export for a printer, laser or router — the buttons are on the bar along the bottom, beside the machine and material they depend on. Click to show them."
             >
               <Printer className="w-3.5 h-3.5" />
             </button>
@@ -3805,7 +3804,7 @@ function App() {
                         const enabled = e.target.checked;
                         const updatedJoint = {
                           ...selectedNode.joints[0],
-                          actuator: enabled ? { type: 'velocity', kv: 10, ctrlValue: 0 } : undefined
+                          actuator: enabled ? { type: 'velocity' as const, kv: 10, ctrlValue: 0 } : undefined
                         };
                         updateNodeJoint(selectedNode.id, updatedJoint);
                       }}
@@ -3848,7 +3847,7 @@ function App() {
                             onChange={(e) => {
                               updateNodeJoint(selectedNode.id, {
                                 ...selectedNode.joints[0],
-                                actuator: { ...selectedNode.joints[0].actuator, kv: parseFloat(e.target.value) }
+                                actuator: { ...selectedNode.joints[0].actuator!, kv: parseFloat(e.target.value) }
                               });
                             }}
                             className="w-full accent-blue-500 cursor-pointer"
@@ -3905,7 +3904,8 @@ function App() {
                       />
                     </div>
 
-                    {pegGeom ? (
+                    {/* generateGearGeoms always places the peg, so `pos` is there. */}
+                    {pegGeom && pegGeom.pos ? (
                       <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-2">
                         <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 mb-1">📍 Pusher Peg Properties</h3>
                         <label className="text-xs font-medium text-slate-500 flex justify-between">
@@ -4058,7 +4058,7 @@ function App() {
                       <label className="text-xs font-semibold text-slate-500 flex items-center gap-2 cursor-pointer py-1">
                         <input 
                           type="checkbox" 
-                          checked={joint.limited === true || joint.limited === 'true'}
+                          checked={joint.limited === true || (joint.limited as unknown) === 'true'}
                           onChange={(e) => {
                             const enabled = e.target.checked;
                             const defaultRange = joint.type === 'slide' ? [-1.0, 1.0] : [-90, 90];
@@ -4072,7 +4072,9 @@ function App() {
                         Enable Range Limits
                       </label>
 
-                      {(joint.limited === true || joint.limited === 'true') && (() => {
+                      {/* A scene loaded from JSON can carry the string rather than the
+                          boolean, and always could; the cast only says so. */}
+                      {(joint.limited === true || (joint.limited as unknown) === 'true') && (() => {
                         const range = joint.range || (joint.type === 'slide' ? [-1.0, 1.0] : [-90, 90]);
                         const isSlide = joint.type === 'slide';
                         const minVal = range[0];
@@ -4150,7 +4152,7 @@ function App() {
                             if (isPlaying) {
                               getPhysicsWorkerClient().setCtrl(`${joint.name}_actuator`, val);
                             }
-                            updateNodeJoint(selectedNode.id, { actuator: { ...joint.actuator, ctrlValue: val } });
+                            updateNodeJoint(selectedNode.id, { actuator: { ...joint.actuator!, ctrlValue: val } });
                           }}
                           className="w-full accent-blue-500 cursor-pointer" 
                         />
@@ -4808,9 +4810,13 @@ function App() {
                               </div>
                             )}
                             {geom.fromto !== undefined && (() => {
-                              const dirX = geom.fromto[3] - geom.fromto[0];
-                              const dirY = geom.fromto[4] - geom.fromto[1];
-                              const dirZ = geom.fromto[5] - geom.fromto[2];
+                              // Held in a local so the handlers below, which
+                              // are functions and so lose the narrowing above,
+                              // read the same array.
+                              const fromto = geom.fromto;
+                              const dirX = fromto[3] - fromto[0];
+                              const dirY = fromto[4] - fromto[1];
+                              const dirZ = fromto[5] - fromto[2];
                               const currentLength = Math.sqrt(dirX*dirX + dirY*dirY + dirZ*dirZ) || 1.0;
                               
                               return (
@@ -4820,12 +4826,12 @@ function App() {
                                       const newVal = v;
                                       const scale = newVal / currentLength;
                                       const newFromto = [
-                                        geom.fromto[0],
-                                        geom.fromto[1],
-                                        geom.fromto[2],
-                                        geom.fromto[0] + dirX * scale,
-                                        geom.fromto[1] + dirY * scale,
-                                        geom.fromto[2] + dirZ * scale
+                                        fromto[0],
+                                        fromto[1],
+                                        fromto[2],
+                                        fromto[0] + dirX * scale,
+                                        fromto[1] + dirY * scale,
+                                        fromto[2] + dirZ * scale
                                       ];
                                       updateNodeGeom(selectedNode.id, { fromto: newFromto }, activeIndex);
                                     }} decimals={2} unit="m" min={0.1} max={5.0} />
@@ -4840,12 +4846,12 @@ function App() {
                                       const newVal = parseFloat(e.target.value);
                                       const scale = newVal / currentLength;
                                       const newFromto = [
-                                        geom.fromto[0],
-                                        geom.fromto[1],
-                                        geom.fromto[2],
-                                        geom.fromto[0] + dirX * scale,
-                                        geom.fromto[1] + dirY * scale,
-                                        geom.fromto[2] + dirZ * scale
+                                        fromto[0],
+                                        fromto[1],
+                                        fromto[2],
+                                        fromto[0] + dirX * scale,
+                                        fromto[1] + dirY * scale,
+                                        fromto[2] + dirZ * scale
                                       ];
                                       updateNodeGeom(selectedNode.id, { fromto: newFromto }, activeIndex);
                                     }}
@@ -5547,13 +5553,18 @@ function App() {
                             <button
                               onClick={() => {
                                 if (meshEditorGeom === g.name) { setMeshEditorGeom(null); return; }
+                                // The mesh arrays, named locally: this button
+                                // only exists for a geom that has them (see the
+                                // condition above), which a handler cannot see.
+                                const verts = g.vertices!;
+                                const faces = g.faces!;
                                 // Format vertices as one triplet per line, faces as one triangle per line
                                 const vLines = [];
-                                for (let i = 0; i < g.vertices.length; i += 3)
-                                  vLines.push(`${g.vertices[i]} ${g.vertices[i+1]} ${g.vertices[i+2]}`);
+                                for (let i = 0; i < verts.length; i += 3)
+                                  vLines.push(`${verts[i]} ${verts[i+1]} ${verts[i+2]}`);
                                 const fLines = [];
-                                for (let i = 0; i < g.faces.length; i += 3)
-                                  fLines.push(`${g.faces[i]} ${g.faces[i+1]} ${g.faces[i+2]}`);
+                                for (let i = 0; i < faces.length; i += 3)
+                                  fLines.push(`${faces[i]} ${faces[i+1]} ${faces[i+2]}`);
                                 setMeshEditorText(`# vertices (x y z, one per line, Three.js Y-up space)\n${vLines.join('\n')}\n\n# faces (i j k triangle indices, one per line)\n${fLines.join('\n')}`);
                                 setMeshEditorError(null);
                                 setMeshEditorGeom(g.name);
@@ -5577,16 +5588,20 @@ function App() {
                             </button>
                             <button
                               onClick={() => {
+                                // As above: this button is only rendered for a
+                                // geom that has the mesh arrays.
+                                const verts = g.vertices!;
+                                const faces = g.faces!;
                                 const unique = new Map<string, number>();
                                 const newVerts: number[] = [], remap: number[] = [];
-                                for (let i = 0; i < g.vertices.length; i += 3) {
-                                  const key = `${g.vertices[i].toFixed(4)},${g.vertices[i+1].toFixed(4)},${g.vertices[i+2].toFixed(4)}`;
-                                  if (!unique.has(key)) { unique.set(key, newVerts.length/3); newVerts.push(g.vertices[i], g.vertices[i+1], g.vertices[i+2]); }
+                                for (let i = 0; i < verts.length; i += 3) {
+                                  const key = `${verts[i].toFixed(4)},${verts[i+1].toFixed(4)},${verts[i+2].toFixed(4)}`;
+                                  if (!unique.has(key)) { unique.set(key, newVerts.length/3); newVerts.push(verts[i], verts[i+1], verts[i+2]); }
                                   remap[i/3] = unique.get(key)!;
                                 }
                                 const filteredFaces: number[] = [];
-                                for (let i = 0; i < g.faces.length; i += 3) {
-                                  const a=remap[g.faces[i]], b=remap[g.faces[i+1]], c=remap[g.faces[i+2]];
+                                for (let i = 0; i < faces.length; i += 3) {
+                                  const a=remap[faces[i]], b=remap[faces[i+1]], c=remap[faces[i+2]];
                                   if (a!==b && b!==c && a!==c) filteredFaces.push(a,b,c);
                                 }
                                 const newScene = cloneSceneGraph(useStore.getState().sceneGraph);

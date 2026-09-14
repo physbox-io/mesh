@@ -17,7 +17,8 @@ interface PulleyRopesRendererProps {
   model: ModelMirror | null;
   data: DataMirror | null;
   mujoco: MujocoShim | null;
-  sceneGraph: SceneGraph;
+  /** Null only before a scene exists; every reader below tolerates it. */
+  sceneGraph: SceneGraph | null;
 }
 
 interface PulleyRopeMarkersProps {
@@ -42,17 +43,18 @@ export const PulleyRopesRenderer = ({ model, data, mujoco, sceneGraph }: PulleyR
   
   // Find all pulley rope nodes in the scene
   const pulleyRopes = useMemo(() => {
-    const ropes: SceneNode[] = [];
+    // Both ends are what the filter below is: a rope without them is not one.
+    const ropes: (SceneNode & { leftTargetId: string; rightTargetId: string })[] = [];
     const traverse = (nodes: SceneNode[]) => {
       if (!nodes) return;
       for (const n of nodes) {
         if (n.isPulleyRope && n.leftTargetId && n.rightTargetId) {
-          ropes.push(n);
+          ropes.push(n as SceneNode & { leftTargetId: string; rightTargetId: string });
         }
         traverse(n.children);
       }
     };
-    traverse(sceneGraph.nodes);
+    traverse(sceneGraph?.nodes ?? []);
     return ropes;
   }, [sceneGraph]);
 
@@ -67,7 +69,7 @@ export const PulleyRopesRenderer = ({ model, data, mujoco, sceneGraph }: PulleyR
       }
       return null;
     };
-    return traverse(sceneGraph.nodes);
+    return traverse(sceneGraph?.nodes ?? []);
   }, [sceneGraph]);
 
   useFrame(() => {
@@ -149,7 +151,11 @@ export const PulleyRopesRenderer = ({ model, data, mujoco, sceneGraph }: PulleyR
   return (
     <>
       {pulleyRopes.map((rope) => (
-        <line key={rope.id} ref={(el) => { lineRefs.current[rope.id] = el; }}>
+        /* `line` in JSX resolves to @types/react's SVG element, not to
+           @react-three/fiber's THREE.Line: both augment the same JSX namespace
+           and the DOM one wins. R3F's reconciler renders a THREE.Line here, so
+           only the ref's declared type needs correcting. */
+        <line key={rope.id} ref={(el) => { lineRefs.current[rope.id] = el as unknown as THREE.Line | null; }}>
           <bufferGeometry />
           <lineBasicMaterial color="#3b82f6" linewidth={3.5} transparent opacity={0.9} />
         </line>

@@ -421,6 +421,12 @@ export const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, se
 
   // Handlers for physical spring dragging, mapped from Three.js coordinates to MuJoCo coordinate space
   const setOrbitEnabled = useOrbitEnable();
+  /*
+   * An implicit geom — one the model has and the scene graph does not, see
+   * `nodeId` above — has no body to select, and these handlers have always
+   * passed that absence straight through rather than ignoring the click. Kept
+   * exactly so; the assertions below only say it out loud.
+   */
   const dragHandlers = useMemo(() => ({
     onClick: (e: ThreeEvent<MouseEvent>) => {
       e.stopPropagation();
@@ -431,22 +437,22 @@ export const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, se
       // the same chord that adds to a selection everywhere else in the app.
       // Two bodies selected is what a boolean between two bodies needs.
       if (e.shiftKey || e.ctrlKey || e.metaKey) {
-        useStore.getState().toggleExtraSelected(nodeId);
+        useStore.getState().toggleExtraSelected(nodeId!);
         return;
       }
-      setSelectedNodeId(nodeId);
+      setSelectedNodeId(nodeId!);
       // And remember WHERE on the body it landed, so a cut can go exactly
       // there, square to the surface. The click already raycasts to select the
       // body; this is the hit it had to compute anyway, and it is what lets one
       // sentence — "click the spot, press Hole" — hold for a primitive, a mesh,
       // an imported STL and a lattice alike.
-      publishCutSpot(nodeId, e);
+      publishCutSpot(nodeId!, e);
     },
     onPointerDown: (e: ThreeEvent<PointerEvent>) => {
       if (isPlaying) {
         e.stopPropagation();
         setOrbitEnabled(false);
-        useStore.getState().setDraggedNodeId(nodeId);
+        useStore.getState().setDraggedNodeId(nodeId!);
         useStore.getState().setDragDistance(e.distance);
         
         const pt = e.point;
@@ -492,7 +498,8 @@ export const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, se
 
   // For dynamic meshes, use body xpos/xmat so renderVertices (centroid-local) align correctly.
   const bodyId = useMemo(() => {
-    if (!isDynamic || !model || !mujoco) return -1;
+    // -1 is also what the shim answers for a geom carrying no body name.
+    if (!isDynamic || !model || !mujoco || !nodeId) return -1;
     return mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY.value, nodeId);
   }, [isDynamic, model, mujoco, nodeId]);
 
@@ -891,7 +898,11 @@ export const MouseDragForceRenderer = ({ model, data, mujoco }: { model: ModelMi
   if (!draggedNodeId || !dragTarget) return null;
 
   return (
-    <line ref={lineRef}>
+    /* `line` in JSX resolves to @types/react's SVG element, not to
+       @react-three/fiber's THREE.Line: both augment the same JSX namespace and
+       the DOM one wins. R3F's reconciler renders a THREE.Line here, so only the
+       ref's declared type needs correcting. */
+    <line ref={lineRef as unknown as React.Ref<SVGLineElement>}>
       <bufferGeometry />
       <lineBasicMaterial color="#f43f5e" linewidth={4} transparent opacity={0.9} />
     </line>

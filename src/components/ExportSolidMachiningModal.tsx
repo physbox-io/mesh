@@ -20,7 +20,7 @@ import {
   inputClass, sectionClass, sectionTitleClass,
   Field, Segmented, FinishingPassFields, RoughingPassFields, BedLevellingFields, PreviewPlaceholder,
 } from './CarveFields';
-import { toolingOnly, useBedProbe, useCarveTooling, useSettled } from './carveTooling';
+import { toolingOnly, useBedProbe, useCarveTooling, useSettled, type SetTooling } from './carveTooling';
 
 interface Props {
   isOpen: boolean;
@@ -149,6 +149,15 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
     if (!result?.success) return;
     void bed.probe(result.partBounds);
   };
+
+  /*
+   * `set` is generic over THIS dialog's options; the field components take a
+   * writer over CarveTooling, which those options extend. TypeScript cannot
+   * relate `<K extends keyof T>` to `<K extends keyof CarveTooling>` for a
+   * `T extends CarveTooling` it is not given, so the relationship is asserted
+   * here. The fields only ever write CarveTooling keys.
+   */
+  const setTooling = set as SetTooling;
 
   const baseName = (scene.name || 'part').replace(/[^\w.-]+/g, '_');
 
@@ -429,7 +438,7 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
             effective={effective}
             derived={derived}
             overrides={overrides}
-            set={set}
+            set={setTooling}
             override={override}
             materialLabel={materialLabel}
             speedNote={speedNote}
@@ -443,7 +452,7 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
             effective={effective}
             derived={derived}
             overrides={overrides}
-            set={set}
+            set={setTooling}
             override={override}
             materialLabel={materialLabel}
           />

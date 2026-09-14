@@ -70,11 +70,20 @@ function rememberPresetId(name: string, id: string): void {
   writePresetIdMap(map);
 }
 
-/** Uploads a saved preset and records the id the server assigned it. */
-export async function saveCloudPreset(name: string, data: unknown): Promise<void> {
+/**
+ * Uploads a saved preset and records the id the server assigned it.
+ *
+ * Returns whether the account actually took it. Nearly every caller is
+ * fire-and-forget and ignores this, which is right: the local write is what the
+ * user is waiting on. The one caller that does care is the path where the LOCAL
+ * write failed for want of room, where this is the difference between the work
+ * being safe in the account and being gone.
+ */
+export async function saveCloudPreset(name: string, data: unknown): Promise<boolean> {
   const existingId = readPresetIdMap()[name];
   const id = await syncCloudPreset('physics', name, data, existingId);
   if (id) rememberPresetId(name, id);
+  return !!id;
 }
 
 /** Deletes the cloud copy of a preset, by its real server id. */

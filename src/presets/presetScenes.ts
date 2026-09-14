@@ -1,8 +1,18 @@
 import type { SceneGraph, SceneNode, SceneGeom } from '../types/scene';
+
+/**
+ * Where a preset asks the camera to sit, and what it looks at.
+ *
+ * Written out as a type so the arrays below are triples rather than
+ * number[]: the store's camera override is a fixed-length position and target,
+ * and a plain array literal would be neither.
+ */
+export type PresetCamera = { position: [number, number, number]; target: [number, number, number] };
 import { generateCurveGeoms, generateWedgeMeshData, generateConeMeshData } from '../utils/geom';
 import { californiaReliefPreset } from './californiaRelief';
 import { megaBustStudioPreset } from './megaBustStudio';
 import { latticeBracketPreset } from './latticeBracket';
+import { oakTreePreset } from './oakTree';
 
 export const pendulumPreset: SceneGraph = {
   nodes: [
@@ -3008,7 +3018,7 @@ export const PRESETS = {
     // block, so it reads as a speck at that distance. A closer default view is
     // purely a camera position, not a scale on the model: the carve's real
     // millimetre dimensions (what the exporter cares about) are untouched.
-    camera: { position: [0.05, -0.09, 0.07], target: [0, 0, 0.02] }
+    camera: { position: [0.05, -0.09, 0.07], target: [0, 0, 0.02] } satisfies PresetCamera
   },
   lattice_bracket: {
     name: 'Wall Bracket (Lattice)',
@@ -3016,7 +3026,15 @@ export const PRESETS = {
     scene: latticeBracketPreset,
     // A 50x40x60 mm part, like the relief map: the default view is framed for
     // objects a metre across and would show this as a speck.
-    camera: { position: [0.14, -0.18, 0.12], target: [0.01, 0, 0.03] }
+    camera: { position: [0.14, -0.18, 0.12], target: [0.01, 0, 0.03] } satisfies PresetCamera
+  },
+  oak_tree: {
+    name: 'Oak Tree',
+    emoji: '🌳',
+    scene: oakTreePreset,
+    // Five metres of tree: the bench-scale default view would have it filling
+    // the window from the inside.
+    camera: { position: [9, -11, 4.5], target: [0, 0, 2.6] } satisfies PresetCamera
   },
   mega_bust_studio: {
     name: 'Mega Bust & Stress Studio',
@@ -3035,7 +3053,7 @@ export const PRESETS = {
     scene: emptyPreset,
     // Framed for a part 40 mm across rather than a metre, which is what the
     // tutorial has you build in step one.
-    camera: { position: [0.12, -0.16, 0.13], target: [0, 0, 0.02] }
+    camera: { position: [0.12, -0.16, 0.13], target: [0, 0, 0.02] } satisfies PresetCamera
   }
 };
 

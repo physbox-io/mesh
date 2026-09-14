@@ -14,6 +14,12 @@ export type CsgOp = 'union' | 'difference' | 'intersection';
 export type GeomRole = 'visual' | 'collision';
 
 export interface SceneGeom {
+  /**
+   * An id of its own, carried by geoms that came from the copilot (see RawGeom
+   * in src/utils/sceneNodes.ts) and by the one the SCAD compile creates. Geoms
+   * are addressed by `name` everywhere; nothing reads this.
+   */
+  id?: string;
   name: string;
   type: GeomType;
   size: number[];
@@ -88,6 +94,16 @@ export interface SceneGeom {
   latticeGeom?: boolean;
   // Centroid-recentered vertices in MuJoCo Z-up space for dynamic mesh rendering.
   renderVertices?: number[];
+  /**
+   * The un-rotated mesh, kept so repeated absolute rotations compose from the
+   * original rather than from the last result (see rotateMeshGeomsAbsolute in
+   * src/store/useStore.ts). Working state: written the first time a mesh geom
+   * is rotated, and carried through cloneGeom by reference like the other
+   * vertex arrays.
+   */
+  baseVertices?: number[];
+  /** The same, for the Z-up renderVertices of a dynamic mesh. */
+  baseRenderVertices?: number[];
 }
 
 export interface SceneJoint {
@@ -112,7 +128,13 @@ export interface SceneJoint {
 export interface SceneNode {
   id: string;
   name: string;
-  type: 'body';
+  /**
+   * Optional because the scene has always contained bodies without it: the STL
+   * import and the MCP bridge build nodes straight, and nothing downstream —
+   * the MJCF emitter included — reads it. It marks a body where something hands
+   * back a mixed bag of objects (see AICopilotPanel).
+   */
+  type?: 'body';
   pos: number[];
   quat?: number[];
   euler?: number[];
@@ -154,6 +176,18 @@ export interface SceneNode {
   pulleyWheelId?: string;
   isAerodynamic?: boolean;
   rot?: number[];
+  /**
+   * Tooth count of a generated gear. A gear is defined by this rather than by
+   * its size, so the scale controls hide themselves when it is set: scaling one
+   * gear would put it out of step with whatever it runs against.
+   */
+  teeth?: number;
+  /**
+   * The body's position before the current absolute-rotation gesture, so the
+   * gesture composes from where it started instead of from its own last result.
+   * Working state, like SceneGeom.baseVertices.
+   */
+  basePos?: number[];
   isHardwareComponent?: boolean;
   hardwareType?: string;
   hardwareSpec?: Record<string, number | string>;
@@ -257,4 +291,10 @@ export interface SceneNode {
 
 export interface SceneGraph {
   nodes: SceneNode[];
+  /**
+   * What to call the scene. Optional because nothing sets it on the live store
+   * graph; a saved user preset carries one, and the export dialogs use it to
+   * name the file they write.
+   */
+  name?: string;
 }

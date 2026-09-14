@@ -40,7 +40,12 @@ interface ChatMessage {
   isImplemented?: boolean;
   hasError?: boolean;
   errorMsg?: string;
-  timestamp: number;
+  /**
+   * When it was said. Absent on a message restored from a saved preset,
+   * which keeps only id, role and content (see SavedCopilotMessage); nothing
+   * reads it, and every message made here carries one.
+   */
+  timestamp?: number;
 }
 
 const cleanLaTeXMath = (str: string): string => {
@@ -706,7 +711,8 @@ export default function AICopilotPanel({ onClose, messages: propsMessages, setMe
       for (let attempt = 0; attempt < 3 && !compiled; attempt++) {
         if (attempt > 0) await new Promise(r => setTimeout(r, 120));
         try {
-          const result = await compileSCAD(node.scad);
+          // scadNodes only ever collects a node that has one.
+          const result = await compileSCAD(node.scad!);
           if (result && result.faces && result.faces.length > 0) {
             compiled = result;
           } else {
@@ -720,9 +726,11 @@ export default function AICopilotPanel({ onClose, messages: propsMessages, setMe
       if (compiled) {
         const storeNodes = useStore.getState().sceneGraph.nodes;
         const targetStoreNode = storeNodes.find(sn => sn.id === node.id || sn.name === node.name || sn.name === node.id || sn.id === node.name);
-        const targetId = targetStoreNode ? targetStoreNode.id : node.id;
+        // A raw node carrying no id of its own matches nothing in the store
+        // either way, so the empty string stands in for the absence.
+        const targetId = targetStoreNode ? targetStoreNode.id : (node.id ?? '');
 
-        useStore.getState().updateNodeScad(targetId, node.scad, compiled, true);
+        useStore.getState().updateNodeScad(targetId, node.scad!, compiled, true);
       } else {
         console.warn(`Failed to auto-compile SCAD for node ${node.id || node.name} after 3 attempts:`, lastErr);
         failedNodes.push(node.name || node.id || 'unnamed body');

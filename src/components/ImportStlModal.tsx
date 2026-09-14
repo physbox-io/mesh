@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { X, Upload, Sliders, Box, Layers, Check, AlertCircle, Code } from 'lucide-react';
 import { parseSTL, type ParsedSTLResult } from '../utils/stlParser';
-import type { SceneNode } from '../types/scene';
+import type { SceneGeom, SceneJoint, SceneNode } from '../types/scene';
 
 interface ImportStlModalProps {
   isOpen: boolean;
@@ -126,8 +126,8 @@ export const ImportStlModal: React.FC<ImportStlModalProps> = ({
         name: baseName,
         pos: [0, 0, 0.2],
         scad: scadCode,
-        geoms: [{ type: 'mesh', size: [1], dynamic: true }],
-        joints: [{ type: 'free' }],
+        geoms: [{ type: 'mesh', size: [1], dynamic: true } as SceneGeom],
+        joints: [{ type: 'free' } as SceneJoint],
         children: [],
       };
       onImportNode(node);
@@ -203,6 +203,8 @@ export const ImportStlModal: React.FC<ImportStlModalProps> = ({
         id,
         name: baseName,
         pos: [0, 0, 0.2],
+        // No `size`: a mesh geom's is unused, and putting a number here would
+        // put one into the scene the import has never put there.
         geoms: [{
           name: `${id}_geom`,
           type: 'mesh',
@@ -211,7 +213,7 @@ export const ImportStlModal: React.FC<ImportStlModalProps> = ({
           faces: parsed.faces,
           renderVertices: parsed.renderVertices,
           dynamic: true,
-        }],
+        } as SceneGeom],
         joints: [{ name: `${id}_free`, type: 'free' }],
         children: [],
       };

@@ -98,6 +98,21 @@ describe('applySculptStroke', () => {
     expect(meshBounds(mesh).max).toEqual(before.max);
   });
 
+  it('says the distance is unmeasured rather than nought when the brush retopologised', () => {
+    const mesh = ball();
+    const before = mesh.vertexCount;
+    const result = applySculptStroke(mesh, {
+      brush: 'inflate', at: [[0, 0, 0.1]], radius: 0.04, strength: 1, dynamicTopology: true,
+    });
+
+    // The stroke plainly did something...
+    expect(result.applied).toBe(1);
+    expect(mesh.vertexCount).not.toBe(before);
+    expect(result.topologyChanged).toBe(true);
+    // ...so it must not report the same 0 that a stroke into thin air reports.
+    expect(result.maxDisplacement).toBeNull();
+  });
+
   it('reports nothing moved when every dab missed', () => {
     const mesh = ball();
     const result = applySculptStroke(mesh, { brush: 'draw', at: [[0, 0, 9]], radius: 0.04, strength: 1 });

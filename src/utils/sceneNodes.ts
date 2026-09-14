@@ -231,7 +231,8 @@ export function mergeAndNormalizeNodes(
     // means what it says: a new body.
 
     if (matchedKey && resultMap.has(matchedKey)) {
-      const existingNode = resultMap.get(matchedKey);
+      // Guarded by the `resultMap.has` immediately above.
+      const existingNode = resultMap.get(matchedKey)!;
 
       const mergedGeoms = (newNode.geoms && newNode.geoms.length > 0)
         ? newNode.geoms.map((g: RawGeom, gIdx: number): RawGeom => {

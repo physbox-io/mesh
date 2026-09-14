@@ -12,7 +12,7 @@ import {
   type HeightProfile,
   type SlopeStyle,
 } from '../utils/heightmapMesh';
-import type { SceneNode } from '../types/scene';
+import type { SceneGeom, SceneNode } from '../types/scene';
 
 interface ImportImageModalProps {
   isOpen: boolean;
@@ -235,6 +235,8 @@ export const ImportImageModal: React.FC<ImportImageModalProps> = ({
       id,
       name: image.name || 'heightmap',
       pos: [0, 0, mesh.sizeM[2] / 2 + 0.05],
+      // No `size`: a mesh geom's is unused, and putting a number here would
+      // put one into the scene the import has never put there.
       geoms: [{
         name: `${id}_geom`,
         type: 'mesh',
@@ -243,7 +245,7 @@ export const ImportImageModal: React.FC<ImportImageModalProps> = ({
         renderVertices: mesh.renderVertices,
         faces: mesh.faces,
         dynamic: true,
-      }],
+      } as SceneGeom],
       joints: [{ name: `${id}_free`, type: 'free' }],
       children: [],
     });

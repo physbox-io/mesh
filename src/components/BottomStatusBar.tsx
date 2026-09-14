@@ -274,15 +274,17 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
   const [machineState, setMachineState] = useState<MachineState>(webSerialManager.getState());
   useEffect(() => webSerialManager.addListener(setMachineState), []);
 
-  // A brief pulse on the export group when something elsewhere sends the user
-  // here. Time-limited so a bar that is glanced at later is not still glowing.
+  // A ring and a note on the export group when something elsewhere sends the
+  // user here. Time-limited so a bar that is glanced at later is not still
+  // glowing at them.
   const [exportsHighlighted, setExportsHighlighted] = useState(false);
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const onShow = () => {
       setExportsHighlighted(true);
       clearTimeout(timer);
-      timer = setTimeout(() => setExportsHighlighted(false), 2400);
+      // Long enough to read a sentence, not just to notice a flash.
+      timer = setTimeout(() => setExportsHighlighted(false), 6000);
     };
     window.addEventListener(SHOW_EXPORTS_EVENT, onShow);
     return () => {
@@ -451,10 +453,29 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
               a row of small coloured glyphs is what the navbar had, and it
               needed hovering to read. */}
           <div
-            className={`flex items-center gap-0.5 rounded-md transition-shadow ${
+            className={`relative flex items-center gap-0.5 rounded-md transition-shadow ${
               exportsHighlighted ? 'ring-2 ring-emerald-500 ring-offset-1 ring-offset-white dark:ring-offset-slate-950' : ''
             }`}
           >
+            {/*
+              The printer in the navbar is where people look for exporting, and
+              for a while it only made this group glow for a couple of seconds.
+              That is easy to miss and easy to read as nothing having happened,
+              so the same button now says in words where the exports are and why
+              they are down here: they change with the machine and the material,
+              and both of those are chosen on this bar rather than in a dialog.
+            */}
+            {exportsHighlighted && (
+              <div
+                role="status"
+                className="absolute bottom-full right-0 mb-2 w-64 rounded-lg bg-slate-900 dark:bg-slate-800 text-white text-[11px] leading-relaxed px-3 py-2 shadow-xl border border-slate-700 z-50"
+              >
+                <span className="font-bold">Exports are here, on this bar.</span>{' '}
+                They change with the machine and material you pick to the left, so
+                they live beside those rather than behind the printer button.
+                <span className="absolute top-full right-4 -mt-px border-[6px] border-transparent border-t-slate-900 dark:border-t-slate-800" />
+              </div>
+            )}
             {exportButtons.map((b) => (
               <button
                 key={b.label}

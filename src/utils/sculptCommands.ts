@@ -102,7 +102,26 @@ export interface SculptStrokeResult {
    * caller with no view of the surface will conclude.
    */
   moved: number;
-  maxDisplacement: number;
+  /**
+   * Null when the brush retopologised, because then there is nothing honest to
+   * measure against.
+   *
+   * A stroke that only moves vertices keeps an undo record of exactly which
+   * ones and where they were, so the furthest travelled is a real number. A
+   * stroke that ADDS vertices — which is what dynamicTopology does, and it is
+   * on by default — keeps a whole-mesh snapshot instead, and the decimation
+   * pass renumbers what survives, so old index i and new index i are not the
+   * same vertex and comparing them would invent a figure.
+   *
+   * It used to return 0 in that case, which is the one answer that is actively
+   * misleading: 0 is also what a stroke that missed entirely returns, so an
+   * inflate that moved five hundred vertices and a dab that landed in thin air
+   * were indistinguishable. Null says "not measured"; `moved` and the vertex
+   * count say whether anything happened.
+   */
+  maxDisplacement: number | null;
+  /** Whether the brush added or removed vertices rather than only moving them. */
+  topologyChanged: boolean;
 }
 
 /** A dab in mesh space, with the surface normal that the raycast would have given. */
@@ -245,7 +264,8 @@ export function applySculptStroke(
   const undo = endStroke(session);
   if (sink) sink.undo = undo;
   let moved = 0;
-  let maxDisplacement = 0;
+  let maxDisplacement: number | null = 0;
+  let topologyChanged = false;
   if (undo?.indices && undo.positions) {
     for (let i = 0; i < undo.indices.length; i++) {
       const v = undo.indices[i];
@@ -259,8 +279,11 @@ export function applySculptStroke(
     }
   } else if (undo?.mesh) {
     // The brush changed the topology, so there is no index-to-index mapping to
-    // measure against. Vertex count is the honest answer available.
+    // measure against. Vertex count is the honest answer available, and the
+    // distance is reported as unmeasured rather than as nought.
     moved = Math.abs(mesh.vertexCount - undo.mesh.vertexCount);
+    maxDisplacement = null;
+    topologyChanged = true;
   }
 
   recomputeNormals(mesh);
@@ -273,6 +296,7 @@ export function applySculptStroke(
     applied,
     moved,
     maxDisplacement,
+    topologyChanged,
   };
 }
 

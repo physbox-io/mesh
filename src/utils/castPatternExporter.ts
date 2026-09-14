@@ -53,15 +53,18 @@ export interface CastOptions {
   /** Which metal, which sets shrink, density and the pour-temperature note. */
   metalId: string;
   /**
-   * Parting plane height in mm, measured from the part's base, or 'auto' to put
-   * it at the base so the whole pattern is one flat-backed piece pulled upward.
+   * Parting plane height in mm, measured from the part's base, or 'auto' to
+   * search a few heights and take whichever leaves the least material trapped.
    */
   partingFromBaseMm: number | 'auto';
   /** Print the sprue, runner, gate and riser as part of the pattern. */
   addGating: boolean;
-  /** Sprue diameter, mm. 0 derives one from the cast weight. */
+  /** Sprue diameter, mm. 0 sizes the choke from the fill rate the casting needs. */
   sprueDiaMm: number;
-  /** Riser diameter, mm. 0 derives one from the part's bulk. */
+  /**
+   * Riser diameter, mm. 0 derives one from the casting's modulus — and may
+   * decide the part does not need a riser at all.
+   */
   riserDiaMm: number;
   /** A riser feeds shrinkage; leave it off only for the thinnest, flattest parts. */
   addRiser: boolean;
@@ -91,6 +94,12 @@ export interface CastSummary {
   castWeightG: number;
   /** Plus the gating, which is remelted; a rough guide to how much to pour. */
   pourWeightG: number;
+  /**
+   * Volume of the sprue, runner, gate and riser actually printed, mm³ — the
+   * metal that fills the channels rather than the part. Carried separately so
+   * the pour weight can be checked against the rig instead of taken on faith.
+   */
+  gatingVolumeMm3: number;
   sprueDiaMm: number;
   riserDiaMm: number;
   partingFromBaseMm: number;
@@ -124,6 +133,17 @@ function triSoupVolume(tris: Float64Array): number {
     v += ax * (by * cz - bz * cy) - ay * (bx * cz - bz * cx) + az * (bx * cy - by * cx);
   }
   return Math.abs(v) / 6;
+}
+
+/** Surface area of a triangle soup (9 numbers per tri), mm². */
+function triSoupArea(tris: Float64Array): number {
+  let a = 0;
+  for (let i = 0; i < tris.length; i += 9) {
+    const ux = tris[i + 3] - tris[i], uy = tris[i + 4] - tris[i + 1], uz = tris[i + 5] - tris[i + 2];
+    const vx = tris[i + 6] - tris[i], vy = tris[i + 7] - tris[i + 1], vz = tris[i + 8] - tris[i + 2];
+    a += Math.hypot(uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx);
+  }
+  return a / 2;
 }
 
 /** Appends one triangle (three points) to a growing list. */
@@ -218,6 +238,7 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
       partVolumeMm3: 0,
       castWeightG: 0,
       pourWeightG: 0,
+      gatingVolumeMm3: 0,
       sprueDiaMm: 0,
       riserDiaMm: 0,
       partingFromBaseMm: 0,
@@ -258,11 +279,24 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
   const partVolumeMm3 = triSoupVolume(part);
   const castWeightG = (partVolumeMm3 / 1000) * metal.densityGcm3;
 
-  // --- Draw check: will the pattern pull straight up? -----------------------
-  // A flat-backed pattern pulled up locks in the sand wherever material sits
-  // above a gap (an overhang) or floats above the parting plane. Measured the
-  // same way the mill measures what it cannot reach: columns from above.
-  const parting = opts.partingFromBaseMm === 'auto' ? 0 : Math.max(0, opts.partingFromBaseMm);
+  // --- Draw check: will the pattern pull out of the sand? -------------------
+  // The parting plane splits the mould in two: everything above it comes away
+  // upward with the cope, everything below it downward with the drag. So a
+  // column of material is trapped if it starts above the plane on nothing (the
+  // cope would have to lift sand out from under it), if it ends below the plane
+  // under nothing (the same problem mirrored, pulled downward), or if a void
+  // inside the column separates its material from the plane, which no pull
+  // frees. Measured the same way the mill measures what it cannot reach:
+  // columns from above.
+  //
+  // What is counted is MATERIAL, not the air the material sits over. That
+  // distinction is the whole bug this had: charging each column the height of
+  // the gap beneath it, or the size of the void inside it, measures empty space
+  // — and empty space is unbounded relative to the part. A scene of separate
+  // bodies with half a metre of air between them (a pendulum: stand, arms,
+  // bobs) reported 714% undrawable, because the air under the bobs is seven
+  // times the metal in the whole scene. A column can now only ever be charged
+  // the material it actually contains, so the total cannot outgrow the part.
   const bounds2d = { minX: mnX - cx - 1, minY: mnY - cy - 1, maxX: mxX - cx + 1, maxY: mxY - cy + 1 };
   const span = Math.max(partW, partD);
   let res = Math.max(0.5, span / 200);
@@ -276,16 +310,73 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
   }
   const { top, bottom, thickness, hit } = sampleColumns(part, bounds2d, cols, rows);
   const cellArea = ((bounds2d.maxX - bounds2d.minX) / (cols - 1)) * ((bounds2d.maxY - bounds2d.minY) / (rows - 1));
-  let trapped = 0;
-  for (let k = 0; k < hit.length; k++) {
-    if (!hit[k]) continue;
-    // Voids enclosed within the silhouette (material over a gap), plus anything
-    // standing above the parting plane on a gap beneath it.
-    const enclosed = Math.max(0, top[k] - bottom[k] - thickness[k]);
-    const floating = Math.max(0, bottom[k] - parting);
-    trapped += (enclosed + floating) * cellArea;
+  // The same columns also give the part's volume as this analysis sees it, and
+  // that is the right denominator for the share: a grid fine enough to resolve a
+  // 50 mm bracket still smears a 4 mm capsule across whole cells, so dividing a
+  // column-measured numerator by the exact mesh volume can put the ratio over
+  // one on thin work. Numerator and denominator measured the same way cannot.
+  let columnVolumeMm3 = 0;
+  for (let k = 0; k < hit.length; k++) if (hit[k]) columnVolumeMm3 += thickness[k] * cellArea;
+  const drawBasisMm3 = columnVolumeMm3 > 1e-9 ? columnVolumeMm3 : partVolumeMm3;
+
+  /** Material that will not draw with a parting plane `p` mm above the base, mm³. */
+  const trappedAt = (p: number): number => {
+    let trapped = 0;
+    for (let k = 0; k < hit.length; k++) {
+      if (!hit[k]) continue;
+      const mat = thickness[k];
+      if (mat <= 0) continue;
+      if (bottom[k] > p || top[k] < p) {
+        // Every millimetre of metal in this column is on the wrong side of the
+        // plane with nothing under (or over) it holding the sand up: all of it
+        // is re-entrant to whichever half would have to pull it.
+        trapped += mat * cellArea;
+      } else if (top[k] - bottom[k] - mat > 1e-6) {
+        // The plane passes through the column, but so does a void, so the metal
+        // comes in two or more spans and only the one touching the plane draws.
+        // The column sampler hands back totals rather than the spans themselves,
+        // so which share that is cannot be known from here; half is the honest
+        // middle of it, and the warning it triggers is the point rather than the
+        // exact figure.
+        trapped += mat * 0.5 * cellArea;
+      }
+    }
+    return trapped;
+  };
+
+  // 'auto' used to mean "at the base", which is only right for a flat-backed
+  // part. Anything mirror-symmetric about its own mid-height — a ring band, a
+  // lens, a barrel — has its whole lower half re-entrant to an upward pull from
+  // the base, and reads as several percent undrawable when in fact it parts
+  // perfectly at mid-height. So try a handful of heights and keep the best.
+  // Thirteen levels is plenty: the trapped-volume curve is piecewise linear in
+  // the plane height, so the minimum sits at or very near one of them, and the
+  // scan costs one pass over an already-sampled grid.
+  let parting: number;
+  if (opts.partingFromBaseMm === 'auto') {
+    parting = 0;
+    let bestTrapped = trappedAt(0);
+    // Only move off the base for a real improvement: a flat-backed pattern is
+    // the easiest thing to ram and to print, so it wins every near-tie.
+    const worthMoving = Math.max(1e-9, drawBasisMm3 * 1e-6);
+    for (let i = 1; i <= 12; i++) {
+      const p = (partH * i) / 12;
+      const t = trappedAt(p);
+      if (t < bestTrapped - worthMoving) {
+        bestTrapped = t;
+        parting = p;
+      }
+    }
+  } else {
+    parting = Math.max(0, opts.partingFromBaseMm);
   }
-  const undrawablePercent = partVolumeMm3 > 0 ? (100 * trapped) / partVolumeMm3 : 0;
+  const trapped = trappedAt(parting);
+  // Clamped as a backstop, not as the fix. A share of a part cannot be negative
+  // or above everything there is, so if some future sampling quirk says it is,
+  // the user should see a saturated 100% rather than a number that tells them
+  // the analysis is broken.
+  const undrawablePercent =
+    drawBasisMm3 > 0 ? Math.min(100, Math.max(0, (100 * trapped) / drawBasisMm3)) : 0;
   if (undrawablePercent > 1) {
     warnings.push(
       `About ${undrawablePercent.toFixed(0)}% of the part overhangs the upward pull, so the pattern ` +
@@ -306,31 +397,122 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
 
   // --- Gating ----------------------------------------------------------------
   // Simple and honest: a downsprue beside the part, a runner along the parting
-  // plane into a gate on the part, and a riser on top. Sized by rules of thumb,
-  // meant as a starting rig to adjust, not a solved feed system.
-  const sprueDia = opts.sprueDiaMm > 0 ? opts.sprueDiaMm : Math.max(8, Math.min(25, Math.cbrt(castWeightG) * 3));
-  const riserDia = opts.riserDiaMm > 0 ? opts.riserDiaMm : Math.max(10, Math.min(40, Math.min(gPartW, gPartD) * 0.5));
-  if (opts.addGating) {
-    const gap = 8;
-    const halfW = gPartW / 2;
-    const sprueX = halfW + gap + sprueDia / 2;
-    const sprueTop = Math.max(gPartH, 20) + 15;
-    const runnerH = Math.max(6, sprueDia * 0.6);
-    // Downsprue.
-    appendCylinder(pat, sprueX, 0, 0, sprueTop, sprueDia / 2);
-    // Runner along the parting plane, from the sprue to the edge of the part.
-    appendBox(pat, halfW - 2, sprueX, -runnerH / 2, runnerH / 2, 0, runnerH);
-    // A short gate stub where the runner meets the part.
-    appendBox(pat, halfW - 4, halfW + 1, -runnerH / 2, runnerH / 2, 0, runnerH * 0.7);
-    if (opts.addRiser) {
-      // Riser on the far side, fed off the top of the part's bulk.
-      appendCylinder(pat, -halfW - gap - riserDia / 2, 0, 0, Math.max(gPartH, 20) + 10, riserDia / 2);
-      appendBox(pat, -halfW - gap - riserDia / 2, -halfW + 2, -runnerH / 2, runnerH / 2, 0, runnerH);
-    }
+  // plane into a gate on the part, and a riser on top. A starting rig to adjust,
+  // not a solved feed system — but sized from this casting rather than from a
+  // table written for a foundry pouring twenty-kilo sand jobs. The old rules
+  // had an 8 mm floor on the sprue and a 10 mm floor on the riser, which on a
+  // five-gram ring meant more metal in the gating than in three castings, and
+  // an 8 mm scar on a 5 mm band.
+
+  // The head the metal falls through: the top of the sprue above the parting
+  // plane. Everything below is driven by it, so it is worked out first.
+  const sprueTop = Math.max(gPartH, 20) + 15;
+  const riserTop = Math.max(gPartH, 20) + 10;
+
+  // Sprue choke, from the fill rate rather than a floor. Continuity at the
+  // choke: mass / (density · time) = area · velocity, with the velocity from
+  // Torricelli under the pouring head and a discharge coefficient of 0.7 for a
+  // printed, near-parallel channel. Fill time follows the usual t = k·√m shape,
+  // calibrated so a kilo of aluminium fills in about six seconds — the middle
+  // of hobby practice — and floored at a third of a second, below which nobody
+  // can pour accurately anyway. The metal through the choke is the casting plus
+  // whatever the feeders hold, hence the 1.3.
+  const chokeMassG = Math.max(castWeightG, 1e-6) * 1.3;
+  const fillTimeS = Math.min(15, Math.max(0.35, 0.19 * Math.sqrt(chokeMassG)));
+  const velocityMmS = Math.sqrt(2 * 9810 * sprueTop);
+  const chokeAreaMm2 = chokeMassG / ((metal.densityGcm3 / 1000) * 0.7 * fillTimeS * velocityMmS);
+  // Two sanity rails on that number. Below about 2.5 mm a channel in sand or
+  // plaster freezes before it has filled and is fragile in the printed pattern,
+  // so that is the floor. At the top, 25 mm as before, and never wider than the
+  // section the casting itself offers the metal — volume over the longest plan
+  // dimension is a fair stand-in for that feed cross-section — because a sprue
+  // fatter than the part it feeds is just a scar to saw off.
+  const feedSectionMm2 = partVolumeMm3 / Math.max(partW, partD, 1e-6);
+  const sprueDia =
+    opts.sprueDiaMm > 0
+      ? opts.sprueDiaMm
+      : Math.max(
+          2.5,
+          Math.min(25, Math.sqrt((4 * feedSectionMm2 * 1.5) / Math.PI), Math.sqrt((4 * chokeAreaMm2) / Math.PI))
+        );
+
+  // Riser, by Chvorinov rather than by plan size. A feeder has to still be
+  // liquid when the casting has frozen, so its modulus (volume over cooling
+  // surface) must beat the casting's by the usual 20% margin. Solving that for
+  // a cylinder of the height this rig actually prints gives a closed form, and
+  // the riser must additionally hold the shrinkage it is there to feed — about
+  // the metal's contraction, at the ~14% yield a plain cylindrical riser
+  // manages. The bigger of the two wins.
+  const partAreaMm2 = triSoupArea(part);
+  const castModulusMm = partAreaMm2 > 0 ? partVolumeMm3 / partAreaMm2 : 0;
+  const reqModulusMm = castModulusMm * 1.2;
+  const modulusDia =
+    riserTop > 2 * reqModulusMm ? (4 * riserTop * reqModulusMm) / (riserTop - 2 * reqModulusMm) : Infinity;
+  const feedVolMm3 = (partVolumeMm3 * metal.shrinkPercent) / 100 / 0.14;
+  const volumeDia = Math.sqrt((4 * feedVolMm3) / (Math.PI * riserTop));
+  const autoRiserDia = Math.min(40, Math.max(modulusDia, volumeDia));
+  // And the part may simply not want a riser. A casting whose modulus is under
+  // a millimetre — a plate thinner than about 2 mm, a jewellery band — freezes
+  // in a second or two and is fed perfectly well back through its own gate and
+  // sprue; likewise a riser that works out under 5 mm across holds no useful
+  // reserve and would freeze first, doing nothing but adding a stub to cut off.
+  // An explicitly requested diameter is always honoured.
+  const riserWanted =
+    opts.addRiser && (opts.riserDiaMm > 0 || (castModulusMm >= 1.0 && autoRiserDia >= 5 && Number.isFinite(autoRiserDia)));
+  const riserDia = opts.riserDiaMm > 0 ? opts.riserDiaMm : autoRiserDia;
+  if (opts.addRiser && !riserWanted) {
+    warnings.push(
+      `No riser: at a modulus of ${castModulusMm.toFixed(2)} mm this casting freezes fast enough to feed ` +
+        `back through its own gate, and a feeder small enough to suit it would freeze first.`
+    );
   }
 
-  // Gating is remelted, so it adds to what you pour but not to the part.
-  const pourWeightG = castWeightG * (opts.addGating ? 1.6 : 1.15);
+  // Runner and gate scale with the choke, not with a fixed 6 mm. An
+  // unpressurised rig wants the runner a little roomier than the choke so the
+  // metal slows and any dross rises; 1.5x the choke area, square section, is the
+  // conventional starting point, with 2 mm as the thinnest thing worth printing.
+  const runnerH = Math.max(2, Math.sqrt(1.5 * (Math.PI * sprueDia * sprueDia) / 4));
+  // The sprue stands off the part by about its own diameter — far enough that
+  // the sand between them holds, close enough that a small part is not fed down
+  // a long cold runner.
+  const gap = Math.max(3, Math.min(8, sprueDia));
+  const halfW = gPartW / 2;
+  const sprueX = halfW + gap + sprueDia / 2;
+  const gateLen = Math.min(5, Math.max(2, sprueDia));
+  let gatingVolumeMm3 = 0;
+  if (opts.addGating) {
+    // Downsprue.
+    appendCylinder(pat, sprueX, 0, 0, sprueTop, sprueDia / 2);
+    gatingVolumeMm3 += (Math.PI * sprueDia * sprueDia * sprueTop) / 4;
+    // Runner along the parting plane, from the sprue to the edge of the part.
+    const runnerX0 = halfW - 2;
+    appendBox(pat, runnerX0, sprueX, -runnerH / 2, runnerH / 2, 0, runnerH);
+    gatingVolumeMm3 += Math.max(0, sprueX - runnerX0) * runnerH * runnerH;
+    // A short gate stub where the runner meets the part.
+    appendBox(pat, halfW + 1 - gateLen, halfW + 1, -runnerH / 2, runnerH / 2, 0, runnerH * 0.7);
+    gatingVolumeMm3 += gateLen * runnerH * runnerH * 0.7;
+    if (riserWanted) {
+      // Riser on the far side, fed off the top of the part's bulk.
+      const riserX = -halfW - gap - riserDia / 2;
+      appendCylinder(pat, riserX, 0, 0, riserTop, riserDia / 2);
+      gatingVolumeMm3 += (Math.PI * riserDia * riserDia * riserTop) / 4;
+      const neckX1 = -halfW + 2;
+      appendBox(pat, riserX, neckX1, -runnerH / 2, runnerH / 2, 0, runnerH);
+      gatingVolumeMm3 += Math.max(0, neckX1 - riserX) * runnerH * runnerH;
+    }
+  } else {
+    gatingVolumeMm3 = 0;
+  }
+
+  // What to melt. Not a multiplier: the metal that has to go in the crucible is
+  // the metal that ends up in the mould — the cavity, which is the pattern's
+  // size and so the part grown by the shrink allowance, plus every channel
+  // printed above — with a tenth on top for the pouring basin, the skull left
+  // in the crucible and the dribble that misses. A flat 1.6x got this badly
+  // wrong on small parts, where the sprue alone outweighs the casting.
+  const mouldVolumeMm3 = partVolumeMm3 * grow * grow * grow + gatingVolumeMm3;
+  const mouldMetalG = (mouldVolumeMm3 / 1000) * metal.densityGcm3;
+  const pourWeightG = mouldMetalG + Math.max(1, mouldMetalG * 0.1);
 
   const patternStl = trisToBinaryStl(pat);
 
@@ -346,8 +528,9 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
       partVolumeMm3,
       castWeightG,
       pourWeightG,
+      gatingVolumeMm3,
       sprueDiaMm: opts.addGating ? sprueDia : 0,
-      riserDiaMm: opts.addGating && opts.addRiser ? riserDia : 0,
+      riserDiaMm: opts.addGating && riserWanted ? riserDia : 0,
       partingFromBaseMm: parting,
       pourC: metal.pourC,
       undrawablePercent,

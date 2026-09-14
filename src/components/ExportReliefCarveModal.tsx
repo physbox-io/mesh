@@ -17,6 +17,7 @@ import {
   Field, Advanced, Segmented, FinishingPassFields, RoughingPassFields, BedLevellingFields, PreviewPlaceholder,
 } from './CarveFields';
 import { toolingOnly, useBedProbe, useCarveTooling } from './carveTooling';
+import { MATERIALS } from '../utils/feedsAndSpeeds';
 import { useExportJob } from '../utils/exportWorkerClient';
 
 interface Props {

@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import * as THREE from 'three';
 import type { SceneGraph, SceneNode, SceneGeom, SceneJoint, GeomType, CsgOp } from '../types/scene';
+import type { DataMirror, ModelMirror } from '../types/sceneLayer';
 import { type CombineOp, cageInFrame, geomsForCombine, nodeWorldMatrix } from '../utils/combineBodies';
 import { DEFAULT_BRUSH, toSceneGeom, type BrushSettings } from '../utils/sculptMesh';
 import { buildSculptBase, DEFAULT_SCULPT_BASE, type SculptBaseId } from '../utils/sculptBases';
@@ -87,19 +88,22 @@ const MUJOCO_SHIM = {
     mjOBJ_ACTUATOR: { value: 'actuator' },
   },
   mj_name2id: (model: ModelMirror | null | undefined, typeVal: string, name: string): number =>
-    (model?._idMaps as IdMaps | undefined)?.[typeVal]?.[name] ?? -1,
+    ((model?._idMaps as IdMaps | undefined)?.[typeVal] as Record<string, number> | undefined)?.[name] ?? -1,
   mj_id2name: (model: ModelMirror | null | undefined, typeVal: string, id: number): string | null =>
-    (model?._idMaps as IdMaps | undefined)?.[`${typeVal}Rev`]?.[id] ?? null,
+    ((model?._idMaps as IdMaps | undefined)?.[`${typeVal}Rev`] as Record<number, string> | undefined)?.[id] ?? null,
   // Nothing on the main thread should call these directly anymore — the worker
   // owns stepping/forward-kinematics. Kept as safe no-ops in case of a stray call.
   mj_step: () => {},
   mj_forward: () => {},
 };
 
-const buildModelMirror = (built: BuiltResult) => ({
-  nq: built.nq, nv: built.nv, nu: built.nu, ngeom: built.ngeom, nbody: built.nbody,
+// The `!`s are the same assertion buildDataMirror already makes: a mirror is
+// only ever built from a BUILT message that reported ok, and every one of these
+// fields is present on such a message.
+const buildModelMirror = (built: BuiltResult): ModelMirror => ({
+  nq: built.nq!, nv: built.nv!, nu: built.nu!, ngeom: built.ngeom!, nbody: built.nbody!,
   opt: { timestep: built.timestep },
-  geom_size: built.geom_size,
+  geom_size: built.geom_size!,
   geom_type: built.geom_type,
   geom_rgba: built.geom_rgba,
   body_mass: built.body_mass,
@@ -117,15 +121,13 @@ const buildModelMirror = (built: BuiltResult) => ({
 // `useStore.getState().data` inside useFrame (not a reactive selector), so
 // mutating in place keeps the exact same performance characteristics as the
 // original live-WASM-view approach: no React re-render on every physics tick.
-const buildDataMirror = (built: BuiltResult | FrameSnapshot) => ({
+const buildDataMirror = (built: BuiltResult | FrameSnapshot): DataMirror => ({
   time: built.time,
   qpos: built.qpos!, qvel: built.qvel!, ctrl: built.ctrl!,
   xfrc_applied: built.xfrc_applied!, qfrc_applied: built.qfrc_applied!,
   xpos: built.xpos!, xmat: built.xmat!, cvel: built.cvel!,
   geom_xpos: built.geom_xpos!, geom_xmat: built.geom_xmat!,
 });
-type ModelMirror = ReturnType<typeof buildModelMirror>;
-type DataMirror = ReturnType<typeof buildDataMirror>;
 
 // Proactive recycling: WASM linear memory only ever grows within a worker's
 // lifetime, and heavy scenes (many dynamic SCAD/mesh bodies) can eat through
@@ -154,6 +156,39 @@ let recompileToken = 0;
 let recompilesInFlight = 0;
 
 let buildsSinceRecycle = 0;
+
+/**
+ * Run something on the next paint, or straight away if there will not be one.
+ *
+ * A finished build used to land inside a bare requestAnimationFrame, so the
+ * compiled model and the scene it came from were only ever written to the store
+ * once the browser painted. A hidden or backgrounded tab does not paint: every
+ * major engine throttles rAF to nothing there. The build itself still ran, so
+ * nothing looked broken — but `sceneGraph`, `isLoaded` and the model were never
+ * committed, so the app sat with isLoaded:false and every MCP command that waits
+ * for the scene to settle timed out. That is exactly what a tab driven by an
+ * agent does: sit behind another window.
+ *
+ * rAF is still preferred when the page is visible, because landing a new model
+ * mid-frame is what it is for. When the page is hidden it is a timer instead.
+ */
+const onNextPaint = (fn: () => void) => {
+  if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+    setTimeout(fn, 0);
+    return;
+  }
+  if (typeof requestAnimationFrame !== 'function') {
+    setTimeout(fn, 0);
+    return;
+  }
+  // A tab can be hidden between the check above and the callback firing, so the
+  // frame is also raced against a timer. Whichever arrives first wins; the other
+  // is a no-op.
+  let settled = false;
+  const once = () => { if (!settled) { settled = true; fn(); } };
+  requestAnimationFrame(once);
+  setTimeout(once, 250);
+};
 
 let physicsWorkerClientSingleton: PhysicsWorkerClient | null = null;
 const recycleWorker = () => {
@@ -193,8 +228,13 @@ export const getPhysicsWorkerClient = (): PhysicsWorkerClient => {
 const isAllMeshNode = (node: SceneNode) =>
   node.geoms?.length > 0 && node.geoms.every((g: SceneGeom) => g.type === 'mesh');
 
-const isDynamicMesh = (g: SceneGeom) => g.type === 'mesh' && g.dynamic && g.renderVertices;
-const isStaticMesh  = (g: SceneGeom) => g.type === 'mesh' && !g.dynamic && g.vertices;
+// Type predicates so that what they check — that the mesh arrays are there —
+// is known to the code that then reads them, rather than re-asserted at
+// every use.
+const isDynamicMesh = (g: SceneGeom): g is SceneGeom & { renderVertices: number[] } =>
+  g.type === 'mesh' && !!g.dynamic && !!g.renderVertices;
+const isStaticMesh = (g: SceneGeom): g is SceneGeom & { vertices: number[] } =>
+  g.type === 'mesh' && !g.dynamic && !!g.vertices;
 
 // A mesh geom authored (by hand, by a preset file, or over MCP) without an
 // explicit dynamic:true sits in the static render path forever, even once a
@@ -352,7 +392,7 @@ const rotateMeshGeomsAbsolute = (node: WorkingNode, euler: [number, number, numb
 // have to be permuted to match. Uniform scaling never noticed the difference,
 // and per-axis scaling would silently stretch collision and render geometry
 // along different axes without it.
-export const scaleMeshGeoms = (node: SceneNode, sx: number, sy: number = sx, sz: number = sx) => {
+export const scaleMeshGeoms = (node: Pick<SceneNode, 'geoms'>, sx: number, sy: number = sx, sz: number = sx) => {
   const scaleAboutCentroid = (vertices: number[], fx: number, fy: number, fz: number) => {
     const v = [...vertices];
     let cx = 0, cy = 0, cz = 0;
@@ -1071,8 +1111,9 @@ export const useStore = create<PhysicsState>()((set, get) => ({
       });
     }
 
-    if (get().historyDebounceTimer) {
-      clearTimeout(get().historyDebounceTimer);
+    const pendingHistoryTimer = get().historyDebounceTimer;
+    if (pendingHistoryTimer) {
+      clearTimeout(pendingHistoryTimer);
     }
 
     const timer = setTimeout(() => {
@@ -1412,12 +1453,22 @@ export const useStore = create<PhysicsState>()((set, get) => ({
         window.dispatchEvent(new CustomEvent('physics:preset-loaded', { detail: { name, prev } }));
       }
       try {
-        const savedScene = readUserPreset(name);
+        const saved = readUserPreset(name);
+        // Two shapes are in circulation. App.tsx spreads the graph, so the nodes
+        // sit at the top level; the MCP bridge used to nest it under a
+        // `sceneGraph` key, and every preset an agent saved before that was
+        // fixed still has them one level down. Read either, so those presets are
+        // not stranded.
+        const nested = (saved as { sceneGraph?: SceneGraph } | null)?.sceneGraph;
+        const savedScene: SceneGraph | null =
+          saved && Array.isArray(saved.nodes) ? (saved as unknown as SceneGraph)
+          : nested && Array.isArray(nested.nodes) ? nested
+          : null;
         // A preset with no nodes is a corrupt or half-written entry rather than
         // an empty scene; recompiling it would throw inside the MJCF builder.
-        if (savedScene && Array.isArray(savedScene.nodes)) {
+        if (savedScene) {
           promoteJointedMeshGeomsDeep(savedScene.nodes);
-          get().recompile(savedScene as SceneGraph, null, true, true);
+          get().recompile(savedScene, null, true, true);
         }
       } catch (e) {
         console.error('Failed to load user preset', e);
@@ -1493,7 +1544,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     const sources = sourceIds
       .filter(id => id !== targetId)
       .map(id => findNode(scene.nodes, id))
-      .filter(Boolean);
+      .filter((n): n is SceneNode => n !== null);
     if (!target || sources.length === 0) return;
 
     // Every geom is written relative to the body carrying it, so moving one to
@@ -1589,7 +1640,8 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     if (mergedResult && mergedFaces > 0) {
       // Rebuilds the mesh from the merged cage, recentres the body on it, and
       // recompiles — the same path an edit in the lattice tools takes.
-      get().applyLattice(targetId, node.latticeCage, node.latticeSubdiv);
+      // Written a few lines above, under this same condition.
+      get().applyLattice(targetId, node.latticeCage!, node.latticeSubdiv);
       return;
     }
     get().recompile(newScene, targetId, true);
@@ -2553,7 +2605,8 @@ export const useStore = create<PhysicsState>()((set, get) => ({
       for (const node of nodes) {
         if (node.id === gearId && node.geoms?.length > 1) {
           const peg = node.geoms.find((g: SceneGeom) => g.name.includes('peg'));
-          if (peg) {
+          // generateGearGeoms always places the peg, so `pos` is there.
+          if (peg && peg.pos) {
             if (updates.offset !== undefined) {
               peg.pos = [updates.offset, 0, peg.pos[2]];
             }
@@ -2629,6 +2682,9 @@ export const useStore = create<PhysicsState>()((set, get) => ({
             meshGeom = node.geoms[0];
           }
           if (!meshGeom) {
+            // No `size`: a mesh geom's is unused, the vertices are written a
+            // few lines below, and putting a number here would put one in the
+            // scene that has never been there.
             meshGeom = {
               id: `geom_${Math.random().toString(36).substring(2, 8)}`,
               name: `${node.name || id}_mesh`,
@@ -2636,7 +2692,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
               dynamic: true,
               rgba: [0.3, 0.6, 0.9, 1],
               mass: 1
-            };
+            } as SceneGeom;
             node.geoms.push(meshGeom);
           }
           meshGeom.type = 'mesh';
@@ -3220,6 +3276,21 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     }
     
     const selectId = typeof window !== 'undefined' && (window as PhysicsWindow).NO_SELECT ? null : id;
+    /*
+     * The body is written to the store HERE, not left for the recompile to land.
+     *
+     * recompile is debounced and drops out entirely when a later one supersedes
+     * it, without ever writing its scene. So a body added while anything else
+     * was touching the scene simply never appeared — no error, no node. Over MCP
+     * that surfaced as physics_create_sculpt timing out after ten seconds
+     * waiting for a node that was never going to arrive, which is how it failed
+     * for a whole session once the app got busy.
+     *
+     * Writing it now also means the id can be used on the very next line, which
+     * is what every caller wants and what the add-a-single-body bridge command
+     * needs.
+     */
+    set(selectId === null ? { sceneGraph: newScene } : { sceneGraph: newScene, selectedNodeId: selectId });
     get().recompile(newScene, selectId);
   },
   
@@ -3287,7 +3358,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
         sceneGraph, recompileId: Date.now(), lastCompileError: null, isLoaded: true,
       };
       if (overrideSelectedId !== undefined) updates.selectedNodeId = overrideSelectedId;
-      requestAnimationFrame(() => {
+      onNextPaint(() => {
         if (get().sceneGraph !== graphAtBuildStart && get().sceneGraph !== sceneGraph) {
           delete updates.sceneGraph;
         }

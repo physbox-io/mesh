@@ -25,6 +25,9 @@ export interface BoundsNode {
   majorRadius?: number;
   tubeRadius?: number;
   geoms?: BoundsGeom[];
+  /** Body-local offset of a child, and the children measured relative to it. */
+  pos?: number[];
+  children?: BoundsNode[];
 }
 
 /** The accessors App.tsx hangs on `window` for the MCP bridge and the copilot. */
@@ -329,6 +332,34 @@ A shelf bracket drawn on a grid: a **50 mm** arm off a **60 mm** wall plate, bot
 
 ## Why a lattice and not a primitive
 Lattice modelling is for parts like this: exact coordinates and arbitrary topology.`,
+
+  oak_tree: `# Oak Tree
+
+An open-grown English oak, **5.4 m** tall with a **6.5 m** crown. Not sculpted: grown, by a recursive branching rule, so the shape is a record of how it got there rather than a lump pushed into a tree silhouette.
+
+## What makes it an oak
+- A short, stout bole that forks **low**, at 2 m of a 5.4 m tree, with a buttressed flare over the bottom 400 mm.
+- Five first-order limbs leaving **near horizontal** from a range of heights, reaching out before they turn up. That candelabra is the thing you recognise an oak by from across a field. All the limbs leaving one whorl would give you a palm.
+- Every fork keeps the wood: the children's cross-sections add up to the parent's, so a limb that splits in two drops to about **0.73** of its radius, not half. That one rule is most of why the taper looks right.
+- Branches **wander**. Each is drawn in four sub-segments with a little heading jitter, because a branch drawn as a straight tube reads as a broom handle.
+- Foliage sits in **discrete clumps at the twig ends**, 2 to 3 lumpy blobs each, so the crown has sky in it. A single green ball on a stick is the classic wrong answer.
+
+## Numbers
+| | |
+|---|---|
+| Height | 5.39 m |
+| Crown spread | 6.51 x 6.46 m |
+| Trunk at the base / flare | 0.40 / 0.68 m |
+| Crown to trunk | 16 : 1 |
+| Lowest foliage | 2.07 m |
+| Wood / foliage triangles | 5,850 / 26,320 |
+
+## Try it
+- The whole tree comes from one seed. Change the seed passed to buildOakTree and you get a different tree of the same species.
+- Raise the starting upward bias from 0.10 and the limbs leave steeply: you get a lombardy poplar.
+- Drop the twig threshold below 0.011 m for finer branching, at a cost in triangles.
+
+It is scenery — no joint, and neither mesh collides, because the convex hull of a tree is a dome nothing should bump into.`,
 
   mega_bust_studio: `# Mega Bust & Stress Studio
 

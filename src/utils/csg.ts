@@ -1121,6 +1121,116 @@ export function decomposeAroundAxis(
 }
 
 // ---------------------------------------------------------------------------
+// Collider soundness
+// ---------------------------------------------------------------------------
+
+/**
+ * MuJoCo runs qhull over every mesh collider when the model is compiled, and a
+ * hull that is not a genuine 3D solid — a wafer, a shard, three near-collinear
+ * points — makes qhull call abort() inside native code. That abort tears down
+ * the wasm heap, so every LATER compile in the session dies with "Could not
+ * allocate memory", including a scene holding nothing but a sphere. There is no
+ * recovering from it at runtime, so a degenerate sector must never be emitted.
+ *
+ * Thresholds are absolute, in metres, picked for the range of parts this app
+ * handles (a few millimetres up to a couple of metres):
+ *
+ *  - MIN_COLLIDER_THICKNESS (0.2 mm). "Thickness" here is 2V/S, which is the
+ *    slab thickness for a thin slab and 2R/3 for a sphere — a cheap,
+ *    orientation-independent measure of how far the hull is from flat (a
+ *    coplanar or collinear cloud drives it to zero). 0.2 mm sits an order of
+ *    magnitude below the thinnest wall anyone machines or prints here (~1 mm)
+ *    and an order of magnitude above the slivers that trigger the abort (the
+ *    reported crash had a 0.06 mm piece). Contact against a sheet thinner than
+ *    this is meaningless anyway.
+ *  - MIN_COLLIDER_ASPECT (1/1000). A long shard can clear the absolute floor
+ *    and still be numerically hopeless, so the thickness must also be at least
+ *    a thousandth of the piece's own diagonal. qhull works at roughly 1e-7
+ *    relative precision, so 1e-3 leaves four orders of headroom.
+ *  - MIN_COLLIDER_VOLUME (1e-10 m^3 = 0.1 mm^3). A 3 mm cube split into 16
+ *    sectors still gives ~1.7e-9 m^3 apiece, so this only catches true
+ *    nothings rather than small-but-real parts.
+ *  - At least four distinct vertices, since fewer cannot bound a volume at all.
+ */
+export const MIN_COLLIDER_THICKNESS = 2e-4;
+export const MIN_COLLIDER_ASPECT = 1e-3;
+export const MIN_COLLIDER_VOLUME = 1e-10;
+
+/** Total area of a triangle mesh's faces. */
+function meshSurfaceArea(verts: number[], faces: number[]): number {
+  let area = 0;
+  for (let i = 0; i < faces.length; i += 3) {
+    const a = faces[i] * 3, b = faces[i + 1] * 3, c = faces[i + 2] * 3;
+    const ux = verts[b] - verts[a], uy = verts[b + 1] - verts[a + 1], uz = verts[b + 2] - verts[a + 2];
+    const vx = verts[c] - verts[a], vy = verts[c + 1] - verts[a + 1], vz = verts[c + 2] - verts[a + 2];
+    const cx = uy * vz - uz * vy, cy = uz * vx - ux * vz, cz = ux * vy - uy * vx;
+    area += Math.hypot(cx, cy, cz) / 2;
+  }
+  return area;
+}
+
+export interface ColliderSoundness {
+  vertexCount: number;
+  volume: number;
+  /** 2V/S — slab thickness for a slab, 2R/3 for a sphere, ~0 for anything flat. */
+  thickness: number;
+  /** AABB diagonal, the piece's own scale. */
+  diameter: number;
+  /** Shortest AABB side. */
+  minExtent: number;
+  degenerate: boolean;
+  reason?: 'vertices' | 'volume' | 'thickness' | 'extent' | 'aspect';
+}
+
+/** Measures whether a hull is a collider MuJoCo can safely run qhull over. */
+export function colliderSoundness(hull: { verts: number[]; faces: number[]; volume?: number }): ColliderSoundness {
+  const { verts, faces } = hull;
+  const vertexCount = verts.length / 3;
+  const volume = hull.volume ?? meshVolumeAndCentroid(verts, faces).volume;
+  const area = meshSurfaceArea(verts, faces);
+  const thickness = area > 0 ? (2 * volume) / area : 0;
+
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  for (let i = 0; i < verts.length; i += 3) {
+    if (verts[i] < minX) minX = verts[i];
+    if (verts[i] > maxX) maxX = verts[i];
+    if (verts[i + 1] < minY) minY = verts[i + 1];
+    if (verts[i + 1] > maxY) maxY = verts[i + 1];
+    if (verts[i + 2] < minZ) minZ = verts[i + 2];
+    if (verts[i + 2] > maxZ) maxZ = verts[i + 2];
+  }
+  const dx = vertexCount ? maxX - minX : 0;
+  const dy = vertexCount ? maxY - minY : 0;
+  const dz = vertexCount ? maxZ - minZ : 0;
+  const diameter = Math.hypot(dx, dy, dz);
+  const minExtent = Math.min(dx, dy, dz);
+
+  let reason: ColliderSoundness['reason'];
+  if (vertexCount < 4) reason = 'vertices';
+  else if (!(volume >= MIN_COLLIDER_VOLUME)) reason = 'volume';
+  else if (!(thickness >= MIN_COLLIDER_THICKNESS)) reason = 'thickness';
+  else if (!(minExtent >= MIN_COLLIDER_THICKNESS)) reason = 'extent';
+  else if (!(thickness >= MIN_COLLIDER_ASPECT * diameter)) reason = 'aspect';
+
+  return { vertexCount, volume, thickness, diameter, minExtent, degenerate: !!reason, reason };
+}
+
+/** True if emitting this hull as a mesh collider risks aborting MuJoCo. */
+export function isDegenerateCollider(hull: { verts: number[]; faces: number[]; volume?: number }): boolean {
+  return colliderSoundness(hull).degenerate;
+}
+
+/**
+ * Drops the sectors that are not genuine convex solids. The volume they carried
+ * is not lost: callers re-normalise mass over the survivors, so the body keeps
+ * its authored weight.
+ */
+export function usableColliderHulls<T extends { verts: number[]; faces: number[]; volume?: number }>(hulls: T[]): T[] {
+  return hulls.filter(h => !isDegenerateCollider(h));
+}
+
+// ---------------------------------------------------------------------------
 // Evaluation
 // ---------------------------------------------------------------------------
 
@@ -1295,23 +1405,38 @@ export async function evaluateNodeCsg(node: SceneNode): Promise<CsgResult | null
         holeAxis.origin[2] - centroid[2],
       ];
       const hulls = decomposeAroundAxis(centeredZup, compiled.faces, shiftedOrigin, holeAxis.axis, sectors);
-      const totalHullVol = hulls.reduce((s, h) => s + h.volume, 0);
-      if (hulls.length >= 3 && totalHullVol > 0) {
+      // A sliver here is not a cosmetic problem: qhull aborts on it inside
+      // MuJoCo and takes the whole wasm heap down with it. See colliderSoundness.
+      const usable = usableColliderHulls(hulls);
+      const dropped = hulls.length - usable.length;
+      const totalHullVol = usable.reduce((s, h) => s + h.volume, 0);
+      if (usable.length >= 3 && totalHullVol > 0) {
         mode = 'decompose';
-        colliders = hulls.map((h, i) => {
+        if (dropped > 0) {
+          warning = `Dropped ${dropped} degenerate collider${dropped === 1 ? '' : 's'} from the decomposition; the remaining ${usable.length} carry the full mass.`;
+        }
+        // Mass is shared by hull volume over the SURVIVORS, and the last one
+        // takes the rounding remainder, so the body weighs exactly what it did
+        // before anything was dropped.
+        let massLeft = +totalMass.toFixed(8);
+        colliders = usable.map((h, i) => {
           // MuJoCo translates every mesh asset so its centre of mass sits at the
           // asset frame's origin, then places that frame at the geom's pos. So
           // pre-centre each sector on its own centroid and hand that centroid
           // back as pos — otherwise MuJoCo's recentring silently stacks every
           // sector on top of the body origin.
           const localZup = translateFlat(h.verts, [-h.centroid[0], -h.centroid[1], -h.centroid[2]]);
+          const share = i === usable.length - 1
+            ? massLeft
+            : +(totalMass * (h.volume / totalHullVol)).toFixed(8);
+          massLeft = +(massLeft - share).toFixed(8);
           return {
             name: `${baseName}_csg_col${i}`,
             type: 'mesh' as const,
             size: [1],
             pos: [+h.centroid[0].toFixed(6), +h.centroid[1].toFixed(6), +h.centroid[2].toFixed(6)],
             rgba: [...rgba],
-            mass: +(totalMass * (h.volume / totalHullVol)).toFixed(8),
+            mass: share,
             condim: template?.condim ?? 3,
             ...(template?.friction ? { friction: [...template.friction] } : {}),
             ...(template?.solref ? { solref: [...template.solref] } : {}),
@@ -1322,6 +1447,16 @@ export async function evaluateNodeCsg(node: SceneNode): Promise<CsgResult | null
             csgDerived: 'collider' as const,
           };
         });
+      } else if (dropped > 0) {
+        // Every sector (or all but a couple) was a sliver. Emitting nothing
+        // would leave the body with no collision at all, so collide as the
+        // whole part's convex hull instead — MuJoCo hulls a mesh collider
+        // anyway, so handing it the visual mesh IS the convex hull of the part.
+        return {
+          hash, scad, volume, hullVolume, centroid, mode: 'hull',
+          warning: `${dropped} of ${hulls.length} decomposition sectors were degenerate (too thin for MuJoCo to hull safely), leaving too few to collide with — colliding as the convex hull of the whole part instead.`,
+          geoms: [{ ...visual, mass: totalMass }],
+        };
       } else {
         warning = 'Sector decomposition degenerated — colliding as the source primitives instead.';
       }

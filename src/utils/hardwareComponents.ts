@@ -20,7 +20,7 @@ export type HardwareType =
   | 'snap_fit'
   | 'd_shaft_hub';
 
-export interface InsertBossSpec {
+export type InsertBossSpec = {
   size: 'M2' | 'M3' | 'M4' | 'M5' | 'M8';
   outerDiameterMm: number;
   innerHoleMm: number;
@@ -36,7 +36,7 @@ export const HEAT_SET_SPECS: Record<string, InsertBossSpec> = {
   M8: { size: 'M8', outerDiameterMm: 18.0, innerHoleMm: 9.8, depthMm: 12.5, chamferMm: 1.2 },
 };
 
-export interface BearingSpec {
+export type BearingSpec = {
   name: '608' | '624' | '625' | '688';
   outerDiameterMm: number;
   innerDiameterMm: number;
@@ -50,7 +50,7 @@ export const BEARING_SPECS: Record<string, BearingSpec> = {
   '688': { name: '688', outerDiameterMm: 16.0, innerDiameterMm: 8.0, widthMm: 5.0 },
 };
 
-export interface NutSpec {
+export type NutSpec = {
   size: 'M3' | 'M4' | 'M5' | 'M6';
   flatToFlatMm: number;
   thicknessMm: number;
@@ -336,7 +336,7 @@ scale(0.001) {
   };
 }
 
-export interface CounterboreSpec {
+export type CounterboreSpec = {
   size: 'M2' | 'M3' | 'M4' | 'M5';
   headDiameterMm: number;
   headHeightMm: number;

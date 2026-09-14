@@ -6,6 +6,7 @@
  * src/store/useStore.ts). These interfaces name the fields the renderers read.
  */
 import type { SceneGeom } from './scene';
+import type { IdMaps } from '../workers/physicsWorkerProtocol';
 
 export interface MujocoObjType { value: string }
 
@@ -17,8 +18,10 @@ export interface MujocoShim {
     mjOBJ_GEOM: MujocoObjType;
     mjOBJ_ACTUATOR: MujocoObjType;
   };
-  mj_name2id: (model: ModelMirror, typeVal: string, name: string) => number;
-  mj_id2name: (model: ModelMirror, typeVal: string, id: number) => string | null;
+  // Null/undefined-tolerant on purpose: the shim answers -1/null for a model
+  // that isn't there, and several call sites hold a `ModelMirror | null`.
+  mj_name2id: (model: ModelMirror | null | undefined, typeVal: string, name: string) => number;
+  mj_id2name: (model: ModelMirror | null | undefined, typeVal: string, id: number) => string | null;
 }
 
 /** The compiled model's sizes and per-geom/body constants. */
@@ -34,6 +37,8 @@ export interface ModelMirror {
   body_parentid?: ArrayLike<number>;
   jnt_qposadr?: ArrayLike<number>;
   jnt_dofadr?: ArrayLike<number>;
+  /** Name<->id lookup tables the worker builds; read only through the shim. */
+  _idMaps?: IdMaps;
 }
 
 /** The per-frame state, mutated in place by the worker's FRAME messages. */

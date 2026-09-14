@@ -9,18 +9,19 @@ import { useStore, getPhysicsWorkerClient } from '../store/useStore';
 import { compileToMJCF } from '../utils/mjcf';
 import { compileSCAD } from '../utils/openscad';
 import { getLiveCameraPose } from '../utils/liveCamera';
-import { makePresetNoteCard, updateOrCreateNotecard } from '../utils/noteCards';
+import { makePresetNoteCard, updateOrCreateNotecard, type NoteCard } from '../utils/noteCards';
 import { generateCurveGeoms, DEFAULT_CURVE_POINTS, DEFAULT_CURVE_WIDTH, DEFAULT_CURVE_THICKNESS, DEFAULT_CURVE_SEGMENTS } from '../utils/geom';
 import { compileCsgNodes } from './useCsgCompile';
+import { csgFrameOffset } from '../utils/csg';
 import { PRESETS } from '../presets/presetScenes';
 import { parseSTL } from '../utils/stlParser';
 import {
   applyDab, buildPaintGeometry, canvasFromLayer, isPaintable, layerFromCanvas,
   paintArgsFromSize, paintResolution, toGeometrySpace,
 } from '../utils/vertexPaint';
-import { saveUserPreset, deleteUserPreset, readUserPreset, listUserPresetNames } from '../utils/userPresets';
-import { SCULPT_BASES } from '../utils/sculptBases';
-import { fromSceneGeom, toSceneGeom } from '../utils/sculptMesh';
+import { saveUserPreset, deleteUserPreset, readUserPreset, listUserPresetNames, type SavedCopilotMessage } from '../utils/userPresets';
+import { SCULPT_BASES, type SculptBaseId } from '../utils/sculptBases';
+import { fromSceneGeom, toSceneGeom, type BrushType } from '../utils/sculptMesh';
 import { applySculptStroke, probeSurface, sculptSummary, undoSculptStroke, BRUSH_TYPES } from '../utils/sculptCommands';
 import {
   addFacesMm, addRingMm, bevelEdgesMm, bevelFaceMm, bridgeFacesMm, describeLattice,
@@ -28,6 +29,8 @@ import {
   insetFaceMm, latticeSummary, removeFacesMm, revolveMm, sharpenEdgesMm,
 } from '../utils/latticeCommands';
 import { measureInScene } from '../utils/measureScene';
+import { generateCastPattern, DEFAULT_CAST_OPTIONS } from '../utils/castPatternExporter';
+import { generateSolidMachining, DEFAULT_SOLID_OPTIONS } from '../utils/solidMachiningExporter';
 import type { Object3D } from 'three';
 import type { SceneNode, SceneGeom, SceneJoint } from '../types/scene';
 import type { RawGeom, RawJoint, RawNode } from '../utils/sceneNodes';
@@ -39,10 +42,10 @@ import type { SculptUndoEntry } from '../utils/sculptMesh';
 import type { HeadlessResult, HistoryEntry } from '../workers/physicsWorkerProtocol';
 
 interface PhysicsWindow extends Window {
-  _physics_setNoteCards?: (cards: unknown[]) => void;
-  _physics_getNoteCards?: () => unknown[];
-  _physics_setCopilotMessages?: (msgs: unknown[]) => void;
-  _physics_getCopilotMessages?: () => unknown[];
+  _physics_setNoteCards?: (cards: NoteCard[]) => void;
+  _physics_getNoteCards?: () => NoteCard[];
+  _physics_setCopilotMessages?: (msgs: SavedCopilotMessage[]) => void;
+  _physics_getCopilotMessages?: () => SavedCopilotMessage[];
   _physics_gl?: { domElement: HTMLCanvasElement; render: (scene: unknown, camera: unknown) => void };
   _physics_scene?: unknown;
   _physics_camera?: unknown;
@@ -100,7 +103,8 @@ const autoCompileScad = async (nodes: SceneNode[]) => {
     for (let attempt = 0; attempt < 3 && !compiled; attempt++) {
       if (attempt > 0) await new Promise(r => setTimeout(r, 100));
       try {
-        const result = await compileSCAD(node.scad);
+        // `collect` only ever pushes a node that has one.
+        const result = await compileSCAD(node.scad!);
         // A technically-valid but empty STL (zero triangles) doesn't throw in
         // compileSCAD but is just as much a failed compile - retry it too.
         if (result.faces.length === 0) {
@@ -119,7 +123,7 @@ const autoCompileScad = async (nodes: SceneNode[]) => {
       // moment - e.g. compiled while a later node's mesh doesn't exist yet - and
       // these overlapping builds race. Letting one of the stale/erroring ones
       // finish last silently corrupts lastCompileError even when the scene is fine.
-      useStore.getState().updateNodeScad(node.id, node.scad, compiled, true);
+      useStore.getState().updateNodeScad(node.id, node.scad!, compiled, true);
     } else {
       console.error(`Failed to auto-compile SCAD for node ${node.id} after 3 attempts:`, lastErr);
     }
@@ -240,13 +244,35 @@ function commitLattice(node: SceneNode, lattice: Lattice) {
   store.applyLattice(node.id, serializeCage(lattice), node.latticeSubdiv ?? 0);
 }
 
-function sculptMeshOf(node: SceneNode) {
+function sculptMeshOf(node: SceneNode | null | undefined) {
   const geom = (node?.geoms ?? []).find((g) => g.type === 'mesh');
   if (!geom?.renderVertices?.length || !geom?.faces?.length) {
     throw new Error(`'${node?.id}' has no sculptable mesh geom`);
   }
   return fromSceneGeom(geom.renderVertices, geom.faces);
 }
+
+/**
+ * A message with the fields one command's schema documents named at their
+ * types. Everything else stays `unknown`, which is how it arrives: a message is
+ * parsed JSON.
+ *
+ * This says what a command expects once, at the top of its case, instead of at
+ * every use of every field. It asserts rather than checks, deliberately — each
+ * handler already validates what it needs, and re-checking here would turn a
+ * malformed field into a missing one, which is a different answer from the one
+ * a caller gets today.
+ */
+type Msg<T> = Record<string, unknown> & T;
+
+/**
+ * `at` as the list of points it stands for: one point, or a list of them.
+ *
+ * Only decides which of those two shapes was sent; whether the points are
+ * points at all is the caller's own check, immediately below every use.
+ */
+const pointList = (v: unknown): number[][] =>
+  (Array.isArray(v) && Array.isArray(v[0]) ? v : [v]) as number[][];
 
 const findNodeInScene = (nodes: SceneNode[], id: string): SceneNode | null => {
   for (const node of nodes || []) {
@@ -271,6 +297,66 @@ const bboxOf = (flatVerts: number[] | undefined) => {
   return { min, max };
 };
 
+/**
+ * Whether a mesh geom actually encloses anything.
+ *
+ * physics_get_lattice and physics_get_sculpt have always reported `watertight`,
+ * and a raw mesh geom reported nothing at all — so a mesh assembled by hand out
+ * of pieces could be full of open rims and inside-out triangles and every reply
+ * would happily describe it by its vertex count and bounding box. That is a
+ * scene which renders perfectly and exports as nothing, and it is not the kind
+ * of thing anybody spots by looking.
+ *
+ * Three cheap facts: every edge used by exactly two triangles, no zero-area
+ * triangles, and a positive signed volume (negative means the surface is inside
+ * out). Edge keys are integers rather than strings because this runs for every
+ * mesh in every scene summary.
+ *
+ * Skipped above a couple of hundred thousand triangles, where the pass would
+ * cost more than the summary it is part of; the reply says so rather than
+ * claiming the mesh is fine.
+ */
+const MAX_CHECKED_TRIANGLES = 200_000;
+function meshIntegrity(g: SceneGeom): Record<string, unknown> {
+  const faces = g.faces || [];
+  const pos = g.renderVertices || g.vertices || [];
+  const triangles = faces.length / 3;
+  if (!triangles || !pos.length) return {};
+  if (triangles > MAX_CHECKED_TRIANGLES) return { watertight: 'not checked — too many triangles' };
+
+  const vertexCount = pos.length / 3;
+  const edges = new Map<number, number>();
+  let degenerate = 0;
+  let volume = 0;
+  for (let i = 0; i < faces.length; i += 3) {
+    const t0 = faces[i], t1 = faces[i + 1], t2 = faces[i + 2];
+    if (t0 === t1 || t1 === t2 || t0 === t2) { degenerate++; continue; }
+    const tri = [t0, t1, t2];
+    for (let e = 0; e < 3; e++) {
+      const a = tri[e], b = tri[(e + 1) % 3];
+      const key = a < b ? a * vertexCount + b : b * vertexCount + a;
+      edges.set(key, (edges.get(key) ?? 0) + 1);
+    }
+    const a = t0 * 3, b = t1 * 3, c = t2 * 3;
+    volume += (pos[a] * (pos[b + 1] * pos[c + 2] - pos[b + 2] * pos[c + 1])
+      - pos[a + 1] * (pos[b] * pos[c + 2] - pos[b + 2] * pos[c])
+      + pos[a + 2] * (pos[b] * pos[c + 1] - pos[b + 1] * pos[c])) / 6;
+  }
+  let boundaryEdges = 0, nonManifoldEdges = 0;
+  for (const n of edges.values()) {
+    if (n === 1) boundaryEdges++;
+    else if (n > 2) nonManifoldEdges++;
+  }
+  const closed = boundaryEdges === 0 && nonManifoldEdges === 0 && degenerate === 0;
+  return {
+    watertight: closed,
+    ...(boundaryEdges ? { boundaryEdges } : {}),
+    ...(nonManifoldEdges ? { nonManifoldEdges } : {}),
+    ...(degenerate ? { degenerateTriangles: degenerate } : {}),
+    ...(closed && volume < 0 ? { windingInverted: true } : {}),
+  };
+}
+
 const summarizeGeom = (g: SceneGeom) => ({
   name: g.name,
   type: g.type,
@@ -282,6 +368,7 @@ const summarizeGeom = (g: SceneGeom) => ({
         vertCount: (g.renderVertices || g.vertices || []).length / 3,
         faceCount: (g.faces || []).length / 3,
         bbox: bboxOf(g.renderVertices || g.vertices),
+        ...meshIntegrity(g),
       }
     : { size: g.size }),
 });
@@ -297,6 +384,21 @@ const summarizeNode = (node: SceneNode): Record<string, unknown> => ({
     csg: {
       collision: node.csgCollision ?? 'auto',
       ...(node.csgVolume !== undefined ? { volumeM3: +node.csgVolume.toFixed(8) } : {}),
+      /*
+       * How far the drawn solid sits from the frame its shapes were written in.
+       *
+       * A compiled boolean is re-origined on its own centre of mass in X and Y,
+       * so a plate drawn symmetric about x=0 with a hole near one edge DRAWS a
+       * few millimetres off centre — 4.5 mm, for a 200 mm plate with a 60 mm
+       * bore at x=60. Sizes and the distances between features are unaffected;
+       * only the mapping from these coordinates to world space is.
+       *
+       * It was not reported anywhere, so a caller measuring the drawn part and
+       * then cutting at what it measured put the cut in the wrong place. It is
+       * reported here for the same reason latticeOrigin is: it is the number you
+       * need to convert, and nothing else will tell you it.
+       */
+      ...(node.csgCentroid ? { originOffsetMm: csgFrameOffset(node).map(v => +(v * 1000).toFixed(3)) } : {}),
       ...(node.csgWarning ? { warning: node.csgWarning } : {}),
       ...(node.csgError ? { error: node.csgError } : {}),
     },
@@ -417,7 +519,7 @@ const fillBodyDefaults = (b: RawNode): SceneNode => {
     flags.static === true ||
     flags.fixed === true ||
     (Array.isArray(b.geoms) && b.geoms.length > 0 && b.geoms.every(g => g.dynamic === false));
-  const defaultJoints = (b.isCurve === true || isFixed) ? [] : [{ type: 'free' }];
+  const defaultJoints: RawJoint[] = (b.isCurve === true || isFixed) ? [] : [{ type: 'free' }];
   const resolvedJoints = (b.joints ?? defaultJoints)
     .map((j: RawJoint, i: number) => fillJointDefaults(j, name, i));
   return {
@@ -475,6 +577,69 @@ const fillBodyDefaults = (b: RawNode): SceneNode => {
 // is ~183m across) rather than an intentionally huge object.
 const SUSPICIOUSLY_LARGE_DIAGONAL_M = 20;
 
+/**
+ * This tab's name, for the hub's session list.
+ *
+ * sessionStorage, not localStorage: it is per-tab and dies with the tab, which
+ * is exactly the lifetime wanted. It also survives a reload, so reloading the
+ * page a person had selected does not silently hand the agent a different tab.
+ *
+ * The label is what a person reads in `list_sessions` when they have three of
+ * these open and have to say which one to drive, so it carries the port and a
+ * short id rather than just a uuid.
+ */
+/**
+ * Bytes as base64, for handing a produced file back over the bridge.
+ *
+ * Chunked because String.fromCharCode is applied to the array and a megabyte of
+ * arguments overflows the call stack. The MCP server writes these to disk and
+ * never returns them to the agent, so size here costs transfer, not context.
+ */
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(binary);
+}
+
+/**
+ * The produced files, with or without the bytes.
+ *
+ * An agent asking what a part weighs and how long it takes to cut does not want
+ * a megabyte of G-code, and when the MCP server has nowhere to put a file it
+ * does not want it either. So the caller says whether it is going to keep them,
+ * and when it is not the bytes are never encoded, never sent, and never sit in
+ * a socket buffer — only the name and the size it would have been.
+ */
+function describeFiles(files: { name: string; bytes: Uint8Array }[], include: boolean) {
+  return files.map(f => include
+    ? { name: f.name, bytes: f.bytes.byteLength, base64: bytesToBase64(f.bytes) }
+    : { name: f.name, bytes: f.bytes.byteLength });
+}
+
+const TAB_SESSION_KEY = 'physbox_tab_session';
+function tabIdentity(): { sessionId: string; label: string; href: string; startedAt: number } {
+  let id = '';
+  let startedAt = Date.now();
+  try {
+    const stored = sessionStorage.getItem(TAB_SESSION_KEY);
+    if (stored) {
+      const parsed = JSON.parse(stored) as { id?: string; startedAt?: number };
+      if (typeof parsed.id === 'string') id = parsed.id;
+      if (typeof parsed.startedAt === 'number') startedAt = parsed.startedAt;
+    }
+  } catch { /* private mode, or a value we did not write: fall through and make one */ }
+  if (!id) {
+    id = `tab_${Math.random().toString(36).slice(2, 10)}`;
+    try { sessionStorage.setItem(TAB_SESSION_KEY, JSON.stringify({ id, startedAt })); } catch { /* nothing to do */ }
+  }
+  const href = typeof location !== 'undefined' ? location.href : '';
+  const port = typeof location !== 'undefined' ? location.port : '';
+  return { sessionId: id, label: `Mesh :${port} ${id.slice(4)}`, href, startedAt };
+}
+
 export function useMCPBridge() {
   useEffect(() => {
     let ws: WebSocket | null = null;
@@ -504,6 +669,15 @@ export function useMCPBridge() {
           app: 'physics',
           port: location.port,
           token: getStoredAuthToken() ?? undefined,
+          // Which TAB this is. Several tabs of the same app all connect to the
+          // one hub, and without a name for each the hub could only shout: every
+          // command went to all of them and whichever answered first won. That
+          // is not a race you can win by retrying — a body created in one tab is
+          // invisible to the next command if a different tab answers it, and a
+          // preset saved by a stale tab overwrites a good one, because
+          // localStorage is shared across tabs of an origin and the last write
+          // stands. With an id per tab the hub can address exactly one.
+          ...tabIdentity(),
         }));
 
       ws.onmessage = (evt) => {
@@ -714,7 +888,7 @@ export function useMCPBridge() {
         case 'SET_COLOR': {
           // The base colour of a body — what "make the imported bracket blue"
           // means. Paint (below) sits on top of this and is not disturbed by it.
-          const { targetId, geomName, rgba } = msg;
+          const { targetId, geomName, rgba } = msg as Msg<{ targetId: string; geomName?: string; rgba: number[] }>;
           if (!targetId) throw new Error('Missing targetId');
           if (!Array.isArray(rgba) || rgba.length < 3) throw new Error('rgba must be [r, g, b] or [r, g, b, a], each 0..1');
           const node = findNodeInScene(store.sceneGraph.nodes, targetId);
@@ -732,7 +906,8 @@ export function useMCPBridge() {
           //
           // `at` is one point or a list of them, in the geom's own frame — so
           // the five pips of a die face are one call rather than five.
-          const { targetId, geomName, at, radius, rgba, flow, erase } = msg;
+          const { targetId, geomName, at, radius, rgba, flow, erase } =
+            msg as Msg<{ targetId: string; geomName?: string; radius?: number; rgba: number[]; flow?: number }>;
           if (!targetId) throw new Error('Missing targetId');
           const node = findNodeInScene(store.sceneGraph.nodes, targetId);
           if (!node) throw new Error(`No object with id '${targetId}'`);
@@ -746,7 +921,7 @@ export function useMCPBridge() {
           }
           if (!Array.isArray(rgba) || rgba.length < 3) throw new Error('rgba must be [r, g, b], each 0..1');
 
-          const points: number[][] = Array.isArray(at?.[0]) ? at : [at];
+          const points: number[][] = pointList(at);
           if (!points.length || points.some((p: unknown) => !Array.isArray(p) || p.length < 3)) {
             throw new Error("at must be [x, y, z] or a list of them, in the geom's own frame (metres)");
           }
@@ -799,7 +974,7 @@ export function useMCPBridge() {
           point to the surface and reads the normal there.
         */
         case 'CREATE_SCULPT': {
-          const { name, base, pos } = msg;
+          const { name, base, pos } = msg as Msg<{ name?: string; base?: SculptBaseId }>;
           const position = Array.isArray(pos) && pos.length === 3 ? pos : [0, 0, 0.3];
           if (base !== undefined && !SCULPT_BASES.some(b => b.id === base)) {
             throw new Error(`Unknown base '${base}'. Available: ${SCULPT_BASES.map(b => b.id).join(', ')}`);
@@ -841,7 +1016,7 @@ export function useMCPBridge() {
         }
 
         case 'SET_SCULPT_BASE': {
-          const { targetId, base } = msg;
+          const { targetId, base } = msg as Msg<{ targetId: string; base: SculptBaseId }>;
           if (!targetId) throw new Error('Missing targetId');
           if (!SCULPT_BASES.some(b => b.id === base)) {
             throw new Error(`Unknown base '${base}'. Available: ${SCULPT_BASES.map(b => b.id).join(', ')}`);
@@ -857,7 +1032,14 @@ export function useMCPBridge() {
         }
 
         case 'SCULPT': {
-          const { targetId, brush, at, radius, strength, invert, symmetryX, symmetry, detail, dynamicTopology, delta } = msg;
+          // Every option below is handed straight to applySculptStroke, which
+          // supplies its own default for each one it does not get.
+          const { targetId, brush, at, radius, strength, invert, symmetryX, symmetry, detail, dynamicTopology, delta } =
+            msg as Msg<{
+              targetId: string; brush?: BrushType; radius?: number; strength?: number;
+              invert?: boolean; symmetryX?: boolean; symmetry?: 'x' | 'y' | 'z';
+              detail?: number; dynamicTopology?: boolean; delta?: number[];
+            }>;
           if (!targetId) throw new Error('Missing targetId');
           const node = findNodeInScene(store.sceneGraph.nodes, targetId);
           if (!node) throw new Error(`No object with id '${targetId}'`);
@@ -868,7 +1050,7 @@ export function useMCPBridge() {
             throw new Error(`Unknown brush '${brush}'. Available: ${BRUSH_TYPES.join(', ')}`);
           }
 
-          const points: number[][] = Array.isArray(at?.[0]) ? at : [at];
+          const points: number[][] = pointList(at);
           if (!points.length || points.some((p: unknown) => !Array.isArray(p) || p.length < 3)) {
             throw new Error("at must be [x, y, z] or a list of them, in the body's own frame (metres)");
           }
@@ -912,7 +1094,7 @@ export function useMCPBridge() {
         }
 
         case 'UNDO_SCULPT': {
-          const { targetId } = msg;
+          const { targetId } = msg as Msg<{ targetId: string }>;
           if (!targetId) throw new Error('Missing targetId');
           const node = findNodeInScene(store.sceneGraph.nodes, targetId);
           if (!node) throw new Error(`No object with id '${targetId}'`);
@@ -999,7 +1181,7 @@ export function useMCPBridge() {
         }
 
         case 'LATTICE_FACES': {
-          const { targetId, faces, mirror } = msg;
+          const { targetId, faces, mirror } = msg as Msg<{ targetId: string }>;
           const { node, lattice } = latticeTarget(store, targetId);
           const before = cloneLattice(lattice);
           const result = addFacesMm(lattice, faces, mirror as LatticeAxis | undefined);
@@ -1012,7 +1194,7 @@ export function useMCPBridge() {
         }
 
         case 'LATTICE_EXTRUDE': {
-          const { targetId, face, distanceMm, axis, mirror } = msg;
+          const { targetId, face, distanceMm, axis, mirror } = msg as Msg<{ targetId: string }>;
           const { node, lattice } = latticeTarget(store, targetId);
           if (typeof distanceMm !== 'number' || !Number.isFinite(distanceMm)) {
             throw new Error('distanceMm must be a number of millimetres to push the face out by');
@@ -1025,7 +1207,7 @@ export function useMCPBridge() {
         }
 
         case 'LATTICE_DELETE_FACES': {
-          const { targetId, faces, mirror } = msg;
+          const { targetId, faces, mirror } = msg as Msg<{ targetId: string }>;
           const { node, lattice } = latticeTarget(store, targetId);
           const before = cloneLattice(lattice);
           const result = removeFacesMm(lattice, faces, mirror as LatticeAxis | undefined);
@@ -1038,7 +1220,7 @@ export function useMCPBridge() {
         }
 
         case 'LATTICE_SHARPEN': {
-          const { targetId, edges, sharp, mirror, loop } = msg;
+          const { targetId, edges, sharp, mirror, loop } = msg as Msg<{ targetId: string }>;
           const { node, lattice } = latticeTarget(store, targetId);
           const before = cloneLattice(lattice);
           const result = sharpenEdgesMm(lattice, edges, sharp !== false, mirror as LatticeAxis | undefined, loop === true);
@@ -1051,7 +1233,7 @@ export function useMCPBridge() {
         }
 
         case 'LATTICE_SMOOTH': {
-          const { targetId, level } = msg;
+          const { targetId, level } = msg as Msg<{ targetId: string }>;
           const { node } = latticeTarget(store, targetId);
           const wanted = Math.max(0, Math.min(2, Math.round(Number(level) || 0)));
           useStore.getState().setLatticeSubdiv(node.id, wanted);
@@ -1067,7 +1249,7 @@ export function useMCPBridge() {
         }
 
         case 'LATTICE_INSET': {
-          const { targetId, face, amountMm, mirror } = msg;
+          const { targetId, face, amountMm, mirror } = msg as Msg<{ targetId: string; amountMm: number }>;
           const { node, lattice } = latticeTarget(store, targetId);
           const before = cloneLattice(lattice);
           const result = insetFaceMm(lattice, face, amountMm, mirror as LatticeAxis | undefined);
@@ -1077,7 +1259,7 @@ export function useMCPBridge() {
         }
 
         case 'LATTICE_BEVEL': {
-          const { targetId, face, amountMm, mirror } = msg;
+          const { targetId, face, amountMm, mirror } = msg as Msg<{ targetId: string; amountMm: number }>;
           const { node, lattice } = latticeTarget(store, targetId);
           const before = cloneLattice(lattice);
           const result = bevelFaceMm(lattice, face, amountMm, mirror as LatticeAxis | undefined);
@@ -1087,7 +1269,7 @@ export function useMCPBridge() {
         }
 
         case 'LATTICE_BEVEL_EDGES': {
-          const { targetId, edges, radiusMm, mode, mirror, loop } = msg;
+          const { targetId, edges, radiusMm, mode, mirror, loop } = msg as Msg<{ targetId: string; radiusMm: number }>;
           const { node, lattice } = latticeTarget(store, targetId);
           const before = cloneLattice(lattice);
           const result = bevelEdgesMm(
@@ -1102,7 +1284,7 @@ export function useMCPBridge() {
         }
 
         case 'LATTICE_CIRCLE': {
-          const { targetId, centre, diameterMm, axis, sides, mirror } = msg;
+          const { targetId, centre, diameterMm, axis, sides, mirror } = msg as Msg<{ targetId: string; diameterMm: number }>;
           const { node, lattice } = latticeTarget(store, targetId);
           const before = cloneLattice(lattice);
           const result = addRingMm(
@@ -1117,7 +1299,7 @@ export function useMCPBridge() {
         }
 
         case 'LATTICE_REVOLVE': {
-          const { targetId, profile, axis, degrees, throughMm, segments, closed } = msg;
+          const { targetId, profile, axis, degrees, throughMm, segments, closed } = msg as Msg<{ targetId: string }>;
           const { node, lattice } = latticeTarget(store, targetId);
           const before = cloneLattice(lattice);
           const result = revolveMm(
@@ -1158,7 +1340,7 @@ export function useMCPBridge() {
         }
 
         case 'LATTICE_BRIDGE': {
-          const { targetId, faceA, faceB } = msg;
+          const { targetId, faceA, faceB } = msg as Msg<{ targetId: string }>;
           const { node, lattice } = latticeTarget(store, targetId);
           const before = cloneLattice(lattice);
           const result = bridgeFacesMm(lattice, faceA, faceB);
@@ -1168,7 +1350,7 @@ export function useMCPBridge() {
         }
 
         case 'LATTICE_DIMENSION': {
-          const { targetId, corners, axis, mode, valueMm } = msg;
+          const { targetId, corners, axis, mode, valueMm } = msg as Msg<{ targetId: string }>;
           const { node, lattice } = latticeTarget(store, targetId);
           const which = (axis === 'x' || axis === 'y' || axis === 'z') ? axis : null;
           if (!which) return { ok: false, error: "axis must be 'x', 'y' or 'z'" };
@@ -1193,7 +1375,7 @@ export function useMCPBridge() {
         }
 
         case 'BODY_CUT': {
-          const { targetId, shape, at, normal, diameterMm, widthMm, lengthMm, depthMm } = msg;
+          const { targetId, shape, at, normal, diameterMm, widthMm, lengthMm, depthMm } = msg as Msg<{ targetId: string }>;
           const node = findNodeInScene(store.sceneGraph.nodes, targetId);
           if (!node) return { ok: false, error: `No object with id '${targetId}'` };
           const kind = shape === 'slot' || shape === 'box' ? 'box'
@@ -1242,8 +1424,8 @@ export function useMCPBridge() {
         }
 
         case 'COMBINE_BODIES': {
-          const { targetId, withIds, op } = msg;
-          const sources = Array.isArray(withIds) ? withIds.filter((v: unknown) => typeof v === 'string') : [];
+          const { targetId, withIds, op } = msg as Msg<{ targetId: string }>;
+          const sources = Array.isArray(withIds) ? withIds.filter((v: unknown): v is string => typeof v === 'string') : [];
           if (sources.length === 0) return { ok: false, error: 'Give the ids of the bodies to merge in, as withIds' };
           const target = findNodeInScene(store.sceneGraph.nodes, targetId);
           if (!target) return { ok: false, error: `No object with id '${targetId}'` };
@@ -1266,7 +1448,7 @@ export function useMCPBridge() {
         }
 
         case 'LATTICE_ORIENT': {
-          const { targetId } = msg;
+          const { targetId } = msg as Msg<{ targetId: string }>;
           const { node, lattice } = latticeTarget(store, targetId);
           const before = cloneLattice(lattice);
           const flipped = orientFaces(lattice);
@@ -1279,7 +1461,7 @@ export function useMCPBridge() {
         }
 
         case 'LATTICE_WALL': {
-          const { targetId, thicknessMm } = msg;
+          const { targetId, thicknessMm } = msg as Msg<{ targetId: string }>;
           const { node } = latticeTarget(store, targetId);
           const mm = Math.max(0, Number(thicknessMm) || 0);
           useStore.getState().setLatticeThickness(node.id, mm);
@@ -1296,7 +1478,7 @@ export function useMCPBridge() {
         }
 
         case 'UNDO_LATTICE': {
-          const { targetId } = msg;
+          const { targetId } = msg as Msg<{ targetId: string }>;
           const { node } = latticeTarget(store, targetId);
           const stack = latticeHistory.get(node.id) ?? [];
           const snapshot = stack.pop();
@@ -1307,18 +1489,18 @@ export function useMCPBridge() {
         }
 
         case 'GET_LATTICE': {
-          const { targetId } = msg;
+          const { targetId } = msg as Msg<{ targetId: string }>;
           const { lattice } = latticeTarget(store, targetId);
           return { ok: true, id: targetId, ...describeLattice(lattice) };
         }
 
         case 'PROBE_SCULPT': {
-          const { targetId, at } = msg;
+          const { targetId, at } = msg as Msg<{ targetId: string }>;
           if (!targetId) throw new Error('Missing targetId');
           const node = findNodeInScene(store.sceneGraph.nodes, targetId);
           if (!node) throw new Error(`No object with id '${targetId}'`);
           if (!node.isSculpt) throw new Error(`'${targetId}' is not a sculpt body`);
-          const points: number[][] = Array.isArray(at?.[0]) ? at : [at];
+          const points: number[][] = pointList(at);
           if (!points.length || points.some((p: unknown) => !Array.isArray(p) || p.length < 3)) {
             throw new Error("at must be [x, y, z] or a list of them, in the body's own frame (metres)");
           }
@@ -1326,7 +1508,7 @@ export function useMCPBridge() {
         }
 
         case 'DELETE_OBJECT': {
-          const { targetId } = msg;
+          const { targetId } = msg as Msg<{ targetId: string }>;
           if (!targetId) throw new Error('Missing targetId');
           const node = findNodeInScene(store.sceneGraph.nodes, targetId);
           if (!node) throw new Error(`No object with id '${targetId}'`);
@@ -1341,8 +1523,125 @@ export function useMCPBridge() {
           return { ok: true, deleted: targetId, name, childrenRemoved: childCount };
         }
 
+        /*
+         * Add ONE body, leaving everything already in the scene alone.
+         *
+         * Until this existed the only ways to get a body in were the three that
+         * make their own (create_lattice, create_sculpt, import_stl) or
+         * build_scene/update_scene, which replace the whole graph. So adding a
+         * ball to a scene you had just built meant reading the entire scene back
+         * — every vertex of every mesh — and posting all of it again, which on
+         * anything with a sculpt or a boolean in it is megabytes each way and
+         * loses whatever another client changed in between.
+         */
+        case 'ADD_OBJECT': {
+          const raw = msg.body as RawNode | undefined;
+          if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+            throw new Error('Missing body: pass one body descriptor, the same shape as an element of physics_build_scene\'s bodies array');
+          }
+          const node = fillBodyDefaults(raw);
+          // A clashing id would make every later call ambiguous about which body
+          // it meant, so it is corrected here rather than refused: the reply says
+          // what the body ended up called.
+          const taken = collectNodeIds(store.sceneGraph.nodes);
+          if (taken.has(node.id)) {
+            let n = 2;
+            while (taken.has(`${node.id}_${n}`)) n++;
+            node.id = `${node.id}_${n}`;
+            if (!raw.name) node.name = node.id;
+          }
+          const nodes = [...store.sceneGraph.nodes, node];
+          store.updateScene({ nodes }, true);
+          await autoCompileScad([node]);
+          await compileCsgNodes(true);
+          await useStore.getState().recompile(useStore.getState().sceneGraph, node.id, false, true);
+          const addError = useStore.getState().lastCompileError;
+          const landed = findNodeInScene(useStore.getState().sceneGraph.nodes, node.id);
+          return {
+            ok: !addError && !!landed,
+            ...(addError ? { error: addError } : {}),
+            id: node.id,
+            name: landed?.name ?? node.name,
+            nodeCount: useStore.getState().sceneGraph.nodes.length,
+          };
+        }
+
+        /*
+         * The two export paths, reachable at last.
+         *
+         * Everything the app can make — a casting pattern, a CNC program, a
+         * mold, a laser layout — lived behind a modal and a mouse, so an agent
+         * could model a part and then had no way to find out whether it could be
+         * made. These two are the ones asked for.
+         *
+         * Files come back base64-encoded and the MCP server writes them out; it
+         * never hands the bytes to the agent, which is the whole reason they are
+         * separated from the summary.
+         */
+        case 'EXPORT_CAST': {
+          const scene = store.sceneGraph;
+          if (!scene.nodes?.length) return { ok: false, error: 'The scene is empty — there is nothing to cast.' };
+          const options = {
+            ...DEFAULT_CAST_OPTIONS,
+            // `metal` is what the MCP tool calls it; `metalId` is what the
+            // exporter's own options call it. Both are accepted so neither side
+            // has to know the other's spelling.
+            ...(typeof msg.metal === 'string' ? { metalId: msg.metal } : {}),
+            ...(typeof msg.metalId === 'string' ? { metalId: msg.metalId } : {}),
+            ...(msg.partingFromBaseMm === 'auto' || typeof msg.partingFromBaseMm === 'number'
+              ? { partingFromBaseMm: msg.partingFromBaseMm as number | 'auto' } : {}),
+            ...(typeof msg.addGating === 'boolean' ? { addGating: msg.addGating } : {}),
+            ...(typeof msg.sprueDiaMm === 'number' ? { sprueDiaMm: msg.sprueDiaMm } : {}),
+            ...(typeof msg.riserDiaMm === 'number' ? { riserDiaMm: msg.riserDiaMm } : {}),
+            ...(typeof msg.addRiser === 'boolean' ? { addRiser: msg.addRiser } : {}),
+          };
+          const result = generateCastPattern(scene, options);
+          if (!result.success) return { ok: false, error: result.error || 'The cast pattern could not be generated.', warnings: result.warnings ?? [] };
+          return {
+            ok: true,
+            summary: result.summary,
+            warnings: result.warnings ?? [],
+            files: describeFiles([{ name: 'cast-pattern.stl', bytes: result.patternStl }], msg.includeFiles !== false),
+          };
+        }
+
+        case 'EXPORT_MACHINING': {
+          const scene = store.sceneGraph;
+          if (!scene.nodes?.length) return { ok: false, error: 'The scene is empty — there is nothing to machine.' };
+          const dia = typeof msg.toolDiaMm === 'number' && msg.toolDiaMm > 0 ? msg.toolDiaMm : 3;
+          const options = {
+            ...DEFAULT_SOLID_OPTIONS,
+            ...(typeof msg.sides === 'number' ? { sides: msg.sides } : {}),
+            ...(typeof msg.stockThicknessMm === 'number' ? { stockThicknessMm: msg.stockThicknessMm } : {}),
+            ...(typeof msg.material === 'string' ? { material: msg.material } : {}),
+            roughingToolDiaMm: dia,
+            finishingToolDiaMm: dia,
+          } as Parameters<typeof generateSolidMachining>[1];
+          const result = generateSolidMachining(scene, options);
+          if (!result.success) return { ok: false, error: result.error || 'The machining program could not be generated.', warnings: result.warnings ?? [] };
+          const encoder = new TextEncoder();
+          return {
+            ok: true,
+            summary: {
+              stock: result.stock,
+              partSizeMm: result.partSizeMm,
+              partVolumeMm3: result.partVolumeMm3,
+              unreachablePercent: result.unreachablePercent,
+              tabsPlaced: result.tabsPlaced,
+              estimatedTimeSeconds: result.estimatedTimeSeconds,
+              totalCutDistanceMm: result.totalCutDistanceMm,
+              sides: result.sides.map(s => ({ side: s.side, depthMm: s.depthMm })),
+            },
+            warnings: result.warnings ?? [],
+            files: describeFiles(
+              result.sides.map(s => ({ name: `machining-side-${s.side}.nc`, bytes: encoder.encode(s.gcode ?? '') })),
+              msg.includeFiles !== false,
+            ),
+          };
+        }
+
         case 'GET_SCULPT': {
-          const { targetId } = msg;
+          const { targetId } = msg as Msg<{ targetId: string }>;
           if (!targetId) throw new Error('Missing targetId');
           const node = findNodeInScene(store.sceneGraph.nodes, targetId);
           if (!node) throw new Error(`No object with id '${targetId}'`);
@@ -1358,7 +1657,7 @@ export function useMCPBridge() {
         }
 
         case 'CLEAR_PAINT': {
-          const { targetId, geomName } = msg;
+          const { targetId, geomName } = msg as Msg<{ targetId: string; geomName?: string }>;
           if (!targetId) {
             store.clearAllPaint();
             return { ok: true, scope: 'scene' };
@@ -1432,8 +1731,15 @@ export function useMCPBridge() {
           // Through the shared accessor, not localStorage directly: a preset an
           // agent saves has to reach the account like any other, and this path
           // is the one that used to bypass sync.
+          // The graph is SPREAD, not nested under a `sceneGraph` key. A user
+          // preset is read back as `{ nodes, noteCards, ... }` — that is the
+          // shape App.tsx's own save writes and the shape loadPreset looks for.
+          // Nesting it put the nodes one level down, where loadPreset's
+          // `Array.isArray(saved.nodes)` guard found nothing and returned
+          // quietly: every preset saved over MCP reported ok and then loaded as
+          // an empty scene.
           const saved = saveUserPreset(userPresetKey, {
-            sceneGraph: store.sceneGraph,
+            ...store.sceneGraph,
             noteCards: (window as unknown as PhysicsWindow)._physics_getNoteCards?.() || [],
             copilotMessages: (window as unknown as PhysicsWindow)._physics_getCopilotMessages?.() || [],
           });
@@ -1510,7 +1816,8 @@ export function useMCPBridge() {
         }
 
         case 'IMPORT_STL': {
-          const { stlData, name, importMode, pos, scale, dynamic } = msg;
+          const { stlData, name, importMode, pos, scale, dynamic } =
+            msg as Msg<{ stlData?: string; name?: string; importMode?: string; scale?: number | [number, number, number]; dynamic?: boolean }>;
           if (!stlData) return { ok: false, error: 'Missing stlData (Base64 string or ASCII text)' };
 
           let data: ArrayBuffer | string;
@@ -1540,6 +1847,9 @@ export function useMCPBridge() {
           const baseName = name || 'imported_stl';
           const parsed = parseSTL(data, { name: baseName, scale });
 
+          // The nodes below are written without geom or joint names, as this
+          // import always has — MuJoCo names them itself. Said out loud rather
+          // than filled in: naming them would change what lands in the scene.
           const mode = importMode || 'scad_parametric';
           const nodePos = Array.isArray(pos) && pos.length === 3 ? pos : [0, 0, 1];
           const id = `stl_${Math.random().toString(36).slice(2, 7)}`;
@@ -1551,8 +1861,8 @@ export function useMCPBridge() {
               name: baseName,
               pos: nodePos,
               scad: parsed.scadParametric,
-              geoms: [{ type: 'mesh', size: [1], dynamic: dynamic !== false }],
-              joints: [{ type: 'free' }],
+              geoms: [{ type: 'mesh', size: [1], dynamic: dynamic !== false } as SceneGeom],
+              joints: [{ type: 'free' } as SceneJoint],
               children: [],
             };
           } else if (mode === 'scad_raw') {
@@ -1561,8 +1871,8 @@ export function useMCPBridge() {
               name: baseName,
               pos: nodePos,
               scad: parsed.scadRaw,
-              geoms: [{ type: 'mesh', size: [1], dynamic: dynamic !== false }],
-              joints: [{ type: 'free' }],
+              geoms: [{ type: 'mesh', size: [1], dynamic: dynamic !== false } as SceneGeom],
+              joints: [{ type: 'free' } as SceneJoint],
               children: [],
             };
           } else if (mode === 'mesh') {
@@ -1576,8 +1886,8 @@ export function useMCPBridge() {
                 faces: parsed.faces,
                 renderVertices: parsed.renderVertices,
                 dynamic: dynamic !== false,
-              }],
-              joints: [{ type: 'free' }],
+              } as SceneGeom],
+              joints: [{ type: 'free' } as SceneJoint],
               children: [],
             };
           } else {
@@ -1589,8 +1899,8 @@ export function useMCPBridge() {
                 type: parsed.primitiveGeom.type,
                 size: parsed.primitiveGeom.size,
                 rgba: [0.3, 0.7, 0.9, 1],
-              }],
-              joints: [{ type: 'free' }],
+              } as SceneGeom],
+              joints: [{ type: 'free' } as SceneJoint],
               children: [],
             };
           }
@@ -1685,7 +1995,7 @@ export function useMCPBridge() {
         }
 
         case 'VALIDATE_SCAD': {
-          const scadCode = msg.scad;
+          const scadCode = msg.scad as string | undefined;
           if (scadCode === undefined) {
             return { ok: false, error: 'Missing scad parameter' };
           }
@@ -1716,7 +2026,8 @@ export function useMCPBridge() {
           if (!msg.sceneGraph) return { ok: false, error: 'Missing sceneGraph' };
           // The MCP tool schema passes sceneGraph as a bare array of nodes (matching
           // BUILD_SCENE's convention); also accept the internal { nodes: [...] } shape.
-          const rawNodes = Array.isArray(msg.sceneGraph) ? msg.sceneGraph : msg.sceneGraph.nodes;
+          const rawScene = msg.sceneGraph as RawNode[] | { nodes?: RawNode[] };
+          const rawNodes = Array.isArray(rawScene) ? rawScene : rawScene.nodes;
           if (!Array.isArray(rawNodes)) {
             return { ok: false, error: 'sceneGraph must be an array of nodes, or an object of the form { nodes: SceneNode[] }' };
           }
@@ -1734,7 +2045,8 @@ export function useMCPBridge() {
         }
 
         case 'SET_ENVIRONMENT': {
-          const { gravityZ, windX, windY, density, floorFriction, floorBounce } = msg;
+          const { gravityZ, windX, windY, density, floorFriction, floorBounce } =
+            msg as Msg<{ gravityZ?: number; windX?: number; windY?: number; density?: number; floorFriction?: number; floorBounce?: number }>;
           const env: Record<string, number> = {};
           if (gravityZ !== undefined) env.gravityZ = gravityZ;
           if (windX !== undefined) env.windX = windX;
