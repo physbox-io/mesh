@@ -136,18 +136,18 @@ function multmatrixWrap(m: THREE.Matrix4, inner: string, indent: string): string
  * Slices of extrusion per turn of thread, and points around the profile.
  *
  * Each slice is one layer of the twisted polygon, so the cutter has
- * slices × points vertices and the boolean pays for every one of them — the
- * openscad-wasm build in use is CGAL, whose time grows faster than the vertex
- * count. Sixteen of each made an M6 through a 100 mm block (110 turns, 51k
- * vertices) take a minute and a half; eight and sixteen is a quarter of the
- * vertices, and the flank still reads as a helix. THREAD_MAX_SLICES caps the
- * absurd case — a fine pitch through a thick part — by thinning the layers
- * rather than refusing, down to THREAD_MIN_SLICES_PER_TURN.
+ * slices × points vertices. With the Manifold engine (see scadWorker.ts) an
+ * M6 through 100 mm — 110 turns, 56k vertices at these settings — evaluates
+ * in a fifth of a second, so the numbers are chosen for how the thread looks:
+ * sixteen layers per turn keeps the flank a smooth helix, thirty-two points
+ * matches the app's default $fn. THREAD_MAX_SLICES still caps the absurd
+ * case — a 0.2 mm pitch through a metre — by thinning the layers rather than
+ * refusing, down to THREAD_MIN_SLICES_PER_TURN.
  */
-export const THREAD_SLICES_PER_TURN = 8;
+export const THREAD_SLICES_PER_TURN = 16;
 export const THREAD_MIN_SLICES_PER_TURN = 4;
-export const THREAD_MAX_SLICES = 640;
-export const THREAD_PROFILE_POINTS = 16;
+export const THREAD_MAX_SLICES = 8000;
+export const THREAD_PROFILE_POINTS = 32;
 
 /** Layers for a cutter of this many turns, under the cap. */
 export function threadSlices(turns: number): number {

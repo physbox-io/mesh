@@ -92,6 +92,8 @@ export default defineConfig({
     }
   },
   optimizeDeps: {
-    exclude: ['@mujoco/mujoco']
+    // Emscripten modules that find their .wasm by import.meta.url: pre-bundling
+    // would move the glue and leave the URL pointing at nothing.
+    exclude: ['@mujoco/mujoco', '@lofcz/openscad-wasm']
   }
 })

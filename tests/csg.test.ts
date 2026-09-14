@@ -737,8 +737,9 @@ describe('threaded holes', () => {
     expect(scad).toContain(`slices=${20 * THREAD_SLICES_PER_TURN}`);
     // A fine pitch through a thick part is thinned rather than refused.
     expect(threadSlices(20)).toBe(20 * THREAD_SLICES_PER_TURN);
-    expect(threadSlices(200)).toBeLessThanOrEqual(Math.max(THREAD_MAX_SLICES, 200 * THREAD_MIN_SLICES_PER_TURN));
-    expect(threadSlices(200)).toBeGreaterThanOrEqual(200 * THREAD_MIN_SLICES_PER_TURN);
+    expect(threadSlices(5000)).toBeLessThanOrEqual(Math.max(THREAD_MAX_SLICES, 5000 * THREAD_MIN_SLICES_PER_TURN));
+    expect(threadSlices(5000)).toBeGreaterThanOrEqual(5000 * THREAD_MIN_SLICES_PER_TURN);
+    expect(threadSlices(5000)).toBeLessThan(5000 * THREAD_SLICES_PER_TURN);
     expect(scad).not.toContain('cylinder(');
     // A plain hole is untouched by the field being absent.
     expect(primitiveToScad({ name: 'plain', type: 'cylinder', size: [0.003, 0.01], csg: 'difference' } as SceneGeom)).toContain('cylinder(');

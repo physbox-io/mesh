@@ -11,61 +11,96 @@
 // keeps the same exported API (loadCompiler / isCompilerReady / compileSCAD).
 
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
+// A static import on purpose: Vite follows it into the module graph, splits
+// the Emscripten glue into its own chunk and emits openscad.wasm as an asset
+// next to it, so nothing is fetched from a CDN and the cross-origin isolation
+// headers the physics worker needs never come into it.
+import createOpenSCAD, { type OpenSCAD } from '@lofcz/openscad-wasm';
 
-type OpenSCADInstance = {
-  renderToStl: (scadCode: string) => Promise<string>;
-};
-type CreateOpenSCADFn = () => Promise<OpenSCADInstance>;
+/*
+ * Which build, and why.
+ *
+ * openscad-wasm 0.0.4 (the npm package this used to load from jsDelivr) is
+ * OpenSCAD with CGAL as its only geometry engine. CGAL is exact arithmetic
+ * over Nef polyhedra, and its time grows faster than the vertex count: a
+ * plate with 27 holes took ten seconds, an M8 thread through a 20 mm block
+ * seven, the same thread through 100 mm a minute and a half. Every one of
+ * those is a boolean of a few thousand triangles.
+ *
+ * @lofcz/openscad-wasm tracks openscad/openscad-wasm's current build, which
+ * carries the Manifold engine as well. Asked for with `--backend Manifold`,
+ * the same three inputs take 0.1 s, 0.2 s and 0.2 s, with identical triangle
+ * counts. Manifold is floating point rather than exact, which for parts
+ * measured in millimetres and drawn at 1e-5 precision makes no difference
+ * anyone can see, and it does not share CGAL's habit of giving up on
+ * coincident faces — the overshoot every cutter here carries is kept anyway,
+ * because a flush cut is a modelling mistake whichever engine evaluates it.
+ */
+const BACKEND_ARGS = ['--backend', 'Manifold', '--export-format', 'asciistl'];
 
-let createOpenSCADFn: CreateOpenSCADFn | null = null;
-let loadingPromise: Promise<CreateOpenSCADFn> | null = null;
+let loadingPromise: Promise<void> | null = null;
 
-async function loadCompiler(): Promise<CreateOpenSCADFn> {
-  if (createOpenSCADFn) return createOpenSCADFn;
+/**
+ * Brings the compiler in. The module is already imported; what this waits
+ * for is the first instance, which is the one that fetches and compiles the
+ * 11 MB wasm — after that the browser has it cached and instances are cheap.
+ */
+async function loadCompiler(): Promise<void> {
   if (loadingPromise) return loadingPromise;
-
   loadingPromise = (async () => {
     try {
-      const cdnUrl = 'https://cdn.jsdelivr.net/npm/openscad-wasm@0.0.4/openscad.js';
-
-      // Load the ES module dynamically in the browser, ignoring build-time parsing in Vite
-      const module = await import(/* @vite-ignore */ cdnUrl);
-      createOpenSCADFn = module.createOpenSCAD;
-      if (!createOpenSCADFn) {
-        throw new Error('createOpenSCAD export not found in openscad-wasm module.');
-      }
+      await createOpenSCAD({ noInitialRun: true, print: () => {}, printErr: () => {} });
       // Announce readiness here rather than in the LOAD handler, so the client's
       // isCompilerReady() mirror also flips when the load was triggered lazily
       // by a compile that arrived before any explicit LOAD.
       self.postMessage({ type: 'READY' });
-      return createOpenSCADFn;
     } catch (err) {
       loadingPromise = null; // reset to allow retries
       throw err;
     }
   })();
-
   return loadingPromise;
+}
+
+/**
+ * Runs one OpenSCAD program to an ASCII STL string.
+ *
+ * A fresh instance per run, as the build's own README asks: once the runtime
+ * has exited it cannot be reused, and a compile that aborted would poison
+ * every one after it.
+ */
+async function renderToStl(scadCode: string): Promise<string> {
+  const stderr: string[] = [];
+  const instance: OpenSCAD = await createOpenSCAD({
+    noInitialRun: true,
+    print: (line: string) => stderr.push(line),
+    printErr: (line: string) => {
+      stderr.push(line);
+      // OpenSCAD's own chatter — "Compiling design", cache sizes, timings —
+      // stays visible in the console at debug level, where it used to be.
+      console.debug('[OpenSCAD]:', line);
+    },
+  });
+  instance.FS.writeFile('/input.scad', scadCode);
+  const exit = instance.callMain(['/input.scad', ...BACKEND_ARGS, '-o', '/output.stl']);
+  if (exit !== 0) {
+    // The last few lines are where OpenSCAD puts the ERROR: it stopped on,
+    // which is a better message than an exit code.
+    const said = stderr.filter((l) => /ERROR|WARNING/.test(l)).slice(-3).join(' · ');
+    throw new Error(`OpenSCAD failed (exit ${exit})${said ? `: ${said}` : ''}`);
+  }
+  return instance.FS.readFile('/output.stl', { encoding: 'utf8' });
 }
 
 type CompiledScad = { vertices: number[]; faces: number[]; renderVertices: number[] };
 
 /**
  * Compiles a raw OpenSCAD source code string into 3D mesh vertex/face arrays.
- * Instantiates a fresh WebAssembly instance each time to prevent Emscripten exit status conflicts.
+ * A fresh WebAssembly instance each time — see renderToStl.
  */
 async function compileSCAD(scadCode: string): Promise<CompiledScad> {
-  // Ensure the script loader function is loaded
-  const createOpenSCAD = await loadCompiler();
-  if (!createOpenSCAD) {
-    throw new Error('OpenSCAD compiler failed to initialize.');
-  }
-
-  // Instantiate a fresh compiler instance for this compilation
-  const compiler = await createOpenSCAD();
-
-  // Render the OpenSCAD code to ASCII STL string format
-  const stlText = await compiler.renderToStl(scadCode);
+  await loadCompiler();
+  const stlText = await renderToStl(scadCode);
   if (!stlText || stlText.length === 0) {
     throw new Error('Compilation produced empty output.');
   }

@@ -13,6 +13,7 @@
     "export:presets": "npx vite-node scripts/export-presets.ts"
   },
   "dependencies": {
+    "@lofcz/openscad-wasm": "^0.0.2",
     "@mujoco/mujoco": "^3.8.1",
     "@physbox-io/ui": "^0.2.0",
     "@react-three/drei": "^10.7.7",
