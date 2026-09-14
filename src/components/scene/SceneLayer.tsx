@@ -14,6 +14,8 @@ import { registerLiveCamera } from '../../utils/liveCamera';
 import { useStore } from '../../store/useStore';
 import { useOrbitEnable } from './useOrbitEnable';
 import { CsgNegativeGhosts } from './CsgGhosts';
+import { FeatureEdges } from './FeatureEdges';
+import { EDGE_THRESHOLD_MESH, EDGE_THRESHOLD_PRIMITIVE, wedgeGeometry } from './edgeView';
 import { PulleyRopesRenderer } from './PulleyRopes';
 import SculptSurface from '../SculptSurface';
 import LatticeSurface from '../LatticeSurface';
@@ -377,6 +379,7 @@ export const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, se
   // the whole canvas down with it.
   const alpha = color?.[3] ?? 1;
   const wireframe = useStore(state => state.wireframe);
+  const showEdges = useStore(state => state.showEdges);
 
   // --- Painting -------------------------------------------------------------
   // A geom holds paint on its vertices, so it has to be drawn from a surface
@@ -391,6 +394,17 @@ export const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, se
   );
   const paintLayer = geomEntry?.paint as PaintLayer | undefined;
   const showPaint = !!nodeId && isPaintable(type, !!node?.isWedge) && (paintMode || !!paintLayer);
+  // A boolean result is lit per triangle, not per vertex. Its arrays arrive
+  // with coincident vertices merged (the STL parser does that, and MuJoCo and
+  // the exporters want it so), and computeVertexNormals() on a shared-index
+  // mesh averages the flat face into the hole wall at every rim vertex. The
+  // long sliver triangles OpenSCAD fans from the rim out to the corners then
+  // smear that leaning normal across the whole face — the dark "X" over every
+  // drilled hole. flatShading takes the normal from screen-space derivatives
+  // in the fragment shader, so the geometry (and the paint keyed to its
+  // vertex indices) stays exactly as it is. The cost is that the hole's wall
+  // shows its facets, which is what it will look like printed anyway.
+  const flatShading = type === 'mesh' && geomEntry?.csgDerived === 'visual';
   const materialProps = useMemo(() => {
     const [r, g, b] = color ?? [0.8, 0.8, 0.8];
     return {
@@ -403,12 +417,18 @@ export const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, se
       // the same under the same light.
       roughness: 0.85,
       metalness: 0.02,
+      flatShading,
       // Every geom in the scene funnels through this one memo, so the whole
       // viewport switches to wireframe from a single flag. Note this is the
       // material's own wireframe — every triangle of the tessellation, the
       // diagonals included — which is the point here: it is a view of the mesh
       // the machine sees, not the tidied silhouette CsgGhostOutline draws.
       wireframe,
+      // With the edge lines on, the surface is pushed back a hair in depth so
+      // a line lying exactly on it wins the depth test everywhere rather than
+      // stippling in and out of the face. Lines can't be offset in WebGL;
+      // triangles can, so it is the mesh that moves.
+      ...(showEdges ? { polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 } : {}),
       // Painted surfaces carry their colour per vertex, and Three multiplies the
       // material's colour into it — so the material goes white and the body's
       // own colour is mixed into the attribute instead. That is what keeps the
@@ -417,7 +437,7 @@ export const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, se
       ...(showPaint ? { vertexColors: true, color: new THREE.Color(1, 1, 1) } : {}),
       ...(alpha < 1 ? { transparent: true, opacity: alpha, depthWrite: false } : {}),
     };
-  }, [color, isSelected, alpha, wireframe, showPaint]);
+  }, [color, isSelected, alpha, wireframe, showEdges, showPaint, flatShading]);
 
   // Handlers for physical spring dragging, mapped from Three.js coordinates to MuJoCo coordinate space
   const setOrbitEnabled = useOrbitEnable();
@@ -672,8 +692,43 @@ export const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, se
     </mesh>
   ) : null;
 
+  /**
+   * The primitive's surface as a geometry, for the edge pass. Mirrors the JSX
+   * primitives below argument for argument — a 32-segment cylinder here and a
+   * 32-segment cylinder there — so the lines land on the corners drawn. Built
+   * only while edges are on: the JSX path stays as it is for everyone else.
+   */
+  const edgeGeometry = useMemo(() => {
+    if (!showEdges || type === 'mesh') return null;
+    if (node?.isWedge) return wedgeGeometry(node.width || 2.0, node.depth || 1.0, node.height || 0.5);
+    if (!geometryArgs || geometryArgs.length === 0 || geometryArgs.some(arg => arg === undefined || isNaN(arg))) return null;
+    const a = geometryArgs;
+    switch (type) {
+      case 'box': return new THREE.BoxGeometry(a[0], a[1], a[2]);
+      case 'sphere': return new THREE.SphereGeometry(a[0], a[1], a[2]);
+      case 'ellipsoid': return new THREE.SphereGeometry(1, 32, 32);
+      case 'capsule': return new THREE.CapsuleGeometry(a[0], a[1], a[2], a[3]);
+      case 'cylinder': return new THREE.CylinderGeometry(a[0], a[0], a[1] * 2, 32);
+      default: return null;
+    }
+  }, [showEdges, type, node?.isWedge, node?.width, node?.depth, node?.height, geometryArgs]);
+  useEffect(() => () => { edgeGeometry?.dispose(); }, [edgeGeometry]);
+
+  const primitiveEdges = showEdges && edgeGeometry ? (
+    <FeatureEdges
+      geometry={edgeGeometry}
+      color={color}
+      threshold={EDGE_THRESHOLD_PRIMITIVE}
+      rotation={type === 'capsule' || type === 'cylinder' ? [Math.PI / 2, 0, 0] : undefined}
+      scale={type === 'ellipsoid' ? [geometryArgs[0], geometryArgs[1], geometryArgs[2]] : undefined}
+    />
+  ) : null;
+
   if (type === 'mesh') {
     if (!meshBufferGeometry) return null;
+    const meshEdges = showEdges ? (
+      <FeatureEdges geometry={meshBufferGeometry} color={color} threshold={EDGE_THRESHOLD_MESH} />
+    ) : null;
     const renderedMaterial = (
       <meshStandardMaterial key={`${alpha < 1 ? 'blend' : 'solid'}:${showPaint}`} {...materialProps} side={THREE.FrontSide} />
     );
@@ -685,6 +740,7 @@ export const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, se
             {renderedMaterial}
             {brushCursor}
           </mesh>
+          {meshEdges}
         </group>
       );
     }
@@ -695,6 +751,7 @@ export const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, se
           {renderedMaterial}
           {brushCursor}
         </mesh>
+        {meshEdges}
       </group>
     );
   }
@@ -729,6 +786,7 @@ export const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, se
           {renderedGeomMaterial}
           {brushCursor}
         </mesh>
+        {primitiveEdges}
       </group>
     );
   }
@@ -775,6 +833,7 @@ export const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, se
           {renderedGeomMaterial}
         </mesh>
       )}
+      {primitiveEdges}
     </group>
   );
 };

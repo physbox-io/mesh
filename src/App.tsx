@@ -1090,7 +1090,7 @@ function App() {
     gravityZ, windX, windY, density, floorFriction, floorBounce, setEnvironment,
     cameraView, setCameraView,
     printAnalysisEnabled, togglePrintAnalysis,
-    wireframe, toggleWireframe, paintMode,
+    wireframe, toggleWireframe, showEdges, toggleShowEdges, paintMode,
     gridCellSizeMm, setGridCellSizeMm,
     sceneGraph, selectedNodeId, setSelectedNodeId,
     updateNodeGeom, updateNodeJoint, updateGearTeeth, addPusherPeg, deletePusherPeg, updatePusherPeg, addComponent, loadPreset, updateScene,
@@ -3242,6 +3242,18 @@ function App() {
             >
               <Grid3x3 className="w-3 h-3" />
               Wireframe
+            </button>
+            <button
+              onClick={() => toggleShowEdges()}
+              title="Draw a line along every real corner of every body, so two faces lit the same still read as two faces. Only edges sharper than about 20° are drawn — a cylinder gets its rims, a sphere nothing."
+              className={`px-2.5 py-1 rounded text-[10px] font-bold tracking-wide transition-all cursor-pointer flex items-center gap-1 ${
+                showEdges
+                  ? 'bg-violet-500 text-white shadow-xs'
+                  : 'text-slate-655 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+              }`}
+            >
+              <Box className="w-3 h-3" />
+              Edges
             </button>
             <select
               value={gridCellSizeMm}

@@ -659,6 +659,9 @@ export interface PhysicsState {
   // --- Viewport display ---------------------------------------------------
   /** Draw every body as the edges of its triangles rather than a shaded solid. */
   wireframe: boolean;
+  /** Draw a dark line along every real corner of every body — see scene/FeatureEdges. */
+  showEdges: boolean;
+  toggleShowEdges: () => void;
   toggleWireframe: () => void;
   /** Grid cell size in millimetres — 100mm reads a bench-scale part fine,
    *  but makes a small part (a relief carve, a coin) look tiny by comparison.
@@ -1338,6 +1341,8 @@ export const useStore = create<PhysicsState>()((set, get) => ({
 
   wireframe: false,
   toggleWireframe: () => set((state) => ({ wireframe: !state.wireframe })),
+  showEdges: false,
+  toggleShowEdges: () => set((state) => ({ showEdges: !state.showEdges })),
   gridCellSizeMm: 100,
   // The one grid. The lattice used to have its own step beside this, and two
   // controls that both said "grid" and meant different things was one too
