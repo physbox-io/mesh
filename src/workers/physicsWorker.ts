@@ -549,13 +549,26 @@ const buildHistoryEntry = (aeroDiagnostics: Record<string, AeroDiagnostic>): His
   collectNodeData(sceneGraph.nodes);
 
   const contacts: ContactHistory[] = [];
-  const ncon = dat.contact.size();
-  for (let c = 0; c < ncon; c++) {
-    const contact = dat.contact.get(c);
-    if (contact) {
-      contacts.push({ geom1: geomNameCache[contact.geom1] ?? `geom_${contact.geom1}`, geom2: geomNameCache[contact.geom2] ?? `geom_${contact.geom2}`, dist: contact.dist });
-      contact.delete();
+  // `dat.contact` is not a view. Every read of the property has the bindings
+  // copy the whole contact array into a fresh std::vector on the wasm heap and
+  // hand back a handle that has to be delete()d — exactly like the per-contact
+  // objects below, which always were. Reading it once per contact, as this
+  // used to, allocated (1 + ncon) copies of ncon contacts every tenth step and
+  // freed none of them: a stress scene with a few hundred contacts leaked the
+  // heap to its 2 GB ceiling every couple of seconds, aborted, and the
+  // "seamless" respawn made it look like a pause. Read once, delete once.
+  const contactVec = dat.contact;
+  try {
+    const ncon = contactVec.size();
+    for (let c = 0; c < ncon; c++) {
+      const contact = contactVec.get(c);
+      if (contact) {
+        contacts.push({ geom1: geomNameCache[contact.geom1] ?? `geom_${contact.geom1}`, geom2: geomNameCache[contact.geom2] ?? `geom_${contact.geom2}`, dist: contact.dist });
+        contact.delete();
+      }
     }
+  } finally {
+    contactVec.delete();
   }
 
   return { time: dat.time, bodies, joints, contacts, aeroDiagnostics };
