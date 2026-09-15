@@ -11,6 +11,18 @@ import { JobHistoryModal } from './JobHistoryModal';
 import { CloudSaveStatus } from './CloudSaveStatus';
 import { GuestListModal } from './GuestListModal';
 
+/**
+ * Asks for the sign-in window from somewhere else in the app.
+ *
+ * The share panel needs it: the one thing to do about a scene too big for a
+ * link is to leave it with an account, and sending somebody hunting for the
+ * avatar in the corner is how that offer goes unaccepted. The modal's state
+ * lives in here, so the request arrives as an event rather than as a prop
+ * threaded through everything in between — the same way the toolbar asks the
+ * status bar to show the export buttons.
+ */
+export const SIGN_IN_REQUESTED_EVENT = 'physbox:sign-in-requested';
+
 export const UserProfileButton: React.FC = () => {
   const [user, setUser] = useState<PhysBoxUser | null>(getStoredUser());
   const [dropdownOpen, setDropdownOpen] = useState(false);
@@ -115,6 +127,12 @@ export const UserProfileButton: React.FC = () => {
    * rather than the flow that produced it, so the window agrees with reality
    * even if the flow above is wrong again.
    */
+  useEffect(() => {
+    const open = () => setShowLoginModal(true);
+    window.addEventListener(SIGN_IN_REQUESTED_EVENT, open);
+    return () => window.removeEventListener(SIGN_IN_REQUESTED_EVENT, open);
+  }, []);
+
   useEffect(() => {
     const onStorage = (event: StorageEvent) => {
       if (event.key !== 'physbox_auth_handoff') return;

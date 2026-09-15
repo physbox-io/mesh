@@ -133,3 +133,29 @@ describe('buildShareLink', () => {
     expect((err as ShareTooLargeError).message).toMatch(/export STL/i);
   });
 });
+
+/*
+ * The account route: the scene is left with the account and the link carries a
+ * token. Only the URL handling is exercised here — the network side belongs to
+ * the API's own suite, and these tests run in node with no DOM, so anything
+ * reaching for `window` is out of reach by design.
+ */
+describe('account share links', () => {
+  it('reads a token out of a query string, and ignores everything else', async () => {
+    const { shareTokenInUrl } = await import('../src/utils/shareLink');
+    expect(shareTokenInUrl('?scene=uPqJ1nK9w2sX4vB7tR3aZg')).toBe('uPqJ1nK9w2sX4vB7tR3aZg');
+    expect(shareTokenInUrl('?other=1')).toBeNull();
+    expect(shareTokenInUrl('')).toBeNull();
+  });
+
+  // The opposite of the fragment path's choice, on purpose: a chat app that
+  // rewrites a link keeps the query and drops the fragment, and surviving that
+  // rewrite is the whole reason this route exists.
+  it('carries the token in the query string, not the fragment', async () => {
+    const { shareTokenInUrl } = await import('../src/utils/shareLink');
+    const url = new URL('https://mesh.example/app/');
+    url.searchParams.set('scene', 'tok123');
+    expect(url.hash).toBe('');
+    expect(shareTokenInUrl(url.search)).toBe('tok123');
+  });
+});

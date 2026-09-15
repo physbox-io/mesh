@@ -25,6 +25,7 @@
 
 import type { SceneNode } from '../types/scene';
 import type { UserPreset } from './userPresets';
+import { createShare, fetchSharedDocument, getStoredUser } from './apiClient';
 
 /** The only share format understood so far. */
 const SHARE_VERSION = '1';
@@ -58,6 +59,14 @@ export interface SharedScene {
 
 export interface ShareLink {
   url: string;
+  /**
+   * Set when the scene was left with the account rather than put in the link.
+   *
+   * It is what "stop sharing" needs, and it is how the panel knows there is
+   * something to stop: a link with the scene inside it cannot be recalled, and
+   * offering to turn one off would be a lie.
+   */
+  token?: string;
   /** Length of the whole URL in characters — what the limits above are about. */
   length: number;
   /**
@@ -273,6 +282,95 @@ export async function buildShareLink(
   }
 
   return { url: full, length: full.length, travelsWell: full.length <= SHARE_SOFT_LIMIT, notes };
+}
+
+// ---------------------------------------------------------------------------
+// The other kind of link: a token, with the scene left in the account
+//
+// Everything above puts the scene in the URL, which needs no server and no
+// account and is right for anything that fits. A sculpt does not fit and never
+// will. So the scene is left with the account and the link carries a token.
+//
+// In the *query string*, not the fragment, which is the opposite of the choice
+// made above and for the reason this path exists at all: a link that a chat app
+// rewrites is exactly what the fragment could not survive, and a rewrite keeps
+// the query and drops the fragment. The cost is that the token appears in an
+// access log, which is why it is 128 bits of randomness and why it can be
+// revoked.
+//
+// What is stored is a snapshot and the server will not let it be edited
+// afterwards. Somebody who vouches for a link is vouching for what they sent,
+// and a link whose contents could change under them would make that worthless.
+// Changing the scene means making a new link.
+// ---------------------------------------------------------------------------
+
+/** The query parameter a token-shared scene arrives in. */
+const SHARE_TOKEN_PARAM = 'scene';
+
+/** Whether there is an account to leave a scene with at all. */
+export function canShareViaAccount(): boolean {
+  return Boolean(getStoredUser());
+}
+
+/**
+ * Leaves the scene with the account and returns the short link for it.
+ *
+ * No size ceiling of our own here: the server holds the one that matters and
+ * says so in its refusal, and a second number kept in the app would be the one
+ * that drifted.
+ */
+export async function buildAccountShareLink(
+  scene: SharedScene,
+  base: string = window.location.href
+): Promise<ShareLink> {
+  const { token } = await createShare({ appId: 'mesh', name: scene.name, data: scene });
+
+  const url = new URL(base);
+  url.search = '';
+  url.hash = '';
+  url.searchParams.set(SHARE_TOKEN_PARAM, token);
+  const full = url.toString();
+
+  return {
+    url: full,
+    length: full.length,
+    travelsWell: true,
+    token,
+    notes: [
+      'The scene is stored with your account and the link points at it, so the link stays short.',
+      'What it holds cannot be changed afterwards — edit the scene and share again for a new link.',
+      'Anyone with the link can open it, with or without an account. You can turn it off at any time.',
+    ],
+  };
+}
+
+/** The token in the address bar, if this page was opened from an account link. */
+export function shareTokenInUrl(search: string = window.location.search): string | null {
+  return new URLSearchParams(search).get(SHARE_TOKEN_PARAM);
+}
+
+/**
+ * Fetches the scene a token stands for.
+ *
+ * The shape is checked on arrival for the same reason the fragment decoder
+ * checks it: a scene with no nodes throws inside the MJCF builder, and an
+ * answer from a newer version of this app is not necessarily one this build
+ * can open.
+ */
+export async function readAccountShareLink(token: string): Promise<SharedScene> {
+  const share = await fetchSharedDocument(token);
+  const scene = share.data as SharedScene | null;
+  if (!scene || !Array.isArray(scene.nodes) || scene.nodes.length === 0) {
+    throw new Error('That shared scene could not be read — it may have been made by a newer version of Mesh.');
+  }
+  return { ...scene, name: scene.name || share.name || 'Shared scene' };
+}
+
+/** Takes an opened token back out of the address bar. See `clearShareFragment`. */
+export function clearShareToken(): void {
+  const url = new URL(window.location.href);
+  url.searchParams.delete(SHARE_TOKEN_PARAM);
+  window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
 }
 
 /** Reads a shared scene out of the address bar. */

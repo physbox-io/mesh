@@ -49,14 +49,27 @@ import {
 } from './components/scene/SceneLayer';
 import { BottomStatusBar, SHOW_EXPORTS_EVENT } from './components/BottomStatusBar';
 import { MachineConfigModal } from './components/MachineConfigModal';
-import { UserProfileButton } from './components/UserProfileButton';
+import { UserProfileButton, SIGN_IN_REQUESTED_EVENT } from './components/UserProfileButton';
 import { MIN_MAX_TOKENS, MAX_MAX_TOKENS, readMaxTokens, writeMaxTokens } from './utils/llmSettings';
 import { PrintAnalysisHUD } from './components/PrintAnalysisHUD';
 import { createHeatSetBossNode, createHexNutTrapNode, createBearingPocketNode, createDShaftHubNode, createCounterboreHoleNode } from './utils/hardwareComponents';
 import { pushGlobalParameter } from './utils/llmSettings';
 import { saveUserPreset, deleteUserPreset, readUserPreset, listUserPresetNames } from './utils/userPresets';
 import { createPortal } from 'react-dom';
-import { buildShareLink, readShareLink, clearShareFragment, type ShareLink } from './utils/shareLink';
+import {
+  buildShareLink,
+  readShareLink,
+  clearShareFragment,
+  buildAccountShareLink,
+  canShareViaAccount,
+  shareTokenInUrl,
+  readAccountShareLink,
+  clearShareToken,
+  ShareTooLargeError,
+  type ShareLink,
+  type SharedScene,
+} from './utils/shareLink';
+import { revokeShare, isProRequired } from './utils/apiClient';
 import { cloudAutosave } from './utils/cloudDocuments';
 import { pushAppParameter } from './utils/cloudSync';
 
@@ -1344,6 +1357,8 @@ function App() {
   const [share, setShare] = useState<ShareLink | null>(null);
   const [shareError, setShareError] = useState<string | null>(null);
   const [shareCopied, setShareCopied] = useState(false);
+  const [shareTooBig, setShareTooBig] = useState<ShareTooLargeError | null>(null);
+  const [shareBusy, setShareBusy] = useState(false);
 
   const copyShareLink = useCallback(async (url: string) => {
     try {
@@ -1370,22 +1385,80 @@ function App() {
    * not the argument that produced it. Note cards do travel: they are
    * annotations written on the scene.
    */
+  /** The scene as it would be shared, read the same way the save reads it. */
+  const sceneToShare = useCallback((): SharedScene => {
+    const synced = getSyncedSceneGraph(sceneGraph, model, data, mujoco);
+    const name = activePreset.startsWith('user:')
+      ? activePreset.slice('user:'.length)
+      : synced.name || 'Shared scene';
+    return { name, nodes: synced.nodes, noteCards };
+  }, [sceneGraph, model, data, mujoco, noteCards, activePreset]);
+
   const handleShare = useCallback(async () => {
     setShareError(null);
+    setShareTooBig(null);
     setShareCopied(false);
     try {
-      const synced = getSyncedSceneGraph(sceneGraph, model, data, mujoco);
-      const name = activePreset.startsWith('user:')
-        ? activePreset.slice('user:'.length)
-        : synced.name || 'Shared scene';
-      const link = await buildShareLink({ name, nodes: synced.nodes, noteCards });
+      const link = await buildShareLink(sceneToShare());
       setShare(link);
       await copyShareLink(link.url);
     } catch (e) {
       setShare(null);
-      setShareError(e instanceof Error ? e.message : 'That scene could not be made into a link.');
+      /*
+       * A scene that will not fit in a link is the ordinary case for anything
+       * sculpted, not an error to apologise for — so it is kept apart from a
+       * real failure. The panel turns it into the offer that actually solves
+       * it: leave the scene with an account and send a short link instead.
+       */
+      if (e instanceof ShareTooLargeError) setShareTooBig(e);
+      else setShareError(e instanceof Error ? e.message : 'That scene could not be made into a link.');
     }
-  }, [sceneGraph, model, data, mujoco, noteCards, activePreset, copyShareLink]);
+  }, [sceneToShare, copyShareLink]);
+
+  /**
+   * Leaves the scene with the account and copies the short link for it.
+   *
+   * Offered only after the link-sized route has failed. It is the heavier
+   * option — it needs an account, and it puts a copy of the scene on a server
+   * — and offering it first would make an account look required for something
+   * that mostly is not.
+   */
+  const handleAccountShare = useCallback(async () => {
+    setShareError(null);
+    setShareBusy(true);
+    try {
+      const link = await buildAccountShareLink(sceneToShare());
+      setShareTooBig(null);
+      setShare(link);
+      await copyShareLink(link.url);
+    } catch (e) {
+      // A free account is expected to work here; sharing is deliberately not a
+      // Pro route. If that ever changes server-side, say so plainly rather than
+      // showing a bare 403.
+      setShareError(
+        isProRequired(e)
+          ? 'Sharing from your account needs PhysBox Pro.'
+          : e instanceof Error
+            ? e.message
+            : 'That scene could not be shared from your account.'
+      );
+    } finally {
+      setShareBusy(false);
+    }
+  }, [sceneToShare, copyShareLink]);
+
+  /** Turns off a link that points at the account. A link with the scene inside it cannot be recalled. */
+  const handleStopSharing = useCallback(async (token: string) => {
+    setShareBusy(true);
+    const ok = await revokeShare(token);
+    setShareBusy(false);
+    if (!ok) {
+      setShareError('That link could not be turned off. Try again in a moment.');
+      return;
+    }
+    setShare(null);
+    setShareCopied(false);
+  }, []);
 
   /**
    * A scene arriving by link — one this app made, from the share button.
@@ -1401,35 +1474,74 @@ function App() {
    * Declinable, and the fragment stays in the URL until it is accepted, so
    * "no" means "not now" rather than "thrown away".
    */
+  /**
+   * Puts a shared scene into the app, however the link carried it.
+   *
+   * Saved under its name and then loaded, rather than pushed into the store.
+   * Every other way into a scene goes through the preset loader, which resets
+   * the lattice and sculpt sessions, the camera and the physics worker in one
+   * known order, and a second path into `recompile` would be a second place for
+   * that order to drift. It also means a shared scene is *kept*: a Mesh scene
+   * is hours of work to rebuild, and losing one to a reload would be worse than
+   * an unasked-for entry in the preset list.
+   */
+  const openSharedScene = useCallback((shared: SharedScene): boolean => {
+    if (
+      !window.confirm(
+        `Open "${shared.name}"?\n\n` +
+          'It is saved under that name and replaces the scene on screen. ' +
+          'Save what you have first if you want it back.\n' +
+          'Cancel keeps it — the link stays in the address bar, so you can reload to open it later.'
+      )
+    ) {
+      return false;
+    }
+    // Never over the top of a scene already saved under that name: a link from
+    // someone whose "bracket" is not your "bracket" would otherwise overwrite
+    // yours on open, with nothing said.
+    const taken = new Set(listUserPresetNames());
+    let name = shared.name;
+    for (let n = 2; taken.has(name); n++) name = `${shared.name} (${n})`;
+
+    clearShareFragment();
+    clearShareToken();
+    if (!saveUserPreset(name, { nodes: shared.nodes, noteCards: shared.noteCards ?? [] })) {
+      setShareError(
+        `"${name}" opened but could not be saved — browser storage is full. ` +
+          'Export the JSON now if you want to keep it.'
+      );
+    }
+    loadUserPresetWithCard(`user:${name}`);
+    return true;
+  }, [loadUserPresetWithCard]);
+
+  /**
+   * A scene arriving as a token — the account route, for scenes too big to put
+   * in a link.
+   *
+   * It lands the same way a fragment-shared scene does, through a save and a
+   * preset load, so there is one way into a shared scene rather than two.
+   * The token is taken out of the address bar only once it is open, so
+   * declining leaves the link where it was.
+   */
+  useEffect(() => {
+    const token = shareTokenInUrl();
+    if (!token) return;
+    readAccountShareLink(token)
+      .then((shared) => openSharedScene(shared))
+      .catch((err) => {
+        clearShareToken();
+        setShareError(err?.message || 'That shared link could not be opened.');
+      });
+    // Once, on mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useEffect(() => {
     readShareLink()
       .then((shared) => {
         if (!shared) return;
-        if (
-          !window.confirm(
-            `Open "${shared.name}"?\n\n` +
-              'It is saved under that name and replaces the scene on screen. ' +
-              'Save what you have first if you want it back.\n' +
-              'Cancel keeps it — the link stays in the address bar, so you can reload to open it later.'
-          )
-        ) {
-          return;
-        }
-        // Never over the top of a scene already saved under that name: a link
-        // from someone whose "bracket" is not your "bracket" would otherwise
-        // overwrite yours on open, with nothing said.
-        const taken = new Set(listUserPresetNames());
-        let name = shared.name;
-        for (let n = 2; taken.has(name); n++) name = `${shared.name} (${n})`;
-
-        clearShareFragment();
-        if (!saveUserPreset(name, { nodes: shared.nodes, noteCards: shared.noteCards ?? [] })) {
-          setShareError(
-            `"${name}" opened but could not be saved — browser storage is full. ` +
-              'Export the JSON now if you want to keep it.'
-          );
-        }
-        loadUserPresetWithCard(`user:${name}`);
+        openSharedScene(shared);
       })
       .catch((err) => {
         clearShareFragment();
@@ -7215,21 +7327,24 @@ THE SOFTWARE, PHYSICS SOLVERS, CSG COMPILERS, TOOLPATH CALCULATORS, AND MACHINE 
           clipboard write is refused on an insecure origin, and a share button
           that silently did nothing is indistinguishable from one that
           worked. */}
-      {(share || shareError) &&
+      {(share || shareError || shareTooBig) &&
         createPortal(
           <div className="fixed top-16 right-4 max-lg:top-1/2 max-lg:right-1/2 max-lg:translate-x-1/2 max-lg:-translate-y-1/2 z-[105] w-[28rem] max-w-[90vw] p-3 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 shadow-xl text-xs">
             <div className="flex items-start justify-between gap-3">
               <p className="font-bold text-slate-800 dark:text-slate-100">
-                {shareError
-                  ? 'This scene could not be shared as a link'
-                  : shareCopied
-                    ? 'Link copied'
-                    : 'Share link'}
+                {shareTooBig
+                  ? 'This scene is too big to put in a link'
+                  : shareError
+                    ? 'This scene could not be shared as a link'
+                    : shareCopied
+                      ? 'Link copied'
+                      : 'Share link'}
               </p>
               <button
                 onClick={() => {
                   setShare(null);
                   setShareError(null);
+                  setShareTooBig(null);
                 }}
                 className="text-slate-400 hover:text-slate-700 dark:hover:text-white font-bold cursor-pointer px-1"
                 title="Dismiss"
@@ -7240,6 +7355,52 @@ THE SOFTWARE, PHYSICS SOLVERS, CSG COMPILERS, TOOLPATH CALCULATORS, AND MACHINE 
 
             {shareError && (
               <p className="mt-1.5 text-[11px] text-amber-700 dark:text-amber-400">{shareError}</p>
+            )}
+
+            {/* The offer, not an apology.
+
+                A sculpt or an imported mesh will never fit in a URL — the
+                vertices are in the scene — so "too big" is the ordinary outcome
+                for half the things worth showing somebody. The one thing that
+                fixes it is an account, and this is the moment it is worth
+                having one, so it is asked for here rather than left to be
+                discovered behind the avatar in the corner. */}
+            {shareTooBig && (
+              <div className="mt-1.5 space-y-2">
+                <p className="text-[11px] text-slate-600 dark:text-slate-300">{shareTooBig.message}</p>
+                {canShareViaAccount() ? (
+                  <>
+                    <p className="text-[11px] text-slate-600 dark:text-slate-300">
+                      Your account can hold it instead, and the link becomes a short one.
+                    </p>
+                    <button
+                      onClick={handleAccountShare}
+                      disabled={shareBusy}
+                      className="w-full flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-md bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white font-semibold cursor-pointer transition-colors"
+                    >
+                      <Share2 className="w-3 h-3" />
+                      {shareBusy ? 'Storing the scene…' : 'Share from your account'}
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <p className="text-[11px] text-slate-600 dark:text-slate-300">
+                      Sign in and your account can hold the scene instead — the link becomes a short
+                      one, anyone can open it without an account, and you can turn it off later.
+                      It is free; there is nothing to buy.
+                    </p>
+                    <button
+                      onClick={() => window.dispatchEvent(new CustomEvent(SIGN_IN_REQUESTED_EVENT))}
+                      className="w-full flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-md bg-sky-600 hover:bg-sky-500 text-white font-semibold cursor-pointer transition-colors"
+                    >
+                      Sign in to share this scene
+                    </button>
+                  </>
+                )}
+                <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                  Or export STL and send the file.
+                </p>
+              </div>
             )}
 
             {share && (
@@ -7279,6 +7440,18 @@ THE SOFTWARE, PHYSICS SOLVERS, CSG COMPILERS, TOOLPATH CALCULATORS, AND MACHINE 
                     <li key={i}>{n}</li>
                   ))}
                 </ul>
+                {/* Only for a link that points at the account. A link with the
+                    scene inside it is already out there and cannot be recalled;
+                    offering to turn one off would be a lie. */}
+                {share.token && (
+                  <button
+                    onClick={() => handleStopSharing(share.token!)}
+                    disabled={shareBusy}
+                    className="mt-2 text-[11px] text-red-600 dark:text-red-400 hover:underline disabled:opacity-50 cursor-pointer"
+                  >
+                    {shareBusy ? 'Turning it off…' : 'Stop sharing this link'}
+                  </button>
+                )}
               </>
             )}
           </div>,

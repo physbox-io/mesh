@@ -508,6 +508,69 @@ export async function putCloudDocument(input: {
   });
 }
 
+/**
+ * A document left with the account so it can be handed over as a short link.
+ *
+ * The apps share by putting the whole document in the URL fragment, which needs
+ * nothing from the server and is right for anything that fits. This is for what
+ * does not: a scene carrying a sculpt or an imported mesh is megabytes, and no
+ * amount of compression puts that in a URL.
+ *
+ * Not a Pro route. Sharing is how the next person finds this software, and a
+ * share that required a subscription of the *sender* would mostly stop the link
+ * being made — so there is no `isProAccount()` check in front of this, only a
+ * signed-in account.
+ */
+export interface ShareMeta {
+  token: string;
+  appId: string;
+  name: string;
+  sizeBytes: number;
+  viewCount: number;
+  createdAt: string;
+}
+
+export async function createShare(input: {
+  appId: string;
+  name: string;
+  data: unknown;
+}): Promise<{ token: string; sizeBytes: number }> {
+  return request('/api/shares', {
+    method: 'POST',
+    body: JSON.stringify({ app_id: input.appId, name: input.name, data: input.data }),
+  });
+}
+
+export async function listShares(): Promise<ShareMeta[]> {
+  const res = await request<{ shares: ShareMeta[] }>('/api/shares');
+  return res.shares || [];
+}
+
+export async function revokeShare(token: string): Promise<boolean> {
+  try {
+    await request(`/api/shares/${encodeURIComponent(token)}`, { method: 'DELETE' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Opens a shared document. Deliberately usable with no account.
+ *
+ * The person following a link has usually never signed in here, and an account
+ * wall is the point at which they close the tab. `request` sends the auth
+ * header only when there is one, so this works signed in or out.
+ */
+export async function fetchSharedDocument(
+  token: string
+): Promise<ShareMeta & { data: unknown }> {
+  const res = await request<{ share: ShareMeta & { data: unknown } }>(
+    `/api/shared/${encodeURIComponent(token)}`
+  );
+  return res.share;
+}
+
 export async function fetchCloudDocuments(appId?: string): Promise<CloudDocumentMeta[]> {
   const res = await request<{ documents: CloudDocumentMeta[] }>(`/api/documents${toQuery({ app_id: appId })}`);
   return res.documents || [];
