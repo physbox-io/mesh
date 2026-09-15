@@ -15,7 +15,7 @@
  * materialProps in SceneLayer) — that, not anything here, is what keeps the
  * lines from flickering through the surface they lie on.
  */
-import React, { useEffect, useMemo } from 'react';
+import { useEffect, useMemo } from 'react';
 import * as THREE from 'three';
 import { edgeColorOf } from './edgeView';
 
