@@ -16,6 +16,12 @@ import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
 // next to it, so nothing is fetched from a CDN and the cross-origin isolation
 // headers the physics worker needs never come into it.
 import createOpenSCAD, { type OpenSCAD } from '@lofcz/openscad-wasm';
+// The same asset the glue would fetch by import.meta.url, as a URL — Vite
+// emits it once and both references point at the one file. Wanted here so
+// the wasm can be COMPILED once (see compiledModule) rather than per run.
+// A relative path into node_modules because the package's exports map does
+// not list the .wasm, so the bare specifier cannot be resolved.
+import wasmUrl from '../../node_modules/@lofcz/openscad-wasm/openscad.wasm?url';
 
 /*
  * Which build, and why.
@@ -36,7 +42,39 @@ import createOpenSCAD, { type OpenSCAD } from '@lofcz/openscad-wasm';
  * coincident faces — the overshoot every cutter here carries is kept anyway,
  * because a flush cut is a modelling mistake whichever engine evaluates it.
  */
-const BACKEND_ARGS = ['--backend', 'Manifold', '--export-format', 'asciistl'];
+const BACKEND_ARGS = ['--backend', 'Manifold', '--export-format', 'binstl'];
+
+/**
+ * The wasm, compiled once.
+ *
+ * A fresh Emscripten instance per run is right (see renderToStl), but left to
+ * itself each instance fetches and COMPILES the 11 MB module again — a couple
+ * of hundred milliseconds on a fast machine, most of a second on a slow one,
+ * for a boolean that then takes six. Compiling to a WebAssembly.Module once
+ * and instantiating from it makes an instance cost about ten milliseconds.
+ */
+let compiledModule: Promise<WebAssembly.Module> | null = null;
+function compiledWasm(): Promise<WebAssembly.Module> {
+  if (!compiledModule) {
+    compiledModule = WebAssembly.compileStreaming(fetch(wasmUrl)).catch((err) => {
+      compiledModule = null; // a failed fetch can be retried
+      throw err;
+    });
+  }
+  return compiledModule;
+}
+
+async function freshInstance(io: { print: (l: string) => void; printErr: (l: string) => void }): Promise<OpenSCAD> {
+  const module = await compiledWasm();
+  return createOpenSCAD({
+    noInitialRun: true,
+    ...io,
+    instantiateWasm: (imports: WebAssembly.Imports, done: (instance: WebAssembly.Instance, module: WebAssembly.Module) => void) => {
+      WebAssembly.instantiate(module, imports).then((instance) => done(instance, module));
+      return {};
+    },
+  });
+}
 
 let loadingPromise: Promise<void> | null = null;
 
@@ -49,7 +87,7 @@ async function loadCompiler(): Promise<void> {
   if (loadingPromise) return loadingPromise;
   loadingPromise = (async () => {
     try {
-      await createOpenSCAD({ noInitialRun: true, print: () => {}, printErr: () => {} });
+      await freshInstance({ print: () => {}, printErr: () => {} });
       // Announce readiness here rather than in the LOAD handler, so the client's
       // isCompilerReady() mirror also flips when the load was triggered lazily
       // by a compile that arrived before any explicit LOAD.
@@ -63,16 +101,17 @@ async function loadCompiler(): Promise<void> {
 }
 
 /**
- * Runs one OpenSCAD program to an ASCII STL string.
+ * Runs one OpenSCAD program to a binary STL.
  *
  * A fresh instance per run, as the build's own README asks: once the runtime
  * has exited it cannot be reused, and a compile that aborted would poison
- * every one after it.
+ * every one after it. Binary rather than ASCII STL because a threaded hole is
+ * a few hundred thousand triangles, which as text is tens of megabytes to
+ * write, hand over and parse; as binary it is fifty bytes a triangle.
  */
-async function renderToStl(scadCode: string): Promise<string> {
+async function renderToStl(scadCode: string): Promise<Uint8Array> {
   const stderr: string[] = [];
-  const instance: OpenSCAD = await createOpenSCAD({
-    noInitialRun: true,
+  const instance: OpenSCAD = await freshInstance({
     print: (line: string) => stderr.push(line),
     printErr: (line: string) => {
       stderr.push(line);
@@ -89,7 +128,7 @@ async function renderToStl(scadCode: string): Promise<string> {
     const said = stderr.filter((l) => /ERROR|WARNING/.test(l)).slice(-3).join(' · ');
     throw new Error(`OpenSCAD failed (exit ${exit})${said ? `: ${said}` : ''}`);
   }
-  return instance.FS.readFile('/output.stl', { encoding: 'utf8' });
+  return instance.FS.readFile('/output.stl', { encoding: 'binary' });
 }
 
 type CompiledScad = { vertices: number[]; faces: number[]; renderVertices: number[] };
@@ -100,14 +139,14 @@ type CompiledScad = { vertices: number[]; faces: number[]; renderVertices: numbe
  */
 async function compileSCAD(scadCode: string): Promise<CompiledScad> {
   await loadCompiler();
-  const stlText = await renderToStl(scadCode);
-  if (!stlText || stlText.length === 0) {
+  const stl = await renderToStl(scadCode);
+  if (!stl || stl.byteLength === 0) {
     throw new Error('Compilation produced empty output.');
   }
 
   // Parse STL data into a BufferGeometry using STLLoader
   const loader = new STLLoader();
-  const geometry = loader.parse(stlText);
+  const geometry = loader.parse(stl.buffer.slice(stl.byteOffset, stl.byteOffset + stl.byteLength) as ArrayBuffer);
 
   const positionAttr = geometry.attributes.position;
   if (!positionAttr) {
@@ -117,7 +156,6 @@ async function compileSCAD(scadCode: string): Promise<CompiledScad> {
   const rawVerts = positionAttr.array;
   const uniqueVerts: number[] = [];
   const faces: number[] = [];
-  const vertMap = new Map<string, number>();
 
   // Deduplicate vertices and index the face array.
   // OpenSCAD's STL output is in its own Z-up convention (X=right, Y=depth, Z=up),
@@ -126,20 +164,40 @@ async function compileSCAD(scadCode: string): Promise<CompiledScad> {
   // Y-up input and swaps it back to MuJoCo Z-up. Remap here (x,y,z)->(x,z,-y) so that
   // round-tripping through that conversion reproduces OpenSCAD's original Z-up
   // orientation instead of rotating every scad-compiled mesh 90° about X.
+  //
+  // Coincident vertices are found by a numeric hash of their coordinates
+  // quantised to 1e-5 (a hundredth of a millimetre), with an exact check on
+  // the bucket. This used to build a string key per corner, which on a
+  // threaded hole's million corners was the slowest step of the compile.
+  const Q = 1e5;
+  const buckets = new Map<number, number[]>();
+  const quantised = (v: number) => Math.round(v * Q);
   for (let i = 0; i < rawVerts.length; i += 3) {
-    const x = rawVerts[i];
-    const y = rawVerts[i + 1];
-    const z = rawVerts[i + 2];
-    const yUpX = x;
-    const yUpY = z;
-    const yUpZ = -y;
-
-    const key = `${yUpX.toFixed(5)},${yUpY.toFixed(5)},${yUpZ.toFixed(5)}`;
-    let idx = vertMap.get(key);
-    if (idx === undefined) {
+    const yUpX = rawVerts[i];
+    const yUpY = rawVerts[i + 2];
+    const yUpZ = -rawVerts[i + 1];
+    const qx = quantised(yUpX), qy = quantised(yUpY), qz = quantised(yUpZ);
+    // Three large primes, xor-folded: cheap, and collisions only cost a
+    // comparison against the bucket's other members.
+    const hash = ((qx * 73856093) ^ (qy * 19349663) ^ (qz * 83492791)) | 0;
+    let bucket = buckets.get(hash);
+    let idx = -1;
+    if (bucket) {
+      for (const candidate of bucket) {
+        const c = candidate * 3;
+        if (quantised(uniqueVerts[c]) === qx && quantised(uniqueVerts[c + 1]) === qy && quantised(uniqueVerts[c + 2]) === qz) {
+          idx = candidate;
+          break;
+        }
+      }
+    } else {
+      bucket = [];
+      buckets.set(hash, bucket);
+    }
+    if (idx === -1) {
       idx = uniqueVerts.length / 3;
       uniqueVerts.push(yUpX, yUpY, yUpZ);
-      vertMap.set(key, idx);
+      bucket.push(idx);
     }
     faces.push(idx);
   }

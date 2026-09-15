@@ -48,15 +48,12 @@ describe('a decomposed boolean body', () => {
     expect(xml).toContain('ring1_csg_col1');
   });
 
-  it('emits the visual shell with contact disabled', () => {
-    // Without this the shell's convex hull would collide, filling the hole in.
-    expect(geomTag(xml, 'ring1_csg')).toMatch(/contype="0"/);
-    expect(geomTag(xml, 'ring1_csg')).toMatch(/conaffinity="0"/);
+  it('leaves the visual shell out of the model: the renderer draws it, MuJoCo never touches it', () => {
+    expect(xml).not.toContain('name="ring1_csg"');
+    expect(xml).not.toContain('<mesh name="ring1_csg"');
   });
 
-  it('gives the visual shell no mass, so the colliders alone carry it', () => {
-    expect(geomTag(xml, 'ring1_csg')).toMatch(/mass="0"/);
-  });
+
 
   it('keeps each collider\'s pos, which MuJoCo needs to place recentred meshes', () => {
     // MuJoCo translates every mesh asset so its centre of mass sits at the asset
@@ -67,7 +64,7 @@ describe('a decomposed boolean body', () => {
   });
 
   it('declares a mesh asset for every mesh geom it emits', () => {
-    for (const n of ['ring1_csg', 'ring1_csg_col0', 'ring1_csg_col1']) {
+    for (const n of ['ring1_csg_col0', 'ring1_csg_col1']) {
       expect(xml).toContain(`<mesh name="${n}"`);
     }
   });

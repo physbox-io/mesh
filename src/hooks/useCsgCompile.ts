@@ -4,8 +4,9 @@
 // A CSG body stores a hash of the inputs its derived geoms were built from
 // (node.csgHash). Any edit that changes the boolean — a size slider, moving the
 // negative shape, switching collision mode — changes the hash, and this is what
-// notices and recompiles. Debounced, because openscad-wasm is nowhere near fast
-// enough to keep up with a dragging slider.
+// notices and recompiles. Debounced a little, so a dragging slider settles
+// before its boolean is evaluated — a short wait now that the engine is
+// Manifold and a typical cut evaluates in tens of milliseconds.
 //
 // The same walk also builds nodes carrying raw OpenSCAD source that have never
 // been compiled — a preset or an MCP-created body arrives with `scad` text and
@@ -21,7 +22,7 @@ import { useStore } from '../store/useStore';
 import { csgHashOf, evaluateNodeCsg, hasBooleanOps } from '../utils/csg';
 import type { SceneNode } from '../types/scene';
 
-const COMPILE_DEBOUNCE_MS = 250;
+const COMPILE_DEBOUNCE_MS = 100;
 
 function collectStale(nodes: SceneNode[], out: SceneNode[] = []): SceneNode[] {
   for (const node of nodes || []) {

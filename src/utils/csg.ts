@@ -1436,8 +1436,13 @@ export async function evaluateNodeCsg(node: SceneNode): Promise<CsgResult | null
   // and what the dynamic-mesh renderer assumes (it draws renderVertices
   // straight at the body frame).
   const { volume, centroid } = meshVolumeAndCentroid(zup, compiled.faces);
-  const fullHull = convexHullOf(chunk3(zup));
-  const hullVolume = fullHull?.volume ?? 0;
+  // The hull volume is a figure for the panel (and the 'hull' mode's mass).
+  // Hulling every vertex of a dense mesh is the slowest thing in this
+  // function, so when the mesh is decomposed below the hull is taken from the
+  // sector hulls' own vertices instead — the same hull, since every extreme
+  // point of the whole is an extreme point of the sector it lies in — and only
+  // the undecomposed cases pay for the full point cloud.
+  let hullVolume: number | null = null;
 
   const requested = node.csgCollision ?? 'auto';
   const totalMass = node.csgMass ?? template?.mass ?? 1;
@@ -1462,6 +1467,7 @@ export async function evaluateNodeCsg(node: SceneNode): Promise<CsgResult | null
   };
 
   if (requested === 'hull') {
+    hullVolume = convexHullOf(chunk3(zup))?.volume ?? 0;
     return {
       hash, scad, volume, hullVolume, centroid, mode: 'hull',
       geoms: [{ ...visual, mass: totalMass }],
@@ -1536,7 +1542,7 @@ export async function evaluateNodeCsg(node: SceneNode): Promise<CsgResult | null
         // whole part's convex hull instead — MuJoCo hulls a mesh collider
         // anyway, so handing it the visual mesh IS the convex hull of the part.
         return {
-          hash, scad, volume, hullVolume, centroid, mode: 'hull',
+          hash, scad, volume, hullVolume: convexHullOf(chunk3(zup))?.volume ?? 0, centroid, mode: 'hull',
           warning: `${dropped} of ${hulls.length} decomposition sectors were degenerate (too thin for MuJoCo to hull safely), leaving too few to collide with — colliding as the convex hull of the whole part instead.`,
           geoms: [{ ...visual, mass: totalMass }],
         };
@@ -1548,8 +1554,9 @@ export async function evaluateNodeCsg(node: SceneNode): Promise<CsgResult | null
 
   if (mode === 'decompose') {
     // Colliders carry the mass; the visual shell must not double-count it.
-    return { hash, scad, volume, hullVolume, centroid, mode, warning, geoms: [{ ...visual, role: 'visual', mass: 0 }, ...colliders] };
+    return { hash, scad, volume, hullVolume: hullVolume ?? 0, centroid, mode, warning, geoms: [{ ...visual, role: 'visual', mass: 0 }, ...colliders] };
   }
+  if (hullVolume === null) hullVolume = convexHullOf(chunk3(zup))?.volume ?? 0;
 
   // 'primitives': the authored positives stay as the colliders (mjcf.ts keeps
   // them and drops the negatives), and the boolean mesh is visual only.
@@ -1643,7 +1650,15 @@ export function resolveCsgGeoms(node: SceneNode, target: 'physics' | 'render'): 
         : {}),
     })));
   }
-  out.push(...derived, ...visualSource);
+  // The boolean's visual mesh is left OUT of the physics model when the body
+  // collides as something else. MuJoCo would still parse it — a threaded hole
+  // is a hundred thousand triangles, three megabytes of XML — and compute
+  // inertia for a geom that has contact zeroed and no mass: over a second of
+  // every rebuild, for nothing. The renderer draws that mesh from the scene
+  // graph and never asks the model for it (see the mesh path in SceneLayer).
+  // In 'hull' mode the mesh IS the collider, carries the mass and has no
+  // role, so it stays.
+  out.push(...derived.filter(g => !(g.csgDerived === 'visual' && g.role === 'visual')), ...visualSource);
   return out;
 }
 

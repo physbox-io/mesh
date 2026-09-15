@@ -417,8 +417,12 @@ describe('resolveCsgGeoms', () => {
     n.geoms.push(derivedMesh, collider);
     const names = resolveCsgGeoms(n, 'physics').map(g => g.name);
     expect(names).toContain('b_col0');
-    expect(names).toContain('b_csg');       // present but contype-zeroed by mjcf
+    // The visual shell is drawn from the scene graph, never simulated, and a
+    // dense one costs MuJoCo over a second to parse — so it stays out.
+    expect(names).not.toContain('b_csg');
     expect(names).not.toContain('plate');
+    // ...but the renderer still gets it.
+    expect(resolveCsgGeoms(n, 'render').map(g => g.name)).toContain('b_csg');
   });
 
   it('splits an explicit total mass across primitive colliders by volume', () => {

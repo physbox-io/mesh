@@ -15,6 +15,7 @@ import { latticeBoolean } from '../utils/latticeBoolean';
 import {
   type CsgResult, type CutSpot, CSG_DEFAULT_SECTORS, scadForDisplay,
   cutGeometry, sourcePositiveBounds, reconcileCuts, pickCutSpot,
+  hasBooleanOps, csgHashOf,
 } from '../utils/csg';
 import { insetNegatives } from '../utils/scaleNode';
 import type { PaintLayer } from '../utils/vertexPaint';
@@ -558,6 +559,23 @@ function cutSpotFromCamera(node: SceneNode): CutSpot | null {
  * is what keeps `pos`, `quat` and `size` from ever disagreeing with the spot
  * and depth they are supposed to express.
  */
+/**
+ * Rebuilds the physics model after an edit to a body's shapes — unless the
+ * edit left a boolean body's mesh stale, in which case the build is skipped.
+ *
+ * useCsgAutoCompile notices the stale hash, evaluates the boolean and runs
+ * its own build a moment later. Building here as well means every cut edit
+ * costs two model builds, and the first one installs colliders for a mesh
+ * that is about to be replaced: pure waste, and a visible stutter before the
+ * real result lands. The scene graph itself is already set by the caller, so
+ * the panel shows the edit at once either way.
+ */
+function rebuildAfterGeomEdit(get: () => PhysicsState, newScene: SceneGraph, nodeId: string) {
+  const node = findNode(newScene.nodes, nodeId);
+  if (node?.csgEnabled && hasBooleanOps(node) && csgHashOf(node) !== node.csgHash) return;
+  get().recompile(newScene, nodeId, false);
+}
+
 function reshapeCut(
   get: () => PhysicsState,
   set: (partial: Partial<PhysicsState>) => void,
@@ -578,7 +596,7 @@ function reshapeCut(
   const next = cutGeometry(node, geom);
   if (next) Object.assign(geom, next);
   set({ sceneGraph: newScene });
-  get().recompile(newScene, nodeId, false);
+  rebuildAfterGeomEdit(get, newScene, nodeId);
 }
 
 const addChildNode = (nodes: SceneNode[], parentId: string, newNode: SceneNode): boolean => {
@@ -2033,7 +2051,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     if (node.csgSectors === undefined) node.csgSectors = CSG_DEFAULT_SECTORS;
 
     set({ sceneGraph: newScene });
-    get().recompile(newScene, nodeId, false);
+    rebuildAfterGeomEdit(get, newScene, nodeId);
     return node.geoms.length - 1;
   },
 
@@ -2762,7 +2780,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
       delete node.csgHash;
     }
     set({ sceneGraph: newScene });
-    get().recompile(newScene, nodeId, false);
+    rebuildAfterGeomEdit(get, newScene, nodeId);
   },
 
   insetNodeGeoms: (nodeId, factor) => {
@@ -2781,7 +2799,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     if (node.csgSectors === undefined) node.csgSectors = CSG_DEFAULT_SECTORS;
 
     set({ sceneGraph: newScene });
-    get().recompile(newScene, nodeId, false);
+    rebuildAfterGeomEdit(get, newScene, nodeId);
   },
 
   setGeomCsgOp: (nodeId, geomIndex, csg) => {
@@ -2810,7 +2828,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
       delete node.csgHash;
     }
     set({ sceneGraph: newScene });
-    get().recompile(newScene, nodeId, false);
+    rebuildAfterGeomEdit(get, newScene, nodeId);
   },
 
   // Installs the output of evaluateNodeCsg: derived geoms replace the previous
