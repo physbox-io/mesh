@@ -15,7 +15,7 @@ import { useStore, getPhysicsWorkerClient, cloneSceneGraph } from './store/useSt
 import type { SceneGraph, SceneNode, SceneGeom, SceneJoint, CsgOp } from './types/scene';
 import type { ModelMirror, MujocoShim } from './types/sceneLayer';
 import type { WeakSpot } from './utils/printAnalysis';
-import { Play, Square, SlidersHorizontal, Settings, Box, Circle, X, RotateCcw, Trash2, Layers, CircleDot, Zap, Info, Triangle, Disc, Code, Menu, Shapes, Minimize2, Save, Download, Upload, Undo, Redo, FileText, ChevronDown, ChevronUp, PanelRight, Edit3, Printer, Scissors, Sparkles, Sun, Moon, Pyramid, Cone, Donut, ChartSpline, Paintbrush, Grid3x3, Image as ImageIcon } from 'lucide-react';
+import { Play, Square, SlidersHorizontal, Settings, Box, Circle, X, RotateCcw, Trash2, Layers, CircleDot, Zap, Info, Triangle, Disc, Code, Menu, Shapes, Minimize2, Save, Download, Upload, Undo, Redo, FileText, ChevronDown, ChevronUp, PanelRight, Edit3, Printer, Scissors, Sparkles, Sun, Moon, Pyramid, Cone, Donut, ChartSpline, Paintbrush, Grid3x3, Image as ImageIcon, Share2, Copy, Check } from 'lucide-react';
 import { useRef, useMemo, useEffect, useCallback, useState, type RefObject, type ComponentProps, type ComponentRef } from 'react';
 import AICopilotPanel from './components/AICopilotPanel';
 import * as THREE from 'three';
@@ -55,6 +55,8 @@ import { PrintAnalysisHUD } from './components/PrintAnalysisHUD';
 import { createHeatSetBossNode, createHexNutTrapNode, createBearingPocketNode, createDShaftHubNode, createCounterboreHoleNode } from './utils/hardwareComponents';
 import { pushGlobalParameter } from './utils/llmSettings';
 import { saveUserPreset, deleteUserPreset, readUserPreset, listUserPresetNames } from './utils/userPresets';
+import { createPortal } from 'react-dom';
+import { buildShareLink, readShareLink, clearShareFragment, type ShareLink } from './utils/shareLink';
 import { cloudAutosave } from './utils/cloudDocuments';
 import { pushAppParameter } from './utils/cloudSync';
 
@@ -1332,6 +1334,111 @@ function App() {
     }
   }, [sceneGraph, model, data, mujoco, noteCards, copilotMessages]);
 
+  /*
+   * Sharing the scene as a link.
+   *
+   * The only way to give someone a scene was the JSON file, which is a file:
+   * it goes in an email, not in a message, and the person on the other end has
+   * to save it, find it and import it.
+   */
+  const [share, setShare] = useState<ShareLink | null>(null);
+  const [shareError, setShareError] = useState<string | null>(null);
+  const [shareCopied, setShareCopied] = useState(false);
+
+  const copyShareLink = useCallback(async (url: string) => {
+    try {
+      await navigator.clipboard.writeText(url);
+      setShareCopied(true);
+    } catch {
+      // No clipboard on an insecure origin, and none in some embedded views.
+      // The link is in a selectable field beside this for exactly that case.
+      setShareCopied(false);
+    }
+  }, []);
+
+  /**
+   * Copies a link that opens this scene in someone else's browser.
+   *
+   * `getSyncedSceneGraph` is the same reader the save and the JSON export use,
+   * so a link, a saved preset and a file all carry the same scene — positions
+   * included, which is what "synced" means: the graph on its own still holds
+   * where every body *started*, not where the simulation has put it.
+   *
+   * The copilot conversation is deliberately left out. It is the author's
+   * working notes rather than part of the scene, it is usually the largest
+   * thing in a saved preset, and the person opening the link wants the model,
+   * not the argument that produced it. Note cards do travel: they are
+   * annotations written on the scene.
+   */
+  const handleShare = useCallback(async () => {
+    setShareError(null);
+    setShareCopied(false);
+    try {
+      const synced = getSyncedSceneGraph(sceneGraph, model, data, mujoco);
+      const name = activePreset.startsWith('user:')
+        ? activePreset.slice('user:'.length)
+        : synced.name || 'Shared scene';
+      const link = await buildShareLink({ name, nodes: synced.nodes, noteCards });
+      setShare(link);
+      await copyShareLink(link.url);
+    } catch (e) {
+      setShare(null);
+      setShareError(e instanceof Error ? e.message : 'That scene could not be made into a link.');
+    }
+  }, [sceneGraph, model, data, mujoco, noteCards, activePreset, copyShareLink]);
+
+  /**
+   * A scene arriving by link — one this app made, from the share button.
+   *
+   * It is saved under its name and then loaded, rather than pushed straight
+   * into the store. Every other way into a scene goes through the preset
+   * loader, which resets the lattice and sculpt sessions, the camera and the
+   * physics worker in one known order; a second path into `recompile` would be
+   * a second place for that order to drift. It also means a shared scene is
+   * *kept* — a Mesh scene is hours of work to rebuild and losing one to a
+   * reload would be worse than an unasked-for entry in the preset list.
+   *
+   * Declinable, and the fragment stays in the URL until it is accepted, so
+   * "no" means "not now" rather than "thrown away".
+   */
+  useEffect(() => {
+    readShareLink()
+      .then((shared) => {
+        if (!shared) return;
+        if (
+          !window.confirm(
+            `Open "${shared.name}"?\n\n` +
+              'It is saved under that name and replaces the scene on screen. ' +
+              'Save what you have first if you want it back.\n' +
+              'Cancel keeps it — the link stays in the address bar, so you can reload to open it later.'
+          )
+        ) {
+          return;
+        }
+        // Never over the top of a scene already saved under that name: a link
+        // from someone whose "bracket" is not your "bracket" would otherwise
+        // overwrite yours on open, with nothing said.
+        const taken = new Set(listUserPresetNames());
+        let name = shared.name;
+        for (let n = 2; taken.has(name); n++) name = `${shared.name} (${n})`;
+
+        clearShareFragment();
+        if (!saveUserPreset(name, { nodes: shared.nodes, noteCards: shared.noteCards ?? [] })) {
+          setShareError(
+            `"${name}" opened but could not be saved — browser storage is full. ` +
+              'Export the JSON now if you want to keep it.'
+          );
+        }
+        loadUserPresetWithCard(`user:${name}`);
+      })
+      .catch((err) => {
+        clearShareFragment();
+        setShareError(err?.message || 'That link could not be read.');
+      });
+    // Once, on mount: opening the scene takes the fragment out of the URL.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const threeSceneRef = useRef<THREE.Scene | null>(null);
   // The EffectComposer instance, so a screenshot can render through the same
   // post-processing pipeline the viewport uses (AO included) instead of a raw
@@ -2237,6 +2344,17 @@ function App() {
               title="JSON"
             >
               <Download className="w-3.5 h-3.5" />
+            </button>
+
+            {/* Share: a link with the scene inside it. Next to the JSON
+                download because it is one — the same scene, addressed to a
+                browser instead of a disk. */}
+            <button
+              onClick={handleShare}
+              className="flex items-center justify-center p-1 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700 text-sky-600 dark:text-sky-400 transition-colors focus:outline-none cursor-pointer"
+              title="Copy a share link — the scene travels inside it"
+            >
+              <Share2 className="w-3.5 h-3.5" />
             </button>
 
             {/* Exporting is done from the status bar, beside the machine it
@@ -7085,6 +7203,87 @@ THE SOFTWARE, PHYSICS SOLVERS, CSG COMPILERS, TOOLPATH CALCULATORS, AND MACHINE 
           </div>
         </div>
       )}
+
+      {/* Share link report.
+
+          Portalled to the body: the toolbar it is triggered from sits inside a
+          stacking context of its own, so a z-index set in there is only a rank
+          among that context's siblings. z-[105] puts it above the note cards
+          (zIndex 25) and below the dialogs.
+
+          The link is in a selectable field as well as on the clipboard: a
+          clipboard write is refused on an insecure origin, and a share button
+          that silently did nothing is indistinguishable from one that
+          worked. */}
+      {(share || shareError) &&
+        createPortal(
+          <div className="fixed top-16 right-4 max-lg:top-1/2 max-lg:right-1/2 max-lg:translate-x-1/2 max-lg:-translate-y-1/2 z-[105] w-[28rem] max-w-[90vw] p-3 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 shadow-xl text-xs">
+            <div className="flex items-start justify-between gap-3">
+              <p className="font-bold text-slate-800 dark:text-slate-100">
+                {shareError
+                  ? 'This scene could not be shared as a link'
+                  : shareCopied
+                    ? 'Link copied'
+                    : 'Share link'}
+              </p>
+              <button
+                onClick={() => {
+                  setShare(null);
+                  setShareError(null);
+                }}
+                className="text-slate-400 hover:text-slate-700 dark:hover:text-white font-bold cursor-pointer px-1"
+                title="Dismiss"
+              >
+                ✕
+              </button>
+            </div>
+
+            {shareError && (
+              <p className="mt-1.5 text-[11px] text-amber-700 dark:text-amber-400">{shareError}</p>
+            )}
+
+            {share && (
+              <>
+                <div className="mt-2 flex items-center gap-1.5">
+                  <input
+                    readOnly
+                    value={share.url}
+                    onFocus={(e) => e.currentTarget.select()}
+                    className="flex-1 min-w-0 px-2 py-1 rounded-md bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 font-mono text-[10px] outline-none"
+                  />
+                  <button
+                    onClick={() => copyShareLink(share.url)}
+                    className="shrink-0 flex items-center gap-1 px-2 py-1 rounded-md bg-sky-600 hover:bg-sky-500 text-white font-semibold cursor-pointer transition-colors"
+                    title="Copy link"
+                  >
+                    {shareCopied ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                    {shareCopied ? 'Copied' : 'Copy'}
+                  </button>
+                  {share.travelsWell && typeof navigator !== 'undefined' && 'share' in navigator && (
+                    <button
+                      onClick={() => {
+                        void navigator.share({ title: 'Mesh scene', url: share.url }).catch(() => {
+                          // Cancelled, or refused for a URL this long. The copy is already made.
+                        });
+                      }}
+                      className="shrink-0 flex items-center gap-1 px-2 py-1 rounded-md border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 font-semibold cursor-pointer transition-colors"
+                      title="Send it to a message, a post or another app"
+                    >
+                      <Share2 className="w-3 h-3" />
+                      Send
+                    </button>
+                  )}
+                </div>
+                <ul className="mt-1.5 space-y-1 text-[11px] text-slate-500 dark:text-slate-400 list-disc list-inside">
+                  {share.notes.map((n, i) => (
+                    <li key={i}>{n}</li>
+                  ))}
+                </ul>
+              </>
+            )}
+          </div>,
+          document.body
+        )}
 
       {isSaveModalOpen && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
