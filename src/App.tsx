@@ -50,6 +50,7 @@ import {
 import { BottomStatusBar, SHOW_EXPORTS_EVENT } from './components/BottomStatusBar';
 import { MachineConfigModal } from './components/MachineConfigModal';
 import { UserProfileButton, SIGN_IN_REQUESTED_EVENT, SIGNED_IN_EVENT } from './components/UserProfileButton';
+import { AgentMachineBanner } from './components/AgentMachineBanner';
 import { MIN_MAX_TOKENS, MAX_MAX_TOKENS, readMaxTokens, writeMaxTokens } from './utils/llmSettings';
 import { PrintAnalysisHUD } from './components/PrintAnalysisHUD';
 import { createHeatSetBossNode, createHexNutTrapNode, createBearingPocketNode, createDShaftHubNode, createCounterboreHoleNode } from './utils/hardwareComponents';
@@ -2605,6 +2606,9 @@ function App() {
             </button>
 
             {/* User Profile & Cloud Sync */}
+            {/* Whether Claude may move the machine — see AgentMachineBanner */}
+            <AgentMachineBanner />
+
             <UserProfileButton />
 
             {/* GitHub */}

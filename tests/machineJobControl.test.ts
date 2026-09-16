@@ -119,7 +119,7 @@ describe('pausing and resuming a running job', () => {
     await webSerialManager.pauseJob();
     const atPause = fake.lines().length;
 
-    expect(webSerialManager.getState().status).toBe('PAUSED_USER');
+    expect(webSerialManager.getState().status).toBe('PAUSED_OPERATOR');
     // `!` and not a queued command: it has to overtake everything already sent.
     expect(fake.sent).toContain('!');
 
@@ -183,7 +183,7 @@ describe('pausing and resuming a running job', () => {
   it('will not pause a machine that is not running a job', async () => {
     await webSerialManager.pauseJob();
     expect(fake.sent).not.toContain('!');
-    expect(webSerialManager.getState().status).not.toBe('PAUSED_USER');
+    expect(webSerialManager.getState().status).not.toBe('PAUSED_OPERATOR');
   });
 
   it('leaves the spindle running through an operator pause', async () => {

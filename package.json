@@ -15,7 +15,7 @@
   "dependencies": {
     "@lofcz/openscad-wasm": "^0.0.2",
     "@mujoco/mujoco": "^3.8.1",
-    "@physbox-io/machining": "^0.2.0",
+    "@physbox-io/machining": "^0.3.2",
     "@physbox-io/ui": "^0.2.0",
     "@react-three/drei": "^10.7.7",
     "@react-three/fiber": "^9.6.1",

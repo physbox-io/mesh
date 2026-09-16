@@ -65,7 +65,7 @@ export const JobPauseBanner: React.FC<{
         <AlertCircle className="w-6 h-6 text-amber-500 flex-shrink-0" />
         <div>
           <h4 className="font-bold text-sm">
-            {machineState.status === 'PAUSED_USER' ? 'Paused' : 'Action Required: Machine Paused'}
+            {machineState.status === 'PAUSED_OPERATOR' ? 'Paused' : 'Action Required: Machine Paused'}
           </h4>
           <p className="text-xs leading-relaxed font-semibold">{machineState.pauseMessage}</p>
         </div>

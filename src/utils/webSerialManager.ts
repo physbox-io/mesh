@@ -9,6 +9,7 @@ import {
   FEED_OVERRIDE_BYTES,
   RAPID_OVERRIDE_BYTES,
   SPINDLE_OVERRIDE_BYTES,
+  type MachineStatus,
   type OverrideStep,
 } from '@physbox-io/machining';
 import { postMachineTelemetry } from './apiClient';
@@ -40,17 +41,15 @@ import {
   type MotionProfile,
 } from './motionProfile';
 
-export type MachineStatus =
-  | 'DISCONNECTED'
-  | 'CONNECTING'
-  | 'IDLE'
-  | 'RUNNING'
-  | 'PAUSED_MATERIAL'
-  | 'PAUSED_TOOL'
-  | 'PAUSED_USER'
-  | 'PAUSED_PARKED'
-  | 'ALARM'
-  | 'ERROR';
+/*
+ * One vocabulary across the three apps.
+ *
+ * This used to spell the operator's own feed hold `PAUSED_USER` while Volt and
+ * Etch called the same state `PAUSED_OPERATOR`, which is the sort of difference
+ * that costs nothing until something has to speak to all three — an agent, in
+ * this case, being told a machine is in a state its tools have never heard of.
+ */
+export type { MachineStatus };
 
 export interface MachineState {
   status: MachineStatus;
@@ -642,7 +641,76 @@ class WebSerialManager {
    * same GRBL on the other end either way, which is why everything below this
    * point is unchanged by the choice. See `machineTransport.ts`.
    */
-  public async connect(link: MachineLink = { kind: 'usb' }): Promise<boolean> {
+  /**
+   * The wire to open when `connect()` is called with no argument.
+   *
+   * `MachineControl` — what the MCP handlers talk to — picks the transport and
+   * then connects in two steps, because that is the shape the other apps'
+   * managers have. This holds the choice in between. The app's own UI still
+   * passes the link straight to `connect`, which is the clearer call when you
+   * have it to hand.
+   */
+  private pendingLink: MachineLink | null = null;
+
+  /** Chooses the wire for a later `connect()`. See `pendingLink`. */
+  public setTransport(mode: 'usb' | 'wifi', deviceId?: string): void {
+    this.pendingLink =
+      mode === 'wifi' ? { kind: 'cloud', deviceId: deviceId ?? '' } : { kind: 'usb' };
+  }
+
+  /** Which wire is open, or would be opened, in the other apps' vocabulary. */
+  public getTransportMode(): 'usb' | 'wifi' {
+    if (this.transport) return this.transport.runJob ? 'wifi' : 'usb';
+    return this.pendingLink?.kind === 'cloud' ? 'wifi' : 'usb';
+  }
+
+  /** Whether a job is streaming right now. */
+  public isRunning(): boolean {
+    return this.isJobRunning;
+  }
+
+  /** Whether a job is part-streamed and waiting. */
+  public isJobPaused(): boolean {
+    return this.isPaused;
+  }
+
+  /**
+   * The operation being cut.
+   *
+   * Always null here: this app's programs are not divided into named
+   * operations the way a board's isolation, drilling and profiling passes are.
+   * A tool change is still a tool change, and shows up in the pause message.
+   */
+  public getCurrentLayer(): null {
+    return null;
+  }
+
+  /** The controller's `$$` settings, in the shape the shared tools expect. */
+  public getGrblSettings(): Map<number, number> {
+    return new Map(
+      Object.entries(this.state.grblSettings).map(([k, v]) => [Number(k), v] as [number, number])
+    );
+  }
+
+  /**
+   * Asks the controller where it is and waits for the answer, so a caller about
+   * to reason about the tool's position reads one from now rather than from up
+   * to a poll interval ago.
+   */
+  public async refreshPosition(): Promise<MachineState> {
+    if (this.state.connected) {
+      await this.writeRealtime(0x3f); // '?' — status request
+      await new Promise<void>(resolve => setTimeout(resolve, 250));
+    }
+    return this.getState();
+  }
+
+  public async connect(link?: MachineLink): Promise<boolean> {
+    const chosen: MachineLink = link ?? this.pendingLink ?? { kind: 'usb' };
+    return this.openLink(chosen);
+  }
+
+  private async openLink(link: MachineLink): Promise<boolean> {
     const transport =
       link.kind === 'cloud'
         ? new CloudMachineTransport(link.deviceId, link.deviceName)
@@ -1524,7 +1592,7 @@ class WebSerialManager {
     this.isPaused = true;
     await this.writeRealtime(0x21); // '!' — feed hold
     this.updateState({
-      status: 'PAUSED_USER',
+      status: 'PAUSED_OPERATOR',
       pauseMessage: 'Paused. The spindle is still running and the tool is still in the cut.',
     });
   }
@@ -1633,7 +1701,7 @@ class WebSerialManager {
       await this.writeRealtime(0x21); // '!'
     }
     this.updateState({
-      status: 'PAUSED_USER',
+      status: 'PAUSED_OPERATOR',
       pauseMessage: 'Stopping the axes before standing the job down…',
     });
     const stopped = await this.waitForHoldComplete();
