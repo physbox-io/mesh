@@ -143,7 +143,7 @@ describe('buildShareLink', () => {
 describe('account share links', () => {
   it('reads a token out of a query string, and ignores everything else', async () => {
     const { shareTokenInUrl } = await import('../src/utils/shareLink');
-    expect(shareTokenInUrl('?scene=uPqJ1nK9w2sX4vB7tR3aZg')).toBe('uPqJ1nK9w2sX4vB7tR3aZg');
+    expect(shareTokenInUrl('?share=uPqJ1nK9w2sX4vB7tR3aZg')).toBe('uPqJ1nK9w2sX4vB7tR3aZg');
     expect(shareTokenInUrl('?other=1')).toBeNull();
     expect(shareTokenInUrl('')).toBeNull();
   });
@@ -154,7 +154,7 @@ describe('account share links', () => {
   it('carries the token in the query string, not the fragment', async () => {
     const { shareTokenInUrl } = await import('../src/utils/shareLink');
     const url = new URL('https://mesh.example/app/');
-    url.searchParams.set('scene', 'tok123');
+    url.searchParams.set('share', 'tok123');
     expect(url.hash).toBe('');
     expect(shareTokenInUrl(url.search)).toBe('tok123');
   });

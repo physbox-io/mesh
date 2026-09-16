@@ -304,8 +304,18 @@ export async function buildShareLink(
 // Changing the scene means making a new link.
 // ---------------------------------------------------------------------------
 
-/** The query parameter a token-shared scene arrives in. */
-const SHARE_TOKEN_PARAM = 'scene';
+/**
+ * The query parameter a token-shared document arrives in.
+ *
+ * The same name in every Physbox app, rather than one word per app. A token is
+ * opaque and says nothing about where it belongs, so the app that receives one
+ * asks the server what it is and sends you to the right app if it is not this
+ * one — which only works if all three look in the same place for it.
+ */
+const SHARE_TOKEN_PARAM = 'share';
+
+/** What to call a sibling app when a link turns out to belong to it. */
+const APP_NAMES: Record<string, string> = { etch: 'Etch', volt: 'Volt', mesh: 'Mesh' };
 
 /** Whether there is an account to leave a scene with at all. */
 export function canShareViaAccount(): boolean {
@@ -359,6 +369,16 @@ export function shareTokenInUrl(search: string = window.location.search): string
  */
 export async function readAccountShareLink(token: string): Promise<SharedScene> {
   const share = await fetchSharedDocument(token);
+  /*
+   * A token carries no hint of which app made it, so a Mesh link pasted into
+   * Etch would otherwise be answered with "that link is damaged" — which sends
+   * somebody looking for a fault in a link that is perfectly good.
+   */
+  if (share.appId && share.appId !== 'mesh') {
+    throw new Error(
+      `That link is a ${APP_NAMES[share.appId] ?? share.appId} document, not a Mesh scene. Open it in ${APP_NAMES[share.appId] ?? share.appId}.`
+    );
+  }
   const scene = share.data as SharedScene | null;
   if (!scene || !Array.isArray(scene.nodes) || scene.nodes.length === 0) {
     throw new Error('That shared scene could not be read — it may have been made by a newer version of Mesh.');
