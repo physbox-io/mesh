@@ -52,6 +52,39 @@ describe('California relief preset', () => {
     expect(unpaired).toBe(0);
   });
 
+  it('is wound right side out, so the viewport does not cull the terrain', () => {
+    // The scene draws mesh geoms with a FrontSide material and takes its normals
+    // from this winding, so an inside-out solid is invisible from outside: you
+    // look straight through the terrain onto the inside of the far wall, which
+    // reads as the model being half transparent. Signed volume is the test that
+    // catches it — the manifold check above passes either way round.
+    const v = mesh.vertices;
+    // The underside is the one flat plane in the model, at the foot of the
+    // plinth; everything else is terrain standing above it.
+    const baseY = -(CA_CARVE_DEPTH_MM / 1000) * CA_PLINTH_FRACTION;
+    let volume = 0;
+    let topFacingDown = 0;
+    let bottomFacingUp = 0;
+    for (let i = 0; i < mesh.faces.length; i += 3) {
+      const [a, b, c] = [mesh.faces[i] * 3, mesh.faces[i + 1] * 3, mesh.faces[i + 2] * 3];
+      volume += (
+        v[a] * (v[b + 1] * v[c + 2] - v[b + 2] * v[c + 1])
+        - v[a + 1] * (v[b] * v[c + 2] - v[b + 2] * v[c])
+        + v[a + 2] * (v[b] * v[c + 1] - v[b + 1] * v[c])
+      ) / 6;
+      // Y component of (b - a) x (c - a): positive means the face looks up.
+      const ny = (v[b + 2] - v[a + 2]) * (v[c] - v[a]) - (v[b] - v[a]) * (v[c + 2] - v[a + 2]);
+      const ys = [v[a + 1], v[b + 1], v[c + 1]];
+      if (ys.every((y) => y > baseY) && ny < 0) topFacingDown++;
+      if (ys.every((y) => y === baseY) && ny > 0) bottomFacingUp++;
+    }
+    expect(volume).toBeGreaterThan(0);
+    // Named per skin, because a count of upward faces alone does not
+    // discriminate: flipped, the underside supplies exactly the same tally.
+    expect(topFacingDown).toBe(0);
+    expect(bottomFacingUp).toBe(0);
+  });
+
   it('lands on the stock at exactly its designed north-south size', () => {
     const { tris } = collectSceneTriangles(californiaReliefPreset);
     expect(tris.length).toBeGreaterThan(0);

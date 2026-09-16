@@ -206,7 +206,9 @@ function toRenderVerts(yupVerts) {
 
 **Setting body pos:** `body_pos = [0, 0, 0]` places the mesh where its vertices are in Y-up space. To start an object at a given height, set `body_pos.z` to the desired height of the body's MuJoCo origin (the mesh's volume centroid). For a mesh whose Y-up base is at Y=0 and centroid at Y=0.125, set `body_pos.z = 0.125` for the base to sit flush with the ground. With `body_pos.z = 0` the MuJoCo origin sits at ground level, which puts the base at Z = -centroid_height, slightly below ground. Verify by checking `xpos[2]` via the `_mesh_xpos` debug object.
 
-**Face winding:** use outward-facing normals (CCW winding viewed from outside). Wrong winding gives inside-out contact normals and sinking.
+**Face winding:** use outward-facing normals (CCW viewed from outside, so each triangle's `(v1-v0) x (v2-v0)` points away from the interior). Wrong winding gives inside-out contact normals and sinking.
+
+It also has a visual symptom that does not look like a winding bug. `SceneLayer.tsx` draws mesh geoms with `side={THREE.FrontSide}` and takes their normals from this winding, so a backwards triangle is not drawn at all and a surface built backwards reads as a **half-transparent body** — you see through its near face to the inside of its far wall. `californiaRelief.ts` shipped that way. When a body looks see-through, sum the signed volume before looking at `rgba` or materials; `physics_get_scene_summary` reports it as `windingInverted`. Note that a positive total only rules out a *uniform* inversion: a mesh with faces both ways can still sum positive, so derive each triangle's order from its face's outward direction rather than writing indices in ascending order.
 
 **Child bodies:** for compound mesh objects (mesh plus child bodies), the child `pos` offset is in MuJoCo Z-up relative to the **parent body's MuJoCo origin** (the volume centroid, not the mesh base). Measure with the `_mesh_xpos` debug log.
 

@@ -525,19 +525,24 @@ export function buildCaliforniaMesh(): CaliforniaMesh {{
       if (mask[at(c, r)] !== 1) continue;
       landCells++;
 
-      // Top surface, wound counter-clockwise seen from above (+y).
+      // Top surface, wound counter-clockwise seen from above (+y). Note the
+      // order is the mirror of the one utils/heightmapMesh.ts uses for the same
+      // quad: that builder is Z-up with its rows running +Y, this one is Y-up
+      // with `pz` running -Z, and copying its ordering across turns the whole
+      // solid inside out. Inside out, the viewport's FrontSide material culls
+      // the terrain and you see through it to the inside of the far wall.
       const a = top(c, r), b = top(c + 1, r), d = top(c + 1, r + 1), e = top(c, r + 1);
-      faces.push(a, e, d, a, d, b);
+      faces.push(a, d, e, a, b, d);
 
       // Underside, wound the other way so the solid's normals all point out.
       const a2 = bot(c, r), b2 = bot(c + 1, r), d2 = bot(c + 1, r + 1), e2 = bot(c, r + 1);
-      faces.push(a2, d2, e2, a2, b2, d2);
+      faces.push(a2, e2, d2, a2, d2, b2);
 
       // A wall on every edge the coast or the state line runs along.
-      if (!isLand(c, r - 1)) faces.push(a, b, b2, a, b2, a2);
-      if (!isLand(c + 1, r)) faces.push(b, d, d2, b, d2, b2);
-      if (!isLand(c, r + 1)) faces.push(d, e, e2, d, e2, d2);
-      if (!isLand(c - 1, r)) faces.push(e, a, a2, e, a2, e2);
+      if (!isLand(c, r - 1)) faces.push(a, b2, b, a, a2, b2);
+      if (!isLand(c + 1, r)) faces.push(b, d2, d, b, b2, d2);
+      if (!isLand(c, r + 1)) faces.push(d, e2, e, d, d2, e2);
+      if (!isLand(c - 1, r)) faces.push(e, a2, a, e, e2, a2);
     }}
   }}
 
