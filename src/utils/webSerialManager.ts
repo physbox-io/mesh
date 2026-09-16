@@ -5,6 +5,12 @@
 // an operator feed hold that can be lifted again without losing the program.
 // ---------------------------------------------------------------------------
 
+import {
+  FEED_OVERRIDE_BYTES,
+  RAPID_OVERRIDE_BYTES,
+  SPINDLE_OVERRIDE_BYTES,
+  type OverrideStep,
+} from '@physbox-io/machining';
 import { postMachineTelemetry } from './apiClient';
 import { cloudAutosave } from './cloudDocuments';
 import {
@@ -323,27 +329,14 @@ export function describeGrblError(line: string): string {
   }
 }
 
-/**
- * How far one nudge moves an override. GRBL implements exactly these four and
- * nothing between, so this is the protocol rather than a choice of resolution.
+/*
+ * The override bytes are the protocol, not a choice, so they come from
+ * `@physbox-io/machining` along with the rest of it — the three apps had three
+ * identical copies of these tables. Re-exported because this module's own
+ * consumers import them from here.
  */
-export type OverrideStep = 10 | 1 | -1 | -10;
-
-export const FEED_OVERRIDE_BYTES: Record<OverrideStep | 'reset', number> = {
-  reset: 0x90,
-  10: 0x91,
-  [-10]: 0x92,
-  1: 0x93,
-  [-1]: 0x94,
-};
-
-export const SPINDLE_OVERRIDE_BYTES: Record<OverrideStep | 'reset', number> = {
-  reset: 0x99,
-  10: 0x9a,
-  [-10]: 0x9b,
-  1: 0x9c,
-  [-1]: 0x9d,
-};
+export { FEED_OVERRIDE_BYTES, SPINDLE_OVERRIDE_BYTES, RAPID_OVERRIDE_BYTES };
+export type { OverrideStep };
 
 /**
  * How long the controller may say nothing before the app says so, ms.
@@ -399,11 +392,6 @@ const RETRACT_CEILING_MARGIN_MM = 1;
 const UNHOMED_CEILING_MARGIN_MM = 3;
 
 /** Rapid traverse trim: GRBL implements full, half and quarter, and no more. */
-export const RAPID_OVERRIDE_BYTES: Record<100 | 50 | 25, number> = {
-  100: 0x95,
-  50: 0x96,
-  25: 0x97,
-};
 
 export type MachineStateListener = (state: MachineState) => void;
 
