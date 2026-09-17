@@ -128,7 +128,7 @@ function meshHeavyNodes(nodes: SceneNode[]): string[] {
     .map((w) => w.name);
 }
 
-function toBase64Url(bytes: Uint8Array): string {
+export function toBase64Url(bytes: Uint8Array): string {
   let binary = '';
   // Chunked: spreading a large array into an argument list overflows the stack,
   // and every scene worth sharing is large by that standard.
@@ -153,7 +153,7 @@ function fromBase64Url(data: string): Uint8Array {
 // reports. The reader is the one that answers.
 const ignore = () => {};
 
-async function gzip(text: string): Promise<Uint8Array | null> {
+export async function gzip(text: string): Promise<Uint8Array | null> {
   // Everywhere current, but a browser without it should produce a bigger link
   // rather than no link at all.
   if (typeof CompressionStream === 'undefined') return null;

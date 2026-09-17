@@ -1,9 +1,10 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import {
-  X, Download, AlertCircle, Layers, Scissors, Cpu, RefreshCw, Info, ChevronRight,
+  X, Download, AlertCircle, Layers, Scissors, Cpu, RefreshCw, Info, ChevronRight, ExternalLink,
 } from 'lucide-react';
 import type { SceneGraph } from '../types/scene';
-import { exportLaserCutSvg, type LaserCutOptions } from '../utils/laserCutExporter';
+import { exportLaserCutSvg, derivedFingerWidthMm, type LaserCutOptions, type StockItem } from '../utils/laserCutExporter';
+import { buildEtchHandoffUrl } from '../utils/etchHandoff';
 import { generateLaserCutGcode, DEFAULT_GCODE_OPTIONS } from '../utils/gcodeExporter';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
 import { NumberInput } from '@physbox-io/ui';
@@ -158,6 +159,15 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
   const [jointMode, setJointMode] = useState<'finger' | 'slot' | 'glue'>('finger');
   const [materialThicknessMm, setMaterialThicknessMm] = useState<number>(3.0);
   const [fingerWidthMm, setFingerWidthMm] = useState<number>(10.0);
+  /**
+   * Whether the finger width follows the stock instead of the number above.
+   *
+   * On by default. A fixed width cannot be right across the range — 10 mm
+   * fingers are sensible in 3 mm ply and far too narrow in 18 mm — and the
+   * derived figure is shown in the field so it is never a number nobody can
+   * see. See `derivedFingerWidthMm`.
+   */
+  const [fingerWidthAuto, setFingerWidthAuto] = useState<boolean>(true);
   const [kerfMm, setKerfMm] = useState<number>(0.15);
   const [cornerRelief, setCornerRelief] = useState<'none' | 'dogbone' | 'tbone'>('none');
   const [bitDiameterMm, setBitDiameterMm] = useState<number>(3.175);
@@ -165,6 +175,40 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
   const [jointClearanceMm, setJointClearanceMm] = useState<number>(0);
   const [sheetWidthMm, setSheetWidthMm] = useState<number>(600);
   const [sheetHeightMm, setSheetHeightMm] = useState<number>(400);
+  /**
+   * Extra pieces of stock, beyond the one the Sheet Size fields describe.
+   *
+   * Empty by default and the whole section stays hidden, so the dialog is
+   * exactly what it always was for anyone cutting from one size of sheet. Rows
+   * here are the offcuts you actually have, which is what makes a job bigger
+   * than your machine cuttable at all.
+   */
+  const [extraStock, setExtraStock] = useState<StockItem[]>([]);
+  const [showStockRack, setShowStockRack] = useState<boolean>(false);
+  /**
+   * Whether the preview draws at true millimetres rather than fitted to the
+   * panel. Fitted is right for "where did everything land"; actual size is the
+   * only way to look at a joint.
+   */
+  const [previewActualSize, setPreviewActualSize] = useState<boolean>(false);
+  /** Why the last hand-over to Etch did not happen, or null. */
+  const [etchError, setEtchError] = useState<string | null>(null);
+  /**
+   * Cut parts from stock thinner than they were drawn.
+   *
+   * Off, and the export refuses rather than warns — see `allowThinnerStock`.
+   * It lives beside the rack because that is the only place the situation can
+   * arise, and it is phrased as a decision rather than as a setting.
+   */
+  const [allowThinnerStock, setAllowThinnerStock] = useState<boolean>(false);
+  /**
+   * Cut a part the rack cannot hold whole as several joined pieces.
+   *
+   * Off. It turns one part into four that have to be glued up — a change to the
+   * object, not to how it is cut — so it waits to be asked for, and the
+   * "too big" warning is where you find out it would help.
+   */
+  const [splitOversized, setSplitOversized] = useState<boolean>(false);
   const [autoScale, setAutoScale] = useState<boolean>(false);
   const [maxSheets, setMaxSheets] = useState<number>(2);
   const [customScalePct, setCustomScalePct] = useState<number>(100);
@@ -265,11 +309,23 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
       jointMode,
       materialThickness: materialThicknessMm / 1000,
       fingerWidth: fingerWidthMm / 1000,
+      fingerWidthAuto,
       kerf: kerfMm / 1000,
       cornerRelief,
       bitDiameter: bitDiameterMm / 1000,
       tabOverhang: tabOverhangMm / 1000,
       jointClearance: jointClearanceMm / 1000,
+      // The rack is only sent once there is more than one piece in it; a single
+      // entry is exactly what `resolveStock` derives from the fields anyway, and
+      // sending it would make every default job take the new code path.
+      stock: extraStock.length
+        ? [
+            { widthMm: sheetWidthMm, heightMm: sheetHeightMm, thicknessMm: materialThicknessMm, quantity: null },
+            ...extraStock,
+          ]
+        : undefined,
+      allowThinnerStock,
+      splitOversized,
       sheetWidth: Math.max(0.05, sheetWidthMm / 1000),
       sheetHeight: Math.max(0.05, sheetHeightMm / 1000),
       scaleFactor: customScalePct / 100,
@@ -279,7 +335,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
       includeSheetOutline: annotations !== 'none',
     };
     return exportLaserCutSvg(scene, options);
-  }, [isOpen, scene, jointMode, materialThicknessMm, fingerWidthMm, kerfMm, cornerRelief, bitDiameterMm, tabOverhangMm, jointClearanceMm, sheetWidthMm, sheetHeightMm, customScalePct, autoScale, maxSheets, annotations]);
+  }, [isOpen, scene, jointMode, materialThicknessMm, fingerWidthMm, fingerWidthAuto, kerfMm, cornerRelief, bitDiameterMm, tabOverhangMm, jointClearanceMm, sheetWidthMm, sheetHeightMm, extraStock, allowThinnerStock, splitOversized, customScalePct, autoScale, maxSheets, annotations]);
 
   // Compute G-Code output result
   const gcodeResult = useMemo(() => {
@@ -334,6 +390,29 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
     link.click();
     document.body.removeChild(link);
     URL.revokeObjectURL(url);
+  };
+
+  /**
+   * Opens this cut in Etch, the 2D end of the same bench.
+   *
+   * A new tab rather than this one: the model is still here, and anyone sending
+   * panels over is going to come back and change something. The stock thickness
+   * travels with it because Etch derives every feed, power and depth from the
+   * material and how thick it is.
+   */
+  const handleSendToEtch = async () => {
+    if (!exportResult || !exportResult.success || !exportResult.svg) return;
+    setEtchError(null);
+    try {
+      const url = await buildEtchHandoffUrl({
+        svg: exportResult.svg,
+        name: `${jointMode} cut`,
+        thicknessMm: materialThicknessMm,
+      });
+      window.open(url, '_blank', 'noopener');
+    } catch (err) {
+      setEtchError(err instanceof Error ? err.message : 'That cut could not be sent to Etch.');
+    }
   };
 
 
@@ -426,7 +505,14 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                 hint="Thickness of the stock you are actually cutting. Finger length, slot depth and CNC cut depth are all derived from it."
               >
                 <NumberInput
-                  step={0.5} min={0.5} max={50}
+                  /*
+                   * 100 mm, matching the stock rack rows below. The old ceiling
+                   * of 50 silently clamped anything thicker — typing 60 for a
+                   * casting flask left the field reading 50, and the whole job
+                   * was then jointed and cut for stock half a centimetre
+                   * thinner than the one on the bench.
+                   */
+                  step={0.5} min={0.5} max={100}
                   value={materialThicknessMm}
                   onChange={(v) => v !== undefined && setMaterialThicknessMm(v)}
                   className={inputClass}
@@ -641,15 +727,33 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                 className="lg:col-span-3"
                 hintAlign="end"
                 label="Tab Width (mm)"
-                hint="Nominal width of a single finger along the joint. Wider means fewer, chunkier fingers; narrower gives more glue area but more cutting."
+                hint="Nominal width of a single finger along the joint. Left on Auto it follows the stock at twice the thickness — a finger narrower than the material is thick is short-grained and snaps out, and one much wider leaves too few fingers to hold the corner square. Switch it off to set a width yourself."
               >
-                <NumberInput
-                  step={1} min={3} max={50}
-                  disabled={jointMode === 'glue'}
-                  value={fingerWidthMm}
-                  onChange={(v) => v !== undefined && setFingerWidthMm(v)}
-                  className={inputClass}
-                />
+                <div className="flex items-center gap-2">
+                  <NumberInput
+                    step={1} min={3} max={50}
+                    disabled={jointMode === 'glue' || fingerWidthAuto}
+                    value={fingerWidthAuto ? derivedFingerWidthMm(materialThicknessMm) : fingerWidthMm}
+                    onChange={(v) => v !== undefined && setFingerWidthMm(v)}
+                    className={inputClass}
+                  />
+                  <label className="flex items-center gap-1 text-[11px] text-slate-500 dark:text-slate-400 whitespace-nowrap cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={fingerWidthAuto}
+                      disabled={jointMode === 'glue'}
+                      onChange={(e) => {
+                        // Turning Auto off hands over the number that was on
+                        // screen, so the field does not jump the moment it
+                        // becomes editable.
+                        if (!e.target.checked) setFingerWidthMm(derivedFingerWidthMm(materialThicknessMm));
+                        setFingerWidthAuto(e.target.checked);
+                      }}
+                      className="w-3.5 h-3.5 cursor-pointer"
+                    />
+                    Auto
+                  </label>
+                </div>
               </Field>
             </div>
 
@@ -702,29 +806,169 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
           <div className={sectionClass}>
             <h3 className={sectionTitleClass}>Sheet &amp; Nesting</h3>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-4">
-              <Field
-                className="lg:col-span-2"
-                label="Sheet Size (mm)"
-                hint="Usable cutting area of one sheet of stock, width by height. Panels are nested left to right; when a row no longer fits, nesting starts a new sheet below."
-              >
-                <div className="flex items-center space-x-1.5">
-                  <NumberInput
-                    step={10} min={50} max={5000}
-                    value={sheetWidthMm}
-                    onChange={(v) => v !== undefined && setSheetWidthMm(v)}
-                    className={`${inputClass} px-2`}
-                    aria-label="Sheet width in mm"
-                  />
-                  <span className="text-xs font-medium text-slate-400">&times;</span>
-                  <NumberInput
-                    step={10} min={50} max={5000}
-                    value={sheetHeightMm}
-                    onChange={(v) => v !== undefined && setSheetHeightMm(v)}
-                    className={`${inputClass} px-2`}
-                    aria-label="Sheet height in mm"
-                  />
-                </div>
-              </Field>
+              {/*
+                Sheet Size and the stock rack are the *same* setting, so only one
+                of them is ever on screen. Showing both asked the operator to
+                enter a sheet size and then a list of stock that already
+                contained it — two controls for one fact, and no way to tell
+                which one the job was actually cut from.
+
+                Closed, this is exactly the field it has always been. Opened, it
+                becomes the first row of the rack and the standalone field goes
+                away.
+              */}
+              {!showStockRack && (
+                <Field
+                  className="lg:col-span-2"
+                  label="Sheet Size (mm)"
+                  hint="Usable cutting area of one sheet of stock, width by height. Panels are nested left to right; when a row no longer fits, nesting starts a new sheet below."
+                >
+                  <div className="flex items-center space-x-1.5">
+                    <NumberInput
+                      step={1} min={10} max={5000}
+                      value={sheetWidthMm}
+                      onChange={(v) => v !== undefined && setSheetWidthMm(v)}
+                      className={`${inputClass} px-2`}
+                      aria-label="Sheet width in mm"
+                    />
+                    <span className="text-xs font-medium text-slate-400">&times;</span>
+                    <NumberInput
+                      step={1} min={10} max={5000}
+                      value={sheetHeightMm}
+                      onChange={(v) => v !== undefined && setSheetHeightMm(v)}
+                      className={`${inputClass} px-2`}
+                      aria-label="Sheet height in mm"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowStockRack(true)}
+                    className="mt-1.5 text-[11px] text-indigo-500 hover:text-indigo-400 cursor-pointer"
+                  >
+                    Use several stock sizes…
+                  </button>
+                </Field>
+              )}
+
+              {showStockRack && (
+                <Field
+                  className="lg:col-span-6"
+                  label="Stock Rack — width × height × thickness (mm)"
+                  hint="Everything you have to cut from. The first row is your usual sheet, as much of it as you need; add a row for each offcut and say how many. Panels are cut from stock matching the thickness they were drawn at, so a 6 mm back and 18 mm sides come off different piles."
+                >
+                  <div className="space-y-1.5">
+                    {/*
+                      Row one is the sheet, edited here rather than in a separate
+                      field above — it is the same stock, and having it in two
+                      places meant entering a size and then a rack that already
+                      held it. "As needed" rather than a count, because a sheet
+                      is something you buy more of and an offcut is not.
+                    */}
+                    <div className="flex items-center gap-1.5">
+                      <NumberInput
+                        step={1} min={10} max={5000} value={sheetWidthMm}
+                        onChange={(v) => v !== undefined && setSheetWidthMm(v)}
+                        className={`${inputClass} px-2`} aria-label="Sheet width in mm"
+                      />
+                      <span className="text-xs font-medium text-slate-400">&times;</span>
+                      <NumberInput
+                        step={1} min={10} max={5000} value={sheetHeightMm}
+                        onChange={(v) => v !== undefined && setSheetHeightMm(v)}
+                        className={`${inputClass} px-2`} aria-label="Sheet height in mm"
+                      />
+                      <span className="text-xs font-medium text-slate-400">&times;</span>
+                      <NumberInput
+                        step={0.5} min={0.5} max={100} value={materialThicknessMm}
+                        onChange={(v) => v !== undefined && setMaterialThicknessMm(v)}
+                        className={`${inputClass} px-2`} aria-label="Sheet thickness in mm"
+                      />
+                      <span className="text-[11px] text-slate-400 px-1 whitespace-nowrap">as needed</span>
+                      <button
+                        type="button"
+                        onClick={() => setShowStockRack(false)}
+                        className="px-2 text-[11px] text-indigo-500 hover:text-indigo-400 cursor-pointer whitespace-nowrap"
+                        disabled={extraStock.length > 0}
+                        title={extraStock.length > 0 ? 'Remove the offcut rows first' : 'Back to a single sheet size'}
+                      >
+                        {extraStock.length > 0 ? '' : 'one size only'}
+                      </button>
+                    </div>
+                    {extraStock.map((item, i) => (
+                      <div key={i} className="flex items-center gap-1.5">
+                        <NumberInput
+                          step={1} min={10} max={5000} value={item.widthMm}
+                          onChange={(v) => v !== undefined && setExtraStock(extraStock.map((r, j) => j === i ? { ...r, widthMm: v } : r))}
+                          className={`${inputClass} px-2`} aria-label="Stock width in mm"
+                        />
+                        <span className="text-xs font-medium text-slate-400">&times;</span>
+                        <NumberInput
+                          step={1} min={10} max={5000} value={item.heightMm}
+                          onChange={(v) => v !== undefined && setExtraStock(extraStock.map((r, j) => j === i ? { ...r, heightMm: v } : r))}
+                          className={`${inputClass} px-2`} aria-label="Stock height in mm"
+                        />
+                        <span className="text-xs font-medium text-slate-400">&times;</span>
+                        <NumberInput
+                          step={1} min={0.5} max={100} value={item.thicknessMm}
+                          onChange={(v) => v !== undefined && setExtraStock(extraStock.map((r, j) => j === i ? { ...r, thicknessMm: v } : r))}
+                          className={`${inputClass} px-2`} aria-label="Stock thickness in mm"
+                        />
+                        <span className="text-[11px] text-slate-400 px-1">qty</span>
+                        <NumberInput
+                          step={1} min={1} max={999} value={item.quantity ?? 1}
+                          onChange={(v) => v !== undefined && setExtraStock(extraStock.map((r, j) => j === i ? { ...r, quantity: v } : r))}
+                          className={`${inputClass} px-2`} aria-label="How many pieces"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setExtraStock(extraStock.filter((_, j) => j !== i))}
+                          className="px-2 text-slate-400 hover:text-red-400 cursor-pointer"
+                          aria-label="Remove this stock size"
+                        >
+                          &times;
+                        </button>
+                      </div>
+                    ))}
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setExtraStock([
+                          ...extraStock,
+                          { widthMm: 300, heightMm: 200, thicknessMm: materialThicknessMm, quantity: 1 },
+                        ])
+                      }
+                      className="text-[11px] text-indigo-500 hover:text-indigo-400 cursor-pointer"
+                    >
+                      + Add stock size
+                    </button>
+                    <label className="flex items-start gap-2 pt-1 text-[11px] text-slate-500 dark:text-slate-400 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={allowThinnerStock}
+                        onChange={(e) => setAllowThinnerStock(e.target.checked)}
+                        className="w-3.5 h-3.5 mt-px cursor-pointer"
+                      />
+                      <span>
+                        Cut from thinner stock than drawn. Off, the export stops instead: a part
+                        cut thinner goes together exactly as drawn and is markedly weaker, so
+                        nothing about the result would tell you.
+                      </span>
+                    </label>
+                    <label className="flex items-start gap-2 text-[11px] text-slate-500 dark:text-slate-400 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={splitOversized}
+                        onChange={(e) => setSplitOversized(e.target.checked)}
+                        className="w-3.5 h-3.5 mt-px cursor-pointer"
+                      />
+                      <span>
+                        Cut parts too big for the rack as joined pieces. A flat frame becomes four
+                        mitred lengths glued at the corners — the same part, from stock no wider
+                        than its own border. Parts that already fit are untouched.
+                      </span>
+                    </label>
+                  </div>
+                </Field>
+              )}
 
               <Field
                 className="lg:col-span-2"
@@ -855,11 +1099,30 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                     </span>
                   )}
                 </div>
+                {/*
+                  Fit squeezes the whole layout into the panel width, which is
+                  what you want to see where things landed and useless for
+                  checking a 4 mm finger. Actual size draws it at its real
+                  millimetres and lets the box scroll — which it could not do
+                  before, because the SVG was pinned to the container width and
+                  so could never overflow to scroll to.
+                */}
+                <button
+                  type="button"
+                  onClick={() => setPreviewActualSize((v) => !v)}
+                  className="text-[11px] text-indigo-500 hover:text-indigo-400 cursor-pointer whitespace-nowrap"
+                >
+                  {previewActualSize ? 'Fit to width' : 'Actual size'}
+                </button>
               </div>
 
-              <div className="w-full h-80 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 p-4 overflow-y-auto overflow-x-hidden">
+              <div className="w-full h-80 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 p-4 overflow-auto">
                 <div
-                  className="w-full [&>svg]:w-full [&>svg]:h-auto"
+                  className={
+                    previewActualSize
+                      ? '[&>svg]:w-auto [&>svg]:h-auto [&>svg]:max-w-none'
+                      : 'w-full [&>svg]:w-full [&>svg]:h-auto'
+                  }
                   dangerouslySetInnerHTML={{ __html: previewSvg }}
                 />
               </div>
@@ -999,6 +1262,18 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
               className="px-4 py-2 text-xs font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-lg transition-colors"
             >
               Close
+            </button>
+            {etchError && (
+              <span className="text-[11px] text-red-600 dark:text-red-400 max-w-xs leading-snug">{etchError}</span>
+            )}
+            <button
+              onClick={handleSendToEtch}
+              disabled={!exportResult || !exportResult.success}
+              title="Open these panels in Etch, with the stock thickness, ready to assign layers and cut"
+              className="flex items-center space-x-2 whitespace-nowrap px-4 py-2 bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600 disabled:opacity-40 text-slate-800 dark:text-slate-100 font-bold text-xs rounded-lg shadow-sm transition-all cursor-pointer"
+            >
+              <ExternalLink className="w-4 h-4" />
+              <span>Open in Etch</span>
             </button>
             <button
               onClick={handleDownloadSvg}

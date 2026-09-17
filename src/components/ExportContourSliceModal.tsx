@@ -400,7 +400,17 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                 hint="Thickness of the stock. Each layer is one sheet thick, so this also sets how far apart the model is sliced."
               >
                 <NumberInput
-                  step={0.5} min={0.1} max={50}
+                  /*
+                   * 200 mm, not 50. Contour stacking *is* the thick-foam
+                   * workflow — EPS ships in 25, 50, 75 and 100 — and this one
+                   * number sets the slice pitch, the cut depth and the
+                   * stepdown at once. A ceiling of 50 meant typing 75 silently
+                   * gave 50, and the whole stack was then sliced at the wrong
+                   * pitch: wrong layer count, wrong finished height, and a cut
+                   * 25 mm short of through. Nothing in `contourSliceExporter`
+                   * has ever had a 50 mm limit.
+                   */
+                  step={0.5} min={0.1} max={200}
                   value={materialThicknessMm}
                   onChange={(v) => v !== undefined && setMaterialThicknessMm(v)}
                   className={inputClass}

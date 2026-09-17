@@ -5,11 +5,29 @@
 import type { SceneGraph, SceneNode, SceneGeom } from '../types/scene';
 import { csgSourceGeoms, fromtoFrame } from './csg';
 import * as THREE from 'three';
+import { splitPanelsToFit } from './panelSplitter';
 
 export interface LaserCutOptions {
   jointMode: 'finger' | 'slot' | 'glue';
   materialThickness: number; // in meters (default 0.003 = 3mm)
-  fingerWidth: number;       // in meters (default 0.010 = 10mm)
+  /**
+   * Nominal width of one finger along the joint, in meters.
+   *
+   * Only read when `fingerWidthAuto` is off. Left automatic it is derived from
+   * the stock — see `derivedFingerWidthMm`.
+   */
+  fingerWidth: number;
+  /**
+   * Derive the finger width from the material thickness instead of using the
+   * number above. On by default.
+   *
+   * A fixed width cannot be right across the range: 10 mm fingers are sensible
+   * in 3 mm ply and far too narrow in 18 mm, where each finger is barely wider
+   * than the material is thick and snaps across the grain. The override stays
+   * because a specific box sometimes wants a specific tooth count — but nobody
+   * should have to know the rule to get a sound joint.
+   */
+  fingerWidthAuto: boolean;
   /**
    * Extra tab length beyond flush, in meters. At 0 a tab finishes level with the
    * mating panel's outer face. Raising it pushes tabs proud, which gives a small
@@ -44,12 +62,58 @@ export interface LaserCutOptions {
   includeLabels: boolean;
   /** Draw the dashed sheet boundaries. Off leaves nothing but cut paths. */
   includeSheetOutline: boolean;
+  /**
+   * The stock actually available, when it is more than one size.
+   *
+   * Left undefined — which is the ordinary case and every existing caller — the
+   * inventory is a single unlimited item built from `sheetWidth`,
+   * `sheetHeight` and `materialThickness`, and everything behaves exactly as it
+   * did. Listing pieces here is how you say "this is what I have in the rack",
+   * which is what makes a job bigger than the machine cuttable at all.
+   */
+  stock?: StockItem[];
+  /**
+   * Cut a part from stock thinner than it was drawn.
+   *
+   * Off, and it is an error rather than a warning. This is a modelling app: a
+   * panel's thickness is a dimension of a physical object, not a hint. Cut an
+   * 8 mm plate from 6 mm and it keeps barely half its stiffness in bending —
+   * thickness enters that as a square — and it may simply not fit the slot,
+   * rebate or mortise something else in the model presents to it.
+   *
+   * What makes it worth refusing rather than warning is that nothing about the
+   * result looks wrong: joints are sized from the stock, so the thin part fits
+   * its neighbours perfectly and assembles exactly as drawn. The only evidence
+   * is a number nobody re-checks. Turning this on is how you say you know.
+   */
+  allowThinnerStock?: boolean;
+  /**
+   * Cut a part the rack cannot hold whole as several pieces, joined.
+   *
+   * Off by default. It turns one part into four that have to be glued up, which
+   * is a change to the object rather than to how it is cut — so it is never
+   * done on the app's own initiative, only when a part would otherwise be
+   * reported oversized and you have said you would rather join it.
+   *
+   * See `panelSplitter.ts`. A part that already fits is never touched.
+   */
+  splitOversized?: boolean;
+}
+
+/** One size of stock in the rack, and how much of it there is. */
+export interface StockItem {
+  widthMm: number;
+  heightMm: number;
+  thicknessMm: number;
+  /** How many pieces. `null` means as many as needed — a size you can buy. */
+  quantity: number | null;
 }
 
 export const DEFAULT_LASER_OPTIONS: LaserCutOptions = {
   jointMode: 'finger',
   materialThickness: 0.003,
   fingerWidth: 0.010,
+  fingerWidthAuto: true,
   tabOverhang: 0,
   jointClearance: 0,
   kerf: 0.00015,
@@ -113,11 +177,24 @@ export interface LaserPanel {
   height2D?: number;
 }
 
+/** One sheet of the finished cut: which stock it is, and how big. */
+export interface SheetSpec {
+  widthMm: number;
+  heightMm: number;
+  thicknessMm: number;
+}
+
 export interface LaserCutResult {
   success: boolean;
   svg?: string;
   panels?: LaserPanel[];
   sheetCount?: number;
+  /**
+   * The sheets in order, each with its own size and thickness. With one stock
+   * size they are all identical; with a mixed rack they are not, which is why
+   * the caller cannot infer them from a single sheet dimension any more.
+   */
+  sheets?: SheetSpec[];
   scaleFactor?: number;
   error?: string;
   /**
@@ -1091,6 +1168,193 @@ interface PanelJointWork {
   mortises: Point2D[][];
 }
 
+/**
+ * Finger width as a multiple of the stock thickness.
+ *
+ * Two. A finger narrower than the material is thick is short-grained and snaps
+ * out under assembly; much wider than about three thicknesses and there are too
+ * few fingers to hold the corner square while the glue goes off. Two sits in
+ * the middle of the range every box generator and woodworking text uses, and it
+ * reproduces roughly the old fixed 10 mm at the 3-6 mm ply the default was
+ * chosen for — so existing thin-stock jobs barely move, and thick stock stops
+ * being wrong.
+ */
+const FINGER_WIDTH_PER_THICKNESS = 2;
+
+/** Bounds on the derived width, in mm. */
+const MIN_FINGER_WIDTH_MM = 5;
+const MAX_FINGER_WIDTH_MM = 25;
+
+/**
+ * The finger width to cut, in mm, for a given stock thickness.
+ *
+ * Clamped at both ends: below about 5 mm the kerf is a serious fraction of the
+ * finger and the fit goes to pieces, and above 25 mm a joint is down to two or
+ * three fingers, which no longer holds a corner square.
+ */
+export function derivedFingerWidthMm(thicknessMm: number): number {
+  const wanted = Math.max(thicknessMm, 0) * FINGER_WIDTH_PER_THICKNESS;
+  return Math.min(Math.max(wanted, MIN_FINGER_WIDTH_MM), MAX_FINGER_WIDTH_MM);
+}
+
+/**
+ * What a set of options actually cuts fingers at, in mm.
+ *
+ * One place, so the dialog can show the number it is about to use rather than
+ * leaving the operator to infer it — a derived value nobody can see reads as
+ * the setting being ignored.
+ */
+export function effectiveFingerWidthMm(options: LaserCutOptions): number {
+  return options.fingerWidthAuto
+    ? derivedFingerWidthMm(options.materialThickness * 1000)
+    : options.fingerWidth * 1000;
+}
+
+// ---------------------------------------------------------------------------
+// Stock inventory
+// ---------------------------------------------------------------------------
+//
+// Stock used to be one size, and everything asked "does this fit the sheet". It
+// is now a rack: a list of pieces, each with its own size, thickness and count.
+// A rack of one unlimited item is exactly the old behaviour, which is how every
+// existing job and every existing caller is left alone.
+//
+// Thickness is the part that changes how the cut is *made* rather than merely
+// where it lands, and it is deliberately an input rather than an outcome. A
+// panel's thickness comes from the model — `extractPanelsFromScene` has always
+// recorded it — so joints can be sized before anything is packed. Deciding
+// thickness by where a panel happened to land would be circular: joints change
+// a panel's size, and its size decides where it lands.
+
+/** The rack, normalised. A job always has one of these, even by default. */
+export function resolveStock(options: LaserCutOptions): StockItem[] {
+  const listed = (options.stock ?? []).filter(
+    (s) => s.widthMm > 0 && s.heightMm > 0 && s.thicknessMm > 0 && (s.quantity === null || s.quantity > 0)
+  );
+  if (listed.length) return listed;
+  return [
+    {
+      widthMm: options.sheetWidth * 1000,
+      heightMm: options.sheetHeight * 1000,
+      thicknessMm: options.materialThickness * 1000,
+      quantity: null,
+    },
+  ];
+}
+
+/** The distinct thicknesses in a rack, thinnest first. */
+export function stockThicknesses(stock: StockItem[]): number[] {
+  return [...new Set(stock.map((s) => s.thicknessMm))].sort((a, b) => a - b);
+}
+
+/**
+ * Decides which thickness of stock each panel is cut from.
+ *
+ * One thickness in the rack and every panel takes it — the old behaviour, and
+ * the reason a birdhouse exports today exactly as it did yesterday. Several,
+ * and each panel takes the one nearest its own modelled slab: you already said
+ * which parts were thick when you drew them, so nothing needs asking twice.
+ *
+ * Measured against the panel as modelled, never as scaled. Scaling a model down
+ * does not make the plywood thinner, and reading a scaled thickness would walk
+ * a 9 mm panel onto 3 mm stock at 33%.
+ */
+/**
+ * How much thinner than drawn passes without complaint, as a fraction and as an
+ * absolute, whichever is larger.
+ *
+ * Sheet goods are routinely undersized — "6 mm" ply is very often 5.5 — and
+ * refusing to cut a 6 mm model from the 6 mm sheet in the rack because of it
+ * would be intolerable. Half a millimetre absorbs that. The case this exists to
+ * catch is the real one: 8 mm drawn, 6 mm in the rack.
+ */
+const THIN_STOCK_TOLERANCE_MM = 0.5;
+const THIN_STOCK_TOLERANCE_FRACTION = 0.05;
+
+export function assignPanelThickness(
+  panels: LaserPanel[],
+  stock: StockItem[],
+  options: LaserCutOptions
+): { byPanelId: Map<string, number>; warnings: string[]; tooThin: string[] } {
+  const available = stockThicknesses(stock);
+  const byPanelId = new Map<string, number>();
+  const warnings: string[] = [];
+
+  const tooThin: string[] = [];
+  /** Thinner than drawn by more than sheet-goods undersizing accounts for. */
+  const isTooThin = (cut: number, drawn: number) =>
+    drawn - cut > Math.max(THIN_STOCK_TOLERANCE_MM, drawn * THIN_STOCK_TOLERANCE_FRACTION);
+
+  if (available.length === 1) {
+    for (const p of panels) {
+      byPanelId.set(p.id, available[0]);
+      if (isTooThin(available[0], p.thickness * 1000)) {
+        tooThin.push(`${p.name} (${(p.thickness * 1000).toFixed(1)} mm drawn, ${available[0].toFixed(1)} mm available)`);
+      }
+    }
+    return { byPanelId, warnings, tooThin };
+  }
+
+  const defaultMm = options.materialThickness * 1000;
+  const thinner: string[] = [];
+  const thicker: string[] = [];
+  for (const panel of panels) {
+    const wanted = panel.thickness * 1000;
+    let best = available[0];
+    let bestGap = Infinity;
+    for (const t of available) {
+      const gap = Math.abs(t - wanted);
+      // Ties go to the job's own default thickness, so a model drawn at a
+      // thickness the rack does not stock lands somewhere predictable rather
+      // than on whichever item was listed first.
+      if (gap < bestGap - 1e-6 || (Math.abs(gap - bestGap) < 1e-6 && t === defaultMm)) {
+        best = t;
+        bestGap = gap;
+      }
+    }
+    byPanelId.set(panel.id, best);
+    if (isTooThin(best, wanted)) {
+      tooThin.push(`${panel.name} (${wanted.toFixed(1)} mm drawn, ${best.toFixed(1)} mm available)`);
+    } else if (bestGap > 0.1) {
+      const entry = `${panel.name} (${wanted.toFixed(1)} mm drawn, ${best.toFixed(1)} mm cut)`;
+      if (best < wanted) thinner.push(entry);
+      else thicker.push(entry);
+    }
+  }
+
+  /*
+   * Thinner and thicker are different problems and are worth saying separately.
+   *
+   * Cut thinner than drawn and the part is weaker than it was designed to be —
+   * the joints still fit each other, because they are sized from the stock, so
+   * nothing about the cut looks wrong. That one is only ever caught by being
+   * told. Cut thicker and the parts no longer seat where the model spaced them,
+   * which at least shows up as panels that will not close.
+   *
+   * Neither refuses. A thinner box still goes together, and the app cannot
+   * judge whether this one carries a load; the operator can. What it must not
+   * do is substitute silently.
+   */
+  const list = (items: string[]) =>
+    `${items.slice(0, 4).join(', ')}${items.length > 4 ? `, +${items.length - 4} more` : ''}`;
+  if (thinner.length) {
+    warnings.push(
+      `Cut thinner than drawn, because the rack holds nothing thicker: ${list(thinner)}. ` +
+        `The joints still fit each other, so this will go together and look right — but the ` +
+        `parts are weaker than the model called for. Add thicker stock if they carry anything.`
+    );
+  }
+  if (thicker.length) {
+    warnings.push(
+      `Cut thicker than drawn, because the rack holds nothing thinner: ${list(thicker)}. ` +
+        `Their joints fit the stock they are cut from, but panels will not seat where they meet ` +
+        `face to face — the model spaced them for thinner material.`
+    );
+  }
+
+  return { byPanelId, warnings, tooThin };
+}
+
 const JOINT_PARALLEL_COS = 0.985;
 const EDGE_PARALLEL_TOL = 0.03;
 const MIN_FEATURE_MM = 0.2;
@@ -1218,8 +1482,15 @@ interface RawJoint {
   hi: number;
   tA: number;
   tB: number;
-  /** Stock thickness the joint was sized for (mm). */
-  stock: number;
+  /**
+   * Stock thickness each panel is cut from (mm).
+   *
+   * Two, not one: a tab has to span the material it passes *through*, so A's
+   * reach is sized from B's stock and B's from A's. With one stock size they
+   * are equal and this is the figure the joint was always sized for.
+   */
+  stockA: number;
+  stockB: number;
   /**
    * Which side can act as the mortised (female) panel in Tab & Slot mode, i.e.
    * has enough material beyond the mate's slab for the slot to be an interior
@@ -1237,12 +1508,19 @@ function jointPanel(j: RawJoint, side: 0 | 1) {
 }
 
 /** Detects every panel pair that butts along a shared boundary edge. */
-function detectJoints(panels: LaserPanel[], options: LaserCutOptions): RawJoint[] {
+function detectJoints(
+  panels: LaserPanel[],
+  options: LaserCutOptions,
+  thicknessOf: (panel: LaserPanel) => number
+): RawJoint[] {
   // Joints are sized from the stock being cut, not from how thick the panels
   // happen to have been drawn. A tab has to span the material it passes through,
   // so a model drawn in 3 mm and cut from 6 mm needs 6 mm tabs — sizing them off
   // the model instead is what made the thickness setting look inert.
-  const stockMm = options.materialThickness * 1000;
+  //
+  // With a mixed rack there is no single answer, so each panel brings its own:
+  // a 6 mm back let into 18 mm sides needs 18 mm tabs on the back and 6 mm
+  // notches in the sides, not one figure applied to both.
   const overhangMm = Math.max(0, options.tabOverhang * 1000);
   const joints: RawJoint[] = [];
 
@@ -1279,7 +1557,12 @@ function detectJoints(panels: LaserPanel[], options: LaserCutOptions): RawJoint[
       // the other panel's plane. Every depth below is scaled by that factor, so
       // a roof ridge interlocks as exactly as a right-angled corner does.
       const invSin = 1 / Math.sqrt(dir2);
-      const reach = (stockMm / 2) * invSin;
+      // Each panel's own stock, and the reach *into* it that its mate must
+      // span. A's features are sized from B's material and vice versa.
+      const stockA = thicknessOf(A);
+      const stockB = thicknessOf(B);
+      const reachA = (stockB / 2) * invSin;
+      const reachB = (stockA / 2) * invSin;
 
       // A plain butt joint puts the line half a thickness inside each panel, but
       // a panel can also be set into its neighbour's face (a floor sitting above
@@ -1306,10 +1589,10 @@ function detectJoints(panels: LaserPanel[], options: LaserCutOptions): RawJoint[
       // spans the same 1 / sin(b) that the thickness does — without that factor
       // a ridge tab lands short of the amount asked for.
       const proud = overhangMm * invSin;
-      const offA = mA.dEdge + reach;
-      const onA = mA.dEdge - reach - proud;
-      const offB = mB.dEdge + reach;
-      const onB = mB.dEdge - reach - proud;
+      const offA = mA.dEdge + reachA;
+      const onA = mA.dEdge - reachA - proud;
+      const offB = mB.dEdge + reachB;
+      const onB = mB.dEdge - reachB - proud;
       // A panel sitting entirely past its neighbour's near face is not a joint.
       if (offA < -MIN_FEATURE_MM || offB < -MIN_FEATURE_MM) continue;
 
@@ -1320,13 +1603,13 @@ function detectJoints(panels: LaserPanel[], options: LaserCutOptions): RawJoint[
       // A mortise has to be a closed hole, so the female panel needs material
       // beyond the tenon's slab. Either side may qualify; prefer whichever has
       // more room rather than always mortising the same one.
-      const roomA = mA.dEdge - reach;
-      const roomB = mB.dEdge - reach;
+      const roomA = mA.dEdge - reachA;
+      const roomB = mB.dEdge - reachB;
       const bestRoom = Math.max(roomA, roomB);
       const slotFemale: 0 | 1 | -1 = bestRoom < 0.8 ? -1 : (roomA >= roomB ? 0 : 1);
 
       joints.push({
-        ia, ib, mA, mB, offA, offB, onA, onB, lo, hi, tA, tB, stock: stockMm,
+        ia, ib, mA, mB, offA, offB, onA, onB, lo, hi, tA, tB, stockA, stockB,
         slotFemale,
         mortiseInner: bestRoom,
       });
@@ -1543,7 +1826,7 @@ function resolveCornerOwners(
       const raw = deadlocked
         ? Math.max(needA.hardInset, needB.hardInset)
         : Math.max(needA.softInset, needB.softInset);
-      const inset = raw > 0 ? Math.max(raw, j.stock) : 0;
+      const inset = raw > 0 ? Math.max(raw, Math.max(j.stockA, j.stockB)) : 0;
 
       if (end === 'lo') result.insetLo = inset;
       else result.insetHi = inset;
@@ -1569,10 +1852,11 @@ function resolveCornerOwners(
 function buildJointWork(
   panels: LaserPanel[],
   options: LaserCutOptions,
-  fallbacks: string[]
+  fallbacks: string[],
+  thicknessOf: (panel: LaserPanel) => number
 ): PanelJointWork[] {
   const work: PanelJointWork[] = panels.map(() => ({ features: [], mortises: [] }));
-  const fingerWidthMm = options.fingerWidth * 1000;
+  const fingerWidthMm = effectiveFingerWidthMm(options);
   const kerfMm = options.kerf * 1000;
   // Across a finger's width, the fit is whatever the user asked for on top of
   // the kerf. Along its depth only the kerf matters — that governs whether a tab
@@ -1585,7 +1869,7 @@ function buildJointWork(
     panel.outerPolygon2D = ensureCCW(panel.outerPolygon2D);
   }
 
-  const joints = detectJoints(panels, options);
+  const joints = detectJoints(panels, options, thicknessOf);
   const owners = resolveCornerOwners(panels, joints);
 
   joints.forEach((j, jointIdx) => {
@@ -1628,7 +1912,9 @@ function buildJointWork(
     const maleOn = female === 0 ? onB : onA;
     const maleOff = female === 0 ? offB : offA;
     const maleOwnsCell = female === 0 ? !aOwnsEvenCells : aOwnsEvenCells;
-    const tenonThickness = j.stock;
+    // The tenon is the male panel's own slab passing through the female, so it
+    // is that panel's stock — not the female's, and not a single job figure.
+    const tenonThickness = maleIdx === ia ? j.stockA : j.stockB;
 
     const push = (panelIdx: number, m: EdgeMatch, sa: number, sb: number, depth: number) => {
       if (Math.abs(depth) < MIN_FEATURE_MM) return;
@@ -2126,7 +2412,22 @@ function applyCornerReliefToPanels(panels: LaserPanel[], options: LaserCutOption
   return skipped;
 }
 
-function applyJointsToPanels(panels: LaserPanel[], options: LaserCutOptions): string[] {
+function applyJointsToPanels(
+  panels: LaserPanel[],
+  options: LaserCutOptions,
+  thicknessOf: (panel: LaserPanel) => number,
+  /**
+   * The job's one stock thickness, or null when the rack holds several.
+   *
+   * The model-versus-stock warning below compares a single modelled thickness
+   * against a single stock thickness, which only means anything when there *is*
+   * one. With a mixed rack `assignPanelThickness` has already reported the
+   * panels whose thickness it could not match, and saying it twice in different
+   * words would leave the operator working out whether they are the same
+   * complaint.
+   */
+  singleThicknessMm: number | null
+): string[] {
   const warnings: string[] = [];
 
   if (options.jointMode === 'glue') {
@@ -2142,7 +2443,7 @@ function applyJointsToPanels(panels: LaserPanel[], options: LaserCutOptions): st
   }
 
   const fallbacks: string[] = [];
-  const work = buildJointWork(panels, options, fallbacks);
+  const work = buildJointWork(panels, options, fallbacks, thicknessOf);
 
   const unjointed: string[] = [];
   for (let i = 0; i < panels.length; i++) {
@@ -2171,8 +2472,8 @@ function applyJointsToPanels(panels: LaserPanel[], options: LaserCutOptions): st
   // If the two disagree badly the parts still interlock, yet the model's own
   // spacing no longer suits the material — a thicker roof sinks into its walls.
   const modelled = panels.map(p => p.thickness * 1000).filter(t => t > 0).sort((a, b) => a - b);
-  const stockMm = options.materialThickness * 1000;
-  if (modelled.length > 0) {
+  const stockMm = singleThicknessMm ?? 0;
+  if (modelled.length > 0 && singleThicknessMm !== null) {
     const typical = modelled[Math.floor(modelled.length / 2)];
     if (stockMm > 1.5 * typical) {
       // Past this point the stock is thicker than the gap the model leaves for
@@ -2288,48 +2589,150 @@ function normalizePanelBounds(panels: LaserPanel[]): void {
  * coordinates plus the sheetIndex it belongs to; the combined SVG stacks sheet
  * N at y = N * sheetHeightMm when it draws.
  */
+/**
+ * Turns a normalised panel a quarter turn in its own plane.
+ *
+ * Needed because a long thin part and a long thin offcut only meet if they
+ * agree which way round they are: a 240 x 30 length will not go on a 320 x 50
+ * bar until one of them turns. Applied to the 2D loops only — the panel's 3D
+ * frame is where it sat in the model and has nothing to do with how it is laid
+ * on the stock.
+ */
+function rotatePanel90(panel: LaserPanel): void {
+  const h = panel.height2D || 0;
+  const turn = (pt: Point2D) => {
+    const x = pt.x;
+    pt.x = h - pt.y;
+    pt.y = x;
+  };
+  panel.outerPolygon2D.forEach(turn);
+  for (const cutout of panel.innerCutouts2D) cutout.forEach(turn);
+  const w = panel.width2D || 0;
+  panel.width2D = h;
+  panel.height2D = w;
+}
+
 function packPanels(
   panels: LaserPanel[],
-  sheetWidthMm: number,
-  sheetHeightMm: number,
-  marginMm: number
-): { sheetCount: number; oversized: string[] } {
-  let currentX = marginMm;
-  let currentY = marginMm;
-  let rowHeight = 0;
-  let sheetIndex = 0;
+  stock: StockItem[],
+  marginMm: number,
+  thicknessOf: (panel: LaserPanel) => number
+): { sheetCount: number; oversized: string[]; sheets: SheetSpec[]; rotated: string[] } {
   const oversized: string[] = [];
+  const sheets: SheetSpec[] = [];
+  const rotated: string[] = [];
 
-  const order = [...panels].sort((a, b) => (b.height2D || 0) - (a.height2D || 0));
-
-  for (const panel of order) {
-    const pw = panel.width2D || 50;
-    const ph = panel.height2D || 50;
-
-    if (pw + 2 * marginMm > sheetWidthMm || ph + 2 * marginMm > sheetHeightMm) {
-      oversized.push(`${panel.name} (${pw.toFixed(0)} x ${ph.toFixed(0)} mm)`);
-    }
-
-    if (currentX + pw + marginMm > sheetWidthMm) {
-      currentX = marginMm;
-      currentY += rowHeight + marginMm;
-      rowHeight = 0;
-    }
-
-    if (currentY + ph + marginMm > sheetHeightMm) {
-      sheetIndex++;
-      currentX = marginMm;
-      currentY = marginMm;
-      rowHeight = 0;
-    }
-
-    panel.placedPos2D = { x: currentX, y: currentY };
-    panel.sheetIndex = sheetIndex;
-    currentX += pw + marginMm;
-    if (ph > rowHeight) rowHeight = ph;
+  /*
+   * One packing problem per thickness. A panel can only be cut from stock of
+   * its own thickness, so the rack divides into independent racks and the
+   * sheets come out grouped — which is also how they get used, since the
+   * machine is set up once per material.
+   */
+  const byThickness = new Map<number, LaserPanel[]>();
+  for (const panel of panels) {
+    const t = thicknessOf(panel);
+    const list = byThickness.get(t);
+    if (list) list.push(panel);
+    else byThickness.set(t, [panel]);
   }
 
-  return { sheetCount: sheetIndex + 1, oversized };
+  for (const thicknessMm of [...byThickness.keys()].sort((a, b) => a - b)) {
+    const mine = byThickness.get(thicknessMm)!;
+    /*
+     * Bins largest first, so a big panel is not stranded because a small
+     * offcut was opened for it first — and within a bin, tallest panel first,
+     * which is the shelf heuristic that was already here.
+     */
+    const bins = stock
+      .filter((item) => Math.abs(item.thicknessMm - thicknessMm) < 1e-6)
+      .sort((a, b) => b.widthMm * b.heightMm - a.widthMm * a.heightMm)
+      .map((item) => ({ item, left: item.quantity }));
+
+    const fitsAnywhere = (w: number, h: number) =>
+      bins.some(
+        (b) => w + 2 * marginMm <= b.item.widthMm && h + 2 * marginMm <= b.item.heightMm
+      );
+
+    /*
+     * Turn anything that only fits the other way round, before ordering or
+     * placing. A part's orientation on the stock is not a property of the part,
+     * and refusing to turn it means a long strip and a long bar never meet.
+     */
+    for (const panel of mine) {
+      const w = panel.width2D || 50;
+      const h = panel.height2D || 50;
+      if (!fitsAnywhere(w, h) && fitsAnywhere(h, w)) {
+        rotatePanel90(panel);
+        rotated.push(panel.name);
+      }
+    }
+
+    const order = [...mine].sort((a, b) => (b.height2D || 0) - (a.height2D || 0));
+
+    let binIdx = 0;
+    let openSheet = -1;
+    let currentX = marginMm;
+    let currentY = marginMm;
+    let rowHeight = 0;
+
+    /** Starts a fresh piece of stock, moving down the rack when one runs out. */
+    const openNext = (): boolean => {
+      while (binIdx < bins.length) {
+        const bin = bins[binIdx];
+        if (bin.left !== null && bin.left <= 0) {
+          binIdx++;
+          continue;
+        }
+        if (bin.left !== null) bin.left -= 1;
+        sheets.push({
+          widthMm: bin.item.widthMm,
+          heightMm: bin.item.heightMm,
+          thicknessMm,
+        });
+        openSheet = sheets.length - 1;
+        currentX = marginMm;
+        currentY = marginMm;
+        rowHeight = 0;
+        return true;
+      }
+      return false;
+    };
+
+    for (const panel of order) {
+      const pw = panel.width2D || 50;
+      const ph = panel.height2D || 50;
+
+      if (!fitsAnywhere(pw, ph)) {
+        oversized.push(`${panel.name} (${pw.toFixed(0)} x ${ph.toFixed(0)} mm, ${thicknessMm.toFixed(1)} mm)`);
+      }
+
+      if (openSheet < 0 && !openNext()) break;
+      const sheet = sheets[openSheet];
+
+      // Wrap to the next row, then to the next piece of stock. A panel that
+      // fits nothing still gets placed — on the last sheet, overhanging and
+      // reported — rather than vanishing from the drawing.
+      if (currentX + pw + marginMm > sheet.widthMm) {
+        currentX = marginMm;
+        currentY += rowHeight + marginMm;
+        rowHeight = 0;
+      }
+      if (currentY + ph + marginMm > sheet.heightMm) {
+        // Out of room on this piece: open the next one. If the rack is empty
+        // the panel stays on this sheet, overhanging and reported, rather than
+        // disappearing from the drawing.
+        const had = openSheet;
+        if (!openNext()) openSheet = had;
+      }
+
+      panel.placedPos2D = { x: currentX, y: currentY };
+      panel.sheetIndex = openSheet;
+      currentX += pw + marginMm;
+      if (ph > rowHeight) rowHeight = ph;
+    }
+  }
+
+  return { sheetCount: Math.max(sheets.length, 1), oversized, sheets, rotated };
 }
 
 export function exportLaserCutSvg(
@@ -2357,9 +2760,38 @@ export function exportLaserCutSvg(
     };
   }
 
-  const sheetWidthMm = options.sheetWidth * 1000;
-  const sheetHeightMm = options.sheetHeight * 1000;
   const marginMm = options.margin * 1000;
+
+  /*
+   * The rack, and which thickness each panel is cut from — both decided here,
+   * once, before any scaling. Scaling a model down does not make the plywood
+   * thinner, so the assignment is made against the panels as modelled and then
+   * carried through every scale probe by panel id.
+   */
+  const stock = resolveStock(options);
+  const thicknesses = stockThicknesses(stock);
+  const assignment = assignPanelThickness(panels, stock, options);
+
+  /*
+   * Refused, not warned. See `allowThinnerStock`: a part cut thinner than it was
+   * drawn assembles perfectly and is quietly weaker than the model called for,
+   * so the only moment it can be caught is before the cut.
+   */
+  if (assignment.tooThin.length && !options.allowThinnerStock) {
+    return {
+      success: false,
+      error:
+        `The rack has nothing thick enough for ${assignment.tooThin.join(', ')}. ` +
+        `Cutting these from thinner stock would give parts that go together exactly as drawn ` +
+        `and are markedly weaker than designed — an 8 mm plate in 6 mm keeps about half its ` +
+        `stiffness in bending — and they may not fit what they slot into. Add thicker stock, ` +
+        `thin the model, or turn on "cut from thinner stock" if you have already decided.`,
+      warnings: assignment.warnings,
+    };
+  }
+  const thicknessOf = (panel: LaserPanel) =>
+    assignment.byPanelId.get(panel.id) ?? options.materialThickness * 1000;
+  const singleThicknessMm = thicknesses.length === 1 ? thicknesses[0] : null;
   const maxSheets = options.maxSheets && options.maxSheets > 0 ? options.maxSheets : 0;
 
   // Determine scale factor S (1.0 = 100%)
@@ -2371,13 +2803,24 @@ export function exportLaserCutSvg(
    * mortises widen an outline, and none of that shrinks with S. Sizing the sheet
    * off the raw faces is what let a "fits in 1 sheet" answer spill onto 2.
    */
+  const splitNotes: string[] = [];
   const buildAtScale = (s: number) => {
-    const working = clonePanels(panels);
+    let working = clonePanels(panels);
     if (Math.abs(s - 1.0) > 1e-4) scalePanels(working, s);
-    const warnings = applyJointsToPanels(working, options);
+    /*
+     * Split before joints, not after. A strip's mitred ends are part of its
+     * outline, and cutting a ring into four *after* its edges had been profiled
+     * would slice through whatever the joint engine had put there.
+     */
+    if (options.splitOversized) {
+      const divided = splitPanelsToFit(working, stock, thicknessOf, marginMm, options.kerf * 1000);
+      working = divided.panels;
+      if (Math.abs(s - 1.0) <= 1e-4) splitNotes.push(...divided.notes);
+    }
+    const warnings = applyJointsToPanels(working, options, thicknessOf, singleThicknessMm);
     normalizePanelBounds(working);
-    const packed = packPanels(working, sheetWidthMm, sheetHeightMm, marginMm);
-    return { panels: working, warnings, ...packed };
+    const packed = packPanels(working, stock, marginMm, thicknessOf);
+    return { panels: working, warnings: [...assignment.warnings, ...splitNotes, ...warnings], ...packed };
   };
 
   const fits = (b: { sheetCount: number; oversized: string[] }) =>
@@ -2425,6 +2868,21 @@ export function exportLaserCutSvg(
   const warnings = build.warnings;
   const sheetCount = build.sheetCount;
   const oversized = build.oversized;
+  const sheets = build.sheets;
+
+  /*
+   * Parts laid on the stock the other way round. Said because the app cannot
+   * know which way the grain runs, and on timber that is the difference between
+   * a part that looks right and one that does not — or, across a narrow piece,
+   * one that snaps.
+   */
+  if (build.rotated.length) {
+    warnings.push(
+      `Turned a quarter turn to fit the stock: ${build.rotated.slice(0, 4).join(', ')}` +
+        `${build.rotated.length > 4 ? `, +${build.rotated.length - 4} more` : ''}. ` +
+        `If the material has a grain or a face that matters, check these before cutting.`
+    );
+  }
 
   if (maxSheets > 0 && sheetCount > maxSheets) {
     warnings.unshift(
@@ -2435,37 +2893,63 @@ export function exportLaserCutSvg(
     );
   }
 
+  /** The biggest piece in the rack, which is what "too big" is measured against. */
+  const largest = stock.reduce((a, b) => (a.widthMm * a.heightMm >= b.widthMm * b.heightMm ? a : b));
+  // Worded exactly as it always was for a single stock size, so the sentence an
+  // operator has read a hundred times does not change because a feature they
+  // are not using now exists.
+  const rackLabel =
+    stock.length === 1
+      ? `a ${largest.widthMm.toFixed(0)} x ${largest.heightMm.toFixed(0)} mm sheet`
+      : `the largest stock (${largest.widthMm.toFixed(0)} x ${largest.heightMm.toFixed(0)} mm)`;
+
   if (Math.abs(scaleFactor - 1.0) > 1e-3) {
     warnings.unshift(
-      `Cuts scaled to ${(scaleFactor * 100).toFixed(0)}% (${scaleFactor.toFixed(2)}x) to fit ${sheetWidthMm.toFixed(0)} x ${sheetHeightMm.toFixed(0)} mm sheet bounds${maxSheets > 0 ? ` (limited to ${maxSheets} sheet${maxSheets === 1 ? '' : 's'})` : ''}.`
+      `Cuts scaled to ${(scaleFactor * 100).toFixed(0)}% (${scaleFactor.toFixed(2)}x) to fit ${rackLabel} bounds${maxSheets > 0 ? ` (limited to ${maxSheets} sheet${maxSheets === 1 ? '' : 's'})` : ''}.`
     );
   } else if (oversized.length > 0) {
     warnings.push(
-      `Too big for a ${sheetWidthMm.toFixed(0)} x ${sheetHeightMm.toFixed(0)} mm sheet: ` +
-      `${oversized.join(', ')}. Pick a larger sheet or enable Auto Scale — these are ` +
-      `drawn overflowing their sheet outline.`
+      `Too big for ${rackLabel}: ${oversized.join(', ')}. Pick larger stock or enable ` +
+      `Auto Scale — these are drawn overflowing their sheet outline.`
     );
   }
 
-  const totalSvgWidth = sheetWidthMm;
-  const totalSvgHeight = sheetHeightMm * sheetCount;
+  /*
+   * The sheets are stacked one below the next, and with a mixed rack they are
+   * not the same size — so the drawing is as wide as the widest and each sheet
+   * starts where the previous one ended, rather than at a fixed pitch.
+   */
+  const sheetTop: number[] = [];
+  let stackY = 0;
+  for (const sheet of sheets) {
+    sheetTop.push(stackY);
+    stackY += sheet.heightMm;
+  }
+  const totalSvgWidth = sheets.length ? Math.max(...sheets.map((sh) => sh.widthMm)) : largest.widthMm;
+  const totalSvgHeight = stackY || largest.heightMm;
 
   let svg = `<?xml version="1.0" encoding="UTF-8" standalone="no"?>\n`;
   svg += `<svg width="${totalSvgWidth}mm" height="${totalSvgHeight}mm" viewBox="0 0 ${totalSvgWidth} ${totalSvgHeight}" xmlns="http://www.w3.org/2000/svg">\n`;
   svg += `  <!-- Generated by PhysBox Laser Cut Engine -->\n`;
-  svg += `  <!-- Settings: Joint=${options.jointMode}, Thickness=${(options.materialThickness*1000).toFixed(1)}mm, Kerf=${(options.kerf*1000).toFixed(2)}mm, Scale=${(scaleFactor*100).toFixed(0)}%, Relief=${
+  svg += `  <!-- Settings: Joint=${options.jointMode}, Thickness=${(options.materialThickness*1000).toFixed(1)}mm, Finger=${effectiveFingerWidthMm(options).toFixed(1)}mm${options.fingerWidthAuto ? ' (auto)' : ''}, Kerf=${(options.kerf*1000).toFixed(2)}mm, Scale=${(scaleFactor*100).toFixed(0)}%, Relief=${
     options.cornerRelief === 'none'
       ? 'none'
       : `${options.cornerRelief} @ ${(options.bitDiameter*1000).toFixed(2)}mm bit`
   } -->\n\n`;
 
   if (options.includeSheetOutline) {
-    for (let s = 0; s < sheetCount; s++) {
-      const sheetY = s * sheetHeightMm;
+    for (let s = 0; s < sheets.length; s++) {
+      const sheet = sheets[s];
+      const sheetY = sheetTop[s];
       svg += `  <!-- Sheet ${s + 1} Frame -->\n`;
-      svg += `  <rect x="0" y="${sheetY}" width="${sheetWidthMm}" height="${sheetHeightMm}" fill="none" stroke="#94A3B8" stroke-width="0.5" stroke-dasharray="4 4" />\n`;
+      svg += `  <rect x="0" y="${sheetY}" width="${sheet.widthMm}" height="${sheet.heightMm}" fill="none" stroke="#94A3B8" stroke-width="0.5" stroke-dasharray="4 4" />\n`;
       if (options.includeLabels) {
-        svg += `  <text x="10" y="${sheetY + 20}" fill="#64748B" font-family="sans-serif" font-size="12" font-weight="bold">Sheet ${s + 1} (${sheetWidthMm}mm x ${sheetHeightMm}mm${scaleFactor !== 1 ? ` @ ${(scaleFactor*100).toFixed(0)}% scale` : ''})</text>\n`;
+        // The thickness joins the caption only when the rack holds more than
+        // one, because then it is what decides which pile of material this
+        // sheet comes off and it cannot be read back off the drawing. With one
+        // thickness it would be noise on every caption of every existing job.
+        const thick = thicknesses.length > 1 ? ` x ${sheet.thicknessMm.toFixed(1)}mm` : '';
+        svg += `  <text x="10" y="${sheetY + 20}" fill="#64748B" font-family="sans-serif" font-size="12" font-weight="bold">Sheet ${s + 1} (${sheet.widthMm}mm x ${sheet.heightMm}mm${thick}${scaleFactor !== 1 ? ` @ ${(scaleFactor*100).toFixed(0)}% scale` : ''})</text>\n`;
       }
       svg += `\n`;
     }
@@ -2477,7 +2961,7 @@ export function exportLaserCutSvg(
   // the sheets one below the next, so that is where the offset goes back in.
   const drawPos = (panel: LaserPanel): Point2D => {
     const pos = panel.placedPos2D || { x: 0, y: 0 };
-    return { x: pos.x, y: pos.y + (panel.sheetIndex || 0) * sheetHeightMm };
+    return { x: pos.x, y: pos.y + (sheetTop[panel.sheetIndex || 0] ?? 0) };
   };
 
   for (const panel of panels) {
@@ -2528,6 +3012,7 @@ export function exportLaserCutSvg(
     svg,
     panels,
     sheetCount,
+    sheets,
     scaleFactor,
     warnings,
   };

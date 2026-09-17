@@ -258,3 +258,184 @@ describe('a scene of separate bodies', () => {
     expect(auto.summary.partingFromBaseMm).toBeLessThanOrEqual(auto.summary.partSizeMm.z);
   });
 });
+
+// ---------------------------------------------------------------------------
+// A tall, mostly-empty scene
+// ---------------------------------------------------------------------------
+//
+// The pendulum again, and the other thing it broke. The riser used to be as
+// tall as the part's bounding box, so a 620 mm scene of thin rods got a 30 mm
+// column 630 mm tall standing beside it: 445 cm³ of aluminium feeding a 550 cm³
+// casting, and two full-height rods in the pattern preview that looked, fairly,
+// like a bug. A feeder is sized by modulus and proportioned to itself.
+function tallSkeletalScene(): SceneGraph {
+  return {
+    nodes: [
+      { name: 'base', pos: [0, 0, 0.01], geoms: [{ name: 'g', type: 'box', size: [0.06, 0.06, 0.01] }] },
+      { name: 'post', pos: [0, 0, 0.29], geoms: [{ name: 'g', type: 'cylinder', size: [0.01, 0.28] }] },
+      { name: 'arm', pos: [0.11, 0, 0.58], geoms: [{ name: 'g', type: 'capsule', size: [0.005, 0.11] }] },
+      { name: 'bob', pos: [0.22, 0, 0.58], geoms: [{ name: 'g', type: 'sphere', size: [0.022] }] },
+    ],
+  } as unknown as SceneGraph;
+}
+
+describe('the rig on a tall scene', () => {
+  const scene = tallSkeletalScene();
+  const r = generateCastPattern(scene, { metalId: 'aluminium' });
+
+  it('proportions the riser to itself, not to the height of the part', () => {
+    expect(r.summary.riserDiaMm).toBeGreaterThan(0);
+    // 1.5 diameters tall, so its volume is π/4·D²·1.5D — nothing to do with the
+    // 620 mm the part happens to stand.
+    const riserVol = (Math.PI * r.summary.riserDiaMm ** 2 * (1.5 * r.summary.riserDiaMm)) / 4;
+    expect(r.summary.gatingVolumeMm3).toBeGreaterThan(riserVol);
+    expect(riserVol).toBeLessThan(r.summary.partVolumeMm3 * 0.25);
+  });
+
+  it('keeps the gating below the casting it feeds', () => {
+    expect(r.summary.gatingVolumeMm3).toBeLessThan(r.summary.partVolumeMm3);
+    expect(r.warnings.join(' ')).not.toMatch(/gating holds more metal/);
+  });
+
+  it('gates into metal, not into the corner of the bounding box', () => {
+    // "A sprue to nothing": the runner used to start at half the pattern width,
+    // which on this scene is 150 mm out over empty air, with the sprue beyond
+    // it. The gate has to land where the parting plane actually cuts metal, and
+    // the only thing this plane cuts is the base plate. Pattern coordinates are
+    // centred on the bounding box and the box is stretched to +X by the arm, so
+    // that plate spans about -151 to -31.
+    expect(r.summary.gateAtMm.x).toBeGreaterThan(-155);
+    expect(r.summary.gateAtMm.x).toBeLessThan(-28);
+    expect(Math.abs(r.summary.gateAtMm.y)).toBeLessThan(65);
+    // And the rig is then light enough not to outweigh what it feeds.
+    expect(r.summary.gatingVolumeMm3).toBeLessThan(r.summary.partVolumeMm3 * 0.5);
+  });
+
+  it('feeds from the heavy end and gates from the far one', () => {
+    // The riser belongs by the section that freezes last — the bob out at +X —
+    // and the gate at the other end of the metal the plane cuts, so the metal
+    // runs the length of the casting towards the feeder. The gate is therefore
+    // at the plate's far corner from the bob, not its near one.
+    expect(r.summary.riserDiaMm).toBeGreaterThan(0);
+    expect(r.summary.gateAtMm.x).toBeLessThan(-90);
+  });
+
+  it('fuses the burnout sprue on somewhere that exists', () => {
+    const burn = generateCastPattern(scene, { method: 'lost-pla', metalId: 'aluminium' });
+    expect(Math.abs(burn.summary.gateAtMm.x)).toBeLessThan(burn.summary.patternSizeMm.x / 2);
+    expect(Math.abs(burn.summary.gateAtMm.y)).toBeLessThan(burn.summary.patternSizeMm.y / 2);
+  });
+
+  it('says the rig is too big for a home foundry', () => {
+    expect(r.warnings.join(' ')).toMatch(/bigger than most home foundries/);
+    const burn = generateCastPattern(scene, { method: 'lost-pla', metalId: 'aluminium' });
+    expect(burn.warnings.join(' ')).toMatch(/kg of investment/);
+  });
+
+  it('still gives a squat part a real feeder', () => {
+    // The bracket keeps a real feeder: the fix is about the height rule, not
+    // about taking the riser away.
+    const big = generateCastPattern(latticeBracketPreset, { metalId: 'aluminium' });
+    expect(big.summary.riserDiaMm).toBeGreaterThan(5);
+    expect(big.summary.riserDiaMm).toBeLessThanOrEqual(40);
+    expect(big.warnings.join(' ')).not.toMatch(/gating holds more metal/);
+  });
+});
+
+describe('lost-PLA cast pattern', () => {
+  const ring = comfortFitRing();
+  const sand = generateCastPattern(latticeBracketPreset, { method: 'sand', metalId: 'aluminium' });
+  const burn = generateCastPattern(latticeBracketPreset, { method: 'lost-pla', metalId: 'aluminium' });
+
+  it('prints a pattern, with a rig fused on when asked', () => {
+    expect(burn.success, burn.error).toBe(true);
+    expect(burn.patternStl.byteLength).toBe(84 + stlTriCount(burn.patternStl) * 50);
+    const bare = generateCastPattern(latticeBracketPreset, { method: 'lost-pla', addGating: false });
+    expect(stlTriCount(burn.patternStl)).toBeGreaterThan(stlTriCount(bare.patternStl));
+    expect(burn.summary.gatingVolumeMm3).toBeGreaterThan(0);
+    expect(bare.summary.gatingVolumeMm3).toBe(0);
+  });
+
+  it('shrinks and weighs the casting exactly as the sand route does', () => {
+    expect(burn.summary.patternSizeMm.x).toBeCloseTo(sand.summary.patternSizeMm.x, 6);
+    expect(burn.summary.castWeightG).toBeCloseTo(sand.summary.castWeightG, 6);
+    expect(burn.summary.method).toBe('lost-pla');
+    expect(burn.summary.methodLabel).toMatch(/lost pla/i);
+  });
+
+  it('never complains that the pattern will not draw', () => {
+    // The whole point of burning it out: the same geometry that fails the sand
+    // draw check is fine here, and the figure is reported without the warning.
+    const atBase = generateCastPattern(ring, { method: 'sand', metalId: 'silver', partingFromBaseMm: 0 });
+    const burnt = generateCastPattern(ring, { method: 'lost-pla', metalId: 'silver', partingFromBaseMm: 0 });
+    expect(atBase.warnings.join(' ')).toMatch(/overhangs the upward pull/);
+    expect(burnt.summary.undrawablePercent).toBeCloseTo(atBase.summary.undrawablePercent, 6);
+    expect(burnt.warnings.join(' ')).not.toMatch(/overhangs the upward pull/);
+    expect(burnt.summary.partingFromBaseMm).toBe(0);
+  });
+
+  it('feeds through the cup instead of a riser, and says nothing about risers', () => {
+    const r = generateCastPattern(ring, { method: 'lost-pla', metalId: 'silver', addRiser: true });
+    expect(r.summary.riserDiaMm).toBe(0);
+    expect(r.warnings.join(' ')).not.toMatch(/riser/i);
+  });
+
+  it('sizes a flask around the rig and the investment to fill it', () => {
+    const s = burn.summary;
+    // Investment all round the pattern, and taller than the pattern is: the
+    // sprue and cup stand above it and the flask has to swallow them.
+    expect(s.flaskDiaMm).toBeGreaterThan(Math.hypot(s.patternSizeMm.x, s.patternSizeMm.y));
+    expect(s.flaskHeightMm).toBeGreaterThan(s.patternSizeMm.z);
+    const flaskVolCm3 = (Math.PI * s.flaskDiaMm ** 2 * s.flaskHeightMm) / 4 / 1000;
+    expect(s.investmentPowderG).toBeGreaterThan(0);
+    expect(s.investmentPowderG).toBeLessThan(flaskVolCm3 * 1.75);
+    // The standard 100:40 mix, and a pattern that costs a sane amount of PLA.
+    expect(s.investmentWaterG).toBeCloseTo(s.investmentPowderG * 0.4, 6);
+    expect(s.patternPlasticG).toBeGreaterThan(0);
+    expect(s.patternPlasticG).toBeLessThan((s.partVolumeMm3 / 1000) * 1.24);
+  });
+
+  it('leaves the flask numbers at zero on the sand route', () => {
+    expect(sand.summary.flaskDiaMm).toBe(0);
+    expect(sand.summary.investmentPowderG).toBe(0);
+    expect(sand.summary.patternPlasticG).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Feeding the section that freezes last
+// ---------------------------------------------------------------------------
+//
+// A ball on the end of a bar. The bar holds more metal than the ball, so any
+// rule that goes by bulk — or by which end of the bounding box is furthest out
+// — feeds the bar. The ball is what freezes last and what pulls a sink, and
+// modulus is what says so: r/3 for a sphere against roughly half the thickness
+// for the bar.
+function ballOnABar(): SceneGraph {
+  return {
+    nodes: [
+      { name: 'bar', pos: [0, 0, 0.005], geoms: [{ name: 'g', type: 'box', size: [0.1, 0.005, 0.005] }] },
+      { name: 'ball', pos: [0.115, 0, 0.005], geoms: [{ name: 'g', type: 'sphere', size: [0.015] }] },
+    ],
+  } as unknown as SceneGraph;
+}
+
+describe('where the feeder goes', () => {
+  const scene = ballOnABar();
+
+  it('puts the burnout sprue on the ball, not on the longer, heavier bar', () => {
+    const burn = generateCastPattern(scene, { method: 'lost-pla', metalId: 'aluminium' });
+    // The bar is 200 mm of 10 mm section — twice the volume of the 30 mm ball —
+    // and it reaches no further, so only modulus tells them apart.
+    const ballX = burn.summary.patternSizeMm.x / 2 - 15;
+    expect(burn.summary.gateAtMm.x).toBeGreaterThan(ballX - 20);
+    expect(Math.abs(burn.summary.gateAtMm.y)).toBeLessThan(8);
+  });
+
+  it('stands the sand riser by the ball and gates from the far end of the bar', () => {
+    const r = generateCastPattern(scene, { method: 'sand', metalId: 'aluminium' });
+    // Feeder at the heavy end, gate at the other, so the metal runs the length
+    // of the casting and arrives at the feeder last and hottest.
+    expect(r.summary.gateAtMm.x).toBeLessThan(-r.summary.patternSizeMm.x / 4);
+  });
+});

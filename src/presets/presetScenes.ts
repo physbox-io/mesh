@@ -2874,6 +2874,73 @@ scale(0.001) {                  // model in mm, emit in metres
 // Single source of truth for built-in presets. The App's preset dropdown and
 // the MCP bridge's LIST_PRESETS both derive from this map — add a preset here
 // and it appears everywhere. `emoji` is an optional display prefix for UI.
+/*
+ * Sand casting flask — cope and drag.
+ *
+ * Two open frames that clamp a sand mould between them: the drag sits on the
+ * board, the cope goes on top, and the parting line between them is where the
+ * pattern comes out. Each half is a plain rectangular ring, and the numbers are
+ * a common small bench size rather than anything derived.
+ *
+ * Modelled as an extruded rectangle with a smaller one subtracted, which is
+ * what makes it a *ring* rather than a hollow box: the void passes clean
+ * through, so cutting it needs one closed outline and one hole, not six faces.
+ * Cut it from stock 60 mm thick and the exporter reads each half as a single
+ * sheet 300 x 300 with a 260 x 260 hole.
+ *
+ * It is here because it is the shape nobody can cut whole. A 300 x 300 slab of
+ * 60 mm timber is not something people have; 60 mm bar is. With "cut parts too
+ * big for the rack as joined pieces" on, each half comes out as four mitred
+ * lengths 300 x 20 that glue up into the same frame.
+ */
+const FLASK_OUTER = 0.300;
+const FLASK_WALL = 0.020;
+const FLASK_TALL = 0.060;
+
+/** One half of the flask: a ring, `tall` deep, with a `wall`-thick border. */
+function flaskHalf(id: string, label: string, z: number) {
+  const halfOuter = FLASK_OUTER / 2;
+  const halfInner = halfOuter - FLASK_WALL;
+  return {
+    id,
+    name: label,
+    type: 'body' as const,
+    pos: [0, 0, z] as [number, number, number],
+    joints: [],
+    csgEnabled: true,
+    csgCollision: 'primitives' as const,
+    geoms: [
+      {
+        name: id,
+        type: 'box' as const,
+        size: [halfOuter, halfOuter, FLASK_TALL / 2],
+        pos: [0, 0, 0] as [number, number, number],
+        rgba: [0.72, 0.54, 0.36, 1] as [number, number, number, number],
+      },
+      {
+        name: `${id}_void`,
+        type: 'box' as const,
+        // Taller than the frame so the void passes right through. A subtraction
+        // that stops inside would leave a floor, and the flask would extract as
+        // a tray rather than a ring.
+        size: [halfInner, halfInner, FLASK_TALL],
+        pos: [0, 0, 0] as [number, number, number],
+        csg: 'difference' as const,
+      },
+    ],
+    children: [],
+  };
+}
+
+export const castingFlaskPreset: SceneGraph = {
+  nodes: [
+    // The drag on the board, the cope resting on it. A hair of clearance
+    // between them so they read as two parts that meet rather than one solid.
+    flaskHalf('drag', 'Drag (lower half)', FLASK_TALL / 2),
+    flaskHalf('cope', 'Cope (upper half)', FLASK_TALL * 1.5 + 0.001),
+  ],
+} as unknown as SceneGraph;
+
 export const PRESETS = {
   empty: {
     name: 'Blank (Empty)',
@@ -2998,6 +3065,11 @@ export const PRESETS = {
     name: 'Boolean Cutouts',
     emoji: '💠',
     scene: booleanShapesPreset
+  },
+  casting_flask: {
+    name: 'Sand Casting Flask (Cope & Drag)',
+    emoji: '🪣',
+    scene: castingFlaskPreset
   },
   birdhouse: {
     name: 'Birdhouse (Primitives)',

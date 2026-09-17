@@ -3,7 +3,9 @@ import { X, AlertCircle, Flame, Download, CheckCircle2 } from 'lucide-react';
 import type { SceneGraph } from '../types/scene';
 import {
   CAST_METALS,
+  CAST_METHODS,
   DEFAULT_CAST_OPTIONS,
+  type CastMethod,
   type CastOptions,
 } from '../utils/castPatternExporter';
 import { NumberInput } from '@physbox-io/ui';
@@ -32,13 +34,30 @@ const round = (n: number) => Math.round(n);
 const round1 = (n: number) => Math.round(n * 10) / 10;
 
 /**
- * Green-sand casting: turn the model into a pattern to print, and walk the
- * operator through packing, pouring and shaking out.
- *
- * The pattern is the positive you ram sand around, not a cavity. This dialog
- * makes it, sizes the gating, checks it will draw, and lays out the foundry
- * steps with the part's own numbers filled in.
+ * How hot to have the flask when the metal goes in, °C. Investment is poured
+ * into a flask still well above room temperature so thin sections do not chill
+ * off mid-fill, and the rule of thumb across the hobby range is roughly half
+ * the pour temperature — cooler for aluminium, glowing for silver and bronze —
+ * kept inside what plaster investment survives and rounded to something a kiln
+ * dial can actually be set to.
  */
+const flaskTempC = (pourC: number) => Math.round(Math.min(550, Math.max(200, pourC * 0.55)) / 25) * 25;
+
+/**
+ * Casting: turn the model into a pattern to print, and walk the operator
+ * through making a mould from it and pouring metal into it.
+ *
+ * The pattern is a positive, not a cavity, on both routes — but which positive
+ * depends on the route, and so does everything downstream of it. Green sand
+ * rams around a pattern that is pulled back out, so it must draw and the rig
+ * is a sprue standing beside it. Lost PLA buries the pattern in plaster and
+ * burns it away, so undercuts cost nothing, the rig has to be fused on, and
+ * the flask and the investment to mix for it become real numbers the operator
+ * needs before they start. One dialog, because the model, the metal, the
+ * shrink and the pour weight are the same question either way; the steps below
+ * and the fields above swap wholesale with the method.
+ */
+
 export const ExportCastModal: React.FC<Props> = ({ isOpen, onClose, scene }) => {
   const [options, setOptions] = useState<CastOptions>(DEFAULT_CAST_OPTIONS);
   const set = <K extends keyof CastOptions>(key: K, value: CastOptions[K] | undefined) => {
@@ -60,10 +79,11 @@ export const ExportCastModal: React.FC<Props> = ({ isOpen, onClose, scene }) => 
 
   const handleDownload = () => {
     if (!result?.success) return;
-    downloadBytes(result.patternStl, `${baseName}_pattern.stl`);
+    downloadBytes(result.patternStl, `${baseName}_${options.method === 'lost-pla' ? 'burnout' : 'sand'}_pattern.stl`);
   };
 
   const metalLabel = summary?.metalLabel ?? '';
+  const lostPla = options.method === 'lost-pla';
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-2 sm:p-4 animate-in fade-in duration-200">
@@ -77,10 +97,12 @@ export const ExportCastModal: React.FC<Props> = ({ isOpen, onClose, scene }) => 
             </div>
             <div>
               <h2 className="text-base sm:text-lg font-bold text-slate-800 dark:text-slate-100">
-                Cast in Metal (Green Sand)
+                Cast in Metal
               </h2>
               <p className="hidden sm:block text-xs text-slate-500 dark:text-slate-400">
-                Print a pattern, ram it in sand, and pour metal into the hollow it leaves
+                {lostPla
+                  ? 'Print a pattern, invest it in plaster, burn it out, and pour metal into the space it left'
+                  : 'Print a pattern, ram it in sand, and pour metal into the hollow it leaves'}
               </p>
             </div>
           </div>
@@ -94,6 +116,22 @@ export const ExportCastModal: React.FC<Props> = ({ isOpen, onClose, scene }) => 
 
         {/* Body */}
         <div className="flex-1 overflow-y-auto overflow-x-clip p-4 sm:p-6 space-y-5">
+
+          {/* Method — everything below it changes with this, so it leads. */}
+          <div className={sectionClass}>
+            <h3 className={sectionTitleClass}>Method</h3>
+            <Segmented
+              value={options.method}
+              onChange={(v) => set('method', v as CastMethod)}
+              options={CAST_METHODS.map((m) => [m.id, m.label] as const)}
+            />
+            <p className="text-[11px] leading-snug text-slate-500 dark:text-slate-400">
+              {CAST_METHODS.find((m) => m.id === options.method)?.blurb}{' '}
+              {lostPla
+                ? 'The pattern is consumed, so undercuts and re-entrant detail cost nothing — but it is one pattern per casting, and the flask has to be fired.'
+                : 'The pattern survives, so you can ram it again and again — but it has to pull out of the sand, which rules out undercuts.'}
+            </p>
+          </div>
 
           {/* Metal & pattern */}
           <div className={sectionClass}>
@@ -116,26 +154,32 @@ export const ExportCastModal: React.FC<Props> = ({ isOpen, onClose, scene }) => 
               </Field>
               <Field
                 className="lg:col-span-2"
-                label="Gating"
-                hint="Print the sprue, runner, gate and riser as one piece with the pattern, so ramming the sand forms the pour channels. Turn it off only if you cut your own gating into the sand by hand."
+                label={lostPla ? 'Sprue & Vents' : 'Gating'}
+                hint={
+                  lostPla
+                    ? 'Fuse the sprue, pouring cup and vents onto the pattern, so they burn out with it and leave their channels behind. Turn it off only if you are spruing the pattern yourself with wax or printed rod.'
+                    : 'Print the sprue, runner, gate and riser as one piece with the pattern, so ramming the sand forms the pour channels. Turn it off only if you cut your own gating into the sand by hand.'
+                }
               >
                 <Segmented
                   value={options.addGating ? 'on' : 'off'}
                   onChange={(v) => set('addGating', v === 'on')}
-                  options={[['on', 'Print In'], ['off', 'By Hand']] as const}
+                  options={lostPla ? ([['on', 'Print On'], ['off', 'By Hand']] as const) : ([['on', 'Print In'], ['off', 'By Hand']] as const)}
                 />
               </Field>
-              <Field
-                className="lg:col-span-2"
-                label="Riser"
-                hint="A reservoir of metal that stays molten longer than the part and feeds its shrinkage as it freezes, so the casting does not pull a sink. Leave it off only for the thinnest, flattest parts."
-              >
-                <Segmented
-                  value={options.addRiser ? 'on' : 'off'}
-                  onChange={(v) => set('addRiser', v === 'on')}
-                  options={[['on', 'Feed It'], ['off', 'None']] as const}
-                />
-              </Field>
+              {!lostPla && (
+                <Field
+                  className="lg:col-span-2"
+                  label="Riser"
+                  hint="A reservoir of metal that stays molten longer than the part and feeds its shrinkage as it freezes, so the casting does not pull a sink. Leave it off only for the thinnest, flattest parts."
+                >
+                  <Segmented
+                    value={options.addRiser ? 'on' : 'off'}
+                    onChange={(v) => set('addRiser', v === 'on')}
+                    options={[['on', 'Feed It'], ['off', 'None']] as const}
+                  />
+                </Field>
+              )}
               <Field
                 label="Sprue Ø (mm)"
                 hint="Diameter of the pour column. 0 sizes it from the cast weight."
@@ -149,31 +193,35 @@ export const ExportCastModal: React.FC<Props> = ({ isOpen, onClose, scene }) => 
                   className={inputClass}
                 />
               </Field>
-              <Field
-                label="Riser Ø (mm)"
-                hint="Diameter of the feeder. 0 sizes it from the part's bulk."
-              >
-                <NumberInput
-                  step={1} min={0} max={60}
-                  allowEmpty
-                  placeholder={summary?.riserDiaMm ? String(round(summary.riserDiaMm)) : 'auto'}
-                  value={options.riserDiaMm || null}
-                  onChange={(v) => set('riserDiaMm', v ?? 0)}
-                  className={inputClass}
-                />
-              </Field>
-              <Field
-                className="lg:col-span-2"
-                label="Recommended Draft (°)"
-                hint="The taper to put on vertical walls, in your model, so the pattern pulls from the sand. This is advice for the report, not applied to the geometry — add it in the modeller, or leave it if the part already draws."
-              >
-                <NumberInput
-                  step={1} min={0} max={10}
-                  value={options.recommendedDraftDeg}
-                  onChange={(v) => set('recommendedDraftDeg', v ?? 2)}
-                  className={inputClass}
-                />
-              </Field>
+              {!lostPla && (
+                <>
+                  <Field
+                    label="Riser Ø (mm)"
+                    hint="Diameter of the feeder. 0 sizes it from the part's bulk."
+                  >
+                    <NumberInput
+                      step={1} min={0} max={60}
+                      allowEmpty
+                      placeholder={summary?.riserDiaMm ? String(round(summary.riserDiaMm)) : 'auto'}
+                      value={options.riserDiaMm || null}
+                      onChange={(v) => set('riserDiaMm', v ?? 0)}
+                      className={inputClass}
+                    />
+                  </Field>
+                  <Field
+                    className="lg:col-span-2"
+                    label="Recommended Draft (°)"
+                    hint="The taper to put on vertical walls, in your model, so the pattern pulls from the sand. This is advice for the report, not applied to the geometry — add it in the modeller, or leave it if the part already draws."
+                  >
+                    <NumberInput
+                      step={1} min={0} max={10}
+                      value={options.recommendedDraftDeg}
+                      onChange={(v) => set('recommendedDraftDeg', v ?? 2)}
+                      className={inputClass}
+                    />
+                  </Field>
+                </>
+              )}
             </div>
 
             {summary && (
@@ -184,10 +232,21 @@ export const ExportCastModal: React.FC<Props> = ({ isOpen, onClose, scene }) => 
                   {' '}{metalLabel} cast ≈ {round(summary.castWeightG)} g ·
                   {' '}pour ≈ {round(summary.pourWeightG)} g
                 </p>
-                <p className={`text-[10px] leading-snug ${summary.undrawablePercent > 1 ? 'text-amber-600 dark:text-amber-400' : 'text-slate-500 dark:text-slate-400'}`}>
-                  {summary.undrawablePercent > 1
-                    ? `${round(summary.undrawablePercent)}% of the part overhangs the pull and will not draw cleanly — add draft or use lost-foam.`
-                    : 'The pattern draws cleanly from the sand: nothing overhangs the upward pull.'}
+                {lostPla && summary.flaskDiaMm > 0 && (
+                  <p className="font-mono text-[11px] text-slate-800 dark:text-slate-100">
+                    Flask ⌀{round(summary.flaskDiaMm)} × {round(summary.flaskHeightMm)} mm ·
+                    {' '}investment ≈ {round(summary.investmentPowderG)} g powder + {round(summary.investmentWaterG)} g water ·
+                    {' '}pattern ≈ {round(summary.patternPlasticG)} g of PLA
+                  </p>
+                )}
+                <p className={`text-[10px] leading-snug ${!lostPla && summary.undrawablePercent > 1 ? 'text-amber-600 dark:text-amber-400' : 'text-slate-500 dark:text-slate-400'}`}>
+                  {lostPla
+                    ? summary.undrawablePercent > 1
+                      ? `${round(summary.undrawablePercent)}% of this part would not draw from sand at any parting plane — burning the pattern out is exactly what buys you that.`
+                      : 'This part would draw from sand too, so green sand is open to you if you would rather keep the pattern.'
+                    : summary.undrawablePercent > 1
+                      ? `${round(summary.undrawablePercent)}% of the part overhangs the pull and will not draw cleanly — add draft, or switch to Lost PLA.`
+                      : 'The pattern draws cleanly from the sand: nothing overhangs the upward pull.'}
                 </p>
                 {busy && <p className="text-[10px] italic text-slate-400">recalculating…</p>}
               </div>
@@ -224,9 +283,30 @@ export const ExportCastModal: React.FC<Props> = ({ isOpen, onClose, scene }) => 
 
           {/* Walkthrough */}
           <div className={sectionClass}>
-            <h3 className={sectionTitleClass}>The Green-Sand Flow</h3>
+            <h3 className={sectionTitleClass}>{lostPla ? 'The Lost-PLA Flow' : 'The Green-Sand Flow'}</h3>
             <ol className="space-y-2.5 text-xs text-slate-600 dark:text-slate-300 leading-relaxed list-none">
-              {[
+              {(lostPla ? [
+                summary
+                  ? `Print the pattern (${round1(summary.patternSizeMm.x)} × ${round1(summary.patternSizeMm.y)} × ${round1(summary.patternSizeMm.z)} mm, ≈${round(summary.patternPlasticG)} g). It is grown ${summary.shrinkPercent}% so the casting shrinks to the ${round1(summary.partSizeMm.x)} × ${round1(summary.partSizeMm.y)} × ${round1(summary.partSizeMm.z)} mm part. Print it hollow — two or three walls, about 10% infill — so there is less plastic to burn and less of it to push outwards as it softens. Every layer line ends up in the casting, so fine layers and a sand or a filler-primer skim pay off here.`
+                  : 'Print the pattern once the model is ready.',
+                options.addGating
+                  ? 'The sprue, cup and vents are printed on. Check the sprue is fused to the pattern rather than balanced on it, and drill a small drain hole from the hollow interior into the sprue so the melted PLA has a way out.'
+                  : 'Sprue it yourself: a rod from the heaviest section up to a pouring cup, and a thin vent from each high point and blind pocket up to the top of the flask.',
+                summary && summary.flaskDiaMm > 0
+                  ? `Stand it in a flask about ⌀${round(summary.flaskDiaMm)} × ${round(summary.flaskHeightMm)} mm, cup upwards and level with the flask top, and seal the base with tape or clay. That leaves roughly 12 mm of investment all round, which is the least that reliably holds.`
+                  : 'Stand it in a flask, cup upwards and level with the flask top, sealed at the base.',
+                summary && summary.investmentPowderG > 0
+                  ? `Mix about ${round(summary.investmentPowderG)} g of investment into ${round(summary.investmentWaterG)} g of water — powder into water, never the other way — for three minutes. Vacuum or vibrate the bubbles out, pour down the side of the flask rather than over the pattern, debubble again, and leave it to set for at least two hours.`
+                  : 'Mix the investment, debubble it, pour it down the side of the flask and leave it to set.',
+                'Burn out in a kiln, flask inverted over a tray so the PLA drains. Hold around 150°C to drive off the water, ramp to 300°C to soften and run the plastic out, then up to 730°C and hold until no smoke comes off and the sprue hole glows clean inside. Call it six to eight hours; rushing it cracks the flask.',
+                summary
+                  ? `Bring the flask down to about ${flaskTempC(summary.pourC)}°C and hold it there — hot enough that the metal does not chill off in the thin sections, cool enough that the casting is not a coarse grain.`
+                  : 'Bring the flask down to pouring temperature and hold it there.',
+                summary
+                  ? `Melt and pour about ${round(summary.pourWeightG)} g of ${metalLabel.toLowerCase()} at roughly ${summary.pourC}°C — casting plus sprue and cup, with a margin. Pour in one go and keep the cup full; vacuum-assist or a centrifuge if the part has thin sections.`
+                  : 'Melt the metal and pour it in one go, keeping the cup full.',
+                'Let it freeze, then quench the flask in a bucket of water — the investment shatters off. Cut off the sprue and vents (remelt them), and finish the part.',
+              ] : [
                 summary
                   ? `Print the pattern (${round1(summary.patternSizeMm.x)} × ${round1(summary.patternSizeMm.y)} × ${round1(summary.patternSizeMm.z)} mm). It is grown ${summary.shrinkPercent}% so the casting shrinks to the ${round1(summary.partSizeMm.x)} × ${round1(summary.partSizeMm.y)} × ${round1(summary.partSizeMm.z)} mm part. Print it solid, and sand or seal the layer lines for a cleaner mould.`
                   : 'Print the pattern once the model is ready.',
@@ -240,7 +320,7 @@ export const ExportCastModal: React.FC<Props> = ({ isOpen, onClose, scene }) => 
                   ? `Melt and pour about ${round(summary.pourWeightG)} g of ${metalLabel.toLowerCase()} at roughly ${summary.pourC}°C — cast plus gating, with a margin. Pour steadily and keep the sprue full.`
                   : 'Melt the metal and pour it steadily, keeping the sprue full.',
                 'Let it freeze and cool, then shake out. Cut off the sprue, runner and riser (remelt them), and finish the part.',
-              ].map((step, i) => (
+              ]).map((step, i) => (
                 <li key={i} className="flex items-start gap-2.5">
                   <span className="flex-shrink-0 w-5 h-5 rounded-full bg-orange-500/15 text-orange-700 dark:text-orange-400 text-[10px] font-bold flex items-center justify-center mt-px">
                     {i + 1}
@@ -251,7 +331,9 @@ export const ExportCastModal: React.FC<Props> = ({ isOpen, onClose, scene }) => 
             </ol>
             <p className="flex items-start gap-2 text-[11px] leading-snug text-slate-500 dark:text-slate-400 border-t border-slate-200 dark:border-slate-800 pt-2.5">
               <AlertCircle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0 text-amber-500" />
-              Molten metal is dangerous. Dry sand and dry tools only — trapped moisture flashes to steam and throws metal. Face shield, gloves, and clear the area of anyone who does not need to be there.
+              {lostPla
+                ? 'Molten metal is dangerous, and this route adds two of its own. Burnout fumes are not something to breathe — kiln outdoors or properly extracted. And a flask that is not fully burnt out still holds water and plastic: that flashes to steam and throws metal straight back up the cup. Face shield, gloves, and clear the area of anyone who does not need to be there.'
+                : 'Molten metal is dangerous. Dry sand and dry tools only — trapped moisture flashes to steam and throws metal. Face shield, gloves, and clear the area of anyone who does not need to be there.'}
             </p>
           </div>
         </div>
@@ -259,10 +341,14 @@ export const ExportCastModal: React.FC<Props> = ({ isOpen, onClose, scene }) => 
         {/* Footer */}
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 px-4 sm:px-6 py-3 sm:py-4 border-t border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/50">
           <div className="hidden lg:flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
-            {summary && summary.undrawablePercent <= 1 && (
+            {summary && (lostPla || summary.undrawablePercent <= 1) && (
               <>
                 <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
-                <span>Pattern draws cleanly. Print it, then follow the steps above.</span>
+                <span>
+                  {lostPla
+                    ? 'One pattern, one casting. Print it, then follow the steps above.'
+                    : 'Pattern draws cleanly. Print it, then follow the steps above.'}
+                </span>
               </>
             )}
           </div>

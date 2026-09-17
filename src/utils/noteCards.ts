@@ -310,6 +310,21 @@ Only **one** of the hollow cube's three shafts collides (the Z one). Decompositi
 
   rope_bridge: `# Rope Bridge\n\nA **cable composite**: 25 linked capsules with a heavy ball dropped onto it.\n\n## Physics\n- MuJoCo expands the composite into a chain of bodies joined by ball joints, welded to the anchor at each end\n- The chain has no bending stiffness, so it hangs in a **catenary** and carries load purely in tension\n- The ball's weight is shared along the span; the shallower the sag, the higher the tension\n\n## Try it\n- Increase the ball's mass and watch the sag deepen\n- Move an anchor apart to pull the rope taut. Tension climbs steeply as it straightens`,
 
+  casting_flask: `# Sand Casting Flask (Cope & Drag)
+
+Two open frames that clamp a sand mould between them. The **drag** sits on the board, the **cope** goes on top, and the parting line between them is where the pattern lifts out.
+
+Each half is a **300 x 300 mm** ring, **60 mm** deep, with a **20 mm** wall — an extruded rectangle with a smaller one subtracted right through it. Because the void passes clean through, each half unwraps as one closed outline with one hole rather than as six shelled faces.
+
+## Why it is here
+It is the shape nobody can cut whole. A 300 x 300 slab of 60 mm timber is not something people have in the rack; **60 mm bar is**.
+
+## Try it
+- **Export Laser Cut (SVG)**, set the material to **60 mm**, and it reports both halves too big for the sheet.
+- Open **Use several stock sizes…** and add a piece about **320 x 40 x 60 mm**.
+- Tick **cut parts too big for the rack as joined pieces**. Each half comes off as **four mitred lengths, 300 x 20 mm**, that glue up into the same frame.
+- Drop the stock to 18 mm and the export refuses: a flask in 18 mm is not a thinner flask, it is a different depth of mould, and the joints would fit each other perfectly while it happened.`,
+
   birdhouse: `# Birdhouse (Primitives)\n\nA 6-panel wooden birdhouse constructed out of primitive boxes and a CSG entrance cutout.\n\n## Laser Cutting\n- Designed for **laser cut face unwrapping**\n- Features interlocking **finger joints** or **glue edge** profiles\n- Front panel has a circular entrance hole cut via CSG boolean difference\n\n## Try it\n- Click **Export Laser Cut (SVG)** in the top toolbar to generate laser vector cut paths`,
 
   birdhouse_scad: `# Birdhouse (OpenSCAD)\n\nA 3D birdhouse model generated from OpenSCAD code.\n\n## Laser Cutting\n- Evaluates OpenSCAD polyhedral mesh into 2D coplanar panel clusters\n- Extracts boundary cutouts and finger joint edges\n\n## Try it\n- Click **Export Laser Cut (SVG)** in the top toolbar to view unwrapped 2D sheet layout`,

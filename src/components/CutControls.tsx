@@ -187,7 +187,14 @@ function CutRow({ node, geom, index }: {
             the cutter, which is longer and is worked out for you. */}
         <CutField
           label="Deep mm"
-          min={0.01}
+          /*
+           * Zero is not a degenerate depth here, it is the through-hole
+           * sentinel — set by the Thru button a few lines down and accepted by
+           * the store. A floor of 0.01 turned "right through" into a
+           * ten-micron dimple and quietly unlit the Thru highlight, so the
+           * button and this box disagreed about the same number.
+           */
+          min={0}
           value={mm(depth)}
           title="How far into the material the cut goes, measured from the surface under the middle of the hole. The cutter itself runs a little past that surface, because a flush cut leaves coincident faces and a boolean of those is not reliably a solid."
           onChange={(v) => setCutDepth(node.id, index, v)}

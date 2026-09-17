@@ -34,6 +34,37 @@ export interface GcodeExportOptions {
   safeZ: number;
   /** Total cut depth in mm for CNC (default 3.0). */
   cutDepthZ: number;
+  /**
+   * Face stock down to the thickness each panel was drawn at, before cutting
+   * its profile. CNC only, and off unless asked for.
+   *
+   * The answer to having 10 mm in the rack and an 8 mm part in the model. The
+   * other direction — stock thinner than drawn — cannot be machined away and is
+   * refused by the panel exporter instead.
+   *
+   * Purely additive: it removes material above the finished face, and the
+   * profile cut still goes the full depth of the original stock, cutting air
+   * for the first couple of millimetres where the pocket already is.
+   */
+  faceToThickness?: boolean;
+  /**
+   * Stock thickness for each sheet index, in mm.
+   *
+   * Comes from the panel exporter's `sheets`, since only it knows which piece
+   * of the rack a sheet was cut from. Without it there is nothing to face down
+   * *from* and the pass does nothing.
+   */
+  sheetStockThicknessMm?: number[];
+  /**
+   * The bit doing the facing, in mm. A surfacing cutter is what this wants; a
+   * plain flat end mill works and simply takes far longer, which is the
+   * operator's trade to make rather than a reason to refuse the job.
+   */
+  facingBitDiameterMm: number;
+  /** Stepover as a fraction of the facing bit's diameter. */
+  facingStepoverFraction: number;
+  /** How much depth the facing bit takes per pass, in mm. */
+  facingDepthPerPassMm: number;
   /** Depth per pass for CNC in mm (default 3.0). */
   zStepdown: number;
   /** Spindle speed in RPM for CNC (default 12000). */
@@ -98,6 +129,13 @@ export const DEFAULT_GCODE_OPTIONS: GcodeExportOptions = {
   plungeFeedrate: 300,
   safeZ: 5.0,
   cutDepthZ: 3.0,
+  faceToThickness: false,
+  // A 25 mm surfacing bit at 60% stepover, 1 mm a pass: unremarkable numbers
+  // for a hobby router, and slow-but-safe for anyone who puts a 6 mm end mill
+  // in instead.
+  facingBitDiameterMm: 25,
+  facingStepoverFraction: 0.6,
+  facingDepthPerPassMm: 1.0,
   zStepdown: 3.0,
   spindleRpm: 12000,
   motionProfile: DEFAULT_MOTION_PROFILE,
@@ -114,7 +152,7 @@ export const DEFAULT_GCODE_OPTIONS: GcodeExportOptions = {
 export interface GcodeOperation {
   id: string;
   name: string;
-  type: 'framing' | 'cut' | 'engrave' | 'pause_sheet' | 'pause_tool';
+  type: 'framing' | 'cut' | 'engrave' | 'pause_sheet' | 'pause_tool' | 'facing';
   sheetIndex: number;
   toolNumber?: number;
 }
@@ -316,6 +354,70 @@ function attachmentZ(s: number, spans: AttachmentSpan[], cutZ: number, topZ: num
  * Generates G-code from 2D LaserCut panels.
  * Interior holes/mortises are cut FIRST, outer polygon outlines are cut LAST.
  */
+/**
+ * A facing pass over one panel's footprint, taking the stock down to the
+ * thickness the panel was drawn at.
+ *
+ * Per footprint rather than over the whole sheet: on a sparsely packed sheet
+ * that is a fraction of the machining, and every panel on a sheet shares one
+ * target thickness anyway because the packer groups sheets by it. Footprints
+ * that overlap after the margin is added are simply faced twice, the second
+ * time through air — cheaper than the bookkeeping to merge them.
+ *
+ * Serpentine, because lifting and returning across a cleared pocket for every
+ * line doubles the travel for nothing.
+ */
+function facingLines(
+  panel: LaserPanel,
+  removalMm: number,
+  options: GcodeExportOptions,
+  f: (n: number) => string
+): { lines: string[]; distanceMm: number } {
+  const lines: string[] = [];
+  const pos = panel.placedPos2D || { x: 0, y: 0 };
+  const bit = Math.max(1, options.facingBitDiameterMm);
+  const r = bit / 2;
+  const stepover = Math.max(0.5, bit * Math.min(Math.max(options.facingStepoverFraction, 0.05), 1));
+  const perPass = Math.max(0.1, options.facingDepthPerPassMm);
+
+  // The bit's centre has to start and finish a radius outside the footprint, or
+  // the edges of the panel keep a lip of full-thickness stock.
+  const x0 = pos.x - r;
+  const x1 = pos.x + (panel.width2D || 0) + r;
+  const y0 = pos.y - r;
+  const y1 = pos.y + (panel.height2D || 0) + r;
+
+  const passes = Math.ceil(removalMm / perPass);
+  let distanceMm = 0;
+
+  for (let p = 1; p <= passes; p++) {
+    const z = -Math.min(removalMm, p * perPass);
+    lines.push(`; Facing pass ${p} of ${passes} at Z${f(z)}`);
+    let forward = true;
+    let first = true;
+    for (let y = y0; y <= y1 + 1e-6; y += stepover) {
+      const yy = Math.min(y, y1);
+      const from = forward ? x0 : x1;
+      const to = forward ? x1 : x0;
+      if (first) {
+        lines.push(`G0 Z${f(options.safeZ)}`);
+        lines.push(`G0 X${f(from)} Y${f(yy)}`);
+        lines.push(`G1 Z${f(z)} F${Math.round(options.plungeFeedrate)}`);
+        first = false;
+      } else {
+        lines.push(`G1 X${f(from)} Y${f(yy)} F${Math.round(options.cutFeedrate)}`);
+        distanceMm += stepover;
+      }
+      lines.push(`G1 X${f(to)} Y${f(yy)} F${Math.round(options.cutFeedrate)}`);
+      distanceMm += Math.abs(to - from);
+      forward = !forward;
+    }
+    lines.push(`G0 Z${f(options.safeZ)}`);
+  }
+
+  return { lines, distanceMm };
+}
+
 export function generateLaserCutGcode(
   panels: LaserPanel[],
   userOptions?: Partial<GcodeExportOptions>
@@ -426,6 +528,34 @@ export function generateLaserCutGcode(
     lines.push(`; ==================================================`);
     lines.push(`; SHEET ${sIdx + 1} of ${sheetCount}`);
     lines.push(`; ==================================================`);
+
+    /*
+     * Facing first, and for the whole sheet before any profile is cut. A panel
+     * whose neighbour has already been cut free is a panel sitting on a sheet
+     * that can shift under a surfacing bit taking a full-width cut.
+     */
+    if (options.machineMode === 'cnc' && options.faceToThickness) {
+      const stockMm = options.sheetStockThicknessMm?.[sKey];
+      for (const panel of sheetPanels) {
+        const target = panel.thickness * 1000;
+        const removal = stockMm !== undefined ? stockMm - target : 0;
+        // Below a tenth of a millimetre there is nothing to take off, and sheet
+        // goods are not flat enough for the attempt to mean anything.
+        if (!(removal > 0.1)) continue;
+
+        operations.push({
+          id: `${panel.id}_facing`,
+          name: `${panel.name} — face ${f(stockMm!)}mm down to ${f(target)}mm`,
+          type: 'facing',
+          sheetIndex: sIdx,
+        });
+        lines.push(``);
+        lines.push(`; --- Facing: ${panel.name} (${f(removal)}mm off a ${f(stockMm!)}mm sheet) ---`);
+        const faced = facingLines(panel, removal, options, f);
+        lines.push(...faced.lines);
+        totalCutDistanceMm += faced.distanceMm;
+      }
+    }
 
     for (const panel of sheetPanels) {
       const pos = panel.placedPos2D || { x: 0, y: 0 };

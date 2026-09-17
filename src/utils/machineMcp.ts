@@ -6,6 +6,7 @@ import {
   type MachineControl,
 } from '@physbox-io/machining';
 import { webSerialManager } from './webSerialManager';
+import type { ResumeOptions } from './jobResume';
 import { fetchMachineDevices } from './apiClient';
 import { generateSolidMachining, DEFAULT_SOLID_OPTIONS } from './solidMachiningExporter';
 import type { SceneGraph } from '../types/scene';
@@ -147,10 +148,26 @@ async function carveCurrentScene(args: Record<string, unknown>): Promise<{ summa
   };
 }
 
+/**
+ * What a command's arguments are before anybody has looked at them.
+ *
+ * `unknown` rather than `any`: these arrive as JSON over the bridge, from an
+ * agent that may be a different version of a different app, so every field is a
+ * claim rather than a fact. The handlers below narrow what they read — a
+ * `feedRate` that arrived as the string "50" should fall back to the default
+ * rather than be handed to the machine.
+ */
+type McpArgs = Record<string, unknown>;
+
+/** A number from an argument, or the fallback when it is anything else. */
+function num<T extends number | undefined>(value: unknown, fallback: T): number | T {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
 /** Mesh's full machine command set, keyed by the bridge command names. */
 export function createMeshMachineHandlers(): Record<
   string,
-  (args: Record<string, any>) => Promise<unknown>
+  (args: McpArgs) => Promise<unknown>
 > {
   // The manager satisfies MachineControl without extending GrblMachine — see
   // the note at the top of this file.
@@ -168,8 +185,8 @@ export function createMeshMachineHandlers(): Record<
        * watching where the outline falls on the material.
        */
       frameJob: async (bounds, args) =>
-        webSerialManager.frameJob(bounds, args.guidePower as number | undefined, {
-          safeZMm: typeof args.safeZMm === 'number' ? args.safeZMm : undefined,
+        webSerialManager.frameJob(bounds, num(args.guidePower, undefined), {
+          safeZMm: num(args.safeZMm, undefined),
         }),
       listDevices: async () => {
         const devices = await fetchMachineDevices();
@@ -207,21 +224,22 @@ export function createMeshMachineHandlers(): Record<
      * equivalent elsewhere: on a carve the operator often winds the tool down
      * onto the stock by eye, and `here` records that without a probe cycle.
      */
-    MACHINE_ZERO_Z: async (args: Record<string, any>) => {
+    MACHINE_ZERO_Z: async (args: McpArgs) => {
       machineArming.requireArmed('zero_z');
 
       if (args.here === true) {
-        machineArming.noteAgentCommand('zero_z', `here offset=${args.offsetMm ?? 0}`);
-        const result = await webSerialManager.zeroZHere(args.offsetMm ?? 0);
+        const offset = num(args.offsetMm, 0);
+        machineArming.noteAgentCommand('zero_z', `here offset=${offset}`);
+        const result = await webSerialManager.zeroZHere(offset);
         if (!result.success) throw new Error(result.message);
         return { ...describeMachine(machine, machineArming), message: result.message };
       }
 
-      machineArming.noteAgentCommand('zero_z', `plate=${args.touchPlateMm ?? 12}`);
+      machineArming.noteAgentCommand('zero_z', `plate=${num(args.touchPlateMm, 12)}`);
       const result = await webSerialManager.zeroZ(
-        args.touchPlateMm ?? 12,
-        args.searchDepthMm ?? 25,
-        args.feedRate ?? 50
+        num(args.touchPlateMm, 12),
+        num(args.searchDepthMm, 25),
+        num(args.feedRate, 50)
       );
       if (!result.success) throw new Error(result.message);
       return {
@@ -244,20 +262,22 @@ export function createMeshMachineHandlers(): Record<
      * Probes a grid across the stock, for levelling a carve against a bed or a
      * workpiece that is not flat.
      */
-    MACHINE_PROBE_SURFACE: async (args: Record<string, any>) => {
+    MACHINE_PROBE_SURFACE: async (args: McpArgs) => {
       machineArming.requireArmed('probe_surface');
       machineArming.noteAgentCommand('probe_surface');
 
       const bounds =
-        args.bounds && typeof args.bounds === 'object' ? args.bounds : jobBounds();
+        args.bounds && typeof args.bounds === 'object'
+          ? (args.bounds as ReturnType<typeof jobBounds>)
+          : jobBounds();
       if (!bounds) {
         throw new Error('There is nothing to probe: pass bounds, or load a scene first.');
       }
 
       const grid = await webSerialManager.probeGrid(
         bounds,
-        typeof args.cols === 'number' ? args.cols : 3,
-        typeof args.rows === 'number' ? args.rows : 3
+        num(args.cols, 3),
+        num(args.rows, 3)
       );
 
       const zs = grid.points.flat().map(p => p.z);
@@ -280,25 +300,25 @@ export function createMeshMachineHandlers(): Record<
      * of lines earlier, and a short preamble puts the machine back into that
      * state before the cut resumes.
      */
-    MACHINE_RESUME_FROM_LINE: async (args: Record<string, any>) => {
+    MACHINE_RESUME_FROM_LINE: async (args: McpArgs) => {
       machineArming.requireArmed('resume_from_line');
       const fromLine = Number(args.fromLine);
       if (!Number.isFinite(fromLine)) {
         throw new Error('Give fromLine: the program line to pick the job back up at.');
       }
       machineArming.noteAgentCommand('resume_from_line', `line=${fromLine}`);
-      const result = webSerialManager.resumeFromLine(fromLine, args.options);
+      const result = webSerialManager.resumeFromLine(fromLine, args.options as ResumeOptions | undefined);
       if (!result.ok) throw new Error(result.message);
       return { ...describeMachine(machine, machineArming), message: result.message };
     },
 
     /** What a resume would do, without doing it. Read-only, so never gated. */
-    MACHINE_PREVIEW_RESUME: async (args: Record<string, any>) => {
+    MACHINE_PREVIEW_RESUME: async (args: McpArgs) => {
       const fromLine = Number(args.fromLine);
       if (!Number.isFinite(fromLine)) {
         throw new Error('Give fromLine: the program line a resume would pick up at.');
       }
-      const plan = webSerialManager.previewResume(fromLine, args.options);
+      const plan = webSerialManager.previewResume(fromLine, args.options as ResumeOptions | undefined);
       if (!plan) return { ok: false, error: 'No program has been sent this session.' };
       return {
         ok: true,

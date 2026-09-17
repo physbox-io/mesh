@@ -30,7 +30,7 @@ import {
   insetFaceMm, latticeSummary, removeFacesMm, revolveMm, sharpenEdgesMm,
 } from '../utils/latticeCommands';
 import { measureInScene } from '../utils/measureScene';
-import { generateCastPattern, DEFAULT_CAST_OPTIONS } from '../utils/castPatternExporter';
+import { generateCastPattern, DEFAULT_CAST_OPTIONS, type CastMethod } from '../utils/castPatternExporter';
 import { generateSolidMachining, DEFAULT_SOLID_OPTIONS } from '../utils/solidMachiningExporter';
 import type { Object3D } from 'three';
 import type { SceneNode, SceneGeom, SceneJoint } from '../types/scene';
@@ -1622,6 +1622,7 @@ export function useMCPBridge() {
             ...(typeof msg.metalId === 'string' ? { metalId: msg.metalId } : {}),
             ...(msg.partingFromBaseMm === 'auto' || typeof msg.partingFromBaseMm === 'number'
               ? { partingFromBaseMm: msg.partingFromBaseMm as number | 'auto' } : {}),
+            ...(msg.method === 'sand' || msg.method === 'lost-pla' ? { method: msg.method as CastMethod } : {}),
             ...(typeof msg.addGating === 'boolean' ? { addGating: msg.addGating } : {}),
             ...(typeof msg.sprueDiaMm === 'number' ? { sprueDiaMm: msg.sprueDiaMm } : {}),
             ...(typeof msg.riserDiaMm === 'number' ? { riserDiaMm: msg.riserDiaMm } : {}),
@@ -1633,7 +1634,10 @@ export function useMCPBridge() {
             ok: true,
             summary: result.summary,
             warnings: result.warnings ?? [],
-            files: describeFiles([{ name: 'cast-pattern.stl', bytes: result.patternStl }], msg.includeFiles !== false),
+            files: describeFiles(
+              [{ name: result.summary.method === 'lost-pla' ? 'burnout-pattern.stl' : 'cast-pattern.stl', bytes: result.patternStl }],
+              msg.includeFiles !== false
+            ),
           };
         }
 
