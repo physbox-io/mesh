@@ -237,7 +237,7 @@ export function FinishingPassFields({
           hint="Diameter of the finishing cutter. It sets both the stepover and how much detail survives: nothing narrower than the bit can be cut. For a V-bit this is the diameter at the top of the cone, which is only reached at full depth."
         >
           <NumberInput
-            step={0.1} min={0.1} max={30}
+            step={0.1} min={0.1} max={60}
             value={options.finishingToolDiaMm}
             onChange={(v) => set('finishingToolDiaMm', v)}
             className={inputClass}
@@ -313,7 +313,15 @@ export function FinishingPassFields({
           hint="Spacing between passes, as a percentage of bit diameter. Lower is smoother and slower: 10% is a show surface, 40% leaves visible ridges you will have to sand."
         >
           <NumberInput
-            step={5} min={2} max={50}
+            /*
+             * 100% is the real invariant — no overlap at all. 50 was an
+             * arbitrary half of it, and it is not a quality bound: a flat
+             * finishing tool leaves no scallop at any stepover, which is why
+             * the ridge warning computes zero for one. Surfacing and slab
+             * flattening are normally run at 70-90%, so the cap doubled those
+             * jobs for an identical surface. 50 stays as the derived default.
+             */
+            step={5} min={2} max={100}
             allowEmpty
             placeholder={String(derived.finishingStepoverPercent)}
             value={overrides.finishingStepoverPercent ?? null}
@@ -536,7 +544,7 @@ export function RoughingPassFields({
           hint="Diameter of the flat end mill used for bulk material removal before the finishing pass."
         >
           <NumberInput
-            step={0.1} min={0.1} max={30}
+            step={0.1} min={0.1} max={60}
             disabled={!options.roughingEnabled}
             value={options.roughingToolDiaMm}
             onChange={(v) => set('roughingToolDiaMm', v)}

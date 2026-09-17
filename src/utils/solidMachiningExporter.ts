@@ -749,7 +749,7 @@ export function generateSolidMachining(
   // --- Sample the part from above ---------------------------------------------
   const stepover = Math.max(
     0.05,
-    (opts.finishingToolDiaMm * Math.min(50, Math.max(2, opts.finishingStepoverPercent))) / 100
+    (opts.finishingToolDiaMm * Math.min(100, Math.max(2, opts.finishingStepoverPercent))) / 100
   );
   let res = Math.min(stepover, 0.6);
   let cols = Math.ceil(stockW / res) + 1;

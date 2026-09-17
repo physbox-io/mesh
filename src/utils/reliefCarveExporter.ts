@@ -1223,7 +1223,7 @@ export function machineSurface(
   const finishRad = Math.max(0.05, opts.finishingToolDiaMm / 2);
   const stepover = Math.max(
     0.05,
-    (opts.finishingToolDiaMm * Math.min(50, Math.max(2, opts.finishingStepoverPercent))) / 100
+    (opts.finishingToolDiaMm * Math.min(100, Math.max(2, opts.finishingStepoverPercent))) / 100
   );
 
   reachWarn(
@@ -2247,7 +2247,7 @@ export function generateReliefCarveGcode(
   const finishRad = Math.max(0.05, opts.finishingToolDiaMm / 2);
   const stepover = Math.max(
     0.05,
-    (opts.finishingToolDiaMm * Math.min(50, Math.max(2, opts.finishingStepoverPercent))) / 100
+    (opts.finishingToolDiaMm * Math.min(100, Math.max(2, opts.finishingStepoverPercent))) / 100
   );
   const usableW = Math.max(1, stockW - 2 * finishRad);
   const usableD = Math.max(1, stockD - 2 * finishRad);

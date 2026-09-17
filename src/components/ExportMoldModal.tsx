@@ -651,7 +651,14 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
                 <Field label="Cavity Depth (mm)" hint="0 uses the scene's natural height. Set a value to scale total depth." hintAlign="start">
                   <NumberInput
                     min={0}
-                    max={200}
+                    /*
+                     * This does not trim the mold, it *rescales the part in Z*
+                     * — `moldExporter` divides it by the scene's own height to
+                     * get a Z scale. A ceiling of 200 meant asking for 250 on a
+                     * 250 mm scene silently squashed every Z dimension to 80%.
+                     * No 200 mm limit exists anywhere in the exporter.
+                     */
+                    max={1000}
                     step={1}
                     value={options.cavityDepthMm}
                     onChange={(v) => set('cavityDepthMm', v)}

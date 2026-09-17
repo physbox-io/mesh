@@ -496,7 +496,15 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                 hint="How fast the head travels while cutting, in mm per minute. It also drives the estimated job time."
               >
                 <NumberInput
-                  step={100} min={100} max={10000} integer
+                  /*
+                   * 10, not 100. The panel above shows a derived feed floored at
+                   * 50 (`feedsAndSpeeds`), so a minimum of 100 meant the number
+                   * being recommended could not be typed — 60 became 100, a 65%
+                   * overfeed in a material the planner had decided wants to be
+                   * cut slowly. The ceiling covers laser engraving, which runs
+                   * at 12-18 k.
+                   */
+                  step={10} min={10} max={30000} integer
                   allowEmpty
                   placeholder={String(machineMode === 'cnc' ? speeds.feedMmMin : 1200)}
                   value={cutFeedrateOverride}
@@ -524,7 +532,8 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                 hint="Routing only. The cutter that will do the cutting. Spindle speed and feed are worked out from its diameter."
               >
                 <NumberInput
-                  step={0.1} min={0.1} max={30}
+                  /* 60 mm: a 2" surfacing cutter is 50.8 and was unreachable. */
+                  step={0.1} min={0.1} max={60}
                   disabled={machineMode !== 'cnc'}
                   value={bitDiameterMm}
                   onChange={(v) => v !== undefined && setBitDiameterMm(v)}
@@ -553,7 +562,14 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                 hint="Width of material the beam or bit removes. Contours are offset by half of it so each layer comes out at its true size."
               >
                 <NumberInput
-                  step={0.05} min={0} max={2}
+                  /*
+                   * The hint says "the beam *or bit* removes", and in routing
+                   * mode the kerf a bit removes is its diameter — 3.175 or 6 mm,
+                   * both past the old ceiling of 2. A router user typing 3.175
+                   * silently got 2, so the dowel holes came out wrong and the
+                   * G-code header then misreported the setting.
+                   */
+                  step={0.05} min={0} max={12}
                   value={kerfMm}
                   onChange={(v) => v !== undefined && setKerfMm(v)}
                   className={inputClass}
