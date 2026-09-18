@@ -73,6 +73,7 @@ import {
 import { revokeShare, isProRequired } from './utils/apiClient';
 import { cloudAutosave } from './utils/cloudDocuments';
 import { pushAppParameter } from './utils/cloudSync';
+import { sanitizeNoteUrl } from '@physbox-io/ui';
 
 type NoteCard = { id: string; markdown: string; minimized: boolean; x: number; y: number };
 // AICopilotPanel keeps its ChatMessage type to itself; this is the same type,
@@ -117,8 +118,8 @@ if (typeof window !== 'undefined') {
   window.useStore = useStore;
 }
 
-// Simple robust markdown parser to convert basic markdown text to safe HTML
-// Markdown parser for note cards
+// Markdown for a note card. Headings, emphasis, code, links and bullets;
+// nothing else, because a note card is a label rather than a document.
 function parseNoteMarkdown(md: string): string {
   if (!md) return '';
   let html = md.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -128,7 +129,16 @@ function parseNoteMarkdown(md: string): string {
   html = html.replace(/\*\*(.*?)\*\*/g, '<strong class="font-bold text-slate-900 dark:text-slate-100">$1</strong>');
   html = html.replace(/\*(.*?)\*/g, '<em class="italic text-slate-700 dark:text-slate-300">$1</em>');
   html = html.replace(/`(.*?)`/g, '<code class="px-1 py-0.5 bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded text-[10px] font-mono text-pink-600 dark:text-pink-400">$1</code>');
-  html = html.replace(/\[(.*?)\]\((.*?)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer" class="text-blue-600 dark:text-blue-400 hover:underline">$1</a>');
+  // A link is the one place a note card's text reaches an HTML attribute, so
+  // what may become an href is decided in @physbox-io/ui and shared with the
+  // other apps. Anything else is left on the page as the text it was written
+  // as, rather than becoming an anchor nobody can see the target of.
+  html = html.replace(/\[(.*?)\]\((.*?)\)/g, (whole, label: string, url: string) => {
+    const href = sanitizeNoteUrl(url);
+    return href
+      ? `<a href="${href}" target="_blank" rel="noopener noreferrer" class="text-blue-600 dark:text-blue-400 hover:underline">${label}</a>`
+      : whole;
+  });
   html = html.replace(/^\s*-\s+(.*$)/gim, '<li class="ml-4 list-disc text-slate-600 dark:text-slate-300 text-xs mb-0.5">$1</li>');
   html = html.split('\n').map(line => {
     const t = line.trim();
@@ -2162,7 +2172,7 @@ function App() {
               ? 'bg-blue-50 border-blue-200 text-blue-600 dark:bg-blue-950/40 dark:border-blue-800 dark:text-blue-400 font-semibold' 
               : isSelected 
                 ? 'bg-blue-50/40 border-blue-100/50 text-blue-500 dark:bg-blue-950/20 dark:border-blue-900/50 dark:text-blue-400 font-semibold' 
-                : 'bg-white dark:bg-slate-900/90 border-transparent dark:border-slate-800/40 hover:bg-slate-100/70 dark:hover:bg-slate-800/70 text-slate-650 dark:text-slate-300'
+                : 'bg-white dark:bg-slate-900/90 border-transparent dark:border-slate-800/40 hover:bg-slate-100/70 dark:hover:bg-slate-800/70 text-slate-600 dark:text-slate-300'
           }`}
         >
           <span className="text-xs flex items-center gap-1.5 font-medium truncate">
@@ -3454,7 +3464,7 @@ function App() {
               className={`px-2.5 py-1 rounded text-[10px] font-bold tracking-wide transition-all cursor-pointer ${
                 cameraView === 'perspective'
                   ? 'bg-blue-500 text-white shadow-xs'
-                  : 'text-slate-650 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+                  : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
               }`}
             >
               Perspective
@@ -3508,7 +3518,7 @@ function App() {
               value={gridCellSizeMm}
               onChange={(e) => setGridCellSizeMm(parseFloat(e.target.value))}
               title="Grid cell size (display only; does not change any body's dimensions)"
-              className="px-1.5 py-1 rounded text-[10px] font-bold tracking-wide bg-transparent text-slate-650 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer outline-none border-none"
+              className="px-1.5 py-1 rounded text-[10px] font-bold tracking-wide bg-transparent text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer outline-none border-none"
             >
               <option value={1}>1mm grid</option>
               <option value={10}>10mm grid</option>
