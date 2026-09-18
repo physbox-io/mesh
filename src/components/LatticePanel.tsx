@@ -302,7 +302,7 @@ function ShapeSides() {
         <NumberInput
           value={sides}
           min={0}
-          title="0 works it out from the radius, so the ring is within half a grid step of a true circle. Any other number draws that regular polygon instead."
+          title="0 picks a count from the radius, within half a grid step of a true circle. Any other number draws that regular polygon."
           onChange={(next) => { typed.current = next; }}
           onCommit={() => {
             if (typed.current !== undefined) setSides(typed.current);
@@ -374,7 +374,7 @@ function Revolve() {
           value={degrees}
           min={1}
           max={360}
-          title="How far round to sweep. 360 closes the shape onto itself; anything less leaves both ends open, which is how you get a half-pipe or a quadrant."
+          title="How far round to sweep. 360 closes the shape onto itself; less leaves both ends open — a half-pipe, a quadrant."
           onChange={(next) => { typed.current = next; }}
           onCommit={() => {
             if (typed.current !== undefined) setDegrees(Math.max(1, Math.min(360, typed.current)));
@@ -435,7 +435,7 @@ function EdgeRadius() {
         <NumberInput
           value={mm}
           min={0}
-          title="How much a chamfer or fillet takes off the edge. It is rounded to the nearest grid step, so the finest cut available is whatever the snap is set to."
+          title="How much a chamfer or fillet takes off the edge, rounded to the nearest grid step. The snap sets the finest cut available."
           onChange={(next) => { typed.current = next; }}
           onCommit={() => {
             if (typed.current !== undefined) setMm(typed.current);
@@ -645,7 +645,7 @@ export function LatticePanel({ onOpenDocs }: { onOpenDocs?: () => void } = {}) {
         <div className="flex items-baseline justify-between">
           <span
             className={`${labelClass} flex items-center gap-1 ${planeLocked ? 'text-sky-500 dark:text-sky-400' : ''}`}
-            title="Where a NEW point lands when you click empty space. Points that already exist can be clicked wherever they are, at any depth, unless Ctrl is held, which keeps everything on this plane."
+            title="Where a NEW point lands when you click empty space. Existing points can be clicked at any depth; Ctrl keeps them on this plane."
           >
             {planeLocked && <Lock className="w-3 h-3" />}
             {planeLocked ? 'Locked To' : 'New Points At'}
@@ -843,7 +843,7 @@ export function LatticePanel({ onOpenDocs }: { onOpenDocs?: () => void } = {}) {
             <button
               type="button"
               onClick={requestLatticeOrient}
-              title="Turn every face to agree with its neighbours and point outwards. A face drawn from the wrong side is invisible from outside and a hole in anything exported. The editor shows the back of one in red."
+              title="Turn every face outwards, to agree with its neighbours. A face drawn from the wrong side shows red, and exports as a hole."
               className="flex items-center gap-1.5 w-full py-1.5 px-2 rounded-lg text-[10px] font-semibold transition-colors cursor-pointer bg-rose-50 dark:bg-rose-950/30 text-rose-600 dark:text-rose-400 hover:bg-rose-100 dark:hover:bg-rose-900/40"
             >
               <RefreshCw className="w-3 h-3 shrink-0" />
@@ -859,7 +859,7 @@ export function LatticePanel({ onOpenDocs }: { onOpenDocs?: () => void } = {}) {
             <button
               type="button"
               onClick={() => separateLattice(latticeNodeId)}
-              title="Make each separate piece of this cage its own body, at the same place. Then each can be moved, and one can be added to or cut from another with the Combine controls in the inspector."
+              title="Make each separate piece of this cage its own body, in place — so each can be moved, added or cut from another."
               className="flex items-center gap-1.5 w-full py-1.5 px-2 rounded-lg text-[10px] font-semibold transition-colors cursor-pointer bg-sky-50 dark:bg-sky-950/30 text-sky-700 dark:text-sky-300 hover:bg-sky-100 dark:hover:bg-sky-900/40"
             >
               <Boxes className="w-3 h-3 shrink-0" />

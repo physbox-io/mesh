@@ -2500,7 +2500,7 @@ function App() {
             <button
               onClick={() => window.dispatchEvent(new CustomEvent(SHOW_EXPORTS_EVENT))}
               className="flex items-center justify-center p-1 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 transition-colors focus:outline-none cursor-pointer"
-              title="Export for a printer, laser or router — the buttons are on the bar along the bottom, beside the machine and material they depend on. Click to show them."
+              title="Export for a printer, laser or router. The buttons are on the bottom bar, beside the machine and material they depend on."
             >
               <Printer className="w-3.5 h-3.5" />
             </button>
@@ -3504,7 +3504,7 @@ function App() {
             </button>
             <button
               onClick={() => toggleShowEdges()}
-              title="Draw a line along every real corner of every body, so two faces lit the same still read as two faces. Only edges sharper than about 20° are drawn — a cylinder gets its rims, a sphere nothing."
+              title="Draw a line along every real corner, so two faces lit the same still read as two. Only edges sharper than about 20°."
               className={`px-2.5 py-1 rounded text-[10px] font-bold tracking-wide transition-all cursor-pointer flex items-center gap-1 ${
                 showEdges
                   ? 'bg-violet-500 text-white shadow-xs'

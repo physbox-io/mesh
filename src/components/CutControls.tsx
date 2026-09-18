@@ -133,7 +133,7 @@ function CutRow({ node, geom, index }: {
         <button
           type="button"
           onClick={grab}
-          title="Slide this cut across the part with the pointer. Click to put it down, Esc to put it back. G does the same once the cut is picked in the list."
+          title="Slide this cut across the part. Click to put it down, Esc to put it back. G does the same from the list."
           className="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase cursor-pointer bg-white dark:bg-slate-800 text-slate-400 hover:text-rose-600 transition-colors flex items-center gap-0.5"
         >
           <Move className="w-2.5 h-2.5" />Move
@@ -196,7 +196,7 @@ function CutRow({ node, geom, index }: {
            */
           min={0}
           value={mm(depth)}
-          title="How far into the material the cut goes, measured from the surface under the middle of the hole. The cutter itself runs a little past that surface, because a flush cut leaves coincident faces and a boolean of those is not reliably a solid."
+          title="How deep the cut goes, from the surface under the middle of the hole. It runs a little past: a flush cut is not reliably a solid."
           onChange={(v) => setCutDepth(node.id, index, v)}
         />
 
@@ -220,7 +220,7 @@ function CutRow({ node, geom, index }: {
 
       {geom.type === 'cylinder' && (
         <div className="flex gap-1 items-end">
-          <label className="flex-1 min-w-0" title="Tap the hole. Pick a bolt size and the diameter becomes that bolt's, with its coarse pitch; the hole is cut with the bolt's own form so a printed or machined part threads straight onto it. Custom keeps your diameter and takes a pitch.">
+          <label className="flex-1 min-w-0" title="Tap the hole. A bolt size sets the diameter, the coarse pitch and the thread form, so a part threads straight onto it.">
             <span className="block text-[9px] font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500">Thread</span>
             <select
               value={threadChoice}
@@ -260,7 +260,7 @@ function CutRow({ node, geom, index }: {
           say "on that face" — clicking the face can, so that is how it moves. */}
       <div
         className="flex items-center gap-1 text-[9px] font-mono text-slate-400 dark:text-slate-500 tabular-nums"
-        title="Where the cut enters, in the body's own axes, and the direction it runs. Type a number to move it that way; it stays on the surface under that point. Or press Move and slide it."
+        title="Where the cut enters, in the body's own axes, and which way it runs. Typing moves it along the surface; or press Move and slide it."
       >
         <span>at</span>
         {([0, 1, 2] as const).map((axis) => (

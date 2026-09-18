@@ -323,7 +323,7 @@ export const MachineWorkOriginPanel: React.FC<{
                   Nothing can detect that — it is observed once, by the person
                   watching the dot blink out. */}
               <label
-                title="For machines whose laser only fires while moving: traces a 0.1 mm cross around the spot to keep it lit. The cross returns to its own centre, so the point you are sighting does not move."
+                title="For lasers that only fire while moving: jiggles the head in a 0.1 mm cross to keep the dot lit. It ends where it started."
                 className="flex items-center space-x-1.5 text-[10px] text-slate-500 cursor-pointer select-none"
               >
                 <input
@@ -380,7 +380,7 @@ export const MachineWorkOriginPanel: React.FC<{
                     step={0.1}
                     value={gaugeThickness}
                     onChange={(v) => v !== undefined && setGaugeThickness(v)}
-                    title="Anything between the tip and the surface: a slip of paper is about 0.1 mm, a 1-2-3 block is 25.4. Leave at 0 when the bit is touching the work itself."
+                    title="Anything between the tip and the surface — paper is about 0.1 mm, a 1-2-3 block 25.4. Leave 0 when the bit touches the work."
                     className="w-16 bg-white dark:bg-slate-950 border border-slate-300 dark:border-slate-800 rounded-lg px-2 py-1 text-xs font-mono text-slate-800 dark:text-slate-200"
                   />
                   <span className="text-[10px] text-slate-500 whitespace-nowrap">mm gauge</span>

@@ -380,7 +380,7 @@ export const JobTransport: React.FC<{
       </button>
       <button
         onClick={() => webSerialManager.cancelJob()}
-        title="Soft reset. This stops the machine now and loses the position. The line it reached is kept, so the job can be resumed once the machine has been re-homed and re-zeroed"
+        title="Soft reset: stops the machine now and loses the position. The line it reached is kept, to resume after re-homing and re-zeroing."
         className={`${base} bg-red-600 hover:bg-red-700 text-white`}
       >
         <Square className={icon} />
