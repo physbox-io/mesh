@@ -10,11 +10,20 @@ things that are easy to get wrong and expensive to discover.
 | Task | Command |
 | --- | --- |
 | Dev server | `npm run dev` (Vite, port 5175; the MCP bridge attaches to it) |
-| Typecheck | `npx tsc --noEmit` — use this, not `npm run build`, while the dev server is up |
+| Typecheck | `npx tsc -b --noEmit` — use this, not `npm run build`, while the dev server is up |
 | One test file | `npx vitest run tests/<name>.test.ts` |
 | Full suite | `npx vitest run` — 70 files, ~2 minutes; run it in the background |
 | Lint | `npm run lint` |
 | Export presets for the native app | `npm run export:presets` |
+
+**`npx tsc --noEmit` checks nothing here.** The root `tsconfig.json` is
+`{"files": [], "references": [...]}`, so without `-b` the compiler is handed no inputs,
+reports no errors and exits 0 — on any code at all. It has to be `npx tsc -b --noEmit`
+(add `--force` to defeat the incremental cache in `node_modules/.tmp`). Note also that
+`tsc -b ... | head` reports `head`'s exit status, not the compiler's, so check
+`${PIPESTATUS[0]}` or write to a file. This was found on 2026-09-18 after a clean
+`tsc --noEmit` passed a file that referenced an undefined variable and crashed the
+page at runtime.
 
 ## Layout
 
