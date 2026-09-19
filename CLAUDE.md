@@ -10,11 +10,16 @@ things that are easy to get wrong and expensive to discover.
 | Task | Command |
 | --- | --- |
 | Dev server | `npm run dev` (Vite, port 5175; the MCP bridge attaches to it) |
-| Typecheck | `npx tsc -b --noEmit` — use this, not `npm run build`, while the dev server is up |
+| Typecheck | `npm run typecheck` (`tsc -b --noEmit`) — use this, not `npm run build`, while the dev server is up |
 | One test file | `npx vitest run tests/<name>.test.ts` |
 | Full suite | `npx vitest run` — 70 files, ~2 minutes; run it in the background |
 | Lint | `npm run lint` |
 | Export presets for the native app | `npm run export:presets` |
+
+CI runs typecheck, lint and the suite on every push to `main` and every PR
+(`.github/workflows/test.yml`); a green push to `main` force-pushes that commit
+to the `deploy` branch, which is the only thing Cloud Build builds. Anything you
+add to the gate has to be one of those three npm scripts.
 
 **`npx tsc --noEmit` checks nothing here.** The root `tsconfig.json` is
 `{"files": [], "references": [...]}`, so without `-b` the compiler is handed no inputs,

@@ -17,7 +17,14 @@ ENV GITHUB_TOKEN=$GITHUB_TOKEN
 # resolve a newer minor at build time, so a deploy could ship a version of the
 # machine layer nobody had run — quietly, and only in the image.
 RUN npm ci
-RUN npm run build
+
+# `build:image`, not `build`: the latter is `tsc -b && vite build`, and the
+# typecheck half already ran in GitHub Actions, which is what gates this image
+# being built at all — Cloud Build only sees the `deploy` branch, and only the
+# test workflow writes to it. Every tsconfig here is noEmit, so `tsc -b`
+# produces nothing vite needs; running it again only repeats the check against
+# the same lockfile, in a container with no cache, on every deploy.
+RUN npm run build:image
 
 # Production stage
 FROM nginx:stable-alpine
