@@ -7,11 +7,11 @@ import {
   bimodality,
   detectLevels,
   DEFAULT_HEIGHTMAP_OPTIONS,
-  type HeightmapMeshResult,
   type HeightMapping,
   type HeightProfile,
   type SlopeStyle,
 } from '../utils/heightmapMesh';
+import { drawHeightmapPreview } from '../utils/heightmapPreview';
 import type { SceneGeom, SceneNode } from '../types/scene';
 
 interface ImportImageModalProps {
@@ -63,40 +63,6 @@ async function decodeImage(file: File): Promise<LoadedImage> {
 }
 
 /** Hillshade the sampled height grid so the preview reads as relief, not as a photo. */
-function drawPreview(canvas: HTMLCanvasElement, mesh: HeightmapMeshResult, maxHeightM: number, widthM: number) {
-  const { cols, rows, heights } = mesh;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return;
-  canvas.width = cols;
-  canvas.height = rows;
-  const img = ctx.createImageData(cols, rows);
-  // Light from the top-left, at the true aspect of the relief.
-  const cell = widthM / (cols - 1);
-  const zScale = maxHeightM / Math.max(cell, 1e-9);
-  for (let r = 0; r < rows; r++) {
-    for (let c = 0; c < cols; c++) {
-      const h = heights[r * cols + c];
-      const hl = heights[r * cols + Math.max(0, c - 1)];
-      const hr = heights[r * cols + Math.min(cols - 1, c + 1)];
-      const hu = heights[Math.max(0, r - 1) * cols + c];
-      const hd = heights[Math.min(rows - 1, r + 1) * cols + c];
-      const nx = -(hr - hl) * 0.5 * zScale;
-      const ny = (hd - hu) * 0.5 * zScale;
-      const len = Math.hypot(nx, ny, 1) || 1;
-      // Light direction (-0.5, 0.6, 0.7), normalised.
-      const lambert = Math.max(0, (nx * -0.48 + ny * 0.57 + 0.67) / len);
-      const shade = 0.28 + 0.55 * lambert + 0.22 * h;
-      const v = Math.round(Math.min(1, shade) * 255);
-      const i = (r * cols + c) * 4;
-      img.data[i] = v;
-      img.data[i + 1] = v;
-      img.data[i + 2] = Math.min(255, v + 8);
-      img.data[i + 3] = 255;
-    }
-  }
-  ctx.putImageData(img, 0, 0);
-}
-
 const inputClass =
   'w-full px-2 py-1 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 ' +
   'text-xs text-slate-700 dark:text-slate-200 focus:outline-none focus:border-fuchsia-500';
@@ -194,7 +160,7 @@ export const ImportImageModal: React.FC<ImportImageModalProps> = ({
   }, [image]);
 
   useEffect(() => {
-    if (mesh && canvasRef.current) drawPreview(canvasRef.current, mesh, maxHeightMm / 1000, widthMm / 1000);
+    if (mesh && canvasRef.current) drawHeightmapPreview(canvasRef.current, mesh, maxHeightMm / 1000, widthMm / 1000);
   }, [mesh, maxHeightMm, widthMm]);
 
   if (!isOpen) return null;

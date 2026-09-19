@@ -26,6 +26,8 @@ import { generatePyramidMeshData, generateConeMeshData, generateTorusMeshData, g
 import { readUserPreset } from '../utils/userPresets';
 import { DEFAULT_MATERIAL, type MaterialId } from '../utils/feedsAndSpeeds';
 import { DEFAULT_FILAMENT, type FilamentId } from '../utils/filaments';
+import { loadStock, saveStock, clampStock, type StockSize } from '../utils/stockSettings';
+import type { ReliefCarveOptions } from '../utils/reliefCarveExporter';
 
 /**
  * What is on the bench.
@@ -57,6 +59,38 @@ interface Preset {
   scene?: SceneGraph;
   camera?: { position: [number, number, number]; target: [number, number, number] };
   environment?: Partial<{ gravityZ: number; windX: number; windY: number; density: number; floorFriction: number; floorBounce: number }>;
+  /**
+   * How this scene is meant to be carved, for the relief export to open with.
+   *
+   * A model that was designed at a particular size and depth carries those
+   * numbers; without this the relief dialog opens on its own 150x150x18
+   * defaults and quietly rescales the thing it was handed.
+   */
+  carve?: Partial<ReliefCarveOptions>;
+}
+
+
+/**
+ * The bench stock a scene's carve settings imply, if they name one.
+ *
+ * Stock is one fact with one home, so a preset or a generator that says it is
+ * cut from a 50 x 40 x 40 block sets the bench to that rather than leaving the
+ * bar and the export dialog disagreeing about what is clamped down.
+ */
+function stockFromCarve(
+  carve: Partial<ReliefCarveOptions> | null | undefined,
+  current: StockSize
+): StockSize {
+  if (!carve) return current;
+  const { stockWidthMm, stockDepthMm, stockThicknessMm } = carve;
+  if (stockWidthMm === undefined && stockDepthMm === undefined && stockThicknessMm === undefined) {
+    return current;
+  }
+  return saveStock(clampStock({
+    widthMm: stockWidthMm ?? current.widthMm,
+    depthMm: stockDepthMm ?? current.depthMm,
+    thicknessMm: stockThicknessMm ?? current.thicknessMm,
+  }));
 }
 
 /** The globals the viewport and the recompile debounce hang off `window`. */
@@ -773,10 +807,40 @@ export interface PhysicsState {
    * router also should not silently reinterpret "PETG" as a milling stock.
    */
   filament: FilamentId;
+  /**
+   * What is clamped on the bed, in millimetres. Here for the same reason the
+   * machine and the material are: it is a fact about the workshop, not about
+   * one export, and until it lived here nothing in the app could answer "how
+   * big is the material" -- which is the first thing a pattern generator needs.
+   *
+   * Persisted, because the board on the bench outlives the tab.
+   */
+  stock: StockSize;
+  /**
+   * Carve settings a preset or a generator wants the relief export to open
+   * with, or null for the exporter's own defaults.
+   *
+   * Only the job-shaped keys -- stock, depth, scale, background. Tooling stays
+   * out: which cutter reaches the bottom of a 20 mm wall is a fact about a
+   * workshop, not about the thing being cut, and `recommendReliefTooling`
+   * derives it.
+   */
+  carveSettings: Partial<ReliefCarveOptions> | null;
+  /** Which surface pattern generator's dialog is open, if any. */
+  patternGeneratorId: string | null;
   isMachineConfigOpen: boolean;
   setMachineTarget: (target: MachineTarget) => void;
   setMaterial: (material: MaterialId) => void;
   setFilament: (filament: FilamentId) => void;
+  setStock: (patch: Partial<StockSize>) => void;
+  setCarveSettings: (settings: Partial<ReliefCarveOptions> | null) => void;
+  openPatternGenerator: (id: string) => void;
+  closePatternGenerator: () => void;
+  /**
+   * Replace the scene with something a generator built, and hand the exporter
+   * the settings it should be cut with.
+   */
+  loadGeneratedScene: (scene: SceneGraph, carve: Partial<ReliefCarveOptions> | null) => void;
   setMachineConfigOpen: (open: boolean) => void;
   setCameraView: (view: 'perspective' | 'topDown') => void;
   setPrintAnalysisEnabled: (enabled: boolean) => void;
@@ -1319,6 +1383,9 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   machineTarget: 'fdm',
   material: DEFAULT_MATERIAL,
   filament: DEFAULT_FILAMENT,
+  stock: loadStock(),
+  carveSettings: null,
+  patternGeneratorId: null,
   isMachineConfigOpen: false,
   cameraView: 'perspective',
   printAnalysisEnabled: false,
@@ -1362,6 +1429,10 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   setMachineTarget: (machineTarget) => set({ machineTarget }),
   setFilament: (filament) => set({ filament }),
   setMaterial: (material) => set({ material }),
+  setStock: (patch) => set((state) => ({ stock: saveStock(clampStock({ ...state.stock, ...patch })) })),
+  setCarveSettings: (carveSettings) => set({ carveSettings }),
+  openPatternGenerator: (id) => set({ patternGeneratorId: id }),
+  closePatternGenerator: () => set({ patternGeneratorId: null }),
   setMachineConfigOpen: (isMachineConfigOpen) => set({ isMachineConfigOpen }),
   setCameraView: (view) => set({ cameraView: view, cameraOverride: null }),
   setPrintAnalysisEnabled: (enabled) => set({ printAnalysisEnabled: enabled }),
@@ -1474,6 +1545,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
         isPlaying: false,
         selectedNodeId: null,
         activePreset: name,
+        carveSettings: null,
         cameraOverride: null,
         cameraResetToken: state.cameraResetToken + 1,
         latticeNodeId: null,
@@ -1536,6 +1608,10 @@ export const useStore = create<PhysicsState>()((set, get) => ({
       selectedNodeId: null,
       activePreset: name,
       sceneGraph: scene,
+      // A preset that does not say how it is cut gets the exporter's defaults
+      // back, rather than inheriting the last one's.
+      carveSettings: preset.carve ?? null,
+      stock: stockFromCarve(preset.carve, state.stock),
       cameraOverride: null,
       // Back to the view every scene starts in. Whatever the camera was doing
       // belonged to the scene that has just gone: a view orbited round a 40 mm
@@ -1563,7 +1639,47 @@ export const useStore = create<PhysicsState>()((set, get) => ({
       if (framing && get().activePreset === name) set({ cameraOverride: framing });
     });
   },
-  
+
+
+  /**
+   * Replace the scene with a generated one.
+   *
+   * The same sequence as loading a preset, and for the same reasons -- the
+   * camera has to be reset because the view belonged to a scene that has gone,
+   * and the modelling tools have to be closed because they were open on a body
+   * that no longer exists. `activePreset` goes to null: a generated board is
+   * not a preset, and claiming to be one would make the dropdown offer to
+   * "reload" something that cannot be reloaded.
+   */
+  loadGeneratedScene: (scene, carve) => {
+    get().prepareForDiscreteChange();
+    getPhysicsWorkerClient().setPlaying(false);
+    set((state) => ({
+      isPlaying: false,
+      selectedNodeId: null,
+      // A generated board is not a preset, and saying it is would make the
+      // dropdown offer to reload something that cannot be reloaded. `undefined`
+      // rather than null, which is what the field is typed as and what
+      // `activePresetLabel` already falls through to.
+      activePreset: undefined,
+      sceneGraph: scene,
+      carveSettings: carve,
+      stock: stockFromCarve(carve, state.stock),
+      patternGeneratorId: null,
+      cameraOverride: null,
+      cameraResetToken: state.cameraResetToken + 1,
+      latticeNodeId: null,
+      latticeStats: null,
+      sculptNodeId: null,
+      sculptStats: null,
+      gestureStatus: null,
+      windX: 0,
+      windY: 0,
+      floorBounce: 0,
+    }));
+    void get().recompile(scene, null, true, true);
+  },
+
   setEnvironment: (env) => {
     get().recordInteraction('environment');
     set(env);

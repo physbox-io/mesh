@@ -31,6 +31,8 @@ import { PRESETS } from './presets/presetScenes';
 import { makePresetNoteCard } from './utils/noteCards';
 import { ImportStlModal } from './components/ImportStlModal';
 import { ImportImageModal } from './components/ImportImageModal';
+import { GeneratePatternModal } from './components/GeneratePatternModal';
+import { SURFACE_PATTERNS } from './utils/surfacePatterns';
 import { ExportLaserCutModal } from './components/ExportLaserCutModal';
 import { ExportContourSliceModal } from './components/ExportContourSliceModal';
 import { ExportReliefCarveModal } from './components/ExportReliefCarveModal';
@@ -1120,7 +1122,7 @@ function App() {
     wireframe, toggleWireframe, showEdges, toggleShowEdges, paintMode,
     gridCellSizeMm, setGridCellSizeMm,
     sceneGraph, selectedNodeId, setSelectedNodeId,
-    updateNodeGeom, updateNodeJoint, updateGearTeeth, addPusherPeg, deletePusherPeg, updatePusherPeg, addComponent, loadPreset, updateScene,
+    updateNodeGeom, updateNodeJoint, updateGearTeeth, addPusherPeg, deletePusherPeg, updatePusherPeg, addComponent, loadPreset, openPatternGenerator, updateScene,
     resetSimulation, updateNodePos,
     updateNodeJointsList, deleteNode, renameNode,
     addHardwareComponentNode, updateNodeRotation, rotateAroundCOM, setRotateAroundCOM,
@@ -2355,7 +2357,12 @@ function App() {
               onChange={(e) => {
                 const v = e.target.value;
                 if (!v) return;
-                if (v.startsWith('user:')) loadUserPresetWithCard(v);
+                // A generator is not a preset: it opens a dialog and builds a
+                // board from the stock already on the bench. It lives in this
+                // list because this is where someone looks for "start me off
+                // with something", which is what it is.
+                if (v.startsWith('generator:')) openPatternGenerator(v.slice('generator:'.length));
+                else if (v.startsWith('user:')) loadUserPresetWithCard(v);
                 else loadPresetWithCard(v);
               }}
               className="bg-transparent text-slate-700 dark:text-slate-100 text-xs rounded-md block px-2 py-1 outline-none font-medium cursor-pointer border-none max-lg:flex-1 max-lg:min-w-0"
@@ -2364,6 +2371,13 @@ function App() {
               <optgroup label="⬜ Built-in Presets" className="bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300">
                 {Object.entries(PRESETS as Record<string, PresetEntry>).map(([id, p]) => (
                   <option key={id} value={id}>{p.emoji ? `${p.emoji} ` : ''}{p.name}</option>
+                ))}
+              </optgroup>
+
+              {/* Generators: patterns built to the size of the stock, not saved scenes. */}
+              <optgroup label="🔧 Generators" className="bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300">
+                {SURFACE_PATTERNS.map((p) => (
+                  <option key={p.id} value={`generator:${p.id}`}>{p.label}…</option>
                 ))}
               </optgroup>
 
@@ -3355,10 +3369,22 @@ function App() {
                 which it does whenever you orbit under a part to look at its
                 underside, and losing the ground is losing the only reference
                 for where the part is. */}
+            {/* Fades at 4 m, which is where the rest of this scene already
+                stops: the shadow camera is +/-2 m and the shadow catcher is a
+                4 m plane, so past that there is ground drawn but nothing
+                grounded on it. At 12 m the grid ran three times further than
+                anything that could cast onto it, and the only thing that extra
+                ground did was make every bench-scale part read as small
+                against a horizon it would never reach.
+
+                Still `infiniteGrid`: it is the fade that is pulled in, not the
+                plane, so there is no visible edge to the world. Presets bigger
+                than this — oak_tree is a life-size 11 m tree — carry their own
+                camera framing and are unaffected. */}
             <Grid
               infiniteGrid
               side={THREE.DoubleSide}
-              fadeDistance={12}
+              fadeDistance={4}
               fadeStrength={1}
               sectionSize={(gridCellSizeMm / 1000) * 5}
               cellSize={gridCellSizeMm / 1000}
@@ -7548,6 +7574,10 @@ THE SOFTWARE, PHYSICS SOLVERS, CSG COMPILERS, TOOLPATH CALCULATORS, AND MACHINE 
         }}
       />
       )}
+
+      {/* Surface pattern generators. Reads its own open/closed state from the
+          store, so there is nothing to pass and nothing to keep in step. */}
+      <GeneratePatternModal />
 
       {/* Image heightmap importer — mounted only while open, like the STL one */}
       {isImportImageModalOpen && (

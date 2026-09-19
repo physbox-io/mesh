@@ -9,7 +9,7 @@ import type { SceneGraph, SceneNode, SceneGeom } from '../types/scene';
  */
 export type PresetCamera = { position: [number, number, number]; target: [number, number, number] };
 import { generateCurveGeoms, generateWedgeMeshData, generateConeMeshData } from '../utils/geom';
-import { californiaReliefPreset } from './californiaRelief';
+import { californiaReliefPreset, CALIFORNIA_RELIEF_SETTINGS } from './californiaRelief';
 import { megaBustStudioPreset } from './megaBustStudio';
 import { latticeBracketPreset } from './latticeBracket';
 import { oakTreePreset } from './oakTree';
@@ -3090,7 +3090,12 @@ export const PRESETS = {
     // block, so it reads as a speck at that distance. A closer default view is
     // purely a camera position, not a scale on the model: the carve's real
     // millimetre dimensions (what the exporter cares about) are untouched.
-    camera: { position: [0.05, -0.09, 0.07], target: [0, 0, 0.02] } satisfies PresetCamera
+    camera: { position: [0.05, -0.09, 0.07], target: [0, 0, 0.02] } satisfies PresetCamera,
+    // How this model is meant to be cut: a 50x40x40 block, 20 mm deep, at the
+    // size it was authored rather than fitted. Until the store could carry
+    // this, the constant existed and nothing read it, so the relief dialog
+    // opened on 150x150x18 and offered to rescale a map of California.
+    carve: CALIFORNIA_RELIEF_SETTINGS,
   },
   lattice_bracket: {
     name: 'Wall Bracket (Lattice)',

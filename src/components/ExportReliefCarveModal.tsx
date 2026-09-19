@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { X, AlertCircle, Cpu, RefreshCw, Layers, Mountain } from 'lucide-react';
 import type { SceneGraph } from '../types/scene';
 import {
@@ -29,12 +29,60 @@ interface Props {
 export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene }) => {
   const setMachineConfigOpen = useStore((s) => s.setMachineConfigOpen);
 
+  /*
+   * Stock is the workshop's, like the material beside it on the status bar.
+   *
+   * It used to be three numbers that reset to 150 x 150 x 18 every time this
+   * dialog mounted, so the board was retyped per export and two exports from
+   * one session could disagree about what they were cutting.
+   *
+   * `carveSettings` is the other half: a preset or a generator can say how the
+   * thing it made is meant to be cut, and the store has already folded any
+   * stock it named into the bench.
+   */
+  const stock = useStore((s) => s.stock);
+  const setStock = useStore((s) => s.setStock);
+  const carveSettings = useStore((s) => s.carveSettings);
+
   // The feeds are derated for the depth of the carve, which here is one of the
   // options rather than something measured off the part.
   const {
     options, setOptions, set, overrides, setOverrides, override, machineState, cuttingRateLimit,
     derived, effective, settled, pending, materialLabel, finishTool, roughTool, speedNote,
-  } = useCarveTooling(isOpen, DEFAULT_RELIEF_OPTIONS, (o) => o.carveDepthMm);
+  } = useCarveTooling(
+    isOpen,
+    {
+      ...DEFAULT_RELIEF_OPTIONS,
+      ...carveSettings,
+      stockWidthMm: stock.widthMm,
+      stockDepthMm: stock.depthMm,
+      stockThicknessMm: stock.thicknessMm,
+    },
+    (o) => o.carveDepthMm
+  );
+
+  /*
+   * Fold the bench's stock in during render rather than from an effect, so no
+   * frame is ever drawn with a carve planned against the previous board. Same
+   * reasoning as the material sync inside `useCarveTooling`.
+   */
+  const [syncedStock, setSyncedStock] = useState(stock);
+  if (syncedStock !== stock) {
+    setSyncedStock(stock);
+    setOptions((prev) => ({
+      ...prev,
+      stockWidthMm: stock.widthMm,
+      stockDepthMm: stock.depthMm,
+      stockThicknessMm: stock.thicknessMm,
+    }));
+  }
+
+  // The same for a scene that arrives carrying its own carve settings.
+  const [syncedCarve, setSyncedCarve] = useState(carveSettings);
+  if (syncedCarve !== carveSettings) {
+    setSyncedCarve(carveSettings);
+    if (carveSettings) setOptions((prev) => ({ ...prev, ...carveSettings }));
+  }
 
   const bed = useBedProbe(() => set('applyMeshLeveling', true));
   const { probedGrid } = bed;
@@ -164,13 +212,13 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
               <Field
                 className="lg:col-span-3"
                 label="Stock Block (mm)"
-                hint="Width, depth and thickness of the block clamped on the bed. The job's origin is the near-left corner of its top face, so zero the machine there before you start. The whole carve runs +X and +Y from zero."
+                hint="Width, depth and thickness of the block clamped on the bed — the same board the status bar shows, so it is set once for every export. The job's origin is the near-left corner of its top face, so zero the machine there before you start. The whole carve runs +X and +Y from zero."
               >
                 <div className="flex items-center space-x-1.5">
                   <NumberInput
                     step={10} min={10} max={2000}
                     value={options.stockWidthMm}
-                    onChange={(v) => set('stockWidthMm', v)}
+                    onChange={(v) => { if (v !== undefined) setStock({ widthMm: v }); }}
                     className={`${inputClass} px-2`}
                     aria-label="Stock width in mm"
                   />
@@ -178,7 +226,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                   <NumberInput
                     step={10} min={10} max={2000}
                     value={options.stockDepthMm}
-                    onChange={(v) => set('stockDepthMm', v)}
+                    onChange={(v) => { if (v !== undefined) setStock({ depthMm: v }); }}
                     className={`${inputClass} px-2`}
                     aria-label="Stock depth in mm"
                   />
@@ -186,7 +234,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                   <NumberInput
                     step={1} min={1} max={300}
                     value={options.stockThicknessMm}
-                    onChange={(v) => set('stockThicknessMm', v)}
+                    onChange={(v) => { if (v !== undefined) setStock({ thicknessMm: v }); }}
                     className={`${inputClass} px-2`}
                     aria-label="Stock thickness in mm"
                   />

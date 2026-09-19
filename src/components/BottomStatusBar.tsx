@@ -2,7 +2,11 @@ import React, { useEffect, useState } from 'react';
 import {
   Box, ChevronUp, Cpu, Cuboid, Flame, Layers, Layers2, MousePointer2, Mountain, Package, Pause, Play, Printer, Scissors, Square, Wrench,
 } from 'lucide-react';
+import { NumberInput } from '@physbox-io/ui';
 import { useStore, type MachineTarget } from '../store/useStore';
+import {
+  DEFAULT_STOCK, MAX_STOCK_PLAN_MM, MAX_STOCK_THICKNESS_MM, MIN_STOCK_MM,
+} from '../utils/stockSettings';
 import { FILAMENTS, filamentSpec, type FilamentId } from '../utils/filaments';
 import { FdmNotice } from './FdmNotice';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
@@ -223,6 +227,8 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
   const setMaterial = useStore((s) => s.setMaterial);
   const filament = useStore((s) => s.filament);
   const setFilament = useStore((s) => s.setFilament);
+  const stock = useStore((s) => s.stock);
+  const setStock = useStore((s) => s.setStock);
   const printing = machineTarget === 'fdm';
 
   const gestureStatus = useStore((s) => s.gestureStatus);
@@ -300,6 +306,9 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
 
   const selectClass =
     'bg-transparent text-slate-800 dark:text-slate-200 font-semibold rounded px-1 py-0.5 outline-none cursor-pointer border-none';
+  const stockFieldClass =
+    'px-1 py-0.5 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded ' +
+    'text-slate-900 dark:text-slate-100 text-right';
   const exportButtonClass = (tone: string) =>
     `flex items-center justify-center p-1 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors focus:outline-none cursor-pointer ${tone}`;
 
@@ -412,6 +421,61 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
             <option value="cnc">CNC Router</option>
             <option value="laser">Laser</option>
           </select>
+
+          {/*
+            What is clamped on the bed. Not shown for a printer: a print has no
+            stock, and the material select beside it already swaps to filaments
+            on the same test.
+
+            A tenth of a millimetre, not a half. The step ladder runs from
+            `min`, and a half-millimetre step puts 3, 6, 9, 12 and 18 mm — every
+            common nominal board — off it. Etch learned this the same way.
+          */}
+          {!printing && (
+            <>
+              <div className="w-px h-3 bg-slate-200 dark:bg-slate-800 mx-0.5" />
+              <Layers className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
+              <label htmlFor="stock-width" className="text-slate-500 dark:text-slate-400">
+                Stock
+              </label>
+              <NumberInput
+                id="stock-width"
+                min={MIN_STOCK_MM}
+                max={MAX_STOCK_PLAN_MM}
+                step={1}
+                fallbackOnBlur={DEFAULT_STOCK.widthMm}
+                value={stock.widthMm}
+                onChange={(v) => { if (v !== undefined && Number.isFinite(v)) setStock({ widthMm: v }); }}
+                className={`w-14 ${stockFieldClass}`}
+                title="Stock width in millimetres — the X extent of the board on the bed"
+              />
+              <span className="text-slate-400">×</span>
+              <NumberInput
+                id="stock-depth"
+                min={MIN_STOCK_MM}
+                max={MAX_STOCK_PLAN_MM}
+                step={1}
+                fallbackOnBlur={DEFAULT_STOCK.depthMm}
+                value={stock.depthMm}
+                onChange={(v) => { if (v !== undefined && Number.isFinite(v)) setStock({ depthMm: v }); }}
+                className={`w-14 ${stockFieldClass}`}
+                title="Stock depth in millimetres — the Y extent of the board on the bed"
+              />
+              <span className="text-slate-400">×</span>
+              <NumberInput
+                id="stock-thickness"
+                min={0.1}
+                max={MAX_STOCK_THICKNESS_MM}
+                step={0.1}
+                fallbackOnBlur={DEFAULT_STOCK.thicknessMm}
+                value={stock.thicknessMm}
+                onChange={(v) => { if (v !== undefined && Number.isFinite(v)) setStock({ thicknessMm: v }); }}
+                className={`w-12 ${stockFieldClass}`}
+                title="Stock thickness in millimetres — how deep a cut can go before it is through the board"
+              />
+              <span className="text-slate-400">mm</span>
+            </>
+          )}
 
           <div className="w-px h-3 bg-slate-200 dark:bg-slate-800 mx-0.5" />
 
