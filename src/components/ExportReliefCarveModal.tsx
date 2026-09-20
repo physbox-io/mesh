@@ -5,6 +5,7 @@ import {
   DEFAULT_RELIEF_OPTIONS,
   recommendReliefTooling,
 } from '../utils/reliefCarveExporter';
+import { runSettings } from '../utils/runSettings';
 import { webSerialManager } from '../utils/webSerialManager';
 import { formatDuration } from '../utils/timeEstimate';
 import { NumberInput } from '@physbox-io/ui';
@@ -152,6 +153,18 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
     void webSerialManager.runJob(result.gcode, {
       name: 'Relief carve',
       estimatedSeconds: result.estimatedTimeSeconds,
+      // The same preflight the operator is shown before pressing this, kept
+      // for the archive: what it was cut from, with which bits, how hard.
+      settings: runSettings({
+        material: materialLabel,
+        machine: 'cnc',
+        tool: preflight.firstTool,
+        secondTool: preflight.secondTool,
+        spindleRpm: settled.spindleRpm,
+        cutFeedrate: settled.finishingFeedrate,
+        plungeRate: settled.finishingPlungeRate,
+        depthMm: settled.carveDepthMm,
+      }),
     });
   };
 

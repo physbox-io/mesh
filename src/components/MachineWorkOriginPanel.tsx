@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { ArrowUp, ArrowDown, ArrowLeft, ArrowRight, ChevronsUp, ChevronsDown, Crosshair, Lightbulb, Navigation, Octagon, Info, Check, Hand, AlertTriangle } from 'lucide-react';
 import { NumberInput } from '@physbox-io/ui';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
+import { ProbeCircuitStatus } from './ProbeCircuitStatus';
 import {
   MAX_GUIDE_POWER_PCT,
   readGuideJiggle,
@@ -405,6 +406,10 @@ export const MachineWorkOriginPanel: React.FC<{
                   <span className="text-[10px] text-slate-500 whitespace-nowrap">mm plate</span>
                 </div>
               </div>
+              <ProbeCircuitStatus
+                active={machineState.probePinActive}
+                seen={machineState.probeCircuitSeen}
+              />
             </div>
           )}
         </div>
@@ -431,7 +436,8 @@ export const MachineWorkOriginPanel: React.FC<{
         {showZProbe &&
           ' For Z, either wind the bit down until it just marks the surface and press Set Z Zero Here' +
           ' (with a feeler under it, enter its thickness as the gauge), or clip the probe' +
-          ' lead to the tool, sit the plate on the stock, park the tool a few mm above it, and probe.'}
+          ' lead to the tool, sit the plate on the stock, touch the tool to the plate by hand until' +
+          ' the probe light turns green, park the tool a few mm above it, and probe.'}
         {onOpenDocs && (
           <>
             {' '}

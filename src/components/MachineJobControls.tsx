@@ -4,6 +4,7 @@ import { webSerialManager, type MachineState, type OverrideStep } from '../utils
 import { checkJobEnvelope, type JobExtent } from '../utils/workEnvelope';
 import { formatDuration } from '../utils/timeEstimate';
 import { NumberInput } from '@physbox-io/ui';
+import { ProbeCircuitStatus } from './ProbeCircuitStatus';
 
 /**
  * Running a job from the browser: stop it, pick it up again, and deal with what
@@ -79,6 +80,9 @@ export const JobPauseBanner: React.FC<{
           while it waits: jog it where you like, and resuming lifts back to the job's own clear
           height before it carries on.
         </p>
+      )}
+      {toolChange && showZTools && (
+        <ProbeCircuitStatus active={machineState.probePinActive} seen={machineState.probeCircuitSeen} />
       )}
 
       {/* The same freedom, for a stop that needs no touching off: the sheet

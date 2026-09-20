@@ -163,6 +163,20 @@ export interface MachineState {
    * button that did nothing.
    */
   controllerSilent: boolean;
+  /** The controller reports the probe input closed right now (`Pn:P`). */
+  probePinActive: boolean;
+  /**
+   * The probe input has been seen to close at least once on this connection.
+   *
+   * Every probe here is a `G38.2`, which the controller stops on contact — so
+   * the one way a probe drives the bit through the work is a circuit that
+   * never closes: a clip left off, a lead on the wrong side of the collet, a
+   * tip glazed from the last cut. Nothing in the controller can tell that
+   * apart from "not there yet" until the search runs out. Touching the bit to
+   * the plate by hand before the first stab proves the circuit, and every
+   * continuity probe is refused until that has happened.
+   */
+  probeCircuitSeen: boolean;
 }
 
 /** A job set aside mid-cut, with the machine free to be moved. */
@@ -370,6 +384,13 @@ const CONTROLLER_RECOVERED_MS = 1500;
  * see `retractClearOfWork`.
  */
 const TOOL_CHANGE_LIFT_MM = 25;
+/**
+ * How far a Z zeroing probe searches for the plate. The tool is parked a few
+ * millimetres above it first, so this only has to cover that gap; it used to
+ * be 25mm, which on a circuit that failed to close was a 25mm drive through
+ * the work.
+ */
+export const ZERO_SEARCH_MM = 10;
 
 /**
  * How far below the top of Z travel a machine-referenced retract stops.
@@ -537,6 +558,8 @@ class WebSerialManager {
     park: null,
     guideSpot: false,
     controllerSilent: false,
+    probePinActive: false,
+    probeCircuitSeen: false,
   };
 
   private listeners: Set<MachineStateListener> = new Set();
@@ -552,6 +575,8 @@ class WebSerialManager {
   /** When the last telemetry POST went out, and whether one is still in flight. */
   private lastTelemetryAt = 0;
   private telemetryInFlight = false;
+  /** What the running job is, as the run archive should remember it. */
+  private jobContext: { name?: string; settings?: Record<string, unknown> | null } = {};
   private lastTelemetryStatus: MachineStatus | null = null;
 
   /** Whether a USB cable is an option in this browser. WiFi always is. */
@@ -608,7 +633,12 @@ class WebSerialManager {
 
     void postMachineTelemetry('physics', {
       status: state.status,
-      jobName: state.portName,
+      // What is being cut, not what it is plugged into. The port name is the
+      // fallback for a program nobody named — a jog or a hand-sent line.
+      jobName: this.jobContext.name || state.portName,
+      // What it is being cut from and with. Without it an archived run says how
+      // long it took and nothing about what it produced.
+      settings: this.jobContext.settings ?? null,
       progressPercent: state.progressPercent,
       currentLine: state.currentLine,
       totalLines: state.totalLines,
@@ -738,7 +768,16 @@ class WebSerialManager {
       // A freshly opened port may report a Z work offset left over from a
       // previous session, tool, or stock — GRBL has no way to say whether
       // this operator has touched it off since, so it starts untrusted.
-      this.updateState({ status: 'IDLE', connected: true, portName: transport.label, needsZZero: true });
+      // The probe circuit likewise: whatever was proved last time belonged to
+      // the old connection, and this may be a different machine.
+      this.updateState({
+        status: 'IDLE',
+        connected: true,
+        portName: transport.label,
+        needsZZero: true,
+        probePinActive: false,
+        probeCircuitSeen: false,
+      });
 
       // Ask what it is before anything else needs to know. Not awaited: the
       // connection is usable the moment it is open, and a controller that is
@@ -807,6 +846,9 @@ class WebSerialManager {
       overrides: { feed: 100, rapid: 100, spindle: 100 },
       guideSpot: false,
       controllerSilent: false,
+      // No machine, no proved circuit: the next one on the cable proves its own.
+      probePinActive: false,
+      probeCircuitSeen: false,
     });
   }
 
@@ -963,6 +1005,7 @@ class WebSerialManager {
 
     let mpos: [number, number, number] | null = null;
     let wpos: [number, number, number] | null = null;
+    let pins = '';
     const patch: Partial<MachineState> = {};
 
     for (const part of parts.slice(1)) {
@@ -986,7 +1029,14 @@ class WebSerialManager {
       else if (key === 'Ov' && nums.length >= 3) {
         patch.overrides = { feed: nums[0], rapid: nums[1], spindle: nums[2] };
       }
+      // `Pn:P` — the asserted input pins. GRBL lists them only while one is
+      // asserted, so a report with no `Pn` field means the probe is open.
+      else if (key === 'Pn') pins = part.slice(sep + 1);
     }
+
+    const probePinActive = /P/.test(pins);
+    if (probePinActive !== this.state.probePinActive) patch.probePinActive = probePinActive;
+    if (probePinActive && !this.state.probeCircuitSeen) patch.probeCircuitSeen = true;
 
     // The controller's own state word, not just its alarms.
     //
@@ -1122,8 +1172,53 @@ class WebSerialManager {
    * tool is now rather than an absolute Z that depends on where the datum was
    * set — under G90 a `Z-20` on a machine zeroed high is a 20 mm dive past it.
    */
-  public async probePoint(searchDepthMm = 20, feedrate = 50, timeoutMs = 120000): Promise<number | null> {
+  public async probePoint(searchDepthMm = ZERO_SEARCH_MM, feedrate = 50, timeoutMs = 120000): Promise<number | null> {
     if (!this.transport || !this.state.connected) return null;
+    this.assertProbeCircuit();
+    return this.probeOnce(searchDepthMm, feedrate, timeoutMs);
+  }
+
+  /**
+   * Why a continuity probe may not start right now, or null if it may. See
+   * `probeCircuitSeen`.
+   *
+   * The opposite state is refused too: an input that reads closed with the
+   * tool in the air is a lead shorted to the frame or `$6` set the wrong way,
+   * and the controller would alarm on the first stab (ALARM:4) rather than
+   * measure anything.
+   */
+  private probeCircuitFault(): string | null {
+    if (this.state.probePinActive) {
+      return (
+        'The probe input already reads closed. If the tool is not touching the plate, the ' +
+        'lead is shorted or the probe pin invert ($6) is set the wrong way — either way a ' +
+        'probe cannot tell contact from open air, so it is not started.'
+      );
+    }
+    if (!this.state.probeCircuitSeen) {
+      return (
+        'The probe circuit has not been proved on this connection. Clip the lead on, touch ' +
+        'the tool to the plate by hand until the probe light comes on, then try again. A ' +
+        'probe stops only when that circuit closes; without it the tool is driven into the work.'
+      );
+    }
+    return null;
+  }
+
+  /** `probeCircuitFault`, as a refusal the operator sees. */
+  private assertProbeCircuit(): void {
+    const fault = this.probeCircuitFault();
+    if (!fault) return;
+    this.updateState({ lastError: fault });
+    throw new Error(fault);
+  }
+
+  /**
+   * One `G38.2`, with the circuit already checked by the caller: the zero and
+   * grid routines gate once up front, not per stab, because between points
+   * the input is read off a poll that may not have caught the lift yet.
+   */
+  private async probeOnce(searchDepthMm: number, feedrate: number, timeoutMs: number): Promise<number | null> {
 
     let settle: (z: number | null) => void;
     const reported = new Promise<number | null>((resolve) => { settle = resolve; });
@@ -1200,8 +1295,18 @@ class WebSerialManager {
    */
   public async runJob(
     gcode: string,
-    options: { name?: string; estimatedSeconds?: number } = {}
+    options: { name?: string; estimatedSeconds?: number; settings?: Record<string, unknown> | null } = {}
   ): Promise<{ delivered: boolean; message: string } | null> {
+    /*
+     * Recorded before anything is sent, and replaced outright by every job.
+     *
+     * The archive opens a run from the *first* telemetry frame that looks like
+     * one and never revisits the settings it arrived with, so a context set
+     * after streaming starts is a context that arrives too late — and one left
+     * over from the last job would file this run under what the last one was
+     * cut from.
+     */
+    this.jobContext = { name: options.name, settings: options.settings ?? null };
     if (!this.transport || !this.state.connected) {
       this.updateState({ lastError: 'No machine is connected, so there was nothing to send the job to.' });
       return null;
@@ -2393,15 +2498,20 @@ class WebSerialManager {
    */
   public async zeroZ(
     touchPlateThicknessMm = 12.0,
-    searchDepthMm = 25,
+    searchDepthMm = ZERO_SEARCH_MM,
     feedrate = 50
   ): Promise<{ success: boolean; message: string; machineZ?: number }> {
     if (!this.state.connected) {
       return { success: false, message: 'Not connected to a machine.' };
     }
+    const fault = this.probeCircuitFault();
+    if (fault) {
+      this.updateState({ lastError: fault });
+      return { success: false, message: fault };
+    }
 
     await this.sendAndWait('G21 G90');
-    const contactZ = await this.probePoint(searchDepthMm, feedrate);
+    const contactZ = await this.probeOnce(searchDepthMm, feedrate, 120000);
 
     if (contactZ === null) {
       const message =
@@ -2469,6 +2579,7 @@ class WebSerialManager {
     if (!this.state.connected) {
       throw new Error('No machine is connected, so the bed cannot be probed.');
     }
+    this.assertProbeCircuit();
 
     // Every Z move here is relative, and there is not one absolute Z rapid in
     // the whole routine. That is the safety property that matters: an absolute
@@ -2509,7 +2620,7 @@ class WebSerialManager {
         await this.sendAndWait(`G0 X${x.toFixed(3)} Y${y.toFixed(3)} F3000`);
         // Straight down, slowly, until the probe triggers or the search runs
         // out. `probePoint` issues `G91 G38.2 Z-<search>`, a relative plunge.
-        const contactZ = await this.probePoint(PROBE_SEARCH_MM, PROBE_FEED);
+        const contactZ = await this.probeOnce(PROBE_SEARCH_MM, PROBE_FEED, 120000);
 
         // A miss means the plunge ran its whole length without the probe
         // triggering: a clip that fell off, a broken wire, a non-conductive

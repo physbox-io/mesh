@@ -6,6 +6,7 @@ import type { SceneGraph } from '../types/scene';
 import { exportLaserCutSvg, derivedFingerWidthMm, type LaserCutOptions, type StockItem } from '../utils/laserCutExporter';
 import { buildEtchHandoffUrl } from '../utils/etchHandoff';
 import { generateLaserCutGcode, DEFAULT_GCODE_OPTIONS } from '../utils/gcodeExporter';
+import { runSettings } from '../utils/runSettings';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
 import { NumberInput } from '@physbox-io/ui';
 import { useStore } from '../store/useStore';
@@ -421,6 +422,17 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
     void webSerialManager.runJob(gcodeResult.gcode, {
       name: 'Laser cut',
       estimatedSeconds: gcodeResult.estimatedTimeSeconds,
+      // What this run was cut from and at, for the archive. The machine layer
+      // is handed a string of G-code and can reconstruct none of it.
+      settings: runSettings({
+        material: materialLabel,
+        machine: machineMode,
+        stockThicknessMm: materialThicknessMm,
+        cutFeedrate,
+        ...(machineMode === 'laser'
+          ? { laserPower, passes: laserPasses }
+          : { spindleRpm, tool: `${bitDiameterMm}mm end mill` }),
+      }),
     });
   };
 

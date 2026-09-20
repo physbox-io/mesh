@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { afterEach, describe, it, expect } from 'vitest';
 import { webSerialManager } from '../src/utils/webSerialManager';
 import { warpGcode, type ProbeGrid } from '../src/utils/meshLeveler';
 
@@ -8,7 +8,7 @@ import { warpGcode, type ProbeGrid } from '../src/utils/meshLeveler';
  * does. Heights come from `surface`, so a test can state the bed it is probing
  * and check the grid that comes back describes it.
  */
-function attachFakeGrbl(surface: (x: number, y: number) => number | null) {
+function attachFakeGrbl(surface: (x: number, y: number) => number | null, opts: { prove?: boolean } = {}) {
   // The manager's serial plumbing is private; a test has to reach past it to
   // stand in for hardware.
   const mgr = webSerialManager as unknown as {
@@ -19,7 +19,7 @@ function attachFakeGrbl(surface: (x: number, y: number) => number | null) {
       open: () => Promise<void>;
       close: () => Promise<void>;
     } | null;
-    state: { connected: boolean; lastError?: string };
+    state: { connected: boolean; lastError?: string; probeCircuitSeen: boolean; probePinActive: boolean };
     handleIncomingLine: (line: string) => void;
   };
 
@@ -66,12 +66,29 @@ function attachFakeGrbl(surface: (x: number, y: number) => number | null) {
     },
   };
 
+  // The operator touching the tool to the plate: one report with the probe
+  // pin asserted, then one with it released. Every probe is refused until the
+  // controller has been seen to report the circuit closed, so the tests that
+  // are about something else start from a proved one.
+  if (opts.prove !== false) proveProbeCircuit();
+
+  function proveProbeCircuit() {
+    mgr.handleIncomingLine('<Idle|MPos:0,0,0|WCO:0,0,0|Pn:P>');
+    mgr.handleIncomingLine('<Idle|MPos:0,0,0|WCO:0,0,0>');
+  }
+
   return {
     sent,
+    proveProbeCircuit,
+    report: (line: string) => mgr.handleIncomingLine(line),
+    state: () => mgr.state,
     detach() {
       mgr.transport = null;
       mgr.state.connected = false;
       mgr.state.lastError = undefined;
+      // As a disconnect would: the proof belonged to this fake.
+      mgr.state.probeCircuitSeen = false;
+      mgr.state.probePinActive = false;
     },
     lastError: () => mgr.state.lastError,
   };
@@ -79,13 +96,14 @@ function attachFakeGrbl(surface: (x: number, y: number) => number | null) {
 
 const bounds = { minX: 0, minY: 0, maxX: 100, maxY: 100 };
 
+// One fake at a time, taken down after every test whichever block it was in,
+// so nothing one test proved about its machine reaches the next.
+let fake: ReturnType<typeof attachFakeGrbl>;
+afterEach(() => {
+  fake?.detach();
+});
+
 describe('probeGrid against a live machine', () => {
-  let fake: ReturnType<typeof attachFakeGrbl>;
-
-  beforeEach(() => {
-    fake?.detach();
-  });
-
   it('records what the machine reported, not zeroes', async () => {
     // A bed tilted 0.4 mm across X, measured from a tool datum 12 mm down, so a
     // grid of plain zeroes cannot pass by accident.
@@ -143,13 +161,77 @@ describe('probeGrid against a live machine', () => {
   });
 });
 
-describe('zeroZ from a touch plate', () => {
-  let fake: ReturnType<typeof attachFakeGrbl>;
+describe('no probe runs on a circuit nobody has proved', () => {
+  /*
+   * A probe is a G38.2, which stops when the probe input closes — and only
+   * then. The one way it drives the tool through the work is a circuit that
+   * never closes, which the controller cannot tell from "not there yet" until
+   * the search runs out. So the circuit has to be seen closed, by hand, before
+   * the first stab of a connection.
+   */
+  it('refuses to zero Z until the probe input has been seen closed', async () => {
+    fake = attachFakeGrbl(() => -5, { prove: false });
+    const result = await webSerialManager.zeroZ(12);
 
-  beforeEach(() => {
-    fake?.detach();
+    expect(result.success).toBe(false);
+    expect(result.message).toMatch(/has not been proved/);
+    expect(fake.lastError()).toMatch(/has not been proved/);
+    expect(fake.sent.some(l => l.includes('G38.2'))).toBe(false);
   });
 
+  it('refuses the bed probe and a bare probe on the same grounds', async () => {
+    fake = attachFakeGrbl(() => -5, { prove: false });
+    await expect(webSerialManager.probeGrid(bounds, 2, 2)).rejects.toThrow(/has not been proved/);
+    await expect(webSerialManager.probePoint()).rejects.toThrow(/has not been proved/);
+    expect(fake.sent.some(l => l.includes('G38.2'))).toBe(false);
+  });
+
+  it('refuses while the input reads closed with nothing touching', async () => {
+    fake = attachFakeGrbl(() => -5, { prove: false });
+    fake.report('<Idle|MPos:0,0,0|WCO:0,0,0|Pn:P>');
+    expect(fake.state().probeCircuitSeen).toBe(true);
+    expect(fake.state().probePinActive).toBe(true);
+
+    const result = await webSerialManager.zeroZ(12);
+    expect(result.success).toBe(false);
+    expect(result.message).toMatch(/already reads closed/);
+    await expect(webSerialManager.probeGrid(bounds, 2, 2)).rejects.toThrow(/already reads closed/);
+    expect(fake.sent.some(l => l.includes('G38.2'))).toBe(false);
+  });
+
+  it('probes once the circuit has closed and opened again', async () => {
+    fake = attachFakeGrbl(() => -5, { prove: false });
+    fake.proveProbeCircuit();
+    expect(fake.state().probePinActive).toBe(false);
+
+    const result = await webSerialManager.zeroZ(12);
+    expect(result.success).toBe(true);
+    expect(fake.sent).toContain('G10 L20 P1 Z12.000');
+  });
+
+  it('forgets the proof when the machine goes away', async () => {
+    fake = attachFakeGrbl(() => -5);
+    expect(fake.state().probeCircuitSeen).toBe(true);
+    await webSerialManager.disconnect();
+    expect(fake.state().probeCircuitSeen).toBe(false);
+
+    // The next machine on the cable has to prove its own.
+    fake = attachFakeGrbl(() => -5, { prove: false });
+    const result = await webSerialManager.zeroZ(12);
+    expect(result.success).toBe(false);
+    expect(result.message).toMatch(/has not been proved/);
+  });
+});
+
+describe('how far a probe searches', () => {
+  it('zeroes with a short search: the tool is parked close, and an open circuit is a plunge', async () => {
+    fake = attachFakeGrbl(() => -5);
+    await webSerialManager.zeroZ(12);
+    expect(fake.sent.find(l => l.includes('G38.2'))).toBe('G91 G38.2 Z-10.000 F50');
+  });
+});
+
+describe('zeroZ from a touch plate', () => {
   it('sets the work offset to the plate thickness once the probe touches', async () => {
     fake = attachFakeGrbl(() => -18.4);
     const result = await webSerialManager.zeroZ(15);

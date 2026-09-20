@@ -5,6 +5,7 @@ import {
 import type { SceneGraph } from '../types/scene';
 import { exportContourSliceSvg, type ContourSliceOptions } from '../utils/contourSliceExporter';
 import { generateContourSliceGcode, DEFAULT_GCODE_OPTIONS } from '../utils/gcodeExporter';
+import { runSettings } from '../utils/runSettings';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
 import { NumberInput } from '@physbox-io/ui';
 import { useStore } from '../store/useStore';
@@ -330,6 +331,16 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
     void webSerialManager.runJob(gcodeResult.gcode, {
       name: 'Contour slices',
       estimatedSeconds: gcodeResult.estimatedTimeSeconds,
+      // What the sheet was and what it was cut at — see `runSettings`.
+      settings: runSettings({
+        material: materialLabel,
+        machine: machineMode,
+        stockThicknessMm: materialThicknessMm,
+        cutFeedrate,
+        ...(machineMode === 'laser'
+          ? { laserPower, passes: laserPasses }
+          : { spindleRpm, tool: `${bitDiameterMm}mm end mill` }),
+      }),
     });
   };
 

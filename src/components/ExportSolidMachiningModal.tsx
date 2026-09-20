@@ -9,6 +9,7 @@ import {
   type UpAxis,
 } from '../utils/solidMachiningExporter';
 import { useExportJob } from '../utils/exportWorkerClient';
+import { runSettings } from '../utils/runSettings';
 import { webSerialManager } from '../utils/webSerialManager';
 import { formatDuration } from '../utils/timeEstimate';
 import { NumberInput } from '@physbox-io/ui';
@@ -137,6 +138,17 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
     void webSerialManager.runJob(current.gcode, {
       name: `Solid part, side ${current.side}`,
       estimatedSeconds: current.estimatedTimeSeconds,
+      // The same preflight the operator is shown before pressing this, kept
+      // for the archive: what it was cut from, with which bits, how hard.
+      settings: runSettings({
+        material: materialLabel,
+        machine: 'cnc',
+        tool: preflight.firstTool,
+        secondTool: preflight.secondTool,
+        spindleRpm: settled.spindleRpm,
+        cutFeedrate: settled.finishingFeedrate,
+        plungeRate: settled.finishingPlungeRate,
+      }),
     });
   };
 

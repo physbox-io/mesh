@@ -5,10 +5,12 @@ import {
   type ArmingState,
   type MachineControl,
 } from '@physbox-io/machining';
-import { webSerialManager } from './webSerialManager';
+import { webSerialManager, ZERO_SEARCH_MM } from './webSerialManager';
 import type { ResumeOptions } from './jobResume';
 import { fetchMachineDevices } from './apiClient';
 import { generateSolidMachining, DEFAULT_SOLID_OPTIONS } from './solidMachiningExporter';
+import { MATERIALS } from './feedsAndSpeeds';
+import { runSettings } from './runSettings';
 import type { SceneGraph } from '../types/scene';
 
 // ---------------------------------------------------------------------------
@@ -99,7 +101,7 @@ async function carveCurrentScene(args: Record<string, unknown>): Promise<{ summa
     ...(typeof args.material === 'string' ? { material: args.material } : {}),
     roughingToolDiaMm: dia,
     finishingToolDiaMm: dia,
-  } as Parameters<typeof generateSolidMachining>[1];
+  } as NonNullable<Parameters<typeof generateSolidMachining>[1]>;
 
   const result = generateSolidMachining(currentScene, options);
   if (!result.success) {
@@ -131,6 +133,17 @@ async function carveCurrentScene(args: Record<string, unknown>): Promise<{ summa
   const run = await webSerialManager.runJob(side.gcode, {
     name: `carve side ${side.side}`,
     estimatedSeconds: result.estimatedTimeSeconds,
+    // An agent never opens a dialog, so this is the only place the run archive
+    // can be told what the program it is about to stream actually cuts.
+    settings: runSettings({
+      material: MATERIALS.find(m => m.id === options.material)?.label ?? String(options.material),
+      machine: 'cnc',
+      stockThicknessMm: options.stockThicknessMm,
+      tool: `${dia}mm end mill`,
+      spindleRpm: options.spindleRpm,
+      cutFeedrate: options.finishingFeedrate,
+      depthMm: side.depthMm,
+    }),
   });
 
   // `runJob` returns null when the browser is the streamer; the job is under
@@ -238,7 +251,7 @@ export function createMeshMachineHandlers(): Record<
       machineArming.noteAgentCommand('zero_z', `plate=${num(args.touchPlateMm, 12)}`);
       const result = await webSerialManager.zeroZ(
         num(args.touchPlateMm, 12),
-        num(args.searchDepthMm, 25),
+        num(args.searchDepthMm, ZERO_SEARCH_MM),
         num(args.feedRate, 50)
       );
       if (!result.success) throw new Error(result.message);

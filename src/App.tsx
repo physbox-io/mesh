@@ -7298,7 +7298,7 @@ const wobble = Math.sin(api.getTime() * 4) * 3;`}
                       <div className="text-xs border-t border-slate-150 pt-3">
                         <strong className="text-slate-700">3️⃣ Zero Z, by hand or on a plate</strong>
                         <p className="text-slate-500 mt-1"><strong>By hand</strong> works on any machine and any material, and needs nothing but the bit: jog Z down at 0.1 mm until the tip just marks the surface, or just nips a slip of paper, and press <strong>Set Z Zero Here</strong>. If something is under the tip, enter its thickness in the <em>gauge</em> box (paper is about 0.1 mm, a 1‑2‑3 block is 25.4) and zero lands on the material rather than on the gauge. Nothing moves: the machine is only being told where it already is.</p>
-                        <p className="text-slate-500 mt-1"><strong>On a plate</strong> is more repeatable but needs a touch plate, a clip and stock the circuit can see. Clip the lead to the tool, sit the plate on the stock's top face, park the tool a few mm above it, enter your plate's real thickness, and press <strong>Probe Z Zero</strong>. <strong>Remove the plate before cutting.</strong></p>
+                        <p className="text-slate-500 mt-1"><strong>On a plate</strong> is more repeatable but needs a touch plate, a clip and stock the circuit can see. Clip the lead to the tool, sit the plate on the stock's top face, and touch the tool to the plate by hand until the probe light under the buttons turns green: that proves the circuit, and the probe is refused until it has been seen to close on this connection. Then park the tool a few mm above the plate, enter your plate's real thickness, and press <strong>Probe Z Zero</strong>. <strong>Remove the plate before cutting.</strong></p>
                       </div>
                       <div className="text-xs border-t border-slate-150 pt-3">
                         <strong className="text-slate-700">4️⃣ Set the spindle speed by hand</strong>
@@ -7322,6 +7322,9 @@ const wobble = Math.sin(api.getTime() * 4) * 3;`}
                         under the tool) <strong>does not set Z zero</strong>, and says so in red. Zeroing on a
                         missed probe would put the stock surface wherever the tool ran to, and the next cut would
                         plunge that far past it. Fix the probe and run it again before starting the job.
+                        The search is 10 mm, so a probe that does not stop drives at most that far; and it is
+                        not started at all until the circuit has been seen to close, or while the input already
+                        reads closed with the tool in the air (a shorted lead, or $6 set the wrong way).
                       </p>
                     </div>
                     <p className="text-xs text-slate-500 leading-relaxed">
