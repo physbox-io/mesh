@@ -18,6 +18,75 @@ function bodyWith(geom: Partial<SceneGeom> & { type: SceneGeom['type']; size: nu
 
 const dome = bodyWith({ type: 'sphere', size: [0.05] });
 
+/**
+ * Four separate ridges with open ground between them.
+ *
+ * A dome is one hill, so every traverse over it is over ground the pass either
+ * side of it has already been cut into. Stripes are the other shape a relief
+ * comes in — the zebra and giraffe generators produce nothing else — and the
+ * move from one channel to the next crosses stock standing at full height.
+ */
+const stripes: SceneGraph = {
+  nodes: [{
+    id: 'b1',
+    name: 'part',
+    type: 'body',
+    pos: [0, 0, 0],
+    joints: [],
+    children: [],
+    geoms: [-0.04, -0.015, 0.01, 0.035].map((x, i) => ({
+      name: `s${i}`,
+      type: 'box',
+      size: [0.006, 0.05, 0.02],
+      pos: [x, 0, 0],
+    })) as SceneGeom[],
+  }],
+};
+
+/**
+ * Every rapid in `text` that travels in XY, measured against the material.
+ *
+ * `solid` is a set of points on a surface the material is never below, so a
+ * rapid passing under one of them in plan is a rapid through the work. Only
+ * moves that travel in XY are a hazard: a plunge is meant to go into the
+ * material, and a cutting move is doing its job.
+ */
+function rapidsThrough(
+  text: string,
+  solid: { x: number; y: number; z: number }[],
+  safeZ: number
+): { rapids: number; worstMm: number } {
+  let x = 0, y = 0, z = safeZ, rapids = 0, worst = 0;
+  for (const line of text.split('\n')) {
+    if (!line.startsWith('G0') && !line.startsWith('G1')) continue;
+    const mx = /X(-?[\d.]+)/.exec(line);
+    const my = /Y(-?[\d.]+)/.exec(line);
+    const mz = /Z(-?[\d.]+)/.exec(line);
+    const nx = mx ? parseFloat(mx[1]) : x;
+    const ny = my ? parseFloat(my[1]) : y;
+    const nz = mz ? parseFloat(mz[1]) : z;
+
+    const len = Math.hypot(nx - x, ny - y);
+    // A rapid that does not travel cannot reach anything it was not already
+    // touching — it is the Z half of a lead-in, and the descent that follows it
+    // is meant to be in the material.
+    if (line.startsWith('G0') && len > 0.01) {
+      rapids++;
+      for (const p of solid) {
+        // Distance from the point to the traverse segment, in plan.
+        const t = Math.max(0, Math.min(1, ((p.x - x) * (nx - x) + (p.y - y) * (ny - y)) / (len * len)));
+        const dx = p.x - (x + (nx - x) * t);
+        const dy = p.y - (y + (ny - y) * t);
+        if (dx * dx + dy * dy > 0.25) continue; // not under the tool's line
+        // The move happens at the lower of its ends' heights.
+        worst = Math.max(worst, p.z - Math.min(z, nz));
+      }
+    }
+    x = nx; y = ny; z = nz;
+  }
+  return { rapids, worstMm: worst > 1e-3 ? Number(worst.toFixed(3)) : 0 };
+}
+
 const BASE = {
   ...DEFAULT_RELIEF_OPTIONS,
   carveDepthMm: 10,
@@ -87,51 +156,61 @@ describe('entering the cut after a roughing pass', () => {
     expect(r.success).toBe(true);
 
     /*
-     * The finishing pass only, for a reason worth stating.
+     * The finishing pass here; roughing gets its own test below.
      *
-     * It cuts each point once, to its final height, so its own toolpath is a
-     * faithful model of what is standing while it runs — a rapid lower than any
-     * of those points is a collision, full stop. Roughing cuts the same ground
-     * repeatedly at descending depths, so the same test there would flag a ring
-     * flying over the shallower bite it has itself already removed. Roughing's
-     * traverses are safe by construction instead: they clear the top of the
-     * layer being cut, and nothing in a layer's region stands above that.
+     * Finishing cuts each point once, to its final height, so its own toolpath
+     * is a faithful model of what is standing while it runs. Roughing cuts the
+     * same ground repeatedly at descending depths, so it is held to the weaker
+     * bound the next test explains — and it needs a model this one cannot
+     * provide, since a dome is a single hill with nothing standing between one
+     * pass and the next.
      */
     const finishing = r.gcode.slice(r.gcode.indexOf('T2 M6'));
     const solid = r.segments.filter((s) => s.type === 'finishing').flatMap((s) => s.points);
     expect(solid.length).toBeGreaterThan(100);
 
-    let x = 0, y = 0, z = BASE.safeZ;
-    let rapids = 0;
-    for (const line of finishing.split('\n')) {
-      const mx = /X(-?[\d.]+)/.exec(line);
-      const my = /Y(-?[\d.]+)/.exec(line);
-      const mz = /Z(-?[\d.]+)/.exec(line);
-      if (!line.startsWith('G0') && !line.startsWith('G1')) continue;
+    const scan = rapidsThrough(finishing, solid, BASE.safeZ);
+    expect(scan.rapids).toBeGreaterThan(10);
+    expect(scan.worstMm).toBe(0);
+  });
 
-      const nx = mx ? parseFloat(mx[1]) : x;
-      const ny = my ? parseFloat(my[1]) : y;
-      const nz = mz ? parseFloat(mz[1]) : z;
+  /*
+   * The same measurement for roughing, on a model that can fail it.
+   *
+   * Roughing's traverses used to be handed no material at all: they cleared
+   * the top of the layer being cut, on the reasoning that nothing inside a
+   * layer's region stands above it. Nothing inside it does — but a move from
+   * one region to the next crosses the ground between them, which this
+   * operation has never touched and which on a relief of separate pockets is
+   * the full height of the stock. A 6 mm carve with the stock defaults flew
+   * those at Z-0.375 and Z-0.875, a few tenths of a millimetre deep, a handful
+   * of times a job: shallow enough to read as the cutter dragging rather than
+   * as a plunge, and it was reported as exactly that.
+   *
+   * The bound is the finished surface, which is where the material ends up and
+   * so the lowest it is ever standing. That is weaker than the finishing test's
+   * — it cannot catch a rapid that clears the finished surface but not what
+   * roughing has left above it — and it is the strongest thing available while
+   * the same ground is cut repeatedly at descending depths.
+   */
+  it('does not fly a roughing rapid through an island it cuts around', () => {
+    // Deep enough to take more than one layer, and cut with a small enough
+    // cutter to get between the stripes. A relief roughed in a single layer
+    // never traverses below the stock's own face, so it cannot fail this.
+    const deep = { ...BASE, carveDepthMm: 12, stockThicknessMm: 20, roughingToolDiaMm: 3.175 };
+    const r = generateReliefCarveGcode(stripes, deep);
+    expect(r.success).toBe(true);
+    expect(r.toolChange).toBe(true);
 
-      // Only rapid moves that travel in XY are a hazard; a plunge is meant to
-      // go into the work, and a cutting move is doing its job.
-      if (line.startsWith('G0') && (mx || my)) {
-        rapids++;
-        const len = Math.hypot(nx - x, ny - y);
-        for (const p of solid) {
-          // Distance from the point to the traverse segment, in plan.
-          const t = len < 1e-9 ? 0
-            : Math.max(0, Math.min(1, ((p.x - x) * (nx - x) + (p.y - y) * (ny - y)) / (len * len)));
-          const dx = p.x - (x + (nx - x) * t);
-          const dy = p.y - (y + (ny - y) * t);
-          if (dx * dx + dy * dy > 0.25) continue; // not under the tool's line
-          // The move happens at the lower of its ends' heights.
-          expect(p.z).toBeLessThanOrEqual(Math.min(z, nz) + 1e-3);
-        }
-      }
-      x = nx; y = ny; z = nz;
-    }
-    expect(rapids).toBeGreaterThan(10);
+    const roughing = r.gcode.slice(0, r.gcode.indexOf('T2 M6'));
+    const solid = r.segments.filter((s) => s.type === 'finishing').flatMap((s) => s.points);
+    // The stripes have to survive into the finished surface, or the model is
+    // not the one this test needs.
+    expect(solid.filter((p) => p.z > -0.5).length).toBeGreaterThan(100);
+
+    const scan = rapidsThrough(roughing, solid, deep.safeZ);
+    expect(scan.rapids).toBeGreaterThan(10);
+    expect(scan.worstMm).toBe(0);
   });
 
   it('still reaches the full depth of the relief', () => {

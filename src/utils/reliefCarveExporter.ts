@@ -1480,6 +1480,13 @@ export function machineSurface(
    * `entryZ` is the height the material stands at when the pass begins: the
    * stock's top face on the first layer, the level the previous layer left on
    * every one after it.
+   *
+   * `levelAt` is how high the material stands anywhere else, and is what the
+   * traverse to the head of the pass is measured against. Defaulting it to
+   * `entryZ` — the plane the pass is dropping from — is only right where the
+   * move stays inside ground the operation has already been over. A move that
+   * crosses material this operation has not reached yet needs to be told about
+   * it, or the “traverse” is a rapid through whatever is standing there.
    */
   const leadIn = (
     path: PathPoint[],
@@ -1510,7 +1517,19 @@ export function machineSurface(
      */
     const span = Math.hypot(head.x - atX, head.y - atY);
     let highest = Math.max(levelAt(atX, atY), levelAt(head.x, head.y));
-    const steps = Math.min(64, Math.max(1, Math.ceil(span / 1.0)));
+    /*
+     * Half a millimetre between samples, and enough of them to hold that over
+     * the longest move in the job.
+     *
+     * The step is what decides which walls this can see. At one sample a
+     * millimetre, capped at 64 of them, a traverse the width of a 140 mm board
+     * sampled every 2.2 mm — wide enough for a stripe of a relief to fall
+     * between two samples and be missed entirely, which is the one case the
+     * whole measurement exists for. The cost is a few hundred heightmap reads
+     * on the handful of moves that are actually long; a raster's traverse
+     * between two adjacent passes is still a single step.
+     */
+    const steps = Math.min(512, Math.max(1, Math.ceil(span / 0.5)));
     for (let i = 1; i < steps; i++) {
       const t = i / steps;
       highest = Math.max(highest, levelAt(atX + (head.x - atX) * t, atY + (head.y - atY) * t));
@@ -1684,6 +1703,29 @@ export function machineSurface(
     materialLevelAt = (x, y) =>
       Math.min(0, Math.max(roughFloor, sampleHeightmap(roughMap, x, y) + allowance));
 
+    /*
+     * What is standing partway through the roughing operation, which is what a
+     * traverse between one cut and the next has to clear.
+     *
+     * `materialLevelAt` is where roughing *finishes*, and using it alone would
+     * fly a traverse through everything the operation has not got down to yet.
+     * `aboveZ` — the plane the next cut is dropping from — is the level of
+     * everything roughing has already been over. The material stands at
+     * whichever of the two is higher: ground already taken to its final level
+     * reads back as that level, ground not yet reached reads back as the plane
+     * above it, and ground the cutter never enters at all — the stripes of a
+     * relief, the islands a pocket is cut around — reads back as the stock's
+     * own face, because that is where it still is.
+     *
+     * Without this a roughing lead-in measured nothing: it was handed the
+     * default, which is `entryZ` everywhere, so it cleared the layer it was
+     * cutting rather than the material it was crossing. On a relief of separate
+     * pockets — a zebra is nothing else — the move from one pocket to the next
+     * then rapided through the stripe between them, at `entryZ + 1 mm`.
+     */
+    const standingAt = (aboveZ: number) => (x: number, y: number) =>
+      Math.min(0, Math.max(materialLevelAt(x, y), aboveZ));
+
     // The last layer sits exactly at the floor, where the only material left to
     // take is at the single deepest point of the ${noun} — so it clears next to
     // nothing, and all the real work happens on the layers above it. A stepdown
@@ -1842,7 +1884,7 @@ export function machineSurface(
 
             // Ramp in along the ring rather than plunging: the centre of an end
             // mill cuts at zero surface speed, and a deep layer pulls hard on it.
-            leadIn(path, above, opts.roughingPlungeRate, feed);
+            leadIn(path, above, opts.roughingPlungeRate, feed, standingAt(above));
 
             for (let i = 1; i < path.length; i++) {
               cutTo(path[i].x, path[i].y, z);
@@ -1881,11 +1923,13 @@ export function machineSurface(
             const last = run[run.length - 1];
             // The layer above is what the tool is dropping through, so that is
             // where the ramp starts — one stepdown, not the whole depth so far.
+            const above = Math.min(0, layerZ + layerStep);
             leadIn(
               [run[0], last],
-              Math.min(0, layerZ + layerStep),
+              above,
               opts.roughingPlungeRate,
-              opts.roughingFeedrate
+              opts.roughingFeedrate,
+              standingAt(above)
             );
 
             cutTo(last.x, last.y, layerZ);
