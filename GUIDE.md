@@ -43,6 +43,33 @@ Technical decisions, conventions, and architecture notes for the **PhysBox: Mesh
 * **Solid (Solid check active):** `contype="1" conaffinity="1"`. Enters the contact solver.
 * **Ephemeral (Solid check inactive):** `contype="0" conaffinity="0"`. Visual guide only; other bodies pass through.
 
+### 4a. Making scenery movable
+* A body whose every geom is ephemeral can touch nothing at all. That is right while it is welded in
+  place — the convex hull of a tree is a dome nothing should bump into — and it means that the moment
+  the body is given a joint it can only do one thing: accelerate through the floor forever. The oak
+  tree preset did exactly that the first time anyone switched it to 6-DOF.
+* So `restoreCollisionWhenMadeMovable` (`store/useStore.ts`) clears those flags at the moment a
+  **jointless** body is given its first joint, from the properties panel or over MCP.
+* Only when nothing in the body collides, and only on that transition. A body that already has one
+  colliding geom has been given a collider deliberately — a trunk cylinder under visual-only meshes,
+  say — and a body that *ships* jointed and ephemeral is nearly always a mechanism part that must not
+  collide: gear teeth that mesh by engine rather than by contact, rotor blades, a Newton's cradle rod.
+  Neither is touched, which is why the rule is not applied as a sweep at load time.
+
+### 4b. What a mesh body weighs
+* MuJoCo's default (`inertia="legacy"`) takes a mesh geom's mass and inertia from its **convex hull**.
+  For a box, a bracket or a building that is the same answer. For anything that mostly encloses air it
+  is not: the oak's 0.87 m³ of timber sits inside a crown-sized hull, which made the tree weigh 274
+  tonnes with its centre of mass 3.7 m up in mid-air between the branches.
+* `mjcf.ts` therefore emits `inertia="exact"` for any mesh that is closed and wound outward — checked
+  per mesh by `utils/meshIntegrity.ts`, which is also what `physics_get_scene_summary` reports
+  `watertight` from. An open or inside-out mesh keeps the hull behaviour, because an exact integral
+  over it would be meaningless or negative.
+* Volume is only half of it: MuJoCo assumes a density of 1000, water. A geom says what it is made of
+  with `density` (kg/m³) and lets its size do the rest — this is what distinguishes a tree from a
+  building of the same shape, and unlike an explicit `mass` it survives a rescale. Oak timber is 700,
+  concrete 2400, and a crown of leaves, being mostly the air between them, is single digits.
+
 ### 5. 3D multi-axis rotation (Euler representation)
 * Rotation is set as an explicit `[X, Y, Z]` Euler array.
 * Any stale `node.quat` is deleted on update so the MuJoCo compiler resolves rotation from the Euler array alone.

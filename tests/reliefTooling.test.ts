@@ -7,6 +7,8 @@ import {
   vBitConeHeight,
   generateReliefCarveGcode,
   DEFAULT_RELIEF_OPTIONS,
+  measureDetailMm,
+  recommendReliefTooling,
   type Heightmap,
 } from '../src/utils/reliefCarveExporter';
 import type { SceneGraph, SceneGeom } from '../src/types/scene';
@@ -190,5 +192,65 @@ describe('what the exported program says about its tooling', () => {
     expect(result.success).toBe(true);
     const naive = (result.totalCutDistanceMm / DEFAULT_RELIEF_OPTIONS.finishingFeedrate) * 60;
     expect(result.estimatedTimeSeconds).toBeGreaterThan(naive);
+  });
+});
+
+describe('measuring the narrowest valley the finishing bit has to enter', () => {
+  /**
+   * A flat board with two straight slots to full depth: a narrow one the full
+   * height of the board and a wide one over `wideFraction` of it.
+   */
+  function twoSlots(narrowMm: number, wideMm: number, depth: number, wideFraction = 1): Heightmap {
+    const step = 0.2;
+    const cols = 301;
+    const rows = 101;
+    const z = new Float32Array(cols * rows);
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const x = c * step;
+        const inNarrow = Math.abs(x - 15) <= narrowMm / 2;
+        const inWide = Math.abs(x - 45) <= wideMm / 2 && r < rows * wideFraction;
+        z[r * cols + c] = inNarrow || inWide ? -depth : 0;
+      }
+    }
+    return { minX: 0, maxX: 60, minY: 0, maxY: 20, cols, rows, stepX: step, stepY: step, z };
+  }
+
+  it('reads the valley that carries most of the area', () => {
+    // A short wide slot beside a long narrow one: the narrow one is the relief.
+    const narrow = measureDetailMm(twoSlots(3, 8, 5, 0.2), 5)!;
+    expect(narrow).toBeGreaterThan(2.4);
+    expect(narrow).toBeLessThan(3.6);
+    // The same slots the full height: now the wide one is most of the valley,
+    // and the narrow one is a line the bit is not sized to.
+    const wide = measureDetailMm(twoSlots(3, 8, 5), 5)!;
+    expect(wide).toBeGreaterThan(7);
+    expect(wide).toBeLessThan(8.5);
+  });
+
+  it('measures against the lowest point, not a nominal depth the relief never reaches', () => {
+    // A generated panel says it is 7 mm deep and cuts 5: the slot is still 3 mm wide.
+    const detail = measureDetailMm(twoSlots(3, 8, 5, 0.2), 7)!;
+    expect(detail).toBeGreaterThan(2.4);
+    expect(detail).toBeLessThan(3.6);
+  });
+
+  it('has nothing to say about a board with no valleys, or one that is all valley', () => {
+    const flat = twoSlots(3, 8, 5);
+    flat.z.fill(0);
+    expect(measureDetailMm(flat, 5)).toBeUndefined();
+    flat.z.fill(-5);
+    expect(measureDetailMm(flat, 5)).toBeUndefined();
+  });
+
+  it('sizes the finishing bit to fit the valley, where the board alone would not', () => {
+    const board = { reliefDepthMm: 4, planWidthMm: 300, planDepthMm: 200 };
+    const byBoard = recommendReliefTooling(board).finishingToolDiaMm!;
+    expect(byBoard).toBeGreaterThanOrEqual(6);
+    const fitted = recommendReliefTooling({ ...board, detailMm: 4 }).finishingToolDiaMm!;
+    expect(fitted).toBeLessThanOrEqual(4 * 0.8);
+    expect(fitted).toBeGreaterThanOrEqual(3);
+    // A wide-open relief is sized by the board as before.
+    expect(recommendReliefTooling({ ...board, detailMm: 40 }).finishingToolDiaMm).toBe(byBoard);
   });
 });

@@ -123,6 +123,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
       // written into state where they would sit shadowed and misleading.
       ...toolingOnly(recommendReliefTooling({
         reliefDepthMm: result.reliefDepthMm,
+        detailMm: result.detailMm,
         planWidthMm: result.carveBounds.maxX - result.carveBounds.minX,
         planDepthMm: result.carveBounds.maxY - result.carveBounds.minY,
         material: prev.material,
@@ -402,6 +403,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
             set={set}
             override={override}
             materialLabel={materialLabel}
+            bitePercent={result?.success ? result.roughingBitePercent : null}
           />
 
 

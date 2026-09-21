@@ -93,6 +93,7 @@ Every geom represents a collision and visual shape attached to a body:
   pos: [number, number, number] <- Optional local position offset [x, y, z]
   rgba: [number, number, number, number] <- Color array [r, g, b, opacity] (0.0 to 1.0)
   mass: number <- Mass of the geom
+  density: number <- Optional kg/m3 for what the geom is MADE OF; its volume then sets its mass. MuJoCo's default is 1000 (water). Ignored when mass is set. Oak ~700, pine ~500, concrete ~2400, steel ~7800; a tree crown or other mostly-air volume is single digits.
   friction: [number, number, number] <- Optional friction parameters [slide, spin, roll] (e.g. [1.0, 0.005, 0.0001])
   fromto: [number, number, number, number, number, number] <- Capsule line definition [x1,y1,z1, x2,y2,z2]
 
@@ -133,6 +134,8 @@ CRITICAL MODEL GENERATION GOTCHAS:
 6. RGBA ALPHA IS NOT TRANSPARENCY: The renderer draws every geom fully opaque regardless of the 4th `rgba` value. `rgba: [r, g, b, 0.3]` on a "guide" or "bounds" primitive renders as a solid shape occluding whatever it overlaps. To hide a geom, delete it; do not dim it.
 7. OPENSCAD TOP-LEVEL PARAMETERS: When generating OpenSCAD code, ALWAYS declare design variables (e.g. `wave_length = 50; // [10:5:200]`, `thickness = 2.0; // [0.5:0.5:10]`) on separate lines at the VERY TOP of the SCAD script, outside any `scale()`, `module`, or block definitions. Include OpenSCAD Customizer range comments `// [min:step:max]`; the app parses them into sliders.
 8. HAND-AUTHORED MESH WINDING: A `mesh` geom carries `vertices: [x0,y0,z0, ...]` (Three.js Y-up) and `faces: [i0,j0,k0, ...]`. Every triangle MUST be wound counter-clockwise seen from OUTSIDE the solid, so that (v1-v0)x(v2-v0) points away from the interior. Geoms are drawn single-sided, so a backwards triangle is not drawn at all: a surface built backwards does not look like an error, it looks like the body has gone half transparent and you are seeing its far inside wall through the front. Do not write face indices in ascending order and hope; derive each triangle's order from the outward direction of the face it belongs to. Prefer a `scad` script, which cannot get this wrong.
+9. A MESH IS WEIGHED BY WHAT IT ENCLOSES, AND ONLY IF IT IS CLOSED: a watertight, outward-wound mesh gets the mass of its real volume. Anything else falls back to MuJoCo's default, which is the mass and inertia of its CONVEX HULL. For a shape that mostly encloses air — a tree, a chair, an open frame — the hull can be a hundred times the volume, with a centre of mass floating in the gap between the parts, and the body then behaves like a top-heavy block of water rather than like the thing it depicts. Set `density` for what it is made of, and keep the mesh closed.
+10. MAKING SCENERY MOVABLE TURNS ITS COLLISION BACK ON: a body authored `contype: 0`/`conaffinity: 0` throughout cannot touch anything, which is right while it is welded in place and useless once it has a joint — it would only accelerate through the floor. Giving such a body its first joint clears those flags. A body that already has one colliding geom is left alone, as is anything that ships jointed and ghosted.
 
 ═══════════════════════════════════════════
 EXAMPLES

@@ -143,6 +143,45 @@ export function isProAccount(): boolean {
   return getStoredUser()?.subscription_tier === 'active';
 }
 
+/** Something readable for a response that carried no explanation of its own. */
+function statusSentence(status: number): string {
+  if (status === 413) return 'That was too large for the server to accept.';
+  if (status === 401 || status === 403) return 'Your session is not allowed to do that.';
+  if (status === 404) return 'The server has no such thing.';
+  if (status >= 500) return 'The server had a problem.';
+  return `The server refused the request (${status}).`;
+}
+
+/**
+ * Above this, a request body is gzipped before it is sent.
+ *
+ * Below it compression is not worth a pass over the string: the win is a few
+ * hundred bytes and the cost is a stream set-up on every keystroke's worth of
+ * preset sync. Above it the win is most of the payload — a scene is float text,
+ * which deflates about seven to one — and it is the difference between a relief
+ * being cloud-saved over a domestic uplink and not.
+ */
+const COMPRESS_ABOVE_BYTES = 256 * 1024;
+
+/**
+ * gzip, where the browser has it.
+ *
+ * `CompressionStream` is in every browser this app supports (it needs WebSerial
+ * to talk to a machine at all, which is narrower), but it is absent in Node,
+ * which is where the tests run — so a missing one is a reason to send the body
+ * as it is, not to fail the request. The API accepts both.
+ */
+async function gzip(body: string): Promise<Uint8Array | null> {
+  const Compression = (globalThis as { CompressionStream?: typeof CompressionStream }).CompressionStream;
+  if (!Compression) return null;
+  try {
+    const stream = new Blob([body]).stream().pipeThrough(new Compression('gzip'));
+    return new Uint8Array(await new Response(stream).arrayBuffer());
+  } catch {
+    return null;
+  }
+}
+
 async function request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
   const baseUrl = getApiBaseUrl();
   const token = getStoredAuthToken();
@@ -156,15 +195,36 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
     headers['Authorization'] = `Bearer ${token}`;
   }
 
+  let body = options.body;
+  if (typeof body === 'string' && body.length > COMPRESS_ABOVE_BYTES) {
+    const packed = await gzip(body);
+    if (packed) {
+      // Express inflates this before its own size limit is applied, so what the
+      // server measures is still the document, not the packet.
+      body = packed as unknown as BodyInit;
+      headers['Content-Encoding'] = 'gzip';
+    }
+  }
+
   const response = await fetch(`${baseUrl}${endpoint}`, {
     ...options,
+    body,
     headers,
   });
 
   if (!response.ok) {
-    const errorData = await response.json().catch(() => ({ error: response.statusText }));
+    /*
+     * Not every refusal comes from the API. A body over the parser's limit is
+     * rejected by Express before any route runs, and a proxy in front of it can
+     * answer with an HTML page — neither has an `error` field, and over HTTP/2
+     * there is no `statusText` either, so the fallback has to be able to stand
+     * on the status code alone. It used to read `HTTP error 413`, which is how a
+     * relief scene too big to sync announced itself.
+     */
+    const errorData = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+    const said = typeof errorData.error === 'string' ? errorData.error : '';
     throw new PhysBoxApiError(
-      errorData.error || `HTTP error ${response.status}`,
+      said || response.statusText || statusSentence(response.status),
       response.status,
       errorData
     );

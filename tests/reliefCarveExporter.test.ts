@@ -6,6 +6,7 @@ import {
   sampleHeightmap,
   DEFAULT_RELIEF_OPTIONS,
   recommendReliefTooling,
+  adaptiveBiteFraction,
 } from '../src/utils/reliefCarveExporter';
 import type { SceneGraph, SceneGeom } from '../src/types/scene';
 
@@ -665,6 +666,23 @@ describe('Adaptive roughing', () => {
     expect(lines(adaptive.gcode)).toBeLessThan(lines(raster.gcode) * 1.5);
   });
 
+  it('opens the bite up where the depth has no layers to give back', () => {
+    // A 6 mm relief: a 6.35 mm cutter clears it in two layers at 30% as well
+    // as at 20%, so the wider bite wins; a 3.175 mm cutter would need more
+    // layers at 30%, so it stays at 20%.
+    expect(adaptiveBiteFraction(6.35, 1.9, 6)).toBeGreaterThanOrEqual(0.3);
+    expect(adaptiveBiteFraction(3.175, 0.95, 6)).toBe(0.2);
+    // Deep enough that every layer counts, the light bite pays for itself.
+    expect(adaptiveBiteFraction(6.35, 1.9, 40)).toBeLessThanOrEqual(0.3);
+  });
+
+  it('reports the bite it took', () => {
+    const res = generateReliefCarveGcode(dome, { ...deep, roughingStrategy: 'adaptive' });
+    expect(res.roughingBitePercent).toBeGreaterThanOrEqual(20);
+    expect(res.roughingBitePercent).toBeLessThanOrEqual(45);
+    expect(res.gcode).toContain(`(${res.roughingBitePercent}% of the cutter)`);
+  });
+
   it('says what bite it is taking and what that buys', () => {
     const adaptive = generateReliefCarveGcode(dome, { ...deep, roughingStrategy: 'adaptive' });
     expect(adaptive.gcode).toMatch(/adaptive clear, [\d.]+ mm bite \(\d+% of the cutter\)/);
@@ -736,6 +754,31 @@ describe('Finishing pass strategies', () => {
     }
   });
 
+  it('stops after roughing when the finishing pass is off, and roughs to the surface', () => {
+    const full = generateReliefCarveGcode(dome, { ...base, roughingEnabled: true });
+    const rough = generateReliefCarveGcode(dome, { ...base, roughingEnabled: true, finishingEnabled: false });
+    expect(rough.success).toBe(true);
+    expect(rough.gcode).not.toContain('OP 2');
+    expect(rough.gcode).not.toContain('T2 M6');
+    expect(rough.toolChange).toBe(false);
+    expect(rough.finishingRasterLines).toBe(0);
+    expect(rough.gcode).toContain('Finishing   : none');
+    expect(rough.estimatedTimeSeconds).toBeLessThan(full.estimatedTimeSeconds);
+
+    // No allowance is left on: with a finishing pass to follow, roughing stops
+    // an allowance short of the surface; without one it goes to the surface.
+    const roughingFloor = (g: string) => Math.min(...zValues(g.slice(0, g.indexOf('OP 2') > 0 ? g.indexOf('OP 2') : g.length)));
+    const withAllowance = roughingFloor(full.gcode);
+    expect(roughingFloor(rough.gcode)).toBeLessThan(withAllowance - 0.05);
+    expect(roughingFloor(rough.gcode)).toBeGreaterThanOrEqual(withAllowance - DEFAULT_RELIEF_OPTIONS.roughingAllowanceMm - 1e-6);
+  });
+
+  it('refuses a job with neither pass', () => {
+    const none = generateReliefCarveGcode(dome, { ...base, roughingEnabled: false, finishingEnabled: false });
+    expect(none.success).toBe(false);
+    expect(none.error).toMatch(/one of them has to cut/);
+  });
+
   it('names the strategy in the G-code header, so a file says how it was cut', () => {
     const waterline = generateReliefCarveGcode(dome, { ...base, finishingStrategy: 'contour' });
     expect(waterline.gcode).toContain('waterline');
@@ -748,16 +791,18 @@ describe('Finishing pass strategies', () => {
   });
 
   it('takes the raster angle from the sweep axis when none is given', () => {
-    const alongY = generateReliefCarveGcode(dome, { ...base, finishingDirection: 'y' });
+    const alongY = generateReliefCarveGcode(dome, { ...base, finishingStrategy: 'raster', finishingDirection: 'y' });
     expect(alongY.gcode).toContain('raster at 90 degrees');
   });
 
-  it('leaves the default raster byte-for-byte as it was', () => {
-    // The new machinery is a generalisation, not a change: the strategy every
-    // existing project already has selected has to produce the file it did.
-    const explicit = generateReliefCarveGcode(dome, { ...base, finishingStrategy: 'raster', finishingAngleDeg: 0 });
+  it('finishes with the hybrid pattern unless told otherwise', () => {
+    // A raster terraces every wall that runs along its passes, and a relief
+    // has walls facing every way. Nobody should have to know that to get a
+    // smooth valley, so the default sends the steep ground to a waterline.
+    const explicit = generateReliefCarveGcode(dome, { ...base, finishingStrategy: 'hybrid' });
     const defaulted = generateReliefCarveGcode(dome, base);
     expect(defaulted.gcode).toBe(explicit.gcode);
+    expect(defaulted.gcode).toContain('hybrid');
   });
 
   it('cuts an angled raster off both axes', () => {

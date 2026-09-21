@@ -8,6 +8,7 @@ import { getStoredAuthToken } from '../utils/apiClient';
 import { useStore, getPhysicsWorkerClient } from '../store/useStore';
 import { createMeshMachineHandlers, setCurrentScene } from '../utils/machineMcp';
 import { compileToMJCF } from '../utils/mjcf';
+import { analyzeMesh } from '../utils/meshIntegrity';
 import { compileSCAD } from '../utils/openscad';
 import { getLiveCameraPose } from '../utils/liveCamera';
 import { makePresetNoteCard, updateOrCreateNotecard, type NoteCard } from '../utils/noteCards';
@@ -308,53 +309,26 @@ const bboxOf = (flatVerts: number[] | undefined) => {
  * scene which renders perfectly and exports as nothing, and it is not the kind
  * of thing anybody spots by looking.
  *
- * Three cheap facts: every edge used by exactly two triangles, no zero-area
- * triangles, and a positive signed volume (negative means the surface is inside
- * out). Edge keys are integers rather than strings because this runs for every
- * mesh in every scene summary.
- *
- * Skipped above a couple of hundred thousand triangles, where the pass would
- * cost more than the summary it is part of; the reply says so rather than
- * claiming the mesh is fine.
+ * The three checks live in utils/meshIntegrity.ts, because the MJCF compiler
+ * asks the same questions of the same mesh for a different reason — whether
+ * MuJoCo can integrate its true volume for its mass — and the two must not
+ * drift apart on what "closed" means.
  */
-const MAX_CHECKED_TRIANGLES = 200_000;
 function meshIntegrity(g: SceneGeom): Record<string, unknown> {
   const faces = g.faces || [];
   const pos = g.renderVertices || g.vertices || [];
   const triangles = faces.length / 3;
   if (!triangles || !pos.length) return {};
-  if (triangles > MAX_CHECKED_TRIANGLES) return { watertight: 'not checked — too many triangles' };
-
-  const vertexCount = pos.length / 3;
-  const edges = new Map<number, number>();
-  let degenerate = 0;
-  let volume = 0;
-  for (let i = 0; i < faces.length; i += 3) {
-    const t0 = faces[i], t1 = faces[i + 1], t2 = faces[i + 2];
-    if (t0 === t1 || t1 === t2 || t0 === t2) { degenerate++; continue; }
-    const tri = [t0, t1, t2];
-    for (let e = 0; e < 3; e++) {
-      const a = tri[e], b = tri[(e + 1) % 3];
-      const key = a < b ? a * vertexCount + b : b * vertexCount + a;
-      edges.set(key, (edges.get(key) ?? 0) + 1);
-    }
-    const a = t0 * 3, b = t1 * 3, c = t2 * 3;
-    volume += (pos[a] * (pos[b + 1] * pos[c + 2] - pos[b + 2] * pos[c + 1])
-      - pos[a + 1] * (pos[b] * pos[c + 2] - pos[b + 2] * pos[c])
-      + pos[a + 2] * (pos[b] * pos[c + 1] - pos[b + 1] * pos[c])) / 6;
-  }
-  let boundaryEdges = 0, nonManifoldEdges = 0;
-  for (const n of edges.values()) {
-    if (n === 1) boundaryEdges++;
-    else if (n > 2) nonManifoldEdges++;
-  }
-  const closed = boundaryEdges === 0 && nonManifoldEdges === 0 && degenerate === 0;
+  const m = analyzeMesh(pos, faces);
+  if (!m) return { watertight: 'not checked — too many triangles' };
   return {
-    watertight: closed,
-    ...(boundaryEdges ? { boundaryEdges } : {}),
-    ...(nonManifoldEdges ? { nonManifoldEdges } : {}),
-    ...(degenerate ? { degenerateTriangles: degenerate } : {}),
-    ...(closed && volume < 0 ? { windingInverted: true } : {}),
+    watertight: m.closed,
+    ...(m.boundaryEdges ? { boundaryEdges: m.boundaryEdges } : {}),
+    ...(m.nonManifoldEdges ? { nonManifoldEdges: m.nonManifoldEdges } : {}),
+    ...(m.degenerateTriangles ? { degenerateTriangles: m.degenerateTriangles } : {}),
+    ...(m.closed && m.volume < 0 ? { windingInverted: true } : {}),
+    // The case signed volume cannot see: some faces one way, some the other.
+    ...(m.closed && !m.consistentlyWound ? { windingMixed: true } : {}),
   };
 }
 

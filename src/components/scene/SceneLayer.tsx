@@ -11,6 +11,7 @@ import { useFrame, useThree, type ThreeEvent } from '@react-three/fiber';
 import { OrbitControls } from '@react-three/drei';
 import * as THREE from 'three';
 import { registerLiveCamera } from '../../utils/liveCamera';
+import { DEFAULT_EYE, DEFAULT_TOP_DOWN_EYE, DEFAULT_TARGET_Y } from '../../utils/frameScene';
 import { useStore } from '../../store/useStore';
 import { useOrbitEnable } from './useOrbitEnable';
 import { CsgNegativeGhosts } from './CsgGhosts';
@@ -79,8 +80,12 @@ export const CameraController = () => {
   const controlsRef = useRef<OrbitControlsImpl>(null);
   
   useEffect(() => {
+    // Both poses are the same distance out, so switching between them does not
+    // also change how big everything is drawn. That distance shows about 250 mm
+    // of world; it was 800 mm (and 1.8 m looking down), which is a framing for a
+    // rig rather than for a part — see utils/frameScene.
     if (cameraView === 'topDown') {
-      camera.position.set(0, 1.8, 0);
+      camera.position.set(...DEFAULT_TOP_DOWN_EYE);
       camera.up.set(0, 0, -1);
       camera.lookAt(0, 0, 0);
       if (controlsRef.current) {
@@ -88,11 +93,11 @@ export const CameraController = () => {
         controlsRef.current.update();
       }
     } else {
-      camera.position.set(0.8, 0.6, 0.8);
+      camera.position.set(...DEFAULT_EYE);
       camera.up.set(0, 1, 0);
-      camera.lookAt(0, 0.15, 0);
+      camera.lookAt(0, DEFAULT_TARGET_Y, 0);
       if (controlsRef.current) {
-        controlsRef.current.target.set(0, 0.15, 0);
+        controlsRef.current.target.set(0, DEFAULT_TARGET_Y, 0);
         controlsRef.current.update();
       }
     }

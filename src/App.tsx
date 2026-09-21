@@ -1,6 +1,7 @@
 
 import { Canvas, useThree } from '@react-three/fiber';
 import { Grid, Environment } from '@react-three/drei';
+import { DEFAULT_EYE } from './utils/frameScene';
 import { EffectComposer, N8AO } from '@react-three/postprocessing';
 import { SCULPT_BASES, type SculptBaseId } from './utils/sculptBases';
 import { downloadMeshGeomStl } from './utils/meshStlExport';
@@ -297,6 +298,54 @@ const PhysicsLoop = ({ isPlaying }: { model: unknown, data: unknown, mujoco: unk
   return null;
 };
 
+/**
+ * Keeps the grid's fade a fixed share of the view, however far out the camera
+ * is.
+ *
+ * drei's `fadeDistance` is a distance in metres, and the camera's is not: a
+ * fixed value means the fade is whatever the zoom happens to make of it. On a
+ * 40 mm part, viewed from 120 mm, a four-metre fade is thirty windows away and
+ * the graph paper is flat and hard-edged to the horizon; on a half-metre
+ * pendulum viewed from 800 mm the same number is five windows and the ground
+ * washes out right behind the model. Same setting, opposite complaints.
+ *
+ * So the fade follows the orbit distance instead — always GRID_FADE_RATIO
+ * viewing distances out — and the grid reads the same at every zoom. Written
+ * straight into the shader uniform in useFrame rather than through the prop,
+ * because the prop is React state and this changes on every frame of a drag.
+ */
+/*
+ * 4 viewing distances out, with fadeStrength 0.8 on the Grid below. Between the
+ * two numbers: the ground is at about 79% alpha where the part is standing,
+ * half gone a bit over two windows out and finished at four. 8 and 0.5 left it
+ * at 94% at the part and running to the horizon, which read as no fog at all.
+ */
+const GRID_FADE_RATIO = 4;
+
+/** What the grid mesh is called in the scene, so this can find it again. */
+const GRID_NAME = 'ground-grid';
+
+const GridFadeFollowsCamera = () => {
+  useFrame((state) => {
+    // Looked up from the live scene rather than held in a ref, the same way
+    // the near-plane effect in SceneLayer reads the camera through R3F's
+    // get(): this writes into an object R3F owns, and a value captured during
+    // render is not ours to modify.
+    const grid = state.scene.getObjectByName(GRID_NAME) as THREE.Mesh | undefined;
+    const material = grid?.material as THREE.ShaderMaterial | undefined;
+    const uniform = material?.uniforms?.fadeDistance;
+    if (!uniform) return;
+    // OrbitControls is `makeDefault`, so R3F holds it and its target is what
+    // the camera is actually circling — the distance to it is the scale of
+    // what is on screen. Falling back to the origin covers the frame or two
+    // before the controls mount.
+    const target = (state.controls as { target?: THREE.Vector3 } | null)?.target;
+    const distance = target ? state.camera.position.distanceTo(target) : state.camera.position.length();
+    uniform.value = Math.max(0.05, distance * GRID_FADE_RATIO);
+  });
+  return null;
+};
+
 // AxisLegendDrawer — lives inside the R3F Canvas, reads camera every frame and draws
 // MuJoCo XYZ axes onto an external HTML canvas element passed via ref.
 // MuJoCo coord system: X=right (red), Y=into screen (green), Z=up (blue)
@@ -504,7 +553,13 @@ const DropHandler = ({ addComponent, onImportFile, onImportImageFile }: {
 
 
 
-const CAMERA_CONFIG = { position: [0.8, 0.6, 0.8] as [number, number, number], fov: 45, near: 0.01, far: 1000 };
+/**
+ * The pose the app opens in, before any scene has been framed. 45° of vertical
+ * FOV at DEFAULT_EYE puts about 250 mm of world across the window — the size of
+ * the parts made here — where it used to put 660 mm and draw everything at
+ * roughly two fifths the size. See utils/frameScene.
+ */
+const CAMERA_CONFIG = { position: DEFAULT_EYE, fov: 45, near: 0.01, far: 1000 };
 
 const getSyncedSceneGraph = (
   scene: SceneGraph,
@@ -3340,11 +3395,13 @@ function App() {
                 toward white, so this is the only extra light left. */}
             <directionalLight position={[-2, 1.2, -1.5]} intensity={darkMode ? 0.12 : 0.15} />
             {/* The shadow camera is an orthographic box, and its default is +/-5m
-                with a 512px map. This scene lives at bench scale — the grid's
-                cells are 100mm and the camera sits 800mm out — so the default
+                with a 512px map. This scene lives at part scale — the camera
+                sits about 300mm out and shows 250mm of world — so the default
                 spends its whole depth texture on empty space and resolves a
                 part's shadow at roughly 20mm per texel, which is mush. Bounded
-                to +/-2m at 2048px it lands near 2mm per texel instead.
+                to +/-0.8m at 2048px it lands near 0.8mm per texel instead,
+                which is what a 250mm part needs to cast a shadow with an edge
+                on it rather than a grey cloud.
                 normalBias offsets the lookup along the surface normal, which is
                 what keeps a body resting flat on the ground from shadow-acneing
                 itself into stripes. 0.01 was tuned against that case — coarse,
@@ -3358,12 +3415,12 @@ function App() {
               intensity={darkMode ? 1.4 : 1.2}
               castShadow
               shadow-mapSize={[2048, 2048]}
-              shadow-camera-left={-2}
-              shadow-camera-right={2}
-              shadow-camera-top={2}
-              shadow-camera-bottom={-2}
+              shadow-camera-left={-0.8}
+              shadow-camera-right={0.8}
+              shadow-camera-top={0.8}
+              shadow-camera-bottom={-0.8}
               shadow-camera-near={0.1}
-              shadow-camera-far={12}
+              shadow-camera-far={6}
               shadow-normalBias={0.03}
             />
             {/* Double-sided: drei's Grid defaults to BackSide, so the graph
@@ -3371,29 +3428,44 @@ function App() {
                 which it does whenever you orbit under a part to look at its
                 underside, and losing the ground is losing the only reference
                 for where the part is. */}
-            {/* Fades at 4 m, which is where the rest of this scene already
-                stops: the shadow camera is +/-2 m and the shadow catcher is a
-                4 m plane, so past that there is ground drawn but nothing
-                grounded on it. At 12 m the grid ran three times further than
-                anything that could cast onto it, and the only thing that extra
-                ground did was make every bench-scale part read as small
-                against a horizon it would never reach.
+            {/* Fades at 1.6 m, which is where the rest of this scene already
+                stops: the shadow camera is +/-0.8 m and the shadow catcher is a
+                1.6 m plane, so past that there is ground drawn but nothing
+                grounded on it. The floor is also the main thing the eye judges
+                a part's size against — a horizon six windows away is what made
+                a 35 mm part read as a dot on an airfield — so it ends a few
+                part-widths out and no further.
 
                 Still `infiniteGrid`: it is the fade that is pulled in, not the
-                plane, so there is no visible edge to the world. Presets bigger
-                than this — oak_tree is a life-size 11 m tree — carry their own
-                camera framing and are unaffected. */}
+                plane, so there is no visible edge to the world.
+
+                fadeDistance here is only the value the first frame is drawn
+                with: GridFadeFollowsCamera takes it over and keeps it at a
+                fixed multiple of the orbit distance, so the fade is the same
+                at every zoom instead of being absent on a 40mm part and heavy
+                on a half-metre one.
+
+                fadeStrength is the shape of that falloff, not its reach: drei
+                draws the grid at pow(1 - dist/fadeDistance, fadeStrength). At 1
+                the fade starts at the camera and the graph paper is already
+                half washed out where the part is standing, which reads as haze
+                over the model rather than as ground running out. 0.8 keeps the
+                grid mostly solid around the part and spends the rest of the
+                fade further out, where it is doing the job of hiding the
+                horizon — see GRID_FADE_RATIO for the pair of them. */}
             <Grid
+              name={GRID_NAME}
               infiniteGrid
               side={THREE.DoubleSide}
-              fadeDistance={4}
-              fadeStrength={1}
+              fadeDistance={1.6}
+              fadeStrength={0.8}
               sectionSize={(gridCellSizeMm / 1000) * 5}
               cellSize={gridCellSizeMm / 1000}
               cellColor={darkMode ? '#334155' : '#cbd5e1'}
               sectionColor={darkMode ? '#64748b' : '#94a3b8'}
               position={[0, -0.005, 0]}
             />
+            <GridFadeFollowsCamera />
 
             {/* Every geom already casts and receives, but until now nothing on
                 the ground caught any of it: drei's Grid is a custom shader that
@@ -3403,9 +3475,9 @@ function App() {
                 identical to one sitting down.
                 ShadowMaterial draws nothing but the shadow itself, so the grid
                 still shows through underneath. Sized to match the shadow
-                camera's 4m footprint exactly — a larger plane would sample
+                camera's 1.6m footprint exactly — a larger plane would sample
                 outside the depth texture and smear its edge texels outward.
-                raycast is stubbed off deliberately: a 4m plane across the
+                raycast is stubbed off deliberately: a plane across the
                 viewport floor would otherwise swallow every background click,
                 and onPointerMissed — the only thing that clears the selection —
                 would never fire again. */}
@@ -3415,7 +3487,7 @@ function App() {
               receiveShadow
               raycast={() => null}
             >
-              <planeGeometry args={[4, 4]} />
+              <planeGeometry args={[1.6, 1.6]} />
               <shadowMaterial transparent opacity={darkMode ? 0.5 : 0.32} depthWrite={false} />
             </mesh>
             

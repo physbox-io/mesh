@@ -64,6 +64,48 @@ const COALESCE_MS = 750;
 const RETRY_MS = 5000;
 const MAX_RETRY_MS = 120000;
 
+/**
+ * The largest document the account will take, mirrored from the API.
+ *
+ * Checked here as well as there because the alternative is discovering it by
+ * uploading: a document over the limit is over it on every save for the rest of
+ * the session, and that is a stream of refused multi-megabyte POSTs from a
+ * machine that is very likely driving a mill over USB at the time.
+ *
+ * `physbox_api`'s `MAX_DOCUMENT_BYTES` is 32 MB — set by that service's memory,
+ * not by storage — and the body is gzipped on the way out, so a relief goes up
+ * at about a seventh of this. Kept a little under the server's number so a
+ * document that passes here is not then refused there over the difference
+ * between a string's length and its UTF-8 byte count.
+ */
+const MAX_DOCUMENT_BYTES = 31 * 1024 * 1024;
+
+/**
+ * Past this, a document is saved on a slower clock.
+ *
+ * Autosave's three seconds is right for a scene of primitives. For thirty
+ * megabytes of vertices it means serialising, compressing and uploading the
+ * whole thing every few seconds — on the machine that is streaming G-code — to
+ * capture edits somebody is still in the middle of making. The work is already
+ * safe locally; the cloud copy can be a minute behind.
+ */
+const BIG_DOCUMENT_BYTES = 2 * 1024 * 1024;
+const BIG_IDLE_MS = 20000;
+const BIG_MAX_WAIT_MS = 120000;
+
+/** Bytes, as something to put in a sentence. */
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  return `${Math.round(bytes / 1024)} kB`;
+}
+
+/** What the badge says when the document cannot fit in the account. */
+function tooLargeMessage(bytes: number): string {
+  return `Too big to sync (${formatBytes(bytes)} of ${formatBytes(
+    MAX_DOCUMENT_BYTES
+  )}) — saved on this device.`;
+}
+
 export type AutosaveState =
   | 'idle'
   | 'pending'
@@ -158,6 +200,15 @@ class CloudAutosave {
   private primed = false;
   /** Set after a conflict; nothing is written again until it is cleared. */
   private blocked = false;
+  /**
+   * Set while the document is bigger than the account will take.
+   *
+   * Separate from `blocked` because it is not a decision anybody has to make and
+   * it can stop being true on its own: delete the imported mesh and the next
+   * serialisation is under the limit, so this clears and saving resumes. A
+   * conflict needs a person; this needs an edit.
+   */
+  private tooLarge = false;
 
   constructor() {
     if (typeof window !== 'undefined') {
@@ -243,6 +294,23 @@ class CloudAutosave {
       return;
     }
 
+    /*
+     * The size gate goes here, where the document has just been serialised
+     * anyway, so it costs a `.length` rather than a second pass over a scene.
+     */
+    if (serialized.length > MAX_DOCUMENT_BYTES) {
+      this.tooLarge = true;
+      this.pendingHash = null;
+      this.clearTimers();
+      this.set({ state: 'offline', message: tooLargeMessage(serialized.length) });
+      return;
+    }
+    if (this.tooLarge) {
+      // Back under the limit — whatever was making it big is gone.
+      this.tooLarge = false;
+      this.set({ state: 'idle', message: null });
+    }
+
     const next = hash(serialized);
     if (next === this.lastSentHash) return;
     if (next === this.pendingHash) {
@@ -255,11 +323,13 @@ class CloudAutosave {
     this.pendingHash = next;
     this.set({ state: 'pending' });
 
+    const big = serialized.length > BIG_DOCUMENT_BYTES;
+
     if (this.idleTimer) clearTimeout(this.idleTimer);
-    this.idleTimer = setTimeout(() => this.save(), IDLE_MS);
+    this.idleTimer = setTimeout(() => this.save(), big ? BIG_IDLE_MS : IDLE_MS);
 
     if (!this.maxWaitTimer) {
-      this.maxWaitTimer = setTimeout(() => this.save(), MAX_WAIT_MS);
+      this.maxWaitTimer = setTimeout(() => this.save(), big ? BIG_MAX_WAIT_MS : MAX_WAIT_MS);
     }
   }
 
@@ -280,6 +350,16 @@ class CloudAutosave {
    */
   async saveExplicit(name: string, data: unknown, label: string): Promise<void> {
     if (!this.enabled() || this.blocked) return;
+    try {
+      const serialized = JSON.stringify(data);
+      if (serialized.length > MAX_DOCUMENT_BYTES) {
+        this.tooLarge = true;
+        this.set({ state: 'offline', message: tooLargeMessage(serialized.length) });
+        return;
+      }
+    } catch {
+      return;
+    }
     const id = ensureDocumentId();
     this.clearTimers();
     this.set({ state: 'saving', documentId: id });
@@ -347,7 +427,7 @@ class CloudAutosave {
 
   private async save(): Promise<void> {
     this.clearTimers();
-    if (this.inFlight || this.blocked || this.pendingHash === null) return;
+    if (this.inFlight || this.blocked || this.tooLarge || this.pendingHash === null) return;
     if (!this.enabled()) return;
 
     const id = ensureDocumentId();
@@ -413,8 +493,24 @@ class CloudAutosave {
     }
 
     if (err instanceof PhysBoxApiError && err.status === 413) {
-      this.blocked = true;
-      this.set({ state: 'offline', message: err.message });
+      /*
+       * The gate in `ingest` should have caught this, so reaching here means the
+       * server's limit is lower than the one compiled in — say what the server
+       * said if it managed to say anything, and otherwise say something a person
+       * can act on rather than `HTTP error 413`.
+       *
+       * `tooLarge` rather than `blocked`: shrinking the document must be enough
+       * to start saving again, without a reload.
+       */
+      this.tooLarge = true;
+      this.pendingHash = null;
+      const sizeBytes = typeof err.body.sizeBytes === 'number' ? err.body.sizeBytes : null;
+      this.set({
+        state: 'offline',
+        message: err.code === 'document_too_large'
+          ? err.message
+          : tooLargeMessage(sizeBytes ?? MAX_DOCUMENT_BYTES),
+      });
       return;
     }
 
@@ -441,7 +537,7 @@ class CloudAutosave {
    */
   private flushOnUnload(): void {
     this.ingest();
-    if (this.pendingHash === null || this.blocked || !this.enabled()) return;
+    if (this.pendingHash === null || this.blocked || this.tooLarge || !this.enabled()) return;
     void this.save();
   }
 
@@ -458,6 +554,7 @@ class CloudAutosave {
       this.set({ revision: null });
     }
     this.blocked = false;
+    this.tooLarge = false;
     this.lastSentHash = null;
     this.set({ state: 'pending', conflictRevision: null, message: null });
     await this.save();
@@ -472,6 +569,7 @@ class CloudAutosave {
   forkDocument(): void {
     writeStored(DOCUMENT_ID_KEY, null);
     this.blocked = false;
+    this.tooLarge = false;
     this.lastSentHash = null;
     // A new id has no revision on the server, and must not inherit the old one's.
     this.primed = true;

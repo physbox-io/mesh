@@ -124,6 +124,17 @@ export interface PatternSpec {
    * it is in shadow and barely orange any more.
    */
   depthFraction?: number;
+  /**
+   * The pattern is two levels with walls between them, rather than a graded
+   * surface.
+   *
+   * Roughing with a flat mill leaves such a pattern already finished: the tops
+   * and floors are flat because the cutter is, and only the walls carry the
+   * roughing layers' steps. The ball-nose finish then spends most of a day
+   * smoothing walls a few millimetres tall, so the dialog offers to stop after
+   * roughing, and opens that way for these.
+   */
+  flatTopped?: boolean;
 }
 
 /** What the dialog opens at when a pattern does not ask for something else. */
@@ -373,6 +384,7 @@ const waves: PatternSpec = {
 
 const topographic: PatternSpec = {
   id: 'topographic',
+  flatTopped: true,
   label: 'Topographic',
   blurb: 'A landscape cut into flat terraces, like a contour model.',
   caveat: 'Every terrace is flat, so this is the one pattern here a flat end mill cuts as well as a ball nose.',
@@ -505,6 +517,7 @@ const crackedEarth: PatternSpec = {
 
 const masonry: PatternSpec = {
   id: 'masonry',
+  flatTopped: true,
   label: 'Brick Courses',
   blurb: 'Courses of brick with recessed mortar, in a running, stack or Flemish bond.',
   defaults: {
@@ -611,6 +624,7 @@ const masonry: PatternSpec = {
 
 const studs: PatternSpec = {
   id: 'studs',
+  flatTopped: true,
   label: 'Stud Plate',
   blurb: 'A flat plate with rows of round studs standing proud of it.',
   caveat:
@@ -913,6 +927,7 @@ function spotAt(
 
 const animalPrint: PatternSpec = {
   id: 'animal_print',
+  flatTopped: true,
   label: 'Animal Print',
   blurb: 'Tiger and zebra bars, leopard rosettes, cheetah spots, giraffe patches, cow blotches.',
   defaults: { coat: 'tiger', scaleMm: 22, boldness: 0.45, wander: 0.9, seed: 7 },

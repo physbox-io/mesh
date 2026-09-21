@@ -57,6 +57,8 @@ export const GeneratePatternModal: React.FC = () => {
 
   const [options, setOptions] = useState<PatternOptions>({});
   const [depthMm, setDepthMm] = useState<number>(6);
+  /** Stop after the flat mill, or send the ball nose over it afterwards. */
+  const [finish, setFinish] = useState<'rough' | 'smooth'>('smooth');
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   /*
@@ -70,6 +72,7 @@ export const GeneratePatternModal: React.FC = () => {
   if (spec && syncedId !== spec.id) {
     setSyncedId(spec.id);
     setOptions({ ...spec.defaults });
+    setFinish(spec.flatTopped ? 'rough' : 'smooth');
     // Each pattern says how deep it wants to be read at; see `depthFraction`.
     const wanted = stock.thicknessMm * (spec.depthFraction ?? DEFAULT_DEPTH_FRACTION);
     const room = stock.thicknessMm - PANEL_BASE_MM - RELIEF_FLOOR_MM;
@@ -154,6 +157,8 @@ export const GeneratePatternModal: React.FC = () => {
       // The board covers the whole stock, so there is no background to take
       // down to the floor. 'carve' would cut a moat round nothing.
       backgroundMode: 'skip',
+      // See `flatTopped`: a two-level pattern is finished by the roughing bit.
+      finishingEnabled: finish === 'smooth',
     };
     loadGeneratedScene(scene, carve);
 
@@ -175,6 +180,7 @@ export const GeneratePatternModal: React.FC = () => {
       markdown:
         `# ${spec.label}\n\n${spec.blurb}\n\n` +
         `${settings}\n- **Carve depth:** ${depthMm} mm\n` +
+        `- **Cut:** ${finish === 'rough' ? 'roughing only, flat mill' : 'roughed, then ball-nose finish'}\n` +
         `- **Stock:** ${stock.widthMm} x ${stock.depthMm} x ${stock.thicknessMm} mm\n\n` +
         `The board is the panel, and the pattern is its top face. Relief carve is ` +
         `already set up for it — the peaks are untouched stock and only the valleys are cut.` +
@@ -282,6 +288,20 @@ export const GeneratePatternModal: React.FC = () => {
                 onChange={(v) => { if (v !== undefined) setDepthMm(v); }}
                 className={inputClass}
               />
+            </Field>
+
+            <Field
+              label="Cut"
+              hint="Rough only: the flat mill leaves flat tops and floors and stepped walls, in about an hour. Finish: the ball nose then smooths every wall, which can take a day."
+            >
+              <select
+                value={finish}
+                onChange={(e) => setFinish(e.target.value as 'rough' | 'smooth')}
+                className={`${inputClass} cursor-pointer`}
+              >
+                <option value="rough">Rough only — flat mill, fast</option>
+                <option value="smooth">Rough, then finish — ball nose, smooth walls, slow</option>
+              </select>
             </Field>
 
             <Field

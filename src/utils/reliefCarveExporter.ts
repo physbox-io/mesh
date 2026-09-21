@@ -171,8 +171,9 @@ export interface ReliefCarveOptions {
   roughingStrategy: 'raster' | 'adaptive';
   /**
    * Radial bite for the roughing pass, mm. Zero derives one from the strategy:
-   * 45% of the cutter for a raster, 20% for an adaptive clear, which is the
-   * trade the deeper stepdown pays for.
+   * 45% of the cutter for a raster, and for an adaptive clear whatever bite
+   * between 20% and 30% clears the depth in the fewest passes — see
+   * `adaptiveBiteFraction`.
    */
   roughingStepoverMm: number;
   /** Roughing cut feedrate in mm/min. */
@@ -181,6 +182,17 @@ export interface ReliefCarveOptions {
   roughingPlungeRate: number;
   /** Material left on the surface for the finishing pass to take off, in mm. */
   roughingAllowanceMm: number;
+  /**
+   * Run the finishing pass at all.
+   *
+   * Off, the roughing bit cuts straight to the surface with no allowance and
+   * the job ends there: flat tops and floors exactly as the flat mill leaves
+   * them, and every sloped wall stepped by the roughing layers. On a pattern
+   * that is flat-topped anyway — a giraffe hide, a brick course, a terrace
+   * model — that is the finished piece, in a fraction of the time the ball
+   * nose would take to smooth walls nobody is looking at. Needs roughing on.
+   */
+  finishingEnabled: boolean;
   /** Finishing tool shape. A ball nose is what makes a curved surface smooth. */
   finishingToolType: CutterShape;
   /**
@@ -229,6 +241,9 @@ export interface ReliefCarveOptions {
    * the finished surface. Everything else here trades cutting time for a
    * surface that does not carry a single direction across the whole model. See
    * utils/finishingPaths.ts.
+   *
+   * Defaults to 'hybrid': a raster terraces every wall that runs along its
+   * passes, and a relief has walls running every way.
    */
   finishingStrategy: FinishingStrategy;
   /**
@@ -322,6 +337,7 @@ export const DEFAULT_RELIEF_OPTIONS: ReliefCarveOptions = {
   roughingFeedrate: 1200,
   roughingPlungeRate: 300,
   roughingAllowanceMm: 0.5,
+  finishingEnabled: true,
   finishingToolType: 'ball_nose',
   finishingVBitAngleDeg: 60,
   finishingToolDiaMm: 3.175,
@@ -329,11 +345,21 @@ export const DEFAULT_RELIEF_OPTIONS: ReliefCarveOptions = {
   finishingGeometry: 'upcut',
   finishingDepthMode: 'auto',
   finishingStepdownMm: 0,
-  finishingStepoverPercent: 15,
+  // A ball nose at a quarter of its diameter leaves a scallop of 3% of its
+  // radius: 0.05 mm on a 3.175 mm ball, which wood does not show and a sanding
+  // block takes off. The old 15% left a third of that and took nearly twice as
+  // long to do it.
+  finishingStepoverPercent: 25,
   finishingFeedrate: 1500,
   finishingPlungeRate: 300,
   finishingDirection: 'x',
-  finishingStrategy: 'raster',
+  // Hybrid, not raster. A raster only leaves a smooth wall where the passes
+  // cross it; a wall running along the passes is built from neighbouring
+  // passes at different heights and comes out terraced, by the stepover times
+  // the tangent of the slope. A relief has walls facing every way, so half of
+  // them terrace. Hybrid hands anything steeper than the cutover to a
+  // waterline and costs nothing on flat ground, where it is a plain raster.
+  finishingStrategy: 'hybrid',
   finishingSteepAngleDeg: 35,
   leadInAngleDeg: 15,
   toolBodyClearance: true,
@@ -371,6 +397,8 @@ export interface ReliefCarveResult {
   /** Cutting time plus rapids and plunges, in seconds. */
   estimatedTimeSeconds: number;
   roughingPassCount: number;
+  /** The radial bite roughing actually took, as a percentage of its cutter. */
+  roughingBitePercent: number;
   finishingRasterLines: number;
   /** Whether the job stops for a tool change between the two passes. */
   toolChange: boolean;
@@ -378,6 +406,8 @@ export interface ReliefCarveResult {
   scaleFactor: number;
   /** How deep the relief actually came out, which in 'proportional' mode is not the carve depth. */
   reliefDepthMm: number;
+  /** The narrowest valley in the relief, in mm; see `measureDetailMm`. */
+  detailMm?: number;
   /**
    * How much the height is stretched relative to the plan, 1 being the model's
    * own proportions. What 'fill' mode leaves implicit.
@@ -478,6 +508,12 @@ const round2 = (n: number) => Math.round(n * 100) / 100;
 const STANDARD_BIT_DIAS = [0.8, 1.0, 1.5, 2.0, 3.0, 3.175, 4.0, 6.0, 6.35];
 
 export interface ReliefToolingInput {
+  /**
+   * The narrowest valley the finishing bit has to get into, in mm, as
+   * `measureDetailMm` reads it off the relief. Left out, the bit is sized from
+   * the board alone.
+   */
+  detailMm?: number;
   /** How deep the relief goes, in mm. */
   reliefDepthMm: number;
   /** Plan-view size of the carved area in mm. */
@@ -532,10 +568,21 @@ export function recommendReliefTooling(input: ReliefToolingInput): Partial<Relie
   const straightShank = (d: number) => autoShankDia(d) <= d + 1e-6;
   const canReach = (d: number) =>
     depth <= (straightShank(d) ? d * MAX_AVAILABLE_REACH_DIAMETERS : autoFluteLength(d));
-  const finishDia =
+  const byBoard =
     STANDARD_BIT_DIAS.find((d) => d >= detailFloor && canReach(d)) ??
     STANDARD_BIT_DIAS.find(canReach) ??
     STANDARD_BIT_DIAS[STANDARD_BIT_DIAS.length - 1];
+
+  // A bit has to get into the valleys it is finishing. Sized from the board
+  // alone, a 300 mm giraffe hide got a 6 mm ball for 4 mm seams: it rode the
+  // seam tops and never touched a floor. `detailMm` is the widest disc that
+  // reaches the valleys at six tenths of the depth; the floor below that is
+  // narrower still where the walls slope, hence the margin. Of the bits that
+  // fit, take the one the board rule would have picked, or the largest.
+  const detailCap = input.detailMm !== undefined && input.detailMm > 0 ? input.detailMm * 0.8 : Infinity;
+  const fitting = STANDARD_BIT_DIAS.filter((d) => d <= detailCap && canReach(d));
+  const finishDia =
+    byBoard <= detailCap ? byBoard : fitting.length > 0 ? fitting[fitting.length - 1] : byBoard;
 
   // The waste is wide open, so the roughing bit is limited by the part rather
   // than by reach. A fifth of the narrow side keeps it inside the shape.
@@ -608,7 +655,7 @@ export function recommendReliefTooling(input: ReliefToolingInput): Partial<Relie
     // the cutter, and enough flute to see the floor.
     finishingShankDiaMm: finishDia,
     finishingFluteLengthMm: round2(Math.max(autoFluteLength(finishDia), depth + 2)),
-    finishingStepoverPercent: 12,
+    finishingStepoverPercent: 25,
     finishingFeedrate: finishSpeeds.feedMmMin,
     finishingPlungeRate: finishSpeeds.plungeMmMin,
     // Sweep the long way: fewer, longer passes and fewer lead-ins.
@@ -701,10 +748,10 @@ export function deriveReliefFeeds(
     spindleRpm: rpm,
     finishingFeedrate: finish.feedMmMin,
     finishingPlungeRate: finish.plungeMmMin,
-    // A ball nose leaves a scallop of about 1/8 of its radius at this spacing,
+    // A ball nose leaves a scallop of about 3% of its radius at this spacing,
     // which sands out; a V-bit's ridge is set by its angle instead, and a flat
     // mill leaves none at all so it can stride out.
-    finishingStepoverPercent: 12,
+    finishingStepoverPercent: 25,
     // 0 means "one bite as deep as the cutter is wide", which is what a
     // finishing pass over already-roughed stock can take.
     finishingStepdownMm: 0,
@@ -714,6 +761,42 @@ export function deriveReliefFeeds(
       Math.round(Math.min(depth / 2, Math.max(0.2, roughDia * (metal ? 0.1 : soft ? 0.4 : 0.3))) * 100) / 100,
     roughingAllowanceMm: Math.round(Math.min(0.5, Math.max(0.1, finishDia / 8)) * 100) / 100,
   };
+}
+
+/**
+ * The radial bite an adaptive clear should take, as a fraction of the cutter.
+ *
+ * A light bite buys depth: `stepdownForEngagement` lets a 20% bite go about
+ * three times deeper than a 45% one. That is only worth having where the depth
+ * has layers to give back. On a 6 mm relief a 6.35 mm cutter clears the whole
+ * thing in two layers at 30% as surely as at 20%, and the 20% bite then just
+ * walks half as much again of path for nothing — a third of the roughing time
+ * on a foliage panel, measured. The cost of a bite is the layers it takes
+ * divided by the width it takes them at, which is the path length to within a
+ * constant, so the bite is the one that minimises that, the wider one on a tie.
+ *
+ * The layer count is worked out exactly as the roughing pass lays them.
+ */
+export function adaptiveBiteFraction(toolDiaMm: number, baseStepdownMm: number, roughDepthMm: number): number {
+  const depth = Math.max(0, roughDepthMm);
+  let best = 0.2;
+  let bestCost = Infinity;
+  // Nothing wider than 30%: measured on six reliefs with two cutters, 40%
+  // was slower than 30% in every case but one, and 30% was never much worse
+  // than 20%.
+  for (const e of [0.2, 0.25, 0.3]) {
+    const stepdown = stepdownForEngagement(toolDiaMm, e, Math.max(0.1, baseStepdownMm));
+    const layerStep = Math.min(stepdown, Math.max(0.1, depth / 2));
+    let layers = 0;
+    for (let z = -layerStep; z > -depth + 1e-6; z -= layerStep) layers++;
+    if (depth > 1e-6) layers++;
+    const cost = layers / e;
+    if (cost <= bestCost) {
+      bestCost = cost;
+      best = e;
+    }
+  }
+  return best;
 }
 
 /** A finishing point this close to the straight line through its neighbours is noise (mm). */
@@ -769,6 +852,125 @@ export interface Heightmap {
   stepY: number;
   /** Surface Z per cell, row-major with row 0 at minY. Stock top is 0. */
   z: Float32Array;
+}
+
+/**
+ * How narrow the relief's valleys are, in mm — the widest bit that still gets
+ * into them.
+ *
+ * The cells below six tenths of the way to the relief's floor are the valley
+ * floors and lower walls. The floor is the depth one cell in a hundred lies
+ * below, not the nominal depth and not the single lowest sample: a generated
+ * panel carries a base its pattern never reaches, and a sample that catches
+ * the panel's side wall reads the base, which put the threshold in the last
+ * few tenths of a millimetre of every seam and measured hairlines. A disc of
+ * diameter d reaches the part of that area that survives an opening by d:
+ * erode by d/2, so only the cells a disc centre can sit in are left, then
+ * grow back by d/2 to get the area such discs sweep. The answer is the
+ * largest d that still sweeps half the valley area — the typical valley by
+ * area, rather than the finest line, because a sampled relief always has
+ * hairlines at the cell level and a bit sized to those is a bit sized to
+ * noise. A giraffe hide's seams are all the valley there is, so this is the
+ * seam; a wood grain's is its wide earlywood bands, not its ring lines.
+ *
+ * Both erosion and growth are chamfer distance transforms, so the whole thing
+ * is linear in the grid and the search over d is a handful of them.
+ *
+ * Undefined when the relief has no valleys or is all valley, and both mean
+ * the same thing: nothing here constrains the bit.
+ */
+export function measureDetailMm(hm: Heightmap, depthMm: number): number | undefined {
+  const { cols, rows, z } = hm;
+  if (cols < 3 || rows < 3 || depthMm <= 0) return undefined;
+  const sorted = Float32Array.from(z).sort();
+  const lowest = Math.min(0, sorted[Math.floor(sorted.length * 0.01)]);
+  if (lowest > -1e-6) return undefined;
+  const threshold = 0.6 * lowest;
+  const deep = new Uint8Array(cols * rows);
+  let deepCells = 0;
+  for (let i = 0; i < z.length; i++) {
+    if (z[i] <= threshold) {
+      deep[i] = 1;
+      deepCells++;
+    }
+  }
+  if (deepCells === 0 || deepCells === z.length) return undefined;
+
+  const cell = (hm.stepX + hm.stepY) / 2;
+  const toWall = chamferDistance(deep, cols, rows, 1);
+
+  const coverage = (diaMm: number): number => {
+    const r = diaMm / 2 / cell;
+    // Cells a disc of this size can centre on.
+    const core = new Uint8Array(cols * rows);
+    let any = false;
+    for (let i = 0; i < toWall.length; i++) {
+      if (deep[i] && toWall[i] >= r) {
+        core[i] = 1;
+        any = true;
+      }
+    }
+    if (!any) return 0;
+    const toCore = chamferDistance(core, cols, rows, 0);
+    let swept = 0;
+    for (let i = 0; i < toCore.length; i++) if (deep[i] && toCore[i] <= r) swept++;
+    return swept / deepCells;
+  };
+
+  // Coverage only falls as the disc grows, so bisect on it.
+  const ENOUGH = 0.5;
+  let lo = cell;
+  if (coverage(lo) < ENOUGH) return Math.round(lo * 100) / 100;
+  let hi = Math.max(hm.maxX - hm.minX, hm.maxY - hm.minY);
+  if (coverage(hi) >= ENOUGH) return undefined;
+  while (hi - lo > 0.1) {
+    const mid = (lo + hi) / 2;
+    if (coverage(mid) >= ENOUGH) lo = mid;
+    else hi = mid;
+  }
+  return Math.round(lo * 100) / 100;
+}
+
+/**
+ * Distance, in cells, from every cell to the nearest cell whose mark differs
+ * from `from` — for `from` = 1, how far each marked cell is from an unmarked
+ * one, and 0 on the unmarked cells themselves. The 3-4 chamfer, which is
+ * within a few percent of Euclidean and two passes over the grid. Cells that
+ * never see the other kind come back as Infinity.
+ */
+function chamferDistance(mark: Uint8Array, cols: number, rows: number, from: 0 | 1): Float32Array {
+  const INF = 1e9;
+  const d = new Float32Array(cols * rows);
+  for (let i = 0; i < d.length; i++) d[i] = mark[i] === from ? INF : 0;
+  const at = (c: number, r: number) => d[r * cols + c];
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      let v = d[r * cols + c];
+      if (v === 0) continue;
+      if (c > 0) v = Math.min(v, at(c - 1, r) + 3);
+      if (r > 0) {
+        v = Math.min(v, at(c, r - 1) + 3);
+        if (c > 0) v = Math.min(v, at(c - 1, r - 1) + 4);
+        if (c < cols - 1) v = Math.min(v, at(c + 1, r - 1) + 4);
+      }
+      d[r * cols + c] = v;
+    }
+  }
+  for (let r = rows - 1; r >= 0; r--) {
+    for (let c = cols - 1; c >= 0; c--) {
+      let v = d[r * cols + c];
+      if (v === 0) continue;
+      if (c < cols - 1) v = Math.min(v, at(c + 1, r) + 3);
+      if (r < rows - 1) {
+        v = Math.min(v, at(c, r + 1) + 3);
+        if (c < cols - 1) v = Math.min(v, at(c + 1, r + 1) + 4);
+        if (c > 0) v = Math.min(v, at(c - 1, r + 1) + 4);
+      }
+      d[r * cols + c] = v;
+    }
+  }
+  for (let i = 0; i < d.length; i++) d[i] = d[i] >= INF ? Infinity : d[i] / 3;
+  return d;
 }
 
 /**
@@ -1099,6 +1301,8 @@ export interface SurfaceMachiningResult {
   /** Cutting time plus rapids and plunges, in seconds. */
   estimatedTimeSeconds: number;
   roughingPassCount: number;
+  /** The radial bite roughing actually took, as a percentage of its cutter. */
+  roughingBitePercent: number;
   finishingRasterLines: number;
   /** Whether the job stops for a tool change between the two passes. */
   toolChange: boolean;
@@ -1140,6 +1344,7 @@ export function machineSurface(
     roughingPassCount: 0,
     finishingRasterLines: 0,
     toolChange: false,
+    roughingBitePercent: 0,
     segments: [],
   });
 
@@ -1226,13 +1431,15 @@ export function machineSurface(
     (opts.finishingToolDiaMm * Math.min(100, Math.max(2, opts.finishingStepoverPercent))) / 100
   );
 
-  reachWarn(
-    opts.finishingToolDiaMm,
-    opts.finishingShankDiaMm,
-    opts.finishingFluteLengthMm,
-    'finishing',
-    finishTip
-  );
+  if (opts.finishingEnabled) {
+    reachWarn(
+      opts.finishingToolDiaMm,
+      opts.finishingShankDiaMm,
+      opts.finishingFluteLengthMm,
+      'finishing',
+      finishTip
+    );
+  }
   if (opts.roughingEnabled) {
     reachWarn(opts.roughingToolDiaMm, 0, 0, 'roughing');
   }
@@ -1300,7 +1507,9 @@ export function machineSurface(
     }
   }
 
-  chiploadWarn(opts.finishingFeedrate, opts.finishingFlutes, 'finishing', opts.finishingToolDiaMm);
+  if (opts.finishingEnabled) {
+    chiploadWarn(opts.finishingFeedrate, opts.finishingFlutes, 'finishing', opts.finishingToolDiaMm);
+  }
   if (opts.roughingEnabled) {
     chiploadWarn(opts.roughingFeedrate, opts.roughingFlutes, 'roughing', opts.roughingToolDiaMm);
   }
@@ -1332,14 +1541,16 @@ export function machineSurface(
     }
   };
 
-  geometryWarn(opts.finishingGeometry, opts.finishingToolDiaMm, 'finishing');
+  if (opts.finishingEnabled) {
+    geometryWarn(opts.finishingGeometry, opts.finishingToolDiaMm, 'finishing');
+  }
   if (opts.roughingEnabled) {
     geometryWarn(opts.roughingGeometry, opts.roughingToolDiaMm, 'roughing');
   }
 
   // A downcut cutter is at its very worst going straight down: the direction it
   // throws waste is the direction it is trying to travel.
-  if (opts.finishingGeometry === 'downcut' && opts.leadInAngleDeg <= 0) {
+  if (opts.finishingEnabled && opts.finishingGeometry === 'downcut' && opts.leadInAngleDeg <= 0) {
     warnings.push(
       `The finishing bit is a downcut and the lead-in angle is 0, so every pass starts with a ` +
         `vertical plunge. That is the one move a downcut cutter cannot make — it packs its own ` +
@@ -1623,15 +1834,19 @@ export function machineSurface(
     );
   }
   gcode.push(`; Material    : ${material.label}`);
-  gcode.push(
-    `; T2 finish   : ${describeCutter(
-      opts.finishingToolDiaMm,
-      opts.finishingToolType,
-      opts.finishingFlutes,
-      opts.finishingGeometry,
-      opts.finishingVBitAngleDeg
-    )}`
-  );
+  if (opts.finishingEnabled) {
+    gcode.push(
+      `; T2 finish   : ${describeCutter(
+        opts.finishingToolDiaMm,
+        opts.finishingToolType,
+        opts.finishingFlutes,
+        opts.finishingGeometry,
+        opts.finishingVBitAngleDeg
+      )}`
+    );
+  } else {
+    gcode.push('; Finishing   : none — the roughing bit cuts to the surface');
+  }
   gcode.push('; ---------------------------------------------------------------');
   gcode.push('G21 ; millimetres');
   gcode.push('G90 ; absolute positioning');
@@ -1649,10 +1864,17 @@ export function machineSurface(
   // Whatever the caller wants done first — registration holes, say.
   for (const line of job.prelude ?? []) gcode.push(line);
 
+  if (!opts.finishingEnabled && !opts.roughingEnabled) {
+    return fail('The finishing pass is off, so roughing has to be on: one of them has to cut.');
+  }
+
   // --- Roughing --------------------------------------------------------------
   let roughingPassCount = 0;
+  let roughingBitePercent = 0;
   const roughRad = Math.max(0.05, opts.roughingToolDiaMm / 2);
-  const allowance = Math.max(0, opts.roughingAllowanceMm);
+  // With no finishing pass to take it off, an allowance would be left on the
+  // piece for good, so roughing goes to the surface.
+  const allowance = opts.finishingEnabled ? Math.max(0, opts.roughingAllowanceMm) : 0;
 
   /**
    * How high the material still stands at a point once roughing has been over
@@ -1669,24 +1891,6 @@ export function machineSurface(
     const roughMap = dilateForTool(surface, roughRad, false, bodyFor(opts.roughingToolDiaMm, 0, 0));
     const adaptive = opts.roughingStrategy === 'adaptive';
 
-    // A raster's bite is only the stepover on a straight run; an adaptive clear
-    // holds it everywhere, corners included. That is what lets the radial bite
-    // come down and the depth go up.
-    const roughStepover = Math.max(
-      0.2,
-      opts.roughingStepoverMm > 0
-        ? opts.roughingStepoverMm
-        : opts.roughingToolDiaMm * (adaptive ? 0.2 : 0.45)
-    );
-    const engagement = roughStepover / Math.max(1e-6, opts.roughingToolDiaMm);
-    const baseStepdown = Math.max(0.1, opts.roughingStepdownMm);
-    // The whole point of holding the engagement down is being able to take the
-    // depth up; taking the one without the other is strictly slower than the
-    // raster it replaced.
-    const stepdown = adaptive
-      ? stepdownForEngagement(opts.roughingToolDiaMm, engagement, baseStepdown)
-      : baseStepdown;
-
     // Deepest the roughing tool is allowed to go: the allowance above the
     // lowest point it can reach at all.
     let deepest = 0;
@@ -1694,6 +1898,29 @@ export function machineSurface(
       if (roughMap.z[i] < deepest) deepest = roughMap.z[i];
     }
     const roughFloor = deepest + allowance;
+
+    const baseStepdown = Math.max(0.1, opts.roughingStepdownMm);
+    // A raster's bite is only the stepover on a straight run; an adaptive clear
+    // holds it everywhere, corners included. That is what lets the radial bite
+    // come down and the depth go up — but only as far as the depth has layers
+    // to give back, so the bite is chosen against this job's depth.
+    const roughStepover = Math.max(
+      0.2,
+      opts.roughingStepoverMm > 0
+        ? opts.roughingStepoverMm
+        : opts.roughingToolDiaMm *
+            (adaptive
+              ? adaptiveBiteFraction(opts.roughingToolDiaMm, baseStepdown, Math.abs(Math.min(0, roughFloor)))
+              : 0.45)
+    );
+    const engagement = roughStepover / Math.max(1e-6, opts.roughingToolDiaMm);
+    roughingBitePercent = Math.round(engagement * 100);
+    // The whole point of holding the engagement down is being able to take the
+    // depth up; taking the one without the other is strictly slower than the
+    // raster it replaced.
+    const stepdown = adaptive
+      ? stepdownForEngagement(opts.roughingToolDiaMm, engagement, baseStepdown)
+      : baseStepdown;
 
     // What the roughing pass leaves standing: its own reachable surface plus
     // the allowance, never deeper than the floor it is allowed to reach and
@@ -1977,6 +2204,7 @@ export function machineSurface(
    * the spindle.
    */
   const toolChange =
+    opts.finishingEnabled &&
     opts.roughingEnabled &&
     (Math.abs(opts.roughingToolDiaMm - opts.finishingToolDiaMm) > 0.01 ||
       opts.finishingToolType !== 'flat' ||
@@ -2009,6 +2237,8 @@ export function machineSurface(
   }
 
   // --- Finishing -------------------------------------------------------------
+  let finishingRasterLines = 0;
+  if (opts.finishingEnabled) {
   // How much depth one sweep of the raster is allowed to take. With roughing on
   // there is only the allowance left to remove, so the whole surface comes off
   // in one sweep. With roughing off the finishing tool is clearing the entire
@@ -2059,7 +2289,7 @@ export function machineSurface(
   }
 
   const rasterAngle = opts.finishingAngleDeg ?? (opts.finishingDirection === 'y' ? 90 : 0);
-  const strategy: FinishingStrategy = opts.finishingStrategy ?? 'raster';
+  const strategy: FinishingStrategy = opts.finishingStrategy ?? DEFAULT_RELIEF_OPTIONS.finishingStrategy;
 
   gcode.push('; --- OP 2: finishing pass ---------------------------------------');
   gcode.push(
@@ -2103,7 +2333,6 @@ export function machineSurface(
     return fail('The chosen finishing strategy produced no passes over this stock.');
   }
 
-  let finishingRasterLines = 0;
   // The height the material stands at when a layer starts: the stock's top face
   // for the first, whatever the layer before it left for the rest.
   let prevLimit = 0;
@@ -2139,6 +2368,15 @@ export function machineSurface(
       for (const r of runs) {
         const pass = simplifyPass(r, PATH_SIMPLIFY_MM);
         if (pass.length < 2) continue;
+        // A run shorter than the stepover lies inside what the passes either
+        // side of it cut, and is too short to ramp into — so it was a plunge
+        // to depth, a retract, and nothing to show for either. Layering
+        // leaves these where a layer's limit clips a pass to a remnant.
+        let runLen = 0;
+        for (let i = 1; i < pass.length; i++) {
+          runLen += Math.hypot(pass[i].x - pass[i - 1].x, pass[i].y - pass[i - 1].y);
+        }
+        if (runLen < stepover - 1e-6) continue;
         finishingRasterLines++;
 
         /*
@@ -2185,6 +2423,9 @@ export function machineSurface(
   if (finishingRasterLines === 0) {
     return fail('The chosen stock and stepover produced no finishing passes.');
   }
+  } else if (roughingPassCount === 0) {
+    return fail('Nothing cuts: the finishing pass is off and roughing produced no passes.');
+  }
 
   gcode.push('; ---------------------------------------------------------------');
   gcode.push('M5 ; spindle off');
@@ -2224,6 +2465,7 @@ export function machineSurface(
     // totals never saw at all.
     estimatedTimeSeconds: estimateGcodeTime(text, { profile: opts.motionProfile }).seconds,
     roughingPassCount,
+    roughingBitePercent,
     finishingRasterLines,
     toolChange,
     segments: previewSegments,
@@ -2262,6 +2504,7 @@ export function generateReliefCarveGcode(
     totalCutDistanceMm: 0,
     estimatedTimeSeconds: 0,
     roughingPassCount: 0,
+    roughingBitePercent: 0,
     finishingRasterLines: 0,
     toolChange: false,
     scaleFactor: 1,
@@ -2441,6 +2684,8 @@ export function generateReliefCarveGcode(
     }
   }
 
+  const detailMm = measureDetailMm(surface, reliefDepth);
+
   const header = [
     '; 3D CNC Relief Carving',
     `; Stock       : ${stockW} x ${stockD} x ${opts.stockThicknessMm} mm`,
@@ -2464,10 +2709,12 @@ export function generateReliefCarveGcode(
     totalCutDistanceMm: cut.totalCutDistanceMm,
     estimatedTimeSeconds: cut.estimatedTimeSeconds,
     roughingPassCount: cut.roughingPassCount,
+    roughingBitePercent: cut.roughingBitePercent,
     finishingRasterLines: cut.finishingRasterLines,
     toolChange: cut.toolChange,
     scaleFactor,
     reliefDepthMm: reliefDepth,
+    detailMm,
     verticalExaggeration: zScale / Math.max(1e-9, scaleFactor),
     carveBounds,
     bounds,

@@ -1,5 +1,6 @@
 import type { SceneGraph, SceneNode, SceneGeom, SceneJoint } from '../types/scene';
 import { generateWedgeMeshData } from './geom';
+import { analyzeMesh } from './meshIntegrity';
 import { resolveCsgGeoms } from './csg';
 
 const formatGeomSize = (type: string, rawSize: unknown): string => {
@@ -44,6 +45,7 @@ const buildGeom = (geom: SceneGeom, massless = false) => {
   }
   if (geom.mass !== undefined) attrs += ` mass="${geom.mass}"`;
   else if (massless) attrs += ` mass="0"`;
+  else if (geom.density !== undefined) attrs += ` density="${geom.density}"`;
   if (geom.role === 'visual') {
     // A visual-only geom is drawn but must not take part in contact — the body's
     // real colliders are elsewhere (see resolveCsgGeoms). Overrides any authored
@@ -248,9 +250,35 @@ export const compileToMJCF = (
     return out;
   };
 
+  /*
+   * How heavy a mesh is, and where its weight sits.
+   *
+   * MuJoCo's default for a mesh is `inertia="legacy"`: mass and inertia come
+   * from the mesh's CONVEX HULL, not from the mesh. For a box, a bracket or a
+   * building that is the same answer either way. For anything that encloses
+   * mostly air it is not: the oak tree preset is a few cubic metres of timber
+   * inside a hull the size of its crown, so the hull gave it a mass of 274
+   * TONNES and a centre of mass 3.7m up, in mid-air between the branches. Make
+   * it movable and it behaved like a top-heavy dome of water rather than like
+   * a tree — a 3 m/s nudge toppled it.
+   *
+   * `inertia="exact"` integrates the real volume instead, which is what makes
+   * a tree weigh what a tree weighs and a building weigh what a building
+   * weighs, without either of them having to say so. It is only valid on a
+   * closed mesh, though, and on an inside-out one it would come out negative,
+   * so it is asked for only where the mesh has been checked and earns it;
+   * everything else keeps the hull behaviour it has always had.
+   */
+  const meshInertia = (g: SceneGeom): string => {
+    const integrity = analyzeMesh(g.renderVertices || g.vertices!, g.faces!);
+    return integrity && integrity.closed && integrity.consistentlyWound && integrity.volume > 0
+      ? ' inertia="exact"'
+      : '';
+  };
+
   const assetXml = meshAssets.length > 0
     ? `\n  <asset>\n${meshAssets.map(g =>
-        `    <mesh name="${g.name}" vertex="${toMjcfVerts(g.vertices!).join(' ')}" face="${g.faces!.join(' ')}" />`
+        `    <mesh name="${g.name}"${meshInertia(g)} vertex="${toMjcfVerts(g.vertices!).join(' ')}" face="${g.faces!.join(' ')}" />`
       ).join('\n')}\n  </asset>`
     : '';
 

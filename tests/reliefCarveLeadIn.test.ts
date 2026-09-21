@@ -93,6 +93,12 @@ const BASE = {
   stockWidthMm: 120,
   stockDepthMm: 120,
   roughingEnabled: true,
+  // These tests read the finishing raster as a map of the finished surface,
+  // which a hybrid pass, with its waterline on the walls, is not.
+  finishingStrategy: 'raster' as const,
+  // Close enough passes to sample the walls, which the test below reads as its
+  // map of the finished surface.
+  finishingStepoverPercent: 15,
   finishingToolType: 'ball' as const,
   finishingToolDiaMm: 3.175,
 };

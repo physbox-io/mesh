@@ -412,31 +412,44 @@ export function surfaceSlopeDeg(s: SurfaceGrid, x: number, y: number): number {
   return (Math.atan(Math.hypot(dzdx, dzdy)) * 180) / Math.PI;
 }
 
+/** Length of a polyline in the plane. */
+function pathLength(pass: Point2D[]): number {
+  let len = 0;
+  for (let i = 1; i < pass.length; i++) {
+    len += Math.hypot(pass[i].x - pass[i - 1].x, pass[i].y - pass[i - 1].y);
+  }
+  return len;
+}
+
 /**
  * Cuts a pass into the runs whose points pass a test, dropping the rest.
  *
- * Single points are dropped too: a one-point run is a plunge and a retract for
- * nothing, and there are a great many of them along the boundary between steep
- * and shallow ground.
+ * Runs shorter than `minLength` are dropped too. Along the boundary between
+ * steep and shallow ground the slope hovers about the threshold, and a pass
+ * that crosses it flickers in and out of its region over a point or two at a
+ * time. Each of those fragments is a plunge and a retract to cut a fraction of
+ * a millimetre that the passes either side of it already reach — a dome carved
+ * this way came out with a couple of hundred of them, and a fragment too short
+ * to ramp into is entered by a straight plunge to depth.
  */
-function splitWhere(pass: Point2D[], keep: (p: Point2D) => boolean): Point2D[][] {
+function splitWhere(pass: Point2D[], keep: (p: Point2D) => boolean, minLength: number): Point2D[][] {
   const runs: Point2D[][] = [];
   let run: Point2D[] = [];
+  const flush = () => {
+    if (run.length >= 2 && pathLength(run) >= minLength) runs.push(run);
+    run = [];
+  };
   for (const p of pass) {
-    if (keep(p)) {
-      run.push(p);
-    } else if (run.length > 0) {
-      if (run.length >= 2) runs.push(run);
-      run = [];
-    }
+    if (keep(p)) run.push(p);
+    else if (run.length > 0) flush();
   }
-  if (run.length >= 2) runs.push(run);
+  flush();
   return runs;
 }
 
 /**
- * Waterline on the steep ground, raster on the shallow, and neither one wasting
- * time where the other is doing the work.
+ * Waterline where the raster would terrace, raster everywhere else, and neither
+ * one wasting time where the other is doing the work.
  *
  * The two sets are generated over the whole model and then masked against each
  * other, rather than each being generated over its own region: masking is exact
@@ -445,11 +458,18 @@ function splitWhere(pass: Point2D[], keep: (p: Point2D) => boolean): Point2D[][]
  */
 export function hybridPasses(input: FinishingPathInput): Point2D[][] {
   const threshold = input.steepAngleDeg ?? DEFAULT_STEEP_ANGLE_DEG;
+  // Steep outright, not steep across the raster's passes. A wall the raster
+  // crosses head-on is smooth already and could in principle stay with the
+  // raster, but the band where the wall turns from crossed to followed then
+  // chops the raster into fragments too short to ramp into, and the whole
+  // saving measured about two percent of the job.
   const isSteep = (p: Point2D) => surfaceSlopeDeg(input.surface, p.x, p.y) >= threshold;
 
-  const steep = contourPasses(input).flatMap((pass) => splitWhere(pass, isSteep));
+  // A run shorter than the stepover lies inside what the pass beside it cuts.
+  const minRun = Math.max(0, input.stepover);
+  const steep = contourPasses(input).flatMap((pass) => splitWhere(pass, isSteep, minRun));
   const shallow = rasterPasses(input, input.angleDeg).flatMap((pass) =>
-    splitWhere(pass, (p) => !isSteep(p))
+    splitWhere(pass, (p) => !isSteep(p), minRun)
   );
 
   // Shallow first: it is the bulk of the surface on most reliefs, and finishing
@@ -493,7 +513,7 @@ export function describeFinishingStrategy(strategy: FinishingStrategy, angleDeg:
     case 'contour':
       return 'waterline, following the surface level lines';
     case 'hybrid':
-      return 'hybrid: waterline on steep ground, raster on shallow';
+      return `hybrid: waterline on steep ground, raster at ${angleDeg} degrees on shallow`;
     case 'raster':
     default:
       return `parallel raster at ${angleDeg} degrees`;

@@ -174,6 +174,16 @@ interface PassFieldsProps {
   materialLabel: string;
 }
 
+/** The roughing pass: the flat mill, how it clears, and the feeds derived for it. */
+interface RoughingPassFieldsProps extends PassFieldsProps {
+  /**
+   * The bite the last export took, as a percentage of the cutter, or null
+   * before one has. An adaptive clear picks it from the job's depth, so only
+   * the exporter knows.
+   */
+  bitePercent: number | null;
+}
+
 /** The finishing pass: the cutter, how it sweeps, and the feeds derived for it. */
 export function FinishingPassFields({
   options, effective, derived, overrides, set, override, materialLabel,
@@ -207,6 +217,19 @@ export function FinishingPassFields({
         </button>
       </div>
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-4">
+        <Field
+          className="lg:col-span-3"
+          hintAlign="end"
+          label="Finishing"
+          hint="Rough only stops after the flat mill: flat tops and floors, sloped walls stepped by its layers, and a job hours shorter. Finish sends the ball nose over everything for smooth walls."
+        >
+          <Segmented
+            value={options.finishingEnabled ? 'on' : 'off'}
+            onChange={(v) => set('finishingEnabled', v === 'on')}
+            disabled={!options.roughingEnabled}
+            options={[['on', 'Finish'], ['off', 'Rough Only']] as const}
+          />
+        </Field>
         <Field
           className="lg:col-span-3"
           label="Cutter Shape"
@@ -255,9 +278,11 @@ export function FinishingPassFields({
       <DerivedRecipe
         title={`Derived for ${materialLabel}`}
         line={
-          `${effective.spindleRpm.toLocaleString()} RPM · ${effective.finishingFeedrate} mm/min · ` +
-          `${((effective.finishingToolDiaMm * effective.finishingStepoverPercent) / 100).toFixed(2)} mm stepover · ` +
-          `${passCount ?? '—'} passes`
+          effective.finishingEnabled
+            ? `${effective.spindleRpm.toLocaleString()} RPM · ${effective.finishingFeedrate} mm/min · ` +
+              `${((effective.finishingToolDiaMm * effective.finishingStepoverPercent) / 100).toFixed(2)} mm stepover · ` +
+              `${passCount ?? '—'} passes`
+            : 'Skipped: the roughing bit cuts to the surface and the job ends there'
         }
         notes={[speedNote]}
       />
@@ -345,7 +370,7 @@ export function FinishingPassFields({
         <Field
           hintAlign="end"
           label="Pass Pattern"
-          hint="How the finishing passes are laid out. A raster is the fastest to cut and the one whose direction you can see in the finished surface. Waterline follows the surface's own level lines, which is far better on steep ground and useless on flat. Hybrid uses each where it wins, and is the one to pick for a sculpted or organic relief."
+          hint="How the finishing passes are laid out. A raster is the fastest to cut and the one whose direction you can see in the finished surface. Waterline follows the surface's own level lines, which is far better on steep ground and useless on flat. Hybrid uses each where it wins and is the default: a raster alone terraces every wall that runs along its passes."
         >
           <select
             value={options.finishingStrategy}
@@ -521,8 +546,8 @@ export function FinishingPassFields({
 
 /** The roughing pass: whether there is one, what it is cut with, and how. */
 export function RoughingPassFields({
-  options, effective, derived, overrides, set, override, materialLabel,
-}: PassFieldsProps) {
+  options, effective, derived, overrides, set, override, materialLabel, bitePercent,
+}: RoughingPassFieldsProps) {
   return (
     <div className={sectionClass}>
       <h3 className={sectionTitleClass}>Roughing Pass</h3>
@@ -534,7 +559,11 @@ export function RoughingPassFields({
         >
           <Segmented
             value={options.roughingEnabled ? 'on' : 'off'}
-            onChange={(v) => set('roughingEnabled', v === 'on')}
+            onChange={(v) => {
+              set('roughingEnabled', v === 'on');
+              // Something has to cut: with roughing off the finishing pass is it.
+              if (v === 'off') set('finishingEnabled', true);
+            }}
             options={[['on', 'Rough First'], ['off', 'Finish Only']] as const}
           />
         </Field>
@@ -576,12 +605,11 @@ export function RoughingPassFields({
             ? `${effective.spindleRpm.toLocaleString()} RPM · ${effective.roughingFeedrate} mm/min · ` +
               `${effective.roughingStepdownMm} mm/pass · ${effective.roughingAllowanceMm} mm left on` +
               (effective.roughingStrategy === 'adaptive'
-                ? ` · ${Math.round(
-                    ((effective.roughingStepoverMm > 0
-                      ? effective.roughingStepoverMm
-                      : effective.roughingToolDiaMm * 0.2) /
-                      Math.max(0.01, effective.roughingToolDiaMm)) * 100
-                  )}% bite, held in corners too`
+                ? ` · ${
+                    effective.roughingStepoverMm > 0
+                      ? Math.round((effective.roughingStepoverMm / Math.max(0.01, effective.roughingToolDiaMm)) * 100)
+                      : bitePercent ?? '—'
+                  }% bite, held in corners too`
                 : '')
             : 'Skipped: the finishing bit clears the whole job on its own'
         }

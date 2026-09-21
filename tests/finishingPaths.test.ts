@@ -227,6 +227,18 @@ describe('hybrid', () => {
     }
   });
 
+  it('drops fragments shorter than a stepover, which are a plunge for nothing', () => {
+    // Along the cutover the slope hovers about the threshold, so passes that
+    // cross it flicker in and out of their region a point or two at a time. On
+    // a dome those fragments came to a couple of hundred straight plunges.
+    const stepover = 2;
+    for (const pass of hybridPasses(input({ stepover, steepAngleDeg: 30 }))) {
+      let len = 0;
+      for (let i = 1; i < pass.length; i++) len += Math.hypot(pass[i].x - pass[i - 1].x, pass[i].y - pass[i - 1].y);
+      expect(len).toBeGreaterThanOrEqual(stepover);
+    }
+  });
+
   it('degenerates to a plain raster when nothing is steep enough', () => {
     const passes = hybridPasses(input({ steepAngleDeg: 85 }));
     const raster = rasterPasses(input(), 0);

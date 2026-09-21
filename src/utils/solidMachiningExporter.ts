@@ -152,6 +152,10 @@ export const DEFAULT_SOLID_OPTIONS: SolidMachiningOptions = {
   // scallops on both.
   finishingToolType: 'flat',
   finishingStepoverPercent: 30,
+  // A flat mill defines a wall with its side, so a raster across a solid part
+  // already leaves the walls square. The relief default's waterline would
+  // only add a pass per stepover down every cliff for nothing.
+  finishingStrategy: 'raster',
 };
 
 /** One setup's worth of program. */

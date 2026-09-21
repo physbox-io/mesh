@@ -40,6 +40,18 @@ export interface SceneGeom {
   quat?: number[];
   euler?: number[];
   mass?: number;
+  /**
+   * What the geom is made of, in kg/m3. MuJoCo weighs a geom by its volume at
+   * a default density of 1000 — water — so a body says how heavy it is either
+   * by stating `mass` outright or by saying what it is made of and letting its
+   * size do the rest. The second is what survives being rescaled, and it is
+   * the only one that can tell a tree from a building of the same shape: oak
+   * timber is about 700, concrete about 2400, and a crown of leaves, which is
+   * mostly the air between them, is single digits.
+   *
+   * Ignored when `mass` is set, which wins.
+   */
+  density?: number;
   contype?: number;
   conaffinity?: number;
   condim?: number;

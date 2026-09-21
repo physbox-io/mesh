@@ -24,6 +24,7 @@ import { PRESETS, pendulumPreset, generateGearGeoms } from '../presets/presetSce
 import { PhysicsWorkerClient, type BuiltResult, type FrameSnapshot } from './physicsWorkerClient';
 import { generatePyramidMeshData, generateConeMeshData, generateTorusMeshData, generateTubeMeshData, generateCurveGeoms, DEFAULT_CURVE_POINTS, DEFAULT_CURVE_WIDTH, DEFAULT_CURVE_THICKNESS, DEFAULT_CURVE_SEGMENTS, getStickyRotation } from '../utils/geom';
 import { readUserPreset } from '../utils/userPresets';
+import { framingForBounds, gridCellForBounds, sceneContentBounds } from '../utils/frameScene';
 import { DEFAULT_MATERIAL, type MaterialId } from '../utils/feedsAndSpeeds';
 import { DEFAULT_FILAMENT, type FilamentId } from '../utils/filaments';
 import { loadStock, saveStock, clampStock, type StockSize } from '../utils/stockSettings';
@@ -298,6 +299,34 @@ const promoteMeshGeomsToDynamic = (node: SceneNode) => {
     if (!g.renderVertices && Array.isArray(g.vertices)) {
       g.renderVertices = toRenderVertices(g.vertices);
     }
+  }
+};
+
+// The other half of the same moment: a body that has just been made movable
+// has to be able to touch the world.
+//
+// Scenery is routinely authored with contype:0/conaffinity:0 — a tree, a
+// cartpole rail, a windmill tower. That is correct while the body is welded in
+// place, and it costs nothing to collide against something that cannot move.
+// Give that same body a joint and it can now only do one thing: accelerate
+// through the floor forever, which is what the oak tree preset did the first
+// time anyone switched it to 6-DOF.
+//
+// Only when NOTHING in the body collides, and only at the moment a joint
+// arrives. A body with a collider already (a trunk cylinder under visual-only
+// meshes, say) has been given one deliberately, and so has a body that ships
+// jointed and ghosted — which is most of a mechanism: gear teeth that mesh by
+// engine rather than by contact, a Newton's cradle rod, a rotor blade. Those
+// pass through here untouched, because they never make this transition.
+export const restoreCollisionWhenMadeMovable = (node: SceneNode) => {
+  const geoms = node.geoms || [];
+  const collides = (g: SceneGeom) =>
+    g.role !== 'visual' && !(g.contype === 0 && g.conaffinity === 0);
+  if (geoms.length === 0 || geoms.some(collides)) return;
+  for (const g of geoms) {
+    if (g.role === 'visual') continue;
+    delete g.contype;
+    delete g.conaffinity;
   }
 };
 
@@ -715,8 +744,10 @@ export interface PhysicsState {
   showEdges: boolean;
   toggleShowEdges: () => void;
   toggleWireframe: () => void;
-  /** Grid cell size in millimetres — 100mm reads a bench-scale part fine,
-   *  but makes a small part (a relief carve, a coin) look tiny by comparison.
+  /** Grid cell size in millimetres. 10mm suits the 250mm of world the viewport
+   *  now shows; 100mm was a bench-scale cell and made a small part (a relief
+   *  carve, a coin) look tiny against it. Set to fit whatever scene is loaded
+   *  (see utils/frameScene) and overridable from the bottom bar.
    *  Purely a display setting: never touches any body's actual dimensions. */
   gridCellSizeMm: number;
   setGridCellSizeMm: (mm: number) => void;
@@ -1168,6 +1199,40 @@ export interface PhysicsState {
   incrementScadCompile: () => void;
   decrementScadCompile: () => void;
 }
+/**
+ * How a freshly loaded scene is framed, and how big the graph paper under it
+ * is drawn.
+ *
+ * Both are worked out from the scene's own bounds rather than fixed: the
+ * viewport's default pose is 0.8 m out over a 100 mm grid, which suits a
+ * bench-scale rig and makes anything at the size people actually cut here —
+ * tens of millimetres up to about 250 mm — read as a speck on a floor tile.
+ * A preset that states its own camera keeps it; the grid still follows the
+ * scene. Returns a patch to `set`, so the caller can apply it in one breath
+ * with whatever else it is doing.
+ *
+ * `gridCellSizeMm` is set directly rather than through `setGridCellSizeMm`
+ * because that setter also moves the lattice snap, and loading a scene is no
+ * reason to change the increment someone is modelling in.
+ */
+function framingPatch(
+  scene: SceneGraph,
+  explicit: { position: [number, number, number]; target: [number, number, number] } | null
+): { cameraOverride: PhysicsState['cameraOverride']; gridCellSizeMm: number } {
+  const bounds = sceneContentBounds(scene.nodes);
+  return {
+    cameraOverride: explicit ?? (bounds ? framingForBounds(bounds) : null),
+    gridCellSizeMm: gridCellForBounds(bounds),
+  };
+}
+
+/**
+ * The pendulum is what the app opens on, and it is 600mm of stand — taller than
+ * the 250mm window the default pose shows. Framed here rather than on load,
+ * because nothing loads it: it is the store's initial scene.
+ */
+const initialFraming = framingPatch(initialScene, null);
+
 export const useStore = create<PhysicsState>()((set, get) => ({
   mujoco: null,
   model: null,
@@ -1389,7 +1454,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   isMachineConfigOpen: false,
   cameraView: 'perspective',
   printAnalysisEnabled: false,
-  cameraOverride: null,
+  cameraOverride: initialFraming.cameraOverride,
   cameraResetToken: 0,
   mcpActiveCount: 0,
   scadCompileCount: 0,
@@ -1442,7 +1507,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   toggleWireframe: () => set((state) => ({ wireframe: !state.wireframe })),
   showEdges: false,
   toggleShowEdges: () => set((state) => ({ showEdges: !state.showEdges })),
-  gridCellSizeMm: 100,
+  gridCellSizeMm: initialFraming.gridCellSizeMm,
   // The one grid. The lattice used to have its own step beside this, and two
   // controls that both said "grid" and meant different things was one too
   // many: 1 mm on the floor and 10 mm in the lattice looked like a bug in the
@@ -1573,7 +1638,12 @@ export const useStore = create<PhysicsState>()((set, get) => ({
         // an empty scene; recompiling it would throw inside the MJCF builder.
         if (savedScene) {
           promoteJointedMeshGeomsDeep(savedScene.nodes);
-          get().recompile(savedScene, null, true, true);
+          void get().recompile(savedScene, null, true, true).then(() => {
+            // A saved scene never carries a camera, so it is framed entirely
+            // from its own bounds — the same as a preset that does not state
+            // one. After the rebuild, for the same reason the presets are.
+            if (get().activePreset === name) set(framingPatch(savedScene, null));
+          });
         }
       } catch (e) {
         console.error('Failed to load user preset', e);
@@ -1636,7 +1706,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     void get().recompile(scene, null, true, true).then(() => {
       // Unless something else has been loaded in the meantime, in which case
       // this framing belongs to a scene that is no longer on screen.
-      if (framing && get().activePreset === name) set({ cameraOverride: framing });
+      if (get().activePreset === name) set(framingPatch(scene, framing));
     });
   },
 
@@ -1677,7 +1747,11 @@ export const useStore = create<PhysicsState>()((set, get) => ({
       windY: 0,
       floorBounce: 0,
     }));
-    void get().recompile(scene, null, true, true);
+    void get().recompile(scene, null, true, true).then(() => {
+      // A generated board is sized from the stock it will be cut from, which
+      // is usually a good deal smaller than the default view assumes.
+      if (get().activePreset === undefined) set(framingPatch(scene, null));
+    });
   },
 
   setEnvironment: (env) => {
@@ -2987,6 +3061,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     const traverse = (nodes: SceneNode[]): boolean => {
       for (const node of nodes) {
         if (node.id === id) {
+          const wasJointless = !(node.joints?.length > 0);
           Object.assign(node, updates);
           // Same trap as updateNodeJointsList: an update that hands this node
           // its first joint (e.g. an MCP physics_update_object call, not just
@@ -2994,6 +3069,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
           // body simulates and drags correctly while its render stays frozen.
           if (updates.joints !== undefined && node.joints?.length > 0) {
             promoteMeshGeomsToDynamic(node);
+            if (wasJointless) restoreCollisionWhenMadeMovable(node);
           }
           return true;
         }
@@ -3015,8 +3091,12 @@ export const useStore = create<PhysicsState>()((set, get) => ({
       if (!nodes) return false;
       for (const node of nodes) {
         if (node.id === id) {
+          const wasJointless = !(node.joints?.length > 0);
           node.joints = joints;
-          if (joints.length > 0) promoteMeshGeomsToDynamic(node);
+          if (joints.length > 0) {
+            promoteMeshGeomsToDynamic(node);
+            if (wasJointless) restoreCollisionWhenMadeMovable(node);
+          }
           return true;
         }
         if (traverse(node.children)) return true;

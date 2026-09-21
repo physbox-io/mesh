@@ -24,10 +24,15 @@ import type { SceneGraph } from '../types/scene';
  * ends are quad strips, built the same reliable way as the side walls.
  *
  * Winding for each of outer wall / inner wall / bottom annulus / top annulus
- * was checked numerically (outward-facing-normal test against the mesh
- * centroid), not guessed: the inner wall's "away from material" direction is
- * the opposite radial sense from the outer wall's, since they bound a thin
- * gap rather than being a continuation of the same surface.
+ * has to be derived rather than guessed: the inner wall's "away from material"
+ * direction is the opposite radial sense from the outer wall's, since they
+ * bound a thin gap rather than being a continuation of the same surface. The
+ * test this was first checked with — outward-facing normals against the MESH
+ * CENTROID — cannot tell you that, because the centroid of a hollow shell sits
+ * in its cavity, and every group came out inverted: the bust was rendering
+ * from the inside. The check that does work is the one the tests now make, and
+ * it is the same one the MJCF compiler makes before it will trust a mesh with
+ * its own mass: closed, consistently wound, and a POSITIVE signed volume.
  */
 function buildSolidLathe(
   radiusAt: (z: number, theta: number) => number,
@@ -38,7 +43,7 @@ function buildSolidLathe(
 ): { vertices: number[]; faces: number[] } {
   const vertices: number[] = [];
   const faces: number[] = [];
-  const N = slices + 1;
+  const N = slices;
 
   // A proportional thickness, not a fixed absolute offset: near the crown
   // radiusAt already floors near-zero, and a fixed subtraction there just
@@ -48,7 +53,12 @@ function buildSolidLathe(
   // less than outer everywhere the outer radius is positive, with no clamp
   // needed.
   const pushRing = (z: number, isInner: boolean) => {
-    for (let j = 0; j <= slices; ++j) {
+    // j < slices, not <= : the ring closes by INDEX, wrapping back to its own
+    // first vertex. Pushing a duplicate vertex at theta = 2*pi instead leaves a
+    // surface that looks closed and is not — the two columns coincide in space
+    // but share no edge, so the mesh carried 324 boundary edges straight up the
+    // seam, and nothing that asks whether it is watertight could say yes.
+    for (let j = 0; j < slices; ++j) {
       const theta = (j / slices) * Math.PI * 2;
       const outerR = radiusAt(z, theta);
       const r = isInner ? outerR * (1 - thicknessRatio) : outerR;
@@ -68,39 +78,44 @@ function buildSolidLathe(
   const innerBase = vertices.length / 3;
   for (let i = 0; i <= stacks; ++i) pushRing((i / stacks) * height, true);
 
-  // Outer wall.
+  /** The next vertex round the ring, wrapping at the seam. */
+  const next = (base: number, j: number) => base + ((j + 1) % slices);
+
+  // Outer wall: normals away from the axis.
   for (let i = 0; i < stacks; ++i) {
+    const ring = outerBase + i * N;
     for (let j = 0; j < slices; ++j) {
-      const first = outerBase + i * N + j;
-      const second = first + N;
-      faces.push(first, second, first + 1);
-      faces.push(second, second + 1, first + 1);
+      const a = ring + j, a1 = next(ring, j);
+      const b = a + N, b1 = a1 + N;
+      faces.push(a, a1, b);
+      faces.push(b, a1, b1);
     }
   }
-  // Inner wall — reversed relative to the outer wall's index order.
+  // Inner wall: the opposite radial sense, since it faces into the cavity.
   for (let i = 0; i < stacks; ++i) {
+    const ring = innerBase + i * N;
     for (let j = 0; j < slices; ++j) {
-      const first = innerBase + i * N + j;
-      const second = first + N;
-      faces.push(first, first + 1, second);
-      faces.push(second, first + 1, second + 1);
+      const a = ring + j, a1 = next(ring, j);
+      const b = a + N, b1 = a1 + N;
+      faces.push(a, b, a1);
+      faces.push(b, b1, a1);
     }
   }
-  // Bottom annulus (z = 0 ring).
+  // Bottom annulus (z = 0 ring), facing down.
   for (let j = 0; j < slices; ++j) {
-    const oa = outerBase + j, ob = outerBase + j + 1;
-    const ia = innerBase + j, ib = innerBase + j + 1;
-    faces.push(oa, ob, ia);
-    faces.push(ia, ob, ib);
+    const oa = outerBase + j, ob = next(outerBase, j);
+    const ia = innerBase + j, ib = next(innerBase, j);
+    faces.push(oa, ia, ob);
+    faces.push(ia, ib, ob);
   }
-  // Top annulus (z = height ring).
+  // Top annulus (z = height ring), facing up.
   const topOuter = outerBase + stacks * N;
   const topInner = innerBase + stacks * N;
   for (let j = 0; j < slices; ++j) {
-    const oa = topOuter + j, ob = topOuter + j + 1;
-    const ia = topInner + j, ib = topInner + j + 1;
-    faces.push(oa, ia, ob);
-    faces.push(ia, ib, ob);
+    const oa = topOuter + j, ob = next(topOuter, j);
+    const ia = topInner + j, ib = next(topInner, j);
+    faces.push(oa, ob, ia);
+    faces.push(ia, ob, ib);
   }
 
   return { vertices, faces };

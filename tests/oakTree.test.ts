@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { buildOakTree, oakTreePreset } from '../src/presets/oakTree';
+import { restoreCollisionWhenMadeMovable } from '../src/store/useStore';
+import { simulate } from './helpers/simulate';
+import type { SceneGraph, SceneNode } from '../src/types/scene';
 
 describe('oak tree', () => {
   it('has plausible proportions for an open-grown oak', () => {
@@ -104,5 +107,51 @@ describe('oak tree — printable', () => {
       // twig is still an island once the slicer has thickened nothing.
       expect(d).toBeLessThan(f.radius * 0.75);
     }
+  });
+});
+
+// What happens when somebody switches the tree to 6-DOF in the properties
+// panel, which is how this was found: it used to accelerate through the floor
+// forever, and then — once it collided — to topple like the top-heavy dome of
+// water its convex hull said it was.
+describe('an oak made movable', () => {
+  const madeMovable = (): SceneGraph => {
+    const scene: SceneGraph = JSON.parse(JSON.stringify(oakTreePreset));
+    const node = scene.nodes[0] as SceneNode;
+    node.joints = [{ name: 'oak_tree_joint', type: 'free' }];
+    restoreCollisionWhenMadeMovable(node);
+    return scene;
+  };
+
+  it('weighs what a tree weighs, not what its crown-sized hull would', async () => {
+    const sim = await simulate(madeMovable());
+    // 0.87 m3 of timber and 100 m3 of mostly-air canopy: under a tonne, with
+    // the centre of mass down in the trunk rather than up among the branches.
+    const mass = sim.model.body_mass[1];
+    expect(mass).toBeGreaterThan(400);
+    expect(mass).toBeLessThan(2000);
+    expect(sim.model.body_ipos[5]).toBeLessThan(3);
+    sim.dispose();
+  });
+
+  it('stands on the ground instead of falling through it', async () => {
+    const sim = await simulate(madeMovable());
+    sim.run(10);
+    const d = sim.data as unknown as { qpos: Float64Array };
+    expect(Math.abs(d.qpos[2])).toBeLessThan(0.1);
+    const tilt = Math.acos(Math.min(1, 1 - 2 * (d.qpos[4] ** 2 + d.qpos[5] ** 2))) * 180 / Math.PI;
+    expect(tilt).toBeLessThan(15);
+    sim.dispose();
+  });
+
+  it('goes over when something hits it hard enough', async () => {
+    const scene = madeMovable();
+    scene.nodes[0].joints![0].initialVelocity = [6, 0, 0, 0, 0, 0];
+    const sim = await simulate(scene);
+    sim.run(6);
+    const d = sim.data as unknown as { qpos: Float64Array };
+    const tilt = Math.acos(Math.max(-1, 1 - 2 * (d.qpos[4] ** 2 + d.qpos[5] ** 2))) * 180 / Math.PI;
+    expect(tilt).toBeGreaterThan(30);
+    sim.dispose();
   });
 });

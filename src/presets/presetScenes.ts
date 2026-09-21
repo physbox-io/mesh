@@ -1025,7 +1025,12 @@ export const goldenGateMeshPreset: SceneGraph = (() => {
       cx-hx, cy-hy, cz-hz,  cx+hx, cy-hy, cz-hz,  cx+hx, cy+hy, cz-hz,  cx-hx, cy+hy, cz-hz,
       cx-hx, cy-hy, cz+hz,  cx+hx, cy-hy, cz+hz,  cx+hx, cy+hy, cz+hz,  cx-hx, cy+hy, cz+hz,
     ];
-    const f = [0,1,2,0,2,3, 4,6,5,4,7,6, 0,4,5,0,5,1, 3,2,6,3,6,7, 0,3,7,0,7,4, 1,5,6,1,6,2];
+    // Counter-clockwise seen from OUTSIDE. Every one of these was wound the
+    // other way round, and since all seven meshes of the bridge are built from
+    // this one helper, all seven were inside out: a bridge you could see
+    // through, which reads as a material problem rather than as a winding one.
+    // See CLAUDE.md § Traps.
+    const f = [0,2,1,0,3,2, 4,5,6,4,6,7, 0,5,4,0,1,5, 3,6,2,3,7,6, 0,7,3,0,4,7, 1,6,5,1,2,6];
     return { v, f };
   }
   function merge(parts: {v:number[];f:number[]}[]) {
@@ -1112,7 +1117,13 @@ export const meshCollisionPreset: SceneGraph = (() => {
      0.25, 0,   -0.12,
      0.25, 0,    0.12,
   ];
-  const rampFaces = [0,1,3, 0,3,2, 0,2,4, 1,3,5, 2,3,5, 2,5,4, 0,5,1, 0,4,5];
+  // Every triangle wound counter-clockwise seen from OUTSIDE. The far end cap
+  // used to be 1,3,5 — one triangle facing inward out of eight, which is not
+  // visible as an error: it is simply not drawn, so the ramp had a missing
+  // wall you could see through into the back of its far face. It also cost the
+  // solid a third of its volume, and MuJoCo refuses to integrate the inertia of
+  // a mesh whose faces disagree. See CLAUDE.md § Traps.
+  const rampFaces = [0,1,3, 0,3,2, 0,2,4, 1,5,3, 2,3,5, 2,5,4, 0,5,1, 0,4,5];
 
   const pyramidYup = [
     -0.12, 0,  0.12,
@@ -1121,7 +1132,10 @@ export const meshCollisionPreset: SceneGraph = (() => {
     -0.12, 0, -0.12,
      0.0,  0.2, 0.0,
   ];
-  const pyramidFaces = [0,4,1, 1,4,2, 2,4,3, 3,4,0, 0,1,2, 0,2,3];
+  // Was wound the other way round throughout — a uniformly inverted solid, with
+  // a negative volume, which renders as a see-through pyramid rather than as a
+  // broken one.
+  const pyramidFaces = [0,1,4, 1,2,4, 2,3,4, 3,0,4, 0,2,1, 0,3,2];
 
   const rampRV = [
     -0.25, 0.12, 0,  -0.25, -0.12, 0,
@@ -2317,21 +2331,26 @@ export const openscadDemoPreset: SceneGraph = {
              0.12, -0.12,  0.1,
             -0.12, -0.12,  0.1
           ],
+          // The shell of the difference() below: outer walls facing out, cavity
+          // walls facing into the cavity, rim on top. 26 of these 28 triangles
+          // used to face the other way — the two that did not are what made it
+          // a MIXED winding, which a signed-volume check cannot see (CLAUDE.md
+          // § Traps) and which MuJoCo will not integrate an inertia over.
           faces: [
             0, 1, 2,  0, 2, 3,
-            0, 1, 5,  0, 5, 4,
-            1, 2, 6,  1, 6, 5,
-            2, 3, 7,  2, 7, 6,
-            3, 0, 4,  3, 4, 7,
-            4, 5, 13,  4, 13, 12,
-            5, 6, 14,  5, 14, 13,
-            6, 7, 15,  6, 15, 14,
-            7, 4, 12,  7, 12, 15,
-            8, 9, 10,  8, 10, 11,
-            8, 12, 13,  8, 13, 9,
-            9, 13, 14,  9, 14, 10,
-            10, 14, 15,  10, 15, 11,
-            11, 15, 12,  11, 12, 8
+            0, 5, 1,  0, 4, 5,
+            1, 6, 2,  1, 5, 6,
+            2, 7, 3,  2, 6, 7,
+            3, 4, 0,  3, 7, 4,
+            4, 13, 5,  4, 12, 13,
+            5, 14, 6,  5, 13, 14,
+            6, 15, 7,  6, 14, 15,
+            7, 12, 4,  7, 15, 12,
+            8, 10, 9,  8, 11, 10,
+            8, 13, 12,  8, 9, 13,
+            9, 14, 13,  9, 10, 14,
+            10, 15, 14,  10, 11, 15,
+            11, 12, 15,  11, 8, 12
           ]
         }
       ],
@@ -3085,12 +3104,10 @@ export const PRESETS = {
     name: 'California Relief Map',
     emoji: '🗺️',
     scene: californiaReliefPreset,
-    // The default camera framing is tuned for bench-scale objects (the grid's
-    // cells are 100mm, the camera sits 800mm out) — this carve is a 50x40x40mm
-    // block, so it reads as a speck at that distance. A closer default view is
-    // purely a camera position, not a scale on the model: the carve's real
-    // millimetre dimensions (what the exporter cares about) are untouched.
-    camera: { position: [0.05, -0.09, 0.07], target: [0, 0, 0.02] } satisfies PresetCamera,
+    // No camera of its own any more. This 50x40x40mm block used to need one,
+    // because the default view was 800mm out and showed it as a speck; the
+    // default now shows about 250mm of world, which is the scale this and
+    // everything else here is worked at. See utils/frameScene.
     // How this model is meant to be cut: a 50x40x40 block, 20 mm deep, at the
     // size it was authored rather than fitted. Until the store could carry
     // this, the constant existed and nothing read it, so the relief dialog
@@ -3101,16 +3118,17 @@ export const PRESETS = {
     name: 'Wall Bracket (Lattice)',
     emoji: '📐',
     scene: latticeBracketPreset,
-    // A 50x40x60 mm part, like the relief map: the default view is framed for
-    // objects a metre across and would show this as a speck.
-    camera: { position: [0.14, -0.18, 0.12], target: [0.01, 0, 0.03] } satisfies PresetCamera
+    // A 50x40x60 mm part, and like the relief map it no longer needs a camera
+    // of its own: the default view is framed for something this size.
   },
   oak_tree: {
     name: 'Oak Tree',
     emoji: '🌳',
     scene: oakTreePreset,
-    // Five metres of tree: the bench-scale default view would have it filling
-    // the window from the inside.
+    // Five metres of tree. A scene too big for the default window is pulled
+    // back far enough to fit it, but this one is framed by hand: standing back
+    // from a tree and looking slightly up at it is not the same picture as
+    // fitting its bounding sphere.
     camera: { position: [9, -11, 4.5], target: [0, 0, 2.6] } satisfies PresetCamera
   },
   mega_bust_studio: {
@@ -3128,9 +3146,6 @@ export const PRESETS = {
     name: 'Tutorial: Making an Exact Part',
     emoji: '🎓',
     scene: emptyPreset,
-    // Framed for a part 40 mm across rather than a metre, which is what the
-    // tutorial has you build in step one.
-    camera: { position: [0.12, -0.16, 0.13], target: [0, 0, 0.02] } satisfies PresetCamera
   }
 };
 

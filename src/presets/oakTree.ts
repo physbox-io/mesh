@@ -394,6 +394,8 @@ export const oakTreePreset: SceneGraph = (() => {
       type: 'body',
       // No joint: a tree stands where it grew. Scenery, so neither mesh
       // collides — the convex hull of a tree is a dome nothing should bump into.
+      // Give it a joint and the store turns collision back on, because a body
+      // that can move and cannot touch anything only falls through the floor.
       pos: [0, 0, 0],
       joints: [],
       geoms: [
@@ -402,6 +404,10 @@ export const oakTreePreset: SceneGraph = (() => {
           type: 'mesh',
           size: [1],
           rgba: [0.33, 0.26, 0.20, 1],
+          // Green oak, in kg/m3. The trunk and limbs come to 0.87 m3, so the
+          // timber of this tree weighs about 600kg — which, with the crown
+          // below, is what decides how it stands and how it goes over.
+          density: 700,
           contype: 0,
           conaffinity: 0,
           vertices: toYup(wood.positions),
@@ -413,6 +419,13 @@ export const oakTreePreset: SceneGraph = (() => {
           type: 'mesh',
           size: [1],
           rgba: [0.25, 0.42, 0.18, 1],
+          // The clumps enclose 100 m3, and a crown is very nearly all air: the
+          // leaves of a mature oak are a couple of hundred kilos spread through
+          // it. Left at the default 1000 the canopy alone weighed 100 TONNES
+          // and dragged the centre of mass up into the branches, which is what
+          // made the tree behave like a top-heavy dome of water the moment it
+          // was made movable.
+          density: 3,
           contype: 0,
           conaffinity: 0,
           vertices: toYup(leaf.positions),

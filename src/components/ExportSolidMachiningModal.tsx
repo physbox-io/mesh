@@ -117,6 +117,7 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
       // flat and wall it touches. The recommendation is written for reliefs.
       finishingToolType: 'flat',
       finishingStepoverPercent: 30,
+      finishingStrategy: 'raster',
     }));
   };
 
@@ -467,6 +468,7 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
             set={setTooling}
             override={override}
             materialLabel={materialLabel}
+            bitePercent={result?.success ? result.sides[0]?.roughingBitePercent ?? null : null}
           />
 
           <BedLevellingFields
