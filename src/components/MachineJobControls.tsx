@@ -714,6 +714,38 @@ export const JobOverrides: React.FC<{ machineState: MachineState }> = ({ machine
         () => webSerialManager.resetSpindleOverride(),
         'Spindle speed (only on a machine whose controller owns the spindle)'
       )}
+      {/* Rapids get three fixed steps because GRBL implements exactly three.
+          Worth having on a first run of an unfamiliar file: a rapid at quarter
+          speed is one you can still hit the stop for. */}
+      <div className="flex items-center gap-1.5">
+        <span
+          className="w-14 shrink-0 text-[10px] uppercase font-semibold text-slate-500"
+          title="Travel between cuts — a quarter-speed rapid is one you stay in reach of the stop for"
+        >
+          Rapids
+        </span>
+        <span
+          className={`w-11 shrink-0 text-right font-mono text-[11px] font-bold ${
+            machineState.overrides.rapid === 100
+              ? 'text-slate-700 dark:text-slate-200'
+              : 'text-amber-600 dark:text-amber-400'
+          }`}
+        >
+          {machineState.overrides.rapid}%
+        </span>
+        <div className="flex gap-1">
+          {([100, 50, 25] as const).map((pct) => (
+            <button
+              key={pct}
+              className={step}
+              onClick={() => webSerialManager.setRapidOverride(pct)}
+              title={`Travel between cuts at ${pct}% of the rapid speed`}
+            >
+              {pct}%
+            </button>
+          ))}
+        </div>
+      </div>
       <p className="text-[10px] leading-relaxed text-slate-500">
         Applied to the motion already in the buffer, so a cut that is chattering or burning can be
         backed off without stopping the job. Chatter or burn marks mean the feed and the speed are
