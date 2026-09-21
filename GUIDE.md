@@ -55,6 +55,16 @@ Technical decisions, conventions, and architecture notes for the **PhysBox: Mesh
 * `src/store/useStore.ts`: state management and scene node mutation actions.
 * `src/utils/mjcf.ts`: compiles the Zustand scene node graph into MJCF XML.
 * `src/presets/presetScenes.ts`: initial scene definitions and configurations.
+* `src/utils/webSerialManager.ts`: the GRBL link and the job streamer. Holds the program and the
+  line it has reached; `resumeFromLine` replays the program without sending it to rebuild the modal
+  state, then streams a preamble plus the tail.
+* `src/utils/jobCheckpoint.ts`: what makes that survive the tab. The program is written to
+  localStorage when a job starts and the reached line every two seconds after, so an interrupted job
+  can be offered back on the next load. On PhysBox Pro the same two records go to the account under
+  the `physics-job` app id — the only route for a program over `MAX_LOCAL_BYTES`, and the only one
+  that reaches a second computer. `src/utils/jobRestore.ts` joins the two halves (the manager may not
+  import back into the checkpoint store); `main.tsx` asks once at start-up and
+  `components/JobRestoreModal.tsx` renders whatever resume point turns up.
 
 ---
 

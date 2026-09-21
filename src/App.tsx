@@ -53,6 +53,7 @@ import { BottomStatusBar, SHOW_EXPORTS_EVENT } from './components/BottomStatusBa
 import { MachineConfigModal } from './components/MachineConfigModal';
 import { UserProfileButton, SIGN_IN_REQUESTED_EVENT, SIGNED_IN_EVENT } from './components/UserProfileButton';
 import { AgentMachineBanner } from './components/AgentMachineBanner';
+import { JobRestoreModal } from './components/JobRestoreModal';
 import { MIN_MAX_TOKENS, MAX_MAX_TOKENS, readMaxTokens, writeMaxTokens } from './utils/llmSettings';
 import { PrintAnalysisHUD } from './components/PrintAnalysisHUD';
 import { createHeatSetBossNode, createHexNutTrapNode, createBearingPocketNode, createDShaftHubNode, createCounterboreHoleNode } from './utils/hardwareComponents';
@@ -604,6 +605,7 @@ const DOCS_TABS = [
   ]},
   { group: 'Fabrication', items: [
     { id: 'zeroing', label: '🎯 Machine Setup & Zeroing' },
+    { id: 'resuming', label: '↩️ Stopping & Resuming' },
   ]},
   { group: 'Scripting', items: [
     { id: 'scripting', label: '💻 Names & Basics' },
@@ -7340,6 +7342,51 @@ const wobble = Math.sin(api.getTime() * 4) * 3;`}
                   </div>
                 )}
 
+                {docsTab === 'resuming' && (
+                  <div className="flex flex-col gap-4">
+                    <h3 className="font-bold text-slate-800 text-lg flex items-center gap-1.5">↩️ Stopping &amp; Resuming a Job</h3>
+                    <p className="text-xs text-slate-600 leading-relaxed">
+                      A relief carve or a deep pocket can run for most of a day. This is what happens
+                      when one of those does not get to the end — because the cutter broke, because
+                      the USB lead was nudged, or because the laptop went to sleep at hour six.
+                    </p>
+
+                    <div className="bg-slate-50 border border-slate-200/60 rounded-xl p-4 flex flex-col gap-3">
+                      <div className="text-xs">
+                        <strong className="text-slate-700">Pause vs. Park vs. E‑Stop</strong>
+                        <p className="text-slate-500 mt-1"><strong>Pause</strong> is a feed hold: the machine decelerates along its path and keeps its position, so Resume carries on exactly where it stopped. <strong>Park</strong> goes further — it stops, notes the line it had actually finished, retracts, and lets go, so you can jog the machine anywhere, change a bit or brush the work out, then put it back. <strong>E‑Stop</strong> is a soft reset: it drops the position, and a part that has been cut into cannot be re-registered from it.</p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">Resuming from a line</strong>
+                        <p className="text-slate-500 mt-1">Line eleven thousand of a G‑code file means nothing on its own: the units, the coordinate system, the feed, the spindle speed and the depth the tool should be at were all set thousands of lines earlier. So the program is replayed without being sent, and a short preamble puts the machine back into that state — retract, spindle up to speed, move over the point it stopped at, then descend into the cut at a feedrate rather than a rapid. The banner names the depth it will descend to. Check that against the piece in front of you.</p>
+                        <p className="text-slate-500 mt-1">The line is an editable field, not a fait accompli. Winding it back a little recuts a short stretch of finished surface, which is almost always safer than trying to land exactly on the break.</p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">Closing the laptop, and power cuts</strong>
+                        <p className="text-slate-500 mt-1">When the browser streams the job over USB, the tab is doing the work: it sends a line at a time and waits for the controller to acknowledge it. A laptop that sleeps stops sending, the USB device re-enumerates when it wakes, and the cut ends wherever the controller’s buffer ran out. <strong>So you cannot sleep the machine and expect the cut to continue.</strong></p>
+                        <p className="text-slate-500 mt-1">What you can do is pick it up afterwards. The program and the line it reached are written to this browser’s storage as it runs, so after a crash, a closed tab or a power cut you are offered the job again — on load, and whenever you come back to the tab. The offer is only good while <strong>the work is still clamped where it was</strong>. Home the machine, confirm the work origin, and zero Z for whatever bit is actually in the spindle before you take it.</p>
+                        <p className="text-slate-500 mt-1">Very large programs — a fine‑stepover relief is hundreds of thousands of lines — do not fit in a browser’s storage. The pause banner says so while the job runs. <strong>PhysBox Pro</strong> keeps the program in your account instead, where size is not the limit, which also means you can pick the job up from a different computer. The line is recorded to the account once a minute rather than every two seconds, so a cloud recovery may be slightly behind the cut — wind it back, not forward.</p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">The way that really does survive a closed lid</strong>
+                        <p className="text-slate-500 mt-1">A job sent to a <strong>Tekno Box</strong> is handed over whole: the device streams it to the controller itself, and the browser is only watching. Close the laptop, shut it down, drive home — the cut carries on. That is the right answer for anything that runs for hours. The machine itself still has to stay powered.</p>
+                      </div>
+                    </div>
+
+                    <div className="bg-amber-50 border border-amber-200/60 rounded-xl p-4 flex flex-col gap-2.5">
+                      <strong className="text-amber-800 font-semibold text-xs">⚠️ What a resume cannot know</strong>
+                      <p className="text-amber-700/80 text-xs leading-relaxed">
+                        It replays the program, not the workshop. It does not know that the stock was
+                        unbolted and put back, that a different bit went in, or that the piece moved when
+                        the cutter snapped. If any of those happened, the preamble will drive the tool to
+                        a depth that was correct for a piece that no longer exists. A program that used
+                        <code>G92</code>, <code>G28</code> or <code>G30</code> is flagged as uncertain for
+                        the same reason, rather than being resumed into a fiction.
+                      </p>
+                    </div>
+                  </div>
+                )}
+
                 {docsTab === 'license' && (
                   <div className="flex flex-col gap-4">
                     <h3 className="font-bold text-slate-800 text-lg flex items-center gap-1.5">⚖️ License &amp; Terms</h3>
@@ -7655,6 +7702,11 @@ THE SOFTWARE, PHYSICS SOLVERS, CSG COMPILERS, TOOLPATH CALCULATORS, AND MACHINE 
         onOpenDocs={() => openDocs('zeroing')}
         machineTarget={machineTarget}
       />
+
+      {/* A job that was still cutting when this browser last closed. Mounted at
+          the top level and not inside an export modal, because the session that
+          opened that modal is the session that went away. */}
+      <JobRestoreModal />
     </div>
   );
 }

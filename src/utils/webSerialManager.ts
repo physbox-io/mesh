@@ -22,6 +22,13 @@ import {
 } from './machineTransport';
 import { locateExecutedLine, planResume, scanModalState, type ResumeOptions } from './jobResume';
 import {
+  adoptCheckpoint,
+  beginCheckpoint,
+  clearCheckpoint,
+  recordProgress,
+  type CheckpointProgram,
+} from './jobCheckpoint';
+import {
   DEFAULT_SPINDLE_PWM_MAX,
   GUIDE_JIGGLE_FEED_MM_MIN,
   GUIDE_JIGGLE_PATTERN,
@@ -193,8 +200,32 @@ export interface ResumePoint {
   /** The line it stopped on, in the numbering the progress display counts in. */
   fromLine: number;
   totalLines: number;
-  /** What ended it, which is what decides how alarming to make the offer. */
-  reason: 'alarm' | 'cancelled' | 'disconnected';
+  /**
+   * What ended it, which is what decides how alarming to make the offer.
+   *
+   * `interrupted` is the one nothing in this session witnessed: a job found in
+   * storage after the tab, the browser or the laptop went away mid-cut. Nothing
+   * stopped it in any orderly sense — it simply stopped being streamed — so the
+   * machine has since been power-cycled, and the warnings are harder.
+   */
+  reason: 'alarm' | 'cancelled' | 'disconnected' | 'interrupted';
+  /**
+   * The program was read back from storage rather than streamed from here.
+   *
+   * Worth flagging on its own because everything the controller knew is gone
+   * with it: the homing, the work offsets that were not in EEPROM, and the tool
+   * that was in the spindle. A resume banner for one of these has to say so.
+   */
+  restored?: boolean;
+  /** The reached line may be up to a minute behind the cut. See `loadCheckpoint`. */
+  approximate?: boolean;
+  /** Where a restored job was found, and when it ran. Only set when `restored`. */
+  from?: {
+    source: 'local' | 'cloud';
+    jobName: string | null;
+    startedAt: number;
+    stoppedAt: number;
+  };
 }
 
 /**
@@ -1407,6 +1438,24 @@ class WebSerialManager {
       // would be assuming the operator re-zeroed rather than checking.
     });
 
+    /*
+     * Written before the first line goes out, not after.
+     *
+     * The window this closes is the one that costs the most: a long job that is
+     * interrupted by the tab going away takes its `program` with it, and until
+     * it has been written down somewhere outside this object there is nothing to
+     * resume into. The first move of a carve is also usually the deepest, so a
+     * checkpoint that only started covering the job a minute in would miss the
+     * part it would hurt most to recut.
+     */
+    beginCheckpoint({
+      gcode,
+      totalLines: prepared.length,
+      jobName: this.jobContext.name ?? null,
+      settings: this.jobContext.settings ?? null,
+      documentId: cloudAutosave.getStatus().documentId,
+    });
+
     this.pumpJobQueue();
   }
 
@@ -1417,7 +1466,61 @@ class WebSerialManager {
    * start — but the offer stops being made.
    */
   public clearResumePoint(): void {
+    // The stored copy goes with it. Discarding the offer is the operator saying
+    // this job is over, and an offer that came back after a reload having just
+    // been dismissed would be a bug rather than a kindness.
+    clearCheckpoint();
     if (this.state.resume) this.updateState({ resume: null });
+  }
+
+  /**
+   * Picks up a job left behind by a session that is no longer here.
+   *
+   * The counterpart to `loadCheckpoint`: the program is put back where
+   * `resumeFromLine` looks for it, and the reached line is offered as a resume
+   * point exactly as a snapped cutter's would be. From here on the two are the
+   * same thing, which is the point — the resume machinery does not need to know
+   * whether the program it is replaying was streamed an hour ago or yesterday.
+   *
+   * What is *not* the same is the machine. Nothing in this app stopped that job,
+   * so the controller has been round a power cycle: not homed, holding whatever
+   * offsets survived in EEPROM, with an unknown tool in the spindle. `restored`
+   * carries that to the banner, and `needsZZero` is already true because a
+   * connection sets it.
+   */
+  public restoreCheckpoint(
+    program: CheckpointProgram,
+    fromLine: number,
+    from: NonNullable<ResumePoint['from']> & { approximate: boolean }
+  ): boolean {
+    if (this.isJobRunning || this.isPaused) return false;
+
+    const prepared = prepareJobLines(program.gcode);
+    if (prepared.length === 0) return false;
+
+    this.program = prepared;
+    this.jobContext = { name: program.jobName ?? undefined, settings: program.settings };
+    adoptCheckpoint(program);
+
+    this.updateState({
+      totalLines: prepared.length,
+      currentLine: Math.max(0, Math.min(prepared.length, fromLine)),
+      progressPercent: Math.round((fromLine / Math.max(1, prepared.length)) * 100),
+      resume: {
+        fromLine: Math.max(0, Math.min(prepared.length, fromLine)),
+        totalLines: prepared.length,
+        reason: 'interrupted',
+        restored: true,
+        approximate: from.approximate,
+        from: {
+          source: from.source,
+          jobName: from.jobName,
+          startedAt: from.startedAt,
+          stoppedAt: from.stoppedAt,
+        },
+      },
+    });
+    return true;
   }
 
   /** How many lines the program has, which is what progress is measured against. */
@@ -1545,7 +1648,10 @@ class WebSerialManager {
         if (this.jobBytesInFlight === 0) {
           this.isJobRunning = false;
           this.stopElapsedTicker();
-          // It finished. There is nothing left to resume into.
+          // It finished. There is nothing left to resume into — here or in
+          // storage, where an offer left standing would invite somebody to
+          // descend into a piece that has already come off the bed.
+          clearCheckpoint();
           this.updateState({ status: 'IDLE', progressPercent: 100, resume: null });
         }
         return;
@@ -1579,6 +1685,10 @@ class WebSerialManager {
     const programLine = Math.max(0, Math.min(this.programLength(), this.jobLineBase + this.currentQueueIndex));
     const progressPercent = Math.round((programLine / Math.max(1, this.programLength())) * 100);
     this.updateState({ currentLine: programLine, progressPercent });
+    // Throttled inside, to a storage write every couple of seconds rather than
+    // one per G-code block. Called from here rather than from `updateState`
+    // because this is the only place the program line is actually decided.
+    recordProgress(programLine, 'streaming');
 
     // A tool change or a programmed stop is the operator's cue, not a fault.
     // Neither is sent on: GRBL rejects M6 unless it was built with it, and the
@@ -1833,6 +1943,10 @@ class WebSerialManager {
     this.jobBytesInFlight = 0;
     await this.writeRealtime(0x18); // Ctrl-X, soft reset
 
+    // A parked job is expected to be picked up again, and "again" is allowed to
+    // be tomorrow: parking is what an operator does when they stop for the day.
+    recordProgress(fromLine, 'parked', true);
+
     this.updateState({
       status: 'PAUSED_PARKED',
       park: { fromLine, totalLines: this.programLength(), at },
@@ -1877,6 +1991,7 @@ class WebSerialManager {
   /** Throws away a parked job without resuming it. */
   public discardPark(): void {
     if (!this.state.park) return;
+    clearCheckpoint();
     this.updateState({
       park: null,
       status: 'IDLE',
@@ -2044,7 +2159,9 @@ class WebSerialManager {
    * Drops everything this side is holding about a job, without touching the
    * machine. Used when the controller has already stopped on its own.
    */
-  private abandonJob(reason: ResumePoint['reason'] = 'cancelled') {
+  // Never `interrupted`: that one is by definition a job nothing here saw end,
+  // so there is no call site in this class that could pass it.
+  private abandonJob(reason: Exclude<ResumePoint['reason'], 'interrupted'> = 'cancelled') {
     // Where it got to, before the queue that knows it is thrown away. The line
     // that was in flight is the one to come back to rather than the one after
     // it: a move that was cut off partway through did not finish, and running
@@ -2052,6 +2169,10 @@ class WebSerialManager {
     // leaves a gap in the work.
     if ((this.isJobRunning || this.isPaused) && this.program.length > 0) {
       const stoppedAt = Math.max(0, Math.min(this.programLength(), this.jobLineBase + this.currentQueueIndex - 1));
+      // Forced past the throttle: what follows a drop or an alarm is often the
+      // operator closing the tab, and a write that waited out its interval would
+      // be the one write that mattered and did not happen.
+      recordProgress(stoppedAt, reason, true);
       this.updateState({
         resume: { fromLine: stoppedAt, totalLines: this.programLength(), reason },
       });

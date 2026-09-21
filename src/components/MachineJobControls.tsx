@@ -5,6 +5,7 @@ import { checkJobEnvelope, type JobExtent } from '../utils/workEnvelope';
 import { formatDuration } from '../utils/timeEstimate';
 import { NumberInput } from '@physbox-io/ui';
 import { ProbeCircuitStatus } from './ProbeCircuitStatus';
+import { CheckpointBadge } from './CheckpointBadge';
 
 /**
  * Running a job from the browser: stop it, pick it up again, and deal with what
@@ -94,6 +95,19 @@ export const JobPauseBanner: React.FC<{
         </p>
       )}
 
+      {/*
+        What a pause is and is not insurance against.
+        A feed hold holds the position in the controller, which is why Resume
+        picks the cut up exactly — and which is also why it is worth nothing at
+        all once the controller loses power. The program is written down
+        separately so that case has a way back, and this says so at the moment
+        somebody is deciding whether they can walk away.
+      */}
+      <CheckpointBadge
+        feedHold={machineState.status === 'PAUSED_OPERATOR'}
+        className="text-amber-700/90 dark:text-amber-300/80"
+      />
+
       <div className="flex flex-wrap items-center justify-end gap-2 pt-2 border-t border-amber-500/30">
         {toolChange && showZTools && (
           <>
@@ -180,7 +194,11 @@ export const JobResumeBanner: React.FC<{
       ? 'The controller alarmed (a limit switch, or a reset part way through).'
       : resume.reason === 'disconnected'
         ? 'The connection to the machine dropped.'
-        : 'The job was stopped.';
+        : resume.reason === 'interrupted'
+          // Nothing in the app saw this one end. The program was read back out
+          // of storage, which is the only reason there is anything to offer.
+          ? 'This browser went away while the job was streaming — a closed tab, a sleeping laptop, or the power going off.'
+          : 'The job was stopped.';
 
   // What the preamble will actually do, not what the program was doing when it
   // stopped: a resume onto a tool change makes no descent at all.
@@ -205,6 +223,16 @@ export const JobResumeBanner: React.FC<{
           </p>
         </div>
       </div>
+
+      {resume.restored && (
+        <p className="text-[11px] leading-relaxed font-semibold">
+          The machine has been through a power cycle since, so nothing on it is still true: home it,
+          confirm the work origin, and zero Z for whatever tool is actually in the spindle.
+          {resume.approximate && (
+            <> The line below was recorded once a minute, so wind it back rather than forward.</>
+          )}
+        </p>
+      )}
 
       {showZTools && (
         <p className="text-[11px] leading-relaxed">
