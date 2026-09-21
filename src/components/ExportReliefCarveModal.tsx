@@ -10,7 +10,7 @@ import { webSerialManager } from '../utils/webSerialManager';
 import { formatDuration } from '../utils/timeEstimate';
 import { NumberInput } from '@physbox-io/ui';
 import { useStore } from '../store/useStore';
-import { JobPauseBanner, JobPreflight, JobProgress, JobResumeBanner, JobTransport } from './MachineJobControls';
+import { JobOverrides, JobPauseBanner, JobPreflight, JobProgress, JobResumeBanner, JobTransport } from './MachineJobControls';
 import { MachineFaultBanner } from './MachineFaultBanner';
 import { ToolpathView } from './ToolpathView';
 import {
@@ -536,6 +536,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                 starts: this modal covers the status bar's progress readout, so
                 without it a running carve reports nothing at all. */}
             <JobProgress machineState={machineState} />
+            <JobOverrides machineState={machineState} />
 
             <JobPreflight
               machineState={machineState}

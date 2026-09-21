@@ -9,7 +9,7 @@ import { runSettings } from '../utils/runSettings';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
 import { NumberInput } from '@physbox-io/ui';
 import { useStore } from '../store/useStore';
-import { JobPauseBanner, JobPreflight, JobProgress, JobResumeBanner, JobTransport } from './MachineJobControls';
+import { JobOverrides, JobPauseBanner, JobPreflight, JobProgress, JobResumeBanner, JobTransport } from './MachineJobControls';
 import { MachineFaultBanner } from './MachineFaultBanner';
 import { formatDuration } from '../utils/timeEstimate';
 import {
@@ -938,6 +938,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                 </div>
               </div>
               <JobProgress machineState={machineState} />
+              <JobOverrides machineState={machineState} />
               <JobPreflight
                 machineState={machineState}
                 tool={machineMode === 'cnc' ? `${bitDiameterMm} mm flat end mill, 2-flute upcut` : undefined}
