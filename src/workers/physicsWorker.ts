@@ -493,8 +493,23 @@ const applyDragForce = () => {
   const bx = dat.xpos[bId * 3], by = dat.xpos[bId * 3 + 1], bz = dat.xpos[bId * 3 + 2];
   const vx = dat.cvel[bId * 6 + 3], vy = dat.cvel[bId * 6 + 4], vz = dat.cvel[bId * 6 + 5];
   const mass = mdl.body_mass[bId] || 1.0;
-  const K = 200.0;
-  const D = 2.0 * Math.sqrt(mass * K);
+  /*
+   * Stiffness PER KILOGRAM, not an absolute one.
+   *
+   * A fixed spring makes the pointer's pull mean something different on every
+   * body: the force is clamped to three times the body's weight below, so with
+   * a constant K the offset needed to reach that clamp grows with the mass —
+   * 0.15 m for a 1 kg block, but 132 m for the 900 kg oak tree, which is many
+   * screens' worth of mouse. The tree read as immovable for that reason, not
+   * because the force was too weak.
+   *
+   * Scaling K with the mass fixes the ratio instead: every body saturates at
+   * the same 3 * 9.81 / 200 ≈ 0.15 m of pointer offset and settles in the same
+   * time, so the gesture feels the same whatever is on the end of it. 200 per
+   * kg is what a 1 kg body already had, so light bodies are unchanged.
+   */
+  const K = 200.0 * mass;
+  const D = 2.0 * Math.sqrt(mass * K); // critical damping, so nothing oscillates
 
   let fx = K * (dragTarget.x - bx) - D * vx;
   let fy = K * (dragTarget.y - by) - D * vy;
