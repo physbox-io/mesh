@@ -166,14 +166,30 @@ const buildDataMirror = (built: BuiltResult | FrameSnapshot): DataMirror => ({
   geom_xpos: built.geom_xpos!, geom_xmat: built.geom_xmat!,
 });
 
-// Proactive recycling: WASM linear memory only ever grows within a worker's
-// lifetime, and heavy scenes (many dynamic SCAD/mesh bodies) can eat through
-// the 2^31-byte ceiling in surprisingly few rebuilds. Rather than wait for a
-// hard "enlarge memory" failure, swap in a fresh worker on a schedule so
-// exhaustion is never actually reached during normal use — the same
-// terminate+respawn mechanism as the reactive recovery path, just run
-// preemptively. Any respawn (proactive or reactive) resets this counter.
-const RECYCLE_EVERY_N_BUILDS = 4;
+/*
+ * Proactive recycling: WASM linear memory only ever grows within a worker's
+ * lifetime, and the @mujoco/mujoco build has a hard 2^31-byte ceiling. Rather
+ * than wait for a hard "enlarge memory" failure, swap in a fresh worker before
+ * exhaustion is reached — the same terminate+respawn mechanism as the reactive
+ * recovery path, just run preemptively.
+ *
+ * This used to fire on a build COUNT, every four builds, because doBuild leaked
+ * a whole MjModel + MjData on every rebuild (its teardown called free(), which
+ * embind does not expose, so it released nothing) and a count was a stand-in
+ * for how much that had cost. Measured at ~13 MB a build on a scene of one box.
+ *
+ * doBuild now actually frees them, which makes the count both wrong and
+ * expensive: a respawn reloads MuJoCo from scratch, and it is also what forces
+ * the seeding dance below — every fifth edit used to land on a worker with no
+ * previous model to carry the pose across. So the decision is made on the heap
+ * the worker reports with each build, and a scene that is not growing never
+ * pays for a respawn at all.
+ *
+ * The threshold leaves generous headroom under the 2 GiB ceiling: growth
+ * between two builds can be large for a heavy mesh scene, and the reactive
+ * bad_alloc/abort recovery below is the last resort rather than the plan.
+ */
+const RECYCLE_HEAP_BYTES = 1_200_000_000;
 /** Orders recompiles so a superseded one can bow out instead of building stale state. */
 let recompileToken = 0;
 /**
@@ -192,7 +208,13 @@ let recompileToken = 0;
  */
 let recompilesInFlight = 0;
 
-let buildsSinceRecycle = 0;
+/**
+ * WASM linear memory reserved as of the last build the worker reported.
+ *
+ * The heap only ever grows within a worker's lifetime, so this is the figure the
+ * proactive recycle should be deciding on.
+ */
+let lastHeapBytes = 0;
 
 /**
  * Run something on the next paint, or straight away if there will not be one.
@@ -231,12 +253,16 @@ let physicsWorkerClientSingleton: PhysicsWorkerClient | null = null;
 const recycleWorker = () => {
   physicsWorkerClientSingleton?.terminate();
   physicsWorkerClientSingleton = null;
-  buildsSinceRecycle = 0;
+  // A fresh worker is a fresh WASM realm, so the heap starts over too.
+  lastHeapBytes = 0;
 };
 export const getPhysicsWorkerClient = (): PhysicsWorkerClient => {
   if (!physicsWorkerClientSingleton) {
     const client = new PhysicsWorkerClient();
     client.onFrame = (snap) => {
+      // The heap moves while stepping too, not only across builds — see the
+      // periodic recycle at the bottom of this file, which decides on it.
+      if (snap.heapBytes) lastHeapBytes = snap.heapBytes;
       const data = useStore.getState().data;
       if (data) {
         data.time = snap.time;
@@ -3692,6 +3718,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
 
     const applyBuilt = (built: BuiltResult) => {
       console.log(`[PhysicsWorker] Model built successfully. Shared memory (COOP/COEP) active: ${!!built.isShared}`);
+      if (built.heapBytes) lastHeapBytes = built.heapBytes;
       const updates: Partial<PhysicsState> = {
         mujoco: MUJOCO_SHIM, model: buildModelMirror(built), data: buildDataMirror(built),
         sceneGraph, recompileId: Date.now(), lastCompileError: null, isLoaded: true,
@@ -3716,13 +3743,11 @@ export const useStore = create<PhysicsState>()((set, get) => ({
       }
 
       // Proactively recycle before the ceiling is ever reached, rather than
-      // only reacting to a hard failure — see RECYCLE_EVERY_N_BUILDS comment.
-      buildsSinceRecycle++;
+      // only reacting to a hard failure — see RECYCLE_HEAP_BYTES comment.
       let recycled = false;
-      if (buildsSinceRecycle > RECYCLE_EVERY_N_BUILDS) {
-        console.warn(`Proactively recycling the physics worker after ${RECYCLE_EVERY_N_BUILDS} builds to stay well clear of the WASM heap ceiling.`);
+      if (lastHeapBytes > RECYCLE_HEAP_BYTES) {
+        console.warn(`Proactively recycling the physics worker: the WASM heap has reached ${(lastHeapBytes / 1048576).toFixed(0)} MB, past the ${(RECYCLE_HEAP_BYTES / 1048576).toFixed(0)} MB mark, to stay well clear of the ceiling.`);
         recycleWorker();
-        buildsSinceRecycle = 1;
         recycled = true;
       }
 
@@ -3828,23 +3853,30 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   },
 
   recycleWorkerSeamlessly: async () => {
-    // Periodic proactive recycle while actively simulating: MuJoCo's own
-    // internal contact/constraint memory can grow over the course of a long
-    // play session — not just across explicit rebuilds — and, like
-    // everything else in a WASM realm, never shrinks back down on its own.
-    // Swap in a fresh worker before that ever becomes a problem, carrying
-    // over the exact current qpos/qvel/time (from the live `data` mirror,
-    // kept up to date by FRAME messages) so it's invisible rather than a
-    // visible reset. See the periodic timer below this store definition.
+    // Proactive recycle while actively simulating: MuJoCo's own internal
+    // contact/constraint memory can grow over the course of a long play
+    // session — not just across explicit rebuilds — and, like everything else
+    // in a WASM realm, never shrinks back down on its own. Swap in a fresh
+    // worker before that becomes a problem, carrying over the exact current
+    // qpos/qvel/time (from the live `data` mirror, kept up to date by FRAME
+    // messages) so it's invisible rather than a visible reset.
+    //
+    // Checked against the heap the worker reports with every frame rather than
+    // done unconditionally on a timer. A respawn reloads MuJoCo from scratch,
+    // and most play sessions never grow the arena enough to need one — a scene
+    // whose contacts are not piling up now pays nothing. See the periodic timer
+    // below this store definition, which is what calls this.
     // isPlaying is deliberately read later via get(), not destructured here: the
     // await below means the snapshot could be stale by the time it's used.
     const { data, sceneGraph, gravityZ, windX, windY, density, floorFriction, floorBounce } = get();
     if (!data) return;
+    if (lastHeapBytes <= RECYCLE_HEAP_BYTES) return;
     // Never recycle on top of a request the worker hasn't answered yet: killing
     // the worker mid-build fails a rebuild that was about to succeed (and an
     // MCP command driving one would be told its scene didn't build). The
     // recycle is purely housekeeping — 20s later is just as good.
     if (getPhysicsWorkerClient().hasPendingWork()) return;
+    console.warn(`Seamlessly recycling the physics worker mid-play: the WASM heap has reached ${(lastHeapBytes / 1048576).toFixed(0)} MB, past the ${(RECYCLE_HEAP_BYTES / 1048576).toFixed(0)} MB mark.`);
     const seedState = {
       qpos: Array.from(data.qpos as Float64Array),
       qvel: Array.from(data.qvel as Float64Array),
@@ -3858,6 +3890,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
       client.setEnv(windX, windY);
       const built = await client.build(xml, sceneGraph, false, seedState);
       if (!built.ok) throw new Error(built.error || 'Unknown physics worker build error');
+      if (built.heapBytes) lastHeapBytes = built.heapBytes;
       set({ mujoco: MUJOCO_SHIM, model: buildModelMirror(built), data: buildDataMirror(built), recompileId: Date.now(), lastCompileError: null });
       if (get().isPlaying) client.setPlaying(true);
     } catch (e) {
@@ -3867,10 +3900,12 @@ export const useStore = create<PhysicsState>()((set, get) => ({
 }));
 
 if (typeof window !== 'undefined') {
-  // Every 20s while actively playing, seamlessly recycle the physics worker
-  // (see recycleWorkerSeamlessly above) — this is what actually addresses
-  // memory growth from long-running simulation, as opposed to the
-  // build-counter recycle in recompile() which only helps across rebuilds.
+  // Every 20s while actively playing, CHECK whether the physics worker needs
+  // recycling (see recycleWorkerSeamlessly above, which returns immediately
+  // unless the heap says otherwise) — this is what addresses memory growth from
+  // long-running simulation, as opposed to the recycle in recompile() which
+  // only looks at the heap across rebuilds. The interval is how often the
+  // question is asked; it is no longer how often a worker is thrown away.
   setInterval(() => {
     if (useStore.getState().isPlaying) {
       useStore.getState().recycleWorkerSeamlessly();

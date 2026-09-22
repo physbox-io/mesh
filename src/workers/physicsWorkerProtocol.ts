@@ -52,6 +52,15 @@ export interface SimBuffers {
 export interface FrameSnapshot extends Partial<SimBuffers> {
   time: number;
   isShared?: boolean;
+  /**
+   * WASM linear memory reserved right now.
+   *
+   * Reported on every frame, not just on a build, because the heap also grows
+   * while simply stepping — MuJoCo's contact/constraint arena sizes itself to
+   * whatever the scene is doing — and the proactive recycle needs a current
+   * figure to decide on during a long run, when no build is happening at all.
+   */
+  heapBytes?: number;
 }
 
 export interface BuiltResult extends Partial<SimBuffers> {
@@ -67,6 +76,8 @@ export interface BuiltResult extends Partial<SimBuffers> {
   idMaps?: IdMaps;
   time?: number;
   isShared?: boolean;
+  /** As on FrameSnapshot — a build spreads one in, so it carries the figure too. */
+  heapBytes?: number;
 }
 
 // ---- History / telemetry -------------------------------------------------

@@ -20,6 +20,14 @@
 // phase with rendering instead of adding a whole extra frame of latency.
 
 import load_mujoco from '@mujoco/mujoco';
+// The same asset the Emscripten glue would fetch by import.meta.url, as a URL.
+// Wanted explicitly so loadMujoco() below can instantiate the module itself and
+// keep hold of its WebAssembly.Memory — this build exports neither HEAPU8 nor
+// wasmMemory (both abort with "was not exported"), so capturing the instance at
+// creation is the only way to read how big the heap has grown. Vite emits the
+// file once; the package's exports map does list ./mujoco.wasm, so a bare
+// specifier resolves (unlike openscad's - see the note in scadWorker.ts).
+import mujocoWasmUrl from '@mujoco/mujoco/mujoco.wasm?url';
 import type { SceneGraph, SceneJoint, SceneNode } from '../types/scene';
 // Pure loop control for the headless run, kept in a module that can be
 // imported outside a Worker realm so it is testable (this file cannot be:
@@ -37,10 +45,39 @@ import type {
 type Mujoco = Awaited<ReturnType<typeof load_mujoco>>;
 type MjModel = InstanceType<Mujoco['MjModel']>;
 type MjData = InstanceType<Mujoco['MjData']>;
-/** See the note in doBuild: what the old model/data teardown *believes* it has. */
-type Freeable = { free: () => void };
-
 let mujoco: Mujoco | null = null;
+/**
+ * The module's linear memory, captured at instantiation.
+ *
+ * MuJoCo's WASM heap only ever grows and has a hard 2^31-byte ceiling, and both
+ * proactive recycles exist to stay clear of it. Reading the real figure lets that
+ * decision be made on the heap itself rather than on a build count or a timer.
+ */
+let wasmMemory: WebAssembly.Memory | null = null;
+
+/** Bytes of WASM linear memory currently reserved, or 0 before the module loads. */
+const heapBytes = (): number => wasmMemory?.buffer.byteLength ?? 0;
+
+/**
+ * Loads the MuJoCo module once, instantiating the wasm ourselves so the
+ * WebAssembly.Memory can be kept (see wasmMemory above).
+ */
+const loadMujoco = async (): Promise<Mujoco> => {
+  if (mujoco) return mujoco;
+  mujoco = await load_mujoco({
+    instantiateWasm: (
+      imports: WebAssembly.Imports,
+      done: (instance: WebAssembly.Instance, module: WebAssembly.Module) => void,
+    ) => {
+      WebAssembly.instantiateStreaming(fetch(mujocoWasmUrl), imports).then((result) => {
+        wasmMemory = result.instance.exports.memory as WebAssembly.Memory;
+        done(result.instance, result.module);
+      });
+      return {};
+    },
+  } as Parameters<typeof load_mujoco>[0]);
+  return mujoco;
+};
 let model: MjModel | null = null;
 let data: MjData | null = null;
 let sceneGraph: SceneGraph = { nodes: [] };
@@ -600,6 +637,7 @@ const snapshot = () => {
     updateSharedBuffers();
     return {
       time: dat.time,
+      heapBytes: heapBytes(),
       qpos,
       qvel,
       ctrl,
@@ -614,6 +652,7 @@ const snapshot = () => {
   }
   return {
     time: dat.time,
+    heapBytes: heapBytes(),
     qpos: Float64Array.from(dat.qpos),
     qvel: Float64Array.from(dat.qvel),
     ctrl: Float64Array.from(dat.ctrl),
@@ -688,7 +727,7 @@ const stepTick = (delta: number) => {
   if (stepsNeeded > 0) {
     const snap = snapshot();
     if (isSharedSupported) {
-      post({ type: 'FRAME', time: snap.time, isShared: true });
+      post({ type: 'FRAME', time: snap.time, heapBytes: snap.heapBytes, isShared: true });
     } else {
       post({ type: 'FRAME', ...snap, isShared: false }, [
         snap.qpos.buffer, snap.qvel.buffer, snap.ctrl.buffer,
@@ -755,13 +794,41 @@ const doBuild = (
 
   if (!mujoco) throw new Error('MuJoCo module not loaded yet');
 
-  // `free()` is not part of @mujoco/mujoco's embind surface — a ClassHandle
-  // exposes delete(), not free() — so these calls have always thrown straight
-  // into their own catch and released nothing. Left exactly as they are and
-  // only typed: switching them to delete() would start genuinely freeing the
-  // old model, which is a change of behaviour rather than of types.
-  if (oldModel) { try { (oldModel as unknown as Freeable).free(); } catch { /* ignore */ } }
-  if (oldData) { try { (oldData as unknown as Freeable).free(); } catch { /* ignore */ } }
+  /*
+   * Release the previous model and data.
+   *
+   * These used to call `free()`, which is not part of @mujoco/mujoco's embind
+   * surface — a ClassHandle exposes delete() — so every one threw straight into
+   * its own catch and released nothing. A whole MjModel + MjData was stranded in
+   * WASM linear memory on EVERY rebuild: measured at ~13 MB a build on a scene of
+   * one box. Memory only ever grows inside a realm and the build has a hard
+   * 2^31-byte ceiling, which is what the proactive recycles in useStore exist to
+   * stay clear of.
+   *
+   * delete() genuinely frees, so this is only safe because nothing outlives the
+   * swap: BuiltResult is all Array.from copies, sharedBuffers are separately
+   * allocated and written by .set(), and stepTick re-reads these module globals
+   * on every call and is driven by TICK messages — doBuild is synchronous, so no
+   * step can interleave with it. runHeadless below has always done exactly this.
+   *
+   * Data before model: MjData is the dependent object. The try/catch stays so a
+   * handle that somehow went already — a double build, a partial failure — still
+   * cannot fail the build that is replacing it.
+   */
+  if (oldData) { try { oldData.delete(); } catch { /* already gone */ } }
+  if (oldModel) { try { oldModel.delete(); } catch { /* already gone */ } }
+  /*
+   * Drop the globals in the same breath.
+   *
+   * from_xml_string below throws on any scene MuJoCo will not accept, which is
+   * an ordinary thing for a user to produce. While free() released nothing that
+   * was harmless — the globals still pointed at a live model. Now they would
+   * point at freed memory until the assignment further down, and a TICK arriving
+   * on a failed build would step a deleted model. Nulling them makes stepTick's
+   * own `!model || !data` guard the thing that catches it.
+   */
+  model = null;
+  data = null;
 
   const newModel = mujoco.MjModel.from_xml_string(xml);
   const newData = new mujoco.MjData(newModel);
@@ -906,6 +973,9 @@ const collectMujocoWarnings = (d: MjData): string[] => {
       }
       stat.delete?.();
     }
+    // The vector is a heap copy in its own right, like the contact vector in
+    // snapshot() — releasing only its members still leaks one per call.
+    stats.delete?.();
   } catch { /* warning stats are diagnostics; never fail a run over them */ }
   return out;
 };
@@ -1005,7 +1075,7 @@ self.onmessage = async (evt: MessageEvent) => {
   try {
     switch (msg.type) {
       case 'BUILD': {
-        if (!mujoco) mujoco = await load_mujoco();
+        if (!mujoco) await loadMujoco();
         try {
           const result = doBuild(msg.xml, msg.sceneGraph, msg.preserveState, msg.seedState);
           post({ type: 'BUILT', id: msg.id, ok: true, ...result });
@@ -1063,7 +1133,7 @@ self.onmessage = async (evt: MessageEvent) => {
           mujoco.mj_forward(model, data);
           const snap = snapshot();
           if (isSharedSupported) {
-            post({ type: 'FRAME', time: snap.time, isShared: true });
+            post({ type: 'FRAME', time: snap.time, heapBytes: snap.heapBytes, isShared: true });
           } else {
             post({ type: 'FRAME', ...snap, isShared: false }, [
               snap.qpos.buffer, snap.qvel.buffer, snap.ctrl.buffer,
@@ -1090,7 +1160,7 @@ self.onmessage = async (evt: MessageEvent) => {
         break;
       }
       case 'RUN_HEADLESS': {
-        if (!mujoco) mujoco = await load_mujoco();
+        if (!mujoco) await loadMujoco();
         const result = runHeadless(msg.xml, msg.sceneGraph, msg.ticks, msg.stride);
         post({ type: 'HEADLESS_RESULT', id: msg.id, ...result });
         break;
