@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
+import { useCommitted } from '../hooks/useSettled';
 
 /**
  * The number at the right-hand end of a slider's label, made typeable.
@@ -16,6 +17,12 @@ import React, { useState } from 'react';
  * typed — "0", "0.", "0.0" before "0.05" — survives the trip. Nothing leaves
  * here until it parses and is in range, and blur settles the box back to
  * whatever value is actually in force.
+ *
+ * Nor does every parseable keystroke leave: `0.125` passes through `0`, `0.1`
+ * and `0.12` on its way, and most of these boxes drive a rebuild of the whole
+ * model. The value is sent once typing stops, or at once on Enter and on blur —
+ * the two places a number is finished before the timer says so. Escape still
+ * throws the edit away rather than committing it late.
  */
 export const SliderValue: React.FC<{
   value: number;
@@ -32,6 +39,11 @@ export const SliderValue: React.FC<{
   const [text, setText] = useState(shown);
   const [editing, setEditing] = useState(false);
   const [seen, setSeen] = useState(value);
+
+  // The box renders from `text`, so the draft here is only the value waiting to
+  // go out. Escape arms `abandoned` because it blurs, and blur is a flush.
+  const [, setPending, flushPending, cancelPending] = useCommitted(value, onChange, 250);
+  const abandoned = useRef(false);
 
   // Track the value while the box is idle, so dragging the slider moves the
   // number, but never overwrite what someone is part-way through typing.
@@ -62,9 +74,12 @@ export const SliderValue: React.FC<{
           if (!Number.isFinite(n)) return;
           if (min !== undefined && n < min) return;
           if (max !== undefined && n > max) return;
-          onChange(n);
+          abandoned.current = false;
+          setPending(n);
         }}
         onBlur={() => {
+          if (abandoned.current) { abandoned.current = false; cancelPending(); }
+          else flushPending();
           setEditing(false);
           setSeen(value);
           setText(shown);
@@ -72,6 +87,7 @@ export const SliderValue: React.FC<{
         onKeyDown={(e) => {
           if (e.key === 'Enter') e.currentTarget.blur();
           if (e.key === 'Escape') {
+            abandoned.current = true;
             setText(shown);
             e.currentTarget.blur();
           }

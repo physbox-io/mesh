@@ -12,6 +12,7 @@ import {
   type SlopeStyle,
 } from '../utils/heightmapMesh';
 import { drawHeightmapPreview } from '../utils/heightmapPreview';
+import { useSettled } from '../hooks/useSettled';
 import type { SceneGeom, SceneNode } from '../types/scene';
 
 interface ImportImageModalProps {
@@ -126,28 +127,43 @@ export const ImportImageModal: React.FC<ImportImageModalProps> = ({
     if (initialFile) void handleFile(initialFile);
   }, [initialFile, handleFile]);
 
+  /*
+   * Building the heightmap is main-thread work that grows with the square of
+   * the grid, and every keystroke used to ask for it again — dragging `gridCols`
+   * across its travel rebuilt the mesh at every column count on the way. The
+   * fields are held still until the editing stops, and `meshPending` dims the
+   * preview meanwhile rather than letting the last mesh read as the new one.
+   */
+  const liveMeshFields = useMemo(() => ({
+    widthMm, maxHeightMm, baseMm, mapping, gridCols, smoothPasses, floorPct,
+    profile, thresholdPct, slopeLevels, slopeWidthMm, slopeStyle,
+  }), [widthMm, maxHeightMm, baseMm, mapping, gridCols, smoothPasses, floorPct,
+      profile, thresholdPct, slopeLevels, slopeWidthMm, slopeStyle]);
+  const meshFields = useSettled(liveMeshFields, 250);
+  const meshPending = meshFields !== liveMeshFields;
+
   const mesh = useMemo(() => {
     if (!image) return null;
+    const f = meshFields;
     try {
       return imageToHeightmapMesh(image.data, image.width, image.height, {
-        widthM: widthMm / 1000,
-        maxHeightM: maxHeightMm / 1000,
-        baseThicknessM: baseMm / 1000,
-        mapping,
-        gridCols,
-        smoothPasses,
-        floor: floorPct / 100,
-        profile,
-        threshold: thresholdPct / 100,
-        slopeLevels,
-        slopeWidthM: slopeWidthMm / 1000,
-        slopeStyle,
+        widthM: f.widthMm / 1000,
+        maxHeightM: f.maxHeightMm / 1000,
+        baseThicknessM: f.baseMm / 1000,
+        mapping: f.mapping,
+        gridCols: f.gridCols,
+        smoothPasses: f.smoothPasses,
+        floor: f.floorPct / 100,
+        profile: f.profile,
+        threshold: f.thresholdPct / 100,
+        slopeLevels: f.slopeLevels,
+        slopeWidthM: f.slopeWidthMm / 1000,
+        slopeStyle: f.slopeStyle,
       });
     } catch {
       return null;
     }
-  }, [image, widthMm, maxHeightMm, baseMm, mapping, gridCols, smoothPasses, floorPct,
-      profile, thresholdPct, slopeLevels, slopeWidthMm, slopeStyle]);
+  }, [image, meshFields]);
 
   /**
    * How two-tone the source is, sampled coarsely — a logo or stencil is where
@@ -160,8 +176,11 @@ export const ImportImageModal: React.FC<ImportImageModalProps> = ({
   }, [image]);
 
   useEffect(() => {
-    if (mesh && canvasRef.current) drawHeightmapPreview(canvasRef.current, mesh, maxHeightMm / 1000, widthMm / 1000);
-  }, [mesh, maxHeightMm, widthMm]);
+    // Drawn from the settled sizes, so the canvas matches the mesh it is of.
+    if (mesh && canvasRef.current) {
+      drawHeightmapPreview(canvasRef.current, mesh, meshFields.maxHeightMm / 1000, meshFields.widthMm / 1000);
+    }
+  }, [mesh, meshFields]);
 
   if (!isOpen) return null;
 
@@ -285,7 +304,7 @@ export const ImportImageModal: React.FC<ImportImageModalProps> = ({
                 <div className="rounded-xl overflow-hidden border border-slate-200 dark:border-slate-800 bg-slate-100 dark:bg-slate-950 flex items-center justify-center p-2">
                   <canvas
                     ref={canvasRef}
-                    className="max-w-full max-h-56 rounded-md"
+                    className={`max-w-full max-h-56 rounded-md transition-opacity ${meshPending ? 'opacity-40' : ''}`}
                     style={{ imageRendering: 'auto' }}
                   />
                 </div>

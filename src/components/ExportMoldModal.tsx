@@ -23,6 +23,7 @@ import { MoldWorkerClient, type MoldPreview } from '../utils/moldWorkerClient';
 import { NumberInput } from '@physbox-io/ui';
 import { CastingGuide } from './CastingGuide';
 import { HintAnchor } from './ExportFields';
+import { useSettled } from '../hooks/useSettled';
 
 interface ExportMoldModalProps {
   isOpen: boolean;
@@ -114,22 +115,6 @@ function buffersToGeometry(buf: MoldHalfBuffers): THREE.BufferGeometry {
   return geo;
 }
 
-/**
- * Holds a value still until it stops changing.
- *
- * Every keystroke in a number field is a new options object and so a new mold.
- * Typing "12" into the wall margin asks for a mold at 1 mm and then at 12; the
- * first is work nobody wanted, and on a relief it is most of a second of it.
- */
-function useDebounced<T>(value: T, delayMs: number): T {
-  const [settled, setSettled] = useState(value);
-  useEffect(() => {
-    const timer = setTimeout(() => setSettled(value), delayMs);
-    return () => clearTimeout(timer);
-  }, [value, delayMs]);
-  return settled;
-}
-
 const EMPTY_SUMMARY: MoldSummary = moldSummary(emptyMoldResult());
 
 export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClose, scene }) => {
@@ -155,7 +140,11 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
   const [preview, setPreview] = useState<MoldPreview | null>(null);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
-  const settledOptions = useDebounced(options, 250);
+  // Every keystroke in a number field is a new options object and so a new
+  // mold. Typing "12" into the wall margin asks for a mold at 1 mm and then at
+  // 12; the first is work nobody wanted, and on a relief it is most of a
+  // second of it.
+  const settledOptions = useSettled(options, 250);
 
   useEffect(() => {
     if (!isOpen) return;

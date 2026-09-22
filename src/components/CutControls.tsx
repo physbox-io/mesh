@@ -35,7 +35,7 @@
 // ---------------------------------------------------------------------------
 
 import { Circle, Square, Donut, Trash2, Move } from 'lucide-react';
-import { NumberInput } from '@physbox-io/ui';
+import { SettledNumberField } from './SettledInputs';
 import { useStore } from '../store/useStore';
 import { cutDepthOf, sourcePositiveBounds } from '../utils/csg';
 import type { SceneGeom, SceneNode } from '../types/scene';
@@ -75,7 +75,7 @@ function CutField({ label, value, onChange, title, min }: {
       <span className="block text-[9px] font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500">
         {label}
       </span>
-      <NumberInput value={value} onChange={(v) => v !== undefined && onChange(v)} min={min} className={fieldClass} />
+      <SettledNumberField value={value} onChange={onChange} min={min} className={fieldClass} />
     </label>
   );
 }
@@ -264,10 +264,10 @@ function CutRow({ node, geom, index }: {
       >
         <span>at</span>
         {([0, 1, 2] as const).map((axis) => (
-          <NumberInput
+          <SettledNumberField
             key={axis}
             value={mm(at[axis])}
-            onChange={(v) => v !== undefined && setAt(axis, v)}
+            onChange={(v) => setAt(axis, v)}
             className="w-14 min-w-0 px-0.5 py-0 rounded bg-transparent border border-transparent hover:border-slate-200 dark:hover:border-slate-700 focus:border-rose-300 outline-none text-[9px] font-mono tabular-nums"
           />
         ))}

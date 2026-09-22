@@ -12,74 +12,7 @@ import { FdmNotice } from './FdmNotice';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
 import { MATERIALS, type MaterialId } from '../utils/feedsAndSpeeds';
 import { formatDuration } from '../utils/timeEstimate';
-import type { SceneGraph } from '../types/scene';
 import type { LatticeTool } from '../utils/latticeMesh';
-
-/**
- * Counts geoms and vertices for the scene readout.
- *
- * Walks the same way the compiler does — a node with an explicit `geoms` array
- * contributes one per entry, and a node without one still contributes itself —
- * so the number here matches what actually reaches MuJoCo rather than counting
- * tree nodes.
- */
-/** Only the fields the count actually reads; a scene geom carries many more. */
-interface CountableGeom {
-  type?: string;
-  vertices?: number[];
-  renderVertices?: number[];
-}
-
-interface CountableNode {
-  geoms?: CountableGeom[];
-  meshVertices?: number[];
-  children?: CountableNode[];
-}
-
-function sceneMetrics(scene: SceneGraph | undefined): { geoms: number; vertices: number } {
-  let geoms = 0;
-  let vertices = 0;
-
-  const countGeomVerts = (g: CountableGeom | undefined) => {
-    if (!g) return;
-    if (Array.isArray(g.vertices) && g.vertices.length > 0) {
-      vertices += Math.floor(g.vertices.length / 3);
-    } else if (Array.isArray(g.renderVertices) && g.renderVertices.length > 0) {
-      vertices += Math.floor(g.renderVertices.length / 3);
-    } else if (g.type === 'box' || g.type === 'cube' || g.type === 'plane') {
-      vertices += 24;
-    } else if (g.type === 'capsule') {
-      vertices += 48;
-    } else if (g.type === 'cylinder') {
-      vertices += 64;
-    } else if (g.type === 'sphere' || g.type === 'ellipsoid') {
-      vertices += 128;
-    } else {
-      vertices += 24;
-    }
-  };
-
-  const walk = (nodes: CountableNode[]) => {
-    if (!Array.isArray(nodes)) return;
-    for (const n of nodes) {
-      if (Array.isArray(n.geoms) && n.geoms.length > 0) {
-        geoms += n.geoms.length;
-        n.geoms.forEach(countGeomVerts);
-      } else {
-        geoms += 1;
-        if (Array.isArray(n.meshVertices) && n.meshVertices.length > 0) {
-          vertices += Math.floor(n.meshVertices.length / 3);
-        } else {
-          vertices += 24;
-        }
-      }
-      if (n.children) walk(n.children);
-    }
-  };
-
-  walk((scene?.nodes ?? []) as CountableNode[]);
-  return { geoms, vertices };
-}
 
 /**
  * What the app is in the middle of, said in one phrase.
@@ -131,7 +64,7 @@ interface ModeChoice {
   hint: string;
   /** A lattice tool to switch to, or a gesture to start. */
   tool?: LatticeTool;
-  gesture?: 'move' | 'scale' | 'inset' | 'measure-distance' | 'measure-angle';
+  gesture?: 'move' | 'rotate' | 'scale' | 'inset' | 'measure-distance' | 'measure-angle';
 }
 
 const LATTICE_TOOLS: ModeChoice[] = [
@@ -145,7 +78,8 @@ const LATTICE_TOOLS: ModeChoice[] = [
 ];
 
 const GESTURES: ModeChoice[] = [
-  { key: 'G', label: 'Move', gesture: 'move', hint: 'Move it with the pointer; X/Y/Z holds one axis' },
+  { key: 'G', label: 'Move', gesture: 'move', hint: 'Move it with the pointer; X/Y/Z holds one axis. Or drag the arrows on the body' },
+  { key: 'R', label: 'Turn', gesture: 'rotate', hint: 'Turn it with the pointer; X/Y/Z holds one axis. Or drag the rings on the body' },
   { key: 'S', label: 'Scale', gesture: 'scale', hint: 'Resize it with the pointer; X/Y/Z holds one axis' },
   { key: 'I', label: 'Inset', gesture: 'inset', hint: 'A lattice face insets; a solid body gets a hole bored through it' },
 ];
@@ -219,7 +153,6 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
   onOpenMachineConfig,
   exports,
 }) => {
-  const sceneGraph = useStore((s) => s.sceneGraph);
   const isPlaying = useStore((s) => s.isPlaying);
   const machineTarget = useStore((s) => s.machineTarget);
   const setMachineTarget = useStore((s) => s.setMachineTarget);
@@ -299,7 +232,6 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
     };
   }, []);
 
-  const { geoms, vertices } = sceneMetrics(sceneGraph);
   const running = machineState.status === 'RUNNING' || machineState.status.startsWith('PAUSED');
   const paused = machineState.status.startsWith('PAUSED');
   const parked = machineState.status === 'PAUSED_PARKED';
@@ -343,7 +275,7 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
       button is a safety control, so none of it is dropped on a narrow screen.
     */
     <footer className="h-8 shrink-0 w-full bg-white dark:bg-slate-950 border-t border-slate-200 dark:border-slate-800/80 px-4 flex items-center justify-between z-20 text-[11px] text-slate-500 dark:text-slate-400 font-mono select-none transition-colors max-lg:h-auto max-lg:flex-wrap max-lg:justify-start max-lg:px-2 max-lg:py-1 max-lg:gap-x-3 max-lg:gap-y-1">
-      {/* Scene metrics */}
+      {/* What the keyboard is doing right now */}
       <div className="flex items-center gap-3 max-lg:shrink-0">
         {/* First thing in the bar, because "which mode am I in" is the question
             asked most often and the one a modal keyboard makes expensive to
@@ -395,15 +327,6 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
               </div>
             </>
           )}
-        </div>
-        <div className="flex items-center gap-2">
-          <span className="font-semibold text-slate-700 dark:text-slate-300">
-            Components: {sceneGraph?.nodes?.length || 0}
-          </span>
-          <span>·</span>
-          <span>Geoms: {geoms}</span>
-          <span>·</span>
-          <span>Vertices: {vertices.toLocaleString()}</span>
         </div>
       </div>
 

@@ -9,6 +9,7 @@ import { runSettings } from '../utils/runSettings';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
 import { NumberInput } from '@physbox-io/ui';
 import { useStore } from '../store/useStore';
+import { useSettled } from '../hooks/useSettled';
 import { JobOverrides, JobPauseBanner, JobPreflight, JobProgress, JobResumeBanner, JobTransport } from './MachineJobControls';
 import { MachineFaultBanner } from './MachineFaultBanner';
 import { formatDuration } from '../utils/timeEstimate';
@@ -185,7 +186,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
    * where the machine is chosen, not here.
    */
   const machineTarget = useStore((s) => s.machineTarget);
-  const machineMode = machineTarget === 'laser' ? 'laser' : 'cnc';
+  const machineMode: 'laser' | 'cnc' = machineTarget === 'laser' ? 'laser' : 'cnc';
   const material = useStore((s) => s.material);
   const materialLabel = MATERIALS.find((m) => m.id === material)?.label ?? material;
   const setMachineConfigOpen = useStore((s) => s.setMachineConfigOpen);
@@ -257,50 +258,75 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
     setLaserPower(Math.max(0, Math.min(ceiling, Math.round(fraction * ceiling))));
   };
 
+  /*
+   * Slicing the whole model and laying the layers out is main-thread work, and
+   * every keystroke in a field below used to ask for it again: typing "12" into
+   * the thickness box sliced once at 1 mm and then again at 12, and the first
+   * slice was for a number nobody meant. The fields are collected here and held
+   * still until the typing stops; `slicePending` is what the preview says while
+   * the wait is on, so an out-of-date drawing never reads as a finished one.
+   */
+  const liveSliceFields = useMemo(() => ({
+    materialThicknessMm, layerOverride, slicePosition, kerfMm, pinCount, pinDiameterMm,
+    sheetWidthMm, sheetHeightMm, customScalePct, autoScale, maxSheets, annotations,
+  }), [materialThicknessMm, layerOverride, slicePosition, kerfMm, pinCount, pinDiameterMm,
+      sheetWidthMm, sheetHeightMm, customScalePct, autoScale, maxSheets, annotations]);
+  const sliceFields = useSettled(liveSliceFields, 250);
+  const slicePending = sliceFields !== liveSliceFields;
+
   const exportResult = useMemo(() => {
     if (!isOpen) return null;
-    const override = parseInt(layerOverride, 10);
+    const f = sliceFields;
+    const override = parseInt(f.layerOverride, 10);
     return exportContourSliceSvg(scene, {
-      materialThickness: materialThicknessMm / 1000,
+      materialThickness: f.materialThicknessMm / 1000,
       sliceCount: Number.isFinite(override) && override > 0 ? override : null,
-      slicePosition,
-      kerf: kerfMm / 1000,
-      pinHoles: pinCount > 0,
-      pinCount,
-      pinDiameter: pinDiameterMm / 1000,
-      sheetWidth: Math.max(0.05, sheetWidthMm / 1000),
-      sheetHeight: Math.max(0.05, sheetHeightMm / 1000),
-      scaleFactor: customScalePct / 100,
-      autoScale,
-      maxSheets: autoScale ? maxSheets : 0,
-      includeLabels: annotations === 'all',
-      includeSheetOutline: annotations !== 'none',
+      slicePosition: f.slicePosition,
+      kerf: f.kerfMm / 1000,
+      pinHoles: f.pinCount > 0,
+      pinCount: f.pinCount,
+      pinDiameter: f.pinDiameterMm / 1000,
+      sheetWidth: Math.max(0.05, f.sheetWidthMm / 1000),
+      sheetHeight: Math.max(0.05, f.sheetHeightMm / 1000),
+      scaleFactor: f.customScalePct / 100,
+      autoScale: f.autoScale,
+      maxSheets: f.autoScale ? f.maxSheets : 0,
+      includeLabels: f.annotations === 'all',
+      includeSheetOutline: f.annotations !== 'none',
     });
-  }, [isOpen, scene, materialThicknessMm, layerOverride, slicePosition, kerfMm,
-      pinCount, pinDiameterMm, sheetWidthMm, sheetHeightMm, customScalePct, autoScale, maxSheets, annotations]);
+  }, [isOpen, scene, sliceFields]);
 
   // Compute G-Code output result
+  const liveGcodeFields = useMemo(() => ({
+    machineMode, cutFeedrate, spindleRpm, laserPower, laserMaxPower, laserPasses,
+    materialThicknessMm, attachments, attachmentWidthMm, attachmentSpacingMm,
+    attachmentHeightMm, bitDiameterMm,
+  }), [machineMode, cutFeedrate, spindleRpm, laserPower, laserMaxPower, laserPasses,
+      materialThicknessMm, attachments, attachmentWidthMm, attachmentSpacingMm,
+      attachmentHeightMm, bitDiameterMm]);
+  const gcodeFields = useSettled(liveGcodeFields, 250);
+
   const gcodeResult = useMemo(() => {
     if (!exportResult?.success || !exportResult.layers) return null;
+    const f = gcodeFields;
     return generateContourSliceGcode(exportResult, {
       ...DEFAULT_GCODE_OPTIONS,
-      machineMode,
-      cutFeedrate,
-      spindleRpm,
+      machineMode: f.machineMode,
+      cutFeedrate: f.cutFeedrate,
+      spindleRpm: f.spindleRpm,
       motionProfile: machineState.motion,
-      laserPower,
-      laserMaxPower,
-      laserPasses,
-      cutDepthZ: materialThicknessMm,
-      zStepdown: Math.min(materialThicknessMm, 3.0),
-      attachmentsEnabled: attachments,
-      attachmentWidthMm,
-      attachmentSpacingMm,
-      attachmentHeightMm,
-      bitDiameterMm,
+      laserPower: f.laserPower,
+      laserMaxPower: f.laserMaxPower,
+      laserPasses: f.laserPasses,
+      cutDepthZ: f.materialThicknessMm,
+      zStepdown: Math.min(f.materialThicknessMm, 3.0),
+      attachmentsEnabled: f.attachments,
+      attachmentWidthMm: f.attachmentWidthMm,
+      attachmentSpacingMm: f.attachmentSpacingMm,
+      attachmentHeightMm: f.attachmentHeightMm,
+      bitDiameterMm: f.bitDiameterMm,
     });
-  }, [exportResult, machineMode, cutFeedrate, spindleRpm, machineState.motion, laserPower, laserMaxPower, laserPasses, materialThicknessMm,
-      attachments, attachmentWidthMm, attachmentSpacingMm, attachmentHeightMm, bitDiameterMm]);
+  }, [exportResult, gcodeFields, machineState.motion]);
 
   const previewSvg = useMemo(() => {
     if (!exportResult?.success) return '';
@@ -853,11 +879,19 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                 />
               </div>
 
-              <div className="w-full h-80 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 p-4 overflow-y-auto overflow-x-hidden">
+              <div className="relative w-full h-80 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 p-4 overflow-y-auto overflow-x-hidden">
                 <div
-                  className="w-full [&>svg]:w-full [&>svg]:h-auto"
+                  className={`w-full [&>svg]:w-full [&>svg]:h-auto transition-opacity ${slicePending ? 'opacity-40' : ''}`}
                   dangerouslySetInnerHTML={{ __html: previewSvg }}
                 />
+                {/* The drawing on screen is the one before the edit being typed.
+                    Saying so beats letting a stale picture read as a finished one. */}
+                {slicePending && (
+                  <span className="absolute top-2 right-2 flex items-center gap-1 text-[10px] font-medium text-slate-400 dark:text-slate-500 bg-white/90 dark:bg-slate-950/90 px-1.5 py-0.5 rounded">
+                    <RefreshCw className="w-3 h-3 animate-spin" />
+                    Re-slicing…
+                  </span>
+                )}
               </div>
             </div>
           )}

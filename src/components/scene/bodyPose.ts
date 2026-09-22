@@ -18,10 +18,25 @@ import type { DataMirror, ModelMirror, MujocoShim } from '../../types/sceneLayer
 export interface BodyPose {
   pos: THREE.Vector3;
   rot: THREE.Matrix3;
+  /**
+   * Whether this came from the running model or is the authored fallback.
+   *
+   * The fallback's `rot` is the IDENTITY, not the body's real orientation —
+   * fine for a body that has never been compiled, and a lie for one that is
+   * merely between models. A rebuild replaces `model` and `data`, so for a
+   * frame or two every lookup here falls back; anything that follows a body
+   * frame by frame has to sit that out rather than believe it, or a rotated
+   * body appears to snap upright and back.
+   */
+  live: boolean;
 }
 
 export function bodyPoseOf(nodeId: string, fallbackPos: number[] = [0, 0, 0]): BodyPose {
-  const fallback = { pos: new THREE.Vector3(fallbackPos[0] ?? 0, fallbackPos[1] ?? 0, fallbackPos[2] ?? 0), rot: new THREE.Matrix3() };
+  const fallback: BodyPose = {
+    pos: new THREE.Vector3(fallbackPos[0] ?? 0, fallbackPos[1] ?? 0, fallbackPos[2] ?? 0),
+    rot: new THREE.Matrix3(),
+    live: false,
+  };
   const state = useStore.getState();
   const model = state.model as ModelMirror | null;
   const data = state.data as DataMirror | null;
@@ -39,7 +54,7 @@ export function bodyPoseOf(nodeId: string, fallbackPos: number[] = [0, 0, 0]): B
       data.xmat[m + 3], data.xmat[m + 4], data.xmat[m + 5],
       data.xmat[m + 6], data.xmat[m + 7], data.xmat[m + 8],
     );
-    return { pos: new THREE.Vector3(data.xpos[o], data.xpos[o + 1], data.xpos[o + 2]), rot };
+    return { pos: new THREE.Vector3(data.xpos[o], data.xpos[o + 1], data.xpos[o + 2]), rot, live: true };
   } catch {
     return fallback;
   }

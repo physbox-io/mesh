@@ -228,3 +228,59 @@ describe('a decomposed mesh body', () => {
     expect(xml).toContain('<mesh name="cup_mesh"');
   });
 });
+
+/*
+ * Rotating a mesh body, which the app does in two places at once.
+ *
+ * `updateNodeRotation` bakes the angles into a mesh body's vertices — that is
+ * what `baseVertices` is: the unrotated copy the bake is derived from — and it
+ * also records them in `node.euler` so the sidebar's sliders have something to
+ * read. Emitting that euler as well told MuJoCo to turn the body a second time,
+ * on top of vertices already turned, so one rotation came out as two.
+ *
+ * A mesh body with no `baseVertices` has never been through that path: its
+ * vertices are as authored and its euler is the only rotation it has, so it
+ * keeps it.
+ */
+describe('a rotated mesh body', () => {
+  const meshNode = (id: string, baked: boolean): SceneNode => ({
+    id, name: id, type: 'body', pos: [0, 0, 0.2], children: [],
+    euler: [30, 40, 50],
+    geoms: [{
+      name: `${id}_mesh`, type: 'mesh', size: [1], dynamic: true, ...tet,
+      ...(baked ? { baseVertices: [...tet.vertices] } : {}),
+    }] as SceneGeom[],
+  });
+
+  const bodyTag = (xml: string, name: string) =>
+    (xml.match(new RegExp(`<body name="${name}"[^>]*>`)) || [''])[0];
+
+  it('does not turn a baked body a second time', () => {
+    expect(bodyTag(compile([meshNode('baked', true)]), 'baked')).not.toContain('euler');
+  });
+
+  it('still turns a mesh whose vertices were never baked', () => {
+    expect(bodyTag(compile([meshNode('raw', false)]), 'raw')).toContain('euler="30 40 50"');
+  });
+
+  it('leaves a primitive body alone — nothing is baked into a box', () => {
+    const box: SceneNode = {
+      id: 'box', name: 'box', type: 'body', pos: [0, 0, 0.2], children: [],
+      euler: [30, 40, 50],
+      geoms: [{ name: 'box_g', type: 'box', size: [0.1, 0.1, 0.1] }] as SceneGeom[],
+    };
+    expect(bodyTag(compile([box]), 'box')).toContain('euler="30 40 50"');
+  });
+
+  it('keeps turning a body whose mesh is only part of it', () => {
+    const mixed: SceneNode = {
+      id: 'mixed', name: 'mixed', type: 'body', pos: [0, 0, 0.2], children: [],
+      euler: [30, 40, 50],
+      geoms: [
+        { name: 'mixed_m', type: 'mesh', size: [1], ...tet, baseVertices: [...tet.vertices] },
+        { name: 'mixed_b', type: 'box', size: [0.1, 0.1, 0.1] },
+      ] as SceneGeom[],
+    };
+    expect(bodyTag(compile([mixed]), 'mixed')).toContain('euler="30 40 50"');
+  });
+});

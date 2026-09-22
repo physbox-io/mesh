@@ -20,6 +20,7 @@ import { webSerialManager, type MachineState } from '../utils/webSerialManager';
 import { MATERIALS, describeSpeedRecommendation, recommendSpeeds } from '../utils/feedsAndSpeeds';
 import { getGridStats, type ProbeGrid } from '../utils/meshLeveler';
 import { useStore } from '../store/useStore';
+import { useSettled } from '../hooks/useSettled';
 
 export type CarveTooling = Omit<
   ReliefCarveOptions,
@@ -64,21 +65,9 @@ export function toolingOnly(patch: Partial<ReliefCarveOptions>): Partial<ReliefC
   return out;
 }
 
-/**
- * Holds a value still until edits stop.
- *
- * Regenerating the carve means re-sampling the whole surface and dilating it by
- * the cutter, which is a few hundred milliseconds of solid work — far too much
- * to run between two keystrokes in a stock-size box.
- */
-export function useSettled<T>(value: T, delayMs: number): T {
-  const [settled, setSettled] = useState(value);
-  useEffect(() => {
-    const t = setTimeout(() => setSettled(value), delayMs);
-    return () => clearTimeout(t);
-  }, [value, delayMs]);
-  return settled;
-}
+// Lives in `hooks/useSettled.ts` now — every input in the app needs it, not
+// just the carve dialogs. Re-exported so the dialogs' imports stay put.
+export { useSettled };
 
 /**
  * Everything a router job dialog keeps about its tooling: the options as

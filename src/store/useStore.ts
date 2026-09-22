@@ -1020,6 +1020,19 @@ export interface PhysicsState {
    */
   measureMode: 'distance' | 'angle' | null;
   setMeasureMode: (mode: 'distance' | 'angle' | null) => void;
+  /**
+   * Which handles the paused-sim gizmo puts on the selected body.
+   *
+   * Editor state rather than component state, because what sets it is a click
+   * in the viewport and a key, both of which live elsewhere. Selecting a
+   * different body always comes back to the arrows: the move is what you want
+   * nine times in ten, and a gizmo that remembered a turn from two bodies ago
+   * would be a mode with nothing on screen to explain it.
+   */
+  gizmoMode: 'translate' | 'rotate';
+  setGizmoMode: (mode: 'translate' | 'rotate') => void;
+  /** Clicking the body that is already selected swaps the handles over. */
+  cycleGizmoMode: () => void;
 
   /** The body being modelled, or null when the lattice tools are closed. */
   latticeNodeId: string | null;
@@ -1225,7 +1238,7 @@ export interface PhysicsState {
   setNodeCsgError: (nodeId: string, error: string | null, hash?: string) => void;
   applyNodeColliders: (nodeId: string, result: ColliderResult, skipRecompile?: boolean) => void;
   setNodeCollisionError: (nodeId: string, error: string | null, hash?: string) => void;
-  recompile: (overrideScene?: SceneGraph, overrideSelectedId?: string | null, forceReset?: boolean, keepPreset?: boolean) => Promise<void>;
+  recompile: (overrideScene?: SceneGraph, overrideSelectedId?: string | null, forceReset?: boolean, keepPreset?: boolean, settle?: boolean) => Promise<void>;
   loadPreset: (name: string) => void;
   resetSimulation: () => void;
   recoverFromFatalWorkerError: (message: string, lastState?: { qpos: number[]; qvel: number[]; time: number }) => Promise<void>;
@@ -1800,7 +1813,14 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     get().recompile(get().sceneGraph);
   },
   
-  setSelectedNodeId: (id) => set({ selectedNodeId: id, extraSelectedIds: [] }),
+  setSelectedNodeId: (id) => set((state) => ({
+    selectedNodeId: id,
+    extraSelectedIds: [],
+    // A different body starts on the move handles again. Re-selecting the same
+    // one leaves them alone, so the viewport's click-to-swap is not undone by
+    // the selection it travels with.
+    gizmoMode: state.selectedNodeId === id ? state.gizmoMode : 'translate',
+  })),
   combineBodies: (targetId, sourceIds, op) => {
     const scene = get().sceneGraph;
     const target = findNode(scene.nodes, targetId);
@@ -1951,6 +1971,9 @@ export const useStore = create<PhysicsState>()((set, get) => ({
 
   measureMode: null,
   setMeasureMode: (mode) => set((state) => (state.measureMode === mode ? {} : { measureMode: mode })),
+  gizmoMode: 'translate',
+  setGizmoMode: (mode) => set((state) => (state.gizmoMode === mode ? {} : { gizmoMode: mode })),
+  cycleGizmoMode: () => set((state) => ({ gizmoMode: state.gizmoMode === 'translate' ? 'rotate' : 'translate' })),
 
   latticeNodeId: null,
   latticeTool: 'place',
@@ -2693,7 +2716,9 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     };
     if (traverse(newScene.nodes)) {
       set({ sceneGraph: newScene });
-      get().recompile(newScene, undefined, true);
+      // Settled: a gizmo rotate commits all three axes in a row, and each one
+      // would otherwise be a rebuild of its own.
+      get().recompile(newScene, undefined, true, undefined, true);
     }
   },
 
@@ -2788,7 +2813,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     };
     traverse(newScene.nodes);
     set({ sceneGraph: newScene });
-    get().recompile(newScene, undefined, structural);
+    get().recompile(newScene, undefined, structural, undefined, structural);
   },
 
   updateGearTeeth: (id, teeth) => {
@@ -3599,7 +3624,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     get().recompile(newScene, selectId);
   },
   
-  recompile: async (overrideScene?: SceneGraph, overrideSelectedId?: string | null, forceReset?: boolean) => {
+  recompile: async (overrideScene?: SceneGraph, overrideSelectedId?: string | null, forceReset?: boolean, _keepPreset?: boolean, settle?: boolean) => {
     /*
      * We only debounce if it's NOT a force reset (which is used by presets/loaders).
      *
@@ -3622,14 +3647,23 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     recompilesInFlight++;
     let counted = true;
     const done = () => { if (counted) { counted = false; recompilesInFlight = Math.max(0, recompilesInFlight - 1); } };
-    if (!forceReset) {
+    /*
+     * A force reset normally skips the wait, because it is what a preset load,
+     * an undo and a reset all use and none of those may lag. But an edit from a
+     * control is also a force reset, and those arrive in bursts: a rotate
+     * commits three axes in a row, and each one would otherwise rebuild the
+     * model and throw the sim state away on its own. `settle` is how an editing
+     * caller asks for the wait back without giving the loaders one — see
+     * `updateNodePos`, `updateNodeRotation` and `updateNodeGeom`.
+     */
+    if (!forceReset || settle) {
       if ((window as PhysicsWindow)._recompileTimeoutId) {
         clearTimeout((window as PhysicsWindow)._recompileTimeoutId);
         (window as PhysicsWindow)._recompileWake?.();
       }
       await new Promise<void>(resolve => {
         (window as PhysicsWindow)._recompileWake = resolve;
-        (window as PhysicsWindow)._recompileTimeoutId = setTimeout(resolve, 50);
+        (window as PhysicsWindow)._recompileTimeoutId = setTimeout(resolve, settle ? 180 : 50);
       });
       (window as PhysicsWindow)._recompileWake = null;
       if (token !== recompileToken) { done(); return; }

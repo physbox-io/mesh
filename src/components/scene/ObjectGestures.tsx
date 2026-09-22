@@ -27,6 +27,7 @@ import type { SceneNode } from '../../types/scene';
 import { scaleNodeTree } from '../../utils/scaleNode';
 import { pickCutSpot, type CutSpot } from '../../utils/csg';
 import { bodyPoseOf } from './bodyPose';
+import { snapToFloor, snapThreshold } from '../../utils/floorSnap';
 import { useOrbitEnable } from './useOrbitEnable';
 
 type Axis = 'x' | 'y' | 'z';
@@ -56,6 +57,14 @@ interface Gesture {
   joint?: string;
   /** Move only: where the body has been moved to, as the pointer stands. */
   to?: [number, number, number];
+  /**
+   * Move only: the `pos[2]` that rests this body's lowest point on the floor,
+   * and how far away the camera was — the two things the floor snap needs. The
+   * gizmo's arrows settle onto the ground the same way; a move made from the
+   * keyboard is the same move and should land the same place.
+   */
+  groundZ?: number;
+  distance?: number;
   /** Move-cut only: which of the body's geoms is the cut, and where it is going. */
   geomIndex?: number;
   spot?: CutSpot | null;
@@ -78,13 +87,13 @@ const GHOST_MATERIAL = new THREE.MeshBasicMaterial({
 export const ObjectGestureController = () => {
   const { scene, camera, gl } = useThree();
   const gesture = useRef<Gesture | null>(null);
-  const pointer = useRef({ x: 0, y: 0 });
+  const pointer = useRef({ x: 0, y: 0, alt: false });
   const setGestureStatus = useStore((s) => s.setGestureStatus);
   const setOrbitEnabled = useOrbitEnable();
 
   useEffect(() => {
     const track = (event: PointerEvent) => {
-      pointer.current = { x: event.clientX, y: event.clientY };
+      pointer.current = { x: event.clientX, y: event.clientY, alt: event.altKey };
     };
     window.addEventListener('pointermove', track);
     return () => window.removeEventListener('pointermove', track);
@@ -257,6 +266,28 @@ export const ObjectGestureController = () => {
       const to: [number, number, number] = [
         state.startPos[0] + delta.x, state.startPos[1] + delta.y, state.startPos[2] + delta.z,
       ];
+      /*
+       * Settle onto the floor on the way past, exactly as the gizmo's up arrow
+       * does — the value almost everyone is after is "resting on the ground",
+       * and it is the one a freehand move never lands on. Only while Z is free
+       * to move: held to X or Y it does not change at all. Alt turns it off.
+       */
+      let resting = false;
+      if ((!state.axis || state.axis === 'z') && state.groundZ !== undefined) {
+        const snap = snapToFloor({
+          z: to[2],
+          groundZ: state.groundZ,
+          threshold: pointer.current.alt
+            ? 0
+            : snapThreshold(
+                (camera as THREE.PerspectiveCamera).fov ?? 50,
+                state.distance ?? 1,
+                gl.domElement.clientHeight,
+              ),
+        });
+        to[2] = snap.z;
+        resting = snap.locked;
+      }
       // Previewed through the physics state rather than the drawn position: a
       // dynamic body's group is rewritten from MuJoCo every frame, so anything
       // written here would be gone before it was seen. A body with no free
@@ -269,7 +300,10 @@ export const ObjectGestureController = () => {
       const said = (['x', 'y', 'z'] as const)
         .map((name, k) => (Math.abs(to[k] - state.startPos![k]) < 5e-5 ? null : `${name.toUpperCase()} ${mm(to[k] - state.startPos![k])}`))
         .filter(Boolean);
-      setGestureStatus(said.length === 0 ? 'Move' : `Move ${said.join(' · ')}`);
+      setGestureStatus(
+        (said.length === 0 ? 'Move' : `Move ${said.join(' · ')}`) +
+        (resting ? ' · resting on floor' : ''),
+      );
       return;
     }
 
@@ -306,15 +340,25 @@ export const ObjectGestureController = () => {
     setGestureStatus(state.kind === 'scale'
       ? `Scale ${state.factor.toFixed(2)}×${state.axis ? ` · ${state.axis.toUpperCase()}` : ''}`
       : `Inset ${state.factor.toFixed(2)}× · bore ${(state.axis ?? 'z').toUpperCase()}`);
-  }, [planeHit, rayIn, setGestureStatus]);
+  }, [camera, gl, planeHit, rayIn, setGestureStatus]);
 
-  const clear = useCallback(() => {
+  /**
+   * Ends the gesture and takes the preview down.
+   *
+   * `restore` is what a CANCELLED move needs and a kept one must not have. The
+   * preview is written into the physics state, so putting it back means writing
+   * the start position into qpos — and the worker answers every such write with
+   * a frame. Doing that on the way to keeping a move sent the body back to where
+   * it started for one frame and then forward again, a flinch visible on the
+   * body and unmissable on the gizmo drawn around it.
+   */
+  const clear = useCallback((restore = true) => {
     const state = gesture.current;
     if (!state) return;
     // A move previewed through the physics state has to be put back through it
     // as well, or a cancelled gesture leaves the body where the pointer left it
     // while the scene graph still says otherwise.
-    if (state.kind === 'move' && state.joint && state.startPos) {
+    if (restore && state.kind === 'move' && state.joint && state.startPos) {
       for (let axis = 0; axis < 3; axis++) getPhysicsWorkerClient().setQpos(state.joint, axis, state.startPos[axis]);
     }
     for (const held of state.held) {
@@ -333,8 +377,10 @@ export const ObjectGestureController = () => {
     const { kind, nodeId, factor } = state;
     const axis = state.axis;
     // The cancel path inside clear() puts a previewed move back; a kept move is
-    // written from the numbers held here, which clear() does not touch.
-    clear();
+    // written from the numbers held here, which clear() does not touch — and
+    // must not be put back first, or the body flinches to its old position for
+    // a frame on the way to its new one.
+    clear(!(keep && kind === 'move'));
     if (kind === 'moveCut') {
       if (!keep || !state.spot || state.geomIndex === undefined) return;
       useStore.getState().moveCutTo(nodeId, state.geomIndex, state.spot);
@@ -440,10 +486,16 @@ export const ObjectGestureController = () => {
       const through = new THREE.Vector3(...startPos);
       const from = planeHit(parent, pointer.current.x, pointer.current.y, through, null);
       if (!from) return;
+      // The box is in world (Y-up) space; the move is in the Z-up frame the
+      // groups' parent defines, so it is brought across before the body's
+      // lowest point is subtracted from its position.
+      const local = box.clone().applyMatrix4(parent.matrixWorld.clone().invert());
       gesture.current = {
         kind, nodeId, centre, pivot, held, ghosts: [], axis: null, factor: 1,
         radius: 0, from, startPos, to: [...startPos] as [number, number, number],
         joint: node.joints?.find((j) => j.type === 'free')?.name,
+        groundZ: startPos[2] - local.min.z,
+        distance: camera.position.distanceTo(worldPivot),
       };
       setOrbitEnabled(false);
       draw();
@@ -539,7 +591,7 @@ export const ObjectGestureController = () => {
   useEffect(() => {
     const move = (event: PointerEvent) => {
       if (!gesture.current) return;
-      pointer.current = { x: event.clientX, y: event.clientY };
+      pointer.current = { x: event.clientX, y: event.clientY, alt: event.altKey };
       handlers.current.draw();
     };
     const down = (event: PointerEvent) => {

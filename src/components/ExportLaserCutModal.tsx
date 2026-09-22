@@ -10,6 +10,7 @@ import { runSettings } from '../utils/runSettings';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
 import { NumberInput } from '@physbox-io/ui';
 import { useStore } from '../store/useStore';
+import { useSettled } from '../hooks/useSettled';
 import { JobOverrides, JobPauseBanner, JobPreflight, JobProgress, JobResumeBanner, JobTransport } from './MachineJobControls';
 import { MachineFaultBanner } from './MachineFaultBanner';
 import { formatDuration } from '../utils/timeEstimate';
@@ -231,7 +232,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
    * where the machine is chosen, not here.
    */
   const machineTarget = useStore((s) => s.machineTarget);
-  const machineMode = machineTarget === 'laser' ? 'laser' : 'cnc';
+  const machineMode: 'laser' | 'cnc' = machineTarget === 'laser' ? 'laser' : 'cnc';
   const material = useStore((s) => s.material);
   const materialLabel = MATERIALS.find((m) => m.id === material)?.label ?? material;
   const setMachineConfigOpen = useStore((s) => s.setMachineConfigOpen);
@@ -303,69 +304,95 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
     setLaserPower(Math.max(0, Math.min(ceiling, Math.round(fraction * ceiling))));
   };
 
+  /*
+   * Laying the panels out is main-thread work, and every keystroke in a field
+   * below used to ask for it again — typing "12" into the thickness box nested
+   * the whole sheet once at 1 mm and then again at 12. The fields are held
+   * still until the typing stops; `layoutPending` is what the preview says
+   * meanwhile, so a stale drawing never reads as a finished one.
+   */
+  const liveLayoutFields = useMemo(() => ({
+    jointMode, materialThicknessMm, fingerWidthMm, fingerWidthAuto, kerfMm, cornerRelief,
+    bitDiameterMm, tabOverhangMm, jointClearanceMm, sheetWidthMm, sheetHeightMm, extraStock,
+    allowThinnerStock, splitOversized, customScalePct, autoScale, maxSheets, annotations,
+  }), [jointMode, materialThicknessMm, fingerWidthMm, fingerWidthAuto, kerfMm, cornerRelief,
+      bitDiameterMm, tabOverhangMm, jointClearanceMm, sheetWidthMm, sheetHeightMm, extraStock,
+      allowThinnerStock, splitOversized, customScalePct, autoScale, maxSheets, annotations]);
+  const layoutFields = useSettled(liveLayoutFields, 250);
+  const layoutPending = layoutFields !== liveLayoutFields;
+
   // Compute laser/cnc 2D panel export result
   const exportResult = useMemo(() => {
     if (!isOpen) return null;
+    const f = layoutFields;
     const options: Partial<LaserCutOptions> = {
-      jointMode,
-      materialThickness: materialThicknessMm / 1000,
-      fingerWidth: fingerWidthMm / 1000,
-      fingerWidthAuto,
-      kerf: kerfMm / 1000,
-      cornerRelief,
-      bitDiameter: bitDiameterMm / 1000,
-      tabOverhang: tabOverhangMm / 1000,
-      jointClearance: jointClearanceMm / 1000,
+      jointMode: f.jointMode,
+      materialThickness: f.materialThicknessMm / 1000,
+      fingerWidth: f.fingerWidthMm / 1000,
+      fingerWidthAuto: f.fingerWidthAuto,
+      kerf: f.kerfMm / 1000,
+      cornerRelief: f.cornerRelief,
+      bitDiameter: f.bitDiameterMm / 1000,
+      tabOverhang: f.tabOverhangMm / 1000,
+      jointClearance: f.jointClearanceMm / 1000,
       // The rack is only sent once there is more than one piece in it; a single
       // entry is exactly what `resolveStock` derives from the fields anyway, and
       // sending it would make every default job take the new code path.
-      stock: extraStock.length
+      stock: f.extraStock.length
         ? [
-            { widthMm: sheetWidthMm, heightMm: sheetHeightMm, thicknessMm: materialThicknessMm, quantity: null },
-            ...extraStock,
+            { widthMm: f.sheetWidthMm, heightMm: f.sheetHeightMm, thicknessMm: f.materialThicknessMm, quantity: null },
+            ...f.extraStock,
           ]
         : undefined,
-      allowThinnerStock,
-      splitOversized,
-      sheetWidth: Math.max(0.05, sheetWidthMm / 1000),
-      sheetHeight: Math.max(0.05, sheetHeightMm / 1000),
-      scaleFactor: customScalePct / 100,
-      autoScale,
-      maxSheets: autoScale ? maxSheets : 0,
-      includeLabels: annotations === 'all',
-      includeSheetOutline: annotations !== 'none',
+      allowThinnerStock: f.allowThinnerStock,
+      splitOversized: f.splitOversized,
+      sheetWidth: Math.max(0.05, f.sheetWidthMm / 1000),
+      sheetHeight: Math.max(0.05, f.sheetHeightMm / 1000),
+      scaleFactor: f.customScalePct / 100,
+      autoScale: f.autoScale,
+      maxSheets: f.autoScale ? f.maxSheets : 0,
+      includeLabels: f.annotations === 'all',
+      includeSheetOutline: f.annotations !== 'none',
     };
     return exportLaserCutSvg(scene, options);
-  }, [isOpen, scene, jointMode, materialThicknessMm, fingerWidthMm, fingerWidthAuto, kerfMm, cornerRelief, bitDiameterMm, tabOverhangMm, jointClearanceMm, sheetWidthMm, sheetHeightMm, extraStock, allowThinnerStock, splitOversized, customScalePct, autoScale, maxSheets, annotations]);
+  }, [isOpen, scene, layoutFields]);
+
+  const liveGcodeFields = useMemo(() => ({
+    machineMode, cutFeedrate, spindleRpm, laserPower, laserMaxPower, laserPasses,
+    materialThicknessMm, attachments, attachmentWidthMm, attachmentSpacingMm,
+    attachmentHeightMm, bitDiameterMm,
+  }), [machineMode, cutFeedrate, spindleRpm, laserPower, laserMaxPower, laserPasses,
+      materialThicknessMm, attachments, attachmentWidthMm, attachmentSpacingMm,
+      attachmentHeightMm, bitDiameterMm]);
+  const gcodeFields = useSettled(liveGcodeFields, 250);
 
   // Compute G-Code output result
   const gcodeResult = useMemo(() => {
     if (!exportResult?.success || !exportResult.panels) return null;
+    const f = gcodeFields;
     const res = generateLaserCutGcode(exportResult.panels, {
       ...DEFAULT_GCODE_OPTIONS,
-      machineMode,
-      cutFeedrate,
-      spindleRpm,
+      machineMode: f.machineMode,
+      cutFeedrate: f.cutFeedrate,
+      spindleRpm: f.spindleRpm,
       motionProfile: machineState.motion,
-      laserPower,
-      laserMaxPower,
-      laserPasses,
-      cutDepthZ: materialThicknessMm,
-      zStepdown: Math.min(materialThicknessMm, 3.0),
-      attachmentsEnabled: attachments,
-      attachmentWidthMm,
-      attachmentSpacingMm,
-      attachmentHeightMm,
-      bitDiameterMm,
+      laserPower: f.laserPower,
+      laserMaxPower: f.laserMaxPower,
+      laserPasses: f.laserPasses,
+      cutDepthZ: f.materialThicknessMm,
+      zStepdown: Math.min(f.materialThicknessMm, 3.0),
+      attachmentsEnabled: f.attachments,
+      attachmentWidthMm: f.attachmentWidthMm,
+      attachmentSpacingMm: f.attachmentSpacingMm,
+      attachmentHeightMm: f.attachmentHeightMm,
+      bitDiameterMm: f.bitDiameterMm,
     });
 
-    if (res.success && machineMode === 'cnc' && probedGrid) {
+    if (res.success && f.machineMode === 'cnc' && probedGrid) {
       res.gcode = warpGcode(res.gcode, probedGrid);
     }
     return res;
-  }, [exportResult, machineMode, cutFeedrate, spindleRpm, machineState.motion, laserPower, laserMaxPower,
-      laserPasses, materialThicknessMm, probedGrid, attachments, attachmentWidthMm, attachmentSpacingMm,
-      attachmentHeightMm, bitDiameterMm]);
+  }, [exportResult, gcodeFields, machineState.motion, probedGrid]);
 
   // The sheet SVG is written at physical size — a 600 mm sheet is far wider than
   // the modal — so the preview is scaled to the panel instead of being dragged
@@ -1128,15 +1155,23 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                 </button>
               </div>
 
-              <div className="w-full h-80 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 p-4 overflow-auto">
+              <div className="relative w-full h-80 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 p-4 overflow-auto">
                 <div
-                  className={
+                  className={`transition-opacity ${layoutPending ? 'opacity-40 ' : ''}${
                     previewActualSize
                       ? '[&>svg]:w-auto [&>svg]:h-auto [&>svg]:max-w-none'
                       : 'w-full [&>svg]:w-full [&>svg]:h-auto'
-                  }
+                  }`}
                   dangerouslySetInnerHTML={{ __html: previewSvg }}
                 />
+                {/* The sheet on screen is the one before the edit being typed.
+                    Saying so beats letting a stale drawing read as a finished one. */}
+                {layoutPending && (
+                  <span className="sticky top-0 float-right flex items-center gap-1 text-[10px] font-medium text-slate-400 dark:text-slate-500 bg-white/90 dark:bg-slate-950/90 px-1.5 py-0.5 rounded">
+                    <RefreshCw className="w-3 h-3 animate-spin" />
+                    Re-nesting…
+                  </span>
+                )}
               </div>
             </div>
           )}

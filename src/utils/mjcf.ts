@@ -130,13 +130,38 @@ const buildNode = (node: SceneNode): string => {
   (node.children || []).forEach(c => innerXml += buildNode(c));
   
   let attrs = `name="${nameStr}" pos="${posStr}"`;
-  if (node.quat) {
+  if (rotationIsBaked(node)) {
+    // Nothing: the vertices already carry it. See `rotationIsBaked`.
+  } else if (node.quat) {
     attrs += ` quat="${node.quat.join(' ')}"`;
   } else if (node.euler) {
     attrs += ` euler="${node.euler.join(' ')}"`;
   }
   
   return `<body ${attrs}>${innerXml}</body>`;
+};
+
+/**
+ * Whether this body's rotation is already in its vertices.
+ *
+ * `updateNodeRotation` turns an all-mesh body by rewriting every vertex from an
+ * unrotated copy it keeps as `baseVertices` — and it also records the angles in
+ * `node.euler`, because that is what the sidebar's rotation sliders read back.
+ * Emitting that euler here as well asked MuJoCo to turn the body a second time,
+ * on top of vertices already turned, so one rotation arrived as two and a body
+ * turned about one axis came out tumbled about three.
+ *
+ * `baseVertices` is the marker, not the geom type: a mesh body that has never
+ * been through that path — one authored in a preset, or imported — has its
+ * vertices as they were written and needs the euler to do the turning. The
+ * presence of even one non-mesh geom means the same, since the bake only ever
+ * runs when every geom is a mesh.
+ */
+const rotationIsBaked = (node: SceneNode): boolean => {
+  const geoms = node.geoms || [];
+  if (geoms.length === 0) return false;
+  if (!geoms.every((g) => g.type === 'mesh')) return false;
+  return geoms.some((g) => Array.isArray(g.baseVertices) && g.baseVertices.length > 0);
 };
 
 export const compileToMJCF = (

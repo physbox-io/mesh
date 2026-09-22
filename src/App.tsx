@@ -43,8 +43,12 @@ import { ExportSolidMachiningModal } from './components/ExportSolidMachiningModa
 import { ExportCastModal } from './components/ExportCastModal';
 import { PulleyRopeMarkers } from './components/scene/PulleyRopes';
 import { SliderValue } from './components/SliderValue';
+import { RangeInput } from './components/RangeInput';
+import { SettledNumberInput, SettledTextInput } from './components/SettledInputs';
 import { ScaleCard, ScaleControls } from './components/ScaleCard';
 import { ObjectGestureController } from './components/scene/ObjectGestures';
+import { TransformGizmo } from './components/scene/TransformGizmo';
+import { isGizmoBusy } from './components/scene/gizmoBusy';
 import { MeasureTool } from './components/scene/MeasureTool';
 import {
   PaintStrokeController, CameraController, DragInteractionController,
@@ -1884,7 +1888,15 @@ function App() {
     return list;
   }, [sceneGraph]);
 
-  const handlePointerMissed = useCallback(() => setSelectedNodeId(null), [setSelectedNodeId]);
+  /*
+   * A click on a gizmo handle is a click on a mesh with no R3F handlers, so R3F
+   * reports it as a miss — and clearing the selection here would take the gizmo
+   * away underneath the drag that is using it.
+   */
+  const handlePointerMissed = useCallback(() => {
+    if (isGizmoBusy()) return;
+    setSelectedNodeId(null);
+  }, [setSelectedNodeId]);
 
 
   const handleDragStart = (e: React.DragEvent, type: string) => {
@@ -2723,27 +2735,27 @@ function App() {
             <div className="flex flex-col gap-4">
               <div className="flex flex-col gap-1">
                 <label className="text-xs font-medium text-slate-500 dark:text-slate-400 flex justify-between">Gravity Z <SliderValue value={gravityZ} onChange={(v) => setEnvironment({gravityZ: v})} decimals={1} unit="m/s²" min={-20} max={20} /></label>
-                <input type="range" min="-20" max="20" step="0.1" value={gravityZ} onChange={(e) => setEnvironment({gravityZ: parseFloat(e.target.value)})} className="w-full accent-blue-500 cursor-pointer" />
+                <RangeInput min="-20" max="20" step="0.1" value={gravityZ} onChange={(v) => setEnvironment({gravityZ: v})} className="w-full accent-blue-500 cursor-pointer" />
               </div>
               <div className="flex flex-col gap-1">
                 <label className="text-xs font-medium text-slate-500 dark:text-slate-400 flex justify-between">Wind X <SliderValue value={windX} onChange={(v) => setEnvironment({windX: v})} decimals={1} unit="m/s" min={-10} max={10} /></label>
-                <input type="range" min="-10" max="10" step="0.1" value={windX} onChange={(e) => setEnvironment({windX: parseFloat(e.target.value)})} className="w-full accent-blue-500 cursor-pointer" />
+                <RangeInput min="-10" max="10" step="0.1" value={windX} onChange={(v) => setEnvironment({windX: v})} className="w-full accent-blue-500 cursor-pointer" />
               </div>
               <div className="flex flex-col gap-1">
                 <label className="text-xs font-medium text-slate-500 dark:text-slate-400 flex justify-between">Wind Y <SliderValue value={windY} onChange={(v) => setEnvironment({windY: v})} decimals={1} unit="m/s" min={-10} max={10} /></label>
-                <input type="range" min="-10" max="10" step="0.1" value={windY} onChange={(e) => setEnvironment({windY: parseFloat(e.target.value)})} className="w-full accent-blue-500 cursor-pointer" />
+                <RangeInput min="-10" max="10" step="0.1" value={windY} onChange={(v) => setEnvironment({windY: v})} className="w-full accent-blue-500 cursor-pointer" />
               </div>
               <div className="flex flex-col gap-1">
                 <label className="text-xs font-medium text-slate-500 dark:text-slate-400 flex justify-between">Air Density (Drag) <SliderValue value={density} onChange={(v) => setEnvironment({density: v})} decimals={2} unit="kg/m³" min={0} max={5} /></label>
-                <input type="range" min="0" max="5" step="0.01" value={density} onChange={(e) => setEnvironment({density: parseFloat(e.target.value)})} className="w-full accent-blue-500 cursor-pointer" />
+                <RangeInput min="0" max="5" step="0.01" value={density} onChange={(v) => setEnvironment({density: v})} className="w-full accent-blue-500 cursor-pointer" />
               </div>
               <div className="flex flex-col gap-1">
                 <label className="text-xs font-medium text-slate-500 dark:text-slate-400 flex justify-between">Floor Friction <SliderValue value={floorFriction} onChange={(v) => setEnvironment({floorFriction: v})} decimals={2} min={0} max={2} /></label>
-                <input type="range" min="0" max="2" step="0.01" value={floorFriction} onChange={(e) => setEnvironment({floorFriction: parseFloat(e.target.value)})} className="w-full accent-blue-500 cursor-pointer" />
+                <RangeInput min="0" max="2" step="0.01" value={floorFriction} onChange={(v) => setEnvironment({floorFriction: v})} className="w-full accent-blue-500 cursor-pointer" />
               </div>
               <div className="flex flex-col gap-1">
                 <label className="text-xs font-medium text-slate-500 dark:text-slate-400 flex justify-between">Floor Bounciness <SliderValue value={floorBounce ?? 0} onChange={(v) => setEnvironment({floorBounce: v})} decimals={2} min={0} max={1} /></label>
-                <input type="range" min="0" max="1" step="0.01" value={floorBounce ?? 0} onChange={(e) => setEnvironment({floorBounce: parseFloat(e.target.value)})} className="w-full accent-blue-500 cursor-pointer" />
+                <RangeInput min="0" max="1" step="0.01" value={floorBounce ?? 0} onChange={(v) => setEnvironment({floorBounce: v})} className="w-full accent-blue-500 cursor-pointer" />
               </div>
               <div className="pt-2.5 border-t border-slate-200 dark:border-slate-800 flex flex-col gap-2.5">
                 <div className="flex flex-col gap-1">
@@ -2824,15 +2836,14 @@ function App() {
                     <span>📏 Copilot Max Response Tokens</span>
                     <span className="font-mono normal-case tracking-normal text-slate-600 dark:text-slate-300">{settingsMaxTokens.toLocaleString()}</span>
                   </label>
-                  <input
-                    type="range"
+                  <RangeInput
                     id="copilotMaxTokens"
                     min={MIN_MAX_TOKENS}
                     max={MAX_MAX_TOKENS}
                     step={1000}
                     value={settingsMaxTokens}
-                    onChange={(e) => {
-                      const next = writeMaxTokens(parseInt(e.target.value, 10));
+                    onChange={(v) => {
+                      const next = writeMaxTokens(Math.round(v));
                       setSettingsMaxTokens(next);
                       window.dispatchEvent(new Event('storage'));
                     }}
@@ -3530,6 +3541,7 @@ function App() {
             <DragInteractionController />
             <PaintStrokeController />
             <ObjectGestureController />
+            <TransformGizmo />
             <MeasureTool />
 
             {/* Subtle contact-shadow AO — reads as "more depth", not a style
@@ -3887,10 +3899,9 @@ function App() {
                     api.getPosition('{selectedNode.name || selectedNode.id}')
                   </span>
                 </div>
-                <input 
-                  type="text" 
-                  value={selectedNode.name || ''} 
-                  onChange={(e) => renameNode(selectedNode.id, e.target.value)}
+                <SettledTextInput
+                  value={selectedNode.name || ''}
+                  onChange={(name) => renameNode(selectedNode.id, name)}
                   className="w-full px-2.5 py-1.5 border border-slate-200 rounded text-sm bg-white font-medium text-slate-800 outline-none focus:border-blue-500 shadow-sm"
                   placeholder="Rename component..."
                 />
@@ -3915,14 +3926,13 @@ function App() {
                         className="text-xs text-slate-500"
                       />
                     </div>
-                    <input 
-                      type="range" 
+                    <RangeInput 
                       min="-10" 
                       max="10" 
                       step="0.001" 
                       className="w-full accent-blue-500 cursor-pointer" 
                       value={selectedNode.pos[0]} 
-                      onChange={(e) => handleMove(0, parseFloat(e.target.value))} 
+                      onChange={(v) => handleMove(0, v)} 
                     />
                   </div>
                   <div className="flex flex-col gap-1.5">
@@ -3936,14 +3946,13 @@ function App() {
                         className="text-xs text-slate-500"
                       />
                     </div>
-                    <input 
-                      type="range" 
+                    <RangeInput 
                       min="-10" 
                       max="10" 
                       step="0.001" 
                       className="w-full accent-blue-500 cursor-pointer" 
                       value={selectedNode.pos[1]} 
-                      onChange={(e) => handleMove(1, parseFloat(e.target.value))} 
+                      onChange={(v) => handleMove(1, v)} 
                     />
                   </div>
                   <div className="flex flex-col gap-1.5">
@@ -3969,14 +3978,13 @@ function App() {
                             className="text-xs text-slate-500"
                           />
                         </div>
-                        <input
-                          type="range"
+                        <RangeInput
                           min="0"
                           max="10"
                           step="0.001"
                           className="w-full accent-blue-500 cursor-pointer"
                           value={displayZ}
-                          onChange={(e) => handleMove(2, parseFloat(e.target.value) + centroidZ)}
+                          onChange={(v) => handleMove(2, v + centroidZ)}
                         />
                       </>);
                     })()}
@@ -4000,42 +4008,39 @@ function App() {
                     <label className="text-xs text-slate-500 flex items-center justify-between font-medium">X Rotation
                       <SliderValue value={getStickyRotation(selectedNode.euler ? selectedNode.euler[0] : 0)} onChange={(v) => updateNodeRotation(selectedNode.id, 0, v)} decimals={0} unit="°" min={0} max={360} />
                     </label>
-                    <input 
-                      type="range" 
+                    <RangeInput 
                       min="0" 
                       max="360" 
                       step="1" 
                       className="w-full accent-blue-500 cursor-pointer" 
                       value={selectedNode.euler ? selectedNode.euler[0] : 0} 
-                      onChange={(e) => updateNodeRotation(selectedNode.id, 0, parseFloat(e.target.value))} 
+                      onChange={(v) => updateNodeRotation(selectedNode.id, 0, v)} 
                     />
                   </div>
                   <div className="flex flex-col gap-1.5 mt-1">
                     <label className="text-xs text-slate-500 flex items-center justify-between font-medium">Y Rotation
                       <SliderValue value={getStickyRotation(selectedNode.euler ? selectedNode.euler[1] : 0)} onChange={(v) => updateNodeRotation(selectedNode.id, 1, v)} decimals={0} unit="°" min={0} max={360} />
                     </label>
-                    <input 
-                      type="range" 
+                    <RangeInput 
                       min="0" 
                       max="360" 
                       step="1" 
                       className="w-full accent-blue-500 cursor-pointer" 
                       value={selectedNode.euler ? selectedNode.euler[1] : 0} 
-                      onChange={(e) => updateNodeRotation(selectedNode.id, 1, parseFloat(e.target.value))} 
+                      onChange={(v) => updateNodeRotation(selectedNode.id, 1, v)} 
                     />
                   </div>
                   <div className="flex flex-col gap-1.5 mt-1">
                     <label className="text-xs text-slate-500 flex items-center justify-between font-medium">Z Rotation
                       <SliderValue value={getStickyRotation(selectedNode.euler ? selectedNode.euler[2] : 0)} onChange={(v) => updateNodeRotation(selectedNode.id, 2, v)} decimals={0} unit="°" min={0} max={360} />
                     </label>
-                    <input 
-                      type="range" 
+                    <RangeInput 
                       min="0" 
                       max="360" 
                       step="1" 
                       className="w-full accent-blue-500 cursor-pointer" 
                       value={selectedNode.euler ? selectedNode.euler[2] : 0} 
-                      onChange={(e) => updateNodeRotation(selectedNode.id, 2, parseFloat(e.target.value))} 
+                      onChange={(v) => updateNodeRotation(selectedNode.id, 2, v)} 
                     />
                   </div>
                 </div>
@@ -4096,13 +4101,10 @@ function App() {
                         api.getJointPosition('{selectedNode.joints[0].name}')
                       </span>
                     </div>
-                    <input 
-                      type="text" 
-                      value={selectedNode.joints[0].name || ''} 
-                      onChange={(e) => {
-                        const cleanName = e.target.value.replace(/[^a-zA-Z0-9_]/g, '_');
-                        updateNodeJoint(selectedNode.id, { name: cleanName });
-                      }}
+                    <SettledTextInput
+                      value={selectedNode.joints[0].name || ''}
+                      clean={(raw) => raw.replace(/[^a-zA-Z0-9_]/g, '_')}
+                      onChange={(cleanName) => updateNodeJoint(selectedNode.id, { name: cleanName })}
                       className="w-full px-2 py-1 border border-slate-200 rounded text-xs font-mono bg-white text-slate-800 outline-none focus:border-blue-500 shadow-sm"
                       placeholder="e.g. cart_slide"
                     />
@@ -4121,15 +4123,14 @@ function App() {
                         <label className="text-xs font-medium text-slate-500 flex justify-between">
                           {label} <span>{selectedNode.joints[0].initialVelocity?.[i] || 0}</span>
                         </label>
-                        <input
-                          type="range"
+                        <RangeInput
                           min="-20"
                           max="20"
                           step="0.5"
                           value={selectedNode.joints[0].initialVelocity?.[i] || 0}
-                          onChange={(e) => {
+                          onChange={(v) => {
                             const vel = [...(selectedNode.joints[0].initialVelocity || [0,0,0,0,0,0])];
-                            vel[i] = parseFloat(e.target.value);
+                            vel[i] = v;
                             updateNodeJoint(selectedNode.id, { ...selectedNode.joints[0], initialVelocity: vel });
                           }}
                           className="w-full accent-blue-500 cursor-pointer"
@@ -4148,15 +4149,14 @@ function App() {
                           <label className="text-xs font-medium text-slate-500 flex justify-between">
                             {label} <span>{selectedNode.joints[0].initialVelocity?.[idx] || 0}</span>
                           </label>
-                          <input
-                            type="range"
+                          <RangeInput
                             min="-50"
                             max="50"
                             step="0.5"
                             value={selectedNode.joints[0].initialVelocity?.[idx] || 0}
-                            onChange={(e) => {
+                            onChange={(v) => {
                               const vel = [...(selectedNode.joints[0].initialVelocity || [0,0,0,0,0,0])];
-                              vel[idx] = parseFloat(e.target.value);
+                              vel[idx] = v;
                               updateNodeJoint(selectedNode.id, { ...selectedNode.joints[0], initialVelocity: vel });
                             }}
                             className="w-full accent-blue-500 cursor-pointer"
@@ -4214,16 +4214,15 @@ function App() {
                           <label className="text-xs font-medium text-slate-500 flex justify-between">
                             Velocity Gain (kv) <span>{selectedNode.joints[0].actuator.kv || 10}</span>
                           </label>
-                          <input
-                            type="range"
+                          <RangeInput
                             min="0.5"
                             max="100"
                             step="0.5"
                             value={selectedNode.joints[0].actuator.kv || 10}
-                            onChange={(e) => {
+                            onChange={(v) => {
                               updateNodeJoint(selectedNode.id, {
                                 ...selectedNode.joints[0],
-                                actuator: { ...selectedNode.joints[0].actuator!, kv: parseFloat(e.target.value) }
+                                actuator: { ...selectedNode.joints[0].actuator!, kv: v }
                               });
                             }}
                             className="w-full accent-blue-500 cursor-pointer"
@@ -4248,14 +4247,13 @@ function App() {
                       <label className="text-xs font-medium text-slate-500 flex justify-between">
                         Teeth Count <span>{selectedNode.geoms.length - (pegGeom ? 2 : 1)}</span>
                       </label>
-                      <input 
-                        type="range" 
+                      <RangeInput 
                         min="4" 
                         max="24" 
                         step="1" 
                         value={selectedNode.geoms.length - (pegGeom ? 2 : 1)} 
-                        onChange={(e) => {
-                          const teethVal = parseInt(e.target.value);
+                        onChange={(v) => {
+                          const teethVal = Math.round(v);
                           updateGearTeeth(selectedNode.id, teethVal);
                         }} 
                         className="w-full accent-blue-500 cursor-pointer" 
@@ -4266,14 +4264,13 @@ function App() {
                           updateNodeGeom(selectedNode.id, { size: [r, selectedNode.geoms[0].size[1]] });
                         }} decimals={2} unit="m" min={0.05} max={5.0} />
                       </label>
-                      <input 
-                        type="range" 
+                      <RangeInput 
                         min="0.05" 
                         max="5.0" 
                         step="0.01" 
                         value={gearRadius} 
-                        onChange={(e) => {
-                          const r = parseFloat(e.target.value);
+                        onChange={(v) => {
+                          const r = v;
                           updateNodeGeom(selectedNode.id, { size: [r, selectedNode.geoms[0].size[1]] });
                         }} 
                         className="w-full accent-blue-500 cursor-pointer" 
@@ -4290,14 +4287,13 @@ function App() {
                             updatePusherPeg(selectedNode.id, { offset: offsetVal });
                           }} decimals={2} unit="m" min={0.01} max={5.0} />
                         </label>
-                        <input 
-                          type="range" 
+                        <RangeInput 
                           min="0.01" 
                           max="5.0" 
                           step="0.01" 
                           value={pegGeom.pos[0]} 
-                          onChange={(e) => {
-                            const offsetVal = parseFloat(e.target.value);
+                          onChange={(v) => {
+                            const offsetVal = v;
                             updatePusherPeg(selectedNode.id, { offset: offsetVal });
                           }} 
                           className="w-full accent-blue-500 cursor-pointer" 
@@ -4308,14 +4304,13 @@ function App() {
                             updatePusherPeg(selectedNode.id, { size: [rVal, pegGeom.size[1]] });
                           }} decimals={3} unit="m" min={0.005} max={0.5} />
                         </label>
-                        <input 
-                          type="range" 
+                        <RangeInput 
                           min="0.005" 
                           max="0.5" 
                           step="0.005" 
                           value={pegGeom.size[0]} 
-                          onChange={(e) => {
-                            const rVal = parseFloat(e.target.value);
+                          onChange={(v) => {
+                            const rVal = v;
                             updatePusherPeg(selectedNode.id, { size: [rVal, pegGeom.size[1]] });
                           }} 
                           className="w-full accent-blue-500 cursor-pointer" 
@@ -4326,14 +4321,13 @@ function App() {
                             updatePusherPeg(selectedNode.id, { size: [pegGeom.size[0], hVal] });
                           }} decimals={2} unit="m" min={0.01} max={1.0} />
                         </label>
-                        <input 
-                          type="range" 
+                        <RangeInput 
                           min="0.01" 
                           max="1.0" 
                           step="0.01" 
                           value={pegGeom.size[1]} 
-                          onChange={(e) => {
-                            const hVal = parseFloat(e.target.value);
+                          onChange={(v) => {
+                            const hVal = v;
                             updatePusherPeg(selectedNode.id, { size: [pegGeom.size[0], hVal] });
                           }} 
                           className="w-full accent-blue-500 cursor-pointer" 
@@ -4367,13 +4361,12 @@ function App() {
                         <DocsInfoButton tab="damping" onOpen={openDocs} />
                       </h3>
                       <label className="text-xs font-medium text-slate-500 flex justify-between">Damping <SliderValue value={joint.damping !== undefined ? joint.damping : 0.0} onChange={(v) => updateNodeJoint(selectedNode.id, {damping: v})} decimals={2} min={0} /></label>
-                      <input 
-                        type="range" 
+                      <RangeInput 
                         min="0" 
                         max={joint.type === 'free' ? "5.0" : "500"} 
                         step={joint.type === 'free' ? "0.01" : "0.1"} 
                         value={joint.damping !== undefined ? joint.damping : 0.0} 
-                        onChange={(e) => updateNodeJoint(selectedNode.id, {damping: parseFloat(e.target.value)})} 
+                        onChange={(v) => updateNodeJoint(selectedNode.id, {damping: v})} 
                         className="w-full accent-blue-500 cursor-pointer" 
                       />
                     </div>
@@ -4390,13 +4383,12 @@ function App() {
                         <label className="text-xs font-medium text-slate-500 flex justify-between">
                           Spring Stiffness (K) <SliderValue value={joint.stiffness || 0} onChange={(v) => updateNodeJoint(selectedNode.id, { stiffness: v })} decimals={0} unit="N/m" min={0} max={5000} />
                         </label>
-                        <input 
-                          type="range" 
+                        <RangeInput 
                           min="0" 
                           max="5000" 
                           step="10" 
                           value={joint.stiffness || 0} 
-                          onChange={(e) => updateNodeJoint(selectedNode.id, { stiffness: parseFloat(e.target.value) })}
+                          onChange={(v) => updateNodeJoint(selectedNode.id, { stiffness: v })}
                           className="w-full accent-blue-500 cursor-pointer" 
                         />
                       </div>
@@ -4406,14 +4398,13 @@ function App() {
                           <label className="text-xs font-medium text-slate-500 flex justify-between">
                             Spring Rest Position <span>{(joint.springref || 0).toFixed(joint.type === 'slide' ? 2 : 0)}{joint.type === 'slide' ? ' m' : '°'}</span>
                           </label>
-                          <input 
-                            type="range" 
+                          <RangeInput 
                             min={joint.type === 'slide' ? -20.0 : -360} 
                             max={joint.type === 'slide' ? 20.0 : 360} 
                             step={joint.type === 'slide' ? 0.05 : 1} 
                             value={joint.springref || 0} 
-                            onChange={(e) => {
-                              const raw = parseFloat(e.target.value);
+                            onChange={(v) => {
+                              const raw = v;
                               const val = joint.type === 'slide' ? raw : getStickyRotation(raw);
                               updateNodeJoint(selectedNode.id, { springref: val });
                             }}
@@ -4462,15 +4453,14 @@ function App() {
                               <label className="text-xs font-medium text-slate-500 flex justify-between">
                                 Minimum Limit <span>{minVal.toFixed(isSlide ? 2 : 0)}{isSlide ? ' m' : '°'}</span>
                               </label>
-                              <input 
-                                type="range" 
+                              <RangeInput 
                                 min={isSlide ? -20.0 : -360}
                                 max={isSlide ? 20.0 : 360}
                                 step={isSlide ? 0.05 : 1}
                                 list={!isSlide ? 'rotation-snaps' : undefined}
                                 value={minVal}
-                                onChange={(e) => {
-                                  const raw = parseFloat(e.target.value);
+                                onChange={(v) => {
+                                  const raw = v;
                                   const val = isSlide ? raw : getStickyRotation(raw);
                                   const newMin = Math.min(val, maxVal);
                                   updateNodeJoint(selectedNode.id, { range: [newMin, maxVal] });
@@ -4483,15 +4473,14 @@ function App() {
                               <label className="text-xs font-medium text-slate-500 flex justify-between">
                                 Maximum Limit <span>{maxVal.toFixed(isSlide ? 2 : 0)}{isSlide ? ' m' : '°'}</span>
                               </label>
-                              <input 
-                                type="range" 
+                              <RangeInput 
                                 min={isSlide ? -20.0 : -360}
                                 max={isSlide ? 20.0 : 360}
                                 step={isSlide ? 0.05 : 1}
                                 list={!isSlide ? 'rotation-snaps' : undefined}
                                 value={maxVal}
-                                onChange={(e) => {
-                                  const raw = parseFloat(e.target.value);
+                                onChange={(v) => {
+                                  const raw = v;
                                   const val = isSlide ? raw : getStickyRotation(raw);
                                   const newMax = Math.max(val, minVal);
                                   updateNodeJoint(selectedNode.id, { range: [minVal, newMax] });
@@ -4596,14 +4585,13 @@ function App() {
                                 const r = v;
                                 updateNodeGeom(selectedNode.id, { size: [r] }, activeIndex);
                               }} decimals={2} unit="m" min={0.05} max={2.0} /></label>
-                            <input
-                              type="range" 
+                            <RangeInput 
                               min="0.05" 
                               max="2.0" 
                               step="0.01" 
                               value={geom.size[0]}
-                              onChange={(e) => {
-                                const r = parseFloat(e.target.value);
+                              onChange={(v) => {
+                                const r = v;
                                 updateNodeGeom(selectedNode.id, { size: [r] }, activeIndex);
                               }}
                               className="w-full accent-blue-500 cursor-pointer" 
@@ -4618,14 +4606,13 @@ function App() {
                                   const val = v;
                                   updateWedgeParams(selectedNode.id, { width: val });
                                 }} decimals={2} unit="m" min={0.5} max={5.0} /></label>
-                              <input
-                                type="range" 
+                              <RangeInput 
                                 min="0.5" 
                                 max="5.0" 
                                 step="0.05" 
                                 value={selectedNode.width || 2.0}
-                                onChange={(e) => {
-                                  const val = parseFloat(e.target.value);
+                                onChange={(v) => {
+                                  const val = v;
                                   updateWedgeParams(selectedNode.id, { width: val });
                                 }}
                                 className="w-full accent-blue-500 cursor-pointer" 
@@ -4636,14 +4623,13 @@ function App() {
                                   const val = v;
                                   updateWedgeParams(selectedNode.id, { depth: val });
                                 }} decimals={2} unit="m" min={0.2} max={4.0} /></label>
-                              <input
-                                type="range" 
+                              <RangeInput 
                                 min="0.2" 
                                 max="4.0" 
                                 step="0.05" 
                                 value={selectedNode.depth || 1.0}
-                                onChange={(e) => {
-                                  const val = parseFloat(e.target.value);
+                                onChange={(v) => {
+                                  const val = v;
                                   updateWedgeParams(selectedNode.id, { depth: val });
                                 }}
                                 className="w-full accent-blue-500 cursor-pointer" 
@@ -4654,14 +4640,13 @@ function App() {
                                   const val = v;
                                   updateWedgeParams(selectedNode.id, { height: val });
                                 }} decimals={2} unit="m" min={0.1} max={3.0} /></label>
-                              <input
-                                type="range" 
+                              <RangeInput 
                                 min="0.1" 
                                 max="3.0" 
                                 step="0.05" 
                                 value={selectedNode.height || 0.5}
-                                onChange={(e) => {
-                                  const val = parseFloat(e.target.value);
+                                onChange={(v) => {
+                                  const val = v;
                                   updateWedgeParams(selectedNode.id, { height: val });
                                 }}
                                 className="w-full accent-blue-500 cursor-pointer" 
@@ -4672,14 +4657,13 @@ function App() {
                                   const val = v;
                                   updateWedgeParams(selectedNode.id, { wedgeAngle: val });
                                 }} decimals={1} unit="°" min={2} max={85} /></label>
-                              <input
-                                type="range" 
+                              <RangeInput 
                                 min="2" 
                                 max="85" 
                                 step="1" 
                                 value={selectedNode.wedgeAngle !== undefined ? selectedNode.wedgeAngle : 14.036}
-                                onChange={(e) => {
-                                  const val = parseFloat(e.target.value);
+                                onChange={(v) => {
+                                  const val = v;
                                   updateWedgeParams(selectedNode.id, { wedgeAngle: val });
                                 }}
                                 className="w-full accent-blue-500 cursor-pointer" 
@@ -4695,14 +4679,13 @@ function App() {
                                   const val = v;
                                   updatePyramidParams(selectedNode.id, { width: val });
                                 }} decimals={2} unit="m" min={0.1} max={3.0} /></label>
-                              <input
-                                type="range" 
+                              <RangeInput 
                                 min="0.1" 
                                 max="3.0" 
                                 step="0.01" 
                                 value={selectedNode.width || 0.5}
-                                onChange={(e) => {
-                                  const val = parseFloat(e.target.value);
+                                onChange={(v) => {
+                                  const val = v;
                                   updatePyramidParams(selectedNode.id, { width: val });
                                 }}
                                 className="w-full accent-blue-500 cursor-pointer" 
@@ -4713,14 +4696,13 @@ function App() {
                                   const val = v;
                                   updatePyramidParams(selectedNode.id, { depth: val });
                                 }} decimals={2} unit="m" min={0.1} max={3.0} /></label>
-                              <input
-                                type="range" 
+                              <RangeInput 
                                 min="0.1" 
                                 max="3.0" 
                                 step="0.01" 
                                 value={selectedNode.depth || 0.5}
-                                onChange={(e) => {
-                                  const val = parseFloat(e.target.value);
+                                onChange={(v) => {
+                                  const val = v;
                                   updatePyramidParams(selectedNode.id, { depth: val });
                                 }}
                                 className="w-full accent-blue-500 cursor-pointer" 
@@ -4731,14 +4713,13 @@ function App() {
                                   const val = v;
                                   updatePyramidParams(selectedNode.id, { height: val });
                                 }} decimals={2} unit="m" min={0.1} max={3.0} /></label>
-                              <input
-                                type="range" 
+                              <RangeInput 
                                 min="0.1" 
                                 max="3.0" 
                                 step="0.01" 
                                 value={selectedNode.height || 0.5}
-                                onChange={(e) => {
-                                  const val = parseFloat(e.target.value);
+                                onChange={(v) => {
+                                  const val = v;
                                   updatePyramidParams(selectedNode.id, { height: val });
                                 }}
                                 className="w-full accent-blue-500 cursor-pointer" 
@@ -4754,14 +4735,13 @@ function App() {
                                   const val = v;
                                   updateConeParams(selectedNode.id, { radius: val });
                                 }} decimals={2} unit="m" min={0.05} max={2.0} /></label>
-                              <input
-                                type="range" 
+                              <RangeInput 
                                 min="0.05" 
                                 max="2.0" 
                                 step="0.01" 
                                 value={selectedNode.radius || 0.3}
-                                onChange={(e) => {
-                                  const val = parseFloat(e.target.value);
+                                onChange={(v) => {
+                                  const val = v;
                                   updateConeParams(selectedNode.id, { radius: val });
                                 }}
                                 className="w-full accent-blue-500 cursor-pointer" 
@@ -4772,14 +4752,13 @@ function App() {
                                   const val = v;
                                   updateConeParams(selectedNode.id, { height: val });
                                 }} decimals={2} unit="m" min={0.1} max={3.0} /></label>
-                              <input
-                                type="range" 
+                              <RangeInput 
                                 min="0.1" 
                                 max="3.0" 
                                 step="0.01" 
                                 value={selectedNode.height || 0.6}
-                                onChange={(e) => {
-                                  const val = parseFloat(e.target.value);
+                                onChange={(v) => {
+                                  const val = v;
                                   updateConeParams(selectedNode.id, { height: val });
                                 }}
                                 className="w-full accent-blue-500 cursor-pointer" 
@@ -4795,14 +4774,13 @@ function App() {
                                   const val = v;
                                   updateTorusParams(selectedNode.id, { majorRadius: val });
                                 }} decimals={2} unit="m" min={0.1} max={3.0} /></label>
-                              <input
-                                type="range" 
+                              <RangeInput 
                                 min="0.1" 
                                 max="3.0" 
                                 step="0.01" 
                                 value={selectedNode.majorRadius || 0.4}
-                                onChange={(e) => {
-                                  const val = parseFloat(e.target.value);
+                                onChange={(v) => {
+                                  const val = v;
                                   updateTorusParams(selectedNode.id, { majorRadius: val });
                                 }}
                                 className="w-full accent-blue-500 cursor-pointer" 
@@ -4813,14 +4791,13 @@ function App() {
                                   const val = v;
                                   updateTorusParams(selectedNode.id, { tubeRadius: val });
                                 }} decimals={2} unit="m" min={0.02} max={1.0} /></label>
-                              <input
-                                type="range" 
+                              <RangeInput 
                                 min="0.02" 
                                 max="1.0" 
                                 step="0.01" 
                                 value={selectedNode.tubeRadius || 0.1}
-                                onChange={(e) => {
-                                  const val = parseFloat(e.target.value);
+                                onChange={(v) => {
+                                  const val = v;
                                   updateTorusParams(selectedNode.id, { tubeRadius: val });
                                 }}
                                 className="w-full accent-blue-500 cursor-pointer" 
@@ -4836,14 +4813,13 @@ function App() {
                                   const val = v;
                                   updateTubeParams(selectedNode.id, { innerRadius: val });
                                 }} decimals={2} unit="m" min={0.02} /></label>
-                              <input 
-                                type="range" 
+                              <RangeInput 
                                 min="0.02" 
                                 max={selectedNode.outerRadius ? selectedNode.outerRadius - 0.01 : 0.29} 
                                 step="0.01" 
                                 value={selectedNode.innerRadius || 0.2} 
-                                onChange={(e) => {
-                                  const val = parseFloat(e.target.value);
+                                onChange={(v) => {
+                                  const val = v;
                                   updateTubeParams(selectedNode.id, { innerRadius: val });
                                 }}
                                 className="w-full accent-blue-500 cursor-pointer" 
@@ -4854,14 +4830,13 @@ function App() {
                                   const val = v;
                                   updateTubeParams(selectedNode.id, { outerRadius: val });
                                 }} decimals={2} unit="m" max={2.0} /></label>
-                              <input 
-                                type="range" 
+                              <RangeInput 
                                 min={selectedNode.innerRadius ? selectedNode.innerRadius + 0.01 : 0.21} 
                                 max="2.0" 
                                 step="0.01" 
                                 value={selectedNode.outerRadius || 0.3} 
-                                onChange={(e) => {
-                                  const val = parseFloat(e.target.value);
+                                onChange={(v) => {
+                                  const val = v;
                                   updateTubeParams(selectedNode.id, { outerRadius: val });
                                 }}
                                 className="w-full accent-blue-500 cursor-pointer" 
@@ -4872,14 +4847,13 @@ function App() {
                                   const val = v;
                                   updateTubeParams(selectedNode.id, { height: val });
                                 }} decimals={2} unit="m" min={0.1} max={3.0} /></label>
-                              <input
-                                type="range" 
+                              <RangeInput 
                                 min="0.1" 
                                 max="3.0" 
                                 step="0.01" 
                                 value={selectedNode.height || 0.5}
-                                onChange={(e) => {
-                                  const val = parseFloat(e.target.value);
+                                onChange={(v) => {
+                                  const val = v;
                                   updateTubeParams(selectedNode.id, { height: val });
                                 }}
                                 className="w-full accent-blue-500 cursor-pointer"
@@ -4895,14 +4869,13 @@ function App() {
                                   const val = v;
                                   updateCurveParams(selectedNode.id, { width: val });
                                 }} decimals={2} unit="m" min={0.1} max={2.0} /></label>
-                              <input
-                                type="range"
+                              <RangeInput
                                 min="0.1"
                                 max="2.0"
                                 step="0.01"
                                 value={selectedNode.curveWidth || 0.5}
-                                onChange={(e) => {
-                                  const val = parseFloat(e.target.value);
+                                onChange={(v) => {
+                                  const val = v;
                                   updateCurveParams(selectedNode.id, { width: val });
                                 }}
                                 className="w-full accent-blue-500 cursor-pointer"
@@ -4913,14 +4886,13 @@ function App() {
                                   const val = v;
                                   updateCurveParams(selectedNode.id, { thickness: val });
                                 }} decimals={2} unit="m" min={0.02} max={0.4} /></label>
-                              <input
-                                type="range"
+                              <RangeInput
                                 min="0.02"
                                 max="0.4"
                                 step="0.01"
                                 value={selectedNode.curveThickness || 0.06}
-                                onChange={(e) => {
-                                  const val = parseFloat(e.target.value);
+                                onChange={(v) => {
+                                  const val = v;
                                   updateCurveParams(selectedNode.id, { thickness: val });
                                 }}
                                 className="w-full accent-blue-500 cursor-pointer"
@@ -4928,14 +4900,13 @@ function App() {
                             </div>
                             <div className="flex flex-col gap-1">
                               <label className="text-xs font-medium text-slate-500 flex justify-between">Smoothness <span>{selectedNode.curveSegments || 28} segments</span></label>
-                              <input
-                                type="range"
+                              <RangeInput
                                 min="6"
                                 max="60"
                                 step="1"
                                 value={selectedNode.curveSegments || 28}
-                                onChange={(e) => {
-                                  const val = parseInt(e.target.value, 10);
+                                onChange={(v) => {
+                                  const val = Math.round(v);
                                   updateCurveParams(selectedNode.id, { segments: val });
                                 }}
                                 className="w-full accent-blue-500 cursor-pointer"
@@ -4946,14 +4917,13 @@ function App() {
                                   const val = v;
                                   updateCurveParams(selectedNode.id, { bank: val });
                                 }} decimals={0} unit="°" min={-45} max={45} /></label>
-                              <input
-                                type="range"
+                              <RangeInput
                                 min="-45"
                                 max="45"
                                 step="1"
                                 value={selectedNode.curveBank || 0}
-                                onChange={(e) => {
-                                  const val = parseFloat(e.target.value);
+                                onChange={(v) => {
+                                  const val = v;
                                   updateCurveParams(selectedNode.id, { bank: val });
                                 }}
                                 className="w-full accent-blue-500 cursor-pointer"
@@ -5030,14 +5000,13 @@ function App() {
                                   const val = v;
                                   updateNodeGeom(selectedNode.id, { size: [val, geom.size[1], geom.size[2]] }, activeIndex);
                                 }} decimals={2} unit="m" min={0.05} max={2.0} /></label>
-                              <input
-                                type="range" 
+                              <RangeInput 
                                 min="0.05" 
                                 max="2.0" 
                                 step="0.01" 
                                 value={geom.size[0]}
-                                onChange={(e) => {
-                                  const val = parseFloat(e.target.value);
+                                onChange={(v) => {
+                                  const val = v;
                                   updateNodeGeom(selectedNode.id, { size: [val, geom.size[1], geom.size[2]] }, activeIndex);
                                 }}
                                 className="w-full accent-blue-500 cursor-pointer" 
@@ -5048,14 +5017,13 @@ function App() {
                                   const val = v;
                                   updateNodeGeom(selectedNode.id, { size: [geom.size[0], val, geom.size[2]] }, activeIndex);
                                 }} decimals={2} unit="m" min={0.05} max={2.0} /></label>
-                              <input
-                                type="range" 
+                              <RangeInput 
                                 min="0.05" 
                                 max="2.0" 
                                 step="0.01" 
                                 value={geom.size[1]}
-                                onChange={(e) => {
-                                  const val = parseFloat(e.target.value);
+                                onChange={(v) => {
+                                  const val = v;
                                   updateNodeGeom(selectedNode.id, { size: [geom.size[0], val, geom.size[2]] }, activeIndex);
                                 }}
                                 className="w-full accent-blue-500 cursor-pointer" 
@@ -5066,14 +5034,13 @@ function App() {
                                   const val = v;
                                   updateNodeGeom(selectedNode.id, { size: [geom.size[0], geom.size[1], val] }, activeIndex);
                                 }} decimals={2} unit="m" min={0.05} max={2.0} /></label>
-                              <input
-                                type="range" 
+                              <RangeInput 
                                 min="0.05" 
                                 max="2.0" 
                                 step="0.01" 
                                 value={geom.size[2]}
-                                onChange={(e) => {
-                                  const val = parseFloat(e.target.value);
+                                onChange={(v) => {
+                                  const val = v;
                                   updateNodeGeom(selectedNode.id, { size: [geom.size[0], geom.size[1], val] }, activeIndex);
                                 }}
                                 className="w-full accent-blue-500 cursor-pointer" 
@@ -5089,14 +5056,13 @@ function App() {
                                   const val = v;
                                   updateNodeGeom(selectedNode.id, { size: [val, geom.size[1], geom.size[2]] }, activeIndex);
                                 }} decimals={2} unit="m" min={0.05} max={2.0} /></label>
-                              <input
-                                type="range" 
+                              <RangeInput 
                                 min="0.05" 
                                 max="2.0" 
                                 step="0.01" 
                                 value={geom.size[0]}
-                                onChange={(e) => {
-                                  const val = parseFloat(e.target.value);
+                                onChange={(v) => {
+                                  const val = v;
                                   updateNodeGeom(selectedNode.id, { size: [val, geom.size[1], geom.size[2]] }, activeIndex);
                                 }}
                                 className="w-full accent-blue-500 cursor-pointer" 
@@ -5107,14 +5073,13 @@ function App() {
                                   const val = v;
                                   updateNodeGeom(selectedNode.id, { size: [geom.size[0], val, geom.size[2]] }, activeIndex);
                                 }} decimals={2} unit="m" min={0.05} max={2.0} /></label>
-                              <input
-                                type="range" 
+                              <RangeInput 
                                 min="0.05" 
                                 max="2.0" 
                                 step="0.01" 
                                 value={geom.size[1]}
-                                onChange={(e) => {
-                                  const val = parseFloat(e.target.value);
+                                onChange={(v) => {
+                                  const val = v;
                                   updateNodeGeom(selectedNode.id, { size: [geom.size[0], val, geom.size[2]] }, activeIndex);
                                 }}
                                 className="w-full accent-blue-500 cursor-pointer" 
@@ -5125,14 +5090,13 @@ function App() {
                                   const val = v;
                                   updateNodeGeom(selectedNode.id, { size: [geom.size[0], geom.size[1], val] }, activeIndex);
                                 }} decimals={2} unit="m" min={0.05} max={2.0} /></label>
-                              <input
-                                type="range" 
+                              <RangeInput 
                                 min="0.05" 
                                 max="2.0" 
                                 step="0.01" 
                                 value={geom.size[2]}
-                                onChange={(e) => {
-                                  const val = parseFloat(e.target.value);
+                                onChange={(v) => {
+                                  const val = v;
                                   updateNodeGeom(selectedNode.id, { size: [geom.size[0], geom.size[1], val] }, activeIndex);
                                 }}
                                 className="w-full accent-blue-500 cursor-pointer" 
@@ -5150,14 +5114,13 @@ function App() {
                                     size: geom.size[1] !== undefined ? [val, geom.size[1]] : [val] 
                                   }, activeIndex);
                                 }} decimals={3} unit="m" min={0.01} max={0.8} /></label>
-                              <input
-                                type="range" 
+                              <RangeInput 
                                 min="0.01" 
                                 max="0.8" 
                                 step="0.005" 
                                 value={geom.size[0]}
-                                onChange={(e) => {
-                                  const val = parseFloat(e.target.value);
+                                onChange={(v) => {
+                                  const val = v;
                                   updateNodeGeom(selectedNode.id, { 
                                     size: geom.size[1] !== undefined ? [val, geom.size[1]] : [val] 
                                   }, activeIndex);
@@ -5171,14 +5134,13 @@ function App() {
                                     const val = v;
                                     updateNodeGeom(selectedNode.id, { size: [geom.size[0], val] }, activeIndex);
                                   }} decimals={2} unit="m" min={0.05} max={3.0} /></label>
-                                <input
-                                  type="range" 
+                                <RangeInput 
                                   min="0.05" 
                                   max="3.0" 
                                   step="0.01" 
                                   value={geom.size[1]}
-                                  onChange={(e) => {
-                                    const val = parseFloat(e.target.value);
+                                  onChange={(v) => {
+                                    const val = v;
                                     updateNodeGeom(selectedNode.id, { size: [geom.size[0], val] }, activeIndex);
                                   }}
                                   className="w-full accent-blue-500 cursor-pointer" 
@@ -5212,14 +5174,13 @@ function App() {
                                       updateNodeGeom(selectedNode.id, { fromto: newFromto }, activeIndex);
                                     }} decimals={2} unit="m" min={0.1} max={5.0} />
                                   </label>
-                                  <input 
-                                    type="range" 
+                                  <RangeInput 
                                     min="0.1" 
                                     max="5.0" 
                                     step="0.05" 
                                     value={currentLength} 
-                                    onChange={(e) => {
-                                      const newVal = parseFloat(e.target.value);
+                                    onChange={(v) => {
+                                      const newVal = v;
                                       const scale = newVal / currentLength;
                                       const newFromto = [
                                         fromto[0],
@@ -5256,14 +5217,13 @@ function App() {
                                   const val = v;
                                   updateNodeGeom(selectedNode.id, { pos: [val, pos[1], pos[2]] }, activeIndex);
                                 }} decimals={3} unit="m" min={-1.0} max={1.0} /></label>
-                              <input
-                                type="range" 
+                              <RangeInput 
                                 min="-1.0" 
                                 max="1.0" 
                                 step="0.005" 
                                 value={pos[0]}
-                                onChange={(e) => {
-                                  const val = parseFloat(e.target.value);
+                                onChange={(v) => {
+                                  const val = v;
                                   updateNodeGeom(selectedNode.id, { pos: [val, pos[1], pos[2]] }, activeIndex);
                                 }}
                                 className="w-full accent-blue-500 cursor-pointer" 
@@ -5274,14 +5234,13 @@ function App() {
                                   const val = v;
                                   updateNodeGeom(selectedNode.id, { pos: [pos[0], val, pos[2]] }, activeIndex);
                                 }} decimals={3} unit="m" min={-1.0} max={1.0} /></label>
-                              <input
-                                type="range" 
+                              <RangeInput 
                                 min="-1.0" 
                                 max="1.0" 
                                 step="0.005" 
                                 value={pos[1]}
-                                onChange={(e) => {
-                                  const val = parseFloat(e.target.value);
+                                onChange={(v) => {
+                                  const val = v;
                                   updateNodeGeom(selectedNode.id, { pos: [pos[0], val, pos[2]] }, activeIndex);
                                 }}
                                 className="w-full accent-blue-500 cursor-pointer" 
@@ -5292,14 +5251,13 @@ function App() {
                                   const val = v;
                                   updateNodeGeom(selectedNode.id, { pos: [pos[0], pos[1], val] }, activeIndex);
                                 }} decimals={3} unit="m" min={-1.0} max={1.0} /></label>
-                              <input
-                                type="range" 
+                              <RangeInput 
                                 min="-1.0" 
                                 max="1.0" 
                                 step="0.005" 
                                 value={pos[2]}
-                                onChange={(e) => {
-                                  const val = parseFloat(e.target.value);
+                                onChange={(v) => {
+                                  const val = v;
                                   updateNodeGeom(selectedNode.id, { pos: [pos[0], pos[1], val] }, activeIndex);
                                 }}
                                 className="w-full accent-blue-500 cursor-pointer" 
@@ -5316,7 +5274,7 @@ function App() {
                         <DocsInfoButton tab="gravity" onOpen={openDocs} />
                       </h3>
                       <label className="text-xs font-medium text-slate-500 flex justify-between">Value <SliderValue value={geom.mass ?? 0} onChange={(v) => updateNodeGeom(selectedNode.id, {mass: v}, activeIndex)} decimals={2} unit="kg" min={0} max={50} /></label>
-                      <input type="range" min="0" max="50" step="0.01" value={geom.mass ?? 0} onChange={(e) => updateNodeGeom(selectedNode.id, {mass: parseFloat(e.target.value)}, activeIndex)} className="w-full accent-blue-500 cursor-pointer" />
+                      <RangeInput min="0" max="50" step="0.01" value={geom.mass ?? 0} onChange={(v) => updateNodeGeom(selectedNode.id, {mass: v}, activeIndex)} className="w-full accent-blue-500 cursor-pointer" />
                       
                       {(() => {
                         let volM3 = 0;
@@ -5408,11 +5366,11 @@ function App() {
                               Contact Stiffness <span className="text-[10px] font-normal text-slate-400">solref[0]</span>
                               <span className="text-blue-600 font-bold">{val.toFixed(3)}s</span>
                             </label>
-                            <input type="range" min="0.001" max="0.1" step="0.001" className="w-full accent-blue-500 cursor-pointer"
+                            <RangeInput min="0.001" max="0.1" step="0.001" className="w-full accent-blue-500 cursor-pointer"
                               value={val}
-                              onChange={(e) => {
+                              onChange={(v) => {
                                 const sr = geom.solref ? [...geom.solref] : [0.02, 1.0];
-                                sr[0] = parseFloat(e.target.value);
+                                sr[0] = v;
                                 updateNodeGeom(selectedNode.id, { solref: sr as [number,number] }, activeIndex);
                               }}
                             />
@@ -5430,10 +5388,10 @@ function App() {
                               Damping Ratio (Bounciness) <span className="text-[10px] font-normal text-slate-400">solref[1]</span>
                               <span className="text-blue-600 font-bold">{val.toFixed(2)}</span>
                             </label>
-                            <input type="range" min="0.0" max="1.0" step="0.01" className="w-full accent-blue-500 cursor-pointer"
+                            <RangeInput min="0.0" max="1.0" step="0.01" className="w-full accent-blue-500 cursor-pointer"
                               value={val}
-                              onChange={(e) => {
-                                const dr = parseFloat(e.target.value);
+                              onChange={(v) => {
+                                const dr = v;
                                 const sr = geom.solref ? [...geom.solref] : [0.02, 1.0];
                                 sr[1] = dr;
                                 updateNodeGeom(selectedNode.id, {
@@ -5456,11 +5414,11 @@ function App() {
                               Contact Impedance <span className="text-[10px] font-normal text-slate-400">solimp[0]</span>
                               <span className="text-blue-600 font-bold">{val.toFixed(3)}</span>
                             </label>
-                            <input type="range" min="0.8" max="0.9999" step="0.001" className="w-full accent-blue-500 cursor-pointer"
+                            <RangeInput min="0.8" max="0.9999" step="0.001" className="w-full accent-blue-500 cursor-pointer"
                               value={val}
-                              onChange={(e) => {
+                              onChange={(v) => {
                                 const si = geom.solimp ? [...geom.solimp] : [0.99, 0.9999, 0.0001, 0.5, 2];
-                                si[0] = parseFloat(e.target.value);
+                                si[0] = v;
                                 updateNodeGeom(selectedNode.id, { solimp: si }, activeIndex);
                               }}
                             />
@@ -5484,11 +5442,11 @@ function App() {
                                   {label} <span className="text-[10px] font-normal text-slate-400">friction[{key}]</span>
                                   <span className="text-blue-600 font-bold">{fr[key].toFixed(key === 2 ? 4 : 3)}</span>
                                 </label>
-                                <input type="range" min={min} max={max} step={step} className="w-full accent-blue-500 cursor-pointer"
+                                <RangeInput min={min} max={max} step={step} className="w-full accent-blue-500 cursor-pointer"
                                   value={fr[key]}
-                                  onChange={(e) => {
+                                  onChange={(v) => {
                                     const newFr = [...fr] as [number,number,number];
-                                    newFr[key] = parseFloat(e.target.value);
+                                    newFr[key] = v;
                                     updateNodeGeom(selectedNode.id, { friction: newFr }, activeIndex);
                                   }}
                                 />
@@ -5629,13 +5587,10 @@ function App() {
                                       <option value="custom">Custom Ratio...</option>
                                     </select>
 
-                                    <input
-                                      type="number"
+                                    <SettledNumberInput
                                       step="0.05"
                                       value={selectedNode.coupleRatio !== undefined ? selectedNode.coupleRatio : -1.0}
-                                      onChange={(e) => {
-                                        const val = parseFloat(e.target.value);
-                                        if (isNaN(val)) return;
+                                      onChange={(val) => {
                                         const newScene = cloneSceneGraph(sceneGraph);
                                         const traverse2 = (nodes: SceneNode[]) => {
                                           if (!nodes) return false;
@@ -5689,11 +5644,10 @@ function App() {
                           <label className="text-xs font-medium text-slate-500 flex justify-between mt-1">
                             Opacity <span>{Math.round((rgba[3] ?? 1) * 100)}%</span>
                           </label>
-                          <input
-                            type="range" min="0" max="1" step="0.01" value={rgba[3] ?? 1}
-                            onChange={(e) => updateNodeGeom(
+                          <RangeInput min="0" max="1" step="0.01" value={rgba[3] ?? 1}
+                            onChange={(v) => updateNodeGeom(
                               selectedNode.id,
-                              {rgba: [rgba[0] ?? 0.5, rgba[1] ?? 0.5, rgba[2] ?? 0.5, parseFloat(e.target.value)]},
+                              {rgba: [rgba[0] ?? 0.5, rgba[1] ?? 0.5, rgba[2] ?? 0.5, v]},
                               activeIndex,
                             )}
                             className="w-full accent-blue-500 cursor-pointer"
@@ -5864,10 +5818,9 @@ function App() {
                               <label className="text-xs font-medium text-slate-500 flex justify-between">
                                 Sectors <span>{selectedNode.csgSectors ?? CSG_DEFAULT_SECTORS}</span>
                               </label>
-                              <input
-                                type="range" min="4" max="48" step="1"
+                              <RangeInput min="4" max="48" step="1"
                                 value={selectedNode.csgSectors ?? CSG_DEFAULT_SECTORS}
-                                onChange={(e) => updateNode(selectedNode.id, { csgSectors: parseInt(e.target.value) })}
+                                onChange={(v) => updateNode(selectedNode.id, { csgSectors: Math.round(v) })}
                                 className="w-full accent-blue-500 cursor-pointer"
                               />
                             </div>
@@ -5891,10 +5844,9 @@ function App() {
                           <label className="text-xs font-medium text-slate-500 flex justify-between">
                             Total mass <SliderValue value={selectedNode.csgMass ?? 1} onChange={(v) => updateNode(selectedNode.id, { csgMass: v })} decimals={3} unit="kg" min={0.01} max={20} />
                           </label>
-                          <input
-                            type="range" min="0.01" max="20" step="0.01"
+                          <RangeInput min="0.01" max="20" step="0.01"
                             value={selectedNode.csgMass ?? 1}
-                            onChange={(e) => updateNode(selectedNode.id, { csgMass: parseFloat(e.target.value) })}
+                            onChange={(v) => updateNode(selectedNode.id, { csgMass: v })}
                             className="w-full accent-blue-500 cursor-pointer"
                           />
                           {/* MuJoCo would derive mass from the hull's volume, which
@@ -6123,13 +6075,12 @@ function App() {
                                   <span>Target Quality:</span>
                                   <span className="font-mono text-amber-700 font-bold">{(simplifyRatio * 100).toFixed(0)}% vertices</span>
                                 </div>
-                                <input
-                                  type="range"
+                                <RangeInput
                                   min="0.05"
                                   max="0.95"
                                   step="0.05"
                                   value={simplifyRatio}
-                                  onChange={(e) => setSimplifyRatio(parseFloat(e.target.value))}
+                                  onChange={(v) => setSimplifyRatio(v)}
                                   className="w-full h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-amber-600 focus:outline-none"
                                 />
                                 <div className="flex justify-between text-[8px] text-slate-400">
@@ -6177,14 +6128,13 @@ function App() {
                       updatePulleyParams(selectedNode.id, { pulleyRadius: radVal });
                     }} decimals={2} unit="m" min={0.15} max={1.5} />
                   </label>
-                  <input 
-                    type="range" 
+                  <RangeInput 
                     min="0.15" 
                     max="1.5" 
                     step="0.01" 
                     value={selectedNode.pulleyRadius || 0.4} 
-                    onChange={(e) => {
-                      const radVal = parseFloat(e.target.value);
+                    onChange={(v) => {
+                      const radVal = v;
                       updatePulleyParams(selectedNode.id, { pulleyRadius: radVal });
                     }} 
                     className="w-full accent-blue-500 cursor-pointer" 
@@ -6332,14 +6282,13 @@ function App() {
                             </div>
                             <div className="flex items-center gap-2">
                               <span className="text-[9px] text-slate-400 font-mono w-8 text-right">{Number(v.min.toFixed(2))}</span>
-                              <input
-                                type="range"
+                              <RangeInput
                                 min={v.min}
                                 max={v.max}
                                 step={v.step}
                                 value={slidingValues[v.name] ?? v.value}
-                                onChange={(e) => {
-                                  const val = Number(parseFloat(e.target.value).toFixed(2));
+                                onChange={(next) => {
+                                  const val = Number(next.toFixed(2));
                                   setSlidingValues(prev => ({ ...prev, [v.name]: val }));
                                   debouncedUpdateCode();
                                 }}

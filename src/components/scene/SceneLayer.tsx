@@ -14,6 +14,7 @@ import { registerLiveCamera } from '../../utils/liveCamera';
 import { DEFAULT_EYE, DEFAULT_TOP_DOWN_EYE, DEFAULT_TARGET_Y } from '../../utils/frameScene';
 import { useStore } from '../../store/useStore';
 import { useOrbitEnable } from './useOrbitEnable';
+import { isGizmoBusy } from './gizmoBusy';
 import { CsgNegativeGhosts } from './CsgGhosts';
 import { FeatureEdges } from './FeatureEdges';
 import { EDGE_THRESHOLD_MESH, EDGE_THRESHOLD_PRIMITIVE, wedgeGeometry } from './edgeView';
@@ -466,7 +467,18 @@ export const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, se
         useStore.getState().toggleExtraSelected(nodeId!);
         return;
       }
-      setSelectedNodeId(nodeId!);
+      /*
+       * Clicking the body that is already selected swaps its handles between
+       * move and turn. One gizmo is on screen at a time — two sets on one body
+       * is a thicket — so the second click is how the other set is reached.
+       *
+       * Unless the gizmo is what was just dragged. Letting go of a handle
+       * dispatches a click at the body underneath it, which read as a second
+       * click and swapped the handles: every turn you made put the arrows back.
+       */
+      if (isGizmoBusy()) return;
+      if (useStore.getState().selectedNodeId === nodeId) useStore.getState().cycleGizmoMode();
+      else setSelectedNodeId(nodeId!);
       // And remember WHERE on the body it landed, so a cut can go exactly
       // there, square to the surface. The click already raycasts to select the
       // body; this is the hit it had to compute anyway, and it is what lets one
@@ -1186,7 +1198,9 @@ export const StaticBoxInstances = ({ geoms, model, data, mujoco, setSelectedNode
           useStore.getState().toggleExtraSelected(nid);
           return;
         }
-        setSelectedNodeId(nid);
+        if (isGizmoBusy()) return;
+        if (useStore.getState().selectedNodeId === nid) useStore.getState().cycleGizmoMode();
+        else setSelectedNodeId(nid);
         // Same as the ordinary geom click: remember where on the body it landed
         // so a cut can go there. Selecting takes a box out of the instanced mesh
         // and into its own DynamicGeom, so without this the first click on one
