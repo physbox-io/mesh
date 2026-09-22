@@ -17,6 +17,7 @@ import {
   cutGeometry, sourcePositiveBounds, reconcileCuts, pickCutSpot,
   hasBooleanOps, csgHashOf,
 } from '../utils/csg';
+import { collidersAreStale, type ColliderResult } from '../utils/convexDecomposition';
 import { insetNegatives } from '../utils/scaleNode';
 import type { PaintLayer } from '../utils/vertexPaint';
 import { compileToMJCF } from '../utils/mjcf';
@@ -636,6 +637,11 @@ function cutSpotFromCamera(node: SceneNode): CutSpot | null {
 function rebuildAfterGeomEdit(get: () => PhysicsState, newScene: SceneGraph, nodeId: string) {
   const node = findNode(newScene.nodes, nodeId);
   if (node?.csgEnabled && hasBooleanOps(node) && csgHashOf(node) !== node.csgHash) return;
+  // Same reasoning for a body about to be re-decomposed, but only once it has
+  // colliders to go stale: a body that has never been decomposed must still
+  // build, or a mesh edit would show nothing until the decomposer caught up —
+  // and a convex body, which never gains colliders, would never build at all.
+  if (node && !node.csgEnabled && node.collisionDecomposed && collidersAreStale(node)) return;
   get().recompile(newScene, nodeId, false);
 }
 
@@ -735,7 +741,35 @@ export interface PhysicsState {
   lastCompileError: string | null;
   isSettingsOpen: boolean;
   cameraView: 'perspective' | 'topDown';
-  printAnalysisEnabled: boolean;
+  /**
+   * Whether the DFM overlay is on. What it judges against is NOT stored: the
+   * lens follows machineTarget and the limits follow material/filament/stock,
+   * all of which are already chosen in the bottom bar. Storing the process too
+   * would let this control disagree with the one beside it.
+   */
+  dfmEnabled: boolean;
+  /**
+   * Whether the DFM panel's casting section is expanded.
+   *
+   * Casting is not a machine, so it cannot follow machineTarget like the other
+   * lenses — but it is a real Mesh workflow, so it sits in the panel one click
+   * away, collapsed. It lives in the store rather than in the panel's own state
+   * because the heat map has to follow it: reading about undercuts while the
+   * viewport is still coloured for overhangs is worse than showing neither.
+   */
+  dfmCastOpen: boolean;
+  /**
+   * Where the DFM panel sits and whether it is rolled up, like a note card.
+   *
+   * In the store rather than the component so it survives the panel being
+   * closed and reopened: having to drag it back out of the way every time is
+   * how a floating panel becomes a thing people stop opening.
+   *
+   * x/y are null until it is first dragged, which is what lets the default sit
+   * in the BOTTOM left — anchored to the bottom edge, rather than a top offset
+   * guessed from a viewport height nothing here knows.
+   */
+  dfmPanel: { x: number | null; y: number | null; minimized: boolean };
 
   // --- Viewport display ---------------------------------------------------
   /** Draw every body as the edges of its triangles rather than a shaded solid. */
@@ -874,8 +908,9 @@ export interface PhysicsState {
   loadGeneratedScene: (scene: SceneGraph, carve: Partial<ReliefCarveOptions> | null) => void;
   setMachineConfigOpen: (open: boolean) => void;
   setCameraView: (view: 'perspective' | 'topDown') => void;
-  setPrintAnalysisEnabled: (enabled: boolean) => void;
-  togglePrintAnalysis: () => void;
+  setDfmEnabled: (enabled: boolean) => void;
+  setDfmCastOpen: (open: boolean) => void;
+  setDfmPanel: (patch: Partial<{ x: number | null; y: number | null; minimized: boolean }>) => void;
   addHardwareComponentNode: (hardwareNode: SceneNode) => void;
   setCameraOverride: (override: { position: [number, number, number]; target: [number, number, number] } | null) => void;
   setEnvironment: (env: Partial<{gravityZ: number, windX: number, windY: number, density: number, floorFriction: number, floorBounce: number}>) => void;
@@ -1188,6 +1223,8 @@ export interface PhysicsState {
   insetNodeGeoms: (nodeId: string, factor: [number, number, number]) => void;
   applyNodeCsg: (nodeId: string, result: CsgResult, skipRecompile?: boolean) => void;
   setNodeCsgError: (nodeId: string, error: string | null, hash?: string) => void;
+  applyNodeColliders: (nodeId: string, result: ColliderResult, skipRecompile?: boolean) => void;
+  setNodeCollisionError: (nodeId: string, error: string | null, hash?: string) => void;
   recompile: (overrideScene?: SceneGraph, overrideSelectedId?: string | null, forceReset?: boolean, keepPreset?: boolean) => Promise<void>;
   loadPreset: (name: string) => void;
   resetSimulation: () => void;
@@ -1453,7 +1490,6 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   patternGeneratorId: null,
   isMachineConfigOpen: false,
   cameraView: 'perspective',
-  printAnalysisEnabled: false,
   cameraOverride: initialFraming.cameraOverride,
   cameraResetToken: 0,
   mcpActiveCount: 0,
@@ -1500,8 +1536,12 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   closePatternGenerator: () => set({ patternGeneratorId: null }),
   setMachineConfigOpen: (isMachineConfigOpen) => set({ isMachineConfigOpen }),
   setCameraView: (view) => set({ cameraView: view, cameraOverride: null }),
-  setPrintAnalysisEnabled: (enabled) => set({ printAnalysisEnabled: enabled }),
-  togglePrintAnalysis: () => set((state) => ({ printAnalysisEnabled: !state.printAnalysisEnabled })),
+  dfmEnabled: false,
+  setDfmEnabled: (dfmEnabled) => set({ dfmEnabled }),
+  dfmCastOpen: false,
+  setDfmCastOpen: (dfmCastOpen) => set({ dfmCastOpen }),
+  dfmPanel: { x: null, y: null, minimized: false },
+  setDfmPanel: (patch) => set((state) => ({ dfmPanel: { ...state.dfmPanel, ...patch } })),
 
   wireframe: false,
   toggleWireframe: () => set((state) => ({ wireframe: !state.wireframe })),
@@ -3042,6 +3082,34 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     set({ sceneGraph: newScene });
     // Bulk callers recompile once at the end — see the same note on updateNodeScad.
     if (!skipRecompile) get().recompile(newScene, undefined, false);
+  },
+
+  applyNodeColliders: (nodeId, result, skipRecompile) => {
+    const newScene = cloneSceneGraph(get().sceneGraph);
+    const node = findNode(newScene.nodes, nodeId);
+    if (!node) return;
+    // Filters 'collider', NOT every derived geom: a boolean body's visual mesh
+    // is derived too, and destroying it would leave the body invisible.
+    const kept = (node.geoms || []).filter((g: SceneGeom) => g.csgDerived !== 'collider');
+    node.geoms = [...kept, ...result.geoms];
+    node.collisionHash = result.hash;
+    if (result.geoms.length > 0) node.collisionDecomposed = true; else delete node.collisionDecomposed;
+    node.collisionSolidity = +result.verdict.solidity.toFixed(4);
+    if (result.warning) node.collisionWarning = result.warning; else delete node.collisionWarning;
+    delete node.collisionError;
+    set({ sceneGraph: newScene });
+    if (!skipRecompile) get().recompile(newScene, undefined, false);
+  },
+
+  setNodeCollisionError: (nodeId, error, hash) => {
+    const newScene = cloneSceneGraph(get().sceneGraph);
+    const node = findNode(newScene.nodes, nodeId);
+    if (!node) return;
+    if (error) node.collisionError = error; else delete node.collisionError;
+    // Record the hash that failed, so a mesh that cannot be decomposed is not
+    // retried on every store update — only a real edit re-arms it.
+    if (error && hash) node.collisionHash = hash;
+    set({ sceneGraph: newScene });
   },
 
   setNodeCsgError: (nodeId, error, hash) => {

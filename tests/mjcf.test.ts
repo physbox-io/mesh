@@ -146,3 +146,85 @@ describe('visual-only geoms weigh nothing', () => {
     expect(geomTag(compile([node]), 'inner_shell')).not.toContain('mass=');
   });
 });
+
+// ---------------------------------------------------------------------------
+// A body that is not a boolean at all, whose mesh has been decomposed into
+// convex pieces. This is the general concave-collision path: an imported STL, a
+// sculpt, a lattice part or a relief reaches MuJoCo the same way.
+// ---------------------------------------------------------------------------
+
+describe('a decomposed mesh body', () => {
+  const decomposedCup = (dynamic: boolean): SceneNode => ({
+    id: 'cup', name: 'cup', type: 'body', pos: [0, 0, 0.2], children: [],
+    joints: dynamic ? [{ name: 'cup_free', type: 'free' }] : [],
+    geoms: [
+      { name: 'cup_mesh', type: 'mesh', size: [1], mass: 0.4, rgba: [0.3, 0.6, 0.9, 1], dynamic, ...tet },
+      { name: 'cup_csg_col0', type: 'mesh', size: [1], role: 'collision', csgDerived: 'collider', mass: 0.25, pos: [0, 0, 0.01], ...tet },
+      { name: 'cup_csg_col1', type: 'mesh', size: [1], role: 'collision', csgDerived: 'collider', mass: 0.15, pos: [0.09, 0, 0.06], ...tet },
+    ] as SceneGeom[],
+  });
+
+  describe('when its mesh is dynamic', () => {
+    const xml = compile([decomposedCup(true)]);
+
+    it('drops the source mesh from the model entirely', () => {
+      // A dynamic mesh is drawn from the body transform, so MuJoCo never needs
+      // to see it — and parsing plus hulling a mesh nothing collides with is
+      // pure cost on every rebuild.
+      expect(geomTag(xml, 'cup_mesh')).toBe('');
+      expect(xml).not.toContain('<mesh name="cup_mesh"');
+    });
+
+    it('emits every collider, each keeping its own pos', () => {
+      // MuJoCo recentres a mesh asset on its centre of mass and places that
+      // frame at pos. Lose the pos and every piece stacks on the body origin.
+      expect(geomTag(xml, 'cup_csg_col0')).toContain('pos="0 0 0.01"');
+      expect(geomTag(xml, 'cup_csg_col1')).toContain('pos="0.09 0 0.06"');
+    });
+
+    it('gives each collider its own mesh asset', () => {
+      expect(xml).toContain('<mesh name="cup_csg_col0"');
+      expect(xml).toContain('<mesh name="cup_csg_col1"');
+    });
+
+    it('integrates a collider exactly, since a hull is closed by construction', () => {
+      expect(xml).toMatch(/<mesh name="cup_csg_col0" inertia="exact"/);
+    });
+
+    it('leaves the body weighing what the pieces weigh', () => {
+      expect(geomTag(xml, 'cup_csg_col0')).toContain('mass="0.25"');
+      expect(geomTag(xml, 'cup_csg_col1')).toContain('mass="0.15"');
+    });
+  });
+
+  describe('when its mesh is static', () => {
+    const xml = compile([decomposedCup(false)]);
+
+    it('keeps the source mesh emitted, or the body would jump to the origin', () => {
+      // A static mesh is drawn from data.geom_xpos via its geom id. Drop the
+      // geom and that lookup returns -1 and the renderer falls back to identity.
+      expect(geomTag(xml, 'cup_mesh')).not.toBe('');
+    });
+
+    it('but strips its contact and its mass, so only the pieces collide', () => {
+      expect(geomTag(xml, 'cup_mesh')).toContain('contype="0"');
+      expect(geomTag(xml, 'cup_mesh')).toContain('conaffinity="0"');
+      expect(geomTag(xml, 'cup_mesh')).toContain('mass="0"');
+    });
+
+    it('still emits the colliders', () => {
+      expect(geomTag(xml, 'cup_csg_col0')).toContain('pos="0 0 0.01"');
+    });
+  });
+
+  it('changes nothing for a body with no colliders derived', () => {
+    // The guarantee that every existing scene is untouched: same node, minus the
+    // derived pieces, must emit exactly what it always did.
+    const plain = decomposedCup(true);
+    plain.geoms = [plain.geoms[0]];
+    const xml = compile([plain]);
+    expect(geomTag(xml, 'cup_mesh')).toContain('mass="0.4"');
+    expect(geomTag(xml, 'cup_mesh')).not.toContain('contype="0"');
+    expect(xml).toContain('<mesh name="cup_mesh"');
+  });
+});

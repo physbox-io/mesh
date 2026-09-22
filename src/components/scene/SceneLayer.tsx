@@ -21,6 +21,7 @@ import { PulleyRopesRenderer } from './PulleyRopes';
 import SculptSurface from '../SculptSurface';
 import LatticeSurface from '../LatticeSurface';
 import { PrintAnalysisOverlay } from '../PrintAnalysisOverlay';
+import { DfmHeatmap } from './DfmHeatmap';
 import { useCoarsePointer } from '../../hooks/useCoarsePointer';
 import { useVertexPaint } from '../../hooks/useVertexPaint';
 import { buildPaintGeometry, isPaintable, paintArgsFromSize, paintResolution, type PaintLayer } from '../../utils/vertexPaint';
@@ -1446,6 +1447,7 @@ export const SceneVisuals = ({ model, data, mujoco, sceneGraph, selectedNodeId, 
         <MouseDragForceRenderer model={model} data={data} mujoco={mujoco} />
         <CurveControlHandles />
         <PrintAnalysisOverlay activeSpotId={activeWeakSpot?.id} onSelectSpot={setActiveWeakSpot} />
+        <DfmHeatmap />
       </group>
       {/* Static mesh geoms: vertices already in Three.js Y-up space, no rotation needed */}
       {staticMeshGeoms.map(g => (

@@ -153,15 +153,16 @@ export const compileToMJCF = (
   }
   const sceneCopy = JSON.parse(JSON.stringify(scene)) as SceneGraph;
 
-  // Resolve boolean-modifier bodies down to the geoms that actually simulate:
+  // Resolve every body down to the geoms that actually simulate: a boolean's
   // negatives are dropped, and depending on the collision mode the colliders are
-  // either the source primitives or the generated convex sectors. Runs before
-  // everything else so name-uniqueness and mesh-asset collection only ever see
-  // geoms that will really be emitted.
+  // the source primitives, the generated convex sectors, or — for any body whose
+  // mesh has been decomposed — its convex pieces. Runs before everything else so
+  // name-uniqueness and mesh-asset collection only ever see geoms that will
+  // really be emitted. A body with nothing derived is returned untouched.
   const resolveCsg = (nodes: SceneNode[]) => {
     if (!nodes) return;
     for (const node of nodes) {
-      if (node.csgEnabled) node.geoms = resolveCsgGeoms(node, 'physics');
+      node.geoms = resolveCsgGeoms(node, 'physics');
       resolveCsg(node.children || []);
     }
   };
@@ -270,6 +271,11 @@ export const compileToMJCF = (
    * everything else keeps the hull behaviour it has always had.
    */
   const meshInertia = (g: SceneGeom): string => {
+    // A derived collider is a convex hull by construction — closed, wound
+    // outward, positive volume — so the exact integral and the hull agree and
+    // the answer is known without computing it. Worth short-circuiting: this
+    // runs per mesh per rebuild, and a decomposed body has up to 24 of them.
+    if (g.csgDerived === 'collider') return ' inertia="exact"';
     const integrity = analyzeMesh(g.renderVertices || g.vertices!, g.faces!);
     return integrity && integrity.closed && integrity.consistentlyWound && integrity.volume > 0
       ? ' inertia="exact"'

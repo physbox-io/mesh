@@ -13,6 +13,9 @@ export type CsgOp = 'union' | 'difference' | 'intersection';
 //   'collision' — simulated, never drawn
 export type GeomRole = 'visual' | 'collision';
 
+// How a body's geometry reaches MuJoCo's contact solver. See SceneNode.collision.
+export type CollisionMode = 'auto' | 'hull' | 'decompose' | 'primitives';
+
 export interface SceneGeom {
   /**
    * An id of its own, carried by geoms that came from the copilot (see RawGeom
@@ -27,8 +30,10 @@ export interface SceneGeom {
   // union of the body's positive geoms; they are never emitted to MJCF.
   csg?: CsgOp;
   role?: GeomRole;
-  // Set on geoms *generated* by evaluating the body's CSG program, so a
-  // recompile can replace them wholesale and tell them from authored ones.
+  // Set on geoms *generated* by evaluating the body's CSG program — or, for a
+  // body that is not a boolean at all, by decomposing its mesh into convex
+  // colliders — so a recompile can replace them wholesale and tell them from
+  // authored ones.
   csgDerived?: 'visual' | 'collider';
   rgba?: number[];
   // Colour brushed onto part of this geom's surface (see utils/vertexPaint).
@@ -232,6 +237,11 @@ export interface SceneNode {
   //   'primitives' — the positive source primitives are the colliders; the
   //                  boolean mesh is visual only (holes don't collide)
   //   'hull'       — the boolean mesh itself collides, i.e. as its convex hull
+  //
+  // @deprecated Superseded by `collision`, which says the same things for ANY
+  // body with a mesh geom rather than only for a boolean one. Never written by
+  // new code; read it through collisionModeOf() so old saves keep their
+  // behaviour.
   csgCollision?: 'auto' | 'decompose' | 'primitives' | 'hull';
   csgSectors?: number;      // sector count for decomposition (default 16)
   csgFn?: number;           // OpenSCAD $fn for generated primitives (default 32)
@@ -246,6 +256,47 @@ export interface SceneNode {
   csgCentroid?: number[];   // centroid offset applied to the compiled body frame
   csgWarning?: string;      // e.g. "no hole axis found, colliding as primitives"
   csgError?: string;
+  /**
+   * How this body's geometry is presented to MuJoCo for contact. Applies to any
+   * body with a mesh geom, boolean or not — an imported STL, a sculpt, a lattice
+   * part and a relief all reach MuJoCo as one mesh, and MuJoCo takes the convex
+   * hull of every one of them. That is why a cup is solid to a ball.
+   *
+   *   'auto'       — decide from the mesh: convex enough, or too coarse or too
+   *                  dense to be worth it, and it collides as its hull; concave,
+   *                  and it is decomposed into convex pieces.
+   *   'hull'       — one convex hull. MuJoCo's own behaviour; cavities fill in.
+   *   'decompose'  — force decomposition even when 'auto' would decline.
+   *   'primitives' — CSG only: the authored positives collide, mesh is visual.
+   *
+   * Absent means 'auto'. See utils/convexDecomposition.ts.
+   */
+  collision?: CollisionMode;
+  /** Hull budget for a decomposition. Absent = derived from how concave it is. */
+  collisionHulls?: number;
+  /** Total mass split across the derived colliders, as csgMass is for a boolean. */
+  collisionMass?: number;
+  /**
+   * Fingerprints the inputs the colliders on this node were built from, so the
+   * auto-compiler knows when they are stale. The non-boolean counterpart of
+   * csgHash; a boolean body uses csgHash and leaves this unset.
+   */
+  collisionHash?: string;
+  /**
+   * Whether the last decomposition actually produced colliders. Read by the
+   * staleness check so it can tell "this body collides as a hull, correctly"
+   * from "this body's colliders went missing" — which is what a share link does
+   * on purpose, since the pieces are regenerable and the budget is 64 kB.
+   */
+  collisionDecomposed?: boolean;
+  /**
+   * True volume over convex-hull volume, as the last decomposition measured it.
+   * 1 is convex; a cup is nearer 0.3. Shown in the panel because it is the whole
+   * basis of the 'auto' decision, and a number a user can act on.
+   */
+  collisionSolidity?: number;
+  collisionWarning?: string;
+  collisionError?: string;
   /**
    * A free-form sculpted body: its mesh geom is not derived from parameters, so
    * nothing may regenerate it. The sculpt tools own it, and the primitive

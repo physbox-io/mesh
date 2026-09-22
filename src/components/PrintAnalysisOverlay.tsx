@@ -14,7 +14,9 @@ export const PrintAnalysisOverlay: React.FC<PrintAnalysisOverlayProps> = ({
   onSelectSpot,
 }) => {
   const sceneGraph = useStore(state => state.sceneGraph);
-  const printAnalysisEnabled = useStore(state => state.printAnalysisEnabled);
+  // Driven by the DFM lens now: the markers are the same structural findings,
+  // shown whenever a manufacturing check is open.
+  const printAnalysisEnabled = useStore(state => state.dfmEnabled);
   const setSelectedNodeId = useStore(state => state.setSelectedNodeId);
 
   const [hoveredSpot, setHoveredSpot] = useState<WeakSpot | null>(null);

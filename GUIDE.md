@@ -204,9 +204,46 @@ box(cx, 1.5, 0, 0.08, 1.5, 0.08) // tall post: large hy
 
 ---
 
+### Concave collision
+
+MuJoCo collides every mesh geom as its **convex hull**. For a bracket or a boulder that is the same
+answer; for anything that encloses air it is not. A cup, bowl, open-top box, funnel or housing
+collides as the solid billet it fits inside, so a ball dropped into it rests on an invisible lid at
+the rim — and nothing about the scene says why.
+
+`utils/convexDecomposition.ts` decides what to do about it, per body, from **solidity**: true volume
+over convex-hull volume. A box and a sphere are 1.0. A cup is nearer 0.3, and that gap is the size of
+the lie. Below ~0.92 the mesh is broken into convex pieces by V-HACD (`utils/vhacd.ts`, vendored —
+see `src/vendor/vhacd/PROVENANCE.md`), each emitted as its own mesh geom tagged
+`csgDerived: 'collider'`. Above it, the hull is kept, because it is exact and cheaper.
+
+This applies to **any** body with a mesh geom — imported STL, sculpt, lattice part, relief,
+hand-written SCAD, boolean. `node.collision` (`'auto' | 'hull' | 'decompose' | 'primitives'`)
+overrides it; `csgCollision` is the old boolean-only field, still read so existing scenes behave as
+they did, never written. Read both through `collisionModeOf()`.
+
+Three things about it are load-bearing:
+
+* **Derived colliders are ordinary geoms**, replaced wholesale by `applyNodeColliders` and
+  fingerprinted by `collisionHash` so the decomposition runs once per real edit rather than per
+  keystroke. Same pattern as `csgHash`, and deliberately a separate field.
+* **Demoting the source mesh is not symmetric.** A *dynamic* mesh is drawn from the body transform,
+  so it is dropped from the model entirely. A *static* mesh is drawn from `data.geom_xpos` via its
+  geom id, so dropping it makes the body jump to the origin — it stays, with contact and mass zeroed.
+* **A decomposed hollow body gets lighter**, because it is weighed by what is there rather than by
+  its hull. Often by a factor of three. Correct, the same defect `inertia="exact"` fixed for the oak
+  tree, and surfaced in the panel rather than applied silently.
+
+A boolean body with a hole that *pierces* it keeps the older, exact sector slicer (`utils/csg.ts`
+`decomposeAroundAxis`), whose error is known in closed form. Everything else goes to V-HACD.
+
+---
+
 ### Dynamic mesh geoms (`dynamic: true`)
 
-Full physics simulation and collision. MuJoCo takes the **convex hull** of the mesh, so a concave shape will not collide correctly as a single mesh.
+Full physics simulation and collision. MuJoCo takes the **convex hull** of the mesh — so a concave
+shape would not collide as the shape it looks like. See § Concave collision below: the app measures
+that and fixes it, and you do not have to do anything.
 
 Requires two extra fields:
 ```ts
@@ -252,6 +289,84 @@ It also has a visual symptom that does not look like a winding bug. `SceneLayer.
 **Reference** (from `meshCollisionPreset`):
 - Pyramid (base 0.6×0.6×0.6, height 0.5): MuJoCo origin at Z≈0 when resting on the floor (`xpos.z ≈ 0`).
 - Ramp (fixed): `body_pos = [0,0,0]`, base flush with the ground.
+
+---
+
+### DFM (design for manufacturing)
+
+`utils/dfm.ts` answers one question: what happens when someone tries to actually
+make this shape. The **DFM** toggle in the bottom-right viewport controls turns it
+on; `components/scene/DfmHeatmap.tsx` paints the surface and
+`components/DfmHUD.tsx` says it in words.
+
+**There is no process picker.** The lens follows `machineTarget` from the bottom
+bar via `dfmLensFor` — a printer gets the print lens, a router the CNC one — and
+a laser gets `null`, because it has no Z depth and overhang, undercut and reach
+mean nothing to it. Asking for the process again would let this control disagree
+with the one beside it.
+
+**Casting is the one exception**, because it is a real Mesh workflow and not a
+machine. It sits at the bottom of the panel in a section that is collapsed by
+default (`dfmCastOpen`), and expanding it switches the heat map to the cast lens
+too — reading about undercuts while the viewport is still shaded for overhangs
+is worse than showing neither.
+
+**The panel drags and rolls up** like a note card, on the same pointer-event
+pattern as `NoteCardOverlay` in `App.tsx`, with its position and minimised state
+in the store (`dfmPanel`) so it survives being closed and reopened. Rolled up, it
+stops sampling the scene altogether.
+
+| Lens | What it measures | What it flags |
+| --- | --- | --- |
+| 3D print | Face angle from vertical; wall thickness through all three axes | Overhang the loaded filament will not hold; walls under its minimum; ceilings it cannot bridge; shrinkage on a large flat |
+| 3-axis CNC | Column top down to the stock bottom, against real material | Material under an overhang the cutter cannot reach; pockets narrower than the bit; depth no standard bit reaches; ribs too thin for the stock |
+| Casting (engine only) | Face angle relative to a ±Z pull about a mid-height parting plane | Undercuts that lock the pattern in; walls with no draft on a part deep enough to drag |
+
+**The limits come from the bench, not from `dfm.ts`.** `dfmLimitsFor` reads the
+store's `material`, `filament` and `stock`: overhang angle, minimum wall,
+bridging and warping come off `FilamentSpec`, the minimum *cut* wall off
+`MaterialSpec`, and the reach from the largest entry in `STANDARD_BIT_DIAS` under
+the same stickout rule `reliefCarveExporter` sizes real tooling with. So
+switching PLA to TPU tightens the overhang limit and forbids bridging, and
+switching aluminium to MDF triples the thin-wall threshold. Adding a filament or
+a material means adding its DFM numbers alongside its cutting numbers.
+
+**It judges the selected body, not the scene.** A Mesh scene is usually a
+simulation — a pendulum, a gear train, a bridge — and asking "will this make?" of
+all of it at once gives true but worthless answers: the Golden Gate does not fit
+on a 150 mm board, and two bodies hanging in space are trivially under an
+overhang with respect to each other. `analyseDfm` takes a `nodeId` and the
+components pass `selectedNodeId`. Fabrication is per part, so the question is.
+
+**It is deliberately hard to set off.** The thresholds live in one `T` block at
+the top of `dfm.ts` with the reasoning attached. Support material is normal in
+FDM; inside corners having the bit's radius is normal in CNC. Neither is a
+written finding — both show in the heat map, which informs without interrupting.
+A panel that complains about every part is one people switch off, and then the
+real problem goes unseen too. `tests/dfm.test.ts` has a block asserting silence
+on ordinary parts; keep it passing when adding a check.
+
+Three things worth knowing before changing it:
+
+* **It is pure and store-free**, unlike `utils/printAnalysis.ts`, which reads live
+  MuJoCo state at module scope and can only run on the main thread. Everything in
+  `dfm.ts` takes a `SceneGraph` and returns numbers, which is why it is tested
+  directly and could move to a worker unchanged.
+* **The heat map and the analysis share one triangle soup.** `analyseDfm` returns
+  the `tris` it measured alongside one `heat` value per triangle, and the overlay
+  draws that same array. Re-collecting the scene on the render side would be a
+  second traversal and a second chance for the colours to land on the wrong
+  faces.
+* **The CNC check measures down to the stock, not to the column's own bottom.** A
+  floating arm measured against itself reads as perfectly reachable; measured
+  against the stock it correctly reports the void underneath as material the
+  machine cannot clear. Same figure `solidMachiningExporter` reports for a real
+  job.
+
+The structural checks (buckling, thin pins, gear clearance) still come from
+`utils/printAnalysis.ts` and ride along with whichever lens is open, since a
+column that buckles buckles however it was made. That is where the old **Weak
+Spots** button's findings went.
 
 ---
 

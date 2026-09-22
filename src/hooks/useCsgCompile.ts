@@ -20,6 +20,7 @@
 import { useEffect } from 'react';
 import { useStore } from '../store/useStore';
 import { csgHashOf, evaluateNodeCsg, hasBooleanOps } from '../utils/csg';
+import { collidersAreStale, collisionHashOf, decomposeNodeColliders } from '../utils/convexDecomposition';
 import type { SceneNode } from '../types/scene';
 
 const COMPILE_DEBOUNCE_MS = 100;
@@ -48,6 +49,21 @@ export function needsScadBuild(node: SceneNode): boolean {
   return !mesh || !mesh.faces || mesh.faces.length === 0;
 }
 
+/**
+ * Bodies whose convex colliders no longer match their mesh.
+ *
+ * Skips csgEnabled nodes deliberately: a boolean body's colliders are produced
+ * by evaluateNodeCsg, in the same pass that builds its mesh. Two producers
+ * writing colliders to one node would fight over them every compile.
+ */
+function collectStaleColliders(nodes: SceneNode[], out: SceneNode[] = []): SceneNode[] {
+  for (const node of nodes || []) {
+    if (!node.csgEnabled && collidersAreStale(node)) out.push(node);
+    collectStaleColliders(node.children || [], out);
+  }
+  return out;
+}
+
 function collectUnbuiltScad(nodes: SceneNode[], out: SceneNode[] = []): SceneNode[] {
   for (const node of nodes || []) {
     if (needsScadBuild(node) && !failedScad.has(node.scad!)) out.push(node);
@@ -68,7 +84,7 @@ export async function compileCsgNodes(skipFinalRecompile = false): Promise<numbe
   const scene = useStore.getState().sceneGraph;
   const stale = collectStale(scene.nodes);
   const unbuilt = collectUnbuiltScad(scene.nodes);
-  if (stale.length === 0 && unbuilt.length === 0) return 0;
+  if (stale.length === 0 && unbuilt.length === 0 && collectStaleColliders(scene.nodes).length === 0) return 0;
 
   if (unbuilt.length > 0) {
     const { compileSCAD } = await import('../utils/openscad');
@@ -98,10 +114,25 @@ export async function compileCsgNodes(skipFinalRecompile = false): Promise<numbe
     }
   }));
 
+  // Re-read the scene rather than reuse the copy above: a boolean body's mesh
+  // was just installed by applyNodeCsg, and a body whose mesh changed in this
+  // same pass has to be decomposed from what it is NOW, not from what it was.
+  const staleColliders = collectStaleColliders(useStore.getState().sceneGraph.nodes);
+  await Promise.all(staleColliders.map(async node => {
+    try {
+      const result = await decomposeNodeColliders(node);
+      if (result) useStore.getState().applyNodeColliders(node.id, result, true);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`Convex decomposition failed for ${node.id}:`, err);
+      useStore.getState().setNodeCollisionError(node.id, message, collisionHashOf(node));
+    }
+  }));
+
   if (!skipFinalRecompile) {
     await useStore.getState().recompile(useStore.getState().sceneGraph, undefined, false);
   }
-  return stale.length + unbuilt.length;
+  return stale.length + unbuilt.length + staleColliders.length;
 }
 
 export function useCsgAutoCompile() {
@@ -109,7 +140,8 @@ export function useCsgAutoCompile() {
 
   useEffect(() => {
     if (collectStale(sceneGraph.nodes).length === 0 &&
-        collectUnbuiltScad(sceneGraph.nodes).length === 0) return;
+        collectUnbuiltScad(sceneGraph.nodes).length === 0 &&
+        collectStaleColliders(sceneGraph.nodes).length === 0) return;
     const timer = setTimeout(() => { void compileCsgNodes(); }, COMPILE_DEBOUNCE_MS);
     return () => clearTimeout(timer);
   }, [sceneGraph]);

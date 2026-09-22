@@ -426,10 +426,10 @@ export interface ReliefCarveResult {
 /** Beyond this the heightmap costs more than the extra fidelity is worth. */
 const MAX_HEIGHTMAP_CELLS = 260_000;
 /** Stickout, in tool diameters, past which a bit is too whippy to hold a surface. */
-const MAX_REACH_DIAMETERS = 4;
+export const MAX_REACH_DIAMETERS = 4;
 
 /** Cutting length, in diameters, past which long-reach bits stop being a stock item. */
-const MAX_AVAILABLE_REACH_DIAMETERS = 8;
+export const MAX_AVAILABLE_REACH_DIAMETERS = 8;
 
 /**
  * Shank a bit that size is most likely ground on.
@@ -505,7 +505,7 @@ export function chiploadMm(feedMmMin: number, rpm: number, flutes: number): numb
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
 /** Diameters a workshop is likely to actually own, metric and imperial mixed. */
-const STANDARD_BIT_DIAS = [0.8, 1.0, 1.5, 2.0, 3.0, 3.175, 4.0, 6.0, 6.35];
+export const STANDARD_BIT_DIAS = [0.8, 1.0, 1.5, 2.0, 3.0, 3.175, 4.0, 6.0, 6.35];
 
 export interface ReliefToolingInput {
   /**

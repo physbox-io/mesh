@@ -33,7 +33,7 @@
 
 import * as THREE from 'three';
 import { ConvexHull } from 'three/examples/jsm/math/ConvexHull.js';
-import type { SceneGeom, SceneNode } from '../types/scene';
+import type { CollisionMode, SceneGeom, SceneNode } from '../types/scene';
 // NOTE: ./openscad is imported lazily inside evaluateNodeCsg, not here. It
 // reaches the Zustand store (for the compile counter), which reaches the physics
 // worker client and the MuJoCo wasm glue — so a static import would drag the
@@ -42,6 +42,24 @@ import type { SceneGeom, SceneNode } from '../types/scene';
 
 export const CSG_DEFAULT_SECTORS = 16;
 export const CSG_DEFAULT_FN = 32;
+
+/**
+ * How this body wants to collide.
+ *
+ * `node.collision` is the field; `node.csgCollision` is what boolean bodies used
+ * to say before the same question was asked of every mesh body. Reading both
+ * here, in one place, is what lets every existing preset, save and share link
+ * keep its exact behaviour without being migrated: nothing writes csgCollision
+ * any more, and nothing else reads it.
+ *
+ * 'decompose' is the old 'decompose' — for a boolean body that still means the
+ * angular sector slice about a hole axis, which is the better answer when there
+ * IS a hole axis. See decompositionVerdict in utils/convexDecomposition.ts.
+ */
+export function collisionModeOf(node: SceneNode): CollisionMode {
+  if (node.collision) return node.collision;
+  return node.csgCollision ?? 'auto';
+}
 
 // ---------------------------------------------------------------------------
 // Coordinate spaces
@@ -862,7 +880,7 @@ export function meshVolumeAndCentroid(verts: number[], faces: number[]): { volum
 // Convex hull
 // ---------------------------------------------------------------------------
 
-interface Hull {
+export interface Hull {
   verts: number[];  // flat, in the input space
   faces: number[];  // triangle indices, CCW outward
   volume: number;
@@ -1313,6 +1331,76 @@ export function usableColliderHulls<T extends { verts: number[]; faces: number[]
   return hulls.filter(h => !isDegenerateCollider(h));
 }
 
+/** What a collider geom inherits from the geom it was decomposed from. */
+export interface ColliderTemplate {
+  rgba?: number[];
+  condim?: number;
+  friction?: number[];
+  solref?: number[];
+  solimp?: number[];
+}
+
+/** The contact properties a collider inherits from the geom it came from. */
+export function colliderTemplateOf(g: SceneGeom | undefined, rgba: number[]): ColliderTemplate {
+  return {
+    rgba,
+    condim: g?.condim,
+    friction: g?.friction,
+    solref: g?.solref,
+    solimp: g?.solimp,
+  };
+}
+
+/**
+ * Turns convex hulls into collider geoms, for both producers: the sector slicer
+ * below and the general decomposition in utils/convexDecomposition.ts. The two
+ * must not drift, because every rule here is one MuJoCo punishes:
+ *
+ * - MuJoCo translates every mesh asset so its centre of mass sits at the asset
+ *   frame's origin, then places that frame at the geom's pos. So each hull is
+ *   pre-centred on its own centroid and hands that centroid back as pos —
+ *   otherwise MuJoCo's recentring silently stacks every hull on the body origin.
+ * - Mass is shared by hull volume, and the LAST hull takes the rounding
+ *   remainder, so the body weighs exactly what was asked for.
+ *
+ * Callers pass hulls that have already been through usableColliderHulls: a
+ * sliver makes qhull abort inside MuJoCo and takes the wasm heap with it.
+ */
+export function hullsToColliderGeoms(
+  hulls: Hull[],
+  baseName: string,
+  template: ColliderTemplate | undefined,
+  totalMass: number,
+): SceneGeom[] {
+  const totalVol = hulls.reduce((s, h) => s + h.volume, 0);
+  if (hulls.length === 0 || !(totalVol > 0)) return [];
+  const rgba = template?.rgba ? [...template.rgba] : [0.3, 0.6, 0.9, 1];
+  let massLeft = +totalMass.toFixed(8);
+  return hulls.map((h, i) => {
+    const localZup = translateFlat(h.verts, [-h.centroid[0], -h.centroid[1], -h.centroid[2]]);
+    const share = i === hulls.length - 1
+      ? massLeft
+      : +(totalMass * (h.volume / totalVol)).toFixed(8);
+    massLeft = +(massLeft - share).toFixed(8);
+    return {
+      name: `${baseName}_csg_col${i}`,
+      type: 'mesh' as const,
+      size: [1],
+      pos: [+h.centroid[0].toFixed(6), +h.centroid[1].toFixed(6), +h.centroid[2].toFixed(6)],
+      rgba: [...rgba],
+      mass: share,
+      condim: template?.condim ?? 3,
+      ...(template?.friction ? { friction: [...template.friction] } : {}),
+      ...(template?.solref ? { solref: [...template.solref] } : {}),
+      ...(template?.solimp ? { solimp: [...template.solimp] } : {}),
+      vertices: zupArrayToYup(localZup),
+      faces: h.faces,
+      role: 'collision' as const,
+      csgDerived: 'collider' as const,
+    };
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Evaluation
 // ---------------------------------------------------------------------------
@@ -1345,7 +1433,7 @@ function geomCsgKey(g: SceneGeom): unknown[] {
   return [g.type, shape, g.pos, g.quat, g.euler, g.fromto, g.csg ?? 'union', g.role ?? null, g.thread?.pitch ?? null];
 }
 
-function meshChecksum(g: SceneGeom): string {
+export function meshChecksum(g: SceneGeom): string {
   const v = g.renderVertices ?? g.vertices ?? [];
   let h = 0x811c9dc5;
   for (let i = 0; i < v.length; i++) {
@@ -1366,7 +1454,7 @@ export function csgHashOf(node: SceneNode): string {
   const key = JSON.stringify([
     src.filter(emitsSolid).map(geomCsgKey),
     node.csgFn ?? CSG_DEFAULT_FN,
-    node.csgCollision ?? 'auto',
+    collisionModeOf(node),
     node.csgSectors ?? CSG_DEFAULT_SECTORS,
     node.csgHoleAxis ?? 'auto',
     node.csgMass ?? null,
@@ -1444,7 +1532,7 @@ export async function evaluateNodeCsg(node: SceneNode): Promise<CsgResult | null
   // the undecomposed cases pay for the full point cloud.
   let hullVolume: number | null = null;
 
-  const requested = node.csgCollision ?? 'auto';
+  const requested = collisionModeOf(node);
   const totalMass = node.csgMass ?? template?.mass ?? 1;
 
   const centeredZup = translateFlat(zup, [-centroid[0], -centroid[1], 0]);
@@ -1504,38 +1592,9 @@ export async function evaluateNodeCsg(node: SceneNode): Promise<CsgResult | null
         if (dropped > 0) {
           warning = `Dropped ${dropped} degenerate collider${dropped === 1 ? '' : 's'} from the decomposition; the remaining ${usable.length} carry the full mass.`;
         }
-        // Mass is shared by hull volume over the SURVIVORS, and the last one
-        // takes the rounding remainder, so the body weighs exactly what it did
-        // before anything was dropped.
-        let massLeft = +totalMass.toFixed(8);
-        colliders = usable.map((h, i) => {
-          // MuJoCo translates every mesh asset so its centre of mass sits at the
-          // asset frame's origin, then places that frame at the geom's pos. So
-          // pre-centre each sector on its own centroid and hand that centroid
-          // back as pos — otherwise MuJoCo's recentring silently stacks every
-          // sector on top of the body origin.
-          const localZup = translateFlat(h.verts, [-h.centroid[0], -h.centroid[1], -h.centroid[2]]);
-          const share = i === usable.length - 1
-            ? massLeft
-            : +(totalMass * (h.volume / totalHullVol)).toFixed(8);
-          massLeft = +(massLeft - share).toFixed(8);
-          return {
-            name: `${baseName}_csg_col${i}`,
-            type: 'mesh' as const,
-            size: [1],
-            pos: [+h.centroid[0].toFixed(6), +h.centroid[1].toFixed(6), +h.centroid[2].toFixed(6)],
-            rgba: [...rgba],
-            mass: share,
-            condim: template?.condim ?? 3,
-            ...(template?.friction ? { friction: [...template.friction] } : {}),
-            ...(template?.solref ? { solref: [...template.solref] } : {}),
-            ...(template?.solimp ? { solimp: [...template.solimp] } : {}),
-            vertices: zupArrayToYup(localZup),
-            faces: h.faces,
-            role: 'collision' as const,
-            csgDerived: 'collider' as const,
-          };
-        });
+        // Mass is shared by hull volume over the SURVIVORS, so the body weighs
+        // exactly what it did before anything was dropped.
+        colliders = hullsToColliderGeoms(usable, baseName, colliderTemplateOf(template, rgba), totalMass);
       } else if (dropped > 0) {
         // Every sector (or all but a couple) was a sliver. Emitting nothing
         // would leave the body with no collision at all, so collide as the
@@ -1608,6 +1667,25 @@ function zupArrayToYup(zup: number[]): number[] {
  *
  * A non-CSG node is returned untouched, so every existing scene is unaffected.
  */
+/**
+ * What becomes of an authored geom once its body collides as convex pieces.
+ *
+ * A primitive is already convex and goes on colliding as itself — only the mesh
+ * is replaced. And whether that mesh can be dropped from the model entirely
+ * depends on how the renderer finds it, which is NOT symmetric:
+ *
+ *   - a DYNAMIC mesh is drawn from the body transform (data.xpos/xmat — see the
+ *     isDynamic branch in SceneLayer), so it needs no geom in the model at all.
+ *     Dropping it saves MuJoCo parsing the asset and hulling it for nothing.
+ *   - a STATIC mesh is drawn from data.geom_xpos via its geom id. Drop it and
+ *     that lookup returns -1, the transform falls back to identity, and the body
+ *     visibly jumps to the origin. So it stays, with contact zeroed and no mass.
+ */
+function demoteDecomposedGeom(g: SceneGeom): SceneGeom[] {
+  if (g.type !== 'mesh') return [g];
+  return g.dynamic ? [] : [{ ...g, role: 'visual' as const, mass: 0 }];
+}
+
 export function resolveCsgGeoms(node: SceneNode, target: 'physics' | 'render'): SceneGeom[] {
   const geoms = node.geoms || [];
   // A negative is a hole. It is never a solid — not drawn, not simulated — and
@@ -1619,7 +1697,16 @@ export function resolveCsgGeoms(node: SceneNode, target: 'physics' | 'render'): 
   // role is meaningful with or without CSG: a collision-only geom is never
   // drawn, and a visual-only one is still emitted (mjcf.ts zeroes its contact).
   if (!node.csgEnabled) {
-    return target === 'render' ? solid.filter(g => g.role !== 'collision') : solid;
+    const colliders = solid.filter(g => g.csgDerived === 'collider');
+    if (colliders.length === 0) {
+      return target === 'render' ? solid.filter(g => g.role !== 'collision') : solid;
+    }
+    // A decomposed body: the convex pieces collide, the mesh they came from is
+    // only drawn. Colliders already carry role 'collision', so the render filter
+    // below drops them without being told about decomposition at all.
+    if (target === 'render') return solid.filter(g => g.role !== 'collision');
+    const authored = solid.filter(g => g.csgDerived !== 'collider');
+    return [...authored.flatMap(demoteDecomposedGeom), ...colliders];
   }
 
   const derived = geoms.filter(g => !!g.csgDerived);

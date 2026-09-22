@@ -26,7 +26,8 @@ import { exportThreeMf, type ThreeMfMesh } from './utils/threeMfExporter';
 import { SimplifyModifier } from 'three/examples/jsm/modifiers/SimplifyModifier.js';
 import { loadCompiler, compileSCAD, isCompilerReady } from './utils/openscad';
 import { getStickyRotation } from './utils/geom';
-import { csgSourceGeoms, csgHashOf, CSG_DEFAULT_SECTORS } from './utils/csg';
+import { csgSourceGeoms, csgHashOf, collisionModeOf, CSG_DEFAULT_SECTORS } from './utils/csg';
+import { collidersAreStale, solidMeshGeoms } from './utils/convexDecomposition';
 import { useCsgAutoCompile } from './hooks/useCsgCompile';
 import { PRESETS } from './presets/presetScenes';
 import { makePresetNoteCard } from './utils/noteCards';
@@ -56,7 +57,7 @@ import { UserProfileButton, SIGN_IN_REQUESTED_EVENT, SIGNED_IN_EVENT } from './c
 import { AgentMachineBanner } from './components/AgentMachineBanner';
 import { JobRestoreModal } from './components/JobRestoreModal';
 import { MIN_MAX_TOKENS, MAX_MAX_TOKENS, readMaxTokens, writeMaxTokens } from './utils/llmSettings';
-import { PrintAnalysisHUD } from './components/PrintAnalysisHUD';
+import { DfmHUD } from './components/DfmHUD';
 import { createHeatSetBossNode, createHexNutTrapNode, createBearingPocketNode, createDShaftHubNode, createCounterboreHoleNode } from './utils/hardwareComponents';
 import { pushGlobalParameter } from './utils/llmSettings';
 import { saveUserPreset, deleteUserPreset, readUserPreset, listUserPresetNames } from './utils/userPresets';
@@ -1175,7 +1176,7 @@ function App() {
     isSettingsOpen, setSettingsOpen, 
     gravityZ, windX, windY, density, floorFriction, floorBounce, setEnvironment,
     cameraView, setCameraView,
-    printAnalysisEnabled, togglePrintAnalysis,
+    dfmEnabled, setDfmEnabled,
     wireframe, toggleWireframe, showEdges, toggleShowEdges, paintMode,
     gridCellSizeMm, setGridCellSizeMm,
     sceneGraph, selectedNodeId, setSelectedNodeId,
@@ -3579,16 +3580,20 @@ function App() {
             >
               Top Down
             </button>
+            {/* Checks the selected part against how it will actually be made.
+                No process picker: the machine and the material are already
+                chosen in the bottom bar, and asking again is how two controls
+                end up disagreeing. */}
             <button
-              onClick={() => togglePrintAnalysis()}
+              onClick={() => setDfmEnabled(!dfmEnabled)}
+              title="Checks the selected part against the machine and material on the bench: what a printer cannot support, what a router cannot reach."
               className={`px-2.5 py-1 rounded text-[10px] font-bold tracking-wide transition-all cursor-pointer flex items-center gap-1 ${
-                printAnalysisEnabled
+                dfmEnabled
                   ? 'bg-amber-500 text-white shadow-xs'
                   : 'text-slate-655 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
               }`}
             >
-              <Printer className="w-3 h-3" />
-              Weak Spots
+              DFM
             </button>
             <button
               onClick={() => toggleWireframe()}
@@ -3633,7 +3638,7 @@ function App() {
           <LatticePanel onOpenDocs={() => openDocs('lattice')} />
 
           {/* Floating Mechanical & 3D Print Failure HUD */}
-          <PrintAnalysisHUD activeSpotId={activeWeakSpot?.id} onSelectSpot={setActiveWeakSpot} />
+          <DfmHUD />
 
           {/* Floating Note Card Overlays */}
           {noteCards.map(card => (
@@ -5696,6 +5701,51 @@ function App() {
                         </div>
                       );
                     })()}
+                  </div>
+                );
+              })()}
+
+              {/* Collision — how any mesh body reaches MuJoCo's contact solver.
+                  A boolean body's equivalent lives in Boolean Modifiers below,
+                  next to the sector and hole-axis controls it shares. */}
+              {(() => {
+                if (selectedNode.csgEnabled) return null;
+                const meshes = solidMeshGeoms(selectedNode);
+                if (meshes.length === 0) return null;
+
+                const mode = collisionModeOf(selectedNode);
+                const colliders = (selectedNode.geoms || []).filter((g) => g.csgDerived === 'collider');
+                const stale = collidersAreStale(selectedNode);
+                const solidity = selectedNode.collisionSolidity ?? null;
+
+                return (
+                  <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-2">
+                    <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 mb-1 flex items-center gap-1.5">
+                      <Donut className="w-3.5 h-3.5 text-rose-500" /> Collision
+                      {stale && <span className="ml-auto text-[10px] font-semibold text-amber-600 animate-pulse">working…</span>}
+                    </h3>
+                    <select
+                      value={mode}
+                      onChange={(e) => updateNode(selectedNode.id, { collision: e.target.value as SceneNode['collision'] })}
+                      className="w-full px-2.5 py-1.5 border border-slate-200 rounded text-xs bg-white text-slate-700 outline-none focus:border-blue-500 cursor-pointer font-medium"
+                      title="MuJoCo collides a mesh as its convex hull, which fills in any hollow. Auto breaks a hollow shape into convex pieces so it behaves like the shape it looks like."
+                    >
+                      <option value="auto">Auto</option>
+                      <option value="decompose">Convex pieces</option>
+                      <option value="hull">Convex hull</option>
+                    </select>
+                    <p className="text-[10px] text-slate-400 leading-snug">
+                      {colliders.length > 0
+                        ? `Colliding as ${colliders.length} convex pieces, so anything hollow in this shape is really hollow — a ball dropped into it lands inside.`
+                        : 'Colliding as one convex hull, so any hollow in this shape is filled in for contact.'}
+                      {solidity !== null && ` Solidity ${(solidity * 100).toFixed(0)}% — how much of its own hull this shape actually fills.`}
+                    </p>
+                    {selectedNode.collisionWarning && (
+                      <p className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1 leading-snug">{selectedNode.collisionWarning}</p>
+                    )}
+                    {selectedNode.collisionError && (
+                      <p className="text-[10px] text-rose-700 bg-rose-50 border border-rose-200 rounded px-2 py-1 leading-snug">Collision failed: {selectedNode.collisionError}</p>
+                    )}
                   </div>
                 );
               })()}

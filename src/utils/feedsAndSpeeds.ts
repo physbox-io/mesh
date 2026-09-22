@@ -60,6 +60,20 @@ export interface MaterialSpec {
    * the surface speed alone would ask for, not a higher one.
    */
   maxRpm?: number;
+  /**
+   * Thinnest wall or rib that survives being cut in this, in mm.
+   *
+   * Not a cutting limit — the bit will happily machine thinner than this — but
+   * the point at which the remaining material stops surviving the process. Wood
+   * splits along the grain, MDF crumbles because it is glued dust, foam tears,
+   * and acrylic chatters and cracks. Metal is the exception: it holds a thin rib
+   * better than any of them.
+   *
+   * Shop rules of thumb rather than measured figures, and deliberately generous:
+   * they exist to catch a 0.3 mm web somebody did not notice, not to argue about
+   * whether 1.6 mm oak is fine.
+   */
+  minWallMm: number;
   /** One line, written for someone deciding what to clamp down. */
   note: string;
 }
@@ -67,6 +81,7 @@ export interface MaterialSpec {
 export const MATERIALS: MaterialSpec[] = [
   {
     id: 'softwood',
+    minWallMm: 2.0,
     label: 'Softwood (pine, cedar)',
     surfaceSpeedMMin: 320,
     chiploadPerDia: 0.03,
@@ -74,6 +89,7 @@ export const MATERIALS: MaterialSpec[] = [
   },
   {
     id: 'hardwood',
+    minWallMm: 1.5,
     label: 'Hardwood (oak, maple, walnut)',
     surfaceSpeedMMin: 250,
     chiploadPerDia: 0.025,
@@ -81,6 +97,7 @@ export const MATERIALS: MaterialSpec[] = [
   },
   {
     id: 'plywood',
+    minWallMm: 2.0,
     label: 'Plywood',
     surfaceSpeedMMin: 250,
     chiploadPerDia: 0.025,
@@ -88,6 +105,7 @@ export const MATERIALS: MaterialSpec[] = [
   },
   {
     id: 'mdf',
+    minWallMm: 2.5,
     label: 'MDF',
     surfaceSpeedMMin: 300,
     chiploadPerDia: 0.03,
@@ -95,6 +113,7 @@ export const MATERIALS: MaterialSpec[] = [
   },
   {
     id: 'acrylic',
+    minWallMm: 1.2,
     label: 'Acrylic / polycarbonate',
     surfaceSpeedMMin: 200,
     chiploadPerDia: 0.035,
@@ -103,6 +122,7 @@ export const MATERIALS: MaterialSpec[] = [
   },
   {
     id: 'aluminium',
+    minWallMm: 0.8,
     label: 'Aluminium',
     surfaceSpeedMMin: 150,
     chiploadPerDia: 0.012,
@@ -111,6 +131,7 @@ export const MATERIALS: MaterialSpec[] = [
   },
   {
     id: 'foam',
+    minWallMm: 6.0,
     label: 'Modelling foam / wax',
     surfaceSpeedMMin: 400,
     chiploadPerDia: 0.05,

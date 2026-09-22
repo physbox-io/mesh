@@ -14,7 +14,8 @@ import { getLiveCameraPose } from '../utils/liveCamera';
 import { makePresetNoteCard, updateOrCreateNotecard, type NoteCard } from '../utils/noteCards';
 import { generateCurveGeoms, DEFAULT_CURVE_POINTS, DEFAULT_CURVE_WIDTH, DEFAULT_CURVE_THICKNESS, DEFAULT_CURVE_SEGMENTS } from '../utils/geom';
 import { compileCsgNodes } from './useCsgCompile';
-import { csgFrameOffset } from '../utils/csg';
+import { csgFrameOffset, collisionModeOf } from '../utils/csg';
+import { solidMeshGeoms, SOLIDITY_DECOMPOSE_BELOW } from '../utils/convexDecomposition';
 import { PRESETS } from '../presets/presetScenes';
 import { parseSTL } from '../utils/stlParser';
 import {
@@ -332,6 +333,35 @@ function meshIntegrity(g: SceneGeom): Record<string, unknown> {
   };
 }
 
+/**
+ * How a body actually reaches the contact solver.
+ *
+ * Worth reporting on every body with a mesh, not just one someone asked about:
+ * "collides as its convex hull" is the difference between a cup and a solid
+ * billet, and it is not visible in a screenshot or a vertex count. An agent that
+ * drops a ball into a container and watches it rest on thin air has no other way
+ * to find out why.
+ */
+function collisionReport(node: SceneNode): Record<string, unknown> {
+  const colliders = (node.geoms || []).filter(g => g.csgDerived === 'collider');
+  if (colliders.length > 0) {
+    return {
+      collidesAs: `${colliders.length} convex pieces`,
+      ...(node.collisionSolidity !== undefined ? { solidity: node.collisionSolidity } : {}),
+      ...(node.collisionWarning ? { collisionWarning: node.collisionWarning } : {}),
+    };
+  }
+  if (solidMeshGeoms(node).length === 0) return {};
+  const filled = node.collisionSolidity !== undefined && node.collisionSolidity < SOLIDITY_DECOMPOSE_BELOW;
+  return {
+    collidesAs: 'convex hull',
+    ...(node.collisionSolidity !== undefined ? { solidity: node.collisionSolidity } : {}),
+    ...(filled ? { cavityFilled: 'This body is hollow but collides as its convex hull, so its cavity is solid to contact.' } : {}),
+    ...(node.collisionWarning ? { collisionWarning: node.collisionWarning } : {}),
+    ...(node.collisionError ? { collisionError: node.collisionError } : {}),
+  };
+}
+
 const summarizeGeom = (g: SceneGeom) => ({
   name: g.name,
   type: g.type,
@@ -357,7 +387,7 @@ const summarizeNode = (node: SceneNode): Record<string, unknown> => ({
   ...(node.scad ? { hasScad: true } : {}),
   ...(node.csgEnabled ? {
     csg: {
-      collision: node.csgCollision ?? 'auto',
+      collision: collisionModeOf(node),
       ...(node.csgVolume !== undefined ? { volumeM3: +node.csgVolume.toFixed(8) } : {}),
       /*
        * How far the drawn solid sits from the frame its shapes were written in.
@@ -378,6 +408,7 @@ const summarizeNode = (node: SceneNode): Record<string, unknown> => ({
       ...(node.csgError ? { error: node.csgError } : {}),
     },
   } : {}),
+  ...(node.csgEnabled ? {} : collisionReport(node)),
   joints: (node.joints || []).map((j) => ({ name: j.name, type: j.type })),
   geoms: (node.geoms || []).map(summarizeGeom),
   children: (node.children || []).map(summarizeNode),
@@ -529,6 +560,11 @@ const fillBodyDefaults = (b: RawNode): SceneNode => {
     ...((b.csgEnabled === true || (b.geoms || []).some((g: RawGeom) => g.csg === 'difference' || g.csg === 'intersection'))
       ? { csgEnabled: true } : {}),
     ...(b.csgCollision !== undefined ? { csgCollision: b.csgCollision } : {}),
+    // How ANY mesh body collides — see utils/convexDecomposition.ts. Supersedes
+    // csgCollision, which is still accepted above so older callers keep working.
+    ...(b.collision      !== undefined ? { collision: b.collision }           : {}),
+    ...(b.collisionHulls !== undefined ? { collisionHulls: b.collisionHulls } : {}),
+    ...(b.collisionMass  !== undefined ? { collisionMass: b.collisionMass }   : {}),
     ...(b.csgSectors   !== undefined ? { csgSectors: b.csgSectors }     : {}),
     ...(b.csgHoleAxis  !== undefined ? { csgHoleAxis: b.csgHoleAxis }   : {}),
     ...(b.csgMass      !== undefined ? { csgMass: b.csgMass }           : {}),
@@ -1817,11 +1853,31 @@ export function useMCPBridge() {
             }
           }
 
+          // A body whose cavity is filled in is the other reason a scene does
+          // not behave: nothing overlaps, and the ball still will not go in.
+          // This is the command someone runs when that happens, so say it here
+          // rather than make them go looking in the scene summary.
+          const filledCavities: Array<{ body: string; solidity: number }> = [];
+          const collectFilled = (ns: SceneNode[]) => {
+            for (const n of ns || []) {
+              const hasColliders = (n.geoms || []).some((g: SceneGeom) => g.csgDerived === 'collider');
+              if (!hasColliders && n.collisionSolidity !== undefined && n.collisionSolidity < SOLIDITY_DECOMPOSE_BELOW) {
+                filledCavities.push({ body: n.name || n.id, solidity: n.collisionSolidity });
+              }
+              collectFilled(n.children || []);
+            }
+          };
+          collectFilled(nodes);
+
           return {
             ok: true,
             hasInterpenetrations: overlappingPairs.length > 0,
             bodyCount: bodyBounds.length,
             overlappingPairs,
+            ...(filledCavities.length ? {
+              filledCavities,
+              note: 'These bodies are hollow but collide as their convex hull, so their cavities are solid to contact — anything dropped in rests on the rim. Set collision:\'decompose\' on them, or simplify the mesh if it was declined for being too dense.',
+            } : {}),
           };
         }
 
@@ -2136,7 +2192,10 @@ export function useMCPBridge() {
               curveClosed:   'boolean — wrap the spline into a seamless closed loop (oval/circuit tracks). Default false.',
               curveBank:     'number — bank (roll) angle in degrees about the travel direction; positive raises the left-of-travel edge. For a counter-clockwise loop use a NEGATIVE bank to raise the outside edge (see the oval_track preset, which uses -18).',
               csgEnabled:    'boolean — evaluate this body\'s geoms as a boolean program (see the geom `csg` field). Inferred automatically when any geom is marked difference/intersection, so you rarely need to set it. The primitives remain the source of truth; the mesh is regenerated whenever they change.',
-              csgCollision:  `'auto'|'decompose'|'primitives'|'hull' — how the boolean result collides. MuJoCo takes the CONVEX HULL of any mesh geom, so a subtracted hole does not exist for contact unless it is decomposed. 'decompose' (and 'auto', when the negative shape is elongated enough to define a hole axis) slices the result into convex angular sectors so the hole is real and things can pass through it. 'primitives' makes the mesh visual-only and collides the source primitives (exact, but holes are solid). 'hull' collides the whole shape as one filled hull. Default 'auto'.`,
+              collision:     `'auto'|'hull'|'decompose'|'primitives' — how THIS BODY collides, mesh or boolean. MuJoCo collides a mesh as its CONVEX HULL, which fills in any cavity, so a cup, bowl, open-top box, funnel or housing would be solid to contact. 'auto' (the default) measures SOLIDITY — true volume over hull volume — and breaks the shape into convex pieces when it is below ~0.92. A box or sphere is 1.0 and keeps its hull, which is exact and cheap; a cup is around 0.3 and gets decomposed, so a ball dropped in lands INSIDE it. 'hull' forces the old filled-in behaviour. 'decompose' forces the split even for a mesh auto declined (under ~24 triangles, or over ~150k). 'primitives' is boolean-only: the authored positives collide and the mesh is visual. Runs in the background and is cached against the mesh, so it costs nothing until the shape changes. NOTE a decomposed hollow body weighs its true volume rather than its hull's — often a third as much; set mass or collisionMass if you wanted the heavier figure.`,
+              collisionHulls: `number — how many convex pieces to break this body into. Default: 8 to 16, scaled by how concave it is. Contact cost between two decomposed bodies is quadratic in this, and accuracy is flat past about 16, so raise it only for a shape whose cavity is genuinely being missed.`,
+              collisionMass: `number (kg) — total mass shared across the convex pieces by volume, as csgMass is for a boolean body.`,
+              csgCollision:  `DEPRECATED, use 'collision'. Still read, so older scenes behave as they always did. 'auto'|'decompose'|'primitives'|'hull' — how the boolean result collides. MuJoCo takes the CONVEX HULL of any mesh geom, so a subtracted hole does not exist for contact unless it is decomposed. 'decompose' (and 'auto', when the negative shape is elongated enough to define a hole axis) slices the result into convex angular sectors so the hole is real and things can pass through it. 'primitives' makes the mesh visual-only and collides the source primitives (exact, but holes are solid). 'hull' collides the whole shape as one filled hull. Default 'auto'.`,
               csgSectors:    'number — sector count for decomposition (default 16). Higher = tighter fit to the hole, more geoms.',
               csgHoleAxis:   `'auto'|'x'|'y'|'z' — axis the hole runs along, for decomposition. 'auto' takes the longest axis of the largest negative geom.`,
               csgMass:       'number — total mass of the boolean solid, split across its colliders by volume. Without this, MuJoCo would derive mass from the hull volume, which for a ring is far more material than there actually is.',
@@ -2147,8 +2206,8 @@ export function useMCPBridge() {
               'PREFER over manual capsule-chain curves: for rope/cable/mustache/tentacle/vine shapes, set isComposite:true + compositeType:\'cable\' + compositeCount/compositeSize/compositeCurve on one body instead of hand-placing many capsule fromto segments.',
               'Compound shapes: add multiple geoms to one body with different pos/quat/euler offsets',
               'Asymmetric shapes: combine box + sphere + cylinder geoms on a single body',
-              'Rings/tubes/holes — PREFER boolean modifiers over hand-built approximations: put two geoms on one body and mark the inner one csg:\'difference\'. E.g. a washer: {type:\'cylinder\',size:[0.12,0.02]} plus {type:\'cylinder\',size:[0.06,0.1],csg:\'difference\'}. The negative MUST be longer than the solid along the hole axis so it pierces right through — a negative that fits entirely inside makes a hollow shell, not a hole, and cannot be decomposed for collision.',
-              'A boolean body collides as convex sectors by default (holes are real). Set csgCollision:\'primitives\' if you only care how it looks, or \'hull\' if you want the hole filled for contact.',
+              'Rings/tubes/holes — PREFER boolean modifiers over hand-built approximations: put two geoms on one body and mark the inner one csg:\'difference\'. E.g. a washer: {type:\'cylinder\',size:[0.12,0.02]} plus {type:\'cylinder\',size:[0.06,0.1],csg:\'difference\'}. A negative that PIERCES right through gives the sharpest collision (exact convex sectors about the hole axis); one that stops inside makes a cavity, which is still collided correctly — it is decomposed like any other concave shape — just approximately rather than exactly.',
+              'A boolean body collides with its holes real by default. Set collision:\'primitives\' if you only care how it looks, or \'hull\' if you want every hole and hollow filled in for contact.',
               'Torus-like shapes: ring of capsule geoms arranged with pos+euler offsets',
               'L/T/cross shapes: multiple box geoms with offset positions on one body',
               'fromto on capsule lets you specify start/end points directly in local space',
@@ -2162,8 +2221,10 @@ export function useMCPBridge() {
               'Mesh tetrahedron example: vertices=[0,0,0, 1,0,0, 0.5,1,0, 0.5,0.5,1], faces=[0,2,1, 0,1,3, 1,2,3, 0,3,2] — note the index order of each triangle is chosen so all four face outward, not just written in ascending order.',
               'CRITICAL — mesh face winding: every triangle must be counter-clockwise viewed from outside the solid. Geoms are drawn single-sided: a backwards triangle is silently culled, and a whole surface built backwards reads as a see-through body rather than as an error. Check by building a heightfield or box one quad at a time and confirming the sum over faces of dot(centroid, cross(v1-v0, v2-v0))/6 (the signed volume) comes out POSITIVE. Beware that signed volume only catches a uniformly inverted solid; a mesh with some faces each way can still sum positive, so derive each triangle\'s order from a rule rather than writing indices in ascending order.',
               'Static mesh (no dynamic field), on a body with no joint: never moves, but still collides normally (mesh collision doesn\'t depend on dynamic). Vertices in Three.js Y-up world space. Good for scenery and decorative structures.',
-              'Dynamic mesh (dynamic:true, or omitted — a jointed body\'s mesh geoms default to it now): renders synced to the body\'s live xpos/xmat every frame, which any body that actually moves needs. Collision always takes MuJoCo\'s convex hull of the vertices regardless of dynamic — concave shapes will not collide correctly either way. renderVertices is auto-derived from vertices if omitted.',
-              'CRITICAL — hollow/concave containers (cups, boxes-with-open-tops, tubes): a single dynamic mesh geom can NEVER act as a real container, no matter how the vertices are shaped. MuJoCo collides dynamic meshes via their convex hull, and the hull of a hollow shape\'s vertices is just the solid outer envelope (it fills in the concave interior) — anything dropped on it lands on what is effectively a solid block. Build the hollow shape as a compound body instead: a floor + walls as separate primitive box/cylinder geoms on the same body (each primitive is individually convex, so together they form a real cavity). If you also want a nicer-looking CSG/OpenSCAD shell, add it as an EXTRA geom on the same body with contype:0 and conaffinity:0 (dynamic:true so it still tracks the body kinematically, but doesn\'t participate in collision) so the primitives handle physics while the mesh handles looks.',
+              'Dynamic mesh (dynamic:true, or omitted — a jointed body\'s mesh geoms default to it now): renders synced to the body\'s live xpos/xmat every frame, which any body that actually moves needs. renderVertices is auto-derived from vertices if omitted.',
+              'HOLLOW AND CONCAVE SHAPES JUST WORK — do not build proxy walls. MuJoCo itself collides a mesh as its CONVEX HULL, so a cup, bowl, open-top box, funnel or housing would be solid to contact. The app now decomposes any concave mesh body into convex pieces automatically (`collision:\'auto\'`, the default), so a ball dropped into a cup lands INSIDE it. This applies to every mesh body — imported STL, sculpt, lattice, relief, hand-written SCAD, boolean. Build the shape as the shape; the old advice to hand-assemble a floor plus wall primitives is obsolete and produces worse results.',
+              'collision (on a body): \'auto\'|\'hull\'|\'decompose\'|\'primitives\'. \'auto\' measures SOLIDITY — the body\'s true volume over its convex hull\'s volume — and decomposes when it is below ~0.92, i.e. when the hull would be telling a lie. A box or a sphere is 1.0 and collides as its hull, which is exact and cheap. A cup is around 0.3. \'hull\' forces the old behaviour (cavities solid, cheapest contact); \'decompose\' forces the split even for a mesh \'auto\' declined as too coarse or too dense (over ~150k triangles); \'primitives\' is boolean-only. Decomposition runs in the background and is cached, so it costs nothing until the mesh actually changes. Supersedes csgCollision, which is still read so old scenes behave as they did.',
+              'GOTCHA — decomposing a hollow body makes it LIGHTER. Undecomposed, MuJoCo weighs a mesh with no explicit mass at 1000 kg/m³ times its HULL volume (the solid lump). Decomposed, it weighs the material that is actually there — often a third of that. That is the correct figure, but if you wanted the heavier one, set mass or collisionMass explicitly.',
               'GOTCHA — rgba alpha is NOT rendered as transparency in this app: the renderer\'s material always uses full opacity regardless of the 4th rgba value, so rgba:[r,g,b,0] does NOT make a geom invisible — it renders as solid opaque black (r=g=b=0), which commonly causes flickering/z-fighting where it overlaps another geom. To hide a primitive collision proxy, do NOT rely on alpha — either color it to match the geom it\'s layered under (e.g. same rgba as a decorative mesh sitting on top of it) or set contype:0/conaffinity:0 on whichever geom you don\'t want colliding and accept both are visible.',
               'Dynamic mesh renderVertices: just swap Y↔Z on each Y-up vertex: (x,y,z)→(x,-z,y). Do NOT subtract centroid. MuJoCo recenters internally.',
               'Dynamic mesh face winding: use outward-facing CCW winding. Wrong winding causes inside-out contacts and objects sinking through surfaces.',
