@@ -3718,15 +3718,48 @@ export const useStore = create<PhysicsState>()((set, get) => ({
       // Proactively recycle before the ceiling is ever reached, rather than
       // only reacting to a hard failure — see RECYCLE_EVERY_N_BUILDS comment.
       buildsSinceRecycle++;
+      let recycled = false;
       if (buildsSinceRecycle > RECYCLE_EVERY_N_BUILDS) {
         console.warn(`Proactively recycling the physics worker after ${RECYCLE_EVERY_N_BUILDS} builds to stay well clear of the WASM heap ceiling.`);
         recycleWorker();
         buildsSinceRecycle = 1;
+        recycled = true;
       }
+
+      /*
+       * A recycled worker has no previous model to carry the simulation across,
+       * so the rebuild lands on the pose the DOCUMENT describes — and a body
+       * that has been tipped by the simulation, or turned by a drag that only
+       * wrote qpos, has no record of its orientation there. Every fifth edit
+       * therefore stood such a body back up, which read as a body occasionally
+       * forgetting its rotation part way through moving or scaling it.
+       *
+       * So the live mirror is handed over as a seed, exactly as the periodic
+       * mid-play recycle already does. Only on a recycle: with the worker still
+       * running, its own copy is the fresher of the two — the main thread's
+       * mirror lags a frame behind — and preferring the seed would undo a drag
+       * that had just written qpos directly. A seed whose length disagrees with
+       * the new model is ignored by the worker, which is the honest answer when
+       * an edit really has changed the shape of the state.
+       *
+       * Never on a force reset. The worker prefers a seed to everything else,
+       * so seeding a preset load, an undo or a reset — any of which can land on
+       * the fifth build like anything else — would restore the very state those
+       * callers exist to throw away.
+       */
+      const live = recycled && !forceReset ? get().data : null;
+      const seedState = live?.qpos
+        ? {
+            qpos: Array.from(live.qpos as Float64Array),
+            qvel: Array.from(live.qvel as Float64Array),
+            ctrl: Array.from(live.ctrl as Float64Array),
+            time: live.time as number,
+          }
+        : undefined;
 
       const client = getPhysicsWorkerClient();
       client.setEnv(windX, windY);
-      const built = await client.build(xml, sceneGraph, !forceReset);
+      const built = await client.build(xml, sceneGraph, !forceReset, seedState);
       if (!built.ok) {
         throw new Error(built.error || 'Unknown physics worker build error');
       }

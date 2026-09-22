@@ -312,6 +312,26 @@ export interface SnapCandidate {
   label: string;
   /** Set for a circle centre, so the readout can quote the diameter too. */
   radius?: number;
+  /**
+   * Which body this belongs to.
+   *
+   * The label has always said so in words; this says it in a form a caller can
+   * act on. A drag that snaps to features needs it to leave the body being
+   * dragged out of its own candidate set — a part that mates with itself goes
+   * nowhere at all.
+   */
+  nodeId?: string;
+  /**
+   * The direction a feature runs, where it has one: the axis of a cylinder, or
+   * the normal of the circle a rim was fitted to.
+   *
+   * Measuring never needed it — a distance is between two points however they
+   * are oriented — so the fit's own normal was thrown away here. Assembling
+   * does need it: sharing an axis with a hole is the whole of concentric
+   * snapping, and a hole recovered from a boolean has no other record of which
+   * way it points.
+   */
+  normal?: Vec3;
 }
 
 const RANK: Record<SnapKind, number> = { centre: 0, vertex: 1, midpoint: 2, edge: 3, surface: 4 };

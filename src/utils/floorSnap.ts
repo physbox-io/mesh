@@ -18,9 +18,53 @@
 // so the snap feels the same at any zoom — the same reasoning as MeasureTool's
 // `SNAP_PIXELS`. Pure functions, no three.js and no store, so the shape of the
 // curve can be tested rather than eyeballed.
+//
+// `snapEase` is that curve on its own. The floor is only the first thing worth
+// snapping to; `mateSnap.ts` pulls a body onto another body's corners, holes
+// and faces, and it must feel like the SAME pull rather than a second one with
+// its own timing. Sharing the function is what guarantees that — a copy would
+// drift the first time either was tuned.
 
 /** How much of the band, at the middle, snaps exactly rather than easing. */
 const DEADZONE_FRACTION = 0.35;
+
+/** How hard a snap is pulling, at some distance from the thing it pulls toward. */
+export interface Ease {
+  /**
+   * The fraction of the raw distance that SURVIVES: 0 at the lock, 1 at the
+   * band edge. Written this way round — as a fraction of the distance rather
+   * than of the band — because that is what guarantees the two properties the
+   * curve has to have: it meets the lock at zero and untouched motion at the
+   * threshold with no step at either join, and it can only ever pull toward the
+   * target, never push past the pointer on the way out.
+   */
+  factor: number;
+  /** 1 at the lock, 0 at the band edge — what a hint's opacity is drawn from. */
+  strength: number;
+  /** True inside the deadzone, where the snap lands exactly. */
+  locked: boolean;
+}
+
+/**
+ * The pull curve, at a distance `dist` from the thing being snapped to.
+ *
+ * A `threshold` of zero or less turns the snap off, which is what a caller
+ * passes while a modifier is held.
+ */
+export function snapEase(dist: number, threshold: number): Ease {
+  if (!Number.isFinite(dist) || !(threshold > 0)) return { factor: 1, strength: 0, locked: false };
+  const away = Math.abs(dist);
+  if (away >= threshold) return { factor: 1, strength: 0, locked: false };
+
+  const inner = DEADZONE_FRACTION * threshold;
+  if (away <= inner) return { factor: 0, strength: 1, locked: true };
+
+  // `t` runs 0 at the deadzone edge to 1 at the band edge; smoothstep of it is
+  // the fraction of the distance left alone.
+  const t = (away - inner) / (threshold - inner);
+  const eased = t * t * (3 - 2 * t);
+  return { factor: eased, strength: 1 - eased, locked: false };
+}
 
 export interface FloorSnap {
   /** Where the drag should actually put the body. */
@@ -52,30 +96,12 @@ export function snapToFloor({ z, groundZ, threshold }: {
   }
 
   const d = z - groundZ;
-  const dist = Math.abs(d);
-  if (dist >= threshold) return { z, strength: 0, locked: false };
-
-  const inner = DEADZONE_FRACTION * threshold;
-  if (dist <= inner) return { z: groundZ, strength: 1, locked: true };
-
-  /*
-   * Between the deadzone and the edge of the band, map the raw distance onto a
-   * smaller one so the body leads the pointer toward the floor. `t` runs 0 at
-   * the deadzone edge to 1 at the band edge, and `smoothstep` of it is the
-   * fraction of the distance that survives: none at the deadzone, all of it at
-   * the band edge. Written as a fraction *of `dist`* rather than of the band,
-   * which is what guarantees the two things this has to have — it meets the
-   * lock at zero and untouched motion at `threshold` with no step at either
-   * join, and it can only ever pull toward the floor, never push past the
-   * pointer on the way out.
-   */
-  const t = (dist - inner) / (threshold - inner);
-  const eased = t * t * (3 - 2 * t);
-  const pulled = dist * eased;
+  const ease = snapEase(d, threshold);
+  if (ease.locked) return { z: groundZ, strength: 1, locked: true };
+  if (ease.strength === 0) return { z, strength: 0, locked: false };
   return {
-    z: groundZ + Math.sign(d) * pulled,
-    // Full at the lock, nothing at the edge — the hint fades as you leave.
-    strength: 1 - eased,
+    z: groundZ + d * ease.factor,
+    strength: ease.strength,
     locked: false,
   };
 }

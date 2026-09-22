@@ -41,17 +41,60 @@
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
-import { TransformControls } from '@react-three/drei';
+import { Line, TransformControls } from '@react-three/drei';
 import * as THREE from 'three';
 import { useStore, getPhysicsWorkerClient } from '../../store/useStore';
 import type { SceneNode } from '../../types/scene';
 import { positiveBounds } from '../../utils/csg';
 import { snapToFloor, snapThreshold } from '../../utils/floorSnap';
+import { getStickyRotation } from '../../utils/geom';
+import { solveMate, solveAlignAboutAxis, type MateFeature, type MateSolution, type AlignSolution } from '../../utils/mateSnap';
+import { bodyFeatures, neighbourFeatures, transformFeatures, documentAxes, graphAxes } from '../../utils/mateFeatures';
 import { bodyPoseOf } from './bodyPose';
 import { setGizmoBusy } from './gizmoBusy';
 
 /** Turning while Shift is held lands on these, the way a protractor does. */
 const ROTATION_SNAP_DEG = 15;
+
+/**
+ * What is drawn while a snap is holding the drag.
+ *
+ * One union rather than two overlays, because only ever one of them is live —
+ * a mate that fires takes the drag over, and the floor is left with whatever
+ * directions the mate did not constrain. Two hints on screen at once would be
+ * two claims about where the part is going.
+ */
+type Hint =
+  | { type: 'floor'; x: number; y: number; r: number; strength: number }
+  | {
+      type: 'mate';
+      kind: MateSolution['kind'];
+      from: [number, number, number];
+      to: [number, number, number];
+      strength: number;
+      axis?: { point: number[]; dir: number[]; radius: number };
+      plane?: { point: number[]; normal: number[]; extent: number };
+    }
+  | { type: 'align'; from: AlignSolution['from']; to: AlignSolution['to']; strength: number };
+
+/** The hint's colours, matching the measure tool's so a snap reads the same everywhere. */
+const HINT_COLOUR: Record<string, number> = {
+  point: 0x22d3ee,
+  axis: 0xf59e0b,
+  face: 0x38bdf8,
+  align: 0xa78bfa,
+};
+
+/**
+ * How far out to look for something to mate with, around the dragged body.
+ *
+ * Its own size plus a margin in snap-bands: a part only mates with what it is
+ * nearly touching, so the reach only has to cover the band plus however far the
+ * drag may wander before the gather is refreshed. Capped so that a crowded
+ * scene cannot turn one mouse-down into a circle fit on every mesh in it.
+ */
+const GATHER_MARGIN_BANDS = 8;
+const MAX_GATHER_M = 0.5;
 
 /**
  * How a drag is shown before it is committed.
@@ -99,6 +142,19 @@ interface Drag {
   radius: number;
   held: { object: THREE.Object3D; position: THREE.Vector3; quaternion: THREE.Quaternion }[];
   ghosts: THREE.Object3D[];
+  /**
+   * The dragged body's own matable features, as they were when the drag began.
+   *
+   * Carried forward each frame by `transformFeatures` rather than re-read,
+   * because mid-drag the scene is showing a preview: reading it back would
+   * measure the body against where the drag has already put it.
+   */
+  moving: MateFeature[];
+  /** Everything else's features. Nothing but this body moves while a drag runs. */
+  fixed: MateFeature[];
+  /** Where `fixed` was gathered, and how far around — so it can be refreshed. */
+  gatheredAt: THREE.Vector3;
+  gatherRadius: number;
 }
 
 const findNode = (nodes: SceneNode[], id: string): SceneNode | null => {
@@ -117,6 +173,36 @@ const originOf = (state: Drag, position: THREE.Vector3): THREE.Vector3 =>
 /** How far the handles have been turned from where they started. */
 const turnOf = (state: Drag, quaternion: THREE.Quaternion): THREE.Quaternion =>
   quaternion.clone().multiply(state.startQuat.clone().invert());
+
+/**
+ * Which ring is being dragged, as a direction in the frame the drag works in.
+ *
+ * `TransformControls` names the handle under the pointer — 'X', 'Y', 'Z', or
+ * 'XYZE' for the outer ring that turns about the view. The named ones are the
+ * proxy's OWN axes, because the controls are in `space="local"` and the proxy
+ * lives inside the Z-up group, so its local frame is MuJoCo's world. The free
+ * ring is left alone: a drag with no axis to confine the nudge to is exactly
+ * the case the confinement exists to avoid.
+ */
+const ringAxis = (
+  controls: { axis?: string | null } | null,
+  proxy: THREE.Object3D,
+): THREE.Vector3 | null => {
+  let unit: THREE.Vector3;
+  switch (controls?.axis) {
+    case 'X': unit = new THREE.Vector3(1, 0, 0); break;
+    case 'Y': unit = new THREE.Vector3(0, 1, 0); break;
+    case 'Z': unit = new THREE.Vector3(0, 0, 1); break;
+    default: return null;
+  }
+  /*
+   * Through the proxy's own orientation, because the handles are LOCAL: the
+   * blue ring on a body that has been turned on its side is not world Z. The
+   * proxy lives inside the Z-up group, whose local coordinates are MuJoCo's
+   * world, so this comes out in the frame the drag arithmetic uses.
+   */
+  return unit.applyQuaternion(proxy.quaternion).normalize();
+};
 
 /**
  * The body's orientation, as opposed to the handles'.
@@ -200,6 +286,104 @@ const GHOST_MATERIAL = new THREE.MeshBasicMaterial({
   color: 0x38bdf8, transparent: true, opacity: 0.35, depthWrite: false,
 });
 
+/**
+ * A small marker, sized in world units rather than pixels.
+ *
+ * The measure tool sizes its markers per frame from the camera; a drag hint is
+ * only ever seen at the distance the drag is happening at, so a fraction of the
+ * snap band it belongs to is steadier and costs nothing.
+ */
+const MARKER_R = 0.0016;
+
+/** The dashed line and end markers of a mate that is pulling the drag. */
+const MateHint = ({ hint }: { hint: Extract<Hint, { type: 'mate' }> }) => {
+  const colour = HINT_COLOUR[hint.kind] ?? HINT_COLOUR.point;
+  const opacity = 0.85 * hint.strength;
+  const from = new THREE.Vector3(...hint.from);
+  const to = new THREE.Vector3(...hint.to);
+  // Rings are built in the XY plane, so one turn puts them on the face or
+  // across the hole they belong to.
+  const facing = (dir: number[]) =>
+    new THREE.Quaternion().setFromUnitVectors(
+      new THREE.Vector3(0, 0, 1),
+      new THREE.Vector3(dir[0], dir[1], dir[2]).normalize(),
+    );
+  const axisEnds = hint.axis
+    ? (() => {
+        const dir = new THREE.Vector3(...hint.axis!.dir).normalize();
+        const at = new THREE.Vector3(...hint.axis!.point);
+        const reach = Math.max(hint.axis!.radius * 3, 0.01);
+        return [at.clone().addScaledVector(dir, -reach), at.clone().addScaledVector(dir, reach)];
+      })()
+    : null;
+
+  return (
+    <group raycast={() => null} renderOrder={999}>
+      {[from, to].map((at, i) => (
+        <mesh key={i} position={at} raycast={() => null} renderOrder={999}>
+          <sphereGeometry args={[MARKER_R, 12, 12]} />
+          <meshBasicMaterial color={colour} transparent opacity={opacity} depthTest={false} toneMapped={false} />
+        </mesh>
+      ))}
+      {axisEnds && (
+        <Line
+          points={axisEnds}
+          color={colour}
+          lineWidth={1.5}
+          dashed
+          dashSize={0.002}
+          gapSize={0.002}
+          transparent
+          opacity={opacity}
+          depthTest={false}
+          toneMapped={false}
+        />
+      )}
+      {hint.axis && (
+        <mesh position={hint.axis.point as [number, number, number]} quaternion={facing(hint.axis.dir)} raycast={() => null} renderOrder={999}>
+          <ringGeometry args={[hint.axis.radius * 0.92, hint.axis.radius, 48]} />
+          <meshBasicMaterial color={colour} transparent opacity={opacity} depthTest={false} side={THREE.DoubleSide} toneMapped={false} />
+        </mesh>
+      )}
+      {hint.plane && (
+        <mesh position={hint.plane.point as [number, number, number]} quaternion={facing(hint.plane.normal)} raycast={() => null} renderOrder={999}>
+          <ringGeometry args={[hint.plane.extent * 0.88, hint.plane.extent, 56]} />
+          <meshBasicMaterial color={colour} transparent opacity={opacity} depthTest={false} side={THREE.DoubleSide} toneMapped={false} />
+        </mesh>
+      )}
+    </group>
+  );
+};
+
+/** Two short normals, leaning toward each other as the turn comes into line. */
+const AlignHint = ({ hint }: { hint: Extract<Hint, { type: 'align' }> }) => {
+  const opacity = 0.85 * hint.strength;
+  const arm = (at: number[], dir: number[]) => {
+    const from = new THREE.Vector3(at[0], at[1], at[2]);
+    const along = new THREE.Vector3(dir[0], dir[1], dir[2]).normalize().multiplyScalar(0.012);
+    return [from, from.clone().add(along)];
+  };
+  return (
+    <group raycast={() => null} renderOrder={999}>
+      {[arm(hint.from.point, hint.from.dir), arm(hint.to.point, hint.to.dir)].map((points, i) => (
+        <Line
+          key={i}
+          points={points}
+          color={HINT_COLOUR.align}
+          lineWidth={1.5}
+          dashed
+          dashSize={0.0015}
+          gapSize={0.0015}
+          transparent
+          opacity={opacity}
+          depthTest={false}
+          toneMapped={false}
+        />
+      ))}
+    </group>
+  );
+};
+
 export const TransformGizmo = () => {
   const { scene, camera, gl } = useThree();
 
@@ -232,6 +416,11 @@ export const TransformGizmo = () => {
    * to read it.
    */
   const proxyRef = useRef<THREE.Object3D>(null);
+  /*
+   * The controls themselves, kept only so the rotate snap can ask which ring is
+   * under the pointer. Painting the handles already had the instance in hand.
+   */
+  const controlsRef = useRef<{ axis?: string | null } | null>(null);
   const [proxyMounted, setProxyMounted] = useState(false);
   const drag = useRef<Drag | null>(null);
   // Alt and Shift are read at the moment of a pointer move rather than
@@ -246,7 +435,7 @@ export const TransformGizmo = () => {
    * is running at all, and where to draw the floor hint and how strongly.
    */
   const [dragging, setDragging] = useState(false);
-  const [hint, setHint] = useState<{ x: number; y: number; r: number; strength: number } | null>(null);
+  const [hint, setHint] = useState<Hint | null>(null);
 
   const node = selectedNodeId ? findNode(sceneGraph?.nodes ?? [], selectedNodeId) : null;
 
@@ -515,6 +704,15 @@ export const TransformGizmo = () => {
     if (channel === 'ghost') {
       for (const group of groups) {
         const ghost = group.clone(true);
+        /*
+         * Stripped of the body's name, and it matters. Every geom is drawn
+         * inside a `<group name={nodeId}>`, and that name is how the measure
+         * and snap stack tells the model from the scenery — so a clone keeping
+         * it would offer the dragged body its own features back, one frame
+         * behind, and the part would try to mate with a copy of itself.
+         * `preview` addresses the ghosts by index, never by name.
+         */
+        ghost.name = '';
         ghost.traverse((object) => {
           const mesh = object as THREE.Mesh;
           if (mesh.isMesh) mesh.material = GHOST_MATERIAL;
@@ -528,6 +726,24 @@ export const TransformGizmo = () => {
 
     const pose = bodyPoseOf(target.id, target.pos);
     const origin = pose.pos;
+
+    /*
+     * Both feature sets are read ONCE, here. Nothing but the dragged body moves
+     * while a drag runs — the gizmo is suppressed whenever the sim is playing —
+     * so the stationary side cannot go stale in place, only out of reach, and
+     * `handleObjectChange` re-gathers when the drag wanders far enough.
+     */
+    const band = snapThreshold(
+      (camera as THREE.PerspectiveCamera).fov ?? 50,
+      camera.position.distanceTo(proxy.getWorldPosition(new THREE.Vector3())),
+      gl.domElement.clientHeight,
+    );
+    const here = proxy.position.clone();
+    const gatherRadius = Math.min(
+      MAX_GATHER_M,
+      (box ? box.getSize(new THREE.Vector3()).length() / 2 : 0.05) + band * GATHER_MARGIN_BANDS,
+    );
+
     drag.current = {
       nodeId: target.id,
       mode,
@@ -545,8 +761,49 @@ export const TransformGizmo = () => {
       radius: ringRadius(box),
       held,
       ghosts,
+      /*
+       * The drawn scene and the document both. A hole that a boolean has
+       * already evaluated leaves nothing on screen but a ring of vertices, and
+       * the cut that made it is still in the document with its exact radius and
+       * axis — which is what makes a peg go into a DRILLED hole rather than
+       * only into another cylinder.
+       */
+      moving: [
+        ...bodyFeatures(groups, target.id),
+        ...documentAxes(target, pose),
+      ],
+      fixed: [
+        ...neighbourFeatures(scene, target.id, [here.x, here.y, here.z], gatherRadius),
+        ...graphAxes(sceneGraph?.nodes ?? [], bodyPoseOf, {
+          exclude: target.id, near: [here.x, here.y, here.z], radius: gatherRadius,
+        }),
+      ],
+      gatheredAt: here,
+      gatherRadius,
     };
-  }, [camera, groundZFor, groupsFor, node, scene]);
+  }, [camera, gl, groundZFor, groupsFor, node, scene]);
+
+  /**
+   * Re-gather the stationary features when the drag has left where they were
+   * found.
+   *
+   * Rate-limited by DISTANCE rather than by time, which is the honest measure:
+   * a drag that is holding still cannot run out of neighbours however long it
+   * holds, and one thrown across the scene needs new ones immediately. Half the
+   * reach is the trigger, so the set is always good for at least the band it is
+   * being asked about.
+   */
+  const refreshNeighbours = useCallback((state: Drag, at: THREE.Vector3) => {
+    if (at.distanceTo(state.gatheredAt) < state.gatherRadius / 2) return;
+    const near: [number, number, number] = [at.x, at.y, at.z];
+    state.fixed = [
+      ...neighbourFeatures(scene, state.nodeId, near, state.gatherRadius),
+      ...graphAxes(useStore.getState().sceneGraph?.nodes ?? [], bodyPoseOf, {
+        exclude: state.nodeId, near, radius: state.gatherRadius,
+      }),
+    ];
+    state.gatheredAt = at.clone();
+  }, [scene]);
 
   const handleObjectChange = useCallback(() => {
     const state = drag.current;
@@ -556,6 +813,16 @@ export const TransformGizmo = () => {
     state.moved = true;
 
     let resting = false;
+    let mated: MateSolution | null = null;
+    let aligned: AlignSolution | null = null;
+    /*
+     * The order the body will be REBUILT in, which is not the same for every
+     * body — see the note in `commit`. Snapping in any other order lands on
+     * angles that are round here and are not round once the model comes back.
+     */
+    const squaringOrder = (): 'ZYX' | 'XYZ' => (
+      !!node?.geoms?.length && node.geoms.every((g) => g.type === 'mesh') ? 'ZYX' : 'XYZ'
+    );
     if (mode === 'translate') {
       // Alt is the usual "no snapping" modifier, and a drag that cannot be
       // talked out of the floor would be worse than no snap at all.
@@ -571,9 +838,59 @@ export const TransformGizmo = () => {
       // Written back so the handle shows the snapped height, not the raw one.
       proxy.position.z = snap.z;
       resting = snap.locked;
-      setHint(snap.strength > 0
-        ? { x: proxy.position.x, y: proxy.position.y, r: state.radius, strength: snap.strength }
-        : null);
+
+      /*
+       * The mate runs after the floor and is allowed to overrule it, because it
+       * is the more specific thing to have meant: the floor is where a part
+       * goes when nothing else is nearby, and a face to sit on is something
+       * else being nearby. What the mate does NOT constrain is then handed back
+       * to the floor — so a peg dropped into an upright hole comes out
+       * concentric AND seated, which is the whole gesture in one drag.
+       */
+      if (threshold > 0) {
+        refreshNeighbours(state, proxy.position);
+        const delta = proxy.position.clone().sub(new THREE.Vector3(...state.startPos));
+        const moving = transformFeatures(
+          state.moving,
+          turnOf(state, proxy.quaternion),
+          new THREE.Vector3(...state.startPos),
+          delta,
+        );
+        mated = solveMate({
+          moving,
+          fixed: state.fixed,
+          position: [proxy.position.x, proxy.position.y, proxy.position.z],
+          threshold,
+        });
+      }
+
+      if (mated) {
+        proxy.position.set(mated.position[0], mated.position[1], mated.position[2]);
+        // The floor still gets the directions the mate left alone. Applied only
+        // on Z, because that is the only one the ground plane has an opinion
+        // about — a mate that frees Z is a face standing on its edge.
+        const freeInZ = mated.free.some((d) => Math.abs(d[2]) > 0.9);
+        if (freeInZ) {
+          const settle = snapToFloor({ z: proxy.position.z, groundZ: state.groundZ, threshold });
+          proxy.position.z = settle.z;
+          resting = settle.locked;
+        } else {
+          resting = false;
+        }
+        setHint({
+          type: 'mate',
+          kind: mated.kind,
+          from: mated.from as [number, number, number],
+          to: mated.to as [number, number, number],
+          strength: mated.strength,
+          ...(mated.axis ? { axis: mated.axis } : {}),
+          ...(mated.plane ? { plane: mated.plane } : {}),
+        });
+      } else {
+        setHint(snap.strength > 0
+          ? { type: 'floor', x: proxy.position.x, y: proxy.position.y, r: state.radius, strength: snap.strength }
+          : null);
+      }
     } else if (keys.current.shift) {
       /*
        * Snapped on the BODY's resulting angles rather than the handles' delta —
@@ -582,7 +899,7 @@ export const TransformGizmo = () => {
        * snapped result is then written back as a delta, because a delta is what
        * the handles hold.
        */
-      const order = !!node?.geoms?.length && node.geoms.every((g) => g.type === 'mesh') ? 'ZYX' : 'XYZ';
+      const order = squaringOrder();
       const euler = new THREE.Euler().setFromQuaternion(bodyQuatOf(state, proxy.quaternion), order);
       const step = THREE.MathUtils.degToRad(ROTATION_SNAP_DEG);
       euler.set(
@@ -595,7 +912,75 @@ export const TransformGizmo = () => {
         .setFromEuler(euler)
         .multiply(state.startBodyQuat.clone().invert())
         .multiply(state.startQuat);
+    } else if (!keys.current.alt) {
+      /*
+       * The gentle half of the bargain the translate snap makes.
+       *
+       * A move never turns the part, so a face mate only fires between faces
+       * that already agree — which would be no use at all if getting them to
+       * agree meant typing angles. So the rings pull the last few degrees onto
+       * a neighbour's face, under the same curve as everything else.
+       *
+       * Confined to the ring under the pointer, and that is the point: a nudge
+       * about a free axis would tip the part off the handle being held, which
+       * is exactly how a gizmo comes to feel possessed. Shift is untouched
+       * above — asking for a protractor and getting a magnet instead would be
+       * two snaps fighting over one drag.
+       */
+      const ring = ringAxis(controlsRef.current, proxy);
+      if (ring) {
+        const turn = turnOf(state, proxy.quaternion);
+        const start = new THREE.Vector3(...state.startPos);
+        const moving = transformFeatures(state.moving, turn, start, new THREE.Vector3());
+        const faces = moving.filter((f): f is Extract<MateFeature, { kind: 'face' }> => f.kind === 'face');
+        const fixedFaces = state.fixed.filter(
+          (f): f is Extract<MateFeature, { kind: 'face' }> => f.kind === 'face',
+        );
+        aligned = solveAlignAboutAxis({
+          moving: faces,
+          fixed: fixedFaces,
+          axis: [ring.x, ring.y, ring.z],
+          quaternion: [proxy.quaternion.x, proxy.quaternion.y, proxy.quaternion.z, proxy.quaternion.w],
+        });
+        if (aligned) {
+          proxy.quaternion.set(
+            aligned.quaternion[0], aligned.quaternion[1], aligned.quaternion[2], aligned.quaternion[3],
+          );
+          setHint({ type: 'align', from: aligned.from, to: aligned.to, strength: aligned.strength });
+        }
+      }
+
+      /*
+       * And failing a neighbour to line up with, square to the world.
+       *
+       * Almost every part in a scene is meant to sit along an axis, and a turn
+       * dragged by hand lands on 89.4°. The sidebar's angles have always been
+       * held to the quarters by `getStickyRotation` — a magnetic band rather
+       * than a step — so the handles use the very same function, and a body
+       * turned by either route settles on the same numbers.
+       *
+       * Only when no face alignment fired: a part being lined up with the thing
+       * beside it should not also be tugged toward the world's axes, or the two
+       * would argue over the last degree.
+       */
+      if (!aligned) {
+        const order = squaringOrder();
+        const euler = new THREE.Euler().setFromQuaternion(bodyQuatOf(state, proxy.quaternion), order);
+        const sticky = ([euler.x, euler.y, euler.z] as const).map(
+          (rad) => THREE.MathUtils.degToRad(getStickyRotation(THREE.MathUtils.radToDeg(rad))),
+        );
+        euler.set(sticky[0], sticky[1], sticky[2], order);
+        proxy.quaternion
+          .setFromEuler(euler)
+          .multiply(state.startBodyQuat.clone().invert())
+          .multiply(state.startQuat);
+      }
     }
+
+    // A turn that is not being pulled anywhere leaves nothing to draw. Cleared
+    // here rather than in each branch above, so holding Shift or Alt mid-turn
+    // cannot leave the last frame's hint on screen.
+    if (mode !== 'translate' && !aligned) setHint(null);
 
     preview(state, proxy.position, proxy.quaternion);
 
@@ -604,6 +989,9 @@ export const TransformGizmo = () => {
       const mm = (v: number) => `${(v * 1000).toFixed(1)} mm`;
       setGestureStatus(
         `Move · ${mm(d.x)}, ${mm(d.y)}, ${mm(d.z)}` +
+        // Only once it is HELD. A line that appeared and vanished as the part
+        // drifted through the band would be read as flicker, not as news.
+        (mated?.locked ? ` · ${mated.label}` : '') +
         (resting ? ' · resting on floor' : '') +
         (state.channel === 'ghost' ? ' · snaps into place on release' : ''),
       );
@@ -612,10 +1000,11 @@ export const TransformGizmo = () => {
       const deg = (v: number) => `${Math.round(THREE.MathUtils.radToDeg(v))}°`;
       setGestureStatus(
         `Turn · ${deg(e.x)}, ${deg(e.y)}, ${deg(e.z)}` +
+        (aligned?.locked ? ` · ${aligned.label}` : '') +
         (state.channel === 'ghost' ? ' · snaps into place on release' : ''),
       );
     }
-  }, [camera, gl, node, preview, setGestureStatus]);
+  }, [camera, gl, node, preview, refreshNeighbours, setGestureStatus]);
 
   const commit = useCallback(() => {
     const state = drag.current;
@@ -781,6 +1170,7 @@ export const TransformGizmo = () => {
    * cannot see that it only touches refs from inside an event.
    */
   const tint = useCallback((controls: THREE.Object3D | null) => {
+    controlsRef.current = controls as unknown as { axis?: string | null } | null;
     if (controls) paintHandles(controls);
   }, []);
   const begin = useCallback(() => handleMouseDown(mode), [handleMouseDown, mode]);
@@ -893,11 +1283,11 @@ export const TransformGizmo = () => {
           letting go. `raycast` is stubbed out: it is a hint, not a target, and a
           hint that swallows the click that ends the drag is worse than none.
         */}
-        {hint && (
+        {hint?.type === 'floor' && (
           <mesh position={[hint.x, hint.y, 0.0005]} raycast={() => null}>
             <ringGeometry args={[hint.r * 0.88, hint.r, 56]} />
             <meshBasicMaterial
-              color={0x38bdf8}
+              color={HINT_COLOUR.face}
               transparent
               opacity={0.85 * hint.strength}
               depthWrite={false}
@@ -905,6 +1295,15 @@ export const TransformGizmo = () => {
             />
           </mesh>
         )}
+        {/*
+          A mate in progress: the feature on the part, the place it is going,
+          and the line between them. Drawn over everything, because the
+          interesting end of a mate is usually inside the material — the middle
+          of a hole, or the face two parts are about to close on. The floor ring
+          above is the same grammar, and deliberately: the floor IS one of these.
+        */}
+        {hint?.type === 'mate' && <MateHint hint={hint} />}
+        {hint?.type === 'align' && <AlignHint hint={hint} />}
       </group>
 
       {/*

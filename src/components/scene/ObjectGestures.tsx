@@ -27,6 +27,8 @@ import type { SceneNode } from '../../types/scene';
 import { scaleNodeTree } from '../../utils/scaleNode';
 import { pickCutSpot, type CutSpot } from '../../utils/csg';
 import { bodyPoseOf } from './bodyPose';
+import { solveScaleToFit, type MateFeature } from '../../utils/mateSnap';
+import { bodyFeatures, neighbourFeatures, documentAxes, graphAxes } from '../../utils/mateFeatures';
 import { snapToFloor, snapThreshold } from '../../utils/floorSnap';
 import { useOrbitEnable } from './useOrbitEnable';
 
@@ -68,6 +70,16 @@ interface Gesture {
   /** Move-cut only: which of the body's geoms is the cut, and where it is going. */
   geomIndex?: number;
   spot?: CutSpot | null;
+  /**
+   * Scale only: the body's holes and bosses at the size it started, and the
+   * ones around it, so the gesture can be pulled toward a size that fits.
+   *
+   * Read once when the gesture begins. The moving side is deliberately taken at
+   * the START size — the factor is relative to that, so measuring it again mid
+   * gesture would be measuring against a body that has already been scaled.
+   */
+  ownAxes?: MateFeature[];
+  nearAxes?: MateFeature[];
 }
 
 /** The node with this id, anywhere in the tree. */
@@ -83,6 +95,18 @@ const findNode = (nodes: SceneNode[], id: string): SceneNode | null => {
 const GHOST_MATERIAL = new THREE.MeshBasicMaterial({
   color: 0xef4444, transparent: true, opacity: 0.35, depthWrite: false,
 });
+
+/**
+ * How far around a body to look for a hole worth matching, when scaling it.
+ *
+ * Generous, and deliberately more so than the mate snap's reach: a part is
+ * usually sized BEFORE it is brought over to the thing it has to fit, so the
+ * bore you mean is often still across the bench rather than under the part.
+ */
+const SCALE_REACH_M = 0.35;
+
+/** How much wider the fit's band is than an ordinary snap's. See its use. */
+const SCALE_BAND_WEIGHT = 3;
 
 export const ObjectGestureController = () => {
   const { scene, camera, gl } = useThree();
@@ -321,6 +345,37 @@ export const ObjectGestureController = () => {
       ? Math.max(0.01, 1 + travel)
       : Math.min(0.98, Math.max(0.02, 1 - travel));
 
+    /*
+     * Pulled toward a size that actually fits something nearby.
+     *
+     * The concentric mate lines a peg up with a bore, but a peg of the wrong
+     * diameter still will not go in, and closing that last fraction of a
+     * millimetre meant reading one diameter off the model and typing the other.
+     * So a scale near a hole is drawn to the factor that matches it, under the
+     * same curve as every other snap — and Alt turns it off, like all of them.
+     *
+     * Skipped while an axis is held: X, Y or Z alone makes an ellipse of a
+     * circle, and there is no single diameter left for it to be matching.
+     */
+    let fitted: ReturnType<typeof solveScaleToFit> = null;
+    if (state.kind === 'scale' && !state.axis && !pointer.current.alt && state.ownAxes && state.nearAxes) {
+      fitted = solveScaleToFit({
+        moving: state.ownAxes,
+        fixed: state.nearAxes,
+        factor: state.factor,
+        // Wider than a move's band, deliberately. Sizing is the coarser
+        // gesture: a pixel of pointer travel is about a third of a millimetre
+        // of radius here, so a band as tight as the floor snap's would be a
+        // handful of pixels wide and would be crossed without being felt.
+        threshold: SCALE_BAND_WEIGHT * snapThreshold(
+          (camera as THREE.PerspectiveCamera).fov ?? 50,
+          camera.position.distanceTo(state.pivot),
+          gl.domElement.clientHeight,
+        ),
+      });
+      if (fitted) state.factor = fitted.factor;
+    }
+
     const scale = factors(state);
     // A body drawn as ONE group is scaled about its own origin and never moved:
     // its position is rewritten from the physics state every frame, and writing
@@ -337,8 +392,13 @@ export const ObjectGestureController = () => {
       const start = state.held[i].position;
       place(state.ghosts[i], start, anchored ? state.pivot : start, scale);
     }
+    const fitSaid = fitted?.locked
+      // The diameter, because that is the number on the drawing and on the
+      // drill bit — nobody asks for a six-millimetre-radius hole.
+      ? ` · ⌀${(fitted.radius * 2000).toFixed(2)} mm · ${fitted.label}`
+      : '';
     setGestureStatus(state.kind === 'scale'
-      ? `Scale ${state.factor.toFixed(2)}×${state.axis ? ` · ${state.axis.toUpperCase()}` : ''}`
+      ? `Scale ${state.factor.toFixed(2)}×${state.axis ? ` · ${state.axis.toUpperCase()}` : ''}${fitSaid}`
       : `Inset ${state.factor.toFixed(2)}× · bore ${(state.axis ?? 'z').toUpperCase()}`);
   }, [camera, gl, planeHit, rayIn, setGestureStatus]);
 
@@ -520,9 +580,37 @@ export const ObjectGestureController = () => {
       }
     }
 
+    /*
+     * Only a scale is sized to fit, and only it pays for the hunt. An inset is
+     * cutting a hole rather than matching one, and a move has its own snapping.
+     */
+    const groupsHere = groupsFor(nodeId);
+    const here: [number, number, number] = [pivot.x, pivot.y, pivot.z];
+    const graph = useStore.getState().sceneGraph?.nodes ?? [];
+    const self = findNode(graph, nodeId);
+    /*
+     * From the drawn scene AND from the document. The drawn scene has the
+     * cylinder a plain body is made of; only the document still has the cut
+     * that made a hole, and a hole is the thing most worth sizing to.
+     */
+    const ownAxes = kind === 'scale'
+      ? [
+          ...bodyFeatures(groupsHere, nodeId),
+          ...(self ? documentAxes(self, bodyPoseOf(nodeId, self.pos)) : []),
+        ]
+      : undefined;
+    const nearAxes = kind === 'scale'
+      ? [
+          ...neighbourFeatures(scene, nodeId, here, SCALE_REACH_M),
+          ...graphAxes(graph, bodyPoseOf, { exclude: nodeId, near: here, radius: SCALE_REACH_M }),
+        ]
+      : undefined;
+
     gesture.current = {
       kind, nodeId, centre, pivot, held, ghosts, axis: null, factor: 1,
       radius: Math.hypot(pointer.current.x - centre.x, pointer.current.y - centre.y),
+      ownAxes,
+      nearAxes,
     };
     setOrbitEnabled(false);
     draw();

@@ -53,6 +53,32 @@ function bodyOf(object: THREE.Object3D): string | null {
   return null;
 }
 
+/**
+ * The twelve edge midpoints of a box, as offsets in its own half-extents.
+ *
+ * An edge is the pair of axes whose sign is fixed; the third runs along it and
+ * is zero at the middle. Written out as the axis left free rather than as
+ * twelve literals, so it cannot be one corner short.
+ *
+ * Only for boxes, and deliberately so. A midpoint recovered from triangle soup
+ * is the middle of whatever edge the tessellator happened to draw, which moves
+ * when the mesh is re-tessellated and means nothing on a curved surface — it
+ * would be noise competing with the corners that ARE real.
+ */
+function boxEdgeMidpoints(): [number, number, number][] {
+  const out: [number, number, number][] = [];
+  for (let along = 0; along < 3; along++) {
+    for (const a of [-1, 1]) for (const b of [-1, 1]) {
+      const offset: [number, number, number] = [0, 0, 0];
+      const others = [0, 1, 2].filter((i) => i !== along);
+      offset[others[0]] = a;
+      offset[others[1]] = b;
+      out.push(offset);
+    }
+  }
+  return out;
+}
+
 /** The centres a primitive has by construction, in world space. */
 function analyticCentres(mesh: THREE.Mesh, nodeId: string | null): SnapCandidate[] {
   const parameters = (mesh.geometry as unknown as { parameters?: Record<string, number> }).parameters;
@@ -63,25 +89,43 @@ function analyticCentres(mesh: THREE.Mesh, nodeId: string | null): SnapCandidate
     return [point.x, point.y, point.z];
   };
   const named = (label: string) => (nodeId ? `${label} of ${nodeId}` : label);
+  const id = nodeId ?? undefined;
 
   if (type === 'SphereGeometry') {
-    out.push({ point: world(0, 0, 0), kind: 'centre', label: named('sphere centre'), radius: parameters?.radius });
+    out.push({ point: world(0, 0, 0), kind: 'centre', label: named('sphere centre'), radius: parameters?.radius, nodeId: id });
   } else if (type === 'CylinderGeometry' || type === 'CapsuleGeometry') {
     const half = ((parameters?.height ?? parameters?.length ?? 0) as number) / 2;
     const radius = (parameters?.radiusTop ?? parameters?.radius) as number | undefined;
-    out.push({ point: world(0, 0, 0), kind: 'centre', label: named('axis centre'), radius });
+    /*
+     * A cylinder is built along its OWN +Y whatever the group holding it has
+     * been turned to, so the axis in world space is that direction carried
+     * through the mesh's world rotation. This is the direction a peg goes into
+     * a hole along, and the one thing a bounding box could never tell you.
+     */
+    const dir = new THREE.Vector3(0, 1, 0).applyQuaternion(mesh.getWorldQuaternion(new THREE.Quaternion())).normalize();
+    const axis: Vec3 = [dir.x, dir.y, dir.z];
+    out.push({ point: world(0, 0, 0), kind: 'centre', label: named('axis centre'), radius, nodeId: id, normal: axis });
     if (half > 0) {
-      out.push({ point: world(0, half, 0), kind: 'centre', label: named('end centre'), radius });
-      out.push({ point: world(0, -half, 0), kind: 'centre', label: named('end centre'), radius });
+      out.push({ point: world(0, half, 0), kind: 'centre', label: named('end centre'), radius, nodeId: id, normal: axis });
+      out.push({ point: world(0, -half, 0), kind: 'centre', label: named('end centre'), radius, nodeId: id, normal: axis });
     }
   } else if (type === 'BoxGeometry') {
     // Every corner, because corner-to-corner is the commonest measurement there
     // is and a box's corners are exact rather than tessellated.
     const [w, h, d] = [parameters?.width ?? 0, parameters?.height ?? 0, parameters?.depth ?? 0];
+    const half: [number, number, number] = [w / 2, h / 2, d / 2];
     for (const sx of [-1, 1]) for (const sy of [-1, 1]) for (const sz of [-1, 1]) {
-      out.push({ point: world((sx * w) / 2, (sy * h) / 2, (sz * d) / 2), kind: 'vertex', label: named('corner') });
+      out.push({ point: world(sx * half[0], sy * half[1], sz * half[2]), kind: 'vertex', label: named('corner'), nodeId: id });
     }
-    out.push({ point: world(0, 0, 0), kind: 'centre', label: named('centre') });
+    for (const [ex, ey, ez] of boxEdgeMidpoints()) {
+      out.push({
+        point: world(ex * half[0], ey * half[1], ez * half[2]),
+        kind: 'midpoint',
+        label: named('edge midpoint'),
+        nodeId: id,
+      });
+    }
+    out.push({ point: world(0, 0, 0), kind: 'centre', label: named('centre'), nodeId: id });
   }
   return out;
 }
@@ -94,7 +138,9 @@ function analyticCentres(mesh: THREE.Mesh, nodeId: string | null): SnapCandidate
  * instances near the point are considered, which is what keeps a track of forty
  * boxes from contributing three hundred and sixty candidates.
  */
-function instancedCandidates(mesh: THREE.InstancedMesh, near: THREE.Vector3, radius: number): SnapCandidate[] {
+function instancedCandidates(
+  mesh: THREE.InstancedMesh, near: THREE.Vector3, radius: number, exclude?: string,
+): SnapCandidate[] {
   const parameters = (mesh.geometry as unknown as { parameters?: Record<string, number> }).parameters;
   if (mesh.geometry.type !== 'BoxGeometry' || !parameters) return [];
   const ids = (mesh.userData?.nodeIds ?? []) as string[];
@@ -112,15 +158,27 @@ function instancedCandidates(mesh: THREE.InstancedMesh, near: THREE.Vector3, rad
     const spread = new THREE.Vector3().setFromMatrixScale(world).length() / 2;
     if (centre.distanceTo(near) > radius + spread) continue;
 
-    const label = ids[i] ? `corner of ${ids[i]}` : 'corner';
+    const id = ids[i];
+    if (exclude && id === exclude) continue;
+    const label = id ? `corner of ${id}` : 'corner';
     for (const sx of [-1, 1]) for (const sy of [-1, 1]) for (const sz of [-1, 1]) {
       const corner = new THREE.Vector3((sx * w) / 2, (sy * h) / 2, (sz * d) / 2).applyMatrix4(world);
-      out.push({ point: [corner.x, corner.y, corner.z], kind: 'vertex', label });
+      out.push({ point: [corner.x, corner.y, corner.z], kind: 'vertex', label, nodeId: id });
+    }
+    for (const [ex, ey, ez] of boxEdgeMidpoints()) {
+      const mid = new THREE.Vector3((ex * w) / 2, (ey * h) / 2, (ez * d) / 2).applyMatrix4(world);
+      out.push({
+        point: [mid.x, mid.y, mid.z],
+        kind: 'midpoint',
+        label: id ? `edge midpoint of ${id}` : 'edge midpoint',
+        nodeId: id,
+      });
     }
     out.push({
       point: [centre.x, centre.y, centre.z],
       kind: 'centre',
-      label: ids[i] ? `centre of ${ids[i]}` : 'centre',
+      label: id ? `centre of ${id}` : 'centre',
+      nodeId: id,
     });
   }
   return out;
@@ -133,9 +191,15 @@ function instancedCandidates(mesh: THREE.InstancedMesh, near: THREE.Vector3, rad
  * body across the room is never walked at all, and by a vertex budget, so an
  * imported STL with a million triangles cannot stall the bridge.
  */
-export function sceneCandidates(root: THREE.Object3D, world: Vec3, radius: number): SnapCandidate[] {
+export function sceneCandidates(
+  root: THREE.Object3D,
+  world: Vec3,
+  radius: number,
+  options: { exclude?: string } = {},
+): SnapCandidate[] {
   const here = new THREE.Vector3(...world);
   const found: SnapCandidate[] = [];
+  const exclude = options.exclude;
 
   root.traverse((object) => {
     const mesh = object as THREE.Mesh;
@@ -148,12 +212,20 @@ export function sceneCandidates(root: THREE.Object3D, world: Vec3, radius: numbe
     // could not be measured to.
     const instanced = mesh as unknown as THREE.InstancedMesh;
     if (instanced.isInstancedMesh) {
-      found.push(...instancedCandidates(instanced, here, radius));
+      found.push(...instancedCandidates(instanced, here, radius, exclude));
       return;
     }
 
     const nodeId = bodyOf(mesh);
     if (!nodeId) return;
+    /*
+     * Dropped BEFORE the vertex scan, not filtered out of the result. A body
+     * dragging against its own features would go nowhere, and the scan — a
+     * walk of the positions plus a circle fit — is the expensive part, so the
+     * body most likely to be near the point is exactly the one worth skipping
+     * early.
+     */
+    if (exclude && nodeId === exclude) return;
 
     if (!mesh.geometry.boundingSphere) mesh.geometry.computeBoundingSphere();
     const sphere = mesh.geometry.boundingSphere?.clone();
@@ -174,7 +246,7 @@ export function sceneCandidates(root: THREE.Object3D, world: Vec3, radius: numbe
 
     for (const point of near) {
       const at = mesh.localToWorld(new THREE.Vector3(...point));
-      found.push({ point: [at.x, at.y, at.z], kind: 'vertex', label: `corner of ${nodeId}` });
+      found.push({ point: [at.x, at.y, at.z], kind: 'vertex', label: `corner of ${nodeId}`, nodeId });
     }
     // The circle hunt: this is what finds the middle of a hole the boolean
     // evaluator left behind, where nothing in the document remembers there was
@@ -182,11 +254,19 @@ export function sceneCandidates(root: THREE.Object3D, world: Vec3, radius: numbe
     const circle = detectCircle(near);
     if (circle) {
       const centre = mesh.localToWorld(new THREE.Vector3(...circle.centre));
+      // The fit's normal is a DIRECTION in the mesh's local frame, so it goes
+      // through the rotation alone — `localToWorld` would add the translation
+      // and turn an axis into a point somewhere near the part.
+      const dir = new THREE.Vector3(...circle.normal)
+        .applyQuaternion(mesh.getWorldQuaternion(new THREE.Quaternion()))
+        .normalize();
       found.push({
         point: [centre.x, centre.y, centre.z],
         kind: 'centre',
         label: `circle centre on ${nodeId}`,
         radius: circle.radius * perUnit,
+        nodeId,
+        normal: [dir.x, dir.y, dir.z],
       });
     }
   });
