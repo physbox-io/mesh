@@ -15,8 +15,8 @@ import { useCommitted } from '../hooks/useSettled';
  *
  * Text is held locally while the box has focus, so a value on its way to being
  * typed — "0", "0.", "0.0" before "0.05" — survives the trip. Nothing leaves
- * here until it parses and is in range, and blur settles the box back to
- * whatever value is actually in force.
+ * here while typing until it parses and is in range; a finished number past a
+ * limit is clamped to it on blur, and the box then shows the value in force.
  *
  * Nor does every parseable keystroke leave: `0.125` passes through `0`, `0.1`
  * and `0.12` on its way, and most of these boxes drive a rebuild of the whole
@@ -79,7 +79,18 @@ export const SliderValue: React.FC<{
         }}
         onBlur={() => {
           if (abandoned.current) { abandoned.current = false; cancelPending(); }
-          else flushPending();
+          else {
+            // A finished number past a limit goes in AT the limit. Dropping it
+            // put the old value back with no word said, so typing 0.02 into a
+            // box whose floor is 0.05 looked like the box ignoring you. Only on
+            // blur and Enter: mid-typing, "0" on the way to "0.05" is not a
+            // request for the minimum.
+            const n = parseFloat(text);
+            if (Number.isFinite(n) && ((min !== undefined && n < min) || (max !== undefined && n > max))) {
+              setPending(Math.min(max ?? Infinity, Math.max(min ?? -Infinity, n)));
+            }
+            flushPending();
+          }
           setEditing(false);
           setSeen(value);
           setText(shown);
