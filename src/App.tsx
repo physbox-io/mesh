@@ -442,12 +442,16 @@ const RenderOnChange = () => {
 const GRID_NAME = 'ground-grid';
 
 const GridFadeFollowsCamera = () => {
+  const found = useRef<THREE.Mesh | undefined>(undefined);
   useFrame((state) => {
-    // Looked up from the live scene rather than held in a ref, the same way
+    // Looked up from the live scene rather than held from render, the same way
     // the near-plane effect in SceneLayer reads the camera through R3F's
     // get(): this writes into an object R3F owns, and a value captured during
-    // render is not ours to modify.
-    const grid = state.scene.getObjectByName(GRID_NAME) as THREE.Mesh | undefined;
+    // render is not ours to modify. The lookup walks the whole scene, so what
+    // it finds is kept until it leaves the scene rather than searched for
+    // again every frame.
+    if (!found.current?.parent) found.current = state.scene.getObjectByName(GRID_NAME) as THREE.Mesh | undefined;
+    const grid = found.current;
     const material = grid?.material as THREE.ShaderMaterial | undefined;
     const uniform = material?.uniforms?.fadeDistance;
     if (!uniform) return;
@@ -468,12 +472,19 @@ const GridFadeFollowsCamera = () => {
 // Three.js Y-up mapping: mujoco(x,y,z) → three(x, z, -y)
 const AxisLegendDrawer = ({ externalRef }: { externalRef: RefObject<HTMLCanvasElement | null> }) => {
   const { camera } = useThree();
+  // The legend depends on nothing but the camera's orientation, so a frame
+  // where that has not turned (every frame of a simulation watched from a
+  // still camera) leaves the drawing as it is.
+  const drawn = useRef<{ el: HTMLCanvasElement; quaternion: THREE.Quaternion; width: number; height: number } | null>(null);
 
   useFrame(() => {
     const el = externalRef.current;
     if (!el) return;
+    const last = drawn.current;
+    if (last && last.el === el && last.width === el.width && last.height === el.height && last.quaternion.equals(camera.quaternion)) return;
     const ctx = el.getContext('2d');
     if (!ctx) return;
+    drawn.current = { el, quaternion: camera.quaternion.clone(), width: el.width, height: el.height };
 
     const W = el.width;
     const H = el.height;
