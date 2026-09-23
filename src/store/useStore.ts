@@ -217,6 +217,12 @@ let recompileToken = 0;
  * and the landing itself pushes it.
  */
 let recompilesInFlight = 0;
+/*
+ * The history debounce timer. Module state, not store state: nothing renders
+ * it, and every write of it to the store notified every subscriber in the app
+ * on every tick of every slider drag.
+ */
+let historyDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 /**
  * WASM linear memory reserved as of the last build the worker reported.
@@ -1143,7 +1149,6 @@ export interface PhysicsState {
   undoStack: UndoRedoState[];
   redoStack: UndoRedoState[];
   tempUndoState: UndoRedoState | null;
-  historyDebounceTimer: ReturnType<typeof setTimeout> | null;
   lastInteractionType: string | null;
 
   // History Actions
@@ -1773,7 +1778,6 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   undoStack: [],
   redoStack: [],
   tempUndoState: null,
-  historyDebounceTimer: null,
   lastInteractionType: null,
 
   // History Actions
@@ -1801,23 +1805,16 @@ export const useStore = create<PhysicsState>()((set, get) => ({
       });
     }
 
-    const pendingHistoryTimer = get().historyDebounceTimer;
-    if (pendingHistoryTimer) {
-      clearTimeout(pendingHistoryTimer);
-    }
-
-    const timer = setTimeout(() => {
+    if (historyDebounceTimer) clearTimeout(historyDebounceTimer);
+    historyDebounceTimer = setTimeout(() => {
       get().flushPendingUndo();
     }, 800);
-
-    set({ historyDebounceTimer: timer });
   },
 
   flushPendingUndo: () => {
-    const { tempUndoState, undoStack, historyDebounceTimer } = get();
-    if (historyDebounceTimer) {
-      clearTimeout(historyDebounceTimer);
-    }
+    const { tempUndoState, undoStack } = get();
+    if (historyDebounceTimer) clearTimeout(historyDebounceTimer);
+    historyDebounceTimer = null;
 
     if (tempUndoState) {
       const current = get();
@@ -1840,17 +1837,14 @@ export const useStore = create<PhysicsState>()((set, get) => ({
           redoStack: [],
           tempUndoState: null,
           lastInteractionType: null,
-          historyDebounceTimer: null
         });
       } else if (recompilesInFlight > 0) {
         // Nothing has moved YET. The change is still on its way through the
         // compiler, and the landing calls back here.
-        set({ historyDebounceTimer: null });
       } else {
         set({
           tempUndoState: null,
           lastInteractionType: null,
-          historyDebounceTimer: null
         });
       }
     }
@@ -1888,8 +1882,8 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     set({
       tempUndoState: snapshot,
       lastInteractionType: 'discrete',
-      historyDebounceTimer: setTimeout(() => get().flushPendingUndo(), 0),
     });
+    historyDebounceTimer = setTimeout(() => get().flushPendingUndo(), 0);
   },
 
   undo: () => {

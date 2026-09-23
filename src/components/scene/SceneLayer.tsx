@@ -313,7 +313,10 @@ interface DynamicGeomProps {
   mujoco: MujocoShim;
   model: ModelMirror;
   data: DataMirror;
-  selectedNodeId: string | null;
+  /** The owning body, looked up once by the parent — see SceneVisuals. */
+  node?: SceneNode | null;
+  /** Picked, or brought along by a Shift-click. */
+  isSelected: boolean;
   setSelectedNodeId: (id: string | null) => void;
   vertices?: number[];
   faces?: number[];
@@ -322,23 +325,16 @@ interface DynamicGeomProps {
   staticBody?: boolean;
 }
 
-export const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, selectedNodeId, setSelectedNodeId, vertices, faces, dynamic: isDynamic, providedGeomId, staticBody }: DynamicGeomProps) => {
+/*
+ * Memoised, and handed its node and selection by the parent rather than
+ * selecting them itself. Each geom used to walk the whole scene graph inside a
+ * store selector, and zustand runs every selector on every write to the store,
+ * so a scene of G geoms and N nodes did G tree walks per write — per pointer
+ * move while dragging. Now the parent indexes the graph once per change.
+ */
+export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type, color, mujoco, model, data, node = null, isSelected, setSelectedNodeId, vertices, faces, dynamic: isDynamic, providedGeomId, staticBody }: DynamicGeomProps) {
   const meshRef = useRef<THREE.Group>(null);
   const isPlaying = useStore(state => state.isPlaying);
-  
-  const node = useStore(state => {
-    if (!nodeId) return null;
-    const find = (nodes: SceneNode[]): SceneNode | null => {
-      if (!nodes) return null;
-      for (const n of nodes) {
-        if (n.id === nodeId) return n;
-        const c = find(n.children);
-        if (c) return c;
-      }
-      return null;
-    };
-    return find(state.sceneGraph.nodes);
-  });
   
   const geomId = useMemo(() => {
     if (providedGeomId !== undefined) return providedGeomId;
@@ -370,10 +366,6 @@ export const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, se
   }, [geomId, type, model, name]);
 
   const rotationMatrix = useMemo(() => new THREE.Matrix4(), []);
-  // Selected, or brought along by a Shift-click. A body about to be combined
-  // has to look picked, or the operation reads as acting on one body.
-  const alsoSelected = useStore((state) => !!nodeId && state.extraSelectedIds.includes(nodeId));
-  const isSelected = selectedNodeId === nodeId || alsoSelected;
 
   // A geom's rgba carries an alpha, and until now every material dropped it and
   // drew fully opaque. A jar authored at 0.35 alpha then hides the very thing it
@@ -584,6 +576,9 @@ export const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, se
       return [[0, 0, 0] as [number, number, number], [0, 0, 0, 1] as [number, number, number, number]];
     }
   }, [isDynamic, bodyId, geomId, model, data]);
+  // A new Quaternion per render reads to R3F as a new pose, and it put the body
+  // back where it started until the next frame's useFrame moved it again.
+  const initialQuaternion = useMemo(() => new THREE.Quaternion(...initialQuat), [initialQuat]);
 
   useFrame(() => {
     // Safety check: ensure closure model/data match current store active ones
@@ -783,7 +778,7 @@ export const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, se
 
     if (isDynamic) {
       return (
-        <group name={nodeId} ref={meshRef} position={initialPos} quaternion={new THREE.Quaternion(...initialQuat)}>
+        <group name={nodeId} ref={meshRef} position={initialPos} quaternion={initialQuaternion}>
           <mesh castShadow receiveShadow geometry={meshBufferGeometry} {...dragHandlers} {...paintHandlers}>
             {renderedMaterial}
             {brushCursor}
@@ -818,7 +813,7 @@ export const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, se
         name={nodeId}
         ref={meshRef}
         position={initialPos}
-        quaternion={new THREE.Quaternion(...initialQuat)}
+        quaternion={initialQuaternion}
       >
         <mesh
           castShadow
@@ -844,7 +839,7 @@ export const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, se
       name={nodeId}
       ref={meshRef}
       position={initialPos}
-      quaternion={new THREE.Quaternion(...initialQuat)}
+      quaternion={initialQuaternion}
     >
       {node?.isWedge ? (
         <mesh castShadow receiveShadow {...dragHandlers}>
@@ -884,7 +879,7 @@ export const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, se
       {primitiveEdges}
     </group>
   );
-};
+});
 
 
 
@@ -949,7 +944,9 @@ export const DragInteractionController = () => {
 // Real-time mouse drag physical spring force line renderer
 export const MouseDragForceRenderer = ({ model, data, mujoco }: { model: ModelMirror | null; data: DataMirror | null; mujoco: MujocoShim | null }) => {
   const draggedNodeId = useStore((state) => state.draggedNodeId);
-  const dragTarget = useStore((state) => state.dragTarget);
+  // The target is read per frame, not subscribed to: it changes on every
+  // pointer move of a drag, and a subscription re-rendered this for each one
+  // only to hand useFrame a value it can read for itself.
   const lineRef = useRef<THREE.Line>(null);
   const bodyIdCache = useRef<Record<string, number>>({});
   useEffect(() => {
@@ -980,7 +977,13 @@ export const MouseDragForceRenderer = ({ model, data, mujoco }: { model: ModelMi
     const activeData = useStore.getState().data;
     if (model !== activeModel || data !== activeData) return;
     if ((window as FrameFlagWindow).DISABLE_USEFRAME) return;
-    if (!model || !data || !mujoco || !draggedNodeId || !dragTarget || !lineRef.current) return;
+    if (!model || !data || !mujoco || !draggedNodeId || !lineRef.current) return;
+    const dragTarget = useStore.getState().dragTarget;
+    // A sculpt stroke claims draggedNodeId too, and pulls on nothing. Not
+    // culled: the geometry is rewritten in place and its bounds never are.
+    lineRef.current.visible = !!dragTarget;
+    lineRef.current.frustumCulled = false;
+    if (!dragTarget) return;
 
     try {
       const bId = bodyIdCache.current[draggedNodeId] ?? -1;
@@ -1002,7 +1005,7 @@ export const MouseDragForceRenderer = ({ model, data, mujoco }: { model: ModelMi
     }
   });
 
-  if (!draggedNodeId || !dragTarget) return null;
+  if (!draggedNodeId) return null;
 
   return (
     /* `line` in JSX resolves to @types/react's SVG element, not to
@@ -1156,7 +1159,7 @@ interface StaticBoxInstancesProps {
   setSelectedNodeId: (id: string | null) => void;
 }
 
-export const StaticBoxInstances = ({ geoms, model, data, mujoco, setSelectedNodeId }: StaticBoxInstancesProps) => {
+export const StaticBoxInstances = React.memo(function StaticBoxInstances({ geoms, model, data, mujoco, setSelectedNodeId }: StaticBoxInstancesProps) {
   const meshRef = useRef<THREE.InstancedMesh>(null);
   const nodeIdByInstance = useMemo(() => geoms.map((g) => g.nodeId), [geoms]);
   const wireframe = useStore(state => state.wireframe);
@@ -1242,7 +1245,7 @@ export const StaticBoxInstances = ({ geoms, model, data, mujoco, setSelectedNode
       <meshStandardMaterial wireframe={wireframe} roughness={0.85} metalness={0.02} />
     </instancedMesh>
   );
-};
+});
 
 
 /** Depth-first lookup by id, for the renderer's own use. */
@@ -1309,7 +1312,10 @@ interface ImplicitGeom {
   rgba: number[];
 }
 
-export const SceneVisuals = ({ model, data, mujoco, sceneGraph, selectedNodeId, setSelectedNodeId, activeWeakSpot, setActiveWeakSpot }: SceneVisualsProps) => {
+/** What a geom is drawn in when it names no colour of its own. */
+const DEFAULT_RGBA = [0.8, 0.8, 0.8, 1];
+
+export const SceneVisuals = React.memo(function SceneVisuals({ model, data, mujoco, sceneGraph, selectedNodeId, setSelectedNodeId, activeWeakSpot, setActiveWeakSpot }: SceneVisualsProps) {
   // Every geom name the scene graph accounts for, drawn or not. The implicit-geom
   // pass below uses this — NOT the render list — to decide what in the MuJoCo
   // model is unexplained. A collision-only geom (a boolean body's source
@@ -1337,6 +1343,35 @@ export const SceneVisuals = ({ model, data, mujoco, sceneGraph, selectedNodeId, 
   // they come out of the instancing while the brush is out, and stay out for
   // good once they carry paint.
   const paintMode = useStore((state) => state.paintMode);
+
+  /*
+   * Every body by id, built once per change to the document, so each geom is
+   * handed its node instead of searching for it. The document, not the
+   * `sceneGraph` prop: that one has shattered bodies swapped for their shards,
+   * and geoms have always looked their node up in the document.
+   */
+  const documentGraph = useStore((state) => state.sceneGraph);
+  const nodeById = useMemo(() => {
+    const map = new Map<string, SceneNode>();
+    const walk = (nodes: SceneNode[]) => {
+      for (const n of nodes || []) {
+        if (!map.has(n.id)) map.set(n.id, n);
+        walk(n.children);
+      }
+    };
+    walk(documentGraph?.nodes || []);
+    return map;
+  }, [documentGraph]);
+  // A body about to be combined has to look picked, or the operation reads as
+  // acting on one body.
+  const extraSelectedIds = useStore((state) => state.extraSelectedIds);
+  const selectedIds = useMemo(() => {
+    const set = new Set(extraSelectedIds);
+    if (selectedNodeId) set.add(selectedNodeId);
+    return set;
+  }, [extraSelectedIds, selectedNodeId]);
+  const nodeOf = (id?: string) => (id ? nodeById.get(id) ?? null : null);
+  const picked = (id?: string) => !!id && selectedIds.has(id);
 
   const geoms = useMemo(() => {
     if (!sceneGraph) return [];
@@ -1394,28 +1429,36 @@ export const SceneVisuals = ({ model, data, mujoco, sceneGraph, selectedNodeId, 
     return list;
   }, [model, mujoco, knownGeomNames]);
 
-  if (!model || !data || !mujoco) return null;
-
-  const allPrimitiveGeoms = geoms.filter(g => g.type !== 'mesh');
-  // Static boxes not on the selected body render as one InstancedMesh.
-  const instancedBoxGeoms = paintMode
-    ? []
-    : allPrimitiveGeoms.filter(g => g.type === 'box' && g.staticBody && !g.customRender && g.nodeId !== selectedNodeId && !g.paint);
-  const instancedNames = new Set(instancedBoxGeoms.map(g => g.name));
-  const primitiveGeoms = allPrimitiveGeoms.filter(g => !instancedNames.has(g.name));
-  // The body under the sculpt tools is drawn by SculptSurface, which owns the
-  // live mesh mid-stroke; the ordinary renderer would draw the last committed
-  // stroke right through it.
-  const sculptGeom = sculptNodeId ? geoms.find(g => g.type === 'mesh' && g.nodeId === sculptNodeId) : undefined;
+  // Derived once per input rather than on every render: StaticBoxInstances
+  // rewrites every instance matrix whenever its list is a new array, and a list
+  // rebuilt per render made that every render.
+  const {
+    primitiveGeoms, instancedBoxGeoms, sculptGeom, staticMeshGeoms, dynamicMeshGeoms,
+  } = useMemo(() => {
+    const allPrimitiveGeoms = geoms.filter(g => g.type !== 'mesh');
+    // Static boxes not on the selected body render as one InstancedMesh.
+    const instancedBoxGeoms = paintMode
+      ? []
+      : allPrimitiveGeoms.filter(g => g.type === 'box' && g.staticBody && !g.customRender && g.nodeId !== selectedNodeId && !g.paint);
+    const instancedNames = new Set(instancedBoxGeoms.map(g => g.name));
+    const primitiveGeoms = allPrimitiveGeoms.filter(g => !instancedNames.has(g.name));
+    // The body under the sculpt tools is drawn by SculptSurface, which owns the
+    // live mesh mid-stroke; the ordinary renderer would draw the last committed
+    // stroke right through it.
+    const sculptGeom = sculptNodeId ? geoms.find(g => g.type === 'mesh' && g.nodeId === sculptNodeId) : undefined;
+    // The same arrangement for the lattice tools: they own the body they are on,
+    // and they draw the cage over it, which the ordinary renderer knows nothing
+    // about.
+    const latticeGeom = latticeNodeId ? geoms.find(g => g.type === 'mesh' && g.nodeId === latticeNodeId) : undefined;
+    const staticMeshGeoms = geoms.filter(g => g.type === 'mesh' && !g.dynamic && g !== sculptGeom && g !== latticeGeom);
+    const dynamicMeshGeoms = geoms.filter(g => g.type === 'mesh' && g.dynamic && g !== sculptGeom && g !== latticeGeom);
+    return { primitiveGeoms, instancedBoxGeoms, sculptGeom, latticeGeom, staticMeshGeoms, dynamicMeshGeoms };
+  }, [geoms, paintMode, selectedNodeId, sculptNodeId, latticeNodeId]);
   // Picking a different base replaces the mesh wholesale, so the sculpting
   // surface has to be remounted rather than left holding the old one.
   const sculptVersion = sculptNodeId ? (findSceneNode(sceneGraph?.nodes ?? [], sculptNodeId)?.sculptVersion ?? 1) : 1;
-  // The same arrangement for the lattice tools: they own the body they are on,
-  // and they draw the cage over it, which the ordinary renderer knows nothing
-  // about.
-  const latticeGeom = latticeNodeId ? geoms.find(g => g.type === 'mesh' && g.nodeId === latticeNodeId) : undefined;
-  const staticMeshGeoms = geoms.filter(g => g.type === 'mesh' && !g.dynamic && g !== sculptGeom && g !== latticeGeom);
-  const dynamicMeshGeoms = geoms.filter(g => g.type === 'mesh' && g.dynamic && g !== sculptGeom && g !== latticeGeom);
+
+  if (!model || !data || !mujoco) return null;
 
 
   return (
@@ -1428,11 +1471,12 @@ export const SceneVisuals = ({ model, data, mujoco, sceneGraph, selectedNodeId, 
             nodeId={g.nodeId}
             name={g.name}
             type={g.type}
-            color={g.rgba || [0.8,0.8,0.8,1]}
+            color={g.rgba || DEFAULT_RGBA}
             mujoco={mujoco}
             model={model}
             data={data}
-            selectedNodeId={selectedNodeId}
+            node={nodeOf(g.nodeId)}
+            isSelected={picked(g.nodeId)}
             setSelectedNodeId={setSelectedNodeId}
             staticBody={g.staticBody}
           />
@@ -1448,7 +1492,7 @@ export const SceneVisuals = ({ model, data, mujoco, sceneGraph, selectedNodeId, 
             mujoco={mujoco}
             model={model}
             data={data}
-            selectedNodeId={selectedNodeId}
+            isSelected={false}
             setSelectedNodeId={setSelectedNodeId}
           />
         ))}
@@ -1458,11 +1502,12 @@ export const SceneVisuals = ({ model, data, mujoco, sceneGraph, selectedNodeId, 
             nodeId={g.nodeId}
             name={g.name}
             type={g.type}
-            color={g.rgba || [0.8,0.8,0.8,1]}
+            color={g.rgba || DEFAULT_RGBA}
             mujoco={mujoco}
             model={model}
             data={data}
-            selectedNodeId={selectedNodeId}
+            node={nodeOf(g.nodeId)}
+            isSelected={picked(g.nodeId)}
             setSelectedNodeId={setSelectedNodeId}
             vertices={g.renderVertices}
             faces={g.faces}
@@ -1500,11 +1545,12 @@ export const SceneVisuals = ({ model, data, mujoco, sceneGraph, selectedNodeId, 
           nodeId={g.nodeId}
           name={g.name}
           type={g.type}
-          color={g.rgba || [0.8,0.8,0.8,1]}
+          color={g.rgba || DEFAULT_RGBA}
           mujoco={mujoco}
           model={model}
           data={data}
-          selectedNodeId={selectedNodeId}
+          node={nodeOf(g.nodeId)}
+          isSelected={picked(g.nodeId)}
           setSelectedNodeId={setSelectedNodeId}
           vertices={g.vertices}
           faces={g.faces}
@@ -1512,4 +1558,4 @@ export const SceneVisuals = ({ model, data, mujoco, sceneGraph, selectedNodeId, 
       ))}
     </>
   );
-};
+});

@@ -4,7 +4,8 @@ import { useStore } from '../store/useStore';
 let isInitializing = false;
 
 export const useMuJoCoInit = () => {
-  const { mujoco, recompile } = useStore();
+  const mujoco = useStore((s) => s.mujoco);
+  const recompile = useStore((s) => s.recompile);
 
   useEffect(() => {
     if (mujoco || isInitializing) return;

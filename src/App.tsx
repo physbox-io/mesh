@@ -12,6 +12,7 @@ import ColoringSection from './components/ColoringSection';
 import { useMuJoCoInit } from './hooks/useMuJoCo';
 import { useMCPBridge } from './hooks/useMCPBridge';
 import { useCoarsePointer } from './hooks/useCoarsePointer';
+import { useShallow } from 'zustand/react/shallow';
 import { useStore, getPhysicsWorkerClient, setPhysicsFrameListener, cloneSceneGraph } from './store/useStore';
 import { useDentStore } from './store/dentStore';
 import { applyShatterPieces } from './store/useStore';
@@ -1000,7 +1001,17 @@ function App() {
   // broken bodies swapped for their shards. See `shatterPieces` in the store.
   const shatteredBodies = useStore((s) => s.visibleShatteredBodies);
   const lastShatter = useStore((s) => s.lastShatter);
-  const dents = useDentStore((s) => s.dents);
+  // Only the selected body's dents: the panel shows no one else's, and a
+  // subscription to the whole map re-rendered the app for every dent anywhere
+  // in the scene, several a second while things are colliding.
+  const selectedNodeIdForDents = useStore((s) => s.selectedNodeId);
+  const dents = useDentStore(useShallow((s) => {
+    const mine: typeof s.dents = {};
+    if (!selectedNodeIdForDents) return mine;
+    const prefix = `${selectedNodeIdForDents}/`;
+    for (const key in s.dents) if (key.startsWith(prefix)) mine[key] = s.dents[key];
+    return mine;
+  }));
   const brokenConstraints = useStore((s) => s.brokenConstraints);
   const lastBreak = useStore((s) => s.lastBreak);
   const restoreConstraint = useStore((s) => s.restoreConstraint);
@@ -1222,6 +1233,9 @@ function App() {
     window.addEventListener('mouseup', handleMouseUp);
   }, []);
 
+  // Only these fields, compared shallowly. A bare useStore() here re-rendered
+  // the whole app, viewport included, on every write to any field of the
+  // store — the drag target on every pointer move during play among them.
   const { 
     model, data, mujoco, recompileId, activePreset,
     isPlaying, togglePlay, isLoaded, 
@@ -1245,7 +1259,30 @@ function App() {
     extraSelectedIds, combineBodies,
     undo, redo, undoStack, redoStack,
     makeDentable,
-  } = useStore();
+  } = useStore(useShallow((s) => ({
+    model: s.model, data: s.data, mujoco: s.mujoco, recompileId: s.recompileId, activePreset: s.activePreset,
+    isPlaying: s.isPlaying, togglePlay: s.togglePlay, isLoaded: s.isLoaded,
+    mcpActiveCount: s.mcpActiveCount, scadCompileCount: s.scadCompileCount,
+    isSettingsOpen: s.isSettingsOpen, setSettingsOpen: s.setSettingsOpen,
+    gravityZ: s.gravityZ, windX: s.windX, windY: s.windY, density: s.density, floorFriction: s.floorFriction, floorBounce: s.floorBounce, setEnvironment: s.setEnvironment,
+    cameraView: s.cameraView, setCameraView: s.setCameraView,
+    dfmEnabled: s.dfmEnabled, setDfmEnabled: s.setDfmEnabled,
+    wireframe: s.wireframe, toggleWireframe: s.toggleWireframe, showEdges: s.showEdges, toggleShowEdges: s.toggleShowEdges, paintMode: s.paintMode,
+    gridCellSizeMm: s.gridCellSizeMm, setGridCellSizeMm: s.setGridCellSizeMm,
+    sceneGraph: s.sceneGraph, selectedNodeId: s.selectedNodeId, setSelectedNodeId: s.setSelectedNodeId,
+    updateNodeGeom: s.updateNodeGeom, updateNodeJoint: s.updateNodeJoint, updateGearTeeth: s.updateGearTeeth, addPusherPeg: s.addPusherPeg, deletePusherPeg: s.deletePusherPeg, updatePusherPeg: s.updatePusherPeg, addComponent: s.addComponent, loadPreset: s.loadPreset, openPatternGenerator: s.openPatternGenerator, updateScene: s.updateScene,
+    resetSimulation: s.resetSimulation, updateNodePos: s.updateNodePos,
+    updateNodeJointsList: s.updateNodeJointsList, deleteNode: s.deleteNode, renameNode: s.renameNode,
+    addHardwareComponentNode: s.addHardwareComponentNode, updateNodeRotation: s.updateNodeRotation, rotateAroundCOM: s.rotateAroundCOM, setRotateAroundCOM: s.setRotateAroundCOM,
+    updateWedgeParams: s.updateWedgeParams, updatePyramidParams: s.updatePyramidParams, updateConeParams: s.updateConeParams, updateTorusParams: s.updateTorusParams, updateTubeParams: s.updateTubeParams, updateCurveParams: s.updateCurveParams, updatePulleyParams: s.updatePulleyParams, updateRopeParams: s.updateRopeParams,
+    parentUnderSelected: s.parentUnderSelected, setParentUnderSelected: s.setParentUnderSelected, updateNodeScript: s.updateNodeScript, updateNode: s.updateNode,
+    deleteNodeGeom: s.deleteNodeGeom, setGeomCsgOp: s.setGeomCsgOp,
+    sculptNodeId: s.sculptNodeId, setSculptNodeId: s.setSculptNodeId, setSculptBase: s.setSculptBase,
+    latticeNodeId: s.latticeNodeId, setLatticeNodeId: s.setLatticeNodeId,
+    extraSelectedIds: s.extraSelectedIds, combineBodies: s.combineBodies,
+    undo: s.undo, redo: s.redo, undoStack: s.undoStack, redoStack: s.redoStack,
+    makeDentable: s.makeDentable,
+  })));
 
   // Exactly what the solver was handed, so the picture and the physics cannot
   // disagree about which bodies exist.
