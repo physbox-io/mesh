@@ -74,8 +74,12 @@ const buildJoint = (joint: SceneJoint) => {
   if (joint.damping !== undefined) attrs += ` damping="${joint.damping}"`;
   if (joint.stiffness !== undefined) attrs += ` stiffness="${joint.stiffness}"`;
   if (joint.springref !== undefined) attrs += ` springref="${joint.springref}"`;
-  if (joint.limited !== undefined) attrs += ` limited="${joint.limited}"`;
-  if (joint.range !== undefined) attrs += ` range="${joint.range.join(' ')}"`;
+  // A crumple's travel is its range: it is held rigid by its lock until that
+  // gives, and then it may fold this far and no further.
+  const range = joint.range ?? joint.crumpleRangeDeg;
+  const limited = joint.limited ?? (joint.crumpleRangeDeg ? true : undefined);
+  if (limited !== undefined) attrs += ` limited="${limited}"`;
+  if (range !== undefined) attrs += ` range="${range.join(' ')}"`;
   return `<joint ${attrs} />`;
 };
 
@@ -342,13 +346,27 @@ export const compileToMJCF = (
   const explicitCouplingNodes: SceneNode[] = [];
   const pulleyRopesList: SceneNode[] = [];
   const weldConstraintsList: { bodyName: string; targetId: string }[] = [];
+  /*
+   * Crumple zones, as locks.
+   *
+   * A joint with a crumple torque is welded to whatever it hangs off, so it
+   * does not move at all until the lock is released — at which point it is an
+   * ordinary damped hinge with a limited range. Emitting it as a weld rather
+   * than as a stiff spring is what makes it PERMANENT: a spring pulls the part
+   * back, and a crumpled one should stay crumpled.
+   */
+  const crumpleLocks: { jointName: string; bodyName: string; parentName: string }[] = [];
   const connectConstraintsList: { bodyId: string; bodyName: string; targetId: string; anchor: number[] }[] = [];
   const nodeNamesMap: Record<string, string> = {};
 
-  const traverse = (nodes: SceneNode[]) => {
+  const traverse = (nodes: SceneNode[], parentName?: string) => {
     if (!nodes) return;
     for (const node of nodes) {
       nodeNamesMap[node.id] = node.name;
+      (node.joints || []).forEach((j) => {
+        if (j.crumpleTorqueNm === undefined || j.type === 'free') return;
+        crumpleLocks.push({ jointName: j.name, bodyName: node.name, parentName: parentName ?? '' });
+      });
       if (node.joints && node.joints.length > 0) {
         jointedNodes[node.id] = node.joints[0].name;
       }
@@ -387,7 +405,7 @@ export const compileToMJCF = (
           rackJoint = j.name;
         }
       });
-      traverse(node.children);
+      traverse(node.children, node.name);
     }
   };
   traverse(sceneCopy.nodes);
@@ -517,6 +535,13 @@ export const compileToMJCF = (
       }
     }
     ropeCouplingIndex++;
+  }
+
+  // 3b. Crumple locks. Named after the joint rather than numbered, so the
+  //     worker can map a released lock straight back to the joint it froze.
+  for (const lock of crumpleLocks) {
+    const target = lock.parentName ? ` body2="${lock.parentName}"` : '';
+    equalityConstraints += `\n    <weld name="crumple_lock_${lock.jointName}" body1="${lock.bodyName}"${target} />`;
   }
 
   // 4. Closed-Loop Weld Constraints

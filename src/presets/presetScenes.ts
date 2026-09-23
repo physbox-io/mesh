@@ -13,6 +13,7 @@ import { californiaReliefPreset, CALIFORNIA_RELIEF_SETTINGS } from './california
 import { megaBustStudioPreset } from './megaBustStudio';
 import { latticeBracketPreset } from './latticeBracket';
 import { oakTreePreset } from './oakTree';
+import { shatterPreset } from './shatter';
 
 export const pendulumPreset: SceneGraph = {
   nodes: [
@@ -3146,6 +3147,11 @@ export const PRESETS = {
     name: 'Tutorial: Making an Exact Part',
     emoji: '🎓',
     scene: emptyPreset,
+  },
+  shatter: {
+    name: 'Shatter',
+    emoji: '💥',
+    scene: shatterPreset,
   }
 };
 

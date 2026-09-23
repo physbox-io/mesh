@@ -23,6 +23,13 @@ import type { PaintLayer } from '../utils/vertexPaint';
 import { compileToMJCF } from '../utils/mjcf';
 import { PRESETS, pendulumPreset, generateGearGeoms } from '../presets/presetScenes';
 import { PhysicsWorkerClient, type BuiltResult, type FrameSnapshot } from './physicsWorkerClient';
+import type { ConstraintBrokenEvent, ImpactEvent } from '../workers/physicsWorkerProtocol';
+import { dentDepth, dentSpread, pierceVerdict, shatterVerdict } from '../utils/breakThresholds';
+import { fractureMesh } from '../utils/fracture';
+import { buildShatterGraph } from '../utils/runtimeShatter';
+import { deformedGeometry, dentKey, useDentStore } from './dentStore';
+import { imprintOf, isDentable, meshForDenting, type Imprint } from '../utils/dentMesh';
+import type { DentConfig } from '../utils/breakThresholds';
 import { generatePyramidMeshData, generateConeMeshData, generateTorusMeshData, generateTubeMeshData, generateCurveGeoms, DEFAULT_CURVE_POINTS, DEFAULT_CURVE_WIDTH, DEFAULT_CURVE_THICKNESS, DEFAULT_CURVE_SEGMENTS, getStickyRotation } from '../utils/geom';
 import { readUserPreset } from '../utils/userPresets';
 import { framingForBounds, gridCellForBounds, sceneContentBounds } from '../utils/frameScene';
@@ -273,6 +280,20 @@ export const getPhysicsWorkerClient = (): PhysicsWorkerClient => {
           data.geom_xpos.set(snap.geom_xpos); data.geom_xmat.set(snap.geom_xmat);
         }
       }
+    };
+    client.onBreak = (event) => {
+      // Append rather than replace: several welds can go in the same step, and
+      // a break is remembered here rather than in the worker because the worker
+      // is respawned every fourth build and every twenty seconds of play.
+      const prev = useStore.getState().brokenConstraints;
+      if (prev.includes(event.key)) return;
+      useStore.setState({
+        brokenConstraints: [...prev, event.key],
+        lastBreak: event,
+      });
+    };
+    client.onImpact = (event) => {
+      useStore.getState().handleImpact(event);
     };
     client.onError = (message, fatal, lastState) => {
       console.error('[PhysicsWorker]', message);
@@ -566,6 +587,291 @@ const cloneNode = (n: SceneNode): SceneNode => {
   return out;
 };
 
+/** Depth-first lookup by node id. */
+const findNodeById = (nodes: SceneNode[], id: string): SceneNode | null => {
+  for (const n of nodes || []) {
+    if (n.id === id) return n;
+    const found = findNodeById(n.children || [], id);
+    if (found) return found;
+  }
+  return null;
+};
+
+/**
+ * Swap one node out for several, wherever it sits in the tree.
+ *
+ * The shards go in at the same depth the body was, rather than at the top
+ * level, so a vase that was parented to a table stays with the table.
+ */
+const replaceNodeWith = (nodes: SceneNode[], id: string, replacements: SceneNode[]): SceneNode[] => {
+  const out: SceneNode[] = [];
+  for (const n of nodes || []) {
+    if (n.id === id) { out.push(...replacements); continue; }
+    const children = replaceNodeWith(n.children || [], id, replacements);
+    out.push(children === n.children ? n : { ...n, children });
+  }
+  return out;
+};
+
+/**
+ * The scene as it currently IS: the document, with every shattered body swapped
+ * for its pieces.
+ *
+ * Derived on demand rather than stored, so an edit to the document — moving a
+ * body, resizing one, adding one — flows through while the wreckage is still on
+ * screen. Returns the document itself, by reference, when nothing is broken, so
+ * the ordinary case costs a property lookup.
+ */
+/**
+ * One rebuild per tick, however many things broke in it.
+ *
+ * A cascade — a vase into a dozen pieces, several of which land together and
+ * come apart again — produces a burst of breaks, and a model rebuild for each
+ * would be several hundred milliseconds of hitching for a result identical to
+ * rebuilding once at the end. The substitutions are already in the store by the
+ * time this fires, so one build picks up all of them.
+ *
+ * The window is long enough to catch a whole cascade of landings rather than
+ * only those in the same frame, and short enough that a single break still
+ * looks immediate.
+ */
+/** A surface whose damage has been made real, ready to compile. */
+export interface DeformedGeometry {
+  vertices: number[];
+  renderVertices: number[];
+  faces: number[];
+}
+
+const SHATTER_REBUILD_COALESCE_MS = 120;
+let shatterRebuildPending: ReturnType<typeof setTimeout> | null = null;
+const scheduleShatterRebuild = (run: () => void) => {
+  if (shatterRebuildPending !== null) return;
+  shatterRebuildPending = setTimeout(() => {
+    shatterRebuildPending = null;
+    run();
+  }, SHATTER_REBUILD_COALESCE_MS);
+};
+
+export const applyShatterPieces = (
+  graph: SceneGraph,
+  pieces: Record<string, SceneNode[]>,
+  deformed: Record<string, DeformedGeometry> = {},
+): SceneGraph => {
+  const ids = Object.keys(pieces);
+  const deformedKeys = Object.keys(deformed);
+  if (ids.length === 0 && deformedKeys.length === 0) return graph;
+
+  let nodes = graph.nodes;
+  for (const id of ids) {
+    nodes = detachReferencesTo(replaceNodeWith(nodes, id, pieces[id]), id);
+  }
+  if (deformedKeys.length > 0) nodes = applyDeformed(nodes, deformed);
+  return { ...graph, nodes };
+};
+
+/**
+ * Swap in the deformed geometry for any surface that asked for it to be real.
+ *
+ * The node is also switched to `decompose`, and that is not an optimisation to
+ * be skipped for small damage: MuJoCo collides a mesh as its CONVEX HULL, and
+ * every kind of damage here is a concavity. A hull fills a hole straight back
+ * in, and it ignores a crater completely — so committing the deformed vertices
+ * without decomposing gives a plate that looks worn and collides exactly as it
+ * did when new, which is the appearance of the feature with none of it.
+ *
+ * Decomposing is therefore what `deformCollision` really costs, and it is why
+ * it is a choice rather than the default: V-HACD runs over the surface again
+ * every time the surface changes.
+ */
+const applyDeformed = (
+  nodes: SceneNode[],
+  deformed: Record<string, DeformedGeometry>,
+): SceneNode[] => {
+  if (!nodes || nodes.length === 0) return nodes;
+  let anyChanged = false;
+  const out = nodes.map((n) => {
+    const children = applyDeformed(n.children || [], deformed);
+    let geoms = n.geoms;
+    let damaged = false;
+    if (n.geoms?.length) {
+      const next = n.geoms.map((g) => {
+        const d = deformed[`${n.id}/${g.name}`];
+        if (!d) return g;
+        damaged = true;
+        return { ...g, type: 'mesh' as const, vertices: d.vertices, renderVertices: d.renderVertices, faces: d.faces };
+      });
+      if (damaged) geoms = next;
+    }
+    // Untouched nodes come back BY REFERENCE. The whole scene is walked on
+    // every build, and a fresh object for each undamaged body would make every
+    // memo and every identity check downstream miss — including the renderer's.
+    if (!damaged && children === (n.children || children)) return n;
+    anyChanged = true;
+    return { ...n, geoms, children, ...(damaged ? { collision: 'decompose' as const } : {}) };
+  });
+  return anyChanged ? out : nodes;
+};
+
+/** The same, as a selector over the store's own fields. */
+export const effectiveSceneGraph = applyShatterPieces;
+
+/**
+ * Cut every constraint that pointed at a body which no longer exists.
+ *
+ * A weld names its target by id, and `mjcf.ts` writes that id straight into
+ * `<weld body2="...">`. Shatter a vase with handles welded to it and the
+ * handles are left naming a body that is now fourteen shards — MuJoCo rejects
+ * the model outright and the whole scene stops compiling, which looks like the
+ * shatter having crashed rather than like a dangling reference.
+ *
+ * Physically it is the right answer anyway: whatever the handle was fixed to
+ * has stopped being a thing, so the handle comes off.
+ */
+const detachReferencesTo = (nodes: SceneNode[], goneId: string): SceneNode[] =>
+  (nodes || []).map((n) => {
+    const children = detachReferencesTo(n.children || [], goneId);
+    const severed =
+      n.weldTargetId === goneId || n.connectTargetId === goneId || n.coupleTargetId === goneId;
+    if (!severed && children === n.children) return n;
+    const next: SceneNode = { ...n, children };
+    if (next.weldTargetId === goneId) delete next.weldTargetId;
+    if (next.connectTargetId === goneId) { delete next.connectTargetId; delete next.connectAnchor; }
+    if (next.coupleTargetId === goneId) delete next.coupleTargetId;
+    return next;
+  });
+
+/**
+ * What a body weighs, so its pieces can be given shares of it.
+ *
+ * Falls back to a kilogram rather than to nothing: shards with no mass at all
+ * are ignored by the solver and simply hang in the air.
+ */
+const bodyMassOf = (node: SceneNode): number => {
+  let total = 0;
+  for (const g of node.geoms || []) if (typeof g.mass === 'number') total += g.mass;
+  return total > 0 ? total : 1;
+};
+
+/**
+ * A dent radius for a geom that did not name one: a sixth of the longest side.
+ *
+ * Scale-relative, because the same absolute radius that craters a 60 mm plate
+ * would be invisible on a 2 m one.
+ */
+const dentBounds = (verts: ArrayLike<number>): [number, number, number] => {
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  for (let i = 0; i + 2 < verts.length; i += 3) {
+    if (verts[i] < minX) minX = verts[i]; if (verts[i] > maxX) maxX = verts[i];
+    if (verts[i + 1] < minY) minY = verts[i + 1]; if (verts[i + 1] > maxY) maxY = verts[i + 1];
+    if (verts[i + 2] < minZ) minZ = verts[i + 2]; if (verts[i + 2] > maxZ) maxZ = verts[i + 2];
+  }
+  return [maxX - minX, maxY - minY, maxZ - minZ];
+};
+
+const defaultDentRadius = (verts: ArrayLike<number>): number => {
+  const span = Math.max(...dentBounds(verts));
+  return Number.isFinite(span) && span > 0 ? span / 6 : 0.02;
+};
+
+/**
+ * The widest a mark in this surface can sensibly be: half its middle dimension.
+ *
+ * Needed because the crater's width comes from the STRIKER, and a striker is
+ * not always the smaller of the two. A rubber cylinder landing on a steel plate
+ * dents itself, and the thing that dented it is the plate — whose imprint is
+ * wider than the whole cylinder, so every vertex of it would be displaced by
+ * very nearly the same amount. That is not a squashed cylinder, it is a
+ * cylinder that has moved.
+ *
+ * The MIDDLE dimension rather than the smallest, because the smallest is a
+ * sheet's thickness and would cap a plate's crater at a couple of millimetres;
+ * and rather than the largest, which for a long thin thing is its length.
+ */
+const maxDentRadius = (verts: ArrayLike<number>): number => {
+  const dims = dentBounds(verts).filter((d) => Number.isFinite(d) && d > 0).sort((a, b) => a - b);
+  if (dims.length === 0) return 0.02;
+  return dims[Math.min(1, dims.length - 1)] / 2;
+};
+
+/**
+ * Push a crater into every dentable surface of a body.
+ *
+ * A no-op on anything without a yield, which is every geom by default — so a
+ * scene that never asked for this pays a property lookup per collision.
+ */
+/**
+ * Make the damage to one surface real to the solver, if it asked for that.
+ *
+ * Reads back whatever the surface has accumulated — one crater or a hundred
+ * small ones along an edge — rather than the single blow that just landed, so
+ * wear builds up the way it looks like it does. The rebuild is coalesced,
+ * because an edge being worn away is a steady trickle of impacts and each one
+ * would otherwise compile the scene again.
+ */
+const commitDamage = (nodeId: string, geomName: string): void => {
+  const geometry = deformedGeometry(dentKey(nodeId, geomName));
+  if (!geometry) return;
+  useStore.setState({
+    deformedGeoms: {
+      ...useStore.getState().deformedGeoms,
+      [dentKey(nodeId, geomName)]: geometry,
+    },
+  });
+  scheduleShatterRebuild(() => useStore.getState().recompile(undefined, undefined, false, true, false, true));
+};
+
+const dentBody = (
+  node: SceneNode,
+  point: number[],
+  normal: number[],
+  impulseNs: number,
+  /** What hit it, so the crater is that shape and that width. */
+  striker?: Imprint | null,
+): void => {
+  for (const geom of node.geoms || []) {
+    const source = geom.renderVertices ?? geom.vertices;
+    if (!source || !geom.faces) continue;
+
+    // Piercing and denting are alternatives, not stages: there is nothing left
+    // to crease where the material has gone.
+    if (pierceVerdict(impulseNs, geom)) {
+      useDentStore.getState().pierce(
+        dentKey(node.id, geom.name),
+        source, geom.faces,
+        [point[0], point[1], point[2]],
+        [normal[0], normal[1], normal[2]],
+        Math.min(maxDentRadius(source), striker?.radius ?? geom.dentRadius ?? defaultDentRadius(source)),
+      );
+      if (geom.deformCollision) commitDamage(node.id, geom.name);
+      continue;
+    }
+
+    const depth = dentDepth(impulseNs, geom);
+    if (depth <= 0) continue;
+    /*
+     * The striker's own width decides the crater's, when it is known: a 38 mm
+     * slug leaves a 38 mm mark, and scaling the slug scales the mark without
+     * anybody editing a number. `dentRadius` on the struck geom is the fallback
+     * for a blow with no identifiable striker — landing on the floor, say.
+     */
+    const cap = maxDentRadius(source);
+    const base = Math.min(cap, striker?.radius ?? geom.dentRadius ?? defaultDentRadius(source));
+    useDentStore.getState().dent(
+      dentKey(node.id, geom.name),
+      source, geom.faces,
+      [point[0], point[1], point[2]],
+      [normal[0], normal[1], normal[2]],
+      depth,
+      // Wider as well as deeper the harder it was hit — see dentSpread — but
+      // never wider than the surface it is in.
+      Math.min(cap, base * dentSpread(impulseNs, geom)),
+      striker?.profile ?? 'dish',
+    );
+    if (geom.deformCollision) commitDamage(node.id, geom.name);
+  }
+};
+
 export const cloneSceneGraph = (sg: SceneGraph): SceneGraph => ({
   ...sg,
   nodes: (sg.nodes || []).map(cloneNode),
@@ -763,6 +1069,55 @@ export interface PhysicsState {
   prepareForDiscreteChange: () => void;
   
   isPlaying: boolean;
+  /**
+   * Welds that have sheared off during this run, by weldKey().
+   *
+   * Transient by design: a break is a simulation event, not an edit. The scene
+   * graph still says the handle is welded on, so this is never serialised into
+   * a preset, a share link or the undo stack, and resetSimulation() empties it
+   * — which is what puts the object back together.
+   */
+  brokenConstraints: string[];
+  /** The most recent break, for the "broken at 1.34 s, 212 N" readout. */
+  lastBreak: ConstraintBrokenEvent | null;
+  /**
+   * Bodies that are currently in pieces, and the pieces they are in.
+   *
+   * Deliberately the SUBSTITUTIONS rather than a finished graph. An overlay
+   * captured as a whole scene goes stale the moment anything else is edited:
+   * the build compiles the snapshot, the document change never reaches it, and
+   * dragging a body moves its gizmo while the body itself sits still. Keeping
+   * only "this id became these nodes" means the effective scene is derived from
+   * whatever the document says right now, so ordinary editing carries on
+   * working around the wreckage.
+   *
+   * The document itself is never touched, so a break stays out of undo, out of
+   * exports and out of anything shared.
+   */
+  shatteredBodies: Record<string, SceneNode[]>;
+  /**
+   * The substitutions the CURRENT model actually contains.
+   *
+   * Lags `shatteredBodies` by exactly one build, and that lag is the point. The
+   * moment a body is marked broken it is gone from the scene the renderer
+   * derives, while the shards that replace it have no bodies in the model yet —
+   * so they resolve to body -1 and are not drawn. The vase vanishes, and
+   * reappears in pieces a rebuild later. Rendering from what was built instead
+   * keeps the whole vase on screen until the instant its pieces can be drawn,
+   * and the swap happens in a single frame.
+   */
+  visibleShatteredBodies: Record<string, SceneNode[]>;
+  /**
+   * Surfaces whose damage has been made real to the solver, by dent key.
+   *
+   * Only geoms with `deformCollision` ever appear here. Like the shattered
+   * bodies, these are substitutions applied on top of the document rather than
+   * edits to it, so a dented plate is still a flat plate in anything you save,
+   * export or undo, and Reset restores it.
+   */
+  deformedGeoms: Record<string, DeformedGeometry>;
+  /** The most recent shatter, for the readout. */
+  lastShatter: { nodeId: string; name: string; pieces: number; time: number; impulseNs: number } | null;
   isLoaded: boolean;
   lastCompileError: string | null;
   isSettingsOpen: boolean;
@@ -972,7 +1327,7 @@ export interface PhysicsState {
   updateScene: (sceneGraph: SceneGraph, skipRecompile?: boolean) => void;
   updateNodePos: (id: string, newPos: [number, number, number]) => void;
   updateNodeGeom: (id: string, updates: Partial<SceneGeom>, geomIndex?: number) => void;
-  updateNodeJoint: (id: string, updates: Partial<SceneJoint>) => void;
+  updateNodeJoint: (id: string, updates: Partial<SceneJoint>, jointIndex?: number) => void;
   updateGearTeeth: (id: string, teeth: number) => void;
   rotateAroundCOM: boolean;
   setRotateAroundCOM: (val: boolean) => void;
@@ -1264,9 +1619,23 @@ export interface PhysicsState {
   setNodeCsgError: (nodeId: string, error: string | null, hash?: string) => void;
   applyNodeColliders: (nodeId: string, result: ColliderResult, skipRecompile?: boolean) => void;
   setNodeCollisionError: (nodeId: string, error: string | null, hash?: string) => void;
-  recompile: (overrideScene?: SceneGraph, overrideSelectedId?: string | null, forceReset?: boolean, keepPreset?: boolean, settle?: boolean) => Promise<void>;
+  recompile: (overrideScene?: SceneGraph, overrideSelectedId?: string | null, forceReset?: boolean, keepPreset?: boolean, settle?: boolean, immediate?: boolean) => Promise<void>;
   loadPreset: (name: string) => void;
   resetSimulation: () => void;
+  /** Put one broken weld back, without resetting the rest of the scene. */
+  restoreConstraint: (key: string) => void;
+  /** A body has been hit: break it, dent it, or ignore it. */
+  handleImpact: (event: ImpactEvent) => void;
+  /**
+   * Make a geom dentable, converting a primitive into the mesh it looked like.
+   *
+   * A dent moves vertices and a primitive has none, so this is what stands
+   * between "tick the box" and a surface that can actually take a mark.
+   * Returns false when the geom is something no mesh can be made of — a plane.
+   */
+  makeDentable: (nodeId: string, geomIndex: number, cfg: DentConfig) => boolean;
+  /** Replace a body with its pieces, in the runtime overlay only. */
+  shatterNode: (node: SceneNode, event: ImpactEvent) => void;
   recoverFromFatalWorkerError: (message: string, lastState?: { qpos: number[]; qvel: number[]; time: number }) => Promise<void>;
   recycleWorkerSeamlessly: () => Promise<void>;
   incrementMcpActive: () => void;
@@ -1518,6 +1887,12 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   },
 
   isPlaying: false,
+  brokenConstraints: [],
+  lastBreak: null,
+  shatteredBodies: {},
+  visibleShatteredBodies: {},
+  deformedGeoms: {},
+  lastShatter: null,
   isLoaded: false,
   lastCompileError: null,
   isSettingsOpen: false,
@@ -1676,8 +2051,142 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   
   resetSimulation: () => {
     getPhysicsWorkerClient().setPlaying(false);
-    set({ isPlaying: false });
+    // Clearing all of this before the rebuild is what puts a broken object back
+    // together: the scene graph was never edited, so a build with nothing in
+    // the broken set, no runtime overlay and no dents emits exactly the scene
+    // that was authored.
+    useDentStore.getState().clear();
+    set({
+      isPlaying: false,
+      brokenConstraints: [], lastBreak: null,
+      shatteredBodies: {}, visibleShatteredBodies: {}, lastShatter: null,
+      deformedGeoms: {},
+    });
     get().recompile(undefined, undefined, true, true);
+  },
+
+  /*
+   * A body has just been hit hard enough to matter.
+   *
+   * Shattering wins over denting when both apply: there is no point creasing
+   * the surface of something that is about to stop existing. Both are decided
+   * from the same measured impulse, which is what makes them read as one
+   * material rather than as two unrelated features.
+   */
+  handleImpact: (event) => {
+    const state = get();
+    // Look the body up in the graph that is actually running: a shard has no
+    // entry in the document, and a body that already broke has none either.
+    const live = effectiveSceneGraph(state.sceneGraph, state.shatteredBodies);
+    const node = findNodeById(live.nodes, event.nodeId);
+    if (!node) return;
+
+    if (shatterVerdict(event.impulseNs, node) && !state.shatteredBodies[node.id]) {
+      get().shatterNode(node, event);
+      return;
+    }
+
+    // Dent whatever was soft enough, on either end of the collision. The body
+    // that reported the blow is usually the striker, so the thing that takes
+    // the mark is usually the other one.
+    const other = event.otherNodeId ? findNodeById(live.nodes, event.otherNodeId) : null;
+    // Each end of the collision is marked by the shape of the other end.
+    dentBody(node, event.localPoint, event.localNormal, event.impulseNs, imprintOf(other?.geoms?.[0]));
+    if (other && event.otherLocalPoint && event.otherLocalNormal) {
+      dentBody(other, event.otherLocalPoint, event.otherLocalNormal, event.impulseNs, imprintOf(node.geoms?.[0]));
+    }
+  },
+
+  /*
+   * Replace a body with its pieces, in the runtime overlay only.
+   *
+   * The rebuild is NOT a force reset: the rest of the scene is mid-flight and
+   * has to stay there. It changes the number of degrees of freedom, though, so
+   * the worker cannot carry the state over by copying arrays — it matches
+   * joints by name instead, which is what the by-joint branch of doBuild is for.
+   */
+  shatterNode: (node, event) => {
+    const geom = (node.geoms || []).find((g) => (g.renderVertices ?? g.vertices) && g.faces);
+    const source = geom && (geom.renderVertices ?? geom.vertices);
+    if (!geom || !source || !geom.faces) return;
+
+    const cells = fractureMesh(source, geom.faces, {
+      pieces: node.shatterPieces,
+      seed: node.shatterSeed ?? 1,
+      focus: node.shatterPattern === 'uniform'
+        ? undefined
+        : [event.localPoint[0], event.localPoint[1], event.localPoint[2]],
+    });
+    // Fewer than two pieces is not a shatter, and replacing a body with one
+    // shard would be a visible no-op that had thrown its collider away.
+    if (cells.length < 2) return;
+
+    const { shards } = buildShatterGraph(node, source, geom.faces, cells, {
+      pos: [event.pos[0], event.pos[1], event.pos[2]],
+      xmat: event.xmat,
+      vel: [event.vel[0], event.vel[1], event.vel[2]],
+      angvel: [event.angvel[0], event.angvel[1], event.angvel[2]],
+    }, {
+      spread: node.shatterSpread,
+      totalMass: bodyMassOf(node),
+      rgba: geom.rgba,
+      friction: geom.friction,
+      solref: geom.solref,
+      solimp: geom.solimp,
+      recursion: (node.shatterDepth ?? 0) > 0 ? {
+        generation: (node.shatterGeneration ?? 0) + 1,
+        depth: node.shatterDepth!,
+        impulseNs: node.shatterImpulseNs!,
+        pieces: node.shatterPieces ?? 8,
+        pattern: node.shatterPattern,
+        spread: node.shatterSpread,
+        seed: node.shatterSeed,
+      } : undefined,
+    });
+
+    set({
+      shatteredBodies: { ...get().shatteredBodies, [node.id]: shards },
+      lastShatter: { nodeId: node.id, name: node.name, pieces: shards.length, time: event.time, impulseNs: event.impulseNs },
+    });
+    scheduleShatterRebuild(() => get().recompile(undefined, undefined, false, true, false, true));
+  },
+
+  makeDentable: (nodeId, geomIndex, cfg) => {
+    const node = findNodeById(get().sceneGraph.nodes, nodeId);
+    const geom = node?.geoms?.[geomIndex];
+    if (!node || !geom) return false;
+
+    const updates: Partial<SceneGeom> = { ...cfg };
+    if (!isDentable(geom)) {
+      const mesh = meshForDenting(geom);
+      if (!mesh) return false;
+      updates.type = 'mesh';
+      updates.vertices = mesh.vertices;
+      updates.renderVertices = toRenderVertices(mesh.vertices);
+      updates.faces = mesh.faces;
+      // A mesh geom on a body that can move has to say so, or it is drawn from
+      // vertices baked once into world space and never tracks the body again:
+      // it simulates and drags correctly and looks frozen in place.
+      if ((node.joints || []).length > 0) updates.dynamic = true;
+      // The shape is its own hull, so there is nothing for the decomposer to
+      // find and every reason not to spend a rebuild looking.
+      if (!node.collision) get().updateNode(node.id, { collision: 'hull' });
+    }
+    get().updateNodeGeom(node.id, updates, geomIndex);
+    return true;
+  },
+
+  restoreConstraint: (key) => {
+    const prev = get().brokenConstraints;
+    if (!prev.includes(key)) return;
+    const next = prev.filter((k) => k !== key);
+    set({
+      brokenConstraints: next,
+      lastBreak: get().lastBreak?.key === key ? null : get().lastBreak,
+    });
+    // Undebounced and state-preserving: the weld comes back where the body is
+    // now, not where it was when it broke.
+    get().recompile(undefined, undefined, false, true);
   },
   
   loadPreset: (name) => {
@@ -2948,13 +3457,17 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     }
   },
 
-  updateNodeJoint: (id, updates) => {
+  // `jointIndex` defaults to 0, which is what every caller meant before it
+  // existed — the inspector only ever shows one joint. A body with several (a
+  // gimbal, say) needs to be able to say which.
+  updateNodeJoint: (id, updates, jointIndex = 0) => {
     get().recordInteraction('node-joint');
     const newScene = cloneSceneGraph(get().sceneGraph);
     const traverse = (nodes: SceneNode[]) => {
       if (!nodes) return false; for (const node of nodes) {
         if (node.id === id && node.joints?.length > 0) {
-          Object.assign(node.joints[0], updates);
+          const target = node.joints[jointIndex] ?? node.joints[0];
+          Object.assign(target, updates);
           return true;
         }
         if (traverse(node.children)) return true;
@@ -3650,7 +4163,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     get().recompile(newScene, selectId);
   },
   
-  recompile: async (overrideScene?: SceneGraph, overrideSelectedId?: string | null, forceReset?: boolean, _keepPreset?: boolean, settle?: boolean) => {
+  recompile: async (overrideScene?: SceneGraph, overrideSelectedId?: string | null, forceReset?: boolean, _keepPreset?: boolean, settle?: boolean, immediate?: boolean) => {
     /*
      * We only debounce if it's NOT a force reset (which is used by presets/loaders).
      *
@@ -3682,7 +4195,15 @@ export const useStore = create<PhysicsState>()((set, get) => ({
      * caller asks for the wait back without giving the loaders one — see
      * `updateNodePos`, `updateNodeRotation` and `updateNodeGeom`.
      */
-    if (!forceReset || settle) {
+    /*
+     * `immediate` is the one way to rebuild at once AND keep the simulation
+     * state. A forceReset does the first but not the second, and everything
+     * else waits out the debounce — right for a slider being dragged, wrong for
+     * something that has already happened in the world. A body shatters on a
+     * particular step, and fifty milliseconds of the old model still being on
+     * screen is fifty milliseconds of a vase that is not there any more.
+     */
+    if ((!forceReset && !immediate) || settle) {
       if ((window as PhysicsWindow)._recompileTimeoutId) {
         clearTimeout((window as PhysicsWindow)._recompileTimeoutId);
         (window as PhysicsWindow)._recompileWake?.();
@@ -3699,7 +4220,23 @@ export const useStore = create<PhysicsState>()((set, get) => ({
       (window as PhysicsWindow).DISABLE_USEFRAME = false;
     }
     const { gravityZ, windX, windY, density, floorFriction, floorBounce } = get();
-    const sceneGraph = overrideScene ?? get().sceneGraph;
+    /*
+     * The RUNTIME graph wins, when there is one.
+     *
+     * A shattered body is not an edit: `sceneGraph` still holds the whole vase,
+     * which is what gets saved, exported, shared and handed to MCP. What is on
+     * screen and in the solver while the pieces are flying is `runtimeGraph`,
+     * and every rebuild between the break and the reset has to compile that one
+     * — including the ones nobody asked for, like the periodic worker recycle.
+     * Miss one and the vase silently reassembles itself mid-air.
+     */
+    const pieces = get().shatteredBodies;
+    const deformed = get().deformedGeoms;
+    const isRuntimeBuild = !overrideScene
+      && (Object.keys(pieces).length > 0 || Object.keys(deformed).length > 0);
+    const sceneGraph = overrideScene ?? (isRuntimeBuild
+      ? applyShatterPieces(get().sceneGraph, pieces, deformed)
+      : get().sceneGraph);
 
     /*
      * What the store held when this build started.
@@ -3723,6 +4260,12 @@ export const useStore = create<PhysicsState>()((set, get) => ({
         mujoco: MUJOCO_SHIM, model: buildModelMirror(built), data: buildDataMirror(built),
         sceneGraph, recompileId: Date.now(), lastCompileError: null, isLoaded: true,
       };
+      // A build of the runtime overlay must never write the overlay back over
+      // the document — that is the one thing that would make a break permanent.
+      if (isRuntimeBuild) delete updates.sceneGraph;
+      // This model contains exactly these pieces, so this is the moment the
+      // renderer may start drawing them.
+      if (!overrideScene) updates.visibleShatteredBodies = pieces;
       if (overrideSelectedId !== undefined) updates.selectedNodeId = overrideSelectedId;
       onNextPaint(() => {
         if (get().sceneGraph !== graphAtBuildStart && get().sceneGraph !== sceneGraph) {
@@ -3784,7 +4327,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
 
       const client = getPhysicsWorkerClient();
       client.setEnv(windX, windY);
-      const built = await client.build(xml, sceneGraph, !forceReset, seedState);
+      const built = await client.build(xml, sceneGraph, !forceReset, seedState, get().brokenConstraints);
       if (!built.ok) {
         throw new Error(built.error || 'Unknown physics worker build error');
       }
@@ -3806,7 +4349,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
           const freshClient = getPhysicsWorkerClient();
           freshClient.setEnv(windX, windY);
           const xml = compileToMJCF(sceneGraph, gravityZ, floorFriction, windX, windY, density, floorBounce);
-          const built = await freshClient.build(xml, sceneGraph, false);
+          const built = await freshClient.build(xml, sceneGraph, false, undefined, get().brokenConstraints);
           if (!built.ok) throw new Error(built.error || 'Unknown physics worker build error', { cause: e });
           applyBuilt(built);
           return;
@@ -3843,7 +4386,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
       const xml = compileToMJCF(sceneGraph, gravityZ, floorFriction, windX, windY, density, floorBounce);
       const client = getPhysicsWorkerClient();
       client.setEnv(windX, windY);
-      const built = await client.build(xml, sceneGraph, false, lastState);
+      const built = await client.build(xml, sceneGraph, false, lastState, get().brokenConstraints);
       if (!built.ok) throw new Error(built.error || 'Unknown physics worker build error');
       set({ mujoco: MUJOCO_SHIM, model: buildModelMirror(built), data: buildDataMirror(built), recompileId: Date.now(), lastCompileError: null });
       if (wasPlaying) { client.setPlaying(true); set({ isPlaying: true }); }
@@ -3888,7 +4431,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
       const xml = compileToMJCF(sceneGraph, gravityZ, floorFriction, windX, windY, density, floorBounce);
       const client = getPhysicsWorkerClient();
       client.setEnv(windX, windY);
-      const built = await client.build(xml, sceneGraph, false, seedState);
+      const built = await client.build(xml, sceneGraph, false, seedState, get().brokenConstraints);
       if (!built.ok) throw new Error(built.error || 'Unknown physics worker build error');
       if (built.heapBytes) lastHeapBytes = built.heapBytes;
       set({ mujoco: MUJOCO_SHIM, model: buildModelMirror(built), data: buildDataMirror(built), recompileId: Date.now(), lastCompileError: null });

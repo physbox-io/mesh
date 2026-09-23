@@ -41,6 +41,7 @@ import type {
   JointHistory,
   WorkerToMainMessage,
 } from './physicsWorkerProtocol';
+import { canCrumple, crumpleAsWeld, crumpleKey, holdSteps, isBreakable, weldKey, weldOverload, type WeldBreakConfig } from '../utils/breakThresholds';
 
 type Mujoco = Awaited<ReturnType<typeof load_mujoco>>;
 type MjModel = InstanceType<Mujoco['MjModel']>;
@@ -677,6 +678,517 @@ const post = (msg: WorkerToMainMessage, transfer: Transferable[] = []) => self.p
 // manipulation (dragging bodies) on top of the unavoidable message-passing
 // round trip. Ticking in lockstep with the main thread's rAF keeps the added
 // overhead to just that one cross-thread hop.
+// ---- Breakable welds ------------------------------------------------------
+//
+// MuJoCo spends a measurable force holding every weld together and reports it in
+// `efc_force`: six rows per weld equality, the first three force in newtons and
+// the last three torque in newton-metres. A 1 kg body hanging off a weld reads
+// 9.81 N, so the numbers a body is authored with are the numbers a person can
+// reason about.
+//
+// Breaking one costs nothing. `data.eq_active` is a writable Uint8Array view —
+// not one of the heap-copy handles `dat.contact` is, so none of the delete()
+// discipline below applies to it — and clearing a row disables that equality
+// from the next step onwards. No rebuild, no change to nq or nv, no state to
+// carry over. The part simply stops being held on and keeps the momentum it
+// already had.
+//
+// The worker breaks the weld itself rather than asking the main thread to,
+// because a round trip is several frames the scene would otherwise spend still
+// holding a weld that has already failed. What the main thread gets is the news.
+
+/** Per-weld bookkeeping, rebuilt once per model build rather than per step. */
+interface BreakableWeld {
+  eqIndex: number;
+  key: string;
+  nodeId: string;
+  targetId: string;
+  cfg: WeldBreakConfig;
+  /** Consecutive steps this weld has been over its limit. */
+  consecutive: number;
+  /**
+   * Set when this is a crumple zone rather than a weld between two parts.
+   *
+   * The difference is only in what happens after: a weld that lets go leaves
+   * two free bodies, while a crumple leaves a joint that has to be stiffened
+   * into its new shape so the part stays folded instead of flapping.
+   */
+  crumple?: { jointName: string; dampingAfter: number };
+}
+
+let breakableWelds: BreakableWeld[] = [];
+
+/**
+ * Keys of welds that have already given way.
+ *
+ * Mirrored from the main thread on every build. The worker cannot be the
+ * authority here: it is terminated and respawned every fourth build and every
+ * twenty seconds of play, and a fresh worker has no memory of what broke.
+ */
+let brokenWeldKeys: Set<string> = new Set();
+
+/**
+ * Match each breakable body to the equality that holds it.
+ *
+ * Deliberately a forward lookup from the scene graph rather than a parse of the
+ * `weld_constraint_N` names the emitter generates. That ordinal is positional:
+ * add a body and every weld after it renumbers, so a cached index would start
+ * pointing at somebody else's weld after the next edit. Going out from the node
+ * to its body id and finding the equality that names it survives any of that.
+ */
+const rebuildBreakableWelds = () => {
+  breakableWelds = [];
+  const mdl = model;
+  const mj = mujoco;
+  if (!mdl || !mj) return;
+
+  const weldType = mj.mjtEq.mjEQ_WELD.value;
+
+  /*
+   * Which equality is which.
+   *
+   * A weld between two parts is found from the body it holds; a crumple lock is
+   * found by NAME, because there may be several on the same body and the body
+   * alone cannot tell them apart. Both are welds as far as MuJoCo is concerned.
+   */
+  const eqIdByName: Record<string, number> = {};
+  for (let i = 0; i < mdl.neq; i++) {
+    const nm = mj.mj_id2name(mdl, mj.mjtObj.mjOBJ_EQUALITY.value, i);
+    if (nm) eqIdByName[nm] = i;
+  }
+
+  const collect = (nodes: SceneNode[]) => {
+    if (!nodes) return;
+    for (const node of nodes) {
+      for (const j of node.joints || []) {
+        if (!canCrumple(j)) continue;
+        const eqIndex = eqIdByName[`crumple_lock_${j.name}`];
+        if (eqIndex === undefined) continue;
+        breakableWelds.push({
+          eqIndex,
+          key: crumpleKey(j.name),
+          nodeId: node.id,
+          targetId: j.name,
+          cfg: crumpleAsWeld(j),
+          consecutive: 0,
+          crumple: { jointName: j.name, dampingAfter: j.crumpleDampingAfter ?? 0 },
+        });
+      }
+      const cfg = node as WeldBreakConfig;
+      if (node.weldTargetId && isBreakable(cfg)) {
+        const bodyId = bodyIdCache[node.id];
+        if (bodyId !== undefined) {
+          for (let i = 0; i < mdl.neq; i++) {
+            if (mdl.eq_type[i] === weldType && mdl.eq_obj1id[i] === bodyId) {
+              breakableWelds.push({
+                eqIndex: i,
+                key: weldKey(node.id, node.weldTargetId),
+                nodeId: node.id,
+                targetId: node.weldTargetId,
+                cfg: {
+                  weldBreakForceN: cfg.weldBreakForceN,
+                  weldBreakTorqueNm: cfg.weldBreakTorqueNm,
+                  weldBreakHoldSteps: holdSteps(cfg),
+                },
+                consecutive: 0,
+              });
+              break;
+            }
+          }
+        }
+      }
+      collect(node.children || []);
+    }
+  };
+  collect(sceneGraph.nodes);
+};
+
+/**
+ * Stiffen a crumple zone into the shape it has just folded into.
+ *
+ * `model.dof_damping` is a plain writable view, so this needs no rebuild. It is
+ * what stops a released joint from swinging: a car wing that folds and then
+ * flaps reads as a hinge coming undone, not as metal taking a set.
+ */
+const releaseCrumple = (w: BreakableWeld) => {
+  const mdl = model;
+  if (!w.crumple || !mdl) return;
+  const jntId = jointIdCache[w.crumple.jointName];
+  if (jntId === undefined) return;
+  const dofAdr = mdl.jnt_dofadr[jntId];
+  if (dofAdr >= 0 && dofAdr < mdl.nv) mdl.dof_damping[dofAdr] = w.crumple.dampingAfter;
+};
+
+/** Re-break, without ceremony, every weld the main thread says is already gone. */
+const applyBrokenWelds = () => {
+  if (!data || brokenWeldKeys.size === 0) return;
+  for (const w of breakableWelds) {
+    if (!brokenWeldKeys.has(w.key)) continue;
+    data.eq_active[w.eqIndex] = 0;
+    releaseCrumple(w);
+  }
+};
+
+/**
+ * Has anything given way this step?
+ *
+ * Costs nothing when the scene has no breakable welds in it, which is every
+ * scene that existed before this feature — the early return is the first line.
+ */
+const checkConstraintBreaks = () => {
+  if (breakableWelds.length === 0) return;
+  const dat = data;
+  const mj = mujoco;
+  if (!dat || !mj) return;
+
+  const equalityType = mj.mjtConstraint.mjCNSTR_EQUALITY.value;
+  const nefc = dat.nefc;
+  if (nefc === 0) return;
+
+  for (const w of breakableWelds) {
+    if (brokenWeldKeys.has(w.key)) continue;
+
+    // A weld contributes six consecutive rows: three of force, three of torque.
+    // Scan rather than assume an offset — the row order follows the solver's
+    // constraint ordering, which is not ours to predict.
+    let fx = 0, fy = 0, fz = 0, tx = 0, ty = 0, tz = 0;
+    let seen = 0;
+    for (let i = 0; i < nefc; i++) {
+      if (dat.efc_type[i] !== equalityType || dat.efc_id[i] !== w.eqIndex) continue;
+      const f = dat.efc_force[i];
+      switch (seen) {
+        case 0: fx = f; break;
+        case 1: fy = f; break;
+        case 2: fz = f; break;
+        case 3: tx = f; break;
+        case 4: ty = f; break;
+        default: tz = f; break;
+      }
+      if (++seen === 6) break;
+    }
+    if (seen === 0) continue;
+
+    const forceN = Math.sqrt(fx * fx + fy * fy + fz * fz);
+    const torqueNm = Math.sqrt(tx * tx + ty * ty + tz * tz);
+    const verdict = weldOverload(forceN, torqueNm, w.cfg, w.consecutive);
+    w.consecutive = verdict.consecutive;
+    if (!verdict.broken) continue;
+
+    dat.eq_active[w.eqIndex] = 0;
+    releaseCrumple(w);
+    brokenWeldKeys.add(w.key);
+    post({
+      type: 'CONSTRAINT_BROKEN',
+      key: w.key,
+      nodeId: w.nodeId,
+      targetId: w.targetId,
+      kind: w.crumple ? 'crumple' : 'weld',
+      time: dat.time,
+      forceN,
+      torqueNm,
+    });
+  }
+};
+
+// ---- Impacts --------------------------------------------------------------
+//
+// What counts as "hit hard" is IMPULSE, not force. Contact force in a hard
+// solver is a spike whose height depends on the timestep as much as on the
+// collision, so a force threshold is a number that changes meaning when the
+// timestep does. Momentum does not: 0.2 kg arriving at 5 m/s and stopping dead
+// is 1 N*s whatever the solver was doing, and it is a quantity somebody can
+// reason about without knowing anything about MuJoCo.
+//
+// The cheap signal is `qfrc_constraint` — the net constraint force on each
+// degree of freedom, a plain view with no heap copy behind it, summed over a
+// short sliding window. Resting on a table barely registers: a 1 kg body at
+// rest accumulates 0.05 N*s over the window and stays there. Being struck
+// clears a whole newton-second in a few milliseconds.
+//
+// Only once that trips does the expensive read happen. `dat.contact` copies the
+// entire contact array onto the wasm heap every time it is touched — the leak
+// that used to hit the 2 GB ceiling — so it is read once, on the step of the
+// impact, purely to find out WHERE the body was hit. Never per step.
+
+/** Sliding window for the impulse sum, in steps (1 ms each). */
+const IMPACT_WINDOW_STEPS = 5;
+/** Steps to wait before a body may report another impact. */
+const IMPACT_COOLDOWN_STEPS = 250;
+
+interface ImpactWatch {
+  nodeId: string;
+  bodyId: number;
+  dofadr: number;
+  /**
+   * How many of this joint's degrees of freedom are translational.
+   *
+   * Six for a free joint, of which the first three are the linear ones. For a
+   * hinge there is exactly one, and reading three would walk straight off the
+   * end of it into whatever joint MuJoCo laid out next — so a swinging arm
+   * would be reporting some other body's constraint force as its own.
+   */
+  dofCount: number;
+  /** The lowest threshold anything on this body cares about, in N*s. */
+  triggerNs: number;
+  ring: Float64Array;
+  cursor: number;
+  cooldown: number;
+  /**
+   * The load this body carries when nothing is happening to it.
+   *
+   * Without this a heavy body cannot be watched at all: a 60 kg plate lying on
+   * the ground shows a steady 590 N of constraint force just holding itself up,
+   * which fills a 5 ms window with 3 N*s of perfectly uneventful resting
+   * contact. Only the EXCESS over what it normally carries is a blow, so the
+   * baseline is tracked slowly and subtracted. A long time constant on purpose:
+   * it has to be far slower than any impact, or it would learn the impact.
+   */
+  baseline: number;
+  /**
+   * Whether the baseline has seen anything yet.
+   *
+   * Starting it at zero makes a body's own resting weight look like a blow on
+   * the very first step, so every dentable thing in the scene got dented the
+   * instant it loaded. The first reading IS the baseline.
+   */
+  primed: boolean;
+  /**
+   * A blow in progress, waiting for its peak.
+   *
+   * The running impulse is reported when it crosses the LOWEST threshold
+   * anything in the scene cares about — which is not the same as how hard the
+   * blow was. Reporting at that instant meant a steel slug and a rubber one
+   * both arrived as "just over the smallest number in the scene", and a plate
+   * that yields higher up was never told about either. So the crossing starts a
+   * short watch instead, and what gets reported is the largest the impulse
+   * reaches over the rest of the window: five milliseconds later, and the
+   * difference between a hard blow and a soft one intact.
+   */
+  pending: { stepsLeft: number; maxImpulseNs: number; point: number[]; normal: number[]; otherBodyId: number } | null;
+}
+
+/** ~500 steps, so the baseline follows a body settling but never an impact. */
+const IMPACT_BASELINE_ALPHA = 0.002;
+
+let impactWatches: ImpactWatch[] = [];
+/** Body id -> node id, for naming the other party to a collision. */
+let bodyIdToNodeId: Record<number, string> = {};
+
+/**
+ * Which bodies are worth watching, and how hard they have to be hit.
+ *
+ * A body with neither a shatter threshold nor a dentable geom is not watched at
+ * all, so a scene that uses none of this pays for one `length === 0` test per
+ * step.
+ */
+const rebuildImpactWatches = () => {
+  impactWatches = [];
+  bodyIdToNodeId = {};
+  const mdl = model;
+  if (!mdl) return;
+
+  /*
+   * The softest thing in the scene, if anything is dentable at all.
+   *
+   * A body resting on the ground is a poor witness to being hit: squeezed
+   * between the blow above and the ground below, its NET constraint force
+   * barely moves, because the ground reaction rises to meet the load. The
+   * hammer is the honest witness — a falling weight carries no constraint force
+   * at all until the moment it arrives, so what shows up on it IS the
+   * collision. So anything that can move is watched when the scene contains
+   * something dentable, and a blow is attributed to both parties.
+   */
+  let minDentNs = Infinity;
+  const scanDentable = (nodes: SceneNode[]) => {
+    for (const node of nodes || []) {
+      for (const g of node.geoms || []) {
+        if (typeof g.dentYieldNs === 'number' && g.dentYieldNs > 0) minDentNs = Math.min(minDentNs, g.dentYieldNs);
+        // A surface that can only be pierced is still worth watching for.
+        if (typeof g.pierceImpulseNs === 'number' && g.pierceImpulseNs > 0) minDentNs = Math.min(minDentNs, g.pierceImpulseNs);
+      }
+      scanDentable(node.children || []);
+    }
+  };
+  scanDentable(sceneGraph.nodes);
+
+  const collect = (nodes: SceneNode[]) => {
+    if (!nodes) return;
+    for (const node of nodes) {
+      const thresholds: number[] = [];
+      if (typeof node.shatterImpulseNs === 'number' && node.shatterImpulseNs > 0) {
+        thresholds.push(node.shatterImpulseNs);
+      }
+      for (const g of node.geoms || []) {
+        if (typeof g.dentYieldNs === 'number' && g.dentYieldNs > 0) thresholds.push(g.dentYieldNs);
+        if (typeof g.pierceImpulseNs === 'number' && g.pierceImpulseNs > 0) thresholds.push(g.pierceImpulseNs);
+      }
+      if (Number.isFinite(minDentNs)) thresholds.push(minDentNs);
+      const bodyId = bodyIdCache[node.id];
+      if (bodyId !== undefined) bodyIdToNodeId[bodyId] = node.id;
+      // Needs a joint of its own: a body welded into the scenery has no degrees
+      // of freedom for a constraint force to show up on.
+      const jointName = node.joints?.[0]?.name;
+      const jointId = jointName !== undefined ? jointIdCache[jointName] : undefined;
+      if (thresholds.length > 0 && bodyId !== undefined && jointId !== undefined) {
+        const jointType = mdl.jnt_type[jointId];
+        impactWatches.push({
+          nodeId: node.id,
+          bodyId,
+          dofadr: mdl.jnt_dofadr[jointId],
+          dofCount: Math.min(3, JOINT_NV[jointType] ?? 1),
+          triggerNs: Math.min(...thresholds),
+          ring: new Float64Array(IMPACT_WINDOW_STEPS),
+          cursor: 0,
+          cooldown: 0,
+          baseline: 0,
+          primed: false,
+          pending: null,
+        });
+      }
+      collect(node.children || []);
+    }
+  };
+  collect(sceneGraph.nodes);
+};
+
+/**
+ * Where on the body the blow landed, in the body's own frame.
+ *
+ * The one place `dat.contact` is read outside history sampling, and it is read
+ * once per impact rather than once per step. Read-once/delete-in-finally, the
+ * same discipline buildHistoryEntry documents.
+ */
+const impactSiteOf = (bodyId: number, againstBodyId?: number): { point: number[]; normal: number[]; otherBodyId: number } | null => {
+  const dat = data, mdl = model;
+  if (!dat || !mdl) return null;
+
+  let best: { point: number[]; normal: number[]; otherBodyId: number } | null = null;
+  const contactVec = dat.contact;
+  try {
+    const ncon = contactVec.size();
+    for (let c = 0; c < ncon; c++) {
+      const contact = contactVec.get(c);
+      if (!contact) continue;
+      try {
+        const b1 = mdl.geom_bodyid[contact.geom1];
+        const b2 = mdl.geom_bodyid[contact.geom2];
+        if (b1 !== bodyId && b2 !== bodyId) continue;
+        // When we already know who hit whom, take THAT contact. A plate lying
+        // on the ground is in contact with the ground at every step, and the
+        // first contact found for it is usually one of those — which would put
+        // the dent on its underside rather than where it was struck.
+        if (againstBodyId !== undefined && b1 !== againstBodyId && b2 !== againstBodyId) continue;
+        const pos = contact.pos;
+        const frame = contact.frame;
+        // contact.frame's first row is the normal, pointing from geom1 to geom2.
+        const sign = b1 === bodyId ? 1 : -1;
+        best = {
+          point: [pos[0], pos[1], pos[2]],
+          normal: [frame[0] * sign, frame[1] * sign, frame[2] * sign],
+          otherBodyId: b1 === bodyId ? b2 : b1,
+        };
+      } finally {
+        contact.delete();
+      }
+      if (best) break;
+    }
+  } finally {
+    contactVec.delete();
+  }
+  if (!best) return null;
+
+  // World -> body local: R^T (p - xpos). xmat is row-major, so its transpose is
+  // a column read.
+  const px = best.point[0] - dat.xpos[bodyId * 3];
+  const py = best.point[1] - dat.xpos[bodyId * 3 + 1];
+  const pz = best.point[2] - dat.xpos[bodyId * 3 + 2];
+  const m = bodyId * 9;
+  const local = (x: number, y: number, z: number): number[] => [
+    dat.xmat[m] * x + dat.xmat[m + 3] * y + dat.xmat[m + 6] * z,
+    dat.xmat[m + 1] * x + dat.xmat[m + 4] * y + dat.xmat[m + 7] * z,
+    dat.xmat[m + 2] * x + dat.xmat[m + 5] * y + dat.xmat[m + 8] * z,
+  ];
+  return {
+    point: local(px, py, pz),
+    normal: local(best.normal[0], best.normal[1], best.normal[2]),
+    otherBodyId: best.otherBodyId,
+  };
+};
+
+/** Has anything been hit hard enough to care about this step? */
+const checkImpacts = (dt: number) => {
+  if (impactWatches.length === 0) return;
+  const dat = data;
+  if (!dat) return;
+
+  for (const w of impactWatches) {
+    if (w.cooldown > 0) { w.cooldown--; continue; }
+
+    let sum = 0;
+    for (let i = 0; i < w.dofCount; i++) {
+      const c = dat.qfrc_constraint[w.dofadr + i];
+      sum += c * c;
+    }
+    const force = Math.sqrt(sum);
+
+    // Only what this body is NOT normally carrying counts as a blow.
+    if (!w.primed) { w.baseline = force; w.primed = true; }
+    const excess = Math.max(0, force - w.baseline);
+    w.baseline += (force - w.baseline) * IMPACT_BASELINE_ALPHA;
+
+    w.ring[w.cursor] = excess * dt;
+    w.cursor = (w.cursor + 1) % IMPACT_WINDOW_STEPS;
+
+    let impulseNs = 0;
+    for (let i = 0; i < IMPACT_WINDOW_STEPS; i++) impulseNs += w.ring[i];
+
+    if (w.pending) {
+      // Still measuring. The site was taken at first contact, while there
+      // certainly was one; only the size of the blow is still in question.
+      if (impulseNs > w.pending.maxImpulseNs) w.pending.maxImpulseNs = impulseNs;
+      if (--w.pending.stepsLeft > 0) continue;
+
+      const { maxImpulseNs, point, normal, otherBodyId } = w.pending;
+      w.pending = null;
+      w.cooldown = IMPACT_COOLDOWN_STEPS;
+      w.ring.fill(0);
+
+      // The same blow in the other body's frame, so a dent lands where the
+      // thing was actually struck rather than at its origin.
+      const otherNodeId = otherBodyId >= 0 ? bodyIdToNodeId[otherBodyId] : undefined;
+      const otherSite = otherBodyId >= 0 ? impactSiteOf(otherBodyId, w.bodyId) : null;
+
+      post({
+        type: 'IMPACT',
+        nodeId: w.nodeId,
+        otherNodeId,
+        otherLocalPoint: otherSite?.point,
+        otherLocalNormal: otherSite?.normal,
+        time: dat.time,
+        impulseNs: maxImpulseNs,
+        localPoint: point,
+        localNormal: normal,
+        pos: [dat.xpos[w.bodyId * 3], dat.xpos[w.bodyId * 3 + 1], dat.xpos[w.bodyId * 3 + 2]],
+        xmat: Array.from({ length: 9 }, (_, i) => dat.xmat[w.bodyId * 9 + i]),
+        vel: [dat.cvel[w.bodyId * 6 + 3], dat.cvel[w.bodyId * 6 + 4], dat.cvel[w.bodyId * 6 + 5]],
+        angvel: [dat.cvel[w.bodyId * 6], dat.cvel[w.bodyId * 6 + 1], dat.cvel[w.bodyId * 6 + 2]],
+      });
+      continue;
+    }
+
+    if (impulseNs < w.triggerNs) continue;
+
+    const site = impactSiteOf(w.bodyId);
+    w.pending = {
+      stepsLeft: IMPACT_WINDOW_STEPS,
+      maxImpulseNs: impulseNs,
+      point: site?.point ?? [0, 0, 0],
+      normal: site?.normal ?? [0, 0, 1],
+      otherBodyId: site?.otherBodyId ?? -1,
+    };
+  }
+};
+
 const stepTick = (delta: number) => {
   if (!isPlaying || !model || !data || !mujoco) return;
   accumulator += Math.min(delta, 0.1);
@@ -697,6 +1209,8 @@ const stepTick = (delta: number) => {
       applyFreeJointDamping(sceneGraph.nodes);
 
       mujoco.mj_step(model, data);
+      checkConstraintBreaks();
+      checkImpacts(stepSize);
       stepCount++;
 
       if (stepCount % 10 === 0) {
@@ -783,16 +1297,74 @@ const buildIdMaps = () => {
   };
 };
 
+/** How many qpos/qvel slots each joint type occupies: free, ball, slide, hinge. */
+const JOINT_NQ = [7, 4, 1, 1];
+const JOINT_NV = [6, 3, 1, 1];
+
+interface CarriedState {
+  nq: number; nv: number; nu: number; time: number;
+  qpos: Float64Array; qvel: Float64Array; ctrl: Float64Array;
+  /** Joint name -> where its state lived in the model being replaced. */
+  joints: Record<string, { type: number; qposadr: number; dofadr: number }>;
+}
+
+/**
+ * Everything worth carrying out of a model that is about to be freed.
+ *
+ * Plain JS arrays on purpose: the handles are deleted moments later and every
+ * read of one after that throws.
+ */
+const captureState = (mdl: MjModel | null, dat: MjData | null): CarriedState | null => {
+  if (!mdl || !dat) return null;
+  try {
+    const joints: CarriedState['joints'] = {};
+    for (const name in jointIdCache) {
+      const id = jointIdCache[name];
+      joints[name] = { type: mdl.jnt_type[id], qposadr: mdl.jnt_qposadr[id], dofadr: mdl.jnt_dofadr[id] };
+    }
+    return {
+      nq: mdl.nq, nv: mdl.nv, nu: mdl.nu, time: dat.time,
+      qpos: Float64Array.from(dat.qpos),
+      qvel: Float64Array.from(dat.qvel),
+      ctrl: Float64Array.from(dat.ctrl),
+      joints,
+    };
+  } catch {
+    // A handle already gone is not worth failing a build over; the build just
+    // falls back to the document pose.
+    return null;
+  }
+};
+
 const doBuild = (
   xml: string,
   newSceneGraph: SceneGraph,
   preserveState: boolean,
   seedState?: { qpos: number[]; qvel: number[]; ctrl?: number[]; time: number },
+  brokenConstraints?: string[],
 ) => {
+  if (brokenConstraints) brokenWeldKeys = new Set(brokenConstraints);
   const oldModel = model;
   const oldData = data;
 
   if (!mujoco) throw new Error('MuJoCo module not loaded yet');
+
+  /*
+   * Take the old state as plain arrays BEFORE anything is released.
+   *
+   * delete() genuinely frees, and embind then throws on any access — reading
+   * `oldModel.nq` after the fact does not return a stale number, it raises
+   * "cannot call emscripten binding method MjModel.nq getter on deleted
+   * object", which fails the whole build. So the copy-forward below cannot
+   * touch the handles at all; it reads this snapshot instead.
+   *
+   * The joint table is the other half of it. Carrying state across a rebuild
+   * that CHANGES the degrees of freedom — a body shattering into a dozen
+   * shards — cannot be a straight array copy, because every address after the
+   * new bodies shifts. Matching by joint NAME survives that, and it is the only
+   * thing that does.
+   */
+  const carried = captureState(oldModel, oldData);
 
   /*
    * Release the previous model and data.
@@ -837,6 +1409,8 @@ const doBuild = (
   data = newData;
   sceneGraph = newSceneGraph;
   rebuildIdCaches();
+  rebuildBreakableWelds();
+  rebuildImpactWatches();
   for (const k of Object.keys(scriptCache)) delete scriptCache[k];
 
   // Explicit seed state (from the main thread's live mirror) takes priority
@@ -850,15 +1424,67 @@ const doBuild = (
     if (seedState.ctrl) for (let i = 0; i < Math.min(seedState.ctrl.length, newModel.nu); i++) newData.ctrl[i] = seedState.ctrl[i];
     newData.time = seedState.time;
     mujoco.mj_forward(newModel, newData);
-  } else if (preserveState && oldModel && oldData && oldModel.nq === newModel.nq && oldModel.nv === newModel.nv) {
-    const nq = Math.min(oldModel.nq, newModel.nq);
-    const nv = Math.min(oldModel.nv, newModel.nv);
-    const nu = Math.min(oldModel.nu, newModel.nu);
-    for (let i = 0; i < nq; i++) newData.qpos[i] = oldData.qpos[i];
-    for (let i = 0; i < nv; i++) newData.qvel[i] = oldData.qvel[i];
-    for (let i = 0; i < nu; i++) newData.ctrl[i] = oldData.ctrl[i];
-    newData.time = oldData.time;
+  } else if (preserveState && carried && carried.nq === newModel.nq && carried.nv === newModel.nv) {
+    const nq = Math.min(carried.nq, newModel.nq);
+    const nv = Math.min(carried.nv, newModel.nv);
+    const nu = Math.min(carried.nu, newModel.nu);
+    for (let i = 0; i < nq; i++) newData.qpos[i] = carried.qpos[i];
+    for (let i = 0; i < nv; i++) newData.qvel[i] = carried.qvel[i];
+    for (let i = 0; i < nu; i++) newData.ctrl[i] = carried.ctrl[i];
+    newData.time = carried.time;
     mujoco.mj_forward(newModel, newData);
+  } else if (carried && preserveState) {
+    /*
+     * The degrees of freedom changed, so there is no array to copy.
+     *
+     * This is the case a body shattering creates: a dozen new free joints
+     * appear, every address after them moves, and the straight copy above would
+     * be nonsense even where it fitted. Matching by joint NAME carries every
+     * body that still exists exactly where it was, and leaves the new ones to
+     * be placed by the document — which for a shard is where it broke, with the
+     * velocity of the point it used to be riding on its initialVelocity.
+     *
+     * Without this, shattering one vase resets the whole scene to its opening
+     * pose: everything else in mid-air snaps back to where it started.
+     */
+    const placed = new Set<string>();
+    for (const name in jointIdCache) {
+      const from = carried.joints[name];
+      if (!from) continue;
+      const id = jointIdCache[name];
+      const type = newModel.jnt_type[id];
+      if (type !== from.type) continue; // same name, different joint: not the same state
+      const nq = JOINT_NQ[type] ?? 1;
+      const nv = JOINT_NV[type] ?? 1;
+      const qTo = newModel.jnt_qposadr[id], vTo = newModel.jnt_dofadr[id];
+      if (qTo + nq > newModel.nq || vTo + nv > newModel.nv) continue;
+      if (from.qposadr + nq > carried.qpos.length || from.dofadr + nv > carried.qvel.length) continue;
+      for (let i = 0; i < nq; i++) newData.qpos[qTo + i] = carried.qpos[from.qposadr + i];
+      for (let i = 0; i < nv; i++) newData.qvel[vTo + i] = carried.qvel[from.dofadr + i];
+      placed.add(name);
+    }
+    for (let i = 0; i < Math.min(carried.nu, newModel.nu); i++) newData.ctrl[i] = carried.ctrl[i];
+    newData.time = carried.time;
+    mujoco.mj_forward(newModel, newData);
+
+    // Anything that did NOT come across is new, and gets its opening velocity.
+    let seededNew = false;
+    const seedNew = (nodes: SceneNode[]) => {
+      if (!nodes) return;
+      for (const node of nodes) {
+        node.joints?.forEach((j) => {
+          if (!j.initialVelocity || placed.has(j.name)) return;
+          const id = jointIdCache[j.name];
+          if (id === undefined) return;
+          const dofAdr = newModel.jnt_dofadr[id];
+          for (let i = 0; i < j.initialVelocity!.length; i++) newData.qvel[dofAdr + i] = j.initialVelocity![i];
+          seededNew = true;
+        });
+        seedNew(node.children);
+      }
+    };
+    seedNew(sceneGraph.nodes);
+    if (seededNew) mujoco.mj_forward(newModel, newData);
   } else {
     const actuators: SceneJoint[] = [];
     const traverse = (nodes: SceneNode[]) => {
@@ -896,6 +1522,12 @@ const doBuild = (
     }
     if (needForward) mujoco.mj_forward(newModel, newData);
   }
+
+  // Last, so nothing above can put a broken weld back together. A rebuild is
+  // the one moment a break can be silently undone — the model is new, every
+  // eq_active row starts at 1, and the recycle timer fires one of these every
+  // twenty seconds of play.
+  applyBrokenWelds();
 
   if (isSharedSupported) {
     const createSharedArray = (size: number) => new Float64Array(new SharedArrayBuffer(size * 8));
@@ -991,6 +1623,10 @@ const runHeadless = (
   const savedModel = model, savedData = data, savedSceneGraph = sceneGraph;
   const savedBodyIdCache = bodyIdCache, savedJointIdCache = jointIdCache;
   const savedGeomIdCache = geomIdCache, savedGeomNameCache = geomNameCache, savedActuatorIdCache = actuatorIdCache;
+  // breakableWelds holds indices into the LIVE model's equality list, so it has
+  // to be swapped out with everything else or the headless run would break
+  // welds by the interactive model's numbering.
+  const savedBreakableWelds = breakableWelds, savedBrokenWeldKeys = brokenWeldKeys;
 
   const warnings: string[] = [];
 
@@ -1004,6 +1640,8 @@ const runHeadless = (
     data = headlessData;
     sceneGraph = headlessSceneGraph;
     rebuildIdCaches();
+    brokenWeldKeys = new Set();
+    rebuildBreakableWelds();
 
     mujoco.mj_forward(model, data);
 
@@ -1039,6 +1677,7 @@ const runHeadless = (
         executeScripts(sceneGraph.nodes, lastAero);
         applyFreeJointDamping(sceneGraph.nodes);
         mujoco!.mj_step(model!, data!);
+        checkConstraintBreaks();
       },
       time: () => data!.time,
       isBad: () => !Number.isFinite(data!.qpos[0]),
@@ -1067,6 +1706,7 @@ const runHeadless = (
     model = savedModel; data = savedData; sceneGraph = savedSceneGraph;
     bodyIdCache = savedBodyIdCache; jointIdCache = savedJointIdCache;
     geomIdCache = savedGeomIdCache; geomNameCache = savedGeomNameCache; actuatorIdCache = savedActuatorIdCache;
+    breakableWelds = savedBreakableWelds; brokenWeldKeys = savedBrokenWeldKeys;
   }
 };
 
@@ -1077,7 +1717,7 @@ self.onmessage = async (evt: MessageEvent) => {
       case 'BUILD': {
         if (!mujoco) await loadMujoco();
         try {
-          const result = doBuild(msg.xml, msg.sceneGraph, msg.preserveState, msg.seedState);
+          const result = doBuild(msg.xml, msg.sceneGraph, msg.preserveState, msg.seedState, msg.brokenConstraints);
           post({ type: 'BUILT', id: msg.id, ok: true, ...result });
           if (isPlaying && isSharedSupported) {
             startWorkerLoop();

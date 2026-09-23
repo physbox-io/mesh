@@ -19,6 +19,7 @@ import { needsScadBuild } from '../src/hooks/useCsgCompile';
 import { makePresetNoteCard } from '../src/utils/noteCards';
 import type { SceneNode } from '../src/types/scene';
 import { simulate, type Sim } from './helpers/simulate';
+import { crumpleAsWeld, weldOverload } from '../src/utils/breakThresholds';
 
 const preset = (key: string) => (PRESETS as Record<string, { scene: never }>)[key].scene;
 
@@ -344,4 +345,122 @@ describe('OpenSCAD presets build on load', () => {
     const node: SceneNode = { id: 'x', name: 'x', type: 'body', pos: [0, 0, 0], geoms: [], joints: [], children: [] };
     expect(needsScadBuild(node)).toBe(false);
   });
+});
+
+/*
+ * Shatter: the demo for breakable welds, and the only preset whose note card
+ * makes claims about forces rather than about positions.
+ *
+ * The thresholds in it were measured against this scene rather than guessed, so
+ * they are only right for this ball at this drop height. That makes them exactly
+ * the sort of number a later edit silently invalidates — a heavier ball, a
+ * shorter arm, a course moved — which is what these assertions are for.
+ *
+ * The break decision here is the real one from utils/breakThresholds.ts. What is
+ * reproduced is only the worker's plumbing around it: find the weld's six
+ * constraint rows, and clear `eq_active` when it gives way.
+ */
+describe('shatter', () => {
+  const EQUALITY = 0; // mjtConstraint.mjCNSTR_EQUALITY
+
+  /** The load on equality `eq`, the way physicsWorker measures it. */
+  const weldLoad = (sim: Sim, eq: number) => {
+    const rows: number[] = [];
+    for (let i = 0; i < sim.data.nefc && rows.length < 6; i++) {
+      if (sim.data.efc_type[i] === EQUALITY && sim.data.efc_id[i] === eq) rows.push(sim.data.efc_force[i]);
+    }
+    const [fx = 0, fy = 0, fz = 0, tx = 0, ty = 0, tz = 0] = rows;
+    return { forceN: Math.hypot(fx, fy, fz), torqueNm: Math.hypot(tx, ty, tz) };
+  };
+
+  /**
+   * Equality index -> the body it holds, by id rather than by position in the
+   * list. Same mapping physicsWorker uses, and for the same reason: the order
+   * welds are emitted in is not a contract.
+   */
+  const weldOwners = (sim: Sim, names: string[]) => {
+    const idToName = new Map(names.map((n) => [sim.bodyId(n), n]));
+    return Array.from({ length: sim.model.neq }, (_, i) => idToName.get(sim.model.eq_obj1id[i]) ?? `eq${i}`);
+  };
+
+  const COURSES = ['course0', 'course1', 'course2', 'course3', 'course4'];
+  // `bracket_arm` is a crumple zone, which is a weld like any other as far as
+  // MuJoCo is concerned — that is the whole reason it cost so little to add.
+  const WELDED = [...COURSES, 'vase_handle_l', 'vase_handle_r', 'bracket_arm'];
+
+  const nodeByName: Record<string, SceneNode> = {};
+  const index = (nodes: SceneNode[]) => nodes.forEach((n) => { nodeByName[n.name] = n; index(n.children || []); });
+  index((preset('shatter') as unknown as { nodes: SceneNode[] }).nodes);
+
+  let sim: Sim;
+  afterAll(() => sim?.dispose());
+
+  it('stands still until the ball arrives, then loses everything but its base', async () => {
+    sim = await simulate(preset('shatter'));
+    const owners = weldOwners(sim, WELDED);
+    expect(new Set(owners)).toEqual(new Set(WELDED));
+
+    // --- Before the strike. A tower that sags under its own weight would make
+    //     every threshold below meaningless.
+    const startZ = COURSES.map((c) => sim.bodyPos(c)[2]);
+    // Before anything has happened: the slug reaches the shelf at about 0.26 s
+    // and the ball reaches the vase at about 0.31, so this has to be read while
+    // both are still in the air.
+    sim.run(0.15);
+    COURSES.forEach((c, i) => {
+      expect(Math.abs(sim.bodyPos(c)[2] - startZ[i])).toBeLessThan(0.005);
+      expect(Math.abs(sim.bodyPos(c)[0])).toBeLessThan(0.005);
+    });
+    // Nothing is leaning on the welds yet — single newtons, not hundreds.
+    owners.forEach((_, i) => expect(weldLoad(sim, i).forceN).toBeLessThan(20));
+
+    // --- Swing, strike, and let the debris settle.
+    const consecutive = new Array(owners.length).fill(0);
+    const broke: Record<string, number> = {};
+    for (let step = 0; step < 6000; step++) {
+      sim.step(1);
+      for (let i = 0; i < owners.length; i++) {
+        if (sim.data.eq_active[i] === 0) continue;
+        const { forceN, torqueNm } = weldLoad(sim, i);
+        const node = nodeByName[owners[i]];
+        const crumple = node?.joints?.find((j) => j.crumpleTorqueNm !== undefined);
+        const cfg = crumple ? crumpleAsWeld(crumple) : node;
+        const verdict = weldOverload(forceN, torqueNm, cfg, consecutive[i]);
+        consecutive[i] = verdict.consecutive;
+        if (verdict.broken) {
+          sim.data.eq_active[i] = 0;
+          broke[owners[i]] = sim.time();
+        }
+      }
+    }
+
+    // The vase's handles are welded on at almost nothing and leave when the
+    // ball reaches the vase, well before the tower has finished coming down.
+    expect(broke.vase_handle_l ?? broke.vase_handle_r).toBeDefined();
+
+    // The shelf bracket gives when the slug lands on it, and then FOLDS —
+    // which is the difference between a crumple and a break. A weld that lets
+    // go leaves two loose parts; this leaves a joint that has taken a set.
+    expect(broke.bracket_arm, 'the bracket should have given').toBeDefined();
+    const folded = sim.jointPos('bracket_hinge');
+    expect(folded).toBeLessThan(-0.3);
+    sim.run(1.0);
+    // ...and stays there. A spring would come back.
+    expect(Math.abs(sim.jointPos('bracket_hinge') - folded)).toBeLessThan(0.05);
+
+    // Every course above the base shears off...
+    for (const c of ['course1', 'course2', 'course3', 'course4']) {
+      expect(broke[c], `${c} should have sheared off`).toBeDefined();
+    }
+    // ...and the base does not, which is what leaves a stump on the plinth.
+    expect(broke.course0).toBeUndefined();
+    expect(sim.bodyPos('course0')[2]).toBeCloseTo(startZ[0], 2);
+    expect(Math.abs(sim.bodyPos('course0')[0])).toBeLessThan(0.05);
+
+    // Everything else ends up on the floor, downrange of where it started.
+    for (const c of ['course1', 'course2', 'course3', 'course4']) {
+      expect(sim.bodyPos(c)[2], `${c} should be on the floor`).toBeLessThan(0.2);
+      expect(sim.bodyPos(c)[0], `${c} should be downrange`).toBeGreaterThan(0.1);
+    }
+  }, 120_000);
 });

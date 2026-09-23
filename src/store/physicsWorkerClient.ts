@@ -8,7 +8,9 @@
 import type { SceneGraph } from '../types/scene';
 import type {
   BuiltResult,
+  ConstraintBrokenEvent,
   FrameSnapshot,
+  ImpactEvent,
   HeadlessResult,
   HistoryEntry,
   SeedState,
@@ -167,6 +169,10 @@ export class PhysicsWorkerClient {
   private pendingTelemetry = new Map<string, Pending<HistoryEntry | null>>();
   onFrame: ((snap: FrameSnapshot) => void) | null = null;
   onError: ((message: string, fatal: boolean, lastState?: SeedState) => void) | null = null;
+  /** A weld has just sheared off. See utils/breakThresholds.ts. */
+  onBreak: ((event: ConstraintBrokenEvent) => void) | null = null;
+  /** A body has been hit hard enough to shatter or to dent. */
+  onImpact: ((event: ImpactEvent) => void) | null = null;
 
   constructor() {
     this.worker = new Worker(new URL('../workers/physicsWorker.ts', import.meta.url), { type: 'module' });
@@ -186,6 +192,12 @@ export class PhysicsWorkerClient {
           break;
         case 'ERROR':
           this.onError?.(msg.message, !!msg.fatal, msg.lastState);
+          break;
+        case 'CONSTRAINT_BROKEN':
+          this.onBreak?.(msg);
+          break;
+        case 'IMPACT':
+          this.onImpact?.(msg);
           break;
         case 'HEADLESS_RESULT': {
           const pending = this.pendingHeadless.get(msg.id);
@@ -217,16 +229,26 @@ export class PhysicsWorkerClient {
     };
   }
 
+  /**
+   * `brokenConstraints` is not optional in spirit, only in type.
+   *
+   * A build hands the worker a brand new model whose equalities all start
+   * active, so anything that has already broken has to be re-broken on the far
+   * side. The worker cannot remember on its own: it is terminated and respawned
+   * every fourth build and every twenty seconds of play. Every call site that
+   * rebuilds during play has to pass this or the scene quietly heals itself.
+   */
   build(
     xml: string,
     sceneGraph: SceneGraph,
     preserveState: boolean,
     seedState?: SeedState,
+    brokenConstraints?: string[],
   ): Promise<BuiltResult> {
     const id = Math.random().toString(36).slice(2);
     return new Promise((resolve, reject) => {
       this.pendingBuilds.set(id, { resolve, reject });
-      this.worker.postMessage({ type: 'BUILD', id, xml, sceneGraph, preserveState, seedState });
+      this.worker.postMessage({ type: 'BUILD', id, xml, sceneGraph, preserveState, seedState, brokenConstraints });
     });
   }
 

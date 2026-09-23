@@ -53,10 +53,23 @@ export function buildSolidLathe(
 ): { vertices: number[]; faces: number[] } {
   const vertices: number[] = [];
   const faces: number[] = [];
-  const N = slices + 1;
+  /*
+   * One vertex per slice, not one per slice plus a closing duplicate.
+   *
+   * A ring that ends with a second copy of its first vertex leaves the seam
+   * stitched to nothing: the two coincident columns are never joined, so the
+   * mesh carries a full-height crack of boundary edges — a hundred of them on a
+   * 24-stack vase — and is not watertight. It renders perfectly well, which is
+   * why it is easy to miss, but `tests/movableBodies.test.ts` checks every
+   * preset mesh for exactly this, and an open shell is the wrong thing to hand
+   * a physics engine or an exporter. Wrapping the index with `% slices` closes
+   * it with no extra vertices at all.
+   */
+  const N = slices;
+  const wrap = (j: number) => (j + 1) % N;
 
   const pushRing = (z: number, isInner: boolean) => {
-    for (let j = 0; j <= slices; ++j) {
+    for (let j = 0; j < slices; ++j) {
       const theta = (j / slices) * Math.PI * 2;
       const outerR = radiusAt(z, theta);
       const r = isInner ? outerR * (1 - thicknessRatio) : outerR;
@@ -80,24 +93,24 @@ export function buildSolidLathe(
   for (let i = 0; i < stacks; ++i) {
     for (let j = 0; j < slices; ++j) {
       const first = outerBase + i * N + j;
-      const second = first + N;
-      faces.push(first, second, first + 1);
-      faces.push(second, second + 1, first + 1);
+      const firstNext = outerBase + i * N + wrap(j);
+      faces.push(first, first + N, firstNext);
+      faces.push(first + N, firstNext + N, firstNext);
     }
   }
   // Inner wall — reversed relative to the outer wall's index order.
   for (let i = 0; i < stacks; ++i) {
     for (let j = 0; j < slices; ++j) {
       const first = innerBase + i * N + j;
-      const second = first + N;
-      faces.push(first, first + 1, second);
-      faces.push(second, first + 1, second + 1);
+      const firstNext = innerBase + i * N + wrap(j);
+      faces.push(first, firstNext, first + N);
+      faces.push(first + N, firstNext, firstNext + N);
     }
   }
   // Bottom annulus (z = 0 ring).
   for (let j = 0; j < slices; ++j) {
-    const oa = outerBase + j, ob = outerBase + j + 1;
-    const ia = innerBase + j, ib = innerBase + j + 1;
+    const oa = outerBase + j, ob = outerBase + wrap(j);
+    const ia = innerBase + j, ib = innerBase + wrap(j);
     faces.push(oa, ob, ia);
     faces.push(ia, ob, ib);
   }
@@ -105,10 +118,34 @@ export function buildSolidLathe(
   const topOuter = outerBase + stacks * N;
   const topInner = innerBase + stacks * N;
   for (let j = 0; j < slices; ++j) {
-    const oa = topOuter + j, ob = topOuter + j + 1;
-    const ia = topInner + j, ib = topInner + j + 1;
+    const oa = topOuter + j, ob = topOuter + wrap(j);
+    const ia = topInner + j, ib = topInner + wrap(j);
     faces.push(oa, ia, ob);
     faces.push(ia, ib, ob);
+  }
+
+  /*
+   * Flip every triangle.
+   *
+   * The four loops above are internally consistent — each wall and annulus is
+   * wound the same way as its neighbours — but consistently the WRONG way round
+   * for this codebase: they give the shell a negative signed volume, which by
+   * the convention csg.ts and the MJCF builder share means the normals point
+   * inward. `SceneLayer` draws mesh geoms with `side={THREE.FrontSide}`, so an
+   * inside-out shell is not drawn as a broken mesh; it is drawn as a
+   * HALF-TRANSPARENT one, where you see through the near wall to the inside of
+   * the far one. That is the trap californiaRelief.ts shipped with.
+   *
+   * Nothing had caught it because nothing used this module — megaBustStudio.ts
+   * carries its own copy of the same function — so the first real consumer
+   * (presets/shatter.ts) was also the first test of it. Reversing here rather
+   * than in each loop keeps the four windings readable and legibly consistent
+   * with one another, and `tests/lathe.test.ts` pins the sign.
+   */
+  for (let i = 0; i < faces.length; i += 3) {
+    const t = faces[i + 1];
+    faces[i + 1] = faces[i + 2];
+    faces[i + 2] = t;
   }
 
   return { vertices, faces };

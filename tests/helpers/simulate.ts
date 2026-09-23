@@ -50,6 +50,8 @@ export interface Sim {
   run(seconds: number): void;
   time(): number;
   bodyPos(name: string): [number, number, number];
+  /** MuJoCo's body id, for the tests that have to read model arrays by index. */
+  bodyId(name: string): number;
   jointPos(name: string): number;
   jointVel(name: string): number;
   /** Peak absolute value of a joint's position over a run — for stability checks. */
@@ -203,6 +205,7 @@ export async function simulate(scene: SceneGraph, opts: SimOptions = {}): Promis
       if (bid === -1) throw new Error(`no body "${name}" in the compiled model`);
       return [data.xpos[bid * 3], data.xpos[bid * 3 + 1], data.xpos[bid * 3 + 2]];
     },
+    bodyId,
     jointPos: (name: string) => {
       const jid = jointId(name);
       if (jid === -1) throw new Error(`no joint "${name}" in the compiled model`);

@@ -18,6 +18,7 @@ import { isGizmoBusy } from './gizmoBusy';
 import { CsgNegativeGhosts } from './CsgGhosts';
 import { FeatureEdges } from './FeatureEdges';
 import { EDGE_THRESHOLD_MESH, EDGE_THRESHOLD_PRIMITIVE, wedgeGeometry } from './edgeView';
+import { dentKey, useDentStore } from '../../store/dentStore';
 import { PulleyRopesRenderer } from './PulleyRopes';
 import SculptSurface from '../SculptSurface';
 import LatticeSurface from '../LatticeSurface';
@@ -642,15 +643,41 @@ export const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, se
     }
   });
 
+  /*
+   * Deformation, if this surface has taken any.
+   *
+   * Dents live outside the scene graph entirely (see store/dentStore.ts) because
+   * writing vertices through the store would rebuild the MuJoCo model and throw
+   * away the very drop that caused the dent. So they arrive here as an overlay
+   * on the geom's own vertices, keyed by node and geom name.
+   *
+   * Rebuilding the whole BufferGeometry per dent rather than patching the
+   * attribute in place is deliberate: a dent is a rare event — the worker will
+   * not report another blow to the same body for a quarter of a second — so this
+   * costs nothing worth the complexity of a hand-managed buffer, and it keeps
+   * the ordinary undented path byte-for-byte what it always was.
+   */
+  const dent = useDentStore((s) => s.dents[dentKey(nodeId ?? '', name)]);
+
   // Build Three.js BufferGeometry from inline vertex/face arrays for mesh type
   const meshBufferGeometry = useMemo(() => {
     if (type !== 'mesh' || !vertices || !faces) return null;
     const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(vertices), 3));
-    geo.setIndex(new THREE.BufferAttribute(new Uint32Array(faces), 1));
+    const positions = dent
+      ? new Float32Array(dent.mesh.positions.subarray(0, dent.mesh.vertexCount * 3))
+      : new Float32Array(vertices);
+    const indices = dent
+      ? new Uint32Array(dent.mesh.faces.subarray(0, dent.mesh.faceCount * 3))
+      : new Uint32Array(faces);
+    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geo.setIndex(new THREE.BufferAttribute(indices, 1));
     geo.computeVertexNormals();
     return geo;
-  }, [type, vertices, faces]);
+    // `dent` itself is intentionally not a dependency: a new store object is
+    // handed out on every dent, and the version is the thing that says whether
+    // the geometry actually changed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [type, vertices, faces, dent?.version]);
 
   // The argument list buildPaintGeometry needs, taken from the geom's own
   // half-extents rather than from geometryArgs — the same rule the MCP bridge

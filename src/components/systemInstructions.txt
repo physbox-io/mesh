@@ -72,6 +72,14 @@ Every node in the "nodes" array represents a physical body and is defined as:
   coupleTargetId: string (id of target body to couple velocity with)
   coupleRatio: number (gear/coupling ratio)
   weldTargetId: string (id of target body to weld to)
+  weldBreakForceN: number (newtons of pull the weld survives before it shears off; omit and it never breaks. A 1 kg body hanging off a weld pulls about 10 N, so a few hundred is a sturdy joint and a few tens is decorative. Breaking is TRANSIENT - the scene still says the part is welded on, and reset puts it back.)
+  weldBreakTorqueNm: number (newton-metres of twist the weld survives; either limit alone is enough)
+  weldBreakHoldSteps: number (consecutive overloaded steps before it counts, default 3; guards against the single-step spike a hard contact produces)
+  shatterImpulseNs: number (newton-seconds of impulse that breaks this body into pieces; omit and it never shatters. The pieces are cut from the body's own outline and weigh what it weighed. TRANSIENT - reset makes it whole.)
+  shatterPieces: number (how many pieces, 2..24, default 8)
+  shatterPattern: 'uniform' | 'radial' (radial crowds the small pieces around the point of impact; default)
+  shatterSpread: number (extra outward speed per piece, m/s)
+  shatterDepth: number (how many times the PIECES may break again when they land; 0 default, 2 max. Each shard inherits a threshold scaled to its share of the body. Every generation multiplies the body count and each break rebuilds the model, so use it sparingly.)
   connectTargetId: string (id of target body to connect with point-to-point)
   connectAnchor: [number, number, number] (anchor point for connect constraint)
   isAerodynamic: boolean (enables aerodynamic lift/drag model)
@@ -96,6 +104,10 @@ Every geom represents a collision and visual shape attached to a body:
   density: number <- Optional kg/m3 for what the geom is MADE OF; its volume then sets its mass. MuJoCo's default is 1000 (water). Ignored when mass is set. Oak ~700, pine ~500, concrete ~2400, steel ~7800; a tree crown or other mostly-air volume is single digits.
   friction: [number, number, number] <- Optional friction parameters [slide, spin, roll] (e.g. [1.0, 0.005, 0.0001])
   fromto: [number, number, number, number, number, number] <- Capsule line definition [x1,y1,z1, x2,y2,z2]
+  dentYieldNs: number <- Optional. Newton-seconds of impulse above which this surface takes a permanent crater. A dent moves vertices, so setting this on a PRIMITIVE converts it to the mesh it already looked like (a plane cannot be converted). COSMETIC - contact keeps using the undented shape. TRANSIENT - reset clears it. Keep the depth rate well under dentMaxDepth/(typical impulse - yield), or the cap is reached just past the threshold and every blow leaves an identical mark.
+  dentDepthPerNs: number <- Optional. Metres of depth per newton-second over the yield.
+  dentRadius: number <- Optional. Crater radius in metres.
+  dentMaxDepth: number <- Optional. Hard cap on how deep one spot can be pushed, in metres.
 
 ═══════════════════════════════════════════
 SCENEJOINT SCHEMA
@@ -106,6 +118,9 @@ Every joint constrains motion of the body relative to its parent:
   axis: [number, number, number] <- Direction axis of rotation/translation (e.g., [0, 1, 0] for Y-rotation)
   pos: [number, number, number] <- Joint anchor position
   damping: number <- Resistance force (default 0 or 1-5 for smooth decay)
+  crumpleTorqueNm: number <- Optional. N*m past which this joint stops being rigid and FOLDS, permanently. Hinges and sliders only. TRANSIENT - reset straightens it. NOTE a joint only folds if something still loads it after it gives: an upright post gives gravity no lever and goes on standing, while a cantilever folds under its own weight.
+  crumpleRangeDeg: [number, number] <- Optional. How far it may fold once it has given, in degrees.
+  crumpleDampingAfter: number <- Optional. Damping written in at the moment it gives, so it settles into its new shape instead of swinging into it.
   stiffness: number <- Spring stiffness force
   range: [number, number] <- Rotation/translation limits (e.g. [-90, 90] in degrees)
   limited: boolean <- Enable range limits

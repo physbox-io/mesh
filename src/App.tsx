@@ -13,10 +13,12 @@ import { useMuJoCoInit } from './hooks/useMuJoCo';
 import { useMCPBridge } from './hooks/useMCPBridge';
 import { useCoarsePointer } from './hooks/useCoarsePointer';
 import { useStore, getPhysicsWorkerClient, cloneSceneGraph } from './store/useStore';
+import { useDentStore } from './store/dentStore';
+import { applyShatterPieces } from './store/useStore';
 import type { SceneGraph, SceneNode, SceneGeom, SceneJoint, CsgOp } from './types/scene';
 import type { ModelMirror, MujocoShim } from './types/sceneLayer';
 import type { WeakSpot } from './utils/printAnalysis';
-import { Play, Square, SlidersHorizontal, Settings, Box, Circle, X, RotateCcw, Trash2, Layers, CircleDot, Zap, Info, Triangle, Disc, Code, Menu, Shapes, Minimize2, Save, Download, Upload, Undo, Redo, FileText, ChevronDown, ChevronUp, PanelRight, Edit3, Printer, Scissors, Sparkles, Sun, Moon, Pyramid, Cone, Donut, ChartSpline, Paintbrush, Grid3x3, Image as ImageIcon, Share2, Copy, Check } from 'lucide-react';
+import { Play, Square, SlidersHorizontal, Settings, Box, Circle, X, RotateCcw, Trash2, Layers, CircleDot, Zap, Info, Triangle, Disc, Code, Menu, Shapes, Minimize2, Save, Download, Upload, Undo, Redo, FileText, ChevronDown, ChevronUp, PanelRight, Edit3, Printer, Scissors, Sparkles, Sun, Moon, Pyramid, Cone, Donut, ChartSpline, Paintbrush, Grid3x3, Image as ImageIcon, Share2, Copy, Check, Link2, Unlink, Hammer } from 'lucide-react';
 import { useRef, useMemo, useEffect, useCallback, useState, type RefObject, type ComponentProps, type ComponentRef } from 'react';
 import AICopilotPanel from './components/AICopilotPanel';
 import * as THREE from 'three';
@@ -27,6 +29,8 @@ import { SimplifyModifier } from 'three/examples/jsm/modifiers/SimplifyModifier.
 import { loadCompiler, compileSCAD, isCompilerReady } from './utils/openscad';
 import { getStickyRotation } from './utils/geom';
 import { csgSourceGeoms, csgHashOf, collisionModeOf, CSG_DEFAULT_SECTORS } from './utils/csg';
+import { DEFAULT_HOLD_STEPS, isBreakable, weldKey } from './utils/breakThresholds';
+import { isDentable, needsConversionForDenting } from './utils/dentMesh';
 import { collidersAreStale, solidMeshGeoms } from './utils/convexDecomposition';
 import { useCsgAutoCompile } from './hooks/useCsgCompile';
 import { PRESETS } from './presets/presetScenes';
@@ -648,6 +652,7 @@ const DOCS_TABS = [
     { id: 'collision', label: '💥 Collision Physics' },
     { id: 'material', label: '🧪 Physical Material' },
     { id: 'friction', label: '🛷 Friction Controls' },
+    { id: 'breaking', label: '💔 Breaking & Denting' },
   ]},
   { group: 'Bodies & Joints', items: [
     { id: 'launch', label: '🚀 Launch Velocity' },
@@ -955,6 +960,14 @@ function App() {
   const [presetNameInput, setPresetNameInput] = useState('');
   const activeGeomIndex = useStore((s) => s.activeGeomIndex);
   const setActiveGeomIndex = useStore((s) => s.setActiveGeomIndex);
+  // While anything is in pieces the scene on screen is the document with the
+  // broken bodies swapped for their shards. See `shatterPieces` in the store.
+  const shatteredBodies = useStore((s) => s.visibleShatteredBodies);
+  const lastShatter = useStore((s) => s.lastShatter);
+  const dents = useDentStore((s) => s.dents);
+  const brokenConstraints = useStore((s) => s.brokenConstraints);
+  const lastBreak = useStore((s) => s.lastBreak);
+  const restoreConstraint = useStore((s) => s.restoreConstraint);
   const [noteCards, setNoteCards] = useState<NoteCard[]>(() => {
     const initialPreset = useStore.getState().activePreset;
     if (initialPreset && !initialPreset.startsWith('user:')) {
@@ -1194,8 +1207,16 @@ function App() {
     sculptNodeId, setSculptNodeId, setSculptBase,
     latticeNodeId, setLatticeNodeId,
     extraSelectedIds, combineBodies,
-    undo, redo, undoStack, redoStack
+    undo, redo, undoStack, redoStack,
+    makeDentable,
   } = useStore();
+
+  // Exactly what the solver was handed, so the picture and the physics cannot
+  // disagree about which bodies exist.
+  const effectiveGraph = useMemo(
+    () => applyShatterPieces(sceneGraph, shatteredBodies),
+    [sceneGraph, shatteredBodies],
+  );
 
   const [activeWeakSpot, setActiveWeakSpot] = useState<WeakSpot | null>(null);
 
@@ -3521,7 +3542,7 @@ function App() {
                 model={model} 
                 data={data} 
                 mujoco={mujoco} 
-                sceneGraph={sceneGraph} 
+                sceneGraph={effectiveGraph} 
                 selectedNodeId={selectedNodeId}
                 setSelectedNodeId={setSelectedNodeId}
                 activeWeakSpot={activeWeakSpot}
@@ -4371,6 +4392,101 @@ function App() {
                       />
                     </div>
                   )}
+
+                  {/* Crumple — a joint that is rigid until it is overloaded,
+                      and then folds and stays folded. Held still by an
+                      auto-emitted weld; releasing it is the same one-byte write
+                      that shears a weld off. See utils/breakThresholds.ts. */}
+                  {(joint.type === 'hinge' || joint.type === 'slide') && (() => {
+                    const on = joint.crumpleTorqueNm !== undefined;
+                    const key = `crumple:${joint.name}`;
+                    const given = brokenConstraints.includes(key);
+                    const info = given && lastBreak?.key === key ? lastBreak : null;
+                    const range = joint.crumpleRangeDeg ?? [-80, 0];
+                    return (
+                      <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-2">
+                        <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 mb-1 flex items-center justify-between">
+                          <span className="flex items-center gap-1">🪗 Crumple Zone</span>
+                          {given
+                            ? <span className="text-[10px] font-semibold text-amber-600">folded</span>
+                            : <DocsInfoButton tab="breaking" onOpen={openDocs} />}
+                        </h3>
+
+                        <label className="flex items-center gap-2 text-xs text-slate-700 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={on}
+                            onChange={(e) => updateNodeJoint(selectedNode.id, e.target.checked
+                              ? { crumpleTorqueNm: 10, crumpleRangeDeg: [-80, 0], crumpleDampingAfter: 5 }
+                              : { crumpleTorqueNm: undefined, crumpleRangeDeg: undefined, crumpleDampingAfter: undefined })}
+                            className="accent-amber-500 cursor-pointer"
+                          />
+                          This joint can take a permanent set
+                        </label>
+
+                        {on && (
+                          <>
+                            <div className="flex items-center gap-2">
+                              <label className="text-[10px] text-slate-500 w-20 shrink-0">Gives at</label>
+                              <SettledNumberInput
+                                step="1" min={0}
+                                value={joint.crumpleTorqueNm ?? 0}
+                                onChange={(v) => updateNodeJoint(selectedNode.id, { crumpleTorqueNm: v })}
+                                className="flex-1 min-w-0 px-2 py-1 border border-slate-200 rounded text-xs bg-white text-slate-700 outline-none focus:border-blue-500"
+                              />
+                              <span className="text-[10px] text-slate-400 w-8 shrink-0">N·m</span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <label className="text-[10px] text-slate-500 w-20 shrink-0">Folds to</label>
+                              <SettledNumberInput
+                                step="5"
+                                value={range[0]}
+                                onChange={(v) => updateNodeJoint(selectedNode.id, { crumpleRangeDeg: [v, range[1]] })}
+                                className="flex-1 min-w-0 px-2 py-1 border border-slate-200 rounded text-xs bg-white text-slate-700 outline-none focus:border-blue-500"
+                              />
+                              <SettledNumberInput
+                                step="5"
+                                value={range[1]}
+                                onChange={(v) => updateNodeJoint(selectedNode.id, { crumpleRangeDeg: [range[0], v] })}
+                                className="flex-1 min-w-0 px-2 py-1 border border-slate-200 rounded text-xs bg-white text-slate-700 outline-none focus:border-blue-500"
+                              />
+                              <span className="text-[10px] text-slate-400 w-8 shrink-0">deg</span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <label className="text-[10px] text-slate-500 w-20 shrink-0">Stiffness after</label>
+                              <SettledNumberInput
+                                step="1" min={0}
+                                value={joint.crumpleDampingAfter ?? 0}
+                                onChange={(v) => updateNodeJoint(selectedNode.id, { crumpleDampingAfter: v })}
+                                className="flex-1 min-w-0 px-2 py-1 border border-slate-200 rounded text-xs bg-white text-slate-700 outline-none focus:border-blue-500"
+                              />
+                              <span className="text-[10px] text-slate-400 w-8 shrink-0">N·m·s</span>
+                            </div>
+                            <p className="text-[10px] text-slate-400 leading-snug">
+                              Held rigid until the torque on it passes the limit, then it folds
+                              within the range above and <strong className="text-slate-500">stays
+                              folded</strong> — a spring comes back, a crumpled bracket does not.
+                              Give it enough stiffness after that it settles into its new shape
+                              instead of swinging into it. Reset straightens it.
+                            </p>
+                            {info && (
+                              <div className="flex items-center gap-2 text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1 leading-snug">
+                                <span className="flex-1">
+                                  Gave at {info.time.toFixed(2)} s, carrying {info.torqueNm.toFixed(1)} N·m.
+                                </span>
+                                <button
+                                  onClick={() => restoreConstraint(key)}
+                                  className="shrink-0 px-1.5 py-0.5 rounded border border-amber-300 hover:bg-amber-100 font-medium"
+                                >
+                                  Straighten
+                                </button>
+                              </div>
+                            )}
+                          </>
+                        )}
+                      </div>
+                    );
+                  })()}
 
                   {(joint.type === 'hinge' || joint.type === 'slide' || joint.type === 'ball') && (
                     <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-3">
@@ -5659,6 +5775,387 @@ function App() {
                 );
               })()}
 
+              {/* Constraints — welding one body to another, and what it takes to
+                  shear it off again. Both the weld itself and the break
+                  thresholds were reachable only over MCP before this. */}
+              {(() => {
+                // A body cannot be welded to itself or to anything hanging off
+                // it: MuJoCo's equality would be fighting the body hierarchy
+                // that already holds them together.
+                const excluded = new Set<string>();
+                const markSubtree = (n: SceneNode) => {
+                  excluded.add(n.id);
+                  (n.children || []).forEach(markSubtree);
+                };
+                markSubtree(selectedNode);
+
+                const candidates: SceneNode[] = [];
+                const collect = (nodes: SceneNode[]) => {
+                  for (const n of nodes || []) {
+                    if (!excluded.has(n.id)) candidates.push(n);
+                    collect(n.children || []);
+                  }
+                };
+                collect(sceneGraph.nodes);
+                if (candidates.length === 0) return null;
+
+                const welded = !!selectedNode.weldTargetId;
+                const breakable = isBreakable(selectedNode);
+                const key = welded ? weldKey(selectedNode.id, selectedNode.weldTargetId!) : '';
+                const isBroken = welded && brokenConstraints.includes(key);
+                const breakInfo = isBroken && lastBreak?.key === key ? lastBreak : null;
+                const targetName = candidates.find((c) => c.id === selectedNode.weldTargetId)?.name;
+
+                return (
+                  <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-2">
+                    <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 mb-1 flex items-center gap-1.5">
+                      <Link2 className="w-3.5 h-3.5 text-indigo-500" /> Constraints
+                      {isBroken && <span className="ml-auto text-[10px] font-semibold text-amber-600">broken</span>}
+                    </h3>
+
+                    <label className="text-[10px] font-medium text-slate-500">Welded to</label>
+                    <select
+                      value={selectedNode.weldTargetId || ''}
+                      onChange={(e) => updateNode(selectedNode.id, { weldTargetId: e.target.value || undefined })}
+                      className="w-full px-2.5 py-1.5 border border-slate-200 rounded text-xs bg-white text-slate-700 outline-none focus:border-blue-500 cursor-pointer font-medium"
+                      title="Holds this body rigidly to another one, wherever the two happen to be. Use it to fix a handle to a mug or a leg to a table."
+                    >
+                      <option value="">— not welded —</option>
+                      {candidates.map((c) => (
+                        <option key={c.id} value={c.id}>{c.name}</option>
+                      ))}
+                    </select>
+
+                    <label className="text-[10px] font-medium text-slate-500 mt-1">Pinned to (ball joint)</label>
+                    <select
+                      value={selectedNode.connectTargetId || ''}
+                      onChange={(e) => updateNode(selectedNode.id, { connectTargetId: e.target.value || undefined })}
+                      className="w-full px-2.5 py-1.5 border border-slate-200 rounded text-xs bg-white text-slate-700 outline-none focus:border-blue-500 cursor-pointer font-medium"
+                      title="Holds one point of this body to another body, but lets it swivel about that point — a pin rather than a weld."
+                    >
+                      <option value="">— not pinned —</option>
+                      {candidates.map((c) => (
+                        <option key={c.id} value={c.id}>{c.name}</option>
+                      ))}
+                    </select>
+
+                    {welded && (
+                      <>
+                        <label className="flex items-center gap-2 text-xs text-slate-700 mt-2 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={breakable}
+                            onChange={(e) => updateNode(selectedNode.id, e.target.checked
+                              ? { weldBreakForceN: 100, weldBreakHoldSteps: DEFAULT_HOLD_STEPS }
+                              : { weldBreakForceN: undefined, weldBreakTorqueNm: undefined, weldBreakHoldSteps: undefined })}
+                            className="accent-indigo-500 cursor-pointer"
+                          />
+                          This weld can shear off
+                        </label>
+
+                        {breakable && (
+                          <>
+                            <div className="flex items-center gap-2">
+                              <label className="text-[10px] text-slate-500 w-20 shrink-0">Pull limit</label>
+                              <SettledNumberInput
+                                step="10"
+                                min={0}
+                                value={selectedNode.weldBreakForceN ?? 0}
+                                onChange={(v) => updateNode(selectedNode.id, { weldBreakForceN: v })}
+                                className="flex-1 min-w-0 px-2 py-1 border border-slate-200 rounded text-xs bg-white text-slate-700 outline-none focus:border-blue-500"
+                              />
+                              <span className="text-[10px] text-slate-400 w-8 shrink-0">N</span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <label className="text-[10px] text-slate-500 w-20 shrink-0">Twist limit</label>
+                              <SettledNumberInput
+                                step="1"
+                                min={0}
+                                value={selectedNode.weldBreakTorqueNm ?? 0}
+                                onChange={(v) => updateNode(selectedNode.id, { weldBreakTorqueNm: v || undefined })}
+                                className="flex-1 min-w-0 px-2 py-1 border border-slate-200 rounded text-xs bg-white text-slate-700 outline-none focus:border-blue-500"
+                                placeholder="none"
+                              />
+                              <span className="text-[10px] text-slate-400 w-8 shrink-0">N·m</span>
+                            </div>
+                            <p className="text-[10px] text-slate-400 leading-snug">
+                              A 1 kg body hanging off this weld pulls about 10 N, so a few
+                              hundred is a sturdy joint and a few tens is a decorative one.
+                              Leave a limit at zero to ignore it. Breaking is part of the
+                              run, not an edit — the part is still welded on in the saved
+                              scene, and Reset puts it back.
+                            </p>
+                          </>
+                        )}
+
+                        {isBroken && (
+                          <div className="flex items-center gap-2 text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1 leading-snug">
+                            <Unlink className="w-3 h-3 shrink-0" />
+                            <span className="flex-1">
+                              {breakInfo
+                                ? `Sheared off ${targetName ? `from ${targetName} ` : ''}at ${breakInfo.time.toFixed(2)} s, carrying ${breakInfo.forceN.toFixed(0)} N.`
+                                : 'This weld has sheared off.'}
+                            </span>
+                            <button
+                              onClick={() => restoreConstraint(key)}
+                              className="shrink-0 px-1.5 py-0.5 rounded border border-amber-300 hover:bg-amber-100 font-medium"
+                            >
+                              Restore
+                            </button>
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                );
+              })()}
+
+              {/* Fracture — what it takes to break this body into pieces, and
+                  how many. The pieces are cut from the body's convex hull, so
+                  they tile it exactly; see utils/fracture.ts. */}
+              {(() => {
+                const meshGeom = (selectedNode.geoms || []).find(
+                  (g) => g.type === 'mesh' && (g.renderVertices || g.vertices) && g.faces,
+                );
+                if (!meshGeom) return null;
+
+                const enabled = typeof selectedNode.shatterImpulseNs === 'number' && selectedNode.shatterImpulseNs > 0;
+                const movable = (selectedNode.joints || []).length > 0;
+                const inPieces = !!shatteredBodies[selectedNode.id];
+                const info = lastShatter?.nodeId === selectedNode.id ? lastShatter : null;
+
+                return (
+                  <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-2">
+                    <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 mb-1 flex items-center gap-1.5">
+                      <Sparkles className="w-3.5 h-3.5 text-rose-500" /> Fracture
+                      {inPieces && <span className="ml-auto text-[10px] font-semibold text-rose-600">in pieces</span>}
+                    </h3>
+
+                    <label className="flex items-center gap-2 text-xs text-slate-700 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={enabled}
+                        onChange={(e) => updateNode(selectedNode.id, e.target.checked
+                          ? { shatterImpulseNs: 2, shatterPieces: 8, shatterSeed: 1, shatterPattern: 'radial' }
+                          : { shatterImpulseNs: undefined })}
+                        className="accent-rose-500 cursor-pointer"
+                      />
+                      This body is brittle
+                    </label>
+
+                    {enabled && !movable && (
+                      <p className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1 leading-snug">
+                        This body is fixed in place, so nothing can hit it hard enough to
+                        matter. Give it a joint under Body &amp; Joints to let it be struck.
+                      </p>
+                    )}
+
+                    {enabled && (
+                      <>
+                        <div className="flex items-center gap-2">
+                          <label className="text-[10px] text-slate-500 w-20 shrink-0">Breaks at</label>
+                          <SettledNumberInput
+                            step="0.5"
+                            min={0}
+                            value={selectedNode.shatterImpulseNs ?? 0}
+                            onChange={(v) => updateNode(selectedNode.id, { shatterImpulseNs: v })}
+                            className="flex-1 min-w-0 px-2 py-1 border border-slate-200 rounded text-xs bg-white text-slate-700 outline-none focus:border-blue-500"
+                          />
+                          <span className="text-[10px] text-slate-400 w-8 shrink-0">N·s</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <label className="text-[10px] text-slate-500 w-20 shrink-0">Pieces</label>
+                          <input
+                            type="range" min={2} max={24} step={1}
+                            value={selectedNode.shatterPieces ?? 8}
+                            onChange={(e) => updateNode(selectedNode.id, { shatterPieces: parseInt(e.target.value, 10) })}
+                            className="flex-1 accent-rose-500 cursor-pointer"
+                          />
+                          <span className="text-[10px] text-slate-500 w-8 shrink-0 text-right">{selectedNode.shatterPieces ?? 8}</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <label className="text-[10px] text-slate-500 w-20 shrink-0">Pattern</label>
+                          <select
+                            value={selectedNode.shatterPattern ?? 'radial'}
+                            onChange={(e) => updateNode(selectedNode.id, { shatterPattern: e.target.value as 'uniform' | 'radial' })}
+                            className="flex-1 min-w-0 px-2 py-1 border border-slate-200 rounded text-xs bg-white text-slate-700 outline-none focus:border-blue-500 cursor-pointer"
+                            title="Radial crowds the small pieces around the point of impact, which is what really happens and what reads as a blow."
+                          >
+                            <option value="radial">Around the impact</option>
+                            <option value="uniform">Evenly</option>
+                          </select>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <label className="text-[10px] text-slate-500 w-20 shrink-0">Pieces break</label>
+                          <select
+                            value={selectedNode.shatterDepth ?? 0}
+                            onChange={(e) => updateNode(selectedNode.id, { shatterDepth: parseInt(e.target.value, 10) || undefined })}
+                            className="flex-1 min-w-0 px-2 py-1 border border-slate-200 rounded text-xs bg-white text-slate-700 outline-none focus:border-blue-500 cursor-pointer"
+                            title="Whether the pieces can break again when they land. Each generation multiplies the body count and every break rebuilds the model, so a scene set to cascade will hitch its way down."
+                          >
+                            <option value={0}>Not again</option>
+                            <option value={1}>Once more</option>
+                            <option value={2}>Twice more</option>
+                          </select>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <label className="text-[10px] text-slate-500 w-20 shrink-0">Scatter</label>
+                          <SettledNumberInput
+                            step="0.1"
+                            min={0}
+                            value={selectedNode.shatterSpread ?? 0}
+                            onChange={(v) => updateNode(selectedNode.id, { shatterSpread: v || undefined })}
+                            className="flex-1 min-w-0 px-2 py-1 border border-slate-200 rounded text-xs bg-white text-slate-700 outline-none focus:border-blue-500"
+                          />
+                          <span className="text-[10px] text-slate-400 w-8 shrink-0">m/s</span>
+                        </div>
+                        <p className="text-[10px] text-slate-400 leading-snug">
+                          Measured as impulse rather than force, so the number means the same
+                          thing whatever the solver is doing: a 200 g body arriving at 5 m/s
+                          and stopping dead is about 1 N·s. The pieces are cut from this
+                          body's outline and add up to exactly what broke.
+                        </p>
+                        {info && (
+                          <div className="flex items-center gap-2 text-[10px] text-rose-700 bg-rose-50 border border-rose-200 rounded px-2 py-1 leading-snug">
+                            <span className="flex-1">
+                              Broke into {info.pieces} pieces at {info.time.toFixed(2)} s, taking {info.impulseNs.toFixed(1)} N·s. Reset makes it whole.
+                            </span>
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                );
+              })()}
+
+              {/* Denting — a surface that takes a permanent mark from a hard
+                  enough blow. Cosmetic by design; see store/dentStore.ts. */}
+              {(() => {
+                // Offered on primitives too. A dent moves vertices and a
+                // primitive has none, so turning it on converts the shape into
+                // the mesh it already looked like — see utils/dentMesh.ts. A
+                // plane is the one thing that cannot be made dentable; it is
+                // infinite in the solver and has no surface to speak of.
+                const dentable = (selectedNode.geoms || []).filter(
+                  (g) => isDentable(g) || needsConversionForDenting(g),
+                );
+                if (dentable.length === 0) return null;
+                const geom = dentable.find((g) => (g.dentYieldNs ?? 0) > 0) ?? dentable[0];
+                const gi = (selectedNode.geoms || []).indexOf(geom);
+                const enabled = typeof geom.dentYieldNs === 'number' && geom.dentYieldNs > 0;
+                const willConvert = needsConversionForDenting(geom);
+                const marks = dents[`${selectedNode.id}/${geom.name}`];
+
+                return (
+                  <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-2">
+                    <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 mb-1 flex items-center gap-1.5">
+                      <Hammer className="w-3.5 h-3.5 text-amber-600" /> Denting
+                      {marks && <span className="ml-auto text-[10px] font-semibold text-amber-600">{marks.holes ? `${marks.holes} hole${marks.holes === 1 ? '' : 's'}` : `${marks.count} dent${marks.count === 1 ? '' : 's'}`}</span>}
+                    </h3>
+
+                    <label className="flex items-center gap-2 text-xs text-slate-700 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={enabled}
+                        onChange={(e) => {
+                          if (e.target.checked) {
+                            makeDentable(selectedNode.id, gi, {
+                              dentYieldNs: 4, dentDepthPerNs: 0.012, dentMaxDepth: 0.01,
+                            });
+                          } else {
+                            updateNodeGeom(selectedNode.id, { dentYieldNs: undefined }, gi);
+                          }
+                        }}
+                        className="accent-amber-500 cursor-pointer"
+                      />
+                      This surface can be dented
+                    </label>
+
+                    {willConvert && (
+                      <p className="text-[10px] text-slate-400 leading-snug">
+                        A {geom.type} has no vertices to push in — it is a handful of
+                        numbers the solver evaluates, not a surface. Turning this on
+                        rebuilds it as the mesh it already looked like, which is what a
+                        dent can actually be made in.
+                      </p>
+                    )}
+
+                    {enabled && (
+                      <>
+                        <div className="flex items-center gap-2">
+                          <label className="text-[10px] text-slate-500 w-20 shrink-0">Yields at</label>
+                          <SettledNumberInput
+                            step="0.5" min={0}
+                            value={geom.dentYieldNs ?? 0}
+                            onChange={(v) => updateNodeGeom(selectedNode.id, { dentYieldNs: v }, gi)}
+                            className="flex-1 min-w-0 px-2 py-1 border border-slate-200 rounded text-xs bg-white text-slate-700 outline-none focus:border-blue-500"
+                          />
+                          <span className="text-[10px] text-slate-400 w-8 shrink-0">N·s</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <label className="text-[10px] text-slate-500 w-20 shrink-0">Deepest</label>
+                          <SettledNumberInput
+                            step="1" min={0}
+                            value={Math.round((geom.dentMaxDepth ?? 0.02) * 1000)}
+                            onChange={(v) => updateNodeGeom(selectedNode.id, { dentMaxDepth: v / 1000 }, gi)}
+                            className="flex-1 min-w-0 px-2 py-1 border border-slate-200 rounded text-xs bg-white text-slate-700 outline-none focus:border-blue-500"
+                          />
+                          <span className="text-[10px] text-slate-400 w-8 shrink-0">mm</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <label className="text-[10px] text-slate-500 w-20 shrink-0">Pierces at</label>
+                          <SettledNumberInput
+                            step="1" min={0}
+                            value={geom.pierceImpulseNs ?? 0}
+                            onChange={(v) => updateNodeGeom(selectedNode.id, { pierceImpulseNs: v || undefined }, gi)}
+                            className="flex-1 min-w-0 px-2 py-1 border border-slate-200 rounded text-xs bg-white text-slate-700 outline-none focus:border-blue-500"
+                            placeholder="never"
+                            title="Above this the surface is holed rather than dented: the material under the striker is gone, not pushed aside. Leave at zero and it can never be pierced."
+                          />
+                          <span className="text-[10px] text-slate-400 w-8 shrink-0">N·s</span>
+                        </div>
+                        {(geom.pierceImpulseNs ?? 0) > 0 && (geom.pierceImpulseNs ?? 0) <= (geom.dentYieldNs ?? 0) * 1.5 && (
+                          <p className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1 leading-snug">
+                            Piercing this close to the yield leaves almost no range in which this
+                            behaves like a sheet — nearly everything that marks it will go through.
+                          </p>
+                        )}
+                        <label className="flex items-center gap-2 text-xs text-slate-700 cursor-pointer mt-1">
+                          <input
+                            type="checkbox"
+                            checked={!!geom.deformCollision}
+                            onChange={(e) => updateNodeGeom(selectedNode.id,
+                              { deformCollision: e.target.checked || undefined }, gi)}
+                            className="accent-amber-500 cursor-pointer"
+                          />
+                          Damage is real, not just seen
+                        </label>
+                        {geom.deformCollision ? (
+                          <p className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1 leading-snug">
+                            Every mark now changes what this body collides as: things fall
+                            through the holes, and an edge worn away stops holding what it used
+                            to. <strong>It is slow on purpose.</strong> Damage reaches the
+                            solver by rebuilding the model, and the surface has to be broken
+                            into convex pieces each time — a hull would fill every crater and
+                            every hole straight back in. Expect a hitch per blow.
+                          </p>
+                        ) : (
+                          <p className="text-[10px] text-slate-400 leading-snug">
+                            <strong className="text-slate-500">Damage is cosmetic.</strong> The
+                            surface shows the crater, but contact keeps using the undamaged
+                            shape — so something can rest on the hole it just made. Tick the box
+                            above to make it real, and read what that costs.
+                            {marks && ` Deepest so far ${(marks.deepest * 1000).toFixed(1)} mm`}
+                            {marks?.holes ? `, and holed through ${marks.holes} time${marks.holes === 1 ? '' : 's'}` : ''}
+                            {marks && '.'}
+                          </p>
+                        )}
+                      </>
+                    )}
+                  </div>
+                );
+              })()}
+
               {/* Collision — how any mesh body reaches MuJoCo's contact solver.
                   A boolean body's equivalent lives in Boolean Modifiers below,
                   next to the sector and hole-axis controls it shares. */}
@@ -6719,6 +7216,112 @@ api.applyForce([force, 0, 0]);
                       <div className="text-xs border-t border-slate-150 pt-3">
                         <strong className="text-slate-700">👻 Ephemeral Mode (Collision Disabled)</strong>
                         <p className="text-slate-500 mt-1">Sets <code>contype="0"</code> and <code>conaffinity="0"</code>. Other bodies pass straight through it. Use it for decorative supports or visual guides.</p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {docsTab === 'breaking' && (
+                  <div className="flex flex-col gap-4">
+                    <h3 className="font-bold text-slate-800 text-lg flex items-center gap-1.5">💔 Breaking</h3>
+                    <p className="text-xs text-slate-600 leading-relaxed">
+                      A weld can be given a limit, past which it shears off and the part
+                      falls away carrying the momentum it already had.
+                    </p>
+                    <div className="bg-slate-50 border border-slate-200/60 rounded-xl p-4 flex flex-col gap-3">
+                      <div className="text-xs">
+                        <strong className="text-slate-700">⚖️ What the numbers mean</strong>
+                        <p className="text-slate-500 mt-1">
+                          MuJoCo reports the force it is spending to hold every weld, so the
+                          limits are real newtons rather than a made-up scale. A 1 kg body
+                          hanging off a weld pulls about 10 N. A few hundred newtons is a
+                          sturdy joint; a few tens is decorative.
+                        </p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">↩️ Breaking is not an edit</strong>
+                        <p className="text-slate-500 mt-1">
+                          The saved scene still says the part is welded on, so nothing you
+                          export or share is changed by a break, and it never enters the undo
+                          history. <strong>Reset</strong> puts the object back together;
+                          pausing does not, because a break you cannot stop and look at is no
+                          use. <strong>Restore</strong> on a broken weld puts back that one
+                          joint, where the body is now.
+                        </p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">💥 Shattering</strong>
+                        <p className="text-slate-500 mt-1">
+                          A brittle body breaks up when it takes a hard enough blow, measured
+                          as <em>impulse</em> — momentum — rather than force, so the number
+                          means the same thing whatever the solver is doing. A 200 g body
+                          arriving at 5 m/s and stopping dead is about 1 N·s. The pieces are
+                          cut from the body's own outline and add up to exactly what broke,
+                          each carrying the velocity of the part of the body it used to be.
+                        </p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">🔨 Denting</strong>
+                        <p className="text-slate-500 mt-1">
+                          A surface with a yield takes a permanent crater from anything that
+                          crosses it, and nothing at all from anything that does not — which
+                          is the half worth watching for. Two identical weights dropped from
+                          the same height onto the same plate, one hard and one soft, land
+                          the same momentum over very different lengths of time, and only one
+                          of them leaves a mark. The crater takes its width and its shape from
+                          whatever made it — a flat-ended slug leaves a flat-bottomed pit its
+                          own width — and spreads wider as well as deeper the harder the blow.
+                          <strong> Dents are cosmetic:</strong> contact
+                          keeps using the undented shape, because feeding a deformed mesh back
+                          to the solver means rebuilding the model.
+                        </p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">🕳️ Piercing</strong>
+                        <p className="text-slate-500 mt-1">
+                          Past a second, higher limit a surface is not creased but holed: the
+                          material under the striker is gone rather than pushed aside. Keep it
+                          well above the yield, or there is no range left in which the thing
+                          behaves like a sheet. Cosmetic in the same way a dent is — contact
+                          keeps using the whole surface, so something can rest on the hole it
+                          just made.
+                        </p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">⚙️ Real damage, if you want it</strong>
+                        <p className="text-slate-500 mt-1">
+                          By default a dent or a hole is seen and not felt — contact goes on
+                          using the undamaged shape. <strong>Damage is real, not just
+                          seen</strong> changes that: things fall through the holes, and an
+                          edge worn away stops holding what it used to. It is slow on purpose.
+                          Damage reaches the solver by rebuilding the model, and the surface
+                          then has to be broken into convex pieces as well, because MuJoCo
+                          collides a mesh as its convex hull — and a hull fills every crater
+                          and every hole straight back in, which would give you a body that
+                          looks worn and collides like new.
+                        </p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">🪗 Crumple zones</strong>
+                        <p className="text-slate-500 mt-1">
+                          A hinge that is rigid until the torque on it passes a limit, and
+                          then folds and <em>stays</em> folded — a car's crumple zone rather
+                          than a spring. It costs almost nothing because it is not a new
+                          mechanism: the joint is held still by a weld, and giving way is the
+                          same release that shears a handle off. Note that a joint only folds
+                          if something is still loading it afterwards; a post standing
+                          straight up gives gravity no lever, so once its base yields it just
+                          goes on standing there.
+                        </p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">⏱️ Why there is a hold</strong>
+                        <p className="text-slate-500 mt-1">
+                          A hard contact makes the solver spike for a single step while it
+                          resolves the overlap. A limit read one step at a time would snap
+                          welds that were never really loaded, so the overload has to last a
+                          few steps — about 3 ms — before it counts.
+                        </p>
                       </div>
                     </div>
                   </div>

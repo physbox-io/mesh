@@ -401,6 +401,45 @@ A **solver stress test** dressed as a sculpture studio: one dense mesh standing 
 - Raise the bob mass and drop it into the tower directly to skip the dominoes
 - Turn the friction on the dominoes down and watch the cascade slide out instead of toppling`,
 
+  shatter: `# 💥 Shatter
+
+Five ways for a thing to stop being rigid, all at once. Press **play** and leave it — nothing is scripted, the ball just swings.
+
+## The tower — welds that shear
+The courses are welded to each other at **25–120 N** and every one fails. The bottom course holds at **1400 N**, so the ball leaves a stump on the plinth. Standing still those welds carry almost nothing: the tower's weight goes down through the blocks, not through the welds. What breaks them is shear.
+
+## The vase — porcelain that shatters
+The ball clips it at about **1.7 N·s**, over its **1.2 N·s** threshold, and it bursts into pieces crowded around the point of impact. The pieces are cut from the vase's own outline and weigh exactly what it weighed. Its two cobalt handles are welded at **12 N** and leave first.
+
+Set **Pieces break: once more** in its Fracture panel and the shards come apart again when they land. It is off by default because each break rebuilds the model, so a cascade hitches.
+
+## The plate — the same blow, twice, with different answers
+Two weights, **identical mass, identical drop**. The steel one lands about **10.9 N·s** and craters the plate; the rubber one lands **5.6 N·s**, stays unmarked by the plate and squashes itself instead. Each of the pair damages exactly one thing, and it is not the same thing.
+
+The difference is not the weight, it is the *time*: momentum is momentum, but the soft one spreads it over tens of milliseconds instead of one or two.
+
+The crater is the shape of whatever made it — a flat-ended slug leaves a flat-bottomed pit its own width — and it grows **wider as well as deeper** the harder the blow, so raising the weight or its mass shows.
+
+## The foil — a blow that goes straight through
+The spike arrives at about **11 N·s** against a sheet that pierces at **7**, and the material under it is gone rather than pushed aside. Below that it only marks.
+
+## The bracket — steel that takes a set
+Off on its own, a shelf arm rigid up to **6 N·m**. The slug dropped on it puts far more through the root, and the arm folds under its own weight and **stays** folded. A spring would come back.
+
+## What is cosmetic, and how to change that
+Breaking, shattering and crumpling are real: the solver knows about them. **Dents and holes are not, by default** — the plate looks cratered and the foil looks holed, but contact goes on using the whole original surface, so the spike rests on the hole it made.
+
+Tick **Damage is real, not just seen** on any surface and that stops being true: things fall through its holes, and an edge worn away stops holding what it used to. It is slow on purpose. Damage reaches the solver by rebuilding the model, and the surface must then be broken into convex pieces too — MuJoCo collides a mesh as its convex hull, and a hull fills every crater and every hole straight back in.
+
+## None of it is an edit
+The scene still says the vase is whole and everything is welded on. Nothing you save, export or share is changed, and none of it enters the undo history. Press **reset** and it all comes back.
+
+## Try it
+- Select any piece for its **Constraints**, **Fracture**, **Denting** and **Crumple Zone** panels
+- Raise the plate's yield past 11 N·s and even the steel weight leaves it clean
+- Drag the steel weight higher before pressing play, or give it more mass, and the crater grows
+- Drop the foil's pierce limit to 3 N·s and almost anything goes through it`,
+
   california_relief: `# California Relief Map\n\nThe real state, at real proportions, built to be carved into a **150 mm square** block.\n\n## Geography\n- Projected in **EPSG:3310 "California Albers"**, the state's official projection, equal area everywhere on the block\n- Terrain from open 1 km DEM tiles: **-82 m** at Badwater to **3,973 m** on the Sierra crest\n- Carves **104.0 × 120.0 mm**, 1 mm to about 8.8 km\n\n## Relief Carving\n- Height is exaggerated roughly **18×**; at true scale the Sierra would stand 0.5 mm proud and the board would read as flat\n- The lowest 15% of the depth is a plinth, so the coastline steps up from the background instead of fading into it\n- Set **Fit** to *manual, 100%* to keep the 120 mm size\n\n## Try it\n- Click **Export Relief Carve (G-code)**, rough with a 6.35 mm flat mill, finish with a 3.175 mm ball nose`,
 };
 

@@ -74,6 +74,55 @@ export interface SceneGeom {
   // The renderer uses renderVertices (Z-up, centroid at origin) inside the rotated group.
   dynamic?: boolean;
   /**
+   * How hard this surface has to be struck before it takes a dent, in N*s.
+   *
+   * Undefined means it is rigid, which is what every geom was before this. A
+   * steel plate given a yield of, say, 6 N*s is unmarked by anything soft or
+   * slow and cratered by a dropped weight — which is the whole point: the same
+   * plate, two different blows, two different outcomes.
+   *
+   * DENTS ARE COSMETIC. The contact solver keeps using the undented mesh,
+   * because re-uploading a collision mesh means rebuilding the model and that
+   * cannot happen at the rate contacts arrive. Deformation lives outside the
+   * scene graph entirely (see store/dentStore.ts) and is cleared by Reset.
+   */
+  dentYieldNs?: number;
+  /** Metres of depth per newton-second over the yield. The plasticity, near enough. */
+  dentDepthPerNs?: number;
+  /** Radius of the crater, in metres. Defaults to a fraction of the mesh's size. */
+  dentRadius?: number;
+  /** Hard cap on how deep one spot can ever be pushed, in metres. */
+  dentMaxDepth?: number;
+  /**
+   * The blow that goes straight through, in N*s.
+   *
+   * Above this the surface is not dented, it is holed: the material under the
+   * striker is gone rather than pushed aside. Should sit well above
+   * `dentYieldNs` — a sheet that dents at 6 and pierces at 7 has no range in
+   * which it behaves like a sheet.
+   *
+   * Cosmetic in the same way a dent is. The contact solver keeps using the
+   * whole surface, so something can be thrown through a holed plate and still
+   * bounce off where the hole is. Undefined means it can never be pierced.
+   */
+  pierceImpulseNs?: number;
+  /**
+   * Whether damage to this surface is real to the contact solver, or only seen.
+   *
+   * Off by default, and that default is not timidity — it is the only way
+   * deformation can be free. A dent is a change of geometry, and geometry
+   * reaches MuJoCo by compiling the scene to MJCF and building a new model, so
+   * every blow that counts costs a rebuild. Off, a hundred impacts cost nothing
+   * and the plate collides flat; on, each one costs a rebuild and the hole is
+   * somewhere things can fall through.
+   *
+   * A HOLE ALSO NEEDS DECOMPOSING. MuJoCo collides a mesh as its convex hull,
+   * which fills a hole straight back in, so a pierced surface with this set is
+   * switched to `collision: 'decompose'` — V-HACD, which is the expensive part
+   * and the reason this is a choice rather than the default.
+   */
+  deformCollision?: boolean;
+  /**
    * For a geom that cuts (csg:'difference'): where it goes into the part, and
    * how far.
    *
@@ -154,6 +203,30 @@ export interface SceneJoint {
     ctrlValue?: number; // Target speed or force from UI
   };
   initialVelocity?: number[]; // [lin_x, lin_y, lin_z, ang_x, ang_y, ang_z]
+  /**
+   * The torque, in N*m, past which this joint stops being rigid and folds.
+   *
+   * A crumple zone: the joint is held still by an equality constraint until
+   * something overloads it, and then it gives and STAYS given. That is the
+   * difference between a hinge and a dent — a spring comes back, a crumpled
+   * wing does not.
+   *
+   * Cheap because it reuses the breakable weld: the lock is an ordinary weld
+   * equality between this body and its parent, emitted by the MJCF builder, and
+   * releasing it is the same one-byte write to `eq_active`. Undefined means the
+   * joint behaves as it always has.
+   */
+  crumpleTorqueNm?: number;
+  /** How far it may fold once it has given, in degrees. Emitted as the joint's range. */
+  crumpleRangeDeg?: [number, number];
+  /**
+   * Damping written into the joint at the moment it gives, in N*m*s.
+   *
+   * High, normally. Without it the released joint swings freely and the part
+   * flaps about, which reads as a hinge coming undone rather than as metal
+   * taking a permanent set.
+   */
+  crumpleDampingAfter?: number;
 }
 
 export interface SceneNode {
@@ -178,6 +251,73 @@ export interface SceneNode {
   weldTargetId?: string;
   connectTargetId?: string;
   connectAnchor?: number[];
+  /**
+   * What it takes to shear this body's weld off, in newtons.
+   *
+   * MuJoCo holds a weld with an equality constraint and reports the force it is
+   * spending to do so, so "the handle snaps off when you load it hard enough"
+   * is a threshold on a number the solver already computes. Six constraint rows
+   * per weld: the first three are force in N, the last three torque in N*m.
+   *
+   * Undefined means the weld never lets go, which is what every weld did before
+   * this existed. Breaking is a SIMULATION event and never touches the saved
+   * scene: the document still says the handle is welded on, and Reset puts it
+   * back. See utils/breakThresholds.ts for the decision itself.
+   */
+  weldBreakForceN?: number;
+  /** The same, for the torque trying to twist the weld apart, in N*m. */
+  weldBreakTorqueNm?: number;
+  /**
+   * How many consecutive steps the overload has to last before it counts.
+   *
+   * Not polish. A hard contact makes the solver spike for a single step as it
+   * resolves the penetration, and a threshold read one step at a time snaps
+   * welds that were never really loaded. Three steps is 3 ms and is enough to
+   * tell a real load from a solver transient.
+   */
+  weldBreakHoldSteps?: number;
+  /**
+   * How hard this body has to be hit before it comes apart, in newton-seconds.
+   *
+   * IMPULSE rather than force, because contact force in a hard solver is a
+   * spike whose height depends on the timestep as much as on the collision.
+   * Momentum does not care: 0.2 kg arriving at 5 m/s and stopping dead is
+   * 1 N*s, and that is a figure somebody can reason about.
+   *
+   * Undefined means it never shatters. Like a broken weld, shattering is a
+   * SIMULATION event: the shards live in the store's runtime overlay and the
+   * saved scene still holds the whole body, so Reset makes it whole again.
+   */
+  shatterImpulseNs?: number;
+  /** How many pieces to break into. 2..24, default 8. See utils/fracture.ts. */
+  shatterPieces?: number;
+  /** Fixes which pieces, so a scene breaks the same way twice. */
+  shatterSeed?: number;
+  /**
+   * 'radial' crowds the pieces toward the point of impact, which is both what
+   * really happens and what reads as a blow rather than as a dissolve.
+   */
+  shatterPattern?: 'uniform' | 'radial';
+  /** Extra outward speed given to each shard, m/s. Sells the burst. */
+  shatterSpread?: number;
+  /**
+   * How many times over the pieces may break again.
+   *
+   * 0, the default, means a body shatters once and its shards are final. 1 lets
+   * the shards break when they land, which is what really happens to porcelain
+   * and looks it.
+   *
+   * Kept small deliberately. Every generation multiplies the body count —
+   * fourteen pieces breaking into four each is fifty-six free bodies and their
+   * contact pairs — and each break is a rebuild of the MuJoCo model, so a scene
+   * set to cascade will hitch its way down. Two is the ceiling.
+   */
+  shatterDepth?: number;
+  /**
+   * Which generation this body is: absent or 0 for something authored, 1 for a
+   * shard of it, and so on. Written by the shatter, never by hand.
+   */
+  shatterGeneration?: number;
   isWedge?: boolean;
   width?: number;
   depth?: number;

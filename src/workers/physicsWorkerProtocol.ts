@@ -125,7 +125,7 @@ export type HeadlessResult =
 // ---- Main thread -> worker -----------------------------------------------
 
 export type MainToWorkerMessage =
-  | { type: 'BUILD'; id: string; xml: string; sceneGraph: SceneGraph; preserveState: boolean; seedState?: SeedState }
+  | { type: 'BUILD'; id: string; xml: string; sceneGraph: SceneGraph; preserveState: boolean; seedState?: SeedState; brokenConstraints?: string[] }
   | { type: 'SET_ENV'; windX?: number; windY?: number }
   | { type: 'SET_PLAYING'; isPlaying: boolean }
   | { type: 'TICK'; delta: number }
@@ -139,12 +139,81 @@ export type MainToWorkerMessage =
   | { type: 'GET_TELEMETRY'; id: string }
   | { type: 'CLEAR_HISTORY' };
 
+/**
+ * A constraint that has just given way, on its way up to the main thread.
+ *
+ * The worker breaks the weld itself, the instant it happens, by clearing the
+ * equality's `eq_active` row — waiting for a round trip would let the scene step
+ * on with a weld the model has already decided is gone. This message is the
+ * worker telling the main thread what it did, so the break survives the next
+ * rebuild: a worker recycle spawns a process with no memory of it, so the main
+ * thread has to be the one that remembers. See `brokenConstraints` on BUILD.
+ */
+export interface ConstraintBrokenEvent {
+  /** Stable across rebuilds — see weldKey()/crumpleKey() in utils/breakThresholds.ts. */
+  key: string;
+  nodeId: string;
+  /** The welded-to body for a weld; the joint's own name for a crumple. */
+  targetId: string;
+  /** 'crumple' is a joint that has folded and stayed folded, not a part coming off. */
+  kind: 'weld' | 'crumple';
+  /** Simulated seconds when it let go, for the "broken at 1.34 s" readout. */
+  time: number;
+  /** What it was carrying when it went, in N and N*m. */
+  forceN: number;
+  torqueNm: number;
+}
+
+/**
+ * A body has been hit hard enough that something should happen to it.
+ *
+ * One message for two features: above the body's shatter threshold it comes
+ * apart, above a geom's dent threshold the surface takes a dent. The worker
+ * reports the blow and lets the main thread decide which, because only the main
+ * thread owns the geometry.
+ *
+ * `pos`/`xmat`/`vel`/`angvel` are the body's state at the instant of the hit,
+ * not at the next frame. A shard's position and spin are derived from them, and
+ * a frame's worth of drift is the difference between a vase bursting where it
+ * was struck and a vase bursting a few centimetres away.
+ */
+export interface ImpactEvent {
+  nodeId: string;
+  /**
+   * The body on the other end of the collision, if there was one.
+   *
+   * A blow is between two things, and which of them is the useful witness
+   * depends on what is being asked. The striker feels the whole of it; a plate
+   * lying on the ground does not, because the ground reaction rises to meet the
+   * load and its net constraint force hardly moves. So the impulse is measured
+   * on whichever body reported it and attributed to both.
+   */
+  otherNodeId?: string;
+  /** Where the blow landed on that other body, in ITS frame. */
+  otherLocalPoint?: number[];
+  otherLocalNormal?: number[];
+  time: number;
+  /** Momentum absorbed over the detection window, in N*s. */
+  impulseNs: number;
+  /** Where it was hit, in the body's own frame. */
+  localPoint: number[];
+  /** Inward surface normal at that point, in the body's own frame. */
+  localNormal: number[];
+  pos: number[];
+  /** Row-major 3x3, straight from `data.xmat`. */
+  xmat: number[];
+  vel: number[];
+  angvel: number[];
+}
+
 // ---- Worker -> main thread -----------------------------------------------
 
 export type WorkerToMainMessage =
   | ({ type: 'BUILT'; id: string } & BuiltResult)
   | ({ type: 'FRAME' } & FrameSnapshot)
   | { type: 'ERROR'; message: string; fatal: boolean; lastState?: SeedState }
+  | ({ type: 'CONSTRAINT_BROKEN' } & ConstraintBrokenEvent)
+  | ({ type: 'IMPACT' } & ImpactEvent)
   | ({ type: 'HEADLESS_RESULT'; id: string } & HeadlessResult)
   | { type: 'HISTORY_RESULT'; id: string; history: HistoryEntry[] }
   | { type: 'TELEMETRY_RESULT'; id: string; telemetry: HistoryEntry | null };
