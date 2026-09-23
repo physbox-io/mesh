@@ -304,7 +304,8 @@ export const MeasureTool = () => {
       // Nothing modal may be interrupted: a running gesture owns the keyboard,
       // and the sculpt brushes have their own idea of what a letter means.
       const state = useStore.getState();
-      if (state.gestureStatus || state.draggedNodeId || state.sculptNodeId || state.paintMode) return;
+      // Nor a running simulation, whose control scripts read A and D.
+      if (state.gestureStatus || state.draggedNodeId || state.sculptNodeId || state.paintMode || state.isPlaying) return;
       event.stopImmediatePropagation();
       const asked = key === 'd' ? 'distance' : 'angle';
       setPicks([]);

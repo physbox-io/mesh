@@ -634,6 +634,10 @@ export const ObjectGestureController = () => {
         return;
       }
       if (event.metaKey || event.ctrlKey || event.altKey) return;
+      // While the simulation runs, letters belong to the control scripts:
+      // the docs suggest WASD and arrows, and S here scaled the selection
+      // while it was meant to steer a cart. The mode menu still starts one.
+      if (useStore.getState().isPlaying) return;
       if (key === 'g' || key === 'm') { begin('move'); return; }
       if (key !== 's' && key !== 'i') return;
       begin(key === 's' ? 'scale' : 'inset');

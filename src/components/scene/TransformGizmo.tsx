@@ -1207,6 +1207,8 @@ export const TransformGizmo = () => {
       if (key === 'escape') { cancel(); return; }
       if (event.metaKey || event.ctrlKey || event.altKey) return;
       if (suppressed || drag.current) return;
+      // Letters belong to the control scripts while the simulation runs.
+      if (useStore.getState().isPlaying) return;
       // `g` starts the move gesture over in ObjectGestures; all that is needed
       // here is for the handles to be the ones it is about to move by.
       if (key === 'g') setMode('translate');
