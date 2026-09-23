@@ -71,6 +71,9 @@ import { DfmHUD } from './components/DfmHUD';
 import { createHeatSetBossNode, createHexNutTrapNode, createBearingPocketNode, createDShaftHubNode, createCounterboreHoleNode } from './utils/hardwareComponents';
 import { pushGlobalParameter } from './utils/llmSettings';
 import { saveUserPreset, deleteUserPreset, readUserPreset, listUserPresetNames } from './utils/userPresets';
+import { savePreset } from './utils/presetStorage';
+import { announcePresetSave } from './utils/presetNotices';
+import { PresetSaveNotice } from './components/PresetSaveNotice';
 import { createPortal } from 'react-dom';
 import {
   buildShareLink,
@@ -1546,15 +1549,26 @@ function App() {
     try {
       const syncedScene = getSyncedSceneGraph(sceneGraph, model, data, mujoco);
       const preset = { ...syncedScene, noteCards, copilotMessages };
-      saveUserPreset(trimmed, preset);
+      /*
+       * Through savePreset, which says what happened: the browser's storage is
+       * a few megabytes and a sculpted scene can be one of them. This used to
+       * ignore a failed write and then load the preset "just saved" — which,
+       * re-saving under an existing name, put the OLD copy over the work on
+       * screen. And a save that worked is not a load either: the scene on
+       * screen already is the preset, so it is only named as one, leaving the
+       * tools open and the camera where it was.
+       */
+      void savePreset(trimmed, preset).then((result) => {
+        announcePresetSave(trimmed, preset, result);
+        if (result.ok) useStore.getState().setActivePreset(`user:${trimmed}`);
+      });
       // A deliberate save is also a named revision of the cloud document, which
       // the pruner never discards — unlike the automatic checkpoints.
       void cloudAutosave.saveExplicit(trimmed, preset, `Saved as “${trimmed}”`);
-      loadUserPresetWithCard(`user:${trimmed}`);
     } catch (e) {
       console.error('Failed to save user preset', e);
     }
-  }, [sceneGraph, model, data, mujoco, noteCards, copilotMessages, loadUserPresetWithCard]);
+  }, [sceneGraph, model, data, mujoco, noteCards, copilotMessages]);
 
   /*
    * Cloud auto-save.
@@ -8675,6 +8689,7 @@ THE SOFTWARE, PHYSICS SOLVERS, CSG COMPILERS, TOOLPATH CALCULATORS, AND MACHINE 
           the top level and not inside an export modal, because the session that
           opened that modal is the session that went away. */}
       <JobRestoreModal />
+      <PresetSaveNotice />
     </div>
   );
 }
