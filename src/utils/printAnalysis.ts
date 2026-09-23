@@ -635,34 +635,37 @@ export function analyzeSceneMechanicalWeaknesses(sceneGraph: SceneGraph): Analys
   }
 
   // --- PASS 5: DYNAMIC CLEARANCE & GEAR INTERLOCKING ---
-  for (let i = 0; i < allNodes.length; i++) {
-    for (let j = i + 1; j < allNodes.length; j++) {
-      const a = allNodes[i];
-      const b = allNodes[j];
+  // Only gear pairs can raise this, so only gears are paired, each centred
+  // once: bounding every node twice per pair made this pass O(N²) bounds
+  // computations, each resolving the node's booleans.
+  const isGear = (n: SceneNode) => n.name?.toLowerCase().includes('gear') || n.name?.toLowerCase().includes('pinion');
+  const gears = allNodes
+    .filter(entry => isGear(entry.node))
+    .map(entry => ({ node: entry.node, center: getNodeRealWorldBounds(entry.node, entry.parentPos).center }));
+  for (let i = 0; i < gears.length; i++) {
+    for (let j = i + 1; j < gears.length; j++) {
+      const a = gears[i];
+      const b = gears[j];
       if (a.node.id === b.node.id) continue;
 
-      const posA = getNodeRealWorldBounds(a.node, a.parentPos).center;
-      const posB = getNodeRealWorldBounds(b.node, b.parentPos).center;
+      const posA = a.center;
+      const posB = b.center;
       const dist = Math.hypot(posA[0] - posB[0], posA[1] - posB[1], posA[2] - posB[2]);
 
       if (dist < 0.03 && dist > 0.001) {
-        const isGearA = a.node.name?.toLowerCase().includes('gear') || a.node.name?.toLowerCase().includes('pinion');
-        const isGearB = b.node.name?.toLowerCase().includes('gear') || b.node.name?.toLowerCase().includes('pinion');
-        if (isGearA && isGearB) {
-          const midPoint: [number, number, number] = [(posA[0] + posB[0]) / 2, (posA[1] + posB[1]) / 2, (posA[2] + posB[2]) / 2];
-          weakSpots.push({
-            id: `clearance_${a.node.id}_${b.node.id}`,
-            nodeId: a.node.id,
-            nodeName: `${a.node.name} / ${b.node.name}`,
-            category: 'hardware',
-            severity: 'warning',
-            title: 'Tight Gear Tooth Clearance / Binding Risk',
-            description: 'Meshing gear centers positioned with minimal clearance gap. Risks physical tooth binding or interlock jams.',
-            recommendation: 'Increase backlash clearance (+0.15mm pitch offset) or verify mechanical equality coupling.',
-            position: midPoint,
-            surfacePoint: midPoint,
-          });
-        }
+        const midPoint: [number, number, number] = [(posA[0] + posB[0]) / 2, (posA[1] + posB[1]) / 2, (posA[2] + posB[2]) / 2];
+        weakSpots.push({
+          id: `clearance_${a.node.id}_${b.node.id}`,
+          nodeId: a.node.id,
+          nodeName: `${a.node.name} / ${b.node.name}`,
+          category: 'hardware',
+          severity: 'warning',
+          title: 'Tight Gear Tooth Clearance / Binding Risk',
+          description: 'Meshing gear centers positioned with minimal clearance gap. Risks physical tooth binding or interlock jams.',
+          recommendation: 'Increase backlash clearance (+0.15mm pitch offset) or verify mechanical equality coupling.',
+          position: midPoint,
+          surfacePoint: midPoint,
+        });
       }
     }
   }
