@@ -1072,6 +1072,11 @@ export const CurveControlHandles = () => {
     const mat = new THREE.LineBasicMaterial({ color: 0x3b82f6, transparent: true, opacity: 0.8, depthTest: false });
     return new THREE.Line(geo, mat);
   }, [found]);
+  useEffect(() => () => {
+    if (!splineLine) return;
+    splineLine.geometry.dispose();
+    (splineLine.material as THREE.Material).dispose();
+  }, [splineLine]);
 
   if (!found || isPlaying) return null;
   const pts: number[][] = found.node.curvePoints || [];

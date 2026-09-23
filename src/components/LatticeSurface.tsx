@@ -2787,6 +2787,22 @@ export function LatticeSurface({
   );
   /* eslint-enable react-hooks/exhaustive-deps */
 
+  // R3F frees nothing passed in through `geometry=`, and several of these are
+  // rebuilt per edit or per pointer move (the lit slice, the pending line), so
+  // each one is let go when it is replaced.
+  useEffect(() => () => solid.geometry.dispose(), [solid]);
+  useEffect(() => () => pick.geometry.dispose(), [pick]);
+  useEffect(() => () => { wire.soft.dispose(); wire.sharp.dispose(); wire.open.dispose(); }, [wire]);
+  useEffect(() => () => edgeHighlight?.dispose(), [edgeHighlight]);
+  useEffect(() => () => volume.geometry.dispose(), [volume]);
+  useEffect(() => () => slice.geometry.dispose(), [slice]);
+  useEffect(() => () => pendingLine.dispose(), [pendingLine]);
+  useEffect(() => () => shapeLine.dispose(), [shapeLine]);
+  useEffect(() => () => { curvePreview.line.dispose(); curvePreview.arms.dispose(); }, [curvePreview]);
+  useEffect(() => () => highlight?.dispose(), [highlight]);
+  useEffect(() => () => hoverFaceGeometry?.dispose(), [hoverFaceGeometry]);
+  useEffect(() => () => dotTexture.dispose(), [dotTexture]);
+
   return (
     <group ref={groupRef} name={`${nodeId}_lattice`}>
       {/* The shape itself, drawn front faces only — as every other renderer in
