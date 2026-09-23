@@ -190,7 +190,7 @@ class CloudAutosave {
   private pendingName = '';
   private pendingData: unknown = null;
   /** The most recent document offered, waiting to be hashed. See `schedule`. */
-  private latest: { name: string; data: unknown } | null = null;
+  private latest: { name: string; data: unknown | (() => unknown) } | null = null;
   private coalesceTimer: ReturnType<typeof setTimeout> | null = null;
   private lastSerializedAt = 0;
   private pendingHash: string | null = null;
@@ -248,8 +248,11 @@ class CloudAutosave {
    * last one is not cheap, so rapid calls are coalesced and only the most recent
    * document is ever hashed. Below the coalescing window this does nothing but
    * store a reference.
+   *
+   * `data` may be a function that builds the document, so a caller whose
+   * document is itself costly to assemble pays for it only when it is hashed.
    */
-  schedule(name: string, data: unknown): void {
+  schedule(name: string, data: unknown | (() => unknown)): void {
     if (!this.enabled()) {
       if (this.status.state !== 'disabled') {
         this.set({ state: 'disabled', message: null });
@@ -283,10 +286,12 @@ class CloudAutosave {
     if (!latest || this.blocked || !this.enabled()) return;
 
     this.lastSerializedAt = Date.now();
-    const { name, data } = latest;
+    const { name } = latest;
 
+    let data: unknown;
     let serialized: string;
     try {
+      data = typeof latest.data === 'function' ? (latest.data as () => unknown)() : latest.data;
       serialized = JSON.stringify(data);
     } catch {
       // A document that will not serialise cannot be saved to anything; the local
