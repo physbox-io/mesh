@@ -1313,6 +1313,12 @@ export interface PhysicsState {
   recompileId: number;
   parentUnderSelected: boolean;
   activePreset: string;
+  /**
+   * Names what is open without loading it — after saving the scene as a
+   * preset, the scene on screen IS that preset, and reloading it would close
+   * the tools, stop the simulation and reframe the camera for nothing.
+   */
+  setActivePreset: (name: string | undefined) => void;
   
   draggedNodeId: string | null;
   dragTarget: { x: number; y: number; z: number } | null;
@@ -1336,12 +1342,6 @@ export interface PhysicsState {
   machineTarget: MachineTarget;
   material: MaterialId;
   /**
-  /**
-   * Names what is open without loading it — after saving the scene as a
-   * preset, the scene on screen IS that preset, and reloading it would close
-   * the tools, stop the simulation and reframe the camera for nothing.
-   */
-  setActivePreset: (name: string) => void;
    * What it would be printed in, kept separate from what it would be cut from.
    *
    * Two lists rather than one widened one: a filament has no surface speed and
@@ -2023,6 +2023,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
   extraSelectedIds: [],
   parentUnderSelected: false,
   activePreset: 'pendulum',
+  setActivePreset: (name) => set({ activePreset: name }),
   draggedNodeId: null,
   dragTarget: null,
   dragDistance: 0,
@@ -2046,7 +2047,6 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
   setMachineTarget: (machineTarget) => set({ machineTarget }),
   setFilament: (filament) => set({ filament }),
   setMaterial: (material) => set({ material }),
-  setActivePreset: (name) => set({ activePreset: name }),
   setStock: (patch) => set((state) => ({ stock: saveStock(clampStock({ ...state.stock, ...patch })) })),
   setCarveSettings: (carveSettings) => set({ carveSettings }),
   openPatternGenerator: (id) => set({ patternGeneratorId: id }),

@@ -585,10 +585,11 @@ const AxisLegendDrawer = ({ externalRef }: { externalRef: RefObject<HTMLCanvasEl
 
 
 // Drop Handler for precise spawning & external file imports (.scad, .stl, .json)
-const DropHandler = ({ addComponent, onImportFile, onImportImageFile }: {
+const DropHandler = ({ addComponent, onImportFile, onImportImageFile, onImportSceneJson }: {
   addComponent: (type: AddComponentType, pos: [number, number, number]) => void;
   onImportFile: (file: File) => void;
   onImportImageFile: (file: File) => void;
+  onImportSceneJson: (text: string, fileName: string, dropped: boolean) => void;
 }) => {
   const { camera, gl } = useThree();
   
@@ -605,18 +606,10 @@ const DropHandler = ({ addComponent, onImportFile, onImportImageFile }: {
           const ext = fileName.slice(fileName.lastIndexOf('.')).toLowerCase();
 
           if (ext === '.json') {
-            try {
-              const text = await file.text();
-              const parsed = JSON.parse(text);
-              if (parsed && Array.isArray(parsed.nodes)) {
-                useStore.getState().updateScene(parsed);
-                if (Array.isArray(parsed.noteCards)) {
-                  physicsGlobals._physics_setNoteCards?.(parsed.noteCards);
-                }
-              }
-            } catch (err) {
-              console.error('Failed to import dropped JSON', err);
-            }
+            // The same path as the Import button, so a dropped scene is checked,
+            // reported and set up the same way rather than swapped in silently.
+            onImportSceneJson(await file.text(), fileName, true);
+            break;
           } else if (file.type.startsWith('image/') || /\.(png|jpe?g|webp|bmp|gif|avif)$/.test(ext)) {
             // An image can only mean the heightmap importer — it is the one
             // path that turns 2D pixels into a body.
@@ -1679,7 +1672,7 @@ function App() {
   /** The scene as it would be shared, read the same way the save reads it. */
   const sceneToShare = useCallback((): SharedScene => {
     const synced = getSyncedSceneGraph(sceneGraph, model, data, mujoco);
-    const name = activePreset.startsWith('user:')
+    const name = activePreset?.startsWith('user:')
       ? activePreset.slice('user:'.length)
       : synced.name || 'Shared scene';
     return { name, nodes: synced.nodes, noteCards };
@@ -2045,6 +2038,40 @@ function App() {
     }
   }, [buildExportGroup, exportBaseName, downloadBlob]);
 
+  /*
+   * Opens a scene file, from the Import button or dropped on the viewport.
+   *
+   * A drop used to take its own path: a bad file did nothing but log, a good
+   * one replaced the scene without asking — a file dragged across the window
+   * by accident took the work with it — and neither stopped the simulation or
+   * the old chat. And after either, the app still took the imported scene for
+   * the preset that had been open, so the Save button overwrote that preset
+   * with it. The scene is no preset now until it is saved as one.
+   */
+  const importSceneJson = useCallback((text: string, fileName: string, dropped: boolean) => {
+    let parsed: { nodes?: unknown; noteCards?: unknown; copilotMessages?: unknown } | null;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      alert(`Could not read ${fileName}: it is not valid JSON.`);
+      return;
+    }
+    if (!parsed || !Array.isArray(parsed.nodes)) {
+      alert(`${fileName} is not a scene: it has no "nodes" array.`);
+      return;
+    }
+    if (dropped && !confirm(`Replace the current scene with ${fileName}?`)) return;
+    const s = useStore.getState();
+    if (s.isPlaying) togglePlay();
+    s.setSculptNodeId(null);
+    s.setLatticeNodeId(null);
+    s.setActivePreset(undefined);
+    updateScene(parsed as SceneGraph);
+    setNoteCards(Array.isArray(parsed.noteCards) ? parsed.noteCards as NoteCard[] : []);
+    setCopilotMessages(Array.isArray(parsed.copilotMessages) ? parsed.copilotMessages as CopilotMessage[] : []);
+    setEditingCardId(null);
+  }, [togglePlay, updateScene]);
+
   const importJson = useCallback(() => {
     const input = document.createElement('input');
     input.type = 'file';
@@ -2052,27 +2079,10 @@ function App() {
     input.onchange = (e: Event) => {
       const file = (e.target as HTMLInputElement).files?.[0];
       if (!file) return;
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        try {
-          const parsed = JSON.parse(e.target?.result as string);
-          if (parsed && Array.isArray(parsed.nodes)) {
-            if (isPlaying) togglePlay();
-            updateScene(parsed);
-            if (Array.isArray(parsed.noteCards)) setNoteCards(parsed.noteCards);
-            if (Array.isArray(parsed.copilotMessages)) setCopilotMessages(parsed.copilotMessages);
-            else setCopilotMessages([]);
-          } else {
-            alert('Invalid scene JSON format. Must contain a "nodes" array.');
-          }
-        } catch {
-          alert('Failed to parse JSON file');
-        }
-      };
-      reader.readAsText(file);
+      void file.text().then((text) => importSceneJson(text, file.name, false));
     };
     input.click();
-  }, [isPlaying, togglePlay, updateScene]);
+  }, [importSceneJson]);
 
 
 
@@ -3622,7 +3632,7 @@ function App() {
           >
             <SceneCapture sceneRef={threeSceneRef} />
             <RenderOnChange />
-            <DropHandler addComponent={addComponent} onImportFile={handleDroppedImportFile} onImportImageFile={handleDroppedImageFile} />
+            <DropHandler addComponent={addComponent} onImportFile={handleDroppedImportFile} onImportImageFile={handleDroppedImageFile} onImportSceneJson={importSceneJson} />
             <color attach="background" args={[darkMode ? '#0b0f19' : '#f8fafc']} />
             {/* background={false}: this only feeds reflections/specular highlights
                 on the PBR materials, it never replaces the flat <color> above.
