@@ -30,7 +30,6 @@ import {
   collisionModeOf, colliderTemplateOf, convexHullOf, hullsToColliderGeoms,
   meshChecksum, meshVolumeAndCentroid, type Hull,
 } from './csg';
-import { analyzeMesh } from './meshIntegrity';
 import type { CollisionMode, SceneGeom, SceneNode } from '../types/scene';
 
 /**
@@ -276,7 +275,20 @@ export async function decomposeNodeColliders(node: SceneNode): Promise<ColliderR
   const source = meshes[0];
   const verts = source.renderVertices ?? source.vertices ?? [];
   const faces = source.faces ?? [];
-  const { volume, hullVolume } = meshSolidity(source);
+
+  // The client runs the worker in a browser and falls back to the module under
+  // Node and vite-node, where there is no Worker to run. Measuring goes through
+  // it too: hulling every vertex of a dense sculpt hitched the viewport after
+  // each stroke when it ran here.
+  const { analyseMeshOffThread, decomposeMeshOffThread } = await import('./vhacdWorkerClient');
+  let analysis;
+  try {
+    analysis = await analyseMeshOffThread(verts, faces);
+  } catch {
+    const { analyseMesh } = await import('./meshAnalysis');
+    analysis = analyseMesh(verts, faces);
+  }
+  const { volume, hullVolume, integrity } = analysis;
   const verdict = decompositionVerdict(node, { volume, hullVolume });
   const mass = colliderMass(node, source, volume);
 
@@ -288,7 +300,6 @@ export async function decomposeNodeColliders(node: SceneNode): Promise<ColliderR
   // fill leaks through the gaps and the "inside" it finds is not the inside.
   // Better a hull and a sentence than confident nonsense. See the winding trap
   // in CLAUDE.md, and meshIntegrity.ts for what is actually checked.
-  const integrity = analyzeMesh(verts, faces);
   if (integrity && !(integrity.closed && integrity.consistentlyWound && integrity.volume > 0)) {
     return {
       hash, geoms: [], verdict: { ...verdict, strategy: 'hull' }, volume, hullVolume, mass,
@@ -298,9 +309,6 @@ export async function decomposeNodeColliders(node: SceneNode): Promise<ColliderR
     };
   }
 
-  // The client runs the worker in a browser and falls back to the module under
-  // Node and vite-node, where there is no Worker to run.
-  const { decomposeMeshOffThread } = await import('./vhacdWorkerClient');
   let hulls: Hull[];
   try {
     hulls = await decomposeMeshOffThread(verts, faces, { maxHulls: verdict.maxHulls });

@@ -12,6 +12,7 @@
 // this. Same split as moldWorker over utils/moldExporter.
 
 import { decomposeMesh } from '../utils/vhacd';
+import { analyseMesh } from '../utils/meshAnalysis';
 import type { VhacdRequest, VhacdResponse } from './vhacdProtocol';
 
 const post = (msg: VhacdResponse, transfer: Transferable[] = []) =>
@@ -19,6 +20,14 @@ const post = (msg: VhacdResponse, transfer: Transferable[] = []) =>
 
 self.onmessage = async (evt: MessageEvent<VhacdRequest>) => {
   const msg = evt.data;
+  if (msg.type === 'ANALYSE') {
+    try {
+      post({ type: 'ANALYSED', id: msg.id, analysis: analyseMesh(Array.from(msg.verts), Array.from(msg.faces)) });
+    } catch (err) {
+      post({ type: 'DECOMPOSE_ERROR', id: msg.id, message: err instanceof Error ? err.message : String(err) });
+    }
+    return;
+  }
   if (msg.type !== 'DECOMPOSE') return;
   try {
     const hulls = await decomposeMesh(

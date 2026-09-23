@@ -12,7 +12,7 @@
 
 import type { Hull } from './csg';
 import type { DecomposeParams } from './vhacd';
-import type { HullPayload, VhacdRequest, VhacdResponse } from '../workers/vhacdProtocol';
+import type { HullPayload, MeshAnalysis, VhacdRequest, VhacdResponse } from '../workers/vhacdProtocol';
 
 /**
  * Long enough for any shape that passed the triangle cap, short enough that a
@@ -21,7 +21,14 @@ import type { HullPayload, VhacdRequest, VhacdResponse } from '../workers/vhacdP
  */
 const DECOMPOSE_TIMEOUT_MS = 20_000;
 
-type Settle = { resolve: (hulls: Hull[]) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> };
+/**
+ * Measuring is a hull and an edge walk, well under a second — but it queues
+ * behind whatever decomposition the one worker is already running, so it gets
+ * that one's allowance on top.
+ */
+const ANALYSE_TIMEOUT_MS = DECOMPOSE_TIMEOUT_MS + 10_000;
+
+type Settle = { resolve: (value: never) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> };
 
 let worker: Worker | null = null;
 let seq = 0;
@@ -44,7 +51,8 @@ function ensureWorker(): Worker | null {
       pending.delete(msg.id);
       clearTimeout(settle.timer);
       if (msg.type === 'DECOMPOSE_ERROR') settle.reject(new Error(msg.message));
-      else settle.resolve(msg.hulls.map(fromPayload));
+      else if (msg.type === 'ANALYSED') (settle.resolve as (a: MeshAnalysis) => void)(msg.analysis);
+      else (settle.resolve as (h: Hull[]) => void)(msg.hulls.map(fromPayload));
     };
     // A worker that dies leaves every caller awaiting forever otherwise.
     worker.onerror = () => {
@@ -83,18 +91,44 @@ export async function decomposeMeshOffThread(
     return decomposeMesh(verts, faces, params);
   }
 
-  return new Promise<Hull[]>((resolve, reject) => {
+  return request<Hull[]>(w, 'Convex decomposition timed out.', DECOMPOSE_TIMEOUT_MS, (id) => ({
+    type: 'DECOMPOSE', id, params,
+    verts: Float64Array.from(verts),
+    faces: Uint32Array.from(faces),
+  }));
+}
+
+/**
+ * Volume, hull volume and integrity of a mesh, measured off the main thread
+ * where it can be. See utils/meshAnalysis.ts.
+ */
+export async function analyseMeshOffThread(verts: number[], faces: number[]): Promise<MeshAnalysis> {
+  const w = ensureWorker();
+  if (!w) {
+    const { analyseMesh } = await import('./meshAnalysis');
+    return analyseMesh(verts, faces);
+  }
+  return request<MeshAnalysis>(w, 'Measuring the mesh timed out.', ANALYSE_TIMEOUT_MS, (id) => ({
+    type: 'ANALYSE', id,
+    verts: Float64Array.from(verts),
+    faces: Uint32Array.from(faces),
+  }));
+}
+
+function request<T>(
+  w: Worker,
+  timeoutMessage: string,
+  timeoutMs: number,
+  build: (id: number) => VhacdRequest & { verts: Float64Array; faces: Uint32Array },
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
     const id = ++seq;
     const timer = setTimeout(() => {
       pending.delete(id);
-      reject(new Error('Convex decomposition timed out.'));
-    }, DECOMPOSE_TIMEOUT_MS);
-    pending.set(id, { resolve, reject, timer });
-    const req: VhacdRequest = {
-      type: 'DECOMPOSE', id, params,
-      verts: Float64Array.from(verts),
-      faces: Uint32Array.from(faces),
-    };
+      reject(new Error(timeoutMessage));
+    }, timeoutMs);
+    pending.set(id, { resolve: resolve as (value: never) => void, reject, timer });
+    const req = build(id);
     w.postMessage(req, [req.verts.buffer, req.faces.buffer]);
   });
 }
