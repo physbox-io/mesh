@@ -125,10 +125,26 @@ export type HeadlessResult =
 // ---- Main thread -> worker -----------------------------------------------
 
 export type MainToWorkerMessage =
-  | { type: 'BUILD'; id: string; xml: string; sceneGraph: SceneGraph; preserveState: boolean; seedState?: SeedState; brokenConstraints?: string[] }
+  | {
+      type: 'BUILD'; id: string; xml: string; sceneGraph: SceneGraph; preserveState: boolean; seedState?: SeedState; brokenConstraints?: string[];
+      /**
+       * Mesh files to put in the worker's VFS before compiling, and names it
+       * may delete. The client tracks what the worker holds, so each file
+       * crosses once per worker. See utils/meshVfs.ts.
+       */
+      meshFiles?: { name: string; bytes: Uint8Array }[];
+      dropMeshes?: string[];
+      /**
+       * Do not step the new model until RESUME: the main thread is still
+       * drawing the old one, and anything simulated before it swaps is
+       * simulated off screen and shows up as a jump. See `holdUntil`.
+       */
+      holdForInstall?: boolean;
+    }
   | { type: 'SET_ENV'; windX?: number; windY?: number }
   | { type: 'SET_PLAYING'; isPlaying: boolean }
-  | { type: 'TICK'; delta: number }
+  | { type: 'TICK'; delta: number; /** Date.now() when posted, so a backlog can be told apart. */ sentAt?: number }
+  | { type: 'RESUME' }
   | { type: 'SET_DRAG'; nodeId: string | null; target: DragTarget | null }
   | { type: 'SET_KEYS'; keys: string[] }
   | { type: 'SET_QPOS'; jointName: string; axis: number; value: number }

@@ -6,6 +6,7 @@
 // against a same-thread MjModel/MjData.
 
 import type { SceneGraph } from '../types/scene';
+import { MeshFileLedger } from '../utils/meshVfs';
 import type {
   BuiltResult,
   ConstraintBrokenEvent,
@@ -167,6 +168,13 @@ export class PhysicsWorkerClient {
   private pendingHeadless = new Map<string, Pending<HeadlessRunResult>>();
   private pendingHistory = new Map<string, Pending<HistoryEntry[]>>();
   private pendingTelemetry = new Map<string, Pending<HistoryEntry | null>>();
+  /**
+   * Which meshes this worker already holds as VFS files. Pass it to
+   * `compileToMJCF` and then `build` the result on THIS client: a recycled
+   * worker has an empty VFS, and XML naming files it never received will not
+   * compile.
+   */
+  readonly meshFiles = new MeshFileLedger();
   onFrame: ((snap: FrameSnapshot) => void) | null = null;
   onError: ((message: string, fatal: boolean, lastState?: SeedState) => void) | null = null;
   /** A weld has just sheared off. See utils/breakThresholds.ts. */
@@ -244,11 +252,19 @@ export class PhysicsWorkerClient {
     preserveState: boolean,
     seedState?: SeedState,
     brokenConstraints?: string[],
+    holdForInstall?: boolean,
   ): Promise<BuiltResult> {
     const id = Math.random().toString(36).slice(2);
+    // Whatever the last compile against this client's ledger emitted as a
+    // file. An XML compiled without the ledger names no files, and `take` then
+    // hands back nothing to send.
+    const { add, drop } = this.meshFiles.take();
     return new Promise((resolve, reject) => {
       this.pendingBuilds.set(id, { resolve, reject });
-      this.worker.postMessage({ type: 'BUILD', id, xml, sceneGraph, preserveState, seedState, brokenConstraints });
+      this.worker.postMessage(
+        { type: 'BUILD', id, xml, sceneGraph, preserveState, seedState, brokenConstraints, meshFiles: add, dropMeshes: drop, holdForInstall },
+        add.map((f) => f.bytes.buffer as ArrayBuffer),
+      );
     });
   }
 
@@ -256,7 +272,9 @@ export class PhysicsWorkerClient {
   // Drives the worker's step loop in lockstep with the main thread's own
   // requestAnimationFrame, so physics stepping stays in phase with rendering
   // instead of drifting against an independent worker-side timer.
-  tick(delta: number) { this.worker.postMessage({ type: 'TICK', delta }); }
+  tick(delta: number) { this.worker.postMessage({ type: 'TICK', delta, sentAt: Date.now() }); }
+  /** The model a `holdForInstall` build made is on screen; the worker may step it. */
+  resume() { this.worker.postMessage({ type: 'RESUME' }); }
   setEnv(windX: number, windY: number) { this.worker.postMessage({ type: 'SET_ENV', windX, windY }); }
   setDrag(nodeId: string | null, target: { x: number; y: number; z: number } | null) { this.worker.postMessage({ type: 'SET_DRAG', nodeId, target }); }
   setKeys(keys: string[]) { this.worker.postMessage({ type: 'SET_KEYS', keys }); }

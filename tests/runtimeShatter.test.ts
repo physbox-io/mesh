@@ -12,7 +12,7 @@
 
 import { describe, it, expect, afterAll } from 'vitest';
 import { fractureMesh } from '../src/utils/fracture';
-import { MAX_SHATTER_DEPTH, buildShatterGraph, matToQuat, rotate, volumeCentroid, zupToYup } from '../src/utils/runtimeShatter';
+import { MAX_SHATTER_DEPTH, buildShatterGraph, matToQuat, quatToMat, rebaseShard, rotate, volumeCentroid, zupToYup } from '../src/utils/runtimeShatter';
 import { simulate, type Sim } from './helpers/simulate';
 import { shatterPreset } from '../src/presets/shatter';
 import type { SceneGraph, SceneNode } from '../src/types/scene';
@@ -165,8 +165,20 @@ describe('pieces that break again', () => {
   });
 
   it('asks for fewer pieces each generation, so a chip does not become gravel', () => {
-    const shards = withRecursion(2);
-    for (const s of shards) expect(s.shatterPieces).toBe(4);
+    // A third of eight, rounded.
+    for (const s of withRecursion(2)) expect(s.shatterPieces).toBe(3);
+  });
+
+  it('never lets a piece come apart into more than four, however many the body did', () => {
+    const node = vaseNode();
+    const geom = node.geoms[0];
+    const cells = fractureMesh(geom.renderVertices!, geom.faces!, { pieces: 24, seed: 3 });
+    const shards = buildShatterGraph(node, geom.renderVertices!, geom.faces!, cells, {
+      pos: [0, 0, 1], xmat: IDENTITY, vel: [0, 0, 0], angvel: [0, 0, 0],
+    }, { recursion: { generation: 1, depth: 1, impulseNs: 1.2, pieces: 24 } }).shards;
+    for (const s of shards.filter((s) => s.shatterPieces !== undefined)) {
+      expect(s.shatterPieces).toBeLessThanOrEqual(4);
+    }
   });
 
   it('stops at the authored depth', () => {
@@ -183,6 +195,90 @@ describe('pieces that break again', () => {
   it('gives each piece its own seed, so two shards do not break identically', () => {
     const seeds = withRecursion(1).map((s) => s.shatterSeed);
     expect(new Set(seeds).size).toBe(seeds.length);
+  });
+});
+
+describe('what a shard costs to simulate', () => {
+  const generation = (g: number) => {
+    const node = vaseNode();
+    const geom = node.geoms[0];
+    const cells = fractureMesh(geom.renderVertices!, geom.faces!, { pieces: 8, seed: 3 });
+    return buildShatterGraph(node, geom.renderVertices!, geom.faces!, cells, {
+      pos: [0, 0, 1], xmat: IDENTITY, vel: [0, 0, 0], angvel: [0, 0, 0],
+    }, g === 1 ? {} : { recursion: { generation: g, depth: 1, impulseNs: 1.2, pieces: 8 } }).shards;
+  };
+
+  it('keeps the first pieces of a body colliding with each other', () => {
+    for (const s of generation(1)) {
+      expect(s.geoms[0].contype).toBeUndefined();
+      expect(s.geoms[0].conaffinity).toBeUndefined();
+    }
+  });
+
+  it('stops chips colliding with each other, but not with anything else', () => {
+    for (const s of generation(2)) {
+      const { contype, conaffinity } = s.geoms[0];
+      // Chip against chip: MuJoCo tests (type1 & aff2) || (type2 & aff1).
+      expect((contype! & conaffinity!) || (contype! & conaffinity!)).toBe(0);
+      // Chip against a default 1/1 geom: the floor, the plinth, the ball.
+      expect((contype! & 1) || (1 & conaffinity!)).not.toBe(0);
+    }
+  });
+
+  it('caps every shard\'s collision hull, and marks its mesh as never changing', () => {
+    for (const s of [...generation(1), ...generation(2)]) {
+      expect(s.geoms[0].maxHullVert).toBe(12);
+      expect(s.geoms[0].stableMesh).toBe(true);
+    }
+  });
+});
+
+describe('re-basing a shard onto where its body has got to', () => {
+  // A body broken at the origin, unturned, drifting +x at 1 m/s and spinning
+  // about z at 2 rad/s; one shard 0.1 m out along +x with 0.3 m/s of spread.
+  const from = { joint: 'vase_free', pos: [0, 0, 0] as [number, number, number], quat: [1, 0, 0, 0] as [number, number, number, number], vel: [1, 0, 0] as [number, number, number], angvel: [0, 0, 2] as [number, number, number] };
+  const shard = { pos: [0.1, 0, 0], quat: [1, 0, 0, 0], initialVelocity: [1 + 0.3, 0.2, 0, 0, 0, 2] };
+  const s = Math.SQRT1_2;
+
+  it('changes nothing when the body has not moved since it broke', () => {
+    const { qpos, qvel } = rebaseShard(shard, from, { pos: [0, 0, 0], quat: [1, 0, 0, 0], vel: [1, 0, 0], angvelLocal: [0, 0, 2] });
+    expect(qpos.map((v) => +v.toFixed(12))).toEqual([0.1, 0, 0, 1, 0, 0, 0]);
+    expect(qvel.map((v) => +v.toFixed(12))).toEqual([1.3, 0.2, 0, 0, 0, 2]);
+  });
+
+  it('carries the shard along with the body when the body has moved', () => {
+    const { qpos } = rebaseShard(shard, from, { pos: [0.75, 0, -0.3], quat: [1, 0, 0, 0], vel: [1, 0, 0], angvelLocal: [0, 0, 2] });
+    expect(qpos[0]).toBeCloseTo(0.85, 12);
+    expect(qpos[2]).toBeCloseTo(-0.3, 12);
+  });
+
+  it('turns the shard\'s offset, orientation and spread with the body', () => {
+    // A quarter turn about z since the break: +x becomes +y.
+    const { qpos, qvel } = rebaseShard(shard, from, { pos: [0, 0, 0], quat: [s, 0, 0, s], vel: [0, 0, 0], angvelLocal: [0, 0, 0] });
+    expect(qpos[0]).toBeCloseTo(0, 12);
+    expect(qpos[1]).toBeCloseTo(0.1, 12);
+    expect(quatToMat(qpos.slice(3))[3]).toBeCloseTo(1, 12); // x axis now points along +y
+    // The body stopped, so all that is left is the 0.3 m/s spread, now along +y.
+    expect(qvel[0]).toBeCloseTo(0, 12);
+    expect(qvel[1]).toBeCloseTo(0.3, 12);
+  });
+
+  it('gives the shard the velocity of its point on the body NOW', () => {
+    // Stopped drifting, still spinning at 2 rad/s: the shard 0.1 m out moves
+    // at w x r = 0.2 m/s along +y, plus its spread.
+    const { qvel } = rebaseShard(shard, from, { pos: [0, 0, 0], quat: [1, 0, 0, 0], vel: [0, 0, 0], angvelLocal: [0, 0, 2] });
+    expect(qvel[0]).toBeCloseTo(0.3, 12);
+    expect(qvel[1]).toBeCloseTo(0.2, 12);
+    expect(qvel[5]).toBeCloseTo(2, 12);
+  });
+
+  it('records the body and the instant on every shard', () => {
+    const { shards, node } = shatterVase({ vel: [1, 2, 3], angvel: [0.1, 0.2, 0.3] });
+    for (const sh of shards) {
+      expect(sh.shatterFrom?.joint).toBe(node.joints![0].name);
+      expect(sh.shatterFrom?.vel).toEqual([1, 2, 3]);
+      expect(sh.shatterFrom?.pos).toEqual([node.pos[0], node.pos[1], node.pos[2]]);
+    }
   });
 });
 

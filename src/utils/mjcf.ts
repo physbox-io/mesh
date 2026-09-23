@@ -2,6 +2,7 @@ import type { SceneGraph, SceneNode, SceneGeom, SceneJoint } from '../types/scen
 import { generateWedgeMeshData } from './geom';
 import { analyzeMesh } from './meshIntegrity';
 import { resolveCsgGeoms } from './csg';
+import { encodeMsh, mshFileName, type MeshFileSink } from './meshVfs';
 
 const formatGeomSize = (type: string, rawSize: unknown): string => {
   const arr = Array.isArray(rawSize)
@@ -168,6 +169,23 @@ const rotationIsBaked = (node: SceneNode): boolean => {
   return geoms.some((g) => Array.isArray(g.baseVertices) && g.baseVertices.length > 0);
 };
 
+export interface MjcfOptions {
+  /**
+   * Let bodies that have come to rest sleep (`<flag sleep="enable"/>`): MuJoCo
+   * stops integrating and colliding a resting island until something touches
+   * it. Asked for only while a scene has shattered, where a settled heap of
+   * shards is most of the step, so no other scene changes behaviour.
+   */
+  sleep?: boolean;
+  /**
+   * Emit meshes as binary files in the worker's VFS rather than as inline
+   * vertex text, where the sink says so. See utils/meshVfs.ts. Left out, every
+   * mesh is inline exactly as before, which is what the tests, the exported
+   * presets and the native app's golden XML rely on.
+   */
+  meshFiles?: MeshFileSink;
+}
+
 export const compileToMJCF = (
   scene: SceneGraph,
   gravityZ: number = -9.81,
@@ -175,12 +193,24 @@ export const compileToMJCF = (
   windX: number = 0,
   windY: number = 0,
   density: number = 0,
-  floorBounce: number = 0.0
+  floorBounce: number = 0.0,
+  opts: MjcfOptions = {},
 ) => {
   if (!Array.isArray(scene?.nodes)) {
     throw new Error('compileToMJCF: scene.nodes must be an array (got a malformed SceneGraph)');
   }
-  const sceneCopy = JSON.parse(JSON.stringify(scene)) as SceneGraph;
+  // Copy only what the passes below write to: a node's name and geom list, and
+  // a geom's name (plus, for a wedge, its mesh fields, which are replaced rather
+  // than edited). Geoms are copied as well as nodes because resolveCsgGeoms
+  // hands back the original geom objects, and a rename would leak into the
+  // store. Vertex and face arrays are shared — nothing here writes into them,
+  // and deep-copying a shattered scene's worth of them cost every rebuild.
+  const cloneNodes = (nodes: SceneNode[]): SceneNode[] => nodes.map(n => ({
+    ...n,
+    ...(n.geoms ? { geoms: n.geoms.map(g => ({ ...g })) } : {}),
+    ...(n.children ? { children: cloneNodes(n.children) } : {}),
+  }));
+  const sceneCopy: SceneGraph = { ...scene, nodes: cloneNodes(scene.nodes) };
 
   // Resolve every body down to the geoms that actually simulate: a boolean's
   // negatives are dropped, and depending on the collision mode the colliders are
@@ -311,10 +341,24 @@ export const compileToMJCF = (
       : '';
   };
 
+  const sink = opts.meshFiles;
+  sink?.begin();
+  const meshAsset = (g: SceneGeom): string => {
+    const hull = g.maxHullVert !== undefined ? ` maxhullvert="${g.maxHullVert}"` : '';
+    const verts = toMjcfVerts(g.vertices!);
+    if (sink) {
+      const bytes = encodeMsh(verts, g.faces!);
+      const file = mshFileName(bytes);
+      if (sink.useFile(file, !!g.stableMesh)) {
+        sink.files.set(file, bytes);
+        return `    <mesh name="${g.name}"${meshInertia(g)}${hull} file="${file}" />`;
+      }
+    }
+    return `    <mesh name="${g.name}"${meshInertia(g)}${hull} vertex="${verts.join(' ')}" face="${g.faces!.join(' ')}" />`;
+  };
+
   const assetXml = meshAssets.length > 0
-    ? `\n  <asset>\n${meshAssets.map(g =>
-        `    <mesh name="${g.name}"${meshInertia(g)} vertex="${toMjcfVerts(g.vertices!).join(' ')}" face="${g.faces!.join(' ')}" />`
-      ).join('\n')}\n  </asset>`
+    ? `\n  <asset>\n${meshAssets.map(meshAsset).join('\n')}\n  </asset>`
     : '';
 
   const actuators: SceneJoint[] = [];
@@ -590,7 +634,7 @@ export const compileToMJCF = (
        0.0018 kg.m^2 hub) hit "Nan, Inf or huge value in QACC" within 15ms and
        simply never turned. This costs nothing and removes a whole class of
        "the preset does nothing" failure that depends on a body's scale. -->
-  <option integrator="implicitfast" timestep="0.001" gravity="0 0 ${gravityZ}" wind="${windX} ${windY} 0" density="${density}" iterations="50" tolerance="1e-10" ls_iterations="50" ls_tolerance="1e-12" />${assetXml}
+  <option integrator="implicitfast" timestep="0.001" gravity="0 0 ${gravityZ}" wind="${windX} ${windY} 0" density="${density}" iterations="50" tolerance="1e-10" ls_iterations="50" ls_tolerance="1e-12"${opts.sleep ? '><flag sleep="enable" /></option>' : ' />'}${assetXml}
   <default>
     <geom solref="0.02 1" solimp="0.99 0.9999 0.0001 0.5 2" />
   </default>

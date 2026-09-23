@@ -466,18 +466,17 @@ export const shatterPreset: SceneGraph = {
       shatterPattern: 'radial',
       shatterSpread: 0.35,
       /*
-       * The pieces could break again when they land — set "Pieces break: once
-       * more" in the Fracture panel — and they are left final here.
+       * The pieces break again when they land, and their pieces do not.
        *
-       * Each shard would inherit a threshold scaled to its own share of the
-       * vase, so a chip that hits the floor comes apart the way porcelain does
-       * rather than bouncing like a pebble. It is off by default because it is
-       * genuinely expensive: every generation multiplies the body count, and
-       * each break is a rebuild of the MuJoCo model, so a dozen pieces landing
-       * in quick succession is a dozen rebuilds and the scene hitches its way
-       * down. Worth turning on to watch; not worth having on by default.
+       * Each shard inherits a threshold scaled to its own share of the vase,
+       * so a chip that hits the floor comes apart the way porcelain does
+       * rather than bouncing like a pebble. What keeps that affordable lives
+       * in utils/runtimeShatter.ts: a shard comes apart into at most four
+       * chips, chips never collide with one another (only with everything
+       * else), and the world holds at most MAX_LIVE_SHARDS. Measured here, the
+       * whole cascade steps in real time.
        */
-      shatterDepth: 0,
+      shatterDepth: 1,
       /*
        * Hulled rather than decomposed.
        *

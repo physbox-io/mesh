@@ -150,6 +150,49 @@ function isFiniteThreshold(v: number | undefined): boolean {
 
 export interface ShatterConfig {
   shatterImpulseNs?: number;
+  shatterThicknessRef?: number;
+}
+
+/**
+ * How far wall thickness may move a shatter threshold, as multiples of it.
+ *
+ * Capped both ways. Below, because a mesh with a paper-thin wall — often an
+ * artefact of how it was modelled rather than a design decision — would
+ * otherwise break when breathed on. Above, because a solid lump measured
+ * across its whole width is not a hundred times stronger than a wall, it just
+ * fails a different way; past a few times the rated wall the blow is taken
+ * as a local squeeze and extra material behind it stops helping.
+ */
+export const WALL_SCALE_MIN = 0.3;
+export const WALL_SCALE_MAX = 3;
+
+/**
+ * The blow that breaks this body, given how thick it is where it was hit.
+ *
+ * `shatterImpulseNs` is the rating for a wall `shatterThicknessRef` thick;
+ * elsewhere it scales linearly with the measured wall, inside the caps. Linear
+ * is a simplification — flexural stress goes as 1/t^2, but a thinner wall is
+ * also lighter and more flexible, and those partly cancel — and it keeps the
+ * number a person types meaning what it says at the thickness they typed.
+ *
+ * With no reference, or no measurement, the threshold is used as it stands.
+ */
+export function shatterLimit(cfg: ShatterConfig | undefined, wallM?: number | null): number {
+  const base = cfg?.shatterImpulseNs ?? Infinity;
+  const ref = cfg?.shatterThicknessRef;
+  if (!(typeof ref === 'number' && ref > 0) || !(typeof wallM === 'number' && wallM > 0)) return base;
+  const scale = Math.min(WALL_SCALE_MAX, Math.max(WALL_SCALE_MIN, wallM / ref));
+  return base * scale;
+}
+
+/**
+ * The weakest this body can be anywhere, which is what the physics worker has
+ * to watch for: it cannot measure walls, so it reports any blow that could
+ * break the thinnest one and leaves the verdict to the main thread.
+ */
+export function shatterFloor(cfg: ShatterConfig | undefined): number {
+  const base = cfg?.shatterImpulseNs ?? Infinity;
+  return typeof cfg?.shatterThicknessRef === 'number' && cfg.shatterThicknessRef > 0 ? base * WALL_SCALE_MIN : base;
 }
 
 export interface DentConfig {
@@ -188,8 +231,8 @@ export function canDent(cfg: DentConfig | undefined): boolean {
 }
 
 /** Was that blow enough to break it? */
-export function shatterVerdict(impulseNs: number, cfg: ShatterConfig | undefined): boolean {
-  return canShatter(cfg) && impulseNs >= cfg!.shatterImpulseNs!;
+export function shatterVerdict(impulseNs: number, cfg: ShatterConfig | undefined, wallM?: number | null): boolean {
+  return canShatter(cfg) && impulseNs >= shatterLimit(cfg, wallM);
 }
 
 /**

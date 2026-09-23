@@ -31,6 +31,7 @@ import { getStickyRotation } from './utils/geom';
 import { csgSourceGeoms, csgHashOf, collisionModeOf, CSG_DEFAULT_SECTORS } from './utils/csg';
 import { DEFAULT_HOLD_STEPS, isBreakable, weldKey } from './utils/breakThresholds';
 import { isDentable, needsConversionForDenting } from './utils/dentMesh';
+import { CUSTOM_DENT, CUSTOM_SHATTER, DEFORM_MATERIALS, deformMaterial, dentFields, estimateBodyMass, materialUpdates, shatterFields } from './utils/deformMaterials';
 import { collidersAreStale, solidMeshGeoms } from './utils/convexDecomposition';
 import { useCsgAutoCompile } from './hooks/useCsgCompile';
 import { PRESETS } from './presets/presetScenes';
@@ -5910,65 +5911,175 @@ function App() {
                 );
               })()}
 
-              {/* Fracture — what it takes to break this body into pieces, and
-                  how many. The pieces are cut from the body's convex hull, so
-                  they tile it exactly; see utils/fracture.ts. */}
+              {/* Deformation — what this body does when it is hit hard: break
+                  into pieces, take a dent, both or neither. A material fills in
+                  numbers that belong together; see utils/deformMaterials.ts.
+                  Shattering is per body and denting per geom, so the card
+                  works on the one geom a dent would be made in. */}
               {(() => {
-                const meshGeom = (selectedNode.geoms || []).find(
-                  (g) => g.type === 'mesh' && (g.renderVertices || g.vertices) && g.faces,
+                // Offered on primitives too. A dent moves vertices and a
+                // fracture cuts them, and a primitive has none, so turning
+                // either on converts the shape into the mesh it already looked
+                // like — see utils/dentMesh.ts. A plane is the one thing that
+                // cannot be converted; it is infinite in the solver.
+                const candidates = (selectedNode.geoms || []).filter(
+                  (g) => isDentable(g) || needsConversionForDenting(g),
                 );
-                if (!meshGeom) return null;
+                if (candidates.length === 0) return null;
+                const geom = candidates.find((g) => (g.dentYieldNs ?? 0) > 0) ?? candidates[0];
+                const gi = (selectedNode.geoms || []).indexOf(geom);
+                const willConvert = needsConversionForDenting(geom);
+                const nodeId = selectedNode.id;
 
-                const enabled = typeof selectedNode.shatterImpulseNs === 'number' && selectedNode.shatterImpulseNs > 0;
+                const shatterOn = typeof selectedNode.shatterImpulseNs === 'number' && selectedNode.shatterImpulseNs > 0;
+                const dentOn = typeof geom.dentYieldNs === 'number' && geom.dentYieldNs > 0;
+                const material = deformMaterial(selectedNode.deformMaterial);
                 const movable = (selectedNode.joints || []).length > 0;
-                const inPieces = !!shatteredBodies[selectedNode.id];
-                const info = lastShatter?.nodeId === selectedNode.id ? lastShatter : null;
+                const inPieces = !!shatteredBodies[nodeId];
+                const info = lastShatter?.nodeId === nodeId ? lastShatter : null;
+                const marks = dents[`${nodeId}/${geom.name}`];
+                const massKg = estimateBodyMass(selectedNode);
+
+                // Any number changed by hand means the body is no longer the
+                // material the dropdown names.
+                const markCustom = () => {
+                  if (selectedNode.deformMaterial && selectedNode.deformMaterial !== 'custom') {
+                    updateNode(nodeId, { deformMaterial: 'custom' });
+                  }
+                };
+                const tuneNode = (u: Partial<SceneNode>) => {
+                  updateNode(nodeId, selectedNode.deformMaterial ? { ...u, deformMaterial: 'custom' } : u);
+                };
+                const tuneGeom = (u: Partial<SceneGeom>) => {
+                  updateNodeGeom(nodeId, u, gi);
+                  markCustom();
+                };
+
+                const setShatter = (on: boolean) => {
+                  if (!on) { updateNode(nodeId, { shatterImpulseNs: undefined }); return; }
+                  if (willConvert) makeDentable(nodeId, gi, {});
+                  updateNode(nodeId, shatterFields(material?.shatter ?? CUSTOM_SHATTER, massKg));
+                };
+                const setDent = (on: boolean) => {
+                  if (on) makeDentable(nodeId, gi, dentFields(material?.dent ?? CUSTOM_DENT));
+                  else updateNodeGeom(nodeId, { dentYieldNs: undefined }, gi);
+                };
+                const pickMaterial = (id: string) => {
+                  const m = deformMaterial(id);
+                  if (!m) { updateNode(nodeId, { deformMaterial: id === 'custom' ? 'custom' : undefined }); return; }
+                  const r = materialUpdates(selectedNode, m, { shatter: shatterOn, dent: dentOn });
+                  for (const [i, u] of Object.entries(r.geoms)) updateNodeGeom(nodeId, u, Number(i));
+                  if (r.dent) makeDentable(nodeId, gi, dentFields(m.dent!));
+                  else {
+                    if (dentOn) updateNodeGeom(nodeId, { dentYieldNs: undefined }, gi);
+                    if (r.shatter && willConvert) makeDentable(nodeId, gi, {});
+                  }
+                  updateNode(nodeId, r.node);
+                };
+
+                const breakSpeed = shatterOn && massKg > 0 ? selectedNode.shatterImpulseNs! / massKg : null;
 
                 return (
                   <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-2">
                     <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 mb-1 flex items-center gap-1.5">
-                      <Sparkles className="w-3.5 h-3.5 text-rose-500" /> Fracture
-                      {inPieces && <span className="ml-auto text-[10px] font-semibold text-rose-600">in pieces</span>}
+                      <Hammer className="w-3.5 h-3.5 text-amber-600" /> Deformation
+                      {(inPieces || marks) && (
+                        <span className="ml-auto text-[10px] font-semibold text-rose-600">
+                          {inPieces
+                            ? 'in pieces'
+                            : marks!.holes ? `${marks!.holes} hole${marks!.holes === 1 ? '' : 's'}` : `${marks!.count} dent${marks!.count === 1 ? '' : 's'}`}
+                        </span>
+                      )}
                     </h3>
 
-                    <label className="flex items-center gap-2 text-xs text-slate-700 cursor-pointer">
+                    <div className="flex items-center gap-2">
+                      <label className="text-[10px] text-slate-500 w-20 shrink-0">Material</label>
+                      <select
+                        value={material?.id ?? 'custom'}
+                        onChange={(e) => pickMaterial(e.target.value)}
+                        className="flex-1 min-w-0 px-2 py-1 border border-slate-200 rounded text-xs bg-white text-slate-700 outline-none focus:border-blue-500 cursor-pointer"
+                        title="Fills in the numbers below, and the density, so the body weighs what it is made of."
+                      >
+                        <option value="custom">Custom</option>
+                        {DEFORM_MATERIALS.map((m) => (
+                          <option key={m.id} value={m.id}>{m.label}</option>
+                        ))}
+                      </select>
+                    </div>
+                    {material && (
+                      <p className="text-[10px] text-slate-400 leading-snug">{material.note}</p>
+                    )}
+
+                    {willConvert && !shatterOn && !dentOn && (
+                      <p className="text-[10px] text-slate-400 leading-snug">
+                        A {geom.type} has no vertices to break or push in. Turning either on
+                        below rebuilds it as the mesh it already looks like.
+                      </p>
+                    )}
+
+                    {/* ---- Shattering ---- */}
+                    <label
+                      className={`flex items-center gap-2 text-xs cursor-pointer ${material && !material.shatter ? 'text-slate-400' : 'text-slate-700'}`}
+                      title={material && !material.shatter ? `${material.label} does not shatter. Choose Custom to make it.` : undefined}
+                    >
                       <input
                         type="checkbox"
-                        checked={enabled}
-                        onChange={(e) => updateNode(selectedNode.id, e.target.checked
-                          ? { shatterImpulseNs: 2, shatterPieces: 8, shatterSeed: 1, shatterPattern: 'radial' }
-                          : { shatterImpulseNs: undefined })}
-                        className="accent-rose-500 cursor-pointer"
+                        checked={shatterOn}
+                        disabled={!!material && !material.shatter}
+                        onChange={(e) => setShatter(e.target.checked)}
+                        className="accent-rose-500 cursor-pointer disabled:cursor-not-allowed"
                       />
-                      This body is brittle
+                      <Sparkles className="w-3 h-3 text-rose-500" /> Shatters
                     </label>
 
-                    {enabled && !movable && (
+                    {shatterOn && !movable && (
                       <p className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1 leading-snug">
                         This body is fixed in place, so nothing can hit it hard enough to
                         matter. Give it a joint under Body &amp; Joints to let it be struck.
                       </p>
                     )}
 
-                    {enabled && (
-                      <>
+                    {shatterOn && (
+                      <div className="flex flex-col gap-2 pl-5">
                         <div className="flex items-center gap-2">
                           <label className="text-[10px] text-slate-500 w-20 shrink-0">Breaks at</label>
                           <SettledNumberInput
                             step="0.5"
                             min={0}
                             value={selectedNode.shatterImpulseNs ?? 0}
-                            onChange={(v) => updateNode(selectedNode.id, { shatterImpulseNs: v })}
+                            onChange={(v) => tuneNode({ shatterImpulseNs: v })}
                             className="flex-1 min-w-0 px-2 py-1 border border-slate-200 rounded text-xs bg-white text-slate-700 outline-none focus:border-blue-500"
                           />
                           <span className="text-[10px] text-slate-400 w-8 shrink-0">N·s</span>
+                        </div>
+                        {breakSpeed !== null && (
+                          <p className="text-[10px] text-slate-400 leading-snug -mt-1">
+                            A {(massKg * 1000 < 1000 ? `${Math.round(massKg * 1000)} g` : `${massKg.toFixed(1)} kg`)} body
+                            stopped from {breakSpeed.toFixed(1)} m/s — a drop of
+                            about {(breakSpeed * breakSpeed / 19.62 * 100).toFixed(0)} cm onto something hard
+                            {selectedNode.shatterThicknessRef
+                              ? `, where the wall is ${+(selectedNode.shatterThicknessRef * 1000).toFixed(1)} mm. Thinner breaks sooner: half that wall, half the blow.`
+                              : '.'}
+                          </p>
+                        )}
+                        <div className="flex items-center gap-2">
+                          <label className="text-[10px] text-slate-500 w-20 shrink-0">Rated wall</label>
+                          <SettledNumberInput
+                            step="1" min={0}
+                            value={+((selectedNode.shatterThicknessRef ?? 0) * 1000).toFixed(1)}
+                            onChange={(v) => tuneNode({ shatterThicknessRef: v > 0 ? v / 1000 : undefined })}
+                            className="flex-1 min-w-0 px-2 py-1 border border-slate-200 rounded text-xs bg-white text-slate-700 outline-none focus:border-blue-500"
+                            placeholder="any"
+                            title="The wall thickness the number above is for. Hit somewhere thinner and it breaks sooner; thicker, and it takes more (up to three times). Measured where the blow lands. Zero: thickness does not matter."
+                          />
+                          <span className="text-[10px] text-slate-400 w-8 shrink-0">mm</span>
                         </div>
                         <div className="flex items-center gap-2">
                           <label className="text-[10px] text-slate-500 w-20 shrink-0">Pieces</label>
                           <input
                             type="range" min={2} max={24} step={1}
                             value={selectedNode.shatterPieces ?? 8}
-                            onChange={(e) => updateNode(selectedNode.id, { shatterPieces: parseInt(e.target.value, 10) })}
+                            onChange={(e) => tuneNode({ shatterPieces: parseInt(e.target.value, 10) })}
                             className="flex-1 accent-rose-500 cursor-pointer"
                           />
                           <span className="text-[10px] text-slate-500 w-8 shrink-0 text-right">{selectedNode.shatterPieces ?? 8}</span>
@@ -5977,7 +6088,7 @@ function App() {
                           <label className="text-[10px] text-slate-500 w-20 shrink-0">Pattern</label>
                           <select
                             value={selectedNode.shatterPattern ?? 'radial'}
-                            onChange={(e) => updateNode(selectedNode.id, { shatterPattern: e.target.value as 'uniform' | 'radial' })}
+                            onChange={(e) => tuneNode({ shatterPattern: e.target.value as 'uniform' | 'radial' })}
                             className="flex-1 min-w-0 px-2 py-1 border border-slate-200 rounded text-xs bg-white text-slate-700 outline-none focus:border-blue-500 cursor-pointer"
                             title="Radial crowds the small pieces around the point of impact, which is what really happens and what reads as a blow."
                           >
@@ -5989,7 +6100,7 @@ function App() {
                           <label className="text-[10px] text-slate-500 w-20 shrink-0">Pieces break</label>
                           <select
                             value={selectedNode.shatterDepth ?? 0}
-                            onChange={(e) => updateNode(selectedNode.id, { shatterDepth: parseInt(e.target.value, 10) || undefined })}
+                            onChange={(e) => tuneNode({ shatterDepth: parseInt(e.target.value, 10) || undefined })}
                             className="flex-1 min-w-0 px-2 py-1 border border-slate-200 rounded text-xs bg-white text-slate-700 outline-none focus:border-blue-500 cursor-pointer"
                             title="Whether the pieces can break again when they land. Each generation multiplies the body count and every break rebuilds the model, so a scene set to cascade will hitch its way down."
                           >
@@ -6004,90 +6115,44 @@ function App() {
                             step="0.1"
                             min={0}
                             value={selectedNode.shatterSpread ?? 0}
-                            onChange={(v) => updateNode(selectedNode.id, { shatterSpread: v || undefined })}
+                            onChange={(v) => tuneNode({ shatterSpread: v || undefined })}
                             className="flex-1 min-w-0 px-2 py-1 border border-slate-200 rounded text-xs bg-white text-slate-700 outline-none focus:border-blue-500"
                           />
                           <span className="text-[10px] text-slate-400 w-8 shrink-0">m/s</span>
                         </div>
-                        <p className="text-[10px] text-slate-400 leading-snug">
-                          Measured as impulse rather than force, so the number means the same
-                          thing whatever the solver is doing: a 200 g body arriving at 5 m/s
-                          and stopping dead is about 1 N·s. The pieces are cut from this
-                          body's outline and add up to exactly what broke.
-                        </p>
                         {info && (
                           <div className="flex items-center gap-2 text-[10px] text-rose-700 bg-rose-50 border border-rose-200 rounded px-2 py-1 leading-snug">
                             <span className="flex-1">
-                              Broke into {info.pieces} pieces at {info.time.toFixed(2)} s, taking {info.impulseNs.toFixed(1)} N·s. Reset makes it whole.
+                              Broke into {info.pieces} pieces at {info.time.toFixed(2)} s, taking {info.impulseNs.toFixed(1)} N·s{info.wallM !== undefined ? ` where the wall is ${(info.wallM * 1000).toFixed(1)} mm` : ''}. Reset makes it whole.
                             </span>
                           </div>
                         )}
-                      </>
+                      </div>
                     )}
-                  </div>
-                );
-              })()}
 
-              {/* Denting — a surface that takes a permanent mark from a hard
-                  enough blow. Cosmetic by design; see store/dentStore.ts. */}
-              {(() => {
-                // Offered on primitives too. A dent moves vertices and a
-                // primitive has none, so turning it on converts the shape into
-                // the mesh it already looked like — see utils/dentMesh.ts. A
-                // plane is the one thing that cannot be made dentable; it is
-                // infinite in the solver and has no surface to speak of.
-                const dentable = (selectedNode.geoms || []).filter(
-                  (g) => isDentable(g) || needsConversionForDenting(g),
-                );
-                if (dentable.length === 0) return null;
-                const geom = dentable.find((g) => (g.dentYieldNs ?? 0) > 0) ?? dentable[0];
-                const gi = (selectedNode.geoms || []).indexOf(geom);
-                const enabled = typeof geom.dentYieldNs === 'number' && geom.dentYieldNs > 0;
-                const willConvert = needsConversionForDenting(geom);
-                const marks = dents[`${selectedNode.id}/${geom.name}`];
-
-                return (
-                  <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-2">
-                    <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 mb-1 flex items-center gap-1.5">
-                      <Hammer className="w-3.5 h-3.5 text-amber-600" /> Denting
-                      {marks && <span className="ml-auto text-[10px] font-semibold text-amber-600">{marks.holes ? `${marks.holes} hole${marks.holes === 1 ? '' : 's'}` : `${marks.count} dent${marks.count === 1 ? '' : 's'}`}</span>}
-                    </h3>
-
-                    <label className="flex items-center gap-2 text-xs text-slate-700 cursor-pointer">
+                    {/* ---- Denting ---- */}
+                    <label
+                      className={`flex items-center gap-2 text-xs cursor-pointer ${material && !material.dent ? 'text-slate-400' : 'text-slate-700'}`}
+                      title={material && !material.dent ? `${material.label} does not dent. Choose Custom to make it.` : undefined}
+                    >
                       <input
                         type="checkbox"
-                        checked={enabled}
-                        onChange={(e) => {
-                          if (e.target.checked) {
-                            makeDentable(selectedNode.id, gi, {
-                              dentYieldNs: 4, dentDepthPerNs: 0.012, dentMaxDepth: 0.01,
-                            });
-                          } else {
-                            updateNodeGeom(selectedNode.id, { dentYieldNs: undefined }, gi);
-                          }
-                        }}
-                        className="accent-amber-500 cursor-pointer"
+                        checked={dentOn}
+                        disabled={!!material && !material.dent}
+                        onChange={(e) => setDent(e.target.checked)}
+                        className="accent-amber-500 cursor-pointer disabled:cursor-not-allowed"
                       />
-                      This surface can be dented
+                      <Hammer className="w-3 h-3 text-amber-600" /> Dents
                     </label>
 
-                    {willConvert && (
-                      <p className="text-[10px] text-slate-400 leading-snug">
-                        A {geom.type} has no vertices to push in — it is a handful of
-                        numbers the solver evaluates, not a surface. Turning this on
-                        rebuilds it as the mesh it already looked like, which is what a
-                        dent can actually be made in.
-                      </p>
-                    )}
-
-                    {enabled && (
-                      <>
+                    {dentOn && (
+                      <div className="flex flex-col gap-2 pl-5">
                         <div className="flex items-center gap-2">
                           <label className="text-[10px] text-slate-500 w-20 shrink-0">Yields at</label>
                           <SettledNumberInput
                             step="0.5" min={0}
                             value={geom.dentYieldNs ?? 0}
-                            onChange={(v) => updateNodeGeom(selectedNode.id, { dentYieldNs: v }, gi)}
+                            onChange={(v) => tuneGeom({ dentYieldNs: v })}
                             className="flex-1 min-w-0 px-2 py-1 border border-slate-200 rounded text-xs bg-white text-slate-700 outline-none focus:border-blue-500"
                           />
                           <span className="text-[10px] text-slate-400 w-8 shrink-0">N·s</span>
@@ -6097,7 +6162,7 @@ function App() {
                           <SettledNumberInput
                             step="1" min={0}
                             value={Math.round((geom.dentMaxDepth ?? 0.02) * 1000)}
-                            onChange={(v) => updateNodeGeom(selectedNode.id, { dentMaxDepth: v / 1000 }, gi)}
+                            onChange={(v) => tuneGeom({ dentMaxDepth: v / 1000 })}
                             className="flex-1 min-w-0 px-2 py-1 border border-slate-200 rounded text-xs bg-white text-slate-700 outline-none focus:border-blue-500"
                           />
                           <span className="text-[10px] text-slate-400 w-8 shrink-0">mm</span>
@@ -6107,7 +6172,7 @@ function App() {
                           <SettledNumberInput
                             step="1" min={0}
                             value={geom.pierceImpulseNs ?? 0}
-                            onChange={(v) => updateNodeGeom(selectedNode.id, { pierceImpulseNs: v || undefined }, gi)}
+                            onChange={(v) => tuneGeom({ pierceImpulseNs: v || undefined })}
                             className="flex-1 min-w-0 px-2 py-1 border border-slate-200 rounded text-xs bg-white text-slate-700 outline-none focus:border-blue-500"
                             placeholder="never"
                             title="Above this the surface is holed rather than dented: the material under the striker is gone, not pushed aside. Leave at zero and it can never be pierced."
@@ -6124,7 +6189,7 @@ function App() {
                           <input
                             type="checkbox"
                             checked={!!geom.deformCollision}
-                            onChange={(e) => updateNodeGeom(selectedNode.id,
+                            onChange={(e) => updateNodeGeom(nodeId,
                               { deformCollision: e.target.checked || undefined }, gi)}
                             className="accent-amber-500 cursor-pointer"
                           />
@@ -6150,7 +6215,15 @@ function App() {
                             {marks && '.'}
                           </p>
                         )}
-                      </>
+                      </div>
+                    )}
+
+                    {(shatterOn || dentOn) && (
+                      <p className="text-[10px] text-slate-400 leading-snug">
+                        Blows are measured as impulse, not force, so the number means the same
+                        thing whatever the solver is doing: a 200 g body arriving at 5 m/s and
+                        stopping dead is about 1 N·s.{shatterOn && dentOn && ' A blow hard enough to shatter does not also dent.'}
+                      </p>
                     )}
                   </div>
                 );
@@ -7247,6 +7320,21 @@ api.applyForce([force, 0, 0]);
                           pausing does not, because a break you cannot stop and look at is no
                           use. <strong>Restore</strong> on a broken weld puts back that one
                           joint, where the body is now.
+                        </p>
+                      </div>
+                      <div className="text-xs border-t border-slate-150 pt-3">
+                        <strong className="text-slate-700">🧱 Materials</strong>
+                        <p className="text-slate-500 mt-1">
+                          The <strong>Deformation</strong> card sets shattering and denting
+                          together. Pick a material and it fills in numbers that belong
+                          together, plus the density, so the body weighs what it is made of.
+                          Glass shatters and never dents; steel dents and never shatters;
+                          plastic and wood can do both. A material's breaking point is a
+                          speed, so a glass marble and a glass tabletop both break from the
+                          same drop. Glass, ceramic and stone also care how thick they are
+                          where they are hit, so a wine glass breaks on its thin bowl from a
+                          knock its foot would shrug off. Change any number and the material
+                          becomes Custom.
                         </p>
                       </div>
                       <div className="text-xs border-t border-slate-150 pt-3">

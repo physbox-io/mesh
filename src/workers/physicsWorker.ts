@@ -41,10 +41,12 @@ import type {
   JointHistory,
   WorkerToMainMessage,
 } from './physicsWorkerProtocol';
-import { canCrumple, crumpleAsWeld, crumpleKey, holdSteps, isBreakable, weldKey, weldOverload, type WeldBreakConfig } from '../utils/breakThresholds';
+import { rebaseShard } from '../utils/runtimeShatter';
+import { canCrumple, crumpleAsWeld, crumpleKey, holdSteps, isBreakable, shatterFloor, weldKey, weldOverload, type WeldBreakConfig } from '../utils/breakThresholds';
 
 type Mujoco = Awaited<ReturnType<typeof load_mujoco>>;
 type MjModel = InstanceType<Mujoco['MjModel']>;
+type MjVFS = InstanceType<Mujoco['MjVFS']>;
 type MjData = InstanceType<Mujoco['MjData']>;
 let mujoco: Mujoco | null = null;
 /**
@@ -363,6 +365,7 @@ const executeScripts = (nodes: SceneNode[], aeroDiagnostics: Record<string, Aero
           const jId = _resolveJoint(joint.name);
           if (jId === -1) return;
           const qposadr = mdl.jnt_qposadr[jId];
+          pendingWake.add(mdl.jnt_bodyid[jId]);
           if (joint.type === 'free') {
             if (Array.isArray(pos) && pos.length >= 3) {
               dat.qpos[qposadr + 0] = pos[0]; dat.qpos[qposadr + 1] = pos[1]; dat.qpos[qposadr + 2] = pos[2];
@@ -382,6 +385,7 @@ const executeScripts = (nodes: SceneNode[], aeroDiagnostics: Record<string, Aero
           const jId = _resolveJoint(joint.name);
           if (jId === -1) return;
           const dofadr = mdl.jnt_dofadr[jId];
+          pendingWake.add(mdl.jnt_bodyid[jId]);
           if (joint.type === 'free') {
             if (Array.isArray(vel) && vel.length >= 3) {
               dat.qvel[dofadr + 0] = vel[0]; dat.qvel[dofadr + 1] = vel[1]; dat.qvel[dofadr + 2] = vel[2];
@@ -506,6 +510,31 @@ const applyFreeJointDamping = (nodes: SceneNode[]) => {
     }
     applyFreeJointDamping(node.children || []);
   }
+};
+
+/*
+ * Bodies to wake before the next step.
+ *
+ * A shattered scene runs with MuJoCo's sleeping on (see `sleep` in mjcf.ts),
+ * and a body that is asleep is not integrated at all: gravity does not wake
+ * it. Writing its qpos moves it, but it stays asleep where it was put, so a
+ * shard lifted by the gizmo or a script would hang in mid-air when let go.
+ * Collisions and applied forces are what wake a body, so a body written to is
+ * given a force far too small to move anything, for one step.
+ */
+const pendingWake = new Set<number>();
+const SLEEP_ENABLE_BIT = 16; // mjENBL_SLEEP
+const WAKE_NUDGE_N = 1e-12;
+
+const wakeBodies = () => {
+  if (pendingWake.size === 0) return;
+  const mdl = model!, dat = data!;
+  if (mdl.opt.enableflags & SLEEP_ENABLE_BIT) {
+    for (const b of pendingWake) {
+      if (b > 0 && b < mdl.nbody) dat.xfrc_applied[b * 6 + 2] += WAKE_NUDGE_N;
+    }
+  }
+  pendingWake.clear();
 };
 
 const applyDragForce = () => {
@@ -1016,7 +1045,9 @@ const rebuildImpactWatches = () => {
     for (const node of nodes) {
       const thresholds: number[] = [];
       if (typeof node.shatterImpulseNs === 'number' && node.shatterImpulseNs > 0) {
-        thresholds.push(node.shatterImpulseNs);
+        // The weakest wall anywhere on it: only the main thread can tell
+        // where the blow landed, and so how thick the body is there.
+        thresholds.push(shatterFloor(node));
       }
       for (const g of node.geoms || []) {
         if (typeof g.dentYieldNs === 'number' && g.dentYieldNs > 0) thresholds.push(g.dentYieldNs);
@@ -1189,8 +1220,41 @@ const checkImpacts = (dt: number) => {
   }
 };
 
+/*
+ * Holding a freshly built model still until the main thread is drawing it.
+ *
+ * A body shatters, the model is rebuilt with its pieces, and the build blocks
+ * this worker for a while — a hundred milliseconds or so for the first break
+ * of a scene. Two things then used to happen off screen. The TICKs that
+ * queued up during the build were all stepped on arrival, lurching the world
+ * forward by however long the build took; and the main thread, busy with the
+ * impact, took as long again to swap the new model in. Meanwhile the screen
+ * showed the old model's last frame. By the time the pieces appeared they
+ * were a fifth of a metre on from the vase the eye was following.
+ *
+ * So after such a build nothing is stepped until RESUME says the new model is
+ * on screen (or `HOLD_FOR_INSTALL_MS` passes, so a lost message cannot freeze
+ * the scene), and ticks posted before that are dropped rather than caught up.
+ * The world pauses for a beat instead of jumping.
+ */
+const HOLD_FOR_INSTALL_MS = 500;
+let holdUntil = 0; // performance.now() deadline; 0 = not holding
+let tickFloor = 0; // Date.now(): TICKs posted before this are a stale backlog
+
+const endHold = () => {
+  holdUntil = 0;
+  tickFloor = Date.now();
+  accumulator = 0;
+  lastTickTime = performance.now();
+};
+
 const stepTick = (delta: number) => {
   if (!isPlaying || !model || !data || !mujoco) return;
+  if (holdUntil) {
+    if (performance.now() < holdUntil) return;
+    endHold();
+    return;
+  }
   accumulator += Math.min(delta, 0.1);
 
   const stepSize = model.opt.timestep;
@@ -1207,6 +1271,7 @@ const stepTick = (delta: number) => {
       const aeroDiagnostics: Record<string, AeroDiagnostic> = {};
       executeScripts(sceneGraph.nodes, aeroDiagnostics);
       applyFreeJointDamping(sceneGraph.nodes);
+      wakeBodies();
 
       mujoco.mj_step(model, data);
       checkConstraintBreaks();
@@ -1336,6 +1401,25 @@ const captureState = (mdl: MjModel | null, dat: MjData | null): CarriedState | n
   }
 };
 
+/**
+ * Mesh files the main thread has sent, for `from_xml_string` to read.
+ *
+ * Lives as long as the worker. MuJoCo caches each processed mesh against its
+ * file, so a mesh that stays in here is not parsed or hulled again on the next
+ * rebuild, which is most of what a rebuild used to cost. The main thread's
+ * `MeshFileLedger` decides what goes in and what comes out; this only obeys.
+ */
+let meshVfs: MjVFS | null = null;
+
+const applyMeshFiles = (add?: { name: string; bytes: Uint8Array }[], drop?: string[]) => {
+  if (!mujoco || (!add?.length && !drop?.length)) return;
+  meshVfs ??= new mujoco.MjVFS();
+  for (const name of drop ?? []) {
+    try { meshVfs.deleteFile(name); } catch { /* never added, or already gone */ }
+  }
+  for (const f of add ?? []) meshVfs.addBuffer(f.name, f.bytes);
+};
+
 const doBuild = (
   xml: string,
   newSceneGraph: SceneGraph,
@@ -1402,7 +1486,7 @@ const doBuild = (
   model = null;
   data = null;
 
-  const newModel = mujoco.MjModel.from_xml_string(xml);
+  const newModel = meshVfs ? mujoco.MjModel.from_xml_string(xml, meshVfs) : mujoco.MjModel.from_xml_string(xml);
   const newData = new mujoco.MjData(newModel);
 
   model = newModel;
@@ -1411,6 +1495,7 @@ const doBuild = (
   rebuildIdCaches();
   rebuildBreakableWelds();
   rebuildImpactWatches();
+  pendingWake.clear(); // body ids from the old model mean nothing in this one
   for (const k of Object.keys(scriptCache)) delete scriptCache[k];
 
   // Explicit seed state (from the main thread's live mirror) takes priority
@@ -1472,6 +1557,36 @@ const doBuild = (
     const seedNew = (nodes: SceneNode[]) => {
       if (!nodes) return;
       for (const node of nodes) {
+        /*
+         * A shard is placed for the instant its body broke, but the old model
+         * has gone on stepping since. If that body was still in the old model,
+         * its state is in `carried` — exactly where it is now — so the shard
+         * is put where it would be on the body as it is now. See rebaseShard.
+         */
+        const from = node.shatterFrom;
+        const parent = from && carried.joints[from.joint];
+        const own = node.joints?.[0];
+        if (from && parent && parent.type === 0 && own?.type === 'free' && !placed.has(own.name)) {
+          const id = jointIdCache[own.name];
+          if (id !== undefined && newModel.jnt_type[id] === 0) {
+            const qa = parent.qposadr, va = parent.dofadr;
+            const { qpos, qvel } = rebaseShard(
+              { pos: node.pos, quat: node.quat ?? [1, 0, 0, 0], initialVelocity: own.initialVelocity },
+              from,
+              {
+                pos: carried.qpos.subarray(qa, qa + 3),
+                quat: carried.qpos.subarray(qa + 3, qa + 7),
+                vel: carried.qvel.subarray(va, va + 3),
+                angvelLocal: carried.qvel.subarray(va + 3, va + 6),
+              },
+            );
+            const qTo = newModel.jnt_qposadr[id], vTo = newModel.jnt_dofadr[id];
+            for (let i = 0; i < 7; i++) newData.qpos[qTo + i] = qpos[i];
+            for (let i = 0; i < 6; i++) newData.qvel[vTo + i] = qvel[i];
+            placed.add(own.name);
+            seededNew = true;
+          }
+        }
         node.joints?.forEach((j) => {
           if (!j.initialVelocity || placed.has(j.name)) return;
           const id = jointIdCache[j.name];
@@ -1717,7 +1832,9 @@ self.onmessage = async (evt: MessageEvent) => {
       case 'BUILD': {
         if (!mujoco) await loadMujoco();
         try {
+          applyMeshFiles(msg.meshFiles, msg.dropMeshes);
           const result = doBuild(msg.xml, msg.sceneGraph, msg.preserveState, msg.seedState, msg.brokenConstraints);
+          if (msg.holdForInstall) holdUntil = performance.now() + HOLD_FOR_INSTALL_MS;
           post({ type: 'BUILT', id: msg.id, ok: true, ...result });
           if (isPlaying && isSharedSupported) {
             startWorkerLoop();
@@ -1748,9 +1865,14 @@ self.onmessage = async (evt: MessageEvent) => {
         break;
       }
       case 'TICK': {
+        if (typeof msg.sentAt === 'number' && msg.sentAt < tickFloor) break;
         if (!isSharedSupported) {
           stepTick(msg.delta);
         }
+        break;
+      }
+      case 'RESUME': {
+        if (holdUntil) endHold();
         break;
       }
       case 'SET_DRAG': {
@@ -1768,6 +1890,7 @@ self.onmessage = async (evt: MessageEvent) => {
         if (jId !== -1) {
           const adr = model.jnt_qposadr[jId];
           data.qpos[adr + msg.axis] = msg.value;
+          pendingWake.add(model.jnt_bodyid[jId]);
           const vadr = model.jnt_dofadr[jId];
           for (let i = 0; i < 6; i++) data.qvel[vadr + i] = 0;
           mujoco.mj_forward(model, data);

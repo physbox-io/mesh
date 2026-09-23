@@ -25,10 +25,12 @@ import { PRESETS, pendulumPreset, generateGearGeoms } from '../presets/presetSce
 import { PhysicsWorkerClient, type BuiltResult, type FrameSnapshot } from './physicsWorkerClient';
 import type { ConstraintBrokenEvent, ImpactEvent } from '../workers/physicsWorkerProtocol';
 import { dentDepth, dentSpread, pierceVerdict, shatterVerdict } from '../utils/breakThresholds';
-import { fractureMesh } from '../utils/fracture';
-import { buildShatterGraph } from '../utils/runtimeShatter';
+import { DEFAULT_FRACTURE_PIECES, fractureMesh } from '../utils/fracture';
+import { buildShatterGraph, MAX_LIVE_SHARDS } from '../utils/runtimeShatter';
 import { deformedGeometry, dentKey, useDentStore } from './dentStore';
 import { imprintOf, isDentable, meshForDenting, type Imprint } from '../utils/dentMesh';
+import { estimateBodyMass } from '../utils/deformMaterials';
+import { wallThicknessAt } from '../utils/wallThickness';
 import type { DentConfig } from '../utils/breakThresholds';
 import { generatePyramidMeshData, generateConeMeshData, generateTorusMeshData, generateTubeMeshData, generateCurveGeoms, DEFAULT_CURVE_POINTS, DEFAULT_CURVE_WIDTH, DEFAULT_CURVE_THICKNESS, DEFAULT_CURVE_SEGMENTS, getStickyRotation } from '../utils/geom';
 import { readUserPreset } from '../utils/userPresets';
@@ -623,17 +625,27 @@ const replaceNodeWith = (nodes: SceneNode[], id: string, replacements: SceneNode
  * the ordinary case costs a property lookup.
  */
 /**
- * One rebuild per tick, however many things broke in it.
+ * Rebuild at once for the first break, and coalesce whatever follows.
  *
  * A cascade — a vase into a dozen pieces, several of which land together and
  * come apart again — produces a burst of breaks, and a model rebuild for each
- * would be several hundred milliseconds of hitching for a result identical to
- * rebuilding once at the end. The substitutions are already in the store by the
- * time this fires, so one build picks up all of them.
+ * would be hitching for a result identical to rebuilding once. So at most one
+ * rebuild is in flight: a break that arrives while one is building is picked
+ * up by a single follow-up as soon as it lands, because the substitutions are
+ * already in the store by then.
  *
- * The window is long enough to catch a whole cascade of landings rather than
- * only those in the same frame, and short enough that a single break still
- * looks immediate.
+ * This used to be a fixed 120 ms timer. It was the wrong shape twice over. The
+ * first break waited out the window for nothing, and the timer is only as good
+ * as the main thread: while a struck scene is rendering and handling impacts
+ * it fired 280 to 320 ms late (measured). All that while the old model went
+ * on simulating the vase intact, so it was seen flying off whole before it
+ * burst. The pieces are re-based onto where the body really is when the build
+ * lands (see rebaseShard), so the delay no longer teleports anything, but it
+ * still reads as a late break.
+ *
+ * A short gap after each build keeps a steady trickle of damage (an edge being
+ * worn away, see commitDamage) from rebuilding back to back and starving the
+ * simulation.
  */
 /** A surface whose damage has been made real, ready to compile. */
 export interface DeformedGeometry {
@@ -642,14 +654,47 @@ export interface DeformedGeometry {
   faces: number[];
 }
 
-const SHATTER_REBUILD_COALESCE_MS = 120;
-let shatterRebuildPending: ReturnType<typeof setTimeout> | null = null;
-const scheduleShatterRebuild = (run: () => void) => {
-  if (shatterRebuildPending !== null) return;
-  shatterRebuildPending = setTimeout(() => {
-    shatterRebuildPending = null;
-    run();
-  }, SHATTER_REBUILD_COALESCE_MS);
+/**
+ * Forget everything that has broken, dented or sheared in this run.
+ *
+ * None of it is in the scene graph, so a build after this emits exactly the
+ * scene that was authored. Reset and loading a preset both start here.
+ */
+const clearBreakage = (set: (patch: Partial<PhysicsState>) => void) => {
+  useDentStore.getState().clear();
+  set({
+    brokenConstraints: [], lastBreak: null,
+    shatteredBodies: {}, visibleShatteredBodies: {}, lastShatter: null,
+    deformedGeoms: {},
+  });
+};
+
+const SHATTER_REBUILD_MIN_GAP_MS = 100;
+let shatterRebuildInFlight = false;
+let shatterRebuildQueued = false;
+let shatterRebuildTimer: ReturnType<typeof setTimeout> | null = null;
+let shatterRebuildLastEnd = -Infinity;
+
+const runShatterRebuild = (run: () => Promise<void> | void) => {
+  shatterRebuildTimer = null;
+  shatterRebuildInFlight = true;
+  shatterRebuildQueued = false;
+  // A microtask, not now: breaks delivered in the same task go in together.
+  Promise.resolve().then(run).finally(() => {
+    shatterRebuildInFlight = false;
+    shatterRebuildLastEnd = performance.now();
+    if (shatterRebuildQueued) scheduleShatterRebuild(run);
+  });
+};
+
+const scheduleShatterRebuild = (run: () => Promise<void> | void) => {
+  if (shatterRebuildInFlight || shatterRebuildTimer !== null) {
+    shatterRebuildQueued = true;
+    return;
+  }
+  const wait = shatterRebuildLastEnd + SHATTER_REBUILD_MIN_GAP_MS - performance.now();
+  if (wait > 0) shatterRebuildTimer = setTimeout(() => runShatterRebuild(run), wait);
+  else runShatterRebuild(run);
 };
 
 export const applyShatterPieces = (
@@ -741,14 +786,27 @@ const detachReferencesTo = (nodes: SceneNode[], goneId: string): SceneNode[] =>
   });
 
 /**
+ * How thick this body is where it was hit, in metres; null when it has no
+ * closed mesh to measure. `localPoint` is in the body frame, which is the frame
+ * renderVertices are in (Z-up, centroid at the origin).
+ */
+const wallAtImpact = (node: SceneNode, localPoint: ArrayLike<number>): number | null => {
+  const geom = (node.geoms || []).find((g) => (g.renderVertices ?? g.vertices) && g.faces);
+  const verts = geom && (geom.renderVertices ?? geom.vertices);
+  if (!geom || !verts || !geom.faces) return null;
+  return wallThicknessAt(verts, geom.faces, [localPoint[0], localPoint[1], localPoint[2]]);
+};
+
+/**
  * What a body weighs, so its pieces can be given shares of it.
  *
- * Falls back to a kilogram rather than to nothing: shards with no mass at all
- * are ignored by the solver and simply hang in the air.
+ * A stated mass where there is one, otherwise volume times density — so a body
+ * given a material weighs the same in pieces as it did whole. Falls back to a
+ * kilogram rather than to nothing: shards with no mass at all are ignored by
+ * the solver and simply hang in the air.
  */
 const bodyMassOf = (node: SceneNode): number => {
-  let total = 0;
-  for (const g of node.geoms || []) if (typeof g.mass === 'number') total += g.mass;
+  const total = estimateBodyMass(node);
   return total > 0 ? total : 1;
 };
 
@@ -1117,7 +1175,7 @@ export interface PhysicsState {
    */
   deformedGeoms: Record<string, DeformedGeometry>;
   /** The most recent shatter, for the readout. */
-  lastShatter: { nodeId: string; name: string; pieces: number; time: number; impulseNs: number } | null;
+  lastShatter: { nodeId: string; name: string; pieces: number; time: number; impulseNs: number; wallM?: number } | null;
   isLoaded: boolean;
   lastCompileError: string | null;
   isSettingsOpen: boolean;
@@ -1635,7 +1693,7 @@ export interface PhysicsState {
    */
   makeDentable: (nodeId: string, geomIndex: number, cfg: DentConfig) => boolean;
   /** Replace a body with its pieces, in the runtime overlay only. */
-  shatterNode: (node: SceneNode, event: ImpactEvent) => void;
+  shatterNode: (node: SceneNode, event: ImpactEvent, wallM?: number | null) => void;
   recoverFromFatalWorkerError: (message: string, lastState?: { qpos: number[]; qvel: number[]; time: number }) => Promise<void>;
   recycleWorkerSeamlessly: () => Promise<void>;
   incrementMcpActive: () => void;
@@ -2055,13 +2113,8 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     // together: the scene graph was never edited, so a build with nothing in
     // the broken set, no runtime overlay and no dents emits exactly the scene
     // that was authored.
-    useDentStore.getState().clear();
-    set({
-      isPlaying: false,
-      brokenConstraints: [], lastBreak: null,
-      shatteredBodies: {}, visibleShatteredBodies: {}, lastShatter: null,
-      deformedGeoms: {},
-    });
+    clearBreakage(set);
+    set({ isPlaying: false });
     get().recompile(undefined, undefined, true, true);
   },
 
@@ -2081,9 +2134,12 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     const node = findNodeById(live.nodes, event.nodeId);
     if (!node) return;
 
-    if (shatterVerdict(event.impulseNs, node) && !state.shatteredBodies[node.id]) {
-      get().shatterNode(node, event);
-      return;
+    if (!state.shatteredBodies[node.id]) {
+      const wallM = node.shatterThicknessRef ? wallAtImpact(node, event.localPoint) : null;
+      if (shatterVerdict(event.impulseNs, node, wallM)) {
+        get().shatterNode(node, event, wallM);
+        return;
+      }
     }
 
     // Dent whatever was soft enough, on either end of the collision. The body
@@ -2105,13 +2161,23 @@ export const useStore = create<PhysicsState>()((set, get) => ({
    * the worker cannot carry the state over by copying arrays — it matches
    * joints by name instead, which is what the by-joint branch of doBuild is for.
    */
-  shatterNode: (node, event) => {
+  shatterNode: (node, event, wallM) => {
     const geom = (node.geoms || []).find((g) => (g.renderVertices ?? g.vertices) && g.faces);
     const source = geom && (geom.renderVertices ?? geom.vertices);
     if (!geom || !source || !geom.faces) return;
 
+    // Stay inside the shard budget. Every entry in `shatteredBodies` lists the
+    // pieces of one break, and a piece that has broken again is no longer in
+    // the world, so the live ones are the pieces with no entry of their own.
+    // A shard breaking now gives its own slot back.
+    const broken = get().shatteredBodies;
+    const live = Object.values(broken).flat().filter((s) => !broken[s.id]);
+    const room = MAX_LIVE_SHARDS - live.length + (live.some((s) => s.id === node.id) ? 1 : 0);
+    const pieces = Math.min(node.shatterPieces ?? DEFAULT_FRACTURE_PIECES, room);
+    if (pieces < 2) return;
+
     const cells = fractureMesh(source, geom.faces, {
-      pieces: node.shatterPieces,
+      pieces,
       seed: node.shatterSeed ?? 1,
       focus: node.shatterPattern === 'uniform'
         ? undefined
@@ -2137,6 +2203,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
         generation: (node.shatterGeneration ?? 0) + 1,
         depth: node.shatterDepth!,
         impulseNs: node.shatterImpulseNs!,
+        thicknessRef: node.shatterThicknessRef,
         pieces: node.shatterPieces ?? 8,
         pattern: node.shatterPattern,
         spread: node.shatterSpread,
@@ -2146,7 +2213,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
 
     set({
       shatteredBodies: { ...get().shatteredBodies, [node.id]: shards },
-      lastShatter: { nodeId: node.id, name: node.name, pieces: shards.length, time: event.time, impulseNs: event.impulseNs },
+      lastShatter: { nodeId: node.id, name: node.name, pieces: shards.length, time: event.time, impulseNs: event.impulseNs, wallM: wallM ?? undefined },
     });
     scheduleShatterRebuild(() => get().recompile(undefined, undefined, false, true, false, true));
   },
@@ -2193,6 +2260,10 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     const prev = get().activePreset;
     get().prepareForDiscreteChange();
     getPhysicsWorkerClient().setPlaying(false);
+    // Whatever broke in the last scene broke in THAT scene. Carried over, a
+    // reloaded vase was already "in pieces" and could never break again, and
+    // a weld whose key the new scene happens to share started out sheared.
+    clearBreakage(set);
     if (name.startsWith('user:')) {
       set((state) => ({
         isPlaying: false,
@@ -4252,6 +4323,9 @@ export const useStore = create<PhysicsState>()((set, get) => ({
      * the newer one and install only the compiled model.
      */
     const graphAtBuildStart = get().sceneGraph;
+    // Set once the worker is holding the model this build made; released when
+    // that model is on screen.
+    let heldClient: PhysicsWorkerClient | null = null;
 
     const applyBuilt = (built: BuiltResult) => {
       console.log(`[PhysicsWorker] Model built successfully. Shared memory (COOP/COEP) active: ${!!built.isShared}`);
@@ -4272,6 +4346,8 @@ export const useStore = create<PhysicsState>()((set, get) => ({
           delete updates.sceneGraph;
         }
         set(updates);
+        heldClient?.resume();
+        heldClient = null;
         done();
         // The scene has moved at last; this is the moment the snapshot taken
         // before it is worth keeping.
@@ -4280,18 +4356,27 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     };
 
     try {
-      const xml = compileToMJCF(sceneGraph, gravityZ, floorFriction, windX, windY, density, floorBounce);
-      if (typeof window !== 'undefined') {
-        (window as PhysicsWindow).compiledXML = xml;
-      }
-
       // Proactively recycle before the ceiling is ever reached, rather than
       // only reacting to a hard failure — see RECYCLE_HEAP_BYTES comment.
+      //
+      // Decided BEFORE compiling: the XML names mesh files that this client's
+      // worker holds (see utils/meshVfs.ts), and a fresh worker holds none.
       let recycled = false;
       if (lastHeapBytes > RECYCLE_HEAP_BYTES) {
         console.warn(`Proactively recycling the physics worker: the WASM heap has reached ${(lastHeapBytes / 1048576).toFixed(0)} MB, past the ${(RECYCLE_HEAP_BYTES / 1048576).toFixed(0)} MB mark, to stay well clear of the ceiling.`);
         recycleWorker();
         recycled = true;
+      }
+      const client = getPhysicsWorkerClient();
+
+      const xml = compileToMJCF(sceneGraph, gravityZ, floorFriction, windX, windY, density, floorBounce, {
+        // A shattered scene is mostly a heap of shards that have stopped
+        // moving; asleep, they cost nothing until something disturbs them.
+        sleep: Object.keys(pieces).length > 0 && !overrideScene,
+        meshFiles: client.meshFiles,
+      });
+      if (typeof window !== 'undefined') {
+        (window as PhysicsWindow).compiledXML = xml;
       }
 
       /*
@@ -4325,9 +4410,12 @@ export const useStore = create<PhysicsState>()((set, get) => ({
           }
         : undefined;
 
-      const client = getPhysicsWorkerClient();
       client.setEnv(windX, windY);
-      const built = await client.build(xml, sceneGraph, !forceReset, seedState, get().brokenConstraints);
+      // Something has just broken mid-flight: have the worker wait for this
+      // model to be on screen before stepping it. See `holdUntil` in the worker.
+      const hold = !!immediate && isRuntimeBuild && !forceReset;
+      const built = await client.build(xml, sceneGraph, !forceReset, seedState, get().brokenConstraints, hold);
+      if (hold && built.ok) heldClient = client;
       if (!built.ok) {
         throw new Error(built.error || 'Unknown physics worker build error');
       }

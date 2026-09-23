@@ -65,6 +65,19 @@ export interface SceneGeom {
   solimp?: number[];
   margin?: number;
   gap?: number;
+  /**
+   * For type='mesh': the most corners MuJoCo may keep when it hulls this mesh
+   * for collision (`<mesh maxhullvert>`). Drawing still uses every vertex.
+   * Shards set it, because collision between mesh hulls costs more per corner
+   * and nobody can see a chip's hull while it tumbles.
+   */
+  maxHullVert?: number;
+  /**
+   * For type='mesh': these vertices will not change for as long as the geom
+   * exists, so the mesh may go straight into the physics worker's file cache
+   * on its first build instead of waiting to prove it is stable. Shards set it.
+   */
+  stableMesh?: boolean;
   // For type='mesh': flat array of vertex positions (x0,y0,z0, x1,y1,z1, ...) and
   // flat array of triangle face indices (i0,j0,k0, i1,j1,k1, ...).
   // vertices are in Three.js Y-up space; the mjcf builder swaps Y↔Z for MuJoCo.
@@ -289,6 +302,24 @@ export interface SceneNode {
    * saved scene still holds the whole body, so Reset makes it whole again.
    */
   shatterImpulseNs?: number;
+  /**
+   * The material last picked in the sidebar's Deformation card, or 'custom'
+   * once a number has been changed by hand. A label only: the shatter and
+   * dent fields it wrote are what the physics reads. See utils/deformMaterials.ts.
+   */
+  deformMaterial?: string;
+  /**
+   * The wall thickness `shatterImpulseNs` is rated for, in metres.
+   *
+   * Set, and the threshold follows how thick the body is WHERE IT WAS HIT: a
+   * wall half this thick breaks at half the blow, one twice as thick needs
+   * twice it, within limits (see shatterLimit in utils/breakThresholds.ts). So
+   * a wine glass struck on the bowl breaks where the same blow on its foot
+   * would not. Unset, the threshold is the same everywhere. Brittle materials
+   * set it; wood and plastic, which fail by splitting rather than by a flaw
+   * opening, do not.
+   */
+  shatterThicknessRef?: number;
   /** How many pieces to break into. 2..24, default 8. See utils/fracture.ts. */
   shatterPieces?: number;
   /** Fixes which pieces, so a scene breaks the same way twice. */
@@ -318,6 +349,22 @@ export interface SceneNode {
    * shard of it, and so on. Written by the shatter, never by hand.
    */
   shatterGeneration?: number;
+  /**
+   * For a shard: the body it came from, and that body's pose and velocity at
+   * the instant it broke (MuJoCo Z-up, world frame). `pos`/`quat` and the free
+   * joint's initialVelocity are only right for that instant. The model the
+   * shard lives in is built some while later, and by then the broken body has
+   * gone on moving in the old model, so the worker re-bases the shard onto
+   * where `joint`'s body actually is when the build lands. Written by the
+   * shatter, never by hand.
+   */
+  shatterFrom?: {
+    joint: string;
+    pos: [number, number, number];
+    quat: [number, number, number, number];
+    vel: [number, number, number];
+    angvel: [number, number, number];
+  };
   isWedge?: boolean;
   width?: number;
   depth?: number;

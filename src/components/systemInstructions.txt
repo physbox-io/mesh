@@ -79,7 +79,7 @@ Every node in the "nodes" array represents a physical body and is defined as:
   shatterPieces: number (how many pieces, 2..24, default 8)
   shatterPattern: 'uniform' | 'radial' (radial crowds the small pieces around the point of impact; default)
   shatterSpread: number (extra outward speed per piece, m/s)
-  shatterDepth: number (how many times the PIECES may break again when they land; 0 default, 2 max. Each shard inherits a threshold scaled to its share of the body. Every generation multiplies the body count and each break rebuilds the model, so use it sparingly.)
+  shatterDepth: number (how many times the PIECES may break again when they land; 0 default, 2 max. Each shard inherits a threshold scaled to its share of the body. Later generations split into at most four chips that do not collide with each other, and the world holds at most 60 shards, so a break past that cuts fewer pieces or none.)
   connectTargetId: string (id of target body to connect with point-to-point)
   connectAnchor: [number, number, number] (anchor point for connect constraint)
   isAerodynamic: boolean (enables aerodynamic lift/drag model)
