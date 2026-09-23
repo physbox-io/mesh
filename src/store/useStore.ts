@@ -18,7 +18,7 @@ import {
   cutGeometry, sourcePositiveBounds, reconcileCuts, pickCutSpot,
   hasBooleanOps, csgHashOf,
 } from '../utils/csg';
-import { collidersAreStale, type ColliderResult } from '../utils/convexDecomposition';
+import { collidersAreStale, collisionHashOf, type ColliderResult } from '../utils/convexDecomposition';
 import { insetNegatives } from '../utils/scaleNode';
 import type { PaintLayer } from '../utils/vertexPaint';
 import { compileToMJCF } from '../utils/mjcf';
@@ -218,6 +218,8 @@ let recompileToken = 0;
  * and the landing itself pushes it.
  */
 let recompilesInFlight = 0;
+/** A reset that a superseded recompile was asked for; see recompile. */
+let pendingForceReset = false;
 /*
  * The history debounce timer. Module state, not store state: nothing renders
  * it, and every write of it to the store notified every subscriber in the app
@@ -1058,6 +1060,27 @@ function cutSpotFromCamera(node: SceneNode): CutSpot | null {
  * real result lands. The scene graph itself is already set by the caller, so
  * the panel shows the edit at once either way.
  */
+/**
+ * Takes a body's convex pieces off it once its mesh has changed shape.
+ *
+ * A decomposed body collides ONLY as its pieces — the mesh they were cut from
+ * is dropped from the model (resolveCsgGeoms) — so after a sculpt stroke it
+ * went on colliding as the shape before the stroke until the decomposer
+ * caught up, a few seconds later. Pressed Play in that window and a part you
+ * had just pulled downward was drawn sunk into the floor; when the new pieces
+ * landed mid-run they arrived already buried, and the solver threw the body
+ * across the scene. Without pieces it collides as its convex hull, which
+ * always contains the mesh: coarser for a moment, never inside anything.
+ * The hash is left alone, so the edit still reads as stale and the
+ * decomposer still runs. Returns whether there was anything to take off.
+ */
+function dropStaleColliders(node: SceneNode): boolean {
+  if (node.csgEnabled || !node.geoms?.some((g) => g.csgDerived === 'collider')) return false;
+  node.geoms = node.geoms.filter((g) => g.csgDerived !== 'collider');
+  delete node.collisionDecomposed;
+  return true;
+}
+
 function rebuildAfterGeomEdit(get: () => PhysicsState, newScene: SceneGraph, nodeId: string) {
   const node = findNode(newScene.nodes, nodeId);
   if (node?.csgEnabled && hasBooleanOps(node) && csgHashOf(node) !== node.csgHash) return;
@@ -2622,7 +2645,13 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
   // that is the user's call, and starting a sim behind someone's back is how a
   // half-finished shape ends up on the floor.
   sculptStats: null,
-  setSculptNodeId: (id) => set(id ? { sculptNodeId: id, latticeNodeId: null, selectedNodeId: id, isPlaying: false } : { sculptNodeId: null, sculptStats: null }),
+  // The worker is told as well as the UI. With shared memory it runs its own
+  // step loop, and flipping only the store's flag showed "paused" while the
+  // body went on falling under the brush.
+  setSculptNodeId: (id) => {
+    if (id && typeof Worker !== 'undefined') getPhysicsWorkerClient().setPlaying(false);
+    set(id ? { sculptNodeId: id, latticeNodeId: null, selectedNodeId: id, isPlaying: false } : { sculptNodeId: null, sculptStats: null });
+  },
   setSculptStats: (stats) => set({ sculptStats: stats }),
 
   // Wholesale replacement, not an edit: the version bump is what tells the
@@ -2668,9 +2697,13 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
   // Opening one modelling mode closes the other: both take over the drawing of
   // the body they are on and both bind the pointer, and two of them at once is
   // two components fighting over one mesh.
-  setLatticeNodeId: (id) => set(id
-    ? { latticeNodeId: id, sculptNodeId: null, selectedNodeId: id, isPlaying: false }
-    : { latticeNodeId: null, latticeStats: null, latticeSelection: null, latticePlaneHold: false, cutSpot: null }),
+  // The worker is paused too, for the same reason as setSculptNodeId.
+  setLatticeNodeId: (id) => {
+    if (id && typeof Worker !== 'undefined') getPhysicsWorkerClient().setPlaying(false);
+    set(id
+      ? { latticeNodeId: id, sculptNodeId: null, selectedNodeId: id, isPlaying: false }
+      : { latticeNodeId: null, latticeStats: null, latticeSelection: null, latticePlaneHold: false, cutSpot: null });
+  },
   // Picking up a drawing tool holds the plane, since a stroke is flat; it is
   // the hold that can be let go of again, not a lock the tool insists on.
   setLatticeTool: (tool) => set(DRAWING_TOOLS.has(tool) ? { latticeTool: tool, latticePlaneHold: true } : { latticeTool: tool }),
@@ -3471,6 +3504,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
               }
             }
             Object.assign(targetGeom, updates);
+            if (updates.vertices || updates.faces || updates.renderVertices) dropStaleColliders(node);
             /*
               A cut is stated as a face and a depth, so resizing or moving the
               shape it cuts into has to move the cut with it — a hole 10 mm into
@@ -3789,6 +3823,11 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
   },
 
   applyNodeColliders: (nodeId, result, skipRecompile) => {
+    // A decomposition of a mesh that has since changed — two strokes, the
+    // first one's result landing after the second — would install pieces of
+    // the wrong shape. The auto-compiler has already queued the right one.
+    const current = findNode(get().sceneGraph.nodes, nodeId);
+    if (!current || collisionHashOf(current) !== result.hash) return;
     const newScene = cloneSceneGraph(get().sceneGraph);
     const node = findNode(newScene.nodes, nodeId);
     if (!node) return;
@@ -3813,7 +3852,12 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     // Record the hash that failed, so a mesh that cannot be decomposed is not
     // retried on every store update — only a real edit re-arms it.
     if (error && hash) node.collisionHash = hash;
+    // And stop colliding as the shape before the edit that could not be
+    // decomposed: stamping the hash alone left those pieces in place for good.
+    // The body collides as its hull instead, which at least contains it.
+    const hadColliders = error ? dropStaleColliders(node) : false;
     set({ sceneGraph: newScene });
+    if (hadColliders) get().recompile(newScene, undefined, false);
   },
 
   setNodeCsgError: (nodeId, error, hash) => {
@@ -4362,8 +4406,21 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
         (window as PhysicsWindow)._recompileTimeoutId = setTimeout(resolve, settle ? 180 : 50);
       });
       (window as PhysicsWindow)._recompileWake = null;
-      if (token !== recompileToken) { done(); return; }
+      if (token !== recompileToken) {
+        // Handed on rather than dropped: the call that overtook this one builds
+        // the newer scene, and it must still start that scene from rest if this
+        // one was asked to.
+        if (forceReset) pendingForceReset = true;
+        done();
+        return;
+      }
     }
+    // A reset asked for by a call this one superseded. Without it, whether a
+    // sculpt stroke reset the simulation came down to timing: the first stroke
+    // also marks the body edited, and that state-keeping rebuild overtook the
+    // stroke's own reset inside its debounce.
+    if (pendingForceReset) forceReset = true;
+    pendingForceReset = false;
 
     if (typeof window !== 'undefined') {
       (window as PhysicsWindow).DISABLE_USEFRAME = false;
@@ -4527,8 +4584,18 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
           return;
         }
       }
-      // Still update the sceneGraph so the UI reflects the change even if MuJoCo rejects it
-      const updates: Partial<PhysicsState> = { sceneGraph, lastCompileError: msg };
+      // A build that a newer call has already superseded is not news: that
+      // call is building the newer scene, and its outcome is the one to report.
+      if (token !== recompileToken) { done(); return; }
+      // Still update the sceneGraph so the UI reflects the change even if MuJoCo
+      // rejects it — but only if nothing has been written since this build
+      // began, the same guard the success path uses. Unguarded, a failed build
+      // of stroke N landing after stroke N+1 had been committed put stroke N
+      // back into the document, and could leave it there. And never a runtime
+      // overlay, which would make a shatter permanent.
+      const updates: Partial<PhysicsState> = { lastCompileError: msg };
+      const sceneMovedOn = get().sceneGraph !== graphAtBuildStart && get().sceneGraph !== sceneGraph;
+      if (!isRuntimeBuild && !sceneMovedOn) updates.sceneGraph = sceneGraph;
       if (overrideSelectedId !== undefined) updates.selectedNodeId = overrideSelectedId;
       set(updates);
       done();
