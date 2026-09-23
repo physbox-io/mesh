@@ -678,6 +678,9 @@ export const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, se
     // the geometry actually changed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [type, vertices, faces, dent?.version]);
+  // R3F frees nothing passed in through `geometry=`, so every sculpt stroke,
+  // boolean and dent would otherwise strand a set of GPU buffers.
+  useEffect(() => () => { meshBufferGeometry?.dispose(); }, [meshBufferGeometry]);
 
   // The argument list buildPaintGeometry needs, taken from the geom's own
   // half-extents rather than from geometryArgs — the same rule the MCP bridge
@@ -711,7 +714,7 @@ export const DynamicGeom = ({ nodeId, name, type, color, mujoco, model, data, se
 
   useEffect(() => {
     // Only the geometries built here are ours to free — the mesh branch hands
-    // back one it owns and disposes itself.
+    // back meshBufferGeometry, which has its own cleanup above.
     if (!paintGeometry || type === 'mesh') return;
     return () => paintGeometry.dispose();
   }, [paintGeometry, type]);
