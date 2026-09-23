@@ -68,9 +68,9 @@ const fromPayload = (h: HullPayload): Hull => ({
 /**
  * Decomposes off the main thread where it can, inline where it cannot.
  *
- * Wrapped in the same compile counter the SCAD pool uses, so the existing
- * "compiling" pill covers this too — a body that takes two seconds to gain its
- * colliders should not look like a body that has stopped responding.
+ * Deliberately not counted in the SCAD pool's compile counter: this runs behind
+ * every sculpt stroke, and a "SCAD Compiling" pill for a side effect of the
+ * user's own action is noise, not news.
  */
 export async function decomposeMeshOffThread(
   verts: number[],
@@ -83,28 +83,18 @@ export async function decomposeMeshOffThread(
     return decomposeMesh(verts, faces, params);
   }
 
-  // Imported here rather than at module scope, and only on the browser path.
-  // A static import of the store drags the physics worker client and the MuJoCo
-  // wasm glue in with it, which is what makes openscad.ts unusable from Node —
-  // and the Node path below is the one the tests and the preset exporter use.
-  const { useStore } = await import('../store/useStore');
-  useStore.getState().incrementScadCompile();
-  try {
-    return await new Promise<Hull[]>((resolve, reject) => {
-      const id = ++seq;
-      const timer = setTimeout(() => {
-        pending.delete(id);
-        reject(new Error('Convex decomposition timed out.'));
-      }, DECOMPOSE_TIMEOUT_MS);
-      pending.set(id, { resolve, reject, timer });
-      const req: VhacdRequest = {
-        type: 'DECOMPOSE', id, params,
-        verts: Float64Array.from(verts),
-        faces: Uint32Array.from(faces),
-      };
-      w.postMessage(req, [req.verts.buffer, req.faces.buffer]);
-    });
-  } finally {
-    useStore.getState().decrementScadCompile();
-  }
+  return new Promise<Hull[]>((resolve, reject) => {
+    const id = ++seq;
+    const timer = setTimeout(() => {
+      pending.delete(id);
+      reject(new Error('Convex decomposition timed out.'));
+    }, DECOMPOSE_TIMEOUT_MS);
+    pending.set(id, { resolve, reject, timer });
+    const req: VhacdRequest = {
+      type: 'DECOMPOSE', id, params,
+      verts: Float64Array.from(verts),
+      faces: Uint32Array.from(faces),
+    };
+    w.postMessage(req, [req.verts.buffer, req.faces.buffer]);
+  });
 }
