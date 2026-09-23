@@ -2,6 +2,19 @@
 @import "tailwindcss";
 @config "../tailwind.config.js";
 
+/*
+ * Two slate shades the markup uses that Tailwind does not ship. Without them
+ * every `border-slate-150` (75 of them) drew in the text colour — Tailwind 4's
+ * default for a border with no colour — and every `dark:bg-slate-955` did
+ * nothing, which left the copilot's prompt box white under light text in dark
+ * mode. Each sits halfway between its neighbours: 150 between 100 and 200, 955
+ * a step past 950.
+ */
+@theme {
+  --color-slate-150: oklch(94.85% 0.01 251.7);
+  --color-slate-955: oklch(10.5% 0.04 265);
+}
+
 @variant dark (&:where(.dark, .dark *));
 
 html, body, #root {
