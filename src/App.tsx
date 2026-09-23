@@ -1659,6 +1659,22 @@ function App() {
     setIsSaveModalOpen(true);
   }, [activePreset]);
 
+  // Ctrl+S opens the save dialog, named for the preset that is open, rather
+  // than the browser's "Save page as", which saves the app's HTML and none of
+  // the scene. Everywhere, fields included: the browser's dialog is no more
+  // use from inside one.
+  const savePresetClickRef = useRef(handleSavePresetClick);
+  savePresetClickRef.current = handleSavePresetClick;
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey || e.key.toLowerCase() !== 's') return;
+      e.preventDefault();
+      savePresetClickRef.current();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
   const handleConfirmSavePreset = useCallback(() => {
     saveUserPresetByName(presetNameInput);
     setIsSaveModalOpen(false);
@@ -2823,7 +2839,7 @@ function App() {
             <button 
               onClick={handleSavePresetClick}
               className="flex items-center justify-center p-1 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 transition-colors focus:outline-none cursor-pointer"
-              title="Save scene preset"
+              title="Save scene preset (Ctrl+S)"
             >
               <Save className="w-3.5 h-3.5" />
             </button>
