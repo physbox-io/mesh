@@ -65,7 +65,16 @@ interface ModeChoice {
   /** A lattice tool to switch to, or a gesture to start. */
   tool?: LatticeTool;
   gesture?: 'move' | 'rotate' | 'scale' | 'inset' | 'measure-distance' | 'measure-angle';
+  /** Put every tool away, leave sculpt or lattice mode, and drop the selection. */
+  none?: true;
 }
+
+/**
+ * The way out, always first and always there. Esc does the same from the
+ * keyboard, but a tool picked from this menu has to be leavable from it too —
+ * otherwise measuring by mouse is a room with no door.
+ */
+const NOTHING: ModeChoice = { key: 'Esc', label: 'Nothing', none: true, hint: 'Put the current tool away, leave sculpt or lattice mode, and deselect everything' };
 
 const LATTICE_TOOLS: ModeChoice[] = [
   { key: '1', label: 'Place', tool: 'place', hint: 'Click grid points to draw a face' },
@@ -187,6 +196,7 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
   // selected in the scene. Sculpting has its own brushes in its own palette.
   const canGesture = !!latticeNodeId || (!sculptNodeId && !!selectedNodeId);
   const choices: ModeChoice[] = [
+    NOTHING,
     ...(latticeNodeId ? LATTICE_TOOLS : []),
     ...(canGesture ? GESTURES : []),
     ...MEASURE,
@@ -194,6 +204,19 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
 
   const choose = (choice: ModeChoice) => {
     setModeMenuOpen(false);
+    if (choice.none) {
+      // Announced like any other choice, so the measure tool hears a mode that
+      // is not measuring and puts its tape away (see MeasureTool).
+      window.dispatchEvent(new CustomEvent('physbox:gesture', { detail: { kind: 'none' } }));
+      const store = useStore.getState();
+      store.setMeasureMode(null);
+      // The same as each mode's own Done button: the edits are already in the
+      // scene, so leaving throws nothing away.
+      store.setSculptNodeId(null);
+      store.setLatticeNodeId(null);
+      store.setSelectedNodeId(null);
+      return;
+    }
     if (choice.tool) {
       setLatticeTool(choice.tool);
       // A lattice tool is not a gesture, but choosing one is just as much a
@@ -284,16 +307,15 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
           <button
             type="button"
             onClick={() => setModeMenuOpen((open) => !open)}
-            disabled={choices.length === 0}
-            className={`flex items-center gap-1 px-2 py-0.5 rounded-md border font-semibold tabular-nums transition-colors ${MODE_TONES[mode.tone]} ${choices.length > 0 ? 'cursor-pointer hover:brightness-95' : 'cursor-default'}`}
+            className={`flex items-center gap-1 px-2 py-0.5 rounded-md border font-semibold tabular-nums transition-colors ${MODE_TONES[mode.tone]} cursor-pointer hover:brightness-95`}
             title={'What the keyboard is doing right now. Click to pick a mode instead. A gesture in progress shows how far it has gone; click or Enter keeps it, Esc puts it back.'}
           >
             <MousePointer2 className="w-3 h-3" />
             {mode.text}
-            {choices.length > 0 && <ChevronUp className={`w-3 h-3 opacity-50 transition-transform ${modeMenuOpen ? 'rotate-180' : ''}`} />}
+            <ChevronUp className={`w-3 h-3 opacity-50 transition-transform ${modeMenuOpen ? 'rotate-180' : ''}`} />
           </button>
 
-          {modeMenuOpen && choices.length > 0 && (
+          {modeMenuOpen && (
             <>
               {/* Anything outside closes it, including a click into the
                   viewport — which would otherwise both close the menu and
@@ -313,7 +335,7 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
                         : ''
                     }`}
                   >
-                    <kbd className="mt-px font-mono font-bold text-[10px] text-slate-500 dark:text-slate-400 w-4 shrink-0">{choice.key}</kbd>
+                    <kbd className="mt-px font-mono font-bold text-[10px] text-slate-500 dark:text-slate-400 w-6 shrink-0">{choice.key}</kbd>
                     <span className="min-w-0">
                       <span className="block font-semibold text-slate-700 dark:text-slate-200">{choice.label}</span>
                       <span className="block text-[10px] leading-snug text-slate-400 dark:text-slate-500 whitespace-normal">{choice.hint}</span>
