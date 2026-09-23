@@ -4,7 +4,19 @@
 // the STL -> mesh conversion; this file does the plumbing and keeps the same
 // exported API this module has always had, so call sites are unchanged.
 
-import { useStore } from '../store/useStore';
+/*
+ * Who hears about compiles starting and ending — the store's "SCAD Compiling"
+ * counter, registered by App.
+ *
+ * Reported through a listener rather than by importing the store: csg.ts
+ * reaches this module, the fracture and vhacd workers reach csg.ts, and the
+ * store spawns both workers, so a store import here made each worker import
+ * the other — a cycle Vite refuses to build.
+ */
+let compileListener: ((delta: 1 | -1) => void) | null = null;
+export function setScadCompileListener(listener: ((delta: 1 | -1) => void) | null): void {
+  compileListener = listener;
+}
 
 type CompiledScad = { vertices: number[]; faces: number[]; renderVertices: number[] };
 
@@ -198,7 +210,7 @@ export async function compileSCAD(scadCode: string): Promise<CompiledScad> {
   const cached = compileCache.get(scadCode);
   if (cached) return cached;
 
-  useStore.getState().incrementScadCompile();
+  compileListener?.(1);
   try {
     const result = await new Promise<CompiledScad>((resolve, reject) => {
       queue.push({ id: Math.random().toString(36).slice(2), scad: scadCode, resolve, reject });
@@ -219,6 +231,6 @@ export async function compileSCAD(scadCode: string): Promise<CompiledScad> {
 
     return result;
   } finally {
-    useStore.getState().decrementScadCompile();
+    compileListener?.(-1);
   }
 }

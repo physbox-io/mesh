@@ -27,7 +27,7 @@ import { useFrame } from '@react-three/fiber';
 import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js';
 import { exportThreeMf, type ThreeMfMesh } from './utils/threeMfExporter';
 import { SimplifyModifier } from 'three/examples/jsm/modifiers/SimplifyModifier.js';
-import { loadCompiler, compileSCAD, isCompilerReady } from './utils/openscad';
+import { loadCompiler, compileSCAD, isCompilerReady, setScadCompileListener } from './utils/openscad';
 import { getStickyRotation } from './utils/geom';
 import { csgSourceGeoms, csgHashOf, collisionModeOf, CSG_DEFAULT_SECTORS } from './utils/csg';
 import { DEFAULT_HOLD_STEPS, isBreakable, weldKey } from './utils/breakThresholds';
@@ -162,6 +162,14 @@ function parseNoteMarkdown(md: string): string {
   }).join('\n');
   return html;
 }
+
+// The status bar's "SCAD Compiling" pill counts compiles in flight. openscad.ts
+// reports them through a listener rather than importing the store; see there.
+setScadCompileListener((delta) => {
+  const s = useStore.getState();
+  if (delta > 0) s.incrementScadCompile();
+  else s.decrementScadCompile();
+});
 
 // Floating note card overlay component
 function NoteCardOverlay({ card, isEditing, onToggleEdit, onToggleMinimize, onMarkdownChange, onClose, onMove }: {
@@ -3998,7 +4006,10 @@ function App() {
                     disappears the next time a face moves — silently, and long
                     after the decision that cost it. Baking says so up front,
                     and it is an ordinary undo step. */}
-                {selectedNode.geoms?.some((g) => g.type === 'mesh' && g.renderVertices?.length) && (
+                {/* Not on a boolean body: what it shows is a mesh rebuilt from
+                    its primitives on every change, so a stroke on it could
+                    only ever be thrown away by the next compile. */}
+                {!selectedNode.csgEnabled && selectedNode.geoms?.some((g) => g.type === 'mesh' && !g.csgDerived && g.renderVertices?.length) && (
                   <button
                     type="button"
                     onClick={() => {
