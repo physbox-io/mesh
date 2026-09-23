@@ -1,4 +1,5 @@
-import { create } from 'zustand';
+import { create, type StateCreator } from 'zustand';
+import { shareUnchanged } from '../utils/shareUnchanged';
 import * as THREE from 'three';
 import type { SceneGraph, SceneNode, SceneGeom, SceneJoint, GeomType, CsgOp } from '../types/scene';
 import type { DataMirror, ModelMirror } from '../types/sceneLayer';
@@ -1768,7 +1769,21 @@ function framingPatch(
  */
 const initialFraming = framingPatch(initialScene, null);
 
-export const useStore = create<PhysicsState>()((set, get) => ({
+/**
+ * Every write of a new scene graph goes through shareUnchanged, so a node an
+ * edit did not touch keeps its object and the viewport can skip it.
+ */
+const sharingUnchangedNodes = (config: StateCreator<PhysicsState>): StateCreator<PhysicsState> =>
+  (rawSet, get, api) => {
+    const set = ((partial: Parameters<typeof rawSet>[0], replace?: boolean) => {
+      const patch = typeof partial === 'function' ? partial(get()) : partial;
+      if (patch && 'sceneGraph' in patch && patch.sceneGraph) shareUnchanged(get().sceneGraph, patch.sceneGraph);
+      (rawSet as (p: typeof patch, r?: boolean) => void)(patch, replace);
+    }) as typeof rawSet;
+    return config(set, get, api);
+  };
+
+export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) => ({
   mujoco: null,
   model: null,
   data: null,
@@ -4573,7 +4588,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
       console.error('Seamless proactive worker recycle failed:', e);
     }
   },
-}));
+})));
 
 if (typeof window !== 'undefined') {
   // Every 20s while actively playing, CHECK whether the physics worker needs
