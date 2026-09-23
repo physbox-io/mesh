@@ -2747,13 +2747,13 @@ function App() {
             */}
             <button
               onClick={() => setIsPropertiesOpen(!isPropertiesOpen)}
-              disabled={!selectedNode}
+              disabled={!selectedNode || isPlaying}
               className={`lg:hidden flex items-center justify-center w-8 h-8 rounded-full border transition-colors focus:outline-none flex-shrink-0 cursor-pointer shadow-xs disabled:opacity-40 disabled:cursor-not-allowed ${
                 isPropertiesOpen
                   ? 'bg-blue-100 border-blue-400 text-blue-700 dark:bg-blue-950 dark:border-blue-700 dark:text-blue-400'
                   : 'border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 bg-white dark:bg-slate-900'
               }`}
-              title={selectedNode ? 'Properties' : 'Select a component to see its properties'}
+              title={isPlaying ? 'Stop the simulation to edit properties' : selectedNode ? 'Properties' : 'Select a component to see its properties'}
             >
               <PanelRight className="w-4 h-4" />
             </button>
@@ -3624,8 +3624,12 @@ function App() {
                 recompiles, and the editor must outlive its own commits. */}
             <LatticeEditorLayer model={model} data={data} mujoco={mujoco} />
             {model && data && mujoco && (
+              /* Not keyed on recompileId any more. Remounting on every
+                 rebuild threw away and rebuilt every geometry in the scene —
+                 each mesh's buffers and normals — for a colour change, and
+                 tore the sculpt tools down after each of their own strokes.
+                 The geoms re-read their ids and poses from the new model. */
               <SceneVisuals 
-                key={`visuals-${recompileId}`}
                 model={model} 
                 data={data} 
                 mujoco={mujoco} 
@@ -3779,15 +3783,18 @@ function App() {
 
         {/* Dimmer behind the inspector drawer. Only exists below `lg`, where
             the inspector is an overlay; tapping the model puts it away. */}
-        {isPropertiesOpen && selectedNode && (
+        {isPropertiesOpen && selectedNode && !isPlaying && (
           <div
             className="lg:hidden absolute inset-0 z-[105] bg-slate-950/30"
             onClick={() => setIsPropertiesOpen(false)}
           />
         )}
 
-        {/* Contextual Properties Sidebar */}
-        {selectedNode && (
+        {/* Contextual Properties Sidebar. Nothing is editable while the
+            simulation runs, so it stays away rather than sliding in whenever a
+            body is clicked; the selection survives, and the panel comes back
+            with it when the run stops. */}
+        {selectedNode && !isPlaying && (
           /*
             Below `lg` there is not room for a permanent 380px column beside a
             3D viewport, so the inspector slides in over it instead.

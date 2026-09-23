@@ -87,12 +87,14 @@ export function SculptSurface({
 
   // The live mesh, built once on mount and mutated in place from then on.
   //
-  // Deliberately NOT rebuilt when `renderVertices` changes: the change that
-  // arrives after every stroke is this component's own commit coming back
-  // round, and rebuilding on it would throw the mesh away mid-session. Opening
-  // a different body remounts this component (the caller keys it by node id),
-  // which is what loads a different mesh.
-  const [mesh] = useState<SculptMesh>(() => fromSceneGeom(renderVertices, faces));
+  // Deliberately NOT rebuilt when `renderVertices` changes because of a stroke:
+  // that change is this component's own commit coming back round, and
+  // rebuilding on it would throw the mesh away mid-session. Opening a different
+  // body remounts this component (the caller keys it by node id), which is
+  // what loads a different mesh.
+  const [mesh, setMesh] = useState<SculptMesh>(() => fromSceneGeom(renderVertices, faces));
+  /** The arrays this component last committed, so its own commits can be told apart. */
+  const committed = useRef<{ renderVertices: number[]; faces: number[] }>({ renderVertices, faces });
 
   const sessionRef = useRef<SculptSession | null>(null);
   const lastPoint = useRef<SurfacePoint | null>(null);
@@ -100,6 +102,31 @@ export function SculptSurface({
   /** Whether this body has already been flagged as sculpted. */
   const markedEdited = useRef(false);
   const redoStack = useRef<SculptUndoEntry[]>([]);
+
+  /*
+   * A change to the body that did not come from here — the app's own undo, an
+   * agent's physics_sculpt, a preset loaded over it — has to replace the live
+   * mesh, or the next stroke would paint over it with the shape from before.
+   * This used to happen by accident: the whole scene layer remounted on every
+   * rebuild, taking this component with it, which reloaded the mesh on every
+   * one of its own strokes as well and threw its undo history away each time.
+   * Now it stays mounted, and only a change it did not make reloads it.
+   */
+  useEffect(() => {
+    const own = committed.current;
+    if (renderVertices === own.renderVertices && faces === own.faces) return;
+    committed.current = { renderVertices, faces };
+    if (sessionRef.current) {
+      endStroke(sessionRef.current);
+      sessionRef.current = null;
+      lastPoint.current = null;
+      setOrbitEnabled(true);
+      useStore.getState().setDraggedNodeId(null);
+    }
+    undoStack.current.length = 0;
+    redoStack.current.length = 0;
+    setMesh(fromSceneGeom(renderVertices, faces));
+  }, [renderVertices, faces, setOrbitEnabled]);
   // The brush the next dab will use. Held in a ref so the pointer handlers do
   // not have to be rebuilt — and written in an effect rather than in render,
   // because a ref written during render is not a render output.
@@ -261,6 +288,7 @@ export function SculptSurface({
   /** Commits the finished stroke to the scene graph. */
   const commit = useCallback((atBudget = false) => {
     const geom = toSceneGeom(mesh);
+    committed.current = { renderVertices: geom.renderVertices, faces: geom.faces };
     updateNodeGeom(nodeId, { vertices: geom.vertices, renderVertices: geom.renderVertices, faces: geom.faces }, 0);
 
     // Marked once, not on every stroke: the flag exists so that changing the

@@ -1,7 +1,8 @@
 import { useMemo } from 'react';
 import * as THREE from 'three';
 import { useStore } from '../../store/useStore';
-import { analyseDfm, dfmLensFor } from '../../utils/dfm';
+import { dfmLensFor } from '../../utils/dfm';
+import { analyseDfmShared } from '../../utils/analysisCache';
 import { buildHeatGeometry } from '../../utils/dfmHeatGeometry';
 
 /**
@@ -37,7 +38,7 @@ export function DfmHeatmap() {
     const lens = dfmEnabled && !minimized ? (castOpen ? 'cast' : dfmLensFor(machineTarget)) : null;
     if (!lens || !sceneGraph) return null;
     try {
-      return buildHeatGeometry(analyseDfm(sceneGraph, lens, { material, filament, stock, nodeId: selectedNodeId }));
+      return buildHeatGeometry(analyseDfmShared(sceneGraph, lens, { material, filament, stock, nodeId: selectedNodeId }));
     } catch {
       // A scene the analyser cannot read should cost the viewport nothing.
       return null;

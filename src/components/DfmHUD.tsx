@@ -1,8 +1,9 @@
 import { useCallback, useMemo, useRef } from 'react';
 import { ChevronDown, ChevronRight, ChevronUp, Ruler, X } from 'lucide-react';
 import { useStore } from '../store/useStore';
-import { analyseDfm, dfmLensFor, type DfmFinding, type DfmProcess, type DfmReport } from '../utils/dfm';
-import { analyzeSceneMechanicalWeaknesses, type WeakSpot } from '../utils/printAnalysis';
+import { dfmLensFor, type DfmFinding, type DfmProcess, type DfmReport } from '../utils/dfm';
+import { type WeakSpot } from '../utils/printAnalysis';
+import { analyseDfmShared, analyzeWeaknessesShared } from '../utils/analysisCache';
 import { materialSpec } from '../utils/feedsAndSpeeds';
 import { filamentSpec } from '../utils/filaments';
 
@@ -129,7 +130,7 @@ export function DfmHUD() {
   const analyse = useCallback((process: DfmProcess | null, when: boolean): DfmReport | null => {
     if (!process || !when || !sceneGraph) return null;
     try {
-      return analyseDfm(sceneGraph, process, bench);
+      return analyseDfmShared(sceneGraph, process, bench);
     } catch {
       return null;
     }
@@ -156,7 +157,7 @@ export function DfmHUD() {
   const structural = useMemo(() => {
     if (!open || !sceneGraph) return [] as WeakSpot[];
     try {
-      return analyzeSceneMechanicalWeaknesses(sceneGraph).weakSpots
+      return analyzeWeaknessesShared(sceneGraph).weakSpots
         .filter(w => w.category !== 'manufacturing');
     } catch {
       return [] as WeakSpot[];

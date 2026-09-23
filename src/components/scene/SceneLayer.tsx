@@ -1170,8 +1170,8 @@ export const StaticBoxInstances = React.memo(function StaticBoxInstances({ geoms
    * Three initialises every instance of a new InstancedMesh to the identity
    * matrix, so until the loop below runs each static box is the unit cube this
    * mesh is built from: a metre on a side, at the origin, a little over a metre
-   * from where the camera starts. The mesh is new on every rebuild (SceneVisuals
-   * remounts on recompileId), and the rebuild lands from a requestAnimationFrame
+   * from where the camera starts. The mesh is new whenever the number of boxes
+   * changes (it is keyed on it), and the rebuild lands from a requestAnimationFrame
    * callback, where React defers passive effects to a later task that the next
    * render frame can beat. When it did, the frame showed a dark block filling
    * the window before the real boxes appeared — the "huge object over the
@@ -1259,14 +1259,14 @@ const findSceneNode = (nodes: SceneNode[], id: string): SceneNode | null => {
 };
 
 /**
- * The lattice editor, mounted OUTSIDE the compile-keyed visuals.
+ * The lattice editor, mounted outside SceneVisuals.
  *
- * SceneVisuals is remounted on every recompile, and every lattice edit
+ * SceneVisuals used to be remounted on every recompile, and every lattice edit
  * recompiles — so an editor mounted inside it was torn down by each of its
  * own commits: its undo history, the outline it was holding, a freehand
  * stroke in mid-drag, all gone the moment they were used. Here it is keyed
- * only on the cage it edits, and survives its own commits. It draws in the
- * same Z-up wrapper group as everything else.
+ * only on the cage it edits, and survives its own commits whatever its parent
+ * does. It draws in the same Z-up wrapper group as everything else.
  */
 export const LatticeEditorLayer = ({ model, data, mujoco }: { model: ModelMirror | null; data: DataMirror | null; mujoco: MujocoShim | null }) => {
   const sceneGraph = useStore((state) => state.sceneGraph);

@@ -513,9 +513,10 @@ export const TransformGizmo = () => {
    *
    * A whole frame is allowed to pass first, rather than relying on this
    * component's `useFrame` running after the ones that write the groups.
-   * `SceneVisuals` is keyed on `recompileId`, so it REMOUNTS on every rebuild
-   * and re-registers its callbacks after this one — the ordering flips exactly
-   * when the measurement matters most. Counting down a frame is immune to it,
+   * `SceneVisuals` used to remount on every rebuild and re-register its
+   * callbacks after this one, flipping the ordering exactly when the
+   * measurement mattered most, and any body mounting later still does. Counting
+   * down a frame is immune to it,
    * and costs nothing: the previous offset is still right in the meantime,
    * since what changed is where the body is, not its shape.
    */

@@ -144,6 +144,40 @@ describe('which meshes become files', () => {
     expect(back.add.length).toBe(1);
   });
 
+  it('names and sends a mesh the same way when its arrays are reused across builds', () => {
+    // The store hands the compiler the same arrays until a mesh really changes,
+    // and the compiler keeps per-mesh work against them (see utils/arrayMemo).
+    // A remembered mesh must still produce exactly the XML and files a fresh
+    // copy of it would.
+    const shared = body('a', tet(0.1));
+    const ledger = new MeshFileLedger();
+    const first = build(ledger, [shared]);
+    const second = build(ledger, [shared]);
+    expect(fileMeshes(second.xml)).toEqual(['a_geom']);
+    expect(second.add.length).toBe(1);
+    expect(second.add[0].bytes.byteLength).toBeGreaterThan(16);
+    expect(second.add[0].name).toBe(mshFileName(encodeMsh(
+      // Three.js Y-up to MuJoCo Z-up, as the compiler writes it.
+      tet(0.1).flatMap((_, i, v) => (i % 3 === 0 ? [v[i], -v[i + 2], v[i + 1]] : [])),
+      shared.geoms[0].faces!,
+    )));
+
+    const fresh = new MeshFileLedger();
+    build(fresh, [body('a', tet(0.1))]);
+    expect(build(fresh, [body('a', tet(0.1))]).xml).toBe(second.xml);
+    expect(first.xml).toBe(compile({ nodes: [body('a', tet(0.1))] }, { meshFiles: new MeshFileLedger() }));
+  });
+
+  it('gives a mesh a new file when it gets new arrays', () => {
+    const ledger = new MeshFileLedger();
+    const a = body('a', tet(0.1), true);
+    const one = build(ledger, [a]);
+    a.geoms[0] = { ...a.geoms[0], vertices: tet(0.2) };
+    const two = build(ledger, [a]);
+    expect(two.add.length).toBe(1);
+    expect(two.add[0].name).not.toBe(one.add[0].name);
+  });
+
   it('forgets a compile that never reached the worker', () => {
     const ledger = new MeshFileLedger();
     compile({ nodes: [body('a', tet(0.1), true)] }, { meshFiles: ledger });

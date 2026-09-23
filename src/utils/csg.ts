@@ -34,6 +34,7 @@
 import * as THREE from 'three';
 import { ConvexHull } from 'three/examples/jsm/math/ConvexHull.js';
 import type { CollisionMode, SceneGeom, SceneNode } from '../types/scene';
+import { PairMemo } from './arrayMemo';
 // NOTE: ./openscad is imported lazily inside evaluateNodeCsg, not here. It
 // reaches the Zustand store (for the compile counter), which reaches the physics
 // worker client and the MuJoCo wasm glue — so a static import would drag the
@@ -1433,8 +1434,19 @@ function geomCsgKey(g: SceneGeom): unknown[] {
   return [g.type, shape, g.pos, g.quat, g.euler, g.fromto, g.csg ?? 'union', g.role ?? null, g.thread?.pitch ?? null];
 }
 
+// Every store update checksums every boolean and decomposed mesh (see
+// geomCsgKey and collisionHashOf), and a mesh only changes by getting new
+// arrays, so the sum is kept against them. See utils/arrayMemo.
+const checksums = new PairMemo<string>();
+const NO_FACES: number[] = [];
+
 export function meshChecksum(g: SceneGeom): string {
-  const v = g.renderVertices ?? g.vertices ?? [];
+  const v = g.renderVertices ?? g.vertices;
+  if (!v) return `0:${g.faces?.length ?? 0}:811c9dc5`;
+  return checksums.get(v, g.faces ?? NO_FACES, () => computeMeshChecksum(v, g.faces?.length ?? 0));
+}
+
+function computeMeshChecksum(v: number[], faceCount: number): string {
   let h = 0x811c9dc5;
   for (let i = 0; i < v.length; i++) {
     // Rounded to the micron the emitter prints at, so a change too small to
@@ -1442,7 +1454,7 @@ export function meshChecksum(g: SceneGeom): string {
     h ^= Math.round(v[i] * 1e6) | 0;
     h = Math.imul(h, 0x01000193) >>> 0;
   }
-  return `${v.length}:${g.faces?.length ?? 0}:${h.toString(16)}`;
+  return `${v.length}:${faceCount}:${h.toString(16)}`;
 }
 
 // Cheap, stable fingerprint of everything the derived geoms depend on. When

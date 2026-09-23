@@ -3,6 +3,18 @@ import { generateWedgeMeshData } from './geom';
 import { analyzeMesh } from './meshIntegrity';
 import { resolveCsgGeoms } from './csg';
 import { encodeMsh, mshFileName, type MeshFileSink } from './meshVfs';
+import { PairMemo } from './arrayMemo';
+
+/*
+ * Per-mesh work kept across rebuilds. Every build used to re-encode every mesh
+ * to .msh bytes and hash them — only to arrive at a file name the worker
+ * already held — and run a full integrity analysis for its inertia attribute,
+ * for every mesh in the scene, on every edit however small. Keyed on the
+ * arrays themselves; see utils/arrayMemo. The bytes are not kept: they are
+ * transferred to the worker, which detaches them.
+ */
+const meshFileNames = new PairMemo<string>();
+const meshInertiaAttrs = new PairMemo<string>();
 
 const formatGeomSize = (type: string, rawSize: unknown): string => {
   const arr = Array.isArray(rawSize)
@@ -335,25 +347,32 @@ export const compileToMJCF = (
     // the answer is known without computing it. Worth short-circuiting: this
     // runs per mesh per rebuild, and a decomposed body has up to 24 of them.
     if (g.csgDerived === 'collider') return ' inertia="exact"';
-    const integrity = analyzeMesh(g.renderVertices || g.vertices!, g.faces!);
-    return integrity && integrity.closed && integrity.consistentlyWound && integrity.volume > 0
-      ? ' inertia="exact"'
-      : '';
+    const verts = g.renderVertices || g.vertices!;
+    return meshInertiaAttrs.get(verts, g.faces!, () => {
+      const integrity = analyzeMesh(verts, g.faces!);
+      return integrity && integrity.closed && integrity.consistentlyWound && integrity.volume > 0
+        ? ' inertia="exact"'
+        : '';
+    });
   };
 
   const sink = opts.meshFiles;
   sink?.begin();
   const meshAsset = (g: SceneGeom): string => {
     const hull = g.maxHullVert !== undefined ? ` maxhullvert="${g.maxHullVert}"` : '';
-    const verts = toMjcfVerts(g.vertices!);
     if (sink) {
-      const bytes = encodeMsh(verts, g.faces!);
-      const file = mshFileName(bytes);
+      const encoded: { bytes?: Uint8Array } = {};
+      const file = meshFileNames.get(g.vertices!, g.faces!, () => {
+        encoded.bytes = encodeMsh(toMjcfVerts(g.vertices!), g.faces!);
+        return mshFileName(encoded.bytes);
+      });
       if (sink.useFile(file, !!g.stableMesh)) {
-        sink.files.set(file, bytes);
+        // Encoded only if the worker does not have it already.
+        if (!sink.holds?.(file)) sink.files.set(file, encoded.bytes ?? encodeMsh(toMjcfVerts(g.vertices!), g.faces!));
         return `    <mesh name="${g.name}"${meshInertia(g)}${hull} file="${file}" />`;
       }
     }
+    const verts = toMjcfVerts(g.vertices!);
     return `    <mesh name="${g.name}"${meshInertia(g)}${hull} vertex="${verts.join(' ')}" face="${g.faces!.join(' ')}" />`;
   };
 

@@ -5,7 +5,7 @@
 // mirror what useStore.ts's recompile()/action methods used to do directly
 // against a same-thread MjModel/MjData.
 
-import type { SceneGraph } from '../types/scene';
+import type { SceneGeom, SceneGraph, SceneNode } from '../types/scene';
 import { MeshFileLedger } from '../utils/meshVfs';
 import type {
   BuiltResult,
@@ -167,6 +167,32 @@ export type HeadlessRunResult = HeadlessResult & {
   ticksRequested?: number;
 };
 
+/*
+ * The scene graph as the worker needs it: names, joints, scripts, break and
+ * dent settings — never the shapes, which it already has in the XML. Every
+ * BUILD posted the whole graph, and structured-cloning a scene's worth of
+ * plain number[] vertex arrays cost time on both threads for data the worker
+ * never reads.
+ */
+const MESH_FIELDS = ['vertices', 'renderVertices', 'faces', 'baseVertices', 'paint'] as const;
+const stripGeom = (g: SceneGeom): SceneGeom => {
+  if (!MESH_FIELDS.some((k) => g[k] !== undefined)) return g;
+  const copy = { ...g };
+  for (const k of MESH_FIELDS) delete copy[k];
+  return copy;
+};
+const stripNodes = (nodes: SceneNode[]): SceneNode[] => (nodes || []).map((n) => {
+  const { latticeCage: _cage, ...rest } = n;
+  void _cage;
+  return {
+    ...rest,
+    ...(n.geoms ? { geoms: n.geoms.map(stripGeom) } : {}),
+    ...(n.children ? { children: stripNodes(n.children) } : {}),
+  };
+});
+export const withoutMeshData = (sceneGraph: SceneGraph): SceneGraph =>
+  sceneGraph ? { ...sceneGraph, nodes: stripNodes(sceneGraph.nodes) } : sceneGraph;
+
 export class PhysicsWorkerClient {
   private worker: Worker;
   private pendingBuilds = new Map<string, Pending<BuiltResult>>();
@@ -267,7 +293,7 @@ export class PhysicsWorkerClient {
     return new Promise((resolve, reject) => {
       this.pendingBuilds.set(id, { resolve, reject });
       this.worker.postMessage(
-        { type: 'BUILD', id, xml, sceneGraph, preserveState, seedState, brokenConstraints, meshFiles: add, dropMeshes: drop, holdForInstall },
+        { type: 'BUILD', id, xml, sceneGraph: withoutMeshData(sceneGraph), preserveState, seedState, brokenConstraints, meshFiles: add, dropMeshes: drop, holdForInstall },
         add.map((f) => f.bytes.buffer as ArrayBuffer),
       );
     });
@@ -295,7 +321,7 @@ export class PhysicsWorkerClient {
     const id = Math.random().toString(36).slice(2);
     return new Promise((resolve, reject) => {
       this.pendingHeadless.set(id, { resolve, reject });
-      this.worker.postMessage({ type: 'RUN_HEADLESS', id, xml, sceneGraph, ticks, stride });
+      this.worker.postMessage({ type: 'RUN_HEADLESS', id, xml, sceneGraph: withoutMeshData(sceneGraph), ticks, stride });
     });
   }
 

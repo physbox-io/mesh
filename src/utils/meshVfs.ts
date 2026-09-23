@@ -73,6 +73,8 @@ export interface MeshFileSink {
   useFile(name: string, stable: boolean): boolean;
   /** The encoded bytes of every mesh this build emitted as a file, by file name. */
   files: Map<string, Uint8Array>;
+  /** Whether the worker already has this file, so its bytes need not be made. */
+  holds?(name: string): boolean;
 }
 
 /**
@@ -102,6 +104,10 @@ export class MeshFileLedger implements MeshFileSink {
     this.thisBuild = new Set();
     this.emitted = new Set();
     this.files = new Map();
+  }
+
+  holds(name: string): boolean {
+    return this.held.has(name);
   }
 
   useFile(name: string, stable: boolean): boolean {
