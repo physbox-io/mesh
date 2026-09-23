@@ -13,6 +13,7 @@ import { webSerialManager, type MachineState } from '../utils/webSerialManager';
 import { MATERIALS, type MaterialId } from '../utils/feedsAndSpeeds';
 import { formatDuration } from '../utils/timeEstimate';
 import type { LatticeTool } from '../utils/latticeMesh';
+import type { SceneNode } from '../types/scene';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 
 /**
@@ -68,6 +69,8 @@ interface ModeChoice {
   gesture?: 'move' | 'rotate' | 'scale' | 'inset' | 'measure-distance' | 'measure-angle';
   /** Put every tool away, leave sculpt or lattice mode, and drop the selection. */
   none?: true;
+  /** Open sculpt or lattice mode on the selected body. */
+  enter?: 'sculpt' | 'lattice';
 }
 
 /**
@@ -107,6 +110,33 @@ const MEASURE: ModeChoice[] = [
   { key: 'D', label: 'Measure distance', gesture: 'measure-distance', hint: 'Click two points; snaps to corners, edge midpoints and hole centres' },
   { key: 'A', label: 'Measure angle', gesture: 'measure-angle', hint: 'Click along one arm, the corner, then the other arm' },
 ];
+
+/*
+ * The two modelling modes, offered here as well as in the Properties panel,
+ * where they were the only way in — a scroll away, below the physics, for the
+ * first thing someone with a mesh selected is likely to want. Offered under
+ * the panel's own conditions (see its Edit Lattice and Sculpt buttons).
+ */
+const ENTER_LATTICE: ModeChoice = { key: '', label: 'Edit lattice', enter: 'lattice', hint: 'Open the lattice tools on this cage. Pauses the simulation' };
+const ENTER_SCULPT: ModeChoice = { key: '', label: 'Sculpt', enter: 'sculpt', hint: 'Open the sculpting tools on this mesh. Pauses the simulation' };
+
+/** Which modelling mode the selected body can be opened in, if any. */
+function modelModeFor(nodes: SceneNode[] | undefined, id: string | null): 'lattice' | 'sculpt' | null {
+  if (!id) return null;
+  const walk = (list: SceneNode[] | undefined): SceneNode | null => {
+    for (const n of list || []) {
+      if (n.id === id) return n;
+      const found = walk(n.children);
+      if (found) return found;
+    }
+    return null;
+  };
+  const node = walk(nodes);
+  if (!node) return null;
+  if (node.isLattice) return 'lattice';
+  if (!node.csgEnabled && node.geoms?.some((g) => g.type === 'mesh' && !g.csgDerived && g.renderVertices?.length)) return 'sculpt';
+  return null;
+}
 
 const MODE_TONES: Record<string, string> = {
   amber: 'bg-amber-100 dark:bg-amber-950/50 text-amber-700 dark:text-amber-300 border-amber-300 dark:border-amber-800',
@@ -197,8 +227,16 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
   // Gestures need something to act on: the body being modelled, or the body
   // selected in the scene. Sculpting has its own brushes in its own palette.
   const canGesture = !!latticeNodeId || (!sculptNodeId && !!selectedNodeId);
+  // A string, not the node, so an edit elsewhere in the scene does not
+  // re-render the bar.
+  const modelMode = useStore((s) => modelModeFor(s.sceneGraph?.nodes, s.selectedNodeId));
+  const enterChoice = latticeNodeId || sculptNodeId ? null
+    : modelMode === 'lattice' ? ENTER_LATTICE
+    : modelMode === 'sculpt' ? ENTER_SCULPT
+    : null;
   const choices: ModeChoice[] = [
     NOTHING,
+    ...(enterChoice ? [enterChoice] : []),
     ...(latticeNodeId ? LATTICE_TOOLS : []),
     ...(canGesture ? GESTURES : []),
     ...MEASURE,
@@ -217,6 +255,15 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
       store.setSculptNodeId(null);
       store.setLatticeNodeId(null);
       store.setSelectedNodeId(null);
+      return;
+    }
+    if (choice.enter) {
+      const store = useStore.getState();
+      store.setMeasureMode(null);
+      if (store.selectedNodeId) {
+        if (choice.enter === 'lattice') store.setLatticeNodeId(store.selectedNodeId);
+        else store.setSculptNodeId(store.selectedNodeId);
+      }
       return;
     }
     if (choice.tool) {
