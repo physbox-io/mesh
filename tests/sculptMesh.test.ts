@@ -596,3 +596,93 @@ describe('limits and caching', () => {
     expect(isWatertight(mesh)).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Faults that only showed under some conditions — the "sometimes dodgy" set.
+// ---------------------------------------------------------------------------
+
+describe('a stroke keeps working however long it goes on', () => {
+  it('finds the vertices under the brush after dozens of dabs in one place', () => {
+    // The spatial hash was built once per stroke, and after a few dozen dabs
+    // the surface had moved further than a cell from where it was filed: the
+    // query found nothing and the brush stopped in mid-stroke.
+    const mesh = icosphere(0.12, 4);
+    recomputeNormals(mesh);
+    const settings = brush({ type: 'draw', radius: 0.03 });
+    const session = beginStroke(mesh, settings);
+    for (let k = 0; k < 30; k++) {
+      const hit = raycastMesh(mesh, 0, 0, 1, 0, 0, -1)!;
+      applyBrush(session, settings, { ...hit });
+      let actual = 0;
+      for (let i = 0; i < mesh.vertexCount; i++) {
+        if (Math.hypot(mesh.positions[i * 3] - hit.x, mesh.positions[i * 3 + 1] - hit.y, mesh.positions[i * 3 + 2] - hit.z) <= settings.radius) actual++;
+      }
+      expect(queryRadius(mesh, session.hash, hit.x, hit.y, hit.z, settings.radius).length).toBe(actual);
+    }
+  });
+
+  it('lets a brush smaller than the triangle it lands in change the surface', () => {
+    for (const radius of [0.002, 0.004, 0.006]) {
+      const mesh = icosphere(0.12, 2); // edges ~30 mm, far longer than any of these brushes
+      recomputeNormals(mesh);
+      const settings = brush({ type: 'draw', radius, dynamicTopology: true });
+      const hit = raycastMesh(mesh, 0.01, 0.013, 1, 0, 0, -1)!;
+      const session = beginStroke(mesh, settings);
+      for (let k = 0; k < 30; k++) applyBrush(session, settings, { ...hit });
+      expect(endStroke(session)).not.toBeNull();
+    }
+  });
+});
+
+describe('grab with dynamic topology', () => {
+  it('takes the vertices it adds along the drag with it', () => {
+    const mesh = icosphere(0.12, 3);
+    recomputeNormals(mesh);
+    const settings = brush({ type: 'grab', radius: 0.03, dynamicTopology: true });
+    const session = beginStroke(mesh, settings);
+    const top = raycastMesh(mesh, 0, 0, 1, 0, 0, -1)!;
+    let p = { ...top };
+    applyBrush(session, settings, p);
+    for (let k = 0; k < 25; k++) {
+      applyBrush(session, settings, { ...p, dx: 0, dy: 0, dz: 0.002 });
+      p = { ...p, z: p.z + 0.002 };
+    }
+    endStroke(session);
+    // New vertices left sitting at the root while their neighbours travelled
+    // on fold the pulled limb back through itself. Nothing unheld should be
+    // left near the axis inside where the cap started.
+    const held = new Set(session.grabbed[0]!);
+    let stray = 0;
+    for (let i = 0; i < mesh.vertexCount; i++) {
+      if (held.has(i)) continue;
+      const x = mesh.positions[i * 3], y = mesh.positions[i * 3 + 1], z = mesh.positions[i * 3 + 2];
+      if (Math.hypot(x, y) < 0.015 && z < 0.125) stray++;
+    }
+    expect(stray).toBeLessThanOrEqual(1);
+    expect(isWatertight(mesh)).toBe(true);
+  });
+});
+
+describe('refineInRadius', () => {
+  it('triangulates the same whatever spare capacity the arrays happen to have', () => {
+    // It held `positions` across addVertex, which can reallocate it; the
+    // diagonal choice then read past the old array and always went one way.
+    for (let s = 0; s < 10; s++) {
+      const a = icosphere(0.12, 3);
+      let seed = s + 1;
+      const rand = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296 - 0.5; };
+      // Jittered, so the two diagonals of a split quad are never equal.
+      for (let i = 0; i < a.vertexCount * 3; i++) a.positions[i] += rand() * 0.006;
+      const b = cloneSculptMesh(a);
+      const roomy = new Float32Array(b.positions.length * 8);
+      roomy.set(b.positions);
+      b.positions = roomy;
+      const normals = new Float32Array(roomy.length);
+      normals.set(b.normals);
+      b.normals = normals;
+      refineInRadius(a, 0, 0, 0.12, 0.04, 0.016);
+      refineInRadius(b, 0, 0, 0.12, 0.04, 0.016);
+      expect(Array.from(a.faces.subarray(0, a.faceCount * 3))).toEqual(Array.from(b.faces.subarray(0, b.faceCount * 3)));
+    }
+  });
+});

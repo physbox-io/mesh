@@ -51,6 +51,7 @@ interface SurfacePoint {
 }
 
 import type { DataMirror, ModelMirror, MujocoShim } from '../types/sceneLayer';
+import type { SceneNode } from '../types/scene';
 
 export interface SculptSurfaceProps {
   nodeId: string;
@@ -62,6 +63,15 @@ export interface SculptSurfaceProps {
   renderVertices: number[];
   faces: number[];
 }
+
+const findSceneNode = (nodes: SceneNode[] | undefined, id: string): SceneNode | null => {
+  for (const node of nodes || []) {
+    if (node.id === id) return node;
+    const found = findSceneNode(node.children, id);
+    if (found) return found;
+  }
+  return null;
+};
 
 export function SculptSurface({
   nodeId, geomName, color, mujoco, model, data, renderVertices, faces,
@@ -98,6 +108,8 @@ export function SculptSurface({
 
   const sessionRef = useRef<SculptSession | null>(null);
   const lastPoint = useRef<SurfacePoint | null>(null);
+  /** The plane an open grab drags on, or null when no grab is open. */
+  const grabPlane = useRef<THREE.Plane | null>(null);
   const undoStack = useRef<SculptUndoEntry[]>([]);
   /** Whether this body has already been flagged as sculpted. */
   const markedEdited = useRef(false);
@@ -289,7 +301,13 @@ export function SculptSurface({
   const commit = useCallback((atBudget = false) => {
     const geom = toSceneGeom(mesh);
     committed.current = { renderVertices: geom.renderVertices, faces: geom.faces };
-    updateNodeGeom(nodeId, { vertices: geom.vertices, renderVertices: geom.renderVertices, faces: geom.faces }, 0);
+    // Into the geom this surface was opened on, found by name. Always index 0
+    // used to write a body's first geom whatever it was — on an imported part
+    // with several meshes, the wrong one, so the stroke showed while the tools
+    // were open and vanished when they closed.
+    const live = findSceneNode(useStore.getState().sceneGraph.nodes, nodeId);
+    const index = Math.max(0, live?.geoms?.findIndex((g) => g.name === geomName) ?? 0);
+    updateNodeGeom(nodeId, { vertices: geom.vertices, renderVertices: geom.renderVertices, faces: geom.faces }, index);
 
     // Marked once, not on every stroke: the flag exists so that changing the
     // base shape knows whether it is throwing work away, and writing it each
@@ -301,7 +319,7 @@ export function SculptSurface({
     }
 
     publishStats(mesh, atBudget);
-  }, [mesh, nodeId, updateNodeGeom, publishStats]);
+  }, [mesh, nodeId, geomName, updateNodeGeom, publishStats]);
 
   const stamp = useCallback((point: SurfacePoint, delta?: { x: number; y: number; z: number }) => {
     const session = sessionRef.current;
@@ -332,6 +350,15 @@ export function SculptSurface({
     sessionRef.current = beginStroke(mesh, brushRef.current);
     lastPoint.current = point;
     redoStack.current.length = 0;
+    if (brushRef.current.type === 'grab') {
+      // The plane the grab drags on: through the point caught, facing the
+      // camera. See onGrabMove.
+      const inverse = new THREE.Matrix4().copy(groupRef.current!.matrixWorld).invert();
+      const facing = event.ray.direction.clone().transformDirection(inverse).normalize().negate();
+      grabPlane.current = new THREE.Plane().setFromNormalAndCoplanarPoint(facing, new THREE.Vector3(point.x, point.y, point.z));
+    } else {
+      grabPlane.current = null;
+    }
     stamp(point);
     showCursor(point);
   }, [mesh, resolve, stamp, showCursor, gl, setOrbitEnabled, nodeId]);
@@ -352,14 +379,8 @@ export function SculptSurface({
       return;
     }
 
-    if (brushRef.current.type === 'grab') {
-      // Grab is a displacement, not a position: what matters is how far the
-      // cursor moved, and the caught vertices come with it.
-      stamp(previous, { x: point.x - previous.x, y: point.y - previous.y, z: point.z - previous.z });
-      lastPoint.current = point;
-      showCursor(point);
-      return;
-    }
+    // A grab is driven from the window instead; see onGrabMove.
+    if (grabPlane.current) return;
 
     // Interpolate along the drag so a fast stroke is a line, not a dotted one.
     const spacing = Math.max(1e-5, brushRef.current.radius * SPACING_FRACTION);
@@ -371,16 +392,21 @@ export function SculptSurface({
 
     for (let i = 1; i <= steps; i++) {
       const t = i / steps;
+      // The normal is interpolated rather than re-cast: between two points a
+      // quarter of a brush apart the surface has not turned far, and casting
+      // per interpolated dab would cost more than the dab itself. Renormalised,
+      // though — the blend of two unit normals is shorter than either, and a
+      // short normal weakened every dab in the middle of a stroke.
+      let nx = previous.nx + (point.nx - previous.nx) * t;
+      let ny = previous.ny + (point.ny - previous.ny) * t;
+      let nz = previous.nz + (point.nz - previous.nz) * t;
+      const nl = Math.hypot(nx, ny, nz);
+      if (nl > 1e-6) { nx /= nl; ny /= nl; nz /= nl; } else { nx = point.nx; ny = point.ny; nz = point.nz; }
       stamp({
         x: previous.x + dx * t,
         y: previous.y + dy * t,
         z: previous.z + dz * t,
-        // The normal is interpolated rather than re-cast: between two points a
-        // quarter of a brush apart the surface has not turned far, and casting
-        // per interpolated dab would cost more than the dab itself.
-        nx: previous.nx + (point.nx - previous.nx) * t,
-        ny: previous.ny + (point.ny - previous.ny) * t,
-        nz: previous.nz + (point.nz - previous.nz) * t,
+        nx, ny, nz,
       });
     }
 
@@ -389,6 +415,7 @@ export function SculptSurface({
   }, [resolve, stamp, showCursor]);
 
   const finishStroke = useCallback(() => {
+    grabPlane.current = null;
     const session = sessionRef.current;
     if (!session) return;
     const entry = endStroke(session);
@@ -417,9 +444,57 @@ export function SculptSurface({
   const onPointerLeave = useCallback(() => {
     showCursor(null);
     // A stroke that leaves the mesh is finished, not paused: keeping it open
-    // means the next dab jumps from wherever the pointer re-enters.
+    // means the next dab jumps from wherever the pointer re-enters. Except a
+    // grab, which is pulling the surface out past its own edge by design, and
+    // ends when the button is let go (onGrabMove's pointerup).
+    if (grabPlane.current) return;
     finishStroke();
   }, [showCursor, finishStroke]);
+
+  /*
+   * Grab, driven from the window rather than from the mesh.
+   *
+   * It used to move by the difference between two surface hits under the
+   * cursor, which is not the direction the cursor moved: near the top of a
+   * ball, moving the mouse up the screen slides the hit point back over the
+   * crown, so the lump was pushed into the body as much as it was lifted. And
+   * one step past the silhouette there was no hit at all, and the pull simply
+   * stopped. Now each pointer ray is met with the plane through the point
+   * first caught, facing the camera, so the lump goes where the cursor goes and
+   * keeps going off the edge of the model. The mesh's own pointer events stop
+   * at its silhouette, which is why this listens on the window.
+   */
+  const onGrabMove = useCallback((event: PointerEvent) => {
+    const plane = grabPlane.current;
+    const group = groupRef.current;
+    const previous = lastPoint.current;
+    if (!plane || !group || !previous || !sessionRef.current) return;
+    const { camera } = getThree();
+    const rect = gl.domElement.getBoundingClientRect();
+    const ndc = new THREE.Vector2(
+      ((event.clientX - rect.left) / rect.width) * 2 - 1,
+      -((event.clientY - rect.top) / rect.height) * 2 + 1,
+    );
+    const ray = new THREE.Raycaster();
+    ray.setFromCamera(ndc, camera);
+    const inverse = new THREE.Matrix4().copy(group.matrixWorld).invert();
+    const local = ray.ray.clone().applyMatrix4(inverse);
+    const at = local.intersectPlane(plane, new THREE.Vector3());
+    if (!at) return;
+    stamp(previous, { x: at.x - previous.x, y: at.y - previous.y, z: at.z - previous.z });
+    lastPoint.current = { ...previous, x: at.x, y: at.y, z: at.z };
+    showCursor(lastPoint.current);
+  }, [getThree, gl, stamp, showCursor]);
+
+  useEffect(() => {
+    const up = () => { if (grabPlane.current) { grabPlane.current = null; finishStroke(); } };
+    window.addEventListener('pointermove', onGrabMove);
+    window.addEventListener('pointerup', up);
+    return () => {
+      window.removeEventListener('pointermove', onGrabMove);
+      window.removeEventListener('pointerup', up);
+    };
+  }, [onGrabMove, finishStroke]);
 
   // ---------------------------------------------------------------------
   // Undo / redo
@@ -431,6 +506,11 @@ export function SculptSurface({
       const target = event.target as HTMLElement | null;
       if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return;
 
+      // Not mid-stroke: undoing under an open session renumbers the vertices it
+      // is holding, and its own undo entry would then bring the undone stroke
+      // back. Swallowed rather than passed on, so the app's undo does not act
+      // either.
+      if (sessionRef.current) { event.preventDefault(); event.stopPropagation(); return; }
       const stack = event.shiftKey ? redoStack.current : undoStack.current;
       const other = event.shiftKey ? undoStack.current : redoStack.current;
       const entry = stack.pop();

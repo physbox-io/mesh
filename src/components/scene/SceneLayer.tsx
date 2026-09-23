@@ -1450,7 +1450,8 @@ export const SceneVisuals = React.memo(function SceneVisuals({ model, data, mujo
     // The body under the sculpt tools is drawn by SculptSurface, which owns the
     // live mesh mid-stroke; the ordinary renderer would draw the last committed
     // stroke right through it.
-    const sculptGeom = sculptNodeId ? geoms.find(g => g.type === 'mesh' && g.nodeId === sculptNodeId) : undefined;
+    // A derived mesh is never the one sculpted: it is rebuilt from its sources.
+    const sculptGeom = sculptNodeId ? geoms.find(g => g.type === 'mesh' && !g.csgDerived && g.nodeId === sculptNodeId) : undefined;
     // The same arrangement for the lattice tools: they own the body they are on,
     // and they draw the cage over it, which the ordinary renderer knows nothing
     // about.

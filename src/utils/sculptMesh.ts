@@ -315,6 +315,8 @@ export interface SpatialHash {
   cellSize: number;
   /** Cell key -> vertex indices in that cell. */
   cells: Map<number, number[]>;
+  /** Vertex index -> the cell key it is filed under, so a moved vertex can be refiled. */
+  keys: Float64Array;
   topologyRevision: number;
   revision: number;
 }
@@ -332,6 +334,7 @@ export function buildSpatialHash(mesh: SculptMesh, cellSize: number): SpatialHas
   const size = Math.max(1e-6, cellSize);
   const cells = new Map<number, number[]>();
   const { positions, vertexCount } = mesh;
+  const keys = new Float64Array(vertexCount);
 
   for (let i = 0; i < vertexCount; i++) {
     const key = cellKey(
@@ -339,22 +342,62 @@ export function buildSpatialHash(mesh: SculptMesh, cellSize: number): SpatialHas
       Math.floor(positions[i * 3 + 1] / size),
       Math.floor(positions[i * 3 + 2] / size)
     );
+    keys[i] = key;
     const bucket = cells.get(key);
     if (bucket) bucket.push(i);
     else cells.set(key, [i]);
   }
 
-  return { cellSize: size, cells, topologyRevision: mesh.topologyRevision, revision: mesh.revision };
+  return { cellSize: size, cells, keys, topologyRevision: mesh.topologyRevision, revision: mesh.revision };
+}
+
+/**
+ * Refiles vertices a dab has just moved.
+ *
+ * The hash used to be built once per stroke and trusted to stay close enough:
+ * queries are padded by a cell to cover drift. But dabs stack, and a few dozen
+ * at one spot carry the surface further than a cell — after which the vertices
+ * under the brush were filed somewhere the query never looked, it found none of
+ * them, and the brush silently stopped working in the middle of a stroke.
+ * Refiling just the vertices that moved keeps every query exact, for the price
+ * of one division per moved vertex.
+ */
+export function rehashVertices(mesh: SculptMesh, hash: SpatialHash, indices: ArrayLike<number>): void {
+  const { cellSize, cells, keys } = hash;
+  const { positions } = mesh;
+  for (let k = 0; k < indices.length; k++) {
+    const i = indices[k];
+    if (i >= keys.length) continue; // added since the hash was built; the next rebuild files it
+    const key = cellKey(
+      Math.floor(positions[i * 3] / cellSize),
+      Math.floor(positions[i * 3 + 1] / cellSize),
+      Math.floor(positions[i * 3 + 2] / cellSize)
+    );
+    const old = keys[i];
+    if (key === old) continue;
+    const from = cells.get(old);
+    if (from) {
+      const at = from.indexOf(i);
+      if (at !== -1) {
+        from[at] = from[from.length - 1];
+        from.pop();
+      }
+    }
+    const to = cells.get(key);
+    if (to) to.push(i);
+    else cells.set(key, [i]);
+    keys[i] = key;
+  }
 }
 
 /**
  * Vertices within `radius` of a point.
  *
- * The hash is built once per stroke and vertices move while it is in use, so
- * this is a query over where they *were*. The cells searched are padded by one
- * in every direction to cover that drift, and the exact distance test at the
- * end means a stale bucket costs a few wasted comparisons and never a wrong
- * answer.
+ * The hash is built once per stroke and every dab refiles the vertices it
+ * moved (rehashVertices), so buckets stay current. The cells searched are still
+ * padded by one in every direction, which covers vertices added by a split
+ * since the last rebuild, and the exact distance test at the end means a stale
+ * bucket costs a few wasted comparisons and never a wrong answer.
  */
 export function queryRadius(
   mesh: SculptMesh,
@@ -417,37 +460,104 @@ function edgeKey(a: number, b: number): number {
  *
  * Returns how many edges were split.
  */
+/**
+ * Whether any point of a triangle lies within `sqrt(reach2)` of a point.
+ *
+ * A bounding-box reject first, since nearly every face in the mesh fails it;
+ * then the exact closest point on the triangle (Ericson, Real-Time Collision
+ * Detection, 5.1.5).
+ */
+function triangleWithin(
+  p: ArrayLike<number>, a: number, b: number, c: number,
+  px: number, py: number, pz: number, reach2: number,
+): boolean {
+  const ax = p[a * 3], ay = p[a * 3 + 1], az = p[a * 3 + 2];
+  const bx = p[b * 3], by = p[b * 3 + 1], bz = p[b * 3 + 2];
+  const cx = p[c * 3], cy = p[c * 3 + 1], cz = p[c * 3 + 2];
+  const reach = Math.sqrt(reach2);
+  if (px < Math.min(ax, bx, cx) - reach || px > Math.max(ax, bx, cx) + reach) return false;
+  if (py < Math.min(ay, by, cy) - reach || py > Math.max(ay, by, cy) + reach) return false;
+  if (pz < Math.min(az, bz, cz) - reach || pz > Math.max(az, bz, cz) + reach) return false;
+
+  const abx = bx - ax, aby = by - ay, abz = bz - az;
+  const acx = cx - ax, acy = cy - ay, acz = cz - az;
+  const apx = px - ax, apy = py - ay, apz = pz - az;
+  const d1 = abx * apx + aby * apy + abz * apz;
+  const d2 = acx * apx + acy * apy + acz * apz;
+  let qx: number, qy: number, qz: number;
+  if (d1 <= 0 && d2 <= 0) { qx = ax; qy = ay; qz = az; }
+  else {
+    const bpx = px - bx, bpy = py - by, bpz = pz - bz;
+    const d3 = abx * bpx + aby * bpy + abz * bpz;
+    const d4 = acx * bpx + acy * bpy + acz * bpz;
+    const cpx = px - cx, cpy = py - cy, cpz = pz - cz;
+    const d5 = abx * cpx + aby * cpy + abz * cpz;
+    const d6 = acx * cpx + acy * cpy + acz * cpz;
+    const vc = d1 * d4 - d3 * d2;
+    const vb = d5 * d2 - d1 * d6;
+    const va = d3 * d6 - d5 * d4;
+    if (d3 >= 0 && d4 <= d3) { qx = bx; qy = by; qz = bz; }
+    else if (d6 >= 0 && d5 <= d6) { qx = cx; qy = cy; qz = cz; }
+    else if (vc <= 0 && d1 >= 0 && d3 <= 0) {
+      const t = d1 / (d1 - d3); qx = ax + abx * t; qy = ay + aby * t; qz = az + abz * t;
+    } else if (vb <= 0 && d2 >= 0 && d6 <= 0) {
+      const t = d2 / (d2 - d6); qx = ax + acx * t; qy = ay + acy * t; qz = az + acz * t;
+    } else if (va <= 0 && d4 - d3 >= 0 && d5 - d6 >= 0) {
+      const t = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+      qx = bx + (cx - bx) * t; qy = by + (cy - by) * t; qz = bz + (cz - bz) * t;
+    } else {
+      const denom = 1 / (va + vb + vc);
+      const v = vb * denom, w = vc * denom;
+      qx = ax + abx * v + acx * w; qy = ay + aby * v + acy * w; qz = az + abz * v + acz * w;
+    }
+  }
+  const dx = qx - px, dy = qy - py, dz = qz - pz;
+  return dx * dx + dy * dy + dz * dz <= reach2;
+}
+
 export function refineInRadius(
   mesh: SculptMesh,
   cx: number,
   cy: number,
   cz: number,
   radius: number,
-  maxEdge: number
+  maxEdge: number,
+  /** Told about each midpoint made, and the two vertices it was made between. */
+  onMidpoint?: (mid: number, a: number, b: number) => void,
 ): number {
-  const { faces, faceCount, positions } = mesh;
+  const { faces, faceCount } = mesh;
   const limit2 = maxEdge * maxEdge;
   const reach = radius + maxEdge;
   const reach2 = reach * reach;
 
+  // `mesh.positions`, read afresh each time rather than held: addVertex below
+  // can reallocate it, and a held array reads past its end as undefined — which
+  // made every diagonal comparison in pass two false, so a two-split face
+  // always took the second diagonal whether or not it was the short one.
   const midpoints = new Map<number, number>();
   const nearBrush = (v: number): boolean => {
-    const dx = positions[v * 3] - cx;
-    const dy = positions[v * 3 + 1] - cy;
-    const dz = positions[v * 3 + 2] - cz;
+    const p = mesh.positions;
+    const dx = p[v * 3] - cx;
+    const dy = p[v * 3 + 1] - cy;
+    const dz = p[v * 3 + 2] - cz;
     return dx * dx + dy * dy + dz * dz <= reach2;
   };
   const edgeLen2 = (a: number, b: number): number => {
-    const dx = positions[a * 3] - positions[b * 3];
-    const dy = positions[a * 3 + 1] - positions[b * 3 + 1];
-    const dz = positions[a * 3 + 2] - positions[b * 3 + 2];
+    const p = mesh.positions;
+    const dx = p[a * 3] - p[b * 3];
+    const dy = p[a * 3 + 1] - p[b * 3 + 1];
+    const dz = p[a * 3 + 2] - p[b * 3 + 2];
     return dx * dx + dy * dy + dz * dz;
   };
 
-  // Pass one: pick the edges, and make each midpoint exactly once.
+  // Pass one: pick the edges, and make each midpoint exactly once. A face is
+  // in reach when any point of it is, not just a corner: a brush smaller than
+  // the triangle it lands inside has no corner near it, and used to refine
+  // nothing, move nothing, and leave small brushes on a base mesh dead.
   for (let f = 0; f < faceCount; f++) {
     const v = [faces[f * 3], faces[f * 3 + 1], faces[f * 3 + 2]];
-    if (!nearBrush(v[0]) && !nearBrush(v[1]) && !nearBrush(v[2])) continue;
+    if (!nearBrush(v[0]) && !nearBrush(v[1]) && !nearBrush(v[2])
+      && !triangleWithin(mesh.positions, v[0], v[1], v[2], cx, cy, cz, reach2)) continue;
 
     for (let e = 0; e < 3; e++) {
       const a = v[e];
@@ -455,15 +565,14 @@ export function refineInRadius(
       if (edgeLen2(a, b) <= limit2) continue;
       const key = edgeKey(a, b);
       if (midpoints.has(key)) continue;
-      midpoints.set(
-        key,
-        addVertex(
-          mesh,
-          (mesh.positions[a * 3] + mesh.positions[b * 3]) / 2,
-          (mesh.positions[a * 3 + 1] + mesh.positions[b * 3 + 1]) / 2,
-          (mesh.positions[a * 3 + 2] + mesh.positions[b * 3 + 2]) / 2
-        )
+      const mid = addVertex(
+        mesh,
+        (mesh.positions[a * 3] + mesh.positions[b * 3]) / 2,
+        (mesh.positions[a * 3 + 1] + mesh.positions[b * 3 + 1]) / 2,
+        (mesh.positions[a * 3 + 2] + mesh.positions[b * 3 + 2]) / 2
       );
+      midpoints.set(key, mid);
+      onMidpoint?.(mid, a, b);
     }
   }
 
@@ -1052,6 +1161,7 @@ function stampOnce(session: SculptSession, settings: BrushSettings, stamp: Brush
     }
   }
 
+  rehashVertices(mesh, session.hash, indices);
   mesh.revision++;
 }
 
@@ -1095,6 +1205,31 @@ function refineAlongDrag(
   // passes over the mesh.
   const steps = Math.min(8, Math.max(1, Math.ceil(span / Math.max(radius, 1e-6))));
 
+  /*
+   * The new vertices join the grab. A midpoint between two held vertices that
+   * was left behind stayed at the root while its parents travelled on with the
+   * cursor, and the faces between them folded back through the limb — faces
+   * the renderer culls, so the pulled limb went see-through in patches. Each
+   * midpoint is held with the average of its parents' weights (an unheld
+   * parent counting as zero), which is where it would be had it been there
+   * from the start.
+   */
+  const held = session.grabbed[channel];
+  const heldWeights = session.grabWeights[channel];
+  const weightOf = new Map<number, number>();
+  if (held && heldWeights) for (let k = 0; k < held.length; k++) weightOf.set(held[k], heldWeights[k]);
+  const joined: number[] = [];
+  const joinedWeights: number[] = [];
+  const onMidpoint = (mid: number, a: number, b: number) => {
+    const wa = weightOf.get(a);
+    const wb = weightOf.get(b);
+    if (wa === undefined && wb === undefined) return;
+    const w = ((wa ?? 0) + (wb ?? 0)) / 2;
+    weightOf.set(mid, w);
+    joined.push(mid);
+    joinedWeights.push(w);
+  };
+
   let split = 0;
   for (let step = 0; step <= steps; step++) {
     if (mesh.vertexCount >= budget) {
@@ -1109,7 +1244,16 @@ function refineAlongDrag(
       origin[2] + spanZ * t,
       radius,
       target * 1.5,
+      onMidpoint,
     );
+  }
+
+  if (joined.length > 0 && held && heldWeights) {
+    session.grabbed[channel] = held.concat(joined);
+    const grown = new Float32Array(heldWeights.length + joinedWeights.length);
+    grown.set(heldWeights);
+    grown.set(joinedWeights, heldWeights.length);
+    session.grabWeights[channel] = grown;
   }
 
   if (split > 0) {
