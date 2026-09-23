@@ -502,7 +502,11 @@ export function SculptSurface({
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 'z') return;
+      const key = event.key.toLowerCase();
+      // Ctrl+Y is redo too, as the app's own handler has it: left to fall
+      // through, it redid a document step instead of a stroke.
+      if (!(event.metaKey || event.ctrlKey) || (key !== 'z' && key !== 'y')) return;
+      const redo = event.shiftKey || key === 'y';
       const target = event.target as HTMLElement | null;
       if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return;
 
@@ -511,8 +515,8 @@ export function SculptSurface({
       // back. Swallowed rather than passed on, so the app's undo does not act
       // either.
       if (sessionRef.current) { event.preventDefault(); event.stopPropagation(); return; }
-      const stack = event.shiftKey ? redoStack.current : undoStack.current;
-      const other = event.shiftKey ? undoStack.current : redoStack.current;
+      const stack = redo ? redoStack.current : undoStack.current;
+      const other = redo ? undoStack.current : redoStack.current;
       const entry = stack.pop();
       if (!entry) return;
 
