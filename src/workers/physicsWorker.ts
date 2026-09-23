@@ -14,10 +14,11 @@
 // The worker owns the entire fixed-timestep step loop (previously
 // PhysicsLoop's useFrame body in App.tsx): force reset, mouse-drag spring
 // force, script execution (aero + user scripts), free-joint damping,
-// mj_step, NaN safety check, and throttled history recording. Stepping is
-// driven by TICK messages from the main thread's own requestAnimationFrame
-// loop (see stepTick below) rather than a worker-local timer, so it stays in
-// phase with rendering instead of adding a whole extra frame of latency.
+// mj_step, NaN safety check, and throttled history recording. Without shared
+// memory, stepping is driven by TICK messages from the main thread's own
+// requestAnimationFrame loop (see stepTick below). With it — the usual case,
+// since the dev server and nginx both send COOP/COEP — the worker paces itself
+// on a 4 ms timer (startWorkerLoop) and posts frames at display rate.
 
 import load_mujoco from '@mujoco/mujoco';
 // The same asset the Emscripten glue would fetch by import.meta.url, as a URL.
@@ -210,40 +211,49 @@ const executeScripts = (nodes: SceneNode[], aeroDiagnostics: Record<string, Aero
       if (geom) {
         const bId = bodyIdCache[node.id] ?? bodyIdCache[node.name] ?? -1;
         if (bId !== -1) {
+          // Views taken once for this body: each `dat.x` / `mdl.x` read is an embind
+          // getter that allocates a new typed array over the heap.
+          const cvel = dat.cvel;
+          const geomXpos = dat.geom_xpos;
+          const xfrc = dat.xfrc_applied;
+          const xmat = dat.xmat;
+          const xpos = dat.xpos;
+          const bodyDofnum = mdl.body_dofnum;
+          const bodyParentid = mdl.body_parentid;
           let pId = bId;
-          while (pId > 0 && mdl.body_dofnum[pId] === 0) {
-            pId = mdl.body_parentid[pId];
+          while (pId > 0 && bodyDofnum[pId] === 0) {
+            pId = bodyParentid[pId];
           }
 
           const gId = geomIdCache[geom.name || ''] ?? -1;
-          let geomWorldX = dat.xpos[bId * 3 + 0];
-          let geomWorldY = dat.xpos[bId * 3 + 1];
-          let geomWorldZ = dat.xpos[bId * 3 + 2];
+          let geomWorldX = xpos[bId * 3 + 0];
+          let geomWorldY = xpos[bId * 3 + 1];
+          let geomWorldZ = xpos[bId * 3 + 2];
           if (gId !== -1) {
-            geomWorldX = dat.geom_xpos[gId * 3 + 0];
-            geomWorldY = dat.geom_xpos[gId * 3 + 1];
-            geomWorldZ = dat.geom_xpos[gId * 3 + 2];
+            geomWorldX = geomXpos[gId * 3 + 0];
+            geomWorldY = geomXpos[gId * 3 + 1];
+            geomWorldZ = geomXpos[gId * 3 + 2];
           }
 
-          const rx = geomWorldX - dat.xpos[pId * 3 + 0];
-          const ry = geomWorldY - dat.xpos[pId * 3 + 1];
-          const rz = geomWorldZ - dat.xpos[pId * 3 + 2];
+          const rx = geomWorldX - xpos[pId * 3 + 0];
+          const ry = geomWorldY - xpos[pId * 3 + 1];
+          const rz = geomWorldZ - xpos[pId * 3 + 2];
 
-          const wx = dat.cvel[bId * 6 + 0];
-          const wy = dat.cvel[bId * 6 + 1];
-          const wz = dat.cvel[bId * 6 + 2];
-          const vO_x = dat.cvel[bId * 6 + 3];
-          const vO_y = dat.cvel[bId * 6 + 4];
-          const vO_z = dat.cvel[bId * 6 + 5];
+          const wx = cvel[bId * 6 + 0];
+          const wy = cvel[bId * 6 + 1];
+          const wz = cvel[bId * 6 + 2];
+          const vO_x = cvel[bId * 6 + 3];
+          const vO_y = cvel[bId * 6 + 4];
+          const vO_z = cvel[bId * 6 + 5];
 
           const vx = vO_x + (wy * rz - wz * ry);
           const vy = vO_y + (wz * rx - wx * rz);
           const vz = vO_z + (wx * ry - wy * rx);
 
           const o = bId * 9;
-          const noseX = dat.xmat[o + 0], noseY = dat.xmat[o + 3], noseZ = dat.xmat[o + 6];
-          const spanX = dat.xmat[o + 1], spanY = dat.xmat[o + 4], spanZ = dat.xmat[o + 7];
-          const upX = dat.xmat[o + 2], upY = dat.xmat[o + 5], upZ = dat.xmat[o + 8];
+          const noseX = xmat[o + 0], noseY = xmat[o + 3], noseZ = xmat[o + 6];
+          const spanX = xmat[o + 1], spanY = xmat[o + 4], spanZ = xmat[o + 7];
+          const upX = xmat[o + 2], upY = xmat[o + 5], upZ = xmat[o + 8];
 
           const relVx = vx - (envWindX || 0);
           const relVy = vy - (envWindY || 0);
@@ -313,13 +323,13 @@ const executeScripts = (nodes: SceneNode[], aeroDiagnostics: Record<string, Aero
             const ty_lever = rz * fx - rx * fz;
             const tz_lever = rx * fy - ry * fx;
 
-            dat.xfrc_applied[pId * 6 + 0] += fx;
-            dat.xfrc_applied[pId * 6 + 1] += fy;
-            dat.xfrc_applied[pId * 6 + 2] += fz;
+            xfrc[pId * 6 + 0] += fx;
+            xfrc[pId * 6 + 1] += fy;
+            xfrc[pId * 6 + 2] += fz;
 
-            dat.xfrc_applied[pId * 6 + 3] += tx_aero + tx_roll + tx_lever;
-            dat.xfrc_applied[pId * 6 + 4] += ty_aero + ty_roll + ty_lever;
-            dat.xfrc_applied[pId * 6 + 5] += tz_aero + tz_roll + tz_lever;
+            xfrc[pId * 6 + 3] += tx_aero + tx_roll + tx_lever;
+            xfrc[pId * 6 + 4] += ty_aero + ty_roll + ty_lever;
+            xfrc[pId * 6 + 5] += tz_aero + tz_roll + tz_lever;
 
             aeroDiagnostics[node.name || node.id] = {
               relSpeed, alpha: alpha * 180 / Math.PI, CL, CD,
@@ -331,9 +341,9 @@ const executeScripts = (nodes: SceneNode[], aeroDiagnostics: Record<string, Aero
           }
 
           const DAMPING = 0.0005;
-          dat.xfrc_applied[pId * 6 + 3] -= DAMPING * wx;
-          dat.xfrc_applied[pId * 6 + 4] -= DAMPING * wy;
-          dat.xfrc_applied[pId * 6 + 5] -= DAMPING * wz;
+          xfrc[pId * 6 + 3] -= DAMPING * wx;
+          xfrc[pId * 6 + 4] -= DAMPING * wy;
+          xfrc[pId * 6 + 5] -= DAMPING * wz;
         }
       }
     }
@@ -491,19 +501,24 @@ const applyFreeJointDamping = (nodes: SceneNode[]) => {
         if (joint.type === 'free' && joint.damping !== undefined && joint.damping > 0) {
           const bId = bodyIdCache[node.id] ?? bodyIdCache[node.name] ?? -1;
           if (bId !== -1) {
-            const wx = dat.cvel[bId * 6 + 0], wy = dat.cvel[bId * 6 + 1], wz = dat.cvel[bId * 6 + 2];
-            const vx = dat.cvel[bId * 6 + 3], vy = dat.cvel[bId * 6 + 4], vz = dat.cvel[bId * 6 + 5];
+            // Views taken once for this body, as in executeScripts.
+            const cvel = dat.cvel;
+            const xfrc = dat.xfrc_applied;
+            const bodyInertia = mdl.body_inertia;
+            const bodyMass = mdl.body_mass;
+            const wx = cvel[bId * 6 + 0], wy = cvel[bId * 6 + 1], wz = cvel[bId * 6 + 2];
+            const vx = cvel[bId * 6 + 3], vy = cvel[bId * 6 + 4], vz = cvel[bId * 6 + 5];
             const c = joint.damping;
-            const mass = mdl.body_mass[bId] || 1.0;
-            const ix = mdl.body_inertia[bId * 3 + 0] || 1.0;
-            const iy = mdl.body_inertia[bId * 3 + 1] || 1.0;
-            const iz = mdl.body_inertia[bId * 3 + 2] || 1.0;
-            dat.xfrc_applied[bId * 6 + 0] -= c * mass * vx;
-            dat.xfrc_applied[bId * 6 + 1] -= c * mass * vy;
-            dat.xfrc_applied[bId * 6 + 2] -= c * mass * vz;
-            dat.xfrc_applied[bId * 6 + 3] -= c * ix * wx;
-            dat.xfrc_applied[bId * 6 + 4] -= c * iy * wy;
-            dat.xfrc_applied[bId * 6 + 5] -= c * iz * wz;
+            const mass = bodyMass[bId] || 1.0;
+            const ix = bodyInertia[bId * 3 + 0] || 1.0;
+            const iy = bodyInertia[bId * 3 + 1] || 1.0;
+            const iz = bodyInertia[bId * 3 + 2] || 1.0;
+            xfrc[bId * 6 + 0] -= c * mass * vx;
+            xfrc[bId * 6 + 1] -= c * mass * vy;
+            xfrc[bId * 6 + 2] -= c * mass * vz;
+            xfrc[bId * 6 + 3] -= c * ix * wx;
+            xfrc[bId * 6 + 4] -= c * iy * wy;
+            xfrc[bId * 6 + 5] -= c * iz * wz;
           }
         }
       }
@@ -526,10 +541,25 @@ const pendingWake = new Set<number>();
 const SLEEP_ENABLE_BIT = 16; // mjENBL_SLEEP
 const WAKE_NUDGE_N = 1e-12;
 
+/*
+ * The two option fields read while stepping, remembered per model. `model.opt`
+ * is an embind accessor that builds a wrapper object each time it is read, and
+ * it was read on every tick; the values cannot change under a built model.
+ * Keyed on the model object because headless runs swap it out and back.
+ */
+let optCache: { model: MjModel; timestep: number; enableflags: number } | null = null;
+const modelOpt = (mdl: MjModel) => {
+  if (optCache?.model !== mdl) {
+    const opt = mdl.opt;
+    optCache = { model: mdl, timestep: opt.timestep, enableflags: opt.enableflags };
+  }
+  return optCache;
+};
+
 const wakeBodies = () => {
   if (pendingWake.size === 0) return;
   const mdl = model!, dat = data!;
-  if (mdl.opt.enableflags & SLEEP_ENABLE_BIT) {
+  if (modelOpt(mdl).enableflags & SLEEP_ENABLE_BIT) {
     for (const b of pendingWake) {
       if (b > 0 && b < mdl.nbody) dat.xfrc_applied[b * 6 + 2] += WAKE_NUDGE_N;
     }
@@ -604,17 +634,21 @@ const buildHistoryEntry = (aeroDiagnostics: Record<string, AeroDiagnostic>): His
     for (const node of nodesList) {
       const bId = bodyIdCache[node.id];
       if (bId !== undefined) {
-        const wx = dat.cvel[bId * 6 + 0], wy = dat.cvel[bId * 6 + 1], wz = dat.cvel[bId * 6 + 2];
-        const vO_x = dat.cvel[bId * 6 + 3], vO_y = dat.cvel[bId * 6 + 4], vO_z = dat.cvel[bId * 6 + 5];
-        const x_pos = dat.xpos[bId * 3 + 0], y_pos = dat.xpos[bId * 3 + 1], z_pos = dat.xpos[bId * 3 + 2];
+        // Views taken once for this body, as in executeScripts.
+        const cvel = dat.cvel;
+        const xfrc = dat.xfrc_applied;
+        const xpos = dat.xpos;
+        const wx = cvel[bId * 6 + 0], wy = cvel[bId * 6 + 1], wz = cvel[bId * 6 + 2];
+        const vO_x = cvel[bId * 6 + 3], vO_y = cvel[bId * 6 + 4], vO_z = cvel[bId * 6 + 5];
+        const x_pos = xpos[bId * 3 + 0], y_pos = xpos[bId * 3 + 1], z_pos = xpos[bId * 3 + 2];
         const vx = vO_x + (wy * z_pos - wz * y_pos);
         const vy = vO_y + (wz * x_pos - wx * z_pos);
         const vz = vO_z + (wx * y_pos - wy * x_pos);
         bodies[node.id] = {
           pos: [x_pos, y_pos, z_pos], vel: [vx, vy, vz], angvel: [wx, wy, wz],
           xfrc_applied: [
-            dat.xfrc_applied[bId * 6 + 0], dat.xfrc_applied[bId * 6 + 1], dat.xfrc_applied[bId * 6 + 2],
-            dat.xfrc_applied[bId * 6 + 3], dat.xfrc_applied[bId * 6 + 4], dat.xfrc_applied[bId * 6 + 5],
+            xfrc[bId * 6 + 0], xfrc[bId * 6 + 1], xfrc[bId * 6 + 2],
+            xfrc[bId * 6 + 3], xfrc[bId * 6 + 4], xfrc[bId * 6 + 5],
           ],
         };
       }
@@ -699,14 +733,13 @@ const snapshot = () => {
 
 const post = (msg: WorkerToMainMessage, transfer: Transferable[] = []) => self.postMessage(msg, transfer);
 
-// Stepping is driven by TICK messages from the main thread's own
-// requestAnimationFrame loop (see App.tsx's PhysicsLoop / physicsWorkerClient's
-// `tick()`), not by a worker-local setInterval. A worker-local timer runs on
-// its own independent clock, out of phase with the render loop, and was
-// adding roughly a whole extra frame of perceived latency to direct
-// manipulation (dragging bodies) on top of the unavoidable message-passing
-// round trip. Ticking in lockstep with the main thread's rAF keeps the added
-// overhead to just that one cross-thread hop.
+// Without shared memory, stepping is driven by TICK messages from the main
+// thread's own requestAnimationFrame loop (see App.tsx's PhysicsLoop /
+// physicsWorkerClient's `tick()`), not by a worker-local setInterval: a
+// worker-local timer runs on its own clock, out of phase with the render loop,
+// and added roughly a frame of latency to dragging a body. With shared memory
+// the TICKs are ignored and the worker's own 4 ms loop steps instead — see
+// startWorkerLoop and FRAME_INTERVAL_MS.
 // ---- Breakable welds ------------------------------------------------------
 //
 // MuJoCo spends a measurable force holding every weld together and reports it in
@@ -874,28 +907,31 @@ const checkConstraintBreaks = () => {
   const nefc = dat.nefc;
   if (nefc === 0) return;
 
+  // A weld contributes six rows: three of force, three of torque. Found by
+  // scanning rather than by assuming an offset — the row order follows the
+  // solver's constraint ordering, which is not ours to predict — but in ONE
+  // pass for all welds, with the views taken once. Every `dat.efc_*` read is an
+  // embind getter that allocates a fresh typed array, and this used to make
+  // three of them per row, per weld, per step.
+  const efcType = dat.efc_type;
+  const efcId = dat.efc_id;
+  const efcForce = dat.efc_force;
+  const rowsOf = new Map<number, number[]>();
+  for (const w of breakableWelds) {
+    if (!brokenWeldKeys.has(w.key)) rowsOf.set(w.eqIndex, []);
+  }
+  if (rowsOf.size === 0) return;
+  for (let i = 0; i < nefc; i++) {
+    if (efcType[i] !== equalityType) continue;
+    const rows = rowsOf.get(efcId[i]);
+    if (rows && rows.length < 6) rows.push(efcForce[i]);
+  }
+
   for (const w of breakableWelds) {
     if (brokenWeldKeys.has(w.key)) continue;
-
-    // A weld contributes six consecutive rows: three of force, three of torque.
-    // Scan rather than assume an offset — the row order follows the solver's
-    // constraint ordering, which is not ours to predict.
-    let fx = 0, fy = 0, fz = 0, tx = 0, ty = 0, tz = 0;
-    let seen = 0;
-    for (let i = 0; i < nefc; i++) {
-      if (dat.efc_type[i] !== equalityType || dat.efc_id[i] !== w.eqIndex) continue;
-      const f = dat.efc_force[i];
-      switch (seen) {
-        case 0: fx = f; break;
-        case 1: fy = f; break;
-        case 2: fz = f; break;
-        case 3: tx = f; break;
-        case 4: ty = f; break;
-        default: tz = f; break;
-      }
-      if (++seen === 6) break;
-    }
-    if (seen === 0) continue;
+    const rows = rowsOf.get(w.eqIndex);
+    if (!rows || rows.length === 0) continue;
+    const [fx = 0, fy = 0, fz = 0, tx = 0, ty = 0, tz = 0] = rows;
 
     const forceN = Math.sqrt(fx * fx + fy * fy + fz * fz);
     const torqueNm = Math.sqrt(tx * tx + ty * ty + tz * tz);
@@ -1257,7 +1293,7 @@ const stepTick = (delta: number) => {
   }
   accumulator += Math.min(delta, 0.1);
 
-  const stepSize = model.opt.timestep;
+  const stepSize = modelOpt(model).timestep;
   const stepsNeeded = Math.floor(accumulator / stepSize);
   accumulator -= stepsNeeded * stepSize;
 
@@ -1283,9 +1319,12 @@ const stepTick = (delta: number) => {
         history.push(entry);
       }
 
+      // One view, not one per element: every `data.qpos` read is an embind
+      // getter that allocates a fresh Float64Array over the heap.
+      const qpos = data.qpos;
       const nq = model.nq;
       for (let j = 0; j < nq; j++) {
-        if (isNaN(data.qpos[j])) {
+        if (isNaN(qpos[j])) {
           post({ type: 'ERROR', message: 'NaN detected in qpos — simulation stopped.', fatal: false });
           isPlaying = false;
           return;
@@ -1300,18 +1339,40 @@ const stepTick = (delta: number) => {
     }
   }
 
-  if (stepsNeeded > 0) {
-    const snap = snapshot();
-    if (isSharedSupported) {
-      post({ type: 'FRAME', time: snap.time, heapBytes: snap.heapBytes, isShared: true });
-    } else {
-      post({ type: 'FRAME', ...snap, isShared: false }, [
-        snap.qpos.buffer, snap.qvel.buffer, snap.ctrl.buffer,
-        snap.xfrc_applied.buffer, snap.qfrc_applied.buffer,
-        snap.xpos.buffer, snap.xmat.buffer, snap.cvel.buffer,
-        snap.geom_xpos.buffer, snap.geom_xmat.buffer
-      ]);
-    }
+  if (stepsNeeded > 0) framePending = true;
+  if (framePending && (!isSharedSupported || performance.now() - lastFramePost >= FRAME_INTERVAL_MS)) {
+    postFrame();
+  }
+};
+
+/*
+ * How often a frame goes to the main thread when the worker paces itself.
+ *
+ * With shared memory the worker runs its own 4 ms loop, and it used to copy
+ * every array into the shared buffers and post a FRAME on every tick that
+ * stepped: about 250 a second, four for each frame the screen can show. Now
+ * it posts at most one per display frame, and whatever is pending goes when
+ * play stops, so the last pose drawn is the last pose simulated. Without
+ * shared memory each TICK comes from the main thread's own frame, so every
+ * one is answered.
+ */
+const FRAME_INTERVAL_MS = 15;
+let lastFramePost = 0;
+let framePending = false;
+
+const postFrame = () => {
+  framePending = false;
+  lastFramePost = performance.now();
+  const snap = snapshot();
+  if (isSharedSupported) {
+    post({ type: 'FRAME', time: snap.time, heapBytes: snap.heapBytes, isShared: true });
+  } else {
+    post({ type: 'FRAME', ...snap, isShared: false }, [
+      snap.qpos.buffer, snap.qvel.buffer, snap.ctrl.buffer,
+      snap.xfrc_applied.buffer, snap.qfrc_applied.buffer,
+      snap.xpos.buffer, snap.xmat.buffer, snap.cvel.buffer,
+      snap.geom_xpos.buffer, snap.geom_xmat.buffer
+    ]);
   }
 };
 
@@ -1858,6 +1919,9 @@ self.onmessage = async (evt: MessageEvent) => {
           if (isSharedSupported) {
             stopWorkerLoop();
           }
+          // The steps since the last frame, so what stops on screen is where
+          // the simulation stopped. See FRAME_INTERVAL_MS.
+          if (framePending && model && data) postFrame();
         }
         break;
       }
