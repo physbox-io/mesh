@@ -14,12 +14,17 @@ import type {
   ImpactEvent,
   HeadlessResult,
   HistoryEntry,
+  HistoryFrame,
+  HistoryQuery,
   SeedState,
 } from '../workers/physicsWorkerProtocol';
 
 export type { BuiltResult, FrameSnapshot } from '../workers/physicsWorkerProtocol';
 
 type Pending<T> = { resolve: (r: T) => void; reject: (e: Error) => void };
+
+/** What GET_HISTORY returned, and how much of the history it was cut from. */
+export type HistoryResult = { frames: HistoryFrame[]; total: number; stride: number };
 
 // ---------------------------------------------------------------------------
 // Headless run core (pure; imported by src/workers/physicsWorker.ts)
@@ -166,7 +171,7 @@ export class PhysicsWorkerClient {
   private worker: Worker;
   private pendingBuilds = new Map<string, Pending<BuiltResult>>();
   private pendingHeadless = new Map<string, Pending<HeadlessRunResult>>();
-  private pendingHistory = new Map<string, Pending<HistoryEntry[]>>();
+  private pendingHistory = new Map<string, Pending<HistoryResult>>();
   private pendingTelemetry = new Map<string, Pending<HistoryEntry | null>>();
   /**
    * Which meshes this worker already holds as VFS files. Pass it to
@@ -219,7 +224,7 @@ export class PhysicsWorkerClient {
           const pending = this.pendingHistory.get(msg.id);
           if (pending) {
             this.pendingHistory.delete(msg.id);
-            pending.resolve(msg.history);
+            pending.resolve({ frames: msg.history, total: msg.total, stride: msg.stride });
           }
           break;
         }
@@ -294,11 +299,12 @@ export class PhysicsWorkerClient {
     });
   }
 
-  getHistory(): Promise<HistoryEntry[]> {
+  /** No query returns everything held; see HistoryRing.query for the filters. */
+  getHistory(query?: HistoryQuery): Promise<HistoryResult> {
     const id = Math.random().toString(36).slice(2);
     return new Promise((resolve, reject) => {
       this.pendingHistory.set(id, { resolve, reject });
-      this.worker.postMessage({ type: 'GET_HISTORY', id });
+      this.worker.postMessage({ type: 'GET_HISTORY', id, query });
     });
   }
 

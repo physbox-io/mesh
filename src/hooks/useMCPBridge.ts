@@ -45,7 +45,7 @@ import {
   type Axis as LatticeAxis, type Lattice,
 } from '../utils/latticeMesh';
 import type { SculptUndoEntry } from '../utils/sculptMesh';
-import type { HeadlessResult, HistoryEntry } from '../workers/physicsWorkerProtocol';
+import type { HeadlessResult, HistoryEntry, HistoryQuery } from '../workers/physicsWorkerProtocol';
 
 interface PhysicsWindow extends Window {
   _physics_setNoteCards?: (cards: NoteCard[]) => void;
@@ -828,8 +828,21 @@ export function useMCPBridge() {
         case 'GET_TELEMETRY':
           return getPhysicsWorkerClient().getTelemetry().then(t => t || { error: 'No simulation telemetry available' });
 
-        case 'GET_HISTORY':
-          return getPhysicsWorkerClient().getHistory();
+        case 'GET_HISTORY': {
+          // The worker holds up to 5000 frames, ~14 MB of JSON when full. No
+          // agent can read that, so unless maxFrames is given (0 = no cap) the
+          // stride is raised to fit 200 frames across whatever window was asked for.
+          const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+          const { frames, total, stride } = await getPhysicsWorkerClient().getHistory({
+            sinceTime: num(msg.sinceTime),
+            last: num(msg.last),
+            stride: num(msg.stride),
+            maxFrames: num(msg.maxFrames) ?? 200,
+            bodies: Array.isArray(msg.bodies) ? (msg.bodies as string[]) : undefined,
+            include: Array.isArray(msg.include) ? (msg.include as HistoryQuery['include']) : undefined,
+          });
+          return { total, returned: frames.length, stride, frames };
+        }
 
         case 'RUN_HEADLESS': {
           const ticks = Number(msg.ticks) || 300;

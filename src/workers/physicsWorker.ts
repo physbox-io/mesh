@@ -41,6 +41,7 @@ import type {
   JointHistory,
   WorkerToMainMessage,
 } from './physicsWorkerProtocol';
+import { HistoryRing } from './historyRing';
 import { rebaseShard } from '../utils/runtimeShatter';
 import { canCrumple, crumpleAsWeld, crumpleKey, holdSteps, isBreakable, shatterFloor, weldKey, weldOverload, type WeldBreakConfig } from '../utils/breakThresholds';
 
@@ -93,8 +94,7 @@ let pressedKeys = new Set<string>();
 let stepCount = 0;
 let accumulator = 0;
 
-let historyBuffer: HistoryEntry[] = [];
-const MAX_HISTORY_SIZE = 5000;
+const history = new HistoryRing(5000);
 
 const isSharedSupported = typeof SharedArrayBuffer !== 'undefined';
 
@@ -1280,10 +1280,7 @@ const stepTick = (delta: number) => {
 
       if (stepCount % 10 === 0) {
         const entry = buildHistoryEntry(aeroDiagnostics);
-        historyBuffer.push(entry);
-        if (historyBuffer.length > MAX_HISTORY_SIZE) {
-          historyBuffer.shift();
-        }
+        history.push(entry);
       }
 
       const nq = model.nq;
@@ -1929,16 +1926,16 @@ self.onmessage = async (evt: MessageEvent) => {
         break;
       }
       case 'GET_HISTORY': {
-        post({ type: 'HISTORY_RESULT', id: msg.id, history: historyBuffer });
+        const { frames, total, stride } = history.query(msg.query);
+        post({ type: 'HISTORY_RESULT', id: msg.id, history: frames, total, stride });
         break;
       }
       case 'GET_TELEMETRY': {
-        const latest = historyBuffer.length > 0 ? historyBuffer[historyBuffer.length - 1] : null;
-        post({ type: 'TELEMETRY_RESULT', id: msg.id, telemetry: latest });
+        post({ type: 'TELEMETRY_RESULT', id: msg.id, telemetry: history.latest() });
         break;
       }
       case 'CLEAR_HISTORY': {
-        historyBuffer = [];
+        history.clear();
         break;
       }
       default:

@@ -118,6 +118,19 @@ export interface HistoryEntry {
   aeroDiagnostics: Record<string, AeroDiagnostic>;
 }
 
+/** A history entry trimmed by a HistoryQuery's `include`: only `time` is certain. */
+export type HistoryFrame = Pick<HistoryEntry, 'time'> & Partial<Omit<HistoryEntry, 'time'>>;
+
+/** Which part of the history GET_HISTORY returns. See HistoryRing.query. */
+export interface HistoryQuery {
+  sinceTime?: number;
+  last?: number;
+  stride?: number;
+  maxFrames?: number;
+  bodies?: string[];
+  include?: ('bodies' | 'joints' | 'contacts' | 'aero')[];
+}
+
 export type HeadlessResult =
   | { ok: true; ticksSimulated: number; trajectory: HistoryEntry[]; warnings: string[] }
   | { ok: false; error: string; warnings: string[] };
@@ -151,7 +164,7 @@ export type MainToWorkerMessage =
   | { type: 'SET_CTRL'; actuatorName: string; value: number }
   | { type: 'UPDATE_SCRIPT'; nodeId: string; script: string }
   | { type: 'RUN_HEADLESS'; id: string; xml: string; sceneGraph: SceneGraph; ticks: number }
-  | { type: 'GET_HISTORY'; id: string }
+  | { type: 'GET_HISTORY'; id: string; query?: HistoryQuery }
   | { type: 'GET_TELEMETRY'; id: string }
   | { type: 'CLEAR_HISTORY' };
 
@@ -231,5 +244,5 @@ export type WorkerToMainMessage =
   | ({ type: 'CONSTRAINT_BROKEN' } & ConstraintBrokenEvent)
   | ({ type: 'IMPACT' } & ImpactEvent)
   | ({ type: 'HEADLESS_RESULT'; id: string } & HeadlessResult)
-  | { type: 'HISTORY_RESULT'; id: string; history: HistoryEntry[] }
+  | { type: 'HISTORY_RESULT'; id: string; history: HistoryFrame[]; total: number; stride: number }
   | { type: 'TELEMETRY_RESULT'; id: string; telemetry: HistoryEntry | null };
