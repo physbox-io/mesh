@@ -24,8 +24,9 @@ import { compileToMJCF } from '../utils/mjcf';
 import { PRESETS, pendulumPreset, generateGearGeoms } from '../presets/presetScenes';
 import { PhysicsWorkerClient, type BuiltResult, type FrameSnapshot } from './physicsWorkerClient';
 import type { ConstraintBrokenEvent, ImpactEvent } from '../workers/physicsWorkerProtocol';
-import { dentDepth, dentSpread, pierceVerdict, shatterVerdict } from '../utils/breakThresholds';
-import { DEFAULT_FRACTURE_PIECES, fractureMesh } from '../utils/fracture';
+import { canShatter, dentDepth, dentSpread, pierceVerdict, shatterVerdict } from '../utils/breakThresholds';
+import { DEFAULT_FRACTURE_PIECES } from '../utils/fracture';
+import { fractureMeshOffThread, prewarmFractureWorker } from '../utils/fractureWorkerClient';
 import { buildShatterGraph, MAX_LIVE_SHARDS } from '../utils/runtimeShatter';
 import { deformedGeometry, dentKey, useDentStore } from './dentStore';
 import { imprintOf, isDentable, meshForDenting, type Imprint } from '../utils/dentMesh';
@@ -662,12 +663,27 @@ export interface DeformedGeometry {
  */
 const clearBreakage = (set: (patch: Partial<PhysicsState>) => void) => {
   useDentStore.getState().clear();
+  breakageEpoch++;
+  fracturing.clear();
   set({
     brokenConstraints: [], lastBreak: null,
     shatteredBodies: {}, visibleShatteredBodies: {}, lastShatter: null,
     deformedGeoms: {},
   });
 };
+
+/*
+ * Bodies being cut in the fracture worker, and how many shards each has been
+ * promised. A body that is still being cut is hit again several times before
+ * its pieces land; without this every one of those blows would cut it again.
+ * The pieces count towards the shard budget from the moment they are asked for.
+ */
+const fracturing = new Map<string, number>();
+/** Bumped whenever breakage is cleared, so a cut that lands after a reset is dropped. */
+let breakageEpoch = 0;
+
+const anyNode = (nodes: SceneNode[], test: (n: SceneNode) => boolean): boolean =>
+  nodes.some((n) => test(n) || anyNode(n.children || [], test));
 
 const SHATTER_REBUILD_MIN_GAP_MS = 100;
 let shatterRebuildInFlight = false;
@@ -1693,7 +1709,7 @@ export interface PhysicsState {
    */
   makeDentable: (nodeId: string, geomIndex: number, cfg: DentConfig) => boolean;
   /** Replace a body with its pieces, in the runtime overlay only. */
-  shatterNode: (node: SceneNode, event: ImpactEvent, wallM?: number | null) => void;
+  shatterNode: (node: SceneNode, event: ImpactEvent, wallM?: number | null) => Promise<void>;
   recoverFromFatalWorkerError: (message: string, lastState?: { qpos: number[]; qvel: number[]; time: number }) => Promise<void>;
   recycleWorkerSeamlessly: () => Promise<void>;
   incrementMcpActive: () => void;
@@ -1995,6 +2011,8 @@ export const useStore = create<PhysicsState>()((set, get) => ({
   togglePlay: () => set((state) => {
     const isPlaying = !state.isPlaying;
     getPhysicsWorkerClient().setPlaying(isPlaying);
+    // Something in this scene can break: have the cutter loaded before it does.
+    if (isPlaying && anyNode(state.sceneGraph.nodes, canShatter)) prewarmFractureWorker();
     return { isPlaying };
   }),
   setLoaded: (loaded) => set({ isLoaded: loaded }),
@@ -2134,7 +2152,9 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     const node = findNodeById(live.nodes, event.nodeId);
     if (!node) return;
 
-    if (!state.shatteredBodies[node.id]) {
+    // Already coming apart: the blow has nothing left to do to this body.
+    const cutting = fracturing.has(node.id);
+    if (!state.shatteredBodies[node.id] && !cutting) {
       const wallM = node.shatterThicknessRef ? wallAtImpact(node, event.localPoint) : null;
       if (shatterVerdict(event.impulseNs, node, wallM)) {
         get().shatterNode(node, event, wallM);
@@ -2147,7 +2167,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     // the mark is usually the other one.
     const other = event.otherNodeId ? findNodeById(live.nodes, event.otherNodeId) : null;
     // Each end of the collision is marked by the shape of the other end.
-    dentBody(node, event.localPoint, event.localNormal, event.impulseNs, imprintOf(other?.geoms?.[0]));
+    if (!cutting) dentBody(node, event.localPoint, event.localNormal, event.impulseNs, imprintOf(other?.geoms?.[0]));
     if (other && event.otherLocalPoint && event.otherLocalNormal) {
       dentBody(other, event.otherLocalPoint, event.otherLocalNormal, event.impulseNs, imprintOf(node.geoms?.[0]));
     }
@@ -2161,7 +2181,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
    * the worker cannot carry the state over by copying arrays — it matches
    * joints by name instead, which is what the by-joint branch of doBuild is for.
    */
-  shatterNode: (node, event, wallM) => {
+  shatterNode: async (node, event, wallM) => {
     const geom = (node.geoms || []).find((g) => (g.renderVertices ?? g.vertices) && g.faces);
     const source = geom && (geom.renderVertices ?? geom.vertices);
     if (!geom || !source || !geom.faces) return;
@@ -2172,17 +2192,37 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     // A shard breaking now gives its own slot back.
     const broken = get().shatteredBodies;
     const live = Object.values(broken).flat().filter((s) => !broken[s.id]);
-    const room = MAX_LIVE_SHARDS - live.length + (live.some((s) => s.id === node.id) ? 1 : 0);
+    let promised = 0;
+    for (const n of fracturing.values()) promised += n;
+    const room = MAX_LIVE_SHARDS - live.length - promised + (live.some((s) => s.id === node.id) ? 1 : 0);
     const pieces = Math.min(node.shatterPieces ?? DEFAULT_FRACTURE_PIECES, room);
     if (pieces < 2) return;
 
-    const cells = fractureMesh(source, geom.faces, {
-      pieces,
-      seed: node.shatterSeed ?? 1,
-      focus: node.shatterPattern === 'uniform'
-        ? undefined
-        : [event.localPoint[0], event.localPoint[1], event.localPoint[2]],
-    });
+    // Cut in the worker while the old model keeps stepping. The pieces are
+    // posed from the impact, and rebaseShard moves them onto wherever the body
+    // has got to by the time the rebuild lands, so the wait costs no accuracy.
+    fracturing.set(node.id, pieces);
+    const epoch = breakageEpoch;
+    let cells: Awaited<ReturnType<typeof fractureMeshOffThread>>;
+    try {
+      cells = await fractureMeshOffThread(source, geom.faces, {
+        pieces,
+        seed: node.shatterSeed ?? 1,
+        focus: node.shatterPattern === 'uniform'
+          ? undefined
+          : [event.localPoint[0], event.localPoint[1], event.localPoint[2]],
+      });
+    } catch (err) {
+      console.warn('[shatter]', err);
+      cells = [];
+    } finally {
+      if (epoch === breakageEpoch) fracturing.delete(node.id);
+    }
+    // Reset, or a new scene, while it was being cut: that break never happened.
+    if (epoch !== breakageEpoch) return;
+    const nowBroken = get().shatteredBodies;
+    if (nowBroken[node.id]) return;
+    if (!findNodeById(effectiveSceneGraph(get().sceneGraph, nowBroken).nodes, node.id)) return;
     // Fewer than two pieces is not a shatter, and replacing a body with one
     // shard would be a visible no-op that had thrown its collider away.
     if (cells.length < 2) return;
@@ -2212,7 +2252,7 @@ export const useStore = create<PhysicsState>()((set, get) => ({
     });
 
     set({
-      shatteredBodies: { ...get().shatteredBodies, [node.id]: shards },
+      shatteredBodies: { ...nowBroken, [node.id]: shards },
       lastShatter: { nodeId: node.id, name: node.name, pieces: shards.length, time: event.time, impulseNs: event.impulseNs, wallM: wallM ?? undefined },
     });
     scheduleShatterRebuild(() => get().recompile(undefined, undefined, false, true, false, true));

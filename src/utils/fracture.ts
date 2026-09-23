@@ -377,41 +377,64 @@ function bisector(a: [number, number, number], b: [number, number, number]): Pla
 function polytopeVertices(planes: Plane[], eps: number): [number, number, number][] {
   const out: [number, number, number][] = [];
   const n = planes.length;
+  // The candidates, not the inside test, are the cost: nearly all of them are
+  // rejected within a few planes, but every one needs a 3x3 solve first. By
+  // Cramer, where planes a, b, c meet is
+  //   (d_a (b x c) + d_b (c x a) + d_c (a x b)) / (a . (b x c)),
+  // so each pair's cross product is worked out once here and every triple is
+  // then a dot product and three scaled adds, with nothing allocated for the
+  // ones thrown away.
+  const cross = new Float64Array(n * n * 3);
+  for (let a = 0; a < n; a++) {
+    const pa = planes[a];
+    for (let b = a + 1; b < n; b++) {
+      const pb = planes[b];
+      const cx = pa.ny * pb.nz - pa.nz * pb.ny;
+      const cy = pa.nz * pb.nx - pa.nx * pb.nz;
+      const cz = pa.nx * pb.ny - pa.ny * pb.nx;
+      const ab = (a * n + b) * 3, ba = (b * n + a) * 3;
+      cross[ab] = cx; cross[ab + 1] = cy; cross[ab + 2] = cz;
+      cross[ba] = -cx; cross[ba + 1] = -cy; cross[ba + 2] = -cz;
+    }
+  }
+  // Consecutive candidates tend to fall outside the same plane, so the one that
+  // rejected the last candidate is tried first.
+  let hot = 0;
   for (let i = 0; i < n; i++) {
+    const pi = planes[i];
     for (let j = i + 1; j < n; j++) {
+      const pj = planes[j];
+      const ij = (i * n + j) * 3;
       for (let k = j + 1; k < n; k++) {
-        const p = intersect3(planes[i], planes[j], planes[k]);
-        if (!p) continue;
+        const pk = planes[k];
+        const jk = (j * n + k) * 3, ki = (k * n + i) * 3;
+        const det = pi.nx * cross[jk] + pi.ny * cross[jk + 1] + pi.nz * cross[jk + 2];
+        if (Math.abs(det) < 1e-12) continue; // two of them are parallel
+        const x = (pi.d * cross[jk] + pj.d * cross[ki] + pk.d * cross[ij]) / det;
+        const y = (pi.d * cross[jk + 1] + pj.d * cross[ki + 1] + pk.d * cross[ij + 1]) / det;
+        const z = (pi.d * cross[jk + 2] + pj.d * cross[ki + 2] + pk.d * cross[ij + 2]) / det;
+        const h = planes[hot];
+        if (hot !== i && hot !== j && hot !== k && h.nx * x + h.ny * y + h.nz * z > h.d + eps) continue;
         let inside = true;
-        for (let m = 0; m < n && inside; m++) {
+        // The point lies on i, j and k by construction, so those are not tested.
+        for (let m = 0; m < n; m++) {
+          if (m === i || m === j || m === k || m === hot) continue;
           const pl = planes[m];
-          if (pl.nx * p[0] + pl.ny * p[1] + pl.nz * p[2] > pl.d + eps) inside = false;
+          if (pl.nx * x + pl.ny * y + pl.nz * z > pl.d + eps) { inside = false; hot = m; break; }
         }
-        if (inside) out.push(p);
+        if (!inside) continue;
+        // A corner where more than three planes meet is found once per triple
+        // of them — ten times over for five — each copy off in the last bits.
+        // ConvexHull does not survive a cloud of near-coincident points: it
+        // drops faces, and a cell came out 3% light that way. One copy each.
+        let dup = false;
+        for (let q = 0; q < out.length && !dup; q++) {
+          const o = out[q];
+          dup = Math.abs(o[0] - x) <= eps && Math.abs(o[1] - y) <= eps && Math.abs(o[2] - z) <= eps;
+        }
+        if (!dup) out.push([x, y, z]);
       }
     }
   }
   return out;
-}
-
-/** Where three planes meet, by Cramer's rule. Null when they do not meet in a point. */
-function intersect3(a: Plane, b: Plane, c: Plane): [number, number, number] | null {
-  const det =
-    a.nx * (b.ny * c.nz - b.nz * c.ny) -
-    a.ny * (b.nx * c.nz - b.nz * c.nx) +
-    a.nz * (b.nx * c.ny - b.ny * c.nx);
-  if (Math.abs(det) < 1e-12) return null;
-  const x =
-    a.d * (b.ny * c.nz - b.nz * c.ny) -
-    a.ny * (b.d * c.nz - b.nz * c.d) +
-    a.nz * (b.d * c.ny - b.ny * c.d);
-  const y =
-    a.nx * (b.d * c.nz - b.nz * c.d) -
-    a.d * (b.nx * c.nz - b.nz * c.nx) +
-    a.nz * (b.nx * c.d - b.d * c.nx);
-  const z =
-    a.nx * (b.ny * c.d - b.d * c.ny) -
-    a.ny * (b.nx * c.d - b.d * c.nx) +
-    a.d * (b.nx * c.ny - b.ny * c.nx);
-  return [x / det, y / det, z / det];
 }

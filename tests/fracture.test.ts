@@ -122,6 +122,40 @@ describe('voronoiCells', () => {
     )!.volume, 9);
   });
 
+  it('does not lose a shard\'s volume where many planes meet in one corner', () => {
+    // A turned pot, whose decimated hull has corners shared by five or more
+    // planes. Each such corner used to reach ConvexHull ten times over, a few
+    // ulps apart, and the hull came back missing faces: one shard 3% light.
+    // Cells tile the hull, so together they must fill the hull of their corners.
+    const seg = 48, rings = 12;
+    const verts: number[] = [], faces: number[] = [];
+    for (let r = 0; r <= rings; r++) {
+      const t = r / rings, rad = 0.05 + 0.03 * Math.sin(t * Math.PI);
+      for (let s = 0; s < seg; s++) {
+        const a = (s / seg) * 2 * Math.PI;
+        verts.push(rad * Math.cos(a), t * 0.2, rad * Math.sin(a));
+      }
+    }
+    for (let r = 0; r < rings; r++) {
+      for (let s = 0; s < seg; s++) {
+        const a = r * seg + s, b = r * seg + (s + 1) % seg;
+        faces.push(a, a + seg, b, b, a + seg, b + seg);
+      }
+    }
+    const bottom = verts.length / 3; verts.push(0, 0, 0);
+    const top = verts.length / 3; verts.push(0, 0.2, 0);
+    for (let s = 0; s < seg; s++) {
+      faces.push(bottom, s, (s + 1) % seg, top, rings * seg + (s + 1) % seg, rings * seg + s);
+    }
+
+    const cells = fractureMesh(verts, faces, { pieces: 24, seed: 3 });
+    const corners: number[][] = [];
+    for (const c of cells) for (let i = 0; i < c.verts.length; i += 3) corners.push(c.verts.slice(i, i + 3));
+    const whole = convexHullOf(corners)!.volume;
+    const total = cells.reduce((s, c) => s + c.volume, 0);
+    expect(total / whole).toBeGreaterThan(0.999);
+  });
+
   it('refuses a degenerate body rather than making nonsense', () => {
     expect(voronoiCells([0, 0, 0, 1, 0, 0, 2, 0, 0], [0, 1, 2], [[0, 0, 0], [1, 0, 0]])).toEqual([]);
     expect(voronoiCells([], [], [[0, 0, 0]])).toEqual([]);
