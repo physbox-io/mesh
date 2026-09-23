@@ -266,6 +266,16 @@ const recycleWorker = () => {
   // A fresh worker is a fresh WASM realm, so the heap starts over too.
   lastHeapBytes = 0;
 };
+/*
+ * Told about every physics frame. A frame moves bodies without touching the
+ * store (the data mirror is written in place, above), so a viewport that only
+ * draws on demand would otherwise miss one that arrives while the simulation
+ * is stopped — a joint slider's SET_QPOS, say. See RenderOnChange in App.
+ */
+let physicsFrameListener: (() => void) | null = null;
+export const setPhysicsFrameListener = (listener: (() => void) | null) => {
+  physicsFrameListener = listener;
+};
 export const getPhysicsWorkerClient = (): PhysicsWorkerClient => {
   if (!physicsWorkerClientSingleton) {
     const client = new PhysicsWorkerClient();
@@ -283,6 +293,7 @@ export const getPhysicsWorkerClient = (): PhysicsWorkerClient => {
           data.geom_xpos.set(snap.geom_xpos); data.geom_xmat.set(snap.geom_xmat);
         }
       }
+      physicsFrameListener?.();
     };
     client.onBreak = (event) => {
       // Append rather than replace: several welds can go in the same step, and

@@ -12,7 +12,7 @@ import ColoringSection from './components/ColoringSection';
 import { useMuJoCoInit } from './hooks/useMuJoCo';
 import { useMCPBridge } from './hooks/useMCPBridge';
 import { useCoarsePointer } from './hooks/useCoarsePointer';
-import { useStore, getPhysicsWorkerClient, cloneSceneGraph } from './store/useStore';
+import { useStore, getPhysicsWorkerClient, setPhysicsFrameListener, cloneSceneGraph } from './store/useStore';
 import { useDentStore } from './store/dentStore';
 import { applyShatterPieces } from './store/useStore';
 import type { SceneGraph, SceneNode, SceneGeom, SceneJoint, CsgOp } from './types/scene';
@@ -331,6 +331,41 @@ const PhysicsLoop = ({ isPlaying }: { model: unknown, data: unknown, mujoco: unk
  * at 94% at the part and running to the horizon, which read as no fog at all.
  */
 const GRID_FADE_RATIO = 4;
+
+/**
+ * Asks for a frame whenever the picture may have changed, so a paused scene
+ * can stop drawing.
+ *
+ * The Canvas renders on demand while the simulation is stopped (see
+ * `frameloop` below). Before that it drew every frame forever: shadow map,
+ * scene, ambient occlusion and the axis legend, sixty-plus times a second over
+ * a scene where nothing was moving. On demand, something has to say when a
+ * frame is needed, and nearly everything that changes the picture passes
+ * through one of four places: the scene store, the dent store, a physics
+ * frame, or a pointer or key event on the page. The tools that write straight
+ * into three objects mid-drag (sculpt, gizmo, measure) are all driven by
+ * pointer events, so listening for those covers them without each one having
+ * to remember.
+ * OrbitControls asks for its own frames, damping included.
+ */
+const RenderOnChange = () => {
+  const invalidate = useThree((state) => state.invalidate);
+  useEffect(() => {
+    const ask = () => invalidate();
+    const unsubscribe = useStore.subscribe(ask);
+    const unsubscribeDents = useDentStore.subscribe(ask);
+    setPhysicsFrameListener(ask);
+    const events = ['pointermove', 'pointerdown', 'pointerup', 'wheel', 'keydown', 'keyup'] as const;
+    for (const e of events) window.addEventListener(e, ask, { passive: true });
+    return () => {
+      unsubscribe();
+      unsubscribeDents();
+      setPhysicsFrameListener(null);
+      for (const e of events) window.removeEventListener(e, ask);
+    };
+  }, [invalidate]);
+  return null;
+};
 
 /** What the grid mesh is called in the scene, so this can find it again. */
 const GRID_NAME = 'ground-grid';
@@ -3387,10 +3422,23 @@ function App() {
           
           <Canvas
             camera={CAMERA_CONFIG}
-            shadows="soft"
+            // Every frame while the simulation runs, and only when asked while
+            // it is stopped — see RenderOnChange.
+            frameloop={isPlaying ? 'always' : 'demand'}
+            // Plain PCF: 'soft' asks for PCFSoftShadowMap, which three r184 has
+            // deprecated and quietly swaps for PCF anyway, with a warning.
+            shadows="percentage"
+            // Capped at 1.5: on a 2x display every pass below (shadow, scene,
+            // ambient occlusion) ran at four times the pixels of a 1x one.
+            dpr={[1, 1.5]}
             onPointerMissed={handlePointerMissed}
             style={paintMode ? { cursor: 'crosshair' } : undefined}
-            gl={{ preserveDrawingBuffer: true, logarithmicDepthBuffer: true }}
+            // antialias off: the scene is drawn into the composer's own target,
+            // which is not multisampled, so the canvas's MSAA only ever smoothed
+            // the one full-screen quad the composer copies out. No
+            // preserveDrawingBuffer either: its one reader, the MCP screenshot,
+            // draws a frame immediately before reading the canvas.
+            gl={{ antialias: false, logarithmicDepthBuffer: true }}
             onCreated={(state) => {
               physicsGlobals._physics_gl = state.gl;
               // The scene and camera as well as the renderer, so a screenshot
@@ -3414,6 +3462,7 @@ function App() {
             }}
           >
             <SceneCapture sceneRef={threeSceneRef} />
+            <RenderOnChange />
             <DropHandler addComponent={addComponent} onImportFile={handleDroppedImportFile} onImportImageFile={handleDroppedImageFile} />
             <color attach="background" args={[darkMode ? '#0b0f19' : '#f8fafc']} />
             {/* background={false}: this only feeds reflections/specular highlights
@@ -3577,12 +3626,14 @@ function App() {
                 physicsGlobals._physics_composer = instance;
               }}
               multisampling={0}
-              enableNormalPass
             >
-              {/* enableNormalPass is required here: without it N8AO reconstructs
-                  normals from depth alone, which falls apart on curved/concave
-                  geometry (a sculpted bust, say) and shows up as a translucent
-                  halo instead of contact shadow. */}
+              {/* No enableNormalPass. It drew the whole scene a second time
+                  every frame, and at full resolution N8AO never reads it: the
+                  shader samples `sceneNormal` only under HALFRES, and binds it
+                  to null otherwise (n8ao/dist/N8AO.js, the sceneNormal uniform),
+                  reconstructing normals from depth instead. A translucent halo
+                  on a curved body is a mesh drawn inside out, not missing
+                  normals — see "face winding" in CLAUDE.md. */}
               <N8AO
                 aoRadius={0.35}
                 intensity={0.8}
