@@ -175,6 +175,9 @@ setScadCompileListener((delta) => {
   else s.decrementScadCompile();
 });
 
+/** Marks a clean point whose undo step has not landed yet. See markClean. */
+const PENDING_CLEAN = Symbol('pending');
+
 /** Presses Ctrl+Z (or Ctrl+Shift+Z) for the toolbar's undo and redo buttons. */
 function pressHistoryKey(redoing: boolean) {
   window.dispatchEvent(new KeyboardEvent('keydown', { key: 'z', ctrlKey: true, shiftKey: redoing, bubbles: true, cancelable: true }));
@@ -1509,36 +1512,77 @@ function App() {
   }, [activePreset]);
 
   // Load a preset and replace the note card with the preset's built-in card (if any)
+  /*
+   * What the scene looked like when it was last loaded, saved or imported, so
+   * picking another preset can ask before throwing work away. Undo brings the
+   * geometry back after a load, but not the note cards or the copilot chat,
+   * which live here rather than in the store's history.
+   *
+   * An edit is read off the undo stack — a new top entry, or one still being
+   * gathered — rather than off the scene object, which also changes when a
+   * boolean compiles or colliders land without anyone touching anything.
+   */
+  const cleanRef = useRef<{ top: unknown; notes: unknown; chat: unknown } | null>(null);
+  const stopWatchingClean = useRef<(() => void) | null>(null);
+  const markClean = useCallback((notes: unknown, chat: unknown) => {
+    stopWatchingClean.current?.();
+    stopWatchingClean.current = null;
+    // A load's own undo step lands a tick or a build later, so the top of the
+    // stack is only read once nothing is still being gathered; until then the
+    // scene counts as the one just loaded.
+    const clean = { top: PENDING_CLEAN as unknown, notes, chat };
+    cleanRef.current = clean;
+    const settle = (state: { tempUndoState: unknown; undoStack: unknown[] }) => {
+      if (state.tempUndoState !== null) return false;
+      clean.top = state.undoStack.at(-1) ?? null;
+      return true;
+    };
+    if (settle(useStore.getState())) return;
+    const unsubscribe = useStore.subscribe((state) => {
+      if (!settle(state)) return;
+      unsubscribe();
+      stopWatchingClean.current = null;
+    });
+    stopWatchingClean.current = unsubscribe;
+  }, []);
+  const hasUnsavedWork = (): boolean => {
+    const clean = cleanRef.current;
+    const { undoStack: undoNow, tempUndoState } = useStore.getState();
+    if (!clean) return undoNow.length > 0 || copilotMessages.length > 0;
+    if (noteCards !== clean.notes || copilotMessages !== clean.chat) return true;
+    if (clean.top === PENDING_CLEAN) return false;
+    return (undoNow.at(-1) ?? null) !== clean.top || tempUndoState !== null;
+  };
+
   const loadPresetWithCard = useCallback((name: string) => {
     loadPreset(name);
     const builtinKey = name.startsWith('user:') ? null : name;
     const presetCard = builtinKey ? makePresetNoteCard(builtinKey) : null;
-    setNoteCards(presetCard ? [presetCard] : []);
-    setCopilotMessages([]);
+    const notes = presetCard ? [presetCard] : [];
+    const chat: CopilotMessage[] = [];
+    setNoteCards(notes);
+    setCopilotMessages(chat);
     setEditingCardId(null);
-  }, [loadPreset]);
+    markClean(notes, chat);
+  }, [loadPreset, markClean]);
 
   // Also load note cards from user presets (stored alongside the scene)
   const loadUserPresetWithCard = useCallback((name: string) => {
     loadPreset(name);
+    let notes: NoteCard[] = [];
+    let chat: CopilotMessage[] = [];
     try {
       const saved = readUserPreset(name);
-      if (saved && Array.isArray(saved.noteCards)) {
-        setNoteCards(saved.noteCards);
-      } else {
-        setNoteCards([]);
-      }
-      if (saved && Array.isArray(saved.copilotMessages)) {
-        setCopilotMessages(saved.copilotMessages);
-      } else {
-        setCopilotMessages([]);
-      }
+      if (saved && Array.isArray(saved.noteCards)) notes = saved.noteCards;
+      if (saved && Array.isArray(saved.copilotMessages)) chat = saved.copilotMessages as CopilotMessage[];
     } catch {
-      setNoteCards([]);
-      setCopilotMessages([]);
+      // Unreadable: it loads with no notes or chat, as before.
     }
+    setNoteCards(notes);
+    setCopilotMessages(chat);
     setEditingCardId(null);
-  }, [loadPreset]);
+    markClean(notes, chat);
+  }, [loadPreset, markClean]);
 
   const saveUserPresetByName = useCallback((name: string) => {
     const trimmed = name.trim();
@@ -1557,7 +1601,10 @@ function App() {
        */
       void savePreset(trimmed, preset).then((result) => {
         announcePresetSave(trimmed, preset, result);
-        if (result.ok) useStore.getState().setActivePreset(`user:${trimmed}`);
+        if (result.ok) {
+          useStore.getState().setActivePreset(`user:${trimmed}`);
+          markClean(noteCards, copilotMessages);
+        }
       });
       // A deliberate save is also a named revision of the cloud document, which
       // the pruner never discards — unlike the automatic checkpoints.
@@ -1565,7 +1612,7 @@ function App() {
     } catch (e) {
       console.error('Failed to save user preset', e);
     }
-  }, [sceneGraph, model, data, mujoco, noteCards, copilotMessages]);
+  }, [sceneGraph, model, data, mujoco, noteCards, copilotMessages, markClean]);
 
   /*
    * Cloud auto-save.
@@ -2071,10 +2118,13 @@ function App() {
     s.setLatticeNodeId(null);
     s.setActivePreset(undefined);
     updateScene(parsed as SceneGraph);
-    setNoteCards(Array.isArray(parsed.noteCards) ? parsed.noteCards as NoteCard[] : []);
-    setCopilotMessages(Array.isArray(parsed.copilotMessages) ? parsed.copilotMessages as CopilotMessage[] : []);
+    const notes = Array.isArray(parsed.noteCards) ? parsed.noteCards as NoteCard[] : [];
+    const chat = Array.isArray(parsed.copilotMessages) ? parsed.copilotMessages as CopilotMessage[] : [];
+    setNoteCards(notes);
+    setCopilotMessages(chat);
     setEditingCardId(null);
-  }, [togglePlay, updateScene]);
+    markClean(notes, chat);
+  }, [togglePlay, updateScene, markClean]);
 
   const importJson = useCallback(() => {
     const input = document.createElement('input');
@@ -2661,8 +2711,9 @@ function App() {
                 // board from the stock already on the bench. It lives in this
                 // list because this is where someone looks for "start me off
                 // with something", which is what it is.
-                if (v.startsWith('generator:')) openPatternGenerator(v.slice('generator:'.length));
-                else if (v.startsWith('user:')) loadUserPresetWithCard(v);
+                if (v.startsWith('generator:')) { openPatternGenerator(v.slice('generator:'.length)); return; }
+                if (hasUnsavedWork() && !confirm('Replace the current scene? Its unsaved changes, note cards and copilot chat will be lost.')) return;
+                if (v.startsWith('user:')) loadUserPresetWithCard(v);
                 else loadPresetWithCard(v);
               }}
               className="bg-transparent text-slate-700 dark:text-slate-100 text-xs rounded-md block px-2 py-1 outline-none font-medium cursor-pointer border-none max-lg:flex-1 max-lg:min-w-0"
