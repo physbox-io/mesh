@@ -3207,6 +3207,12 @@ function App() {
             </div>
             <div className="flex flex-col mt-1">
               {sceneGraph.nodes.map(node => renderHierarchyNode(node, 0))}
+              {/* A blank scene said nothing at all about where to start. */}
+              {sceneGraph.nodes.length === 0 && (
+                <p className="px-3 py-2 text-[11px] leading-relaxed text-slate-400 dark:text-slate-500">
+                  Nothing here yet. Drag a part in from Components below, pick a preset at the top, or ask the Copilot to build one.
+                </p>
+              )}
             </div>
           </div>
 
