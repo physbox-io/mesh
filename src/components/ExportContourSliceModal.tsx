@@ -3,7 +3,8 @@ import {
   X, Download, AlertCircle, Layers, Mountain, Cpu, RefreshCw, Info, ChevronRight,
 } from 'lucide-react';
 import type { SceneGraph } from '../types/scene';
-import { exportContourSliceSvg, type ContourSliceOptions } from '../utils/contourSliceExporter';
+import { type ContourSliceOptions, type ContourSliceResult } from '../utils/contourSliceExporter';
+import { useExportJob } from '../utils/exportWorkerClient';
 import { generateContourSliceGcode, DEFAULT_GCODE_OPTIONS } from '../utils/gcodeExporter';
 import { runSettings } from '../utils/runSettings';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
@@ -272,13 +273,12 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
   }), [materialThicknessMm, layerOverride, slicePosition, kerfMm, pinCount, pinDiameterMm,
       sheetWidthMm, sheetHeightMm, customScalePct, autoScale, maxSheets, annotations]);
   const sliceFields = useSettled(liveSliceFields, 250);
-  const slicePending = sliceFields !== liveSliceFields;
-
-  const exportResult = useMemo(() => {
-    if (!isOpen) return null;
+  // Slicing a big model takes long enough to freeze the tab, so it runs on the
+  // export worker; the drawing on screen stays up, dimmed, until the new one lands.
+  const sliceJob = useExportJob(isOpen, (client) => {
     const f = sliceFields;
     const override = parseInt(f.layerOverride, 10);
-    return exportContourSliceSvg(scene, {
+    return client.run('contour', scene, {
       materialThickness: f.materialThicknessMm / 1000,
       sliceCount: Number.isFinite(override) && override > 0 ? override : null,
       slicePosition: f.slicePosition,
@@ -294,7 +294,11 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
       includeLabels: f.annotations === 'all',
       includeSheetOutline: f.annotations !== 'none',
     });
-  }, [isOpen, scene, sliceFields]);
+  }, [scene, sliceFields]);
+  const exportResult: ContourSliceResult | null = sliceJob.failure
+    ? { success: false, error: sliceJob.failure }
+    : sliceJob.result;
+  const slicePending = sliceFields !== liveSliceFields || sliceJob.busy;
 
   // Compute G-Code output result
   const liveGcodeFields = useMemo(() => ({

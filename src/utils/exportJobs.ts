@@ -26,19 +26,31 @@ import {
   type SolidMachiningResult,
 } from './solidMachiningExporter';
 import {
+  exportLaserCutSvg,
+  type LaserCutOptions,
+  type LaserCutResult,
+} from './laserCutExporter';
+import {
+  exportContourSliceSvg,
+  type ContourSliceOptions,
+  type ContourSliceResult,
+} from './contourSliceExporter';
+import {
   generateCastPattern,
   type CastOptions,
   type CastResult,
 } from './castPatternExporter';
 
 /** Which export a job runs. Add a case here and in `runExportJob`. */
-export type ExportJobKind = 'relief' | 'solid' | 'cast';
+export type ExportJobKind = 'relief' | 'solid' | 'cast' | 'laser' | 'contour';
 
 /** The options and result each job takes and returns. */
 export interface ExportJobMap {
   relief: { options: ReliefCarveOptions; result: ReliefCarveResult };
   solid: { options: SolidMachiningOptions; result: SolidMachiningResult };
   cast: { options: CastOptions; result: CastResult };
+  laser: { options: LaserCutOptions; result: LaserCutResult };
+  contour: { options: ContourSliceOptions; result: ContourSliceResult };
 }
 
 export type ExportJobOptions<K extends ExportJobKind> = Partial<ExportJobMap[K]['options']>;
@@ -57,6 +69,10 @@ export function runExportJob<K extends ExportJobKind>(
       return generateSolidMachining(scene, options as ExportJobOptions<'solid'>) as ExportJobResult<K>;
     case 'cast':
       return generateCastPattern(scene, options as ExportJobOptions<'cast'>) as ExportJobResult<K>;
+    case 'laser':
+      return exportLaserCutSvg(scene, options as ExportJobOptions<'laser'>) as ExportJobResult<K>;
+    case 'contour':
+      return exportContourSliceSvg(scene, options as ExportJobOptions<'contour'>) as ExportJobResult<K>;
     default: {
       // Exhaustive: a new kind that forgets its case is a compile error here.
       const never: never = kind;

@@ -3,7 +3,8 @@ import {
   X, Download, AlertCircle, Layers, Scissors, Cpu, RefreshCw, Info, ChevronRight, ExternalLink,
 } from 'lucide-react';
 import type { SceneGraph } from '../types/scene';
-import { exportLaserCutSvg, derivedFingerWidthMm, type LaserCutOptions, type StockItem } from '../utils/laserCutExporter';
+import { derivedFingerWidthMm, type LaserCutOptions, type LaserCutResult, type StockItem } from '../utils/laserCutExporter';
+import { useExportJob } from '../utils/exportWorkerClient';
 import { buildEtchHandoffUrl } from '../utils/etchHandoff';
 import { generateLaserCutGcode, DEFAULT_GCODE_OPTIONS } from '../utils/gcodeExporter';
 import { runSettings } from '../utils/runSettings';
@@ -319,11 +320,9 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
       bitDiameterMm, tabOverhangMm, jointClearanceMm, sheetWidthMm, sheetHeightMm, extraStock,
       allowThinnerStock, splitOversized, customScalePct, autoScale, maxSheets, annotations]);
   const layoutFields = useSettled(liveLayoutFields, 250);
-  const layoutPending = layoutFields !== liveLayoutFields;
-
-  // Compute laser/cnc 2D panel export result
-  const exportResult = useMemo(() => {
-    if (!isOpen) return null;
+  // Nesting a big model takes long enough to freeze the tab, so it runs on the
+  // export worker; the drawing on screen stays up, dimmed, until the new one lands.
+  const layoutJob = useExportJob(isOpen, (client) => {
     const f = layoutFields;
     const options: Partial<LaserCutOptions> = {
       jointMode: f.jointMode,
@@ -354,8 +353,12 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
       includeLabels: f.annotations === 'all',
       includeSheetOutline: f.annotations !== 'none',
     };
-    return exportLaserCutSvg(scene, options);
-  }, [isOpen, scene, layoutFields]);
+    return client.run('laser', scene, options);
+  }, [scene, layoutFields]);
+  const exportResult: LaserCutResult | null = layoutJob.failure
+    ? { success: false, error: layoutJob.failure }
+    : layoutJob.result;
+  const layoutPending = layoutFields !== liveLayoutFields || layoutJob.busy;
 
   const liveGcodeFields = useMemo(() => ({
     machineMode, cutFeedrate, spindleRpm, laserPower, laserMaxPower, laserPasses,
