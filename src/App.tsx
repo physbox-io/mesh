@@ -1279,13 +1279,6 @@ function App() {
 
 
 
-  // Pre-load the OpenSCAD compiler in the background after app initialization
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      loadCompiler().catch(err => console.warn('Failed to pre-load OpenSCAD compiler in background:', err));
-    }, 2000);
-    return () => clearTimeout(timer);
-  }, []);
 
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -1353,6 +1346,29 @@ function App() {
     undo: s.undo, redo: s.redo, undoStack: s.undoStack, redoStack: s.redoStack,
     makeDentable: s.makeDentable,
   })));
+
+  /*
+   * Pre-load the OpenSCAD compiler in the background, so the first boolean is
+   * quick — but only once physics is up and the page is idle.
+   *
+   * It is 11 MB of wasm and 8 MB of fonts. On a fixed two-second timer it went
+   * out while MuJoCo's own 9 MB could still be downloading on a slow link, and
+   * the scene the user came to see waited behind a compiler it may never need.
+   * A scene with booleans in it does not wait for this either way: compiling
+   * starts the pool itself.
+   */
+  useEffect(() => {
+    if (!mujoco) return;
+    const preload = () => {
+      loadCompiler().catch(err => console.warn('Failed to pre-load OpenSCAD compiler in background:', err));
+    };
+    if (typeof window.requestIdleCallback === 'function') {
+      const handle = window.requestIdleCallback(preload, { timeout: 10000 });
+      return () => window.cancelIdleCallback(handle);
+    }
+    const timer = setTimeout(preload, 3000);
+    return () => clearTimeout(timer);
+  }, [mujoco]);
 
   // Exactly what the solver was handed, so the picture and the physics cannot
   // disagree about which bodies exist.
