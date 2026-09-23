@@ -2211,9 +2211,12 @@ export function LatticeSurface({
         return;
       }
 
-      if ((event.metaKey || event.ctrlKey) && key === 'z') {
-        const stack = event.shiftKey ? redoStack.current : undoStack.current;
-        const other = event.shiftKey ? undoStack.current : redoStack.current;
+      // Ctrl+Y is redo too, as the app's own handler has it: left to fall
+      // through, it redid a document step instead of this tool's.
+      if ((event.metaKey || event.ctrlKey) && (key === 'z' || key === 'y')) {
+        const redo = event.shiftKey || key === 'y';
+        const stack = redo ? redoStack.current : undoStack.current;
+        const other = redo ? undoStack.current : redoStack.current;
         const snapshot = stack.pop();
         if (!snapshot) return;
         event.preventDefault();
