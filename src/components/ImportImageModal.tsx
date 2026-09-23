@@ -14,6 +14,7 @@ import {
 import { drawHeightmapPreview } from '../utils/heightmapPreview';
 import { useSettled } from '../hooks/useSettled';
 import type { SceneGeom, SceneNode } from '../types/scene';
+import { useEscapeToClose } from '../hooks/useEscapeToClose';
 
 interface ImportImageModalProps {
   isOpen: boolean;
@@ -81,6 +82,7 @@ export const ImportImageModal: React.FC<ImportImageModalProps> = ({
   onImportNode,
   initialFile,
 }) => {
+  useEscapeToClose(isOpen, onClose);
   const [image, setImage] = useState<LoadedImage | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);

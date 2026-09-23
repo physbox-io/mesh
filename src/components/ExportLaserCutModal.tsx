@@ -22,6 +22,7 @@ import {
   recommendSpeeds,
 } from '../utils/feedsAndSpeeds';
 import { warpGcode, type ProbeGrid } from '../utils/meshLeveler';
+import { useEscapeToClose } from '../hooks/useEscapeToClose';
 
 interface ExportLaserCutModalProps {
   isOpen: boolean;
@@ -159,6 +160,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
   onClose,
   scene,
   }) => {
+  useEscapeToClose(isOpen, onClose);
   const [jointMode, setJointMode] = useState<'finger' | 'slot' | 'glue'>('finger');
   const [materialThicknessMm, setMaterialThicknessMm] = useState<number>(3.0);
   const [fingerWidthMm, setFingerWidthMm] = useState<number>(10.0);

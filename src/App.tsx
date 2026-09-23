@@ -92,6 +92,7 @@ import { revokeShare, isProRequired } from './utils/apiClient';
 import { cloudAutosave } from './utils/cloudDocuments';
 import { pushAppParameter } from './utils/cloudSync';
 import { sanitizeNoteUrl } from '@physbox-io/ui';
+import { useEscapeToClose } from './hooks/useEscapeToClose';
 
 type NoteCard = { id: string; markdown: string; minimized: boolean; x: number; y: number };
 // AICopilotPanel keeps its ChatMessage type to itself; this is the same type,
@@ -1021,6 +1022,7 @@ function App() {
   const toggleDarkMode = () => setDarkMode(prev => !prev);
 
   const [isDocsOpen, setIsDocsOpen] = useState(false);
+  useEscapeToClose(isDocsOpen, () => setIsDocsOpen(false));
   const [showAICopilot, setShowAICopilot] = useState(false);
   const [docsTab, setDocsTab] = useState<DocsTabId>('gravity');
   const openDocs = useCallback((tab: DocsTabId) => { setDocsTab(tab); setIsDocsOpen(true); }, []);

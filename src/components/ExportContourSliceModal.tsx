@@ -20,6 +20,7 @@ import {
   materialSpec,
   recommendSpeeds,
 } from '../utils/feedsAndSpeeds';
+import { useEscapeToClose } from '../hooks/useEscapeToClose';
 
 interface ExportContourSliceModalProps {
   isOpen: boolean;
@@ -157,6 +158,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
   onClose,
   scene,
   }) => {
+  useEscapeToClose(isOpen, onClose);
   const [materialThicknessMm, setMaterialThicknessMm] = useState(3.0);
   const [layerOverride, setLayerOverride] = useState('');
   const [slicePosition, setSlicePosition] = useState<ContourSliceOptions['slicePosition']>('middle');

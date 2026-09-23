@@ -13,6 +13,7 @@ import { inputClass, sectionClass, sectionTitleClass, Field, Segmented } from '.
 import { useSettled } from './carveTooling';
 import { useExportJob } from '../utils/exportWorkerClient';
 import { PatternView } from './PatternView';
+import { useEscapeToClose } from '../hooks/useEscapeToClose';
 
 interface Props {
   isOpen: boolean;
@@ -59,6 +60,7 @@ const flaskTempC = (pourC: number) => Math.round(Math.min(550, Math.max(200, pou
  */
 
 export const ExportCastModal: React.FC<Props> = ({ isOpen, onClose, scene }) => {
+  useEscapeToClose(isOpen, onClose);
   const [options, setOptions] = useState<CastOptions>(DEFAULT_CAST_OPTIONS);
   const set = <K extends keyof CastOptions>(key: K, value: CastOptions[K] | undefined) => {
     if (value === undefined) return;

@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { X, Upload, Sliders, Box, Layers, Check, AlertCircle, Code } from 'lucide-react';
 import { parseSTL, type ParsedSTLResult } from '../utils/stlParser';
 import type { SceneGeom, SceneJoint, SceneNode } from '../types/scene';
+import { useEscapeToClose } from '../hooks/useEscapeToClose';
 
 interface ImportStlModalProps {
   isOpen: boolean;
@@ -17,6 +18,7 @@ export const ImportStlModal: React.FC<ImportStlModalProps> = ({
   onImportNode,
   initialFile,
 }) => {
+  useEscapeToClose(isOpen, onClose);
   const [fileName, setFileName] = useState<string>('');
   const [scadCode, setScadCode] = useState<string | null>(null);
   const [parsed, setParsed] = useState<ParsedSTLResult | null>(null);

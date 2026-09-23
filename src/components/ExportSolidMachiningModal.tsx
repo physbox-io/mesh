@@ -22,6 +22,7 @@ import {
   Field, Segmented, FinishingPassFields, RoughingPassFields, BedLevellingFields, PreviewPlaceholder,
 } from './CarveFields';
 import { toolingOnly, useBedProbe, useCarveTooling, useSettled, type SetTooling } from './carveTooling';
+import { useEscapeToClose } from '../hooks/useEscapeToClose';
 
 interface Props {
   isOpen: boolean;
@@ -58,6 +59,7 @@ function downloadText(text: string, filename: string) {
  * are two programs to run instead of one.
  */
 export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, scene }) => {
+  useEscapeToClose(isOpen, onClose);
   const setMachineConfigOpen = useStore((s) => s.setMachineConfigOpen);
   const [side, setSide] = useState<0 | 1>(0);
 

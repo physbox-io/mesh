@@ -24,6 +24,7 @@ import { NumberInput } from '@physbox-io/ui';
 import { CastingGuide } from './CastingGuide';
 import { HintAnchor } from './ExportFields';
 import { useSettled } from '../hooks/useSettled';
+import { useEscapeToClose } from '../hooks/useEscapeToClose';
 
 interface ExportMoldModalProps {
   isOpen: boolean;
@@ -118,6 +119,7 @@ function buffersToGeometry(buf: MoldHalfBuffers): THREE.BufferGeometry {
 const EMPTY_SUMMARY: MoldSummary = moldSummary(emptyMoldResult());
 
 export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClose, scene }) => {
+  useEscapeToClose(isOpen, onClose);
   const [options, setOptions] = useState<MoldOptions>(DEFAULT_MOLD_OPTIONS);
   const set = <K extends keyof MoldOptions>(key: K, value: MoldOptions[K] | undefined) => {
     if (value === undefined) return;

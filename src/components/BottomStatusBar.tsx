@@ -13,6 +13,7 @@ import { webSerialManager, type MachineState } from '../utils/webSerialManager';
 import { MATERIALS, type MaterialId } from '../utils/feedsAndSpeeds';
 import { formatDuration } from '../utils/timeEstimate';
 import type { LatticeTool } from '../utils/latticeMesh';
+import { useEscapeToClose } from '../hooks/useEscapeToClose';
 
 /**
  * What the app is in the middle of, said in one phrase.
@@ -192,6 +193,7 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
   });
 
   const [modeMenuOpen, setModeMenuOpen] = useState(false);
+  useEscapeToClose(modeMenuOpen, () => setModeMenuOpen(false));
   // Gestures need something to act on: the body being modelled, or the body
   // selected in the scene. Sculpting has its own brushes in its own palette.
   const canGesture = !!latticeNodeId || (!sculptNodeId && !!selectedNodeId);

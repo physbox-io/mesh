@@ -20,6 +20,7 @@ import {
 import { toolingOnly, useBedProbe, useCarveTooling } from './carveTooling';
 import { MATERIALS } from '../utils/feedsAndSpeeds';
 import { useExportJob } from '../utils/exportWorkerClient';
+import { useEscapeToClose } from '../hooks/useEscapeToClose';
 
 interface Props {
   isOpen: boolean;
@@ -28,6 +29,7 @@ interface Props {
 }
 
 export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene }) => {
+  useEscapeToClose(isOpen, onClose);
   const setMachineConfigOpen = useStore((s) => s.setMachineConfigOpen);
 
   /*

@@ -9,6 +9,7 @@ import { JobOverrides } from './MachineJobControls';
 import { describeMotionProfile } from '../utils/motionProfile';
 import { webSerialUnavailableReason } from '../utils/machineTransport';
 import { TeknoBoxPicker } from './TeknoBoxPicker';
+import { useEscapeToClose } from '../hooks/useEscapeToClose';
 
 /** The three ways this app can reach a machine. */
 type MachineLinkKind = 'usb' | 'cloud';
@@ -47,6 +48,7 @@ export const MachineConfigModal: React.FC<{
    */
   machineTarget: MachineTarget;
 }> = ({ isOpen, onClose, onOpenDocs, machineTarget }) => {
+  useEscapeToClose(isOpen, onClose);
   const [machineState, setMachineState] = useState<MachineState>(webSerialManager.getState());
 
   /*

@@ -16,6 +16,7 @@ import {
 } from '../utils/surfacePatterns';
 import type { SceneGraph } from '../types/scene';
 import type { ReliefCarveOptions } from '../utils/reliefCarveExporter';
+import { useEscapeToClose } from '../hooks/useEscapeToClose';
 
 /**
  * The surface pattern generators, in the preset dropdown's Generators group.
@@ -49,6 +50,7 @@ const Field: React.FC<{ label: string; hint?: string; children: React.ReactNode 
 export const GeneratePatternModal: React.FC = () => {
   const patternId = useStore((s) => s.patternGeneratorId);
   const closePatternGenerator = useStore((s) => s.closePatternGenerator);
+  useEscapeToClose(!!patternId, closePatternGenerator);
   const loadGeneratedScene = useStore((s) => s.loadGeneratedScene);
   const stock = useStore((s) => s.stock);
   const setStock = useStore((s) => s.setStock);
