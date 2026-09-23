@@ -1681,23 +1681,6 @@ function App() {
     setPresetNameInput('');
   }, [presetNameInput, saveUserPresetByName]);
 
-  const exportJson = useCallback(() => {
-    try {
-      const syncedScene = getSyncedSceneGraph(sceneGraph, model, data, mujoco);
-      const dataStr = JSON.stringify({ ...syncedScene, noteCards, copilotMessages }, null, 2);
-      const blob = new Blob([dataStr], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'physics_physbox_scene.json';
-      a.click();
-      URL.revokeObjectURL(url);
-    } catch (e) {
-      console.error('Failed to export JSON', e);
-      alert('Failed to export JSON');
-    }
-  }, [sceneGraph, model, data, mujoco, noteCards, copilotMessages]);
-
   /*
    * Sharing the scene as a link.
    *
@@ -2042,6 +2025,23 @@ function App() {
 
     return baseName.toLowerCase().replace(/[^a-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '') || 'physics_scene';
   }, [noteCards, activePreset]);
+
+  const exportJson = useCallback(() => {
+    try {
+      const syncedScene = getSyncedSceneGraph(sceneGraph, model, data, mujoco);
+      const dataStr = JSON.stringify({ ...syncedScene, noteCards, copilotMessages }, null, 2);
+      const blob = new Blob([dataStr], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${exportBaseName()}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error('Failed to export JSON', e);
+      alert('Failed to export JSON');
+    }
+  }, [sceneGraph, model, data, mujoco, noteCards, copilotMessages, exportBaseName]);
 
   const downloadBlob = useCallback((blob: Blob, filename: string) => {
     const url = URL.createObjectURL(blob);

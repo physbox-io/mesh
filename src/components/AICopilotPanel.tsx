@@ -1323,6 +1323,15 @@ If modifying the 3D scene graph, include the updated "nodes" array in \`\`\`json
               placeholder={mode === 'generate' ? "Describe the physics scene you want to generate. e.g. A stack of 3 cubes falling on top of each other, or a double pendulum connected to a hinge..." : "Describe the modifications you want to apply. e.g. Add a sphere body with free joint at position [0, 0, 4], or increase joint damping..."}
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
+              // Ctrl/Cmd+Enter sends, as it does in most prompt boxes; a plain
+              // Enter stays a new line, since a scene description runs long.
+              onKeyDown={(e) => {
+                if (e.key !== 'Enter' || !(e.ctrlKey || e.metaKey) || loading) return;
+                e.preventDefault();
+                if (mode === 'generate') handleGenerate();
+                else handleMutate();
+              }}
+              title="Ctrl+Enter to send"
               className="w-full px-3 py-2 border border-slate-200 dark:border-slate-800 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 text-xs shadow-inner bg-white dark:bg-slate-955 text-slate-800 dark:text-slate-200 min-h-[75px] leading-normal placeholder-slate-400 dark:placeholder-slate-500"
             />
             <button
