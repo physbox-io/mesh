@@ -1399,7 +1399,13 @@ function App() {
       if ((e.target as HTMLElement)?.isContentEditable) return;
 
       if (e.key === 'Delete' || e.key === 'Backspace') {
-        const selId = useStore.getState().selectedNodeId;
+        // Not while a tool has hold of the body. Lattice swallows the key
+        // itself; sculpting, painting, measuring and a keyboard gesture did
+        // not, so a stray Backspace deleted the body being worked on and threw
+        // away its stroke history with it.
+        const s = useStore.getState();
+        if (s.sculptNodeId || s.latticeNodeId || s.paintMode || s.measureMode || s.gestureStatus) return;
+        const selId = s.selectedNodeId;
         if (selId) {
           useStore.getState().deleteNode(selId);
           useStore.getState().setSelectedNodeId(null);
