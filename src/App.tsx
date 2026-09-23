@@ -2712,11 +2712,13 @@ function App() {
                   onClick={() => {
                     const presetName = activePreset.replace('user:', '');
                     if (window.confirm(`Are you sure you want to delete the preset "${presetName}"?`)) {
-                      try {
-                        deleteUserPreset(presetName);
-                        loadPresetWithCard('empty');
-                      } catch (e) {
-                        console.error('Failed to delete preset', e);
+                      // The preset goes; the scene on screen stays. Loading the
+                      // empty scene here wiped the work, notes and chat as well,
+                      // which the question above never mentioned.
+                      if (deleteUserPreset(presetName)) {
+                        useStore.getState().setActivePreset(undefined);
+                      } else {
+                        alert(`Could not delete "${presetName}": this browser would not write the preset list.`);
                       }
                     }
                   }}
