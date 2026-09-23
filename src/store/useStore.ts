@@ -1435,6 +1435,8 @@ export interface PhysicsState {
   renameNode: (id: string, newName: string) => void;
   updateNodeJointsList: (id: string, joints: SceneJoint[]) => void;
   deleteNode: (id: string) => void;
+  /** Deletes several bodies as one undo step, and clears the selection they made up. */
+  deleteNodes: (ids: string[]) => void;
   addPusherPeg: (gearId: string) => void;
   deletePusherPeg: (gearId: string) => void;
   updatePusherPeg: (gearId: string, updates: { offset?: number, size?: [number, number] }) => void;
@@ -3878,22 +3880,31 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     }
   },
 
-  deleteNode: (id) => {
+  deleteNode: (id) => get().deleteNodes([id]),
+
+  // Shift-click builds a selection of several bodies, and Delete used to take
+  // only the primary one, leaving the rest highlighted and still listed in the
+  // Combine card.
+  deleteNodes: (ids) => {
+    const doomed = new Set(ids);
+    if (doomed.size === 0) return;
     get().prepareForDiscreteChange();
     const newScene = cloneSceneGraph(get().sceneGraph);
-    const traverseAndRemove = (nodes: SceneNode[]): boolean => {
-      if (!nodes) return false;
-      for (let i = 0; i < nodes.length; i++) {
-        if (nodes[i].id === id) {
+    let removed = false;
+    const traverseAndRemove = (nodes: SceneNode[]) => {
+      if (!nodes) return;
+      for (let i = nodes.length - 1; i >= 0; i--) {
+        if (doomed.has(nodes[i].id)) {
           nodes.splice(i, 1);
-          return true;
+          removed = true;
+        } else {
+          traverseAndRemove(nodes[i].children);
         }
-        if (traverseAndRemove(nodes[i].children)) return true;
       }
-      return false;
     };
-    if (traverseAndRemove(newScene.nodes)) {
-      set({ sceneGraph: newScene, selectedNodeId: null });
+    traverseAndRemove(newScene.nodes);
+    if (removed) {
+      set({ sceneGraph: newScene, selectedNodeId: null, extraSelectedIds: [] });
       get().recompile(newScene, null);
     }
   },

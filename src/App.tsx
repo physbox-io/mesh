@@ -1401,11 +1401,8 @@ function App() {
         // away its stroke history with it.
         const s = useStore.getState();
         if (s.sculptNodeId || s.latticeNodeId || s.paintMode || s.measureMode || s.gestureStatus) return;
-        const selId = s.selectedNodeId;
-        if (selId) {
-          useStore.getState().deleteNode(selId);
-          useStore.getState().setSelectedNodeId(null);
-        }
+        const ids = [...(s.selectedNodeId ? [s.selectedNodeId] : []), ...s.extraSelectedIds];
+        if (ids.length > 0) s.deleteNodes(ids);
         return;
       }
 
@@ -2775,10 +2772,7 @@ function App() {
 
             <button
               onClick={() => {
-                if (selectedNodeId) {
-                  deleteNode(selectedNodeId);
-                  setSelectedNodeId(null);
-                }
+                if (selectedNodeId) useStore.getState().deleteNodes([selectedNodeId, ...extraSelectedIds]);
               }}
               disabled={!selectedNodeId}
               className="flex items-center justify-center p-1 rounded-md hover:bg-red-50 dark:hover:bg-red-950/40 text-red-500 disabled:opacity-30 disabled:hover:bg-transparent transition-colors focus:outline-none cursor-pointer"
