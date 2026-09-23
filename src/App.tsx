@@ -175,6 +175,11 @@ setScadCompileListener((delta) => {
   else s.decrementScadCompile();
 });
 
+/** Presses Ctrl+Z (or Ctrl+Shift+Z) for the toolbar's undo and redo buttons. */
+function pressHistoryKey(redoing: boolean) {
+  window.dispatchEvent(new KeyboardEvent('keydown', { key: 'z', ctrlKey: true, shiftKey: redoing, bubbles: true, cancelable: true }));
+}
+
 // Floating note card overlay component
 function NoteCardOverlay({ card, isEditing, onToggleEdit, onToggleMinimize, onMarkdownChange, onClose, onMove }: {
   card: { id: string; markdown: string; minimized: boolean; x: number; y: number };
@@ -1329,7 +1334,7 @@ function App() {
     sculptNodeId, setSculptNodeId, setSculptBase,
     latticeNodeId, setLatticeNodeId,
     extraSelectedIds, combineBodies,
-    undo, redo, undoStack, redoStack,
+    undoStack, redoStack,
     makeDentable,
   } = useStore(useShallow((s) => ({
     model: s.model, data: s.data, mujoco: s.mujoco, recompileId: s.recompileId, activePreset: s.activePreset,
@@ -1352,7 +1357,7 @@ function App() {
     sculptNodeId: s.sculptNodeId, setSculptNodeId: s.setSculptNodeId, setSculptBase: s.setSculptBase,
     latticeNodeId: s.latticeNodeId, setLatticeNodeId: s.setLatticeNodeId,
     extraSelectedIds: s.extraSelectedIds, combineBodies: s.combineBodies,
-    undo: s.undo, redo: s.redo, undoStack: s.undoStack, redoStack: s.redoStack,
+    undoStack: s.undoStack, redoStack: s.redoStack,
     makeDentable: s.makeDentable,
   })));
 
@@ -2837,9 +2842,15 @@ function App() {
               <Upload className="w-3.5 h-3.5" />
             </button>
 
+            {/* The buttons press Ctrl+Z rather than calling the store, so they
+                do exactly what the keys do: while sculpt or lattice is open
+                that is the tool's own last step, falling through to the
+                document once the tool's history is spent. Calling undo()
+                directly stepped the document back from under the tool and
+                threw its history away. */}
             <button
-              onClick={undo}
-              disabled={undoStack.length === 0}
+              onClick={() => pressHistoryKey(false)}
+              disabled={undoStack.length === 0 && !sculptNodeId && !latticeNodeId}
               className="flex items-center justify-center p-1 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 disabled:opacity-30 disabled:hover:bg-transparent transition-colors focus:outline-none cursor-pointer"
               title="Undo"
             >
@@ -2847,8 +2858,8 @@ function App() {
             </button>
 
             <button
-              onClick={redo}
-              disabled={redoStack.length === 0}
+              onClick={() => pressHistoryKey(true)}
+              disabled={redoStack.length === 0 && !sculptNodeId && !latticeNodeId}
               className="flex items-center justify-center p-1 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 disabled:opacity-30 disabled:hover:bg-transparent transition-colors focus:outline-none cursor-pointer"
               title="Redo"
             >
