@@ -170,6 +170,10 @@ export function useVertexPaint({
     dirtyRef.current = false;
     if (!canvas) return;
     useStore.getState().setGeomPaint(nodeId, name, layerFromCanvas(canvas));
+    // One undo step per stroke, as the paint help promises. Left to the
+    // history's 800 ms debounce, strokes laid down quickly merged into one,
+    // and Ctrl+Z took several back at once.
+    useStore.getState().flushPendingUndo();
   }, [nodeId, name]);
 
   // A stroke can end anywhere — off the body, off the canvas, outside the

@@ -559,6 +559,9 @@ export const scaleMeshGeoms = (node: Pick<SceneNode, 'geoms'>, sx: number, sy: n
  * literally the same array. Only data that genuinely arrived from somewhere
  * else (an MCP payload, a loaded file) is walked element by element.
  */
+/** How many steps back Ctrl+Z can go. */
+const UNDO_LIMIT = 100;
+
 const sameValue = (a: unknown, b: unknown): boolean => {
   if (a === b) return true;
   if (a === null || b === null || typeof a !== 'object' || typeof b !== 'object') return false;
@@ -1875,7 +1878,10 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
 
       if (isDifferent) {
         const newUndoStack = [...undoStack, tempUndoState];
-        if (newUndoStack.length > 20) {
+        // A snapshot shares the mesh arrays with the scene it was taken from
+        // (see cloneGeom), so a step costs the scene's small fields, not its
+        // vertices. Twenty was a few minutes of work.
+        if (newUndoStack.length > UNDO_LIMIT) {
           newUndoStack.shift();
         }
         set({
