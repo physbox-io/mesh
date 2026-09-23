@@ -1277,7 +1277,7 @@ If modifying the 3D scene graph, include the updated "nodes" array in \`\`\`json
             </div>
           </div>
         </div>
-        <button onClick={onClose} className="p-1 text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-md transition-colors cursor-pointer"><X className="w-5 h-5" /></button>
+        <button aria-label="Close" title="Close" onClick={onClose} className="p-1 text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-md transition-colors cursor-pointer"><X className="w-5 h-5" /></button>
       </div>
 
       {/* Main Panel Content */}

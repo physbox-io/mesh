@@ -398,7 +398,7 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
               </p>
             </div>
           </div>
-          <button
+          <button aria-label="Close" title="Close"
             onClick={onClose}
             className="p-1 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded-lg transition-colors cursor-pointer"
           >

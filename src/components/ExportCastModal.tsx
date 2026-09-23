@@ -108,7 +108,7 @@ export const ExportCastModal: React.FC<Props> = ({ isOpen, onClose, scene }) => 
               </p>
             </div>
           </div>
-          <button
+          <button aria-label="Close" title="Close"
             onClick={onClose}
             className="flex-shrink-0 p-1.5 rounded-lg text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-200/50 dark:hover:bg-slate-700/50 transition-colors"
           >

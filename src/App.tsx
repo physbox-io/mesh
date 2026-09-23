@@ -2719,6 +2719,7 @@ function App() {
                 Bound to activePreset instead, re-picking Blank after adding a
                 body fires nothing at all and the scene is never cleared. */}
             <select
+              aria-label="Scene preset"
               value=""
               onChange={(e) => {
                 const v = e.target.value;
@@ -3032,7 +3033,7 @@ function App() {
           <div className="absolute top-4 right-6 w-64 max-lg:inset-x-2 max-lg:right-auto max-lg:top-1/2 max-lg:-translate-y-1/2 max-lg:w-auto max-lg:max-h-[80dvh] max-lg:overflow-y-auto glass-panel rounded-lg p-4 z-30 max-lg:z-50 shadow-lg border border-slate-200 dark:border-slate-800 bg-white/90 dark:bg-slate-900/90 text-slate-800 dark:text-slate-100">
             <h3 className="font-semibold text-sm mb-4 flex items-center justify-between text-slate-800 dark:text-slate-100">
               <span className="flex items-center gap-2"><Settings className="w-4 h-4 text-slate-500 dark:text-slate-400" /> Environment</span>
-              <button onClick={() => setSettingsOpen(false)}><X className="w-4 h-4 text-slate-400 dark:text-slate-500 hover:text-slate-600 dark:hover:text-slate-300 cursor-pointer" /></button>
+              <button aria-label="Close" title="Close" onClick={() => setSettingsOpen(false)}><X className="w-4 h-4 text-slate-400 dark:text-slate-500 hover:text-slate-600 dark:hover:text-slate-300 cursor-pointer" /></button>
             </h3>
             <div className="flex flex-col gap-4">
               <div className="flex flex-col gap-1">
@@ -7502,7 +7503,7 @@ api.applyForce([force, 0, 0]);
                 <Info className="w-5 h-5 text-blue-500" />
                 <h2 className="font-bold text-slate-800 text-base">PhysBox Reference Guide</h2>
               </div>
-              <button 
+              <button aria-label="Close" title="Close" 
                 onClick={() => setIsDocsOpen(false)}
                 className="p-1 rounded-lg hover:bg-slate-200 text-slate-400 hover:text-slate-600 transition-colors cursor-pointer"
               >

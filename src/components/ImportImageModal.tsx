@@ -251,7 +251,7 @@ export const ImportImageModal: React.FC<ImportImageModalProps> = ({
             <ImageIcon className="w-5 h-5 text-fuchsia-500" />
             <h3 className="font-bold text-slate-800 dark:text-slate-100 text-base">Import Image as 3D Relief</h3>
           </div>
-          <button
+          <button aria-label="Close" title="Close"
             onClick={onClose}
             className="p-1 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded-lg transition-colors cursor-pointer"
           >
