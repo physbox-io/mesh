@@ -50,7 +50,7 @@ import { snapToFloor, snapThreshold } from '../../utils/floorSnap';
 import { getStickyRotation } from '../../utils/geom';
 import { solveMate, solveAlignAboutAxis, type MateFeature, type MateSolution, type AlignSolution } from '../../utils/mateSnap';
 import { bodyFeatures, neighbourFeatures, transformFeatures, documentAxes, graphAxes } from '../../utils/mateFeatures';
-import { bodyPoseOf } from './bodyPose';
+import { bodyPoseOf, toParentFrame } from './bodyPose';
 import { setGizmoBusy } from './gizmoBusy';
 
 /** Turning while Shift is held lands on these, the way a protractor does. */
@@ -95,6 +95,24 @@ const HINT_COLOUR: Record<string, number> = {
  */
 const GATHER_MARGIN_BANDS = 8;
 const MAX_GATHER_M = 0.5;
+
+/**
+ * Whether MuJoCo moves this body — it or any ancestor carrying a joint. The
+ * same test SceneLayer uses to decide whether to rewrite a body's transform
+ * each frame, which is what makes a `group` preview stick or not.
+ *
+ * undefined when the id is not in the graph at all, so a caller can tell "no
+ * joints" from "no such body".
+ */
+function drivenByModel(nodes: SceneNode[], id: string, inherited = false): boolean | undefined {
+  for (const node of nodes) {
+    const jointed = inherited || (node.joints?.length ?? 0) > 0;
+    if (node.id === id) return jointed;
+    const found = drivenByModel(node.children ?? [], id, jointed);
+    if (found !== undefined) return found;
+  }
+  return undefined;
+}
 
 /**
  * How a drag is shown before it is committed.
@@ -692,8 +710,18 @@ export const TransformGizmo = () => {
     const groups = groupsFor(target.id);
     const box = drawnBox(groups);
     const freeJoint = target.joints?.find((j) => j.type === 'free')?.name;
-    const allStatic = groups.length > 0 && !!target.geoms?.every((g) => !g.dynamic);
-    const channel: Channel = freeJoint ? 'qpos' : allStatic ? 'group' : 'ghost';
+    /*
+     * Whether MuJoCo drives this body, which is the question `group` turns on:
+     * SceneLayer's useFrame early-returns for a body with no joints anywhere up
+     * its chain (`staticBody: !jointed`) and rewrites the transform every frame
+     * for one that has them. This used to ask whether any geom was a dynamic
+     * mesh instead — a different question with a different answer, and a hinged
+     * body made of primitives fell in the gap: it got `group`, and its preview
+     * was overwritten sixty times a second, so the handles moved and the body
+     * sat still.
+     */
+    const driven = drivenByModel(useStore.getState().sceneGraph?.nodes ?? [], target.id) ?? false;
+    const channel: Channel = freeJoint ? 'qpos' : driven || groups.length === 0 ? 'ghost' : 'group';
 
     const held = groups.map((object) => ({
       object,
@@ -1039,7 +1067,9 @@ export const TransformGizmo = () => {
       // A click that did not drag is a click, not a move — and a no-op
       // `updateNodePos` would still cost a rebuild and an undo entry.
       if (to.some((v, i) => Math.abs(v - state.originStart[i]) > 1e-6)) {
-        store.updateNodePos(state.nodeId, to);
+        // `pos` is parent-relative and a free joint's qpos is global, so the
+        // same point goes to the two of them in two different frames.
+        store.updateNodePos(state.nodeId, toParentFrame(state.nodeId, to));
         if (state.joint) {
           for (let axis = 0; axis < 3; axis++) getPhysicsWorkerClient().setQpos(state.joint, axis, to[axis]);
         }

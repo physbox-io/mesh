@@ -26,7 +26,7 @@ import { useStore, getPhysicsWorkerClient } from '../../store/useStore';
 import type { SceneNode } from '../../types/scene';
 import { scaleNodeTree } from '../../utils/scaleNode';
 import { pickCutSpot, type CutSpot } from '../../utils/csg';
-import { bodyPoseOf } from './bodyPose';
+import { bodyPoseOf, toParentFrame } from './bodyPose';
 import { solveScaleToFit, type MateFeature } from '../../utils/mateSnap';
 import { bodyFeatures, neighbourFeatures, documentAxes, graphAxes } from '../../utils/mateFeatures';
 import { snapToFloor, snapThreshold } from '../../utils/floorSnap';
@@ -450,7 +450,9 @@ export const ObjectGestureController = () => {
       const to = state.to;
       if (!keep || !to || !state.startPos) return;
       if (to.every((v, i) => Math.abs(v - state.startPos![i]) < 1e-6)) return;
-      useStore.getState().updateNodePos(nodeId, to);
+      // `pos` is relative to the parent body; `to` is where the pointer left
+      // it, in the world. See toParentFrame.
+      useStore.getState().updateNodePos(nodeId, toParentFrame(nodeId, to));
       // The scene graph now agrees with where the body is; put the live sim
       // there too, since updateNodePos alone would wait for a reset.
       if (state.joint) {

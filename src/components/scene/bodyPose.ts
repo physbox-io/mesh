@@ -14,6 +14,7 @@
 import * as THREE from 'three';
 import { useStore } from '../../store/useStore';
 import type { DataMirror, ModelMirror, MujocoShim } from '../../types/sceneLayer';
+import type { SceneNode } from '../../types/scene';
 
 export interface BodyPose {
   pos: THREE.Vector3;
@@ -58,4 +59,42 @@ export function bodyPoseOf(nodeId: string, fallbackPos: number[] = [0, 0, 0]): B
   } catch {
     return fallback;
   }
+}
+
+/** The body a node hangs from, or null when it sits at the top of the scene. */
+function parentBodyOf(nodes: SceneNode[], id: string, parent: SceneNode | null = null): SceneNode | null | undefined {
+  for (const node of nodes) {
+    if (node.id === id) return parent;
+    const found = parentBodyOf(node.children ?? [], id, node);
+    if (found !== undefined) return found;
+  }
+  return undefined;
+}
+
+/**
+ * A world point, expressed in the frame a body's `pos` is actually written in.
+ *
+ * MJCF nests bodies, so a child's `pos` is relative to its PARENT body — while
+ * everything that drags a body (the gizmo, the keyboard gestures) works in
+ * world space, because that is where the pointer is. Writing the one into the
+ * other sends a child of a rotated parent off along the parent's axes instead
+ * of the ones under the cursor, and drops it somewhere else entirely when the
+ * parent is also offset. The pendulum's lower arm is the case that shows it:
+ * its parent swings, so the further the arm has travelled the further the drag
+ * misses by.
+ *
+ * A top-level body hangs off worldbody, whose frame is the world's, so it
+ * passes straight through. So does anything whose parent has no live pose to
+ * ask — there is nothing better to say then, and it is what this did before.
+ */
+export function toParentFrame(nodeId: string, world: [number, number, number]): [number, number, number] {
+  const parent = parentBodyOf(useStore.getState().sceneGraph?.nodes ?? [], nodeId);
+  if (!parent) return world;
+  const pose = bodyPoseOf(parent.id, parent.pos);
+  if (!pose.live) return world;
+  // xmat is body-to-world, so its transpose takes the world into the body.
+  const local = new THREE.Vector3(world[0], world[1], world[2])
+    .sub(pose.pos)
+    .applyMatrix3(pose.rot.clone().transpose());
+  return [local.x, local.y, local.z];
 }
