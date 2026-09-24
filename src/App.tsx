@@ -20,7 +20,7 @@ import type { SceneGraph, SceneNode, SceneGeom, SceneJoint, CsgOp } from './type
 import type { ModelMirror, MujocoShim } from './types/sceneLayer';
 import type { WeakSpot } from './utils/printAnalysis';
 import { Play, Square, SlidersHorizontal, Settings, Box, Circle, X, RotateCcw, Trash2, Layers, CircleDot, Zap, Info, Triangle, Disc, Code, Menu, Shapes, Minimize2, Save, Download, Upload, Undo, Redo, FileText, ChevronDown, ChevronUp, PanelRight, Edit3, Printer, Scissors, Sparkles, Sun, Moon, Pyramid, Cone, Donut, ChartSpline, Paintbrush, Grid3x3, Image as ImageIcon, Share2, Copy, Check, Link2, Unlink, Hammer } from 'lucide-react';
-import { useRef, useMemo, useEffect, useCallback, useState, type RefObject, type ComponentProps, type ComponentRef } from 'react';
+import { useRef, useMemo, useEffect, useCallback, useState, type RefObject, type ComponentRef } from 'react';
 import AICopilotPanel from './components/AICopilotPanel';
 import { DocsModal } from './components/docs/DocsModal';
 import { DocsInfoButton } from './components/docs/DocsInfoButton';
@@ -38,7 +38,8 @@ import { CUSTOM_DENT, CUSTOM_SHATTER, DEFORM_MATERIALS, deformMaterial, dentFiel
 import { collidersAreStale, solidMeshGeoms } from './utils/convexDecomposition';
 import { useCsgAutoCompile } from './hooks/useCsgCompile';
 import { PRESETS } from './presets/presetScenes';
-import { makePresetNoteCard } from './utils/noteCards';
+import { makePresetNoteCard, type NoteCard } from './utils/noteCards';
+import { physicsGlobals, type CopilotMessage } from './physicsGlobals';
 import { ImportStlModal } from './components/ImportStlModal';
 import { ImportImageModal } from './components/ImportImageModal';
 import { GeneratePatternModal } from './components/GeneratePatternModal';
@@ -98,10 +99,6 @@ import { pushAppParameter } from './utils/cloudSync';
 import { sanitizeNoteUrl } from '@physbox-io/ui';
 import { useEscapeToClose } from './hooks/useEscapeToClose';
 
-type NoteCard = { id: string; markdown: string; minimized: boolean; x: number; y: number };
-// AICopilotPanel keeps its ChatMessage type to itself; this is the same type,
-// read back off its props so the two cannot drift.
-type CopilotMessage = NonNullable<ComponentProps<typeof AICopilotPanel>['messages']>[number];
 type StoreState = ReturnType<typeof useStore.getState>;
 type AddComponentType = Parameters<StoreState['addComponent']>[0];
 type PresetEntry = { name: string; emoji?: string };
@@ -114,31 +111,6 @@ type SyncMujoco = Pick<MujocoShim, 'mj_name2id'> & { mjtObj: Pick<MujocoShim['mj
 interface SyncData {
   xpos: ArrayLike<number>;
   xmat: ArrayLike<number>;
-}
-
-// Globals other modules (the MCP bridge, the note-card manager, tests) reach
-// through `window`. Typed here rather than declared globally so a differently
-// typed declaration elsewhere cannot conflict with this one.
-interface PhysicsGlobals {
-  DISABLE_USEFRAME?: boolean;
-  _physics_getNoteCards?: () => NoteCard[];
-  _physics_setNoteCards?: (cards: NoteCard[]) => void;
-  _physics_getCopilotMessages?: () => CopilotMessage[];
-  _physics_setCopilotMessages?: (msgs: CopilotMessage[]) => void;
-  _physics_store?: typeof useStore;
-  _physics_gl?: THREE.WebGLRenderer;
-  _physics_scene?: THREE.Scene;
-  _physics_camera?: THREE.Camera;
-  _physics_composer?: ComponentRef<typeof EffectComposer> | null;
-}
-const physicsGlobals = (typeof window !== 'undefined' ? window : {}) as unknown as PhysicsGlobals;
-
-declare global {
-  interface Window { useStore?: typeof useStore }
-}
-// Debug hook: the store is reachable from the browser console.
-if (typeof window !== 'undefined') {
-  window.useStore = useStore;
 }
 
 // Markdown for a note card. Headings, emphasis, code, links and bullets;
