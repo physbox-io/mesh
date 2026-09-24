@@ -234,13 +234,20 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
     : modelMode === 'lattice' ? ENTER_LATTICE
     : modelMode === 'sculpt' ? ENTER_SCULPT
     : null;
-  const choices: ModeChoice[] = [
-    NOTHING,
-    ...(enterChoice ? [enterChoice] : []),
-    ...(latticeNodeId ? LATTICE_TOOLS : []),
-    ...(canGesture ? GESTURES : []),
-    ...MEASURE,
-  ];
+  // While the simulation runs, only measuring. The keys for the rest are
+  // already dead then (the control scripts own the letters), but the menu
+  // still offered them, and a Move or a Scale started under a running sim
+  // fought the solver for the body.
+  const playing = useStore((s) => s.isPlaying);
+  const choices: ModeChoice[] = playing
+    ? [NOTHING, ...MEASURE]
+    : [
+        NOTHING,
+        ...(enterChoice ? [enterChoice] : []),
+        ...(latticeNodeId ? LATTICE_TOOLS : []),
+        ...(canGesture ? GESTURES : []),
+        ...MEASURE,
+      ];
 
   const choose = (choice: ModeChoice) => {
     setModeMenuOpen(false);

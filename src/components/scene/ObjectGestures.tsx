@@ -638,7 +638,7 @@ export const ObjectGestureController = () => {
       if (event.metaKey || event.ctrlKey || event.altKey) return;
       // While the simulation runs, letters belong to the control scripts:
       // the docs suggest WASD and arrows, and S here scaled the selection
-      // while it was meant to steer a cart. The mode menu still starts one.
+      // while it was meant to steer a cart.
       if (useStore.getState().isPlaying) return;
       if (key === 'g' || key === 'm') { begin('move'); return; }
       if (key !== 's' && key !== 'i') return;
@@ -653,6 +653,9 @@ export const ObjectGestureController = () => {
       // The same event carries the measure tool's modes (see MeasureTool), so
       // the kinds this controller owns are named rather than assumed.
       const kind = (event as CustomEvent<{ kind: string }>).detail?.kind;
+      // Not under a running simulation, whoever asks: the solver moves the
+      // body every step, and a gesture moving it too is the two fighting.
+      if (useStore.getState().isPlaying) return;
       if (kind === 'move' || kind === 'scale' || kind === 'inset') begin(kind);
     };
     window.addEventListener('physbox:gesture', onAsked);
