@@ -37,7 +37,12 @@ export type BrushType =
   | 'smooth'
   | 'flatten'
   | 'pinch'
-  | 'grab';
+  | 'grab'
+  /**
+   * Not a brush at all: a lasso that cuts straight through the clay. It never
+   * reaches the dab code below — see utils/sculptCut.ts.
+   */
+  | 'scissors';
 
 export interface SculptMesh {
   /** xyz per vertex, Z-up metres. Length is capacity; `vertexCount` is truth. */
@@ -799,6 +804,11 @@ export interface BrushSettings {
    * failure than a tab that stops responding.
    */
   maxVertices: number;
+  /**
+   * For the scissors: close the cut with new faces (true), or leave the hole
+   * open, so the clay is a shell you can see into.
+   */
+  capCut?: boolean;
 }
 
 export const DEFAULT_BRUSH: BrushSettings = {
@@ -811,6 +821,7 @@ export const DEFAULT_BRUSH: BrushSettings = {
   dynamicTopology: true,
   detail: 0.25,
   maxVertices: 250_000,
+  capCut: true,
 };
 
 export interface BrushStamp {
@@ -942,6 +953,7 @@ function recordUndo(session: SculptSession, indices: number[]): void {
  * a stroke has been going on.
  */
 export function applyBrush(session: SculptSession, settings: BrushSettings, stamp: BrushStamp): void {
+  if (settings.type === 'scissors') return;
   stampOnce(session, settings, stamp);
 
   if (settings.symmetryX) {
@@ -1473,15 +1485,117 @@ export function meshBounds(mesh: SculptMesh): { min: [number, number, number]; m
  * here, so it is checked here.
  */
 export function isWatertight(mesh: SculptMesh): boolean {
+  return facesWatertight(mesh.faces, mesh.faceCount);
+}
+
+/** isWatertight on a bare index list, for a mesh that is not a SculptMesh. */
+export function facesWatertight(faces: ArrayLike<number>, faceCount = Math.floor(faces.length / 3)): boolean {
   const counts = new Map<number, number>();
-  for (let f = 0; f < mesh.faceCount; f++) {
+  for (let f = 0; f < faceCount; f++) {
     for (let e = 0; e < 3; e++) {
-      const a = mesh.faces[f * 3 + e];
-      const b = mesh.faces[f * 3 + ((e + 1) % 3)];
+      const a = faces[f * 3 + e];
+      const b = faces[f * 3 + ((e + 1) % 3)];
       const key = edgeKey(a, b);
       counts.set(key, (counts.get(key) ?? 0) + 1);
     }
   }
   for (const count of counts.values()) if (count !== 2) return false;
   return true;
+}
+
+/**
+ * The separate pieces of a mesh — its connected components, joined through
+ * shared vertices — largest first by surface area, each renumbered into a
+ * mesh of its own.
+ *
+ * A mesh the scissors have cut in two is still one mesh, and one body, until
+ * this splits it: nothing can be deleted or moved on its own, and a brush
+ * reaches across the gap and pulls both pieces at once.
+ */
+export function splitComponents(mesh: SculptMesh): SculptMesh[] {
+  const { faces, faceCount, vertexCount, positions } = mesh;
+  const parent = new Int32Array(vertexCount);
+  for (let i = 0; i < vertexCount; i++) parent[i] = i;
+  const find = (v: number): number => {
+    while (parent[v] !== v) { parent[v] = parent[parent[v]]; v = parent[v]; }
+    return v;
+  };
+  for (let f = 0; f < faceCount; f++) {
+    const a = find(faces[f * 3]);
+    const b = find(faces[f * 3 + 1]);
+    const c = find(faces[f * 3 + 2]);
+    if (a !== b) parent[b] = a;
+    const ra = find(a);
+    if (ra !== c) parent[c] = ra;
+  }
+
+  // Faces per root, in the order first met.
+  const byRoot = new Map<number, number[]>();
+  for (let f = 0; f < faceCount; f++) {
+    const root = find(faces[f * 3]);
+    let list = byRoot.get(root);
+    if (!list) { list = []; byRoot.set(root, list); }
+    list.push(f);
+  }
+  if (byRoot.size < 2) return [mesh];
+
+  const pieces: SculptMesh[] = [];
+  const remap = new Int32Array(vertexCount).fill(-1);
+  for (const list of byRoot.values()) {
+    const piecePositions: number[] = [];
+    const pieceFaces = new Uint32Array(list.length * 3);
+    const used: number[] = [];
+    list.forEach((f, k) => {
+      for (let e = 0; e < 3; e++) {
+        const v = faces[f * 3 + e];
+        if (remap[v] < 0) {
+          remap[v] = used.length;
+          used.push(v);
+          piecePositions.push(positions[v * 3], positions[v * 3 + 1], positions[v * 3 + 2]);
+        }
+        pieceFaces[k * 3 + e] = remap[v];
+      }
+    });
+    for (const v of used) remap[v] = -1;
+    pieces.push(createSculptMesh(piecePositions, pieceFaces));
+  }
+  // By surface area, not face count: dynamic topology makes density follow
+  // the brush, so a small piece that was worked on can have more triangles
+  // than a large one that was not.
+  const area = new Map(pieces.map((p) => [p, surfaceArea(p)]));
+  return pieces.sort((a, b) => area.get(b)! - area.get(a)!);
+}
+
+function surfaceArea(mesh: SculptMesh): number {
+  const { positions: p, faces, faceCount } = mesh;
+  let total = 0;
+  for (let f = 0; f < faceCount; f++) {
+    const a = faces[f * 3] * 3, b = faces[f * 3 + 1] * 3, c = faces[f * 3 + 2] * 3;
+    const ux = p[b] - p[a], uy = p[b + 1] - p[a + 1], uz = p[b + 2] - p[a + 2];
+    const vx = p[c] - p[a], vy = p[c + 1] - p[a + 1], vz = p[c + 2] - p[a + 2];
+    total += Math.hypot(uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx) / 2;
+  }
+  return total;
+}
+
+/** How many separate pieces a mesh is in, without building them. */
+export function countComponents(mesh: SculptMesh): number {
+  const { faces, faceCount, vertexCount } = mesh;
+  const parent = new Int32Array(vertexCount);
+  for (let i = 0; i < vertexCount; i++) parent[i] = i;
+  const find = (v: number): number => {
+    while (parent[v] !== v) { parent[v] = parent[parent[v]]; v = parent[v]; }
+    return v;
+  };
+  const used = new Uint8Array(vertexCount);
+  for (let f = 0; f < faceCount * 3; f += 3) {
+    const a = find(faces[f]), b = find(faces[f + 1]);
+    if (a !== b) parent[b] = a;
+    const r = find(a), c = find(faces[f + 2]);
+    if (r !== c) parent[c] = r;
+    used[faces[f]] = used[faces[f + 1]] = used[faces[f + 2]] = 1;
+  }
+  let count = 0;
+  for (let i = 0; i < vertexCount; i++) if (used[i] && find(i) === i) count++;
+  return count;
 }

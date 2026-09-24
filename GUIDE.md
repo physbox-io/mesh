@@ -239,6 +239,38 @@ A boolean body with a hole that *pierces* it keeps the older, exact sector slice
 
 ---
 
+### Sculpt scissors
+
+The sculpt brushes (`utils/sculptMesh.ts`) only move, split and merge triangles inside a closed
+surface, so on their own they cannot make a hole or cut a piece off. The **Scissors** tool (key 7)
+can. You draw a loop on screen, and it is swept along the view into a prism that is then subtracted
+from the mesh (or intersected with it, with Ctrl held). An agent does the same with
+`physics_sculpt_cut`, passing a polygon in the body's frame and a direction.
+
+* **The boolean is `manifold-3d`**, not OpenSCAD. That is why the body stays a sculpt afterwards:
+  `physics_cut` adds a negative to the boolean program and sets `csgEnabled`, which ends sculpting.
+  The package is pinned to 3.2.x, because from 3.3 it pulls in its CAD CLI's dependency tree (sharp,
+  gltf-transform, esbuild) with it. The cut runs in `workers/sculptCutWorker.ts`: building Manifold's
+  half-edge structure takes about a second at 160 k vertices. `utils/sculptCut.ts` stays Worker-free,
+  so the tests call it directly.
+* **Leaving a cut open is done by filtering, not by clipping.** Every input to the boolean carries its
+  own original ID, and each output triangle reports which input it came from. An open cut drops the
+  prism's triangles. Manifold only accepts closed input, so a sculpt that is already open has each rim
+  temporarily fanned shut first (as a third ID), and that fill is dropped as well.
+* **A cut that splits the clay makes one body per piece** (`separateSculpt` in the store, as one
+  undo step). The largest piece stays on the body, and the rest become new sculpt bodies at the same
+  pose, in the same frame. While the pieces were one mesh, none of them could be deleted, and a brush
+  reached across the gap and dragged the neighbouring piece too. The split is a document change, so
+  it drops `SculptSurface`'s own stroke history, and Ctrl+Z falls through to the app's undo.
+* **An open sculpt draws a darker back face**, in both `SculptSurface` and `SceneLayer`, so its inside
+  reads as an inside wall. This applies to open *sculpts* only. Everywhere else a missing back face
+  is how an inside-out mesh gives itself away (see Traps in CLAUDE.md).
+* **Physics on an open sculpt is best-effort.** Solidity is volume over hull volume, and an open shell
+  has no volume, so the concave-collision decision above is unreliable for one. Leave the cut
+  filled if the body has to collide properly.
+
+---
+
 ### Dynamic mesh geoms (`dynamic: true`)
 
 Full physics simulation and collision. MuJoCo takes the **convex hull** of the mesh — so a concave

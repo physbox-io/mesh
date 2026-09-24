@@ -27,11 +27,14 @@ import {
   raycastMesh,
   recomputeNormals,
   isWatertight,
+  splitComponents,
+  countComponents,
   type SculptMesh,
   type SculptSession,
   type SculptUndoEntry,
   type BrushSettings,
 } from '../utils/sculptMesh';
+import { cutSculptOffThread, prewarmSculptCut } from '../utils/sculptCutClient';
 
 /**
  * How far the brush travels between dabs, as a fraction of its radius.
@@ -81,6 +84,9 @@ export function SculptSurface({
   const cursorRef = useRef<THREE.Mesh>(null);
 
   const brush = useStore((s) => s.sculptBrush);
+  // An open surface — the scissors with Fill cut off — shows its inside, and
+  // the inside needs drawing; see the back-face mesh below.
+  const surfaceOpen = useStore((s) => s.sculptStats?.watertight === false);
   // The viewport-wide wireframe applies here too — a sculpt is the one body
   // whose tessellation you most want to be able to look at.
   const wireframe = useStore((s) => s.wireframe);
@@ -114,6 +120,10 @@ export function SculptSurface({
   /** Whether this body has already been flagged as sculpted. */
   const markedEdited = useRef(false);
   const redoStack = useRef<SculptUndoEntry[]>([]);
+  /** Set while the scissors' worker has a cut in hand. */
+  const cutting = useRef(false);
+  /** The mesh this component currently holds, for a cut that finishes after it was replaced. */
+  const liveMesh = useRef<SculptMesh | null>(null);
 
   /*
    * A change to the body that did not come from here — the app's own undo, an
@@ -212,6 +222,7 @@ export function SculptSurface({
       faces: mesh.faceCount,
       watertight: isWatertight(mesh),
       atBudget,
+      pieces: countComponents(mesh),
     });
   }, []);
 
@@ -335,7 +346,8 @@ export function SculptSurface({
   }, [mesh, syncGeometry]);
 
   const onPointerDown = useCallback((event: ThreeEvent<PointerEvent>) => {
-    if (event.button !== 0) return;
+    // The scissors draw on the canvas, not on the surface; see the lasso below.
+    if (event.button !== 0 || brushRef.current.type === 'scissors') return;
     const point = resolve(event);
     if (!point) return;
 
@@ -364,6 +376,7 @@ export function SculptSurface({
   }, [mesh, resolve, stamp, showCursor, gl, setOrbitEnabled, nodeId]);
 
   const onPointerMove = useCallback((event: ThreeEvent<PointerEvent>) => {
+    if (brushRef.current.type === 'scissors') { showCursor(null); return; }
     const point = resolve(event);
 
     if (!sessionRef.current) {
@@ -514,7 +527,7 @@ export function SculptSurface({
       // is holding, and its own undo entry would then bring the undone stroke
       // back. Swallowed rather than passed on, so the app's undo does not act
       // either.
-      if (sessionRef.current) { event.preventDefault(); event.stopPropagation(); return; }
+      if (sessionRef.current || cutting.current) { event.preventDefault(); event.stopPropagation(); return; }
       const stack = redo ? redoStack.current : undoStack.current;
       const other = redo ? undoStack.current : redoStack.current;
       const entry = stack.pop();
@@ -531,6 +544,187 @@ export function SculptSurface({
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
   }, [mesh, syncGeometry, commit]);
+
+  // ---------------------------------------------------------------------
+  // Scissors
+  // ---------------------------------------------------------------------
+
+  useEffect(() => { liveMesh.current = mesh; }, [mesh]);
+
+  /*
+   * The lasso, drawn on the canvas rather than on the surface.
+   *
+   * It has to be able to start off the model — a loop round an arm starts in
+   * the air beside it — so it cannot hang off the mesh's own pointer events,
+   * which only fire over the mesh. It listens on the window in the capture
+   * phase and keeps a left-button press on the canvas to itself, so nothing
+   * else in the scene (selection, a body drag) sees a gesture that is a cut.
+   * Right-drag still orbits.
+   *
+   * The loop is an SVG overlay made by hand rather than a React element: it
+   * changes on every pointer move, and none of it is anything React needs to
+   * know about.
+   */
+  const cut = useCallback(async (loop: [number, number][], keep: boolean) => {
+    const group = groupRef.current;
+    if (!group) return false;
+    const { camera } = getThree();
+    camera.updateMatrixWorld();
+    const viewToLocal = new THREE.Matrix4().copy(group.matrixWorld).invert().multiply(camera.matrixWorld);
+    const target = mesh;
+    const revision = target.revision;
+
+    cutting.current = true;
+    const store = useStore.getState();
+    store.setSculptNotice({ text: 'Cutting…', tone: 'busy' });
+    const result = await cutSculptOffThread(target, {
+      kind: 'view',
+      loop,
+      projectionInverse: Array.from(camera.projectionMatrixInverse.elements),
+      viewToLocal: Array.from(viewToLocal.elements),
+    }, { mode: keep ? 'keep' : 'remove', cap: brushRef.current.capCut ?? true });
+    cutting.current = false;
+
+    if (!result.ok) {
+      store.setSculptNotice({ text: result.error, tone: 'error' });
+      return false;
+    }
+    // Something else replaced the mesh while the worker had it — an agent's
+    // stroke, a preset — and a cut of the old shape would overwrite it.
+    if (liveMesh.current !== target || target.revision !== revision) {
+      store.setSculptNotice({ text: 'The clay changed while it was being cut, so the cut was dropped. Draw it again.', tone: 'error' });
+      return false;
+    }
+
+    /*
+      A cut that splits the clay makes one body per piece, so a piece can be
+      selected, moved or deleted on its own — and so a brush on one cannot
+      reach across the gap and drag the other along with it, which it did
+      while they were one mesh. That is a change to the document, not to this
+      mesh: it goes through the store as an ordinary undo step, and this
+      surface reloads with the largest piece. Its own stroke history goes with
+      the reload, so Ctrl+Z falls through to the app's undo, which puts the
+      body back whole.
+    */
+    const pieces = splitComponents(result.mesh);
+    if (pieces.length > 1) {
+      store.separateSculpt(nodeId, pieces, geomName);
+      store.setSculptNotice({
+        text: `Cut into ${pieces.length} separate bodies. Press Done, then select a piece to move or delete it.`,
+        tone: 'info',
+      });
+      return true;
+    }
+
+    // applyUndo is exactly "swap the whole mesh for this one, and hand back
+    // what puts it back", so the cut is one undo step like any stroke.
+    undoStack.current.push(applyUndo(target, { indices: null, positions: null, mesh: result.mesh }));
+    if (undoStack.current.length > 50) undoStack.current.shift();
+    redoStack.current.length = 0;
+    syncGeometry(target);
+    commit();
+    store.setSculptNotice(null);
+    return true;
+  }, [mesh, getThree, syncGeometry, commit, nodeId, geomName]);
+
+  useEffect(() => {
+    if (brush.type !== 'scissors') return;
+    prewarmSculptCut();
+    showCursor(null);
+    const canvas = gl.domElement;
+    const NS = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(NS, 'svg');
+    Object.assign(svg.style, { position: 'fixed', pointerEvents: 'none', zIndex: '40', display: 'none' });
+    const path = document.createElementNS(NS, 'polygon');
+    path.setAttribute('fill', 'rgba(56, 189, 248, 0.12)');
+    path.setAttribute('stroke', '#38bdf8');
+    path.setAttribute('stroke-width', '1.5');
+    path.setAttribute('stroke-dasharray', '5 4');
+    path.setAttribute('stroke-linejoin', 'round');
+    svg.appendChild(path);
+    document.body.appendChild(svg);
+
+    let points: [number, number][] | null = null;
+    let rect: DOMRect | null = null;
+    let pointerId = -1;
+
+    const draw = () => {
+      if (!points || !rect) return;
+      path.setAttribute('points', points.map(([x, y]) => `${x - rect!.left},${y - rect!.top}`).join(' '));
+    };
+    const hide = () => { svg.style.display = 'none'; path.setAttribute('points', ''); };
+    const release = () => {
+      if (canvas.hasPointerCapture?.(pointerId)) canvas.releasePointerCapture(pointerId);
+      setOrbitEnabled(true);
+      useStore.getState().setDraggedNodeId(null);
+    };
+
+    const down = (event: PointerEvent) => {
+      if (event.button !== 0 || event.target !== canvas) return;
+      event.stopPropagation();
+      event.preventDefault();
+      if (cutting.current || sessionRef.current) return;
+      rect = canvas.getBoundingClientRect();
+      Object.assign(svg.style, {
+        left: `${rect.left}px`, top: `${rect.top}px`, width: `${rect.width}px`, height: `${rect.height}px`, display: 'block',
+      });
+      svg.setAttribute('viewBox', `0 0 ${rect.width} ${rect.height}`);
+      svg.style.opacity = '1';
+      points = [[event.clientX, event.clientY]];
+      pointerId = event.pointerId;
+      canvas.setPointerCapture?.(pointerId);
+      setOrbitEnabled(false);
+      useStore.getState().setDraggedNodeId(nodeId);
+      useStore.getState().setSculptNotice(null);
+      draw();
+    };
+    const move = (event: PointerEvent) => {
+      if (!points) return;
+      const [lx, ly] = points[points.length - 1];
+      // A point per few pixels: finer is only more polygon for the boolean.
+      if (Math.hypot(event.clientX - lx, event.clientY - ly) < 3) return;
+      points.push([event.clientX, event.clientY]);
+      draw();
+    };
+    const up = (event: PointerEvent) => {
+      if (!points || !rect) return;
+      const loop = points;
+      const box = rect;
+      points = null;
+      release();
+      if (loop.length < 3) { hide(); return; }
+      const ndc = loop.map(([x, y]): [number, number] => [
+        ((x - box.left) / box.width) * 2 - 1,
+        -((y - box.top) / box.height) * 2 + 1,
+      ]);
+      // Held on screen, dimmed, until the worker is done with it.
+      svg.style.opacity = '0.5';
+      void cut(ndc, brushRef.current.invert || event.ctrlKey).finally(hide);
+    };
+    const key = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || !points) return;
+      // Esc lets go of the loop, and only the loop: the panel's own Esc would
+      // close the sculpt tools as well.
+      event.stopPropagation();
+      event.preventDefault();
+      points = null;
+      release();
+      hide();
+    };
+
+    window.addEventListener('pointerdown', down, true);
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('keydown', key, true);
+    return () => {
+      window.removeEventListener('pointerdown', down, true);
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('keydown', key, true);
+      if (points) release();
+      svg.remove();
+    };
+  }, [brush.type, gl, cut, setOrbitEnabled, showCursor, nodeId]);
 
   // A stroke left open by an unmount would leave the camera disabled.
   useEffect(() => () => {
@@ -558,6 +752,17 @@ export function SculptSurface({
       >
         <meshStandardMaterial color={rgb} roughness={0.85} metalness={0.02} side={THREE.FrontSide} wireframe={wireframe} />
       </mesh>
+
+      {/* The inside of an open surface. Front faces only is right for a closed
+          one — a face drawn backwards should look broken — but a hole left
+          open shows the back of the far wall, and undrawn that looks like a
+          see-through ghost rather than a hollow. Darker, so it reads as the
+          inside, and only while the surface is open. */}
+      {surfaceOpen && (
+        <mesh geometry={geometry} raycast={() => null}>
+          <meshStandardMaterial color={rgb.clone().multiplyScalar(0.45)} roughness={0.95} metalness={0} side={THREE.BackSide} wireframe={wireframe} />
+        </mesh>
+      )}
 
       {/* The brush ring. Drawn on top of the surface so it stays readable in a
           hollow the surface would otherwise occlude it in. */}

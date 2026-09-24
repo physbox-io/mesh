@@ -5,7 +5,7 @@
 // A sculpting UI lives or dies on how little of it you have to look at. The
 // hand is on the model, the eyes are on the model, and every glance over here to
 // find a brush is a glance away from the thing being made — so the panel is
-// built to be learned once and then never read again: six brushes on the number
+// built to be learned once and then never read again: seven tools on the number
 // keys, the two sliders that matter on the bracket keys, and everything else
 // out of the way.
 //
@@ -18,10 +18,39 @@
 import { useEffect } from 'react';
 import {
   Paintbrush, Expand, Waves, Minimize2, Magnet, Hand,
-  FlipHorizontal2, Sparkles, Check, TriangleAlert, Boxes,
+  FlipHorizontal2, Sparkles, Check, TriangleAlert, Boxes, Scissors, PaintBucket, Loader2, Info,
 } from 'lucide-react';
 import { useStore } from '../store/useStore';
-import type { BrushType } from '../utils/sculptMesh';
+import { fromSceneGeom, splitComponents, type BrushType } from '../utils/sculptMesh';
+import type { SceneGeom, SceneNode } from '../types/scene';
+
+const findNode = (nodes: SceneNode[] | undefined, id: string): SceneNode | null => {
+  for (const node of nodes || []) {
+    if (node.id === id) return node;
+    const found = findNode(node.children, id);
+    if (found) return found;
+  }
+  return null;
+};
+
+/**
+ * Splits the sculpt being worked on into one body per piece. For a sculpt
+ * that was cut apart before cuts did this by themselves, and so is still one
+ * body in several pieces.
+ */
+function separatePieces(nodeId: string) {
+  const store = useStore.getState();
+  const node = findNode(store.sceneGraph.nodes, nodeId);
+  const geom = node?.geoms?.find((g: SceneGeom) => g.type === 'mesh' && !g.csgDerived);
+  if (!geom?.renderVertices?.length || !geom.faces?.length) return;
+  const pieces = splitComponents(fromSceneGeom(geom.renderVertices, geom.faces));
+  if (pieces.length < 2) return;
+  store.separateSculpt(nodeId, pieces, geom.name);
+  store.setSculptNotice({
+    text: `Now ${pieces.length} separate bodies. Press Done, then select a piece to move or delete it.`,
+    tone: 'info',
+  });
+}
 
 interface BrushDefinition {
   type: BrushType;
@@ -46,6 +75,7 @@ const BRUSHES: BrushDefinition[] = [
   { type: 'inflate', label: 'Inflate', key: '4', icon: Expand, hint: 'Push every vertex along its own normal. Swells a form rather than raising a ridge.' },
   { type: 'flatten', label: 'Flatten', key: '5', icon: Minimize2, hint: 'Pull the surface onto its own local plane. Makes a facet out of a bulge.' },
   { type: 'pinch', label: 'Pinch', key: '6', icon: Magnet, hint: 'Draw material sideways towards the cursor. Sharpens an edge that smoothing has softened.' },
+  { type: 'scissors', label: 'Scissors', key: '7', icon: Scissors, hint: 'Draw a loop, on or off the model: everything inside it is cut away, straight through. Hold Ctrl to keep only the inside.' },
 ];
 
 const panelClass =
@@ -118,6 +148,8 @@ export function SculptPanel() {
   const brush = useStore((s) => s.sculptBrush);
   const setBrush = useStore((s) => s.setSculptBrush);
   const setSculptNodeId = useStore((s) => s.setSculptNodeId);
+  const notice = useStore((s) => s.sculptNotice);
+  const scissors = brush.type === 'scissors';
 
   // Keyboard: the whole point of the palette is not having to use it.
   useEffect(() => {
@@ -156,7 +188,7 @@ export function SculptPanel() {
   }, [sculptNodeId, brush.radius, brush.symmetryX, setBrush, setSculptNodeId]);
 
   // Ctrl inverts the brush for as long as it is held — the same gesture as
-  // every sculpting tool, and the reason 'carve' is not a seventh button.
+  // every sculpting tool, and the reason 'carve' is not a button of its own.
   useEffect(() => {
     if (!sculptNodeId) return;
     const down = (e: KeyboardEvent) => { if (e.key === 'Control' && !brush.invert) setBrush({ invert: true }); };
@@ -214,6 +246,17 @@ export function SculptPanel() {
 
       <p className="text-[10px] leading-snug text-slate-500 dark:text-slate-400">{active.hint}</p>
 
+      {scissors ? (
+        <div className="flex gap-1.5">
+          <Toggle
+            label="Fill cut"
+            active={brush.capCut ?? true}
+            onClick={() => setBrush({ capCut: !(brush.capCut ?? true) })}
+            icon={PaintBucket}
+            hint="Close the cut with a new face, so the clay stays solid. Off leaves the hole open: you can see inside, and it will not print."
+          />
+        </div>
+      ) : (<>
       <Slider
         label="Size"
         value={brush.radius}
@@ -290,6 +333,22 @@ export function SculptPanel() {
           hint="Target edge length, as a fraction of the brush. Finer means more triangles: the count below is the one to watch."
         />
       )}
+      </>)}
+
+      {notice && (
+        <div
+          className={`flex items-start gap-1 text-[10px] leading-snug ${
+            notice.tone === 'error' ? 'text-amber-600 dark:text-amber-400' : 'text-sky-600 dark:text-sky-400'
+          }`}
+        >
+          {notice.tone === 'busy'
+            ? <Loader2 className="w-3 h-3 mt-px shrink-0 animate-spin" />
+            : notice.tone === 'error'
+              ? <TriangleAlert className="w-3 h-3 mt-px shrink-0" />
+              : <Info className="w-3 h-3 mt-px shrink-0" />}
+          <span>{notice.text}</span>
+        </div>
+      )}
 
       {stats && (
         <div className="pt-2 border-t border-slate-200 dark:border-slate-800 space-y-1">
@@ -310,6 +369,16 @@ export function SculptPanel() {
               <span>Detail limit reached. The brush is not adding density.</span>
             </div>
           )}
+          {(stats.pieces ?? 1) > 1 && (
+            <button
+              type="button"
+              onClick={() => separatePieces(sculptNodeId)}
+              title="This body is in several pieces that are not joined. Make each piece its own body, so it can be moved or deleted, and brushed without dragging the others."
+              className="w-full flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-[11px] font-semibold border bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:border-slate-300"
+            >
+              <Scissors className="w-3.5 h-3.5" /> Separate {stats.pieces} pieces
+            </button>
+          )}
           {!stats.watertight && (
             <div
               className="flex items-start gap-1 text-[10px] text-amber-600 dark:text-amber-400"
@@ -323,7 +392,9 @@ export function SculptPanel() {
       )}
 
       <p className="text-[10px] leading-snug text-slate-400 dark:text-slate-500 pt-1 border-t border-slate-200 dark:border-slate-800">
-        Drag on the model to sculpt · Ctrl inverts · Right-drag orbits · Ctrl+Z undoes a stroke
+        {scissors
+          ? 'Drag a loop to cut · Ctrl keeps the inside · Esc drops the loop · Ctrl+Z undoes a cut'
+          : 'Drag on the model to sculpt · Ctrl inverts · Right-drag orbits · Ctrl+Z undoes a stroke'}
       </p>
     </div>
   );

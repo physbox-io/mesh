@@ -30,6 +30,7 @@ import { buildPaintGeometry, isPaintable, paintArgsFromSize, paintResolution, ty
 import { sampleCatmullRom } from '../../utils/geom';
 import { resolveCsgGeoms } from '../../utils/csg';
 import { DEFAULT_UNIT } from '../../utils/latticeMesh';
+import { facesWatertight } from '../../utils/sculptMesh';
 import type { GeomType, SceneGraph, SceneNode } from '../../types/scene';
 import type { WeakSpot } from '../../utils/printAnalysis';
 import type { DataMirror, FrameFlagWindow, ModelMirror, MujocoShim, RenderGeom } from '../../types/sceneLayer';
@@ -673,6 +674,22 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
     // the geometry actually changed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [type, vertices, faces, dent?.version]);
+  /*
+   * Whether this is a sculpt with a hole left open by the scissors.
+   *
+   * Only a sculpt, and only when it really is open: everywhere else a missing
+   * back face is exactly what should show, because it is how an inside-out
+   * mesh gives itself away (see CLAUDE.md on face winding).
+   */
+  const openSculpt = useMemo(
+    () => type === 'mesh' && !!node?.isSculpt && !!faces?.length && !facesWatertight(faces),
+    [type, node?.isSculpt, faces],
+  );
+  const insideColor = useMemo(
+    () => new THREE.Color(color?.[0] ?? 0.8, color?.[1] ?? 0.8, color?.[2] ?? 0.8).multiplyScalar(0.45),
+    [color],
+  );
+
   // R3F frees nothing passed in through `geometry=`, so every sculpt stroke,
   // boolean and dent would otherwise strand a set of GPU buffers.
   useEffect(() => () => { meshBufferGeometry?.dispose(); }, [meshBufferGeometry]);
@@ -775,6 +792,13 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
     const renderedMaterial = (
       <meshStandardMaterial key={`${alpha < 1 ? 'blend' : 'solid'}:${showPaint}`} {...materialProps} side={THREE.FrontSide} />
     );
+    // The inside of a sculpt the scissors left open — see SculptSurface, which
+    // draws the same thing while the tools are up.
+    const insideWall = openSculpt ? (
+      <mesh geometry={meshBufferGeometry} raycast={() => null}>
+        <meshStandardMaterial color={insideColor} roughness={0.95} metalness={0} side={THREE.BackSide} />
+      </mesh>
+    ) : null;
 
     if (isDynamic) {
       return (
@@ -783,6 +807,7 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
             {renderedMaterial}
             {brushCursor}
           </mesh>
+          {insideWall}
           {meshEdges}
         </group>
       );
@@ -794,6 +819,7 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
           {renderedMaterial}
           {brushCursor}
         </mesh>
+        {insideWall}
         {meshEdges}
       </group>
     );

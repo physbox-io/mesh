@@ -8,6 +8,7 @@ A browser-based rigid-body physics simulator and CAD fabrication studio built on
 
 * **MuJoCo WASM physics engine.** Contact dynamics, multi-axis joints, motor actuators, and proximity mechanical constraints (gears, pinion-rack, pulley ropes, welds).
 * **3D CSG parametric modelling.** Manifold boolean operations (union, subtract, intersect) and OpenSCAD in a web worker.
+* **Free-form sculpting.** Draw, grab, smooth, inflate, flatten and pinch brushes with dynamic topology, plus scissors: draw a loop to cut a hole straight through the clay or cut a piece off, with the cut filled or left open.
 * **Mouse spring dragging.** Click and drag live objects in the 3D viewport during playback, with the spring force drawn as a line.
 * **Fabrication exporters:**
   * **3D print STL.** Binary `.stl`, centred and Z-up, for OrcaSlicer and PrusaSlicer.

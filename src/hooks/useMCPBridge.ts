@@ -27,8 +27,9 @@ import {
 } from '../utils/vertexPaint';
 import { saveUserPreset, deleteUserPreset, readUserPreset, listUserPresetNames, type SavedCopilotMessage } from '../utils/userPresets';
 import { SCULPT_BASES, type SculptBaseId } from '../utils/sculptBases';
-import { fromSceneGeom, toSceneGeom, type BrushType } from '../utils/sculptMesh';
+import { fromSceneGeom, toSceneGeom, splitComponents, type BrushType } from '../utils/sculptMesh';
 import { applySculptStroke, probeSurface, sculptSummary, undoSculptStroke, BRUSH_TYPES } from '../utils/sculptCommands';
+import { cutSculptOffThread } from '../utils/sculptCutClient';
 import {
   addFacesMm, addRingMm, bevelEdgesMm, bevelFaceMm, bridgeFacesMm, describeLattice,
   dimensionSelectionMm, extrudeMm,
@@ -1170,6 +1171,84 @@ export function useMCPBridge() {
           store.updateNodeGeom(targetId, { vertices, renderVertices, faces }, geomIndex);
 
           return { ok: true, id: targetId, undoDepth: stack.length, ...sculptSummary(mesh) };
+        }
+
+        /*
+          The scissors, without a screen: a polygon in the body's own frame,
+          swept through the whole body along `direction` (default: the
+          polygon's own normal) and taken out — or, with mode 'keep', kept and
+          everything else taken out. `cap: false` leaves the cut open.
+
+          Runs in the scissors' worker, so a cut of a dense sculpt does not
+          stall the page, and is one entry in the same history UNDO_SCULPT
+          pops.
+        */
+        case 'SCULPT_CUT': {
+          const { targetId, polygon, direction, mode, cap } = msg as Msg<{
+            targetId: string; polygon: number[][]; direction?: number[]; mode?: 'remove' | 'keep'; cap?: boolean;
+          }>;
+          if (!targetId) throw new Error('Missing targetId');
+          const node = findNodeInScene(store.sceneGraph.nodes, targetId);
+          if (!node) throw new Error(`No object with id '${targetId}'`);
+          if (!node.isSculpt) throw new Error(`'${targetId}' is not a sculpt body`);
+          if (!Array.isArray(polygon) || polygon.length < 3 || polygon.some((p: unknown) => !Array.isArray(p) || p.length < 3)) {
+            throw new Error("polygon must be three or more [x, y, z] points, in the body's own frame (metres)");
+          }
+          if (direction !== undefined && (!Array.isArray(direction) || direction.length < 3)) {
+            throw new Error('direction must be [x, y, z]');
+          }
+          if (mode !== undefined && mode !== 'remove' && mode !== 'keep') {
+            throw new Error("mode must be 'remove' (take the prism out) or 'keep' (keep only the prism)");
+          }
+
+          const geomIndex = Math.max(0, (node.geoms ?? []).findIndex((g: SceneGeom) => g.type === 'mesh'));
+          const geomBefore = node.geoms?.[geomIndex];
+          const mesh = sculptMeshOf(node);
+          const result = await cutSculptOffThread(mesh, { kind: 'polygon', polygon, direction }, { mode, cap });
+          if (!result.ok) return { ok: false, id: targetId, error: result.error };
+
+          // The worker had it for a while; if the body changed meanwhile, the
+          // cut is of a shape that no longer exists.
+          const live = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId);
+          if (!live || live.geoms?.[geomIndex] !== geomBefore) {
+            return { ok: false, id: targetId, error: 'The body changed while it was being cut; nothing was applied.' };
+          }
+
+          // A cut that splits the clay makes one body per piece, as the
+          // Scissors do in the viewport. That is a change to the document, so
+          // it is the editor's undo that reverses it, not this history.
+          const pieces = splitComponents(result.mesh);
+          if (pieces.length > 1) {
+            const bodies = useStore.getState().separateSculpt(targetId, pieces, geomBefore?.name);
+            sculptHistory.delete(targetId);
+            const error = useStore.getState().lastCompileError;
+            return {
+              ok: !error, ...(error ? { error } : {}), id: targetId,
+              facesBefore: result.facesBefore, facesAfter: pieces[0].faceCount,
+              pieces: pieces.length, bodies,
+              ...sculptSummary(pieces[0]),
+              undoDepth: 0,
+            };
+          }
+
+          const stack = sculptHistory.get(targetId) ?? [];
+          stack.push({ indices: null, positions: null, mesh });
+          while (stack.length > SCULPT_HISTORY_DEPTH) stack.shift();
+          sculptHistory.set(targetId, stack);
+
+          // Metadata first, geometry second — see SCULPT.
+          const latest = useStore.getState();
+          latest.updateNode(targetId, { sculptEdited: true, sculptVersion: (live.sculptVersion ?? 1) + 1 });
+          const { vertices, renderVertices, faces } = toSceneGeom(result.mesh);
+          latest.updateNodeGeom(targetId, { vertices, renderVertices, faces }, geomIndex);
+
+          const error = useStore.getState().lastCompileError;
+          return {
+            ok: !error, ...(error ? { error } : {}), id: targetId,
+            facesBefore: result.facesBefore, facesAfter: result.facesAfter, pieces: result.pieces,
+            ...sculptSummary(result.mesh),
+            undoDepth: stack.length,
+          };
         }
 
         /*

@@ -589,6 +589,22 @@ api.setAngularVelocity([0, 15.0, 0], 'cart'); // Sets angular velocities`}
                   </div>
                 </div>
 
+                <div className="bg-sky-50 border border-sky-200/70 rounded-xl p-4 flex flex-col gap-3">
+                  <div className="text-xs">
+                    <strong className="text-sky-800">✂️ Cutting sculpted clay</strong>
+                    <p className="text-sky-900/70 mt-1">
+                      The sculpt panel's <strong>Scissors</strong> (key <kbd className="font-mono">7</kbd>) cut straight
+                      through along your view. Drag a loop: everything inside it goes. A loop in the middle of the model
+                      makes a hole; a loop over its edge cuts that piece off, and the loop can start off the model.
+                      Hold <kbd className="font-mono">Ctrl</kbd> to keep only the inside instead. <strong>Fill cut</strong> closes
+                      the cut with a new face so the clay stays solid; turn it off to leave the hole open and see inside,
+                      but an open surface will not print. The body stays a sculpt, and <strong>Ctrl+Z</strong> undoes a cut
+                      like a stroke. A cut that splits the clay makes <strong>one body per piece</strong>: press Done, then
+                      select a piece to move or delete it on its own.
+                    </p>
+                  </div>
+                </div>
+
                 <h4 className="font-bold text-slate-700 text-sm mt-1">Every key</h4>
                 <div className="bg-slate-50 border border-slate-200/60 rounded-xl p-4 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1.5 text-xs">
                   {[
