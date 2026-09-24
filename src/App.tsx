@@ -26,7 +26,7 @@ import { DocsInfoButton } from './components/docs/DocsInfoButton';
 import * as THREE from 'three';
 import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js';
 import { exportThreeMf, type ThreeMfMesh } from './utils/threeMfExporter';
-import { SimplifyModifier } from 'three/examples/jsm/modifiers/SimplifyModifier.js';
+import { simplifyGeomMesh } from './utils/simplifyMesh';
 import { loadCompiler, compileSCAD, isCompilerReady, setScadCompileListener } from './utils/openscad';
 import { getStickyRotation } from './utils/geom';
 import { csgSourceGeoms, csgHashOf, collisionModeOf, CSG_DEFAULT_SECTORS } from './utils/csg';
@@ -1433,133 +1433,11 @@ function App() {
   const handleSimplifyMesh = useCallback((g: SceneGeom) => {
     try {
       setMeshSimplifierError(null);
-      if (!g.vertices || g.vertices.length < 9) {
-        throw new Error('Not enough vertices to simplify (need at least 3 triangles / 9 coordinates).');
-      }
+      const { vertices: uniqueVerts, faces, renderVertices: newRenderVerts } = simplifyGeomMesh(g, simplifyRatio);
 
-      // 1. Weld/deduplicate vertices first so that the edge collapse algorithm works properly on a connected mesh
-      const uniqueInputVerts: number[] = [];
-      const inputFaces: number[] = [];
-      const inputVertMap = new Map<string, number>();
-
-      for (let i = 0; i < g.vertices.length; i += 3) {
-        const x = g.vertices[i];
-        const y = g.vertices[i + 1];
-        const z = g.vertices[i + 2];
-        const key = `${x.toFixed(5)},${y.toFixed(5)},${z.toFixed(5)}`;
-        let idx = inputVertMap.get(key);
-        if (idx === undefined) {
-          idx = uniqueInputVerts.length / 3;
-          uniqueInputVerts.push(x, y, z);
-          inputVertMap.set(key, idx);
-        }
-      }
-
-      if (g.faces && g.faces.length > 0) {
-        for (let i = 0; i < g.faces.length; i++) {
-          const oldIdx = g.faces[i];
-          const vx = g.vertices[oldIdx * 3];
-          const vy = g.vertices[oldIdx * 3 + 1];
-          const vz = g.vertices[oldIdx * 3 + 2];
-          const key = `${vx.toFixed(5)},${vy.toFixed(5)},${vz.toFixed(5)}`;
-          inputFaces.push(inputVertMap.get(key)!);
-        }
-      } else {
-        // If not indexed, build faces sequentially
-        for (let i = 0; i < g.vertices.length; i += 3) {
-          const x = g.vertices[i];
-          const y = g.vertices[i + 1];
-          const z = g.vertices[i + 2];
-          const key = `${x.toFixed(5)},${y.toFixed(5)},${z.toFixed(5)}`;
-          inputFaces.push(inputVertMap.get(key)!);
-        }
-      }
-
-      // 2. Create a THREE.BufferGeometry from the welded geometry
-      const geometry = new THREE.BufferGeometry();
-      const positionArray = new Float32Array(uniqueInputVerts);
-      geometry.setAttribute('position', new THREE.BufferAttribute(positionArray, 3));
-      geometry.setIndex(inputFaces);
-
-      // 3. Compute the number of vertices to remove
-      const originalVertexCount = uniqueInputVerts.length / 3;
-      const targetCount = Math.max(4, Math.floor(originalVertexCount * simplifyRatio));
-      const countToRemove = originalVertexCount - targetCount;
-
-      if (countToRemove <= 0) {
-        throw new Error('Already at or below target vertex count. Try a lower quality/ratio.');
-      }
-
-      // 4. Apply the SimplifyModifier
-      const modifier = new SimplifyModifier();
-      const simplifiedGeometry = modifier.modify(geometry, countToRemove);
-      
-      const simplifiedPositions = simplifiedGeometry.attributes.position.array;
-      const simplifiedIndex = simplifiedGeometry.index ? simplifiedGeometry.index.array : null;
-      if (!simplifiedPositions || simplifiedPositions.length === 0) {
-        throw new Error('Simplification produced an empty geometry.');
-      }
-
-      // 5. Extract the resulting vertices and faces using the index array from SimplifyModifier
-      const uniqueVerts: number[] = [];
-      const faces: number[] = [];
-      const vertMap = new Map<number, number>();
-
-      if (simplifiedIndex) {
-        for (let i = 0; i < simplifiedIndex.length; i++) {
-          const oldIdx = simplifiedIndex[i];
-          let newIdx = vertMap.get(oldIdx);
-          if (newIdx === undefined) {
-            newIdx = uniqueVerts.length / 3;
-            const vx = simplifiedPositions[oldIdx * 3];
-            const vy = simplifiedPositions[oldIdx * 3 + 1];
-            const vz = simplifiedPositions[oldIdx * 3 + 2];
-            uniqueVerts.push(
-              Number(vx.toFixed(5)),
-              Number(vy.toFixed(5)),
-              Number(vz.toFixed(5))
-            );
-            vertMap.set(oldIdx, newIdx);
-          }
-          faces.push(newIdx);
-        }
-      } else {
-        // Fallback for non-indexed output
-        const vertMapStr = new Map<string, number>();
-        for (let i = 0; i < simplifiedPositions.length; i += 3) {
-          const x = simplifiedPositions[i];
-          const y = simplifiedPositions[i + 1];
-          const z = simplifiedPositions[i + 2];
-          const key = `${x.toFixed(5)},${y.toFixed(5)},${z.toFixed(5)}`;
-          let idx = vertMapStr.get(key);
-          if (idx === undefined) {
-            idx = uniqueVerts.length / 3;
-            uniqueVerts.push(
-              Number(x.toFixed(5)),
-              Number(y.toFixed(5)),
-              Number(z.toFixed(5))
-            );
-            vertMapStr.set(key, idx);
-          }
-          faces.push(idx);
-        }
-      }
-
-      if (uniqueVerts.length < 9) {
-        throw new Error('Simplification reduced geometry below minimum visible threshold.');
-      }
-
-      // 6. Swap Y/Z coordinates for renderVertices if this is a dynamic mesh (MuJoCo space swap)
-      let newRenderVerts: number[] | undefined;
-      if (g.dynamic) {
-        newRenderVerts = [];
-        for (let i = 0; i < uniqueVerts.length; i += 3) {
-          const x = uniqueVerts[i], y = uniqueVerts[i+1], z = uniqueVerts[i+2];
-          newRenderVerts.push(+x.toFixed(5), +(-z).toFixed(5), +y.toFixed(5));
-        }
-      }
-
-      // 7. Update the sceneGraph with the new simplified vertices/faces
+      // Write it back. This matches the geom by name across the whole tree and
+      // takes the first hit, so two bodies with a geom of the same name would
+      // have the wrong one simplified. Kept as it was; fix it on its own.
       const newScene = cloneSceneGraph(useStore.getState().sceneGraph);
       const traverse = (nodes: SceneNode[]): boolean => {
         for (const node of nodes) {
