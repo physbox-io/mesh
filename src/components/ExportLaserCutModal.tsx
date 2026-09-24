@@ -357,9 +357,12 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
     };
     return client.run('laser', scene, options);
   }, [scene, layoutFields]);
-  const exportResult: LaserCutResult | null = layoutJob.failure
-    ? { success: false, error: layoutJob.failure }
-    : layoutJob.result;
+  // Memoised so a failure is one object, not a new one per render that would
+  // re-run the G-code and preview memos below every time.
+  const exportResult = useMemo<LaserCutResult | null>(
+    () => (layoutJob.failure ? { success: false, error: layoutJob.failure } : layoutJob.result),
+    [layoutJob.failure, layoutJob.result],
+  );
   const layoutPending = layoutFields !== liveLayoutFields || layoutJob.busy;
 
   const liveGcodeFields = useMemo(() => ({

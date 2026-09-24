@@ -213,9 +213,11 @@ function NoteCardOverlay({ card, isEditing, onToggleEdit, onToggleMinimize, onMa
     setDraft(null);
   };
   const onMarkdownChangeRef = useRef(onMarkdownChange);
-  onMarkdownChangeRef.current = onMarkdownChange;
   const draftRef = useRef(draft);
-  draftRef.current = draft;
+  useEffect(() => {
+    onMarkdownChangeRef.current = onMarkdownChange;
+    draftRef.current = draft;
+  });
   // Leaving edit mode or closing the card must not drop what was typed last.
   useEffect(() => () => {
     if (draftTimer.current) clearTimeout(draftTimer.current);
@@ -678,7 +680,7 @@ const DropHandler = ({ addComponent, onImportFile, onImportImageFile, onImportSc
       window.removeEventListener('drop', handler);
       window.removeEventListener('dragover', dragOverHandler);
     };
-  }, [camera, gl, addComponent, onImportFile, onImportImageFile]);
+  }, [camera, gl, addComponent, onImportFile, onImportImageFile, onImportSceneJson]);
   
   return null;
 };
@@ -1664,7 +1666,9 @@ function App() {
   // the scene. Everywhere, fields included: the browser's dialog is no more
   // use from inside one.
   const savePresetClickRef = useRef(handleSavePresetClick);
-  savePresetClickRef.current = handleSavePresetClick;
+  useEffect(() => {
+    savePresetClickRef.current = handleSavePresetClick;
+  });
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey || e.key.toLowerCase() !== 's') return;

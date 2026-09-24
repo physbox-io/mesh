@@ -297,9 +297,12 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
       includeSheetOutline: f.annotations !== 'none',
     });
   }, [scene, sliceFields]);
-  const exportResult: ContourSliceResult | null = sliceJob.failure
-    ? { success: false, error: sliceJob.failure }
-    : sliceJob.result;
+  // Memoised so a failure is one object, not a new one per render that would
+  // re-run the G-code and preview memos below every time.
+  const exportResult = useMemo<ContourSliceResult | null>(
+    () => (sliceJob.failure ? { success: false, error: sliceJob.failure } : sliceJob.result),
+    [sliceJob.failure, sliceJob.result],
+  );
   const slicePending = sliceFields !== liveSliceFields || sliceJob.busy;
 
   // Compute G-Code output result
