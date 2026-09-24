@@ -54,6 +54,7 @@ import { SliderValue } from './components/SliderValue';
 import { RangeInput } from './components/RangeInput';
 import { SettledNumberInput, SettledTextInput } from './components/SettledInputs';
 import { ScaleControls } from './components/ScaleCard';
+import { ConfirmModal } from './components/ConfirmModal';
 import { ObjectGestureController } from './components/scene/ObjectGestures';
 import { TransformGizmo } from './components/scene/TransformGizmo';
 import { isGizmoBusy } from './components/scene/gizmoBusy';
@@ -927,6 +928,11 @@ function replaceVarInCode(code: string, varName: string, newValue: number): stri
 }
 
 // Helper to find a node by ID in hierarchy
+/** Whether a body sits at the top of the scene rather than inside another. */
+function isTopLevel(nodes: SceneNode[], id: string): boolean {
+  return nodes.some((n) => n.id === id);
+}
+
 function findNodeById(nodes: SceneNode[], targetId: string): SceneNode | null {
   for (const node of nodes) {
     if (node.id === targetId) return node;
@@ -988,6 +994,10 @@ function App() {
   const closeDocs = useStore((s) => s.closeDocs);
   useEscapeToClose(isDocsOpen, closeDocs);
   const [showAICopilot, setShowAICopilot] = useState(false);
+  // Set when Free is picked for a body that hangs under another: MuJoCo only
+  // allows a free joint at the top level, so the body has to be detached
+  // first and that is not something to do behind someone's back.
+  const [detachForFree, setDetachForFree] = useState<{ id: string; joints: SceneJoint[] } | null>(null);
   const [scriptText, setScriptText] = useState('');
   const [scriptError, setScriptError] = useState<string | null>(null);
   const [meshEditorGeom, setMeshEditorGeom] = useState<string | null>(null);
@@ -5047,6 +5057,15 @@ function App() {
                         newJoints = [{ name, type: 'ball', pos: [0, 0, 0], damping: 0.5 }];
                       }
                     }
+                    // A free joint is only legal on a top-level body. Asked
+                    // for on a nested one, MuJoCo refuses the entire model and
+                    // the app carries on with the last one that worked, so the
+                    // body stops responding with nothing said. Offer the
+                    // detach that would make it legal instead.
+                    if (jointType === 'free' && !isTopLevel(sceneGraph.nodes, selectedNode.id)) {
+                      setDetachForFree({ id: selectedNode.id, joints: newJoints });
+                      return;
+                    }
                     updateNodeJointsList(selectedNode.id, newJoints);
                   }}
                   className="w-full px-2 py-1.5 border border-slate-200 rounded text-sm bg-white font-medium text-slate-700 outline-none focus:border-blue-500 cursor-pointer"
@@ -7648,6 +7667,36 @@ api.applyForce([force, 0, 0]);
           </div>,
           document.body
         )}
+
+      {detachForFree && (() => {
+        const body = findNodeById(sceneGraph.nodes, detachForFree.id);
+        return (
+          <ConfirmModal
+            title="Detach this body to make it free?"
+            confirmLabel="Detach and make free"
+            body={
+              <>
+                <p>
+                  <strong>{body?.name || detachForFree.id}</strong> hangs inside another body, and a
+                  6-DOF body has to sit at the top of the scene — MuJoCo will not load a model with a
+                  free joint anywhere else.
+                </p>
+                <p>
+                  It will be lifted out of its parent and left exactly where it is now, free to fall
+                  and be pushed around. Anything hanging under it comes too. Its parent keeps
+                  everything else.
+                </p>
+              </>
+            }
+            onCancel={() => setDetachForFree(null)}
+            onConfirm={() => {
+              const { id, joints } = detachForFree;
+              setDetachForFree(null);
+              if (useStore.getState().detachToTopLevel(id)) updateNodeJointsList(id, joints);
+            }}
+          />
+        );
+      })()}
 
       {isSaveModalOpen && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
