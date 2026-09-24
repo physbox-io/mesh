@@ -21,6 +21,7 @@ import {
 import { collidersAreStale, collisionHashOf, type ColliderResult } from '../utils/convexDecomposition';
 import { insetNegatives } from '../utils/scaleNode';
 import type { PaintLayer } from '../utils/vertexPaint';
+import type { DocsTabId } from '../utils/docsTabs';
 import { compileToMJCF } from '../utils/mjcf';
 import { PRESETS, pendulumPreset, generateGearGeoms } from '../presets/presetScenes';
 import { PhysicsWorkerClient, type BuiltResult, type FrameSnapshot } from './physicsWorkerClient';
@@ -1398,6 +1399,13 @@ export interface PhysicsState {
   /** Which surface pattern generator's dialog is open, if any. */
   patternGeneratorId: string | null;
   isMachineConfigOpen: boolean;
+  /**
+   * The reference guide. It lives here rather than in App because the (i)
+   * buttons that deep-link into it are scattered through the property cards,
+   * and threading an opener down to each one is all cost and no benefit.
+   */
+  isDocsOpen: boolean;
+  docsTab: DocsTabId;
   setMachineTarget: (target: MachineTarget) => void;
   setMaterial: (material: MaterialId) => void;
   setFilament: (filament: FilamentId) => void;
@@ -1411,6 +1419,9 @@ export interface PhysicsState {
    */
   loadGeneratedScene: (scene: SceneGraph, carve: Partial<ReliefCarveOptions> | null) => void;
   setMachineConfigOpen: (open: boolean) => void;
+  openDocs: (tab: DocsTabId) => void;
+  setDocsTab: (tab: DocsTabId) => void;
+  closeDocs: () => void;
   setCameraView: (view: 'perspective' | 'topDown') => void;
   setDfmEnabled: (enabled: boolean) => void;
   setDfmCastOpen: (open: boolean) => void;
@@ -2034,6 +2045,8 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
   carveSettings: null,
   patternGeneratorId: null,
   isMachineConfigOpen: false,
+  isDocsOpen: false,
+  docsTab: 'gravity',
   cameraView: 'perspective',
   cameraOverride: initialFraming.cameraOverride,
   cameraResetToken: 0,
@@ -2083,6 +2096,9 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
   openPatternGenerator: (id) => set({ patternGeneratorId: id }),
   closePatternGenerator: () => set({ patternGeneratorId: null }),
   setMachineConfigOpen: (isMachineConfigOpen) => set({ isMachineConfigOpen }),
+  openDocs: (docsTab) => set({ docsTab, isDocsOpen: true }),
+  setDocsTab: (docsTab) => set({ docsTab }),
+  closeDocs: () => set({ isDocsOpen: false }),
   setCameraView: (view) => set({ cameraView: view, cameraOverride: null }),
   dfmEnabled: false,
   setDfmEnabled: (dfmEnabled) => set({ dfmEnabled }),
