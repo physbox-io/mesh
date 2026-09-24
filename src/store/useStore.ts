@@ -30,7 +30,7 @@ import { DEFAULT_FRACTURE_PIECES } from '../utils/fracture';
 import { fractureMeshOffThread, prewarmFractureWorker } from '../utils/fractureWorkerClient';
 import { buildShatterGraph, MAX_LIVE_SHARDS } from '../utils/runtimeShatter';
 import { deformedGeometry, dentKey, useDentStore } from './dentStore';
-import { imprintOf, isDentable, meshForDenting, type Imprint } from '../utils/dentMesh';
+import { fromtoCenter, imprintOf, isDentable, meshForDenting, type Imprint } from '../utils/dentMesh';
 import { estimateBodyMass } from '../utils/deformMaterials';
 import { wallThicknessAt } from '../utils/wallThickness';
 import type { DentConfig } from '../utils/breakThresholds';
@@ -2329,6 +2329,15 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
       updates.vertices = mesh.vertices;
       updates.renderVertices = toRenderVertices(mesh.vertices);
       updates.faces = mesh.faces;
+      // A fromto carried the shape's direction AND its offset. meshForDenting
+      // has turned the vertices to face the right way; the offset moves to the
+      // geom's pos, because these vertices are the collision geometry too and
+      // MuJoCo recentres a mesh asset on its centroid. Bake the offset in and
+      // the thing collides half its own length away from where it is drawn.
+      if (geom.fromto) {
+        updates.pos = fromtoCenter(geom.fromto);
+        updates.fromto = undefined;
+      }
       // A mesh geom on a body that can move has to say so, or it is drawn from
       // vertices baked once into world space and never tracks the body again:
       // it simulates and drags correctly and looks frozen in place.

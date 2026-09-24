@@ -212,6 +212,102 @@ export function ellipsoidMeshForDenting(rx: number, ry: number, rz: number): Den
  * long one; the alternative is a special case for a shape nobody reaches for
  * when they want something they can dent.
  */
+/**
+ * Lay a mesh that was built along +Y down the axis a `fromto` describes, and
+ * move it onto that axis.
+ *
+ * `fromto` is how MuJoCo writes a capsule or cylinder that does not run along
+ * its own Z: the two end points, in the body frame, Z-up. The builders above
+ * know nothing about that — they produce a shape centred on the origin running
+ * along Three's +Y — so without this a `fromto` capsule converts to a mesh
+ * standing upright at the body origin. That is what the double pendulum's
+ * lower arm did when shattering was switched on for it.
+ *
+ * The offset is baked in here AND repeated on the geom's `pos`, which looks
+ * redundant and is not, because the two consumers disagree about where a mesh
+ * lives:
+ *
+ *   - The renderer, for a DYNAMIC mesh, draws renderVertices at the BODY's
+ *     transform and never looks at the geom's pos (SceneLayer's useFrame:
+ *     "renderVertices are in body-local space"). It needs the offset in the
+ *     vertices.
+ *   - MuJoCo recentres a mesh asset on its volume centroid and then places it
+ *     at the geom's pos (GUIDE.md § Computing renderVertices). It throws the
+ *     baked offset away, so it needs the offset on the pos.
+ *
+ * Feed only one and the body collides somewhere other than where it is drawn:
+ * half its own length out, in the direction it runs. Since a cylinder's
+ * centroid is the midpoint of its axis, the value both want is the same one —
+ * see fromtoCenter.
+ */
+function placeAlongFromto(vertices: number[], fromto: number[]): void {
+  // MuJoCo Z-up -> Three Y-up.
+  let dx = fromto[3] - fromto[0];
+  let dy = fromto[5] - fromto[2];
+  let dz = -(fromto[4] - fromto[1]);
+
+  const len = Math.hypot(dx, dy, dz);
+  if (len === 0) return;
+  dx /= len; dy /= len; dz /= len;
+
+  // Midpoint of the axis, in these vertices' Y-up space.
+  const mx = (fromto[0] + fromto[3]) / 2;
+  const my = (fromto[2] + fromto[5]) / 2;
+  const mz = -(fromto[1] + fromto[4]) / 2;
+
+  // Rotation taking +Y onto d, by Rodrigues about (Y x d). The two degenerate
+  // cases are d parallel to +Y, where there is nothing to turn, and
+  // antiparallel, where the axis is undefined and any half turn will do.
+  const kx = dz, kz = -dx;              // Y x d = (dz, 0, -dx)
+  const sin = Math.hypot(kx, kz);       // |Y x d|
+  const cos = dy;                       // Y . d
+
+  if (sin < 1e-12) {
+    if (cos < 0) {
+      for (let i = 0; i < vertices.length; i += 3) {
+        vertices[i + 1] = -vertices[i + 1];   // half turn about X
+        vertices[i + 2] = -vertices[i + 2];
+      }
+    }
+    translate(vertices, mx, my, mz);
+    return;
+  }
+
+  const ux = kx / sin, uz = kz / sin;   // unit axis; its y component is 0
+  const t = 1 - cos;
+  for (let i = 0; i < vertices.length; i += 3) {
+    const x = vertices[i], y = vertices[i + 1], z = vertices[i + 2];
+    const cxv = -uz * y, cyv = uz * x - ux * z, czv = ux * y;  // k x v
+    const kv = ux * x + uz * z;                                 // k . v
+    vertices[i] = x * cos + cxv * sin + ux * kv * t;
+    vertices[i + 1] = y * cos + cyv * sin;   // k has no y, so no k*(k.v) term
+    vertices[i + 2] = z * cos + czv * sin + uz * kv * t;
+  }
+  translate(vertices, mx, my, mz);
+}
+
+/** Shift every vertex by a Three-space offset, in place. */
+function translate(vertices: number[], dx: number, dy: number, dz: number): void {
+  for (let i = 0; i < vertices.length; i += 3) {
+    vertices[i] += dx;
+    vertices[i + 1] += dy;
+    vertices[i + 2] += dz;
+  }
+}
+
+/**
+ * Where a fromto shape's middle sits, in the MuJoCo body frame — the `pos` a
+ * geom needs once its fromto has been turned into vertices. Same space as
+ * fromto itself, so no axis swap here.
+ */
+export function fromtoCenter(fromto: number[]): [number, number, number] {
+  return [
+    (fromto[0] + fromto[3]) / 2,
+    (fromto[1] + fromto[4]) / 2,
+    (fromto[2] + fromto[5]) / 2,
+  ];
+}
+
 export function meshForDenting(geom: SceneGeom): DentMesh | null {
   const size = geom.size || [];
   switch (geom.type) {
@@ -220,10 +316,18 @@ export function meshForDenting(geom: SceneGeom): DentMesh | null {
     case 'cylinder':
     case 'capsule': {
       const r = size[0] ?? 0.05;
-      const half = geom.fromto
-        ? Math.hypot(geom.fromto[3] - geom.fromto[0], geom.fromto[4] - geom.fromto[1], geom.fromto[5] - geom.fromto[2]) / 2
-        : (size[1] ?? r);
-      return cylinderMeshForDenting(r, half);
+      if (geom.fromto) {
+        const ft = geom.fromto;
+        const half = Math.hypot(ft[3] - ft[0], ft[4] - ft[1], ft[5] - ft[2]) / 2;
+        const mesh = cylinderMeshForDenting(r, half);
+        // Direction and offset both; the same offset is repeated on the geom's
+        // pos by makeDentable. See placeAlongFromto for why both are needed.
+        placeAlongFromto(mesh.vertices, ft);
+        return mesh;
+      }
+      // No fromto means it already runs along its own Z, which is where
+      // cylinderMeshForDenting puts it (Three +Y maps to MuJoCo +Z).
+      return cylinderMeshForDenting(r, size[1] ?? r);
     }
     case 'sphere':
       return ellipsoidMeshForDenting(size[0] ?? 0.05, size[0] ?? 0.05, size[0] ?? 0.05);
