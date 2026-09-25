@@ -2136,7 +2136,6 @@ function App() {
                           <option value="gemini-3.6-flash">Gemini 3.6 Flash (Recommended)</option>
                           <option value="gemini-3.5-flash">Gemini 3.5 Flash</option>
                           <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
-                          <option value="gemini-1.5-pro">Gemini 1.5 Pro</option>
                         </>
                       )}
                     </optgroup>
