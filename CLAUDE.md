@@ -12,7 +12,7 @@ things that are easy to get wrong and expensive to discover.
 | Dev server | `npm run dev` (Vite, port 5175; the MCP bridge attaches to it) |
 | Typecheck | `npm run typecheck` (`tsc -b --noEmit`) — use this, not `npm run build`, while the dev server is up |
 | One test file | `npx vitest run tests/<name>.test.ts` |
-| Full suite | `npx vitest run` — 70 files, ~2 minutes; run it in the background |
+| Full suite | `npx vitest run` — 110+ files, several minutes; run it in the background |
 | Lint | `npm run lint` |
 | Export presets for the native app | `npm run export:presets` |
 
@@ -36,9 +36,11 @@ page at runtime.
 - `src/utils/mjcf.ts` — compiles the scene graph to MJCF XML. The graph, not the XML, is the source of truth.
 - `src/components/scene/SceneLayer.tsx` — renders one geom. Materials and culling live here.
 - `src/hooks/useMCPBridge.ts` — every MCP command, mapped to store mutations/selectors.
-- `src/workers/` — physics, OpenSCAD, mold and export workers. Anything slow belongs in one.
-- `src/utils/*Exporter.ts` — one per fabrication output (STL, laser cut, contour slice, relief carve,
-  solid machining, mold, cast pattern). The carve exporters share a `machineSurface()` core.
+- `src/workers/` — physics, OpenSCAD, mold, export, fracture, sculpt-cut and V-HACD workers. Anything
+  slow belongs in one.
+- `src/utils/*Exporter.ts` — one per fabrication output (G-code, 3MF, laser cut, contour slice, relief
+  carve, solid machining, mold, cast pattern); STL goes through three's `STLExporter` in `App.tsx`.
+  Solid machining reuses `machineSurface()` from `reliefCarveExporter.ts`.
 - `src/presets/` — scene definitions. `presetScenes.ts` holds the `PRESETS` map; large presets get
   their own module.
 - `tests/` — Vitest, no browser. Exporters and geometry are tested by asserting on their output.
@@ -49,17 +51,17 @@ page at runtime.
 `side={THREE.FrontSide}` and their normals come from the index winding. A backwards triangle is not
 drawn at all, so a surface built backwards looks like a *half-transparent body* — you see through its
 near face to the inside of its far wall — rather than like a broken mesh. That sends you to `rgba`
-and materials, which is the wrong end of the problem. When something looks see-through, sum the
-signed volume first (`physics_get_scene_summary` reports it as `windingInverted`). A positive total
-only rules out a *uniform* inversion: a mesh with faces both ways can still sum positive, so derive
+and materials, which is the wrong end of the problem. When something looks see-through, check the
+winding first: `physics_get_scene_summary` reports `windingInverted` (negative signed volume) and
+`windingMixed` (faces wound both ways, which a positive total does not rule out). Derive
 each triangle's index order from its face's outward direction rather than writing indices in
 ascending order. `californiaRelief.ts` shipped inside out this way.
 
-**Two coordinate spaces, and copying index order between them mirrors it.** Three.js is Y-up
-(`vertices`); MuJoCo is Z-up (`renderVertices`); `mjcf.ts` swaps Y↔Z on the way out. Builders differ
-in which way their rows run — `utils/heightmapMesh.ts` is Z-up with rows running +Y, while
-`presets/californiaRelief.ts` is Y-up with rows running −Z — so a quad's winding cannot be copied
-from one to the other unchanged. See GUIDE.md § Mesh Geoms Reference.
+**Two coordinate spaces, and builders whose rows run opposite ways.** Three.js is Y-up
+(`vertices`); MuJoCo is Z-up (`renderVertices`); `mjcf.ts` rotates one into the other,
+`(x,y,z)→(x,−z,y)`, which keeps winding. The trap is the builders: `utils/heightmapMesh.ts` is Z-up
+with rows running −Y (+Z once converted), while `presets/californiaRelief.ts` is Y-up with rows
+running −Z — so a quad's winding cannot be copied from one to the other unchanged. See GUIDE.md § Mesh Geoms Reference.
 
 **Concave shapes collide as convex pieces now, and the source mesh is demoted asymmetrically.**
 MuJoCo hulls every mesh geom, so a cup used to be a solid billet. `utils/convexDecomposition.ts`

@@ -293,7 +293,8 @@ export const compileToMJCF = (
   collectMeshAssets(sceneCopy.nodes);
 
   // Vertices stored in Three.js Y-up space (X=right, Y=up, Z=depth).
-  // MuJoCo is Z-up, so swap Y and Z for each vertex triplet before emitting.
+  // MuJoCo is Z-up: rotate (x,y,z) -> (x,-z,y), which keeps the winding (a
+  // plain Y/Z swap would mirror it).
   const toMjcfVerts = (verts: number[]) => {
     const out: number[] = [];
     for (let i = 0; i < verts.length; i += 3) {
