@@ -69,7 +69,9 @@ the model entirely (it draws from the body transform), while a **static** one mu
 contact zeroed — drop it and `geomId` is -1, the renderer falls back to identity, and the body jumps
 to the origin. See GUIDE.md § Concave collision.
 
-**`rgba`'s alpha is ignored.** The renderer draws every geom opaque. To hide something, delete it.
+**`rgba`'s alpha hides nothing from the physics.** Alpha below 1 draws a geom translucent
+(`SceneLayer.tsx`, depthWrite off), and 0 draws nothing, but the geom still collides and has mass.
+To get rid of something, delete it.
 
 **Some presets are generated, and the generator owns the code too.** `scripts/gen_california_relief.py`
 emits `src/presets/californiaRelief.ts` — and carries that module's *TypeScript builder* as its output
