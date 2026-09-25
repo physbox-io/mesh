@@ -27,6 +27,7 @@ import * as THREE from 'three';
 import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js';
 import { exportThreeMf, type ThreeMfMesh } from './utils/threeMfExporter';
 import { simplifyGeomMesh, toRenderVertices } from './utils/simplifyMesh';
+import { sliderSpan, offsetSpan, lengthSpan } from './utils/sliderSpan';
 import { loadCompiler, compileSCAD, isCompilerReady, setScadCompileListener } from './utils/openscad';
 import { getStickyRotation } from './utils/geom';
 import { csgSourceGeoms, csgHashOf, collisionModeOf, CSG_DEFAULT_SECTORS } from './utils/csg';
@@ -3289,9 +3290,7 @@ function App() {
                       />
                     </div>
                     <RangeInput 
-                      min="-10" 
-                      max="10" 
-                      step="0.001" 
+                      {...offsetSpan(selectedNode.pos[0])}
                       className="w-full accent-blue-500 cursor-pointer" 
                       value={selectedNode.pos[0]} 
                       onChange={(v) => handleMove(0, v)} 
@@ -3309,9 +3308,7 @@ function App() {
                       />
                     </div>
                     <RangeInput 
-                      min="-10" 
-                      max="10" 
-                      step="0.001" 
+                      {...offsetSpan(selectedNode.pos[1])}
                       className="w-full accent-blue-500 cursor-pointer" 
                       value={selectedNode.pos[1]} 
                       onChange={(v) => handleMove(1, v)} 
@@ -3341,9 +3338,7 @@ function App() {
                           />
                         </div>
                         <RangeInput
-                          min="0"
-                          max="10"
-                          step="0.001"
+                          {...offsetSpan(displayZ)}
                           className="w-full accent-blue-500 cursor-pointer"
                           value={displayZ}
                           onChange={(v) => handleMove(2, v + centroidZ)}
@@ -3444,11 +3439,9 @@ function App() {
                             <label className="text-xs font-medium text-slate-500 flex justify-between">Radius <SliderValue value={geom.size[0]} onChange={(v) => {
                                 const r = v;
                                 updateNodeGeom(selectedNode.id, { size: [r] }, activeIndex);
-                              }} decimals={2} unit="m" min={0.05} max={2.0} /></label>
+                              }} decimals={2} unit="m" min={0.01} /></label>
                             <RangeInput 
-                              min="0.05" 
-                              max="2.0" 
-                              step="0.01" 
+                              {...lengthSpan(geom.size[0])}
                               value={geom.size[0]}
                               onChange={(v) => {
                                 const r = v;
@@ -3465,11 +3458,9 @@ function App() {
                               <label className="text-xs font-medium text-slate-500 flex justify-between">Base Width (X) <SliderValue value={selectedNode.width || 2.0} onChange={(v) => {
                                   const val = v;
                                   updateWedgeParams(selectedNode.id, { width: val });
-                                }} decimals={2} unit="m" min={0.5} max={5.0} /></label>
+                                }} decimals={2} unit="m" min={0.01} /></label>
                               <RangeInput 
-                                min="0.5" 
-                                max="5.0" 
-                                step="0.05" 
+                                {...lengthSpan(selectedNode.width || 2.0)}
                                 value={selectedNode.width || 2.0}
                                 onChange={(v) => {
                                   const val = v;
@@ -3482,11 +3473,9 @@ function App() {
                               <label className="text-xs font-medium text-slate-500 flex justify-between">Depth (Y) <SliderValue value={selectedNode.depth || 1.0} onChange={(v) => {
                                   const val = v;
                                   updateWedgeParams(selectedNode.id, { depth: val });
-                                }} decimals={2} unit="m" min={0.2} max={4.0} /></label>
+                                }} decimals={2} unit="m" min={0.01} /></label>
                               <RangeInput 
-                                min="0.2" 
-                                max="4.0" 
-                                step="0.05" 
+                                {...lengthSpan(selectedNode.depth || 1.0)}
                                 value={selectedNode.depth || 1.0}
                                 onChange={(v) => {
                                   const val = v;
@@ -3499,11 +3488,9 @@ function App() {
                               <label className="text-xs font-medium text-slate-500 flex justify-between">Height (Z) <SliderValue value={selectedNode.height || 0.5} onChange={(v) => {
                                   const val = v;
                                   updateWedgeParams(selectedNode.id, { height: val });
-                                }} decimals={2} unit="m" min={0.1} max={3.0} /></label>
+                                }} decimals={2} unit="m" min={0.01} /></label>
                               <RangeInput 
-                                min="0.1" 
-                                max="3.0" 
-                                step="0.05" 
+                                {...lengthSpan(selectedNode.height || 0.5)}
                                 value={selectedNode.height || 0.5}
                                 onChange={(v) => {
                                   const val = v;
@@ -3538,11 +3525,9 @@ function App() {
                               <label className="text-xs font-medium text-slate-500 flex justify-between">Base Width (X) <SliderValue value={selectedNode.width || 0.5} onChange={(v) => {
                                   const val = v;
                                   updatePyramidParams(selectedNode.id, { width: val });
-                                }} decimals={2} unit="m" min={0.1} max={3.0} /></label>
+                                }} decimals={2} unit="m" min={0.01} /></label>
                               <RangeInput 
-                                min="0.1" 
-                                max="3.0" 
-                                step="0.01" 
+                                {...lengthSpan(selectedNode.width || 0.5)}
                                 value={selectedNode.width || 0.5}
                                 onChange={(v) => {
                                   const val = v;
@@ -3555,11 +3540,9 @@ function App() {
                               <label className="text-xs font-medium text-slate-500 flex justify-between">Base Depth (Y) <SliderValue value={selectedNode.depth || 0.5} onChange={(v) => {
                                   const val = v;
                                   updatePyramidParams(selectedNode.id, { depth: val });
-                                }} decimals={2} unit="m" min={0.1} max={3.0} /></label>
+                                }} decimals={2} unit="m" min={0.01} /></label>
                               <RangeInput 
-                                min="0.1" 
-                                max="3.0" 
-                                step="0.01" 
+                                {...lengthSpan(selectedNode.depth || 0.5)}
                                 value={selectedNode.depth || 0.5}
                                 onChange={(v) => {
                                   const val = v;
@@ -3572,11 +3555,9 @@ function App() {
                               <label className="text-xs font-medium text-slate-500 flex justify-between">Height (Z) <SliderValue value={selectedNode.height || 0.5} onChange={(v) => {
                                   const val = v;
                                   updatePyramidParams(selectedNode.id, { height: val });
-                                }} decimals={2} unit="m" min={0.1} max={3.0} /></label>
+                                }} decimals={2} unit="m" min={0.01} /></label>
                               <RangeInput 
-                                min="0.1" 
-                                max="3.0" 
-                                step="0.01" 
+                                {...lengthSpan(selectedNode.height || 0.5)}
                                 value={selectedNode.height || 0.5}
                                 onChange={(v) => {
                                   const val = v;
@@ -3594,11 +3575,9 @@ function App() {
                               <label className="text-xs font-medium text-slate-500 flex justify-between">Radius <SliderValue value={selectedNode.radius || 0.3} onChange={(v) => {
                                   const val = v;
                                   updateConeParams(selectedNode.id, { radius: val });
-                                }} decimals={2} unit="m" min={0.05} max={2.0} /></label>
+                                }} decimals={2} unit="m" min={0.01} /></label>
                               <RangeInput 
-                                min="0.05" 
-                                max="2.0" 
-                                step="0.01" 
+                                {...lengthSpan(selectedNode.radius || 0.3)}
                                 value={selectedNode.radius || 0.3}
                                 onChange={(v) => {
                                   const val = v;
@@ -3611,11 +3590,9 @@ function App() {
                               <label className="text-xs font-medium text-slate-500 flex justify-between">Height <SliderValue value={selectedNode.height || 0.6} onChange={(v) => {
                                   const val = v;
                                   updateConeParams(selectedNode.id, { height: val });
-                                }} decimals={2} unit="m" min={0.1} max={3.0} /></label>
+                                }} decimals={2} unit="m" min={0.01} /></label>
                               <RangeInput 
-                                min="0.1" 
-                                max="3.0" 
-                                step="0.01" 
+                                {...lengthSpan(selectedNode.height || 0.6)}
                                 value={selectedNode.height || 0.6}
                                 onChange={(v) => {
                                   const val = v;
@@ -3633,11 +3610,9 @@ function App() {
                               <label className="text-xs font-medium text-slate-500 flex justify-between">Major Radius (Ring) <SliderValue value={selectedNode.majorRadius || 0.4} onChange={(v) => {
                                   const val = v;
                                   updateTorusParams(selectedNode.id, { majorRadius: val });
-                                }} decimals={2} unit="m" min={0.1} max={3.0} /></label>
+                                }} decimals={2} unit="m" min={0.01} /></label>
                               <RangeInput 
-                                min="0.1" 
-                                max="3.0" 
-                                step="0.01" 
+                                {...lengthSpan(selectedNode.majorRadius || 0.4)}
                                 value={selectedNode.majorRadius || 0.4}
                                 onChange={(v) => {
                                   const val = v;
@@ -3650,11 +3625,9 @@ function App() {
                               <label className="text-xs font-medium text-slate-500 flex justify-between">Tube Radius <SliderValue value={selectedNode.tubeRadius || 0.1} onChange={(v) => {
                                   const val = v;
                                   updateTorusParams(selectedNode.id, { tubeRadius: val });
-                                }} decimals={2} unit="m" min={0.02} max={1.0} /></label>
+                                }} decimals={2} unit="m" min={0.01} /></label>
                               <RangeInput 
-                                min="0.02" 
-                                max="1.0" 
-                                step="0.01" 
+                                {...lengthSpan(selectedNode.tubeRadius || 0.1)}
                                 value={selectedNode.tubeRadius || 0.1}
                                 onChange={(v) => {
                                   const val = v;
@@ -3672,11 +3645,10 @@ function App() {
                               <label className="text-xs font-medium text-slate-500 flex justify-between">Inner Radius <SliderValue value={selectedNode.innerRadius || 0.2} onChange={(v) => {
                                   const val = v;
                                   updateTubeParams(selectedNode.id, { innerRadius: val });
-                                }} decimals={2} unit="m" min={0.02} /></label>
+                                }} decimals={2} unit="m" min={0.01} /></label>
                               <RangeInput 
-                                min="0.02" 
-                                max={selectedNode.outerRadius ? selectedNode.outerRadius - 0.01 : 0.29} 
-                                step="0.01" 
+                                {...lengthSpan(selectedNode.innerRadius || 0.2)}
+                                max={selectedNode.outerRadius ? selectedNode.outerRadius - 0.01 : 0.29}
                                 value={selectedNode.innerRadius || 0.2} 
                                 onChange={(v) => {
                                   const val = v;
@@ -3689,11 +3661,10 @@ function App() {
                               <label className="text-xs font-medium text-slate-500 flex justify-between">Outer Radius <SliderValue value={selectedNode.outerRadius || 0.3} onChange={(v) => {
                                   const val = v;
                                   updateTubeParams(selectedNode.id, { outerRadius: val });
-                                }} decimals={2} unit="m" max={2.0} /></label>
+                                }} decimals={2} unit="m" /></label>
                               <RangeInput 
-                                min={selectedNode.innerRadius ? selectedNode.innerRadius + 0.01 : 0.21} 
-                                max="2.0" 
-                                step="0.01" 
+                                {...lengthSpan(selectedNode.outerRadius || 0.3)}
+                                min={selectedNode.innerRadius ? selectedNode.innerRadius + 0.01 : 0.21}
                                 value={selectedNode.outerRadius || 0.3} 
                                 onChange={(v) => {
                                   const val = v;
@@ -3706,11 +3677,9 @@ function App() {
                               <label className="text-xs font-medium text-slate-500 flex justify-between">Height (Z) <SliderValue value={selectedNode.height || 0.5} onChange={(v) => {
                                   const val = v;
                                   updateTubeParams(selectedNode.id, { height: val });
-                                }} decimals={2} unit="m" min={0.1} max={3.0} /></label>
+                                }} decimals={2} unit="m" min={0.01} /></label>
                               <RangeInput 
-                                min="0.1" 
-                                max="3.0" 
-                                step="0.01" 
+                                {...lengthSpan(selectedNode.height || 0.5)}
                                 value={selectedNode.height || 0.5}
                                 onChange={(v) => {
                                   const val = v;
@@ -3728,11 +3697,9 @@ function App() {
                               <label className="text-xs font-medium text-slate-500 flex justify-between">Track Width <SliderValue value={selectedNode.curveWidth || 0.5} onChange={(v) => {
                                   const val = v;
                                   updateCurveParams(selectedNode.id, { width: val });
-                                }} decimals={2} unit="m" min={0.1} max={2.0} /></label>
+                                }} decimals={2} unit="m" min={0.01} /></label>
                               <RangeInput
-                                min="0.1"
-                                max="2.0"
-                                step="0.01"
+                                {...lengthSpan(selectedNode.curveWidth || 0.5)}
                                 value={selectedNode.curveWidth || 0.5}
                                 onChange={(v) => {
                                   const val = v;
@@ -3745,11 +3712,9 @@ function App() {
                               <label className="text-xs font-medium text-slate-500 flex justify-between">Thickness <SliderValue value={selectedNode.curveThickness || 0.06} onChange={(v) => {
                                   const val = v;
                                   updateCurveParams(selectedNode.id, { thickness: val });
-                                }} decimals={2} unit="m" min={0.02} max={0.4} /></label>
+                                }} decimals={2} unit="m" min={0.01} /></label>
                               <RangeInput
-                                min="0.02"
-                                max="0.4"
-                                step="0.01"
+                                {...lengthSpan(selectedNode.curveThickness || 0.06)}
                                 value={selectedNode.curveThickness || 0.06}
                                 onChange={(v) => {
                                   const val = v;
@@ -3859,11 +3824,9 @@ function App() {
                               <label className="text-xs font-medium text-slate-500 flex justify-between">Radius X <SliderValue value={geom.size[0]} onChange={(v) => {
                                   const val = v;
                                   updateNodeGeom(selectedNode.id, { size: [val, geom.size[1], geom.size[2]] }, activeIndex);
-                                }} decimals={2} unit="m" min={0.05} max={2.0} /></label>
+                                }} decimals={2} unit="m" min={0.01} /></label>
                               <RangeInput 
-                                min="0.05" 
-                                max="2.0" 
-                                step="0.01" 
+                                {...lengthSpan(geom.size[0])}
                                 value={geom.size[0]}
                                 onChange={(v) => {
                                   const val = v;
@@ -3876,11 +3839,9 @@ function App() {
                               <label className="text-xs font-medium text-slate-500 flex justify-between">Radius Y <SliderValue value={geom.size[1]} onChange={(v) => {
                                   const val = v;
                                   updateNodeGeom(selectedNode.id, { size: [geom.size[0], val, geom.size[2]] }, activeIndex);
-                                }} decimals={2} unit="m" min={0.05} max={2.0} /></label>
+                                }} decimals={2} unit="m" min={0.01} /></label>
                               <RangeInput 
-                                min="0.05" 
-                                max="2.0" 
-                                step="0.01" 
+                                {...lengthSpan(geom.size[1])}
                                 value={geom.size[1]}
                                 onChange={(v) => {
                                   const val = v;
@@ -3893,11 +3854,9 @@ function App() {
                               <label className="text-xs font-medium text-slate-500 flex justify-between">Radius Z <SliderValue value={geom.size[2]} onChange={(v) => {
                                   const val = v;
                                   updateNodeGeom(selectedNode.id, { size: [geom.size[0], geom.size[1], val] }, activeIndex);
-                                }} decimals={2} unit="m" min={0.05} max={2.0} /></label>
+                                }} decimals={2} unit="m" min={0.01} /></label>
                               <RangeInput 
-                                min="0.05" 
-                                max="2.0" 
-                                step="0.01" 
+                                {...lengthSpan(geom.size[2])}
                                 value={geom.size[2]}
                                 onChange={(v) => {
                                   const val = v;
@@ -3915,11 +3874,9 @@ function App() {
                               <label className="text-xs font-medium text-slate-500 flex justify-between">Width (X) <SliderValue value={geom.size[0]} onChange={(v) => {
                                   const val = v;
                                   updateNodeGeom(selectedNode.id, { size: [val, geom.size[1], geom.size[2]] }, activeIndex);
-                                }} decimals={2} unit="m" min={0.05} max={2.0} /></label>
+                                }} decimals={2} unit="m" min={0.01} /></label>
                               <RangeInput 
-                                min="0.05" 
-                                max="2.0" 
-                                step="0.01" 
+                                {...lengthSpan(geom.size[0])}
                                 value={geom.size[0]}
                                 onChange={(v) => {
                                   const val = v;
@@ -3932,11 +3889,9 @@ function App() {
                               <label className="text-xs font-medium text-slate-500 flex justify-between">Depth (Y) <SliderValue value={geom.size[1]} onChange={(v) => {
                                   const val = v;
                                   updateNodeGeom(selectedNode.id, { size: [geom.size[0], val, geom.size[2]] }, activeIndex);
-                                }} decimals={2} unit="m" min={0.05} max={2.0} /></label>
+                                }} decimals={2} unit="m" min={0.01} /></label>
                               <RangeInput 
-                                min="0.05" 
-                                max="2.0" 
-                                step="0.01" 
+                                {...lengthSpan(geom.size[1])}
                                 value={geom.size[1]}
                                 onChange={(v) => {
                                   const val = v;
@@ -3949,11 +3904,9 @@ function App() {
                               <label className="text-xs font-medium text-slate-500 flex justify-between">Height (Z) <SliderValue value={geom.size[2]} onChange={(v) => {
                                   const val = v;
                                   updateNodeGeom(selectedNode.id, { size: [geom.size[0], geom.size[1], val] }, activeIndex);
-                                }} decimals={2} unit="m" min={0.05} max={2.0} /></label>
+                                }} decimals={2} unit="m" min={0.01} /></label>
                               <RangeInput 
-                                min="0.05" 
-                                max="2.0" 
-                                step="0.01" 
+                                {...lengthSpan(geom.size[2])}
                                 value={geom.size[2]}
                                 onChange={(v) => {
                                   const val = v;
@@ -3973,11 +3926,9 @@ function App() {
                                   updateNodeGeom(selectedNode.id, { 
                                     size: geom.size[1] !== undefined ? [val, geom.size[1]] : [val] 
                                   }, activeIndex);
-                                }} decimals={3} unit="m" min={0.01} max={0.8} /></label>
+                                }} decimals={3} unit="m" min={0.01} /></label>
                               <RangeInput 
-                                min="0.01" 
-                                max="0.8" 
-                                step="0.005" 
+                                {...lengthSpan(geom.size[0])}
                                 value={geom.size[0]}
                                 onChange={(v) => {
                                   const val = v;
@@ -3993,11 +3944,9 @@ function App() {
                                 <label className="text-xs font-medium text-slate-500 flex justify-between">Length (Half-Height) <SliderValue value={geom.size[1]} onChange={(v) => {
                                     const val = v;
                                     updateNodeGeom(selectedNode.id, { size: [geom.size[0], val] }, activeIndex);
-                                  }} decimals={2} unit="m" min={0.05} max={3.0} /></label>
+                                  }} decimals={2} unit="m" min={0.01} /></label>
                                 <RangeInput 
-                                  min="0.05" 
-                                  max="3.0" 
-                                  step="0.01" 
+                                  {...lengthSpan(geom.size[1])}
                                   value={geom.size[1]}
                                   onChange={(v) => {
                                     const val = v;
@@ -4032,12 +3981,10 @@ function App() {
                                         fromto[2] + dirZ * scale
                                       ];
                                       updateNodeGeom(selectedNode.id, { fromto: newFromto }, activeIndex);
-                                    }} decimals={2} unit="m" min={0.1} max={5.0} />
+                                    }} decimals={2} unit="m" min={0.01} />
                                   </label>
                                   <RangeInput 
-                                    min="0.1" 
-                                    max="5.0" 
-                                    step="0.05" 
+                                    {...lengthSpan(currentLength)}
                                     value={currentLength} 
                                     onChange={(v) => {
                                       const newVal = v;
@@ -4677,7 +4624,10 @@ function App() {
                     {(() => {
                       const pos = geom.pos || [0, 0, 0];
                       return (
-                        <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-3">
+                        // Folded until opened: most bodies never move a sub-geom off its origin.
+                        // The class is only the starting state; the header click toggles it (see
+                        // the collapse effect), and React leaves it alone while the prop is unchanged.
+                        <div className="is-collapsed p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-3">
                           <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 flex items-center gap-1.5">
                             <span className="flex items-center gap-1">📍 Geom Position Offset</span>
                             <DocsInfoButton tab="offset" />
@@ -4687,11 +4637,9 @@ function App() {
                               <label className="text-xs font-medium text-slate-500 flex justify-between">X Offset <SliderValue value={pos[0]} onChange={(v) => {
                                   const val = v;
                                   updateNodeGeom(selectedNode.id, { pos: [val, pos[1], pos[2]] }, activeIndex);
-                                }} decimals={3} unit="m" min={-1.0} max={1.0} /></label>
+                                }} decimals={3} unit="m" /></label>
                               <RangeInput 
-                                min="-1.0" 
-                                max="1.0" 
-                                step="0.005" 
+                                {...sliderSpan(pos[0], -1, 1)}
                                 value={pos[0]}
                                 onChange={(v) => {
                                   const val = v;
@@ -4704,11 +4652,9 @@ function App() {
                               <label className="text-xs font-medium text-slate-500 flex justify-between">Y Offset <SliderValue value={pos[1]} onChange={(v) => {
                                   const val = v;
                                   updateNodeGeom(selectedNode.id, { pos: [pos[0], val, pos[2]] }, activeIndex);
-                                }} decimals={3} unit="m" min={-1.0} max={1.0} /></label>
+                                }} decimals={3} unit="m" /></label>
                               <RangeInput 
-                                min="-1.0" 
-                                max="1.0" 
-                                step="0.005" 
+                                {...sliderSpan(pos[1], -1, 1)}
                                 value={pos[1]}
                                 onChange={(v) => {
                                   const val = v;
@@ -4721,11 +4667,9 @@ function App() {
                               <label className="text-xs font-medium text-slate-500 flex justify-between">Z Offset <SliderValue value={pos[2]} onChange={(v) => {
                                   const val = v;
                                   updateNodeGeom(selectedNode.id, { pos: [pos[0], pos[1], val] }, activeIndex);
-                                }} decimals={3} unit="m" min={-1.0} max={1.0} /></label>
+                                }} decimals={3} unit="m" /></label>
                               <RangeInput 
-                                min="-1.0" 
-                                max="1.0" 
-                                step="0.005" 
+                                {...sliderSpan(pos[2], -1, 1)}
                                 value={pos[2]}
                                 onChange={(v) => {
                                   const val = v;
