@@ -1570,11 +1570,12 @@ export interface CsgResult {
 const MAX_COMPILE_ATTEMPTS = 3;
 
 /**
- * How much of its hull a rounded body must fill to collide as that hull. A
- * rounded box is ~0.99; an L-bracket ~0.6, and colliding as its hull would
- * fill in the inside of the L.
+ * How much of its hull a rounded body must fill to collide as that hull — the
+ * same line an ordinary mesh body is decomposed below (SOLIDITY_DECOMPOSE_BELOW
+ * in convexDecomposition.ts). A rounded box is ~0.99; an L-bracket ~0.6, and a
+ * plate with a hole ~0.91, and colliding as either's hull would fill it in.
  */
-const ROUNDED_HULL_SOLIDITY = 0.9;
+const ROUNDED_HULL_SOLIDITY = 0.92;
 
 /**
  * Evaluates a node's boolean program and builds the derived geoms for it.
@@ -1715,12 +1716,30 @@ export async function evaluateNodeCsg(node: SceneNode): Promise<CsgResult | null
   // collide as its source primitives — the square box, corners and all, which
   // is the one thing rounding it was meant to change. When the rounded solid
   // is near enough convex, let it collide as itself (MuJoCo hulls it anyway).
+  //
+  // And when it is not near enough convex — a plate with a hole in its OpenSCAD
+  // source, where no negative says where the hole is, so there is no axis to
+  // slice around — it is broken into convex pieces the way any other mesh body
+  // is (utils/convexDecomposition.ts), rather than hulled, which would fill the
+  // hole, or left to its square primitives.
   if (mode === 'primitives' && requested === 'auto' && hasEdgeRounds(node)) {
     const hull = convexHullOf(chunk3(zup))?.volume ?? 0;
+    hullVolume = hull;
     if (hull > 0 && volume / hull >= ROUNDED_HULL_SOLIDITY) {
       return { hash, scad, volume, hullVolume: hull, centroid, mode: 'hull', geoms: [{ ...visual, mass: totalMass }] };
     }
-    hullVolume = hull;
+    try {
+      const { hullBudget, solidityOf } = await import('./convexDecomposition');
+      const { decomposeMeshOffThread } = await import('./vhacdWorkerClient');
+      const pieces = await decomposeMeshOffThread(centeredZup, compiled.faces, { maxHulls: hullBudget(solidityOf(volume, hull)) });
+      const usable = usableColliderHulls(pieces);
+      if (usable.length >= 2) {
+        colliders = hullsToColliderGeoms(usable, baseName, colliderTemplateOf(template, rgba), totalMass);
+        return { hash, scad, volume, hullVolume: hull, centroid, mode: 'decompose', geoms: [{ ...visual, role: 'visual', mass: 0 }, ...colliders] };
+      }
+    } catch {
+      // Timed out or no worker: fall through and collide as the primitives.
+    }
   }
 
   if (mode === 'decompose') {

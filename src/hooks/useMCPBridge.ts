@@ -943,6 +943,12 @@ export function useMCPBridge() {
               throw new Error(`Failed to compile SCAD: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`);
             }
             store.updateNodeScad(targetId, updates.scad, compiled, false);
+            // A part with a cut or a rounding is a boolean over this mesh, and
+            // the caller is told ok:true now — so build it now, as below.
+            if (findNodeInScene(useStore.getState().sceneGraph.nodes, targetId)?.csgEnabled) {
+              await compileCsgNodes(true);
+              await useStore.getState().recompile(useStore.getState().sceneGraph, undefined, false, true);
+            }
           } else {
             store.updateNode(targetId, updates);
             // An update that touches a boolean body (its geoms, its collision

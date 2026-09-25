@@ -35,7 +35,7 @@ import { DEFAULT_HOLD_STEPS, isBreakable, weldKey } from './utils/breakThreshold
 import { isDentable, needsConversionForDenting } from './utils/dentMesh';
 import { CUSTOM_DENT, CUSTOM_SHATTER, DEFORM_MATERIALS, deformMaterial, dentFields, estimateBodyMass, materialUpdates, shatterFields } from './utils/deformMaterials';
 import { collidersAreStale, solidMeshGeoms } from './utils/convexDecomposition';
-import { useCsgAutoCompile } from './hooks/useCsgCompile';
+import { useCsgAutoCompile, compileCsgNodes } from './hooks/useCsgCompile';
 import { PRESETS } from './presets/presetScenes';
 import { makePresetNoteCard, type NoteCard } from './utils/noteCards';
 import { physicsGlobals, type CopilotMessage } from './physicsGlobals';
@@ -1436,6 +1436,10 @@ function App() {
     try {
       const compiled = await compileSCAD(scadText);
       useStore.getState().updateNodeScad(selectedNode.id, scadText, compiled);
+      // A part with a cut or a rounding is a boolean over this mesh: build it
+      // now rather than leave it to the debounced auto-compiler, which does
+      // not reliably pick up a source change (see compileCsgNodes).
+      if (selectedNode.csgEnabled) await compileCsgNodes();
     } catch (e) {
       console.error('OpenSCAD Compilation Error:', e);
       setScadError((e as Error).message || 'Compilation failed.');

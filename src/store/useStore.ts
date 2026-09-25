@@ -4083,7 +4083,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     node.geoms = node.geoms.filter((_: SceneGeom, i: number) => i !== geomIndex);
     // Losing the last boolean operator leaves an ordinary compound body; drop
     // the derived mesh with it so the primitives come back into view.
-    if (node.csgEnabled && !node.geoms.some((g: SceneGeom) => !g.csgDerived && (g.csg === 'difference' || g.csg === 'intersection'))) {
+    if (node.csgEnabled && !hasBooleanOps(node)) {
       node.geoms = node.geoms.filter((g: SceneGeom) => !g.csgDerived);
       node.csgEnabled = false;
       delete node.csgHash;
@@ -4170,6 +4170,9 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     // the wrong shape. The auto-compiler has already queued the right one.
     const current = findNode(get().sceneGraph.nodes, nodeId);
     if (!current || collisionHashOf(current) !== result.hash) return;
+    // Nor onto a body that has become a boolean while this ran (rounded, or
+    // cut): its colliders come from its boolean, and these would sit on top.
+    if (current.csgEnabled) return;
     const newScene = cloneSceneGraph(get().sceneGraph);
     const node = findNode(newScene.nodes, nodeId);
     if (!node) return;
@@ -4792,6 +4795,10 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
      * the other thing we do not want.
      */
     const token = ++recompileToken;
+    // The scene as it stood when this build was asked for — see
+    // graphAtBuildStart below for why it has to be taken here, before the
+    // debounce, when the caller hands in the scene to build.
+    const graphAtCall = get().sceneGraph;
     // Counted from the CALL, not from the build: the debounce below is fifty
     // milliseconds, and the undo snapshot is offered for flushing on the very
     // next tick. Counting any later and the snapshot is gone before the change
@@ -4876,8 +4883,15 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
      * A build is authoritative about the model it produced, not about every
      * other field of a node, so if the scene has moved on underneath us we keep
      * the newer one and install only the compiled model.
+     *
+     * "Underneath us" counts from the moment the scene being built was chosen.
+     * A caller that passes one chose it at the call, before the debounce above;
+     * taking the snapshot after the debounce let any edit made in those fifty
+     * milliseconds pass for the starting state, and the build then wrote its
+     * older scene straight over it. That is how a rounding dropped by the
+     * compiler (keepFoundEdges) came back a moment later.
      */
-    const graphAtBuildStart = get().sceneGraph;
+    const graphAtBuildStart = overrideScene ? graphAtCall : get().sceneGraph;
     // Set once the worker is holding the model this build made; released when
     // that model is on screen.
     let heldClient: PhysicsWorkerClient | null = null;
