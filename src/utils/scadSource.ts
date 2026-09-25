@@ -104,14 +104,30 @@ export function parseScadVariables(code: string): ScadVariable[] {
       if (match) {
         const name = match[1];
         const value = parseFloat(match[2]);
-        const parsedStep = match[4] ? parseFloat(match[4]) : undefined;
-
-        const min = value === 0 ? -0.2 : value - Math.abs(value) * 0.2;
-        const max = value === 0 ? 0.2 : value + Math.abs(value) * 0.2;
-        let step = parsedStep;
-        if (step === undefined) {
-          const range = max - min;
-          step = parseFloat((range / 100).toPrecision(2));
+        // An OpenSCAD Customizer comment, `// [min:step:max]` or `// [min:max]`,
+        // is the slider: its bounds and its step. The step alone used to be
+        // taken and put inside a ±20% window round the value, so
+        // `sx = 0.1; // [0.1:0.05:3.0]` got a 0.08-0.12 slider whose only
+        // reachable value was 0.08 and which could not be moved.
+        const declared = match[3] !== undefined && match[5] !== undefined;
+        let min: number;
+        let max: number;
+        let step: number | undefined;
+        if (declared) {
+          const lo = parseFloat(match[3]);
+          const hi = parseFloat(match[5]);
+          // A value written outside its own range still gets a slider that shows it.
+          min = Math.min(lo, hi, value);
+          max = Math.max(lo, hi, value);
+          step = match[4] !== undefined ? Math.abs(parseFloat(match[4])) : undefined;
+          // `[3:12]` with an integer value is a count, as it is in the Customizer.
+          if (step === undefined && [lo, hi, value].every(Number.isInteger)) step = 1;
+        } else {
+          min = value === 0 ? -0.2 : value - Math.abs(value) * 0.2;
+          max = value === 0 ? 0.2 : value + Math.abs(value) * 0.2;
+        }
+        if (!step || step > max - min) {
+          step = parseFloat(((max - min) / 100).toPrecision(2));
         }
 
         variables.push({

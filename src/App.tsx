@@ -6225,24 +6225,26 @@ function App() {
                             <div className="flex justify-between items-center text-xs">
                               <span className="font-mono text-slate-700 dark:text-slate-300 font-medium">{v.name}</span>
                               <span className="font-mono text-violet-600 dark:text-violet-400 font-bold bg-violet-50 dark:bg-violet-950/40 px-1.5 py-0.5 rounded border border-violet-100 dark:border-violet-900/50">
-                                {Number((slidingValues[v.name] ?? v.value).toFixed(2))}
+                                {Number((slidingValues[v.name] ?? v.value).toPrecision(4))}
                               </span>
                             </div>
                             <div className="flex items-center gap-2">
-                              <span className="text-[9px] text-slate-400 font-mono w-8 text-right">{Number(v.min.toFixed(2))}</span>
+                              <span className="text-[9px] text-slate-400 font-mono w-8 text-right">{Number(v.min.toPrecision(3))}</span>
                               <RangeInput
                                 min={v.min}
                                 max={v.max}
                                 step={v.step}
                                 value={slidingValues[v.name] ?? v.value}
                                 onChange={(next) => {
-                                  const val = Number(next.toFixed(2));
+                                  // Only the float noise off the step comes off: two decimals would turn
+                                  // a 5 mm value, written in metres, into 10 mm.
+                                  const val = Number(next.toPrecision(10));
                                   setSlidingValues(prev => ({ ...prev, [v.name]: val }));
                                   debouncedUpdateCode();
                                 }}
                                 className="flex-1 h-1 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-violet-600"
                               />
-                              <span className="text-[9px] text-slate-400 font-mono w-8">{Number(v.max.toFixed(2))}</span>
+                              <span className="text-[9px] text-slate-400 font-mono w-8">{Number(v.max.toPrecision(3))}</span>
                             </div>
                           </div>
                         ))}
