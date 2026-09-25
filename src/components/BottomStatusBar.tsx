@@ -98,13 +98,12 @@ const GESTURES: ModeChoice[] = [
 ];
 
 /*
- * One key, two operations, named for what each actually does. In a lattice, I
- * insets the selected faces. On a solid body there are no faces to pick, so it
- * bores in from the face under the pointer — and calling that "Inset" is how it
- * came to be expected to inset a face and seen to remove two instead.
+ * One key, said two ways. In a lattice, I insets the selected faces. On an
+ * ordinary body it insets the flat face under the pointer, which is then
+ * pushed in or pulled out; a curved surface has no face to inset, and is bored.
  */
 const LATTICE_INSET: ModeChoice = { key: 'I', label: 'Inset', gesture: 'inset', hint: 'Shrink the selected faces inside themselves, ringed by quads' };
-const BORE: ModeChoice = { key: 'I', label: 'Bore / pocket', gesture: 'inset', hint: 'Cut in from the face under the pointer, right through; P stops short with a floor, X/Y/Z picks a world axis' };
+const BODY_INSET: ModeChoice = { key: 'I', label: 'Inset face', gesture: 'inset', hint: 'Inset the flat face under the pointer, click, then push in for a pocket or pull out for a boss. On a curved surface it bores through' };
 
 /** Offered on its own, beside the gestures: a finishing step for any part that is not being sculpted or latticed. */
 const ROUND_EDGES: ModeChoice = { key: 'E', label: 'Round edges', gesture: 'round-edges', hint: 'Round or bevel edges of the selected part: click edges or faces, pick a size' };
@@ -258,7 +257,7 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
         NOTHING,
         ...(enterChoice ? [enterChoice] : []),
         ...(latticeNodeId ? LATTICE_TOOLS : []),
-        ...(canGesture ? [...GESTURES, latticeNodeId ? LATTICE_INSET : BORE] : []),
+        ...(canGesture ? [...GESTURES, latticeNodeId ? LATTICE_INSET : BODY_INSET] : []),
         ...(selectedNodeId && !latticeNodeId && !sculptNodeId ? [ROUND_EDGES] : []),
         ...MEASURE,
       ];

@@ -20,7 +20,7 @@ export const DOCS_TABS = [
   ]},
   { group: 'Modelling', items: [
     { id: 'lattice', label: '🔲 Lattice Modelling' },
-    { id: 'gestures', label: '⌨️ Scale, Bore & Modal Keys' },
+    { id: 'gestures', label: '⌨️ Scale, Inset & Modal Keys' },
   ]},
   { group: 'Fabrication', items: [
     { id: 'zeroing', label: '🎯 Machine Setup & Zeroing' },

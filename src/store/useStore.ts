@@ -15,7 +15,7 @@ import {
 } from '../utils/latticeMesh';
 import { latticeBoolean } from '../utils/latticeBoolean';
 import {
-  type CsgResult, type CutSpot, CSG_DEFAULT_SECTORS, scadForDisplay,
+  type CsgResult, type CutSpot, type FaceRegion, CSG_DEFAULT_SECTORS, scadForDisplay,
   cutGeometry, sourcePositiveBounds, reconcileCuts, pickCutSpot,
   hasBooleanOps, csgHashOf,
 } from '../utils/csg';
@@ -1204,7 +1204,10 @@ function reshapeCut(
   const newScene = cloneSceneGraph(get().sceneGraph);
   const node = findNode(newScene.nodes, nodeId);
   const geom = node?.geoms?.[geomIndex];
-  if (!node || !geom || geom.csg !== 'difference' || geom.csgDerived) return;
+  // A boss is a cut stood on the face rather than sunk into it: the same
+  // anchor, the same edits.
+  const isCut = geom?.csg === 'difference' || (geom?.csg === 'union' && !!geom.cutNormal);
+  if (!node || !geom || !isCut || geom.csgDerived) return;
   edit(geom);
   const next = cutGeometry(node, geom);
   if (next) Object.assign(geom, next);
@@ -1870,6 +1873,20 @@ export interface PhysicsState {
    * or -1.
    */
   addBodyCut: (nodeId: string, shape: 'cylinder' | 'box' | 'sphere', spot?: CutSpot) => number;
+  /**
+   * An inset face, pushed in or pulled out: a box or disk cut sized to a flat
+   * face (see flatFaceAt), sunk into it as a pocket or stood on it as a boss.
+   * `half` is the inset outline, in the region's own frame. `depth` is signed
+   * metres: negative into the part, positive out of it; `through` sinks it all
+   * the way, however thick the part is or becomes. With `index`, reshapes that
+   * feature instead of adding one. Returns the feature's geom index, or -1.
+   */
+  setFaceFeature: (
+    nodeId: string,
+    region: FaceRegion,
+    feature: { half: number[]; depth: number; through?: boolean },
+    index?: number,
+  ) => number;
   /** Moves a cut to another spot on the part, square to the surface there. */
   moveCutTo: (nodeId: string, geomIndex: number, spot: CutSpot) => void;
   /** Sets how deep a cut goes, in millimetres in from the surface; 0 goes through. */
@@ -3371,6 +3388,61 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     set({ sceneGraph: newScene });
     rebuildAfterGeomEdit(get, newScene, nodeId);
     return node.geoms.length - 1;
+  },
+
+  setFaceFeature: (nodeId, region, feature, index) => {
+    const raise = !feature.through && feature.depth > 0;
+    if (!feature.through && Math.abs(feature.depth) < 1e-7) return -1;
+    if (!findNode(get().sceneGraph.nodes, nodeId)) return -1;
+    get().prepareForDiscreteChange();
+    const newScene = cloneSceneGraph(get().sceneGraph);
+    const node = findNode(newScene.nodes, nodeId);
+    if (!node) return -1;
+    const geoms = [...(node.geoms || [])];
+    const existing = index !== undefined ? geoms[index] : undefined;
+    if (index !== undefined && !existing?.cutFace) return -1;
+
+    const round = (v: number) => +v.toFixed(6);
+    const [h0, h1] = [Math.max(1e-6, feature.half[0] ?? 0), Math.max(1e-6, feature.half[1] ?? feature.half[0] ?? 0)];
+    const sameKind = existing && (existing.csg === 'union') === raise;
+    const count = geoms.filter((g) => g.cutFace && !g.csgDerived && (g.csg === 'union') === raise).length;
+    const geom: SceneGeom = {
+      ...(existing ?? {}),
+      name: sameKind ? existing!.name : `${node.id}_${raise ? 'boss' : 'pocket'}${count + 1}`,
+      type: region.shape,
+      size: region.shape === 'box' ? [round(h0), round(h1), 0] : [round(h0), 0],
+      csg: raise ? 'union' : 'difference',
+      cutAt: region.at.map(round),
+      cutNormal: region.normal.map((v) => +v.toFixed(9)),
+      cutDepth: feature.through ? 0 : round(Math.abs(feature.depth)),
+      cutFace: true,
+    };
+    if (region.twist) geom.cutTwist = +region.twist.toFixed(9);
+    else delete geom.cutTwist;
+    // A pocket is red like every negative here. A boss is material, and is the
+    // part's colour: a body with no hole in it is not compiled at all, so the
+    // boss is drawn as a shape of its own and would otherwise be the default.
+    const own = geoms.find((g) => !g.csgDerived && !g.cutFace && (!g.csg || g.csg === 'union') && g.role !== 'visual');
+    if (!raise) geom.rgba = [0.9, 0.25, 0.35, 1];
+    else if (own?.rgba) geom.rgba = [...own.rgba];
+    else delete geom.rgba;
+
+    // Into the list BEFORE it is measured: a boss is left out of its own probe
+    // by identity, and the old one it replaces must not still be there to be
+    // measured from.
+    const at = existing ? index! : geoms.length;
+    geoms[at] = geom;
+    node.geoms = geoms;
+    const derived = cutGeometry(node, geom);
+    if (!derived) return -1;
+    Object.assign(geom, derived);
+
+    node.csgEnabled = true;
+    if (node.csgCollision === undefined) node.csgCollision = 'auto';
+    if (node.csgSectors === undefined) node.csgSectors = CSG_DEFAULT_SECTORS;
+    set({ sceneGraph: newScene, activeGeomIndex: at });
+    rebuildAfterGeomEdit(get, newScene, nodeId);
+    return at;
   },
 
   moveCutTo: (nodeId, geomIndex, spot) => reshapeCut(get, set, nodeId, geomIndex, 'cut-move', (geom) => {

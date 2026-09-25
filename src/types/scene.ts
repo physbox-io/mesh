@@ -158,8 +158,23 @@ export interface SceneGeom {
   cutNormal?: number[];
   /** The point on that surface the cut is centred on, in the body frame. */
   cutAt?: number[];
-  /** Depth in metres into the material from `cutAt`. 0 or absent cuts through. */
+  /**
+   * Depth in metres into the material from `cutAt`. 0 or absent cuts through.
+   * On a boss (a `union` geom with a `cutNormal`) it is the height it stands
+   * OUT of the surface instead, and is never through.
+   */
   cutDepth?: number;
+  /**
+   * How far a box cut is turned about its own line, in radians. The line alone
+   * leaves the turn arbitrary; a face feature sets it so the slot's width and
+   * breadth run along the face's own edges rather than at an angle to them.
+   */
+  cutTwist?: number;
+  /**
+   * Made by insetting a face (the I gesture): sized to the flat face it sits
+   * on, and re-opened by I on that face rather than joined by another.
+   */
+  cutFace?: boolean;
   /**
    * A modifier on a round cut: the hole is tapped. `pitch` is the thread pitch
    * in metres; the geom's own radius is the thread's MAJOR radius (the size a

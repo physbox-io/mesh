@@ -96,7 +96,11 @@ function CutRow({ node, geom, index }: {
   const through = !(geom.cutDepth && geom.cutDepth > 0);
   const size = geom.size || [];
   const at = geom.cutAt || [0, 0, 0];
-  const label = geom.type === 'cylinder' ? 'Hole' : geom.type === 'box' ? 'Slot' : 'Dish';
+  // A boss is a face feature pulled OUT: material added, standing on the face.
+  const boss = geom.csg === 'union';
+  const label = boss ? 'Boss'
+    : geom.cutFace ? 'Pocket'
+      : geom.type === 'cylinder' ? 'Hole' : geom.type === 'box' ? 'Slot' : 'Dish';
   // Measured against the material under this hole, exactly as the store does
   // when it derives the cutter — so a through hole in a stepped part reads as
   // the thickness it actually passes through, not the height of the whole part.
@@ -185,6 +189,15 @@ function CutRow({ node, geom, index }: {
 
         {/* Depth of the HOLE, measured into the material — never the length of
             the cutter, which is longer and is worked out for you. */}
+        {boss ? (
+          <CutField
+            label="High mm"
+            min={0.01}
+            value={mm(depth)}
+            title="How far the boss stands out of the face under its middle."
+            onChange={(v) => setCutDepth(node.id, index, Math.max(0.01, v))}
+          />
+        ) : (
         <CutField
           label="Deep mm"
           /*
@@ -199,8 +212,9 @@ function CutRow({ node, geom, index }: {
           title="How deep the cut goes, from the surface under the middle of the hole. It runs a little past: a flush cut is not reliably a solid."
           onChange={(v) => setCutDepth(node.id, index, v)}
         />
+        )}
 
-        {geom.type !== 'sphere' && (
+        {geom.type !== 'sphere' && !boss && (
           <button
             type="button"
             onClick={() => setCutDepth(node.id, index, through ? mm(depth) / 2 : 0)}
@@ -218,7 +232,7 @@ function CutRow({ node, geom, index }: {
         )}
       </div>
 
-      {geom.type === 'cylinder' && (
+      {geom.type === 'cylinder' && !boss && (
         <div className="flex gap-1 items-end">
           <label className="flex-1 min-w-0" title="Tap the hole. A bolt size sets the diameter, the coarse pitch and the thread form, so a part threads straight onto it.">
             <span className="block text-[9px] font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500">Thread</span>
@@ -296,7 +310,7 @@ export function CutControls({ node, disabled, disabledReason, compact }: {
   const bounds = sourcePositiveBounds(node);
   const cuts = (node.geoms || [])
     .map((geom, index) => ({ geom, index }))
-    .filter(({ geom }) => geom.csg === 'difference' && !geom.csgDerived);
+    .filter(({ geom }) => (geom.csg === 'difference' || (geom.csg === 'union' && geom.cutNormal)) && !geom.csgDerived);
 
   return (
     <div className="space-y-1.5">

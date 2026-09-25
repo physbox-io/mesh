@@ -473,7 +473,7 @@ api.setAngularVelocity([0, 15.0, 0], 'cart'); // Sets angular velocities`}
                   </div>
                   <div className="text-xs border-t border-slate-150 pt-3">
                     <strong className="text-slate-700">⌨️ Or press S in the viewport</strong>
-                    <p className="text-slate-500 mt-1">With a body selected, <kbd className="font-mono">S</kbd> scales it by pointer, <kbd className="font-mono">X</kbd>/<kbd className="font-mono">Y</kbd>/<kbd className="font-mono">Z</kbd> confines it to one axis, and <kbd className="font-mono">I</kbd> bores into it from the face under the pointer. Use the card when you want to type an exact figure. See <strong>Scale, Bore &amp; Modal Keys</strong>.</p>
+                    <p className="text-slate-500 mt-1">With a body selected, <kbd className="font-mono">S</kbd> scales it by pointer, <kbd className="font-mono">X</kbd>/<kbd className="font-mono">Y</kbd>/<kbd className="font-mono">Z</kbd> confines it to one axis, and <kbd className="font-mono">I</kbd> insets the face under the pointer. Use the card when you want to type an exact figure. See <strong>Scale, Inset &amp; Modal Keys</strong>.</p>
                   </div>
                   <div className="text-xs border-t border-slate-150 pt-3">
                     <strong className="text-slate-700">⚠️ Very small geoms</strong>
@@ -655,7 +655,7 @@ api.setAngularVelocity([0, 15.0, 0], 'cart'); // Sets angular velocities`}
 
             {tab === 'gestures' && (
               <div className="flex flex-col gap-4">
-                <h3 className="font-bold text-slate-800 text-lg flex items-center gap-1.5">⌨️ Scale, Bore &amp; Modal Keys</h3>
+                <h3 className="font-bold text-slate-800 text-lg flex items-center gap-1.5">⌨️ Scale, Inset &amp; Modal Keys</h3>
                 <div className="bg-amber-50 border border-amber-200/70 rounded-xl p-4 text-xs">
                   <strong className="text-slate-700">📐 Measuring: <kbd className="font-mono">D</kbd> for a distance, <kbd className="font-mono">A</kbd> for an angle</strong>
                   <p className="text-slate-500 mt-1">
@@ -669,14 +669,14 @@ api.setAngularVelocity([0, 15.0, 0], 'cart'); // Sets angular velocities`}
                   </p>
                 </div>
                 <p className="text-xs text-slate-600 leading-relaxed">
-                  Scale, bore and inset need a <strong>size</strong>. The key starts the operation and the pointer sizes
+                  Scale and inset need a <strong>size</strong>. The key starts the operation and the pointer sizes
                   it live. Nothing is held down while you move.
                 </p>
 
                 <div className="bg-slate-50 border border-slate-200/60 rounded-xl p-4 flex flex-col gap-3">
                   <div className="text-xs">
                     <strong className="text-slate-700">1. Press the key</strong>
-                    <p className="text-slate-500 mt-1"><kbd className="font-mono">S</kbd> to scale, <kbd className="font-mono">I</kbd> to bore (or, in the lattice tools, to inset). The gesture starts at 1× wherever the pointer is.</p>
+                    <p className="text-slate-500 mt-1"><kbd className="font-mono">S</kbd> to scale, <kbd className="font-mono">I</kbd> to inset. The gesture starts at 1× wherever the pointer is.</p>
                   </div>
                   <div className="text-xs border-t border-slate-150 pt-3">
                     <strong className="text-slate-700">2. Move the pointer</strong>
@@ -699,9 +699,10 @@ api.setAngularVelocity([0, 15.0, 0], 'cart'); // Sets angular velocities`}
                     <p className="text-slate-500 mt-1">Scales the selected body and everything parented under it (mesh vertices, primitive sizes, geom offsets and child positions), so an assembly keeps its shape. To type an exact figure instead, use the <strong>Scale</strong> card in the sidebar.</p>
                   </div>
                   <div className="text-xs border-t border-slate-150 pt-3">
-                    <strong className="text-slate-700">I on an ordinary body: a bore or a pocket</strong>
-                    <p className="text-slate-500 mt-1">This is not a face inset: a solid body has no faces to pick. It puts a scaled copy of the body's own shape inside it, marked as a boolean <strong>hole</strong>. The hole runs in from the face the pointer is on when you press <kbd className="font-mono">I</kbd>, and by default right through: a cylinder becomes a pipe, a box becomes a square tube. The red ghost is the hole. Move the pointer out to widen it.</p>
-                    <p className="text-slate-500 mt-1">Press <kbd className="font-mono">P</kbd> for a <strong>pocket</strong>: open on that face only, with a floor as thick as the walls, which makes a tray or a cup. Press <kbd className="font-mono">X</kbd>, <kbd className="font-mono">Y</kbd> or <kbd className="font-mono">Z</kbd> to run it along that world axis instead, opening on the side facing you; the same key again goes back to the face you pointed at. The hole is an ordinary geom afterwards, with its own size, position and operator. Deleting it gives the solid back.</p>
+                    <strong className="text-slate-700">I on an ordinary body: inset a face, then push or pull it</strong>
+                    <p className="text-slate-500 mt-1">Point at a flat face (a side of a box, the end of a cylinder, a flat region of a mesh) and press <kbd className="font-mono">I</kbd>. A blue outline of the face appears inside it; move the pointer towards the middle for a wider border. <strong>Click</strong>, then move along the face's line: push in for a <strong>pocket</strong> (all the way for right through), pull out for a <strong>boss</strong>. Click again to keep it.</p>
+                    <p className="text-slate-500 mt-1">The result is a cut listed under <strong>Cuts</strong> in the sidebar, with its own size and depth or height, and it follows the face when the part changes. <kbd className="font-mono">I</kbd> on the same face again re-opens it; <kbd className="font-mono">G</kbd> slides it; pulling it back flush removes it.</p>
+                    <p className="text-slate-500 mt-1">A curved surface has no face to inset, so there <kbd className="font-mono">I</kbd> bores a scaled copy of the whole body through it instead: a sphere or a pipe. <kbd className="font-mono">P</kbd> stops that short as a pocket with a floor, and <kbd className="font-mono">X</kbd>/<kbd className="font-mono">Y</kbd>/<kbd className="font-mono">Z</kbd> run it along a world axis.</p>
                   </div>
                   <div className="text-xs border-t border-slate-150 pt-3">
                     <strong className="text-slate-700">S and I inside the lattice tools</strong>
@@ -717,8 +718,8 @@ api.setAngularVelocity([0, 15.0, 0], 'cart'); // Sets angular velocities`}
                 <ol className="text-xs text-slate-600 leading-relaxed list-decimal ml-4 flex flex-col gap-1.5">
                   <li>Drop a <strong>cylinder</strong> into the scene and leave it selected.</li>
                   <li>Press <kbd className="font-mono">S</kbd>, pull the pointer out to make it taller and wider, click to keep it.</li>
-                  <li>Press <kbd className="font-mono">I</kbd> and move the pointer <em>out</em> until the red ghost is the bore you want. Click.</li>
-                  <li>The body is now a boolean: solid minus a copy of itself that runs right through it. Give it a moment to build, then look at the <strong>Boolean</strong> card in the sidebar to choose how it should collide.</li>
+                  <li>Point at its flat top and press <kbd className="font-mono">I</kbd>. Move the pointer in until the blue disk leaves the wall you want, and click.</li>
+                  <li>Push the pointer down the cylinder until the status bar says <em>right through</em>, and click. The body is now a boolean: solid minus a disk that runs right through it. Give it a moment to build, then look at the <strong>Boolean</strong> card in the sidebar to choose how it should collide.</li>
                 </ol>
               </div>
             )}

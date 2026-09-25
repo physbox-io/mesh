@@ -12,9 +12,13 @@
 // pointer to size it, click or Enter to keep it, Esc or right-click to put it
 // back, and X/Y/Z confine it to one axis on the way.
 //
-// I is not the lattice tool's face inset, although it shares the key: a solid
-// body has no faces to pick, only a shape to cut into. It bores in from the
-// face under the pointer, right through or, with P, as a pocket with a floor.
+// I insets a face. Over a FLAT face — a box's side, a cylinder's end, a flat
+// region of a mesh — it draws the face smaller inside itself, and a click then
+// pushes that in as a pocket or pulls it out as a boss: a cut geom sized to the
+// face (flatFaceAt, setFaceFeature), which follows the face as the part changes
+// and is re-opened by I on the same face. Over a curved surface there is no
+// face to inset, and it bores into the body instead, right through or, with P,
+// as a pocket with a floor.
 //
 // The preview is the SCENE, not the document. Scaling a real mesh means
 // rewriting every vertex and rebuilding its buffers, which is far too much to
@@ -29,7 +33,7 @@ import * as THREE from 'three';
 import { useStore, getPhysicsWorkerClient } from '../../store/useStore';
 import type { SceneNode } from '../../types/scene';
 import { scaleNodeTree, boreFactors, BORE_OVERSHOOT, type Bore } from '../../utils/scaleNode';
-import { pickCutSpot, type CutSpot } from '../../utils/csg';
+import { pickCutSpot, flatFaceAt, surfaceUnder, sourcePositiveBounds, type CutSpot, type FaceRegion } from '../../utils/csg';
 import { bodyPoseOf, toParentFrame } from './bodyPose';
 import { solveScaleToFit, type MateFeature } from '../../utils/mateSnap';
 import { bodyFeatures, neighbourFeatures, documentAxes, graphAxes } from '../../utils/mateFeatures';
@@ -44,8 +48,32 @@ interface Held {
   position: THREE.Vector3;
 }
 
+/** A face being inset, then pushed in or pulled out. */
+interface FaceGesture {
+  region: FaceRegion;
+  stage: 'inset' | 'depth';
+  /** The fraction of the face the inset keeps, across it. */
+  inset: number;
+  startInset: number;
+  /** Signed metres: out of the part is positive, into it negative. */
+  depth: number;
+  startDepth: number;
+  through: boolean;
+  /** Material under the middle of the face: how deep a pocket can go before it is through. */
+  thickness: number;
+  /** The feature being re-opened, or -1 for a new one. */
+  index: number;
+  /** Where along the face's line the pointer was when the depth stage began. */
+  from: number;
+  /** The face's middle and line, and the turn a cut there is drawn with, in the frame bodies are drawn in. */
+  at: THREE.Vector3;
+  normal: THREE.Vector3;
+  turn: THREE.Quaternion;
+  ghost: THREE.Mesh;
+}
+
 interface Gesture {
-  kind: 'scale' | 'inset' | 'move' | 'moveCut';
+  kind: 'scale' | 'inset' | 'move' | 'moveCut' | 'face';
   nodeId: string;
   /** Screen position of the body, and how far the pointer was from it. */
   centre: { x: number; y: number };
@@ -93,6 +121,7 @@ interface Gesture {
   eye?: THREE.Vector3;
   aim?: { axis: 0 | 1 | 2; side: 1 | -1 };
   pocket?: boolean;
+  face?: FaceGesture;
 }
 
 const AXES: Axis[] = ['x', 'y', 'z'];
@@ -184,6 +213,28 @@ const findNode = (nodes: SceneNode[], id: string): SceneNode | null => {
 const GHOST_MATERIAL = new THREE.MeshBasicMaterial({
   color: 0xef4444, transparent: true, opacity: 0.35, depthWrite: false,
 });
+/** Material being added rather than taken away: a boss. */
+const BOSS_MATERIAL = new THREE.MeshBasicMaterial({
+  color: 0x0ea5e9, transparent: true, opacity: 0.4, depthWrite: false,
+});
+/*
+ * The inset outline and a pocket are drawn THROUGH the part. A pocket is
+ * almost wholly inside the material, and an outline lies on the face, so drawn
+ * with depth testing the part hid the one and fought the other for the same
+ * pixels — a flickering sliver where the shape should be. A boss stands out of
+ * the part and needs neither.
+ */
+const OUTLINE_MATERIAL = new THREE.MeshBasicMaterial({
+  color: 0x0ea5e9, transparent: true, opacity: 0.3, depthWrite: false, depthTest: false,
+});
+const POCKET_MATERIAL = new THREE.MeshBasicMaterial({
+  color: 0xef4444, transparent: true, opacity: 0.3, depthWrite: false, depthTest: false,
+});
+const OUTLINE_EDGES = new THREE.LineBasicMaterial({ color: 0x0284c7, transparent: true, depthTest: false });
+const POCKET_EDGES = new THREE.LineBasicMaterial({ color: 0xdc2626, transparent: true, depthTest: false });
+
+/** Millimetres, for the status bar. */
+const mmText = (metres: number) => `${(metres * 1000).toFixed(1)} mm`;
 
 /**
  * How far around a body to look for a hole worth matching, when scaling it.
@@ -321,6 +372,76 @@ export const ObjectGestureController = () => {
     const state = gesture.current;
     if (!state) return;
 
+    if (state.kind === 'face' && state.face) {
+      const face = state.face;
+      const { region, ghost } = face;
+      const parent = ghost.parent;
+      if (!parent) return;
+      if (face.stage === 'inset') {
+        /*
+         * The inner face follows the pointer out from the middle of the face,
+         * in proportion: where the pointer started is the inset it started
+         * with, halfway in is half the size. The floor on the reference keeps
+         * a pointer that started on the middle from making every pixel a
+         * doubling.
+         */
+        const away = Math.hypot(pointer.current.x - state.centre.x, pointer.current.y - state.centre.y);
+        const reference = Math.max(48, state.radius);
+        face.inset = Math.min(0.98, Math.max(0.02, face.startInset * (1 + (away - state.radius) / reference)));
+      } else {
+        // Along the face's own line, read off the plane that contains it and
+        // faces the camera — the same way a held axis is read in a move.
+        const ray = rayIn(parent, pointer.current.x, pointer.current.y);
+        const toEye = ray.origin.clone().sub(face.at);
+        const across = toEye.sub(face.normal.clone().multiplyScalar(toEye.dot(face.normal)));
+        if (across.lengthSq() > 1e-12) {
+          const hit = ray.intersectPlane(new THREE.Plane().setFromNormalAndCoplanarPoint(across.normalize(), face.at), new THREE.Vector3());
+          if (hit) {
+            face.depth = face.startDepth + hit.sub(face.at).dot(face.normal) - face.from;
+            // Past the far side of the part is right through, and stays so
+            // however much further the pointer goes.
+            face.through = face.thickness > 0 && -face.depth >= face.thickness;
+          }
+        }
+      }
+
+      const half = region.half.map((h) => h * face.inset);
+      const [w, l] = region.shape === 'box' ? [2 * half[0], 2 * half[1]] : [2 * half[0], 2 * half[0]];
+      const extent = Math.max(w, l);
+      let length: number;
+      let middle: number;
+      const edges = ghost.children[0] as THREE.LineSegments | undefined;
+      if (face.stage === 'inset' || Math.abs(face.depth) < 1e-6) {
+        // A thin slab on the face: the outline to be.
+        length = Math.max(1e-5, extent * 0.005);
+        middle = length / 2;
+        ghost.material = OUTLINE_MATERIAL;
+        if (edges) edges.material = OUTLINE_EDGES;
+      } else if (face.depth > 0) {
+        length = face.depth;
+        middle = face.depth / 2;
+        ghost.material = BOSS_MATERIAL;
+        if (edges) edges.material = OUTLINE_EDGES;
+      } else {
+        length = face.through ? face.thickness : -face.depth;
+        middle = -length / 2;
+        ghost.material = POCKET_MATERIAL;
+        if (edges) edges.material = POCKET_EDGES;
+      }
+      ghost.scale.set(w, l, length);
+      ghost.quaternion.copy(face.turn);
+      ghost.position.copy(face.at).addScaledVector(face.normal, middle);
+
+      const border = Math.min(...region.half.map((h) => h * (1 - face.inset)));
+      setGestureStatus(face.stage === 'inset'
+        ? `Inset face · ${mmText(border)} border · click, then push in or pull out`
+        : face.through ? 'Pocket · right through'
+          : face.depth < -1e-6 ? `Pocket ${mmText(-face.depth)} deep`
+            : face.depth > 1e-6 ? `Boss ${mmText(face.depth)} high`
+              : 'Push in for a pocket, pull out for a boss');
+      return;
+    }
+
     if (state.kind === 'moveCut') {
       /*
        * A hole slides over the part it is in. The pointer's ray is taken into
@@ -340,7 +461,8 @@ export const ObjectGestureController = () => {
       const toBody = pose.rot.clone().transpose();
       const origin = ray.origin.clone().sub(pose.pos).applyMatrix3(toBody);
       const direction = ray.direction.clone().applyMatrix3(toBody).normalize();
-      const spot = pickCutSpot(node, origin.toArray(), direction.toArray());
+      // A boss is material, and would otherwise land on its own top.
+      const spot = pickCutSpot(node, origin.toArray(), direction.toArray(), node.geoms?.[state.geomIndex ?? -1]);
       if (spot) state.spot = spot;
       const shown = state.spot;
       if (shown) {
@@ -527,6 +649,10 @@ export const ObjectGestureController = () => {
     // A cutter's ghost owns the geometry made for it; an inset's ghosts are
     // clones sharing the body's own, which must not be disposed.
     if (state.kind === 'moveCut') for (const ghost of state.ghosts) (ghost as THREE.Mesh).geometry?.dispose();
+    // A face's ghost has its edges as a child, with a geometry of their own.
+    if (state.kind === 'face') {
+      for (const ghost of state.ghosts) ghost.traverse((o) => (o as THREE.Mesh).geometry?.dispose());
+    }
     gesture.current = null;
     setGestureStatus(null);
     setOrbitEnabled(true);
@@ -536,6 +662,37 @@ export const ObjectGestureController = () => {
     const state = gesture.current;
     if (!state) return;
     const { kind, nodeId, factor } = state;
+    if (kind === 'face' && state.face) {
+      const face = state.face;
+      if (keep && face.stage === 'inset') {
+        // The first click keeps the outline and hands the pointer to the
+        // depth, measured from wherever the pointer is now.
+        const parent = face.ghost.parent;
+        const ray = parent ? rayIn(parent, pointer.current.x, pointer.current.y) : null;
+        const toEye = ray ? ray.origin.clone().sub(face.at) : null;
+        const across = toEye ? toEye.sub(face.normal.clone().multiplyScalar(toEye.dot(face.normal))) : null;
+        const hit = ray && across && across.lengthSq() > 1e-12
+          ? ray.intersectPlane(new THREE.Plane().setFromNormalAndCoplanarPoint(across.normalize(), face.at), new THREE.Vector3())
+          : null;
+        face.from = hit ? hit.sub(face.at).dot(face.normal) : 0;
+        face.stage = 'depth';
+        draw();
+        return;
+      }
+      clear();
+      if (!keep) return;
+      const store = useStore.getState();
+      const half = face.region.half.map((h) => h * face.inset);
+      // Pulled back flush, a feature that was there is taken away: it no
+      // longer does anything, and leaving it would be a hole of no depth.
+      if (!face.through && Math.abs(face.depth) < 1e-6) {
+        if (face.index !== -1) store.deleteNodeGeom(nodeId, face.index);
+        return;
+      }
+      store.setFaceFeature(nodeId, face.region, { half, depth: face.depth, through: face.through },
+        face.index === -1 ? undefined : face.index);
+      return;
+    }
     const axis = state.axis;
     // Read before clear() ends the gesture it is read from.
     const bore = kind === 'inset' ? boreOf(state) : null;
@@ -578,7 +735,88 @@ export const ObjectGestureController = () => {
       boreFactors(factor, bore),
       bore.open === 0 ? undefined : { axis: bore.axis, side: bore.open },
     );
-  }, [clear]);
+  }, [clear, draw, rayIn]);
+
+  /**
+   * The flat face under the pointer, ready to inset — or the face feature it
+   * already has, re-opened — or null when the pointer is not on a flat face.
+   *
+   * A feature is re-opened when the pointer is on it (a boss's top) or on the
+   * face it sits in the middle of (around a pocket, or a boss too big to miss
+   * the face it stands on). Otherwise a new one starts at 0.8 of the face.
+   */
+  const startFace = useCallback((node: SceneNode, parent: THREE.Object3D): FaceGesture | null => {
+    const pose = bodyPoseOf(node.id, node.pos);
+    const toBody = pose.rot.clone().transpose();
+    const ray = rayIn(parent, pointer.current.x, pointer.current.y);
+    const origin = ray.origin.clone().sub(pose.pos).applyMatrix3(toBody);
+    const direction = ray.direction.clone().applyMatrix3(toBody).normalize();
+    let region = flatFaceAt(node, origin.toArray(), direction.toArray());
+    if (!region) return null;
+
+    const geoms = node.geoms ?? [];
+    const same = (a: number[] | undefined, b: number[]) => !!a && b.every((v, k) => Math.abs(v - (a[k] ?? 0)) < 1e-5);
+    let index = region.geom?.cutFace && region.geom.csg === 'union' ? geoms.indexOf(region.geom) : -1;
+    if (index === -1) {
+      index = geoms.findIndex((g) => g.cutFace && !g.csgDerived && same(g.cutAt, region!.at) && same(g.cutNormal, region!.normal));
+    }
+    const feature = index === -1 ? null : geoms[index];
+    if (feature) {
+      // The face it stands on, found from outside along its own line with the
+      // feature itself left out.
+      const n = feature.cutNormal ?? [0, 0, 1];
+      const bounds = sourcePositiveBounds(node);
+      const away = bounds ? Math.hypot(...bounds.max.map((v, a) => v - bounds.min[a])) + 1 : 10;
+      const at = feature.cutAt ?? [0, 0, 0];
+      const base = flatFaceAt(node, at.map((v, a) => v + (n[a] ?? 0) * away), n.map((v) => -v), feature);
+      if (base) region = base;
+      else index = -1;
+    }
+
+    const under = surfaceUnder(node, region.at, region.normal);
+    const reopened = index === -1 ? null : geoms[index];
+    const startInset = reopened
+      ? Math.min(0.98, Math.max(0.02, (reopened.size?.[0] ?? 0) / (region.half[0] || 1)))
+      : 0.8;
+    const startDepth = !reopened ? 0
+      : reopened.csg === 'union' ? (reopened.cutDepth ?? 0)
+        : -(reopened.cutDepth && reopened.cutDepth > 0 ? reopened.cutDepth : (under?.thickness ?? 0));
+
+    // Everything the ghost is drawn with, brought once into the frame bodies
+    // are drawn in: the body does not move while its face is being edited.
+    const n = new THREE.Vector3(...(region.normal as [number, number, number]));
+    const bodyTurn = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), n);
+    if (region.twist) bodyTurn.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), region.twist));
+    const poseTurn = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().setFromMatrix3(pose.rot));
+    const geometry = region.shape === 'box'
+      ? new THREE.BoxGeometry(1, 1, 1)
+      : new THREE.CylinderGeometry(0.5, 0.5, 1, 48).rotateX(Math.PI / 2);
+    const ghost = new THREE.Mesh(geometry, OUTLINE_MATERIAL);
+    // Its edges, so the shape reads even where the fill is faint; a child, so
+    // they take the ghost's scale. Drawn after the part, over it.
+    const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geometry, 30), OUTLINE_EDGES);
+    ghost.add(edges);
+    ghost.renderOrder = 999;
+    edges.renderOrder = 1000;
+    parent.add(ghost);
+
+    return {
+      region,
+      stage: 'inset',
+      inset: startInset,
+      startInset,
+      depth: startDepth,
+      startDepth,
+      through: !!reopened && reopened.csg === 'difference' && !(reopened.cutDepth && reopened.cutDepth > 0),
+      thickness: under?.thickness ?? 0,
+      index,
+      from: 0,
+      at: new THREE.Vector3(...(region.at as [number, number, number])).applyMatrix3(pose.rot).add(pose.pos),
+      normal: n.clone().applyMatrix3(pose.rot).normalize(),
+      turn: poseTurn.multiply(bodyTurn),
+      ghost,
+    };
+  }, [rayIn]);
 
   const begin = useCallback((kind: 'scale' | 'inset' | 'move') => {
     if (gesture.current) return;
@@ -618,7 +856,7 @@ export const ObjectGestureController = () => {
       // millimetres, and the body is not.
       const node = findNode(store.sceneGraph.nodes, nodeId);
       const cut = node?.geoms?.[store.activeGeomIndex];
-      if (node && cut && cut.csg === 'difference' && !cut.csgDerived && cut.cutAt) {
+      if (node && cut && (cut.csg === 'difference' || (cut.csg === 'union' && cut.cutNormal)) && !cut.csgDerived && cut.cutAt) {
         const parent = groups[0].parent;
         if (!parent) return;
         // A stub of the cutter, drawn where the pointer says the hole would
@@ -664,6 +902,26 @@ export const ObjectGestureController = () => {
       setOrbitEnabled(false);
       draw();
       return;
+    }
+
+    if (kind === 'inset' && parent) {
+      const node = findNode(store.sceneGraph.nodes, nodeId);
+      const face = node ? startFace(node, parent) : null;
+      if (face) {
+        const worldAt = parent.localToWorld(face.at.clone()).project(camera);
+        const at = {
+          x: rect.left + ((worldAt.x + 1) / 2) * rect.width,
+          y: rect.top + ((1 - worldAt.y) / 2) * rect.height,
+        };
+        gesture.current = {
+          kind: 'face', nodeId, centre: at, pivot, held: [], ghosts: [face.ghost], axis: null, factor: 1,
+          radius: Math.hypot(pointer.current.x - at.x, pointer.current.y - at.y),
+          face,
+        };
+        setOrbitEnabled(false);
+        draw();
+        return;
+      }
     }
 
     const ghosts: THREE.Object3D[] = [];
@@ -747,7 +1005,7 @@ export const ObjectGestureController = () => {
     };
     setOrbitEnabled(false);
     draw();
-  }, [camera, draw, gl, groupsFor, planeHit, scene, setOrbitEnabled]);
+  }, [camera, draw, gl, groupsFor, planeHit, scene, setOrbitEnabled, startFace]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {

@@ -735,14 +735,14 @@ function geomRayHits(geom: SceneGeom, origin: THREE.Vector3, dir: THREE.Vector3)
  * Coordinates are the body's own frame — the frame a geom's `pos` is written
  * in — so a caller has only to say where the ray starts and which way it goes.
  */
-export function probeRay(node: SceneNode, origin: number[], direction: number[]): SurfaceHit[] {
+export function probeRay(node: SceneNode, origin: number[], direction: number[], exclude?: SceneGeom): SurfaceHit[] {
   const o = new THREE.Vector3(origin[0] ?? 0, origin[1] ?? 0, origin[2] ?? 0);
   const d = new THREE.Vector3(direction[0] ?? 0, direction[1] ?? 0, direction[2] ?? 0);
   if (d.lengthSq() < 1e-18) return [];
   d.normalize();
   const hits: SurfaceHit[] = [];
   for (const geom of csgSourceGeoms(node)) {
-    if (!isPositive(geom)) continue;
+    if (!isPositive(geom) || geom === exclude) continue;
     hits.push(...geomRayHits(geom, o, d));
   }
   return hits.sort((a, b) => a.t - b.t);
@@ -769,8 +769,8 @@ function clearOf(node: SceneNode): number {
  * happens — would otherwise hand back an inward normal and put the hole on the
  * wrong side of the surface.
  */
-export function pickCutSpot(node: SceneNode, origin: number[], direction: number[]): CutSpot | null {
-  const hits = probeRay(node, origin, direction);
+export function pickCutSpot(node: SceneNode, origin: number[], direction: number[], exclude?: SceneGeom): CutSpot | null {
+  const hits = probeRay(node, origin, direction, exclude);
   if (hits.length === 0) return null;
   const d = new THREE.Vector3(direction[0] ?? 0, direction[1] ?? 0, direction[2] ?? 0).normalize();
   const first = hits[0];
@@ -782,6 +782,262 @@ export function pickCutSpot(node: SceneNode, origin: number[], direction: number
   const normal = new THREE.Vector3(first.normal[0], first.normal[1], first.normal[2]);
   if (normal.dot(d) > 0) normal.negate();
   return { at, normal: normal.toArray() };
+}
+
+/**
+ * A flat face of a part: where its middle is, which way it faces, and its
+ * outline, as a box or a disk centred there.
+ *
+ * `half` is the box's two half-extents, or the disk's radius, in the frame a
+ * cut at `at` along `normal` turned by `twist` is drawn in — so a cut given
+ * these numbers covers the face exactly, and one given a fraction of them is
+ * the face inset.
+ */
+export interface FaceRegion {
+  at: number[];
+  normal: number[];
+  shape: 'box' | 'cylinder';
+  half: number[];
+  twist: number;
+  /** The geom the face belongs to — a boss's own top, say. */
+  geom?: SceneGeom;
+}
+
+/** The twist that turns a cut's frame along `normal` so its X runs along `u`. */
+function twistOnto(normal: THREE.Vector3, u: THREE.Vector3): number {
+  const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
+  const x = new THREE.Vector3(1, 0, 0).applyQuaternion(q);
+  const y = new THREE.Vector3(0, 1, 0).applyQuaternion(q);
+  return Math.atan2(u.dot(y), u.dot(x));
+}
+
+/**
+ * The flat mesh region a triangle belongs to, as a rectangle or a disk.
+ *
+ * Grown from the triangle across shared edges while the neighbours lie in the
+ * same plane, which is what a face is on a mesh: a lattice quad, the top of an
+ * extrusion, the cap of an imported cylinder. Then fitted: a rectangle when the
+ * region fills its tightest bounding rectangle, a disk when it fills its
+ * circle, and nothing otherwise — an L-shaped face has no inset that a box or a
+ * disk can draw without spilling onto the faces around it.
+ */
+function meshFaceRegion(geom: SceneGeom, hitFace: number): FaceRegion | null {
+  const verts = geom.renderVertices!;
+  const faces = geom.faces!;
+  const off = geom.pos || [0, 0, 0];
+  const at = (i: number) => new THREE.Vector3(
+    verts[i * 3] + (off[0] || 0), verts[i * 3 + 1] + (off[1] || 0), verts[i * 3 + 2] + (off[2] || 0),
+  );
+  const normalOf = (f: number) => {
+    const a = at(faces[f]);
+    return at(faces[f + 1]).sub(a).cross(at(faces[f + 2]).sub(a));
+  };
+  const n0 = normalOf(hitFace);
+  if (n0.lengthSq() < 1e-24) return null;
+  n0.normalize();
+  const p0 = at(faces[hitFace]);
+
+  // Size of the whole mesh, for a tolerance that means the same at any scale.
+  let extent = 0;
+  for (let i = 0; i < verts.length; i++) extent = Math.max(extent, Math.abs(verts[i]));
+  const eps = Math.max(1e-9, extent * 1e-5);
+
+  const byEdge = new Map<string, number[]>();
+  const edgeKey = (a: number, b: number) => (a < b ? `${a},${b}` : `${b},${a}`);
+  for (let f = 0; f < faces.length; f += 3) {
+    for (let k = 0; k < 3; k++) {
+      const key = edgeKey(faces[f + k], faces[f + (k + 1) % 3]);
+      const list = byEdge.get(key);
+      if (list) list.push(f); else byEdge.set(key, [f]);
+    }
+  }
+  const coplanar = (f: number) => {
+    const n = normalOf(f);
+    if (n.lengthSq() < 1e-24) return false;
+    if (n.normalize().dot(n0) < 0.9999) return false;
+    for (let k = 0; k < 3; k++) if (Math.abs(at(faces[f + k]).sub(p0).dot(n0)) > eps) return false;
+    return true;
+  };
+  const region = new Set<number>([hitFace]);
+  const queue = [hitFace];
+  while (queue.length > 0) {
+    const f = queue.pop()!;
+    for (let k = 0; k < 3; k++) {
+      for (const g of byEdge.get(edgeKey(faces[f + k], faces[f + (k + 1) % 3])) ?? []) {
+        if (region.has(g) || !coplanar(g)) continue;
+        region.add(g);
+        queue.push(g);
+      }
+    }
+  }
+
+  // The region's outline: edges only one of its triangles uses.
+  const count = new Map<string, number>();
+  for (const f of region) {
+    for (let k = 0; k < 3; k++) {
+      const key = edgeKey(faces[f + k], faces[f + (k + 1) % 3]);
+      count.set(key, (count.get(key) ?? 0) + 1);
+    }
+  }
+  const outline: [THREE.Vector3, THREE.Vector3][] = [];
+  for (const [key, c] of count) {
+    if (c !== 1) continue;
+    const [a, b] = key.split(',').map(Number);
+    outline.push([at(a), at(b)]);
+  }
+  if (outline.length < 3) return null;
+  let area = 0;
+  for (const f of region) area += normalOf(f).length() / 2;
+  if (area < 1e-18) return null;
+
+  // Tightest rectangle: its sides run along one of the outline's own edges.
+  const points = outline.flatMap(([a, b]) => [a, b]);
+  let best: { u: THREE.Vector3; v: THREE.Vector3; min: number[]; max: number[]; area: number } | null = null;
+  for (const [a, b] of outline) {
+    const u = b.clone().sub(a);
+    u.sub(n0.clone().multiplyScalar(u.dot(n0)));
+    if (u.lengthSq() < 1e-24) continue;
+    u.normalize();
+    const v = n0.clone().cross(u);
+    const min = [Infinity, Infinity];
+    const max = [-Infinity, -Infinity];
+    for (const p of points) {
+      const c = [p.dot(u), p.dot(v)];
+      for (let k = 0; k < 2; k++) {
+        if (c[k] < min[k]) min[k] = c[k];
+        if (c[k] > max[k]) max[k] = c[k];
+      }
+    }
+    const boxArea = (max[0] - min[0]) * (max[1] - min[1]);
+    if (!best || boxArea < best.area) best = { u, v, min, max, area: boxArea };
+  }
+  if (!best) return null;
+  const plane = p0.dot(n0);
+
+  if (area / best.area > 0.98) {
+    const cu = (best.min[0] + best.max[0]) / 2;
+    const cv = (best.min[1] + best.max[1]) / 2;
+    const centre = best.u.clone().multiplyScalar(cu).addScaledVector(best.v, cv).addScaledVector(n0, plane);
+    return {
+      at: centre.toArray(),
+      normal: n0.toArray(),
+      shape: 'box',
+      half: [(best.max[0] - best.min[0]) / 2, (best.max[1] - best.min[1]) / 2],
+      twist: twistOnto(n0, best.u),
+    };
+  }
+
+  // A disk: the circle through the outline's middle, inscribed so that it
+  // stays on the face between the corners of a faceted circle.
+  const centre = new THREE.Vector3();
+  for (const p of points) centre.add(p);
+  centre.multiplyScalar(1 / points.length);
+  let inner = Infinity;
+  for (const [a, b] of outline) inner = Math.min(inner, a.clone().add(b).multiplyScalar(0.5).distanceTo(centre));
+  if (Number.isFinite(inner) && inner > 0 && area / (Math.PI * inner * inner) > 0.97 && area / (Math.PI * inner * inner) < 1.1) {
+    return { at: centre.toArray(), normal: n0.toArray(), shape: 'cylinder', half: [inner], twist: 0 };
+  }
+  return null;
+}
+
+/**
+ * The flat face a ray from outside lands on, or null if what it lands on is
+ * not flat: the side of a cylinder, a sphere, an irregular mesh face.
+ *
+ * A box's six faces, a cylinder's two ends, and the flat regions of a mesh are
+ * faces. `exclude` leaves one geom out, so a boss can be asked about the face
+ * it stands on rather than about its own top.
+ */
+export function flatFaceAt(
+  node: SceneNode,
+  origin: number[],
+  direction: number[],
+  exclude?: SceneGeom,
+): FaceRegion | null {
+  const o = new THREE.Vector3(origin[0] ?? 0, origin[1] ?? 0, origin[2] ?? 0);
+  const d = new THREE.Vector3(direction[0] ?? 0, direction[1] ?? 0, direction[2] ?? 0);
+  if (d.lengthSq() < 1e-18) return null;
+  d.normalize();
+
+  // The nearest hit, and whose it is.
+  let nearest: { t: number; geom: SceneGeom; normal: number[]; face?: number } | null = null;
+  for (const geom of csgSourceGeoms(node)) {
+    if (!isPositive(geom) || geom === exclude) continue;
+    if (geom.type === 'mesh') {
+      const verts = geom.renderVertices;
+      if (!verts || !geom.faces) continue;
+      const off = geom.pos || [0, 0, 0];
+      const at = (i: number) => new THREE.Vector3(
+        verts[i * 3] + (off[0] || 0), verts[i * 3 + 1] + (off[1] || 0), verts[i * 3 + 2] + (off[2] || 0),
+      );
+      for (let f = 0; f < geom.faces.length; f += 3) {
+        const a = at(geom.faces[f]);
+        const b = at(geom.faces[f + 1]);
+        const c = at(geom.faces[f + 2]);
+        const t = rayTriangle(o, d, a, b, c);
+        if (t === null || (nearest && t >= nearest.t)) continue;
+        const n = b.clone().sub(a).cross(c.clone().sub(a));
+        if (n.lengthSq() < 1e-24) continue;
+        nearest = { t, geom, normal: n.normalize().toArray(), face: f };
+      }
+      continue;
+    }
+    for (const hit of geomRayHits(geom, o, d)) {
+      if (!nearest || hit.t < nearest.t) nearest = { t: hit.t, geom, normal: hit.normal };
+    }
+  }
+  if (!nearest) return null;
+  const region = faceRegionOf(nearest.geom, nearest.normal, nearest.face);
+  return region ? { ...region, geom: nearest.geom } : null;
+}
+
+/** The flat face of one geom that a hit with this normal (or on this triangle) is on. */
+function faceRegionOf(geom: SceneGeom, hitNormal: number[], hitFace?: number): FaceRegion | null {
+  if (geom.type === 'mesh') return hitFace === undefined ? null : meshFaceRegion(geom, hitFace);
+
+  // Primitives are read in their own frame, where their faces are axis-aligned.
+  const s = geom.size || [];
+  let matrix = geomMatrix(geom);
+  let halfLen = s[1] ?? s[0] ?? 0.1;
+  if ((geom.type === 'cylinder') && geom.fromto && geom.fromto.length >= 6) {
+    const f = fromtoFrame(geom.fromto);
+    matrix = f.matrix;
+    halfLen = f.halfLen;
+  }
+  const rotation = new THREE.Matrix3().setFromMatrix4(matrix);
+  const toLocal = rotation.clone().transpose();
+  const local = new THREE.Vector3(...(hitNormal as [number, number, number])).applyMatrix3(toLocal);
+  const toBody = (p: THREE.Vector3) => p.clone().applyMatrix4(matrix);
+  const turn = (v: THREE.Vector3) => v.clone().applyMatrix3(rotation).normalize();
+
+  if (geom.type === 'box') {
+    const half = [s[0] ?? 0.1, s[1] ?? s[0] ?? 0.1, s[2] ?? s[0] ?? 0.1];
+    const c = [Math.abs(local.x), Math.abs(local.y), Math.abs(local.z)];
+    const a = c[0] >= c[1] && c[0] >= c[2] ? 0 : c[1] >= c[2] ? 1 : 2;
+    const sign = local.getComponent(a) < 0 ? -1 : 1;
+    const [ua, va] = [0, 1, 2].filter((k) => k !== a);
+    const centre = new THREE.Vector3().setComponent(a, sign * half[a]);
+    const normal = turn(new THREE.Vector3().setComponent(a, sign));
+    const u = turn(new THREE.Vector3().setComponent(ua, 1));
+    return {
+      at: toBody(centre).toArray(),
+      normal: normal.toArray(),
+      shape: 'box',
+      half: [half[ua], half[va]],
+      twist: twistOnto(normal, u),
+    };
+  }
+  if (geom.type === 'cylinder' && Math.abs(local.z) > 0.999) {
+    const sign = local.z < 0 ? -1 : 1;
+    return {
+      at: toBody(new THREE.Vector3(0, 0, sign * halfLen)).toArray(),
+      normal: turn(new THREE.Vector3(0, 0, sign)).toArray(),
+      shape: 'cylinder',
+      half: [s[0] ?? 0.1],
+      twist: 0,
+    };
+  }
+  return null;
 }
 
 /**
@@ -799,6 +1055,12 @@ export function surfaceUnder(
   node: SceneNode,
   at: number[],
   normal: number[],
+  /**
+   * A boss is itself positive material, so a ray down its line would meet its
+   * own top first — and a boss re-measured from its own top grows by its
+   * height every time it is reconciled. It is left out of its own probe.
+   */
+  exclude?: SceneGeom,
 ): { entry: number[]; thickness: number } | null {
   const n = new THREE.Vector3(normal[0] ?? 0, normal[1] ?? 0, normal[2] ?? 1);
   if (n.lengthSq() < 1e-18) return null;
@@ -809,7 +1071,7 @@ export function surfaceUnder(
     (at[1] ?? 0) + n.y * away,
     (at[2] ?? 0) + n.z * away,
   ];
-  const hits = probeRay(node, origin, [-n.x, -n.y, -n.z]);
+  const hits = probeRay(node, origin, [-n.x, -n.y, -n.z], exclude);
   if (hits.length === 0) return null;
   const first = hits[0].t;
   const last = hits[hits.length - 1].t;
@@ -835,15 +1097,29 @@ export function cutGeometry(
   if (n.lengthSq() < 1e-18) return null;
   n.normalize();
 
-  const under = surfaceUnder(node, geom.cutAt ?? [0, 0, 0], n.toArray());
+  const under = surfaceUnder(node, geom.cutAt ?? [0, 0, 0], n.toArray(), geom);
   const entry = new THREE.Vector3(...(under ? under.entry : (geom.cutAt ?? [0, 0, 0])));
   const s = geom.size || [];
   const over = cutOvershoot(node);
 
   // A shape's own +Z turned onto the cut's line. Every solid here is a body of
-  // revolution about that axis or a box, so one rotation orients all of them.
+  // revolution about that axis or a box, so one rotation orients all of them —
+  // then turned about that line by the twist, which only a box can tell.
   const quat = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), n);
+  if (geom.cutTwist) quat.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), geom.cutTwist));
   const mjQuat = [quat.w, quat.x, quat.y, quat.z].map(v => +v.toFixed(9));
+
+  if (geom.csg === 'union') {
+    // A boss: out of the surface by its height, and sunk into it by the
+    // overshoot so the two solids overlap instead of touching — touching faces
+    // are as undecidable to a union as to a difference.
+    const height = Math.max(1e-6, geom.cutDepth || 0);
+    const centre = entry.clone().addScaledVector(n, (height - over) / 2);
+    const pos = centre.toArray().map(v => +v.toFixed(6));
+    const length = height + over;
+    if (geom.type === 'box') return { pos, size: [s[0] ?? 0.005, s[1] ?? 0.005, length / 2], quat: mjQuat };
+    return { pos, size: [s[0] ?? 0.005, length / 2], quat: mjQuat };
+  }
 
   if (geom.type === 'sphere') {
     // A scoop, not a bore: a sphere has no length to run, so it is always
@@ -880,6 +1156,7 @@ export function cutGeometry(
  */
 export function cutDepthOf(node: SceneNode, geom: SceneGeom): number {
   if (geom.cutDepth && geom.cutDepth > 0) return geom.cutDepth;
+  if (geom.csg === 'union') return 0;
   const under = surfaceUnder(node, geom.cutAt ?? [0, 0, 0], geom.cutNormal ?? [0, 0, 1]);
   return under ? under.thickness : 0;
 }
@@ -900,7 +1177,9 @@ export function cutDepthOf(node: SceneNode, geom: SceneGeom): number {
  * Returns whether anything moved, so a caller can skip a recompile.
  */
 export function reconcileCuts(node: SceneNode): boolean {
-  const cuts = (node.geoms || []).filter(g => g.csg === 'difference' && !g.csgDerived && g.cutNormal);
+  // Bosses too: a union that carries a direction is stood on a face the same
+  // way a hole is sunk into one, and has to follow that face the same way.
+  const cuts = (node.geoms || []).filter(g => (g.csg === 'difference' || g.csg === 'union') && !g.csgDerived && g.cutNormal);
   if (cuts.length === 0) return false;
 
   let changed = false;
@@ -909,7 +1188,7 @@ export function reconcileCuts(node: SceneNode): boolean {
     if (!next) continue;
     // The anchor follows the surface too, so the next reconcile measures from
     // where the material is now rather than from where it used to be.
-    const under = surfaceUnder(node, geom.cutAt ?? [0, 0, 0], geom.cutNormal!);
+    const under = surfaceUnder(node, geom.cutAt ?? [0, 0, 0], geom.cutNormal!, geom);
     if (under) geom.cutAt = under.entry.map(v => +v.toFixed(6));
 
     const samePos = (geom.pos || []).length === 3
