@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import ReactDOM from 'react-dom';
-import { User, LogOut, Radio, Sparkles, ShieldCheck, CheckCircle, History } from 'lucide-react';
+import { User, LogOut, Radio, Sparkles, ShieldCheck, CheckCircle, AlertCircle, History } from 'lucide-react';
 import { getStoredUser, getStoredAuthToken, clearStoredAuth, fetchCurrentUser } from '../utils/apiClient';
 import type { PhysBoxUser } from '../utils/apiClient';
 import { signInWithGooglePopup, disableGoogleAutoSelect } from '../utils/googleAuth';
@@ -10,6 +10,7 @@ import { RemoteMachiningModal } from './RemoteMachiningModal';
 import { JobHistoryModal } from './JobHistoryModal';
 import { CloudSaveStatus } from './CloudSaveStatus';
 import { GuestListModal } from './GuestListModal';
+import { useEscapeToClose } from '../hooks/useEscapeToClose';
 
 /**
  * Asks for the sign-in window from somewhere else in the app.
@@ -39,8 +40,11 @@ export const UserProfileButton: React.FC = () => {
   const [showHistoryModal, setShowHistoryModal] = useState(false);
   const [showGuestModal, setShowGuestModal] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  // Its X promised Escape; this is what makes it true. Not mid sign-in.
+  useEscapeToClose(showLoginModal && !isLoading, () => setShowLoginModal(false));
   const [loginError, setLoginError] = useState<string | null>(null);
   const [syncSummary, setSyncSummary] = useState<string | null>(null);
+  const [syncFailed, setSyncFailed] = useState(false);
   /** Set when the avatar will not load; the icon stands in for it. */
   const [avatarBroken, setAvatarBroken] = useState(false);
   /**
@@ -94,6 +98,7 @@ export const UserProfileButton: React.FC = () => {
     try {
       const { parameters, presets } = await pullCloudState();
       const added = mergePulledPresets(presets);
+      setSyncFailed(false);
       setSyncSummary(
         parameters === 0 && added === 0
           ? 'Account is up to date'
@@ -102,6 +107,7 @@ export const UserProfileButton: React.FC = () => {
       );
     } catch (e) {
       console.warn('[PhysBox Cloud] Could not pull account state:', e);
+      setSyncFailed(true);
       setSyncSummary('Could not reach the sync service');
     }
   }, []);
@@ -338,7 +344,9 @@ export const UserProfileButton: React.FC = () => {
                 </button>
 
                 <div className="px-3 py-1.5 text-[10px] text-slate-500 flex items-center gap-1.5">
-                  <CheckCircle className="w-3 h-3 text-emerald-500 dark:text-emerald-400" />
+                  {syncFailed
+                    ? <AlertCircle className="w-3 h-3 text-amber-500 dark:text-amber-400" />
+                    : <CheckCircle className="w-3 h-3 text-emerald-500 dark:text-emerald-400" />}
                   <span>{syncSummary ?? 'Syncing parameters and presets…'}</span>
                 </div>
               </div>
@@ -382,7 +390,7 @@ export const UserProfileButton: React.FC = () => {
         ReactDOM.createPortal(
           <div
             className="fixed inset-0 z-[99999] bg-slate-900/50 dark:bg-black/75 backdrop-blur-md flex items-center justify-center p-4 overflow-y-auto"
-            onClick={() => setShowLoginModal(false)}
+            onClick={() => { if (!isLoading) setShowLoginModal(false); }}
           >
             <div
               className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-2xl w-full max-w-md p-6 space-y-4 shadow-2xl relative max-h-[90dvh] overflow-y-auto my-auto text-slate-800 dark:text-slate-100"

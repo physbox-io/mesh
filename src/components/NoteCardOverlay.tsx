@@ -93,7 +93,7 @@ export function NoteCardOverlay({ card, isEditing, onToggleEdit, onToggleMinimiz
           <button onClick={onToggleMinimize} className="p-0.5 rounded hover:bg-slate-200 dark:hover:bg-slate-800 transition-colors" title={card.minimized ? 'Expand' : 'Minimize'}>
             {card.minimized ? <ChevronDown className="w-3 h-3 text-slate-500 dark:text-slate-400" /> : <ChevronUp className="w-3 h-3 text-slate-500 dark:text-slate-400" />}
           </button>
-          <button onClick={onClose} className="p-0.5 rounded hover:bg-red-100 dark:hover:bg-red-950/40 transition-colors" title="Close">
+          <button onClick={onClose} className="p-0.5 rounded hover:bg-red-100 dark:hover:bg-red-950/40 transition-colors" title="Delete note" aria-label="Delete note">
             <X className="w-3 h-3 text-slate-500 dark:text-slate-400 hover:text-red-500" />
           </button>
         </div>
