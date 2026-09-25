@@ -77,7 +77,11 @@ export const MachineWorkOriginPanel: React.FC<{
     else void webSerialManager.guideSpotOn(guidePower);
   };
 
-  const busy = machineState.status === 'RUNNING' || isProbingZ;
+  // A feed hold too: the rest of the program is still in GRBL's planner, so a
+  // jog is refused (and that refusal ended the job) and a zero or go-to-origin
+  // would run mid-program on resume. Tool and material pauses stay open - they
+  // are waiting for exactly this.
+  const busy = machineState.status === 'RUNNING' || machineState.status === 'PAUSED_OPERATOR' || isProbingZ;
   const zZeroed = probeMessage?.ok === true;
   // The manager raises this at a tool-change pause and drops it as soon as
   // either zeroing route has run. Until then the datum on the machine belongs

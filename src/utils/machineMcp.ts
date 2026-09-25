@@ -146,9 +146,14 @@ async function carveCurrentScene(args: Record<string, unknown>): Promise<{ summa
     }),
   });
 
-  // `runJob` returns null when the browser is the streamer; the job is under
-  // way either way, and the device path reports whether it was taken.
+  // `runJob` returns null when the browser is the streamer; the device path
+  // reports whether it was taken. But null is also a refusal (no Z zero, a job
+  // already running), which used to be reported to the agent as a cut under
+  // way - so a null with nothing streaming is the refusal, and says why.
   if (run && !run.delivered) throw new Error(run.message);
+  if (!run && !webSerialManager.isRunning()) {
+    throw new Error(webSerialManager.getState().lastError ?? 'The job did not start.');
+  }
 
   const minutes = Math.round((result.estimatedTimeSeconds ?? 0) / 60);
   return {

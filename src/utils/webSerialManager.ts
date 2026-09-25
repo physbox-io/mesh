@@ -1418,6 +1418,14 @@ class WebSerialManager {
      * over from the last job would file this run under what the last one was
      * cut from.
      */
+    // Not over the top of one already in flight: a new stream resets the byte
+    // count while the old program's lines are still in GRBL's buffer, which
+    // over MCP put 222 bytes into its 128-byte receive buffer. Checked before
+    // the context below, which belongs to the job still running.
+    if (this.isJobRunning || this.isPaused) {
+      this.updateState({ lastError: 'A job is already running or paused. Cancel it before starting another.' });
+      return null;
+    }
     this.jobContext = { name: options.name, settings: options.settings ?? null };
     if (!this.transport || !this.state.connected) {
       this.updateState({ lastError: 'No machine is connected, so there was nothing to send the job to.' });
@@ -1469,6 +1477,7 @@ class WebSerialManager {
 
   public startJob(gcode: string, estimatedSeconds?: number) {
     if (!this.state.connected) return;
+    if (this.isJobRunning || this.isPaused) return; // see runJob
 
     /*
      * The stream owns the ack channel from here.
@@ -2246,7 +2255,23 @@ class WebSerialManager {
   }
 
   /** Triggers hardware homing cycle ($H). */
+  /**
+   * Refuses a manual move or zeroing while a program has hold of the machine.
+   *
+   * Streaming, or feed-held with the rest of the program in GRBL's planner: a
+   * jog then is refused by GRBL (error:8), which abandoned the job with the
+   * spindle still on, and a G0 or G10 queues behind the hold and runs in the
+   * middle of the program on resume. A tool-change or material pause is fine -
+   * the machine is parked and waiting for exactly this - and so is a park.
+   */
+  private refuseWhileJobHoldsMachine(what: string): void {
+    if ((this.isJobRunning && !this.isPaused) || this.state.status === 'PAUSED_OPERATOR') {
+      throw new Error(`Can't ${what} while a job is running or on feed hold. Stop or finish the job first.`);
+    }
+  }
+
   public async homeMachine(): Promise<void> {
+    this.refuseWhileJobHoldsMachine('home');
     await this.sendLine('$H');
   }
 
@@ -2314,6 +2339,7 @@ class WebSerialManager {
 
   /** Sets current XY position as G54 Work Origin (0,0). */
   public async zeroXY(): Promise<void> {
+    this.refuseWhileJobHoldsMachine('zero XY');
     await this.sendLine('G10 L20 P1 X0 Y0');
   }
 
@@ -2339,6 +2365,7 @@ class WebSerialManager {
    * job carried on assuming it.
    */
   public async zeroZHere(offsetMm = 0): Promise<{ success: boolean; message: string }> {
+    this.refuseWhileJobHoldsMachine('zero Z');
     if (!this.state.connected) {
       return { success: false, message: 'Not connected to a machine.' };
     }
@@ -2363,6 +2390,7 @@ class WebSerialManager {
    * face: X, Y and Z all mean "here".
    */
   public async zeroAllHere(): Promise<void> {
+    this.refuseWhileJobHoldsMachine('zero the axes');
     await this.sendLine('G10 L20 P1 X0 Y0 Z0');
     this.updateState({ needsZZero: false });
   }
@@ -2377,6 +2405,7 @@ class WebSerialManager {
    * `jogCancel` and the next G-code line still runs in the mode it expects.
    */
   public async jog(delta: { x?: number; y?: number; z?: number }, feedrate = 1000): Promise<void> {
+    this.refuseWhileJobHoldsMachine('jog');
     const axes = (['x', 'y', 'z'] as const)
       .filter((a) => delta[a] !== undefined && delta[a] !== 0)
       .map((a) => `${a.toUpperCase()}${delta[a]!.toFixed(3)}`)
@@ -2694,6 +2723,7 @@ class WebSerialManager {
 
   /** Retracts and drives to the current work XY origin, to check where zero landed. */
   public async gotoWorkOrigin(safeZ = 5): Promise<void> {
+    this.refuseWhileJobHoldsMachine('go to the origin');
     await this.sendLine('G21 G90');
     const retractZ = await this.clampedRetractZ(safeZ);
     await this.sendLine(`G0 Z${retractZ.toFixed(3)}`);
@@ -2717,6 +2747,7 @@ class WebSerialManager {
     searchDepthMm = ZERO_SEARCH_MM,
     feedrate = 50
   ): Promise<{ success: boolean; message: string; machineZ?: number }> {
+    this.refuseWhileJobHoldsMachine('probe Z');
     if (!this.state.connected) {
       return { success: false, message: 'Not connected to a machine.' };
     }
@@ -2773,6 +2804,7 @@ class WebSerialManager {
     gridY = 3,
     onProgress?: (probedCount: number, totalCount: number) => void
   ): Promise<{ minX: number; minY: number; maxX: number; maxY: number; gridX: number; gridY: number; points: { x: number; y: number; z: number }[][] }> {
+    this.refuseWhileJobHoldsMachine('probe the surface');
     const gx = Math.max(2, Math.round(gridX));
     const gy = Math.max(2, Math.round(gridY));
 
@@ -2914,6 +2946,7 @@ class WebSerialManager {
     guidePower = 5,
     opts: { laserMode?: boolean; safeZMm?: number } = {}
   ): Promise<void> {
+    this.refuseWhileJobHoldsMachine('frame the job');
     // Callers have always said "CNC" by asking for no guide power at all, so
     // that stays the default reading of it. Guide power alone is not enough to
     // mean laser: MCP passes the default 5 whatever the machine, and on a
