@@ -6,7 +6,7 @@ import {
   signedVolume, orientFaces, inconsistentFaces, faceCentre, bridgeFaces, insetFace, bevelFace,
   serializeCage, deserializeCage, cloneLattice, restoreLattice, faceCount,
   boxLattice, SNAP_MULTIPLES, DEFAULT_UNIT, setCrease, isCrease, edgeLoop, triangulate,
-  facesAlong, edgeExists, scaleVertices, type Lattice,
+  facesAlong, edgeExists, scaleVertices, addWire, type Lattice,
 } from '../src/utils/latticeMesh';
 import { meshCentroid } from '../src/utils/latticeMesh';
 import { subdivide } from '../src/utils/subdivide';
@@ -710,6 +710,39 @@ describe('extruding backwards', () => {
     expect(facings(l)).toHaveLength(6);
     expect(isWatertight(l)).toBe(true);
     expect(signedVolume(l)).toBeGreaterThan(0);
+  });
+});
+
+describe('pushing a face into a solid', () => {
+  const topFace = (l: Lattice) => l.faces.findIndex((v, f) => !!v && (faceNormal(l, f)?.[2] ?? 0) > 0.9);
+
+  it('winds a pocket outwards, so it is not drawn inside out', () => {
+    const l = boxLattice(0.01, 200);
+    const { inner } = insetFace(l, topFace(l), 100)!;
+    const before = signedVolume(l);
+    extrudeFace(l, inner, -100);
+
+    expect(isWatertight(l)).toBe(true);
+    expect(inconsistentFaces(l)).toBe(0);
+    // Material taken away, not added: positive, and less than the box.
+    expect(signedVolume(l)).toBeGreaterThan(0);
+    expect(signedVolume(l)).toBeLessThan(before);
+  });
+
+  it('winds a face of a solid pushed straight in the same way', () => {
+    const l = boxLattice(0.01, 200);
+    extrudeFace(l, topFace(l), -100);
+    expect(inconsistentFaces(l)).toBe(0);
+    expect(signedVolume(l)).toBeGreaterThan(0);
+  });
+});
+
+describe('wires left in a lattice', () => {
+  it('stay out of the mesh, so they cannot turn into collision geometry', () => {
+    const l = boxLattice(0.01, 2);
+    const boxVerts = toPolyMesh(l).positions.length / 3;
+    addWire(l, [vertexAt(l, 20, 0, 0), vertexAt(l, 25, 0, 0), vertexAt(l, 25, 5, 0)]);
+    expect(toPolyMesh(l).positions.length / 3).toBe(boxVerts);
   });
 });
 

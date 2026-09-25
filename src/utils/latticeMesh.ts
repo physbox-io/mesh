@@ -2007,13 +2007,13 @@ export function latticeBounds(lattice: Lattice): { min: LatticeCoord; max: Latti
 }
 
 /** The vertices some face or wire still uses, in index order. */
-function usedVertices(lattice: Lattice): number[] {
+function usedVertices(lattice: Lattice, { wires = true }: { wires?: boolean } = {}): number[] {
   const used = new Set<number>();
   for (const verts of lattice.faces) {
     if (!verts) continue;
     for (const v of verts) used.add(v);
   }
-  for (const chain of lattice.wires) for (const v of chain) used.add(v);
+  if (wires) for (const chain of lattice.wires) for (const v of chain) used.add(v);
   return [...used].sort((a, b) => a - b);
 }
 
@@ -2121,7 +2121,10 @@ export function splitLattice(lattice: Lattice): Lattice[] {
 
 /** The cage as metric polygons, Z-up, dropping orphaned vertices. */
 export function toPolyMesh(lattice: Lattice): PolyMesh {
-  const used = usedVertices(lattice);
+  // Face vertices only. A wire is a sketch, not surface, but its vertices went
+  // into the mesh unreferenced, and MuJoCo hulls every vertex of a mesh geom:
+  // an unfinished wire became an invisible wedge the body collided with.
+  const used = usedVertices(lattice, { wires: false });
   const remap = new Map<number, number>();
   const positions: number[] = [];
   for (const v of used) {
