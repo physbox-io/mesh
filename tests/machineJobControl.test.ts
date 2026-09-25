@@ -268,6 +268,20 @@ describe('the Z datum across a tool change', () => {
   });
 });
 
+describe('framing a job', () => {
+  let fake: ReturnType<typeof attachFakeGrbl>;
+  beforeEach(() => { fake = attachFakeGrbl(); });
+  afterEach(() => fake.detach());
+
+  it('does not light a spindle for a default-power frame on a machine not in laser mode', async () => {
+    (webSerialManager as unknown as { state: { grblSettings: Record<number, number> } }).state.grblSettings = { 32: 0 };
+    await webSerialManager.frameJob({ minX: 0, minY: 0, maxX: 10, maxY: 10 });
+
+    expect(fake.lines().some((l) => l.startsWith('M3'))).toBe(false);
+    expect(fake.lines().some((l) => /^G0 Z/.test(l))).toBe(true);
+  });
+});
+
 describe('setting Z zero by hand', () => {
   let fake: ReturnType<typeof attachFakeGrbl>;
 

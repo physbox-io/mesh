@@ -2901,8 +2901,11 @@ class WebSerialManager {
     opts: { laserMode?: boolean; safeZMm?: number } = {}
   ): Promise<void> {
     // Callers have always said "CNC" by asking for no guide power at all, so
-    // that stays the default reading of it.
-    const { laserMode = guidePower > 0, safeZMm = 5 } = opts;
+    // that stays the default reading of it. Guide power alone is not enough to
+    // mean laser: MCP passes the default 5 whatever the machine, and on a
+    // relay-switched router `M3 S5` is full RPM with the bit still at stock
+    // height. Unless the caller says, a lit lap also needs `$32` laser mode on.
+    const { laserMode = guidePower > 0 && this.laserModeEnabled(), safeZMm = 5 } = opts;
     const { minX, minY, maxX, maxY } = bounds;
 
     await this.sendLine('G21');
