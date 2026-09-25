@@ -66,22 +66,34 @@ const heapBytes = (): number => wasmMemory?.buffer.byteLength ?? 0;
 /**
  * Loads the MuJoCo module once, instantiating the wasm ourselves so the
  * WebAssembly.Memory can be kept (see wasmMemory above).
+ *
+ * The load is shared: two BUILDs arriving while the wasm downloads used to load
+ * two separate modules, and the second build then handed module 2 a VFS made by
+ * module 1 ("Expected null or instance of MjVFS"), failing every mesh build for
+ * the life of the worker. A failed instantiate rejects - Emscripten never calls
+ * `done` for it, which left the load, and the build awaiting it, pending forever.
  */
-const loadMujoco = async (): Promise<Mujoco> => {
-  if (mujoco) return mujoco;
-  mujoco = await load_mujoco({
-    instantiateWasm: (
-      imports: WebAssembly.Imports,
-      done: (instance: WebAssembly.Instance, module: WebAssembly.Module) => void,
-    ) => {
-      WebAssembly.instantiateStreaming(fetch(mujocoWasmUrl), imports).then((result) => {
-        wasmMemory = result.instance.exports.memory as WebAssembly.Memory;
-        done(result.instance, result.module);
-      });
-      return {};
-    },
-  } as Parameters<typeof load_mujoco>[0]);
-  return mujoco;
+let mujocoLoading: Promise<Mujoco> | null = null;
+const loadMujoco = (): Promise<Mujoco> => {
+  if (mujoco) return Promise.resolve(mujoco);
+  mujocoLoading ??= new Promise<Mujoco>((resolve, reject) => {
+    load_mujoco({
+      instantiateWasm: (
+        imports: WebAssembly.Imports,
+        done: (instance: WebAssembly.Instance, module: WebAssembly.Module) => void,
+      ) => {
+        WebAssembly.instantiateStreaming(fetch(mujocoWasmUrl), imports).then((result) => {
+          wasmMemory = result.instance.exports.memory as WebAssembly.Memory;
+          done(result.instance, result.module);
+        }, reject);
+        return {};
+      },
+    } as Parameters<typeof load_mujoco>[0]).then((m) => { mujoco = m; resolve(m); }, reject);
+  }).catch((e) => {
+    mujocoLoading = null;
+    throw new Error(`The physics engine failed to load: ${String((e as Error)?.message || e)}`);
+  });
+  return mujocoLoading;
 };
 let model: MjModel | null = null;
 let data: MjData | null = null;
@@ -1888,8 +1900,8 @@ self.onmessage = async (evt: MessageEvent) => {
   try {
     switch (msg.type) {
       case 'BUILD': {
-        if (!mujoco) await loadMujoco();
         try {
+          if (!mujoco) await loadMujoco();
           applyMeshFiles(msg.meshFiles, msg.dropMeshes);
           const result = doBuild(msg.xml, msg.sceneGraph, msg.preserveState, msg.seedState, msg.brokenConstraints);
           if (msg.holdForInstall) holdUntil = performance.now() + HOLD_FOR_INSTALL_MS;
@@ -1984,7 +1996,12 @@ self.onmessage = async (evt: MessageEvent) => {
         break;
       }
       case 'RUN_HEADLESS': {
-        if (!mujoco) await loadMujoco();
+        try {
+          if (!mujoco) await loadMujoco();
+        } catch (e) {
+          post({ type: 'HEADLESS_RESULT', id: msg.id, ok: false, error: String((e as Error)?.message || e), warnings: [] });
+          break;
+        }
         const result = runHeadless(msg.xml, msg.sceneGraph, msg.ticks, msg.stride);
         post({ type: 'HEADLESS_RESULT', id: msg.id, ...result });
         break;

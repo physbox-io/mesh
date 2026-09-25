@@ -266,6 +266,19 @@ export class PhysicsWorkerClient {
           break;
       }
     };
+    // A worker whose script or wasm never loads - a tab left open across a
+    // deploy fetches old hashed chunks, and nginx answers those with
+    // index.html - reports only here. Without it every build waited forever
+    // and the page sat on "Initializing Mesh..." with no error.
+    const fail = (message: string) => {
+      this.rejectAll(new Error(message));
+      this.onError?.(message, false);
+    };
+    this.worker.onerror = (evt: ErrorEvent) => {
+      evt.preventDefault();
+      fail(`The physics engine failed to load${evt.message ? `: ${evt.message}` : ''}. Reload the page to try again.`);
+    };
+    this.worker.onmessageerror = () => fail('The physics worker sent a message that could not be read.');
   }
 
   /**
@@ -363,7 +376,10 @@ export class PhysicsWorkerClient {
     // fired ended up never replying, leaving the "MCP Active" badge on screen
     // for the rest of the session. The message deliberately avoids the words
     // recompile() sniffs for when deciding a failure was WASM heap exhaustion.
-    const err = new Error('The physics worker was recycled before this request completed.');
+    this.rejectAll(new Error('The physics worker was recycled before this request completed.'));
+  }
+
+  private rejectAll(err: Error) {
     const settle = (map: Map<string, { reject: (e: Error) => void }>) => {
       for (const pending of map.values()) pending.reject(err);
       map.clear();

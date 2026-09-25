@@ -4,6 +4,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 // in flight until the client itself settles it.
 class SilentWorker {
   onmessage: ((evt: MessageEvent) => void) | null = null;
+  onerror: ((evt: ErrorEvent) => void) | null = null;
   postMessage = vi.fn();
   terminate = vi.fn();
 }
@@ -49,5 +50,22 @@ describe('PhysicsWorkerClient.terminate', () => {
   it('reports no pending work on a fresh client', async () => {
     const { PhysicsWorkerClient } = await import('../src/store/physicsWorkerClient');
     expect(new PhysicsWorkerClient().hasPendingWork()).toBe(false);
+  });
+});
+
+describe('PhysicsWorkerClient worker failure', () => {
+  it('rejects in-flight requests and reports when the worker fails to load', async () => {
+    const { PhysicsWorkerClient } = await import('../src/store/physicsWorkerClient');
+    const client = new PhysicsWorkerClient();
+    const onError = vi.fn();
+    client.onError = onError;
+
+    const build = client.build('<mujoco/>', { nodes: [] }, true);
+    // What a stale hashed chunk served as index.html looks like to the page.
+    created[0].onerror?.({ message: 'SyntaxError: Unexpected token <', preventDefault: () => {} } as ErrorEvent);
+
+    await expect(build).rejects.toThrow(/failed to load/);
+    expect(onError).toHaveBeenCalledWith(expect.stringMatching(/failed to load/), false);
+    expect(client.hasPendingWork()).toBe(false);
   });
 });
