@@ -330,6 +330,8 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
   const running = machineState.status === 'RUNNING' || machineState.status.startsWith('PAUSED');
   const paused = machineState.status.startsWith('PAUSED');
   const parked = machineState.status === 'PAUSED_PARKED';
+  // The same gate the job panel's banner applies: a new bit, and no Z datum for it yet.
+  const needsReZero = machineState.status === 'PAUSED_TOOL' && machineState.needsZZero;
 
   const selectClass =
     'bg-transparent text-slate-800 dark:text-slate-200 font-semibold rounded px-1 py-0.5 outline-none cursor-pointer border-none';
@@ -682,9 +684,10 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
               </span>
             )}
             <button
-              onClick={() => (paused ? webSerialManager.resumeJob() : webSerialManager.pauseJob())}
-              title={paused ? 'Resume the job' : 'Pause the job'}
-              className="p-0.5 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white cursor-pointer"
+              onClick={() => void (paused ? webSerialManager.resumeJob() : webSerialManager.pauseJob())}
+              disabled={needsReZero}
+              title={needsReZero ? 'Set Z zero for the new tool first' : paused ? 'Resume the job' : 'Pause the job'}
+              className="p-0.5 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
             >
               {paused ? <Play className="w-3.5 h-3.5" /> : <Pause className="w-3.5 h-3.5" />}
             </button>

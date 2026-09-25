@@ -140,7 +140,7 @@ export const JobPauseBanner: React.FC<{
         )}
 
         <button
-          onClick={() => webSerialManager.resumeJob()}
+          onClick={() => void webSerialManager.resumeJob({ zIsSet: overridden })}
           disabled={blocked}
           title={blocked ? 'Set Z zero for the new tool first' : undefined}
           className="px-4 py-1.5 bg-amber-500 hover:bg-amber-600 disabled:opacity-40 disabled:cursor-not-allowed text-slate-950 font-bold text-xs rounded-lg flex items-center space-x-1.5 cursor-pointer"

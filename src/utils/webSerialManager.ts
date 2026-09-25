@@ -1907,8 +1907,16 @@ class WebSerialManager {
    * the machine; after a tool-change pause the controller was never held in the
    * first place, and a cycle start it did not need is harmless.
    */
-  public async resumeJob() {
+  public async resumeJob({ zIsSet = false }: { zIsSet?: boolean } = {}) {
     if (!this.isPaused) return;
+
+    // The re-zero gate lives here, not only in the banner's button: the bottom
+    // bar's play button and MCP `resume` came straight here and plunged the new
+    // bit against the old one's datum. `zIsSet` is the operator saying, by the
+    // banner's "Z is already set" link, that it already describes this tool.
+    if (this.state.status === 'PAUSED_TOOL' && this.state.needsZZero && !zIsSet) {
+      throw new Error('Set Z zero for the new tool before resuming: the Z datum still belongs to the last one.');
+    }
 
     // A pause the machine was free to be driven around in is a pause it has to
     // be put back from. A feed hold is not one of those — GRBL refuses to jog
