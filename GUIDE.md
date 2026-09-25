@@ -271,6 +271,40 @@ from the mesh (or intersected with it, with Ctrl held). An agent does the same w
 
 ---
 
+### Rounded and bevelled edges
+
+Any part made of shapes can have edges rounded (fillet) or bevelled (chamfer): E, the mode menu, or
+the Edges card; `physics_get_edges` / `physics_round_edges` for agents. A rounding is a feature on the
+body, `node.edgeRounds: { mode, size, edges }[]`, and it is realised **in the boolean program**, which
+is what makes it cheap: the drawn mesh, the colliders, mass and every exporter get it for nothing.
+
+* **Edges are found on the unrounded part** (`utils/featureEdges.ts`, via `utils/edgeRoundBase.ts`,
+  which compiles `csgProgram(node, { rounds: false, always: true })`). Weld the STL soup, group facets
+  into surfaces by the 20° crease angle, and chain the seams between two surfaces, breaking wherever
+  the pair of surfaces changes. A straight chain is a `line`; a closed, flat ring is a `circle` (a
+  hole's or a boss's rim, fitted with `detectCircle`). Anything else is reported but not offered.
+* **Each edge is stored self-sufficiently**, in the source frame: the two outward normals and the two
+  in-face directions away from the edge. That is all the cross-section needs, so emission never goes
+  back to a mesh. Anything drawn over the compiled body shifts by `csgFrameOffset`, like the cut ghosts.
+* **A convex edge is a cutter and a concave one a filler** (`utils/edgeRound.ts`): the region between
+  the corner and the arc (or flat), swept along the edge — `linear_extrude` for a line,
+  `rotate_extrude` for a rim, with the rim's own facet count and phase so the facets line up. Fillers
+  are unioned before cutters are subtracted, and both after the part's own booleans.
+* **Box corners get a patch.** Three edge cutters meeting square leave a blunt point; where three
+  fillets of one size meet at right angles (across features, too), the corner cube less a ball is cut.
+* **Tangent booleans leave collapsed slivers.** `evaluateNodeCsg` drops triangles whose corners weld
+  to one point (`dropCollapsedTriangles`); without that a filleted cube reads as not watertight.
+* **A rounded part with no hole collides as its own hull** when it fills ≥ 90% of it. Otherwise
+  'auto' would fall back to the square source primitives, the one thing the rounding meant to change.
+* **Size limits** (`maxSetback`): half the narrower face beside the edge, or half the gap to the next
+  edge on that face, so a rounding cannot run into its neighbour or into a hole.
+* **Resizing moves the edges** (`reconcileEdgeRounds`, beside `reconcileCuts` in `updateNodeGeom`), by
+  the change in the positive geoms' bounding box. Other kinds of reshaping do not.
+* **The tool edits the body live.** A session writes its draft onto the node so the real boolean shows
+  the result; Apply makes it one undo step and Cancel puts the session's base back.
+
+---
+
 ### Dynamic mesh geoms (`dynamic: true`)
 
 Full physics simulation and collision. MuJoCo takes the **convex hull** of the mesh — so a concave
