@@ -540,6 +540,10 @@ function App() {
         // away its stroke history with it.
         const s = useStore.getState();
         if (s.sculptNodeId || s.latticeNodeId || s.paintMode || s.measureMode || s.gestureStatus) return;
+        // Nor from inside a dialog: every modal is a full-screen `fixed inset-0`
+        // overlay, and Backspace on one of its buttons deleted the selected
+        // body hidden behind it.
+        if ((e.target as HTMLElement).closest?.('.fixed.inset-0')) return;
         const ids = [...(s.selectedNodeId ? [s.selectedNodeId] : []), ...s.extraSelectedIds];
         if (ids.length > 0) s.deleteNodes(ids);
         return;
