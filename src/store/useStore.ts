@@ -1133,6 +1133,23 @@ function rebuildAfterGeomEdit(get: () => PhysicsState, newScene: SceneGraph, nod
   get().recompile(newScene, nodeId, false);
 }
 
+/**
+ * After undo or redo: build any boolean body whose generated mesh no longer
+ * matches what was restored.
+ *
+ * A snapshot carries a body's generated mesh as it was when the snapshot was
+ * taken, which is not always the mesh of the shape it restores — undoing a
+ * rounding puts the roundings back to none while the mesh saved with them is
+ * still the rounded one. The removal button rebuilds straight away; undo has
+ * to as well, rather than hope the auto-compiler gets round to it. Imported
+ * lazily: the compiler's module imports this store.
+ */
+function rebuildBooleansAfterRestore(): void {
+  void import('../hooks/useCsgCompile')
+    .then(({ compileCsgNodes }) => compileCsgNodes())
+    .catch((err) => console.error('Rebuilding booleans after undo failed:', err));
+}
+
 /** A session's roundings: the base, with its draft put in. */
 function draftRounds(session: EdgeRoundSession): EdgeRoundFeature[] {
   return withRoundFeature(
@@ -2129,6 +2146,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     });
 
     get().recompile(previousState.sceneGraph, previousState.selectedNodeId, true, true);
+    rebuildBooleansAfterRestore();
   },
 
   redo: () => {
@@ -2167,6 +2185,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     });
 
     get().recompile(nextState.sceneGraph, nextState.selectedNodeId, true, true);
+    rebuildBooleansAfterRestore();
   },
 
   isPlaying: false,
@@ -4144,6 +4163,13 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
   // Installs the output of evaluateNodeCsg: derived geoms replace the previous
   // ones wholesale, source primitives are untouched.
   applyNodeCsg: (nodeId, result, skipRecompile) => {
+    // A result is for the shape the body had when its compile STARTED. If the
+    // body has changed since — undone, rounded differently, no longer a
+    // boolean at all — installing it would put back a shape that is not there
+    // (an undone rounding coming straight back). The auto-compiler builds the
+    // current one.
+    const current = findNode(get().sceneGraph.nodes, nodeId);
+    if (!current || !current.csgEnabled || csgHashOf(current) !== result.hash) return;
     const newScene = cloneSceneGraph(get().sceneGraph);
     const node = findNode(newScene.nodes, nodeId);
     if (!node) return;

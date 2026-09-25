@@ -154,6 +154,27 @@ export async function compileCsgNodes(skipFinalRecompile = false): Promise<numbe
   return stale.length + unbuilt.length + staleColliders.length;
 }
 
+/**
+ * One queued run at a time, and a new scene change does not push it back.
+ *
+ * This used to be a plain debounce: every scene change cleared the timer and
+ * started it again. A scene that is written more often than the debounce —
+ * anything that rewrites the graph on a stream of events — then never let it
+ * fire, and a boolean edit (or an undo, which restores a stale boolean mesh
+ * and leaves the rebuild to this) never built. A run reads the scene when it
+ * FIRES, so one run picks up every change queued behind it, and anything
+ * still stale when it finishes is caught by the next scene change.
+ */
+let queuedRun: ReturnType<typeof setTimeout> | null = null;
+
+export function scheduleCsgCompile(): void {
+  if (queuedRun) return;
+  queuedRun = setTimeout(() => {
+    queuedRun = null;
+    compileCsgNodes().catch((err) => console.error('Automatic boolean compile failed:', err));
+  }, COMPILE_DEBOUNCE_MS);
+}
+
 export function useCsgAutoCompile() {
   const sceneGraph = useStore(state => state.sceneGraph);
 
@@ -161,7 +182,6 @@ export function useCsgAutoCompile() {
     if (collectStale(sceneGraph.nodes).length === 0 &&
         collectUnbuiltScad(sceneGraph.nodes).length === 0 &&
         collectStaleColliders(sceneGraph.nodes).length === 0) return;
-    const timer = setTimeout(() => { void compileCsgNodes(); }, COMPILE_DEBOUNCE_MS);
-    return () => clearTimeout(timer);
+    scheduleCsgCompile();
   }, [sceneGraph]);
 }
