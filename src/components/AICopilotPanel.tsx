@@ -1193,18 +1193,18 @@ If modifying the 3D scene graph, include the updated "nodes" array in \`\`\`json
         return <h1 key={idx} className="text-sm font-extrabold text-slate-800 dark:text-slate-100 border-b border-slate-150 dark:border-slate-800 pb-1 mt-3 mb-2 tracking-tight">{line.substring(2)}</h1>;
       }
       if (line.startsWith('## ')) {
-        return <h2 key={idx} className="text-xs font-bold text-slate-850 dark:text-slate-200 mt-3 mb-1 tracking-tight">{line.substring(3)}</h2>;
+        return <h2 key={idx} className="text-xs font-bold text-slate-800 dark:text-slate-200 mt-3 mb-1 tracking-tight">{line.substring(3)}</h2>;
       }
       if (line.startsWith('### ')) {
         return <h3 key={idx} className="text-xs font-semibold text-slate-700 dark:text-slate-300 mt-2 mb-1">{line.substring(4)}</h3>;
       }
       if (line.startsWith('* ') || line.startsWith('- ')) {
-        return <li key={idx} className="ml-4 list-disc text-slate-600 dark:text-slate-350 my-0.5 leading-relaxed">{parseBoldAndCode(line.substring(2))}</li>;
+        return <li key={idx} className="ml-4 list-disc text-slate-600 dark:text-slate-300 my-0.5 leading-relaxed">{parseBoldAndCode(line.substring(2))}</li>;
       }
       if (!line.trim()) {
         return <div key={idx} className="h-1.5" />;
       }
-      return <p key={idx} className="my-1.5 text-slate-600 dark:text-slate-350 leading-relaxed font-sans">{parseBoldAndCode(line)}</p>;
+      return <p key={idx} className="my-1.5 text-slate-600 dark:text-slate-300 leading-relaxed font-sans">{parseBoldAndCode(line)}</p>;
     });
   };
 
@@ -1270,19 +1270,19 @@ If modifying the 3D scene graph, include the updated "nodes" array in \`\`\`json
         <div className="grid grid-cols-3 gap-1 p-1 bg-slate-100 dark:bg-slate-955/40 rounded-xl select-none shrink-0">
           <button
             onClick={() => setMode('explain')}
-            className={`py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer ${mode === 'explain' ? 'bg-white dark:bg-slate-800 text-blue-650 dark:text-blue-400 shadow-sm' : 'text-slate-505 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200'}`}
+            className={`py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer ${mode === 'explain' ? 'bg-white dark:bg-slate-800 text-blue-600 dark:text-blue-400 shadow-sm' : 'text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200'}`}
           >
             🔍 Explain
           </button>
           <button
             onClick={() => setMode('generate')}
-            className={`py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer ${mode === 'generate' ? 'bg-white dark:bg-slate-800 text-blue-650 dark:text-blue-400 shadow-sm' : 'text-slate-505 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200'}`}
+            className={`py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer ${mode === 'generate' ? 'bg-white dark:bg-slate-800 text-blue-600 dark:text-blue-400 shadow-sm' : 'text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200'}`}
           >
             🪄 Generate
           </button>
           <button
             onClick={() => setMode('mutate')}
-            className={`py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer ${mode === 'mutate' ? 'bg-white dark:bg-slate-800 text-blue-655 dark:text-blue-450 shadow-sm' : 'text-slate-505 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200'}`}
+            className={`py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer ${mode === 'mutate' ? 'bg-white dark:bg-slate-800 text-blue-600 dark:text-blue-400 shadow-sm' : 'text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200'}`}
           >
             🛠️ Mutate
           </button>
@@ -1354,7 +1354,7 @@ If modifying the 3D scene graph, include the updated "nodes" array in \`\`\`json
               <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
               <div className="flex flex-col">
                 <span className="text-xs font-bold text-amber-800 dark:text-amber-300 leading-normal">API Key Required</span>
-                <p className="text-[10px] text-amber-650 dark:text-amber-450 leading-normal">Configure your Gemini or Claude API key below:</p>
+                <p className="text-[10px] text-amber-600 dark:text-amber-400 leading-normal">Configure your Gemini or Claude API key below:</p>
               </div>
             </div>
             <div className="flex flex-col gap-2">
@@ -1365,7 +1365,7 @@ If modifying the 3D scene graph, include the updated "nodes" array in \`\`\`json
                   placeholder="Paste AIzaSy... key here" 
                   value={geminiApiKey}
                   onChange={(e) => saveGeminiApiKey(e.target.value)}
-                  className="w-full px-2.5 py-1.5 text-xs border border-amber-200 dark:border-amber-900/40 rounded-lg shadow-sm focus:outline-none focus:ring-1 focus:ring-amber-550 font-mono bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200"
+                  className="w-full px-2.5 py-1.5 text-xs border border-amber-200 dark:border-amber-900/40 rounded-lg shadow-sm focus:outline-none focus:ring-1 focus:ring-amber-500 font-mono bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200"
                 />
               </div>
               <div className="flex flex-col gap-1">
@@ -1375,7 +1375,7 @@ If modifying the 3D scene graph, include the updated "nodes" array in \`\`\`json
                   placeholder="Paste sk-ant-... key here" 
                   value={claudeApiKey}
                   onChange={(e) => saveClaudeApiKey(e.target.value)}
-                  className="w-full px-2.5 py-1.5 text-xs border border-amber-200 dark:border-amber-900/40 rounded-lg shadow-sm focus:outline-none focus:ring-1 focus:ring-amber-550 font-mono bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200"
+                  className="w-full px-2.5 py-1.5 text-xs border border-amber-200 dark:border-amber-900/40 rounded-lg shadow-sm focus:outline-none focus:ring-1 focus:ring-amber-500 font-mono bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-200"
                 />
               </div>
               <div className="flex items-center justify-between gap-2 mt-1">
@@ -1430,8 +1430,8 @@ If modifying the 3D scene graph, include the updated "nodes" array in \`\`\`json
         {/* Chat Stream Timeline */}
         <div ref={responseContainerRef} className="flex-1 border border-slate-100 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-950/40 p-3 rounded-xl overflow-y-auto leading-relaxed text-xs text-slate-700 dark:text-slate-300 shadow-inner flex flex-col gap-4 min-h-[150px]">
           {modeMessages.length === 0 ? (
-            <div className="flex flex-col items-center justify-center h-full gap-2 text-slate-400 dark:text-slate-550 select-none py-8 text-center">
-              <HelpCircle className="w-8 h-8 text-slate-350 dark:text-slate-700" />
+            <div className="flex flex-col items-center justify-center h-full gap-2 text-slate-400 dark:text-slate-500 select-none py-8 text-center">
+              <HelpCircle className="w-8 h-8 text-slate-400 dark:text-slate-700" />
               <p className="text-[11px] leading-normal px-4">
                 {(geminiApiKey || claudeApiKey)
                   ? `No history in ${mode} mode. Ask a question or submit a request to start.`
