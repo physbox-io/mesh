@@ -892,7 +892,19 @@ export function useMCPBridge() {
           };
           const found = findNode(store.sceneGraph.nodes);
           if (!found) throw new Error(`Object not found: ${targetId}`);
-          return stripMeshArrays(found);
+          // The docs promise every mesh geom its size and integrity checks, as
+          // physics_get_scene_summary gives them; this used to strip the arrays
+          // and return nothing in their place.
+          const withMeshChecks = (n: SceneNode): SceneNode => ({
+            ...n,
+            ...(n.geoms ? {
+              geoms: n.geoms.map((g) => (g.type === 'mesh'
+                ? { ...g, vertCount: (g.renderVertices || g.vertices || []).length / 3, faceCount: (g.faces || []).length / 3, bbox: bboxOf(g.renderVertices || g.vertices), ...meshIntegrity(g) }
+                : g)),
+            } : {}),
+            ...(n.children ? { children: n.children.map(withMeshChecks) } : {}),
+          });
+          return stripMeshArrays(withMeshChecks(found));
         }
 
         case 'UPDATE_OBJECT': {
