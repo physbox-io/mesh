@@ -262,8 +262,11 @@ export async function fetchCurrentUser(): Promise<PhysBoxUser | null> {
       return res.user;
     }
     return null;
-  } catch {
-    clearStoredAuth();
+  } catch (e) {
+    // Only a server that says the session is no good ends it. Offline, a 5xx
+    // or a DNS failure used to sign the user out while the page still showed
+    // them signed in, and sync and sharing then quietly stopped working.
+    if (e instanceof PhysBoxApiError && (e.status === 401 || e.status === 403)) clearStoredAuth();
     return null;
   }
 }

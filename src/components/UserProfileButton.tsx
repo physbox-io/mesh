@@ -72,6 +72,7 @@ export const UserProfileButton: React.FC = () => {
   useEffect(() => {
     fetchCurrentUser().then((u) => {
       if (u) setUser(u);
+      else if (!getStoredAuthToken()) setUser(null); // the session was refused
     });
   }, []);
 
