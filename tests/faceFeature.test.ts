@@ -8,7 +8,7 @@
 // found exactly and the cut is turned to lie along the face's own edges.
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { flatFaceAt, cutGeometry, geomBounds, reconcileCuts, type FaceRegion } from '../src/utils/csg';
+import { flatFaceAt, cutGeometry, geomBounds, reconcileCuts, insetPolygon, prismMesh, type FaceRegion } from '../src/utils/csg';
 import { useStore } from '../src/store/useStore';
 import type { SceneGeom, SceneGraph, SceneNode } from '../src/types/scene';
 
@@ -101,12 +101,17 @@ describe('flat regions of a mesh', () => {
     expect(region.half.map((v) => +v.toFixed(9))).toEqual([0.1, 0.1]);
   });
 
-  it('refuses a flat face that no box or disk fits', () => {
-    // An L of three squares: flat, but a rectangle over it would spill off it.
+  it('follows a flat face that no box or disk fits', () => {
+    // An L of three squares: a rectangle over it would spill off it, so it is
+    // its own outline — six corners, the ones where triangles merely met along
+    // a straight edge dropped.
     const v = [0, 0, 0, 1, 0, 0, 2, 0, 0, 0, 1, 0, 1, 1, 0, 2, 1, 0, 0, 2, 0, 1, 2, 0];
     const faces = [0, 1, 4, 0, 4, 3, 1, 2, 5, 1, 5, 4, 3, 4, 7, 3, 7, 6];
     const ell = body([{ name: 'l', type: 'mesh', dynamic: true, renderVertices: v, faces } as unknown as SceneGeom]);
-    expect(flatFaceAt(ell, [0.5, 0.5, 5], [0, 0, -1])).toBeNull();
+    const region = flatFaceAt(ell, [0.5, 0.5, 5], [0, 0, -1])!;
+    expect(region.shape).toBe('polygon');
+    expect(region.outline).toHaveLength(6);
+    expect(region.closed).toBe(false);
   });
 });
 
@@ -156,13 +161,13 @@ describe('setFaceFeature', () => {
 
   it('adds a pocket, then turns the same feature into a boss', () => {
     const region = flatFaceAt(part(), [0, 0, 5], [0, 0, -1])!;
-    const index = useStore.getState().setFaceFeature('part', region, { half: [0.05, 0.1], depth: -0.02 });
+    const index = useStore.getState().setFaceFeature('part', region, { border: 0.05, depth: -0.02 });
     expect(index).toBe(1);
     let feature = part().geoms[index];
     expect(feature).toMatchObject({ csg: 'difference', cutFace: true, cutDepth: 0.02 });
     expect(part().csgEnabled).toBe(true);
 
-    const again = useStore.getState().setFaceFeature('part', region, { half: [0.05, 0.1], depth: 0.03 }, index);
+    const again = useStore.getState().setFaceFeature('part', region, { border: 0.05, depth: 0.03 }, index);
     expect(again).toBe(index);
     expect(part().geoms).toHaveLength(2);
     feature = part().geoms[index];
@@ -172,8 +177,76 @@ describe('setFaceFeature', () => {
 
   it('goes right through when asked, and does nothing at no depth', () => {
     const region = flatFaceAt(part(), [0, 0, 5], [0, 0, -1])!;
-    expect(useStore.getState().setFaceFeature('part', region, { half: [0.05, 0.1], depth: 0 })).toBe(-1);
-    const index = useStore.getState().setFaceFeature('part', region, { half: [0.05, 0.1], depth: -1, through: true });
+    expect(useStore.getState().setFaceFeature('part', region, { border: 0.05, depth: 0 })).toBe(-1);
+    const index = useStore.getState().setFaceFeature('part', region, { border: 0.05, depth: -1, through: true });
     expect(part().geoms[index]).toMatchObject({ csg: 'difference', cutDepth: 0 });
+  });
+});
+
+// Any flat face, not only rectangles and disks: a lattice face drawn as a
+// trapezoid used to fall through to boring the whole body.
+describe('a face of any outline', () => {
+  const trapezoid = [[0, 0], [0.4, 0], [0.3, 0.2], [0.1, 0.2]];
+  beforeEach(() => {
+    (globalThis as unknown as { window: unknown }).window = globalThis;
+  });
+  const prismBody = () => {
+    const { positions, faces } = prismMesh(trapezoid, 0, 0.1);
+    return body([{ name: 'p', type: 'mesh', dynamic: true, renderVertices: positions, faces } as unknown as SceneGeom]);
+  };
+
+  it('insets by the same distance from every edge', () => {
+    const inner = insetPolygon(trapezoid, 0.02)!;
+    // Each new edge is 0.02 in from the old one: measure a corner of it
+    // against the old edge's line.
+    for (let i = 0; i < 4; i++) {
+      const [a, b] = [trapezoid[i], trapezoid[(i + 1) % 4]];
+      const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      const p = inner[i];
+      const dist = ((b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])) / len;
+      expect(dist).toBeCloseTo(0.02, 9);
+    }
+    expect(insetPolygon(trapezoid, 0.5)).toBeNull();
+  });
+
+  it('finds the trapezoid as its own outline', () => {
+    const region = flatFaceAt(prismBody(), [0.2, 0.1, 5], [0, 0, -1])!;
+    expect(region.shape).toBe('polygon');
+    expect(region.outline).toHaveLength(4);
+    expect(region.closed).toBe(true);
+    expect(region.at[2]).toBeCloseTo(0.1, 9);
+    expect(region.maxBorder).toBeGreaterThan(0.05);
+    expect(region.maxBorder).toBeLessThan(0.1);
+  });
+
+  it('sinks a pocket of that outline, and stands a boss of it', () => {
+    useStore.setState({ sceneGraph: { nodes: [{ ...prismBody(), id: 'part' }] } as unknown as SceneGraph, model: null, data: null });
+    const part = () => useStore.getState().sceneGraph.nodes[0];
+    const region = flatFaceAt(part(), [0.2, 0.1, 5], [0, 0, -1])!;
+    const index = useStore.getState().setFaceFeature('part', region, { border: 0.02, depth: -0.04 });
+    const pocket = part().geoms[index];
+    expect(pocket).toMatchObject({ type: 'mesh', csg: 'difference', cutFace: true });
+    expect(pocket.cutOutline).toHaveLength(4);
+    const b = geomBounds(pocket)!;
+    expect(b.min[2]).toBeCloseTo(0.06, 6);
+    expect(b.max[2]).toBeGreaterThan(0.1);
+
+    useStore.getState().setFaceFeature('part', region, { border: 0.02, depth: 0.03 }, index);
+    const boss = part().geoms[index];
+    expect(boss.csg).toBe('union');
+    expect(geomBounds(boss)!.max[2]).toBeCloseTo(0.13, 6);
+  });
+
+  it('sinks nothing into an open surface, but stands a boss on one', () => {
+    // A lone face: what a single lattice quad is when it is not part of a solid.
+    const sheet = {
+      name: 's', type: 'mesh', dynamic: true,
+      renderVertices: [0, 0, 0, 0.2, 0, 0, 0.2, 0.2, 0, 0, 0.2, 0], faces: [0, 1, 2, 0, 2, 3],
+    } as unknown as SceneGeom;
+    useStore.setState({ sceneGraph: { nodes: [{ ...body([sheet]), id: 'part' }] } as unknown as SceneGraph, model: null, data: null });
+    const region = flatFaceAt(useStore.getState().sceneGraph.nodes[0], [0.1, 0.1, 5], [0, 0, -1])!;
+    expect(region.closed).toBe(false);
+    expect(useStore.getState().setFaceFeature('part', region, { border: 0.02, depth: -0.01 })).toBe(-1);
+    expect(useStore.getState().setFaceFeature('part', region, { border: 0.02, depth: 0.01 })).toBe(1);
   });
 });

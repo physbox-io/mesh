@@ -176,6 +176,14 @@ export interface SceneGeom {
    */
   cutFace?: boolean;
   /**
+   * A face feature on a face that is neither a rectangle nor a disk: its inset
+   * outline, anticlockwise, in metres, in the cut's own frame. The geom is a
+   * mesh, and cutGeometry stands this up as a prism.
+   */
+  cutOutline?: number[][];
+  /** How far a face feature is inset from the face's edges, in metres. */
+  cutBorder?: number;
+  /**
    * A modifier on a round cut: the hole is tapped. `pitch` is the thread pitch
    * in metres; the geom's own radius is the thread's MAJOR radius (the size a
    * bolt is named by — M6 is a 6 mm major diameter), and the minor diameter

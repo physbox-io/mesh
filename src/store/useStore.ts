@@ -15,7 +15,7 @@ import {
 } from '../utils/latticeMesh';
 import { latticeBoolean } from '../utils/latticeBoolean';
 import {
-  type CsgResult, type CutSpot, type FaceRegion, CSG_DEFAULT_SECTORS, scadForDisplay,
+  type CsgResult, type CutSpot, type FaceRegion, CSG_DEFAULT_SECTORS, scadForDisplay, insetPolygon,
   cutGeometry, sourcePositiveBounds, reconcileCuts, pickCutSpot,
   hasBooleanOps, csgHashOf,
 } from '../utils/csg';
@@ -1874,17 +1874,18 @@ export interface PhysicsState {
    */
   addBodyCut: (nodeId: string, shape: 'cylinder' | 'box' | 'sphere', spot?: CutSpot) => number;
   /**
-   * An inset face, pushed in or pulled out: a box or disk cut sized to a flat
-   * face (see flatFaceAt), sunk into it as a pocket or stood on it as a boss.
-   * `half` is the inset outline, in the region's own frame. `depth` is signed
-   * metres: negative into the part, positive out of it; `through` sinks it all
-   * the way, however thick the part is or becomes. With `index`, reshapes that
-   * feature instead of adding one. Returns the feature's geom index, or -1.
+   * An inset face, pushed in or pulled out: a cut the shape of a flat face (see
+   * flatFaceAt) — a box, a disk, or a prism of any other outline — sunk into it
+   * as a pocket or stood on it as a boss. `border` is how far in from the
+   * face's edges, in metres. `depth` is signed metres: negative into the part,
+   * positive out of it; `through` sinks it all the way, however thick the part
+   * is or becomes. Nothing is sunk into an open surface. With `index`, reshapes
+   * that feature instead of adding one. Returns the feature's geom index, or -1.
    */
   setFaceFeature: (
     nodeId: string,
     region: FaceRegion,
-    feature: { half: number[]; depth: number; through?: boolean },
+    feature: { border: number; depth: number; through?: boolean },
     index?: number,
   ) => number;
   /** Moves a cut to another spot on the part, square to the surface there. */
@@ -3393,6 +3394,13 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
   setFaceFeature: (nodeId, region, feature, index) => {
     const raise = !feature.through && feature.depth > 0;
     if (!feature.through && Math.abs(feature.depth) < 1e-7) return -1;
+    // A sheet has no inside to sink anything into; a boolean against one is
+    // not a part with a pocket in it, it is nothing.
+    if (!raise && !region.closed) return -1;
+    const border = Math.max(0, feature.border);
+    const outline = region.shape === 'polygon' ? (region.outline ? insetPolygon(region.outline, border) : null) : undefined;
+    if (outline === null) return -1;
+    if (region.shape !== 'polygon' && region.half.some((h) => h - border <= 0)) return -1;
     if (!findNode(get().sceneGraph.nodes, nodeId)) return -1;
     get().prepareForDiscreteChange();
     const newScene = cloneSceneGraph(get().sceneGraph);
@@ -3403,20 +3411,30 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     if (index !== undefined && !existing?.cutFace) return -1;
 
     const round = (v: number) => +v.toFixed(6);
-    const [h0, h1] = [Math.max(1e-6, feature.half[0] ?? 0), Math.max(1e-6, feature.half[1] ?? feature.half[0] ?? 0)];
+    const [h0, h1] = [region.half[0] - border, (region.half[1] ?? region.half[0]) - border];
     const sameKind = existing && (existing.csg === 'union') === raise;
     const count = geoms.filter((g) => g.cutFace && !g.csgDerived && (g.csg === 'union') === raise).length;
     const geom: SceneGeom = {
       ...(existing ?? {}),
       name: sameKind ? existing!.name : `${node.id}_${raise ? 'boss' : 'pocket'}${count + 1}`,
-      type: region.shape,
-      size: region.shape === 'box' ? [round(h0), round(h1), 0] : [round(h0), 0],
+      type: region.shape === 'polygon' ? 'mesh' : region.shape,
+      size: region.shape === 'box' ? [round(h0), round(h1), 0] : region.shape === 'cylinder' ? [round(h0), 0] : [1],
       csg: raise ? 'union' : 'difference',
       cutAt: region.at.map(round),
       cutNormal: region.normal.map((v) => +v.toFixed(9)),
       cutDepth: feature.through ? 0 : round(Math.abs(feature.depth)),
       cutFace: true,
+      cutBorder: round(border),
     };
+    if (outline) {
+      // A prism is baked into the body frame by cutGeometry: no size, and no
+      // pose of its own to be applied on top.
+      geom.cutOutline = outline.map(([x, y]) => [+x.toFixed(7), +y.toFixed(7)]);
+      delete geom.pos;
+      delete geom.quat;
+    } else {
+      delete geom.cutOutline;
+    }
     if (region.twist) geom.cutTwist = +region.twist.toFixed(9);
     else delete geom.cutTwist;
     // A pocket is red like every negative here. A boss is material, and is the

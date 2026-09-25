@@ -36,6 +36,7 @@ import { ConvexHull } from 'three/examples/jsm/math/ConvexHull.js';
 import type { CollisionMode, SceneGeom, SceneNode } from '../types/scene';
 import { PairMemo } from './arrayMemo';
 import { edgeRoundSolids, hasEdgeRounds } from './edgeRound';
+import { analyzeMesh } from './meshIntegrity';
 // NOTE: ./openscad is imported lazily inside evaluateNodeCsg, not here. It
 // reaches the Zustand store (for the compile counter), which reaches the physics
 // worker client and the MuJoCo wasm glue — so a static import would drag the
@@ -786,21 +787,146 @@ export function pickCutSpot(node: SceneNode, origin: number[], direction: number
 
 /**
  * A flat face of a part: where its middle is, which way it faces, and its
- * outline, as a box or a disk centred there.
+ * outline — a box, a disk, or any other polygon — centred there.
  *
  * `half` is the box's two half-extents, or the disk's radius, in the frame a
  * cut at `at` along `normal` turned by `twist` is drawn in — so a cut given
- * these numbers covers the face exactly, and one given a fraction of them is
- * the face inset.
+ * these numbers covers the face exactly. A polygon has `outline` instead: its
+ * corners, anticlockwise seen from outside, in that same frame.
  */
 export interface FaceRegion {
   at: number[];
   normal: number[];
-  shape: 'box' | 'cylinder';
+  shape: 'box' | 'cylinder' | 'polygon';
   half: number[];
+  outline?: number[][];
   twist: number;
+  /** The widest border an inset of this face can have before it closes up. */
+  maxBorder: number;
+  /**
+   * Whether the face is on a closed solid. An open surface — a lone lattice
+   * face, a sheet — has no inside, so nothing can be sunk into it; only a boss
+   * can be stood on it.
+   */
+  closed: boolean;
   /** The geom the face belongs to — a boss's own top, say. */
   geom?: SceneGeom;
+}
+
+/** Twice the signed area of a 2D loop: positive when it runs anticlockwise. */
+function loopArea2(points: number[][]): number {
+  let a = 0;
+  for (let i = 0; i < points.length; i++) {
+    const p = points[i];
+    const q = points[(i + 1) % points.length];
+    a += p[0] * q[1] - q[0] * p[1];
+  }
+  return a;
+}
+
+/** Whether two 2D segments cross, not counting a shared end. */
+function segmentsCross(a: number[], b: number[], c: number[], d: number[]): boolean {
+  const orient = (p: number[], q: number[], r: number[]) => (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]);
+  const d1 = orient(c, d, a);
+  const d2 = orient(c, d, b);
+  const d3 = orient(a, b, c);
+  const d4 = orient(a, b, d);
+  return ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0));
+}
+
+/**
+ * A polygon moved in on every side by the same distance: the inset of a face.
+ *
+ * Each corner slides along the bisector of its two edges, by as much as keeps
+ * both edges `border` in from where they were. Null once that is no longer a
+ * polygon — an edge has shrunk past nothing and turned round, or two edges
+ * have crossed — which is where an inset has closed up.
+ */
+export function insetPolygon(points: number[][], border: number): number[][] | null {
+  const n = points.length;
+  if (n < 3) return null;
+  if (border <= 0) return points.map((p) => [...p]);
+  const out: number[][] = [];
+  for (let i = 0; i < n; i++) {
+    const p0 = points[(i + n - 1) % n];
+    const p1 = points[i];
+    const p2 = points[(i + 1) % n];
+    const e1 = [p1[0] - p0[0], p1[1] - p0[1]];
+    const e2 = [p2[0] - p1[0], p2[1] - p1[1]];
+    const l1 = Math.hypot(e1[0], e1[1]);
+    const l2 = Math.hypot(e2[0], e2[1]);
+    if (l1 < 1e-12 || l2 < 1e-12) return null;
+    // Inward is to the LEFT of an anticlockwise loop.
+    const n1 = [-e1[1] / l1, e1[0] / l1];
+    const n2 = [-e2[1] / l2, e2[0] / l2];
+    const denom = 1 + n1[0] * n2[0] + n1[1] * n2[1];
+    if (denom < 1e-6) return null;
+    out.push([p1[0] + border * (n1[0] + n2[0]) / denom, p1[1] + border * (n1[1] + n2[1]) / denom]);
+  }
+  for (let i = 0; i < n; i++) {
+    const a = points[i], b = points[(i + 1) % n];
+    const c = out[i], d = out[(i + 1) % n];
+    if ((b[0] - a[0]) * (d[0] - c[0]) + (b[1] - a[1]) * (d[1] - c[1]) <= 0) return null;
+  }
+  if (loopArea2(out) <= 0) return null;
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 2; j < n; j++) {
+      if (i === 0 && j === n - 1) continue;
+      if (segmentsCross(out[i], out[(i + 1) % n], out[j], out[(j + 1) % n])) return null;
+    }
+  }
+  return out;
+}
+
+/** The widest border insetPolygon will take, found by halving. */
+function maxPolygonBorder(points: number[][]): number {
+  let lo = 0;
+  let hi = Math.sqrt(Math.abs(loopArea2(points)) / 2);
+  for (let i = 0; i < 40; i++) {
+    const mid = (lo + hi) / 2;
+    if (insetPolygon(points, mid)) lo = mid; else hi = mid;
+  }
+  return lo;
+}
+
+/**
+ * A prism: a 2D outline (anticlockwise) stood from z = `z0` to `z1`, wound
+ * outward. Flat arrays, the way a mesh geom holds them. Shared by a polygon
+ * cut and by the ghost that previews one.
+ */
+export function prismMesh(outline: number[][], z0: number, z1: number): { positions: number[]; faces: number[] } {
+  const n = outline.length;
+  const positions: number[] = [];
+  for (const [x, y] of outline) positions.push(x, y, z0);
+  for (const [x, y] of outline) positions.push(x, y, z1);
+  const faces: number[] = [];
+  const caps = THREE.ShapeUtils.triangulateShape(outline.map(([x, y]) => new THREE.Vector2(x, y)), []);
+  for (const [a, b, c] of caps) {
+    // Whatever order the triangulator hands back, the top faces up and the
+    // bottom down.
+    const up = loopArea2([outline[a], outline[b], outline[c]]) > 0;
+    const [p, q, r] = up ? [a, b, c] : [a, c, b];
+    faces.push(n + p, n + q, n + r);
+    faces.push(r, q, p);
+  }
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n;
+    faces.push(i, j, n + j, i, n + j, n + i);
+  }
+  return { positions, faces };
+}
+
+/** A disk or a box outline as a polygon, for a ghost that draws every shape one way. */
+export function regionOutline(region: FaceRegion, border: number): number[][] | null {
+  if (region.shape === 'polygon') return region.outline ? insetPolygon(region.outline, border) : null;
+  if (region.shape === 'box') {
+    const [hx, hy] = [region.half[0] - border, region.half[1] - border];
+    if (hx <= 0 || hy <= 0) return null;
+    return [[-hx, -hy], [hx, -hy], [hx, hy], [-hx, hy]];
+  }
+  const r = region.half[0] - border;
+  if (r <= 0) return null;
+  return Array.from({ length: 48 }, (_, i) => [r * Math.cos((i / 48) * 2 * Math.PI), r * Math.sin((i / 48) * 2 * Math.PI)]);
 }
 
 /** The twist that turns a cut's frame along `normal` so its X runs along `u`. */
@@ -914,16 +1040,22 @@ function meshFaceRegion(geom: SceneGeom, hitFace: number): FaceRegion | null {
   if (!best) return null;
   const plane = p0.dot(n0);
 
+  const integrity = analyzeMesh(verts, faces);
+  const closed = !!integrity?.closed;
+
   if (area / best.area > 0.98) {
     const cu = (best.min[0] + best.max[0]) / 2;
     const cv = (best.min[1] + best.max[1]) / 2;
     const centre = best.u.clone().multiplyScalar(cu).addScaledVector(best.v, cv).addScaledVector(n0, plane);
+    const half = [(best.max[0] - best.min[0]) / 2, (best.max[1] - best.min[1]) / 2];
     return {
       at: centre.toArray(),
       normal: n0.toArray(),
       shape: 'box',
-      half: [(best.max[0] - best.min[0]) / 2, (best.max[1] - best.min[1]) / 2],
+      half,
       twist: twistOnto(n0, best.u),
+      maxBorder: Math.min(half[0], half[1]),
+      closed,
     };
   }
 
@@ -934,10 +1066,75 @@ function meshFaceRegion(geom: SceneGeom, hitFace: number): FaceRegion | null {
   centre.multiplyScalar(1 / points.length);
   let inner = Infinity;
   for (const [a, b] of outline) inner = Math.min(inner, a.clone().add(b).multiplyScalar(0.5).distanceTo(centre));
-  if (Number.isFinite(inner) && inner > 0 && area / (Math.PI * inner * inner) > 0.97 && area / (Math.PI * inner * inner) < 1.1) {
-    return { at: centre.toArray(), normal: n0.toArray(), shape: 'cylinder', half: [inner], twist: 0 };
+  // A faceted circle, not merely a round-ish polygon: an octagon fills its
+  // inscribed circle to within 6%, and would be drawn as a disk if this asked
+  // only about area. Twelve sides fill it to within 2.3%.
+  const fill = area / (Math.PI * inner * inner);
+  if (Number.isFinite(inner) && inner > 0 && outline.length >= 12 && fill > 0.97 && fill < 1.03) {
+    return { at: centre.toArray(), normal: n0.toArray(), shape: 'cylinder', half: [inner], twist: 0, maxBorder: inner, closed };
   }
-  return null;
+
+  /*
+   * Any other flat face is its own outline: the boundary edges chained into one
+   * loop. Triangles are wound anticlockwise seen from outside, so their edges
+   * along the boundary already run anticlockwise round it. More than one loop
+   * is a face with a hole in it, which a single prism cannot follow.
+   */
+  const next = new Map<number, number>();
+  for (const f of region) {
+    for (let k = 0; k < 3; k++) {
+      const a = faces[f + k];
+      const b = faces[f + (k + 1) % 3];
+      if (count.get(edgeKey(a, b)) === 1) next.set(a, b);
+    }
+  }
+  const start = next.keys().next().value as number | undefined;
+  if (start === undefined) return null;
+  const loop: number[] = [];
+  for (let v: number | undefined = start; v !== undefined && loop.length <= next.size; v = next.get(v)) {
+    loop.push(v);
+    if (next.get(v) === start) break;
+  }
+  if (loop.length !== next.size || next.get(loop[loop.length - 1]) !== start) return null;
+
+  const turn = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), n0);
+  const ax = new THREE.Vector3(1, 0, 0).applyQuaternion(turn);
+  const ay = new THREE.Vector3(0, 1, 0).applyQuaternion(turn);
+  let flat = loop.map((i) => { const p = at(i); return [p.dot(ax), p.dot(ay)]; });
+  // Corners in the middle of a straight edge are where triangles met, not
+  // corners of the face, and would put a kink in the inset.
+  flat = flat.filter((p, i) => {
+    const a = flat[(i + flat.length - 1) % flat.length];
+    const b = flat[(i + 1) % flat.length];
+    const cross = (p[0] - a[0]) * (b[1] - p[1]) - (p[1] - a[1]) * (b[0] - p[0]);
+    return Math.abs(cross) > eps * Math.hypot(b[0] - a[0], b[1] - a[1]);
+  });
+  if (flat.length < 3 || loopArea2(flat) <= 0) return null;
+
+  // Centred on its area centroid, which is where a cut's line goes through.
+  let cx = 0, cy = 0, a2 = 0;
+  for (let i = 0; i < flat.length; i++) {
+    const p = flat[i];
+    const q = flat[(i + 1) % flat.length];
+    const c = p[0] * q[1] - q[0] * p[1];
+    a2 += c;
+    cx += (p[0] + q[0]) * c;
+    cy += (p[1] + q[1]) * c;
+  }
+  cx /= 3 * a2;
+  cy /= 3 * a2;
+  const polygon = flat.map(([x, y]) => [x - cx, y - cy]);
+  const middle = ax.clone().multiplyScalar(cx).addScaledVector(ay, cy).addScaledVector(n0, plane);
+  return {
+    at: middle.toArray(),
+    normal: n0.toArray(),
+    shape: 'polygon',
+    half: [],
+    outline: polygon,
+    twist: 0,
+    maxBorder: maxPolygonBorder(polygon),
+    closed,
+  };
 }
 
 /**
@@ -1025,6 +1222,8 @@ function faceRegionOf(geom: SceneGeom, hitNormal: number[], hitFace?: number): F
       shape: 'box',
       half: [half[ua], half[va]],
       twist: twistOnto(normal, u),
+      maxBorder: Math.min(half[ua], half[va]),
+      closed: true,
     };
   }
   if (geom.type === 'cylinder' && Math.abs(local.z) > 0.999) {
@@ -1035,6 +1234,8 @@ function faceRegionOf(geom: SceneGeom, hitNormal: number[], hitFace?: number): F
       shape: 'cylinder',
       half: [s[0] ?? 0.1],
       twist: 0,
+      maxBorder: s[0] ?? 0.1,
+      closed: true,
     };
   }
   return null;
@@ -1091,7 +1292,7 @@ export function surfaceUnder(
 export function cutGeometry(
   node: SceneNode,
   geom: SceneGeom,
-): { pos: number[]; size: number[]; quat: number[] } | null {
+): Partial<SceneGeom> | null {
   const normal = geom.cutNormal ?? [0, 0, 1];
   const n = new THREE.Vector3(normal[0] ?? 0, normal[1] ?? 0, normal[2] ?? 1);
   if (n.lengthSq() < 1e-18) return null;
@@ -1108,6 +1309,27 @@ export function cutGeometry(
   const quat = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), n);
   if (geom.cutTwist) quat.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), geom.cutTwist));
   const mjQuat = [quat.w, quat.x, quat.y, quat.z].map(v => +v.toFixed(9));
+
+  if (geom.type === 'mesh' && geom.cutOutline) {
+    // A face of any other shape: its outline stood up as a prism, over the
+    // same length a box cut would have, baked into the body frame — the frame
+    // every mesh geom's vertices are read in.
+    const boss = geom.csg === 'union';
+    const height = Math.max(1e-6, geom.cutDepth || 0);
+    const through = !boss && !(geom.cutDepth && geom.cutDepth > 0);
+    const reach = boss ? height : through ? (under?.thickness ?? 0) + over : geom.cutDepth!;
+    const length = reach + over;
+    const centre = entry.clone().addScaledVector(n, boss ? (height - over) / 2 : (over - reach) / 2);
+    const prism = prismMesh(geom.cutOutline, -length / 2, length / 2);
+    const m = new THREE.Matrix4().makeRotationFromQuaternion(quat).setPosition(centre);
+    const p = new THREE.Vector3();
+    const zup: number[] = [];
+    for (let i = 0; i < prism.positions.length; i += 3) {
+      p.set(prism.positions[i], prism.positions[i + 1], prism.positions[i + 2]).applyMatrix4(m);
+      zup.push(+p.x.toFixed(7), +p.y.toFixed(7), +p.z.toFixed(7));
+    }
+    return { renderVertices: zup, vertices: zupArrayToYup(zup), faces: prism.faces, dynamic: true };
+  }
 
   if (geom.csg === 'union') {
     // A boss: out of the surface by its height, and sunk into it by the
@@ -1191,13 +1413,10 @@ export function reconcileCuts(node: SceneNode): boolean {
     const under = surfaceUnder(node, geom.cutAt ?? [0, 0, 0], geom.cutNormal!, geom);
     if (under) geom.cutAt = under.entry.map(v => +v.toFixed(6));
 
-    const samePos = (geom.pos || []).length === 3
-      && next.pos.every((v, a) => Math.abs(v - (geom.pos![a] ?? 0)) < 1e-9);
-    const sameSize = (geom.size || []).length === next.size.length
-      && next.size.every((v, i) => Math.abs(v - (geom.size![i] ?? 0)) < 1e-9);
-    const sameQuat = (geom.quat || []).length === 4
-      && next.quat.every((v, i) => Math.abs(v - (geom.quat![i] ?? 0)) < 1e-9);
-    if (samePos && sameSize && sameQuat) continue;
+    const same = (a: number[] | undefined, b: number[] | undefined) =>
+      !b || (!!a && a.length === b.length && b.every((v, i) => Math.abs(v - (a[i] ?? 0)) < 1e-9));
+    if (same(geom.pos, next.pos) && same(geom.size, next.size) && same(geom.quat, next.quat)
+      && same(geom.renderVertices, next.renderVertices)) continue;
     Object.assign(geom, next);
     changed = true;
   }

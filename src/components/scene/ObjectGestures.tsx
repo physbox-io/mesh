@@ -33,7 +33,11 @@ import * as THREE from 'three';
 import { useStore, getPhysicsWorkerClient } from '../../store/useStore';
 import type { SceneNode } from '../../types/scene';
 import { scaleNodeTree, boreFactors, BORE_OVERSHOOT, type Bore } from '../../utils/scaleNode';
-import { pickCutSpot, flatFaceAt, surfaceUnder, sourcePositiveBounds, type CutSpot, type FaceRegion } from '../../utils/csg';
+import {
+  pickCutSpot, flatFaceAt, surfaceUnder, sourcePositiveBounds, regionOutline, prismMesh, csgSourceGeoms,
+  type CutSpot, type FaceRegion,
+} from '../../utils/csg';
+import { analyzeMesh } from '../../utils/meshIntegrity';
 import { bodyPoseOf, toParentFrame } from './bodyPose';
 import { solveScaleToFit, type MateFeature } from '../../utils/mateSnap';
 import { bodyFeatures, neighbourFeatures, documentAxes, graphAxes } from '../../utils/mateFeatures';
@@ -52,13 +56,23 @@ interface Held {
 interface FaceGesture {
   region: FaceRegion;
   stage: 'inset' | 'depth';
-  /** The fraction of the face the inset keeps, across it. */
+  /**
+   * How much of the widest possible border is NOT taken: 1 is the face itself,
+   * near 0 is an inset closed almost to nothing. The border is the same all
+   * round, as far in from every edge.
+   */
   inset: number;
   startInset: number;
+  /** The border the ghost's outline was last built for. */
+  drawnBorder: number;
+  /** Across the face at its widest, to size the ghost's slab by. */
+  extent: number;
   /** Signed metres: out of the part is positive, into it negative. */
   depth: number;
   startDepth: number;
   through: boolean;
+  /** Pushed into an open surface, which has nowhere to go: said, not drawn. */
+  sinking: boolean;
   /** Material under the middle of the face: how deep a pocket can go before it is through. */
   thickness: number;
   /** The feature being re-opened, or -1 for a new one. */
@@ -233,6 +247,26 @@ const POCKET_MATERIAL = new THREE.MeshBasicMaterial({
 const OUTLINE_EDGES = new THREE.LineBasicMaterial({ color: 0x0284c7, transparent: true, depthTest: false });
 const POCKET_EDGES = new THREE.LineBasicMaterial({ color: 0xdc2626, transparent: true, depthTest: false });
 
+/** A face's outline as a prism a unit tall, centred on z = 0: the ghost, scaled along z to length. */
+const ghostGeometry = (outline: number[][]) => {
+  const { positions, faces } = prismMesh(outline, -0.5, 0.5);
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setIndex(faces);
+  return geometry;
+};
+
+/**
+ * Whether every shape a body is made of encloses something. A lone lattice
+ * face or an imported sheet does not, and a boolean against it is not a part
+ * with a hole in it — OpenSCAD answers with nothing, or with rubbish.
+ */
+const isClosedSolid = (node: SceneNode) => csgSourceGeoms(node).every((g) => {
+  if (g.type !== 'mesh' || g.csg === 'difference' || g.role === 'visual') return true;
+  const v = g.renderVertices;
+  return !v || !g.faces || !!analyzeMesh(v, g.faces)?.closed;
+});
+
 /** Millimetres, for the status bar. */
 const mmText = (metres: number) => `${(metres * 1000).toFixed(1)} mm`;
 
@@ -254,6 +288,16 @@ export const ObjectGestureController = () => {
   const pointer = useRef({ x: 0, y: 0, alt: false });
   const setGestureStatus = useStore((s) => s.setGestureStatus);
   const setOrbitEnabled = useOrbitEnable();
+
+  /** A refusal said in the status bar for a few seconds, rather than nothing happening. */
+  const flashTimer = useRef<number | undefined>(undefined);
+  const flash = useCallback((text: string) => {
+    setGestureStatus(text);
+    window.clearTimeout(flashTimer.current);
+    flashTimer.current = window.setTimeout(() => {
+      if (useStore.getState().gestureStatus === text) setGestureStatus(null);
+    }, 3500);
+  }, [setGestureStatus]);
 
   useEffect(() => {
     const track = (event: PointerEvent) => {
@@ -391,6 +435,8 @@ export const ObjectGestureController = () => {
       } else {
         // Along the face's own line, read off the plane that contains it and
         // faces the camera — the same way a held axis is read in a move.
+        // An open surface has no inside: the pointer can raise a boss from
+        // it, and pushing in stops at the face.
         const ray = rayIn(parent, pointer.current.x, pointer.current.y);
         const toEye = ray.origin.clone().sub(face.at);
         const across = toEye.sub(face.normal.clone().multiplyScalar(toEye.dot(face.normal)));
@@ -398,6 +444,8 @@ export const ObjectGestureController = () => {
           const hit = ray.intersectPlane(new THREE.Plane().setFromNormalAndCoplanarPoint(across.normalize(), face.at), new THREE.Vector3());
           if (hit) {
             face.depth = face.startDepth + hit.sub(face.at).dot(face.normal) - face.from;
+            face.sinking = !region.closed && face.depth < 0;
+            if (face.sinking) face.depth = 0;
             // Past the far side of the part is right through, and stays so
             // however much further the pointer goes.
             face.through = face.thickness > 0 && -face.depth >= face.thickness;
@@ -405,9 +453,24 @@ export const ObjectGestureController = () => {
         }
       }
 
-      const half = region.half.map((h) => h * face.inset);
-      const [w, l] = region.shape === 'box' ? [2 * half[0], 2 * half[1]] : [2 * half[0], 2 * half[0]];
-      const extent = Math.max(w, l);
+      // The outline is rebuilt only when the border has changed: a prism of a
+      // few dozen corners is nothing to build, but there is no reason to.
+      const border = region.maxBorder * (1 - face.inset);
+      if (Math.abs(border - face.drawnBorder) > 1e-9) {
+        const outline = regionOutline(region, border);
+        if (outline) {
+          const built = ghostGeometry(outline);
+          ghost.geometry.dispose();
+          ghost.geometry = built;
+          const edges = ghost.children[0] as THREE.LineSegments | undefined;
+          if (edges) {
+            edges.geometry.dispose();
+            edges.geometry = new THREE.EdgesGeometry(built, 30);
+          }
+          face.drawnBorder = border;
+        }
+      }
+      const extent = face.extent;
       let length: number;
       let middle: number;
       const edges = ghost.children[0] as THREE.LineSegments | undefined;
@@ -428,13 +491,13 @@ export const ObjectGestureController = () => {
         ghost.material = POCKET_MATERIAL;
         if (edges) edges.material = POCKET_EDGES;
       }
-      ghost.scale.set(w, l, length);
+      ghost.scale.set(1, 1, length);
       ghost.quaternion.copy(face.turn);
       ghost.position.copy(face.at).addScaledVector(face.normal, middle);
 
-      const border = Math.min(...region.half.map((h) => h * (1 - face.inset)));
       setGestureStatus(face.stage === 'inset'
-        ? `Inset face · ${mmText(border)} border · click, then push in or pull out`
+        ? `Inset face · ${mmText(face.drawnBorder)} border · click, then ${region.closed ? 'push in or pull out' : 'pull out'}`
+        : face.sinking ? 'Open surface · nothing to sink into; pull out for a boss'
         : face.through ? 'Pocket · right through'
           : face.depth < -1e-6 ? `Pocket ${mmText(-face.depth)} deep`
             : face.depth > 1e-6 ? `Boss ${mmText(face.depth)} high`
@@ -682,14 +745,14 @@ export const ObjectGestureController = () => {
       clear();
       if (!keep) return;
       const store = useStore.getState();
-      const half = face.region.half.map((h) => h * face.inset);
+      const border = face.region.maxBorder * (1 - face.inset);
       // Pulled back flush, a feature that was there is taken away: it no
       // longer does anything, and leaving it would be a hole of no depth.
       if (!face.through && Math.abs(face.depth) < 1e-6) {
         if (face.index !== -1) store.deleteNodeGeom(nodeId, face.index);
         return;
       }
-      store.setFaceFeature(nodeId, face.region, { half, depth: face.depth, through: face.through },
+      store.setFaceFeature(nodeId, face.region, { border, depth: face.depth, through: face.through },
         face.index === -1 ? undefined : face.index);
       return;
     }
@@ -775,9 +838,17 @@ export const ObjectGestureController = () => {
 
     const under = surfaceUnder(node, region.at, region.normal);
     const reopened = index === -1 ? null : geoms[index];
-    const startInset = reopened
-      ? Math.min(0.98, Math.max(0.02, (reopened.size?.[0] ?? 0) / (region.half[0] || 1)))
-      : 0.8;
+    // Re-opened at the border it was kept with; a new inset starts a fifth of
+    // the way in, so there is something to see the moment the key is pressed.
+    const reopenedBorder = !reopened ? null
+      : reopened.cutBorder ?? ((region.half[0] ?? 0) - (reopened.size?.[0] ?? 0));
+    const startInset = reopenedBorder === null || !(region.maxBorder > 0)
+      ? 0.8
+      : Math.min(0.98, Math.max(0.02, 1 - reopenedBorder / region.maxBorder));
+    const whole = regionOutline(region, 0);
+    if (!whole) return null;
+    let extent = 0;
+    for (const p of whole) extent = Math.max(extent, 2 * Math.hypot(p[0], p[1]));
     const startDepth = !reopened ? 0
       : reopened.csg === 'union' ? (reopened.cutDepth ?? 0)
         : -(reopened.cutDepth && reopened.cutDepth > 0 ? reopened.cutDepth : (under?.thickness ?? 0));
@@ -788,9 +859,7 @@ export const ObjectGestureController = () => {
     const bodyTurn = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), n);
     if (region.twist) bodyTurn.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), region.twist));
     const poseTurn = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().setFromMatrix3(pose.rot));
-    const geometry = region.shape === 'box'
-      ? new THREE.BoxGeometry(1, 1, 1)
-      : new THREE.CylinderGeometry(0.5, 0.5, 1, 48).rotateX(Math.PI / 2);
+    const geometry = ghostGeometry(whole);
     const ghost = new THREE.Mesh(geometry, OUTLINE_MATERIAL);
     // Its edges, so the shape reads even where the fill is faint; a child, so
     // they take the ghost's scale. Drawn after the part, over it.
@@ -805,6 +874,9 @@ export const ObjectGestureController = () => {
       stage: 'inset',
       inset: startInset,
       startInset,
+      drawnBorder: -1,
+      extent,
+      sinking: false,
       depth: startDepth,
       startDepth,
       through: !!reopened && reopened.csg === 'difference' && !(reopened.cutDepth && reopened.cutDepth > 0),
@@ -924,6 +996,14 @@ export const ObjectGestureController = () => {
       }
     }
 
+    if (kind === 'inset') {
+      const node = findNode(store.sceneGraph.nodes, nodeId);
+      if (node && !isClosedSolid(node)) {
+        flash('Nothing to bore: this body is an open surface, not a solid. Point at a flat face to inset it');
+        return;
+      }
+    }
+
     const ghosts: THREE.Object3D[] = [];
     let boreStart: Pick<Gesture, 'rot' | 'eye' | 'aim' | 'pocket'> = {};
     if (kind === 'inset') {
@@ -1005,7 +1085,7 @@ export const ObjectGestureController = () => {
     };
     setOrbitEnabled(false);
     draw();
-  }, [camera, draw, gl, groupsFor, planeHit, scene, setOrbitEnabled, startFace]);
+  }, [camera, draw, flash, gl, groupsFor, planeHit, scene, setOrbitEnabled, startFace]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
