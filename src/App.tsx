@@ -770,6 +770,7 @@ function App() {
       void cloudAutosave.saveExplicit(trimmed, preset, `Saved as “${trimmed}”`);
     } catch (e) {
       console.error('Failed to save user preset', e);
+      alert(`Could not save "${trimmed}": ${e instanceof Error ? e.message : String(e)}`);
     }
   }, [sceneGraph, model, data, mujoco, noteCards, copilotMessages, markClean]);
 
@@ -837,6 +838,9 @@ function App() {
   }, []);
 
   const handleConfirmSavePreset = useCallback(() => {
+    // Enter with no name used to close the dialog as if it had saved; the
+    // Save button is already disabled for that.
+    if (!presetNameInput.trim()) return;
     saveUserPresetByName(presetNameInput);
     setIsSaveModalOpen(false);
     setPresetNameInput('');
