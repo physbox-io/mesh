@@ -2291,9 +2291,9 @@ class WebSerialManager {
       currentLine: 0,
       totalLines: 0,
       progressPercent: 0,
-      // The job it belonged to is gone, so a standing "re-zero before you
-      // resume" has nothing left to warn about.
-      needsZZero: false,
+      // needsZZero is left as it was. An unlock proves nothing about the Z
+      // datum: a machine that powers up in alarm, or a bit that snapped and was
+      // replaced, still has to be zeroed before a start or a resume.
     });
     await this.sendLine('$X');
   }
@@ -2940,6 +2940,13 @@ class WebSerialManager {
 
   /** Emergency Stop (Ctrl+X and M5). */
   public async eStop(): Promise<void> {
+    // A soft reset from a finished feed hold leaves GRBL Idle, not Alarm, so no
+    // alarm arrives to end the job. Left running, a later Resume streamed the
+    // rest of the program into a freshly reset machine with the spindle off.
+    if (this.isJobRunning || this.isPaused) {
+      this.abandonJob('cancelled');
+      this.updateState({ progressPercent: 0, pauseMessage: undefined });
+    }
     if (this.transport) {
       this.clearGuideSpotTimeout();
       await this.transport.writeRealtime(0x18); // Ctrl+X soft reset

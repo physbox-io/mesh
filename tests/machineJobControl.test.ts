@@ -180,6 +180,18 @@ describe('pausing and resuming a running job', () => {
     expect(moves).toEqual([...new Set(moves)]);
   });
 
+  it('ends the job on an E-Stop, so a later Resume sends nothing', async () => {
+    webSerialManager.startJob(JOB);
+    await settle();
+    await webSerialManager.pauseJob();
+    await webSerialManager.eStop();
+    const afterStop = fake.lines().length;
+
+    await webSerialManager.resumeJob();
+    await advance(4);
+    expect(fake.lines().length).toBe(afterStop);
+  });
+
   it('will not pause a machine that is not running a job', async () => {
     await webSerialManager.pauseJob();
     expect(fake.sent).not.toContain('!');
@@ -212,6 +224,15 @@ describe('the Z datum across a tool change', () => {
     await advance(6);
 
     expect(webSerialManager.getState().status).toBe('PAUSED_TOOL');
+    expect(webSerialManager.getState().needsZZero).toBe(true);
+  });
+
+  it('keeps the flag through an alarm unlock, which says nothing about Z', async () => {
+    webSerialManager.startJob('G21\nG90\nG1 X10 F600\nT2 M6\nG1 X20\n');
+    await advance(6);
+    expect(webSerialManager.getState().needsZZero).toBe(true);
+
+    await webSerialManager.unlockAlarm();
     expect(webSerialManager.getState().needsZZero).toBe(true);
   });
 
