@@ -144,13 +144,18 @@ const autoCompileScad = async (nodes: SceneNode[]) => {
 // to know whether the scene it just loaded actually built successfully. This
 // awaits the whole pipeline (all scad compiles, then a single final recompile)
 // and reports the real MJCF compile result instead.
-const settleScene = async (nodes: SceneNode[]): Promise<{ ok: boolean; error?: string; nodeCount: number }> => {
+const settleScene = async (
+  nodes: SceneNode[],
+  { replacesScene = true }: { replacesScene?: boolean } = {},
+): Promise<{ ok: boolean; error?: string; nodeCount: number }> => {
   const store = useStore.getState();
   // A freshly built/replaced scene (BUILD_SCENE/UPDATE_SCENE) is never a preset
   // load, so any note card left over from a previously-loaded preset (e.g.
   // "Double Pendulum") is now describing a scene that no longer exists. Clear
-  // it here rather than relying on callers to remember to.
-  (window as unknown as PhysicsWindow)._physics_setNoteCards?.([]);
+  // it here rather than relying on callers to remember to. Not for a caller
+  // that only adds a body to the scene (CREATE_LATTICE, IMPORT_STL): that
+  // wiped the user's own notes.
+  if (replacesScene) (window as unknown as PhysicsWindow)._physics_setNoteCards?.([]);
   // skipRecompile: this initial set uses placeholder (pre-scad) mesh geoms, so
   // an immediate recompile here would be both wasted work and another stale
   // build racing against the final one below.
@@ -1316,7 +1321,7 @@ export function useMCPBridge() {
 
           const currentNodes = useStore.getState().sceneGraph.nodes || [];
           const updatedNodes = [...currentNodes, newNode];
-          const settleRes = await settleScene(updatedNodes);
+          const settleRes = await settleScene(updatedNodes, { replacesScene: false });
           if (!settleRes.ok) {
             throw new Error(`The lattice body failed to compile: ${settleRes.error}`);
           }
@@ -2389,7 +2394,7 @@ export function useMCPBridge() {
 
           const currentNodes = store.sceneGraph.nodes || [];
           const updatedNodes = [...currentNodes, newNode];
-          const res = await settleScene(updatedNodes);
+          const res = await settleScene(updatedNodes, { replacesScene: false });
 
           return {
             ok: res.ok,
