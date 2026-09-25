@@ -306,6 +306,7 @@ const liveModelGraph = (s: Pick<PhysicsState, 'sceneGraph' | 'shatteredBodies' |
 };
 
 let physicsWorkerClientSingleton: PhysicsWorkerClient | null = null;
+let loggedSharedMode = false;
 const recycleWorker = () => {
   physicsWorkerClientSingleton?.terminate();
   physicsWorkerClientSingleton = null;
@@ -4863,7 +4864,11 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     let heldClient: PhysicsWorkerClient | null = null;
 
     const applyBuilt = (built: BuiltResult) => {
-      console.log(`[PhysicsWorker] Model built successfully. Shared memory (COOP/COEP) active: ${!!built.isShared}`);
+      // Once, not on every edit's rebuild.
+      if (!loggedSharedMode) {
+        loggedSharedMode = true;
+        console.info(`[PhysicsWorker] Shared memory (COOP/COEP) active: ${!!built.isShared}`);
+      }
       if (built.heapBytes) lastHeapBytes = built.heapBytes;
       const updates: Partial<PhysicsState> = {
         mujoco: MUJOCO_SHIM, model: buildModelMirror(built), data: buildDataMirror(built),
