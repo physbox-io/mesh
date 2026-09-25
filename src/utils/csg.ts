@@ -35,6 +35,7 @@ import * as THREE from 'three';
 import { ConvexHull } from 'three/examples/jsm/math/ConvexHull.js';
 import type { CollisionMode, SceneGeom, SceneNode } from '../types/scene';
 import { PairMemo } from './arrayMemo';
+import { edgeRoundSolids, hasEdgeRounds } from './edgeRound';
 // NOTE: ./openscad is imported lazily inside evaluateNodeCsg, not here. It
 // reaches the Zustand store (for the compile counter), which reaches the physics
 // worker client and the MuJoCo wasm glue — so a static import would drag the
@@ -320,7 +321,8 @@ const isPositive = (g: SceneGeom) => (!g.csg || g.csg === 'union') && g.role !==
 export function hasBooleanOps(node: SceneNode): boolean {
   const src = csgSourceGeoms(node);
   const pos = src.filter(isPositive);
-  return pos.length > 0 && src.some(g => isNegative(g) || isIntersect(g));
+  // A rounded or bevelled edge is a boolean too: see utils/edgeRound.ts.
+  return pos.length > 0 && (src.some(g => isNegative(g) || isIntersect(g)) || hasEdgeRounds(node));
 }
 
 /**
@@ -328,8 +330,9 @@ export function hasBooleanOps(node: SceneNode): boolean {
  * to evaluate. Order of operations: intersect the union of positives, then
  * subtract the negatives.
  */
-export function csgProgram(node: SceneNode): string | null {
-  if (!hasBooleanOps(node)) return null;
+export function csgProgram(node: SceneNode, options: { rounds?: boolean; always?: boolean } = {}): string | null {
+  const { rounds = true, always = false } = options;
+  if (!always && !hasBooleanOps(node)) return null;
   const fn = node.csgFn ?? CSG_DEFAULT_FN;
   const src = csgSourceGeoms(node);
 
@@ -354,6 +357,15 @@ export function csgProgram(node: SceneNode): string | null {
   const negatives = src.filter(isNegative);
   if (negatives.length > 0) {
     body = `difference() {\n${reindent(body)}\n${emit(negatives, '  ')}\n}`;
+  }
+
+  // Edges are rounded last, on the finished shape: they were picked on it,
+  // holes and all. Fillers (inside corners) go on before cutters come off, so
+  // a filler can never put back material a cutter took.
+  if (rounds) {
+    const { cutters, fillers } = edgeRoundSolids(node.edgeRounds, fn);
+    if (fillers.length > 0) body = `union() {\n${reindent(body)}\n${fillers.map(f => `  ${f}`).join('\n')}\n}`;
+    if (cutters.length > 0) body = `difference() {\n${reindent(body)}\n${cutters.map(c => `  ${c}`).join('\n')}\n}`;
   }
 
   return `// Generated from ${node.name || node.id}'s primitives — edit the shapes, not this.\n${body}\n`;
@@ -1471,6 +1483,7 @@ export function csgHashOf(node: SceneNode): string {
     node.csgHoleAxis ?? 'auto',
     node.csgMass ?? null,
     src.filter(isPositive).map(g => [g.rgba, g.mass, g.friction, g.condim, g.solref, g.solimp]),
+    node.edgeRounds ?? null,
   ]);
   let h = 0x811c9dc5;
   for (let i = 0; i < key.length; i++) {
@@ -1492,6 +1505,13 @@ export interface CsgResult {
 }
 
 const MAX_COMPILE_ATTEMPTS = 3;
+
+/**
+ * How much of its hull a rounded body must fill to collide as that hull. A
+ * rounded box is ~0.99; an L-bracket ~0.6, and colliding as its hull would
+ * fill in the inside of the L.
+ */
+const ROUNDED_HULL_SOLIDITY = 0.9;
 
 /**
  * Evaluates a node's boolean program and builds the derived geoms for it.
@@ -1521,6 +1541,11 @@ export async function evaluateNodeCsg(node: SceneNode): Promise<CsgResult | null
     }
   }
   if (!compiled) throw (lastErr instanceof Error ? lastErr : new Error(String(lastErr)));
+  // A boolean between surfaces that meet tangentially — a fillet's arc running
+  // into a corner's ball — leaves slivers whose corners weld to one point in
+  // float32. They have no area and use no edge the rest of the mesh needs, but
+  // they make an otherwise closed mesh read as not watertight.
+  compiled = { ...compiled, faces: dropCollapsedTriangles(compiled.faces) };
 
   const src = csgSourceGeoms(node);
   const positives = src.filter(isPositive);
@@ -1623,6 +1648,18 @@ export async function evaluateNodeCsg(node: SceneNode): Promise<CsgResult | null
     }
   }
 
+  // A body with rounded edges and no hole to decompose around would otherwise
+  // collide as its source primitives — the square box, corners and all, which
+  // is the one thing rounding it was meant to change. When the rounded solid
+  // is near enough convex, let it collide as itself (MuJoCo hulls it anyway).
+  if (mode === 'primitives' && requested === 'auto' && hasEdgeRounds(node)) {
+    const hull = convexHullOf(chunk3(zup))?.volume ?? 0;
+    if (hull > 0 && volume / hull >= ROUNDED_HULL_SOLIDITY) {
+      return { hash, scad, volume, hullVolume: hull, centroid, mode: 'hull', geoms: [{ ...visual, mass: totalMass }] };
+    }
+    hullVolume = hull;
+  }
+
   if (mode === 'decompose') {
     // Colliders carry the mass; the visual shell must not double-count it.
     return { hash, scad, volume, hullVolume: hullVolume ?? 0, centroid, mode, warning, geoms: [{ ...visual, role: 'visual', mass: 0 }, ...colliders] };
@@ -1635,6 +1672,21 @@ export async function evaluateNodeCsg(node: SceneNode): Promise<CsgResult | null
     hash, scad, volume, hullVolume, centroid, mode: 'primitives', warning,
     geoms: [{ ...visual, role: 'visual', mass: 0 }],
   };
+}
+
+/** The triangles that still have three different corners. */
+export function dropCollapsedTriangles(faces: number[]): number[] {
+  let collapsed = false;
+  for (let i = 0; i < faces.length && !collapsed; i += 3) {
+    collapsed = faces[i] === faces[i + 1] || faces[i + 1] === faces[i + 2] || faces[i] === faces[i + 2];
+  }
+  if (!collapsed) return faces;
+  const out: number[] = [];
+  for (let i = 0; i < faces.length; i += 3) {
+    const a = faces[i], b = faces[i + 1], c = faces[i + 2];
+    if (a !== b && b !== c && a !== c) out.push(a, b, c);
+  }
+  return out;
 }
 
 function chunk3(flat: number[]): number[][] {

@@ -1,7 +1,8 @@
 import { create, type StateCreator } from 'zustand';
 import { shareUnchanged } from '../utils/shareUnchanged';
 import * as THREE from 'three';
-import type { SceneGraph, SceneNode, SceneGeom, SceneJoint, GeomType, CsgOp } from '../types/scene';
+import type { SceneGraph, SceneNode, SceneGeom, SceneJoint, GeomType, CsgOp, EdgeRoundFeature, RoundEdge } from '../types/scene';
+import { hasEdgeRounds, reconcileEdgeRounds, withRoundFeature, withoutEdges } from '../utils/edgeRound';
 import type { DataMirror, ModelMirror } from '../types/sceneLayer';
 import { type CombineOp, cageInFrame, geomsForCombine, nodeWorldMatrix } from '../utils/combineBodies';
 import { DEFAULT_BRUSH, toSceneGeom, type BrushSettings, type SculptMesh } from '../utils/sculptMesh';
@@ -287,6 +288,21 @@ const onNextPaint = (fn: () => void) => {
   const once = () => { if (!settled) { settled = true; fn(); } };
   requestAnimationFrame(once);
   setTimeout(once, 250);
+};
+
+/*
+ * The graph a respawned worker must be given mid-play: the runtime one, with
+ * shards and dents, when anything has broken - the same choice recompile()
+ * makes. Rebuilding the saved graph instead put a shattered vase back together
+ * and, since the shards change the state's length, dropped the seed and reset
+ * the whole scene.
+ */
+const liveModelGraph = (s: Pick<PhysicsState, 'sceneGraph' | 'shatteredBodies' | 'deformedGeoms'>) => {
+  const broken = Object.keys(s.shatteredBodies).length > 0 || Object.keys(s.deformedGeoms).length > 0;
+  return {
+    graph: broken ? applyShatterPieces(s.sceneGraph, s.shatteredBodies, s.deformedGeoms) : s.sceneGraph,
+    sleep: Object.keys(s.shatteredBodies).length > 0,
+  };
 };
 
 let physicsWorkerClientSingleton: PhysicsWorkerClient | null = null;
@@ -1116,6 +1132,44 @@ function rebuildAfterGeomEdit(get: () => PhysicsState, newScene: SceneGraph, nod
   get().recompile(newScene, nodeId, false);
 }
 
+/** A session's roundings: the base, with its draft put in. */
+function draftRounds(session: EdgeRoundSession): EdgeRoundFeature[] {
+  return withRoundFeature(
+    session.base,
+    { mode: session.mode, size: session.size, edges: session.picked },
+    session.editIndex,
+  );
+}
+
+/**
+ * Puts a body's roundings on it and rebuilds. Rounding makes a body a boolean
+ * one; taking the last rounding off a body with no other boolean makes it an
+ * ordinary one again, and its generated mesh has to go with it or the rounded
+ * shape would keep drawing over the square one.
+ */
+function writeEdgeRounds(
+  get: () => PhysicsState,
+  set: (partial: Partial<PhysicsState>) => void,
+  nodeId: string,
+  features: EdgeRoundFeature[],
+  rebuild = true,
+) {
+  const newScene = cloneSceneGraph(get().sceneGraph);
+  const node = findNode(newScene.nodes, nodeId);
+  if (!node) return;
+  if (features.length > 0) node.edgeRounds = features; else delete node.edgeRounds;
+  if (hasBooleanOps(node)) {
+    node.csgEnabled = true;
+    if (node.csgCollision === undefined) node.csgCollision = 'auto';
+  } else if (node.csgEnabled) {
+    node.csgEnabled = false;
+    node.geoms = (node.geoms || []).filter((g: SceneGeom) => !g.csgDerived);
+    delete node.csgHash;
+  }
+  set({ sceneGraph: newScene });
+  if (rebuild) rebuildAfterGeomEdit(get, newScene, nodeId);
+}
+
 function reshapeCut(
   get: () => PhysicsState,
   set: (partial: Partial<PhysicsState>) => void,
@@ -1186,6 +1240,18 @@ function latticeAfterUndo(state: UndoRedoState) {
   const stillThere = id !== null && findNode(state.sceneGraph.nodes, id) !== null;
   if (stillThere) return { latticeNodeId: id };
   return { latticeNodeId: null, latticeStats: null, latticeSelection: null, cutSpot: null };
+}
+
+export interface EdgeRoundSession {
+  nodeId: string;
+  /** The body's roundings when the session opened: what Cancel puts back. */
+  base: EdgeRoundFeature[];
+  /** The rounding being changed, or null for a new one. */
+  editIndex: number | null;
+  mode: 'fillet' | 'chamfer';
+  /** Metres. */
+  size: number;
+  picked: RoundEdge[];
 }
 
 export interface PhysicsState {
@@ -1547,6 +1613,26 @@ export interface PhysicsState {
    * in the same frame, so nothing moves. Returns every body's id, this one first.
    */
   separateSculpt: (nodeId: string, pieces: SculptMesh[], geomName?: string) => string[];
+
+  // --- Rounding edges ------------------------------------------------------
+  //
+  // A fillet or chamfer is a feature on the body (node.edgeRounds); this is
+  // the tool that makes one. While a session is open its draft is written
+  // straight onto the body, so the real boolean shows the result as the size
+  // is dragged, and only Apply leaves an undo step. See utils/edgeRound.ts.
+  edgeRoundSession: EdgeRoundSession | null;
+  /** Open the tool on a body — on one of its roundings, to change which edges it has. */
+  startEdgeRound: (nodeId: string, editIndex?: number) => void;
+  updateEdgeRoundDraft: (patch: Partial<Pick<EdgeRoundSession, 'mode' | 'size' | 'picked'>>) => void;
+  applyEdgeRound: () => void;
+  cancelEdgeRound: () => void;
+  /** Change a rounding's size or kind from the inspector. */
+  setEdgeRoundFeature: (nodeId: string, index: number, patch: Partial<Pick<EdgeRoundFeature, 'mode' | 'size'>>) => void;
+  removeEdgeRoundFeature: (nodeId: string, index: number) => void;
+  /** Round edges in one step, for agents: no session, one undo entry. */
+  roundEdges: (nodeId: string, feature: EdgeRoundFeature) => void;
+  /** Take the rounding off these edges, whichever feature has them. */
+  unroundEdges: (nodeId: string, edges: RoundEdge[]) => void;
 
   // --- Lattice modelling ---------------------------------------------------
   //
@@ -2834,6 +2920,77 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
   setGestureStatus: (status) => set((state) => (state.gestureStatus === status ? {} : { gestureStatus: status })),
 
   measureMode: null,
+
+  edgeRoundSession: null,
+  startEdgeRound: (nodeId, editIndex) => {
+    const open = get().edgeRoundSession;
+    if (open) get().cancelEdgeRound();
+    const node = findNode(get().sceneGraph.nodes, nodeId);
+    if (!node) return;
+    const base = node.edgeRounds ?? [];
+    const editing = editIndex !== undefined ? base[editIndex] : undefined;
+    set({
+      edgeRoundSession: {
+        nodeId,
+        base,
+        editIndex: editing ? editIndex! : null,
+        mode: editing?.mode ?? 'fillet',
+        size: editing?.size ?? 0,
+        picked: editing ? [...editing.edges] : [],
+      },
+      measureMode: null,
+    });
+  },
+  updateEdgeRoundDraft: (patch) => {
+    const session = get().edgeRoundSession;
+    if (!session) return;
+    const next = { ...session, ...patch };
+    set({ edgeRoundSession: next });
+    writeEdgeRounds(get, set, next.nodeId, draftRounds(next));
+  },
+  applyEdgeRound: () => {
+    const session = get().edgeRoundSession;
+    if (!session) return;
+    set({ edgeRoundSession: null });
+    // One undo step for the whole session: the snapshot is taken of the body as
+    // it was before the draft, then the result goes on top of it.
+    writeEdgeRounds(get, set, session.nodeId, session.base, false);
+    get().prepareForDiscreteChange();
+    writeEdgeRounds(get, set, session.nodeId, draftRounds(session));
+  },
+  cancelEdgeRound: () => {
+    const session = get().edgeRoundSession;
+    if (!session) return;
+    set({ edgeRoundSession: null });
+    writeEdgeRounds(get, set, session.nodeId, session.base);
+  },
+  setEdgeRoundFeature: (nodeId, index, patch) => {
+    const node = findNode(get().sceneGraph.nodes, nodeId);
+    const feature = node?.edgeRounds?.[index];
+    if (!feature) return;
+    get().recordInteraction('edge-round');
+    const features = [...node!.edgeRounds!];
+    features[index] = { ...feature, ...patch };
+    writeEdgeRounds(get, set, nodeId, features);
+  },
+  removeEdgeRoundFeature: (nodeId, index) => {
+    const node = findNode(get().sceneGraph.nodes, nodeId);
+    if (!node?.edgeRounds?.[index]) return;
+    get().prepareForDiscreteChange();
+    writeEdgeRounds(get, set, nodeId, node.edgeRounds.filter((_, i) => i !== index));
+  },
+  roundEdges: (nodeId, feature) => {
+    const node = findNode(get().sceneGraph.nodes, nodeId);
+    if (!node) return;
+    get().prepareForDiscreteChange();
+    writeEdgeRounds(get, set, nodeId, withRoundFeature(node.edgeRounds, feature, null));
+  },
+  unroundEdges: (nodeId, edges) => {
+    const node = findNode(get().sceneGraph.nodes, nodeId);
+    if (!node?.edgeRounds) return;
+    get().prepareForDiscreteChange();
+    writeEdgeRounds(get, set, nodeId, withoutEdges(node.edgeRounds, edges));
+  },
   setMeasureMode: (mode) => set((state) => (state.measureMode === mode ? {} : { measureMode: mode })),
   gizmoMode: 'translate',
   setGizmoMode: (mode) => set((state) => (state.gizmoMode === mode ? {} : { gizmoMode: mode })),
@@ -3664,8 +3821,11 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
                 });
               }
             }
+            const boundsBefore = structural && node.edgeRounds ? sourcePositiveBounds(node) : null;
             Object.assign(targetGeom, updates);
             if (updates.vertices || updates.faces || updates.renderVertices) dropStaleColliders(node);
+            // Rounded edges are stored as points, so they move with the shape.
+            if (boundsBefore) reconcileEdgeRounds(node, boundsBefore, sourcePositiveBounds(node));
             /*
               A cut is stated as a face and a depth, so resizing or moving the
               shape it cuts into has to move the cut with it — a hole 10 mm into
@@ -3945,7 +4105,8 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
       if (positivesLeft === 0) return;
     }
     node.geoms[geomIndex].csg = csg;
-    const hasOps = node.geoms.some((g: SceneGeom) => !g.csgDerived && (g.csg === 'difference' || g.csg === 'intersection'));
+    const hasOps = node.geoms.some((g: SceneGeom) => !g.csgDerived && (g.csg === 'difference' || g.csg === 'intersection')) ||
+      hasEdgeRounds(node);
     node.csgEnabled = hasOps;
     if (hasOps) {
       if (node.csgCollision === undefined) node.csgCollision = 'auto';
@@ -4794,6 +4955,9 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
         throw new Error(built.error || 'Unknown physics worker build error');
       }
       applyBuilt(built);
+      // A fresh worker starts paused. The other two recycles tell it to play;
+      // this one didn't, so the simulation froze while the UI still said Play.
+      if (recycled && get().isPlaying) client.setPlaying(true);
     } catch (e) {
       console.error("Failed to compile MJCF:", e);
       const msg = String(e instanceof Error ? e.message : e);
@@ -4853,9 +5017,10 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     const wasPlaying = get().isPlaying;
     recycleWorker();
     set({ isPlaying: false });
-    const { sceneGraph, gravityZ, windX, windY, density, floorFriction, floorBounce } = get();
+    const { gravityZ, windX, windY, density, floorFriction, floorBounce } = get();
+    const { graph: sceneGraph, sleep } = liveModelGraph(get());
     try {
-      const xml = compileToMJCF(sceneGraph, gravityZ, floorFriction, windX, windY, density, floorBounce);
+      const xml = compileToMJCF(sceneGraph, gravityZ, floorFriction, windX, windY, density, floorBounce, { sleep });
       const client = getPhysicsWorkerClient();
       client.setEnv(windX, windY);
       const built = await client.build(xml, sceneGraph, false, lastState, get().brokenConstraints);
@@ -4883,7 +5048,8 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     // below this store definition, which is what calls this.
     // isPlaying is deliberately read later via get(), not destructured here: the
     // await below means the snapshot could be stale by the time it's used.
-    const { data, sceneGraph, gravityZ, windX, windY, density, floorFriction, floorBounce } = get();
+    const { data, gravityZ, windX, windY, density, floorFriction, floorBounce } = get();
+    const { graph: sceneGraph, sleep } = liveModelGraph(get());
     if (!data) return;
     if (lastHeapBytes <= RECYCLE_HEAP_BYTES) return;
     // Never recycle on top of a request the worker hasn't answered yet: killing
@@ -4900,7 +5066,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     };
     recycleWorker();
     try {
-      const xml = compileToMJCF(sceneGraph, gravityZ, floorFriction, windX, windY, density, floorBounce);
+      const xml = compileToMJCF(sceneGraph, gravityZ, floorFriction, windX, windY, density, floorBounce, { sleep });
       const client = getPhysicsWorkerClient();
       client.setEnv(windX, windY);
       const built = await client.build(xml, sceneGraph, false, seedState, get().brokenConstraints);

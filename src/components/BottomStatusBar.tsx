@@ -67,7 +67,7 @@ interface ModeChoice {
   hint: string;
   /** A lattice tool to switch to, or a gesture to start. */
   tool?: LatticeTool;
-  gesture?: 'move' | 'rotate' | 'scale' | 'inset' | 'measure-distance' | 'measure-angle';
+  gesture?: 'move' | 'rotate' | 'scale' | 'inset' | 'measure-distance' | 'measure-angle' | 'round-edges';
   /** Put every tool away, leave sculpt or lattice mode, and drop the selection. */
   none?: true;
   /** Open sculpt or lattice mode on the selected body. */
@@ -97,6 +97,9 @@ const GESTURES: ModeChoice[] = [
   { key: 'S', label: 'Scale', gesture: 'scale', hint: 'Resize it with the pointer; X/Y/Z holds one axis' },
   { key: 'I', label: 'Inset', gesture: 'inset', hint: 'A lattice face insets; a solid body gets a hole bored through it' },
 ];
+
+/** Offered on its own, beside the gestures: a finishing step for any part that is not being sculpted or latticed. */
+const ROUND_EDGES: ModeChoice = { key: 'E', label: 'Round edges', gesture: 'round-edges', hint: 'Round or bevel edges of the selected part: click edges or faces, pick a size' };
 
 /**
  * Measuring, which is not modelling and is offered whether anything is selected
@@ -248,6 +251,7 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
         ...(enterChoice ? [enterChoice] : []),
         ...(latticeNodeId ? LATTICE_TOOLS : []),
         ...(canGesture ? GESTURES : []),
+        ...(selectedNodeId && !latticeNodeId && !sculptNodeId ? [ROUND_EDGES] : []),
         ...MEASURE,
       ];
 
@@ -259,6 +263,7 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
       window.dispatchEvent(new CustomEvent('physbox:gesture', { detail: { kind: 'none' } }));
       const store = useStore.getState();
       store.setMeasureMode(null);
+      store.applyEdgeRound();
       // The same as each mode's own Done button: the edits are already in the
       // scene, so leaving throws nothing away.
       store.setSculptNodeId(null);
@@ -269,6 +274,7 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
     if (choice.enter) {
       const store = useStore.getState();
       store.setMeasureMode(null);
+      store.applyEdgeRound();
       if (store.selectedNodeId) {
         if (choice.enter === 'lattice') store.setLatticeNodeId(store.selectedNodeId);
         else store.setSculptNodeId(store.selectedNodeId);

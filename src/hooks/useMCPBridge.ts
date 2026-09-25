@@ -17,6 +17,8 @@ import { getLiveCameraPose } from '../utils/liveCamera';
 import { makePresetNoteCard, updateOrCreateNotecard, type NoteCard } from '../utils/noteCards';
 import { generateCurveGeoms, DEFAULT_CURVE_POINTS, DEFAULT_CURVE_WIDTH, DEFAULT_CURVE_THICKNESS, DEFAULT_CURVE_SEGMENTS } from '../utils/geom';
 import { compileCsgNodes } from './useCsgCompile';
+import { bodyEdges, bodyUp, whyNotRoundable } from '../utils/edgeRoundBase';
+import { maxSizeFor, sameEdge, selectEdges, type EdgeCandidate, type EdgeGroup } from '../utils/featureEdges';
 import { csgFrameOffset, collisionModeOf } from '../utils/csg';
 import { solidMeshGeoms, SOLIDITY_DECOMPOSE_BELOW } from '../utils/convexDecomposition';
 import { PRESETS } from '../presets/presetScenes';
@@ -564,8 +566,11 @@ const fillBodyDefaults = (b: RawNode): SceneNode => {
     // into a single mesh (see utils/csg.ts). csgEnabled is inferred when the
     // caller marked a negative but forgot the flag, since a negative geom is
     // meaningless without it and silently rendering it as a solid is worse.
-    ...((b.csgEnabled === true || (b.geoms || []).some((g: RawGeom) => g.csg === 'difference' || g.csg === 'intersection'))
+    // Rounded and bevelled edges are a boolean too (utils/edgeRound.ts).
+    ...((b.csgEnabled === true || (b.geoms || []).some((g: RawGeom) => g.csg === 'difference' || g.csg === 'intersection') ||
+      (Array.isArray(b.edgeRounds) && b.edgeRounds.length > 0))
       ? { csgEnabled: true } : {}),
+    ...(Array.isArray(b.edgeRounds) ? { edgeRounds: b.edgeRounds } : {}),
     ...(b.csgCollision !== undefined ? { csgCollision: b.csgCollision } : {}),
     // How ANY mesh body collides — see utils/convexDecomposition.ts. Supersedes
     // csgCollision, which is still accepted above so older callers keep working.
@@ -1507,6 +1512,85 @@ export function useMCPBridge() {
           return {
             ok: true, id: targetId, ...result, ...latticeSummary(lattice),
             undoDepth: (latticeHistory.get(targetId) ?? []).length,
+          };
+        }
+
+        /*
+         * Rounded and bevelled edges. GET_EDGES lists what can be rounded, with
+         * ids; ROUND_EDGES rounds some of them — by id, or by a group a person
+         * would name (all, top, bottom, vertical). The edges are found on the
+         * body as modelled, before any rounding, so ids stay put while its
+         * roundings change. See utils/edgeRound.ts.
+         */
+        case 'GET_EDGES': {
+          const { targetId } = msg as Msg<{ targetId: string }>;
+          const node = findNodeInScene(store.sceneGraph.nodes, targetId);
+          const why = whyNotRoundable(node);
+          if (why) return { ok: false, error: node ? why : `No object with id '${targetId}'` };
+          const found = await bodyEdges(node!, bodyUp(store.sceneGraph.nodes, targetId));
+          const mm = (p: number[]) => p.map((v) => Math.round(v * 1e6) / 1e3);
+          const roundedBy = (e: EdgeCandidate) => (node!.edgeRounds ?? []).findIndex((f) => f.edges.some((x) => sameEdge(x, e.edge)));
+          return {
+            ok: true,
+            id: targetId,
+            edges: found.edges.map((e) => ({
+              id: e.id,
+              kind: e.edge.kind,
+              ...(e.edge.kind === 'line'
+                ? { fromMm: mm(e.edge.a), toMm: mm(e.edge.b) }
+                : { centreMm: mm(e.edge.centre), diameterMm: Math.round(e.edge.radius * 2e6) / 1e3, axis: e.edge.axis.map((v) => Math.round(v * 1000) / 1000) }),
+              convex: e.edge.convex,
+              angleDeg: Math.round(e.angleDeg * 10) / 10,
+              groups: (['top', 'bottom', 'vertical'] as const).filter((g) => e[g]),
+              maxRoundMm: Math.round(maxSizeFor([e], 'fillet') * 1e5) / 100,
+              maxBevelMm: Math.round(maxSizeFor([e], 'chamfer') * 1e5) / 100,
+              ...(roundedBy(e) >= 0 ? { roundedBy: roundedBy(e) } : {}),
+            })),
+            // Edges that were found but are neither straight nor a full circle.
+            unroundable: found.other.length,
+            roundings: (node!.edgeRounds ?? []).map((f, i) => ({
+              index: i, mode: f.mode === 'fillet' ? 'round' : 'bevel', sizeMm: Math.round(f.size * 1e5) / 100, edges: f.edges.length,
+            })),
+          };
+        }
+
+        case 'ROUND_EDGES': {
+          const { targetId, edges, sizeMm, mode, remove } = msg as Msg<{ targetId: string }>;
+          const node = findNodeInScene(store.sceneGraph.nodes, targetId);
+          const why = whyNotRoundable(node);
+          if (why) return { ok: false, error: node ? why : `No object with id '${targetId}'` };
+          const which = Array.isArray(edges) ? edges.map(Number)
+            : edges === undefined ? 'all'
+            : ['all', 'top', 'bottom', 'vertical'].includes(String(edges)) ? String(edges) as EdgeGroup : null;
+          if (which === null) return { ok: false, error: "edges must be 'all', 'top', 'bottom', 'vertical' or a list of ids from physics_get_edges" };
+          const found = await bodyEdges(node!, bodyUp(store.sceneGraph.nodes, targetId));
+          const { picked, unknown } = selectEdges(found.edges, which);
+          if (unknown.length) return { ok: false, error: `No edge with id ${unknown.join(', ')} — physics_get_edges lists them` };
+          if (picked.length === 0) return { ok: false, error: `This part has no ${Array.isArray(which) ? '' : which + ' '}edges that can be rounded` };
+
+          if (remove === true) {
+            store.unroundEdges(targetId, picked.map((e) => e.edge));
+          } else {
+            const kind: 'fillet' | 'chamfer' = mode === 'bevel' || mode === 'chamfer' ? 'chamfer' : 'fillet';
+            if (typeof sizeMm !== 'number' || !(sizeMm > 0)) return { ok: false, error: 'sizeMm must be a positive number of millimetres' };
+            const most = maxSizeFor(picked, kind);
+            if (sizeMm / 1000 > most + 1e-9) {
+              return { ok: false, error: `${sizeMm} mm is too big for ${picked.length === 1 ? 'this edge' : 'these edges'} — ${Math.floor(most * 1e5) / 100} mm is the most that fits` };
+            }
+            store.roundEdges(targetId, { mode: kind, size: sizeMm / 1000, edges: picked.map((e) => e.edge) });
+          }
+          await compileCsgNodes(true);
+          await useStore.getState().recompile(useStore.getState().sceneGraph, undefined, false, true);
+          const after = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId);
+          if (after?.csgError) return { ok: false, error: `Rounding failed: ${after.csgError}` };
+          return {
+            ok: true,
+            id: targetId,
+            edgesChanged: picked.length,
+            roundings: (after?.edgeRounds ?? []).map((f, i) => ({
+              index: i, mode: f.mode === 'fillet' ? 'round' : 'bevel', sizeMm: Math.round(f.size * 1e5) / 100, edges: f.edges.length,
+            })),
+            ...(after?.csgVolume !== undefined ? { volumeMm3: Math.round(after.csgVolume * 1e9 * 10) / 10 } : {}),
           };
         }
 

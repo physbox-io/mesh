@@ -444,6 +444,14 @@ export interface SceneNode {
   csgWarning?: string;      // e.g. "no hole axis found, colliding as primitives"
   csgError?: string;
   /**
+   * Rounded (fillet) and bevelled (chamfer) edges, each a feature: one size,
+   * one kind, the edges it was applied to. Realised in the boolean program —
+   * convex edges become cutters, concave ones fillers — so the drawn mesh, the
+   * colliders, the mass and every exporter get the rounded shape for free.
+   * Any body with rounds is a boolean body. See utils/edgeRound.ts.
+   */
+  edgeRounds?: EdgeRoundFeature[];
+  /**
    * How this body's geometry is presented to MuJoCo for contact. Applies to any
    * body with a mesh geom, boolean or not — an imported STL, a sculpt, a lattice
    * part and a relief all reach MuJoCo as one mesh, and MuJoCo takes the convex
@@ -561,4 +569,52 @@ export interface SceneGraph {
    * name the file they write.
    */
   name?: string;
+}
+
+/**
+ * One edge a fillet or chamfer was applied to, in the body's SOURCE frame
+ * (Z-up, the frame the primitives and the boolean program are written in —
+ * not the compiled frame, which is re-origined on the centroid; see
+ * csgFrameOffset).
+ *
+ * At a point on the edge, `n1`/`n2` are the outward normals of the two faces
+ * that meet there and `t1`/`t2` the directions ALONG each face, square to the
+ * edge, pointing away from it. That is everything the cross-section needs, so
+ * nothing has to be re-derived from the mesh when the program is emitted.
+ * `convex` is true where the faces meet as the outside of a corner (material
+ * is taken away) and false in an inside corner (material is added).
+ */
+export type RoundEdge =
+  | {
+      kind: 'line';
+      a: number[];
+      b: number[];
+      n1: number[]; n2: number[];
+      t1: number[]; t2: number[];
+      convex: boolean;
+    }
+  | {
+      kind: 'circle';
+      centre: number[];
+      /** Unit normal of the circle's plane. */
+      axis: number[];
+      radius: number;
+      /**
+       * Unit direction from the centre to the point the normals are given at —
+       * a vertex of the rim, so the cutter's facets line up with the hole's.
+       */
+      ref: number[];
+      /** Facets round the rim, matched by the cutter for the same reason. */
+      segments: number;
+      n1: number[]; n2: number[];
+      t1: number[]; t2: number[];
+      convex: boolean;
+    };
+
+export interface EdgeRoundFeature {
+  /** 'fillet' rounds the edge; 'chamfer' cuts it off flat. */
+  mode: 'fillet' | 'chamfer';
+  /** Metres. A fillet's radius; a chamfer's leg — how far back along each face it starts. */
+  size: number;
+  edges: RoundEdge[];
 }

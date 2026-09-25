@@ -60,6 +60,9 @@ import { ObjectGestureController } from './components/scene/ObjectGestures';
 import { TransformGizmo } from './components/scene/TransformGizmo';
 import { isGizmoBusy } from './components/scene/gizmoBusy';
 import { MeasureTool } from './components/scene/MeasureTool';
+import { EdgeRoundTool } from './components/scene/EdgeRoundTool';
+import { EdgeRoundPanel } from './components/EdgeRoundPanel';
+import { EdgesCard } from './components/EdgesCard';
 import {
   PaintStrokeController, CameraController, DragInteractionController,
   SceneCapture, SceneVisuals,
@@ -2656,6 +2659,7 @@ function App() {
             {/* First in the stack: it explains why everything under it may be
                 describing a scene that is not the one being drawn. */}
             <CompileErrorBanner />
+            <EdgeRoundPanel />
             {scadCompileCount > 0 && (
               <div className="bg-white/90 dark:bg-slate-900/90 text-slate-800 dark:text-slate-100 border border-slate-200/80 dark:border-slate-800/80 px-3.5 py-1.5 rounded-full shadow-md flex items-center gap-2.5 text-xs font-semibold backdrop-blur-md transition-all duration-300 pointer-events-auto">
                 <div className="relative flex h-2 w-2">
@@ -2893,6 +2897,7 @@ function App() {
             <ObjectGestureController />
             <TransformGizmo />
             <MeasureTool />
+            <EdgeRoundTool />
 
             {/* Subtle contact-shadow AO — reads as "more depth", not a style
                 change. The composer takes over the render loop from r3f, so a
@@ -5575,6 +5580,8 @@ function App() {
                   </div>
                 );
               })()}
+
+              <EdgesCard node={selectedNode} />
 
               {/* Boolean Modifiers (CSG) — subtract/intersect one primitive with another */}
               {(() => {
