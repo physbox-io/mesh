@@ -20,7 +20,7 @@
 
 import type { SceneGraph } from '../types/scene';
 import { collectSceneTriangles } from './contourSliceExporter';
-import { warpGcode, type ProbeGrid } from './meshLeveler';
+import { getGridStats, warpGcode, type ProbeGrid } from './meshLeveler';
 import {
   clearingRings,
   feedForEngagement,
@@ -1663,8 +1663,16 @@ export function machineSurface(
     atX = x; atY = y; atZ = z;
   };
 
-  /** How far over the highest thing in the way a traverse flies, in mm. */
-  const TRAVERSE_CLEARANCE_MM = 1.0;
+  /**
+   * How far over the highest thing in the way a traverse flies, in mm.
+   *
+   * Plus the levelling grid's full Z span when the program is warped to it:
+   * warpGcode splits and warps cutting moves along their length but a rapid
+   * only at its end point, so a traverse across a crowned sheet runs a straight
+   * line under the crown - up to the grid's span below where it should be.
+   */
+  const TRAVERSE_CLEARANCE_MM = 1.0
+    + (opts.applyMeshLeveling && opts.meshLevelGrid ? getGridStats(opts.meshLevelGrid).spanZ : 0);
   /** The height the last `leadIn` traversed at, recorded for the preview. */
   let lastTraverseZ = opts.safeZ;
 
