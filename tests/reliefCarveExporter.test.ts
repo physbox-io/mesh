@@ -754,6 +754,20 @@ describe('Finishing pass strategies', () => {
     }
   });
 
+  it('lifts clear of the work before the spindle stops or starts', () => {
+    const res = generateReliefCarveGcode(dome, { ...base, roughingEnabled: true, finishingToolType: 'ball' });
+    expect(res.toolChange).toBe(true);
+    const lines = res.gcode.split('\n').map((l) => l.replace(/;.*$/, '').trim()).filter(Boolean);
+    const isLift = (l: string | undefined) => !!l && /^G0 Z/.test(l);
+
+    // Every M5 comes straight after a lift, and every M3 after the first one
+    // (which is at the start, before any cutting) comes straight after one too.
+    lines.forEach((l, i) => { if (l === 'M5') expect(isLift(lines[i - 1]), `line ${i}: ${lines[i - 1]}`).toBe(true); });
+    const starts = lines.flatMap((l, i) => (/^M3\b/.test(l) ? [i] : []));
+    expect(starts.length).toBe(2);
+    expect(isLift(lines[starts[1] - 1])).toBe(true);
+  });
+
   it('stops after roughing when the finishing pass is off, and roughs to the surface', () => {
     const full = generateReliefCarveGcode(dome, { ...base, roughingEnabled: true });
     const rough = generateReliefCarveGcode(dome, { ...base, roughingEnabled: true, finishingEnabled: false });

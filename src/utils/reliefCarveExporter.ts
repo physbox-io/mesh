@@ -2211,8 +2211,12 @@ export function machineSurface(
       Math.round(opts.roughingFlutes) !== Math.round(opts.finishingFlutes) ||
       opts.roughingGeometry !== opts.finishingGeometry);
   if (toolChange) {
-    gcode.push('M5 ; spindle off for the tool change');
+    // Out of the cut before the spindle stops, and in the air before it
+    // starts again: a spindle stopped in the work drags its bit, and one
+    // started at touch-off height spins the new bit up on the stock. Mesh's
+    // own streamer retracts on resume, but another sender runs this as written.
     gcode.push(`G0 Z${f(Math.max(opts.safeZ, 20))}`);
+    gcode.push('M5 ; spindle off for the tool change');
     gcode.push(
       `T2 M6 ; fit the ${describeCutter(
         opts.finishingToolDiaMm,
@@ -2222,8 +2226,6 @@ export function machineSurface(
         opts.finishingVBitAngleDeg
       )} and re-zero Z`
     );
-    gcode.push(`M3 S${Math.round(opts.spindleRpm)}`);
-    gcode.push('G4 P2');
     // Back up to the travel height, said out loud rather than assumed.
     //
     // Everything after this point traverses at whatever Z it thinks the tool is
@@ -2233,6 +2235,8 @@ export function machineSurface(
     // machine is standing are as far apart as they ever get — and the next
     // traverse would be a rapid across the job at the surface of it.
     gcode.push(`G0 Z${f(Math.max(opts.safeZ, 20))} ; back to travel height after the change`);
+    gcode.push(`M3 S${Math.round(opts.spindleRpm)}`);
+    gcode.push('G4 P2');
     atZ = Math.max(opts.safeZ, 20);
   }
 
@@ -2428,8 +2432,8 @@ export function machineSurface(
   }
 
   gcode.push('; ---------------------------------------------------------------');
-  gcode.push('M5 ; spindle off');
   gcode.push(`G0 Z${f(opts.safeZ)}`);
+  gcode.push('M5 ; spindle off, clear of the work');
   gcode.push('G0 X0 Y0 ; back to the work origin');
   gcode.push('M30 ; end of program');
 
