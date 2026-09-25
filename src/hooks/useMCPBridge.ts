@@ -859,24 +859,18 @@ export function useMCPBridge() {
           // headless "what-if" run can never diverge from what's actually
           // rendered live, and never costs a second loaded WASM module.
           const xml = compileToMJCF(sceneGraph, gravityZ, floorFriction, windX, windY, density, floorBounce);
-          const result: HeadlessResult = await getPhysicsWorkerClient().runHeadless(xml, sceneGraph, ticks);
-          // Decimate/filter the trajectory before it crosses the websocket: a
-          // full per-tick, per-body trajectory is ~500KB per 900 ticks and was
-          // the main reason long runs blew the bridge's 30s response window.
+          // Decimated in the worker, not here: a full per-tick, per-body
+          // trajectory is ~500KB per 900 ticks, and striding only after the run
+          // left the worker's 20,000-frame cap in force, so a long run stopped
+          // early and told the caller to raise the stride it had already raised.
           const stride = Math.max(1, Math.floor(Number(msg.stride) || 1));
+          const result: HeadlessResult = await getPhysicsWorkerClient().runHeadless(xml, sceneGraph, ticks, stride);
           const bodyFilter = Array.isArray(msg.bodies) && msg.bodies.length > 0 ? new Set(msg.bodies as string[]) : null;
-          if (result.ok && result.trajectory && (stride > 1 || bodyFilter)) {
-            const t = result.trajectory;
-            let frames: HistoryEntry[] = stride > 1
-              ? t.filter((_, i) => i % stride === 0 || i === t.length - 1)
-              : t;
-            if (bodyFilter) {
-              frames = frames.map((fr: HistoryEntry) => ({
-                ...fr,
-                bodies: Object.fromEntries(Object.entries(fr.bodies || {}).filter(([k]) => bodyFilter.has(k))),
-              }));
-            }
-            result.trajectory = frames;
+          if (result.ok && result.trajectory && bodyFilter) {
+            result.trajectory = result.trajectory.map((fr: HistoryEntry) => ({
+              ...fr,
+              bodies: Object.fromEntries(Object.entries(fr.bodies || {}).filter(([k]) => bodyFilter.has(k))),
+            }));
           }
           return result;
         }
@@ -1546,7 +1540,7 @@ export function useMCPBridge() {
                 : { centreMm: mm(e.edge.centre), diameterMm: Math.round(e.edge.radius * 2e6) / 1e3, axis: e.edge.axis.map((v) => Math.round(v * 1000) / 1000) }),
               convex: e.edge.convex,
               angleDeg: Math.round(e.angleDeg * 10) / 10,
-              groups: (['top', 'bottom', 'vertical'] as const).filter((g) => e[g]),
+              groups: e.edge.convex ? (['top', 'bottom', 'vertical'] as const).filter((g) => e[g]) : ['inside'],
               maxRoundMm: Math.round(maxSizeFor([e], 'fillet') * 1e5) / 100,
               maxBevelMm: Math.round(maxSizeFor([e], 'chamfer') * 1e5) / 100,
               ...(roundedBy(e) >= 0 ? { roundedBy: roundedBy(e) } : {}),
@@ -1566,8 +1560,8 @@ export function useMCPBridge() {
           if (why) return { ok: false, error: node ? why : `No object with id '${targetId}'` };
           const which = Array.isArray(edges) ? edges.map(Number)
             : edges === undefined ? 'all'
-            : ['all', 'top', 'bottom', 'vertical'].includes(String(edges)) ? String(edges) as EdgeGroup : null;
-          if (which === null) return { ok: false, error: "edges must be 'all', 'top', 'bottom', 'vertical' or a list of ids from physics_get_edges" };
+            : ['all', 'top', 'bottom', 'vertical', 'inside'].includes(String(edges)) ? String(edges) as EdgeGroup : null;
+          if (which === null) return { ok: false, error: "edges must be 'all', 'top', 'bottom', 'vertical', 'inside' or a list of ids from physics_get_edges" };
           const found = await bodyEdges(node!, bodyUp(store.sceneGraph.nodes, targetId));
           const { picked, unknown } = selectEdges(found.edges, which);
           if (unknown.length) return { ok: false, error: `No edge with id ${unknown.join(', ')} — physics_get_edges lists them` };
