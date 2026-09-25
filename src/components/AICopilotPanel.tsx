@@ -8,6 +8,7 @@ import type { SceneGeom, SceneJoint, SceneNode } from '../types/scene';
 import { readMaxTokens } from '../utils/llmSettings';
 import SYSTEM_INSTRUCTIONS from './systemInstructions.txt?raw';
 import { pushGlobalParameter } from '../utils/llmSettings';
+import { anthropicUrl, geminiUrl } from '../utils/llmEndpoints';
 
 interface AICopilotPanelProps {
   onClose: () => void;
@@ -357,10 +358,7 @@ export default function AICopilotPanel({ onClose, messages: propsMessages, setMe
   const fetchAvailableModels = async (key: string) => {
     if (!key.trim()) return;
     try {
-      let res = await fetch(`/api/gemini/v1beta/models?key=${key.trim()}`);
-      if (!res.ok) {
-        res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${key.trim()}`);
-      }
+      const res = await fetch(geminiUrl(`/v1beta/models?key=${key.trim()}`));
       const data = await res.json();
       if (data.models && Array.isArray(data.models)) {
         const validModels = (data.models as GeminiModelItem[])
@@ -384,14 +382,10 @@ export default function AICopilotPanel({ onClose, messages: propsMessages, setMe
     const headers = {
       'x-api-key': key.trim(),
       'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true',
     };
     try {
-      let res = await fetch('/api/anthropic/v1/models', { headers });
-      if (!res.ok && res.status === 404) {
-        res = await fetch('https://api.anthropic.com/v1/models', {
-          headers: { ...headers, 'anthropic-dangerous-direct-browser-access': 'true' }
-        });
-      }
+      const res = await fetch(anthropicUrl('/v1/models'), { headers });
       if (res.ok) {
         const data = await res.json();
         const rawModels = (data.data || data.models || []) as ClaudeModelItem[];
@@ -525,10 +519,7 @@ export default function AICopilotPanel({ onClose, messages: propsMessages, setMe
       });
 
       try {
-        let response = await fetch('/api/anthropic/v1/messages', { method: 'POST', headers, body });
-        if (!response.ok && response.status === 404) {
-          response = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST', headers, body });
-        }
+        const response = await fetch(anthropicUrl('/v1/messages'), { method: 'POST', headers, body });
 
         const json = await response.json();
         if (json.error) {
@@ -571,18 +562,11 @@ export default function AICopilotPanel({ onClose, messages: propsMessages, setMe
       });
 
       try {
-        let response = await fetch(`/api/gemini/v1beta/models/${currentModel}:generateContent?key=${effectiveKey}`, {
+        const response = await fetch(geminiUrl(`/v1beta/models/${currentModel}:generateContent?key=${effectiveKey}`), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: requestBody,
         });
-        if (!response.ok && response.status === 404) {
-          response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${currentModel}:generateContent?key=${effectiveKey}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: requestBody,
-          });
-        }
 
         const json = await response.json();
         if (json.error) {

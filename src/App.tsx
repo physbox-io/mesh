@@ -107,6 +107,7 @@ import { PhysicsLoop } from './components/scene/PhysicsLoop';
 import { RenderOnChange } from './components/scene/RenderOnChange';
 import { GridFadeFollowsCamera } from './components/scene/GridFadeFollowsCamera';
 import { GRID_NAME } from './components/scene/gridConstants';
+import { anthropicUrl, geminiUrl } from './utils/llmEndpoints';
 
 type PresetEntry = { name: string; emoji?: string };
 type GeminiModelInfo = { name: string; displayName?: string; supportedGenerationMethods?: string[] };
@@ -266,10 +267,7 @@ function App() {
       'anthropic-dangerous-direct-browser-access': 'true'
     };
     try {
-      let res = await fetch('/api/anthropic/v1/models', { headers });
-      if (!res.ok) {
-        res = await fetch('https://api.anthropic.com/v1/models', { headers });
-      }
+      const res = await fetch(anthropicUrl('/v1/models'), { headers });
       if (res.ok) {
         const data = await res.json();
         const rawModels = data.data || data.models || [];
@@ -291,10 +289,7 @@ function App() {
   const fetchSettingsGeminiModels = async (key: string) => {
     if (!key.trim()) return null;
     try {
-      let res = await fetch(`/api/gemini/v1beta/models?key=${key.trim()}`);
-      if (!res.ok) {
-        res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${key.trim()}`);
-      }
+      const res = await fetch(geminiUrl(`/v1beta/models?key=${key.trim()}`));
       const data = await res.json();
       if (data.models && Array.isArray(data.models)) {
         const validModels = data.models
