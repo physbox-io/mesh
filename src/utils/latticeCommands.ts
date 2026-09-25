@@ -24,7 +24,7 @@
 
 import {
   addFace, coordOf, edgeKey, extrudeFace, faceNormal, findFace, findMirrorFace, findVertex,
-  bevelFace, bridgeFaces, edgeLoop, insetFace, isCrease, isWatertight, latticeBounds,
+  bevelFace, bridgeFaces, edgeLoop, insetFace, insetRefusal, INSET_REFUSAL_TEXT, isCrease, isWatertight, latticeBounds,
   latticeStats, mirrorCoord, mirrorFace,
   removeFace, setCrease, vertexAt, dominantAxis,
   moveVertices, scaleVertices, vertexCount, AXIS_INDEX,
@@ -312,9 +312,11 @@ export function insetFaceMm(lattice: Lattice, face: unknown, amountMm: number, m
   }
   const steps = stepsFromMm(amountMm, lattice.unit);
   const partner = mirror ? findMirrorFace(lattice, index, mirror) : -1;
+  const refused = insetRefusal(lattice, index);
+  if (refused) throw new Error(`That face cannot be inset: ${INSET_REFUSAL_TEXT[refused]}`);
   const result = insetFace(lattice, index, steps);
   if (!result) {
-    throw new Error('That face cannot be inset by that much — it must lie flat on to an axis, and the inset must be less than half its width');
+    throw new Error('That face cannot be inset by that much — the inset must be less than half its width');
   }
   if (partner !== -1) insetFace(lattice, partner, steps);
   const innerVerts = lattice.faces[result.inner] ?? [];

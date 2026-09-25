@@ -37,7 +37,7 @@ import {
   toSceneGeom, cageEdges, coordOf, vertexAt, findVertex, addFace,
   removeFace, removeVertex, moveVertex, moveVertices, flipFace, setCrease, isCrease, creaseEdges, edgeKey, edgeLoop, extrudeFace, mirrorFace, findMirrorFace,
   faceNormal, faceCentre, dominantAxis, latticeStats, latticeBounds, mirrorCoord, orientFaces, vertexCount,
-  bridgeFaces, insetFace, bevelFace, bevelEdges, scaleVertices, ringCoords, revolveChain, chainFromEdges, triangulate, curveCoords,
+  bridgeFaces, insetFace, insetRefusal, INSET_REFUSAL_TEXT, bevelFace, bevelEdges, scaleVertices, ringCoords, revolveChain, chainFromEdges, triangulate, curveCoords,
   addWire, removeWire, wireEndingAt, removeWireEdge, wireEdges,
   AXIS_INDEX, DRAWING_TOOLS, type Axis, type Lattice, type LatticeCage, type LatticeCoord, type SnapMultiple,
 } from '../utils/latticeMesh';
@@ -1768,7 +1768,7 @@ export function LatticeSurface({
   // the width of the screen, which is the whole range of the gesture.
 
   type Gesture =
-    | { kind: 'inset'; faces: number[]; snapshot: Lattice; centre: { x: number; y: number }; radius: number; steps: number; step: number; limit: number; inner: number[] }
+    | { kind: 'inset'; faces: number[]; snapshot: Lattice; centre: { x: number; y: number }; radius: number; steps: number; step: number; limit: number; inner: number[]; skipped: number }
     | { kind: 'scale'; vertices: number[]; about: LatticeCoord; snapshot: Lattice; centre: { x: number; y: number }; radius: number; axis: Axis | null; applied: boolean }
     | { kind: 'move'; vertices: number[]; snapshot: Lattice; from: THREE.Vector3; through: THREE.Vector3; axis: Axis | null; step: LatticeCoord };
 
@@ -1902,7 +1902,13 @@ export function LatticeSurface({
       }
       state.steps = steps;
       state.inner = inner;
-      setGestureStatus(`Inset ${mmText(steps * unit)}`);
+      // Said, so that a drag that has stopped growing reads as a limit rather
+      // than as the gesture having stuck, and faces left out are not a mystery.
+      const notes = [
+        steps >= state.limit ? 'as far as it goes' : '',
+        state.skipped ? `${state.skipped} face${state.skipped === 1 ? '' : 's'} left alone — not flat on to an axis, or too narrow` : '',
+      ].filter(Boolean);
+      setGestureStatus(`Inset ${mmText(steps * unit)}${notes.map((n) => ` · ${n}`).join('')}`);
       setRevision((r) => r + 1);
       return;
     }
@@ -1947,13 +1953,44 @@ export function LatticeSurface({
     setRevision((r) => r + 1);
   }, [commit, lattice, setGestureStatus, setOrbitEnabled]);
 
+  /**
+   * A refusal said in the status bar for a few seconds.
+   *
+   * An inset that cannot happen used to do nothing at all, which reads as the
+   * key being broken rather than as the face being the wrong kind of face.
+   */
+  const flashTimer = useRef<number | undefined>(undefined);
+  const flash = useCallback((text: string) => {
+    setGestureStatus(text);
+    window.clearTimeout(flashTimer.current);
+    flashTimer.current = window.setTimeout(() => {
+      if (useStore.getState().gestureStatus === text) setGestureStatus(null);
+    }, 3000);
+  }, [setGestureStatus]);
+
   const beginGesture = useCallback((kind: 'inset' | 'scale' | 'move') => {
     if (gesture.current) return;
-    const faces = selectedFaces;
+    let faces = selectedFaces;
+    let skipped = 0;
+    if (kind === 'inset') {
+      if (faces.length === 0) {
+        flash('Inset · select a face first');
+        return;
+      }
+      // Faces that cannot be inset at any size are left out, and said so; if
+      // that is all of them, the reason is the whole answer.
+      const refusals = faces.map((f) => insetRefusal(lattice, f));
+      const usable = faces.filter((_, i) => !refusals[i]);
+      if (usable.length === 0) {
+        flash(`Can't inset: ${INSET_REFUSAL_TEXT[refusals[0]!]}`);
+        return;
+      }
+      skipped = faces.length - usable.length;
+      faces = usable;
+    }
     const vertices = selectedVertices.length > 0
       ? selectedVertices
       : [...new Set(faces.flatMap((f) => lattice.faces[f] ?? []))];
-    if (kind === 'inset' && faces.length === 0) return;
     // One corner is a perfectly good thing to move; scaling or insetting it is
     // not, since both need something with a size.
     if (vertices.length < (kind === 'move' ? 1 : 2)) return;
@@ -2013,13 +2050,18 @@ export function LatticeSurface({
           if (hi > lo) half = Math.min(half, (hi - lo) / 2);
         }
       }
-      if (!Number.isFinite(half) || half < 1) return;
+      if (!Number.isFinite(half) || half < 1) {
+        // The snapshot above is already on the undo stack; nothing was done.
+        undoStack.current.pop();
+        flash(`Can't inset: ${INSET_REFUSAL_TEXT.narrow}`);
+        return;
+      }
       let step: number = snap;
       while (step > 1 && half / step < 3) step = Math.max(1, Math.round(step / 10));
       // One step short of meeting in the middle: a ring pulled all the way in
       // is a face with no area, which insetFace refuses anyway.
       const limit = Math.max(step, Math.floor((half - step) / step) * step);
-      gesture.current = { kind, faces: [...faces], snapshot, centre, radius, steps: 0, step, limit, inner: [] };
+      gesture.current = { kind, faces: [...faces], snapshot, centre, radius, steps: 0, step, limit, inner: [], skipped };
       setGestureKind(kind);
       setOrbitEnabled(false);
       // Straight to one step, so the shape moves on the keypress rather than
@@ -2041,7 +2083,7 @@ export function LatticeSurface({
     setGestureKind(kind);
     setGestureStatus('Scale 1.00×');
     setOrbitEnabled(false);
-  }, [lattice, moveHit, position, screenCentre, selectedFaces, selectedVertices, setGestureStatus, setOrbitEnabled, snap, updateGesture]);
+  }, [flash, lattice, moveHit, position, screenCentre, selectedFaces, selectedVertices, setGestureStatus, setOrbitEnabled, snap, updateGesture]);
 
   // While a gesture is running the pointer belongs to it: every button press
   // is an answer to it rather than a click on the model behind it, which is why

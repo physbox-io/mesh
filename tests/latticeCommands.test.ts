@@ -6,7 +6,7 @@ import {
 } from '../src/utils/latticeCommands';
 import {
   boxLattice, createLattice, DEFAULT_UNIT, faceCount, findVertex, isWatertight,
-  vertexCount, latticeBounds, vertexAt, addFace,
+  vertexCount, latticeBounds, vertexAt, addFace, insetRefusal,
 } from '../src/utils/latticeMesh';
 
 const square = (z = 0) => [[0, 0, z], [10, 0, z], [10, 10, z], [0, 10, z]];
@@ -280,6 +280,27 @@ describe('holes and joins over MCP', () => {
   it('refuses a change smaller than the grid', () => {
     const l = boxLattice(DEFAULT_UNIT, 200);
     expect(() => insetFaceMm(l, wall(1), 0.04)).toThrow(/less than one grid step/);
+  });
+
+  // An inset that cannot happen has to say which of its reasons applies: the
+  // gesture used to pass a refusal on as nothing happening at all.
+  it('says a tilted face cannot be inset, and why', () => {
+    const l = createLattice(DEFAULT_UNIT);
+    const slope = [[0, 0, 0], [10, 10, 0], [10, 10, 10], [0, 0, 10]];
+    addFacesMm(l, [slope]);
+    expect(() => insetFaceMm(l, slope, 1)).toThrow(/flat on to an axis/);
+    expect(insetRefusal(l, findFaceMm(l, slope))).toBe('tilted');
+  });
+
+  it('tells a face too narrow to inset from one that is merely inset too far', () => {
+    const l = createLattice(DEFAULT_UNIT);
+    const sliver = [[0, 0, 0], [0.1, 0, 0], [0.1, 10, 0], [0, 10, 0]];
+    addFacesMm(l, [sliver]);
+    expect(insetRefusal(l, findFaceMm(l, sliver))).toBe('narrow');
+
+    const box = boxLattice(DEFAULT_UNIT, 200);
+    expect(insetRefusal(box, findFaceMm(box, wall(1)))).toBeNull();
+    expect(() => insetFaceMm(box, wall(1), 25)).toThrow(/less than half its width/);
   });
 });
 

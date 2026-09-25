@@ -972,6 +972,35 @@ export function bevelFace(lattice: Lattice, face: number, steps: number): boolea
  * direction with no exact answer on a grid, and a corner that lands between
  * grid points is the one thing this file exists to prevent.
  */
+/**
+ * Why a face cannot be inset at any size, or null if it can.
+ *
+ * insetFace answers a refusal with null and nothing else, and the gesture that
+ * calls it used to pass that on as nothing happening at all — so a face that
+ * could never be inset looked exactly like a tool that did not work.
+ *  - `tilted`: not flat on to an axis, so "inwards" has no whole-number answer.
+ *  - `narrow`: less than two grid units across, so there is no room to come in.
+ */
+export function insetRefusal(lattice: Lattice, face: number): 'tilted' | 'narrow' | null {
+  const verts = lattice.faces[face];
+  const normal = verts ? faceNormal(lattice, face) : null;
+  if (!verts || !normal) return 'narrow';
+  const a = AXIS_INDEX[dominantAxis(normal).axis];
+  if (Math.abs(normal[a]) < 0.999) return 'tilted';
+  for (let k = 0; k < 3; k++) {
+    if (k === a) continue;
+    const cs = verts.map((v) => coordOf(lattice, v)[k]);
+    if (Math.max(...cs) - Math.min(...cs) < 2) return 'narrow';
+  }
+  return null;
+}
+
+/** What insetRefusal's answer means, said to a person. */
+export const INSET_REFUSAL_TEXT = {
+  tilted: 'only faces lying flat on to an axis can be inset on the grid',
+  narrow: 'the face is too narrow to inset — no room to come in by even one grid unit',
+} as const;
+
 export function insetFace(lattice: Lattice, face: number, steps: number): { inner: number; border: number[] } | null {
   const verts = lattice.faces[face];
   if (!verts || steps === 0) return null;

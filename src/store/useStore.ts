@@ -1881,7 +1881,7 @@ export interface PhysicsState {
    * with a [0.8, 0.8, 1.05] copy of itself subtracted is a pipe, where the same
    * copy shrunk on all three would be a sealed cavity nobody can see.
    */
-  insetNodeGeoms: (nodeId: string, factor: [number, number, number]) => void;
+  insetNodeGeoms: (nodeId: string, factor: [number, number, number], pocket?: { axis: 0 | 1 | 2; side: 1 | -1 }) => void;
   applyNodeCsg: (nodeId: string, result: CsgResult, skipRecompile?: boolean) => void;
   setNodeCsgError: (nodeId: string, error: string | null, hash?: string) => void;
   applyNodeColliders: (nodeId: string, result: ColliderResult, skipRecompile?: boolean) => void;
@@ -4092,14 +4092,14 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     rebuildAfterGeomEdit(get, newScene, nodeId);
   },
 
-  insetNodeGeoms: (nodeId, factor) => {
+  insetNodeGeoms: (nodeId, factor, pocket) => {
     const target = findNode(get().sceneGraph.nodes, nodeId);
-    if (!target || insetNegatives(target, factor).length === 0) return;
+    if (!target || insetNegatives(target, factor, pocket).length === 0) return;
     get().prepareForDiscreteChange();
     const newScene = cloneSceneGraph(get().sceneGraph);
     const node = findNode(newScene.nodes, nodeId);
     if (!node) return;
-    const copies = insetNegatives(node, factor);
+    const copies = insetNegatives(node, factor, pocket);
     if (copies.length === 0) return;
 
     node.geoms = [...node.geoms, ...copies];

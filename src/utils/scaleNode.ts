@@ -10,6 +10,7 @@
 
 import { useStore, scaleMeshGeoms, cloneSceneGraph } from '../store/useStore';
 import type { SceneGeom, SceneNode } from '../types/scene';
+import { geomBounds } from './csg';
 
 /**
  * How one geom's size responds to a per-axis scale.
@@ -122,6 +123,97 @@ export function scaleNodeTree(nodeId: string, sx: number, sy: number, sz: number
 }
 
 /**
+ * Which way a bore runs through a body, in the body's own frame.
+ *
+ * `open` is the face it comes in from: 1 for the face on the + side of the
+ * axis, -1 for the − side, and 0 for right through both. A bore open on one
+ * face only is a pocket — a tray, a cup, a recess — with a floor left in it.
+ */
+export interface Bore {
+  axis: 0 | 1 | 2;
+  open: 1 | -1 | 0;
+}
+
+/**
+ * How far a bore runs past a face it comes out of, as a fraction of the body's
+ * length along it. A flush cut leaves coincident faces, which is the one thing
+ * a boolean evaluator cannot decide about.
+ */
+export const BORE_OVERSHOOT = 0.025;
+
+/**
+ * The per-axis factors of the copy that cuts a bore, for a given wall.
+ *
+ * `wall` is the factor across the bore: 0.8 leaves walls a tenth of the body's
+ * width each side. Along it, a bore right through is longer than the body at
+ * both ends; a pocket is longer at its open end only and leaves a floor as
+ * thick, in proportion, as the walls — on a cube, exactly as thick.
+ */
+export function boreFactors(wall: number, bore: Bore): [number, number, number] {
+  const along = bore.open === 0 ? 1 + 2 * BORE_OVERSHOOT : 1 + BORE_OVERSHOOT - (1 - wall) / 2;
+  return [0, 1, 2].map((a) => (a === bore.axis ? along : wall)) as [number, number, number];
+}
+
+/** Where a set of geoms starts and ends along one body axis, or null if they have no extent. */
+function spanAlong(geoms: SceneGeom[], axis: number): [number, number] | null {
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const g of geoms) {
+    let b = geomBounds(g);
+    // A static mesh keeps only its Y-up `vertices`, which geomBounds does not
+    // read. Brought into the body's Z-up frame the way mjcf.ts does it.
+    if (!b && g.type === 'mesh' && g.vertices?.length) {
+      const v = g.vertices as number[];
+      const off = g.pos || [0, 0, 0];
+      const min = [Infinity, Infinity, Infinity];
+      const max = [-Infinity, -Infinity, -Infinity];
+      for (let i = 0; i < v.length; i += 3) {
+        const p = [v[i], -v[i + 2], v[i + 1]];
+        for (let a = 0; a < 3; a++) {
+          const c = p[a] + (off[a] || 0);
+          if (c < min[a]) min[a] = c;
+          if (c > max[a]) max[a] = c;
+        }
+      }
+      b = { min, max };
+    }
+    if (!b) continue;
+    lo = Math.min(lo, b.min[axis]);
+    hi = Math.max(hi, b.max[axis]);
+  }
+  return hi > lo ? [lo, hi] : null;
+}
+
+/** Slides a geom along one body axis, whatever it is made of. */
+function shiftGeom(g: SceneGeom, axis: number, d: number) {
+  if (g.type === 'mesh') {
+    // renderVertices are Z-up like the body; `vertices` are Y-up, where the
+    // body's Y is −Z and its Z is Y (see mjcf.ts).
+    if (g.renderVertices) {
+      const v = [...g.renderVertices];
+      for (let i = axis; i < v.length; i += 3) v[i] += d;
+      g.renderVertices = v;
+    }
+    if (g.vertices) {
+      const v = [...(g.vertices as number[])];
+      const [k, sign] = axis === 0 ? [0, 1] : axis === 1 ? [2, -1] : [1, 1];
+      for (let i = k; i < v.length; i += 3) v[i] += sign * d;
+      g.vertices = v;
+    }
+    return;
+  }
+  const pos = [...(g.pos ?? [0, 0, 0])];
+  pos[axis] += d;
+  g.pos = pos as typeof g.pos;
+  if (g.fromto) {
+    const f = [...g.fromto];
+    f[axis] += d;
+    f[axis + 3] += d;
+    g.fromto = f as typeof g.fromto;
+  }
+}
+
+/**
  * A scaled copy of a body's own shapes, marked as holes.
  *
  * The shortest path from a solid to a hollow one: a cylinder with a 0.9 copy of
@@ -130,8 +222,16 @@ export function scaleNodeTree(nodeId: string, sx: number, sy: number, sz: number
  *
  * Factors are per-axis, which is what makes it more than a shell: 1 on two of
  * them cuts a slot instead.
+ *
+ * With `pocket`, the copy is slid along that axis until its end stands just
+ * past the face named, so it opens on that face alone — which is what makes a
+ * pocket of a copy that would otherwise sit in the middle as a sealed cavity.
  */
-export function insetNegatives(node: SceneNode, [fx, fy, fz]: [number, number, number]): SceneGeom[] {
+export function insetNegatives(
+  node: SceneNode,
+  [fx, fy, fz]: [number, number, number],
+  pocket?: { axis: 0 | 1 | 2; side: 1 | -1 },
+): SceneGeom[] {
   // Above 1 on an axis is how a bore is asked to pass right THROUGH: a copy cut
   // flush with the surface it emerges from leaves two coincident faces, which
   // is the one thing a boolean evaluator cannot decide about. At least one axis
@@ -171,5 +271,15 @@ export function insetNegatives(node: SceneNode, [fx, fy, fz]: [number, number, n
   // Mesh copies are scaled the way the inspector would scale them, about their
   // own centroid, so a hollowed mesh keeps its walls even in thickness.
   scaleMeshGeoms({ geoms: copies }, fx, fy, fz);
+
+  if (pocket) {
+    const body = spanAlong(positives, pocket.axis);
+    const copy = spanAlong(copies, pocket.axis);
+    if (body && copy) {
+      const overshoot = BORE_OVERSHOOT * (body[1] - body[0]);
+      const d = pocket.side > 0 ? body[1] + overshoot - copy[1] : body[0] - overshoot - copy[0];
+      for (const g of copies) shiftGeom(g, pocket.axis, d);
+    }
+  }
   return copies;
 }

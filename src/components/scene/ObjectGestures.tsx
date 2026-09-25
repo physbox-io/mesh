@@ -8,9 +8,13 @@
 // or an imported mesh is just as often the wrong size, and the sidebar slider
 // is a long way from the model.
 //
-// So S scales the selected body and I hollows it. Both are modal: move the
+// So S scales the selected body and I bores into it. Both are modal: move the
 // pointer to size it, click or Enter to keep it, Esc or right-click to put it
 // back, and X/Y/Z confine it to one axis on the way.
+//
+// I is not the lattice tool's face inset, although it shares the key: a solid
+// body has no faces to pick, only a shape to cut into. It bores in from the
+// face under the pointer, right through or, with P, as a pocket with a floor.
 //
 // The preview is the SCENE, not the document. Scaling a real mesh means
 // rewriting every vertex and rebuilding its buffers, which is far too much to
@@ -24,7 +28,7 @@ import { useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 import { useStore, getPhysicsWorkerClient } from '../../store/useStore';
 import type { SceneNode } from '../../types/scene';
-import { scaleNodeTree } from '../../utils/scaleNode';
+import { scaleNodeTree, boreFactors, BORE_OVERSHOOT, type Bore } from '../../utils/scaleNode';
 import { pickCutSpot, type CutSpot } from '../../utils/csg';
 import { bodyPoseOf, toParentFrame } from './bodyPose';
 import { solveScaleToFit, type MateFeature } from '../../utils/mateSnap';
@@ -80,7 +84,92 @@ interface Gesture {
    */
   ownAxes?: MateFeature[];
   nearAxes?: MateFeature[];
+  /**
+   * Bore only. The body's rotation (body → the frame bodies are drawn in), the
+   * camera in that frame, the body axis and face the pointer was on when the
+   * key was pressed, and whether it stops short as a pocket.
+   */
+  rot?: THREE.Matrix3;
+  eye?: THREE.Vector3;
+  aim?: { axis: 0 | 1 | 2; side: 1 | -1 };
+  pocket?: boolean;
 }
+
+const AXES: Axis[] = ['x', 'y', 'z'];
+
+/** A body axis, as a direction in the frame bodies are drawn in. */
+const bodyAxisDir = (rot: THREE.Matrix3, axis: number) => new THREE.Vector3().setFromMatrix3Column(rot, axis);
+
+/** The component of a vector that is largest, and so the axis it most nearly is. */
+const dominant = (v: THREE.Vector3): 0 | 1 | 2 => {
+  const c = [Math.abs(v.x), Math.abs(v.y), Math.abs(v.z)];
+  return (c[0] >= c[1] && c[0] >= c[2] ? 0 : c[1] >= c[2] ? 1 : 2);
+};
+
+/** The body axis that lies closest to a world axis. */
+const bodyAxisNearest = (rot: THREE.Matrix3, world: number): 0 | 1 | 2 => {
+  const e = rot.elements; // column-major: column i is body axis i
+  let best = 0;
+  for (let i = 1; i < 3; i++) if (Math.abs(e[i * 3 + world]) > Math.abs(e[best * 3 + world])) best = i;
+  return best as 0 | 1 | 2;
+};
+
+/** A direction named as the world axis it is nearest, signed when that matters. */
+const worldName = (dir: THREE.Vector3, signed: boolean) => {
+  const k = dominant(dir);
+  return `${signed ? (dir.getComponent(k) < 0 ? '−' : '+') : ''}${'XYZ'[k]}`;
+};
+
+/*
+ * Which way the bore runs, and which face it opens on.
+ *
+ * From the face under the pointer when I was pressed: that is the face you
+ * were looking at, and it was the only reasonable reading of "inset this" —
+ * a bore that always ran along Z opened the top and bottom of a cube
+ * whichever side you pointed at. X/Y/Z take over, and mean the WORLD's axes,
+ * the ones on screen: on a rotated body the body axis nearest the one
+ * pressed, opening on whichever of its two faces is towards the camera.
+ */
+function boreOf(state: Gesture): Bore {
+  let aim = state.aim ?? { axis: 2 as const, side: 1 as const };
+  if (state.axis && state.rot) {
+    const axis = bodyAxisNearest(state.rot, AXES.indexOf(state.axis));
+    const toEye = state.eye ? state.eye.clone().sub(state.pivot) : null;
+    const side = toEye && bodyAxisDir(state.rot, axis).dot(toEye) < 0 ? -1 : 1;
+    aim = { axis, side };
+  }
+  return { axis: aim.axis, open: state.pocket ? aim.side : 0 };
+}
+
+/**
+ * Where a set of drawn objects starts and ends along a direction, in `parent`'s
+ * frame. From each mesh's own bounding box, so a rotated body is measured along
+ * its own axis rather than by a world-aligned box around it.
+ */
+const spanAlong = (objects: THREE.Object3D[], parent: THREE.Object3D, dir: THREE.Vector3): [number, number] | null => {
+  const toParent = new THREE.Matrix4().copy(parent.matrixWorld).invert();
+  const m = new THREE.Matrix4();
+  const p = new THREE.Vector3();
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const object of objects) {
+    object.updateMatrixWorld(true);
+    object.traverse((child) => {
+      const mesh = child as THREE.Mesh;
+      if (!mesh.isMesh || !mesh.visible || !mesh.geometry) return;
+      if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox();
+      const box = mesh.geometry.boundingBox;
+      if (!box || box.isEmpty()) return;
+      m.multiplyMatrices(toParent, mesh.matrixWorld);
+      for (const x of [box.min.x, box.max.x]) for (const y of [box.min.y, box.max.y]) for (const z of [box.min.z, box.max.z]) {
+        const t = p.set(x, y, z).applyMatrix4(m).dot(dir);
+        if (t < lo) lo = t;
+        if (t > hi) hi = t;
+      }
+    });
+  }
+  return hi > lo ? [lo, hi] : null;
+};
 
 /** The node with this id, anywhere in the tree. */
 const findNode = (nodes: SceneNode[], id: string): SceneNode | null => {
@@ -170,26 +259,17 @@ export const ObjectGestureController = () => {
       );
     }
     /*
-     * Inset bores a hole THROUGH the body, along one axis.
+     * A bore runs INTO the body, along one of its axes.
      *
      * A copy shrunk on all three axes is a sealed cavity: correct arithmetic,
      * useless result. Nothing about the body changes on the outside, so it
      * reads as an operation that did not happen — which is exactly how it was
-     * reported. So the copy shrinks across the bore and OVERSHOOTS along it:
-     * a flush cut leaves coincident faces, which is the one thing a boolean
-     * evaluator cannot decide about (see the ring component for the same note).
-     *
-     * The axis keys pick which way the bore runs; Z by default, which is the
-     * axis a cylinder and a capsule are already built along.
+     * reported. So the copy shrinks across the bore and OVERSHOOTS along it,
+     * at both ends or, as a pocket, at the face it opens on (see boreFactors).
      */
-    const bore = state.axis ?? 'z';
-    const through = 1.05;
-    return new THREE.Vector3(
-      bore === 'x' ? through : state.factor,
-      bore === 'y' ? through : state.factor,
-      bore === 'z' ? through : state.factor,
-    );
+    return new THREE.Vector3(...boreFactors(state.factor, boreOf(state)));
   };
+
 
   /**
    * A ray from the pointer, in the frame bodies actually live in.
@@ -392,14 +472,32 @@ export const ObjectGestureController = () => {
       const start = state.held[i].position;
       place(state.ghosts[i], start, anchored ? state.pivot : start, scale);
     }
+    // A pocket slides the ghost along the bore until it stands just past the
+    // face it opens on — the same slide insetNegatives gives the real cut.
+    const bore = state.kind === 'inset' ? boreOf(state) : null;
+    const boreDir = bore && state.rot ? bodyAxisDir(state.rot, bore.axis) : null;
+    const parent = state.ghosts[0]?.parent;
+    if (bore && bore.open !== 0 && boreDir && parent) {
+      const body = spanAlong(state.held.map((h) => h.object), parent, boreDir);
+      const ghost = spanAlong(state.ghosts, parent, boreDir);
+      if (body && ghost) {
+        const overshoot = BORE_OVERSHOOT * (body[1] - body[0]);
+        const d = bore.open > 0 ? body[1] + overshoot - ghost[1] : body[0] - overshoot - ghost[0];
+        for (const g of state.ghosts) g.position.addScaledVector(boreDir, d);
+      }
+    }
     const fitSaid = fitted?.locked
       // The diameter, because that is the number on the drawing and on the
       // drill bit — nobody asks for a six-millimetre-radius hole.
       ? ` · ⌀${(fitted.radius * 2000).toFixed(2)} mm · ${fitted.label}`
       : '';
+    const boreSaid = !bore || !boreDir ? ''
+      : bore.open === 0
+        ? `Bore through ${worldName(boreDir, false)} ${state.factor.toFixed(2)}× · P for a pocket`
+        : `Pocket from ${worldName(boreDir.clone().multiplyScalar(bore.open), true)} ${state.factor.toFixed(2)}× · P to go through`;
     setGestureStatus(state.kind === 'scale'
       ? `Scale ${state.factor.toFixed(2)}×${state.axis ? ` · ${state.axis.toUpperCase()}` : ''}${fitSaid}`
-      : `Inset ${state.factor.toFixed(2)}× · bore ${(state.axis ?? 'z').toUpperCase()}`);
+      : boreSaid);
   }, [camera, gl, planeHit, rayIn, setGestureStatus]);
 
   /**
@@ -436,6 +534,8 @@ export const ObjectGestureController = () => {
     if (!state) return;
     const { kind, nodeId, factor } = state;
     const axis = state.axis;
+    // Read before clear() ends the gesture it is read from.
+    const bore = kind === 'inset' ? boreOf(state) : null;
     // The cancel path inside clear() puts a previewed move back; a kept move is
     // written from the numbers held here, which clear() does not touch — and
     // must not be put back first, or the body flinches to its old position for
@@ -469,13 +569,12 @@ export const ObjectGestureController = () => {
     // The same numbers the ghost was drawn with, so what is cut is what was
     // shown. `scale` was computed from the live gesture, which `clear` has
     // already ended, so it is recomputed from what was kept.
-    const bore = axis ?? 'z';
-    const through = 1.05;
-    useStore.getState().insetNodeGeoms(nodeId, [
-      bore === 'x' ? through : factor,
-      bore === 'y' ? through : factor,
-      bore === 'z' ? through : factor,
-    ]);
+    if (!bore) return;
+    useStore.getState().insetNodeGeoms(
+      nodeId,
+      boreFactors(factor, bore),
+      bore.open === 0 ? undefined : { axis: bore.axis, side: bore.open },
+    );
   }, [clear]);
 
   const begin = useCallback((kind: 'scale' | 'inset' | 'move') => {
@@ -565,7 +664,35 @@ export const ObjectGestureController = () => {
     }
 
     const ghosts: THREE.Object3D[] = [];
+    let boreStart: Pick<Gesture, 'rot' | 'eye' | 'aim' | 'pocket'> = {};
     if (kind === 'inset') {
+      const node = findNode(store.sceneGraph.nodes, nodeId);
+      const rot = bodyPoseOf(nodeId, node?.pos ?? [0, 0, 0]).rot;
+      const parent = groups[0].parent;
+      const eye = parent ? parent.worldToLocal(camera.position.clone()) : camera.position.clone();
+      // The face under the pointer, as a body axis and a side of it. Taken
+      // before the ghosts exist, so the ray cannot land on one of them.
+      const rect = gl.domElement.getBoundingClientRect();
+      const caster = new THREE.Raycaster();
+      caster.setFromCamera(new THREE.Vector2(
+        ((pointer.current.x - rect.left) / rect.width) * 2 - 1,
+        -(((pointer.current.y - rect.top) / rect.height) * 2 - 1),
+      ), camera);
+      const hit = caster.intersectObjects(groups, true).find((h) => h.face && (h.object as THREE.Mesh).isMesh);
+      let aim: { axis: 0 | 1 | 2; side: 1 | -1 };
+      if (hit && parent) {
+        const normal = hit.face!.normal.clone().transformDirection(hit.object.matrixWorld)
+          .transformDirection(new THREE.Matrix4().copy(parent.matrixWorld).invert())
+          .applyMatrix3(rot.clone().transpose());
+        const axis = dominant(normal);
+        aim = { axis, side: normal.getComponent(axis) < 0 ? -1 : 1 };
+      } else {
+        // Off the body: the axis nearest up, opening towards the camera, which
+        // on an unrotated body is the old default of Z.
+        const axis = bodyAxisNearest(rot, 2);
+        aim = { axis, side: bodyAxisDir(rot, axis).dot(eye.clone().sub(pivot)) < 0 ? -1 : 1 };
+      }
+      boreStart = { rot, eye, aim, pocket: false };
       // A hole is easier to judge as a shape than as a number, and the body it
       // is being cut out of stays where it is while you judge it.
       for (const group of groups) {
@@ -613,6 +740,7 @@ export const ObjectGestureController = () => {
       radius: Math.hypot(pointer.current.x - centre.x, pointer.current.y - centre.y),
       ownAxes,
       nearAxes,
+      ...boreStart,
     };
     setOrbitEnabled(false);
     draw();
@@ -631,6 +759,9 @@ export const ObjectGestureController = () => {
         else if (key === 'enter' || key === ' ') end(true);
         else if (key === 'x' || key === 'y' || key === 'z') {
           running.axis = running.axis === key ? null : (key as Axis);
+          draw();
+        } else if (key === 'p' && running.kind === 'inset') {
+          running.pocket = !running.pocket;
           draw();
         }
         return;

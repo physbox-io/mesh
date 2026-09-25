@@ -95,8 +95,16 @@ const GESTURES: ModeChoice[] = [
   { key: 'G', label: 'Move', gesture: 'move', hint: 'Move it with the pointer; X/Y/Z holds one axis. Or drag the arrows on the body' },
   { key: 'R', label: 'Turn', gesture: 'rotate', hint: 'Turn it with the pointer; X/Y/Z holds one axis. Or drag the rings on the body' },
   { key: 'S', label: 'Scale', gesture: 'scale', hint: 'Resize it with the pointer; X/Y/Z holds one axis' },
-  { key: 'I', label: 'Inset', gesture: 'inset', hint: 'A lattice face insets; a solid body gets a hole bored through it' },
 ];
+
+/*
+ * One key, two operations, named for what each actually does. In a lattice, I
+ * insets the selected faces. On a solid body there are no faces to pick, so it
+ * bores in from the face under the pointer — and calling that "Inset" is how it
+ * came to be expected to inset a face and seen to remove two instead.
+ */
+const LATTICE_INSET: ModeChoice = { key: 'I', label: 'Inset', gesture: 'inset', hint: 'Shrink the selected faces inside themselves, ringed by quads' };
+const BORE: ModeChoice = { key: 'I', label: 'Bore / pocket', gesture: 'inset', hint: 'Cut in from the face under the pointer, right through; P stops short with a floor, X/Y/Z picks a world axis' };
 
 /** Offered on its own, beside the gestures: a finishing step for any part that is not being sculpted or latticed. */
 const ROUND_EDGES: ModeChoice = { key: 'E', label: 'Round edges', gesture: 'round-edges', hint: 'Round or bevel edges of the selected part: click edges or faces, pick a size' };
@@ -250,7 +258,7 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
         NOTHING,
         ...(enterChoice ? [enterChoice] : []),
         ...(latticeNodeId ? LATTICE_TOOLS : []),
-        ...(canGesture ? GESTURES : []),
+        ...(canGesture ? [...GESTURES, latticeNodeId ? LATTICE_INSET : BORE] : []),
         ...(selectedNodeId && !latticeNodeId && !sculptNodeId ? [ROUND_EDGES] : []),
         ...MEASURE,
       ];
