@@ -1163,8 +1163,10 @@ function App() {
       for (const card of noteCards) {
         if (card.markdown) {
           const match = card.markdown.match(/^\s*#\s+(.+)$/m);
-          if (match && match[1].trim()) {
-            baseName = match[1].trim().replace(/[*_`]/g, '').trim();
+          const heading = match ? match[1].replace(/[*_`]/g, '').trim() : '';
+          // Not the new-card placeholder, or every export became note.stl.
+          if (heading && heading !== 'Note') {
+            baseName = heading;
             break;
           }
         }
@@ -1216,6 +1218,11 @@ function App() {
   const exportStl = useCallback(() => {
     const exportGroup = buildExportGroup();
     if (!exportGroup) return;
+    // As the 3MF export does: an empty scene otherwise downloads an STL with
+    // no triangles in it.
+    let hasMesh = false;
+    exportGroup.traverse((o) => { if ((o as THREE.Mesh).isMesh) hasMesh = true; });
+    if (!hasMesh) { alert('Nothing to export'); return; }
 
     const exporter = new STLExporter();
     const result = exporter.parse(exportGroup, { binary: true }) as DataView;
