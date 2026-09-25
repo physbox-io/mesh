@@ -22,6 +22,7 @@ export const DropHandler = ({ addComponent, onImportFile, onImportImageFile, onI
       // 1. External files dropped (e.g. from desktop or file explorer)
       const files = e.dataTransfer?.files;
       if (files && files.length > 0) {
+        let handled = false;
         for (let i = 0; i < files.length; i++) {
           const file = files[i];
           const fileName = file.name;
@@ -31,11 +32,13 @@ export const DropHandler = ({ addComponent, onImportFile, onImportImageFile, onI
             // The same path as the Import button, so a dropped scene is checked,
             // reported and set up the same way rather than swapped in silently.
             onImportSceneJson(await file.text(), fileName, true);
+            handled = true;
             break;
           } else if (file.type.startsWith('image/') || /\.(png|jpe?g|webp|bmp|gif|avif)$/.test(ext)) {
             // An image can only mean the heightmap importer — it is the one
             // path that turns 2D pixels into a body.
             onImportImageFile(file);
+            handled = true;
             break;
           } else if (ext === '.scad' || ext === '.stl') {
             // Hand the file to the import dialog rather than guessing: how an
@@ -43,8 +46,15 @@ export const DropHandler = ({ addComponent, onImportFile, onImportImageFile, onI
             // whole point of that dialog, and a silent default import was
             // indistinguishable from the drop having done nothing.
             onImportFile(file);
+            handled = true;
             break;
           }
+        }
+        // Said out loud, as the import paths do: a drop that is quietly
+        // ignored reads as the app not working.
+        if (!handled) {
+          const names = Array.from(files, (f) => f.name).join(', ');
+          alert(`Mesh can open .json scenes, .stl and .scad models, and images. ${names} ${files.length === 1 ? "isn't" : "aren't"} one of those.`);
         }
         return;
       }
