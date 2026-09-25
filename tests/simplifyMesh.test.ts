@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import * as THREE from 'three';
-import { simplifyGeomMesh } from '../src/utils/simplifyMesh';
+import { simplifyGeomMesh, toRenderVertices } from '../src/utils/simplifyMesh';
 
 /** A triangle soup (no index), the way an imported STL arrives. */
 function soup(detail: number): number[] {
@@ -67,5 +67,11 @@ describe('simplifyGeomMesh', () => {
     // A tetrahedron has 4 vertices, and the floor is 4.
     const tet = [0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0];
     expect(() => simplifyGeomMesh({ vertices: tet }, 0.1)).toThrow(/Already at or below/);
+  });
+});
+
+describe('toRenderVertices', () => {
+  it('maps Y-up (x, y, z) to Z-up (x, -z, y)', () => {
+    expect(toRenderVertices([1, 2, 3, -0.1234567, 0, 5])).toEqual([1, -3, 2, -0.12346, -5, 0]);
   });
 });

@@ -26,7 +26,7 @@ import { DocsInfoButton } from './components/docs/DocsInfoButton';
 import * as THREE from 'three';
 import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js';
 import { exportThreeMf, type ThreeMfMesh } from './utils/threeMfExporter';
-import { simplifyGeomMesh } from './utils/simplifyMesh';
+import { simplifyGeomMesh, toRenderVertices } from './utils/simplifyMesh';
 import { loadCompiler, compileSCAD, isCompilerReady, setScadCompileListener } from './utils/openscad';
 import { getStickyRotation } from './utils/geom';
 import { csgSourceGeoms, csgHashOf, collisionModeOf, CSG_DEFAULT_SECTORS } from './utils/csg';
@@ -98,7 +98,7 @@ import { useEscapeToClose } from './hooks/useEscapeToClose';
 import { getSyncedSceneGraph } from './utils/mujocoSync';
 import { pressHistoryKey } from './utils/historyKeys';
 import { generateScadForNode, parseScadVariables, replaceVarInCode } from './utils/scadSource';
-import { isTopLevel, findNodeById, getNodeWorldPos } from './utils/sceneTree';
+import { isTopLevel, findNodeById, getNodeWorldPos, patchGeom } from './utils/sceneTree';
 import { NoteCardOverlay } from './components/NoteCardOverlay';
 import { AxisLegendDrawer } from './components/AxisLegendDrawer';
 import { DropHandler } from './components/DropHandler';
@@ -1430,32 +1430,17 @@ function App() {
     }
   }, [selectedNode, scadText]);
 
-  const handleSimplifyMesh = useCallback((g: SceneGeom) => {
+  const handleSimplifyMesh = useCallback((g: SceneGeom, ownerId: string) => {
     try {
       setMeshSimplifierError(null);
       const { vertices: uniqueVerts, faces, renderVertices: newRenderVerts } = simplifyGeomMesh(g, simplifyRatio);
 
-      // Write it back. This matches the geom by name across the whole tree and
-      // takes the first hit, so two bodies with a geom of the same name would
-      // have the wrong one simplified. Kept as it was; fix it on its own.
       const newScene = cloneSceneGraph(useStore.getState().sceneGraph);
-      const traverse = (nodes: SceneNode[]): boolean => {
-        for (const node of nodes) {
-          const idx = node.geoms?.findIndex((ng) => ng.name === g.name);
-          if (idx >= 0) {
-            node.geoms[idx] = {
-              ...node.geoms[idx],
-              vertices: uniqueVerts,
-              faces,
-              ...(newRenderVerts ? { renderVertices: newRenderVerts } : {})
-            };
-            return true;
-          }
-          if (traverse(node.children)) return true;
-        }
-        return false;
-      };
-      traverse(newScene.nodes);
+      patchGeom(newScene.nodes, ownerId, g.name, {
+        vertices: uniqueVerts,
+        faces,
+        ...(newRenderVerts ? { renderVertices: newRenderVerts } : {}),
+      });
       useStore.getState().updateScene(newScene);
       
       setMeshSimplifierGeom(null);
@@ -5926,8 +5911,13 @@ function App() {
                                   if (a!==b && b!==c && a!==c) filteredFaces.push(a,b,c);
                                 }
                                 const newScene = cloneSceneGraph(useStore.getState().sceneGraph);
-                                const traverse = (nodes: SceneNode[]): boolean => { for (const node of nodes) { const idx = node.geoms?.findIndex((ng) => ng.name === g.name); if (idx >= 0) { node.geoms[idx] = {...node.geoms[idx], vertices: newVerts, faces: filteredFaces}; return true; } if (traverse(node.children)) return true; } return false; };
-                                traverse(newScene.nodes);
+                                // A dynamic mesh is drawn from renderVertices, so they are
+                                // renumbered with the rest or the new faces index old points.
+                                patchGeom(newScene.nodes, g._fromChildId ?? selectedNode.id, g.name, {
+                                  vertices: newVerts,
+                                  faces: filteredFaces,
+                                  ...(g.dynamic ? { renderVertices: toRenderVertices(newVerts) } : {}),
+                                });
                                 useStore.getState().updateScene(newScene);
                               }}
                               className="flex items-center justify-center gap-1 px-2 py-1.5 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded text-[10px] font-semibold text-slate-600 transition-colors cursor-pointer"
@@ -5983,27 +5973,13 @@ function App() {
                                     // If this is a dynamic mesh, recompute renderVertices from the new vertices.
                                     // renderVertices = raw Z-up: Y-up (x,y,z) → Z-up (x,-z,y), no centroid subtraction.
                                     // MuJoCo recenters the mesh internally; xpos tracks the recentered frame.
-                                    let newRenderVerts: number[] | undefined;
-                                    if (g.dynamic) {
-                                      newRenderVerts = [];
-                                      for (let i = 0; i < newVerts.length; i += 3) {
-                                        const x = newVerts[i], y = newVerts[i+1], z = newVerts[i+2];
-                                        newRenderVerts.push(+x.toFixed(5), +(-z).toFixed(5), +y.toFixed(5));
-                                      }
-                                    }
+                                    const newRenderVerts = g.dynamic ? toRenderVertices(newVerts) : undefined;
                                     const newScene = cloneSceneGraph(useStore.getState().sceneGraph);
-                                    const traverse = (nodes: SceneNode[]): boolean => {
-                                      for (const node of nodes) {
-                                        const idx = node.geoms?.findIndex((ng) => ng.name === g.name);
-                                        if (idx >= 0) {
-                                          node.geoms[idx] = {...node.geoms[idx], vertices: newVerts, faces: newFaces, ...(newRenderVerts ? {renderVertices: newRenderVerts} : {})};
-                                          return true;
-                                        }
-                                        if (traverse(node.children)) return true;
-                                      }
-                                      return false;
-                                    };
-                                    traverse(newScene.nodes);
+                                    patchGeom(newScene.nodes, g._fromChildId ?? selectedNode.id, g.name, {
+                                      vertices: newVerts,
+                                      faces: newFaces,
+                                      ...(newRenderVerts ? { renderVertices: newRenderVerts } : {}),
+                                    });
                                     useStore.getState().updateScene(newScene);
                                     setMeshEditorError(null);
                                     setMeshEditorGeom(null);
@@ -6050,7 +6026,7 @@ function App() {
                                     Cancel
                                   </button>
                                   <button
-                                    onClick={() => handleSimplifyMesh(g)}
+                                    onClick={() => handleSimplifyMesh(g, g._fromChildId ?? selectedNode.id)}
                                     className="px-2.5 py-1 bg-amber-600 hover:bg-amber-700 text-white text-[10px] font-semibold rounded cursor-pointer shadow transition-colors flex items-center gap-1"
                                   >
                                     <Sparkles className="w-3 h-3" />

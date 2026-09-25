@@ -1,4 +1,4 @@
-import type { SceneNode } from '../types/scene';
+import type { SceneGeom, SceneNode } from '../types/scene';
 
 // Helper to find a node by ID in hierarchy
 /** Whether a body sits at the top of the scene rather than inside another. */
@@ -32,4 +32,20 @@ export function getNodeWorldPos(nodes: SceneNode[], targetId: string, currentOff
     }
   }
   return null;
+}
+
+/**
+ * Merges `updates` into the geom called `geomName` on the body `ownerId`, in
+ * place, and says whether it found one. Pass a cloned tree.
+ *
+ * Addressed by owner as well as name because geom names are not unique in the
+ * scene graph — mjcf.ts renames clashes only in the copy it compiles — so a
+ * lookup by name alone could write one body's edit into another's mesh.
+ */
+export function patchGeom(nodes: SceneNode[], ownerId: string, geomName: string, updates: Partial<SceneGeom>): boolean {
+  const owner = findNodeById(nodes, ownerId);
+  const idx = owner?.geoms?.findIndex((g) => g.name === geomName) ?? -1;
+  if (!owner || idx < 0) return false;
+  owner.geoms[idx] = { ...owner.geoms[idx], ...updates };
+  return true;
 }

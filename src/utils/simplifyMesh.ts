@@ -10,6 +10,18 @@ export interface SimplifiedMesh {
 }
 
 /**
+ * A mesh's Y-up `vertices` as the Z-up `renderVertices` a dynamic mesh is
+ * drawn from: (x, y, z) becomes (x, -z, y), rounded to 5 places.
+ */
+export function toRenderVertices(vertices: number[]): number[] {
+  const out: number[] = [];
+  for (let i = 0; i < vertices.length; i += 3) {
+    out.push(+vertices[i].toFixed(5), +(-vertices[i + 2]).toFixed(5), +vertices[i + 1].toFixed(5));
+  }
+  return out;
+}
+
+/**
  * Reduces a mesh geom to about `ratio` of its vertices (never fewer than 4)
  * with three's SimplifyModifier. Throws, with a message fit to show the user,
  * when the input is too small or the result collapses.
@@ -131,15 +143,8 @@ export function simplifyGeomMesh(g: Pick<SceneGeom, 'vertices' | 'faces' | 'dyna
     throw new Error('Simplification reduced geometry below minimum visible threshold.');
   }
 
-  // 6. Swap Y/Z coordinates for renderVertices if this is a dynamic mesh (MuJoCo space swap)
-  let newRenderVerts: number[] | undefined;
-  if (g.dynamic) {
-    newRenderVerts = [];
-    for (let i = 0; i < uniqueVerts.length; i += 3) {
-      const x = uniqueVerts[i], y = uniqueVerts[i+1], z = uniqueVerts[i+2];
-      newRenderVerts.push(+x.toFixed(5), +(-z).toFixed(5), +y.toFixed(5));
-    }
-  }
+  // 6. A dynamic mesh is drawn from renderVertices, in MuJoCo's Z-up frame.
+  const newRenderVerts = g.dynamic ? toRenderVertices(uniqueVerts) : undefined;
 
   return { vertices: uniqueVerts, faces, ...(newRenderVerts ? { renderVertices: newRenderVerts } : {}) };
 }
