@@ -82,9 +82,18 @@ older `utils/printAnalysis.ts` imports `useStore` at module scope and reads live
 MuJoCo state, so it only runs on the main thread — its tests pass only because a
 default store has no model loaded. New analysis belongs in `dfm.ts`. See GUIDE.md § DFM.
 
+**Body and geom names are made unique for you, and not always to what you wrote.** The
+viewport finds MuJoCo bodies and geoms by the graph's names, so a clash used to draw one body
+at another's transform. `utils/uniqueNames.ts` now renames the later of any clash to
+`name_2`, `name_3` … — in the store's `set` middleware *and* in `mjcf.ts`, by the same rule, so
+both agree. Look a geom up by its owning body and name (`sceneTree.patchGeom`), not by name
+across the whole tree, and don't write `sceneGraph` through `useStore.setState`, which
+skips the middleware.
+
 **Several things must be edited in more than one place:**
 
-- A new preset: the `PRESETS` map in `presets/presetScenes.ts` *and* the hardcoded `<select>` in `App.tsx`.
+- A new preset: only the `PRESETS` map in `presets/presetScenes.ts` — the header dropdown
+  is built from it.
 - MCP docs: `mcp-docs.json` here (the server loads it from `~/mesh/` at import) *and* the standalone
   fallback at `physbox_mcp/physbox_mcp/mcp-docs/physics.json`. A new command also needs a handler in
   `useMCPBridge.ts`. **The MCP server must be restarted before any of it takes effect.**
