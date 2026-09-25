@@ -186,6 +186,10 @@ export function SculptSurface({
     const vertexFloats = mesh.vertexCount * 3;
     const indexCount = mesh.faceCount * 3;
 
+    // three frees an attribute's GL buffer only when its geometry is disposed,
+    // so a replaced attribute left its old, smaller buffer on the GPU for good.
+    // Disposing first frees them; the geometry uploads again on the next draw.
+    if (positionAttr.array.length < vertexFloats || indexAttr.array.length < indexCount) geometry.dispose();
     if (positionAttr.array.length < vertexFloats) {
       geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(mesh.positions.length), 3));
       geometry.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(mesh.normals.length), 3));

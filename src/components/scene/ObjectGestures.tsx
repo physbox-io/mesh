@@ -524,6 +524,9 @@ export const ObjectGestureController = () => {
       held.object.position.copy(held.position);
     }
     for (const ghost of state.ghosts) ghost.removeFromParent();
+    // A cutter's ghost owns the geometry made for it; an inset's ghosts are
+    // clones sharing the body's own, which must not be disposed.
+    if (state.kind === 'moveCut') for (const ghost of state.ghosts) (ghost as THREE.Mesh).geometry?.dispose();
     gesture.current = null;
     setGestureStatus(null);
     setOrbitEnabled(true);
