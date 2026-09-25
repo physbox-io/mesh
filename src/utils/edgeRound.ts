@@ -124,8 +124,22 @@ export function edgeSolidScad(edge: RoundEdge, mode: 'fillet' | 'chamfer', size:
     const u = norm(edge.t1);
     const v = cross(dir, u);
     const pts = section.map((p) => `[${fmt(dot(p, u))},${fmt(dot(p, v))}]`).join(',');
-    const origin = sub(edge.a, scale(dir, OVERRUN));
-    return `multmatrix(${matrixRows([u, v, dir], origin)}) linear_extrude(height=${fmt(length + 2 * OVERRUN)}) polygon([${pts}]);`;
+    // A cutter runs a hair past each end into air; a filler must not, or the
+    // part grows a skin that far past its own faces.
+    const overrun = edge.convex ? OVERRUN : 0;
+    const origin = sub(edge.a, scale(dir, overrun));
+    const swept = `multmatrix(${matrixRows([u, v, dir], origin)}) linear_extrude(height=${fmt(length + 2 * overrun)}) polygon([${pts}]);`;
+    if (!edge.stops?.length) return swept;
+    // Cut short at each face the edge runs away from: the half-space above
+    // that face, as a block big enough to hold the whole sliver.
+    const reach = length + 10 * size + 0.001;
+    const blocks = edge.stops.map((stop) => {
+      const n = norm(stop.normal);
+      const x = norm(Math.abs(n[0]) < 0.9 ? cross(n, [1, 0, 0]) : cross(n, [0, 1, 0]));
+      const y = cross(n, x);
+      return `multmatrix(${matrixRows([x, y, n], stop.point)}) translate([${fmt(-reach)}, ${fmt(-reach)}, 0]) cube([${fmt(2 * reach)}, ${fmt(2 * reach)}, ${fmt(reach)}]);`;
+    });
+    return `intersection() { ${swept} ${blocks.join(' ')} }`;
   }
   // A rim. rotate_extrude spins the X-Y plane about Y→Z, X being the radius.
   const ref = norm(edge.ref);
@@ -178,6 +192,40 @@ export function cornerPatchesScad(feature: EdgeRoundFeature, fn: number): string
 }
 
 /**
+ * An outside edge that ends in an inside corner which is itself being rounded
+ * — a gusset's top edge running down into the fillet at its foot — stops at
+ * the top of that fillet rather than at the face beneath it.
+ *
+ * Carried down to the face, the outside edge's cutter bites into the fillet
+ * that was just added there, and the two leave notches and slivers where a
+ * CAD system would have blended them. Stopping short leaves the last few
+ * millimetres of the outside edge sharp, which reads as finished; the notches
+ * do not.
+ */
+function stopShortOfFillers(
+  edge: RoundEdge,
+  concave: { edge: Extract<RoundEdge, { kind: 'line' }>; mode: 'fillet' | 'chamfer'; size: number }[],
+): RoundEdge {
+  if (edge.kind !== 'line' || !edge.stops?.length || concave.length === 0) return edge;
+  const stops = edge.stops.map((stop) => {
+    let lift = 0;
+    for (const c of concave) {
+      // The fillet lies along the stop's face, and passes through the stop.
+      const onFace = dot(c.edge.n1, stop.normal) > 0.999 ? c.edge.t2 : dot(c.edge.n2, stop.normal) > 0.999 ? c.edge.t1 : null;
+      if (!onFace) continue;
+      const ab = sub(c.edge.b, c.edge.a);
+      const t = Math.max(0, Math.min(1, dot(sub(stop.point, c.edge.a), ab) / Math.max(dot(ab, ab), 1e-18)));
+      const nearest = add(c.edge.a, scale(ab, t));
+      if (len(sub(stop.point, nearest)) > 1e-6) continue;
+      // How far the fillet climbs the other face, measured off the stop's face.
+      lift = Math.max(lift, setbackOf(c.edge, c.mode, c.size) * Math.abs(dot(onFace, stop.normal)));
+    }
+    return lift > 0 ? { ...stop, point: add(stop.point, scale(norm(stop.normal), lift)) } : stop;
+  });
+  return { ...edge, stops };
+}
+
+/**
  * Every rounding on a body, split into what is taken away and what is added.
  *
  * Corners are found across features, not within each: round the top edges
@@ -188,10 +236,17 @@ export function edgeRoundSolids(features: EdgeRoundFeature[] | undefined, fn: nu
   const cutters: string[] = [];
   const fillers: string[] = [];
   const filletsBySize = new Map<number, RoundEdge[]>();
+  const concave: { edge: Extract<RoundEdge, { kind: 'line' }>; mode: 'fillet' | 'chamfer'; size: number }[] = [];
   for (const feature of features || []) {
     if (!(feature.size > 0)) continue;
     for (const edge of feature.edges) {
-      const solid = edgeSolidScad(edge, feature.mode, feature.size, fn);
+      if (edge.kind === 'line' && !edge.convex) concave.push({ edge, mode: feature.mode, size: feature.size });
+    }
+  }
+  for (const feature of features || []) {
+    if (!(feature.size > 0)) continue;
+    for (const edge of feature.edges) {
+      const solid = edgeSolidScad(edge.convex ? stopShortOfFillers(edge, concave) : edge, feature.mode, feature.size, fn);
       (edge.convex ? cutters : fillers).push(solid);
     }
     if (feature.mode === 'fillet') {
@@ -234,7 +289,7 @@ export function reconcileEdgeRounds(
   if (same) return false;
   for (const feature of node.edgeRounds) {
     feature.edges = feature.edges.map((e) => {
-      if (e.kind === 'line') return { ...e, a: map(e.a), b: map(e.b) };
+      if (e.kind === 'line') return { ...e, a: map(e.a), b: map(e.b), ...(e.stops ? { stops: e.stops.map((st) => ({ ...st, point: map(st.point) })) } : {}) };
       const centre = map(e.centre);
       const rimPoint = map(add(e.centre, scale(e.ref, e.radius)));
       const radius = len(sub(rimPoint, centre).map((c, k) => c - dot(sub(rimPoint, centre), e.axis) * e.axis[k]));
@@ -279,4 +334,19 @@ export function withoutEdges(features: EdgeRoundFeature[] | undefined, edges: Ro
     if (kept.length > 0) out.push(kept.length === f.edges.length ? f : { ...f, edges: kept });
   }
   return out;
+}
+
+/**
+ * A body's roundings with only the edges that are still on it. `lost` counts
+ * the edges dropped; a feature left with none is dropped with them.
+ */
+export function keepFoundEdges(features: EdgeRoundFeature[], found: RoundEdge[]): { features: EdgeRoundFeature[]; lost: number } {
+  let lost = 0;
+  const kept: EdgeRoundFeature[] = [];
+  for (const f of features) {
+    const edges = f.edges.filter((e) => found.some((c) => sameEdge(c, e)));
+    lost += f.edges.length - edges.length;
+    if (edges.length > 0) kept.push(edges.length === f.edges.length ? f : { ...f, edges });
+  }
+  return { features: lost ? kept : features, lost };
 }

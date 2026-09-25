@@ -27,7 +27,7 @@ import { useBodyEdges } from '../../hooks/useBodyEdges';
 import { findNodeById } from '../../utils/sceneTree';
 import { csgFrameOffset } from '../../utils/csg';
 import { nodeWorldMatrix } from '../../utils/combineBodies';
-import { edgesOfSurface, maxSizeFor, sameEdge, suggestedSize, type EdgeCandidate } from '../../utils/featureEdges';
+import { edgesOfSurface, maxSizeFor, sameEdge, selectEdges, suggestedSize, type EdgeCandidate } from '../../utils/featureEdges';
 
 /** How near the pointer an edge must be, on screen, to be the one meant. */
 const PICK_PIXELS = 10;
@@ -103,8 +103,10 @@ export const EdgeRoundTool = () => {
     initialised.current = key;
     if (session.size > 0) return;
     const fresh = session.editIndex === null && !(node.edgeRounds?.length);
-    const picked = fresh ? body.edges.map((e) => e.edge) : session.picked;
-    const fitsAll = maxSizeFor(fresh ? body.edges : body.edges.filter((c) => picked.some((p) => sameEdge(p, c.edge))), session.mode);
+    // Outside edges only: inside corners add material and are asked for separately.
+    const outside = selectEdges(body.edges, 'all').picked;
+    const picked = fresh ? outside.map((e) => e.edge) : session.picked;
+    const fitsAll = maxSizeFor(fresh ? outside : body.edges.filter((c) => picked.some((p) => sameEdge(p, c.edge))), session.mode);
     useStore.getState().updateEdgeRoundDraft({
       picked,
       size: suggestedSize(body.smallestDimension, fitsAll || maxSizeFor(body.edges, session.mode)),

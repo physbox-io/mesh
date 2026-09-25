@@ -183,6 +183,16 @@ export function findFeatureEdges(positions: ArrayLike<number>, faces: ArrayLike<
     if (dot(triNormal[t], surfaceFirstNormal[s]) < Math.cos((0.5 * Math.PI) / 180)) surfaceFlat[s] = false;
   }
   const surfaces: Surface[] = surfaceNormalSum.map((n, i) => ({ normal: norm(n), flat: surfaceFlat[i] }));
+  // Which surfaces meet at each corner, for where a straight edge runs out.
+  const vertexSurfaces = new Map<number, Set<number>>();
+  for (let t = 0; t < triCount; t++) {
+    const surface = triangleSurface[t];
+    if (surface < 0) continue;
+    for (const v of tris[t]) {
+      const set = vertexSurfaces.get(v);
+      if (set) set.add(surface); else vertexSurfaces.set(v, new Set([surface]));
+    }
+  }
 
   // --- 3. feature segments, chained ------------------------------------------
   interface Segment { i: number; j: number; tA: number; tB: number; pair: string }
@@ -289,9 +299,32 @@ export function findFeatureEdges(positions: ArrayLike<number>, faces: ArrayLike<
       const angleDeg = (Math.acos(Math.max(-1, Math.min(1, dot(t1, t2)))) * 180) / Math.PI;
       const mid = scale(add(first, last), 0.5);
       const maxSetback = Math.min(reach(sA, mid, t1), reach(sB, mid, t2)) / 2;
+      // At each end, the flat faces the edge rises away from: a gusset's edge
+      // leaving the floor. Its rounding must stop at that floor, not carry on
+      // square to the edge and into it. A box's edge runs INTO the face at its
+      // end (the sign test), where the square end sits in air and needs nothing.
+      //
+      // An inside corner's rounding ADDS material, so for it every face at the
+      // end is a stop, whichever way the edge meets it: a filler running along
+      // a gusset's foot must not poke up through the gusset's sloping top where
+      // the gusset gets lower than the filler is tall.
+      const convexHere = dot(inFace(seg.tA, first, norm(span)), nB) < 0;
+      const stops: { point: number[]; normal: number[] }[] = [];
+      for (const [endVertex, endPoint, otherPoint] of [
+        [chain.verts[0], first, last],
+        [chain.verts[chain.verts.length - 1], last, first],
+      ] as const) {
+        for (const surface of vertexSurfaces.get(endVertex) ?? []) {
+          if (surface === sA || surface === sB || !surfaces[surface].flat) continue;
+          const n = surfaces[surface].normal;
+          const along = dot(sub(otherPoint, endPoint), n);
+          if (along > spanLen * 1e-3) stops.push({ point: endPoint, normal: n });
+          else if (!convexHere && along < -spanLen * 1e-3) stops.push({ point: endPoint, normal: scale(n, -1) });
+        }
+      }
       edges.push({
         id: edges.length,
-        edge: { kind: 'line', a: first, b: last, n1: nA, n2: nB, t1, t2, convex },
+        edge: { kind: 'line', a: first, b: last, n1: nA, n2: nB, t1, t2, convex, ...(stops.length ? { stops } : {}) },
         points: [first, last],
         closed: false,
         surfaces: pair,
@@ -465,7 +498,13 @@ export function suggestedSize(smallestDimension: number, maxSize: number): numbe
   return pick;
 }
 
-export type EdgeGroup = 'all' | 'top' | 'bottom' | 'vertical';
+/**
+ * The groups a person picks edges by. 'all' is every OUTSIDE edge — what
+ * "round it off" means — and 'inside' the inside corners, which add material
+ * rather than take it away and are asked for separately. The other three are
+ * outside edges too.
+ */
+export type EdgeGroup = 'all' | 'top' | 'bottom' | 'vertical' | 'inside';
 
 /** The candidates a group names, or those with the given ids. Unknown ids are reported, not ignored. */
 export function selectEdges(edges: EdgeCandidate[], which: EdgeGroup | number[]): { picked: EdgeCandidate[]; unknown: number[] } {
@@ -476,6 +515,8 @@ export function selectEdges(edges: EdgeCandidate[], which: EdgeGroup | number[])
       unknown: which.filter((id) => !byId.has(id)),
     };
   }
-  if (which === 'all') return { picked: edges, unknown: [] };
-  return { picked: edges.filter((e) => e[which]), unknown: [] };
+  if (which === 'inside') return { picked: edges.filter((e) => !e.edge.convex), unknown: [] };
+  const outside = edges.filter((e) => e.edge.convex);
+  if (which === 'all') return { picked: outside, unknown: [] };
+  return { picked: outside.filter((e) => e[which]), unknown: [] };
 }

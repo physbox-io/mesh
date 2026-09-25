@@ -596,7 +596,8 @@ api.setAngularVelocity([0, 15.0, 0], 'cart'); // Sets angular velocities`}
                       Select a part and press <kbd className="font-mono">E</kbd> (or <strong>Round edges</strong> in the mode
                       menu, or the <strong>Edges</strong> card). Every edge you can round is drawn; on a fresh part they all
                       start picked at a suggested size, so you see it softened straight away. Click an edge to add or drop it,
-                      click a flat face to take all its edges, or use <strong>All / Top / Bottom / Vertical</strong>.
+                      click a flat face to take all its edges, or use <strong>All / Top / Bottom / Vertical</strong> (outside
+                      edges) or <strong>Inside corners</strong>, which fills the valleys in and makes a rib or a bracket stronger.
                       <strong> Round</strong> is a smooth curve, <strong>Bevel</strong> a flat cut. The size slider stops at the
                       largest size that fits (hold <kbd className="font-mono">Alt</kbd> for fine steps).{' '}
                       <kbd className="font-mono">Enter</kbd> keeps it, <kbd className="font-mono">Esc</kbd> puts it back. The

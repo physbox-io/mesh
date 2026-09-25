@@ -5599,9 +5599,9 @@ function App() {
                 const solids = source.filter((g) => g.type !== 'plane');
                 const ops = source.filter((g) => g.csg === 'difference' || g.csg === 'intersection');
                 const isCsg = !!selectedNode.csgEnabled && ops.length > 0;
-                // Offer the section on anything made of primitives; a body that's
-                // already a single hand-authored mesh has nothing to boolean with.
-                if (!isCsg && (solids.length === 0 || selectedNode.scad !== undefined || selectedNode.isCurve || selectedNode.isPulleyRope)) return null;
+                // Offered on anything with a solid to cut into — OpenSCAD and
+                // imported parts included: Cut makes a hole in any of them.
+                if (!isCsg && (solids.length === 0 || selectedNode.isCurve || selectedNode.isPulleyRope)) return null;
 
                 const mode = selectedNode.csgCollision ?? 'auto';
                 const colliders = (selectedNode.geoms || []).filter((g) => g.csgDerived === 'collider');

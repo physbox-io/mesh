@@ -110,6 +110,31 @@ describe('findFeatureEdges', () => {
     expect(concave[0].angleDeg).toBeCloseTo(90, 3);
   });
 
+  it('stops a gusset\'s sloping edges at the plates it stands on, and a box\'s edges nowhere', () => {
+    // An L of two plates with a triangular rib in the corner, all one closed
+    // surface: the side view, extruded.
+    const side = new THREE.Shape();
+    side.moveTo(0, 0); side.lineTo(0.05, 0); side.lineTo(0.05, 0.005); side.lineTo(0.03, 0.005);
+    side.lineTo(0.005, 0.03); side.lineTo(0.005, 0.06); side.lineTo(0, 0.06); side.closePath();
+    const found = findFeatureEdges(...Object.values(extrude(side, 0.004)) as [number[], number[]]);
+    // three's extrusion is along its Z; here the shape's y is up in the part's
+    // frame only by construction, so ask which edges slope and check their stops.
+    const sloped = found.edges.filter((e) => e.edge.kind === 'line' && e.edge.a.length &&
+      Math.abs(Math.abs(e.edge.a[0] - e.edge.b[0]) - Math.abs(e.edge.a[1] - e.edge.b[1])) < 1e-6 &&
+      Math.abs(e.edge.a[0] - e.edge.b[0]) > 0.01);
+    expect(sloped).toHaveLength(2);
+    for (const e of sloped) {
+      if (e.edge.kind !== 'line') continue;
+      expect(e.edge.stops).toHaveLength(2);
+      for (const stop of e.edge.stops!) {
+        // Each stop is one of the plates' inner faces: normal along +x or +y.
+        expect(Math.max(stop.normal[0], stop.normal[1])).toBeCloseTo(1, 6);
+      }
+    }
+    const { positions, faces } = box(0.02, 0.02, 0.02);
+    expect(findFeatureEdges(positions, faces).edges.every((e) => e.edge.kind !== 'line' || !e.edge.stops)).toBe(true);
+  });
+
   it('picks a face\'s outline from its surface', () => {
     const { positions, faces } = box(0.04, 0.03, 0.02);
     const found = findFeatureEdges(positions, faces);

@@ -452,6 +452,12 @@ export interface SceneNode {
    */
   edgeRounds?: EdgeRoundFeature[];
   /**
+   * How many rounded edges were dropped the last time the part changed shape
+   * under them (see keepFoundEdges). Shown on the Edges card; cleared by the
+   * next change to the roundings.
+   */
+  edgeRoundsLost?: number;
+  /**
    * How this body's geometry is presented to MuJoCo for contact. Applies to any
    * body with a mesh geom, boolean or not — an imported STL, a sculpt, a lattice
    * part and a relief all reach MuJoCo as one mesh, and MuJoCo takes the convex
@@ -592,6 +598,13 @@ export type RoundEdge =
       n1: number[]; n2: number[];
       t1: number[]; t2: number[];
       convex: boolean;
+      /**
+       * Planes the edge's rounding must stop at: the flat faces it runs away
+       * from at either end, as a gusset's edge runs up off the floor it stands
+       * on. Keep the side where (x - point)·normal >= 0. Without them the
+       * rounding's square end would dig a notch into that face.
+       */
+      stops?: { point: number[]; normal: number[] }[];
     }
   | {
       kind: 'circle';

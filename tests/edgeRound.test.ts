@@ -1,9 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import * as THREE from 'three';
 import type { EdgeRoundFeature, RoundEdge, SceneNode } from '../src/types/scene';
-import { crossSection, setbackOf, edgeSolidScad, cornerPatchesScad, edgeRoundSolids, reconcileEdgeRounds } from '../src/utils/edgeRound';
+import { crossSection, setbackOf, edgeSolidScad, cornerPatchesScad, edgeRoundSolids, reconcileEdgeRounds, keepFoundEdges } from '../src/utils/edgeRound';
 import { findFeatureEdges } from '../src/utils/featureEdges';
-import { csgProgram, csgHashOf, hasBooleanOps } from '../src/utils/csg';
+import { csgProgram, csgHashOf, hasBooleanOps, meshShells, primitiveToScad } from '../src/utils/csg';
 
 /** The top-front edge of a 20 mm cube centred on the origin, along X. */
 const topFront: RoundEdge = {
@@ -65,6 +65,11 @@ describe('OpenSCAD', () => {
   it('extrudes a straight edge along itself', () => {
     const scad = edgeSolidScad(topFront, 'fillet', 0.002, 32);
     expect(scad).toMatch(/^multmatrix\(.*\) linear_extrude\(height=0\.02002\) polygon\(\[/);
+  });
+
+  it('cuts a stopped edge short at its stops', () => {
+    const scad = edgeSolidScad({ ...topFront, stops: [{ point: topFront.a, normal: [1, 0, 0] }] }, 'fillet', 0.002, 32);
+    expect(scad).toMatch(/^intersection\(\) \{ multmatrix\(.*linear_extrude.*; multmatrix\(.*cube\(/);
   });
 
   it('spins a rim, with as many facets as the rim has', () => {
@@ -137,5 +142,63 @@ describe('reconcileEdgeRounds', () => {
     expect(e.kind === 'line' && e.a[2]).toBeCloseTo(0.01, 9);
     // The size is a size, not a proportion: it stays.
     expect(node.edgeRounds![0].size).toBe(0.002);
+  });
+});
+
+describe('keepFoundEdges', () => {
+  it('drops the edges that are no longer on the part, and a feature left empty', () => {
+    const moved: RoundEdge = { ...topFront, a: [-0.01, -0.02, 0.01], b: [0.01, -0.02, 0.01] };
+    const other: RoundEdge = { ...topFront, a: [-0.01, 0.01, 0.01], b: [0.01, 0.01, 0.01] };
+    const { features, lost } = keepFoundEdges([
+      { mode: 'fillet', size: 0.002, edges: [topFront, other] },
+      { mode: 'chamfer', size: 0.001, edges: [moved] },
+    ], [topFront]);
+    expect(lost).toBe(2);
+    expect(features).toHaveLength(1);
+    expect(features[0].edges).toEqual([topFront]);
+  });
+
+  it('hands back the same list when nothing was lost', () => {
+    const features = [{ mode: 'fillet' as const, size: 0.002, edges: [topFront] }];
+    expect(keepFoundEdges(features, [topFront]).features).toBe(features);
+  });
+});
+
+describe('meshShells', () => {
+  it('hands OpenSCAD each closed shell of a mesh separately, so buried faces are merged away', () => {
+    const cube = (dx: number) => {
+      const g = new THREE.BoxGeometry(0.02, 0.02, 0.02).toNonIndexed().translate(dx, 0, 0);
+      return Array.from(g.attributes.position.array as ArrayLike<number>);
+    };
+    const points = [...cube(0), ...cube(0.01)];
+    const faces = points.map((_, i) => i).filter((i) => i < points.length / 3);
+    const shells = meshShells(points, faces);
+    expect(shells).toHaveLength(2);
+    expect(shells.every((s) => s.faces.length === 36)).toBe(true);
+    const scad = primitiveToScad({ name: 'm', type: 'mesh', size: [1], renderVertices: points, faces }, 32, '')!;
+    expect(scad.startsWith('union() { polyhedron(')).toBe(true);
+    expect(scad.match(/polyhedron\(/g)).toHaveLength(2);
+  });
+});
+
+describe('an outside edge ending in a rounded inside corner', () => {
+  it('stops at the top of the fillet, not at the face under it', () => {
+    // A rib standing on a floor at z = 0: its top edge runs down to the floor at
+    // the origin, and the rib's foot along x is an inside corner.
+    const slope: RoundEdge = {
+      kind: 'line', a: [0, -0.002, 0], b: [-0.02, -0.002, 0.02],
+      n1: [0, -1, 0], n2: [Math.SQRT1_2, 0, Math.SQRT1_2],
+      t1: [-Math.SQRT1_2, 0, Math.SQRT1_2], t2: [0, 1, 0], convex: true,
+      stops: [{ point: [0, -0.002, 0], normal: [0, 0, 1] }],
+    };
+    const foot: RoundEdge = {
+      kind: 'line', a: [-0.02, -0.002, 0], b: [0, -0.002, 0],
+      n1: [0, 0, 1], n2: [0, -1, 0], t1: [0, -1, 0], t2: [0, 0, 1], convex: false,
+    };
+    const alone = edgeRoundSolids([{ mode: 'fillet', size: 0.002, edges: [slope] }], 16).cutters[0];
+    const withFoot = edgeRoundSolids([{ mode: 'fillet', size: 0.002, edges: [slope, foot] }], 16).cutters[0];
+    // Alone, the stop is the floor; with the foot filleted, 2 mm above it.
+    expect(alone).toMatch(/\[0, 0, 1, 0\]/);
+    expect(withFoot).toMatch(/\[0, 0, 1, 0\.002\]/);
   });
 });

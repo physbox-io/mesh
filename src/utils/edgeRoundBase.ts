@@ -32,7 +32,6 @@ const CACHE_LIMIT = 8;
 export function whyNotRoundable(node: SceneNode | null | undefined): string | null {
   if (!node) return 'Select a part first.';
   if (node.isSculpt) return 'Sculpted clay has no sharp edges to round — smooth it with the brushes instead.';
-  if (node.scad !== undefined && node.scad.trim() !== '') return 'This part is written in OpenSCAD: round it in its source (minkowski or offset).';
   const solid = (node.geoms || []).some((g) => !g.csgDerived && g.type !== 'plane' && (!g.csg || g.csg === 'union') && g.role !== 'visual');
   if (!solid) return 'This part has no solid shape to round.';
   return null;

@@ -22,6 +22,9 @@ import { useStore } from '../store/useStore';
 import { csgHashOf, evaluateNodeCsg, hasBooleanOps } from '../utils/csg';
 import { collidersAreStale, collisionHashOf, decomposeNodeColliders } from '../utils/convexDecomposition';
 import type { SceneNode } from '../types/scene';
+import { bodyEdges, bodyUp } from '../utils/edgeRoundBase';
+import { keepFoundEdges } from '../utils/edgeRound';
+import { findNodeById } from '../utils/sceneTree';
 
 const COMPILE_DEBOUNCE_MS = 100;
 
@@ -100,9 +103,25 @@ export async function compileCsgNodes(skipFinalRecompile = false): Promise<numbe
     }));
   }
 
-  await Promise.all(stale.map(async node => {
+  await Promise.all(stale.map(async staleNode => {
+    let node = staleNode;
     const hash = csgHashOf(node);
     try {
+      // Roundings are stored as the edges they were put on. When the shape
+      // under them changes in a way nothing mapped — an OpenSCAD source edited,
+      // a hole moved — some of those edges are simply not there any more, and
+      // rounding them anyway would cut where an edge used to be. So they are
+      // checked against the part as it now is, and the lost ones dropped.
+      if (node.edgeRounds?.length) {
+        const nodes = useStore.getState().sceneGraph.nodes;
+        const found = await bodyEdges(node, bodyUp(nodes, node.id));
+        const { features, lost } = keepFoundEdges(node.edgeRounds, found.edges.map((c) => c.edge));
+        if (lost > 0) {
+          useStore.getState().dropLostEdgeRounds(node.id, features, lost);
+          node = findNodeById(useStore.getState().sceneGraph.nodes, node.id) ?? node;
+          if (csgHashOf(node) === node.csgHash) return;
+        }
+      }
       const result = await evaluateNodeCsg(node);
       // skipRecompile: one build at the end, so several boolean bodies in a
       // scene can't race overlapping MJCF/WASM builds against each other.

@@ -1159,6 +1159,7 @@ function writeEdgeRounds(
   const node = findNode(newScene.nodes, nodeId);
   if (!node) return;
   if (features.length > 0) node.edgeRounds = features; else delete node.edgeRounds;
+  delete node.edgeRoundsLost;
   if (hasBooleanOps(node)) {
     node.csgEnabled = true;
     if (node.csgCollision === undefined) node.csgCollision = 'auto';
@@ -1634,6 +1635,8 @@ export interface PhysicsState {
   roundEdges: (nodeId: string, feature: EdgeRoundFeature) => void;
   /** Take the rounding off these edges, whichever feature has them. */
   unroundEdges: (nodeId: string, edges: RoundEdge[]) => void;
+  /** The compiler found some rounded edges gone from the part: keep the rest, and say how many went. */
+  dropLostEdgeRounds: (nodeId: string, features: EdgeRoundFeature[], lost: number) => void;
 
   // --- Lattice modelling ---------------------------------------------------
   //
@@ -2985,6 +2988,22 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     if (!node) return;
     get().prepareForDiscreteChange();
     writeEdgeRounds(get, set, nodeId, withRoundFeature(node.edgeRounds, feature, null));
+  },
+  dropLostEdgeRounds: (nodeId, features, lost) => {
+    // Not an undo step of its own: it is the consequence of the edit that
+    // changed the shape, and undoing that edit brings the edges back.
+    const newScene = cloneSceneGraph(get().sceneGraph);
+    const node = findNode(newScene.nodes, nodeId);
+    if (!node) return;
+    if (features.length > 0) node.edgeRounds = features; else delete node.edgeRounds;
+    node.edgeRoundsLost = (node.edgeRoundsLost ?? 0) + lost;
+    if (!hasBooleanOps(node) && node.csgEnabled) {
+      node.csgEnabled = false;
+      node.geoms = (node.geoms || []).filter((g: SceneGeom) => !g.csgDerived);
+      delete node.csgHash;
+    }
+    set({ sceneGraph: newScene });
+    if (!node.csgEnabled) get().recompile(newScene, nodeId, false);
   },
   unroundEdges: (nodeId, edges) => {
     const node = findNode(get().sceneGraph.nodes, nodeId);

@@ -277,14 +277,21 @@ export function primitiveToScad(geom: SceneGeom, fn: number = CSG_DEFAULT_FN, in
       // Prefer renderVertices: already Z-up, same space as everything else here.
       const zup = geom.renderVertices ?? (geom.vertices ? yupArrayToZup(geom.vertices) : null);
       if (!zup || !geom.faces || geom.faces.length === 0) return null;
-      const pts: string[] = [];
-      for (let i = 0; i < zup.length; i += 3) pts.push(`[${fmt(zup[i])},${fmt(zup[i + 1])},${fmt(zup[i + 2])}]`);
-      const tris: string[] = [];
-      // OpenSCAD wants each face wound CLOCKWISE seen from outside; ours are CCW.
-      for (let i = 0; i < geom.faces.length; i += 3) {
-        tris.push(`[${geom.faces[i + 2]},${geom.faces[i + 1]},${geom.faces[i]}]`);
-      }
-      body = `polyhedron(points=[${pts.join(',')}], faces=[${tris.join(',')}], convexity=4);`;
+      // A mesh can hold several closed shells pushed into one another — the
+      // lattice bracket's gusset is a separate box buried in its plates. One
+      // polyhedron of both is not a solid OpenSCAD will merge: the overlap
+      // stays, the buried faces stay, and every boolean on the part (a cut, a
+      // rounded edge) meets surfaces that are inside it. Each shell goes in as
+      // its own polyhedron and the union merges them.
+      const polyhedra = meshShells(zup, geom.faces).map(({ points, faces }) => {
+        const pts: string[] = [];
+        for (let i = 0; i < points.length; i += 3) pts.push(`[${fmt(points[i])},${fmt(points[i + 1])},${fmt(points[i + 2])}]`);
+        const tris: string[] = [];
+        // OpenSCAD wants each face wound CLOCKWISE seen from outside; ours are CCW.
+        for (let i = 0; i < faces.length; i += 3) tris.push(`[${faces[i + 2]},${faces[i + 1]},${faces[i]}]`);
+        return `polyhedron(points=[${pts.join(',')}], faces=[${tris.join(',')}], convexity=4);`;
+      });
+      body = polyhedra.length === 1 ? polyhedra[0] : `union() { ${polyhedra.join(' ')} }`;
       break;
     }
     default:
@@ -292,6 +299,62 @@ export function primitiveToScad(geom: SceneGeom, fn: number = CSG_DEFAULT_FN, in
   }
 
   return multmatrixWrap(matrix, body, indent);
+}
+
+/**
+ * The closed pieces of a mesh, each with its own points and re-numbered faces.
+ * Connected by position rather than by index, since a mesh may repeat a point
+ * along a crease. Memoised on the arrays: every compile of the body asks.
+ */
+const shellMemo = new PairMemo<{ points: number[]; faces: number[] }[]>();
+export function meshShells(points: number[], faces: number[]): { points: number[]; faces: number[] }[] {
+  return shellMemo.get(points, faces, () => splitShells(points, faces));
+}
+
+function splitShells(points: number[], faces: number[]): { points: number[]; faces: number[] }[] {
+  const count = points.length / 3;
+  const weld: number[] = new Array(count);
+  const seen = new Map<string, number>();
+  for (let i = 0; i < count; i++) {
+    const key = `${Math.round(points[3 * i] * 1e9)},${Math.round(points[3 * i + 1] * 1e9)},${Math.round(points[3 * i + 2] * 1e9)}`;
+    const at = seen.get(key);
+    if (at === undefined) { seen.set(key, i); weld[i] = i; } else weld[i] = at;
+  }
+  const parent = Array.from({ length: count }, (_, i) => i);
+  const find = (i: number): number => {
+    while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; }
+    return i;
+  };
+  for (let t = 0; t + 2 < faces.length; t += 3) {
+    const a = find(weld[faces[t]]);
+    parent[find(weld[faces[t + 1]])] = a;
+    parent[find(weld[faces[t + 2]])] = a;
+  }
+  const byRoot = new Map<number, number[]>();
+  for (let t = 0; t + 2 < faces.length; t += 3) {
+    const root = find(weld[faces[t]]);
+    const list = byRoot.get(root);
+    if (list) list.push(t); else byRoot.set(root, [t]);
+  }
+  if (byRoot.size <= 1) return [{ points, faces }];
+  return [...byRoot.values()].map((tris) => {
+    const remap = new Map<number, number>();
+    const outPoints: number[] = [];
+    const outFaces: number[] = [];
+    for (const t of tris) {
+      for (let k = 0; k < 3; k++) {
+        const v = faces[t + k];
+        let n = remap.get(v);
+        if (n === undefined) {
+          n = outPoints.length / 3;
+          remap.set(v, n);
+          outPoints.push(points[3 * v], points[3 * v + 1], points[3 * v + 2]);
+        }
+        outFaces.push(n);
+      }
+    }
+    return { points: outPoints, faces: outFaces };
+  });
 }
 
 function yupArrayToZup(v: number[]): number[] {

@@ -32,6 +32,13 @@ export const EdgesCard: React.FC<{ node: SceneNode }> = ({ node }) => {
         shape is what collides, prints and machines.
       </p>
 
+      {node.edgeRoundsLost ? (
+        <p className="text-[10px] leading-snug text-amber-700 bg-amber-50 rounded-md px-2 py-1">
+          The part changed shape, and {node.edgeRoundsLost} rounded edge{node.edgeRoundsLost === 1 ? ' was' : 's were'} no
+          longer on it, so {node.edgeRoundsLost === 1 ? 'it was' : 'they were'} dropped. Round the new edges to put it back.
+        </p>
+      ) : null}
+
       {features.map((f, i) => (
         <div key={i} className="flex items-center gap-1.5 text-[11px]">
           <select

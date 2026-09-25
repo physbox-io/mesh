@@ -273,7 +273,7 @@ from the mesh (or intersected with it, with Ctrl held). An agent does the same w
 
 ### Rounded and bevelled edges
 
-Any part made of shapes can have edges rounded (fillet) or bevelled (chamfer): E, the mode menu, or
+Any part but a sculpt — primitives, booleans, lattice, OpenSCAD and imported parts — can have edges rounded (fillet) or bevelled (chamfer): E, the mode menu, or
 the Edges card; `physics_get_edges` / `physics_round_edges` for agents. A rounding is a feature on the
 body, `node.edgeRounds: { mode, size, edges }[]`, and it is realised **in the boolean program**, which
 is what makes it cheap: the drawn mesh, the colliders, mass and every exporter get it for nothing.
@@ -290,6 +290,20 @@ is what makes it cheap: the drawn mesh, the colliders, mass and every exporter g
   the corner and the arc (or flat), swept along the edge — `linear_extrude` for a line,
   `rotate_extrude` for a rim, with the rim's own facet count and phase so the facets line up. Fillers
   are unioned before cutters are subtracted, and both after the part's own booleans.
+* **Meshes go in shell by shell.** A lattice part can be several closed shells pushed into each other
+  (the Wall Bracket's gusset is buried 1 mm in its plates). `primitiveToScad` hands each shell to
+  OpenSCAD as its own polyhedron inside a `union()` (`meshShells`), or the buried faces survive and
+  get rounded — which cut grooves into the plates.
+* **Straight edges stop where they should** (`stops`). An outside edge that rises away from a face (a
+  gusset leaving the floor) is cut short at that face, not carried on square into it. An inside
+  corner's filler is cut short at every face at its ends, so it never pokes through the part. Where an
+  outside edge runs into an inside corner that is also rounded, it stops at the top of that fillet
+  (`stopShortOfFillers`): the last few millimetres stay sharp, because two roundings made separately
+  cannot blend. 'All' therefore means outside edges; inside corners are their own pick.
+* **Roundings whose edges have gone are dropped.** Before each compile of a rounded body,
+  `compileCsgNodes` checks its roundings against the edges the part now has (`keepFoundEdges`), so an
+  OpenSCAD part whose source was edited, or a part whose hole moved, loses the rounding on an edge that
+  is not there instead of being cut where it was. The Edges card says how many (`edgeRoundsLost`).
 * **Box corners get a patch.** Three edge cutters meeting square leave a blunt point; where three
   fillets of one size meet at right angles (across features, too), the corner cube less a ball is cut.
 * **Tangent booleans leave collapsed slivers.** `evaluateNodeCsg` drops triangles whose corners weld

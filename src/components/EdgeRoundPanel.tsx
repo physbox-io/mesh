@@ -19,10 +19,11 @@ import { SettledNumberField } from './SettledInputs';
  * The edges themselves are picked in the viewport (EdgeRoundTool).
  */
 const GROUPS: { id: EdgeGroup; label: string; hint: string }[] = [
-  { id: 'all', label: 'All', hint: 'Every edge of the part' },
-  { id: 'top', label: 'Top', hint: 'The edges round the faces that point up' },
-  { id: 'bottom', label: 'Bottom', hint: 'The edges round the faces that point down' },
-  { id: 'vertical', label: 'Vertical', hint: 'The upright edges' },
+  { id: 'all', label: 'All', hint: 'Every outside edge of the part' },
+  { id: 'top', label: 'Top', hint: 'The outside edges round the faces that point up' },
+  { id: 'bottom', label: 'Bottom', hint: 'The outside edges round the faces that point down' },
+  { id: 'vertical', label: 'Vertical', hint: 'The upright outside edges' },
+  { id: 'inside', label: 'Inside corners', hint: 'Where two faces meet in a valley: rounding one fills it in, which makes a bracket or a boss stronger' },
 ];
 
 const mm = (m: number) => Math.round(m * 1e5) / 100;
@@ -72,7 +73,7 @@ export const EdgeRoundPanel: React.FC = () => {
     store.updateEdgeRoundDraft({ mode: 'chamfer', picked: bottom.map((c) => c.edge), size: Math.min(0.0005, fits) });
   };
 
-  const groupsHere = body ? GROUPS.filter((g) => g.id === 'all' || body.edges.some((e) => e[g.id as 'top' | 'bottom' | 'vertical'])) : [];
+  const groupsHere = body ? GROUPS.filter((g) => selectEdges(body.edges, g.id).picked.length > 0) : [];
   const failed = node?.csgError;
   const blocked = !!error && !body;
 
