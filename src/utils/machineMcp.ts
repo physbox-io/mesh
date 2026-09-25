@@ -320,7 +320,16 @@ export function createMeshMachineHandlers(): Record<
         throw new Error('Give fromLine: the program line to pick the job back up at.');
       }
       machineArming.noteAgentCommand('resume_from_line', `line=${fromLine}`);
-      const result = webSerialManager.resumeFromLine(fromLine, args.options as ResumeOptions | undefined);
+      // Only finite numbers get through: these go straight into G-code, where a
+      // string extraClearance concatenated into "G0 Z105" and a bad plungeFeed
+      // became "FNaN", refused only after the spindle had been started.
+      const raw = (args.options ?? {}) as Record<string, unknown>;
+      const options: ResumeOptions = {
+        plungeFeed: num(raw.plungeFeed, undefined),
+        spindleWarmupSeconds: num(raw.spindleWarmupSeconds, undefined),
+        extraClearance: num(raw.extraClearance, undefined),
+      };
+      const result = webSerialManager.resumeFromLine(fromLine, options);
       if (!result.ok) throw new Error(result.message);
       return { ...describeMachine(machine, machineArming), message: result.message };
     },
