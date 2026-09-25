@@ -476,6 +476,11 @@ const fillGeomDefaults = (g: RawGeom, bodyName: string, idx: number, bodyIsJoint
     ? g.renderVertices
     : (dynamic && Array.isArray(g.vertices) ? toRenderVertices(g.vertices) : undefined);
   return {
+    // Everything the caller wrote is kept, and only what needs a default is
+    // filled in. This was a whitelist, which fell behind the schema: density,
+    // margin, gap, paint, thread and the dent and pierce fields were dropped
+    // without a word, so a documented `density: 700` weighed as water.
+    ...(g as SceneGeom),
     name:    g.name    ?? `${bodyName}_geom_${idx}`,
     type:    g.type    ?? 'box',
     size:    g.size    ?? [0.25, 0.25, 0.25],
@@ -501,6 +506,8 @@ const fillGeomDefaults = (g: RawGeom, bodyName: string, idx: number, bodyIsJoint
 };
 
 const fillJointDefaults = (j: RawJoint, bodyName: string, idx: number): SceneJoint => ({
+  // As for geoms: springref and the crumple fields were dropped by a whitelist.
+  ...(j as SceneJoint),
   name:    j.name    ?? `${bodyName}_joint_${idx}`,
   type:    j.type    ?? 'free',
   ...(j.axis     !== undefined ? { axis: j.axis }         : {}),
@@ -539,7 +546,13 @@ const fillBodyDefaults = (b: RawNode): SceneNode => {
   const defaultJoints: RawJoint[] = (b.isCurve === true || isFixed) ? [] : [{ type: 'free' }];
   const resolvedJoints = (b.joints ?? defaultJoints)
     .map((j: RawJoint, i: number) => fillJointDefaults(j, name, i));
+  // As for geoms, the caller's fields are kept (shatter settings, sculpt
+  // flags...) - all but the "does not move" flags above, which are not
+  // SceneNode fields and have been turned into the joints below.
+  const rest = { ...b } as RawNode & { dynamic?: boolean; static?: boolean; fixed?: boolean };
+  delete rest.dynamic; delete rest.static; delete rest.fixed;
   return {
+    ...(rest as SceneNode),
     id,
     name,
     type:     'body',
