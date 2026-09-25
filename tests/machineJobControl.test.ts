@@ -266,6 +266,23 @@ describe('the Z datum across a tool change', () => {
     expect(webSerialManager.getState().status).toBe('PAUSED_MATERIAL');
     expect(webSerialManager.getState().needsZZero).toBe(false);
   });
+
+  it('does not lift Z at a sheet swap in a program that never moves Z', async () => {
+    // A laser job: nothing on resume would bring a lift back down.
+    webSerialManager.startJob('G21\nG90\nM4 S500\nG1 X10 F600\nM5\nM0\nM4 S500\nG1 X20\n');
+    await advance(8);
+
+    expect(webSerialManager.getState().status).toBe('PAUSED_MATERIAL');
+    expect(fake.lines().some((l) => /Z/.test(l))).toBe(false);
+  });
+
+  it('still lifts clear at a sheet swap in a program that cuts in Z', async () => {
+    webSerialManager.startJob('G21\nG90\nG0 Z5\nG1 Z-1 F300\nG1 X10 F600\nM0\nG1 X20\n');
+    await advance(8);
+
+    expect(webSerialManager.getState().status).toBe('PAUSED_MATERIAL');
+    expect(fake.lines().some((l) => /^G91 G0 Z|^G0 Z/.test(l) && !/Z5$/.test(l))).toBe(true);
+  });
 });
 
 describe('framing a job', () => {

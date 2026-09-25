@@ -1860,7 +1860,13 @@ class WebSerialManager {
     // travel and alarmed — is a rapid through the job. `retractClearOfWork`
     // owns that problem; see the note on it.
     await this.sendLine('M5'); // Laser/Spindle OFF
-    await this.retractClearOfWork(TOOL_CHANGE_LIFT_MM);
+    // Not at a sheet swap in a program that never commands Z - a laser job.
+    // Resume puts back only the program's own Z (retractToProgramClearZ), and a
+    // laser program has none, so the lift stayed and every later sheet was cut
+    // 25 mm out of focus. A tool change always lifts: it means a spindle.
+    const programUsesZ = this.program.length > 0
+      && scanModalState(this.program.map((l) => l.code), this.programLength()).safeZ !== null;
+    if (type === 'PAUSED_TOOL' || programUsesZ) await this.retractClearOfWork(TOOL_CHANGE_LIFT_MM);
     await this.sendLine('G90'); // Absolute, whichever way the lift was made
     await this.sendLine('G0 X0.000 Y0.000'); // Park XY where the collet is reachable
   }
