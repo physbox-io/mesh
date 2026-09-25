@@ -15,7 +15,7 @@ import {
 } from '../utils/latticeMesh';
 import { latticeBoolean } from '../utils/latticeBoolean';
 import {
-  type CsgResult, type CutSpot, type FaceRegion, CSG_DEFAULT_SECTORS, scadForDisplay, insetPolygon,
+  type CsgResult, type CutSpot, type FaceRegion, CSG_DEFAULT_SECTORS, scadForDisplay, insetPolygon, faceUnderFeature,
   cutGeometry, sourcePositiveBounds, reconcileCuts, pickCutSpot,
   hasBooleanOps, csgHashOf,
 } from '../utils/csg';
@@ -1888,6 +1888,8 @@ export interface PhysicsState {
     feature: { border: number; depth: number; through?: boolean },
     index?: number,
   ) => number;
+  /** Re-insets a face feature to a border in millimetres, against the face it is on. */
+  setFaceFeatureBorder: (nodeId: string, geomIndex: number, borderMm: number) => void;
   /** Moves a cut to another spot on the part, square to the surface there. */
   moveCutTo: (nodeId: string, geomIndex: number, spot: CutSpot) => void;
   /** Sets how deep a cut goes, in millimetres in from the surface; 0 goes through. */
@@ -3166,6 +3168,15 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
             */
             for (const other of node.geoms ?? []) {
               if (other === geom || other.csgDerived) continue;
+              // A cut is rebuilt from its anchor by reconcileCuts below, which
+              // throws its `pos` away — so it is the anchor that has to walk
+              // back. Walking only `pos` slid every hole sideways off the spot
+              // it was put on, and left a face prism a stray offset that grew
+              // with every edit.
+              if (other.cutAt && other.cutNormal) {
+                other.cutAt = other.cutAt.map((v, a) => v - local[a]);
+                continue;
+              }
               const at = other.pos ?? [0, 0, 0];
               other.pos = [at[0] - local[0], at[1] - local[1], at[2] - local[2]];
             }
@@ -3461,6 +3472,19 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     set({ sceneGraph: newScene, activeGeomIndex: at });
     rebuildAfterGeomEdit(get, newScene, nodeId);
     return at;
+  },
+
+  setFaceFeatureBorder: (nodeId, geomIndex, borderMm) => {
+    const node = findNode(get().sceneGraph.nodes, nodeId);
+    const feature = node?.geoms?.[geomIndex];
+    if (!node || !feature?.cutFace) return;
+    const region = faceUnderFeature(node, feature);
+    if (!region) return;
+    const through = feature.csg === 'difference' && !(feature.cutDepth && feature.cutDepth > 0);
+    const depth = feature.csg === 'union' ? (feature.cutDepth ?? 0) : -(feature.cutDepth ?? 0);
+    // Too wide a border closes the face up, and setFaceFeature refuses it:
+    // the feature is left as it was rather than lost.
+    get().setFaceFeature(nodeId, region, { border: Math.max(0, borderMm) / 1000, depth, through }, geomIndex);
   },
 
   moveCutTo: (nodeId, geomIndex, spot) => reshapeCut(get, set, nodeId, geomIndex, 'cut-move', (geom) => {

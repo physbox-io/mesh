@@ -90,6 +90,7 @@ function CutRow({ node, geom, index }: {
   const setCutSection = useStore((s) => s.setCutSection);
   const moveCutTo = useStore((s) => s.moveCutTo);
   const setCutThread = useStore((s) => s.setCutThread);
+  const setFaceFeatureBorder = useStore((s) => s.setFaceFeatureBorder);
   const setActiveGeomIndex = useStore((s) => s.setActiveGeomIndex);
   const spot = useStore((s) => s.cutSpot);
 
@@ -163,7 +164,18 @@ function CutRow({ node, geom, index }: {
       </div>
 
       <div className="flex gap-1 items-end">
-        {geom.type === 'box'
+        {geom.cutFace ? (
+          /* A face feature is sized by how far in from the face's edges it
+             stands, which is one number for every outline — and the only one
+             a pentagon or an octagon has. */
+          <CutField
+            label="Border mm"
+            min={0}
+            value={mm(geom.cutBorder ?? 0)}
+            title="How far in from the edges of the face it sits on, the same all round. Too wide and the face closes up, and the change is refused."
+            onChange={(v) => setFaceFeatureBorder(node.id, index, v)}
+          />
+        ) : geom.type === 'box'
           ? ([0, 1] as const).map((i) => (
             <CutField
               key={i}

@@ -10,7 +10,8 @@
 
 import { useStore, scaleMeshGeoms, cloneSceneGraph } from '../store/useStore';
 import type { SceneGeom, SceneNode } from '../types/scene';
-import { geomBounds } from './csg';
+import * as THREE from 'three';
+import { geomBounds, reconcileCuts } from './csg';
 
 /**
  * How one geom's size responds to a per-axis scale.
@@ -40,6 +41,58 @@ export function scaledSize(type: string | undefined, size: number[], sx: number,
       return size;
     default:
       return size.map((v) => v * mean);
+  }
+}
+
+/**
+ * Scales what a cut MEANS — where it goes into the part, which way, how deep,
+ * and its outline across the face — rather than the primitive it is built as.
+ *
+ * A cut is rebuilt from those numbers whenever the part changes (see
+ * reconcileCuts), so scaling only its `size` and `pos` lasted until the next
+ * edit, which put every hole back where and how big it was before the scale.
+ *
+ * The direction goes by the inverse-transpose, as a surface normal must: a
+ * face at 45° on a block stretched in X is no longer at 45°. Lengths across
+ * the face are read in the cut's own frame, before and after.
+ */
+function scaleCutIntent(g: SceneGeom, sx: number, sy: number, sz: number) {
+  const S = new THREE.Vector3(sx, sy, sz);
+  const Z = new THREE.Vector3(0, 0, 1);
+  const n = new THREE.Vector3(...(g.cutNormal as [number, number, number])).normalize();
+  const n2 = new THREE.Vector3(n.x / sx, n.y / sy, n.z / sz).normalize();
+  const frame = (normal: THREE.Vector3) => {
+    const q = new THREE.Quaternion().setFromUnitVectors(Z, normal);
+    if (g.cutTwist) q.multiply(new THREE.Quaternion().setFromAxisAngle(Z, g.cutTwist));
+    return [new THREE.Vector3(1, 0, 0).applyQuaternion(q), new THREE.Vector3(0, 1, 0).applyQuaternion(q)];
+  };
+  const [ax, ay] = frame(n);
+  const [bx, by] = frame(n2);
+  const stretch = (v: THREE.Vector3) => v.clone().multiply(S).length();
+  const across = (stretch(ax) + stretch(ay)) / 2;
+
+  g.cutAt = (g.cutAt ?? [0, 0, 0]).map((v, a) => v * [sx, sy, sz][a]);
+  // Depth is a distance between two faces parallel to the surface, so it is
+  // measured along the NEW normal.
+  if (g.cutDepth) g.cutDepth *= Math.abs(n.clone().multiply(S).dot(n2));
+  g.cutNormal = n2.toArray();
+  if (g.cutBorder) g.cutBorder *= across;
+  if (g.cutOutline) {
+    g.cutOutline = g.cutOutline.map(([x, y]) => {
+      const p = ax.clone().multiplyScalar(x).addScaledVector(ay, y).multiply(S);
+      return [p.dot(bx), p.dot(by)];
+    });
+  } else if (g.size) {
+    const size = [...g.size];
+    if (g.type === 'box') {
+      size[0] *= stretch(ax);
+      size[1] *= stretch(ay);
+    } else if (g.type === 'sphere') {
+      size[0] *= (sx + sy + sz) / 3;
+    } else {
+      size[0] *= across;
+    }
+    g.size = size;
   }
 }
 
@@ -79,7 +132,13 @@ export function scaleNodeTree(nodeId: string, sx: number, sy: number, sz: number
     if ((n as { teeth?: number }).teeth !== undefined) return;
 
     scaleMeshGeoms(n, sx, sy, sz);
+    let cuts = false;
     for (const g of n.geoms ?? []) {
+      if (g.cutAt && g.cutNormal && !g.csgDerived) {
+        scaleCutIntent(g, sx, sy, sz);
+        cuts = true;
+        continue;
+      }
       if (g.type !== 'mesh' && g.size) g.size = scaledSize(g.type, g.size, sx, sy, sz);
       if (g.pos) g.pos = [g.pos[0] * sx, g.pos[1] * sy, g.pos[2] * sz];
       if (g.fromto) g.fromto = [
@@ -87,6 +146,10 @@ export function scaleNodeTree(nodeId: string, sx: number, sy: number, sz: number
         g.fromto[3] * sx, g.fromto[4] * sy, g.fromto[5] * sz,
       ];
     }
+
+    // The cuts are rebuilt now, against the shapes at their new size, rather
+    // than left as whatever the next edit happens to make of them.
+    if (cuts) reconcileCuts(n);
 
     // The numbers a generated shape is generated FROM. Named per shape rather
     // than scaled blindly: `radius` is lateral on a cone and `height` is along

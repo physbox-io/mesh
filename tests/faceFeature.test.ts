@@ -8,7 +8,11 @@
 // found exactly and the cut is turned to lie along the face's own edges.
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { flatFaceAt, cutGeometry, geomBounds, reconcileCuts, insetPolygon, prismMesh, type FaceRegion } from '../src/utils/csg';
+import {
+  flatFaceAt, cutGeometry, geomBounds, reconcileCuts, insetPolygon, prismMesh, hasBooleanOps, type FaceRegion,
+} from '../src/utils/csg';
+import { boxLattice, serializeCage, toSceneGeom, extrudeFace, faceNormal } from '../src/utils/latticeMesh';
+import { scaleNodeTree } from '../src/utils/scaleNode';
 import { useStore } from '../src/store/useStore';
 import type { SceneGeom, SceneGraph, SceneNode } from '../src/types/scene';
 
@@ -131,9 +135,6 @@ describe('a boss', () => {
     const node = slab();
     const region = flatFaceAt(node, [0, 0, 5], [0, 0, -1])!;
     const boss = featureOn(node, region, 0.5, { csg: 'union', cutDepth: 0.05 });
-    // The first pass may trim the overshoot, which is sized off the part and
-    // the part now includes the boss. Its top does not move, then or after.
-    reconcileCuts(node);
     const before = [...boss.pos!];
     expect(geomBounds(boss)!.max[2]).toBeCloseTo(0.35, 6);
     reconcileCuts(node);
@@ -248,5 +249,102 @@ describe('a face of any outline', () => {
     expect(region.closed).toBe(false);
     expect(useStore.getState().setFaceFeature('part', region, { border: 0.02, depth: -0.01 })).toBe(-1);
     expect(useStore.getState().setFaceFeature('part', region, { border: 0.02, depth: 0.01 })).toBe(1);
+  });
+});
+
+// The rough edges found in a scene made by hand with these tools.
+describe('keeping a feature where it was put', () => {
+  beforeEach(() => {
+    (globalThis as unknown as { window: unknown }).window = globalThis;
+  });
+  const part = () => useStore.getState().sceneGraph.nodes[0];
+  const load = (node: SceneNode) =>
+    useStore.setState({ sceneGraph: { nodes: [node] } as unknown as SceneGraph, model: null, data: null });
+
+  it('stays on its spot when a lattice edit re-centres the body', () => {
+    // A 40 mm lattice cube, pocketed in its +X face. Extruding +Y by 20 mm
+    // re-centres the body 10 mm along Y — sideways to the pocket. The cage
+    // walked back; the pocket's anchor used to stay put, and it slid 10 mm off
+    // the middle of the cube's face.
+    const lattice = boxLattice(0.0001, 200);
+    const mesh = toSceneGeom(lattice, 0, 0);
+    load({
+      id: 'part', name: 'part', type: 'body', pos: [0, 0, 0.1], joints: [], children: [],
+      isLattice: true, latticeCage: serializeCage(lattice), latticeSubdiv: 0, latticeOrigin: mesh.origin,
+      geoms: [{
+        name: 'part_mesh', type: 'mesh', size: [1], mass: 1, dynamic: true, latticeGeom: true,
+        vertices: mesh.vertices, renderVertices: mesh.renderVertices, faces: mesh.faces,
+      }],
+    } as unknown as SceneNode);
+    const region = flatFaceAt(part(), [5, 0, 0], [-1, 0, 0])!;
+    const index = useStore.getState().setFaceFeature('part', region, { border: 0.005, depth: -0.01 });
+
+    const plusY = lattice.faces.findIndex((_, f) => (faceNormal(lattice, f)?.[1] ?? 0) > 0.99);
+    extrudeFace(lattice, plusY, 200);
+    useStore.getState().applyLattice('part', serializeCage(lattice), 0);
+
+    const cube = part().geoms.find((g) => g.latticeGeom)!;
+    const ys = (cube.renderVertices as number[]).filter((_, i) => i % 3 === 1);
+    const pocket = geomBounds(part().geoms[index])!;
+    // The cube part of the shape is its first 40 mm from −Y.
+    expect((pocket.min[1] + pocket.max[1]) / 2).toBeCloseTo(Math.min(...ys) + 0.02, 6);
+  });
+
+  it('folds a stray offset back into a prism that already drifted', () => {
+    const trapezoid = [[0, 0], [0.4, 0], [0.3, 0.2], [0.1, 0.2]];
+    const { positions, faces } = prismMesh(trapezoid, 0, 0.1);
+    load({ ...body([{ name: 'p', type: 'mesh', dynamic: true, renderVertices: positions, faces } as unknown as SceneGeom]), id: 'part' });
+    const region = flatFaceAt(part(), [0.2, 0.1, 5], [0, 0, -1])!;
+    const index = useStore.getState().setFaceFeature('part', region, { border: 0.02, depth: 0.03 });
+    const right = geomBounds(part().geoms[index])!;
+    // What the old walk-back left: the anchor 10 mm off in Y, and a pos
+    // making up for it.
+    const node = part();
+    const boss = node.geoms[index];
+    boss.cutAt = [boss.cutAt![0], boss.cutAt![1] + 0.01, boss.cutAt![2]];
+    boss.pos = [0, -0.01, 0];
+    reconcileCuts(node);
+    expect(boss.pos).toEqual([0, 0, 0]);
+    const now = geomBounds(boss)!;
+    for (let a = 0; a < 3; a++) {
+      expect(now.min[a]).toBeCloseTo(right.min[a], 6);
+      expect(now.max[a]).toBeCloseTo(right.max[a], 6);
+    }
+  });
+
+  it('compiles a body whose only feature is a boss', () => {
+    // Uncompiled, a boss was a separate shape weighed by its own volume.
+    const node = slab();
+    const region = flatFaceAt(node, [0, 0, 5], [0, 0, -1])!;
+    featureOn(node, region, 0.5, { csg: 'union', cutDepth: 0.05 });
+    expect(hasBooleanOps(node)).toBe(true);
+  });
+
+  it('scales with the body, and stays scaled when the part is next rebuilt', () => {
+    load({ ...slab(), id: 'part' });
+    const region = flatFaceAt(part(), [5, 0, 0], [-1, 0, 0])!;
+    const index = useStore.getState().setFaceFeature('part', region, { border: 0.05, depth: -0.04 });
+    scaleNodeTree('part', 2, 1, 1);
+    const pocket = () => geomBounds(part().geoms[index])!;
+    // On the +X face, now at 0.2; 80 mm deep, since X doubled; across the
+    // face unchanged.
+    expect(pocket().min[0]).toBeCloseTo(0.2 - 0.08, 6);
+    expect(pocket().max[1]).toBeCloseTo(0.15, 6);
+    expect(pocket().max[2]).toBeCloseTo(0.25, 6);
+    reconcileCuts(part());
+    expect(pocket().min[0]).toBeCloseTo(0.12, 6);
+  });
+
+  it('takes a new border from the sidebar, against its own face', () => {
+    load({ ...slab(), id: 'part' });
+    const region = flatFaceAt(part(), [0, 0, 5], [0, 0, -1])!;
+    const index = useStore.getState().setFaceFeature('part', region, { border: 0.02, depth: -0.05 });
+    useStore.getState().setFaceFeatureBorder('part', index, 50);
+    const feature = part().geoms[index];
+    expect(feature.cutBorder).toBeCloseTo(0.05, 9);
+    expect(feature.size).toEqual([0.05, 0.15, expect.any(Number)]);
+    // Wider than the face: refused, and the feature is left as it was.
+    useStore.getState().setFaceFeatureBorder('part', index, 500);
+    expect(part().geoms[index].cutBorder).toBeCloseTo(0.05, 9);
   });
 });

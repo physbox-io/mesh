@@ -386,7 +386,11 @@ export function hasBooleanOps(node: SceneNode): boolean {
   const src = csgSourceGeoms(node);
   const pos = src.filter(isPositive);
   // A rounded or bevelled edge is a boolean too: see utils/edgeRound.ts.
-  return pos.length > 0 && (src.some(g => isNegative(g) || isIntersect(g)) || hasEdgeRounds(node));
+  // A boss is a boolean too. Left uncompiled it is a shape of its own beside
+  // the part: weighed by its own volume rather than sharing the body's mass,
+  // and drawn and collided as a separate piece.
+  const isBoss = (g: SceneGeom) => g.csg === 'union' && !!g.cutNormal;
+  return pos.length > 0 && (src.some(g => isNegative(g) || isIntersect(g) || isBoss(g)) || hasEdgeRounds(node));
 }
 
 /**
@@ -515,7 +519,14 @@ export interface CutSpot {
  * the hole.
  */
 function cutOvershoot(node: SceneNode): number {
-  const bounds = sourcePositiveBounds(node);
+  // Measured on the part WITHOUT its bosses. A boss's own length includes the
+  // overshoot, so counting it here fed a boss back into itself: it changed
+  // length the first time it was rebuilt after it moved, and only settled on
+  // the second.
+  const bounds = sourcePositiveBounds({
+    ...node,
+    geoms: (node.geoms || []).filter(g => !(g.csg === 'union' && g.cutNormal)),
+  });
   if (!bounds) return 0.001;
   const diagonal = Math.hypot(
     bounds.max[0] - bounds.min[0],
@@ -1188,6 +1199,19 @@ export function flatFaceAt(
   return region ? { ...region, geom: nearest.geom } : null;
 }
 
+/**
+ * The face a face feature was made on, found again: from well outside along
+ * its own line, with the feature itself left out — a boss would otherwise be
+ * found standing on its own top. Null when the face is no longer flat or no
+ * longer there.
+ */
+export function faceUnderFeature(node: SceneNode, feature: SceneGeom): FaceRegion | null {
+  const n = feature.cutNormal ?? [0, 0, 1];
+  const at = feature.cutAt ?? [0, 0, 0];
+  const away = clearOf(node);
+  return flatFaceAt(node, at.map((v, a) => v + (n[a] ?? 0) * away), n.map((v) => -v), feature);
+}
+
 /** The flat face of one geom that a hit with this normal (or on this triangle) is on. */
 function faceRegionOf(geom: SceneGeom, hitNormal: number[], hitFace?: number): FaceRegion | null {
   if (geom.type === 'mesh') return hitFace === undefined ? null : meshFaceRegion(geom, hitFace);
@@ -1298,8 +1322,17 @@ export function cutGeometry(
   if (n.lengthSq() < 1e-18) return null;
   n.normalize();
 
-  const under = surfaceUnder(node, geom.cutAt ?? [0, 0, 0], n.toArray(), geom);
-  const entry = new THREE.Vector3(...(under ? under.entry : (geom.cutAt ?? [0, 0, 0])));
+  /*
+   * A face prism's vertices are baked into the body frame, so it has no pos of
+   * its own. One that has one was left it by the lattice walk-back before that
+   * moved anchors instead, and the offset is exactly how far its anchor should
+   * have moved: folded back in, it lands on its face again.
+   */
+  const prism = geom.type === 'mesh' && !!geom.cutOutline;
+  const drift = prism && geom.pos ? geom.pos : [0, 0, 0];
+  const anchor = (geom.cutAt ?? [0, 0, 0]).map((v, a) => v + (drift[a] ?? 0));
+  const under = surfaceUnder(node, anchor, n.toArray(), geom);
+  const entry = new THREE.Vector3(...(under ? under.entry : anchor));
   const s = geom.size || [];
   const over = cutOvershoot(node);
 
@@ -1310,7 +1343,7 @@ export function cutGeometry(
   if (geom.cutTwist) quat.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), geom.cutTwist));
   const mjQuat = [quat.w, quat.x, quat.y, quat.z].map(v => +v.toFixed(9));
 
-  if (geom.type === 'mesh' && geom.cutOutline) {
+  if (prism && geom.cutOutline) {
     // A face of any other shape: its outline stood up as a prism, over the
     // same length a box cut would have, baked into the body frame — the frame
     // every mesh geom's vertices are read in.
@@ -1320,15 +1353,19 @@ export function cutGeometry(
     const reach = boss ? height : through ? (under?.thickness ?? 0) + over : geom.cutDepth!;
     const length = reach + over;
     const centre = entry.clone().addScaledVector(n, boss ? (height - over) / 2 : (over - reach) / 2);
-    const prism = prismMesh(geom.cutOutline, -length / 2, length / 2);
+    const shape = prismMesh(geom.cutOutline, -length / 2, length / 2);
     const m = new THREE.Matrix4().makeRotationFromQuaternion(quat).setPosition(centre);
     const p = new THREE.Vector3();
     const zup: number[] = [];
-    for (let i = 0; i < prism.positions.length; i += 3) {
-      p.set(prism.positions[i], prism.positions[i + 1], prism.positions[i + 2]).applyMatrix4(m);
+    for (let i = 0; i < shape.positions.length; i += 3) {
+      p.set(shape.positions[i], shape.positions[i + 1], shape.positions[i + 2]).applyMatrix4(m);
       zup.push(+p.x.toFixed(7), +p.y.toFixed(7), +p.z.toFixed(7));
     }
-    return { renderVertices: zup, vertices: zupArrayToYup(zup), faces: prism.faces, dynamic: true };
+    const drifted = drift.some((v) => Math.abs(v) > 0);
+    return {
+      renderVertices: zup, vertices: zupArrayToYup(zup), faces: shape.faces, dynamic: true,
+      ...(drifted ? { cutAt: entry.toArray().map(v => +v.toFixed(6)), pos: [0, 0, 0] } : {}),
+    };
   }
 
   if (geom.csg === 'union') {
@@ -1411,7 +1448,7 @@ export function reconcileCuts(node: SceneNode): boolean {
     // The anchor follows the surface too, so the next reconcile measures from
     // where the material is now rather than from where it used to be.
     const under = surfaceUnder(node, geom.cutAt ?? [0, 0, 0], geom.cutNormal!, geom);
-    if (under) geom.cutAt = under.entry.map(v => +v.toFixed(6));
+    if (under && !next.cutAt) geom.cutAt = under.entry.map(v => +v.toFixed(6));
 
     const same = (a: number[] | undefined, b: number[] | undefined) =>
       !b || (!!a && a.length === b.length && b.every((v, i) => Math.abs(v - (a[i] ?? 0)) < 1e-9));

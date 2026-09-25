@@ -34,7 +34,7 @@ import { useStore, getPhysicsWorkerClient } from '../../store/useStore';
 import type { SceneNode } from '../../types/scene';
 import { scaleNodeTree, boreFactors, BORE_OVERSHOOT, type Bore } from '../../utils/scaleNode';
 import {
-  pickCutSpot, flatFaceAt, surfaceUnder, sourcePositiveBounds, regionOutline, prismMesh, csgSourceGeoms,
+  pickCutSpot, flatFaceAt, faceUnderFeature, surfaceUnder, regionOutline, prismMesh, csgSourceGeoms,
   type CutSpot, type FaceRegion,
 } from '../../utils/csg';
 import { analyzeMesh } from '../../utils/meshIntegrity';
@@ -530,9 +530,17 @@ export const ObjectGestureController = () => {
       const shown = state.spot;
       if (shown) {
         const at = new THREE.Vector3(...(shown.at as [number, number, number])).applyMatrix3(pose.rot).add(pose.pos);
-        const normal = new THREE.Vector3(...(shown.normal as [number, number, number])).applyMatrix3(pose.rot).normalize();
         ghost.position.copy(at);
-        ghost.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
+        // Turned the way the cut itself will be: onto the line in the BODY's
+        // frame, by the cut's own twist, then with the body — so a slot lies
+        // along the face it is on, as it will when it is put down.
+        const cutGeom = node.geoms?.[state.geomIndex ?? -1];
+        const onLine = new THREE.Quaternion().setFromUnitVectors(
+          new THREE.Vector3(0, 0, 1),
+          new THREE.Vector3(...(shown.normal as [number, number, number])).normalize(),
+        );
+        if (cutGeom?.cutTwist) onLine.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), cutGeom.cutTwist));
+        ghost.quaternion.setFromRotationMatrix(new THREE.Matrix4().setFromMatrix3(pose.rot)).multiply(onLine);
         const mm = (v: number) => (v * 1000).toFixed(1);
         setGestureStatus(`Move cut · at ${shown.at.map(mm).join(', ')} mm`);
       } else {
@@ -819,19 +827,15 @@ export const ObjectGestureController = () => {
 
     const geoms = node.geoms ?? [];
     const same = (a: number[] | undefined, b: number[]) => !!a && b.every((v, k) => Math.abs(v - (a[k] ?? 0)) < 1e-5);
-    let index = region.geom?.cutFace && region.geom.csg === 'union' ? geoms.indexOf(region.geom) : -1;
-    if (index === -1) {
-      index = geoms.findIndex((g) => g.cutFace && !g.csgDerived && same(g.cutAt, region!.at) && same(g.cutNormal, region!.normal));
-    }
+    // A feature centred on the face under the pointer comes first: that is a
+    // pocket sunk into a boss's top as much as one in a plain face, and asking
+    // the boss first made the pocket impossible to reach. Failing that, a
+    // boss's own top re-opens the boss; its base face does too, from around it.
+    let index = geoms.findIndex((g) => g.cutFace && !g.csgDerived && same(g.cutAt, region!.at) && same(g.cutNormal, region!.normal));
+    if (index === -1 && region.geom?.cutFace && region.geom.csg === 'union') index = geoms.indexOf(region.geom);
     const feature = index === -1 ? null : geoms[index];
     if (feature) {
-      // The face it stands on, found from outside along its own line with the
-      // feature itself left out.
-      const n = feature.cutNormal ?? [0, 0, 1];
-      const bounds = sourcePositiveBounds(node);
-      const away = bounds ? Math.hypot(...bounds.max.map((v, a) => v - bounds.min[a])) + 1 : 10;
-      const at = feature.cutAt ?? [0, 0, 0];
-      const base = flatFaceAt(node, at.map((v, a) => v + (n[a] ?? 0) * away), n.map((v) => -v), feature);
+      const base = faceUnderFeature(node, feature);
       if (base) region = base;
       else index = -1;
     }
@@ -937,7 +941,14 @@ export const ObjectGestureController = () => {
         const size = cut.size || [];
         const r = Math.max(1e-4, size[0] ?? 0.005);
         let geometry: THREE.BufferGeometry;
-        if (cut.type === 'box') geometry = new THREE.BoxGeometry(2 * r, 2 * Math.max(1e-4, size[1] ?? r), 3 * r);
+        if (cut.cutOutline) {
+          // A face feature of any other outline is a mesh whose size means
+          // nothing — read as a radius it drew a cylinder a metre across. Its
+          // own outline, stood up as a short stub, is what is being moved.
+          let extent = 0;
+          for (const [x, y] of cut.cutOutline) extent = Math.max(extent, Math.hypot(x, y));
+          geometry = ghostGeometry(cut.cutOutline).scale(1, 1, Math.max(1e-4, extent));
+        } else if (cut.type === 'box') geometry = new THREE.BoxGeometry(2 * r, 2 * Math.max(1e-4, size[1] ?? r), 3 * r);
         else if (cut.type === 'sphere') geometry = new THREE.SphereGeometry(r, 24, 16);
         else geometry = new THREE.CylinderGeometry(r, r, 3 * r, 32).rotateX(Math.PI / 2);
         const ghost = new THREE.Mesh(geometry, GHOST_MATERIAL);
