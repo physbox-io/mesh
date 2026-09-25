@@ -791,6 +791,25 @@ export function useMCPBridge() {
         }
       }
 
+      /*
+       * A body given by name becomes its id, once, here.
+       *
+       * Every handler finds bodies by id or name (findNodeInScene), but the store
+       * edits, deletes and keys history by id alone. So sculpt, combine, delete
+       * and the lattice undo stack given a name found the body, reported ok, and
+       * changed nothing - or pushed history under a key undo never read. An
+       * exact id wins over a name, so a body named like another's id is safe.
+       */
+      const toId = (v: unknown): unknown => {
+        if (typeof v !== 'string') return v;
+        const byId = (nodes: SceneNode[] = []): boolean =>
+          nodes.some((n) => n.id === v || byId(n.children));
+        if (byId(store.sceneGraph.nodes)) return v;
+        return findNodeInScene(store.sceneGraph.nodes, v)?.id ?? v;
+      };
+      if (msg && typeof msg.targetId === 'string') msg = { ...msg, targetId: toId(msg.targetId) };
+      if (msg && Array.isArray(msg.withIds)) msg = { ...msg, withIds: msg.withIds.map(toId) };
+
       switch (cmd) {
         case 'GET_STATE':
           return {
