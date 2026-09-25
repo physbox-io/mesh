@@ -857,8 +857,14 @@ export function extrudeFace(
 
     So a backwards extrusion is wound backwards. This is not a matter of taste:
     an inside-out solid is one nothing downstream will accept.
+
+    Only for a lone face, though. A face of a solid pushed inward is a pocket:
+    the material is on the far side of the new walls and floor exactly as it
+    was behind the old face, so the forward winding is already outward, and
+    its neighbours' edges expect it. Reversing it turned every pocket's walls
+    and floor inside out.
   */
-  const backwards = travel * normal[a] < 0;
+  const backwards = lone && travel * normal[a] < 0;
 
   const sides: number[] = [];
   for (let i = 0; i < ring.length; i++) {
