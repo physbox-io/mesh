@@ -4,6 +4,7 @@ import { analyzeMesh } from './meshIntegrity';
 import { resolveCsgGeoms } from './csg';
 import { encodeMsh, mshFileName, type MeshFileSink } from './meshVfs';
 import { PairMemo } from './arrayMemo';
+import { uniquifyNamesInPlace } from './uniqueNames';
 
 /*
  * Per-mesh work kept across rebuilds. Every build used to re-encode every mesh
@@ -223,6 +224,8 @@ export const compileToMJCF = (
     ...(n.children ? { children: cloneNodes(n.children) } : {}),
   }));
   const sceneCopy: SceneGraph = { ...scene, nodes: cloneNodes(scene.nodes) };
+  // Before booleans are resolved, so names match what the store keeps.
+  uniquifyNamesInPlace(sceneCopy.nodes);
 
   // Resolve every body down to the geoms that actually simulate: a boolean's
   // negatives are dropped, and depending on the collision mode the colliders are
@@ -239,35 +242,12 @@ export const compileToMJCF = (
   };
   resolveCsg(sceneCopy.nodes);
 
-  // DynamicGeom component caches a geom's id from its name once at mount. If two
-  // geoms or bodies ever share a name, MuJoCo silently binds both lookups to
-  // whichever one it registered first — every other geom "sharing" that name
-  // then renders forever at the wrong body's transform, with no compile error
-  // to explain it. Catch collisions here and ensure unique body/geom names.
-  const seenBodyNames = new Set<string>();
-  const seenGeomNames = new Set<string>();
-  const checkNames = (nodes: SceneNode[]) => {
-    if (!nodes) return;
-    for (const node of nodes) {
-      if (node.isPulleyRope) { checkNames(node.children || []); continue; }
-      let bodyName = node.name || node.id || 'body';
-      if (seenBodyNames.has(bodyName)) {
-        bodyName = `${bodyName}_${Math.random().toString(36).substr(2, 4)}`;
-        node.name = bodyName;
-      }
-      seenBodyNames.add(bodyName);
-      for (const g of node.geoms || []) {
-        let gName = g.name || `${bodyName}_geom`;
-        if (seenGeomNames.has(gName)) {
-          gName = `${gName}_${Math.random().toString(36).substr(2, 4)}`;
-          g.name = gName;
-        }
-        seenGeomNames.add(gName);
-      }
-      checkNames(node.children || []);
-    }
-  };
-  checkNames(sceneCopy.nodes);
+  // The viewport finds each body and geom by its name, so a clash would bind
+  // the lookups for both to whichever MuJoCo registered first. Renamed by the
+  // same rule the store applies to the graph, so the two agree (see
+  // utils/uniqueNames); this pass only finds anything new when a boolean's
+  // generated geoms clash, since the graph pass ran on the scene handed in.
+  uniquifyNamesInPlace(sceneCopy.nodes);
 
   // Runs BEFORE mesh-asset collection: a wedge is rewritten into a mesh geom
   // here, and that mesh still needs to land in the <asset> block below.

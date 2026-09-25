@@ -42,6 +42,7 @@ import { DEFAULT_MATERIAL, type MaterialId } from '../utils/feedsAndSpeeds';
 import { DEFAULT_FILAMENT, type FilamentId } from '../utils/filaments';
 import { loadStock, saveStock, clampStock, type StockSize } from '../utils/stockSettings';
 import type { ReliefCarveOptions } from '../utils/reliefCarveExporter';
+import { withUniqueNames } from '../utils/uniqueNames';
 
 /**
  * What is on the bench.
@@ -1862,7 +1863,12 @@ const sharingUnchangedNodes = (config: StateCreator<PhysicsState>): StateCreator
   (rawSet, get, api) => {
     const set = ((partial: Parameters<typeof rawSet>[0], replace?: boolean) => {
       const patch = typeof partial === 'function' ? partial(get()) : partial;
-      if (patch && 'sceneGraph' in patch && patch.sceneGraph) shareUnchanged(get().sceneGraph, patch.sceneGraph);
+      if (patch && 'sceneGraph' in patch && patch.sceneGraph) {
+        // Clashing body and geom names renamed by the compiler's rule, so the
+        // graph the viewport draws from names what the model holds.
+        patch.sceneGraph = withUniqueNames(patch.sceneGraph);
+        shareUnchanged(get().sceneGraph, patch.sceneGraph);
+      }
       (rawSet as (p: typeof patch, r?: boolean) => void)(patch, replace);
     }) as typeof rawSet;
     return config(set, get, api);
