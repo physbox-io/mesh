@@ -610,7 +610,8 @@ api.setAngularVelocity([0, 15.0, 0], 'cart'); // Sets angular velocities`}
                   {[
                     ['1 2 3', 'Place, Select, Extrude'],
                     ['X Y Z', 'Turn the work plane; it lands on whatever the pointer is on'],
-                    ['[ ]', 'Move the plane a step along its axis (Shift for five)'],
+                    ['[ ]', 'Move the plane a step along its axis (Shift for five, Alt for 0.1 mm)'],
+                    ['Alt (hold)', 'Snap to 0.1 mm instead of the grid while dragging or clicking'],
                     ['Ctrl (hold)', 'Stay on the plane you are pointing at'],
                     ['Click / Enter', 'Close the polygon being drawn'],
                     ['Shift / Ctrl+click', 'Add a corner, face or edge to the selection'],

@@ -1855,6 +1855,11 @@ function framingPatch(
  */
 const initialFraming = framingPatch(initialScene, null);
 
+/** The lattice snap (in 0.1 mm grid steps) that matches a grid drawn at `mm`. */
+function snapForGridMm(mm: number): SnapMultiple {
+  return (Math.round(mm * 10) || 10) as SnapMultiple;
+}
+
 /**
  * Every write of a new scene graph goes through shareUnchanged, so a node an
  * edit did not touch keeps its object and the viewport can skip it.
@@ -2162,7 +2167,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
   // controls that both said "grid" and meant different things was one too
   // many: 1 mm on the floor and 10 mm in the lattice looked like a bug in the
   // lattice. Cells are millimetres; lattice steps are tenths, hence the ten.
-  setGridCellSizeMm: (mm) => set({ gridCellSizeMm: mm, latticeSnap: (Math.round(mm * 10) || 10) as SnapMultiple }),
+  setGridCellSizeMm: (mm) => set({ gridCellSizeMm: mm, latticeSnap: snapForGridMm(mm) }),
 
   paintMode: false,
   paintColor: [0.91, 0.30, 0.24],
@@ -2837,9 +2842,10 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
   latticeNodeId: null,
   latticeTool: 'place',
   latticePlane: { axis: 'z', index: 0 },
-  // 10 mm to start: the step most parts are laid out on, with 0.1 mm available
-  // for detail without any of the coarse work having to move.
-  latticeSnap: 1000,
+  // The step the grid on screen is drawn at — 10 mm for most parts, with
+  // 0.1 mm a held Alt away. This used to be a fixed 1000 (100 mm) under a
+  // 10 mm grid, so clicks landed on every tenth line of what was shown.
+  latticeSnap: snapForGridMm(initialFraming.gridCellSizeMm),
   latticeMirror: null,
   latticePlaneLocked: false,
   latticePlaneHold: false,

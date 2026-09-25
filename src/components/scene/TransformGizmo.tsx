@@ -52,6 +52,7 @@ import { solveMate, solveAlignAboutAxis, type MateFeature, type MateSolution, ty
 import { bodyFeatures, neighbourFeatures, transformFeatures, documentAxes, graphAxes } from '../../utils/mateFeatures';
 import { bodyPoseOf, toParentFrame } from './bodyPose';
 import { setGizmoBusy } from './gizmoBusy';
+import { ensureModifierKeys, modifiers } from '../../utils/modifierKeys';
 
 /** Turning while Shift is held lands on these, the way a protractor does. */
 const ROTATION_SNAP_DEG = 15;
@@ -443,7 +444,6 @@ export const TransformGizmo = () => {
   const drag = useRef<Drag | null>(null);
   // Alt and Shift are read at the moment of a pointer move rather than
   // subscribed to, so picking one up mid-drag takes effect on the next move.
-  const keys = useRef({ alt: false, shift: false });
   const pointer = useRef({ x: 0, y: 0 });
   /** The keyboard turn, while one is running — see `beginTurn` below. */
   const modal = useRef<{ axis: 'x' | 'y' | 'z'; centre: { x: number; y: number }; from: number } | null>(null);
@@ -855,7 +855,7 @@ export const TransformGizmo = () => {
     if (mode === 'translate') {
       // Alt is the usual "no snapping" modifier, and a drag that cannot be
       // talked out of the floor would be worse than no snap at all.
-      const off = keys.current.alt;
+      const off = modifiers().alt;
       const threshold = off
         ? 0
         : snapThreshold(
@@ -920,7 +920,7 @@ export const TransformGizmo = () => {
           ? { type: 'floor', x: proxy.position.x, y: proxy.position.y, r: state.radius, strength: snap.strength }
           : null);
       }
-    } else if (keys.current.shift) {
+    } else if (modifiers().shift) {
       /*
        * Snapped on the BODY's resulting angles rather than the handles' delta —
        * landing on 15° means the body sitting at 15°, not turned by it — and in
@@ -941,7 +941,7 @@ export const TransformGizmo = () => {
         .setFromEuler(euler)
         .multiply(state.startBodyQuat.clone().invert())
         .multiply(state.startQuat);
-    } else if (!keys.current.alt) {
+    } else if (!modifiers().alt) {
       /*
        * The gentle half of the bargain the translate snap makes.
        *
@@ -1149,7 +1149,7 @@ export const TransformGizmo = () => {
     if (!state || !spin || !proxy) return;
 
     let angle = bearing(x, y) - spin.from;
-    if (keys.current.shift) {
+    if (modifiers().shift) {
       const step = THREE.MathUtils.degToRad(ROTATION_SNAP_DEG);
       angle = Math.round(angle / step) * step;
     }
@@ -1183,17 +1183,9 @@ export const TransformGizmo = () => {
     setGestureStatus('Turn Z 0° · X/Y/Z picks the axis, click to keep it');
   }, [bearing, camera, gl, handleMouseDown, setGestureStatus, setMode]);
 
-  useEffect(() => {
-    const track = (event: KeyboardEvent) => {
-      keys.current = { alt: event.altKey, shift: event.shiftKey };
-    };
-    window.addEventListener('keydown', track);
-    window.addEventListener('keyup', track);
-    return () => {
-      window.removeEventListener('keydown', track);
-      window.removeEventListener('keyup', track);
-    };
-  }, []);
+  // Alt and Shift come from the app-wide tracker, which also hears them on
+  // pointer events and lets go of them when the window loses focus.
+  useEffect(ensureModifierKeys, []);
 
   /*
    * Bound ahead of the JSX rather than inline: an arrow written in the props

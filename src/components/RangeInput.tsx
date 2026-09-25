@@ -1,5 +1,7 @@
 import React, { useCallback } from 'react';
 import { useCommitted } from '../hooks/useSettled';
+import { useModifier } from '../hooks/useModifier';
+import { fineStep } from '../utils/modifierKeys';
 
 /**
  * A slider that reports where it landed, not every place it passed through.
@@ -16,9 +18,13 @@ import { useCommitted } from '../hooks/useSettled';
  * idle window is there for the in-between case: a slow drag that never quite
  * stops should still show its effect, not wait for the finger to lift.
  *
+ * Holding Alt makes the step two decades finer, so a slider on 10 mm stops
+ * can still land on 12.3 mm without typing it — the same "Alt means don't
+ * snap" the viewport uses.
+ *
  * Drop-in for the element it replaces: same props, same `className`, `value`
  * and `onChange` as numbers rather than form events. Imports nothing from this
- * app beyond the hook, so it can move to `@physbox-io/ui` beside `NumberInput`.
+ * app beyond the hooks, so it can move to `@physbox-io/ui` beside `NumberInput`.
  */
 export interface RangeInputProps
   extends Omit<React.InputHTMLAttributes<HTMLInputElement>, 'value' | 'onChange' | 'type'> {
@@ -35,9 +41,13 @@ export const RangeInput: React.FC<RangeInputProps> = ({
   onPointerUp,
   onKeyUp,
   onBlur,
+  step,
   ...rest
 }) => {
   const [draft, setDraft, flush] = useCommitted(value, onChange, commitDelay);
+  const fine = useModifier('alt');
+  const numericStep = typeof step === 'number' ? step : typeof step === 'string' && step !== 'any' ? parseFloat(step) : NaN;
+  const effectiveStep = fine && Number.isFinite(numericStep) ? fineStep(numericStep) : step;
 
   const handlePointerUp = useCallback(
     (e: React.PointerEvent<HTMLInputElement>) => {
@@ -65,6 +75,7 @@ export const RangeInput: React.FC<RangeInputProps> = ({
     <input
       {...rest}
       type="range"
+      step={effectiveStep}
       value={Number.isFinite(draft) ? draft : 0}
       onChange={(e) => setDraft(parseFloat(e.target.value))}
       onPointerUp={handlePointerUp}

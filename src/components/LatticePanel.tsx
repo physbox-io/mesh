@@ -92,7 +92,8 @@ const KEYS: { title: string; keys: [string, string][] }[] = [
     title: 'The grid',
     keys: [
       ['X Y Z', 'Turn the work plane, landing on whatever the pointer is on'],
-      ['[ ]', 'Move it a step along its axis (Shift for five)'],
+      ['[ ]', 'Move it a step along its axis (Shift for five, Alt for 0.1 mm)'],
+      ['Alt', 'Hold while dragging or clicking to snap to 0.1 mm instead of the grid'],
       ['Ctrl', 'Hold to stay on the plane you are pointing at'],
       ['Caps Lock', 'Hold the plane without holding a key (the lock button does the same)'],
     ],

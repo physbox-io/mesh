@@ -39,8 +39,9 @@ import {
   faceNormal, faceCentre, dominantAxis, latticeStats, latticeBounds, mirrorCoord, orientFaces, vertexCount,
   bridgeFaces, insetFace, bevelFace, bevelEdges, scaleVertices, ringCoords, revolveChain, chainFromEdges, triangulate, curveCoords,
   addWire, removeWire, wireEndingAt, removeWireEdge, wireEdges,
-  AXIS_INDEX, DRAWING_TOOLS, type Axis, type Lattice, type LatticeCage, type LatticeCoord,
+  AXIS_INDEX, DRAWING_TOOLS, type Axis, type Lattice, type LatticeCage, type LatticeCoord, type SnapMultiple,
 } from '../utils/latticeMesh';
+import { useModifier } from '../hooks/useModifier';
 import { dimensionMm, selectionBoundsMm } from '../utils/latticeCommands';
 import { splitHostAround, fuseFlushFaces, resolveExtrusion, unionOverlappingPieces } from '../utils/latticeSketch';
 import type { SceneNode } from '../types/scene';
@@ -286,7 +287,13 @@ export function LatticeSurface({
 
   const tool = useStore((s) => s.latticeTool);
   const plane = useStore((s) => s.latticePlane);
-  const snap = useStore((s) => s.latticeSnap);
+  const gridSnap = useStore((s) => s.latticeSnap);
+  // Holding Alt snaps to the finest grid step (0.1 mm) instead: the cage is
+  // whole grid steps, so that is as free as a point can be. Only the snapping
+  // changes — the dots drawn stay on the chosen grid (gridSnap), so pressing
+  // Alt doesn't flood the view with a hundred times as many of them.
+  const snapOff = useModifier('alt');
+  const snap: SnapMultiple = snapOff ? 1 : gridSnap;
   const mirror = useStore((s) => s.latticeMirror);
   const wireframe = useStore((s) => s.wireframe);
   const applyLattice = useStore((s) => s.applyLattice);
@@ -423,13 +430,13 @@ export function LatticeSurface({
     setHoverState(coord);
     if (!coord) return;
     // The field's window follows the pointer in jumps — see `focus` below.
-    const reach = Math.floor(MAX_FIELD_SPAN / 4) * snap;
+    const reach = Math.floor(MAX_FIELD_SPAN / 4) * gridSnap;
     setFocus((current) => (
       !current || coord.some((c, k) => Math.abs(c - current[k]) > reach)
-        ? coord.map((c) => Math.round(c / snap) * snap) as LatticeCoord
+        ? coord.map((c) => Math.round(c / gridSnap) * gridSnap) as LatticeCoord
         : current
     ));
-  }, [snap]);
+  }, [gridSnap]);
 
   const setGestureStatus = useStore((s) => s.setGestureStatus);
 
@@ -678,13 +685,13 @@ export function LatticeSurface({
      * that follows the pointer — was tried, and at 1 mm it was a small patch
      * that wandered off the part and had to be chased.
      */
-    let step = snap;
+    let step = gridSnap;
     const range = (axis: 0 | 1 | 2, at: number) => {
       // The margin is in steps of the CURRENT grid, so coarse work gets a
       // proportionally wide field and fine work gets a tight one — a fixed
       // margin in lattice units is invisible at 100 mm and a mile at 0.1 mm.
-      const lo = Math.floor((min[axis] - FIELD_MARGIN * snap) / at) * at;
-      const hi = Math.ceil((max[axis] + FIELD_MARGIN * snap) / at) * at;
+      const lo = Math.floor((min[axis] - FIELD_MARGIN * gridSnap) / at) * at;
+      const hi = Math.ceil((max[axis] + FIELD_MARGIN * gridSnap) / at) * at;
       return { lo, hi };
     };
     const fits = (at: number) => [0, 1, 2].every((k) => {
@@ -692,8 +699,8 @@ export function LatticeSurface({
       return (r.hi - r.lo) / at + 1 <= MAX_FIELD_SPAN;
     });
     while (!fits(step) && step < 1e6) step *= 10;
-    return { ranges: [range(0, step), range(1, step), range(2, step)] as const, step, fine: [range(0, snap), range(1, snap), range(2, snap)] as const };
-  }, [lattice, revision, snap]); // eslint-disable-line react-hooks/exhaustive-deps
+    return { ranges: [range(0, step), range(1, step), range(2, step)] as const, step, fine: [range(0, gridSnap), range(1, gridSnap), range(2, gridSnap)] as const };
+  }, [lattice, revision, gridSnap]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /**
    * How much of the world one screen pixel covers, at the body being edited.
@@ -796,12 +803,12 @@ export function LatticeSurface({
       // can afford what the volume cannot — and held, out past it as well.
       let r = field.fine[k];
       const at = focus ? focus[k] : (r.lo + r.hi) / 2;
-      const centre = Math.round(at / snap) * snap;
-      if (locked) r = { lo: Math.min(r.lo, centre - SLICE_REACH * snap), hi: Math.max(r.hi, centre + SLICE_REACH * snap) };
+      const centre = Math.round(at / gridSnap) * gridSnap;
+      if (locked) r = { lo: Math.min(r.lo, centre - SLICE_REACH * gridSnap), hi: Math.max(r.hi, centre + SLICE_REACH * gridSnap) };
       // Only a part hundreds of steps across gets a window, and then it is a
       // wide one around the pointer rather than a patch.
-      if ((r.hi - r.lo) / snap + 1 > MAX_SLICE_SPAN) {
-        const half = Math.floor(MAX_SLICE_SPAN / 2) * snap;
+      if ((r.hi - r.lo) / gridSnap + 1 > MAX_SLICE_SPAN) {
+        const half = Math.floor(MAX_SLICE_SPAN / 2) * gridSnap;
         r = { lo: centre - half, hi: centre + half };
       }
       return r;
@@ -809,8 +816,8 @@ export function LatticeSurface({
     const ranges = [span(0), span(1), span(2)] as const;
     const axis = AXIS_INDEX[plane.axis];
     const [a, b] = OTHER_AXES[plane.axis];
-    for (let u = ranges[a].lo; u <= ranges[a].hi; u += snap) {
-      for (let v = ranges[b].lo; v <= ranges[b].hi; v += snap) {
+    for (let u = ranges[a].lo; u <= ranges[a].hi; u += gridSnap) {
+      for (let v = ranges[b].lo; v <= ranges[b].hi; v += gridSnap) {
         const coord: LatticeCoord = [0, 0, 0];
         coord[axis] = litIndex;
         coord[a] = u;
@@ -822,7 +829,7 @@ export function LatticeSurface({
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
     return { geometry, coords, ranges };
-  }, [field, focus, litIndex, locked, plane.axis, snap, unit]);
+  }, [field, focus, litIndex, locked, plane.axis, gridSnap, unit]);
 
   // -----------------------------------------------------------------------
   // Pointer -> grid
@@ -2232,6 +2239,15 @@ export function LatticeSurface({
         commit();
         return;
       }
+      // [ and ] move the plane by one snap step — by the finest step with Alt,
+      // which is why they are answered before the Alt bail below. By code as
+      // well as key, because Alt changes the character some layouts produce.
+      const bracket = event.code === 'BracketLeft' ? '[' : event.code === 'BracketRight' ? ']' : key;
+      if ((bracket === '[' || bracket === ']') && !event.metaKey && !event.ctrlKey) {
+        event.preventDefault();
+        nudgeLatticePlane((bracket === ']' ? 1 : -1) * snap * (event.shiftKey ? 5 : 1));
+        return;
+      }
       if (event.metaKey || event.ctrlKey || event.altKey) return;
 
       if (key === 'escape') {
@@ -2251,11 +2267,6 @@ export function LatticeSurface({
           if (points.length >= 3) closePending(points);
           return [];
         });
-        return;
-      }
-      if (key === '[' || key === ']') {
-        event.preventDefault();
-        nudgeLatticePlane((key === ']' ? 1 : -1) * snap * (event.shiftKey ? 5 : 1));
         return;
       }
       if (key === 'x' || key === 'y' || key === 'z') {

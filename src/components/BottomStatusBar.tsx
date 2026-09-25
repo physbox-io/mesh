@@ -15,6 +15,7 @@ import { formatDuration } from '../utils/timeEstimate';
 import type { LatticeTool } from '../utils/latticeMesh';
 import type { SceneNode } from '../types/scene';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
+import { useModifier } from '../hooks/useModifier';
 
 /**
  * What the app is in the middle of, said in one phrase.
@@ -223,6 +224,7 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
   });
 
   const [modeMenuOpen, setModeMenuOpen] = useState(false);
+  const snapOff = useModifier('alt');
   useEscapeToClose(modeMenuOpen, () => setModeMenuOpen(false));
   // Gestures need something to act on: the body being modelled, or the body
   // selected in the scene. Sculpting has its own brushes in its own palette.
@@ -401,11 +403,23 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
                 <p className="px-2 py-1 text-[10px] leading-snug text-slate-400 dark:text-slate-500 border-t border-slate-100 dark:border-slate-800 mt-1">
                   Pick one, move the pointer to size it, then click to keep it, or Esc to put it back.
                   Measuring takes clicks instead: Esc puts the tape away.
+                  Hold Alt while dragging to turn snapping off.
                 </p>
               </div>
             </>
           )}
         </div>
+        {/* Alt turns every snap off — grid, floor, mates, slider stops. Said
+            out loud while it is held, because a drag that suddenly stops
+            landing on round numbers otherwise looks like a bug. */}
+        {snapOff && (
+          <span
+            className="px-2 py-0.5 rounded-md border font-semibold border-amber-300 bg-amber-50 text-amber-700 dark:border-amber-700/60 dark:bg-amber-950/40 dark:text-amber-300"
+            title="Alt is held: drags and sliders move freely (0.1 mm steps) instead of snapping to the grid, the floor or other parts."
+          >
+            Snap off
+          </span>
+        )}
       </div>
 
       {/* What it is cut on, and what out of */}
