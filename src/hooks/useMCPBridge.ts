@@ -902,10 +902,15 @@ export function useMCPBridge() {
         }
 
         case 'UPDATE_OBJECT': {
-          const targetId = typeof msg.targetId === 'string' ? msg.targetId : '';
+          const requestedId = typeof msg.targetId === 'string' ? msg.targetId : '';
           const updates = msg.updates as Partial<SceneNode> & { scad?: string };
-          if (!targetId) throw new Error('Missing object id');
+          if (!requestedId) throw new Error('Missing object id');
           if (!updates) throw new Error('Missing updates payload');
+          // The store edits by id alone and ignores one it doesn't know, which
+          // this handler then reported as ok:true.
+          const target = findNodeInScene(store.sceneGraph.nodes, requestedId);
+          if (!target) return { ok: false, error: `No object with id "${requestedId}"` };
+          const targetId = target.id;
 
           if (updates.scad !== undefined) {
             let compiled: Awaited<ReturnType<typeof compileSCAD>> | null = null;
@@ -2117,7 +2122,8 @@ export function useMCPBridge() {
 
         case 'TOGGLE_PLAY':
           store.togglePlay();
-          return { ok: true, isPlaying: store.isPlaying };
+          // `store` is the snapshot from before the toggle.
+          return { ok: true, isPlaying: useStore.getState().isPlaying };
 
         case 'PLAY':
           if (!store.isPlaying) store.togglePlay();
@@ -2135,6 +2141,10 @@ export function useMCPBridge() {
         case 'LOAD_PRESET': {
           const name = msg.preset as Parameters<typeof store.loadPreset>[0];
           if (!name) return { ok: false, error: 'Missing preset name' };
+          // loadPreset ignores a name it doesn't know, and this handler used to
+          // report ok and then clear the note cards and chat anyway.
+          const known = name.startsWith('user:') ? !!readUserPreset(name) : Object.hasOwn(PRESETS, name);
+          if (!known) return { ok: false, error: `No preset named "${name}". Call physics_list_presets for the valid names.` };
           store.loadPreset(name);
           getPhysicsWorkerClient().clearHistory();
           // Mirror App.tsx's loadPresetWithCard/loadUserPresetWithCard: replace
@@ -2287,7 +2297,9 @@ export function useMCPBridge() {
           let data: ArrayBuffer | string;
           try {
             if (typeof stlData === 'string' && stlData.startsWith('data:')) {
-              const b64 = stlData.split(',', 1)[1] || stlData;
+              // Not split(',', 1): its limit keeps only the first piece, so the
+              // payload was never found and every data URL failed to decode.
+              const b64 = stlData.slice(stlData.indexOf(',') + 1);
               const binary = atob(b64);
               const bytes = new Uint8Array(binary.length);
               for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
