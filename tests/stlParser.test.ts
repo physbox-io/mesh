@@ -296,3 +296,19 @@ describe('parseSTL array inference', () => {
     expect(r.scadCsg).toContain('p1_diameter');
   });
 });
+
+describe('telling binary from ASCII', () => {
+  it('reads a padded binary file whose header starts with "solid" as binary', () => {
+    const exact = writeBinarySTL(boxTris(0, 0, 0, 0.02, 0.02, 0.02));
+    // What some CAD exporters write: a "solid ..." header and a couple of bytes of padding.
+    const padded = new Uint8Array(exact.byteLength + 2);
+    padded.set(new Uint8Array(exact));
+    padded.set(new TextEncoder().encode('solid part exported'), 0);
+    const result = parseSTL(padded.buffer);
+    expect(result.faces.length / 3).toBe(12);
+  });
+
+  it('refuses a file with no triangles instead of importing nothing', () => {
+    expect(() => parseSTL(writeBinarySTL([]))).toThrow(/no triangles/);
+  });
+});

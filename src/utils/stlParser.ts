@@ -582,13 +582,31 @@ function translateWrap(offset: [number, number, number], body: string, indent: s
   return `${indent}translate([${offset.map(fmt).join(', ')}])\n${body.replace(/^/gm, '  ')}`;
 }
 
+/**
+ * A binary STL trimmed to exactly the length its header promises.
+ *
+ * three's STLLoader calls a file binary only when its size is exactly
+ * 84 + 50 * triangles; otherwise a file that starts with "solid" is read as
+ * ASCII. Several CAD exporters write binary files whose 80-byte header begins
+ * "solid" and pad the end by a few bytes, and those parsed as ASCII into zero
+ * triangles. An ASCII file can't pass this check: bytes 80-83 of text read as
+ * a count of millions of triangles, far past the end of the file.
+ */
+function asExactBinary(data: ArrayBuffer | string): ArrayBuffer | string {
+  if (typeof data === 'string' || data.byteLength < 84) return data;
+  const triangles = new DataView(data).getUint32(80, true);
+  const expected = 84 + 50 * triangles;
+  if (triangles > 0 && expected < data.byteLength) return data.slice(0, expected);
+  return data;
+}
+
 /** Parse STL data (ArrayBuffer or ASCII string) */
 export function parseSTL(
   data: ArrayBuffer | string,
   options: STLParseOptions = {}
 ): ParsedSTLResult {
   const loader = new STLLoader();
-  const geometry = loader.parse(data);
+  const geometry = loader.parse(asExactBinary(data));
   const positionAttr = geometry.attributes.position;
 
   if (!positionAttr) {
@@ -596,6 +614,11 @@ export function parseSTL(
   }
 
   const rawVerts = positionAttr.array as Float32Array;
+  // Said here rather than let through: an empty mesh reaches the model as
+  // MuJoCo's default 10 cm box, which looks like an import that worked.
+  if (rawVerts.length === 0) {
+    throw new Error('The file contains no triangles.');
+  }
 
   // Compute raw bounding box to check mm -> meter auto-scaling
   const rawBbox = computeBoundingBox(Array.from(rawVerts));
