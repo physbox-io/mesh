@@ -99,7 +99,7 @@ Every geom represents a collision and visual shape attached to a body:
     - cylinder: [radius, half_height]
     - ellipsoid: [radius_x, radius_y, radius_z]
   pos: [number, number, number] <- Optional local position offset [x, y, z]
-  rgba: [number, number, number, number] <- Color array [r, g, b, a] (0.0 to 1.0); the 4th value is ignored, every geom is drawn opaque
+  rgba: [number, number, number, number] <- Color array [r, g, b, a] (0.0 to 1.0); a below 1 draws the geom translucent
   mass: number <- Mass of the geom
   density: number <- Optional kg/m3 for what the geom is MADE OF; its volume then sets its mass. MuJoCo's default is 1000 (water). Ignored when mass is set. Oak ~700, pine ~500, concrete ~2400, steel ~7800; a tree crown or other mostly-air volume is single digits.
   friction: [number, number, number] <- Optional friction parameters [slide, spin, roll] (e.g. [1.0, 0.005, 0.0001])
