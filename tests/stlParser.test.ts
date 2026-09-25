@@ -312,3 +312,17 @@ describe('telling binary from ASCII', () => {
     expect(() => parseSTL(writeBinarySTL([]))).toThrow(/no triangles/);
   });
 });
+
+describe('recentring an import', () => {
+  it('stands a part authored far from the origin on the origin', () => {
+    const tris = boxTris(0.4, 0, -0.3, 0.02, 0.02, 0.02);
+    const raw = parseSTL(writeBinarySTL(tris));
+    const moved = parseSTL(writeBinarySTL(tris), { recentre: true });
+
+    expect(raw.boundingBox.center[0]).toBeCloseTo(0.4, 6);
+    expect(moved.boundingBox.center[0]).toBeCloseTo(0, 6);
+    expect(moved.boundingBox.center[1]).toBeCloseTo(0, 6);
+    expect(moved.boundingBox.min[2]).toBeCloseTo(0, 6);
+    expect(moved.boundingBox.size).toEqual(raw.boundingBox.size);
+  });
+});

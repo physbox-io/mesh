@@ -58,7 +58,7 @@ export const ImportStlModal: React.FC<ImportStlModalProps> = ({
 
     try {
       const buffer = await file.arrayBuffer();
-      const result = parseSTL(buffer, { name: file.name.replace(/\.stl$/i, '') });
+      const result = parseSTL(buffer, { name: file.name.replace(/\.stl$/i, ''), recentre: true });
       setParsed(result);
     } catch (err) {
       setError(`Failed to parse STL file: ${String(err)}`);

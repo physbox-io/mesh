@@ -16,6 +16,13 @@ export interface STLParseOptions {
   name?: string;
   scale?: number | [number, number, number];
   autoScaleMmToMeters?: boolean;
+  /**
+   * Move the part so its footprint is centred on the origin and it stands on
+   * z = 0. A file's own origin can be anywhere - often a corner of the CAD
+   * assembly, metres from the part - and the body's origin (its gizmo, its
+   * pivot, where it spawns) is wherever that was.
+   */
+  recentre?: boolean;
 }
 
 export interface BoundingBox {
@@ -639,6 +646,10 @@ export function parseSTL(
     scaleX = scaleY = scaleZ = 0.001;
   }
 
+  const [ox, oy, oz] = options.recentre
+    ? [rawBbox.center[0] * scaleX, rawBbox.center[1] * scaleY, rawBbox.min[2] * scaleZ]
+    : [0, 0, 0];
+
   // Deduplicate into an index buffer, keeping both conventions in sync.
   const yUpVerts: number[] = [];
   const zUpVerts: number[] = [];
@@ -646,9 +657,9 @@ export function parseSTL(
   const vertMap = new Map<string, number>();
 
   for (let i = 0; i < rawVerts.length; i += 3) {
-    const x = rawVerts[i] * scaleX;
-    const y = rawVerts[i + 1] * scaleY;
-    const z = rawVerts[i + 2] * scaleZ;
+    const x = rawVerts[i] * scaleX - ox;
+    const y = rawVerts[i + 1] * scaleY - oy;
+    const z = rawVerts[i + 2] * scaleZ - oz;
 
     // Weld on a 1µm grid. Rounding to an integer (rather than toFixed) matters:
     // a coordinate of -1e-16 — which any lathe-like STL produces at the seam
