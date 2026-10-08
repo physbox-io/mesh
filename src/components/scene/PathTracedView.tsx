@@ -1,15 +1,27 @@
 import { useEffect, useMemo, useRef } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
-import { WebGLPathTracer, ShapedAreaLight } from 'three-gpu-pathtracer';
+import { FullScreenQuad } from 'three/examples/jsm/postprocessing/Pass.js';
+import { WebGLPathTracer, ShapedAreaLight, DenoiseMaterial } from 'three-gpu-pathtracer';
 import { useStore } from '../../store/useStore';
 import { useViewQuality, usePathTraceStatus, type PathTracePhase } from '../../store/viewQualityStore';
 import { preToneMappedColor } from '../../utils/neutralToneMapping';
 
 /** How long the view has to hold still before tracing starts. */
 const SETTLE_MS = 350;
-/** Where it stops: past this the image barely changes, and the GPU goes idle. */
-const MAX_SAMPLES = 256;
+/**
+ * Where it stops and the GPU goes idle. 256 left grit the denoiser could not
+ * hide; grain falls as 1/sqrt(samples), so 512 takes twice as long for about
+ * 70% of that grain, and the denoiser smooths what is left.
+ */
+const MAX_SAMPLES = 512;
+/**
+ * The denoiser's blur, in pixels, and how different two pixels' colours can be
+ * (in linear light) and still be blurred together. Past the threshold the
+ * filter treats the step as an edge and leaves it alone.
+ */
+const DENOISE_SIGMA = 4;
+const DENOISE_THRESHOLD = 0.05;
 /** Angular radius of the key light's disc, seen from the origin. */
 const KEY_LIGHT_ANGULAR_RADIUS = 0.1;
 
@@ -38,7 +50,7 @@ export function PathTracedView({ background }: { background: string }) {
   const camera = useThree((s) => s.camera);
   const invalidate = useThree((s) => s.invalidate);
 
-  const pathTracer = useMemo(() => {
+  const engine = useMemo(() => {
     try {
       const pt = new WebGLPathTracer(gl);
       pt.renderDelay = 0;
@@ -50,12 +62,33 @@ export function PathTracedView({ background }: { background: string }) {
       pt.bounces = 5;
       // Softens the fireflies a glossy surface throws off at low sample counts.
       pt.filterGlossyFactor = 0.5;
-      return pt;
+      // Copied to the canvas through an edge-preserving blur rather than
+      // straight. Path-tracing grain falls only as 1/sqrt(samples), so halving
+      // it by brute force costs four times the samples; a bilateral filter
+      // smooths it out of the flat and gently curved surfaces that make up
+      // most of a part, and stops at any step in colour, which is where its
+      // edges and shadow lines are. The tracer's own quad still carries the
+      // fade-in, so its opacity and blending are copied across each frame.
+      const denoise = new DenoiseMaterial({ sigma: DENOISE_SIGMA, kSigma: 1, threshold: DENOISE_THRESHOLD });
+      const denoiseQuad = new FullScreenQuad(denoise);
+      pt.renderToCanvasCallback = (target, renderer, quad) => {
+        const fade = quad.material as THREE.ShaderMaterial & { opacity: number };
+        denoise.map = target.texture;
+        denoise.opacity = fade.opacity;
+        denoise.blending = fade.blending;
+        denoise.transparent = fade.opacity < 1;
+        const autoClear = renderer.autoClear;
+        renderer.autoClear = false;
+        denoiseQuad.render(renderer);
+        renderer.autoClear = autoClear;
+      };
+      return { pathTracer: pt, denoise, denoiseQuad };
     } catch (e) {
       console.error('[PathTracedView] could not start the path tracer', e);
       return null;
     }
   }, [gl]);
+  const pathTracer = engine?.pathTracer ?? null;
 
   const floor = useMemo(() => {
     const mesh = new THREE.Mesh(
@@ -88,12 +121,14 @@ export function PathTracedView({ background }: { background: string }) {
   useEffect(() => {
     const s = state.current;
     return () => {
-      pathTracer?.dispose();
+      engine?.pathTracer.dispose();
+      engine?.denoiseQuad.dispose();
+      engine?.denoise.dispose();
       floor.geometry.dispose();
       (floor.material as THREE.Material).dispose();
       for (const m of s.instanceMaterials) m.dispose();
     };
-  }, [pathTracer, floor]);
+  }, [engine, floor]);
 
   // A new backdrop colour is a new scene to trace.
   useEffect(() => {
