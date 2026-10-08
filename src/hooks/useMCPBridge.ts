@@ -788,7 +788,7 @@ export function useMCPBridge() {
       return {
         ok: false,
         error: 'The scene is prepared for casting with draft baked in, so that edit was not made. '
-          + 'Call physics_set_cast_prep with off:true to restore the original shapes, or bake:true to keep the drafted ones, then retry.',
+          + 'Call physics_set_cast_prep with off=true to restore the original shapes, or bake=true to keep the drafted ones, then retry.',
       };
     };
 
