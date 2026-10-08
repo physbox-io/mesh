@@ -3213,7 +3213,11 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
   bakeCastPrep: () => withCastPrepBypass(() => {
     const sg = get().sceneGraph;
     if (!sg.castPrep) return;
-    get().prepareForDiscreteChange();
+    // Not an undo step of its own. Baking changes no shape, only forgets the
+    // originals, so a step for it undid to a scene that looked identical and
+    // took a second Ctrl+Z to see anything happen. One undo now goes straight
+    // back to before the prep, which is the step the person can see.
+    get().flushPendingUndo();
     const newScene = cloneSceneGraph(sg);
     delete newScene.castPrep;
     set({ sceneGraph: newScene, castPrepGuardOpen: false });

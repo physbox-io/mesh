@@ -89,6 +89,16 @@ describe('Prepare for Casting in the store', () => {
     expect(useStore.getState().sceneGraph.nodes[0].pos).toEqual([0.1, 0, 0.01]);
   });
 
+  it('one undo after baking in goes back to before the prep', async () => {
+    await prep(2);
+    useStore.getState().bakeCastPrep();
+    await tick();
+    useStore.getState().undo();
+    const sg = useStore.getState().sceneGraph;
+    expect(sg.castPrep).toBeUndefined();
+    expect(sg.nodes[0].geoms[0].type).toBe('box');
+  });
+
   it('undoes the whole prep in one step', async () => {
     await prep(2);
     useStore.getState().undo();
