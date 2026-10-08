@@ -44,6 +44,7 @@ import {
 import { useModifier } from '../hooks/useModifier';
 import { dimensionMm, selectionBoundsMm } from '../utils/latticeCommands';
 import { splitHostAround, fuseFlushFaces, resolveExtrusion, unionOverlappingPieces } from '../utils/latticeSketch';
+import { creasedGeometry } from '../utils/creasedNormals';
 import type { SceneNode } from '../types/scene';
 
 /**
@@ -543,10 +544,14 @@ export function LatticeSurface({
    */
   const solid = useMemo(() => {
     const { renderVertices, faces, origin } = toSceneGeom(lattice, subdiv, thickness);
+    // Creased rather than computeVertexNormals(): one normal per welded vertex
+    // smears a flat face into its neighbour across every corner (see
+    // utils/creasedNormals). Nothing here keys to the surface's vertex numbers.
+    const { positions, normals, index } = creasedGeometry(renderVertices, faces);
     const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute('position', new THREE.Float32BufferAttribute(renderVertices, 3));
-    geometry.setIndex(faces);
-    geometry.computeVertexNormals();
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+    geometry.setIndex(new THREE.BufferAttribute(index, 1));
     return { geometry, origin };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lattice, revision, subdiv, thickness]);

@@ -32,6 +32,7 @@ import { sampleCatmullRom } from '../../utils/geom';
 import { resolveCsgGeoms } from '../../utils/csg';
 import { DEFAULT_UNIT } from '../../utils/latticeMesh';
 import { facesWatertight } from '../../utils/sculptMesh';
+import { creasedGeometry } from '../../utils/creasedNormals';
 import type { GeomType, SceneGraph, SceneNode } from '../../types/scene';
 import type { WeakSpot } from '../../utils/printAnalysis';
 import type { DataMirror, FrameFlagWindow, ModelMirror, MujocoShim, RenderGeom } from '../../types/sceneLayer';
@@ -407,17 +408,16 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
   );
   const paintLayer = geomEntry?.paint as PaintLayer | undefined;
   const showPaint = !!nodeId && isPaintable(type, !!node?.isWedge) && (paintMode || !!paintLayer);
-  // A boolean result is lit per triangle, not per vertex. Its arrays arrive
-  // with coincident vertices merged (the STL parser does that, and MuJoCo and
-  // the exporters want it so), and computeVertexNormals() on a shared-index
-  // mesh averages the flat face into the hole wall at every rim vertex. The
-  // long sliver triangles OpenSCAD fans from the rim out to the corners then
-  // smear that leaning normal across the whole face — the dark "X" over every
-  // drilled hole. flatShading takes the normal from screen-space derivatives
-  // in the fragment shader, so the geometry (and the paint keyed to its
-  // vertex indices) stays exactly as it is. The cost is that the hole's wall
-  // shows its facets, which is what it will look like printed anyway.
-  const flatShading = type === 'mesh' && geomEntry?.csgDerived === 'visual';
+  // A mesh is drawn with crease-aware normals (shadedGeometry below), not the
+  // single normal per vertex computeVertexNormals() gives a welded mesh. That
+  // one normal averages a flat face into the wall beside it at every corner and
+  // hole rim, and the long sliver triangles OpenSCAD and STL exporters fan from
+  // there smear it across the whole face: the dark "X" over enclosure walls and
+  // drilled plates. The creased copy splits vertices, though, and paint is keyed
+  // to the welded vertex indices, so while paint is showing the welded mesh is
+  // drawn with flatShading instead (normals from screen-space derivatives;
+  // facets show, but nothing smears).
+  const flatShading = type === 'mesh' && showPaint;
   const materialProps = useMemo(() => {
     const [r, g, b] = color ?? [0.8, 0.8, 0.8];
     return {
@@ -689,6 +689,22 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
     // the geometry actually changed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [type, vertices, faces, dent?.version]);
+  // What is actually drawn: the same triangles, split along creases so flat
+  // faces light flat and curved ones smooth (see flatShading above). Paint,
+  // the edge overlay and the open-sculpt inside wall keep the welded copy.
+  const shadedGeometry = useMemo(() => {
+    if (!meshBufferGeometry || showPaint) return meshBufferGeometry;
+    const welded = meshBufferGeometry.getAttribute('position').array;
+    const { positions, normals, index } = creasedGeometry(welded, meshBufferGeometry.getIndex()!.array);
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geo.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+    geo.setIndex(new THREE.BufferAttribute(index, 1));
+    return geo;
+  }, [meshBufferGeometry, showPaint]);
+  useEffect(() => () => {
+    if (shadedGeometry && shadedGeometry !== meshBufferGeometry) shadedGeometry.dispose();
+  }, [shadedGeometry, meshBufferGeometry]);
   /*
    * Whether this is a sculpt with a hole left open by the scissors.
    *
@@ -818,7 +834,7 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
     if (isDynamic) {
       return (
         <group name={nodeId} ref={meshRef} position={initialPos} quaternion={initialQuaternion}>
-          <mesh castShadow receiveShadow geometry={meshBufferGeometry} {...dragHandlers} {...paintHandlers}>
+          <mesh castShadow receiveShadow geometry={shadedGeometry!} {...dragHandlers} {...paintHandlers}>
             {renderedMaterial}
             {brushCursor}
           </mesh>
@@ -830,7 +846,7 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
     // Static mesh: vertices baked in Three.js world space — no position/rotation applied.
     return (
       <group name={nodeId}>
-        <mesh castShadow receiveShadow geometry={meshBufferGeometry} {...dragHandlers} {...paintHandlers}>
+        <mesh castShadow receiveShadow geometry={shadedGeometry!} {...dragHandlers} {...paintHandlers}>
           {renderedMaterial}
           {brushCursor}
         </mesh>
