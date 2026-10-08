@@ -91,6 +91,14 @@ export default defineConfig({
       }
     }
   },
+  worker: {
+    // ES modules, not Vite's default IIFE: a worker that splits into more than
+    // one chunk (a dynamic import, or a module shared with the page) cannot be
+    // built as an IIFE, and rolldown fails the whole production build over it.
+    // CI never runs a build, so this broke every deploy for days unseen. Every
+    // worker is already created with { type: 'module' }, which this needs.
+    format: 'es',
+  },
   optimizeDeps: {
     // Emscripten modules that find their .wasm by import.meta.url: pre-bundling
     // would move the glue and leave the URL pointing at nothing.
