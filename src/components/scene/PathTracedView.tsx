@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useRef } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 import { FullScreenQuad } from 'three/examples/jsm/postprocessing/Pass.js';
@@ -25,6 +25,61 @@ const DENOISE_THRESHOLD = 0.05;
 /** Angular radius of the key light's disc, seen from the origin. */
 const KEY_LIGHT_ANGULAR_RADIUS = 0.1;
 
+interface Engine {
+  pathTracer: WebGLPathTracer;
+  denoise: DenoiseMaterial;
+  denoiseQuad: FullScreenQuad;
+  floor: THREE.Mesh;
+}
+
+function createEngine(gl: THREE.WebGLRenderer): Engine | null {
+  try {
+    const pt = new WebGLPathTracer(gl);
+    pt.renderDelay = 0;
+    pt.minSamples = 1;
+    pt.fadeDuration = 300;
+    // The raster frame underneath is the composer's, drawn already; the
+    // tracer's own fallback would draw the live scene a second time, raw.
+    pt.rasterizeScene = false;
+    pt.bounces = 5;
+    // Softens the fireflies a glossy surface throws off at low sample counts.
+    pt.filterGlossyFactor = 0.5;
+    // Copied to the canvas through an edge-preserving blur rather than
+    // straight. Path-tracing grain falls only as 1/sqrt(samples), so halving
+    // it by brute force costs four times the samples; a bilateral filter
+    // smooths it out of the flat and gently curved surfaces that make up
+    // most of a part, and stops at any step in colour, which is where its
+    // edges and shadow lines are. The tracer's own quad still carries the
+    // fade-in, so its opacity and blending are copied across each frame.
+    const denoise = new DenoiseMaterial({ sigma: DENOISE_SIGMA, kSigma: 1, threshold: DENOISE_THRESHOLD });
+    const denoiseQuad = new FullScreenQuad(denoise);
+    pt.renderToCanvasCallback = (target, renderer, quad) => {
+      const fade = quad.material as THREE.ShaderMaterial & { opacity: number };
+      denoise.map = target.texture;
+      denoise.opacity = fade.opacity;
+      denoise.blending = fade.blending;
+      denoise.transparent = fade.opacity < 1;
+      const autoClear = renderer.autoClear;
+      renderer.autoClear = false;
+      denoiseQuad.render(renderer);
+      renderer.autoClear = autoClear;
+    };
+
+    const floor = new THREE.Mesh(
+      new THREE.PlaneGeometry(40, 40),
+      new THREE.MeshStandardMaterial({ roughness: 0.9, metalness: 0 }),
+    );
+    floor.rotation.x = -Math.PI / 2;
+    floor.updateMatrix();
+    floor.matrixAutoUpdate = false;
+
+    return { pathTracer: pt, denoise, denoiseQuad, floor };
+  } catch (e) {
+    console.error('[PathTracedView] could not start the path tracer', e);
+    return null;
+  }
+}
+
 /**
  * Render mode: path traces the scene whenever the view is still.
  *
@@ -46,60 +101,7 @@ const KEY_LIGHT_ANGULAR_RADIUS = 0.1;
  */
 export function PathTracedView({ background }: { background: string }) {
   const gl = useThree((s) => s.gl);
-  const scene = useThree((s) => s.scene);
-  const camera = useThree((s) => s.camera);
   const invalidate = useThree((s) => s.invalidate);
-
-  const engine = useMemo(() => {
-    try {
-      const pt = new WebGLPathTracer(gl);
-      pt.renderDelay = 0;
-      pt.minSamples = 1;
-      pt.fadeDuration = 300;
-      // The raster frame underneath is the composer's, drawn already; the
-      // tracer's own fallback would draw the live scene a second time, raw.
-      pt.rasterizeScene = false;
-      pt.bounces = 5;
-      // Softens the fireflies a glossy surface throws off at low sample counts.
-      pt.filterGlossyFactor = 0.5;
-      // Copied to the canvas through an edge-preserving blur rather than
-      // straight. Path-tracing grain falls only as 1/sqrt(samples), so halving
-      // it by brute force costs four times the samples; a bilateral filter
-      // smooths it out of the flat and gently curved surfaces that make up
-      // most of a part, and stops at any step in colour, which is where its
-      // edges and shadow lines are. The tracer's own quad still carries the
-      // fade-in, so its opacity and blending are copied across each frame.
-      const denoise = new DenoiseMaterial({ sigma: DENOISE_SIGMA, kSigma: 1, threshold: DENOISE_THRESHOLD });
-      const denoiseQuad = new FullScreenQuad(denoise);
-      pt.renderToCanvasCallback = (target, renderer, quad) => {
-        const fade = quad.material as THREE.ShaderMaterial & { opacity: number };
-        denoise.map = target.texture;
-        denoise.opacity = fade.opacity;
-        denoise.blending = fade.blending;
-        denoise.transparent = fade.opacity < 1;
-        const autoClear = renderer.autoClear;
-        renderer.autoClear = false;
-        denoiseQuad.render(renderer);
-        renderer.autoClear = autoClear;
-      };
-      return { pathTracer: pt, denoise, denoiseQuad };
-    } catch (e) {
-      console.error('[PathTracedView] could not start the path tracer', e);
-      return null;
-    }
-  }, [gl]);
-  const pathTracer = engine?.pathTracer ?? null;
-
-  const floor = useMemo(() => {
-    const mesh = new THREE.Mesh(
-      new THREE.PlaneGeometry(40, 40),
-      new THREE.MeshStandardMaterial({ roughness: 0.9, metalness: 0 }),
-    );
-    mesh.rotation.x = -Math.PI / 2;
-    mesh.updateMatrix();
-    mesh.matrixAutoUpdate = false;
-    return mesh;
-  }, []);
 
   const state = useRef({
     sceneSig: [] as number[],
@@ -114,21 +116,30 @@ export function PathTracedView({ background }: { background: string }) {
     instanceMaterials: [] as THREE.Material[],
   });
 
+  // The tracer, its denoiser and the floor are made in an effect and held in a
+  // ref, not returned from a hook: the frame callback reconfigures them as it
+  // goes, and a value returned from a hook is not ours to modify.
+  const engineRef = useRef<Engine | null>(null);
   useEffect(() => {
-    if (!pathTracer) useViewQuality.getState().setPathTrace(false);
-  }, [pathTracer]);
-
-  useEffect(() => {
+    const engine = createEngine(gl);
+    if (!engine) {
+      useViewQuality.getState().setPathTrace(false);
+      return;
+    }
+    engineRef.current = engine;
     const s = state.current;
     return () => {
-      engine?.pathTracer.dispose();
-      engine?.denoiseQuad.dispose();
-      engine?.denoise.dispose();
-      floor.geometry.dispose();
-      (floor.material as THREE.Material).dispose();
+      engineRef.current = null;
+      engine.pathTracer.dispose();
+      engine.denoiseQuad.dispose();
+      engine.denoise.dispose();
+      engine.floor.geometry.dispose();
+      (engine.floor.material as THREE.Material).dispose();
       for (const m of s.instanceMaterials) m.dispose();
+      s.instanceMaterials = [];
+      s.sceneDirty = true;
     };
-  }, [engine, floor]);
+  }, [gl]);
 
   // A new backdrop colour is a new scene to trace.
   useEffect(() => {
@@ -137,9 +148,13 @@ export function PathTracedView({ background }: { background: string }) {
     invalidate();
   }, [background, invalidate]);
 
-  useFrame(() => {
+  // gl, scene and camera from the frame's own state rather than from render,
+  // the same way GridFadeFollowsCamera reads them: this writes to the renderer.
+  useFrame(({ gl, scene, camera, invalidate }) => {
     const s = state.current;
-    if (!pathTracer) return;
+    const engine = engineRef.current;
+    if (!engine) return;
+    const { pathTracer, floor } = engine;
     const now = performance.now();
 
     const report = (phase: PathTracePhase, samples: number) => {
@@ -249,6 +264,22 @@ function collectBodies(scene: THREE.Scene): THREE.Mesh[] {
 }
 
 /**
+ * A number for each material, so a body switched to another material changes
+ * the signature. three gives every material an `id` at runtime, but its type
+ * declarations leave it out.
+ */
+const materialKeys = new WeakMap<THREE.Material, number>();
+let nextMaterialKey = 1;
+function materialKey(material: THREE.Material): number {
+  let key = materialKeys.get(material);
+  if (key === undefined) {
+    key = nextMaterialKey++;
+    materialKeys.set(material, key);
+  }
+  return key;
+}
+
+/**
  * Everything about the bodies that changes the picture, as numbers: where each
  * one is, which geometry and material it draws with, and their versions.
  */
@@ -259,7 +290,7 @@ function sceneSignature(bodies: THREE.Mesh[]): number[] {
     const position = mesh.geometry.getAttribute('position');
     sig.push(mesh.geometry.id, position ? (position as THREE.BufferAttribute).version : -1);
     const material = mesh.material as THREE.MeshStandardMaterial;
-    sig.push(material.id, material.version, material.color.r, material.color.g, material.color.b, material.opacity);
+    sig.push(materialKey(material), material.version, material.color.r, material.color.g, material.color.b, material.opacity);
     const instanced = mesh as THREE.InstancedMesh;
     if (instanced.isInstancedMesh) {
       sig.push(instanced.count, instanced.instanceMatrix.version, instanced.instanceColor?.version ?? -1);
