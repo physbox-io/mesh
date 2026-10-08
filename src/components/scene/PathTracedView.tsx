@@ -22,8 +22,17 @@ const MAX_SAMPLES = 512;
  */
 const DENOISE_SIGMA = 4;
 const DENOISE_THRESHOLD = 0.05;
-/** Angular radius of the key light's disc, seen from the origin. */
-const KEY_LIGHT_ANGULAR_RADIUS = 0.1;
+/**
+ * Angular radius of the key light's disc, seen from the origin: about a degree
+ * across, a little larger than the sun. Kept small so Render mode lights the
+ * scene the way the raster view does, whose key is a directional light, a
+ * point source. It was 0.1 rad (11 degrees across, a large softbox), and that
+ * changed the picture rather than refined it: a pendulum's few-millimetre rods
+ * swinging 200 mm up cast a penumbra ten times their width, so no core
+ * shadow at all, where the raster view drew a clear one. At this size the
+ * same rod's penumbra is about 4 mm.
+ */
+const KEY_LIGHT_ANGULAR_RADIUS = 0.01;
 
 interface Engine {
   pathTracer: WebGLPathTracer;
@@ -95,9 +104,10 @@ function createEngine(gl: THREE.WebGLRenderer): Engine | null {
  * cast shadows with a standard material), drawn with their own geometry and
  * materials at their world transforms; a real floor in place of the grid and
  * shadow catcher, which a path tracer cannot draw; and a disc-shaped area light
- * standing in for the key light. A directional light is a point source to a path
- * tracer and casts hard shadows; the disc gives the soft, contact-hardening
- * shadows the raster view cannot. The studio environment is the live one.
+ * standing in for the key light. A directional light is a true point to a path
+ * tracer; a small disc casts the shadows the raster view does, in the same
+ * places and the same shape, with an edge that softens a little with height.
+ * The studio environment is the live one.
  */
 export function PathTracedView({ background }: { background: string }) {
   const gl = useThree((s) => s.gl);

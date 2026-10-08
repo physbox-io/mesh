@@ -2836,8 +2836,7 @@ function App() {
             {/* Hi-Res doubles the map (about 0.4mm per texel) and widens the
                 PCF filter to soften the shadow's edge. Only so far: three r184
                 filters with five taps rotated per pixel, so a wider radius goes
-                grainy rather than softer. Shadows that soften with distance
-                are the Render mode's — see PathTracedView. */}
+                grainy rather than softer. */}
             <directionalLight
               ref={keyLightRef}
               position={[1.5, 3, 1.5]}
