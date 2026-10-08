@@ -64,6 +64,15 @@ jobs:
       - name: Test
         run: npm run test
 
+      # The same `vite build` the Cloud Build image runs. Nothing above bundles
+      # anything - the dev server and vitest both skip the production bundler -
+      # so an error only it raises (circular worker imports; workers that
+      # cannot be IIFE) passed every step here, and the deploy then failed in
+      # Cloud Build for weeks with main green. Last, because it is the cheapest
+      # to be told about after the others.
+      - name: Build
+        run: npm run build:image
+
   # Hands the tested commit to Cloud Build. The trigger watches `deploy`.
   deploy:
     needs: test

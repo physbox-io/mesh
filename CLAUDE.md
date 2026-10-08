@@ -16,10 +16,13 @@ things that are easy to get wrong and expensive to discover.
 | Lint | `npm run lint` |
 | Export presets for the native app | `npm run export:presets` |
 
-CI runs typecheck, lint and the suite on every push to `main` and every PR
-(`.github/workflows/test.yml`); a green push to `main` force-pushes that commit
-to the `deploy` branch, which is the only thing Cloud Build builds. Anything you
-add to the gate has to be one of those three npm scripts.
+CI runs typecheck, lint, the suite and a production build (`npm run build:image`)
+on every push to `main` and every PR (`.github/workflows/test.yml`); a green push
+to `main` force-pushes that commit to the `deploy` branch, which is the only thing
+Cloud Build builds. Anything you add to the gate has to be one of those npm
+scripts. The build step is there because nothing else bundles: twice a
+worker-bundling error passed CI and failed every Cloud Build for days. Green CI
+is still not a deploy - check `gcloud builds list` after a push to `main`.
 
 **`npx tsc --noEmit` checks nothing here.** The root `tsconfig.json` is
 `{"files": [], "references": [...]}`, so without `-b` the compiler is handed no inputs,
