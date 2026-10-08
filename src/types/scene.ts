@@ -598,6 +598,40 @@ export interface SceneGraph {
    * name the file they write.
    */
   name?: string;
+  /**
+   * Set while "Prepare for casting" is on (see utils/castPrep.ts): every part
+   * has had its edges broken and, for sand, its walls drafted. Kept on the
+   * graph so undo, save and reload all carry the originals with the change.
+   */
+  castPrep?: CastPrep;
+}
+
+/**
+ * What "Prepare for casting" did to the scene, and what it overwrote.
+ *
+ * Edges go on as ordinary parametric roundings. Draft cannot be parametric, so
+ * when there is any the drafted shape is BAKED into each body as mesh geoms,
+ * and the scene is guarded against edits until it is switched off or baked in.
+ */
+export interface CastPrep {
+  /** Taper on the walls, degrees. 0 when there is none (lost PLA, or draft off). */
+  draftDeg: number;
+  /** 'add' grows walls toward the parting plane; 'remove' shrinks them away from it. */
+  draftMode: 'add' | 'remove';
+  /** World height (m) of the parting plane the draft tapers from. */
+  partingZ: number;
+  /** The edge sizes asked for, mm; null when edges were left alone. */
+  edges: { chamferMm: number; filletMm: number } | null;
+  /**
+   * Per touched body: its shape fields as they were, and a signature of what
+   * prep left there, so switching off puts back only bodies nobody has since
+   * changed.
+   */
+  originals: Record<string, { shape: Partial<SceneNode>; signature: string }>;
+  /** Bodies prep could not treat, and why. */
+  skipped: { nodeId: string; name: string; reason: string }[];
+  /** Edges left sharp across the scene because they were too short to take a break. */
+  sharpEdges: number;
 }
 
 /**

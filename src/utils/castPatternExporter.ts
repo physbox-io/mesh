@@ -31,8 +31,10 @@
 // in sand the only geometry rule is that it draws. Everything here is
 // millimetres, and for sand the pull is straight up (+Z) from a flat parting
 // plane, which suits the flat-backed, convex-ish patterns that route is for.
-// Undercuts are reported, not fixed: adding draft is a modelling job, and the
-// walkthrough says how much to add.
+// Undercuts are reported here, not fixed. Draft and edge breaks are put into the
+// model itself by "Prepare for casting" (utils/castPrep.ts), so the plain STL
+// export carries them too; this reads `scene.castPrep` only to part where the
+// draft was tapered from.
 
 import type { SceneGraph } from '../types/scene';
 import { collectSceneTriangles } from './contourSliceExporter';
@@ -106,8 +108,6 @@ export interface CastOptions {
   riserDiaMm: number;
   /** A riser feeds shrinkage; leave it off only for the thinnest, flattest parts. */
   addRiser: boolean;
-  /** Draft the walkthrough recommends on vertical walls, for the report. */
-  recommendedDraftDeg: number;
 }
 
 export const DEFAULT_CAST_OPTIONS: CastOptions = {
@@ -118,7 +118,6 @@ export const DEFAULT_CAST_OPTIONS: CastOptions = {
   sprueDiaMm: 0,
   riserDiaMm: 0,
   addRiser: true,
-  recommendedDraftDeg: 2,
 };
 
 export interface CastSummary {
@@ -153,6 +152,12 @@ export interface CastSummary {
    */
   gateAtMm: { x: number; y: number };
   partingFromBaseMm: number;
+  /** The parting plane as a world height, metres — what castPrep tapers draft from. */
+  partingWorldZ: number;
+  /** Draft the model carries from "Prepare for casting", degrees; 0 for none. */
+  draftDeg: number;
+  /** Edge breaks the model carries from it, mm; null for none. */
+  edgesMm: { chamferMm: number; filletMm: number } | null;
   pourC: number;
   /**
    * Share of the part's volume that overhangs a straight upward pull. In sand
@@ -383,6 +388,9 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
       riserDiaMm: 0,
       gateAtMm: { x: 0, y: 0 },
       partingFromBaseMm: 0,
+      partingWorldZ: 0,
+      draftDeg: scene.castPrep?.draftDeg ?? 0,
+      edgesMm: scene.castPrep?.edges ?? null,
       pourC: metal.pourC,
       undrawablePercent: 0,
       flaskDiaMm: 0,
@@ -499,7 +507,12 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
   // the plane height, so the minimum sits at or very near one of them, and the
   // scan costs one pass over an already-sampled grid.
   let parting: number;
-  if (opts.partingFromBaseMm === 'auto') {
+  const preppedDraft = scene.castPrep && scene.castPrep.draftDeg > 0 ? scene.castPrep : null;
+  if (opts.partingFromBaseMm === 'auto' && preppedDraft) {
+    // The walls were tapered away from one plane; parting anywhere else puts
+    // the drafted walls the wrong way round on one side of it.
+    parting = Math.min(partH, Math.max(0, preppedDraft.partingZ * 1000 - mnZ));
+  } else if (opts.partingFromBaseMm === 'auto') {
     parting = 0;
     let bestTrapped = trappedAt(0);
     // Only move off the base for a real improvement: a flat-backed pattern is
@@ -526,8 +539,11 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
   if (undrawablePercent > 1 && !lostPla) {
     warnings.push(
       `About ${undrawablePercent.toFixed(0)}% of the part overhangs the upward pull, so the pattern ` +
-        `will not draw cleanly from the sand there. Add ${opts.recommendedDraftDeg}° draft to the walls, ` +
-        `move the parting plane, or switch to Lost PLA and burn the pattern out instead of pulling it.`
+        (preppedDraft
+          ? `will not draw cleanly from the sand there. The walls already carry ${preppedDraft.draftDeg}° of draft, ` +
+            `so what is left is an undercut that draft cannot fix: change the shape, or switch to Lost PLA.`
+          : `will not draw cleanly from the sand there. Turn on Prepare for Casting to add draft, ` +
+            `move the parting plane, or switch to Lost PLA and burn the pattern out instead of pulling it.`)
     );
   }
 
@@ -968,6 +984,9 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
       riserDiaMm: opts.addGating && riserWanted ? riserDia : 0,
       gateAtMm: opts.addGating ? { x: gateAt.x, y: gateAt.y } : { x: 0, y: 0 },
       partingFromBaseMm: lostPla ? 0 : parting,
+      partingWorldZ: (mnZ + parting) / 1000,
+      draftDeg: scene.castPrep?.draftDeg ?? 0,
+      edgesMm: scene.castPrep?.edges ?? null,
       pourC: metal.pourC,
       undrawablePercent,
       flaskDiaMm,

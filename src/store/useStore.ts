@@ -1,7 +1,8 @@
 import { create, type StateCreator } from 'zustand';
 import { shareUnchanged } from '../utils/shareUnchanged';
 import * as THREE from 'three';
-import type { SceneGraph, SceneNode, SceneGeom, SceneJoint, GeomType, CsgOp, EdgeRoundFeature, RoundEdge } from '../types/scene';
+import type { SceneGraph, SceneNode, SceneGeom, SceneJoint, GeomType, CsgOp, EdgeRoundFeature, RoundEdge, CastPrep } from '../types/scene';
+import { bakeDraftInto, copyPrep, restoreShape, shapeSignature, unprepScene, type DraftParams } from '../utils/castPrep';
 import { hasEdgeRounds, reconcileEdgeRounds, withRoundFeature, withoutEdges } from '../utils/edgeRound';
 import type { DataMirror, ModelMirror } from '../types/sceneLayer';
 import { type CombineOp, cageInFrame, geomsForCombine, nodeWorldMatrix } from '../utils/combineBodies';
@@ -248,6 +249,46 @@ let pendingForceReset = false;
  * on every tick of every slider drag.
  */
 let historyDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+/*
+ * The Cast-prep edit guard. While draft is baked into the scene (see CastPrep),
+ * an edit to any body is turned away and the guard modal opened in its place,
+ * because the edit would land on the drafted shape and switching prep off
+ * would then have nothing to put back.
+ *
+ * A user edit is a write that follows recordInteraction or
+ * prepareForDiscreteChange in the same tick — everything that writes to the
+ * scene calls one of them first (see prepareForDiscreteChange). Internal writes,
+ * a compile landing, do not, and are let through.
+ */
+let userEditPending = false;
+let userEditTimer: ReturnType<typeof setTimeout> | null = null;
+/** Nonzero while prep itself is writing: switching off, baking in, undo, redo. */
+let castPrepBypass = 0;
+/** Graphs the guard refused, so an action's own recompile of one is not built. */
+const refusedGraphs = new WeakSet<SceneGraph>();
+
+function markUserEdit() {
+  userEditPending = true;
+  if (userEditTimer) clearTimeout(userEditTimer);
+  userEditTimer = setTimeout(() => { userEditPending = false; userEditTimer = null; }, 0);
+}
+
+function withCastPrepBypass<T>(fn: () => T): T {
+  castPrepBypass++;
+  try { return fn(); } finally { castPrepBypass--; }
+}
+
+/** Whether the scene has draft baked in, and so is guarded against edits. */
+export function castPrepArmed(sg: SceneGraph | null | undefined): boolean {
+  return !!sg?.castPrep && sg.castPrep.draftDeg > 0;
+}
+
+/** After shareUnchanged: did any body change? Notes and other scene fields do not count. */
+function bodiesChanged(prev: SceneGraph, next: SceneGraph): boolean {
+  const a = prev.nodes || [], b = next.nodes || [];
+  return a.length !== b.length || b.some((n, i) => n !== a[i]);
+}
 
 /**
  * WASM linear memory reserved as of the last build the worker reported.
@@ -1175,6 +1216,13 @@ function writeEdgeRounds(
   const newScene = cloneSceneGraph(get().sceneGraph);
   const node = findNode(newScene.nodes, nodeId);
   if (!node) return;
+  setNodeEdgeRounds(node, features);
+  set({ sceneGraph: newScene });
+  if (rebuild) rebuildAfterGeomEdit(get, newScene, nodeId);
+}
+
+/** writeEdgeRounds' edit to the node itself, on a graph the caller has cloned. */
+function setNodeEdgeRounds(node: SceneNode, features: EdgeRoundFeature[]) {
   if (features.length > 0) node.edgeRounds = features; else delete node.edgeRounds;
   delete node.edgeRoundsLost;
   if (hasBooleanOps(node)) {
@@ -1185,8 +1233,6 @@ function writeEdgeRounds(
     node.geoms = (node.geoms || []).filter((g: SceneGeom) => !g.csgDerived);
     delete node.csgHash;
   }
-  set({ sceneGraph: newScene });
-  if (rebuild) rebuildAfterGeomEdit(get, newScene, nodeId);
 }
 
 function reshapeCut(
@@ -1658,6 +1704,30 @@ export interface PhysicsState {
   /** The compiler found some rounded edges gone from the part: keep the rest, and say how many went. */
   dropLostEdgeRounds: (nodeId: string, features: EdgeRoundFeature[], lost: number) => void;
 
+  // --- Prepare for casting (utils/castPrep.ts, driven by castPrepRunner) ---
+  /** What the running prep is doing, for the modal; null when none is running. */
+  castPrepBusy: string | null;
+  setCastPrepBusy: (busy: string | null) => void;
+  /** The guard modal: an edit was turned away because draft is baked in. */
+  castPrepGuardOpen: boolean;
+  /** Counts edits the guard turned away, so a caller can tell its own was one. */
+  castPrepBlocked: number;
+  closeCastPrepGuard: () => void;
+  /** Starts prep: one undo step for all of it, and the originals on the graph. */
+  beginCastPrep: (prep: CastPrep) => void;
+  /** Puts prep's roundings on, no undo step of its own. The caller compiles them. */
+  writeCastPrepEdges: (features: Record<string, EdgeRoundFeature[]>) => void;
+  /** Bodies whose roundings would not compile: back to how they were, still in prep for draft. */
+  revertCastPrepEdges: (failed: { id: string; reason: string }[]) => void;
+  /** Bakes draft into every prepped body. */
+  bakeCastPrepDraft: (params: DraftParams) => void;
+  /** Records what prep did, and fingerprints each body as prep left it. */
+  finishCastPrep: (patch: Partial<Pick<CastPrep, 'edges' | 'sharpEdges'>>) => void;
+  /** Switches prep off: each body nobody has changed since gets its originals back. */
+  clearCastPrep: () => { restored: string[]; kept: { id: string; name: string }[] };
+  /** Keeps the prepped shapes as the model, and forgets the originals. */
+  bakeCastPrep: () => void;
+
   // --- Lattice modelling ---------------------------------------------------
   //
   // The state here is the state of the TOOL, not of the shape: the shape lives
@@ -1994,12 +2064,21 @@ function snapForGridMm(mm: number): SnapMultiple {
 const sharingUnchangedNodes = (config: StateCreator<PhysicsState>): StateCreator<PhysicsState> =>
   (rawSet, get, api) => {
     const set = ((partial: Parameters<typeof rawSet>[0], replace?: boolean) => {
-      const patch = typeof partial === 'function' ? partial(get()) : partial;
+      let patch = typeof partial === 'function' ? partial(get()) : partial;
       if (patch && 'sceneGraph' in patch && patch.sceneGraph) {
         // Clashing body and geom names renamed by the compiler's rule, so the
         // graph the viewport draws from names what the model holds.
+        const offered = patch.sceneGraph;
         patch.sceneGraph = withUniqueNames(patch.sceneGraph);
-        shareUnchanged(get().sceneGraph, patch.sceneGraph);
+        const prev = get().sceneGraph;
+        shareUnchanged(prev, patch.sceneGraph);
+        if (userEditPending && castPrepBypass === 0 && castPrepArmed(prev) && bodiesChanged(prev, patch.sceneGraph)) {
+          // Turned away: the rest of the patch (selection and the like) still applies.
+          refusedGraphs.add(offered);
+          refusedGraphs.add(patch.sceneGraph);
+          const { sceneGraph: _refused, ...rest } = patch;
+          patch = { ...rest, castPrepGuardOpen: true, castPrepBlocked: get().castPrepBlocked + 1 } as typeof patch;
+        }
       }
       (rawSet as (p: typeof patch, r?: boolean) => void)(patch, replace);
     }) as typeof rawSet;
@@ -2020,6 +2099,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
 
   // History Actions
   recordInteraction: (type: string) => {
+    markUserEdit();
     const state = get();
     if (state.lastInteractionType && state.lastInteractionType !== type) {
       state.flushPendingUndo();
@@ -2107,6 +2187,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
    * so a run of them still gets one entry each rather than being swallowed.
    */
   prepareForDiscreteChange: () => {
+    markUserEdit();
     get().flushPendingUndo();
     const { sceneGraph, gravityZ, windX, windY, density, floorFriction, floorBounce, selectedNodeId, latticeNodeId } = get();
     const snapshot: UndoRedoState = {
@@ -2128,84 +2209,90 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
   },
 
   undo: () => {
-    get().flushPendingUndo();
-    const { undoStack, redoStack, sceneGraph, gravityZ, windX, windY, density, floorFriction, floorBounce, selectedNodeId, latticeNodeId } = get();
-    if (undoStack.length === 0) return;
+    if (get().castPrepBusy) return;
+    withCastPrepBypass(() => {
+      get().flushPendingUndo();
+      const { undoStack, redoStack, sceneGraph, gravityZ, windX, windY, density, floorFriction, floorBounce, selectedNodeId, latticeNodeId } = get();
+      if (undoStack.length === 0) return;
 
-    const previousState = undoStack[undoStack.length - 1];
-    const newUndoStack = undoStack.slice(0, -1);
+      const previousState = undoStack[undoStack.length - 1];
+      const newUndoStack = undoStack.slice(0, -1);
 
-    const currentStateSnapshot: UndoRedoState = {
-      sceneGraph: cloneSceneGraph(sceneGraph),
-      gravityZ,
-      windX,
-      windY,
-      density,
-      floorFriction,
-      floorBounce,
-      selectedNodeId,
-      latticeNodeId,
-    };
+      const currentStateSnapshot: UndoRedoState = {
+        sceneGraph: cloneSceneGraph(sceneGraph),
+        gravityZ,
+        windX,
+        windY,
+        density,
+        floorFriction,
+        floorBounce,
+        selectedNodeId,
+        latticeNodeId,
+      };
 
-    set({
-      sceneGraph: previousState.sceneGraph,
-      gravityZ: previousState.gravityZ,
-      windX: previousState.windX,
-      windY: previousState.windY,
-      density: previousState.density,
-      floorFriction: previousState.floorFriction,
-      floorBounce: previousState.floorBounce,
-      selectedNodeId: previousState.selectedNodeId,
-      // The tools follow the document back. A body that has just stopped
-      // existing cannot be the one being modelled, and the editor holding its
-      // own copy of the cage is exactly how a ghost gets committed back in.
-      ...latticeAfterUndo(previousState),
-      undoStack: newUndoStack,
-      redoStack: [...redoStack, currentStateSnapshot],
-      isPlaying: false
+      set({
+        sceneGraph: previousState.sceneGraph,
+        gravityZ: previousState.gravityZ,
+        windX: previousState.windX,
+        windY: previousState.windY,
+        density: previousState.density,
+        floorFriction: previousState.floorFriction,
+        floorBounce: previousState.floorBounce,
+        selectedNodeId: previousState.selectedNodeId,
+        // The tools follow the document back. A body that has just stopped
+        // existing cannot be the one being modelled, and the editor holding its
+        // own copy of the cage is exactly how a ghost gets committed back in.
+        ...latticeAfterUndo(previousState),
+        undoStack: newUndoStack,
+        redoStack: [...redoStack, currentStateSnapshot],
+        isPlaying: false
     });
 
     get().recompile(previousState.sceneGraph, previousState.selectedNodeId, true, true);
     rebuildBooleansAfterRestore();
+    });
   },
 
   redo: () => {
-    get().flushPendingUndo();
-    const { undoStack, redoStack, sceneGraph, gravityZ, windX, windY, density, floorFriction, floorBounce, selectedNodeId, latticeNodeId } = get();
-    if (redoStack.length === 0) return;
+    if (get().castPrepBusy) return;
+    withCastPrepBypass(() => {
+      get().flushPendingUndo();
+      const { undoStack, redoStack, sceneGraph, gravityZ, windX, windY, density, floorFriction, floorBounce, selectedNodeId, latticeNodeId } = get();
+      if (redoStack.length === 0) return;
 
-    const nextState = redoStack[redoStack.length - 1];
-    const newRedoStack = redoStack.slice(0, -1);
+      const nextState = redoStack[redoStack.length - 1];
+      const newRedoStack = redoStack.slice(0, -1);
 
-    const currentStateSnapshot: UndoRedoState = {
-      sceneGraph: cloneSceneGraph(sceneGraph),
-      gravityZ,
-      windX,
-      windY,
-      density,
-      floorFriction,
-      floorBounce,
-      selectedNodeId,
-      latticeNodeId,
-    };
+      const currentStateSnapshot: UndoRedoState = {
+        sceneGraph: cloneSceneGraph(sceneGraph),
+        gravityZ,
+        windX,
+        windY,
+        density,
+        floorFriction,
+        floorBounce,
+        selectedNodeId,
+        latticeNodeId,
+      };
 
-    set({
-      sceneGraph: nextState.sceneGraph,
-      gravityZ: nextState.gravityZ,
-      windX: nextState.windX,
-      windY: nextState.windY,
-      density: nextState.density,
-      floorFriction: nextState.floorFriction,
-      floorBounce: nextState.floorBounce,
-      selectedNodeId: nextState.selectedNodeId,
-      ...latticeAfterUndo(nextState),
-      undoStack: [...undoStack, currentStateSnapshot],
-      redoStack: newRedoStack,
-      isPlaying: false
+      set({
+        sceneGraph: nextState.sceneGraph,
+        gravityZ: nextState.gravityZ,
+        windX: nextState.windX,
+        windY: nextState.windY,
+        density: nextState.density,
+        floorFriction: nextState.floorFriction,
+        floorBounce: nextState.floorBounce,
+        selectedNodeId: nextState.selectedNodeId,
+        ...latticeAfterUndo(nextState),
+        undoStack: [...undoStack, currentStateSnapshot],
+        redoStack: newRedoStack,
+        isPlaying: false
     });
 
     get().recompile(nextState.sceneGraph, nextState.selectedNodeId, true, true);
     rebuildBooleansAfterRestore();
+    });
   },
 
   isPlaying: false,
@@ -3050,6 +3137,87 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     get().prepareForDiscreteChange();
     writeEdgeRounds(get, set, nodeId, withoutEdges(node.edgeRounds, edges));
   },
+
+  castPrepBusy: null,
+  setCastPrepBusy: (busy) => set({ castPrepBusy: busy }),
+  castPrepGuardOpen: false,
+  castPrepBlocked: 0,
+  closeCastPrepGuard: () => set({ castPrepGuardOpen: false }),
+  beginCastPrep: (prep) => {
+    get().prepareForDiscreteChange();
+    const newScene = cloneSceneGraph(get().sceneGraph);
+    newScene.castPrep = prep;
+    set({ sceneGraph: newScene });
+  },
+  writeCastPrepEdges: (features) => {
+    const newScene = cloneSceneGraph(get().sceneGraph);
+    for (const [id, list] of Object.entries(features)) {
+      const node = findNode(newScene.nodes, id);
+      if (node) setNodeEdgeRounds(node, list);
+    }
+    set({ sceneGraph: newScene });
+  },
+  revertCastPrepEdges: (failed) => {
+    const sg = get().sceneGraph;
+    if (!sg.castPrep || failed.length === 0) return;
+    const newScene = cloneSceneGraph(sg);
+    const prep = copyPrep(sg.castPrep);
+    for (const { id, reason } of failed) {
+      const node = findNode(newScene.nodes, id);
+      const entry = prep.originals[id];
+      if (!node || !entry) continue;
+      restoreShape(node, entry.shape);
+      prep.skipped.push({ nodeId: id, name: node.name, reason });
+    }
+    newScene.castPrep = prep;
+    set({ sceneGraph: newScene });
+  },
+  bakeCastPrepDraft: (params) => {
+    const sg = get().sceneGraph;
+    if (!sg.castPrep) return;
+    const newScene = cloneSceneGraph(sg);
+    const prep = copyPrep(sg.castPrep);
+    bakeDraftInto(newScene, prep, params);
+    prep.draftDeg = params.deg;
+    prep.draftMode = params.mode;
+    prep.partingZ = params.partingZ;
+    newScene.castPrep = prep;
+    set({ sceneGraph: newScene });
+    get().recompile(newScene, undefined, true);
+  },
+  finishCastPrep: (patch) => {
+    const sg = get().sceneGraph;
+    if (!sg.castPrep) return;
+    const newScene = cloneSceneGraph(sg);
+    const prep = { ...copyPrep(sg.castPrep), ...patch };
+    for (const [id, entry] of Object.entries(prep.originals)) {
+      const node = findNode(newScene.nodes, id);
+      if (node) entry.signature = shapeSignature(node);
+    }
+    newScene.castPrep = prep;
+    set({ sceneGraph: newScene });
+  },
+  clearCastPrep: () => withCastPrepBypass(() => {
+    const sg = get().sceneGraph;
+    if (!sg.castPrep) return { restored: [], kept: [] };
+    get().prepareForDiscreteChange();
+    const newScene = cloneSceneGraph(sg);
+    const result = unprepScene(newScene);
+    set({ sceneGraph: newScene, castPrepGuardOpen: false });
+    get().recompile(newScene, undefined, true);
+    // A restored boolean comes back with the mesh it had; one whose mesh the
+    // compiler since replaced is rebuilt here rather than left to chance.
+    rebuildBooleansAfterRestore();
+    return result;
+  }),
+  bakeCastPrep: () => withCastPrepBypass(() => {
+    const sg = get().sceneGraph;
+    if (!sg.castPrep) return;
+    get().prepareForDiscreteChange();
+    const newScene = cloneSceneGraph(sg);
+    delete newScene.castPrep;
+    set({ sceneGraph: newScene, castPrepGuardOpen: false });
+  }),
   setMeasureMode: (mode) => set((state) => (state.measureMode === mode ? {} : { measureMode: mode })),
   gizmoMode: 'translate',
   setGizmoMode: (mode) => set((state) => (state.gizmoMode === mode ? {} : { gizmoMode: mode })),
@@ -4920,6 +5088,9 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
   },
   
   recompile: async (overrideScene?: SceneGraph, overrideSelectedId?: string | null, forceReset?: boolean, _keepPreset?: boolean, settle?: boolean, immediate?: boolean) => {
+    // An edit the Cast-prep guard turned away never reached the store; its
+    // action's own rebuild must not build it either.
+    if (overrideScene && refusedGraphs.has(overrideScene)) return;
     /*
      * We only debounce if it's NOT a force reset (which is used by presets/loaders).
      *

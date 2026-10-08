@@ -319,6 +319,31 @@ is what makes it cheap: the drawn mesh, the colliders, mass and every exporter g
 
 ---
 
+### Prepare for Casting (draft and edge breaks)
+
+The Cast dialog's **Prepare for Casting** switch (and `SET_CAST_PREP`) puts what a pattern needs onto
+every part, in the model itself, so the viewport and the plain STL export carry it too.
+`utils/castPrep.ts` is the pure half and `utils/castPrepRunner.ts` drives it through the store.
+
+* **Edges first, as ordinary roundings.** Outside edges get a chamfer and inside corners a fillet 1.5×
+  as big, sized per edge (`planEdgeRounds`) so one short edge does not cap the rest. For sand, the
+  parting face's edges stay sharp, because a break there leaves sand overhanging it.
+* **Then draft, baked in.** Draft has no parametric form, so each body's drawn shape (roundings
+  included) becomes mesh geoms (`draftTriangles`). Every vertex moves sideways by an amount that is
+  linear in its distance from the parting plane, along a miter of the walls around it. That leans
+  outside walls out toward the plane and pocket walls in toward their floor. Lost PLA gets no draft.
+* **Originals are on the graph.** `sceneGraph.castPrep.originals` holds each body's shape fields
+  (`SHAPE_KEYS`, the generator flags included, so that a baked wedge is not regenerated). Switching
+  off restores a body only if its `shapeSignature` still matches what prep left there; otherwise the
+  body is kept as it is and named. The whole prep is one undo step.
+* **Edits are refused while draft is baked in.** The store's set middleware drops a scene write that
+  changes a body when it follows `recordInteraction` or `prepareForDiscreteChange` in the same tick,
+  and opens `CastPrepGuardModal` (Cancel / Leave Casting Prep / Bake It In). Internal writes, such as
+  a compile landing, are let through. Over MCP, the command fails and its error names the way out.
+  Prep with edges only is not guarded, because its roundings are still editable.
+
+---
+
 ### Dynamic mesh geoms (`dynamic: true`)
 
 Full physics simulation and collision. MuJoCo takes the **convex hull** of the mesh — so a concave

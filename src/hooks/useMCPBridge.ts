@@ -39,6 +39,7 @@ import {
 } from '../utils/latticeCommands';
 import { measureInScene } from '../utils/measureScene';
 import { generateCastPattern, DEFAULT_CAST_OPTIONS, type CastMethod } from '../utils/castPatternExporter';
+import { runCastPrep } from '../utils/castPrepRunner';
 import { generateSolidMachining, DEFAULT_SOLID_OPTIONS } from '../utils/solidMachiningExporter';
 import type { Object3D } from 'three';
 import type { SceneNode, SceneGeom, SceneJoint } from '../types/scene';
@@ -744,7 +745,7 @@ export function useMCPBridge() {
 
         let result: unknown;
         try {
-          result = handle(cmd, msg);
+          result = guardedHandle(cmd, msg);
         } catch (e) {
           ws?.send(JSON.stringify({ event: 'ERROR', cmd, id, error: String(e) }));
           done();
@@ -770,6 +771,26 @@ export function useMCPBridge() {
      * would be worse than having no gate at all.
      */
     const machineHandlers = createMeshMachineHandlers();
+
+    /*
+     * With draft baked in by Prepare for Casting, the store turns body edits
+     * away (see the guard in useStore). A handler that went on to report
+     * success would be telling the agent something that did not happen, so a
+     * command during which an edit was refused fails instead, and says how to
+     * get past it. The guard's modal is for a person; an agent has its answer,
+     * so the modal is closed again.
+     */
+    const guardedHandle = async (cmd: string, msg: Record<string, unknown>): Promise<unknown> => {
+      const blockedBefore = useStore.getState().castPrepBlocked;
+      const data = await handle(cmd, msg);
+      if (useStore.getState().castPrepBlocked === blockedBefore) return data;
+      useStore.getState().closeCastPrepGuard();
+      return {
+        ok: false,
+        error: 'The scene is prepared for casting with draft baked in, so that edit was not made. '
+          + 'Call physics_set_cast_prep with off:true to restore the original shapes, or bake:true to keep the drafted ones, then retry.',
+      };
+    };
 
     const handle = async (cmd: string, msg: Record<string, unknown>): Promise<unknown> => {
       // Access Zustand store directly — works outside React render
@@ -2101,6 +2122,35 @@ export function useMCPBridge() {
               msg.includeFiles !== false
             ),
           };
+        }
+
+        /*
+         * Prepare for Casting, as the Cast dialog's switch does it: edge
+         * breaks on every part, and for sand, draft baked in. See
+         * utils/castPrep.ts.
+         */
+        case 'SET_CAST_PREP': {
+          if (msg.off === true) {
+            if (!store.sceneGraph.castPrep) return { ok: true, on: false, note: 'Prep was not on.' };
+            const { restored, kept } = store.clearCastPrep();
+            await useStore.getState().recompile(useStore.getState().sceneGraph, undefined, false, true);
+            return { ok: true, on: false, restored: restored.length, keptAsTheyAre: kept.map((k) => k.name) };
+          }
+          if (msg.bake === true) {
+            if (!store.sceneGraph.castPrep) return { ok: false, error: 'Prep is not on, so there is nothing to bake in.' };
+            store.bakeCastPrep();
+            return { ok: true, on: false, baked: true };
+          }
+          const method = msg.method === 'lost-pla' ? 'lost-pla' : 'sand';
+          const report = await runCastPrep({
+            method,
+            draftDeg: typeof msg.draftDeg === 'number' ? msg.draftDeg : 2,
+            draftMode: msg.draftMode === 'remove' ? 'remove' : 'add',
+            edges: msg.edges !== false,
+            edgeSizeMm: typeof msg.edgeSizeMm === 'number' && msg.edgeSizeMm > 0 ? msg.edgeSizeMm : 'auto',
+            partingFromBaseMm: typeof msg.partingFromBaseMm === 'number' ? msg.partingFromBaseMm : 'auto',
+          });
+          return report.ok ? { ...report, on: true } : report;
         }
 
         case 'EXPORT_MACHINING': {

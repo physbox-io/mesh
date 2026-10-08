@@ -16,6 +16,7 @@ import type { LatticeTool } from '../utils/latticeMesh';
 import type { SceneNode } from '../types/scene';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { useModifier } from '../hooks/useModifier';
+import { CastPrepGuardModal } from './CastPrepGuardModal';
 
 /**
  * What the app is in the middle of, said in one phrase.
@@ -206,6 +207,9 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
 }) => {
   const isPlaying = useStore((s) => s.isPlaying);
   const machineTarget = useStore((s) => s.machineTarget);
+  // Prepare for Casting changes the model itself, so say so where the Cast
+  // button is, which is on screen the whole time.
+  const castPrep = useStore((s) => s.sceneGraph.castPrep);
   const setMachineTarget = useStore((s) => s.setMachineTarget);
   const material = useStore((s) => s.material);
   const setMaterial = useStore((s) => s.setMaterial);
@@ -345,13 +349,24 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
    * without the relief carve and the solid part, which need a Z axis a laser
    * does not have.
    */
-  const exportButtons: { label: string; title: string; tone: string; icon: React.ReactNode; run: () => void }[] =
+  const exportButtons: { label: string; title: string; tone: string; icon: React.ReactNode; run: () => void; ring?: boolean }[] =
     machineTarget === 'fdm'
       ? [
           { label: 'STL', title: '3D Print (STL), geometry only. STL cannot carry colour; use 3MF if the model is painted.', tone: 'text-slate-600 dark:text-slate-300', icon: <Printer className="w-3.5 h-3.5" />, run: exports.stl },
           { label: '3MF', title: '3D Print in colour (3MF). Carries painted colour two ways: per-vertex for viewers, and a filament slot per triangle for a multi-material slicer.', tone: 'text-fuchsia-600 dark:text-fuchsia-400', icon: <Package className="w-3.5 h-3.5" />, run: exports.threeMf },
           { label: 'Mold', title: 'Export 3D Printable Casting Mold (STL)', tone: 'text-purple-600 dark:text-purple-400', icon: <Box className="w-3.5 h-3.5" />, run: exports.mold },
-          { label: 'Cast', title: 'Cast in metal — print a pattern with shrink and gating, for sand or lost PLA', tone: 'text-orange-600 dark:text-orange-400', icon: <Flame className="w-3.5 h-3.5" />, run: exports.cast },
+          castPrep
+            ? {
+                label: castPrep.draftDeg > 0 ? `Cast · ${castPrep.draftDeg}°` : 'Cast · Prepped',
+                title: castPrep.draftDeg > 0
+                  ? `${castPrep.draftDeg}° of draft is baked into the model, and editing is locked — open Cast to switch it off.`
+                  : 'The model\'s edges are broken for casting — open Cast to switch it off.',
+                tone: 'text-orange-600 dark:text-orange-400',
+                icon: <Flame className="w-3.5 h-3.5" />,
+                run: exports.cast,
+                ring: true,
+              }
+            : { label: 'Cast', title: 'Cast in metal — print a pattern with shrink and gating, for sand or lost PLA', tone: 'text-orange-600 dark:text-orange-400', icon: <Flame className="w-3.5 h-3.5" />, run: exports.cast },
         ]
       : [
           { label: 'SVG', title: 'Unwrap panel faces into 2D cut patterns (SVG), or cut them straight from here', tone: 'text-amber-600 dark:text-amber-400', icon: <Scissors className="w-3.5 h-3.5" />, run: exports.unwrap },
@@ -576,7 +591,7 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
                 type="button"
                 onClick={b.run}
                 title={b.title}
-                className={`${exportButtonClass(b.tone)} gap-1 px-1.5 font-semibold`}
+                className={`${exportButtonClass(b.tone)} gap-1 px-1.5 font-semibold ${b.ring ? 'ring-1 ring-orange-500/70 bg-orange-500/10' : ''}`}
               >
                 {b.icon}
                 {b.label}
@@ -707,6 +722,7 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
           </span>
         </div>
       </div>
+      <CastPrepGuardModal />
     </footer>
   );
 };

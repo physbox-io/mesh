@@ -194,20 +194,12 @@ export function collectSceneTriangles(scene: SceneGraph): {
 
     for (const geom of resolveCsgGeoms(node, 'render')) {
       if (geom.role === 'collision') continue;
-      const frame = getGeomFrame(geom);
-      const matrix = new THREE.Matrix4().multiplyMatrices(bodyMatrix, frame.matrix);
       const before = tris.length;
-      if (!appendGeomTriangles(geom, frame.halfLen, matrix, tris)) {
+      if (!appendSolidTriangles(geom, bodyMatrix, tris)) {
         skipped.push(`${node.name} (${geom.name || geom.type})`);
         continue;
       }
       const added = (tris.length - before) / 9;
-      // Slicing reads winding to decide which side of a contour is material, so
-      // an inside-out mesh yields segments that all get unioned away and the
-      // export reports no closed contours. Mesh data is not always wound the way
-      // a renderer's double-sided material lets it get away with, so flip a
-      // solid that encloses negative volume rather than losing it.
-      if (signedVolume(tris, before, tris.length) < 0) flipWinding(tris, before, tris.length);
       for (let i = 0; i < added; i++) solidIds.push(solid);
       solid++;
     }
@@ -217,6 +209,27 @@ export function collectSceneTriangles(scene: SceneGraph): {
 
   for (const root of scene.nodes) traverse(root);
   return { tris, solidIds, skipped, warnings };
+}
+
+/**
+ * Appends one geom's triangles, placed by its body's world matrix and wound
+ * outward. Returns false for shapes with no volume, and appends nothing then.
+ */
+export function appendSolidTriangles(geom: SceneGeom, bodyMatrix: THREE.Matrix4, out: number[]): boolean {
+  const frame = getGeomFrame(geom);
+  const matrix = new THREE.Matrix4().multiplyMatrices(bodyMatrix, frame.matrix);
+  const before = out.length;
+  if (!appendGeomTriangles(geom, frame.halfLen, matrix, out)) {
+    out.length = before;
+    return false;
+  }
+  // Slicing reads winding to decide which side of a contour is material, so
+  // an inside-out mesh yields segments that all get unioned away and the
+  // export reports no closed contours. Mesh data is not always wound the way
+  // a renderer's double-sided material lets it get away with, so flip a
+  // solid that encloses negative volume rather than losing it.
+  if (signedVolume(out, before, out.length) < 0) flipWinding(out, before, out.length);
+  return true;
 }
 
 /** Appends one geom's world triangles. Returns false for shapes with no volume. */
