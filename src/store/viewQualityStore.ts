@@ -1,10 +1,14 @@
 // The viewport's Hi-Res switch, in the settings panel.
 //
 // Hi-Res holds the rendering that costs frame time: MSAA on the composer, the
-// tone-mapping pass, and the finer tessellation of curved primitives. Off, the
-// viewport goes back to the cheaper settings it had before those were added.
-// The lighting and materials stay as they are either way; they cost nothing per
-// frame.
+// tone-mapping pass, the selection outline, the larger and softer shadow map,
+// and the finer tessellation of curved primitives. Off, the viewport goes back
+// to the cheaper settings it had before those were added. The lighting and
+// materials stay as they are either way; they cost nothing per frame.
+//
+// Render mode (the viewport's Render button) is separate and never remembered:
+// it path traces the scene whenever it is still, which keeps the GPU at full
+// load until the image converges, so it starts off on every load.
 //
 // A store of its own rather than a slice of useStore: it is a per-machine
 // display preference, not part of a scene, and editing useStore reloads the app
@@ -25,6 +29,8 @@ function readHiRes(): boolean {
 interface ViewQualityState {
   hiRes: boolean;
   setHiRes: (hiRes: boolean) => void;
+  pathTrace: boolean;
+  setPathTrace: (pathTrace: boolean) => void;
 }
 
 export const useViewQuality = create<ViewQualityState>((set) => ({
@@ -37,4 +43,25 @@ export const useViewQuality = create<ViewQualityState>((set) => ({
     }
     set({ hiRes });
   },
+  pathTrace: false,
+  setPathTrace: (pathTrace) => set({ pathTrace }),
+}));
+
+/**
+ * What the path tracer is doing, for the viewport's status pill. Its own store
+ * because RenderOnChange redraws on every useViewQuality change, and a sample
+ * count written as the image converges would keep the frame loop running.
+ */
+export type PathTracePhase = 'waiting' | 'building' | 'rendering' | 'done';
+
+interface PathTraceStatus {
+  phase: PathTracePhase;
+  samples: number;
+  set: (status: { phase: PathTracePhase; samples: number }) => void;
+}
+
+export const usePathTraceStatus = create<PathTraceStatus>((set) => ({
+  phase: 'waiting',
+  samples: 0,
+  set: (status) => set(status),
 }));

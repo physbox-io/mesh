@@ -18,8 +18,8 @@ import { useDentStore } from './store/dentStore';
 import { applyShatterPieces } from './store/useStore';
 import type { SceneGraph, SceneNode, SceneGeom, SceneJoint, CsgOp } from './types/scene';
 import type { WeakSpot } from './utils/printAnalysis';
-import { Play, Square, SlidersHorizontal, Settings, Box, Circle, X, RotateCcw, Trash2, Layers, CircleDot, Zap, Info, Triangle, Disc, Code, Menu, Shapes, Minimize2, Save, Download, Upload, Undo, Redo, FileText, PanelRight, Printer, Scissors, Sparkles, Sun, Moon, Pyramid, Cone, Donut, ChartSpline, Paintbrush, Grid3x3, Image as ImageIcon, Share2, Copy, Check, Link2, Unlink, Hammer } from 'lucide-react';
-import { useRef, useMemo, useEffect, useCallback, useState, type ComponentRef } from 'react';
+import { Play, Square, SlidersHorizontal, Settings, Box, Circle, X, RotateCcw, Trash2, Layers, CircleDot, Zap, Info, Triangle, Disc, Code, Menu, Shapes, Minimize2, Save, Download, Upload, Undo, Redo, FileText, PanelRight, Printer, Scissors, Sparkles, Sun, Moon, Pyramid, Cone, Donut, ChartSpline, Paintbrush, Grid3x3, Image as ImageIcon, Share2, Copy, Check, Link2, Unlink, Hammer, Aperture } from 'lucide-react';
+import { useRef, useMemo, useEffect, useLayoutEffect, useCallback, useState, type ComponentRef } from 'react';
 import AICopilotPanel from './components/AICopilotPanel';
 import { DocsModal } from './components/docs/DocsModal';
 import { DocsInfoButton } from './components/docs/DocsInfoButton';
@@ -112,7 +112,9 @@ import { GridFadeFollowsCamera } from './components/scene/GridFadeFollowsCamera'
 import { GRID_NAME } from './components/scene/gridConstants';
 import { anthropicUrl, geminiUrl } from './utils/llmEndpoints';
 import { BodyToneMapping } from './components/scene/BodyToneMapping';
-import { useViewQuality } from './store/viewQualityStore';
+import { useViewQuality, usePathTraceStatus } from './store/viewQualityStore';
+import { SelectionOutline } from './components/scene/SelectionOutline';
+import { PathTracedView } from './components/scene/PathTracedView';
 
 type PresetEntry = { name: string; emoji?: string };
 type GeminiModelInfo = { name: string; displayName?: string; supportedGenerationMethods?: string[] };
@@ -140,6 +142,20 @@ function App() {
   useMuJoCoInit();
   const hiRes = useViewQuality(s => s.hiRes);
   const setHiRes = useViewQuality(s => s.setHiRes);
+  const pathTrace = useViewQuality(s => s.pathTrace);
+  const setPathTrace = useViewQuality(s => s.setPathTrace);
+  const pathTracePhase = usePathTraceStatus(s => s.phase);
+  const pathTraceSamples = usePathTraceStatus(s => s.samples);
+  const keyLightRef = useRef<THREE.DirectionalLight>(null);
+  // three allocates a shadow map once and never resizes it, so a new mapSize
+  // only takes once the old map is gone. Layout effect: the frame the switch
+  // asked for must find the map already dropped.
+  useLayoutEffect(() => {
+    const shadow = keyLightRef.current?.shadow;
+    if (!shadow?.map) return;
+    shadow.map.dispose();
+    shadow.map = null;
+  }, [hiRes]);
   const [darkMode, setDarkMode] = useState(() => {
     if (typeof window !== 'undefined') {
       return localStorage.getItem('physics_dark_mode') === 'true';
@@ -2817,11 +2833,18 @@ function App() {
                 right at this map's own ~2mm/texel resolution, so the acne
                 shows up radiating with the wedges instead of as stripes. 0.03
                 clears that without visible peter-panning at bench scale. */}
+            {/* Hi-Res doubles the map (about 0.4mm per texel) and widens the
+                PCF filter to soften the shadow's edge. Only so far: three r184
+                filters with five taps rotated per pixel, so a wider radius goes
+                grainy rather than softer. Shadows that soften with distance
+                are the Render mode's — see PathTracedView. */}
             <directionalLight
+              ref={keyLightRef}
               position={[1.5, 3, 1.5]}
               intensity={darkMode ? 1.4 : 1.2}
               castShadow
-              shadow-mapSize={[2048, 2048]}
+              shadow-mapSize={hiRes ? [4096, 4096] : [2048, 2048]}
+              shadow-radius={hiRes ? 4 : 1}
               shadow-camera-left={-0.8}
               shadow-camera-right={0.8}
               shadow-camera-top={0.8}
@@ -2959,6 +2982,10 @@ function App() {
               // copy-out quad, so with this at 0 nothing in the viewport was
               // antialiased at all. The main cost of the Hi-Res switch.
               multisampling={hiRes ? 4 : 0}
+              // The outline draws its selection mask between the composer's
+              // passes and needs the renderer to leave the buffers alone;
+              // the render pass still clears its own target.
+              autoClear={false}
             >
               {/* No enableNormalPass. It drew the whole scene a second time
                   every frame, and at full resolution N8AO never reads it: the
@@ -2977,8 +3004,22 @@ function App() {
                   shadow — see BodyToneMapping. Last in the chain so it sees
                   AO's output in linear light. Hi-Res only. */}
               {hiRes && <BodyToneMapping />}
+              {/* After the tone mapping, so the outline is the blue asked for. */}
+              {hiRes && <SelectionOutline />}
             </EffectComposer>
+            {/* Draws over the composer's frame, so it comes after it. */}
+            {pathTrace && <PathTracedView background={darkMode ? '#0b0f19' : '#f8fafc'} />}
           </Canvas>
+
+          {pathTrace && (
+            <div className="absolute bottom-14 right-4 z-10 px-2 py-0.5 rounded text-[10px] font-medium tabular-nums bg-white/80 dark:bg-slate-900/80 backdrop-blur-md border border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-300 pointer-events-none">
+              {isPlaying ? 'Render paused while playing'
+                : pathTracePhase === 'waiting' ? 'Render: waiting for the view to settle'
+                : pathTracePhase === 'building' ? 'Render: preparing scene'
+                : pathTracePhase === 'rendering' ? `Render: ${pathTraceSamples} samples`
+                : `Render: done, ${pathTraceSamples} samples`}
+            </div>
+          )}
 
           {/* Floating Viewport Camera Controls */}
           <div className="absolute bottom-4 right-4 z-10 flex items-center gap-1 bg-white/80 dark:bg-slate-900/80 backdrop-blur-md border border-slate-200 dark:border-slate-800 p-1 rounded-lg shadow-sm">
@@ -3040,6 +3081,18 @@ function App() {
             >
               <Box className="w-3 h-3" />
               Edges
+            </button>
+            <button
+              onClick={() => setPathTrace(!pathTrace)}
+              title="Path trace the view whenever it is still: real soft shadows and reflections. Uses the whole GPU until the image settles, so leave it off while working."
+              className={`px-2.5 py-1 rounded text-[10px] font-bold tracking-wide transition-all cursor-pointer flex items-center gap-1 ${
+                pathTrace
+                  ? 'bg-violet-500 text-white shadow-xs'
+                  : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+              }`}
+            >
+              <Aperture className="w-3 h-3" />
+              Render
             </button>
             <select
               value={gridCellSizeMm}

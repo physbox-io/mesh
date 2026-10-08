@@ -422,8 +422,10 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
     const [r, g, b] = color ?? [0.8, 0.8, 0.8];
     return {
       color: new THREE.Color(r, g, b),
-      emissive: isSelected ? '#3b82f6' : '#000',
-      emissiveIntensity: isSelected ? 0.2 : 0,
+      // The tint marks the selection only with Hi-Res off; with it on, the
+      // composer outlines the selection instead (SelectionOutline).
+      emissive: isSelected && !hiRes ? '#3b82f6' : '#000',
+      emissiveIntensity: isSelected && !hiRes ? 0.2 : 0,
       // Satin, like a printed or moulded part. At 0.85 the studio lights in
       // App.tsx spread into a wash and a curved surface shaded about as flat
       // as a box face; at 0.5 they land as soft highlights that show the
@@ -451,7 +453,7 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
       ...(showPaint ? { vertexColors: true, color: new THREE.Color(1, 1, 1) } : {}),
       ...(alpha < 1 ? { transparent: true, opacity: alpha, depthWrite: false } : {}),
     };
-  }, [color, isSelected, alpha, wireframe, showEdges, showPaint, flatShading]);
+  }, [color, isSelected, hiRes, alpha, wireframe, showEdges, showPaint, flatShading]);
 
   // Handlers for physical spring dragging, mapped from Three.js coordinates to MuJoCo coordinate space
   const setOrbitEnabled = useOrbitEnable();
