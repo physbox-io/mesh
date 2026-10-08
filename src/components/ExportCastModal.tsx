@@ -49,7 +49,7 @@ const flaskTempC = (pourC: number) => Math.round(Math.min(550, Math.max(200, pou
  * through making a mould from it and pouring metal into it.
  *
  * The pattern is a positive, not a cavity, on both routes — but which positive
- * depends on the route, and so does everything downstream of it. Green sand
+ * depends on the route, and so does everything downstream of it. Sand
  * rams around a pattern that is pulled back out, so it must draw and the rig
  * is a sprue standing beside it. Lost PLA buries the pattern in plaster and
  * burns it away, so undercuts cost nothing, the rig has to be fused on, and
@@ -245,7 +245,7 @@ export const ExportCastModal: React.FC<Props> = ({ isOpen, onClose, scene }) => 
                   {lostPla
                     ? summary.undrawablePercent > 1
                       ? `${round(summary.undrawablePercent)}% of this part would not draw from sand at any parting plane — burning the pattern out is exactly what buys you that.`
-                      : 'This part would draw from sand too, so green sand is open to you if you would rather keep the pattern.'
+                      : 'This part would draw from sand too, so sand casting is open to you if you would rather keep the pattern.'
                     : summary.undrawablePercent > 1
                       ? `${round(summary.undrawablePercent)}% of the part overhangs the pull and will not draw cleanly — add draft, or switch to Lost PLA.`
                       : 'The pattern draws cleanly from the sand: nothing overhangs the upward pull.'}
@@ -285,7 +285,7 @@ export const ExportCastModal: React.FC<Props> = ({ isOpen, onClose, scene }) => 
 
           {/* Walkthrough */}
           <div className={sectionClass}>
-            <h3 className={sectionTitleClass}>{lostPla ? 'The Lost-PLA Flow' : 'The Green-Sand Flow'}</h3>
+            <h3 className={sectionTitleClass}>{lostPla ? 'The Lost-PLA Flow' : 'The Sand Flow'}</h3>
             <ol className="space-y-2.5 text-xs text-slate-600 dark:text-slate-300 leading-relaxed list-none">
               {(lostPla ? [
                 summary
@@ -313,7 +313,7 @@ export const ExportCastModal: React.FC<Props> = ({ isOpen, onClose, scene }) => 
                   ? `Print the pattern (${round1(summary.patternSizeMm.x)} × ${round1(summary.patternSizeMm.y)} × ${round1(summary.patternSizeMm.z)} mm). It is grown ${summary.shrinkPercent}% so the casting shrinks to the ${round1(summary.partSizeMm.x)} × ${round1(summary.partSizeMm.y)} × ${round1(summary.partSizeMm.z)} mm part. Print it solid, and sand or seal the layer lines for a cleaner mould.`
                   : 'Print the pattern once the model is ready.',
                 'Set the pattern flat-back-down in the drag (the lower half of the flask), parting face on the board. Dust it with parting powder so the sand releases.',
-                'Ram green sand over it, firm and even, strike off level, then roll the drag over.',
+                'Ram sand over it, firm and even, strike off level, then roll the drag over.',
                 'Dust the parting face, set the cope (upper half) on top, and ram it full.'
                   + (options.addGating ? ' The printed sprue and riser form their own openings.' : ' Set a sprue pin and a riser pin, then ram around them.'),
                 'Lift the cope off, gently draw the pattern straight up out of the drag, and cut a short gate from the runner into the cavity if you rammed one by hand. Poke a few fine vents.',

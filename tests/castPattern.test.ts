@@ -9,7 +9,7 @@ function stlTriCount(stl: Uint8Array): number {
   return new DataView(stl.buffer, stl.byteOffset, stl.byteLength).getUint32(80, true);
 }
 
-describe('green-sand cast pattern', () => {
+describe('sand cast pattern', () => {
   const r = generateCastPattern(latticeBracketPreset, { metalId: 'aluminium' });
 
   it('produces a printable pattern STL', () => {

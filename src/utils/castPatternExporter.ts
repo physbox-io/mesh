@@ -6,7 +6,7 @@
 // printed positive that ends up as a cavity with metal in it. Two routes to
 // that cavity, and the pattern differs between them:
 //
-//   - Green sand. The pattern is rammed in sand and pulled back out, so it is
+//   - Sand. The pattern is rammed in sand and pulled back out, so it is
 //     reusable, it has to draw, and the gating is rammed in alongside it.
 //   - Lost PLA. The pattern is invested in plaster and burnt out, so it is
 //     consumed, it never has to draw — undercuts are free — and the gating has
@@ -67,7 +67,7 @@ export type CastMethod = 'sand' | 'lost-pla';
 export const CAST_METHODS: { id: CastMethod; label: string; blurb: string }[] = [
   {
     id: 'sand',
-    label: 'Green Sand',
+    label: 'Sand',
     blurb: 'Ram sand around a reusable printed pattern, pull it out, pour into the hollow.',
   },
   {
@@ -353,7 +353,7 @@ function trisToBinaryStl(tris: number[]): Uint8Array {
 }
 
 /**
- * Turns a scene into a casting pattern, ready to print — rammable in green sand
+ * Turns a scene into a casting pattern, ready to print — rammable in sand
  * or investable for burnout, depending on `method`.
  */
 export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<CastOptions>): CastResult {

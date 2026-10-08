@@ -351,7 +351,7 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
           { label: 'STL', title: '3D Print (STL), geometry only. STL cannot carry colour; use 3MF if the model is painted.', tone: 'text-slate-600 dark:text-slate-300', icon: <Printer className="w-3.5 h-3.5" />, run: exports.stl },
           { label: '3MF', title: '3D Print in colour (3MF). Carries painted colour two ways: per-vertex for viewers, and a filament slot per triangle for a multi-material slicer.', tone: 'text-fuchsia-600 dark:text-fuchsia-400', icon: <Package className="w-3.5 h-3.5" />, run: exports.threeMf },
           { label: 'Mold', title: 'Export 3D Printable Casting Mold (STL)', tone: 'text-purple-600 dark:text-purple-400', icon: <Box className="w-3.5 h-3.5" />, run: exports.mold },
-          { label: 'Cast', title: 'Cast in metal — print a pattern with shrink and gating, for green sand or lost PLA', tone: 'text-orange-600 dark:text-orange-400', icon: <Flame className="w-3.5 h-3.5" />, run: exports.cast },
+          { label: 'Cast', title: 'Cast in metal — print a pattern with shrink and gating, for sand or lost PLA', tone: 'text-orange-600 dark:text-orange-400', icon: <Flame className="w-3.5 h-3.5" />, run: exports.cast },
         ]
       : [
           { label: 'SVG', title: 'Unwrap panel faces into 2D cut patterns (SVG), or cut them straight from here', tone: 'text-amber-600 dark:text-amber-400', icon: <Scissors className="w-3.5 h-3.5" />, run: exports.unwrap },
