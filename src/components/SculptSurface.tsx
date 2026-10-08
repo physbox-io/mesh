@@ -754,7 +754,7 @@ export function SculptSurface({
         onPointerUp={onPointerUp}
         onPointerLeave={onPointerLeave}
       >
-        <meshStandardMaterial color={rgb} roughness={0.85} metalness={0.02} side={THREE.FrontSide} wireframe={wireframe} />
+        <meshStandardMaterial color={rgb} roughness={0.5} metalness={0.02} side={THREE.FrontSide} wireframe={wireframe} />
       </mesh>
 
       {/* The inside of an open surface. Front faces only is right for a closed

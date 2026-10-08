@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { useThree } from '@react-three/fiber';
 import { useStore, setPhysicsFrameListener } from '../../store/useStore';
 import { useDentStore } from '../../store/dentStore';
+import { useViewQuality } from '../../store/viewQualityStore';
 
 /**
  * Asks for a frame whenever the picture may have changed, so a paused scene
@@ -12,8 +13,8 @@ import { useDentStore } from '../../store/dentStore';
  * scene, ambient occlusion and the axis legend, sixty-plus times a second over
  * a scene where nothing was moving. On demand, something has to say when a
  * frame is needed, and nearly everything that changes the picture passes
- * through one of four places: the scene store, the dent store, a physics
- * frame, or a pointer or key event on the page. The tools that write straight
+ * through one of five places: the scene store, the dent store, the Hi-Res
+ * switch's store, a physics frame, or a pointer or key event on the page. The tools that write straight
  * into three objects mid-drag (sculpt, gizmo, measure) are all driven by
  * pointer events, so listening for those covers them without each one having
  * to remember.
@@ -45,6 +46,7 @@ export const RenderOnChange = () => {
     };
     const unsubscribe = useStore.subscribe(ask);
     const unsubscribeDents = useDentStore.subscribe(ask);
+    const unsubscribeQuality = useViewQuality.subscribe(ask);
     setPhysicsFrameListener(ask);
     const pointerEvents = ['pointermove', 'pointerdown', 'pointerup', 'wheel'] as const;
     const keyEvents = ['keydown', 'keyup'] as const;
@@ -53,6 +55,7 @@ export const RenderOnChange = () => {
     return () => {
       unsubscribe();
       unsubscribeDents();
+      unsubscribeQuality();
       setPhysicsFrameListener(null);
       for (const e of pointerEvents) window.removeEventListener(e, onPointer);
       for (const e of keyEvents) window.removeEventListener(e, onKey);

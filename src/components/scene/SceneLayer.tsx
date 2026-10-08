@@ -19,6 +19,7 @@ import { CsgNegativeGhosts } from './CsgGhosts';
 import { FeatureEdges } from './FeatureEdges';
 import { EDGE_THRESHOLD_MESH, EDGE_THRESHOLD_PRIMITIVE, wedgeGeometry } from './edgeView';
 import { dentKey, useDentStore } from '../../store/dentStore';
+import { useViewQuality } from '../../store/viewQualityStore';
 import { PulleyRopesRenderer } from './PulleyRopes';
 import SculptSurface from '../SculptSurface';
 import LatticeSurface from '../LatticeSurface';
@@ -178,6 +179,15 @@ export const CameraController = () => {
 
   return <OrbitControls enabled={draggedNodeId === null} ref={controlsRef} makeDefault enableDamping dampingFactor={0.1} minDistance={minDistance} mouseButtons={{ LEFT: 99 as THREE.MOUSE, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE }} />;
 };
+
+// Tessellation of the curved primitives, by the Hi-Res switch. At 32 sides a
+// cylinder's facets were plain to see on a part filling the viewport, and a
+// capsule at 16 sides with 4 cap rings read as a polygon; Hi-Res roughly
+// triples the triangles to fix that, which matters in a scene of hundreds of
+// spheres. The surface and its edge overlay below share these, so the
+// overlay's feature edges land on the drawn facets.
+const HI_RES_SEGMENTS = { radial: 64, sphereWidth: 64, sphereHeight: 48, capsuleCap: 12, capsuleRadial: 64 };
+const LO_RES_SEGMENTS = { radial: 32, sphereWidth: 32, sphereHeight: 32, capsuleCap: 4, capsuleRadial: 16 };
 
 export const WedgeGeometry = ({ width = 2.0, depth = 1.0, height = 0.5 }: { width: number; depth: number; height: number }) => {
   const vertices = useMemo(() => {
@@ -344,6 +354,8 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
     return id;
   }, [providedGeomId, model, mujoco, name]);
 
+  const hiRes = useViewQuality(s => s.hiRes);
+  const segments = hiRes ? HI_RES_SEGMENTS : LO_RES_SEGMENTS;
   const geometryArgs = useMemo(() => {
     if (geomId === -1 || !model) return [];
     try {
@@ -354,9 +366,9 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
       const hl = model.geom_size[geomId * 3 + 1];
       const hz = model.geom_size[geomId * 3 + 2];
       
-      if (type === 'sphere') return [r, 32, 32];
+      if (type === 'sphere') return [r, segments.sphereWidth, segments.sphereHeight];
       if (type === 'box') return [r * 2, hl * 2, hz * 2];
-      if (type === 'capsule') return [r, hl * 2, 4, 16];
+      if (type === 'capsule') return [r, hl * 2, segments.capsuleCap, segments.capsuleRadial];
       if (type === 'cylinder') return [r, hl];
       if (type === 'ellipsoid') return [r, hl, hz];
       return [r];
@@ -364,7 +376,7 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
       console.error(`[DynamicGeom ${name}] geometryArgs Error:`, e);
       return [];
     }
-  }, [geomId, type, model, name]);
+  }, [geomId, type, model, name, segments]);
 
   const rotationMatrix = useMemo(() => new THREE.Matrix4(), []);
 
@@ -412,11 +424,12 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
       color: new THREE.Color(r, g, b),
       emissive: isSelected ? '#3b82f6' : '#000',
       emissiveIntensity: isSelected ? 0.2 : 0,
-      // Left at three.js's defaults (roughness 1, metalness 0) these bodies were
-      // fully matte and the new environment map had nothing to reflect. Matched
-      // to SculptSurface's own material so a sculpted part and a rigid body read
-      // the same under the same light.
-      roughness: 0.85,
+      // Satin, like a printed or moulded part. At 0.85 the studio lights in
+      // App.tsx spread into a wash and a curved surface shaded about as flat
+      // as a box face; at 0.5 they land as soft highlights that show the
+      // curvature. Matched to SculptSurface, LatticeSurface and the instanced
+      // boxes below, so every kind of body reads the same under the same light.
+      roughness: 0.5,
       metalness: 0.02,
       flatShading,
       // Every geom in the scene funnels through this one memo, so the whole
@@ -766,12 +779,12 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
     switch (type) {
       case 'box': return new THREE.BoxGeometry(a[0], a[1], a[2]);
       case 'sphere': return new THREE.SphereGeometry(a[0], a[1], a[2]);
-      case 'ellipsoid': return new THREE.SphereGeometry(1, 32, 32);
+      case 'ellipsoid': return new THREE.SphereGeometry(1, segments.sphereWidth, segments.sphereHeight);
       case 'capsule': return new THREE.CapsuleGeometry(a[0], a[1], a[2], a[3]);
-      case 'cylinder': return new THREE.CylinderGeometry(a[0], a[0], a[1] * 2, 32);
+      case 'cylinder': return new THREE.CylinderGeometry(a[0], a[0], a[1] * 2, segments.radial);
       default: return null;
     }
-  }, [showEdges, type, node?.isWedge, node?.width, node?.depth, node?.height, geometryArgs]);
+  }, [showEdges, type, node?.isWedge, node?.width, node?.depth, node?.height, geometryArgs, segments]);
   useEffect(() => () => { edgeGeometry?.dispose(); }, [edgeGeometry]);
 
   const primitiveEdges = showEdges && edgeGeometry ? (
@@ -886,7 +899,7 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
         </>
       ) : type === 'ellipsoid' ? (
         <mesh castShadow receiveShadow scale={[geometryArgs[0], geometryArgs[1], geometryArgs[2]]} {...dragHandlers}>
-          <sphereGeometry args={[1, 32, 32]} />
+          <sphereGeometry args={[1, segments.sphereWidth, segments.sphereHeight]} />
           {renderedGeomMaterial}
         </mesh>
       ) : null}
@@ -898,7 +911,7 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
       )}
       {type === 'cylinder' && (
         <mesh castShadow receiveShadow rotation={[Math.PI / 2, 0, 0]} {...dragHandlers}>
-          <cylinderGeometry args={[geometryArgs[0], geometryArgs[0], geometryArgs[1] * 2, 32]} />
+          <cylinderGeometry args={[geometryArgs[0], geometryArgs[0], geometryArgs[1] * 2, segments.radial]} />
           {renderedGeomMaterial}
         </mesh>
       )}
@@ -1273,7 +1286,7 @@ export const StaticBoxInstances = React.memo(function StaticBoxInstances({ geoms
       }}
     >
       <boxGeometry args={[1, 1, 1]} />
-      <meshStandardMaterial wireframe={wireframe} roughness={0.85} metalness={0.02} />
+      <meshStandardMaterial wireframe={wireframe} roughness={0.5} metalness={0.02} />
     </instancedMesh>
   );
 });

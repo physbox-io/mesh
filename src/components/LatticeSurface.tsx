@@ -2866,7 +2866,7 @@ export function LatticeSurface({
           gave: an inside-out face looked perfectly solid here and vanished the
           moment the tools were closed. */}
       <mesh name={geomName} geometry={solid.geometry} castShadow receiveShadow raycast={() => null}>
-        <meshStandardMaterial color={rgb} roughness={0.6} metalness={0.05} side={THREE.FrontSide} wireframe={wireframe} />
+        <meshStandardMaterial color={rgb} roughness={0.5} metalness={0.02} side={THREE.FrontSide} wireframe={wireframe} />
       </mesh>
 
       {/* And the backs of those faces, in a colour nobody would choose for a

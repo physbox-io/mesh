@@ -1,6 +1,6 @@
 
 import { Canvas } from '@react-three/fiber';
-import { Grid, Environment } from '@react-three/drei';
+import { Grid, Environment, Lightformer } from '@react-three/drei';
 import { DEFAULT_EYE } from './utils/frameScene';
 import { EffectComposer, N8AO } from '@react-three/postprocessing';
 import { SCULPT_BASES, type SculptBaseId } from './utils/sculptBases';
@@ -111,6 +111,8 @@ import { RenderOnChange } from './components/scene/RenderOnChange';
 import { GridFadeFollowsCamera } from './components/scene/GridFadeFollowsCamera';
 import { GRID_NAME } from './components/scene/gridConstants';
 import { anthropicUrl, geminiUrl } from './utils/llmEndpoints';
+import { BodyToneMapping } from './components/scene/BodyToneMapping';
+import { useViewQuality } from './store/viewQualityStore';
 
 type PresetEntry = { name: string; emoji?: string };
 type GeminiModelInfo = { name: string; displayName?: string; supportedGenerationMethods?: string[] };
@@ -136,6 +138,8 @@ const CAMERA_CONFIG = { position: DEFAULT_EYE, fov: 45, near: 0.01, far: 1000 };
 
 function App() {
   useMuJoCoInit();
+  const hiRes = useViewQuality(s => s.hiRes);
+  const setHiRes = useViewQuality(s => s.setHiRes);
   const [darkMode, setDarkMode] = useState(() => {
     if (typeof window !== 'undefined') {
       return localStorage.getItem('physics_dark_mode') === 'true';
@@ -2078,6 +2082,20 @@ function App() {
               <button aria-label="Close" title="Close" onClick={() => setSettingsOpen(false)}><X className="w-4 h-4 text-slate-400 dark:text-slate-500 hover:text-slate-600 dark:hover:text-slate-300 cursor-pointer" /></button>
             </h3>
             <div className="flex flex-col gap-4">
+              <div className="flex items-center justify-between gap-2">
+                <span id="hiResLabel" className="text-xs font-medium text-slate-500 dark:text-slate-400" title="Antialiasing, tone mapping and smoother curves. Turn off if the viewport is slow.">Hi-Res</span>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={hiRes}
+                  aria-labelledby="hiResLabel"
+                  title="Antialiasing, tone mapping and smoother curves. Turn off if the viewport is slow."
+                  onClick={() => setHiRes(!hiRes)}
+                  className={`relative inline-flex h-4 w-7 shrink-0 cursor-pointer items-center rounded-full transition-colors ${hiRes ? 'bg-blue-500' : 'bg-slate-300 dark:bg-slate-700'}`}
+                >
+                  <span className={`inline-block h-3 w-3 rounded-full bg-white shadow transition-transform ${hiRes ? 'translate-x-3.5' : 'translate-x-0.5'}`} />
+                </button>
+              </div>
               <div className="flex flex-col gap-1">
                 <label className="text-xs font-medium text-slate-500 dark:text-slate-400 flex justify-between">Gravity Z <SliderValue value={gravityZ} onChange={(v) => setEnvironment({gravityZ: v})} decimals={1} unit="m/s²" min={-20} max={20} /></label>
                 <RangeInput min="-20" max="20" step="0.1" value={gravityZ} onChange={(v) => setEnvironment({gravityZ: v})} className="w-full accent-blue-500 cursor-pointer" />
@@ -2762,18 +2780,27 @@ function App() {
             <RenderOnChange />
             <DropHandler addComponent={addComponent} onImportFile={handleDroppedImportFile} onImportImageFile={handleDroppedImageFile} onImportSceneJson={importSceneJson} />
             <color attach="background" args={[darkMode ? '#0b0f19' : '#f8fafc']} />
-            {/* background={false}: this only feeds reflections/specular highlights
-                on the PBR materials, it never replaces the flat <color> above.
-                Kept low so it reads as "materials aren't dead flat any more"
-                rather than "everything is suddenly glossy". */}
-            <Environment preset="apartment" background={false} environmentIntensity={0.12} />
-            <ambientLight intensity={darkMode ? 0.35 : 0.6} />
-            {/* Fill light opposite the key light, well below its intensity — just
-                enough to lift the shadow side off pure black without flattening
-                the modeling the key light + AO are doing. Stacking this with a
-                hemisphere light on top of ambient + environment washed everything
-                toward white, so this is the only extra light left. */}
-            <directionalLight position={[-2, 1.2, -1.5]} intensity={darkMode ? 0.12 : 0.15} />
+            {/* A photo studio, built here rather than loaded: a broad softbox
+                overhead, two strip lights either side and a dim grey room. It
+                is where the shading comes from now — the diffuse light that
+                wraps a body and the highlights that show a curved face is
+                curved — so it runs well above the 0.12 the apartment HDR was
+                held at. That HDR was also fetched from a CDN on every load.
+                The ambient light under it was most of what the scene used to
+                be lit by, and ambient lights every face the same, which is why
+                a box read as three flat tints. It is kept only as a floor so
+                nothing in a crevice goes fully black.
+                background={false}: the room lights the bodies but is never
+                drawn; the flat <color> above stays the backdrop. frames={1}
+                (the default) renders the cube map once, not every frame. */}
+            <Environment background={false} resolution={256} environmentIntensity={darkMode ? 0.7 : 0.8}>
+              <color attach="background" args={['#3a3d42']} />
+              <Lightformer form="rect" intensity={2.5} position={[0, 5, 0]} rotation-x={Math.PI / 2} scale={[8, 8, 1]} />
+              <Lightformer form="rect" intensity={1.6} position={[-5, 1.5, 1]} rotation-y={Math.PI / 2} scale={[8, 2.5, 1]} />
+              <Lightformer form="rect" intensity={1.0} position={[5, 1, -1]} rotation-y={-Math.PI / 2} scale={[8, 2.5, 1]} />
+              <Lightformer form="rect" intensity={0.6} position={[0, 1, -5]} scale={[8, 2, 1]} />
+            </Environment>
+            <ambientLight intensity={0.08} />
             {/* The shadow camera is an orthographic box, and its default is +/-5m
                 with a 512px map. This scene lives at part scale — the camera
                 sits about 300mm out and shows 250mm of world — so the default
@@ -2927,7 +2954,11 @@ function App() {
                 composerRef.current = instance;
                 physicsGlobals._physics_composer = instance;
               }}
-              multisampling={0}
+              // MSAA on the composer's own target, which is where the scene is
+              // drawn — the canvas's antialias flag only ever smoothed the
+              // copy-out quad, so with this at 0 nothing in the viewport was
+              // antialiased at all. The main cost of the Hi-Res switch.
+              multisampling={hiRes ? 4 : 0}
             >
               {/* No enableNormalPass. It drew the whole scene a second time
                   every frame, and at full resolution N8AO never reads it: the
@@ -2942,6 +2973,10 @@ function App() {
                 distanceFalloff={1}
                 color="black"
               />
+              {/* Tone maps the bodies only, not the backdrop, grid or floor
+                  shadow — see BodyToneMapping. Last in the chain so it sees
+                  AO's output in linear light. Hi-Res only. */}
+              {hiRes && <BodyToneMapping />}
             </EffectComposer>
           </Canvas>
 
