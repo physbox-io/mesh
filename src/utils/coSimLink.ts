@@ -80,6 +80,30 @@ const JOINT_SLIDE = 2;
 const JOINT_HINGE = 3;
 const OBJ = (mj: Mujoco) => mj.mjtObj;
 
+type ObjKind = 'joint' | 'actuator' | 'body';
+
+/**
+ * Name → id, remembered per built model. A linked Volt names the same
+ * channels on every slice, and `mj_name2id` is a string search through the
+ * model each time; a rebuilt model is a new object, so it starts afresh.
+ */
+const idCache = new WeakMap<MjModel, Map<string, number>>();
+function idOf(mj: Mujoco, model: MjModel, kind: ObjKind, name: string): number {
+  let cache = idCache.get(model);
+  if (!cache) {
+    cache = new Map();
+    idCache.set(model, cache);
+  }
+  const key = `${kind}:${name}`;
+  let id = cache.get(key);
+  if (id === undefined) {
+    const obj = kind === 'joint' ? OBJ(mj).mjOBJ_JOINT : kind === 'actuator' ? OBJ(mj).mjOBJ_ACTUATOR : OBJ(mj).mjOBJ_BODY;
+    id = mj.mj_name2id(model, obj.value, name);
+    cache.set(key, id);
+  }
+  return id;
+}
+
 /** Hinge and slide joints, by name: the ones with one scalar position. */
 function scalarJoints(mj: Mujoco, model: MjModel): { name: string; id: number; hinge: boolean }[] {
   const out: { name: string; id: number; hinge: boolean }[] = [];
@@ -155,11 +179,11 @@ export function resolveInputs(mj: Mujoco, model: MjModel, inputs: Record<string,
     const m = INPUT.exec(name);
     if (!m || !Number.isFinite(value)) { unknown.push(name); continue; }
     if (m[1] === 'joint' && m[3]) {
-      const id = mj.mj_name2id(model, OBJ(mj).mjOBJ_JOINT.value, m[2]);
+      const id = idOf(mj, model, 'joint', m[2]);
       if (id < 0 || (model.jnt_type[id] !== JOINT_HINGE && model.jnt_type[id] !== JOINT_SLIDE)) { unknown.push(name); continue; }
       resolved.push({ kind: 'dof', index: model.jnt_dofadr[id], value });
     } else if (m[1] === 'actuator' && !m[3]) {
-      const id = mj.mj_name2id(model, OBJ(mj).mjOBJ_ACTUATOR.value, m[2]);
+      const id = idOf(mj, model, 'actuator', m[2]);
       if (id < 0) { unknown.push(name); continue; }
       resolved.push({ kind: 'ctrl', index: id, value });
     } else {
@@ -218,7 +242,7 @@ export function readOutputs(mj: Mujoco, model: MjModel, data: MjData, names: str
     if (!m) { unknown.push(name); continue; }
     const [, kind, target, field] = m;
     if (kind === 'joint' && (field === 'pos' || field === 'vel' || field === 'inertia' || field === 'load')) {
-      const id = mj.mj_name2id(model, OBJ(mj).mjOBJ_JOINT.value, target);
+      const id = idOf(mj, model, 'joint', target);
       if (id < 0 || (model.jnt_type[id] !== JOINT_HINGE && model.jnt_type[id] !== JOINT_SLIDE)) { unknown.push(name); continue; }
       const dof = model.jnt_dofadr[id];
       if (field === 'pos') outputs[name] = data.qpos[model.jnt_qposadr[id]];
@@ -228,11 +252,11 @@ export function readOutputs(mj: Mujoco, model: MjModel, data: MjData, names: str
       // M·qacc = passive − bias + actuator + constraint + applied.
       else outputs[name] = data.qfrc_passive[dof] - data.qfrc_bias[dof] + data.qfrc_actuator[dof] + data.qfrc_constraint[dof];
     } else if (kind === 'actuator' && field === 'force') {
-      const id = mj.mj_name2id(model, OBJ(mj).mjOBJ_ACTUATOR.value, target);
+      const id = idOf(mj, model, 'actuator', target);
       if (id < 0) { unknown.push(name); continue; }
       outputs[name] = data.actuator_force[id];
     } else if (kind === 'body') {
-      const id = mj.mj_name2id(model, OBJ(mj).mjOBJ_BODY.value, target);
+      const id = idOf(mj, model, 'body', target);
       if (id < 1) { unknown.push(name); continue; }
       if (field === 'contacts') outputs[name] = contactCounts().get(id) ?? 0;
       else if (field === 'x' || field === 'y' || field === 'z') outputs[name] = data.xpos[id * 3 + 'xyz'.indexOf(field)];
