@@ -59,6 +59,8 @@ import { SettledNumberInput, SettledTextInput } from './components/SettledInputs
 import { ScaleControls } from './components/ScaleCard';
 import { ConfirmModal } from './components/ConfirmModal';
 import { CompileErrorBanner } from './components/CompileErrorBanner';
+import { VoltLinkBanner } from './components/VoltLinkBanner';
+import { useVoltLink } from './hooks/useVoltLink';
 import { ObjectGestureController } from './components/scene/ObjectGestures';
 import { TransformGizmo } from './components/scene/TransformGizmo';
 import { isGizmoBusy } from './components/scene/gizmoBusy';
@@ -1708,6 +1710,7 @@ function App() {
   }, [selectedNodeId, setSelectedNodeId, setIsLeftSidebarOpen, activeGeomIndex, setActiveGeomIndex]);
 
   useMCPBridge();
+  useVoltLink();
   // Regenerates a boolean body's mesh whenever its primitives change.
   useCsgAutoCompile();
 
@@ -2765,6 +2768,7 @@ function App() {
             {/* First in the stack: it explains why everything under it may be
                 describing a scene that is not the one being drawn. */}
             <CompileErrorBanner />
+            <VoltLinkBanner />
             <EdgeRoundPanel />
             {scadCompileCount > 0 && (
               <div className="bg-white/90 dark:bg-slate-900/90 text-slate-800 dark:text-slate-100 border border-slate-200/80 dark:border-slate-800/80 px-3.5 py-1.5 rounded-full shadow-md flex items-center gap-2.5 text-xs font-semibold backdrop-blur-md transition-all duration-300 pointer-events-auto">

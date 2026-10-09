@@ -547,6 +547,9 @@ export const compileToMJCF = (
     let attrs = `name="${j.name}_actuator" joint="${j.name}"`;
     if (act.kv !== undefined && act.type === 'velocity') attrs += ` kv="${act.kv}"`;
     if (act.gear !== undefined) attrs += ` gear="${act.gear}"`;
+    // A motor's ctrl is its torque. Unlimited, so a linked Volt's stall
+    // torque arrives whole rather than clipped to a range nobody set.
+    if (act.type === 'motor') attrs += ` ctrllimited="false"`;
     return `    <${act.type} ${attrs} />`;
   }).join('\n');
 

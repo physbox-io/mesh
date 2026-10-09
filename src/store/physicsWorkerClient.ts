@@ -17,7 +17,9 @@ import type {
   HistoryFrame,
   HistoryQuery,
   SeedState,
+  StepForResult,
 } from '../workers/physicsWorkerProtocol';
+import type { CoSimChannel } from '../utils/coSimLink';
 
 export type { BuiltResult, FrameSnapshot } from '../workers/physicsWorkerProtocol';
 
@@ -199,6 +201,8 @@ export class PhysicsWorkerClient {
   private pendingHeadless = new Map<string, Pending<HeadlessRunResult>>();
   private pendingHistory = new Map<string, Pending<HistoryResult>>();
   private pendingTelemetry = new Map<string, Pending<HistoryEntry | null>>();
+  private pendingSteps = new Map<string, Pending<StepForResult>>();
+  private pendingChannels = new Map<string, Pending<{ channels: CoSimChannel[]; timestepMs: number }>>();
   /**
    * Which meshes this worker already holds as VFS files. Pass it to
    * `compileToMJCF` and then `build` the result on THIS client: a recycled
@@ -251,6 +255,23 @@ export class PhysicsWorkerClient {
           if (pending) {
             this.pendingHistory.delete(msg.id);
             pending.resolve({ frames: msg.history, total: msg.total, stride: msg.stride });
+          }
+          break;
+        }
+        case 'STEPPED': {
+          const pending = this.pendingSteps.get(msg.id);
+          if (pending) {
+            this.pendingSteps.delete(msg.id);
+            const { type: _t, id: _i, ...result } = msg;
+            pending.resolve(result);
+          }
+          break;
+        }
+        case 'CHANNELS': {
+          const pending = this.pendingChannels.get(msg.id);
+          if (pending) {
+            this.pendingChannels.delete(msg.id);
+            pending.resolve({ channels: msg.channels, timestepMs: msg.timestepMs });
           }
           break;
         }
@@ -355,12 +376,31 @@ export class PhysicsWorkerClient {
     });
   }
 
+  /** A linked Volt's slice: hold `inputs` for `dtMs`, then read `outputs`. */
+  stepFor(dtMs: number, inputs: Record<string, number>, outputs: string[]): Promise<StepForResult> {
+    const id = Math.random().toString(36).slice(2);
+    return new Promise((resolve, reject) => {
+      this.pendingSteps.set(id, { resolve, reject });
+      this.worker.postMessage({ type: 'STEP_FOR', id, dtMs, inputs, outputs });
+    });
+  }
+
+  /** Every channel a linked Volt can bind in the built model. */
+  getChannels(): Promise<{ channels: CoSimChannel[]; timestepMs: number }> {
+    const id = Math.random().toString(36).slice(2);
+    return new Promise((resolve, reject) => {
+      this.pendingChannels.set(id, { resolve, reject });
+      this.worker.postMessage({ type: 'GET_CHANNELS', id });
+    });
+  }
+
   // True while the worker still owes an answer to a build/headless/history/
   // telemetry request. The periodic recycle checks this so it doesn't
   // terminate a worker mid-build and turn a legitimate request into a failure.
   hasPendingWork(): boolean {
     return this.pendingBuilds.size > 0 || this.pendingHeadless.size > 0
-        || this.pendingHistory.size > 0 || this.pendingTelemetry.size > 0;
+        || this.pendingHistory.size > 0 || this.pendingTelemetry.size > 0
+        || this.pendingSteps.size > 0 || this.pendingChannels.size > 0;
   }
 
   clearHistory() {
@@ -388,5 +428,7 @@ export class PhysicsWorkerClient {
     settle(this.pendingHeadless);
     settle(this.pendingHistory);
     settle(this.pendingTelemetry);
+    settle(this.pendingSteps);
+    settle(this.pendingChannels);
   }
 }

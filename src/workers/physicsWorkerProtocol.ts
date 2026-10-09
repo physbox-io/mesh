@@ -4,6 +4,7 @@
 // another.
 
 import type { SceneGraph } from '../types/scene';
+import type { CoSimChannel } from '../utils/coSimLink';
 
 /** Explicit state to seed a freshly built model with (a live mirror's copy). */
 export interface SeedState {
@@ -166,7 +167,10 @@ export type MainToWorkerMessage =
   | { type: 'RUN_HEADLESS'; id: string; xml: string; sceneGraph: SceneGraph; ticks: number }
   | { type: 'GET_HISTORY'; id: string; query?: HistoryQuery }
   | { type: 'GET_TELEMETRY'; id: string }
-  | { type: 'CLEAR_HISTORY' };
+  | { type: 'CLEAR_HISTORY' }
+  /** A linked Volt's slice; see utils/coSimLink.ts. */
+  | { type: 'STEP_FOR'; id: string; dtMs: number; inputs: Record<string, number>; outputs: string[] }
+  | { type: 'GET_CHANNELS'; id: string };
 
 /**
  * A constraint that has just given way, on its way up to the main thread.
@@ -245,4 +249,11 @@ export type WorkerToMainMessage =
   | ({ type: 'IMPACT' } & ImpactEvent)
   | ({ type: 'HEADLESS_RESULT'; id: string } & HeadlessResult)
   | { type: 'HISTORY_RESULT'; id: string; history: HistoryFrame[]; total: number; stride: number }
-  | { type: 'TELEMETRY_RESULT'; id: string; telemetry: HistoryEntry | null };
+  | { type: 'TELEMETRY_RESULT'; id: string; telemetry: HistoryEntry | null }
+  | ({ type: 'STEPPED'; id: string } & StepForResult)
+  | { type: 'CHANNELS'; id: string; channels: CoSimChannel[]; timestepMs: number };
+
+/** What a STEP_FOR did. `unknown` lists the input and output names the model has no channel for. */
+export type StepForResult =
+  | { ok: true; t: number; steps: number; outputs: Record<string, number>; unknown: string[] }
+  | { ok: false; error: string };

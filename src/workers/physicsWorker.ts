@@ -29,6 +29,10 @@ import load_mujoco from '@mujoco/mujoco';
 // file once; the package's exports map does list ./mujoco.wasm, so a bare
 // specifier resolves (unlike openscad's - see the note in scadWorker.ts).
 import mujocoWasmUrl from '@mujoco/mujoco/mujoco.wasm?url';
+import {
+  applyCtrlInputs, applyJointForces, channelCatalogue, readOutputs, resolveInputs, stepsFor,
+  type ResolvedInput,
+} from '../utils/coSimLink';
 import type { SceneGraph, SceneJoint, SceneNode } from '../types/scene';
 // Pure loop control for the headless run, kept in a module that can be
 // imported outside a Worker realm so it is testable (this file cannot be:
@@ -1296,6 +1300,88 @@ const endHold = () => {
   lastTickTime = performance.now();
 };
 
+/**
+ * The joint forces a linked Volt is applying this STEP_FOR, added every step
+ * after `qfrc_applied` is cleared. Empty whenever no STEP_FOR is running.
+ */
+let linkForces: ResolvedInput[] = [];
+
+/**
+ * One model step, with everything a step does besides `mj_step`: forces,
+ * scripts, damping, breaks, impacts, history. False when the step failed or
+ * went to NaN, which has already been reported and has stopped play.
+ */
+const stepOnce = (stepSize: number): boolean => {
+  if (!model || !data || !mujoco) return false;
+  try {
+    data.xfrc_applied.fill(0);
+    data.qfrc_applied.fill(0);
+
+    applyDragForce();
+    applyJointForces(data, linkForces);
+
+    const aeroDiagnostics: Record<string, AeroDiagnostic> = {};
+    executeScripts(sceneGraph.nodes, aeroDiagnostics);
+    applyFreeJointDamping(sceneGraph.nodes);
+    wakeBodies();
+
+    mujoco.mj_step(model, data);
+    checkConstraintBreaks();
+    checkImpacts(stepSize);
+    stepCount++;
+
+    if (stepCount % 10 === 0) {
+      const entry = buildHistoryEntry(aeroDiagnostics);
+      history.push(entry);
+    }
+
+    // One view, not one per element: every `data.qpos` read is an embind
+    // getter that allocates a fresh Float64Array over the heap.
+    const qpos = data.qpos;
+    const nq = model.nq;
+    for (let j = 0; j < nq; j++) {
+      if (isNaN(qpos[j])) {
+        post({ type: 'ERROR', message: 'NaN detected in qpos — simulation stopped.', fatal: false });
+        isPlaying = false;
+        return false;
+      }
+    }
+    return true;
+  } catch (e) {
+    const msg = String((e as Error)?.message || e);
+    const fatal = /Aborted|enlarge memory|abort|bad_alloc/i.test(msg);
+    post({ type: 'ERROR', message: msg, fatal, lastState: fatal ? { qpos: Array.from(data.qpos), qvel: Array.from(data.qvel), time: data.time } : undefined });
+    isPlaying = false;
+    return false;
+  }
+};
+
+/**
+ * A linked Volt's slice: hold `inputs` for `dtMs` of model time, then read
+ * `outputs`. Runs whether or not the scene is playing — while linked it is
+ * not, and this is the only thing that moves it.
+ */
+const stepFor = (dtMs: number, inputs: Record<string, number>, outputNames: string[]) => {
+  if (!model || !data || !mujoco) return { ok: false as const, error: 'No model is built.' };
+  const { resolved, unknown: unknownInputs } = resolveInputs(mujoco, model, inputs);
+  applyCtrlInputs(data, resolved);
+  linkForces = resolved;
+  const stepSize = modelOpt(model).timestep;
+  const n = stepsFor(dtMs, stepSize);
+  let steps = 0;
+  try {
+    for (; steps < n; steps++) if (!stepOnce(stepSize)) break;
+  } finally {
+    linkForces = [];
+  }
+  if (steps < n) return { ok: false as const, error: 'The scene failed mid-step; see Mesh for the reason.' };
+  // A read with no steps behind it still wants the derived quantities current.
+  if (n === 0) mujoco.mj_forward(model, data);
+  const { outputs, unknown: unknownOutputs } = readOutputs(mujoco, model, data, outputNames);
+  if (n > 0) postFrame();
+  return { ok: true as const, t: data.time, steps, outputs, unknown: [...unknownInputs, ...unknownOutputs] };
+};
+
 const stepTick = (delta: number) => {
   if (!isPlaying || !model || !data || !mujoco) return;
   if (holdUntil) {
@@ -1310,45 +1396,7 @@ const stepTick = (delta: number) => {
   accumulator -= stepsNeeded * stepSize;
 
   for (let i = 0; i < stepsNeeded; i++) {
-    try {
-      data.xfrc_applied.fill(0);
-      data.qfrc_applied.fill(0);
-
-      applyDragForce();
-
-      const aeroDiagnostics: Record<string, AeroDiagnostic> = {};
-      executeScripts(sceneGraph.nodes, aeroDiagnostics);
-      applyFreeJointDamping(sceneGraph.nodes);
-      wakeBodies();
-
-      mujoco.mj_step(model, data);
-      checkConstraintBreaks();
-      checkImpacts(stepSize);
-      stepCount++;
-
-      if (stepCount % 10 === 0) {
-        const entry = buildHistoryEntry(aeroDiagnostics);
-        history.push(entry);
-      }
-
-      // One view, not one per element: every `data.qpos` read is an embind
-      // getter that allocates a fresh Float64Array over the heap.
-      const qpos = data.qpos;
-      const nq = model.nq;
-      for (let j = 0; j < nq; j++) {
-        if (isNaN(qpos[j])) {
-          post({ type: 'ERROR', message: 'NaN detected in qpos — simulation stopped.', fatal: false });
-          isPlaying = false;
-          return;
-        }
-      }
-    } catch (e) {
-      const msg = String((e as Error)?.message || e);
-      const fatal = /Aborted|enlarge memory|abort|bad_alloc/i.test(msg);
-      post({ type: 'ERROR', message: msg, fatal, lastState: fatal ? { qpos: Array.from(data.qpos), qvel: Array.from(data.qvel), time: data.time } : undefined });
-      isPlaying = false;
-      return;
-    }
+    if (!stepOnce(stepSize)) return;
   }
 
   if (stepsNeeded > 0) framePending = true;
@@ -2017,6 +2065,19 @@ self.onmessage = async (evt: MessageEvent) => {
       }
       case 'CLEAR_HISTORY': {
         history.clear();
+        break;
+      }
+      case 'STEP_FOR': {
+        const r = stepFor(msg.dtMs, msg.inputs ?? {}, msg.outputs ?? []);
+        post(r.ok
+          ? { type: 'STEPPED', id: msg.id, ok: true, t: r.t, steps: r.steps, outputs: r.outputs, unknown: r.unknown }
+          : { type: 'STEPPED', id: msg.id, ok: false, error: r.error });
+        break;
+      }
+      case 'GET_CHANNELS': {
+        post(model && mujoco
+          ? { type: 'CHANNELS', id: msg.id, channels: channelCatalogue(mujoco, model), timestepMs: modelOpt(model).timestep * 1000 }
+          : { type: 'CHANNELS', id: msg.id, channels: [], timestepMs: 0 });
         break;
       }
       default:

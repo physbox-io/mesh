@@ -49,6 +49,7 @@ import type { SplitSection } from '../utils/printSplit';
 import { featureGeoms } from '../utils/printAssembly';
 import type { ReliefCarveOptions } from '../utils/reliefCarveExporter';
 import { withUniqueNames } from '../utils/uniqueNames';
+import { envelope } from '../utils/coSimLink';
 
 /**
  * What is on the bench.
@@ -412,6 +413,21 @@ export const getPhysicsWorkerClient = (): PhysicsWorkerClient => {
     physicsWorkerClientSingleton = client;
   }
   return physicsWorkerClientSingleton;
+};
+
+/**
+ * Ends a link to Volt from this side: tells the Volt page, and stops answering it.
+ * Volt's end stops its run when it hears.
+ */
+export const endVoltLink = () => {
+  const link = useStore.getState().voltLink;
+  if (!link) return;
+  try {
+    window.opener?.postMessage(envelope({ type: 'UNLINK' }), link.origin);
+  } catch {
+    // The Volt tab is gone; there is no one to tell.
+  }
+  useStore.setState({ voltLink: null });
 };
 
 // Returns true if every geom on a node is a mesh (so pos/euler are meaningless for rendering)
@@ -1407,6 +1423,11 @@ export interface PhysicsState {
   lastShatter: { nodeId: string; name: string; pieces: number; time: number; impulseNs: number; wallM?: number } | null;
   isLoaded: boolean;
   lastCompileError: string | null;
+  /**
+   * The Volt page driving this scene, while linked: it owns the clock, and
+   * the scene steps only when it asks. See hooks/useVoltLink.ts.
+   */
+  voltLink: { origin: string } | null;
   isSettingsOpen: boolean;
   cameraView: 'perspective' | 'topDown';
   /**
@@ -2346,6 +2367,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
   },
 
   isPlaying: false,
+  voltLink: null,
   brokenConstraints: [],
   lastBreak: null,
   shatteredBodies: {},
@@ -2399,6 +2421,8 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
   decrementScadCompile: () => set((state) => ({ scadCompileCount: Math.max(0, state.scadCompileCount - 1) })),
 
   togglePlay: () => set((state) => {
+    // Playing hands the clock back from Volt: the two cannot both drive it.
+    if (state.voltLink) endVoltLink();
     const isPlaying = !state.isPlaying;
     getPhysicsWorkerClient().setPlaying(isPlaying);
     // Something in this scene can break: have the cutter loaded before it does.
@@ -5668,7 +5692,8 @@ if (typeof window !== 'undefined') {
   // only looks at the heap across rebuilds. The interval is how often the
   // question is asked; it is no longer how often a worker is thrown away.
   setInterval(() => {
-    if (useStore.getState().isPlaying) {
+    // Linked to Volt the scene steps without playing, and grows the heap the same way.
+    if (useStore.getState().isPlaying || useStore.getState().voltLink) {
       useStore.getState().recycleWorkerSeamlessly();
     }
   }, 20000);
