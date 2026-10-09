@@ -107,8 +107,20 @@ export function solidMeshGeoms(node: SceneNode): SceneGeom[] {
     !!(g.renderVertices?.length || g.vertices?.length));
 }
 
+/**
+ * The mesh a geom collides as: its separate collider source when it carries
+ * one (Split for Print's section before its holes and pegs — see
+ * SceneGeom.colliderVertices), and the geom itself otherwise. Decomposing the
+ * drilled section instead would fill every hole with a convex piece.
+ */
+export function colliderSourceOf(g: SceneGeom): SceneGeom {
+  return g.colliderFaces?.length && g.colliderVertices?.length
+    ? { ...g, renderVertices: g.colliderVertices, vertices: undefined, faces: g.colliderFaces }
+    : g;
+}
+
 const triangleCount = (geoms: SceneGeom[]) =>
-  geoms.reduce((n, g) => n + (g.faces?.length ?? 0) / 3, 0);
+  geoms.reduce((n, g) => n + (colliderSourceOf(g).faces?.length ?? 0) / 3, 0);
 
 /**
  * True volume and hull volume of a mesh geom, in its own space.
@@ -175,7 +187,7 @@ export function decompositionVerdict(
 
   const measured = opts.volume !== undefined && opts.hullVolume !== undefined
     ? { volume: opts.volume, hullVolume: opts.hullVolume, solidity: solidityOf(opts.volume, opts.hullVolume) }
-    : meshSolidity(meshes[0]);
+    : meshSolidity(colliderSourceOf(meshes[0]));
   const { solidity } = measured;
   const maxHulls = hullBudget(solidity, node.collisionHulls);
 
@@ -242,7 +254,7 @@ export function collisionHashOf(node: SceneNode): string {
   const meshes = solidMeshGeoms(node);
   if (meshes.length === 0) return '';
   const key = JSON.stringify([
-    meshes.map(g => [meshChecksum(g), g.pos ?? null, g.quat ?? null, g.euler ?? null]),
+    meshes.map(g => [meshChecksum(colliderSourceOf(g)), g.pos ?? null, g.quat ?? null, g.euler ?? null]),
     collisionModeOf(node),
     node.collisionHulls ?? null,
     node.collisionMass ?? null,
@@ -273,8 +285,9 @@ export async function decomposeNodeColliders(node: SceneNode): Promise<ColliderR
 
   const meshes = solidMeshGeoms(node);
   const source = meshes[0];
-  const verts = source.renderVertices ?? source.vertices ?? [];
-  const faces = source.faces ?? [];
+  const shape = colliderSourceOf(source);
+  const verts = shape.renderVertices ?? shape.vertices ?? [];
+  const faces = shape.faces ?? [];
 
   // The client runs the worker in a browser and falls back to the module under
   // Node and vite-node, where there is no Worker to run. Measuring goes through

@@ -15,6 +15,8 @@ import {
   enclosedAir,
   overhangDeg,
   thinnestWall,
+  supportArea,
+  fitsBedSquareOn,
   DFM_DEFAULTS,
 } from '../src/utils/dfm';
 import { buildHeatGeometry } from '../src/utils/dfmHeatGeometry';
@@ -523,5 +525,48 @@ describe('dfmLensFor', () => {
     // A laser has no Z depth, so overhang, undercut and reach mean nothing to
     // it. Better no answer than a confident one from the wrong lens.
     expect(dfmLensFor('laser')).toBeNull();
+  });
+});
+
+describe('the printer bed', () => {
+  // Half-extents in metres: a 300 x 100 x 100 mm part.
+  const long = () => scene([boxBody([0, 0, 0.05], [0.15, 0.05, 0.05])]);
+
+  it('says a part does not fit when no square-on way up fits the bed', () => {
+    const r = analyseDfm(long(), 'print', { printBed: { widthMm: 200, depthMm: 200, heightMm: 200 } });
+    const f = r.findings.find((x) => x.id === 'print_exceeds_bed');
+    expect(f).toBeDefined();
+    expect(f!.fix).toMatch(/Split/);
+  });
+
+  it('is quiet when it fits some way up, and when no bed is given', () => {
+    // 300 mm stands up on a bed 320 mm tall.
+    expect(analyseDfm(long(), 'print', { printBed: { widthMm: 200, depthMm: 200, heightMm: 320 } })
+      .findings.find((x) => x.id === 'print_exceeds_bed')).toBeUndefined();
+    expect(analyseDfm(long(), 'print').findings.find((x) => x.id === 'print_exceeds_bed')).toBeUndefined();
+  });
+
+  it('shades exactly the faces Split for Print counts as needing support', () => {
+    // A T: a stem with a wide bar on top, whose underside overhangs.
+    const r = analyseDfm(scene([
+      boxBody([0, 0, 0.04], [0.01, 0.01, 0.04], 'stem'),
+      boxBody([0, 0, 0.085], [0.05, 0.05, 0.005], 'bar'),
+    ]), 'print');
+    const { area } = supportArea(r.tris, DFM_DEFAULTS.overhangDeg);
+    let shaded = 0;
+    for (let t = 0; t < r.heat.length; t++) {
+      if (r.heat[t] <= 0) continue;
+      const i = t * 9;
+      const u = [r.tris[i + 3] - r.tris[i], r.tris[i + 4] - r.tris[i + 1], r.tris[i + 5] - r.tris[i + 2]];
+      const v = [r.tris[i + 6] - r.tris[i], r.tris[i + 7] - r.tris[i + 1], r.tris[i + 8] - r.tris[i + 2]];
+      shaded += Math.hypot(u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]) / 2;
+    }
+    expect(area).toBeGreaterThan(0);
+    expect(shaded).toBeCloseTo(area, 12);
+  });
+
+  it('fits a box any of the six square-on ways up', () => {
+    expect(fitsBedSquareOn([300, 100, 100], { widthMm: 100, depthMm: 100, heightMm: 300 })).toBe(true);
+    expect(fitsBedSquareOn([300, 100, 100], { widthMm: 200, depthMm: 200, heightMm: 200 })).toBe(false);
   });
 });

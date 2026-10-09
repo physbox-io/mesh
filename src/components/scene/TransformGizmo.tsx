@@ -413,6 +413,8 @@ export const TransformGizmo = () => {
   const recompileId = useStore((s) => s.recompileId);
   const paintMode = useStore((s) => s.paintMode);
   const measureMode = useStore((s) => s.measureMode);
+  // Select Multiple drags boxes across the view; a handle under the pointer would take the drag.
+  const multiSelectMode = useStore((s) => s.multiSelectMode);
   const latticeNodeId = useStore((s) => s.latticeNodeId);
   const sculptNodeId = useStore((s) => s.sculptNodeId);
   const draggedNodeId = useStore((s) => s.draggedNodeId);
@@ -464,7 +466,7 @@ export const TransformGizmo = () => {
    * the sidebar still works.
    */
   const suppressed =
-    isPlaying || !node || extraSelectedIds.length > 0 ||
+    isPlaying || !node || extraSelectedIds.length > 0 || multiSelectMode ||
     paintMode || measureMode !== null || latticeNodeId !== null ||
     sculptNodeId !== null || draggedNodeId !== null;
 

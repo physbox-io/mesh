@@ -10,7 +10,7 @@ import { useDentStore } from '../store/dentStore';
 import { isDentable, needsConversionForDenting } from '../utils/dentMesh';
 import type { DentConfig } from '../utils/breakThresholds';
 import { createMeshMachineHandlers, setCurrentScene } from '../utils/machineMcp';
-import { compileToMJCF } from '../utils/mjcf';
+import { compileToMJCF, PRINT_CONTACT_TIME } from '../utils/mjcf';
 import { analyzeMesh } from '../utils/meshIntegrity';
 import { compileSCAD } from '../utils/openscad';
 import { getLiveCameraPose } from '../utils/liveCamera';
@@ -40,6 +40,8 @@ import {
 import { measureInScene } from '../utils/measureScene';
 import { generateCastPattern, DEFAULT_CAST_OPTIONS, type CastMethod } from '../utils/castPatternExporter';
 import { runCastPrep } from '../utils/castPrepRunner';
+import { selectionSoups, splitOffThread, testAssemblyOffThread } from '../utils/printSplitClient';
+import { filamentSpec } from '../utils/filaments';
 import { generateSolidMachining, DEFAULT_SOLID_OPTIONS } from '../utils/solidMachiningExporter';
 import type { Object3D } from 'three';
 import type { SceneNode, SceneGeom, SceneJoint } from '../types/scene';
@@ -421,8 +423,17 @@ const summarizeNode = (node: SceneNode): Record<string, unknown> => ({
     },
   } : {}),
   ...(node.csgEnabled ? {} : collisionReport(node)),
+  ...(node.printPose ? { printPose: { up: node.printPose.up, spinDeg: +(node.printPose.spin * 180 / Math.PI).toFixed(2) } } : {}),
   joints: (node.joints || []).map((j) => ({ name: j.name, type: j.type })),
-  geoms: (node.geoms || []).map(summarizeGeom),
+  // A split section carries dozens of exact pin and socket colliders; listing
+  // each one would bury the geoms that matter, so they are counted instead.
+  geoms: (node.geoms || []).filter((g) => !g.contactClass).map(summarizeGeom),
+  ...((node.geoms || []).some((g) => g.contactClass) ? {
+    exactColliders: {
+      pins: (node.geoms || []).filter((g) => g.contactClass === 'pin').length,
+      sockets: (node.geoms || []).filter((g) => g.contactClass === 'socket').length,
+    },
+  } : {}),
   children: (node.children || []).map(summarizeNode),
 });
 
@@ -434,6 +445,8 @@ const stripMeshArrays = (node: SceneNode): SceneNode => {
       delete rest.vertices;
       delete rest.faces;
       delete rest.renderVertices;
+      delete rest.colliderVertices;
+      delete rest.colliderFaces;
       return rest;
     });
   }
@@ -887,7 +900,17 @@ export function useMCPBridge() {
           return store.sceneGraph;
 
         case 'GET_SCENE_SUMMARY':
-          return { nodes: (store.sceneGraph.nodes || []).map(summarizeNode) };
+          return {
+            nodes: (store.sceneGraph.nodes || []).map(summarizeNode),
+            ...(store.sceneGraph.simFidelity === 'print' ? {
+              simFidelity: {
+                mode: 'print',
+                // g * t^2 at the stiffest contact the timestep allows.
+                restingPenetrationMm: +(9.81 * PRINT_CONTACT_TIME * PRINT_CONTACT_TIME * 1000).toFixed(3),
+                note: 'Pins and sockets collide exactly; everything else collides as its hull or convex pieces. A clearance under about 0.1 mm is below what the contact can resolve.',
+              },
+            } : {}),
+          };
 
         case 'GET_TELEMETRY':
           return getPhysicsWorkerClient().getTelemetry().then(t => t || { error: 'No simulation telemetry available' });
@@ -2125,6 +2148,92 @@ export function useMCPBridge() {
         }
 
         /*
+         * Split for Print, as the dialog does it: cut a body into sections
+         * that fit the bed, with joinery on the cut faces. Reports the
+         * sections; `testAssembly` puts them back together in MuJoCo first,
+         * and `apply` replaces the body with them. See utils/printSplit.ts.
+         */
+        case 'SPLIT_FOR_PRINT': {
+          const bodyId = typeof msg.bodyId === 'string' ? msg.bodyId : store.selectedNodeId;
+          const node = bodyId ? findNodeInScene(store.sceneGraph.nodes, bodyId) : null;
+          if (!node) return { ok: false, error: bodyId ? `No body called ${bodyId}.` : 'Give bodyId, or select a body first.' };
+          // More bodies to split as one part with it, in its frame.
+          const others = (Array.isArray(msg.withIds) ? msg.withIds : []).filter((v): v is string => typeof v === 'string');
+          const missing = others.filter((id) => !findNodeInScene(store.sceneGraph.nodes, id));
+          if (missing.length) return { ok: false, error: `No body called ${missing.join(', ')}.` };
+          const { soups, absorbed } = selectionSoups(store.sceneGraph, [node.id, ...others.map((id) => findNodeInScene(store.sceneGraph.nodes, id)!.id)]);
+          if (!soups.length) return { ok: false, error: `${node.name} has no solid geometry to split.` };
+          const bedArr = Array.isArray(msg.bedMm) ? (msg.bedMm as number[]) : null;
+          const bed = bedArr && bedArr.length === 3 && bedArr.every((v) => typeof v === 'number' && v > 0)
+            ? { widthMm: bedArr[0], depthMm: bedArr[1], heightMm: bedArr[2] }
+            : store.printBed;
+          const kind = msg.joinery === 'none' || msg.joinery === 'peg' || msg.joinery === 'dowel' ? msg.joinery : 'dowel';
+          const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+          const joinery = Object.fromEntries(Object.entries({
+            kind,
+            diameterMm: num(msg.diameterMm),
+            lengthMm: num(msg.lengthMm),
+            clearanceMm: num(msg.clearanceMm),
+            minWallMm: num(msg.minWallMm),
+          }).filter(([, v]) => v !== undefined));
+          const { result, checks } = await splitOffThread(soups, {
+            bed,
+            marginMm: num(msg.marginMm) ?? 5,
+            overhangDeg: filamentSpec(store.filament).maxOverhangDeg,
+            joinery,
+          });
+          if (!result.ok) return { ok: false, error: result.error };
+
+          let assembly: Record<string, unknown> | undefined;
+          if (msg.testAssembly === true && result.cuts.length) {
+            try {
+              const { results } = await testAssemblyOffThread(result);
+              assembly = {
+                ok: results.every((r) => r.ok),
+                stages: results.map((r) => ({
+                  label: r.label, kind: r.kind, ok: r.ok, seated: r.seated,
+                  gapMm: +r.gapMm.toFixed(3), lateralMm: +r.lateralMm.toFixed(3), angleDeg: +r.angleDeg.toFixed(3),
+                  playMm: r.playMm === null ? 'unbounded' : +r.playMm.toFixed(3),
+                  twistDeg: r.twistDeg === null ? 'unbounded' : +r.twistDeg.toFixed(3),
+                  rotates: r.rotates, diverged: r.diverged, notes: r.notes,
+                })),
+              };
+            } catch (err) {
+              assembly = { ok: false, error: err instanceof Error ? err.message : String(err) };
+            }
+          }
+
+          const ids = msg.apply === true ? store.splitBodyForPrint(node.id, result.sections, absorbed) : null;
+          const round = (v: number, d = 1) => +v.toFixed(d);
+          return {
+            ok: true,
+            applied: !!ids,
+            ...(absorbed.length ? { includedBodies: absorbed.length } : {}),
+            bedMm: [bed.widthMm, bed.depthMm, bed.heightMm],
+            sections: result.sections.map((sec, i) => ({
+              index: i,
+              ...(ids ? { id: ids[i] } : {}),
+              fits: sec.fits,
+              printedSizeMm: sec.sizeMm.map((v) => round(v)),
+              supportMm2: round(sec.supportMm2),
+              up: sec.up.map((v) => round(v, 4)),
+              spinDeg: round(sec.spin * 180 / Math.PI, 2),
+              volumeCm3: round(sec.volumeMm3 / 1000, 2),
+              holes: sec.features.filter((f) => f.kind === 'bore').length,
+              pegs: sec.features.filter((f) => f.kind === 'peg').length,
+            })),
+            cuts: result.cuts.map((c) => ({ normal: c.normal.map((v) => round(v, 4)), offsetMm: round(c.offset * 1000, 2) })),
+            joints: result.joints.map((j) => ({
+              between: [j.neg, j.pos], areaMm2: round(j.areaMm2), pins: j.pins.length,
+              ...(j.pegSide ? { pegsOn: j.pegSide === 'neg' ? j.neg : j.pos } : {}),
+            })),
+            checks,
+            ...(assembly ? { assembly } : {}),
+            warnings: result.warnings,
+          };
+        }
+
+        /*
          * Prepare for Casting, as the Cast dialog's switch does it: edge
          * breaks on every part, and for sand, draft baked in. See
          * utils/castPrep.ts.
@@ -2620,8 +2729,12 @@ export function useMCPBridge() {
         }
 
         case 'SET_ENVIRONMENT': {
-          const { gravityZ, windX, windY, density, floorFriction, floorBounce } =
-            msg as Msg<{ gravityZ?: number; windX?: number; windY?: number; density?: number; floorFriction?: number; floorBounce?: number }>;
+          const { gravityZ, windX, windY, density, floorFriction, floorBounce, fidelity } =
+            msg as Msg<{ gravityZ?: number; windX?: number; windY?: number; density?: number; floorFriction?: number; floorBounce?: number; fidelity?: string }>;
+          if (fidelity !== undefined) {
+            if (fidelity !== 'standard' && fidelity !== 'print') return { ok: false, error: `fidelity must be 'standard' or 'print', not '${fidelity}'.` };
+            store.setSimFidelity(fidelity);
+          }
           const env: Record<string, number> = {};
           if (gravityZ !== undefined) env.gravityZ = gravityZ;
           if (windX !== undefined) env.windX = windX;

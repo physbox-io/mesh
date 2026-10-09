@@ -29,6 +29,7 @@ export function DfmHeatmap() {
   const material = useStore(state => state.material);
   const filament = useStore(state => state.filament);
   const stock = useStore(state => state.stock);
+  const printBed = useStore(state => state.printBed);
   const selectedNodeId = useStore(state => state.selectedNodeId);
 
   const geometry = useMemo(() => {
@@ -38,12 +39,12 @@ export function DfmHeatmap() {
     const lens = dfmEnabled && !minimized ? (castOpen ? 'cast' : dfmLensFor(machineTarget)) : null;
     if (!lens || !sceneGraph) return null;
     try {
-      return buildHeatGeometry(analyseDfmShared(sceneGraph, lens, { material, filament, stock, nodeId: selectedNodeId }));
+      return buildHeatGeometry(analyseDfmShared(sceneGraph, lens, { material, filament, stock, printBed, nodeId: selectedNodeId }));
     } catch {
       // A scene the analyser cannot read should cost the viewport nothing.
       return null;
     }
-  }, [sceneGraph, dfmEnabled, minimized, castOpen, machineTarget, material, filament, stock, selectedNodeId]);
+  }, [sceneGraph, dfmEnabled, minimized, castOpen, machineTarget, material, filament, stock, printBed, selectedNodeId]);
 
   if (!geometry) return null;
 

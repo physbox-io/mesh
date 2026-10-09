@@ -1,12 +1,13 @@
 import React, { useEffect, useState } from 'react';
 import {
-  Box, ChevronUp, Cpu, Cuboid, Flame, Layers, Layers2, MousePointer2, Mountain, Package, Pause, Play, Printer, Scissors, Square, Wrench,
+  Box, ChevronUp, Cpu, Cuboid, Flame, Layers, Layers2, MousePointer2, Mountain, Package, Pause, Play, Printer, Puzzle, Scissors, Square, Wrench,
 } from 'lucide-react';
 import { NumberInput } from '@physbox-io/ui';
 import { useStore, type MachineTarget } from '../store/useStore';
 import {
   DEFAULT_STOCK, MAX_STOCK_PLAN_MM, MAX_STOCK_THICKNESS_MM, MIN_STOCK_MM,
 } from '../utils/stockSettings';
+import { DEFAULT_PRINT_BED, MAX_PRINT_BED_MM, MIN_PRINT_BED_MM } from '../utils/printBedSettings';
 import { FILAMENTS, filamentSpec, type FilamentId } from '../utils/filaments';
 import { FdmNotice } from './FdmNotice';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
@@ -40,6 +41,7 @@ function modeLabel(state: {
   sculptBrush: string;
   paintMode: boolean;
   measureMode: string | null;
+  multiSelect: number | null;
 }): { text: string; tone: string } {
   const title = (word: string) => word.charAt(0).toUpperCase() + word.slice(1);
   // Measuring outranks the gesture line it writes into, so the chip stays amber
@@ -50,6 +52,7 @@ function modeLabel(state: {
   if (state.latticeNodeId) return { text: `Lattice · ${title(state.latticeTool)}`, tone: 'indigo' };
   if (state.sculptNodeId) return { text: `Sculpt · ${title(state.sculptBrush)}`, tone: 'sky' };
   if (state.paintMode) return { text: 'Paint', tone: 'violet' };
+  if (state.multiSelect !== null) return { text: `Select multiple · ${state.multiSelect}`, tone: 'emerald' };
   return { text: 'Select', tone: 'slate' };
 }
 
@@ -73,6 +76,8 @@ interface ModeChoice {
   none?: true;
   /** Open sculpt or lattice mode on the selected body. */
   enter?: 'sculpt' | 'lattice';
+  /** Turn on Select Multiple. */
+  multi?: true;
 }
 
 /**
@@ -107,6 +112,8 @@ const LATTICE_INSET: ModeChoice = { key: 'I', label: 'Inset', gesture: 'inset', 
 const BODY_INSET: ModeChoice = { key: 'I', label: 'Inset face', gesture: 'inset', hint: 'Inset the flat face under the pointer, click, then push in for a pocket or pull out for a boss. On a curved surface it bores through' };
 
 /** Offered on its own, beside the gestures: a finishing step for any part that is not being sculpted or latticed. */
+const SELECT_MULTIPLE: ModeChoice = { key: '⇧', label: 'Select multiple', multi: true, hint: 'Drag a box across bodies to select them all (Shift-drag adds), or click one to add or remove it — to split or combine several as one. Esc to stop' };
+
 const ROUND_EDGES: ModeChoice = { key: 'E', label: 'Round edges', gesture: 'round-edges', hint: 'Round or bevel edges of the selected part: click edges or faces, pick a size' };
 
 /**
@@ -156,6 +163,7 @@ const MODE_TONES: Record<string, string> = {
   sky: 'bg-sky-100 dark:bg-sky-950/50 text-sky-700 dark:text-sky-300 border-sky-300 dark:border-sky-800',
   violet: 'bg-violet-100 dark:bg-violet-950/50 text-violet-700 dark:text-violet-300 border-violet-300 dark:border-violet-800',
   slate: 'bg-slate-100 dark:bg-slate-900 text-slate-500 dark:text-slate-400 border-slate-200 dark:border-slate-800',
+  emerald: 'bg-emerald-100 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 border-emerald-300 dark:border-emerald-800',
 };
 
 /**
@@ -176,6 +184,8 @@ export interface ExportActions {
   solid: () => void;
   /** Print a casting pattern — sand or burnout — to cast the part in metal. */
   cast: () => void;
+  /** Cut the selected body into sections that fit the printer. */
+  split: () => void;
 }
 
 /** Fired by anything that wants the export buttons pointed out — the navbar's print button, for one. */
@@ -217,6 +227,8 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
   const setFilament = useStore((s) => s.setFilament);
   const stock = useStore((s) => s.stock);
   const setStock = useStore((s) => s.setStock);
+  const printBed = useStore((s) => s.printBed);
+  const setPrintBed = useStore((s) => s.setPrintBed);
   const printing = machineTarget === 'fdm';
 
   const gestureStatus = useStore((s) => s.gestureStatus);
@@ -226,6 +238,17 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
   const selectedNodeId = useStore((s) => s.selectedNodeId);
   const setLatticeTool = useStore((s) => s.setLatticeTool);
   const measureMode = useStore((s) => s.measureMode);
+  const multiSelectMode = useStore((s) => s.multiSelectMode);
+  const extraSelectedCount = useStore((s) => s.extraSelectedIds.length);
+  // Esc leaves Select Multiple, as it leaves every other mode.
+  useEffect(() => {
+    if (!multiSelectMode) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') useStore.getState().setMultiSelectMode(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [multiSelectMode]);
   const mode = modeLabel({
     gestureStatus,
     draggedNodeId: useStore((s) => s.draggedNodeId),
@@ -235,6 +258,7 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
     sculptBrush: useStore((s) => s.sculptBrush.type),
     paintMode: useStore((s) => s.paintMode),
     measureMode,
+    multiSelect: multiSelectMode ? (selectedNodeId ? 1 : 0) + extraSelectedCount : null,
   });
 
   const [modeMenuOpen, setModeMenuOpen] = useState(false);
@@ -259,6 +283,7 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
     ? [NOTHING, ...MEASURE]
     : [
         NOTHING,
+        SELECT_MULTIPLE,
         ...(enterChoice ? [enterChoice] : []),
         ...(latticeNodeId ? LATTICE_TOOLS : []),
         ...(canGesture ? [...GESTURES, latticeNodeId ? LATTICE_INSET : BODY_INSET] : []),
@@ -274,12 +299,19 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
       window.dispatchEvent(new CustomEvent('physbox:gesture', { detail: { kind: 'none' } }));
       const store = useStore.getState();
       store.setMeasureMode(null);
+      store.setMultiSelectMode(false);
       store.applyEdgeRound();
       // The same as each mode's own Done button: the edits are already in the
       // scene, so leaving throws nothing away.
       store.setSculptNodeId(null);
       store.setLatticeNodeId(null);
       store.setSelectedNodeId(null);
+      return;
+    }
+    if (choice.multi) {
+      const store = useStore.getState();
+      store.setMeasureMode(null);
+      store.setMultiSelectMode(true);
       return;
     }
     if (choice.enter) {
@@ -349,11 +381,21 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
    * without the relief carve and the solid part, which need a Z axis a laser
    * does not have.
    */
-  const exportButtons: { label: string; title: string; tone: string; icon: React.ReactNode; run: () => void; ring?: boolean }[] =
+  const exportButtons: { label: string; title: string; tone: string; icon: React.ReactNode; run: () => void; ring?: boolean; disabled?: boolean }[] =
     machineTarget === 'fdm'
       ? [
           { label: 'STL', title: '3D Print (STL), geometry only. STL cannot carry colour; use 3MF if the model is painted.', tone: 'text-slate-600 dark:text-slate-300', icon: <Printer className="w-3.5 h-3.5" />, run: exports.stl },
           { label: '3MF', title: '3D Print in colour (3MF). Carries painted colour two ways: per-vertex for viewers, and a filament slot per triangle for a multi-material slicer.', tone: 'text-fuchsia-600 dark:text-fuchsia-400', icon: <Package className="w-3.5 h-3.5" />, run: exports.threeMf },
+          {
+            label: 'Split',
+            title: selectedNodeId
+              ? `Split for print: cut the selected ${extraSelectedCount ? `${extraSelectedCount + 1} bodies, as one part,` : 'body'} into sections that fit the bed, with dowel holes or pegs to line them up`
+              : 'Split for print — select a body first',
+            tone: 'text-emerald-600 dark:text-emerald-400',
+            icon: <Puzzle className="w-3.5 h-3.5" />,
+            run: exports.split,
+            disabled: !selectedNodeId,
+          },
           { label: 'Mold', title: 'Export 3D Printable Casting Mold (STL)', tone: 'text-purple-600 dark:text-purple-400', icon: <Box className="w-3.5 h-3.5" />, run: exports.mold },
           castPrep
             ? {
@@ -522,6 +564,39 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
             </>
           )}
 
+          {/*
+            The printer's build volume, in the same slot: Split for Print cuts
+            parts to it, and the print lens checks parts against it.
+          */}
+          {printing && (
+            <>
+              <div className="w-px h-3 bg-slate-200 dark:bg-slate-800 mx-0.5" />
+              <Box className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+              <label htmlFor="bed-width" className="text-slate-500 dark:text-slate-400">
+                Bed
+              </label>
+              {([['widthMm', 'bed-width', 'Bed width in millimetres — the X size of the build plate'],
+                ['depthMm', 'bed-depth', 'Bed depth in millimetres — the Y size of the build plate'],
+                ['heightMm', 'bed-height', 'Build height in millimetres — how tall a print the gantry clears']] as const).map(([key, id, title], i) => (
+                <React.Fragment key={key}>
+                  {i > 0 && <span className="text-slate-400">×</span>}
+                  <NumberInput
+                    id={id}
+                    min={MIN_PRINT_BED_MM}
+                    max={MAX_PRINT_BED_MM}
+                    step={1}
+                    fallbackOnBlur={DEFAULT_PRINT_BED[key]}
+                    value={printBed[key]}
+                    onChange={(v) => { if (v !== undefined && Number.isFinite(v)) setPrintBed({ [key]: v }); }}
+                    className={`w-12 ${stockFieldClass}`}
+                    title={title}
+                  />
+                </React.Fragment>
+              ))}
+              <span className="text-slate-400">mm</span>
+            </>
+          )}
+
           <div className="w-px h-3 bg-slate-200 dark:bg-slate-800 mx-0.5" />
 
           <Layers2 className="w-3.5 h-3.5 text-emerald-500" />
@@ -591,7 +666,8 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
                 type="button"
                 onClick={b.run}
                 title={b.title}
-                className={`${exportButtonClass(b.tone)} gap-1 px-1.5 font-semibold ${b.ring ? 'ring-1 ring-orange-500/70 bg-orange-500/10' : ''}`}
+                disabled={b.disabled}
+                className={`${exportButtonClass(b.tone)} gap-1 px-1.5 font-semibold disabled:opacity-40 disabled:cursor-not-allowed ${b.ring ? 'ring-1 ring-orange-500/70 bg-orange-500/10' : ''}`}
               >
                 {b.icon}
                 {b.label}

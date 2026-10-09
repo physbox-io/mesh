@@ -182,6 +182,91 @@ const rotationIsBaked = (node: SceneNode): boolean => {
   return geoms.some((g) => Array.isArray(g.baseVertices) && g.baseVertices.length > 0);
 };
 
+/*
+ * Contact classes, as contype/conaffinity bits. Two geoms touch when either's
+ * contype shares a bit with the other's conaffinity.
+ *
+ * Bit 1 is MuJoCo's default, the body class every geom not told otherwise
+ * is in. The exact colliders of Split for Print (SceneGeom.contactClass) live in
+ * the 'print' fidelity only, and never meet a body: a pin has to go into a
+ * bore the body's hull would have filled in, so it must not see that hull.
+ *
+ * - A pin is type PIN_CONTACT plus its joint's bit, affinity PIN_CONTACT: it
+ *   meets every other pin, and the sockets of its own joint.
+ * - A socket is type 0, affinity its joint's bit: it meets only its own
+ *   joint's pins — not other sockets (two glued faces' plates coincide, and
+ *   coincident slabs in contact rock), and not another joint's pins (a hole
+ *   passing near another hole's lining would stop that hole's dowel dead).
+ * - The floor carries every bit.
+ *
+ * Joint bits are 2 to 30, so joints share a bit 29 apart. Two joints that
+ * far apart in the cut order are a long way apart in the part too.
+ */
+const PIN_CONTACT = 2;
+const JOINT_BITS = 29;
+const FLOOR_CONTACT = 0x7fffffff;
+const jointBit = (group: number | undefined) => 1 << (2 + (((group ?? 0) % JOINT_BITS) + JOINT_BITS) % JOINT_BITS);
+export const PRINT_CONTACT_TIME = 0.002;
+
+/**
+ * Puts each body's geoms into their contact classes, in place.
+ *
+ * - A pin or a socket lives only in print fidelity; otherwise it is inert.
+ *   It never weighs anything — the section's own mesh carries the mass.
+ * - A mesh with a separate collider source (`colliderVertices`) is drawn from
+ *   its own vertices but collides as the source: the visible mesh is emitted
+ *   visual-only and a plain mesh geom beside it takes the contact and the
+ *   mass. Not when the body has convex pieces already, which were made from
+ *   that same source and replace it (see convexDecomposition.ts).
+ *
+ * A scene with neither kind of geom comes out byte for byte as it did before
+ * this existed, which the native app's golden XML depends on.
+ */
+function applyContactClasses(nodes: SceneNode[], print: boolean) {
+  for (const node of nodes) {
+    if (node.geoms?.some((g) => g.contactClass || g.colliderFaces?.length)) {
+      const decomposed = node.geoms.some((g) => g.csgDerived === 'collider');
+      const out: SceneGeom[] = [];
+      for (const g of node.geoms) {
+        if (g.contactClass) {
+          const bit = jointBit(g.contactGroup);
+          const contype = !print ? 0 : g.contactClass === 'pin' ? PIN_CONTACT | bit : 0;
+          const conaffinity = !print ? 0 : g.contactClass === 'pin' ? PIN_CONTACT : bit;
+          out.push({ ...g, role: 'collision', mass: 0, density: undefined, contype, conaffinity });
+        } else if (
+          !decomposed && g.type === 'mesh' && g.role !== 'visual'
+          && g.colliderFaces?.length && g.colliderVertices?.length
+        ) {
+          const { colliderVertices, colliderFaces, ...rest } = g;
+          out.push({ ...rest, role: 'visual', mass: undefined, density: undefined });
+          // Y-up, as every geom's `vertices` are; renderVertices is Z-up.
+          const yUp: number[] = new Array(colliderVertices.length);
+          for (let i = 0; i < colliderVertices.length; i += 3) {
+            yUp[i] = colliderVertices[i];
+            yUp[i + 1] = colliderVertices[i + 2];
+            yUp[i + 2] = -colliderVertices[i + 1];
+          }
+          out.push({
+            ...rest,
+            name: `${g.name}_collider`,
+            role: 'collision',
+            vertices: yUp,
+            renderVertices: colliderVertices,
+            faces: colliderFaces,
+            baseVertices: undefined,
+            baseRenderVertices: undefined,
+            paint: undefined,
+          });
+        } else {
+          out.push(g);
+        }
+      }
+      node.geoms = out;
+    }
+    applyContactClasses(node.children || [], print);
+  }
+}
+
 export interface MjcfOptions {
   /**
    * Let bodies that have come to rest sleep (`<flag sleep="enable"/>`): MuJoCo
@@ -241,6 +326,9 @@ export const compileToMJCF = (
     }
   };
   resolveCsg(sceneCopy.nodes);
+
+  const printFidelity = scene.simFidelity === 'print';
+  applyContactClasses(sceneCopy.nodes, printFidelity);
 
   // The viewport finds each body and geom by its name, so a clash would bind
   // the lookups for both to whichever MuJoCo registered first. Renamed by the
@@ -625,6 +713,12 @@ export const compileToMJCF = (
     equalityXml = `\n  <equality>${equalityConstraints}\n  </equality>`;
   }
 
+  // Contact time constant. MuJoCo will not go below twice the timestep, and at
+  // 0.002 s a part resting under gravity sinks about g*t^2 = 0.04 mm into what
+  // it rests on — against 4 mm at the standard 0.02. That is the difference
+  // between a 0.2 mm clearance meaning something and meaning nothing.
+  const contactTime = printFidelity ? PRINT_CONTACT_TIME : 0.02;
+
   return `
 <mujoco model="dynamic_scene">
   <!-- integrator="implicitfast": joint damping and velocity-actuator gains are
@@ -636,11 +730,11 @@ export const compileToMJCF = (
        "the preset does nothing" failure that depends on a body's scale. -->
   <option integrator="implicitfast" timestep="0.001" gravity="0 0 ${gravityZ}" wind="${windX} ${windY} 0" density="${density}" iterations="50" tolerance="1e-10" ls_iterations="50" ls_tolerance="1e-12"${opts.sleep ? '><flag sleep="enable" /></option>' : ' />'}${assetXml}
   <default>
-    <geom solref="0.02 1" solimp="0.99 0.9999 0.0001 0.5 2" />
+    <geom solref="${contactTime} 1" solimp="0.99 0.9999 0.0001 0.5 2" />
   </default>
   <worldbody>
     <light directional="true" pos="-0.3 0.3 1.5" dir="0.3 -0.3 -1.5" diffuse="0.8 0.8 0.8" />
-    <geom name="floor" type="plane" size="0.5 0.5 0.1" pos="0 0 0" rgba="0.9 0.9 0.9 1" friction="${floorFriction} 0.005 0.0001" solref="0.02 ${Math.max(0, 1 - floorBounce).toFixed(3)}" solimp="0.99 0.9999 0.0001 0.5 2" />
+    <geom name="floor" type="plane" size="0.5 0.5 0.1" pos="0 0 0" rgba="0.9 0.9 0.9 1" friction="${floorFriction} 0.005 0.0001" solref="${contactTime} ${Math.max(0, 1 - floorBounce).toFixed(3)}" solimp="0.99 0.9999 0.0001 0.5 2"${printFidelity ? ` contype="${FLOOR_CONTACT}" conaffinity="${FLOOR_CONTACT}"` : ''} />
     
     ${sceneCopy.nodes.map(buildNode).join('\n')}
   </worldbody>

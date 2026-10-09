@@ -49,6 +49,9 @@ import { ExportReliefCarveModal } from './components/ExportReliefCarveModal';
 import { ExportMoldModal } from './components/ExportMoldModal';
 import { ExportSolidMachiningModal } from './components/ExportSolidMachiningModal';
 import { ExportCastModal } from './components/ExportCastModal';
+import { SplitForPrintModal } from './components/SplitForPrintModal';
+import { MarqueeSelect } from './components/scene/MarqueeSelect';
+import { layoutOnBed, type PosedPart } from './utils/printPlate';
 import { PulleyRopeMarkers } from './components/scene/PulleyRopes';
 import { SliderValue } from './components/SliderValue';
 import { RangeInput } from './components/RangeInput';
@@ -221,6 +224,9 @@ function App() {
   const [isMoldModalOpen, setIsMoldModalOpen] = useState(false);
   const [isSolidModalOpen, setIsSolidModalOpen] = useState(false);
   const [isCastModalOpen, setIsCastModalOpen] = useState(false);
+  const [isSplitModalOpen, setIsSplitModalOpen] = useState(false);
+  const simFidelity = useStore((s) => s.sceneGraph.simFidelity ?? 'standard');
+  const setSimFidelity = useStore((s) => s.setSimFidelity);
   // The machine setup lives in the store rather than in local state: the bottom
   // bar opens it, and the export modals link to it when a job needs a machine
   // that is not connected yet.
@@ -1265,6 +1271,36 @@ function App() {
    * prints it. See utils/threeMfExporter.
    */
   const export3mf = useCallback(() => {
+    // Sections made by Split for Print know which way up they print. When
+    // there are some, offer the print job — each section stood that way and
+    // laid out on the bed — rather than the scene as it stands. No size prompt
+    // for those: they were cut to fit this bed, and rescaling would undo that.
+    const { sceneGraph: graph, printBed } = useStore.getState();
+    const posed: PosedPart[] = [];
+    const walk = (nodes: SceneNode[]) => {
+      for (const n of nodes) {
+        const mesh = n.printPose && (n.geoms || []).find((g) => g.type === 'mesh' && g.role !== 'collision' && g.renderVertices?.length && g.faces?.length);
+        if (n.printPose && mesh) {
+          const c = new THREE.Color().setRGB(mesh.rgba?.[0] ?? 0.8, mesh.rgba?.[1] ?? 0.8, mesh.rgba?.[2] ?? 0.8, THREE.SRGBColorSpace);
+          posed.push({ name: n.name || n.id, positions: mesh.renderVertices!, faces: mesh.faces!, pose: n.printPose, colour: [c.r, c.g, c.b] });
+        }
+        walk(n.children || []);
+      }
+    };
+    walk(graph.nodes);
+    if (posed.length && window.confirm(
+      `Lay out the ${posed.length} split section${posed.length === 1 ? '' : 's'} on the ${printBed.widthMm} × ${printBed.depthMm} mm bed, each standing the way it prints?\n\nCancel exports the whole scene as it stands instead.`,
+    )) {
+      const plated = layoutOnBed(posed, printBed);
+      const result = exportThreeMf(plated.map((p) => ({
+        name: p.name, positions: p.positions, indices: p.indices, colors: null, baseColor: p.colour,
+      })));
+      downloadBlob(new Blob([result.data.buffer as ArrayBuffer], { type: 'application/vnd.ms-package.3dmanufacturing-3dmodel+xml' }), `${exportBaseName()}_plate.3mf`);
+      const plates = Math.max(...plated.map((p) => p.plate)) + 1;
+      if (plates > 1) console.info(`[Export] ${plates} plates' worth of sections; the extra plates sit beside the bed.`);
+      return;
+    }
+
     const exportGroup = buildExportGroup();
     if (!exportGroup) return;
 
@@ -2135,6 +2171,24 @@ function App() {
               <div className="flex flex-col gap-1">
                 <label className="text-xs font-medium text-slate-500 dark:text-slate-400 flex justify-between">Floor Bounciness <SliderValue value={floorBounce ?? 0} onChange={(v) => setEnvironment({floorBounce: v})} decimals={2} min={0} max={1} /></label>
                 <RangeInput min="0" max="1" step="0.01" value={floorBounce ?? 0} onChange={(v) => setEnvironment({floorBounce: v})} className="w-full accent-blue-500 cursor-pointer" />
+              </div>
+              {/* Contact fidelity. Print is for millimetre parts that have to
+                  fit: stiffer contact, and pins colliding with their holes
+                  exactly. A property of the scene, so it is undone and saved
+                  with it. */}
+              <div className="flex items-center justify-between gap-2">
+                <span id="fidelityLabel" className="text-xs font-medium text-slate-500 dark:text-slate-400" title="Print: contact stiff enough for millimetre clearances, and pegs and dowels that really go into their holes. For split parts and anything else that has to fit together.">Print Fidelity</span>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={simFidelity === 'print'}
+                  aria-labelledby="fidelityLabel"
+                  title="Print: contact stiff enough for millimetre clearances, and pegs and dowels that really go into their holes. For split parts and anything else that has to fit together."
+                  onClick={() => setSimFidelity(simFidelity === 'print' ? 'standard' : 'print')}
+                  className={`relative inline-flex h-4 w-7 shrink-0 cursor-pointer items-center rounded-full transition-colors ${simFidelity === 'print' ? 'bg-blue-500' : 'bg-slate-300 dark:bg-slate-700'}`}
+                >
+                  <span className={`inline-block h-3 w-3 rounded-full bg-white shadow transition-transform ${simFidelity === 'print' ? 'translate-x-3.5' : 'translate-x-0.5'}`} />
+                </button>
               </div>
               <div className="pt-2.5 border-t border-slate-200 dark:border-slate-800 flex flex-col gap-2.5">
                 <div className="flex flex-col gap-1">
@@ -3008,6 +3062,7 @@ function App() {
             </EffectComposer>
             {/* Draws over the composer's frame, so it comes after it. */}
             {pathTrace && <PathTracedView background={darkMode ? '#0b0f19' : '#f8fafc'} />}
+            <MarqueeSelect />
           </Canvas>
 
           {pathTrace && (
@@ -6887,6 +6942,10 @@ api.applyForce([force, 0, 0]);
         onClose={() => setIsCastModalOpen(false)}
         scene={sceneGraph}
       />
+      <SplitForPrintModal
+        isOpen={isSplitModalOpen}
+        onClose={() => setIsSplitModalOpen(false)}
+      />
 
       <BottomStatusBar
         onOpenMachineConfig={() => setMachineConfigOpen(true)}
@@ -6899,6 +6958,7 @@ api.applyForce([force, 0, 0]);
           reliefCarve: () => setIsReliefCarveModalOpen(true),
           solid: () => setIsSolidModalOpen(true),
           cast: () => setIsCastModalOpen(true),
+          split: () => setIsSplitModalOpen(true),
         }}
       />
 

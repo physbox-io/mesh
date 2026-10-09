@@ -183,21 +183,18 @@ function boundaryLoops(mesh: SculptMesh): number[][] | null {
 }
 
 /**
- * Cut a sculpt with a prism. Pure: the mesh passed in is not touched, and the
- * result is a new one.
+ * A mesh as a Manifold, its open rims (if any) closed with a fan each.
+ *
+ * The mesh's own triangles keep `clayId` as their original ID and the fill
+ * gets `fillId`, so a caller that wants the fill gone again afterwards — the
+ * scissors, cutting an open sculpt — can filter it out of the result, and one
+ * that wants a solid — Split for Print — just keeps it.
  */
-export function cutSculpt(
-  wasm: ManifoldToplevel,
-  mesh: SculptMesh,
-  prism: ManifoldT,
-  options: CutOptions = {},
-): CutResult {
-  const mode = options.mode ?? 'remove';
-  const cap = options.cap ?? true;
+export type ToManifoldResult =
+  | { ok: true; manifold: ManifoldT; clayId: number; fillId: number }
+  | { ok: false; error: string };
 
-  // Close any open rims, so Manifold will accept the mesh. The fill goes in
-  // after the clay's own triangles as a second run with its own ID, and is
-  // filtered back out of the result.
+export function toManifold(wasm: ManifoldToplevel, mesh: SculptMesh): ToManifoldResult {
   const loops = boundaryLoops(mesh);
   if (!loops) {
     return { ok: false, error: 'The surface has open edges that meet at a point, so it cannot be cut. Undo back to before they appeared.' };
@@ -243,13 +240,36 @@ export function cutSculpt(
   } catch {
     return { ok: false, error: 'The surface is not a clean solid (some edge is shared by more than two triangles), so it cannot be cut.' };
   }
+  const status = clay.status();
+  if (status !== 'NoError') {
+    clay.delete();
+    return { ok: false, error: `The surface cannot be cut as it is (${status}).` };
+  }
+  return { ok: true, manifold: clay, clayId, fillId };
+}
+
+/**
+ * Cut a sculpt with a prism. Pure: the mesh passed in is not touched, and the
+ * result is a new one.
+ */
+export function cutSculpt(
+  wasm: ManifoldToplevel,
+  mesh: SculptMesh,
+  prism: ManifoldT,
+  options: CutOptions = {},
+): CutResult {
+  const mode = options.mode ?? 'remove';
+  const cap = options.cap ?? true;
+
+  // Close any open rims, so Manifold will accept the mesh. The fill goes in
+  // after the clay's own triangles as a second run with its own ID, and is
+  // filtered back out of the result.
+  const closed = toManifold(wasm, mesh);
+  if (!closed.ok) return closed;
+  const { manifold: clay, clayId, fillId } = closed;
 
   let result: ManifoldT | null = null;
   try {
-    const status = clay.status();
-    if (status !== 'NoError') {
-      return { ok: false, error: `The surface cannot be cut as it is (${status}).` };
-    }
     result = mode === 'keep' ? clay.intersect(prism) : clay.subtract(prism);
     if (result.isEmpty()) {
       return {

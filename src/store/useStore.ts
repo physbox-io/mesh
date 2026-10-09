@@ -19,6 +19,7 @@ import {
   type CsgResult, type CutSpot, type FaceRegion, CSG_DEFAULT_SECTORS, scadForDisplay, insetPolygon, faceUnderFeature,
   cutGeometry, sourcePositiveBounds, reconcileCuts, pickCutSpot,
   hasBooleanOps, csgHashOf,
+  colliderTemplateOf, hullsToColliderGeoms, meshVolumeAndCentroid, usableColliderHulls,
 } from '../utils/csg';
 import { collidersAreStale, collisionHashOf, type ColliderResult } from '../utils/convexDecomposition';
 import { insetNegatives } from '../utils/scaleNode';
@@ -43,6 +44,9 @@ import { framingForBounds, gridCellForBounds, sceneContentBounds } from '../util
 import { DEFAULT_MATERIAL, type MaterialId } from '../utils/feedsAndSpeeds';
 import { DEFAULT_FILAMENT, type FilamentId } from '../utils/filaments';
 import { loadStock, saveStock, clampStock, type StockSize } from '../utils/stockSettings';
+import { loadPrintBed, savePrintBed, clampPrintBed, type PrintBed } from '../utils/printBedSettings';
+import type { SplitSection } from '../utils/printSplit';
+import { featureGeoms } from '../utils/printAssembly';
 import type { ReliefCarveOptions } from '../utils/reliefCarveExporter';
 import { withUniqueNames } from '../utils/uniqueNames';
 
@@ -673,9 +677,11 @@ const cloneGeom = (g: SceneGeom): SceneGeom => {
   // same reason: it is thousands of numbers, it is replaced wholesale rather
   // than mutated in place, and this clone runs on every slider tick and every
   // undo snapshot.
-  const { vertices, faces, renderVertices, baseVertices, baseRenderVertices, paint, ...rest } = g;
+  const { vertices, faces, renderVertices, baseVertices, baseRenderVertices, colliderVertices, colliderFaces, paint, ...rest } = g;
   const out: WorkingGeom = JSON.parse(JSON.stringify(rest));
   if (paint !== undefined) out.paint = paint;
+  if (colliderVertices !== undefined) out.colliderVertices = colliderVertices;
+  if (colliderFaces !== undefined) out.colliderFaces = colliderFaces;
   if (vertices !== undefined) out.vertices = vertices;
   if (faces !== undefined) out.faces = faces;
   if (renderVertices !== undefined) out.renderVertices = renderVertices;
@@ -1156,6 +1162,15 @@ function cutSpotFromCamera(node: SceneNode): CutSpot | null {
  * The hash is left alone, so the edit still reads as stale and the
  * decomposer still runs. Returns whether there was anything to take off.
  */
+/**
+ * Split for Print's section colours: far enough apart that every seam shows,
+ * and none of them the selection or warning colours.
+ */
+const SECTION_COLOURS: [number, number, number][] = [
+  [0.36, 0.55, 0.85], [0.92, 0.6, 0.25], [0.4, 0.72, 0.5], [0.78, 0.45, 0.72],
+  [0.85, 0.78, 0.35], [0.35, 0.7, 0.75], [0.7, 0.55, 0.42], [0.55, 0.5, 0.85],
+];
+
 function dropStaleColliders(node: SceneNode): boolean {
   if (node.csgEnabled || !node.geoms?.some((g) => g.csgDerived === 'collider')) return false;
   node.geoms = node.geoms.filter((g) => g.csgDerived !== 'collider');
@@ -1541,6 +1556,13 @@ export interface PhysicsState {
    */
   stock: StockSize;
   /**
+   * The printer's build volume, in millimetres: what Split for Print cuts a
+   * part to fit, and what the print lens checks a part against. Persisted, for
+   * the same reason the stock is.
+   */
+  printBed: PrintBed;
+  setPrintBed: (patch: Partial<PrintBed>) => void;
+  /**
    * Carve settings a preset or a generator wants the relief export to open
    * with, or null for the exporter's own defaults.
    *
@@ -1597,6 +1619,20 @@ export interface PhysicsState {
   extraSelectedIds: string[];
   /** Adds a body to the selection, or takes it out again. */
   toggleExtraSelected: (id: string) => void;
+  /**
+   * While on, a plain click adds a body to the selection or takes it out,
+   * the same as Shift-click — for a mouse-only user, or a trackpad, gathering
+   * the bodies Split for Print or Combine should take as one. The bottom
+   * bar's mode menu turns it on; Esc, or choosing Nothing, turns it off.
+   */
+  multiSelectMode: boolean;
+  setMultiSelectMode: (on: boolean) => void;
+  /**
+   * Select these bodies at once — what a box dragged across the viewport
+   * catches. The first becomes the primary unless the current primary is among
+   * them; `add` keeps what was selected already.
+   */
+  selectMany: (ids: string[], add: boolean) => void;
   /**
    * Merges other bodies into this one and applies a boolean between them.
    *
@@ -1681,6 +1717,20 @@ export interface PhysicsState {
    * in the same frame, so nothing moves. Returns every body's id, this one first.
    */
   separateSculpt: (nodeId: string, pieces: SculptMesh[], geomName?: string) => string[];
+  /**
+   * Replace a body with the sections Split for Print cut it into: the first
+   * keeps the body's id, the rest are new siblings in the same place, each
+   * carrying how it is printed (`printPose`) and its exact pin and socket
+   * colliders. One undo step. Returns the bodies' ids, in section order.
+   */
+  splitBodyForPrint: (
+    nodeId: string,
+    sections: Pick<SplitSection, 'positions' | 'faces' | 'plainPositions' | 'plainFaces' | 'up' | 'spin' | 'colliders' | 'volumeMm3' | 'convexPieces'>[],
+    /** Other bodies whose geometry went into the sections — attached children, or bodies selected with it — to remove. */
+    absorbed?: string[],
+  ) => string[];
+  /** Set how finely contact is resolved (SceneGraph.simFidelity). One undo step. */
+  setSimFidelity: (fidelity: 'standard' | 'print') => void;
 
   // --- Rounding edges ------------------------------------------------------
   //
@@ -2309,6 +2359,8 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
   material: DEFAULT_MATERIAL,
   filament: DEFAULT_FILAMENT,
   stock: loadStock(),
+  printBed: loadPrintBed(),
+  setPrintBed: (patch) => set((state) => ({ printBed: savePrintBed(clampPrintBed({ ...state.printBed, ...patch })) })),
   carveSettings: null,
   patternGeneratorId: null,
   isMachineConfigOpen: false,
@@ -2926,6 +2978,18 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     get().recompile(newScene, targetId, true);
   },
 
+  multiSelectMode: false,
+  setMultiSelectMode: (on) => set((state) => (state.multiSelectMode === on ? {} : { multiSelectMode: on })),
+  selectMany: (ids, add) => set((state) => {
+    const all = add
+      ? [...(state.selectedNodeId ? [state.selectedNodeId] : []), ...state.extraSelectedIds, ...ids]
+      : ids;
+    const unique = [...new Set(all)];
+    if (!unique.length) return add ? {} : { selectedNodeId: null, extraSelectedIds: [] };
+    const primary = state.selectedNodeId && unique.includes(state.selectedNodeId) ? state.selectedNodeId : unique[0];
+    return { selectedNodeId: primary, extraSelectedIds: unique.filter((id) => id !== primary) };
+  }),
+
   toggleExtraSelected: (id) => set((state) => {
     // The primary is already selected; asking for it again is not a second
     // selection, and letting it into the list would let a body be combined
@@ -3044,6 +3108,169 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     set({ sceneGraph: newScene, extraSelectedIds: [] });
     get().recompile(newScene, undefined, true);
     return ids;
+  },
+
+  splitBodyForPrint: (nodeId, sections, absorbed = []) => {
+    const node = findNode(get().sceneGraph.nodes, nodeId);
+    if (!node || sections.length === 0) return [nodeId];
+    get().prepareForDiscreteChange();
+    const newScene = cloneSceneGraph(get().sceneGraph);
+    const first = findNode(newScene.nodes, nodeId);
+    if (!first) return [nodeId];
+
+    const solid = (first.geoms || []).filter((g: SceneGeom) =>
+      g.csg !== 'difference' && !g.csgDerived && g.role !== 'collision' && g.role !== 'visual');
+    const template: SceneGeom | undefined = solid[0] ?? first.geoms?.[0];
+    // What it weighs is shared out by volume when it was stated; otherwise
+    // each section is weighed from its own volume at the body's density.
+    const totalMass = first.csgMass ?? (solid.length && solid.every((g: SceneGeom) => g.mass !== undefined)
+      ? solid.reduce((m: number, g: SceneGeom) => m + (g.mass ?? 0), 0)
+      : undefined);
+    const density = solid.find((g: SceneGeom) => g.density !== undefined)?.density;
+    const totalVolume = sections.reduce((v, sec) => v + sec.volumeMm3, 0) || 1;
+    // The sections are cut from the triangles as drawn, which already carry a
+    // rotation that was baked into the vertices (see rotationIsBaked in
+    // mjcf.ts) — so that rotation must not be applied to them a second time.
+    const baked = (first.geoms || []).length > 0
+      && first.geoms.every((g: SceneGeom) => g.type === 'mesh')
+      && first.geoms.some((g: SceneGeom) => Array.isArray(g.baseVertices) && g.baseVertices.length > 0);
+
+    const geomsFor = (id: string, sec: (typeof sections)[number], k: number): SceneGeom[] => {
+      const rgba = [...SECTION_COLOURS[k % SECTION_COLOURS.length], template?.rgba?.[3] ?? 1];
+      const renderVertices = Array.from(sec.positions);
+      const vertices: number[] = new Array(renderVertices.length);
+      for (let i = 0; i < renderVertices.length; i += 3) {
+        vertices[i] = renderVertices[i];
+        vertices[i + 1] = renderVertices[i + 2];
+        vertices[i + 2] = -renderVertices[i + 1];
+      }
+      return [
+        {
+          name: `${id}_mesh`,
+          type: 'mesh',
+          size: [1],
+          rgba,
+          dynamic: true,
+          ...(template?.friction ? { friction: [...template.friction] } : {}),
+          ...(template?.condim !== undefined ? { condim: template.condim } : {}),
+          ...(totalMass !== undefined
+            ? { mass: +(totalMass * (sec.volumeMm3 / totalVolume)).toPrecision(6) }
+            : density !== undefined ? { density } : {}),
+          vertices,
+          renderVertices,
+          faces: Array.from(sec.faces),
+          colliderVertices: Array.from(sec.plainPositions),
+          colliderFaces: Array.from(sec.plainFaces),
+        },
+        ...featureGeoms(sec.colliders, id, rgba),
+      ];
+    };
+    /*
+      A concave section collides as the exact convex pieces it was cut into,
+      installed here as its decomposition. Its hull would fill the corner its
+      neighbour sits in, and V-HACD only approximates, so either way two
+      halves of an L would stand apart at their seam.
+    */
+    const installPieces = (n: SceneNode, sec: (typeof sections)[number]) => {
+      if (!sec.convexPieces.length) return;
+      const mesh = n.geoms[0];
+      const hulls = usableColliderHulls(sec.convexPieces.map((piece) => {
+        const verts = Array.from(piece.positions);
+        const faces = Array.from(piece.faces);
+        return { verts, faces, ...meshVolumeAndCentroid(verts, faces) };
+      }));
+      const volume = hulls.reduce((v, h) => v + h.volume, 0);
+      const mass = mesh.mass ?? (mesh.density ?? 1000) * volume;
+      const colliders = hullsToColliderGeoms(hulls, n.name || n.id, colliderTemplateOf(mesh, mesh.rgba ?? [0.3, 0.6, 0.9, 1]), mass);
+      if (!colliders.length) return;
+      n.geoms.push(...colliders);
+      n.collisionDecomposed = true;
+      n.collisionHash = collisionHashOf(n);
+    };
+    const poseOf = (sec: (typeof sections)[number]) => ({ up: [...sec.up] as [number, number, number], spin: sec.spin });
+
+    // Everything that would regenerate the body's geometry from a recipe has
+    // to go: the sections ARE the geometry now, and a wedge's or a lattice's
+    // recipe would quietly rebuild the whole part over them.
+    const GENERATORS = [
+      'isWedge', 'isPyramid', 'isCone', 'isTorus', 'isTube', 'isCurve', 'curvePoints',
+      'isLattice', 'latticeCage', 'latticeSubdiv', 'latticeThickness', 'latticeOrigin', 'latticeVersion', 'latticeBaked', 'latticeEdited',
+      'isSculpt', 'sculptBase', 'sculptVersion', 'sculptEdited',
+      'scad', 'csgEnabled', 'csgCollision', 'csgSectors', 'csgFn', 'csgHoleAxis', 'csgMass', 'csgHash', 'csgScad',
+      'csgVolume', 'csgHullVolume', 'csgCentroid', 'csgWarning', 'csgError', 'edgeRounds', 'edgeRoundsLost',
+      'collisionHash', 'collisionDecomposed', 'collisionSolidity', 'collisionWarning', 'collisionError',
+    ] as const;
+    const strip = (n: SceneNode) => {
+      for (const key of GENERATORS) delete (n as unknown as Record<string, unknown>)[key];
+      if (baked) { delete n.euler; delete n.quat; }
+    };
+
+    // The other bodies the sections were cut from — children of this one, or
+    // others selected with it — are in the sections now, wherever they hung.
+    if (absorbed.length) {
+      const gone = new Set(absorbed.filter((id) => id !== nodeId));
+      const prune = (list: SceneNode[]): SceneNode[] => list
+        .filter((c) => !gone.has(c.id))
+        .map((c) => { c.children = prune(c.children || []); return c; });
+      newScene.nodes = prune(newScene.nodes);
+    }
+    strip(first);
+    first.geoms = geomsFor(first.name || first.id, sections[0], 0);
+    first.printPose = poseOf(sections[0]);
+    installPieces(first, sections[0]);
+
+    const siblings = (() => {
+      const walk = (list: SceneNode[]): SceneNode[] | null => {
+        for (const n of list) {
+          if (n.id === nodeId) return list;
+          const found = walk(n.children || []);
+          if (found) return found;
+        }
+        return null;
+      };
+      return walk(newScene.nodes) ?? newScene.nodes;
+    })();
+    const at = siblings.indexOf(first);
+    const baseName = first.name || first.id;
+
+    const ids = [nodeId];
+    sections.slice(1).forEach((sec, k) => {
+      const id = `split_${Math.random().toString(36).substring(2, 10)}`;
+      ids.push(id);
+      // Named for the part it came from; uniqueNames settles any clash.
+      const name = `${baseName}_part${k + 2}`;
+      const { children: _children, geoms: _geoms, ...rest } = first;
+      void _children; void _geoms;
+      const copy: SceneNode = JSON.parse(JSON.stringify(rest));
+      const section: SceneNode = {
+        ...copy,
+        id,
+        name,
+        joints: (first.joints || []).map((j: SceneJoint) => ({ ...j, name: `${name}_${String(j.name || 'joint').split('_').pop()}` })),
+        // A section cut off a welded part is not welded to anything, and a
+        // script written for the whole part does not know about this piece.
+        weldTargetId: undefined,
+        coupleTargetId: undefined,
+        connectTargetId: undefined,
+        script: undefined,
+        geoms: geomsFor(name, sec, k + 1),
+        printPose: poseOf(sec),
+        children: [],
+      };
+      installPieces(section, sec);
+      siblings.splice(at + 1 + k, 0, section);
+    });
+    set({ sceneGraph: newScene, extraSelectedIds: [] });
+    get().recompile(newScene, undefined, true);
+    return ids;
+  },
+
+  setSimFidelity: (fidelity) => {
+    if ((get().sceneGraph.simFidelity ?? 'standard') === fidelity) return;
+    get().prepareForDiscreteChange();
+    const newScene: SceneGraph = { ...get().sceneGraph, simFidelity: fidelity === 'standard' ? undefined : fidelity };
+    set({ sceneGraph: newScene });
+    get().recompile(newScene, undefined, false);
   },
 
   gestureStatus: null,

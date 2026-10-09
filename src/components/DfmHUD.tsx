@@ -74,6 +74,7 @@ export function DfmHUD() {
   const material = useStore(state => state.material);
   const filament = useStore(state => state.filament);
   const stock = useStore(state => state.stock);
+  const printBed = useStore(state => state.printBed);
   const selectedNodeId = useStore(state => state.selectedNodeId);
 
   const dragRef = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null);
@@ -123,8 +124,8 @@ export function DfmHUD() {
   // The machine lens is not a setting: it follows the bench.
   const lens = dfmEnabled ? dfmLensFor(machineTarget) : null;
   const bench = useMemo(
-    () => ({ material, filament, stock, nodeId: selectedNodeId }),
-    [material, filament, stock, selectedNodeId],
+    () => ({ material, filament, stock, printBed, nodeId: selectedNodeId }),
+    [material, filament, stock, printBed, selectedNodeId],
   );
 
   const analyse = useCallback((process: DfmProcess | null, when: boolean): DfmReport | null => {

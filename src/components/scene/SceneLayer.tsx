@@ -47,6 +47,13 @@ type OrbitControlsImpl = React.ComponentRef<typeof OrbitControls>;
  * keep colouring every body the cursor merely passed over, with the camera
  * still frozen from when the stroke began.
  */
+
+/** Select Multiple is on and something is already selected: a click adds to it. */
+const addsToSelection = () => {
+  const { multiSelectMode, selectedNodeId } = useStore.getState();
+  return multiSelectMode && !!selectedNodeId;
+};
+
 export const PaintStrokeController = () => {
   const paintMode = useStore(state => state.paintMode);
   const setOrbitEnabled = useOrbitEnable();
@@ -471,8 +478,10 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
       if (useStore.getState().paintMode) return;
       // Shift or Ctrl adds a body to the selection instead of replacing it,
       // the same chord that adds to a selection everywhere else in the app.
-      // Two bodies selected is what a boolean between two bodies needs.
-      if (e.shiftKey || e.ctrlKey || e.metaKey) {
+      // Two bodies selected is what a boolean between two bodies needs. The
+      // Select Multiple mode makes a plain click do the same, once there is
+      // a first body to add to.
+      if (e.shiftKey || e.ctrlKey || e.metaKey || addsToSelection()) {
         useStore.getState().toggleExtraSelected(nodeId!);
         return;
       }
@@ -1289,7 +1298,7 @@ export const StaticBoxInstances = React.memo(function StaticBoxInstances({ geoms
         if (useStore.getState().paintMode) return;
         const nid = e.instanceId === undefined ? undefined : nodeIdByInstance[e.instanceId];
         if (!nid) return;
-        if (e.shiftKey || e.ctrlKey || e.metaKey) {
+        if (e.shiftKey || e.ctrlKey || e.metaKey || addsToSelection()) {
           useStore.getState().toggleExtraSelected(nid);
           return;
         }

@@ -220,6 +220,52 @@ export interface SceneGeom {
   baseVertices?: number[];
   /** The same, for the Z-up renderVertices of a dynamic mesh. */
   baseRenderVertices?: number[];
+  /**
+   * A collider whose shape is known exactly, as opposed to one approximated
+   * from a mesh. Split for Print puts these on the sections it makes, in two
+   * kinds:
+   *
+   * - 'pin': what goes INTO a hole — a peg, a dowel.
+   * - 'socket': what a pin meets — the lining of a hole, and the face round
+   *   it, so a pin that misses its hole lands on the face instead of passing
+   *   into the part.
+   *
+   * Only the 'print' simulation fidelity (SceneGraph.simFidelity) uses them.
+   * There a pin meets sockets, other pins and the floor; a socket meets only
+   * pins and the floor; and neither meets a body's ordinary hull or convex
+   * pieces — so a pin can go into a bore that the body's hull would have
+   * filled in. Sockets never meet sockets, because the face plates of two
+   * parts that are glued together lie exactly on top of each other, and two
+   * stacks of coincident boxes in contact rock and slide where the bodies'
+   * own faces sit still.
+   *
+   * In 'standard' fidelity they are inert, and they never weigh anything, so a
+   * scene that has them simulates exactly as one without. They carry role
+   * 'collision' as well, which keeps them out of the viewport and out of
+   * every export.
+   */
+  contactClass?: 'pin' | 'socket';
+  /**
+   * Which joint a pin or socket belongs to. A socket meets only the pins of its
+   * own joint: near a corner, one joint's hole can run past another's, and a
+   * lining that caught the other joint's dowel would stop it in mid-air where
+   * the real hole lets it through. Pins meet every pin, whatever the joint, so
+   * two dowels that really would cross still collide.
+   */
+  contactGroup?: number;
+  /**
+   * For type='mesh': what the body collides as, when that is not what it looks
+   * like. Z-up, body frame, metres — the space of renderVertices.
+   *
+   * Split for Print stores each section here as it was before its holes and
+   * pegs went on. A hull of the drilled section fills its holes back in, and a
+   * hull of the pegged one wraps a cone round every peg that the next section's
+   * face then collides with; the plain section has neither problem, and the
+   * holes and pegs themselves collide as `contactClass` pin and socket geoms.
+   * Also what a decomposition of the body works from (convexDecomposition.ts).
+   */
+  colliderVertices?: number[];
+  colliderFaces?: number[];
 }
 
 export interface SceneJoint {
@@ -588,6 +634,13 @@ export interface SceneNode {
   compositePrefix?: string;
   compositeCurve?: string;
   weldLastToId?: string;
+  /**
+   * How this body is printed, when Split for Print made it: `up` is the
+   * body-local direction that points up off the bed, and `spin` the turn about
+   * the vertical after that, in radians. The 3MF export stands the body that
+   * way and lays it on the plate. The physics and the viewport ignore it.
+   */
+  printPose?: { up: [number, number, number]; spin: number };
 }
 
 export interface SceneGraph {
@@ -604,6 +657,18 @@ export interface SceneGraph {
    * graph so undo, save and reload all carry the originals with the change.
    */
   castPrep?: CastPrep;
+  /**
+   * How finely contact is resolved. 'standard' (or absent) is what every scene
+   * has always had. 'print' is for parts at the millimetre scale that have to
+   * fit together — pins in holes, pegs in sockets: contact as stiff as MuJoCo
+   * allows at the timestep, so resting penetration is hundredths of a
+   * millimetre rather than millimetres, and `contactClass` pins and sockets
+   * come alive (see SceneGeom.contactClass).
+   *
+   * A property of the scene rather than of the session, so it is saved, shared
+   * and undone with the scene it describes.
+   */
+  simFidelity?: 'standard' | 'print';
 }
 
 /**

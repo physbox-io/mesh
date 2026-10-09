@@ -344,6 +344,78 @@ every part, in the model itself, so the viewport and the plain STL export carry 
 
 ---
 
+### Split for Print
+
+The **Split** button in the FDM bottom bar (and `SPLIT_FOR_PRINT`) cuts the selected body into
+sections that each fit the printer's bed, turns each to print with the least support, and puts
+joinery on the cut faces. The bed is a workshop setting beside the stock (`store.printBed`,
+`utils/printBedSettings.ts`); the print lens reports `print_exceeds_bed` against it.
+
+* **The engine is pure.** `utils/printSplit.ts` takes the body as triangle soups (body frame, Z-up,
+  metres; `bodySoups` in `printSplitClient.ts` collects them) and works in millimetres in Manifold.
+  `workers/printSplitWorker.ts` runs it, and `tests/printSplit.test.ts` runs it directly.
+* **Which way up.** `bestPose` tries the six axes, the piece's cut faces and its 24 largest hull
+  faces. It finds the footprint by rotating calipers and costs a pose by `supportArea`, which lives in
+  `utils/printSupport.ts` so the DFM lens measures support the same way.
+* **Where to cut.** A piece with no pose that fits is cut in two. Planes square to the world axes and
+  to its principal axes are tried at the first of n even slabs, ±15%. A sliver (under 2% of the
+  piece) is refused, and a face too thin to glue is heavily penalised. The fewest predicted sections
+  wins, then the least support and the smallest seam, then the cut nearest the even split.
+* **Joinery goes on per joint.** A joint is the patch of a cut plane two final sections actually
+  share; an early cut is later cut again. Pins go as deep in the patch as they fit, two when it is
+  wider than four diameters. Pegs go on whichever side's pose minds them least, measured on the real
+  geometry, which is what keeps a section from being printed standing on its pegs.
+* **What the scene gets.** `splitBodyForPrint` keeps the body's id for section 1 and adds siblings
+  `<name>_part2`… Each section has one mesh geom with `colliderVertices`/`colliderFaces`, which hold the
+  section before its holes and pegs, plus `contactClass` pin and socket geoms, and `printPose` on the
+  node. Recipe fields (wedge, lattice, sculpt, CSG, roundings) are dropped, because the sections are
+  the geometry now. The 3MF export offers to stand posed sections the way they print and pack them
+  on the bed (`layoutOnBed` in `utils/printPlate.ts`), with no size prompt.
+
+**Print fidelity** (`sceneGraph.simFidelity: 'print'`, the Environment panel's switch, or
+`physics_set_environment(fidelity)`) is generic, not specific to the split:
+
+* **Stiffer contact.** Contact uses `solref 0.002`, the stiffest the 1 ms timestep allows, so a resting
+  part sinks about 0.04 mm rather than 4 mm.
+* **Bodies collide as their plain mesh.** `mjcf.ts` emits a mesh with a collider source as its own
+  plain-mesh collision geom, and draws the original visual-only. A hull of the drilled section would
+  fill the holes, and a hull of the pegged one would wrap a cone round each peg that the next section
+  then hits. This holds in both fidelities.
+* **Exact pins and sockets.** In print fidelity a **pin** (dowel, peg: contype 2) meets pins and
+  sockets, and a **socket** (16-sided hole lining, its cap, and box plates covering the face round
+  the holes: contype 4, conaffinity 2) meets only pins. Neither meets a body hull (contype 1). The
+  floor has every bit. Sockets must not meet sockets: two parts' face plates coincide, and coincident
+  slabs in contact rock and slide a part a tenth of a millimetre off its seat. That is also why
+  rectangular plate cells are boxes, not thin mesh prisms.
+* **Standard fidelity.** Pins and sockets are inert and massless, and a scene without them compiles
+  byte for byte as before. That byte-identical output is what protects the native app's golden XML.
+* **The limit.** Anything else, a ball say, does not see the holes. Contact between arbitrary concave
+  shapes below a millimetre is only as good as V-HACD, and sections with solidity below 0.92 are
+  flagged as approximate.
+
+**The assembly test** (`utils/printAssembly.ts`) builds a separate print-fidelity scene per stage.
+The user's scene is never touched.
+
+* **Stage order.** It follows the cut tree: both sides of a cut are assembled, then joined. The
+  negative side is held static, and the positive side is dropped as one free body, with the scene
+  turned so the cut normal points up. It starts 1.5 pin lengths above its seat, nudged sideways by
+  0.3× the clearance. Dowels get a stage of their own first.
+* **What it measures.**
+  * **Gap and alignment:** the seated gap (signed) and the lateral and angular error. These are
+    measured at the middle of the moving sections, not at the body origin, which can be half a metre
+    away.
+  * **Play:** the moving part is pushed both ways along two axes and twisted both ways. The push is
+    applied at the joint face, as a force plus its moment, so a tall part slides on its pins instead
+    of tipping.
+  * **Stability:** whether MuJoCo diverged.
+* **Where it runs.** The main thread compiles the stage XML with `compileToMJCF`, and the split worker
+  steps MuJoCo. The worker never bundles `mjcf.ts`.
+* **Exact checks.** `checkSplit` does in Manifold what MuJoCo cannot resolve: overlap between printed
+  sections, how far the plain sections differ from the original, and whether every pin has a partner
+  on the same axis.
+
+---
+
 ### Dynamic mesh geoms (`dynamic: true`)
 
 Full physics simulation and collision. MuJoCo takes the **convex hull** of the mesh — so a concave

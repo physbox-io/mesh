@@ -31,6 +31,7 @@ import { DEFAULT_FILAMENT, filamentSpec, type FilamentId } from './filaments';
 import { MAX_AVAILABLE_REACH_DIAMETERS, STANDARD_BIT_DIAS } from './reliefCarveExporter';
 import { sampleColumns } from './solidMachiningExporter';
 import { squaredDistanceTransform } from './heightmapMesh';
+import { overhangDeg, supportArea } from './printSupport';
 import type { SceneGraph, SceneNode } from '../types/scene';
 
 export type DfmProcess = 'print' | 'cnc' | 'cast';
@@ -61,6 +62,8 @@ export interface DfmLimits {
   draftDeg: number;
   /** What is clamped on the bed, mm. Null when it should not be checked. */
   stockMm: { widthMm: number; depthMm: number; thicknessMm: number } | null;
+  /** The printer's build volume, mm. Null when it should not be checked. */
+  bedMm: { widthMm: number; depthMm: number; heightMm: number } | null;
   /**
    * Thinnest wall that survives being CUT, as opposed to printed. A separate
    * number because they answer to different things: the printed one is the
@@ -130,6 +133,7 @@ export interface DfmBench {
   material: MaterialId;
   filament: FilamentId;
   stock?: { widthMm: number; depthMm: number; thicknessMm: number } | null;
+  printBed?: { widthMm: number; depthMm: number; heightMm: number } | null;
   /**
    * The body to judge. Absent means the whole scene.
    *
@@ -164,6 +168,7 @@ export function dfmLimitsFor(bench: DfmBench): DfmLimits {
     maxToolReachMm: biggestBit * MAX_AVAILABLE_REACH_DIAMETERS,
     draftDeg: 2,
     stockMm: bench.stock ?? null,
+    bedMm: bench.printBed ?? null,
     cncMinWallMm: mat.minWallMm,
   };
 }
@@ -265,20 +270,9 @@ function hotSpot(tris: Float64Array, heat: Float32Array, min: number): [number, 
   return w > 0 ? [sx / w, sy / w, sz / w] : null;
 }
 
-/**
- * How far a face leans from the build axis, in degrees.
- *
- * A vertical wall is 0° and prints on top of itself. A horizontal ceiling is 90°
- * and is bridging over air. The slicer limit of 45° is the angle at which each
- * layer still lands half on the one below it.
- *
- * Only DOWNWARD-facing triangles can overhang: an upward face at any angle has
- * the whole part underneath it. Those come back as 0.
- */
-export function overhangDeg(normalZ: number): number {
-  if (normalZ >= 0) return 0;
-  return Math.asin(Math.min(1, -normalZ)) * RAD;
-}
+// Measured in utils/printSupport.ts, where Split for Print can reach it
+// without loading this module.
+export { overhangDeg, supportArea };
 
 /**
  * The taper on a face, relative to pulling the pattern along +Z.
@@ -342,21 +336,12 @@ function analysePrint(tris: Float64Array, limits: DfmLimits): Omit<DfmReport, 'p
   const findings: DfmFinding[] = [];
   const b = bounds(tris);
 
-  let overhangArea = 0, totalArea = 0, worstDeg = 0, unbridgeable = 0;
-  for (let t = 0; t < count; t++) {
-    const tri = triNormal(tris, t);
-    if (!tri) continue;
-    totalArea += tri.area;
-    const deg = overhangDeg(tri.n[2]);
-    if (deg <= limits.overhangDeg) continue;
-    // Faces sitting on the build plate are printed against glass, not air.
-    const c = triCentroid(tris, t);
-    if (c[2] - b.minZ < 0.0005) continue;
+  let worstDeg = 0, unbridgeable = 0;
+  const { area: overhangArea, totalArea } = supportArea(tris, limits.overhangDeg, 0.0005, (t, deg, area) => {
     heat[t] = Math.min(1, (deg - limits.overhangDeg) / (90 - limits.overhangDeg));
-    overhangArea += tri.area;
     if (deg > worstDeg) worstDeg = deg;
-    if (deg >= T.bridgeDeg) unbridgeable += tri.area;
-  }
+    if (deg >= T.bridgeDeg) unbridgeable += area;
+  });
 
   const share = totalArea > 0 ? overhangArea / totalArea : 0;
 
@@ -422,6 +407,8 @@ function analysePrint(tris: Float64Array, limits: DfmLimits): Omit<DfmReport, 'p
     });
   }
 
+  findings.push(...bedFindings(b, limits));
+
   return {
     findings,
     heat,
@@ -434,10 +421,46 @@ function analysePrint(tris: Float64Array, limits: DfmLimits): Omit<DfmReport, 'p
 }
 
 /**
+ * Whether the part fits the printer at all, in any of the six square-on ways
+ * up. Turning it at an angle can sometimes squeeze a part in that this says
+ * will not fit; Split for Print searches those, and says so if it finds one.
+ *
+ * Same ballpark rule as the stock: a part many times the bed is a scene, not a
+ * print, and telling someone their bridge will not fit a printer is noise.
+ */
+const BED_BALLPARK = 6;
+
+function bedFindings(b: ReturnType<typeof bounds>, limits: DfmLimits): DfmFinding[] {
+  const bed = limits.bedMm;
+  if (!bed) return [];
+  const size = [(b.maxX - b.minX) * 1000, (b.maxY - b.minY) * 1000, (b.maxZ - b.minZ) * 1000];
+  if (fitsBedSquareOn(size, bed)) return [];
+  const worst = Math.max(...size) / Math.max(bed.widthMm, bed.depthMm, bed.heightMm);
+  if (worst > BED_BALLPARK) return [];
+  return [{
+    id: 'print_exceeds_bed',
+    process: 'print',
+    severity: 'critical',
+    title: 'It does not fit the printer',
+    detail: `This part is ${size.map((v) => v.toFixed(0)).join(' x ')} mm, and the bed is ${bed.widthMm} x ${bed.depthMm} x ${bed.heightMm} mm whichever way up it goes.`,
+    fix: 'Split it for print: it is cut into sections that each fit, with dowel holes or pegs on the cut faces to line them up.',
+    position: [(b.minX + b.maxX) / 2, (b.minY + b.maxY) / 2, b.maxZ],
+    metric: worst,
+  }];
+}
+
+/** Whether a box of these sides fits the bed in one of its six square-on orientations. */
+export function fitsBedSquareOn(sizeMm: number[], bed: { widthMm: number; depthMm: number; heightMm: number }): boolean {
+  const [a, b, c] = sizeMm;
+  const orders = [[a, b, c], [a, c, b], [b, a, c], [b, c, a], [c, a, b], [c, b, a]];
+  return orders.some(([w, d, h]) => w <= bed.widthMm && d <= bed.depthMm && h <= bed.heightMm);
+}
+
+/**
  * Whether the part fits the board that is clamped down.
  *
- * CNC only. `stock` is what is on the router bed; nothing in the app knows how
- * big a printer's bed is, so the print lens has no business guessing.
+ * CNC only. `stock` is what is on the router bed; the printer's bed is the
+ * print lens's own question, answered by bedFindings.
  *
  * And only when the part is in the same ballpark as the board. A part twice the
  * size of the stock is an actionable near-miss — scale it, or split it. A part
@@ -818,6 +841,7 @@ export function analyseDfm(
       material: bench.material ?? DEFAULT_MATERIAL,
       filament: bench.filament ?? DEFAULT_FILAMENT,
       stock: bench.stock ?? null,
+      printBed: bench.printBed ?? null,
     }),
     ...Object.fromEntries(Object.entries(bench).filter(([k]) => k in DFM_DEFAULTS)),
   };
