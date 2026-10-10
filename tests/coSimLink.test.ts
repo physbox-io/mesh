@@ -4,15 +4,17 @@ import { compileToMJCF } from '../src/utils/mjcf';
 import { PRESETS } from '../src/presets/presetScenes';
 import type { SceneGraph, SceneNode } from '../src/types/scene';
 import {
-  applyCtrlInputs, applyJointForces, channelCatalogue, envelope, isCoSimMessage, readOutputs, resolveInputs, stepsFor,
+  applyCtrlInputs, applyJointForces, channelCatalogue, envelope, isCoSimMessage, readOutputs, resolveInputs,
+  setJointParams, stepsFor, substepsFor,
 } from '../src/utils/coSimLink';
 
 /**
  * The co-simulation link's channels against real MuJoCo models: what a
  * linked Volt can bind, and that driving a joint through it obeys Newton.
  *
- * The step loop here is the worker's `stepOnce` reduced to what matters for
- * a joint force: clear `qfrc_applied`, add the link's forces, step.
+ * The step loop here is the worker's `stepFor` reduced to what matters for a
+ * joint force: add the link's armature and damping, sub-step a stiff law,
+ * and each step clear `qfrc_applied`, add the link's forces, step.
  */
 
 type Mujoco = Awaited<ReturnType<typeof load_mujoco>>;
@@ -40,22 +42,39 @@ const flywheel = (mass: number, radius: number, timestep = 0.001, damping = 0) =
   </actuator>
 </mujoco>`;
 
-function run(xml: string, inputs: Record<string, number>, dtMs: number, outputs: string[]) {
-  const model = mj.MjModel.from_xml_string(xml);
-  const data = new mj.MjData(model);
+type Run = { t: number; n: number; sub: number; unknown: string[]; outputs: Record<string, number>; trace: number[] };
+
+/** One STEP_FOR, as the worker does it, on a fresh model or a carried one. */
+function step(
+  model: InstanceType<Mujoco['MjModel']>, data: InstanceType<Mujoco['MjData']>,
+  inputs: Record<string, number>, dtMs: number, outputs: string[], opts: { noSubsteps?: boolean; trace?: string } = {},
+): Run {
   const { resolved, unknown } = resolveInputs(mj, model, inputs);
   applyCtrlInputs(data, resolved);
-  const n = stepsFor(dtMs, model.opt.timestep);
-  for (let i = 0; i < n; i++) {
+  setJointParams(mj, model, data, resolved);
+  const ts = model.opt.timestep;
+  const base = stepsFor(dtMs, ts);
+  const sub = opts.noSubsteps || base === 0 ? 1 : substepsFor(model, data, resolved, ts);
+  if (base > 0) model.opt.timestep = dtMs / 1000 / (base * sub);
+  const trace: number[] = [];
+  for (let i = 0; i < base * sub; i++) {
     data.qfrc_applied.fill(0);
     applyJointForces(data, resolved);
     mj.mj_step(model, data);
+    if (opts.trace) trace.push(readOutputs(mj, model, data, [opts.trace]).outputs[opts.trace]);
   }
+  model.opt.timestep = ts;
   const read = readOutputs(mj, model, data, outputs);
-  const result = { t: data.time, n, unknown: [...unknown, ...read.unknown], outputs: read.outputs };
+  return { t: data.time, n: base * sub, sub, unknown: [...unknown, ...read.unknown], outputs: read.outputs, trace };
+}
+
+function run(xml: string, inputs: Record<string, number>, dtMs: number, outputs: string[], opts: { noSubsteps?: boolean; trace?: string } = {}) {
+  const model = mj.MjModel.from_xml_string(xml);
+  const data = new mj.MjData(model);
+  const r = step(model, data, inputs, dtMs, outputs, opts);
   data.delete();
   model.delete();
-  return result;
+  return r;
 }
 
 describe('a joint driven through the link', () => {
@@ -87,11 +106,15 @@ describe('a joint driven through the link', () => {
   });
 
   it('advances time by exactly the slice, whatever the timestep divides into, and not at all for a read', () => {
-    for (const [ts, dt] of [[0.001, 5], [0.002, 5], [0.0005, 1], [0.004, 1]] as const) {
+    for (const [ts, dt] of [[0.001, 5], [0.002, 5], [0.0005, 1], [0.004, 1], [0.003, 10]] as const) {
       const r = run(flywheel(1, 0.1, ts), {}, dt, []);
-      expect(r.n).toBe(Math.max(1, Math.round(dt / 1000 / ts)));
-      expect(r.t).toBeCloseTo(r.n * ts, 12);
+      expect(r.n).toBe(Math.ceil(dt / 1000 / ts - 1e-9));
+      expect(r.t).toBeCloseTo(dt / 1000, 12);
     }
+    // Sub-stepped, too: the slice is the same length in finer steps.
+    const stiff = run(flywheel(0.01, 0.02, 0.002), { 'joint:spin.force.sin(50)': -2 }, 10, []);
+    expect(stiff.sub).toBeGreaterThan(1);
+    expect(stiff.t).toBeCloseTo(0.01, 12);
     expect(run(flywheel(1, 0.1), { 'joint:spin.force': 1 }, 0, []).t).toBe(0);
   });
 
@@ -108,6 +131,99 @@ describe('a joint driven through the link', () => {
   it('names the inputs and outputs it has no channel for, rather than dropping them', () => {
     const r = run(flywheel(1, 0.1), { 'joint:nope.force': 1, 'actuator:drive.force': 1, 'banana': 2 }, 5, ['joint:spin.vel', 'joint:nope.pos', 'body:world.x']);
     expect(r.unknown.sort()).toEqual(['actuator:drive.force', 'banana', 'body:world.x', 'joint:nope.force', 'joint:nope.pos'].sort());
+    const bad = run(flywheel(1, 0.1), { 'joint:spin.force.sin(x)': 1, 'joint:spin.force.tan(2)': 1 }, 5, []);
+    expect(bad.unknown.sort()).toEqual(['joint:spin.force.sin(x)', 'joint:spin.force.tan(2)']);
+  });
+});
+
+describe('a force that varies with the joint\'s position', () => {
+  // A stepper held on one phase: τ = −K·sin(N·q), a spring of stiffness K·N
+  // about q = 0, here at a few hundred hertz on a light rotor.
+  for (const { K, N, mass, radius, armature } of [
+    { K: 0.235, N: 50, mass: 0.02, radius: 0.02, armature: 5.4e-6 },
+    { K: 0.4, N: 50, mass: 0.05, radius: 0.03, armature: 0 },
+    { K: 2, N: 10, mass: 1, radius: 0.1, armature: 1e-3 },
+  ]) {
+    const inertia = (mass * radius * radius) / 2 + armature;
+    const f = Math.sqrt((K * N) / inertia) / (2 * Math.PI);
+    it(`rings at √(K·N/I)/2π = ${f.toFixed(0)}Hz and holds its energy, at a 2ms scene timestep: K=${K}, N=${N}`, () => {
+      const xml = flywheel(mass, radius, 0.002);
+      const model = mj.MjModel.from_xml_string(xml);
+      const data = new mj.MjData(model);
+      data.qpos[0] = 0.2 / N; // a fifth of the way to the next tooth: small enough to be linear
+      const inputs = { 'joint:spin.force.sin(50)': 0, [`joint:spin.force.sin(${N})`]: -K, 'joint:spin.armature': armature };
+      const pos: number[] = [];
+      const t: number[] = [];
+      const slices = Math.max(40, Math.ceil(5 / f / 0.005));
+      for (let k = 0; k < slices; k++) {
+        const r = step(model, data, inputs, 5, [], { trace: 'joint:spin.pos' });
+        const dt = 0.005 / r.trace.length;
+        r.trace.forEach((q, i) => { pos.push(q); t.push(k * 0.005 + (i + 1) * dt); });
+      }
+      // Period from upward zero crossings.
+      const ups: number[] = [];
+      for (let i = 1; i < pos.length; i++) if (pos[i - 1] < 0 && pos[i] >= 0) ups.push(t[i - 1] + (t[i] - t[i - 1]) * (-pos[i - 1] / (pos[i] - pos[i - 1])));
+      expect(ups.length, `crossings; peak ${Math.max(...pos.map(Math.abs))}`).toBeGreaterThan(3);
+      const period = (ups[ups.length - 1] - ups[0]) / (ups.length - 1);
+      expect(period * f, `period ${period}, ${ups.length} crossings over ${t[t.length - 1]}s`).toBeGreaterThan(0);
+      // sin(N·q) ≈ N·q to 0.7% at this amplitude, which lengthens the period about as much.
+      expect(Math.abs(period * f - 1)).toBeLessThan(0.02);
+      const peak = Math.max(...pos.slice(-pos.length / 4).map(Math.abs));
+      expect(peak).toBeLessThan(0.2 / N * 1.05);
+      expect(peak).toBeGreaterThan(0.2 / N * 0.9);
+      data.delete();
+      model.delete();
+    });
+  }
+
+  it('keeps the scene where it was when the armature changes', () => {
+    const model = mj.MjModel.from_xml_string(flywheel(1, 0.1, 0.001));
+    const data = new mj.MjData(model);
+    step(model, data, { 'joint:spin.force': 0.5 }, 50, []);
+    const [q, v, t] = [data.qpos[0], data.qvel[0], data.time];
+    step(model, data, { 'joint:spin.armature': 0.01 }, 0, []);
+    expect([data.qpos[0], data.qvel[0], data.time]).toEqual([q, v, t]);
+    data.delete();
+    model.delete();
+  });
+
+  it('would blow up at the scene timestep without the sub-steps', () => {
+    const model = mj.MjModel.from_xml_string(flywheel(0.02, 0.02, 0.002));
+    const data = new mj.MjData(model);
+    data.qpos[0] = 0.004;
+    for (let k = 0; k < 40; k++) step(model, data, { 'joint:spin.force.sin(50)': -0.235 }, 5, [], { noSubsteps: true });
+    expect(Math.abs(data.qpos[0]) > 0.04 || !Number.isFinite(data.qpos[0])).toBe(true);
+    data.delete();
+    model.delete();
+  });
+
+  it('applies a cos law and a sin law together as their sum', () => {
+    const model = mj.MjModel.from_xml_string(flywheel(1, 0.1, 0.001));
+    const data = new mj.MjData(model);
+    data.qpos[0] = 0.3;
+    const r = step(model, data, { 'joint:spin.force.cos(2)': 0.5, 'joint:spin.force.sin(3)': 0.25, 'joint:spin.force': 0.1 }, 1, ['joint:spin.vel']);
+    const torque = 0.5 * Math.cos(0.6) + 0.25 * Math.sin(0.9) + 0.1;
+    expect(r.outputs['joint:spin.vel'] / ((torque * 0.001) / 0.005)).toBeCloseTo(1, 2);
+    data.delete();
+    model.delete();
+  });
+
+  it('adds armature and damping while they are named, and takes them off after', () => {
+    const model = mj.MjModel.from_xml_string(flywheel(1, 0.1, 0.001, 0.002));
+    const data = new mj.MjData(model);
+    const r = step(model, data, { 'joint:spin.force': 0.01, 'joint:spin.armature': 0.005 }, 100, ['joint:spin.vel', 'joint:spin.inertia']);
+    // I = 0.005 (body) + 0.005 (armature)
+    expect(r.outputs['joint:spin.inertia']).toBeCloseTo(0.01, 9);
+    expect(r.outputs['joint:spin.vel'] / ((0.01 * 0.1) / 0.01)).toBeCloseTo(1, 1);
+    const d = step(model, data, { 'joint:spin.damping': 0.05 }, 100, ['joint:spin.vel', 'joint:spin.inertia']);
+    expect(d.outputs['joint:spin.vel']).toBeLessThan(r.outputs['joint:spin.vel']);
+    expect(d.outputs['joint:spin.inertia']).toBeCloseTo(0.005, 9);
+    expect(model.dof_damping[0]).toBeCloseTo(0.052, 12);
+    step(model, data, {}, 0, []);
+    expect(model.dof_armature[0]).toBe(0);
+    expect(model.dof_damping[0]).toBeCloseTo(0.002, 12);
+    data.delete();
+    model.delete();
   });
 });
 
@@ -134,7 +250,7 @@ describe('the channel catalogue', () => {
       for (let id = 0; id < model.njnt; id++) {
         if (model.jnt_type[id] < 2) continue;
         const name = mj.mj_id2name(model, mj.mjtObj.mjOBJ_JOINT.value, id);
-        for (const field of ['force', 'pos', 'vel', 'inertia', 'load']) expect(names, `${name}.${field}`).toContain(`joint:${name}.${field}`);
+        for (const field of ['force', 'force.cos(w)', 'force.sin(w)', 'armature', 'damping', 'pos', 'vel', 'inertia', 'load']) expect(names, `${name}.${field}`).toContain(`joint:${name}.${field}`);
       }
       for (let id = 0; id < model.nu; id++) {
         const name = mj.mj_id2name(model, mj.mjtObj.mjOBJ_ACTUATOR.value, id);

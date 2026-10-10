@@ -142,6 +142,10 @@ export function channelCatalogue(mj: Mujoco, model: MjModel): CoSimChannel[] {
     const [pos, vel, force] = j.hinge ? ['rad', 'rad/s', 'N·m'] : ['m', 'm/s', 'N'];
     channels.push(
       { name: `joint:${j.name}.force`, direction: 'input', unit: force, description: `${j.hinge ? 'Torque' : 'Force'} applied along joint ${j.name}` },
+      { name: `joint:${j.name}.force.cos(w)`, direction: 'input', unit: force, description: `Force amplitude a, applied as a·cos(w·q) of joint ${j.name}'s position q every step; w in the name, per ${pos}` },
+      { name: `joint:${j.name}.force.sin(w)`, direction: 'input', unit: force, description: `Force amplitude b, applied as b·sin(w·q) of joint ${j.name}'s position q every step; w in the name, per ${pos}` },
+      { name: `joint:${j.name}.armature`, direction: 'input', unit: j.hinge ? 'kg·m²' : 'kg', description: `Inertia added to joint ${j.name} while named in each step: a motor's rotor` },
+      { name: `joint:${j.name}.damping`, direction: 'input', unit: j.hinge ? 'N·m·s/rad' : 'N·s/m', description: `Damping added to joint ${j.name} while named in each step: a motor's bearings` },
       { name: `joint:${j.name}.pos`, direction: 'output', unit: pos, description: `Position of joint ${j.name}` },
       { name: `joint:${j.name}.vel`, direction: 'output', unit: vel, description: `Speed of joint ${j.name}` },
       { name: `joint:${j.name}.inertia`, direction: 'output', unit: j.hinge ? 'kg·m²' : 'kg', description: `What joint ${j.name} has to accelerate: its diagonal of the mass matrix` },
@@ -163,10 +167,21 @@ export function channelCatalogue(mj: Mujoco, model: MjModel): CoSimChannel[] {
   return channels;
 }
 
-/** An input resolved to where it goes: a dof's applied force, or an actuator's ctrl. */
-export type ResolvedInput = { kind: 'dof'; index: number; value: number } | { kind: 'ctrl'; index: number; value: number };
+/**
+ * An input resolved to where it goes:
+ *  - `dof`: a force on a joint, constant or `value·cos(w·q)` / `value·sin(w·q)`
+ *    of the joint's own position q, evaluated afresh every step;
+ *  - `ctrl`: an actuator's control input;
+ *  - `armature` / `damping`: added to the joint's own while named — a
+ *    motor's rotor inertia and its bearing friction, coupled to the joint.
+ */
+export type ResolvedInput =
+  | { kind: 'dof'; index: number; qposadr: number; value: number; harmonic?: { fn: 'cos' | 'sin'; w: number } }
+  | { kind: 'ctrl'; index: number; value: number }
+  | { kind: 'armature' | 'damping'; index: number; value: number };
 
-const INPUT = /^(joint|actuator):(.+?)(\.force)?$/;
+const JOINT_INPUT = /^joint:(.+?)\.(force(?:\.(cos|sin)\(([-+0-9.eE]+)\))?|armature|damping)$/;
+const ACTUATOR_INPUT = /^actuator:(.+)$/;
 
 /**
  * Where each input goes. Names this model has no channel for come back in
@@ -176,19 +191,29 @@ export function resolveInputs(mj: Mujoco, model: MjModel, inputs: Record<string,
   const resolved: ResolvedInput[] = [];
   const unknown: string[] = [];
   for (const [name, value] of Object.entries(inputs)) {
-    const m = INPUT.exec(name);
-    if (!m || !Number.isFinite(value)) { unknown.push(name); continue; }
-    if (m[1] === 'joint' && m[3]) {
-      const id = idOf(mj, model, 'joint', m[2]);
+    if (!Number.isFinite(value)) { unknown.push(name); continue; }
+    const j = JOINT_INPUT.exec(name);
+    if (j) {
+      const id = idOf(mj, model, 'joint', j[1]);
       if (id < 0 || (model.jnt_type[id] !== JOINT_HINGE && model.jnt_type[id] !== JOINT_SLIDE)) { unknown.push(name); continue; }
-      resolved.push({ kind: 'dof', index: model.jnt_dofadr[id], value });
-    } else if (m[1] === 'actuator' && !m[3]) {
-      const id = idOf(mj, model, 'actuator', m[2]);
-      if (id < 0) { unknown.push(name); continue; }
-      resolved.push({ kind: 'ctrl', index: id, value });
-    } else {
-      unknown.push(name);
+      const dof = model.jnt_dofadr[id];
+      if (j[2] === 'armature' || j[2] === 'damping') {
+        resolved.push({ kind: j[2], index: dof, value });
+      } else {
+        const w = j[4] === undefined ? undefined : Number(j[4]);
+        if (w !== undefined && !Number.isFinite(w)) { unknown.push(name); continue; }
+        resolved.push({
+          kind: 'dof', index: dof, qposadr: model.jnt_qposadr[id], value,
+          harmonic: w === undefined ? undefined : { fn: j[3] as 'cos' | 'sin', w },
+        });
+      }
+      continue;
     }
+    if (name.includes('.')) { unknown.push(name); continue; }
+    const a = ACTUATOR_INPUT.exec(name);
+    const id = a ? idOf(mj, model, 'actuator', a[1]) : -1;
+    if (id < 0) { unknown.push(name); continue; }
+    resolved.push({ kind: 'ctrl', index: id, value });
   }
   return { resolved, unknown };
 }
@@ -199,13 +224,114 @@ export function applyCtrlInputs(data: MjData, inputs: ResolvedInput[]): void {
 }
 
 /**
- * Adds the joint-force inputs to `qfrc_applied`. Call it every step, after
- * whatever clears `qfrc_applied` and before `mj_step`.
+ * Adds the joint-force inputs to `qfrc_applied`, each evaluated at the
+ * joint's position now. Call it every step, after whatever clears
+ * `qfrc_applied` and before `mj_step`.
  */
 export function applyJointForces(data: MjData, inputs: ResolvedInput[]): void {
   if (inputs.length === 0) return;
+  // One view of each: every read of `data.qpos` allocates a fresh one.
   const qfrc = data.qfrc_applied;
-  for (const i of inputs) if (i.kind === 'dof') qfrc[i.index] += i.value;
+  const qpos = data.qpos;
+  for (const i of inputs) {
+    if (i.kind !== 'dof') continue;
+    let f = i.value;
+    if (i.harmonic) {
+      const q = qpos[i.qposadr];
+      f *= i.harmonic.fn === 'cos' ? Math.cos(i.harmonic.w * q) : Math.sin(i.harmonic.w * q);
+    }
+    qfrc[i.index] += f;
+  }
+}
+
+/**
+ * The armature and damping a link has added, per model: each dof's own value
+ * from the scene, and what is on it now.
+ */
+const jointParams = new WeakMap<MjModel, Map<string, { base: number; applied: number }>>();
+
+/**
+ * Puts the joint parameters a STEP_FOR names on the model — the scene's own
+ * value plus the input — and takes off any it no longer names, so a step
+ * that names none (as unlinking sends) leaves the scene as it was built.
+ *
+ * Armature only reaches the dynamics after `mj_setConst`: MuJoCo caches the
+ * inertia it derives from it. That is not free, so the model is only written
+ * when a value changes, which for a motor is once per link.
+ */
+export function setJointParams(mj: Mujoco, model: MjModel, data: MjData, inputs: ResolvedInput[]): void {
+  let held = jointParams.get(model);
+  if (!held) {
+    held = new Map();
+    jointParams.set(model, held);
+  }
+  const wanted = new Map<string, number>();
+  for (const i of inputs) {
+    if (i.kind === 'armature' || i.kind === 'damping') wanted.set(`${i.kind}:${i.index}`, Math.max(0, i.value));
+  }
+  let armatureChanged = false;
+  const write = (key: string, value: number) => {
+    const [kind, idx] = key.split(':');
+    (kind === 'armature' ? model.dof_armature : model.dof_damping)[Number(idx)] = value;
+    if (kind === 'armature') armatureChanged = true;
+  };
+  for (const [key, add] of wanted) {
+    let entry = held.get(key);
+    if (!entry) {
+      const [kind, idx] = key.split(':');
+      const base = (kind === 'armature' ? model.dof_armature : model.dof_damping)[Number(idx)];
+      entry = { base, applied: base };
+      held.set(key, entry);
+    }
+    if (entry.applied !== entry.base + add) {
+      entry.applied = entry.base + add;
+      write(key, entry.applied);
+    }
+  }
+  for (const [key, entry] of held) {
+    if (wanted.has(key)) continue;
+    if (entry.applied !== entry.base) write(key, entry.base);
+    held.delete(key);
+  }
+  if (armatureChanged) {
+    // mj_setConst uses the data it is handed as scratch, which would reset
+    // the scene mid-run, so it gets data of its own.
+    const scratch = new mj.MjData(model);
+    try {
+      mj.mj_setConst(model, scratch);
+    } finally {
+      scratch.delete();
+    }
+    mj.mj_forward(model, data);
+  }
+}
+
+/**
+ * How many sub-steps each model step needs so position-dependent forces stay
+ * resolved: a stepper held by its coils is a stiff spring (~240Hz on its own
+ * rotor), and a timestep long beside its period would ring and blow up.
+ *
+ * Each joint's stiffness is bounded by Σ|value·w| over its harmonic forces;
+ * with its inertia (mass-matrix diagonal, armature included) that gives an
+ * upper bound on its natural frequency, and the step is cut until there are
+ * twenty to a period. Capped, so a mistaken law cannot stall the page.
+ */
+export function substepsFor(model: MjModel, data: MjData, inputs: ResolvedInput[], timestepS: number, maxSubsteps = 64): number {
+  const stiffness = new Map<number, number>();
+  for (const i of inputs) {
+    if (i.kind !== 'dof' || !i.harmonic) continue;
+    stiffness.set(i.index, (stiffness.get(i.index) ?? 0) + Math.abs(i.value * i.harmonic.w));
+  }
+  if (stiffness.size === 0) return 1;
+  const qM = data.qM;
+  let n = 1;
+  for (const [dof, k] of stiffness) {
+    const inertia = Math.max(qM[model.dof_Madr[dof]], 1e-12);
+    const omega = Math.sqrt(k / inertia);
+    const period = (2 * Math.PI) / omega;
+    n = Math.max(n, Math.ceil(timestepS / (period / 20)));
+  }
+  return Math.min(n, maxSubsteps);
 }
 
 const OUTPUT = /^(joint|actuator|body):(.+)\.(pos|vel|inertia|load|force|x|y|z|contacts)$/;
@@ -269,11 +395,12 @@ export function readOutputs(mj: Mujoco, model: MjModel, data: MjData, names: str
 }
 
 /**
- * How many model steps make `dtMs`: at least one for any slice, so time
- * always moves, and none for a slice of zero — which is how Volt reads the
- * scene's state before its first slice without moving it.
+ * How many equal steps make a `dtMs` slice exactly, none longer than the
+ * model's timestep: Volt owns time, so a 5ms slice is 5ms even in a scene
+ * stepped at 2ms (three steps of 1.67ms). None for a slice of zero — how Volt
+ * reads the scene before its first slice without moving it.
  */
 export function stepsFor(dtMs: number, timestepS: number): number {
   if (!(dtMs > 0)) return 0;
-  return Math.max(1, Math.round(dtMs / 1000 / timestepS));
+  return Math.max(1, Math.ceil(dtMs / 1000 / timestepS - 1e-9));
 }

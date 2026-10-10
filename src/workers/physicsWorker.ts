@@ -30,7 +30,7 @@ import load_mujoco from '@mujoco/mujoco';
 // specifier resolves (unlike openscad's - see the note in scadWorker.ts).
 import mujocoWasmUrl from '@mujoco/mujoco/mujoco.wasm?url';
 import {
-  applyCtrlInputs, applyJointForces, channelCatalogue, readOutputs, resolveInputs, stepsFor,
+  applyCtrlInputs, applyJointForces, channelCatalogue, readOutputs, resolveInputs, setJointParams, stepsFor, substepsFor,
   type ResolvedInput,
 } from '../utils/coSimLink';
 import type { SceneGraph, SceneJoint, SceneNode } from '../types/scene';
@@ -1365,14 +1365,22 @@ const stepFor = (dtMs: number, inputs: Record<string, number>, outputNames: stri
   if (!model || !data || !mujoco) return { ok: false as const, error: 'No model is built.' };
   const { resolved, unknown: unknownInputs } = resolveInputs(mujoco, model, inputs);
   applyCtrlInputs(data, resolved);
+  setJointParams(mujoco, model, data, resolved);
   linkForces = resolved;
   const stepSize = modelOpt(model).timestep;
-  const n = stepsFor(dtMs, stepSize);
+  // The slice in equal steps that end exactly on it, finer still where a
+  // position-dependent force is stiff; the scene's own timestep is put back.
+  const base = stepsFor(dtMs, stepSize);
+  const sub = base > 0 ? substepsFor(model, data, resolved, stepSize) : 1;
+  const n = base * sub;
+  const h = n > 0 ? dtMs / 1000 / n : stepSize;
+  if (h !== stepSize) model.opt.timestep = h;
   let steps = 0;
   try {
-    for (; steps < n; steps++) if (!stepOnce(stepSize)) break;
+    for (; steps < n; steps++) if (!stepOnce(h)) break;
   } finally {
     linkForces = [];
+    if (h !== stepSize) model.opt.timestep = stepSize;
   }
   if (steps < n) return { ok: false as const, error: 'The scene failed mid-step; see Mesh for the reason.' };
   // A read with no steps behind it still wants the derived quantities current.

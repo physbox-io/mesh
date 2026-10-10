@@ -428,6 +428,8 @@ export const endVoltLink = () => {
     // The Volt tab is gone; there is no one to tell.
   }
   useStore.setState({ voltLink: null });
+  // Take off what Volt added to the joints; see setJointParams.
+  void getPhysicsWorkerClient().stepFor(0, {}, []).catch(() => {});
 };
 
 // Returns true if every geom on a node is a mesh (so pos/euler are meaningless for rendering)

@@ -50,6 +50,9 @@ export function useVoltLink() {
         }
         case 'UNLINK':
           useStore.setState({ voltLink: null });
+          // A step that names no inputs takes off the rotor inertia and
+          // bearing friction Volt added, without moving anything.
+          void getPhysicsWorkerClient().stepFor(0, {}, []).catch(() => {});
           return;
         default:
           return;
