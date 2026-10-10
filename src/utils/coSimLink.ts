@@ -404,3 +404,54 @@ export function stepsFor(dtMs: number, timestepS: number): number {
   if (!(dtMs > 0)) return 0;
   return Math.max(1, Math.ceil(dtMs / 1000 / timestepS - 1e-9));
 }
+
+// ---------------------------------------------------------------------------
+// Measured cavities: outputs that come from the scene graph, not the model
+// ---------------------------------------------------------------------------
+
+/** What "Measure cavity" found for a body, in metres and cubic metres. */
+export interface MeasuredCavity {
+  volume: number;
+  portLength?: number;
+  portRadius?: number;
+}
+
+const CAVITY_OUTPUT = /^body:(.+)\.(cavityVolume|portLength|portRadius)$/;
+
+/**
+ * The channels of every measured cavity: a speaker in Volt binds its box
+ * volume and port to them. Constants rather than state, so they are answered
+ * on the main thread and never reach the physics worker; a port's channels
+ * exist only when the body has a port.
+ */
+export function cavityChannels(measured: Record<string, MeasuredCavity>): CoSimChannel[] {
+  const channels: CoSimChannel[] = [];
+  for (const [body, c] of Object.entries(measured)) {
+    channels.push({ name: `body:${body}.cavityVolume`, direction: 'output', unit: 'm³', description: `Air volume inside body ${body}, as measured` });
+    if (c.portLength !== undefined && c.portRadius !== undefined) {
+      channels.push(
+        { name: `body:${body}.portLength`, direction: 'output', unit: 'm', description: `Length of body ${body}'s port` },
+        { name: `body:${body}.portRadius`, direction: 'output', unit: 'm', description: `Radius of body ${body}'s port` },
+      );
+    }
+  }
+  return channels;
+}
+
+/**
+ * Splits the outputs a STEP_FOR names into the measured cavities' (answered
+ * here) and the rest (for the model). A cavity name with no measurement stays
+ * with the rest, so it comes back `unknown` as any other would.
+ */
+export function readCavityOutputs(measured: Record<string, MeasuredCavity>, names: string[]): { outputs: Record<string, number>; rest: string[] } {
+  const outputs: Record<string, number> = {};
+  const rest: string[] = [];
+  for (const name of names) {
+    const m = CAVITY_OUTPUT.exec(name);
+    const c = m ? measured[m[1]] : undefined;
+    const v = !m || !c ? undefined : m[2] === 'cavityVolume' ? c.volume : m[2] === 'portLength' ? c.portLength : c.portRadius;
+    if (v === undefined) rest.push(name);
+    else outputs[name] = v;
+  }
+  return { outputs, rest };
+}

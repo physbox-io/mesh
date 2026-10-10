@@ -60,6 +60,7 @@ import { ScaleControls } from './components/ScaleCard';
 import { ConfirmModal } from './components/ConfirmModal';
 import { CompileErrorBanner } from './components/CompileErrorBanner';
 import { VoltLinkBanner } from './components/VoltLinkBanner';
+import { CavityCard } from './components/CavityCard';
 import { useVoltLink } from './hooks/useVoltLink';
 import { ObjectGestureController } from './components/scene/ObjectGestures';
 import { TransformGizmo } from './components/scene/TransformGizmo';
@@ -5936,6 +5937,9 @@ function App() {
                   </div>
                 );
               })()}
+
+              {/* The air inside a watertight body, for a speaker box in Volt. */}
+              <CavityCard node={selectedNode} />
 
               {/* Mesh Properties — shown when the body or any child has a mesh geom */}
               {(() => {

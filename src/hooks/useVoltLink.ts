@@ -6,11 +6,22 @@
 // clock: each STEP_FOR moves the scene exactly the slice it names, and nothing
 // else moves it. Only the window that opened this one, from one of Volt's
 // origins, is listened to.
+//
+// Measured cavities are channels too, but of the scene graph rather than the
+// model: they are answered here and never reach the physics worker, and a new
+// measurement while linked re-sends the catalogue so Volt can bind it.
 // ---------------------------------------------------------------------------
 
 import { useEffect } from 'react';
 import { getPhysicsWorkerClient, useStore } from '../store/useStore';
-import { envelope, isCoSimMessage, voltOrigins, type CoSimBody } from '../utils/coSimLink';
+import { useCavityStore } from '../store/cavityStore';
+import { cavityChannels, envelope, isCoSimMessage, readCavityOutputs, voltOrigins, type CoSimBody } from '../utils/coSimLink';
+
+/** The whole catalogue: the model's channels, and every measured cavity's. */
+async function catalogue() {
+  const { channels, timestepMs } = await getPhysicsWorkerClient().getChannels();
+  return { channels: [...channels, ...cavityChannels(useCavityStore.getState().measured)], timestepMs };
+}
 
 export function useVoltLink() {
   useEffect(() => {
@@ -29,7 +40,7 @@ export function useVoltLink() {
           if (!state.isLoaded) return;
           if (state.isPlaying) state.togglePlay();
           useStore.setState({ voltLink: { origin: evt.origin } });
-          const { channels, timestepMs } = await getPhysicsWorkerClient().getChannels();
+          const { channels, timestepMs } = await catalogue();
           reply({ type: 'CATALOGUE', channels, timestepMs, scene: document.title });
           return;
         }
@@ -39,9 +50,10 @@ export function useVoltLink() {
             return;
           }
           try {
-            const r = await getPhysicsWorkerClient().stepFor(msg.dtMs, msg.inputs, msg.outputs);
+            const measured = readCavityOutputs(useCavityStore.getState().measured, msg.outputs ?? []);
+            const r = await getPhysicsWorkerClient().stepFor(msg.dtMs, msg.inputs, measured.rest);
             reply(r.ok
-              ? { type: 'STEPPED', seq: msg.seq, t: r.t, steps: r.steps, outputs: r.outputs, unknown: r.unknown }
+              ? { type: 'STEPPED', seq: msg.seq, t: r.t, steps: r.steps, outputs: { ...r.outputs, ...measured.outputs }, unknown: r.unknown }
               : { type: 'ERROR', seq: msg.seq, message: r.error });
           } catch (e) {
             reply({ type: 'ERROR', seq: msg.seq, message: String((e as Error)?.message || e) });
@@ -59,7 +71,19 @@ export function useVoltLink() {
       }
     };
 
+    // A cavity measured while linked: tell Volt, so its picker lists it.
+    const unsubscribe = useCavityStore.subscribe((s, prev) => {
+      const link = useStore.getState().voltLink;
+      if (!link || s.measured === prev.measured) return;
+      void catalogue().then(({ channels, timestepMs }) => {
+        window.opener?.postMessage(envelope({ type: 'CATALOGUE', channels, timestepMs, scene: document.title }), link.origin);
+      }).catch(() => {});
+    });
+
     window.addEventListener('message', onMessage);
-    return () => window.removeEventListener('message', onMessage);
+    return () => {
+      window.removeEventListener('message', onMessage);
+      unsubscribe();
+    };
   }, []);
 }
