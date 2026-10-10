@@ -2961,6 +2961,93 @@ export const castingFlaskPreset: SceneGraph = {
   ],
 } as unknown as SceneGraph;
 
+/*
+ * Scenes made to be driven from Volt over the link (utils/coSimLink.ts). The
+ * joint names are the contract: Volt's "Gripper with Limit Switch" preset
+ * binds its motor to jaw_hinge and its limit switch to jaw_hinge's angle;
+ * its "NEMA 17 Stepper" binds to stepper_shaft. Rename one and the binding
+ * goes with it.
+ */
+export const voltGripperPreset: SceneGraph = {
+  nodes: [
+    {
+      id: 'gripper_base',
+      name: 'gripper_base',
+      type: 'body',
+      pos: [0, 0, 0],
+      joints: [],
+      geoms: [
+        { name: 'gripper_plate', type: 'box', size: [0.035, 0.035, 0.012], pos: [0, 0, 0.012], rgba: [0.3, 0.32, 0.36, 1], contype: 0, conaffinity: 0 },
+        { name: 'gripper_post', type: 'cylinder', size: [0.008, 0.016], pos: [0, 0, 0.032], rgba: [0.45, 0.45, 0.5, 1], contype: 0, conaffinity: 0 },
+        // Where the jaw stops when shut: drawn, not collided, so a closed jaw is visible.
+        { name: 'fixed_finger', type: 'capsule', fromto: [0, 0, 0.04, 0.012, 0.099, 0.04], size: [0.006], rgba: [0.5, 0.5, 0.55, 1], contype: 0, conaffinity: 0 },
+      ],
+      children: [
+        {
+          id: 'jaw',
+          name: 'jaw',
+          type: 'body',
+          pos: [0, 0, 0.04],
+          // Swings in the horizontal plane, so gravity neither opens nor shuts it.
+          joints: [
+            { name: 'jaw_hinge', type: 'hinge', axis: [0, 0, 1], pos: [0, 0, 0], damping: 0.0005, limited: true, range: [0, 80] },
+          ],
+          geoms: [
+            { name: 'jaw_finger', type: 'capsule', fromto: [0, 0, 0, 0.1, 0, 0], size: [0.006], mass: 0.05, rgba: [0.95, 0.6, 0.15, 1] },
+          ],
+          children: [],
+        },
+      ],
+    },
+    {
+      // Out of the jaw's sweep to start with. Drag it into the sweep — about
+      // (0.055, 0.045) — and the jaw stalls on it before the limit switch.
+      id: 'grip_block',
+      name: 'grip_block',
+      type: 'body',
+      pos: [0.16, 0.08, 0.035],
+      joints: [{ name: 'grip_block_free', type: 'free' }],
+      geoms: [
+        // Taller than the jaw is high, so the finger meets its side rather than its edge.
+        { name: 'grip_block_geom', type: 'box', size: [0.02, 0.02, 0.035], mass: 2, rgba: [0.25, 0.55, 0.9, 1], friction: [1, 0.005, 0.0001] },
+      ],
+      children: [],
+    },
+  ],
+};
+
+export const voltStepperDialPreset: SceneGraph = {
+  nodes: [
+    {
+      id: 'dial_base',
+      name: 'dial_base',
+      type: 'body',
+      pos: [0, 0, 0],
+      joints: [],
+      geoms: [
+        { name: 'dial_housing', type: 'box', size: [0.021, 0.021, 0.02], pos: [0, 0, 0.02], rgba: [0.2, 0.2, 0.22, 1], contype: 0, conaffinity: 0 },
+        { name: 'dial_zero_mark', type: 'box', size: [0.002, 0.004, 0.001], pos: [0.045, 0, 0.041], rgba: [0.9, 0.2, 0.2, 1], contype: 0, conaffinity: 0 },
+      ],
+      children: [
+        {
+          id: 'dial',
+          name: 'dial',
+          type: 'body',
+          pos: [0, 0, 0.045],
+          joints: [
+            { name: 'stepper_shaft', type: 'hinge', axis: [0, 0, 1], pos: [0, 0, 0], damping: 0.0001 },
+          ],
+          geoms: [
+            { name: 'dial_disc', type: 'cylinder', size: [0.04, 0.003], mass: 0.05, rgba: [0.85, 0.85, 0.88, 1], contype: 0, conaffinity: 0 },
+            { name: 'dial_pointer', type: 'box', size: [0.018, 0.003, 0.002], pos: [0.02, 0, 0.004], mass: 0.002, rgba: [0.95, 0.6, 0.15, 1], contype: 0, conaffinity: 0 },
+          ],
+          children: [],
+        },
+      ],
+    },
+  ],
+};
+
 export const PRESETS = {
   empty: {
     name: 'Blank (Empty)',
@@ -3003,6 +3090,16 @@ export const PRESETS = {
   cartpole: {
     name: 'Cartpole System',
     scene: cartpolePreset
+  },
+  volt_gripper: {
+    name: 'Volt Gripper',
+    emoji: '🦾',
+    scene: voltGripperPreset
+  },
+  volt_stepper_dial: {
+    name: 'Volt Stepper Dial',
+    emoji: '🔩',
+    scene: voltStepperDialPreset
   },
   newtons_cradle: {
     name: "Newton's Cradle",
