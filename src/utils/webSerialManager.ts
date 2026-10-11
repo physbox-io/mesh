@@ -187,6 +187,25 @@ export interface MachineState {
    * continuity probe is refused until that has happened.
    */
   probeCircuitSeen: boolean;
+  /**
+   * The last job that ran to its final line, for the "Job Succeeded" notice.
+   *
+   * Set in one place only: the pump, when the last line of the program has
+   * been acknowledged. Every other way a job ends — E-Stop, an alarm, a dropped
+   * connection, a discarded park — goes through `abandonJob` or `discardPark`
+   * and leaves this alone, so its presence means the program really did finish.
+   * Cleared when the next job starts. `finishedAt` is what tells one finish
+   * from the next, so a notice dismissed for one job does not hide the next.
+   */
+  lastCompletedJob: CompletedJob | null;
+}
+
+/** What a job that ran to the end took. */
+export interface CompletedJob {
+  finishedAt: number;
+  elapsedSeconds: number;
+  estimatedSeconds: number | null;
+  totalLines: number;
 }
 
 /** A job set aside mid-cut, with the machine free to be moved. */
@@ -594,6 +613,7 @@ class WebSerialManager {
     controllerSilent: false,
     probePinActive: false,
     probeCircuitSeen: false,
+    lastCompletedJob: null,
   };
 
   private listeners: Set<MachineStateListener> = new Set();
@@ -1542,6 +1562,7 @@ class WebSerialManager {
       // something anyone can pick up.
       resume: null,
     park: null,
+      lastCompletedJob: null,
       // Left as-is deliberately: `runJob` has already refused to reach here
       // while Z is untrusted, and clearing it just because a program started
       // would be assuming the operator re-zeroed rather than checking.
@@ -1694,6 +1715,7 @@ class WebSerialManager {
       progressPercent: Math.round((plan.fromLine / Math.max(1, this.programLength())) * 100),
       resume: null,
       pauseMessage: undefined,
+      lastCompletedJob: null,
     });
 
     this.pumpJobQueue();
@@ -1756,12 +1778,27 @@ class WebSerialManager {
         // is in its buffer. The job is over when the last line is acked.
         if (this.jobBytesInFlight === 0) {
           this.isJobRunning = false;
+          // Read before the ticker stops, which forgets when the job started.
+          const elapsedSeconds = this.jobStartedAt === null
+            ? this.state.elapsedSeconds
+            : Math.round((Date.now() - this.jobStartedAt) / 1000);
           this.stopElapsedTicker();
           // It finished. There is nothing left to resume into — here or in
           // storage, where an offer left standing would invite somebody to
           // descend into a piece that has already come off the bed.
           clearCheckpoint();
-          this.updateState({ status: 'IDLE', progressPercent: 100, resume: null });
+          this.updateState({
+            status: 'IDLE',
+            progressPercent: 100,
+            resume: null,
+            elapsedSeconds,
+            lastCompletedJob: {
+              finishedAt: Date.now(),
+              elapsedSeconds,
+              estimatedSeconds: this.state.estimatedSeconds,
+              totalLines: this.state.totalLines,
+            },
+          });
         }
         return;
       }

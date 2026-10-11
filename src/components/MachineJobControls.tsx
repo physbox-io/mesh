@@ -6,6 +6,7 @@ import { formatDuration } from '../utils/timeEstimate';
 import { NumberInput } from '@physbox-io/ui';
 import { ProbeCircuitStatus } from './ProbeCircuitStatus';
 import { CheckpointBadge } from './CheckpointBadge';
+import { JogPad } from './JogPad';
 
 /**
  * Running a job from the browser: stop it, pick it up again, and deal with what
@@ -96,6 +97,22 @@ export const JobPauseBanner: React.FC<{
           The machine is stopped and free to move. Jog it where you like. Resuming lifts back to the
           job's own clear height before it carries on.
         </p>
+      )}
+
+      {/* The pad the text above keeps mentioning. Not on a feed hold: GRBL
+          refuses to jog in Hold, and the tool is still in the cut. */}
+      {machineState.status !== 'PAUSED_OPERATOR' && (
+        <div className="rounded-lg bg-white/60 dark:bg-slate-950/40 border border-amber-500/30 p-2.5 space-y-2 text-slate-700 dark:text-slate-200">
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <span className="text-[10px] uppercase font-bold text-slate-500">Jog</span>
+            <span className="text-[11px] font-mono tabular-nums">
+              <span className="text-slate-500">WPos </span>
+              X:{machineState.wpos.x.toFixed(2)} Y:{machineState.wpos.y.toFixed(2)} Z:
+              {machineState.wpos.z.toFixed(2)}
+            </span>
+          </div>
+          <JogPad />
+        </div>
       )}
 
       {/*

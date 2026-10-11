@@ -79,6 +79,7 @@ import { MachineConfigModal } from './components/MachineConfigModal';
 import { UserProfileButton, SIGN_IN_REQUESTED_EVENT, SIGNED_IN_EVENT } from './components/UserProfileButton';
 import { AgentMachineBanner } from './components/AgentMachineBanner';
 import { JobRestoreModal } from './components/JobRestoreModal';
+import { JobSucceededModal } from './components/JobSucceededModal';
 import { MIN_MAX_TOKENS, MAX_MAX_TOKENS, readMaxTokens, writeMaxTokens } from './utils/llmSettings';
 import { DfmHUD } from './components/DfmHUD';
 import { createHeatSetBossNode, createHexNutTrapNode, createBearingPocketNode, createDShaftHubNode, createCounterboreHoleNode } from './utils/hardwareComponents';
@@ -6991,6 +6992,8 @@ api.applyForce([force, 0, 0]);
           the top level and not inside an export modal, because the session that
           opened that modal is the session that went away. */}
       <JobRestoreModal />
+      {/* A job that ran to its last line, wherever it was started from. */}
+      <JobSucceededModal />
       <PresetSaveNotice />
     </div>
   );

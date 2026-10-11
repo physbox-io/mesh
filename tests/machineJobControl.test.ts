@@ -192,6 +192,28 @@ describe('pausing and resuming a running job', () => {
     expect(fake.lines().length).toBe(afterStop);
   });
 
+  // What the "Job Succeeded" modal shows from, and the only thing it shows from.
+  it('records a job that ran to its last line as completed', async () => {
+    webSerialManager.startJob('G21\nG90\nG1 X10 F600\nM30', 90);
+    await advance(10);
+    const state = webSerialManager.getState();
+    expect(state.status).toBe('IDLE');
+    expect(state.lastCompletedJob).toMatchObject({ totalLines: 4, estimatedSeconds: 90 });
+  });
+
+  it('does not record a stopped job as completed, and forgets the last one on a new start', async () => {
+    webSerialManager.startJob('G21\nG90\nG1 X10 F600\nM30');
+    await advance(10);
+    expect(webSerialManager.getState().lastCompletedJob).not.toBeNull();
+
+    webSerialManager.startJob(JOB);
+    expect(webSerialManager.getState().lastCompletedJob).toBeNull();
+    await settle();
+    await webSerialManager.eStop();
+    await advance(4);
+    expect(webSerialManager.getState().lastCompletedJob).toBeNull();
+  });
+
   it('will not pause a machine that is not running a job', async () => {
     await webSerialManager.pauseJob();
     expect(fake.sent).not.toContain('!');
