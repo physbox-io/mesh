@@ -75,6 +75,26 @@ describe('no rapid moves through the stock', () => {
   }
 });
 
+describe('roughing on its own', () => {
+  // The last roughing layer sits exactly at the floor, and a strict "below
+  // the layer" test left it empty. With a finishing pass that was hidden —
+  // finishing went to the floor anyway — but with roughing alone the channel
+  // round a two-sided part stopped a whole layer short of the middle, and the
+  // part never came free.
+  it('cuts each side of a two-sided part all the way to its floor', () => {
+    const r = generateSolidMachining(dishScene(), {
+      sides: 2, roughingToolDiaMm: 3, finishingEnabled: false, material: 'aluminium',
+    });
+    expect(r.success, r.error).toBe(true);
+    for (const side of r.sides) {
+      let deepest = 0;
+      const roughing = side.gcode.slice(side.gcode.indexOf('OP 1: roughing'));
+      for (const m of roughing.matchAll(/Z(-?\d+(?:\.\d+)?)/g)) deepest = Math.min(deepest, parseFloat(m[1]));
+      expect(-deepest, `side ${side.side}`).toBeCloseTo(side.depthMm, 2);
+    }
+  });
+});
+
 describe('the finishing pass does not cut into the walls it crosses', () => {
   // The raster samples the cutter-offset surface a resolution step apart and
   // the machine draws straight lines between the samples. Across a vertical

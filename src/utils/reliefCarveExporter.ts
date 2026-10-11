@@ -1922,7 +1922,7 @@ export function machineSurface(
       )}`
     );
   } else {
-    gcode.push('; Finishing   : none — the roughing bit cuts to the surface');
+    gcode.push('; Finishing   : none — roughing goes to the surface in layers, so slopes come out stepped');
   }
   gcode.push('; ---------------------------------------------------------------');
   gcode.push('G21 ; millimetres');
@@ -2072,7 +2072,12 @@ export function machineSurface(
       for (let j = 0; j < gys.length; j++) {
         for (let i = 0; i < gxs.length; i++) {
           const target = sampleHeightmap(roughMap, gxs[i], gys[j]) + allowance;
-          if (target <= layerZ - 1e-6) mask[(j + 1) * cols + (i + 1)] = 1;
+          // At or below the layer, not strictly below it. The last layer sits
+          // exactly at the floor, so every cell there has a target *equal* to
+          // it: a strict test left that layer empty, and with no finishing
+          // pass to follow, the channel round a solid part stopped a whole
+          // layer short of breaking through.
+          if (target <= layerZ + 1e-6) mask[(j + 1) * cols + (i + 1)] = 1;
         }
       }
 
@@ -2228,7 +2233,8 @@ export function machineSurface(
 
         for (const x of lineXs) {
           const target = sampleHeightmap(roughMap, x, y) + allowance;
-          if (target <= layerZ - 1e-6) run.push({ x, y, z: layerZ });
+          // At or below the layer: see `layerRegion`.
+          if (target <= layerZ + 1e-6) run.push({ x, y, z: layerZ });
           else flushRun();
         }
         flushRun();

@@ -282,7 +282,7 @@ export function FinishingPassFields({
             ? `${effective.spindleRpm.toLocaleString()} RPM · ${effective.finishingFeedrate} mm/min · ` +
               `${((effective.finishingToolDiaMm * effective.finishingStepoverPercent) / 100).toFixed(2)} mm stepover · ` +
               `${passCount ?? '—'} passes`
-            : 'Skipped: the roughing bit cuts to the surface and the job ends there'
+            : 'Skipped: roughing goes to the surface in layers, so slopes come out stepped, and the job ends there'
         }
         notes={[speedNote]}
       />

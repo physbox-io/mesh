@@ -660,11 +660,23 @@ describe('Adaptive roughing', () => {
     // GRBL swallows a few hundred lines a second; a contour with a vertex on
     // every grid cell would be tens of times that, and a job that streams
     // slower than it cuts stalls the spindle in the cut.
-    const raster = generateReliefCarveGcode(dome, { ...deep, roughingStrategy: 'raster' });
+    //
+    // Measured as the mean length of a move rather than as a line count
+    // against the raster: the count also grows with how much there is to clear,
+    // and when the floor layer started clearing the background it really is
+    // supposed to, adaptive gained a quarter more lines while its moves stayed
+    // 13 mm long. A vertex per grid cell would be a third of a millimetre.
     const adaptive = generateReliefCarveGcode(dome, { ...deep, roughingStrategy: 'adaptive' });
-
-    const lines = (g: string) => roughingOf(g).split('\n').length;
-    expect(lines(adaptive.gcode)).toBeLessThan(lines(raster.gcode) * 1.5);
+    let x = 0, y = 0, moves = 0, length = 0;
+    for (const line of roughingOf(adaptive.gcode).split('\n')) {
+      if (!line.startsWith('G1')) continue;
+      const nx = parseFloat(/X(-?[\d.]+)/.exec(line)?.[1] ?? `${x}`);
+      const ny = parseFloat(/Y(-?[\d.]+)/.exec(line)?.[1] ?? `${y}`);
+      const d = Math.hypot(nx - x, ny - y);
+      if (d > 0) { moves++; length += d; }
+      x = nx; y = ny;
+    }
+    expect(length / moves).toBeGreaterThan(5);
   });
 
   it('opens the bite up where the depth has no layers to give back', () => {
