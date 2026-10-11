@@ -33,6 +33,7 @@ import {
   type FinishingStrategy,
 } from './finishingPaths';
 import { estimateGcodeTime } from './timeEstimate';
+import { StockModel, FLAT_PROFILE, ballProfile, vProfile, type CutterProfile } from './stockModel';
 import { DEFAULT_MOTION_PROFILE, type MotionProfile } from './motionProfile';
 import {
   DEFAULT_MATERIAL,
@@ -1669,14 +1670,32 @@ export function machineSurface(
   let atY = 0;
   let atZ = opts.safeZ;
 
+  /*
+   * What is really left standing, lowered by every cut as it is written, and
+   * the cutter currently doing the cutting. Every traverse and every rapid
+   * descent is measured against this rather than against where the material
+   * would be once an operation finishes — see `StockModel` for why those differ
+   * by up to a whole roughing layer.
+   */
+  // A quarter of the smaller cutter's radius: fine enough that the cells a
+  // pass covers completely reach the passes either side of it at any normal
+  // stepover, so the rim the model holds back is thin.
+  const stock = new StockModel(
+    bounds,
+    Math.min(1, Math.max(0.1, Math.min(opts.roughingToolDiaMm, opts.finishingToolDiaMm) / 8))
+  );
+  let cutter: { radius: number; profile: CutterProfile } = { radius: 0.05, profile: FLAT_PROFILE };
+
   const rapidTo = (x: number, y: number, z: number) => {
     atX = x; atY = y; atZ = z;
   };
   const plungeTo = (z: number) => {
+    stock.cut(atX, atY, atZ, atX, atY, z, cutter.radius, cutter.profile);
     atZ = z;
   };
   const cutTo = (x: number, y: number, z: number) => {
     cutDistance += Math.hypot(x - atX, y - atY, z - atZ);
+    stock.cut(atX, atY, atZ, x, y, z, cutter.radius, cutter.profile);
     atX = x; atY = y; atZ = z;
   };
 
@@ -1713,25 +1732,28 @@ export function machineSurface(
    * into — or the angle is set to zero — it plunges, which is what it had to do
    * anyway.
    *
-   * `entryZ` is the height the material stands at when the pass begins: the
-   * stock's top face on the first layer, the level the previous layer left on
-   * every one after it.
+   * `entryZ` is the height the material is expected to stand at when the pass
+   * begins: the stock's top face on the first layer, the level the previous
+   * layer left on every one after it. Where the stock model says more is
+   * standing under the head than that, the model wins — the ramp starts from
+   * the real material, and the rapid down to it stops above it.
    *
-   * `levelAt` is how high the material stands anywhere else, and is what the
-   * traverse to the head of the pass is measured against. Defaulting it to
-   * `entryZ` — the plane the pass is dropping from — is only right where the
-   * move stays inside ground the operation has already been over. A move that
-   * crosses material this operation has not reached yet needs to be told about
-   * it, or the “traverse” is a rapid through whatever is standing there.
+   * The traverse to the head of the pass is measured against the stock model
+   * too, over the cutter's whole footprint rather than under its axis. It used
+   * to be handed a function for where the material would be once the operation
+   * finished, sampled along the centre line: that missed everything roughing
+   * had not got down to yet, and everything a cutter's edge reaches beside its
+   * axis, and a 3 mm cutter rapided through up to 1.7 mm of wood.
    */
   const leadIn = (
     path: PathPoint[],
-    entryZ: number,
+    expectedEntryZ: number,
     rate: number,
-    returnRate = 0,
-    levelAt: (x: number, y: number) => number = () => entryZ
+    returnRate = 0
   ) => {
     const head = path[0];
+    const standing = stock.highestUnder(head.x, head.y, cutter.radius);
+    const entryZ = Math.min(0, Math.max(expectedEntryZ, standing));
     const approachZ = Math.min(opts.safeZ, entryZ + 0.5);
 
     /*
@@ -1743,33 +1765,19 @@ export function machineSurface(
      * relief that is some four hundred retracts and several metres of Z rapid
      * that cut nothing.
      *
-     * The height is measured rather than guessed: the material level is
-     * sampled along the line the tool is about to fly, and the traverse goes a
-     * millimetre over the highest thing on it. That is exact where a rule like
-     * "stay low if the next pass is close" is only usually right — a wall
-     * standing between two adjacent passes is precisely the case such a rule
-     * gets wrong, and the cost of being wrong is the cutter driven through it
-     * at rapid.
+     * The height is measured rather than guessed: the stock model is swept
+     * along the line the tool is about to fly, as wide as the cutter, and the
+     * traverse goes a millimetre over the highest thing on it. That is exact
+     * where a rule like "stay low if the next pass is close" is only usually
+     * right — a wall standing between two adjacent passes is precisely the case
+     * such a rule gets wrong, and the cost of being wrong is the cutter driven
+     * through it at rapid. The sweep samples at half a stock cell, so nothing
+     * the model holds can fall between two samples.
      */
-    const span = Math.hypot(head.x - atX, head.y - atY);
-    let highest = Math.max(levelAt(atX, atY), levelAt(head.x, head.y));
-    /*
-     * Half a millimetre between samples, and enough of them to hold that over
-     * the longest move in the job.
-     *
-     * The step is what decides which walls this can see. At one sample a
-     * millimetre, capped at 64 of them, a traverse the width of a 140 mm board
-     * sampled every 2.2 mm — wide enough for a stripe of a relief to fall
-     * between two samples and be missed entirely, which is the one case the
-     * whole measurement exists for. The cost is a few hundred heightmap reads
-     * on the handful of moves that are actually long; a raster's traverse
-     * between two adjacent passes is still a single step.
-     */
-    const steps = Math.min(512, Math.max(1, Math.ceil(span / 0.5)));
-    for (let i = 1; i < steps; i++) {
-      const t = i / steps;
-      highest = Math.max(highest, levelAt(atX + (head.x - atX) * t, atY + (head.y - atY) * t));
-    }
+    const highest = Math.max(
+      head.z,
+      stock.highestAlong(atX, atY, head.x, head.y, cutter.radius)
+    );
     const traverseZ = Math.min(opts.safeZ, Math.min(0, highest) + TRAVERSE_CLEARANCE_MM);
 
     if (traverseZ > atZ + 1e-6) {
@@ -1902,8 +1910,9 @@ export function machineSurface(
   const allowance = opts.finishingEnabled ? Math.max(0, opts.roughingAllowanceMm) : 0;
 
   /**
-   * How high the material still stands at a point once roughing has been over
-   * it, which is the height anything entering the cut there has to start from.
+   * The lowest the material can stand at a point once roughing has been over
+   * it: the finishing pass's expected entry height. What is really standing is
+   * the stock model's business (see `leadIn`).
    *
    * Without roughing nothing has been taken off, so the answer is the stock's
    * top face — which is what this is until the roughing block below replaces
@@ -1914,6 +1923,8 @@ export function machineSurface(
 
   if (opts.roughingEnabled) {
     const roughMap = dilateForTool(surface, roughRad, false, bodyFor(opts.roughingToolDiaMm, 0, 0));
+    // Roughing is always a flat end mill.
+    cutter = { radius: roughRad, profile: FLAT_PROFILE };
     const adaptive = opts.roughingStrategy === 'adaptive';
 
     // Deepest the roughing tool is allowed to go: the allowance above the
@@ -1947,36 +1958,15 @@ export function machineSurface(
       ? stepdownForEngagement(opts.roughingToolDiaMm, engagement, baseStepdown)
       : baseStepdown;
 
-    // What the roughing pass leaves standing: its own reachable surface plus
+    // The lowest roughing can leave anything: its own reachable surface plus
     // the allowance, never deeper than the floor it is allowed to reach and
-    // never above the stock's top face. `roughMap` is already dilated for the
-    // roughing cutter, so a pocket it cannot get into reads back high here —
-    // which is the answer wanted, since the material really is still there.
+    // never above the stock's top face. It is NOT what roughing leaves — a
+    // cell is only cleared to the layer plane above its surface, and ground
+    // shallower than the first layer is not touched at all — so it is used
+    // only as the finishing pass's expected entry height, which `leadIn` raises
+    // to whatever the stock model says is really standing.
     materialLevelAt = (x, y) =>
       Math.min(0, Math.max(roughFloor, sampleHeightmap(roughMap, x, y) + allowance));
-
-    /*
-     * What is standing partway through the roughing operation, which is what a
-     * traverse between one cut and the next has to clear.
-     *
-     * `materialLevelAt` is where roughing *finishes*, and using it alone would
-     * fly a traverse through everything the operation has not got down to yet.
-     * `aboveZ` — the plane the next cut is dropping from — is the level of
-     * everything roughing has already been over. The material stands at
-     * whichever of the two is higher: ground already taken to its final level
-     * reads back as that level, ground not yet reached reads back as the plane
-     * above it, and ground the cutter never enters at all — the stripes of a
-     * relief, the islands a pocket is cut around — reads back as the stock's
-     * own face, because that is where it still is.
-     *
-     * Without this a roughing lead-in measured nothing: it was handed the
-     * default, which is `entryZ` everywhere, so it cleared the layer it was
-     * cutting rather than the material it was crossing. On a relief of separate
-     * pockets — a zebra is nothing else — the move from one pocket to the next
-     * then rapided through the stripe between them, at `entryZ + 1 mm`.
-     */
-    const standingAt = (aboveZ: number) => (x: number, y: number) =>
-      Math.min(0, Math.max(materialLevelAt(x, y), aboveZ));
 
     // The last layer sits exactly at the floor, where the only material left to
     // take is at the single deepest point of the ${noun} — so it clears next to
@@ -2136,7 +2126,7 @@ export function machineSurface(
 
             // Ramp in along the ring rather than plunging: the centre of an end
             // mill cuts at zero surface speed, and a deep layer pulls hard on it.
-            leadIn(path, above, opts.roughingPlungeRate, feed, standingAt(above));
+            leadIn(path, above, opts.roughingPlungeRate, feed);
 
             for (let i = 1; i < path.length; i++) {
               cutTo(path[i].x, path[i].y, z);
@@ -2176,13 +2166,7 @@ export function machineSurface(
             // The layer above is what the tool is dropping through, so that is
             // where the ramp starts — one stepdown, not the whole depth so far.
             const above = Math.min(0, layerZ + layerStep);
-            leadIn(
-              [run[0], last],
-              above,
-              opts.roughingPlungeRate,
-              opts.roughingFeedrate,
-              standingAt(above)
-            );
+            leadIn([run[0], last], above, opts.roughingPlungeRate, opts.roughingFeedrate);
 
             cutTo(last.x, last.y, layerZ);
             gcode.push(`G1 X${f(last.x)} Y${f(last.y)} F${Math.round(opts.roughingFeedrate)}`);
@@ -2320,6 +2304,15 @@ export function machineSurface(
   const rasterAngle = opts.finishingAngleDeg ?? (opts.finishingDirection === 'y' ? 90 : 0);
   const strategy: FinishingStrategy = opts.finishingStrategy ?? DEFAULT_RELIEF_OPTIONS.finishingStrategy;
 
+  cutter = {
+    radius: finishRad,
+    profile:
+      opts.finishingToolType === 'ball_nose'
+        ? ballProfile(finishRad)
+        : opts.finishingToolType === 'v_bit'
+          ? vProfile(Math.tan(vBitHalfAngleRad(opts.finishingVBitAngleDeg)))
+          : FLAT_PROFILE,
+  };
   gcode.push('; --- OP 2: finishing pass ---------------------------------------');
   gcode.push(
     `; ${describeCutter(
@@ -2427,9 +2420,7 @@ export function machineSurface(
          */
         const head = pass[0];
         const entryZ = Math.min(0, materialLevelAt(head.x, head.y), prevLimit);
-        // The traverse is measured against what roughing left standing, which
-        // is the highest the material can be anywhere the finisher flies.
-        leadIn(pass, entryZ, opts.finishingPlungeRate, opts.finishingFeedrate, materialLevelAt);
+        leadIn(pass, entryZ, opts.finishingPlungeRate, opts.finishingFeedrate);
 
         // GRBL keeps the last feedrate, so it is only stated when it changes.
         let first = true;

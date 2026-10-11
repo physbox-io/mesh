@@ -9,6 +9,7 @@ import {
   adaptiveBiteFraction,
 } from '../src/utils/reliefCarveExporter';
 import type { SceneGraph, SceneGeom } from '../src/types/scene';
+import { cutStock } from './helpers/cutStock';
 
 function bodyWith(geom: Partial<SceneGeom> & { type: SceneGeom['type']; size: number[] }, pos = [0, 0, 0]): SceneGraph {
   return {
@@ -366,20 +367,20 @@ describe('Relief carve exporter', () => {
       finishingStepdownMm: 2,
     });
 
-    // Track Z through the whole program and check every downward cutting move.
-    // Before layering, the first G1 of the raster dived from the safe height to
-    // the floor of the relief — 20 mm straight down on a 1.6 mm bit. The bound
-    // is one stepdown plus the 0.5 mm the tool is rapided down to first.
-    let z = DEFAULT_RELIEF_OPTIONS.safeZ;
-    for (const line of result.gcode.split('\n')) {
-      const zw = /Z(-?[\d.]+)/.exec(line);
-      if (!zw) continue;
-      const next = parseFloat(zw[1]);
-      if (line.startsWith('G1 ') && next < z) {
-        expect(z - next).toBeLessThanOrEqual(2.5 + 1e-6);
-      }
-      z = next;
-    }
+    // Cut the program back out of the stock and check what each cutting move
+    // took. Before layering, the first G1 of the raster dived from the safe
+    // height to the floor of the relief — 20 mm straight down on a 1.6 mm bit.
+    // The bound is one stepdown plus the 0.5 mm the tool is rapided down to
+    // first.
+    //
+    // Measured on the material rather than on the Z words: an entry starts from
+    // what is really standing, which at the stock's edge is a fin the cutter's
+    // axis cannot get past, and a steep move down through air above the last
+    // layer's floor takes nothing.
+    const deepest = cutStock(result.gcode, 150, 150, 0.8)
+      .filter((c) => !c.rapid)
+      .reduce((m, c) => Math.max(m, c.removedMm), 0);
+    expect(deepest).toBeLessThanOrEqual(2.5 + 1e-6);
   });
 
   it('ramps into the cut instead of plunging, unless told not to', () => {
