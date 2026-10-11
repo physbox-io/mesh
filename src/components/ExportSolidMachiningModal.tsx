@@ -123,9 +123,38 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
     }));
   };
 
+  /*
+   * The toolpath view's inputs, held still between renders.
+   *
+   * The viewport rebuilds its whole path whenever either changes identity, and
+   * a rebuild puts the playhead back to zero and re-fits the camera. As object
+   * literals in the JSX they changed on every render — and while a job runs
+   * this modal renders on every status report — so the live trace was reset
+   * several times a second and the view snapped back under any orbit.
+   */
+  const current = result?.success ? result.sides[Math.min(side, result.sides.length - 1)] : null;
+  const previewResult = useMemo(
+    () =>
+      current && result?.success
+        ? { segments: current.segments, estimatedTimeSeconds: current.estimatedTimeSeconds, carveBounds: result.partBounds }
+        : null,
+    [current, result]
+  );
+  const previewOptions = useMemo(
+    () =>
+      result?.success
+        ? {
+            ...settled,
+            stockWidthMm: result.stock.widthMm,
+            stockDepthMm: result.stock.depthMm,
+            stockThicknessMm: result.stock.thicknessMm,
+          }
+        : null,
+    [settled, result]
+  );
+
   if (!isOpen) return null;
 
-  const current = result?.success ? result.sides[Math.min(side, result.sides.length - 1)] : null;
   const twoSided = options.sides === 2;
   const swaps = !!current?.toolChange;
   const preflight = {
@@ -544,16 +573,9 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
                 </span>
               </div>
 
-              <ToolpathView
-                result={{ segments: current.segments, estimatedTimeSeconds: current.estimatedTimeSeconds, carveBounds: result.partBounds }}
-                options={{
-                  ...settled,
-                  stockWidthMm: result.stock.widthMm,
-                  stockDepthMm: result.stock.depthMm,
-                  stockThicknessMm: result.stock.thicknessMm,
-                }}
-                machineState={machineState}
-              />
+              {previewResult && previewOptions && (
+                <ToolpathView result={previewResult} options={previewOptions} machineState={machineState} />
+              )}
 
               <div className="flex items-center space-x-4 text-[11px] text-slate-500 dark:text-slate-400">
                 <span>
