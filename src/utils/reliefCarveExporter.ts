@@ -803,15 +803,20 @@ export function adaptiveBiteFraction(toolDiaMm: number, baseStepdownMm: number, 
 const PATH_SIMPLIFY_MM = 0.01;
 
 /**
- * The same idea for roughing, an order of magnitude looser.
+ * The same idea for roughing, looser, and tied to the allowance.
  *
- * Roughing leaves an allowance for the finishing pass to take off, so a
- * deviation of a twentieth of a millimetre on a roughing ring is invisible in
- * the finished piece — it comes off anyway. Holding roughing to the finishing
- * tolerance costs tens of thousands of lines to describe curves that nothing
- * will ever see.
+ * Roughing leaves an allowance for the finishing pass to take off, so a ring
+ * may stray from its curve by up to half of it and still never reach the
+ * finished surface. Held to a fixed twentieth of a millimetre instead, a ring
+ * keeps nearly every marching-squares vertex — they zigzag by a fraction of a
+ * cell — and an adaptive clear of a dome came to three times the lines of a
+ * raster. Capped, because past a quarter of a millimetre the ring is visibly
+ * not the curve any more; floored for a job with no allowance at all, where
+ * roughing cuts the surface itself.
  */
-const ROUGH_SIMPLIFY_MM = 0.05;
+function roughSimplifyMm(allowanceMm: number): number {
+  return Math.min(0.25, Math.max(0.05, allowanceMm / 2));
+}
 /** How far the simplifier looks ahead before it commits to a point. */
 const SIMPLIFY_LOOKAHEAD = 48;
 /** Preview vertex budget — past this the viewport, not the mill, is the bottleneck. */
@@ -2120,7 +2125,7 @@ export function machineSurface(
           // to well inside the machine's own resolution.
           const plan = simplifyPass(
             loop.map((p) => ({ x: safeX(p.x), y: safeY(p.y), z: layerZ })),
-            ROUGH_SIMPLIFY_MM
+            roughSimplifyMm(allowance)
           );
           if (plan.length < 2) continue;
 
