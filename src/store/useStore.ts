@@ -5255,6 +5255,15 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
       }
     }
 
+    // MuJoCo allows a free joint only on a top-level body, and most branches
+    // above give one unconditionally. Nested, the part gets the same hinge the
+    // primitives get as children.
+    if (isChild) {
+      joints = joints.map((j): SceneJoint => j.type === 'free'
+        ? { name: `${id}_hinge`, type: 'hinge', axis: [0, 1, 0], pos: [0, 0, 0], damping: 0.5 }
+        : j);
+    }
+
     const newNode: SceneNode = {
       id, name: id, type: 'body', pos: localPos,
       joints,
