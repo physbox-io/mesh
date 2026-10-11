@@ -55,7 +55,10 @@ export const JobPauseBanner: React.FC<{
   if (!paused) return null;
 
   const toolChange = machineState.status === 'PAUSED_TOOL';
-  const blocked = showZTools && machineState.needsZZero && !overridden;
+  const parked = machineState.status === 'PAUSED_PARKED';
+  // `resumeFromPark` takes no override, so neither does its button here — the
+  // same gate as the Resume Here in the transport.
+  const blocked = showZTools && machineState.needsZZero && (parked || !overridden);
   const allowResume = () => {
     setOverridden(true);
     setOverrideFor(machineState.pauseMessage ?? null);
@@ -129,7 +132,7 @@ export const JobPauseBanner: React.FC<{
           </>
         )}
 
-        {blocked && (
+        {blocked && !parked && (
           <button
             onClick={allowResume}
             title="Only if the Z datum is already right for the tool now in the spindle"
@@ -140,7 +143,13 @@ export const JobPauseBanner: React.FC<{
         )}
 
         <button
-          onClick={() => void webSerialManager.resumeJob({ zIsSet: overridden })}
+          // A park let go of the program, so `resumeJob` has nothing to release
+          // and returned without a word; it is put back from the park point.
+          onClick={() =>
+            void (parked
+              ? webSerialManager.resumeFromPark()
+              : webSerialManager.resumeJob({ zIsSet: overridden }))
+          }
           disabled={blocked}
           title={blocked ? 'Set Z zero for the new tool first' : undefined}
           className="px-4 py-1.5 bg-amber-500 hover:bg-amber-600 disabled:opacity-40 disabled:cursor-not-allowed text-slate-950 font-bold text-xs rounded-lg flex items-center space-x-1.5 cursor-pointer"
