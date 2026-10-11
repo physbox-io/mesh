@@ -2478,7 +2478,7 @@ export function machineSurface(
           const points = s.points.filter((_, i) => i % stride === 0);
           const last = s.points[s.points.length - 1];
           if (points[points.length - 1] !== last) points.push(last);
-          return { type: s.type, points };
+          return { ...s, points };
         });
   return {
     success: true,
