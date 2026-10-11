@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { X, AlertCircle, Cpu, RefreshCw, Layers, Mountain } from 'lucide-react';
 import type { SceneGraph } from '../types/scene';
+import { rememberReliefOptions } from '../utils/lastReliefOptions';
 import {
   DEFAULT_RELIEF_OPTIONS,
   recommendReliefTooling,
@@ -114,8 +115,10 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
   // screen while the next is on its way.
   const { result, busy, failure } = useExportJob(
     isOpen,
-    (client) =>
-      client.run('relief', scene, {
+    (client) => {
+      // Kept for the MCP relief export, so an agent plans the same job.
+      rememberReliefOptions(settled);
+      return client.run('relief', scene, {
         ...settled,
         // The connected machine's own acceleration and traverse limits, so the
         // run-time estimate sharpens from a guess into a measurement the moment
@@ -123,7 +126,8 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
         motionProfile: machineState.motion,
         meshLevelGrid: probedGrid,
         applyMeshLeveling: settled.applyMeshLeveling && probedGrid !== null,
-      }),
+      });
+    },
     [scene, settled, probedGrid, machineState.motion]
   );
 

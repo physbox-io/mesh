@@ -44,6 +44,15 @@ import { runCastPrep } from '../utils/castPrepRunner';
 import { selectionSoups, splitOffThread, testAssemblyOffThread } from '../utils/printSplitClient';
 import { filamentSpec } from '../utils/filaments';
 import { generateSolidMachining, deriveSolidOptions } from '../utils/solidMachiningExporter';
+import {
+  DEFAULT_RELIEF_OPTIONS,
+  deriveReliefFeeds,
+  describeCutter,
+  type ReliefCarveOptions,
+  type ReliefCarveResult,
+} from '../utils/reliefCarveExporter';
+import { lastReliefOptions } from '../utils/lastReliefOptions';
+import { ExportWorkerClient } from '../utils/exportWorkerClient';
 import { webSerialManager } from '../utils/webSerialManager';
 import type { Object3D } from 'three';
 import type { SceneGraph, SceneNode, SceneGeom, SceneJoint } from '../types/scene';
@@ -2315,6 +2324,110 @@ export function useMCPBridge() {
             partingFromBaseMm: typeof msg.partingFromBaseMm === 'number' ? msg.partingFromBaseMm : 'auto',
           });
           return report.ok ? { ...report, on: true } : report;
+        }
+
+        /*
+         * A relief carve, planned the way the Relief Carve dialog last planned
+         * it - the same stock, fit, cutters and any feed typed over - so an
+         * agent looking into a carve is looking at the job that went to the
+         * machine. Anything asked for here is laid on top; asking for a cutter,
+         * a material or a depth works the feeds out again for it. With the
+         * dialog not opened this session, it starts from the scene's own carve
+         * settings and the bench's stock and material, as the dialog would.
+         */
+        case 'EXPORT_RELIEF': {
+          const scene = store.sceneGraph;
+          if (!scene.nodes?.length) return { ok: false, error: 'The scene is empty — there is nothing to carve.' };
+          const motion = webSerialManager.getState().motion;
+          const fromDialog = lastReliefOptions();
+          const base: ReliefCarveOptions = fromDialog
+            ? { ...DEFAULT_RELIEF_OPTIONS, ...fromDialog }
+            : {
+                ...DEFAULT_RELIEF_OPTIONS,
+                ...store.carveSettings,
+                stockWidthMm: store.stock.widthMm,
+                stockDepthMm: store.stock.depthMm,
+                stockThicknessMm: store.stock.thicknessMm,
+                material: store.material,
+              };
+          const num = (v: unknown) => (typeof v === 'number' && v > 0 ? v : undefined);
+          const shape = msg.finishingToolType === 'flat' || msg.finishingToolType === 'ball_nose' || msg.finishingToolType === 'v_bit'
+            ? msg.finishingToolType
+            : undefined;
+          const asked: Partial<ReliefCarveOptions> = {
+            ...(num(msg.roughingToolDiaMm) ? { roughingToolDiaMm: num(msg.roughingToolDiaMm) } : {}),
+            ...(num(msg.finishingToolDiaMm) ? { finishingToolDiaMm: num(msg.finishingToolDiaMm) } : {}),
+            ...(shape ? { finishingToolType: shape } : {}),
+            ...(num(msg.carveDepthMm) ? { carveDepthMm: num(msg.carveDepthMm) } : {}),
+            ...(typeof msg.material === 'string' ? { material: msg.material as ReliefCarveOptions['material'] } : {}),
+            ...(msg.roughingStrategy === 'adaptive' || msg.roughingStrategy === 'raster' ? { roughingStrategy: msg.roughingStrategy } : {}),
+            ...(typeof msg.roughingEnabled === 'boolean' ? { roughingEnabled: msg.roughingEnabled } : {}),
+            ...(num(msg.stockWidthMm) ? { stockWidthMm: num(msg.stockWidthMm) } : {}),
+            ...(num(msg.stockDepthMm) ? { stockDepthMm: num(msg.stockDepthMm) } : {}),
+            ...(num(msg.stockThicknessMm) ? { stockThicknessMm: num(msg.stockThicknessMm) } : {}),
+          };
+          const merged: ReliefCarveOptions = { ...base, ...asked };
+          // The dialog's feeds stand, overrides and all, unless what they were
+          // worked out for has been changed here.
+          const rederive = !fromDialog || ['roughingToolDiaMm', 'finishingToolDiaMm', 'carveDepthMm', 'material']
+            .some((k) => k in asked);
+          const options: ReliefCarveOptions = {
+            ...merged,
+            ...(rederive
+              ? deriveReliefFeeds(merged, motion.spindle, Math.min(motion.maxRate.x, motion.maxRate.y))
+              : {}),
+            motionProfile: motion,
+            // The probed bed belongs to the dialog's session at the machine.
+            meshLevelGrid: null,
+            applyMeshLeveling: false,
+          };
+          const client = new ExportWorkerClient();
+          let result: ReliefCarveResult;
+          try {
+            result = await client.run('relief', scene, options);
+          } finally {
+            client.dispose();
+          }
+          if (!result.success) return { ok: false, error: result.error || 'The relief carve could not be planned.', warnings: result.warnings ?? [] };
+          const lines = result.gcode.split('\n');
+          const toolChangeAt = lines.findIndex((l) => /^T\d+\s*M0?6\b/.test(l));
+          return {
+            ok: true,
+            optionsFrom: fromDialog ? 'the Relief Carve dialog' : 'the scene and bench defaults (the dialog has not planned a carve this session)',
+            summary: {
+              stockMm: { width: options.stockWidthMm, depth: options.stockDepthMm, thickness: options.stockThicknessMm },
+              material: options.material,
+              carveDepthMm: options.carveDepthMm,
+              reliefDepthMm: result.reliefDepthMm,
+              roughing: options.roughingEnabled
+                ? {
+                    tool: describeCutter(options.roughingToolDiaMm, 'flat', options.roughingFlutes, options.roughingGeometry),
+                    strategy: options.roughingStrategy,
+                    layers: result.roughingPassCount,
+                    bitePercent: result.roughingBitePercent,
+                    estimatedSeconds: result.roughingTimeSeconds,
+                  }
+                : null,
+              finishing: options.finishingEnabled
+                ? {
+                    tool: describeCutter(options.finishingToolDiaMm, options.finishingToolType, options.finishingFlutes, options.finishingGeometry, options.finishingVBitAngleDeg),
+                    strategy: options.finishingStrategy,
+                    passes: result.finishingRasterLines,
+                  }
+                : null,
+              spindleRpm: options.spindleRpm,
+              estimatedTimeSeconds: result.estimatedTimeSeconds,
+              totalCutDistanceMm: result.totalCutDistanceMm,
+              lines: lines.length,
+              // 1-based, as an editor or a sender's line counter shows it.
+              toolChangeLine: result.toolChange && toolChangeAt >= 0 ? toolChangeAt + 1 : null,
+            },
+            warnings: result.warnings ?? [],
+            files: describeFiles(
+              [{ name: 'relief-carve.nc', bytes: new TextEncoder().encode(result.gcode) }],
+              msg.includeFiles !== false,
+            ),
+          };
         }
 
         case 'EXPORT_MACHINING': {
