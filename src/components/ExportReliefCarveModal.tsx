@@ -520,6 +520,14 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                   Est. Time: {formatDuration(result.estimatedTimeSeconds)}
                   ({(result.totalCutDistanceMm / 1000).toFixed(1)} m cut)
                 </span>
+                {result.roughingTimeSeconds > 0 && (
+                  // The split, because a roughing pass that leaves the work to
+                  // the finishing tool shows up here before it shows at the machine.
+                  <span title="How the time divides between the roughing and finishing passes">
+                    Roughing {formatDuration(result.roughingTimeSeconds)}, finishing{' '}
+                    {formatDuration(Math.max(0, result.estimatedTimeSeconds - result.roughingTimeSeconds))}
+                  </span>
+                )}
                 {result.toolChange && (
                   <span className="text-amber-600 dark:text-amber-400 font-medium">
                     Pauses for a tool change between passes

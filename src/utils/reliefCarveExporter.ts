@@ -420,6 +420,11 @@ export interface ReliefCarveResult {
   totalCutDistanceMm: number;
   /** Cutting time plus rapids and plunges, in seconds. */
   estimatedTimeSeconds: number;
+  /**
+   * How much of that is the roughing pass. Said separately because the split is
+   * the first sign of a roughing pass that is leaving the work to the finisher.
+   */
+  roughingTimeSeconds: number;
   roughingPassCount: number;
   /** The radial bite roughing actually took, as a percentage of its cutter. */
   roughingBitePercent: number;
@@ -1410,6 +1415,11 @@ export interface SurfaceMachiningResult {
   totalCutDistanceMm: number;
   /** Cutting time plus rapids and plunges, in seconds. */
   estimatedTimeSeconds: number;
+  /**
+   * How much of that is the roughing pass. Said separately because the split is
+   * the first sign of a roughing pass that is leaving the work to the finisher.
+   */
+  roughingTimeSeconds: number;
   roughingPassCount: number;
   /** The radial bite roughing actually took, as a percentage of its cutter. */
   roughingBitePercent: number;
@@ -1451,6 +1461,7 @@ export function machineSurface(
     gcode: '',
     totalCutDistanceMm: 0,
     estimatedTimeSeconds: 0,
+    roughingTimeSeconds: 0,
     roughingPassCount: 0,
     finishingRasterLines: 0,
     toolChange: false,
@@ -2059,13 +2070,12 @@ export function machineSurface(
       ? stepdownForEngagement(opts.roughingToolDiaMm, engagement, baseStepdown)
       : baseStepdown;
 
-    // The lowest roughing can leave anything: its own reachable surface plus
-    // the allowance, never deeper than the floor it is allowed to reach and
-    // never above the stock's top face. It is NOT what roughing leaves — a
-    // cell is only cleared to the layer plane above its surface, and ground
-    // shallower than the first layer is not touched at all — so it is used
-    // only as the finishing pass's expected entry height, which `leadIn` raises
-    // to whatever the stock model says is really standing.
+    // What roughing leaves: its own reachable surface plus the allowance,
+    // never deeper than the floor it is allowed to reach and never above the
+    // stock's top face. Each slab follows the surface down to its floor, so
+    // this is what stands once roughing is done, wherever the flat mill fits.
+    // Where it does not, `leadIn` raises the finishing entry to whatever the
+    // stock model says is really standing.
     materialLevelAt = (x, y) =>
       Math.min(0, Math.max(roughFloor, sampleHeightmap(roughMap, x, y) + allowance));
 
@@ -2085,32 +2095,13 @@ export function machineSurface(
     for (let z = -layerStep; z > roughFloor + 1e-6; z -= layerStep) layers.push(z);
     if (roughFloor < -1e-6) layers.push(roughFloor);
     /*
-     * And a layer at every flat the part has.
-     *
-     * Layer planes a stepdown apart land wherever they land, so a flat face
-     * between two of them was left standing up to a whole layer proud: on a
-     * soap dish roughed in aluminium, the underside face and the pocket floor
-     * each came out about a millimetre high. With roughing alone that is the
-     * finished part, which was promised flat tops and floors; with finishing,
-     * it is a full layer for the finisher to take off where it expects the
-     * allowance. A level that a patch of the target surface at least a cutter
-     * wide sits on exactly gets a layer of its own.
-     *
-     * Only for what the next regular layer will not reach: the ground deeper
-     * than that is cleared by the layers below anyway, and taking a full
-     * layer of rings over all of it to shave a flat would cost a layer's
-     * time for nothing.
+     * No separate layer for a flat any more. Layer planes land wherever they
+     * land, and a flat face between two of them used to be left up to a whole
+     * layer proud, so each flat got a layer of its own. Each slab now follows
+     * the surface down to its floor, which puts a flat between two planes at
+     * exactly its own height on the slab that passes through it.
      */
-    const flatOnly: { z: number; above: number }[] = [];
-    for (const level of flatLevels(roughMap, allowance, opts.roughingToolDiaMm)) {
-      if (level >= -1e-6 || level <= roughFloor + 1e-6) continue;
-      // Only a layer exactly on it will do: one a hair below it leaves the
-      // flat out of its region entirely.
-      if (layers.some((z) => Math.abs(z - level) < 1e-3)) continue;
-      const next = layers.find((z) => z < level) ?? -Infinity;
-      flatOnly.push({ z: level, above: next });
-    }
-    roughingPassCount = layers.length + flatOnly.length;
+    roughingPassCount = layers.length;
 
     if (layers.length > 0) {
       gcode.push('; --- OP 1: roughing ---------------------------------------------');
@@ -2136,6 +2127,20 @@ export function machineSurface(
     const xs = axisSamples(bounds.minX + roughRad, bounds.maxX - roughRad, res);
     const ys = axisSamples(bounds.minY + roughRad, bounds.maxY - roughRad, roughStepover);
 
+    /** The lowest the roughing tool's tip may go at a point: its surface plus the allowance. */
+    const roughTargetAt = (x: number, y: number) =>
+      Math.max(roughFloor, sampleHeightmap(roughMap, x, y) + allowance);
+    /**
+     * Where a slab's cut runs at a point: down to the slab's floor, or to the
+     * surface where that stands higher. `roughMap` is the flat cutter's own
+     * offset surface, so following it cannot gouge. Never above the slab's
+     * top: a contour runs a fraction of a cell outside the region it bounds,
+     * where the surface can stand higher than the slab, and on the first slab
+     * that is above the stock.
+     */
+    const slabZ = (x: number, y: number, floorZ: number, topZ: number) =>
+      Math.min(topZ, Math.max(floorZ, roughTargetAt(x, y)));
+
     /**
      * Where the tool's centre may sit at a given layer, as a grid.
      *
@@ -2145,7 +2150,7 @@ export function machineSurface(
      * a relief that fills its stock is exactly the case where that would throw
      * the outermost ring of every layer away.
      */
-    const layerRegion = (layerZ: number, onlyAbove = -Infinity): ClearingRegion => {
+    const layerRegion = (layerTop: number): ClearingRegion => {
       const gxs = axisSamples(bounds.minX + roughRad, bounds.maxX - roughRad, res);
       const gys = axisSamples(bounds.minY + roughRad, bounds.maxY - roughRad, res);
       const cols = gxs.length + 2;
@@ -2154,13 +2159,14 @@ export function machineSurface(
 
       for (let j = 0; j < gys.length; j++) {
         for (let i = 0; i < gxs.length; i++) {
-          const target = sampleHeightmap(roughMap, gxs[i], gys[j]) + allowance;
-          // At or below the layer, not strictly below it. The last layer sits
-          // exactly at the floor, so every cell there has a target *equal* to
-          // it: a strict test left that layer empty, and with no finishing
-          // pass to follow, the channel round a solid part stopped a whole
-          // layer short of breaking through.
-          if (target <= layerZ + 1e-6 && target > onlyAbove + 1e-6) mask[(j + 1) * cols + (i + 1)] = 1;
+          const target = roughTargetAt(gxs[i], gys[j]);
+          // Anywhere this slab has material to give, not only where the
+          // finished surface lies below the slab's floor. That rule left every
+          // cell shallower than the first layer untouched - most of a relief -
+          // and a whole layer of terrace standing between every two, all of it
+          // for the finishing tool. The path follows the surface down to the
+          // floor instead (see `slabZ`).
+          if (target < layerTop - 1e-6) mask[(j + 1) * cols + (i + 1)] = 1;
         }
       }
 
@@ -2197,12 +2203,76 @@ export function machineSurface(
     const safeY = (y: number) =>
       Math.min(Math.max(y, bounds.minY + roughRad), bounds.maxY - roughRad);
 
-    /** One layer cleared by walking the region's contours inward. */
-    const emitAdaptiveLayer = (layerZ: number, layerTop: number, onlyAbove = -Infinity) => {
-      const thickness = layerTop - layerZ;
-      const rings = clearingRings(layerRegion(layerZ, onlyAbove), roughStepover, opts.roughingToolDiaMm);
+    /** Whether a point lies inside a closed loop (even-odd). */
+    const insideLoop = (pt: { x: number; y: number }, loop: { x: number; y: number }[]) => {
+      let inside = false;
+      for (let i = 0, j = loop.length - 1; i < loop.length; j = i++) {
+        const a = loop[i];
+        const b = loop[j];
+        if ((a.y > pt.y) !== (b.y > pt.y) && pt.x < ((b.x - a.x) * (pt.y - a.y)) / (b.y - a.y) + a.x) {
+          inside = !inside;
+        }
+      }
+      return inside;
+    };
 
+    /** A closed loop turned to start at the vertex nearest a point. */
+    const startNearest = <T extends { x: number; y: number }>(loop: T[], x: number, y: number): T[] => {
+      let best = 0;
+      let bestD = Infinity;
+      for (let i = 0; i < loop.length; i++) {
+        const d = (loop[i].x - x) ** 2 + (loop[i].y - y) ** 2;
+        if (d < bestD) { bestD = d; best = i; }
+      }
+      return best === 0 ? loop : [...loop.slice(best), ...loop.slice(0, best)];
+    };
+
+    /** Squared distance from a point to a loop's nearest vertex. */
+    const loopDistance = (loop: { x: number; y: number }[], x: number, y: number) => {
+      let best = Infinity;
+      for (const p of loop) best = Math.min(best, (p.x - x) ** 2 + (p.y - y) ** 2);
+      return best;
+    };
+
+    /**
+     * One slab cleared by walking each pocket's contours inward.
+     *
+     * Pocket by pocket, nearest first. The rings used to go out ring-major across
+     * the whole stock - the outermost ring of every pocket, then the next ring of
+     * every pocket - in the order marching squares happened to find them, which
+     * is row by row. On a relief with a dozen separate deep spots that is a rapid
+     * across the work between every ring of every one of them. Now each ring is
+     * hung under the ring outside it that contains it, every pocket is taken
+     * from its outer ring to its last before the tool leaves it, and the next
+     * pocket is whichever is closest to where the tool stands.
+     */
+    const emitAdaptiveLayer = (layerZ: number, layerTop: number) => {
+      const thickness = layerTop - layerZ;
+      const rings = clearingRings(layerRegion(layerTop), roughStepover, opts.roughingToolDiaMm);
+
+      interface RingLoop {
+        loop: { x: number; y: number }[];
+        ring: (typeof rings)[number];
+        children: RingLoop[];
+      }
+      const roots: RingLoop[] = [];
+      let previous: RingLoop[] = [];
       for (const ring of rings) {
+        const current: RingLoop[] = [];
+        for (const loop of ring.loops) {
+          if (loop.length < 2) continue;
+          const node: RingLoop = { loop, ring, children: [] };
+          // A ring inset from its region's boundary always lies inside the ring
+          // before it; one that does not is a pocket of its own.
+          const parent = previous.find((p) => insideLoop(loop[0], p.loop));
+          (parent ? parent.children : roots).push(node);
+          current.push(node);
+        }
+        previous = current;
+      }
+
+      const emitLoop = (node: RingLoop) => {
+        const { ring } = node;
         // The first ring of a slab is a slot however it is approached — nothing
         // has opened the material either side of it yet — so it is fed for the
         // chip it is actually taking rather than the one the stepover implies.
@@ -2234,65 +2304,79 @@ export function machineSurface(
         );
         const bites = Math.max(1, Math.ceil((thickness - 1e-6) / ringStep));
 
-        for (const loop of ring.loops) {
-          if (loop.length < 2) continue;
+        // Marching squares puts a vertex on every grid cell the contour
+        // crosses, so a ring round a 200 mm region arrives as a couple of
+        // thousand moves of a third of a millimetre each. GRBL swallows a few
+        // hundred lines a second, and a job that streams slower than it cuts
+        // stalls the spindle in the cut — the same reason the finishing
+        // raster is thinned, and far more pressing here, since a roughing
+        // ring is mostly long gentle curves that a handful of points describe
+        // to well inside the machine's own resolution.
+        //
+        // Each point sits on the surface where that stands above the slab's
+        // floor, so the simplifier holds the height as well as the plan shape.
+        const loop = startNearest(node.loop, atX, atY);
+        const onSurface = loop.map((p) => {
+          const x = safeX(p.x);
+          const y = safeY(p.y);
+          return { x, y, z: slabZ(x, y, layerZ, layerTop) };
+        });
+        const plan = simplifyPass([...onSurface, onSurface[0]], roughSimplifyMm(allowance));
+        if (plan.length < 2) return;
 
-          // Marching squares puts a vertex on every grid cell the contour
-          // crosses, so a ring round a 200 mm region arrives as a couple of
-          // thousand moves of a third of a millimetre each. GRBL swallows a few
-          // hundred lines a second, and a job that streams slower than it cuts
-          // stalls the spindle in the cut — the same reason the finishing
-          // raster is thinned, and far more pressing here, since a roughing
-          // ring is mostly long gentle curves that a handful of points describe
-          // to well inside the machine's own resolution.
-          const plan = simplifyPass(
-            loop.map((p) => ({ x: safeX(p.x), y: safeY(p.y), z: layerZ })),
-            roughSimplifyMm(allowance)
-          );
-          if (plan.length < 2) continue;
+        for (let bite = 1; bite <= bites; bite++) {
+          const biteFloor = bite === bites ? layerZ : layerTop - (thickness * bite) / bites;
+          const above = layerTop - (thickness * (bite - 1)) / bites;
+          const path = plan.map((p) => ({ ...p, z: Math.max(biteFloor, p.z) }));
 
-          for (let bite = 1; bite <= bites; bite++) {
-            const z = bite === bites ? layerZ : layerTop - (thickness * bite) / bites;
-            const above = layerTop - (thickness * (bite - 1)) / bites;
-            const path = plan.map((p) => ({ ...p, z }));
+          // Ramp in along the ring rather than plunging: the centre of an end
+          // mill cuts at zero surface speed, and a deep layer pulls hard on it.
+          leadIn(path, above, opts.roughingPlungeRate, feed);
 
-            // Ramp in along the ring rather than plunging: the centre of an end
-            // mill cuts at zero surface speed, and a deep layer pulls hard on it.
-            leadIn(path, above, opts.roughingPlungeRate, feed);
-
-            for (let i = 1; i < path.length; i++) {
-              cutTo(path[i].x, path[i].y, z);
-              gcode.push(`G1 X${f(path[i].x)} Y${f(path[i].y)} F${Math.round(feed)}`);
-            }
-            // Closed: back to where it started, so the ring leaves nothing behind.
-            cutTo(path[0].x, path[0].y, z);
-            gcode.push(`G1 X${f(path[0].x)} Y${f(path[0].y)} F${Math.round(feed)}`);
-
-            // No retract here: the next `leadIn` lifts only as far as it needs
-            // to clear what stands between this ring and the one inside it, and
-            // the final retract at the end of the program covers the last one.
-            segments.push({ type: 'roughing', points: path, traverseZ: lastTraverseZ });
+          let lastZ = path[0].z;
+          for (let i = 1; i < path.length; i++) {
+            cutTo(path[i].x, path[i].y, path[i].z);
+            const z = Math.abs(path[i].z - lastZ) > 1e-6 ? ` Z${f(path[i].z)}` : '';
+            lastZ = path[i].z;
+            gcode.push(`G1 X${f(path[i].x)} Y${f(path[i].y)}${z} F${Math.round(feed)}`);
           }
+
+          // No retract here: the next `leadIn` lifts only as far as it needs
+          // to clear what stands between this ring and the one inside it, and
+          // the final retract at the end of the program covers the last one.
+          segments.push({ type: 'roughing', points: path, traverseZ: lastTraverseZ });
         }
+      };
+
+      // Depth first through each pocket, the nearest unvisited one next.
+      const emitPocket = (node: RingLoop) => {
+        emitLoop(node);
+        const pending = [...node.children];
+        while (pending.length > 0) {
+          let best = 0;
+          for (let i = 1; i < pending.length; i++) {
+            if (loopDistance(pending[i].loop, atX, atY) < loopDistance(pending[best].loop, atX, atY)) best = i;
+          }
+          emitPocket(pending.splice(best, 1)[0]);
+        }
+      };
+      const pockets = [...roots];
+      while (pockets.length > 0) {
+        let best = 0;
+        for (let i = 1; i < pockets.length; i++) {
+          if (loopDistance(pockets[i].loop, atX, atY) < loopDistance(pockets[best].loop, atX, atY)) best = i;
+        }
+        emitPocket(pockets.splice(best, 1)[0]);
       }
     };
 
-    // Regular layers and flats' layers, top down. A regular layer drops from
-    // the regular layer before it, as it always has; a flat's layer drops from
-    // whatever was last cut above it, and only clears what the next regular
-    // layer will not.
-    const plan = [
-      ...layers.map((z) => ({ z, above: -Infinity, flat: false })),
-      ...flatOnly.map((f) => ({ ...f, flat: true })),
-    ].sort((a, b) => b.z - a.z);
+    // Regular layers, top down, each one a slab from the layer above.
     let layerTop = 0;
-    let lastCut = 0;
-    for (const { z: layerZ, above: onlyAbove, flat } of plan) {
-      const top = flat ? lastCut : layerTop;
-      lastCut = layerZ;
-      if (!flat) layerTop = layerZ;
+    for (const layerZ of layers) {
+      const top = layerTop;
+      layerTop = layerZ;
       if (adaptive) {
-        emitAdaptiveLayer(layerZ, top, onlyAbove);
+        emitAdaptiveLayer(layerZ, top);
         continue;
       }
 
@@ -2302,35 +2386,34 @@ export function machineSurface(
         const lineXs = forward ? xs : [...xs].reverse();
         forward = !forward;
 
-        // A run is the stretch of this line where there is still material below
-        // the layer height and the tool can reach it without gouging.
+        // A run is the stretch of this line where the slab has material to
+        // give, cut down to the slab's floor or to the surface, whichever is
+        // higher. See `layerRegion`.
         let run: PathPoint[] = [];
         const flushRun = () => {
           if (run.length >= 2) {
-            const last = run[run.length - 1];
+            const plan = simplifyPass(run, roughSimplifyMm(allowance));
             // The layer above is what the tool is dropping through, so that is
             // where the ramp starts — one layer, not the whole depth so far.
-            const above = top;
-            leadIn([run[0], last], above, opts.roughingPlungeRate, opts.roughingFeedrate);
+            leadIn(plan, top, opts.roughingPlungeRate, opts.roughingFeedrate);
 
-            cutTo(last.x, last.y, layerZ);
-            gcode.push(`G1 X${f(last.x)} Y${f(last.y)} F${Math.round(opts.roughingFeedrate)}`);
+            let lastZ = plan[0].z;
+            for (let i = 1; i < plan.length; i++) {
+              cutTo(plan[i].x, plan[i].y, plan[i].z);
+              const z = Math.abs(plan[i].z - lastZ) > 1e-6 ? ` Z${f(plan[i].z)}` : '';
+              lastZ = plan[i].z;
+              gcode.push(`G1 X${f(plan[i].x)} Y${f(plan[i].y)}${z} F${Math.round(opts.roughingFeedrate)}`);
+            }
 
             // One segment per run: the preview must not draw a line across the
             // gap the tool actually flew over.
-            segments.push({
-              type: 'roughing',
-              points: [run[0], run[run.length - 1]],
-              traverseZ: lastTraverseZ,
-            });
+            segments.push({ type: 'roughing', points: plan, traverseZ: lastTraverseZ });
           }
           run = [];
         };
 
         for (const x of lineXs) {
-          const target = sampleHeightmap(roughMap, x, y) + allowance;
-          // At or below the layer: see `layerRegion`.
-          if (target <= layerZ + 1e-6 && target > onlyAbove + 1e-6) run.push({ x, y, z: layerZ });
+          if (roughTargetAt(x, y) < top - 1e-6) run.push({ x, y, z: slabZ(x, y, layerZ, top) });
           else flushRun();
         }
         flushRun();
@@ -2606,6 +2689,9 @@ export function machineSurface(
   if (opts.applyMeshLeveling && opts.meshLevelGrid) {
     text = warpGcode(text, opts.meshLevelGrid);
   }
+  // Where the finishing pass starts, after any levelling warp, so the
+  // roughing share is timed off the same program the machine will run.
+  const finishingStart = text.indexOf('; --- OP 2: finishing');
 
   // Preview only needs the shape of the path, and a raster has far more points
   // than a viewport can usefully draw.
@@ -2633,6 +2719,9 @@ export function machineSurface(
     // ramps, the retracts and the mesh-levelling subdivision that the running
     // totals never saw at all.
     estimatedTimeSeconds: estimateGcodeTime(text, { profile: opts.motionProfile }).seconds,
+    roughingTimeSeconds: roughingPassCount > 0
+      ? estimateGcodeTime(text.slice(0, finishingStart >= 0 ? finishingStart : text.length), { profile: opts.motionProfile }).seconds
+      : 0,
     roughingPassCount,
     roughingBitePercent,
     finishingRasterLines,
@@ -2866,6 +2955,7 @@ export function generateReliefCarveGcode(
     gcode: '',
     totalCutDistanceMm: 0,
     estimatedTimeSeconds: 0,
+    roughingTimeSeconds: 0,
     roughingPassCount: 0,
     roughingBitePercent: 0,
     finishingRasterLines: 0,
@@ -3117,6 +3207,7 @@ export function generateReliefCarveGcode(
     gcode: cut.gcode,
     totalCutDistanceMm: cut.totalCutDistanceMm,
     estimatedTimeSeconds: cut.estimatedTimeSeconds,
+    roughingTimeSeconds: cut.roughingTimeSeconds,
     roughingPassCount: cut.roughingPassCount,
     roughingBitePercent: cut.roughingBitePercent,
     finishingRasterLines: cut.finishingRasterLines,

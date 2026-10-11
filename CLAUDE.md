@@ -74,6 +74,15 @@ the model entirely (it draws from the body transform), while a **static** one mu
 contact zeroed — drop it and `geomId` is -1, the renderer falls back to identity, and the body jumps
 to the origin. See GUIDE.md § Concave collision.
 
+**A safe toolpath can still waste the afternoon.** The carve tests mostly check safety: no rapid
+through stock, no gouge, no dive. Twice a roughing pass passed all of them and went to the machine
+while leaving most of the material to the small finishing bit, and hopping across the stock between
+pockets. `tests/reliefPathEfficiency.test.ts` measures what roughing leaves, what share of the
+material it removes, and how far it flies between cuts, against figures taken on the old and new
+paths. Any change to roughing or finishing order in `reliefCarveExporter.ts` (which also drives
+solid machining through `machineSurface()`) has to keep it green. Don't loosen a bound without
+a measurement.
+
 **`rgba`'s alpha hides nothing from the physics.** Alpha below 1 draws a geom translucent
 (`SceneLayer.tsx`, depthWrite off), and 0 draws nothing, but the geom still collides and has mass.
 To get rid of something, delete it.
