@@ -1,5 +1,5 @@
 import React from 'react';
-import { AlertCircle, Play, Pause, Square, Hand, ChevronsDown, Gauge, RotateCcw } from 'lucide-react';
+import { AlertCircle, Play, Pause, Square, Hand, ChevronsDown, Gauge, RotateCcw, Cpu } from 'lucide-react';
 import { webSerialManager, type MachineState, type OverrideStep } from '../utils/webSerialManager';
 import { checkJobEnvelope, type JobExtent } from '../utils/workEnvelope';
 import { formatDuration } from '../utils/timeEstimate';
@@ -7,6 +7,7 @@ import { NumberInput } from '@physbox-io/ui';
 import { ProbeCircuitStatus } from './ProbeCircuitStatus';
 import { CheckpointBadge } from './CheckpointBadge';
 import { JogPad } from './JogPad';
+import { useStore } from '../store/useStore';
 
 /**
  * Running a job from the browser: stop it, pick it up again, and deal with what
@@ -20,6 +21,39 @@ import { JogPad } from './JogPad';
  * running for two hours means the piece is scrap, because a soft reset loses the
  * position and the carve cannot be re-registered.
  */
+
+/**
+ * The way into Machine Setup from a banner that has just told somebody to
+ * unlock, home or zero: that is where all three live, and a banner that names
+ * them without a way there leaves the operator hunting for it.
+ */
+const OpenSetupButton: React.FC<{ onOpen?: () => void }> = ({ onOpen }) => {
+  const setMachineConfigOpen = useStore((s) => s.setMachineConfigOpen);
+  return (
+    <button
+      onClick={() => {
+        onOpen?.();
+        setMachineConfigOpen(true);
+      }}
+      title="Connect, unlock, home and zero the machine"
+      className="mr-auto px-3 py-1.5 bg-blue-500 hover:bg-blue-600 text-slate-950 text-xs font-bold rounded-lg flex items-center gap-1.5 cursor-pointer"
+    >
+      <Cpu className="w-3.5 h-3.5" />
+      <span>Machine Setup</span>
+    </button>
+  );
+};
+
+/** Starting a new job throws the resume offer away; this says so first. */
+function confirmDiscardResume(machineState: MachineState): boolean {
+  const resume = machineState.resume;
+  if (!resume) return true;
+  const which = resume.jobName ? `the ${resume.jobName} job` : 'the stopped job';
+  return window.confirm(
+    `Starting from the beginning discards the offer to resume ${which} at line ` +
+      `${resume.fromLine.toLocaleString()}. Start over anyway?`
+  );
+}
 
 /**
  * What the machine stopped for, and what has to happen before it carries on.
@@ -129,6 +163,7 @@ export const JobPauseBanner: React.FC<{
       />
 
       <div className="flex flex-wrap items-center justify-end gap-2 pt-2 border-t border-amber-500/30">
+        <OpenSetupButton />
         {toolChange && showZTools && (
           <>
             <button
@@ -201,7 +236,12 @@ export const JobResumeBanner: React.FC<{
   machineState: MachineState;
   /** A laser has no Z to descend to, so it gets none of the depth talk. */
   showZTools?: boolean;
-}> = ({ machineState, showZTools = true }) => {
+  /**
+   * Runs before Machine Setup opens. The restore dialog sits above Setup, so it
+   * steps aside first; the offer itself stays live in the export modals.
+   */
+  onOpenSetup?: () => void;
+}> = ({ machineState, showZTools = true, onOpenSetup }) => {
   const resume = machineState.resume;
   const [line, setLine] = React.useState<number | null>(null);
   const [error, setError] = React.useState<string | null>(null);
@@ -210,13 +250,23 @@ export const JobResumeBanner: React.FC<{
   const target = line ?? resume?.fromLine ?? 0;
   const preview = React.useMemo(
     () => (resume ? webSerialManager.previewResume(target) : null),
-    [resume, target]
+    // needsZZero too: the manager reads it, and once Z is zeroed a resume at a
+    // tool change steps past the M6, which changes the plan.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [resume, target, machineState.needsZZero]
   );
 
   if (!resume || running) return null;
 
+  const pending = resume.pendingPause;
+  const atToolChange = pending?.kind === 'tool-change';
   const why =
-    resume.reason === 'alarm'
+    pending && resume.reason === 'alarm'
+      // It had already stopped, on purpose, and the alarm came after: a stop
+      // that otherwise reads as random, and a re-zero demand that reads as
+      // arbitrary, until it says what the job was waiting for.
+      ? `It had stopped for ${atToolChange ? 'a tool change' : 'a programmed stop'}, with everything before it cut, when the controller alarmed (a limit switch while lifting clear).`
+      : resume.reason === 'alarm'
       ? 'The controller alarmed (a limit switch, or a reset part way through).'
       : resume.reason === 'disconnected'
         ? 'The connection to the machine dropped.'
@@ -260,7 +310,24 @@ export const JobResumeBanner: React.FC<{
         </p>
       )}
 
-      {showZTools && (
+      {pending && (
+        <p className="text-xs leading-relaxed font-semibold">{pending.message}</p>
+      )}
+
+      {showZTools && atToolChange && (
+        <p className="text-[11px] leading-relaxed">
+          Unlock the machine and jog Z down off the switch, fit the new bit, and zero Z on the same
+          surface as before. X and Y did not move, so they need nothing. Resuming carries on with the
+          new tool from the tool change; it does not stop for it a second time.
+          {depth !== null && depth !== undefined ? (
+            <> Resuming will move over the stopping point and descend to <strong>Z{depth.toFixed(2)} mm</strong>.</>
+          ) : (
+            <> Resuming lifts to the job's clear height and carries on from there.</>
+          )}
+        </p>
+      )}
+
+      {showZTools && !atToolChange && (
         <p className="text-[11px] leading-relaxed">
           Before resuming: clear the tool from the work by hand, and re-home the machine if it
           alarmed. If the bit was changed, its length is different and the Z zero is now wrong.
@@ -284,6 +351,7 @@ export const JobResumeBanner: React.FC<{
       )}
 
       <div className="flex flex-wrap items-center justify-end gap-2 pt-2 border-t border-sky-500/30">
+        <OpenSetupButton onOpen={onOpenSetup} />
         <label className="flex items-center gap-1.5 text-[11px] font-semibold mr-auto">
           <span>Resume from line</span>
           <NumberInput
@@ -362,6 +430,46 @@ export const JobTransport: React.FC<{
 
   if (!running && !paused) {
     const blockedByZZero = requiresZZero && machineState.needsZZero;
+    const resume = machineState.resume;
+    const startOver = () => {
+      if (confirmDiscardResume(machineState)) onStart();
+    };
+
+    // A stopped job stays the thing on offer until it is resumed or let go:
+    // closing the modal and coming back must not turn its button into a Start
+    // that silently throws the resume point away.
+    if (resume) {
+      return (
+        <div className={variant === 'footer' ? 'flex items-center gap-2' : 'flex items-center gap-2 w-full'}>
+          <button
+            onClick={startOver}
+            disabled={!canStart || blockedByZZero}
+            title="Run the whole program again from the first line. Asks first, because it discards the resume point."
+            className={`${base} bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed text-slate-700 dark:text-slate-200`}
+          >
+            <RotateCcw className={icon} />
+            <span>Start Over</span>
+          </button>
+          <button
+            onClick={() => {
+              const res = webSerialManager.resumeFromLine(resume.fromLine);
+              if (!res.ok) window.alert(res.message);
+            }}
+            disabled={blockedByZZero}
+            title={
+              blockedByZZero
+                ? 'Set Z zero for the tool that is in the spindle now'
+                : `Carry on${resume.jobName ? ` with ${resume.jobName}` : ''} from line ${resume.fromLine.toLocaleString()}`
+            }
+            className={`${base} bg-sky-500 hover:bg-sky-600 disabled:opacity-40 disabled:cursor-not-allowed text-slate-950`}
+          >
+            <Play className={`${icon} fill-current`} />
+            <span>Resume from line {resume.fromLine.toLocaleString()}</span>
+          </button>
+        </div>
+      );
+    }
+
     return (
       <button
         onClick={onStart}

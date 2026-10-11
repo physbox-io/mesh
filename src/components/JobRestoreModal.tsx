@@ -152,7 +152,7 @@ export const JobRestoreModal: React.FC = () => {
             </ul>
           </div>
 
-          <JobResumeBanner machineState={machineState} />
+          <JobResumeBanner machineState={machineState} onOpenSetup={later} />
 
           <div className="flex justify-end gap-2 pt-1">
             <button
