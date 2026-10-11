@@ -7,7 +7,7 @@
 import { describe, it, expect } from 'vitest';
 import { latticeBracketPreset } from '../src/presets/latticeBracket';
 import { generateSolidMachining } from '../src/utils/solidMachiningExporter';
-import { cutStock, type MoveCut } from './helpers/cutStock';
+import { cutStock, cutStockMap, type MoveCut } from './helpers/cutStock';
 
 /** Every G0 in a program that took material off. */
 function rapidsThroughStock(
@@ -73,6 +73,44 @@ describe('no rapid moves through the stock', () => {
       }
     });
   }
+});
+
+describe('the finishing pass does not cut into the walls it crosses', () => {
+  // The raster samples the cutter-offset surface a resolution step apart and
+  // the machine draws straight lines between the samples. Across a vertical
+  // wall that line was a chamfer into the top of the wall: up to 0.65 mm into
+  // a pocket's rim on the soap dish this was found on.
+  it('leaves the top of the rim round the recess at its full height', () => {
+    const r = generateSolidMachining(dishScene(), {
+      sides: 2, roughingToolDiaMm: 3, finishingToolDiaMm: 3, finishingToolType: 'flat', material: 'aluminium',
+    });
+    expect(r.success, r.error).toBe(true);
+    const a = r.sides.find((s) => s.side === 'A')!;
+    const cut = cutStockMap(a.gcode, r.stock.widthMm, r.stock.depthMm, 1.5);
+
+    // Two-sided, the part is centred in the block with its top a skin below
+    // the face: the rim's top is at -skin, the recess floor 3 mm under it.
+    const skin = (r.stock.thicknessMm - r.partSizeMm.z) / 2;
+    const cx = r.stock.widthMm / 2, cy = r.stock.depthMm / 2;
+    // The north and south rims run 14..20 mm either side of the centre line,
+    // the east and west ones 24..30 mm. The exporter only knows where a wall
+    // is to within one sample of its heightmap (0.6 mm here), so the check
+    // stays a millimetre clear of every edge: what it is after is a cut into
+    // the top of the rim, not where exactly its sides land.
+    let worst = 0;
+    for (let x = cx - 29; x <= cx + 29; x += 0.25) {
+      for (const dy of [15, 16, 17, 18, 19]) {
+        worst = Math.max(worst, -skin - cut.at(x, cy + dy), -skin - cut.at(x, cy - dy));
+      }
+    }
+    for (let y = cy - 13; y <= cy + 13; y += 0.25) {
+      for (const dx of [25, 26, 27, 28, 29]) {
+        worst = Math.max(worst, -skin - cut.at(cx + dx, y), -skin - cut.at(cx - dx, y));
+      }
+    }
+    // How far below the rim's top any of it was cut.
+    expect(worst).toBeLessThan(0.05);
+  });
 });
 
 /**

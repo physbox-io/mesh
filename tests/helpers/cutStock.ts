@@ -34,6 +34,29 @@ export function cutStock(
   radius: number,
   finishing: 'flat' | 'ball' = 'flat'
 ): MoveCut[] {
+  return cutStockMap(gcode, width, depth, radius, finishing).cuts;
+}
+
+/** What the stock looks like afterwards: the height of each 0.25 mm cell. */
+export interface CutResult {
+  cuts: MoveCut[];
+  cell: number;
+  cols: number;
+  rows: number;
+  /** Row-major, row 0 at Y0; 0 is the stock's top face. */
+  heights: Float32Array;
+  /** Height at a point in work coordinates. */
+  at(x: number, y: number): number;
+}
+
+/** `cutStock`, also handing back the stock it leaves. */
+export function cutStockMap(
+  gcode: string,
+  width: number,
+  depth: number,
+  radius: number,
+  finishing: 'flat' | 'ball' = 'flat'
+): CutResult {
   const cell = 0.25;
   const cols = Math.ceil(width / cell);
   const rows = Math.ceil(depth / cell);
@@ -85,5 +108,8 @@ export function cutStock(
     }
     x = nx; y = ny; z = nz;
   }
-  return cuts;
+  return {
+    cuts, cell, cols, rows, heights: h,
+    at: (px, py) => h[Math.min(rows - 1, Math.floor(py / cell)) * cols + Math.min(cols - 1, Math.floor(px / cell))],
+  };
 }

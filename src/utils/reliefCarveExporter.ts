@@ -1228,6 +1228,41 @@ interface PathPoint {
  * islands it was going round. On a giraffe hide that put the finishing ball
  * nose up to 6 mm into the patches.
  */
+/** Steeper than this between two samples, a pass is taken to be crossing a wall. */
+const WALL_SLOPE = Math.tan((60 * Math.PI) / 180);
+
+/**
+ * Turns a pass's steep steps into square ones, high side first.
+ *
+ * A pass is a list of samples of the cutter-offset surface, a resolution step
+ * apart, and the machine draws a straight line between each pair. Across a
+ * vertical wall that line is a chamfer: the cutter starts down while its edge
+ * is still over the top of the wall, and cuts into it — up to 0.65 mm into a
+ * pocket's rim on the part this was found on, on every wall the raster
+ * crossed. Where the samples rise or fall more steeply than `WALL_SLOPE`, the
+ * cutter now stays at the higher of the two until it is over the lower one
+ * and goes straight down there, or goes straight up first and then across.
+ * Somewhere between the two samples is the wall, and that is the only side of
+ * it the cutter can be wrong on without cutting into the part: it leaves at
+ * most a sample step of material against the wall instead of gouging it.
+ */
+export function squareUpWalls(points: PathPoint[], maxSlope = WALL_SLOPE): PathPoint[] {
+  if (points.length < 2) return points;
+  const out: PathPoint[] = [points[0]];
+  for (let i = 1; i < points.length; i++) {
+    const p = points[i - 1];
+    const q = points[i];
+    const run = Math.hypot(q.x - p.x, q.y - p.y);
+    const rise = q.z - p.z;
+    if (run > 1e-9 && Math.abs(rise) > run * maxSlope) {
+      // Down: across at the top, then down. Up: up first, then across.
+      out.push(rise < 0 ? { x: q.x, y: q.y, z: p.z } : { x: p.x, y: p.y, z: q.z });
+    }
+    out.push(q);
+  }
+  return out;
+}
+
 function simplifyPass(points: PathPoint[], tolMm: number): PathPoint[] {
   if (points.length <= 2) return points;
 
@@ -1815,7 +1850,16 @@ export function machineSurface(
     let travelled = 0;
     for (let i = 1; i < path.length && travelled < rampLen; i++) {
       const seg = Math.hypot(path[i].x - path[i - 1].x, path[i].y - path[i - 1].y);
-      if (seg <= 1e-9) continue;
+      if (seg <= 1e-9) {
+        // A straight step up or down — the foot of a wall, from
+        // `squareUpWalls`. It has to stay in the walk: dropped, the return leg
+        // ran straight from the top of the wall to its foot, diagonally
+        // through whatever the step was there to go round.
+        if (Math.abs(path[i].z - path[i - 1].z) > 1e-9) {
+          walk.push({ x: path[i].x, y: path[i].y, pz: path[i].z, d: travelled });
+        }
+        continue;
+      }
       if (travelled + seg <= rampLen) {
         walk.push({ x: path[i].x, y: path[i].y, pz: path[i].z, d: travelled + seg });
       } else {
@@ -2388,7 +2432,7 @@ export function machineSurface(
       if (run.length > 0) runs.push(run);
 
       for (const r of runs) {
-        const pass = simplifyPass(r, PATH_SIMPLIFY_MM);
+        const pass = simplifyPass(squareUpWalls(r), PATH_SIMPLIFY_MM);
         if (pass.length < 2) continue;
         // A run shorter than the stepover lies inside what the passes either
         // side of it cut, and is too short to ramp into — so it was a plunge
@@ -2422,15 +2466,18 @@ export function machineSurface(
         const entryZ = Math.min(0, materialLevelAt(head.x, head.y), prevLimit);
         leadIn(pass, entryZ, opts.finishingPlungeRate, opts.finishingFeedrate);
 
-        // GRBL keeps the last feedrate, so it is only stated when it changes.
-        let first = true;
+        // GRBL keeps the last feedrate, so it is only stated when it changes:
+        // at the start, and either side of the straight drops `squareUpWalls`
+        // puts at the foot of a wall, which go down at the plunge rate.
+        let rate = 0;
         for (let i = 1; i < pass.length; i++) {
           const p = pass[i];
+          const prev = pass[i - 1];
+          const drop = p.z < prev.z - 1e-6 && Math.hypot(p.x - prev.x, p.y - prev.y) < 1e-6;
+          const want = drop ? opts.finishingPlungeRate : opts.finishingFeedrate;
           cutTo(p.x, p.y, p.z);
-          gcode.push(
-            `G1 X${f(p.x)} Y${f(p.y)} Z${f(p.z)}${first ? ` F${Math.round(opts.finishingFeedrate)}` : ''}`
-          );
-          first = false;
+          gcode.push(`G1 X${f(p.x)} Y${f(p.y)} Z${f(p.z)}${want !== rate ? ` F${Math.round(want)}` : ''}`);
+          rate = want;
         }
 
         segments.push({ type: 'finishing', points: pass, traverseZ: lastTraverseZ });
