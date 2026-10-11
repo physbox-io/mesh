@@ -432,22 +432,22 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
   // utils/geomSurface) once the worker has built it, and as authored until
   // then. The last one built stays up while the next is on its way, so editing
   // a pattern does not flash the bare face between every keystroke.
-  const [textured, setTextured] = useState<TexturedSurface | null>(null);
+  const [built, setBuilt] = useState<TexturedSurface | null>(null);
+  const hasTextures = !!geomEntry?.textures?.length;
   useEffect(() => {
-    if (!geomEntry?.textures?.length) {
-      setTextured(null);
-      return;
-    }
+    if (!geomEntry?.textures?.length) return;
     const halfLen = geomHalfLen(geomEntry);
-    const hit = cachedTexturedSurface(geomEntry, halfLen);
-    if (hit) {
-      setTextured(hit);
-      return;
-    }
+    if (cachedTexturedSurface(geomEntry, halfLen)) return;
     let live = true;
-    void requestTexturedSurface(geomEntry, halfLen).then((surface) => { if (live) setTextured(surface); });
+    void requestTexturedSurface(geomEntry, halfLen).then((surface) => { if (live) setBuilt(surface); });
     return () => { live = false; };
   }, [geomEntry]);
+  // The cache answers at once when it has this build; otherwise the last one
+  // the worker handed back is drawn until the new one lands.
+  const textured = useMemo(
+    () => (geomEntry && hasTextures ? cachedTexturedSurface(geomEntry, geomHalfLen(geomEntry)) ?? built : null),
+    [geomEntry, hasTextures, built],
+  );
   const patterned = textured && textured.regions.some((r) => r.applied) ? textured : null;
   // Paint is keyed to the authored mesh's vertices, which the patterned one
   // does not have.
