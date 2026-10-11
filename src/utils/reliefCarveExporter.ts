@@ -1228,6 +1228,40 @@ interface PathPoint {
  * islands it was going round. On a giraffe hide that put the finishing ball
  * nose up to 6 mm into the patches.
  */
+/**
+ * Heights the target surface is flat at over an area at least a cutter wide,
+ * highest first: the levels a roughing layer has to land on exactly for a
+ * flat face to come out flat. `offset` is added to every height (the roughing
+ * allowance). Read to the hundredth of a millimetre, which is finer than any
+ * layer and coarser than a flat face's float noise.
+ *
+ * A cell only counts when its four neighbours sit at its height too. Counting
+ * every cell that rounds to a level found hundreds of "flats" on a gently
+ * sloping dome — each ring of cells shares a rounded height — and a soap
+ * dish's roughing went from two and a half hours to twelve.
+ */
+export function flatLevels(map: Heightmap, offset: number, cutterDiaMm: number): number[] {
+  const cellArea = Math.max(1e-9, map.stepX * map.stepY);
+  const minCells = Math.max(4, Math.ceil((cutterDiaMm * cutterDiaMm) / cellArea));
+  const counts = new Map<number, number>();
+  const { cols, rows, z } = map;
+  for (let j = 1; j < rows - 1; j++) {
+    for (let i = 1; i < cols - 1; i++) {
+      const k = j * cols + i;
+      const v = z[k];
+      if (
+        Math.abs(z[k - 1] - v) > 5e-3 || Math.abs(z[k + 1] - v) > 5e-3 ||
+        Math.abs(z[k - cols] - v) > 5e-3 || Math.abs(z[k + cols] - v) > 5e-3
+      ) continue;
+      const key = Math.round((v + offset) * 100);
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+  }
+  const levels: number[] = [];
+  for (const [key, n] of counts) if (n >= minCells) levels.push(key / 100);
+  return levels.sort((a, b) => b - a);
+}
+
 /** Steeper than this between two samples, a pass is taken to be crossing a wall. */
 const WALL_SLOPE = Math.tan((60 * Math.PI) / 180);
 
@@ -2027,7 +2061,33 @@ export function machineSurface(
     const layers: number[] = [];
     for (let z = -layerStep; z > roughFloor + 1e-6; z -= layerStep) layers.push(z);
     if (roughFloor < -1e-6) layers.push(roughFloor);
-    roughingPassCount = layers.length;
+    /*
+     * And a layer at every flat the part has.
+     *
+     * Layer planes a stepdown apart land wherever they land, so a flat face
+     * between two of them was left standing up to a whole layer proud: on a
+     * soap dish roughed in aluminium, the underside face and the pocket floor
+     * each came out about a millimetre high. With roughing alone that is the
+     * finished part, which was promised flat tops and floors; with finishing,
+     * it is a full layer for the finisher to take off where it expects the
+     * allowance. A level that a patch of the target surface at least a cutter
+     * wide sits on exactly gets a layer of its own.
+     *
+     * Only for what the next regular layer will not reach: the ground deeper
+     * than that is cleared by the layers below anyway, and taking a full
+     * layer of rings over all of it to shave a flat would cost a layer's
+     * time for nothing.
+     */
+    const flatOnly: { z: number; above: number }[] = [];
+    for (const level of flatLevels(roughMap, allowance, opts.roughingToolDiaMm)) {
+      if (level >= -1e-6 || level <= roughFloor + 1e-6) continue;
+      // Only a layer exactly on it will do: one a hair below it leaves the
+      // flat out of its region entirely.
+      if (layers.some((z) => Math.abs(z - level) < 1e-3)) continue;
+      const next = layers.find((z) => z < level) ?? -Infinity;
+      flatOnly.push({ z: level, above: next });
+    }
+    roughingPassCount = layers.length + flatOnly.length;
 
     if (layers.length > 0) {
       gcode.push('; --- OP 1: roughing ---------------------------------------------');
@@ -2062,7 +2122,7 @@ export function machineSurface(
      * a relief that fills its stock is exactly the case where that would throw
      * the outermost ring of every layer away.
      */
-    const layerRegion = (layerZ: number): ClearingRegion => {
+    const layerRegion = (layerZ: number, onlyAbove = -Infinity): ClearingRegion => {
       const gxs = axisSamples(bounds.minX + roughRad, bounds.maxX - roughRad, res);
       const gys = axisSamples(bounds.minY + roughRad, bounds.maxY - roughRad, res);
       const cols = gxs.length + 2;
@@ -2077,7 +2137,7 @@ export function machineSurface(
           // it: a strict test left that layer empty, and with no finishing
           // pass to follow, the channel round a solid part stopped a whole
           // layer short of breaking through.
-          if (target <= layerZ + 1e-6) mask[(j + 1) * cols + (i + 1)] = 1;
+          if (target <= layerZ + 1e-6 && target > onlyAbove + 1e-6) mask[(j + 1) * cols + (i + 1)] = 1;
         }
       }
 
@@ -2115,8 +2175,9 @@ export function machineSurface(
       Math.min(Math.max(y, bounds.minY + roughRad), bounds.maxY - roughRad);
 
     /** One layer cleared by walking the region's contours inward. */
-    const emitAdaptiveLayer = (layerZ: number) => {
-      const rings = clearingRings(layerRegion(layerZ), roughStepover, opts.roughingToolDiaMm);
+    const emitAdaptiveLayer = (layerZ: number, layerTop: number, onlyAbove = -Infinity) => {
+      const thickness = layerTop - layerZ;
+      const rings = clearingRings(layerRegion(layerZ, onlyAbove), roughStepover, opts.roughingToolDiaMm);
 
       for (const ring of rings) {
         // The first ring of a slab is a slot however it is approached — nothing
@@ -2148,8 +2209,7 @@ export function machineSurface(
           ring.engagement,
           baseStepdown
         );
-        const bites = Math.max(1, Math.ceil((layerStep - 1e-6) / ringStep));
-        const layerTop = Math.min(0, layerZ + layerStep);
+        const bites = Math.max(1, Math.ceil((thickness - 1e-6) / ringStep));
 
         for (const loop of ring.loops) {
           if (loop.length < 2) continue;
@@ -2169,8 +2229,8 @@ export function machineSurface(
           if (plan.length < 2) continue;
 
           for (let bite = 1; bite <= bites; bite++) {
-            const z = bite === bites ? layerZ : layerTop - (layerStep * bite) / bites;
-            const above = layerTop - (layerStep * (bite - 1)) / bites;
+            const z = bite === bites ? layerZ : layerTop - (thickness * bite) / bites;
+            const above = layerTop - (thickness * (bite - 1)) / bites;
             const path = plan.map((p) => ({ ...p, z }));
 
             // Ramp in along the ring rather than plunging: the centre of an end
@@ -2194,9 +2254,22 @@ export function machineSurface(
       }
     };
 
-    for (const layerZ of layers) {
+    // Regular layers and flats' layers, top down. A regular layer drops from
+    // the regular layer before it, as it always has; a flat's layer drops from
+    // whatever was last cut above it, and only clears what the next regular
+    // layer will not.
+    const plan = [
+      ...layers.map((z) => ({ z, above: -Infinity, flat: false })),
+      ...flatOnly.map((f) => ({ ...f, flat: true })),
+    ].sort((a, b) => b.z - a.z);
+    let layerTop = 0;
+    let lastCut = 0;
+    for (const { z: layerZ, above: onlyAbove, flat } of plan) {
+      const top = flat ? lastCut : layerTop;
+      lastCut = layerZ;
+      if (!flat) layerTop = layerZ;
       if (adaptive) {
-        emitAdaptiveLayer(layerZ);
+        emitAdaptiveLayer(layerZ, top, onlyAbove);
         continue;
       }
 
@@ -2213,8 +2286,8 @@ export function machineSurface(
           if (run.length >= 2) {
             const last = run[run.length - 1];
             // The layer above is what the tool is dropping through, so that is
-            // where the ramp starts — one stepdown, not the whole depth so far.
-            const above = Math.min(0, layerZ + layerStep);
+            // where the ramp starts — one layer, not the whole depth so far.
+            const above = top;
             leadIn([run[0], last], above, opts.roughingPlungeRate, opts.roughingFeedrate);
 
             cutTo(last.x, last.y, layerZ);
@@ -2234,7 +2307,7 @@ export function machineSurface(
         for (const x of lineXs) {
           const target = sampleHeightmap(roughMap, x, y) + allowance;
           // At or below the layer: see `layerRegion`.
-          if (target <= layerZ + 1e-6) run.push({ x, y, z: layerZ });
+          if (target <= layerZ + 1e-6 && target > onlyAbove + 1e-6) run.push({ x, y, z: layerZ });
           else flushRun();
         }
         flushRun();

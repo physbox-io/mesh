@@ -26,12 +26,13 @@ import type { SceneGraph } from '../types/scene';
 import { collectSceneTriangles } from './contourSliceExporter';
 import {
   DEFAULT_RELIEF_OPTIONS,
+  deriveReliefFeeds,
   machineSurface,
   type Heightmap,
   type ReliefCarveOptions,
   type SurfaceMachiningResult,
 } from './reliefCarveExporter';
-import { materialSpec } from './feedsAndSpeeds';
+import { materialSpec, type SpindleRange } from './feedsAndSpeeds';
 
 /** Which way up the model goes in the first setup. */
 export type UpAxis = '+z' | '-z' | '+x' | '-x' | '+y' | '-y';
@@ -632,6 +633,43 @@ export function measurePart(
     if (z < mnZ) mnZ = z; if (z > mxZ) mxZ = z;
   }
   return { x: mxX - mnX, y: mxY - mnY, z: mxZ - mnZ };
+}
+
+/**
+ * The options a job is actually cut with when nobody has tuned them: the
+ * defaults, what was asked for, and then the feeds, speeds, stepdowns and
+ * allowance worked out for that material, those cutters and this part's
+ * height — what the dialog does before it shows its numbers.
+ *
+ * Without this, `material` only changed the label. The MCP export passed the
+ * defaults straight to `generateSolidMachining`, which are a wood recipe, so
+ * a job asked for in aluminium came out with hardwood's feeds and spindle
+ * speed and a 2 mm base stepdown that adaptive clearing deepened to 3.67 mm on
+ * a 3 mm cutter — where aluminium's own base is a tenth of the cutter.
+ */
+export function deriveSolidOptions(
+  scene: SceneGraph,
+  asked: Partial<SolidMachiningOptions>,
+  spindle?: SpindleRange | null,
+  maxFeedMmMin?: number
+): SolidMachiningOptions {
+  const opts: SolidMachiningOptions = { ...DEFAULT_SOLID_OPTIONS, ...asked };
+  const part = measurePart(scene, opts.up, opts.scalePercent);
+  return {
+    ...opts,
+    ...deriveReliefFeeds(
+      {
+        material: opts.material,
+        finishingToolDiaMm: opts.finishingToolDiaMm,
+        finishingFlutes: opts.finishingFlutes,
+        roughingToolDiaMm: opts.roughingToolDiaMm,
+        roughingFlutes: opts.roughingFlutes,
+        carveDepthMm: part?.z ?? 10,
+      },
+      spindle,
+      maxFeedMmMin
+    ),
+  };
 }
 
 /**

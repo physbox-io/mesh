@@ -42,7 +42,8 @@ import { generateCastPattern, DEFAULT_CAST_OPTIONS, type CastMethod } from '../u
 import { runCastPrep } from '../utils/castPrepRunner';
 import { selectionSoups, splitOffThread, testAssemblyOffThread } from '../utils/printSplitClient';
 import { filamentSpec } from '../utils/filaments';
-import { generateSolidMachining, DEFAULT_SOLID_OPTIONS } from '../utils/solidMachiningExporter';
+import { generateSolidMachining, deriveSolidOptions } from '../utils/solidMachiningExporter';
+import { webSerialManager } from '../utils/webSerialManager';
 import type { Object3D } from 'three';
 import type { SceneGraph, SceneNode, SceneGeom, SceneJoint } from '../types/scene';
 import type { RawGeom, RawJoint, RawNode } from '../utils/sceneNodes';
@@ -2266,8 +2267,11 @@ export function useMCPBridge() {
           const scene = store.sceneGraph;
           if (!scene.nodes?.length) return { ok: false, error: 'The scene is empty — there is nothing to machine.' };
           const dia = typeof msg.toolDiaMm === 'number' && msg.toolDiaMm > 0 ? msg.toolDiaMm : 3;
-          const options = {
-            ...DEFAULT_SOLID_OPTIONS,
+          // Feeds, speeds and stepdowns worked out for the material and the
+          // connected machine, as the dialog does; DEFAULT_SOLID_OPTIONS alone is
+          // a wood recipe whatever material is named.
+          const motion = webSerialManager.getState().motion;
+          const options = deriveSolidOptions(scene, {
             ...(typeof msg.sides === 'number' ? { sides: msg.sides } : {}),
             ...(typeof msg.stockThicknessMm === 'number' ? { stockThicknessMm: msg.stockThicknessMm } : {}),
             ...(typeof msg.material === 'string' ? { material: msg.material } : {}),
@@ -2276,7 +2280,7 @@ export function useMCPBridge() {
               : {}),
             roughingToolDiaMm: dia,
             finishingToolDiaMm: dia,
-          } as Parameters<typeof generateSolidMachining>[1];
+          } as Parameters<typeof deriveSolidOptions>[1], motion.spindle, Math.min(motion.maxRate.x, motion.maxRate.y));
           const result = generateSolidMachining(scene, options);
           if (!result.success) return { ok: false, error: result.error || 'The machining program could not be generated.', warnings: result.warnings ?? [] };
           const encoder = new TextEncoder();

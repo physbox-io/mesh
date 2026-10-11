@@ -14,8 +14,8 @@
  * So the exporter keeps this instead: a grid that starts at the stock's top
  * face and is lowered by every cutting move as it is emitted. It is
  * deliberately pessimistic, because what it is for is keeping rapids out of
- * the stock. A cell is lowered only when the cutter covers all of it — its
- * centre lies within the radius less half the cell's diagonal — to the highest
+ * the stock. A cell is lowered only when the cutter covers all of it — every
+ * corner, clipped to the stock, within the radius — to the highest
  * level the cutter leaves anywhere across it. A query counts every cell the
  * footprint could touch — centre within the radius plus half the diagonal. So
  * the model can overstate what is left but never understate it.
@@ -54,6 +54,8 @@ export class StockModel {
   private readonly rows: number;
   private readonly x0: number;
   private readonly y0: number;
+  private readonly x1: number;
+  private readonly y1: number;
   /** Highest material in each cell. Stock top is 0. */
   private readonly z: Float32Array;
 
@@ -68,6 +70,8 @@ export class StockModel {
     this.cell = Math.max(0.05, cellMm, Math.sqrt(area / 4e6));
     this.x0 = bounds.minX;
     this.y0 = bounds.minY;
+    this.x1 = bounds.maxX;
+    this.y1 = bounds.maxY;
     this.cols = Math.max(1, Math.ceil((bounds.maxX - bounds.minX) / this.cell));
     this.rows = Math.max(1, Math.ceil((bounds.maxY - bounds.minY) / this.cell));
     this.z = new Float32Array(this.cols * this.rows); // all 0: the stock's face
@@ -102,6 +106,21 @@ export class StockModel {
     }
   }
 
+  /** Farthest in-stock corner of cell `k` from the segment (ax, ay)-(bx, by). */
+  private farthestCorner(k: number, ax: number, ay: number, bx: number, by: number): number {
+    const i = k % this.cols, j = (k - i) / this.cols;
+    const xa = this.x0 + i * this.cell, ya = this.y0 + j * this.cell;
+    const xb = Math.min(this.x1, xa + this.cell), yb = Math.min(this.y1, ya + this.cell);
+    const ex = bx - ax, ey = by - ay;
+    const lenSq = ex * ex + ey * ey;
+    const dist = (px: number, py: number) => {
+      let t = lenSq > 1e-12 ? ((px - ax) * ex + (py - ay) * ey) / lenSq : 0;
+      t = t < 0 ? 0 : t > 1 ? 1 : t;
+      return Math.hypot(ax + ex * t - px, ay + ey * t - py);
+    };
+    return Math.max(dist(xa, ya), dist(xb, ya), dist(xa, yb), dist(xb, yb));
+  }
+
   /** A cutting move from one tip position to another. */
   cut(
     x0: number, y0: number, z0: number,
@@ -112,7 +131,6 @@ export class StockModel {
     if (Math.min(z0, z1) >= 0) return; // above the stock's face
     // Whole cells only, each at the highest the cutter leaves across it.
     const half = this.cell * Math.SQRT1_2;
-    if (radius <= half) return;
     // In pieces no longer than a cell, each taken at its own higher end, so a
     // sloping move lowers the stock by no more than it really cuts.
     const len = Math.hypot(x1 - x0, y1 - y0);
@@ -121,15 +139,25 @@ export class StockModel {
       const ta = s / pieces, tb = (s + 1) / pieces;
       const za = z0 + (z1 - z0) * ta, zb = z0 + (z1 - z0) * tb;
       const z = Math.max(za, zb);
-      this.near(
-        x0 + (x1 - x0) * ta, y0 + (y1 - y0) * ta,
-        x0 + (x1 - x0) * tb, y0 + (y1 - y0) * tb,
-        radius - half,
-        (k, d) => {
-          const level = z + profile(d + half);
-          if (level < this.z[k]) this.z[k] = level;
+      const ax = x0 + (x1 - x0) * ta, ay = y0 + (y1 - y0) * ta;
+      const bx = x0 + (x1 - x0) * tb, by = y0 + (y1 - y0) * tb;
+      this.near(ax, ay, bx, by, radius, (k, d) => {
+        // Well inside the cutter, the centre's distance and half a diagonal
+        // settle it. In the band near its edge, the corners are measured —
+        // clipped to the stock, since a cell hanging off the edge has nothing
+        // there to cut — or a pass running one radius in from the stock's
+        // edge would never count the edge as cut.
+        let far = d + half;
+        if (far > radius) {
+          far = this.farthestCorner(k, ax, ay, bx, by);
+          // A micron of slack: the outermost pass runs exactly one radius in
+          // from the stock's edge, and rounding put the edge a hair outside.
+          if (far > radius + 1e-3) return;
+          far = Math.min(far, radius);
         }
-      );
+        const level = z + profile(far);
+        if (level < this.z[k]) this.z[k] = level;
+      });
     }
   }
 

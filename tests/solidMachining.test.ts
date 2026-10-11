@@ -2,7 +2,7 @@
 // preset that exists to be made.
 import { describe, it, expect } from 'vitest';
 import { latticeBracketPreset } from '../src/presets/latticeBracket';
-import { generateSolidMachining, DEFAULT_SOLID_OPTIONS } from '../src/utils/solidMachiningExporter';
+import { generateSolidMachining, deriveSolidOptions, DEFAULT_SOLID_OPTIONS } from '../src/utils/solidMachiningExporter';
 
 /** Fast enough tooling for a test: a big finisher means a coarse grid. */
 const quick = {
@@ -111,5 +111,34 @@ describe('solid machining of the wall bracket', () => {
     expect(loose.success, loose.error).toBe(true);
     expect(loose.tabsPlaced).toBe(0);
     expect(loose.warnings.join('\n')).toMatch(/come loose/);
+  });
+});
+
+describe('options worked out for the material', () => {
+  // The MCP export used to hand the defaults straight to the exporter, so the
+  // material only changed the label: an aluminium job got hardwood's feeds,
+  // spindle speed and stepdown.
+  const asked = { sides: 2 as const, roughingToolDiaMm: 3, finishingToolDiaMm: 3 };
+  const alu = deriveSolidOptions(latticeBracketPreset, { ...asked, material: 'aluminium' });
+  const oak = deriveSolidOptions(latticeBracketPreset, { ...asked, material: 'hardwood' });
+
+  it('cuts aluminium shallower and slower than hardwood', () => {
+    expect(alu.roughingStepdownMm).toBeLessThan(oak.roughingStepdownMm);
+    expect(alu.roughingFeedrate).toBeLessThan(oak.roughingFeedrate);
+    expect(alu.roughingStepdownMm).toBeLessThanOrEqual(0.1 * 3 + 1e-9);
+  });
+
+  it('keeps what was asked for', () => {
+    expect(alu.sides).toBe(2);
+    expect(alu.material).toBe('aluminium');
+    expect(alu.roughingToolDiaMm).toBe(3);
+  });
+
+  it('writes the derived numbers into the program', () => {
+    const a = generateSolidMachining(latticeBracketPreset, alu);
+    const o = generateSolidMachining(latticeBracketPreset, oak);
+    expect(a.success && o.success).toBe(true);
+    const roughFeed = (g: string) => g.slice(g.indexOf('OP 1: roughing')).match(/ F(\d+)/)?.[1];
+    expect(roughFeed(a.sides[0].gcode)).not.toBe(roughFeed(o.sides[0].gcode));
   });
 });
