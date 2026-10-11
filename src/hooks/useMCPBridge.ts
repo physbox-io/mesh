@@ -2271,6 +2271,9 @@ export function useMCPBridge() {
             ...(typeof msg.sides === 'number' ? { sides: msg.sides } : {}),
             ...(typeof msg.stockThicknessMm === 'number' ? { stockThicknessMm: msg.stockThicknessMm } : {}),
             ...(typeof msg.material === 'string' ? { material: msg.material } : {}),
+            ...(msg.finishingToolType === 'flat' || msg.finishingToolType === 'ball_nose' || msg.finishingToolType === 'v_bit'
+              ? { finishingToolType: msg.finishingToolType }
+              : {}),
             roughingToolDiaMm: dia,
             finishingToolDiaMm: dia,
           } as Parameters<typeof generateSolidMachining>[1];
