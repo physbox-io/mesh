@@ -29,6 +29,7 @@ import {
   clearCheckpoint,
   recordProgress,
   type CheckpointProgram,
+  type PendingPause,
 } from './jobCheckpoint';
 import {
   DEFAULT_SPINDLE_PWM_MAX,
@@ -241,6 +242,15 @@ export interface ResumePoint {
   restored?: boolean;
   /** The reached line may be up to a minute behind the cut. See `loadCheckpoint`. */
   approximate?: boolean;
+  /**
+   * The job had already stopped at a tool change or programmed stop when it
+   * ended, and everything before it had been cut. The offer then lands on that
+   * line, and the banner says what was being asked for — which is what makes
+   * "zero Z before resuming" make sense after an alarm that looked random.
+   */
+  pendingPause?: PendingPause;
+  /** The job this offer belongs to, so another job's Start can say what it would discard. */
+  jobName?: string | null;
   /** Where a restored job was found, and when it ran. Only set when `restored`. */
   from?: {
     source: 'local' | 'cloud';
@@ -430,13 +440,13 @@ const CONTROLLER_SILENCE_MS = 3000;
 const CONTROLLER_RECOVERED_MS = 1500;
 
 /**
- * How far the tool is lifted clear of the work when a job stops for a tool.
+ * How long a tool-change pause waits for the moves already sent to be cut.
  *
- * Enough to get a spanner and two fingers past a workpiece and to see what has
- * been cut, and a height the machine is asked for rather than assumed to have:
- * see `retractClearOfWork`.
+ * GRBL's planner holds only a handful of blocks, but grblHAL builds hold
+ * dozens and a slow finishing feed spreads them over minutes. Running out of
+ * patience here leaves the pause unparked, which is safe; lifting early is not.
  */
-const TOOL_CHANGE_LIFT_MM = 25;
+const PAUSE_DRAIN_TIMEOUT_MS = 10 * 60 * 1000;
 /**
  * How far a Z zeroing probe searches for the plate. The tool is parked a few
  * millimetres above it first, so this only has to cover that gap; it used to
@@ -446,23 +456,14 @@ const TOOL_CHANGE_LIFT_MM = 25;
 export const ZERO_SEARCH_MM = 10;
 
 /**
- * How far below the top of Z travel a machine-referenced retract stops.
+ * How far below the homing pull-off point a machine-referenced retract stops.
  *
- * A millimetre, because on a homed machine the ceiling is a number the
- * controller itself reported and the only thing being allowed for is the switch
- * having a few tenths of hysteresis.
+ * Homing leaves the tool at `MPos -$27`, the pull-off, which is only just
+ * clear of the switch. A retract to a millimetre under the ceiling sat on that
+ * edge with the default `$27=1`, and a switch with a few tenths of hysteresis
+ * trips there. So the retract stops this far below the pull-off point instead.
  */
-const RETRACT_CEILING_MARGIN_MM = 1;
-
-/**
- * The same margin for a machine that has not been homed.
- *
- * Wider, because the headroom is worked out from an `MPos` read up to a status
- * poll ago and the lift itself executes several moves later, out of the planner
- * buffer — so the position it was computed against is not the position it runs
- * from.
- */
-const UNHOMED_CEILING_MARGIN_MM = 3;
+const RETRACT_BELOW_PULLOFF_MM = 1;
 
 /** Rapid traverse trim: GRBL implements full, half and quarter, and no more. */
 
@@ -588,6 +589,30 @@ class WebSerialManager {
   private hasHomed = false;
   /** A homing cycle seen running, waiting on the `Idle` that completes it. */
   private homingInProgress = false;
+
+  /**
+   * The highest work Z this job has been seen at, from the status reports.
+   *
+   * On a machine that has not been homed this is the only height the app
+   * knows the tool can reach: it has just been there, on the same datum. A
+   * tool-change lift asks for no more than this, because a blind relative lift
+   * on top of the program's own retract took a relief carve into the top limit
+   * switch. Reset whenever a stream starts or resumes, since a resume may follow
+   * a re-zero for a longer tool, which makes the same work Z a higher machine
+   * position.
+   */
+  private jobPeakWorkZ: number | null = null;
+
+  /**
+   * The pause the stream stopped at, once everything sent before it has run.
+   *
+   * GRBL acks lines when it parses them, so when the pump reaches an `M6` up
+   * to a planner's worth of moves are still to be cut. Once the `G4 P0` behind
+   * them is acked they have all been cut, and the job stands exactly at the
+   * pause line — so an alarm from then on, such as the lift tripping a switch,
+   * resumes at that line rather than winding back into the last tool's path.
+   */
+  private drainedPause: { line: number; kind: 'tool-change' | 'stop'; message: string } | null = null;
 
   private state: MachineState = {
     status: 'DISCONNECTED',
@@ -1238,6 +1263,9 @@ class WebSerialManager {
       patch.wpos = { x: wpos[0], y: wpos[1], z: wpos[2] };
       patch.mpos = { x: wpos[0] + ox, y: wpos[1] + oy, z: wpos[2] + oz };
     }
+    if (patch.wpos && (this.isJobRunning || this.isPaused) && machineWord !== 'Alarm') {
+      this.jobPeakWorkZ = Math.max(this.jobPeakWorkZ ?? -Infinity, patch.wpos.z);
+    }
 
     // One update for the whole report: each one notifies every listener, and
     // the telemetry publisher hangs off that.
@@ -1547,6 +1575,8 @@ class WebSerialManager {
     this.jobLineBase = 0;
     this.isJobRunning = true;
     this.isPaused = false;
+    this.jobPeakWorkZ = null;
+    this.drainedPause = null;
 
     this.updateState({
       status: 'RUNNING',
@@ -1621,7 +1651,7 @@ class WebSerialManager {
   public restoreCheckpoint(
     program: CheckpointProgram,
     fromLine: number,
-    from: NonNullable<ResumePoint['from']> & { approximate: boolean }
+    from: NonNullable<ResumePoint['from']> & { approximate: boolean; pendingPause?: PendingPause }
   ): boolean {
     if (this.isJobRunning || this.isPaused) return false;
 
@@ -1642,6 +1672,8 @@ class WebSerialManager {
         reason: 'interrupted',
         restored: true,
         approximate: from.approximate,
+        jobName: program.jobName ?? null,
+        ...(from.pendingPause ? { pendingPause: from.pendingPause } : {}),
         from: {
           source: from.source,
           jobName: from.jobName,
@@ -1691,6 +1723,8 @@ class WebSerialManager {
       return { ok: false, message: 'There is no program to resume — nothing has been sent this session.' };
     }
 
+    fromLine = this.pastHandledToolChange(fromLine);
+
     const plan = planResume(this.program.map((l) => l.code), fromLine, {
       ...options,
       currentZ: this.state.wpos.z,
@@ -1707,6 +1741,8 @@ class WebSerialManager {
     this.jobLineBase = plan.fromLine - preamble.length;
     this.isJobRunning = true;
     this.isPaused = false;
+    this.jobPeakWorkZ = null;
+    this.drainedPause = null;
 
     this.updateState({
       status: 'RUNNING',
@@ -1737,10 +1773,31 @@ class WebSerialManager {
    */
   public previewResume(fromLine: number, options?: ResumeOptions) {
     if (this.program.length === 0) return null;
+    fromLine = this.pastHandledToolChange(fromLine);
     return planResume(this.program.map((l) => l.code), fromLine, {
       ...options,
       arrivingAtPause: this.lineIsPause(fromLine),
     });
+  }
+
+  /**
+   * Steps a resume past a tool change the operator has already made.
+   *
+   * An offer standing at a tool change whose new bit has since been zeroed
+   * has had its tool change: replaying the `M6` would only stop the job again
+   * at once, for the same bit, and demand the same zero a second time.
+   */
+  private pastHandledToolChange(fromLine: number): number {
+    const offer = this.state.resume;
+    if (
+      offer?.pendingPause?.kind === 'tool-change'
+      && offer.fromLine === fromLine
+      && !this.state.needsZZero
+      && this.lineIsPause(fromLine)
+    ) {
+      return Math.min(this.programLength(), fromLine + 1);
+    }
+    return fromLine;
   }
 
   /**
@@ -1908,30 +1965,60 @@ class WebSerialManager {
   /** Triggers an interactive pause for Tool or Material Changes. */
   private async triggerPause(type: 'PAUSED_TOOL' | 'PAUSED_MATERIAL', message: string) {
     this.isPaused = true;
+    // The pump has stopped at the pause line, which is the line just taken.
+    const pauseLine = Math.max(0, Math.min(this.programLength(), this.jobLineBase + this.currentQueueIndex - 1));
+    this.drainedPause = null;
     this.updateState({
       status: type,
-      pauseMessage: message,
+      // Not the real prompt yet: the moves already in the controller's buffer
+      // are still being cut, sometimes for a quarter of a minute, and a banner
+      // saying "fit the next tool" over a spindle that is still carving is
+      // what made the lift that follows look like it came from nowhere.
+      pauseMessage: type === 'PAUSED_TOOL'
+        ? 'Finishing the moves already sent, then stopping for a tool change…'
+        : 'Finishing the moves already sent, then stopping…',
       // A new bit is a new tool length, so the datum the job was started on no
       // longer describes where the tip is. Resume is gated on this being dealt
       // with, either by probing again or by touching off by hand.
       needsZZero: type === 'PAUSED_TOOL' ? true : this.state.needsZZero,
     });
 
+    // Let the buffer run dry before deciding anything about height. GRBL acks a
+    // dwell only once the planner is empty, so from the `ok` on, every line sent
+    // before the pause has been cut — including the program's own retract,
+    // which a relief carve makes to Z20 just before its `M6`. The lift used to
+    // be sized from where the tool stood when the pump stopped, 15 s and 23 mm
+    // lower, and was then added on top of that retract and into the limit switch.
+    await this.sendLine('M5'); // Laser/Spindle OFF
+    await this.sendAndWait('G4 P0', PAUSE_DRAIN_TIMEOUT_MS);
+    // An alarm or a cancel while draining has already dealt with the job; a
+    // lift and park into a machine that is no longer this job's would be wrong.
+    if (!this.isPaused || this.state.status !== type) return;
+    await this.nextStatusReport();
+    if (!this.isPaused || this.state.status !== type) return;
+
+    this.drainedPause = { line: pauseLine, kind: type === 'PAUSED_TOOL' ? 'tool-change' : 'stop', message };
+    this.updateState({ pauseMessage: message });
+
     // Get clear of the work, then bring the spindle out where it can be reached.
     //
-    // Neither the lift nor the park may assume anything about where the tool is
-    // standing: the park is a rapid across the work at whatever height the lift
-    // left, so a lift that did not happen — because it ran into the top of Z
-    // travel and alarmed — is a rapid through the job. `retractClearOfWork`
-    // owns that problem; see the note on it.
-    await this.sendLine('M5'); // Laser/Spindle OFF
     // Not at a sheet swap in a program that never commands Z - a laser job.
     // Resume puts back only the program's own Z (retractToProgramClearZ), and a
     // laser program has none, so the lift stayed and every later sheet was cut
     // 25 mm out of focus. A tool change always lifts: it means a spindle.
     const programUsesZ = this.program.length > 0
       && scanModalState(this.program.map((l) => l.code), this.programLength()).safeZ !== null;
-    if (type === 'PAUSED_TOOL' || programUsesZ) await this.retractClearOfWork(TOOL_CHANGE_LIFT_MM);
+    if (type === 'PAUSED_TOOL' || programUsesZ) {
+      // The park is a rapid across the work at whatever height the lift left,
+      // so it only goes when the tool is known to be clear of the stock top.
+      const clear = await this.retractClearOfWork();
+      if (!clear) {
+        this.updateState({
+          pauseMessage: `${message} The tool has not been parked: this job never went above where it is standing now, so jog it clear before changing anything.`,
+        });
+        return;
+      }
+    }
     await this.sendLine('G90'); // Absolute, whichever way the lift was made
     await this.sendLine('G0 X0.000 Y0.000'); // Park XY where the collet is reachable
   }
@@ -1992,6 +2079,7 @@ class WebSerialManager {
     }
 
     this.isPaused = false;
+    this.drainedPause = null;
     this.updateState({ status: 'RUNNING', pauseMessage: undefined });
     // Out of band GRBL cycle start.
     await this.writeRealtime(0x7e); // '~'
@@ -2343,7 +2431,23 @@ class WebSerialManager {
     // it: a move that was cut off partway through did not finish, and running
     // it again only recuts a path that has already been cut, while skipping it
     // leaves a gap in the work.
-    if ((this.isJobRunning || this.isPaused) && this.program.length > 0) {
+    const drained = this.drainedPause;
+    this.drainedPause = null;
+    if ((this.isJobRunning || this.isPaused) && this.program.length > 0 && drained) {
+      // Stopped at a pause whose preceding moves had all been cut: nothing to
+      // wind back over. Winding back here put a ball nose onto the last 64
+      // lines of the roughing end mill's path.
+      recordProgress(drained.line, reason, true, { kind: drained.kind, message: drained.message });
+      this.updateState({
+        resume: {
+          fromLine: drained.line,
+          totalLines: this.programLength(),
+          reason,
+          pendingPause: { kind: drained.kind, message: drained.message },
+          jobName: this.jobContext.name ?? null,
+        },
+      });
+    } else if ((this.isJobRunning || this.isPaused) && this.program.length > 0) {
       const sent = Math.max(0, Math.min(this.programLength(), this.jobLineBase + this.currentQueueIndex - 1));
       /*
        * Rewound from the line last SENT, which is not the line last CUT: GRBL
@@ -2366,7 +2470,7 @@ class WebSerialManager {
       // be the one write that mattered and did not happen.
       recordProgress(stoppedAt, reason, true);
       this.updateState({
-        resume: { fromLine: stoppedAt, totalLines: this.programLength(), reason },
+        resume: { fromLine: stoppedAt, totalLines: this.programLength(), reason, jobName: this.jobContext.name ?? null },
       });
     }
 
@@ -2445,6 +2549,7 @@ class WebSerialManager {
     await this.sendAndWait(`G10 L20 P1 Z${offsetMm.toFixed(3)}`);
     // The datum is now real, whichever bit is in the collet.
     this.updateState({ needsZZero: false });
+    this.jobPeakWorkZ = null;
     return {
       success: true,
       message:
@@ -2465,6 +2570,7 @@ class WebSerialManager {
     this.refuseWhileJobHoldsMachine('zero the axes');
     await this.sendLine('G10 L20 P1 X0 Y0 Z0');
     this.updateState({ needsZZero: false });
+    this.jobPeakWorkZ = null;
   }
 
   /**
@@ -2755,42 +2861,43 @@ class WebSerialManager {
   }
 
   /**
-   * Lifts the tool clear of the work without driving it into the top of travel.
+   * Lifts the tool clear of the work without driving it into the top of travel,
+   * and says whether it is now clear of the stock top.
    *
-   * A relative `G91 G0 Z25` clears the work from wherever the tool happens to
-   * be, which is what makes it right for a tool change: the alternative, an
-   * absolute work Z, assumes the datum leaves headroom above it. But relative
-   * is unbounded in the other direction, and on a carve that ends its last pass
-   * near the top of Z the same 25 mm is a move straight into the limit switch —
-   * a hard limit alarm, a dropped program, and a position the controller can no
-   * longer vouch for.
+   * Called only once the buffer has drained, so the position read here is
+   * where the tool actually stands.
    *
-   * So the lift is asked for against the machine's own envelope. On a homed
-   * machine that is exact and needs no arithmetic: `G53` names a height in
-   * machine coordinates, and a millimetre below the ceiling is as high as it is
-   * legal to go, whatever the work offset says. Un-homed, machine coordinates
-   * are meaningless and the relative lift stands, trimmed by whatever headroom
-   * `MPos` claims — which is why the trim keeps a wider margin than the `G53`
-   * path does, since the lift executes out of the planner buffer some moves
-   * after the position it was computed from.
+   * On a homed machine the lift is exact: `G53` names a height in machine
+   * coordinates, and the homing pull-off point (less a margin) is as high as it
+   * is safe to go, whatever the work offset says.
+   *
+   * Un-homed, nothing about the ceiling is known. `MPos` 0 is wherever the
+   * controller powered up, so "headroom" worked out from it is fiction, and a
+   * blind relative lift took two relief carves into the top switch: from the
+   * program's own Z20 retract, 25 mm more was further than the machine had. So
+   * the lift goes no higher than this job has already been seen to go, on the
+   * same datum. That height is reachable by demonstration. For a carve that
+   * retracts before its `M6` it means no lift at all, and the operator jogs up
+   * from the pause banner if they need more room.
    */
-  private async retractClearOfWork(liftMm: number): Promise<void> {
+  private async retractClearOfWork(): Promise<boolean> {
     const top = this.topOfZTravel();
 
     if (this.hasHomed && top !== null) {
-      await this.sendLine(`G53 G0 Z${(top - RETRACT_CEILING_MARGIN_MM).toFixed(3)}`);
-      return;
+      const pullOff = this.state.grblSettings[27] ?? 1;
+      await this.sendLine(`G53 G0 Z${(top - Math.max(0, pullOff) - RETRACT_BELOW_PULLOFF_MM).toFixed(3)}`);
+      return true;
     }
 
-    const headroom = top === null ? null : top - this.state.mpos.z - UNHOMED_CEILING_MARGIN_MM;
-    // No usable headroom figure means an un-referenced controller reporting
-    // `MPos` of zero, not a machine with nowhere to go: the requested lift is
-    // no worse than what it would have got anyway.
-    const lift = headroom !== null && headroom > 0 ? Math.min(liftMm, headroom) : liftMm;
-    // Left in G91: the caller restates the distance mode it wants, because a
-    // caller that forgot to would have `G0 X0 Y0` mean a nudge of nothing
-    // rather than a move to the origin either way.
-    await this.sendLine(`G91 G0 Z${lift.toFixed(3)}`);
+    const currentZ = this.state.wpos.z;
+    const target = Math.max(currentZ, this.jobPeakWorkZ ?? -Infinity);
+    if (target > currentZ + 0.001) {
+      await this.sendLine(`G90 G0 Z${target.toFixed(3)}`);
+    }
+    // The datum is the stock top for every program this app writes, so a tool
+    // at or below it may be in the work, and a rapid park from there is a rapid
+    // through the job.
+    return target > 0;
   }
 
   /** Retracts and drives to the current work XY origin, to check where zero landed. */
@@ -2842,6 +2949,8 @@ class WebSerialManager {
 
     await this.sendAndWait(`G10 L20 P1 Z${touchPlateThicknessMm.toFixed(3)}`);
     this.updateState({ needsZZero: false });
+    // Heights seen on the old datum say nothing about this one.
+    this.jobPeakWorkZ = null;
     // Relative retract: it clears the plate by the same 5 mm wherever the datum
     // ended up, and does not depend on the offset that was just written.
     await this.sendAndWait('G91 G0 Z5.000');

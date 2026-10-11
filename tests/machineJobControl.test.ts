@@ -23,6 +23,12 @@ function attachFakeGrbl() {
   };
 
   const sent: string[] = [];
+  /**
+   * What the board answers a `?` with. A tool-change pause asks where the tool
+   * is once the buffer has drained, and a board that never answered would make
+   * every one of those wait out its timeout.
+   */
+  const board = { report: '<Idle|MPos:0.000,0.000,0.000|FS:0,0>' as string | null };
   /** Bytes written that the fake has not yet acknowledged. */
   let outstanding = 0;
   /** The high-water mark of that, which is what must never exceed the buffer. */
@@ -43,6 +49,10 @@ function attachFakeGrbl() {
     async close() {},
     async writeRealtime(byte: number) {
       sent.push(String.fromCharCode(byte));
+      if (byte === 0x3f && board.report) {
+        const report = board.report;
+        setTimeout(() => mgr.handleIncomingLine(report), 0);
+      }
     },
     async writeLine(line: string) {
       const trimmed = line.trim();
@@ -66,6 +76,7 @@ function attachFakeGrbl() {
   return {
     sent,
     peak,
+    board,
     lines: () => sent.filter((s) => s.length > 1),
     detach() {
       mgr.transport = null;
@@ -283,11 +294,13 @@ describe('the Z datum across a tool change', () => {
   });
 
   it('says what to fit and what to set, and says the Z part once', async () => {
+    // Standing clear of the stock, so the prompt is the whole message.
+    fake.board.report = '<Idle|MPos:0.000,0.000,5.000|FS:0,0>';
     // The exporter's own comment for the line, as a relief carve writes it.
     webSerialManager.startJob(
       'G21\nG90\nG1 X10 F600\nT2 M6 ; fit the 3.175 mm ball nose and re-zero Z\nM3 S12000\nG1 X20\n'
     );
-    await advance(6);
+    await advance(12);
 
     const message = webSerialManager.getState().pauseMessage ?? '';
     expect(message).toBe('Tool change: fit the 3.175 mm ball nose, set the spindle to 12,000 RPM.');
@@ -313,11 +326,15 @@ describe('the Z datum across a tool change', () => {
   });
 
   it('still lifts clear at a sheet swap in a program that cuts in Z', async () => {
+    const mgr = webSerialManager as unknown as { handleIncomingLine: (l: string) => void };
     webSerialManager.startJob('G21\nG90\nG0 Z5\nG1 Z-1 F300\nG1 X10 F600\nM0\nG1 X20\n');
-    await advance(8);
+    // Seen at the program's clear height on the way in, then down in the cut.
+    mgr.handleIncomingLine('<Run|MPos:0.000,0.000,5.000|FS:0,0>');
+    fake.board.report = '<Idle|MPos:10.000,0.000,-1.000|FS:0,0>';
+    await advance(12);
 
     expect(webSerialManager.getState().status).toBe('PAUSED_MATERIAL');
-    expect(fake.lines().some((l) => /^G91 G0 Z|^G0 Z/.test(l) && !/Z5$/.test(l))).toBe(true);
+    expect(fake.lines()).toContain('G90 G0 Z5.000');
   });
 });
 
@@ -427,23 +444,6 @@ describe('reading the machine and trimming it live', () => {
     // None of them went out as a line the controller would have to parse.
     expect(fake.lines()).toHaveLength(0);
   });
-
-  it('retracts relative to where the tool is at a tool change, not to an absolute Z', async () => {
-    webSerialManager.startJob('G21\nG90\nG1 X10 F600\nT2 M6\nG1 X20\n');
-    await advance(6);
-
-    const lines = fake.lines();
-    // An absolute `G0 Z25` assumes the datum leaves 25 mm of headroom above it,
-    // which on a job zeroed near the top of Z travel is a move into the limit.
-    expect(lines).toContain('G91 G0 Z25.000');
-    expect(lines).not.toContain('G0 Z25.000');
-    // And it must come back to absolute before the park, or X0 Y0 is a nudge
-    // of zero rather than a move to the origin.
-    const lift = lines.indexOf('G91 G0 Z25.000');
-    const backToAbsolute = lines.indexOf('G90', lift);
-    expect(backToAbsolute).toBeGreaterThan(lift);
-    expect(lines.indexOf('G0 X0.000 Y0.000', backToAbsolute)).toBeGreaterThan(backToAbsolute);
-  });
 });
 
 /*
@@ -478,37 +478,66 @@ describe('getting clear of the work for a tool change', () => {
     internals().hasHomed = false;
   });
 
-  it('lifts in machine coordinates once the machine has been homed', async () => {
+  it('lifts in machine coordinates, under the pull-off point, once homed', async () => {
     const mgr = internals();
-    mgr.state.grblSettings = { 23: 0, 132: 80 };
+    mgr.state.grblSettings = { 23: 0, 132: 80, 27: 2 };
     // A homing cycle, as the controller reports one: `Home` while it runs, and
     // the `Idle` that follows is the moment MPos means something.
     mgr.handleIncomingLine('<Home|MPos:0.000,0.000,-40.000|FS:0,0>');
-    mgr.handleIncomingLine('<Idle|MPos:0.000,0.000,0.000|FS:0,0>');
+    mgr.handleIncomingLine('<Idle|MPos:0.000,0.000,-2.000|FS:0,0>');
 
     webSerialManager.startJob(TOOL_CHANGE_JOB);
-    await advance(6);
+    await advance(12);
 
     const lines = fake.lines();
-    // A millimetre under the ceiling the controller itself reported, which no
-    // work offset can turn into a move into the switch.
-    expect(lines).toContain('G53 G0 Z-1.000');
+    // Homing leaves the tool at -$27, only just off the switch; a millimetre
+    // below that, not a millimetre below the switch itself.
+    expect(lines).toContain('G53 G0 Z-3.000');
     expect(lines.some((l) => l.startsWith('G91 G0 Z'))).toBe(false);
-    const lift = lines.indexOf('G53 G0 Z-1.000');
+    const lift = lines.indexOf('G53 G0 Z-3.000');
     expect(lines.indexOf('G0 X0.000 Y0.000', lift)).toBeGreaterThan(lift);
   });
 
-  it('trims the relative lift to the headroom left when it has not been homed', async () => {
+  /*
+   * The giraffe carve. The program retracts to Z20 before its M6, and the pump
+   * reaches the M6 while a quarter of a minute of cutting is still in GRBL's
+   * buffer. The lift used to be sized from where the tool was then - down in
+   * the cut - and added on top of the Z20 retract, into the limit switch.
+   */
+  it('waits for the buffered moves to run before lifting, and lifts no higher than the job has been', async () => {
     const mgr = internals();
     mgr.state.grblSettings = { 23: 0, 132: 80 };
-    mgr.handleIncomingLine('<Idle|MPos:0.000,0.000,-5.000|FS:0,0>');
+    webSerialManager.startJob(
+      'G21\nG90\nG0 Z5.000\nG1 Z-3.500 F300\nG1 X10 F600\nG0 Z20.000\nT2 M6 ; fit the ball nose\nG1 X20\n'
+    );
+    // The pump stops at the M6 with the tool still in the cut.
+    mgr.handleIncomingLine('<Run|MPos:5.000,0.000,-3.500|FS:600,10000>');
+    // By the time the dwell is acked, the retract has run.
+    fake.board.report = '<Idle|MPos:10.000,0.000,20.000|FS:0,0>';
+    await advance(12);
 
+    const lines = fake.lines();
+    const m5 = lines.indexOf('M5');
+    const drain = lines.indexOf('G4 P0');
+    expect(m5).toBeGreaterThanOrEqual(0);
+    expect(drain).toBeGreaterThan(m5);
+    // Already at the highest height the job has reached: nothing more to ask.
+    expect(lines.some((l) => /^G91 G0 Z/.test(l))).toBe(false);
+    expect(lines.some((l) => /G0 Z(2[1-9]|[3-9]\d)/.test(l))).toBe(false);
+    expect(lines.indexOf('G0 X0.000 Y0.000')).toBeGreaterThan(drain);
+    expect(webSerialManager.getState().pauseMessage).toBe('Tool change: fit the ball nose.');
+  });
+
+  it('lifts back up to the highest height the job has been seen at', async () => {
+    const mgr = internals();
     webSerialManager.startJob(TOOL_CHANGE_JOB);
-    await advance(6);
+    mgr.handleIncomingLine('<Run|MPos:0.000,0.000,12.000|FS:0,0>');
+    fake.board.report = '<Idle|MPos:10.000,0.000,1.000|FS:0,0>';
+    await advance(12);
 
-    // Five millimetres below the top, three of them kept back: 25 mm of lift
-    // becomes the 2 mm that are actually there.
-    expect(fake.lines()).toContain('G91 G0 Z2.000');
+    const lines = fake.lines();
+    expect(lines).toContain('G90 G0 Z12.000');
+    expect(lines.indexOf('G0 X0.000 Y0.000')).toBeGreaterThan(lines.indexOf('G90 G0 Z12.000'));
   });
 
   it('forgets that it was homed when the controller alarms', async () => {
@@ -522,11 +551,25 @@ describe('getting clear of the work for a tool change', () => {
     mgr.handleIncomingLine('<Idle|MPos:0.000,0.000,-5.000|FS:0,0>');
 
     webSerialManager.startJob(TOOL_CHANGE_JOB);
-    await advance(6);
+    mgr.handleIncomingLine('<Run|MPos:0.000,0.000,8.000|FS:0,0>');
+    fake.board.report = '<Idle|MPos:10.000,0.000,2.000|FS:0,0>';
+    await advance(12);
 
     const lines = fake.lines();
     expect(lines.some((l) => l.startsWith('G53'))).toBe(false);
-    expect(lines).toContain('G91 G0 Z2.000');
+    expect(lines).toContain('G90 G0 Z8.000');
+  });
+
+  it('does not park across the work when the job has never been above the stock', async () => {
+    // Nothing here says the tool is clear of anything, so the rapid to X0 Y0
+    // would be a rapid through the job. It stays put and says so.
+    webSerialManager.startJob(TOOL_CHANGE_JOB);
+    await advance(12);
+
+    const lines = fake.lines();
+    expect(lines).not.toContain('G0 X0.000 Y0.000');
+    expect(lines.some((l) => /^G91 G0 Z/.test(l))).toBe(false);
+    expect(webSerialManager.getState().pauseMessage).toMatch(/jog it clear/);
   });
 
   it('lifts back to the program\'s own clear height before carrying on', async () => {
@@ -567,13 +610,98 @@ describe('getting clear of the work for a tool change', () => {
     // machine is about to carry straight on with.
     expect(fake.sent.slice(atPause).filter((l) => l.length > 1)).toHaveLength(0);
   });
+});
 
-  it('falls back to the full relative lift when the controller says nothing about travel', async () => {
-    // No `$23`: nothing is known about which end of Z home is, so nothing can
-    // be worked out about headroom either, and the lift is what it always was.
-    webSerialManager.startJob(TOOL_CHANGE_JOB);
-    await advance(6);
+/*
+ * An alarm at a tool change, as the giraffe carve had one: the lift tripped
+ * the top switch after every roughing move had been cut. The offer has to land
+ * on the M6 rather than 64 lines back into the roughing path, say what was
+ * being asked for, and outlive the unlock and a power cycle.
+ */
+describe('a job that alarms while stopped for a tool change', () => {
+  let fake: ReturnType<typeof attachFakeGrbl>;
+  const mgr = () =>
+    webSerialManager as unknown as {
+      handleIncomingLine: (l: string) => void;
+      jobContext: { name?: string };
+    };
 
-    expect(fake.lines()).toContain('G91 G0 Z25.000');
+  // Line 6 (0-based) is the M6.
+  const PROGRAM = [
+    'G21', 'G90', 'G0 Z5.000', 'G1 Z-2.000 F300',
+    ...Array.from({ length: 2 }, (_, i) => `G1 X${(i + 1) * 10} F600`),
+    'T2 M6 ; fit the 1.5875 mm ball nose',
+    'M3 S16000',
+    'G0 Z20.000',
+    'G1 X30 F600',
+  ].join('\n');
+
+  beforeEach(() => {
+    fake = attachFakeGrbl();
+  });
+  afterEach(async () => {
+    await webSerialManager.cancelJob();
+    webSerialManager.clearResumePoint();
+    fake.detach();
+  });
+
+  async function alarmAtToolChange() {
+    webSerialManager.startJob(PROGRAM);
+    mgr().handleIncomingLine('<Run|MPos:0.000,0.000,5.000|FS:0,0>');
+    fake.board.report = '<Idle|MPos:20.000,0.000,5.000|FS:0,0>';
+    await advance(12);
+    expect(webSerialManager.getState().status).toBe('PAUSED_TOOL');
+    mgr().handleIncomingLine('<Alarm|MPos:20.000,0.000,26.000|FS:0,0>');
+  }
+
+  it('offers the tool change line itself, and says what it was waiting for', async () => {
+    await alarmAtToolChange();
+    const resume = webSerialManager.getState().resume;
+    expect(resume?.reason).toBe('alarm');
+    expect(resume?.fromLine).toBe(6);
+    expect(resume?.pendingPause).toEqual({
+      kind: 'tool-change',
+      message: 'Tool change: fit the 1.5875 mm ball nose, set the spindle to 16,000 RPM.',
+    });
+  });
+
+  it('keeps the offer through an unlock, a disconnect and a reconnect', async () => {
+    await alarmAtToolChange();
+    const before = webSerialManager.getState().resume;
+
+    await webSerialManager.unlockAlarm();
+    expect(webSerialManager.getState().resume).toEqual(before);
+
+    await webSerialManager.disconnect();
+    expect(webSerialManager.getState().resume).toEqual(before);
+  });
+
+  it('does not stop for the same tool change again once Z has been zeroed', async () => {
+    await alarmAtToolChange();
+    await webSerialManager.unlockAlarm();
+    await webSerialManager.zeroZHere();
+    const sentBefore = fake.lines().length;
+
+    const res = webSerialManager.resumeFromLine(6);
+    expect(res.ok).toBe(true);
+    await advance(12);
+
+    const after = fake.lines().slice(sentBefore);
+    expect(after.some((l) => /M6/.test(l))).toBe(false);
+    expect(after).toContain('G1 X30 F600');
+    expect(webSerialManager.getState().status).not.toBe('PAUSED_TOOL');
+  });
+
+  it('still winds back an alarm that lands mid-stream, where the buffer had not run', async () => {
+    const long = ['G21', 'G90', 'G0 Z5.000', 'G1 Z-1.000 F300',
+      ...Array.from({ length: 200 }, (_, i) => `G1 X${(i + 1) * 10} F600`)].join('\n');
+    webSerialManager.startJob(long);
+    await advance(20);
+    const reached = webSerialManager.getState().currentLine;
+    mgr().handleIncomingLine('<Alarm|MPos:0.000,0.000,0.000|FS:0,0>');
+
+    const resume = webSerialManager.getState().resume;
+    expect(resume?.pendingPause).toBeUndefined();
+    expect(resume!.fromLine).toBeLessThan(reached);
   });
 });

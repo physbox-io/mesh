@@ -126,6 +126,19 @@ export interface CheckpointProgress {
   at: number;
   fromLine: number;
   reason: CheckpointReason;
+  /**
+   * The tool change or programmed stop the job was standing at, if it stopped
+   * at one. Carried so that an offer read back after a reload still says which
+   * bit to fit, which is the whole reason Z has to be zeroed again.
+   */
+  pendingPause?: PendingPause;
+}
+
+/** A tool change or programmed stop that a stopped job was waiting at. */
+export interface PendingPause {
+  kind: 'tool-change' | 'stop';
+  /** The operator prompt, e.g. "Tool change: fit the 1.5875 mm ball nose…". */
+  message: string;
 }
 
 /** A checkpoint recovered from somewhere, ready to be handed to the manager. */
@@ -347,7 +360,8 @@ export function beginCheckpoint(input: {
 export function recordProgress(
   fromLine: number,
   reason: CheckpointReason = 'streaming',
-  force = false
+  force = false,
+  pendingPause?: PendingPause
 ): void {
   if (!current) return;
 
@@ -358,6 +372,7 @@ export function recordProgress(
     at: now,
     fromLine,
     reason,
+    ...(pendingPause ? { pendingPause } : {}),
   };
 
   if (force || now - lastLocalWrite >= LOCAL_PROGRESS_MS) {

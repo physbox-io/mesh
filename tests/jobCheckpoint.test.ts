@@ -109,6 +109,16 @@ describe('checkpointing a running job', () => {
     expect(found!.program.gcode).toBe(p.gcode);
   });
 
+  it('remembers the tool change a stopped job was waiting at', async () => {
+    beginCheckpoint({ ...program(4000), jobName: 'Relief carve' });
+    const pause = { kind: 'tool-change' as const, message: 'Tool change: fit the 1.5875 mm ball nose.' };
+    recordProgress(2075, 'alarm', true, pause);
+
+    const found = await loadCheckpoint();
+    expect(found!.progress.fromLine).toBe(2075);
+    expect(found!.progress.pendingPause).toEqual(pause);
+  });
+
   it('does not offer a job that had cut nothing', async () => {
     beginCheckpoint(program(4000));
     // begin records line 0 on its own; nothing else has happened.
