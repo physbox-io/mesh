@@ -80,11 +80,28 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
     }));
   }
 
-  // The same for a scene that arrives carrying its own carve settings.
+  /*
+   * The same for a scene that arrives carrying its own carve settings -- and
+   * for one that arrives without, which has to take the last scene's back off.
+   *
+   * This dialog stays mounted between scenes, so whatever a generated board
+   * asked for (a fixed 100% scale, no background cut, a cut right through the
+   * stock) used to stay in force for the next model too. Each key the previous
+   * scene set goes back to its default before the new scene's are laid on.
+   * The stock is the bench's, not the scene's, and is left alone.
+   */
   const [syncedCarve, setSyncedCarve] = useState(carveSettings);
   if (syncedCarve !== carveSettings) {
+    const previous = syncedCarve;
     setSyncedCarve(carveSettings);
-    if (carveSettings) setOptions((prev) => ({ ...prev, ...carveSettings }));
+    setOptions((prev) => {
+      const next: Record<string, unknown> = { ...prev };
+      for (const key of Object.keys(previous ?? {})) {
+        if (key.startsWith('stock')) continue;
+        next[key] = (DEFAULT_RELIEF_OPTIONS as unknown as Record<string, unknown>)[key];
+      }
+      return { ...(next as typeof prev), ...(carveSettings ?? {}) };
+    });
   }
 
   const bed = useBedProbe(() => set('applyMeshLeveling', true));
