@@ -44,7 +44,7 @@ import { selectionSoups, splitOffThread, testAssemblyOffThread } from '../utils/
 import { filamentSpec } from '../utils/filaments';
 import { generateSolidMachining, DEFAULT_SOLID_OPTIONS } from '../utils/solidMachiningExporter';
 import type { Object3D } from 'three';
-import type { SceneNode, SceneGeom, SceneJoint } from '../types/scene';
+import type { SceneGraph, SceneNode, SceneGeom, SceneJoint } from '../types/scene';
 import type { RawGeom, RawJoint, RawNode } from '../utils/sceneNodes';
 import {
   boxLattice, cloneLattice, deserializeCage, orientFaces, serializeCage, toSceneGeom as latticeToSceneGeom, DEFAULT_UNIT as LATTICE_UNIT,
@@ -2704,6 +2704,38 @@ export function useMCPBridge() {
           } catch (e) {
             return { ok: false, error: String(e) };
           }
+        }
+
+        case 'LOAD_SCENE_FILE': {
+          // An Export JSON file, read off disk by the MCP server so that a scene
+          // of many megabytes never passes through a tool call. Loaded the way
+          // App.tsx's Import JSON loads one: the whole graph as written (name,
+          // castPrep and simFidelity included, no default-filling - the file came
+          // out of this app), its note cards and chat, the sim stopped, and no
+          // preset claiming the scene, so Save cannot overwrite one with it.
+          const scene = msg.scene as (SceneGraph & { noteCards?: unknown; copilotMessages?: unknown }) | undefined;
+          if (!scene || !Array.isArray(scene.nodes)) {
+            return { ok: false, error: 'The file is not a Mesh scene: it has no "nodes" array.' };
+          }
+          const { noteCards, copilotMessages, ...graph } = scene;
+          if (store.isPlaying) store.togglePlay();
+          store.setSculptNodeId(null);
+          store.setLatticeNodeId(null);
+          store.setActivePreset(undefined);
+          store.updateScene(graph, true);
+          // Awaited, unlike Import JSON's: the reply has to say whether it built.
+          await useStore.getState().recompile(useStore.getState().sceneGraph);
+          getPhysicsWorkerClient().clearHistory();
+          const win = window as unknown as PhysicsWindow;
+          win._physics_setNoteCards?.(Array.isArray(noteCards) ? noteCards as NoteCard[] : []);
+          win._physics_setCopilotMessages?.(Array.isArray(copilotMessages) ? copilotMessages as SavedCopilotMessage[] : []);
+          const error = useStore.getState().lastCompileError;
+          return {
+            ok: !error,
+            ...(error ? { error } : {}),
+            nodeCount: graph.nodes.length,
+            noteCardCount: Array.isArray(noteCards) ? noteCards.length : 0,
+          };
         }
 
         case 'UPDATE_SCENE': {
