@@ -1,4 +1,5 @@
 import type { PaintLayer } from '../utils/vertexPaint';
+import type { SurfaceTexture } from '../utils/surfaceTexture';
 export type GeomType = 'capsule' | 'sphere' | 'box' | 'plane' | 'cylinder' | 'ellipsoid' | 'mesh';
 export type JointType = 'hinge' | 'slide' | 'ball' | 'free';
 
@@ -40,6 +41,14 @@ export interface SceneGeom {
   // Purely decorative: nothing in the physics, the MJCF emitter or any exporter
   // reads it.
   paint?: PaintLayer;
+  /**
+   * Surface patterns laid onto faces of this geom (see utils/surfaceTexture),
+   * in order. Authoring intent only: the patterned mesh is derived from these
+   * and the geom's own surface, cached outside the graph (utils/geomSurface),
+   * and drawn and exported in place of the geom. The MJCF emitter never reads
+   * it, so the physics is the shape as authored.
+   */
+  textures?: SurfaceTexture[];
   fromto?: number[];
   pos?: number[];
   quat?: number[];

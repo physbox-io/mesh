@@ -33,6 +33,9 @@ import { resolveCsgGeoms } from '../../utils/csg';
 import { DEFAULT_UNIT } from '../../utils/latticeMesh';
 import { facesWatertight } from '../../utils/sculptMesh';
 import { creasedGeometry } from '../../utils/creasedNormals';
+import { cachedTexturedSurface, geomHalfLen } from '../../utils/geomSurface';
+import { requestTexturedSurface } from '../../utils/textureClient';
+import type { TexturedSurface } from '../../utils/surfaceTexture';
 import type { GeomType, SceneGraph, SceneNode } from '../../types/scene';
 import type { WeakSpot } from '../../utils/printAnalysis';
 import type { DataMirror, FrameFlagWindow, ModelMirror, MujocoShim, RenderGeom } from '../../types/sceneLayer';
@@ -344,6 +347,17 @@ interface DynamicGeomProps {
   staticBody?: boolean;
 }
 
+/** Z-up (MuJoCo) vertices to Y-up (three.js): the inverse of mjcf.ts's (x,y,z) to (x,-z,y). */
+function zupToYup(v: number[]): number[] {
+  const out = new Array<number>(v.length);
+  for (let i = 0; i < v.length; i += 3) {
+    out[i] = v[i];
+    out[i + 1] = v[i + 2];
+    out[i + 2] = -v[i + 1];
+  }
+  return out;
+}
+
 /*
  * Memoised, and handed its node and selection by the parent rather than
  * selecting them itself. Each geom used to walk the whole scene graph inside a
@@ -413,8 +427,32 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
     () => node?.geoms?.find((g) => g.name === name),
     [node, name]
   );
-  const paintLayer = geomEntry?.paint as PaintLayer | undefined;
-  const showPaint = !!nodeId && isPaintable(type, !!node?.isWedge) && (paintMode || !!paintLayer);
+  // --- Surface patterns -----------------------------------------------------
+  // A geom with patterns on its faces is drawn from the patterned mesh (see
+  // utils/geomSurface) once the worker has built it, and as authored until
+  // then. The last one built stays up while the next is on its way, so editing
+  // a pattern does not flash the bare face between every keystroke.
+  const [textured, setTextured] = useState<TexturedSurface | null>(null);
+  useEffect(() => {
+    if (!geomEntry?.textures?.length) {
+      setTextured(null);
+      return;
+    }
+    const halfLen = geomHalfLen(geomEntry);
+    const hit = cachedTexturedSurface(geomEntry, halfLen);
+    if (hit) {
+      setTextured(hit);
+      return;
+    }
+    let live = true;
+    void requestTexturedSurface(geomEntry, halfLen).then((surface) => { if (live) setTextured(surface); });
+    return () => { live = false; };
+  }, [geomEntry]);
+  const patterned = textured && textured.regions.some((r) => r.applied) ? textured : null;
+  // Paint is keyed to the authored mesh's vertices, which the patterned one
+  // does not have.
+  const paintLayer = (patterned ? undefined : geomEntry?.paint) as PaintLayer | undefined;
+  const showPaint = !patterned && !!nodeId && isPaintable(type, !!node?.isWedge) && (paintMode || !!paintLayer);
   // A mesh is drawn with crease-aware normals (shadedGeometry below), not the
   // single normal per vertex computeVertexNormals() gives a welded mesh. That
   // one normal averages a flat face into the wall beside it at every corner and
@@ -683,12 +721,18 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
   const meshBufferGeometry = useMemo(() => {
     if (type !== 'mesh' || !vertices || !faces) return null;
     const geo = new THREE.BufferGeometry();
+    // The patterned surface is built in the geom's Z-up frame. A dynamic mesh
+    // is drawn in that frame; a static one is drawn from its Y-up `vertices`,
+    // so it is turned back the way mjcf.ts turns those up.
+    const pattern = !dent && patterned
+      ? (isDynamic ? patterned.vertices : zupToYup(patterned.vertices))
+      : null;
     const positions = dent
       ? new Float32Array(dent.mesh.positions.subarray(0, dent.mesh.vertexCount * 3))
-      : new Float32Array(vertices);
+      : new Float32Array(pattern ?? vertices);
     const indices = dent
       ? new Uint32Array(dent.mesh.faces.subarray(0, dent.mesh.faceCount * 3))
-      : new Uint32Array(faces);
+      : new Uint32Array(pattern ? patterned!.faces : faces);
     geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     geo.setIndex(new THREE.BufferAttribute(indices, 1));
     geo.computeVertexNormals();
@@ -697,7 +741,7 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
     // handed out on every dent, and the version is the thing that says whether
     // the geometry actually changed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [type, vertices, faces, dent?.version]);
+  }, [type, vertices, faces, dent?.version, patterned, isDynamic]);
   // What is actually drawn: the same triangles, split along creases so flat
   // faces light flat and curved ones smooth (see flatShading above). Paint,
   // the edge overlay and the open-sculpt inside wall keep the welded copy.
@@ -770,6 +814,19 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
     if (!paintGeometry || type === 'mesh') return;
     return () => paintGeometry.dispose();
   }, [paintGeometry, type]);
+
+  // A patterned primitive, drawn as the mesh it now is, with crease-aware
+  // normals so a fluted face lights as flutes rather than as one smooth blur.
+  const patternedGeometry = useMemo(() => {
+    if (type === 'mesh' || !patterned) return null;
+    const { positions, normals, index } = creasedGeometry(new Float32Array(patterned.vertices), new Uint32Array(patterned.faces));
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geo.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+    geo.setIndex(new THREE.BufferAttribute(index, 1));
+    return geo;
+  }, [type, patterned]);
+  useEffect(() => () => { patternedGeometry?.dispose(); }, [patternedGeometry]);
 
   const { handlers: paintHandlers, cursorRef } = useVertexPaint({
     nodeId,
@@ -872,6 +929,19 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
   const renderedGeomMaterial = (
     <meshStandardMaterial key={`${alpha < 1 ? 'blend' : 'solid'}:${showPaint}`} {...materialProps} />
   );
+
+  if (patternedGeometry) {
+    return (
+      <group name={nodeId} ref={meshRef} position={initialPos} quaternion={initialQuaternion}>
+        {/* Already in the geom's own frame, cylinders along +Z included, so
+            none of the rotation the JSX primitives below are given. */}
+        <mesh castShadow receiveShadow geometry={patternedGeometry} {...dragHandlers}>
+          {renderedGeomMaterial}
+        </mesh>
+        {primitiveEdges}
+      </group>
+    );
+  }
 
   if (paintGeometry) {
     return (
@@ -1516,7 +1586,7 @@ export const SceneVisuals = React.memo(function SceneVisuals({ model, data, mujo
     // Static boxes not on the selected body render as one InstancedMesh.
     const instancedBoxGeoms = paintMode
       ? []
-      : allPrimitiveGeoms.filter(g => g.type === 'box' && g.staticBody && !g.customRender && g.nodeId !== selectedNodeId && !g.paint);
+      : allPrimitiveGeoms.filter(g => g.type === 'box' && g.staticBody && !g.customRender && g.nodeId !== selectedNodeId && !g.paint && !g.textures?.length);
     const instancedNames = new Set(instancedBoxGeoms.map(g => g.name));
     const primitiveGeoms = allPrimitiveGeoms.filter(g => !instancedNames.has(g.name));
     // The body under the sculpt tools is drawn by SculptSurface, which owns the

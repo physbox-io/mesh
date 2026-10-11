@@ -19,9 +19,9 @@ import { resolveCsgGeoms } from './csg';
 import {
   getNodeWorldTransform,
   getGeomFrame,
-  yupVertsToZup,
   type Point2D,
 } from './laserCutExporter';
+import { appendGeomTriangles } from './geomSurface';
 
 export interface ContourSliceOptions {
   /** Stock thickness, in meters. One layer is cut per thickness of model height. */
@@ -229,63 +229,6 @@ export function appendSolidTriangles(geom: SceneGeom, bodyMatrix: THREE.Matrix4,
   // a renderer's double-sided material lets it get away with, so flip a
   // solid that encloses negative volume rather than losing it.
   if (signedVolume(out, before, out.length) < 0) flipWinding(out, before, out.length);
-  return true;
-}
-
-/** Appends one geom's world triangles. Returns false for shapes with no volume. */
-function appendGeomTriangles(
-  geom: SceneGeom,
-  halfLen: number | undefined,
-  matrix: THREE.Matrix4,
-  out: number[]
-): boolean {
-  const s = geom.size || [];
-  const r = s[0] || 0.01;
-  let geometry: THREE.BufferGeometry;
-
-  switch (geom.type) {
-    case 'box':
-      geometry = new THREE.BoxGeometry(2 * (s[0] || 0.01), 2 * (s[1] || 0.01), 2 * (s[2] || 0.01));
-      break;
-    case 'sphere':
-      geometry = new THREE.SphereGeometry(r, 48, 24);
-      break;
-    case 'ellipsoid':
-      geometry = new THREE.SphereGeometry(1, 48, 24).scale(s[0] || 0.01, s[1] || 0.01, s[2] || 0.01);
-      break;
-    case 'cylinder':
-      // three builds these around +Y; the scene's primitives run along local +Z.
-      geometry = new THREE.CylinderGeometry(r, r, 2 * (halfLen ?? s[1] ?? r), 48).rotateX(Math.PI / 2);
-      break;
-    case 'capsule':
-      geometry = new THREE.CapsuleGeometry(r, 2 * (halfLen ?? s[1] ?? r), 12, 32).rotateX(Math.PI / 2);
-      break;
-    case 'mesh': {
-      // vertices is the Y-up (three.js) copy; renderVertices shares its space
-      // with pos/euler/size, and therefore with `matrix`.
-      const verts = geom.renderVertices ?? yupVertsToZup(geom.vertices || []);
-      const faces = geom.faces || [];
-      if (verts.length === 0 || faces.length === 0) return false;
-      const v = new THREE.Vector3();
-      for (let i = 0; i + 2 < faces.length; i += 3) {
-        for (let k = 0; k < 3; k++) {
-          const vi = faces[i + k] * 3;
-          if (vi + 2 >= verts.length) return false;
-          v.set(verts[vi], verts[vi + 1], verts[vi + 2]).applyMatrix4(matrix);
-          out.push(v.x, v.y, v.z);
-        }
-      }
-      return true;
-    }
-    // A plane is the infinite ground, not stock to be cut.
-    default:
-      return false;
-  }
-
-  const nonIndexed = geometry.index ? geometry.toNonIndexed() : geometry;
-  nonIndexed.applyMatrix4(matrix);
-  const pos = nonIndexed.attributes.position.array;
-  for (let i = 0; i < pos.length; i++) out.push(pos[i]);
   return true;
 }
 
