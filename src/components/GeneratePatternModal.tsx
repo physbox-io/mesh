@@ -1,5 +1,5 @@
 import React, { useMemo, useRef, useState, useEffect } from 'react';
-import { X, AlertCircle, Shuffle, Sparkles } from 'lucide-react';
+import { X, AlertCircle, Sparkles } from 'lucide-react';
 import { NumberInput } from '@physbox-io/ui';
 import { useStore } from '../store/useStore';
 import { useSettled } from './carveTooling';
@@ -18,6 +18,7 @@ import {
 import type { SceneGraph } from '../types/scene';
 import type { ReliefCarveOptions } from '../utils/reliefCarveExporter';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
+import { Field, PatternFields, inputClass } from './PatternFields';
 
 /**
  * The surface pattern generators, in the preset dropdown's Generators group.
@@ -34,19 +35,6 @@ import { useEscapeToClose } from '../hooks/useEscapeToClose';
 /** How fine a grid the mesh is built on. The preview uses a coarser one. */
 const EXPORT_COLS = 420;
 const PREVIEW_COLS = 240;
-
-const inputClass =
-  'w-full px-2 py-1 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 ' +
-  'text-xs text-slate-700 dark:text-slate-200 focus:outline-none focus:border-fuchsia-500';
-
-const Field: React.FC<{ label: string; hint?: string; children: React.ReactNode }> = ({
-  label, hint, children,
-}) => (
-  <label className="block space-y-1" title={hint}>
-    <span className="block text-[11px] font-medium text-slate-500 dark:text-slate-400">{label}</span>
-    {children}
-  </label>
-);
 
 export const GeneratePatternModal: React.FC = () => {
   const patternId = useStore((s) => s.patternGeneratorId);
@@ -228,61 +216,7 @@ export const GeneratePatternModal: React.FC = () => {
         <div className="p-5 overflow-y-auto flex-1 grid grid-cols-1 md:grid-cols-[1fr_1.1fr] gap-5">
           {/* Controls */}
           <div className="space-y-3">
-            {spec.fields.map((f) => {
-              if (f.kind === 'number') {
-                return (
-                  <Field key={f.key} label={f.unit ? `${f.label} (${f.unit})` : f.label} hint={f.hint}>
-                    <NumberInput
-                      min={f.min}
-                      max={f.max}
-                      step={f.step}
-                      fallbackOnBlur={Number(spec.defaults[f.key])}
-                      value={Number(options[f.key])}
-                      onChange={(v) => set(f.key, v)}
-                      className={inputClass}
-                    />
-                  </Field>
-                );
-              }
-              if (f.kind === 'choice') {
-                return (
-                  <Field key={f.key} label={f.label} hint={f.hint}>
-                    <select
-                      value={String(options[f.key] ?? '')}
-                      onChange={(e) => set(f.key, e.target.value)}
-                      className={`${inputClass} cursor-pointer`}
-                    >
-                      {f.options.map((o) => (
-                        <option key={o.value} value={o.value}>{o.label}</option>
-                      ))}
-                    </select>
-                  </Field>
-                );
-              }
-              return (
-                <Field key={f.key} label={f.label} hint={f.hint}>
-                  <div className="flex items-center gap-1.5">
-                    <NumberInput
-                      min={1}
-                      max={999999}
-                      step={1}
-                      fallbackOnBlur={1}
-                      value={Number(options[f.key])}
-                      onChange={(v) => set(f.key, v)}
-                      className={inputClass}
-                    />
-                    <button
-                      type="button"
-                      onClick={() => set(f.key, Math.floor(Math.random() * 99999) + 1)}
-                      title="Try another one of the same kind"
-                      className="p-1.5 rounded-md border border-slate-200 dark:border-slate-700 text-slate-500 hover:text-fuchsia-500 hover:border-fuchsia-500 transition-colors cursor-pointer"
-                    >
-                      <Shuffle className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                </Field>
-              );
-            })}
+            <PatternFields spec={spec} options={options} onChange={set} />
 
             <div className="pt-1 border-t border-slate-200 dark:border-slate-800" />
 

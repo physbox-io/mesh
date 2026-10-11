@@ -24,6 +24,8 @@ import {
 import { collidersAreStale, collisionHashOf, type ColliderResult } from '../utils/convexDecomposition';
 import { insetNegatives } from '../utils/scaleNode';
 import type { PaintLayer } from '../utils/vertexPaint';
+import type { SurfaceTexture } from '../utils/surfaceTexture';
+import type { FacePatternTarget } from '../utils/facePatternPick';
 import type { DocsTabId } from '../utils/docsTabs';
 import { compileToMJCF } from '../utils/mjcf';
 import { PRESETS, pendulumPreset, generateGearGeoms } from '../presets/presetScenes';
@@ -1603,6 +1605,8 @@ export interface PhysicsState {
   carveSettings: Partial<ReliefCarveOptions> | null;
   /** Which surface pattern generator's dialog is open, if any. */
   patternGeneratorId: string | null;
+  /** The face the pattern-on-a-face dialog is open on, if it is. */
+  facePatternTarget: FacePatternTarget | null;
   isMachineConfigOpen: boolean;
   /**
    * The reference guide. It lives here rather than in App because the (i)
@@ -1618,6 +1622,13 @@ export interface PhysicsState {
   setCarveSettings: (settings: Partial<ReliefCarveOptions> | null) => void;
   openPatternGenerator: (id: string) => void;
   closePatternGenerator: () => void;
+  openFacePattern: (target: FacePatternTarget) => void;
+  closeFacePattern: () => void;
+  /**
+   * Replaces a geom's surface patterns (see utils/surfaceTexture), or clears
+   * them with undefined. No recompile: the MJCF never reads them.
+   */
+  setGeomTextures: (nodeId: string, geomName: string, textures: SurfaceTexture[] | undefined) => void;
   /**
    * Replace the scene with something a generator built, and hand the exporter
    * the settings it should be cut with.
@@ -2398,6 +2409,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
   setPrintBed: (patch) => set((state) => ({ printBed: savePrintBed(clampPrintBed({ ...state.printBed, ...patch })) })),
   carveSettings: null,
   patternGeneratorId: null,
+  facePatternTarget: null,
   isMachineConfigOpen: false,
   isDocsOpen: false,
   docsTab: 'gravity',
@@ -2455,6 +2467,8 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
   setCarveSettings: (carveSettings) => set({ carveSettings }),
   openPatternGenerator: (id) => set({ patternGeneratorId: id }),
   closePatternGenerator: () => set({ patternGeneratorId: null }),
+  openFacePattern: (target) => set({ facePatternTarget: target }),
+  closeFacePattern: () => set({ facePatternTarget: null }),
   setMachineConfigOpen: (isMachineConfigOpen) => set({ isMachineConfigOpen }),
   openDocs: (docsTab) => set({ docsTab, isDocsOpen: true }),
   setDocsTab: (docsTab) => set({ docsTab }),
@@ -2510,6 +2524,23 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     // the scene graph rather than out of the compiled model. Rebuilding here
     // would drop the simulation back to its initial pose once per stroke to
     // change nothing the simulation can see.
+    set({ sceneGraph: newScene });
+  },
+
+  setGeomTextures: (nodeId, geomName, textures) => {
+    const existing = findNode(get().sceneGraph.nodes, nodeId);
+    const index = existing?.geoms?.findIndex((geom: SceneGeom) => geom.name === geomName) ?? -1;
+    if (index === -1) return;
+
+    get().recordInteraction('pattern');
+    const newScene = cloneSceneGraph(get().sceneGraph);
+    const node = findNode(newScene.nodes, nodeId);
+    if (!node?.geoms?.[index]) return;
+    if (textures?.length) node.geoms[index].textures = textures;
+    else delete node.geoms[index].textures;
+    // No recompile, for the reason setGeomPaint gives: the physics is the
+    // shape as authored, and the viewport and the exporters read the
+    // patterns off the scene graph (utils/geomSurface).
     set({ sceneGraph: newScene });
   },
 
@@ -2881,6 +2912,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
       carveSettings: carve,
       stock: stockFromCarve(carve, state.stock),
       patternGeneratorId: null,
+      facePatternTarget: null,
       cameraOverride: null,
       cameraResetToken: state.cameraResetToken + 1,
       latticeNodeId: null,
@@ -4731,7 +4763,19 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     const node = findNode(newScene.nodes, nodeId);
     if (!node) return;
     const source = (node.geoms || []).filter((g: SceneGeom) => !g.csgDerived);
-    node.geoms = [...source, ...result.geoms];
+    // Patterns on the compiled surface are authored on a derived geom, so they
+    // are carried over to the one that replaces it -- by name, or from the
+    // only visual mesh to the only visual mesh. Their seeds find the face
+    // again on the new surface, or say it has gone.
+    const oldVisual = (node.geoms || []).filter((g: SceneGeom) => g.csgDerived === 'visual' && g.textures?.length);
+    const newVisual = result.geoms.filter((g: SceneGeom) => g.csgDerived === 'visual');
+    const geoms = result.geoms.map((g: SceneGeom) => {
+      if (g.csgDerived !== 'visual' || !oldVisual.length) return g;
+      const from = oldVisual.find((o: SceneGeom) => o.name === g.name)
+        ?? (oldVisual.length === 1 && newVisual.length === 1 ? oldVisual[0] : undefined);
+      return from ? { ...g, textures: from.textures } : g;
+    });
+    node.geoms = [...source, ...geoms];
     node.csgHash = result.hash;
     // Summarized, not stored whole: a lattice mesh operand is megabytes of
     // polyhedron literal, and this field is shown, undone and saved.

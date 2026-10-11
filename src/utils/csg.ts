@@ -591,7 +591,7 @@ function quadratic(a: number, b: number, c: number): number[] {
  * top of a dome. Meshes are the one case with no closed form, and there the
  * triangles ARE the surface, so intersecting them is exact.
  */
-function geomRayHits(geom: SceneGeom, origin: THREE.Vector3, dir: THREE.Vector3): SurfaceHit[] {
+export function geomRayHits(geom: SceneGeom, origin: THREE.Vector3, dir: THREE.Vector3): SurfaceHit[] {
   const s = geom.size || [];
   const hits: SurfaceHit[] = [];
 

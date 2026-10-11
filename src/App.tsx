@@ -42,6 +42,7 @@ import { physicsGlobals, type CopilotMessage } from './physicsGlobals';
 import { ImportStlModal } from './components/ImportStlModal';
 import { ImportImageModal } from './components/ImportImageModal';
 import { GeneratePatternModal } from './components/GeneratePatternModal';
+import { FacePatternModal } from './components/FacePatternModal';
 import { SURFACE_PATTERNS } from './utils/surfacePatterns';
 import { ExportLaserCutModal } from './components/ExportLaserCutModal';
 import { ExportContourSliceModal } from './components/ExportContourSliceModal';
@@ -6944,6 +6945,7 @@ api.applyForce([force, 0, 0]);
       {/* Surface pattern generators. Reads its own open/closed state from the
           store, so there is nothing to pass and nothing to keep in step. */}
       <GeneratePatternModal />
+      <FacePatternModal />
 
       {/* Image heightmap importer — mounted only while open, like the STL one */}
       {isImportImageModalOpen && (

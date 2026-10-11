@@ -1,0 +1,294 @@
+import React, { useEffect, useState } from 'react';
+import { X, AlertCircle, Sparkles, Trash2 } from 'lucide-react';
+import { NumberInput } from '@physbox-io/ui';
+import { useStore } from '../store/useStore';
+import { useSettled } from '../hooks/useSettled';
+import { useEscapeToClose } from '../hooks/useEscapeToClose';
+import { findNodeById } from '../utils/sceneTree';
+import { SURFACE_PATTERNS, patternById, type PatternOptions } from '../utils/surfacePatterns';
+import {
+  DEFAULT_MAX_TILT_DEG,
+  DEFAULT_TEXTURE_BORDER_M,
+  DEFAULT_TEXTURE_CELL_M,
+  type SurfaceTexture,
+  type TexturedSurface,
+} from '../utils/surfaceTexture';
+import { geomHalfLen } from '../utils/geomSurface';
+import { requestTexturedSurface } from '../utils/textureClient';
+import type { FacePatternTarget } from '../utils/facePatternPick';
+import { Field, PatternFields, inputClass } from './PatternFields';
+
+/**
+ * One of the Generators patterns, put on a face of a part that is already in
+ * the scene (T, or "Pattern a face" in the mode menu).
+ *
+ * It docks at the side with no backdrop, because the preview IS the part: every
+ * change is written to the scene as it is made, the viewport rebuilds the
+ * patterned surface in a worker, and Cancel puts back what was there. The
+ * physics never sees any of it (see utils/geomSurface).
+ */
+
+/** Patterns that can go on a face: a through-cut needs a whole board to cut through. */
+const FACE_PATTERNS = SURFACE_PATTERNS.filter((p) => !p.throughCut);
+
+const DEFAULT_DEPTH_MM = 1.5;
+
+const mm = (m: number) => Math.round(m * 1e5) / 100;
+
+function newTexture(target: FacePatternTarget): SurfaceTexture {
+  const spec = FACE_PATTERNS[0];
+  return {
+    pattern: spec.id,
+    options: { ...spec.defaults },
+    depthM: -DEFAULT_DEPTH_MM / 1000,
+    borderM: DEFAULT_TEXTURE_BORDER_M,
+    cellM: DEFAULT_TEXTURE_CELL_M,
+    seedAt: target.seedAt,
+    seedNormal: target.seedNormal,
+  };
+}
+
+const targetKey = (t: FacePatternTarget | null) =>
+  t ? `${t.nodeId}|${t.geomName}|${t.index ?? 'new'}|${t.seedAt.join(',')}` : null;
+
+export const FacePatternModal: React.FC = () => {
+  const target = useStore((s) => s.facePatternTarget);
+  const closeFacePattern = useStore((s) => s.closeFacePattern);
+  const setGeomTextures = useStore((s) => s.setGeomTextures);
+  const geom = useStore((s) => {
+    if (!s.facePatternTarget) return null;
+    const node = findNodeById(s.sceneGraph.nodes, s.facePatternTarget.nodeId);
+    return node?.geoms?.find((g) => g.name === s.facePatternTarget!.geomName) ?? null;
+  });
+
+  // What the geom had when the dialog opened, which Cancel puts back, and
+  // where in its list the pattern being edited sits.
+  const [before, setBefore] = useState<SurfaceTexture[] | undefined>(undefined);
+  const [index, setIndex] = useState(0);
+  const [draft, setDraft] = useState<SurfaceTexture | null>(null);
+  const [report, setReport] = useState<TexturedSurface | null>(null);
+
+  /*
+   * Seeded when the dialog opens on a face, folded in during render as the
+   * board generator does, so the first frame never shows another face's
+   * pattern.
+   */
+  const [synced, setSynced] = useState<string | null>(null);
+  const key = targetKey(target);
+  if (key !== synced) {
+    setSynced(key);
+    if (target && geom) {
+      const existing = geom.textures ?? [];
+      const editing = target.index !== undefined && existing[target.index] ? target.index : undefined;
+      setBefore(geom.textures);
+      setIndex(editing ?? existing.length);
+      setDraft(editing !== undefined ? existing[editing] : newTexture(target));
+      setReport(null);
+    } else {
+      setDraft(null);
+    }
+  }
+
+  const settled = useSettled(draft, 200);
+
+  // Written to the scene as it settles, so the part in the viewport is the preview.
+  useEffect(() => {
+    if (!target || !settled || synced !== targetKey(target)) return;
+    const list = [...(before ?? [])];
+    list[index] = settled;
+    setGeomTextures(target.nodeId, target.geomName, list);
+  }, [settled, target, before, index, synced, setGeomTextures]);
+
+  // The same build the viewport draws, for its numbers and its warnings.
+  useEffect(() => {
+    if (!geom?.textures?.length) return;
+    let live = true;
+    void requestTexturedSurface(geom, geomHalfLen(geom)).then((surface) => { if (live) setReport(surface); });
+    return () => { live = false; };
+  }, [geom]);
+
+  const cancel = () => {
+    if (target) setGeomTextures(target.nodeId, target.geomName, before);
+    closeFacePattern();
+  };
+  useEscapeToClose(!!target, cancel);
+
+  if (!target || !draft) return null;
+  const spec = patternById(draft.pattern) ?? FACE_PATTERNS[0];
+  const options: PatternOptions = { ...spec.defaults, ...(draft.options ?? {}) };
+  const editingExisting = !!before && index < before.length;
+
+  const patch = (p: Partial<SurfaceTexture>) => setDraft((d) => (d ? { ...d, ...p } : d));
+  const setOption = (k: string, v: number | string | undefined) => {
+    if (v === undefined) return;
+    patch({ options: { ...options, [k]: v } });
+  };
+  const choosePattern = (id: string) => {
+    const next = patternById(id);
+    if (next) patch({ pattern: id, options: { ...next.defaults } });
+  };
+
+  const emboss = draft.depthM > 0;
+  const depthMm = Math.abs(draft.depthM) * 1000;
+  const region = report?.regions[index];
+  const pending = !region || synced !== key;
+  const warnings = (report?.warnings ?? []).filter((w) => w.startsWith(`Pattern ${index + 1}:`) || !w.startsWith('Pattern '));
+
+  // Done writes what is in the fields now rather than what last settled, so a
+  // change made in the last fifth of a second is not lost.
+  const done = () => {
+    const list = [...(before ?? [])];
+    list[index] = draft;
+    setGeomTextures(target.nodeId, target.geomName, list);
+    closeFacePattern();
+  };
+
+  const remove = () => {
+    const list = (before ?? []).filter((_, i) => i !== index);
+    setGeomTextures(target.nodeId, target.geomName, list.length ? list : undefined);
+    closeFacePattern();
+  };
+
+  return (
+    <div className="fixed top-16 right-4 z-50 w-80 max-h-[calc(100dvh-6rem)] flex flex-col bg-white dark:bg-slate-900 rounded-xl shadow-2xl border border-slate-200 dark:border-slate-800 overflow-hidden">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-slate-200 dark:border-slate-800">
+        <div className="flex items-center gap-2">
+          <Sparkles className="w-4 h-4 text-fuchsia-500" />
+          <h3 className="font-bold text-slate-800 dark:text-slate-100 text-sm">Pattern on a face</h3>
+        </div>
+        <button
+          onClick={cancel}
+          className="p-1 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded-lg transition-colors cursor-pointer"
+          aria-label="Close"
+        >
+          <X className="w-4 h-4" />
+        </button>
+      </div>
+
+      <div className="p-4 overflow-y-auto flex-1 space-y-3">
+        <Field label="Pattern" hint={spec.blurb}>
+          <select value={spec.id} onChange={(e) => choosePattern(e.target.value)} className={`${inputClass} cursor-pointer`}>
+            {FACE_PATTERNS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
+          </select>
+        </Field>
+        <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">{spec.blurb}</p>
+
+        <PatternFields spec={spec} options={options} onChange={setOption} />
+
+        <div className="pt-1 border-t border-slate-200 dark:border-slate-800" />
+
+        <div className="grid grid-cols-2 gap-2">
+          <Field label="Into the face" hint="Engrave sinks the pattern into the face. Emboss stands it proud of it.">
+            <select
+              value={emboss ? 'emboss' : 'engrave'}
+              onChange={(e) => patch({ depthM: (e.target.value === 'emboss' ? 1 : -1) * Math.abs(draft.depthM) })}
+              className={`${inputClass} cursor-pointer`}
+            >
+              <option value="engrave">Engrave</option>
+              <option value="emboss">Emboss</option>
+            </select>
+          </Field>
+          <Field label="Depth (mm)" hint="How far the deepest point sits below the face, or the highest above it.">
+            <NumberInput
+              min={0.1} max={20} step={0.1} fallbackOnBlur={DEFAULT_DEPTH_MM}
+              value={depthMm}
+              onChange={(v) => { if (v !== undefined && v > 0) patch({ depthM: (emboss ? 1 : -1) * v / 1000 }); }}
+              className={inputClass}
+            />
+          </Field>
+          <Field label="Border (mm)" hint="A plain rim this wide is left round the edge of the face.">
+            <NumberInput
+              min={0} max={100} step={0.5} fallbackOnBlur={mm(DEFAULT_TEXTURE_BORDER_M)}
+              value={mm(draft.borderM ?? DEFAULT_TEXTURE_BORDER_M)}
+              onChange={(v) => { if (v !== undefined) patch({ borderM: v / 1000 }); }}
+              className={inputClass}
+            />
+          </Field>
+          <Field label="Detail (mm)" hint="The size of the triangles the pattern is built from. Smaller is crisper and slower.">
+            <NumberInput
+              min={0.15} max={5} step={0.05} fallbackOnBlur={mm(DEFAULT_TEXTURE_CELL_M)}
+              value={mm(draft.cellM ?? DEFAULT_TEXTURE_CELL_M)}
+              onChange={(v) => { if (v !== undefined && v > 0) patch({ cellM: v / 1000 }); }}
+              className={inputClass}
+            />
+          </Field>
+          <Field label="Rotate (°)" hint="Turns the pattern on the face.">
+            <NumberInput
+              min={-360} max={360} step={15} fallbackOnBlur={0}
+              value={draft.twistDeg ?? 0}
+              onChange={(v) => { if (v !== undefined) patch({ twistDeg: v }); }}
+              className={inputClass}
+            />
+          </Field>
+          <Field label="Scale (×)" hint="Draws every feature of the pattern this much bigger.">
+            <NumberInput
+              min={0.1} max={10} step={0.1} fallbackOnBlur={1}
+              value={draft.scale ?? 1}
+              onChange={(v) => { if (v !== undefined && v > 0) patch({ scale: v }); }}
+              className={inputClass}
+            />
+          </Field>
+          <Field label="Stop at (°)" hint="On a curved surface, how far round from where you clicked the pattern may go.">
+            <NumberInput
+              min={1} max={179} step={5} fallbackOnBlur={DEFAULT_MAX_TILT_DEG}
+              value={draft.maxTiltDeg ?? DEFAULT_MAX_TILT_DEG}
+              onChange={(v) => { if (v !== undefined) patch({ maxTiltDeg: v }); }}
+              className={inputClass}
+            />
+          </Field>
+        </div>
+
+        <div className="grid grid-cols-2 gap-2 text-[11px]">
+          <div className="bg-slate-100 dark:bg-slate-800 p-2 rounded-lg">
+            <div className="text-slate-400">Face</div>
+            <div className="font-semibold text-slate-700 dark:text-slate-200">
+              {pending || !region.applied ? '—' : `${mm(region.extentM[0])} × ${mm(region.extentM[1])} mm`}
+            </div>
+          </div>
+          <div className="bg-slate-100 dark:bg-slate-800 p-2 rounded-lg">
+            <div className="text-slate-400">Triangles</div>
+            <div className="font-semibold text-slate-700 dark:text-slate-200">
+              {pending ? 'building…' : region.triangles.toLocaleString()}
+            </div>
+          </div>
+        </div>
+
+        {(region && !region.applied ? [region.reason ?? 'It could not be put on that face.'] : warnings).map((w) => (
+          <div key={w} className="flex items-start gap-2 p-2 rounded-lg bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900/60">
+            <AlertCircle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+            <p className="text-[11px] text-amber-700 dark:text-amber-300 leading-relaxed">{w.replace(/^Pattern \d+: /, '')}</p>
+          </div>
+        ))}
+
+        <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
+          Drawn and exported with the pattern; simulated as the plain shape.
+        </p>
+      </div>
+
+      <div className="flex items-center justify-between gap-2 px-4 py-3 border-t border-slate-200 dark:border-slate-800">
+        {editingExisting ? (
+          <button
+            onClick={remove}
+            className="flex items-center gap-1 px-2 py-1.5 text-xs font-semibold text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 rounded-lg transition-colors cursor-pointer"
+          >
+            <Trash2 className="w-3.5 h-3.5" /> Remove
+          </button>
+        ) : <span />}
+        <div className="flex items-center gap-2">
+          <button
+            onClick={cancel}
+            className="px-3 py-1.5 text-xs font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition-colors cursor-pointer"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={done}
+            className="px-4 py-1.5 text-xs font-bold text-white bg-fuchsia-600 hover:bg-fuchsia-500 rounded-lg transition-colors cursor-pointer"
+          >
+            Done
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};

@@ -43,6 +43,7 @@ import { solveScaleToFit, type MateFeature } from '../../utils/mateSnap';
 import { bodyFeatures, neighbourFeatures, documentAxes, graphAxes } from '../../utils/mateFeatures';
 import { snapToFloor, snapThreshold } from '../../utils/floorSnap';
 import { useOrbitEnable } from './useOrbitEnable';
+import { pickPatternFace } from '../../utils/facePatternPick';
 
 type Axis = 'x' | 'y' | 'z';
 
@@ -316,6 +317,7 @@ export const ObjectGestureController = () => {
     return found;
   }, [scene]);
 
+
   /**
    * Where a scale of `factor` puts a group that started at `position`.
    *
@@ -387,6 +389,41 @@ export const ObjectGestureController = () => {
       caster.ray.direction.clone().transformDirection(inverse).normalize(),
     );
   }, [camera, gl]);
+
+  /**
+   * Opens the pattern dialog on the face of the selected body under the
+   * pointer (T), or says why not. A body drawn only as static meshes has its
+   * groups straight in the Y-up scene rather than in the Z-up group, so its
+   * ray is turned into Z-up here.
+   */
+  const pickPatternAt = useCallback((x: number, y: number): boolean => {
+    const store = useStore.getState();
+    const nodeId = store.selectedNodeId;
+    if (!nodeId) return false;
+    const node = findNode(store.sceneGraph.nodes, nodeId);
+    const groups = groupsFor(nodeId);
+    const parent = (groups.find((g) => g.parent && g.parent.type !== 'Scene') ?? groups[0])?.parent;
+    if (!node || !parent) return false;
+    const ray = rayIn(parent, x, y);
+    if (parent.type === 'Scene') {
+      const zUp = (v: THREE.Vector3) => v.set(v.x, -v.z, v.y);
+      zUp(ray.origin);
+      zUp(ray.direction);
+    }
+    const pose = bodyPoseOf(node.id, node.pos);
+    const toBody = pose.rot.clone().transpose();
+    const origin = ray.origin.clone().sub(pose.pos).applyMatrix3(toBody);
+    const direction = ray.direction.clone().applyMatrix3(toBody).normalize();
+    const pick = pickPatternFace(node, origin.toArray(), direction.toArray());
+    if (!pick) {
+      flash('Point at a face of the selected part to put a pattern on it');
+      return false;
+    }
+    store.openFacePattern({ nodeId, ...pick });
+    return true;
+  }, [flash, groupsFor, rayIn]);
+  /** Set by the mode menu's "Pattern a face": the next click picks the face. */
+  const patternArmed = useRef(false);
 
   /**
    * Where the pointer is, on the surface a move is measured against.
@@ -1123,6 +1160,17 @@ export const ObjectGestureController = () => {
       // the docs suggest WASD and arrows, and S here scaled the selection
       // while it was meant to steer a cart.
       if (useStore.getState().isPlaying) return;
+      if (key === 'escape' && patternArmed.current) { patternArmed.current = false; setGestureStatus(null); return; }
+      if (key === 't') {
+        // A pattern on the face under the pointer. Not while another tool
+        // owns the pointer, for the same reasons as the gestures below.
+        const store = useStore.getState();
+        if (store.latticeNodeId || store.sculptNodeId || store.paintMode || store.measureMode) return;
+        if (!store.selectedNodeId) return;
+        event.preventDefault();
+        pickPatternAt(pointer.current.x, pointer.current.y);
+        return;
+      }
       if (key === 'g' || key === 'm') { begin('move'); return; }
       if (key !== 's' && key !== 'i') return;
       begin(key === 's' ? 'scale' : 'inset');
@@ -1139,6 +1187,10 @@ export const ObjectGestureController = () => {
       // Not under a running simulation, whoever asks: the solver moves the
       // body every step, and a gesture moving it too is the two fighting.
       if (useStore.getState().isPlaying) return;
+      // From the menu the pointer is on the menu, not on a face, so the next
+      // click on the part is the pick.
+      patternArmed.current = kind === 'pattern';
+      if (kind === 'pattern') flash('Click a face of the selected part to put a pattern on it');
       if (kind === 'move' || kind === 'scale' || kind === 'inset') begin(kind);
     };
     window.addEventListener('physbox:gesture', onAsked);
@@ -1146,7 +1198,7 @@ export const ObjectGestureController = () => {
       window.removeEventListener('keydown', onKey, true);
       window.removeEventListener('physbox:gesture', onAsked);
     };
-  }, [begin, draw, end]);
+  }, [begin, draw, end, flash, pickPatternAt, setGestureStatus]);
 
   /*
    * The pointer handlers are registered ONCE and read the current callbacks out
@@ -1163,10 +1215,10 @@ export const ObjectGestureController = () => {
    * Registering once removes the race entirely, and the gesture is still put
    * back on unmount, which is the case the cleanup was there for.
    */
-  const handlers = useRef({ draw, end, clear });
+  const handlers = useRef({ draw, end, clear, pickPatternAt, canvas: gl.domElement });
   useEffect(() => {
-    handlers.current = { draw, end, clear };
-  }, [clear, draw, end]);
+    handlers.current = { draw, end, clear, pickPatternAt, canvas: gl.domElement };
+  }, [clear, draw, end, pickPatternAt, gl]);
 
   useEffect(() => {
     const move = (event: PointerEvent) => {
@@ -1175,7 +1227,17 @@ export const ObjectGestureController = () => {
       handlers.current.draw();
     };
     const down = (event: PointerEvent) => {
-      if (!gesture.current) return;
+      if (!gesture.current) {
+        // The click the menu's "Pattern a face" asked for. Only on the
+        // canvas: a click on a panel just puts the mode away.
+        if (!patternArmed.current || event.button !== 0) return;
+        patternArmed.current = false;
+        if (event.target !== handlers.current.canvas) return;
+        event.preventDefault();
+        event.stopPropagation();
+        handlers.current.pickPatternAt(event.clientX, event.clientY);
+        return;
+      }
       event.preventDefault();
       event.stopPropagation();
       handlers.current.end(event.button === 0);

@@ -71,7 +71,7 @@ interface ModeChoice {
   hint: string;
   /** A lattice tool to switch to, or a gesture to start. */
   tool?: LatticeTool;
-  gesture?: 'move' | 'rotate' | 'scale' | 'inset' | 'measure-distance' | 'measure-angle' | 'round-edges';
+  gesture?: 'move' | 'rotate' | 'scale' | 'inset' | 'measure-distance' | 'measure-angle' | 'round-edges' | 'pattern';
   /** Put every tool away, leave sculpt or lattice mode, and drop the selection. */
   none?: true;
   /** Open sculpt or lattice mode on the selected body. */
@@ -115,6 +115,7 @@ const BODY_INSET: ModeChoice = { key: 'I', label: 'Inset face', gesture: 'inset'
 const SELECT_MULTIPLE: ModeChoice = { key: '⇧', label: 'Select multiple', multi: true, hint: 'Drag a box across bodies to select them all (Shift-drag adds), or click one to add or remove it — to split or combine several as one. Esc to stop' };
 
 const ROUND_EDGES: ModeChoice = { key: 'E', label: 'Round edges', gesture: 'round-edges', hint: 'Round or bevel edges of the selected part: click edges or faces, pick a size' };
+const PATTERN_FACE: ModeChoice = { key: 'T', label: 'Pattern a face', gesture: 'pattern', hint: 'Click a face of the selected part to carve or emboss one of the Generators patterns into it' };
 
 /**
  * Measuring, which is not modelling and is offered whether anything is selected
@@ -287,7 +288,7 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
         ...(enterChoice ? [enterChoice] : []),
         ...(latticeNodeId ? LATTICE_TOOLS : []),
         ...(canGesture ? [...GESTURES, latticeNodeId ? LATTICE_INSET : BODY_INSET] : []),
-        ...(selectedNodeId && !latticeNodeId && !sculptNodeId ? [ROUND_EDGES] : []),
+        ...(selectedNodeId && !latticeNodeId && !sculptNodeId ? [ROUND_EDGES, PATTERN_FACE] : []),
         ...MEASURE,
       ];
 
