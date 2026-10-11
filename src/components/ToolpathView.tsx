@@ -6,6 +6,7 @@ import type { ToolpathSegment } from '../utils/reliefCarveExporter';
 import type { MachineState } from '../utils/webSerialManager';
 import { clockMoves, formatDuration, type ClockedMove, type TimedMove } from '../utils/timeEstimate';
 import type { MotionProfile } from '../utils/motionProfile';
+import { moveIndexAt, trackPlayhead, PLAYHEAD_START, type PlayheadState } from '../utils/livePlayhead';
 
 /**
  * What the viewport needs to know about a job. A relief carve's result and a
@@ -158,113 +159,6 @@ function depthColour(z: number, deepest: number, out: THREE.Color): THREE.Color 
     a[1] + (b[1] - a[1]) * f,
     a[2] + (b[2] - a[2]) * f
   );
-}
-
-/** Squared distance from a point to the segment a move sweeps. */
-function distanceSqToMove(m: ClockedMove, x: number, y: number, z: number): number {
-  const dx = m.x2 - m.x1;
-  const dy = m.y2 - m.y1;
-  const dz = m.z2 - m.z1;
-  const lenSq = dx * dx + dy * dy + dz * dz;
-  let t = 0;
-  if (lenSq > 1e-12) {
-    t = ((x - m.x1) * dx + (y - m.y1) * dy + (z - m.z1) * dz) / lenSq;
-    t = Math.min(1, Math.max(0, t));
-  }
-  const px = m.x1 + dx * t - x;
-  const py = m.y1 + dy * t - y;
-  const pz = m.z1 + dz * t - z;
-  return px * px + py * py + pz * pz;
-}
-
-/** How far off the path the machine may report before the search gives up and re-syncs, mm. */
-const LIVE_SNAP_TOLERANCE_MM = 6;
-/** How many moves ahead of the last match the forward search looks. */
-const LIVE_SEARCH_WINDOW = 4000;
-
-/**
- * Where on the program the machine actually is, from the position it reports.
- *
- * The obvious source — GRBL's line count, scaled onto the clock — is wrong
- * twice over, and both errors run the same way. Lines are counted as they are
- * *sent*, and the controller holds a planner buffer of them, so the count runs
- * ahead of the cutter by as much as the buffer is deep. And a line is not a
- * unit of time: a rapid across the stock is one line and a fraction of a
- * second, a raster pass is one line and several seconds, so mapping "62% of
- * the lines" onto "62% of the clock" skews wherever the two kinds are not
- * evenly mixed — which on a relief is everywhere, because roughing and
- * finishing have quite different mixes.
- *
- * The reported position has neither problem: it is where the tool is. So the
- * playhead is found by projecting that position onto the path and taking the
- * clock of the point it lands on.
- *
- * The search runs forward from the last match rather than over the whole path,
- * because a raster crosses its own neighbours constantly and the globally
- * nearest point to the spindle is very often on the pass beside the one being
- * cut, a stepover away. Going forward-only also stops the bright "already cut"
- * region flickering backwards. When nothing within the window is close enough
- * — after a jog, a resume, or a lost connection — it falls back to a search of
- * the whole path, which is the one case where being wrong about which pass is
- * worse than being slow.
- */
-function projectOntoPath(
-  moves: ClockedMove[],
-  x: number,
-  y: number,
-  z: number,
-  from: number
-): { index: number; clock: number } | null {
-  if (moves.length === 0) return null;
-
-  const scan = (lo: number, hi: number) => {
-    let bestI = -1;
-    let bestD = Infinity;
-    for (let i = lo; i < hi; i++) {
-      const d = distanceSqToMove(moves[i], x, y, z);
-      if (d < bestD) {
-        bestD = d;
-        bestI = i;
-      }
-    }
-    return { bestI, bestD };
-  };
-
-  const start = Math.min(Math.max(0, from), moves.length - 1);
-  const near = scan(start, Math.min(moves.length, start + LIVE_SEARCH_WINDOW));
-  let bestI = near.bestI;
-
-  if (near.bestD > LIVE_SNAP_TOLERANCE_MM * LIVE_SNAP_TOLERANCE_MM) {
-    const global = scan(0, moves.length);
-    if (global.bestI >= 0 && global.bestD < near.bestD) bestI = global.bestI;
-  }
-  if (bestI < 0) return null;
-
-  // Interpolate the clock across the move, so the readout advances smoothly
-  // along a long pass instead of stepping once per move.
-  const m = moves[bestI];
-  const dx = m.x2 - m.x1;
-  const dy = m.y2 - m.y1;
-  const dz = m.z2 - m.z1;
-  const lenSq = dx * dx + dy * dy + dz * dz;
-  let f = 0;
-  if (lenSq > 1e-12) {
-    f = ((x - m.x1) * dx + (y - m.y1) * dy + (z - m.z1) * dz) / lenSq;
-    f = Math.min(1, Math.max(0, f));
-  }
-  return { index: bestI, clock: m.t0 + (m.t1 - m.t0) * f };
-}
-
-/** The move in flight at time `t`, by binary search over the cumulative clock. */
-function moveIndexAt(moves: ClockedMove[], t: number): number {
-  let lo = 0;
-  let hi = moves.length - 1;
-  while (lo < hi) {
-    const mid = (lo + hi) >> 1;
-    if (moves[mid].t1 < t) lo = mid + 1;
-    else hi = mid;
-  }
-  return lo;
 }
 
 /**
@@ -724,27 +618,47 @@ export function ToolpathView({
   const { x: wposX, y: wposY, z: wposZ } = machineState.wpos;
 
   /**
-   * Where the forward search starts. Reset when the job stops, so the next run
-   * does not begin hunting from the end of the last one.
+   * The live playhead's own state: where the forward search starts, and how
+   * many reports have asked to take it backwards. Reset when the job stops, so
+   * the next run does not begin hunting from the end of the last one.
    */
-  const liveIndexRef = useRef(0);
+  const liveTrackRef = useRef<PlayheadState>(PLAYHEAD_START);
   useEffect(() => {
-    if (!live) liveIndexRef.current = 0;
+    if (!live) liveTrackRef.current = PLAYHEAD_START;
   }, [live]);
+  // A new path puts the clock back to zero (above), and the tracker with it.
+  useEffect(() => {
+    liveTrackRef.current = PLAYHEAD_START;
+  }, [path]);
+
+  /**
+   * Where the job should be by signals that cannot jump between passes: time
+   * elapsed against the estimate, and lines sent against the program. Read by
+   * the tracker only when following the tool forwards has lost it, and kept in
+   * a ref so the once-a-second elapsed tick does not re-run the projection.
+   */
+  const anchorsRef = useRef<number[]>([]);
+  useEffect(() => {
+    const total = path.seconds;
+    const anchors: number[] = [];
+    const { elapsedSeconds, estimatedSeconds, progressPercent } = machineState;
+    if (estimatedSeconds) anchors.push(Math.min(total, (elapsedSeconds / estimatedSeconds) * total));
+    anchors.push((progressPercent / 100) * total);
+    anchorsRef.current = anchors;
+  }, [path, machineState]);
 
   // Follow the machine by where it says the tool is, not by how many lines have
-  // been sent to it. See `projectOntoPath` for why the line count cannot do
-  // this job.
+  // been sent to it. See `trackPlayhead` for why the line count cannot do this
+  // job on its own, and why the nearest point on the whole path cannot either.
   useEffect(() => {
     if (!live) return;
     const moves = pathRef.current.moves;
     if (moves.length === 0) return;
 
-    const hit = projectOntoPath(moves, wposX, wposY, wposZ, liveIndexRef.current);
-    if (!hit) return;
-
-    liveIndexRef.current = hit.index;
-    setClock(hit.clock);
+    const prev = liveTrackRef.current;
+    const next = trackPlayhead(moves, wposX, wposY, wposZ, prev, anchorsRef.current);
+    liveTrackRef.current = next;
+    if (next.clock !== prev.clock) setClock(next.clock);
   }, [live, wposX, wposY, wposZ]);
 
   // The dry run. Compressed onto a fixed screen duration, because the thing
