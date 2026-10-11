@@ -38,6 +38,7 @@ import {
   insetFaceMm, latticeSummary, removeFacesMm, revolveMm, sharpenEdgesMm,
 } from '../utils/latticeCommands';
 import { measureInScene } from '../utils/measureScene';
+import { getNodeWorldPos } from '../utils/sceneTree';
 import { generateCastPattern, DEFAULT_CAST_OPTIONS, type CastMethod } from '../utils/castPatternExporter';
 import { runCastPrep } from '../utils/castPrepRunner';
 import { selectionSoups, splitOffThread, testAssemblyOffThread } from '../utils/printSplitClient';
@@ -292,6 +293,34 @@ type Msg<T> = Record<string, unknown> & T;
 const pointList = (v: unknown): number[][] =>
   (Array.isArray(v) && Array.isArray(v[0]) ? v : [v]) as number[][];
 
+/**
+ * Where a new body asked to go under `parent` (an id or a name) lands: the
+ * parent's real id, and whether it or anything above it has a joint. Throws
+ * when there is no such body, rather than quietly adding at the top level.
+ */
+const resolveParent = (nodes: SceneNode[], parent: unknown): { id: string; moves: boolean } | null => {
+  if (parent === undefined || parent === null || parent === '') return null;
+  if (typeof parent !== 'string') throw new Error('parent must be the id or name of an existing body');
+  const walk = (list: SceneNode[], aboveMoves: boolean): { id: string; moves: boolean } | null => {
+    for (const n of list || []) {
+      const moves = aboveMoves || (n.joints?.length ?? 0) > 0 || n.isComposite === true;
+      if (n.id === parent || n.name === parent) return { id: n.id, moves };
+      const found = walk(n.children || [], moves);
+      if (found) return found;
+    }
+    return null;
+  };
+  const found = walk(nodes, false);
+  if (!found) throw new Error(`No body '${parent}' to put the new one under`);
+  return found;
+};
+
+/** The scene with `child` appended to the children of `parentId`, copied along the path. */
+const withChild = (nodes: SceneNode[], parentId: string, child: SceneNode): SceneNode[] =>
+  nodes.map((n) => n.id === parentId
+    ? { ...n, children: [...(n.children || []), child] }
+    : n.children?.length ? { ...n, children: withChild(n.children, parentId, child) } : n);
+
 const findNodeInScene = (nodes: SceneNode[], id: string): SceneNode | null => {
   for (const node of nodes || []) {
     if (node.id === id || node.name === id) return node;
@@ -534,9 +563,20 @@ const fillJointDefaults = (j: RawJoint, bodyName: string, idx: number): SceneJoi
   ...(j.actuator !== undefined ? { actuator: j.actuator } : {}),
 });
 
-const fillBodyDefaults = (b: RawNode): SceneNode => {
+/**
+ * `parentMoves` is null for a top-level body. For a nested one it says whether
+ * anything above it has a joint, which decides whether its meshes are drawn
+ * from the body's transform.
+ */
+const fillBodyDefaults = (b: RawNode, parentMoves: boolean | null = null): SceneNode => {
   const name = b.name ?? b.id ?? `body_${Math.random().toString(36).slice(2, 7)}`;
   const id   = b.id   ?? name;
+  const nested = parentMoves !== null;
+  // MuJoCo allows a free joint only on a top-level body; written inside another
+  // one it fails the whole compile with a message that names neither body.
+  if (nested && (b.joints ?? []).some((j: RawJoint) => j.type === 'free')) {
+    throw new Error(`Body '${name}' has a free joint but sits inside another body. A free joint is only allowed at the top level: leave joints out to fix it rigidly to its parent, or give it a hinge or slide.`);
+  }
   // Curve (rigid curved track): generate convex box segments from the spline
   // params so agents can author curves declaratively without hand-placing geoms.
   const curveGeoms = (b.isCurve === true && b.geoms === undefined)
@@ -558,9 +598,11 @@ const fillBodyDefaults = (b: RawNode): SceneNode => {
     flags.static === true ||
     flags.fixed === true ||
     (Array.isArray(b.geoms) && b.geoms.length > 0 && b.geoms.every(g => g.dynamic === false));
-  const defaultJoints: RawJoint[] = (b.isCurve === true || isFixed) ? [] : [{ type: 'free' }];
+  // A nested body with no joints given is fixed rigidly to its parent.
+  const defaultJoints: RawJoint[] = (b.isCurve === true || isFixed || nested) ? [] : [{ type: 'free' }];
   const resolvedJoints = (b.joints ?? defaultJoints)
     .map((j: RawJoint, i: number) => fillJointDefaults(j, name, i));
+  const moves = resolvedJoints.length > 0 || parentMoves === true;
   // As for geoms, the caller's fields are kept (shatter settings, sculpt
   // flags...) - all but the "does not move" flags above, which are not
   // SceneNode fields and have been turned into the joints below.
@@ -575,9 +617,9 @@ const fillBodyDefaults = (b: RawNode): SceneNode => {
     ...(b.quat  !== undefined ? { quat: b.quat }   : {}),
     ...(b.euler !== undefined ? { euler: b.euler } : {}),
     geoms:    (curveGeoms ?? b.geoms ?? (b.scad !== undefined ? [{ type: 'mesh', size: [1], dynamic: true }] : [{ type: 'box', size: [0.25, 0.25, 0.25] }]))
-                .map((g: RawGeom, i: number) => fillGeomDefaults(g, name, i, resolvedJoints.length > 0)),
+                .map((g: RawGeom, i: number) => fillGeomDefaults(g, name, i, moves)),
     joints:   resolvedJoints,
-    children: (b.children ?? []).map(fillBodyDefaults),
+    children: (b.children ?? []).map((c) => fillBodyDefaults(c, moves)),
     ...(b.coupleTargetId  !== undefined ? { coupleTargetId: b.coupleTargetId }   : {}),
     ...(b.coupleRatio     !== undefined ? { coupleRatio: b.coupleRatio }         : {}),
     ...(b.weldTargetId    !== undefined ? { weldTargetId: b.weldTargetId }       : {}),
@@ -1137,6 +1179,7 @@ export function useMCPBridge() {
         */
         case 'CREATE_SCULPT': {
           const { name, base, pos } = msg as Msg<{ name?: string; base?: SculptBaseId }>;
+          const parent = resolveParent(store.sceneGraph.nodes, msg.parent);
           const position = Array.isArray(pos) && pos.length === 3 ? pos : [0, 0, 0.3];
           if (base !== undefined && !SCULPT_BASES.some(b => b.id === base)) {
             throw new Error(`Unknown base '${base}'. Available: ${SCULPT_BASES.map(b => b.id).join(', ')}`);
@@ -1153,14 +1196,19 @@ export function useMCPBridge() {
             component, and wait for the one that appears.
           */
           const before = collectNodeIds(store.sceneGraph.nodes);
-          // No parent: a sculpt is a body in its own right, never a child of
-          // whatever happens to be selected — `pos` is a world position and
-          // would silently become a local one.
-          store.addComponent('sculpt', position);
+          // Under the `parent` asked for, or at the top level - never under
+          // whatever happens to be selected. addComponent takes a world
+          // position, and `pos` here is relative to the parent, as everywhere
+          // else in the scene graph.
+          const parentWorld = parent ? getNodeWorldPos(store.sceneGraph.nodes, parent.id) ?? [0, 0, 0] : [0, 0, 0];
+          store.addComponent('sculpt', position.map((v: number, i: number) => v + parentWorld[i]), parent?.id ?? null);
 
           const created = await waitForNewNode(before, 10000);
           if (!created) throw new Error('The sculpt body was not created (timed out waiting for the scene to settle)');
 
+          // Nested, it is fixed rigidly to its parent, like any body added
+          // under one over MCP; the editor's own adds give a child a hinge.
+          if (parent) store.updateNodeJointsList(created.id, []);
           if (base && base !== created.sculptBase) store.setSculptBase(created.id, base);
           if (typeof name === 'string' && name.trim()) store.renameNode(created.id, name.trim());
 
@@ -1169,6 +1217,7 @@ export function useMCPBridge() {
             ok: true,
             id: created.id,
             name: after?.name,
+            ...(parent ? { parent: parent.id } : {}),
             base: after?.sculptBase,
             ...sculptSummary(sculptMeshOf(after)),
           };
@@ -1364,6 +1413,7 @@ export function useMCPBridge() {
         */
         case 'CREATE_LATTICE': {
           const { name, pos, sizeMm, edit } = msg;
+          const parent = resolveParent(useStore.getState().sceneGraph.nodes, msg.parent);
           const position: [number, number, number] = Array.isArray(pos) && pos.length === 3 ? [pos[0], pos[1], pos[2]] : [0, 0, 0.2];
           const size = typeof sizeMm === 'number' && sizeMm > 0 ? sizeMm : 40;
           const halfSteps = Math.max(1, Math.round((size / 2) / (LATTICE_UNIT * 1000)));
@@ -1377,7 +1427,9 @@ export function useMCPBridge() {
             name: (typeof name === 'string' && name.trim()) ? name.trim() : 'Lattice',
             type: 'body',
             pos: position,
-            joints: [{ name: `${id}_free`, type: 'free' }],
+            // Nested, it is fixed rigidly to its parent: a free joint is only
+            // allowed at the top level.
+            joints: parent ? [] : [{ name: `${id}_free`, type: 'free' }],
             geoms: [{
               name: `${id}_mesh`,
               type: 'mesh',
@@ -1400,7 +1452,7 @@ export function useMCPBridge() {
           };
 
           const currentNodes = useStore.getState().sceneGraph.nodes || [];
-          const updatedNodes = [...currentNodes, newNode];
+          const updatedNodes = parent ? withChild(currentNodes, parent.id, newNode) : [...currentNodes, newNode];
           const settleRes = await settleScene(updatedNodes, { replacesScene: false });
           if (!settleRes.ok) {
             throw new Error(`The lattice body failed to compile: ${settleRes.error}`);
@@ -1413,6 +1465,7 @@ export function useMCPBridge() {
 
           return {
             ok: true, id, name: newNode.name,
+            ...(parent ? { parent: parent.id } : {}),
             ...latticeSummary(deserializeCage(cage)),
           };
         }
@@ -2075,7 +2128,8 @@ export function useMCPBridge() {
           if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
             throw new Error('Missing body: pass one body descriptor, the same shape as an element of physics_build_scene\'s bodies array');
           }
-          const node = fillBodyDefaults(raw);
+          const parent = resolveParent(store.sceneGraph.nodes, msg.parent);
+          const node = fillBodyDefaults(raw, parent ? parent.moves : null);
           // A clashing id would make every later call ambiguous about which body
           // it meant, so it is corrected here rather than refused: the reply says
           // what the body ended up called.
@@ -2086,7 +2140,9 @@ export function useMCPBridge() {
             node.id = `${node.id}_${n}`;
             if (!raw.name) node.name = node.id;
           }
-          const nodes = [...store.sceneGraph.nodes, node];
+          const nodes = parent
+            ? withChild(store.sceneGraph.nodes, parent.id, node)
+            : [...store.sceneGraph.nodes, node];
           store.updateScene({ nodes }, true);
           await autoCompileScad([node]);
           await compileCsgNodes(true);
@@ -2098,6 +2154,7 @@ export function useMCPBridge() {
             ...(addError ? { error: addError } : {}),
             id: node.id,
             name: landed?.name ?? node.name,
+            ...(parent ? { parent: parent.id } : {}),
             nodeCount: useStore.getState().sceneGraph.nodes.length,
           };
         }
@@ -2755,7 +2812,7 @@ export function useMCPBridge() {
           // joints/geoms/children (very easy to hand-author without, e.g. by
           // editing the output of GET_SCENE_SUMMARY, which strips these arrays)
           // doesn't crash compileToMJCF's unconditional .forEach on those fields.
-          const nodes = rawNodes.map(fillBodyDefaults);
+          const nodes = rawNodes.map((b) => fillBodyDefaults(b));
           const result = await settleScene(nodes);
           updateOrCreateNotecard({
             mode: 'mcp',
@@ -2909,7 +2966,7 @@ export function useMCPBridge() {
             return { ok: false, error: 'bodies must be a non-empty array' };
           }
 
-          const nodes = bodies.map(fillBodyDefaults);
+          const nodes = bodies.map((b) => fillBodyDefaults(b));
           const result = await settleScene(nodes);
           updateOrCreateNotecard({
             mode: 'mcp',
