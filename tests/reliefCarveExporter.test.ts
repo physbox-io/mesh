@@ -870,3 +870,51 @@ describe('Finishing pass strategies', () => {
     }
   });
 });
+
+describe('Path simplification', () => {
+  it('keeps contour passes on their curve instead of chording through the island', () => {
+    // A 40 mm pillar standing 10 mm proud of the floor. Every waterline and
+    // roughing ring round it sits at one Z, which is the case that used to be
+    // thinned to one vertex in forty-eight and driven straight through it.
+    const pillar = bodyWith({ type: 'cylinder', size: [0.02, 0.005] }, [0, 0, 0.005]);
+    const opts = {
+      ...DEFAULT_RELIEF_OPTIONS,
+      stockWidthMm: 100, stockDepthMm: 100, stockThicknessMm: 20,
+      carveDepthMm: 10, fitMode: 'manual' as const, scalePercent: 100,
+      verticalScaleMode: 'proportional' as const,
+      roughingToolDiaMm: 3.175, finishingToolDiaMm: 1.5875,
+      finishingStrategy: 'hybrid' as const,
+    };
+    const res = generateReliefCarveGcode(pillar, opts);
+    expect(res.success).toBe(true);
+
+    const finishing = res.gcode.split('T2 M6')[1];
+    const roughing = res.gcode.split('T2 M6')[0];
+    for (const [label, program, toolRad] of [
+      ['finishing', finishing, opts.finishingToolDiaMm / 2],
+      ['roughing', roughing, opts.roughingToolDiaMm / 2],
+    ] as const) {
+      let x = 0, y = 0, z = 5;
+      let closest = Infinity;
+      for (const line of program.split('\n')) {
+        if (!/^G[01] /.test(line)) continue;
+        const nx = /X(-?[\d.]+)/.exec(line) ? parseFloat(/X(-?[\d.]+)/.exec(line)![1]) : x;
+        const ny = /Y(-?[\d.]+)/.exec(line) ? parseFloat(/Y(-?[\d.]+)/.exec(line)![1]) : y;
+        const nz = /Z(-?[\d.]+)/.exec(line) ? parseFloat(/Z(-?[\d.]+)/.exec(line)![1]) : z;
+        // Along the whole move, not just its ends: a chord's ends are on the
+        // curve and its middle is inside it.
+        for (let i = 0; i <= 20; i++) {
+          const t = i / 20;
+          if (z + (nz - z) * t > -1) continue;
+          const d = Math.hypot(x + (nx - x) * t - 50, y + (ny - y) * t - 50);
+          closest = Math.min(closest, d - toolRad);
+        }
+        x = nx; y = ny; z = nz;
+      }
+      // The pillar is sampled on a 0.4 mm grid and tessellated, which puts a
+      // correct path up to about half a millimetre inside it. The chords
+      // reached 1.35 mm.
+      expect(closest, label).toBeGreaterThan(20 - 0.75);
+    }
+  });
+});

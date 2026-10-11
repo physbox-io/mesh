@@ -357,25 +357,63 @@ export function contourPasses(input: FinishingPathInput): Point2D[][] {
   const step = Math.max(1e-6, stepover);
   const passes: Point2D[][] = [];
 
+  /*
+   * The surface inside a one-cell border standing above the top face.
+   *
+   * Marching squares only hands back closed loops, and a level line that runs
+   * off the edge of the grid does not close — so every wall of a relief that
+   * reaches the edge of the stock got no waterline at all. On a pattern that
+   * covers the board that is nearly every wall: a giraffe hide's grooves are
+   * one network touching all four sides, and only the patches it fully
+   * encloses were finished. The border closes every contour, and the stretch
+   * of it that runs round the border lies off the stock, where the bounds
+   * test below cuts it away.
+   */
+  const pCols = surface.cols + 2;
+  const pRows = surface.rows + 2;
+  const padded = new Float32Array(pCols * pRows).fill(1);
+  for (let r = 0; r < surface.rows; r++) {
+    padded.set(surface.z.subarray(r * surface.cols, (r + 1) * surface.cols), (r + 1) * pCols + 1);
+  }
+  const toMm = (p: Point2D) => gridToMm({ x: p.x - 1, y: p.y - 1 }, surface);
+  const inBounds = (p: Point2D) =>
+    p.x >= bounds.minX - 1e-6 &&
+    p.x <= bounds.maxX + 1e-6 &&
+    p.y >= bounds.minY - 1e-6 &&
+    p.y <= bounds.maxY + 1e-6;
+
   // Skip level 0 itself: the top face is not a feature, and a contour exactly on
   // it is the outline of every uncarved patch on the board.
   for (let level = -step; level > floorZ - step; level -= step) {
     const clamped = Math.max(level, floorZ + 1e-6);
-    const loops = isoContours(surface.z, surface.cols, surface.rows, clamped);
+    const loops = isoContours(padded, pCols, pRows, clamped);
     for (const loop of loops) {
-      const mm = loop.map((p) => gridToMm(p, surface));
-      // A contour can run onto ground the tool centre may not enter.
-      const inside = mm.filter(
-        (p) =>
-          p.x >= bounds.minX - 1e-6 &&
-          p.x <= bounds.maxX + 1e-6 &&
-          p.y >= bounds.minY - 1e-6 &&
-          p.y <= bounds.maxY + 1e-6
-      );
-      if (inside.length < 3) continue;
-      const closed = inside.length === mm.length ? closeLoop(inside) : inside;
-      const pass = resamplePolyline(closed, resolution);
-      if (pass.length >= 2) passes.push(pass);
+      const mm = loop.map(toMm);
+      const outside = mm.findIndex((p) => !inBounds(p));
+      if (outside < 0) {
+        const pass = resamplePolyline(closeLoop(mm), resolution);
+        if (pass.length >= 2) passes.push(pass);
+        continue;
+      }
+      /*
+       * A contour that runs onto ground the tool centre may not enter is split
+       * where it leaves, not filtered. Dropping the outside points and keeping
+       * the rest joined the two ends either side of the excursion with a
+       * straight move, which is a cut across whatever stands between them.
+       * Starting the walk just after an outside point means no run is split
+       * across the loop's seam.
+       */
+      let run: Point2D[] = [];
+      const flush = () => {
+        if (run.length >= 2) passes.push(resamplePolyline(run, resolution));
+        run = [];
+      };
+      for (let i = 1; i <= mm.length; i++) {
+        const p = mm[(outside + i) % mm.length];
+        if (inBounds(p)) run.push(p);
+        else flush();
+      }
+      flush();
     }
     if (clamped <= floorZ + 1e-6) break;
   }
@@ -465,9 +503,28 @@ export function hybridPasses(input: FinishingPathInput): Point2D[][] {
   // saving measured about two percent of the job.
   const isSteep = (p: Point2D) => surfaceSlopeDeg(input.surface, p.x, p.y) >= threshold;
 
+  /*
+   * The waterline's share reaches a stepover past the steep ground.
+   *
+   * The crease at the bottom of a V-groove, and the crest of a ridge, read as
+   * flat — the slopes either side cancel in the difference — so the waterline
+   * left them to the raster. But the flat strip is narrower than a stepover,
+   * so every raster run across it was too short to keep, and nothing finished
+   * it: a giraffe hide's grooves came out with the roughing bit's flat bottom
+   * standing 0.7 mm proud along every one of them. Overlapping by a stepover
+   * hands those strips to the waterline, whose level lines run along them.
+   */
+  const reach = Math.max(input.stepover, 2 * Math.max(input.surface.stepX, input.surface.stepY));
+  const near = [0, 1, 2, 3, 4, 5, 6, 7].map((k) => ({
+    dx: reach * Math.cos((k * Math.PI) / 4),
+    dy: reach * Math.sin((k * Math.PI) / 4),
+  }));
+  const isSteepNear = (p: Point2D) =>
+    isSteep(p) || near.some((o) => isSteep({ x: p.x + o.dx, y: p.y + o.dy }));
+
   // A run shorter than the stepover lies inside what the pass beside it cuts.
   const minRun = Math.max(0, input.stepover);
-  const steep = contourPasses(input).flatMap((pass) => splitWhere(pass, isSteep, minRun));
+  const steep = contourPasses(input).flatMap((pass) => splitWhere(pass, isSteepNear, minRun));
   const shallow = rasterPasses(input, input.angleDeg).flatMap((pass) =>
     splitWhere(pass, (p) => !isSteep(p), minRun)
   );

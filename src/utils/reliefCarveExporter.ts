@@ -1213,6 +1213,14 @@ interface PathPoint {
  * lines a second over serial, and a job that streams slower than it cuts stalls
  * the spindle in the cut — so points that sit on the straight line between the
  * ones either side of them are dropped.
+ *
+ * "On the line" is measured in plan as well as in Z. This used to check Z
+ * alone, which is all a raster needs — its points are collinear in plan by
+ * construction — but a waterline contour or a roughing ring sits at one Z the
+ * whole way round, so every point passed and the path was cut to one vertex in
+ * forty-eight: straight 10 mm chords across a closed curve, driven through the
+ * islands it was going round. On a giraffe hide that put the finishing ball
+ * nose up to 6 mm into the patches.
  */
 function simplifyPass(points: PathPoint[], tolMm: number): PathPoint[] {
   if (points.length <= 2) return points;
@@ -1225,14 +1233,18 @@ function simplifyPass(points: PathPoint[], tolMm: number): PathPoint[] {
     const b = points[i];
     const spanX = b.x - a.x;
     const spanY = b.y - a.y;
-    const span = Math.hypot(spanX, spanY);
+    const span2 = spanX * spanX + spanY * spanY;
 
     let fits = i - anchor <= SIMPLIFY_LOOKAHEAD;
-    if (fits && span > 1e-9) {
+    if (fits) {
       for (let j = anchor + 1; j < i; j++) {
         const p = points[j];
-        const t = (Math.hypot(p.x - a.x, p.y - a.y)) / span;
-        if (Math.abs(p.z - (a.z + (b.z - a.z) * t)) > tolMm) {
+        // Nearest point on the chord in plan, and how far off it p lies.
+        const t = span2 > 1e-18
+          ? Math.min(1, Math.max(0, ((p.x - a.x) * spanX + (p.y - a.y) * spanY) / span2))
+          : 0;
+        const off = Math.hypot(p.x - (a.x + spanX * t), p.y - (a.y + spanY * t));
+        if (off > tolMm || Math.abs(p.z - (a.z + (b.z - a.z) * t)) > tolMm) {
           fits = false;
           break;
         }

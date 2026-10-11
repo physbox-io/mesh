@@ -38,6 +38,23 @@ function conePit(cols = 41, rows = 31, depth = 10, radius = 12): SurfaceGrid {
   return { ...BOUNDS, cols, rows, stepX, stepY, z };
 }
 
+/**
+ * A V-groove running the full height of the board along x = 20, 10 mm deep and
+ * 8 mm across: the wall of a pattern that runs off the edge of the stock.
+ */
+function grooveAcross(cols = 81, rows = 61): SurfaceGrid {
+  const stepX = (BOUNDS.maxX - BOUNDS.minX) / (cols - 1);
+  const stepY = (BOUNDS.maxY - BOUNDS.minY) / (rows - 1);
+  const z = new Float32Array(cols * rows);
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const x = BOUNDS.minX + c * stepX;
+      z[r * cols + c] = Math.min(0, -10 + Math.abs(x - 20) * 2.5);
+    }
+  }
+  return { ...BOUNDS, cols, rows, stepX, stepY, z };
+}
+
 function input(over: Partial<FinishingPathInput> = {}): FinishingPathInput {
   return {
     bounds: BOUNDS,
@@ -192,6 +209,26 @@ describe('contour (waterline)', () => {
     expect(contourPasses(input({ surface: flat }))).toHaveLength(0);
   });
 
+  it('finishes a wall that runs off the edge of the stock', () => {
+    // Its level lines do not close inside the grid, which used to mean they
+    // were thrown away and the groove got no waterline at all.
+    const passes = contourPasses(input({ surface: grooveAcross(), stepover: 1, resolution: 0.5 }));
+    expect(passes.length).toBeGreaterThan(10);
+    const ys = passes.flat().map((p) => p.y);
+    expect(Math.max(...ys) - Math.min(...ys)).toBeGreaterThan(25);
+  });
+
+  it('splits a contour where it leaves the stock rather than jumping the gap', () => {
+    const resolution = 0.5;
+    const bounds = { minX: 0, minY: 3, maxX: 40, maxY: 27 };
+    for (const pass of contourPasses(input({ surface: grooveAcross(), bounds, stepover: 1, resolution }))) {
+      for (let i = 1; i < pass.length; i++) {
+        expect(Math.hypot(pass[i].x - pass[i - 1].x, pass[i].y - pass[i - 1].y)).toBeLessThanOrEqual(resolution + 1e-6);
+      }
+      for (const p of pass) expect(inRect(p, bounds)).toBe(true);
+    }
+  });
+
   it('stays inside the stock', () => {
     for (const pass of contourPasses(input())) {
       for (const p of pass) expect(inRect(p)).toBe(true);
@@ -237,6 +274,14 @@ describe('hybrid', () => {
       for (let i = 1; i < pass.length; i++) len += Math.hypot(pass[i].x - pass[i - 1].x, pass[i].y - pass[i - 1].y);
       expect(len).toBeGreaterThanOrEqual(stepover);
     }
+  });
+
+  it('finishes the crease at the bottom of a V-groove', () => {
+    // The two walls cancel in the slope, so the crease reads as flat ground,
+    // and it is too narrow for the raster to keep a run across it.
+    const passes = hybridPasses(input({ surface: grooveAcross(), stepover: 0.5, resolution: 0.25, steepAngleDeg: 35 }));
+    const nearCrease = passes.flat().filter((p) => Math.abs(p.x - 20) < 0.5);
+    expect(nearCrease.length).toBeGreaterThan(20);
   });
 
   it('degenerates to a plain raster when nothing is steep enough', () => {
