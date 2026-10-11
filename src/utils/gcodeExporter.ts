@@ -24,6 +24,14 @@ export interface GcodeExportOptions {
   laserGuidePower: number;
   /** Number of times the laser retraces each cut path (default 1). */
   laserPasses: number;
+  /**
+   * Beam power for engraving a panel's surface pattern (LaserPanel.engrave2D),
+   * as an S-value in 0..laserMaxPower. Its own number because marking a face
+   * and cutting through it are an order of magnitude apart.
+   */
+  laserEngravePower: number;
+  /** Feedrate for engraving, mm/min. Fast: a mark wants a light, even burn. */
+  engraveFeedrate: number;
   /** Cut feedrate in mm/min (default 1200). */
   cutFeedrate: number;
   /** Travel rapid move feedrate in mm/min (default 3000). */
@@ -124,6 +132,10 @@ export const DEFAULT_GCODE_OPTIONS: GcodeExportOptions = {
   laserPower: 10000,
   laserGuidePower: 5,
   laserPasses: 1,
+  // A fifth of full power at 3000 mm/min marks ply and MDF without cutting into
+  // it on most diode and CO2 machines; the dialog says to test on scrap.
+  laserEngravePower: 2000,
+  engraveFeedrate: 3000,
   cutFeedrate: 1200,
   travelFeedrate: 3000,
   plungeFeedrate: 300,
@@ -185,6 +197,11 @@ export interface GcodeExportResult {
 function laserS(options: GcodeExportOptions): number {
   const ceiling = Math.max(1, Math.round(options.laserMaxPower));
   return Math.max(0, Math.min(ceiling, Math.round(options.laserPower)));
+}
+
+function laserEngraveS(options: GcodeExportOptions): number {
+  const ceiling = Math.max(1, Math.round(options.laserMaxPower));
+  return Math.max(0, Math.min(ceiling, Math.round(options.laserEngravePower)));
 }
 
 /** Guide S-value, authored on the $30=1000 scale and rescaled to this machine. */
@@ -462,6 +479,10 @@ export function generateLaserCutGcode(
 
   const radius = compensationRadius(options);
   const warnings: string[] = [];
+  // Engraving is traced once whatever the pass count, so it is kept apart from
+  // the cut length that the passes multiply.
+  let engravedMm = 0;
+  const skippedEngraving: string[] = [];
 
   const lines: string[] = [];
   lines.push(`; --------------------------------------------------`);
@@ -587,6 +608,27 @@ export function generateLaserCutGcode(
         }
       }
 
+      // 0. Engrave the surface pattern before anything is cut, while the panel
+      // is still held flat by the sheet round it. A router cannot draw these
+      // lines (its patterns are carved; see Relief carve), so it skips them.
+      const engraving = (panel.engrave2D ?? []).filter((l) => l.length >= 2);
+      if (engraving.length && options.machineMode === 'laser') {
+        operations.push({ id: `${panel.id}_engrave`, name: `${panel.name} Pattern`, type: 'engrave', sheetIndex: sIdx });
+        lines.push(`; Engrave pattern (${engraving.length} lines)`);
+        const s = laserEngraveS(options);
+        for (const line of engraving) {
+          lines.push(`G0 X${f(pos.x + line[0].x)} Y${f(pos.y + line[0].y)} F${options.travelFeedrate}`);
+          lines.push(`M3 S${s}`);
+          for (let i = 1; i < line.length; i++) {
+            lines.push(`G1 X${f(pos.x + line[i].x)} Y${f(pos.y + line[i].y)} F${options.engraveFeedrate}`);
+            engravedMm += Math.hypot(line[i].x - line[i - 1].x, line[i].y - line[i - 1].y);
+          }
+          lines.push(`M5`);
+        }
+      } else if (engraving.length && !skippedEngraving.includes(panel.name)) {
+        skippedEngraving.push(panel.name);
+      }
+
       // 1. Cut inner cutouts/mortises FIRST so material doesn't shift
       for (let cIdx = 0; cIdx < holePaths.length; cIdx++) {
         const cutout = holePaths[cIdx];
@@ -642,6 +684,13 @@ export function generateLaserCutGcode(
 
   // Every laser pass retraces the whole path, so the head really does travel that far.
   totalCutDistanceMm *= laserPassCount(options);
+  totalCutDistanceMm += engravedMm;
+  if (skippedEngraving.length) {
+    warnings.push(
+      `${skippedEngraving.join(', ')}: the surface pattern is laser engraving, so a router leaves it out. ` +
+        `Carve it with Relief carve instead.`
+    );
+  }
 
   const gcodeText = lines.join('\n');
   // Planned the way the controller plans it — accelerate, cruise, brake — not

@@ -290,6 +290,9 @@ export function splitPanelsToFit(
           name: `${panel.name}_${i + 1}${pieces.length > 1 ? `${String.fromCharCode(97 + j)}` : ''}`,
           outerPolygon2D: piece,
           innerCutouts2D: [],
+          // A pattern drawn across the whole ring does not follow it into the
+          // lengths; see the note below.
+          engrave2D: undefined,
           // The lengths are coplanar with one another and joined by glue, so
           // there is no 3D adjacency for the joint engine to find.
           edges3D: [],
@@ -299,6 +302,7 @@ export function splitPanelsToFit(
     notes.push(
       `${panel.name} does not fit the rack whole, so it is cut as 4 mitred lengths ` +
         `glued at the corners. The assembled part is the same size as the model.` +
+        (panel.engrave2D?.length ? ` Its surface pattern is not engraved on the lengths.` : '') +
         (spliced
           ? ` The lengths are longer than the stock too, so they are spliced from ` +
             `${spliced} pieces joined by interlocking fingers.`

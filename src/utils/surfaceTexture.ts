@@ -103,6 +103,29 @@ export interface TextureRegionReport {
   normal: Vec3;
   /** Every facet within half a degree of the mean normal. */
   flat: boolean;
+  /** The relief as laid, for drawing it in 2D (a laser's engrave layer). */
+  field?: ReliefField;
+}
+
+/**
+ * How much of the relief is at each point of a region, on a grid in the
+ * pattern's frame: 0 is the face as it was, 1 the full depth (engraved) or
+ * full height (embossed). Zero outside the region and across its border, so
+ * a contour of it never runs off the face.
+ */
+export interface ReliefField {
+  /** The grid's (0, 0) corner, and its u and v directions, in the geom's own frame. */
+  origin: Vec3;
+  u: Vec3;
+  v: Vec3;
+  cols: number;
+  rows: number;
+  /** Grid spacing, metres. */
+  step: number;
+  data: Float32Array;
+  emboss: boolean;
+  /** The pattern is two levels (see PatternSpec.flatTopped), so one contour says it all. */
+  twoLevel: boolean;
 }
 
 export interface TexturedSurface {
@@ -388,8 +411,18 @@ function planarFrame(points: Vec3[], n: Vec3, twistDeg: number): Frame {
     if (b < v0) v0 = b;
     if (b > v1) v1 = b;
   }
+  // On the region's own plane, not the parallel one through the frame's
+  // origin: u and v alone would put the corner -- and every line drawn from
+  // it -- in the middle of the part.
+  let w = 0;
+  for (const p of points) w += dot(p, n);
+  w /= points.length || 1;
   return {
-    origin: [u[0] * u0 + v[0] * v0, u[1] * u0 + v[1] * v0, u[2] * u0 + v[2] * v0],
+    origin: [
+      u[0] * u0 + v[0] * v0 + n[0] * w,
+      u[1] * u0 + v[1] * v0 + n[1] * w,
+      u[2] * u0 + v[2] * v0 + n[2] * w,
+    ],
     u,
     v,
     width: u1 - u0,
@@ -462,6 +495,48 @@ function boundaryDistance(
     }
   }
   return { cols, rows, step, data };
+}
+
+/**
+ * The relief over the region's grid: the pattern, faded at the border, and
+ * masked to the region by an even-odd scan of its edge -- the grid covers the
+ * region's bounding box, and a face that is not a rectangle leaves corners of
+ * it off the part.
+ */
+function reliefField(
+  frame: Frame,
+  heights: Grid,
+  dist: Grid,
+  segments: [number, number, number, number][],
+  border: number,
+  ramp: number,
+  emboss: boolean,
+  twoLevel: boolean,
+): ReliefField {
+  const { cols, rows, step } = heights;
+  const data = new Float32Array(cols * rows);
+  const crossings: number[] = [];
+  for (let r = 0; r < rows; r++) {
+    // Half a cell in, so a scanline never runs exactly through a corner.
+    const y = Math.min((rows - 1) * step, r * step + step * 1e-3);
+    crossings.length = 0;
+    for (const [ax, ay, bx, by] of segments) {
+      if ((ay > y) === (by > y)) continue;
+      crossings.push(ax + ((y - ay) / (by - ay)) * (bx - ax));
+    }
+    crossings.sort((a, b) => a - b);
+    for (let k = 0; k + 1 < crossings.length; k += 2) {
+      const c0 = Math.max(0, Math.ceil(crossings[k] / step));
+      const c1 = Math.min(cols - 1, Math.floor(crossings[k + 1] / step));
+      for (let c = c0; c <= c1; c++) {
+        const i = r * cols + c;
+        const h = clamp01(heights.data[i]);
+        const fade = clamp01((dist.data[i] - border) / ramp);
+        data[i] = (emboss ? h : 1 - h) * fade;
+      }
+    }
+  }
+  return { origin: frame.origin, u: frame.u, v: frame.v, cols, rows, step, data, emboss, twoLevel };
 }
 
 // --- refinement --------------------------------------------------------------
@@ -794,6 +869,7 @@ export function applySurfaceTextures(
     }
     job.report.depthM = depth;
     job.report.triangles = labels.filter((l) => l === j).length;
+    job.report.field = reliefField(job.frame, heights, dist, segments, border, ramp, depth > 0, !!spec.flatTopped);
 
     if (spec.palette) {
       for (const v of members[j]) {

@@ -260,6 +260,8 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
   const [laserMaxPower, setLaserMaxPower] = useState<number>(DEFAULT_GCODE_OPTIONS.laserMaxPower);
   const [laserPower, setLaserPower] = useState<number>(DEFAULT_GCODE_OPTIONS.laserPower);
   const [laserPasses, setLaserPasses] = useState<number>(1);
+  const [engravePower, setEngravePower] = useState<number>(DEFAULT_GCODE_OPTIONS.laserEngravePower);
+  const [engraveFeedrate, setEngraveFeedrate] = useState<number>(DEFAULT_GCODE_OPTIONS.engraveFeedrate);
   const [attachments, setAttachments] = useState<boolean>(DEFAULT_GCODE_OPTIONS.attachmentsEnabled);
   const [attachmentWidthMm, setAttachmentWidthMm] = useState<number>(DEFAULT_GCODE_OPTIONS.attachmentWidthMm);
   const [attachmentSpacingMm, setAttachmentSpacingMm] = useState<number>(DEFAULT_GCODE_OPTIONS.attachmentSpacingMm);
@@ -364,12 +366,15 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
     [layoutJob.failure, layoutJob.result],
   );
   const layoutPending = layoutFields !== liveLayoutFields || layoutJob.busy;
+  const hasEngraving = !!exportResult?.panels?.some((p) => p.engrave2D?.length);
 
   const liveGcodeFields = useMemo(() => ({
     machineMode, cutFeedrate, spindleRpm, laserPower, laserMaxPower, laserPasses,
+    engravePower, engraveFeedrate,
     materialThicknessMm, attachments, attachmentWidthMm, attachmentSpacingMm,
     attachmentHeightMm, bitDiameterMm,
   }), [machineMode, cutFeedrate, spindleRpm, laserPower, laserMaxPower, laserPasses,
+      engravePower, engraveFeedrate,
       materialThicknessMm, attachments, attachmentWidthMm, attachmentSpacingMm,
       attachmentHeightMm, bitDiameterMm]);
   const gcodeFields = useSettled(liveGcodeFields, 250);
@@ -387,6 +392,8 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
       laserPower: f.laserPower,
       laserMaxPower: f.laserMaxPower,
       laserPasses: f.laserPasses,
+      laserEngravePower: f.engravePower,
+      engraveFeedrate: f.engraveFeedrate,
       cutDepthZ: f.materialThicknessMm,
       zStepdown: Math.min(f.materialThicknessMm, 3.0),
       attachmentsEnabled: f.attachments,
@@ -605,6 +612,38 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                   className={inputClass}
                 />
               </Field>
+
+              {hasEngraving && (
+                <>
+                  <Field
+                    className="lg:col-span-2"
+                    label="Engrave Power"
+                    hint={`Beam power for the surface patterns (the blue lines), currently ${Math.round((engravePower / Math.max(1, laserMaxPower)) * 100)}% of S${laserMaxPower}. Try it on scrap first.`}
+                  >
+                    <NumberInput
+                      step={laserMaxPower >= 10000 ? 250 : 25} min={0} max={laserMaxPower} integer
+                      disabled={machineMode !== 'laser'}
+                      value={engravePower}
+                      onChange={(v) => v !== undefined && setEngravePower(v)}
+                      className={inputClass}
+                    />
+                  </Field>
+                  <Field
+                    className="lg:col-span-2"
+                    label="Engrave Speed"
+                    hintAlign="end"
+                    hint="Feedrate for the surface patterns, mm/min. Faster marks lighter."
+                  >
+                    <NumberInput
+                      step={250} min={100} max={30000} integer
+                      disabled={machineMode !== 'laser'}
+                      value={engraveFeedrate}
+                      onChange={(v) => v !== undefined && setEngraveFeedrate(v)}
+                      className={inputClass}
+                    />
+                  </Field>
+                </>
+              )}
             </div>
 
             {machineMode === 'cnc' && (

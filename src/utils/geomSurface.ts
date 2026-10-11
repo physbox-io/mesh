@@ -21,7 +21,7 @@
 
 import * as THREE from 'three';
 import type { SceneGeom } from '../types/scene';
-import { getGeomFrame, yupVertsToZup } from './laserCutExporter';
+import { fromtoFrame } from './csg';
 import { applySurfaceTextures, type TexturedSurface } from './surfaceTexture';
 
 /**
@@ -100,7 +100,21 @@ export function geomLocalSurface(geom: SceneGeom, halfLen?: number): { positions
 
 /** A cylinder or capsule given by `fromto` has its length there, not in `size`. */
 export function geomHalfLen(geom: SceneGeom): number | undefined {
-  return getGeomFrame(geom).halfLen;
+  if (geom.fromto && geom.fromto.length >= 6 && (geom.type === 'cylinder' || geom.type === 'capsule')) {
+    return fromtoFrame(geom.fromto).halfLen;
+  }
+  return undefined;
+}
+
+/**
+ * Y-up (three.js) vertices to the Z-up space pos/euler/size use. The same as
+ * laserCutExporter's, repeated rather than imported: the laser exporter reads
+ * patterns from here, and importing it back would make the two a cycle.
+ */
+function yupVertsToZup(v: number[]): number[] {
+  const out: number[] = [];
+  for (let i = 0; i < v.length; i += 3) out.push(v[i], -v[i + 2], v[i + 1]);
+  return out;
 }
 
 // --- the cache ---------------------------------------------------------------

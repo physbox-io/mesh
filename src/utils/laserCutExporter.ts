@@ -6,6 +6,8 @@ import type { SceneGraph, SceneNode, SceneGeom } from '../types/scene';
 import { csgSourceGeoms, fromtoFrame } from './csg';
 import * as THREE from 'three';
 import { splitPanelsToFit } from './panelSplitter';
+import { texturedSurfaceOf } from './geomSurface';
+import { reliefContours } from './patternEngrave';
 
 export interface LaserCutOptions {
   jointMode: 'finger' | 'slot' | 'glue';
@@ -159,6 +161,14 @@ export interface LaserPanel {
   outerPolygon2D: Point2D[];
   // 2D interior cutout loops (holes, e.g. entrance hole, interior mortise slots)
   innerCutouts2D: Point2D[][];
+  /**
+   * Lines to engrave rather than cut: the outlines of a surface pattern laid
+   * on this panel's face (see utils/patternEngrave), open polylines in the
+   * same local mm frame as the loops above.
+   */
+  engrave2D?: Point2D[][];
+  /** The pattern is on the face that lies downward as cut; turn the panel over to assemble it. */
+  engraveUnderside?: boolean;
   // 3D edge information for joint matching
   edges3D: LaserPanelEdge[];
   /**
@@ -641,6 +651,36 @@ interface CoplanarGroup {
   tris: RawTriFace[];
 }
 
+/**
+ * Gives a panel the engrave lines of any surface pattern on the face it was
+ * cut from: a region of `geom` whose plane is one of the panel's two skins.
+ */
+function attachPatternEngraving(panel: LaserPanel, geom: SceneGeom, geomMatrix: THREE.Matrix4): void {
+  if (!geom.textures?.length) return;
+  const surface = texturedSurfaceOf(geom, getGeomFrame(geom).halfLen);
+  if (!surface) return;
+  const n = v3(panel.normal3D);
+  const origin = v3(panel.origin3D);
+  // Both skins of a sheet sit half a thickness off the mid-plane; a shelled
+  // box's panel has its outer skin there too.
+  const reach = panel.thickness / 2 + 1e-3;
+  for (const region of surface.regions) {
+    const field = region.applied ? region.field : undefined;
+    if (!field) continue;
+    const normal = new THREE.Vector3(...region.normal).transformDirection(geomMatrix);
+    const facing = normal.dot(n);
+    if (Math.abs(facing) < 0.99) continue;
+    const at = new THREE.Vector3(...field.origin).applyMatrix4(geomMatrix);
+    if (Math.abs(at.clone().sub(origin).dot(n)) > reach) continue;
+    const lines = reliefContours(field).map((line) =>
+      line.map((p) => toPanel2D(panel, new THREE.Vector3(p[0], p[1], p[2]).applyMatrix4(geomMatrix))),
+    );
+    if (!lines.length) continue;
+    (panel.engrave2D ??= []).push(...lines);
+    if (facing < 0) panel.engraveUnderside = true;
+  }
+}
+
 export function extractPanelsFromScene(
   scene: SceneGraph,
   options: LaserCutOptions
@@ -759,6 +799,7 @@ export function extractPanelsFromScene(
             innerCutouts2D,
             edges3D,
           });
+          attachPatternEngraving(panels[panels.length - 1], geom, geomMatrix);
         } else {
           const facesSpec = [
             { name: 'front',  u: new THREE.Vector3(1, 0, 0),  v: new THREE.Vector3(0, 0, 1), n: new THREE.Vector3(0, 1, 0),  pos: new THREE.Vector3(0, fullY/2, 0),  w: fullX, h: fullZ },
@@ -814,6 +855,7 @@ export function extractPanelsFromScene(
               innerCutouts2D: [],
               edges3D,
             });
+            attachPatternEngraving(panels[panels.length - 1], geom, geomMatrix);
           }
         }
       } else if (geom.type === 'mesh' && (geom.renderVertices || geom.vertices) && geom.faces) {
@@ -830,6 +872,7 @@ export function extractPanelsFromScene(
         if (meshPanels.length === 0) {
           invalidGeoms.push(`${node.name} (curved non-planar mesh)`);
         } else {
+          for (const panel of meshPanels) attachPatternEngraving(panel, geom, geomMatrix);
           panels.push(...meshPanels);
           panelIdCounter += meshPanels.length;
         }
@@ -2521,6 +2564,7 @@ function clonePanels(panels: LaserPanel[]): LaserPanel[] {
     vAxis3D: { ...p.vAxis3D },
     outerPolygon2D: p.outerPolygon2D.map(pt => ({ ...pt })),
     innerCutouts2D: p.innerCutouts2D.map(loop => loop.map(pt => ({ ...pt }))),
+    engrave2D: p.engrave2D?.map(line => line.map(pt => ({ ...pt }))),
     edges3D: p.edges3D.map(e => ({ ...e, p1: { ...e.p1 }, p2: { ...e.p2 } })),
   }));
 }
@@ -2536,8 +2580,8 @@ function scalePanels(panels: LaserPanel[], s: number): void {
       pt.x *= s;
       pt.y *= s;
     }
-    for (const cutout of panel.innerCutouts2D) {
-      for (const pt of cutout) {
+    for (const loop of [...panel.innerCutouts2D, ...(panel.engrave2D ?? [])]) {
+      for (const pt of loop) {
         pt.x *= s;
         pt.y *= s;
       }
@@ -2573,8 +2617,9 @@ function normalizePanelBounds(panels: LaserPanel[]): void {
       pt.x -= minX;
       pt.y -= minY;
     }
-    for (const cutout of panel.innerCutouts2D) {
-      for (const pt of cutout) {
+    // The engrave lines move with the panel but never size it: they lie on it.
+    for (const loop of [...panel.innerCutouts2D, ...(panel.engrave2D ?? [])]) {
+      for (const pt of loop) {
         pt.x -= minX;
         pt.y -= minY;
       }
@@ -2607,6 +2652,7 @@ function rotatePanel90(panel: LaserPanel): void {
   };
   panel.outerPolygon2D.forEach(turn);
   for (const cutout of panel.innerCutouts2D) cutout.forEach(turn);
+  for (const line of panel.engrave2D ?? []) line.forEach(turn);
   const w = panel.width2D || 0;
   panel.width2D = h;
   panel.height2D = w;
@@ -2870,6 +2916,17 @@ export function exportLaserCutSvg(
   const oversized = build.oversized;
   const sheets = build.sheets;
 
+  // A pattern on the face that lies down on the bed is engraved on the face
+  // that is up, where the laser can reach it; the panel then goes in the
+  // other way round.
+  const underside = panels.filter((p) => p.engraveUnderside && p.engrave2D?.length).map((p) => p.name);
+  if (underside.length) {
+    warnings.push(
+      `${underside.join(', ')}: the pattern is on the face that lies on the bed, so it is engraved ` +
+        `on the top instead. Turn ${underside.length === 1 ? 'that panel' : 'those panels'} over when you assemble.`
+    );
+  }
+
   /*
    * Parts laid on the stock the other way round. Said because the app cannot
    * know which way the grain runs, and on timber that is the difference between
@@ -2987,6 +3044,23 @@ export function exportLaserCutSvg(
     }
   }
   svg += `  </g>\n\n`;
+
+  // Surface patterns, as lines to engrave: blue, the colour the labels already
+  // use for "mark, do not cut", in a group of their own so a laser's software
+  // can give them their own power and speed.
+  if (panels.some((p) => p.engrave2D?.length)) {
+    svg += `  <g id="engrave-patterns" stroke="#0000FF" stroke-width="0.1" fill="none" stroke-linejoin="round" stroke-linecap="round">\n`;
+    for (const panel of panels) {
+      const pos = drawPos(panel);
+      for (const line of panel.engrave2D ?? []) {
+        if (line.length < 2) continue;
+        let d = `M ${(pos.x + line[0].x).toFixed(2)} ${(pos.y + line[0].y).toFixed(2)}`;
+        for (let i = 1; i < line.length; i++) d += ` L ${(pos.x + line[i].x).toFixed(2)} ${(pos.y + line[i].y).toFixed(2)}`;
+        svg += `    <path d="${d}" />\n`;
+      }
+    }
+    svg += `  </g>\n\n`;
+  }
 
   if (options.includeLabels) {
     svg += `  <g id="engrave-labels" fill="#0000FF" font-family="sans-serif" font-size="8" text-anchor="middle">\n`;
