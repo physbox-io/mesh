@@ -83,7 +83,7 @@ import { MIN_MAX_TOKENS, MAX_MAX_TOKENS, readMaxTokens, writeMaxTokens } from '.
 import { DfmHUD } from './components/DfmHUD';
 import { createHeatSetBossNode, createHexNutTrapNode, createBearingPocketNode, createDShaftHubNode, createCounterboreHoleNode } from './utils/hardwareComponents';
 import { pushGlobalParameter } from './utils/llmSettings';
-import { saveUserPreset, deleteUserPreset, readUserPreset, listUserPresetNames } from './utils/userPresets';
+import { saveUserPreset, deleteUserPreset, readUserPreset, listUserPresetNames, cloudOnlyPresetNames, USER_PRESETS_CHANGED_EVENT } from './utils/userPresets';
 import { savePreset } from './utils/presetStorage';
 import { announcePresetSave } from './utils/presetNotices';
 import { PresetSaveNotice } from './components/PresetSaveNotice';
@@ -220,6 +220,14 @@ function App() {
    */
   const [isPropertiesOpen, setIsPropertiesOpen] = useState(false);
   const [isSaveModalOpen, setIsSaveModalOpen] = useState(false);
+  // The preset list reads storage during render, so a pull from the account or
+  // a save that only the account could take has to ask for a render to show up.
+  const [, setPresetListVersion] = useState(0);
+  useEffect(() => {
+    const bump = () => setPresetListVersion(v => v + 1);
+    window.addEventListener(USER_PRESETS_CHANGED_EVENT, bump);
+    return () => window.removeEventListener(USER_PRESETS_CHANGED_EVENT, bump);
+  }, []);
   const [isImportStlModalOpen, setIsImportStlModalOpen] = useState(false);
   const [isLaserCutModalOpen, setIsLaserCutModalOpen] = useState(false);
   const [isContourSliceModalOpen, setIsContourSliceModalOpen] = useState(false);
@@ -1854,8 +1862,10 @@ function App() {
               {/* User Presets */}
               {(() => {
                 let keys: string[];
+                let inAccountOnly: Set<string>;
                 try {
                   keys = listUserPresetNames();
+                  inAccountOnly = new Set(cloudOnlyPresetNames());
                 } catch {
                   return null;
                 }
@@ -1863,7 +1873,7 @@ function App() {
                 return (
                   <optgroup label="📁 Saved Presets" className="bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300">
                     {keys.sort().map(k => (
-                      <option key={`user:${k}`} value={`user:${k}`}>💾 {k}</option>
+                      <option key={`user:${k}`} value={`user:${k}`}>{inAccountOnly.has(k) ? '☁️' : '💾'} {k}</option>
                     ))}
                   </optgroup>
                 );

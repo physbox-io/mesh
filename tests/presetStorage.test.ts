@@ -46,8 +46,7 @@ const bigScene = (mb: number) => ({
 let savePreset: typeof import('../src/utils/presetStorage').savePreset;
 let presetToFile: typeof import('../src/utils/presetStorage').presetToFile;
 let presetStorageReport: typeof import('../src/utils/presetStorage').presetStorageReport;
-let listPresetNamesEverywhere: typeof import('../src/utils/presetStorage').listPresetNamesEverywhere;
-let readPresetAnywhere: typeof import('../src/utils/presetStorage').readPresetAnywhere;
+let presets: typeof import('../src/utils/userPresets');
 
 beforeEach(async () => {
   store.clear();
@@ -60,8 +59,7 @@ beforeEach(async () => {
   savePreset = m.savePreset;
   presetToFile = m.presetToFile;
   presetStorageReport = m.presetStorageReport;
-  listPresetNamesEverywhere = m.listPresetNamesEverywhere;
-  readPresetAnywhere = m.readPresetAnywhere;
+  presets = await import('../src/utils/userPresets');
 });
 
 afterEach(() => { vi.restoreAllMocks(); });
@@ -162,30 +160,69 @@ describe('an account is not tied to this browser', () => {
     expect(r.message).toMatch(/saved to your account/i);
   });
 
-  it('lists and reads a preset that only exists in the account', async () => {
+  it('lists and loads a preset the account took because the browser was full', async () => {
     account.token = 'tok';
-    account.presets = [{ name: 'cloud_only', data: { nodes: [{ id: 'fromCloud' }] } }];
+    store.limit = 10;
 
-    expect(await listPresetNamesEverywhere()).toContain('cloud_only');
-    const read = await readPresetAnywhere('user:cloud_only');
-    expect((read as { nodes: { id: string }[] }).nodes[0].id).toBe('fromCloud');
+    await savePreset('too_big_for_here', bigScene(1));
+
+    expect(presets.listUserPresetNames()).toContain('too_big_for_here');
+    expect(presets.cloudOnlyPresetNames()).toEqual(['too_big_for_here']);
+    expect(presets.readUserPreset('user:too_big_for_here')?.nodes?.[0].id).toBe('x');
   });
 
-  it('prefers the local copy when a name exists in both', async () => {
+  it('moves it into this browser once there is room to save it again', async () => {
     account.token = 'tok';
-    account.presets = [{ name: 'both', data: { nodes: [{ id: 'cloud' }] } }];
-    await savePreset('both', { nodes: [{ id: 'local' }] } as never);
+    store.limit = 10;
+    await savePreset('moved', bigScene(1));
 
-    const read = await readPresetAnywhere('both');
-    expect((read as { nodes: { id: string }[] }).nodes[0].id).toBe('local');
+    store.limit = Infinity;
+    const r = await savePreset('moved', bigScene(1));
+
+    expect(r.savedTo).toBe('local');
+    expect(presets.cloudOnlyPresetNames()).toEqual([]);
+    expect(presets.listUserPresetNames()).toEqual(['moved']);
   });
 
-  it('still lists what this browser has when the account cannot be reached', async () => {
+  it('deletes a preset that only the account holds', async () => {
     account.token = 'tok';
-    await savePreset('here', { nodes: [] } as never);
-    const api = await import('../src/utils/apiClient');
-    vi.spyOn(api, 'fetchCloudPresets').mockRejectedValue(new Error('offline'));
-    expect(await listPresetNamesEverywhere()).toEqual(['here']);
+    store.limit = 10;
+    await savePreset('gone', bigScene(1));
+
+    expect(presets.deleteUserPreset('gone')).toBe(true);
+    expect(presets.listUserPresetNames()).toEqual([]);
+    expect(cloud.removeCloudPreset).toHaveBeenCalledWith('gone');
+  });
+});
+
+describe('pulling the account into another browser', () => {
+  it('stores everything when there is room', () => {
+    const r = presets.mergePulledPresets({ a: { nodes: [] }, b: { nodes: [] } });
+    expect(r).toEqual({ added: 2, keptInAccount: 0 });
+    expect(Object.keys(presets.readUserPresets()).sort()).toEqual(['a', 'b']);
+  });
+
+  it('does not lose every preset to the one that will not fit', () => {
+    // Room for the two small ones, not for the megabyte.
+    store.limit = 2_000;
+    const r = presets.mergePulledPresets({
+      big: bigScene(1) as never,
+      small1: { nodes: [{ id: 's1' }] } as never,
+      small2: { nodes: [{ id: 's2' }] } as never,
+    });
+
+    expect(r).toEqual({ added: 2, keptInAccount: 1 });
+    expect(Object.keys(presets.readUserPresets()).sort()).toEqual(['small1', 'small2']);
+    expect(presets.listUserPresetNames().sort()).toEqual(['big', 'small1', 'small2']);
+    expect(presets.cloudOnlyPresetNames()).toEqual(['big']);
+    expect(presets.readUserPreset('big')?.nodes?.[0].id).toBe('x');
+  });
+
+  it('leaves a preset already saved here alone', () => {
+    presets.saveUserPreset('mine', { nodes: [{ id: 'local' }] } as never);
+    const r = presets.mergePulledPresets({ mine: { nodes: [{ id: 'cloud' }] } as never });
+    expect(r).toEqual({ added: 0, keptInAccount: 0 });
+    expect(presets.readUserPreset('mine')?.nodes?.[0].id).toBe('local');
   });
 });
 

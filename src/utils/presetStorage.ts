@@ -29,12 +29,11 @@
  */
 
 import {
-  readUserPresets, readUserPreset, listUserPresetNames, writeLocalPreset,
+  listUserPresetNames, writeLocalPreset, rememberCloudOnlyPreset,
   isQuotaError, takeLastWriteError, presetSizes, presetStoreBytes,
   type UserPreset, type PresetSize,
 } from './userPresets';
 import { saveCloudPreset } from './cloudSync';
-import { fetchCloudPresets } from './apiClient';
 import { getStoredAuthToken, isProAccount } from './apiClient';
 
 /** Where a preset ended up. */
@@ -143,6 +142,9 @@ export async function savePreset(name: string, preset: UserPreset): Promise<Pres
   if (signedIn) {
     const uploaded = await saveCloudPreset(key, preset);
     if (uploaded) {
+      // Listed and loadable from here on, though this browser holds no copy;
+      // another machine finds it through the pull on sign-in.
+      rememberCloudOnlyPreset(key, preset);
       return {
         ok: true, savedTo: 'cloud', quotaExceeded: quota, bytes,
         storeBytes: presetStoreBytes(), largest: presetSizes().slice(0, 5), signedIn, pro,
@@ -211,58 +213,4 @@ export function presetStorageReport() {
     signedIn: !!getStoredAuthToken(),
     pro: isProAccount(),
   };
-}
-
-/**
- * Every preset the account can reach, local or not.
- *
- * Listing straight out of localStorage was the other half of the tie to this
- * browser: a preset saved to the account because the browser was full would not
- * have appeared in the list at all, which makes saving it pointless. Cloud names
- * are merged in so a preset is listed wherever it lives.
- */
-export async function listPresetNamesEverywhere(): Promise<string[]> {
-  const local = listUserPresetNames();
-  if (!getStoredAuthToken()) return local;
-  try {
-    const cloud = await fetchCloudPresets('physics');
-    const names = new Set(local);
-    for (const p of cloud) if (p?.name) names.add(p.name);
-    return [...names];
-  } catch {
-    // A listing that fails should show what this browser has, not nothing.
-    return local;
-  }
-}
-
-/**
- * Reads a preset from this browser, or from the account if it is not here.
- *
- * The local copy wins when there is one: it is the one the user has been
- * editing, and `pullCloudState` deliberately never overwrites it.
- */
-export async function readPresetAnywhere(name: string): Promise<UserPreset | null> {
-  const key = name.replace(/^user:/, '');
-  const local = readUserPreset(key);
-  if (local) return local;
-  if (!getStoredAuthToken()) return null;
-  try {
-    const cloud = await fetchCloudPresets('physics');
-    const hit = cloud.find(p => p?.name === key);
-    return (hit?.data as UserPreset) ?? null;
-  } catch {
-    return null;
-  }
-}
-
-/** Presets held in the account but not in this browser. */
-export async function cloudOnlyPresetNames(): Promise<string[]> {
-  if (!getStoredAuthToken()) return [];
-  const local = new Set(Object.keys(readUserPresets()));
-  try {
-    const cloud = await fetchCloudPresets('physics');
-    return cloud.map(p => p?.name).filter((n): n is string => !!n && !local.has(n));
-  } catch {
-    return [];
-  }
 }

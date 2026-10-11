@@ -34,6 +34,41 @@ export interface UserPreset {
   [key: string]: unknown;
 }
 
+/**
+ * Presets the account holds that this browser had no room for.
+ *
+ * Without this, a preset that went to the account because localStorage was full
+ * was listed nowhere: the dropdown, the loaders and the MCP bridge all read
+ * localStorage, and the pull on another machine copied the account into a
+ * localStorage just as full, failing for every preset at once and saying
+ * nothing. They are held here for the session instead, and every reader below
+ * falls back to them, so a preset is listed and loads wherever it lives.
+ *
+ * Deliberately not counted by readUserPresets, presetSizes or presetStoreBytes:
+ * those answer "what is this browser storing", which is what the quota advice
+ * needs.
+ */
+const cloudOnly: Record<string, UserPreset> = {};
+
+/** Fired whenever the set of listed presets changes outside a local save. */
+export const USER_PRESETS_CHANGED_EVENT = 'physics:user-presets-changed';
+
+function announceChange(): void {
+  if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent(USER_PRESETS_CHANGED_EVENT));
+}
+
+/** Lists a preset that only the account holds, for the rest of the session. */
+export function rememberCloudOnlyPreset(name: string, preset: UserPreset): void {
+  cloudOnly[name.replace(/^user:/, '')] = preset;
+  announceChange();
+}
+
+/** Presets listed only because the account has them, without the `user:` prefix. */
+export function cloudOnlyPresetNames(): string[] {
+  const local = readUserPresets();
+  return Object.keys(cloudOnly).filter(name => !Object.hasOwn(local, name));
+}
+
 export function readUserPresets(): Record<string, UserPreset> {
   try {
     const raw = localStorage.getItem(USER_PRESETS_KEY);
@@ -43,15 +78,17 @@ export function readUserPresets(): Record<string, UserPreset> {
   }
 }
 
-/** Names without the `user:` prefix, in the order localStorage holds them. */
+/** Names without the `user:` prefix: this browser's, then any held only by the account. */
 export function listUserPresetNames(): string[] {
-  return Object.keys(readUserPresets());
+  const names = Object.keys(readUserPresets());
+  for (const name of Object.keys(cloudOnly)) if (!names.includes(name)) names.push(name);
+  return names;
 }
 
 /** Accepts either `name` or `user:name`, since both forms circulate. */
 export function readUserPreset(name: string): UserPreset | null {
   const key = name.replace(/^user:/, '');
-  const preset = readUserPresets()[key];
+  const preset = readUserPresets()[key] ?? cloudOnly[key];
   return preset ?? null;
 }
 
@@ -142,7 +179,10 @@ export function writeLocalPreset(name: string, preset: UserPreset): boolean {
   const key = name.replace(/^user:/, '');
   const presets = readUserPresets();
   presets[key] = preset;
-  return writeAll(presets);
+  if (!writeAll(presets)) return false;
+  // Room was made and it is stored here now; the local copy is what reads find.
+  delete cloudOnly[key];
+  return true;
 }
 
 /** Saves locally, then mirrors to the account. Returns false if the local write failed. */
@@ -155,27 +195,67 @@ export function saveUserPreset(name: string, preset: UserPreset): boolean {
 
 export function deleteUserPreset(name: string): boolean {
   const key = name.replace(/^user:/, '');
+  const wasCloudOnly = Object.hasOwn(cloudOnly, key);
+  delete cloudOnly[key];
   const presets = readUserPresets();
-  delete presets[key];
-  if (!writeAll(presets)) return false;
+  if (Object.hasOwn(presets, key)) {
+    delete presets[key];
+    if (!writeAll(presets)) return false;
+  }
   void removeCloudPreset(key);
+  if (wasCloudOnly) announceChange();
   return true;
+}
+
+export interface PresetMergeResult {
+  /** Presets new to this browser and now stored in it. */
+  added: number;
+  /** Presets new to this browser that it had no room for, listed from the account instead. */
+  keptInAccount: number;
 }
 
 /**
  * Merges presets pulled from the account into local storage.
  *
- * Additive on purpose — see the note in cloudSync.pullCloudState. Returns how
- * many were new, for the message the account menu shows.
+ * Additive on purpose — see the note in cloudSync.pullCloudState.
+ *
+ * The obvious single write of everything at once is tried first, but it cannot
+ * be the only attempt: the presets that end up in the account for want of room
+ * are by definition the big ones, a browser on another machine is often no
+ * emptier, and one of them failing the write used to cost every other preset in
+ * the pull along with it. So on failure they go in one at a time, smallest
+ * first, and whatever still does not fit is listed from the account.
  */
-export function mergePulledPresets(pulled: Record<string, UserPreset>): number {
+export function mergePulledPresets(pulled: Record<string, UserPreset>): PresetMergeResult {
   const presets = readUserPresets();
-  let added = 0;
-  for (const [name, data] of Object.entries(pulled)) {
-    if (name in presets) continue;
-    presets[name] = data;
-    added += 1;
+  const incoming = Object.entries(pulled).filter(([name]) => !(name in presets));
+  if (incoming.length === 0) return { added: 0, keptInAccount: 0 };
+
+  const all = { ...presets, ...Object.fromEntries(incoming) };
+  if (writeAll(all)) {
+    for (const [name] of incoming) delete cloudOnly[name];
+    announceChange();
+    return { added: incoming.length, keptInAccount: 0 };
   }
-  if (added > 0) writeAll(presets);
-  return added;
+
+  const size = (data: UserPreset) => {
+    try { return JSON.stringify(data).length; } catch { return Infinity; }
+  };
+  incoming.sort((a, b) => size(a[1]) - size(b[1]));
+  let added = 0;
+  let keptInAccount = 0;
+  for (const [name, data] of incoming) {
+    presets[name] = data;
+    if (writeAll(presets)) {
+      delete cloudOnly[name];
+      added += 1;
+    } else {
+      delete presets[name];
+      cloudOnly[name] = data;
+      keptInAccount += 1;
+    }
+  }
+  takeLastWriteError();
+  announceChange();
+  return { added, keptInAccount };
 }
