@@ -1145,20 +1145,17 @@ export function useMCPBridge() {
             addComponent picks its own id and finishes with a DEBOUNCED, async
             recompile, so the store still holds the old scene when it returns —
             reading the node list straight afterwards gives you the scene as it
-            was. It also parents the new body under the current selection when
-            the editor is in that mode, so the new node is not necessarily last,
-            or even top level.
+            was.
 
-            Taking "the last node" was both of those bugs at once: it returned
-            whatever the scene already ended with, and the rename below then
-            renamed the user's existing body. So: remember every id, ask for the
+            Taking "the last node" was that bug: it returned whatever the scene
+            already ended with, and the rename below then renamed the user's
+            existing body. So: remember every id, ask for the
             component, and wait for the one that appears.
           */
           const before = collectNodeIds(store.sceneGraph.nodes);
-          // A sculpt is a body in its own right, never a child of whatever
-          // happens to be selected — `pos` is a world position and would
-          // silently become a local one.
-          store.setParentUnderSelected(false);
+          // No parent: a sculpt is a body in its own right, never a child of
+          // whatever happens to be selected — `pos` is a world position and
+          // would silently become a local one.
           store.addComponent('sculpt', position);
 
           const created = await waitForNewNode(before, 10000);
