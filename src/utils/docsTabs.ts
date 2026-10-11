@@ -1,6 +1,9 @@
 // Every panel in the properties sidebar should be able to point at an
 // explainer. Tabs are grouped so the nav stays readable as the list grows.
 export const DOCS_TABS = [
+  { group: 'Quick Reference', items: [
+    { id: 'quickref', label: '📌 Quick Reference' },
+  ]},
   { group: 'Simulation', items: [
     { id: 'gravity', label: '🪐 Gravity & Inertia' },
     { id: 'collision', label: '💥 Collision Physics' },

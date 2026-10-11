@@ -2081,7 +2081,7 @@ function App() {
 
             {/* Docs (Info) */}
             <button
-              onClick={() => openDocs(docsTab)}
+              onClick={() => openDocs('quickref')}
               className="flex items-center justify-center w-8 h-8 rounded-full border border-indigo-200 dark:border-indigo-800 text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/30 hover:bg-indigo-100 dark:hover:bg-indigo-900/40 transition-colors focus:outline-none flex-shrink-0 cursor-pointer shadow-xs"
               title="Documentation"
             >

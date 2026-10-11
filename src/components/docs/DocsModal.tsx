@@ -1,5 +1,6 @@
 import { Info, X } from 'lucide-react';
 import { DOCS_TABS, type DocsTabId } from '../../utils/docsTabs';
+import { QuickReference } from './QuickReference';
 
 /**
  * The reference guide. Every panel in the properties sidebar can deep-link
@@ -57,6 +58,8 @@ export function DocsModal({ tab, onTab, onClose }: {
 
           {/* Tab Panel */}
           <div className="flex-1 p-6 max-sm:p-4 overflow-y-auto min-w-0">
+            {tab === 'quickref' && <QuickReference />}
+
             {tab === 'gravity' && (
               <div className="flex flex-col gap-4">
                 <h3 className="font-bold text-slate-800 text-lg flex items-center gap-1.5">🪐 Gravity, Active Joints & Inertia</h3>
