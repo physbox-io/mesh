@@ -10,6 +10,9 @@ import { describeMotionProfile } from '../utils/motionProfile';
 import { webSerialUnavailableReason } from '../utils/machineTransport';
 import { TeknoBoxPicker } from './TeknoBoxPicker';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
+import { NumberInput } from '@physbox-io/ui';
+import { readSpindleMaxOverride, writeSpindleMaxOverride } from '../utils/spindleOverride';
+import { DEFAULT_SPINDLE_RANGE } from '../utils/feedsAndSpeeds';
 
 /** The three ways this app can reach a machine. */
 type MachineLinkKind = 'usb' | 'cloud';
@@ -69,6 +72,20 @@ export const MachineConfigModal: React.FC<{
   );
 
   useEffect(() => webSerialManager.addListener(setMachineState), []);
+
+  /*
+   * The spindle's real top speed, for a router whose `$30` is not it. The box
+   * edits a draft; the value is saved on blur, read from a ref because the
+   * input commits in the same handler that reports the final number.
+   */
+  const [spindleMax, setSpindleMax] = useState<number | undefined>(() => readSpindleMaxOverride() ?? undefined);
+  const spindleMaxRef = useRef(spindleMax);
+  const commitSpindleMax = (rpm: number | undefined) => {
+    spindleMaxRef.current = rpm;
+    setSpindleMax(rpm);
+    writeSpindleMaxOverride(rpm ?? null);
+    webSerialManager.reapplySpindleOverride();
+  };
 
   // Gate on the first real connect attempt only. The auto-resume effect below
   // never reaches this — it only fires for a device already connected once
@@ -327,6 +344,52 @@ export const MachineConfigModal: React.FC<{
             <p className="text-[11px] leading-relaxed text-slate-500 dark:text-slate-400">
               {describeMotionProfile(machineState.motion, machineState.connected)}
             </p>
+
+            {/* Every recommended feed is capped at the spindle's top speed, and
+                `$30` is often the firmware's default rather than the router's. */}
+            <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-200 dark:border-slate-800">
+              <label htmlFor="spindle-max-override" className="text-xs font-semibold">
+                Spindle top speed
+              </label>
+              <NumberInput
+                id="spindle-max-override"
+                integer
+                allowEmpty
+                min={1000}
+                max={100000}
+                step={1000}
+                value={spindleMax}
+                placeholder={String(machineState.grblSettings[30] ?? DEFAULT_SPINDLE_RANGE.max)}
+                onChange={(v) => {
+                  spindleMaxRef.current = v;
+                  setSpindleMax(v);
+                }}
+                onCommit={() => commitSpindleMax(spindleMaxRef.current)}
+                className="w-24 px-2 py-1 rounded-lg text-xs font-mono bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800"
+                aria-label="Spindle top speed in RPM"
+              />
+              <span className="text-xs text-slate-500">RPM</span>
+              {spindleMax !== undefined && (
+                <button
+                  type="button"
+                  onClick={() => commitSpindleMax(undefined)}
+                  className="px-2 py-1 rounded-lg text-[11px] font-semibold text-slate-500 hover:bg-slate-200 dark:hover:bg-slate-800 cursor-pointer"
+                >
+                  {machineState.grblSettings[30] !== undefined ? 'Use $30' : 'Clear'}
+                </button>
+              )}
+              <p className="basis-full text-[11px] leading-relaxed text-slate-500 dark:text-slate-400">
+                {spindleMax !== undefined
+                  ? `Feeds and speeds are planned up to ${spindleMax.toLocaleString()} RPM` +
+                    (machineState.grblSettings[30] !== undefined
+                      ? `, not the controller's $30 = ${machineState.grblSettings[30].toLocaleString()}.`
+                      : '.')
+                  : machineState.grblSettings[30] !== undefined
+                    ? `From the controller's $30. If your router dials faster, enter its real top speed.`
+                    : `Not reported. Assuming ${DEFAULT_SPINDLE_RANGE.max.toLocaleString()} RPM. Enter your spindle's real top speed.`}{' '}
+                For a hand-dialled router. If the controller sets the speed itself, it caps S at $30, so change $30 instead.
+              </p>
+            </div>
           </div>
 
           {machineState.connected && (

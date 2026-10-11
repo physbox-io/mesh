@@ -6,6 +6,7 @@ import type { PhysBoxUser } from '../utils/apiClient';
 import { signInWithGooglePopup, disableGoogleAutoSelect } from '../utils/googleAuth';
 import { pullCloudState } from '../utils/cloudSync';
 import { mergePulledPresets } from '../utils/userPresets';
+import { webSerialManager } from '../utils/webSerialManager';
 import { RemoteMachiningModal } from './RemoteMachiningModal';
 import { JobHistoryModal } from './JobHistoryModal';
 import { CloudSaveStatus } from './CloudSaveStatus';
@@ -98,6 +99,9 @@ export const UserProfileButton: React.FC = () => {
     if (!getStoredAuthToken()) return;
     try {
       const { parameters, presets } = await pullCloudState();
+      // The machine state holds the spindle override already applied, so a
+      // value just restored from the account has to be pushed into it.
+      webSerialManager.reapplySpindleOverride();
       const added = mergePulledPresets(presets);
       setSyncFailed(false);
       setSyncSummary(

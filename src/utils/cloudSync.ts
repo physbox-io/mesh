@@ -20,9 +20,10 @@
 import { fetchCloudParameters, fetchCloudPresets, syncCloudPreset, deleteCloudPreset } from './apiClient';
 import { SYNCED_LLM_PARAMETER_KEYS } from './llmSettings';
 import type { UserPreset } from './userPresets';
+import { SPINDLE_MAX_OVERRIDE_KEY } from './spindleOverride';
 
 /** UI preferences that follow the account, under this app's own id. */
-export const SYNCED_APP_PARAMETER_KEYS: readonly string[] = ['physics_dark_mode'];
+export const SYNCED_APP_PARAMETER_KEYS: readonly string[] = ['physics_dark_mode', SPINDLE_MAX_OVERRIDE_KEY];
 
 /**
  * Mirrors one app-scoped preference to the account.

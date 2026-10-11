@@ -49,6 +49,7 @@ import {
   parseGrblSettings,
   type MotionProfile,
 } from './motionProfile';
+import { withSpindleOverride } from './spindleOverride';
 
 /*
  * One vocabulary across the three apps.
@@ -582,7 +583,7 @@ class WebSerialManager {
     // Disconnected: there is no machine to have a stale datum, but nothing has
     // been zeroed either, so a move guarded on this must still be blocked.
     needsZZero: true,
-    motion: DEFAULT_MOTION_PROFILE,
+    motion: withSpindleOverride(DEFAULT_MOTION_PROFILE),
     grblSettings: {},
     overrides: { feed: 100, rapid: 100, spindle: 100 },
     elapsedSeconds: 0,
@@ -770,9 +771,27 @@ class WebSerialManager {
   }
 
 
+  /**
+   * The motion profile as the controller reported it, before the operator's
+   * spindle override. `state.motion` is this with the override applied, so
+   * changing the override can be undone without asking the machine again.
+   */
+  private reportedMotion: MotionProfile = DEFAULT_MOTION_PROFILE;
+
   private updateState(patch: Partial<MachineState>) {
+    // Every write of the profile goes through the override, so no path that
+    // sets it — connect, disconnect, a fresh `$$` — can forget to apply it.
+    if (patch.motion) {
+      this.reportedMotion = patch.motion;
+      patch = { ...patch, motion: withSpindleOverride(patch.motion) };
+    }
     this.state = { ...this.state, ...patch };
     this.notify();
+  }
+
+  /** Re-applies the spindle override after it changes, here or from the account. */
+  public reapplySpindleOverride(): void {
+    this.updateState({ motion: this.reportedMotion });
   }
 
   /**
