@@ -491,3 +491,183 @@ describe('colouring', () => {
     }
   });
 });
+
+/** Count the dips in a row: places that are lower than both neighbours or start a flat floor. */
+function troughs(values: number[]): number {
+  let n = 0;
+  for (let i = 1; i < values.length - 1; i++) {
+    if (values[i] < values[i - 1] && values[i] <= values[i + 1]) n++;
+  }
+  return n;
+}
+
+/** A 1 mm grid over the test board, so a column or row index is a position in mm. */
+const mmGrid = { cols: 301, rows: 121, extent: { widthM: 0.3, depthM: 0.12 } };
+
+const row = (g: Float32Array, r: number): number[] =>
+  Array.from(g.subarray(r * mmGrid.cols, (r + 1) * mmGrid.cols));
+const column = (g: Float32Array, c: number): number[] =>
+  Array.from({ length: mmGrid.rows }, (_, r) => g[r * mmGrid.cols + c]);
+
+describe('fluted', () => {
+  const spec = patternById('fluted')!;
+  const build = (o: Record<string, number | string>): Float32Array =>
+    spec.build(mmGrid.cols, mmGrid.rows, mmGrid.extent, { ...spec.defaults, ...o });
+
+  it('puts one flute per pitch across the board', () => {
+    // Flutes run down the board at angle 0, so a row crosses every one of
+    // them. They sit at 0, 12 ... 300 mm; the two on the board's edges are not
+    // dips with a neighbour either side, which leaves 300 / 12 - 1.
+    const g = build({ meanderMm: 0, profile: 'v', land: 0 });
+    expect(troughs(row(g, 60))).toBe(300 / 12 - 1);
+  });
+
+  it('is the same on every row when straight, and not when it meanders', () => {
+    const straight = build({ meanderMm: 0 });
+    expect(row(straight, 10)).toEqual(row(straight, 90));
+    const wavy = build({ meanderMm: 5 });
+    expect(row(wavy, 10)).not.toEqual(row(wavy, 50));
+  });
+});
+
+describe('wave slats', () => {
+  const spec = patternById('wave_slats')!;
+  const build = (o: Record<string, number | string>): Float32Array =>
+    spec.build(mmGrid.cols, mmGrid.rows, mmGrid.extent, { ...spec.defaults, ...o });
+
+  it('cuts every gap to the floor', () => {
+    // Pitch 20, gap 6: each pitch opens with its gap, so mm 1..5 of each is floor.
+    const g = build({});
+    for (let p = 0; p < 300; p += 20) {
+      for (const r of [5, 60, 115]) expect(g[r * mmGrid.cols + p + 3]).toBe(0);
+    }
+  });
+
+  it('runs the wave along a slat at the wavelength it was given', () => {
+    const g = build({ wavelengthMm: 40, waveAngleDeg: 0, top: 'flat' });
+    // The middle of the first slat, 6 + 7 mm in.
+    const slat = column(g, 13);
+    expect(Math.max(...slat) - Math.min(...slat)).toBeGreaterThan(0.5);
+    for (let r = 0; r + 40 < mmGrid.rows; r++) expect(slat[r + 40]).toBeCloseTo(slat[r], 5);
+  });
+});
+
+describe('parquet', () => {
+  const spec = patternById('parquet')!;
+
+  for (const layout of ['herringbone', 'chevron', 'basket']) {
+    it(`${layout}: sinks the joints to the floor and leaves the staves standing`, () => {
+      const g = spec.build(mmGrid.cols, mmGrid.rows, mmGrid.extent, { ...spec.defaults, layout, jitter: 0 });
+      let floor = 0;
+      let face = 0;
+      for (const v of g) {
+        if (v === 0) floor++;
+        else if (v > 0.9) face++;
+      }
+      // Joints are a thin network; most of the board is stave face.
+      expect(floor).toBeGreaterThan(g.length * 0.02);
+      expect(face).toBeGreaterThan(g.length * 0.5);
+    });
+  }
+
+  it('lays a basket weave in blocks a stave length square, turned between neighbours', () => {
+    // 80 x 20 staves: 80 mm blocks of four. In the first block the staves lie
+    // along the board, so a row through a stave crosses no joint until the
+    // block edge; in the next block they lie across it, so it crosses three.
+    const g = spec.build(mmGrid.cols, mmGrid.rows, mmGrid.extent, { ...spec.defaults, layout: 'basket', jitter: 0 });
+    const r = row(g, 10);
+    const jointsIn = (from: number, to: number): number => {
+      let n = 0;
+      for (let c = from + 1; c < to; c++) if (r[c] === 0 && r[c - 1] !== 0) n++;
+      return n;
+    };
+    expect(jointsIn(3, 77)).toBe(0);
+    expect(jointsIn(83, 157)).toBe(3);
+  });
+});
+
+describe('faceted', () => {
+  const spec = patternById('faceted')!;
+
+  it('puts a peak in the middle of each cell and a valley at its corners', () => {
+    const g = spec.build(mmGrid.cols, mmGrid.rows, mmGrid.extent, { ...spec.defaults, cellMm: 30, sharpness: 1 });
+    for (const [x, y] of [[15, 15], [45, 75], [255, 105]]) expect(g[y * mmGrid.cols + x]).toBeCloseTo(1, 5);
+    for (const [x, y] of [[30, 30], [60, 90], [240, 0]]) expect(g[y * mmGrid.cols + x]).toBeCloseTo(0, 5);
+  });
+
+  it('flattens more of each top as the sharpness falls', () => {
+    const plateau = (sharpness: number): number =>
+      spec.build(mmGrid.cols, mmGrid.rows, mmGrid.extent, { ...spec.defaults, sharpness })
+        .filter((v) => v === 1).length;
+    expect(plateau(0)).toBeGreaterThan(plateau(1) * 10);
+  });
+
+  it('builds tumbling blocks from three flat faces', () => {
+    // Every face is a plane, so along any line the height changes in straight
+    // runs: the second difference is zero except where faces meet.
+    const g = spec.build(mmGrid.cols, mmGrid.rows, mmGrid.extent, { ...spec.defaults, form: 'blocks' });
+    const r = row(g, 60);
+    let bends = 0;
+    for (let c = 1; c < r.length - 1; c++) if (Math.abs(r[c + 1] - 2 * r[c] + r[c - 1]) > 1e-4) bends++;
+    expect(bends).toBeLessThan(r.length * 0.25);
+  });
+});
+
+describe('kumiko', () => {
+  const spec = patternById('kumiko')!;
+
+  for (const form of ['asanoha', 'triangle', 'square']) {
+    it(`${form}: leaves most of the face uncut and cuts the lines to the floor`, () => {
+      const g = spec.build(mmGrid.cols, mmGrid.rows, mmGrid.extent, { ...spec.defaults, form });
+      const uncut = g.filter((v) => v === 1).length;
+      expect(uncut).toBeGreaterThan(g.length * 0.5);
+      expect(Math.min(...g)).toBeLessThan(0.3);
+    });
+  }
+
+  it('cuts more line into a hemp leaf than into its bare triangles', () => {
+    const cut = (form: string): number =>
+      spec.build(mmGrid.cols, mmGrid.rows, mmGrid.extent, { ...spec.defaults, form }).filter((v) => v < 1).length;
+    expect(cut('asanoha')).toBeGreaterThan(cut('triangle') * 1.5);
+  });
+});
+
+describe('guilloche', () => {
+  const spec = patternById('guilloche')!;
+
+  it('is plain straight lines with no wave and no cross angle, and a moiré with them', () => {
+    const plain = spec.build(mmGrid.cols, mmGrid.rows, mmGrid.extent,
+      { ...spec.defaults, form: 'moire', amplitudeMm: 0, crossDeg: 0 });
+    // Lines run along the board, so each row is one height all the way across.
+    for (const r of [7, 50, 99]) expect(new Set(row(plain, r)).size).toBe(1);
+    const moire = spec.build(mmGrid.cols, mmGrid.rows, mmGrid.extent, { ...spec.defaults, form: 'moire' });
+    expect(new Set(row(moire, 50)).size).toBeGreaterThan(1);
+  });
+
+  it('centres the rosette on the board', () => {
+    // With no twist the two ring sets coincide, so the rosette has the board's
+    // own mirror symmetry about its centre.
+    const g = spec.build(mmGrid.cols, mmGrid.rows, mmGrid.extent, { ...spec.defaults, twistDeg: 0, lobes: 4 });
+    for (const [c, r] of [[100, 30], [40, 90], [140, 59]]) {
+      expect(g[r * mmGrid.cols + c]).toBeCloseTo(g[(120 - r) * mmGrid.cols + (300 - c)], 4);
+    }
+  });
+});
+
+describe('fish scales', () => {
+  const spec = patternById('scales')!;
+
+  it('steps once per row of scales', () => {
+    // Walking up the board, each scale falls from its free edge towards where
+    // it tucks under the next row, then jumps up to that row's free edge: one
+    // sharp step per row, which is what reads as overlap.
+    const g = spec.build(mmGrid.cols, mmGrid.rows, mmGrid.extent, { ...spec.defaults, jitter: 0, overlap: 0.25 });
+    const col = column(g, 0);
+    let steps = 0;
+    for (let r = 1; r < col.length; r++) if (col[r] - col[r - 1] > 0.2) steps++;
+    // Rows are 9 mm apart, but a column through the even rows' centres only
+    // grazes the odd rows' edges, so it meets a scale every 18 mm.
+    expect(steps).toBeGreaterThanOrEqual(Math.floor(120 / 18) - 1);
+    expect(steps).toBeLessThanOrEqual(Math.ceil(120 / 18) + 1);
+  });
+});

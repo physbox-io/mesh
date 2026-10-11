@@ -380,6 +380,149 @@ const waves: PatternSpec = {
   },
 };
 
+// --- Fluted ----------------------------------------------------------------
+
+/** Turn board coordinates into a frame rotated by `angle`: u across, v along. */
+const rotate = (x: number, y: number, angle: number): [number, number] => {
+  const c = Math.cos(angle);
+  const s = Math.sin(angle);
+  return [x * c + y * s, -x * s + y * c];
+};
+
+const fluted: PatternSpec = {
+  id: 'fluted',
+  label: 'Fluted',
+  blurb: 'Parallel flutes or reeds, straight or meandering on a sine -- the wavy wall-panel look.',
+  defaults: {
+    pitchMm: 12, profile: 'flute', land: 0.15, meanderMm: 5, meanderWavelengthMm: 160,
+    driftDeg: 0, angleDeg: 0,
+  },
+  fields: [
+    { kind: 'number', key: 'pitchMm', label: 'Pitch', min: 2, max: 100, step: 0.5, unit: 'mm',
+      hint: 'Centre to centre. A flute narrower than the cutter comes out as wide as the cutter, so keep this above its diameter.' },
+    { kind: 'choice', key: 'profile', label: 'Profile', options: [
+      { value: 'flute', label: 'Flutes (round grooves)' },
+      { value: 'reed', label: 'Reeds (round beads)' },
+      { value: 'v', label: 'V grooves' },
+    ] },
+    { kind: 'number', key: 'land', label: 'Land', min: 0, max: 0.8, step: 0.05,
+      hint: 'Flat left between flutes, as a fraction of the pitch. Zero meets in a sharp ridge.' },
+    { kind: 'number', key: 'meanderMm', label: 'Meander', min: 0, max: 100, step: 0.5, unit: 'mm',
+      hint: 'How far each flute swings to either side. Zero is straight fluting.' },
+    { kind: 'number', key: 'meanderWavelengthMm', label: 'Meander length', min: 10, max: 1000, step: 5, unit: 'mm',
+      hint: 'Distance along a flute for one full swing.' },
+    { kind: 'number', key: 'driftDeg', label: 'Phase drift', min: -180, max: 180, step: 5, unit: 'deg',
+      hint: 'How far each flute\'s swing runs ahead of its neighbour\'s. Zero keeps them parallel; a little makes the wave travel across the board.' },
+    { kind: 'number', key: 'angleDeg', label: 'Direction', min: -90, max: 90, step: 5, unit: 'deg' },
+  ],
+  build(cols, rows, extent, opts) {
+    const pitch = Math.max(0.5, num(opts, 'pitchMm', 12)) / 1000;
+    const profile = str(opts, 'profile', 'flute');
+    const land = Math.min(0.95, Math.max(0, num(opts, 'land', 0.15)));
+    const amp = Math.max(0, num(opts, 'meanderMm', 5)) / 1000;
+    const lambda = Math.max(1, num(opts, 'meanderWavelengthMm', 160)) / 1000;
+    const drift = (num(opts, 'driftDeg', 0) * Math.PI) / 180;
+    const angle = (num(opts, 'angleDeg', 0) * Math.PI) / 180;
+
+    const k = (2 * Math.PI) / lambda;
+    // A flute can swing past its neighbours when the meander outruns the
+    // pitch, so the nearest one is not always the one the point started over.
+    const reach = Math.min(8, Math.ceil(amp / pitch) + 1);
+
+    return normaliseGrid(
+      fillGrid(cols, rows, extent, (x, y) => {
+        const [u, v] = rotate(x, y, angle);
+        const home = Math.round(u / pitch);
+        let best = Infinity;
+        for (let i = home - reach; i <= home + reach; i++) {
+          const phase = k * v + i * drift;
+          const centre = i * pitch + amp * Math.sin(phase);
+          // Measured across the flute, not across the board: on the steep
+          // part of a swing the horizontal gap overstates the distance, which
+          // would pinch every flute thin wherever it turns.
+          const slope = amp * k * Math.cos(phase);
+          const d = Math.abs(u - centre) / Math.sqrt(1 + slope * slope);
+          if (d < best) best = d;
+        }
+        // 0 at a flute's centre line, 1 halfway to the next.
+        const t = best / (pitch / 2);
+        if (profile === 'reed') {
+          // A bead on every centre line, meeting its neighbour in a V.
+          return Math.sqrt(Math.max(0, 1 - t * t));
+        }
+        // A groove takes the pitch less the land.
+        const g = Math.min(1, t / Math.max(1e-6, 1 - land));
+        if (profile === 'v') return g;
+        // Half round: the section a ball-nose cutter leaves.
+        return 1 - Math.sqrt(Math.max(0, 1 - g * g));
+      })
+    );
+  },
+};
+
+// --- Wave slats ------------------------------------------------------------
+
+const waveSlats: PatternSpec = {
+  id: 'wave_slats',
+  label: 'Wave Slats',
+  blurb: 'A row of slats whose tops rise and fall with a wave running across them.',
+  defaults: {
+    pitchMm: 20, gapMm: 6, wavelengthMm: 200, waveAngleDeg: 30, low: 0.3, top: 'round', angleDeg: 0,
+  },
+  fields: [
+    { kind: 'number', key: 'pitchMm', label: 'Slat pitch', min: 3, max: 200, step: 0.5, unit: 'mm',
+      hint: 'Slat plus gap, centre to centre.' },
+    { kind: 'number', key: 'gapMm', label: 'Gap', min: 0, max: 100, step: 0.5, unit: 'mm',
+      hint: 'Cut to the floor between slats. Narrower than the cutter, and it comes out as wide as the cutter.' },
+    { kind: 'number', key: 'wavelengthMm', label: 'Wavelength', min: 10, max: 2000, step: 5, unit: 'mm',
+      hint: 'Crest to crest of the wave the slat tops follow.' },
+    { kind: 'number', key: 'waveAngleDeg', label: 'Wave angle', min: -90, max: 90, step: 5, unit: 'deg',
+      hint: 'Zero runs the wave along each slat, so they all match; 90 steps it from slat to slat. Between the two it travels diagonally.' },
+    { kind: 'number', key: 'low', label: 'Trough height', min: 0.05, max: 0.9, step: 0.05,
+      hint: 'How tall a slat stays at the bottom of the wave, as a fraction of the full height.' },
+    { kind: 'choice', key: 'top', label: 'Slat top', options: [
+      { value: 'round', label: 'Rounded' },
+      { value: 'flat', label: 'Square' },
+    ] },
+    { kind: 'number', key: 'angleDeg', label: 'Direction', min: -90, max: 90, step: 5, unit: 'deg' },
+  ],
+  build(cols, rows, extent, opts) {
+    const pitch = Math.max(1, num(opts, 'pitchMm', 20)) / 1000;
+    const gap = Math.min(pitch * 0.9, Math.max(0, num(opts, 'gapMm', 6)) / 1000);
+    const lambda = Math.max(1, num(opts, 'wavelengthMm', 200)) / 1000;
+    const waveAngle = (num(opts, 'waveAngleDeg', 30) * Math.PI) / 180;
+    const low = Math.min(0.95, Math.max(0.01, num(opts, 'low', 0.3)));
+    const round = str(opts, 'top', 'round') === 'round';
+    const angle = (num(opts, 'angleDeg', 0) * Math.PI) / 180;
+
+    const k = (2 * Math.PI) / lambda;
+    const slatW = pitch - gap;
+
+    const out = fillGrid(cols, rows, extent, (x, y) => {
+      const [u, v] = rotate(x, y, angle);
+      // Each pitch is the gap followed by the slat.
+      const i = Math.floor(u / pitch);
+      const inPitch = u - i * pitch;
+      if (inPitch < gap) return 0;
+      // The wave is read at the slat's centre line, not at the point, so a
+      // slat is one slat -- the same height across its width -- and the wave
+      // shows as a step from each to the next, which is the whole look.
+      const centre = i * pitch + gap + slatW / 2;
+      const phase = k * (v * Math.cos(waveAngle) + centre * Math.sin(waveAngle));
+      const height = low + (1 - low) * (0.5 + 0.5 * Math.sin(phase));
+      if (!round) return height;
+      const s = (inPitch - gap - slatW / 2) / (slatW / 2);
+      // A rounded-over top, not a half cylinder: the flat of the slat still
+      // carries the wave and only its edges fall away.
+      const ease = Math.sqrt(Math.max(0, 1 - Math.pow(Math.abs(s), 4)));
+      return height * (0.75 + 0.25 * ease);
+    });
+    // Not normalised: the gap floor is genuinely zero, and the slat tops are
+    // already a fraction of full height by construction.
+    return out;
+  },
+};
+
 // --- Topographic -----------------------------------------------------------
 
 const topographic: PatternSpec = {
@@ -615,6 +758,428 @@ const masonry: PatternSpec = {
         const arris = clamp01(edge / (mortar * 0.6));
 
         return 0.35 + (0.65 + lift + grit) * arris;
+      })
+    );
+  },
+};
+
+// --- Parquet ---------------------------------------------------------------
+
+/** Positive modulo: `fract` for a period other than 1. */
+const wrap = (a: number, n: number): number => a - Math.floor(a / n) * n;
+
+/**
+ * Which stave of a herringbone a point is on, in units of the stave width.
+ *
+ * The staves here are axis-aligned and `n` widths long; the board turns the
+ * whole field 45 degrees afterwards, which is what makes it read as a
+ * herringbone rather than as a staircase. Horizontal staves start at (t, t)
+ * and vertical ones at (t, t + 1), and that pair repeats every (n, -n) -- a
+ * lattice whose cell has area 2n, exactly one stave of each kind, so the two
+ * tests below between them cover the plane once.
+ */
+function herringboneStave(x: number, y: number, n: number): { id: [number, number]; along: number; across: number } {
+  const fy = Math.floor(y);
+  const a = wrap(x - fy, 2 * n);
+  if (a < n) {
+    return { id: [Math.floor((x - fy) / (2 * n)) * 2, fy], along: a, across: y - fy };
+  }
+  const fx = Math.floor(x);
+  const b = wrap(y - fx - 1, 2 * n);
+  return { id: [Math.floor((y - fx - 1) / (2 * n)) * 2 + 1, fx], along: b, across: x - fx };
+}
+
+const parquet: PatternSpec = {
+  id: 'parquet',
+  flatTopped: true,
+  label: 'Parquet',
+  blurb: 'Staves laid in a herringbone, a chevron or a basket weave, with sunk joints.',
+  defaults: { layout: 'herringbone', staveLengthMm: 80, staveWidthMm: 20, jointMm: 1.5, jitter: 0.5, seed: 1 },
+  baseRgb: [0.66, 0.47, 0.28],
+  // The joint is the floor; above it each stave takes its own tone from its own
+  // height, which the per-stave lift sets -- so a board reads as separate
+  // pieces of timber, the way parquet does.
+  palette: (h) => (h < 0.3
+    ? [0.22, 0.14, 0.08]
+    : mix([0.50, 0.32, 0.17], [0.80, 0.62, 0.40], (h - 0.3) / 0.7)),
+  fields: [
+    { kind: 'choice', key: 'layout', label: 'Layout', options: [
+      { value: 'herringbone', label: 'Herringbone' },
+      { value: 'chevron', label: 'Chevron' },
+      { value: 'basket', label: 'Basket weave' },
+    ] },
+    { kind: 'number', key: 'staveLengthMm', label: 'Stave length', min: 10, max: 600, step: 1, unit: 'mm',
+      hint: 'Herringbone and basket weave round this to a whole number of stave widths, which is what lets the staves interlock.' },
+    { kind: 'number', key: 'staveWidthMm', label: 'Stave width', min: 3, max: 150, step: 0.5, unit: 'mm' },
+    { kind: 'number', key: 'jointMm', label: 'Joint', min: 0.3, max: 10, step: 0.1, unit: 'mm',
+      hint: 'The sunk line between staves. Narrower than the cutter, and it comes out as wide as the cutter.' },
+    { kind: 'number', key: 'jitter', label: 'Variation', min: 0, max: 1, step: 0.05,
+      hint: 'Per-stave differences in height and tone. Zero is one flat floor with lines in it.' },
+    seedField(),
+  ],
+  build(cols, rows, extent, opts) {
+    const layout = str(opts, 'layout', 'herringbone');
+    const W = Math.max(0.5, num(opts, 'staveWidthMm', 20)) / 1000;
+    const lengthM = Math.max(1, num(opts, 'staveLengthMm', 80)) / 1000;
+    const n = Math.max(2, Math.round(lengthM / W));
+    const joint = Math.max(0.05, num(opts, 'jointMm', 1.5)) / 1000;
+    const jitter = clamp01(num(opts, 'jitter', 0.5));
+    const seed = Math.round(num(opts, 'seed', 1));
+
+    // The chevron's staves are cut on the mitre, so a column is the stave's
+    // length laid across at 45 degrees and a row is its width measured square
+    // to the cut.
+    const chevronCol = lengthM * Math.SQRT1_2;
+    const chevronRow = W * Math.SQRT2;
+
+    /** The stave a point is on, and how far it is from that stave's edge, in metres. */
+    const locate = (x: number, y: number): { id: [number, number]; edge: number } => {
+      if (layout === 'chevron') {
+        const col = Math.floor(x / chevronCol);
+        const xl = x - col * chevronCol;
+        // Alternate columns slope opposite ways and meet at the seam.
+        const rise = col % 2 === 0 ? xl : chevronCol - xl;
+        const yy = y - rise;
+        const row = Math.floor(yy / chevronRow);
+        const f = yy / chevronRow - row;
+        const acrossEdge = Math.min(f, 1 - f) * W;
+        const seamEdge = Math.min(xl, chevronCol - xl);
+        return { id: [col, row], edge: Math.min(acrossEdge, seamEdge) };
+      }
+      if (layout === 'basket') {
+        const block = n * W;
+        const bi = Math.floor(x / block);
+        const bj = Math.floor(y / block);
+        const xl = x - bi * block;
+        const yl = y - bj * block;
+        // Each block is n staves side by side, turned a quarter between neighbours.
+        const flat = (bi + bj) % 2 === 0;
+        const across = flat ? yl : xl;
+        const s = Math.floor(across / W);
+        const f = across - s * W;
+        const edge = Math.min(f, W - f, xl, block - xl, yl, block - yl);
+        return { id: [bi * n + (flat ? 0 : s), bj * n + (flat ? s : 0)], edge };
+      }
+      // Herringbone, worked in stave widths in a frame turned 45 degrees.
+      const [u, v] = rotate(x, y, Math.PI / 4);
+      const st = herringboneStave(u / W, v / W, n);
+      if (st.along >= n) return { id: st.id, edge: 0 };
+      const edge = Math.min(st.along, n - st.along, st.across, 1 - st.across) * W;
+      return { id: st.id, edge };
+    };
+
+    return fillGrid(cols, rows, extent, (x, y) => {
+      const { id, edge } = locate(x, y);
+      const half = joint / 2;
+      if (edge < half) return 0;
+      const lift = jitter > 0 ? (hash2D(id[0], id[1], seed ^ 0x5a17) - 0.5) * jitter * 0.5 : 0;
+      // Ease each stave into its joint, as the bricks do: a stave with a
+      // knife edge is one a round cutter cannot make and real oak chips off.
+      const arris = clamp01((edge - half) / (joint * 0.8));
+      return clamp01(0.4 + (0.55 + lift) * arris);
+    });
+  },
+};
+
+// --- Faceted ---------------------------------------------------------------
+
+/**
+ * The offset from a point to the centre of its hexagon, in a lattice whose
+ * centres are one unit apart.
+ *
+ * Two rectangular lattices of centres, one shifted half a cell, between them
+ * hold every hexagon centre; the nearer of the two candidates is the one the
+ * point is in.
+ */
+function hexOffset(x: number, y: number): [number, number] {
+  const sy = Math.sqrt(3);
+  const ax = wrap(x, 1) - 0.5;
+  const ay = wrap(y, sy) - sy / 2;
+  const bx = wrap(x - 0.5, 1) - 0.5;
+  const by = wrap(y - sy / 2, sy) - sy / 2;
+  return ax * ax + ay * ay < bx * bx + by * by ? [ax, ay] : [bx, by];
+}
+
+const faceted: PatternSpec = {
+  id: 'faceted',
+  label: 'Faceted',
+  blurb: 'Fields of pyramids, diamonds or hexagons, or the tumbling-blocks cube illusion.',
+  defaults: { form: 'pyramid', cellMm: 30, sharpness: 1, angleDeg: 0 },
+  fields: [
+    { kind: 'choice', key: 'form', label: 'Form', options: [
+      { value: 'pyramid', label: 'Square pyramids' },
+      { value: 'diamond', label: 'Diamonds' },
+      { value: 'hex', label: 'Hex pyramids' },
+      { value: 'blocks', label: 'Tumbling blocks' },
+    ] },
+    { kind: 'number', key: 'cellMm', label: 'Cell size', min: 3, max: 300, step: 1, unit: 'mm',
+      hint: 'One pyramid or block, edge to edge.' },
+    { kind: 'number', key: 'sharpness', label: 'Peak sharpness', min: 0, max: 1, step: 0.05,
+      hint: 'One comes to a point; lower cuts the tops off flat. Tumbling blocks only read as cubes when sharp.' },
+    { kind: 'number', key: 'angleDeg', label: 'Rotation', min: -90, max: 90, step: 5, unit: 'deg' },
+  ],
+  build(cols, rows, extent, opts) {
+    const form = str(opts, 'form', 'pyramid');
+    const cell = Math.max(0.5, num(opts, 'cellMm', 30)) / 1000;
+    const sharp = clamp01(num(opts, 'sharpness', 1));
+    const angle = (num(opts, 'angleDeg', 0) * Math.PI) / 180;
+    // The three faces of a cube corner, pointing at alternate vertices of its
+    // hexagon. Every point's height is set by whichever it faces most.
+    const cubeFaces = [90, 210, 330].map((d) => [Math.cos((d * Math.PI) / 180), Math.sin((d * Math.PI) / 180)]);
+
+    const raw = (x: number, y: number): number => {
+      let [u, v] = rotate(x, y, angle);
+      u /= cell;
+      v /= cell;
+      if (form === 'hex' || form === 'blocks') {
+        const [gx, gy] = hexOffset(u, v);
+        if (form === 'hex') {
+          // Distance to the hexagon's edge, as a fraction of its inradius.
+          const d = Math.max(Math.abs(gx), Math.abs(gx) * 0.5 + Math.abs(gy) * (Math.sqrt(3) / 2));
+          return 1 - d / 0.5;
+        }
+        // Three planes meeting at the centre. Raking light gives each its own
+        // shade, which is the whole illusion -- no paint involved.
+        let m = 0;
+        for (const [fx, fy] of cubeFaces) m = Math.max(m, gx * fx + gy * fy);
+        return 1 - m * Math.sqrt(3);
+      }
+      if (form === 'diamond') {
+        // A square pyramid field squashed along one axis and turned 45
+        // degrees: the knurl a lathe leaves, at a larger scale.
+        [u, v] = rotate(u, v / 1.6, Math.PI / 4);
+      }
+      const fu = wrap(u, 1) - 0.5;
+      const fv = wrap(v, 1) - 0.5;
+      return 1 - 2 * Math.max(Math.abs(fu), Math.abs(fv));
+    };
+
+    // Sharpness truncates the top: 1 leaves the point, 0 flattens the upper
+    // 60% of every facet into a plateau.
+    const scale = 0.4 + 0.6 * sharp;
+    return fillGrid(cols, rows, extent, (x, y) => clamp01(raw(x, y) / scale));
+  },
+};
+
+// --- Kumiko ----------------------------------------------------------------
+
+/** Distance from a point to a segment. */
+function segmentDistance(
+  px: number, py: number, ax: number, ay: number, bx: number, by: number
+): number {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const len2 = dx * dx + dy * dy;
+  const t = len2 > 0 ? clamp01(((px - ax) * dx + (py - ay) * dy) / len2) : 0;
+  return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+}
+
+const kumiko: PatternSpec = {
+  id: 'kumiko',
+  label: 'Kumiko',
+  blurb: 'Japanese lattice patterns as fine grooves in a flat face: hemp leaf, triangles, or squares and diagonals.',
+  depthFraction: 0.15,
+  defaults: { form: 'asanoha', cellMm: 40, lineMm: 2.5, profile: 'v', angleDeg: 0 },
+  fields: [
+    { kind: 'choice', key: 'form', label: 'Form', options: [
+      { value: 'asanoha', label: 'Asanoha (hemp leaf)' },
+      { value: 'triangle', label: 'Triangles' },
+      { value: 'square', label: 'Squares & diagonals' },
+    ] },
+    { kind: 'number', key: 'cellMm', label: 'Cell size', min: 5, max: 300, step: 1, unit: 'mm',
+      hint: 'The edge of one triangle or square.' },
+    { kind: 'number', key: 'lineMm', label: 'Line width', min: 0.3, max: 20, step: 0.1, unit: 'mm',
+      hint: 'Width at the surface. Cut with a V bit, the line\'s width follows from its depth.' },
+    { kind: 'choice', key: 'profile', label: 'Groove', options: [
+      { value: 'v', label: 'V' },
+      { value: 'round', label: 'Round' },
+    ] },
+    { kind: 'number', key: 'angleDeg', label: 'Rotation', min: -90, max: 90, step: 5, unit: 'deg' },
+  ],
+  build(cols, rows, extent, opts) {
+    const form = str(opts, 'form', 'asanoha');
+    const s = Math.max(1, num(opts, 'cellMm', 40)) / 1000;
+    const half = Math.max(0.05, num(opts, 'lineMm', 2.5)) / 2000;
+    const round = str(opts, 'profile', 'v') === 'round';
+    const angle = (num(opts, 'angleDeg', 0) * Math.PI) / 180;
+    const h = (s * Math.sqrt(3)) / 2;
+
+    /** Distance from a point to the nearest line of the lattice, in metres. */
+    const distance = (x: number, y: number): number => {
+      const [u, v] = rotate(x, y, angle);
+      if (form === 'square') {
+        // Every line here is infinite -- the grid and both diagonals of each
+        // square -- so the distance is the nearest of four line families.
+        const line = (a: number, period: number): number => Math.abs(wrap(a + period / 2, period) - period / 2);
+        return Math.min(
+          line(u, s),
+          line(v, s),
+          line(u - v, s) * Math.SQRT1_2,
+          line(u + v, s) * Math.SQRT1_2
+        );
+      }
+      // Find the triangle of a triangular lattice the point is in, from its
+      // skewed coordinates.
+      const j = v / h;
+      const i = u / s - j / 2;
+      const fi = Math.floor(i);
+      const fj = Math.floor(j);
+      const up = i - fi + (j - fj) < 1;
+      const corners: Array<[number, number]> = up
+        ? [[fi, fj], [fi + 1, fj], [fi, fj + 1]]
+        : [[fi + 1, fj], [fi + 1, fj + 1], [fi, fj + 1]];
+      const pts = corners.map(([ci, cj]) => [(ci + cj / 2) * s, cj * h]);
+      let d = Infinity;
+      for (let k = 0; k < 3; k++) {
+        const [ax, ay] = pts[k];
+        const [bx, by] = pts[(k + 1) % 3];
+        d = Math.min(d, segmentDistance(u, v, ax, ay, bx, by));
+      }
+      if (form === 'asanoha') {
+        // The hemp leaf adds a spoke from each triangle's centre to each of
+        // its corners. The triangle's own edges are always drawn, so nothing
+        // outside it can be nearer than they are; checking this one
+        // triangle's spokes is enough.
+        const cx = (pts[0][0] + pts[1][0] + pts[2][0]) / 3;
+        const cy = (pts[0][1] + pts[1][1] + pts[2][1]) / 3;
+        for (const [px, py] of pts) d = Math.min(d, segmentDistance(u, v, cx, cy, px, py));
+      }
+      return d;
+    };
+
+    return fillGrid(cols, rows, extent, (x, y) => {
+      const t = distance(x, y) / half;
+      if (t >= 1) return 1;
+      return round ? 1 - Math.sqrt(Math.max(0, 1 - t * t)) : t;
+    });
+  },
+};
+
+// --- Guilloche -------------------------------------------------------------
+
+const guilloche: PatternSpec = {
+  id: 'guilloche',
+  label: 'Guilloché',
+  blurb: 'Engine-turned interference lines: a moiré of two wavy line sets, or a spirograph rosette.',
+  depthFraction: 0.1,
+  defaults: { form: 'rosette', pitchMm: 3, lineMm: 1, amplitudeMm: 4, wavelengthMm: 60, crossDeg: 6, lobes: 12, twistDeg: 8 },
+  fields: [
+    { kind: 'choice', key: 'form', label: 'Form', options: [
+      { value: 'rosette', label: 'Rosette' },
+      { value: 'moire', label: 'Moiré' },
+    ] },
+    { kind: 'number', key: 'pitchMm', label: 'Line pitch', min: 0.5, max: 30, step: 0.1, unit: 'mm',
+      hint: 'Spacing between neighbouring lines. Fine pitches need a fine V bit.' },
+    { kind: 'number', key: 'lineMm', label: 'Line width', min: 0.1, max: 10, step: 0.05, unit: 'mm' },
+    { kind: 'number', key: 'amplitudeMm', label: 'Wave', min: 0, max: 50, step: 0.5, unit: 'mm',
+      hint: 'How far each line swings.' },
+    { kind: 'number', key: 'wavelengthMm', label: 'Wavelength', min: 5, max: 500, step: 1, unit: 'mm',
+      hint: 'Moiré only: the length of one swing along a line.' },
+    { kind: 'number', key: 'crossDeg', label: 'Cross angle', min: 0, max: 45, step: 0.5, unit: 'deg',
+      hint: 'Moiré only: the angle between the two line sets. Small angles give the broad, slow beats.' },
+    { kind: 'number', key: 'lobes', label: 'Lobes', min: 2, max: 60, step: 1,
+      hint: 'Rosette only: swings in one turn around the centre.' },
+    { kind: 'number', key: 'twistDeg', label: 'Twist', min: 0, max: 90, step: 1, unit: 'deg',
+      hint: 'Rosette only: how far each ring\'s swing turns from the last. The two sets twist opposite ways and weave.' },
+  ],
+  build(cols, rows, extent, opts) {
+    const form = str(opts, 'form', 'rosette');
+    const pitch = Math.max(0.1, num(opts, 'pitchMm', 3)) / 1000;
+    const half = Math.max(0.05, num(opts, 'lineMm', 1)) / 2000;
+    const amp = Math.max(0, num(opts, 'amplitudeMm', 4)) / 1000;
+    const lambda = Math.max(1, num(opts, 'wavelengthMm', 60)) / 1000;
+    const cross = (num(opts, 'crossDeg', 6) * Math.PI) / 180;
+    const lobes = Math.max(1, Math.round(num(opts, 'lobes', 12)));
+    const twist = (num(opts, 'twistDeg', 8) * Math.PI) / 180;
+    const k = (2 * Math.PI) / lambda;
+    const reach = Math.min(12, Math.ceil(amp / pitch) + 1);
+    const cx = extent.widthM / 2;
+    const cy = extent.depthM / 2;
+
+    /** Groove height for a distance from the nearest line: 0 on it, 1 clear of it. */
+    const groove = (d: number): number => Math.min(1, d / half);
+
+    /** Distance to the nearest of a family of wavy straight lines turned by `a`. */
+    const wavyLines = (x: number, y: number, a: number): number => {
+      const [u, v] = rotate(x, y, a);
+      const sway = amp * Math.sin(k * u);
+      const slope = amp * k * Math.cos(k * u);
+      const off = v - sway;
+      return Math.abs(off - Math.round(off / pitch) * pitch) / Math.sqrt(1 + slope * slope);
+    };
+
+    /** Distance to the nearest of a family of wavy rings, whose swing turns by `tw` each ring. */
+    const wavyRings = (x: number, y: number, tw: number): number => {
+      const r = Math.hypot(x - cx, y - cy);
+      const phi = Math.atan2(y - cy, x - cx);
+      const home = Math.round(r / pitch);
+      let best = Infinity;
+      for (let i = Math.max(0, home - reach); i <= home + reach; i++) {
+        const phase = lobes * phi + i * tw;
+        const ring = i * pitch + amp * Math.sin(phase);
+        const slope = r > 1e-6 ? (amp * lobes * Math.cos(phase)) / r : 0;
+        best = Math.min(best, Math.abs(r - ring) / Math.sqrt(1 + slope * slope));
+      }
+      return best;
+    };
+
+    return fillGrid(cols, rows, extent, (x, y) => {
+      if (form === 'moire') {
+        return Math.min(groove(wavyLines(x, y, 0)), groove(wavyLines(x, y, cross)));
+      }
+      return Math.min(groove(wavyRings(x, y, twist)), groove(wavyRings(x, y, -twist)));
+    });
+  },
+};
+
+// --- Fish scales -----------------------------------------------------------
+
+const scales: PatternSpec = {
+  id: 'scales',
+  label: 'Fish Scales',
+  blurb: 'Overlapping round scales in offset rows, each one lifting to its free edge.',
+  defaults: { scaleMm: 24, overlap: 0.25, lift: 0.7, jitter: 0.3, angleDeg: 0, seed: 1 },
+  fields: [
+    { kind: 'number', key: 'scaleMm', label: 'Scale size', min: 3, max: 300, step: 1, unit: 'mm',
+      hint: 'The width of one scale.' },
+    { kind: 'number', key: 'overlap', label: 'Overlap', min: 0, max: 0.7, step: 0.05,
+      hint: 'How much of each scale the next row covers. More overlap, shorter scales.' },
+    { kind: 'number', key: 'lift', label: 'Lift', min: 0.1, max: 1, step: 0.05,
+      hint: 'How much each scale rises from where it tucks under to its free edge. The step at the edge is what shows the overlap.' },
+    { kind: 'number', key: 'jitter', label: 'Variation', min: 0, max: 1, step: 0.05,
+      hint: 'Per-scale differences in height.' },
+    { kind: 'number', key: 'angleDeg', label: 'Direction', min: -180, max: 180, step: 5, unit: 'deg',
+      hint: 'Which way the free edges face.' },
+    seedField(),
+  ],
+  build(cols, rows, extent, opts) {
+    const R = Math.max(0.5, num(opts, 'scaleMm', 24)) / 2000;
+    const overlap = Math.min(0.7, Math.max(0, num(opts, 'overlap', 0.25)));
+    const lift = Math.min(1, Math.max(0.05, num(opts, 'lift', 0.7)));
+    const jitter = clamp01(num(opts, 'jitter', 0.3));
+    const angle = (num(opts, 'angleDeg', 0) * Math.PI) / 180;
+    const seed = Math.round(num(opts, 'seed', 1));
+    // Rows a radius apart on half-offset centres just cover the plane with
+    // nothing to spare; closer rows overlap more. Never further apart than
+    // that, or bare gaps open between the scales.
+    const rowH = R * (1 - overlap);
+    const span = Math.ceil(R / rowH);
+
+    return normaliseGrid(
+      fillGrid(cols, rows, extent, (x, y) => {
+        const [u, v] = rotate(x, y, angle);
+        const home = Math.floor(v / rowH);
+        // Later rows lie on top, so the first scale found counting down from
+        // the highest candidate row is the one that shows.
+        for (let r = home + span; r >= home - span; r--) {
+          const offset = (r & 1) * R;
+          const i = Math.round((u - offset) / (2 * R));
+          const d = Math.hypot(u - (offset + i * 2 * R), v - r * rowH);
+          if (d >= R) continue;
+          const bump = jitter > 0 ? (hash2D(i, r, seed ^ 0x3c1) - 0.5) * jitter * 0.3 : 0;
+          return 1 - lift * (1 - d / R) + bump;
+        }
+        return 0;
       })
     );
   },
@@ -1158,7 +1723,14 @@ const foliage: PatternSpec = {
 export const SURFACE_PATTERNS: PatternSpec[] = [
   woodGrain,
   masonry,
+  parquet,
+  faceted,
+  kumiko,
+  guilloche,
+  scales,
   waves,
+  fluted,
+  waveSlats,
   topographic,
   crackedEarth,
   studs,
