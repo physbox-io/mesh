@@ -1530,7 +1530,13 @@ export interface PhysicsState {
   sceneGraph: SceneGraph;
   selectedNodeId: string | null;
   recompileId: number;
-  parentUnderSelected: boolean;
+  /**
+   * Bodies switched off with the hierarchy's eye. View only: they are still in
+   * the model, colliding and carrying mass. Kept out of the scene graph, so it
+   * is not saved, not undone and not compiled.
+   */
+  hiddenNodeIds: string[];
+  toggleNodeHidden: (id: string) => void;
   activePreset: string;
   /**
    * Names what is open without loading it — after saving the scene as a
@@ -1710,8 +1716,13 @@ export interface PhysicsState {
   updateRopeParams: (id: string, params: { pulleyWheelId?: string; leftTargetId?: string; rightTargetId?: string }) => void;
   updateNodeComposite: (id: string, params: Partial<SceneNode>) => void;
   
-  setParentUnderSelected: (val: boolean) => void;
-  addComponent: (type: 'box' | 'sphere' | 'capsule' | 'cylinder' | 'bob' | 'gear' | 'wedge' | 'pulley_wheel' | 'pulley_rope' | 'mesh' | 'openscad' | 'pyramid' | 'cone' | 'torus' | 'tube' | 'ellipsoid' | 'curve' | 'ring' | 'sculpt' | 'lattice', position: number[]) => void;
+  /**
+   * Adds a part and returns its id. With `parentId` it goes under that body and
+   * the parent stays selected, so several adds in a row land side by side
+   * rather than each under the last. Without one it goes at the top level and
+   * is selected.
+   */
+  addComponent: (type: 'box' | 'sphere' | 'capsule' | 'cylinder' | 'bob' | 'gear' | 'wedge' | 'pulley_wheel' | 'pulley_rope' | 'mesh' | 'openscad' | 'pyramid' | 'cone' | 'torus' | 'tube' | 'ellipsoid' | 'curve' | 'ring' | 'sculpt' | 'lattice', position: number[], parentId?: string | null) => string;
 
   // --- Sculpting ----------------------------------------------------------
   /** The body being sculpted, or null when the sculpt tools are closed. */
@@ -2408,14 +2419,18 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
   sceneGraph: initialScene,
   selectedNodeId: null,
   extraSelectedIds: [],
-  parentUnderSelected: false,
+  hiddenNodeIds: [],
   activePreset: 'pendulum',
   setActivePreset: (name) => set({ activePreset: name }),
   draggedNodeId: null,
   dragTarget: null,
   dragDistance: 0,
 
-  setParentUnderSelected: (val) => set({ parentUnderSelected: val }),
+  toggleNodeHidden: (id) => set((state) => ({
+    hiddenNodeIds: state.hiddenNodeIds.includes(id)
+      ? state.hiddenNodeIds.filter((h) => h !== id)
+      : [...state.hiddenNodeIds, id],
+  })),
   incrementMcpActive: () => set((state) => ({ mcpActiveCount: state.mcpActiveCount + 1 })),
   decrementMcpActive: () => set((state) => ({ mcpActiveCount: Math.max(0, state.mcpActiveCount - 1) })),
   resetMcpActive: () => set({ mcpActiveCount: 0 }),
@@ -2736,6 +2751,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
       set((state) => ({
         isPlaying: false,
         selectedNodeId: null,
+        hiddenNodeIds: [],
         activePreset: name,
         carveSettings: null,
         cameraOverride: null,
@@ -2803,6 +2819,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     set((state) => ({
       isPlaying: false,
       selectedNodeId: null,
+      hiddenNodeIds: [],
       activePreset: name,
       sceneGraph: scene,
       // A preset that does not say how it is cut gets the exporter's defaults
@@ -2854,6 +2871,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     set((state) => ({
       isPlaying: false,
       selectedNodeId: null,
+      hiddenNodeIds: [],
       // A generated board is not a preset, and saying it is would make the
       // dropdown offer to reload something that cannot be reloaded. `undefined`
       // rather than null, which is what the field is typed as and what
@@ -4941,9 +4959,9 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     }
   },
 
-  addComponent: (type, position) => {
+  addComponent: (type, position, parentId) => {
     get().prepareForDiscreteChange();
-    const { sceneGraph, selectedNodeId, parentUnderSelected } = get();
+    const { sceneGraph } = get();
     const newScene = cloneSceneGraph(sceneGraph);
     
     // 8-character random unique suffix (no millisecond timestamp)
@@ -4952,11 +4970,11 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     // Determine target local position
     let localPos: [number, number, number] = [position[0], position[1], position[2]];
     
-    const isChild = !!(selectedNodeId && parentUnderSelected);
+    const isChild = !!parentId && !!findNodeById(newScene.nodes, parentId);
     
-    if (isChild && selectedNodeId) {
+    if (isChild && parentId) {
       // Find parent world position to make drop coordinates relative to parent!
-      const parentWorldPos = getNodeWorldPos(newScene.nodes, selectedNodeId);
+      const parentWorldPos = getNodeWorldPos(newScene.nodes, parentId);
       if (parentWorldPos) {
         localPos = [
           position[0] - parentWorldPos[0],
@@ -5319,13 +5337,15 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
       } : {}),
     };
 
-    if (isChild && selectedNodeId) {
-      addChildNode(newScene.nodes, selectedNodeId, newNode);
+    if (isChild && parentId) {
+      addChildNode(newScene.nodes, parentId, newNode);
     } else {
       newScene.nodes.push(newNode);
     }
     
-    const selectId = typeof window !== 'undefined' && (window as PhysicsWindow).NO_SELECT ? null : id;
+    // A nested part leaves its parent selected: the next add goes beside it,
+    // not under it.
+    const selectId = isChild ? parentId! : typeof window !== 'undefined' && (window as PhysicsWindow).NO_SELECT ? null : id;
     /*
      * The body is written to the store HERE, not left for the recompile to land.
      *
@@ -5342,6 +5362,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
      */
     set(selectId === null ? { sceneGraph: newScene } : { sceneGraph: newScene, selectedNodeId: selectId });
     get().recompile(newScene, selectId);
+    return id;
   },
   
   recompile: async (overrideScene?: SceneGraph, overrideSelectedId?: string | null, forceReset?: boolean, _keepPreset?: boolean, settle?: boolean, immediate?: boolean) => {

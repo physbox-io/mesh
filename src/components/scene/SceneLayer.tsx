@@ -1444,14 +1444,20 @@ export const SceneVisuals = React.memo(function SceneVisuals({ model, data, mujo
   const nodeOf = (id?: string) => (id ? nodeById.get(id) ?? null : null);
   const picked = (id?: string) => !!id && selectedIds.has(id);
 
+  // Bodies switched off with the hierarchy's eye. Only their drawing goes: they
+  // stay in the model, and in knownGeomNames above, so the implicit pass does
+  // not draw them back in as unexplained geoms.
+  const hiddenNodeIds = useStore((state) => state.hiddenNodeIds);
   const geoms = useMemo(() => {
     if (!sceneGraph) return [];
+    const hidden = new Set(hiddenNodeIds);
     const list: RenderGeom[] = [];
-    const traverse = (nodes: SceneNode[], ancestorJointed: boolean) => {
+    const traverse = (nodes: SceneNode[], ancestorJointed: boolean, ancestorHidden: boolean) => {
       if (!nodes) return;
       for (const node of nodes) {
         const jointed = ancestorJointed || (node.joints && node.joints.length > 0) || node.isComposite === true;
-        if (node.geoms) {
+        const isHidden = ancestorHidden || hidden.has(node.id);
+        if (node.geoms && !isHidden) {
           // Boolean bodies draw their generated mesh instead of the primitives it
           // was cut from, and never draw the negatives (those are ghosts, below).
           for (const geom of resolveCsgGeoms(node, 'render')) {
@@ -1461,12 +1467,12 @@ export const SceneVisuals = React.memo(function SceneVisuals({ model, data, mujo
             list.push({ nodeId: node.id, staticBody: !jointed, customRender: !!node.isWedge, ...geom });
           }
         }
-        traverse(node.children, jointed);
+        traverse(node.children, jointed, isHidden);
       }
     };
-    traverse(sceneGraph.nodes, false);
+    traverse(sceneGraph.nodes, false, false);
     return list;
-  }, [sceneGraph]);
+  }, [sceneGraph, hiddenNodeIds]);
 
   const implicitGeoms = useMemo(() => {
     if (!model || !mujoco || !model.geom_type) return [];

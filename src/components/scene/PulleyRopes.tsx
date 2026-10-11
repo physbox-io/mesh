@@ -41,22 +41,27 @@ export const PulleyRopesRenderer = ({ model, data, mujoco, sceneGraph }: PulleyR
     bodyIdCache.current = c;
   }, [model, mujoco]);
   
+  // A rope switched off with the hierarchy's eye is not drawn, like any body.
+  const hiddenNodeIds = useStore((state) => state.hiddenNodeIds);
+
   // Find all pulley rope nodes in the scene
   const pulleyRopes = useMemo(() => {
+    const hidden = new Set(hiddenNodeIds);
     // Both ends are what the filter below is: a rope without them is not one.
     const ropes: (SceneNode & { leftTargetId: string; rightTargetId: string })[] = [];
-    const traverse = (nodes: SceneNode[]) => {
+    const traverse = (nodes: SceneNode[], ancestorHidden: boolean) => {
       if (!nodes) return;
       for (const n of nodes) {
-        if (n.isPulleyRope && n.leftTargetId && n.rightTargetId) {
+        const isHidden = ancestorHidden || hidden.has(n.id);
+        if (n.isPulleyRope && n.leftTargetId && n.rightTargetId && !isHidden) {
           ropes.push(n as SceneNode & { leftTargetId: string; rightTargetId: string });
         }
-        traverse(n.children);
+        traverse(n.children, isHidden);
       }
     };
-    traverse(sceneGraph?.nodes ?? []);
+    traverse(sceneGraph?.nodes ?? [], false);
     return ropes;
-  }, [sceneGraph]);
+  }, [sceneGraph, hiddenNodeIds]);
 
   // Helper to find wheel node radius reactively
   const findWheelNode = useCallback((wheelId: string) => {

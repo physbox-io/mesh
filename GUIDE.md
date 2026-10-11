@@ -35,7 +35,8 @@ Technical decisions, conventions, and architecture notes for the **PhysBox: Mesh
 * **Free joint damping:** MuJoCo has no joint-level damping for free joints. The step loop applies drag forces ($F = -c \cdot m \cdot v$) and drag torques ($T = -c \cdot I \cdot \omega$), scaled by mass and principal moments of inertia, so linear velocity and spin both decay at the configured rate ($e^{-ct}$).
 
 ### 3. Nested sub-geometries and selection
-* **Hierarchy view:** a compound body with `node.geoms.length > 1` shows its sub-geometries as nested nodes in the left sidebar tree.
+* **Hierarchy view:** a compound body with `node.geoms.length > 1` shows its sub-geometries as nested nodes in the left sidebar tree. Bodies with children or sub-geometries fold with a chevron. The eye hides a body and its descendants from the view only (`hiddenNodeIds` in the store): they still collide and have mass, and hiding is not saved or compiled.
+* **Adding parts:** a part added from the Components palette (click or drag) goes under the selected body, and the parent stays selected so repeated adds land side by side. With Worldbody selected it goes at the top level and is selected. MCP adds pass no parent and always land at the top level.
 * **Per-geom editing:** clicking a sub-geometry in the tree highlights it in indigo, opens the properties panel on the right, and binds the controls (Dimensions, Mass, Collisions, Material, Appearance, Position Offset) to that geom.
 
 ### 4. Solid vs ephemeral collisions

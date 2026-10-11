@@ -18,7 +18,7 @@ import { useDentStore } from './store/dentStore';
 import { applyShatterPieces } from './store/useStore';
 import type { SceneGraph, SceneNode, SceneGeom, SceneJoint, CsgOp } from './types/scene';
 import type { WeakSpot } from './utils/printAnalysis';
-import { Play, Square, SlidersHorizontal, Settings, Box, Circle, X, RotateCcw, Trash2, Layers, CircleDot, Zap, Info, Triangle, Disc, Code, Menu, Shapes, Minimize2, Save, Download, Upload, Undo, Redo, FileText, PanelRight, Printer, Scissors, Sparkles, Sun, Moon, Pyramid, Cone, Donut, ChartSpline, Paintbrush, Grid3x3, Image as ImageIcon, Share2, Copy, Check, Link2, Unlink, Hammer, Aperture } from 'lucide-react';
+import { Play, Square, SlidersHorizontal, Settings, Box, Circle, X, RotateCcw, Trash2, Layers, CircleDot, Zap, Info, Triangle, Disc, Code, Menu, Shapes, Minimize2, Save, Download, Upload, Undo, Redo, FileText, PanelRight, Printer, Scissors, Sparkles, Sun, Moon, Pyramid, Cone, Donut, ChartSpline, Paintbrush, Grid3x3, Image as ImageIcon, Share2, Copy, Check, Link2, Unlink, Hammer, Aperture, ChevronRight, ChevronDown, Eye, EyeOff } from 'lucide-react';
 import { useRef, useMemo, useEffect, useLayoutEffect, useCallback, useState, type ComponentRef } from 'react';
 import AICopilotPanel from './components/AICopilotPanel';
 import { DocsModal } from './components/docs/DocsModal';
@@ -499,7 +499,7 @@ function App() {
     updateNodeJointsList, deleteNode, renameNode,
     addHardwareComponentNode, updateNodeRotation, rotateAroundCOM, setRotateAroundCOM,
     updateWedgeParams, updatePyramidParams, updateConeParams, updateTorusParams, updateTubeParams, updateCurveParams, updatePulleyParams, updateRopeParams,
-    parentUnderSelected, setParentUnderSelected, updateNodeScript, updateNode,
+    hiddenNodeIds, toggleNodeHidden, updateNodeScript, updateNode,
     deleteNodeGeom, setGeomCsgOp,
     sculptNodeId, setSculptNodeId, setSculptBase,
     latticeNodeId, setLatticeNodeId,
@@ -522,7 +522,7 @@ function App() {
     updateNodeJointsList: s.updateNodeJointsList, deleteNode: s.deleteNode, renameNode: s.renameNode,
     addHardwareComponentNode: s.addHardwareComponentNode, updateNodeRotation: s.updateNodeRotation, rotateAroundCOM: s.rotateAroundCOM, setRotateAroundCOM: s.setRotateAroundCOM,
     updateWedgeParams: s.updateWedgeParams, updatePyramidParams: s.updatePyramidParams, updateConeParams: s.updateConeParams, updateTorusParams: s.updateTorusParams, updateTubeParams: s.updateTubeParams, updateCurveParams: s.updateCurveParams, updatePulleyParams: s.updatePulleyParams, updateRopeParams: s.updateRopeParams,
-    parentUnderSelected: s.parentUnderSelected, setParentUnderSelected: s.setParentUnderSelected, updateNodeScript: s.updateNodeScript, updateNode: s.updateNode,
+    hiddenNodeIds: s.hiddenNodeIds, toggleNodeHidden: s.toggleNodeHidden, updateNodeScript: s.updateNodeScript, updateNode: s.updateNode,
     deleteNodeGeom: s.deleteNodeGeom, setGeomCsgOp: s.setGeomCsgOp,
     sculptNodeId: s.sculptNodeId, setSculptNodeId: s.setSculptNodeId, setSculptBase: s.setSculptBase,
     latticeNodeId: s.latticeNodeId, setLatticeNodeId: s.setLatticeNodeId,
@@ -1562,7 +1562,7 @@ function App() {
       if (parentNode) {
         const worldPos = getNodeWorldPos(sceneGraph.nodes, selectedNodeId) || [0, 0, 0];
         const offset = (type === 'capsule' || type === 'bob') ? [0, 0, -0.6] : [0.5, 0, 0];
-        addComponent(type, [worldPos[0] + offset[0], worldPos[1] + offset[1], worldPos[2] + offset[2]]);
+        addComponent(type, [worldPos[0] + offset[0], worldPos[1] + offset[1], worldPos[2] + offset[2]], selectedNodeId);
         setIsLeftSidebarOpen(false);
         return;
       }
@@ -1587,18 +1587,26 @@ function App() {
    * two steps out of one intent.
    */
   const handleAddLatticeClick = () => {
-    addComponent('lattice', [0, 0, 0.2]);
+    const id = addComponent('lattice', [0, 0, 0.2], selectedNodeId);
     setIsLeftSidebarOpen(false);
-    const created = [...useStore.getState().sceneGraph.nodes].reverse().find((n) => n.isLattice);
-    if (created) useStore.getState().setLatticeNodeId(created.id);
+    useStore.getState().setLatticeNodeId(id);
   };
 
   const handleAddSculptClick = () => {
-    addComponent('sculpt', [0, 0, 0.2]);
+    const id = addComponent('sculpt', [0, 0, 0.2], selectedNodeId);
     setIsLeftSidebarOpen(false);
-    const created = [...useStore.getState().sceneGraph.nodes].reverse().find((n) => n.isSculpt);
-    if (created) useStore.getState().setSculptNodeId(created.id);
+    useStore.getState().setSculptNodeId(id);
   };
+
+  // A part dropped on the canvas goes under the selected body, like a clicked
+  // one. Read at drop time rather than bound to the selection, so the drop
+  // listeners are not torn down and re-added on every selection change.
+  const addComponentUnderSelection = useCallback(
+    (type: Parameters<typeof addComponent>[0], pos: [number, number, number]) => {
+      addComponent(type, pos, useStore.getState().selectedNodeId);
+    },
+    [addComponent],
+  );
 
   /**
    * Switches a sculpt body to a different base.
@@ -1613,9 +1621,28 @@ function App() {
     setSculptBase(node.id, base);
   };
 
+  // Bodies folded shut in the hierarchy. View state only, so not in the store,
+  // and everything starts open.
+  const [collapsedIds, setCollapsedIds] = useState<Set<string>>(() => new Set());
+  const toggleCollapsed = useCallback((id: string) => {
+    setCollapsedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
+
   const renderHierarchyNode = useCallback((rootNode: SceneNode, rootDepth: number = 0): React.ReactNode => {
-    const render = (node: SceneNode, depth: number): React.ReactNode => {
+    const hidden = new Set(hiddenNodeIds);
+    const render = (node: SceneNode, depth: number, ancestorHidden: boolean): React.ReactNode => {
     const isSelected = selectedNodeId === node.id;
+    const isHidden = hidden.has(node.id);
+    // A child of a hidden body is not drawn either, so it reads as hidden too.
+    const dimmed = isHidden || ancestorHidden;
+    const showGeoms = !!node.geoms && node.geoms.length > 1 && !node.isCurve;
+    const hasChildren = !!node.children && node.children.length > 0;
+    const collapsible = showGeoms || hasChildren;
+    const isCollapsed = collapsible && collapsedIds.has(node.id);
     
     // Choose pretty visual emoji
     let emoji = '📦';
@@ -1653,15 +1680,36 @@ function App() {
                 : 'bg-white dark:bg-slate-900/90 border-transparent dark:border-slate-800/40 hover:bg-slate-100/70 dark:hover:bg-slate-800/70 text-slate-600 dark:text-slate-300'
           }`}
         >
-          <span className="text-xs flex items-center gap-1.5 font-medium truncate">
+          {collapsible ? (
+            <button
+              onClick={(e) => { e.stopPropagation(); toggleCollapsed(node.id); }}
+              className="-ml-1 mr-0.5 p-0.5 rounded text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-200/60 dark:hover:bg-slate-700/60 cursor-pointer shrink-0"
+              title={isCollapsed ? 'Expand' : 'Collapse'}
+            >
+              {isCollapsed ? <ChevronRight className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+            </button>
+          ) : (
+            <span className="-ml-1 mr-0.5 w-4 shrink-0" />
+          )}
+          <span className={`text-xs flex items-center gap-1.5 font-medium truncate min-w-0 ${dimmed ? 'opacity-50' : ''}`}>
             <span>{emoji}</span> <span className="truncate">{node.name}</span>
           </span>
+          {/* View only: a hidden body still collides and has mass. */}
+          <button
+            onClick={(e) => { e.stopPropagation(); toggleNodeHidden(node.id); }}
+            className={`ml-auto pl-1 p-0.5 rounded cursor-pointer shrink-0 hover:bg-slate-200/60 dark:hover:bg-slate-700/60 ${
+              isHidden ? 'text-slate-400 dark:text-slate-500' : 'text-slate-400/70 hover:text-slate-600 dark:hover:text-slate-200'
+            }`}
+            title={isHidden ? 'Show' : 'Hide in the view (still collides)'}
+          >
+            {isHidden ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+          </button>
         </div>
         
         {/* Render sub-geoms nested under body if there are multiple geoms.
             Curves are one logical shape built from dozens of segment boxes —
             listing each segment would swamp the tree, so skip them. */}
-        {node.geoms && node.geoms.length > 1 && !node.isCurve && (
+        {showGeoms && !isCollapsed && (
           <div className="pl-3 ml-2.5 border-l border-slate-200 dark:border-slate-800/60 flex flex-col gap-0.5 mb-1">
             {node.geoms.map((g, idx) => {
               const isGeomSelected = isSelected && activeGeomIndex === idx;
@@ -1708,16 +1756,16 @@ function App() {
           </div>
         )}
 
-        {node.children && node.children.length > 0 && (
+        {hasChildren && !isCollapsed && (
           <div className="pl-3 ml-2.5 border-l border-slate-200 dark:border-slate-800/60 flex flex-col gap-0.5">
-            {node.children.map((child) => render(child, depth + 1))}
+            {node.children.map((child) => render(child, depth + 1, dimmed))}
           </div>
         )}
       </div>
     );
     };
-    return render(rootNode, rootDepth);
-  }, [selectedNodeId, setSelectedNodeId, setIsLeftSidebarOpen, activeGeomIndex, setActiveGeomIndex]);
+    return render(rootNode, rootDepth, false);
+  }, [selectedNodeId, setSelectedNodeId, setIsLeftSidebarOpen, activeGeomIndex, setActiveGeomIndex, hiddenNodeIds, toggleNodeHidden, collapsedIds, toggleCollapsed]);
 
   useMCPBridge();
   useVoltLink();
@@ -2372,20 +2420,8 @@ function App() {
           )}
 
           <div className="text-[10px] font-medium text-slate-500 dark:text-slate-400 mb-2.5 bg-slate-50 dark:bg-slate-950/40 px-2 py-1.5 rounded-lg border border-slate-200/50 dark:border-slate-800/50">
-            Adding to: <span className="text-blue-600 dark:text-blue-400 font-semibold truncate block">{selectedNode && parentUnderSelected ? selectedNode.name : '🌍 Worldbody'}</span>
+            Adding to: <span className="text-blue-600 dark:text-blue-400 font-semibold truncate block">{selectedNode ? selectedNode.name : '🌍 Worldbody'}</span>
           </div>
-
-          {selectedNode && (
-            <label className="text-[10px] font-semibold text-slate-600 dark:text-slate-400 flex items-center gap-2 mb-3 bg-slate-50 dark:bg-slate-950/40 border border-slate-200/60 dark:border-slate-800/60 p-2 rounded-lg cursor-pointer select-none hover:bg-slate-100/50 dark:hover:bg-slate-800/50 transition-colors shadow-sm">
-              <input 
-                type="checkbox" 
-                checked={parentUnderSelected} 
-                onChange={(e) => setParentUnderSelected(e.target.checked)} 
-                className="w-3.5 h-3.5 rounded text-blue-600 border-slate-300 dark:border-slate-700 focus:ring-blue-400 dark:focus:ring-blue-900 accent-blue-500 cursor-pointer"
-              />
-              <span>Nest under selected</span>
-            </label>
-          )}
 
           <div className="grid grid-cols-2 gap-2">
             {/* Cube (Box) */}
@@ -2864,7 +2900,7 @@ function App() {
           >
             <SceneCapture sceneRef={threeSceneRef} />
             <RenderOnChange />
-            <DropHandler addComponent={addComponent} onImportFile={handleDroppedImportFile} onImportImageFile={handleDroppedImageFile} onImportSceneJson={importSceneJson} />
+            <DropHandler addComponent={addComponentUnderSelection} onImportFile={handleDroppedImportFile} onImportImageFile={handleDroppedImageFile} onImportSceneJson={importSceneJson} />
             <color attach="background" args={[darkMode ? '#0b0f19' : '#f8fafc']} />
             {/* A photo studio, built here rather than loaded: a broad softbox
                 overhead, two strip lights either side and a dim grey room. It
