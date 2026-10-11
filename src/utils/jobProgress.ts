@@ -16,19 +16,24 @@ import { distanceSqToMove } from './livePlayhead';
  *
  * - Every move before the planner's contents has been cut. When the status
  *   report carries `Bf:` (planner blocks free) that is exact; otherwise the
- *   stock planner depth is assumed. That is a floor the progress cannot fall
+ *   deepest planner going is assumed. That is a floor the progress cannot fall
  *   below.
  * - Within the few dozen moves behind the acked line, the position GRBL reports
- *   picks out the exact move and how far along it the tool is. That window is
- *   too short for a relief's repeating passes to be confused with each other,
- *   which is what made a search of the whole path jump between them.
+ *   picks out the exact move and how far along it the tool is. That window
+ *   keeps out a relief's earlier layers and passes, which is what made a
+ *   search of the whole path jump between them. It does not keep out the next
+ *   few finishing rows, so the match is held to the path itself and the
+ *   earliest move that fits wins (see `CUT_SNAP_TOLERANCE_MM`).
  *
  * The answer is turned into seconds through the program with the per-line
  * clock from `programTimeline`, because a line is not a unit of time, and it
  * never moves backwards within a run.
  */
 
-/** GRBL's usable planner depth on a stock 328p build, used when `Bf:` isn't reported. */
+/**
+ * GRBL's usable planner depth on a stock 328p build: the least a planner holds,
+ * so the depth assumed for one whose `Bf:` has never been seen empty.
+ */
 export const DEFAULT_PLANNER_BLOCKS = 15;
 /**
  * How many moves behind the acked line the position is matched against.
@@ -38,10 +43,19 @@ export const DEFAULT_PLANNER_BLOCKS = 15;
 export const CUT_SEARCH_MOVES = 64;
 /**
  * How far off the program's path a reported position may be and still match,
- * mm. GRBL reports where the steps put the tool, so on the path it is within
- * rounding; this allows for that and little else.
+ * mm. GRBL reports where the steps put the tool, so on the path it is within a
+ * step and the report's three decimals; this allows for that and little else.
+ *
+ * It was a millimetre, which is wider than a finishing stepover. A relief's
+ * finishing raster is rows 0.4 mm apart cut in fragments a millimetre or two
+ * long, so the window behind the acks holds several rows, and a tool on one
+ * row matched the next one along — or the rapid back across the stock that
+ * starts it. The clock jumped ahead to that move and then, since it never goes
+ * back, stood still until the tool caught up: a bar that lurched and stalled
+ * through the whole finishing pass while roughing, its passes a cutter's width
+ * apart, ran smoothly.
  */
-export const CUT_SNAP_TOLERANCE_MM = 1;
+export const CUT_SNAP_TOLERANCE_MM = 0.1;
 
 export interface CutState {
   /** Seconds through the program, on the timeline's clock. */
@@ -97,7 +111,16 @@ export function locateCut(tl: ProgramTimeline, obs: CutObservation, prev: CutSta
   // anything is in it: GRBL frees a block once its steps are prepared, which
   // can be a moment before the last of them has moved. An empty planner is
   // empty, and everything acked has run.
-  const inPlanner = obs.plannerBlocksInUse ?? DEFAULT_PLANNER_BLOCKS;
+  //
+  // Without `Bf:` the planner is taken to be as deep as the search window, not
+  // a stock board's fifteen. The floor has to be a point the tool has passed,
+  // and on a deeper planner (grblHAL, most 32-bit boards) acked-minus-fifteen
+  // is ahead of the tool: the clock jumped to it, the search then started past
+  // the move the tool was really on, and nothing moved until the tool caught
+  // up. Long moves hid it; a finishing raster's millimetre fragments, each
+  // with a retract and a rapid, made it a lurch every few seconds. Too deep a
+  // guess only puts the floor further back, where the position takes over.
+  const inPlanner = obs.plannerBlocksInUse ?? CUT_SEARCH_MOVES;
   const floorMove = Math.max(firstMove, ackedMoves - inPlanner - (inPlanner > 0 ? 1 : 0));
   let seconds = Math.max(prev.seconds, startOfMove(tl, floorMove, acked));
   let move = Math.max(prev.move, floorMove);
@@ -105,15 +128,18 @@ export function locateCut(tl: ProgramTimeline, obs: CutObservation, prev: CutSta
   if (obs.pos) {
     const { x, y, z } = obs.pos;
     const lo = Math.max(firstMove, prev.move, ackedMoves - CUT_SEARCH_MOVES);
+    // The earliest move the position lies on, not the nearest or the latest.
+    // Where the path crosses or retraces itself — a ramp going back over its
+    // own line, a rapid passing over a cut — the position is on both, and
+    // taking the later one is a jump the clock can never undo; taking the
+    // earlier one is a lag the next report makes up. A point on a junction
+    // goes to the move ending there, at the same clock as the next one's start.
+    const tolSq = CUT_SNAP_TOLERANCE_MM * CUT_SNAP_TOLERANCE_MM;
     let best = -1;
-    let bestD = CUT_SNAP_TOLERANCE_MM * CUT_SNAP_TOLERANCE_MM;
     for (let k = lo; k < ackedMoves; k++) {
-      const d = distanceSqToMove(tl.moves[k], x, y, z);
-      // `<=` so a point on a junction belongs to the later move, which is the
-      // one the tool is entering.
-      if (d <= bestD) {
-        bestD = d;
+      if (distanceSqToMove(tl.moves[k], x, y, z) <= tolSq) {
         best = k;
+        break;
       }
     }
     if (best >= 0) {

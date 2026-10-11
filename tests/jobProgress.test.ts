@@ -48,8 +48,9 @@ describe('placing the cutter from acks and position', () => {
     const rand = () => ((rng = (rng * 1103515245 + 12345) % 2 ** 31) / 2 ** 31);
     for (let done = 1; done < TL.moves.length; done++) {
       const truth = TL.moves[done - 1].t1;
-      // The acks run ahead of the cut by however much is in the planner.
-      const lead = Math.floor(rand() * 15);
+      // The acks run ahead of the cut by however much is in the planner, and a
+      // grblHAL planner holds more than twice a stock board's.
+      const lead = Math.floor(rand() * 40);
       const ackedMove = Math.min(TL.moves.length - 1, done + lead);
       const acked = TL.moves[ackedMove].line + 1;
       state = locateCut(TL, { acked, plannerBlocksInUse: null, floorLine: 0, pos: pointAfterMove(TL, done - 1) }, state);
@@ -87,6 +88,43 @@ describe('placing the cutter from acks and position', () => {
     const ahead = pointAfterMove(TL, 60);
     const s = locateCut(TL, { acked, plannerBlocksInUse: 0, floorLine: 0, pos: ahead }, CUT_START);
     expect(s.seconds).toBeLessThanOrEqual(TL.lineEnd[acked - 1]);
+  });
+
+  it('neither lurches nor stalls through a finishing raster, on any planner depth', () => {
+    // What a hybrid finishing pass looks like on mostly uncut ground: rows
+    // 0.4 mm apart, each a few slivers a millimetre long, every one entered and
+    // left with a retract and a rapid across the stock.
+    const out = ['G21 G90', 'M3 S16000', 'G0 Z5'];
+    for (let r = 0; r < 40; r++) {
+      const y = (r * 0.4).toFixed(1);
+      const xs = r % 2 === 0 ? [5, 30, 60, 85] : [85, 60, 30, 5];
+      for (const x0 of xs) {
+        const dir = r % 2 === 0 ? 1 : -1;
+        out.push(`G0 X${x0} Y${y}`, 'G0 Z0.5', `G1 Z-0.1 F480`);
+        for (let s = 1; s <= 3; s++) out.push(`G1 X${x0 + dir * s * 0.4} F1440`);
+        out.push('G0 Z1');
+      }
+    }
+    const tl = programTimeline(prepareJobLines(out.join('\n')).map((l) => l.code));
+
+    for (const depth of [8, 15, 32, 48]) {
+      let state: CutState = CUT_START;
+      let mi = 0;
+      let prevErr = 0;
+      for (let t = 0; t < tl.total; t += 0.1) {
+        while (mi < tl.moves.length - 1 && tl.moves[mi].t1 < t) mi++;
+        const m = tl.moves[mi];
+        const f = m.t1 > m.t0 ? Math.min(1, (t - m.t0) / (m.t1 - m.t0)) : 1;
+        const pos = { x: m.x1 + (m.x2 - m.x1) * f, y: m.y1 + (m.y2 - m.y1) * f, z: m.z1 + (m.z2 - m.z1) * f };
+        const acked = tl.moves[Math.min(tl.moves.length - 1, mi + depth)].line + 1;
+        // No `Bf:`: the planner's depth is not known.
+        state = locateCut(tl, { acked, plannerBlocksInUse: null, floorLine: 0, pos }, state);
+        const err = state.seconds - t;
+        expect(err, `depth ${depth} at ${t.toFixed(1)} s`).toBeLessThan(0.05);
+        expect(err - prevErr, `depth ${depth} at ${t.toFixed(1)} s`).toBeGreaterThan(-0.15);
+        prevErr = err;
+      }
+    }
   });
 
   it('reads the line being cut off the clock, and a resume line back onto it', () => {
