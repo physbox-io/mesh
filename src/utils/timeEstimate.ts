@@ -303,20 +303,47 @@ export interface GcodeEstimate {
  */
 export function estimateGcodeTime(gcode: string, opts: TimingOptions = {}): GcodeEstimate {
   const profile = opts.profile ?? DEFAULT_MOTION_PROFILE;
+  const read = readProgram(gcode.split('\n'));
+  const dwellSeconds = read.dwells.reduce((sum, d) => sum + d.seconds, 0);
 
-  const moves: TimedMove[] = [];
+  return {
+    seconds: estimateMoveSeconds(read.moves, opts) + dwellSeconds,
+    cutDistanceMm: read.cutDistanceMm,
+    rapidDistanceMm: read.rapidDistanceMm,
+    moves: read.moves,
+    operatorStops: read.operatorStops,
+    spindleSpeeds: read.spindleSpeeds,
+    source: profile.source,
+  };
+}
+
+/** A move tagged with the program line that commanded it. */
+export interface LineMove extends TimedMove {
+  /** Index into the lines the program was read from. */
+  line: number;
+}
+
+/**
+ * The motion in a list of G-code lines, each move tagged with its line.
+ *
+ * Shared by the whole-program estimate and the per-line timeline, so the two
+ * cannot read the same program differently.
+ */
+function readProgram(lines: string[]) {
+  const moves: LineMove[] = [];
+  const dwells: Array<{ line: number; seconds: number }> = [];
   let x = 0, y = 0, z = 0;
   let feed = 0;
   let absolute = true;
   let unitScale = 1; // G20 (inches) multiplies coordinates up to mm
-  let dwellSeconds = 0;
   let cutDistanceMm = 0;
   let rapidDistanceMm = 0;
   let operatorStops = 0;
   const spindleSpeeds: number[] = [];
   let lastS: number | null = null;
 
-  for (const raw of gcode.split('\n')) {
+  for (let index = 0; index < lines.length; index++) {
+    const raw = lines[index];
     const semi = raw.indexOf(';');
     const line = (semi < 0 ? raw : raw.slice(0, semi)).trim().toUpperCase();
     if (!line) continue;
@@ -365,7 +392,7 @@ export function estimateGcodeTime(gcode: string, opts: TimingOptions = {}): Gcod
 
     if (/\bG0*4\b/.test(line)) {
       const p = line.match(/P(-?\d*\.?\d+)/);
-      if (p) dwellSeconds += Math.max(0, parseFloat(p[1]));
+      if (p) dwells.push({ line: index, seconds: Math.max(0, parseFloat(p[1])) });
     }
 
     if (motion === null || (tx === null && ty === null && tz === null)) continue;
@@ -383,21 +410,71 @@ export function estimateGcodeTime(gcode: string, opts: TimingOptions = {}): Gcod
         x2: nx, y2: ny, z2: nz,
         feed: motion === 0 ? 0 : feed,
         rapid: motion === 0,
+        line: index,
       });
     }
 
     x = nx; y = ny; z = nz;
   }
 
-  return {
-    seconds: estimateMoveSeconds(moves, opts) + dwellSeconds,
-    cutDistanceMm,
-    rapidDistanceMm,
-    moves,
-    operatorStops,
-    spindleSpeeds,
-    source: profile.source,
-  };
+  return { moves, dwells, cutDistanceMm, rapidDistanceMm, operatorStops, spindleSpeeds };
+}
+
+/** A program on the clock, line by line. See `programTimeline`. */
+export interface ProgramTimeline {
+  /** Seconds into the program at which each line has finished running. */
+  lineEnd: Float64Array;
+  /** Seconds for the whole program; the same figure `estimateGcodeTime` gives. */
+  total: number;
+  /** The program's moves on that clock, each tagged with its line, dwells included. */
+  moves: Array<ClockedMove & { line: number }>;
+  /**
+   * Index into `moves` of the first move on or after each line, with one extra
+   * entry at the end. `moveStart[n]` is how many moves lines `0..n-1` make.
+   */
+  moveStart: Int32Array;
+}
+
+/**
+ * When, in seconds from the start, each line of a program has finished.
+ *
+ * The estimate says how long the whole job takes; this says how far through
+ * that time any one line is, which is what turns "the machine is on line 9,000"
+ * into a progress figure. A line is not a unit of time — a rapid across the
+ * stock is one line and a fraction of a second, a run of 0.2 mm raster steps is
+ * hundreds of lines and barely moves — so the line number alone can't be one.
+ *
+ * Pass it the lines exactly as they are streamed (`prepareJobLines`), so its
+ * indexes are the streamer's program-line numbers. Dwells are put on the clock
+ * at the line that commands them rather than added on at the end. Lines that
+ * don't move finish when the line before them did.
+ */
+export function programTimeline(lines: string[], opts: TimingOptions = {}): ProgramTimeline {
+  const read = readProgram(lines);
+  const clocked = clockMoves(read.moves, opts) as Array<ClockedMove & { line: number }>;
+
+  const lineEnd = new Float64Array(lines.length);
+  const moveStart = new Int32Array(lines.length + 1);
+  let offset = 0;
+  let end = 0;
+  let m = 0;
+  let d = 0;
+  for (let i = 0; i < lines.length; i++) {
+    moveStart[i] = m;
+    for (; m < clocked.length && clocked[m].line === i; m++) {
+      clocked[m].t0 += offset;
+      clocked[m].t1 += offset;
+      end = clocked[m].t1;
+    }
+    for (; d < read.dwells.length && read.dwells[d].line === i; d++) {
+      offset += read.dwells[d].seconds;
+      end += read.dwells[d].seconds;
+    }
+    lineEnd[i] = end;
+  }
+  moveStart[lines.length] = clocked.length;
+
+  return { lineEnd, total: end, moves: clocked, moveStart };
 }
 
 /** "2 h 14 min", "7 min", "40 s" — a duration someone can plan an afternoon around. */

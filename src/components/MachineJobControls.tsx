@@ -706,23 +706,18 @@ export const JobPreflight: React.FC<{
  * `JobPreflight` deliberately blanks itself mid-job on the assumption that
  * something else is showing this. Nothing was.
  *
- * Time rather than lines is the headline for the same reason the status bar
- * leads with it: G-code lines are not evenly sized in time, so "line 4,000 of
- * 7,000" is not 57% of the wait. The line count is still here, labelled as what
- * it is — where in the file the streamer has got to, which is the number worth
- * quoting when something has gone wrong.
+ * The bar is the same figure the status bar shows: the line the cutter is on,
+ * weighted by how long each line takes, since "line 4,000 of 7,000" is not 57%
+ * of the wait. The line number is still here, because it is the one to quote
+ * when something has gone wrong and the one a resume would restart on.
  */
 export const JobProgress: React.FC<{ machineState: MachineState }> = ({ machineState }) => {
   const running =
     machineState.status === 'RUNNING' || machineState.status.startsWith('PAUSED');
   if (!machineState.connected || !running) return null;
 
-  const { elapsedSeconds: elapsed, estimatedSeconds: estimate } = machineState;
-  // Against the clock when the job quoted a run time, and against lines sent
-  // when it did not — the same fallback the status bar uses.
-  const percent = estimate
-    ? Math.min(100, (elapsed / estimate) * 100)
-    : machineState.progressPercent;
+  const { elapsedSeconds: elapsed, remainingSeconds: remaining } = machineState;
+  const percent = Math.min(100, machineState.progressPercent);
   const paused = machineState.status.startsWith('PAUSED');
 
   return (
@@ -737,25 +732,17 @@ export const JobProgress: React.FC<{ machineState: MachineState }> = ({ machineS
         </h4>
         <span className="font-mono text-[11px] tabular-nums text-slate-700 dark:text-slate-200">
           {formatDuration(elapsed)}
-          {estimate !== null && (
-            <>
-              {' / '}
-              {formatDuration(estimate)}
-              <span className="text-slate-400">
-                {' '}({formatDuration(Math.max(0, estimate - elapsed))} left)
-              </span>
-            </>
+          {remaining !== null && (
+            <span className="text-slate-400">
+              {' '}({formatDuration(remaining)} left)
+            </span>
           )}
         </span>
       </div>
 
       <div
         className="w-full h-2 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden"
-        title={
-          estimate !== null
-            ? 'Elapsed against the estimated run time'
-            : 'Lines sent to the controller (the job did not quote a run time)'
-        }
+        title="How far through the job the cutter is"
       >
         <div
           className={`h-full transition-all ${paused ? 'bg-amber-500' : 'bg-emerald-500'}`}
@@ -765,7 +752,7 @@ export const JobProgress: React.FC<{ machineState: MachineState }> = ({ machineS
 
       <p className="font-mono text-[10px] text-slate-400">
         line {machineState.currentLine.toLocaleString()} /{' '}
-        {machineState.totalLines.toLocaleString()} sent
+        {machineState.totalLines.toLocaleString()}
       </p>
     </div>
   );

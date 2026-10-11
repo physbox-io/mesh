@@ -5,8 +5,10 @@ import {
   clockMoves,
   moveSeconds,
   formatDuration,
+  programTimeline,
   type TimedMove,
 } from '../src/utils/timeEstimate';
+import { prepareJobLines } from '../src/utils/webSerialManager';
 import { DEFAULT_MOTION_PROFILE } from '../src/utils/motionProfile';
 
 /** A straight run of `n` moves of `step` mm along X at `feed` mm/min. */
@@ -154,6 +156,50 @@ describe('reading a G-code program', () => {
     const spaced = estimateGcodeTime('G90\nG1 X10 Y5 F800\n');
     const packed = estimateGcodeTime('G90\nG1X10Y5F800\n');
     expect(packed.seconds).toBeCloseTo(spaced.seconds, 10);
+  });
+});
+
+describe('putting each line of a program on the clock', () => {
+  const PROGRAM = [
+    '; header',
+    'G21 G90',
+    'M3 S12000',
+    'G4 P2 (spin up)',
+    'G0 Z5',
+    'G0 X10 Y10',
+    'G1 Z-1 F300',
+    ...Array.from({ length: 40 }, (_, i) => `G1 X${10 + (i + 1) * 0.5} F1200`),
+    'G0 Z5',
+    'T2 M6 (ball nose)',
+    'G1 X0 Y0 F1500',
+    'M30',
+  ].join('\n');
+  const lines = prepareJobLines(PROGRAM).map((l) => l.code);
+  const tl = programTimeline(lines);
+
+  it('indexes the lines the streamer sends, and totals what the estimate says', () => {
+    expect(tl.lineEnd).toHaveLength(lines.length);
+    expect(tl.moveStart).toHaveLength(lines.length + 1);
+    expect(tl.total).toBeCloseTo(estimateGcodeTime(PROGRAM).seconds, 9);
+  });
+
+  it('never runs backwards, and a line that does not move takes no time', () => {
+    for (let i = 1; i < tl.lineEnd.length; i++) expect(tl.lineEnd[i]).toBeGreaterThanOrEqual(tl.lineEnd[i - 1]);
+    const m6 = lines.findIndex((l) => /M6/.test(l));
+    expect(tl.lineEnd[m6]).toBe(tl.lineEnd[m6 - 1]);
+  });
+
+  it('puts a dwell on the clock at its own line', () => {
+    const dwell = lines.findIndex((l) => /^G4/.test(l));
+    expect(tl.lineEnd[dwell]).toBeCloseTo(2, 9);
+    // The moves after it start after it.
+    expect(tl.moves[tl.moveStart[dwell + 1]].t0).toBeCloseTo(2, 9);
+  });
+
+  it('tags every move with the line that made it', () => {
+    for (let i = 0; i < lines.length; i++) {
+      for (let k = tl.moveStart[i]; k < tl.moveStart[i + 1]; k++) expect(tl.moves[k].line).toBe(i);
+    }
   });
 });
 

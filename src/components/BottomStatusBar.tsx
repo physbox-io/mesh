@@ -725,45 +725,28 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
             <span className="text-slate-700 dark:text-slate-200">
               {parked ? 'Parked' : paused ? 'Paused' : 'Cutting'}
             </span>
-            {/* Time, not lines. See `elapsedSeconds` in webSerialManager for why
-                the line count cannot answer "how much longer". The line count
-                is still shown, labelled as what it is — lines sent, which is
-                what to quote when something has gone wrong and you need to know
-                where in the file it is. */}
+            {/* Progress is read off the line the cutter is on, weighted by the
+                time each line takes (see `progressPercent` in webSerialManager).
+                Elapsed is the wall clock, shown for what it is. */}
             <span className="tabular-nums text-slate-700 dark:text-slate-200">
               {formatDuration(machineState.elapsedSeconds)}
-              {machineState.estimatedSeconds !== null && (
-                <>
-                  {' / '}
-                  {formatDuration(machineState.estimatedSeconds)}
-                  <span className="text-slate-400">
-                    {' '}
-                    ({formatDuration(Math.max(0, machineState.estimatedSeconds - machineState.elapsedSeconds))} left)
-                  </span>
-                </>
+              {machineState.remainingSeconds !== null && (
+                <span className="text-slate-400">
+                  {' '}({formatDuration(machineState.remainingSeconds)} left)
+                </span>
               )}
             </span>
             <div
               className="w-20 h-1.5 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden"
-              title={
-                machineState.estimatedSeconds !== null
-                  ? 'Elapsed against the estimated run time'
-                  : 'Lines sent to the controller (the job did not quote a run time)'
-              }
+              title="How far through the job the cutter is"
             >
               <div
                 className="h-full bg-emerald-500 transition-all"
-                style={{
-                  width: `${
-                    machineState.estimatedSeconds
-                      ? Math.min(100, (machineState.elapsedSeconds / machineState.estimatedSeconds) * 100)
-                      : machineState.progressPercent
-                  }%`,
-                }}
+                style={{ width: `${Math.min(100, machineState.progressPercent)}%` }}
               />
             </div>
             <span className="text-slate-400">
-              line {machineState.currentLine}/{machineState.totalLines} sent
+              line {machineState.currentLine}/{machineState.totalLines}
             </span>
             {/* Why it stopped, next to the button that restarts it — a tool
                 change is an instruction, and it is no use only in a panel the

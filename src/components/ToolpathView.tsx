@@ -632,20 +632,15 @@ export function ToolpathView({
   }, [path]);
 
   /**
-   * Where the job should be by signals that cannot jump between passes: time
-   * elapsed against the estimate, and lines sent against the program. Read by
-   * the tracker only when following the tool forwards has lost it, and kept in
-   * a ref so the once-a-second elapsed tick does not re-run the projection.
+   * Where the job is by the streamer's own reckoning: the line the cutter is on,
+   * as a share of the program's time (see `progressPercent`). Read by the
+   * tracker only when following the tool forwards has lost it, and kept in a
+   * ref so a progress update does not re-run the projection.
    */
   const anchorsRef = useRef<number[]>([]);
   useEffect(() => {
-    const total = path.seconds;
-    const anchors: number[] = [];
-    const { elapsedSeconds, estimatedSeconds, progressPercent } = machineState;
-    if (estimatedSeconds) anchors.push(Math.min(total, (elapsedSeconds / estimatedSeconds) * total));
-    anchors.push((progressPercent / 100) * total);
-    anchorsRef.current = anchors;
-  }, [path, machineState]);
+    anchorsRef.current = [(machineState.progressPercent / 100) * path.seconds];
+  }, [path, machineState.progressPercent]);
 
   // Follow the machine by where it says the tool is, not by how many lines have
   // been sent to it. See `trackPlayhead` for why the line count cannot do this

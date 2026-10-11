@@ -23,6 +23,15 @@ import {
   type MachineTransport,
 } from './machineTransport';
 import { locateExecutedLine, planResume, scanModalState, type ResumeOptions } from './jobResume';
+import { programTimeline, type ProgramTimeline } from './timeEstimate';
+import {
+  CUT_START,
+  DEFAULT_PLANNER_BLOCKS,
+  lineAtSeconds,
+  locateCut,
+  secondsAtLine,
+  type CutState,
+} from './jobProgress';
 import {
   adoptCheckpoint,
   beginCheckpoint,
@@ -68,24 +77,33 @@ export interface MachineState {
   portName?: string;
   mpos: { x: number; y: number; z: number };
   wpos: { x: number; y: number; z: number };
+  /**
+   * The program line the cutter is on — not the line last sent, which runs
+   * ahead of it by GRBL's serial buffer and planner. See `jobProgress.ts`.
+   * It is also the line a resume from here would restart on.
+   */
   currentLine: number;
   totalLines: number;
+  /**
+   * How far through the program the cutter is, by time rather than by lines.
+   *
+   * Taken from the line being cut (`currentLine`, refined by where the tool is
+   * along it) and the per-line clock from `programTimeline`. A line is not a
+   * unit of time — a rapid across the stock is one line and a fraction of a
+   * second, a raster pass is hundreds of short ones — so "62% of the lines" and
+   * "62% of the way through" are different numbers, and this is the second.
+   * It only moves forward within a run, holds still through pauses, and a
+   * resumed run starts at the share of the job its line had reached.
+   *
+   * A job handed to a cloud device has no line stream to read, and falls back
+   * to elapsed time against the quoted estimate.
+   */
   progressPercent: number;
+  /** Time left at the current feed override, or null when nothing can say. */
+  remainingSeconds: number | null;
   /**
    * Seconds since the job started cutting, and the run time it was quoted at.
-   *
-   * The line count cannot answer "how much longer" and never could. GRBL acks a
-   * line when it has parsed it, so the count runs ahead of the cut by whatever
-   * is sitting in the planner; and a line is not a unit of time either — a
-   * rapid across the stock is one line and a fraction of a second, a raster
-   * pass is one line and several. On a relief, where the mix of the two changes
-   * completely between roughing and finishing, "62% of the lines" and "62% of
-   * the way through" are simply different numbers.
-   *
-   * The clock is not a guess in the same way: the estimate comes off the
-   * finished program and the machine's own `$$` limits, and the elapsed time is
-   * measured. `estimatedSeconds` is null when the job was started by something
-   * that did not quote one, and the UI says so rather than inventing a figure.
+   * Both are readouts only; `progressPercent` is the progress.
    */
   elapsedSeconds: number;
   estimatedSeconds: number | null;
@@ -335,7 +353,7 @@ export function prepareJobLines(gcode: string): JobLine[] {
  * commands, which are paced one at a time and may have someone waiting on them.
  */
 type AckSlot =
-  | { kind: 'job'; bytes: number }
+  | { kind: 'job'; bytes: number; programLine: number }
   | { kind: 'other'; resolve: (() => void) | null };
 
 /**
@@ -507,6 +525,27 @@ class WebSerialManager {
    * clamps rather than counting backwards.
    */
   private jobLineBase = 0;
+
+  /**
+   * The program on the clock, line by line, for reading progress off the line
+   * being cut. Built whenever `program` is set; null for a job a cloud device
+   * runs by itself, which has no line stream here to read.
+   */
+  private timeline: ProgramTimeline | null = null;
+  /** Program lines GRBL has acknowledged this run: `0..ackedLines-1` are planned or cut. */
+  private ackedLines = 0;
+  /** Where this run picked the program up: 0 from the start, the resume line otherwise. */
+  private cutFloorLine = 0;
+  /** Where the cutter was last placed. See `advanceCut`. */
+  private cut: CutState = CUT_START;
+  /**
+   * The planner's depth and its free blocks, from `Bf:`. GRBL reports it only
+   * when `$10` asks, so both stay null on a stock setup; the depth is the most
+   * free blocks ever seen, which is the planner sitting empty.
+   */
+  private plannerSize: number | null = null;
+  private plannerFree: number | null = null;
+
   private isJobRunning = false;
   private isPaused = false;
 
@@ -562,8 +601,89 @@ class WebSerialManager {
     if (this.elapsedTimer) clearInterval(this.elapsedTimer);
     this.elapsedTimer = setInterval(() => {
       if (this.jobStartedAt === null) return;
-      this.updateState({ elapsedSeconds: Math.round((Date.now() - this.jobStartedAt) / 1000) });
+      const elapsedSeconds = Math.round((Date.now() - this.jobStartedAt) / 1000);
+      const estimate = this.state.estimatedSeconds;
+      // A job a cloud device is running has no acks or lines here to read, so
+      // the clock against the quote is all there is. Short of 100 until the
+      // device says it has finished.
+      if (this.timeline === null && estimate) {
+        this.updateState({
+          elapsedSeconds,
+          progressPercent: Math.min(99, (elapsedSeconds / estimate) * 100),
+          remainingSeconds: Math.max(0, estimate - elapsedSeconds),
+        });
+      } else {
+        this.updateState({ elapsedSeconds });
+      }
     }, 1000);
+  }
+
+  /**
+   * Starts this run's progress at `fromLine`, against the program as it stands.
+   *
+   * The timeline is rebuilt here rather than kept, so it is timed with the
+   * motion profile of the machine connected now.
+   */
+  private beginCutTracking(fromLine: number): Partial<MachineState> {
+    this.timeline = this.program.length > 0
+      ? programTimeline(this.program.map((l) => l.code), { profile: this.state.motion })
+      : null;
+    this.ackedLines = fromLine;
+    this.cutFloorLine = fromLine;
+    const tl = this.timeline;
+    this.cut = tl
+      ? { seconds: secondsAtLine(tl, fromLine), move: tl.moveStart[Math.min(fromLine, tl.lineEnd.length)] }
+      : CUT_START;
+    return this.cutProgress();
+  }
+
+  /**
+   * Places the cutter from one status report, and the progress that follows.
+   *
+   * `plannerBlocksInUse` overrides the report's `Bf:` — a drained buffer is
+   * known to be empty without asking.
+   */
+  private advanceCut(
+    pos: { x: number; y: number; z: number } | null,
+    plannerBlocksInUse?: number
+  ): Partial<MachineState> {
+    const tl = this.timeline;
+    if (!tl) return {};
+    // The depth is never taken as less than a stock board's: the most free
+    // blocks seen is only the depth once the planner has been seen empty, and
+    // assuming too deep a planner merely puts the floor further back.
+    const inUse = plannerBlocksInUse
+      ?? (this.plannerFree !== null
+        ? Math.max(DEFAULT_PLANNER_BLOCKS, this.plannerSize ?? 0) - this.plannerFree
+        : null);
+    this.cut = locateCut(
+      tl,
+      { acked: this.ackedLines, plannerBlocksInUse: inUse, floorLine: this.cutFloorLine, pos },
+      this.cut
+    );
+    const patch = this.cutProgress();
+    // Throttled inside, to a storage write every couple of seconds. The cut
+    // line rather than the sent one, so a job picked back up after the tab
+    // went away restarts where the tool was, not a planner's worth past it.
+    if (this.isJobRunning && !this.isPaused) recordProgress(patch.currentLine ?? 0, 'streaming');
+    return patch;
+  }
+
+  /** `currentLine`, `progressPercent` and `remainingSeconds` from the cut state. */
+  private cutProgress(): Partial<MachineState> {
+    const tl = this.timeline;
+    if (!tl) return {};
+    const total = tl.total;
+    const seconds = Math.min(total, this.cut.seconds);
+    // Never past the next line GRBL hasn't been given. That line may be a tool
+    // change, which takes no time and so would otherwise be counted as done.
+    const currentLine = Math.min(lineAtSeconds(tl, seconds), this.ackedLines, tl.lineEnd.length);
+    const feed = Math.max(10, this.state.overrides?.feed ?? 100);
+    return {
+      currentLine,
+      progressPercent: total > 0 ? Math.round((seconds / total) * 10000) / 100 : 0,
+      remainingSeconds: Math.max(0, total - seconds) * (100 / feed),
+    };
   }
 
   private stopElapsedTicker() {
@@ -622,6 +742,7 @@ class WebSerialManager {
     currentLine: 0,
     totalLines: 0,
     progressPercent: 0,
+    remainingSeconds: null,
     feedRate: 0,
     spindleSpeed: 0,
     // Disconnected: there is no machine to have a stale datum, but nothing has
@@ -1091,6 +1212,7 @@ class WebSerialManager {
       const slot = this.ackQueue.shift();
       if (slot?.kind === 'job') {
         this.jobBytesInFlight = Math.max(0, this.jobBytesInFlight - slot.bytes);
+        if (slot.programLine + 1 > this.ackedLines) this.ackedLines = slot.programLine + 1;
         this.pumpJobQueue();
       } else if (slot?.kind === 'other') {
         slot.resolve?.();
@@ -1182,6 +1304,7 @@ class WebSerialManager {
     let mpos: [number, number, number] | null = null;
     let wpos: [number, number, number] | null = null;
     let pins = '';
+    let bufferFree: number | null = null;
     const patch: Partial<MachineState> = {};
 
     for (const part of parts.slice(1)) {
@@ -1204,6 +1327,11 @@ class WebSerialManager {
       // `Ov:100,100,100` — feed, rapid and spindle trim, as percentages.
       else if (key === 'Ov' && nums.length >= 3) {
         patch.overrides = { feed: nums[0], rapid: nums[1], spindle: nums[2] };
+      }
+      // `Bf:15,128` — planner blocks and serial bytes free. Only sent when `$10`
+      // asks for it, and read only to say how far behind the acks the cut is.
+      else if (key === 'Bf' && nums.length >= 1 && Number.isFinite(nums[0])) {
+        bufferFree = nums[0];
       }
       // `Pn:P` — the asserted input pins. GRBL lists them only while one is
       // asserted, so a report with no `Pn` field means the probe is open.
@@ -1265,6 +1393,14 @@ class WebSerialManager {
     }
     if (patch.wpos && (this.isJobRunning || this.isPaused) && machineWord !== 'Alarm') {
       this.jobPeakWorkZ = Math.max(this.jobPeakWorkZ ?? -Infinity, patch.wpos.z);
+    }
+
+    this.plannerFree = bufferFree;
+    if (bufferFree !== null) this.plannerSize = Math.max(this.plannerSize ?? 0, bufferFree);
+    // Into the same update, so a report is one notification. Not on an alarm:
+    // the position is a fiction from then on, and the job has been abandoned.
+    if ((this.isJobRunning || this.isPaused) && machineWord !== 'Alarm') {
+      Object.assign(patch, this.advanceCut(patch.wpos ?? null));
     }
 
     // One update for the whole report: each one notifies every listener, and
@@ -1525,10 +1661,14 @@ class WebSerialManager {
       }
       // The device owns the clock now. What comes back arrives as progress over
       // the relay rather than being counted out here.
+      // Nothing streams from here, so there is no line to read progress off.
+      this.timeline = null;
       this.updateState({
         status: result.delivered ? 'RUNNING' : 'IDLE',
         estimatedSeconds: options.estimatedSeconds ?? null,
         elapsedSeconds: 0,
+        progressPercent: 0,
+        remainingSeconds: options.estimatedSeconds ?? null,
         pauseMessage: result.delivered ? undefined : result.message,
       });
       if (result.delivered) {
@@ -1580,9 +1720,8 @@ class WebSerialManager {
 
     this.updateState({
       status: 'RUNNING',
-      currentLine: 0,
+      ...this.beginCutTracking(0),
       totalLines: this.gcodeQueue.length,
-      progressPercent: 0,
       elapsedSeconds: 0,
       estimatedSeconds: estimatedSeconds ?? null,
       // Pressing start is a new moment too: whatever the last attempt was
@@ -1664,8 +1803,7 @@ class WebSerialManager {
 
     this.updateState({
       totalLines: prepared.length,
-      currentLine: Math.max(0, Math.min(prepared.length, fromLine)),
-      progressPercent: Math.round((fromLine / Math.max(1, prepared.length)) * 100),
+      ...this.beginCutTracking(Math.max(0, Math.min(prepared.length, fromLine))),
       resume: {
         fromLine: Math.max(0, Math.min(prepared.length, fromLine)),
         totalLines: prepared.length,
@@ -1744,11 +1882,15 @@ class WebSerialManager {
     this.jobPeakWorkZ = null;
     this.drainedPause = null;
 
+    // The clock carries on from what the job had already run, rather than
+    // starting again or counting the time it spent stopped as cutting.
+    this.jobStartedAt = Date.now() - this.state.elapsedSeconds * 1000;
+    this.startElapsedTicker();
+
     this.updateState({
       status: 'RUNNING',
-      currentLine: plan.fromLine,
+      ...this.beginCutTracking(plan.fromLine),
       totalLines: this.programLength(),
-      progressPercent: Math.round((plan.fromLine / Math.max(1, this.programLength())) * 100),
       resume: null,
       pauseMessage: undefined,
       lastCompletedJob: null,
@@ -1846,7 +1988,9 @@ class WebSerialManager {
           clearCheckpoint();
           this.updateState({
             status: 'IDLE',
+            currentLine: this.programLength(),
             progressPercent: 100,
+            remainingSeconds: 0,
             resume: null,
             elapsedSeconds,
             lastCompletedJob: {
@@ -1881,17 +2025,9 @@ class WebSerialManager {
     const note = this.gcodeNotes[this.currentQueueIndex] || '';
     this.currentQueueIndex++;
 
-    // Reported against the original program rather than the queue, so a resumed
-    // job carries on from 61% instead of restarting the bar at zero. During the
-    // preamble the sum is below where the program picks up, and clamping there
-    // is what stops the progress running backwards.
-    const programLine = Math.max(0, Math.min(this.programLength(), this.jobLineBase + this.currentQueueIndex));
-    const progressPercent = Math.round((programLine / Math.max(1, this.programLength())) * 100);
-    this.updateState({ currentLine: programLine, progressPercent });
-    // Throttled inside, to a storage write every couple of seconds rather than
-    // one per G-code block. Called from here rather than from `updateState`
-    // because this is the only place the program line is actually decided.
-    recordProgress(programLine, 'streaming');
+    // The program line this queue entry is, for the ack to credit. Below where
+    // the program picks up during a resume's preamble, which is not in it.
+    const programLine = this.jobLineBase + this.currentQueueIndex - 1;
 
     // A tool change or a programmed stop is the operator's cue, not a fault.
     // Neither is sent on: GRBL rejects M6 unless it was built with it, and the
@@ -1919,7 +2055,7 @@ class WebSerialManager {
     // Booked as a job slot rather than going through `sendLine`, so its ack is
     // credited back to the stream's byte count and not to an interactive
     // command that never asked for one.
-    this.ackQueue.push({ kind: 'job', bytes });
+    this.ackQueue.push({ kind: 'job', bytes, programLine });
     this.jobBytesInFlight += bytes;
     void this.transport.writeLine(line);
     return true;
@@ -1998,7 +2134,8 @@ class WebSerialManager {
     if (!this.isPaused || this.state.status !== type) return;
 
     this.drainedPause = { line: pauseLine, kind: type === 'PAUSED_TOOL' ? 'tool-change' : 'stop', message };
-    this.updateState({ pauseMessage: message });
+    // Drained, so everything acked has been cut: the progress stands at the pause.
+    this.updateState({ pauseMessage: message, ...this.advanceCut(null, 0) });
 
     // Get clear of the work, then bring the spindle out where it can be reached.
     //
@@ -2245,6 +2382,7 @@ class WebSerialManager {
       status: 'IDLE',
       pauseMessage: undefined,
       progressPercent: 0,
+      remainingSeconds: null,
     });
   }
 
@@ -2327,7 +2465,7 @@ class WebSerialManager {
     await this.eStop();
     // The soft reset leaves GRBL in Alarm if it was moving, so the status the
     // machine reports next is the truth here rather than an assumed IDLE.
-    this.updateState({ progressPercent: 0, pauseMessage: undefined });
+    this.updateState({ progressPercent: 0, remainingSeconds: null, pauseMessage: undefined });
   }
 
   /**
@@ -2476,6 +2614,11 @@ class WebSerialManager {
 
     this.isJobRunning = false;
     this.isPaused = false;
+    // A stopped job is not running up time. The elapsed figure stays, and a
+    // resume carries on counting from it.
+    if (this.elapsedTimer) clearInterval(this.elapsedTimer);
+    this.elapsedTimer = null;
+    this.jobStartedAt = null;
     this.gcodeQueue = [];
     this.gcodeNotes = [];
     this.currentQueueIndex = 0;
@@ -2506,6 +2649,7 @@ class WebSerialManager {
       currentLine: 0,
       totalLines: 0,
       progressPercent: 0,
+      remainingSeconds: null,
       // needsZZero is left as it was. An unlock proves nothing about the Z
       // datum: a machine that powers up in alarm, or a bit that snapped and was
       // replaced, still has to be zeroed before a start or a resume.
@@ -3176,7 +3320,7 @@ class WebSerialManager {
     // rest of the program into a freshly reset machine with the spindle off.
     if (this.isJobRunning || this.isPaused) {
       this.abandonJob('cancelled');
-      this.updateState({ progressPercent: 0, pauseMessage: undefined });
+      this.updateState({ progressPercent: 0, remainingSeconds: null, pauseMessage: undefined });
     }
     if (this.transport) {
       this.clearGuideSpotTimeout();

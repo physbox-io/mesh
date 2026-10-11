@@ -143,13 +143,15 @@ describe('pausing and resuming a running job', () => {
     webSerialManager.startJob(JOB);
     await settle();
     await webSerialManager.pauseJob();
-    const lineAtPause = webSerialManager.getState().currentLine;
+    // Lines sent, not `currentLine`: that is the line being cut, which only a
+    // status report moves, and this board sends none.
+    const sentAtPause = fake.lines().length;
 
     await webSerialManager.resumeJob();
     await advance(8);
 
     expect(fake.sent).toContain('~');
-    expect(webSerialManager.getState().currentLine).toBeGreaterThan(lineAtPause);
+    expect(fake.lines().length).toBeGreaterThan(sentAtPause);
     // The program's own moves all reached the machine, none twice.
     const moves = fake.lines().filter((l) => l.startsWith('G1 X'));
     expect(moves).toEqual([...new Set(moves)]);
@@ -697,7 +699,8 @@ describe('a job that alarms while stopped for a tool change', () => {
       ...Array.from({ length: 200 }, (_, i) => `G1 X${(i + 1) * 10} F600`)].join('\n');
     webSerialManager.startJob(long);
     await advance(20);
-    const reached = webSerialManager.getState().currentLine;
+    // The line last sent, which is what the rewind is measured back from.
+    const reached = fake.lines().length;
     mgr().handleIncomingLine('<Alarm|MPos:0.000,0.000,0.000|FS:0,0>');
 
     const resume = webSerialManager.getState().resume;
