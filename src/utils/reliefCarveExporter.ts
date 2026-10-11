@@ -145,6 +145,25 @@ export interface ReliefCarveOptions {
    * it at full stock height and only cuts where the model actually dips.
    */
   backgroundMode: 'carve' | 'skip';
+  /**
+   * Cut right through the stock, this far into the spoilboard, in mm. Zero
+   * keeps the usual 1 mm of stock under the deepest cut.
+   *
+   * With it set, the relief goes the stock's full thickness plus this, and
+   * the holes in the model -- the places inside its footprint with no surface
+   * at all -- are cut to that floor whatever `backgroundMode` says, since a
+   * hole is the point of a through-cut and not background.
+   */
+  cutThroughMm?: number;
+  /**
+   * Through-cuts only: leave tabs bridging any piece the cut would set loose,
+   * so it is held to the board instead of thrown. On by default.
+   */
+  holdingTabs?: boolean;
+  /** Tab thickness above the bottom of the stock, mm. */
+  tabHeightMm?: number;
+  /** Tab length along the slot, mm. */
+  tabWidthMm?: number;
   /** Clear waste with a flat mill before the finishing raster. */
   roughingEnabled: boolean;
   /** Roughing tool diameter in mm. Always a flat end mill — see `roughingToolDiaMm`. */
@@ -327,6 +346,10 @@ export const DEFAULT_RELIEF_OPTIONS: ReliefCarveOptions = {
   fitMode: 'fit',
   scalePercent: 100,
   backgroundMode: 'carve',
+  cutThroughMm: 0,
+  holdingTabs: true,
+  tabHeightMm: 2,
+  tabWidthMm: 6,
   invertRelief: false,
   roughingEnabled: true,
   roughingToolDiaMm: 6.35,
@@ -2621,6 +2644,200 @@ export function machineSurface(
 /**
  * Turns a scene into a relief carving job for a 3-axis CNC router.
  */
+/** Cells cut down to the bottom of the stock or below are gone. */
+const isCutThrough = (z: number, stockBottomZ: number): boolean => z <= stockBottomZ + 1e-6;
+
+/**
+ * Group the material a through-cut leaves into pieces, by edge-adjacency.
+ *
+ * `label` is the piece each cell belongs to, or -1 for a cell cut through;
+ * `sizes` is each piece's cell count.
+ */
+function labelPieces(surface: Heightmap, stockBottomZ: number): { label: Int32Array; sizes: number[] } {
+  const { cols, z } = surface;
+  const label = new Int32Array(z.length).fill(-1);
+  const sizes: number[] = [];
+  const stack: number[] = [];
+  for (let start = 0; start < z.length; start++) {
+    if (label[start] !== -1 || isCutThrough(z[start], stockBottomZ)) continue;
+    const id = sizes.length;
+    let size = 0;
+    label[start] = id;
+    stack.push(start);
+    while (stack.length) {
+      const i = stack.pop()!;
+      size++;
+      const c = i % cols;
+      for (const n of [c > 0 ? i - 1 : -1, c < cols - 1 ? i + 1 : -1, i - cols, i + cols]) {
+        if (n < 0 || n >= z.length || label[n] !== -1 || isCutThrough(z[n], stockBottomZ)) continue;
+        label[n] = id;
+        stack.push(n);
+      }
+    }
+    sizes.push(size);
+  }
+  return { label, sizes };
+}
+
+/** The smallest piece worth calling a part: a square millimetre, in cells. */
+const minPieceCells = (resolutionMm: number): number => 1 / Math.max(1e-6, resolutionMm * resolutionMm);
+
+/**
+ * How many pieces of a through-cut come away from the main body of the board.
+ *
+ * Every piece but the largest is one the cutter will free. Specks under a
+ * square millimetre are left out -- a sliver between two samples is sampling,
+ * not a part.
+ */
+export function countLoosePieces(surface: Heightmap, stockBottomZ: number, resolutionMm: number): number {
+  const { sizes } = labelPieces(surface, stockBottomZ);
+  const sorted = [...sizes].sort((p, q) => q - p);
+  return sorted.slice(1).filter((n) => n >= minPieceCells(resolutionMm)).length;
+}
+
+export interface HoldingTabOptions {
+  /** How far the tab stands above the bottom of the stock, mm. */
+  heightMm: number;
+  /** Length of the tab along the slot, mm. The cutter's radius adds to it. */
+  widthMm: number;
+  /** Tabs along one slot are at least this far apart, mm. */
+  spacingMm: number;
+}
+
+/**
+ * Bridge every loose piece of a through-cut back to its neighbours with tabs.
+ *
+ * A tab is a short length of slot left uncut at the bottom: the cutter goes
+ * through either side of it and stops `heightMm` above the spoilboard over it,
+ * so the piece hangs on that bridge rather than coming free and being thrown.
+ * They are snapped off or sawn through after the job.
+ *
+ * Where to put them is found from the slots themselves. Growing every piece
+ * out across the cut-through cells at once, the places two growths meet are
+ * the middle of the slot between those two pieces -- a seam. A tab centred on
+ * a seam point, as wide as the slot is there, joins the pieces on either
+ * side. Seams are only tabbed where a loose piece is on one side of them, and
+ * each loose piece gets at least two tabs wherever its seams allow, since a
+ * piece on one tab pivots into the cutter.
+ *
+ * Edits `surface` in place and says how many tabs it left and how many
+ * pieces are still loose (a piece walled in by nothing but board edge has
+ * no seam to tab across).
+ */
+export function addHoldingTabs(
+  surface: Heightmap,
+  stockBottomZ: number,
+  resolutionMm: number,
+  tab: HoldingTabOptions
+): { tabs: number; loose: number } {
+  const { cols, rows, z } = surface;
+  const { label, sizes } = labelPieces(surface, stockBottomZ);
+  const minCells = minPieceCells(resolutionMm);
+  let main = -1;
+  for (let i = 0; i < sizes.length; i++) if (main < 0 || sizes[i] > sizes[main]) main = i;
+  const isLoose = (id: number) => id >= 0 && id !== main && sizes[id] >= minCells;
+  if (!sizes.some((_, id) => isLoose(id))) return { tabs: 0, loose: 0 };
+
+  // Grow every real piece out across the cut cells, breadth first, so each cut
+  // cell learns which piece is nearest and how far away it is.
+  const owner = new Int32Array(z.length).fill(-1);
+  const dist = new Float32Array(z.length).fill(Infinity);
+  let queue: number[] = [];
+  for (let i = 0; i < z.length; i++) {
+    if (label[i] >= 0 && sizes[label[i]] >= minCells) {
+      owner[i] = label[i];
+      dist[i] = 0;
+      queue.push(i);
+    }
+  }
+  while (queue.length) {
+    const next: number[] = [];
+    for (const i of queue) {
+      const c = i % cols;
+      for (const n of [c > 0 ? i - 1 : -1, c < cols - 1 ? i + 1 : -1, i - cols, i + cols]) {
+        if (n < 0 || n >= z.length || owner[n] !== -1) continue;
+        owner[n] = owner[i];
+        dist[n] = dist[i] + 1;
+        next.push(n);
+      }
+    }
+    queue = next;
+  }
+
+  // Seams: neighbouring cells owned by different pieces, one of them loose.
+  const seams = new Map<string, number[]>();
+  for (let i = 0; i < z.length; i++) {
+    const c = i % cols;
+    for (const n of [c < cols - 1 ? i + 1 : -1, i + cols < z.length ? i + cols : -1]) {
+      if (n < 0) continue;
+      const a = owner[i], b = owner[n];
+      if (a < 0 || b < 0 || a === b || !(isLoose(a) || isLoose(b))) continue;
+      const at = dist[i] >= dist[n] ? i : n;
+      if (label[at] >= 0) continue; // a seam is in the slot, not in a piece
+      const key = a < b ? `${a}:${b}` : `${b}:${a}`;
+      if (!seams.has(key)) seams.set(key, []);
+      seams.get(key)!.push(at);
+    }
+  }
+
+  const spacing = Math.max(1, tab.spacingMm / resolutionMm);
+  const centres: number[] = [];
+  const perPiece = new Map<number, number[]>();
+  const far = (i: number, js: number[], d: number) =>
+    js.every((j) => Math.hypot((i % cols) - (j % cols), Math.floor(i / cols) - Math.floor(j / cols)) >= d);
+  const place = (i: number, key: string) => {
+    centres.push(i);
+    for (const id of key.split(':').map(Number)) {
+      if (!perPiece.has(id)) perPiece.set(id, []);
+      perPiece.get(id)!.push(i);
+    }
+  };
+  for (const [key, cells] of seams) {
+    const mine: number[] = [];
+    for (const i of cells) {
+      if (far(i, mine, spacing)) {
+        mine.push(i);
+        place(i, key);
+      }
+    }
+  }
+  // A loose piece left on one tab gets a second, as far from the first as
+  // its seams reach.
+  for (const [key, cells] of seams) {
+    for (const id of key.split(':').map(Number)) {
+      if (!isLoose(id) || (perPiece.get(id)?.length ?? 0) >= 2) continue;
+      const have = perPiece.get(id) ?? [];
+      let best = -1;
+      let bestD = -1;
+      for (const i of cells) {
+        const d = Math.min(...have.map((j) => Math.hypot((i % cols) - (j % cols), Math.floor(i / cols) - Math.floor(j / cols))));
+        if (d > bestD) { bestD = d; best = i; }
+      }
+      // Two tabs on top of each other are one tab.
+      if (best >= 0 && bestD > tab.widthMm / resolutionMm) place(best, key);
+    }
+  }
+
+  // Raise the slot floor over each tab: a disc wide enough to span the slot
+  // where it sits, and at least the tab's own width.
+  const topZ = stockBottomZ + Math.max(0.1, tab.heightMm);
+  for (const centre of centres) {
+    const radius = Math.max(tab.widthMm / 2 / resolutionMm, dist[centre] + 1.5);
+    const r0 = Math.floor(centre / cols);
+    const c0 = centre % cols;
+    const reach = Math.ceil(radius);
+    for (let r = Math.max(0, r0 - reach); r <= Math.min(rows - 1, r0 + reach); r++) {
+      for (let c = Math.max(0, c0 - reach); c <= Math.min(cols - 1, c0 + reach); c++) {
+        if (Math.hypot(r - r0, c - c0) > radius) continue;
+        const i = r * cols + c;
+        if (z[i] < topZ) z[i] = topZ;
+      }
+    }
+  }
+
+  return { tabs: centres.length, loose: countLoosePieces(surface, stockBottomZ, resolutionMm) };
+}
+
 export function generateReliefCarveGcode(
   scene: SceneGraph,
   userOptions?: Partial<ReliefCarveOptions>
@@ -2754,8 +2971,17 @@ export function generateReliefCarveGcode(
   // the footprint is — the operator set a stock size, not a depth percentage.
   // 'proportional' ties depth to plan scale and exaggeration instead; clamping it
   // here would silently change that ratio, so it stays a warning to fix by hand.
+  const cutThrough = Math.max(0, opts.cutThroughMm ?? 0);
   const maxDepthForStock = Math.max(0.1, opts.stockThicknessMm - 1);
-  if (!proportional && reliefDepth > maxDepthForStock) {
+  if (cutThrough > 0) {
+    // A through-cut is a depth the operator asked for by name, not one to
+    // second-guess: the stock and a skim of spoilboard, and no less.
+    reliefDepth = opts.stockThicknessMm + cutThrough;
+    warnings.push(
+      `Cuts through the ${opts.stockThicknessMm} mm stock and ${cutThrough} mm into the spoilboard. ` +
+        `Check the board is down flat on it before you start.`
+    );
+  } else if (!proportional && reliefDepth > maxDepthForStock) {
     warnings.push(
       `Relief depth reduced to ${maxDepthForStock.toFixed(1)} mm to leave 1 mm under the ` +
         `${opts.stockThicknessMm} mm stock (requested ${reliefDepth.toFixed(1)} mm).`
@@ -2824,9 +3050,46 @@ export function generateReliefCarveGcode(
       }
     }
   } else {
+    // In a through-cut, a cell with no surface inside the model's footprint is
+    // one of its holes and goes to the floor; outside the footprint it is
+    // background like any other.
+    const inFootprint = (i: number): boolean => {
+      if (cutThrough <= 0) return false;
+      const x = surface.minX + (i % surface.cols) * surface.stepX;
+      const y = surface.minY + Math.floor(i / surface.cols) * surface.stepY;
+      return x >= carveBounds.minX && x <= carveBounds.maxX && y >= carveBounds.minY && y <= carveBounds.maxY;
+    };
     for (let i = 0; i < surface.z.length; i++) {
-      if (surface.z[i] === -Infinity) surface.z[i] = backgroundZ;
+      if (surface.z[i] === -Infinity) surface.z[i] = inFootprint(i) ? floorZ : backgroundZ;
       else if (surface.z[i] < floorZ) surface.z[i] = floorZ;
+    }
+  }
+
+  if (cutThrough > 0) {
+    let loose = countLoosePieces(surface, -opts.stockThicknessMm, res);
+    if (loose > 0 && opts.holdingTabs !== false) {
+      const freed = loose;
+      const height = Math.min(Math.max(0.2, opts.tabHeightMm ?? 2), opts.stockThicknessMm * 0.8);
+      const placed = addHoldingTabs(surface, -opts.stockThicknessMm, res, {
+        heightMm: height,
+        widthMm: Math.max(0.5, opts.tabWidthMm ?? 6),
+        spacingMm: 80,
+      });
+      loose = placed.loose;
+      if (placed.tabs > 0) {
+        warnings.push(
+          `${placed.tabs} holding tab${placed.tabs === 1 ? '' : 's'}, ${height} mm thick, keep ` +
+            `${freed} loose piece${freed === 1 ? '' : 's'} attached. Saw or chisel ` +
+            `${placed.tabs === 1 ? 'it' : 'them'} off once the board is off the machine.`
+        );
+      }
+    }
+    if (loose > 0) {
+      warnings.push(
+        `${loose} piece${loose === 1 ? ' is' : 's are'} cut free of the rest of the board. Hold ` +
+          `${loose === 1 ? 'it' : 'them'} down -- tabs, tape or screws -- or the cutter will throw ` +
+          `${loose === 1 ? 'it' : 'them'} once the last of the slot is cut.`
+      );
     }
   }
 

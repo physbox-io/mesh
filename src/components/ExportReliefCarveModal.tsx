@@ -333,6 +333,59 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
               <Field
                 className="lg:col-span-2"
                 hintAlign="end"
+                label="Cut Through"
+                hint="Leave 1 mm keeps the board whole under the deepest cut. Through cuts the model's holes right through the stock and 0.3 mm into the spoilboard."
+              >
+                <Segmented
+                  value={(options.cutThroughMm ?? 0) > 0 ? 'through' : 'leave'}
+                  onChange={(v) => set('cutThroughMm', v === 'through' ? 0.3 : 0)}
+                  options={[['leave', 'Leave 1 mm'], ['through', 'Through']] as const}
+                />
+              </Field>
+
+              {(options.cutThroughMm ?? 0) > 0 && (
+                <>
+                  <Field
+                    hintAlign="end"
+                    label="Holding Tabs"
+                    hint="Bridges left across the slot wherever the cut would set a piece loose, so the cutter cannot throw it. Saw or chisel them off afterwards."
+                  >
+                    <Segmented
+                      value={options.holdingTabs === false ? 'off' : 'on'}
+                      onChange={(v) => set('holdingTabs', v === 'on')}
+                      options={[['on', 'On'], ['off', 'Off']] as const}
+                    />
+                  </Field>
+                  <Field
+                    label="Tab Height (mm)"
+                    hint="How thick each tab is, from the bottom of the stock up."
+                  >
+                    <NumberInput
+                      step={0.5} min={0.2} max={20}
+                      disabled={options.holdingTabs === false}
+                      value={options.tabHeightMm ?? 2}
+                      onChange={(v) => set('tabHeightMm', v)}
+                      className={inputClass}
+                    />
+                  </Field>
+                  <Field
+                    label="Tab Width (mm)"
+                    hint="How long each tab runs along the slot. The cutter leaves it a little longer than this, by its own radius at each end."
+                  >
+                    <NumberInput
+                      step={1} min={0.5} max={50}
+                      disabled={options.holdingTabs === false}
+                      value={options.tabWidthMm ?? 6}
+                      onChange={(v) => set('tabWidthMm', v)}
+                      className={inputClass}
+                    />
+                  </Field>
+                </>
+              )}
+
+              <Field
+                className="lg:col-span-2"
+                hintAlign="end"
                 label="Relief Polarity"
                 hint="Standard (Cameo) raises peaks toward the stock surface. Invert (Intaglio / Mold) carves peaks deepest into the block as negative cavities, for casting molds or sunken engravings."
               >

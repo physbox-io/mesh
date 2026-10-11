@@ -9,6 +9,7 @@ import {
   patternById,
   PANEL_BASE_MM,
   RELIEF_FLOOR_MM,
+  THROUGH_CUT_OVERCUT_MM,
   DEFAULT_DEPTH_FRACTION,
   MIN_SENSIBLE_DEPTH_MM,
   type PatternOptions,
@@ -107,14 +108,14 @@ export const GeneratePatternModal: React.FC = () => {
       drawHeightmapPreview(
         canvasRef.current,
         preview.plank.mesh,
-        settledDepth / 1000,
+        (spec?.throughCut ? settledStock.thicknessMm : settledDepth) / 1000,
         settledStock.widthMm / 1000,
         // The same palette the board is painted with, so the dialog shows the
         // thing that will appear in the scene rather than a grey rehearsal.
         spec?.palette ? (h) => spec.palette!(h, settledOptions) : undefined
       );
     }
-  }, [preview, settledDepth, settledStock.widthMm, spec, settledOptions]);
+  }, [preview, settledDepth, settledStock.widthMm, settledStock.thicknessMm, spec, settledOptions]);
 
   if (!spec) return null;
 
@@ -124,6 +125,8 @@ export const GeneratePatternModal: React.FC = () => {
   };
 
   const plank = preview?.plank ?? null;
+  // A through-cut has no depth to choose: it is the board's.
+  const through = spec.throughCut === true;
   const sizeNote = plank
     ? `${(plank.mesh.sizeM[0] * 1000).toFixed(0)} × ${(plank.mesh.sizeM[1] * 1000).toFixed(1)} × ` +
       `${(plank.mesh.sizeM[2] * 1000).toFixed(1)} mm`
@@ -145,7 +148,10 @@ export const GeneratePatternModal: React.FC = () => {
       // The exporter takes its carve depth from the model's total height, and
       // that number drives the roughing layers and how far the cutter must
       // reach. The panel is the pattern plus its base, so this is that.
-      carveDepthMm: depthMm + PANEL_BASE_MM,
+      carveDepthMm: through ? stock.thicknessMm + THROUGH_CUT_OVERCUT_MM : depthMm + PANEL_BASE_MM,
+      // ...and a through-cut tells the exporter so, which is what lets it go
+      // past the last millimetre it otherwise always leaves.
+      cutThroughMm: through ? THROUGH_CUT_OVERCUT_MM : 0,
       // The board is already the size of the stock, so there is nothing to fit
       // and nothing to rescale: cut it where it is, at the size it is.
       fitMode: 'manual',
@@ -181,11 +187,14 @@ export const GeneratePatternModal: React.FC = () => {
       id: `generated_${spec.id}`,
       markdown:
         `# ${spec.label}\n\n${spec.blurb}\n\n` +
-        `${settings}\n- **Carve depth:** ${depthMm} mm\n` +
+        `${settings}\n- **Carve depth:** ${through ? `through, ${THROUGH_CUT_OVERCUT_MM} mm into the spoilboard` : `${depthMm} mm`}\n` +
         `- **Cut:** ${finish === 'rough' ? 'roughing only, flat mill' : 'roughed, then ball-nose finish'}\n` +
         `- **Stock:** ${stock.widthMm} x ${stock.depthMm} x ${stock.thicknessMm} mm\n\n` +
-        `The board is the panel, and the pattern is its top face. Relief carve is ` +
-        `already set up for it — the peaks are untouched stock and only the valleys are cut.` +
+        (through
+          ? `The board is the panel, cut right through where the pattern is. Relief carve is ` +
+            `already set up to cut through it.`
+          : `The board is the panel, and the pattern is its top face. Relief carve is ` +
+            `already set up for it — the peaks are untouched stock and only the valleys are cut.`) +
         (spec.caveat ? `\n\n> ${spec.caveat}` : ''),
       minimized: false,
       x: 16,
@@ -194,7 +203,7 @@ export const GeneratePatternModal: React.FC = () => {
   };
 
   const maxDepthMm = stock.thicknessMm - PANEL_BASE_MM - RELIEF_FLOOR_MM;
-  const tooDeep = depthMm > maxDepthMm;
+  const tooDeep = !through && depthMm > maxDepthMm;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
@@ -277,20 +286,31 @@ export const GeneratePatternModal: React.FC = () => {
 
             <div className="pt-1 border-t border-slate-200 dark:border-slate-800" />
 
-            <Field
-              label="Carve depth (mm)"
-              hint="How far the deepest point of the pattern goes below the surface of the board. Everything above it is untouched stock face."
-            >
-              <NumberInput
-                min={0.1}
-                max={Math.max(0.1, maxDepthMm)}
-                step={0.5}
-                fallbackOnBlur={6}
-                value={depthMm}
-                onChange={(v) => { if (v !== undefined) setDepthMm(v); }}
-                className={inputClass}
-              />
-            </Field>
+            {through ? (
+              <Field
+                label="Carve depth"
+                hint="This pattern is cut right through the board, so its depth is the stock's thickness."
+              >
+                <p className="text-xs text-slate-700 dark:text-slate-200">
+                  Through the {stock.thicknessMm} mm stock, {THROUGH_CUT_OVERCUT_MM} mm into the spoilboard
+                </p>
+              </Field>
+            ) : (
+              <Field
+                label="Carve depth (mm)"
+                hint="How far the deepest point of the pattern goes below the surface of the board. Everything above it is untouched stock face."
+              >
+                <NumberInput
+                  min={0.1}
+                  max={Math.max(0.1, maxDepthMm)}
+                  step={0.5}
+                  fallbackOnBlur={6}
+                  value={depthMm}
+                  onChange={(v) => { if (v !== undefined) setDepthMm(v); }}
+                  className={inputClass}
+                />
+              </Field>
+            )}
 
             <Field
               label="Cut"
@@ -384,12 +404,12 @@ export const GeneratePatternModal: React.FC = () => {
               band stays at full height. Trim or edge the panel afterwards, or drop the plan scale
               a couple of percent to pull the pattern inside it.
             </p>
-            <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
+            {!through && <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
               One object, not a pattern laid over a block: the panel is the footprint of the stock
               and the pattern is its top face, so the relief export cuts only the valleys and leaves
               the high points as untouched surface. It is {PANEL_BASE_MM} mm thick under the deepest
               cut — what it is cut <em>from</em> is the {stock.thicknessMm} mm stock on the bench.
-            </p>
+            </p>}
           </div>
         </div>
 

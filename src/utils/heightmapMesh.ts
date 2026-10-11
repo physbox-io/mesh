@@ -59,6 +59,12 @@ export interface HeightmapOptions {
   slopeWidthM?: number;
   /** `sloped` only: which side of the boundary the ramp is carved out of. */
   slopeStyle?: SlopeStyle;
+  /**
+   * Heights below this (0..1) are no material at all: holes through the
+   * solid, walled round, rather than the lowest part of the relief. Leave it
+   * out for an ordinary closed slab.
+   */
+  holeBelow?: number;
 }
 
 export interface HeightmapMeshResult {
@@ -429,6 +435,10 @@ export function buildHeightmapMesh(
   const x0 = -widthM / 2;
   const y0 = heightM / 2; // row 0 is the top of the image, at +Y
 
+  if (options.holeBelow !== undefined) {
+    return buildHoledSolid(heights, cols, rows, dx, x0, y0, options);
+  }
+
   const zUp: number[] = [];
   const faces: number[] = [];
 
@@ -493,6 +503,145 @@ export function buildHeightmapMesh(
     heights,
     triangleCount: faces.length / 3,
     sizeM: [widthM, heightM, baseThicknessM + maxHeightM],
+  };
+}
+
+/**
+ * The same solid with holes cut through it: `buildHeightmapMesh` with
+ * `holeBelow` set.
+ *
+ * The closed-slab path above can lean on its shape -- one perimeter ring, one
+ * flat bottom fanned from the centre -- and a holed solid has neither: every
+ * hole brings a boundary of its own. So this one is built cell by cell. Each
+ * solid cell gets its top, its bottom, and a wall on every side it shares with
+ * a hole or with the edge of the board; two solid cells share their edge and
+ * put nothing between them. Every edge then belongs to exactly two faces.
+ *
+ * Top vertices keep the slab's layout, `r * cols + c`, so paint laid on the
+ * grid still lands where it should; the bottom is a second grid after them.
+ */
+function buildHoledSolid(
+  heights: Float32Array,
+  cols: number,
+  rows: number,
+  dx: number,
+  x0: number,
+  y0: number,
+  options: HeightmapOptions
+): HeightmapMeshResult {
+  const { widthM, maxHeightM, baseThicknessM } = options;
+  const cut = Math.min(Math.max(options.holeBelow ?? 0, 0), 1);
+  const cellCols = cols - 1;
+  const cellRows = rows - 1;
+  const at = (r: number, c: number) => r * cols + c;
+
+  // A cell is solid when its corners are, on average: a hole's edge then
+  // falls halfway between a solid sample and an empty one, rather than a whole
+  // cell to one side the way "all four corners" or "any corner" would put it.
+  const solid = new Uint8Array(cellCols * cellRows);
+  for (let r = 0; r < cellRows; r++) {
+    for (let c = 0; c < cellCols; c++) {
+      const mean = (heights[at(r, c)] + heights[at(r, c + 1)] + heights[at(r + 1, c)] + heights[at(r + 1, c + 1)]) / 4;
+      solid[r * cellCols + c] = mean >= cut ? 1 : 0;
+    }
+  }
+
+  // Two solid cells meeting only at a corner would share a vertical edge with
+  // four walls on it. That is not a solid -- it is two solids touching at a
+  // line -- and every winding check reports it as a face turned the wrong
+  // way. Fill one of the two empty cells at such a corner, which narrows the
+  // hole there by a cell and leaves it a proper solid; repeat until none are
+  // left, since a fill can make a new one beside it.
+  const isSolid = (r: number, c: number) => r >= 0 && c >= 0 && r < cellRows && c < cellCols && solid[r * cellCols + c] === 1;
+  for (let changed = true; changed;) {
+    changed = false;
+    for (let r = 0; r < cellRows - 1; r++) {
+      for (let c = 0; c < cellCols - 1; c++) {
+        const a = isSolid(r, c), b = isSolid(r, c + 1), d = isSolid(r + 1, c), e = isSolid(r + 1, c + 1);
+        if (a && e && !b && !d) { solid[r * cellCols + c + 1] = 1; changed = true; }
+        else if (b && d && !a && !e) { solid[r * cellCols + c] = 1; changed = true; }
+      }
+    }
+  }
+
+  // An empty sample on the rim of a solid cell is that cell's corner, and the
+  // top would sag down to it. Lift it to the highest solid sample around it,
+  // which keeps a flat top flat right up to the hole's wall.
+  const z = new Float32Array(heights.length);
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const h = heights[at(r, c)];
+      if (h >= cut) { z[at(r, c)] = h; continue; }
+      let lift = h;
+      for (let rr = Math.max(0, r - 1); rr <= Math.min(rows - 1, r + 1); rr++) {
+        for (let cc = Math.max(0, c - 1); cc <= Math.min(cols - 1, c + 1); cc++) {
+          const n = heights[at(rr, cc)];
+          if (n >= cut && n > lift) lift = n;
+        }
+      }
+      z[at(r, c)] = lift;
+    }
+  }
+
+  const zUp: number[] = [];
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) zUp.push(x0 + c * dx, y0 - r * dx, baseThicknessM + z[at(r, c)] * maxHeightM);
+  }
+  const bottom = rows * cols;
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) zUp.push(x0 + c * dx, y0 - r * dx, 0);
+  }
+
+  const faces: number[] = [];
+
+  /**
+   * A wall from the top edge p-q down to the bottom, facing `out`.
+   *
+   * The order is taken from the face's own normal rather than written out per
+   * side: this builder's rows run -Y, and a wall whose indices were copied
+   * from a builder whose rows run the other way is drawn inside out.
+   */
+  const wall = (p: number, q: number, out: [number, number]) => {
+    const bp = bottom + p, bq = bottom + q;
+    const ux = zUp[bp * 3] - zUp[p * 3], uy = zUp[bp * 3 + 1] - zUp[p * 3 + 1], uz = zUp[bp * 3 + 2] - zUp[p * 3 + 2];
+    const vx = zUp[bq * 3] - zUp[p * 3], vy = zUp[bq * 3 + 1] - zUp[p * 3 + 1], vz = zUp[bq * 3 + 2] - zUp[p * 3 + 2];
+    const nx = uy * vz - uz * vy;
+    const ny = uz * vx - ux * vz;
+    if (nx * out[0] + ny * out[1] >= 0) faces.push(p, bp, bq, p, bq, q);
+    else faces.push(p, bq, bp, p, q, bq);
+  };
+
+  for (let r = 0; r < cellRows; r++) {
+    for (let c = 0; c < cellCols; c++) {
+      if (!isSolid(r, c)) continue;
+      const a = at(r, c), b = at(r, c + 1), d = at(r + 1, c), e = at(r + 1, c + 1);
+      faces.push(a, d, e, a, e, b); // top, CCW seen from +Z
+      faces.push(bottom + a, bottom + e, bottom + d, bottom + a, bottom + b, bottom + e); // bottom, facing -Z
+      // Row r is at higher Y than row r + 1, so "up" a row is +Y.
+      if (!isSolid(r - 1, c)) wall(a, b, [0, 1]);
+      if (!isSolid(r + 1, c)) wall(d, e, [0, -1]);
+      if (!isSolid(r, c - 1)) wall(a, d, [-1, 0]);
+      if (!isSolid(r, c + 1)) wall(b, e, [1, 0]);
+    }
+  }
+
+  const yUp: number[] = new Array(zUp.length);
+  for (let i = 0; i < zUp.length; i += 3) {
+    yUp[i] = zUp[i];
+    yUp[i + 1] = zUp[i + 2];
+    yUp[i + 2] = -zUp[i + 1];
+  }
+
+  return {
+    vertices: yUp,
+    renderVertices: zUp,
+    faces,
+    boundingBox: computeBoundingBox(zUp),
+    cols,
+    rows,
+    heights: z,
+    triangleCount: faces.length / 3,
+    sizeM: [widthM, dx * (rows - 1), baseThicknessM + maxHeightM],
   };
 }
 

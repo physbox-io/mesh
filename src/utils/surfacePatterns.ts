@@ -135,6 +135,16 @@ export interface PatternSpec {
    * roughing, and opens that way for these.
    */
   flatTopped?: boolean;
+  /**
+   * Heights under one half are not the floor of a carve but no material at
+   * all: the pattern is cut right through the stock.
+   *
+   * The panel is then the stock's full thickness, the depth is not the
+   * user's to set, and the relief export is told to go through into the
+   * spoilboard. Whatever the pattern leaves must still hold together -- a
+   * slot that reaches the edge of the board sets a strip loose.
+   */
+  throughCut?: boolean;
 }
 
 /** What the dialog opens at when a pattern does not ask for something else. */
@@ -520,6 +530,96 @@ const waveSlats: PatternSpec = {
     // Not normalised: the gap floor is genuinely zero, and the slat tops are
     // already a fraction of full height by construction.
     return out;
+  },
+};
+
+// --- Sliced ----------------------------------------------------------------
+
+const sliced: PatternSpec = {
+  id: 'sliced',
+  throughCut: true,
+  flatTopped: true,
+  label: 'Sliced',
+  blurb: 'A board cut right through into wavy strips that stay joined at both ends, like a sliced and fanned steak.',
+  caveat:
+    'The slots go through the board, so set the stock on a spoilboard you do not mind marking; the cut goes 0.3 mm into it. The strips hang from the solid ends, so keep the end margin generous. The slot can be no narrower than the cutter, and the cutter needs flute enough to reach through the full thickness.',
+  defaults: {
+    slices: 7, slotMm: 6.35, amplitudeMm: 12, wavelengthMm: 250, phaseDeg: 0, endMarginMm: 30,
+    envelope: 'taper', axis: 'x',
+  },
+  fields: [
+    { kind: 'number', key: 'slices', label: 'Strips', min: 2, max: 60, step: 1,
+      hint: 'How many strips the board is cut into. One slot fewer than that.' },
+    { kind: 'number', key: 'slotMm', label: 'Slot width', min: 0.5, max: 50, step: 0.05, unit: 'mm',
+      hint: 'The cut between strips. It cannot be narrower than the cutter: 6.35 mm is a 1/4" end mill.' },
+    { kind: 'number', key: 'amplitudeMm', label: 'Wave', min: 0, max: 200, step: 0.5, unit: 'mm',
+      hint: 'How far the strips swing to either side at the middle of the board.' },
+    { kind: 'number', key: 'wavelengthMm', label: 'Wavelength', min: 10, max: 3000, step: 5, unit: 'mm',
+      hint: 'Length along the board of one full swing.' },
+    { kind: 'number', key: 'phaseDeg', label: 'Phase shift', min: -180, max: 180, step: 5, unit: 'deg',
+      hint: 'How far each slot\'s swing runs ahead of the last. Zero keeps the strips an even width; anything else makes them swell and pinch -- too much, with a big wave, and neighbouring slots meet and cut a strip in two.' },
+    { kind: 'number', key: 'endMarginMm', label: 'End margin', min: 5, max: 500, step: 1, unit: 'mm',
+      hint: 'Solid board left at each end, holding the strips together.' },
+    { kind: 'choice', key: 'envelope', label: 'Wave shape', options: [
+      { value: 'taper', label: 'Gathers at the ends' },
+      { value: 'eased', label: 'Full swing, eased at the ends' },
+    ], hint: 'Gathering brings every slot back to straight where it meets the solid ends, which is the classic look.' },
+    { kind: 'choice', key: 'axis', label: 'Strips run', options: [
+      { value: 'x', label: 'Along the width' },
+      { value: 'y', label: 'Along the depth' },
+    ] },
+  ],
+  build(cols, rows, extent, opts) {
+    const n = Math.max(2, Math.round(num(opts, 'slices', 7)));
+    const halfSlot = Math.max(0.05, num(opts, 'slotMm', 6.35)) / 2000;
+    const amp = Math.max(0, num(opts, 'amplitudeMm', 12)) / 1000;
+    const lambda = Math.max(1, num(opts, 'wavelengthMm', 250)) / 1000;
+    const phase = (num(opts, 'phaseDeg', 0) * Math.PI) / 180;
+    const margin = Math.max(0, num(opts, 'endMarginMm', 30)) / 1000;
+    const taper = str(opts, 'envelope', 'taper') === 'taper';
+    const alongY = str(opts, 'axis', 'x') === 'y';
+
+    // Work along the strips (s) and across them (t), whichever way they run.
+    const length = alongY ? extent.depthM : extent.widthM;
+    const breadth = alongY ? extent.widthM : extent.depthM;
+    const start = Math.min(margin, length / 2);
+    const end = length - start;
+    const run = Math.max(1e-6, end - start);
+    const spacing = breadth / n;
+    const k = (2 * Math.PI) / lambda;
+
+    /** How much of the swing is allowed at s: nothing at the ends, all of it in the middle. */
+    const envelope = (s: number): number => {
+      const u = clamp01((s - start) / run);
+      if (taper) return Math.sin(Math.PI * u);
+      const ramp = clamp01(Math.min(u, 1 - u) / 0.2);
+      return ramp * ramp * (3 - 2 * ramp);
+    };
+    const centre = (i: number, s: number): number =>
+      i * spacing + amp * envelope(s) * Math.sin(k * (s - start) + i * phase);
+
+    // Slots can swing past a neighbour's resting line, so look a few either side.
+    const reach = Math.min(10, Math.ceil(amp / Math.max(1e-6, spacing)) + 1);
+    const ds = Math.max(1e-5, run / 2000);
+
+    return fillGrid(cols, rows, extent, (x, y) => {
+      const s = alongY ? y : x;
+      const t = alongY ? x : y;
+      const home = Math.round(t / spacing);
+      for (let i = Math.max(1, home - reach); i <= Math.min(n - 1, home + reach); i++) {
+        let d: number;
+        if (s < start || s > end) {
+          // Past the end of the slot the cutter's own radius rounds it off.
+          const e = s < start ? start : end;
+          d = Math.hypot(s - e, t - centre(i, e));
+        } else {
+          const slope = (centre(i, s + ds) - centre(i, s - ds)) / (2 * ds);
+          d = Math.abs(t - centre(i, s)) / Math.sqrt(1 + slope * slope);
+        }
+        if (d < halfSlot) return 0;
+      }
+      return 1;
+    });
   },
 };
 
@@ -1731,6 +1831,7 @@ export const SURFACE_PATTERNS: PatternSpec[] = [
   waves,
   fluted,
   waveSlats,
+  sliced,
   topographic,
   crackedEarth,
   studs,
@@ -1778,6 +1879,13 @@ export const PANEL_BASE_MM = 2;
  */
 export const RELIEF_FLOOR_MM = 1;
 
+/**
+ * How far a through-cut goes past the bottom of the stock, in mm: enough to
+ * clear the last skin of a board that is never quite the thickness it says,
+ * not so much that the spoilboard is ploughed.
+ */
+export const THROUGH_CUT_OVERCUT_MM = 0.3;
+
 export interface PlankResult {
   node: SceneNode;
   mesh: HeightmapMeshResult;
@@ -1814,9 +1922,12 @@ export function buildPatternPlank(
   if (!(stock.widthMm > 0) || !(stock.depthMm > 0) || !(stock.thicknessMm > 0)) {
     throw new Error('Stock must have a width, a depth and a thickness.');
   }
-  const panelMm = patternDepthMm + PANEL_BASE_MM;
-  if (patternDepthMm <= 0) throw new Error('The pattern needs a depth to be cut to.');
-  if (panelMm + RELIEF_FLOOR_MM > stock.thicknessMm) {
+  // A through-cut is the whole board with holes in it, so its depth is the
+  // board's and nothing is left under it.
+  const through = spec.throughCut === true;
+  const panelMm = through ? stock.thicknessMm : patternDepthMm + PANEL_BASE_MM;
+  if (!through && patternDepthMm <= 0) throw new Error('The pattern needs a depth to be cut to.');
+  if (!through && panelMm + RELIEF_FLOOR_MM > stock.thicknessMm) {
     const deepest = stock.thicknessMm - PANEL_BASE_MM - RELIEF_FLOOR_MM;
     throw new Error(
       `A ${patternDepthMm} mm pattern does not fit in ${stock.thicknessMm} mm stock — ` +
@@ -1858,8 +1969,9 @@ export function buildPatternPlank(
 
   const mesh = buildHeightmapMesh(grid, cols, rows, {
     widthM,
-    maxHeightM: patternDepthMm / 1000,
-    baseThicknessM: PANEL_BASE_MM / 1000,
+    maxHeightM: (through ? stock.thicknessMm : patternDepthMm) / 1000,
+    baseThicknessM: through ? 0 : PANEL_BASE_MM / 1000,
+    holeBelow: through ? 0.5 : undefined,
     mapping: 'white-high',
     gridCols: cols,
     // The pattern decides its own smoothness; blurring it here would quietly
