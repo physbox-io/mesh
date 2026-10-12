@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { X, AlertCircle, Cpu, RefreshCw, Layers, Cuboid, Download } from 'lucide-react';
 import type { SceneGraph } from '../types/scene';
 import { recommendReliefTooling } from '../utils/reliefCarveExporter';
@@ -7,7 +7,6 @@ import {
   sideDepthMm,
   fittingScalePercent,
   DEFAULT_SOLID_OPTIONS,
-  MAX_SOLID_PART_MM,
   type UpAxis,
 } from '../utils/solidMachiningExporter';
 import { useExportJob } from '../utils/exportWorkerClient';
@@ -78,19 +77,22 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
     () => (isOpen ? measurePart(scene, placement.up, placement.scalePercent) : null),
     [isOpen, scene, placement]
   );
-  // A model bigger than anything a router mills from solid (a tree, a room)
-  // opens at a scale that makes a part of it, rather than at a plan that
-  // cannot be made and takes minutes to say so.
+  // The scale is chosen for the model in the scene: 100% for anything a router
+  // can mill from solid, and for something bigger (a tree, a room) the scale
+  // that makes a part of it. Chosen again when a different model arrives, so
+  // the 5% a tree was given is not what the next preset is planned at; a scale
+  // set by hand stays while the model is edited.
+  const fittedFor = useRef<number | null>(null);
   useEffect(() => {
     if (!isOpen) return;
     const natural = measurePart(scene, '+z', 100);
     if (!natural) return;
     const largest = Math.max(natural.x, natural.y, natural.z);
-    setPlacement((p) =>
-      (largest * p.scalePercent) / 100 > MAX_SOLID_PART_MM
-        ? { ...p, scalePercent: fittingScalePercent(largest) }
-        : p
-    );
+    const was = fittedFor.current;
+    const sameModel = was !== null && largest < was * 2 && largest > was / 2;
+    if (sameModel) return;
+    fittedFor.current = largest;
+    setPlacement((p) => ({ ...p, scalePercent: fittingScalePercent(largest) }));
   }, [isOpen, scene]);
   const partHeight = part?.z ?? 10;
 

@@ -43,7 +43,7 @@ import { generateCastPattern, DEFAULT_CAST_OPTIONS, type CastMethod } from '../u
 import { runCastPrep } from '../utils/castPrepRunner';
 import { selectionSoups, splitOffThread, testAssemblyOffThread } from '../utils/printSplitClient';
 import { filamentSpec } from '../utils/filaments';
-import { generateSolidMachining, deriveSolidOptions } from '../utils/solidMachiningExporter';
+import { generateSolidMachining, deriveSolidOptions, fittingScalePercent, measurePart } from '../utils/solidMachiningExporter';
 import {
   DEFAULT_RELIEF_OPTIONS,
   deriveReliefFeeds,
@@ -359,7 +359,14 @@ function machiningOptionsFor(msg: Record<string, unknown>, scene: SceneGraph) {
   // connected machine, as the dialog does; DEFAULT_SOLID_OPTIONS alone is
   // a wood recipe whatever material is named.
   const motion = webSerialManager.getState().motion;
+  // At the scale asked for, or as the dialog opens it: 100%, unless the model
+  // is too big to mill from solid and a fraction of it makes a part.
+  const natural = measurePart(scene, '+z', 100);
+  const scalePercent = typeof msg.scalePercent === 'number' && msg.scalePercent > 0
+    ? msg.scalePercent
+    : fittingScalePercent(natural ? Math.max(natural.x, natural.y, natural.z) : 0);
   const options = deriveSolidOptions(scene, {
+    scalePercent,
     ...(typeof msg.sides === 'number' ? { sides: msg.sides } : {}),
     ...(typeof msg.stockThicknessMm === 'number' ? { stockThicknessMm: msg.stockThicknessMm } : {}),
     ...(typeof msg.material === 'string' ? { material: msg.material } : {}),
