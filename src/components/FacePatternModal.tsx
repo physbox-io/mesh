@@ -11,6 +11,8 @@ import {
   DEFAULT_TEXTURE_BORDER_M,
   DEFAULT_TEXTURE_CELL_M,
   type SurfaceTexture,
+  type TextureProjection,
+  type TextureRegionReport,
   type TexturedSurface,
 } from '../utils/surfaceTexture';
 import { geomHalfLen } from '../utils/geomSurface';
@@ -46,6 +48,27 @@ function newTexture(target: FacePatternTarget): SurfaceTexture {
     seedAt: target.seedAt,
     seedNormal: target.seedNormal,
   };
+}
+
+const LAYOUT_NAMES = { planar: 'Projected flat', cylindrical: 'Unrolled round the cylinder', unwrap: 'Unwrapped' } as const;
+
+/** One line or two on how the face was laid out, when that is worth knowing. */
+function layoutNotes(region: TextureRegionReport, stopAt: number): string[] {
+  const notes: string[] = [];
+  const how = region.projection ? LAYOUT_NAMES[region.projection] : null;
+  if (region.wrap && !region.wrap.blended && Math.abs(region.wrap.scaled - 1) >= 0.005) {
+    const pct = Math.round(Math.abs(region.wrap.scaled - 1) * 1000) / 10;
+    notes.push(`${how}: the pattern is ${pct} % ${region.wrap.scaled > 1 ? 'larger' : 'smaller'} so it meets itself all the way round.`);
+  } else if (region.wrap?.blended) {
+    notes.push(`${how}: the pattern does not repeat, so it is blended where it meets itself.`);
+  } else if (region.projection === 'cylindrical' && stopAt < 180) {
+    notes.push(`${how}. Set Stop at to 180 to take it all the way round.`);
+  } else if (region.seam) {
+    notes.push(`${how}: it had to be cut open to lie flat, and the cut, on the far side, is left plain.`);
+  } else if (region.projection && region.projection !== 'planar') {
+    notes.push(`${how}.`);
+  }
+  return notes;
 }
 
 const targetKey = (t: FacePatternTarget | null) =>
@@ -133,6 +156,7 @@ export const FacePatternModal: React.FC = () => {
   const region = report?.regions[index];
   const pending = !region || synced !== key;
   const warnings = (report?.warnings ?? []).filter((w) => w.startsWith(`Pattern ${index + 1}:`) || !w.startsWith('Pattern '));
+  const notes = pending || !region.applied ? [] : layoutNotes(region, draft.maxTiltDeg ?? DEFAULT_MAX_TILT_DEG);
 
   // Done writes what is in the fields now rather than what last settled, so a
   // change made in the last fifth of a second is not lost.
@@ -228,13 +252,25 @@ export const FacePatternModal: React.FC = () => {
               className={inputClass}
             />
           </Field>
-          <Field label="Stop at (°)" hint="On a curved surface, how far round from where you clicked the pattern may go.">
+          <Field label="Stop at (°)" hint="On a curved surface, how far round from where you clicked the pattern may go. 180 goes all the way round.">
             <NumberInput
-              min={1} max={179} step={5} fallbackOnBlur={DEFAULT_MAX_TILT_DEG}
+              min={1} max={180} step={5} fallbackOnBlur={DEFAULT_MAX_TILT_DEG}
               value={draft.maxTiltDeg ?? DEFAULT_MAX_TILT_DEG}
               onChange={(v) => { if (v !== undefined) patch({ maxTiltDeg: v }); }}
               className={inputClass}
             />
+          </Field>
+          <Field label="Lay out" hint="How a curved face is flattened for the pattern. Auto picks: flat faces are projected, a cylinder is unrolled, anything else is unwrapped so the pattern's cells stay square.">
+            <select
+              value={draft.projection ?? 'auto'}
+              onChange={(e) => patch({ projection: e.target.value === 'auto' ? undefined : (e.target.value as TextureProjection) })}
+              className={`${inputClass} cursor-pointer`}
+            >
+              <option value="auto">Auto</option>
+              <option value="planar">Flat</option>
+              <option value="cylindrical">Wrap round</option>
+              <option value="unwrap">Unwrap</option>
+            </select>
           </Field>
         </div>
 
@@ -252,6 +288,10 @@ export const FacePatternModal: React.FC = () => {
             </div>
           </div>
         </div>
+
+        {notes.map((n) => (
+          <p key={n} className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">{n}</p>
+        ))}
 
         {(region && !region.applied ? [region.reason ?? 'It could not be put on that face.'] : warnings).map((w) => (
           <div key={w} className="flex items-start gap-2 p-2 rounded-lg bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900/60">

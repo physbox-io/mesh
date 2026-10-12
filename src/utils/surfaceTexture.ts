@@ -21,13 +21,18 @@
 // Pure: a mesh and a list of textures in, a mesh out. No store, no three.
 // ---------------------------------------------------------------------------
 
-import { MAX_PATTERN_CELLS, patternById, type PatternOptions } from './surfacePatterns';
+import { MAX_PATTERN_CELLS, patternById, type PatternOptions, type PatternSpec } from './surfacePatterns';
 import { EDGE_CREASE_DEG } from './featureEdges';
 import { planeBasis, type Vec3 } from './measureSnap';
+import { cutToDisc, cylinderAngle, cylinderReference, fitCylinder, lscm, triangleStretch } from './surfaceUv';
 import type { PaintLayer } from './vertexPaint';
 
-/** How a region's surface is mapped onto the flat pattern. */
-export type TextureProjection = 'auto' | 'planar';
+/**
+ * How a region's surface is mapped onto the flat pattern: projected straight
+ * onto a plane, unrolled round a cylinder's axis, or unwrapped by a conformal
+ * map (utils/surfaceUv.ts). 'auto' picks by the shape of the region.
+ */
+export type TextureProjection = 'auto' | 'planar' | 'cylindrical' | 'unwrap';
 
 /**
  * One pattern on one region of a geom: the authoring intent, saved with the
@@ -81,6 +86,12 @@ export const DEFAULT_MAX_TILT_DEG = 75;
 export const MAX_TEXTURE_TRIANGLES = 400_000;
 /** Beyond this a planar projection is stretched by more than about 10 %. */
 const PLANAR_TILT_DEG = 25;
+/** A region counts as a cylinder's side when no facet leans further along the axis than this. */
+const CYLINDER_LEAN_DEG = 5;
+/** ...and its points sit this close to the fitted circle, as a fraction of the radius. */
+const CYLINDER_ERROR = 0.03;
+/** Stretch the modal warns about. */
+export const STRETCH_WARNING = 0.15;
 
 /** What happened to one texture. */
 export interface TextureRegionReport {
@@ -103,7 +114,26 @@ export interface TextureRegionReport {
   normal: Vec3;
   /** Every facet within half a degree of the mean normal. */
   flat: boolean;
-  /** The relief as laid, for drawing it in 2D (a laser's engrave layer). */
+  /** The projection used, once 'auto' has picked one. */
+  projection?: Exclude<TextureProjection, 'auto'>;
+  /**
+   * How much the flat map distorts the surface, over all but the worst 5 % of
+   * it: 0.41 is a planar projection of a 45° wall. See triangleStretch.
+   */
+  stretch?: number;
+  /**
+   * The region goes all the way round a cylinder, so the pattern has to meet
+   * itself. `scaled` is the factor the pattern was resized by so a whole number
+   * of its repeats go round; a pattern that does not repeat is blended across
+   * the join instead.
+   */
+  wrap?: { scaled: number; blended: boolean };
+  /** A tube, or a face with a hole, had to be cut open to be laid flat; the cut is left plain. */
+  seam?: boolean;
+  /**
+   * The relief as laid, for drawing it in 2D (a laser's engrave layer). Only
+   * for a planar projection: a curved region is never one flat panel.
+   */
   field?: ReliefField;
 }
 
@@ -511,6 +541,287 @@ const project = (frame: Frame, p: Vec3): [number, number] => {
   return [dot(d, frame.u), dot(d, frame.v)];
 };
 
+// --- laying the region flat --------------------------------------------------
+
+type Segment = [number, number, number, number];
+type Uv = [number, number];
+
+/**
+ * A region laid out flat: the pattern coordinates (metres) of every corner of
+ * every one of its faces, before refinement. A refined vertex takes its
+ * coordinates from the face it was cut from (see refine's `parents`), so the
+ * map is set once, on the coarse mesh, whatever shape it is.
+ *
+ * Corners are kept per face rather than per vertex because a vertex on a cut
+ * has a different place on each side of it.
+ */
+interface RegionUv {
+  kind: Exclude<TextureProjection, 'auto'>;
+  corners: Map<number, number[]>;
+  width: number;
+  height: number;
+  /** The circumference, when the region wraps all the way round a cylinder; 0 otherwise. */
+  wrapC: number;
+  /** Rotation still to apply when the pattern is looked up, degrees. A planar frame has it built in. */
+  twistDeg: number;
+  /** The region's edge, in pattern coordinates. */
+  segments: Segment[];
+  /** Both sides of a cut made to open the region out; empty unless there was one. */
+  seam: Segment[];
+  /** The planar frame, for the relief field the laser draws. */
+  frame?: Frame;
+  note?: string;
+}
+
+/** The pattern coordinates of each face's corners, from a function of the corner's vertex. */
+function cornersBy(mesh: Mesh, faces: number[], at: (f: number, v: number) => Uv): Map<number, number[]> {
+  const corners = new Map<number, number[]>();
+  for (const f of faces) {
+    const c: number[] = [];
+    for (let k = 0; k < 3; k++) c.push(...at(f, mesh.faces[3 * f + k]));
+    corners.set(f, c);
+  }
+  return corners;
+}
+
+/** Every edge of the region that the face across it is not part of, as drawn in pattern coordinates. */
+function edgeSegments(mesh: Mesh, edges: Map<number, number[]>, faces: number[], corners: Map<number, number[]>): Segment[] {
+  const out: Segment[] = [];
+  for (const f of faces) {
+    const c = corners.get(f)!;
+    for (let k = 0; k < 3; k++) {
+      const a = mesh.faces[3 * f + k], b = mesh.faces[3 * f + ((k + 1) % 3)];
+      const list = edges.get(edgeKey(a, b)) ?? [];
+      if (list.length === 2 && corners.has(list[0]) && corners.has(list[1])) continue;
+      const k2 = (k + 1) % 3;
+      out.push([c[2 * k], c[2 * k + 1], c[2 * k2], c[2 * k2 + 1]]);
+    }
+  }
+  return out;
+}
+
+function planarUv(surface: IndexedSurface, faces: number[], frame: Frame): RegionUv {
+  const { mesh, edges } = surface;
+  const corners = cornersBy(mesh, faces, (_f, v) => project(frame, vtx(mesh.pos, v)));
+  return {
+    kind: 'planar', corners, width: frame.width, height: frame.height, wrapC: 0, twistDeg: 0,
+    segments: edgeSegments(mesh, edges, faces, corners), seam: [], frame,
+  };
+}
+
+/** Wraps an angle into (-π, π]. */
+const wrapPi = (a: number) => a - 2 * Math.PI * Math.round(a / (2 * Math.PI));
+const mod = (x: number, m: number) => ((x % m) + m) % m;
+
+/**
+ * A cylinder's side unrolled: arc length round the axis and distance along it.
+ * A region that goes all the way round is cut opposite the point picked and
+ * keeps its full circumference; one that does not is cut in the widest gap,
+ * so the cut is off the part.
+ */
+function cylinderUv(surface: IndexedSurface, faces: number[], fit: NonNullable<ReturnType<typeof fitCylinder>>, seedAt: Vec3, twistDeg: number): RegionUv {
+  const { mesh, edges } = surface;
+  const ref = cylinderReference(fit);
+  const angle = (v: number) => cylinderAngle(fit, ref, vtx(mesh.pos, v));
+
+  // Which angles the region covers, in half-degree bins.
+  const BINS = 720;
+  const covered = new Uint8Array(BINS);
+  const spans = new Map<number, number[]>();
+  for (const f of faces) {
+    const t0 = angle(mesh.faces[3 * f]);
+    const t = [t0, t0 + wrapPi(angle(mesh.faces[3 * f + 1]) - t0), t0 + wrapPi(angle(mesh.faces[3 * f + 2]) - t0)];
+    spans.set(f, t);
+    const lo = Math.min(...t), hi = Math.max(...t);
+    const b0 = Math.ceil((lo / (2 * Math.PI)) * BINS - 0.5), b1 = Math.floor((hi / (2 * Math.PI)) * BINS - 0.5);
+    for (let b = b0; b <= b1; b++) covered[mod(b, BINS)] = 1;
+  }
+  const wrapped = covered.every((c) => c === 1);
+  let cut: number;
+  if (wrapped) {
+    cut = cylinderAngle(fit, ref, seedAt) + Math.PI;
+  } else {
+    // The middle of the longest run of bins nothing covers, going round.
+    let best = -1, bestLen = 0;
+    for (let start = 0; start < BINS; start++) {
+      if (covered[start] || !covered[mod(start - 1, BINS)]) continue;
+      let n = 0;
+      while (n < BINS && !covered[mod(start + n, BINS)]) n++;
+      if (n > bestLen) { bestLen = n; best = start; }
+    }
+    cut = (((best + bestLen / 2) / BINS) * 2 * Math.PI);
+  }
+
+  // Unrolled so that (u, v, outward normal) is right-handed: anticlockwise
+  // round the axis and up it from outside a rod, down it from inside a pipe.
+  const side = fit.outward ? 1 : -1;
+  const along = (v: number) => side * dot(sub(vtx(mesh.pos, v), fit.centre), fit.axis);
+  let v0 = Infinity, v1 = -Infinity, u0 = Infinity, u1 = -Infinity;
+  const raw = new Map<number, number[]>();
+  for (const f of faces) {
+    const t = spans.get(f)!;
+    const start = mod(t[0] - cut, 2 * Math.PI);
+    const c: number[] = [];
+    for (let k = 0; k < 3; k++) {
+      const u = fit.radius * (start + (t[k] - t[0]));
+      const v = along(mesh.faces[3 * f + k]);
+      c.push(u, v);
+      u0 = Math.min(u0, u); u1 = Math.max(u1, u);
+      v0 = Math.min(v0, v); v1 = Math.max(v1, v);
+    }
+    raw.set(f, c);
+  }
+  const wrapC = wrapped ? 2 * Math.PI * fit.radius : 0;
+  const shiftU = wrapped ? 0 : u0;
+  for (const c of raw.values()) for (let k = 0; k < 3; k++) { c[2 * k] -= shiftU; c[2 * k + 1] -= v0; }
+
+  let segments = edgeSegments(mesh, edges, faces, raw);
+  // Round a full wrap the edge is periodic: a corner either side of the
+  // join sees the edge across it.
+  if (wrapped) segments = segments.flatMap((s) => [s, [s[0] - wrapC, s[1], s[2] - wrapC, s[3]], [s[0] + wrapC, s[1], s[2] + wrapC, s[3]]] as Segment[]);
+  return {
+    kind: 'cylindrical', corners: raw, width: wrapped ? wrapC : u1 - u0, height: v1 - v0, wrapC, twistDeg,
+    segments, seam: [],
+  };
+}
+
+/**
+ * Anything else, unwrapped by a conformal map (utils/surfaceUv.ts), with the
+ * planar frame's projection as the starting guess and its two farthest points
+ * pinned where the projection put them, so the pattern turns the way Rotate
+ * says. Null for a closed surface, which has no edge to open it from.
+ */
+function unwrapUv(surface: IndexedSurface, faces: number[], frame: Frame, seedAt: Vec3): RegionUv | null {
+  const { mesh, edges } = surface;
+  const regionFaces: number[] = [];
+  for (const f of faces) for (let k = 0; k < 3; k++) regionFaces.push(mesh.faces[3 * f + k]);
+  const disc = cutToDisc(mesh.pos, regionFaces, seedAt);
+  if (!disc.ok) return null;
+
+  const n = disc.source.length;
+  const pos = new Float64Array(3 * n);
+  const guess = new Float64Array(2 * n);
+  disc.source.forEach((v, i) => {
+    const p = vtx(mesh.pos, v);
+    pos.set(p, 3 * i);
+    guess.set(project(frame, p), 2 * i);
+  });
+
+  // Two pins as far apart as the region goes.
+  const at = (i: number): Vec3 => [pos[3 * i], pos[3 * i + 1], pos[3 * i + 2]];
+  const farthest = (from: Vec3) => {
+    let best = 0, bestD = -1;
+    for (let i = 0; i < n; i++) {
+      const d = len(sub(at(i), from));
+      if (d > bestD) { bestD = d; best = i; }
+    }
+    return best;
+  };
+  const centre: Vec3 = [0, 0, 0];
+  for (let i = 0; i < n; i++) for (let a = 0; a < 3; a++) centre[a] += pos[3 * i + a] / n;
+  const p0 = farthest(centre);
+  const p1 = farthest(at(p0));
+  const uv = lscm(pos, disc.faces, [p0, p1], [[guess[2 * p0], guess[2 * p0 + 1]], [guess[2 * p1], guess[2 * p1 + 1]]], guess);
+
+  // Sized so the pattern covers the same area it would on a flat face.
+  let area3 = 0, areaUv = 0;
+  for (let f = 0; f < disc.faces.length; f += 3) {
+    const [i, j, k] = [disc.faces[f], disc.faces[f + 1], disc.faces[f + 2]];
+    area3 += len(cross(sub(at(j), at(i)), sub(at(k), at(i)))) / 2;
+    areaUv += ((uv[2 * j] - uv[2 * i]) * (uv[2 * k + 1] - uv[2 * i + 1]) - (uv[2 * k] - uv[2 * i]) * (uv[2 * j + 1] - uv[2 * i + 1])) / 2;
+  }
+  const k = areaUv > 0 ? Math.sqrt(area3 / areaUv) : 1;
+  let u0 = Infinity, u1 = -Infinity, v0 = Infinity, v1 = -Infinity;
+  for (let i = 0; i < n; i++) {
+    uv[2 * i] *= k; uv[2 * i + 1] *= k;
+    u0 = Math.min(u0, uv[2 * i]); u1 = Math.max(u1, uv[2 * i]);
+    v0 = Math.min(v0, uv[2 * i + 1]); v1 = Math.max(v1, uv[2 * i + 1]);
+  }
+
+  const corners = new Map<number, number[]>();
+  faces.forEach((f, i) => {
+    const c: number[] = [];
+    for (let k2 = 0; k2 < 3; k2++) {
+      const d = disc.faces[3 * i + k2];
+      c.push(uv[2 * d] - u0, uv[2 * d + 1] - v0);
+    }
+    corners.set(f, c);
+  });
+
+  // The cut, from both sides: the faces either side of a cut edge place its
+  // ends in different spots.
+  const seam: Segment[] = [];
+  if (disc.seam.length) {
+    const cutKeys = new Set(disc.seam.map(([a, b]) => edgeKey(a, b)));
+    for (const f of faces) {
+      const c = corners.get(f)!;
+      for (let k2 = 0; k2 < 3; k2++) {
+        const a = mesh.faces[3 * f + k2], b = mesh.faces[3 * f + ((k2 + 1) % 3)];
+        if (!cutKeys.has(edgeKey(a, b))) continue;
+        const k3 = (k2 + 1) % 3;
+        seam.push([c[2 * k2], c[2 * k2 + 1], c[2 * k3], c[2 * k3 + 1]]);
+      }
+    }
+  }
+  return {
+    kind: 'unwrap', corners, width: u1 - u0, height: v1 - v0, wrapC: 0, twistDeg: 0,
+    segments: edgeSegments(mesh, edges, faces, corners), seam,
+  };
+}
+
+/**
+ * The region laid flat by the projection asked for -- or for 'auto', by its
+ * shape: planar while every facet is within PLANAR_TILT_DEG of the mean,
+ * unrolled when it is a cylinder's side, unwrapped otherwise.
+ */
+function regionUv(surface: IndexedSurface, faces: number[], normal: Vec3, minCos: number, texture: SurfaceTexture): RegionUv {
+  const { mesh, normals, areas } = surface;
+  const want = texture.projection ?? 'auto';
+  const twist = texture.twistDeg ?? 0;
+  const verts = new Set<number>();
+  for (const f of faces) for (let k = 0; k < 3; k++) verts.add(mesh.faces[3 * f + k]);
+  const points = [...verts].map((i) => vtx(mesh.pos, i));
+  const frame = planarFrame(points, normal, twist);
+
+  if (want === 'planar' || (want === 'auto' && minCos >= Math.cos((PLANAR_TILT_DEG * Math.PI) / 180))) {
+    return planarUv(surface, faces, frame);
+  }
+  if (want === 'auto' || want === 'cylindrical') {
+    const centroids = faces.map((f): Vec3 => {
+      const a = vtx(mesh.pos, mesh.faces[3 * f]), b = vtx(mesh.pos, mesh.faces[3 * f + 1]), c = vtx(mesh.pos, mesh.faces[3 * f + 2]);
+      return [(a[0] + b[0] + c[0]) / 3, (a[1] + b[1] + c[1]) / 3, (a[2] + b[2] + c[2]) / 3];
+    });
+    const fit = fitCylinder(points, centroids, faces.map((f) => normals[f]), faces.map((f) => areas[f]));
+    const isCylinder = !!fit && fit.leanDeg <= CYLINDER_LEAN_DEG && fit.error <= CYLINDER_ERROR;
+    if (fit && (isCylinder || want === 'cylindrical')) return cylinderUv(surface, faces, fit, texture.seedAt as Vec3, twist);
+  }
+  const unwrapped = unwrapUv(surface, faces, frame, texture.seedAt as Vec3);
+  if (unwrapped) return unwrapped;
+  return { ...planarUv(surface, faces, frame), note: 'a closed surface has no edge to unwrap it from, so it is projected flat.' };
+}
+
+/** The flat map's stretch over the region, ignoring its worst 5 % by area. */
+function regionStretch(mesh: Mesh, faces: number[], uv: RegionUv, areas: number[]): number {
+  const rows: [number, number][] = [];
+  let total = 0;
+  for (const f of faces) {
+    const c = uv.corners.get(f)!;
+    const s = triangleStretch(
+      vtx(mesh.pos, mesh.faces[3 * f]), vtx(mesh.pos, mesh.faces[3 * f + 1]), vtx(mesh.pos, mesh.faces[3 * f + 2]),
+      [c[0], c[1]], [c[2], c[3]], [c[4], c[5]],
+    );
+    rows.push([s, areas[f]]);
+    total += areas[f];
+  }
+  rows.sort((a, b) => a[0] - b[0]);
+  let acc = 0;
+  for (const [s, a] of rows) {
+    acc += a;
+    if (acc >= total * 0.95) return s;
+  }
+  return rows.length ? rows[rows.length - 1][0] : 0;
+}
+
 // --- grids over the region ---------------------------------------------------
 
 interface Grid {
@@ -615,6 +926,144 @@ function reliefField(
   return { origin: frame.origin, u: frame.u, v: frame.v, cols, rows, step, data, emboss, twoLevel };
 }
 
+// --- looking the pattern up ----------------------------------------------------
+
+/** The pattern's heights over a w x h rectangle of pattern coordinates. */
+function patternGrid(spec: PatternSpec, opts: PatternOptions, scale: number, width: number, height: number, cellM: number): Grid {
+  const shape = gridFor(width, height, cellM);
+  return {
+    ...shape,
+    data: spec.build(shape.cols, shape.rows, {
+      widthM: ((shape.cols - 1) * shape.step) / scale,
+      depthM: ((shape.rows - 1) * shape.step) / scale,
+    }, opts),
+  };
+}
+
+/**
+ * The pattern over a w x h rectangle, turned by `twistDeg` about its middle:
+ * the grid is built over the turned rectangle's bounding box.
+ */
+function rectLookup(spec: PatternSpec, opts: PatternOptions, scale: number, width: number, height: number, cellM: number, twistDeg: number) {
+  const t = (twistDeg * Math.PI) / 180;
+  if (t === 0) {
+    const grid = patternGrid(spec, opts, scale, width, height, cellM);
+    return { grid, heightAt: (u: number, v: number) => clamp01(sample(grid, u, v)) };
+  }
+  const c = Math.cos(t), s = Math.sin(t);
+  const w2 = Math.abs(width * c) + Math.abs(height * s), h2 = Math.abs(width * s) + Math.abs(height * c);
+  const grid = patternGrid(spec, opts, scale, w2, h2, cellM);
+  return {
+    grid,
+    heightAt: (u: number, v: number) => {
+      const du = u - width / 2, dv = v - height / 2;
+      return clamp01(sample(grid, c * du + s * dv + w2 / 2, -s * du + c * dv + h2 / 2));
+    },
+  };
+}
+
+/**
+ * The distance near `around` at which the pattern repeats itself along u, or
+ * null if it does not. Measured, because a pattern's repeat is not something
+ * a PatternSpec states: it depends on its options, its Direction and Rotate.
+ * Rows of samples are compared with themselves shifted by every lag from 3/4
+ * to 4/3 of `around`, and the lag nearest `around` that matches is kept.
+ */
+function findRepeat(heightAt: (u: number, v: number) => number, around: number, height: number, step: number): number | null {
+  const n = Math.floor((1.6 * around) / step);
+  const R = Math.max(1, Math.min(48, Math.round(height / step)));
+  const S = new Float64Array(R * n);
+  let mean = 0;
+  for (let r = 0; r < R; r++) {
+    const v = ((r + 0.5) / R) * height;
+    for (let c = 0; c < n; c++) {
+      const h = heightAt(c * step, v);
+      S[r * n + c] = h;
+      mean += h;
+    }
+  }
+  mean /= S.length || 1;
+  let variance = 0;
+  for (const h of S) variance += (h - mean) * (h - mean);
+  variance /= S.length || 1;
+  // The same all the way along: any length goes round.
+  if (variance < 1e-6) return around;
+
+  const window = Math.max(1, Math.floor((0.25 * around) / step));
+  const lo = Math.ceil((0.75 * around) / step);
+  const hi = Math.min(Math.floor((1.34 * around) / step), n - 1 - window);
+  if (hi <= lo) return null;
+  const D = new Float64Array(hi + 2).fill(Infinity);
+  for (let lag = lo; lag <= hi; lag++) {
+    let sum = 0;
+    for (let r = 0; r < R; r++) {
+      const row = r * n;
+      for (let c = 0; c < window; c++) {
+        const d = S[row + c] - S[row + c + lag];
+        sum += d * d;
+      }
+    }
+    D[lag] = sum / (R * window * 2 * variance);
+  }
+  const target = around / step;
+  let best = -1;
+  for (let lag = lo; lag <= hi; lag++) {
+    if (!(D[lag] < 0.02)) continue;
+    if (lag > lo && D[lag - 1] < D[lag]) continue;
+    if (lag < hi && D[lag + 1] < D[lag]) continue;
+    if (best < 0 || Math.abs(lag - target) < Math.abs(best - target)) best = lag;
+  }
+  if (best < 0) return null;
+  // Between samples, by the parabola through the minimum and its neighbours.
+  let shift = 0;
+  if (best > lo && best < hi) {
+    const a = D[best - 1], b = D[best], c = D[best + 1];
+    const den = a - 2 * b + c;
+    if (den > 0) shift = Math.max(-0.5, Math.min(0.5, (a - c) / (2 * den)));
+  }
+  return (best + shift) * step;
+}
+
+interface Lookup {
+  heightAt: (u: number, v: number) => number;
+  /** The grid in pattern coordinates, for the relief field; only when it is one. */
+  grid?: Grid;
+  wrap?: { scaled: number; blended: boolean };
+}
+
+/**
+ * The pattern's height at any point of the region's map. Round a full wrap it
+ * has to meet itself: a pattern that repeats is resized so a whole number of
+ * repeats go round, and one that does not is cross-faded with itself over a
+ * short band either side of the join.
+ */
+function patternLookup(spec: PatternSpec, opts: PatternOptions, scale: number, uv: RegionUv, cellM: number): Lookup {
+  if (!uv.wrapC) {
+    const r = rectLookup(spec, opts, scale, uv.width, uv.height, cellM, uv.twistDeg);
+    return { heightAt: r.heightAt, grid: uv.twistDeg === 0 ? r.grid : undefined };
+  }
+  const C = uv.wrapC;
+  const probe = rectLookup(spec, opts, scale, 1.6 * C, uv.height, cellM, uv.twistDeg);
+  const repeat = findRepeat(probe.heightAt, C, uv.height, probe.grid.step);
+  if (repeat) {
+    const scaled = C / repeat;
+    const r = rectLookup(spec, opts, scale * scaled, C, uv.height, cellM, uv.twistDeg);
+    return { heightAt: (u, v) => r.heightAt(mod(u, C), v), wrap: { scaled, blended: false } };
+  }
+  const band = Math.min(C / 4, 0.02);
+  const r = rectLookup(spec, opts, scale, C + band, uv.height, cellM, uv.twistDeg);
+  return {
+    heightAt: (u, v) => {
+      const x = mod(u, C);
+      if (x >= band) return r.heightAt(x, v);
+      const t = x / band;
+      const s = t * t * (3 - 2 * t);
+      return r.heightAt(x + C, v) * (1 - s) + r.heightAt(x, v) * s;
+    },
+    wrap: { scaled: 1, blended: true },
+  };
+}
+
 // --- refinement --------------------------------------------------------------
 
 /**
@@ -623,9 +1072,12 @@ function reliefField(
  * by both faces on it, so a face just outside the region is split along the
  * edge it shares and no crack opens; its other edges are left as they are.
  *
+ * `parents` says, for every face, which of the faces given it was cut from,
+ * and is kept up to date as `labels` is.
+ *
  * Returns false if it stopped at the triangle cap.
  */
-function refine(mesh: Mesh, labels: number[], cells: number[], maxTriangles: number): boolean {
+function refine(mesh: Mesh, labels: number[], parents: number[], cells: number[], maxTriangles: number): boolean {
   const len2 = (a: number, b: number) => {
     const p = mesh.pos;
     const dx = p[3 * a] - p[3 * b], dy = p[3 * a + 1] - p[3 * b + 1], dz = p[3 * a + 2] - p[3 * b + 2];
@@ -654,13 +1106,16 @@ function refine(mesh: Mesh, labels: number[], cells: number[], maxTriangles: num
     // face keeping the label of the one it came from.
     const out: number[] = [];
     const outLabels: number[] = [];
+    const outParents: number[] = [];
+    let parent = 0;
     const emit = (label: number, ...v: number[]) => {
       out.push(...v);
-      for (let i = 0; i < v.length / 3; i++) outLabels.push(label);
+      for (let i = 0; i < v.length / 3; i++) { outLabels.push(label); outParents.push(parent); }
     };
     for (let f = 0; f < faceCount; f++) {
       const a = mesh.faces[3 * f], b = mesh.faces[3 * f + 1], c = mesh.faces[3 * f + 2];
       const label = labels[f];
+      parent = parents[f];
       const ab = mid.get(edgeKey(a, b));
       const bc = mid.get(edgeKey(b, c));
       const ca = mid.get(edgeKey(c, a));
@@ -689,6 +1144,8 @@ function refine(mesh: Mesh, labels: number[], cells: number[], maxTriangles: num
     // Copied rather than spread: a spread of this many arguments overflows the stack.
     labels.length = outLabels.length;
     for (let i = 0; i < outLabels.length; i++) labels[i] = outLabels[i];
+    parents.length = outParents.length;
+    for (let i = 0; i < outParents.length; i++) parents[i] = outParents[i];
     if (out.length / 3 > maxTriangles) return false;
   }
   return true;
@@ -733,7 +1190,7 @@ export function applySurfaceTextures(
     texture: SurfaceTexture;
     faces: number[];
     normal: Vec3;
-    frame: Frame;
+    uv: RegionUv;
     cellM: number;
     depthM: number;
     report: TextureRegionReport;
@@ -767,16 +1224,14 @@ export function applySurfaceTextures(
     let minCos = 1;
     for (const f of grown) minCos = Math.min(minCos, dot(normals[f], normal));
     const flat = minCos >= Math.cos((0.5 * Math.PI) / 180);
-    const tiltDeg = (Math.acos(Math.min(1, minCos)) * 180) / Math.PI;
-    if (tiltDeg > PLANAR_TILT_DEG) {
-      const stretch = Math.round((1 / Math.max(0.05, minCos) - 1) * 100);
-      warnings.push(`Pattern ${index + 1}: the surface turns ${Math.round(tiltDeg)}° away from flat, so the pattern stretches by up to ${stretch} % there.`);
+    const uv = regionUv(surface, grown, normal, minCos, texture);
+    if (uv.note) warnings.push(`Pattern ${index + 1}: ${uv.note}`);
+    const stretch = regionStretch(mesh, grown, uv, areas);
+    if (stretch > STRETCH_WARNING) {
+      const pct = Number.isFinite(stretch) ? `${Math.round(stretch * 100)} %` : 'a great deal';
+      const fix = uv.kind === 'planar' && !uv.note ? ' Projection Auto lays it out evenly.' : '';
+      warnings.push(`Pattern ${index + 1}: the surface stretches the pattern by up to ${pct}.${fix}`);
     }
-
-    const verts = new Set<number>();
-    for (const f of grown) for (let k = 0; k < 3; k++) verts.add(mesh.faces[3 * f + k]);
-    const points = [...verts].map((i) => vtx(mesh.pos, i));
-    const frame = planarFrame(points, normal, texture.twistDeg ?? 0);
 
     // A deep engrave on a tight curve folds the surface through itself.
     let depthM = texture.depthM;
@@ -789,10 +1244,10 @@ export function applySurfaceTextures(
     for (const f of grown) claimed[f] = index;
     const cellM = Math.max(1e-5, texture.cellM ?? DEFAULT_TEXTURE_CELL_M);
     const report: TextureRegionReport = {
-      index, applied: true, areaM2: area, extentM: [frame.width, frame.height], triangles: 0, cellM, depthM,
-      normal, flat,
+      index, applied: true, areaM2: area, extentM: [uv.width, uv.height], triangles: 0, cellM, depthM,
+      normal, flat, projection: uv.kind, stretch, seam: uv.seam.length > 0 || undefined,
     };
-    jobs.push({ index, texture, faces: grown, normal, frame, cellM, depthM, report });
+    jobs.push({ index, texture, faces: grown, normal, uv, cellM, depthM, report });
   });
 
   // Coarsen to fit the cap before refining, rather than stopping half way:
@@ -810,7 +1265,9 @@ export function applySurfaceTextures(
   }
 
   const labels: number[] = Array.from(claimed).map((owner) => jobs.findIndex((j) => j.index === owner));
-  if (jobs.length && !refine(mesh, labels, jobs.map((j) => j.cellM), maxTriangles * 1.25)) {
+  const coarseFaces = mesh.faces.slice();
+  const parents: number[] = labels.map((_, f) => f);
+  if (jobs.length && !refine(mesh, labels, parents, jobs.map((j) => j.cellM), maxTriangles * 1.25)) {
     warnings.push('Refinement stopped at the triangle limit; the pattern is coarser than asked for.');
   }
 
@@ -856,40 +1313,67 @@ export function applySurfaceTextures(
   const members: number[][] = jobs.map(() => []);
   for (let v = 0; v < vertexCount; v++) if (owner[v] >= 0) members[owner[v]].push(v);
 
+  /** Where a vertex of a refined face sits in its coarse parent, as weights of the parent's corners. */
+  const weights = (v: number, parent: number): [number, number, number] => {
+    const a = vtx(original, coarseFaces[3 * parent]);
+    const v0 = sub(vtx(original, coarseFaces[3 * parent + 1]), a);
+    const v1 = sub(vtx(original, coarseFaces[3 * parent + 2]), a);
+    const v2 = sub(vtx(original, v), a);
+    const d00 = dot(v0, v0), d01 = dot(v0, v1), d11 = dot(v1, v1), d20 = dot(v2, v0), d21 = dot(v2, v1);
+    const den = d00 * d11 - d01 * d01;
+    if (!(Math.abs(den) > 0)) return [1, 0, 0];
+    const wb = (d11 * d20 - d01 * d21) / den, wc = (d00 * d21 - d01 * d20) / den;
+    return [1 - wb - wc, wb, wc];
+  };
+
   jobs.forEach((job, j) => {
     const spec = patternById(job.texture.pattern)!;
     const opts = { ...spec.defaults, ...(job.texture.options ?? {}) };
     const scale = job.texture.scale && job.texture.scale > 0 ? job.texture.scale : 1;
-    const shape = gridFor(job.frame.width, job.frame.height, job.cellM);
-    const heights: Grid = {
-      ...shape,
-      data: spec.build(shape.cols, shape.rows, {
-        widthM: ((shape.cols - 1) * shape.step) / scale,
-        depthM: ((shape.rows - 1) * shape.step) / scale,
-      }, opts),
-    };
+    const { uv } = job;
+    const look = patternLookup(spec, opts, scale, uv, job.cellM);
+    if (look.wrap) job.report.wrap = look.wrap;
 
-    // The region's edge, in the pattern's plane: every edge of one of its
-    // faces that the face on the other side does not share the label of.
-    const segments: [number, number, number, number][] = [];
-    for (const [key, list] of faceEdges) {
-      const inside = list.filter((f) => labels[f] === j).length;
-      if (inside === 0 || inside === list.length) continue;
-      const a = project(job.frame, vtx(mesh.pos, Math.floor(key / KEY)));
-      const b = project(job.frame, vtx(mesh.pos, key % KEY));
-      segments.push([a[0], a[1], b[0], b[1]]);
+    // Each vertex's place on the pattern, from the coarse face it was cut
+    // from. One on a cut has a place on each side; either will do, since the
+    // cut is left plain.
+    const vu = new Float64Array(vertexCount);
+    const vv = new Float64Array(vertexCount);
+    const placed = new Uint8Array(vertexCount);
+    for (let f = 0; f < labels.length; f++) {
+      if (labels[f] !== j) continue;
+      const c = uv.corners.get(parents[f])!;
+      for (let k = 0; k < 3; k++) {
+        const v = mesh.faces[3 * f + k];
+        if (placed[v]) continue;
+        placed[v] = 1;
+        const w = weights(v, parents[f]);
+        vu[v] = w[0] * c[0] + w[1] * c[2] + w[2] * c[4];
+        vv[v] = w[0] * c[1] + w[1] * c[3] + w[2] * c[5];
+      }
     }
+    // Round a full wrap, back into the one turn the grids cover.
+    const wrapU = (u: number) => (uv.wrapC ? mod(u, uv.wrapC) : u);
+
+    const shape = look.grid ?? gridFor(uv.width, uv.height, job.cellM);
     const border = Math.max(0, job.texture.borderM ?? DEFAULT_TEXTURE_BORDER_M);
     // The pattern comes in over one cell past the border, not as a step at it.
     const ramp = job.cellM;
-    const dist = boundaryDistance(shape, segments, border + ramp * 2);
+    const dist = boundaryDistance(shape, uv.segments, border + ramp * 2);
+    // A cut made to lay the region flat is left plain, half a border wide either side.
+    const seamDist = uv.seam.length ? boundaryDistance(shape, uv.seam, border + ramp * 2) : null;
+    const fadeAt = (u: number, v: number) => {
+      const x = wrapU(u);
+      let fade = clamp01((sample(dist, x, v) - border) / ramp);
+      if (seamDist) fade = Math.min(fade, clamp01((sample(seamDist, x, v) - border / 2) / ramp));
+      return fade;
+    };
 
     const place = (depth: number) => {
       for (const v of members[j]) {
         const p: Vec3 = [original[3 * v], original[3 * v + 1], original[3 * v + 2]];
-        const [x, y] = project(job.frame, p);
-        const h = clamp01(sample(heights, x, y));
-        const fade = clamp01((sample(dist, x, y) - border) / ramp);
+        const h = look.heightAt(vu[v], vv[v]);
+        const fade = fadeAt(vu[v], vv[v]);
         const offset = (depth < 0 ? depth * (1 - h) : depth * h) * fade;
         const n = norm([vNormal[3 * v], vNormal[3 * v + 1], vNormal[3 * v + 2]]);
         mesh.pos[3 * v] = p[0] + n[0] * offset;
@@ -916,12 +1400,13 @@ export function applySurfaceTextures(
     }
     job.report.depthM = depth;
     job.report.triangles = labels.filter((l) => l === j).length;
-    job.report.field = reliefField(job.frame, heights, dist, segments, border, ramp, depth > 0, !!spec.flatTopped);
+    if (uv.frame && look.grid) {
+      job.report.field = reliefField(uv.frame, look.grid, dist, uv.segments, border, ramp, depth > 0, !!spec.flatTopped);
+    }
 
     if (spec.palette) {
       for (const v of members[j]) {
-        const [x, y] = project(job.frame, vtx(original, v));
-        const [r, g, b] = spec.palette(clamp01(sample(heights, x, y)), opts);
+        const [r, g, b] = spec.palette(look.heightAt(vu[v], vv[v]), opts);
         paintIdx.push(v);
         paintRgba.push(Math.round(clamp01(r) * 255), Math.round(clamp01(g) * 255), Math.round(clamp01(b) * 255), 255);
       }
