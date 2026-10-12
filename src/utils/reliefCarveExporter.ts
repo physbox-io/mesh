@@ -2445,16 +2445,25 @@ export function machineSurface(
         }
       };
 
-      // Depth first through each pocket, the nearest unvisited one next.
-      const emitPocket = (node: RingLoop) => {
-        emitLoop(node);
-        const pending = [...node.children];
-        while (pending.length > 0) {
+      // Depth first through each pocket, the nearest unvisited one next. On an
+      // explicit stack: a big pocket nests a ring per stepover, and recursing
+      // once a ring overflowed the call stack on a part a few metres across.
+      const emitPocket = (root: RingLoop) => {
+        emitLoop(root);
+        const stack = [[...root.children]];
+        while (stack.length > 0) {
+          const pending = stack[stack.length - 1];
+          if (pending.length === 0) {
+            stack.pop();
+            continue;
+          }
           let best = 0;
           for (let i = 1; i < pending.length; i++) {
             if (loopDistance(pending[i].loop, atX, atY) < loopDistance(pending[best].loop, atX, atY)) best = i;
           }
-          emitPocket(pending.splice(best, 1)[0]);
+          const node = pending.splice(best, 1)[0];
+          emitLoop(node);
+          stack.push([...node.children]);
         }
       };
       const pockets = [...roots];

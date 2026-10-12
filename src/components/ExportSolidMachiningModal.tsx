@@ -1,11 +1,13 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { X, AlertCircle, Cpu, RefreshCw, Layers, Cuboid, Download } from 'lucide-react';
 import type { SceneGraph } from '../types/scene';
 import { recommendReliefTooling } from '../utils/reliefCarveExporter';
 import {
   measurePart,
   sideDepthMm,
+  fittingScalePercent,
   DEFAULT_SOLID_OPTIONS,
+  MAX_SOLID_PART_MM,
   type UpAxis,
 } from '../utils/solidMachiningExporter';
 import { useExportJob } from '../utils/exportWorkerClient';
@@ -76,6 +78,20 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
     () => (isOpen ? measurePart(scene, placement.up, placement.scalePercent) : null),
     [isOpen, scene, placement]
   );
+  // A model bigger than anything a router mills from solid (a tree, a room)
+  // opens at a scale that makes a part of it, rather than at a plan that
+  // cannot be made and takes minutes to say so.
+  useEffect(() => {
+    if (!isOpen) return;
+    const natural = measurePart(scene, '+z', 100);
+    if (!natural) return;
+    const largest = Math.max(natural.x, natural.y, natural.z);
+    setPlacement((p) =>
+      (largest * p.scalePercent) / 100 > MAX_SOLID_PART_MM
+        ? { ...p, scalePercent: fittingScalePercent(largest) }
+        : p
+    );
+  }, [isOpen, scene]);
   const partHeight = part?.z ?? 10;
 
   const {
@@ -720,7 +736,6 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
               onSimulate={handleSimulate}
               progress={simulation.progress}
               error={simulation.error}
-              added={simulation.added}
             />
 
             {machineState.connected ? (

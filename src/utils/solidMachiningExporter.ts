@@ -206,6 +206,28 @@ export interface SolidMachiningResult {
 /** Beyond this the heightmap costs more than the extra fidelity is worth. */
 const MAX_HEIGHTMAP_CELLS = 260_000;
 
+/**
+ * The largest part, any way, this will plan. A router's bed is about a metre
+ * and a half and no bit reaches a metre down; past this the plan only takes
+ * minutes, and a few metres overflowed the page.
+ */
+export const MAX_SOLID_PART_MM = 1000;
+
+/** What a part this big opens at in the dialog when 100% will not do. */
+const FIT_PART_MM = 200;
+
+/**
+ * A round scale that brings a part `naturalMm` across at 100% to about
+ * FIT_PART_MM: 100 when it is already no bigger than MAX_SOLID_PART_MM.
+ */
+export function fittingScalePercent(naturalMm: number): number {
+  if (!(naturalMm > MAX_SOLID_PART_MM)) return 100;
+  const exact = (100 * FIT_PART_MM) / naturalMm;
+  // Two significant figures: 5.4%, not 5.3717%.
+  const p = 10 ** (Math.floor(Math.log10(exact)) - 1);
+  return Math.max(0.01, +(Math.floor(exact / p) * p).toPrecision(2));
+}
+
 /** The two sides' channels overlap by this much at the midplane, so they meet. */
 const SIDE_OVERLAP_MM = 0.5;
 
@@ -749,6 +771,15 @@ export function generateSolidMachining(
   const partH = mxZ - mnZ;
   if (partW <= 1e-6 || partD <= 1e-6 || partH <= 1e-6) {
     return fail('The scene has no volume in this orientation, so there is no part to cut.');
+  }
+  const largest = Math.max(partW, partD, partH);
+  if (largest > MAX_SOLID_PART_MM) {
+    const fit = fittingScalePercent(largest / opts.scalePercent * 100);
+    return fail(
+      `At ${opts.scalePercent}% the part is ${f(partW)} x ${f(partD)} x ${f(partH)} mm, past the ` +
+        `${MAX_SOLID_PART_MM} mm a router can mill from solid. Scale it down: ${fit}% makes it ` +
+        `${f((largest * fit) / opts.scalePercent)} mm at its largest.`
+    );
   }
 
   // --- Stock, channel and frame ----------------------------------------------

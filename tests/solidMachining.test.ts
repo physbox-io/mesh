@@ -2,7 +2,8 @@
 // preset that exists to be made.
 import { describe, it, expect } from 'vitest';
 import { latticeBracketPreset } from '../src/presets/latticeBracket';
-import { generateSolidMachining, deriveSolidOptions, DEFAULT_SOLID_OPTIONS } from '../src/utils/solidMachiningExporter';
+import { generateSolidMachining, deriveSolidOptions, DEFAULT_SOLID_OPTIONS, fittingScalePercent, measurePart } from '../src/utils/solidMachiningExporter';
+import { oakTreePreset } from '../src/presets/oakTree';
 
 /** Fast enough tooling for a test: a big finisher means a coarse grid. */
 const quick = {
@@ -140,5 +141,29 @@ describe('options worked out for the material', () => {
     expect(a.success && o.success).toBe(true);
     const roughFeed = (g: string) => g.slice(g.indexOf('OP 1: roughing')).match(/ F(\d+)/)?.[1];
     expect(roughFeed(a.sides[0].gcode)).not.toBe(roughFeed(o.sides[0].gcode));
+  });
+});
+
+describe('a model far bigger than a part', () => {
+  // The oak tree at 100% is metres across. Planned as it was, it overflowed the
+  // page's stack after minutes; it is turned away at once, with a scale that fits.
+  it('says so, quickly, with a scale that makes a part of it', () => {
+    const t0 = performance.now();
+    const r = generateSolidMachining(oakTreePreset, quick);
+    expect(performance.now() - t0).toBeLessThan(2000);
+    expect(r.success).toBe(false);
+    const fit = Number(r.error?.match(/Scale it down: ([\d.]+)%/)?.[1]);
+    const natural = measurePart(oakTreePreset, '+z', 100)!;
+    expect(fit).toBe(fittingScalePercent(Math.max(natural.x, natural.y, natural.z)));
+    const at = measurePart(oakTreePreset, '+z', fit)!;
+    const largest = Math.max(at.x, at.y, at.z);
+    expect(largest).toBeGreaterThan(180);
+    expect(largest).toBeLessThanOrEqual(200);
+  });
+
+  it('leaves a part that fits at 100%', () => {
+    expect(fittingScalePercent(999)).toBe(100);
+    expect(fittingScalePercent(4000)).toBe(5);
+    expect(fittingScalePercent(3820)).toBe(5.2);
   });
 });
