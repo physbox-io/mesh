@@ -77,8 +77,10 @@ describe('Relief carve heightmap', () => {
     };
 
     const raw = sampleHeightmap(hm, -2, 0);
-    const ball = sampleHeightmap(dilateForTool(hm, 3, true), -2, 0);
-    const flat = sampleHeightmap(dilateForTool(hm, 3, false), -2, 0);
+    // The wall taken to stand on the plateau's first sample, so the ball's
+    // arithmetic below is exact; where else a wall can be read is the next test.
+    const ball = sampleHeightmap(dilateForTool(hm, 3, true, [], 'samples'), -2, 0);
+    const flat = sampleHeightmap(dilateForTool(hm, 3, false, [], 'samples'), -2, 0);
 
     // 2 mm short of the wall the raw surface is still floor level, which would
     // bury a 3 mm-radius cutter in the plateau.
@@ -87,6 +89,31 @@ describe('Relief carve heightmap', () => {
     expect(ball).toBeCloseTo(Math.sqrt(5) - 3, 2);
     // A flat mill has to clear the plateau entirely.
     expect(flat).toBeCloseTo(0, 3);
+  });
+
+  /*
+   * Where a wall stands between its two samples is not in the samples. Read
+   * as standing on the high one, a 100 mm cylinder milled from solid came out
+   * 0.85 mm under: the cutter stood in the cell the wall was really in.
+   */
+  it('reads a wall half way across its cell, or at its near edge to keep clear', () => {
+    const cols = 41, rows = 3;
+    const z = new Float32Array(cols * rows).fill(-10);
+    for (let r = 0; r < rows; r++) for (let c = 20; c < cols; c++) z[r * cols + c] = 0;
+    const hm = { minX: -20, minY: -1, maxX: 20, maxY: 1, cols, rows, stepX: 1, stepY: 1, z };
+    // A flat mill's centre on a sample, at x; its rim reaches x + r. The wall
+    // is somewhere between x = -1 (floor) and x = 0 (plateau).
+    const at = (x: number, r: number, walls: 'samples' | 'middle' | 'clear') =>
+      dilateForTool(hm, r, false, [], walls).z[cols + (x + 20)];
+    // Rim at -0.4: past half way, so on the plateau; 'samples' waits for 0.
+    expect(at(-4, 3.6, 'middle')).toBeCloseTo(0, 3);
+    expect(at(-4, 3.6, 'samples')).toBeCloseTo(-10, 3);
+    // Rim at -0.7: short of half way, but inside the wall's cell, which
+    // 'clear' keeps out of entirely.
+    expect(at(-4, 3.3, 'middle')).toBeCloseTo(-10, 3);
+    expect(at(-4, 3.3, 'clear')).toBeCloseTo(0, 3);
+    // Rim at -1.4: clear of the cell, so on the floor whatever the rule.
+    expect(at(-5, 3.6, 'clear')).toBeCloseTo(-10, 3);
   });
 });
 

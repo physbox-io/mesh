@@ -171,7 +171,11 @@ describe('roughing a solid part', () => {
     }
     left.sort((a, b) => a - b);
     expect(left[Math.floor(left.length * 0.5)]).toBeLessThan(opts.roughingAllowanceMm + 0.2);
-    expect(left[Math.floor(left.length * 0.9)]).toBeLessThan(opts.roughingAllowanceMm + 0.4);
+    // 0.54 mm at p90 while roughing read a wall as standing on its high
+    // sample, which cut past walls sampled across (0.85 mm into a 100 mm
+    // cylinder). Held clear of them it is 1.83: up to a cell of the steep
+    // flank near the equator left for the ball, 133 minutes against 121.
+    expect(left[Math.floor(left.length * 0.9)]).toBeLessThan(opts.roughingAllowanceMm + 1.6);
   });
 
   it('flies little between cuts', () => {
@@ -206,10 +210,13 @@ function finishingLifts(gcode: string): number {
  * by cutting across the surface rather than lifting out. Figures are old/new.
  */
 describe('finishing', () => {
-  // Was 141 lifts and a 0.097 rapid/cut ratio; 16 and 0.048.
+  // Was 141 lifts and a 0.097 rapid/cut ratio; 16 and 0.048. 56 once
+  // roughing kept clear of the walls it used to cut past: the ring it now
+  // leaves round the foot of the dome is more runs, 270 mm more in the air
+  // and 21.4 minutes against 21.3.
   it('a dome: lifts out of the cut a handful of times, not once a row', () => {
     const res = generateReliefCarveGcode(dome, options);
-    expect(finishingLifts(res.gcode)).toBeLessThan(40);
+    expect(finishingLifts(res.gcode)).toBeLessThan(60);
     const { rapid, cut } = travel(res.gcode.slice(res.gcode.indexOf('OP 2: finishing')));
     expect(rapid / cut).toBeLessThan(0.07);
   });
@@ -233,7 +240,8 @@ describe('finishing', () => {
   });
 
   // Solid machining finishes through the same code. Was 98 lifts a side with
-  // its default flat finisher; 5.
+  // its default flat finisher; 5. 23 at most once roughing kept clear of the
+  // walls it used to cut past, for the same reason as the dome.
   it('a solid part: the same, on every side', () => {
     const ball: SceneGraph = {
       nodes: [{
@@ -243,6 +251,6 @@ describe('finishing', () => {
       }],
     };
     const res = generateSolidMachining(ball, deriveSolidOptions(ball, { sides: 2, material: 'softwood' }));
-    for (const side of res.sides) expect(finishingLifts(side.gcode ?? '')).toBeLessThan(20);
+    for (const side of res.sides) expect(finishingLifts(side.gcode ?? '')).toBeLessThan(26);
   });
 });

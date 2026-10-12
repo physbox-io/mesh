@@ -1164,7 +1164,26 @@ export function dilateForTool(
    * shapes read the same.
    */
   tip: boolean | CutterTip,
-  body: ToolBodySection[] = []
+  body: ToolBodySection[] = [],
+  /**
+   * Where a wall stands inside the cell it was sampled across, which the
+   * samples alone cannot say.
+   *
+   * 'samples' trusts only the samples, so a cutter may stand up to a cell
+   * inside a wall: slots a cutter wide still go through, at the price of
+   * cutting into the side of a part by as much as a cell.
+   *
+   * 'middle' (the default) puts the wall where the samples' bilinear crosses
+   * half way between the cell's lowest and highest corner. Wrong by at most
+   * half a cell either way, against the full cell 'samples' can cut in by,
+   * and a slot a cutter wide still goes through.
+   *
+   * 'clear' assumes the wall is at the edge of its cell nearest the cutter,
+   * so the cutter never enters it. It leaves up to a cell on, which costs
+   * roughing nothing: roughing leaves an allowance anyway, and a roughing bit
+   * that cuts into a finished wall cannot be undone.
+   */
+  walls: 'samples' | 'middle' | 'clear' = 'middle'
 ): Heightmap {
   const shape: CutterShape =
     typeof tip === 'boolean' ? (tip ? 'ball_nose' : 'flat') : tip.shape;
@@ -1245,7 +1264,7 @@ export function dilateForTool(
    * gap for anything that lifts by a constant: the flat end and each body
    * section. A ball or a V lifts less towards its axis, so it can be held up
    * from inside a cell as well, and takes a finer lattice across its face.
-   * Cells with a wall in them are left to the samples (see `at`).
+   * Cells with a wall in them are read by the `walls` rule (see `at`).
    */
   const extra: { ox: number; oy: number; lift: number }[] = [];
   const pitch = Math.min(hm.stepX || Infinity, hm.stepY || Infinity);
@@ -1292,7 +1311,14 @@ export function dilateForTool(
     if (
       Math.abs(z10 - z00) > wall || Math.abs(z11 - z01) > wall ||
       Math.abs(z01 - z00) > wall || Math.abs(z11 - z10) > wall
-    ) return -Infinity;
+    ) {
+      const high = Math.max(z00, z10, z01, z11);
+      if (walls === 'clear') return high;
+      if (walls === 'samples') return -Infinity;
+      const low = Math.min(z00, z10, z01, z11);
+      const here = (z00 * (1 - tx) + z10 * tx) * (1 - ty) + (z01 * (1 - tx) + z11 * tx) * ty;
+      return here >= (low + high) / 2 ? high : -Infinity;
+    }
     return (z00 * (1 - tx) + z10 * tx) * (1 - ty) + (z01 * (1 - tx) + z11 * tx) * ty;
   };
   // In cells, so the inner loop is additions.
@@ -2131,7 +2157,15 @@ export function machineSurface(
   let materialLevelAt: (x: number, y: number) => number = () => 0;
 
   if (opts.roughingEnabled) {
-    const roughMap = dilateForTool(surface, roughRad, false, bodyFor(opts.roughingToolDiaMm, 0, 0));
+    // Walls held at the near edge of the cell they were sampled across
+    // ('clear'): the allowance only lifts the floor, so on a vertical wall
+    // roughing cuts to size, and with the wall anywhere in its cell it cut
+    // past it. A 100 mm cylinder milled from solid came out 0.85 mm under
+    // at its faces, and nothing after roughing can put material back. This
+    // leaves up to a cell on a wall for the finisher instead: 206 against 213
+    // minutes on that cylinder, 133 against 121 on a 60 mm sphere, whose
+    // flanks near the equator are walls at this sampling.
+    const roughMap = dilateForTool(surface, roughRad, false, bodyFor(opts.roughingToolDiaMm, 0, 0), 'clear');
     // Roughing is always a flat end mill.
     cutter = { radius: roughRad, profile: FLAT_PROFILE };
     const adaptive = opts.roughingStrategy === 'adaptive';
