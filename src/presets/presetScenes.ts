@@ -13,6 +13,7 @@ import { californiaReliefPreset, CALIFORNIA_RELIEF_SETTINGS } from './california
 import { megaBustStudioPreset } from './megaBustStudio';
 import { latticeBracketPreset } from './latticeBracket';
 import { oakTreePreset } from './oakTree';
+import { soapDishPreset } from './soapDish';
 import { shatterPreset } from './shatter';
 
 export const pendulumPreset: SceneGraph = {
@@ -3219,15 +3220,22 @@ export const PRESETS = {
     // A 50x40x60 mm part, and like the relief map it no longer needs a camera
     // of its own: the default view is framed for something this size.
   },
+  soap_dish: {
+    name: 'Soap Dish (Solid Milling)',
+    emoji: '🧼',
+    // An 80x60x20 mm part with work on both faces: the example for two-sided
+    // solid machining. OpenSCAD, compiled on load.
+    scene: soapDishPreset,
+  },
   oak_tree: {
     name: 'Oak Tree',
     emoji: '🌳',
     scene: oakTreePreset,
-    // Five metres of tree. A scene too big for the default window is pulled
+    // Three metres of tree. A scene too big for the default window is pulled
     // back far enough to fit it, but this one is framed by hand: standing back
     // from a tree and looking slightly up at it is not the same picture as
     // fitting its bounding sphere.
-    camera: { position: [9, -11, 4.5], target: [0, 0, 2.6] } satisfies PresetCamera
+    camera: { position: [4.95, -6.05, 2.5], target: [0, 0, 1.43] } satisfies PresetCamera
   },
   mega_bust_studio: {
     name: 'Mega Bust & Stress Studio',

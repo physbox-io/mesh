@@ -331,6 +331,19 @@ It is the shape nobody can cut whole. A 300 x 300 slab of 60 mm timber is not so
 
   birdhouse_scad: `# Birdhouse (OpenSCAD)\n\nA 3D birdhouse model generated from OpenSCAD code.\n\n## Laser Cutting\n- Evaluates OpenSCAD polyhedral mesh into 2D coplanar panel clusters\n- Extracts boundary cutouts and finger joint edges\n\n## Try it\n- Click **Export Laser Cut (SVG)** in the top toolbar to view unwrapped 2D sheet layout`,
 
+  soap_dish: `# Soap Dish (Solid Milling)
+
+An **80 x 60 x 20 mm** soap dish, made to be milled from a solid block. It has work on both faces: an oval **well** in the domed top, and a **pocket** underneath with two ribs across it, joined by a **drain**. Neither face can be reached from the other side, so it is cut in two setups.
+
+## Cutting it
+- Open **Solid Machining**. The defaults are two-sided: side A cuts the top, the block is turned over on its two **registration pins**, and side B cuts the underside. Tabs hold the part in its frame until you cut it free.
+- **Add Simulation** cuts both programs out of one block and puts the result in the scene. Switch it to **Overlay** to lay it over the model, where a missed area or an over-cut shows.
+
+## Why it is lopsided
+The ribs and the drain are **off centre** on purpose. A symmetric part comes out right even when side B is read back to front, so it cannot show the commonest two-sided mistake. This one can: a drain or rib in the wrong place is plain in the simulation.
+
+## Try it
+- It is **OpenSCAD**: change its variables (length, well depth, rib width, drain position) and the part and both programs follow.`,
   lattice_bracket: `# Wall Bracket (Lattice Modelling)
 
 A shelf bracket drawn on a grid: a **50 mm** arm off a **60 mm** wall plate, both **5 mm** thick, stiffened by a **4 mm** gusset. Every dimension is a whole millimetre: a lattice vertex is a triple of integers on the grid.
