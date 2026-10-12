@@ -40,9 +40,14 @@ import {
   type CastOptions,
   type CastResult,
 } from './castPatternExporter';
+import {
+  runSimulationJob,
+  type SimulationJobOptions,
+  type SimulationJobResult,
+} from './simulatedPart';
 
 /** Which export a job runs. Add a case here and in `runExportJob`. */
-export type ExportJobKind = 'relief' | 'solid' | 'cast' | 'laser' | 'contour';
+export type ExportJobKind = 'relief' | 'solid' | 'cast' | 'laser' | 'contour' | 'simulate';
 
 /** The options and result each job takes and returns. */
 export interface ExportJobMap {
@@ -51,16 +56,22 @@ export interface ExportJobMap {
   cast: { options: CastOptions; result: CastResult };
   laser: { options: LaserCutOptions; result: LaserCutResult };
   contour: { options: ContourSliceOptions; result: ContourSliceResult };
+  /** Add Simulation: cuts a program out of a block. Takes the program, not the scene. */
+  simulate: { options: SimulationJobOptions; result: SimulationJobResult };
 }
 
 export type ExportJobOptions<K extends ExportJobKind> = Partial<ExportJobMap[K]['options']>;
 export type ExportJobResult<K extends ExportJobKind> = ExportJobMap[K]['result'];
 
-/** Runs one export job, by name. The only place that knows every job's exporter. */
+/**
+ * Runs one export job, by name. The only place that knows every job's exporter.
+ * `onProgress`, from 0 to 1, is called by the jobs long enough to need it.
+ */
 export function runExportJob<K extends ExportJobKind>(
   kind: K,
   scene: SceneGraph,
-  options: ExportJobOptions<K>
+  options: ExportJobOptions<K>,
+  onProgress?: (fraction: number) => void
 ): ExportJobResult<K> {
   switch (kind) {
     case 'relief':
@@ -73,6 +84,8 @@ export function runExportJob<K extends ExportJobKind>(
       return exportLaserCutSvg(scene, options as ExportJobOptions<'laser'>) as ExportJobResult<K>;
     case 'contour':
       return exportContourSliceSvg(scene, options as ExportJobOptions<'contour'>) as ExportJobResult<K>;
+    case 'simulate':
+      return runSimulationJob(options as SimulationJobOptions, onProgress) as ExportJobResult<K>;
     default: {
       // Exhaustive: a new kind that forgets its case is a compile error here.
       const never: never = kind;

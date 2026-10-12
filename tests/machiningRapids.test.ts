@@ -3,11 +3,11 @@
 // A G0 is the machine's top speed with no regard for what is in the way, so a
 // rapid that takes material off is a cutter dragged sideways through the work
 // at several metres a minute — in aluminium, a snapped bit. See
-// helpers/cutStock for how the program is cut back out of a block.
+// src/utils/cutSimulation.ts for how the program is cut back out of a block.
 import { describe, it, expect } from 'vitest';
 import { latticeBracketPreset } from '../src/presets/latticeBracket';
 import { generateSolidMachining } from '../src/utils/solidMachiningExporter';
-import { cutStock, cutStockMap, type MoveCut } from './helpers/cutStock';
+import { cutStock, cutStockMap, type MoveCut } from '../src/utils/cutSimulation';
 
 /** Every G0 in a program that took material off. */
 function rapidsThroughStock(

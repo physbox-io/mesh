@@ -29,7 +29,14 @@ self.onmessage = (evt: MessageEvent<Incoming>) => {
   if (msg.type !== 'RUN') return;
   if (msg.scene) scene = msg.scene;
   try {
-    const result = runExportJob(msg.kind, scene, msg.options);
+    let last = -1;
+    const result = runExportJob(msg.kind, scene, msg.options, (fraction) => {
+      // Whole percent steps: a message per G-code line would flood the page.
+      const pct = Math.floor(fraction * 100);
+      if (pct === last) return;
+      last = pct;
+      self.postMessage({ type: 'PROGRESS', id: msg.id, fraction });
+    });
     self.postMessage({ type: 'DONE', id: msg.id, result });
   } catch (e) {
     self.postMessage({ type: 'FAILED', id: msg.id, message: (e as Error)?.message ?? String(e) });

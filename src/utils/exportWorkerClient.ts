@@ -23,7 +23,11 @@ import {
 } from './exportJobs';
 import type { SceneGraph } from '../types/scene';
 
-type Settle = { resolve: (v: unknown) => void; reject: (e: Error) => void };
+type Settle = {
+  resolve: (v: unknown) => void;
+  reject: (e: Error) => void;
+  onProgress?: (fraction: number) => void;
+};
 
 export class ExportWorkerClient {
   private worker: Worker | null = null;
@@ -40,6 +44,10 @@ export class ExportWorkerClient {
         const msg = evt.data;
         const settle = this.pending.get(msg.id);
         if (!settle) return;
+        if (msg.type === 'PROGRESS') {
+          settle.onProgress?.(msg.fraction);
+          return;
+        }
         this.pending.delete(msg.id);
         if (msg.type === 'FAILED') settle.reject(new Error(msg.message));
         else if (msg.type === 'DONE') settle.resolve(msg.result);
@@ -59,15 +67,16 @@ export class ExportWorkerClient {
   run<K extends ExportJobKind>(
     kind: K,
     scene: SceneGraph,
-    options: ExportJobOptions<K>
+    options: ExportJobOptions<K>,
+    onProgress?: (fraction: number) => void
   ): Promise<ExportJobResult<K>> {
-    if (!this.worker) return Promise.resolve(runExportJob(kind, scene, options));
+    if (!this.worker) return Promise.resolve(runExportJob(kind, scene, options, onProgress));
 
     const fresh = scene !== this.sceneSent;
     this.sceneSent = scene;
     const id = ++this.seq;
     return new Promise<ExportJobResult<K>>((resolve, reject) => {
-      this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
+      this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject, onProgress });
       this.worker!.postMessage({ type: 'RUN', id, kind, options, ...(fresh ? { scene } : {}) });
     });
   }

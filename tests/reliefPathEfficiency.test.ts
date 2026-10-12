@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { generateReliefCarveGcode, DEFAULT_RELIEF_OPTIONS } from '../src/utils/reliefCarveExporter';
 import { generateSolidMachining, deriveSolidOptions } from '../src/utils/solidMachiningExporter';
 import type { SceneGraph } from '../src/types/scene';
-import { cutStockMap } from './helpers/cutStock';
+import { cutStockMap } from '../src/utils/cutSimulation';
 
 /*
  * Whether the toolpath is a sensible use of machine time, not only a safe one.

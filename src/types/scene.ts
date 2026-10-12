@@ -650,6 +650,21 @@ export interface SceneNode {
    * way and lays it on the plate. The physics and the viewport ignore it.
    */
   printPose?: { up: [number, number, number]; spin: number };
+  /**
+   * Set on a body Add Simulation made: the part a machining program will leave,
+   * cut back out of the stock, not part of the design. The exporters leave it
+   * out of what they plan, so simulating a job does not change the next one.
+   */
+  simulation?: {
+    kind: 'relief' | 'machining' | 'laser' | 'contour';
+    /** When it was simulated, ISO 8601. */
+    createdAt: string;
+    /** Simulation grid, mm. */
+    cellMm: number;
+    /** How far the drawn surface may stray from the grid, mm. */
+    toleranceMm: number;
+    placement: 'beside' | 'overlay';
+  };
 }
 
 export interface SceneGraph {

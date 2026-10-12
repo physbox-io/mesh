@@ -548,6 +548,33 @@ Spots** button's findings went.
 
 ---
 
+### Add Simulation (the part as cut)
+
+**Add Simulation** in a machining dialog's footer cuts the program on screen back out of a block of
+the stock and adds what is left to the scene as a body, beside the model at its real size or laid
+over the model (the second half of the button switches between the two). It is offered whenever
+there is a program, with or without a machine. Relief Carve has it so far; the plan for the rest is
+`plans/add-simulation.md`.
+
+* **One simulator for the feature and the tests.** `utils/cutSimulation.ts` sweeps each cutter
+  (flat, ball or V, switched at `T<n> M6`) along every G0/G1 through a heightmap, exactly at cell
+  centres: each move is swept in closed form, not stepped. `cutStock`/`cutStockMap` are the tests'
+  shorthand for it. It is not `StockModel`, which overstates what is left on purpose to keep rapids
+  out of the stock.
+* **The mesh** (`utils/simulationMesh.ts`) is a top and a bottom surface with walls wherever
+  material stops, each surface merged by quadtree where it is planar, and closed where big blocks
+  meet small ones. Kept under 200 000 triangles by relaxing the merge tolerance, which the note
+  card reports.
+* **Putting it back on the model** needs the fit the exporter used, so the result carries a
+  `stockTransform`. Overlay undoes the scale and a relief's vertical exaggeration.
+* **The body is marked** `node.simulation`. `collectSceneTriangles` leaves it out, so simulating a
+  job never changes the next plan. It has no joint and does not collide (`contype`/`conaffinity` 0,
+  `collision: 'hull'` so it is never decomposed).
+* The cut runs on its own export worker (job kind `simulate`, with progress), started for the job
+  and stopped after it.
+
+---
+
 ### Adding a new preset
 
 Two places to update:

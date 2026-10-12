@@ -9,7 +9,7 @@ import {
   adaptiveBiteFraction,
 } from '../src/utils/reliefCarveExporter';
 import type { SceneGraph, SceneGeom } from '../src/types/scene';
-import { cutStock } from './helpers/cutStock';
+import { cutStock } from '../src/utils/cutSimulation';
 
 function bodyWith(geom: Partial<SceneGeom> & { type: SceneGeom['type']; size: number[] }, pos = [0, 0, 0]): SceneGraph {
   return {

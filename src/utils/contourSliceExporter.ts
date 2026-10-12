@@ -179,6 +179,11 @@ export function collectSceneTriangles(scene: SceneGraph): {
   let solid = 0;
 
   const traverse = (node: SceneNode, parentMatrix?: THREE.Matrix4) => {
+    // What a program will leave is not part of what it is planned from.
+    if (node.simulation) {
+      warnings.push(`${node.name}: a simulated cut, so it is left out.`);
+      return;
+    }
     const bodyMatrix = getNodeWorldTransform(node, parentMatrix);
 
     // A body whose holes have never been evaluated still lists its cutters as

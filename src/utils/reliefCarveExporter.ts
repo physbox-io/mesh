@@ -413,6 +413,26 @@ export interface ToolpathSegment {
   traverseZ?: number;
 }
 
+/**
+ * Where the model went on the stock:
+ *
+ *   work = scale * (rotation . (model - modelOrigin)) + workOrigin
+ *
+ * per axis, the model in the scene's Z-up millimetres and work in the
+ * program's. A relief scales X and Y alike and Z by its own factor and turns
+ * nothing; a solid part is turned onto its side A.
+ */
+export interface StockTransform {
+  /** Row-major 3x3. Absent is the identity. */
+  rotation?: number[];
+  modelOriginMm: [number, number, number];
+  workOriginMm: [number, number, number];
+  scale: [number, number, number];
+  /** The model's own extent, before any of the above. */
+  modelMinMm: [number, number, number];
+  modelMaxMm: [number, number, number];
+}
+
 export interface ReliefCarveResult {
   success: boolean;
   gcode: string;
@@ -446,6 +466,8 @@ export interface ReliefCarveResult {
   carveBounds: { minX: number; minY: number; maxX: number; maxY: number };
   /** The stock block itself. */
   bounds: { minX: number; minY: number; maxX: number; maxY: number; minZ: number; maxZ: number };
+  /** How the model was put on the stock, so a simulated cut can be put back on the model. */
+  stockTransform?: StockTransform;
   /** Decimated toolpath polylines for the 3D preview. */
   segments: ToolpathSegment[];
   warnings: string[];
@@ -3361,6 +3383,13 @@ export function generateReliefCarveGcode(
     verticalExaggeration: zScale / Math.max(1e-9, scaleFactor),
     carveBounds,
     bounds,
+    stockTransform: {
+      modelOriginMm: [cx, cy, mxZ],
+      workOriginMm: [stockCx, stockCy, 0],
+      scale: [scaleFactor, scaleFactor, zScale],
+      modelMinMm: [mnX, mnY, mnZ],
+      modelMaxMm: [mxX, mxY, mxZ],
+    },
     segments: cut.segments,
     warnings,
   };

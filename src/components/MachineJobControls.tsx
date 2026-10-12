@@ -1,5 +1,5 @@
-import React from 'react';
-import { AlertCircle, Play, Pause, Square, Hand, ChevronsDown, Gauge, RotateCcw, Cpu } from 'lucide-react';
+import React, { useState } from 'react';
+import { AlertCircle, Play, Pause, Square, Hand, ChevronsDown, Gauge, RotateCcw, Cpu, Box, Loader2, Check } from 'lucide-react';
 import { webSerialManager, type MachineState, type OverrideStep } from '../utils/webSerialManager';
 import { checkJobEnvelope, type JobExtent } from '../utils/workEnvelope';
 import { formatDuration } from '../utils/timeEstimate';
@@ -386,6 +386,61 @@ export const JobResumeBanner: React.FC<{
           <span>Resume from line {target.toLocaleString()}</span>
         </button>
       </div>
+    </div>
+  );
+};
+
+/**
+ * Add Simulation: puts the part this program will leave into the scene, cut
+ * back out of the stock, to look at and measure before any wood is spent.
+ *
+ * Offered whenever there is a program, machine or no machine, so it sits
+ * beside the start button rather than inside it. The second half of the button
+ * says where the part goes and switches it: beside the model at the size it
+ * will really be, or over the model, where an over-cut or a missed area shows.
+ */
+export const AddSimulationButton: React.FC<{
+  disabled: boolean;
+  onSimulate: (placement: 'beside' | 'overlay') => void;
+  /** 0 to 1 while one is running; null when idle. */
+  progress: number | null;
+  error?: string | null;
+  /** Name of the body the last one added, said until the next. */
+  added?: string | null;
+}> = ({ disabled, onSimulate, progress, error, added }) => {
+  const [placement, setPlacement] = useState<'beside' | 'overlay'>('beside');
+  const busy = progress !== null;
+  return (
+    <div className="flex items-center" title={error ?? undefined}>
+      <button
+        onClick={() => onSimulate(placement)}
+        disabled={disabled || busy}
+        title={
+          error
+            ? `The last simulation failed: ${error}`
+            : added
+              ? `Added "${added}" to the scene. Click to add another.`
+              : 'Cut this program out of a block of the stock and add the result to the scene'
+        }
+        className="flex items-center space-x-2 whitespace-nowrap pl-4 pr-3 py-2 bg-amber-100 dark:bg-amber-900/40 hover:bg-amber-200 dark:hover:bg-amber-900/70 disabled:opacity-40 disabled:cursor-not-allowed text-amber-900 dark:text-amber-100 font-bold text-xs rounded-l-lg border border-amber-300 dark:border-amber-700 cursor-pointer"
+      >
+        {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : added && !error ? <Check className="w-4 h-4" /> : <Box className="w-4 h-4" />}
+        <span>{busy
+            ? `Simulating ${Math.round((progress ?? 0) * 100)}%`
+            : error ? 'Simulation failed' : added ? 'Added to scene' : 'Add Simulation'}</span>
+      </button>
+      <button
+        onClick={() => setPlacement((p) => (p === 'beside' ? 'overlay' : 'beside'))}
+        disabled={busy}
+        title={
+          placement === 'beside'
+            ? 'Beside the model, at the size it will come off the machine. Click to lay it over the model instead.'
+            : 'Over the model, scaled back to it. Click to put it beside the model instead.'
+        }
+        className="whitespace-nowrap px-2.5 py-2 bg-amber-50 dark:bg-amber-950/40 hover:bg-amber-100 dark:hover:bg-amber-900/60 disabled:opacity-40 text-amber-800 dark:text-amber-200 text-[11px] font-semibold rounded-r-lg border border-l-0 border-amber-300 dark:border-amber-700 cursor-pointer"
+      >
+        {placement === 'beside' ? 'Beside' : 'Overlay'}
+      </button>
     </div>
   );
 };

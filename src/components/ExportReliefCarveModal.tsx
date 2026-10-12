@@ -11,7 +11,7 @@ import { webSerialManager } from '../utils/webSerialManager';
 import { formatDuration } from '../utils/timeEstimate';
 import { NumberInput } from '@physbox-io/ui';
 import { useStore } from '../store/useStore';
-import { JobOverrides, JobPauseBanner, JobPreflight, JobProgress, JobResumeBanner, JobTransport } from './MachineJobControls';
+import { AddSimulationButton, JobOverrides, JobPauseBanner, JobPreflight, JobProgress, JobResumeBanner, JobTransport } from './MachineJobControls';
 import { MachineFaultBanner } from './MachineFaultBanner';
 import { ToolpathView } from './ToolpathView';
 import {
@@ -22,6 +22,8 @@ import { toolingOnly, useBedProbe, useCarveTooling } from './carveTooling';
 import { MATERIALS } from '../utils/feedsAndSpeeds';
 import { useExportJob } from '../utils/exportWorkerClient';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
+import { useAddSimulation } from '../hooks/useAddSimulation';
+import { reliefSimulationTools } from '../utils/simulatedPart';
 
 interface Props {
   isOpen: boolean;
@@ -106,6 +108,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
   }
 
   const bed = useBedProbe(() => set('applyMeshLeveling', true));
+  const simulation = useAddSimulation();
   const { probedGrid } = bed;
 
   // Sampling the surface and dilating it by the cutter is a few hundred
@@ -189,6 +192,35 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
         plungeRate: settled.finishingPlungeRate,
         depthMm: settled.carveDepthMm,
       }),
+    });
+  };
+
+  /**
+   * Cuts the program shown out of a block of the stock and puts the result in
+   * the scene. Offered only once the plan on screen is the plan for the
+   * settings on screen, so the tools it simulates are the ones the program
+   * was written for.
+   */
+  const handleSimulate = (placement: 'beside' | 'overlay') => {
+    if (!result?.success || !result.stockTransform) return;
+    void simulation.add({
+      job: {
+        gcode: result.gcode,
+        widthMm: settled.stockWidthMm,
+        depthMm: settled.stockDepthMm,
+        thicknessMm: settled.stockThicknessMm,
+        ...reliefSimulationTools(settled),
+      },
+      transform: result.stockTransform,
+      kind: 'relief',
+      label: 'Relief carve',
+      placement,
+      details: [
+        settled.roughingEnabled ? `Roughing: ${roughTool}` : null,
+        `Finishing: ${finishTool}`,
+        `Estimated ${formatDuration(result.estimatedTimeSeconds)} on the machine`,
+        settled.applyMeshLeveling && probedGrid ? 'Bed levelling applied, so the surface carries the probed bed' : null,
+      ].filter((d): d is string => !!d),
     });
   };
 
@@ -647,6 +679,14 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
             >
               Close
             </button>
+
+            <AddSimulationButton
+              disabled={!result?.success || busy || pending}
+              onSimulate={handleSimulate}
+              progress={simulation.progress}
+              error={simulation.error}
+              added={simulation.added}
+            />
 
             {machineState.connected ? (
               <JobTransport
