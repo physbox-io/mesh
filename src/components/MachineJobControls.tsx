@@ -429,9 +429,10 @@ export const AddSimulationButton: React.FC<{
         className={`flex items-center space-x-2 whitespace-nowrap pl-4 py-2 bg-amber-100 dark:bg-amber-900/40 hover:bg-amber-200 dark:hover:bg-amber-900/70 disabled:opacity-40 disabled:cursor-not-allowed text-amber-900 dark:text-amber-100 font-bold text-xs border border-amber-300 dark:border-amber-700 cursor-pointer ${besideOnly ? 'rounded-lg pr-4' : 'rounded-l-lg pr-3'}`}
       >
         {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Box className="w-4 h-4" />}
-        <span>{busy
+        {/* The reason on the button itself: a bare 'failed' sent people hunting for a tooltip. */}
+        <span className="max-w-[18rem] truncate">{busy
             ? `Simulating ${Math.round((progress ?? 0) * 100)}%`
-            : error ? 'Simulation failed' : label}</span>
+            : error ? `Failed: ${error}` : label}</span>
       </button>
       {!besideOnly && <button
         onClick={() => setPlacement((p) => (p === 'beside' ? 'overlay' : 'beside'))}
