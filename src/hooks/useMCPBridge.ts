@@ -51,6 +51,11 @@ import {
   type ReliefCarveOptions,
   type ReliefCarveResult,
 } from '../utils/reliefCarveExporter';
+import { DEFAULT_LASER_OPTIONS, type LaserCutResult } from '../utils/laserCutExporter';
+import { DEFAULT_CONTOUR_OPTIONS, collectSceneTriangles, type ContourSliceResult } from '../utils/contourSliceExporter';
+import { reliefSimulationTools } from '../utils/simulatedPart';
+import { contourSheetParts, laserSheetParts, laserStockTransform } from '../utils/sheetSimulation';
+import { addSimulationToScene } from './useAddSimulation';
 import { lastReliefOptions } from '../utils/lastReliefOptions';
 import { ExportWorkerClient } from '../utils/exportWorkerClient';
 import { webSerialManager } from '../utils/webSerialManager';
@@ -292,6 +297,80 @@ function sculptMeshOf(node: SceneNode | null | undefined) {
  * a caller gets today.
  */
 type Msg<T> = Record<string, unknown> & T;
+
+/**
+ * The relief job an MCP command plans: the dialog's last plan if there is one,
+ * else the scene's and the bench's, with the command's own overrides on top.
+ * Shared by EXPORT_RELIEF and ADD_SIMULATION, so a simulation is of the
+ * program the export would hand over.
+ */
+function reliefOptionsFor(msg: Record<string, unknown>): { options: ReliefCarveOptions; fromDialog: boolean } {
+  const store = useStore.getState();
+  const motion = webSerialManager.getState().motion;
+  const dialog = lastReliefOptions();
+  const base: ReliefCarveOptions = dialog
+    ? { ...DEFAULT_RELIEF_OPTIONS, ...dialog }
+    : {
+        ...DEFAULT_RELIEF_OPTIONS,
+        ...store.carveSettings,
+        stockWidthMm: store.stock.widthMm,
+        stockDepthMm: store.stock.depthMm,
+        stockThicknessMm: store.stock.thicknessMm,
+        material: store.material,
+      };
+  const num = (v: unknown) => (typeof v === 'number' && v > 0 ? v : undefined);
+  const shape = msg.finishingToolType === 'flat' || msg.finishingToolType === 'ball_nose' || msg.finishingToolType === 'v_bit'
+    ? msg.finishingToolType
+    : undefined;
+  const asked: Partial<ReliefCarveOptions> = {
+    ...(num(msg.roughingToolDiaMm) ? { roughingToolDiaMm: num(msg.roughingToolDiaMm) } : {}),
+    ...(num(msg.finishingToolDiaMm) ? { finishingToolDiaMm: num(msg.finishingToolDiaMm) } : {}),
+    ...(shape ? { finishingToolType: shape } : {}),
+    ...(num(msg.carveDepthMm) ? { carveDepthMm: num(msg.carveDepthMm) } : {}),
+    ...(typeof msg.material === 'string' ? { material: msg.material as ReliefCarveOptions['material'] } : {}),
+    ...(msg.roughingStrategy === 'adaptive' || msg.roughingStrategy === 'raster' ? { roughingStrategy: msg.roughingStrategy } : {}),
+    ...(typeof msg.roughingEnabled === 'boolean' ? { roughingEnabled: msg.roughingEnabled } : {}),
+    ...(num(msg.stockWidthMm) ? { stockWidthMm: num(msg.stockWidthMm) } : {}),
+    ...(num(msg.stockDepthMm) ? { stockDepthMm: num(msg.stockDepthMm) } : {}),
+    ...(num(msg.stockThicknessMm) ? { stockThicknessMm: num(msg.stockThicknessMm) } : {}),
+  };
+  const merged: ReliefCarveOptions = { ...base, ...asked };
+  // The dialog's feeds stand, overrides and all, unless what they were
+  // worked out for has been changed here.
+  const rederive = !dialog || ['roughingToolDiaMm', 'finishingToolDiaMm', 'carveDepthMm', 'material']
+    .some((k) => k in asked);
+  const options: ReliefCarveOptions = {
+    ...merged,
+    ...(rederive
+      ? deriveReliefFeeds(merged, motion.spindle, Math.min(motion.maxRate.x, motion.maxRate.y))
+      : {}),
+    motionProfile: motion,
+    // The probed bed belongs to the dialog's session at the machine.
+    meshLevelGrid: null,
+    applyMeshLeveling: false,
+  };
+  return { options, fromDialog: !!dialog };
+}
+
+/** The solid-machining job an MCP command plans. Shared by EXPORT_MACHINING and ADD_SIMULATION. */
+function machiningOptionsFor(msg: Record<string, unknown>, scene: SceneGraph) {
+  const dia = typeof msg.toolDiaMm === 'number' && msg.toolDiaMm > 0 ? msg.toolDiaMm : 3;
+  // Feeds, speeds and stepdowns worked out for the material and the
+  // connected machine, as the dialog does; DEFAULT_SOLID_OPTIONS alone is
+  // a wood recipe whatever material is named.
+  const motion = webSerialManager.getState().motion;
+  const options = deriveSolidOptions(scene, {
+    ...(typeof msg.sides === 'number' ? { sides: msg.sides } : {}),
+    ...(typeof msg.stockThicknessMm === 'number' ? { stockThicknessMm: msg.stockThicknessMm } : {}),
+    ...(typeof msg.material === 'string' ? { material: msg.material } : {}),
+    ...(msg.finishingToolType === 'flat' || msg.finishingToolType === 'ball_nose' || msg.finishingToolType === 'v_bit'
+      ? { finishingToolType: msg.finishingToolType }
+      : {}),
+    roughingToolDiaMm: dia,
+    finishingToolDiaMm: dia,
+  } as Parameters<typeof deriveSolidOptions>[1], motion.spindle, Math.min(motion.maxRate.x, motion.maxRate.y));
+  return options;
+}
 
 /**
  * `at` as the list of points it stands for: one point, or a list of them.
@@ -2338,49 +2417,7 @@ export function useMCPBridge() {
         case 'EXPORT_RELIEF': {
           const scene = store.sceneGraph;
           if (!scene.nodes?.length) return { ok: false, error: 'The scene is empty — there is nothing to carve.' };
-          const motion = webSerialManager.getState().motion;
-          const fromDialog = lastReliefOptions();
-          const base: ReliefCarveOptions = fromDialog
-            ? { ...DEFAULT_RELIEF_OPTIONS, ...fromDialog }
-            : {
-                ...DEFAULT_RELIEF_OPTIONS,
-                ...store.carveSettings,
-                stockWidthMm: store.stock.widthMm,
-                stockDepthMm: store.stock.depthMm,
-                stockThicknessMm: store.stock.thicknessMm,
-                material: store.material,
-              };
-          const num = (v: unknown) => (typeof v === 'number' && v > 0 ? v : undefined);
-          const shape = msg.finishingToolType === 'flat' || msg.finishingToolType === 'ball_nose' || msg.finishingToolType === 'v_bit'
-            ? msg.finishingToolType
-            : undefined;
-          const asked: Partial<ReliefCarveOptions> = {
-            ...(num(msg.roughingToolDiaMm) ? { roughingToolDiaMm: num(msg.roughingToolDiaMm) } : {}),
-            ...(num(msg.finishingToolDiaMm) ? { finishingToolDiaMm: num(msg.finishingToolDiaMm) } : {}),
-            ...(shape ? { finishingToolType: shape } : {}),
-            ...(num(msg.carveDepthMm) ? { carveDepthMm: num(msg.carveDepthMm) } : {}),
-            ...(typeof msg.material === 'string' ? { material: msg.material as ReliefCarveOptions['material'] } : {}),
-            ...(msg.roughingStrategy === 'adaptive' || msg.roughingStrategy === 'raster' ? { roughingStrategy: msg.roughingStrategy } : {}),
-            ...(typeof msg.roughingEnabled === 'boolean' ? { roughingEnabled: msg.roughingEnabled } : {}),
-            ...(num(msg.stockWidthMm) ? { stockWidthMm: num(msg.stockWidthMm) } : {}),
-            ...(num(msg.stockDepthMm) ? { stockDepthMm: num(msg.stockDepthMm) } : {}),
-            ...(num(msg.stockThicknessMm) ? { stockThicknessMm: num(msg.stockThicknessMm) } : {}),
-          };
-          const merged: ReliefCarveOptions = { ...base, ...asked };
-          // The dialog's feeds stand, overrides and all, unless what they were
-          // worked out for has been changed here.
-          const rederive = !fromDialog || ['roughingToolDiaMm', 'finishingToolDiaMm', 'carveDepthMm', 'material']
-            .some((k) => k in asked);
-          const options: ReliefCarveOptions = {
-            ...merged,
-            ...(rederive
-              ? deriveReliefFeeds(merged, motion.spindle, Math.min(motion.maxRate.x, motion.maxRate.y))
-              : {}),
-            motionProfile: motion,
-            // The probed bed belongs to the dialog's session at the machine.
-            meshLevelGrid: null,
-            applyMeshLeveling: false,
-          };
+          const { options, fromDialog } = reliefOptionsFor(msg);
           const client = new ExportWorkerClient();
           let result: ReliefCarveResult;
           try {
@@ -2433,21 +2470,7 @@ export function useMCPBridge() {
         case 'EXPORT_MACHINING': {
           const scene = store.sceneGraph;
           if (!scene.nodes?.length) return { ok: false, error: 'The scene is empty — there is nothing to machine.' };
-          const dia = typeof msg.toolDiaMm === 'number' && msg.toolDiaMm > 0 ? msg.toolDiaMm : 3;
-          // Feeds, speeds and stepdowns worked out for the material and the
-          // connected machine, as the dialog does; DEFAULT_SOLID_OPTIONS alone is
-          // a wood recipe whatever material is named.
-          const motion = webSerialManager.getState().motion;
-          const options = deriveSolidOptions(scene, {
-            ...(typeof msg.sides === 'number' ? { sides: msg.sides } : {}),
-            ...(typeof msg.stockThicknessMm === 'number' ? { stockThicknessMm: msg.stockThicknessMm } : {}),
-            ...(typeof msg.material === 'string' ? { material: msg.material } : {}),
-            ...(msg.finishingToolType === 'flat' || msg.finishingToolType === 'ball_nose' || msg.finishingToolType === 'v_bit'
-              ? { finishingToolType: msg.finishingToolType }
-              : {}),
-            roughingToolDiaMm: dia,
-            finishingToolDiaMm: dia,
-          } as Parameters<typeof deriveSolidOptions>[1], motion.spindle, Math.min(motion.maxRate.x, motion.maxRate.y));
+          const options = machiningOptionsFor(msg, scene);
           const result = generateSolidMachining(scene, options);
           if (!result.success) return { ok: false, error: result.error || 'The machining program could not be generated.', warnings: result.warnings ?? [] };
           const encoder = new TextEncoder();
@@ -2469,6 +2492,155 @@ export function useMCPBridge() {
               msg.includeFiles !== false,
             ),
           };
+        }
+
+        case 'ADD_SIMULATION': {
+          // The part a program leaves, added to the scene: the same plan the
+          // matching export would hand over, cut back out of its stock.
+          const scene = store.sceneGraph;
+          if (!scene.nodes?.some((n) => !n.simulation)) {
+            return { ok: false, error: 'The scene has nothing to cut but earlier simulations.' };
+          }
+          const placement = msg.placement === 'overlay' ? 'overlay' : 'beside';
+          const num = (v: unknown) => (typeof v === 'number' && v > 0 ? v : undefined);
+          const runJob = async <T,>(go: (client: ExportWorkerClient) => Promise<T>) => {
+            const client = new ExportWorkerClient();
+            try { return await go(client); } finally { client.dispose(); }
+          };
+
+          if (msg.kind === 'relief') {
+            const { options, fromDialog } = reliefOptionsFor(msg);
+            const result: ReliefCarveResult = await runJob((c) => c.run('relief', scene, options));
+            if (!result.success || !result.stockTransform) {
+              return { ok: false, error: result.error || 'The relief carve could not be planned.', warnings: result.warnings ?? [] };
+            }
+            const added = await addSimulationToScene({
+              job: {
+                gcode: result.gcode,
+                widthMm: options.stockWidthMm,
+                depthMm: options.stockDepthMm,
+                thicknessMm: options.stockThicknessMm,
+                ...reliefSimulationTools(options),
+              },
+              transform: result.stockTransform,
+              kind: 'relief',
+              label: 'Relief carve',
+              placement,
+            });
+            const m = added.milled!;
+            return {
+              ok: true, id: added.id, name: added.name, kind: 'relief', placement,
+              optionsFrom: fromDialog ? 'the Relief Carve dialog' : 'the scene and bench defaults',
+              volumeMm3: Math.round(m.volumeMm3),
+              stockVolumeMm3: Math.round(m.stockVolumeMm3),
+              removedMm3: Math.round(m.stockVolumeMm3 - m.volumeMm3),
+              rapidMovesThatCut: m.rapidCuts,
+              deepestRapidCutMm: +m.deepestRapidMm.toFixed(3),
+              cellMm: +m.cellMm.toFixed(3),
+              meshToleranceMm: +m.toleranceMm.toFixed(3),
+              warnings: result.warnings ?? [],
+            };
+          }
+
+          if (msg.kind === 'machining') {
+            const options = machiningOptionsFor(msg, scene);
+            const result = generateSolidMachining(scene, options);
+            if (!result.success || !result.stockTransform) {
+              return { ok: false, error: result.error || 'The machining program could not be generated.', warnings: result.warnings ?? [] };
+            }
+            const added = await addSimulationToScene({
+              job: {
+                gcode: result.sides[0].gcode,
+                gcodeB: result.sides[1]?.gcode,
+                widthMm: result.stock.widthMm,
+                depthMm: result.stock.depthMm,
+                thicknessMm: result.stock.thicknessMm,
+                ...reliefSimulationTools(options),
+                measureRect: result.partBounds,
+              },
+              transform: result.stockTransform,
+              kind: 'machining',
+              label: 'Solid part',
+              placement,
+              modelVolumeMm3: result.partVolumeMm3,
+            });
+            const m = added.milled!;
+            const part = m.measuredVolumeMm3 ?? 0;
+            return {
+              ok: true, id: added.id, name: added.name, kind: 'machining', placement,
+              sides: result.sides.length,
+              volumeMm3: Math.round(m.volumeMm3),
+              // Over the part's footprint, so the frame round it is left out; tabs are not.
+              partVolumeMm3: Math.round(part),
+              modelVolumeMm3: Math.round(result.partVolumeMm3),
+              partVsModel: result.partVolumeMm3 > 0 ? +(part / result.partVolumeMm3).toFixed(4) : null,
+              rapidMovesThatCut: m.rapidCuts,
+              deepestRapidCutMm: +m.deepestRapidMm.toFixed(3),
+              cellMm: +m.cellMm.toFixed(3),
+              meshToleranceMm: +m.toleranceMm.toFixed(3),
+              warnings: result.warnings ?? [],
+            };
+          }
+
+          if (msg.kind === 'laser' || msg.kind === 'contour') {
+            const router = msg.machine === 'router';
+            const routerRadiusMm = router ? (num(msg.bitDiaMm) ?? 3.175) / 2 : 0;
+            const thicknessMm = num(msg.materialThicknessMm) ?? 3;
+            if (msg.kind === 'laser') {
+              const result: LaserCutResult = await runJob((c) =>
+                c.run('laser', scene, { ...DEFAULT_LASER_OPTIONS, materialThickness: thicknessMm / 1000 }));
+              if (!result.success || !result.panels?.length) {
+                return { ok: false, error: result.error || 'The panels could not be laid out.', warnings: result.warnings ?? [] };
+              }
+              const added = await addSimulationToScene({
+                sheets: { parts: laserSheetParts(result.panels, result.sheets), routerRadiusMm },
+                transform: laserStockTransform(result.panels, result.scaleFactor ?? 1),
+                kind: 'laser',
+                label: router ? 'Router cut' : 'Laser cut',
+                placement,
+                details: [`${result.panels.length} panels in ${thicknessMm} mm stock`],
+              });
+              return {
+                ok: true, id: added.id, name: added.name, kind: 'laser', placement,
+                panels: result.panels.length,
+                volumeMm3: Math.round(added.volumeMm3),
+                warnings: result.warnings ?? [],
+              };
+            }
+            const result: ContourSliceResult = await runJob((c) =>
+              c.run('contour', scene, { ...DEFAULT_CONTOUR_OPTIONS, materialThickness: thicknessMm / 1000 }));
+            if (!result.success || !result.layers?.length || !result.stockTransform) {
+              return { ok: false, error: result.error || 'The model could not be sliced.', warnings: result.warnings ?? [] };
+            }
+            const added = await addSimulationToScene({
+              sheets: { parts: contourSheetParts(result.layers, thicknessMm), routerRadiusMm },
+              transform: result.stockTransform,
+              kind: 'contour',
+              label: 'Contour stack',
+              placement,
+              details: [`${result.layers.length} layers of ${thicknessMm} mm stock`],
+            });
+            // The model, stretched the way the stack is.
+            const tris = collectSceneTriangles(scene).tris;
+            let six = 0;
+            for (let t = 0; t + 8 < tris.length; t += 9) {
+              six += tris[t] * (tris[t + 4] * tris[t + 8] - tris[t + 5] * tris[t + 7])
+                - tris[t + 1] * (tris[t + 3] * tris[t + 8] - tris[t + 5] * tris[t + 6])
+                + tris[t + 2] * (tris[t + 3] * tris[t + 7] - tris[t + 4] * tris[t + 6]);
+            }
+            const [sx, sy, sz] = result.stockTransform.scale;
+            const model = (six / 6) * 1e9 * sx * sy * sz;
+            return {
+              ok: true, id: added.id, name: added.name, kind: 'contour', placement,
+              layers: result.layers.length,
+              volumeMm3: Math.round(added.volumeMm3),
+              modelVolumeMm3: Math.round(model),
+              stackVsModel: model > 0 ? +(added.volumeMm3 / model).toFixed(4) : null,
+              warnings: result.warnings ?? [],
+            };
+          }
+
+          return { ok: false, error: "kind must be 'relief', 'machining', 'laser' or 'contour'." };
         }
 
         case 'GET_SCULPT': {
