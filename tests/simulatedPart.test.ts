@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { generateReliefCarveGcode, DEFAULT_RELIEF_OPTIONS } from '../src/utils/reliefCarveExporter';
+import { generateReliefCarveGcode, DEFAULT_RELIEF_OPTIONS, buildHeightmap } from '../src/utils/reliefCarveExporter';
+import { collectSceneTriangles } from '../src/utils/contourSliceExporter';
+import { simulateMilling } from '../src/utils/cutSimulation';
 import { reliefSimulationTools, runSimulationJob, simulatedBody } from '../src/utils/simulatedPart';
 import { analyzeMesh } from '../src/utils/meshIntegrity';
 import type { SceneGraph, SceneNode } from '../src/types/scene';
@@ -127,4 +129,49 @@ describe('Add Simulation', () => {
     expect(again.stockTransform).toEqual(relief.stockTransform);
     expect(again.warnings.some((w) => w.includes('Simulated: Relief carve'))).toBe(true);
   });
+
+  /*
+   * The finished relief against the model it was cut from, cell by cell, the
+   * check that found the finishing pass planned into the surface on a slope.
+   *
+   * Never below it by more than the exporter's own sampling of the surface
+   * accounts for: a sphere geom is facets, and a surface sampled every 0.6 mm
+   * passes under the ridges between them by up to 0.045 mm. Before the cutter
+   * was swept between samples it went 0.088 mm in with a ball nose and
+   * 0.258 mm with a flat, on the dome's steep flank. And within a scallop of it
+   * wherever a ball can reach.
+   */
+  for (const tool of ['ball_nose', 'flat'] as const) {
+    it(`finishes on the model with a ${tool} finisher, not in it`, () => {
+      const o = { ...options, finishingToolType: tool };
+      const res = tool === 'ball_nose' ? relief : generateReliefCarveGcode(dome, o);
+      const cut = simulateMilling(res.gcode, { widthMm: 120, depthMm: 120, ...reliefSimulationTools(o) });
+      const t = res.stockTransform!;
+      const src = collectSceneTriangles(dome).tris;
+      const tris = new Float64Array(src.length);
+      for (let i = 0; i < src.length; i += 3) {
+        for (let a = 0; a < 3; a++) tris[i + a] = (src[i + a] * 1000 - t.modelOriginMm[a]) * t.scale[a] + t.workOriginMm[a];
+      }
+      const c = cut.cell;
+      const model = buildHeightmap(
+        tris, { minX: c / 2, minY: c / 2, maxX: (cut.cols - 0.5) * c, maxY: (cut.rows - 0.5) * c }, cut.cols, cut.rows, -Infinity
+      );
+      let worstGouge = 0;
+      const excess: number[] = [];
+      for (let j = 0; j < cut.rows; j++) {
+        for (let i = 0; i < cut.cols; i++) {
+          const k = j * cut.cols + i;
+          const want = Math.max(-res.reliefDepthMm, model.z[k]);
+          worstGouge = Math.max(worstGouge, want - cut.heights[k]);
+          // Inside the cap, clear of the corner at its foot no ball can fill.
+          if (Math.hypot((i + 0.5) * c - 60, (j + 0.5) * c - 60) < 28) excess.push(cut.heights[k] - want);
+        }
+      }
+      expect(worstGouge).toBeLessThan(0.07);
+      if (tool === 'ball_nose') {
+        excess.sort((a, b) => a - b);
+        expect(excess[Math.floor(excess.length * 0.99)]).toBeLessThan(0.08);
+      }
+    });
+  }
 });

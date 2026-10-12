@@ -1229,6 +1229,77 @@ export function dilateForTool(
     }
   }
 
+  /*
+   * Points between the samples.
+   *
+   * The surface between samples is the bilinear the rest of the exporter reads
+   * it as, and the samples alone do not bound it. On a slope the highest point
+   * under a flat cutter is on its rim, uphill, and the nearest sample inside
+   * the rim can be most of a cell short of it: the tip was set that much too
+   * low, a slope times half a cell. On a 100 mm dome sampled every 0.6 mm that
+   * put the finishing pass 0.23 mm into the surface with a flat finisher, and
+   * 0.075 mm with a ball nose.
+   *
+   * Along any line parallel to an axis a bilinear is straight, so over a disc
+   * it peaks either at a sample inside or on the rim, and rim points close the
+   * gap for anything that lifts by a constant: the flat end and each body
+   * section. A ball or a V lifts less towards its axis, so it can be held up
+   * from inside a cell as well, and takes a finer lattice across its face.
+   * Cells with a wall in them are left to the samples (see `at`).
+   */
+  const extra: { ox: number; oy: number; lift: number }[] = [];
+  const pitch = Math.min(hm.stepX || Infinity, hm.stepY || Infinity);
+  if (Number.isFinite(pitch) && pitch > 0) {
+    const sub = pitch / 3;
+    const tipLift = (d: number) =>
+      shape === 'ball_nose'
+        ? Math.sqrt(Math.max(0, toolRadiusMm * toolRadiusMm - d * d)) - toolRadiusMm
+        : shape === 'v_bit' ? -d * coneSlope : 0;
+    const rim = (radius: number, l: number) => {
+      const n = Math.max(8, Math.ceil((2 * Math.PI * radius) / sub));
+      for (let k = 0; k < n; k++) {
+        const a = (2 * Math.PI * k) / n;
+        extra.push({ ox: radius * Math.cos(a), oy: radius * Math.sin(a), lift: l });
+      }
+    };
+    rim(toolRadiusMm, tipLift(toolRadiusMm));
+    for (const s of body) rim(s.radiusMm, -s.aboveTipMm);
+    if (shape !== 'flat') {
+      const nx = Math.ceil(toolRadiusMm / (hm.stepX / 3));
+      const ny = Math.ceil(toolRadiusMm / (hm.stepY / 3));
+      for (let b = -ny; b <= ny; b++) {
+        for (let a = -nx; a <= nx; a++) {
+          if (a % 3 === 0 && b % 3 === 0) continue; // a sample: in the kernel already
+          const ox = (a * hm.stepX) / 3, oy = (b * hm.stepY) / 3;
+          const d = Math.hypot(ox, oy);
+          if (d < toolRadiusMm) extra.push({ ox, oy, lift: tipLift(d) });
+        }
+      }
+    }
+  }
+  const at = (x: number, y: number) => {
+    const fx = Math.min(hm.cols - 1, Math.max(0, x)), fy = Math.min(hm.rows - 1, Math.max(0, y));
+    const c0 = Math.min(hm.cols - 2, Math.floor(fx)), r0 = Math.min(hm.rows - 2, Math.floor(fy));
+    if (c0 < 0 || r0 < 0) return hm.z[Math.round(fy) * hm.cols + Math.round(fx)];
+    const tx = fx - c0, ty = fy - r0;
+    const k = r0 * hm.cols + c0;
+    const z00 = hm.z[k], z10 = hm.z[k + 1], z01 = hm.z[k + hm.cols], z11 = hm.z[k + hm.cols + 1];
+    // A wall is sampled as a ramp a cell wide, but it stands somewhere in that
+    // cell, not across it: read as a ramp it lifted the cutter a cell clear of
+    // every wall, and slots stopped going through. Across a wall the samples
+    // are all there is to go on.
+    const wall = WALL_SLOPE * Math.min(hm.stepX || Infinity, hm.stepY || Infinity);
+    if (
+      Math.abs(z10 - z00) > wall || Math.abs(z11 - z01) > wall ||
+      Math.abs(z01 - z00) > wall || Math.abs(z11 - z10) > wall
+    ) return -Infinity;
+    return (z00 * (1 - tx) + z10 * tx) * (1 - ty) + (z01 * (1 - tx) + z11 * tx) * ty;
+  };
+  // In cells, so the inner loop is additions.
+  const extraX = Float64Array.from(extra, (e) => (hm.stepX ? e.ox / hm.stepX : 0));
+  const extraY = Float64Array.from(extra, (e) => (hm.stepY ? e.oy / hm.stepY : 0));
+  const extraLift = Float64Array.from(extra, (e) => e.lift);
+
   for (let row = 0; row < hm.rows; row++) {
     for (let col = 0; col < hm.cols; col++) {
       let best = -Infinity;
@@ -1242,6 +1313,10 @@ export function dilateForTool(
           const candidate = hm.z[r * hm.cols + c] + l;
           if (candidate > best) best = candidate;
         }
+      }
+      for (let e = 0; e < extraLift.length; e++) {
+        const candidate = at(col + extraX[e], row + extraY[e]) + extraLift[e];
+        if (candidate > best) best = candidate;
       }
 
       out[row * hm.cols + col] = best;
