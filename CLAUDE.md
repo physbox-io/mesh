@@ -79,8 +79,10 @@ through stock, no gouge, no dive. Twice a roughing pass passed all of them and w
 while leaving most of the material to the small finishing bit, and hopping across the stock between
 pockets. `tests/reliefPathEfficiency.test.ts` measures what roughing leaves, what share of the
 material it removes, and how far it flies between cuts, against figures taken on the old and new
-paths. Any change to roughing or finishing order in `reliefCarveExporter.ts` (which also drives
-solid machining through `machineSurface()`) has to keep it green. Don't loosen a bound without
+paths. Finishing had the same fault (runs cut in scan order, a lift and a flight between every
+two), and the same file now measures its lifts and air travel. Any change to roughing or
+finishing order in `reliefCarveExporter.ts` (which also drives solid machining through
+`machineSurface()`) has to keep it green. Don't loosen a bound without
 a measurement.
 
 **`rgba`'s alpha hides nothing from the physics.** Alpha below 1 draws a geom translucent
