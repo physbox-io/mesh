@@ -368,7 +368,7 @@ Lattice modelling is for parts like this: exact coordinates and arbitrary topolo
 A young open-grown English oak, **3.0 m** tall with a **3.8 m** crown. Not sculpted: grown, by a recursive branching rule, so the shape is a record of how it got there rather than a lump pushed into a tree silhouette.
 
 ## What makes it an oak
-- A short, stout bole that forks **low**, at 2 m of a 5.4 m tree, with a buttressed flare over the bottom 400 mm.
+- A short, stout bole that forks **low**, at 1 m of a 3 m tree, with a buttressed flare over the bottom 270 mm.
 - Five first-order limbs leaving **near horizontal** from a range of heights, reaching out before they turn up. That candelabra is the thing you recognise an oak by from across a field. All the limbs leaving one whorl would give you a palm.
 - Every fork keeps the wood: the children's cross-sections add up to the parent's, so a limb that splits in two drops to about **0.73** of its radius, not half. That one rule is most of why the taper looks right.
 - Branches **wander**. Each is drawn in four sub-segments with a little heading jitter, because a branch drawn as a straight tube reads as a broom handle.
