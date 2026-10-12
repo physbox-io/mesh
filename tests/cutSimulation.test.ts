@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { simulateMilling, type SimTool } from '../src/utils/cutSimulation';
-import { buildSimulationMesh } from '../src/utils/simulationMesh';
+import { buildSimulationMesh, halveGrid } from '../src/utils/simulationMesh';
 import { analyzeMesh } from '../src/utils/meshIntegrity';
 
 // The simulator against cuts whose answer is known on paper, and the mesh it
@@ -210,5 +210,39 @@ describe('simulationMesh', () => {
     const mesh = buildSimulationMesh({ cols, rows, cell, originX: 0, originY: 0, widthMm: 40, depthMm: 40, top, bottom });
     const { volume } = check(mesh);
     expect(Math.abs(volume - 8000) / 8000).toBeLessThan(0.03);
+  });
+
+  it('draws a part that is all walls on a coarser grid, rather than over the budget', () => {
+    // A field of 1 mm pins, cut from both sides: every pin is four walls, and
+    // no tolerance merges a wall away. The oak tree came out like this, at
+    // 600 000 triangles.
+    const cols = 400, rows = 400, cell = 0.1;
+    const top = new Float64Array(cols * rows), bottom = new Float64Array(cols * rows);
+    for (let j = 0; j < rows; j++) {
+      for (let i = 0; i < cols; i++) {
+        const pin = i % 20 < 10 && j % 20 < 10;
+        top[j * cols + i] = pin ? -2 : -6;
+        bottom[j * cols + i] = pin ? -10 : -6;
+      }
+    }
+    const grid = { cols, rows, cell, originX: 0, originY: 0, widthMm: 40, depthMm: 40, top, bottom };
+    const fine = buildSimulationMesh(grid, { maxTriangles: Infinity });
+    const mesh = buildSimulationMesh(grid, { maxTriangles: fine.faces.length / 3 / 3 });
+    expect(mesh.faces.length / 3).toBeLessThanOrEqual(fine.faces.length / 3 / 3);
+    expect(mesh.cellMm).toBeGreaterThan(cell);
+    check(mesh);
+    // Halving keeps the material's volume exactly: 400 pins of 1 x 1 x 8 mm.
+    // What the mesh then loses is the mesher's own half cell round every
+    // edge, which a 1 mm pin on a 0.4 mm grid feels and a part does not.
+    const gridVolume = (g: typeof grid) => {
+      let v = 0;
+      for (let k = 0; k < g.cols * g.rows; k++) v += Math.max(0, g.top[k] - (g.bottom as Float64Array)[k]) * g.cell ** 2;
+      return v;
+    };
+    let g = grid;
+    for (let n = 0; n < 3; n++) {
+      g = halveGrid(g) as typeof grid;
+      expect(gridVolume(g)).toBeCloseTo(3200, 6);
+    }
   });
 });

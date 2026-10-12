@@ -115,7 +115,9 @@ export async function addSimulationToScene(
       ...(milled.measuredVolumeMm3 !== undefined && req.modelVolumeMm3
         ? [`- The part itself: ${cm3(milled.measuredVolumeMm3)}, against ${cm3(req.modelVolumeMm3)} in the model (tabs included)`]
         : []),
-      `- Simulated on a ${milled.cellMm.toFixed(2)} mm grid, drawn to within ${milled.toleranceMm.toFixed(3)} mm`,
+      milled.drawnCellMm > milled.cellMm * 1.01
+        ? `- Simulated on a ${milled.cellMm.toFixed(2)} mm grid, drawn on a ${milled.drawnCellMm.toFixed(2)} mm one: too much detail to draw finer`
+        : `- Simulated on a ${milled.cellMm.toFixed(2)} mm grid, drawn to within ${milled.toleranceMm.toFixed(3)} mm`,
       ...(milled.rapidCuts > 0
         ? [`- **${milled.rapidCuts} rapid move${milled.rapidCuts === 1 ? '' : 's'} cut material**, up to ${milled.deepestRapidMm.toFixed(2)} mm deep`]
         : []),

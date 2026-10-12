@@ -44,6 +44,8 @@ export interface SimulationJobResult {
   faces: Uint32Array;
   cellMm: number;
   toleranceMm: number;
+  /** The grid the mesh is drawn from, mm: `cellMm`, or coarser when that was too much to draw. */
+  drawnCellMm: number;
   volumeMm3: number;
   /** The block it was cut from. */
   stockVolumeMm3: number;
@@ -127,6 +129,7 @@ export function runSimulationJob(o: SimulationJobOptions, onProgress?: (fraction
     faces: mesh.faces,
     cellMm: grid.cell,
     toleranceMm: mesh.toleranceMm,
+    drawnCellMm: mesh.cellMm,
     volumeMm3: mesh.volumeMm3,
     stockVolumeMm3: o.widthMm * o.depthMm * o.thicknessMm,
     rapidCuts: rapids.length,

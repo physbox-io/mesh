@@ -55,6 +55,8 @@ export interface SimulationMesh {
   faces: Uint32Array;
   /** The merge tolerance the mesh was built at, mm. */
   toleranceMm: number;
+  /** The grid it was drawn from, mm: the simulation's, or coarser when that was too much to draw. */
+  cellMm: number;
   /** Enclosed volume, mm³. */
   volumeMm3: number;
 }
@@ -64,15 +66,60 @@ const MIN_THICKNESS = 1e-3;
 
 export function buildSimulationMesh(grid: HeightGrid, opts: SimulationMeshOptions = {}): SimulationMesh {
   const maxTriangles = opts.maxTriangles ?? 200_000;
-  let tol = Math.max(1e-6, opts.toleranceMm ?? 0.005);
+  const firstTol = Math.max(1e-6, opts.toleranceMm ?? 0.005);
+  let tol = firstTol;
   for (;;) {
-    const mesh = buildAt(grid, tol, tol > 2 ? Infinity : maxTriangles);
-    if (mesh && (mesh.faces.length / 3 <= maxTriangles || tol > 2)) return mesh;
-    tol *= 2.5;
+    // Past 2 mm the tolerance has nothing left to give. A part whose detail is
+    // walls rather than slopes (a tree's twigs, cut from both sides) is still
+    // over the budget there, 600 000 triangles for one oak, which is more
+    // than the page will hold; so the grid is halved and the merge tried again.
+    const last = tol > 2 && (grid.cols < 64 || grid.rows < 64);
+    const mesh = buildAt(grid, tol, last ? Infinity : maxTriangles);
+    if (mesh && (mesh.faces.length / 3 <= maxTriangles || last)) return { ...mesh, cellMm: grid.cell };
+    if (tol > 2) {
+      grid = halveGrid(grid);
+      tol = firstTol;
+    } else {
+      tol *= 2.5;
+    }
   }
 }
 
-function buildAt(grid: HeightGrid, tol: number, maxTriangles: number): SimulationMesh | null {
+/**
+ * The grid at half the resolution: each 2 x 2 block one cell, at the mean top
+ * and mean bottom of its cells. An empty cell's top is its bottom, so the mean
+ * keeps the material's volume exactly; counting a half-full block as full or
+ * as empty would grow or shrink every feature by a coarse cell.
+ */
+export function halveGrid(grid: HeightGrid): HeightGrid {
+  const { cols, rows, top } = grid;
+  const flat = typeof grid.bottom === 'number' ? grid.bottom : null;
+  const c2 = Math.ceil(cols / 2), r2 = Math.ceil(rows / 2);
+  const top2 = new Float64Array(c2 * r2);
+  const bottom2 = flat !== null ? null : new Float64Array(c2 * r2);
+  for (let j = 0; j < r2; j++) {
+    for (let i = 0; i < c2; i++) {
+      let cells = 0, sumTop = 0, sumBottom = 0;
+      for (let dj = 0; dj < 2; dj++) {
+        for (let di = 0; di < 2; di++) {
+          const x = 2 * i + di, y = 2 * j + dj;
+          if (x >= cols || y >= rows) continue;
+          const k = y * cols + x;
+          const b = flat !== null ? flat : (grid.bottom as ArrayLike<number>)[k];
+          cells++;
+          // A cell with no material may carry any top below its bottom.
+          sumTop += Math.max(top[k], b);
+          sumBottom += b;
+        }
+      }
+      top2[j * c2 + i] = sumTop / cells;
+      if (bottom2) bottom2[j * c2 + i] = sumBottom / cells;
+    }
+  }
+  return { ...grid, cols: c2, rows: r2, cell: grid.cell * 2, top: top2, bottom: bottom2 ?? (flat as number) };
+}
+
+function buildAt(grid: HeightGrid, tol: number, maxTriangles: number): Omit<SimulationMesh, 'cellMm'> | null {
   const { cols, rows, top } = grid;
   const n = cols * rows;
   const flatBottom = typeof grid.bottom === 'number' ? grid.bottom : null;
