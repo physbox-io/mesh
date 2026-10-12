@@ -65,9 +65,9 @@ describe('framingForBounds', () => {
     expect(small).toBeCloseTo(DEFAULT_VIEW_DISTANCE, 6);
   });
 
-  it('shows about 250mm of world, well under the 0.8m the view used to open at', () => {
-    expect(DEFAULT_VIEW_DISTANCE).toBeGreaterThan(0.25);
-    expect(DEFAULT_VIEW_DISTANCE).toBeLessThan(0.35);
+  it('shows about 160mm of world, well under the 0.8m the view used to open at', () => {
+    expect(DEFAULT_VIEW_DISTANCE).toBeGreaterThan(0.17);
+    expect(DEFAULT_VIEW_DISTANCE).toBeLessThan(0.22);
   });
 
   it('backs off for a scene too big for that window, rather than clipping it', () => {

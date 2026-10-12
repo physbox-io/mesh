@@ -10,8 +10,8 @@
  * window across, and the 100 mm graph paper says the whole part is a third of
  * one square.
  *
- * So the default view is a 250 mm window instead — the same scene, drawn about
- * two and a half times larger — and the grid cell is chosen to suit what is in
+ * So the default view is a 160 mm window instead — the same scene, drawn about
+ * four times larger — and the grid cell is chosen to suit what is in
  * it. Nothing here scales a model: it is only how close the camera stands.
  *
  * A scene BIGGER than that window is pulled back far enough to fit, because the
@@ -56,11 +56,12 @@ const FOV_DEG = 45;
 const MARGIN = 1.35;
 
 /**
- * How much world the window shows by default, in metres. 250 mm is the top of
- * the range of things that get cut here, so a part at that size fills the view
- * and everything under it is drawn to the same scale rather than zoomed to fit.
+ * How much world the window shows by default, in metres. Most of what is made
+ * here is under 160 mm, so a part that size fills the view and everything under
+ * it is drawn to the same scale rather than zoomed to fit; a bigger one is
+ * pulled back for. It was 250 mm, which opened an 80 mm part small.
  */
-export const DEFAULT_VIEW_EXTENT = 0.25;
+export const DEFAULT_VIEW_EXTENT = 0.16;
 
 /**
  * The distance that puts DEFAULT_VIEW_EXTENT across the window vertically, and

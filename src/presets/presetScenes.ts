@@ -3205,7 +3205,7 @@ export const PRESETS = {
     scene: californiaReliefPreset,
     // No camera of its own any more. This 50x40x40mm block used to need one,
     // because the default view was 800mm out and showed it as a speck; the
-    // default now shows about 250mm of world, which is the scale this and
+    // default now shows about 160mm of world, which is the scale this and
     // everything else here is worked at. See utils/frameScene.
     // How this model is meant to be cut: a 50x40x40 block, 20 mm deep, at the
     // size it was authored rather than fitted. Until the store could carry
