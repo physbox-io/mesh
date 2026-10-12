@@ -86,10 +86,12 @@ export function simulateStock(
 
   const a = run(o.gcode, 0);
   let bottom: number | Float64Array = -o.thicknessMm;
-  const cuts = [...a.cuts];
+  let cuts = a.cuts;
   if (o.gcodeB) {
     const b = run(o.gcodeB, 1);
-    cuts.push(...b.cuts);
+    // Concatenated, not pushed as arguments: a big job is hundreds of
+    // thousands of moves, past what a browser's call stack takes.
+    cuts = cuts.concat(b.cuts);
     // Side B's surface, turned back over into side A's frame.
     const under = new Float64Array(a.heights.length);
     for (let j = 0; j < a.rows; j++) {
