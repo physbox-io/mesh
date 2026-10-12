@@ -3,7 +3,7 @@
 // The cut runs on its own export worker, started for the job and stopped after
 // it, so a simulation never queues behind the dialog's next re-plan and the
 // dialog's own worker is not held up by it. The body then goes into the scene
-// as one undo step, with a note card saying what it is.
+// as one undo step, with a section on the scene's note card saying what it is.
 
 import { useCallback, useState } from 'react';
 import { ExportWorkerClient } from '../utils/exportWorkerClient';
@@ -104,7 +104,7 @@ export async function addSimulationToScene(
   store.addHardwareComponentNode({ ...node, name });
 
   const where = req.placement === 'overlay' ? ', laid over the model.' : ', at full size beside the model.';
-  const lines = [`# ${name}`, ''];
+  const lines = [`## ${name}`, ''];
   if (milled && req.job) {
     lines.push(
       `What the ${req.label.toLowerCase()} program leaves, cut back out of a ` +
@@ -141,28 +141,25 @@ export async function addSimulationToScene(
         : []),
     );
   }
-  const cards = physicsGlobals._physics_getNoteCards?.() ?? [];
-  physicsGlobals._physics_setNoteCards?.([
-    ...cards,
-    { id: `note_card_${id}`, markdown: lines.join('\n'), minimized: true, x: 16 + 24 * cards.length, y: 16 + 24 * cards.length },
-  ]);
+  // The scene has one note card; the body gets a section at the end of it.
+  const [card, ...rest] = physicsGlobals._physics_getNoteCards?.() ?? [];
+  const section = lines.join('\n');
+  physicsGlobals._physics_setNoteCards?.(card
+    ? [{ ...card, markdown: `${card.markdown.trimEnd()}\n\n${section}` }, ...rest]
+    : [{ id: `note_card_${id}`, markdown: section, minimized: true, x: 16, y: 16 }]);
 
   return { id, name, volumeMm3: mesh.volumeMm3, milled };
 }
 
-/** `addSimulationToScene` with the progress, the last body added and any failure, for a dialog to show. */
+/** `addSimulationToScene` with the progress and any failure, for a dialog to show. */
 export function useAddSimulation() {
   const [progress, setProgress] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [added, setAdded] = useState<string | null>(null);
   const add = useCallback(async (req: AddSimulationRequest) => {
     setError(null);
-    setAdded(null);
     setProgress(0);
     try {
-      const done = await addSimulationToScene(req, setProgress);
-      setAdded(done.name);
-      return done;
+      return await addSimulationToScene(req, setProgress);
     } catch (e) {
       setError((e as Error)?.message ?? String(e));
       return null;
@@ -170,7 +167,7 @@ export function useAddSimulation() {
       setProgress(null);
     }
   }, []);
-  return { add, progress, error, added };
+  return { add, progress, error };
 }
 
 /**

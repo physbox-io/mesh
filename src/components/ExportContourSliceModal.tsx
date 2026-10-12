@@ -1053,7 +1053,6 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
               onSimulate={handleSimulate}
               progress={simulation.progress}
               error={simulation.error}
-              added={simulation.added}
             />
             <button
               onClick={handleDownloadSvg}

@@ -393,7 +393,6 @@ export const ExportCastModal: React.FC<Props> = ({ isOpen, onClose, scene }) => 
               onSimulate={handleAddToScene}
               progress={addToScene.progress}
               error={addToScene.error}
-              added={addToScene.added}
               label="Add to Scene"
               besideOnly
             />

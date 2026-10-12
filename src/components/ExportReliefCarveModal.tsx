@@ -685,7 +685,6 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
               onSimulate={handleSimulate}
               progress={simulation.progress}
               error={simulation.error}
-              added={simulation.added}
             />
 
             {machineState.connected ? (

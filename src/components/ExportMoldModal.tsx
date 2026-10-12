@@ -823,7 +823,6 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
               onSimulate={() => void handleAddToScene()}
               progress={addToScene.progress}
               error={addToScene.error}
-              added={addToScene.added}
               label="Add to Scene"
               besideOnly
             />

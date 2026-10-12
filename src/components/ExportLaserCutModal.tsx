@@ -1390,7 +1390,6 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
               onSimulate={handleSimulate}
               progress={simulation.progress}
               error={simulation.error}
-              added={simulation.added}
             />
             <button
               onClick={handleSendToEtch}
