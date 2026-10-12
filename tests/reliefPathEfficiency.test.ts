@@ -179,3 +179,70 @@ describe('roughing a solid part', () => {
     expect(rapid / cut).toBeLessThan(0.1);
   });
 });
+
+/** Rapids that climb during the finishing pass: one per run the tool lifts out of. */
+function finishingLifts(gcode: string): number {
+  let z = 0, lifts = 0;
+  for (const raw of gcode.slice(gcode.indexOf('OP 2: finishing')).split('\n')) {
+    const line = raw.split(';')[0];
+    const m = /^G([01])\b.*Z(-?[\d.]+)/.exec(line);
+    if (!m) continue;
+    const nz = parseFloat(m[2]);
+    if (m[1] === '0' && nz > z + 1e-9) lifts++;
+    z = nz;
+  }
+  return lifts;
+}
+
+/*
+ * The finishing pass had the same fault roughing did. Its runs - raster rows
+ * split where they leave the material, waterline levels split where they leave
+ * steep ground - were cut in the generator's order, so the tool lifted out of
+ * every one and flew across the stock to the next piece of the next row. On a
+ * giraffe hide that was 761 runs and more distance in the air than cutting;
+ * the run log had the tool at its clearance height in half of all samples.
+ *
+ * Runs are now cut nearest first, and a run close to the last one is reached
+ * by cutting across the surface rather than lifting out. Figures are old/new.
+ */
+describe('finishing', () => {
+  // Was 141 lifts and a 0.097 rapid/cut ratio; 16 and 0.048.
+  it('a dome: lifts out of the cut a handful of times, not once a row', () => {
+    const res = generateReliefCarveGcode(dome, options);
+    expect(finishingLifts(res.gcode)).toBeLessThan(40);
+    const { rapid, cut } = travel(res.gcode.slice(res.gcode.indexOf('OP 2: finishing')));
+    expect(rapid / cut).toBeLessThan(0.07);
+  });
+
+  // Was 858 lifts, flying 0.47 of what it cut; 377 and 0.030.
+  it('stripes: does not fly between the pieces of neighbouring rows', () => {
+    const stripes: SceneGraph = {
+      nodes: [{
+        id: 'b1', name: 'part', type: 'body', pos: [0, 0, 0], joints: [], children: [],
+        geoms: [-0.04, -0.015, 0.01, 0.035].map((x, i) => ({
+          name: `s${i}`, type: 'box', size: [0.006, 0.05, 0.02], pos: [x, 0, 0],
+        })) as never,
+      }],
+    };
+    const res = generateReliefCarveGcode(stripes, {
+      ...DEFAULT_RELIEF_OPTIONS, carveDepthMm: 10, stockWidthMm: 120, stockDepthMm: 120,
+    });
+    expect(finishingLifts(res.gcode)).toBeLessThan(500);
+    const { rapid, cut } = travel(res.gcode.slice(res.gcode.indexOf('OP 2: finishing')));
+    expect(rapid / cut).toBeLessThan(0.1);
+  });
+
+  // Solid machining finishes through the same code. Was 98 lifts a side with
+  // its default flat finisher; 5.
+  it('a solid part: the same, on every side', () => {
+    const ball: SceneGraph = {
+      nodes: [{
+        id: 'b1', name: 'part', type: 'body', pos: [0, 0, 0],
+        geoms: [{ name: 'g1', type: 'sphere', size: [0.03] } as never],
+        joints: [], children: [],
+      }],
+    };
+    const res = generateSolidMachining(ball, deriveSolidOptions(ball, { sides: 2, material: 'softwood' }));
+    for (const side of res.sides) expect(finishingLifts(side.gcode ?? '')).toBeLessThan(20);
+  });
+});

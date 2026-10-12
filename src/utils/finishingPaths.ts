@@ -495,6 +495,11 @@ function splitWhere(pass: Point2D[], keep: (p: Point2D) => boolean, minLength: n
  * survive are already in the order the tool wants them.
  */
 export function hybridPasses(input: FinishingPathInput): Point2D[][] {
+  return hybridPassGroups(input).flat();
+}
+
+/** `hybridPasses` as its two sets, raster then waterline. */
+function hybridPassGroups(input: FinishingPathInput): Point2D[][][] {
   const threshold = input.steepAngleDeg ?? DEFAULT_STEEP_ANGLE_DEG;
   // Steep outright, not steep across the raster's passes. A wall the raster
   // crosses head-on is smooth already and could in principle stay with the
@@ -531,7 +536,7 @@ export function hybridPasses(input: FinishingPathInput): Point2D[][] {
 
   // Shallow first: it is the bulk of the surface on most reliefs, and finishing
   // the walls last leaves the crisp edges the least time to be knocked about.
-  return [...shallow, ...steep];
+  return [shallow, steep];
 }
 
 // ---------------------------------------------------------------------------
@@ -541,20 +546,39 @@ export function finishingPasses(
   strategy: FinishingStrategy,
   input: FinishingPathInput
 ): Point2D[][] {
+  return finishingPassGroups(strategy, input).flat();
+}
+
+/**
+ * The plan-view passes for a strategy as sets to be cut one after another,
+ * each in whatever order the cutter likes.
+ *
+ * The order within a set is the generator's — scan order for a raster, level
+ * by level for a waterline — and that is not an order to cut in once the
+ * exporter has split the passes where they leave the material: it hops across
+ * the stock between every two pieces. The exporter re-orders each set, nearest
+ * piece next. The sets themselves stay in order where the order means
+ * something: a hybrid's raster before its waterline, a crosshatch's first
+ * direction before its second.
+ */
+export function finishingPassGroups(
+  strategy: FinishingStrategy,
+  input: FinishingPathInput
+): Point2D[][][] {
   switch (strategy) {
     case 'crosshatch':
-      return [...rasterPasses(input, input.angleDeg), ...rasterPasses(input, input.angleDeg + 90)];
+      return [rasterPasses(input, input.angleDeg), rasterPasses(input, input.angleDeg + 90)];
     case 'concentric':
-      return concentricPasses(input);
+      return [concentricPasses(input)];
     case 'spiral':
-      return spiralPasses(input);
+      return [spiralPasses(input)];
     case 'contour':
-      return contourPasses(input);
+      return [contourPasses(input)];
     case 'hybrid':
-      return hybridPasses(input);
+      return hybridPassGroups(input);
     case 'raster':
     default:
-      return rasterPasses(input, input.angleDeg);
+      return [rasterPasses(input, input.angleDeg)];
   }
 }
 

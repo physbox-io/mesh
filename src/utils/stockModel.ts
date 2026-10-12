@@ -161,6 +161,43 @@ export class StockModel {
     }
   }
 
+  /**
+   * The deepest a cutting move would bite into what is standing: the most
+   * material over the cutter's profile anywhere along it, in mm, 0 if it would
+   * cut nothing. Measured the generous way round — each cell against the lower
+   * end of its piece and the cutter's nearest point — so it never reads short.
+   *
+   * `within` limits it to material that close to the axis. Over the whole
+   * cutter, a pass running down a wall with half a millimetre left on it reads
+   * as the wall's height; near the axis it reads as what the centre of the
+   * tool, which cuts worst, would be driven into.
+   */
+  deepestCut(
+    x0: number, y0: number, z0: number,
+    x1: number, y1: number, z1: number,
+    radius: number,
+    profile: CutterProfile = FLAT_PROFILE,
+    within: number = radius
+  ): number {
+    let worst = 0;
+    const len = Math.hypot(x1 - x0, y1 - y0);
+    const pieces = Math.max(1, Math.ceil(len / this.cell));
+    for (let s = 0; s < pieces; s++) {
+      const ta = s / pieces, tb = (s + 1) / pieces;
+      const z = Math.min(z0 + (z1 - z0) * ta, z0 + (z1 - z0) * tb);
+      this.near(
+        x0 + (x1 - x0) * ta, y0 + (y1 - y0) * ta,
+        x0 + (x1 - x0) * tb, y0 + (y1 - y0) * tb,
+        Math.min(radius, within),
+        (k, d) => {
+          const bite = this.z[k] - (z + profile(d));
+          if (bite > worst) worst = bite;
+        }
+      );
+    }
+    return worst;
+  }
+
   /** Highest material a cutter of `radius` centred at (x, y) would touch. */
   highestUnder(x: number, y: number, radius: number): number {
     return this.highestAlong(x, y, x, y, radius);

@@ -140,11 +140,52 @@ describe('entering the cut after a roughing pass', () => {
      *
      * Only the finishing pass is checked. Roughing's first layer really does
      * start at the top face, because at that point nothing has been cut yet.
+     *
+     * Checked over the background rather than as the lowest approach: most
+     * finishing runs are now reached by cutting across from the last one, so
+     * an approach is only made where a run cannot be linked to. Every one made
+     * over ground clearly off the disc, which roughing took to the floor, has
+     * to come down to it.
+     *
+     * Within a cutter's width of the stock's edge the stock model still sees a
+     * cell standing where roughing's outer ring turned away and left a cusp —
+     * it counts a cell cut only once the cutter has covered all of it — so an
+     * entry there starts from the face. That is the model being careful, not
+     * the lead-in being told the wrong thing, and it is left out here.
      */
-    const finishing = r.gcode.slice(r.gcode.indexOf('T2 M6'));
-    const approaches = [...finishing.matchAll(/^G0 Z(-?[\d.]+)$/gm)].map((m) => parseFloat(m[1]));
-    expect(approaches.length).toBeGreaterThan(0);
-    expect(Math.min(...approaches)).toBeLessThan(-5);
+    const finishing = r.gcode.slice(r.gcode.indexOf('T2 M6')).split('\n');
+    // The disc fills the stock: centred, its radius half the stock's width.
+    const c = BASE.stockWidthMm / 2;
+    const margin = BASE.finishingToolDiaMm + 0.5;
+    const overBackground = (x: number, y: number) =>
+      Math.hypot(x - c, y - c) > c + margin &&
+      Math.min(x, y, BASE.stockWidthMm - x, BASE.stockDepthMm - y) > margin;
+    const approaches: number[] = [];
+    let backgroundMm = 0;
+    let at = { x: 0, y: 0 };
+    for (const line of finishing) {
+      const xy = /^G[01] X(-?[\d.]+) Y(-?[\d.]+)/.exec(line);
+      if (xy) {
+        const next = { x: parseFloat(xy[1]), y: parseFloat(xy[2]) };
+        if (line.startsWith('G1')) {
+          // Sampled a millimetre at a time: a raster row runs from the
+          // background onto the disc, so its ends say little.
+          const len = Math.hypot(next.x - at.x, next.y - at.y);
+          const n = Math.ceil(len);
+          for (let k = 0; k < n; k++) {
+            const t = (k + 0.5) / n;
+            if (overBackground(at.x + (next.x - at.x) * t, at.y + (next.y - at.y) * t)) backgroundMm += len / n;
+          }
+        }
+        at = next;
+      }
+      const approach = /^G0 Z(-?[\d.]+)$/.exec(line);
+      if (approach && overBackground(at.x, at.y)) approaches.push(parseFloat(approach[1]));
+    }
+    // The background is finished, however it is reached: the four corners the
+    // disc leaves are some 3000 mm² at a half-millimetre stepover.
+    expect(backgroundMm).toBeGreaterThan(2000);
+    for (const z of approaches) expect(z).toBeLessThan(-5);
   });
 
   /*

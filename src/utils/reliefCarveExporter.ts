@@ -28,7 +28,7 @@ import {
   type ClearingRegion,
 } from './adaptiveClearing';
 import {
-  finishingPasses,
+  finishingPassGroups,
   describeFinishingStrategy,
   type FinishingStrategy,
 } from './finishingPaths';
@@ -2570,7 +2570,7 @@ export function machineSurface(
   // Plan-view only. Z stays this function's business: every point that comes
   // back is sampled against the dilated surface, clamped to the layer limit and
   // dropped where there is nothing under it, exactly as the raster always was.
-  const planPasses = finishingPasses(strategy, {
+  const planGroups = finishingPassGroups(strategy, {
     bounds: passRect,
     stepover,
     resolution: res,
@@ -2580,9 +2580,49 @@ export function machineSurface(
     steepAngleDeg: opts.finishingSteepAngleDeg,
   });
 
-  if (planPasses.length === 0) {
+  if (planGroups.every((g) => g.length === 0)) {
     return fail('The chosen finishing strategy produced no passes over this stock.');
   }
+
+  /** The finished surface at a point, as far down as a layer limited to `limit` may take it. */
+  const finishZAt = (x: number, y: number, limit: number) =>
+    Math.max(limit, Math.min(0, Math.max(floorZ, sampleHeightmap(finishMap, x, y))));
+
+  /*
+   * How far the cutter will cut its way across to the next run rather than lift.
+   *
+   * Every run used to be entered from above: up to the traverse height, across,
+   * down, a ramp in and back. Between the pieces of two neighbouring raster rows
+   * that is a millimetre of Z each way and a ramp, to move one stepover. Riding
+   * the finished surface across instead is a cut like any other on the pass —
+   * the surface is the tool-dilated one the passes themselves follow, so the
+   * link cannot gouge it — and takes a fraction of the time. Two cutter widths:
+   * past that the link is cutting a line of its own across ground the passes
+   * were laid out to cover another way.
+   */
+  const linkMaxMm = Math.max(2 * stepover, 2 * opts.finishingToolDiaMm);
+  /*
+   * The deepest a link may bite into what is standing.
+   *
+   * A link has no ramp, so it is only allowed where it takes about the depth
+   * the passes themselves take: the roughing allowance and its scallops, or a
+   * layer's stepdown when the finishing tool is clearing on its own. Where
+   * roughing could not reach, or a wall the link would climb into stands
+   * taller, the run is entered from above as before.
+   */
+  const linkBiteMm = opts.roughingEnabled
+    ? opts.roughingAllowanceMm + 0.5
+    : Number.isFinite(finishStepdown) ? finishStepdown : finishRad;
+  /*
+   * The deepest a link may cut with the rest of the cutter, out to its rim.
+   *
+   * Measured near the axis only, a link at the stock's edge with the finishing
+   * tool clearing on its own ran past the fin the tool centre can never reach
+   * and took ten millimetres of it in one move. After roughing that is what
+   * every pass does down a wall — half a millimetre sideways over the wall's
+   * whole height — so there it is not limited.
+   */
+  const linkRimMm = opts.roughingEnabled ? Infinity : linkBiteMm;
 
   // The height the material stands at when a layer starts: the stock's top face
   // for the first, whatever the layer before it left for the rest.
@@ -2593,68 +2633,166 @@ export function machineSurface(
       gcode.push(`; layer down to Z${f(limit)}`);
     }
 
-    for (const plan of planPasses) {
-      // `surface` is where the pass ends up; `z` is as far as this layer is
-      // allowed to go towards it. A point the layer above already took to its
-      // surface is finished, and is left out of this layer entirely — which is
-      // what stops the pass re-tracing the whole background on every layer.
-      const raw: PathPoint[] = [];
-      for (const pt of plan) {
-        const surface = Math.min(0, Math.max(floorZ, sampleHeightmap(finishMap, pt.x, pt.y)));
-        const done = surface >= prevLimit - 1e-6;
-        raw.push({ x: pt.x, y: pt.y, z: done ? 0 : Math.max(surface, limit) });
-      }
+    // Whether the cutter is down on the surface at the end of a run, from
+    // where the next may be linked to without lifting.
+    let down = false;
 
-      // Stretches where the tool would only skim the stock's own top face have
-      // no material under them. Flying over them instead of tracing them is what
-      // keeps a small model on a big board from costing a full-board raster.
+    for (const group of planGroups) {
+      // This layer's runs in the group, in no particular order yet.
       const runs: PathPoint[][] = [];
-      let run: PathPoint[] = [];
-      for (const p of raw) {
-        if (p.z < -1e-6) run.push(p);
-        else if (run.length > 0) { runs.push(run); run = []; }
-      }
-      if (run.length > 0) runs.push(run);
-
-      for (const r of runs) {
-        const pass = simplifyPass(squareUpWalls(r), PATH_SIMPLIFY_MM);
-        if (pass.length < 2) continue;
-        // A run shorter than the stepover lies inside what the passes either
-        // side of it cut, and is too short to ramp into — so it was a plunge
-        // to depth, a retract, and nothing to show for either. Layering
-        // leaves these where a layer's limit clips a pass to a remnant.
-        let runLen = 0;
-        for (let i = 1; i < pass.length; i++) {
-          runLen += Math.hypot(pass[i].x - pass[i - 1].x, pass[i].y - pass[i - 1].y);
+      for (const plan of group) {
+        // `surface` is where the pass ends up; `z` is as far as this layer is
+        // allowed to go towards it. A point the layer above already took to its
+        // surface is finished, and is left out of this layer entirely — which is
+        // what stops the pass re-tracing the whole background on every layer.
+        const raw: PathPoint[] = [];
+        for (const pt of plan) {
+          const surface = Math.min(0, Math.max(floorZ, sampleHeightmap(finishMap, pt.x, pt.y)));
+          const done = surface >= prevLimit - 1e-6;
+          raw.push({ x: pt.x, y: pt.y, z: done ? 0 : Math.max(surface, limit) });
         }
-        if (runLen < stepover - 1e-6) continue;
-        finishingRasterLines++;
 
-        /*
-         * Where the material actually is at the head of this pass.
-         *
-         * This used to be told `Z0` — the stock's top face — whatever roughing
-         * had already taken off. With a 10 mm ${noun} and roughing on, the real
-         * material stands at about `surface + 0.5 mm`, so the ramp was handed a
-         * 10 mm drop instead of half a millimetre and spent 37 mm descending
-         * through open air at the plunge rate before it touched anything, then
-         * retraced the same 37 mm on the way back. About fifteen seconds a run,
-         * for roughly one second of cutting, across every raster line in the
-         * job — which is most of where "it spent a long time cutting air" came
-         * from.
-         *
-         * The lower of the two is what is standing: whichever of roughing and
-         * the finishing layer above cut deepest here is the one that decides
-         * the height, and cutting the same place twice does not raise it.
-         */
+        // Stretches where the tool would only skim the stock's own top face have
+        // no material under them. Flying over them instead of tracing them is what
+        // keeps a small model on a big board from costing a full-board raster.
+        let run: PathPoint[] = [];
+        const flush = () => {
+          if (run.length === 0) return;
+          // A run shorter than the stepover lies inside what the passes either
+          // side of it cut, and is too short to ramp into — so it was a plunge
+          // to depth, a retract, and nothing to show for either. Layering
+          // leaves these where a layer's limit clips a pass to a remnant.
+          const pass = simplifyPass(squareUpWalls(run), PATH_SIMPLIFY_MM);
+          let runLen = 0;
+          for (let i = 1; i < pass.length; i++) {
+            runLen += Math.hypot(pass[i].x - pass[i - 1].x, pass[i].y - pass[i - 1].y);
+          }
+          if (pass.length >= 2 && runLen >= stepover - 1e-6) runs.push(run);
+          run = [];
+        };
+        for (const p of raw) {
+          if (p.z < -1e-6) run.push(p);
+          else flush();
+        }
+        flush();
+      }
+
+      /*
+       * Nearest run next, from either end, or from anywhere round a loop.
+       *
+       * The runs come out of the generator in its own order — row after row
+       * across the whole stock for a raster, level after level for a waterline
+       * — and once they are split where they leave the material, cutting them
+       * in that order flies the width of the stock between every two pieces of
+       * neighbouring rows. On a giraffe hide that was 761 runs and more
+       * distance in the air than cutting. Taken nearest first, the pieces of
+       * one patch are finished, row to row, before the tool leaves it — the
+       * same order the roughing pockets were given.
+       */
+      const closed = runs.map((r) =>
+        r.length > 3 && Math.hypot(r[0].x - r[r.length - 1].x, r[0].y - r[r.length - 1].y) < 1e-6
+      );
+      // A loop's candidate starting points, thinned so the search stays cheap
+      // on long contours. The chosen loop is then turned to its exact nearest.
+      const probes = runs.map((r, i) => {
+        if (!closed[i]) return [0, r.length - 1];
+        const step = Math.max(1, Math.floor((r.length - 1) / 32));
+        const out: number[] = [];
+        for (let k = 0; k < r.length - 1; k += step) out.push(k);
+        return out;
+      });
+      const used = new Uint8Array(runs.length);
+
+      for (let n = 0; n < runs.length; n++) {
+        let best = -1;
+        let bestAt = 0;
+        let bestD = Infinity;
+        for (let i = 0; i < runs.length; i++) {
+          if (used[i]) continue;
+          for (const k of probes[i]) {
+            const d = Math.hypot(runs[i][k].x - atX, runs[i][k].y - atY);
+            if (d < bestD) {
+              bestD = d;
+              best = i;
+              bestAt = k;
+            }
+          }
+        }
+        used[best] = 1;
+        let r = runs[best];
+        if (closed[best]) {
+          let near = bestAt;
+          for (let k = 0; k < r.length - 1; k++) {
+            if (Math.hypot(r[k].x - atX, r[k].y - atY) < Math.hypot(r[near].x - atX, r[near].y - atY)) near = k;
+          }
+          r = [...r.slice(near, r.length - 1), ...r.slice(0, near), r[near]];
+        } else if (bestAt !== 0) {
+          r = [...r].reverse();
+        }
+
+        const pass = simplifyPass(squareUpWalls(r), PATH_SIMPLIFY_MM);
+        finishingRasterLines++;
         const head = pass[0];
-        const entryZ = Math.min(0, materialLevelAt(head.x, head.y), prevLimit);
-        leadIn(pass, entryZ, opts.finishingPlungeRate, opts.finishingFeedrate);
+
+        // Across to the head along the surface, where it is close and the
+        // material in the way is no more than a pass would take anyway.
+        let link: PathPoint[] | null = null;
+        const gap = Math.hypot(head.x - atX, head.y - atY);
+        if (down && gap <= linkMaxMm) {
+          const steps = Math.max(1, Math.ceil(gap / res));
+          const pts: PathPoint[] = [];
+          for (let i = 1; i < steps; i++) {
+            const x = atX + ((head.x - atX) * i) / steps;
+            const y = atY + ((head.y - atY) * i) / steps;
+            pts.push({ x, y, z: finishZAt(x, y, limit) });
+          }
+          pts.push({ x: head.x, y: head.y, z: head.z });
+          // Measured as the cut it would be, against the cutter's profile.
+          const candidate = simplifyPass([{ x: atX, y: atY, z: atZ }, ...pts], PATH_SIMPLIFY_MM);
+          let ok = true;
+          for (let i = 1; i < candidate.length && ok; i++) {
+            const a = candidate[i - 1], b = candidate[i];
+            ok =
+              stock.deepestCut(a.x, a.y, a.z, b.x, b.y, b.z, cutter.radius, cutter.profile, cutter.radius / 2) <= linkBiteMm &&
+              (!Number.isFinite(linkRimMm) ||
+                stock.deepestCut(a.x, a.y, a.z, b.x, b.y, b.z, cutter.radius, cutter.profile) <= linkRimMm);
+          }
+          if (ok) link = candidate;
+        }
+
+        if (link) {
+          for (let i = 1; i < link.length; i++) {
+            const p = link[i];
+            cutTo(p.x, p.y, p.z);
+            gcode.push(`G1 X${f(p.x)} Y${f(p.y)} Z${f(p.z)} F${Math.round(opts.finishingFeedrate)}`);
+          }
+        } else {
+          /*
+           * Where the material actually is at the head of this pass.
+           *
+           * This used to be told `Z0` — the stock's top face — whatever roughing
+           * had already taken off. With a 10 mm ${noun} and roughing on, the real
+           * material stands at about `surface + 0.5 mm`, so the ramp was handed a
+           * 10 mm drop instead of half a millimetre and spent 37 mm descending
+           * through open air at the plunge rate before it touched anything, then
+           * retraced the same 37 mm on the way back. About fifteen seconds a run,
+           * for roughly one second of cutting, across every raster line in the
+           * job — which is most of where "it spent a long time cutting air" came
+           * from.
+           *
+           * The lower of the two is what is standing: whichever of roughing and
+           * the finishing layer above cut deepest here is the one that decides
+           * the height, and cutting the same place twice does not raise it.
+           */
+          const entryZ = Math.min(0, materialLevelAt(head.x, head.y), prevLimit);
+          leadIn(pass, entryZ, opts.finishingPlungeRate, opts.finishingFeedrate);
+        }
 
         // GRBL keeps the last feedrate, so it is only stated when it changes:
         // at the start, and either side of the straight drops `squareUpWalls`
-        // puts at the foot of a wall, which go down at the plunge rate.
-        let rate = 0;
+        // puts at the foot of a wall, which go down at the plunge rate. A link
+        // stated the feed already.
+        let rate = link ? opts.finishingFeedrate : 0;
         for (let i = 1; i < pass.length; i++) {
           const p = pass[i];
           const prev = pass[i - 1];
@@ -2664,8 +2802,13 @@ export function machineSurface(
           gcode.push(`G1 X${f(p.x)} Y${f(p.y)} Z${f(p.z)}${want !== rate ? ` F${Math.round(want)}` : ''}`);
           rate = want;
         }
+        down = true;
 
-        segments.push({ type: 'finishing', points: pass, traverseZ: lastTraverseZ });
+        segments.push({
+          type: 'finishing',
+          points: link ? [...link.slice(0, -1), ...pass] : pass,
+          traverseZ: lastTraverseZ,
+        });
       }
     }
 
