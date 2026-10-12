@@ -16,6 +16,9 @@ import { PatternView } from './PatternView';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { useStore } from '../store/useStore';
 import { runCastPrep, type CastPrepOptions, type CastPrepReport } from '../utils/castPrepRunner';
+import { AddSimulationButton } from './MachineJobControls';
+import { sceneStockTransform, useAddSimulation } from '../hooks/useAddSimulation';
+import { stlToMesh } from '../utils/stlMesh';
 
 interface Props {
   isOpen: boolean;
@@ -84,6 +87,7 @@ export const ExportCastModal: React.FC<Props> = ({ isOpen, onClose, scene }) => 
   // Prep rewrites the scene several times on its way through; build the
   // preview once, from where it lands.
   const prepBusy = useStore((s) => s.castPrepBusy);
+  const addToScene = useAddSimulation();
   const { result, busy, failure } = useExportJob(
     isOpen,
     (client) => (prepBusy ? null : client.run('cast', scene, settled)),
@@ -98,6 +102,18 @@ export const ExportCastModal: React.FC<Props> = ({ isOpen, onClose, scene }) => 
   const handleDownload = () => {
     if (!result?.success) return;
     downloadBytes(result.patternStl, `${baseName}_${options.method === 'lost-pla' ? 'burnout' : 'sand'}_pattern.stl`);
+  };
+
+  /** The pattern as printed, gating and all, beside the part it was made from. */
+  const handleAddToScene = () => {
+    if (!result?.success) return;
+    void addToScene.add({
+      mesh: stlToMesh(result.patternStl),
+      transform: sceneStockTransform(),
+      kind: 'cast',
+      label: options.method === 'lost-pla' ? 'Burnout pattern' : 'Sand pattern',
+      placement: 'beside',
+    });
   };
 
   const metalLabel = summary?.metalLabel ?? '';
@@ -372,6 +388,15 @@ export const ExportCastModal: React.FC<Props> = ({ isOpen, onClose, scene }) => 
             >
               Close
             </button>
+            <AddSimulationButton
+              disabled={!result?.success || busy}
+              onSimulate={handleAddToScene}
+              progress={addToScene.progress}
+              error={addToScene.error}
+              added={addToScene.added}
+              label="Add to Scene"
+              besideOnly
+            />
             <button
               onClick={handleDownload}
               disabled={!result?.success}

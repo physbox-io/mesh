@@ -12,7 +12,7 @@ import { webSerialManager, type MachineState } from '../utils/webSerialManager';
 import { NumberInput } from '@physbox-io/ui';
 import { useStore } from '../store/useStore';
 import { useSettled } from '../hooks/useSettled';
-import { JobOverrides, JobPauseBanner, JobPreflight, JobProgress, JobResumeBanner, JobTransport } from './MachineJobControls';
+import { AddSimulationButton, JobOverrides, JobPauseBanner, JobPreflight, JobProgress, JobResumeBanner, JobTransport } from './MachineJobControls';
 import { MachineFaultBanner } from './MachineFaultBanner';
 import { formatDuration } from '../utils/timeEstimate';
 import {
@@ -23,6 +23,8 @@ import {
 } from '../utils/feedsAndSpeeds';
 import { warpGcode, type ProbeGrid } from '../utils/meshLeveler';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
+import { useAddSimulation } from '../hooks/useAddSimulation';
+import { laserSheetParts, laserStockTransform } from '../utils/sheetSimulation';
 
 interface ExportLaserCutModalProps {
   isOpen: boolean;
@@ -366,6 +368,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
     [layoutJob.failure, layoutJob.result],
   );
   const layoutPending = layoutFields !== liveLayoutFields || layoutJob.busy;
+  const simulation = useAddSimulation();
   const hasEngraving = !!exportResult?.panels?.some((p) => p.engrave2D?.length);
 
   const liveGcodeFields = useMemo(() => ({
@@ -421,6 +424,27 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
   );
 
   if (!isOpen) return null;
+
+  /**
+   * The panels as they come off the machine, put back together where the
+   * model is: a router's inside corners rounded to its bit, a laser's as drawn.
+   */
+  const handleSimulate = (placement: 'beside' | 'overlay') => {
+    if (!exportResult?.success || !exportResult.panels?.length) return;
+    const routerRadiusMm = machineMode === 'cnc' ? (gcodeResult?.compensationMm ?? bitDiameterMm / 2) : 0;
+    void simulation.add({
+      sheets: { parts: laserSheetParts(exportResult.panels, exportResult.sheets), routerRadiusMm },
+      transform: laserStockTransform(exportResult.panels, exportResult.scaleFactor ?? 1),
+      kind: 'laser',
+      label: machineMode === 'cnc' ? 'Router cut' : 'Laser cut',
+      placement,
+      details: [
+        `${exportResult.sheetCount ?? 1} sheet${(exportResult.sheetCount ?? 1) === 1 ? '' : 's'} of ${materialThicknessMm} mm stock`,
+        machineMode === 'cnc' ? `${bitDiameterMm} mm bit` : null,
+        (exportResult.scaleFactor ?? 1) !== 1 ? `At ${Math.round((exportResult.scaleFactor ?? 1) * 100)}% of the model` : null,
+      ].filter((d): d is string => !!d),
+    });
+  };
 
   const handleDownloadSvg = () => {
     if (!exportResult || !exportResult.success || !exportResult.svg) return;
@@ -1361,6 +1385,13 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
             {etchError && (
               <span className="text-[11px] text-red-600 dark:text-red-400 max-w-xs leading-snug">{etchError}</span>
             )}
+            <AddSimulationButton
+              disabled={!exportResult?.success || layoutPending}
+              onSimulate={handleSimulate}
+              progress={simulation.progress}
+              error={simulation.error}
+              added={simulation.added}
+            />
             <button
               onClick={handleSendToEtch}
               disabled={!exportResult || !exportResult.success}

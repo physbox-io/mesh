@@ -2,7 +2,8 @@ import { describe, it, expect } from 'vitest';
 import { generateReliefCarveGcode, DEFAULT_RELIEF_OPTIONS, buildHeightmap } from '../src/utils/reliefCarveExporter';
 import { collectSceneTriangles } from '../src/utils/contourSliceExporter';
 import { simulateMilling } from '../src/utils/cutSimulation';
-import { reliefSimulationTools, runSimulationJob, simulatedBody } from '../src/utils/simulatedPart';
+import { reliefSimulationTools, runSimulationJob, simulateStock, simulatedBody } from '../src/utils/simulatedPart';
+import { generateSolidMachining, deriveSolidOptions } from '../src/utils/solidMachiningExporter';
 import { analyzeMesh } from '../src/utils/meshIntegrity';
 import type { SceneGraph, SceneNode } from '../src/types/scene';
 
@@ -79,7 +80,7 @@ describe('Add Simulation', () => {
   });
 
   it('lays the overlay over the model, cap to cap', () => {
-    const node = simulatedBody(sim, job, relief.stockTransform!, {
+    const node = simulatedBody(sim, relief.stockTransform!, {
       id: 's1', name: 'sim', kind: 'relief', placement: 'overlay',
     });
     const { lo, hi } = extent(node);
@@ -97,7 +98,7 @@ describe('Add Simulation', () => {
   });
 
   it('puts the part beside the model, and the next one beside that', () => {
-    const first = simulatedBody(sim, job, relief.stockTransform!, {
+    const first = simulatedBody(sim, relief.stockTransform!, {
       id: 's1', name: 'sim', kind: 'relief', placement: 'beside',
     });
     const a = extent(first);
@@ -105,14 +106,14 @@ describe('Add Simulation', () => {
     expect(a.hi[0] - a.lo[0]).toBeCloseTo(0.12, 4);
     // Standing on the model's lowest point.
     expect(a.lo[2]).toBeCloseTo(-0.05, 4);
-    const second = simulatedBody(sim, job, relief.stockTransform!, {
+    const second = simulatedBody(sim, relief.stockTransform!, {
       id: 's2', name: 'sim 2', kind: 'relief', placement: 'beside', existing: [first],
     });
     expect(extent(second).lo[0]).toBeGreaterThan(a.hi[0]);
   });
 
   it('keeps the same winding in both of its frames', () => {
-    const node = simulatedBody(sim, job, relief.stockTransform!, {
+    const node = simulatedBody(sim, relief.stockTransform!, {
       id: 's1', name: 'sim', kind: 'relief', placement: 'beside',
     });
     const g = node.geoms[0];
@@ -122,7 +123,7 @@ describe('Add Simulation', () => {
   });
 
   it('is left out of the next plan', () => {
-    const node = simulatedBody(sim, job, relief.stockTransform!, {
+    const node = simulatedBody(sim, relief.stockTransform!, {
       id: 's1', name: 'Simulated: Relief carve', kind: 'relief', placement: 'beside',
     });
     const again = generateReliefCarveGcode({ nodes: [...dome.nodes, node] }, options);
@@ -174,4 +175,111 @@ describe('Add Simulation', () => {
       }
     });
   }
+});
+
+describe('Add Simulation, two sides', () => {
+  /** A 60 mm sphere, cut from both faces of the block. */
+  const ball: SceneGraph = {
+    nodes: [{
+      id: 'b1', name: 'part', type: 'body', pos: [0, 0, 0],
+      geoms: [{ name: 'g1', type: 'sphere', size: [0.03] } as never],
+      joints: [], children: [],
+    }],
+  };
+  const opts = deriveSolidOptions(ball, { sides: 2, material: 'softwood', finishingToolType: 'ball_nose' });
+  const res = generateSolidMachining(ball, opts);
+  const job = {
+    gcode: res.sides[0].gcode,
+    gcodeB: res.sides[1].gcode,
+    widthMm: res.stock.widthMm,
+    depthMm: res.stock.depthMm,
+    thicknessMm: res.stock.thicknessMm,
+    ...reliefSimulationTools(opts),
+  };
+
+  /*
+   * The volume says both sides cut the whole sphere, and the symmetry says
+   * they met: side B is mirrored back column for column, and reading it one
+   * column off showed a 0.15 mm step here, against 0.003 mm read right.
+   */
+  it('cuts the sphere from both sides, meeting at the seam without a step', () => {
+    const { grid, cuts } = simulateStock(job);
+    expect(cuts.filter((c) => c.rapid)).toEqual([]);
+    const top = grid.top, bottom = grid.bottom as Float64Array;
+    const cx = res.stock.widthMm / 2, cy = res.stock.depthMm / 2, mid = -res.stock.thicknessMm / 2;
+    let volume = 0, step = 0;
+    for (let j = 0; j < grid.rows; j++) {
+      for (let i = 0; i < grid.cols; i++) {
+        const k = j * grid.cols + i;
+        const r = Math.hypot((i + 0.5) * grid.cell - cx, (j + 0.5) * grid.cell - cy);
+        const thick = Math.max(0, top[k] - bottom[k]);
+        // The tabs reach in to the sphere at its equator; a millimetre of them counts.
+        if (r < 31) volume += thick * grid.cell ** 2;
+        if (r < 25) step = Math.max(step, Math.abs(top[k] - mid - (mid - bottom[k])));
+      }
+    }
+    const sphere = (4 / 3) * Math.PI * 30 ** 3;
+    expect(Math.abs(volume - sphere) / sphere).toBeLessThan(0.02);
+    expect(step).toBeLessThan(0.05);
+  });
+
+  it('meshes the two-sided block closed, and lays it back over the sphere', () => {
+    const sim = runSimulationJob(job);
+    const integrity = analyzeMesh(Array.from(sim.positions), Array.from(sim.faces))!;
+    expect(integrity.closed).toBe(true);
+    expect(integrity.consistentlyWound).toBe(true);
+    const node = simulatedBody(sim, res.stockTransform!, {
+      id: 's1', name: 'sim', kind: 'machining', placement: 'overlay',
+    });
+    const { lo, hi } = extent(node);
+    // The block is centred on the sphere every way.
+    for (let a = 0; a < 3; a++) expect((lo[a] + hi[a]) / 2).toBeCloseTo(0, 4);
+    expect(hi[2] - lo[2]).toBeCloseTo(res.stock.thicknessMm / 1000, 4);
+  });
+
+  it('describes a part turned on its side by the turn it was given', () => {
+    // 40 x 20 x 10 mm, cut with its +X end up.
+    const brick: SceneGraph = {
+      nodes: [{
+        id: 'b1', name: 'brick', type: 'body', pos: [0.1, 0.2, 0.3],
+        geoms: [{ name: 'g1', type: 'box', size: [0.02, 0.01, 0.005] } as never],
+        joints: [], children: [],
+      }],
+    };
+    const r = generateSolidMachining(brick, deriveSolidOptions(brick, { sides: 2, up: '+x' }));
+    const t = r.stockTransform!;
+    const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+    for (const x of [80, 120]) for (const y of [190, 210]) for (const z of [295, 305]) {
+      const m = [x - t.modelOriginMm[0], y - t.modelOriginMm[1], z - t.modelOriginMm[2]];
+      const R = t.rotation!;
+      for (let a = 0; a < 3; a++) {
+        const w = t.scale[a] * (R[a * 3] * m[0] + R[a * 3 + 1] * m[1] + R[a * 3 + 2] * m[2]) + t.workOriginMm[a];
+        lo[a] = Math.min(lo[a], w);
+        hi[a] = Math.max(hi[a], w);
+      }
+    }
+    // Standing on end: 40 mm tall, its top face skinned below the stock's.
+    expect(hi[2] - lo[2]).toBeCloseTo(40, 3);
+    expect(hi[2]).toBeCloseTo(-(r.stock.thicknessMm - 40) / 2, 3);
+    expect(lo[0]).toBeCloseTo(r.partBounds.minX, 3);
+    expect(hi[0]).toBeCloseTo(r.partBounds.maxX, 3);
+    expect(lo[1]).toBeCloseTo(r.partBounds.minY, 3);
+    expect(hi[1]).toBeCloseTo(r.partBounds.maxY, 3);
+
+    // And turned back, the corners land where they started.
+    const corners = [[80, 190, 295], [120, 210, 305], [80, 210, 305]];
+    const positions = new Float32Array(corners.flatMap((m) => {
+      const R = t.rotation!;
+      return [0, 1, 2].map((a) =>
+        t.scale[a] * (R[a * 3] * m[0] + R[a * 3 + 1] * m[1] + R[a * 3 + 2] * m[2]) + t.workOriginMm[a]);
+    }));
+    const node = simulatedBody(
+      { positions, faces: new Uint32Array([0, 1, 2]), cellMm: 0.1, toleranceMm: 0 }, t,
+      { id: 's', name: 's', kind: 'machining', placement: 'overlay' }
+    );
+    const v = node.geoms[0].renderVertices!;
+    corners.forEach((m, c) => {
+      for (let a = 0; a < 3; a++) expect((v[c * 3 + a] + node.pos[a]) * 1000).toBeCloseTo(m[a], 2);
+    });
+  });
 });

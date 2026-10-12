@@ -11,7 +11,7 @@ import { webSerialManager, type MachineState } from '../utils/webSerialManager';
 import { NumberInput } from '@physbox-io/ui';
 import { useStore } from '../store/useStore';
 import { useSettled } from '../hooks/useSettled';
-import { JobOverrides, JobPauseBanner, JobPreflight, JobProgress, JobResumeBanner, JobTransport } from './MachineJobControls';
+import { AddSimulationButton, JobOverrides, JobPauseBanner, JobPreflight, JobProgress, JobResumeBanner, JobTransport } from './MachineJobControls';
 import { MachineFaultBanner } from './MachineFaultBanner';
 import { formatDuration } from '../utils/timeEstimate';
 import {
@@ -21,6 +21,8 @@ import {
   recommendSpeeds,
 } from '../utils/feedsAndSpeeds';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
+import { useAddSimulation } from '../hooks/useAddSimulation';
+import { contourSheetParts } from '../utils/sheetSimulation';
 
 interface ExportContourSliceModalProps {
   isOpen: boolean;
@@ -304,6 +306,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
     [sliceJob.failure, sliceJob.result],
   );
   const slicePending = sliceFields !== liveSliceFields || sliceJob.busy;
+  const simulation = useAddSimulation();
 
   // Compute G-Code output result
   const liveGcodeFields = useMemo(() => ({
@@ -346,6 +349,24 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
   }, [exportResult, preview]);
 
   if (!isOpen) return null;
+
+  /** The layers as cut, stacked back up into the model they were sliced from. */
+  const handleSimulate = (placement: 'beside' | 'overlay') => {
+    if (!exportResult?.success || !exportResult.layers?.length || !exportResult.stockTransform) return;
+    const thickness = sliceFields.materialThicknessMm;
+    const routerRadiusMm = machineMode === 'cnc' ? (gcodeResult?.compensationMm ?? bitDiameterMm / 2) : 0;
+    void simulation.add({
+      sheets: { parts: contourSheetParts(exportResult.layers, thickness), routerRadiusMm },
+      transform: exportResult.stockTransform,
+      kind: 'contour',
+      label: 'Contour stack',
+      placement,
+      details: [
+        `${exportResult.layers.length} layers of ${thickness} mm stock`,
+        machineMode === 'cnc' ? `${bitDiameterMm} mm bit` : null,
+      ].filter((d): d is string => !!d),
+    });
+  };
 
   const handleDownloadSvg = () => {
     if (!exportResult?.success || !exportResult.svg) return;
@@ -1027,6 +1048,13 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
             >
               Close
             </button>
+            <AddSimulationButton
+              disabled={!exportResult?.success || slicePending}
+              onSimulate={handleSimulate}
+              progress={simulation.progress}
+              error={simulation.error}
+              added={simulation.added}
+            />
             <button
               onClick={handleDownloadSvg}
               disabled={!exportResult?.success}

@@ -407,7 +407,13 @@ export const AddSimulationButton: React.FC<{
   error?: string | null;
   /** Name of the body the last one added, said until the next. */
   added?: string | null;
-}> = ({ disabled, onSimulate, progress, error, added }) => {
+  /**
+   * For an output that is geometry already (a pattern, a mold): its own label,
+   * and always beside the model, since there is no fit to lay it back over.
+   */
+  label?: string;
+  besideOnly?: boolean;
+}> = ({ disabled, onSimulate, progress, error, added, label = 'Add Simulation', besideOnly = false }) => {
   const [placement, setPlacement] = useState<'beside' | 'overlay'>('beside');
   const busy = progress !== null;
   return (
@@ -420,16 +426,18 @@ export const AddSimulationButton: React.FC<{
             ? `The last simulation failed: ${error}`
             : added
               ? `Added "${added}" to the scene. Click to add another.`
-              : 'Cut this program out of a block of the stock and add the result to the scene'
+              : besideOnly
+                ? 'Add it to the scene beside the model'
+                : 'Cut this program out of a block of the stock and add the result to the scene'
         }
-        className="flex items-center space-x-2 whitespace-nowrap pl-4 pr-3 py-2 bg-amber-100 dark:bg-amber-900/40 hover:bg-amber-200 dark:hover:bg-amber-900/70 disabled:opacity-40 disabled:cursor-not-allowed text-amber-900 dark:text-amber-100 font-bold text-xs rounded-l-lg border border-amber-300 dark:border-amber-700 cursor-pointer"
+        className={`flex items-center space-x-2 whitespace-nowrap pl-4 py-2 bg-amber-100 dark:bg-amber-900/40 hover:bg-amber-200 dark:hover:bg-amber-900/70 disabled:opacity-40 disabled:cursor-not-allowed text-amber-900 dark:text-amber-100 font-bold text-xs border border-amber-300 dark:border-amber-700 cursor-pointer ${besideOnly ? 'rounded-lg pr-4' : 'rounded-l-lg pr-3'}`}
       >
         {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : added && !error ? <Check className="w-4 h-4" /> : <Box className="w-4 h-4" />}
         <span>{busy
             ? `Simulating ${Math.round((progress ?? 0) * 100)}%`
-            : error ? 'Simulation failed' : added ? 'Added to scene' : 'Add Simulation'}</span>
+            : error ? 'Simulation failed' : added ? 'Added to scene' : label}</span>
       </button>
-      <button
+      {!besideOnly && <button
         onClick={() => setPlacement((p) => (p === 'beside' ? 'overlay' : 'beside'))}
         disabled={busy}
         title={
@@ -440,7 +448,7 @@ export const AddSimulationButton: React.FC<{
         className="whitespace-nowrap px-2.5 py-2 bg-amber-50 dark:bg-amber-950/40 hover:bg-amber-100 dark:hover:bg-amber-900/60 disabled:opacity-40 text-amber-800 dark:text-amber-200 text-[11px] font-semibold rounded-r-lg border border-l-0 border-amber-300 dark:border-amber-700 cursor-pointer"
       >
         {placement === 'beside' ? 'Beside' : 'Overlay'}
-      </button>
+      </button>}
     </div>
   );
 };

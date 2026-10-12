@@ -30,6 +30,7 @@ import {
   machineSurface,
   type Heightmap,
   type ReliefCarveOptions,
+  type StockTransform,
   type SurfaceMachiningResult,
 } from './reliefCarveExporter';
 import { materialSpec, type SpindleRange } from './feedsAndSpeeds';
@@ -193,6 +194,11 @@ export interface SolidMachiningResult {
   tabsPlaced: number;
   /** Registration pin centres in work coordinates, if bored. */
   pins: { x: number; y: number }[];
+  /**
+   * How the model was turned and put in the stock, side A's frame, so a
+   * simulated cut can be put back on the model.
+   */
+  stockTransform?: StockTransform;
   estimatedTimeSeconds: number;
   totalCutDistanceMm: number;
 }
@@ -217,6 +223,16 @@ function f(num: number): string {
  * stays right-handed: the piece that comes off the machine is the part, not its
  * reflection.
  */
+/** `orient` as a row-major matrix. */
+const ORIENT_MATRIX: Record<UpAxis, number[]> = {
+  '+z': [1, 0, 0, 0, 1, 0, 0, 0, 1],
+  '-z': [1, 0, 0, 0, -1, 0, 0, 0, -1],
+  '+x': [0, 0, -1, 0, 1, 0, 1, 0, 0],
+  '-x': [0, 0, 1, 0, 1, 0, -1, 0, 0],
+  '+y': [1, 0, 0, 0, 0, -1, 0, 1, 0],
+  '-y': [1, 0, 0, 0, 0, 1, 0, -1, 0],
+};
+
 function orient(up: UpAxis, x: number, y: number, z: number): [number, number, number] {
   switch (up) {
     case '+z': return [x, y, z];
@@ -1032,6 +1048,23 @@ export function generateSolidMachining(
     unreachablePercent,
     tabsPlaced: tabs.placed,
     pins,
+    stockTransform: (() => {
+      // The scene's own millimetres, before the scale.
+      const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+      for (let i = 0; i < sceneTris.length; i++) {
+        lo[i % 3] = Math.min(lo[i % 3], sceneTris[i] * 1000);
+        hi[i % 3] = Math.max(hi[i % 3], sceneTris[i] * 1000);
+      }
+      const s = scale / 1000;
+      return {
+        rotation: [...ORIENT_MATRIX[opts.up]],
+        modelOriginMm: [0, 0, 0] as [number, number, number],
+        workOriginMm: [stockCx - (mnX + mxX) / 2, stockCy - (mnY + mxY) / 2, topZ - mxZ] as [number, number, number],
+        scale: [s, s, s] as [number, number, number],
+        modelMinMm: lo as [number, number, number],
+        modelMaxMm: hi as [number, number, number],
+      };
+    })(),
     estimatedTimeSeconds: sides.reduce((t, s) => t + s.estimatedTimeSeconds, 0),
     totalCutDistanceMm: sides.reduce((t, s) => t + s.totalCutDistanceMm, 0),
   };

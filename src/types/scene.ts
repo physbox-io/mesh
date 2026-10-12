@@ -654,9 +654,11 @@ export interface SceneNode {
    * Set on a body Add Simulation made: the part a machining program will leave,
    * cut back out of the stock, not part of the design. The exporters leave it
    * out of what they plan, so simulating a job does not change the next one.
+   * A casting pattern or mold halves added to the scene are marked the same
+   * way, for the same reason.
    */
   simulation?: {
-    kind: 'relief' | 'machining' | 'laser' | 'contour';
+    kind: 'relief' | 'machining' | 'laser' | 'contour' | 'cast' | 'mold';
     /** When it was simulated, ISO 8601. */
     createdAt: string;
     /** Simulation grid, mm. */

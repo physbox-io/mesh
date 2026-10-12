@@ -22,6 +22,7 @@ import {
   type Point2D,
 } from './laserCutExporter';
 import { appendGeomTriangles } from './geomSurface';
+import type { StockTransform } from './reliefCarveExporter';
 
 export interface ContourSliceOptions {
   /** Stock thickness, in meters. One layer is cut per thickness of model height. */
@@ -114,6 +115,12 @@ export interface ContourSliceResult {
   /** Where the dowels ended up, in model millimetres. */
   pins?: { x: number; y: number; radiusMm: number }[];
   scaleFactor?: number;
+  /**
+   * How the stack stands for the model: layer i is cut in the plan's scaled
+   * millimetres and stacked at i sheet thicknesses up, while it stands for
+   * the i-th share of the model's height.
+   */
+  stockTransform?: StockTransform;
   error?: string;
   warnings?: string[];
 }
@@ -1311,6 +1318,20 @@ export function exportContourSliceSvg(
     stackHeight,
     pins,
     scaleFactor,
+    stockTransform: (() => {
+      const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+      for (let i = 0; i < tris.length; i++) {
+        lo[i % 3] = Math.min(lo[i % 3], tris[i] * 1000);
+        hi[i % 3] = Math.max(hi[i % 3], tris[i] * 1000);
+      }
+      return {
+        modelOriginMm: [0, 0, zMin * 1000] as [number, number, number],
+        workOriginMm: [0, 0, 0] as [number, number, number],
+        scale: [scaleFactor, scaleFactor, thickness / step] as [number, number, number],
+        modelMinMm: lo as [number, number, number],
+        modelMaxMm: hi as [number, number, number],
+      };
+    })(),
     warnings,
   };
 }

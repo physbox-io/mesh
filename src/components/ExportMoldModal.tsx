@@ -25,6 +25,9 @@ import { CastingGuide } from './CastingGuide';
 import { HintAnchor } from './ExportFields';
 import { useSettled } from '../hooks/useSettled';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
+import { AddSimulationButton } from './MachineJobControls';
+import { sceneStockTransform, useAddSimulation } from '../hooks/useAddSimulation';
+import { stlToMesh } from '../utils/stlMesh';
 
 interface ExportMoldModalProps {
   isOpen: boolean;
@@ -354,6 +357,21 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
   }, [preview, result, viewMode, isXRay, explodeGap, options.moldType]);
 
   const [saving, setSaving] = useState(false);
+  const addToScene = useAddSimulation();
+
+  /** The halves as they print, flat side by side, beside the part they mold. */
+  const handleAddToScene = async () => {
+    const client = clientRef.current;
+    if (!client) return;
+    const bytes = await client.stl();
+    void addToScene.add({
+      mesh: stlToMesh(bytes),
+      transform: sceneStockTransform(),
+      kind: 'mold',
+      label: 'Mold',
+      placement: 'beside',
+    });
+  };
 
   const handleDownload = async (filename: string) => {
     const client = clientRef.current;
@@ -799,6 +817,16 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
             >
               Cancel
             </button>
+
+            <AddSimulationButton
+              disabled={!result.success || result.totalTriangles === 0 || busy || saving}
+              onSimulate={() => void handleAddToScene()}
+              progress={addToScene.progress}
+              error={addToScene.error}
+              added={addToScene.added}
+              label="Add to Scene"
+              besideOnly
+            />
 
             <button
               onClick={() => void handleDownload('casting_mold_plate.stl')}

@@ -45,9 +45,10 @@ import {
   type SimulationJobOptions,
   type SimulationJobResult,
 } from './simulatedPart';
+import { runSheetJob, type SheetJobOptions, type SheetJobResult } from './sheetSimulation';
 
 /** Which export a job runs. Add a case here and in `runExportJob`. */
-export type ExportJobKind = 'relief' | 'solid' | 'cast' | 'laser' | 'contour' | 'simulate';
+export type ExportJobKind = 'relief' | 'solid' | 'cast' | 'laser' | 'contour' | 'simulate' | 'simulateSheets';
 
 /** The options and result each job takes and returns. */
 export interface ExportJobMap {
@@ -58,6 +59,8 @@ export interface ExportJobMap {
   contour: { options: ContourSliceOptions; result: ContourSliceResult };
   /** Add Simulation: cuts a program out of a block. Takes the program, not the scene. */
   simulate: { options: SimulationJobOptions; result: SimulationJobResult };
+  /** The same for sheet parts: outlines extruded at the stock's thickness. */
+  simulateSheets: { options: SheetJobOptions; result: SheetJobResult };
 }
 
 export type ExportJobOptions<K extends ExportJobKind> = Partial<ExportJobMap[K]['options']>;
@@ -86,6 +89,8 @@ export function runExportJob<K extends ExportJobKind>(
       return exportContourSliceSvg(scene, options as ExportJobOptions<'contour'>) as ExportJobResult<K>;
     case 'simulate':
       return runSimulationJob(options as SimulationJobOptions, onProgress) as ExportJobResult<K>;
+    case 'simulateSheets':
+      return runSheetJob(options as SheetJobOptions, onProgress) as ExportJobResult<K>;
     default: {
       // Exhaustive: a new kind that forgets its case is a compile error here.
       const never: never = kind;

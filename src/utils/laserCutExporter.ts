@@ -183,6 +183,12 @@ export interface LaserPanel {
   placedPos2D?: Point2D;
   /** Which sheet of stock this panel is nested on, counting from 0. */
   sheetIndex?: number;
+  /**
+   * The packer turned the loops a quarter turn to fit the stock (see
+   * `rotatePanel90`). The 3D frame is not turned with them, so undoing this is
+   * how a loop point goes back to the panel's place in the model.
+   */
+  turnedOnSheet?: boolean;
   width2D?: number;
   height2D?: number;
 }
@@ -2656,6 +2662,7 @@ function rotatePanel90(panel: LaserPanel): void {
   const w = panel.width2D || 0;
   panel.width2D = h;
   panel.height2D = w;
+  panel.turnedOnSheet = !panel.turnedOnSheet;
 }
 
 function packPanels(

@@ -14,7 +14,7 @@ import { webSerialManager } from '../utils/webSerialManager';
 import { formatDuration } from '../utils/timeEstimate';
 import { NumberInput } from '@physbox-io/ui';
 import { useStore } from '../store/useStore';
-import { JobOverrides, JobPauseBanner, JobPreflight, JobProgress, JobResumeBanner, JobTransport } from './MachineJobControls';
+import { AddSimulationButton, JobOverrides, JobPauseBanner, JobPreflight, JobProgress, JobResumeBanner, JobTransport } from './MachineJobControls';
 import { MachineFaultBanner } from './MachineFaultBanner';
 import { ToolpathView } from './ToolpathView';
 import {
@@ -23,6 +23,8 @@ import {
 } from './CarveFields';
 import { toolingOnly, useBedProbe, useCarveTooling, useSettled, type SetTooling } from './carveTooling';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
+import { useAddSimulation } from '../hooks/useAddSimulation';
+import { reliefSimulationTools } from '../utils/simulatedPart';
 
 interface Props {
   isOpen: boolean;
@@ -84,6 +86,7 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
 
   const bed = useBedProbe(() => set('applyMeshLeveling', true));
   const { probedGrid } = bed;
+  const simulation = useAddSimulation();
 
   // Planning the job is the heaviest thing this app computes, and it used to run
   // synchronously in a useMemo right here — which froze the tab hard enough that
@@ -181,6 +184,39 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
         cutFeedrate: settled.finishingFeedrate,
         plungeRate: settled.finishingPlungeRate,
       }),
+    });
+  };
+
+  /**
+   * Cuts both setups out of one block, side B turned over as the operator
+   * turns it, and puts what comes off the machine in the scene: holes, tabs
+   * and any step at the seam between the sides included.
+   */
+  const handleSimulate = (where: 'beside' | 'overlay') => {
+    if (!result?.success || !result.stockTransform) return;
+    const [a, b] = result.sides;
+    void simulation.add({
+      job: {
+        gcode: a.gcode,
+        gcodeB: b?.gcode,
+        widthMm: result.stock.widthMm,
+        depthMm: result.stock.depthMm,
+        thicknessMm: result.stock.thicknessMm,
+        ...reliefSimulationTools(settled),
+        measureRect: result.partBounds,
+      },
+      modelVolumeMm3: result.partVolumeMm3,
+      transform: result.stockTransform,
+      kind: 'machining',
+      label: 'Solid part',
+      placement: where,
+      details: [
+        result.sides.length === 2 ? 'Two setups, side B flipped left to right' : 'One setup',
+        settled.roughingEnabled ? `Roughing: ${roughTool}` : null,
+        `Finishing: ${finishTool}`,
+        `Estimated ${formatDuration(result.estimatedTimeSeconds)} on the machine`,
+        `${result.tabsPlaced} tab${result.tabsPlaced === 1 ? '' : 's'} hold it to the frame`,
+      ].filter((d): d is string => !!d),
     });
   };
 
@@ -678,6 +714,14 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
             >
               Close
             </button>
+
+            <AddSimulationButton
+              disabled={!result?.success || busy || pending || settledPlacement !== placement}
+              onSimulate={handleSimulate}
+              progress={simulation.progress}
+              error={simulation.error}
+              added={simulation.added}
+            />
 
             {machineState.connected ? (
               <JobTransport
