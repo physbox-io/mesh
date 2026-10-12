@@ -70,6 +70,7 @@ import { MeasureTool } from './components/scene/MeasureTool';
 import { EdgeRoundTool } from './components/scene/EdgeRoundTool';
 import { EdgeRoundPanel } from './components/EdgeRoundPanel';
 import { EdgesCard } from './components/EdgesCard';
+import { SurfacePatternsCard } from './components/SurfacePatternsCard';
 import {
   PaintStrokeController, CameraController, DragInteractionController,
   SceneCapture, SceneVisuals,
@@ -5795,6 +5796,7 @@ function App() {
               })()}
 
               <EdgesCard node={selectedNode} />
+              <SurfacePatternsCard node={selectedNode} />
 
               {/* Boolean Modifiers (CSG) — subtract/intersect one primitive with another */}
               {(() => {

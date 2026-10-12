@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { applySurfaceTextures, type SurfaceTexture } from '../src/utils/surfaceTexture';
+import { applySurfaceTextures, textureIndexAt, type SurfaceTexture } from '../src/utils/surfaceTexture';
 import { analyzeMesh } from '../src/utils/meshIntegrity';
 
 /*
@@ -202,6 +202,32 @@ describe('choosing the region', () => {
     const side = 2 * Math.PI * 0.02 * 0.04;
     expect(r.areaM2).toBeGreaterThan(side * 0.22);
     expect(r.areaM2).toBeLessThan(side * 0.28);
+  });
+});
+
+describe('picking a face that already has a pattern', () => {
+  const { positions, faces } = box(HX, HY, HZ);
+  const side = fluted({ seedAt: [HX, 0, 0], seedNormal: [1, 0, 0] });
+
+  it('finds the pattern on the face picked, anywhere on that face', () => {
+    const textures = [fluted(), side];
+    expect(textureIndexAt(positions, faces, textures, [HX * 0.8, -HY * 0.7, HZ], [0, 0, 1])).toBe(0);
+    expect(textureIndexAt(positions, faces, textures, [HX, HY * 0.5, HZ * 0.5], [1, 0, 0])).toBe(1);
+  });
+
+  it('finds none on a plain face, or off the part', () => {
+    expect(textureIndexAt(positions, faces, [fluted()], [0, 0, -HZ], [0, 0, -1])).toBe(-1);
+    expect(textureIndexAt(positions, faces, [fluted()], [1, 1, 1])).toBe(-1);
+  });
+
+  it('settles a pick on an edge by the way it faced', () => {
+    const textures = [fluted(), side];
+    expect(textureIndexAt(positions, faces, textures, [HX, 0, HZ], [0, 0, 1])).toBe(0);
+    expect(textureIndexAt(positions, faces, textures, [HX, 0, HZ], [1, 0, 0])).toBe(1);
+  });
+
+  it('does not credit a pattern refused as an overlap with the face', () => {
+    expect(textureIndexAt(positions, faces, [fluted(), fluted({ seedAt: [HX / 2, 0, HZ] })], [0, 0, HZ], [0, 0, 1])).toBe(0);
   });
 });
 

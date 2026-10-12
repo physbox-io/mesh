@@ -12,12 +12,16 @@ import * as THREE from 'three';
 import type { SceneGeom, SceneNode } from '../types/scene';
 import { geomRayHits, resolveCsgGeoms } from './csg';
 import { getGeomFrame } from './laserCutExporter';
+import { geomHalfLen, geomLocalSurface } from './geomSurface';
+import { textureIndexAt } from './surfaceTexture';
 
 /** A face picked for a pattern: the geom, and the seed in its own frame. */
 export interface PatternPick {
   geomName: string;
   seedAt: number[];
   seedNormal: number[];
+  /** The pattern already on the face picked, which the pick opens rather than adding another. */
+  index?: number;
 }
 
 const PATTERNABLE = new Set(['box', 'sphere', 'ellipsoid', 'cylinder', 'capsule', 'mesh']);
@@ -58,11 +62,17 @@ export function pickPatternFace(node: SceneNode, origin: number[], direction: nu
     normal.transformDirection(inverse);
   }
   const round = (v: THREE.Vector3) => v.toArray().map((x) => +x.toFixed(7));
-  return { geomName: best.geom.name, seedAt: round(at), seedNormal: round(normal.normalize()) };
+  const pick: PatternPick = { geomName: best.geom.name, seedAt: round(at), seedNormal: round(normal.normalize()) };
+  const textures = best.geom.textures;
+  if (textures?.length) {
+    const base = geomLocalSurface(best.geom, geomHalfLen(best.geom));
+    const index = base ? textureIndexAt(base.positions, base.faces, textures, pick.seedAt, pick.seedNormal) : -1;
+    if (index >= 0) pick.index = index;
+  }
+  return pick;
 }
 
 /** The face the pattern dialog is open on. `index` is the pattern being edited; absent for a new one. */
 export interface FacePatternTarget extends PatternPick {
   nodeId: string;
-  index?: number;
 }

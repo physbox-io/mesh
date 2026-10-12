@@ -323,6 +323,82 @@ function growRegion(
   return region;
 }
 
+/** A welded surface with what growing regions on it needs. */
+interface IndexedSurface {
+  mesh: Mesh;
+  normals: Vec3[];
+  areas: number[];
+  edges: Map<number, number[]>;
+  /**
+   * How far a seed may sit off the surface and still be on it: slack for a
+   * pick made on a slightly different tessellation of the same shape.
+   */
+  seedTol: number;
+}
+
+function indexSurface(positions: ArrayLike<number>, faces: ArrayLike<number>): IndexedSurface {
+  const mesh = weld(positions, faces);
+  const normals: Vec3[] = [];
+  const areas: number[] = [];
+  for (let f = 0; f < mesh.faces.length / 3; f++) {
+    const c = faceCross(mesh, f);
+    normals.push(norm(c));
+    areas.push(len(c) / 2);
+  }
+  let extent = 0;
+  if (mesh.pos.length) {
+    const lo: Vec3 = [Infinity, Infinity, Infinity], hi: Vec3 = [-Infinity, -Infinity, -Infinity];
+    for (let i = 0; i < mesh.pos.length; i += 3) {
+      for (let a = 0; a < 3; a++) {
+        lo[a] = Math.min(lo[a], mesh.pos[i + a]);
+        hi[a] = Math.max(hi[a], mesh.pos[i + a]);
+      }
+    }
+    extent = len(sub(hi, lo));
+  }
+  return { mesh, normals, areas, edges: edgeFaces(mesh), seedTol: Math.max(5e-4, extent * 0.01) };
+}
+
+/** The faces a texture's region takes, grown from its seed, or why it has none. */
+function textureRegion(surface: IndexedSurface, texture: SurfaceTexture, claimed: Int32Array): number[] | 'missed' | 'overlap' {
+  const { mesh, normals, edges, seedTol } = surface;
+  const seedN = texture.seedNormal ? norm(texture.seedNormal as Vec3) : null;
+  const seed = seedFace(mesh, normals, texture.seedAt as Vec3, seedN, seedTol);
+  if (seed < 0) return 'missed';
+  const creaseCos = Math.cos(((texture.creaseDeg ?? EDGE_CREASE_DEG) * Math.PI) / 180);
+  const tiltCos = Math.cos(((texture.maxTiltDeg ?? DEFAULT_MAX_TILT_DEG) * Math.PI) / 180);
+  return growRegion(mesh, normals, edges, seed, creaseCos, tiltCos, claimed);
+}
+
+/**
+ * Which of `textures` already covers the point picked, or -1. Picking a face
+ * that has a pattern on it opens that pattern rather than laying a second one,
+ * which would only be refused as an overlap.
+ */
+export function textureIndexAt(
+  positions: ArrayLike<number>,
+  faces: ArrayLike<number>,
+  textures: SurfaceTexture[],
+  at: number[],
+  normal?: number[],
+): number {
+  const surface = indexSurface(positions, faces);
+  const picked = seedFace(surface.mesh, surface.normals, at as Vec3, normal ? norm(normal as Vec3) : null, surface.seedTol);
+  if (picked < 0) return -1;
+  // Claimed in order, as applySurfaceTextures does, so a pattern refused for
+  // overlapping an earlier one does not own the earlier one's faces.
+  const claimed = new Int32Array(surface.mesh.faces.length / 3).fill(-1);
+  for (let i = 0; i < textures.length; i++) {
+    const spec = patternById(textures[i].pattern);
+    if (!spec || spec.throughCut || !(Math.abs(textures[i].depthM) > 0)) continue;
+    const grown = textureRegion(surface, textures[i], claimed);
+    if (typeof grown === 'string') continue;
+    if (grown.includes(picked)) return i;
+    for (const f of grown) claimed[f] = i;
+  }
+  return -1;
+}
+
 /**
  * The tightest the region curves, as a radius in metres: the angle between
  * neighbouring facets over the distance between their middles. Infinite on a
@@ -645,34 +721,11 @@ export function applySurfaceTextures(
   options: { maxTriangles?: number } = {},
 ): TexturedSurface {
   const maxTriangles = options.maxTriangles ?? MAX_TEXTURE_TRIANGLES;
-  const mesh = weld(positions, faces);
+  const surface = indexSurface(positions, faces);
+  const { mesh, normals, areas, edges } = surface;
   const warnings: string[] = [];
   const regions: TextureRegionReport[] = [];
   const faceCount = mesh.faces.length / 3;
-
-  const normals: Vec3[] = [];
-  const areas: number[] = [];
-  for (let f = 0; f < faceCount; f++) {
-    const c = faceCross(mesh, f);
-    normals.push(norm(c));
-    areas.push(len(c) / 2);
-  }
-  const edges = edgeFaces(mesh);
-
-  let extent = 0;
-  {
-    const lo: Vec3 = [Infinity, Infinity, Infinity], hi: Vec3 = [-Infinity, -Infinity, -Infinity];
-    for (let i = 0; i < mesh.pos.length; i += 3) {
-      for (let a = 0; a < 3; a++) {
-        lo[a] = Math.min(lo[a], mesh.pos[i + a]);
-        hi[a] = Math.max(hi[a], mesh.pos[i + a]);
-      }
-    }
-    if (mesh.pos.length) extent = len(sub(hi, lo));
-  }
-  // A pick is a point on the surface; this much slack covers a pick made on a
-  // slightly different tessellation of the same shape.
-  const seedTol = Math.max(5e-4, extent * 0.01);
 
   const claimed = new Int32Array(faceCount).fill(-1);
   interface Job {
@@ -700,14 +753,8 @@ export function applySurfaceTextures(
     if (spec.throughCut) return skip(index, `${spec.label} cuts right through a board, so it cannot be laid on a face.`);
     if (!(Math.abs(texture.depthM) > 0)) return skip(index, 'its depth is zero.');
 
-    const at = texture.seedAt as Vec3;
-    const seedN = texture.seedNormal ? norm(texture.seedNormal as Vec3) : null;
-    const seed = seedFace(mesh, normals, at, seedN, seedTol);
-    if (seed < 0) return skip(index, 'the point it was put on is no longer on the part.');
-
-    const creaseCos = Math.cos(((texture.creaseDeg ?? EDGE_CREASE_DEG) * Math.PI) / 180);
-    const tiltCos = Math.cos(((texture.maxTiltDeg ?? DEFAULT_MAX_TILT_DEG) * Math.PI) / 180);
-    const grown = growRegion(mesh, normals, edges, seed, creaseCos, tiltCos, claimed);
+    const grown = textureRegion(surface, texture, claimed);
+    if (grown === 'missed') return skip(index, 'the point it was put on is no longer on the part.');
     if (grown === 'overlap') return skip(index, 'it overlaps a pattern already on that face.');
 
     let area = 0;
