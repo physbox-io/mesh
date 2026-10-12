@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { X, AlertCircle, Cpu, RefreshCw, Layers, Cuboid, Download } from 'lucide-react';
 import type { SceneGraph } from '../types/scene';
 import { recommendReliefTooling } from '../utils/reliefCarveExporter';
@@ -69,38 +69,57 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
   // Which way up and how big are not tooling, and the part's height — which
   // the feeds are derated for — depends on them, so they are kept outside the
   // tooling state and measured first.
-  const [placement, setPlacement] = useState<{ up: UpAxis; scalePercent: number }>({
-    up: DEFAULT_SOLID_OPTIONS.up,
-    scalePercent: DEFAULT_SOLID_OPTIONS.scalePercent,
-  });
-  const part = useMemo(
-    () => (isOpen ? measurePart(scene, placement.up, placement.scalePercent) : null),
-    [isOpen, scene, placement]
-  );
+  //
   // The scale is chosen for the model in the scene: 100% for anything a router
   // can mill from solid, and for something bigger (a tree, a room) the scale
-  // that makes a part of it. Chosen again when a different model arrives, so
-  // the 5% a tree was given is not what the next preset is planned at; a scale
-  // set by hand stays while the model is edited.
-  const fittedFor = useRef<number | null>(null);
-  useEffect(() => {
-    if (!isOpen) return;
+  // that makes a part of it. Chosen again when a model of a different size
+  // arrives, so the 5% a tree was given is not what the next preset is planned
+  // at; a scale set by hand stays while the same model is edited. `forMm` is
+  // the size of the model the scale was chosen for.
+  type Placement = { up: UpAxis; scalePercent: number; forMm: number | null };
+  const [placement, setPlacement] = useState<Placement>({
+    up: DEFAULT_SOLID_OPTIONS.up,
+    scalePercent: DEFAULT_SOLID_OPTIONS.scalePercent,
+    forMm: null,
+  });
+  const largest = useMemo(() => {
+    if (!isOpen) return null;
     const natural = measurePart(scene, '+z', 100);
-    if (!natural) return;
-    const largest = Math.max(natural.x, natural.y, natural.z);
-    const was = fittedFor.current;
-    const sameModel = was !== null && largest < was * 2 && largest > was / 2;
-    if (sameModel) return;
-    fittedFor.current = largest;
-    setPlacement((p) => ({ ...p, scalePercent: fittingScalePercent(largest) }));
+    return natural ? Math.max(natural.x, natural.y, natural.z) : null;
   }, [isOpen, scene]);
+  /*
+   * Worked out during render, not in an effect: the first plan starts in the
+   * same commit the dialog opens, and planned at 100% first, a tree failed at
+   * once and showed that failure for the half minute the plan at its real
+   * scale took.
+   */
+  const fitTo = (p: Placement): Placement =>
+    largest === null || (p.forMm !== null && largest < p.forMm * 2 && largest > p.forMm / 2)
+      ? p
+      : { ...p, scalePercent: fittingScalePercent(largest), forMm: largest };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const shown = useMemo(() => fitTo(placement), [placement, largest]);
+  useEffect(() => {
+    if (shown !== placement) setPlacement(shown);
+  }, [shown, placement]);
+  const settledRaw = useSettled(placement, 250);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const settledFit = useMemo(() => fitTo(settledRaw), [settledRaw, largest]);
+  const settledPlacement = useMemo(
+    () => ({ up: settledFit.up, scalePercent: settledFit.scalePercent }),
+    [settledFit.up, settledFit.scalePercent]
+  );
+  const placementSettled = settledPlacement.up === shown.up && settledPlacement.scalePercent === shown.scalePercent;
+  const part = useMemo(
+    () => (isOpen ? measurePart(scene, shown.up, shown.scalePercent) : null),
+    [isOpen, scene, shown.up, shown.scalePercent]
+  );
   const partHeight = part?.z ?? 10;
 
   const {
     options, setOptions, set, overrides, setOverrides, override, machineState, cuttingRateLimit,
     derived, effective, settled, pending, materialLabel, finishTool, roughTool, speedNote,
   } = useCarveTooling(isOpen, DEFAULT_SOLID_OPTIONS, (o) => sideDepthMm(partHeight, o));
-  const settledPlacement = useSettled(placement, 250);
 
   const bed = useBedProbe(() => set('applyMeshLeveling', true));
   const { probedGrid } = bed;
@@ -310,7 +329,7 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
                 hint="Which axis of the model points at the spindle for the first side. Pick the one that puts the part's flat face down and its tallest dimension across the bed rather than up: the deeper the cut the longer and whippier the cutter has to be."
               >
                 <select
-                  value={placement.up}
+                  value={shown.up}
                   onChange={(e) => setPlacement((p) => ({ ...p, up: e.target.value as UpAxis }))}
                   className={inputClass}
                 >
@@ -325,7 +344,7 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
               >
                 <NumberInput
                   step={10} min={1} max={10000}
-                  value={placement.scalePercent}
+                  value={shown.scalePercent}
                   onChange={(v) => v !== undefined && setPlacement((p) => ({ ...p, scalePercent: v }))}
                   className={inputClass}
                 />
@@ -610,7 +629,7 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
                     Pauses for a tool change between passes
                   </span>
                 )}
-                {(busy || pending || settledPlacement !== placement) && <span className="text-slate-400 italic">recalculating…</span>}
+                {(busy || pending || !placementSettled) && <span className="text-slate-400 italic">recalculating…</span>}
                 <span className="ml-auto flex items-center gap-2">
                   {result.sides.map((s) => (
                     <button
@@ -734,7 +753,7 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
             </button>
 
             <AddSimulationButton
-              disabled={!result?.success || busy || pending || settledPlacement !== placement}
+              disabled={!result?.success || busy || pending || !placementSettled}
               onSimulate={handleSimulate}
               progress={simulation.progress}
               error={simulation.error}
