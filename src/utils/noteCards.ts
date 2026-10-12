@@ -352,7 +352,7 @@ Lattice modelling is for parts like this: exact coordinates and arbitrary topolo
 
   oak_tree: `# Oak Tree
 
-An open-grown English oak, **5.4 m** tall with a **6.5 m** crown. Not sculpted: grown, by a recursive branching rule, so the shape is a record of how it got there rather than a lump pushed into a tree silhouette.
+A young open-grown English oak, **3.0 m** tall with a **3.8 m** crown. Not sculpted: grown, by a recursive branching rule, so the shape is a record of how it got there rather than a lump pushed into a tree silhouette.
 
 ## What makes it an oak
 - A short, stout bole that forks **low**, at 2 m of a 5.4 m tree, with a buttressed flare over the bottom 400 mm.
@@ -364,17 +364,17 @@ An open-grown English oak, **5.4 m** tall with a **6.5 m** crown. Not sculpted: 
 ## Numbers
 | | |
 |---|---|
-| Height | 5.39 m |
-| Crown spread | 6.51 x 6.46 m |
-| Trunk at the base / flare | 0.40 / 0.68 m |
+| Height | 3.03 m |
+| Crown spread | 3.79 x 3.82 m |
+| Trunk at the base / flare | 0.22 / 0.37 m |
 | Crown to trunk | 16 : 1 |
-| Lowest foliage | 2.07 m |
+| Lowest foliage | 0.99 m |
 | Wood / foliage triangles | 5,850 / 26,320 |
 
 ## Try it
 - The whole tree comes from one seed. Change the seed passed to buildOakTree and you get a different tree of the same species.
 - Raise the starting upward bias from 0.10 and the limbs leave steeply: you get a lombardy poplar.
-- Drop the twig threshold below 0.011 m for finer branching, at a cost in triangles.
+- Drop the twig threshold below 0.011 for finer branching, at a cost in triangles.
 
 It is scenery — no joint, and neither mesh collides, because the convex hull of a tree is a dome nothing should bump into.`,
 

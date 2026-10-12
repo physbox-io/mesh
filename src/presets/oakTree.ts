@@ -368,8 +368,21 @@ export function buildOakTree(seed = 20260913) {
     grow(o, start, dir, 1.02 + rnd() * 0.34, FORK_R * (0.60 + rnd() * 0.14), 6, 0.12);
   }
 
+  // Grown at the size of a field oak, nearly 7 m across, and handed back at a
+  // little over half that: a young oak, under 4 m every way, which is as big
+  // as anything in this app should be. Scaling the finished tree rather than
+  // every length above keeps its shape exactly as it grew.
+  for (const m of [o.wood, o.leaf]) for (let i = 0; i < m.positions.length; i++) m.positions[i] *= SIZE;
+  for (const f of o.foliage) {
+    f.centre = mul(f.centre, SIZE);
+    f.tip = mul(f.tip, SIZE);
+    f.radius *= SIZE;
+  }
   return o;
 }
+
+/** What the tree is scaled by once grown. */
+const SIZE = 0.55;
 
 /**
  * Z-up build coordinates to the Y-up world space a mesh geom's `vertices` are
@@ -404,8 +417,8 @@ export const oakTreePreset: SceneGraph = (() => {
           type: 'mesh',
           size: [1],
           rgba: [0.33, 0.26, 0.20, 1],
-          // Green oak, in kg/m3. The trunk and limbs come to 0.87 m3, so the
-          // timber of this tree weighs about 600kg — which, with the crown
+          // Green oak, in kg/m3. The trunk and limbs come to 0.15 m3, so the
+          // timber of this tree weighs about 100 kg — which, with the crown
           // below, is what decides how it stands and how it goes over.
           density: 700,
           contype: 0,
@@ -419,9 +432,9 @@ export const oakTreePreset: SceneGraph = (() => {
           type: 'mesh',
           size: [1],
           rgba: [0.25, 0.42, 0.18, 1],
-          // The clumps enclose 100 m3, and a crown is very nearly all air: the
-          // leaves of a mature oak are a couple of hundred kilos spread through
-          // it. Left at the default 1000 the canopy alone weighed 100 TONNES
+          // The clumps enclose 17 m3, and a crown is very nearly all air: the
+          // leaves of a young oak are some tens of kilos spread through
+          // it. Left at the default 1000 the canopy alone weighed 17 TONNES
           // and dragged the centre of mass up into the branches, which is what
           // made the tree behave like a top-heavy dome of water the moment it
           // was made movable.

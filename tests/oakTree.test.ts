@@ -22,14 +22,16 @@ describe('oak tree', () => {
       height: +height.toFixed(2),
       spreadX: +spreadX.toFixed(2),
       spreadY: +spreadY.toFixed(2),
-      crownToTrunk: +(Math.max(spreadX, spreadY) / 0.40).toFixed(1),
+      crownToTrunk: +(Math.max(spreadX, spreadY) / 0.22).toFixed(1),
       woodVerts: wood.positions.length / 3, woodTris: wood.faces.length / 3,
       leafVerts: leaf.positions.length / 3, leafTris: leaf.faces.length / 3,
       lowestLeaf: +l.min[2].toFixed(2),
     }, null, 1));
-    expect(height).toBeGreaterThan(3.5);
+    // A young oak: under 4 m every way, which is as big as this app goes.
+    expect(height).toBeGreaterThan(2.5);
+    expect(Math.max(height, spreadX, spreadY)).toBeLessThan(4);
     expect(Math.max(spreadX, spreadY)).toBeGreaterThan(height * 0.85);
-    expect(l.min[2]).toBeGreaterThan(1.2);
+    expect(l.min[2]).toBeGreaterThan(0.66);
   });
 
   it('is deterministic', () => {
@@ -125,12 +127,12 @@ describe('an oak made movable', () => {
 
   it('weighs what a tree weighs, not what its crown-sized hull would', async () => {
     const sim = await simulate(madeMovable());
-    // 0.87 m3 of timber and 100 m3 of mostly-air canopy: under a tonne, with
-    // the centre of mass down in the trunk rather than up among the branches.
+    // 0.15 m3 of timber and 17 m3 of mostly-air canopy: 150 kg, with the
+    // centre of mass down in the trunk rather than up among the branches.
     const mass = sim.model.body_mass[1];
-    expect(mass).toBeGreaterThan(400);
-    expect(mass).toBeLessThan(2000);
-    expect(sim.model.body_ipos[5]).toBeLessThan(3);
+    expect(mass).toBeGreaterThan(80);
+    expect(mass).toBeLessThan(400);
+    expect(sim.model.body_ipos[5]).toBeLessThan(1.65);
     sim.dispose();
   });
 
