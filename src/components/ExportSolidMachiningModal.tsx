@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { X, AlertCircle, Cpu, RefreshCw, Layers, Cuboid, Download } from 'lucide-react';
 import type { SceneGraph } from '../types/scene';
 import { recommendReliefTooling } from '../utils/reliefCarveExporter';
@@ -99,9 +99,9 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
       : { ...p, scalePercent: fittingScalePercent(largest), forMm: largest };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const shown = useMemo(() => fitTo(placement), [placement, largest]);
-  useEffect(() => {
-    if (shown !== placement) setPlacement(shown);
-  }, [shown, placement]);
+  // Kept, so a scale typed in next starts from it. Set during render, as React
+  // has it for state that follows from other state: an effect would render twice.
+  if (shown !== placement) setPlacement(shown);
   const settledRaw = useSettled(placement, 250);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const settledFit = useMemo(() => fitTo(settledRaw), [settledRaw, largest]);
