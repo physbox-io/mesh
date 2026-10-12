@@ -43,7 +43,7 @@ import { generateCastPattern, DEFAULT_CAST_OPTIONS, type CastMethod } from '../u
 import { runCastPrep } from '../utils/castPrepRunner';
 import { selectionSoups, splitOffThread, testAssemblyOffThread } from '../utils/printSplitClient';
 import { filamentSpec } from '../utils/filaments';
-import { generateSolidMachining, deriveSolidOptions, fittingScalePercent, measurePart } from '../utils/solidMachiningExporter';
+import { deriveSolidOptions, fittingScalePercent, measurePart, type SolidMachiningResult } from '../utils/solidMachiningExporter';
 import {
   DEFAULT_RELIEF_OPTIONS,
   deriveReliefFeeds,
@@ -2478,7 +2478,11 @@ export function useMCPBridge() {
           const scene = store.sceneGraph;
           if (!scene.nodes?.length) return { ok: false, error: 'The scene is empty — there is nothing to machine.' };
           const options = machiningOptionsFor(msg, scene);
-          const result = generateSolidMachining(scene, options);
+          // On a worker, as the dialog plans it: on the page, a big part froze
+          // the tab for the half minute its plan takes.
+          const client = new ExportWorkerClient();
+          let result: SolidMachiningResult;
+          try { result = await client.run('solid', scene, options); } finally { client.dispose(); }
           if (!result.success) return { ok: false, error: result.error || 'The machining program could not be generated.', warnings: result.warnings ?? [] };
           const encoder = new TextEncoder();
           return {
@@ -2551,7 +2555,9 @@ export function useMCPBridge() {
 
           if (msg.kind === 'machining') {
             const options = machiningOptionsFor(msg, scene);
-            const result = generateSolidMachining(scene, options);
+            // On the worker: a big part's plan takes half a minute, and on the
+            // page it froze the tab for all of it.
+            const result: SolidMachiningResult = await runJob((c) => c.run('solid', scene, options));
             if (!result.success || !result.stockTransform) {
               return { ok: false, error: result.error || 'The machining program could not be generated.', warnings: result.warnings ?? [] };
             }
