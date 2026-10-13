@@ -4,7 +4,7 @@
 // error rather than a silent no-op -- the convention physicsWorkerProtocol.ts
 // established.
 
-import type { SurfaceTexture, TexturedSurface } from '../utils/surfaceTexture';
+import type { FaceSplit, SurfaceTexture, TexturedSurface } from '../utils/surfaceTexture';
 
 export interface TextureRequest {
   type: 'TEXTURE';
@@ -12,6 +12,7 @@ export interface TextureRequest {
   positions: Float64Array;
   faces: Uint32Array;
   textures: SurfaceTexture[];
+  splits?: FaceSplit[];
 }
 
 export type TextureResponse =

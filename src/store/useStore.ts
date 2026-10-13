@@ -24,7 +24,7 @@ import {
 import { collidersAreStale, collisionHashOf, type ColliderResult } from '../utils/convexDecomposition';
 import { insetNegatives } from '../utils/scaleNode';
 import type { PaintLayer } from '../utils/vertexPaint';
-import type { SurfaceTexture } from '../utils/surfaceTexture';
+import type { FaceSplit, SurfaceTexture } from '../utils/surfaceTexture';
 import type { FacePatternTarget } from '../utils/facePatternPick';
 import type { DocsTabId } from '../utils/docsTabs';
 import { compileToMJCF } from '../utils/mjcf';
@@ -1629,6 +1629,8 @@ export interface PhysicsState {
    * them with undefined. No recompile: the MJCF never reads them.
    */
   setGeomTextures: (nodeId: string, geomName: string, textures: SurfaceTexture[] | undefined) => void;
+  /** Replace a geom's knife seams (SceneGeom.faceSplits). One undo step; no recompile. */
+  setGeomFaceSplits: (nodeId: string, geomName: string, splits: FaceSplit[] | undefined) => void;
   /**
    * Replace the scene with something a generator built, and hand the exporter
    * the settings it should be cut with.
@@ -1773,6 +1775,11 @@ export interface PhysicsState {
     sections: Pick<SplitSection, 'positions' | 'faces' | 'plainPositions' | 'plainFaces' | 'up' | 'spin' | 'colliders' | 'volumeMm3' | 'convexPieces'>[],
     /** Other bodies whose geometry went into the sections — attached children, or bodies selected with it — to remove. */
     absorbed?: string[],
+    /**
+     * A plain cut (the knife's) rather than a split for print: the pieces keep
+     * the part's colour and are given no print pose.
+     */
+    opts?: { plain?: boolean },
   ) => string[];
   /** Set how finely contact is resolved (SceneGraph.simFidelity). One undo step. */
   setSimFidelity: (fidelity: 'standard' | 'print') => void;
@@ -2544,6 +2551,19 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     set({ sceneGraph: newScene });
   },
 
+  setGeomFaceSplits: (nodeId, geomName, splits) => {
+    const existing = findNode(get().sceneGraph.nodes, nodeId);
+    if (!existing?.geoms?.some((geom: SceneGeom) => geom.name === geomName)) return;
+    get().prepareForDiscreteChange();
+    const newScene = cloneSceneGraph(get().sceneGraph);
+    const geom = findNode(newScene.nodes, nodeId)?.geoms?.find((g: SceneGeom) => g.name === geomName);
+    if (!geom) return;
+    if (splits?.length) geom.faceSplits = splits;
+    else delete geom.faceSplits;
+    // No recompile: a seam changes no shape (see setGeomTextures).
+    set({ sceneGraph: newScene });
+  },
+
   setGeomColor: (nodeId, geomName, rgba) => {
     get().recordInteraction('node-geom');
     const newScene = cloneSceneGraph(get().sceneGraph);
@@ -3186,7 +3206,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     return ids;
   },
 
-  splitBodyForPrint: (nodeId, sections, absorbed = []) => {
+  splitBodyForPrint: (nodeId, sections, absorbed = [], opts = {}) => {
     const node = findNode(get().sceneGraph.nodes, nodeId);
     if (!node || sections.length === 0) return [nodeId];
     get().prepareForDiscreteChange();
@@ -3212,7 +3232,9 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
       && first.geoms.some((g: SceneGeom) => Array.isArray(g.baseVertices) && g.baseVertices.length > 0);
 
     const geomsFor = (id: string, sec: (typeof sections)[number], k: number): SceneGeom[] => {
-      const rgba = [...SECTION_COLOURS[k % SECTION_COLOURS.length], template?.rgba?.[3] ?? 1];
+      const rgba = opts.plain && template?.rgba
+        ? [...template.rgba]
+        : [...SECTION_COLOURS[k % SECTION_COLOURS.length], template?.rgba?.[3] ?? 1];
       const renderVertices = Array.from(sec.positions);
       const vertices: number[] = new Array(renderVertices.length);
       for (let i = 0; i < renderVertices.length; i += 3) {
@@ -3292,7 +3314,8 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     }
     strip(first);
     first.geoms = geomsFor(first.name || first.id, sections[0], 0);
-    first.printPose = poseOf(sections[0]);
+    if (opts.plain) delete first.printPose;
+    else first.printPose = poseOf(sections[0]);
     installPieces(first, sections[0]);
 
     const siblings = (() => {
@@ -3330,7 +3353,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
         connectTargetId: undefined,
         script: undefined,
         geoms: geomsFor(name, sec, k + 1),
-        printPose: poseOf(sec),
+        printPose: opts.plain ? undefined : poseOf(sec),
         children: [],
       };
       installPieces(section, sec);
@@ -4763,17 +4786,17 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     const node = findNode(newScene.nodes, nodeId);
     if (!node) return;
     const source = (node.geoms || []).filter((g: SceneGeom) => !g.csgDerived);
-    // Patterns on the compiled surface are authored on a derived geom, so they
-    // are carried over to the one that replaces it -- by name, or from the
-    // only visual mesh to the only visual mesh. Their seeds find the face
-    // again on the new surface, or say it has gone.
-    const oldVisual = (node.geoms || []).filter((g: SceneGeom) => g.csgDerived === 'visual' && g.textures?.length);
+    // Patterns and seams on the compiled surface are authored on a derived
+    // geom, so they are carried over to the one that replaces it -- by name,
+    // or from the only visual mesh to the only visual mesh. Their seeds find
+    // the face again on the new surface, or say it has gone.
+    const oldVisual = (node.geoms || []).filter((g: SceneGeom) => g.csgDerived === 'visual' && (g.textures?.length || g.faceSplits?.length));
     const newVisual = result.geoms.filter((g: SceneGeom) => g.csgDerived === 'visual');
     const geoms = result.geoms.map((g: SceneGeom) => {
       if (g.csgDerived !== 'visual' || !oldVisual.length) return g;
       const from = oldVisual.find((o: SceneGeom) => o.name === g.name)
         ?? (oldVisual.length === 1 && newVisual.length === 1 ? oldVisual[0] : undefined);
-      return from ? { ...g, textures: from.textures } : g;
+      return from ? { ...g, textures: from.textures, faceSplits: from.faceSplits } : g;
     });
     node.geoms = [...source, ...geoms];
     node.csgHash = result.hash;

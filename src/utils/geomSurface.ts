@@ -143,7 +143,7 @@ export function texturedSurfaceKey(geom: SceneGeom, halfLen?: number): string {
   const base = geom.type === 'mesh'
     ? `mesh:${idOf(geom.renderVertices ?? geom.vertices)}:${idOf(geom.faces)}`
     : `${geom.type}:${(geom.size || []).join(',')}:${halfLen ?? ''}`;
-  return `${base}|${JSON.stringify(geom.textures ?? [])}`;
+  return `${base}|${JSON.stringify(geom.textures ?? [])}|${JSON.stringify(geom.faceSplits ?? [])}`;
 }
 
 /** The cached textured surface, without building it. */
@@ -174,7 +174,7 @@ export function texturedSurfaceOf(geom: SceneGeom, halfLen?: number): TexturedSu
   if (hit) return hit;
   const base = geomLocalSurface(geom, halfLen);
   if (!base) return null;
-  const surface = applySurfaceTextures(base.positions, base.faces, geom.textures);
+  const surface = applySurfaceTextures(base.positions, base.faces, geom.textures, { splits: geom.faceSplits });
   storeTexturedSurface(texturedSurfaceKey(geom, halfLen), surface);
   return surface;
 }

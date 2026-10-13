@@ -8,7 +8,7 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import type { ManifoldToplevel } from 'manifold-3d';
 import { loadManifold } from '../src/utils/sculptCut';
-import { splitForPrint, sectionPoseMatrix, type SplitResult } from '../src/utils/printSplit';
+import { cutAlongPlane, splitForPrint, sectionPoseMatrix, type SplitResult } from '../src/utils/printSplit';
 import { layoutOnBed, packOnBed, rotatePoints, type Vec3 } from '../src/utils/printPlate';
 import { supportArea } from '../src/utils/printSupport';
 import { analyzeMesh } from '../src/utils/meshIntegrity';
@@ -310,5 +310,38 @@ describe('selectionSoups', () => {
     const r = ok(splitForPrint(wasm, soups, { bed: bed200, joinery: { kind: 'none' } }));
     expect(r.sections).toHaveLength(1);
     expect(r.sections[0].volumeMm3).toBeCloseTo(2 * 20 * 20 * 20, 0);
+  });
+});
+
+describe('the knife cutting right through', () => {
+  it('cuts a box in two, in place, closed, with the volume shared out', () => {
+    const r = cutAlongPlane(wasm, [box(40, 20, 10)], [0.015, 0, 0], [1, 0, 0]);
+    if (!r.ok) throw new Error(r.error);
+    expect(r.sections).toHaveLength(2);
+    const volumes = r.sections.map((s) => s.volumeMm3).sort((a, b) => a - b);
+    expect(volumes[0]).toBeCloseTo(15 * 20 * 10, 0);
+    expect(volumes[1]).toBeCloseTo(25 * 20 * 10, 0);
+    for (const s of r.sections) {
+      const check = analyzeMesh(Array.from(s.positions), Array.from(s.faces))!;
+      expect(check.closed && check.consistentlyWound).toBe(true);
+      // In the body's frame, where they were cut from: no print pose.
+      for (let i = 0; i < s.positions.length; i += 3) {
+        expect(s.positions[i]).toBeGreaterThan(-1e-6);
+        expect(s.positions[i]).toBeLessThan(0.04 + 1e-6);
+      }
+    }
+  });
+
+  it('makes every separate piece a part: a U cut across both legs is three', () => {
+    // Two uprights on a base, cut above the base: the base and both leg tops.
+    const soups = [box(40, 10, 10), box(10, 10, 30, [0, 0, 10]), box(10, 10, 30, [30, 0, 10])];
+    const r = cutAlongPlane(wasm, soups, [0, 0, 0.025], [0, 0, 1]);
+    if (!r.ok) throw new Error(r.error);
+    expect(r.sections).toHaveLength(3);
+  });
+
+  it('refuses a plane that misses the part', () => {
+    const r = cutAlongPlane(wasm, [box(40, 20, 10)], [0.1, 0, 0], [1, 0, 0]);
+    expect(r.ok).toBe(false);
   });
 });

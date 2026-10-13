@@ -15,7 +15,7 @@ const post = (msg: TextureResponse) => (self as unknown as DedicatedWorkerGlobal
 self.onmessage = (evt: MessageEvent<TextureRequest>) => {
   const msg = evt.data;
   try {
-    const surface = applySurfaceTextures(msg.positions, msg.faces, msg.textures);
+    const surface = applySurfaceTextures(msg.positions, msg.faces, msg.textures, { splits: msg.splits });
     post({ type: 'TEXTURE_DONE', id: msg.id, surface });
   } catch (err) {
     post({ type: 'TEXTURE_FAILED', id: msg.id, error: err instanceof Error ? err.message : String(err) });

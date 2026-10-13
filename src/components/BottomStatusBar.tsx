@@ -71,7 +71,7 @@ interface ModeChoice {
   hint: string;
   /** A lattice tool to switch to, or a gesture to start. */
   tool?: LatticeTool;
-  gesture?: 'move' | 'rotate' | 'scale' | 'inset' | 'measure-distance' | 'measure-angle' | 'round-edges' | 'pattern';
+  gesture?: 'move' | 'rotate' | 'scale' | 'inset' | 'measure-distance' | 'measure-angle' | 'round-edges' | 'pattern' | 'knife';
   /** Put every tool away, leave sculpt or lattice mode, and drop the selection. */
   none?: true;
   /** Open sculpt or lattice mode on the selected body. */
@@ -112,6 +112,7 @@ const LATTICE_INSET: ModeChoice = { key: 'I', label: 'Inset', gesture: 'inset', 
 const BODY_INSET: ModeChoice = { key: 'I', label: 'Inset face', gesture: 'inset', hint: 'Inset the flat face under the pointer, click, then push in for a pocket or pull out for a boss. On a curved surface it bores through' };
 
 /** Offered on its own, beside the gestures: a finishing step for any part that is not being sculpted or latticed. */
+const KNIFE: ModeChoice = { key: 'K', label: 'Knife', gesture: 'knife', hint: 'Drag a line across the selected part to split its face in two, so each side can take its own pattern. C while dragging cuts it right through into separate parts. Click a seam to remove it' };
 const SELECT_MULTIPLE: ModeChoice = { key: '⇧', label: 'Select multiple', multi: true, hint: 'Drag a box across bodies to select them all (Shift-drag adds), or click one to add or remove it — to split or combine several as one. Esc to stop' };
 
 const ROUND_EDGES: ModeChoice = { key: 'E', label: 'Round edges', gesture: 'round-edges', hint: 'Round or bevel edges of the selected part: click edges or faces, pick a size' };
@@ -287,7 +288,7 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
         SELECT_MULTIPLE,
         ...(enterChoice ? [enterChoice] : []),
         ...(latticeNodeId ? LATTICE_TOOLS : []),
-        ...(canGesture ? [...GESTURES, latticeNodeId ? LATTICE_INSET : BODY_INSET] : []),
+        ...(canGesture ? [...GESTURES, ...(latticeNodeId ? [LATTICE_INSET] : [BODY_INSET, KNIFE])] : []),
         ...(selectedNodeId && !latticeNodeId && !sculptNodeId ? [ROUND_EDGES, PATTERN_FACE] : []),
         ...MEASURE,
       ];

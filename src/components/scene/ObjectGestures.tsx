@@ -39,6 +39,8 @@ import {
 } from '../../utils/csg';
 import { analyzeMesh } from '../../utils/meshIntegrity';
 import { bodyPoseOf, toParentFrame } from './bodyPose';
+import { bodyParent, bodyToParent, rayInBody } from './bodyRay';
+import { FaceKnife } from './FaceKnife';
 import { solveScaleToFit, type MateFeature } from '../../utils/mateSnap';
 import { bodyFeatures, neighbourFeatures, documentAxes, graphAxes } from '../../utils/mateFeatures';
 import { snapToFloor, snapThreshold } from '../../utils/floorSnap';
@@ -259,8 +261,6 @@ const GLOW_MATERIAL = new THREE.MeshBasicMaterial({
   polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2, side: THREE.DoubleSide,
 });
 const GLOW_EDGES = new THREE.LineBasicMaterial({ color: 0xf5d0fe, transparent: true, opacity: 0.9, depthWrite: false });
-/** The Z-up body frame into the Y-up scene, for a body drawn straight in the scene: (x, y, z) → (x, z, −y). */
-const Z_UP_TO_Y_UP = new THREE.Matrix4().set(1, 0, 0, 0, 0, 0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1);
 
 /** A face's outline as a prism a unit tall, centred on z = 0: the ghost, scaled along z to length. */
 const ghostGeometry = (outline: number[][]) => {
@@ -415,21 +415,10 @@ export const ObjectGestureController = () => {
     const nodeId = store.selectedNodeId;
     if (!nodeId) return null;
     const node = findNode(store.sceneGraph.nodes, nodeId);
-    const groups = groupsFor(nodeId);
-    const parent = (groups.find((g) => g.parent && g.parent.type !== 'Scene') ?? groups[0])?.parent;
+    const parent = bodyParent(scene, nodeId);
     if (!node || !parent) return null;
-    const ray = rayIn(parent, x, y);
-    if (parent.type === 'Scene') {
-      const zUp = (v: THREE.Vector3) => v.set(v.x, -v.z, v.y);
-      zUp(ray.origin);
-      zUp(ray.direction);
-    }
-    const pose = bodyPoseOf(node.id, node.pos);
-    const toBody = pose.rot.clone().transpose();
-    const origin = ray.origin.clone().sub(pose.pos).applyMatrix3(toBody);
-    const direction = ray.direction.clone().applyMatrix3(toBody).normalize();
-    return { node, parent, origin: origin.toArray(), direction: direction.toArray() };
-  }, [groupsFor, rayIn]);
+    return { node, parent, ...rayInBody(node, parent, camera, gl.domElement, x, y) };
+  }, [scene, camera, gl]);
 
   /** Opens the pattern dialog on the face of the selected body under the pointer (T), or says why not. */
   const pickPatternAt = useCallback((x: number, y: number): boolean => {
@@ -466,11 +455,8 @@ export const ObjectGestureController = () => {
       const object = new THREE.Group();
       object.add(new THREE.Mesh(wash, GLOW_MATERIAL), new THREE.LineSegments(edge, GLOW_EDGES));
       object.renderOrder = 10;
-      const pose = bodyPoseOf(node.id, node.pos);
-      const matrix = new THREE.Matrix4().setFromMatrix3(pose.rot).setPosition(pose.pos);
-      if (parent.type === 'Scene') matrix.premultiply(Z_UP_TO_Y_UP);
       object.matrixAutoUpdate = false;
-      object.matrix.copy(matrix);
+      object.matrix.copy(bodyToParent(node, parent));
       parent.add(object);
       glow.current = { key: found.key, object };
     }
@@ -489,16 +475,14 @@ export const ObjectGestureController = () => {
       if (!asked) { showGlow(null, null, null); return; }
       const store = useStore.getState();
       const node = findNode(store.sceneGraph.nodes, asked.nodeId);
-      const groups = groupsFor(asked.nodeId);
-      const parent = (groups.find((g) => g.parent && g.parent.type !== 'Scene') ?? groups[0])?.parent ?? null;
-      showGlow(parent, node, node ? pickedFaceGlow(node, asked) : null);
+      showGlow(bodyParent(scene, asked.nodeId), node, node ? pickedFaceGlow(node, asked) : null);
     };
     window.addEventListener('physbox:pattern-glow', onGlow);
     return () => {
       window.removeEventListener('physbox:pattern-glow', onGlow);
       showGlow(null, null, null);
     };
-  }, [groupsFor, showGlow]);
+  }, [scene, showGlow]);
 
   /** Set by the mode menu's "Pattern a face": the next click picks the face. */
   const patternArmed = useRef(false);
@@ -1356,7 +1340,8 @@ export const ObjectGestureController = () => {
     };
   }, []);
 
-  return null;
+  // The knife is a pointer tool like these, mounted with them.
+  return <FaceKnife />;
 };
 
 export default ObjectGestureController;

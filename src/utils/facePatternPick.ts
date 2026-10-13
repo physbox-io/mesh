@@ -57,15 +57,35 @@ export function pickedFaceGlow(node: SceneNode, pick: PatternPick): PatternFaceG
   return geom ? glowOf(geom, pick) : null;
 }
 
+/** A geom's own frame into the body's, the way castPatternRay comes back. */
+export function geomToBody(geom: SceneGeom): THREE.Matrix4 {
+  return geom.type === 'mesh'
+    ? new THREE.Matrix4().makeTranslation(geom.pos?.[0] || 0, geom.pos?.[1] || 0, geom.pos?.[2] || 0)
+    : getGeomFrame(geom).matrix.clone();
+}
+
+/** The surfaces of a body that patterns and seams go on: each geom, its surface in its own frame, and that frame. */
+export function patternSurfaces(node: SceneNode): { geom: SceneGeom; base: { positions: number[]; faces: number[] }; toBody: THREE.Matrix4 }[] {
+  return resolveCsgGeoms(node, 'render')
+    .filter((g) => g.role !== 'collision' && PATTERNABLE.has(g.type))
+    .flatMap((geom) => {
+      const base = baseSurface(geom);
+      return base ? [{ geom, base, toBody: geomToBody(geom) }] : [];
+    });
+}
+
+/** Where a ray in the body's frame meets the drawn surface: the geom, the point in its frame, and how far along. */
+export function patternHit(node: SceneNode, origin: number[], direction: number[]): { geom: SceneGeom; at: number[]; t: number } | null {
+  const hit = castPatternRay(node, origin, direction);
+  return hit ? { geom: hit.geom, at: hit.pick.seedAt, t: hit.t } : null;
+}
+
 function glowOf(geom: SceneGeom, pick: PatternPick): PatternFaceGlow | null {
   const base = baseSurface(geom);
   if (!base) return null;
-  const region = patternRegionAt(base.positions, base.faces, geom.textures ?? [], pick.seedAt, pick.seedNormal);
+  const region = patternRegionAt(base.positions, base.faces, geom.textures ?? [], pick.seedAt, pick.seedNormal, geom.faceSplits);
   if (!region) return null;
-  // Back from the geom's frame to the body's, the way castPatternRay came.
-  const matrix = geom.type === 'mesh'
-    ? new THREE.Matrix4().makeTranslation(geom.pos?.[0] || 0, geom.pos?.[1] || 0, geom.pos?.[2] || 0)
-    : getGeomFrame(geom).matrix;
+  const matrix = geomToBody(geom);
   const v = new THREE.Vector3();
   for (const list of [region.triangles, region.outline]) {
     for (let i = 0; i < list.length; i += 3) {
@@ -154,7 +174,7 @@ function castPatternRay(node: SceneNode, origin: number[], direction: number[]):
   const textures = best.geom.textures;
   if (textures?.length) {
     const base = baseSurface(best.geom);
-    const index = base ? textureIndexAt(base.positions, base.faces, textures, pick.seedAt, pick.seedNormal) : -1;
+    const index = base ? textureIndexAt(base.positions, base.faces, textures, pick.seedAt, pick.seedNormal, best.geom.faceSplits) : -1;
     if (index >= 0) pick.index = index;
   }
   return { pick, t: best.t, geom: best.geom };

@@ -1,5 +1,5 @@
 import type { PaintLayer } from '../utils/vertexPaint';
-import type { SurfaceTexture } from '../utils/surfaceTexture';
+import type { FaceSplit, SurfaceTexture } from '../utils/surfaceTexture';
 export type GeomType = 'capsule' | 'sphere' | 'box' | 'plane' | 'cylinder' | 'ellipsoid' | 'mesh';
 export type JointType = 'hinge' | 'slide' | 'ball' | 'free';
 
@@ -49,6 +49,12 @@ export interface SceneGeom {
    * it, so the physics is the shape as authored.
    */
   textures?: SurfaceTexture[];
+  /**
+   * Seams drawn across this geom's faces with the knife (see FaceSplit). Like
+   * `textures`, nothing in the physics reads them: they divide a face into
+   * faces for the patterns and anything else that grows a region over it.
+   */
+  faceSplits?: FaceSplit[];
   fromto?: number[];
   pos?: number[];
   quat?: number[];

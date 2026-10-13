@@ -16,7 +16,7 @@ import load_mujoco from '@mujoco/mujoco';
 // The asset the Emscripten glue would fetch, as a URL; see physicsWorker.ts.
 import mujocoWasmUrl from '@mujoco/mujoco/mujoco.wasm?url';
 import { loadManifold } from '../utils/sculptCut';
-import { checkSplit, splitForPrint, type SplitSection } from '../utils/printSplit';
+import { checkSplit, cutAlongPlane, splitForPrint, type SplitSection } from '../utils/printSplit';
 import { runStage, type MujocoLike } from '../utils/printAssembly';
 import type { PrintSplitRequest, PrintSplitResponse } from './printSplitProtocol';
 
@@ -60,6 +60,12 @@ self.onmessage = async (evt: MessageEvent<PrintSplitRequest>) => {
       const result = splitForPrint(wasm, msg.soups, msg.options);
       const checks = result.ok ? checkSplit(wasm, result.sections, result.joints, msg.soups) : null;
       post({ type: 'SPLIT_DONE', id: msg.id, result, checks }, result.ok ? result.sections.flatMap(buffersOf) : []);
+      return;
+    }
+    if (msg.type === 'PLANE_CUT') {
+      const wasm = await loadManifold();
+      const result = cutAlongPlane(wasm, msg.soups, msg.at, msg.normal);
+      post({ type: 'PLANE_CUT_DONE', id: msg.id, result }, result.ok ? result.sections.flatMap(buffersOf) : []);
       return;
     }
     const mj = await loadMujoco();

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { applySurfaceTextures, patternRegionAt, textureIndexAt, type SurfaceTexture } from '../src/utils/surfaceTexture';
+import { applySurfaceTextures, patternRegionAt, splitSeams, textureIndexAt, type FaceSplit, type SurfaceTexture } from '../src/utils/surfaceTexture';
 import { geomLocalSurface } from '../src/utils/geomSurface';
 import type { SceneGeom } from '../src/types/scene';
 import { analyzeMesh } from '../src/utils/meshIntegrity';
@@ -228,6 +228,67 @@ describe('a face is covered whole', () => {
     expect(r.areaM2 / (4 * Math.PI * R * R)).toBeGreaterThan(0.3);
     expect(r.areaM2 / (4 * Math.PI * R * R)).toBeLessThan(0.45);
     expect(r.projection).toBe('unwrap');
+  });
+});
+
+describe('a seam drawn with the knife', () => {
+  const R = 0.03;
+  const sphere = geomLocalSurface({ name: 's', type: 'sphere', size: [R] } as SceneGeom)!;
+  const halves: FaceSplit[] = [{ at: [0, 0, 0], normal: [1, 0, 0], seeds: [[R, 0, 0]] }];
+  const facing = (x: number) => fluted({ seedAt: [x, 0, 0], seedNormal: [Math.sign(x), 0, 0], depthM: -0.0005 });
+
+  it('halves a sphere, and each half takes a pattern of its own, whole', () => {
+    const out = applySurfaceTextures(sphere.positions, sphere.faces, [facing(R), facing(-R)], { splits: halves });
+    for (const r of out.regions) {
+      expect(r.applied).toBe(true);
+      // A half has an edge now, so it is covered whole rather than capped.
+      expect(r.capped).toBeUndefined();
+      expect(r.areaM2 / (2 * Math.PI * R * R)).toBeGreaterThan(0.97);
+    }
+    const check = analyzeMesh(out.vertices, out.faces)!;
+    expect(check.closed && check.consistentlyWound).toBe(true);
+  });
+
+  it('runs all the way round the faces it was drawn over', () => {
+    const [seam] = splitSeams(sphere.positions, sphere.faces, halves);
+    // Every point on the plane, and together a loop the sphere's girth.
+    let length = 0;
+    for (let i = 0; i < seam.length; i += 6) {
+      expect(Math.abs(seam[i])).toBeLessThan(1e-6);
+      length += Math.hypot(seam[i + 3] - seam[i], seam[i + 4] - seam[i + 1], seam[i + 5] - seam[i + 2]);
+    }
+    expect(length).toBeGreaterThan(2 * Math.PI * R * 0.97);
+    expect(length).toBeLessThan(2 * Math.PI * R * 1.01);
+  });
+
+  it('divides only the faces it was drawn over: across a box top, not the bottom', () => {
+    const { positions, faces } = box(HX, HY, HZ);
+    const split: FaceSplit = { at: [0, 0, 0], normal: [1, 0, 0], seeds: [[0.01, 0, HZ]] };
+    const top = applySurfaceTextures(positions, faces, [fluted({ seedAt: [0.01, 0, HZ] })], { splits: [split] });
+    expect(top.regions[0].areaM2).toBeCloseTo(2 * HX * HY, 9);
+    const bottom = applySurfaceTextures(positions, faces, [fluted({ seedAt: [0.01, 0, -HZ], seedNormal: [0, 0, -1] })], { splits: [split] });
+    expect(bottom.regions[0].areaM2).toBeCloseTo(4 * HX * HY, 9);
+  });
+
+  it('is what the hover lights up to', () => {
+    const glow = patternRegionAt(sphere.positions, sphere.faces, [], [R, 0, 0], [1, 0, 0], halves)!;
+    const whole = patternRegionAt(sphere.positions, sphere.faces, [], [R, 0, 0], [1, 0, 0])!;
+    for (let i = 0; i < glow.triangles.length; i += 3) expect(glow.triangles[i]).toBeGreaterThan(-1e-6);
+    // Capped at 75 degrees without the seam, the whole half with it.
+    expect(glow.triangles.length).toBeGreaterThan(whole.triangles.length);
+  });
+});
+
+describe('two patterns on a part with no edges', () => {
+  it('lets the second stop at the first rather than refusing it', () => {
+    const R = 0.03;
+    const sphere = geomLocalSurface({ name: 's', type: 'sphere', size: [R] } as SceneGeom)!;
+    const c = Math.SQRT1_2;
+    const out = applySurfaceTextures(sphere.positions, sphere.faces, [
+      fluted({ seedAt: [R, 0, 0], seedNormal: [1, 0, 0], depthM: -0.0005 }),
+      fluted({ seedAt: [-R * c, R * c, 0], seedNormal: [-c, c, 0], depthM: -0.0005 }),
+    ]);
+    expect(out.regions.map((r) => r.applied)).toEqual([true, true]);
   });
 });
 

@@ -1279,6 +1279,61 @@ export function splitForPrint(wasm: ManifoldToplevel, soups: ArrayLike<number>[]
   return { ok: true, sections, cuts, joints, tree, joinery, warnings: ctx.warnings };
 }
 
+/** What a straight cut through a body made: its pieces, or why there are none. */
+export type PlaneCutResult = { ok: true; sections: SplitSection[] } | { ok: false; error: string };
+
+/**
+ * Cuts a body along one plane, the knife's: every separate piece either side
+ * becomes a section, in place, with no joinery and no print pose — a plain cut
+ * that splitBodyForPrint can put in the scene as it puts printed sections.
+ * `at` and `normal` are body frame, metres, like the soups. A plane that
+ * misses the solid is refused rather than handed back as one piece.
+ */
+export function cutAlongPlane(wasm: ManifoldToplevel, soups: ArrayLike<number>[], at: Vec3, normal: Vec3): PlaneCutResult {
+  const made = solidFrom(wasm, soups);
+  if (!made.ok) return made;
+  const n = unit(normal);
+  const [pos, neg] = made.solid.splitByPlane(n, dot(n, at) * MM);
+  const whole = made.solid.volume();
+  made.solid.delete();
+  try {
+    // A sliver under a thousandth of the part is the plane grazing it, not a piece.
+    const pieces = [pos, neg].flatMap((half) => half.decompose()).filter((p) => {
+      if (p.volume() > whole * 1e-3) return true;
+      p.delete();
+      return false;
+    });
+    if (pieces.length < 2) {
+      for (const p of pieces) p.delete();
+      return { ok: false, error: 'The line does not cut right through the part, so there is nothing to separate.' };
+    }
+    const sections = pieces.map((m): SplitSection => {
+      const out = toMetres(m);
+      const hull = m.hull();
+      const solidity = Math.min(1, m.volume() / Math.max(1e-12, hull.volume()));
+      hull.delete();
+      const convex = convexPieces(m);
+      const convexOut = convex.map(toMetres);
+      for (const c of convex) c.delete();
+      const box = m.boundingBox();
+      const volume = m.volume();
+      m.delete();
+      return {
+        positions: out.positions, faces: out.faces,
+        plainPositions: out.positions.slice(), plainFaces: out.faces.slice(),
+        up: [0, 0, 1], spin: 0, supportMm2: 0,
+        sizeMm: [box.max[0] - box.min[0], box.max[1] - box.min[1], box.max[2] - box.min[2]],
+        fits: true, volumeMm3: volume, features: [], colliders: [], solidity,
+        convexPieces: convexOut, explode: [0, 0, 0],
+      };
+    });
+    return { ok: true, sections };
+  } finally {
+    pos.delete();
+    neg.delete();
+  }
+}
+
 /** The print rotation for a section, as the plate layout and the preview use it. */
 export function sectionPoseMatrix(s: Pick<SplitSection, 'up' | 'spin'>): Mat3 {
   return mulMat3(rotationZ(s.spin), rotationBetween(s.up, [0, 0, 1]));

@@ -75,6 +75,24 @@ export interface SurfaceTexture {
   scale?: number;
 }
 
+/**
+ * A seam across a face: the knife's plane, and where on the part it was
+ * drawn. It divides only the faces it was drawn over, so a line across a
+ * box's top splits the top and not the bottom the same plane also passes
+ * through. The shape is untouched; a pattern's region, and the hover that
+ * shows it, stop at the seam as they stop at a sharp edge.
+ */
+export interface FaceSplit {
+  /** A point on the plane, and its normal, in the geom's own frame, metres. */
+  at: number[];
+  normal: number[];
+  /** Points on the surface under the knife's line; the faces holding them are the ones divided. */
+  seeds: number[][];
+}
+
+/** Seams one surface can carry: each is a bit of a face's side code. */
+const MAX_SPLITS = 32;
+
 export const DEFAULT_TEXTURE_CELL_M = 0.0004;
 export const DEFAULT_TEXTURE_BORDER_M = 0.002;
 /** How far round from the pick a pattern goes on a part with no edges to stop it. */
@@ -320,19 +338,21 @@ function seedFace(mesh: Mesh, normals: Vec3[], at: Vec3, seedNormal: Vec3 | null
 }
 
 /**
- * Grows the region from its seed across edges gentler than the crease, while
- * the surface has not tilted more than `maxTilt` from the seed. Returns the
- * faces, or the reason there are none.
+ * Grows the region from its seed across edges gentler than the crease and not
+ * across a seam, while the surface has not tilted more than `maxTilt` from
+ * the seed. Returns the faces, or the reason there are none. Meeting a face
+ * another pattern has is a refusal, unless `aroundClaimed`, when the region
+ * just stops there.
  */
 function growRegion(
-  mesh: Mesh,
-  normals: Vec3[],
-  edges: Map<number, number[]>,
+  surface: IndexedSurface,
   seed: number,
   creaseCos: number,
   tiltCos: number,
   claimed: Int32Array,
+  aroundClaimed = false,
 ): number[] | 'overlap' {
+  const { mesh, normals, edges, sides } = surface;
   if (claimed[seed] >= 0) return 'overlap';
   const seedN = normals[seed];
   const inRegion = new Uint8Array(mesh.faces.length / 3);
@@ -346,8 +366,12 @@ function growRegion(
       const g = list[0] === f ? list[1] : list[0];
       if (inRegion[g]) continue;
       if (dot(normals[f], normals[g]) < creaseCos) continue;
+      if (sides && sides[f] !== sides[g]) continue;
       if (dot(normals[g], seedN) < tiltCos) continue;
-      if (claimed[g] >= 0) return 'overlap';
+      if (claimed[g] >= 0) {
+        if (aroundClaimed) continue;
+        return 'overlap';
+      }
       inRegion[g] = 1;
       region.push(g);
     }
@@ -366,10 +390,18 @@ interface IndexedSurface {
    * pick made on a slightly different tessellation of the same shape.
    */
   seedTol: number;
+  /**
+   * Which side of each seam each face is on, a bit a seam, or null with no
+   * seams. Faces either side of a seam differ in its bit; faces a seam does
+   * not divide have it clear. A region never crosses from one code to another.
+   */
+  sides: Uint32Array | null;
 }
 
-function indexSurface(positions: ArrayLike<number>, faces: ArrayLike<number>): IndexedSurface {
-  const mesh = weld(positions, faces);
+function indexSurface(positions: ArrayLike<number>, faces: ArrayLike<number>, splits: FaceSplit[] = []): IndexedSurface {
+  const planes = splits.slice(0, MAX_SPLITS).map((sp) => ({ ...sp, n: norm(sp.normal as Vec3) })).filter((sp) => len(sp.n) > 0);
+  let mesh = weld(positions, faces);
+  for (const sp of planes) mesh = slicePlane(mesh, sp.at as Vec3, sp.n);
   const normals: Vec3[] = [];
   const areas: number[] = [];
   for (let f = 0; f < mesh.faces.length / 3; f++) {
@@ -388,7 +420,109 @@ function indexSurface(positions: ArrayLike<number>, faces: ArrayLike<number>): I
     }
     extent = len(sub(hi, lo));
   }
-  return { mesh, normals, areas, edges: edgeFaces(mesh), seedTol: Math.max(5e-4, extent * 0.01) };
+  const surface: IndexedSurface = { mesh, normals, areas, edges: edgeFaces(mesh), seedTol: Math.max(5e-4, extent * 0.01), sides: null };
+  if (planes.length) surface.sides = seamSides(surface, planes);
+  return surface;
+}
+
+/**
+ * Cuts every triangle the plane passes through, so the seam runs along edges.
+ * A cut edge's new corner is shared by both triangles on it, and a corner on
+ * the plane is used as it is, so the surface stays closed and each piece keeps
+ * its triangle's winding.
+ */
+function slicePlane(mesh: Mesh, at: Vec3, n: Vec3): Mesh {
+  const pos = mesh.pos.slice();
+  const count = pos.length / 3;
+  let extent = 0;
+  for (let i = 0; i < pos.length; i++) extent = Math.max(extent, Math.abs(pos[i] - at[i % 3]));
+  const tol = Math.max(1e-12, extent * 1e-7);
+  const d = new Float64Array(count);
+  for (let i = 0; i < count; i++) {
+    const v = dot(sub(vtx(pos, i), at), n);
+    d[i] = Math.abs(v) < tol ? 0 : v;
+  }
+  const made = new Map<number, number>();
+  const cut = (a: number, b: number) => {
+    const key = edgeKey(a, b);
+    let i = made.get(key);
+    if (i === undefined) {
+      const t = d[a] / (d[a] - d[b]);
+      i = pos.length / 3;
+      for (let k = 0; k < 3; k++) pos.push(pos[3 * a + k] + t * (pos[3 * b + k] - pos[3 * a + k]));
+      made.set(key, i);
+    }
+    return i;
+  };
+  const out: number[] = [];
+  for (let f = 0; f < mesh.faces.length; f += 3) {
+    const t = [mesh.faces[f], mesh.faces[f + 1], mesh.faces[f + 2]];
+    const sg = t.map((v) => Math.sign(d[v]));
+    if (!sg.includes(1) || !sg.includes(-1)) { out.push(...t); continue; }
+    const zero = sg.indexOf(0);
+    if (zero >= 0) {
+      // On the plane at one corner: the opposite edge is cut, two triangles.
+      const [z, p, q] = [t[zero], t[(zero + 1) % 3], t[(zero + 2) % 3]];
+      const m = cut(p, q);
+      out.push(z, p, m, z, m, q);
+    } else {
+      // One corner alone on its side: both its edges are cut, three triangles.
+      const lone = sg.findIndex((x, k) => x !== sg[(k + 1) % 3] && x !== sg[(k + 2) % 3]);
+      const [a, b, c] = [t[lone], t[(lone + 1) % 3], t[(lone + 2) % 3]];
+      const ab = cut(a, b), ac = cut(a, c);
+      out.push(a, ab, ac, ab, b, c, ab, c, ac);
+    }
+  }
+  return { pos, faces: out };
+}
+
+/** Each face's side code (IndexedSurface.sides): a seam's bit is set on the faces it divides that lie on its positive side. */
+function seamSides(surface: IndexedSurface, planes: (FaceSplit & { n: Vec3 })[]): Uint32Array {
+  const { mesh, normals, seedTol } = surface;
+  const faceCount = mesh.faces.length / 3;
+  const sides = new Uint32Array(faceCount);
+  const creaseCos = Math.cos((EDGE_CREASE_DEG * Math.PI) / 180);
+  const none = new Int32Array(faceCount).fill(-1);
+  planes.forEach((sp, bit) => {
+    // The faces the knife was drawn over, as far as their sharp edges.
+    const divided = new Set<number>();
+    for (const seedAt of sp.seeds) {
+      const seed = seedFace(mesh, normals, seedAt as Vec3, null, seedTol);
+      if (seed < 0 || divided.has(seed)) continue;
+      const grown = growRegion(surface, seed, creaseCos, -Infinity, none);
+      if (typeof grown !== 'string') for (const f of grown) divided.add(f);
+    }
+    for (const f of divided) {
+      const c = [0, 1, 2].map((k) => vtx(mesh.pos, mesh.faces[3 * f + k]));
+      const mid: Vec3 = [(c[0][0] + c[1][0] + c[2][0]) / 3, (c[0][1] + c[1][1] + c[2][1]) / 3, (c[0][2] + c[1][2] + c[2][2]) / 3];
+      if (dot(sub(mid, sp.at as Vec3), sp.n) > 0) sides[f] |= 1 << bit;
+    }
+  });
+  return sides;
+}
+
+/**
+ * Each seam on a surface as line segments in its frame, one array per split
+ * in the order given, for drawing them and for finding the one under the
+ * pointer: every edge between two faces the seam puts on different sides.
+ */
+export function splitSeams(positions: ArrayLike<number>, faces: ArrayLike<number>, splits: FaceSplit[]): Float32Array[] {
+  if (!splits.length) return [];
+  const { mesh, edges, sides } = cachedIndexSurface(positions, faces, splits);
+  const out: number[][] = splits.map(() => []);
+  if (sides) {
+    for (const [key, list] of edges) {
+      if (list.length !== 2) continue;
+      const differ = sides[list[0]] ^ sides[list[1]];
+      if (!differ) continue;
+      const a = Math.floor(key / KEY), b = key - a * KEY;
+      for (let bit = 0; bit < Math.min(splits.length, MAX_SPLITS); bit++) {
+        if (!(differ & (1 << bit))) continue;
+        for (const v of [a, b]) out[bit].push(mesh.pos[3 * v], mesh.pos[3 * v + 1], mesh.pos[3 * v + 2]);
+      }
+    }
+  }
+  return out.map((list) => new Float32Array(list));
 }
 
 /** A texture's region: its faces, and whether it was stopped short of the face's edges. */
@@ -409,7 +543,7 @@ interface Region {
  * from the pick. `maxTiltDeg`, given, is that limit on any face.
  */
 function textureRegion(surface: IndexedSurface, texture: SurfaceTexture, claimed: Int32Array): Region | 'missed' | 'overlap' {
-  const { mesh, normals, edges, seedTol } = surface;
+  const { mesh, normals, seedTol } = surface;
   const seedN = texture.seedNormal ? norm(texture.seedNormal as Vec3) : null;
   const seed = seedFace(mesh, normals, texture.seedAt as Vec3, seedN, seedTol);
   if (seed < 0) return 'missed';
@@ -418,19 +552,22 @@ function textureRegion(surface: IndexedSurface, texture: SurfaceTexture, claimed
   // opposite the pick reads a hair under that, so it was left out.
   const tiltCos = (deg: number) => (deg >= 180 ? -Infinity : Math.cos((deg * Math.PI) / 180));
   const grow = (deg: number, cap: boolean): Region | 'overlap' => {
-    const grown = growRegion(mesh, normals, edges, seed, creaseCos, tiltCos(deg), claimed);
+    // Capped, the region is only the near side of a part with no edges, and
+    // a pattern already on the far side is where this one stops, not a
+    // reason to refuse it.
+    const grown = growRegion(surface, seed, creaseCos, tiltCos(deg), claimed, cap);
     return typeof grown === 'string' ? grown : { faces: grown, capped: cap };
   };
   if (texture.maxTiltDeg !== undefined) return grow(texture.maxTiltDeg, false);
   // Whether the whole face is closed is a property of the part, not of what
   // other patterns have taken, so it is asked of a region grown regardless.
-  const whole = growRegion(mesh, normals, edges, seed, creaseCos, -Infinity, new Int32Array(claimed.length).fill(-1));
-  if (typeof whole !== 'string' && isClosedRegion(mesh, edges, whole)) return grow(DEFAULT_MAX_TILT_DEG, true);
+  const whole = growRegion(surface, seed, creaseCos, -Infinity, new Int32Array(claimed.length).fill(-1));
+  if (typeof whole !== 'string' && isClosedRegion(surface, whole)) return grow(DEFAULT_MAX_TILT_DEG, true);
   return grow(180, false);
 }
 
 /** No edge of the faces borders a face outside them: the region is the whole of a closed surface. */
-function isClosedRegion(mesh: Mesh, edges: Map<number, number[]>, faces: number[]): boolean {
+function isClosedRegion({ mesh, edges }: IndexedSurface, faces: number[]): boolean {
   const inRegion = new Set(faces);
   for (const f of faces) {
     for (let e = 0; e < 3; e++) {
@@ -473,8 +610,9 @@ export function textureIndexAt(
   textures: SurfaceTexture[],
   at: number[],
   normal?: number[],
+  splits: FaceSplit[] = [],
 ): number {
-  const surface = cachedIndexSurface(positions, faces);
+  const surface = cachedIndexSurface(positions, faces, splits);
   const picked = pickedFace(surface, at, normal);
   return picked < 0 ? -1 : existingRegionAt(surface, textures, picked)?.index ?? -1;
 }
@@ -491,8 +629,9 @@ export function patternRegionAt(
   textures: SurfaceTexture[],
   at: number[],
   normal?: number[],
+  splits: FaceSplit[] = [],
 ): { triangles: Float32Array; outline: Float32Array } | null {
-  const surface = cachedIndexSurface(positions, faces);
+  const surface = cachedIndexSurface(positions, faces, splits);
   const { mesh, edges } = surface;
   const picked = pickedFace(surface, at, normal);
   if (picked < 0) return null;
@@ -523,12 +662,13 @@ export function patternRegionAt(
  * a pick, and the hover asks again on every move over the same part, so each
  * is kept for as long as the positions array it was made from.
  */
-const indexed = new WeakMap<object, { faces: ArrayLike<number>; surface: IndexedSurface }>();
-function cachedIndexSurface(positions: ArrayLike<number>, faces: ArrayLike<number>): IndexedSurface {
+const indexed = new WeakMap<object, { faces: ArrayLike<number>; splits: string; surface: IndexedSurface }>();
+function cachedIndexSurface(positions: ArrayLike<number>, faces: ArrayLike<number>, splits: FaceSplit[] = []): IndexedSurface {
+  const key = JSON.stringify(splits);
   const hit = indexed.get(positions);
-  if (hit && hit.faces === faces) return hit.surface;
-  const surface = indexSurface(positions, faces);
-  indexed.set(positions, { faces, surface });
+  if (hit && hit.faces === faces && hit.splits === key) return hit.surface;
+  const surface = indexSurface(positions, faces, splits);
+  indexed.set(positions, { faces, splits: key, surface });
   return surface;
 }
 
@@ -1278,10 +1418,10 @@ export function applySurfaceTextures(
   positions: ArrayLike<number>,
   faces: ArrayLike<number>,
   textures: SurfaceTexture[],
-  options: { maxTriangles?: number } = {},
+  options: { maxTriangles?: number; splits?: FaceSplit[] } = {},
 ): TexturedSurface {
   const maxTriangles = options.maxTriangles ?? MAX_TEXTURE_TRIANGLES;
-  const surface = indexSurface(positions, faces);
+  const surface = indexSurface(positions, faces, options.splits);
   const { mesh, normals, areas, edges } = surface;
   const warnings: string[] = [];
   const regions: TextureRegionReport[] = [];

@@ -73,7 +73,7 @@ export function requestTexturedSurface(geom: SceneGeom, halfLen?: number): Promi
         resolve(surface);
       });
       const req: TextureRequest = {
-        type: 'TEXTURE', id, textures,
+        type: 'TEXTURE', id, textures, splits: geom.faceSplits,
         positions: Float64Array.from(base.positions),
         faces: Uint32Array.from(base.faces),
       };

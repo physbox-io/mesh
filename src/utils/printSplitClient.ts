@@ -12,7 +12,7 @@ import { appendSolidTriangles } from './contourSliceExporter';
 import { getNodeWorldTransform } from './laserCutExporter';
 import { resolveCsgGeoms } from './csg';
 import { compileToMJCF } from './mjcf';
-import type { SplitChecks, SplitOptions, SplitResult } from './printSplit';
+import type { PlaneCutResult, SplitChecks, SplitOptions, SplitResult } from './printSplit';
 import { buildAssemblyPlan, type AssemblyPlan, type MujocoLike, type StageResult } from './printAssembly';
 import type { PrintSplitRequest, PrintSplitResponse } from '../workers/printSplitProtocol';
 
@@ -94,6 +94,7 @@ export function selectionSoups(scene: SceneGraph, ids: string[]): { soups: Float
 
 type Pending =
   | { kind: 'split'; resolve: (o: SplitOutcome) => void; timer: ReturnType<typeof setTimeout> }
+  | { kind: 'plane'; resolve: (r: PlaneCutResult) => void; timer: ReturnType<typeof setTimeout> }
   | {
     kind: 'assemble';
     resolve: (r: StageResult[]) => void;
@@ -112,6 +113,7 @@ function failAll(error: string) {
   for (const [, p] of pending) {
     clearTimeout(p.timer);
     if (p.kind === 'split') p.resolve({ result: { ok: false, error }, checks: null });
+    else if (p.kind === 'plane') p.resolve({ ok: false, error });
     else p.reject(new Error(error));
   }
   pending.clear();
@@ -130,6 +132,10 @@ function ensureWorker(): Worker | null {
         pending.delete(msg.id);
         clearTimeout(p.timer);
         p.resolve({ result: msg.result, checks: msg.checks });
+      } else if (msg.type === 'PLANE_CUT_DONE' && p.kind === 'plane') {
+        pending.delete(msg.id);
+        clearTimeout(p.timer);
+        p.resolve(msg.result);
       } else if (msg.type === 'ASSEMBLE_PROGRESS' && p.kind === 'assemble') {
         p.results.push(msg.result);
         p.onProgress?.(msg.done, msg.total, msg.result);
@@ -143,6 +149,7 @@ function ensureWorker(): Worker | null {
         pending.delete(msg.id);
         clearTimeout(p.timer);
         if (p.kind === 'split') p.resolve({ result: { ok: false, error: msg.error }, checks: null });
+        else if (p.kind === 'plane') p.resolve({ ok: false, error: msg.error });
         else p.reject(new Error(msg.error));
       }
     };
@@ -162,6 +169,7 @@ function abandon(id: number, error: string) {
   if (!p) return;
   pending.delete(id);
   if (p.kind === 'split') p.resolve({ result: { ok: false, error }, checks: null });
+  else if (p.kind === 'plane') p.resolve({ ok: false, error });
   else p.reject(new Error(error));
   // A wedged worker is no use to the next request either.
   worker?.terminate();
@@ -190,6 +198,26 @@ export async function splitOffThread(soups: Float64Array[], options: SplitOption
     pending.set(id, { kind: 'split', resolve, timer });
     // Copies, not the caller's arrays: they are transferred.
     const req: PrintSplitRequest = { type: 'SPLIT', id, soups: soups.map((s) => s.slice()), options };
+    w.postMessage(req, req.soups.map((s) => s.buffer));
+  });
+}
+
+/** The knife's through-cut, off the main thread where it can be, inline where not. Never rejects. */
+export async function cutAlongPlaneOffThread(
+  soups: Float64Array[],
+  at: [number, number, number],
+  normal: [number, number, number],
+): Promise<PlaneCutResult> {
+  const w = ensureWorker();
+  if (!w) {
+    const [{ loadManifold }, { cutAlongPlane }] = await Promise.all([import('./sculptCut'), import('./printSplit')]);
+    return cutAlongPlane(await loadManifold(), soups, at, normal);
+  }
+  return new Promise<PlaneCutResult>((resolve) => {
+    const id = ++seq;
+    const timer = setTimeout(() => abandon(id, 'The cut took too long and was abandoned.'), SPLIT_TIMEOUT_MS);
+    pending.set(id, { kind: 'plane', resolve, timer });
+    const req: PrintSplitRequest = { type: 'PLANE_CUT', id, soups: soups.map((s) => s.slice()), at, normal };
     w.postMessage(req, req.soups.map((s) => s.buffer));
   });
 }
