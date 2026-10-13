@@ -118,7 +118,11 @@ export const CameraController = () => {
     // The drawing views swap in an orthographic camera (below), and for one
     // render this effect still sees the camera being swapped out. Posing that
     // one would only leave the perspective camera somewhere odd for later.
-    const ortho = (camera as THREE.OrthographicCamera).isOrthographicCamera === true;
+    // Written through R3F's `get()`, like the near-plane effect below: the
+    // camera captured in render is not ours to modify. `camera` stays a
+    // dependency so the swap re-runs this.
+    const live = getSize().camera;
+    const ortho = (live as THREE.OrthographicCamera).isOrthographicCamera === true;
     if (drawing !== ortho) return;
     if (controlsRef.current) dropMomentum(controlsRef.current);
     if (drawing) {
@@ -134,14 +138,14 @@ export const CameraController = () => {
       const { forward, up } = VIEW_AXES[cameraView];
       const [tx, ty, tz] = framing.target;
       const target = new THREE.Vector3(tx, tz, -ty);
-      camera.up.set(up[0], up[2], -up[1]);
-      camera.position.set(
+      live.up.set(up[0], up[2], -up[1]);
+      live.position.set(
         tx - forward[0] * ORTHO_STANDOFF,
         tz - forward[2] * ORTHO_STANDOFF,
         -(ty - forward[1] * ORTHO_STANDOFF),
       );
-      camera.lookAt(target);
-      (camera as THREE.OrthographicCamera).zoom = Math.max(1, height) / framing.height;
+      live.lookAt(target);
+      (live as THREE.OrthographicCamera).zoom = Math.max(1, height) / framing.height;
       if (controlsRef.current) {
         controlsRef.current.target.copy(target);
         controlsRef.current.update();
@@ -150,15 +154,15 @@ export const CameraController = () => {
       // Both poses are the same distance out, so switching between them does
       // not also change how big everything is drawn. That distance shows about
       // 160 mm of world — see utils/frameScene.
-      camera.position.set(...DEFAULT_EYE);
-      camera.up.set(0, 1, 0);
-      camera.lookAt(0, DEFAULT_TARGET_Y, 0);
+      live.position.set(...DEFAULT_EYE);
+      live.up.set(0, 1, 0);
+      live.lookAt(0, DEFAULT_TARGET_Y, 0);
       if (controlsRef.current) {
         controlsRef.current.target.set(0, DEFAULT_TARGET_Y, 0);
         controlsRef.current.update();
       }
     }
-    (camera as THREE.PerspectiveCamera | THREE.OrthographicCamera).updateProjectionMatrix();
+    (live as THREE.PerspectiveCamera | THREE.OrthographicCamera).updateProjectionMatrix();
   }, [cameraView, drawing, cameraResetToken, camera, getSize]);
 
   // Explicit pose from the MCP SET_CAMERA bridge command. The store held this

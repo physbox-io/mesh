@@ -246,7 +246,10 @@ export function DimensionOverlay() {
   const view = isDrawingView(cameraView) ? cameraView : null;
   const on = dimsEnabled && view !== null;
 
-  const [found, setFound] = useState<BodyDimensions[]>([]);
+  // Tagged with what it was measured for, so a change of view or selection
+  // never draws the last one's figures on the new sheet while it re-measures.
+  const [found, setFound] = useState<{ key: string; dims: BodyDimensions[] }>({ key: '', dims: [] });
+  const measuring = `${view}|${selectedNodeId ?? ''}`;
   const [mpp, setMpp] = useState(0);
   const [square, setSquare] = useState(false);
   const cache = useRef(new Map<string, { signature: string; dims: BodyDimensions | null }>());
@@ -259,10 +262,7 @@ export function DimensionOverlay() {
     cache.current.clear();
     lastSignature.current = '';
     lastPoll.current = 0;
-    if (!on) {
-      setFound([]);
-      setLiveDimensions([]);
-    }
+    if (!on) setLiveDimensions([]);
   }, [on, view, selectedNodeId]);
 
   useFrame(({ camera, size }) => {
@@ -301,7 +301,7 @@ export function DimensionOverlay() {
       if (d.bounds.u[1] - d.bounds.u[0] > MAX_PART_M || d.bounds.v[1] - d.bounds.v[0] > MAX_PART_M) continue;
       next.push(d);
     }
-    setFound(next);
+    setFound({ key: measuring, dims: next });
     setLiveDimensions(next.flatMap((b) => b.dims.map((d) => d.kind === 'linear'
       ? {
           body: b.id, kind: d.kind, direction: d.axis === 'u' ? 'width' as const : 'height' as const,
@@ -311,8 +311,8 @@ export function DimensionOverlay() {
   });
 
   const drawing = useMemo(
-    () => (on && view && square && mpp > 0 ? layOut(found, view, mpp) : null),
-    [on, view, square, mpp, found],
+    () => (on && view && square && mpp > 0 && found.key === measuring ? layOut(found.dims, view, mpp) : null),
+    [on, view, square, mpp, found, measuring],
   );
   const lineGeometry = useMemo(() => {
     const g = new THREE.BufferGeometry();
