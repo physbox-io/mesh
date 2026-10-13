@@ -80,6 +80,8 @@ import {
   type Axis as LatticeAxis, type Lattice,
 } from '../utils/latticeMesh';
 import type { SculptUndoEntry } from '../utils/sculptMesh';
+import { CAMERA_VIEWS, type CameraView } from '../utils/cameraViews';
+import { getLiveDimensions } from '../utils/liveDimensions';
 import type { HeadlessResult, HistoryEntry, HistoryQuery } from '../workers/physicsWorkerProtocol';
 
 interface PhysicsWindow extends Window {
@@ -1019,21 +1021,31 @@ export function useMCPBridge() {
             ...(live ?? {}),
             preset: store.cameraOverride ? null : store.cameraView,
             isOverride: store.cameraOverride !== null,
+            dims: store.dimsEnabled,
+            // What the Dims overlay is drawing right now, in mm; empty when it
+            // is off, in Perspective, or orbited off the view's axis.
+            dimensions: getLiveDimensions(),
           };
         }
 
         case 'SET_CAMERA': {
-          // Two mutually exclusive forms: { preset: 'perspective'|'topDown' } to
-          // reset to a built-in view, or { position:[x,y,z], target?:[x,y,z] }
-          // for an explicit pose. Both position and target are in MuJoCo world
+          // Two mutually exclusive forms: { preset } to reset to a built-in
+          // view, or { position:[x,y,z], target?:[x,y,z] } for an explicit
+          // (perspective) pose. Both position and target are in MuJoCo world
           // space, same convention as every other pos field in this API.
+          // `dims` switches the Dims overlay with either form, or alone.
+          if (msg.dims !== undefined) {
+            if (typeof msg.dims !== 'boolean') return { ok: false, error: 'dims must be true or false' };
+            store.setDimsEnabled(msg.dims);
+          }
           if (msg.preset !== undefined) {
-            if (msg.preset !== 'perspective' && msg.preset !== 'topDown') {
-              return { ok: false, error: "preset must be 'perspective' or 'topDown'" };
+            if (!CAMERA_VIEWS.includes(msg.preset as CameraView)) {
+              return { ok: false, error: `preset must be one of ${CAMERA_VIEWS.map((v) => `'${v}'`).join(', ')}` };
             }
-            store.setCameraView(msg.preset);
+            store.setCameraView(msg.preset as CameraView);
             return { ok: true };
           }
+          if (msg.dims !== undefined && msg.position === undefined) return { ok: true };
           if (!Array.isArray(msg.position) || msg.position.length !== 3) {
             return { ok: false, error: 'position must be a [x,y,z] array in MuJoCo world space (or pass preset instead)' };
           }
