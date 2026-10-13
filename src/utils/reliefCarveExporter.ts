@@ -2272,7 +2272,12 @@ export function machineSurface(
     // leaves up to a cell on a wall for the finisher instead: 206 against 213
     // minutes on that cylinder, 133 against 121 on a 60 mm sphere, whose
     // flanks near the equator are walls at this sampling.
-    const roughMap = dilateForTool(surface, roughRad, false, bodyFor(opts.roughingToolDiaMm, 0, 0), 'clear');
+    // With no finishing pass, roughing is the last cut and goes by the
+    // samples, as it always had: held a cell clear, a through-cut's 4 mm
+    // slots closed up on a 3.175 mm cutter and nothing was cut at all, and
+    // 'middle' still held it 0.28 mm short of cutting through.
+    const roughWalls = opts.finishingEnabled ? 'clear' : 'samples';
+    const roughMap = dilateForTool(surface, roughRad, false, bodyFor(opts.roughingToolDiaMm, 0, 0), roughWalls);
     // Roughing is always a flat end mill.
     cutter = { radius: roughRad, profile: FLAT_PROFILE };
     const adaptive = opts.roughingStrategy === 'adaptive';
