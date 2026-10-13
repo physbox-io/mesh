@@ -338,6 +338,25 @@ export function spiralPasses(input: FinishingPathInput): Point2D[][] {
 // Waterline
 // ---------------------------------------------------------------------------
 
+/** Steeper than this between two samples, the surface is taken to be a wall standing between them. */
+export const WALL_SLOPE = Math.tan((60 * Math.PI) / 180);
+
+/**
+ * The height a waterline point was traced at, if it is one.
+ *
+ * A waterline is one height all the way round, and that height has to come
+ * from the line, not from reading the surface back under each point: along
+ * the foot of a cliff the reading lands part way up it, and the pass climbed
+ * the cliff and dropped back every cell or so -- 199 m of vertical travel on
+ * one side of a 100 mm cylinder milled from solid, most of a seven-hour side.
+ */
+export function waterlineLevel(p: Point2D): number | undefined {
+  return (p as Point2D & { level?: number }).level;
+}
+
+const atLevel = (pass: Point2D[], level: number): Point2D[] =>
+  pass.map((p) => ({ x: p.x, y: p.y, level }) as Point2D);
+
 /** Grid coordinates from marching squares back into millimetres on the stock. */
 function gridToMm(p: Point2D, s: SurfaceGrid): Point2D {
   return { x: s.minX + p.x * s.stepX, y: s.minY + p.y * s.stepY };
@@ -376,6 +395,10 @@ export function contourPasses(input: FinishingPathInput): Point2D[][] {
     padded.set(surface.z.subarray(r * surface.cols, (r + 1) * surface.cols), (r + 1) * pCols + 1);
   }
   const toMm = (p: Point2D) => gridToMm({ x: p.x - 1, y: p.y - 1 }, surface);
+  // A wall is crossed half way between its samples, as the cutter's dilation
+  // reads it (dilateForTool's 'middle'), so every level of the waterline
+  // stands the same distance off it.
+  const wallRise = WALL_SLOPE * Math.min(surface.stepX || Infinity, surface.stepY || Infinity);
   const inBounds = (p: Point2D) =>
     p.x >= bounds.minX - 1e-6 &&
     p.x <= bounds.maxX + 1e-6 &&
@@ -386,13 +409,13 @@ export function contourPasses(input: FinishingPathInput): Point2D[][] {
   // it is the outline of every uncarved patch on the board.
   for (let level = -step; level > floorZ - step; level -= step) {
     const clamped = Math.max(level, floorZ + 1e-6);
-    const loops = isoContours(padded, pCols, pRows, clamped);
+    const loops = isoContours(padded, pCols, pRows, clamped, wallRise);
     for (const loop of loops) {
       const mm = loop.map(toMm);
       const outside = mm.findIndex((p) => !inBounds(p));
       if (outside < 0) {
         const pass = resamplePolyline(closeLoop(mm), resolution);
-        if (pass.length >= 2) passes.push(pass);
+        if (pass.length >= 2) passes.push(atLevel(pass, clamped));
         continue;
       }
       /*
@@ -405,7 +428,7 @@ export function contourPasses(input: FinishingPathInput): Point2D[][] {
        */
       let run: Point2D[] = [];
       const flush = () => {
-        if (run.length >= 2) passes.push(resamplePolyline(run, resolution));
+        if (run.length >= 2) passes.push(atLevel(resamplePolyline(run, resolution), clamped));
         run = [];
       };
       for (let i = 1; i <= mm.length; i++) {

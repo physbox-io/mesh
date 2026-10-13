@@ -30,6 +30,8 @@ import {
 import {
   finishingPassGroups,
   describeFinishingStrategy,
+  waterlineLevel,
+  WALL_SLOPE,
   type FinishingStrategy,
 } from './finishingPaths';
 import { estimateGcodeTime } from './timeEstimate';
@@ -1185,6 +1187,49 @@ export function dilateForTool(
    */
   walls: 'samples' | 'middle' | 'clear' = 'middle'
 ): Heightmap {
+  const out = new Float32Array(hm.z);
+  if (toolRadiusMm <= 0) return { ...hm, z: out };
+  const { kx, ky, lift, extraX, extraY, extraLift, at } = toolProbe(hm, toolRadiusMm, tip, body, walls);
+
+  for (let row = 0; row < hm.rows; row++) {
+    for (let col = 0; col < hm.cols; col++) {
+      let best = -Infinity;
+
+      for (let dy = -ky; dy <= ky; dy++) {
+        const r = Math.min(hm.rows - 1, Math.max(0, row + dy));
+        for (let dx = -kx; dx <= kx; dx++) {
+          const l = lift[(dy + ky) * (2 * kx + 1) + (dx + kx)];
+          if (l === -Infinity) continue;
+          const c = Math.min(hm.cols - 1, Math.max(0, col + dx));
+          const candidate = hm.z[r * hm.cols + c] + l;
+          if (candidate > best) best = candidate;
+        }
+      }
+      for (let e = 0; e < extraLift.length; e++) {
+        const candidate = at(col + extraX[e], row + extraY[e]) + extraLift[e];
+        if (candidate > best) best = candidate;
+      }
+
+      out[row * hm.cols + col] = best;
+    }
+  }
+
+  return { ...hm, z: out };
+}
+
+/**
+ * What `dilateForTool` measures a tool against: the kernel of samples round
+ * the tip with the lift each one asks for, the points between samples that
+ * hold it up on a slope or a rim, and how the surface is read between samples
+ * (`at`, in cells, by the `walls` rule).
+ */
+function toolProbe(
+  hm: Heightmap,
+  toolRadiusMm: number,
+  tip: boolean | CutterTip,
+  body: ToolBodySection[],
+  walls: 'samples' | 'middle' | 'clear'
+) {
   const shape: CutterShape =
     typeof tip === 'boolean' ? (tip ? 'ball_nose' : 'flat') : tip.shape;
   // Rise per mm of radius on the cone's flank: the tip has to sit this much
@@ -1193,8 +1238,6 @@ export function dilateForTool(
     shape === 'v_bit'
       ? 1 / Math.tan(vBitHalfAngleRad(typeof tip === 'boolean' ? 60 : tip.vBitAngleDeg ?? 60))
       : 0;
-  const out = new Float32Array(hm.z);
-  if (toolRadiusMm <= 0) return { ...hm, z: out };
 
   // The kernel has to be wide enough for the widest part of the tool, not just
   // the cutting end — the whole point of the body sections is that they stick
@@ -1305,8 +1348,9 @@ export function dilateForTool(
     const z00 = hm.z[k], z10 = hm.z[k + 1], z01 = hm.z[k + hm.cols], z11 = hm.z[k + hm.cols + 1];
     // A wall is sampled as a ramp a cell wide, but it stands somewhere in that
     // cell, not across it: read as a ramp it lifted the cutter a cell clear of
-    // every wall, and slots stopped going through. Across a wall the samples
-    // are all there is to go on.
+    // every wall, and slots stopped going through. Where in the cell it is
+    // read to stand is the `walls` rule; 'middle' reads either side of the
+    // half-way line as the level on that side.
     const wall = WALL_SLOPE * Math.min(hm.stepX || Infinity, hm.stepY || Infinity);
     if (
       Math.abs(z10 - z00) > wall || Math.abs(z11 - z01) > wall ||
@@ -1317,7 +1361,7 @@ export function dilateForTool(
       if (walls === 'samples') return -Infinity;
       const low = Math.min(z00, z10, z01, z11);
       const here = (z00 * (1 - tx) + z10 * tx) * (1 - ty) + (z01 * (1 - tx) + z11 * tx) * ty;
-      return here >= (low + high) / 2 ? high : -Infinity;
+      return here >= (low + high) / 2 ? high : low;
     }
     return (z00 * (1 - tx) + z10 * tx) * (1 - ty) + (z01 * (1 - tx) + z11 * tx) * ty;
   };
@@ -1326,30 +1370,43 @@ export function dilateForTool(
   const extraY = Float64Array.from(extra, (e) => (hm.stepY ? e.oy / hm.stepY : 0));
   const extraLift = Float64Array.from(extra, (e) => e.lift);
 
-  for (let row = 0; row < hm.rows; row++) {
-    for (let col = 0; col < hm.cols; col++) {
-      let best = -Infinity;
+  return { kx, ky, lift, extraX, extraY, extraLift, at };
+}
 
-      for (let dy = -ky; dy <= ky; dy++) {
-        const r = Math.min(hm.rows - 1, Math.max(0, row + dy));
-        for (let dx = -kx; dx <= kx; dx++) {
-          const l = lift[(dy + ky) * (2 * kx + 1) + (dx + kx)];
-          if (l === -Infinity) continue;
-          const c = Math.min(hm.cols - 1, Math.max(0, col + dx));
-          const candidate = hm.z[r * hm.cols + c] + l;
-          if (candidate > best) best = candidate;
-        }
-      }
-      for (let e = 0; e < extraLift.length; e++) {
-        const candidate = at(col + extraX[e], row + extraY[e]) + extraLift[e];
+/**
+ * The height the tool's tip has to sit at to clear the surface, at any point
+ * rather than only on a sample: `dilateForTool` for one place. A waterline's
+ * points lie between samples, and the dilated grid read back there is a
+ * bilinear that a wall rises across; this reads the surface under the cutter
+ * itself, by the same `walls` rule.
+ */
+export function toolTipHeightAt(
+  hm: Heightmap,
+  toolRadiusMm: number,
+  tip: boolean | CutterTip,
+  body: ToolBodySection[] = [],
+  walls: 'samples' | 'middle' | 'clear' = 'middle'
+): (xMm: number, yMm: number) => number {
+  if (toolRadiusMm <= 0) return (x, y) => sampleHeightmap(hm, x, y);
+  const { kx, ky, lift, extraX, extraY, extraLift, at } = toolProbe(hm, toolRadiusMm, tip, body, walls);
+  return (xMm, yMm) => {
+    const col = hm.stepX ? (xMm - hm.minX) / hm.stepX : 0;
+    const row = hm.stepY ? (yMm - hm.minY) / hm.stepY : 0;
+    let best = -Infinity;
+    for (let dy = -ky; dy <= ky; dy++) {
+      for (let dx = -kx; dx <= kx; dx++) {
+        const l = lift[(dy + ky) * (2 * kx + 1) + (dx + kx)];
+        if (l === -Infinity) continue;
+        const candidate = at(col + dx, row + dy) + l;
         if (candidate > best) best = candidate;
       }
-
-      out[row * hm.cols + col] = best;
     }
-  }
-
-  return { ...hm, z: out };
+    for (let e = 0; e < extraLift.length; e++) {
+      const candidate = at(col + extraX[e], row + extraY[e]) + extraLift[e];
+      if (candidate > best) best = candidate;
+    }
+    return best;
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1412,9 +1469,6 @@ export function flatLevels(map: Heightmap, offset: number, cutterDiaMm: number):
   for (const [key, n] of counts) if (n >= minCells) levels.push(key / 100);
   return levels.sort((a, b) => b - a);
 }
-
-/** Steeper than this between two samples, a pass is taken to be crossing a wall. */
-const WALL_SLOPE = Math.tan((60 * Math.PI) / 180);
 
 /**
  * Turns a pass's steep steps into square ones, high side first.
@@ -1857,6 +1911,59 @@ export function machineSurface(
     finishTip
   );
   const finishMap = dilateForTool(surface, finishRad, finishTip, finishBody);
+  // For points between the samples (a waterline's), read under the cutter
+  // itself rather than off the dilated grid.
+  const finishTipAt = toolTipHeightAt(surface, finishRad, finishTip, finishBody);
+  /*
+   * Where a waterline point can stand at its level. The line is traced on the
+   * dilated grid and the cutter is checked under itself, and the two can put
+   * a wall a fraction of a cell apart. Where the check finds the cutter in the
+   * wall, the point steps downhill, off the wall, until it is clear: a
+   * waterline keeps its height and gives up a little of its line. Climbing the
+   * wall instead, at every such point, was 287 m of vertical travel on one
+   * side of a 100 mm cylinder. Only a point with no clear spot within a cell
+   * is lifted.
+   */
+  const wallRise = WALL_SLOPE * Math.min(finishMap.stepX || Infinity, finishMap.stepY || Infinity);
+  /**
+   * Whether the dilated grid has a wall across the cell a point is in: the
+   * only cells where the line was placed by the half-way rule rather than by
+   * the grid's own reading, so the only ones the cutter has to be checked in.
+   */
+  const inWallCell = (x: number, y: number) => {
+    const fx = (x - finishMap.minX) / (finishMap.stepX || 1), fy = (y - finishMap.minY) / (finishMap.stepY || 1);
+    const c = Math.min(finishMap.cols - 2, Math.max(0, Math.floor(fx)));
+    const r = Math.min(finishMap.rows - 2, Math.max(0, Math.floor(fy)));
+    const k = r * finishMap.cols + c, z = finishMap.z;
+    const a = z[k], b = z[k + 1], cc = z[k + finishMap.cols], d = z[k + finishMap.cols + 1];
+    return Math.max(a, b, cc, d) - Math.min(a, b, cc, d) > wallRise;
+  };
+  // The rectangle the tool *centre* may enter: the stock, inset by the tool's
+  // own radius. On stock narrower than the cutter it collapses to the centre
+  // line rather than inverting.
+  const passRect = {
+    minX: Math.min(bounds.minX + finishRad, (bounds.minX + bounds.maxX) / 2),
+    maxX: Math.max(bounds.maxX - finishRad, (bounds.minX + bounds.maxX) / 2),
+    minY: Math.min(bounds.minY + finishRad, (bounds.minY + bounds.maxY) / 2),
+    maxY: Math.max(bounds.maxY - finishRad, (bounds.minY + bounds.maxY) / 2),
+  };
+
+  const holdOffWall = (p: { x: number; y: number }, level: number) => {
+    if (!inWallCell(p.x, p.y) || finishTipAt(p.x, p.y) <= level + 1e-3) return { x: p.x, y: p.y, z: level };
+    const gx = sampleHeightmap(finishMap, p.x + res / 2, p.y) - sampleHeightmap(finishMap, p.x - res / 2, p.y);
+    const gy = sampleHeightmap(finishMap, p.x, p.y + res / 2) - sampleHeightmap(finishMap, p.x, p.y - res / 2);
+    const g = Math.hypot(gx, gy);
+    if (g > 1e-9) {
+      for (let k = 1; k <= 8; k++) {
+        const d = (res * k) / 8;
+        const x = p.x - (gx / g) * d, y = p.y - (gy / g) * d;
+        // Never off the edge of the stock the tool centre is kept inside.
+        if (x < passRect.minX || x > passRect.maxX || y < passRect.minY || y > passRect.maxY) break;
+        if (finishTipAt(x, y) <= level + 1e-3) return { x, y, z: level };
+      }
+    }
+    return { x: p.x, y: p.y, z: Math.max(level, finishTipAt(p.x, p.y)) };
+  };
 
   // How much of the ${noun} the tool's own body puts out of reach. Left silent
   // this reads as a carve that simply came out shallow, so it is measured
@@ -2697,15 +2804,6 @@ export function machineSurface(
         : '')
   );
 
-  // The rectangle the tool *centre* may enter: the stock, inset by the tool's
-  // own radius. On stock narrower than the cutter it collapses to the centre
-  // line rather than inverting.
-  const passRect = {
-    minX: Math.min(bounds.minX + finishRad, (bounds.minX + bounds.maxX) / 2),
-    maxX: Math.max(bounds.maxX - finishRad, (bounds.minX + bounds.maxX) / 2),
-    minY: Math.min(bounds.minY + finishRad, (bounds.minY + bounds.maxY) / 2),
-    maxY: Math.max(bounds.maxY - finishRad, (bounds.minY + bounds.maxY) / 2),
-  };
 
   // Plan-view only. Z stays this function's business: every point that comes
   // back is sampled against the dilated surface, clamped to the layer limit and
@@ -2768,6 +2866,16 @@ export function machineSurface(
   // for the first, whatever the layer before it left for the rest.
   let prevLimit = 0;
 
+  // Where each pass point stands and how high, worked out once: it is the
+  // same on every layer, and checking a waterline against its walls again
+  // per layer nearly doubled the time a layered job took to plan.
+  const placed = planGroups.map((group) => group.map((plan) => plan.map((pt) => {
+    const level = waterlineLevel(pt);
+    return level === undefined
+      ? { x: pt.x, y: pt.y, z: sampleHeightmap(finishMap, pt.x, pt.y) }
+      : holdOffWall(pt, level);
+  })));
+
   for (const limit of finishLimits) {
     if (finishLimits.length > 1) {
       gcode.push(`; layer down to Z${f(limit)}`);
@@ -2777,7 +2885,7 @@ export function machineSurface(
     // where the next may be linked to without lifting.
     let down = false;
 
-    for (const group of planGroups) {
+    for (const group of placed) {
       // This layer's runs in the group, in no particular order yet.
       const runs: PathPoint[][] = [];
       for (const plan of group) {
@@ -2786,10 +2894,19 @@ export function machineSurface(
         // surface is finished, and is left out of this layer entirely — which is
         // what stops the pass re-tracing the whole background on every layer.
         const raw: PathPoint[] = [];
-        for (const pt of plan) {
-          const surface = Math.min(0, Math.max(floorZ, sampleHeightmap(finishMap, pt.x, pt.y)));
+        /*
+         * A waterline holds its own level, so it does not climb each wall
+         * it runs along the foot of, unless the cutter really would cut in
+         * there (see `holdOffWall`). Its line is traced with each wall half
+         * way across its cell, and a surface steeper than a wall's threshold
+         * but not vertical, like a sphere near its equator, stands well off
+         * that line: held at the level alone, the tool went 1 mm into a
+         * 40 mm sphere's flank.
+         */
+        for (const at of plan) {
+          const surface = Math.min(0, Math.max(floorZ, at.z));
           const done = surface >= prevLimit - 1e-6;
-          raw.push({ x: pt.x, y: pt.y, z: done ? 0 : Math.max(surface, limit) });
+          raw.push({ x: at.x, y: at.y, z: done ? 0 : Math.max(surface, limit) });
         }
 
         // Stretches where the tool would only skim the stock's own top face have

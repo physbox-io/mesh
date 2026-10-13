@@ -64,7 +64,16 @@ export function isoContours(
   field: Float32Array,
   cols: number,
   rows: number,
-  level: number
+  level: number,
+  /**
+   * An edge rising more than this is a step, not a slope: crossed half way
+   * along rather than where a straight line between its ends would put the
+   * level. A heightmap's wall stands somewhere between its two samples, and
+   * read as a ramp a contour near its foot lies against the low sample and
+   * one near its top against the high, so the levels of a waterline lean a
+   * cell out of true down every wall. Off by default.
+   */
+  stepRise = Infinity
 ): Point2D[][] {
   const segments: [Point2D, Point2D][] = [];
   const at = (c: number, r: number) => field[r * cols + c];
@@ -73,7 +82,7 @@ export function isoContours(
   // stepped at pixel boundaries.
   const lerp = (x0: number, y0: number, v0: number, x1: number, y1: number, v1: number): Point2D => {
     const denom = v1 - v0;
-    const t = Math.abs(denom) < 1e-12 ? 0.5 : (level - v0) / denom;
+    const t = Math.abs(denom) < 1e-12 || Math.abs(denom) > stepRise ? 0.5 : (level - v0) / denom;
     const clamped = t < 0 ? 0 : t > 1 ? 1 : t;
     return { x: x0 + (x1 - x0) * clamped, y: y0 + (y1 - y0) * clamped };
   };
