@@ -72,7 +72,7 @@ function drawnPieces(root: THREE.Object3D, only: string | null): Map<string, { p
     let entry = out.get(id);
     if (!entry) out.set(id, (entry = { pieces: [], signature: '' }));
     entry.pieces.push({ id, geometry, matrix });
-    entry.signature += `${geometry.uuid}:${geometry.getAttribute('position')?.version ?? 0}:${matrix.elements.map((e) => e.toFixed(6)).join(',')};`;
+    entry.signature += `${geometry.uuid}:${(geometry.getAttribute('position') as THREE.BufferAttribute | undefined)?.version ?? 0}:${matrix.elements.map((e) => e.toFixed(6)).join(',')};`;
   };
   root.traverseVisible((object) => {
     const mesh = object as THREE.Mesh;
