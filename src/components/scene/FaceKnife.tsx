@@ -275,7 +275,7 @@ export const FaceKnife = () => {
       if (cut) {
         for (const { geom, base, toBody } of patternSurfaces(node)) {
           const toGeom = toBody.clone().invert();
-          let segments: ArrayLike<number> = [];
+          let segments: ArrayLike<number>;
           if (d.separate) {
             segments = planeSection(base.positions, base.faces, cut.at.clone().applyMatrix4(toGeom), cut.normal.clone().transformDirection(toGeom));
           } else {
