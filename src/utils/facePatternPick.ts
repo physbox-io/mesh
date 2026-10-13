@@ -31,6 +31,34 @@ const PATTERNABLE = new Set(['box', 'sphere', 'ellipsoid', 'cylinder', 'capsule'
  * meets none.
  */
 export function pickPatternFace(node: SceneNode, origin: number[], direction: number[]): PatternPick | null {
+  return castPatternRay(node, origin, direction)?.pick ?? null;
+}
+
+/**
+ * The face at a point given in the body's frame, for a pick made by
+ * coordinates rather than a click (MCP). With `normal` the point is looked at
+ * from just outside along it; without, from all six axis directions, keeping
+ * the surface that passes nearest the point. Null when no surface is within
+ * a centimetre.
+ */
+export function patternPickAt(node: SceneNode, at: number[], normal?: number[]): PatternPick | null {
+  const OUT = 0.005;
+  const p = new THREE.Vector3(at[0] ?? 0, at[1] ?? 0, at[2] ?? 0);
+  const looks = normal && Math.hypot(normal[0] ?? 0, normal[1] ?? 0, normal[2] ?? 0) > 1e-9
+    ? [new THREE.Vector3(normal[0] ?? 0, normal[1] ?? 0, normal[2] ?? 0).normalize()]
+    : [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]].map((d) => new THREE.Vector3(...d));
+  let best: { pick: PatternPick; off: number } | null = null;
+  for (const n of looks) {
+    const origin = p.clone().addScaledVector(n, OUT);
+    const hit = castPatternRay(node, origin.toArray(), n.clone().negate().toArray());
+    if (!hit) continue;
+    const off = Math.abs(hit.t - OUT);
+    if (off <= 0.01 && (!best || off < best.off)) best = { pick: hit.pick, off };
+  }
+  return best?.pick ?? null;
+}
+
+function castPatternRay(node: SceneNode, origin: number[], direction: number[]): { pick: PatternPick; t: number } | null {
   const o = new THREE.Vector3(origin[0] ?? 0, origin[1] ?? 0, origin[2] ?? 0);
   const d = new THREE.Vector3(direction[0] ?? 0, direction[1] ?? 0, direction[2] ?? 0);
   if (d.lengthSq() < 1e-18) return null;
@@ -69,7 +97,7 @@ export function pickPatternFace(node: SceneNode, origin: number[], direction: nu
     const index = base ? textureIndexAt(base.positions, base.faces, textures, pick.seedAt, pick.seedNormal) : -1;
     if (index >= 0) pick.index = index;
   }
-  return pick;
+  return { pick, t: best.t };
 }
 
 /** The face the pattern dialog is open on. `index` is the pattern being edited; absent for a new one. */

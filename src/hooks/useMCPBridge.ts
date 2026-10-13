@@ -58,6 +58,16 @@ import { contourSheetParts, laserSheetParts, laserStockTransform } from '../util
 import { addSimulationToScene } from './useAddSimulation';
 import { lastReliefOptions } from '../utils/lastReliefOptions';
 import { ExportWorkerClient } from '../utils/exportWorkerClient';
+import { patternPickAt } from '../utils/facePatternPick';
+import { SURFACE_PATTERNS, patternById, type PatternOptions } from '../utils/surfacePatterns';
+import {
+  DEFAULT_TEXTURE_BORDER_M,
+  DEFAULT_TEXTURE_CELL_M,
+  type SurfaceTexture,
+  type TextureProjection,
+} from '../utils/surfaceTexture';
+import { geomHalfLen } from '../utils/geomSurface';
+import { requestTexturedSurface } from '../utils/textureClient';
 import { webSerialManager } from '../utils/webSerialManager';
 import type { Object3D } from 'three';
 import type { SceneGraph, SceneNode, SceneGeom, SceneJoint } from '../types/scene';
@@ -2671,6 +2681,108 @@ export function useMCPBridge() {
             base: node.sculptBase,
             edited: !!node.sculptEdited,
             ...sculptSummary(sculptMeshOf(node)),
+          };
+        }
+
+        case 'APPLY_PATTERN': {
+          const m = msg as Msg<{
+            targetId: string; at?: number[]; normal?: number[]; pattern?: string; options?: PatternOptions;
+            depthMm?: number; emboss?: boolean; borderMm?: number; cellMm?: number; projection?: string;
+            twistDeg?: number; scale?: number; stopAtDeg?: number; remove?: boolean; preview?: boolean;
+          }>;
+          if (!m.targetId) throw new Error('Missing targetId');
+          const node = findNodeInScene(store.sceneGraph.nodes, m.targetId);
+          if (!node) throw new Error(`No object with id '${m.targetId}'`);
+          const at = pointList(m.at)[0];
+          if (!at) throw new Error('Missing at: a point [x, y, z] on the face, in the body\'s own frame in millimetres.');
+          // The face a click there would pick, so a pattern laid here is one
+          // the T key finds again, and editing one keeps its seed.
+          const pick = patternPickAt(node, at.map((v) => v / 1000), Array.isArray(m.normal) ? m.normal : undefined);
+          if (!pick) {
+            throw new Error(`No surface of '${m.targetId}' within 10 mm of [${at.join(', ')}] mm. Points are in the body's own frame in millimetres; physics_get_object gives the shapes, and normal says which way the face looks.`);
+          }
+          const geom = (node.geoms || []).find((g) => g.name === pick.geomName);
+          if (!geom) throw new Error(`The face picked belongs to '${pick.geomName}', which is not on the body.`);
+          const existing = geom.textures ?? [];
+          const describe = (t: SurfaceTexture) =>
+            `${patternById(t.pattern)?.label ?? t.pattern}, ${t.depthM > 0 ? 'embossed' : 'engraved'} ${(Math.abs(t.depthM) * 1000).toFixed(1)} mm`;
+
+          if (m.remove) {
+            if (pick.index === undefined) return { ok: false, error: 'There is no pattern on the face at that point.' };
+            const list = existing.filter((_, i) => i !== pick.index);
+            if (!m.preview) store.setGeomTextures(node.id, geom.name, list.length ? list : undefined);
+            return { ok: true, removed: describe(existing[pick.index]), geomName: geom.name, remaining: list.length };
+          }
+
+          const prev = pick.index !== undefined ? existing[pick.index] : undefined;
+          const faceable = SURFACE_PATTERNS.filter((p) => !p.throughCut);
+          const known = () =>
+            faceable.map((p) => `${p.id} (${p.fields.map((f) => f.key).join(', ')})`).join('; ');
+          const patternId = m.pattern ?? prev?.pattern;
+          if (!patternId) throw new Error(`Missing pattern. One of, with its options: ${known()}.`);
+          const spec = patternById(patternId);
+          if (!spec || spec.throughCut) {
+            throw new Error(`'${patternId}' is not a pattern that goes on a face. One of, with its options: ${known()}.`);
+          }
+          const projections: TextureProjection[] = ['auto', 'planar', 'cylindrical', 'unwrap'];
+          if (m.projection !== undefined && !projections.includes(m.projection as TextureProjection)) {
+            throw new Error(`projection is one of ${projections.join(', ')}.`);
+          }
+          const optionKeys = new Set(spec.fields.map((f) => f.key));
+          const unknown = Object.keys(m.options ?? {}).filter((k) => !optionKeys.has(k));
+          const depthMm = m.depthMm ?? (prev ? Math.abs(prev.depthM) * 1000 : 1.5);
+          if (!(depthMm > 0)) throw new Error('depthMm must be more than 0.');
+          const emboss = m.emboss ?? (prev ? prev.depthM > 0 : false);
+          const projection = (m.projection ?? prev?.projection) as TextureProjection | undefined;
+          const texture: SurfaceTexture = {
+            pattern: spec.id,
+            options: { ...spec.defaults, ...(prev?.pattern === spec.id ? prev.options : {}), ...(m.options ?? {}) },
+            depthM: ((emboss ? 1 : -1) * depthMm) / 1000,
+            borderM: m.borderMm !== undefined ? Math.max(0, m.borderMm) / 1000 : prev?.borderM ?? DEFAULT_TEXTURE_BORDER_M,
+            cellM: m.cellMm !== undefined ? Math.max(0.05, m.cellMm) / 1000 : prev?.cellM ?? DEFAULT_TEXTURE_CELL_M,
+            // An edit keeps the face it was laid on, wherever on it `at` lands.
+            seedAt: prev?.seedAt ?? pick.seedAt,
+            seedNormal: prev?.seedNormal ?? pick.seedNormal,
+            // Unset, a cylinder's side goes all the way round; see textureRegion.
+            maxTiltDeg: m.stopAtDeg ?? prev?.maxTiltDeg,
+            projection: projection === 'auto' ? undefined : projection,
+            twistDeg: m.twistDeg ?? prev?.twistDeg,
+            scale: m.scale ?? prev?.scale,
+          };
+          const index = pick.index ?? existing.length;
+          const list = [...existing];
+          list[index] = texture;
+          // The same build the viewport draws, in the texture worker.
+          const surface = await requestTexturedSurface({ ...geom, textures: list }, geomHalfLen(geom));
+          const region = surface?.regions.find((r) => r.index === index);
+          const warnings = [
+            ...(surface?.warnings ?? [])
+              .filter((w) => w.startsWith(`Pattern ${index + 1}:`) || !w.startsWith('Pattern '))
+              .map((w) => w.replace(/^Pattern \d+: /, '')),
+            ...(unknown.length ? [`${spec.label} has no option ${unknown.join(', ')}; it takes ${[...optionKeys].join(', ')}.`] : []),
+          ];
+          if (!region?.applied) {
+            return { ok: false, error: region?.reason ?? 'The pattern could not be laid on that face.', warnings };
+          }
+          if (!m.preview) store.setGeomTextures(node.id, geom.name, list);
+          const mm = (v: number) => Math.round(v * 10000) / 10;
+          return {
+            ok: true,
+            preview: !!m.preview,
+            edited: pick.index !== undefined,
+            index,
+            geomName: geom.name,
+            pattern: describe({ ...texture, depthM: region.depthM }),
+            options: texture.options,
+            faceMm: [mm(region.extentM[0]), mm(region.extentM[1])],
+            areaMm2: Math.round(region.areaM2 * 1e6),
+            projection: region.projection,
+            stretchPercent: region.stretch !== undefined && Number.isFinite(region.stretch) ? Math.round(region.stretch * 100) : null,
+            ...(region.wrap ? { wrap: region.wrap } : {}),
+            ...(region.seam ? { seam: true } : {}),
+            depthMm: mm(Math.abs(region.depthM)),
+            triangles: region.triangles,
+            warnings,
           };
         }
 
