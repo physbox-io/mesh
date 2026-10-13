@@ -2,12 +2,10 @@ import React, { useEffect, useState } from 'react';
 import { X, AlertCircle, Sparkles, Trash2 } from 'lucide-react';
 import { NumberInput } from '@physbox-io/ui';
 import { useStore } from '../store/useStore';
-import { useSettled } from '../hooks/useSettled';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { findNodeById } from '../utils/sceneTree';
 import { SURFACE_PATTERNS, patternById, type PatternOptions } from '../utils/surfacePatterns';
 import {
-  DEFAULT_MAX_TILT_DEG,
   DEFAULT_TEXTURE_BORDER_M,
   DEFAULT_TEXTURE_CELL_M,
   type SurfaceTexture,
@@ -17,16 +15,18 @@ import {
 } from '../utils/surfaceTexture';
 import { geomHalfLen } from '../utils/geomSurface';
 import { requestTexturedSurface } from '../utils/textureClient';
-import type { FacePatternTarget } from '../utils/facePatternPick';
+import type { FacePatternGlowEvent, FacePatternTarget } from '../utils/facePatternPick';
 import { Field, PatternFields, inputClass } from './PatternFields';
 
 /**
  * One of the Generators patterns, put on a face of a part that is already in
  * the scene (T, or "Pattern a face" in the mode menu).
  *
- * It docks at the side with no backdrop, because the preview IS the part: every
- * change is written to the scene as it is made, the viewport rebuilds the
- * patterned surface in a worker, and Cancel puts back what was there. The
+ * It docks at the side with no backdrop, because the preview IS the part:
+ * Apply writes the pattern to the scene, the viewport rebuilds the patterned
+ * surface in a worker, and the dialog stays open to change it and apply again.
+ * Done applies and closes; Cancel puts back what was there. Until something is
+ * applied the face picked is lit up, so it is plain which face it is. The
  * physics never sees any of it (see utils/geomSurface).
  */
 
@@ -53,7 +53,7 @@ function newTexture(target: FacePatternTarget): SurfaceTexture {
 const LAYOUT_NAMES = { planar: 'Projected flat', cylindrical: 'Unrolled round the cylinder', unwrap: 'Unwrapped' } as const;
 
 /** One line or two on how the face was laid out, when that is worth knowing. */
-function layoutNotes(region: TextureRegionReport, stopAt: number): string[] {
+function layoutNotes(region: TextureRegionReport): string[] {
   const notes: string[] = [];
   const how = region.projection ? LAYOUT_NAMES[region.projection] : null;
   if (region.wrap && !region.wrap.blended && Math.abs(region.wrap.scaled - 1) >= 0.005) {
@@ -61,8 +61,8 @@ function layoutNotes(region: TextureRegionReport, stopAt: number): string[] {
     notes.push(`${how}: the pattern is ${pct} % ${region.wrap.scaled > 1 ? 'larger' : 'smaller'} so it meets itself all the way round.`);
   } else if (region.wrap?.blended) {
     notes.push(`${how}: the pattern does not repeat, so it is blended where it meets itself.`);
-  } else if (region.projection === 'cylindrical' && stopAt < 180) {
-    notes.push(`${how}. Set Stop at to 180 to take it all the way round.`);
+  } else if (region.capped) {
+    notes.push('This part has no edges to stop at, so the pattern covers the side facing where you clicked.');
   } else if (region.seam) {
     notes.push(`${how}: it had to be cut open to lie flat, and the cut, on the far side, is left plain.`);
   } else if (region.projection && region.projection !== 'planar') {
@@ -89,6 +89,8 @@ export const FacePatternModal: React.FC = () => {
   const [before, setBefore] = useState<SurfaceTexture[] | undefined>(undefined);
   const [index, setIndex] = useState(0);
   const [draft, setDraft] = useState<SurfaceTexture | null>(null);
+  // What is in the scene now: the pattern as last applied, or null for none yet.
+  const [applied, setApplied] = useState<SurfaceTexture | null>(null);
   const [report, setReport] = useState<TexturedSurface | null>(null);
 
   /*
@@ -106,21 +108,21 @@ export const FacePatternModal: React.FC = () => {
       setBefore(geom.textures);
       setIndex(editing ?? existing.length);
       setDraft(editing !== undefined ? existing[editing] : newTexture(target));
+      setApplied(editing !== undefined ? existing[editing] : null);
       setReport(null);
     } else {
       setDraft(null);
     }
   }
 
-  const settled = useSettled(draft, 200);
-
-  // Written to the scene as it settles, so the part in the viewport is the preview.
+  // The face lit up until there is a pattern on it to show where it is.
+  const glowAt: FacePatternGlowEvent = target && !applied && synced === key ? target : null;
   useEffect(() => {
-    if (!target || !settled || synced !== targetKey(target)) return;
-    const list = [...(before ?? [])];
-    list[index] = settled;
-    setGeomTextures(target.nodeId, target.geomName, list);
-  }, [settled, target, before, index, synced, setGeomTextures]);
+    if (!glowAt) return;
+    const send = (detail: FacePatternGlowEvent) => window.dispatchEvent(new CustomEvent('physbox:pattern-glow', { detail }));
+    send(glowAt);
+    return () => send(null);
+  }, [glowAt]);
 
   // The same build the viewport draws, for its numbers and its warnings.
   useEffect(() => {
@@ -156,14 +158,18 @@ export const FacePatternModal: React.FC = () => {
   const region = report?.regions[index];
   const pending = !region || synced !== key;
   const warnings = (report?.warnings ?? []).filter((w) => w.startsWith(`Pattern ${index + 1}:`) || !w.startsWith('Pattern '));
-  const notes = pending || !region.applied ? [] : layoutNotes(region, draft.maxTiltDeg ?? DEFAULT_MAX_TILT_DEG);
+  const notes = !applied || pending || !region.applied ? [] : layoutNotes(region);
 
-  // Done writes what is in the fields now rather than what last settled, so a
-  // change made in the last fifth of a second is not lost.
-  const done = () => {
+  const apply = () => {
     const list = [...(before ?? [])];
     list[index] = draft;
     setGeomTextures(target.nodeId, target.geomName, list);
+    setApplied(draft);
+    // The numbers shown were the last build's; these say building until this one is in.
+    setReport(null);
+  };
+  const done = () => {
+    if (draft !== applied) apply();
     closeFacePattern();
   };
 
@@ -252,14 +258,6 @@ export const FacePatternModal: React.FC = () => {
               className={inputClass}
             />
           </Field>
-          <Field label="Stop at (°)" hint="On a curved surface, how far round from where you clicked the pattern may go. Left alone, the side of a cylinder is taken all the way round.">
-            <NumberInput
-              min={1} max={180} step={5} fallbackOnBlur={DEFAULT_MAX_TILT_DEG}
-              value={draft.maxTiltDeg ?? DEFAULT_MAX_TILT_DEG}
-              onChange={(v) => { if (v !== undefined) patch({ maxTiltDeg: v }); }}
-              className={inputClass}
-            />
-          </Field>
           <Field label="Lay out" hint="How a curved face is flattened for the pattern. Auto picks: flat faces are projected, a cylinder is unrolled, anything else is unwrapped so the pattern's cells stay square.">
             <select
               value={draft.projection ?? 'auto'}
@@ -278,13 +276,13 @@ export const FacePatternModal: React.FC = () => {
           <div className="bg-slate-100 dark:bg-slate-800 p-2 rounded-lg">
             <div className="text-slate-400">Face</div>
             <div className="font-semibold text-slate-700 dark:text-slate-200">
-              {pending || !region.applied ? '—' : `${mm(region.extentM[0])} × ${mm(region.extentM[1])} mm`}
+              {!applied || pending || !region.applied ? '—' : `${mm(region.extentM[0])} × ${mm(region.extentM[1])} mm`}
             </div>
           </div>
           <div className="bg-slate-100 dark:bg-slate-800 p-2 rounded-lg">
             <div className="text-slate-400">Triangles</div>
             <div className="font-semibold text-slate-700 dark:text-slate-200">
-              {pending ? 'building…' : region.triangles.toLocaleString()}
+              {!applied ? '—' : pending ? 'building…' : region.triangles.toLocaleString()}
             </div>
           </div>
         </div>
@@ -293,7 +291,13 @@ export const FacePatternModal: React.FC = () => {
           <p key={n} className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">{n}</p>
         ))}
 
-        {(region && !region.applied ? [region.reason ?? 'It could not be put on that face.'] : warnings).map((w) => (
+        {!applied && (
+          <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
+            The lit face is where it goes. Apply to see it on the part.
+          </p>
+        )}
+
+        {(!applied ? [] : region && !region.applied ? [region.reason ?? 'It could not be put on that face.'] : warnings).map((w) => (
           <div key={w} className="flex items-start gap-2 p-2 rounded-lg bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900/60">
             <AlertCircle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
             <p className="text-[11px] text-amber-700 dark:text-amber-300 leading-relaxed">{w.replace(/^Pattern \d+: /, '')}</p>
@@ -320,6 +324,13 @@ export const FacePatternModal: React.FC = () => {
             className="px-3 py-1.5 text-xs font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition-colors cursor-pointer"
           >
             Cancel
+          </button>
+          <button
+            onClick={apply}
+            disabled={draft === applied}
+            className="px-3 py-1.5 text-xs font-semibold text-fuchsia-700 dark:text-fuchsia-300 border border-fuchsia-300 dark:border-fuchsia-800 hover:bg-fuchsia-50 dark:hover:bg-fuchsia-950/40 disabled:opacity-40 disabled:hover:bg-transparent disabled:cursor-default rounded-lg transition-colors cursor-pointer"
+          >
+            Apply
           </button>
           <button
             onClick={done}

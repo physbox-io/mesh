@@ -2780,6 +2780,7 @@ export function useMCPBridge() {
             stretchPercent: region.stretch !== undefined && Number.isFinite(region.stretch) ? Math.round(region.stretch * 100) : null,
             ...(region.wrap ? { wrap: region.wrap } : {}),
             ...(region.seam ? { seam: true } : {}),
+            ...(region.capped ? { capped: true } : {}),
             depthMm: mm(Math.abs(region.depthM)),
             triangles: region.triangles,
             warnings,

@@ -43,7 +43,7 @@ import { solveScaleToFit, type MateFeature } from '../../utils/mateSnap';
 import { bodyFeatures, neighbourFeatures, documentAxes, graphAxes } from '../../utils/mateFeatures';
 import { snapToFloor, snapThreshold } from '../../utils/floorSnap';
 import { useOrbitEnable } from './useOrbitEnable';
-import { pickPatternFace } from '../../utils/facePatternPick';
+import { pickPatternFace, patternFaceGlow, pickedFaceGlow, type PatternFaceGlow, type FacePatternGlowEvent } from '../../utils/facePatternPick';
 
 type Axis = 'x' | 'y' | 'z';
 
@@ -248,6 +248,20 @@ const POCKET_MATERIAL = new THREE.MeshBasicMaterial({
 const OUTLINE_EDGES = new THREE.LineBasicMaterial({ color: 0x0284c7, transparent: true, depthTest: false });
 const POCKET_EDGES = new THREE.LineBasicMaterial({ color: 0xdc2626, transparent: true, depthTest: false });
 
+/*
+ * The face a pattern would go on, lit up: a pale wash added over the face and
+ * a brighter line round its edge, drawn over the part's own colour rather than
+ * replacing it, and pulled towards the eye so it never fights the face for
+ * the same pixels.
+ */
+const GLOW_MATERIAL = new THREE.MeshBasicMaterial({
+  color: 0xf0abfc, transparent: true, opacity: 0.35, depthWrite: false, blending: THREE.AdditiveBlending,
+  polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2, side: THREE.DoubleSide,
+});
+const GLOW_EDGES = new THREE.LineBasicMaterial({ color: 0xf5d0fe, transparent: true, opacity: 0.9, depthWrite: false });
+/** The Z-up body frame into the Y-up scene, for a body drawn straight in the scene: (x, y, z) → (x, z, −y). */
+const Z_UP_TO_Y_UP = new THREE.Matrix4().set(1, 0, 0, 0, 0, 0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1);
+
 /** A face's outline as a prism a unit tall, centred on z = 0: the ghost, scaled along z to length. */
 const ghostGeometry = (outline: number[][]) => {
   const { positions, faces } = prismMesh(outline, -0.5, 0.5);
@@ -284,7 +298,7 @@ const SCALE_REACH_M = 0.35;
 const SCALE_BAND_WEIGHT = 3;
 
 export const ObjectGestureController = () => {
-  const { scene, camera, gl } = useThree();
+  const { scene, camera, gl, invalidate } = useThree();
   const gesture = useRef<Gesture | null>(null);
   const pointer = useRef({ x: 0, y: 0, alt: false });
   const setGestureStatus = useStore((s) => s.setGestureStatus);
@@ -391,19 +405,19 @@ export const ObjectGestureController = () => {
   }, [camera, gl]);
 
   /**
-   * Opens the pattern dialog on the face of the selected body under the
-   * pointer (T), or says why not. A body drawn only as static meshes has its
-   * groups straight in the Y-up scene rather than in the Z-up group, so its
-   * ray is turned into Z-up here.
+   * The selected body under the pointer, and the pointer's ray in the body's
+   * own frame, for picking a face to pattern. A body drawn only as static
+   * meshes has its groups straight in the Y-up scene rather than in the Z-up
+   * group, so its ray is turned into Z-up here.
    */
-  const pickPatternAt = useCallback((x: number, y: number): boolean => {
+  const bodyRayAt = useCallback((x: number, y: number) => {
     const store = useStore.getState();
     const nodeId = store.selectedNodeId;
-    if (!nodeId) return false;
+    if (!nodeId) return null;
     const node = findNode(store.sceneGraph.nodes, nodeId);
     const groups = groupsFor(nodeId);
     const parent = (groups.find((g) => g.parent && g.parent.type !== 'Scene') ?? groups[0])?.parent;
-    if (!node || !parent) return false;
+    if (!node || !parent) return null;
     const ray = rayIn(parent, x, y);
     if (parent.type === 'Scene') {
       const zUp = (v: THREE.Vector3) => v.set(v.x, -v.z, v.y);
@@ -414,14 +428,78 @@ export const ObjectGestureController = () => {
     const toBody = pose.rot.clone().transpose();
     const origin = ray.origin.clone().sub(pose.pos).applyMatrix3(toBody);
     const direction = ray.direction.clone().applyMatrix3(toBody).normalize();
-    const pick = pickPatternFace(node, origin.toArray(), direction.toArray());
-    if (!pick) {
+    return { node, parent, origin: origin.toArray(), direction: direction.toArray() };
+  }, [groupsFor, rayIn]);
+
+  /** Opens the pattern dialog on the face of the selected body under the pointer (T), or says why not. */
+  const pickPatternAt = useCallback((x: number, y: number): boolean => {
+    const at = bodyRayAt(x, y);
+    const pick = at && pickPatternFace(at.node, at.origin, at.direction);
+    if (!at || !pick) {
       flash('Point at a face of the selected part to put a pattern on it');
       return false;
     }
-    store.openFacePattern({ nodeId, ...pick });
+    useStore.getState().openFacePattern({ nodeId: at.node.id, ...pick });
     return true;
-  }, [flash, groupsFor, rayIn]);
+  }, [bodyRayAt, flash]);
+
+  /**
+   * The face lit up: under the pointer while "Pattern a face" waits for its
+   * click, and the face picked while the dialog is open on it and nothing has
+   * been applied to show where it is. Drawn in the body's parent at the
+   * body's pose, so it sits on the part however the part is drawn.
+   */
+  const glow = useRef<{ key: string; object: THREE.Group } | null>(null);
+  const showGlow = useCallback((parent: THREE.Object3D | null, node: SceneNode | null, found: PatternFaceGlow | null) => {
+    const current = glow.current;
+    if (found && current && current.key === found.key && current.object.parent === parent) return;
+    if (current) {
+      current.object.removeFromParent();
+      current.object.traverse((o) => { if (o instanceof THREE.Mesh || o instanceof THREE.LineSegments) o.geometry.dispose(); });
+      glow.current = null;
+    }
+    if (found && parent && node) {
+      const wash = new THREE.BufferGeometry();
+      wash.setAttribute('position', new THREE.BufferAttribute(found.triangles, 3));
+      const edge = new THREE.BufferGeometry();
+      edge.setAttribute('position', new THREE.BufferAttribute(found.outline, 3));
+      const object = new THREE.Group();
+      object.add(new THREE.Mesh(wash, GLOW_MATERIAL), new THREE.LineSegments(edge, GLOW_EDGES));
+      object.renderOrder = 10;
+      const pose = bodyPoseOf(node.id, node.pos);
+      const matrix = new THREE.Matrix4().setFromMatrix3(pose.rot).setPosition(pose.pos);
+      if (parent.type === 'Scene') matrix.premultiply(Z_UP_TO_Y_UP);
+      object.matrixAutoUpdate = false;
+      object.matrix.copy(matrix);
+      parent.add(object);
+      glow.current = { key: found.key, object };
+    }
+    invalidate();
+  }, [invalidate]);
+
+  const glowUnderPointer = useCallback((x: number, y: number) => {
+    const at = bodyRayAt(x, y);
+    showGlow(at?.parent ?? null, at?.node ?? null, at ? patternFaceGlow(at.node, at.origin, at.direction) : null);
+  }, [bodyRayAt, showGlow]);
+
+  // The dialog asks for its face to be lit until something is applied to it.
+  useEffect(() => {
+    const onGlow = (event: Event) => {
+      const asked = (event as CustomEvent<FacePatternGlowEvent>).detail;
+      if (!asked) { showGlow(null, null, null); return; }
+      const store = useStore.getState();
+      const node = findNode(store.sceneGraph.nodes, asked.nodeId);
+      const groups = groupsFor(asked.nodeId);
+      const parent = (groups.find((g) => g.parent && g.parent.type !== 'Scene') ?? groups[0])?.parent ?? null;
+      showGlow(parent, node, node ? pickedFaceGlow(node, asked) : null);
+    };
+    window.addEventListener('physbox:pattern-glow', onGlow);
+    return () => {
+      window.removeEventListener('physbox:pattern-glow', onGlow);
+      showGlow(null, null, null);
+    };
+  }, [groupsFor, showGlow]);
+
   /** Set by the mode menu's "Pattern a face": the next click picks the face. */
   const patternArmed = useRef(false);
 
@@ -1160,7 +1238,7 @@ export const ObjectGestureController = () => {
       // the docs suggest WASD and arrows, and S here scaled the selection
       // while it was meant to steer a cart.
       if (useStore.getState().isPlaying) return;
-      if (key === 'escape' && patternArmed.current) { patternArmed.current = false; setGestureStatus(null); return; }
+      if (key === 'escape' && patternArmed.current) { patternArmed.current = false; showGlow(null, null, null); setGestureStatus(null); return; }
       if (key === 't') {
         // A pattern on the face under the pointer. Not while another tool
         // owns the pointer, for the same reasons as the gestures below.
@@ -1190,7 +1268,10 @@ export const ObjectGestureController = () => {
       // From the menu the pointer is on the menu, not on a face, so the next
       // click on the part is the pick.
       patternArmed.current = kind === 'pattern';
-      if (kind === 'pattern') flash('Click a face of the selected part to put a pattern on it');
+      if (kind === 'pattern') {
+        flash('Click a face of the selected part to put a pattern on it');
+        glowUnderPointer(pointer.current.x, pointer.current.y);
+      } else showGlow(null, null, null);
       if (kind === 'move' || kind === 'scale' || kind === 'inset') begin(kind);
     };
     window.addEventListener('physbox:gesture', onAsked);
@@ -1198,7 +1279,7 @@ export const ObjectGestureController = () => {
       window.removeEventListener('keydown', onKey, true);
       window.removeEventListener('physbox:gesture', onAsked);
     };
-  }, [begin, draw, end, flash, pickPatternAt, setGestureStatus]);
+  }, [begin, draw, end, flash, glowUnderPointer, pickPatternAt, setGestureStatus, showGlow]);
 
   /*
    * The pointer handlers are registered ONCE and read the current callbacks out
@@ -1215,13 +1296,26 @@ export const ObjectGestureController = () => {
    * Registering once removes the race entirely, and the gesture is still put
    * back on unmount, which is the case the cleanup was there for.
    */
-  const handlers = useRef({ draw, end, clear, pickPatternAt, canvas: gl.domElement });
+  const handlers = useRef({ draw, end, clear, pickPatternAt, glowUnderPointer, showGlow, canvas: gl.domElement });
   useEffect(() => {
-    handlers.current = { draw, end, clear, pickPatternAt, canvas: gl.domElement };
-  }, [clear, draw, end, pickPatternAt, gl]);
+    handlers.current = { draw, end, clear, pickPatternAt, glowUnderPointer, showGlow, canvas: gl.domElement };
+  }, [clear, draw, end, pickPatternAt, glowUnderPointer, showGlow, gl]);
 
   useEffect(() => {
+    // While "Pattern a face" waits for its click, the face under the pointer
+    // is lit, looked up at most once a frame.
+    let glowFrame = 0;
     const move = (event: PointerEvent) => {
+      if (!gesture.current && patternArmed.current && !glowFrame) {
+        const { clientX: x, clientY: y } = event;
+        const over = event.target === handlers.current.canvas;
+        glowFrame = requestAnimationFrame(() => {
+          glowFrame = 0;
+          if (!patternArmed.current) return;
+          if (over) handlers.current.glowUnderPointer(x, y);
+          else handlers.current.showGlow(null, null, null);
+        });
+      }
       if (!gesture.current) return;
       pointer.current = { x: event.clientX, y: event.clientY, alt: event.altKey };
       handlers.current.draw();
@@ -1232,6 +1326,7 @@ export const ObjectGestureController = () => {
         // canvas: a click on a panel just puts the mode away.
         if (!patternArmed.current || event.button !== 0) return;
         patternArmed.current = false;
+        handlers.current.showGlow(null, null, null);
         if (event.target !== handlers.current.canvas) return;
         event.preventDefault();
         event.stopPropagation();
@@ -1252,6 +1347,7 @@ export const ObjectGestureController = () => {
     window.addEventListener('pointerup', swallow, true);
     window.addEventListener('contextmenu', swallow, true);
     return () => {
+      cancelAnimationFrame(glowFrame);
       window.removeEventListener('pointermove', move, true);
       window.removeEventListener('pointerdown', down, true);
       window.removeEventListener('pointerup', swallow, true);

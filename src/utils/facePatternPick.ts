@@ -12,8 +12,8 @@ import * as THREE from 'three';
 import type { SceneGeom, SceneNode } from '../types/scene';
 import { geomRayHits, resolveCsgGeoms } from './csg';
 import { getGeomFrame } from './laserCutExporter';
-import { geomHalfLen, geomLocalSurface } from './geomSurface';
-import { textureIndexAt } from './surfaceTexture';
+import { geomHalfLen, geomLocalSurface, texturedSurfaceKey } from './geomSurface';
+import { patternRegionAt, textureIndexAt } from './surfaceTexture';
 
 /** A face picked for a pattern: the geom, and the seed in its own frame. */
 export interface PatternPick {
@@ -32,6 +32,66 @@ const PATTERNABLE = new Set(['box', 'sphere', 'ellipsoid', 'cylinder', 'capsule'
  */
 export function pickPatternFace(node: SceneNode, origin: number[], direction: number[]): PatternPick | null {
   return castPatternRay(node, origin, direction)?.pick ?? null;
+}
+
+/** The face a pattern would go on, to light up: triangles and edge in the body's frame. */
+export interface PatternFaceGlow {
+  /** Which face this is, to tell a move onto another face from one across the same face. */
+  key: string;
+  triangles: Float32Array;
+  outline: Float32Array;
+}
+
+/**
+ * The face a ray in the body's frame would put a pattern on — the pattern
+ * already there, or the region a new one would cover — or null.
+ */
+export function patternFaceGlow(node: SceneNode, origin: number[], direction: number[]): PatternFaceGlow | null {
+  const hit = castPatternRay(node, origin, direction);
+  return hit ? glowOf(hit.geom, hit.pick) : null;
+}
+
+/** The face a pick already made covers, as patternFaceGlow; for the face the pattern dialog is open on. */
+export function pickedFaceGlow(node: SceneNode, pick: PatternPick): PatternFaceGlow | null {
+  const geom = resolveCsgGeoms(node, 'render').find((g) => g.name === pick.geomName);
+  return geom ? glowOf(geom, pick) : null;
+}
+
+function glowOf(geom: SceneGeom, pick: PatternPick): PatternFaceGlow | null {
+  const base = baseSurface(geom);
+  if (!base) return null;
+  const region = patternRegionAt(base.positions, base.faces, geom.textures ?? [], pick.seedAt, pick.seedNormal);
+  if (!region) return null;
+  // Back from the geom's frame to the body's, the way castPatternRay came.
+  const matrix = geom.type === 'mesh'
+    ? new THREE.Matrix4().makeTranslation(geom.pos?.[0] || 0, geom.pos?.[1] || 0, geom.pos?.[2] || 0)
+    : getGeomFrame(geom).matrix;
+  const v = new THREE.Vector3();
+  for (const list of [region.triangles, region.outline]) {
+    for (let i = 0; i < list.length; i += 3) {
+      v.set(list[i], list[i + 1], list[i + 2]).applyMatrix4(matrix);
+      list[i] = v.x; list[i + 1] = v.y; list[i + 2] = v.z;
+    }
+  }
+  // The first triangle of a region is its seed's, so it names the face.
+  const t = region.triangles;
+  return { key: `${geom.name}|${t.length}|${t[0]},${t[1]},${t[2]}`, ...region };
+}
+
+/*
+ * A geom's surface in its own frame, kept by its shape: the region search
+ * indexes the surface it is handed once per array, and a hover asks on
+ * every move.
+ */
+const bases = new Map<string, { positions: number[]; faces: number[] } | null>();
+function baseSurface(geom: SceneGeom) {
+  const halfLen = geomHalfLen(geom);
+  const key = texturedSurfaceKey(geom, halfLen);
+  if (!bases.has(key)) {
+    bases.set(key, geomLocalSurface(geom, halfLen));
+    while (bases.size > 8) bases.delete(bases.keys().next().value!);
+  }
+  return bases.get(key)!;
 }
 
 /**
@@ -58,7 +118,7 @@ export function patternPickAt(node: SceneNode, at: number[], normal?: number[]):
   return best?.pick ?? null;
 }
 
-function castPatternRay(node: SceneNode, origin: number[], direction: number[]): { pick: PatternPick; t: number } | null {
+function castPatternRay(node: SceneNode, origin: number[], direction: number[]): { pick: PatternPick; t: number; geom: SceneGeom } | null {
   const o = new THREE.Vector3(origin[0] ?? 0, origin[1] ?? 0, origin[2] ?? 0);
   const d = new THREE.Vector3(direction[0] ?? 0, direction[1] ?? 0, direction[2] ?? 0);
   if (d.lengthSq() < 1e-18) return null;
@@ -93,14 +153,20 @@ function castPatternRay(node: SceneNode, origin: number[], direction: number[]):
   const pick: PatternPick = { geomName: best.geom.name, seedAt: round(at), seedNormal: round(normal.normalize()) };
   const textures = best.geom.textures;
   if (textures?.length) {
-    const base = geomLocalSurface(best.geom, geomHalfLen(best.geom));
+    const base = baseSurface(best.geom);
     const index = base ? textureIndexAt(base.positions, base.faces, textures, pick.seedAt, pick.seedNormal) : -1;
     if (index >= 0) pick.index = index;
   }
-  return { pick, t: best.t };
+  return { pick, t: best.t, geom: best.geom };
 }
 
 /** The face the pattern dialog is open on. `index` is the pattern being edited; absent for a new one. */
 export interface FacePatternTarget extends PatternPick {
   nodeId: string;
 }
+
+/**
+ * The detail of a `physbox:pattern-glow` event: the face to light up, or
+ * null to put the light out. The pattern dialog sends it; the scene draws it.
+ */
+export type FacePatternGlowEvent = FacePatternTarget | null;

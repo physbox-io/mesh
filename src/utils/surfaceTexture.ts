@@ -64,9 +64,8 @@ export interface SurfaceTexture {
   creaseDeg?: number;
   /**
    * The region also stops where the surface has turned this far from the
-   * picked point, degrees. A bowl blended into its rim by a fillet has no
-   * crease at all, and without this the region would carry on over the rim
-   * and down the outside.
+   * picked point, degrees. Left out, it runs to the face's edges, except on a
+   * part with no edges at all (see textureRegion).
    */
   maxTiltDeg?: number;
   projection?: TextureProjection;
@@ -78,6 +77,7 @@ export interface SurfaceTexture {
 
 export const DEFAULT_TEXTURE_CELL_M = 0.0004;
 export const DEFAULT_TEXTURE_BORDER_M = 0.002;
+/** How far round from the pick a pattern goes on a part with no edges to stop it. */
 export const DEFAULT_MAX_TILT_DEG = 75;
 /**
  * Most triangles a textured mesh may have, all regions together. A region that
@@ -130,6 +130,8 @@ export interface TextureRegionReport {
   wrap?: { scaled: number; blended: boolean };
   /** A tube, or a face with a hole, had to be cut open to be laid flat; the cut is left plain. */
   seam?: boolean;
+  /** The part has no edges to stop at, so the region covers only the side facing the pick. */
+  capped?: boolean;
   /**
    * The relief as laid, for drawing it in 2D (a laser's engrave layer). Only
    * for a planar projection: a curved region is never one flat panel.
@@ -389,8 +391,24 @@ function indexSurface(positions: ArrayLike<number>, faces: ArrayLike<number>): I
   return { mesh, normals, areas, edges: edgeFaces(mesh), seedTol: Math.max(5e-4, extent * 0.01) };
 }
 
-/** The faces a texture's region takes, grown from its seed, or why it has none. */
-function textureRegion(surface: IndexedSurface, texture: SurfaceTexture, claimed: Int32Array): number[] | 'missed' | 'overlap' {
+/** A texture's region: its faces, and whether it was stopped short of the face's edges. */
+interface Region {
+  faces: number[];
+  /** The part had no edge to stop at, so the region stops DEFAULT_MAX_TILT_DEG round from the seed. */
+  capped: boolean;
+}
+
+/**
+ * The faces a texture's region takes, grown from its seed, or why it has none.
+ *
+ * A face is everything up to the part's sharp edges: a box's whole top, a
+ * cylinder's whole side, a dish and over its rounded rim. The one surface that
+ * cannot be taken whole is a closed one with no edge at all — a sphere, a
+ * capsule, a sculpted blob — which no flat pattern covers without tearing, so
+ * there the region stops where the surface has turned DEFAULT_MAX_TILT_DEG
+ * from the pick. `maxTiltDeg`, given, is that limit on any face.
+ */
+function textureRegion(surface: IndexedSurface, texture: SurfaceTexture, claimed: Int32Array): Region | 'missed' | 'overlap' {
   const { mesh, normals, edges, seedTol } = surface;
   const seedN = texture.seedNormal ? norm(texture.seedNormal as Vec3) : null;
   const seed = seedFace(mesh, normals, texture.seedAt as Vec3, seedN, seedTol);
@@ -398,38 +416,51 @@ function textureRegion(surface: IndexedSurface, texture: SurfaceTexture, claimed
   const creaseCos = Math.cos(((texture.creaseDeg ?? EDGE_CREASE_DEG) * Math.PI) / 180);
   // 180 degrees is no limit at all: its cosine is -1, and the facet exactly
   // opposite the pick reads a hair under that, so it was left out.
-  const tilt = texture.maxTiltDeg ?? DEFAULT_MAX_TILT_DEG;
-  const tiltCos = tilt >= 180 ? -Infinity : Math.cos((tilt * Math.PI) / 180);
-  const grown = growRegion(mesh, normals, edges, seed, creaseCos, tiltCos, claimed);
-  /*
-   * The tilt limit is for a bowl blended into its rim, where no crease stops
-   * the region going over the top and down the outside. A cylinder's side is
-   * bounded by the creases at its ends, and stopped by the tilt it covered
-   * only the part of the side facing the picker. Left at its default, a
-   * region that is a cylinder's side carries on round, as long as all of it
-   * is the same cylinder.
-   */
-  if (texture.maxTiltDeg === undefined && typeof grown !== 'string' && isCylinderSide(surface, grown)) {
-    const round = growRegion(mesh, normals, edges, seed, creaseCos, -Infinity, claimed);
-    if (typeof round !== 'string' && round.length > grown.length && isCylinderSide(surface, round)) return round;
-  }
-  return grown;
+  const tiltCos = (deg: number) => (deg >= 180 ? -Infinity : Math.cos((deg * Math.PI) / 180));
+  const grow = (deg: number, cap: boolean): Region | 'overlap' => {
+    const grown = growRegion(mesh, normals, edges, seed, creaseCos, tiltCos(deg), claimed);
+    return typeof grown === 'string' ? grown : { faces: grown, capped: cap };
+  };
+  if (texture.maxTiltDeg !== undefined) return grow(texture.maxTiltDeg, false);
+  // Whether the whole face is closed is a property of the part, not of what
+  // other patterns have taken, so it is asked of a region grown regardless.
+  const whole = growRegion(mesh, normals, edges, seed, creaseCos, -Infinity, new Int32Array(claimed.length).fill(-1));
+  if (typeof whole !== 'string' && isClosedRegion(mesh, edges, whole)) return grow(DEFAULT_MAX_TILT_DEG, true);
+  return grow(180, false);
 }
 
-/** The faces lie on one cylinder's side, and are not all one flat face. */
-function isCylinderSide(surface: IndexedSurface, faces: number[]): boolean {
-  const { mesh, normals, areas } = surface;
-  const n0 = normals[faces[0]];
-  if (faces.every((f) => dot(normals[f], n0) > Math.cos((5 * Math.PI) / 180))) return false;
-  const verts = new Set<number>();
-  for (const f of faces) for (let k = 0; k < 3; k++) verts.add(mesh.faces[3 * f + k]);
-  const centroids = faces.map((f): Vec3 => {
-    const a = vtx(mesh.pos, mesh.faces[3 * f]), b = vtx(mesh.pos, mesh.faces[3 * f + 1]), c = vtx(mesh.pos, mesh.faces[3 * f + 2]);
-    return [(a[0] + b[0] + c[0]) / 3, (a[1] + b[1] + c[1]) / 3, (a[2] + b[2] + c[2]) / 3];
-  });
-  const fit = fitCylinder([...verts].map((i) => vtx(mesh.pos, i)), centroids, faces.map((f) => normals[f]), faces.map((f) => areas[f]));
-  return !!fit && fit.leanDeg <= CYLINDER_LEAN_DEG && fit.error <= CYLINDER_ERROR;
+/** No edge of the faces borders a face outside them: the region is the whole of a closed surface. */
+function isClosedRegion(mesh: Mesh, edges: Map<number, number[]>, faces: number[]): boolean {
+  const inRegion = new Set(faces);
+  for (const f of faces) {
+    for (let e = 0; e < 3; e++) {
+      const list = edges.get(edgeKey(mesh.faces[3 * f + e], mesh.faces[3 * f + ((e + 1) % 3)]));
+      if (!list || list.length !== 2 || !list.every((g) => inRegion.has(g))) return false;
+    }
+  }
+  return true;
 }
+
+/**
+ * The pattern already covering the point picked, and its faces, or null.
+ * Claimed in order, as applySurfaceTextures does, so a pattern refused for
+ * overlapping an earlier one does not own the earlier one's faces.
+ */
+function existingRegionAt(surface: IndexedSurface, textures: SurfaceTexture[], picked: number): { index: number; faces: number[] } | null {
+  const claimed = new Int32Array(surface.mesh.faces.length / 3).fill(-1);
+  for (let i = 0; i < textures.length; i++) {
+    const spec = patternById(textures[i].pattern);
+    if (!spec || spec.throughCut || !(Math.abs(textures[i].depthM) > 0)) continue;
+    const grown = textureRegion(surface, textures[i], claimed);
+    if (typeof grown === 'string') continue;
+    if (grown.faces.includes(picked)) return { index: i, faces: grown.faces };
+    for (const f of grown.faces) claimed[f] = i;
+  }
+  return null;
+}
+
+const pickedFace = (surface: IndexedSurface, at: number[], normal?: number[]) =>
+  seedFace(surface.mesh, surface.normals, at as Vec3, normal ? norm(normal as Vec3) : null, surface.seedTol);
 
 /**
  * Which of `textures` already covers the point picked, or -1. Picking a face
@@ -443,21 +474,62 @@ export function textureIndexAt(
   at: number[],
   normal?: number[],
 ): number {
-  const surface = indexSurface(positions, faces);
-  const picked = seedFace(surface.mesh, surface.normals, at as Vec3, normal ? norm(normal as Vec3) : null, surface.seedTol);
-  if (picked < 0) return -1;
-  // Claimed in order, as applySurfaceTextures does, so a pattern refused for
-  // overlapping an earlier one does not own the earlier one's faces.
-  const claimed = new Int32Array(surface.mesh.faces.length / 3).fill(-1);
-  for (let i = 0; i < textures.length; i++) {
-    const spec = patternById(textures[i].pattern);
-    if (!spec || spec.throughCut || !(Math.abs(textures[i].depthM) > 0)) continue;
-    const grown = textureRegion(surface, textures[i], claimed);
-    if (typeof grown === 'string') continue;
-    if (grown.includes(picked)) return i;
-    for (const f of grown) claimed[f] = i;
+  const surface = cachedIndexSurface(positions, faces);
+  const picked = pickedFace(surface, at, normal);
+  return picked < 0 ? -1 : existingRegionAt(surface, textures, picked)?.index ?? -1;
+}
+
+/**
+ * The face a pick lands on, as a pattern would take it: the pattern already
+ * there if there is one, or the region a new one would grow. Triangles as
+ * corner positions, and the region's edge as line segments, both in the frame
+ * given — for lighting the face up under the pointer before it is picked.
+ */
+export function patternRegionAt(
+  positions: ArrayLike<number>,
+  faces: ArrayLike<number>,
+  textures: SurfaceTexture[],
+  at: number[],
+  normal?: number[],
+): { triangles: Float32Array; outline: Float32Array } | null {
+  const surface = cachedIndexSurface(positions, faces);
+  const { mesh, edges } = surface;
+  const picked = pickedFace(surface, at, normal);
+  if (picked < 0) return null;
+  let region = existingRegionAt(surface, textures, picked)?.faces;
+  if (!region) {
+    const grown = textureRegion(surface, { pattern: '', depthM: 0, seedAt: at, seedNormal: normal }, new Int32Array(mesh.faces.length / 3).fill(-1));
+    if (typeof grown === 'string') return null;
+    region = grown.faces;
   }
-  return -1;
+  const inRegion = new Set(region);
+  const triangles = new Float32Array(region.length * 9);
+  const outline: number[] = [];
+  region.forEach((f, i) => {
+    for (let k = 0; k < 3; k++) {
+      const a = mesh.faces[3 * f + k], b = mesh.faces[3 * f + ((k + 1) % 3)];
+      for (let c = 0; c < 3; c++) triangles[9 * i + 3 * k + c] = mesh.pos[3 * a + c];
+      const list = edges.get(edgeKey(a, b));
+      if (!list || !list.every((g) => inRegion.has(g))) {
+        for (const v of [a, b]) outline.push(mesh.pos[3 * v], mesh.pos[3 * v + 1], mesh.pos[3 * v + 2]);
+      }
+    }
+  });
+  return { triangles, outline: new Float32Array(outline) };
+}
+
+/*
+ * Indexing a surface (welding it, finding its edges) is most of the cost of
+ * a pick, and the hover asks again on every move over the same part, so each
+ * is kept for as long as the positions array it was made from.
+ */
+const indexed = new WeakMap<object, { faces: ArrayLike<number>; surface: IndexedSurface }>();
+function cachedIndexSurface(positions: ArrayLike<number>, faces: ArrayLike<number>): IndexedSurface {
+  const hit = indexed.get(positions);
+  if (hit && hit.faces === faces) return hit.surface;
+  const surface = indexSurface(positions, faces);
+  indexed.set(positions, { faces, surface });
+  return surface;
 }
 
 /**
@@ -1241,9 +1313,10 @@ export function applySurfaceTextures(
     if (spec.throughCut) return skip(index, `${spec.label} cuts right through a board, so it cannot be laid on a face.`);
     if (!(Math.abs(texture.depthM) > 0)) return skip(index, 'its depth is zero.');
 
-    const grown = textureRegion(surface, texture, claimed);
-    if (grown === 'missed') return skip(index, 'the point it was put on is no longer on the part.');
-    if (grown === 'overlap') return skip(index, 'it overlaps a pattern already on that face.');
+    const region = textureRegion(surface, texture, claimed);
+    if (region === 'missed') return skip(index, 'the point it was put on is no longer on the part.');
+    if (region === 'overlap') return skip(index, 'it overlaps a pattern already on that face.');
+    const grown = region.faces;
 
     let area = 0;
     let sum: Vec3 = [0, 0, 0];
@@ -1277,6 +1350,7 @@ export function applySurfaceTextures(
     const report: TextureRegionReport = {
       index, applied: true, areaM2: area, extentM: [uv.width, uv.height], triangles: 0, cellM, depthM,
       normal, flat, projection: uv.kind, stretch, seam: uv.seam.length > 0 || undefined,
+      capped: region.capped || undefined,
     };
     jobs.push({ index, texture, faces: grown, normal, uv, cellM, depthM, report });
   });

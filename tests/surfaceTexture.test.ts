@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { applySurfaceTextures, textureIndexAt, type SurfaceTexture } from '../src/utils/surfaceTexture';
+import { applySurfaceTextures, patternRegionAt, textureIndexAt, type SurfaceTexture } from '../src/utils/surfaceTexture';
+import { geomLocalSurface } from '../src/utils/geomSurface';
+import type { SceneGeom } from '../src/types/scene';
 import { analyzeMesh } from '../src/utils/meshIntegrity';
 
 /*
@@ -202,6 +204,56 @@ describe('choosing the region', () => {
     const side = 2 * Math.PI * 0.02 * 0.04;
     expect(r.areaM2).toBeGreaterThan(side * 0.22);
     expect(r.areaM2).toBeLessThan(side * 0.28);
+  });
+});
+
+describe('a face is covered whole', () => {
+  it('takes a cylinder\'s whole side, with no limit asked for', () => {
+    const cyl = cylinder(0.02, 0.02, 96);
+    const out = applySurfaceTextures(cyl.positions, cyl.faces, [fluted({ seedAt: [0.02, 0, 0], seedNormal: [1, 0, 0], depthM: -0.0005 })]);
+    const [r] = out.regions;
+    expect(r.applied).toBe(true);
+    expect(r.capped).toBeUndefined();
+    expect(r.areaM2).toBeGreaterThan(2 * Math.PI * 0.02 * 0.04 * 0.98);
+  });
+
+  it('stops short on a part with no edges, and says so', () => {
+    const R = 0.03;
+    const sphere = geomLocalSurface({ name: 's', type: 'sphere', size: [R] } as SceneGeom)!;
+    const out = applySurfaceTextures(sphere.positions, sphere.faces, [fluted({ seedAt: [R, 0, 0], seedNormal: [1, 0, 0], depthM: -0.0005 })]);
+    const [r] = out.regions;
+    expect(r.applied).toBe(true);
+    expect(r.capped).toBe(true);
+    // A cap 75 degrees round from the pick: 2πR²(1 − cos 75°), about 37 % of the sphere.
+    expect(r.areaM2 / (4 * Math.PI * R * R)).toBeGreaterThan(0.3);
+    expect(r.areaM2 / (4 * Math.PI * R * R)).toBeLessThan(0.45);
+    expect(r.projection).toBe('unwrap');
+  });
+});
+
+describe('the face a pick would light up', () => {
+  const { positions, faces } = box(HX, HY, HZ);
+
+  it('is the whole face, edged all round', () => {
+    const glow = patternRegionAt(positions, faces, [], [0.01, 0.005, HZ], [0, 0, 1])!;
+    expect(glow.triangles.length).toBe(2 * 9);
+    // Four edges, two ends each; the diagonal inside the face is not one.
+    expect(glow.outline.length).toBe(4 * 2 * 3);
+    for (let i = 2; i < glow.triangles.length; i += 3) expect(glow.triangles[i]).toBeCloseTo(HZ, 6);
+  });
+
+  it('is the pattern already there, when the pick lands in one', () => {
+    const cyl = cylinder(0.02, 0.02, 96);
+    const quarter = fluted({ seedAt: [0.02, 0, 0], seedNormal: [1, 0, 0], maxTiltDeg: 45 });
+    const near = (t: number): number[] => [0.02 * Math.cos(t), 0.02 * Math.sin(t), 0];
+    const inside = patternRegionAt(cyl.positions, cyl.faces, [quarter], near(0.3), [Math.cos(0.3), Math.sin(0.3), 0])!;
+    const whole = patternRegionAt(cyl.positions, cyl.faces, [], near(0.3), [Math.cos(0.3), Math.sin(0.3), 0])!;
+    expect(inside.triangles.length).toBeLessThan(whole.triangles.length * 0.3);
+    expect(whole.triangles.length).toBe(96 * 2 * 9);
+  });
+
+  it('is nothing off the part', () => {
+    expect(patternRegionAt(positions, faces, [], [0, 0, 0.5], [0, 0, 1])).toBeNull();
   });
 });
 
