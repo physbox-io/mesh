@@ -159,7 +159,7 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
       // flat and wall it touches. The recommendation is written for reliefs.
       finishingToolType: 'flat',
       finishingStepoverPercent: 30,
-      finishingStrategy: 'raster',
+      finishingStrategy: 'hybrid',
     }));
   };
 
@@ -241,6 +241,7 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
         thicknessMm: result.stock.thicknessMm,
         ...reliefSimulationTools(settled),
         measureRect: result.partBounds,
+        measureMask: result.footprint,
       },
       modelVolumeMm3: result.partVolumeMm3,
       transform: result.stockTransform,

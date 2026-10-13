@@ -2570,6 +2570,7 @@ export function useMCPBridge() {
                 thicknessMm: result.stock.thicknessMm,
                 ...reliefSimulationTools(options),
                 measureRect: result.partBounds,
+                measureMask: result.footprint,
               },
               transform: result.stockTransform,
               kind: 'machining',
@@ -2583,7 +2584,8 @@ export function useMCPBridge() {
               ok: true, id: added.id, name: added.name, kind: 'machining', placement,
               sides: result.sides.length,
               volumeMm3: Math.round(m.volumeMm3),
-              // Over the part's footprint, so the frame round it is left out; tabs are not.
+              // Inside the part's own outline, so the frame, the tabs and the
+              // stock round a part that is not a rectangle are all left out.
               partVolumeMm3: Math.round(part),
               modelVolumeMm3: Math.round(result.partVolumeMm3),
               partVsModel: result.partVolumeMm3 > 0 ? +(part / result.partVolumeMm3).toFixed(4) : null,

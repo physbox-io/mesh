@@ -186,7 +186,12 @@ describe('Add Simulation, two sides', () => {
       joints: [], children: [],
     }],
   };
-  const opts = deriveSolidOptions(ball, { sides: 2, material: 'softwood', finishingToolType: 'ball_nose' });
+  // A raster, whose passes on the two sides are each other's mirror image
+  // exactly, so any step at the seam is the sides read out of line. Hybrid's
+  // waterline leaves its scallops at slightly different places on each side:
+  // 0.17 mm apart at worst, though both are as close to the sphere (0.08 mm
+  // mean, 0.26 at worst) as the raster is.
+  const opts = deriveSolidOptions(ball, { sides: 2, material: 'softwood', finishingToolType: 'ball_nose', finishingStrategy: 'raster' });
   const res = generateSolidMachining(ball, opts);
   const job = {
     gcode: res.sides[0].gcode,

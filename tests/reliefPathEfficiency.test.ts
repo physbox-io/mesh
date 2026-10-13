@@ -170,12 +170,16 @@ describe('roughing a solid part', () => {
       if (done.heights[i] < -0.5) left.push(Math.max(0, rough.heights[i] - done.heights[i]));
     }
     left.sort((a, b) => a - b);
-    expect(left[Math.floor(left.length * 0.5)]).toBeLessThan(opts.roughingAllowanceMm + 0.2);
+    // 0.61 with hybrid the default: its waterline takes the steep flanks
+    // roughing left a cell on (see below) down to the surface as well.
+    expect(left[Math.floor(left.length * 0.5)]).toBeLessThan(opts.roughingAllowanceMm + 0.25);
     // 0.54 mm at p90 while roughing read a wall as standing on its high
     // sample, which cut past walls sampled across (0.85 mm into a 100 mm
     // cylinder). Held clear of them it is 1.83: up to a cell of the steep
     // flank near the equator left for the ball, 133 minutes against 121.
-    expect(left[Math.floor(left.length * 0.9)]).toBeLessThan(opts.roughingAllowanceMm + 1.6);
+    // 2.31 once hybrid was the default: the raster had left most of that cell
+    // on the flank, and the waterline takes it off.
+    expect(left[Math.floor(left.length * 0.9)]).toBeLessThan(opts.roughingAllowanceMm + 2.1);
   });
 
   it('flies little between cuts', () => {
@@ -241,7 +245,10 @@ describe('finishing', () => {
 
   // Solid machining finishes through the same code. Was 98 lifts a side with
   // its default flat finisher; 5. 23 at most once roughing kept clear of the
-  // walls it used to cut past, for the same reason as the dome.
+  // walls it used to cut past, for the same reason as the dome. 155 with
+  // hybrid finishing the default: a waterline's runs end where its level
+  // leaves steep ground, and that is 3 m in the air on a 60 mm sphere's side,
+  // about a minute and a half of a 49-minute side.
   it('a solid part: the same, on every side', () => {
     const ball: SceneGraph = {
       nodes: [{
@@ -251,6 +258,6 @@ describe('finishing', () => {
       }],
     };
     const res = generateSolidMachining(ball, deriveSolidOptions(ball, { sides: 2, material: 'softwood' }));
-    for (const side of res.sides) expect(finishingLifts(side.gcode ?? '')).toBeLessThan(26);
+    for (const side of res.sides) expect(finishingLifts(side.gcode ?? '')).toBeLessThan(170);
   });
 });

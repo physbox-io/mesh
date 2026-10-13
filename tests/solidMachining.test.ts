@@ -42,11 +42,19 @@ describe('solid machining of the wall bracket', () => {
     expect(twoSided.stock.thicknessMm).toBeCloseTo(60 + 2 * DEFAULT_SOLID_OPTIONS.topSkinMm, 3);
   });
 
-  it('each side cuts just past the middle of the block and no further', () => {
+  /*
+   * The channel round the part is split at the middle; the part's own faces
+   * are cut from whichever side they face, however deep. Side A once stopped
+   * at the middle everywhere, and the top of the bracket's lower arm, 56 mm
+   * down, was left under 24 mm of stock that neither side cut.
+   */
+  it('each side cuts its own faces, and the channel just past the middle', () => {
     const half = twoSided.stock.thicknessMm / 2;
+    expect(twoSided.sides[0].depthMm).toBeCloseTo(56, 0);
+    expect(twoSided.sides[1].depthMm).toBeLessThan(half + 1);
     for (const side of twoSided.sides) {
       expect(side.depthMm).toBeGreaterThan(half);
-      expect(side.depthMm).toBeLessThan(half + 1);
+      expect(side.depthMm).toBeLessThanOrEqual(twoSided.stock.thicknessMm);
       let deepest = 0;
       for (const m of side.gcode.matchAll(/Z(-?\d+(?:\.\d+)?)/g)) {
         const z = parseFloat(m[1]);

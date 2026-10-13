@@ -38,7 +38,7 @@ export interface AddSimulationRequest {
   placement: SimulationPlacement;
   /** Lines for the note card: tools, run time. */
   details?: string[];
-  /** The model's own volume at the size cut, to set against `job.measureRect`'s. */
+  /** The model's own volume at the size cut, to set against what `job.measureMask` measures. */
   modelVolumeMm3?: number;
 }
 
@@ -113,7 +113,7 @@ export async function addSimulationToScene(
       ...(req.details ?? []).map((d) => `- ${d}`),
       `- Removes ${cm3(milled.stockVolumeMm3 - milled.volumeMm3)} of ${cm3(milled.stockVolumeMm3)}`,
       ...(milled.measuredVolumeMm3 !== undefined && req.modelVolumeMm3
-        ? [`- The part itself: ${cm3(milled.measuredVolumeMm3)}, against ${cm3(req.modelVolumeMm3)} in the model (tabs included)`]
+        ? [`- The part itself: ${cm3(milled.measuredVolumeMm3)}, against ${cm3(req.modelVolumeMm3)} in the model, inside its outline`]
         : []),
       milled.drawnCellMm > milled.cellMm * 1.01
         ? `- Simulated on a ${milled.cellMm.toFixed(2)} mm grid, drawn on a ${milled.drawnCellMm.toFixed(2)} mm one: too much detail to draw finer`

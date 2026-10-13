@@ -12,6 +12,7 @@
 import { simulateMilling, simulationCellMm, type MoveCut, type SimTool } from './cutSimulation';
 import { buildSimulationMesh, type HeightGrid } from './simulationMesh';
 import type { CutterShape, ReliefCarveOptions, StockTransform } from './reliefCarveExporter';
+import type { PartFootprint } from './solidMachiningExporter';
 import type { SceneGeom, SceneNode } from '../types/scene';
 
 export interface SimulationJobOptions {
@@ -36,6 +37,11 @@ export interface SimulationJobOptions {
    * model's without the frame round it.
    */
   measureRect?: { minX: number; minY: number; maxX: number; maxY: number };
+  /**
+   * Narrower than `measureRect`: only where this mask is set (nearest sample),
+   * so a round part is measured without the stock in the corners of its box.
+   */
+  measureMask?: PartFootprint;
 }
 
 export interface SimulationJobResult {
@@ -109,15 +115,21 @@ export function runSimulationJob(o: SimulationJobOptions, onProgress?: (fraction
   const { grid, cuts } = simulateStock(o, onProgress ? (f) => onProgress(f * 0.8) : undefined);
   const mesh = buildSimulationMesh(grid, { maxTriangles: o.maxTriangles });
   let measuredVolumeMm3: number | undefined;
-  if (o.measureRect) {
-    const r = o.measureRect;
+  if (o.measureRect || o.measureMask) {
+    const r = o.measureRect ?? { minX: -Infinity, minY: -Infinity, maxX: Infinity, maxY: Infinity };
+    const m = o.measureMask;
+    const inMask = (x: number, y: number) => {
+      if (!m) return true;
+      const c = Math.round((x - m.minX) / (m.stepX || 1)), j = Math.round((y - m.minY) / (m.stepY || 1));
+      return c >= 0 && j >= 0 && c < m.cols && j < m.rows && m.mask[j * m.cols + c] === 1;
+    };
     measuredVolumeMm3 = 0;
     for (let j = 0; j < grid.rows; j++) {
       const y = grid.originY + (j + 0.5) * grid.cell;
       if (y < r.minY || y > r.maxY) continue;
       for (let i = 0; i < grid.cols; i++) {
         const x = grid.originX + (i + 0.5) * grid.cell;
-        if (x < r.minX || x > r.maxX) continue;
+        if (x < r.minX || x > r.maxX || !inMask(x, y)) continue;
         const k = j * grid.cols + i;
         const under = typeof grid.bottom === 'number' ? grid.bottom : grid.bottom[k];
         measuredVolumeMm3 += Math.max(0, grid.top[k] - under) * grid.cell * grid.cell;

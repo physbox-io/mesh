@@ -154,11 +154,25 @@ export const DEFAULT_SOLID_OPTIONS: SolidMachiningOptions = {
   // scallops on both.
   finishingToolType: 'flat',
   finishingStepoverPercent: 30,
-  // A flat mill defines a wall with its side, so a raster across a solid part
-  // already leaves the walls square. The relief default's waterline would
-  // only add a pass per stepover down every cliff for nothing.
-  finishingStrategy: 'raster',
+  // Hybrid, as for a relief. A raster leaves a wall square only where its
+  // passes cross it; where they run along it, the wall is the side of
+  // whichever pass came nearest, a stepover apart: a 100 mm cylinder came out
+  // striped and up to 1 mm proud down its sides. The waterline takes the
+  // walls to within half a sample (49.55-50.35 mm on that 50 mm radius) for
+  // 131 minutes a side against 103.
+  finishingStrategy: 'hybrid',
 };
+
+/** A plan-view mask on a grid over the stock, its (0, 0) sample at (minX, minY). */
+export interface PartFootprint {
+  minX: number;
+  minY: number;
+  stepX: number;
+  stepY: number;
+  cols: number;
+  rows: number;
+  mask: Uint8Array;
+}
 
 /** One setup's worth of program. */
 export interface SolidSideResult extends SurfaceMachiningResult {
@@ -180,6 +194,12 @@ export interface SolidMachiningResult {
   bounds: { minX: number; minY: number; maxX: number; maxY: number; minZ: number; maxZ: number };
   /** Where the part lands on the stock, plan view. */
   partBounds: { minX: number; minY: number; maxX: number; maxY: number };
+  /**
+   * The part's own outline on side A's stock, as the columns it was sampled
+   * on: 1 where the part has material. The bounding box above also takes in
+   * the stock round a part that is not a rectangle.
+   */
+  footprint?: PartFootprint;
   /** The part as cut, mm. */
   partSizeMm: { x: number; y: number; z: number };
   /** Part volume from the mesh, mm³. */
@@ -953,8 +973,14 @@ export function generateSolidMachining(
         const src = side === 'A' ? r * cols + c : r * cols + (cols - 1 - c);
         const k = r * cols + c;
         if (hit[src]) {
+          // The part's own surface, however deep it is. Held to the floor,
+          // which is half way through on a two-sided job, anything below the
+          // half that faces this side was cut by neither: the floor of a
+          // pocket deeper than half the part, the lower half of a cone. A
+          // 50 mm cup came out with 16 mm of its pocket left in. Only the
+          // channel round the part is split between the sides.
           const h = side === 'A' ? top[src] : -stockT - bottom[src];
-          z[k] = Math.min(0, Math.max(floorZ, h));
+          z[k] = Math.min(0, Math.max(-stockT, h));
         } else if (frameMask[src]) {
           z[k] = 0;
         } else if (tabs.mask[src]) {
@@ -1046,13 +1072,20 @@ export function generateSolidMachining(
       }
     }
 
+    const surface = surfaceFor(side);
+    // As deep as this side's own surfaces go, which on a pocketed part is
+    // further than the half way it shares the channel at.
+    let deepest = 0;
+    for (let k = 0; k < surface.z.length; k++) deepest = Math.max(deepest, -surface.z[k]);
+    // Past the half only by more than the surface's own float rounding.
+    const depth = deepest > depthA + 1e-3 ? deepest : depthA;
     const cut = machineSurface(
-      { surface: surfaceFor(side), bounds, depthMm: depthA, resolution: res, header, prelude, noun: 'cut' },
-      carveOpts,
+      { surface, bounds, depthMm: depth, resolution: res, header, prelude, noun: 'cut' },
+      { ...carveOpts, carveDepthMm: depth },
       warnings
     );
     if (!cut.success) return fail(`Side ${side}: ${cut.error ?? 'no toolpath.'}`);
-    sides.push({ ...cut, side, depthMm: depthA });
+    sides.push({ ...cut, side, depthMm: depth });
   }
 
   if (!twoSided && opts.throughCutMm > 0) {
@@ -1074,6 +1107,7 @@ export function generateSolidMachining(
     stock: { widthMm: stockW, depthMm: stockD, thicknessMm: stockT },
     bounds,
     partBounds,
+    footprint: { minX: 0, minY: 0, stepX, stepY, cols, rows, mask: hit },
     partSizeMm: { x: partW, y: partD, z: partH },
     partVolumeMm3: partVolume,
     unreachablePercent,
