@@ -582,6 +582,18 @@ function quadratic(a: number, b: number, c: number): number[] {
   return [(-b - root) / (2 * a), (-b + root) / (2 * a)];
 }
 
+/** Y-up (three.js) vertices as the Z-up frame pos and size are given in: (x, y, z) to (x, -z, y). */
+function yupToZup(v: number[] | undefined): number[] | undefined {
+  if (!v) return undefined;
+  const out = new Array<number>(v.length);
+  for (let i = 0; i < v.length; i += 3) {
+    out[i] = v[i];
+    out[i + 1] = -v[i + 2];
+    out[i + 2] = v[i + 1];
+  }
+  return out;
+}
+
 /**
  * Every point a ray enters or leaves one geom, with the surface normal there.
  *
@@ -596,7 +608,11 @@ export function geomRayHits(geom: SceneGeom, origin: THREE.Vector3, dir: THREE.V
   const hits: SurfaceHit[] = [];
 
   if (geom.type === 'mesh') {
-    const verts = geom.renderVertices;
+    // A static mesh keeps only its Y-up `vertices`; renderVertices is the
+    // Z-up copy a dynamic one is drawn from. Read without the fallback, every
+    // ray missed a static mesh -- the California relief took no pattern, and
+    // no cut, anywhere on it.
+    const verts = geom.renderVertices ?? yupToZup(geom.vertices);
     if (!verts || !geom.faces) return hits;
     const off = geom.pos || [0, 0, 0];
     const at = (i: number) => new THREE.Vector3(
