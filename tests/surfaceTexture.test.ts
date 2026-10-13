@@ -249,6 +249,18 @@ describe('a seam drawn with the knife', () => {
     expect(check.closed && check.consistentlyWound).toBe(true);
   });
 
+  it('leaves the patterned half round, not a ball of flat panels', () => {
+    // Next to no depth, so what is measured is the surface the pattern stands on.
+    const out = applySurfaceTextures(sphere.positions, sphere.faces, [{ ...facing(R), depthM: -1e-9, cellM: 0.001 }], { splits: halves });
+    let worst = 0;
+    for (let i = 0; i < out.vertices.length; i += 3) {
+      if (out.vertices[i] < 1e-4) continue;
+      worst = Math.max(worst, Math.abs(Math.hypot(out.vertices[i], out.vertices[i + 1], out.vertices[i + 2]) - R));
+    }
+    // Left on the coarse facets it was 0.13 mm in at worst.
+    expect(worst).toBeLessThan(0.02e-3);
+  });
+
   it('runs all the way round the faces it was drawn over', () => {
     const [seam] = splitSeams(sphere.positions, sphere.faces, halves);
     // Every point on the plane, and together a loop the sphere's girth.

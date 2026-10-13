@@ -110,6 +110,12 @@ const CYLINDER_LEAN_DEG = 5;
 const CYLINDER_ERROR = 0.03;
 /** Stretch the modal warns about. */
 export const STRETCH_WARNING = 0.15;
+/**
+ * How far a refined vertex is lifted onto the curve of its face (Phong
+ * tessellation). A half lands an edge's midpoint on the circle through its
+ * ends; the usual 3/4 left a sphere 0.10 mm off, 1 overshot as far as none.
+ */
+const PHONG_ALPHA = 0.5;
 
 /** What happened to one texture. */
 export interface TextureRegionReport {
@@ -443,13 +449,56 @@ function slicePlane(mesh: Mesh, at: Vec3, n: Vec3): Mesh {
     d[i] = Math.abs(v) < tol ? 0 : v;
   }
   const made = new Map<number, number>();
+  /*
+   * A cut on a curved surface lands on the chord between two corners, inside
+   * the curve, and the pattern's lift (PHONG_ALPHA) never moves a corner. So
+   * it is lifted here, along a curve through both ends shaped by their
+   * normals, each normal taken over the faces round that corner within the
+   * crease of the edge's own: across a flat face they agree and nothing moves.
+   */
+  let around: Map<number, number[]> | null = null;
+  let edges: Map<number, number[]> | null = null;
+  const faceNormal = (f: number) => norm(faceCross(mesh, f));
+  const creaseCos = Math.cos((EDGE_CREASE_DEG * Math.PI) / 180);
+  const smoothNormal = (v: number, ref: Vec3): Vec3 => {
+    const sum: Vec3 = [0, 0, 0];
+    for (const f of around!.get(v) ?? []) {
+      const c = faceCross(mesh, f);
+      if (dot(norm(c), ref) < creaseCos) continue;
+      sum[0] += c[0]; sum[1] += c[1]; sum[2] += c[2];
+    }
+    return norm(sum);
+  };
   const cut = (a: number, b: number) => {
     const key = edgeKey(a, b);
     let i = made.get(key);
     if (i === undefined) {
       const t = d[a] / (d[a] - d[b]);
       i = pos.length / 3;
-      for (let k = 0; k < 3; k++) pos.push(pos[3 * a + k] + t * (pos[3 * b + k] - pos[3 * a + k]));
+      const pa = vtx(pos, a), pb = vtx(pos, b);
+      const p: Vec3 = [0, 1, 2].map((k) => pa[k] + t * (pb[k] - pa[k])) as Vec3;
+      if (!around) {
+        around = new Map();
+        for (let f = 0; f < mesh.faces.length / 3; f++) {
+          for (let k = 0; k < 3; k++) {
+            const v = mesh.faces[3 * f + k];
+            const list = around.get(v);
+            if (list) list.push(f); else around.set(v, [f]);
+          }
+        }
+        edges = edgeFaces(mesh);
+      }
+      const sides = edges!.get(key) ?? [];
+      const ref = norm(sides.reduce<Vec3>((acc, f) => { const n = faceNormal(f); return [acc[0] + n[0], acc[1] + n[1], acc[2] + n[2]]; }, [0, 0, 0]));
+      if (sides.length === 2 && dot(faceNormal(sides[0]), faceNormal(sides[1])) >= creaseCos) {
+        const na = smoothNormal(a, ref), nb = smoothNormal(b, ref);
+        const offA = dot(sub(p, pa), na), offB = dot(sub(p, pb), nb);
+        for (let k = 0; k < 3; k++) p[k] -= PHONG_ALPHA * ((1 - t) * offA * na[k] + t * offB * nb[k]);
+        // Back onto the plane: the seam is where the line was drawn.
+        const off = dot(sub(p, at), n);
+        for (let k = 0; k < 3; k++) p[k] -= off * n[k];
+      }
+      pos.push(p[0], p[1], p[2]);
       made.set(key, i);
     }
     return i;
@@ -1574,14 +1623,38 @@ export function applySurfaceTextures(
    * apart on a 48-sided drum, which dragged the triangles along the edges over
    * and held 1 mm flutes to 0.3 mm.
    */
-  const coarseNormals = jobs.map((_, j) => {
+  const coarseCross = (f: number) => {
+    const a = vtx(original, coarseFaces[3 * f]);
+    return cross(sub(vtx(original, coarseFaces[3 * f + 1]), a), sub(vtx(original, coarseFaces[3 * f + 2]), a));
+  };
+  const coarseNormals = jobs.map((job, j) => {
     const n = new Float64Array(coarseVerts);
-    for (let f = 0; f < coarseLabels.length; f++) {
-      if (coarseLabels[f] !== j) continue;
-      const a = vtx(original, coarseFaces[3 * f]);
-      const c = cross(sub(vtx(original, coarseFaces[3 * f + 1]), a), sub(vtx(original, coarseFaces[3 * f + 2]), a));
+    const add = (f: number, c: Vec3) => {
       for (let k = 0; k < 3; k++) {
         const v = coarseFaces[3 * f + k];
+        n[3 * v] += c[0];
+        n[3 * v + 1] += c[1];
+        n[3 * v + 2] += c[2];
+      }
+    };
+    for (let f = 0; f < coarseLabels.length; f++) if (coarseLabels[f] === j) add(f, coarseCross(f));
+    /*
+     * And the faces past the region's edge that carry on smoothly from it. A
+     * region stopped by a seam or a cap, not a crease, has the rest of the
+     * curve on the far side, and without it every normal along that edge
+     * leaned into the region: a half sphere's lift and pattern tipped off
+     * square along its seam and at its pole.
+     */
+    const creaseCos = Math.cos(((job.texture.creaseDeg ?? EDGE_CREASE_DEG) * Math.PI) / 180);
+    const inside = n.slice();
+    for (let f = 0; f < coarseLabels.length; f++) {
+      if (coarseLabels[f] === j) continue;
+      const c = coarseCross(f);
+      const fn = norm(c);
+      for (let k = 0; k < 3; k++) {
+        const v = coarseFaces[3 * f + k];
+        const own = norm([inside[3 * v], inside[3 * v + 1], inside[3 * v + 2]]);
+        if (len(own) === 0 || dot(own, fn) < creaseCos) continue;
         n[3 * v] += c[0];
         n[3 * v + 1] += c[1];
         n[3 * v + 2] += c[2];
@@ -1590,6 +1663,7 @@ export function applySurfaceTextures(
     return n;
   });
   const vNormal = new Float64Array(vertexCount * 3);
+  const basePos = Float64Array.from(original);
 
   const paintIdx: number[] = [];
   const paintRgba: number[] = [];
@@ -1643,6 +1717,25 @@ export function applySurfaceTextures(
           }
           vNormal[3 * v + axis] = sum;
         }
+        // Lifted off the flat facet onto the curve its corners' normals
+        // describe (Phong tessellation). Left on the facet, every refined
+        // vertex of a sphere's coarse triangle lay in one plane and the
+        // patterned half drew as a ball of flat panels; a flat face's corners
+        // share one normal, so it stays flat.
+        const at = vtx(original, v);
+        const lifted: Vec3 = [0, 0, 0];
+        for (let corner = 0; corner < 3; corner++) {
+          const cv = coarseFaces[3 * parents[f] + corner];
+          const n = norm([cn[3 * cv], cn[3 * cv + 1], cn[3 * cv + 2]]);
+          const off = dot(sub(at, vtx(original, cv)), n);
+          for (let axis = 0; axis < 3; axis++) lifted[axis] += w[corner] * (at[axis] - off * n[axis]);
+        }
+        for (let axis = 0; axis < 3; axis++) basePos[3 * v + axis] = (1 - PHONG_ALPHA) * at[axis] + PHONG_ALPHA * lifted[axis];
+        // The region's own edge never moves with the pattern, but it takes the
+        // curve, or the row beside it stands proud of it all along a seam. The
+        // faces next door share these vertices, so nothing opens; along a crease
+        // the corners share one normal and they stay where they are.
+        if (owner[v] === -2) for (let axis = 0; axis < 3; axis++) mesh.pos[3 * v + axis] = basePos[3 * v + axis];
       }
     }
     // Round a full wrap, back into the one turn the grids cover.
@@ -1664,7 +1757,7 @@ export function applySurfaceTextures(
 
     const place = (depth: number) => {
       for (const v of members[j]) {
-        const p: Vec3 = [original[3 * v], original[3 * v + 1], original[3 * v + 2]];
+        const p: Vec3 = [basePos[3 * v], basePos[3 * v + 1], basePos[3 * v + 2]];
         const h = look.heightAt(vu[v], vv[v]);
         const fade = fadeAt(vu[v], vv[v]);
         const offset = (depth < 0 ? depth * (1 - h) : depth * h) * fade;

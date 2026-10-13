@@ -9,7 +9,8 @@
 // a sharp edge (SceneGeom.faceSplits, utils/surfaceTexture). Halving a sphere
 // is one drag through its middle, and then each half takes its own pattern.
 //
-// C during the drag cuts right through instead: the part becomes separate
+// C, before the drag or during it, cuts right through instead (and back): the
+// part becomes separate
 // closed bodies with flat faces at the cut (cutAlongPlane, put in the scene by
 // splitBodyForPrint as a plain cut).
 //
@@ -31,7 +32,7 @@ import { bodyParent, bodyToParent, rayInBody } from './bodyRay';
 
 interface Drag {
   x0: number; y0: number; x1: number; y1: number;
-  /** C: cut right through into pieces, rather than leave a seam. */
+  /** Cut right through into pieces, rather than leave a seam. */
   separate: boolean;
   free: boolean;
 }
@@ -52,6 +53,10 @@ const SEAM_REACH_PX = 7;
 const CENTRE_SNAP_PX = 12;
 const ANGLE_STEP = Math.PI / 12;
 const ANGLE_SNAP = (5 * Math.PI) / 180;
+
+const idleStatus = (separate: boolean) => separate
+  ? 'Knife · drag across the part to cut it into pieces · C for a seam instead · Esc to stop'
+  : 'Knife · drag across the part to split its face · C to cut right through · Esc to stop';
 
 /*
  * Each line twice: bright where it can be seen, faint where the part is in
@@ -93,6 +98,8 @@ export const FaceKnife = () => {
   const armed = useRef(false);
   const drag = useRef<Drag | null>(null);
   const hot = useRef<Seam | null>(null);
+  /** C: the next line cuts right through. Set before the drag or during it. */
+  const separate = useRef(false);
   const busy = useRef(false);
   const layer = useRef<THREE.Group | null>(null);
   const overlay = useRef<{ svg: SVGSVGElement; line: SVGLineElement; dot: SVGCircleElement } | null>(null);
@@ -292,7 +299,7 @@ export const FaceKnife = () => {
         ? `Knife · cut into pieces${middle} · C for a seam instead`
         : faces ? `Knife · seam${middle} · C to cut right through` : 'Knife · draw the line across the part');
     } else {
-      setGestureStatus(hot.current ? 'Knife · click to remove this seam' : 'Knife · drag across the part to split its face · Esc to stop');
+      setGestureStatus(hot.current ? 'Knife · click to remove this seam' : idleStatus(separate.current));
     }
     parent.add(group);
     layer.current = group;
@@ -333,6 +340,7 @@ export const FaceKnife = () => {
     const store = useStore.getState();
     if (store.isPlaying || !selected()) return;
     armed.current = true;
+    separate.current = false;
     drag.current = null;
     hot.current = null;
     redraw();
@@ -350,7 +358,7 @@ export const FaceKnife = () => {
   const flash = useCallback((text: string) => {
     setGestureStatus(text);
     window.setTimeout(() => {
-      if (useStore.getState().gestureStatus === text) setGestureStatus(armed.current ? 'Knife · drag across the part to split its face · Esc to stop' : null);
+      if (useStore.getState().gestureStatus === text) setGestureStatus(armed.current ? idleStatus(separate.current) : null);
     }, 3500);
   }, [setGestureStatus]);
 
@@ -409,10 +417,13 @@ export const FaceKnife = () => {
           event.preventDefault();
           event.stopImmediatePropagation();
           if (drag.current) { drag.current = null; schedule(); } else disarm();
-        } else if (key === 'c' && drag.current) {
+        } else if (key === 'c' && !event.metaKey && !event.ctrlKey && !event.altKey) {
           event.preventDefault();
           event.stopImmediatePropagation();
-          drag.current.separate = !drag.current.separate;
+          // Held down, the key repeats: one press is one switch.
+          if (event.repeat) return;
+          separate.current = !separate.current;
+          if (drag.current) drag.current.separate = separate.current;
           schedule();
         } else if (key === 'alt' && drag.current) {
           drag.current.free = true;
@@ -440,7 +451,7 @@ export const FaceKnife = () => {
       if (!armed.current || busy.current || event.button !== 0 || event.target !== gl.domElement) return;
       event.preventDefault();
       event.stopPropagation();
-      drag.current = { x0: event.clientX, y0: event.clientY, x1: event.clientX, y1: event.clientY, separate: false, free: event.altKey };
+      drag.current = { x0: event.clientX, y0: event.clientY, x1: event.clientX, y1: event.clientY, separate: separate.current, free: event.altKey };
       schedule();
     };
     const move = (event: PointerEvent) => {
