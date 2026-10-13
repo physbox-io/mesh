@@ -252,7 +252,7 @@ export const FacePatternModal: React.FC = () => {
               className={inputClass}
             />
           </Field>
-          <Field label="Stop at (°)" hint="On a curved surface, how far round from where you clicked the pattern may go. 180 goes all the way round.">
+          <Field label="Stop at (°)" hint="On a curved surface, how far round from where you clicked the pattern may go. Left alone, the side of a cylinder is taken all the way round.">
             <NumberInput
               min={1} max={180} step={5} fallbackOnBlur={DEFAULT_MAX_TILT_DEG}
               value={draft.maxTiltDeg ?? DEFAULT_MAX_TILT_DEG}

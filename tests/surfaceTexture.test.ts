@@ -357,6 +357,30 @@ describe('curved surfaces', () => {
     expect(across).toBeLessThanOrEqual(worst * 1.5 + 1e-6);
   });
 
+  it('takes a cylinder\'s side all the way round by default, and only as far as asked when asked', () => {
+    const round = applySurfaceTextures(cyl.positions, cyl.faces, [fluted({ seedAt: [R, 0, 0], seedNormal: [1, 0, 0] })]);
+    expect(round.regions[0].areaM2).toBeCloseTo(2 * Math.PI * R * 0.06, 4);
+    expect(round.regions[0].wrap).toBeDefined();
+    const part = applySurfaceTextures(cyl.positions, cyl.faces, [fluted({ seedAt: [R, 0, 0], seedNormal: [1, 0, 0], maxTiltDeg: 75 })]);
+    expect(part.regions[0].areaM2).toBeLessThan(0.5 * round.regions[0].areaM2);
+    // A box's top is not a cylinder, and a bowl is not one either: both keep their regions.
+    const top = applySurfaceTextures(box(HX, HY, HZ).positions, box(HX, HY, HZ).faces, [fluted()]);
+    expect(top.regions[0].areaM2).toBeCloseTo(4 * HX * HY, 9);
+  });
+
+  // A 48-sided drum: each facet a flat face, so pushed along facet normals the
+  // vertices either side of every edge went 3.75 degrees apart and folded.
+  it('engraves a faceted drum to full depth all the way round', () => {
+    const drum = cylinder(0.03, 0.05, 48);
+    const out = applySurfaceTextures(drum.positions, drum.faces, [
+      fluted({ seedAt: [0.03, 0, 0], seedNormal: [1, 0, 0], depthM: -0.001, options: { pitchMm: 6, meanderMm: 0 }, cellM: 0.003 }),
+    ]);
+    expect(out.regions[0].depthM).toBeCloseTo(-0.001, 9);
+    expect(out.warnings.some((w) => /folded/.test(w))).toBe(false);
+    const check = analyzeMesh(out.vertices, out.faces)!;
+    expect(check.closed && check.consistentlyWound).toBe(true);
+  });
+
   it('blends a pattern that does not repeat across the join', () => {
     const out = applySurfaceTextures(cyl.positions, cyl.faces, [allRound({ pattern: 'voronoi', depthM: -0.001 })]);
     expect(out.regions[0].wrap).toEqual({ scaled: 1, blended: true });

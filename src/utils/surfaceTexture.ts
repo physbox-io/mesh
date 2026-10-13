@@ -396,8 +396,39 @@ function textureRegion(surface: IndexedSurface, texture: SurfaceTexture, claimed
   const seed = seedFace(mesh, normals, texture.seedAt as Vec3, seedN, seedTol);
   if (seed < 0) return 'missed';
   const creaseCos = Math.cos(((texture.creaseDeg ?? EDGE_CREASE_DEG) * Math.PI) / 180);
-  const tiltCos = Math.cos(((texture.maxTiltDeg ?? DEFAULT_MAX_TILT_DEG) * Math.PI) / 180);
-  return growRegion(mesh, normals, edges, seed, creaseCos, tiltCos, claimed);
+  // 180 degrees is no limit at all: its cosine is -1, and the facet exactly
+  // opposite the pick reads a hair under that, so it was left out.
+  const tilt = texture.maxTiltDeg ?? DEFAULT_MAX_TILT_DEG;
+  const tiltCos = tilt >= 180 ? -Infinity : Math.cos((tilt * Math.PI) / 180);
+  const grown = growRegion(mesh, normals, edges, seed, creaseCos, tiltCos, claimed);
+  /*
+   * The tilt limit is for a bowl blended into its rim, where no crease stops
+   * the region going over the top and down the outside. A cylinder's side is
+   * bounded by the creases at its ends, and stopped by the tilt it covered
+   * only the part of the side facing the picker. Left at its default, a
+   * region that is a cylinder's side carries on round, as long as all of it
+   * is the same cylinder.
+   */
+  if (texture.maxTiltDeg === undefined && typeof grown !== 'string' && isCylinderSide(surface, grown)) {
+    const round = growRegion(mesh, normals, edges, seed, creaseCos, -Infinity, claimed);
+    if (typeof round !== 'string' && round.length > grown.length && isCylinderSide(surface, round)) return round;
+  }
+  return grown;
+}
+
+/** The faces lie on one cylinder's side, and are not all one flat face. */
+function isCylinderSide(surface: IndexedSurface, faces: number[]): boolean {
+  const { mesh, normals, areas } = surface;
+  const n0 = normals[faces[0]];
+  if (faces.every((f) => dot(normals[f], n0) > Math.cos((5 * Math.PI) / 180))) return false;
+  const verts = new Set<number>();
+  for (const f of faces) for (let k = 0; k < 3; k++) verts.add(mesh.faces[3 * f + k]);
+  const centroids = faces.map((f): Vec3 => {
+    const a = vtx(mesh.pos, mesh.faces[3 * f]), b = vtx(mesh.pos, mesh.faces[3 * f + 1]), c = vtx(mesh.pos, mesh.faces[3 * f + 2]);
+    return [(a[0] + b[0] + c[0]) / 3, (a[1] + b[1] + c[1]) / 3, (a[2] + b[2] + c[2]) / 3];
+  });
+  const fit = fitCylinder([...verts].map((i) => vtx(mesh.pos, i)), centroids, faces.map((f) => normals[f]), faces.map((f) => areas[f]));
+  return !!fit && fit.leanDeg <= CYLINDER_LEAN_DEG && fit.error <= CYLINDER_ERROR;
 }
 
 /**
@@ -1255,20 +1286,45 @@ export function applySurfaceTextures(
   const PER_TRIANGLE = 0.2;
   const budget = Math.max(0, maxTriangles - faceCount);
   const wanted = jobs.reduce((n, j) => n + j.report.areaM2 / (PER_TRIANGLE * j.cellM * j.cellM), 0);
+  const askedCell = jobs.length ? jobs[0].cellM : 0;
   if (wanted > budget && jobs.length) {
     const k = Math.sqrt(wanted / Math.max(1, budget));
     for (const job of jobs) {
       job.cellM *= k;
       job.report.cellM = job.cellM;
     }
-    warnings.push(`The patterned surface would be too many triangles at the size asked for, so it is refined to ${(jobs[0].cellM * 1000).toFixed(2)} mm.`);
   }
 
   const labels: number[] = Array.from(claimed).map((owner) => jobs.findIndex((j) => j.index === owner));
   const coarseFaces = mesh.faces.slice();
+  const coarseLabels = labels.slice();
+  const coarseVerts = mesh.pos.length;
   const parents: number[] = labels.map((_, f) => f);
-  if (jobs.length && !refine(mesh, labels, parents, jobs.map((j) => j.cellM), maxTriangles * 1.25)) {
-    warnings.push('Refinement stopped at the triangle limit; the pattern is coarser than asked for.');
+  /*
+   * Refined from the start again, a quarter coarser, until it fits. The
+   * estimate above is for well-shaped faces; a long thin one (the side of a
+   * tall cylinder, two triangles the height of the part) takes many more,
+   * and refinement stopped at the cap left it in slivers that folded at
+   * almost any depth: 1 mm of scales on a 560 mm post came out 0.06 mm deep.
+   */
+  for (let attempt = 0; jobs.length; attempt++) {
+    if (refine(mesh, labels, parents, jobs.map((j) => j.cellM), maxTriangles * 1.25)) break;
+    if (attempt === 8) {
+      warnings.push('Refinement stopped at the triangle limit; the pattern is coarser than asked for.');
+      break;
+    }
+    mesh.faces = coarseFaces.slice();
+    mesh.pos.length = coarseVerts;
+    labels.length = coarseLabels.length;
+    parents.length = coarseLabels.length;
+    for (let f = 0; f < coarseLabels.length; f++) { labels[f] = coarseLabels[f]; parents[f] = f; }
+    for (const job of jobs) {
+      job.cellM *= 1.25;
+      job.report.cellM = job.cellM;
+    }
+  }
+  if (jobs.length && jobs[0].cellM > askedCell * 1.001) {
+    warnings.push(`The patterned surface would be too many triangles at the size asked for, so it is refined to ${(jobs[0].cellM * 1000).toFixed(2)} mm.`);
   }
 
   // Which job each vertex is inside of; -1 outside every region, -2 on the
@@ -1294,19 +1350,32 @@ export function applySurfaceTextures(
   for (let f = 0; f < labels.length; f++) before.push(labels[f] >= 0 ? faceCross(mesh, f) : [0, 0, 0]);
   const original = mesh.pos.slice();
 
-  // Vertex normals, area-weighted over each region's own faces only, so a
-  // region's edge does not lean towards the face next door.
-  const vNormal = new Float64Array(vertexCount * 3);
-  for (let f = 0; f < labels.length; f++) {
-    if (labels[f] < 0) continue;
-    const c = before[f];
-    for (let k = 0; k < 3; k++) {
-      const v = mesh.faces[3 * f + k];
-      vNormal[3 * v] += c[0];
-      vNormal[3 * v + 1] += c[1];
-      vNormal[3 * v + 2] += c[2];
+  /*
+   * Which way each vertex moves: the normals at the corners of the faces the
+   * region started as, area-weighted over the region's own faces (so its edge
+   * does not lean towards the face next door), blended across each face the
+   * way Phong shading blends them. Taken from the refined facets instead,
+   * every vertex inside one flat facet of a faceted cylinder moved along that
+   * facet's normal and those on its edges along an average, 3.75 degrees
+   * apart on a 48-sided drum, which dragged the triangles along the edges over
+   * and held 1 mm flutes to 0.3 mm.
+   */
+  const coarseNormals = jobs.map((_, j) => {
+    const n = new Float64Array(coarseVerts);
+    for (let f = 0; f < coarseLabels.length; f++) {
+      if (coarseLabels[f] !== j) continue;
+      const a = vtx(original, coarseFaces[3 * f]);
+      const c = cross(sub(vtx(original, coarseFaces[3 * f + 1]), a), sub(vtx(original, coarseFaces[3 * f + 2]), a));
+      for (let k = 0; k < 3; k++) {
+        const v = coarseFaces[3 * f + k];
+        n[3 * v] += c[0];
+        n[3 * v + 1] += c[1];
+        n[3 * v + 2] += c[2];
+      }
     }
-  }
+    return n;
+  });
+  const vNormal = new Float64Array(vertexCount * 3);
 
   const paintIdx: number[] = [];
   const paintRgba: number[] = [];
@@ -1350,6 +1419,16 @@ export function applySurfaceTextures(
         const w = weights(v, parents[f]);
         vu[v] = w[0] * c[0] + w[1] * c[2] + w[2] * c[4];
         vv[v] = w[0] * c[1] + w[1] * c[3] + w[2] * c[5];
+        const cn = coarseNormals[j];
+        for (let axis = 0; axis < 3; axis++) {
+          let sum = 0;
+          for (let corner = 0; corner < 3; corner++) {
+            const cv = coarseFaces[3 * parents[f] + corner];
+            const len3 = Math.hypot(cn[3 * cv], cn[3 * cv + 1], cn[3 * cv + 2]) || 1;
+            sum += w[corner] * (cn[3 * cv + axis] / len3);
+          }
+          vNormal[3 * v + axis] = sum;
+        }
       }
     }
     // Round a full wrap, back into the one turn the grids cover.
