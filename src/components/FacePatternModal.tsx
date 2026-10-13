@@ -119,7 +119,7 @@ export const FacePatternModal: React.FC = () => {
   const glowAt: FacePatternGlowEvent = target && !applied && synced === key ? target : null;
   useEffect(() => {
     if (!glowAt) return;
-    const send = (detail: FacePatternGlowEvent) => window.dispatchEvent(new CustomEvent('physbox:pattern-glow', { detail }));
+    const send = (detail: FacePatternGlowEvent) => { window.dispatchEvent(new CustomEvent('physbox:pattern-glow', { detail })); };
     send(glowAt);
     return () => send(null);
   }, [glowAt]);
