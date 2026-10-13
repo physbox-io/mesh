@@ -25,10 +25,11 @@ import * as THREE from 'three';
 import { useStore } from '../../store/useStore';
 import type { SceneNode } from '../../types/scene';
 import { findNodeById } from '../../utils/sceneTree';
-import { splitSeams, type FaceSplit } from '../../utils/surfaceTexture';
+import { splitSeams } from '../../utils/surfaceTexture';
 import { patternHit, patternSurfaces } from '../../utils/facePatternPick';
-import { cutAlongPlaneOffThread, partSoups } from '../../utils/printSplitClient';
+import { cutAlongPlaneOffThread } from '../../utils/printSplitClient';
 import { bodyParent, bodyToParent, rayInBody } from './bodyRay';
+import { carryAcrossCut, knifeSoups, seamsAcross, splitFor } from '../../utils/knife';
 
 interface Drag {
   x0: number; y0: number; x1: number; y1: number;
@@ -198,17 +199,6 @@ export const FaceKnife = () => {
     }
     return { at, normal, seeds };
   }, [camera, centreOf, gl]);
-
-  /** A geom's seam for a cut, in its own frame. */
-  const splitFor = (toBody: THREE.Matrix4, at: THREE.Vector3, normal: THREE.Vector3, seeds: number[][]): FaceSplit => {
-    const toGeom = toBody.clone().invert();
-    const round = (v: THREE.Vector3) => v.toArray().map((x) => +x.toFixed(7));
-    return {
-      at: round(at.clone().applyMatrix4(toGeom)),
-      normal: round(normal.clone().transformDirection(toGeom)),
-      seeds: seeds.map((s) => s.map((x) => +x.toFixed(7))),
-    };
-  };
 
   const ensureOverlay = useCallback(() => {
     if (overlay.current) return overlay.current;
@@ -383,25 +373,22 @@ export const FaceKnife = () => {
     if (d.separate) {
       busy.current = true;
       setGestureStatus('Knife · cutting…');
-      const { soups, absorbed } = partSoups(node);
+      const { soups, absorbed } = knifeSoups(node);
       const result = await cutAlongPlaneOffThread(soups, cut.at.toArray(), cut.normal.toArray());
       busy.current = false;
       if (!result.ok) { flash(result.error); return; }
-      useStore.getState().splitBodyForPrint(node.id, result.sections, absorbed, { plain: true });
+      const carry = carryAcrossCut(node, result.sections, cut.at.toArray(), cut.normal.toArray());
+      useStore.getState().splitBodyForPrint(node.id, result.sections, absorbed, { plain: true, carry });
       flash(`Cut into ${result.sections.length} pieces`);
       return;
     }
     let made = 0;
-    for (const { geom, base, toBody } of patternSurfaces(node)) {
-      const seeds = cut.seeds.get(geom.name);
-      if (!seeds) continue;
-      const split = splitFor(toBody, cut.at, cut.normal, seeds);
-      // Kept only if it divides something: a line along an edge leaves no seam.
-      if (!splitSeams(base.positions, base.faces, [split])[0].length) continue;
+    // Kept only where it divides something: a line along an edge leaves no seam.
+    for (const { geomName, split } of seamsAcross(node, cut.at, cut.normal, cut.seeds)) {
       // The geom as the scene graph has it, which is where the list is kept.
-      const own = node.geoms?.find((g) => g.name === geom.name);
+      const own = node.geoms?.find((g) => g.name === geomName);
       if (!own) continue;
-      store.setGeomFaceSplits(node.id, geom.name, [...(own.faceSplits ?? []), split]);
+      store.setGeomFaceSplits(node.id, geomName, [...(own.faceSplits ?? []), split]);
       made++;
     }
     if (!made) flash('Draw the line across the part to split its face');

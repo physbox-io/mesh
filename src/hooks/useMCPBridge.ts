@@ -41,7 +41,7 @@ import { measureInScene } from '../utils/measureScene';
 import { getNodeWorldPos } from '../utils/sceneTree';
 import { generateCastPattern, DEFAULT_CAST_OPTIONS, type CastMethod } from '../utils/castPatternExporter';
 import { runCastPrep } from '../utils/castPrepRunner';
-import { selectionSoups, splitOffThread, testAssemblyOffThread } from '../utils/printSplitClient';
+import { cutAlongPlaneOffThread, selectionSoups, splitOffThread, testAssemblyOffThread } from '../utils/printSplitClient';
 import { filamentSpec } from '../utils/filaments';
 import { deriveSolidOptions, fittingScalePercent, measurePart, type SolidMachiningResult } from '../utils/solidMachiningExporter';
 import {
@@ -58,11 +58,13 @@ import { contourSheetParts, laserSheetParts, laserStockTransform } from '../util
 import { addSimulationToScene } from './useAddSimulation';
 import { lastReliefOptions } from '../utils/lastReliefOptions';
 import { ExportWorkerClient } from '../utils/exportWorkerClient';
-import { patternPickAt } from '../utils/facePatternPick';
+import { patternPickAt, patternSurfaces } from '../utils/facePatternPick';
+import { carryAcrossCut, knifeSoups, seamsAcross } from '../utils/knife';
 import { SURFACE_PATTERNS, patternById, type PatternOptions } from '../utils/surfacePatterns';
 import {
   DEFAULT_TEXTURE_BORDER_M,
   DEFAULT_TEXTURE_CELL_M,
+  splitSeams,
   type SurfaceTexture,
   type TextureProjection,
 } from '../utils/surfaceTexture';
@@ -70,6 +72,7 @@ import { geomHalfLen } from '../utils/geomSurface';
 import { requestTexturedSurface } from '../utils/textureClient';
 import { webSerialManager } from '../utils/webSerialManager';
 import type { Object3D } from 'three';
+import { Vector3 } from 'three';
 import type { SceneGraph, SceneNode, SceneGeom, SceneJoint } from '../types/scene';
 import type { RawGeom, RawJoint, RawNode } from '../utils/sceneNodes';
 import {
@@ -2785,6 +2788,75 @@ export function useMCPBridge() {
             triangles: region.triangles,
             warnings,
           };
+        }
+
+        case 'KNIFE': {
+          const m = msg as Msg<{ targetId: string; at?: number[]; normal?: number[]; cut?: boolean; remove?: boolean }>;
+          if (!m.targetId) throw new Error('Missing targetId');
+          const node = findNodeInScene(store.sceneGraph.nodes, m.targetId);
+          if (!node) throw new Error(`No object with id '${m.targetId}'`);
+          const atMm = pointList(m.at)[0];
+          if (!atMm) throw new Error('Missing at: a point [x, y, z] the plane passes through, in the body\'s own frame in millimetres.');
+          const at = new Vector3(...atMm.map((v) => v / 1000));
+
+          if (m.remove) {
+            // The seam passing nearest the point, within 5 mm.
+            let best: { geomName: string; index: number; d: number } | null = null;
+            const a = new Vector3(), b = new Vector3(), q = new Vector3();
+            for (const { geom, base, toBody } of patternSurfaces(node)) {
+              splitSeams(base.positions, base.faces, geom.faceSplits ?? []).forEach((seg, index) => {
+                for (let i = 0; i + 5 < seg.length; i += 6) {
+                  a.set(seg[i], seg[i + 1], seg[i + 2]).applyMatrix4(toBody);
+                  b.set(seg[i + 3], seg[i + 4], seg[i + 5]).applyMatrix4(toBody);
+                  const ab = b.clone().sub(a);
+                  const t = Math.max(0, Math.min(1, at.clone().sub(a).dot(ab) / Math.max(1e-18, ab.lengthSq())));
+                  const d = q.copy(a).addScaledVector(ab, t).distanceTo(at);
+                  if (!best || d < best.d) best = { geomName: geom.name, index, d };
+                }
+              });
+            }
+            const found = best as { geomName: string; index: number; d: number } | null;
+            if (!found || found.d > 0.005) return { ok: false, error: `No seam on '${m.targetId}' passes within 5 mm of [${atMm.join(', ')}] mm.` };
+            const geom = node.geoms!.find((g) => g.name === found.geomName)!;
+            const left = (geom.faceSplits ?? []).filter((_, i) => i !== found.index);
+            store.setGeomFaceSplits(node.id, geom.name, left.length ? left : undefined);
+            return { ok: true, removed: true, geomName: geom.name, remaining: left.length };
+          }
+
+          if (!Array.isArray(m.normal) || m.normal.length !== 3 || !m.normal.every(Number.isFinite)) {
+            throw new Error('Missing normal: the direction [x, y, z] square to the plane, in the body\'s own frame.');
+          }
+          const normal = new Vector3(...m.normal);
+          if (normal.lengthSq() < 1e-18) throw new Error('normal must not be [0, 0, 0].');
+          normal.normalize();
+
+          if (m.cut) {
+            const { soups, absorbed } = knifeSoups(node);
+            const result = await cutAlongPlaneOffThread(soups, at.toArray(), normal.toArray());
+            if (!result.ok) return { ok: false, error: result.error };
+            const carry = carryAcrossCut(node, result.sections, at.toArray(), normal.toArray());
+            const ids = useStore.getState().splitBodyForPrint(node.id, result.sections, absorbed, { plain: true, carry });
+            return {
+              ok: true,
+              cut: true,
+              pieces: ids.map((id, k) => ({
+                id,
+                volumeMm3: Math.round(result.sections[k].volumeMm3),
+                patterns: carry[k].textures?.length ?? 0,
+                seams: carry[k].faceSplits?.length ?? 0,
+              })),
+            };
+          }
+
+          const seams = seamsAcross(node, at, normal);
+          if (!seams.length) {
+            return { ok: false, error: 'The plane does not divide any face of the part: it misses it, or runs along an edge.' };
+          }
+          for (const { geomName, split } of seams) {
+            const geom = node.geoms?.find((g) => g.name === geomName);
+            if (geom) store.setGeomFaceSplits(node.id, geomName, [...(geom.faceSplits ?? []), split]);
+          }
+          return { ok: true, seams: seams.map(({ geomName, split }) => ({ geomName, facesDivided: split.seeds.length })) };
         }
 
         case 'CLEAR_PAINT': {

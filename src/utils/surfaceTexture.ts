@@ -551,6 +551,43 @@ function seamSides(surface: IndexedSurface, planes: (FaceSplit & { n: Vec3 })[])
 }
 
 /**
+ * A seed on each face (as far as its sharp edges) a plane passes through:
+ * the seeds for a seam that divides every face it crosses, which is what the
+ * knife over MCP makes, there being no line drawn on screen to say which.
+ */
+export function planeSeeds(positions: ArrayLike<number>, faces: ArrayLike<number>, at: number[], normal: number[]): number[][] {
+  const n = norm(normal as Vec3);
+  if (len(n) === 0) return [];
+  const surface = cachedIndexSurface(positions, faces);
+  const { mesh } = surface;
+  const faceCount = mesh.faces.length / 3;
+  const creaseCos = Math.cos((EDGE_CREASE_DEG * Math.PI) / 180);
+  const none = new Int32Array(faceCount).fill(-1);
+  const seen = new Uint8Array(faceCount);
+  const seeds: number[][] = [];
+  for (let f = 0; f < faceCount; f++) {
+    if (seen[f]) continue;
+    const c = [0, 1, 2].map((k) => vtx(mesh.pos, mesh.faces[3 * f + k]));
+    const d = c.map((p) => dot(sub(p, at as Vec3), n));
+    if (!(Math.min(...d) < 0 && Math.max(...d) > 0)) continue;
+    // Where the plane crosses this triangle: the middle of that line.
+    const hits: Vec3[] = [];
+    for (let k = 0; k < 3; k++) {
+      const a = d[k], b = d[(k + 1) % 3];
+      if ((a < 0) === (b < 0)) continue;
+      const t = a / (a - b);
+      hits.push([0, 1, 2].map((i) => c[k][i] + t * (c[(k + 1) % 3][i] - c[k][i])) as Vec3);
+    }
+    if (hits.length < 2) continue;
+    const grown = growRegion(surface, f, creaseCos, -Infinity, none);
+    if (typeof grown === 'string') continue;
+    for (const g of grown) seen[g] = 1;
+    seeds.push([0, 1, 2].map((i) => (hits[0][i] + hits[1][i]) / 2));
+  }
+  return seeds;
+}
+
+/**
  * Each seam on a surface as line segments in its frame, one array per split
  * in the order given, for drawing them and for finding the one under the
  * pointer: every edge between two faces the seam puts on different sides.

@@ -1777,9 +1777,10 @@ export interface PhysicsState {
     absorbed?: string[],
     /**
      * A plain cut (the knife's) rather than a split for print: the pieces keep
-     * the part's colour and are given no print pose.
+     * the part's colour and are given no print pose. `carry`, a section
+     * each: the patterns and seams it keeps (utils/knife carryAcrossCut).
      */
-    opts?: { plain?: boolean },
+    opts?: { plain?: boolean; carry?: { textures?: SurfaceTexture[]; faceSplits?: FaceSplit[] }[] },
   ) => string[];
   /** Set how finely contact is resolved (SceneGraph.simFidelity). One undo step. */
   setSimFidelity: (fidelity: 'standard' | 'print') => void;
@@ -3259,6 +3260,8 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
           faces: Array.from(sec.faces),
           colliderVertices: Array.from(sec.plainPositions),
           colliderFaces: Array.from(sec.plainFaces),
+          ...(opts.carry?.[k]?.textures?.length ? { textures: opts.carry[k].textures } : {}),
+          ...(opts.carry?.[k]?.faceSplits?.length ? { faceSplits: opts.carry[k].faceSplits } : {}),
         },
         ...featureGeoms(sec.colliders, id, rgba),
       ];
