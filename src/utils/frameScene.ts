@@ -233,5 +233,3 @@ export const DEFAULT_EYE: [number, number, number] = [
   -VIEW_DIR.y * DEFAULT_VIEW_DISTANCE,
 ];
 
-/** Straight down from the same distance, so the two views are the same scale. */
-export const DEFAULT_TOP_DOWN_EYE: [number, number, number] = [0, DEFAULT_VIEW_DISTANCE, 0];

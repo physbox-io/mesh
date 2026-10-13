@@ -67,6 +67,7 @@ import { ObjectGestureController } from './components/scene/ObjectGestures';
 import { TransformGizmo } from './components/scene/TransformGizmo';
 import { isGizmoBusy } from './components/scene/gizmoBusy';
 import { MeasureTool } from './components/scene/MeasureTool';
+import { DimensionOverlay } from './components/scene/DimensionOverlay';
 import { EdgeRoundTool } from './components/scene/EdgeRoundTool';
 import { EdgeRoundPanel } from './components/EdgeRoundPanel';
 import { EdgesCard } from './components/EdgesCard';
@@ -492,6 +493,7 @@ function App() {
     isSettingsOpen, setSettingsOpen, 
     gravityZ, windX, windY, density, floorFriction, floorBounce, setEnvironment,
     cameraView, setCameraView,
+    dimsEnabled, setDimsEnabled, cameraOffAxis,
     dfmEnabled, setDfmEnabled,
     wireframe, toggleWireframe, showEdges, toggleShowEdges, paintMode,
     gridCellSizeMm, setGridCellSizeMm,
@@ -515,6 +517,7 @@ function App() {
     isSettingsOpen: s.isSettingsOpen, setSettingsOpen: s.setSettingsOpen,
     gravityZ: s.gravityZ, windX: s.windX, windY: s.windY, density: s.density, floorFriction: s.floorFriction, floorBounce: s.floorBounce, setEnvironment: s.setEnvironment,
     cameraView: s.cameraView, setCameraView: s.setCameraView,
+    dimsEnabled: s.dimsEnabled, setDimsEnabled: s.setDimsEnabled, cameraOffAxis: s.cameraOffAxis,
     dfmEnabled: s.dfmEnabled, setDfmEnabled: s.setDfmEnabled,
     wireframe: s.wireframe, toggleWireframe: s.toggleWireframe, showEdges: s.showEdges, toggleShowEdges: s.toggleShowEdges, paintMode: s.paintMode,
     gridCellSizeMm: s.gridCellSizeMm, setGridCellSizeMm: s.setGridCellSizeMm,
@@ -3072,6 +3075,7 @@ function App() {
             <ObjectGestureController />
             <TransformGizmo />
             <MeasureTool />
+            <DimensionOverlay />
             <EdgeRoundTool />
 
             {/* Subtle contact-shadow AO — reads as "more depth", not a style
@@ -3131,26 +3135,42 @@ function App() {
 
           {/* Floating Viewport Camera Controls */}
           <div className="absolute bottom-4 right-4 z-10 flex items-center gap-1 bg-white/80 dark:bg-slate-900/80 backdrop-blur-md border border-slate-200 dark:border-slate-800 p-1 rounded-lg shadow-sm">
-            <button
-              onClick={() => setCameraView('perspective')}
-              className={`px-2.5 py-1 rounded text-[10px] font-bold tracking-wide transition-all cursor-pointer ${
-                cameraView === 'perspective'
-                  ? 'bg-blue-500 text-white shadow-xs'
-                  : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
-              }`}
-            >
-              Perspective
-            </button>
-            <button
-              onClick={() => setCameraView('topDown')}
-              className={`px-2.5 py-1 rounded text-[10px] font-bold tracking-wide transition-all cursor-pointer ${
-                cameraView === 'topDown'
-                  ? 'bg-blue-500 text-white shadow-xs'
-                  : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
-              }`}
-            >
-              Top Down
-            </button>
+            {([
+              ['perspective', 'Perspective', 'The free view'],
+              ['topDown', 'Top Down', 'Looking straight down, drawn flat (orthographic)'],
+              ['front', 'Front', 'Looking at the front, drawn flat (orthographic)'],
+              ['side', 'Side', 'Looking at the right-hand side, drawn flat (orthographic)'],
+            ] as const).map(([view, label, title]) => (
+              <button
+                key={view}
+                onClick={() => setCameraView(view)}
+                title={title}
+                className={`px-2.5 py-1 rounded text-[10px] font-bold tracking-wide transition-all cursor-pointer ${
+                  // Orbited off a drawing view, its button is no longer lit:
+                  // the view on screen is not that one, and a click puts it back.
+                  cameraView === view && !(view !== 'perspective' && cameraOffAxis)
+                    ? 'bg-blue-500 text-white shadow-xs'
+                    : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+            {/* Only in the flat views: a dimension means something there at
+                every depth, and the overlay draws nothing anywhere else. */}
+            {cameraView !== 'perspective' && (
+              <button
+                onClick={() => setDimsEnabled(!dimsEnabled)}
+                title="Dimensions in mm for the selected part, or every part when none is selected"
+                className={`px-2.5 py-1 rounded text-[10px] font-bold tracking-wide transition-all cursor-pointer ${
+                  dimsEnabled
+                    ? 'bg-amber-500 text-white shadow-xs'
+                    : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+                }`}
+              >
+                Dims
+              </button>
+            )}
             {/* Checks the selected part against how it will actually be made.
                 No process picker: the machine and the material are already
                 chosen in the bottom bar, and asking again is how two controls

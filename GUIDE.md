@@ -548,6 +548,36 @@ Spots** button's findings went.
 
 ---
 
+### Drawing views and Dims
+
+**Top Down**, **Front** and **Side** (`cameraView` `'topDown' | 'front' | 'side'`) are
+orthographic: `CameraController` mounts a drei `OrthographicCamera` while one is chosen
+and drei hands the perspective camera back when it unmounts. Axes, framing and the
+`DrawingView` type are in `utils/cameraViews.ts` (document frame, Z-up): Front looks
+along +Y from the −Y side, Side is the right-hand view from +X, Top looks down −Z
+with +Y up the screen. They frame the scene's content at the same 160 mm default
+scale as the perspective view. Orbiting is still allowed. Choosing the view you are
+in poses it again (`setCameraView` bumps `cameraResetToken`), after dropping any
+orbit momentum. An explicit pose (`setCameraOverride`, MCP `position`, a scene
+load's framing) goes back to perspective.
+
+* **Anything sized in pixels must not read `fov`.** An orthographic camera has none,
+  and a band computed from `undefined` is NaN and snaps nothing. Use
+  `metresPerPixel(camera, distance, height)` from `utils/cameraScale.ts`, which
+  gives the frustum height over zoom for ortho. Points (`PointsMaterial`) draw
+  `size` in plain pixels under ortho.
+* **Dims** (`dimsEnabled`) is `components/scene/DimensionOverlay.tsx` over the pure
+  `utils/viewDimensions.ts`. It measures the parts as drawn: shadow-casting meshes
+  under each body's `<group name>`, world space, back to the document frame, so
+  booleans, poses and instanced static boxes are already applied. Feature edges
+  come from `findFeatureEdges`. Straight edges square to the sheet become chain
+  stops, along with the centres of circles seen end-on. Those circles also get ⌀
+  leaders, equal ones counted (`2× ⌀8`). Bodies over 60k triangles get the overall
+  size only. Nothing is drawn unless the camera is within 1° of the view's axis.
+  `physics_get_camera` reports what is drawn (`utils/liveDimensions.ts`).
+
+---
+
 ### Add Simulation (the part as cut)
 
 **Add Simulation** in a machining dialog's footer adds what the job will leave to the scene as a

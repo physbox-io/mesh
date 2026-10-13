@@ -46,7 +46,7 @@ export interface SceneSnap extends SnapCandidate {
  * canvas is, which separates the model from the floor grid and the overlays
  * without keeping a list of them.
  */
-function bodyOf(object: THREE.Object3D): string | null {
+export function bodyOf(object: THREE.Object3D): string | null {
   for (let node: THREE.Object3D | null = object; node; node = node.parent) {
     if (node.type === 'Group' && node.name) return node.name;
   }

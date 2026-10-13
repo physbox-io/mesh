@@ -8,10 +8,11 @@
  */
 import React, { useRef, useMemo, useState, useEffect, useLayoutEffect } from 'react';
 import { useFrame, useThree, type ThreeEvent } from '@react-three/fiber';
-import { OrbitControls } from '@react-three/drei';
+import { OrbitControls, OrthographicCamera } from '@react-three/drei';
 import * as THREE from 'three';
 import { registerLiveCamera } from '../../utils/liveCamera';
-import { DEFAULT_EYE, DEFAULT_TOP_DOWN_EYE, DEFAULT_TARGET_Y } from '../../utils/frameScene';
+import { DEFAULT_EYE, DEFAULT_TARGET_Y, sceneContentBounds } from '../../utils/frameScene';
+import { isDrawingView, orthoFraming, ORTHO_STANDOFF, SQUARE_TO_VIEW, VIEW_AXES } from '../../utils/cameraViews';
 import { useStore } from '../../store/useStore';
 import { useOrbitEnable } from './useOrbitEnable';
 import { isGizmoBusy } from './gizmoBusy';
@@ -86,29 +87,69 @@ export const PaintStrokeController = () => {
   return null;
 };
 
+/**
+ * Let go of whatever an orbit or pan was still coasting with.
+ *
+ * With damping on, the controls keep turning the camera for a while after the
+ * pointer lets go, and that carries straight through a new pose: click Front
+ * just after an orbit and the view lands square, then drifts off it — which
+ * also hides the Dims, as they only draw square to the view. One undamped
+ * update spends the leftover in a single step; the pose set after it wins.
+ */
+function dropMomentum(controls: OrbitControlsImpl) {
+  const damping = controls.enableDamping;
+  controls.enableDamping = false;
+  controls.update();
+  controls.enableDamping = damping;
+}
+
 export const CameraController = () => {
   const { camera } = useThree();
   const cameraView = useStore(state => state.cameraView);
+  const drawing = isDrawingView(cameraView);
   // Loading a preset asks for the starting view back. See cameraResetToken:
   // the view someone has orbited to is still `perspective`, so the state alone
   // never changes and this effect would never re-run.
   const cameraResetToken = useStore(state => state.cameraResetToken);
   const controlsRef = useRef<OrbitControlsImpl>(null);
-  
+  const getSize = useThree((state) => state.get);
+
   useEffect(() => {
-    // Both poses are the same distance out, so switching between them does not
-    // also change how big everything is drawn. That distance shows about 250 mm
-    // of world; it was 800 mm (and 1.8 m looking down), which is a framing for a
-    // rig rather than for a part — see utils/frameScene.
-    if (cameraView === 'topDown') {
-      camera.position.set(...DEFAULT_TOP_DOWN_EYE);
-      camera.up.set(0, 0, -1);
-      camera.lookAt(0, 0, 0);
+    // The drawing views swap in an orthographic camera (below), and for one
+    // render this effect still sees the camera being swapped out. Posing that
+    // one would only leave the perspective camera somewhere odd for later.
+    const ortho = (camera as THREE.OrthographicCamera).isOrthographicCamera === true;
+    if (drawing !== ortho) return;
+    if (controlsRef.current) dropMomentum(controlsRef.current);
+    if (drawing) {
+      // Square to the view, at the content's centre, sized to fit it — the
+      // same 160 mm default scale as the perspective view, and the same
+      // backing off for a bigger scene. See utils/cameraViews.
+      const { width, height } = getSize().size;
+      const framing = orthoFraming(
+        sceneContentBounds(useStore.getState().sceneGraph.nodes),
+        cameraView,
+        height > 0 ? width / height : 1,
+      );
+      const { forward, up } = VIEW_AXES[cameraView];
+      const [tx, ty, tz] = framing.target;
+      const target = new THREE.Vector3(tx, tz, -ty);
+      camera.up.set(up[0], up[2], -up[1]);
+      camera.position.set(
+        tx - forward[0] * ORTHO_STANDOFF,
+        tz - forward[2] * ORTHO_STANDOFF,
+        -(ty - forward[1] * ORTHO_STANDOFF),
+      );
+      camera.lookAt(target);
+      (camera as THREE.OrthographicCamera).zoom = Math.max(1, height) / framing.height;
       if (controlsRef.current) {
-        controlsRef.current.target.set(0, 0, 0);
+        controlsRef.current.target.copy(target);
         controlsRef.current.update();
       }
     } else {
+      // Both poses are the same distance out, so switching between them does
+      // not also change how big everything is drawn. That distance shows about
+      // 160 mm of world — see utils/frameScene.
       camera.position.set(...DEFAULT_EYE);
       camera.up.set(0, 1, 0);
       camera.lookAt(0, DEFAULT_TARGET_Y, 0);
@@ -117,8 +158,8 @@ export const CameraController = () => {
         controlsRef.current.update();
       }
     }
-    camera.updateProjectionMatrix();
-  }, [cameraView, cameraResetToken, camera]);
+    (camera as THREE.PerspectiveCamera | THREE.OrthographicCamera).updateProjectionMatrix();
+  }, [cameraView, drawing, cameraResetToken, camera, getSize]);
 
   // Explicit pose from the MCP SET_CAMERA bridge command. The store held this
   // field (and GET_CAMERA reported it) but nothing ever applied it to the
@@ -129,6 +170,7 @@ export const CameraController = () => {
     if (!cameraOverride) return;
     const [px, py, pz] = cameraOverride.position;
     const [tx, ty, tz] = cameraOverride.target;
+    if (controlsRef.current) dropMomentum(controlsRef.current);
     camera.up.set(0, 1, 0);
     camera.position.set(px, pz, -py);
     if (controlsRef.current) {
@@ -139,6 +181,21 @@ export const CameraController = () => {
     }
     camera.updateProjectionMatrix();
   }, [cameraOverride, camera]);
+
+  // Whether the camera is still square to the drawing view it was put in. A
+  // flag in the store rather than a check in the button, because the button
+  // lives outside the canvas and only hears about a change, never a frame.
+  const lookDirection = useMemo(() => new THREE.Vector3(), []);
+  useFrame(({ camera: live }) => {
+    const store = useStore.getState();
+    let off = false;
+    if (isDrawingView(store.cameraView)) {
+      const { forward } = VIEW_AXES[store.cameraView];
+      live.getWorldDirection(lookDirection);
+      off = lookDirection.dot(new THREE.Vector3(forward[0], forward[2], -forward[1])) < SQUARE_TO_VIEW;
+    }
+    if (off !== store.cameraOffAxis) store.setCameraOffAxis(off);
+  });
 
   const draggedNodeId = useStore((state) => state.draggedNodeId);
   /*
@@ -165,11 +222,13 @@ export const CameraController = () => {
   const getThree = useThree((state) => state.get);
   useEffect(() => {
     const perspective = getThree().camera as THREE.PerspectiveCamera;
+    // An orthographic view keeps its own near plane: it stands well back.
+    if (!perspective.isPerspectiveCamera) return;
     const near = Math.min(0.01, minDistance / 2);
     if (perspective.near === near) return;
     perspective.near = near;
     perspective.updateProjectionMatrix();
-  }, [getThree, minDistance]);
+  }, [getThree, minDistance, camera]);
   /*
    * Hand the live camera and orbit target to the MCP bridge.
    *
@@ -188,7 +247,16 @@ export const CameraController = () => {
     if (controlsRef.current) registerLiveCamera(camera, controlsRef.current.target);
   }, [camera]);
 
-  return <OrbitControls enabled={draggedNodeId === null} ref={controlsRef} makeDefault enableDamping dampingFactor={0.1} minDistance={minDistance} mouseButtons={{ LEFT: 99 as THREE.MOUSE, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE }} />;
+  return (
+    <>
+      {/* The drawing views. drei makes this the default camera while it is
+          mounted and hands the perspective one back when it unmounts; the
+          controls follow whichever is the default. Its frustum is the canvas
+          in pixels, so `zoom` is pixels per metre. */}
+      {drawing && <OrthographicCamera makeDefault near={0.001} far={1000} />}
+      <OrbitControls enabled={draggedNodeId === null} ref={controlsRef} makeDefault enableDamping dampingFactor={0.1} minDistance={minDistance} mouseButtons={{ LEFT: 99 as THREE.MOUSE, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE }} />
+    </>
+  );
 };
 
 // Tessellation of the curved primitives, by the Hi-Res switch. At 32 sides a

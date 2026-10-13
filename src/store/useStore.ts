@@ -27,6 +27,7 @@ import type { PaintLayer } from '../utils/vertexPaint';
 import type { FaceSplit, SurfaceTexture } from '../utils/surfaceTexture';
 import type { FacePatternTarget } from '../utils/facePatternPick';
 import type { DocsTabId } from '../utils/docsTabs';
+import type { CameraView } from '../utils/cameraViews';
 import { compileToMJCF } from '../utils/mjcf';
 import { PRESETS, pendulumPreset, generateGearGeoms } from '../presets/presetScenes';
 import { PhysicsWorkerClient, type BuiltResult, type FrameSnapshot } from './physicsWorkerClient';
@@ -1433,7 +1434,23 @@ export interface PhysicsState {
    */
   voltLink: { origin: string } | null;
   isSettingsOpen: boolean;
-  cameraView: 'perspective' | 'topDown';
+  /**
+   * The camera preset. Top Down, Front and Side are orthographic — a drawing
+   * sheet's projection, so a part's near and far edges line up and the Dims
+   * overlay can sit on them. They can still be orbited out of; see CameraView.
+   */
+  cameraView: CameraView;
+  /**
+   * True once the camera has been orbited off the drawing view it was put in.
+   * The view's button stops showing as chosen, because it no longer is —
+   * and clicking it puts the view back. Kept by CameraController.
+   */
+  cameraOffAxis: boolean;
+  /**
+   * Whether the Dims overlay is on. It draws only in an orthographic view and
+   * only while the camera is still square to it (DimensionOverlay.tsx).
+   */
+  dimsEnabled: boolean;
   /**
    * Whether the DFM overlay is on. What it judges against is NOT stored: the
    * lens follows machineTarget and the limits follow material/filament/stock,
@@ -1640,7 +1657,9 @@ export interface PhysicsState {
   openDocs: (tab: DocsTabId) => void;
   setDocsTab: (tab: DocsTabId) => void;
   closeDocs: () => void;
-  setCameraView: (view: 'perspective' | 'topDown') => void;
+  setCameraView: (view: CameraView) => void;
+  setDimsEnabled: (enabled: boolean) => void;
+  setCameraOffAxis: (off: boolean) => void;
   setDfmEnabled: (enabled: boolean) => void;
   setDfmCastOpen: (open: boolean) => void;
   setDfmPanel: (patch: Partial<{ x: number | null; y: number | null; minimized: boolean }>) => void;
@@ -2140,11 +2159,14 @@ export interface PhysicsState {
 function framingPatch(
   scene: SceneGraph,
   explicit: { position: [number, number, number]; target: [number, number, number] } | null
-): { cameraOverride: PhysicsState['cameraOverride']; gridCellSizeMm: number } {
+): { cameraOverride: PhysicsState['cameraOverride']; gridCellSizeMm: number; cameraView?: CameraView } {
   const bounds = sceneContentBounds(scene.nodes);
+  const cameraOverride = explicit ?? (bounds ? framingForBounds(bounds) : null);
   return {
-    cameraOverride: explicit ?? (bounds ? framingForBounds(bounds) : null),
+    cameraOverride,
     gridCellSizeMm: gridCellForBounds(bounds),
+    // A pose with an eye position is a perspective pose; see setCameraOverride.
+    ...(cameraOverride ? { cameraView: 'perspective' as const } : {}),
   };
 }
 
@@ -2422,6 +2444,8 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
   isDocsOpen: false,
   docsTab: 'gravity',
   cameraView: 'perspective',
+  dimsEnabled: false,
+  cameraOffAxis: false,
   cameraOverride: initialFraming.cameraOverride,
   cameraResetToken: 0,
   mcpActiveCount: 0,
@@ -2481,7 +2505,11 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
   openDocs: (docsTab) => set({ docsTab, isDocsOpen: true }),
   setDocsTab: (docsTab) => set({ docsTab }),
   closeDocs: () => set({ isDocsOpen: false }),
-  setCameraView: (view) => set({ cameraView: view, cameraOverride: null }),
+  // The token too: choosing the view you are already in, after orbiting off
+  // it, is asking for its pose back, and the view alone would not change.
+  setCameraView: (view) => set((state) => ({ cameraView: view, cameraOverride: null, cameraResetToken: state.cameraResetToken + 1 })),
+  setDimsEnabled: (dimsEnabled) => set({ dimsEnabled }),
+  setCameraOffAxis: (cameraOffAxis) => set({ cameraOffAxis }),
   dfmEnabled: false,
   setDfmEnabled: (dfmEnabled) => set({ dfmEnabled }),
   dfmCastOpen: false,
@@ -2609,7 +2637,9 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     const newGraph = { ...sceneGraph, nodes: newNodes };
     get().recompile(newGraph, hardwareNode.id);
   },
-  setCameraOverride: (override) => set({ cameraOverride: override }),
+  // An explicit pose is an eye position and a target, which is a perspective
+  // pose: the orthographic drawing views are framed by their axis and zoom.
+  setCameraOverride: (override) => set(override ? { cameraOverride: override, cameraView: 'perspective' } : { cameraOverride: null }),
   
   resetSimulation: () => {
     getPhysicsWorkerClient().setPlaying(false);
