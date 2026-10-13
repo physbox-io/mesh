@@ -43,7 +43,8 @@ import { bodyParent, bodyToParent, rayInBody } from './bodyRay';
 import { FaceKnife } from './FaceKnife';
 import { solveScaleToFit, type MateFeature } from '../../utils/mateSnap';
 import { bodyFeatures, neighbourFeatures, documentAxes, graphAxes } from '../../utils/mateFeatures';
-import { snapToFloor, snapThreshold } from '../../utils/floorSnap';
+import { snapToFloor, snapThresholdForScale } from '../../utils/floorSnap';
+import { metresPerPixel } from '../../utils/cameraScale';
 import { useOrbitEnable } from './useOrbitEnable';
 import { pickPatternFace, patternFaceGlow, pickedFaceGlow, type PatternFaceGlow, type FacePatternGlowEvent } from '../../utils/facePatternPick';
 
@@ -675,11 +676,11 @@ export const ObjectGestureController = () => {
           groundZ: state.groundZ,
           threshold: pointer.current.alt
             ? 0
-            : snapThreshold(
-                (camera as THREE.PerspectiveCamera).fov ?? 50,
+            : snapThresholdForScale(metresPerPixel(
+                camera,
                 state.distance ?? 1,
                 gl.domElement.clientHeight,
-              ),
+              )),
         });
         to[2] = snap.z;
         resting = snap.locked;
@@ -739,11 +740,11 @@ export const ObjectGestureController = () => {
         // gesture: a pixel of pointer travel is about a third of a millimetre
         // of radius here, so a band as tight as the floor snap's would be a
         // handful of pixels wide and would be crossed without being felt.
-        threshold: SCALE_BAND_WEIGHT * snapThreshold(
-          (camera as THREE.PerspectiveCamera).fov ?? 50,
+        threshold: SCALE_BAND_WEIGHT * snapThresholdForScale(metresPerPixel(
+          camera,
           camera.position.distanceTo(state.pivot),
           gl.domElement.clientHeight,
-        ),
+        )),
       });
       if (fitted) state.factor = fitted.factor;
     }

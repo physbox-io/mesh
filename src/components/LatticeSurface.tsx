@@ -31,6 +31,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useFrame, useThree, type ThreeEvent } from '@react-three/fiber';
 import * as THREE from 'three';
+import { metresPerPixel as metresPerPixelOf } from '../utils/cameraScale';
 import { useStore } from '../store/useStore';
 import {
   deserializeCage, serializeCage, cloneLattice, restoreLattice,
@@ -734,8 +735,7 @@ export function LatticeSurface({
     if (!group || size.height === 0) return;
     const perspective = camera as THREE.PerspectiveCamera;
     const distance = camera.position.distanceTo(group.getWorldPosition(worldPoint));
-    const metresPerPixel =
-      (2 * Math.tan((perspective.fov * Math.PI) / 360) * distance) / size.height;
+    const metresPerPixel = metresPerPixelOf(camera, distance, size.height);
     perPixelRef.current = metresPerPixel;
     // Pixels, not grid steps. Sized to the step, a 100 mm grid drew dots the
     // size of the part; the grid says where a mark is, never how big.
@@ -744,7 +744,10 @@ export function LatticeSurface({
     // ÷ depth pixels, with no account of the field of view, so a size worked
     // out in metres-per-pixel comes out tan(fov/2) too small — a fifth of the
     // intended dot at a 50° lens. Divided back out here.
-    const perPoint = metresPerPixel / Math.tan((perspective.fov * Math.PI) / 360);
+    // An orthographic view (Top, Front, Side) draws `size` as plain pixels.
+    const perPoint = perspective.isPerspectiveCamera
+      ? metresPerPixel / Math.tan((perspective.fov * Math.PI) / 360)
+      : 1;
     if (volumeMaterial.current) volumeMaterial.current.size = perPoint * 2.5;
     if (sliceMaterial.current) sliceMaterial.current.size = perPoint * (locked ? 4.5 : 3.5);
     // A 15% band: below it the change is not visible, and above it a sphere is

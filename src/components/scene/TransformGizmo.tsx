@@ -46,7 +46,8 @@ import * as THREE from 'three';
 import { useStore, getPhysicsWorkerClient } from '../../store/useStore';
 import type { SceneNode } from '../../types/scene';
 import { positiveBounds } from '../../utils/csg';
-import { snapToFloor, snapThreshold } from '../../utils/floorSnap';
+import { snapToFloor, snapThresholdForScale } from '../../utils/floorSnap';
+import { metresPerPixel } from '../../utils/cameraScale';
 import { getStickyRotation } from '../../utils/geom';
 import { solveMate, solveAlignAboutAxis, type MateFeature, type MateSolution, type AlignSolution } from '../../utils/mateSnap';
 import { bodyFeatures, neighbourFeatures, transformFeatures, documentAxes, graphAxes } from '../../utils/mateFeatures';
@@ -764,11 +765,11 @@ export const TransformGizmo = () => {
      * so the stationary side cannot go stale in place, only out of reach, and
      * `handleObjectChange` re-gathers when the drag wanders far enough.
      */
-    const band = snapThreshold(
-      (camera as THREE.PerspectiveCamera).fov ?? 50,
+    const band = snapThresholdForScale(metresPerPixel(
+      camera,
       camera.position.distanceTo(proxy.getWorldPosition(new THREE.Vector3())),
       gl.domElement.clientHeight,
-    );
+    ));
     const here = proxy.position.clone();
     const gatherRadius = Math.min(
       MAX_GATHER_M,
@@ -860,11 +861,11 @@ export const TransformGizmo = () => {
       const off = modifiers().alt;
       const threshold = off
         ? 0
-        : snapThreshold(
-            (camera as THREE.PerspectiveCamera).fov ?? 50,
+        : snapThresholdForScale(metresPerPixel(
+            camera,
             state.distance,
             gl.domElement.clientHeight,
-          );
+          ));
       const snap = snapToFloor({ z: proxy.position.z, groundZ: state.groundZ, threshold });
       // Written back so the handle shows the snapped height, not the raw one.
       proxy.position.z = snap.z;

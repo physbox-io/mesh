@@ -131,7 +131,12 @@ export const MIN_SNAP_M = 0.0002;
 export const MAX_SNAP_M = 0.02;
 
 export function snapThreshold(fovDegrees: number, distance: number, canvasHeight: number): number {
-  const raw = worldPerPixel(fovDegrees, distance, canvasHeight) * SNAP_PIXELS;
+  return snapThresholdForScale(worldPerPixel(fovDegrees, distance, canvasHeight));
+}
+
+/** The same threshold from a scale already in metres per pixel — what an orthographic view has instead of a lens. */
+export function snapThresholdForScale(metresPerPixel: number): number {
+  const raw = metresPerPixel * SNAP_PIXELS;
   if (!(raw > 0)) return MIN_SNAP_M;
   return Math.min(MAX_SNAP_M, Math.max(MIN_SNAP_M, raw));
 }
