@@ -12,7 +12,8 @@
  *     up the sheet is a stop across it, and every edge that runs along the
  *     sheet a stop up it — the steps of a stepped block, the slot in a bracket.
  *     The centres of holes seen end-on are stops too, which is how a drawing
- *     locates a hole.
+ *     locates a hole. Its smallest link is left out, as the overall already
+ *     gives it (see omittedLink).
  *   - The diameter of every circle seen end-on, on a leader, and of every
  *     sphere. Both rims of a through hole are one hole; a row of equal holes
  *     is labelled once, "6× ⌀4".
@@ -91,8 +92,6 @@ const MERGE_M = 0.0005;
 const MAX_STOPS = 8;
 /** An edge shorter than this share of the part along its own direction is detail, not a face. */
 const MIN_EDGE_SHARE = 0.1;
-/** Within this, a straight edge lies in the sheet (|dir·forward|). */
-const IN_PLANE = 0.03;
 /** Within about 2°, a straight edge runs straight up or straight along the sheet. */
 const SQUARE = Math.sin((2 * Math.PI) / 180);
 /** Within this, a circle faces the camera. */
@@ -101,6 +100,18 @@ const END_ON = 0.98;
 const SAME_M = 0.0001;
 
 const dot = (a: ArrayLike<number>, b: ArrayLike<number>) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+
+/**
+ * Which link of a chain to leave out, given the overall size beside it: the
+ * smallest, the last of equals. A chain and the overall together state one
+ * figure twice (715 beside 655 + 60), which a drawing never does; the one
+ * left out is still there as the overall less the rest.
+ */
+export function omittedLink(lengths: number[]): number {
+  let at = 0;
+  for (let i = 1; i < lengths.length; i++) if (lengths[i] <= lengths[at] + SAME_M) at = i;
+  return at;
+}
 
 /** A length on the sheet, in mm, as a drawing writes it: one decimal, none when whole. */
 export function formatDim(metres: number): string {
@@ -170,21 +181,23 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
     for (const candidate of found.edges) {
       const e = candidate.edge;
       if (e.kind === 'line') {
-        const d: Vec3 = [e.b[0] - e.a[0], e.b[1] - e.a[1], e.b[2] - e.a[2]];
-        const length = Math.hypot(d[0], d[1], d[2]);
-        if (!(length > 0)) continue;
-        if (Math.abs(dot(d, forward)) / length > IN_PLANE) continue;
-        const du = dot(d, right) / length;
-        const dv = dot(d, up) / length;
+        // Judged by how it is DRAWN, not how it lies: projected straight onto
+        // the sheet, an edge tilted away in depth (a windmill's pitched sail)
+        // is still a vertical line at one place across it, and that place is
+        // what a dimension measures to.
+        const du = dot(e.b, right) - dot(e.a, right);
+        const dv = dot(e.b, up) - dot(e.a, up);
+        const drawn = Math.hypot(du, dv);
+        if (!(drawn > SAME_M)) continue;
         const ua = dot(e.a, right), ub = dot(e.b, right);
         const va = dot(e.a, up), vb = dot(e.b, up);
         // Runs up the sheet: a stop across it, reaching down to the width row.
-        if (Math.abs(du) < SQUARE && length >= MIN_EDGE_SHARE * height) {
-          uStops.push({ at: (ua + ub) / 2, anchor: Math.min(va, vb), weight: length });
+        if (Math.abs(du) / drawn < SQUARE && drawn >= MIN_EDGE_SHARE * height) {
+          uStops.push({ at: (ua + ub) / 2, anchor: Math.min(va, vb), weight: drawn });
         }
         // Runs along the sheet: a stop up it, reaching left to the height row.
-        if (Math.abs(dv) < SQUARE && length >= MIN_EDGE_SHARE * width) {
-          vStops.push({ at: (va + vb) / 2, anchor: Math.min(ua, ub), weight: length });
+        if (Math.abs(dv) / drawn < SQUARE && drawn >= MIN_EDGE_SHARE * width) {
+          vStops.push({ at: (va + vb) / 2, anchor: Math.min(ua, ub), weight: drawn });
         }
       } else {
         const facing = Math.abs(dot(e.axis, forward));
@@ -278,7 +291,11 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
     if (!(hi - lo > SAME_M)) return;
     const chain = chainStops(stops, lo, hi, edge);
     if (chain.length > 2) {
-      for (let i = 0; i + 1 < chain.length; i++) dims.push(linear(axis, chain[i], chain[i + 1], 1, edge));
+      const links = chain.slice(1).map((stop, i) => stop.at - chain[i].at);
+      const skip = omittedLink(links);
+      for (let i = 0; i + 1 < chain.length; i++) {
+        if (i !== skip) dims.push(linear(axis, chain[i], chain[i + 1], 1, edge));
+      }
     }
     dims.push(linear(axis, chain[0], chain[chain.length - 1], 2, edge, diameter));
   };

@@ -104,13 +104,13 @@ describe('plate with holes', () => {
     expect(labels).toEqual(['2× ⌀8', '⌀12']);
   });
 
-  it('top view: the chain locates the hole centres and adds up to the width', () => {
+  it('top view: the chain locates the hole centres, its last 10 left to the overall', () => {
     const d = bodyViewDimensions(plate(), 'topDown');
     const chain = linear(d, 'u', 1).map((x) => x.valueMm);
-    expect(chain.map((x) => Math.round(x * 10) / 10)).toEqual([10, 20, 20, 10]);
-    expect(chain.reduce((a, b) => a + b, 0)).toBeCloseTo(linear(d, 'u', 2)[0].valueMm, 6);
-    // Up the sheet, the holes all sit at 15.
-    expect(linear(d, 'v', 1).map((x) => Math.round(x.valueMm * 10) / 10)).toEqual([15, 15]);
+    expect(chain.map((x) => Math.round(x * 10) / 10)).toEqual([10, 20, 20]);
+    expect(chain.reduce((a, b) => a + b, 0) + 10).toBeCloseTo(linear(d, 'u', 2)[0].valueMm, 6);
+    // Up the sheet, the holes all sit at 15: one 15 says so beside the 30.
+    expect(linear(d, 'v', 1).map((x) => Math.round(x.valueMm * 10) / 10)).toEqual([15]);
   });
 
   it('front view: the holes are out of sight and add nothing', () => {
@@ -126,19 +126,21 @@ describe('stepped block', () => {
   // Front profile: 50 wide; 20 high for the first 20 mm, 8 high after.
   const stepped = () => body(profileXZ([[0, 0], [mm(50), 0], [mm(50), mm(8)], [mm(20), mm(8)], [mm(20), mm(20)], [0, mm(20)]], mm(15)));
 
-  it('front view: the step is a stop each way, and the chains add up', () => {
+  it('front view: the step is a stop each way, never stated twice beside the overall', () => {
     const d = bodyViewDimensions(stepped(), 'front');
-    expect(linear(d, 'u', 1).map((x) => Math.round(x.valueMm * 10) / 10)).toEqual([20, 30]);
-    expect(linear(d, 'v', 1).map((x) => Math.round(x.valueMm * 10) / 10)).toEqual([8, 12]);
+    // 20 + 30 = 50 would say the 50 twice; the 20 is the overall less the 30.
+    expect(linear(d, 'u', 1).map((x) => Math.round(x.valueMm * 10) / 10)).toEqual([30]);
+    expect(linear(d, 'v', 1).map((x) => Math.round(x.valueMm * 10) / 10)).toEqual([12]);
     expect(linear(d, 'u', 2)[0].valueMm).toBeCloseTo(50, 6);
     expect(linear(d, 'v', 2)[0].valueMm).toBeCloseTo(20, 6);
   });
 
   it('the step edge reaches its extension line down from where it is', () => {
     const d = bodyViewDimensions(stepped(), 'front');
-    const [first] = linear(d, 'u', 1);
-    // Both ends of the 20 mm run start on the bottom of the part.
-    expect(first.anchorA).toBeCloseTo(0, 6);
+    const [run] = linear(d, 'u', 1);
+    // The 30 mm run starts at the step and ends at the bottom-right corner.
+    expect(run.a).toBeCloseTo(mm(20), 6);
+    expect(run.anchorB).toBeCloseTo(0, 6);
   });
 });
 
@@ -226,5 +228,31 @@ describe('spheres inside spheres', () => {
       ],
     }, 'front');
     expect(d?.dims.map((x) => x.label)).toEqual(['⌀200']);
+  });
+});
+
+describe('windmill blade', () => {
+  // A sail 360 long starting 40 from the pivot, pitched 12° about its own
+  // length, on a round shaft from the pivot: seen face on (Side), the sail's
+  // ends are tilted away in depth but still vertical lines on the sheet.
+  const blade = () => {
+    const sail = new THREE.BoxGeometry(mm(12), mm(360), mm(60));
+    sail.applyMatrix4(new THREE.Matrix4().makeRotationY((12 * Math.PI) / 180));
+    sail.translate(0, mm(220), 0);
+    const shaft = new THREE.CylinderGeometry(mm(8), mm(8), mm(70), 32);
+    shaft.translate(0, mm(35), 0);
+    const a = body(sail);
+    const b = body(shaft);
+    return {
+      id: 'blade',
+      positions: [...a.positions as number[], ...b.positions as number[]],
+      faces: [...a.faces as number[], ...(b.faces as number[]).map((i) => i + a.positions.length / 3)],
+    };
+  };
+
+  it('side view: the sail\'s own length beside the blade\'s overall', () => {
+    const d = bodyViewDimensions(blade(), 'side');
+    expect(linear(d, 'u', 2)[0].valueMm).toBeCloseTo(400, 6);
+    expect(linear(d, 'u', 1).map((x) => Math.round(x.valueMm * 10) / 10)).toEqual([360]);
   });
 });
