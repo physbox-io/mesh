@@ -1,43 +1,10 @@
 import { useLayoutEffect, useMemo } from 'react';
 import { useThree } from '@react-three/fiber';
 import * as THREE from 'three';
+import { getCycloramaPalette } from '../../utils/cycloramaPalette';
 
 export interface StudioBackdropProps {
   darkMode: boolean;
-}
-
-export interface CycloramaPalette {
-  top: string;
-  horizon: string;
-  bottom: string;
-  spotCenter: string;
-  spotInner: string;
-  spotEdge: string;
-  spotCorner: string;
-}
-
-export function getCycloramaPalette(darkMode: boolean): CycloramaPalette {
-  if (darkMode) {
-    return {
-      top: '#070b14',
-      horizon: '#111b2e',
-      bottom: '#060911',
-      spotCenter: '#213252',
-      spotInner: '#152038',
-      spotEdge: '#090e1a',
-      spotCorner: '#03060c',
-    };
-  }
-
-  return {
-    top: '#eaeff6',
-    horizon: '#fafbfd',
-    bottom: '#e4ebf4',
-    spotCenter: '#fffdfa',
-    spotInner: '#f8fafd',
-    spotEdge: '#e8eef6',
-    spotCorner: '#d8e2ef',
-  };
 }
 
 function buildCycloramaTexture(darkMode: boolean): THREE.Texture | THREE.Color {

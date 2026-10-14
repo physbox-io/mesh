@@ -1,5 +1,6 @@
 import React from 'react';
 import type { SceneNode } from '../types/scene';
+import type { PhysicsState } from '../store/useStore';
 import {
   createHeatSetBossNode,
   createHexNutTrapNode,
@@ -8,11 +9,14 @@ import {
   createCounterboreHoleNode,
 } from '../utils/hardwareComponents';
 
+/** What the palette adds by click: every component but the lattice, which has its own handler. */
+export type PaletteComponentType = Exclude<Parameters<PhysicsState['addComponent']>[0], 'lattice'>;
+
 export interface ComponentPaletteProps {
   coarsePointer: boolean;
   selectedNodeName: string | null;
   onDragStart: (e: React.DragEvent, type: string) => void;
-  onAddComponent: (type: any) => void;
+  onAddComponent: (type: PaletteComponentType) => void;
   onAddSculpt: () => void;
   onAddLattice: () => void;
   onAddHardwareNode: (node: SceneNode) => void;

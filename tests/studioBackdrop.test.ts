@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { getCycloramaPalette } from '../src/components/scene/StudioBackdrop';
+import { getCycloramaPalette } from '../src/utils/cycloramaPalette';
 
 describe('getCycloramaPalette', () => {
   it('returns distinct center and edge studio cyclorama stops for light and dark mode', () => {

@@ -10,17 +10,13 @@
 import { applySurfaceTextures } from '../utils/surfaceTexture';
 import type { TextureRequest, TextureResponse } from './textureProtocol';
 
-const post = (msg: TextureResponse, transfer?: Transferable[]) =>
-  (self as unknown as DedicatedWorkerGlobalScope).postMessage(msg, transfer ?? []);
+const post = (msg: TextureResponse) => (self as unknown as DedicatedWorkerGlobalScope).postMessage(msg);
 
 self.onmessage = (evt: MessageEvent<TextureRequest>) => {
   const msg = evt.data;
   try {
     const surface = applySurfaceTextures(msg.positions, msg.faces, msg.textures, { splits: msg.splits });
-    post(
-      { type: 'TEXTURE_DONE', id: msg.id, surface },
-      [surface.positions.buffer, surface.faces.buffer, surface.owner.buffer],
-    );
+    post({ type: 'TEXTURE_DONE', id: msg.id, surface });
   } catch (err) {
     post({ type: 'TEXTURE_FAILED', id: msg.id, error: err instanceof Error ? err.message : String(err) });
   }
