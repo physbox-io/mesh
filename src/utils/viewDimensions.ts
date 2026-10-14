@@ -160,20 +160,26 @@ const dot = (a: ArrayLike<number>, b: ArrayLike<number>) => a[0] * b[0] + a[1] *
 const neg = (a: Vec3): Vec3 => [0 - a[0], 0 - a[1], 0 - a[2]];
 
 /**
- * Which link of a chain to leave out, given the overall size beside it: the
- * smallest, the last of equals, and never one marked `keep`. A chain and the
- * overall together state one figure twice (715 beside 655 + 60), which a
- * drawing never does; the one left out is still there as the overall less the
- * rest. A diameter is kept: it says the size is round, which a difference
- * cannot. -1 when every link is kept.
+ * Which link of a chain to leave out, given the overall size beside it. A
+ * chain and the overall together state one figure twice (715 beside 655 + 60),
+ * which a drawing never does; the one left out is still there as the overall
+ * less the rest. A figure the chain gives twice goes first (a gear's 115.7 |
+ * 18.7 | 115.7 keeps the tooth, not both sides); otherwise the smallest. The
+ * last of equals, and never one marked `keep`: a diameter says the size is
+ * round, which a difference cannot. -1 when every link is kept.
  */
 export function omittedLink(lengths: number[], keep: boolean[] = []): number {
-  let at = -1;
-  for (let i = 0; i < lengths.length; i++) {
-    if (keep[i]) continue;
-    if (at < 0 || lengths[i] <= lengths[at] + SAME_M) at = i;
-  }
-  return at;
+  const repeated = (i: number) => lengths.some((x, j) => j !== i && Math.abs(x - lengths[i]) <= SAME_M);
+  const pick = (allowed: (i: number) => boolean) => {
+    let at = -1;
+    for (let i = 0; i < lengths.length; i++) {
+      if (keep[i] || !allowed(i)) continue;
+      if (at < 0 || lengths[i] <= lengths[at] + SAME_M) at = i;
+    }
+    return at;
+  };
+  const twice = pick(repeated);
+  return twice >= 0 ? twice : pick(() => true);
 }
 
 /** A length on the sheet, in mm, as a drawing writes it: one decimal, none when whole. */
@@ -208,7 +214,8 @@ export function sheetAxes(frame: [Vec3, Vec3, Vec3] | undefined, view: DrawingVi
   return { u: toward(a, right, up), v: toward(b, up, right), w: toward(axes[wi], forward, right) };
 }
 
-interface Stop { at: number; anchor: number; weight: number }
+/** `centre`: a hole's or pin's centre line, not an edge of the part. */
+interface Stop { at: number; anchor: number; weight: number; centre?: boolean }
 
 /**
  * Sorted stops with the near-duplicates merged and the ends always in — or just
@@ -227,9 +234,20 @@ function chainStops(stops: Stop[], lo: number, hi: number, loAnchor: number): St
       if (s.weight > last.weight) last.at = s.at;
       last.anchor = Math.min(last.anchor, s.anchor);
       last.weight = Math.max(last.weight, s.weight);
+      last.centre = !!last.centre && !!s.centre;
       continue;
     }
     merged.push({ ...s });
+  }
+  // A centre line exactly halfway between the two edges either side of it (a
+  // pin through the middle of a post, the axle under a tooth) cuts one feature
+  // into two halves, 10 + 10 for a ⌀20. The edges give the feature; the centre
+  // adds nothing they do not. Between the part's own ends it stays: that is a
+  // hole located from the outline.
+  for (let i = merged.length - 2; i >= 1; i--) {
+    const [prev, s, next] = [merged[i - 1], merged[i], merged[i + 1]];
+    if (s.centre && !prev.centre && !next.centre && prev.weight !== Infinity && next.weight !== Infinity &&
+      Math.abs(s.at - (prev.at + next.at) / 2) < MERGE_M) merged.splice(i, 1);
   }
   if (merged.length <= MAX_STOPS) return merged;
   return [merged[0], merged[merged.length - 1]];
@@ -304,6 +322,41 @@ function bossTest(positions: ArrayLike<number>, faces: ArrayLike<number>, triang
   };
 }
 
+/**
+ * Whether a point is behind the part's own surface, seen along w: some
+ * triangle covering it on the sheet lies nearer. Built on first use.
+ */
+function occlusion(positions: ArrayLike<number>, faces: ArrayLike<number>, axes: SheetAxes) {
+  let tris: Float64Array | null = null;
+  return (pu: number, pv: number, pw: number): boolean => {
+    if (!tris) {
+      tris = new Float64Array(faces.length * 3);
+      for (let t = 0, k = 0; t < faces.length; t++) {
+        const i = faces[t] * 3;
+        const q = [positions[i], positions[i + 1], positions[i + 2]];
+        tris[k++] = dot(q, axes.u);
+        tris[k++] = dot(q, axes.v);
+        tris[k++] = dot(q, axes.w);
+      }
+    }
+    for (let k = 0; k < tris.length; k += 9) {
+      const ax = tris[k], ay = tris[k + 1], aw = tris[k + 2];
+      const bx = tris[k + 3], by = tris[k + 4], bw = tris[k + 5];
+      const cx = tris[k + 6], cy = tris[k + 7], cw = tris[k + 8];
+      if (Math.min(aw, bw, cw) >= pw - PAST_M) continue;
+      if (pu < Math.min(ax, bx, cx) || pu > Math.max(ax, bx, cx)) continue;
+      if (pv < Math.min(ay, by, cy) || pv > Math.max(ay, by, cy)) continue;
+      const det = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+      if (Math.abs(det) < 1e-18) continue;
+      const l1 = ((pu - ax) * (cy - ay) - (pv - ay) * (cx - ax)) / det;
+      const l2 = ((bx - ax) * (pv - ay) - (by - ay) * (pu - ax)) / det;
+      if (l1 < 0 || l2 < 0 || l1 + l2 > 1) continue;
+      if (aw + l1 * (bw - aw) + l2 * (cw - aw) < pw - PAST_M) return true;
+    }
+    return false;
+  };
+}
+
 /** The dimensions for one part in one view. */
 export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimensions | null {
   const { forward, right, up } = VIEW_AXES[view];
@@ -334,6 +387,20 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
   const vStops: Stop[] = [];
   const circles: { centre: [number, number]; radius: number }[] = [];
   const balls: { centre: [number, number]; radius: number }[] = [];
+  const hidden = occlusion(body.positions, body.faces, { u: right, v: up, w: forward });
+  /**
+   * Whether any of a round's near face shows past the rest of the part: its
+   * nearest point and four around it, a little in from its rim. An eye inside
+   * a skull, or a ball behind a plate, gets no leader pointing at nothing.
+   */
+  const inSight = (c: ArrayLike<number>, radius: number) => {
+    const at = (du: number, dv: number) => {
+      const k = Math.sqrt(Math.max(0, 1 - du * du - dv * dv));
+      const q = [0, 1, 2].map((i) => c[i] + radius * (du * right[i] + dv * up[i] - k * forward[i]));
+      return !hidden(dot(q, right), dot(q, up), dot(q, forward));
+    };
+    return at(0, 0) || at(0.7, 0) || at(-0.7, 0) || at(0, 0.7) || at(0, -0.7);
+  };
   // Rounds lying in the view: across them, from silhouette to silhouette, is a diameter.
   const sideOn: { axis: 'u' | 'v'; lo: number; hi: number }[] = [];
   // Whether something straight runs along each axis, which is what makes the
@@ -419,7 +486,9 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
     const cu = dot(mid, U), cv = dot(mid, V);
     const t = length > 0 ? axis.map((x) => x / length) : [0, 0, 1];
     if (Math.abs(dot(t, W)) > END_ON) {
-      balls.push({ centre: [cu, cv], radius: rod.radius });
+      // Seen from the end nearer the camera, its dome's centre.
+      const near = dot(rod.a, forward) < dot(rod.b, forward) ? rod.a : rod.b;
+      if (inSight(near, rod.radius)) balls.push({ centre: [cu, cv], radius: rod.radius });
       continue;
     }
     const along = Math.abs(dot(t, V)) > END_ON ? 'v' : Math.abs(dot(t, U)) > END_ON ? 'u' : null;
@@ -448,6 +517,7 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
     b.radius > a.radius &&
     Math.hypot(a.centre[0] - b.centre[0], a.centre[1] - b.centre[1], a.centre[2] - b.centre[2]) + a.radius <= b.radius + SAME_M));
   for (const sphere of spheres) {
+    if (!inSight(sphere.centre, sphere.radius)) continue;
     balls.push({ centre: [dot(sphere.centre, U), dot(sphere.centre, V)], radius: sphere.radius });
   }
 
@@ -495,8 +565,8 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
   // starts at its centre: a centre line.
   for (const h of holes) {
     if (balls.includes(h)) continue;
-    uStops.push({ at: h.centre[0], anchor: h.centre[1], weight: 2 * h.radius });
-    vStops.push({ at: h.centre[1], anchor: h.centre[0], weight: 2 * h.radius });
+    uStops.push({ at: h.centre[0], anchor: h.centre[1], weight: 2 * h.radius, centre: true });
+    vStops.push({ at: h.centre[1], anchor: h.centre[0], weight: 2 * h.radius, centre: true });
   }
 
   // --- rows ----------------------------------------------------------------
@@ -515,9 +585,23 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
     label: `${isDiameter(axis, a.at, b.at) ? '⌀' : ''}${formatDim(b.at - a.at)}`,
   });
 
+  // A sphere as wide as the part, centred on it (a pendulum's bob on its rod):
+  // its ⌀ leader already gives that size, and the steps from the rod out to the
+  // ball's sides (18 − 5 = 13) are not the size of anything. That way, only the
+  // diameters of rounds seen side on are given.
+  const sphereSpans = (axis: 'u' | 'v', lo: number, hi: number) => balls.some((b) => {
+    const c = axis === 'u' ? b.centre[0] : b.centre[1];
+    return Math.abs(c - b.radius - lo) < MERGE_M && Math.abs(c + b.radius - hi) < MERGE_M;
+  });
   const rows = (axis: 'u' | 'v', stops: Stop[], lo: number, hi: number, edge: number) => {
     if (!(hi - lo > SAME_M)) return;
     const chain = chainStops(stops, lo, hi, edge);
+    if (sphereSpans(axis, lo, hi)) {
+      for (let i = 0; i + 1 < chain.length; i++) {
+        if (isDiameter(axis, chain[i].at, chain[i + 1].at)) dims.push(linear(axis, chain[i], chain[i + 1], 1, edge));
+      }
+      return;
+    }
     if (chain.length > 2) {
       const links = chain.slice(1).map((stop, i) => stop.at - chain[i].at);
       const skip = omittedLink(links, links.map((_, i) => isDiameter(axis, chain[i].at, chain[i + 1].at)));

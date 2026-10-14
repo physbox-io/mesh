@@ -287,7 +287,24 @@ function layOut(found: BodyDimensions[], locations: LocationDim[], view: Drawing
       }
       y += h + 2;
     }
-    labels.push({ key, at: toThree(add(spot, up, (y - y0) * mpp)), text, anchor, location });
+    const placedAt = add(spot, up, (y - y0) * mpp);
+    // Moved off its line to stay clear of another: a thin leader back to it,
+    // or the figure floats with nothing to say what it measures.
+    if (y !== y0) line(location ? out.locationLines : out.lines, spot, placedAt);
+    labels.push({ key, at: toThree(placedAt), text, anchor, location });
+  };
+  /**
+   * Whether this figure is already on the sheet: the same text at the same
+   * place, to the pixel. Two parts can share a face line (a birdhouse's front
+   * and back walls, seen from the front), and a figure drawn twice over itself
+   * reads as two.
+   */
+  const drawn = new Set<string>();
+  const already = (text: string, ...points: Vec3[]) => {
+    const key = `${text}@${points.map((p) => `${Math.round(dot(p, right) / mpp)},${Math.round(dot(p, up) / mpp)}`).join(';')}`;
+    if (drawn.has(key)) return true;
+    drawn.add(key);
+    return false;
   };
 
   for (const body of found) {
@@ -318,6 +335,7 @@ function layOut(found: BodyDimensions[], locations: LocationDim[], view: Drawing
         const pa = d.axis === 'u' ? pu : pv;
         const pc = d.axis === 'u' ? pv : pu;
         const rowAt = d.edge - pc(ROW_PX[row]);
+        if (already(d.label, pt(d.a, rowAt), pt(d.b, rowAt))) return;
         line(out.lines, pt(d.a, d.anchorA - pc(GAP_PX)), pt(d.a, rowAt - pc(OVERSHOOT_PX)));
         line(out.lines, pt(d.b, d.anchorB - pc(GAP_PX)), pt(d.b, rowAt - pc(OVERSHOOT_PX)));
         line(out.lines, pt(d.a, rowAt), pt(d.b, rowAt));
@@ -334,6 +352,7 @@ function layOut(found: BodyDimensions[], locations: LocationDim[], view: Drawing
         // are not labelled up the same line.
         const [ku, kv] = LEADER_DIRECTIONS[diameterCount++ % LEADER_DIRECTIONS.length];
         const [cu, cv] = d.centre;
+        if (already(d.label, at(cu, cv), at(cu + d.radius, cv))) return;
         const k = add(add([0, 0, 0], U, ku), V, kv);
         const near = at(cu - ku * d.radius, cv - kv * d.radius);
         const far = at(cu + ku * d.radius, cv + kv * d.radius);
@@ -349,6 +368,7 @@ function layOut(found: BodyDimensions[], locations: LocationDim[], view: Drawing
         // From the sheet's horizontal or vertical round to the part's long
         // axis, both drawn out from the middle of the part.
         const centre = at(...d.centre);
+        if (already(d.label, centre, add(centre, d.to, mpp * 40))) return;
         const theta = Math.acos(Math.min(1, Math.max(-1, dot(d.from, d.to))));
         const g = unit(add(d.to, d.from, -dot(d.to, d.from)));
         const reach = (ARC_PX + ARC_OVERRUN_PX) * mpp;
@@ -364,26 +384,33 @@ function layOut(found: BodyDimensions[], locations: LocationDim[], view: Drawing
     });
   }
 
-  // Where each part sits: across from the reference origin, then up to the part's.
+  // Where each part sits: up from the reference origin, then across to the
+  // part's. Across goes at the part's own height, inside the drawing, rather
+  // than along the floor, where it ran off the sheet under the toolbar.
   for (const loc of locations) {
     const depth = 0;
     const at = (u: number, v: number): Vec3 => add(add(add([0, 0, 0], right, u), up, v), forward, depth);
     const from = at(...loc.from);
-    const corner = at(loc.to[0], loc.from[1]);
+    const corner = at(loc.from[0], loc.to[1]);
     const to = at(...loc.to);
     for (const p of [from, to]) {
       line(out.locationLines, add(p, right, -MARK_PX * mpp), add(p, right, MARK_PX * mpp));
       line(out.locationLines, add(p, up, -MARK_PX * mpp), add(p, up, MARK_PX * mpp));
     }
     const leg = (a: Vec3, b: Vec3, text: string, key: string) => {
+      if (already(`loc:${text}`, a, b)) return;
       const d = unit(add(b, a, -1));
       line(out.locationLines, a, b);
       arrow(out.locationArrows, a, [-d[0], -d[1], -d[2]]);
       arrow(out.locationArrows, b, d);
-      label(key, add(a, add(b, a, -1), 0.5), text, 'centre', true);
+      // On a long leg the figure sits near the part, which is in the drawing,
+      // not halfway back to an origin that may be off the sheet (on the floor
+      // under the toolbar).
+      const lengthPx = Math.hypot(...add(b, a, -1)) / mpp;
+      label(key, lengthPx > 80 ? add(b, d, -28 * mpp) : add(a, add(b, a, -1), 0.5), text, 'centre', true);
     };
-    if (loc.across) leg(from, corner, loc.across.label, `${loc.id}:across`);
-    if (loc.up) leg(corner, to, loc.up.label, `${loc.id}:up`);
+    if (loc.up) leg(from, corner, loc.up.label, `${loc.id}:up`);
+    if (loc.across) leg(corner, to, loc.across.label, `${loc.id}:across`);
   }
 
   return {

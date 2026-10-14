@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
-import { bodyViewDimensions, formatDim, locationDimensions, sheetAxes, type AngleDim, type BodyMesh, type DiameterDim, type LinearDim } from '../src/utils/viewDimensions';
+import { bodyViewDimensions, formatDim, locationDimensions, omittedLink, sheetAxes, type AngleDim, type BodyMesh, type DiameterDim, type LinearDim } from '../src/utils/viewDimensions';
 import { orthoFraming } from '../src/utils/cameraViews';
 
 /** A three geometry as a body: positions taken as document frame (Z-up), metres. */
@@ -360,5 +360,48 @@ describe('locationDimensions', () => {
       ['rotor', '100', null],
       ['vane', '200', '50'],
     ]);
+  });
+});
+
+describe('browser-check fixes', () => {
+  const upright = (r: number, h: number, z: number) => body(
+    new THREE.CylinderGeometry(mm(r), mm(r), mm(h), 64).rotateX(Math.PI / 2).translate(0, 0, mm(z)));
+
+  it('a pin through the middle of a post does not cut its ⌀20 into 10 + 10', () => {
+    const base = body(new THREE.BoxGeometry(mm(120), mm(40), mm(20)).translate(0, 0, mm(10)));
+    // Along Y, so seen end-on from the front, through the top of the post.
+    const pin = body(new THREE.CylinderGeometry(mm(4), mm(4), mm(30), 64).translate(0, 0, mm(150)));
+    const d = bodyViewDimensions(joined('stand', [base, upright(10, 160, 100), pin]), 'front');
+    expect(linear(d, 'u', 1).map((x) => x.label)).toEqual(['50', '⌀20']);
+    expect(linear(d, 'u', 2).map((x) => x.label)).toEqual(['120']);
+  });
+
+  it('a bob as wide as its rod\'s part says ⌀ once, with no steps out to its sides', () => {
+    const rod = body(new THREE.CapsuleGeometry(mm(5), mm(200), 8, 32).rotateX(Math.PI / 2).translate(0, 0, mm(100)));
+    const bob = body(new THREE.SphereGeometry(mm(18), 48, 32));
+    const d = bodyViewDimensions(joined('pole', [rod, bob], {
+      rods: [{ a: [0, 0, 0], b: [0, 0, mm(200)], radius: mm(5) }],
+      spheres: [{ centre: [0, 0, 0], radius: mm(18) }],
+    }), 'front');
+    expect(labels(d).filter((x) => x.includes('36') || x === '13')).toEqual(['⌀36']);
+    expect(linear(d, 'u', 1).map((x) => x.label)).toEqual(['⌀10']);
+    expect(linear(d, 'u', 2)).toEqual([]);
+  });
+
+  it('a ball out of sight behind the part gets no leader; one standing proud of it does', () => {
+    const block = body(new THREE.BoxGeometry(mm(100), mm(100), mm(100)));
+    const inside = { centre: [0, mm(20), 0] as [number, number, number], radius: mm(10) };
+    const proud = { centre: [mm(30), mm(-50), 0] as [number, number, number], radius: mm(8) };
+    const ball = (s: typeof inside) => body(new THREE.SphereGeometry(s.radius, 32, 16).translate(s.centre[0], s.centre[1], s.centre[2]));
+    const d = bodyViewDimensions(joined('head', [block, ball(inside), ball(proud)], { spheres: [inside, proud] }), 'front');
+    expect(diameters(d).map((x) => x.label)).toEqual(['⌀16']);
+  });
+});
+
+describe('omittedLink', () => {
+  it('leaves out a repeated figure before a smaller one, and the smallest otherwise', () => {
+    expect(omittedLink([0.1157, 0.0187, 0.1157])).toBe(2);
+    expect(omittedLink([0.655, 0.06])).toBe(1);
+    expect(omittedLink([0.06, 0.04, 0.06], [false, true, false])).toBe(2);
   });
 });
