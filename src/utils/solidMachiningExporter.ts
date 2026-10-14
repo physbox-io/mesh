@@ -656,7 +656,7 @@ function pinBore(
   for (let i = 1; i <= total; i++) {
     const a = (i / segs) * 2 * Math.PI;
     const z = toZ * (i / total);
-    out.push(`G1 X${f(cx + r * Math.cos(a))} Y${f(cy + r * Math.sin(a))} Z${f(z)}`);
+    out.push(`G1 X${f(cx + r * Math.cos(a))} Y${f(cy + r * Math.sin(a))} Z${f(z)} F${Math.round(feedRate)}`);
   }
   for (let i = 1; i <= segs; i++) {
     const a = (i / segs) * 2 * Math.PI;

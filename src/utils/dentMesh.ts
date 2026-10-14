@@ -396,22 +396,23 @@ export function imprintOf(geom: SceneGeom | undefined): Imprint | null {
     case 'box':
       // The smallest half-extent: a box landing square leaves a mark the size
       // of the face it landed on, and the narrow way is the one that fits.
-      return { radius: Math.max(1e-3, Math.min(size[0] ?? 0.05, size[2] ?? size[0] ?? 0.05)), profile: 'flat' };
+      return { radius: Math.max(1e-3, Math.min(size[0] ?? 0.05, size[1] ?? size[0] ?? 0.05, size[2] ?? size[0] ?? 0.05)), profile: 'flat' };
     case 'sphere':
       return { radius: Math.max(1e-3, size[0] ?? 0.03), profile: 'round' };
     case 'ellipsoid':
-      return { radius: Math.max(1e-3, Math.min(size[0] ?? 0.03, size[2] ?? size[0] ?? 0.03)), profile: 'round' };
+      return { radius: Math.max(1e-3, Math.min(size[0] ?? 0.03, size[1] ?? size[0] ?? 0.03, size[2] ?? size[0] ?? 0.03)), profile: 'round' };
     case 'mesh': {
       const v = geom.renderVertices ?? geom.vertices;
       if (!v || v.length < 9) return null;
-      // Half the smaller of its two cross-sectional spans, which is the width
-      // of the mark it can make edge-on as well as face-on.
-      let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+      // Half the smallest bounding span across all three axes, which is the width
+      // of the mark it can make edge-on as well as face-on (and invariant to Y-up vs Z-up).
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, minZ = Infinity, maxZ = -Infinity;
       for (let i = 0; i < v.length; i += 3) {
         if (v[i] < minX) minX = v[i]; if (v[i] > maxX) maxX = v[i];
+        if (v[i + 1] < minY) minY = v[i + 1]; if (v[i + 1] > maxY) maxY = v[i + 1];
         if (v[i + 2] < minZ) minZ = v[i + 2]; if (v[i + 2] > maxZ) maxZ = v[i + 2];
       }
-      const span = Math.min(maxX - minX, maxZ - minZ);
+      const span = Math.min(maxX - minX, maxY - minY, maxZ - minZ);
       return Number.isFinite(span) && span > 0 ? { radius: span / 2, profile: 'round' } : null;
     }
     default:

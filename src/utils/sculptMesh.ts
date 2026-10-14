@@ -1078,7 +1078,7 @@ function stampOnce(session: SculptSession, settings: BrushSettings, stamp: Brush
       // smoothing in place would let a vertex already moved this pass drag its
       // neighbours further than the strength allows.
       const { offsets, neighbours } = session.adjacency;
-      const source = positions.slice(0, mesh.vertexCount * 3);
+      const deltas = new Float32Array(indices.length * 3);
       const rate = weights.length > 0 ? strength : 0;
       for (let k = 0; k < indices.length; k++) {
         const i = indices[k];
@@ -1088,15 +1088,21 @@ function stampOnce(session: SculptSession, settings: BrushSettings, stamp: Brush
         let ax = 0, ay = 0, az = 0;
         for (let j = from; j < to; j++) {
           const n = neighbours[j];
-          ax += source[n * 3];
-          ay += source[n * 3 + 1];
-          az += source[n * 3 + 2];
+          ax += positions[n * 3];
+          ay += positions[n * 3 + 1];
+          az += positions[n * 3 + 2];
         }
         const count = to - from;
         const w = weights[k] * rate;
-        positions[i * 3] += (ax / count - source[i * 3]) * w;
-        positions[i * 3 + 1] += (ay / count - source[i * 3 + 1]) * w;
-        positions[i * 3 + 2] += (az / count - source[i * 3 + 2]) * w;
+        deltas[k * 3] = (ax / count - positions[i * 3]) * w;
+        deltas[k * 3 + 1] = (ay / count - positions[i * 3 + 1]) * w;
+        deltas[k * 3 + 2] = (az / count - positions[i * 3 + 2]) * w;
+      }
+      for (let k = 0; k < indices.length; k++) {
+        const i = indices[k];
+        positions[i * 3] += deltas[k * 3];
+        positions[i * 3 + 1] += deltas[k * 3 + 1];
+        positions[i * 3 + 2] += deltas[k * 3 + 2];
       }
       break;
     }

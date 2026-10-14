@@ -132,9 +132,10 @@ export class StockModel {
     // Whole cells only, each at the highest the cutter leaves across it.
     const half = this.cell * Math.SQRT1_2;
     // In pieces no longer than a cell, each taken at its own higher end, so a
-    // sloping move lowers the stock by no more than it really cuts.
+    // sloping move lowers the stock by no more than it really cuts. A flat move
+    // (z0 === z1) has the same height along its whole length and needs only one.
     const len = Math.hypot(x1 - x0, y1 - y0);
-    const pieces = Math.max(1, Math.ceil(len / this.cell));
+    const pieces = z0 === z1 ? 1 : Math.max(1, Math.ceil(len / this.cell));
     for (let s = 0; s < pieces; s++) {
       const ta = s / pieces, tb = (s + 1) / pieces;
       const za = z0 + (z1 - z0) * ta, zb = z0 + (z1 - z0) * tb;
@@ -181,7 +182,7 @@ export class StockModel {
   ): number {
     let worst = 0;
     const len = Math.hypot(x1 - x0, y1 - y0);
-    const pieces = Math.max(1, Math.ceil(len / this.cell));
+    const pieces = z0 === z1 ? 1 : Math.max(1, Math.ceil(len / this.cell));
     for (let s = 0; s < pieces; s++) {
       const ta = s / pieces, tb = (s + 1) / pieces;
       const z = Math.min(z0 + (z1 - z0) * ta, z0 + (z1 - z0) * tb);

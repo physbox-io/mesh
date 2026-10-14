@@ -1166,12 +1166,21 @@ export function exportContourSliceSvg(
           p.y *= scaleFactor;
         }
       }
+      layer.areaMm2 *= scaleFactor * scaleFactor;
+      if (layer.labelPos2D) {
+        layer.labelPos2D.x *= scaleFactor;
+        layer.labelPos2D.y *= scaleFactor;
+      }
     }
     for (const pin of pins) {
       pin.x *= scaleFactor;
       pin.y *= scaleFactor;
       pin.radiusMm *= scaleFactor;
     }
+    minX *= scaleFactor;
+    minY *= scaleFactor;
+    maxX *= scaleFactor;
+    maxY *= scaleFactor;
   }
 
   for (const layer of layers) {
@@ -1279,8 +1288,8 @@ export function exportContourSliceSvg(
       if (!anchor) continue;
       const pos = layer.placedPos2D!;
       const off = layer.modelOffset2D!;
-      const x = pos.x - off.x + anchor.x * scaleFactor;
-      const y = pos.y + off.y - anchor.y * scaleFactor;
+      const x = pos.x - off.x + anchor.x;
+      const y = pos.y + off.y - anchor.y;
       svg += `    <text x="${x.toFixed(2)}" y="${y.toFixed(2)}">${escapeXml(String(layer.index + 1))}</text>\n`;
     }
     svg += `  </g>\n`;

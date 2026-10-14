@@ -781,8 +781,8 @@ function generateLoopGcode(
     // set at or above the cut depth cannot turn the whole outline into a no-op.
     const attachTopZ = -Math.max(0.1, totalDepth - Math.max(0, options.attachmentHeightMm));
 
-    lines.push(`G0 X${f(startX)} Y${f(startY)} F${options.travelFeedrate}`);
     lines.push(`G0 Z${f(options.safeZ)}`);
+    lines.push(`G0 X${f(startX)} Y${f(startY)} F${options.travelFeedrate}`);
 
     for (let pass = 1; pass <= passes; pass++) {
       const currentZ = -Math.min(totalDepth, pass * stepdown);
@@ -867,14 +867,14 @@ export function generateContourSliceGcode(
   }
 
   const layers = result.layers;
-  const sheetCount = layers.length;
+  const sheetCount = result.sheetCount || layers.length;
   const operations: GcodeOperation[] = [];
   const radius = compensationRadius(options);
 
   const lines: string[] = [];
   lines.push(`; --------------------------------------------------`);
   lines.push(`; PhysBox Contour Slice Stack G-Code (${options.machineMode.toUpperCase()})`);
-  lines.push(`; Layers: ${sheetCount}`);
+  lines.push(`; Layers: ${layers.length}`);
   if (options.machineMode === 'laser') {
     lines.push(`; Laser: S${laserS(options)} of $30=${Math.round(options.laserMaxPower)} max, ${laserPassCount(options)} pass(es)`);
   }
@@ -912,7 +912,7 @@ export function generateContourSliceGcode(
     if (lIdx > 0 && options.pauseBetweenSheets) {
       operations.push({
         id: `pause_layer_${lIdx + 1}`,
-        name: `Insert Slice Layer ${lIdx + 1} of ${sheetCount}`,
+        name: `Insert Slice Layer ${lIdx + 1} of ${layers.length}`,
         type: 'pause_sheet',
         sheetIndex: lIdx,
       });
@@ -925,7 +925,7 @@ export function generateContourSliceGcode(
         lines.push(`M5`);
       }
       lines.push(`G0 X0.000 Y0.000`);
-      lines.push(`M0 (PAUSE: Insert Slice Layer ${lIdx + 1} of ${sheetCount})`);
+      lines.push(`M0 (PAUSE: Insert Slice Layer ${lIdx + 1} of ${layers.length})`);
       if (options.machineMode === 'cnc') {
         lines.push(`M3 S${Math.round(options.spindleRpm)}`);
         lines.push(`G4 P2`);
@@ -934,7 +934,7 @@ export function generateContourSliceGcode(
 
     lines.push(``);
     lines.push(`; ==================================================`);
-    lines.push(`; CONTOUR LAYER ${lIdx + 1} of ${sheetCount} (Z = ${f(layer.z * 1000)}mm)`);
+    lines.push(`; CONTOUR LAYER ${lIdx + 1} of ${layers.length} (Z = ${f(layer.z * 1000)}mm)`);
     lines.push(`; ==================================================`);
 
     // On a router the tool has to stand off each contour by its own radius, and
@@ -954,6 +954,13 @@ export function generateContourSliceGcode(
       cutPaths = comp.paths;
     }
 
+    const offset: Point2D = layer.placedPos2D && layer.modelOffset2D
+      ? {
+          x: layer.placedPos2D.x - layer.modelOffset2D.x,
+          y: layer.placedPos2D.y - (layer.modelOffset2D.y - (layer.height2D ?? 0)),
+        }
+      : { x: 0, y: 0 };
+
     for (let cIdx = 0; cIdx < cutPaths.length; cIdx++) {
       const contour = cutPaths[cIdx];
       if (contour.length < 3) continue;
@@ -966,10 +973,12 @@ export function generateContourSliceGcode(
       });
 
       for (const pt of contour) {
-        minX = Math.min(minX, pt.x);
-        minY = Math.min(minY, pt.y);
-        maxX = Math.max(maxX, pt.x);
-        maxY = Math.max(maxY, pt.y);
+        const px = offset.x + pt.x;
+        const py = offset.y + pt.y;
+        minX = Math.min(minX, px);
+        minY = Math.min(minY, py);
+        maxX = Math.max(maxX, px);
+        maxY = Math.max(maxY, py);
       }
 
       // Every contour gets attachments, holes included: a slice's holes are voids
@@ -978,7 +987,7 @@ export function generateContourSliceGcode(
       const spans = planAttachments(polygonPerimeter(contour), options);
       attachmentCount += spans.length;
       totalCutDistanceMm += polygonPerimeter(contour);
-      lines.push(...generateLoopGcode(contour, { x: 0, y: 0 }, options, spans));
+      lines.push(...generateLoopGcode(contour, offset, options, spans));
     }
   }
 

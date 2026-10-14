@@ -159,7 +159,7 @@ const scriptCache: Record<string, (api: Record<string, unknown>) => void> = {};
 const findNodeById = (nodes: SceneNode[], targetId: string): SceneNode | null => {
   if (!nodes) return null;
   for (const n of nodes) {
-    if (n.id === targetId) return n;
+    if (n.id === targetId || n.name === targetId) return n;
     const c = findNodeById(n.children || [], targetId);
     if (c) return c;
   }
@@ -427,6 +427,7 @@ const executeScripts = (nodes: SceneNode[], aeroDiagnostics: Record<string, Aero
           const jId = _resolveJoint(joint.name);
           if (jId === -1) return;
           const dofadr = mdl.jnt_dofadr[jId];
+          pendingWake.add(mdl.jnt_bodyid[jId]);
           if (joint.type === 'free') {
             if (Array.isArray(angvel) && angvel.length >= 3) {
               dat.qvel[dofadr + 3] = angvel[0]; dat.qvel[dofadr + 4] = angvel[1]; dat.qvel[dofadr + 5] = angvel[2];
@@ -654,12 +655,21 @@ const buildHistoryEntry = (aeroDiagnostics: Record<string, AeroDiagnostic>): His
         const cvel = dat.cvel;
         const xfrc = dat.xfrc_applied;
         const xpos = dat.xpos;
+        const bodyDofnum = mdl.body_dofnum;
+        const bodyParentid = mdl.body_parentid;
+        let pId = bId;
+        while (pId > 0 && bodyDofnum[pId] === 0) {
+          pId = bodyParentid[pId];
+        }
         const wx = cvel[bId * 6 + 0], wy = cvel[bId * 6 + 1], wz = cvel[bId * 6 + 2];
         const vO_x = cvel[bId * 6 + 3], vO_y = cvel[bId * 6 + 4], vO_z = cvel[bId * 6 + 5];
         const x_pos = xpos[bId * 3 + 0], y_pos = xpos[bId * 3 + 1], z_pos = xpos[bId * 3 + 2];
-        const vx = vO_x + (wy * z_pos - wz * y_pos);
-        const vy = vO_y + (wz * x_pos - wx * z_pos);
-        const vz = vO_z + (wx * y_pos - wy * x_pos);
+        const rx = x_pos - xpos[pId * 3 + 0];
+        const ry = y_pos - xpos[pId * 3 + 1];
+        const rz = z_pos - xpos[pId * 3 + 2];
+        const vx = vO_x + (wy * rz - wz * ry);
+        const vy = vO_y + (wz * rx - wx * rz);
+        const vz = vO_z + (wx * ry - wy * rx);
         bodies[node.id] = {
           pos: [x_pos, y_pos, z_pos], vel: [vx, vy, vz], angvel: [wx, wy, wz],
           xfrc_applied: [
@@ -1874,7 +1884,7 @@ const runHeadless = (
   let headlessModel: MjModel | null = null;
   let headlessData: MjData | null = null;
   try {
-    headlessModel = mujoco.MjModel.from_xml_string(xml);
+    headlessModel = meshVfs ? mujoco.MjModel.from_xml_string(xml, meshVfs) : mujoco.MjModel.from_xml_string(xml);
     headlessData = new mujoco.MjData(headlessModel);
 
     model = headlessModel;
@@ -1921,7 +1931,7 @@ const runHeadless = (
         checkConstraintBreaks();
       },
       time: () => data!.time,
-      isBad: () => !Number.isFinite(data!.qpos[0]),
+      isBad: () => model!.nq > 0 && !Number.isFinite(data!.qpos[0]),
       sample: () => buildHistoryEntry(lastAero),
     });
 
@@ -2021,7 +2031,8 @@ self.onmessage = async (evt: MessageEvent) => {
           data.qpos[adr + msg.axis] = msg.value;
           pendingWake.add(model.jnt_bodyid[jId]);
           const vadr = model.jnt_dofadr[jId];
-          for (let i = 0; i < 6; i++) data.qvel[vadr + i] = 0;
+          const nv = JOINT_NV[model.jnt_type[jId]] ?? 1;
+          for (let i = 0; i < nv; i++) data.qvel[vadr + i] = 0;
           mujoco.mj_forward(model, data);
           const snap = snapshot();
           if (isSharedSupported) {

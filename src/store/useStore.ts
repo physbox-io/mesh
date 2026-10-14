@@ -548,11 +548,20 @@ const rotateMeshGeomsAbsolute = (node: WorkingNode, euler: [number, number, numb
   const radY = (ry * Math.PI) / 180;
   const radZ = (rz * Math.PI) / 180;
 
-  // Build 3D rotation matrix for Y-up world space (Euler order: Z * Y * X)
-  const matX = new THREE.Matrix4().makeRotationX(radX);
-  const matY = new THREE.Matrix4().makeRotationY(radY);
-  const matZ = new THREE.Matrix4().makeRotationZ(radZ);
-  const rotMat = new THREE.Matrix4().multiplyMatrices(matZ, new THREE.Matrix4().multiplyMatrices(matY, matX));
+  // Z-up rotation matrix (Euler order: Z * Y * X) for renderVertices and node.pos
+  const matXz = new THREE.Matrix4().makeRotationX(radX);
+  const matYz = new THREE.Matrix4().makeRotationY(radY);
+  const matZz = new THREE.Matrix4().makeRotationZ(radZ);
+  const rotMatZup = new THREE.Matrix4().multiplyMatrices(matZz, new THREE.Matrix4().multiplyMatrices(matYz, matXz));
+
+  // Equivalent rotation in Three.js Y-up space where (x, y, z) maps to Z-up (x, -z, y):
+  // T^-1 * Rz(radZ) * Ry(radY) * Rx(radX) * T = Ry(radZ) * Rz(-radY) * Rx(radX)
+  const matXy = new THREE.Matrix4().makeRotationX(radX);
+  const matYy = new THREE.Matrix4().makeRotationZ(-radY);
+  const matZy = new THREE.Matrix4().makeRotationY(radZ);
+  const rotMatYup = new THREE.Matrix4().multiplyMatrices(matZy, new THREE.Matrix4().multiplyMatrices(matYy, matXy));
+
+  const v = new THREE.Vector3();
 
   for (const g of node.geoms) {
     if (isStaticMesh(g)) {
@@ -596,11 +605,6 @@ const rotateMeshGeomsAbsolute = (node: WorkingNode, euler: [number, number, numb
         g.baseRenderVertices = [...g.renderVertices];
       }
       const baseRender = g.baseRenderVertices as number[];
-      // renderVertices are Z-up space in MuJoCo
-      const matXz = new THREE.Matrix4().makeRotationX(radX);
-      const matYz = new THREE.Matrix4().makeRotationZ(radY);
-      const matZz = new THREE.Matrix4().makeRotationY(-radZ);
-      const rotMatZup = new THREE.Matrix4().multiplyMatrices(matZz, new THREE.Matrix4().multiplyMatrices(matYz, matXz));
 
       const newRender = new Array(baseRender.length);
       const v = new THREE.Vector3();
@@ -613,12 +617,14 @@ const rotateMeshGeomsAbsolute = (node: WorkingNode, euler: [number, number, numb
       }
       g.renderVertices = newRender;
 
-      if (!rotateAroundCOM && node.pos) {
-        if (!node.basePos) node.basePos = [...node.pos];
-        const bp = node.basePos;
-        v.set(bp[0], bp[1], bp[2]).applyMatrix4(rotMat);
-        node.pos = [v.x, v.y, v.z];
-      }
+  if (node.geoms.some(isDynamicMesh) && node.pos) {
+    if (!node.basePos) node.basePos = [...node.pos];
+    if (!rotateAroundCOM) {
+      const bp = node.basePos;
+      v.set(bp[0], bp[1], bp[2]).applyMatrix4(rotMatZup);
+      node.pos = [v.x, v.y, v.z];
+    } else {
+      node.pos = [...node.basePos];
     }
   }
 };
@@ -3260,7 +3266,9 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     // mjcf.ts) — so that rotation must not be applied to them a second time.
     const baked = (first.geoms || []).length > 0
       && first.geoms.every((g: SceneGeom) => g.type === 'mesh')
-      && first.geoms.some((g: SceneGeom) => Array.isArray(g.baseVertices) && g.baseVertices.length > 0);
+      && first.geoms.some((g: SceneGeom) =>
+        (Array.isArray(g.baseVertices) && g.baseVertices.length > 0) ||
+        (Array.isArray(g.baseRenderVertices) && g.baseRenderVertices.length > 0));
 
     const geomsFor = (id: string, sec: (typeof sections)[number], k: number): SceneGeom[] => {
       const rgba = opts.plain && template?.rgba
@@ -5522,13 +5530,14 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
      * screen is fifty milliseconds of a vase that is not there any more.
      */
     if ((!forceReset && !immediate) || settle) {
-      if ((window as PhysicsWindow)._recompileTimeoutId) {
-        clearTimeout((window as PhysicsWindow)._recompileTimeoutId);
-        (window as PhysicsWindow)._recompileWake?.();
+      const win = (typeof window !== 'undefined' ? window : globalThis) as unknown as PhysicsWindow;
+      if (win._recompileTimeoutId) {
+        clearTimeout(win._recompileTimeoutId);
+        win._recompileWake?.();
       }
       await new Promise<void>(resolve => {
-        (window as PhysicsWindow)._recompileWake = resolve;
-        (window as PhysicsWindow)._recompileTimeoutId = setTimeout(resolve, settle ? 180 : 50);
+        win._recompileWake = resolve;
+        win._recompileTimeoutId = setTimeout(resolve, settle ? 180 : 50);
       });
       (window as PhysicsWindow)._recompileWake = null;
       if (token !== recompileToken) {
@@ -5710,7 +5719,9 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
           recycleWorker();
           const freshClient = getPhysicsWorkerClient();
           freshClient.setEnv(windX, windY);
-          const xml = compileToMJCF(sceneGraph, gravityZ, floorFriction, windX, windY, density, floorBounce);
+          const xml = compileToMJCF(sceneGraph, gravityZ, floorFriction, windX, windY, density, floorBounce, {
+            meshFiles: freshClient.meshFiles,
+          });
           const built = await freshClient.build(xml, sceneGraph, false, undefined, get().brokenConstraints);
           if (!built.ok) throw new Error(built.error || 'Unknown physics worker build error', { cause: e });
           applyBuilt(built);
@@ -5801,6 +5812,10 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
       time: data.time as number,
     };
     recycleWorker();
+      const xml = compileToMJCF(sceneGraph, gravityZ, floorFriction, windX, windY, density, floorBounce, {
+        sleep,
+        meshFiles: client.meshFiles,
+      });
     try {
       const xml = compileToMJCF(sceneGraph, gravityZ, floorFriction, windX, windY, density, floorBounce, { sleep });
       const client = getPhysicsWorkerClient();
@@ -5830,3 +5845,7 @@ if (typeof window !== 'undefined') {
     }
   }, 20000);
 }
+      const xml = compileToMJCF(sceneGraph, gravityZ, floorFriction, windX, windY, density, floorBounce, {
+        sleep,
+        meshFiles: client.meshFiles,
+      });

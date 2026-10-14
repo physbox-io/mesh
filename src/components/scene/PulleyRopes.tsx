@@ -38,8 +38,18 @@ export const PulleyRopesRenderer = ({ model, data, mujoco, sceneGraph }: PulleyR
       const name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY.value, b);
       if (name) c[name] = b;
     }
+    const mapNodeIds = (nodes?: SceneNode[]) => {
+      if (!nodes) return;
+      for (const n of nodes) {
+        const bId = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY.value, n.id);
+        if (bId !== -1) c[n.id] = bId;
+        else if (n.name && c[n.name] !== undefined) c[n.id] = c[n.name];
+        mapNodeIds(n.children);
+      }
+    };
+    mapNodeIds(sceneGraph?.nodes);
     bodyIdCache.current = c;
-  }, [model, mujoco]);
+  }, [model, mujoco, sceneGraph]);
   
   // A rope switched off with the hierarchy's eye is not drawn, like any body.
   const hiddenNodeIds = useStore((state) => state.hiddenNodeIds);

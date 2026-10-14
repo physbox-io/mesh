@@ -975,7 +975,7 @@ function twistOnto(normal: THREE.Vector3, u: THREE.Vector3): number {
  * disk can draw without spilling onto the faces around it.
  */
 function meshFaceRegion(geom: SceneGeom, hitFace: number): FaceRegion | null {
-  const verts = geom.renderVertices!;
+  const verts = (geom.renderVertices ?? yupToZup(geom.vertices))!;
   const faces = geom.faces!;
   const off = geom.pos || [0, 0, 0];
   const at = (i: number) => new THREE.Vector3(
@@ -1188,7 +1188,7 @@ export function flatFaceAt(
   for (const geom of csgSourceGeoms(node)) {
     if (!isPositive(geom) || geom === exclude) continue;
     if (geom.type === 'mesh') {
-      const verts = geom.renderVertices;
+      const verts = geom.renderVertices ?? yupToZup(geom.vertices);
       if (!verts || !geom.faces) continue;
       const off = geom.pos || [0, 0, 0];
       const at = (i: number) => new THREE.Vector3(
@@ -1580,7 +1580,7 @@ export function supportInterval(g: SceneGeom, d: THREE.Vector3): { lo: number; h
   const r = s[0] ?? 0.1;
 
   if (g.type === 'mesh') {
-    const v = g.renderVertices;
+    const v = g.renderVertices ?? yupToZup(g.vertices);
     if (!v || v.length === 0) return null;
     const off = g.pos || [0, 0, 0];
     let lo = Infinity, hi = -Infinity;
@@ -2231,7 +2231,7 @@ export async function evaluateNodeCsg(node: SceneNode): Promise<CsgResult | null
       const shiftedOrigin = [
         holeAxis.origin[0] - centroid[0],
         holeAxis.origin[1] - centroid[1],
-        holeAxis.origin[2] - centroid[2],
+        holeAxis.origin[2],
       ];
       const hulls = decomposeAroundAxis(centeredZup, compiled.faces, shiftedOrigin, holeAxis.axis, sectors);
       // A sliver here is not a cosmetic problem: qhull aborts on it inside
@@ -2465,7 +2465,7 @@ export function geomBounds(g: SceneGeom): { min: number[]; max: number[] } | nul
 
   if (g.type === 'mesh') {
     // Mesh vertices are already in the body frame; only an explicit pos shifts them.
-    const v = g.renderVertices;
+    const v = g.renderVertices ?? yupToZup(g.vertices);
     if (!v || v.length === 0) return null;
     const off = g.pos || [0, 0, 0];
     for (let i = 0; i < v.length; i += 3) {

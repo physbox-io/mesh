@@ -98,6 +98,16 @@ function zupToYupFlat(zup: number[]): number[] {
   return out;
 }
 
+function yupToZupFlat(yup: number[]): number[] {
+  const out = new Array<number>(yup.length);
+  for (let i = 0; i < yup.length; i += 3) {
+    out[i] = yup[i];
+    out[i + 1] = -yup[i + 2] + 0;
+    out[i + 2] = yup[i + 1];
+  }
+  return out;
+}
+
 /**
  * One geom, rewritten from its own body's frame into another's.
  *
@@ -119,7 +129,7 @@ export function rewriteGeom(geom: SceneGeom, relative: THREE.Matrix4): SceneGeom
     // and only shifted by an explicit pos, never turned by a quat (see
     // geomBounds). So the transform goes into the vertices and the geom comes
     // out sitting at the origin of its new body.
-    const zup = geom.renderVertices ?? [];
+    const zup = geom.renderVertices ?? (geom.vertices ? yupToZupFlat(geom.vertices) : []);
     const moved = transformFlat(zup, relative, geom.pos || [0, 0, 0]);
     next.renderVertices = moved;
     next.vertices = zupToYupFlat(moved);

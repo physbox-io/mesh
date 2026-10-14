@@ -1905,11 +1905,15 @@ export function orientFaces(lattice: Lattice): number {
           // Both running the edge the same way means one of them is the wrong
           // way round; the one being visited is the one that moves.
           if (runsForwards(use.face, key) === runsForwards(f, key)) {
-            lattice.faces[use.face]!.reverse();
+            const flippedVerts = lattice.faces[use.face]!;
+            flippedVerts.reverse();
             // The direction table describes the old winding, so it has to be
             // corrected too or the next neighbour is judged against a lie.
-            for (const [, uses] of along) {
-              for (const entry of uses) if (entry.face === use.face) entry.forwards = !entry.forwards;
+            for (let j = 0; j < flippedVerts.length; j++) {
+              const edge = edgeKey(flippedVerts[j], flippedVerts[(j + 1) % flippedVerts.length]);
+              for (const entry of along.get(edge) ?? []) {
+                if (entry.face === use.face) entry.forwards = !entry.forwards;
+              }
             }
             flipped++;
           }
@@ -1951,9 +1955,17 @@ function outwardness(lattice: Lattice, faces: number[]): number {
   let total = 0;
   for (const f of faces) {
     const centre = faceCentre(lattice, f);
-    const normal = faceNormal(lattice, f);
-    if (!centre || !normal) continue;
-    total += (centre[0] - cx) * normal[0] + (centre[1] - cy) * normal[1] + (centre[2] - cz) * normal[2];
+    const verts = lattice.faces[f];
+    if (!centre || !verts || verts.length < 3) continue;
+    let nx = 0, ny = 0, nz = 0;
+    for (let a = 0; a < verts.length; a++) {
+      const [x1, y1, z1] = coordOf(lattice, verts[a]);
+      const [x2, y2, z2] = coordOf(lattice, verts[(a + 1) % verts.length]);
+      nx += (y1 - y2) * (z1 + z2);
+      ny += (z1 - z2) * (x1 + x2);
+      nz += (x1 - x2) * (y1 + y2);
+    }
+    total += 0.5 * ((centre[0] - cx) * nx + (centre[1] - cy) * ny + (centre[2] - cz) * nz);
   }
   return total;
 }

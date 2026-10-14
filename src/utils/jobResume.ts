@@ -81,9 +81,17 @@ const INITIAL: ModalState = {
   uncertain: false,
 };
 
+const wordRegexCache = new Map<string, RegExp>();
+const codeRegexCache = new Map<string, RegExp>();
+
 /** Reads a word's value off a line, e.g. word('X', 'G1 X4.2 Y0') === 4.2. */
 function word(code: string, letter: string): number | null {
-  const m = new RegExp(`${letter}(-?\\d*\\.?\\d+)`, 'i').exec(code);
+  let re = wordRegexCache.get(letter);
+  if (!re) {
+    re = new RegExp(`${letter}(-?\\d*\\.?\\d+)`, 'i');
+    wordRegexCache.set(letter, re);
+  }
+  const m = re.exec(code);
   if (!m) return null;
   const v = parseFloat(m[1]);
   return Number.isFinite(v) ? v : null;
@@ -91,7 +99,68 @@ function word(code: string, letter: string): number | null {
 
 /** Whether a G or M code appears on the line, tolerating the leading zeros GRBL allows. */
 function hasCode(code: string, letter: 'G' | 'M', n: number): boolean {
-  return new RegExp(`\\b${letter}0*${n}\\b`, 'i').test(code);
+  const key = `${letter}${n}`;
+  let re = codeRegexCache.get(key);
+  if (!re) {
+    re = new RegExp(`\\b${letter}0*${n}\\b`, 'i');
+    codeRegexCache.set(key, re);
+  }
+  return re.test(code);
+}
+
+/** Advances `state` by a single stripped G-code line. */
+function stepModalLine(state: ModalState, code: string): void {
+  if (hasCode(code, 'G', 20)) state.units = 'G20';
+  if (hasCode(code, 'G', 21)) state.units = 'G21';
+  if (hasCode(code, 'G', 90)) state.distance = 'G90';
+  if (hasCode(code, 'G', 91)) state.distance = 'G91';
+  if (hasCode(code, 'G', 17)) state.plane = 'G17';
+  if (hasCode(code, 'G', 18)) state.plane = 'G18';
+  if (hasCode(code, 'G', 19)) state.plane = 'G19';
+  for (let w = 54; w <= 59; w++) if (hasCode(code, 'G', w)) state.wcs = `G${w}`;
+
+  if (hasCode(code, 'G', 92) || hasCode(code, 'G', 28) || hasCode(code, 'G', 30)) {
+    state.uncertain = true;
+    state.uncertainBecause =
+      'The program uses G92/G28/G30, which move or redefine the coordinate system part way ' +
+      'through. Where the tool would be at this line cannot be worked out by reading the file.';
+  }
+
+  const f = word(code, 'F');
+  if (f !== null && f > 0) state.feed = f;
+
+  // The S word is the spindle speed even on lines that do not start it, and
+  // on a laser it is the power, changing constantly.
+  const s = word(code, 'S');
+  if (hasCode(code, 'M', 3) || hasCode(code, 'M', 4)) {
+    state.spindle = {
+      mode: hasCode(code, 'M', 4) ? 'M4' : 'M3',
+      rpm: s !== null ? s : state.spindle?.rpm ?? null,
+    };
+  } else if (hasCode(code, 'M', 5)) {
+    state.spindle = null;
+  } else if (s !== null && state.spindle) {
+    state.spindle = { ...state.spindle, rpm: s };
+  }
+
+  // Only motion words move the tool. A bare `S1000` or `M5` does not.
+  const isMotion =
+    hasCode(code, 'G', 0) || hasCode(code, 'G', 1) || hasCode(code, 'G', 2) || hasCode(code, 'G', 3);
+  const x = word(code, 'X');
+  const y = word(code, 'Y');
+  const z = word(code, 'Z');
+  if (isMotion || x !== null || y !== null || z !== null) {
+    const apply = (prev: number | null, next: number | null): number | null => {
+      if (next === null) return prev;
+      if (state.distance === 'G91') return (prev ?? 0) + next;
+      return next;
+    };
+    state.position = {
+      x: apply(state.position.x, x),
+      y: apply(state.position.y, y),
+      z: apply(state.position.z, z),
+    };
+  }
 }
 
 /**
@@ -117,59 +186,7 @@ export function scanModalState(lines: string[], upTo: number): ModalState {
   }
 
   for (let i = 0; i < limit; i++) {
-    const code = lines[i];
-
-    if (hasCode(code, 'G', 20)) state.units = 'G20';
-    if (hasCode(code, 'G', 21)) state.units = 'G21';
-    if (hasCode(code, 'G', 90)) state.distance = 'G90';
-    if (hasCode(code, 'G', 91)) state.distance = 'G91';
-    if (hasCode(code, 'G', 17)) state.plane = 'G17';
-    if (hasCode(code, 'G', 18)) state.plane = 'G18';
-    if (hasCode(code, 'G', 19)) state.plane = 'G19';
-    for (let w = 54; w <= 59; w++) if (hasCode(code, 'G', w)) state.wcs = `G${w}`;
-
-    if (hasCode(code, 'G', 92) || hasCode(code, 'G', 28) || hasCode(code, 'G', 30)) {
-      state.uncertain = true;
-      state.uncertainBecause =
-        'The program uses G92/G28/G30, which move or redefine the coordinate system part way ' +
-        'through. Where the tool would be at this line cannot be worked out by reading the file.';
-    }
-
-    const f = word(code, 'F');
-    if (f !== null && f > 0) state.feed = f;
-
-    // The S word is the spindle speed even on lines that do not start it, and
-    // on a laser it is the power, changing constantly.
-    const s = word(code, 'S');
-    if (hasCode(code, 'M', 3) || hasCode(code, 'M', 4)) {
-      state.spindle = {
-        mode: hasCode(code, 'M', 4) ? 'M4' : 'M3',
-        rpm: s !== null ? s : state.spindle?.rpm ?? null,
-      };
-    } else if (hasCode(code, 'M', 5)) {
-      state.spindle = null;
-    } else if (s !== null && state.spindle) {
-      state.spindle = { ...state.spindle, rpm: s };
-    }
-
-    // Only motion words move the tool. A bare `S1000` or `M5` does not.
-    const isMotion =
-      hasCode(code, 'G', 0) || hasCode(code, 'G', 1) || hasCode(code, 'G', 2) || hasCode(code, 'G', 3);
-    const x = word(code, 'X');
-    const y = word(code, 'Y');
-    const z = word(code, 'Z');
-    if (isMotion || x !== null || y !== null || z !== null) {
-      const apply = (prev: number | null, next: number | null): number | null => {
-        if (next === null) return prev;
-        if (state.distance === 'G91') return (prev ?? 0) + next;
-        return next;
-      };
-      state.position = {
-        x: apply(state.position.x, x),
-        y: apply(state.position.y, y),
-        z: apply(state.position.z, z),
-      };
-    }
+    stepModalLine(state, lines[i]);
   }
 
   return state;
@@ -378,9 +395,9 @@ export function locateExecutedLine(
 
   let best = lo;
   let bestDist = Infinity;
+  const state = scanModalState(lines, lo);
 
   for (let i = lo; i <= hi; i++) {
-    const state = scanModalState(lines, i);
     const p = state.position;
     // A program that never mentions an axis says nothing about it — a laser job
     // commands no Z — so an absent axis is not evidence either way.
@@ -395,6 +412,10 @@ export function locateExecutedLine(
       bestDist = dist;
       best = i;
       if (dist <= toleranceMm) break;
+    }
+
+    if (i < hi) {
+      stepModalLine(state, lines[i]);
     }
   }
 

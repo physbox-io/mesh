@@ -179,7 +179,11 @@ const rotationIsBaked = (node: SceneNode): boolean => {
   const geoms = node.geoms || [];
   if (geoms.length === 0) return false;
   if (!geoms.every((g) => g.type === 'mesh')) return false;
-  return geoms.some((g) => Array.isArray(g.baseVertices) && g.baseVertices.length > 0);
+  return geoms.some(
+    (g) =>
+      (Array.isArray(g.baseVertices) && g.baseVertices.length > 0) ||
+      (Array.isArray(g.baseRenderVertices) && g.baseRenderVertices.length > 0),
+  );
 };
 
 /*
