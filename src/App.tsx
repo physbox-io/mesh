@@ -8,6 +8,7 @@ import { downloadMeshGeomStl } from './utils/meshStlExport';
 import SculptPanel from './components/SculptPanel';
 import LatticePanel from './components/LatticePanel';
 import { CutControls } from './components/CutControls';
+import { ThreadField } from './components/ThreadField';
 import ColoringSection from './components/ColoringSection';
 import { useMuJoCoInit } from './hooks/useMuJoCo';
 import { useMCPBridge } from './hooks/useMCPBridge';
@@ -18,7 +19,7 @@ import { useDentStore } from './store/dentStore';
 import { applyShatterPieces } from './store/useStore';
 import type { SceneGraph, SceneNode, SceneGeom, SceneJoint, CsgOp } from './types/scene';
 import type { WeakSpot } from './utils/printAnalysis';
-import { Play, Square, SlidersHorizontal, Settings, Box, Circle, X, RotateCcw, Trash2, Layers, CircleDot, Zap, Info, Triangle, Disc, Code, Menu, Shapes, Minimize2, Save, Download, Upload, Undo, Redo, FileText, PanelRight, Printer, Scissors, Sparkles, Sun, Moon, Pyramid, Cone, Donut, ChartSpline, Paintbrush, Grid3x3, Image as ImageIcon, Share2, Copy, Check, Link2, Unlink, Hammer, Aperture, ChevronRight, ChevronDown, Eye, EyeOff } from 'lucide-react';
+import { Play, Square, SlidersHorizontal, Settings, Box, X, RotateCcw, Trash2, Zap, Info, Code, Menu, Shapes, Minimize2, Save, Download, Upload, Undo, Redo, PanelRight, Printer, Scissors, Sparkles, Sun, Moon, Donut, Paintbrush, Grid3x3, Image as ImageIcon, Share2, Copy, Check, Link2, Unlink, Hammer, Aperture, ChevronRight, ChevronDown, Eye, EyeOff } from 'lucide-react';
 import { useRef, useMemo, useEffect, useLayoutEffect, useCallback, useState, type ComponentRef } from 'react';
 import AICopilotPanel from './components/AICopilotPanel';
 import { DocsModal } from './components/docs/DocsModal';
@@ -85,7 +86,7 @@ import { JobRestoreModal } from './components/JobRestoreModal';
 import { JobSucceededModal } from './components/JobSucceededModal';
 import { MIN_MAX_TOKENS, MAX_MAX_TOKENS, readMaxTokens, writeMaxTokens } from './utils/llmSettings';
 import { DfmHUD } from './components/DfmHUD';
-import { createHeatSetBossNode, createHexNutTrapNode, createBearingPocketNode, createDShaftHubNode, createCounterboreHoleNode } from './utils/hardwareComponents';
+import { ComponentPalette } from './components/ComponentPalette';
 import { pushGlobalParameter } from './utils/llmSettings';
 import { saveUserPreset, deleteUserPreset, readUserPreset, listUserPresetNames, cloudOnlyPresetNames, USER_PRESETS_CHANGED_EVENT } from './utils/userPresets';
 import { savePreset } from './utils/presetStorage';
@@ -122,6 +123,7 @@ import { GridFadeFollowsCamera } from './components/scene/GridFadeFollowsCamera'
 import { GRID_NAME } from './components/scene/gridConstants';
 import { anthropicUrl, geminiUrl } from './utils/llmEndpoints';
 import { BodyToneMapping } from './components/scene/BodyToneMapping';
+import { StudioBackdrop } from './components/scene/StudioBackdrop';
 import { useViewQuality, usePathTraceStatus } from './store/viewQualityStore';
 import { SelectionOutline } from './components/scene/SelectionOutline';
 import { PathTracedView } from './components/scene/PathTracedView';
@@ -1973,7 +1975,11 @@ function App() {
         {/* Center/Right: Simulation Toolbar & Files */}
         <div className="flex items-center gap-2 md:gap-3 min-w-0 max-lg:w-full max-lg:flex-wrap max-lg:justify-between max-lg:gap-y-1.5">
           {/* Simulation Controller Block */}
-          <div className="flex items-center max-lg:shrink-0 bg-slate-100 dark:bg-slate-800/80 p-0.5 rounded-lg border border-slate-200/80 dark:border-slate-700/60 shadow-inner">
+          <div className={`flex items-center max-lg:shrink-0 p-0.5 rounded-lg border transition-all duration-300 ${
+            isPlaying
+              ? 'bg-emerald-50/80 dark:bg-emerald-950/35 border-emerald-400/60 dark:border-emerald-500/40 shadow-[0_0_12px_-2px_rgba(16,185,129,0.28)]'
+              : 'bg-slate-100 dark:bg-slate-800/80 border-slate-200/80 dark:border-slate-700/60 shadow-inner'
+          }`}>
             {/* Simulate / Stop */}
             <button 
               onClick={togglePlay}
@@ -2413,400 +2419,51 @@ function App() {
             </div>
           </div>
 
-          <h2 className="text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider mb-1">Components</h2>
-
-          {/* The palette is drag-and-drop with a mouse, which a finger cannot
-              do onto a canvas it cannot see behind the drawer. Tapping already
-              adds the part at the origin — it just needed saying. */}
-          {coarsePointer && (
-            <p className="text-[10px] text-slate-400 dark:text-slate-500 leading-tight mb-1.5">
-              Tap a part to drop it into the scene.
-            </p>
-          )}
-
-          <div className="text-[10px] font-medium text-slate-500 dark:text-slate-400 mb-2.5 bg-slate-50 dark:bg-slate-950/40 px-2 py-1.5 rounded-lg border border-slate-200/50 dark:border-slate-800/50">
-            Adding to: <span className="text-blue-600 dark:text-blue-400 font-semibold truncate block">{selectedNode ? selectedNode.name : '🌍 Worldbody'}</span>
-          </div>
-
-          <div className="grid grid-cols-2 gap-2">
-            {/* Cube (Box) */}
-            <div 
-              draggable 
-              onDragStart={(e) => handleDragStart(e, 'box')} 
-              onClick={() => handleAddComponentClick('box')}
-              className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-blue-400 dark:hover:border-blue-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
-              title="Cube (Box geom)"
-            >
-              <div className="p-1.5 bg-rose-50 dark:bg-rose-950/30 rounded-lg mb-1 group-hover:scale-105 transition-transform">
-                <Box className="w-4 h-4 text-rose-500 dark:text-rose-400" />
-              </div>
-              <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Cube</span>
-            </div>
-
-            {/* Sphere */}
-            <div 
-              draggable 
-              onDragStart={(e) => handleDragStart(e, 'sphere')} 
-              onClick={() => handleAddComponentClick('sphere')}
-              className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-blue-400 dark:hover:border-blue-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
-              title="Sphere (Ball geom)"
-            >
-              <div className="p-1.5 bg-emerald-50 dark:bg-emerald-950/30 rounded-lg mb-1 group-hover:scale-105 transition-transform">
-                <Circle className="w-4 h-4 text-emerald-500 dark:text-emerald-400" />
-              </div>
-              <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Sphere</span>
-            </div>
-
-            {/* Cylinder */}
-            <div 
-              draggable 
-              onDragStart={(e) => handleDragStart(e, 'cylinder')} 
-              onClick={() => handleAddComponentClick('cylinder')}
-              className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-blue-400 dark:hover:border-blue-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
-              title="Cylinder block"
-            >
-              <div className="p-1.5 bg-amber-50 dark:bg-amber-950/30 rounded-lg mb-1 group-hover:scale-105 transition-transform">
-                <Layers className="w-4 h-4 text-amber-600 dark:text-amber-400" />
-              </div>
-              <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Cylinder</span>
-            </div>
-
-            {/* Pole (Capsule) */}
-            <div 
-              draggable 
-              onDragStart={(e) => handleDragStart(e, 'capsule')} 
-              onClick={() => handleAddComponentClick('capsule')}
-              className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-blue-400 dark:hover:border-blue-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
-              title="Capsule rod (Pole)"
-            >
-              <div className="p-1.5 bg-indigo-50 dark:bg-indigo-950/30 rounded-lg mb-1 group-hover:scale-105 transition-transform">
-                <Zap className="w-4 h-4 text-indigo-500 dark:text-indigo-400" />
-              </div>
-              <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Pole</span>
-            </div>
-
-            {/* Gear */}
-            <div 
-              draggable 
-              onDragStart={(e) => handleDragStart(e, 'gear')} 
-              onClick={() => handleAddComponentClick('gear')}
-              className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-blue-400 dark:hover:border-blue-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
-              title="Gear cog"
-            >
-              <div className="p-1.5 bg-slate-100 dark:bg-slate-800 rounded-lg mb-1 group-hover:rotate-45 transition-transform duration-300">
-                <Settings className="w-4 h-4 text-slate-500 dark:text-slate-400" />
-              </div>
-              <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Gear</span>
-            </div>
-
-            {/* Wedge */}
-            <div 
-              draggable 
-              onDragStart={(e) => handleDragStart(e, 'wedge')} 
-              onClick={() => handleAddComponentClick('wedge')}
-              className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-blue-400 dark:hover:border-blue-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
-              title="Wedge (Inclined plane)"
-            >
-              <div className="p-1.5 bg-amber-50 dark:bg-amber-950/20 rounded-lg mb-1 group-hover:scale-105 transition-transform">
-                <Triangle className="w-4 h-4 text-amber-600 dark:text-amber-500 rotate-90" />
-              </div>
-              <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Wedge</span>
-            </div>
-
-            {/* Pyramid */}
-            <div 
-              draggable 
-              onDragStart={(e) => handleDragStart(e, 'pyramid')} 
-              onClick={() => handleAddComponentClick('pyramid')}
-              className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-blue-400 dark:hover:border-blue-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
-              title="Pyramid (Convex mesh)"
-            >
-              <div className="p-1.5 bg-rose-50 dark:bg-rose-950/30 rounded-lg mb-1 group-hover:scale-105 transition-transform">
-                <Pyramid className="w-4 h-4 text-rose-600 dark:text-rose-400" />
-              </div>
-              <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Pyramid</span>
-            </div>
-
-            {/* Cone */}
-            <div 
-              draggable 
-              onDragStart={(e) => handleDragStart(e, 'cone')} 
-              onClick={() => handleAddComponentClick('cone')}
-              className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-blue-400 dark:hover:border-blue-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
-              title="Cone (Convex mesh)"
-            >
-              <div className="p-1.5 bg-sky-50 dark:bg-sky-950/30 rounded-lg mb-1 group-hover:scale-105 transition-transform">
-                <Cone className="w-4 h-4 text-sky-600 dark:text-sky-400" />
-              </div>
-              <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Cone</span>
-            </div>
-
-            {/* Torus */}
-            <div 
-              draggable 
-              onDragStart={(e) => handleDragStart(e, 'torus')} 
-              onClick={() => handleAddComponentClick('torus')}
-              className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-blue-400 dark:hover:border-blue-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
-              title="Torus (Ring mesh)"
-            >
-              <div className="p-1.5 bg-violet-50 dark:bg-violet-950/30 rounded-lg mb-1 group-hover:scale-105 transition-transform">
-                <Donut className="w-4 h-4 text-violet-600 dark:text-violet-400" />
-              </div>
-              <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Torus</span>
-            </div>
-
-            {/* Tube */}
-            <div 
-              draggable 
-              onDragStart={(e) => handleDragStart(e, 'tube')} 
-              onClick={() => handleAddComponentClick('tube')}
-              className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-blue-400 dark:hover:border-blue-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
-              title="Tube (Hollow cylinder)"
-            >
-              <div className="p-1.5 bg-emerald-50 dark:bg-emerald-950/30 rounded-lg mb-1 group-hover:scale-105 transition-transform">
-                <CircleDot className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
-              </div>
-              <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Tube</span>
-            </div>
-
-            {/* Ellipsoid */}
-            <div 
-              draggable 
-              onDragStart={(e) => handleDragStart(e, 'ellipsoid')} 
-              onClick={() => handleAddComponentClick('ellipsoid')}
-              className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-blue-400 dark:hover:border-blue-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
-              title="Ellipsoid primitive"
-            >
-              <div className="p-1.5 bg-amber-50 dark:bg-amber-950/30 rounded-lg mb-1 group-hover:scale-105 transition-transform">
-                <Circle className="w-4 h-4 text-amber-600 dark:text-amber-400 scale-x-125 scale-y-75" />
-              </div>
-              <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Ellipsoid</span>
-            </div>
-
-            {/* Ring — a boolean body: ellipsoid minus a piercing ellipsoid */}
-            <div
-              draggable
-              onDragStart={(e) => handleDragStart(e, 'ring')}
-              onClick={() => handleAddComponentClick('ring')}
-              className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-blue-400 dark:hover:border-blue-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
-              title="Ring (an ellipsoid with a second ellipsoid subtracted; a boolean body you can reshape)"
-            >
-              <div className="p-1.5 bg-rose-50 dark:bg-rose-950/30 rounded-lg mb-1 group-hover:scale-105 transition-transform">
-                <Donut className="w-4 h-4 text-rose-600 dark:text-rose-400" />
-              </div>
-              <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Ring</span>
-            </div>
-
-            {/* Sculpt (free-form clay — the one shape not made from parameters) */}
-            <div
-              draggable
-              onDragStart={(e) => handleDragStart(e, 'sculpt')}
-              onClick={() => handleAddSculptClick()}
-              className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-blue-400 dark:hover:border-blue-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
-              title="Sculpt (a ball of clay you push into shape by hand; detail is added as you brush)"
-            >
-              <div className="p-1.5 bg-sky-50 dark:bg-sky-950/30 rounded-lg mb-1 group-hover:scale-105 transition-transform">
-                <Paintbrush className="w-4 h-4 text-sky-600 dark:text-sky-400" />
-              </div>
-              <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Sculpt</span>
-            </div>
-
-            {/* Lattice (points on a grid, connected — the precise counterpart
-                to sculpting's free hand) */}
-            <div
-              draggable
-              onDragStart={(e) => handleDragStart(e, 'lattice')}
-              onClick={() => handleAddLatticeClick()}
-              className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-blue-400 dark:hover:border-blue-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
-              title="Lattice (connect points on a 3D grid into faces, with exact dimensions and optional smoothing)"
-            >
-              <div className="p-1.5 bg-indigo-50 dark:bg-indigo-950/30 rounded-lg mb-1 group-hover:scale-105 transition-transform">
-                <Grid3x3 className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
-              </div>
-              <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Lattice</span>
-            </div>
-
-            {/* Curve (rigid curved track) */}
-            <div
-              draggable
-              onDragStart={(e) => handleDragStart(e, 'curve')}
-              onClick={() => handleAddComponentClick('curve')}
-              className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-blue-400 dark:hover:border-blue-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
-              title="Curve (rigid spline track that balls roll along)"
-            >
-              <div className="p-1.5 bg-orange-50 dark:bg-orange-950/30 rounded-lg mb-1 group-hover:scale-105 transition-transform">
-                <ChartSpline className="w-4 h-4 text-orange-600 dark:text-orange-400" />
-              </div>
-              <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Curve</span>
-            </div>
-
-            {/* Pulley Wheel */}
-            <div 
-              draggable 
-              onDragStart={(e) => handleDragStart(e, 'pulley_wheel')} 
-              onClick={() => handleAddComponentClick('pulley_wheel')}
-              className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-blue-400 dark:hover:border-blue-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
-              title="Pulley Stand system disk"
-            >
-              <div className="p-1.5 bg-cyan-50 dark:bg-cyan-950/30 rounded-lg mb-1 group-hover:scale-105 transition-transform">
-                <Disc className="w-4 h-4 text-cyan-600 dark:text-cyan-400" />
-              </div>
-              <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Pulley</span>
-            </div>
-
-            {/* Rope */}
-            <div 
-              draggable 
-              onDragStart={(e) => handleDragStart(e, 'pulley_rope')} 
-              onClick={() => handleAddComponentClick('pulley_rope')}
-              className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-blue-400 dark:hover:border-blue-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
-              title="Coupler Rope"
-            >
-              <div className="p-1.5 bg-emerald-50 dark:bg-emerald-950/30 rounded-lg mb-1 group-hover:scale-105 transition-transform">
-                <CircleDot className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
-              </div>
-              <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Rope</span>
-            </div>
-          </div>
-
-          {/* 3D-Printed Mechanical Hardware Primitives */}
-          <div className="mt-4 pt-3 border-t border-slate-200 dark:border-slate-800">
-            <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2 flex items-center gap-1.5">
-              <span>🔩 3D Hardware Primitives</span>
-            </h3>
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                onClick={() => {
-                  const node = createHeatSetBossNode('M3');
-                  addHardwareComponentNode(node);
-                  setIsLeftSidebarOpen(false);
-                }}
-                className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-emerald-400 dark:hover:border-emerald-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
-                title="M3 Heat-Set Insert Boss"
-              >
-                <div className="p-1.5 bg-emerald-50 dark:bg-emerald-950/30 rounded-lg mb-1 group-hover:scale-105 transition-transform">
-                  <span className="text-xs font-mono text-emerald-600 dark:text-emerald-400 font-bold">M3</span>
-                </div>
-                <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">M3 Insert Boss</span>
-              </button>
-
-              <button
-                onClick={() => {
-                  const node = createHexNutTrapNode('M3');
-                  addHardwareComponentNode(node);
-                  setIsLeftSidebarOpen(false);
-                }}
-                className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-blue-400 dark:hover:border-blue-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
-                title="M3 Hex Nut Trap Slot"
-              >
-                <div className="p-1.5 bg-blue-50 dark:bg-blue-950/30 rounded-lg mb-1 group-hover:scale-105 transition-transform">
-                  <span className="text-xs font-mono text-blue-600 dark:text-blue-400 font-bold">Nut</span>
-                </div>
-                <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">M3 Nut Trap</span>
-              </button>
-
-              <button
-                onClick={() => {
-                  const node = createCounterboreHoleNode('M3');
-                  addHardwareComponentNode(node);
-                  setIsLeftSidebarOpen(false);
-                }}
-                className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-cyan-400 dark:hover:border-cyan-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
-                title="M3 Counterbored Screw Hole (Cap Screw Recess + Shank Clearance)"
-              >
-                <div className="p-1.5 bg-cyan-50 dark:bg-cyan-950/30 rounded-lg mb-1 group-hover:scale-105 transition-transform">
-                  <span className="text-xs font-mono text-cyan-600 dark:text-cyan-400 font-bold">M3</span>
-                </div>
-                <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">M3 Cap Recess</span>
-              </button>
-
-              <button
-                onClick={() => {
-                  const node = createBearingPocketNode('608');
-                  addHardwareComponentNode(node);
-                  setIsLeftSidebarOpen(false);
-                }}
-                className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-amber-400 dark:hover:border-amber-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
-                title="608 Skate Bearing Pocket"
-              >
-                <div className="p-1.5 bg-amber-50 dark:bg-amber-950/30 rounded-lg mb-1 group-hover:scale-105 transition-transform">
-                  <Disc className="w-4 h-4 text-amber-600 dark:text-amber-400" />
-                </div>
-                <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">608 Bearing</span>
-              </button>
-
-              <button
-                onClick={() => {
-                  const node = createDShaftHubNode(5.0);
-                  addHardwareComponentNode(node);
-                  setIsLeftSidebarOpen(false);
-                }}
-                className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-purple-400 dark:hover:border-purple-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
-                title="5mm D-Shaft Motor Hub (NEMA17)"
-              >
-                <div className="p-1.5 bg-purple-50 dark:bg-purple-950/30 rounded-lg mb-1 group-hover:scale-105 transition-transform">
-                  <span className="text-xs font-mono text-purple-600 dark:text-purple-400 font-bold">D5</span>
-                </div>
-                <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">D-Shaft Hub</span>
-              </button>
-            </div>
-          </div>
-
-          <div className="mt-4 pt-3 border-t border-slate-200 dark:border-slate-800">
-            <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2 flex items-center gap-1.5">
-              <span>🔧 Others</span>
-            </h3>
-            <div className="grid grid-cols-2 gap-2">
-            {/* Mesh */}
-            <div 
-              draggable 
-              onDragStart={(e) => handleDragStart(e, 'mesh')} 
-              onClick={() => handleAddComponentClick('mesh')}
-              className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-blue-400 dark:hover:border-blue-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
-              title="Custom static Mesh"
-            >
-              <div className="p-1.5 bg-violet-50 dark:bg-violet-950/30 rounded-lg mb-1 group-hover:scale-105 transition-transform">
-                <Shapes className="w-4 h-4 text-violet-500 dark:text-violet-400" />
-              </div>
-              <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Mesh</span>
-            </div>
-
-            {/* OpenSCAD */}
-            <div 
-              draggable 
-              onDragStart={(e) => handleDragStart(e, 'openscad')} 
-              onClick={() => handleAddComponentClick('openscad')}
-              className="p-2 border border-slate-200 dark:border-slate-800 rounded-lg bg-white dark:bg-slate-900 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:border-blue-400 dark:hover:border-blue-800 hover:bg-slate-50/50 dark:hover:bg-slate-800/30 transition-all group"
-              title="Procedural OpenSCAD shape"
-            >
-              <div className="p-1.5 bg-blue-50 dark:bg-blue-950/30 rounded-lg mb-1 group-hover:scale-105 transition-transform">
-                <Code className="w-4 h-4 text-blue-500 dark:text-blue-400" />
-              </div>
-              <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">SCAD</span>
-            </div>
-
-            {/* Note Card - spans 2 cols */}
-            <div
-              onClick={() => {
-                const id = `card_${Date.now()}`;
-                setNoteCards(prev => [...prev, { id, markdown: '# Note\n\nWrite your notes here.', minimized: false, x: 80, y: 80 }]);
-                setEditingCardId(id);
-                setIsLeftSidebarOpen(false);
-              }}
-              className="col-span-2 p-2 border border-dashed border-violet-300 dark:border-violet-800 rounded-lg bg-violet-50/20 dark:bg-violet-950/10 flex items-center justify-center gap-2 cursor-pointer hover:border-violet-400 dark:hover:border-violet-700 hover:bg-violet-50/40 dark:hover:bg-violet-950/30 transition-all group select-none mt-1"
-            >
-              <FileText className="w-3.5 h-3.5 text-violet-600 dark:text-violet-400 group-hover:scale-105 transition-transform" />
-              <span className="text-[10px] font-bold text-slate-700 dark:text-slate-300">Add Note Card</span>
-            </div>
-          </div>
-        </div>
+          <ComponentPalette
+            coarsePointer={coarsePointer}
+            selectedNodeName={selectedNode ? selectedNode.name : null}
+            onDragStart={handleDragStart}
+            onAddComponent={handleAddComponentClick}
+            onAddSculpt={() => handleAddSculptClick()}
+            onAddLattice={() => handleAddLatticeClick()}
+            onAddHardwareNode={(node) => {
+              addHardwareComponentNode(node);
+              setIsLeftSidebarOpen(false);
+            }}
+            onAddNoteCard={() => {
+              const id = `card_${Date.now()}`;
+              setNoteCards((prev) => [
+                ...prev,
+                { id, markdown: '# Note\n\nWrite your notes here.', minimized: false, x: 80, y: 80 },
+              ]);
+              setEditingCardId(id);
+              setIsLeftSidebarOpen(false);
+            }}
+          />
 
         {/* Colour, which is looks only — see ColoringSection. */}
         <ColoringSection onArmed={() => setIsLeftSidebarOpen(false)} />
       </aside>
 
         {/* Viewport */}
-        <main className="flex-1 relative min-w-0">
+        <main className="flex-1 relative min-w-0 overflow-hidden">
+          {/* Subtle Studio Cyclorama Edge Vignette */}
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-0 z-[5] bg-[radial-gradient(ellipse_at_50%_46%,transparent_50%,rgba(100,116,139,0.12)_100%)] dark:bg-[radial-gradient(ellipse_at_50%_46%,transparent_44%,rgba(2,6,23,0.48)_100%)] shadow-[inset_0_1px_2px_rgba(15,23,42,0.04)] dark:shadow-[inset_0_1px_4px_rgba(0,0,0,0.45)]"
+          />
+
+          {/* Top-Edge Live Simulation Hairline & Soft Glow */}
+          <div
+            aria-hidden="true"
+            className={`pointer-events-none absolute inset-x-0 top-0 z-[6] transition-opacity duration-500 ${
+              isPlaying ? 'opacity-100' : 'opacity-0'
+            }`}
+          >
+            <div className="h-[2.5px] w-full bg-gradient-to-r from-transparent via-emerald-400 to-transparent" />
+            <div className="h-7 w-full bg-gradient-to-b from-emerald-500/10 via-amber-400/[0.04] to-transparent dark:from-emerald-400/14 dark:via-amber-300/[0.05] dark:to-transparent" />
+          </div>
+
           {!isLoaded && (
             <div className="absolute inset-0 flex items-center justify-center z-20 pointer-events-none bg-slate-50/50 backdrop-blur-sm">
               <div className="text-slate-500 flex flex-col items-center gap-4 font-medium">
@@ -2906,7 +2563,7 @@ function App() {
             <SceneCapture sceneRef={threeSceneRef} />
             <RenderOnChange />
             <DropHandler addComponent={addComponentUnderSelection} onImportFile={handleDroppedImportFile} onImportImageFile={handleDroppedImageFile} onImportSceneJson={importSceneJson} />
-            <color attach="background" args={[darkMode ? '#0b0f19' : '#f8fafc']} />
+            <StudioBackdrop darkMode={darkMode} />
             {/* A photo studio, built here rather than loaded: a broad softbox
                 overhead, two strip lights either side and a dim grey room. It
                 is where the shading comes from now — the diffuse light that
@@ -4189,6 +3846,9 @@ function App() {
                                   className="w-full accent-blue-500 cursor-pointer" 
                                 />
                               </div>
+                            )}
+                            {geom.type === 'cylinder' && !geom.cutNormal && (
+                              <ThreadField node={selectedNode} geom={geom} index={activeIndex} />
                             )}
                             {geom.fromto !== undefined && (() => {
                               // Held in a local so the handlers below, which

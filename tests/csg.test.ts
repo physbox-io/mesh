@@ -15,7 +15,7 @@ import {
   detectHoleAxis, decomposeAroundAxis,
   positiveBounds, sourcePositiveBounds, geomBounds, clipSegmentsToBox, geomMatrixOf,
   resolveCsgGeoms, cutGeometry, cutDepthOf, reconcileCuts, surfaceUnder, pickCutSpot,
-  threadProfile, threadSlices, THREAD_DEPTH_PER_PITCH, THREAD_SLICES_PER_TURN, THREAD_MAX_SLICES, THREAD_MIN_SLICES_PER_TURN,
+  threadProfile, threadSlices, THREAD_DEPTH_PER_PITCH, THREAD_EXTERNAL_DEPTH_PER_PITCH, THREAD_SLICES_PER_TURN, THREAD_MAX_SLICES, THREAD_MIN_SLICES_PER_TURN,
 } from '../src/utils/csg';
 import type { SceneGeom, SceneNode } from '../src/types/scene';
 
@@ -759,5 +759,66 @@ describe('threaded holes', () => {
       { name: 'hole', type: 'cylinder', size: [0.003, 0.03], csg: 'difference', thread: { pitch: 0.001 } },
     ], { csgEnabled: true });
     expect(csgHashOf(plain)).not.toBe(csgHashOf(tapped));
+  });
+
+  it('keeps the ISO basic form when given the internal depth explicitly', () => {
+    const a = threadProfile(0.003, 0.001, 64);
+    const b = threadProfile(0.003, 0.001, 64, THREAD_DEPTH_PER_PITCH);
+    expect(b).toEqual(a);
+  });
+});
+
+describe('threaded rods', () => {
+  const radiiOf = (pts: [number, number][]) => pts.map(([x, y]) => Math.hypot(x, y));
+
+  it('cuts an external thread to the deeper ISO root, with 60° flanks and a 1/6 root flat', () => {
+    // M6 × 1 external: d3 = 6 − 1.2269 = 4.773 mm.
+    const radii = radiiOf(threadProfile(0.003, 0.001, 96, THREAD_EXTERNAL_DEPTH_PER_PITCH));
+    expect(Math.max(...radii)).toBeCloseTo(0.003, 6);
+    // Points are written to the micron, so the diameter reads to about 2 µm.
+    expect(Math.min(...radii) * 2000).toBeCloseTo(4.773, 2);
+    const atMinor = radii.filter((r) => Math.abs(r - Math.min(...radii)) < 2e-6).length;
+    expect(atMinor / 96).toBeCloseTo(1 / 6, 1);
+    // The flank still runs at tan 30° of travel per unit of depth.
+    const flank = THREAD_EXTERNAL_DEPTH_PER_PITCH / Math.sqrt(3);
+    const mid = radii[Math.round(96 * (1 / 8 + flank / 2))];
+    expect(mid).toBeCloseTo(0.003 - THREAD_EXTERNAL_DEPTH_PER_PITCH * 0.001 / 2, 4);
+  });
+
+  it('emits a solid cylinder as the external form, and a hole as the internal one', () => {
+    const rod = primitiveToScad({ name: 'rod', type: 'cylinder', size: [0.003, 0.01], thread: { pitch: 0.001 } } as SceneGeom)!;
+    const hole = primitiveToScad({ name: 'tap', type: 'cylinder', size: [0.003, 0.01], csg: 'difference', thread: { pitch: 0.001 } } as SceneGeom)!;
+    const minR = (scad: string) => Math.min(...[...scad.matchAll(/\[(-?[\d.e-]+),(-?[\d.e-]+)\]/g)].map((m) => Math.hypot(+m[1], +m[2])));
+    expect(minR(rod)).toBeCloseTo(0.003 - THREAD_EXTERNAL_DEPTH_PER_PITCH * 0.001, 5);
+    expect(minR(hole)).toBeCloseTo(0.003 - THREAD_DEPTH_PER_PITCH * 0.001, 5);
+  });
+
+  it('turns a left-hand thread the other way', () => {
+    const right = primitiveToScad({ name: 'r', type: 'cylinder', size: [0.003, 0.01], thread: { pitch: 0.001 } } as SceneGeom)!;
+    const left = primitiveToScad({ name: 'l', type: 'cylinder', size: [0.003, 0.01], thread: { pitch: 0.001, left: true } } as SceneGeom)!;
+    expect(right).toContain('twist=-7200');
+    expect(left).toContain('twist=7200');
+  });
+
+  it('takes the fit off a rod and adds it to a hole, across the diameter', () => {
+    const maxR = (scad: string) => Math.max(...[...scad.matchAll(/\[(-?[\d.e-]+),(-?[\d.e-]+)\]/g)].map((m) => Math.hypot(+m[1], +m[2])));
+    const rod = primitiveToScad({ name: 'rod', type: 'cylinder', size: [0.004, 0.01], thread: { pitch: 0.00125, fit: 0.0003 } } as SceneGeom)!;
+    const hole = primitiveToScad({ name: 'tap', type: 'cylinder', size: [0.004, 0.01], csg: 'difference', thread: { pitch: 0.00125, fit: 0.0003 } } as SceneGeom)!;
+    expect(maxR(rod)).toBeCloseTo(0.004 - 0.00015, 5);
+    expect(maxR(hole)).toBeCloseTo(0.004 + 0.00015, 5);
+  });
+
+  it('makes a body with a threaded rod a boolean one, and a plain cylinder not', () => {
+    expect(hasBooleanOps(body([{ name: 'rod', type: 'cylinder', size: [0.003, 0.01] } as SceneGeom]))).toBe(false);
+    const rod = body([{ name: 'rod', type: 'cylinder', size: [0.003, 0.01], thread: { pitch: 0.001 } } as SceneGeom], { csgEnabled: true });
+    expect(hasBooleanOps(rod)).toBe(true);
+    expect(csgProgram(rod)).toContain('linear_extrude');
+  });
+
+  it('recompiles when the hand or the fit changes', () => {
+    const at = (thread: SceneGeom['thread']) => csgHashOf(body([{ name: 'rod', type: 'cylinder', size: [0.003, 0.01], thread } as SceneGeom], { csgEnabled: true }));
+    const base = at({ pitch: 0.001 });
+    expect(at({ pitch: 0.001, left: true })).not.toBe(base);
+    expect(at({ pitch: 0.001, fit: 0.0002 })).not.toBe(base);
   });
 });

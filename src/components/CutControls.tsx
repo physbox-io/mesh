@@ -36,6 +36,7 @@
 
 import { Circle, Square, Donut, Trash2, Move } from 'lucide-react';
 import { SettledNumberField } from './SettledInputs';
+import { ThreadField } from './ThreadField';
 import { useStore } from '../store/useStore';
 import { cutDepthOf, sourcePositiveBounds } from '../utils/csg';
 import type { SceneGeom, SceneNode } from '../types/scene';
@@ -45,15 +46,6 @@ const SHAPES = [
   ['box', 'Slot', Square, 'A rectangular pocket or slot, sized in millimetres, square to the surface you last clicked.'],
   ['sphere', 'Dish', Circle, 'A spherical scoop: a seat for a ball, or a rounded pocket. Always blind.'],
 ] as const;
-
-/**
- * ISO metric coarse threads, by name: [major diameter mm, pitch mm]. The sizes
- * a hobbyist's drawer actually holds; anything else is typed as a pitch.
- */
-const METRIC_THREADS: [string, number, number][] = [
-  ['M2', 2, 0.4], ['M2.5', 2.5, 0.45], ['M3', 3, 0.5], ['M4', 4, 0.7], ['M5', 5, 0.8],
-  ['M6', 6, 1], ['M8', 8, 1.25], ['M10', 10, 1.5], ['M12', 12, 1.75],
-];
 
 /** Metres in, millimetres out, to a tenth of a micron and no trailing noise. */
 const mm = (metres: number | undefined) => Math.round((metres ?? 0) * 1000 * 10000) / 10000;
@@ -89,7 +81,6 @@ function CutRow({ node, geom, index }: {
   const setCutDepth = useStore((s) => s.setCutDepth);
   const setCutSection = useStore((s) => s.setCutSection);
   const moveCutTo = useStore((s) => s.moveCutTo);
-  const setCutThread = useStore((s) => s.setCutThread);
   const setFaceFeatureBorder = useStore((s) => s.setFaceFeatureBorder);
   const setActiveGeomIndex = useStore((s) => s.setActiveGeomIndex);
   const spot = useStore((s) => s.cutSpot);
@@ -111,14 +102,6 @@ function CutRow({ node, geom, index }: {
   // deleting it and cutting another.
   const elsewhere = spot?.nodeId === node.id
     && (geom.cutAt || []).some((v, a) => Math.abs(v - (spot.at[a] ?? 0)) > 1e-6);
-
-  // The thread as the menu names it: a standard size when both numbers match
-  // one, "custom" when there is a pitch that no standard has, "none" otherwise.
-  const pitchMm = geom.thread?.pitch ? mm(geom.thread.pitch) : 0;
-  const standard = pitchMm > 0
-    ? METRIC_THREADS.find(([, d, p]) => Math.abs(d - mm((size[0] ?? 0) * 2)) < 1e-3 && Math.abs(p - pitchMm) < 1e-3)
-    : undefined;
-  const threadChoice = pitchMm > 0 ? (standard?.[0] ?? 'custom') : 'none';
 
   /** Lets the pointer take the cut across the part: the same gesture G starts. */
   const grab = () => {
@@ -244,42 +227,7 @@ function CutRow({ node, geom, index }: {
         )}
       </div>
 
-      {geom.type === 'cylinder' && !boss && (
-        <div className="flex gap-1 items-end">
-          <label className="flex-1 min-w-0" title="Tap the hole. A bolt size sets the diameter, the coarse pitch and the thread form, so a part threads straight onto it.">
-            <span className="block text-[9px] font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500">Thread</span>
-            <select
-              value={threadChoice}
-              onChange={(e) => {
-                const pick = e.target.value;
-                if (pick === 'none') { setCutThread(node.id, index, null); return; }
-                const found = METRIC_THREADS.find(([name]) => name === pick);
-                if (found) {
-                  setCutSection(node.id, index, [metres(found[1]) / 2]);
-                  setCutThread(node.id, index, found[2]);
-                } else {
-                  // Custom: a pitch in proportion to the hole, to be typed over.
-                  setCutThread(node.id, index, Math.max(0.1, Math.round(mm((size[0] ?? 0) * 2) * 0.15 * 100) / 100));
-                }
-              }}
-              className={fieldClass}
-            >
-              <option value="none">None</option>
-              {METRIC_THREADS.map(([name]) => <option key={name} value={name}>{name}</option>)}
-              <option value="custom">Custom</option>
-            </select>
-          </label>
-          {pitchMm > 0 && (
-            <CutField
-              label="Pitch mm"
-              min={0.05}
-              value={pitchMm}
-              title="Distance from one thread to the next. A bolt's coarse pitch is in its name's tables: M6 is 1 mm, M8 is 1.25."
-              onChange={(v) => setCutThread(node.id, index, v)}
-            />
-          )}
-        </div>
-      )}
+      {geom.type === 'cylinder' && <ThreadField node={node} geom={geom} index={index} />}
 
       {/* Where it is and which way it runs. A readout rather than fields: the
           spot is a point on a surface, and three boxes of millimetres cannot

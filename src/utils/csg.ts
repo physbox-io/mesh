@@ -188,6 +188,13 @@ export function threadSlices(turns: number): number {
 export const THREAD_DEPTH_PER_PITCH = 0.541266;
 
 /**
+ * The EXTERNAL thread's depth, 17/24 H: a bolt's root is cut deeper than the
+ * nut's crest reaches, so the two clear there. M6 × 1's minor diameter is
+ * 6 − 2 × 0.6134 = 4.773 mm, the tables' d3.
+ */
+export const THREAD_EXTERNAL_DEPTH_PER_PITCH = 0.613435;
+
+/**
  * The cross-section of a single-start 60° thread, as a polygon.
  *
  * The trick, and why a thread costs one linear_extrude rather than a sweep:
@@ -198,22 +205,29 @@ export const THREAD_DEPTH_PER_PITCH = 0.541266;
  * profile that is a function of axial position, which a V thread is.
  *
  * The profile over one pitch, in fractions of the pitch: a crest flat of 1/8
- * at the major radius, a flank of 5/16, a root flat of 1/4 at the minor
- * radius, and the other flank — the ISO basic form. The flank drops
- * THREAD_DEPTH_PER_PITCH × P over 5P/16 of travel, which is tan 60°: the
- * flanks meet at the 60° the thread is named for.
+ * at the major radius, a flank, a root flat at the minor radius, and the other
+ * flank. Both flanks are 60° — a drop of `depth` over depth × tan 30° of
+ * travel — so a deeper thread has a narrower root: 1/4 of the pitch at the
+ * internal depth (the ISO basic form), 1/6 at the external one.
  *
  * Points go anticlockwise from angle 0, which is what polygon() wants.
  */
-export function threadProfile(majorRadius: number, pitch: number, segments: number = THREAD_PROFILE_POINTS): [number, number][] {
-  const depth = THREAD_DEPTH_PER_PITCH * pitch;
+export function threadProfile(
+  majorRadius: number,
+  pitch: number,
+  segments: number = THREAD_PROFILE_POINTS,
+  depthPerPitch: number = THREAD_DEPTH_PER_PITCH,
+): [number, number][] {
+  const depth = depthPerPitch * pitch;
   const minor = Math.max(1e-6, majorRadius - depth);
+  const flank = depthPerPitch / Math.sqrt(3);
+  const rootEnd = 1 - flank;
   const radiusAt = (t: number): number => {
     // t is the fraction of one pitch, 0..1, taken from the angle.
     if (t < 1 / 8) return majorRadius;
-    if (t < 7 / 16) return majorRadius - depth * ((t - 1 / 8) / (5 / 16));
-    if (t < 11 / 16) return minor;
-    return minor + depth * ((t - 11 / 16) / (5 / 16));
+    if (t < 1 / 8 + flank) return majorRadius - depth * ((t - 1 / 8) / flank);
+    if (t < rootEnd) return minor;
+    return minor + depth * ((t - rootEnd) / flank);
   };
   const pts: [number, number][] = [];
   for (let i = 0; i < segments; i++) {
@@ -249,13 +263,21 @@ export function primitiveToScad(geom: SceneGeom, fn: number = CSG_DEFAULT_FN, in
       }
       const pitch = geom.thread?.pitch;
       if (pitch && pitch > 0) {
-        // A tapped hole: the cutter is the bolt's own form at nominal size,
-        // right-handed. OpenSCAD's twist turns clockwise as it goes up, so a
-        // negative twist is what climbs the way a right-hand thread does.
+        // A tapped hole's cutter is the bolt's own form at nominal size, and a
+        // rod is the bolt, cut deeper at the root; the fit opens the one and
+        // slims the other. OpenSCAD's twist turns clockwise as it goes up, so
+        // a negative twist is what climbs the way a right-hand thread does.
+        const hole = geom.csg === 'difference';
+        const fit = Math.max(0, geom.thread?.fit ?? 0);
+        const major = Math.max(1e-6, (s[0] ?? 0.1) + (hole ? fit / 2 : -fit / 2));
         const length = halfLen * 2;
         const turns = length / pitch;
-        const profile = threadProfile(s[0] ?? 0.1, pitch, Math.min(fn, THREAD_PROFILE_POINTS)).map(([x, y]) => `[${x},${y}]`).join(',');
-        body = `linear_extrude(height=${fmt(length)}, center=true, twist=${fmt(-360 * turns)}, slices=${threadSlices(turns)}, convexity=10) polygon([${profile}]);`;
+        const profile = threadProfile(
+          major, pitch, Math.min(fn, THREAD_PROFILE_POINTS),
+          hole ? THREAD_DEPTH_PER_PITCH : THREAD_EXTERNAL_DEPTH_PER_PITCH,
+        ).map(([x, y]) => `[${x},${y}]`).join(',');
+        const twist = (geom.thread?.left ? 360 : -360) * turns;
+        body = `linear_extrude(height=${fmt(length)}, center=true, twist=${fmt(twist)}, slices=${threadSlices(turns)}, convexity=10) polygon([${profile}]);`;
       } else {
         body = `cylinder(h=${fmt(halfLen * 2)}, r=${fmt(s[0] ?? 0.1)}, center=true, $fn=${fn});`;
       }
@@ -376,6 +398,7 @@ export function csgDerivedGeoms(node: SceneNode): SceneGeom[] {
 const isNegative = (g: SceneGeom) => g.csg === 'difference';
 const isIntersect = (g: SceneGeom) => g.csg === 'intersection';
 const isPositive = (g: SceneGeom) => (!g.csg || g.csg === 'union') && g.role !== 'visual';
+const isThreaded = (g: SceneGeom) => g.type === 'cylinder' && (g.thread?.pitch ?? 0) > 0;
 
 /**
  * True if this node's geoms actually describe a boolean — i.e. there is
@@ -390,7 +413,9 @@ export function hasBooleanOps(node: SceneNode): boolean {
   // the part: weighed by its own volume rather than sharing the body's mass,
   // and drawn and collided as a separate piece.
   const isBoss = (g: SceneGeom) => g.csg === 'union' && !!g.cutNormal;
-  return pos.length > 0 && (src.some(g => isNegative(g) || isIntersect(g) || isBoss(g)) || hasEdgeRounds(node));
+  // So is a threaded rod: MuJoCo has no helix, only the plain cylinder.
+  const isRod = (g: SceneGeom) => isPositive(g) && isThreaded(g);
+  return pos.length > 0 && (src.some(g => isNegative(g) || isIntersect(g) || isBoss(g) || isRod(g)) || hasEdgeRounds(node));
 }
 
 /**
@@ -2057,7 +2082,7 @@ function emitsSolid(g: SceneGeom): boolean {
  */
 function geomCsgKey(g: SceneGeom): unknown[] {
   const shape = g.type === 'mesh' ? meshChecksum(g) : g.size;
-  return [g.type, shape, g.pos, g.quat, g.euler, g.fromto, g.csg ?? 'union', g.role ?? null, g.thread?.pitch ?? null];
+  return [g.type, shape, g.pos, g.quat, g.euler, g.fromto, g.csg ?? 'union', g.role ?? null, g.thread ?? null];
 }
 
 // Every store update checksums every boolean and decomposed mesh (see

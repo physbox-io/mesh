@@ -199,19 +199,24 @@ export interface SceneGeom {
   /** How far a face feature is inset from the face's edges, in metres. */
   cutBorder?: number;
   /**
-   * A modifier on a round cut: the hole is tapped. `pitch` is the thread pitch
-   * in metres; the geom's own radius is the thread's MAJOR radius (the size a
-   * bolt is named by — M6 is a 6 mm major diameter), and the minor diameter
-   * follows from the pitch by the ISO 60° form. Only the OpenSCAD emitter reads
-   * it: the cutter becomes a helical solid instead of a plain cylinder, and
-   * everything downstream sees the boolean result as usual.
+   * A thread on a cylinder. On one marked 'difference' the hole is tapped (an
+   * internal thread); on any other the cylinder is a threaded rod (external).
+   * `pitch` is the thread pitch in metres; the geom's own radius is the
+   * thread's MAJOR radius (the size a bolt is named by — M6 is a 6 mm major
+   * diameter), and the minor diameter follows from the pitch by the ISO 60°
+   * form. `left` makes it left-handed. `fit` is a diametral clearance in
+   * metres, taken off a rod and added to a hole, so that two parts drawn at
+   * the same nominal size can be made to turn freely; absent, it is zero.
+   * Only the OpenSCAD emitter reads it: the cylinder becomes a helical solid,
+   * and everything downstream sees the boolean result as usual. A threaded
+   * rod therefore makes its body a boolean one (see hasBooleanOps).
    *
    * One field rather than a `modifiers` list because every modifier a hole can
    * take — a thread, a countersink, a counterbore — is a different thing with
    * different numbers, and they are not stacked in an order that matters. Each
    * gets its own optional field beside this one.
    */
-  thread?: { pitch: number };
+  thread?: { pitch: number; left?: boolean; fit?: number };
   /**
    * This is the geom the body's lattice cage owns — the one `applyLattice`
    * rewrites on every edit.

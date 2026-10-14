@@ -4,6 +4,7 @@ import * as THREE from 'three';
 import type { SceneGraph, SceneNode, SceneGeom, SceneJoint, GeomType, CsgOp, EdgeRoundFeature, RoundEdge, CastPrep } from '../types/scene';
 import { bakeDraftInto, copyPrep, restoreShape, shapeSignature, unprepScene, type DraftParams } from '../utils/castPrep';
 import { hasEdgeRounds, reconcileEdgeRounds, withRoundFeature, withoutEdges } from '../utils/edgeRound';
+import type { GeomThreadSpec } from '../utils/metricThreads';
 import type { DataMirror, ModelMirror } from '../types/sceneLayer';
 import { type CombineOp, cageInFrame, geomsForCombine, nodeWorldMatrix } from '../utils/combineBodies';
 import { DEFAULT_BRUSH, toSceneGeom, type BrushSettings, type SculptMesh } from '../utils/sculptMesh';
@@ -564,7 +565,7 @@ const rotateMeshGeomsAbsolute = (node: WorkingNode, euler: [number, number, numb
   const v = new THREE.Vector3();
 
   for (const g of node.geoms) {
-    if (isStaticMesh(g)) {
+    if (g.type === 'mesh' && Array.isArray(g.vertices) && g.vertices.length > 0) {
       if (!g.baseVertices) {
         g.baseVertices = [...g.vertices];
       }
@@ -580,18 +581,17 @@ const rotateMeshGeomsAbsolute = (node: WorkingNode, euler: [number, number, numb
       cx /= n; cy /= n; cz /= n;
 
       const newVerts = new Array(baseVerts.length);
-      const v = new THREE.Vector3();
 
       for (let i = 0; i < baseVerts.length; i += 3) {
-        if (rotateAroundCOM) {
+        if (rotateAroundCOM || g.dynamic) {
           v.set(baseVerts[i] - cx, baseVerts[i + 1] - cy, baseVerts[i + 2] - cz);
-          v.applyMatrix4(rotMat);
+          v.applyMatrix4(rotMatYup);
           newVerts[i] = v.x + cx;
           newVerts[i + 1] = v.y + cy;
           newVerts[i + 2] = v.z + cz;
         } else {
           v.set(baseVerts[i], baseVerts[i + 1], baseVerts[i + 2]);
-          v.applyMatrix4(rotMat);
+          v.applyMatrix4(rotMatYup);
           newVerts[i] = v.x;
           newVerts[i + 1] = v.y;
           newVerts[i + 2] = v.z;
@@ -607,7 +607,6 @@ const rotateMeshGeomsAbsolute = (node: WorkingNode, euler: [number, number, numb
       const baseRender = g.baseRenderVertices as number[];
 
       const newRender = new Array(baseRender.length);
-      const v = new THREE.Vector3();
       for (let i = 0; i < baseRender.length; i += 3) {
         v.set(baseRender[i], baseRender[i + 1], baseRender[i + 2]);
         v.applyMatrix4(rotMatZup);
@@ -616,6 +615,8 @@ const rotateMeshGeomsAbsolute = (node: WorkingNode, euler: [number, number, numb
         newRender[i + 2] = v.z;
       }
       g.renderVertices = newRender;
+    }
+  }
 
   if (node.geoms.some(isDynamicMesh) && node.pos) {
     if (!node.basePos) node.basePos = [...node.pos];
@@ -1267,6 +1268,15 @@ function writeEdgeRounds(
 function setNodeEdgeRounds(node: SceneNode, features: EdgeRoundFeature[]) {
   if (features.length > 0) node.edgeRounds = features; else delete node.edgeRounds;
   delete node.edgeRoundsLost;
+  settleBooleanState(node);
+}
+
+/**
+ * Makes a body a boolean one when its shapes describe a boolean, and an
+ * ordinary one again when they stop — taking the generated mesh with it, or the
+ * old shape would keep drawing over the new one.
+ */
+function settleBooleanState(node: SceneNode) {
   if (hasBooleanOps(node)) {
     node.csgEnabled = true;
     if (node.csgCollision === undefined) node.csgCollision = 'auto';
@@ -2094,8 +2104,13 @@ export interface PhysicsState {
   setCutDepth: (nodeId: string, geomIndex: number, mm: number) => void;
   /** Resizes a cut's cross-section, in millimetres, and re-derives its length. */
   setCutSection: (nodeId: string, geomIndex: number, section: number[]) => void;
-  /** Taps a round cut with a thread of this pitch in millimetres, or null to make it plain again. */
-  setCutThread: (nodeId: string, geomIndex: number, pitchMm: number | null) => void;
+  /**
+   * Threads a cylinder, or makes it plain again with null. A hole is tapped; any
+   * other cylinder becomes a threaded rod, which makes its body a boolean one.
+   * `diameterMm`, when given, sets the major diameter in the same step, so
+   * picking a bolt size is one undo.
+   */
+  setGeomThread: (nodeId: string, geomIndex: number, thread: GeomThreadSpec | null, diameterMm?: number) => void;
   /**
    * Which of the selected body's geoms the sidebar is showing, and the one a
    * gesture acts on: G with a cut selected here moves the cut rather than the
@@ -4035,10 +4050,39 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     geom.cutDepth = Math.max(0, mm) / 1000;
   }),
 
-  setCutThread: (nodeId, geomIndex, pitchMm) => reshapeCut(get, set, nodeId, geomIndex, 'cut-thread', (geom) => {
-    if (geom.type !== 'cylinder' || pitchMm === null || !(pitchMm > 0)) delete geom.thread;
-    else geom.thread = { pitch: pitchMm / 1000 };
-  }),
+  setGeomThread: (nodeId, geomIndex, thread, diameterMm) => {
+    const edit = (geom: SceneGeom) => {
+      if (geom.type !== 'cylinder') return;
+      if (!thread || !(thread.pitchMm > 0)) delete geom.thread;
+      else geom.thread = {
+        pitch: thread.pitchMm / 1000,
+        ...(thread.left ? { left: true } : {}),
+        ...(thread.fitMm && thread.fitMm > 0 ? { fit: thread.fitMm / 1000 } : {}),
+      };
+      if (diameterMm !== undefined && diameterMm > 0) {
+        const size = [...(geom.size || [])];
+        size[0] = diameterMm / 2000;
+        geom.size = size;
+      }
+    };
+    const geom = findNode(get().sceneGraph.nodes, nodeId)?.geoms?.[geomIndex];
+    if (!geom || geom.csgDerived || geom.type !== 'cylinder') return;
+    // A hole or boss placed on a face is re-derived from its spot, so its
+    // depth still reaches the material at the new diameter.
+    if (geom.cutNormal) {
+      reshapeCut(get, set, nodeId, geomIndex, 'geom-thread', edit);
+      return;
+    }
+    get().recordInteraction('geom-thread');
+    const newScene = cloneSceneGraph(get().sceneGraph);
+    const node = findNode(newScene.nodes, nodeId);
+    const target = node?.geoms?.[geomIndex];
+    if (!node || !target) return;
+    edit(target);
+    settleBooleanState(node);
+    set({ sceneGraph: newScene });
+    rebuildAfterGeomEdit(get, newScene, nodeId);
+  },
 
   activeGeomIndex: 0,
   setActiveGeomIndex: (index) => set({ activeGeomIndex: index }),
@@ -5539,7 +5583,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
         win._recompileWake = resolve;
         win._recompileTimeoutId = setTimeout(resolve, settle ? 180 : 50);
       });
-      (window as PhysicsWindow)._recompileWake = null;
+      win._recompileWake = null;
       if (token !== recompileToken) {
         // Handed on rather than dropped: the call that overtook this one builds
         // the newer scene, and it must still start that scene from rest if this
@@ -5767,8 +5811,11 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     const { gravityZ, windX, windY, density, floorFriction, floorBounce } = get();
     const { graph: sceneGraph, sleep } = liveModelGraph(get());
     try {
-      const xml = compileToMJCF(sceneGraph, gravityZ, floorFriction, windX, windY, density, floorBounce, { sleep });
       const client = getPhysicsWorkerClient();
+      const xml = compileToMJCF(sceneGraph, gravityZ, floorFriction, windX, windY, density, floorBounce, {
+        sleep,
+        meshFiles: client.meshFiles,
+      });
       client.setEnv(windX, windY);
       const built = await client.build(xml, sceneGraph, false, lastState, get().brokenConstraints);
       if (!built.ok) throw new Error(built.error || 'Unknown physics worker build error');
@@ -5812,13 +5859,12 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
       time: data.time as number,
     };
     recycleWorker();
+    try {
+      const client = getPhysicsWorkerClient();
       const xml = compileToMJCF(sceneGraph, gravityZ, floorFriction, windX, windY, density, floorBounce, {
         sleep,
         meshFiles: client.meshFiles,
       });
-    try {
-      const xml = compileToMJCF(sceneGraph, gravityZ, floorFriction, windX, windY, density, floorBounce, { sleep });
-      const client = getPhysicsWorkerClient();
       client.setEnv(windX, windY);
       const built = await client.build(xml, sceneGraph, false, seedState, get().brokenConstraints);
       if (!built.ok) throw new Error(built.error || 'Unknown physics worker build error');
@@ -5845,7 +5891,3 @@ if (typeof window !== 'undefined') {
     }
   }, 20000);
 }
-      const xml = compileToMJCF(sceneGraph, gravityZ, floorFriction, windX, windY, density, floorBounce, {
-        sleep,
-        meshFiles: client.meshFiles,
-      });

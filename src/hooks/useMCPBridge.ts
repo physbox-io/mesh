@@ -751,8 +751,10 @@ const fillBodyDefaults = (b: RawNode, parentMoves: boolean | null = null): Scene
     // into a single mesh (see utils/csg.ts). csgEnabled is inferred when the
     // caller marked a negative but forgot the flag, since a negative geom is
     // meaningless without it and silently rendering it as a solid is worse.
-    // Rounded and bevelled edges are a boolean too (utils/edgeRound.ts).
-    ...((b.csgEnabled === true || (b.geoms || []).some((g: RawGeom) => g.csg === 'difference' || g.csg === 'intersection') ||
+    // Rounded and bevelled edges are a boolean too (utils/edgeRound.ts), and
+    // so is a threaded rod, which MuJoCo can only draw as a plain cylinder.
+    ...((b.csgEnabled === true || (b.geoms || []).some((g: RawGeom) => g.csg === 'difference' || g.csg === 'intersection' ||
+      (g.type === 'cylinder' && (g.thread?.pitch ?? 0) > 0)) ||
       (Array.isArray(b.edgeRounds) && b.edgeRounds.length > 0))
       ? { csgEnabled: true } : {}),
     ...(Array.isArray(b.edgeRounds) ? { edgeRounds: b.edgeRounds } : {}),
@@ -1864,7 +1866,7 @@ export function useMCPBridge() {
         }
 
         case 'BODY_CUT': {
-          const { targetId, shape, at, normal, diameterMm, widthMm, lengthMm, depthMm, threadPitchMm } = msg as Msg<{ targetId: string }>;
+          const { targetId, shape, at, normal, diameterMm, widthMm, lengthMm, depthMm, threadPitchMm, threadLeft, threadFitMm } = msg as Msg<{ targetId: string }>;
           const node = findNodeInScene(store.sceneGraph.nodes, targetId);
           if (!node) return { ok: false, error: `No object with id '${targetId}'` };
           const kind = shape === 'slot' || shape === 'box' ? 'box'
@@ -1896,7 +1898,13 @@ export function useMCPBridge() {
           if (typeof depthMm === 'number') store.setCutDepth(targetId, index, depthMm);
           // A thread only means something on a round hole; on a slot or a dish
           // the store drops it, and the reply's missing threadPitchMm says so.
-          if (typeof threadPitchMm === 'number' && kind === 'cylinder') store.setCutThread(targetId, index, threadPitchMm);
+          if (typeof threadPitchMm === 'number' && kind === 'cylinder') {
+            store.setGeomThread(targetId, index, {
+              pitchMm: threadPitchMm,
+              left: threadLeft === true,
+              fitMm: typeof threadFitMm === 'number' ? threadFitMm : 0,
+            });
+          }
 
           const cut = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId)?.geoms?.[index];
           return {
@@ -1910,7 +1918,11 @@ export function useMCPBridge() {
             // material, and on a stepped or curved part that moves.
             atMm: (cut?.cutAt ?? []).map((v: number) => Math.round(v * 1000 * 1000) / 1000),
             normal: cut?.cutNormal,
-            ...(cut?.thread?.pitch ? { threadPitchMm: Math.round(cut.thread.pitch * 1000 * 1000) / 1000 } : {}),
+            ...(cut?.thread?.pitch ? {
+              threadPitchMm: Math.round(cut.thread.pitch * 1000 * 1000) / 1000,
+              ...(cut.thread.left ? { threadLeft: true } : {}),
+              ...(cut.thread.fit ? { threadFitMm: Math.round(cut.thread.fit * 1000 * 1000) / 1000 } : {}),
+            } : {}),
             depthMm: cut?.cutDepth ? Math.round(cut.cutDepth * 1000 * 1000) / 1000 : 0,
             through: !(cut?.cutDepth && cut.cutDepth > 0),
           };
@@ -3369,7 +3381,7 @@ export function useMCPBridge() {
               faces:       'number[] — flat array of triangle indices for mesh type: [i0,j0,k0, i1,j1,k1, ...]. WINDING MATTERS: each triangle must read counter-clockwise seen from OUTSIDE the solid, i.e. (v1-v0)x(v2-v0) points away from the interior. The viewport draws mesh geoms single-sided, so a triangle wound the other way is not drawn at all and you see through the surface to the inside of the far wall — which looks like the body is half transparent, not like a winding bug. See the note in presets/californiaRelief.ts, which shipped inside out.',
               dynamic:     'boolean — if true, mesh participates in simulation and collision; requires renderVertices',
               csg:         `'union'|'difference'|'intersection' — boolean modifier (default 'union'). A geom marked 'difference' is CUT OUT of the union of the body's other geoms instead of being added to it: one ellipsoid plus a slimmer ellipsoid marked 'difference' is a ring. The body is compiled to a single mesh; set csgCollision on the body to choose how it collides.`,
-              thread:      `{ pitch: number } — on a cylinder marked 'difference' only: the hole is tapped, pitch in METRES (M6 coarse is 0.001). The cylinder's radius is the thread's major radius. Easier through physics_cut's threadPitchMm.`,
+              thread:      `{ pitch: number, left?: boolean, fit?: number } — on any cylinder. On one marked 'difference' the hole is tapped; on any other the cylinder becomes a threaded rod (external ISO thread), which makes the body a boolean one (csgEnabled is inferred on add; pass csgEnabled: true when adding a thread through physics_update_object). pitch and fit are in METRES (M6 coarse is 0.001). The cylinder's radius is the thread's MAJOR radius, so an M8 rod (radius 0.004, pitch 0.00125) screws into an M8 tapped hole as drawn. left: left-handed. fit: diametral clearance, taken off a rod and added to a hole; default 0. For holes, physics_cut's threadPitchMm is easier.`,
               role:        `'visual'|'collision' — 'visual' draws but never collides (contype/conaffinity forced to 0), 'collision' simulates but is never drawn. Default (omitted) is both.`,
               renderVertices: 'number[] — dynamic mesh only: flat [x0,y0,z0,...] in raw MuJoCo Z-up space. Convert from Y-up vertices: (x,y,z)→(x,-z,y). Do NOT subtract centroid — MuJoCo recenters internally.',
             },
