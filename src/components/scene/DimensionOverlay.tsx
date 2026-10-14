@@ -422,24 +422,53 @@ function layOut(found: BodyDimensions[], locations: LocationDim[], view: Drawing
   };
 }
 
-/** What physics_get_camera reports: every figure drawn, in the order drawn. */
-function liveList(found: BodyDimensions[], locations: LocationDim[], parents: Map<string, string | null>): LiveDimension[] {
-  const sizes = found.flatMap((b) => b.dims.map((d): LiveDimension => d.kind === 'linear'
-    ? {
-        body: b.id, kind: d.kind, direction: d.axis === 'u' ? 'width' : 'height',
-        row: d.row === 1 ? 'chain' : 'overall', label: d.label, valueMm: d.valueMm,
+/**
+ * What physics_get_camera reports: every figure drawn, in the order drawn, and
+ * like the sheet, each once. Two parts sharing a face line (a birdhouse's front
+ * and back walls, seen from the front) give the same figure at the same place;
+ * the first keeps it and names the rest in `sharedWith`.
+ */
+function liveList(found: BodyDimensions[], locations: LocationDim[], parents: Map<string, string | null>, view: DrawingView): LiveDimension[] {
+  const { right, up } = VIEW_AXES[view];
+  const out: LiveDimension[] = [];
+  const seen = new Map<string, LiveDimension>();
+  const keep = (key: string, entry: LiveDimension) => {
+    const first = seen.get(key);
+    if (first) {
+      if (first.body !== entry.body && !first.sharedWith?.includes(entry.body)) {
+        first.sharedWith = [...(first.sharedWith ?? []), entry.body];
       }
-    : d.kind === 'diameter'
-      ? { body: b.id, kind: d.kind, count: d.count, label: d.label, valueMm: d.valueMm }
-      : { body: b.id, kind: d.kind, label: d.label, valueDeg: d.valueDeg }));
-  const places = locations.flatMap((loc) => {
+      return;
+    }
+    seen.set(key, entry);
+    out.push(entry);
+  };
+  /** A place on the sheet, to a tenth of a millimetre. */
+  const spot = (p: Vec3) => `${Math.round(dot(p, right) * 1e4)},${Math.round(dot(p, up) * 1e4)}`;
+  for (const b of found) {
+    const { u: U, v: V } = b.axes;
+    const at = (u: number, v: number) => add(add([0, 0, 0], U, u), V, v);
+    for (const d of b.dims) {
+      if (d.kind === 'linear') {
+        const pt = d.axis === 'u' ? (s: number) => at(s, d.edge) : (s: number) => at(d.edge, s);
+        keep(`${d.kind}:${d.row}:${d.label}@${spot(pt(d.a))};${spot(pt(d.b))}`, {
+          body: b.id, kind: d.kind, direction: d.axis === 'u' ? 'width' : 'height',
+          row: d.row === 1 ? 'chain' : 'overall', label: d.label, valueMm: d.valueMm,
+        });
+      } else if (d.kind === 'diameter') {
+        keep(`${d.kind}:${d.label}@${spot(at(...d.centre))}`,
+          { body: b.id, kind: d.kind, count: d.count, label: d.label, valueMm: d.valueMm });
+      } else {
+        keep(`${d.kind}:${d.label}@${spot(at(...d.centre))}`, { body: b.id, kind: d.kind, label: d.label, valueDeg: d.valueDeg });
+      }
+    }
+  }
+  for (const loc of locations) {
     const from = parents.get(loc.id) ?? 'origin';
-    const out: LiveDimension[] = [];
-    if (loc.across) out.push({ body: loc.id, kind: 'location', direction: 'width', from, label: loc.across.label, valueMm: loc.across.valueMm });
     if (loc.up) out.push({ body: loc.id, kind: 'location', direction: 'height', from, label: loc.up.label, valueMm: loc.up.valueMm });
-    return out;
-  });
-  return [...sizes, ...places];
+    if (loc.across) out.push({ body: loc.id, kind: 'location', direction: 'width', from, label: loc.across.label, valueMm: loc.across.valueMm });
+  }
+  return out;
 }
 
 export function DimensionOverlay() {
@@ -508,7 +537,7 @@ export function DimensionOverlay() {
     const links = locationLinks(next.map((d) => d.id), useStore.getState().sceneGraph.nodes);
     const located = selectedNodeId || links.length <= MAX_LOCATIONS ? locationDimensions(links, view) : [];
     setFound({ key: measuring, dims: next, locations: located });
-    setLiveDimensions(liveList(next, located, new Map(links.map((l) => [l.id, l.parent]))));
+    setLiveDimensions(liveList(next, located, new Map(links.map((l) => [l.id, l.parent])), view));
   });
 
   const drawing = useMemo(

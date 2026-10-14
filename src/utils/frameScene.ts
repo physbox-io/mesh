@@ -147,6 +147,66 @@ export function sceneContentBounds(nodes: SceneNode[]): SceneBounds | null {
   return any ? { min, max } : null;
 }
 
+/** Bigger than this is the floor or the sky, not a part. */
+const MAX_PART_M = 10;
+
+/**
+ * The content's bounds as it is drawn, document frame: every shadow-casting
+ * mesh of a body in the scene graph, at its real pose. sceneContentBounds adds
+ * up authored positions and leaves rotations out, which is close enough for
+ * the perspective view's generous framing, but not for a drawing view's: a
+ * windmill's blade turned 120° stood out past the top of the sheet. Null when
+ * nothing of the current scene is drawn yet (just after a load), so the caller
+ * can fall back.
+ */
+export function drawnContentBounds(root: THREE.Object3D, nodes: SceneNode[]): SceneBounds | null {
+  const ids = new Set<string>();
+  const walk = (list: SceneNode[] | undefined) => {
+    for (const node of list ?? []) { ids.add(node.id); walk(node.children); }
+  };
+  walk(nodes);
+  const total = new THREE.Box3();
+  const piece = new THREE.Box3();
+  const instance = new THREE.Matrix4();
+  const take = (box: THREE.Box3) => {
+    const size = box.getSize(new THREE.Vector3());
+    if (box.isEmpty() || Math.max(size.x, size.y, size.z) > MAX_PART_M) return;
+    total.union(box);
+  };
+  const bodyOf = (object: THREE.Object3D) => {
+    for (let node: THREE.Object3D | null = object; node; node = node.parent) {
+      if (node.type === 'Group' && node.name) return node.name;
+    }
+    return null;
+  };
+  root.updateMatrixWorld();
+  root.traverseVisible((object) => {
+    const mesh = object as THREE.Mesh;
+    if (!mesh.isMesh || !mesh.geometry || !mesh.castShadow) return;
+    if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox();
+    const local = mesh.geometry.boundingBox!;
+    const instanced = mesh as unknown as THREE.InstancedMesh;
+    if (instanced.isInstancedMesh) {
+      const owners = (instanced.userData?.nodeIds ?? []) as string[];
+      for (let i = 0; i < instanced.count; i++) {
+        if (!ids.has(owners[i])) continue;
+        instanced.getMatrixAt(i, instance);
+        take(piece.copy(local).applyMatrix4(instance.premultiply(instanced.matrixWorld)));
+      }
+      return;
+    }
+    const id = bodyOf(mesh);
+    if (!id || !ids.has(id)) return;
+    take(piece.copy(local).applyMatrix4(mesh.matrixWorld));
+  });
+  if (total.isEmpty()) return null;
+  // Three's Y-up back to the document's Z-up: (x, y, z) → (x, −z, y).
+  return {
+    min: [total.min.x, -total.max.z, total.min.y],
+    max: [total.max.x, -total.min.z, total.max.y],
+  };
+}
+
 /**
  * A camera pose that shows `bounds` at the default scale, backing off only far
  * enough to fit a scene too big for it.

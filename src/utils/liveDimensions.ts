@@ -19,6 +19,11 @@ export interface LiveDimension {
   row?: 'chain' | 'overall';
   /** Diameter only: how many equal holes the label stands for. */
   count?: number;
+  /**
+   * Other bodies with this same figure at the same place on the sheet (two
+   * walls whose faces line up): drawn, and listed, once.
+   */
+  sharedWith?: string[];
   /** Location only: the body it is measured from, or 'origin'. */
   from?: string;
   label: string;

@@ -11,7 +11,7 @@ import { useFrame, useThree, type ThreeEvent } from '@react-three/fiber';
 import { OrbitControls, OrthographicCamera } from '@react-three/drei';
 import * as THREE from 'three';
 import { registerLiveCamera } from '../../utils/liveCamera';
-import { DEFAULT_EYE, DEFAULT_TARGET_Y, sceneContentBounds } from '../../utils/frameScene';
+import { DEFAULT_EYE, DEFAULT_TARGET_Y, drawnContentBounds, sceneContentBounds } from '../../utils/frameScene';
 import { isDrawingView, orthoFraming, ORTHO_STANDOFF, SQUARE_TO_VIEW, VIEW_AXES } from '../../utils/cameraViews';
 import { useStore } from '../../store/useStore';
 import { useOrbitEnable } from './useOrbitEnable';
@@ -126,12 +126,13 @@ export const CameraController = () => {
     if (drawing !== ortho) return;
     if (controlsRef.current) dropMomentum(controlsRef.current);
     if (drawing) {
-      // Square to the view, at the content's centre, sized to fit it — the
+      // Square to the view, at the content's centre as drawn, sized to fit it — the
       // same 160 mm default scale as the perspective view, and the same
       // backing off for a bigger scene. See utils/cameraViews.
       const { width, height } = getSize().size;
+      const nodes = useStore.getState().sceneGraph.nodes;
       const framing = orthoFraming(
-        sceneContentBounds(useStore.getState().sceneGraph.nodes),
+        drawnContentBounds(getSize().scene, nodes) ?? sceneContentBounds(nodes),
         cameraView,
         height > 0 ? width / height : 1,
       );
