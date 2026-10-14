@@ -23,6 +23,21 @@ const MAX_SAMPLES = 512;
 const DENOISE_SIGMA = 4;
 const DENOISE_THRESHOLD = 0.05;
 /**
+ * How many pieces a sample is cut into, across and down, one piece drawn per
+ * frame. The tracer's default is 3, and on a 2080 Ti a ninth of a sample took a
+ * fraction of a 75 Hz refresh, so the GPU idled most of every frame and a
+ * render took 512 x 9 refreshes: 61-63 s. Whole samples, at 27 ms a frame,
+ * took 11-13 s. So it starts whole, and a GPU that cannot draw a whole sample
+ * in SLOW_FRAME_MS, SLOW_FRAMES_TO_STEP frames running, gets the next count
+ * up, so the viewport stays usable while it renders.
+ *
+ * Not more samples per frame either: past one whole sample the GPU is full,
+ * and two, four and eight a frame bought 4-19% for frames of 40-190 ms.
+ */
+const TILE_STEPS = [1, 2, 3];
+const SLOW_FRAME_MS = 50;
+const SLOW_FRAMES_TO_STEP = 5;
+/**
  * Angular radius of the key light's disc, seen from the origin: about a degree
  * across, a little larger than the sun. Kept small so Render mode lights the
  * scene the way the raster view does, whose key is a directional light, a
@@ -51,6 +66,7 @@ function createEngine(gl: THREE.WebGLRenderer): Engine | null {
     // tracer's own fallback would draw the live scene a second time, raw.
     pt.rasterizeScene = false;
     pt.bounces = 5;
+    pt.tiles.set(TILE_STEPS[0], TILE_STEPS[0]);
     // Softens the fireflies a glossy surface throws off at low sample counts.
     pt.filterGlossyFactor = 0.5;
     // Copied to the canvas through an edge-preserving blur rather than
@@ -124,6 +140,11 @@ export function PathTracedView({ background }: { background: string }) {
     reportedSamples: -1,
     traced: null as THREE.Scene | null,
     instanceMaterials: [] as THREE.Material[],
+    /** Index into TILE_STEPS; it only ever goes up, for as long as Render mode is on. */
+    tileStep: 0,
+    /** When the last sample was drawn, if it was drawn in the frame before this one. */
+    lastSampleAt: 0,
+    slowFrames: 0,
   });
 
   // The tracer, its denoiser and the floor are made in an effect and held in a
@@ -166,6 +187,9 @@ export function PathTracedView({ background }: { background: string }) {
     if (!engine) return;
     const { pathTracer, floor } = engine;
     const now = performance.now();
+    // Only consecutive frames that both drew a sample measure what one costs.
+    const lastSampleAt = s.lastSampleAt;
+    s.lastSampleAt = 0;
 
     const report = (phase: PathTracePhase, samples: number) => {
       const rounded = Math.floor(samples);
@@ -240,6 +264,10 @@ export function PathTracedView({ background }: { background: string }) {
     // Once converged, a frame drawn for some other reason (the pointer crossing
     // the viewport) only puts the finished image back over the raster one.
     pathTracer.pausePathTracing = converged;
+    if (!converged) {
+      stepTilesIfSlow(s, pathTracer, lastSampleAt ? now - lastSampleAt : 0);
+      s.lastSampleAt = now;
+    }
     // The quad that copies the traced image to the canvas tone maps when the
     // renderer says to, and the composer has the renderer set to none. Same
     // curve as the raster view's BodyToneMapping.
@@ -257,6 +285,27 @@ export function PathTracedView({ background }: { background: string }) {
   }, 2);
 
   return null;
+}
+
+/**
+ * Cuts each sample into more pieces once frames have run slow for
+ * SLOW_FRAMES_TO_STEP in a row (see TILE_STEPS). In a row, so the one long
+ * frame in which the shader compiles does not count. Only between samples,
+ * because the tracer keeps its place in the current one by tile number.
+ */
+function stepTilesIfSlow(
+  s: { tileStep: number; slowFrames: number },
+  pathTracer: WebGLPathTracer,
+  frameMs: number,
+) {
+  if (frameMs === 0) return;
+  s.slowFrames = frameMs > SLOW_FRAME_MS ? s.slowFrames + 1 : 0;
+  if (s.slowFrames < SLOW_FRAMES_TO_STEP || s.tileStep >= TILE_STEPS.length - 1) return;
+  if (!Number.isInteger(pathTracer.samples)) return;
+  s.tileStep++;
+  s.slowFrames = 0;
+  const n = TILE_STEPS[s.tileStep];
+  pathTracer.tiles.set(n, n);
 }
 
 /** The bodies: visible meshes that cast shadows and draw with a standard material. */
