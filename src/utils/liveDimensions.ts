@@ -7,15 +7,25 @@
  */
 export interface LiveDimension {
   body: string;
-  kind: 'linear' | 'diameter';
-  /** Linear only: 'width' runs across the sheet, 'height' up it. */
+  /**
+   * 'linear' and 'diameter' are the part's own sizes, along its own axes;
+   * 'angle' is how far it is turned in the view; 'location' is where its
+   * origin sits from its parent's.
+   */
+  kind: 'linear' | 'diameter' | 'angle' | 'location';
+  /** Linear: 'width' runs across the part, 'height' up it. Location: across the sheet or up it. */
   direction?: 'width' | 'height';
   /** Linear only: 'chain' between face edges, or 'overall'. */
   row?: 'chain' | 'overall';
   /** Diameter only: how many equal holes the label stands for. */
   count?: number;
+  /** Location only: the body it is measured from, or 'origin'. */
+  from?: string;
   label: string;
-  valueMm: number;
+  /** Every kind but angle. */
+  valueMm?: number;
+  /** Angle only. */
+  valueDeg?: number;
 }
 
 let live: LiveDimension[] = [];

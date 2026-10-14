@@ -3,9 +3,15 @@
  *
  * What to measure comes from utils/viewDimensions, run on the parts AS DRAWN:
  * every transform, boolean and MuJoCo pose already applied, the same reasoning
- * as measureScene. This file only gathers those triangles and draws the result
- * the way a drawing does — thin extension lines out from the part, a dimension
- * line with an arrowhead at each end, the figure in mm on it.
+ * as measureScene. This file gathers those triangles, each part's own axes
+ * (the frame of its biggest piece) and its exact round pieces, and draws the
+ * result the way a drawing does — thin extension lines out from the part, a
+ * dimension line with an arrowhead at each end, the figure in mm on it. A part
+ * turned or tilted in the view is dimensioned along its own edges, so a
+ * figure can sit on a slanted or foreshortened line; it is the true size.
+ *
+ * Where each part sits is drawn too, in a second colour: its origin from its
+ * parent's, across and up the sheet.
  *
  * Drawn only while the camera is square to the view: orbit off it and the
  * figures would sit on a sheet nobody is looking at, so they go until you come
@@ -18,11 +24,17 @@ import { Html } from '@react-three/drei';
 import * as THREE from 'three';
 import { useStore } from '../../store/useStore';
 import { isDrawingView, SQUARE_TO_VIEW, VIEW_AXES, type DrawingView } from '../../utils/cameraViews';
-import { bodyViewDimensions, type BodyDimensions, type BodyMesh } from '../../utils/viewDimensions';
+import {
+  bodyViewDimensions, locationDimensions, type BodyDimensions, type BodyMesh, type LocationDim,
+} from '../../utils/viewDimensions';
 import { bodyOf } from '../../utils/measureScene';
-import { setLiveDimensions } from '../../utils/liveDimensions';
+import { setLiveDimensions, type LiveDimension } from '../../utils/liveDimensions';
+import type { SceneNode } from '../../types/scene';
+import type { DataMirror, ModelMirror, MujocoShim } from '../../types/sceneLayer';
 
 const COLOUR = '#d97706';
+/** Where a part sits, as against what it is. */
+const LOCATION_COLOUR = '#0891b2';
 /** How far out each row sits from the part, in pixels. */
 const ROW_PX = [0, 22, 46];
 /** The gap between the part and an extension line, and how far it runs past the dimension line. */
@@ -33,14 +45,30 @@ const ARROW_HALF_PX = 3;
 /** The diameter leader: how far past the rim it runs, and its shoulder. */
 const LEADER_PX = 26;
 const SHOULDER_PX = 10;
+/** An angle's arc, and how far its two lines run past it. */
+const ARC_PX = 34;
+const ARC_OVERRUN_PX = 12;
+/** The arms of the cross that marks a part's origin. */
+const MARK_PX = 5;
 /** How often the drawn scene is checked for change. */
 const POLL_MS = 250;
 /** Bigger than this is the floor or the sky, not a part. */
 const MAX_PART_M = 10;
+/** With nothing selected and more parts than this, where each sits is left out: it would be a web of lines. */
+const MAX_LOCATIONS = 12;
 
 type Vec3 = [number, number, number];
 
 interface DrawnPiece { id: string; geometry: THREE.BufferGeometry; matrix: THREE.Matrix4 }
+
+/** Three's Y-up scene frame and the document's Z-up, both ways. */
+const toDoc = (v: THREE.Vector3): Vec3 => [v.x, -v.z, v.y];
+const toThree = (v: ArrayLike<number>) => new THREE.Vector3(v[0], v[2], -v[1]);
+
+const evenScale = (matrix: THREE.Matrix4) => {
+  const scale = new THREE.Vector3().setFromMatrixScale(matrix);
+  return { scale, even: Math.abs(scale.x - scale.y) <= 1e-3 * scale.x && Math.abs(scale.x - scale.z) <= 1e-3 * scale.x };
+};
 
 /**
  * The sphere a piece is, exactly, when it is a whole sphere drawn at an even
@@ -51,10 +79,44 @@ function sphereOf({ geometry, matrix }: DrawnPiece): { centre: Vec3; radius: num
   if (geometry.type !== 'SphereGeometry') return null;
   const p = (geometry as THREE.SphereGeometry).parameters;
   if (Math.abs(p.phiLength - Math.PI * 2) > 1e-6 || Math.abs(p.thetaLength - Math.PI) > 1e-6) return null;
-  const scale = new THREE.Vector3().setFromMatrixScale(matrix);
-  if (Math.abs(scale.x - scale.y) > 1e-3 * scale.x || Math.abs(scale.x - scale.z) > 1e-3 * scale.x) return null;
-  const c = new THREE.Vector3().setFromMatrixPosition(matrix);
-  return { centre: [c.x, -c.z, c.y], radius: p.radius * scale.x };
+  const { scale, even } = evenScale(matrix);
+  if (!even) return null;
+  return { centre: toDoc(new THREE.Vector3().setFromMatrixPosition(matrix)), radius: p.radius * scale.x };
+}
+
+/** The rod a capsule is: the ends of its straight part, and its radius. */
+function rodOf({ geometry, matrix }: DrawnPiece): { a: Vec3; b: Vec3; radius: number } | null {
+  if (geometry.type !== 'CapsuleGeometry') return null;
+  const p = (geometry as THREE.CapsuleGeometry).parameters;
+  const { scale, even } = evenScale(matrix);
+  if (!even) return null;
+  return {
+    a: toDoc(new THREE.Vector3(0, -p.height / 2, 0).applyMatrix4(matrix)),
+    b: toDoc(new THREE.Vector3(0, p.height / 2, 0).applyMatrix4(matrix)),
+    radius: p.radius * scale.x,
+  };
+}
+
+/**
+ * A part's own axes: those of its biggest piece that is not a sphere. The piece's frame is the geom's, which is the body's
+ * turned by however the geom sits in it — the frame its edges run along.
+ */
+function frameOf(pieces: DrawnPiece[]): [Vec3, Vec3, Vec3] | undefined {
+  let best: DrawnPiece | null = null;
+  let bestSize = -1;
+  const size = new THREE.Vector3();
+  for (const piece of pieces) {
+    // A true sphere's axes say nothing; an ellipsoid (a sphere scaled unevenly) has its own.
+    if (sphereOf(piece)) continue;
+    if (!piece.geometry.boundingBox) piece.geometry.computeBoundingBox();
+    piece.geometry.boundingBox!.getSize(size).multiply(new THREE.Vector3().setFromMatrixScale(piece.matrix));
+    const across = size.length();
+    if (across > bestSize) { best = piece; bestSize = across; }
+  }
+  if (!best) return undefined;
+  const e = best.matrix.elements;
+  const axis = (i: number) => toDoc(new THREE.Vector3(e[i * 4], e[i * 4 + 1], e[i * 4 + 2]).normalize());
+  return [axis(0), axis(1), axis(2)];
 }
 
 /**
@@ -97,7 +159,7 @@ function drawnPieces(root: THREE.Object3D, only: string | null): Map<string, { p
   return out;
 }
 
-/** One body's triangles, world space, document frame (Z-up). */
+/** One body's triangles, world space, document frame (Z-up), with its frame and exact rounds. */
 function bodyMesh(id: string, pieces: DrawnPiece[]): BodyMesh {
   const positions: number[] = [];
   const faces: number[] = [];
@@ -108,52 +170,114 @@ function bodyMesh(id: string, pieces: DrawnPiece[]): BodyMesh {
     const base = positions.length / 3;
     for (let i = 0; i < position.count; i++) {
       p.fromBufferAttribute(position, i).applyMatrix4(matrix);
-      // Three's Y-up scene frame back to the document's Z-up: (x, y, z) → (x, −z, y).
-      positions.push(p.x, -p.z, p.y);
+      positions.push(...toDoc(p));
     }
     const index = geometry.index;
     if (index) for (let i = 0; i < index.count; i++) faces.push(base + index.getX(i));
     else for (let i = 0; i < position.count; i++) faces.push(base + i);
   }
   const spheres = pieces.map(sphereOf).filter((x): x is NonNullable<typeof x> => x !== null);
-  return { id, positions, faces, spheres };
+  const rods = pieces.map(rodOf).filter((x): x is NonNullable<typeof x> => x !== null);
+  return { id, positions, faces, spheres, rods, frame: frameOf(pieces) };
 }
 
-/** The view's own document-frame axes, as Three-frame vectors. */
-function threeAxes(view: DrawingView) {
-  const toThree = (v: Vec3) => new THREE.Vector3(v[0], v[2], -v[1]);
-  const { forward, right, up } = VIEW_AXES[view];
-  return { forward: toThree(forward), right: toThree(right), up: toThree(up) };
+/**
+ * Each drawn part's origin and the origin it is located from — its parent
+ * body's, or the world's — from MuJoCo, where a simulated body actually is.
+ * A part MuJoCo does not know is left out.
+ */
+function locationLinks(ids: Iterable<string>, nodes: SceneNode[]): { id: string; parent: string | null; from: Vec3; to: Vec3 }[] {
+  const { model, data, mujoco } = useStore.getState() as unknown as {
+    model: ModelMirror | null; data: DataMirror | null; mujoco: MujocoShim | null;
+  };
+  if (!model || !data || !mujoco) return [];
+  const parentOf = new Map<string, SceneNode | null>();
+  const byId = new Map<string, SceneNode>();
+  const walk = (list: SceneNode[] | undefined, parent: SceneNode | null) => {
+    for (const node of list ?? []) {
+      byId.set(node.id, node);
+      parentOf.set(node.id, parent);
+      // A pulley rope is not a part: its children hang off whatever it hangs off.
+      walk(node.children, node.isPulleyRope ? parent : node);
+    }
+  };
+  walk(nodes, null);
+  const origin = (node: SceneNode): Vec3 | null => {
+    try {
+      const b = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY.value, node.name || node.id);
+      if (b < 0) return null;
+      return [data.xpos[b * 3], data.xpos[b * 3 + 1], data.xpos[b * 3 + 2]];
+    } catch {
+      return null;
+    }
+  };
+  const out: { id: string; parent: string | null; from: Vec3; to: Vec3 }[] = [];
+  for (const id of ids) {
+    const node = byId.get(id);
+    if (!node) continue;
+    const to = origin(node);
+    if (!to) continue;
+    const parent = parentOf.get(id) ?? null;
+    const from = parent ? origin(parent) : [0, 0, 0] as Vec3;
+    if (!from) continue;
+    out.push({ id, parent: parent?.id ?? null, from, to });
+  }
+  return out;
 }
 
 interface Drawing {
   lines: Float32Array;
   arrows: Float32Array;
-  labels: { key: string; at: THREE.Vector3; text: string; anchor: 'centre' | 'left' | 'right' }[];
+  locationLines: Float32Array;
+  locationArrows: Float32Array;
+  labels: { key: string; at: THREE.Vector3; text: string; anchor: 'centre' | 'left' | 'right'; location: boolean }[];
 }
 
 /** Which way each successive ⌀ leader on a part runs, so concentric circles do not share one. */
 const LEADER_DIRECTIONS: [number, number][] = [[1, 1], [-1, 1], [1, -1], [-1, -1]].map(
   ([u, v]) => [u * Math.SQRT1_2, v * Math.SQRT1_2] as [number, number]);
 
-/** Lay the dimensions out on the sheet at this many metres per pixel. */
-function layOut(found: BodyDimensions[], view: DrawingView, mpp: number): Drawing {
-  const { forward, right, up } = threeAxes(view);
-  const lines: number[] = [];
-  const arrows: number[] = [];
+const add = (a: Vec3, b: Vec3, k = 1): Vec3 => [a[0] + b[0] * k, a[1] + b[1] * k, a[2] + b[2] * k];
+const dot = (a: Vec3, b: Vec3) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const cross = (a: Vec3, b: Vec3): Vec3 => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+const unit = (a: Vec3): Vec3 => {
+  const l = Math.hypot(a[0], a[1], a[2]);
+  return l > 0 ? [a[0] / l, a[1] / l, a[2] / l] : [1, 0, 0];
+};
+
+/** Lay the dimensions out on the sheet at this many metres per pixel. Works in the document frame throughout. */
+function layOut(found: BodyDimensions[], locations: LocationDim[], view: DrawingView, mpp: number): Drawing {
+  const { forward, right, up } = VIEW_AXES[view];
+  const out = { lines: [] as number[], arrows: [] as number[], locationLines: [] as number[], locationArrows: [] as number[] };
   const labels: Drawing['labels'] = [];
-  const px = (n: number) => n * mpp;
+  /** A direction as it shows on the sheet: its depth dropped. */
+  const onSheet = (d: Vec3) => unit(add(d, forward, -dot(d, forward)));
+  const line = (target: number[], a: Vec3, b: Vec3) => {
+    const p = toThree(a), q = toThree(b);
+    target.push(p.x, p.y, p.z, q.x, q.y, q.z);
+  };
+  /** An arrowhead with its tip at `tip`, pointing along `direction` as drawn. */
+  const arrow = (target: number[], tip: Vec3, direction: Vec3) => {
+    const d = onSheet(direction);
+    const back = add(tip, d, -ARROW_LONG_PX * mpp);
+    const side = cross(forward, d);
+    for (const p of [tip, add(back, side, ARROW_HALF_PX * mpp), add(back, side, -ARROW_HALF_PX * mpp)]) {
+      const t = toThree(p);
+      target.push(t.x, t.y, t.z);
+    }
+  };
   /*
    * Figures already placed, as screen rectangles (pixels on the sheet). A figure
    * that would land on one moves up the sheet until it is clear: approximate
    * widths are enough to keep two numbers from printing over each other.
    */
   const placed: { x0: number; x1: number; y0: number; y1: number }[] = [];
-  const place = (u: number, v: number, text: string, anchor: 'centre' | 'left' | 'right'): [number, number] => {
+  const label = (key: string, spot: Vec3, text: string, anchor: 'centre' | 'left' | 'right', location = false) => {
     const w = text.length * 6.5 + 8;
     const h = 14;
-    let x = u / mpp;
-    let y = v / mpp;
+    const x = dot(spot, right) / mpp;
+    const y0 = dot(spot, up) / mpp;
+    let y = y0;
     const x0 = anchor === 'left' ? x : anchor === 'right' ? x - w : x - w / 2;
     for (let tries = 0; tries < 6; tries++) {
       const box = { x0, x1: x0 + w, y0: y - h / 2, y1: y + h / 2 };
@@ -163,25 +287,17 @@ function layOut(found: BodyDimensions[], view: DrawingView, mpp: number): Drawin
       }
       y += h + 2;
     }
-    x *= mpp;
-    return [x, y * mpp];
+    labels.push({ key, at: toThree(add(spot, up, (y - y0) * mpp)), text, anchor, location });
   };
 
   for (const body of found) {
-    // On the face nearest the camera, a touch in front of it.
-    const w = body.near - px(2);
-    const at = (u: number, v: number) =>
-      right.clone().multiplyScalar(u).addScaledVector(up, v).addScaledVector(forward, w);
-    const seg = (a: THREE.Vector3, b: THREE.Vector3) => lines.push(a.x, a.y, a.z, b.x, b.y, b.z);
-    /** An arrowhead with its tip at `tip`, pointing along the sheet direction (du, dv). */
-    const arrow = (tipU: number, tipV: number, du: number, dv: number) => {
-      const tip = at(tipU, tipV);
-      const back = at(tipU - du * px(ARROW_LONG_PX), tipV - dv * px(ARROW_LONG_PX));
-      const side = right.clone().multiplyScalar(-dv).addScaledVector(up, du).multiplyScalar(px(ARROW_HALF_PX));
-      const l = back.clone().add(side);
-      const r = back.clone().sub(side);
-      arrows.push(tip.x, tip.y, tip.z, l.x, l.y, l.z, r.x, r.y, r.z);
-    };
+    const { u: U, v: V, w: W } = body.axes;
+    const at = (u: number, v: number): Vec3 => add(add(add([0, 0, 0], U, u), V, v), W, body.depth);
+    // A pixel along each of the part's axes, which may be drawn foreshortened.
+    const fu = Math.max(0.05, Math.hypot(...add(U, forward, -dot(U, forward))));
+    const fv = Math.max(0.05, Math.hypot(...add(V, forward, -dot(V, forward))));
+    const pu = (n: number) => (n * mpp) / fu;
+    const pv = (n: number) => (n * mpp) / fv;
     let diameterCount = 0;
     const hasChain = { u: false, v: false };
     for (const d of body.dims) if (d.kind === 'linear' && d.row === 1) hasChain[d.axis] = true;
@@ -190,52 +306,113 @@ function layOut(found: BodyDimensions[], view: DrawingView, mpp: number): Drawin
       const key = `${body.id}:${i}`;
       if (d.kind === 'linear') {
         const row = d.row === 2 && !hasChain[d.axis] ? 1 : d.row;
-        const line = d.edge - px(ROW_PX[row]);
-        const spanPx = (d.b - d.a) / mpp;
+        const along = d.axis === 'u' ? U : V;
+        const spanPx = ((d.b - d.a) * (d.axis === 'u' ? fu : fv)) / mpp;
         // Too short to hold its figure between the arrows: the figure goes past
         // an end — the near one when this is the first of its chain, where
         // nothing else is drawn, and otherwise the far one.
         const outside = spanPx < 34;
         const first = d.a <= (d.axis === 'u' ? body.bounds.u[0] : body.bounds.v[0]) + 1e-9;
-        if (d.axis === 'u') {
-          seg(at(d.a, d.anchorA - px(GAP_PX)), at(d.a, line - px(OVERSHOOT_PX)));
-          seg(at(d.b, d.anchorB - px(GAP_PX)), at(d.b, line - px(OVERSHOOT_PX)));
-          seg(at(d.a, line), at(d.b, line));
-          arrow(d.a, line, -1, 0);
-          arrow(d.b, line, 1, 0);
-          const anchor = outside && !first ? 'left' as const : 'centre' as const;
-          const [lu, lv] = !outside ? [(d.a + d.b) / 2, line] : first ? [d.a - px(16), line] : [d.b + px(6), line];
-          labels.push({ key, at: at(...place(lu, lv, d.label, anchor)), text: d.label, anchor });
-        } else {
-          seg(at(d.anchorA - px(GAP_PX), d.a), at(line - px(OVERSHOOT_PX), d.a));
-          seg(at(d.anchorB - px(GAP_PX), d.b), at(line - px(OVERSHOOT_PX), d.b));
-          seg(at(line, d.a), at(line, d.b));
-          arrow(line, d.a, 0, -1);
-          arrow(line, d.b, 0, 1);
-          const [lu, lv] = !outside ? [line, (d.a + d.b) / 2] : first ? [line, d.a - px(10)] : [line, d.b + px(10)];
-          labels.push({ key, at: at(...place(lu, lv, d.label, 'centre')), text: d.label, anchor: 'centre' });
-        }
-      } else {
+        // (along, across) on the part's sheet, whichever way this one measures.
+        const pt = d.axis === 'u' ? (s: number, t: number) => at(s, t) : (s: number, t: number) => at(t, s);
+        const pa = d.axis === 'u' ? pu : pv;
+        const pc = d.axis === 'u' ? pv : pu;
+        const rowAt = d.edge - pc(ROW_PX[row]);
+        line(out.lines, pt(d.a, d.anchorA - pc(GAP_PX)), pt(d.a, rowAt - pc(OVERSHOOT_PX)));
+        line(out.lines, pt(d.b, d.anchorB - pc(GAP_PX)), pt(d.b, rowAt - pc(OVERSHOOT_PX)));
+        line(out.lines, pt(d.a, rowAt), pt(d.b, rowAt));
+        arrow(out.arrows, pt(d.a, rowAt), [-along[0], -along[1], -along[2]]);
+        arrow(out.arrows, pt(d.b, rowAt), along);
+        const trailing = outside && !first;
+        const spot = !outside ? pt((d.a + d.b) / 2, rowAt)
+          : first ? pt(d.a - pa(d.axis === 'u' ? 16 : 10), rowAt)
+          : pt(d.b + pa(d.axis === 'u' ? 6 : 10), rowAt);
+        label(key, spot, d.label, trailing && d.axis === 'u' ? 'left' : 'centre');
+      } else if (d.kind === 'diameter') {
         // Across the circle at 45°, out past the rim to a short shoulder. Each
         // further ⌀ on the part turns a quarter, so a counterbore's two circles
         // are not labelled up the same line.
         const [ku, kv] = LEADER_DIRECTIONS[diameterCount++ % LEADER_DIRECTIONS.length];
         const [cu, cv] = d.centre;
-        const near: [number, number] = [cu - ku * d.radius, cv - kv * d.radius];
-        const far: [number, number] = [cu + ku * d.radius, cv + kv * d.radius];
-        const out: [number, number] = [far[0] + ku * px(LEADER_PX), far[1] + kv * px(LEADER_PX)];
-        const side = Math.sign(ku);
-        seg(at(...near), at(...out));
-        seg(at(...out), at(out[0] + side * px(SHOULDER_PX), out[1]));
-        arrow(near[0], near[1], -ku, -kv);
-        arrow(far[0], far[1], ku, kv);
-        const anchor = side > 0 ? 'left' as const : 'right' as const;
-        const spot = place(out[0] + side * px(SHOULDER_PX + 3), out[1], d.label, anchor);
-        labels.push({ key, at: at(...spot), text: d.label, anchor });
+        const k = add(add([0, 0, 0], U, ku), V, kv);
+        const near = at(cu - ku * d.radius, cv - kv * d.radius);
+        const far = at(cu + ku * d.radius, cv + kv * d.radius);
+        const outward = onSheet(k);
+        const elbow = add(far, outward, LEADER_PX * mpp);
+        const side = dot(outward, right) >= 0 ? 1 : -1;
+        line(out.lines, near, elbow);
+        line(out.lines, elbow, add(elbow, right, side * SHOULDER_PX * mpp));
+        arrow(out.arrows, near, [-k[0], -k[1], -k[2]]);
+        arrow(out.arrows, far, k);
+        label(key, add(elbow, right, side * (SHOULDER_PX + 3) * mpp), d.label, side > 0 ? 'left' : 'right');
+      } else {
+        // From the sheet's horizontal or vertical round to the part's long
+        // axis, both drawn out from the middle of the part.
+        const centre = at(...d.centre);
+        const theta = Math.acos(Math.min(1, Math.max(-1, dot(d.from, d.to))));
+        const g = unit(add(d.to, d.from, -dot(d.to, d.from)));
+        const reach = (ARC_PX + ARC_OVERRUN_PX) * mpp;
+        line(out.lines, centre, add(centre, d.from, reach));
+        line(out.lines, centre, add(centre, d.to, reach));
+        const arcAt = (phi: number, r: number) => add(add(centre, d.from, r * Math.cos(phi)), g, r * Math.sin(phi));
+        const steps = 12;
+        for (let s = 0; s < steps; s++) {
+          line(out.lines, arcAt((theta * s) / steps, ARC_PX * mpp), arcAt((theta * (s + 1)) / steps, ARC_PX * mpp));
+        }
+        label(key, arcAt(theta / 2, (ARC_PX + 16) * mpp), d.label, 'centre');
       }
     });
   }
-  return { lines: new Float32Array(lines), arrows: new Float32Array(arrows), labels };
+
+  // Where each part sits: across from the reference origin, then up to the part's.
+  for (const loc of locations) {
+    const depth = 0;
+    const at = (u: number, v: number): Vec3 => add(add(add([0, 0, 0], right, u), up, v), forward, depth);
+    const from = at(...loc.from);
+    const corner = at(loc.to[0], loc.from[1]);
+    const to = at(...loc.to);
+    for (const p of [from, to]) {
+      line(out.locationLines, add(p, right, -MARK_PX * mpp), add(p, right, MARK_PX * mpp));
+      line(out.locationLines, add(p, up, -MARK_PX * mpp), add(p, up, MARK_PX * mpp));
+    }
+    const leg = (a: Vec3, b: Vec3, text: string, key: string) => {
+      const d = unit(add(b, a, -1));
+      line(out.locationLines, a, b);
+      arrow(out.locationArrows, a, [-d[0], -d[1], -d[2]]);
+      arrow(out.locationArrows, b, d);
+      label(key, add(a, add(b, a, -1), 0.5), text, 'centre', true);
+    };
+    if (loc.across) leg(from, corner, loc.across.label, `${loc.id}:across`);
+    if (loc.up) leg(corner, to, loc.up.label, `${loc.id}:up`);
+  }
+
+  return {
+    lines: new Float32Array(out.lines),
+    arrows: new Float32Array(out.arrows),
+    locationLines: new Float32Array(out.locationLines),
+    locationArrows: new Float32Array(out.locationArrows),
+    labels,
+  };
+}
+
+/** What physics_get_camera reports: every figure drawn, in the order drawn. */
+function liveList(found: BodyDimensions[], locations: LocationDim[], parents: Map<string, string | null>): LiveDimension[] {
+  const sizes = found.flatMap((b) => b.dims.map((d): LiveDimension => d.kind === 'linear'
+    ? {
+        body: b.id, kind: d.kind, direction: d.axis === 'u' ? 'width' : 'height',
+        row: d.row === 1 ? 'chain' : 'overall', label: d.label, valueMm: d.valueMm,
+      }
+    : d.kind === 'diameter'
+      ? { body: b.id, kind: d.kind, count: d.count, label: d.label, valueMm: d.valueMm }
+      : { body: b.id, kind: d.kind, label: d.label, valueDeg: d.valueDeg }));
+  const places = locations.flatMap((loc) => {
+    const from = parents.get(loc.id) ?? 'origin';
+    const out: LiveDimension[] = [];
+    if (loc.across) out.push({ body: loc.id, kind: 'location', direction: 'width', from, label: loc.across.label, valueMm: loc.across.valueMm });
+    if (loc.up) out.push({ body: loc.id, kind: 'location', direction: 'height', from, label: loc.up.label, valueMm: loc.up.valueMm });
+    return out;
+  });
+  return [...sizes, ...places];
 }
 
 export function DimensionOverlay() {
@@ -248,7 +425,7 @@ export function DimensionOverlay() {
 
   // Tagged with what it was measured for, so a change of view or selection
   // never draws the last one's figures on the new sheet while it re-measures.
-  const [found, setFound] = useState<{ key: string; dims: BodyDimensions[] }>({ key: '', dims: [] });
+  const [found, setFound] = useState<{ key: string; dims: BodyDimensions[]; locations: LocationDim[] }>({ key: '', dims: [], locations: [] });
   const measuring = `${view}|${selectedNodeId ?? ''}`;
   const [mpp, setMpp] = useState(0);
   const [square, setSquare] = useState(false);
@@ -273,7 +450,7 @@ export function DimensionOverlay() {
       return;
     }
     camera.getWorldDirection(forward);
-    const isSquare = forward.dot(threeAxes(view).forward) >= SQUARE_TO_VIEW;
+    const isSquare = forward.dot(toThree(VIEW_AXES[view].forward)) >= SQUARE_TO_VIEW;
     if (isSquare !== square) setSquare(isSquare);
 
     const perPixel = (ortho.top - ortho.bottom) / (ortho.zoom * Math.max(1, size.height));
@@ -301,42 +478,45 @@ export function DimensionOverlay() {
       if (d.bounds.u[1] - d.bounds.u[0] > MAX_PART_M || d.bounds.v[1] - d.bounds.v[0] > MAX_PART_M) continue;
       next.push(d);
     }
-    setFound({ key: measuring, dims: next });
-    setLiveDimensions(next.flatMap((b) => b.dims.map((d) => d.kind === 'linear'
-      ? {
-          body: b.id, kind: d.kind, direction: d.axis === 'u' ? 'width' as const : 'height' as const,
-          row: d.row === 1 ? 'chain' as const : 'overall' as const, label: d.label, valueMm: d.valueMm,
-        }
-      : { body: b.id, kind: d.kind, count: d.count, label: d.label, valueMm: d.valueMm })));
+    const links = locationLinks(next.map((d) => d.id), useStore.getState().sceneGraph.nodes);
+    const located = selectedNodeId || links.length <= MAX_LOCATIONS ? locationDimensions(links, view) : [];
+    setFound({ key: measuring, dims: next, locations: located });
+    setLiveDimensions(liveList(next, located, new Map(links.map((l) => [l.id, l.parent]))));
   });
 
   const drawing = useMemo(
-    () => (on && view && square && mpp > 0 && found.key === measuring ? layOut(found.dims, view, mpp) : null),
+    () => (on && view && square && mpp > 0 && found.key === measuring ? layOut(found.dims, found.locations, view, mpp) : null),
     [on, view, square, mpp, found, measuring],
   );
-  const lineGeometry = useMemo(() => {
-    const g = new THREE.BufferGeometry();
-    if (drawing) g.setAttribute('position', new THREE.BufferAttribute(drawing.lines, 3));
-    return g;
+  const geometries = useMemo(() => {
+    const make = (array: Float32Array | undefined) => {
+      const g = new THREE.BufferGeometry();
+      if (array) g.setAttribute('position', new THREE.BufferAttribute(array, 3));
+      return g;
+    };
+    return {
+      lines: make(drawing?.lines),
+      arrows: make(drawing?.arrows),
+      locationLines: make(drawing?.locationLines),
+      locationArrows: make(drawing?.locationArrows),
+    };
   }, [drawing]);
-  const arrowGeometry = useMemo(() => {
-    const g = new THREE.BufferGeometry();
-    if (drawing) g.setAttribute('position', new THREE.BufferAttribute(drawing.arrows, 3));
-    return g;
-  }, [drawing]);
-  useEffect(() => () => lineGeometry.dispose(), [lineGeometry]);
-  useEffect(() => () => arrowGeometry.dispose(), [arrowGeometry]);
+  useEffect(() => () => Object.values(geometries).forEach((g) => g.dispose()), [geometries]);
   useEffect(() => () => setLiveDimensions([]), []);
 
   if (!drawing) return null;
   return (
     <group>
-      <lineSegments geometry={lineGeometry} raycast={() => null} renderOrder={997}>
-        <lineBasicMaterial color={COLOUR} depthTest={false} transparent toneMapped={false} />
-      </lineSegments>
-      <mesh geometry={arrowGeometry} raycast={() => null} renderOrder={998}>
-        <meshBasicMaterial color={COLOUR} depthTest={false} side={THREE.DoubleSide} transparent toneMapped={false} />
-      </mesh>
+      {([['lines', 'arrows', COLOUR], ['locationLines', 'locationArrows', LOCATION_COLOUR]] as const).map(([lines, arrows, colour]) => (
+        <group key={lines}>
+          <lineSegments geometry={geometries[lines]} raycast={() => null} renderOrder={997}>
+            <lineBasicMaterial color={colour} depthTest={false} transparent toneMapped={false} />
+          </lineSegments>
+          <mesh geometry={geometries[arrows]} raycast={() => null} renderOrder={998}>
+            <meshBasicMaterial color={colour} depthTest={false} side={THREE.DoubleSide} transparent toneMapped={false} />
+          </mesh>
+        </group>
+      ))}
       {drawing.labels.map((label) => (
         <Html
           key={label.key}
@@ -352,7 +532,7 @@ export function DimensionOverlay() {
               ? { pointerEvents: 'none', transform: 'translate(-100%, -50%)' }
               : { pointerEvents: 'none' }}
         >
-          <span className="px-1 rounded-sm bg-white/90 dark:bg-slate-900/90 text-amber-700 dark:text-amber-400 text-[10px] font-mono font-semibold tabular-nums whitespace-nowrap shadow-xs">
+          <span className={`px-1 rounded-sm bg-white/90 dark:bg-slate-900/90 text-[10px] font-mono font-semibold tabular-nums whitespace-nowrap shadow-xs ${label.location ? 'text-cyan-700 dark:text-cyan-400' : 'text-amber-700 dark:text-amber-400'}`}>
             {label.text}
           </span>
         </Html>

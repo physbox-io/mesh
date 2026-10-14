@@ -575,6 +575,21 @@ load's framing) goes back to perspective.
   leaders, equal ones counted (`2× ⌀8`). Bodies over 60k triangles get the overall
   size only. Nothing is drawn unless the camera is within 1° of the view's axis.
   `physics_get_camera` reports what is drawn (`utils/liveDimensions.ts`).
+* **Every figure is a true size.** A part is measured along its own axes
+  (`BodyMesh.frame`, the frame of its biggest non-sphere piece), not the sheet's:
+  `sheetAxes` takes the axis nearest the line of sight as depth and the other two
+  as u and v. A part turned in the view gets aligned dimensions; one tilted in depth
+  is dimensioned isometric-style, a foreshortened line carrying the true figure.
+  When the long axis lies in the view's plane and is turned, an angle arc gives it
+  against the sheet's horizontal or vertical. A projected outline is never
+  printed: it is a number nobody can build to.
+* **Rounds seen side on** add their silhouette (that span reads ⌀) and the rim where
+  they step, but only bosses, never holes (`bossTest`), and only rims that show: a
+  rim with material on both sides in the drawn view is a hidden line and is left
+  out. Capsules come in exactly from `CapsuleGeometry` (`rods`), like spheres.
+* **Locations**, in a second colour: each body's origin (MuJoCo `xpos`) from its
+  parent body's, or from the world origin, across and up the sheet. Left out with
+  nothing selected and more than 12 bodies.
 
 ---
 

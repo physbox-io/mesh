@@ -1,22 +1,37 @@
 /**
  * The dimensions a drawing view puts on a part.
  *
- * A Top, Front or Side view is orthographic, so a dimension is a plain 2D
- * measurement on the sheet: (u, v) are screen right and screen up, in metres,
- * from VIEW_AXES. What gets dimensioned is what a person dimensions by hand:
+ * A Top, Front or Side view is orthographic. A part is measured along its OWN
+ * axes (BodyMesh.frame), not the sheet's: a blade turned 120° and pitched 12°
+ * is still 400 long, 60 wide and 10 thick, and those are the figures a person
+ * needs to make it. Of the part's three axes, the one nearest the line of
+ * sight is depth and the other two are its sheet axes u and v (SheetAxes);
+ * every position below is along those, in metres. A part square to the view
+ * has the view's own right and up as u and v, and everything reads as it
+ * always has. One turned in the view gets aligned dimensions, along its edges
+ * at their slant. One tilted in depth is dimensioned the way an isometric
+ * drawing is: the line is drawn foreshortened, the figure is the true size.
+ *
+ * What gets dimensioned is what a person dimensions by hand:
  *
  *   - The overall size: width below the part, height on its left, in the outer
- *     row. A cylinder lying in the view has a width that IS its diameter, and
- *     says so (⌀).
+ *     row. A round lying in the view whose width IS its diameter says so (⌀).
  *   - A chain of the face edges in the inner row: every straight edge that runs
- *     up the sheet is a stop across it, and every edge that runs along the
- *     sheet a stop up it — the steps of a stepped block, the slot in a bracket.
- *     The centres of holes seen end-on are stops too, which is how a drawing
+ *     up the part is a stop across it, and every edge that runs along it a stop
+ *     up it — the steps of a stepped block, the slot in a bracket. A round seen
+ *     side on adds its silhouette, and the rim where it steps (a mast standing
+ *     on a wider base) — but only a rim that shows: one buried in other
+ *     material is a hidden line, which a drawing does not dimension. The
+ *     centres of holes seen end-on are stops too, which is how a drawing
  *     locates a hole. Its smallest link is left out, as the overall already
- *     gives it (see omittedLink).
+ *     gives it (see omittedLink); a diameter never is.
  *   - The diameter of every circle seen end-on, on a leader, and of every
- *     sphere. Both rims of a through hole are one hole; a row of equal holes
- *     is labelled once, "6× ⌀4".
+ *     sphere and rod seen end-on. Both rims of a through hole are one hole; a
+ *     row of equal holes is labelled once, "6× ⌀4".
+ *   - The part's angle, when it is turned in the view: its long axis against
+ *     the sheet's horizontal or vertical, whichever is nearer.
+ *
+ * Where each part sits is locationDimensions: its origin from its parent's.
  *
  * The edges come from findFeatureEdges, run on the part as drawn (world space,
  * document frame) — the same edge finder the rounding tool uses, which already
@@ -38,9 +53,26 @@ export interface BodyMesh {
    * — a pendulum's bob is dimensioned by its diameter like a hole is.
    */
   spheres?: { centre: Vec3; radius: number }[];
+  /**
+   * Round rods with domed ends (capsules): the ends of the straight part's
+   * axis, and the radius. Smooth all over, so as edgeless as a sphere.
+   */
+  rods?: { a: Vec3; b: Vec3; radius: number }[];
+  /**
+   * The part's own axes, document frame, orthonormal: the frame it was built
+   * in, which its edges run along. Absent: the world's.
+   */
+  frame?: [Vec3, Vec3, Vec3];
 }
 
-/** Positions along the sheet: u is screen right, v screen up, metres. */
+/** A part's own axes as a view draws them: u across, v up, w into the sheet. */
+export interface SheetAxes {
+  u: Vec3;
+  v: Vec3;
+  w: Vec3;
+}
+
+/** Positions along the part's sheet axes, metres. */
 export interface LinearDim {
   kind: 'linear';
   /** Which way it measures: along u (a width) or along v (a height). */
@@ -73,14 +105,31 @@ export interface DiameterDim {
   label: string;
 }
 
-export type ViewDim = LinearDim | DiameterDim;
+export interface AngleDim {
+  kind: 'angle';
+  /** Where the arc is centred, on the part's sheet axes. */
+  centre: [number, number];
+  /**
+   * The sheet's horizontal or vertical the angle is measured from, and the
+   * part's axis it is measured to: document-frame unit vectors, both lying in
+   * the view's plane.
+   */
+  from: Vec3;
+  to: Vec3;
+  valueDeg: number;
+  label: string;
+}
+
+export type ViewDim = LinearDim | DiameterDim | AngleDim;
 
 export interface BodyDimensions {
   id: string;
-  /** The part's projected outline, metres. */
+  /** The axes every position here is measured along. */
+  axes: SheetAxes;
+  /** The part's outline on its own sheet axes, metres. */
   bounds: { u: [number, number]; v: [number, number] };
-  /** The depth of the part's face nearest the camera, along the view's forward axis. */
-  near: number;
+  /** The middle of the part along w, so a figure drawn at it lands on the part. */
+  depth: number;
   dims: ViewDim[];
 }
 
@@ -98,18 +147,32 @@ const SQUARE = Math.sin((2 * Math.PI) / 180);
 const END_ON = 0.98;
 /** Sizes within this are the same size: 0.1 mm. */
 const SAME_M = 0.0001;
+/** Within 1°, an axis lies in the view's plane, so the angle it is drawn at is its true angle. */
+const IN_SHEET = Math.sin((1 * Math.PI) / 180);
+/** Turned less than this, a part is square and has no angle to give. */
+const MIN_ANGLE_DEG = 0.5;
+/** How far past a rim or a rod's tip to look for other material, metres. */
+const PAST_M = 0.0002;
+
+const WORLD: [Vec3, Vec3, Vec3] = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
 
 const dot = (a: ArrayLike<number>, b: ArrayLike<number>) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const neg = (a: Vec3): Vec3 => [0 - a[0], 0 - a[1], 0 - a[2]];
 
 /**
  * Which link of a chain to leave out, given the overall size beside it: the
- * smallest, the last of equals. A chain and the overall together state one
- * figure twice (715 beside 655 + 60), which a drawing never does; the one
- * left out is still there as the overall less the rest.
+ * smallest, the last of equals, and never one marked `keep`. A chain and the
+ * overall together state one figure twice (715 beside 655 + 60), which a
+ * drawing never does; the one left out is still there as the overall less the
+ * rest. A diameter is kept: it says the size is round, which a difference
+ * cannot. -1 when every link is kept.
  */
-export function omittedLink(lengths: number[]): number {
-  let at = 0;
-  for (let i = 1; i < lengths.length; i++) if (lengths[i] <= lengths[at] + SAME_M) at = i;
+export function omittedLink(lengths: number[], keep: boolean[] = []): number {
+  let at = -1;
+  for (let i = 0; i < lengths.length; i++) {
+    if (keep[i]) continue;
+    if (at < 0 || lengths[i] <= lengths[at] + SAME_M) at = i;
+  }
   return at;
 }
 
@@ -117,6 +180,32 @@ export function omittedLink(lengths: number[]): number {
 export function formatDim(metres: number): string {
   const mm = Math.round(metres * 10000) / 10;
   return Number.isInteger(mm) ? mm.toFixed(0) : mm.toFixed(1);
+}
+
+/** An angle as a drawing writes it: one decimal, none when whole. */
+export function formatAngle(degrees: number): string {
+  const d = Math.round(degrees * 10) / 10;
+  return `${Number.isInteger(d) ? d.toFixed(0) : d.toFixed(1)}°`;
+}
+
+/**
+ * A part's own axes as a view draws them. The one nearest the line of sight
+ * is depth; of the other two, the one nearer screen right is u. Each is turned
+ * to point right, up and away, as the view's own do, so a part square to the
+ * view gets the view's axes exactly.
+ */
+export function sheetAxes(frame: [Vec3, Vec3, Vec3] | undefined, view: DrawingView): SheetAxes {
+  const { forward, right, up } = VIEW_AXES[view];
+  const axes = frame ?? WORLD;
+  let wi = 0;
+  for (let i = 1; i < 3; i++) if (Math.abs(dot(axes[i], forward)) > Math.abs(dot(axes[wi], forward)) + 1e-9) wi = i;
+  let [a, b] = axes.filter((_, i) => i !== wi);
+  if (Math.abs(dot(b, right)) > Math.abs(dot(a, right)) + 1e-9) [a, b] = [b, a];
+  const toward = (x: Vec3, first: Vec3, second: Vec3) => {
+    const d = dot(x, first);
+    return d < -1e-9 || (Math.abs(d) <= 1e-9 && dot(x, second) < 0) ? neg(x) : x;
+  };
+  return { u: toward(a, right, up), v: toward(b, up, right), w: toward(axes[wi], forward, right) };
 }
 
 interface Stop { at: number; anchor: number; weight: number }
@@ -146,72 +235,210 @@ function chainStops(stops: Stop[], lo: number, hi: number, loAnchor: number): St
   return [merged[0], merged[merged.length - 1]];
 }
 
+/**
+ * Whether a point on the part's sheet is covered by any of its triangles, as
+ * drawn looking along w: what tells a rim that shows from one buried in other
+ * material. Built on first use, as most parts have no rim to ask about.
+ */
+function coverage(positions: ArrayLike<number>, faces: ArrayLike<number>, axes: SheetAxes) {
+  let tris: Float64Array | null = null;
+  return (pu: number, pv: number): boolean => {
+    if (!tris) {
+      tris = new Float64Array((faces.length / 3) * 6);
+      for (let t = 0, k = 0; t < faces.length; t++) {
+        const i = faces[t] * 3;
+        const q = [positions[i], positions[i + 1], positions[i + 2]];
+        tris[k++] = dot(q, axes.u);
+        tris[k++] = dot(q, axes.v);
+      }
+    }
+    const eps = 1e-9;
+    for (let k = 0; k < tris.length; k += 6) {
+      const ax = tris[k], ay = tris[k + 1], bx = tris[k + 2], by = tris[k + 3], cx = tris[k + 4], cy = tris[k + 5];
+      if (pu < Math.min(ax, bx, cx) - eps || pu > Math.max(ax, bx, cx) + eps) continue;
+      if (pv < Math.min(ay, by, cy) - eps || pv > Math.max(ay, by, cy) + eps) continue;
+      const d1 = (bx - ax) * (pv - ay) - (by - ay) * (pu - ax);
+      const d2 = (cx - bx) * (pv - by) - (cy - by) * (pu - bx);
+      const d3 = (ax - cx) * (pv - cy) - (ay - cy) * (pu - cx);
+      const area = Math.abs((bx - ax) * (cy - ay) - (by - ay) * (cx - ax));
+      const tol = eps * Math.max(1, area);
+      if ((d1 >= -tol && d2 >= -tol && d3 >= -tol) || (d1 <= tol && d2 <= tol && d3 <= tol)) {
+        if (area > 0) return true;
+      }
+    }
+    return false;
+  };
+}
+
+/**
+ * Whether a circular edge is the rim of a boss (a round standing out, which a
+ * side view shows) rather than of a hole (cut in, which it does not). Of the
+ * edge's two surfaces, the round wall is the one whose facets face away from
+ * the axis — or toward it, for a hole.
+ */
+function bossTest(positions: ArrayLike<number>, faces: ArrayLike<number>, triangleSurface: number[]) {
+  const first = new Map<number, number>();
+  triangleSurface.forEach((s, t) => { if (s >= 0 && !first.has(s)) first.set(s, t); });
+  return (surfaces: [number, number], centre: Vec3, axis: Vec3): boolean => {
+    let best: { across: number; outward: number } | null = null;
+    for (const s of surfaces) {
+      const t = first.get(s);
+      if (t === undefined) continue;
+      const q = [0, 1, 2].map((k) => {
+        const i = faces[t * 3 + k] * 3;
+        return [positions[i], positions[i + 1], positions[i + 2]];
+      });
+      const ab = [q[1][0] - q[0][0], q[1][1] - q[0][1], q[1][2] - q[0][2]];
+      const ac = [q[2][0] - q[0][0], q[2][1] - q[0][1], q[2][2] - q[0][2]];
+      const n = [ab[1] * ac[2] - ab[2] * ac[1], ab[2] * ac[0] - ab[0] * ac[2], ab[0] * ac[1] - ab[1] * ac[0]];
+      const length = Math.hypot(n[0], n[1], n[2]);
+      if (!(length > 0)) continue;
+      const along = Math.abs(dot(n, axis)) / length;
+      const c = [0, 1, 2].map((k) => (q[0][k] + q[1][k] + q[2][k]) / 3 - centre[k]);
+      const h = dot(c, axis);
+      const radial = [c[0] - axis[0] * h, c[1] - axis[1] * h, c[2] - axis[2] * h];
+      // The wall is the surface square to the axis.
+      if (!best || along < best.across) best = { across: along, outward: dot(n, radial) };
+    }
+    return !!best && best.across < 0.5 && best.outward > 0;
+  };
+}
+
 /** The dimensions for one part in one view. */
 export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimensions | null {
   const { forward, right, up } = VIEW_AXES[view];
+  const axes = sheetAxes(body.frame, view);
+  const { u: U, v: V, w: W } = axes;
   const p = body.positions;
   if (p.length < 9) return null;
 
-  // --- the outline ---------------------------------------------------------
-  let u0 = Infinity, u1 = -Infinity, v0 = Infinity, v1 = -Infinity, near = Infinity;
+  // --- the outline, on the part's own axes ---------------------------------
+  let u0 = Infinity, u1 = -Infinity, v0 = Infinity, v1 = -Infinity, w0 = Infinity, w1 = -Infinity;
   for (let i = 0; i < p.length; i += 3) {
     const q = [p[i], p[i + 1], p[i + 2]];
-    const u = dot(q, right), v = dot(q, up), w = dot(q, forward);
+    const u = dot(q, U), v = dot(q, V), w = dot(q, W);
     if (u < u0) u0 = u;
     if (u > u1) u1 = u;
     if (v < v0) v0 = v;
     if (v > v1) v1 = v;
-    if (w < near) near = w;
+    if (w < w0) w0 = w;
+    if (w > w1) w1 = w;
   }
   if (!(u1 - u0 > SAME_M || v1 - v0 > SAME_M)) return null;
   const width = u1 - u0;
   const height = v1 - v0;
+  const covered = coverage(body.positions, body.faces, axes);
 
   // --- the edges -----------------------------------------------------------
   const uStops: Stop[] = [];
   const vStops: Stop[] = [];
   const circles: { centre: [number, number]; radius: number }[] = [];
-  // A circle lying in the view (a cylinder seen side on) whose diameter spans
-  // the part: that width or height is a diameter.
-  let uIsDiameter = false;
-  let vIsDiameter = false;
+  const balls: { centre: [number, number]; radius: number }[] = [];
+  // Rounds lying in the view: across them, from silhouette to silhouette, is a diameter.
+  const sideOn: { axis: 'u' | 'v'; lo: number; hi: number }[] = [];
+  // Whether something straight runs along each axis, which is what makes the
+  // part's turn in the view an angle worth giving: a plain disc's is not.
+  const straight = { u: false, v: false };
+
+  /**
+   * A round seen side on, its axis along `along`: its silhouette is a stop each
+   * side across it, and a diameter between them. `at` is where to stand along
+   * the axis to look across.
+   */
+  const silhouette = (along: 'u' | 'v', cu: number, cv: number, radius: number, weight: number) => {
+    if (along === 'v') {
+      uStops.push({ at: cu - radius, anchor: cv, weight }, { at: cu + radius, anchor: cv, weight });
+      sideOn.push({ axis: 'u', lo: cu - radius, hi: cu + radius });
+    } else {
+      vStops.push({ at: cv - radius, anchor: cu, weight }, { at: cv + radius, anchor: cu, weight });
+      sideOn.push({ axis: 'v', lo: cv - radius, hi: cv + radius });
+    }
+  };
 
   if (body.faces.length / 3 <= MAX_DIM_TRIANGLES) {
     const found = findFeatureEdges(body.positions, body.faces);
+    const isBoss = bossTest(body.positions, body.faces, found.triangleSurface);
     for (const candidate of found.edges) {
       const e = candidate.edge;
       if (e.kind === 'line') {
-        // Judged by how it is DRAWN, not how it lies: projected straight onto
-        // the sheet, an edge tilted away in depth (a windmill's pitched sail)
-        // is still a vertical line at one place across it, and that place is
-        // what a dimension measures to.
-        const du = dot(e.b, right) - dot(e.a, right);
-        const dv = dot(e.b, up) - dot(e.a, up);
+        // Judged by how it is drawn on the part's own sheet, not how it lies:
+        // seen along w, an edge tilted away in depth is still a vertical line at
+        // one place across it, and that place is what a dimension measures to.
+        const delta = [e.b[0] - e.a[0], e.b[1] - e.a[1], e.b[2] - e.a[2]];
+        const du = dot(delta, U);
+        const dv = dot(delta, V);
         const drawn = Math.hypot(du, dv);
         if (!(drawn > SAME_M)) continue;
-        const ua = dot(e.a, right), ub = dot(e.b, right);
-        const va = dot(e.a, up), vb = dot(e.b, up);
-        // Runs up the sheet: a stop across it, reaching down to the width row.
+        const ua = dot(e.a, U), ub = dot(e.b, U);
+        const va = dot(e.a, V), vb = dot(e.b, V);
+        const length = Math.hypot(delta[0], delta[1], delta[2]);
+        // Runs up the part: a stop across it, reaching down to the width row.
         if (Math.abs(du) / drawn < SQUARE && drawn >= MIN_EDGE_SHARE * height) {
           uStops.push({ at: (ua + ub) / 2, anchor: Math.min(va, vb), weight: drawn });
+          if (Math.abs(dv) / length > 1 - SQUARE) straight.v = true;
         }
-        // Runs along the sheet: a stop up it, reaching left to the height row.
+        // Runs along the part: a stop up it, reaching left to the height row.
         if (Math.abs(dv) / drawn < SQUARE && drawn >= MIN_EDGE_SHARE * width) {
           vStops.push({ at: (va + vb) / 2, anchor: Math.min(ua, ub), weight: drawn });
+          if (Math.abs(du) / length > 1 - SQUARE) straight.u = true;
         }
       } else {
-        const facing = Math.abs(dot(e.axis, forward));
-        const cu = dot(e.centre, right), cv = dot(e.centre, up);
+        const facing = Math.abs(dot(e.axis, W));
+        const cu = dot(e.centre, U), cv = dot(e.centre, V);
         if (facing > END_ON) {
           circles.push({ centre: [cu, cv], radius: e.radius });
-        } else if (facing < 1 - END_ON) {
-          // In the sheet. Its diameter runs square to its axis.
-          const diameter = 2 * e.radius;
-          if (Math.abs(dot(e.axis, up)) > END_ON && Math.abs(diameter - width) < SAME_M) uIsDiameter = true;
-          if (Math.abs(dot(e.axis, right)) > END_ON && Math.abs(diameter - height) < SAME_M) vIsDiameter = true;
+          continue;
         }
+        if (facing >= 1 - END_ON) continue;
+        // In the sheet, so drawn as a straight line across the round. Where the
+        // round steps (a mast on a wider base) or ends, the rim is a stop along
+        // its axis — if it shows. Looked for just either side of the rim, a
+        // little inside the round's radius: material on both sides means the
+        // rim is buried (a shaft's end inside the sail it carries).
+        const along = Math.abs(dot(e.axis, V)) > END_ON ? 'v' : Math.abs(dot(e.axis, U)) > END_ON ? 'u' : null;
+        // A hole seen side on is out of sight inside the part: only a boss shows.
+        if (!along || !isBoss(candidate.surfaces, e.centre, e.axis)) continue;
+        const r = 0.9 * e.radius;
+        const shows = along === 'v'
+          ? [cv - PAST_M, cv + PAST_M].some((v) => !covered(cu - r, v) || !covered(cu + r, v))
+          : [cu - PAST_M, cu + PAST_M].some((u) => !covered(u, cv - r) || !covered(u, cv + r));
+        if (!shows) continue;
+        if (along === 'v') vStops.push({ at: cv, anchor: cu - e.radius, weight: 2 * e.radius });
+        else uStops.push({ at: cu, anchor: cv - e.radius, weight: 2 * e.radius });
+        silhouette(along, cu, cv, e.radius, 2 * e.radius);
       }
     }
+  }
+
+  // Rods: seen end-on, a circle; seen side on, a silhouette each side, and the
+  // tip of each domed end where it is not buried in the part.
+  for (const rod of body.rods ?? []) {
+    const axis = [rod.b[0] - rod.a[0], rod.b[1] - rod.a[1], rod.b[2] - rod.a[2]];
+    const length = Math.hypot(axis[0], axis[1], axis[2]);
+    const mid: Vec3 = [(rod.a[0] + rod.b[0]) / 2, (rod.a[1] + rod.b[1]) / 2, (rod.a[2] + rod.b[2]) / 2];
+    const cu = dot(mid, U), cv = dot(mid, V);
+    const t = length > 0 ? axis.map((x) => x / length) : [0, 0, 1];
+    if (Math.abs(dot(t, W)) > END_ON) {
+      balls.push({ centre: [cu, cv], radius: rod.radius });
+      continue;
+    }
+    const along = Math.abs(dot(t, V)) > END_ON ? 'v' : Math.abs(dot(t, U)) > END_ON ? 'u' : null;
+    if (!along) continue;
+    straight[along] = true;
+    const half = length / 2 + rod.radius;
+    const across = along === 'v' ? cu : cv;
+    const centre = along === 'v' ? cv : cu;
+    const stops = along === 'v' ? vStops : uStops;
+    for (const tip of [centre - half, centre + half]) {
+      const past = tip + Math.sign(tip - centre) * PAST_M;
+      if (!(along === 'v' ? covered(across, past) : covered(past, across))) {
+        stops.push({ at: tip, anchor: across - rod.radius, weight: 2 * rod.radius });
+      }
+    }
+    const looks = along === 'v'
+      ? [cu - rod.radius - PAST_M, cu + rod.radius + PAST_M].some((u) => !covered(u, cv))
+      : [cv - rod.radius - PAST_M, cv + rod.radius + PAST_M].some((v) => !covered(cu, v));
+    if (looks) silhouette(along, cu, cv, rod.radius, 2 * rod.radius);
   }
 
   // A sphere wholly inside another is out of sight (an eye socket inside a
@@ -220,9 +447,9 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
   const spheres = (body.spheres ?? []).filter((a, i, all) => !all.some((b, j) => j !== i &&
     b.radius > a.radius &&
     Math.hypot(a.centre[0] - b.centre[0], a.centre[1] - b.centre[1], a.centre[2] - b.centre[2]) + a.radius <= b.radius + SAME_M));
-  const balls: { centre: [number, number]; radius: number }[] = spheres.map((sphere) => ({
-    centre: [dot(sphere.centre, right), dot(sphere.centre, up)], radius: sphere.radius,
-  }));
+  for (const sphere of spheres) {
+    balls.push({ centre: [dot(sphere.centre, U), dot(sphere.centre, V)], radius: sphere.radius });
+  }
 
   // --- circles: one per hole, one label per size ---------------------------
   const holes: { centre: [number, number]; radius: number }[] = [];
@@ -261,9 +488,8 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
       label: `${count > 1 ? `${count}× ` : ''}⌀${formatDim(size.radius * 2)}`,
     });
   }
-  if (wholeDisc) {
-    return { id: body.id, bounds: { u: [u0, u1], v: [v0, v1] }, near, dims };
-  }
+  const result = (): BodyDimensions => ({ id: body.id, axes, bounds: { u: [u0, u1], v: [v0, v1] }, depth: (w0 + w1) / 2, dims });
+  if (wholeDisc) return result();
 
   // Holes seen end-on are located by their centres. A hole's extension line
   // starts at its centre: a centre line.
@@ -274,7 +500,9 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
   }
 
   // --- rows ----------------------------------------------------------------
-  const linear = (axis: 'u' | 'v', a: Stop, b: Stop, row: 1 | 2, edge: number, diameter = false): LinearDim => ({
+  const isDiameter = (axis: 'u' | 'v', a: number, b: number) =>
+    sideOn.some((s) => s.axis === axis && Math.abs(s.lo - a) < MERGE_M && Math.abs(s.hi - b) < MERGE_M);
+  const linear = (axis: 'u' | 'v', a: Stop, b: Stop, row: 1 | 2, edge: number): LinearDim => ({
     kind: 'linear',
     axis,
     a: a.at,
@@ -284,25 +512,46 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
     edge,
     row,
     valueMm: Math.round((b.at - a.at) * 10000) / 10,
-    label: `${diameter ? '⌀' : ''}${formatDim(b.at - a.at)}`,
+    label: `${isDiameter(axis, a.at, b.at) ? '⌀' : ''}${formatDim(b.at - a.at)}`,
   });
 
-  const rows = (axis: 'u' | 'v', stops: Stop[], lo: number, hi: number, edge: number, diameter: boolean) => {
+  const rows = (axis: 'u' | 'v', stops: Stop[], lo: number, hi: number, edge: number) => {
     if (!(hi - lo > SAME_M)) return;
     const chain = chainStops(stops, lo, hi, edge);
     if (chain.length > 2) {
       const links = chain.slice(1).map((stop, i) => stop.at - chain[i].at);
-      const skip = omittedLink(links);
+      const skip = omittedLink(links, links.map((_, i) => isDiameter(axis, chain[i].at, chain[i + 1].at)));
       for (let i = 0; i + 1 < chain.length; i++) {
         if (i !== skip) dims.push(linear(axis, chain[i], chain[i + 1], 1, edge));
       }
     }
-    dims.push(linear(axis, chain[0], chain[chain.length - 1], 2, edge, diameter));
+    dims.push(linear(axis, chain[0], chain[chain.length - 1], 2, edge));
   };
-  rows('u', uStops, u0, u1, v0, uIsDiameter);
-  rows('v', vStops, v0, v1, u0, vIsDiameter);
+  rows('u', uStops, u0, u1, v0);
+  rows('v', vStops, v0, v1, u0);
 
-  return { id: body.id, bounds: { u: [u0, u1], v: [v0, v1] }, near, dims };
+  // --- the angle -----------------------------------------------------------
+  // Measured on the part's long axis, and only when that axis lies in the
+  // view's plane, where the angle it is drawn at is the angle it is at.
+  const main = width >= height ? 'u' : 'v';
+  const m = main === 'u' ? U : V;
+  if (straight[main] && Math.abs(dot(m, forward)) < IN_SHEET) {
+    const x = dot(m, right), y = dot(m, up);
+    const off = (Math.atan2(Math.abs(y), Math.abs(x)) * 180) / Math.PI;
+    const [deg, ref] = off <= 45 ? [off, right] : [90 - off, up];
+    if (deg > MIN_ANGLE_DEG) {
+      dims.push({
+        kind: 'angle',
+        centre: [(u0 + u1) / 2, (v0 + v1) / 2],
+        from: dot(m, ref) >= 0 ? ref : neg(ref),
+        to: m,
+        valueDeg: Math.round(deg * 10) / 10,
+        label: formatAngle(deg),
+      });
+    }
+  }
+
+  return result();
 }
 
 /** Every part's dimensions in one view. */
@@ -311,6 +560,39 @@ export function viewDimensions(bodies: BodyMesh[], view: DrawingView): BodyDimen
   for (const body of bodies) {
     const d = bodyViewDimensions(body, view);
     if (d) out.push(d);
+  }
+  return out;
+}
+
+/**
+ * Where a part sits: its origin from its parent's (from the world's, for a
+ * part with none), across the sheet and up it. The two figures and the third
+ * from another view put every part where it goes; each part's own dimensions
+ * then say what it is.
+ */
+export interface LocationDim {
+  id: string;
+  /** The reference and the located origin, on the view's own right and up, metres. */
+  from: [number, number];
+  to: [number, number];
+  /** The two figures; null where the part is not moved that way. */
+  across: { valueMm: number; label: string } | null;
+  up: { valueMm: number; label: string } | null;
+}
+
+export function locationDimensions(links: { id: string; from: Vec3; to: Vec3 }[], view: DrawingView): LocationDim[] {
+  const { right, up } = VIEW_AXES[view];
+  const figure = (d: number) => (Math.abs(d) < MERGE_M ? null : {
+    valueMm: Math.round(Math.abs(d) * 10000) / 10,
+    label: formatDim(Math.abs(d)),
+  });
+  const out: LocationDim[] = [];
+  for (const link of links) {
+    const from: [number, number] = [dot(link.from, right), dot(link.from, up)];
+    const to: [number, number] = [dot(link.to, right), dot(link.to, up)];
+    const across = figure(to[0] - from[0]);
+    const upFigure = figure(to[1] - from[1]);
+    if (across || upFigure) out.push({ id: link.id, from, to, across, up: upFigure });
   }
   return out;
 }
