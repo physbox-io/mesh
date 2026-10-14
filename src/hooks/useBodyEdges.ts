@@ -15,7 +15,7 @@ function shapeKey(node: SceneNode): string {
     node.id,
     node.csgFn ?? null,
     csgSourceGeoms(node).map((g) => [
-      g.type, g.type === 'mesh' ? meshChecksum(g) : g.size, g.pos, g.quat, g.euler, g.fromto, g.csg ?? null, g.role ?? null, g.thread ?? null,
+      g.type, g.type === 'mesh' ? meshChecksum(g) : g.size, g.pos, g.quat, g.euler, g.fromto, g.csg ?? null, g.role ?? null, g.thread ?? null, g.facets ?? null,
     ]),
   ]);
 }

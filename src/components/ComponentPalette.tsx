@@ -1,13 +1,9 @@
 import React from 'react';
 import type { SceneNode } from '../types/scene';
 import type { PhysicsState } from '../store/useStore';
-import {
-  createHeatSetBossNode,
-  createHexNutTrapNode,
-  createBearingPocketNode,
-  createDShaftHubNode,
-  createCounterboreHoleNode,
-} from '../utils/hardwareComponents';
+import type { HardwareCutKind } from '../types/scene';
+import { createDShaftHubNode } from '../utils/hardwareComponents';
+import { HARDWARE_KINDS } from '../utils/hardwareCuts';
 
 /** What the palette adds by click: every component but the lattice, which has its own handler. */
 export type PaletteComponentType = Exclude<Parameters<PhysicsState['addComponent']>[0], 'lattice'>;
@@ -20,6 +16,12 @@ export interface ComponentPaletteProps {
   onAddSculpt: () => void;
   onAddLattice: () => void;
   onAddHardwareNode: (node: SceneNode) => void;
+  /**
+   * The selected body that hardware would be cut into, by name, or null when
+   * nothing solid is selected — a nut trap is a hole in a part, not a part.
+   */
+  hardwareTarget: string | null;
+  onAddHardwareCut: (kind: HardwareCutKind) => void;
   onAddNoteCard: () => void;
 }
 
@@ -31,8 +33,17 @@ export const ComponentPalette: React.FC<ComponentPaletteProps> = ({
   onAddSculpt,
   onAddLattice,
   onAddHardwareNode,
+  hardwareTarget,
+  onAddHardwareCut,
   onAddNoteCard,
 }) => {
+  const cutTile = (kind: HardwareCutKind) => ({
+    onClick: () => onAddHardwareCut(kind),
+    disabled: !hardwareTarget,
+    title: hardwareTarget
+      ? `${HARDWARE_KINDS[kind].hint} Cut into ${hardwareTarget} where you last clicked it; change its size in the Cut panel.`
+      : `${HARDWARE_KINDS[kind].hint} Select a part first: this is cut into it.`,
+  });
   return (
     <>
       <h2 className="text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider mb-1">
@@ -755,14 +766,18 @@ export const ComponentPalette: React.FC<ComponentPaletteProps> = ({
       {/* 3D-Printed Mechanical Hardware Primitives */}
       <div className="mt-4 pt-3 border-t border-slate-200 dark:border-slate-800">
         <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2 flex items-center gap-1.5">
-          <span>🔩 3D Hardware Primitives</span>
+          <span>🔩 Hardware</span>
         </h3>
+        <p className="text-[10px] leading-snug text-slate-400 dark:text-slate-500 mb-2">
+          {hardwareTarget
+            ? <>Cut into <span className="font-semibold text-slate-600 dark:text-slate-300">{hardwareTarget}</span> where you last clicked it. Pick the size in its Cut panel.</>
+            : 'Select a part, click where it goes, then pick one. Sizes M2 to M24 are in its Cut panel.'}
+        </p>
         <div className="grid grid-cols-2 gap-2">
           {/* M3 Heat-Set Insert Boss */}
           <button
-            onClick={() => onAddHardwareNode(createHeatSetBossNode('M3'))}
-            className="p-2 border border-slate-200/90 dark:border-slate-800 rounded-xl bg-gradient-to-b from-white to-slate-50/70 dark:from-slate-900 dark:to-slate-900/80 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:-translate-y-0.5 hover:shadow-md hover:border-emerald-300 dark:hover:border-emerald-800/80 active:translate-y-0 active:scale-[0.97] transition-all duration-150 group"
-            title="M3 Heat-Set Insert Boss"
+            {...cutTile('insert_boss')}
+            className="p-2 border border-slate-200/90 dark:border-slate-800 rounded-xl bg-gradient-to-b from-white to-slate-50/70 dark:from-slate-900 dark:to-slate-900/80 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:-translate-y-0.5 hover:shadow-md hover:border-emerald-300 dark:hover:border-emerald-800/80 active:translate-y-0 active:scale-[0.97] transition-all duration-150 group disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:translate-y-0 disabled:hover:shadow-xs"
           >
             <div className="p-1.5 bg-gradient-to-br from-emerald-50 to-emerald-100/70 dark:from-emerald-950/40 dark:to-emerald-900/20 ring-1 ring-emerald-200/60 dark:ring-emerald-800/40 rounded-lg mb-1 group-hover:scale-110 group-hover:-rotate-3 transition-transform duration-200">
               <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none">
@@ -819,15 +834,14 @@ export const ComponentPalette: React.FC<ComponentPaletteProps> = ({
               </svg>
             </div>
             <span className="text-[10px] font-bold text-slate-700 dark:text-slate-200 group-hover:text-emerald-600 dark:group-hover:text-emerald-400 transition-colors">
-              M3 Insert Boss
+              Insert Boss
             </span>
           </button>
 
           {/* M3 Hex Nut Trap */}
           <button
-            onClick={() => onAddHardwareNode(createHexNutTrapNode('M3'))}
-            className="p-2 border border-slate-200/90 dark:border-slate-800 rounded-xl bg-gradient-to-b from-white to-slate-50/70 dark:from-slate-900 dark:to-slate-900/80 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:-translate-y-0.5 hover:shadow-md hover:border-blue-300 dark:hover:border-blue-800/80 active:translate-y-0 active:scale-[0.97] transition-all duration-150 group"
-            title="M3 Hex Nut Trap Slot"
+            {...cutTile('nut_trap')}
+            className="p-2 border border-slate-200/90 dark:border-slate-800 rounded-xl bg-gradient-to-b from-white to-slate-50/70 dark:from-slate-900 dark:to-slate-900/80 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:-translate-y-0.5 hover:shadow-md hover:border-blue-300 dark:hover:border-blue-800/80 active:translate-y-0 active:scale-[0.97] transition-all duration-150 group disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:translate-y-0 disabled:hover:shadow-xs"
           >
             <div className="p-1.5 bg-gradient-to-br from-blue-50 to-blue-100/70 dark:from-blue-950/40 dark:to-blue-900/20 ring-1 ring-blue-200/60 dark:ring-blue-800/40 rounded-lg mb-1 group-hover:scale-110 group-hover:rotate-6 transition-transform duration-200">
               <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none">
@@ -870,15 +884,14 @@ export const ComponentPalette: React.FC<ComponentPaletteProps> = ({
               </svg>
             </div>
             <span className="text-[10px] font-bold text-slate-700 dark:text-slate-200 group-hover:text-blue-600 dark:group-hover:text-blue-400 transition-colors">
-              M3 Nut Trap
+              Nut Trap
             </span>
           </button>
 
           {/* M3 Counterbore Cap Recess */}
           <button
-            onClick={() => onAddHardwareNode(createCounterboreHoleNode('M3'))}
-            className="p-2 border border-slate-200/90 dark:border-slate-800 rounded-xl bg-gradient-to-b from-white to-slate-50/70 dark:from-slate-900 dark:to-slate-900/80 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:-translate-y-0.5 hover:shadow-md hover:border-cyan-300 dark:hover:border-cyan-800/80 active:translate-y-0 active:scale-[0.97] transition-all duration-150 group"
-            title="M3 Counterbored Screw Hole (Cap Screw Recess + Shank Clearance)"
+            {...cutTile('counterbore')}
+            className="p-2 border border-slate-200/90 dark:border-slate-800 rounded-xl bg-gradient-to-b from-white to-slate-50/70 dark:from-slate-900 dark:to-slate-900/80 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:-translate-y-0.5 hover:shadow-md hover:border-cyan-300 dark:hover:border-cyan-800/80 active:translate-y-0 active:scale-[0.97] transition-all duration-150 group disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:translate-y-0 disabled:hover:shadow-xs"
           >
             <div className="p-1.5 bg-gradient-to-br from-cyan-50 to-cyan-100/70 dark:from-cyan-950/40 dark:to-cyan-900/20 ring-1 ring-cyan-200/60 dark:ring-cyan-800/40 rounded-lg mb-1 group-hover:scale-110 group-hover:-rotate-3 transition-transform duration-200">
               <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none">
@@ -924,15 +937,14 @@ export const ComponentPalette: React.FC<ComponentPaletteProps> = ({
               </svg>
             </div>
             <span className="text-[10px] font-bold text-slate-700 dark:text-slate-200 group-hover:text-cyan-600 dark:group-hover:text-cyan-400 transition-colors">
-              M3 Cap Recess
+              Counterbore
             </span>
           </button>
 
           {/* 608 Skate Bearing Pocket */}
           <button
-            onClick={() => onAddHardwareNode(createBearingPocketNode('608'))}
-            className="p-2 border border-slate-200/90 dark:border-slate-800 rounded-xl bg-gradient-to-b from-white to-slate-50/70 dark:from-slate-900 dark:to-slate-900/80 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:-translate-y-0.5 hover:shadow-md hover:border-amber-300 dark:hover:border-amber-800/80 active:translate-y-0 active:scale-[0.97] transition-all duration-150 group"
-            title="608 Skate Bearing Pocket"
+            {...cutTile('bearing')}
+            className="p-2 border border-slate-200/90 dark:border-slate-800 rounded-xl bg-gradient-to-b from-white to-slate-50/70 dark:from-slate-900 dark:to-slate-900/80 shadow-xs flex flex-col items-center justify-center text-center cursor-pointer hover:-translate-y-0.5 hover:shadow-md hover:border-amber-300 dark:hover:border-amber-800/80 active:translate-y-0 active:scale-[0.97] transition-all duration-150 group disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:translate-y-0 disabled:hover:shadow-xs"
           >
             <div className="p-1.5 bg-gradient-to-br from-amber-50 to-amber-100/70 dark:from-amber-950/40 dark:to-amber-900/20 ring-1 ring-amber-200/60 dark:ring-amber-800/40 rounded-lg mb-1 group-hover:scale-110 group-hover:rotate-45 transition-transform duration-300">
               <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none">
@@ -982,7 +994,7 @@ export const ComponentPalette: React.FC<ComponentPaletteProps> = ({
               </svg>
             </div>
             <span className="text-[10px] font-bold text-slate-700 dark:text-slate-200 group-hover:text-amber-600 dark:group-hover:text-amber-400 transition-colors">
-              608 Bearing
+              Bearing Pocket
             </span>
           </button>
 

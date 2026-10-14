@@ -37,9 +37,10 @@
 import { Circle, Square, Donut, Trash2, Move } from 'lucide-react';
 import { SettledNumberField } from './SettledInputs';
 import { ThreadField } from './ThreadField';
+import { BORE_LABELS, HARDWARE_KINDS } from '../utils/hardwareCuts';
 import { useStore } from '../store/useStore';
 import { cutDepthOf, sourcePositiveBounds } from '../utils/csg';
-import type { SceneGeom, SceneNode } from '../types/scene';
+import type { HardwareCutKind, SceneGeom, SceneNode } from '../types/scene';
 
 const SHAPES = [
   ['cylinder', 'Hole', Circle, 'A round hole at a diameter you type, square to the surface you last clicked. Goes right through until you give it a depth.'],
@@ -252,6 +253,103 @@ function CutRow({ node, geom, index }: {
 }
 
 /**
+ * One hardware feature, however many cuts it is made of: its size, what goes
+ * in its hole, its fit. Each change rebuilds every piece from the tables in
+ * utils/hardwareCuts.ts, so a nut trap stays a nut trap of the size it says.
+ */
+function HardwareRow({ node, geom, index }: {
+  node: SceneNode;
+  geom: SceneGeom;
+  index: number;
+}) {
+  const deleteNodeGeom = useStore((s) => s.deleteNodeGeom);
+  const setHardwareCut = useStore((s) => s.setHardwareCut);
+  const moveCutTo = useStore((s) => s.moveCutTo);
+  const setActiveGeomIndex = useStore((s) => s.setActiveGeomIndex);
+  const spot = useStore((s) => s.cutSpot);
+  const hw = geom.hardware!;
+  const info = HARDWARE_KINDS[hw.kind];
+  const fitMm = hw.fit ? mm(hw.fit) : 0;
+  const elsewhere = spot?.nodeId === node.id
+    && (geom.cutAt || []).some((v, a) => Math.abs(v - (spot.at[a] ?? 0)) > 1e-6);
+  const grab = () => {
+    setActiveGeomIndex(index);
+    window.dispatchEvent(new CustomEvent('physbox:gesture', { detail: { kind: 'move' } }));
+  };
+
+  return (
+    <div className="rounded-lg border border-rose-200 dark:border-rose-900/60 bg-rose-50/50 dark:bg-rose-950/20 p-1.5 space-y-1">
+      <div className="flex items-center gap-1">
+        <span className="flex-1 text-[10px] font-semibold text-rose-600 dark:text-rose-400" title={info.hint}>
+          {info.label} {hw.size}
+        </span>
+        <button
+          type="button"
+          onClick={grab}
+          title="Slide this feature across the part. Click to put it down, Esc to put it back."
+          className="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase cursor-pointer bg-white dark:bg-slate-800 text-slate-400 hover:text-rose-600 transition-colors flex items-center gap-0.5"
+        >
+          <Move className="w-2.5 h-2.5" />Move
+        </button>
+        {elsewhere && (
+          <button
+            type="button"
+            onClick={() => moveCutTo(node.id, index, { at: spot!.at, normal: spot!.normal })}
+            title="Move this feature to the spot you last clicked, square to the surface there"
+            className="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase cursor-pointer bg-white dark:bg-slate-800 text-slate-400 hover:text-rose-600 transition-colors"
+          >
+            Here
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={() => deleteNodeGeom(node.id, index)}
+          title={`Remove this ${info.label.toLowerCase()}`}
+          className="p-0.5 rounded text-slate-400 hover:text-rose-600 cursor-pointer"
+        >
+          <Trash2 className="w-3 h-3" />
+        </button>
+      </div>
+      <div className="flex gap-1 items-end">
+        <label className="flex-1 min-w-0" title={hw.kind === 'bearing' ? 'The bearing it is sized for.' : 'The bolt size it is sized for.'}>
+          <span className="block text-[9px] font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500">Size</span>
+          <select
+            value={hw.size}
+            onChange={(e) => setHardwareCut(node.id, hw.group, { size: e.target.value })}
+            className={fieldClass}
+          >
+            {info.sizes.map((size) => <option key={size} value={size}>{size}</option>)}
+          </select>
+        </label>
+        {info.bores && (
+          <label className="flex-1 min-w-0" title="What goes in the hole: a screw through it, a thread cut in it, or a heat-set insert.">
+            <span className="block text-[9px] font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500">
+              {hw.kind === 'counterbore' ? 'Below head' : 'Hole'}
+            </span>
+            <select
+              value={hw.bore ?? info.defaultBore}
+              onChange={(e) => setHardwareCut(node.id, hw.group, { bore: e.target.value as typeof hw.bore })}
+              className={fieldClass}
+            >
+              {info.bores.map((bore) => <option key={bore} value={bore}>{BORE_LABELS[bore]}</option>)}
+            </select>
+          </label>
+        )}
+        <CutField
+          label="Fit mm"
+          min={0}
+          value={fitMm}
+          title="Clearance across the diameter of what fits in it: the nut, the head, the insert, the bearing."
+          onChange={(v) => setHardwareCut(node.id, hw.group, { fitMm: v })}
+        />
+      </div>
+    </div>
+  );
+}
+
+const HARDWARE_ORDER: HardwareCutKind[] = ['nut_trap', 'counterbore', 'insert', 'insert_boss', 'bearing'];
+
+/**
  * The Cut controls for one body: the shapes you can take out of it, and the
  * ones already taken.
  *
@@ -267,6 +365,7 @@ export function CutControls({ node, disabled, disabledReason, compact }: {
   compact?: boolean;
 }) {
   const addBodyCut = useStore((s) => s.addBodyCut);
+  const addHardwareCut = useStore((s) => s.addHardwareCut);
   const bounds = sourcePositiveBounds(node);
   const cuts = (node.geoms || [])
     .map((geom, index) => ({ geom, index }))
@@ -292,12 +391,37 @@ export function CutControls({ node, disabled, disabledReason, compact }: {
           </button>
         ))}
       </div>
+      <div className="flex flex-wrap gap-1">
+        {HARDWARE_ORDER.map((kind) => (
+          <button
+            key={kind}
+            type="button"
+            disabled={disabled || !bounds}
+            onClick={() => addHardwareCut(node.id, kind)}
+            title={disabled ? (disabledReason ?? 'There is nothing solid to cut into yet.') : `${HARDWARE_KINDS[kind].hint} Goes where you last clicked on the part.`}
+            className={`px-1.5 py-1 rounded-md text-[10px] font-semibold transition-colors ${
+              disabled || !bounds
+                ? 'bg-slate-50 dark:bg-slate-800/40 text-slate-300 dark:text-slate-600 cursor-not-allowed'
+                : 'bg-slate-100 dark:bg-slate-800 text-slate-500 hover:text-rose-600 dark:hover:text-rose-400 cursor-pointer'
+            }`}
+          >
+            {HARDWARE_KINDS[kind].label}
+          </button>
+        ))}
+      </div>
 
       {bounds && cuts.length > 0 && (
         <div className="space-y-1">
-          {cuts.map(({ geom, index }) => (
-            <CutRow key={geom.name || index} node={node} geom={geom} index={index} />
-          ))}
+          {cuts.map(({ geom, index }) => {
+            // A hardware feature is shown once, on its first piece.
+            const group = geom.hardware?.group;
+            if (group) {
+              const first = cuts.find((c) => c.geom.hardware?.group === group);
+              if (first?.index !== index) return null;
+              return <HardwareRow key={group} node={node} geom={geom} index={index} />;
+            }
+            return <CutRow key={geom.name || index} node={node} geom={geom} index={index} />;
+          })}
           {!compact && (
             <p className="text-[10px] leading-snug text-slate-400 dark:text-slate-500">
               A cut is drawn as a red outline. Click anywhere on the part to aim the next one, or to move one you have.

@@ -18,7 +18,7 @@ A browser-based rigid-body physics simulator and CAD fabrication studio built on
   * **Contour slicing.** Stackable relief contour slices for laser, cardboard or foam, as SVG, G-code, or a ZIP package.
   * **Relief carve.** Heightmap roughing and finishing toolpaths with probed mesh levelling.
 * **Machine control and work origin.** Jog pad (0.1/1/10 mm steps) to drive the tool to the job origin, `G10 L20` XY zeroing, touch-plate Z probing that refuses to set a datum when the probe makes no contact, and 3×3+ bed probing that warps G-code to follow an untrue bed. GRBL 1.1, FluidNC and grblHAL over WebSerial. See **Docs → Fabrication → Machine Setup &amp; Zeroing** in the app.
-* **Hardware primitives.** Heat-set insert bosses (M2 to M8), metric printed threads (M3 to M16), hex nut traps (M3 to M6), bearing pockets, snap-fits, D-shaft motor couplers.
+* **Hardware, cut into your part.** Hex nut traps and counterbored screw holes (M2 to M24), heat-set insert holes and bosses (M2 to M8), bearing pockets, all sized from ISO tables and changeable after placing. Threads on any cylinder: tapped holes and threaded rods, M2 to M24 or any pitch, either hand. D-shaft motor couplers.
 * **AI copilot and MCP bridge.** In-app AI agent panel and a WebSocket MCP server bridge (`physbox_mcp`) for scene generation by external agents.
 
 ---

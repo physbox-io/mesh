@@ -17,6 +17,11 @@ export type GeomRole = 'visual' | 'collision';
 // How a body's geometry reaches MuJoCo's contact solver. See SceneNode.collision.
 export type CollisionMode = 'auto' | 'hull' | 'decompose' | 'primitives';
 
+/** The hardware features a part can have cut into it; see utils/hardwareCuts.ts. */
+export type HardwareCutKind = 'nut_trap' | 'counterbore' | 'insert' | 'insert_boss' | 'bearing';
+/** What goes into a hardware feature's hole: a screw through it, a thread in it, or a heat-set insert. */
+export type HardwareBore = 'clearance' | 'tapped' | 'insert';
+
 export interface SceneGeom {
   /**
    * An id of its own, carried by geoms that came from the copilot (see RawGeom
@@ -217,6 +222,29 @@ export interface SceneGeom {
    * gets its own optional field beside this one.
    */
   thread?: { pitch: number; left?: boolean; fit?: number };
+  /**
+   * A cylinder drawn with this many flat sides instead of round: 6 is a hex
+   * prism, which is what a nut pocket is. The radius is to the corners. Only
+   * the OpenSCAD emitter reads it, so it means something on a boolean body.
+   */
+  facets?: number;
+  /**
+   * This cut is one piece of a hardware feature — a nut trap, a counterbore,
+   * an insert hole or boss, a bearing pocket (utils/hardwareCuts.ts). Every
+   * piece of one feature carries the same `group` and the feature's numbers,
+   * so the panel shows them as one, and a new size rebuilds them all.
+   */
+  hardware?: {
+    group: string;
+    kind: HardwareCutKind;
+    /** A bolt size ('M3') or a bearing number ('608'). */
+    size: string;
+    /** Which piece of the feature this is: 'pocket', 'shank', 'head', 'boss', 'bore', 'shaft'. */
+    part: string;
+    bore?: HardwareBore;
+    /** Diametral clearance on the fitting diameter, metres. */
+    fit?: number;
+  };
   /**
    * This is the geom the body's lattice cage owns — the one `applyLattice`
    * rewrites on every edit.

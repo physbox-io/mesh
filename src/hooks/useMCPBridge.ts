@@ -73,8 +73,9 @@ import { requestTexturedSurface } from '../utils/textureClient';
 import { webSerialManager } from '../utils/webSerialManager';
 import type { Object3D } from 'three';
 import { Vector3 } from 'three';
-import type { SceneGraph, SceneNode, SceneGeom, SceneJoint } from '../types/scene';
+import type { SceneGraph, SceneNode, SceneGeom, SceneJoint, HardwareBore, HardwareCutKind } from '../types/scene';
 import type { RawGeom, RawJoint, RawNode } from '../utils/sceneNodes';
+import { HARDWARE_KINDS, hardwareSpecOf } from '../utils/hardwareCuts';
 import {
   boxLattice, cloneLattice, deserializeCage, orientFaces, serializeCage, toSceneGeom as latticeToSceneGeom, DEFAULT_UNIT as LATTICE_UNIT,
   type Axis as LatticeAxis, type Lattice,
@@ -1869,15 +1870,45 @@ export function useMCPBridge() {
           const { targetId, shape, at, normal, diameterMm, widthMm, lengthMm, depthMm, threadPitchMm, threadLeft, threadFitMm } = msg as Msg<{ targetId: string }>;
           const node = findNodeInScene(store.sceneGraph.nodes, targetId);
           if (!node) return { ok: false, error: `No object with id '${targetId}'` };
-          const kind = shape === 'slot' || shape === 'box' ? 'box'
-            : shape === 'dish' || shape === 'sphere' ? 'sphere' : 'cylinder';
-          const spot = Array.isArray(at) && at.length >= 3
+          const spotIn = Array.isArray(at) && at.length >= 3
             ? {
               at: [at[0] / 1000, at[1] / 1000, at[2] / 1000],
               normal: Array.isArray(normal) && normal.length >= 3 ? [...normal] : [0, 0, 1],
             }
             : undefined;
-          const index = store.addBodyCut(targetId, kind, spot);
+
+          // A hardware feature: several cuts made as one, sized from tables.
+          if (typeof shape === 'string' && shape in HARDWARE_KINDS) {
+            const hwKind = shape as HardwareCutKind;
+            const group = store.addHardwareCut(targetId, hwKind, spotIn);
+            if (!group) return { ok: false, error: 'That body has no solid shape to cut into' };
+            const { size, bore, fitMm } = msg as Msg<{ size?: string; bore?: HardwareBore; fitMm?: number }>;
+            if (size !== undefined || bore !== undefined || fitMm !== undefined) {
+              useStore.getState().setHardwareCut(targetId, group, {
+                ...(size !== undefined ? { size: String(size) } : {}),
+                ...(bore !== undefined ? { bore } : {}),
+                ...(typeof fitMm === 'number' ? { fitMm } : {}),
+              });
+            }
+            const after = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId);
+            const spec = hardwareSpecOf(after?.geoms ?? [], group);
+            const info = HARDWARE_KINDS[hwKind];
+            if (size !== undefined && spec && spec.size !== String(size)) {
+              return { ok: false, error: `${info.label} comes in ${info.sizes.join(', ')}; got '${size}'` };
+            }
+            return {
+              ok: true, id: targetId, group, shape: hwKind, size: spec?.size,
+              ...(spec?.bore ? { bore: spec.bore } : {}),
+              fitMm: spec?.fitMm ?? 0,
+              atMm: (spec?.at ?? []).map((v: number) => Math.round(v * 1000 * 1000) / 1000),
+              normal: spec?.normal,
+              pieces: (after?.geoms ?? []).filter((g) => g.hardware?.group === group).map((g) => g.hardware!.part),
+            };
+          }
+
+          const kind = shape === 'slot' || shape === 'box' ? 'box'
+            : shape === 'dish' || shape === 'sphere' ? 'sphere' : 'cylinder';
+          const index = store.addBodyCut(targetId, kind, spotIn);
           if (index < 0) return { ok: false, error: 'That body has no solid shape to cut into' };
 
           // Size and depth after the fact, through the same actions the panel

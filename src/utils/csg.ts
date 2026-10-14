@@ -279,7 +279,7 @@ export function primitiveToScad(geom: SceneGeom, fn: number = CSG_DEFAULT_FN, in
         const twist = (geom.thread?.left ? 360 : -360) * turns;
         body = `linear_extrude(height=${fmt(length)}, center=true, twist=${fmt(twist)}, slices=${threadSlices(turns)}, convexity=10) polygon([${profile}]);`;
       } else {
-        body = `cylinder(h=${fmt(halfLen * 2)}, r=${fmt(s[0] ?? 0.1)}, center=true, $fn=${fn});`;
+        body = `cylinder(h=${fmt(halfLen * 2)}, r=${fmt(s[0] ?? 0.1)}, center=true, $fn=${geom.facets && geom.facets >= 3 ? Math.round(geom.facets) : fn});`;
       }
       break;
     }
@@ -2082,7 +2082,7 @@ function emitsSolid(g: SceneGeom): boolean {
  */
 function geomCsgKey(g: SceneGeom): unknown[] {
   const shape = g.type === 'mesh' ? meshChecksum(g) : g.size;
-  return [g.type, shape, g.pos, g.quat, g.euler, g.fromto, g.csg ?? 'union', g.role ?? null, g.thread ?? null];
+  return [g.type, shape, g.pos, g.quat, g.euler, g.fromto, g.csg ?? 'union', g.role ?? null, g.thread ?? null, g.facets ?? null];
 }
 
 // Every store update checksums every boolean and decomposed mesh (see

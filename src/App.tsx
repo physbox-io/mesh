@@ -9,6 +9,7 @@ import SculptPanel from './components/SculptPanel';
 import LatticePanel from './components/LatticePanel';
 import { CutControls } from './components/CutControls';
 import { ThreadField } from './components/ThreadField';
+import { HARDWARE_KINDS } from './utils/hardwareCuts';
 import ColoringSection from './components/ColoringSection';
 import { useMuJoCoInit } from './hooks/useMuJoCo';
 import { useMCPBridge } from './hooks/useMCPBridge';
@@ -31,7 +32,7 @@ import { simplifyGeomMesh, toRenderVertices } from './utils/simplifyMesh';
 import { sliderSpan, offsetSpan, lengthSpan } from './utils/sliderSpan';
 import { loadCompiler, compileSCAD, isCompilerReady, setScadCompileListener } from './utils/openscad';
 import { getStickyRotation } from './utils/geom';
-import { csgSourceGeoms, csgHashOf, collisionModeOf, CSG_DEFAULT_SECTORS } from './utils/csg';
+import { csgSourceGeoms, csgHashOf, collisionModeOf, CSG_DEFAULT_SECTORS, sourcePositiveBounds } from './utils/csg';
 import { DEFAULT_HOLD_STEPS, isBreakable, weldKey } from './utils/breakThresholds';
 import { isDentable, needsConversionForDenting } from './utils/dentMesh';
 import { CUSTOM_DENT, CUSTOM_SHATTER, DEFORM_MATERIALS, deformMaterial, dentFields, estimateBodyMass, materialUpdates, shatterFields } from './utils/deformMaterials';
@@ -1719,7 +1720,12 @@ function App() {
         {showGeoms && !isCollapsed && (
           <div className="pl-3 ml-2.5 border-l border-slate-200 dark:border-slate-800/60 flex flex-col gap-0.5 mb-1">
             {node.geoms.map((g, idx) => {
-              const isGeomSelected = isSelected && activeGeomIndex === idx;
+              // A hardware feature is several cuts; it is listed once, by what
+              // it is, and picking it picks the whole feature for G and S.
+              const hw = g.hardware;
+              if (hw && node.geoms.findIndex((o) => o.hardware?.group === hw.group && !o.csgDerived) !== idx) return null;
+              const isGeomSelected = isSelected && (activeGeomIndex === idx
+                || (!!hw && node.geoms[activeGeomIndex]?.hardware?.group === hw.group));
               // Generated boolean output is derived data, not something to select
               // and edit — the primitives above it are the real controls.
               if (g.csgDerived) return null;
@@ -1738,6 +1744,7 @@ function App() {
               // A boolean operator matters more than the shape it's applied to.
               if (g.csg === 'difference') subEmoji = '➖';
               else if (g.csg === 'intersection') subEmoji = '∩';
+              if (hw) subEmoji = '🔩';
 
               return (
                 <div 
@@ -1755,7 +1762,12 @@ function App() {
                 >
                   <span className="flex items-center gap-1.5 text-[11px] font-medium truncate">
                     <span>{subEmoji}</span>
-                    <span className={`truncate ${g.csg === 'difference' ? 'line-through decoration-rose-400/70' : ''}`}>{g.name || `Geom ${idx + 1}`}</span>
+                    <span
+                      className={`truncate ${g.csg === 'difference' && !hw ? 'line-through decoration-rose-400/70' : ''}`}
+                      title={hw ? 'G moves it, S steps its size; or use its row in the Cut panel' : undefined}
+                    >
+                      {hw ? `${HARDWARE_KINDS[hw.kind].label} ${hw.size}` : (g.name || `Geom ${idx + 1}`)}
+                    </span>
                   </span>
                 </div>
               );
@@ -2428,6 +2440,12 @@ function App() {
             onAddLattice={() => handleAddLatticeClick()}
             onAddHardwareNode={(node) => {
               addHardwareComponentNode(node);
+              setIsLeftSidebarOpen(false);
+            }}
+            hardwareTarget={selectedNode && sourcePositiveBounds(selectedNode) ? selectedNode.name : null}
+            onAddHardwareCut={(kind) => {
+              if (!selectedNode) return;
+              useStore.getState().addHardwareCut(selectedNode.id, kind);
               setIsLeftSidebarOpen(false);
             }}
             onAddNoteCard={() => {

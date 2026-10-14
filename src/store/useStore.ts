@@ -1,10 +1,11 @@
 import { create, type StateCreator } from 'zustand';
 import { shareUnchanged } from '../utils/shareUnchanged';
 import * as THREE from 'three';
-import type { SceneGraph, SceneNode, SceneGeom, SceneJoint, GeomType, CsgOp, EdgeRoundFeature, RoundEdge, CastPrep } from '../types/scene';
+import type { SceneGraph, SceneNode, SceneGeom, SceneJoint, GeomType, CsgOp, EdgeRoundFeature, RoundEdge, CastPrep, HardwareCutKind } from '../types/scene';
 import { bakeDraftInto, copyPrep, restoreShape, shapeSignature, unprepScene, type DraftParams } from '../utils/castPrep';
 import { hasEdgeRounds, reconcileEdgeRounds, withRoundFeature, withoutEdges } from '../utils/edgeRound';
 import type { GeomThreadSpec } from '../utils/metricThreads';
+import { hardwareCutGeoms, hardwareSpecOf, nextHardwareGroup, type HardwareCutSpec } from '../utils/hardwareCuts';
 import type { DataMirror, ModelMirror } from '../types/sceneLayer';
 import { type CombineOp, cageInFrame, geomsForCombine, nodeWorldMatrix } from '../utils/combineBodies';
 import { DEFAULT_BRUSH, toSceneGeom, type BrushSettings, type SculptMesh } from '../utils/sculptMesh';
@@ -1287,6 +1288,57 @@ function settleBooleanState(node: SceneNode) {
   }
 }
 
+/**
+ * Where a new cut goes, in order of how much the app actually knows: the spot
+ * handed in; the last surface picked on this body — the face selected in the
+ * lattice editor, or wherever an ordinary click landed on it; the spot the
+ * camera is looking at; and failing all of that the middle of the top, which
+ * is only reached with no viewport at all.
+ */
+function newCutSpot(
+  get: () => PhysicsState,
+  target: SceneNode,
+  bounds: { min: number[]; max: number[] },
+  spot?: CutSpot,
+  fromCamera = true,
+): CutSpot {
+  const picked = get().cutSpot;
+  return spot
+    ?? (picked?.nodeId === target.id ? { at: picked.at, normal: picked.normal } : null)
+    ?? (fromCamera ? cutSpotFromCamera(target) : null)
+    ?? {
+      at: [0, 1, 2].map(a => +((bounds.min[a] + bounds.max[a]) / 2).toFixed(6)),
+      normal: [0, 0, 1],
+    };
+}
+
+/**
+ * Puts a hardware feature's cuts on a node (of a graph the caller cloned), in
+ * place of any it had: where the old ones were in the list, or at the end.
+ * Placed in order, so a boss is there before the hole bored into it is
+ * measured. False when a piece could not be placed.
+ */
+function writeHardwareGroup(node: SceneNode, spec: HardwareCutSpec): boolean {
+  const geoms = node.geoms || [];
+  const first = geoms.findIndex((g) => g.hardware?.group === spec.group && !g.csgDerived);
+  const kept = geoms.filter((g) => g.hardware?.group !== spec.group);
+  const at = first < 0 ? kept.length : geoms.slice(0, first).filter((g) => g.hardware?.group !== spec.group).length;
+  const pieces = hardwareCutGeoms(spec, node.id);
+  node.geoms = kept;
+  let insertAt = at;
+  for (const piece of pieces) {
+    node.geoms.splice(insertAt, 0, piece);
+    const derived = cutGeometry(node, piece);
+    if (!derived) return false;
+    Object.assign(piece, derived);
+    insertAt++;
+  }
+  node.csgEnabled = true;
+  if (node.csgCollision === undefined) node.csgCollision = 'auto';
+  if (node.csgSectors === undefined) node.csgSectors = CSG_DEFAULT_SECTORS;
+  return true;
+}
+
 function reshapeCut(
   get: () => PhysicsState,
   set: (partial: Partial<PhysicsState>) => void,
@@ -2098,6 +2150,15 @@ export interface PhysicsState {
   ) => number;
   /** Re-insets a face feature to a border in millimetres, against the face it is on. */
   setFaceFeatureBorder: (nodeId: string, geomIndex: number, borderMm: number) => void;
+  /**
+   * Cuts a hardware feature — a nut trap, a counterbore, an insert hole or
+   * boss, a bearing pocket — into a body at a spot on its surface (or where a
+   * plain cut would go without one). Returns the feature's group, or null when
+   * the body has nothing solid to cut into.
+   */
+  addHardwareCut: (nodeId: string, kind: HardwareCutKind, spot?: CutSpot) => string | null;
+  /** Rebuilds a hardware feature with a new size, bore, fit or spot. */
+  setHardwareCut: (nodeId: string, group: string, changes: Partial<Omit<HardwareCutSpec, 'group' | 'kind'>>) => void;
   /** Moves a cut to another spot on the part, square to the surface there. */
   moveCutTo: (nodeId: string, geomIndex: number, spot: CutSpot) => void;
   /** Sets how deep a cut goes, in millimetres in from the surface; 0 goes through. */
@@ -3897,24 +3958,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     if (!bounds) return -1;
     const span = [0, 1, 2].map(a => Math.max(1e-4, bounds.max[a] - bounds.min[a]));
 
-    /*
-      Where it goes, in order of how much the app actually knows:
-
-        the spot handed in;
-        the last surface picked on this body — the face selected in the lattice
-        editor, or wherever an ordinary click landed on it;
-        the spot the camera is looking at;
-        and failing all of that the middle of the top, which is only reached
-        with no viewport at all.
-    */
-    const picked = get().cutSpot;
-    const where = spot
-      ?? (picked?.nodeId === nodeId ? { at: picked.at, normal: picked.normal } : null)
-      ?? cutSpotFromCamera(target)
-      ?? {
-        at: [0, 1, 2].map(a => +((bounds.min[a] + bounds.max[a]) / 2).toFixed(6)),
-        normal: [0, 0, 1],
-      };
+    const where = newCutSpot(get, target, bounds, spot);
 
     // Sized off the part: a hole that arrives at a seventh of the part's width
     // is one typed number from what you wanted, where a fixed 10 mm is off the
@@ -3954,6 +3998,41 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     set({ sceneGraph: newScene });
     rebuildAfterGeomEdit(get, newScene, nodeId);
     return node.geoms.length - 1;
+  },
+
+  addHardwareCut: (nodeId, kind, spot) => {
+    const target = findNode(get().sceneGraph.nodes, nodeId);
+    if (!target) return null;
+    const bounds = sourcePositiveBounds(target);
+    if (!bounds) return null;
+    // Not aimed down the camera's line when nothing was clicked: a nut trap
+    // goes into a face square to it, and the camera is rarely square to one.
+    // The top is where the first one usually goes, and Move takes it anywhere.
+    const where = newCutSpot(get, target, bounds, spot, false);
+    get().prepareForDiscreteChange();
+    const newScene = cloneSceneGraph(get().sceneGraph);
+    const node = findNode(newScene.nodes, nodeId);
+    if (!node) return null;
+    const group = nextHardwareGroup(node.geoms || [], kind);
+    if (!writeHardwareGroup(node, { group, kind, size: '', at: where.at, normal: where.normal })) return null;
+    const last = (node.geoms || []).reduce((acc, g, i) => (g.hardware?.group === group ? i : acc), -1);
+    set({ sceneGraph: newScene, activeGeomIndex: last });
+    rebuildAfterGeomEdit(get, newScene, nodeId);
+    return group;
+  },
+
+  setHardwareCut: (nodeId, group, changes) => {
+    const current = findNode(get().sceneGraph.nodes, nodeId);
+    const spec = current && hardwareSpecOf(current.geoms || [], group);
+    if (!spec) return;
+    // Coalesced like a cut's own edits: a drag across the part reports every
+    // frame, and a typed fit every keystroke.
+    get().recordInteraction(`hardware-${changes.at ? 'move' : 'edit'}`);
+    const newScene = cloneSceneGraph(get().sceneGraph);
+    const node = findNode(newScene.nodes, nodeId);
+    if (!node || !writeHardwareGroup(node, { ...spec, ...changes, group, kind: spec.kind })) return;
+    set({ sceneGraph: newScene });
+    rebuildAfterGeomEdit(get, newScene, nodeId);
   },
 
   setFaceFeature: (nodeId, region, feature, index) => {
@@ -4041,10 +4120,18 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     get().setFaceFeature(nodeId, region, { border: Math.max(0, borderMm) / 1000, depth, through }, geomIndex);
   },
 
-  moveCutTo: (nodeId, geomIndex, spot) => reshapeCut(get, set, nodeId, geomIndex, 'cut-move', (geom) => {
-    geom.cutAt = spot.at.map(v => +v.toFixed(6));
-    geom.cutNormal = spot.normal;
-  }),
+  moveCutTo: (nodeId, geomIndex, spot) => {
+    // A piece of a hardware feature takes the rest of the feature with it.
+    const group = findNode(get().sceneGraph.nodes, nodeId)?.geoms?.[geomIndex]?.hardware?.group;
+    if (group) {
+      get().setHardwareCut(nodeId, group, { at: spot.at.map(v => +v.toFixed(6)), normal: [...spot.normal] });
+      return;
+    }
+    reshapeCut(get, set, nodeId, geomIndex, 'cut-move', (geom) => {
+      geom.cutAt = spot.at.map(v => +v.toFixed(6));
+      geom.cutNormal = spot.normal;
+    });
+  },
 
   setCutDepth: (nodeId, geomIndex, mm) => reshapeCut(get, set, nodeId, geomIndex, 'cut-depth', (geom) => {
     geom.cutDepth = Math.max(0, mm) / 1000;
@@ -4796,7 +4883,10 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     const newScene = cloneSceneGraph(get().sceneGraph);
     const node = findNode(newScene.nodes, nodeId);
     if (!node || !node.geoms || geomIndex < 0 || geomIndex >= node.geoms.length) return;
-    node.geoms = node.geoms.filter((_: SceneGeom, i: number) => i !== geomIndex);
+    // A piece of a hardware feature goes with the rest of it: half a nut trap
+    // is a hole nobody asked for.
+    const group = node.geoms[geomIndex].hardware?.group;
+    node.geoms = node.geoms.filter((g: SceneGeom, i: number) => i !== geomIndex && !(group && g.hardware?.group === group));
     // Losing the last boolean operator leaves an ordinary compound body; drop
     // the derived mesh with it so the primitives come back into view.
     if (node.csgEnabled && !hasBooleanOps(node)) {
