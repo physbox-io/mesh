@@ -279,7 +279,7 @@ function coverage(positions: ArrayLike<number>, faces: ArrayLike<number>, axes: 
 function bossTest(positions: ArrayLike<number>, faces: ArrayLike<number>, triangleSurface: number[]) {
   const first = new Map<number, number>();
   triangleSurface.forEach((s, t) => { if (s >= 0 && !first.has(s)) first.set(s, t); });
-  return (surfaces: [number, number], centre: Vec3, axis: Vec3): boolean => {
+  return (surfaces: [number, number], centre: ArrayLike<number>, axis: ArrayLike<number>): boolean => {
     let best: { across: number; outward: number } | null = null;
     for (const s of surfaces) {
       const t = first.get(s);
