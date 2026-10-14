@@ -461,7 +461,12 @@ export const FaceKnife = () => {
       event.preventDefault();
       event.stopPropagation();
       drag.current = null;
-      void finish(d).then(schedule);
+      // The seam under the pointer before the drag may be gone, or a new one there now.
+      const onCanvas = event.target === gl.domElement;
+      void finish(d).then(() => {
+        hot.current = onCanvas ? seamAt(event.clientX, event.clientY) : null;
+        schedule();
+      });
     };
     // A click that is the end of a line is not a selection.
     const swallowClick = (event: MouseEvent) => {
