@@ -212,6 +212,11 @@ export interface SolidMachiningResult {
   unreachablePercent: number;
   /** Tabs actually placed. Fewer than asked for means the edge had no room. */
   tabsPlaced: number;
+  /**
+   * Each tab, by the outline cell it is joined to (stock mm), and the heights
+   * it spans in side A's coordinates (stock top 0, negative down).
+   */
+  tabs: { x: number; y: number; topZ: number; bottomZ: number }[];
   /** Registration pin centres in work coordinates, if bored. */
   pins: { x: number; y: number }[];
   /**
@@ -253,6 +258,10 @@ const SIDE_OVERLAP_MM = 0.5;
 
 /** Tabs are looked for on the part's outline this far apart, as a fraction of a full turn. */
 const TAB_SEARCH_STEPS = 720;
+/** A pin hole whose helix radius is under this is drilled in pecks instead. */
+const PECK_BELOW_MM = 0.25;
+/** How far above the hole (or the last peck) a peck drill starts and clears to. */
+const PECK_CLEAR_MM = 0.5;
 
 function f(num: number): string {
   return (Math.round(num * 1000) / 1000).toFixed(3).replace(/\.?0+$/, '') || '0';
@@ -533,9 +542,11 @@ function placeTabs(
   count: number,
   tabWidthMm: number,
   moatWidthMm: number
-): { mask: Uint8Array; placed: number } {
-  const mask = new Uint8Array(cols * rows);
-  if (count <= 0) return { mask, placed: 0 };
+): { mask: Int32Array; anchors: number[] } {
+  // Which tab each channel cell belongs to, 1-based; 0 for none.
+  const mask = new Int32Array(cols * rows);
+  const anchors: number[] = [];
+  if (count <= 0) return { mask, anchors };
 
   // The outline: part cells with a channel cell beside them.
   let cxSum = 0, cySum = 0, n = 0;
@@ -551,7 +562,7 @@ function placeTabs(
       ) outline.push(k);
     }
   }
-  if (n === 0 || outline.length === 0) return { mask, placed: 0 };
+  if (n === 0 || outline.length === 0) return { mask, anchors };
   const cx = cxSum / n;
   const cy = cySum / n;
 
@@ -567,7 +578,13 @@ function placeTabs(
 
   const reach = Math.ceil(moatWidthMm / cellMm) + 2;
   const halfW = tabWidthMm / 2 / cellMm;
-  let placed = 0;
+  /*
+   * How far apart two tabs' anchors must be, in cells. Bearings are spread
+   * evenly about the centre, but the outline is not: on a long thin bar two
+   * bearings land a couple of millimetres apart on its long side, and two
+   * tabs were reported where there was one, cut twice.
+   */
+  const spacing = (1.5 * tabWidthMm) / cellMm;
 
   for (let i = 0; i < count; i++) {
     const want = -Math.PI + ((i + 0.5) * 2 * Math.PI) / count;
@@ -582,6 +599,10 @@ function placeTabs(
     for (let step = 0; step < TAB_SEARCH_STEPS && !done; step++) {
       const idx = (lo + (step % 2 === 0 ? step / 2 : -(step + 1) / 2) + byAngle.length * 4) % byAngle.length;
       const p = byAngle[idx];
+      if (anchors.some((k) => {
+        const r = Math.floor(k / cols);
+        return Math.hypot(k - r * cols - p.c, r - p.r) < spacing;
+      })) continue;
 
       // Nearest frame cell within reach of the channel's width.
       let best = Infinity, bc = 0, br = 0;
@@ -613,15 +634,17 @@ function placeTabs(
           if (!moat[k]) continue;
           const along = dc * nx + dr * ny;
           const across = -dc * ny + dr * nx;
-          if (along >= -1 && along <= len + 1 && Math.abs(across) <= halfW) mask[k] = 1;
+          if (along >= -1 && along <= len + 1 && Math.abs(across) <= halfW && !mask[k]) {
+            mask[k] = anchors.length + 1;
+          }
         }
       }
-      placed++;
+      anchors.push(p.k);
       done = true;
     }
   }
 
-  return { mask, placed };
+  return { mask, anchors };
 }
 
 /**
@@ -649,6 +672,33 @@ function pinBore(
   const segs = 24;
   out.push(`; registration pin ${f(pinDiaMm)} mm at X${f(cx)} Y${f(cy)}`);
   out.push(`G0 Z${f(safeZ)}`);
+
+  /*
+   * No room for a helix: drilled, in pecks at the plunge rate.
+   *
+   * A helix with no radius is a straight plunge, and it was being fed at the
+   * cutting rate - four times the plunge rate - the whole depth of the block
+   * and on into the spoilboard, with nowhere for the chips to go. Each peck
+   * is no deeper than the cutter is wide, and the tool comes out of the hole
+   * after each to clear them.
+   */
+  if (r < PECK_BELOW_MM) {
+    const peck = Math.max(0.5, Math.min(toolDiaMm, pitchMm));
+    out.push(`G0 X${f(cx)} Y${f(cy)}`);
+    out.push(`G0 Z${f(PECK_CLEAR_MM)}`);
+    let z = 0;
+    while (z > toZ + 1e-6) {
+      const next = Math.max(toZ, z - peck);
+      // Back down at rapid to just above the last peck's bottom.
+      if (z < 0) out.push(`G0 Z${f(z + PECK_CLEAR_MM)}`);
+      out.push(`G1 Z${f(next)} F${Math.round(plungeRate)}`);
+      out.push(`G0 Z${f(PECK_CLEAR_MM)}`);
+      z = next;
+    }
+    out.push(`G0 Z${f(safeZ)}`);
+    return out;
+  }
+
   out.push(`G0 X${f(cx + r)} Y${f(cy)}`);
   out.push(`G1 Z0 F${Math.round(plungeRate)}`);
   const turns = Math.max(1, Math.ceil(-toZ / Math.max(0.1, pitchMm)));
@@ -764,6 +814,7 @@ export function generateSolidMachining(
     partVolumeMm3: 0,
     unreachablePercent: 0,
     tabsPlaced: 0,
+    tabs: [],
     pins: [],
     estimatedTimeSeconds: 0,
     totalCutDistanceMm: 0,
@@ -897,21 +948,35 @@ export function generateSolidMachining(
     hit, moatMask, frameMask, cols, rows, res,
     Math.max(0, Math.round(opts.tabCount)), opts.tabWidthMm, moat
   );
-  if (tabs.placed < Math.round(opts.tabCount)) {
+  const tabsPlaced = tabs.anchors.length;
+  if (tabsPlaced < Math.round(opts.tabCount)) {
     warnings.push(
-      `Only ${tabs.placed} of ${Math.round(opts.tabCount)} tabs could be placed: the part's ` +
+      `Only ${tabsPlaced} of ${Math.round(opts.tabCount)} tabs could be placed: the part's ` +
         `outline has no frame within reach at the other positions. Widen the frame, or ask for fewer.`
     );
   }
-  if (tabs.placed === 0) {
+  if (tabsPlaced === 0) {
     warnings.push(
       `Nothing holds the part once the channel is through. It will come loose under the cutter ` +
         `on the last pass — add tabs, or fix the part down some other way.`
     );
   }
-  const tabTopZ = twoSided
-    ? -(stockT / 2 - opts.tabThicknessMm / 2)
-    : -(stockT - opts.tabThicknessMm);
+  /*
+   * Each tab's height, from the part at the cell it is joined to.
+   *
+   * One-sided, a tab stands on the bottom of the stock, which is always solid
+   * under the part. Two-sided, it was put at the stock's midplane whatever the
+   * part was doing there - and where the edge does not span the middle, as on
+   * a flange at the bottom of a tall boss or a tapered side, the tab was
+   * machined joined to nothing while the part beside it was cut away. Now it
+   * is as near the middle as the part's edge at that point allows.
+   */
+  const tabT = opts.tabThicknessMm;
+  const tabZ = tabs.anchors.map((k) => {
+    if (!twoSided) return { topZ: -(stockT - tabT), bottomZ: -stockT };
+    const topZ = Math.min(top[k], Math.max(-stockT / 2 + tabT / 2, bottom[k] + tabT));
+    return { topZ, bottomZ: topZ - tabT };
+  });
 
   // --- Registration pins ----------------------------------------------------
   const pins: { x: number; y: number }[] = [];
@@ -921,7 +986,11 @@ export function generateSolidMachining(
       const c = Math.round(x / stepX);
       const r = Math.round(stockCy / stepY);
       const k = Math.min(rows - 1, Math.max(0, r)) * cols + Math.min(cols - 1, Math.max(0, c));
-      if (frame < opts.pinDiaMm + 2 || !frameMask[k]) {
+      // The whole hole in the frame with a millimetre to spare, not only its
+      // centre: a stock given narrower than part, channel and frame leaves
+      // less frame than was asked for, and the hole ran into the channel.
+      const clear = dist[k] * res - opts.pinDiaMm / 2;
+      if (frame < opts.pinDiaMm + 2 || !frameMask[k] || clear < moat + 1) {
         warnings.push(
           `No room in the frame for a ${opts.pinDiaMm} mm registration pin at X${f(x)}: the frame ` +
             `needs to be wider than the pin with stock either side of it. Widen the frame or turn pins off.`
@@ -930,6 +999,34 @@ export function generateSolidMachining(
         break;
       }
       pins.push({ x, y: stockCy });
+    }
+  }
+
+  // Bored with whichever cutter does the roughing.
+  const pinToolDia = opts.roughingEnabled ? opts.roughingToolDiaMm : opts.finishingToolDiaMm;
+  if (pins.length > 0) {
+    const boreDepth = stockT + opts.pinDepthMm;
+    // A pin hole has to go right through the block to register the flip, so
+    // one the holder stops short of is no hole at all.
+    const holderAt = opts.holderDiaMm > 0 && opts.toolStickoutMm > 0 ? opts.toolStickoutMm : Infinity;
+    if (pinToolDia > opts.pinDiaMm + 1e-6) {
+      warnings.push(
+        `The ${pinToolDia} mm cutter is too wide to bore a ${opts.pinDiaMm} mm pin hole; the pins are skipped.`
+      );
+      pins.length = 0;
+    } else if (boreDepth > holderAt - 0.5) {
+      warnings.push(
+        `The pin holes go ${f(boreDepth)} mm deep, through the block and into the spoilboard, ` +
+          `but the cutter only sticks ${f(holderAt)} mm out of its holder; the pins are skipped. ` +
+          `Fit the cutter longer, or register the flip by hand.`
+      );
+      pins.length = 0;
+    } else if (opts.pinDiaMm - pinToolDia < 2 * PECK_BELOW_MM) {
+      warnings.push(
+        `The ${opts.pinDiaMm} mm pin holes are barely wider than the ${pinToolDia} mm cutter, so they ` +
+          `are drilled in pecks rather than bored on a helix, and come out the cutter's size. ` +
+          `Use a wider pin for a hole that is cut to size.`
+      );
     }
   }
 
@@ -984,7 +1081,10 @@ export function generateSolidMachining(
         } else if (frameMask[src]) {
           z[k] = 0;
         } else if (tabs.mask[src]) {
-          z[k] = tabTopZ;
+          // Side A cuts down to the tab's top; side B, looking up from the
+          // underside, up to its bottom.
+          const tab = tabZ[tabs.mask[src] - 1];
+          z[k] = side === 'A' ? tab.topZ : -stockT - tab.bottomZ;
         } else {
           z[k] = floorZ;
         }
@@ -1013,7 +1113,7 @@ export function generateSolidMachining(
     `; Stock       : ${f(stockW)} x ${f(stockD)} x ${f(stockT)} mm ${material.label.toLowerCase()}`,
     `; Part        : ${f(partW)} x ${f(partD)} x ${f(partH)} mm, model ${opts.up} up, ${opts.scalePercent}% scale`,
     `; Channel     : ${f(moat)} mm round the part, ${f(frame)} mm frame beyond it`,
-    `; Tabs        : ${tabs.placed} x ${f(opts.tabWidthMm)} mm wide, ${f(opts.tabThicknessMm)} mm thick`,
+    `; Tabs        : ${tabsPlaced} x ${f(opts.tabWidthMm)} mm wide, ${f(opts.tabThicknessMm)} mm thick`,
     '; Origin      : near-left corner of the stock, top face, Z0',
     `; Extents     : X0..${f(stockW)}  Y0..${f(stockD)} (all cuts are +X +Y of zero)`,
   ];
@@ -1045,31 +1145,16 @@ export function generateSolidMachining(
 
     let prelude: string[] | undefined;
     if (side === 'A' && pins.length > 0) {
-      const toolDia = opts.roughingEnabled ? opts.roughingToolDiaMm : opts.finishingToolDiaMm;
-      if (toolDia > opts.pinDiaMm + 1e-6) {
-        warnings.push(
-          `The ${toolDia} mm cutter is too wide to bore a ${opts.pinDiaMm} mm pin hole; the pins are skipped.`
+      const plunge = opts.roughingEnabled ? opts.roughingPlungeRate : opts.finishingPlungeRate;
+      const feed = opts.roughingEnabled ? opts.roughingFeedrate : opts.finishingFeedrate;
+      const pitch = opts.roughingEnabled ? opts.roughingStepdownMm : Math.max(0.2, opts.finishingToolDiaMm / 2);
+      prelude = ['; --- OP 0: registration pins ----------------------------------'];
+      for (const p of pins) {
+        prelude.push(
+          ...pinBore(p.x, p.y, pinToolDia, opts.pinDiaMm, -(stockT + opts.pinDepthMm), pitch, plunge, feed, opts.safeZ)
         );
-        pins.length = 0;
-      } else {
-        if (opts.pinDiaMm - toolDia < 0.5) {
-          warnings.push(
-            `The ${opts.pinDiaMm} mm pin holes are barely wider than the ${toolDia} mm cutter, so they ` +
-              `are drilled straight down rather than bored on a helix. Fine in wood; in aluminium ` +
-              `peck it or use a wider pin.`
-          );
-        }
-        const plunge = opts.roughingEnabled ? opts.roughingPlungeRate : opts.finishingPlungeRate;
-        const feed = opts.roughingEnabled ? opts.roughingFeedrate : opts.finishingFeedrate;
-        const pitch = opts.roughingEnabled ? opts.roughingStepdownMm : Math.max(0.2, opts.finishingToolDiaMm / 2);
-        prelude = ['; --- OP 0: registration pins ----------------------------------'];
-        for (const p of pins) {
-          prelude.push(
-            ...pinBore(p.x, p.y, toolDia, opts.pinDiaMm, -(stockT + opts.pinDepthMm), pitch, plunge, feed, opts.safeZ)
-          );
-        }
-        prelude.push('G0 X0 Y0 ; back over the origin before the part');
       }
+      prelude.push('G0 X0 Y0 ; back over the origin before the part');
     }
 
     const surface = surfaceFor(side);
@@ -1111,7 +1196,11 @@ export function generateSolidMachining(
     partSizeMm: { x: partW, y: partD, z: partH },
     partVolumeMm3: partVolume,
     unreachablePercent,
-    tabsPlaced: tabs.placed,
+    tabsPlaced,
+    tabs: tabs.anchors.map((k, i) => {
+      const r = Math.floor(k / cols);
+      return { x: (k - r * cols) * stepX, y: r * stepY, ...tabZ[i] };
+    }),
     pins,
     stockTransform: (() => {
       // The scene's own millimetres, before the scale.
