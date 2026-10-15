@@ -8,6 +8,7 @@ import SculptPanel from './components/SculptPanel';
 import LatticePanel from './components/LatticePanel';
 import { LeftSidebar } from './components/palette/LeftSidebar';
 import { InspectorPanel } from './components/inspector/InspectorPanel';
+import { BodyBasicsCard } from './components/inspector/BodyBasicsCard';
 import { PositionCard } from './components/inspector/PositionCard';
 import { ResizeCard } from './components/inspector/ResizeCard';
 
@@ -63,7 +64,6 @@ import { layoutOnBed, type PosedPart } from './utils/printPlate';
 import { PulleyRopeMarkers } from './components/scene/PulleyRopes';
 import { SliderValue } from './components/SliderValue';
 import { RangeInput } from './components/RangeInput';
-import { SettledTextInput } from './components/SettledInputs';
 import { ConfirmModal } from './components/ConfirmModal';
 import { CompileErrorBanner } from './components/CompileErrorBanner';
 import { VoltLinkBanner } from './components/VoltLinkBanner';
@@ -451,8 +451,8 @@ function App() {
     sceneGraph, selectedNodeId, setSelectedNodeId,
     addComponent, loadPreset, openPatternGenerator, updateScene,
     resetSimulation,
-    deleteNode, renameNode,
-    updateNodeScript, updateNode,
+    deleteNode,
+    updateNodeScript,
     sculptNodeId, setSculptNodeId, setSculptBase,
     latticeNodeId, setLatticeNodeId,
     extraSelectedIds, combineBodies,
@@ -471,8 +471,8 @@ function App() {
     sceneGraph: s.sceneGraph, selectedNodeId: s.selectedNodeId, setSelectedNodeId: s.setSelectedNodeId,
     addComponent: s.addComponent, loadPreset: s.loadPreset, openPatternGenerator: s.openPatternGenerator, updateScene: s.updateScene,
     resetSimulation: s.resetSimulation,
-    deleteNode: s.deleteNode, renameNode: s.renameNode,
-    updateNodeScript: s.updateNodeScript, updateNode: s.updateNode,
+    deleteNode: s.deleteNode,
+    updateNodeScript: s.updateNodeScript,
     sculptNodeId: s.sculptNodeId, setSculptNodeId: s.setSculptNodeId, setSculptBase: s.setSculptBase,
     latticeNodeId: s.latticeNodeId, setLatticeNodeId: s.setLatticeNodeId,
     extraSelectedIds: s.extraSelectedIds, combineBodies: s.combineBodies,
@@ -2814,37 +2814,7 @@ function App() {
                   </div>
                 )}
 
-                <div className="flex items-center justify-between p-3 bg-slate-50 border border-slate-200/60 rounded-lg">
-                  <div>
-                    <div className="text-xs font-semibold text-slate-700">Aerodynamics</div>
-                    <div className="text-[10px] text-slate-500">Apply lift and drag automatically</div>
-                  </div>
-                  <label className="relative inline-flex items-center cursor-pointer">
-                    <input 
-                      type="checkbox" 
-                      className="sr-only peer"
-                      checked={selectedNode.isAerodynamic || false}
-                      onChange={(e) => updateNode(selectedNode.id, { isAerodynamic: e.target.checked })}
-                    />
-                    <div className="w-8 h-4 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-blue-500"></div>
-                  </label>
-                </div>
-
-                <div className="flex flex-col gap-1.5 p-3 bg-slate-50 border border-slate-200/60 rounded-lg">
-                <div className="flex justify-between items-center">
-                  <label className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Component Name</label>
-                  <span className="font-mono text-[9px] text-blue-600 font-semibold bg-blue-50 px-1 py-0.5 rounded cursor-pointer select-all border border-blue-100" title="Body API Reference Name. Click to select/copy.">
-                    api.getPosition('{selectedNode.name || selectedNode.id}')
-                  </span>
-                </div>
-                <SettledTextInput
-                  value={selectedNode.name || ''}
-                  onChange={(name) => renameNode(selectedNode.id, name)}
-                  className="w-full px-2.5 py-1.5 border border-slate-200 rounded text-sm bg-white font-medium text-slate-800 outline-none focus:border-blue-500 shadow-sm"
-                  placeholder="Rename component..."
-                />
-                <span className="text-[9px] font-mono text-slate-400 mt-0.5">ID: {selectedNode.id}</span>
-              </div>
+              <BodyBasicsCard node={selectedNode} />
 
               <PositionCard node={selectedNode} />
 
