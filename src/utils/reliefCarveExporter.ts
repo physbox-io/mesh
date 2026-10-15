@@ -680,8 +680,11 @@ export function recommendReliefTooling(input: ReliefToolingInput): Partial<Relie
   // has to suit; the roughing feed is then worked back from that same speed
   // rather than from the one the roughing bit would have preferred.
   const rpm = finishSpeeds.rpm;
+  // Scaled up to the finishing bit's speed, a roughing feed can pass what the
+  // gantry can track, so it is held to that.
+  const maxFeed = input.maxFeedMmMin && input.maxFeedMmMin > 0 ? input.maxFeedMmMin : Infinity;
   const feedAt = (rec: ReturnType<typeof speedsFor>) =>
-    Math.max(50, Math.round((rec.feedMmMin * (rpm / rec.rpm)) / 10) * 10);
+    Math.min(maxFeed, Math.max(50, Math.round((rec.feedMmMin * (rpm / rec.rpm)) / 10) * 10));
 
   return {
     material,
@@ -792,8 +795,12 @@ export function deriveReliefFeeds(
 
   const rpm = finish.rpm;
   // The roughing bit at the finishing bit's speed: same chip per tooth, so the
-  // feed scales with however far the speed had to move.
-  const roughFeed = Math.max(50, Math.round((rough.feedMmMin * (rpm / rough.rpm)) / 10) * 10);
+  // feed scales with however far the speed had to move - but never past what
+  // the gantry can track.
+  const roughFeed = Math.min(
+    maxFeedMmMin && maxFeedMmMin > 0 ? maxFeedMmMin : Infinity,
+    Math.max(50, Math.round((rough.feedMmMin * (rpm / rough.rpm)) / 10) * 10)
+  );
   const soft = opts.material === 'foam' || opts.material === 'softwood';
   const metal = opts.material === 'aluminium';
 
@@ -2857,6 +2864,17 @@ export function machineSurface(
     // own streamer retracts on resume, but another sender runs this as written.
     gcode.push(`G0 Z${f(Math.max(opts.safeZ, 20))}`);
     gcode.push('M5 ; spindle off for the tool change');
+    /*
+     * Over the work origin for the change, not over the pocket roughing
+     * happened to finish in: the corner is where the operator reaches the
+     * collet from and touches the new bit off.
+     *
+     * The path planner is not told. The finishing order still starts from
+     * where roughing finished - planned from the corner instead, the dome's
+     * finishing lifted 73 times against 56 - and the flight from the corner
+     * to its first run is at the change height, over everything.
+     */
+    gcode.push('G0 X0 Y0 ; park over the work origin');
     gcode.push(
       `T2 M6 ; fit the ${describeCutter(
         opts.finishingToolDiaMm,
