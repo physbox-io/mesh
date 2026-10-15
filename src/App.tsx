@@ -7,6 +7,7 @@ import SculptPanel from './components/SculptPanel';
 import LatticePanel from './components/LatticePanel';
 import { LeftSidebar } from './components/palette/LeftSidebar';
 import { InspectorPanel } from './components/inspector/InspectorPanel';
+import { CombineCard } from './components/inspector/CombineCard';
 import { ModellingTools } from './components/inspector/ModellingTools';
 import { BodyBasicsCard } from './components/inspector/BodyBasicsCard';
 import { PositionCard } from './components/inspector/PositionCard';
@@ -35,7 +36,7 @@ import { useStore } from './store/useStore';
 import { applyShatterPieces } from './store/useStore';
 import type { SceneGraph, SceneNode } from './types/scene';
 import type { WeakSpot } from './utils/printAnalysis';
-import { Play, Square, Settings, Box, X, RotateCcw, Trash2, Zap, Info, Code, Menu, Save, Download, Upload, Undo, Redo, PanelRight, Printer, Sparkles, Sun, Moon, Donut, Grid3x3, Image as ImageIcon, Share2, Copy, Check, Aperture } from 'lucide-react';
+import { Play, Square, Settings, Box, X, RotateCcw, Trash2, Zap, Info, Code, Menu, Save, Download, Upload, Undo, Redo, PanelRight, Printer, Sparkles, Sun, Moon, Grid3x3, Image as ImageIcon, Share2, Copy, Check, Aperture } from 'lucide-react';
 import { useRef, useMemo, useEffect, useLayoutEffect, useCallback, useState, type ComponentRef } from 'react';
 import AICopilotPanel from './components/AICopilotPanel';
 import { DocsModal } from './components/docs/DocsModal';
@@ -117,7 +118,6 @@ import { useEscapeToClose } from './hooks/useEscapeToClose';
 import { getSyncedSceneGraph } from './utils/mujocoSync';
 import { pressHistoryKey } from './utils/historyKeys';
 import { generateScadForNode, parseScadVariables, replaceVarInCode } from './utils/scadSource';
-import { findNodeById } from './utils/sceneTree';
 import { NoteCardOverlay } from './components/NoteCardOverlay';
 import { AxisLegendDrawer } from './components/AxisLegendDrawer';
 import { DropHandler } from './components/DropHandler';
@@ -455,7 +455,7 @@ function App() {
     updateNodeScript,
     sculptNodeId,
     latticeNodeId,
-    extraSelectedIds, combineBodies,
+    extraSelectedIds,
     undoStack, redoStack,
   } = useStore(useShallow((s) => ({
     model: s.model, data: s.data, mujoco: s.mujoco, recompileId: s.recompileId, activePreset: s.activePreset,
@@ -475,7 +475,7 @@ function App() {
     updateNodeScript: s.updateNodeScript,
     sculptNodeId: s.sculptNodeId,
     latticeNodeId: s.latticeNodeId,
-    extraSelectedIds: s.extraSelectedIds, combineBodies: s.combineBodies,
+    extraSelectedIds: s.extraSelectedIds,
     undoStack: s.undoStack, redoStack: s.redoStack,
   })));
 
@@ -2619,58 +2619,7 @@ function App() {
         <InspectorPanel>
           {(selectedNode) => (
             <>
-                {/* Combining. A boolean is a program over ONE body's shapes, so
-                    two bodies dragged in from the sidebar can never cut each
-                    other however they overlap — the shapes have to be on one
-                    body first. Shift-click a second body and this appears. */}
-                {extraSelectedIds.length > 0 && (
-                  <div className="p-3 bg-white dark:bg-slate-900 rounded-lg border border-indigo-200 dark:border-indigo-900 shadow-sm flex flex-col gap-2">
-                    <h3 className="text-sm font-medium text-slate-700 dark:text-slate-200 flex items-center gap-1.5">
-                      <Donut className="w-3.5 h-3.5 text-indigo-500" />
-                      Combine {extraSelectedIds.length + 1} bodies
-                    </h3>
-                    <p className="text-[10px] text-slate-400 leading-snug">
-                      The other {extraSelectedIds.length === 1 ? 'body is' : 'bodies are'} merged into
-                      <strong> {selectedNode.name || selectedNode.id}</strong>, keeping
-                      {extraSelectedIds.length === 1 ? ' its' : ' their'} place in the world. One body
-                      comes out.
-                    </p>
-                    {/* Said out loud, because a merged body takes its subtree
-                        with it and losing a child body you spent time on is not
-                        something to find out afterwards. */}
-                    {(() => {
-                      const withKids = extraSelectedIds.filter((id) => {
-                        const n = findNodeById(sceneGraph.nodes, id);
-                        return (n?.children?.length ?? 0) > 0;
-                      });
-                      if (withKids.length === 0) return null;
-                      return (
-                        <p className="text-[10px] leading-snug text-amber-600 dark:text-amber-400">
-                          <strong>Anything parented to {withKids.length === 1 ? 'it' : 'them'} goes too.</strong>{' '}
-                          {withKids.join(', ')} {withKids.length === 1 ? 'has' : 'have'} child bodies, and
-                          merging removes the body they hang from. Undo puts it all back.
-                        </p>
-                      );
-                    })()}
-                    <div className="flex gap-1">
-                      {([
-                        ['union', '＋ Add', 'One body made of both shapes.'],
-                        ['difference', '－ Subtract', 'The other shapes are cut out of this one.'],
-                        ['intersection', '∩ Intersect', 'Only the overlap is kept.'],
-                      ] as const).map(([op, label, hint]) => (
-                        <button
-                          key={op}
-                          type="button"
-                          onClick={() => combineBodies(selectedNode.id, extraSelectedIds, op)}
-                          title={hint}
-                          className="flex-1 py-1.5 rounded-md text-[10px] font-semibold bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-indigo-100 dark:hover:bg-indigo-950/50 hover:text-indigo-700 dark:hover:text-indigo-300 cursor-pointer transition-colors"
-                        >
-                          {label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
+                <CombineCard node={selectedNode} />
 
                 <ModellingTools node={selectedNode} />
 
