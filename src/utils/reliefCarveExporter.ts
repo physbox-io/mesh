@@ -2490,7 +2490,6 @@ export function machineSurface(
      * pocket is whichever is closest to where the tool stands.
      */
     const emitAdaptiveLayer = (layerZ: number, layerTop: number) => {
-      const thickness = layerTop - layerZ;
       const rings = clearingRings(layerRegion(layerTop), roughStepover, opts.roughingToolDiaMm);
 
       interface RingLoop {
@@ -2516,36 +2515,6 @@ export function machineSurface(
 
       const emitLoop = (node: RingLoop) => {
         const { ring } = node;
-        // The first ring of a slab is a slot however it is approached — nothing
-        // has opened the material either side of it yet — so it is fed for the
-        // chip it is actually taking rather than the one the stepover implies.
-        const feed = feedForEngagement(opts.roughingFeedrate, ring.engagement);
-
-        /*
-         * ...and cut at the depth its own engagement earns, not the layer's.
-         *
-         * The layer stepdown is boosted well past the baseline — with a 6.35 mm
-         * cutter at a 20% stepover, `(0.45/0.2)^1.5` is a 3.4x gain — and that
-         * boost is bought entirely by the small radial bite. The first ring
-         * does not have a small radial bite. It is a full-width slot, so it was
-         * taking the whole boosted depth at 100% engagement: a 6.35 mm wide,
-         * 4.75 mm deep slot entered on a straight ramp, which is the single
-         * heaviest cut in the program and what the carve sounded like when it
-         * was being aggressive. Only a 1/1.6 feed floor stood against it.
-         *
-         * Asking the same function what depth this ring's engagement is worth
-         * gives the baseline back, since the boost is a function of engagement
-         * and there is none to be had at full width. The ring is then taken in
-         * as many equal bites as that allows, and the rings behind it — which
-         * really are at the stepover the boost was calculated for — are
-         * untouched and still take the layer in one pass.
-         */
-        const ringStep = stepdownForEngagement(
-          opts.roughingToolDiaMm,
-          ring.engagement,
-          baseStepdown
-        );
-        const bites = Math.max(1, Math.ceil((thickness - 1e-6) / ringStep));
 
         // Marching squares puts a vertex on every grid cell the contour
         // crosses, so a ring round a 200 mm region arrives as a couple of
@@ -2564,12 +2533,89 @@ export function machineSurface(
           const y = safeY(p.y);
           return { x, y, z: slabZ(x, y, layerZ, layerTop) };
         });
+
+        /*
+         * What this ring will really be cutting, read off the stock model
+         * before it is cut, rather than what the ring's place in the order
+         * promises.
+         *
+         * The promise is that every ring after the first has open air on its
+         * outer side, which is what buys the boosted depth and feed. That holds
+         * in a flat-bottomed pocket. Here each ring follows the surface down to
+         * the slab's floor, so on a slope the ring inside sits lower than the
+         * ring outside it, and the material between the two heights is solid
+         * on both sides of the cutter: a full-width slot. On a 100 mm dome that
+         * was a 4.8 mm slot in one bite at 115% of the roughing feed, on every
+         * ring down every flank.
+         *
+         * So each flank is read most of the way out to the cutter's rim, and
+         * the lower of the two is how deep the slot is. The ring's depth is
+         * measured the same way - from the highest material under it, not from
+         * the top of the slab - so a ring riding high on a slope is not cut
+         * three times over in the air at three bite heights that all clamp to
+         * the same surface.
+         */
         const plan = simplifyPass([...onSurface, onSurface[0]], roughSimplifyMm(allowance));
         if (plan.length < 2) return;
 
+        // Along the path as it will be cut, every half cell or so, each flank
+        // read square to the move.
+        const flank = roughRad * 0.8;
+        let slot = 0;
+        let standing = -Infinity;
+        let bottom = Infinity;
+        for (let i = 1; i < plan.length; i++) {
+          const a = plan[i - 1];
+          const b = plan[i];
+          const len = Math.hypot(b.x - a.x, b.y - a.y);
+          const nx = len > 1e-9 ? -(b.y - a.y) / len : 0;
+          const ny = len > 1e-9 ? (b.x - a.x) / len : 0;
+          const steps = Math.max(1, Math.ceil(len / (stock.cell / 2)));
+          for (let s = i === 1 ? 0 : 1; s <= steps; s++) {
+            const t = s / steps;
+            const x = a.x + (b.x - a.x) * t;
+            const y = a.y + (b.y - a.y) * t;
+            const z = a.z + (b.z - a.z) * t;
+            standing = Math.max(standing, stock.highestUnder(x, y, roughRad));
+            bottom = Math.min(bottom, z);
+            if (len <= 1e-9) continue;
+            const left = stock.highestUnder(x + nx * flank, y + ny * flank, 0);
+            const right = stock.highestUnder(x - nx * flank, y - ny * flank, 0);
+            slot = Math.max(slot, Math.min(left, right) - z);
+          }
+        }
+        const ringTop = Math.min(layerTop, standing);
+        const span = ringTop - bottom;
+        // Nothing left standing in this ring's way: the rings outside it took
+        // it all.
+        if (!(span > 1e-3)) return;
+
+        const slotting = slot > Math.max(0.1, baseStepdown * 0.1);
+        // A slot is fed for the chip it is actually taking rather than the one
+        // the stepover implies.
+        const feed = feedForEngagement(opts.roughingFeedrate, slotting ? 1 : ring.engagement);
+
+        /*
+         * ...and cut at the depth its engagement earns, not the layer's.
+         *
+         * The layer stepdown is boosted well past the baseline — with a 6.35 mm
+         * cutter at a 20% stepover, `(0.45/0.2)^1.5` is a 3.4x gain — and that
+         * boost is bought entirely by the small radial bite. The first ring of
+         * a slab does not have one, and nor does a ring stepping down a slope.
+         *
+         * Bites are equal slices of the ring's own depth. Where the slot is no
+         * deeper than the full-width stepdown, no bite can slot deeper than the
+         * slot itself, so the boosted depth stands; where it is deeper, every
+         * bite is held to the full-width stepdown.
+         */
+        const ringStep = slot > baseStepdown
+          ? stepdownForEngagement(opts.roughingToolDiaMm, 1, baseStepdown)
+          : stepdownForEngagement(opts.roughingToolDiaMm, ring.engagement, baseStepdown);
+        const bites = Math.max(1, Math.ceil((span - 1e-6) / ringStep));
+
         for (let bite = 1; bite <= bites; bite++) {
-          const biteFloor = bite === bites ? layerZ : layerTop - (thickness * bite) / bites;
-          const above = layerTop - (thickness * (bite - 1)) / bites;
+          const biteFloor = bite === bites ? layerZ : ringTop - (span * bite) / bites;
+          const above = ringTop - (span * (bite - 1)) / bites;
           const path = plan.map((p) => ({ ...p, z: Math.max(biteFloor, p.z) }));
 
           // Ramp in along the ring rather than plunging: the centre of an end
