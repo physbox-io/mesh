@@ -50,6 +50,8 @@ function attachBoard() {
   mgr.state.guideSpot = false;
   mgr.state.probeCircuitSeen = true;
   mgr.state.probePinActive = false;
+  // A singleton: a $32=1 restored by one test would make the next a laser.
+  mgr.state.grblSettings = {};
   mgr.guideSpotRestoreLaserMode = false;
   mgr.ackQueue = [];
 
@@ -124,6 +126,9 @@ const wait = (ms = 0) => new Promise((r) => setTimeout(r, ms));
 
 const JOB = ['G21', 'G90', 'G1 X10 F600', ...Array.from({ length: 50 }, (_, i) => `G1 X${(i + 2) * 10}`), 'M30'].join('\n');
 
+/** The same, cut in Z: a router job, which a park lifts out of. */
+const ROUTER_JOB = ['G21', 'G90', 'G0 Z5', 'G1 Z-2 F300', ...JOB.split('\n').slice(2)].join('\n');
+
 let fake: ReturnType<typeof attachBoard>;
 beforeEach(() => {
   fake = attachBoard();
@@ -148,7 +153,7 @@ describe('soft reset', () => {
   });
 
   it('parks only once the controller has rebooted, and owes no acks after', async () => {
-    webSerialManager.startJob(JOB);
+    webSerialManager.startJob(ROUTER_JOB);
     await wait();
     fake.board.report = '<Hold:0|MPos:5.000,0.000,-2.000|FS:0,0>';
     const parked = await webSerialManager.parkJob();
@@ -160,6 +165,24 @@ describe('soft reset', () => {
     expect(afterReset[1]).toMatch(/^G0 Z/);
     await wait(5);
     expect(fake.mgr.ackQueue).toHaveLength(0);
+  });
+
+  it('leaves a laser at its focus height when parking, and when resuming the park', async () => {
+    // A focus move, so the program alone would pass for a router's.
+    webSerialManager.startJob(['G21', 'G90', 'G0 Z0', 'M4 S800', ...JOB.split('\n').slice(2)].join('\n'));
+    await wait();
+    fake.board.report = '<Hold:0|MPos:25.000,0.000,0.000|FS:0,0>';
+    expect(await webSerialManager.parkJob({ isLaser: true })).toBe(true);
+    const parkedAt = fake.lines().length;
+    expect(fake.lines().slice(fake.lines().lastIndexOf('G21 G90'))).toEqual(['G21 G90']);
+
+    fake.board.report = '<Idle|MPos:25.000,0.000,0.000|FS:0,0>';
+    expect(await webSerialManager.resumeFromPark({ isLaser: true })).toBe(true);
+    for (let i = 0; i < 10; i++) await wait();
+    const resumed = fake.lines().slice(parkedAt);
+    // The program's own focus move may be replayed; nothing else moves Z.
+    expect(resumed.filter((l) => /\bZ-?\d/.test(l) && l !== 'G0 Z0')).toEqual([]);
+    expect(resumed).not.toContain('G4 P2');
   });
 
   it('stops a job the controller restarted underneath, rather than waiting on it', async () => {

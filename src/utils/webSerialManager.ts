@@ -1999,6 +1999,7 @@ class WebSerialManager {
 
     const plan = planResume(this.program.map((l) => l.code), fromLine, {
       ...options,
+      isLaser: this.jobIsLaser(options?.isLaser),
       currentZ: this.state.wpos.z,
       arrivingAtPause: this.lineIsPause(fromLine),
     });
@@ -2052,6 +2053,7 @@ class WebSerialManager {
     fromLine = this.pastHandledToolChange(fromLine);
     return planResume(this.program.map((l) => l.code), fromLine, {
       ...options,
+      isLaser: this.jobIsLaser(options?.isLaser),
       arrivingAtPause: this.lineIsPause(fromLine),
     });
   }
@@ -2273,13 +2275,11 @@ class WebSerialManager {
 
     // Get clear of the work, then bring the spindle out where it can be reached.
     //
-    // Not at a sheet swap in a program that never commands Z - a laser job.
+    // Not at a sheet swap on a laser.
     // Resume puts back only the program's own Z (restoreAfterProgramPause), and
     // a laser program has none, so the lift stayed and every later sheet was cut
     // 25 mm out of focus. A tool change always lifts: it means a spindle.
-    const programUsesZ = this.program.length > 0
-      && scanModalState(this.program.map((l) => l.code), this.programLength()).safeZ !== null;
-    if (type === 'PAUSED_TOOL' || programUsesZ) {
+    if (type === 'PAUSED_TOOL' || !this.jobIsLaser()) {
       // The park is a rapid across the work at whatever height the lift left,
       // so it only goes when the tool is known to be clear of the stock top.
       const clear = await this.retractClearOfWork();
@@ -2440,12 +2440,13 @@ class WebSerialManager {
    *      machine position and comes back in `Idle` rather than `Alarm`, which
    *      is the whole reason for waiting in step 1.
    *   4. Retract to safe Z, so the tool is out of the cut and the work can be
-   *      looked at, brushed out, or measured.
+   *      looked at, brushed out, or measured. A laser stays at its focus
+   *      height.
    *
    * After this the machine is idle and free: jog it anywhere, re-zero Z for a
    * fresh tool, whatever is needed. `resumeFromPark` puts it back.
    */
-  public async parkJob(): Promise<boolean> {
+  public async parkJob({ isLaser: laser }: { isLaser?: boolean } = {}): Promise<boolean> {
     if (!this.isJobRunning || this.state.status === 'PAUSED_PARKED') return false;
 
     // 1. Hold, and let the deceleration finish.
@@ -2495,10 +2496,15 @@ class WebSerialManager {
     // 4. Out of the cut, once the controller is back up: anything sent before
     //    then is discarded, and a status read before then is the hold's. After
     //    a soft reset GRBL needs the modes restating before it will take a move.
+    //    Not on a laser: its Z is a focus height, and the resume preamble puts
+    //    no Z back on a laser, so a lift here cut the rest of the job 5 mm out
+    //    of focus.
     await reset;
     await this.sendAndWait('G21 G90', QUICK_REPLY_TIMEOUT_MS);
-    const parkRetractZ = await this.clampedRetractZ(5);
-    await this.sendAndWait(`G0 Z${parkRetractZ.toFixed(3)}`);
+    if (!this.jobIsLaser(laser)) {
+      const parkRetractZ = await this.clampedRetractZ(5);
+      await this.sendAndWait(`G0 Z${parkRetractZ.toFixed(3)}`);
+    }
     return true;
   }
 
@@ -2512,14 +2518,14 @@ class WebSerialManager {
    * they sat in GRBL's buffer while the stream filled it behind them, and then
    * did the same moves a second time.
    */
-  public async resumeFromPark(): Promise<boolean> {
+  public async resumeFromPark(options?: Pick<ResumeOptions, 'isLaser'>): Promise<boolean> {
     const park = this.state.park;
     if (!park || this.state.status !== 'PAUSED_PARKED') return false;
 
     // The preamble's retract is clamped to the live Z, so read it from now.
     await this.nextStatusReport();
     this.updateState({ park: null, pauseMessage: undefined });
-    return this.resumeFromLine(park.fromLine).ok;
+    return this.resumeFromLine(park.fromLine, options).ok;
   }
 
   /** Throws away a parked job without resuming it. */
