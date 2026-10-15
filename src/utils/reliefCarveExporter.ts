@@ -2989,15 +2989,22 @@ export function machineSurface(
     ? opts.roughingAllowanceMm + 0.5
     : Number.isFinite(finishStepdown) ? finishStepdown : finishRad;
   /*
-   * The deepest a link may cut with the rest of the cutter, out to its rim.
+   * How far out from the axis a link is held to that bite as well.
    *
    * Measured near the axis only, a link at the stock's edge with the finishing
    * tool clearing on its own ran past the fin the tool centre can never reach
-   * and took ten millimetres of it in one move. After roughing that is what
-   * every pass does down a wall — half a millimetre sideways over the wall's
-   * whole height — so there it is not limited.
+   * and took ten millimetres of it in one move, so without roughing it is held
+   * to the bite out to the rim. After roughing, every pass down a wall takes
+   * the allowance sideways over the wall's whole height, and a link may too -
+   * but only the allowance: the rim was not checked at all, and wherever the
+   * roughing bit could not get in, a narrow valley or an inside corner, a link
+   * ploughed the outer half of the cutter through the full height of what it
+   * left. So the bite is checked out to the allowance band, and a stock cell
+   * further in for the model's own coarseness.
    */
-  const linkRimMm = opts.roughingEnabled ? Infinity : linkBiteMm;
+  const linkRimWithin = opts.roughingEnabled
+    ? Math.max(finishRad / 2, finishRad - Math.max(0, opts.roughingAllowanceMm) - stock.cell)
+    : finishRad;
 
   // The height the material stands at when a layer starts: the stock's top face
   // for the first, whatever the layer before it left for the rest.
@@ -3167,15 +3174,16 @@ export function machineSurface(
             pts.push({ x, y, z: finishZAt(x, y, limit) });
           }
           pts.push({ x: head.x, y: head.y, z: head.z });
-          // Measured as the cut it would be, against the cutter's profile.
-          const candidate = simplifyPass([{ x: atX, y: atY, z: atZ }, ...pts], PATH_SIMPLIFY_MM);
+          // Squared up at each wall as the runs are, or a link across a step
+          // runs straight through its edge; then measured as the cut it would
+          // be, against the cutter's profile.
+          const candidate = simplifyPass(squareUpWalls([{ x: atX, y: atY, z: atZ }, ...pts]), PATH_SIMPLIFY_MM);
           let ok = true;
           for (let i = 1; i < candidate.length && ok; i++) {
             const a = candidate[i - 1], b = candidate[i];
             ok =
               stock.deepestCut(a.x, a.y, a.z, b.x, b.y, b.z, cutter.radius, cutter.profile, cutter.radius / 2) <= linkBiteMm &&
-              (!Number.isFinite(linkRimMm) ||
-                stock.deepestCut(a.x, a.y, a.z, b.x, b.y, b.z, cutter.radius, cutter.profile) <= linkRimMm);
+              stock.deepestCut(a.x, a.y, a.z, b.x, b.y, b.z, cutter.radius, cutter.profile, linkRimWithin) <= linkBiteMm;
           }
           if (ok) link = candidate;
         }
