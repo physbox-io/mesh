@@ -2958,6 +2958,10 @@ export function useMCPBridge() {
           if (!known) return { ok: false, error: `No preset named "${name}". Call physics_list_presets for the valid names.` };
           store.loadPreset(name);
           getPhysicsWorkerClient().clearHistory();
+          // The preset's boolean bodies build asynchronously, and this used to
+          // answer before they had: a contour slice sent straight after
+          // loading the casting flask cut solid blocks, its holes not yet made.
+          await compileCsgNodes();
           // Mirror App.tsx's loadPresetWithCard/loadUserPresetWithCard: replace
           // whatever note card is showing with this preset's own card (or clear
           // it) instead of leaving a stale card from whatever was loaded before -
