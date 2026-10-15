@@ -1,5 +1,5 @@
-// Which of the app's panels are open: the reference guide and the two side
-// drawers.
+// Which of the app's panels are open: the reference guide, the side drawers,
+// the copilot and the two importers.
 //
 // A store of its own rather than a slice of useStore: none of it is part of a
 // scene, useStore is big enough already, and editing useStore reloads the app
@@ -28,6 +28,19 @@ interface PanelsState {
   isPropertiesOpen: boolean;
   setLeftSidebarOpen: (open: boolean) => void;
   setPropertiesOpen: (open: boolean) => void;
+  /** The AI copilot drawer. */
+  isCopilotOpen: boolean;
+  setCopilotOpen: (open: boolean) => void;
+  /**
+   * The STL and image importers, opened from the header or by a file dropped
+   * on the viewport — which hands over the file, so the dialog opens on it.
+   */
+  stlImport: { file: File | null } | null;
+  imageImport: { file: File | null } | null;
+  openStlImport: (file?: File) => void;
+  openImageImport: (file?: File) => void;
+  closeStlImport: () => void;
+  closeImageImport: () => void;
 }
 
 export const usePanels = create<PanelsState>((set) => ({
@@ -40,4 +53,12 @@ export const usePanels = create<PanelsState>((set) => ({
   isPropertiesOpen: false,
   setLeftSidebarOpen: (isLeftSidebarOpen) => set({ isLeftSidebarOpen }),
   setPropertiesOpen: (isPropertiesOpen) => set({ isPropertiesOpen }),
+  isCopilotOpen: false,
+  setCopilotOpen: (isCopilotOpen) => set({ isCopilotOpen }),
+  stlImport: null,
+  imageImport: null,
+  openStlImport: (file) => set({ stlImport: { file: file ?? null } }),
+  openImageImport: (file) => set({ imageImport: { file: file ?? null } }),
+  closeStlImport: () => set({ stlImport: null }),
+  closeImageImport: () => set({ imageImport: null }),
 }));
