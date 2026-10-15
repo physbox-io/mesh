@@ -27,7 +27,9 @@ export function ScadEditorCard({ node }: { node: SceneNode }) {
   }, [node]);
 
   if (node.scad === undefined) return null;
-  return <ScadEditor node={node} />;
+  // One editor per body, so a slider timer, a compile in flight or a slider
+  // held mid-drag cannot carry over to the next body selected.
+  return <ScadEditor key={node.id} node={node} />;
 }
 
 function ScadEditor({ node }: { node: SceneNode }) {
@@ -43,14 +45,14 @@ function ScadEditor({ node }: { node: SceneNode }) {
   const [exportError, setExportError] = useState<string | null>(null);
 
   // The editor follows the stored source: a compile, an undo or the MCP
-  // bridge can each change it underneath the textarea.
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      setScadText(node.scad || '');
-      setScadError(null);
-    }, 0);
-    return () => clearTimeout(timer);
-  }, [node]);
+  // bridge can each change it underneath the textarea. Only the source — an
+  // edit anywhere else on the body leaves an unsaved draft alone.
+  const [shownScad, setShownScad] = useState(node.scad);
+  if (node.scad !== shownScad) {
+    setShownScad(node.scad);
+    setScadText(node.scad ?? '');
+    setScadError(null);
+  }
 
   const scadVars = useMemo(() => parseScadVariables(scadText), [scadText]);
 
@@ -68,42 +70,48 @@ function ScadEditor({ node }: { node: SceneNode }) {
   }, [slidingValues]);
 
   const updateCodeTimeoutRef = useRef<number | null>(null);
+  const nodeId = node.id;
+
+  // Writes the slider values into the source and compiles it, for this body.
+  const commitSlide = useCallback(async () => {
+    updateCodeTimeoutRef.current = null;
+    let updated = scadTextRef.current;
+    for (const [name, value] of Object.entries(slidingValuesRef.current)) {
+      updated = replaceVarInCode(updated, name, value);
+    }
+    setScadText(updated);
+
+    setIsScadCompiling(true);
+    setScadError(null);
+    try {
+      const compiled = await compileSCAD(updated);
+      useStore.getState().updateNodeScad(nodeId, updated, compiled);
+    } catch (e) {
+      console.error('OpenSCAD Auto-Compilation Error:', e);
+      setScadError((e as Error).message || 'Auto-compilation failed.');
+    } finally {
+      setIsScadCompiling(false);
+      setSlidingValues({});
+    }
+  }, [nodeId]);
 
   const debouncedUpdateCode = useCallback(() => {
     if (updateCodeTimeoutRef.current) {
       window.clearTimeout(updateCodeTimeoutRef.current);
     }
-    updateCodeTimeoutRef.current = window.setTimeout(async () => {
-      let updated = scadTextRef.current;
-      for (const [name, value] of Object.entries(slidingValuesRef.current)) {
-        updated = replaceVarInCode(updated, name, value);
-      }
-      setScadText(updated);
+    updateCodeTimeoutRef.current = window.setTimeout(commitSlide, 300);
+  }, [commitSlide]);
 
-      const selectedNodeId = useStore.getState().selectedNodeId;
-      if (!selectedNodeId) return;
-      setIsScadCompiling(true);
-      setScadError(null);
-      try {
-        const compiled = await compileSCAD(updated);
-        useStore.getState().updateNodeScad(selectedNodeId, updated, compiled);
-      } catch (e) {
-        console.error('OpenSCAD Auto-Compilation Error:', e);
-        setScadError((e as Error).message || 'Auto-compilation failed.');
-      } finally {
-        setIsScadCompiling(false);
-        setSlidingValues({});
-      }
-    }, 300);
-  }, []);
-
+  // A slide still waiting when the editor goes (another body selected) is
+  // saved now, to the body it was made on, rather than dropped.
   useEffect(() => {
     return () => {
       if (updateCodeTimeoutRef.current) {
         window.clearTimeout(updateCodeTimeoutRef.current);
+        void commitSlide();
       }
     };
-  }, []);
+  }, [commitSlide]);
 
   const handleCompileScad = useCallback(async () => {
     setIsScadCompiling(true);

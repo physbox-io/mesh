@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useState } from 'react';
 import { Code, Info, Zap } from 'lucide-react';
 import { useStore } from '../../store/useStore';
 import { usePanels } from '../../store/panelsStore';
@@ -12,14 +12,15 @@ export function ScriptEditorCard({ node }: { node: SceneNode }) {
   const [scriptError, setScriptError] = useState<string | null>(null);
   const [showApiRef, setShowApiRef] = useState(false);
 
-  // The editor follows the stored script, so the MCP bridge or an undo shows.
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      setScriptText(node.script || '');
-      setScriptError(null);
-    }, 0);
-    return () => clearTimeout(timer);
-  }, [node]);
+  // The editor follows the stored script, so the MCP bridge or an undo shows,
+  // and starts over on another body. Only those — moving the body, or an edit
+  // in another card, leaves an unsaved draft alone.
+  const [shown, setShown] = useState({ id: node.id, script: node.script });
+  if (node.id !== shown.id || node.script !== shown.script) {
+    setShown({ id: node.id, script: node.script });
+    setScriptText(node.script || '');
+    setScriptError(null);
+  }
 
   const handleSaveScript = useCallback(() => {
     try {
