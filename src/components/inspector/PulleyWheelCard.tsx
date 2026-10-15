@@ -1,7 +1,7 @@
 import { useStore } from '../../store/useStore';
+import type { SceneNode } from '../../types/scene';
 import { SliderValue } from '../SliderValue';
 import { RangeInput } from '../RangeInput';
-import type { SceneNode } from '../../types/scene';
 
 export function PulleyWheelCard({ node }: { node: SceneNode }) {
   const updatePulleyParams = useStore((s) => s.updatePulleyParams);
