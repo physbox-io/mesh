@@ -940,7 +940,11 @@ export function exportContourSliceSvg(
     return { success: false, error: 'The scene is flat along Z, so there is nothing to slice into layers.' };
   }
 
-  const autoCount = Math.max(1, Math.round(modelHeight / thickness));
+  // Rounded up, never to the nearest: a stack can be planed down to height but
+  // not built up to it, and rounding 121 mm over 50 mm stock gave two sheets,
+  // a stack 21 mm short. The slack forgives a model a hair over a whole number
+  // of sheets (a flask's 1 mm clearance) rather than adding a sheet for it.
+  const autoCount = Math.max(1, Math.ceil(modelHeight / thickness - 0.1));
   const layerCount = Math.max(1, Math.floor(options.sliceCount ?? autoCount));
 
   if (layerCount > MAX_LAYERS) {
@@ -951,16 +955,18 @@ export function exportContourSliceSvg(
     };
   }
 
-  // Each layer owns an equal share of the model's height, and is sampled at one
-  // spot inside its own share. With the layer count left on auto that share is
-  // the stock thickness; an override stretches or squeezes it, which is why the
-  // assembled stack is reported separately below.
-  const step = modelHeight / layerCount;
-  const inset = options.slicePosition === 'bottom'
-    ? step * 0.02
+  // Each layer owns a band of the model's height and is sampled at one spot
+  // inside it. On auto the band is one sheet thick from the bottom up, so the
+  // stack is the model at true height and the top sheet stands proud of it,
+  // its band cut off at the model's top. An override shares the height out
+  // equally, stretching or squeezing it, which is why the assembled stack is
+  // reported separately below.
+  const step = options.sliceCount == null ? thickness : modelHeight / layerCount;
+  const sampleAt = options.slicePosition === 'bottom'
+    ? 0.02
     : options.slicePosition === 'top'
-      ? step * 0.98
-      : step * 0.5;
+      ? 0.98
+      : 0.5;
 
   const layers: ContourLayer[] = [];
   let emptyLayers = 0;
@@ -970,11 +976,13 @@ export function exportContourSliceSvg(
     // between a flask's cope and drag sits exactly at mid-height, so one thick
     // layer over both used to come out empty and the export failed. The layer
     // still has material in it, so look elsewhere in its band, nearest first.
-    let z = zMin + i * step + inset;
+    const bandLo = zMin + i * step;
+    const band = Math.min(step, zMax - bandLo);
+    let z = bandLo + sampleAt * band;
     let loops = contoursAtZ(tris, z, solidIds);
     if (loops.length === 0) {
       const tries = [0.5, 0.25, 0.75, 0.1, 0.9, 0.02, 0.98]
-        .map((f) => zMin + (i + f) * step)
+        .map((f) => bandLo + f * band)
         .sort((a, b) => Math.abs(a - z) - Math.abs(b - z));
       for (const alt of tries) {
         const found = contoursAtZ(tris, alt, solidIds);
@@ -1256,7 +1264,15 @@ export function exportContourSliceSvg(
   }
 
   const stackHeight = layers.length * thickness;
-  if (Math.abs(stackHeight - modelHeight) > Math.max(thickness, modelHeight * 0.02)) {
+  const topBand = modelHeight - (layerCount - 1) * step;
+  if (options.sliceCount == null && thickness - topBand > Math.max(0.0005, thickness * 0.1)) {
+    warnings.push(
+      `The model is ${(modelHeight * 1000).toFixed(0)} mm tall, not a whole number of ` +
+      `${(thickness * 1000).toFixed(1)} mm sheets, so the top layer stands ` +
+      `${((thickness - topBand) * 1000).toFixed(0)} mm proud. Plane it down to ` +
+      `${(topBand * 1000).toFixed(0)} mm, or cut that layer from thinner stock.`
+    );
+  } else if (Math.abs(stackHeight - modelHeight) > Math.max(thickness, modelHeight * 0.02)) {
     warnings.push(
       `${layers.length} layers of ${(thickness * 1000).toFixed(1)} mm stack up to ` +
       `${(stackHeight * 1000).toFixed(0)} mm, but the model is ${(modelHeight * 1000).toFixed(0)} mm tall. ` +

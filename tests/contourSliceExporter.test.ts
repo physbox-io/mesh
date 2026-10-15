@@ -304,16 +304,29 @@ describe('Contour Slice Exporter', () => {
     expect(result.mapSvg).toContain('hsl(');
   });
 
+  it('never builds a stack shorter than the model', () => {
+    // 121 mm of flask over 50 mm stock rounded to two sheets, 100 mm: the
+    // finished flask came out 21 mm short. Three sheets, the top one planed.
+    const result = exportContourSliceSvg(castingFlaskPreset, { materialThickness: 0.05, pinHoles: false });
+    expect(result.success).toBe(true);
+    expect(result.layers).toHaveLength(3);
+    expect(result.stackHeight!).toBeGreaterThanOrEqual(result.modelHeight!);
+    // Each layer is sampled inside its own sheet, the top one inside what is left of the model.
+    expect(result.layers!.map((l) => +(l.z * 1000).toFixed(1))).toEqual([25, 75, 110.5]);
+    expect(result.stockTransform!.scale[2]).toBeCloseTo(1, 6);
+    expect(result.warnings!.some((w) => w.includes('Plane it down to 21 mm'))).toBe(true);
+    // A model a hair over a whole number of sheets does not get an extra one.
+    expect(exportContourSliceSvg(castingFlaskPreset, { materialThickness: 0.02, pinHoles: false }).layers).toHaveLength(6);
+  });
+
   it('finds the material in a thick layer whose mid-height falls in a gap', () => {
     // The flask's cope sits 1 mm above its drag, and that gap is at exactly
     // half the 121 mm height: one 200 mm layer sampled there came out empty
     // and the export failed with "no closed contours".
-    for (const mm of [100, 200]) {
-      const result = exportContourSliceSvg(castingFlaskPreset, { materialThickness: mm / 1000, pinHoles: false });
-      expect(result.success).toBe(true);
-      expect(result.layers).toHaveLength(1);
-      expect(result.layers![0].loops.length).toBeGreaterThan(0);
-    }
+    const result = exportContourSliceSvg(castingFlaskPreset, { materialThickness: 0.2, pinHoles: false });
+    expect(result.success).toBe(true);
+    expect(result.layers).toHaveLength(1);
+    expect(result.layers![0].loops.length).toBeGreaterThan(0);
   });
 
   it('reports a scene with nothing to slice rather than emitting an empty sheet', () => {
