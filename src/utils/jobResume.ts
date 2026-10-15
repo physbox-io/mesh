@@ -108,6 +108,25 @@ function hasCode(code: string, letter: 'G' | 'M', n: number): boolean {
   return re.test(code);
 }
 
+/** Whether a line moves the tool: a motion code, or an axis word under the modal one. */
+function isMotionLine(code: string): boolean {
+  return hasCode(code, 'G', 0) || hasCode(code, 'G', 1) || hasCode(code, 'G', 2) || hasCode(code, 'G', 3)
+    || word(code, 'X') !== null || word(code, 'Y') !== null || word(code, 'Z') !== null;
+}
+
+/**
+ * The spindle as the program will have it when it next moves, from `from` on.
+ *
+ * A tool change is followed by the new bit's `M3 S…` before its first move, so
+ * a resume that restored the speed in force before the `M6` would spin the new
+ * bit at the old bit's speed and descend into the cut with it.
+ */
+function spindleAtNextMove(state: ModalState, lines: string[], from: number): ModalState['spindle'] {
+  const probe: ModalState = { ...state, position: { ...state.position } };
+  for (let i = from; i < lines.length && !isMotionLine(lines[i]); i++) stepModalLine(probe, lines[i]);
+  return probe.spindle;
+}
+
 /** Advances `state` by a single stripped G-code line. */
 function stepModalLine(state: ModalState, code: string): void {
   if (hasCode(code, 'G', 20)) state.units = 'G20';
@@ -144,12 +163,10 @@ function stepModalLine(state: ModalState, code: string): void {
   }
 
   // Only motion words move the tool. A bare `S1000` or `M5` does not.
-  const isMotion =
-    hasCode(code, 'G', 0) || hasCode(code, 'G', 1) || hasCode(code, 'G', 2) || hasCode(code, 'G', 3);
   const x = word(code, 'X');
   const y = word(code, 'Y');
   const z = word(code, 'Z');
-  if (isMotion || x !== null || y !== null || z !== null) {
+  if (isMotionLine(code)) {
     const apply = (prev: number | null, next: number | null): number | null => {
       if (next === null) return prev;
       if (state.distance === 'G91') return (prev ?? 0) + next;
@@ -371,8 +388,9 @@ export function planResume(
   const clamped = Math.max(0, Math.min(fromLine, lines.length));
   const state = scanModalState(lines, clamped);
   const descends = !options?.arrivingAtPause && state.position.z !== null;
+  const spindle = spindleAtNextMove(state, lines, clamped);
   return {
-    preamble: buildResumePreamble(state, clamped, options),
+    preamble: buildResumePreamble({ ...state, spindle }, clamped, options),
     state,
     fromLine: clamped,
     descendsToZ: descends ? state.position.z : null,

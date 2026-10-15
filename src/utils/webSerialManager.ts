@@ -2274,8 +2274,8 @@ class WebSerialManager {
     // Get clear of the work, then bring the spindle out where it can be reached.
     //
     // Not at a sheet swap in a program that never commands Z - a laser job.
-    // Resume puts back only the program's own Z (retractToProgramClearZ), and a
-    // laser program has none, so the lift stayed and every later sheet was cut
+    // Resume puts back only the program's own Z (restoreAfterProgramPause), and
+    // a laser program has none, so the lift stayed and every later sheet was cut
     // 25 mm out of focus. A tool change always lifts: it means a spindle.
     const programUsesZ = this.program.length > 0
       && scanModalState(this.program.map((l) => l.code), this.programLength()).safeZ !== null;
@@ -2346,7 +2346,8 @@ class WebSerialManager {
     // in `Hold`, the tool is still in the cut, and `~` picks the same move back
     // up — so only the two that park get the retract.
     if (this.state.status === 'PAUSED_TOOL' || this.state.status === 'PAUSED_MATERIAL') {
-      await this.retractToProgramClearZ();
+      await this.restoreAfterProgramPause();
+      if (!this.isPaused) return; // cancelled, alarmed or disconnected meanwhile
     }
 
     this.isPaused = false;
@@ -2358,35 +2359,53 @@ class WebSerialManager {
   }
 
   /**
-   * Puts Z back where the program believes it is, before the stream restarts.
+   * Puts the machine back the way the program left it at a tool change or a
+   * programmed stop, before the stream restarts.
    *
-   * A tool change leaves the program's idea of the tool's height and the tool's
-   * actual height with nothing to do with each other. The exporter writes the
-   * lift before the `M6` and then assumes the machine is still up there, so the
-   * first traverse of the next operation is a bare `G0 X Y` with no Z word in
-   * it — while the machine is standing wherever the operator left it, which
-   * after touching off a new bit is *on the work*, by definition. That traverse
-   * is then a rapid across the job at the surface of it.
+   * The pause turned the spindle off, lifted, parked at X0 Y0, and then the
+   * operator was free to jog, touch off (which sends `G21 G90`) and fit a new
+   * bit. The program knows none of that. The exporter writes its lift *before*
+   * the `M6` and assumes the machine is still up there, over the same point, in
+   * the same modes, with the spindle as it was - so the next line may be a bare
+   * `G0 X Y` (a rapid across the job at the surface, from a tool left on the
+   * work), a `G1 Z-2` (a plunge at X0 Y0), a cut at depth with a dead spindle
+   * after an `M0` that never repeats its `M3`, or an inch or `G91` move read in
+   * millimetres or absolute.
    *
-   * The height is the program's own: `safeZ` is the highest Z it ever commands,
-   * which is the height it treats as clear. Clamped so it can only ever move
-   * away from the work — someone who jogged up 100 mm to get a spanner in stays
-   * where they are, and the program's own next plunge brings them back down.
+   * So this sends what a resume from that line would: the planner's preamble.
+   * Units, plane and work offset; up to the program's clear height (never down
+   * from where the tool is); over the point the program had reached; the
+   * spindle back to the speed it will next cut at, with time to spin up; down
+   * at a feed to where the program left the tool; and the feed and distance
+   * mode last. Every line waits for its `ok`, so the receive buffer is empty
+   * when the pump fills it again. The pause drained the buffer before it
+   * lifted, so the positions here are where the tool really is.
    */
-  private async retractToProgramClearZ(): Promise<void> {
+  private async restoreAfterProgramPause(): Promise<void> {
     if (this.program.length === 0) return;
     const at = Math.max(0, Math.min(this.programLength(), this.jobLineBase + this.currentQueueIndex));
-    const scan = scanModalState(this.program.map((l) => l.code), at);
-    // A program that never commands Z is a laser job, which has no height to
-    // put back and no spindle to hold clear of anything.
-    if (scan.safeZ === null) return;
-
+    // The retract is clamped to the live Z, so read it from now.
     await this.nextStatusReport();
-    // `safeZ` is in the program's units and the controller reports millimetres,
-    // so the comparison has to happen in one or the other.
-    const mmPerUnit = scan.units === 'G20' ? 25.4 : 1;
-    const currentZ = this.state.wpos.z / mmPerUnit;
-    await this.sendLine(`G0 Z${Math.max(scan.safeZ, currentZ).toFixed(3)}`);
+    const plan = planResume(this.program.map((l) => l.code), at, {
+      currentZ: this.state.wpos.z,
+      isLaser: this.jobIsLaser(),
+      arrivingAtPause: this.lineIsPause(at),
+    });
+    for (const line of prepareJobLines(plan.preamble.join('\n'))) {
+      if (!this.isPaused) return;
+      await this.sendAndWait(line.code);
+    }
+  }
+
+  /**
+   * Whether the job is for a laser: the caller's word when it has one, then
+   * `$32` laser mode, then a program that never commands a Z.
+   */
+  private jobIsLaser(explicit?: boolean): boolean {
+    if (explicit !== undefined) return explicit;
+    if (this.laserModeEnabled()) return true;
+    // `upTo` 0: only the whole-program safe Z is wanted, not a replay.
+    return this.program.length > 0 && scanModalState(this.program.map((l) => l.code), 0).safeZ === null;
   }
 
   /**

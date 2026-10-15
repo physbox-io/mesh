@@ -601,6 +601,69 @@ describe('getting clear of the work for a tool change', () => {
     expect(after.indexOf(String.fromCharCode(0x7e))).toBeGreaterThan(lift);
   });
 
+  /** Pauses `program` at its stop, resumes it, and returns what was sent from the resume on. */
+  async function pauseAndResume(program: string, status: 'PAUSED_TOOL' | 'PAUSED_MATERIAL') {
+    webSerialManager.startJob(program);
+    await advance(12);
+    expect(webSerialManager.getState().status).toBe(status);
+    const atPause = fake.sent.length;
+    await webSerialManager.resumeJob({ zIsSet: true });
+    await advance(12);
+    return fake.sent.slice(atPause);
+  }
+
+  it('puts the spindle back on, and the tool back over and into the cut, after a stop', async () => {
+    // An M0 in the middle of a cut, with no M5 before it and no M3 after: the
+    // pause turned the spindle off, and the next line is a cut at depth.
+    const after = await pauseAndResume(
+      'G21\nG90\nG0 Z5.000\nM3 S12000\nG1 Z-2.000 F300\nG1 X10 F600\nM0\nG1 X20\n',
+      'PAUSED_MATERIAL'
+    );
+    const at = (l: string) => after.indexOf(l);
+    const go = at(String.fromCharCode(0x7e));
+    expect(at('G0 Z5.000')).toBeGreaterThanOrEqual(0);
+    expect(at('M3 S12000')).toBeGreaterThan(at('G0 Z5.000'));
+    expect(at('G4 P2')).toBeGreaterThan(at('M3 S12000'));
+    expect(at('G0 X10.000 Y0.000')).toBeGreaterThan(at('G0 Z5.000'));
+    expect(at('G1 Z-2.000 F300')).toBeGreaterThan(at('G0 X10.000 Y0.000'));
+    expect(at('F600')).toBeGreaterThan(at('G1 Z-2.000 F300'));
+    expect(go).toBeGreaterThan(at('F600'));
+    expect(at('G1 X20')).toBeGreaterThan(go);
+  });
+
+  it('restores inches and incremental mode, which touching off had replaced', async () => {
+    const after = await pauseAndResume(
+      'G20\nG90\nG0 Z0.200\nG1 Z-0.050 F10\nG1 X1 F20\nG91\nM0\nG1 X1\n',
+      'PAUSED_MATERIAL'
+    );
+    const go = after.indexOf(String.fromCharCode(0x7e));
+    expect(after.indexOf('G20')).toBeGreaterThanOrEqual(0);
+    expect(after.indexOf('G20')).toBeLessThan(after.indexOf('G0 Z0.200'));
+    // Absolute for the moves back, incremental again for the program's own.
+    expect(after.indexOf('G91')).toBeGreaterThan(after.indexOf('G0 X1.000 Y0.000'));
+    expect(after.indexOf('G91')).toBeLessThan(go);
+  });
+
+  it('spins the new bit at its own speed, not the one it replaced', async () => {
+    const after = await pauseAndResume(
+      'G21\nG90\nG0 Z5.000\nM3 S18000\nG1 Z-2.000 F300\nG1 X10 F600\nG0 Z20.000\nT2 M6\nM3 S16000\nG1 X30\n',
+      'PAUSED_TOOL'
+    );
+    const go = after.indexOf(String.fromCharCode(0x7e));
+    expect(after.indexOf('M3 S16000')).toBeGreaterThanOrEqual(0);
+    expect(after.indexOf('M3 S16000')).toBeLessThan(go);
+    expect(after).not.toContain('M3 S18000');
+  });
+
+  it('waits for every restoring line to be taken before streaming the rest', async () => {
+    await pauseAndResume(
+      'G21\nG90\nG0 Z5.000\nM3 S12000\nG1 Z-2.000 F300\nG1 X10 F600\nM0\n' +
+        Array.from({ length: 100 }, (_, i) => `G1 X${(i + 2) * 10}`).join('\n') + '\n',
+      'PAUSED_MATERIAL'
+    );
+    expect(fake.peak.bytes).toBeLessThanOrEqual(128);
+  });
+
   it('leaves a feed hold alone — the tool is still in the cut', async () => {
     webSerialManager.startJob('G21\nG90\nG0 Z5.000\nG1 Z-2.000 F300\n' +
       Array.from({ length: 200 }, (_, i) => `G1 X${(i + 1) * 10} F600`).join('\n') + '\n');

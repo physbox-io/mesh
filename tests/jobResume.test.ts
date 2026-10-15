@@ -97,6 +97,10 @@ describe('jobResume', () => {
       expect(plunge).toMatch(/F250/);
     });
 
+    it('does not light what the program puts out before its next move', () => {
+      expect(planResume(router, 12).preamble.join('\n')).not.toMatch(/^M3/m);
+    });
+
     it('lets the spindle come up to speed before it is used', () => {
       const body = plan.preamble.filter((l) => !l.startsWith(';'));
       const spindle = body.findIndex((l) => /^M3 /.test(l));
@@ -130,8 +134,9 @@ describe('jobResume', () => {
     ];
 
     it('positions before restoring the beam, not after', () => {
-      const body = planResume(laser, 7).preamble.filter((l) => !l.startsWith(';'));
-      const move = body.findIndex((l) => /^G0 X50\.000 Y40\.000/.test(l));
+      // Mid-cut: at line 7 the next thing the program does is put the beam out.
+      const body = planResume(laser, 6).preamble.filter((l) => !l.startsWith(';'));
+      const move = body.findIndex((l) => /^G0 X50\.000 Y10\.000/.test(l));
       const beam = body.findIndex((l) => /^M3 S800/.test(l));
 
       expect(move).toBeGreaterThanOrEqual(0);
@@ -153,8 +158,8 @@ describe('jobResume', () => {
 
     it('treats a laser job with a focus move as a laser when told it is one', () => {
       const focused = ['G21', 'G90', 'G0 Z0', 'G0 X10 Y10', 'M4 S800', 'G1 X50 F1200', 'G1 Y40', 'M5'];
-      const body = planResume(focused, 7, { isLaser: true }).preamble.filter((l) => !l.startsWith(';'));
-      const move = body.findIndex((l) => /^G0 X50\.000 Y40\.000/.test(l));
+      const body = planResume(focused, 6, { isLaser: true }).preamble.filter((l) => !l.startsWith(';'));
+      const move = body.findIndex((l) => /^G0 X50\.000 Y10\.000/.test(l));
       const beam = body.findIndex((l) => /^M4 S800/.test(l));
       expect(move).toBeGreaterThanOrEqual(0);
       expect(beam).toBeGreaterThan(move);
