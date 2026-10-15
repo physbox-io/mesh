@@ -306,15 +306,17 @@ describe('Contour Slice Exporter', () => {
 
   it('never builds a stack shorter than the model', () => {
     // 121 mm of flask over 50 mm stock rounded to two sheets, 100 mm: the
-    // finished flask came out 21 mm short. Three sheets, the top one planed.
+    // finished flask came out 21 mm short. Three sheets, the top one faced
+    // down to what is left of the flask, so the stack is the flask's height.
     const result = exportContourSliceSvg(castingFlaskPreset, { materialThickness: 0.05, pinHoles: false });
     expect(result.success).toBe(true);
     expect(result.layers).toHaveLength(3);
-    expect(result.stackHeight!).toBeGreaterThanOrEqual(result.modelHeight!);
+    expect(result.layers!.map((l) => l.facedToMm)).toEqual([undefined, undefined, 21]);
+    expect(result.stackHeight!).toBeCloseTo(result.modelHeight!, 6);
     // Each layer is sampled inside its own sheet, the top one inside what is left of the model.
     expect(result.layers!.map((l) => +(l.z * 1000).toFixed(1))).toEqual([25, 75, 110.5]);
     expect(result.stockTransform!.scale[2]).toBeCloseTo(1, 6);
-    expect(result.warnings!.some((w) => w.includes('Plane it down to 21 mm'))).toBe(true);
+    expect(result.warnings!.some((w) => w.includes('faced down to 21 mm'))).toBe(true);
     // A model a hair over a whole number of sheets does not get an extra one.
     expect(exportContourSliceSvg(castingFlaskPreset, { materialThickness: 0.02, pinHoles: false }).layers).toHaveLength(6);
   });

@@ -235,6 +235,7 @@ export function contourSheetParts(layers: ContourLayer[], thicknessMm: number): 
     u: [1, 0, 0],
     v: [0, 1, 0],
     zFrom: 0,
-    zTo: thicknessMm,
+    // The top layer as faced down to the model's top.
+    zTo: layer.facedToMm ?? thicknessMm,
   }));
 }

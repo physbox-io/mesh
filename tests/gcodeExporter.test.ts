@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { generateLaserCutGcode, generateContourSliceGcode, generateFramingGcode, DEFAULT_GCODE_OPTIONS } from '../src/utils/gcodeExporter';
 import { exportLaserCutSvg, DEFAULT_LASER_OPTIONS, type LaserPanel, type Point2D } from '../src/utils/laserCutExporter';
 import { exportContourSliceSvg, DEFAULT_CONTOUR_OPTIONS } from '../src/utils/contourSliceExporter';
-import { birdhousePreset } from '../src/presets/presetScenes';
+import { birdhousePreset, castingFlaskPreset } from '../src/presets/presetScenes';
 
 describe('G-Code Generator Engine', () => {
   it('generates laser mode G-code for birdhouse panels with interior cutouts first', () => {
@@ -413,3 +413,64 @@ describe('Cutter compensation', () => {
     expect(Math.max(...ys.map((p) => p.y))).toBeCloseTo(63, 3);
   });
 });
+
+describe('Contour stack top layer', () => {
+  // 121 mm of flask over 50 mm stock: two full sheets and a third faced down
+  // to the 21 mm the flask has left, so the stack finishes at its height.
+  const slice = exportContourSliceSvg(castingFlaskPreset, { ...DEFAULT_CONTOUR_OPTIONS, materialThickness: 0.05, pinHoles: false });
+  const opts = { ...DEFAULT_GCODE_OPTIONS, machineMode: 'cnc' as const, cutDepthZ: 50, zStepdown: 3, bitDiameterMm: 6, attachmentsEnabled: false };
+
+  const layerBlocks = (gcode: string) => gcode.split(/; CONTOUR LAYER /).slice(1);
+  const zs = (block: string) => [...block.matchAll(/G1 [^\n]*Z(-?[\d.]+)/g)].map((m) => +m[1]);
+
+  it('faces only the top layer, down to the flask top, before its profile', () => {
+    const res = generateContourSliceGcode(slice, opts);
+    expect(res.success).toBe(true);
+    const facing = res.operations.filter((o) => o.type === 'facing');
+    expect(facing).toHaveLength(1);
+    expect(facing[0].sheetIndex).toBe(2);
+
+    const [first, , top] = layerBlocks(res.gcode);
+    expect(first).not.toContain('Facing');
+    const facePart = top.slice(top.indexOf('--- Facing'), top.indexOf('; Pass 1/'));
+    expect(Math.min(...zs(facePart))).toBeCloseTo(-29, 3);
+    // The profile starts below the faced surface and still cuts through the sheet.
+    const profile = top.slice(top.indexOf('; Pass 1/'));
+    const profileZ = zs(profile);
+    expect(Math.max(...profileZ)).toBeLessThan(-29);
+    expect(Math.min(...profileZ)).toBeCloseTo(-50, 3);
+  });
+
+  it('faces only the wall band a frame needs, not the hole it drops', () => {
+    // A 300 mm frame with 20 mm walls, as the flask slices once its CSG is built.
+    const sq = (a: number, cw: boolean) => {
+      const l = [{ x: -a, y: -a }, { x: a, y: -a }, { x: a, y: a }, { x: -a, y: a }];
+      return cw ? l.reverse() : l;
+    };
+    const frame = {
+      success: true,
+      sheetCount: 1,
+      layers: [{ index: 0, z: 0, loops: [sq(150, false), sq(130, true)], pieceCount: 1, areaMm2: 22400, facedToMm: 21 }],
+    } as unknown as Parameters<typeof generateContourSliceGcode>[0];
+    const res = generateContourSliceGcode(frame, opts);
+    const block = res.gcode.slice(res.gcode.indexOf('--- Facing'), res.gcode.indexOf('; Pass 1/'));
+    const pts = [...block.matchAll(/G1 X(-?[\d.]+) Y(-?[\d.]+)/g)].map((m) => [+m[1], +m[2]]);
+    expect(pts.length).toBeGreaterThan(0);
+    // Every tool centre is within a bit radius of the wall, outside or in.
+    for (const [x, y] of pts) {
+      const r = Math.max(Math.abs(x), Math.abs(y));
+      expect(r).toBeGreaterThan(130 - 3 - 0.5);
+      expect(r).toBeLessThan(150 + 3 + 0.5);
+    }
+    // And the band is cleared: some centre runs close to each edge of it.
+    const radii = pts.map(([x, y]) => Math.max(Math.abs(x), Math.abs(y)));
+    expect(Math.min(...radii)).toBeLessThan(128);
+    expect(Math.max(...radii)).toBeGreaterThan(152);
+  });
+
+  it('leaves a laser program alone', () => {
+    const res = generateContourSliceGcode(slice, { ...opts, machineMode: 'laser' });
+    expect(res.operations.some((o) => o.type === 'facing')).toBe(false);
+  });
+});
+

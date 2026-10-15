@@ -88,6 +88,13 @@ export interface ContourLayer {
   pieceCount: number;
   /** Cut area in mm², holes excluded. */
   areaMm2: number;
+  /**
+   * How thick this layer finishes, mm, when that is less than a sheet: the top
+   * layer, whose band stops at the model's top. A router faces a full sheet
+   * down to it before cutting the profile, so the stack finishes at the
+   * model's height. Absent for a full sheet.
+   */
+  facedToMm?: number;
   /** Where the engraved layer number goes, in the same frame as `loops`. */
   labelPos2D?: Point2D;
   /**
@@ -957,8 +964,8 @@ export function exportContourSliceSvg(
 
   // Each layer owns a band of the model's height and is sampled at one spot
   // inside it. On auto the band is one sheet thick from the bottom up, so the
-  // stack is the model at true height and the top sheet stands proud of it,
-  // its band cut off at the model's top. An override shares the height out
+  // stack is the model at true height, and the top band stops at the model's
+  // top: that layer is faced down to match. An override shares the height out
   // equally, stretching or squeezing it, which is why the assembled stack is
   // reported separately below.
   const step = options.sliceCount == null ? thickness : modelHeight / layerCount;
@@ -1004,6 +1011,8 @@ export function exportContourSliceSvg(
       loops,
       pieceCount: Math.max(1, pieces),
       areaMm2: Math.abs(area),
+      // Under a tenth of a millimetre is not worth a facing pass.
+      ...(band < thickness - 1e-4 ? { facedToMm: +(band * 1000).toFixed(1) } : {}),
     });
   }
 
@@ -1263,14 +1272,16 @@ export function exportContourSliceSvg(
     );
   }
 
-  const stackHeight = layers.length * thickness;
-  const topBand = modelHeight - (layerCount - 1) * step;
-  if (options.sliceCount == null && thickness - topBand > Math.max(0.0005, thickness * 0.1)) {
+  const lastLayer = layers[layers.length - 1];
+  const stackHeight = options.sliceCount == null
+    ? lastLayer.index * thickness + (lastLayer.facedToMm ?? thickness * 1000) / 1000
+    : layers.length * thickness;
+  if (lastLayer.facedToMm !== undefined) {
     warnings.push(
       `The model is ${(modelHeight * 1000).toFixed(0)} mm tall, not a whole number of ` +
-      `${(thickness * 1000).toFixed(1)} mm sheets, so the top layer stands ` +
-      `${((thickness - topBand) * 1000).toFixed(0)} mm proud. Plane it down to ` +
-      `${(topBand * 1000).toFixed(0)} mm, or cut that layer from thinner stock.`
+      `${(thickness * 1000).toFixed(1)} mm sheets, so the top layer is faced down to ` +
+      `${lastLayer.facedToMm} mm before its profile is cut. A laser cannot face: cut that ` +
+      `layer from ${lastLayer.facedToMm} mm stock instead.`
     );
   } else if (Math.abs(stackHeight - modelHeight) > Math.max(thickness, modelHeight * 0.02)) {
     warnings.push(
