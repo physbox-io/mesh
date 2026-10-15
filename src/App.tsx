@@ -9,11 +9,9 @@ import SculptPanel from './components/SculptPanel';
 import LatticePanel from './components/LatticePanel';
 import { CutControls } from './components/CutControls';
 import { ThreadField } from './components/ThreadField';
-import ColoringSection from './components/ColoringSection';
-import { HierarchyTree } from './components/HierarchyTree';
+import { LeftSidebar } from './components/palette/LeftSidebar';
 import { useMuJoCoInit } from './hooks/useMuJoCo';
 import { useMCPBridge } from './hooks/useMCPBridge';
-import { useCoarsePointer } from './hooks/useCoarsePointer';
 import { useShallow } from 'zustand/react/shallow';
 import { useStore, getPhysicsWorkerClient, cloneSceneGraph } from './store/useStore';
 import { useDentStore } from './store/dentStore';
@@ -32,7 +30,7 @@ import { simplifyGeomMesh, toRenderVertices } from './utils/simplifyMesh';
 import { sliderSpan, offsetSpan, lengthSpan } from './utils/sliderSpan';
 import { loadCompiler, compileSCAD, isCompilerReady, setScadCompileListener } from './utils/openscad';
 import { getStickyRotation } from './utils/geom';
-import { csgSourceGeoms, csgHashOf, collisionModeOf, CSG_DEFAULT_SECTORS, sourcePositiveBounds } from './utils/csg';
+import { csgSourceGeoms, csgHashOf, collisionModeOf, CSG_DEFAULT_SECTORS } from './utils/csg';
 import { DEFAULT_HOLD_STEPS, isBreakable, weldKey } from './utils/breakThresholds';
 import { isDentable, needsConversionForDenting } from './utils/dentMesh';
 import { CUSTOM_DENT, CUSTOM_SHATTER, DEFORM_MATERIALS, deformMaterial, dentFields, estimateBodyMass, materialUpdates, shatterFields } from './utils/deformMaterials';
@@ -87,7 +85,6 @@ import { JobRestoreModal } from './components/JobRestoreModal';
 import { JobSucceededModal } from './components/JobSucceededModal';
 import { MIN_MAX_TOKENS, MAX_MAX_TOKENS, readMaxTokens, writeMaxTokens } from './utils/llmSettings';
 import { DfmHUD } from './components/DfmHUD';
-import { ComponentPalette } from './components/ComponentPalette';
 import { pushGlobalParameter } from './utils/llmSettings';
 import { saveUserPreset, deleteUserPreset, readUserPreset, listUserPresetNames, cloudOnlyPresetNames, USER_PRESETS_CHANGED_EVENT } from './utils/userPresets';
 import { savePreset } from './utils/presetStorage';
@@ -114,7 +111,7 @@ import { useEscapeToClose } from './hooks/useEscapeToClose';
 import { getSyncedSceneGraph } from './utils/mujocoSync';
 import { pressHistoryKey } from './utils/historyKeys';
 import { generateScadForNode, parseScadVariables, replaceVarInCode } from './utils/scadSource';
-import { isTopLevel, findNodeById, getNodeWorldPos, patchGeom } from './utils/sceneTree';
+import { isTopLevel, findNodeById, patchGeom } from './utils/sceneTree';
 import { NoteCardOverlay } from './components/NoteCardOverlay';
 import { AxisLegendDrawer } from './components/AxisLegendDrawer';
 import { DropHandler } from './components/DropHandler';
@@ -214,7 +211,6 @@ function App() {
   const [propertiesWidth, setPropertiesWidth] = useState(380);
   const isLeftSidebarOpen = usePanels((s) => s.isLeftSidebarOpen);
   const setIsLeftSidebarOpen = usePanels((s) => s.setLeftSidebarOpen);
-  const coarsePointer = useCoarsePointer();
   const isPropertiesOpen = usePanels((s) => s.isPropertiesOpen);
   const setIsPropertiesOpen = usePanels((s) => s.setPropertiesOpen);
   const [isSaveModalOpen, setIsSaveModalOpen] = useState(false);
@@ -495,7 +491,7 @@ function App() {
     updateNodeGeom, updateNodeJoint, updateGearTeeth, addPusherPeg, deletePusherPeg, updatePusherPeg, addComponent, loadPreset, openPatternGenerator, updateScene,
     resetSimulation, updateNodePos,
     updateNodeJointsList, deleteNode, renameNode,
-    addHardwareComponentNode, updateNodeRotation, rotateAroundCOM, setRotateAroundCOM,
+    updateNodeRotation, rotateAroundCOM, setRotateAroundCOM,
     updateWedgeParams, updatePyramidParams, updateConeParams, updateTorusParams, updateTubeParams, updateCurveParams, updatePulleyParams, updateRopeParams,
     updateNodeScript, updateNode,
     deleteNodeGeom, setGeomCsgOp,
@@ -519,7 +515,7 @@ function App() {
     updateNodeGeom: s.updateNodeGeom, updateNodeJoint: s.updateNodeJoint, updateGearTeeth: s.updateGearTeeth, addPusherPeg: s.addPusherPeg, deletePusherPeg: s.deletePusherPeg, updatePusherPeg: s.updatePusherPeg, addComponent: s.addComponent, loadPreset: s.loadPreset, openPatternGenerator: s.openPatternGenerator, updateScene: s.updateScene,
     resetSimulation: s.resetSimulation, updateNodePos: s.updateNodePos,
     updateNodeJointsList: s.updateNodeJointsList, deleteNode: s.deleteNode, renameNode: s.renameNode,
-    addHardwareComponentNode: s.addHardwareComponentNode, updateNodeRotation: s.updateNodeRotation, rotateAroundCOM: s.rotateAroundCOM, setRotateAroundCOM: s.setRotateAroundCOM,
+    updateNodeRotation: s.updateNodeRotation, rotateAroundCOM: s.rotateAroundCOM, setRotateAroundCOM: s.setRotateAroundCOM,
     updateWedgeParams: s.updateWedgeParams, updatePyramidParams: s.updatePyramidParams, updateConeParams: s.updateConeParams, updateTorusParams: s.updateTorusParams, updateTubeParams: s.updateTubeParams, updateCurveParams: s.updateCurveParams, updatePulleyParams: s.updatePulleyParams, updateRopeParams: s.updateRopeParams,
     updateNodeScript: s.updateNodeScript, updateNode: s.updateNode,
     deleteNodeGeom: s.deleteNodeGeom, setGeomCsgOp: s.setGeomCsgOp,
@@ -1523,10 +1519,6 @@ function App() {
   }, [setSelectedNodeId]);
 
 
-  const handleDragStart = (e: React.DragEvent, type: string) => {
-    e.dataTransfer.setData('type', type);
-  };
-
   // Find selected node details
   const selectedNode = useMemo<SceneNode | null>(() => {
     if (!selectedNodeId) return null;
@@ -1639,48 +1631,6 @@ function App() {
     if (freeJoint) {
       getPhysicsWorkerClient().setQpos(freeJoint.name, axis, cleanVal);
     }
-  };
-
-  const handleAddComponentClick = (type: 'box' | 'sphere' | 'capsule' | 'cylinder' | 'bob' | 'gear' | 'wedge' | 'pulley_wheel' | 'pulley_rope' | 'mesh' | 'openscad' | 'pyramid' | 'cone' | 'torus' | 'tube' | 'ellipsoid' | 'curve' | 'ring' | 'sculpt') => {
-    if (selectedNodeId) {
-      const parentNode = findNodeById(sceneGraph.nodes, selectedNodeId);
-      if (parentNode) {
-        const worldPos = getNodeWorldPos(sceneGraph.nodes, selectedNodeId) || [0, 0, 0];
-        const offset = (type === 'capsule' || type === 'bob') ? [0, 0, -0.6] : [0.5, 0, 0];
-        addComponent(type, [worldPos[0] + offset[0], worldPos[1] + offset[1], worldPos[2] + offset[2]], selectedNodeId);
-        setIsLeftSidebarOpen(false);
-        return;
-      }
-    }
-    addComponent(type, [0, 0, 0.15]); // Spawn slightly above floor
-    setIsLeftSidebarOpen(false);
-  };
-
-  /**
-   * Adds a ball of clay and opens the sculpt tools on it.
-   *
-   * Making the object and then having to go and find the tools that act on it is
-   * two steps where the intent was one — nobody adds a sculpt in order to look
-   * at a sphere. The new node is picked out of the store afterwards because
-   * `addComponent` mints the id itself and does not hand it back.
-   */
-  /**
-   * Adds a box on the grid and opens the lattice tools on it.
-   *
-   * Same reasoning as the sculpt button: nobody adds a lattice body in order to
-   * look at a cube, and leaving them to go and find the tools afterwards makes
-   * two steps out of one intent.
-   */
-  const handleAddLatticeClick = () => {
-    const id = addComponent('lattice', [0, 0, 0.2], selectedNodeId);
-    setIsLeftSidebarOpen(false);
-    useStore.getState().setLatticeNodeId(id);
-  };
-
-  const handleAddSculptClick = () => {
-    const id = addComponent('sculpt', [0, 0, 0.2], selectedNodeId);
-    setIsLeftSidebarOpen(false);
-    useStore.getState().setSculptNodeId(id);
   };
 
   // A part dropped on the canvas goes under the selected body, like a clicked
@@ -2342,69 +2292,16 @@ function App() {
           </div>
         )}
 
-        {/* Mobile Sidebar Backdrop Scrim. Covers the workspace, not the whole
-            page: the header above it stays live, so the hamburger that opened
-            the drawer is still the thing that closes it. */}
-        {isLeftSidebarOpen && (
-          <div
-            onClick={() => setIsLeftSidebarOpen(false)}
-            className="absolute inset-0 bg-slate-900/20 backdrop-blur-xs z-[115] md:hidden"
-          />
-        )}
-
-        {/* Left Sidebar.
-            `absolute inset-y-0` against the workspace, not `fixed inset-y-14`:
-            below `lg` the header wraps onto as many rows as its contents need,
-            so its height is not knowable here and anything pinned 3.5rem from
-            the top of the page tucks under a two-row navbar. */}
-        <aside className={`w-64 md:w-56 max-w-[85vw] shrink-0 glass-panel border-r border-slate-200 dark:border-slate-800 flex flex-col p-4 bg-white/90 dark:bg-slate-900/90 overflow-y-auto transition-transform duration-200 ease-in-out absolute md:relative inset-y-0 md:inset-auto left-0 z-20 max-md:z-[120] shadow-xl md:shadow-none ${
-          isLeftSidebarOpen ? 'flex translate-x-0' : 'hidden md:flex -translate-x-full md:translate-x-0'
-        }`}>
-          <div className="flex items-center justify-between mb-2.5">
-            <h2 className="text-[10px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider">Hierarchy</h2>
-            {/* As an overlay the drawer covers the model, so it carries its own
-                way out rather than relying on the hamburger it came from. */}
-            <button
-              onClick={() => setIsLeftSidebarOpen(false)}
-              className="md:hidden p-1 -m-1 rounded text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
-              title="Close the hierarchy panel"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-          <HierarchyTree />
-
-          <ComponentPalette
-            coarsePointer={coarsePointer}
-            selectedNodeName={selectedNode ? selectedNode.name : null}
-            onDragStart={handleDragStart}
-            onAddComponent={handleAddComponentClick}
-            onAddSculpt={() => handleAddSculptClick()}
-            onAddLattice={() => handleAddLatticeClick()}
-            onAddHardwareNode={(node) => {
-              addHardwareComponentNode(node);
-              setIsLeftSidebarOpen(false);
-            }}
-            hardwareTarget={selectedNode && sourcePositiveBounds(selectedNode) ? selectedNode.name : null}
-            onAddHardwareCut={(kind) => {
-              if (!selectedNode) return;
-              useStore.getState().addHardwareCut(selectedNode.id, kind);
-              setIsLeftSidebarOpen(false);
-            }}
-            onAddNoteCard={() => {
-              const id = `card_${Date.now()}`;
-              setNoteCards((prev) => [
-                ...prev,
-                { id, markdown: '# Note\n\nWrite your notes here.', minimized: false, x: 80, y: 80 },
-              ]);
-              setEditingCardId(id);
-              setIsLeftSidebarOpen(false);
-            }}
-          />
-
-        {/* Colour, which is looks only — see ColoringSection. */}
-        <ColoringSection onArmed={() => setIsLeftSidebarOpen(false)} />
-      </aside>
+        <LeftSidebar
+          onAddNoteCard={() => {
+            const id = `card_${Date.now()}`;
+            setNoteCards((prev) => [
+              ...prev,
+              { id, markdown: '# Note\n\nWrite your notes here.', minimized: false, x: 80, y: 80 },
+            ]);
+            setEditingCardId(id);
+          }}
+        />
 
         {/* Viewport */}
         <main className="flex-1 relative min-w-0 overflow-hidden">
