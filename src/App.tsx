@@ -9,6 +9,7 @@ import LatticePanel from './components/LatticePanel';
 import { ThreadField } from './components/ThreadField';
 import { LeftSidebar } from './components/palette/LeftSidebar';
 import { InspectorPanel } from './components/inspector/InspectorPanel';
+import { MotorCard } from './components/inspector/MotorCard';
 import { GearCard } from './components/inspector/GearCard';
 import { JointSettingsCard } from './components/inspector/JointSettingsCard';
 import { GeomPropertiesCard } from './components/inspector/GeomPropertiesCard';
@@ -3736,71 +3737,7 @@ function App() {
                 )}
               </div>
 
-              {/* Motor Actuator Option for Hinge/Slide joints */}
-              {selectedNode.joints?.length > 0 && (selectedNode.joints[0].type === 'hinge' || selectedNode.joints[0].type === 'slide') && (
-                <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-2">
-                  <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 mb-1">⚡ Joint Actuator / Motor</h3>
-                  <label className="text-xs font-semibold text-slate-500 flex items-center gap-2 cursor-pointer py-1">
-                    <input 
-                      type="checkbox" 
-                      checked={!!selectedNode.joints[0].actuator}
-                      onChange={(e) => {
-                        const enabled = e.target.checked;
-                        const updatedJoint = {
-                          ...selectedNode.joints[0],
-                          actuator: enabled ? { type: 'velocity' as const, kv: 10, ctrlValue: 0 } : undefined
-                        };
-                        updateNodeJoint(selectedNode.id, updatedJoint);
-                      }}
-                      className="w-4 h-4 rounded text-blue-500 focus:ring-blue-400 accent-blue-500 cursor-pointer"
-                    />
-                    Enable Motor Drive
-                  </label>
-
-                  {selectedNode.joints[0].actuator && (
-                    <div className="flex flex-col gap-2.5 mt-1 pt-2 border-t border-slate-100">
-                      <div className="flex flex-col gap-1">
-                        <label className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Actuator Type</label>
-                        <select
-                          value={selectedNode.joints[0].actuator.type}
-                          onChange={(e) => {
-                            const type = e.target.value as 'velocity' | 'motor';
-                            updateNodeJoint(selectedNode.id, {
-                              ...selectedNode.joints[0],
-                              actuator: { ...selectedNode.joints[0].actuator, type, kv: type === 'velocity' ? 10 : undefined }
-                            });
-                          }}
-                          className="w-full px-2 py-1.5 border border-slate-200 rounded text-xs bg-white font-medium text-slate-700 outline-none cursor-pointer focus:border-blue-500"
-                        >
-                          <option value="velocity">Velocity Drive (Target Speed)</option>
-                          <option value="motor">Torque Drive (Direct Force)</option>
-                        </select>
-                      </div>
-
-                      {selectedNode.joints[0].actuator.type === 'velocity' && (
-                        <div className="flex flex-col gap-1">
-                          <label className="text-xs font-medium text-slate-500 flex justify-between">
-                            Velocity Gain (kv) <span>{selectedNode.joints[0].actuator.kv || 10}</span>
-                          </label>
-                          <RangeInput
-                            min="0.5"
-                            max="100"
-                            step="0.5"
-                            value={selectedNode.joints[0].actuator.kv || 10}
-                            onChange={(v) => {
-                              updateNodeJoint(selectedNode.id, {
-                                ...selectedNode.joints[0],
-                                actuator: { ...selectedNode.joints[0].actuator!, kv: v }
-                              });
-                            }}
-                            className="w-full accent-blue-500 cursor-pointer"
-                          />
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              )}
+              <MotorCard node={selectedNode} />
 
               <GearCard node={selectedNode} />
 
