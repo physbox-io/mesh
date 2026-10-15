@@ -7,27 +7,6 @@ import SculptPanel from './components/SculptPanel';
 import LatticePanel from './components/LatticePanel';
 import { LeftSidebar } from './components/palette/LeftSidebar';
 import { InspectorPanel } from './components/inspector/InspectorPanel';
-import { CombineCard } from './components/inspector/CombineCard';
-import { ModellingTools } from './components/inspector/ModellingTools';
-import { BodyBasicsCard } from './components/inspector/BodyBasicsCard';
-import { PositionCard } from './components/inspector/PositionCard';
-import { ResizeCard } from './components/inspector/ResizeCard';
-
-
-import { JointTypeCard } from './components/inspector/JointTypeCard';
-import { MotorCard } from './components/inspector/MotorCard';
-import { GearCard } from './components/inspector/GearCard';
-import { JointSettingsCard } from './components/inspector/JointSettingsCard';
-import { GeomPropertiesCard } from './components/inspector/GeomPropertiesCard';
-
-
-import { ConstraintsCard } from './components/inspector/ConstraintsCard';
-import { DeformationCard } from './components/inspector/DeformationCard';
-import { CollisionCard } from './components/inspector/CollisionCard';
-import { CsgCard } from './components/inspector/CsgCard';
-import { MeshGeomsCard } from './components/inspector/MeshGeomsCard';
-import { PulleyWheelCard } from './components/inspector/PulleyWheelCard';
-import { RopeCard } from './components/inspector/RopeCard';
 import { useSelectedNode } from './hooks/useSelectedNode';
 import { useMuJoCoInit } from './hooks/useMuJoCo';
 import { useMCPBridge } from './hooks/useMCPBridge';
@@ -68,7 +47,6 @@ import { RangeInput } from './components/RangeInput';
 import { ConfirmModal } from './components/ConfirmModal';
 import { CompileErrorBanner } from './components/CompileErrorBanner';
 import { VoltLinkBanner } from './components/VoltLinkBanner';
-import { CavityCard } from './components/CavityCard';
 import { useVoltLink } from './hooks/useVoltLink';
 import { ObjectGestureController } from './components/scene/ObjectGestures';
 import { TransformGizmo } from './components/scene/TransformGizmo';
@@ -77,8 +55,6 @@ import { MeasureTool } from './components/scene/MeasureTool';
 import { DimensionOverlay } from './components/scene/DimensionOverlay';
 import { EdgeRoundTool } from './components/scene/EdgeRoundTool';
 import { EdgeRoundPanel } from './components/EdgeRoundPanel';
-import { EdgesCard } from './components/EdgesCard';
-import { SurfacePatternsCard } from './components/SurfacePatternsCard';
 import {
   PaintStrokeController, CameraController, DragInteractionController,
   SceneCapture, SceneVisuals,
@@ -451,7 +427,6 @@ function App() {
     sceneGraph, selectedNodeId, setSelectedNodeId,
     addComponent, loadPreset, openPatternGenerator, updateScene,
     resetSimulation,
-    deleteNode,
     updateNodeScript,
     sculptNodeId,
     latticeNodeId,
@@ -471,7 +446,6 @@ function App() {
     sceneGraph: s.sceneGraph, selectedNodeId: s.selectedNodeId, setSelectedNodeId: s.setSelectedNodeId,
     addComponent: s.addComponent, loadPreset: s.loadPreset, openPatternGenerator: s.openPatternGenerator, updateScene: s.updateScene,
     resetSimulation: s.resetSimulation,
-    deleteNode: s.deleteNode,
     updateNodeScript: s.updateNodeScript,
     sculptNodeId: s.sculptNodeId,
     latticeNodeId: s.latticeNodeId,
@@ -2619,46 +2593,6 @@ function App() {
         <InspectorPanel>
           {(selectedNode) => (
             <>
-                <CombineCard node={selectedNode} />
-
-                <ModellingTools node={selectedNode} />
-
-              <BodyBasicsCard node={selectedNode} />
-
-              <PositionCard node={selectedNode} />
-
-              <ResizeCard node={selectedNode} />
-
-              <JointTypeCard node={selectedNode} />
-
-              <MotorCard node={selectedNode} />
-
-              <GearCard node={selectedNode} />
-
-              <JointSettingsCard node={selectedNode} />
-
-              <GeomPropertiesCard node={selectedNode} />
-
-              <ConstraintsCard node={selectedNode} />
-
-              <DeformationCard node={selectedNode} />
-
-              <CollisionCard node={selectedNode} />
-
-              <EdgesCard node={selectedNode} />
-              <SurfacePatternsCard node={selectedNode} />
-
-              <CsgCard node={selectedNode} />
-
-              {/* The air inside a watertight body, for a speaker box in Volt. */}
-              <CavityCard node={selectedNode} />
-
-              <MeshGeomsCard node={selectedNode} />
-
-              <PulleyWheelCard node={selectedNode} />
-
-              <RopeCard node={selectedNode} />
-
               {/* OpenSCAD Editor Card */}
               {selectedNode.scad !== undefined && (
                 <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-2.5">
@@ -3048,14 +2982,6 @@ api.applyForce([force, 0, 0]);
                   </div>
                 )}
               </div>
-
-              {/* Delete Component Button */}
-              <button 
-                onClick={() => deleteNode(selectedNode.id)}
-                className="mt-2 flex items-center justify-center gap-2 w-full py-2 border border-red-200 rounded-lg text-xs font-semibold text-red-600 bg-red-50 hover:bg-red-100 hover:border-red-300 transition-colors shadow-sm cursor-pointer"
-              >
-                <Trash2 className="w-4 h-4" /> Delete Component
-              </button>
             </>
           )}
         </InspectorPanel>
