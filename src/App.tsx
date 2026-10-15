@@ -4,13 +4,12 @@ import { Grid, Environment, Lightformer } from '@react-three/drei';
 import { DEFAULT_EYE } from './utils/frameScene';
 import { EffectComposer, N8AO } from '@react-three/postprocessing';
 import { SCULPT_BASES, type SculptBaseId } from './utils/sculptBases';
-
 import SculptPanel from './components/SculptPanel';
 import LatticePanel from './components/LatticePanel';
-
 import { ThreadField } from './components/ThreadField';
 import { LeftSidebar } from './components/palette/LeftSidebar';
 import { InspectorPanel } from './components/inspector/InspectorPanel';
+import { CollisionCard } from './components/inspector/CollisionCard';
 import { CsgCard } from './components/inspector/CsgCard';
 import { MeshGeomsCard } from './components/inspector/MeshGeomsCard';
 import { PulleyWheelCard } from './components/inspector/PulleyWheelCard';
@@ -35,11 +34,9 @@ import { exportThreeMf, type ThreeMfMesh } from './utils/threeMfExporter';
 import { sliderSpan, offsetSpan, lengthSpan } from './utils/sliderSpan';
 import { loadCompiler, compileSCAD, isCompilerReady, setScadCompileListener } from './utils/openscad';
 import { getStickyRotation } from './utils/geom';
-import { collisionModeOf } from './utils/csg';
 import { DEFAULT_HOLD_STEPS, isBreakable, weldKey } from './utils/breakThresholds';
 import { isDentable, needsConversionForDenting } from './utils/dentMesh';
 import { CUSTOM_DENT, CUSTOM_SHATTER, DEFORM_MATERIALS, deformMaterial, dentFields, estimateBodyMass, materialUpdates, shatterFields } from './utils/deformMaterials';
-import { collidersAreStale, solidMeshGeoms } from './utils/convexDecomposition';
 import { useCsgAutoCompile, compileCsgNodes } from './hooks/useCsgCompile';
 import { PRESETS } from './presets/presetScenes';
 import { makePresetNoteCard, type NoteCard } from './utils/noteCards';
@@ -5156,50 +5153,7 @@ function App() {
                 );
               })()}
 
-              {/* Collision — how any mesh body reaches MuJoCo's contact solver.
-                  A boolean body's equivalent lives in Boolean Modifiers below,
-                  next to the sector and hole-axis controls it shares. */}
-              {(() => {
-                if (selectedNode.csgEnabled) return null;
-                const meshes = solidMeshGeoms(selectedNode);
-                if (meshes.length === 0) return null;
-
-                const mode = collisionModeOf(selectedNode);
-                const colliders = (selectedNode.geoms || []).filter((g) => g.csgDerived === 'collider');
-                const stale = collidersAreStale(selectedNode);
-                const solidity = selectedNode.collisionSolidity ?? null;
-
-                return (
-                  <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-2">
-                    <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 mb-1 flex items-center gap-1.5">
-                      <Donut className="w-3.5 h-3.5 text-rose-500" /> Collision
-                      {stale && <span className="ml-auto text-[10px] font-semibold text-amber-600 animate-pulse">working…</span>}
-                    </h3>
-                    <select
-                      value={mode}
-                      onChange={(e) => updateNode(selectedNode.id, { collision: e.target.value as SceneNode['collision'] })}
-                      className="w-full px-2.5 py-1.5 border border-slate-200 rounded text-xs bg-white text-slate-700 outline-none focus:border-blue-500 cursor-pointer font-medium"
-                      title="MuJoCo collides a mesh as its convex hull, which fills in any hollow. Auto breaks a hollow shape into convex pieces so it behaves like the shape it looks like."
-                    >
-                      <option value="auto">Auto</option>
-                      <option value="decompose">Convex pieces</option>
-                      <option value="hull">Convex hull</option>
-                    </select>
-                    <p className="text-[10px] text-slate-400 leading-snug">
-                      {colliders.length > 0
-                        ? `Colliding as ${colliders.length} convex pieces, so anything hollow in this shape is really hollow — a ball dropped into it lands inside.`
-                        : 'Colliding as one convex hull, so any hollow in this shape is filled in for contact.'}
-                      {solidity !== null && ` Solidity ${(solidity * 100).toFixed(0)}% — how much of its own hull this shape actually fills.`}
-                    </p>
-                    {selectedNode.collisionWarning && (
-                      <p className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1 leading-snug">{selectedNode.collisionWarning}</p>
-                    )}
-                    {selectedNode.collisionError && (
-                      <p className="text-[10px] text-rose-700 bg-rose-50 border border-rose-200 rounded px-2 py-1 leading-snug">Collision failed: {selectedNode.collisionError}</p>
-                    )}
-                  </div>
-                );
-              })()}
+              <CollisionCard node={selectedNode} />
 
               <EdgesCard node={selectedNode} />
               <SurfacePatternsCard node={selectedNode} />
