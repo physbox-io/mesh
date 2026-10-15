@@ -189,7 +189,7 @@ export const JobPauseBanner: React.FC<{
           // and returned without a word; it is put back from the park point.
           onClick={() =>
             void (parked
-              ? webSerialManager.resumeFromPark()
+              ? webSerialManager.resumeFromPark({ isLaser: !showZTools })
               : webSerialManager.resumeJob({ zIsSet: overridden }))
           }
           disabled={blocked}
@@ -239,11 +239,11 @@ export const JobResumeBanner: React.FC<{
   const running = machineState.status === 'RUNNING' || machineState.status.startsWith('PAUSED');
   const target = line ?? resume?.fromLine ?? 0;
   const preview = React.useMemo(
-    () => (resume ? webSerialManager.previewResume(target) : null),
+    () => (resume ? webSerialManager.previewResume(target, { isLaser: !showZTools }) : null),
     // needsZZero too: the manager reads it, and once Z is zeroed a resume at a
     // tool change steps past the M6, which changes the plan.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [resume, target, machineState.needsZZero]
+    [resume, target, machineState.needsZZero, showZTools]
   );
 
   if (!resume || running) return null;
@@ -272,7 +272,7 @@ export const JobResumeBanner: React.FC<{
   const done = Math.round((resume.fromLine / Math.max(1, resume.totalLines)) * 100);
 
   const go = () => {
-    const res = webSerialManager.resumeFromLine(target);
+    const res = webSerialManager.resumeFromLine(target, { isLaser: !showZTools });
     setError(res.ok ? null : res.message);
   };
 
@@ -362,11 +362,13 @@ export const JobResumeBanner: React.FC<{
         </button>
         <button
           onClick={go}
-          disabled={!machineState.connected || machineState.needsZZero}
+          // A laser has no Z to zero, so a datum never set this session stays
+          // unset for good, and would hold its resume shut for good.
+          disabled={!machineState.connected || (showZTools && machineState.needsZZero)}
           title={
             !machineState.connected
               ? 'Connect to the machine first'
-              : machineState.needsZZero
+              : showZTools && machineState.needsZZero
                 ? 'Set Z zero for the tool that is in the spindle now'
                 : 'Rebuild the machine state and carry on from this line'
           }
@@ -465,6 +467,10 @@ export const JobTransport: React.FC<{
   const running = machineState.status === 'RUNNING';
   const paused = machineState.status.startsWith('PAUSED');
   const parked = machineState.status === 'PAUSED_PARKED';
+  // A laser has no Z datum to set, so its never-set one must not hold any
+  // button here shut: Start, Resume from line, Resume Here or Resume.
+  const blockedByZZero = requiresZZero && machineState.needsZZero;
+  const isLaser = !requiresZZero;
 
   /*
    * `whitespace-nowrap` on both, and `px-2` inline rather than `px-3`.
@@ -481,7 +487,6 @@ export const JobTransport: React.FC<{
   const icon = variant === 'footer' ? 'w-4 h-4' : 'w-3.5 h-3.5';
 
   if (!running && !paused) {
-    const blockedByZZero = requiresZZero && machineState.needsZZero;
     const resume = machineState.resume;
     const startOver = () => {
       if (resume) setConfirmStartOver(true);
@@ -535,7 +540,7 @@ export const JobTransport: React.FC<{
           </button>
           <button
             onClick={() => {
-              const res = webSerialManager.resumeFromLine(resume.fromLine);
+              const res = webSerialManager.resumeFromLine(resume.fromLine, { isLaser });
               if (!res.ok) setResumeError(res.message);
             }}
             disabled={blockedByZZero}
@@ -570,10 +575,10 @@ export const JobTransport: React.FC<{
     return (
       <div className={variant === 'footer' ? 'flex items-center gap-2' : 'flex items-center gap-2 w-full'}>
         <button
-          onClick={() => webSerialManager.resumeFromPark()}
-          disabled={machineState.needsZZero}
+          onClick={() => webSerialManager.resumeFromPark({ isLaser })}
+          disabled={blockedByZZero}
           title={
-            machineState.needsZZero
+            blockedByZZero
               ? 'Set Z zero for the new tool first'
               : 'Drive back over the parked point and carry on cutting from the line that was actually reached'
           }
@@ -607,9 +612,9 @@ export const JobTransport: React.FC<{
         </button>
       ) : (
         <button
-          onClick={() => webSerialManager.resumeJob()}
-          disabled={machineState.needsZZero}
-          title={machineState.needsZZero ? 'Set Z zero for the new tool first' : 'Cycle start'}
+          onClick={() => webSerialManager.resumeJob({ zIsSet: isLaser })}
+          disabled={blockedByZZero}
+          title={blockedByZZero ? 'Set Z zero for the new tool first' : 'Cycle start'}
           className={`${base} bg-emerald-500 hover:bg-emerald-600 disabled:opacity-40 disabled:cursor-not-allowed text-slate-950`}
         >
           <Play className={`${icon} fill-current`} />
@@ -620,7 +625,7 @@ export const JobTransport: React.FC<{
           sitting in the cut and GRBL refuses to jog in Hold, so pausing to
           actually look at the work used to mean scrapping the job. */}
       <button
-        onClick={() => webSerialManager.parkJob()}
+        onClick={() => webSerialManager.parkJob({ isLaser })}
         title="Stop the cut, retract, and hand the machine back so you can jog it about. The line actually reached is kept, so it can carry on from there."
         className={`${base} bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200`}
       >
