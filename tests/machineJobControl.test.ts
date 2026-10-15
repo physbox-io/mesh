@@ -759,6 +759,22 @@ describe('a job that alarms while stopped for a tool change', () => {
     expect(webSerialManager.getState().status).not.toBe('PAUSED_TOOL');
   });
 
+  it('does not wind back past the line a resumed run started from', async () => {
+    const long = ['G21', 'G90', 'G0 Z5.000', 'G1 Z-1.000 F300',
+      ...Array.from({ length: 200 }, (_, i) => `G1 X${(i + 1) * 10} F600`)].join('\n');
+    webSerialManager.startJob(long);
+    await advance(20);
+    mgr().handleIncomingLine('<Alarm|MPos:0.000,0.000,0.000|FS:0,0>');
+    await webSerialManager.unlockAlarm();
+
+    // Resumed from line 150, and alarmed again a few lines in.
+    expect(webSerialManager.resumeFromLine(150).ok).toBe(true);
+    await advance(3);
+    mgr().handleIncomingLine('<Alarm|MPos:0.000,0.000,0.000|FS:0,0>');
+
+    expect(webSerialManager.getState().resume!.fromLine).toBeGreaterThanOrEqual(150);
+  });
+
   it('still winds back an alarm that lands mid-stream, where the buffer had not run', async () => {
     const long = ['G21', 'G90', 'G0 Z5.000', 'G1 Z-1.000 F300',
       ...Array.from({ length: 200 }, (_, i) => `G1 X${(i + 1) * 10} F600`)].join('\n');

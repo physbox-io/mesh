@@ -2751,9 +2751,11 @@ class WebSerialManager {
        * is a fiction and after a drop it is stale - so it goes back the same
        * window the park searches. Recutting costs time; a gap ruins the part.
        * Never back past a tool change or programmed stop, though: that would
-       * cut the last tool's path with the new one.
+       * cut the last tool's path with the new one. Nor past the line this run
+       * was resumed from, which the operator chose and whose preamble lines
+       * are not program lines at all.
        */
-      let stoppedAt = Math.max(0, sent - WebSerialManager.PARK_LOOKBACK_LINES);
+      let stoppedAt = Math.max(this.cutFloorLine, sent - WebSerialManager.PARK_LOOKBACK_LINES);
       for (let i = sent - 1; i >= stoppedAt; i--) {
         const code = (this.program[i]?.code ?? '').replace(/\([^)]*\)|;.*$/g, '');
         if (classifyJobLine(code) !== 'motion') { stoppedAt = i + 1; break; }
