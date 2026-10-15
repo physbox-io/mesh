@@ -10,6 +10,8 @@ import LatticePanel from './components/LatticePanel';
 import { CutControls } from './components/CutControls';
 import { ThreadField } from './components/ThreadField';
 import { LeftSidebar } from './components/palette/LeftSidebar';
+import { InspectorPanel } from './components/inspector/InspectorPanel';
+import { useSelectedNode } from './hooks/useSelectedNode';
 import { useMuJoCoInit } from './hooks/useMuJoCo';
 import { useMCPBridge } from './hooks/useMCPBridge';
 import { useShallow } from 'zustand/react/shallow';
@@ -18,7 +20,7 @@ import { useDentStore } from './store/dentStore';
 import { applyShatterPieces } from './store/useStore';
 import type { SceneGraph, SceneNode, SceneGeom, SceneJoint, CsgOp } from './types/scene';
 import type { WeakSpot } from './utils/printAnalysis';
-import { Play, Square, SlidersHorizontal, Settings, Box, X, RotateCcw, Trash2, Zap, Info, Code, Menu, Shapes, Minimize2, Save, Download, Upload, Undo, Redo, PanelRight, Printer, Scissors, Sparkles, Sun, Moon, Donut, Paintbrush, Grid3x3, Image as ImageIcon, Share2, Copy, Check, Link2, Unlink, Hammer, Aperture } from 'lucide-react';
+import { Play, Square, Settings, Box, X, RotateCcw, Trash2, Zap, Info, Code, Menu, Shapes, Minimize2, Save, Download, Upload, Undo, Redo, PanelRight, Printer, Scissors, Sparkles, Sun, Moon, Donut, Paintbrush, Grid3x3, Image as ImageIcon, Share2, Copy, Check, Link2, Unlink, Hammer, Aperture } from 'lucide-react';
 import { useRef, useMemo, useEffect, useLayoutEffect, useCallback, useState, type ComponentRef } from 'react';
 import AICopilotPanel from './components/AICopilotPanel';
 import { DocsModal } from './components/docs/DocsModal';
@@ -208,7 +210,6 @@ function App() {
   const [simplifyRatio, setSimplifyRatio] = useState(0.5);
   const [meshSimplifierError, setMeshSimplifierError] = useState<string | null>(null);
   const [showApiRef, setShowApiRef] = useState(false);
-  const [propertiesWidth, setPropertiesWidth] = useState(380);
   const isLeftSidebarOpen = usePanels((s) => s.isLeftSidebarOpen);
   const setIsLeftSidebarOpen = usePanels((s) => s.setLeftSidebarOpen);
   const isPropertiesOpen = usePanels((s) => s.isPropertiesOpen);
@@ -456,22 +457,6 @@ function App() {
     physicsGlobals._physics_store = useStore;
   }, [noteCards, copilotMessages]);
 
-
-  const handleMouseDown = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    const handleMouseMove = (moveEvent: MouseEvent) => {
-      const newWidth = window.innerWidth - moveEvent.clientX;
-      if (newWidth >= 280 && newWidth <= 800) {
-        setPropertiesWidth(newWidth);
-      }
-    };
-    const handleMouseUp = () => {
-      window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('mouseup', handleMouseUp);
-    };
-    window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('mouseup', handleMouseUp);
-  }, []);
 
   // Only these fields, compared shallowly. A bare useStore() here re-rendered
   // the whole app, viewport included, on every write to any field of the
@@ -1519,20 +1504,7 @@ function App() {
   }, [setSelectedNodeId]);
 
 
-  // Find selected node details
-  const selectedNode = useMemo<SceneNode | null>(() => {
-    if (!selectedNodeId) return null;
-    let found: SceneNode | null = null;
-    const traverse = (nodes: SceneNode[]) => {
-      if (!nodes) return;
-      for (const node of nodes) {
-        if (node.id === selectedNodeId) found = node;
-        traverse(node.children);
-      }
-    };
-    traverse(sceneGraph.nodes);
-    return found;
-  }, [selectedNodeId, sceneGraph]);
+  const selectedNode = useSelectedNode();
 
   // Sync selected node's script and scad code into local text state
   useEffect(() => {
@@ -2773,67 +2745,9 @@ function App() {
           ))}
         </main>
 
-        {/* Dimmer behind the inspector drawer. Only exists below `lg`, where
-            the inspector is an overlay; tapping the model puts it away. */}
-        {isPropertiesOpen && selectedNode && !isPlaying && (
-          <div
-            className="lg:hidden absolute inset-0 z-[105] bg-slate-950/30"
-            onClick={() => setIsPropertiesOpen(false)}
-          />
-        )}
-
-        {/* Contextual Properties Sidebar. Nothing is editable while the
-            simulation runs, so it stays away rather than sliding in whenever a
-            body is clicked; the selection survives, and the panel comes back
-            with it when the run stops. */}
-        {selectedNode && !isPlaying && (
-          /*
-            Below `lg` there is not room for a permanent 380px column beside a
-            3D viewport, so the inspector slides in over it instead.
-
-            Written as `max-lg:` overrides on top of the original classes, so
-            that at desktop width this element carries exactly what it always
-            did — in particular no stray transform, which would otherwise make
-            the aside a containing block and re-anchor the absolutely
-            positioned popovers inside it. The drag-to-resize width is an
-            inline style, so the mobile width has to out-rank it explicitly.
-          */
-          <aside
-            style={{ width: `${propertiesWidth}px` }}
-            className={`shrink-0 glass-panel border-l border-slate-200 dark:border-slate-800 flex flex-col p-4 z-20 bg-white/55 dark:bg-slate-900/55 overflow-y-auto relative max-lg:absolute max-lg:inset-y-0 max-lg:right-0 max-lg:z-[110] max-lg:w-80! max-lg:max-w-[80vw] max-lg:shadow-xl max-lg:bg-white/95 max-lg:dark:bg-slate-900/95 max-lg:transition-transform max-lg:duration-200 ${
-              // Below `lg` the drawer waits off the right-hand edge until it is
-              // asked for. `pointer-events-none` as well as the translate, so a
-              // panel parked off screen cannot swallow taps meant for the model.
-              isPropertiesOpen ? 'max-lg:translate-x-0' : 'max-lg:translate-x-full max-lg:pointer-events-none'
-            }`}
-          >
-            {/* Elegant Resize Handle */}
-            <div
-              onMouseDown={handleMouseDown}
-              className="absolute top-0 left-0 bottom-0 w-1.5 cursor-col-resize hover:bg-blue-500/20 active:bg-blue-500/40 transition-colors z-20 group hidden lg:flex items-center justify-center"
-              title="Drag to resize panel"
-            >
-              <div className="w-[2px] h-8 bg-slate-300 dark:bg-slate-700 group-hover:bg-blue-500 group-active:bg-blue-600 rounded transition-colors" />
-            </div>
-
-            <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-4 flex items-center justify-between">
-              <span className="flex items-center gap-2"><SlidersHorizontal className="w-4 h-4" /> Properties</span>
-              {/* Closes the drawer and leaves the component selected: the top
-                  bar's bin, undo and the keyboard all act on the selection, so
-                  putting the panel away must not throw that away too. The
-                  desktop column has nowhere to go, so there its X deselects,
-                  exactly as it always did. */}
-              <button
-                onClick={() => setIsPropertiesOpen(false)}
-                className="lg:hidden cursor-pointer"
-                title="Close Properties"
-              >
-                <X className="w-4 h-4 text-slate-400 hover:text-slate-600" />
-              </button>
-              <button onClick={() => setSelectedNodeId(null)} className="hidden lg:block cursor-pointer" title="Deselect"><X className="w-4 h-4 text-slate-400 hover:text-slate-600" /></button>
-            </h2>
-            
-            <div className="flex flex-col gap-4">
+        <InspectorPanel>
+          {(selectedNode) => (
+            <>
                 {/* Combining. A boolean is a program over ONE body's shapes, so
                     two bodies dragged in from the sidebar can never cut each
                     other however they overlap — the shapes have to be on one
@@ -6242,9 +6156,9 @@ api.applyForce([force, 0, 0]);
               >
                 <Trash2 className="w-4 h-4" /> Delete Component
               </button>
-            </div>
-          </aside>
-        )}
+            </>
+          )}
+        </InspectorPanel>
 
         {showAICopilot && (
           <AICopilotPanel
