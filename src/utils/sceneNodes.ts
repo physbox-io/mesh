@@ -159,16 +159,26 @@ export function sanitizeAndNormalizeNodes(rawNodes: RawNode[], existingNodes: Ra
       });
     }
 
-    const joints: RawJoint[] = Array.isArray(n.joints) ? n.joints.map((j: RawJoint, jIdx: number) => ({
-      id: j.id || `joint_${randomSuffix(6)}`,
-      name: j.name || `${baseName}_joint_${jIdx}`,
-      type: j.type || 'hinge',
-      axis: Array.isArray(j.axis) ? j.axis : [0, 0, 1],
-      pos: Array.isArray(j.pos) ? j.pos : [0, 0, 0],
-      damping: typeof j.damping === 'number' ? j.damping : 0.1,
-      stiffness: typeof j.stiffness === 'number' ? j.stiffness : 0.0,
-      actuator: j.actuator,
-    })) : (existingNode?.joints || []);
+    const joints: RawJoint[] = Array.isArray(n.joints) ? n.joints.map((j: RawJoint, jIdx: number): RawJoint => {
+      const existingJoint = existingNode?.joints?.find((ej) => ej.name && ej.name === j.name) ?? existingNode?.joints?.[jIdx];
+      const sameType = existingJoint && (j.type === undefined || j.type === existingJoint.type);
+      const inherited = sameType ? existingJoint : {};
+      return {
+        ...inherited,
+        ...j,
+        id: j.id || existingJoint?.id || `joint_${randomSuffix(6)}`,
+        name: j.name || existingJoint?.name || `${baseName}_joint_${jIdx}`,
+        type: j.type || existingJoint?.type || 'hinge',
+        axis: Array.isArray(j.axis) ? j.axis : (sameType && Array.isArray(existingJoint?.axis) ? existingJoint.axis : [0, 0, 1]),
+        pos: Array.isArray(j.pos) ? j.pos : (sameType && Array.isArray(existingJoint?.pos) ? existingJoint.pos : [0, 0, 0]),
+        damping: typeof j.damping === 'number' ? j.damping : (sameType && typeof existingJoint?.damping === 'number' ? existingJoint.damping : 0.1),
+        stiffness: typeof j.stiffness === 'number' ? j.stiffness : (sameType && typeof existingJoint?.stiffness === 'number' ? existingJoint.stiffness : 0.0),
+        ...(typeof j.springref === 'number' ? { springref: j.springref } : (sameType && typeof existingJoint?.springref === 'number' ? { springref: existingJoint.springref } : {})),
+        ...(typeof j.limited === 'boolean' ? { limited: j.limited } : (sameType && typeof existingJoint?.limited === 'boolean' ? { limited: existingJoint.limited } : {})),
+        ...(Array.isArray(j.range) ? { range: j.range } : (sameType && Array.isArray(existingJoint?.range) ? { range: existingJoint.range } : {})),
+        actuator: j.actuator !== undefined ? j.actuator : (sameType ? existingJoint?.actuator : undefined),
+      };
+    }) : (existingNode?.joints || []);
 
     const children = Array.isArray(n.children)
       ? n.children.map((c: RawNode, cIdx: number) => normalizeNode(c, cIdx)).filter((c): c is RawNode => c !== null)

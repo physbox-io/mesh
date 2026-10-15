@@ -27,39 +27,39 @@ export const GuestListModal: React.FC<GuestListModalProps> = ({ isOpen, onClose,
       onClick={onClose}
     >
       <div
-        className="bg-slate-900 border border-cyan-500/30 rounded-2xl w-full max-w-md overflow-hidden shadow-2xl text-slate-100 p-6 text-center relative my-auto"
+        className="bg-white dark:bg-slate-900 border border-cyan-500/30 rounded-2xl w-full max-w-md overflow-hidden shadow-2xl text-slate-800 dark:text-slate-100 p-6 text-center relative my-auto"
         onClick={(e) => e.stopPropagation()}
       >
         <button
           onClick={onClose}
-          className="absolute top-4 right-4 text-slate-400 hover:text-slate-200 p-1.5 rounded-lg hover:bg-slate-800 transition cursor-pointer"
+          className="absolute top-4 right-4 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition cursor-pointer"
           title="Close (Esc)"
         >
           <X className="w-5 h-5" />
         </button>
 
-        <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-cyan-500/10 border border-cyan-500/30 text-cyan-400 text-xs font-semibold uppercase tracking-wider mb-4">
+        <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-cyan-50 dark:bg-cyan-500/10 border border-cyan-200 dark:border-cyan-500/30 text-cyan-700 dark:text-cyan-400 text-xs font-semibold uppercase tracking-wider mb-4">
           <Sparkles className="w-3.5 h-3.5" /> Early Access VIP Guest List
         </div>
 
-        <h2 className="text-2xl font-extrabold text-slate-100 mb-2">
+        <h2 className="text-2xl font-extrabold text-slate-900 dark:text-slate-100 mb-2">
           You're on the Guest List!
         </h2>
 
-        <p className="text-sm text-slate-300 leading-relaxed mb-5">
+        <p className="text-sm text-slate-600 dark:text-slate-300 leading-relaxed mb-5">
           Thank you for joining PhysBox Cloud! Your account is registered for early access. We are activating accounts in batches to maintain real-time telemetry performance.
         </p>
 
         {userEmail && (
-          <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-3 text-xs text-cyan-300 font-mono flex items-center justify-center gap-2 mb-6">
-            <ShieldCheck className="w-4 h-4 text-cyan-400" />
+          <div className="bg-slate-50 dark:bg-slate-950/80 border border-slate-200 dark:border-slate-800 rounded-xl p-3 text-xs text-cyan-700 dark:text-cyan-300 font-mono flex items-center justify-center gap-2 mb-6">
+            <ShieldCheck className="w-4 h-4 text-cyan-600 dark:text-cyan-400" />
             <span>{userEmail}</span>
           </div>
         )}
 
-        <div className="space-y-2.5 text-left bg-slate-950/40 p-4 rounded-xl border border-slate-800 text-xs text-slate-300 mb-6">
+        <div className="space-y-2.5 text-left bg-slate-50 dark:bg-slate-950/40 p-4 rounded-xl border border-slate-200 dark:border-slate-800 text-xs text-slate-600 dark:text-slate-300 mb-6">
           <div className="flex items-center gap-2">
-            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+            <CheckCircle2 className="w-4 h-4 text-emerald-500 dark:text-emerald-400 shrink-0" />
             {/* Was "Auto-save and parameter sync configured", which promised one
                 thing that was true and one that was not: settings and presets do
                 sync, and the open document was never saved anywhere. Document
@@ -68,11 +68,11 @@ export const GuestListModal: React.FC<GuestListModalProps> = ({ isOpen, onClose,
             <span>Settings and saved presets sync across your devices</span>
           </div>
           <div className="flex items-center gap-2">
-            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+            <CheckCircle2 className="w-4 h-4 text-emerald-500 dark:text-emerald-400 shrink-0" />
             <span>Remote machining telemetry dashboard enabled</span>
           </div>
           <div className="flex items-center gap-2">
-            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+            <CheckCircle2 className="w-4 h-4 text-emerald-500 dark:text-emerald-400 shrink-0" />
             <span>You will receive an activation email once batch opens</span>
           </div>
         </div>

@@ -113,6 +113,36 @@ describe('sanitizeAndNormalizeNodes', () => {
     expect(out[0].geoms[0].size).toEqual([0.0015]);
     expect(out[0].geoms[0].fromto).toEqual([0, 0, 0, 0.03, 0, 0]);
   });
+
+  it('preserves joint springref, limited, and range across normalization', () => {
+    const existing = [{
+      id: 'plunger',
+      name: 'plunger',
+      geoms: [{ id: 'g', name: 'plunger_geom', type: 'cylinder', size: [0.01, 0.04] }],
+      joints: [{
+        id: 'j1',
+        name: 'plunger_slide',
+        type: 'slide' as const,
+        axis: [0, 0, 1],
+        damping: 4,
+        stiffness: 450,
+        springref: 0.08,
+        limited: true,
+        range: [-0.05, 0.12],
+      }],
+    }];
+    const out = sanitizeAndNormalizeNodes(
+      [{ id: 'plunger', joints: [{ name: 'plunger_slide', stiffness: 600 }] }],
+      existing
+    );
+    const j = out[0].joints[0];
+    expect(j.type).toBe('slide');
+    expect(j.stiffness).toBe(600);
+    expect(j.damping).toBe(4);
+    expect(j.springref).toBe(0.08);
+    expect(j.limited).toBe(true);
+    expect(j.range).toEqual([-0.05, 0.12]);
+  });
 });
 
 describe('mergeAndNormalizeNodes', () => {

@@ -7,6 +7,7 @@ import {
   getStoredAuthToken,
   type MachineDevice,
 } from '../utils/apiClient';
+import { ConfirmModal } from './ConfirmModal';
 
 /**
  * Choosing a Tekno Box, and claiming one that has not been claimed yet.
@@ -60,6 +61,7 @@ export const TeknoBoxPicker: React.FC<{
   const [pairing, setPairing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [confirmUnpair, setConfirmUnpair] = useState<MachineDevice | null>(null);
   const signedIn = Boolean(getStoredAuthToken());
 
   /**
@@ -121,12 +123,6 @@ export const TeknoBoxPicker: React.FC<{
    * code off its screen — which needs somebody standing in front of it.
    */
   const handleForget = async (device: MachineDevice) => {
-    if (!window.confirm(
-      `Unpair ${device.name}?\n\nIt will stop being reachable from your apps, and pairing it ` +
-      `again means reading a new code off the machine's own screen.`
-    )) {
-      return;
-    }
     setError(null);
     const ok = await forgetMachineDevice(device.deviceId);
     if (!ok) {
@@ -168,6 +164,25 @@ export const TeknoBoxPicker: React.FC<{
 
   return (
     <div className="space-y-2">
+      {confirmUnpair && (
+        <ConfirmModal
+          title={`Unpair ${confirmUnpair.name}?`}
+          confirmLabel="Unpair machine"
+          tone="red"
+          body={
+            <p>
+              It will stop being reachable from your apps, and pairing it again means reading a new
+              code off the machine&apos;s own screen.
+            </p>
+          }
+          onCancel={() => setConfirmUnpair(null)}
+          onConfirm={() => {
+            const dev = confirmUnpair;
+            setConfirmUnpair(null);
+            void handleForget(dev);
+          }}
+        />
+      )}
       {devices.length > 0 ? (
         <div className="flex flex-wrap items-center gap-2">
           <select
@@ -197,7 +212,7 @@ export const TeknoBoxPicker: React.FC<{
             type="button"
             onClick={() => {
               const device = devices.find((d) => d.deviceId === value);
-              if (device) void handleForget(device);
+              if (device) setConfirmUnpair(device);
             }}
             disabled={disabled || !value}
             title="Unpair this machine from your account"

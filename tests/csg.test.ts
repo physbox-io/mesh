@@ -303,6 +303,56 @@ describe('decomposeAroundAxis', () => {
     expect(convexHullOf([[0, 0, 0], [1, 0, 0], [0, 1, 0]])).toBeNull();           // too few
     expect(convexHullOf([[0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 1, 0]])).toBeNull(); // coplanar
   });
+
+  it('splits a stepped bearing pocket at the ledge so the pocket stays open down to the seat', () => {
+    // 608 bearing housing: outer R=13.5mm, height 9mm (z in [0, 9mm]).
+    // Lower retention lip (z in [0, 2mm]): inner shaft bore r1=4.5mm.
+    // Upper bearing pocket (z in [2mm, 9mm]): inner pocket bore r2=11mm.
+    const segs = 32;
+    const outerR = 0.0135, r1 = 0.0045, r2 = 0.011;
+    const z0 = 0, zStep = 0.002, zTop = 0.009;
+    const stepVerts: number[] = [];
+    const stepFaces: number[] = [];
+    const ring = (r: number, z: number) => {
+      const base = stepVerts.length / 3;
+      for (let i = 0; i < segs; i++) {
+        const a = (i / segs) * Math.PI * 2;
+        stepVerts.push(r * Math.cos(a), r * Math.sin(a), z);
+      }
+      return base;
+    };
+    const bOut = ring(outerR, z0), tOut = ring(outerR, zTop);
+    const bShaft = ring(r1, z0), sShaft = ring(r1, zStep);
+    const sPocket = ring(r2, zStep), tPocket = ring(r2, zTop);
+    for (let i = 0; i < segs; i++) {
+      const n = (i + 1) % segs;
+      // Outer cylinder wall (spans full height across the step)
+      stepFaces.push(bOut + i, bOut + n, tOut + n, bOut + i, tOut + n, tOut + i);
+      // Lower shaft bore wall
+      stepFaces.push(bShaft + n, bShaft + i, sShaft + i, bShaft + n, sShaft + i, sShaft + n);
+      // Annular bearing seat ledge at z = zStep
+      stepFaces.push(sShaft + i, sPocket + i, sPocket + n, sShaft + i, sPocket + n, sShaft + n);
+      // Upper bearing pocket bore wall
+      stepFaces.push(sPocket + n, sPocket + i, tPocket + i, sPocket + n, tPocket + i, tPocket + n);
+      // Bottom and top caps
+      stepFaces.push(bOut + n, bOut + i, bShaft + i, bOut + n, bShaft + i, bShaft + n);
+      stepFaces.push(tPocket + n, tPocket + i, tOut + i, tPocket + n, tOut + i, tOut + n);
+    }
+
+    const hulls = decomposeAroundAxis(stepVerts, stepFaces, [0, 0, 0], [0, 0, 1], 16);
+    expect(hulls).toHaveLength(32); // 16 lower lip sectors + 16 upper pocket sectors
+    const planes = hulls.map(planesOf);
+
+    // A point inside the bearing pocket just above the seat (r = 9mm, z = 2.5mm)
+    // must be clear air — without axial splitting, the single-sector hull
+    // bridges from (r=4.5mm, z=2mm) to (r=11mm, z=9mm) and blocks r=9mm.
+    expect(insideAny(planes, [0.009, 0, 0.0025])).toBe(false);
+    // While the retention lip right below the seat (r = 9mm, z = 1.0mm) is solid.
+    expect(insideAny(planes, [0.009, 0, 0.001])).toBe(true);
+    // And the central shaft hole (r = 0, any z) stays open all the way through.
+    expect(insideAny(planes, [0, 0, 0.001])).toBe(false);
+    expect(insideAny(planes, [0, 0, 0.005])).toBe(false);
+  });
 });
 
 describe('bounds and outline clipping', () => {

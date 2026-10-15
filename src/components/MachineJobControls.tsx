@@ -7,6 +7,7 @@ import { NumberInput } from '@physbox-io/ui';
 import { ProbeCircuitStatus } from './ProbeCircuitStatus';
 import { CheckpointBadge } from './CheckpointBadge';
 import { JogPad } from './JogPad';
+import { ConfirmModal } from './ConfirmModal';
 import { useStore } from '../store/useStore';
 
 /**
@@ -43,17 +44,6 @@ const OpenSetupButton: React.FC<{ onOpen?: () => void }> = ({ onOpen }) => {
     </button>
   );
 };
-
-/** Starting a new job throws the resume offer away; this says so first. */
-function confirmDiscardResume(machineState: MachineState): boolean {
-  const resume = machineState.resume;
-  if (!resume) return true;
-  const which = resume.jobName ? `the ${resume.jobName} job` : 'the stopped job';
-  return window.confirm(
-    `Starting from the beginning discards the offer to resume ${which} at line ` +
-      `${resume.fromLine.toLocaleString()}. Start over anyway?`
-  );
-}
 
 /**
  * What the machine stopped for, and what has to happen before it carries on.
@@ -470,6 +460,8 @@ export const JobTransport: React.FC<{
   /** A laser has no Z datum, so an unconfirmed one can't hurt it — every CNC mode does. */
   requiresZZero?: boolean;
 }> = ({ machineState, canStart, onStart, startLabel, variant = 'footer', requiresZZero = true }) => {
+  const [confirmStartOver, setConfirmStartOver] = useState(false);
+  const [resumeError, setResumeError] = useState<string | null>(null);
   const running = machineState.status === 'RUNNING';
   const paused = machineState.status.startsWith('PAUSED');
   const parked = machineState.status === 'PAUSED_PARKED';
@@ -492,15 +484,46 @@ export const JobTransport: React.FC<{
     const blockedByZZero = requiresZZero && machineState.needsZZero;
     const resume = machineState.resume;
     const startOver = () => {
-      if (confirmDiscardResume(machineState)) onStart();
+      if (resume) setConfirmStartOver(true);
+      else onStart();
     };
 
     // A stopped job stays the thing on offer until it is resumed or let go:
     // closing the modal and coming back must not turn its button into a Start
     // that silently throws the resume point away.
     if (resume) {
+      const which = resume.jobName ? `the ${resume.jobName} job` : 'the stopped job';
       return (
         <div className={variant === 'footer' ? 'flex items-center gap-2' : 'flex items-center gap-2 w-full'}>
+          {confirmStartOver && (
+            <ConfirmModal
+              title="Start job over from the beginning?"
+              confirmLabel="Start over"
+              tone="amber"
+              body={
+                <p>
+                  Starting from the beginning discards the offer to resume {which} at line{' '}
+                  {resume.fromLine.toLocaleString()}.
+                </p>
+              }
+              onCancel={() => setConfirmStartOver(false)}
+              onConfirm={() => {
+                setConfirmStartOver(false);
+                onStart();
+              }}
+            />
+          )}
+          {resumeError && (
+            <ConfirmModal
+              title="Could not resume job"
+              confirmLabel="OK"
+              hideCancel
+              tone="red"
+              body={<p>{resumeError}</p>}
+              onCancel={() => setResumeError(null)}
+              onConfirm={() => setResumeError(null)}
+            />
+          )}
           <button
             onClick={startOver}
             disabled={!canStart || blockedByZZero}
@@ -513,7 +536,7 @@ export const JobTransport: React.FC<{
           <button
             onClick={() => {
               const res = webSerialManager.resumeFromLine(resume.fromLine);
-              if (!res.ok) window.alert(res.message);
+              if (!res.ok) setResumeError(res.message);
             }}
             disabled={blockedByZZero}
             title={

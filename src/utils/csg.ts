@@ -1765,6 +1765,138 @@ export function detectHoleAxis(node: SceneNode): { origin: number[]; axis: numbe
 // ---------------------------------------------------------------------------
 
 /**
+ * Finds interior planes perpendicular to `a` where an annular step shelf (a
+ * bearing pocket ledge, counterbore floor or nut-trap seat) wraps all the way
+ * around the hole axis.
+ *
+ * Without splitting at those planes, a single sector's convex hull bridges
+ * straight from the narrower shaft rim to the wider pocket rim and turns a
+ * flat bearing seat into a cone. Requiring horizontal facets across all four
+ * quadrants around `origin` picks up hex and round pockets alike while ignoring
+ * the flat roof of a single cross-slot or a smooth torus.
+ */
+function detectAxialSteps(
+  P: THREE.Vector3[],
+  faces: number[],
+  t: Float64Array,
+  a: THREE.Vector3,
+  u: THREE.Vector3,
+  v: THREE.Vector3,
+): number[] {
+  let tMin = Infinity, tMax = -Infinity;
+  for (let i = 0; i < t.length; i++) {
+    if (t[i] < tMin) tMin = t[i];
+    if (t[i] > tMax) tMax = t[i];
+  }
+  const margin = MIN_COLLIDER_THICKNESS * 2;
+  if (tMax - tMin <= margin * 2) return [];
+
+  const clusters: Array<{ sumT: number; count: number; quads: number }> = [];
+  for (let i = 0; i < faces.length; i += 3) {
+    const i0 = faces[i], i1 = faces[i + 1], i2 = faces[i + 2];
+    const t0 = t[i0], t1 = t[i1], t2 = t[i2];
+    if (Math.abs(t0 - t1) > 1e-5 || Math.abs(t1 - t2) > 1e-5) continue;
+    const tm = (t0 + t1 + t2) / 3;
+    if (tm <= tMin + margin || tm >= tMax - margin) continue;
+
+    const p0 = P[i0], p1 = P[i1], p2 = P[i2];
+    const ex = p1.x - p0.x, ey = p1.y - p0.y, ez = p1.z - p0.z;
+    const fx = p2.x - p0.x, fy = p2.y - p0.y, fz = p2.z - p0.z;
+    const nx = ey * fz - ez * fy, ny = ez * fx - ex * fz, nz = ex * fy - ey * fx;
+    const len = Math.hypot(nx, ny, nz);
+    if (len < 1e-10) continue;
+    if (Math.abs((nx * a.x + ny * a.y + nz * a.z) / len) < 0.995) continue;
+
+    const cx = (p0.x + p1.x + p2.x) / 3;
+    const cy = (p0.y + p1.y + p2.y) / 3;
+    const cz = (p0.z + p1.z + p2.z) / 3;
+    const cu = cx * u.x + cy * u.y + cz * u.z;
+    const cv = cx * v.x + cy * v.y + cz * v.z;
+    const qBit = 1 << ((cu >= 0 ? 1 : 0) | (cv >= 0 ? 2 : 0));
+
+    let bucket = clusters.find(c => Math.abs(c.sumT / c.count - tm) <= 1e-4);
+    if (!bucket) {
+      bucket = { sumT: 0, count: 0, quads: 0 };
+      clusters.push(bucket);
+    }
+    bucket.sumT += tm;
+    bucket.count += 1;
+    bucket.quads |= qBit;
+  }
+
+  const raw = clusters
+    .filter(c => c.count >= 6 && c.quads === 0b1111)
+    .map(c => c.sumT / c.count)
+    .sort((x, y) => x - y);
+
+  const steps: number[] = [];
+  for (const s of raw) {
+    if (steps.length === 0 || s - steps[steps.length - 1] >= margin) {
+      steps.push(s);
+    }
+  }
+  return steps;
+}
+
+/**
+ * Clips `(P, faces)` to the axial slab `tLo <= P·a <= tHi`, keeping only
+ * triangles that enter the open interior `(tLo, tHi)` so a horizontal step
+ * shelf at `t = tLo` or `t = tHi` does not drag the wider bore's vertices
+ * into the narrower bore's point cloud.
+ */
+function clipMeshToAxialSlab(
+  P: THREE.Vector3[],
+  faces: number[],
+  t: Float64Array,
+  tLo: number,
+  tHi: number,
+): { slabP: THREE.Vector3[]; slabFaces: number[] } {
+  const SLAB_EPS = 1e-6;
+  const clipHalfspace = (
+    pts: Array<{ p: THREE.Vector3; t: number }>,
+    planeT: number,
+    keepAbove: boolean,
+  ) => {
+    const res: Array<{ p: THREE.Vector3; t: number }> = [];
+    for (let i = 0; i < pts.length; i++) {
+      const cur = pts[i], nxt = pts[(i + 1) % pts.length];
+      const curIn = keepAbove ? cur.t >= planeT - 1e-9 : cur.t <= planeT + 1e-9;
+      const nxtIn = keepAbove ? nxt.t >= planeT - 1e-9 : nxt.t <= planeT + 1e-9;
+      if (curIn) res.push(cur);
+      if (curIn !== nxtIn && Math.abs(nxt.t - cur.t) > 1e-12) {
+        const alpha = (planeT - cur.t) / (nxt.t - cur.t);
+        res.push({ p: cur.p.clone().lerp(nxt.p, alpha), t: planeT });
+      }
+    }
+    return res;
+  };
+
+  const slabP: THREE.Vector3[] = [];
+  const slabFaces: number[] = [];
+  for (let i = 0; i < faces.length; i += 3) {
+    const i0 = faces[i], i1 = faces[i + 1], i2 = faces[i + 2];
+    const t0 = t[i0], t1 = t[i1], t2 = t[i2];
+    if (Math.max(t0, t1, t2) <= tLo + SLAB_EPS || Math.min(t0, t1, t2) >= tHi - SLAB_EPS) continue;
+
+    let poly: Array<{ p: THREE.Vector3; t: number }> = [
+      { p: P[i0], t: t0 },
+      { p: P[i1], t: t1 },
+      { p: P[i2], t: t2 },
+    ];
+    if (tLo > -Infinity) poly = clipHalfspace(poly, tLo, true);
+    if (tHi < Infinity && poly.length >= 3) poly = clipHalfspace(poly, tHi, false);
+    if (poly.length < 3) continue;
+
+    const base = slabP.length;
+    for (const v of poly) slabP.push(v.p);
+    for (let k = 1; k + 1 < poly.length; k++) {
+      slabFaces.push(base, base + k, base + k + 1);
+    }
+  }
+  return { slabP, slabFaces };
+}
+
+/**
  * Slices a mesh into `sectors` angular wedges about `axis` through `origin` and
  * returns the convex hull of each wedge.
  *
@@ -1773,17 +1905,17 @@ export function detectHoleAxis(node: SceneNode): { origin: number[]; axis: numbe
  * with the neighbouring wedge, so adjacent hulls meet face-to-face instead of
  * leaving a V-shaped gap along every boundary.
  *
- * What survives: the hole (each hull only spans a chord of the inner surface).
- * What doesn't: concavities WITHIN one wedge, which get filled — the price of
- * every collider being convex, and the reason a V-HACD mode would still have
- * something to offer for non-ring shapes.
+ * When the bore has coaxial steps (a bearing pocket, counterbore or nut trap),
+ * the mesh is first split along the step planes so each axial tier is hulled on
+ * its own and the flat step ledge stays open instead of being bridged by a cone.
  */
 export function decomposeAroundAxis(
   verts: number[],
   faces: number[],
   origin: number[],
   axis: number[],
-  sectors: number
+  sectors: number,
+  axialSteps?: number[],
 ): Hull[] {
   const n = Math.max(3, Math.floor(sectors));
   const a = new THREE.Vector3(axis[0], axis[1], axis[2]).normalize();
@@ -1808,67 +1940,89 @@ export function decomposeAroundAxis(
   }
 
   const P: THREE.Vector3[] = [];
+  const t = new Float64Array(verts.length / 3);
   for (let i = 0; i < verts.length; i += 3) {
-    P.push(new THREE.Vector3(verts[i] - o.x, verts[i + 1] - o.y, verts[i + 2] - o.z));
+    const p = new THREE.Vector3(verts[i] - o.x, verts[i + 1] - o.y, verts[i + 2] - o.z);
+    P.push(p);
+    t[P.length - 1] = p.dot(a);
   }
-  // Signed distance of every vertex to every boundary plane, computed once.
-  const dist: Float64Array[] = normals.map(nn => {
-    const d = new Float64Array(P.length);
-    for (let i = 0; i < P.length; i++) d[i] = P[i].dot(nn);
-    return d;
-  });
+
+  const steps = axialSteps !== undefined
+    ? [...axialSteps].sort((x, y) => x - y)
+    : detectAxialSteps(P, faces, t, a, u, v);
 
   const EPS = 1e-9;
-  const clouds: number[][][] = Array.from({ length: n }, () => []);
-
-  // Vertices land in the sector whose two half-planes they're both inside of.
-  for (let i = 0; i < P.length; i++) {
-    for (let s = 0; s < n; s++) {
-      if (dist[s][i] >= -EPS && dist[s + 1][i] <= EPS) {
-        clouds[s].push([P[i].x, P[i].y, P[i].z]);
-      }
-    }
-  }
-
-  // Unique mesh edges, so a boundary crossing is only computed once per edge.
-  const edges = new Set<number>();
-  const pushEdge = (i: number, j: number) => edges.add(i < j ? i * P.length + j : j * P.length + i);
-  for (let i = 0; i < faces.length; i += 3) {
-    pushEdge(faces[i], faces[i + 1]);
-    pushEdge(faces[i + 1], faces[i + 2]);
-    pushEdge(faces[i + 2], faces[i]);
-  }
-
-  for (const key of edges) {
-    const i = Math.floor(key / P.length), j = key % P.length;
-    for (let b = 0; b < n; b++) {
-      const di = dist[b][i], dj = dist[b][j];
-      if ((di > EPS && dj < -EPS) || (di < -EPS && dj > EPS)) {
-        const t = di / (di - dj);
-        const p = P[i].clone().lerp(P[j], t);
-        // A crossing of boundary b belongs to the two sectors that share it —
-        // but only if it's within their OTHER bound, since a plane is infinite
-        // while the wedge is not.
-        const prev = (b - 1 + n) % n;
-        const pt = [p.x, p.y, p.z];
-        if (p.dot(normals[b + 1]) <= EPS) clouds[b].push(pt);
-        if (p.dot(normals[prev]) >= -EPS) clouds[prev].push(pt);
-      }
-    }
-  }
-
   const out: Hull[] = [];
-  for (const cloud of clouds) {
-    const hull = convexHullOf(cloud);
-    if (!hull) continue;
-    // Back into the mesh's own frame (the clouds were built relative to origin).
-    for (let i = 0; i < hull.verts.length; i += 3) {
-      hull.verts[i] += o.x;
-      hull.verts[i + 1] += o.y;
-      hull.verts[i + 2] += o.z;
+
+  const sliceSlab = (slabP: THREE.Vector3[], slabFaces: number[]) => {
+    if (slabP.length < 4 || slabFaces.length < 3) return;
+    // Signed distance of every vertex to every boundary plane, computed once.
+    const dist: Float64Array[] = normals.map(nn => {
+      const d = new Float64Array(slabP.length);
+      for (let i = 0; i < slabP.length; i++) d[i] = slabP[i].dot(nn);
+      return d;
+    });
+
+    const clouds: number[][][] = Array.from({ length: n }, () => []);
+
+    // Vertices land in the sector whose two half-planes they're both inside of.
+    for (let i = 0; i < slabP.length; i++) {
+      for (let s = 0; s < n; s++) {
+        if (dist[s][i] >= -EPS && dist[s + 1][i] <= EPS) {
+          clouds[s].push([slabP[i].x, slabP[i].y, slabP[i].z]);
+        }
+      }
     }
-    hull.centroid = [hull.centroid[0] + o.x, hull.centroid[1] + o.y, hull.centroid[2] + o.z];
-    out.push(hull);
+
+    // Unique mesh edges, so a boundary crossing is only computed once per edge.
+    const edges = new Set<number>();
+    const pushEdge = (i: number, j: number) => edges.add(i < j ? i * slabP.length + j : j * slabP.length + i);
+    for (let i = 0; i < slabFaces.length; i += 3) {
+      pushEdge(slabFaces[i], slabFaces[i + 1]);
+      pushEdge(slabFaces[i + 1], slabFaces[i + 2]);
+      pushEdge(slabFaces[i + 2], slabFaces[i]);
+    }
+
+    for (const key of edges) {
+      const i = Math.floor(key / slabP.length), j = key % slabP.length;
+      for (let b = 0; b < n; b++) {
+        const di = dist[b][i], dj = dist[b][j];
+        if ((di > EPS && dj < -EPS) || (di < -EPS && dj > EPS)) {
+          const frac = di / (di - dj);
+          const p = slabP[i].clone().lerp(slabP[j], frac);
+          // A crossing of boundary b belongs to the two sectors that share it —
+          // but only if it's within their OTHER bound, since a plane is infinite
+          // while the wedge is not.
+          const prev = (b - 1 + n) % n;
+          const pt = [p.x, p.y, p.z];
+          if (p.dot(normals[b + 1]) <= EPS) clouds[b].push(pt);
+          if (p.dot(normals[prev]) >= -EPS) clouds[prev].push(pt);
+        }
+      }
+    }
+
+    for (const cloud of clouds) {
+      const hull = convexHullOf(cloud);
+      if (!hull) continue;
+      // Back into the mesh's own frame (the clouds were built relative to origin).
+      for (let i = 0; i < hull.verts.length; i += 3) {
+        hull.verts[i] += o.x;
+        hull.verts[i + 1] += o.y;
+        hull.verts[i + 2] += o.z;
+      }
+      hull.centroid = [hull.centroid[0] + o.x, hull.centroid[1] + o.y, hull.centroid[2] + o.z];
+      out.push(hull);
+    }
+  };
+
+  if (steps.length === 0) {
+    sliceSlab(P, faces);
+  } else {
+    const bounds = [-Infinity, ...steps, Infinity];
+    for (let k = 0; k + 1 < bounds.length; k++) {
+      const { slabP, slabFaces } = clipMeshToAxialSlab(P, faces, t, bounds[k], bounds[k + 1]);
+      sliceSlab(slabP, slabFaces);
+    }
   }
   return out;
 }

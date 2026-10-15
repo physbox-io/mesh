@@ -228,7 +228,7 @@ aside.glass-panel div.is-collapsed h3 {
   margin-bottom: 0px;
 }
 
-/* API Ref code blocks */
+/* API Ref code blocks & tinted inspector accents */
 aside.glass-panel .bg-blue-50 {
   background-color: #f0f7ff;
   border-color: #e0f2fe;
@@ -236,9 +236,81 @@ aside.glass-panel .bg-blue-50 {
   transition: all 0.15s ease;
 }
 .dark aside.glass-panel .bg-blue-50 {
-  background-color: rgba(2, 132, 199, 0.1);
-  border-color: rgba(2, 132, 199, 0.2);
+  background-color: rgba(2, 132, 199, 0.12);
+  border-color: rgba(56, 189, 248, 0.25);
   color: #38bdf8;
 }
+.dark aside.glass-panel .bg-blue-50:hover {
+  background-color: rgba(2, 132, 199, 0.2);
+}
+
+.dark aside.glass-panel .border-slate-200,
+.dark aside.glass-panel .border-slate-150,
+.dark aside.glass-panel .border-slate-100,
+.dark aside.glass-panel .border-slate-50 {
+  border-color: #1e293b;
+}
+
+.dark aside.glass-panel .text-slate-800 {
+  color: #f1f5f9;
+}
+
+.dark aside.glass-panel .bg-violet-50 {
+  background-color: rgba(139, 92, 246, 0.12);
+  border-color: rgba(139, 92, 246, 0.28);
+  color: #c4b5fd;
+}
+.dark aside.glass-panel .bg-violet-50:hover {
+  background-color: rgba(139, 92, 246, 0.2);
+}
+
+.dark aside.glass-panel .bg-amber-50,
+.dark aside.glass-panel .bg-amber-50\/50,
+.dark aside.glass-panel .bg-amber-100,
+.dark aside.glass-panel .bg-amber-100\/60 {
+  background-color: rgba(245, 158, 11, 0.12);
+  border-color: rgba(245, 158, 11, 0.28);
+  color: #fcd34d;
+}
+.dark aside.glass-panel .bg-amber-50:hover {
+  background-color: rgba(245, 158, 11, 0.2);
+}
+.dark aside.glass-panel .text-amber-700,
+.dark aside.glass-panel .text-amber-800 {
+  color: #fcd34d;
+}
+
+.dark aside.glass-panel .bg-emerald-50,
+.dark aside.glass-panel .bg-emerald-100 {
+  background-color: rgba(16, 185, 129, 0.12);
+  border-color: rgba(16, 185, 129, 0.28);
+  color: #6ee7b7;
+}
+.dark aside.glass-panel .bg-emerald-50:hover {
+  background-color: rgba(16, 185, 129, 0.2);
+}
+
+.dark aside.glass-panel .bg-red-50,
+.dark aside.glass-panel .bg-rose-50,
+.dark aside.glass-panel .bg-rose-100 {
+  background-color: rgba(244, 63, 94, 0.12);
+  border-color: rgba(244, 63, 94, 0.28);
+  color: #fda4af;
+}
+.dark aside.glass-panel .bg-red-50:hover,
+.dark aside.glass-panel .bg-rose-50:hover {
+  background-color: rgba(244, 63, 94, 0.22);
+}
+.dark aside.glass-panel .text-rose-700,
+.dark aside.glass-panel .text-rose-800 {
+  color: #fda4af;
+}
+
+.dark aside.glass-panel .bg-sky-50 {
+  background-color: rgba(14, 165, 233, 0.15);
+  border-color: rgba(56, 189, 248, 0.45);
+  color: #7dd3fc;
+}
+
 
 

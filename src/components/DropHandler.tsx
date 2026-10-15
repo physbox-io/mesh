@@ -7,11 +7,12 @@ type StoreState = ReturnType<typeof useStore.getState>;
 type AddComponentType = Parameters<StoreState['addComponent']>[0];
 
 // Drop Handler for precise spawning & external file imports (.scad, .stl, .json)
-export const DropHandler = ({ addComponent, onImportFile, onImportImageFile, onImportSceneJson }: {
+export const DropHandler = ({ addComponent, onImportFile, onImportImageFile, onImportSceneJson, onUnsupportedDrop }: {
   addComponent: (type: AddComponentType, pos: [number, number, number]) => void;
   onImportFile: (file: File) => void;
   onImportImageFile: (file: File) => void;
   onImportSceneJson: (text: string, fileName: string, dropped: boolean) => void;
+  onUnsupportedDrop?: (message: string) => void;
 }) => {
   const { camera, gl } = useThree();
   
@@ -54,7 +55,8 @@ export const DropHandler = ({ addComponent, onImportFile, onImportImageFile, onI
         // ignored reads as the app not working.
         if (!handled) {
           const names = Array.from(files, (f) => f.name).join(', ');
-          alert(`Mesh can open .json scenes, .stl and .scad models, and images. ${names} ${files.length === 1 ? "isn't" : "aren't"} one of those.`);
+          const msg = `Mesh can open .json scenes, .stl and .scad models, and images. ${names} ${files.length === 1 ? "isn't" : "aren't"} one of those.`;
+          if (onUnsupportedDrop) onUnsupportedDrop(msg);
         }
         return;
       }

@@ -10,6 +10,7 @@
 // ---------------------------------------------------------------------------
 
 import { useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { AlertTriangle } from 'lucide-react';
 
 export function ConfirmModal({
@@ -17,6 +18,8 @@ export function ConfirmModal({
   body,
   confirmLabel = 'Continue',
   cancelLabel = 'Cancel',
+  hideCancel = false,
+  tone = 'blue',
   onConfirm,
   onCancel,
 }: {
@@ -24,6 +27,8 @@ export function ConfirmModal({
   body: React.ReactNode;
   confirmLabel?: string;
   cancelLabel?: string;
+  hideCancel?: boolean;
+  tone?: 'blue' | 'red' | 'amber';
   onConfirm: () => void;
   onCancel: () => void;
 }) {
@@ -40,7 +45,19 @@ export function ConfirmModal({
     return () => window.removeEventListener('keydown', onKey, true);
   }, [onCancel]);
 
-  return (
+  const confirmBtnClass =
+    tone === 'red'
+      ? 'bg-red-500 hover:bg-red-600 text-white'
+      : tone === 'amber'
+        ? 'bg-amber-500 hover:bg-amber-600 text-slate-950'
+        : 'bg-blue-500 hover:bg-blue-600 text-white';
+
+  const iconBadgeClass =
+    tone === 'red'
+      ? 'bg-red-100 dark:bg-red-950/60 text-red-600 dark:text-red-400'
+      : 'bg-amber-100 dark:bg-amber-950/60 text-amber-600 dark:text-amber-400';
+
+  const modal = (
     <div
       className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[70] flex items-center justify-center p-4"
       onClick={onCancel}
@@ -53,23 +70,25 @@ export function ConfirmModal({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center gap-3">
-          <div className="w-9 h-9 rounded-lg bg-amber-100 dark:bg-amber-950 flex items-center justify-center text-amber-600 shrink-0">
+          <div className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 ${iconBadgeClass}`}>
             <AlertTriangle className="w-5 h-5" />
           </div>
           <h2 className="font-bold text-slate-800 dark:text-slate-100 text-base">{title}</h2>
         </div>
         <div className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed flex flex-col gap-2">{body}</div>
         <div className="flex justify-end gap-2 text-xs">
-          <button
-            onClick={onCancel}
-            className="px-4 py-2 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition-colors font-semibold cursor-pointer"
-          >
-            {cancelLabel}
-          </button>
+          {!hideCancel && (
+            <button
+              onClick={onCancel}
+              className="px-4 py-2 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition-colors font-semibold cursor-pointer"
+            >
+              {cancelLabel}
+            </button>
+          )}
           <button
             ref={confirmRef}
             onClick={onConfirm}
-            className="px-4 py-2 font-semibold text-white bg-blue-500 hover:bg-blue-600 rounded-lg transition-colors cursor-pointer"
+            className={`px-4 py-2 font-semibold rounded-lg transition-colors cursor-pointer ${confirmBtnClass}`}
           >
             {confirmLabel}
           </button>
@@ -77,4 +96,7 @@ export function ConfirmModal({
       </div>
     </div>
   );
+
+  return typeof document !== 'undefined' ? createPortal(modal, document.body) : modal;
 }
+

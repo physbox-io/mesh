@@ -793,6 +793,35 @@ function App() {
     markClean(notes, chat);
   }, [loadPreset, markClean]);
 
+  const [dialogModal, setDialogModal] = useState<{
+    title: string;
+    body: React.ReactNode;
+    confirmLabel: string;
+    cancelLabel?: string;
+    hideCancel?: boolean;
+    tone?: 'blue' | 'red' | 'amber';
+    onConfirm: () => void;
+    onCancel?: () => void;
+  } | null>(null);
+
+  const [exportScaleModal, setExportScaleModal] = useState<{
+    title: string;
+    value: string;
+    error?: string;
+    onConfirm: (targetMm: number) => void;
+  } | null>(null);
+
+  const showNotice = useCallback((title: string, message: string, tone: 'blue' | 'red' | 'amber' = 'amber') => {
+    setDialogModal({
+      title,
+      body: <p>{message}</p>,
+      confirmLabel: 'OK',
+      hideCancel: true,
+      tone,
+      onConfirm: () => setDialogModal(null),
+    });
+  }, []);
+
   const saveUserPresetByName = useCallback((name: string) => {
     const trimmed = name.trim();
     if (!trimmed) return;
@@ -820,9 +849,9 @@ function App() {
       void cloudAutosave.saveExplicit(trimmed, preset, `Saved as “${trimmed}”`);
     } catch (e) {
       console.error('Failed to save user preset', e);
-      alert(`Could not save "${trimmed}": ${e instanceof Error ? e.message : String(e)}`);
+      showNotice('Could not save preset', `Could not save "${trimmed}": ${e instanceof Error ? e.message : String(e)}`, 'red');
     }
-  }, [sceneGraph, model, data, mujoco, noteCards, copilotMessages, markClean]);
+  }, [sceneGraph, model, data, mujoco, noteCards, copilotMessages, markClean, showNotice]);
 
   /*
    * Cloud auto-save.
@@ -1048,34 +1077,44 @@ function App() {
    * is hours of work to rebuild, and losing one to a reload would be worse than
    * an unasked-for entry in the preset list.
    */
-  const openSharedScene = useCallback((shared: SharedScene): boolean => {
-    if (
-      !window.confirm(
-        `Open "${shared.name}"?\n\n` +
-          'It is saved under that name and replaces the scene on screen. ' +
-          'Save what you have first if you want it back.\n' +
-          'Cancel keeps it — the link stays in the address bar, so you can reload to open it later.'
-      )
-    ) {
-      return false;
-    }
-    // Never over the top of a scene already saved under that name: a link from
-    // someone whose "bracket" is not your "bracket" would otherwise overwrite
-    // yours on open, with nothing said.
-    const taken = new Set(listUserPresetNames());
-    let name = shared.name;
-    for (let n = 2; taken.has(name); n++) name = `${shared.name} (${n})`;
+  const openSharedScene = useCallback((shared: SharedScene) => {
+    setDialogModal({
+      title: `Open "${shared.name}"?`,
+      confirmLabel: 'Open shared scene',
+      cancelLabel: 'Keep current scene',
+      body: (
+        <>
+          <p>
+            It is saved under that name and replaces the scene on screen. Save what you have first if
+            you want it back.
+          </p>
+          <p>
+            Keeping your current scene leaves the link in the address bar, so you can reload to open
+            it later.
+          </p>
+        </>
+      ),
+      onCancel: () => setDialogModal(null),
+      onConfirm: () => {
+        setDialogModal(null);
+        // Never over the top of a scene already saved under that name: a link from
+        // someone whose "bracket" is not your "bracket" would otherwise overwrite
+        // yours on open, with nothing said.
+        const taken = new Set(listUserPresetNames());
+        let name = shared.name;
+        for (let n = 2; taken.has(name); n++) name = `${shared.name} (${n})`;
 
-    clearShareFragment();
-    clearShareToken();
-    if (!saveUserPreset(name, { nodes: shared.nodes, noteCards: shared.noteCards ?? [] })) {
-      setShareError(
-        `"${name}" opened but could not be saved — browser storage is full. ` +
-          'Export the JSON now if you want to keep it.'
-      );
-    }
-    loadUserPresetWithCard(`user:${name}`);
-    return true;
+        clearShareFragment();
+        clearShareToken();
+        if (!saveUserPreset(name, { nodes: shared.nodes, noteCards: shared.noteCards ?? [] })) {
+          setShareError(
+            `"${name}" opened but could not be saved — browser storage is full. ` +
+              'Export the JSON now if you want to keep it.'
+          );
+        }
+        loadUserPresetWithCard(`user:${name}`);
+      },
+    });
   }, [loadUserPresetWithCard]);
 
   /**
@@ -1130,11 +1169,14 @@ function App() {
    * come along, because two of the three formats can carry colour and the one
    * that cannot simply ignores them.
    *
-   * Returns null when the user cancels the size prompt.
+   * Prompts with the in-app export size modal when parts have positive size.
    */
-  const buildExportGroup = useCallback((): THREE.Group | null => {
+  const withExportGroup = useCallback((title: string, onReady: (exportGroup: THREE.Group) => void) => {
     const scene = threeSceneRef.current;
-    if (!scene) { alert('Scene not ready'); return null; }
+    if (!scene) {
+      showNotice('Scene not ready', 'Wait for the 3D scene to finish loading before exporting.');
+      return;
+    }
 
     // Find the nearest ancestor tagged with a body's nodeId (set on DynamicGeom's
     // wrapper <group name={nodeId}>), so multi-part scenes (e.g. an enclosure's
@@ -1178,6 +1220,11 @@ function App() {
       else partBboxes.set(partKey, meshBbox);
     });
 
+    if (exportGroup.children.length === 0) {
+      showNotice('Nothing to export', 'There are no visible 3D parts in the scene to export.');
+      return;
+    }
+
     // Normalize: fit the LONGEST SINGLE PART's longest side to a user-specified
     // target in mm (not the combined bounding box of everything visible), centered
     // at origin. Also convert from Three.js Y-up (the scene's convention) to the
@@ -1192,23 +1239,27 @@ function App() {
     }
     if (longestPartDim > 0) {
       const defaultMm = Math.round(longestPartDim * 1000).toString();
-      const targetStr = window.prompt("Longest part's longest side (mm):", defaultMm);
-      if (targetStr === null) return null;
-      const targetMm = parseFloat(targetStr);
-      if (isNaN(targetMm) || targetMm <= 0) { alert('Invalid size'); return null; }
-      const scale = targetMm / longestPartDim;
-      const center = bbox.getCenter(new THREE.Vector3());
-      const transform = new THREE.Matrix4()
-        .makeRotationX(Math.PI / 2)
-        .multiply(new THREE.Matrix4().makeScale(scale, scale, scale))
-        .multiply(new THREE.Matrix4().makeTranslation(-center.x, -center.y, -center.z));
-      for (const child of exportGroup.children) {
-        (child as THREE.Mesh).geometry.applyMatrix4(transform);
-      }
+      setExportScaleModal({
+        title,
+        value: defaultMm,
+        onConfirm: (targetMm) => {
+          const scale = targetMm / longestPartDim;
+          const center = bbox.getCenter(new THREE.Vector3());
+          const transform = new THREE.Matrix4()
+            .makeRotationX(Math.PI / 2)
+            .multiply(new THREE.Matrix4().makeScale(scale, scale, scale))
+            .multiply(new THREE.Matrix4().makeTranslation(-center.x, -center.y, -center.z));
+          for (const child of exportGroup.children) {
+            (child as THREE.Mesh).geometry.applyMatrix4(transform);
+          }
+          onReady(exportGroup);
+        },
+      });
+      return;
     }
 
-    return exportGroup;
-  }, []);
+    onReady(exportGroup);
+  }, [showNotice]);
 
   /** The scene's name, cleaned up into something that can be a filename. */
   const exportBaseName = useCallback(() => {
@@ -1256,9 +1307,9 @@ function App() {
       URL.revokeObjectURL(url);
     } catch (e) {
       console.error('Failed to export JSON', e);
-      alert('Failed to export JSON');
+      showNotice('Export failed', 'Failed to export JSON.', 'red');
     }
-  }, [sceneGraph, model, data, mujoco, noteCards, copilotMessages, exportBaseName]);
+  }, [sceneGraph, model, data, mujoco, noteCards, copilotMessages, exportBaseName, showNotice]);
 
   const downloadBlob = useCallback((blob: Blob, filename: string) => {
     const url = URL.createObjectURL(blob);
@@ -1270,18 +1321,12 @@ function App() {
   }, []);
 
   const exportStl = useCallback(() => {
-    const exportGroup = buildExportGroup();
-    if (!exportGroup) return;
-    // As the 3MF export does: an empty scene otherwise downloads an STL with
-    // no triangles in it.
-    let hasMesh = false;
-    exportGroup.traverse((o) => { if ((o as THREE.Mesh).isMesh) hasMesh = true; });
-    if (!hasMesh) { alert('Nothing to export'); return; }
-
-    const exporter = new STLExporter();
-    const result = exporter.parse(exportGroup, { binary: true }) as DataView;
-    downloadBlob(new Blob([result.buffer as ArrayBuffer], { type: 'application/octet-stream' }), `${exportBaseName()}.stl`);
-  }, [buildExportGroup, exportBaseName, downloadBlob]);
+    withExportGroup('Export STL', (exportGroup) => {
+      const exporter = new STLExporter();
+      const result = exporter.parse(exportGroup, { binary: true }) as DataView;
+      downloadBlob(new Blob([result.buffer as ArrayBuffer], { type: 'application/octet-stream' }), `${exportBaseName()}.stl`);
+    });
+  }, [withExportGroup, exportBaseName, downloadBlob]);
 
   /**
    * The same model, in the format that can carry what it looks like.
@@ -1290,6 +1335,45 @@ function App() {
    * renders the file, and a filament slot per triangle for a slicer that
    * prints it. See utils/threeMfExporter.
    */
+  const exportWholeScene3mf = useCallback(() => {
+    withExportGroup('Export 3MF', (exportGroup) => {
+      const meshes: ThreeMfMesh[] = [];
+      exportGroup.traverse((obj) => {
+        const mesh = obj as THREE.Mesh;
+        if (!mesh.isMesh) return;
+        const material = mesh.material as THREE.MeshStandardMaterial;
+        const position = mesh.geometry.getAttribute('position');
+        if (!position) return;
+        const color = mesh.geometry.getAttribute('color');
+        meshes.push({
+          name: mesh.name || 'part',
+          positions: position.array as Float32Array,
+          indices: (mesh.geometry.getIndex()?.array as Uint32Array | undefined) ?? null,
+          // Present exactly when the body carries paint: the painted material is
+          // white and holds the body's own colour in the attribute instead.
+          colors: material.vertexColors && color ? (color.array as Float32Array) : null,
+          baseColor: [material.color.r, material.color.g, material.color.b],
+        });
+      });
+
+      if (!meshes.length) {
+        showNotice('Nothing to export', 'There are no visible 3D parts in the scene to export.');
+        return;
+      }
+
+      const result = exportThreeMf(meshes);
+      downloadBlob(new Blob([result.data.buffer as ArrayBuffer], { type: 'application/vnd.ms-package.3dmanufacturing-3dmodel+xml' }), `${exportBaseName()}.3mf`);
+
+      // Said out loud because it is the one thing about the file a user cannot
+      // see by looking at it: how many filaments the paint was reduced to.
+      const slots = result.palette.filter(p => p.triangles > 0);
+      if (slots.length > 1) {
+        console.info(`[Export] 3MF written with ${slots.length} filament slots:`,
+          slots.map(p => `${p.extruder}: ${p.hex} (${p.triangles} triangles)`).join(', '));
+      }
+    });
+  }, [withExportGroup, exportBaseName, downloadBlob, showNotice]);
+
   const export3mf = useCallback(() => {
     // Sections made by Split for Print know which way up they print. When
     // there are some, offer the print job — each section stood that way and
@@ -1308,54 +1392,40 @@ function App() {
       }
     };
     walk(graph.nodes);
-    if (posed.length && window.confirm(
-      `Lay out the ${posed.length} split section${posed.length === 1 ? '' : 's'} on the ${printBed.widthMm} × ${printBed.depthMm} mm bed, each standing the way it prints?\n\nCancel exports the whole scene as it stands instead.`,
-    )) {
-      const plated = layoutOnBed(posed, printBed);
-      const result = exportThreeMf(plated.map((p) => ({
-        name: p.name, positions: p.positions, indices: p.indices, colors: null, baseColor: p.colour,
-      })));
-      downloadBlob(new Blob([result.data.buffer as ArrayBuffer], { type: 'application/vnd.ms-package.3dmanufacturing-3dmodel+xml' }), `${exportBaseName()}_plate.3mf`);
-      const plates = Math.max(...plated.map((p) => p.plate)) + 1;
-      if (plates > 1) console.info(`[Export] ${plates} plates' worth of sections; the extra plates sit beside the bed.`);
+    if (posed.length) {
+      setDialogModal({
+        title: `Lay out ${posed.length} split section${posed.length === 1 ? '' : 's'} on the print bed?`,
+        confirmLabel: 'Lay out on bed',
+        cancelLabel: 'Export scene as-is',
+        body: (
+          <>
+            <p>
+              Each split section will be stood the way it prints and arranged across the{' '}
+              <strong>{printBed.widthMm} × {printBed.depthMm} mm</strong> bed.
+            </p>
+            <p>Choose “Export scene as-is” to export the whole scene in its current pose instead.</p>
+          </>
+        ),
+        onConfirm: () => {
+          setDialogModal(null);
+          const plated = layoutOnBed(posed, printBed);
+          const result = exportThreeMf(plated.map((p) => ({
+            name: p.name, positions: p.positions, indices: p.indices, colors: null, baseColor: p.colour,
+          })));
+          downloadBlob(new Blob([result.data.buffer as ArrayBuffer], { type: 'application/vnd.ms-package.3dmanufacturing-3dmodel+xml' }), `${exportBaseName()}_plate.3mf`);
+          const plates = Math.max(...plated.map((p) => p.plate)) + 1;
+          if (plates > 1) console.info(`[Export] ${plates} plates' worth of sections; the extra plates sit beside the bed.`);
+        },
+        onCancel: () => {
+          setDialogModal(null);
+          exportWholeScene3mf();
+        },
+      });
       return;
     }
 
-    const exportGroup = buildExportGroup();
-    if (!exportGroup) return;
-
-    const meshes: ThreeMfMesh[] = [];
-    exportGroup.traverse((obj) => {
-      const mesh = obj as THREE.Mesh;
-      if (!mesh.isMesh) return;
-      const material = mesh.material as THREE.MeshStandardMaterial;
-      const position = mesh.geometry.getAttribute('position');
-      if (!position) return;
-      const color = mesh.geometry.getAttribute('color');
-      meshes.push({
-        name: mesh.name || 'part',
-        positions: position.array as Float32Array,
-        indices: (mesh.geometry.getIndex()?.array as Uint32Array | undefined) ?? null,
-        // Present exactly when the body carries paint: the painted material is
-        // white and holds the body's own colour in the attribute instead.
-        colors: material.vertexColors && color ? (color.array as Float32Array) : null,
-        baseColor: [material.color.r, material.color.g, material.color.b],
-      });
-    });
-
-    if (!meshes.length) { alert('Nothing to export'); return; }
-
-    const result = exportThreeMf(meshes);
-    downloadBlob(new Blob([result.data.buffer as ArrayBuffer], { type: 'application/vnd.ms-package.3dmanufacturing-3dmodel+xml' }), `${exportBaseName()}.3mf`);
-
-    // Said out loud because it is the one thing about the file a user cannot
-    // see by looking at it: how many filaments the paint was reduced to.
-    const slots = result.palette.filter(p => p.triangles > 0);
-    if (slots.length > 1) {
-      console.info(`[Export] 3MF written with ${slots.length} filament slots:`,
-        slots.map(p => `${p.extruder}: ${p.hex} (${p.triangles} triangles)`).join(', '));
-    }
-  }, [buildExportGroup, exportBaseName, downloadBlob]);
+    exportWholeScene3mf();
+  }, [exportWholeScene3mf, exportBaseName, downloadBlob]);
 
   /*
    * Opens a scene file, from the Import button or dropped on the viewport.
@@ -1372,27 +1442,43 @@ function App() {
     try {
       parsed = JSON.parse(text);
     } catch {
-      alert(`Could not read ${fileName}: it is not valid JSON.`);
+      showNotice('Could not read file', `Could not read ${fileName}: it is not valid JSON.`, 'red');
       return;
     }
     if (!parsed || !Array.isArray(parsed.nodes)) {
-      alert(`${fileName} is not a scene: it has no "nodes" array.`);
+      showNotice('Invalid scene file', `${fileName} is not a scene: it has no "nodes" array.`, 'red');
       return;
     }
-    if (dropped && !confirm(`Replace the current scene with ${fileName}?`)) return;
-    const s = useStore.getState();
-    if (s.isPlaying) togglePlay();
-    s.setSculptNodeId(null);
-    s.setLatticeNodeId(null);
-    s.setActivePreset(undefined);
-    updateScene(parsed as SceneGraph);
-    const notes = Array.isArray(parsed.noteCards) ? parsed.noteCards as NoteCard[] : [];
-    const chat = Array.isArray(parsed.copilotMessages) ? parsed.copilotMessages as CopilotMessage[] : [];
-    setNoteCards(notes);
-    setCopilotMessages(chat);
-    setEditingCardId(null);
-    markClean(notes, chat);
-  }, [togglePlay, updateScene, markClean]);
+    const applyImport = () => {
+      const s = useStore.getState();
+      if (s.isPlaying) togglePlay();
+      s.setSculptNodeId(null);
+      s.setLatticeNodeId(null);
+      s.setActivePreset(undefined);
+      updateScene(parsed as SceneGraph);
+      const notes = Array.isArray(parsed.noteCards) ? parsed.noteCards as NoteCard[] : [];
+      const chat = Array.isArray(parsed.copilotMessages) ? parsed.copilotMessages as CopilotMessage[] : [];
+      setNoteCards(notes);
+      setCopilotMessages(chat);
+      setEditingCardId(null);
+      markClean(notes, chat);
+    };
+    if (dropped) {
+      setDialogModal({
+        title: `Replace the current scene with ${fileName}?`,
+        confirmLabel: 'Replace scene',
+        tone: 'amber',
+        body: <p>The current scene on screen will be replaced by the imported file.</p>,
+        onCancel: () => setDialogModal(null),
+        onConfirm: () => {
+          setDialogModal(null);
+          applyImport();
+        },
+      });
+      return;
+    }
+    applyImport();
+  }, [togglePlay, updateScene, markClean, showNotice]);
 
   const importJson = useCallback(() => {
     const input = document.createElement('input');
@@ -1625,7 +1711,20 @@ function App() {
    */
   const handleSculptBaseClick = (node: SceneNode, base: SculptBaseId, label: string) => {
     if ((node.sculptBase || 'sphere') === base) return;
-    if (node.sculptEdited && !window.confirm(`Start over from the ${label} base? The sculpting on this body will be discarded.`)) return;
+    if (node.sculptEdited) {
+      setDialogModal({
+        title: `Start over from the ${label} base?`,
+        confirmLabel: 'Discard & start over',
+        tone: 'amber',
+        body: <p>The sculpting on this body will be discarded. You can undo with Ctrl+Z.</p>,
+        onCancel: () => setDialogModal(null),
+        onConfirm: () => {
+          setDialogModal(null);
+          setSculptBase(node.id, base);
+        },
+      });
+      return;
+    }
     setSculptBase(node.id, base);
   };
 
@@ -1907,9 +2006,25 @@ function App() {
                 // list because this is where someone looks for "start me off
                 // with something", which is what it is.
                 if (v.startsWith('generator:')) { openPatternGenerator(v.slice('generator:'.length)); return; }
-                if (hasUnsavedWork() && !confirm('Replace the current scene? Its unsaved changes, note cards and copilot chat will be lost.')) return;
-                if (v.startsWith('user:')) loadUserPresetWithCard(v);
-                else loadPresetWithCard(v);
+                const applyPresetLoad = () => {
+                  if (v.startsWith('user:')) loadUserPresetWithCard(v);
+                  else loadPresetWithCard(v);
+                };
+                if (hasUnsavedWork()) {
+                  setDialogModal({
+                    title: 'Replace the current scene?',
+                    confirmLabel: 'Replace scene',
+                    tone: 'amber',
+                    body: <p>Its unsaved changes, note cards and copilot chat will be lost.</p>,
+                    onCancel: () => setDialogModal(null),
+                    onConfirm: () => {
+                      setDialogModal(null);
+                      applyPresetLoad();
+                    },
+                  });
+                  return;
+                }
+                applyPresetLoad();
               }}
               className="bg-transparent text-slate-700 dark:text-slate-100 text-xs rounded-md block px-2 py-1 outline-none font-medium cursor-pointer border-none max-lg:flex-1 max-lg:min-w-0"
             >
@@ -1963,16 +2078,33 @@ function App() {
                 <button
                   onClick={() => {
                     const presetName = activePreset.replace('user:', '');
-                    if (window.confirm(`Are you sure you want to delete the preset "${presetName}"?`)) {
-                      // The preset goes; the scene on screen stays. Loading the
-                      // empty scene here wiped the work, notes and chat as well,
-                      // which the question above never mentioned.
-                      if (deleteUserPreset(presetName)) {
-                        useStore.getState().setActivePreset(undefined);
-                      } else {
-                        alert(`Could not delete "${presetName}": this browser would not write the preset list.`);
-                      }
-                    }
+                    setDialogModal({
+                      title: `Delete preset "${presetName}"?`,
+                      confirmLabel: 'Delete preset',
+                      tone: 'red',
+                      body: (
+                        <p>
+                          The saved preset will be removed from your preset list. The scene currently on
+                          screen will stay open.
+                        </p>
+                      ),
+                      onCancel: () => setDialogModal(null),
+                      onConfirm: () => {
+                        setDialogModal(null);
+                        // The preset goes; the scene on screen stays. Loading the
+                        // empty scene here wiped the work, notes and chat as well,
+                        // which the question above never mentioned.
+                        if (deleteUserPreset(presetName)) {
+                          useStore.getState().setActivePreset(undefined);
+                        } else {
+                          showNotice(
+                            'Could not delete preset',
+                            `Could not delete "${presetName}": this browser would not write the preset list.`,
+                            'red',
+                          );
+                        }
+                      },
+                    });
                   }}
                   className="flex items-center justify-center p-1 rounded-md text-red-500 hover:bg-red-50 dark:hover:bg-red-950/50 transition-colors focus:outline-none cursor-pointer"
                   title={`Delete preset "${activePreset.replace('user:', '')}"`}
@@ -2580,7 +2712,7 @@ function App() {
           >
             <SceneCapture sceneRef={threeSceneRef} />
             <RenderOnChange />
-            <DropHandler addComponent={addComponentUnderSelection} onImportFile={handleDroppedImportFile} onImportImageFile={handleDroppedImageFile} onImportSceneJson={importSceneJson} />
+            <DropHandler addComponent={addComponentUnderSelection} onImportFile={handleDroppedImportFile} onImportImageFile={handleDroppedImageFile} onImportSceneJson={importSceneJson} onUnsupportedDrop={(msg) => showNotice('Unsupported file', msg, 'amber')} />
             <StudioBackdrop darkMode={darkMode} />
             {/* A photo studio, built here rather than loaded: a broad softbox
                 overhead, two strip lights either side and a dim grey room. It
@@ -3055,7 +3187,7 @@ function App() {
                     type="button"
                     onClick={() => setLatticeNodeId(selectedNode.id)}
                     disabled={latticeNodeId === selectedNode.id}
-                    className="flex items-center justify-center gap-2 w-full py-2 rounded-lg text-xs font-bold transition-all bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-200 disabled:text-slate-400 text-white cursor-pointer disabled:cursor-default"
+                    className="flex items-center justify-center gap-2 w-full py-2 rounded-lg text-xs font-bold transition-all bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-200 dark:disabled:bg-slate-800 disabled:text-slate-400 dark:disabled:text-slate-500 text-white cursor-pointer disabled:cursor-default"
                     title="Open the lattice tools on this cage. Pauses the simulation."
                   >
                     <Grid3x3 className="w-3.5 h-3.5" />
@@ -3091,16 +3223,31 @@ function App() {
                     type="button"
                     onClick={() => {
                       if (selectedNode.isLattice) {
-                        if (!window.confirm(
-                          'Sculpting applies the lattice: this mesh stops being built from its cage, '
-                          + 'and the lattice tools close on it for good. The cage stays in the file, '
-                          + 'and Ctrl+Z puts it back. Carry on?')) return;
-                        useStore.getState().bakeLattice(selectedNode.id);
+                        const targetId = selectedNode.id;
+                        setDialogModal({
+                          title: 'Apply lattice and start sculpting?',
+                          confirmLabel: 'Apply lattice & sculpt',
+                          tone: 'amber',
+                          body: (
+                            <p>
+                              Sculpting applies the lattice: this mesh stops being built from its cage,
+                              and the lattice tools close on it for good. The cage stays in the file, and
+                              Ctrl+Z puts it back.
+                            </p>
+                          ),
+                          onCancel: () => setDialogModal(null),
+                          onConfirm: () => {
+                            setDialogModal(null);
+                            useStore.getState().bakeLattice(targetId);
+                            setSculptNodeId(targetId);
+                          },
+                        });
+                        return;
                       }
                       setSculptNodeId(selectedNode.id);
                     }}
                     disabled={sculptNodeId === selectedNode.id}
-                    className="flex items-center justify-center gap-2 w-full py-2 rounded-lg text-xs font-bold transition-all bg-sky-600 hover:bg-sky-500 disabled:bg-slate-200 disabled:text-slate-400 text-white cursor-pointer disabled:cursor-default"
+                    className="flex items-center justify-center gap-2 w-full py-2 rounded-lg text-xs font-bold transition-all bg-sky-600 hover:bg-sky-500 disabled:bg-slate-200 dark:disabled:bg-slate-800 disabled:text-slate-400 dark:disabled:text-slate-500 text-white cursor-pointer disabled:cursor-default"
                     title={selectedNode.isLattice
                       ? 'Applies the lattice first: the cage stops driving this mesh, and sculpting takes over. Undoable.'
                       : 'Open the sculpting tools on this mesh. Pauses the simulation.'}
@@ -4349,7 +4496,7 @@ function App() {
                       
                       <div className="flex flex-col gap-1">
                         <label className="text-xs font-medium text-slate-500 flex justify-between">
-                          Spring Stiffness (K) <SliderValue value={joint.stiffness || 0} onChange={(v) => updateNodeJoint(selectedNode.id, { stiffness: v })} decimals={0} unit="N/m" min={0} max={5000} />
+                          Spring Stiffness (K) <SliderValue value={joint.stiffness || 0} onChange={(v) => updateNodeJoint(selectedNode.id, { stiffness: v })} decimals={0} unit={joint.type === 'slide' ? 'N/m' : 'N·m/rad'} min={0} max={5000} />
                         </label>
                         <RangeInput 
                           min="0" 
@@ -6138,34 +6285,31 @@ function App() {
                             defaultPrompt = Math.round(longestSide * 1000).toString();
                           }
 
-                          const targetStr = window.prompt("Longest part's longest side (mm):", defaultPrompt);
-                          if (targetStr === null) return;
-                          const targetMm = parseFloat(targetStr);
-                          if (isNaN(targetMm) || targetMm <= 0) { alert('Invalid size'); return; }
+                          const filename = `${selectedNode.name || 'openscad_shape'}.stl`;
+                          setExportScaleModal({
+                            title: 'Export OpenSCAD STL',
+                            value: defaultPrompt,
+                            onConfirm: (targetMm) => {
+                              const scale = targetMm / longestSide;
+                              const center = bbox.getCenter(new THREE.Vector3());
+                              const transform = new THREE.Matrix4()
+                                .makeRotationX(Math.PI / 2)
+                                .multiply(new THREE.Matrix4().makeScale(scale, scale, scale))
+                                .multiply(new THREE.Matrix4().makeTranslation(-center.x, -center.y, -center.z));
 
-                          const scale = targetMm / longestSide;
-                          const center = bbox.getCenter(new THREE.Vector3());
-                          const transform = new THREE.Matrix4()
-                            .makeRotationX(Math.PI / 2)
-                            .multiply(new THREE.Matrix4().makeScale(scale, scale, scale))
-                            .multiply(new THREE.Matrix4().makeTranslation(-center.x, -center.y, -center.z));
-                          
-                          geo.applyMatrix4(transform);
+                              geo.applyMatrix4(transform);
 
-                          const exportGroup = new THREE.Group();
-                          exportGroup.add(mesh);
+                              const exportGroup = new THREE.Group();
+                              exportGroup.add(mesh);
 
-                          const exporter = new STLExporter();
-                          const result = exporter.parse(exportGroup, { binary: true }) as DataView;
-                          const blob = new Blob([result.buffer as ArrayBuffer], { type: 'application/octet-stream' });
-                          const url = URL.createObjectURL(blob);
-                          const a = document.createElement('a');
-                          a.href = url;
-                          a.download = `${selectedNode.name || 'openscad_shape'}.stl`;
-                          a.click();
-                          URL.revokeObjectURL(url);
+                              const exporter = new STLExporter();
+                              const result = exporter.parse(exportGroup, { binary: true }) as DataView;
+                              const blob = new Blob([result.buffer as ArrayBuffer], { type: 'application/octet-stream' });
+                              downloadBlob(blob, filename);
+                            },
+                          });
                         } catch (e) {
-                          alert('Failed to export OpenSCAD STL: ' + (e as Error).message);
+                          showNotice('OpenSCAD export failed', 'Failed to export OpenSCAD STL: ' + (e as Error).message, 'red');
                         } finally {
                           setIsCompilerLoading(false);
                         }
@@ -6583,16 +6727,105 @@ api.applyForce([force, 0, 0]);
         );
       })()}
 
-      {isSaveModalOpen && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl border border-slate-100 shadow-2xl max-w-md w-full p-6 flex flex-col gap-4 animate-in fade-in zoom-in-95 duration-200">
+      {dialogModal && (
+        <ConfirmModal
+          title={dialogModal.title}
+          body={dialogModal.body}
+          confirmLabel={dialogModal.confirmLabel}
+          cancelLabel={dialogModal.cancelLabel}
+          hideCancel={dialogModal.hideCancel}
+          tone={dialogModal.tone}
+          onCancel={dialogModal.onCancel ?? (() => setDialogModal(null))}
+          onConfirm={dialogModal.onConfirm}
+        />
+      )}
+
+      {exportScaleModal && (
+        <div
+          className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[120] flex items-center justify-center p-4"
+          onClick={() => setExportScaleModal(null)}
+        >
+          <div
+            className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 shadow-2xl max-w-md w-full p-6 flex flex-col gap-4 animate-in fade-in zoom-in-95 duration-200"
+            onClick={(e) => e.stopPropagation()}
+          >
             <div className="flex items-center gap-3">
-              <div className="w-9 h-9 rounded-lg bg-blue-100 flex items-center justify-center text-blue-600">
+              <div className="w-9 h-9 rounded-lg bg-blue-100 dark:bg-blue-950/60 flex items-center justify-center text-blue-600 dark:text-blue-400">
+                <Printer className="w-5 h-5" />
+              </div>
+              <div>
+                <h2 className="font-bold text-slate-800 dark:text-slate-100 text-base">{exportScaleModal.title}</h2>
+                <p className="text-xs text-slate-500 dark:text-slate-400">Longest part&apos;s longest side (mm)</p>
+              </div>
+            </div>
+            <input
+              autoFocus
+              type="number"
+              min="0.1"
+              step="any"
+              value={exportScaleModal.value}
+              onChange={(e) => setExportScaleModal({ ...exportScaleModal, value: e.target.value, error: undefined })}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  const targetMm = parseFloat(exportScaleModal.value);
+                  if (isNaN(targetMm) || targetMm <= 0) {
+                    setExportScaleModal({ ...exportScaleModal, error: 'Enter a valid size greater than 0 mm.' });
+                    return;
+                  }
+                  const cb = exportScaleModal.onConfirm;
+                  setExportScaleModal(null);
+                  cb(targetMm);
+                }
+                if (e.key === 'Escape') setExportScaleModal(null);
+              }}
+              className="w-full px-3 py-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-100 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-500 font-mono"
+            />
+            {exportScaleModal.error && (
+              <p className="text-xs text-red-600 dark:text-red-400 -mt-2">{exportScaleModal.error}</p>
+            )}
+            <div className="flex justify-end gap-2 text-xs">
+              <button
+                onClick={() => setExportScaleModal(null)}
+                className="px-4 py-2 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition-colors font-semibold cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  const targetMm = parseFloat(exportScaleModal.value);
+                  if (isNaN(targetMm) || targetMm <= 0) {
+                    setExportScaleModal({ ...exportScaleModal, error: 'Enter a valid size greater than 0 mm.' });
+                    return;
+                  }
+                  const cb = exportScaleModal.onConfirm;
+                  setExportScaleModal(null);
+                  cb(targetMm);
+                }}
+                className="px-4 py-2 font-semibold text-white bg-blue-500 hover:bg-blue-600 rounded-lg transition-colors cursor-pointer"
+              >
+                Export
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isSaveModalOpen && (
+        <div
+          className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+          onClick={() => setIsSaveModalOpen(false)}
+        >
+          <div
+            className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 shadow-2xl max-w-md w-full p-6 flex flex-col gap-4 animate-in fade-in zoom-in-95 duration-200"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-lg bg-blue-100 dark:bg-blue-950/60 flex items-center justify-center text-blue-600 dark:text-blue-400">
                 <Save className="w-5 h-5" />
               </div>
               <div>
-                <h2 className="font-bold text-slate-800 text-base">Save Scene Preset</h2>
-                <p className="text-xs text-slate-500">Give your scene a name to save it locally</p>
+                <h2 className="font-bold text-slate-800 dark:text-slate-100 text-base">Save Scene Preset</h2>
+                <p className="text-xs text-slate-500 dark:text-slate-400">Give your scene a name to save it locally</p>
               </div>
             </div>
             <input
@@ -6605,19 +6838,19 @@ api.applyForce([force, 0, 0]);
                 if (e.key === 'Enter') handleConfirmSavePreset();
                 if (e.key === 'Escape') setIsSaveModalOpen(false);
               }}
-              className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full px-3 py-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-500 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-500"
             />
             <div className="flex justify-end gap-2 text-xs">
               <button
                 onClick={() => setIsSaveModalOpen(false)}
-                className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg transition-colors font-semibold"
+                className="px-4 py-2 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition-colors font-semibold cursor-pointer"
               >
                 Cancel
               </button>
               <button
                 onClick={handleConfirmSavePreset}
                 disabled={!presetNameInput.trim()}
-                className="px-4 py-2 font-semibold text-white bg-blue-500 hover:bg-blue-600 disabled:opacity-40 disabled:cursor-not-allowed rounded-lg transition-colors"
+                className="px-4 py-2 font-semibold text-white bg-blue-500 hover:bg-blue-600 disabled:opacity-40 disabled:cursor-not-allowed rounded-lg transition-colors cursor-pointer"
               >
                 Save
               </button>

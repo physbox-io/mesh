@@ -13,8 +13,10 @@
 // an ugly scene, and Ctrl+Z is right there.
 // ---------------------------------------------------------------------------
 
+import { useState } from 'react';
 import { Palette, Pipette, Eraser } from 'lucide-react';
 import { useStore } from '../store/useStore';
+import { ConfirmModal } from './ConfirmModal';
 
 /**
  * The palette.
@@ -76,6 +78,7 @@ export function ColoringSection({ onArmed }: ColoringSectionProps) {
   const setPaintColor = useStore((s) => s.setPaintColor);
   const setPaintBrush = useStore((s) => s.setPaintBrush);
   const clearAllPaint = useStore((s) => s.clearAllPaint);
+  const [confirmClearOpen, setConfirmClearOpen] = useState(false);
 
   const currentHex = rgbToHex(paintColor);
 
@@ -199,18 +202,34 @@ export function ColoringSection({ onArmed }: ColoringSectionProps) {
       </p>
 
       <button
-        onClick={() => {
-          if (window.confirm('Take the paint off every body in the scene? The bodies keep their own colours.')) {
-            clearAllPaint();
-          }
-        }}
+        onClick={() => setConfirmClearOpen(true)}
         className="w-full mt-2 flex items-center justify-center gap-1.5 py-1 rounded-lg text-[10px] font-bold text-slate-500 dark:text-slate-400 border border-dashed border-slate-300 dark:border-slate-700 hover:border-slate-400 dark:hover:border-slate-600 hover:text-slate-700 dark:hover:text-slate-200 transition-colors cursor-pointer"
         title="Strips every brush stroke in the scene. Each body keeps the colour it was given in its properties."
       >
         <Eraser className="w-3 h-3" /> Clear all paint
       </button>
+
+      {confirmClearOpen && (
+        <ConfirmModal
+          title="Clear all paint?"
+          confirmLabel="Clear paint"
+          tone="red"
+          body={
+            <p>
+              Takes every brush stroke off every body in the scene. Each body keeps the base colour
+              it was given in its properties, and Ctrl+Z puts the paint back.
+            </p>
+          }
+          onCancel={() => setConfirmClearOpen(false)}
+          onConfirm={() => {
+            setConfirmClearOpen(false);
+            clearAllPaint();
+          }}
+        />
+      )}
     </div>
   );
 }
 
 export default ColoringSection;
+
