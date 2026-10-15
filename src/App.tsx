@@ -9,6 +9,7 @@ import LatticePanel from './components/LatticePanel';
 import { ThreadField } from './components/ThreadField';
 import { LeftSidebar } from './components/palette/LeftSidebar';
 import { InspectorPanel } from './components/inspector/InspectorPanel';
+import { GearCard } from './components/inspector/GearCard';
 import { JointSettingsCard } from './components/inspector/JointSettingsCard';
 import { GeomPropertiesCard } from './components/inspector/GeomPropertiesCard';
 
@@ -452,7 +453,7 @@ function App() {
     wireframe, toggleWireframe, showEdges, toggleShowEdges, paintMode,
     gridCellSizeMm, setGridCellSizeMm,
     sceneGraph, selectedNodeId, setSelectedNodeId,
-    updateNodeGeom, updateNodeJoint, updateGearTeeth, addPusherPeg, deletePusherPeg, updatePusherPeg, addComponent, loadPreset, openPatternGenerator, updateScene,
+    updateNodeGeom, updateNodeJoint, addComponent, loadPreset, openPatternGenerator, updateScene,
     resetSimulation, updateNodePos,
     updateNodeJointsList, deleteNode, renameNode,
     updateNodeRotation, rotateAroundCOM, setRotateAroundCOM,
@@ -474,7 +475,7 @@ function App() {
     wireframe: s.wireframe, toggleWireframe: s.toggleWireframe, showEdges: s.showEdges, toggleShowEdges: s.toggleShowEdges, paintMode: s.paintMode,
     gridCellSizeMm: s.gridCellSizeMm, setGridCellSizeMm: s.setGridCellSizeMm,
     sceneGraph: s.sceneGraph, selectedNodeId: s.selectedNodeId, setSelectedNodeId: s.setSelectedNodeId,
-    updateNodeGeom: s.updateNodeGeom, updateNodeJoint: s.updateNodeJoint, updateGearTeeth: s.updateGearTeeth, addPusherPeg: s.addPusherPeg, deletePusherPeg: s.deletePusherPeg, updatePusherPeg: s.updatePusherPeg, addComponent: s.addComponent, loadPreset: s.loadPreset, openPatternGenerator: s.openPatternGenerator, updateScene: s.updateScene,
+    updateNodeGeom: s.updateNodeGeom, updateNodeJoint: s.updateNodeJoint, addComponent: s.addComponent, loadPreset: s.loadPreset, openPatternGenerator: s.openPatternGenerator, updateScene: s.updateScene,
     resetSimulation: s.resetSimulation, updateNodePos: s.updateNodePos,
     updateNodeJointsList: s.updateNodeJointsList, deleteNode: s.deleteNode, renameNode: s.renameNode,
     updateNodeRotation: s.updateNodeRotation, rotateAroundCOM: s.rotateAroundCOM, setRotateAroundCOM: s.setRotateAroundCOM,
@@ -3801,120 +3802,7 @@ function App() {
                 </div>
               )}
 
-              {/* Gear Config */}
-              {selectedNode.id.includes('gear') && selectedNode.geoms && (() => {
-                const pegGeom = selectedNode.geoms.find((g) => g.name.includes('peg'));
-                const gearRadius = selectedNode.geoms[0].size[0];
-                return (
-                  <div className="flex flex-col gap-4">
-                    <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-2">
-                      <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 mb-1">⚙️ Gear Properties</h3>
-                      <label className="text-xs font-medium text-slate-500 flex justify-between">
-                        Teeth Count <span>{selectedNode.geoms.length - (pegGeom ? 2 : 1)}</span>
-                      </label>
-                      <RangeInput 
-                        min="4" 
-                        max="24" 
-                        step="1" 
-                        value={selectedNode.geoms.length - (pegGeom ? 2 : 1)} 
-                        onChange={(v) => {
-                          const teethVal = Math.round(v);
-                          updateGearTeeth(selectedNode.id, teethVal);
-                        }} 
-                        className="w-full accent-blue-500 cursor-pointer" 
-                      />
-                      <label className="text-xs font-medium text-slate-500 flex justify-between mt-2">
-                        Gear Radius <SliderValue value={gearRadius} onChange={(v) => {
-                          const r = v;
-                          updateNodeGeom(selectedNode.id, { size: [r, selectedNode.geoms[0].size[1]] });
-                        }} decimals={2} unit="m" min={0.05} max={5.0} />
-                      </label>
-                      <RangeInput 
-                        min="0.05" 
-                        max="5.0" 
-                        step="0.01" 
-                        value={gearRadius} 
-                        onChange={(v) => {
-                          const r = v;
-                          updateNodeGeom(selectedNode.id, { size: [r, selectedNode.geoms[0].size[1]] });
-                        }} 
-                        className="w-full accent-blue-500 cursor-pointer" 
-                      />
-                    </div>
-
-                    {/* generateGearGeoms always places the peg, so `pos` is there. */}
-                    {pegGeom && pegGeom.pos ? (
-                      <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-2">
-                        <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 mb-1">📍 Pusher Peg Properties</h3>
-                        <label className="text-xs font-medium text-slate-500 flex justify-between">
-                          Peg Offset (Radius) <SliderValue value={pegGeom.pos[0]} onChange={(v) => {
-                            const offsetVal = v;
-                            updatePusherPeg(selectedNode.id, { offset: offsetVal });
-                          }} decimals={2} unit="m" min={0.01} max={5.0} />
-                        </label>
-                        <RangeInput 
-                          min="0.01" 
-                          max="5.0" 
-                          step="0.01" 
-                          value={pegGeom.pos[0]} 
-                          onChange={(v) => {
-                            const offsetVal = v;
-                            updatePusherPeg(selectedNode.id, { offset: offsetVal });
-                          }} 
-                          className="w-full accent-blue-500 cursor-pointer" 
-                        />
-                        <label className="text-xs font-medium text-slate-500 flex justify-between mt-2">
-                          Peg Thickness <SliderValue value={pegGeom.size[0]} onChange={(v) => {
-                            const rVal = v;
-                            updatePusherPeg(selectedNode.id, { size: [rVal, pegGeom.size[1]] });
-                          }} decimals={3} unit="m" min={0.005} max={0.5} />
-                        </label>
-                        <RangeInput 
-                          min="0.005" 
-                          max="0.5" 
-                          step="0.005" 
-                          value={pegGeom.size[0]} 
-                          onChange={(v) => {
-                            const rVal = v;
-                            updatePusherPeg(selectedNode.id, { size: [rVal, pegGeom.size[1]] });
-                          }} 
-                          className="w-full accent-blue-500 cursor-pointer" 
-                        />
-                        <label className="text-xs font-medium text-slate-500 flex justify-between mt-2">
-                          Peg Length <SliderValue value={pegGeom.size[1]} onChange={(v) => {
-                            const hVal = v;
-                            updatePusherPeg(selectedNode.id, { size: [pegGeom.size[0], hVal] });
-                          }} decimals={2} unit="m" min={0.01} max={1.0} />
-                        </label>
-                        <RangeInput 
-                          min="0.01" 
-                          max="1.0" 
-                          step="0.01" 
-                          value={pegGeom.size[1]} 
-                          onChange={(v) => {
-                            const hVal = v;
-                            updatePusherPeg(selectedNode.id, { size: [pegGeom.size[0], hVal] });
-                          }} 
-                          className="w-full accent-blue-500 cursor-pointer" 
-                        />
-                        <button
-                          onClick={() => deletePusherPeg(selectedNode.id)}
-                          className="mt-2 w-full py-1.5 px-3 bg-red-50 text-red-600 hover:bg-red-100 rounded-md text-xs font-medium transition duration-150 shadow-sm border border-red-100"
-                        >
-                          🗑️ Remove Pusher Peg
-                        </button>
-                      </div>
-                    ) : (
-                      <button
-                        onClick={() => addPusherPeg(selectedNode.id)}
-                        className="py-2 px-3 bg-blue-50 hover:bg-blue-100 text-blue-600 rounded-lg text-xs font-semibold transition duration-150 border border-blue-100 flex items-center justify-center gap-1.5 shadow-sm"
-                      >
-                        ➕ Add Pusher Peg
-                      </button>
-                    )}
-                  </div>
-                );
-              })()}
+              <GearCard node={selectedNode} />
 
               <JointSettingsCard node={selectedNode} />
 
