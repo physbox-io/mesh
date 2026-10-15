@@ -1502,6 +1502,85 @@ export function squareUpWalls(points: PathPoint[], maxSlope = WALL_SLOPE): PathP
   return out;
 }
 
+/**
+ * For each waterline run, the runs at a higher level that pass within `reach`
+ * of it: the ones that must be cut before it.
+ *
+ * Roughing leaves its allowance standing the whole height of every wall. A
+ * waterline at the foot of a wall cut before the levels above it buries the
+ * finishing cutter's flank in all of it at once, a side cut as tall as the
+ * wall; top down, each level takes only its own step. Runs that are not
+ * waterlines (`levels[i]` undefined) wait for nothing and hold nothing up.
+ *
+ * Points are sampled every quarter of `reach` and binned on a grid of that
+ * size, so a run is matched only against what is nearby.
+ */
+export function higherWaterlinesNear(
+  runs: { x: number; y: number }[][],
+  levels: (number | undefined)[],
+  reach: number
+): number[][] {
+  const out = runs.map(() => [] as number[]);
+  if (!(reach > 0) || !levels.some((l) => l !== undefined)) return out;
+
+  const cell = reach;
+  const key = (x: number, y: number) => `${Math.floor(x / cell)},${Math.floor(y / cell)}`;
+  const samples = runs.map((run, i) => {
+    if (levels[i] === undefined || run.length === 0) return [];
+    const pts = [run[0]];
+    let from = run[0];
+    for (let k = 1; k < run.length; k++) {
+      const p = run[k];
+      const d = Math.hypot(p.x - from.x, p.y - from.y);
+      if (d >= reach / 4 || k === run.length - 1) {
+        // Long moves are filled in, or a waterline straight along a wall
+        // would be two points a wall's length apart.
+        const extra = Math.floor(d / (reach / 4));
+        for (let e = 1; e < extra; e++) {
+          pts.push({ x: from.x + ((p.x - from.x) * e) / extra, y: from.y + ((p.y - from.y) * e) / extra });
+        }
+        pts.push(p);
+        from = p;
+      }
+    }
+    return pts;
+  });
+
+  const bins = new Map<string, { run: number; x: number; y: number }[]>();
+  samples.forEach((pts, run) => {
+    for (const p of pts) {
+      const k = key(p.x, p.y);
+      let bin = bins.get(k);
+      if (!bin) bins.set(k, (bin = []));
+      bin.push({ run, x: p.x, y: p.y });
+    }
+  });
+
+  samples.forEach((pts, i) => {
+    const level = levels[i];
+    if (level === undefined) return;
+    const found = new Set<number>();
+    for (const p of pts) {
+      const cx = Math.floor(p.x / cell);
+      const cy = Math.floor(p.y / cell);
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const bin = bins.get(`${cx + dx},${cy + dy}`);
+          if (!bin) continue;
+          for (const q of bin) {
+            if (found.has(q.run)) continue;
+            const other = levels[q.run];
+            if (other === undefined || other <= level + 1e-6) continue;
+            if (Math.hypot(q.x - p.x, q.y - p.y) < reach) found.add(q.run);
+          }
+        }
+      }
+    }
+    out[i] = [...found];
+  });
+  return out;
+}
+
 function simplifyPass(points: PathPoint[], tolMm: number): PathPoint[] {
   if (points.length <= 2) return points;
 
@@ -2933,6 +3012,9 @@ export function machineSurface(
       ? { x: pt.x, y: pt.y, z: sampleHeightmap(finishMap, pt.x, pt.y) }
       : holdOffWall(pt, level);
   })));
+  // The level each pass was traced at, where it is a waterline.
+  const placedLevels = planGroups.map((group) => group.map((plan) =>
+    plan.length > 0 ? waterlineLevel(plan[0]) : undefined));
 
   for (const limit of finishLimits) {
     if (finishLimits.length > 1) {
@@ -2943,10 +3025,14 @@ export function machineSurface(
     // where the next may be linked to without lifting.
     let down = false;
 
-    for (const group of placed) {
-      // This layer's runs in the group, in no particular order yet.
+    for (let g = 0; g < placed.length; g++) {
+      const group = placed[g];
+      // This layer's runs in the group, in no particular order yet, and the
+      // waterline level each came from.
       const runs: PathPoint[][] = [];
-      for (const plan of group) {
+      const runLevels: (number | undefined)[] = [];
+      for (let k = 0; k < group.length; k++) {
+        const plan = group[k];
         // `surface` is where the pass ends up; `z` is as far as this layer is
         // allowed to go towards it. A point the layer above already took to its
         // surface is finished, and is left out of this layer entirely — which is
@@ -2982,7 +3068,10 @@ export function machineSurface(
           for (let i = 1; i < pass.length; i++) {
             runLen += Math.hypot(pass[i].x - pass[i - 1].x, pass[i].y - pass[i - 1].y);
           }
-          if (pass.length >= 2 && runLen >= stepover - 1e-6) runs.push(run);
+          if (pass.length >= 2 && runLen >= stepover - 1e-6) {
+            runs.push(run);
+            runLevels.push(placedLevels[g][k]);
+          }
           run = [];
         };
         for (const p of raw) {
@@ -3018,12 +3107,27 @@ export function machineSurface(
       });
       const used = new Uint8Array(runs.length);
 
+      /*
+       * ...except down a wall, which is cut top first.
+       *
+       * Nearest in plan alone ignores height, and stepping from one wall to the
+       * next it took whichever level of the next happened to be closest - as
+       * often as not the deepest - and worked the wall upward from there, the
+       * cutter's flank buried in the allowance standing over it the whole way.
+       * A waterline waits for every higher one near it (see
+       * `higherWaterlinesNear`); everything else is nearest first as before.
+       */
+      const waitingFor = higherWaterlinesNear(runs, runLevels, opts.finishingToolDiaMm);
+      const pending = waitingFor.map((w) => w.length);
+      const releases: number[][] = runs.map(() => []);
+      waitingFor.forEach((w, i) => { for (const j of w) releases[j].push(i); });
+
       for (let n = 0; n < runs.length; n++) {
         let best = -1;
         let bestAt = 0;
         let bestD = Infinity;
         for (let i = 0; i < runs.length; i++) {
-          if (used[i]) continue;
+          if (used[i] || pending[i] > 0) continue;
           for (const k of probes[i]) {
             const d = Math.hypot(runs[i][k].x - atX, runs[i][k].y - atY);
             if (d < bestD) {
@@ -3034,6 +3138,7 @@ export function machineSurface(
           }
         }
         used[best] = 1;
+        for (const i of releases[best]) pending[i]--;
         let r = runs[best];
         if (closed[best]) {
           let near = bestAt;
