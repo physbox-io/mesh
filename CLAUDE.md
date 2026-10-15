@@ -42,7 +42,7 @@ page at runtime.
 - `src/workers/` — physics, OpenSCAD, mold, export, fracture, sculpt-cut and V-HACD workers. Anything
   slow belongs in one.
 - `src/utils/*Exporter.ts` — one per fabrication output (G-code, 3MF, laser cut, contour slice, relief
-  carve, solid machining, mold, cast pattern); STL goes through three's `STLExporter` in `App.tsx`.
+  carve, solid machining, mold, cast pattern); STL and 3MF go through `hooks/useMeshExport.tsx`.
   Solid machining reuses `machineSurface()` from `reliefCarveExporter.ts`.
 - `src/presets/` — scene definitions. `presetScenes.ts` holds the `PRESETS` map; large presets get
   their own module.
