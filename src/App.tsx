@@ -11,6 +11,8 @@ import { CutControls } from './components/CutControls';
 import { ThreadField } from './components/ThreadField';
 import { LeftSidebar } from './components/palette/LeftSidebar';
 import { InspectorPanel } from './components/inspector/InspectorPanel';
+import { PulleyWheelCard } from './components/inspector/PulleyWheelCard';
+import { RopeCard } from './components/inspector/RopeCard';
 import { useSelectedNode } from './hooks/useSelectedNode';
 import { useMuJoCoInit } from './hooks/useMuJoCo';
 import { useMCPBridge } from './hooks/useMCPBridge';
@@ -477,8 +479,7 @@ function App() {
     resetSimulation, updateNodePos,
     updateNodeJointsList, deleteNode, renameNode,
     updateNodeRotation, rotateAroundCOM, setRotateAroundCOM,
-    updateWedgeParams, updatePyramidParams, updateConeParams, updateTorusParams, updateTubeParams, updateCurveParams, updatePulleyParams, updateRopeParams,
-    updateNodeScript, updateNode,
+    updateWedgeParams, updatePyramidParams, updateConeParams, updateTorusParams, updateTubeParams, updateCurveParams,     updateNodeScript, updateNode,
     deleteNodeGeom, setGeomCsgOp,
     sculptNodeId, setSculptNodeId, setSculptBase,
     latticeNodeId, setLatticeNodeId,
@@ -501,8 +502,7 @@ function App() {
     resetSimulation: s.resetSimulation, updateNodePos: s.updateNodePos,
     updateNodeJointsList: s.updateNodeJointsList, deleteNode: s.deleteNode, renameNode: s.renameNode,
     updateNodeRotation: s.updateNodeRotation, rotateAroundCOM: s.rotateAroundCOM, setRotateAroundCOM: s.setRotateAroundCOM,
-    updateWedgeParams: s.updateWedgeParams, updatePyramidParams: s.updatePyramidParams, updateConeParams: s.updateConeParams, updateTorusParams: s.updateTorusParams, updateTubeParams: s.updateTubeParams, updateCurveParams: s.updateCurveParams, updatePulleyParams: s.updatePulleyParams, updateRopeParams: s.updateRopeParams,
-    updateNodeScript: s.updateNodeScript, updateNode: s.updateNode,
+    updateWedgeParams: s.updateWedgeParams, updatePyramidParams: s.updatePyramidParams, updateConeParams: s.updateConeParams, updateTorusParams: s.updateTorusParams, updateTubeParams: s.updateTubeParams, updateCurveParams: s.updateCurveParams,     updateNodeScript: s.updateNodeScript, updateNode: s.updateNode,
     deleteNodeGeom: s.deleteNodeGeom, setGeomCsgOp: s.setGeomCsgOp,
     sculptNodeId: s.sculptNodeId, setSculptNodeId: s.setSculptNodeId, setSculptBase: s.setSculptBase,
     latticeNodeId: s.latticeNodeId, setLatticeNodeId: s.setLatticeNodeId,
@@ -1463,35 +1463,6 @@ function App() {
     };
     input.click();
   }, [importSceneJson]);
-
-
-  const allPulleyWheels = useMemo(() => {
-    const list: SceneNode[] = [];
-    const traverse = (nodes: SceneNode[]) => {
-      if (!nodes) return;
-      for (const n of nodes) {
-        if (n.isPulleyWheel) list.push(n);
-        traverse(n.children);
-      }
-    };
-    traverse(sceneGraph.nodes);
-    return list;
-  }, [sceneGraph]);
-
-  const allJointedNodes = useMemo(() => {
-    const list: SceneNode[] = [];
-    const traverse = (nodes: SceneNode[]) => {
-      if (!nodes) return;
-      for (const n of nodes) {
-        if (n.joints && n.joints.length > 0 && !n.isPulleyWheel) {
-          list.push(n);
-        }
-        traverse(n.children);
-      }
-    };
-    traverse(sceneGraph.nodes);
-    return list;
-  }, [sceneGraph]);
 
   /*
    * A click on a gizmo handle is a click on a mesh with no R3F handlers, so R3F
@@ -5674,90 +5645,9 @@ function App() {
                 );
               })()}
 
-              {selectedNode.isPulleyWheel && (
-                <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-2">
-                  <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 mb-1">🛞 Pulley Properties</h3>
-                  <label className="text-xs font-medium text-slate-500 flex justify-between">
-                    Pulley Radius <SliderValue value={selectedNode.pulleyRadius || 0.4} onChange={(v) => {
-                      const radVal = v;
-                      updatePulleyParams(selectedNode.id, { pulleyRadius: radVal });
-                    }} decimals={2} unit="m" min={0.15} max={1.5} />
-                  </label>
-                  <RangeInput 
-                    min="0.15" 
-                    max="1.5" 
-                    step="0.01" 
-                    value={selectedNode.pulleyRadius || 0.4} 
-                    onChange={(v) => {
-                      const radVal = v;
-                      updatePulleyParams(selectedNode.id, { pulleyRadius: radVal });
-                    }} 
-                    className="w-full accent-blue-500 cursor-pointer" 
-                  />
-                </div>
-              )}
+              <PulleyWheelCard node={selectedNode} />
 
-              {selectedNode.isPulleyRope && (
-                <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-3">
-                  <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 mb-1 flex items-center gap-1.5">
-                    <span>🧵 Rope Properties</span>
-                  </h3>
-
-                  <p className="text-[10px] text-slate-400 leading-snug -mt-1">
-                    Connect two bodies directly, or optionally route through a Pulley Wheel for an Atwood-style coupling.
-                  </p>
-                  
-                  <div className="flex flex-col gap-1">
-                    <label className="text-xs font-semibold text-slate-500 flex justify-between">
-                      Body A <span className="font-normal text-rose-400">required</span>
-                    </label>
-                    <select
-                      value={selectedNode.leftTargetId || ''}
-                      onChange={(e) => updateRopeParams(selectedNode.id, { leftTargetId: e.target.value })}
-                      className="w-full text-xs border border-slate-200 rounded p-1.5 bg-slate-50 font-medium text-slate-700 focus:border-blue-500 outline-none"
-                    >
-                      <option value="">-- Select Body A --</option>
-                      {allJointedNodes.map(n => (
-                        <option key={n.id} value={n.id}>{n.id}</option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <div className="flex flex-col gap-1">
-                    <label className="text-xs font-semibold text-slate-500 flex justify-between">
-                      Body B <span className="font-normal text-rose-400">required</span>
-                    </label>
-                    <select
-                      value={selectedNode.rightTargetId || ''}
-                      onChange={(e) => updateRopeParams(selectedNode.id, { rightTargetId: e.target.value })}
-                      className="w-full text-xs border border-slate-200 rounded p-1.5 bg-slate-50 font-medium text-slate-700 focus:border-blue-500 outline-none"
-                    >
-                      <option value="">-- Select Body B --</option>
-                      {allJointedNodes.map(n => (
-                        <option key={n.id} value={n.id}>{n.id}</option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <div className="flex flex-col gap-1">
-                    <label className="text-xs font-semibold text-slate-500 flex justify-between">
-                      Pulley Wheel <span className="font-normal text-slate-400">optional</span>
-                    </label>
-                    <select
-                      value={selectedNode.pulleyWheelId || ''}
-                      onChange={(e) => updateRopeParams(selectedNode.id, { pulleyWheelId: e.target.value })}
-                      className="w-full text-xs border border-slate-200 rounded p-1.5 bg-slate-50 font-medium text-slate-700 focus:border-blue-500 outline-none"
-                    >
-                      <option value="">-- None (direct coupling) --</option>
-                      {allPulleyWheels.map(wheel => (
-                        <option key={wheel.id} value={wheel.id}>
-                          {wheel.id} (r={( wheel.pulleyRadius || 0.4).toFixed(2)}m)
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                </div>
-              )}
+              <RopeCard node={selectedNode} />
 
               {/* OpenSCAD Editor Card */}
               {selectedNode.scad !== undefined && (
