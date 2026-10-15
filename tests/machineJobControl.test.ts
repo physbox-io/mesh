@@ -49,6 +49,8 @@ function attachFakeGrbl() {
     async close() {},
     async writeRealtime(byte: number) {
       sent.push(String.fromCharCode(byte));
+      // A soft reset: the board reboots and says so, and the manager waits for that.
+      if (byte === 0x18) setTimeout(() => mgr.handleIncomingLine("Grbl 1.1h ['$' for help]"), 0);
       if (byte === 0x3f && board.report) {
         const report = board.report;
         setTimeout(() => mgr.handleIncomingLine(report), 0);

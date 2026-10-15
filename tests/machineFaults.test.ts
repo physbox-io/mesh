@@ -37,7 +37,10 @@ function attachFakeGrbl(options: { ack?: boolean } = {}) {
     label: 'Fake GRBL',
     async open() {},
     async close() {},
-    async writeRealtime() {},
+    // A soft reset: the board reboots and says so, and the manager waits for that.
+    async writeRealtime(byte: number) {
+      if (byte === 0x18) setTimeout(() => mgr.handleIncomingLine("Grbl 1.1h ['$' for help]"), 0);
+    },
     async writeLine(line: string) {
       const trimmed = line.trim();
       if (!trimmed) return;

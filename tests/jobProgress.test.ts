@@ -198,6 +198,8 @@ function attachPlannerGrbl({ reportBf }: { reportBf: boolean }) {
     async close() {},
     async writeRealtime(byte: number) {
       if (byte === 0x3f) setTimeout(report, 0);
+      // A soft reset: the board reboots and says so, and the manager waits for that.
+      if (byte === 0x18) setTimeout(() => mgr.handleIncomingLine("Grbl 1.1h ['$' for help]"), 0);
     },
     async writeLine(line: string) {
       if (line.trim()) rx.push(line.trim());
