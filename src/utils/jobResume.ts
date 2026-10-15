@@ -204,7 +204,8 @@ export interface ResumeOptions {
   /** Extra height above the program's own retract to traverse at. */
   extraClearance?: number;
   /**
-   * The tool's actual live work Z, if known. `state.safeZ` is the *program's*
+   * The tool's actual live work Z in millimetres, as GRBL reports it, if
+   * known. `state.safeZ` is the *program's*
    * retract height, which is only clear of the job when the Z datum in force
    * now is the one the program was cut against — against a stale or
    * different one it can be below the tool already, and the retract this
@@ -226,7 +227,22 @@ export interface ResumeOptions {
    * every reason to distrust, in service of a move the program never makes.
    */
   arrivingAtPause?: boolean;
+  /**
+   * Whether the machine is a laser, as the caller knows it. Left out, it is
+   * guessed from the program never commanding a Z - which a laser job with a
+   * focus move (`G0 Z0`) defeats, and a laser taken for a router has its beam
+   * lit, and dwelt on, before the traverse to the restart point.
+   */
+  isLaser?: boolean;
 }
+
+/**
+ * The lowest a router's resume traverses at, in millimetres above the work
+ * zero. A program whose every Z is at or below the stock top (an engraving
+ * that never retracts above `Z0`) gives a `safeZ` of 0 or less, and a rapid
+ * there drags the tool across the surface.
+ */
+export const MIN_RESUME_CLEARANCE_MM = 2;
 
 /**
  * The lines that have to run before the stream restarts.
@@ -239,23 +255,25 @@ export interface ResumeOptions {
  * the restart point. Getting that the wrong way round scores a line straight
  * across the work on the way to picking up where it left off.
  *
- * Which one a program is comes from whether it ever commands a Z: a laser job
- * has no Z axis to command, and nothing else in a program says so as reliably.
+ * Which one it is comes from the caller (`isLaser`), who knows the machine.
+ * Without that it is guessed from whether the program ever commands a Z.
  */
 export function buildResumePreamble(
   state: ModalState,
   fromLine: number,
   options?: ResumeOptions
 ): string[] {
+  // The defaults are millimetres; an inch program reads every number in inches.
+  const mmPerUnit = state.units === 'G20' ? 25.4 : 1;
   const opt = {
-    plungeFeed: options?.plungeFeed ?? 300,
+    plungeFeed: options?.plungeFeed ?? 300 / mmPerUnit,
     spindleWarmupSeconds: options?.spindleWarmupSeconds ?? 2,
     extraClearance: options?.extraClearance ?? 0,
   };
 
   const num = (v: number) => v.toFixed(3);
   const lines: string[] = [];
-  const isLaser = state.position.z === null && state.safeZ === null;
+  const isLaser = options?.isLaser ?? (state.position.z === null && state.safeZ === null);
   const arrivingAtPause = options?.arrivingAtPause ?? false;
 
   lines.push(`; --- RESUME AT LINE ${fromLine} ---`);
@@ -270,8 +288,11 @@ export function buildResumePreamble(
 
   if (!isLaser) {
     // Up and clear before anything moves sideways.
-    const wantedZ = (state.safeZ ?? 5) + opt.extraClearance;
-    const clearZ = options?.currentZ !== undefined ? Math.max(wantedZ, options.currentZ) : wantedZ;
+    const floorZ = MIN_RESUME_CLEARANCE_MM / mmPerUnit;
+    const wantedZ = Math.max(state.safeZ ?? 5 / mmPerUnit, floorZ) + opt.extraClearance;
+    const clearZ = options?.currentZ !== undefined
+      ? Math.max(wantedZ, options.currentZ / mmPerUnit)
+      : wantedZ;
     lines.push(`G0 Z${num(clearZ)} ; retract to the program's own clear height`);
 
     // Nothing spins up for a pause: the program's own tool-change handling
@@ -370,7 +391,10 @@ export function planResume(
  *
  * The position, though, is not a guess: the machine is stationary and reporting
  * where it is. So the executed line is found by replaying the program and
- * taking the line whose end point the tool is actually standing on.
+ * taking the line whose path the tool is standing on - the segment from where
+ * the line starts to where it ends, not its end point alone. Halfway along a
+ * 200 mm cut both ends are 100 mm away, and a short move forty lines on whose
+ * end happened to lie 5 mm off would win, skipping those forty lines.
  *
  * Only a window behind the sent line is considered. The whole program is not a
  * candidate set — a raster crosses its own neighbours constantly and there are
@@ -397,25 +421,42 @@ export function locateExecutedLine(
   let bestDist = Infinity;
   const state = scanModalState(lines, lo);
 
+  // A program that never mentions an axis says nothing about it - a laser job
+  // commands no Z - so an absent axis is not evidence either way.
+  const axis = (from: number | null, to: number | null, here: number) =>
+    to === null ? null : { a: (from ?? to) - here, d: to - (from ?? to) };
+
   for (let i = lo; i <= hi; i++) {
-    const p = state.position;
-    // A program that never mentions an axis says nothing about it — a laser job
-    // commands no Z — so an absent axis is not evidence either way.
-    const dx = p.x === null ? 0 : p.x - at.x;
-    const dy = p.y === null ? 0 : p.y - at.y;
-    const dz = p.z === null ? 0 : p.z - at.z;
-    const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    const start = state.position;
+    if (i < hi) stepModalLine(state, lines[i]);
+    const end = state.position;
+
+    // Line i runs from `start` to `end`; at i === hi nothing after it was sent,
+    // so only its start point is a candidate.
+    const parts = i < hi
+      ? [axis(start.x, end.x, at.x), axis(start.y, end.y, at.y), axis(start.z, end.z, at.z)]
+      : [axis(null, start.x, at.x), axis(null, start.y, at.y), axis(null, start.z, at.z)];
+    // Before the program has named any axis, the tool is nowhere in it, and a
+    // distance of nothing would make the header the best match for every park.
+    if (parts.every((p) => p === null)) continue;
+    let dd = 0;
+    let ad = 0;
+    for (const p of parts) if (p) { dd += p.d * p.d; ad += p.a * p.d; }
+    const t = dd > 1e-12 ? Math.max(0, Math.min(1, -ad / dd)) : 0;
+    let dist2 = 0;
+    for (const p of parts) if (p) dist2 += (p.a + t * p.d) ** 2;
+    const dist = Math.sqrt(dist2);
+
+    // Standing at a line's end is having finished it: the line to come back to
+    // is the next one. Anywhere short of the end, it is this one, again.
+    const candidate = i < hi && t >= 1 - 1e-9 ? i + 1 : i;
 
     // Strictly less than, so the earliest of several equally good candidates
     // wins and the rewind errs backwards.
     if (dist < bestDist - 1e-9) {
       bestDist = dist;
-      best = i;
+      best = candidate;
       if (dist <= toleranceMm) break;
-    }
-
-    if (i < hi) {
-      stepModalLine(state, lines[i]);
     }
   }
 

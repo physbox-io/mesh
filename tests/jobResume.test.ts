@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { scanModalState, buildResumePreamble, planResume } from '../src/utils/jobResume';
+import { scanModalState, buildResumePreamble, planResume, locateExecutedLine } from '../src/utils/jobResume';
 import { prepareJobLines } from '../src/utils/webSerialManager';
 import { generateLaserCutGcode, DEFAULT_GCODE_OPTIONS } from '../src/utils/gcodeExporter';
 import type { LaserPanel, Point2D } from '../src/utils/laserCutExporter';
@@ -140,6 +140,52 @@ describe('jobResume', () => {
 
     it('commands no Z at all', () => {
       expect(planResume(laser, 7).preamble.join('\n')).not.toMatch(/\bZ-?\d/);
+    });
+  });
+
+  describe('the preamble on the edge cases the audit found', () => {
+    it('traverses above the stock top even when the program never goes above Z0', () => {
+      const flat = ['G21', 'G90', 'G0 Z0', 'M3 S10000', 'G0 X10 Y10', 'G1 Z-0.500 F100', 'G1 X20'];
+      const joined = planResume(flat, 7).preamble.join('\n');
+      expect(joined).toContain('G0 Z2.000');
+      expect(joined).not.toMatch(/G0 Z0\.000/);
+    });
+
+    it('treats a laser job with a focus move as a laser when told it is one', () => {
+      const focused = ['G21', 'G90', 'G0 Z0', 'G0 X10 Y10', 'M4 S800', 'G1 X50 F1200', 'G1 Y40', 'M5'];
+      const body = planResume(focused, 7, { isLaser: true }).preamble.filter((l) => !l.startsWith(';'));
+      const move = body.findIndex((l) => /^G0 X50\.000 Y40\.000/.test(l));
+      const beam = body.findIndex((l) => /^M4 S800/.test(l));
+      expect(move).toBeGreaterThanOrEqual(0);
+      expect(beam).toBeGreaterThan(move);
+      expect(body.join('\n')).not.toMatch(/G4|\bZ-?\d/);
+    });
+
+    it('reads the live Z as millimetres in an inch program', () => {
+      const inch = ['G20', 'G90', 'G0 Z0.2', 'M3 S10000', 'G0 X1 Y1', 'G1 Z-0.1 F10', 'G1 X2'];
+      const joined = planResume(inch, 7, { currentZ: 25.4 }).preamble.join('\n');
+      // One inch up, not 25.4 inches into the top of travel.
+      expect(joined).toContain('G0 Z1.000');
+      // And the default plunge is 300 mm/min, not 300 in/min.
+      expect(joined).toMatch(/G1 Z-0\.100 F12\b/);
+    });
+  });
+
+  describe('finding the line a stopped machine was on', () => {
+    it('finds the long cut it stopped halfway along, not a nearby end point further on', () => {
+      const raster = [
+        'G21', 'G90', 'G0 X0 Y0',
+        'G1 X200 Y0 F600', // line 3: stopped at X100 on this one
+        'G1 X200 Y5',
+        'G1 X100 Y5', // ends 5 mm from where the tool stands
+        ...Array.from({ length: 40 }, (_, i) => `G1 X${100 - i} Y5`),
+      ];
+      expect(locateExecutedLine(raster, { x: 100, y: 0, z: 0 }, raster.length)).toBe(3);
+    });
+
+    it('comes back to the next line when standing on a line\'s end', () => {
+      const lines = ['G21', 'G90', 'G0 X0 Y0', 'G1 X10 F600', 'G1 X20', 'G1 X30'];
+      expect(locateExecutedLine(lines, { x: 10, y: 0, z: 0 }, lines.length)).toBe(4);
     });
   });
 
