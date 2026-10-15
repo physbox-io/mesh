@@ -1,17 +1,15 @@
-import { useCallback, useState, type ReactNode } from 'react';
+import { useCallback, useState } from 'react';
 import { SlidersHorizontal, Trash2, X } from 'lucide-react';
 import { useStore } from '../../store/useStore';
 import { usePanels } from '../../store/panelsStore';
 import { useSelectedNode } from '../../hooks/useSelectedNode';
-import type { SceneNode } from '../../types/scene';
 import { InspectorCards } from './InspectorCards';
 
 /**
  * The properties inspector on the right: the drawer, its resize handle and its
- * header, the cards and the Delete button. `children` renders the code editor
- * cards, which App still owns, between the cards and Delete.
+ * header, the cards and the Delete button.
  */
-export function InspectorPanel({ children }: { children: (node: SceneNode) => ReactNode }) {
+export function InspectorPanel() {
   const selectedNode = useSelectedNode();
   const isPlaying = useStore((s) => s.isPlaying);
   const setSelectedNodeId = useStore((s) => s.setSelectedNodeId);
@@ -100,7 +98,6 @@ export function InspectorPanel({ children }: { children: (node: SceneNode) => Re
 
           <div className="flex flex-col gap-4">
             <InspectorCards node={selectedNode} />
-            {children(selectedNode)}
 
             {/* Delete Component Button */}
             <button

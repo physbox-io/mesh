@@ -19,6 +19,8 @@ import { PositionCard } from './PositionCard';
 import { PulleyWheelCard } from './PulleyWheelCard';
 import { ResizeCard } from './ResizeCard';
 import { RopeCard } from './RopeCard';
+import { ScadEditorCard } from './ScadEditorCard';
+import { ScriptEditorCard } from './ScriptEditorCard';
 
 /**
  * Every inspector card for the selected body, top to bottom. Each one decides
@@ -66,6 +68,10 @@ export function InspectorCards({ node }: { node: SceneNode }) {
       <PulleyWheelCard node={node} />
 
       <RopeCard node={node} />
+
+      <ScadEditorCard node={node} />
+
+      <ScriptEditorCard node={node} />
     </>
   );
 }

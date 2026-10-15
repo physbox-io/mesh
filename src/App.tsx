@@ -22,8 +22,8 @@ import { DocsModal } from './components/docs/DocsModal';
 import * as THREE from 'three';
 import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js';
 import { exportThreeMf, type ThreeMfMesh } from './utils/threeMfExporter';
-import { loadCompiler, compileSCAD, isCompilerReady, setScadCompileListener } from './utils/openscad';
-import { useCsgAutoCompile, compileCsgNodes } from './hooks/useCsgCompile';
+import { loadCompiler, setScadCompileListener } from './utils/openscad';
+import { useCsgAutoCompile } from './hooks/useCsgCompile';
 import { PRESETS } from './presets/presetScenes';
 import { makePresetNoteCard, type NoteCard } from './utils/noteCards';
 import { physicsGlobals, type CopilotMessage } from './physicsGlobals';
@@ -45,6 +45,7 @@ import { PulleyRopeMarkers } from './components/scene/PulleyRopes';
 import { SliderValue } from './components/SliderValue';
 import { RangeInput } from './components/RangeInput';
 import { ExportScaleModal } from './components/ExportScaleModal';
+import { downloadBlob } from './utils/downloadBlob';
 import { ConfirmModal } from './components/ConfirmModal';
 import { CompileErrorBanner } from './components/CompileErrorBanner';
 import { VoltLinkBanner } from './components/VoltLinkBanner';
@@ -94,7 +95,6 @@ import { pushAppParameter } from './utils/cloudSync';
 import { useEscapeToClose } from './hooks/useEscapeToClose';
 import { getSyncedSceneGraph } from './utils/mujocoSync';
 import { pressHistoryKey } from './utils/historyKeys';
-import { generateScadForNode, parseScadVariables, replaceVarInCode } from './utils/scadSource';
 import { NoteCardOverlay } from './components/NoteCardOverlay';
 import { AxisLegendDrawer } from './components/AxisLegendDrawer';
 import { DropHandler } from './components/DropHandler';
@@ -178,9 +178,6 @@ function App() {
   const closeDocs = usePanels((s) => s.closeDocs);
   useEscapeToClose(isDocsOpen, closeDocs);
   const [showAICopilot, setShowAICopilot] = useState(false);
-  const [scriptText, setScriptText] = useState('');
-  const [scriptError, setScriptError] = useState<string | null>(null);
-  const [showApiRef, setShowApiRef] = useState(false);
   const isLeftSidebarOpen = usePanels((s) => s.isLeftSidebarOpen);
   const setIsLeftSidebarOpen = usePanels((s) => s.setLeftSidebarOpen);
   const isPropertiesOpen = usePanels((s) => s.isPropertiesOpen);
@@ -235,10 +232,6 @@ function App() {
   });
   const [copilotMessages, setCopilotMessages] = useState<CopilotMessage[]>([]);
   const [editingCardId, setEditingCardId] = useState<string | null>(null);
-  const [scadText, setScadText] = useState('');
-  const [scadError, setScadError] = useState<string | null>(null);
-  const [isScadCompiling, setIsScadCompiling] = useState(false);
-  const [isCompilerLoading, setIsCompilerLoading] = useState(false);
   const axisCanvasRef = useRef<HTMLCanvasElement>(null);
 
   const [settingsGeminiKey, setSettingsGeminiKey] = useState(() => localStorage.getItem('gemini_api_key') || '');
@@ -343,65 +336,6 @@ function App() {
     }
   };
 
-  const scadVars = useMemo(() => parseScadVariables(scadText), [scadText]);
-  const compileTimeoutRef = useRef<number | null>(null);
-
-  // OpenSCAD Slider Debouncing State
-  const [slidingValues, setSlidingValues] = useState<Record<string, number>>({});
-
-  const scadTextRef = useRef(scadText);
-  useEffect(() => {
-    scadTextRef.current = scadText;
-  }, [scadText]);
-
-  const slidingValuesRef = useRef(slidingValues);
-  useEffect(() => {
-    slidingValuesRef.current = slidingValues;
-  }, [slidingValues]);
-
-  const updateCodeTimeoutRef = useRef<number | null>(null);
-
-  const debouncedUpdateCode = useCallback(() => {
-    if (updateCodeTimeoutRef.current) {
-      window.clearTimeout(updateCodeTimeoutRef.current);
-    }
-    updateCodeTimeoutRef.current = window.setTimeout(async () => {
-      let updated = scadTextRef.current;
-      for (const [name, value] of Object.entries(slidingValuesRef.current)) {
-        updated = replaceVarInCode(updated, name, value);
-      }
-      setScadText(updated);
-
-      const selectedNodeId = useStore.getState().selectedNodeId;
-      if (!selectedNodeId) return;
-      setIsScadCompiling(true);
-      setScadError(null);
-      try {
-        const compiled = await compileSCAD(updated);
-        useStore.getState().updateNodeScad(selectedNodeId, updated, compiled);
-      } catch (e) {
-        console.error('OpenSCAD Auto-Compilation Error:', e);
-        setScadError((e as Error).message || 'Auto-compilation failed.');
-      } finally {
-        setIsScadCompiling(false);
-        setSlidingValues({});
-      }
-    }, 300);
-  }, []);
-
-  useEffect(() => {
-    return () => {
-      /* eslint-disable react-hooks/exhaustive-deps */
-      if (compileTimeoutRef.current) {
-        window.clearTimeout(compileTimeoutRef.current);
-      }
-      if (updateCodeTimeoutRef.current) {
-        window.clearTimeout(updateCodeTimeoutRef.current);
-      }
-      /* eslint-enable react-hooks/exhaustive-deps */
-    };
-  }, []);
-
   // Expose noteCards and copilotMessages state to MCP bridge and noteCard manager
   useEffect(() => {
     physicsGlobals._physics_getNoteCards = () => noteCards;
@@ -428,7 +362,6 @@ function App() {
     sceneGraph, selectedNodeId, setSelectedNodeId,
     addComponent, loadPreset, openPatternGenerator, updateScene,
     resetSimulation,
-    updateNodeScript,
     sculptNodeId,
     latticeNodeId,
     extraSelectedIds,
@@ -447,7 +380,6 @@ function App() {
     sceneGraph: s.sceneGraph, selectedNodeId: s.selectedNodeId, setSelectedNodeId: s.setSelectedNodeId,
     addComponent: s.addComponent, loadPreset: s.loadPreset, openPatternGenerator: s.openPatternGenerator, updateScene: s.updateScene,
     resetSimulation: s.resetSimulation,
-    updateNodeScript: s.updateNodeScript,
     sculptNodeId: s.sculptNodeId,
     latticeNodeId: s.latticeNodeId,
     extraSelectedIds: s.extraSelectedIds,
@@ -1225,22 +1157,13 @@ function App() {
     }
   }, [sceneGraph, model, data, mujoco, noteCards, copilotMessages, exportBaseName, showNotice]);
 
-  const downloadBlob = useCallback((blob: Blob, filename: string) => {
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    a.click();
-    URL.revokeObjectURL(url);
-  }, []);
-
   const exportStl = useCallback(() => {
     withExportGroup('Export STL', (exportGroup) => {
       const exporter = new STLExporter();
       const result = exporter.parse(exportGroup, { binary: true }) as DataView;
       downloadBlob(new Blob([result.buffer as ArrayBuffer], { type: 'application/octet-stream' }), `${exportBaseName()}.stl`);
     });
-  }, [withExportGroup, exportBaseName, downloadBlob]);
+  }, [withExportGroup, exportBaseName]);
 
   /**
    * The same model, in the format that can carry what it looks like.
@@ -1286,7 +1209,7 @@ function App() {
           slots.map(p => `${p.extruder}: ${p.hex} (${p.triangles} triangles)`).join(', '));
       }
     });
-  }, [withExportGroup, exportBaseName, downloadBlob, showNotice]);
+  }, [withExportGroup, exportBaseName, showNotice]);
 
   const export3mf = useCallback(() => {
     // Sections made by Split for Print know which way up they print. When
@@ -1339,7 +1262,7 @@ function App() {
     }
 
     exportWholeScene3mf();
-  }, [exportWholeScene3mf, exportBaseName, downloadBlob]);
+  }, [exportWholeScene3mf, exportBaseName]);
 
   /*
    * Opens a scene file, from the Import button or dropped on the viewport.
@@ -1417,65 +1340,6 @@ function App() {
   }, [setSelectedNodeId]);
 
   const selectedNode = useSelectedNode();
-
-  // Sync selected node's script and scad code into local text state
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      if (selectedNode) {
-        setScriptText(selectedNode.script || '');
-        setScriptError(null);
-        
-        let currentScad = selectedNode.scad;
-        if (currentScad === undefined && (selectedNode.id.includes('openscad') || selectedNode.id.includes('scad'))) {
-          currentScad = generateScadForNode(selectedNode);
-          // Persist the generated scad field to the node in store
-          useStore.getState().updateNode(selectedNode.id, { scad: currentScad });
-        }
-        
-        setScadText(currentScad || '');
-        setScadError(null);
-      } else {
-        setScriptText('');
-        setScriptError(null);
-        setScadText('');
-        setScadError(null);
-      }
-    }, 0);
-    return () => clearTimeout(timer);
-  }, [selectedNodeId, selectedNode]);
-
-  const handleSaveScript = useCallback(() => {
-    if (!selectedNode) return;
-    try {
-      if (scriptText.trim() !== '') {
-        // Syntax compilation check
-        new Function('api', scriptText);
-      }
-      setScriptError(null);
-      updateNodeScript(selectedNode.id, scriptText);
-    } catch (e) {
-      setScriptError((e as Error).message || 'Compilation Error');
-    }
-  }, [selectedNode, scriptText, updateNodeScript]);
-
-  const handleCompileScad = useCallback(async () => {
-    if (!selectedNode) return;
-    setIsScadCompiling(true);
-    setScadError(null);
-    try {
-      const compiled = await compileSCAD(scadText);
-      useStore.getState().updateNodeScad(selectedNode.id, scadText, compiled);
-      // A part with a cut or a rounding is a boolean over this mesh: build it
-      // now rather than leave it to the debounced auto-compiler, which does
-      // not reliably pick up a source change (see compileCsgNodes).
-      if (selectedNode.csgEnabled) await compileCsgNodes();
-    } catch (e) {
-      console.error('OpenSCAD Compilation Error:', e);
-      setScadError((e as Error).message || 'Compilation failed.');
-    } finally {
-      setIsScadCompiling(false);
-    }
-  }, [selectedNode, scadText]);
 
   // A part dropped on the canvas goes under the selected body, like a clicked
   // one. Read at drop time rather than bound to the selection, so the drop
@@ -2590,401 +2454,7 @@ function App() {
           ))}
         </main>
 
-        <InspectorPanel>
-          {(selectedNode) => (
-            <>
-              {/* OpenSCAD Editor Card */}
-              {selectedNode.scad !== undefined && (
-                <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-2.5">
-                  <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 mb-1 flex items-center justify-between">
-                    <span className="flex items-center gap-1.5 font-semibold text-slate-800">
-                      <Settings className="w-4 h-4 text-violet-500" />
-                      OpenSCAD CAD Code
-                    </span>
-                    <div className="flex items-center gap-1.5">
-                      {isScadCompiling ? (
-                        <span className="flex items-center gap-1 text-[10px] font-semibold text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded-full border border-amber-100 animate-pulse">
-                          Compiling...
-                        </span>
-                      ) : (
-                        <span className="text-[10px] font-medium text-slate-400 bg-slate-50 px-1.5 py-0.5 rounded-full border border-slate-100">
-                          CAD Shape
-                        </span>
-                      )}
-                    </div>
-                  </h3>
-
-                  <p className="text-[10px] text-slate-400 -mt-1 leading-tight">
-                    Write constructive solid geometry code to generate custom physics structures.
-                  </p>
-
-                  {!isCompilerReady() && (
-                    <div className="text-[9px] text-violet-600 font-semibold bg-violet-50 border border-violet-100/60 p-1.5 rounded text-center leading-snug animate-pulse">
-                      🌐 Loading CAD engine in background...
-                    </div>
-                  )}
-
-                  {/* Templates Selector */}
-                  <div className="flex items-center justify-between text-xs text-slate-500 gap-1.5 bg-slate-50 p-1.5 rounded-md border border-slate-100">
-                    <span className="text-[10px] font-medium text-slate-400 uppercase tracking-wider">Templates:</span>
-                    <select
-                      onChange={(e) => {
-                        const templateVal = e.target.value;
-                        if (templateVal === 'hollow_cube') {
-                          setScadText(`// Hollow Cube\nsize = 0.6; // [0.2:0.05:1.2]\nhole_d = 0.75; // [0.3:0.05:1.5]\ndifference() {\n  cube([size, size, size], center=true);\n  sphere(d=hole_d, $fn=24);\n}`);
-                        } else if (templateVal === 'wheel') {
-                          setScadText(`// Wheel with Hole\nheight = 0.15; // [0.05:0.05:0.5]\nouter_r = 0.35; // [0.1:0.05:1.0]\ninner_r = 0.08; // [0.02:0.02:0.5]\ndifference() {\n  cylinder(h=height, r=outer_r, center=true, $fn=30);\n  cylinder(h=height*1.5, r=inner_r, center=true, $fn=16);\n}`);
-                        } else if (templateVal === 'wedge') {
-                          setScadText(`// Wedge with multiple holes\nwidth = 1.0; // [0.5:0.1:2.0]\nheight = 0.5; // [0.2:0.1:1.5]\nthickness = 0.4; // [0.1:0.1:1.0]\nhole_r = 0.08; // [0.02:0.01:0.2]\ndifference() {\n  // Base wedge block\n  linear_extrude(height=thickness, center=true)\n    polygon([[0,0], [width,0], [0,height]]);\n  \n  // Cylindrical holes\n  translate([width*0.2, height*0.2, 0])\n    cylinder(h=thickness*1.5, r=hole_r, center=true, $fn=16);\n  translate([width*0.5, height*0.3, 0])\n    cylinder(h=thickness*1.5, r=hole_r, center=true, $fn=16);\n}`);
-                        } else if (templateVal === 'funnel') {
-                          setScadText(`// Funnel / Bowl\nheight = 0.4; // [0.2:0.05:1.0]\nbase_r = 0.15; // [0.05:0.05:0.5]\ntop_r = 0.4; // [0.2:0.05:1.0]\npassage_r = 0.05; // [0.02:0.01:0.2]\ndifference() {\n  cylinder(h=height, r1=base_r, r2=top_r, center=true, $fn=24);\n  translate([0, 0, height*0.125])\n    cylinder(h=height, r1=base_r*0.66, r2=top_r*0.95, center=true, $fn=24);\n  // vertical passage hole\n  cylinder(h=height*1.5, r=passage_r, center=true, $fn=16);\n}`);
-                        } else if (templateVal === 'clear') {
-                          setScadText('');
-                        }
-                        e.target.value = ''; // Reset selection
-                      }}
-                      className="text-xs bg-white border border-slate-200 rounded px-1.5 py-0.5 text-slate-700 outline-none focus:border-blue-500 cursor-pointer"
-                    >
-                      <option value="">-- Select Template --</option>
-                      <option value="hollow_cube">Hollow Cube</option>
-                      <option value="wheel">Wheel with Hole</option>
-                      <option value="wedge">Wedge with Holes</option>
-                      <option value="funnel">Funnel / Bowl</option>
-                      <option value="clear">Clear Editor</option>
-                    </select>
-                  </div>
-
-                  {/* Procedural parameters sliders */}
-                  {scadVars.length > 0 && (
-                    <div className="flex flex-col gap-2 p-2 bg-slate-50 dark:bg-slate-900/50 rounded-lg border border-slate-100 dark:border-slate-800 mb-1">
-                      <span className="text-[9px] font-bold text-slate-500 uppercase tracking-wider">
-                        Procedural Parameters
-                      </span>
-                      <div className="grid grid-cols-1 gap-2">
-                        {scadVars.map((v) => (
-                          <div key={v.name} className="flex flex-col gap-1">
-                            <div className="flex justify-between items-center text-xs">
-                              <span className="font-mono text-slate-700 dark:text-slate-300 font-medium">{v.name}</span>
-                              <span className="font-mono text-violet-600 dark:text-violet-400 font-bold bg-violet-50 dark:bg-violet-950/40 px-1.5 py-0.5 rounded border border-violet-100 dark:border-violet-900/50">
-                                {Number((slidingValues[v.name] ?? v.value).toPrecision(4))}
-                              </span>
-                            </div>
-                            <div className="flex items-center gap-2">
-                              <span className="text-[9px] text-slate-400 font-mono w-8 text-right">{Number(v.min.toPrecision(3))}</span>
-                              <RangeInput
-                                min={v.min}
-                                max={v.max}
-                                step={v.step}
-                                value={slidingValues[v.name] ?? v.value}
-                                onChange={(next) => {
-                                  // Only the float noise off the step comes off: two decimals would turn
-                                  // a 5 mm value, written in metres, into 10 mm.
-                                  const val = Number(next.toPrecision(10));
-                                  setSlidingValues(prev => ({ ...prev, [v.name]: val }));
-                                  debouncedUpdateCode();
-                                }}
-                                className="flex-1 h-1 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-violet-600"
-                              />
-                              <span className="text-[9px] text-slate-400 font-mono w-8">{Number(v.max.toPrecision(3))}</span>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Text Area Code Editor */}
-                  <div className="relative">
-                    <textarea
-                      value={scadText}
-                      onChange={(e) => setScadText(e.target.value)}
-                      placeholder="// Write OpenSCAD here... e.g. cube(10);"
-                      className="w-full h-44 font-mono text-[11px] leading-relaxed p-2.5 bg-slate-950 text-violet-300 rounded-lg border border-slate-800 focus:outline-none focus:ring-2 focus:ring-violet-500 focus:border-transparent resize-y shadow-inner"
-                      spellCheck={false}
-                    />
-                    <div className="absolute right-2.5 bottom-2.5 text-[8px] font-mono text-slate-600 bg-slate-900/50 px-1 rounded pointer-events-none select-none border border-slate-800">
-                      SCAD
-                    </div>
-                  </div>
-
-                  {/* Compilation Error Display */}
-                  {scadError && (
-                    <div className="p-2.5 bg-amber-50 border border-amber-200 text-amber-800 rounded-lg text-[10px] flex gap-1.5 items-start leading-tight">
-                      <span className="font-bold shrink-0">⚠️ Error:</span>
-                      <span className="font-mono text-slate-700 break-all">{scadError}</span>
-                    </div>
-                  )}
-
-                  {/* Action Buttons Row */}
-                  <div className="flex gap-2 items-center justify-between">
-                    <button
-                      onClick={async () => {
-                        setIsCompilerLoading(true);
-                        try {
-                          const compiled = await compileSCAD(scadText);
-                          if (!compiled.vertices || compiled.vertices.length === 0) {
-                            throw new Error('Compilation produced no vertices.');
-                          }
-
-                          const geo = new THREE.BufferGeometry();
-                          geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(compiled.vertices), 3));
-                          geo.setIndex(new THREE.BufferAttribute(new Uint32Array(compiled.faces), 1));
-                          geo.computeVertexNormals();
-
-                          const mesh = new THREE.Mesh(geo);
-                          const bbox = new THREE.Box3().setFromObject(mesh);
-                          const size = bbox.getSize(new THREE.Vector3());
-                          const longestSide = Math.max(size.x, size.y, size.z);
-
-                          let defaultPrompt = '150';
-                          if (longestSide > 0) {
-                            defaultPrompt = Math.round(longestSide * 1000).toString();
-                          }
-
-                          const filename = `${selectedNode.name || 'openscad_shape'}.stl`;
-                          setExportScaleModal({
-                            title: 'Export OpenSCAD STL',
-                            value: defaultPrompt,
-                            onConfirm: (targetMm) => {
-                              const scale = targetMm / longestSide;
-                              const center = bbox.getCenter(new THREE.Vector3());
-                              const transform = new THREE.Matrix4()
-                                .makeRotationX(Math.PI / 2)
-                                .multiply(new THREE.Matrix4().makeScale(scale, scale, scale))
-                                .multiply(new THREE.Matrix4().makeTranslation(-center.x, -center.y, -center.z));
-
-                              geo.applyMatrix4(transform);
-
-                              const exportGroup = new THREE.Group();
-                              exportGroup.add(mesh);
-
-                              const exporter = new STLExporter();
-                              const result = exporter.parse(exportGroup, { binary: true }) as DataView;
-                              const blob = new Blob([result.buffer as ArrayBuffer], { type: 'application/octet-stream' });
-                              downloadBlob(blob, filename);
-                            },
-                          });
-                        } catch (e) {
-                          showNotice('OpenSCAD export failed', 'Failed to export OpenSCAD STL: ' + (e as Error).message, 'red');
-                        } finally {
-                          setIsCompilerLoading(false);
-                        }
-                      }}
-                      disabled={isCompilerLoading || isScadCompiling}
-                      className="text-[10px] font-semibold text-blue-600 hover:text-blue-700 disabled:text-slate-400 transition-colors flex items-center gap-1 cursor-pointer"
-                    >
-                      <Printer className="w-3.5 h-3.5" />
-                      Export STL (3D Print)
-                    </button>
-
-                    <button
-                      onClick={handleCompileScad}
-                      disabled={isScadCompiling || isCompilerLoading}
-                      className="px-3 py-1.5 bg-violet-600 hover:bg-violet-700 disabled:bg-slate-400 active:bg-violet-800 text-white rounded-lg text-[11px] font-semibold shadow transition-colors flex items-center gap-1 cursor-pointer"
-                    >
-                      <Zap className="w-3.5 h-3.5" />
-                      {isScadCompiling ? 'Compiling...' : 'Compile & Update'}
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {/* Component Control Script Card */}
-              <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-2.5">
-                <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 mb-1 flex items-center justify-between">
-                  <span className="flex items-center gap-1.5 font-semibold text-slate-800">
-                    <Code className="w-4 h-4 text-blue-500" />
-                    Component Script
-                    <button
-                      type="button"
-                      onClick={() => openDocs('tutorial')}
-                      className="ml-0.5 flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-semibold text-blue-600 bg-blue-50 border border-blue-200 hover:bg-blue-100 hover:border-blue-300 transition-colors cursor-pointer"
-                      title="Open the scripting tutorial"
-                    >
-                      <Info className="w-3.5 h-3.5" />
-                      Tutorial
-                    </button>
-                  </span>
-                  <div className="flex items-center gap-1.5">
-                    {selectedNode.script ? (
-                      <span className="flex items-center gap-1 text-[10px] font-semibold text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded-full border border-emerald-100 animate-pulse">
-                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-                        Active
-                      </span>
-                    ) : (
-                      <span className="text-[10px] font-medium text-slate-400 bg-slate-50 px-1.5 py-0.5 rounded-full border border-slate-100">
-                        Disabled
-                      </span>
-                    )}
-                  </div>
-                </h3>
-
-                <p className="text-[10px] text-slate-400 -mt-1 leading-tight">
-                  Write custom real-time JavaScript to control this component at 1000Hz.
-                </p>
-
-                {/* Templates Selector */}
-                <div className="flex items-center justify-between text-xs text-slate-500 gap-1.5 bg-slate-50 p-1.5 rounded-md border border-slate-100">
-                  <span className="text-[10px] font-medium text-slate-400 uppercase tracking-wider">Templates:</span>
-                  <select
-                    onChange={(e) => {
-                      const templateVal = e.target.value;
-                      if (templateVal === 'lqr') {
-                        setScriptText(`// Cartpole LQR Balancing Controller
-const x = api.getJointPosition('cart_slide');
-const v = api.getJointVelocity('cart_slide');
-const theta = api.getJointPosition('pole_hinge');
-const omega = api.getJointVelocity('pole_hinge');
-
-// State-feedback LQR controller gains
-const kx = 22.0;      // Cart position gain
-const kv = 15.0;      // Cart velocity damping
-const kTheta = 80.0;  // Pole angle gain (robust tracking)
-const kOmega = 20.0;  // Pole angular velocity damping
-
-// Compute the balancing force
-const force = (kx * x) + (kv * v) + (kTheta * theta) + (kOmega * omega);
-
-// Apply force directly to the cart slide joint
-api.applyJointForce('cart_slide', force);
-`);
-                      } else if (templateVal === 'sine') {
-                        setScriptText(`// Sinusoidal Driver
-const forceX = Math.sin(api.getTime() * 5.0) * 8.0;
-api.applyForce([forceX, 0, 0]);
-`);
-                      } else if (templateVal === 'spring') {
-                        setScriptText(`// PD Harmonic Spring / Return-to-Center
-const pos = api.getPosition();
-const dist = 0.0 - pos[0];
-const vel = api.getVelocity()[0];
-
-// PD coefficients
-const kp = 25.0; // Spring constant
-const kd = 5.0;  // Damping
-
-const force = (kp * dist) - (kd * vel);
-api.applyForce([force, 0, 0]);
-`);
-                      } else if (templateVal === 'clear') {
-                        setScriptText('');
-                      }
-                      e.target.value = ''; // Reset selection
-                    }}
-                    className="text-xs bg-white border border-slate-200 rounded px-1.5 py-0.5 text-slate-700 outline-none focus:border-blue-500 cursor-pointer"
-                  >
-                    <option value="">-- Select Template --</option>
-                    <option value="lqr">LQR Cartpole Balancer</option>
-                    <option value="sine">Sinusoidal Driver</option>
-                    <option value="spring">PD Harmonic Spring</option>
-                    <option value="clear">Clear Script</option>
-                  </select>
-                </div>
-
-                {/* Text Area Code Editor */}
-                <div className="relative">
-                  <textarea
-                    value={scriptText}
-                    onChange={(e) => setScriptText(e.target.value)}
-                    placeholder="// Write control logic here... e.g. api.applyForce([10, 0, 0])"
-                    className="w-full h-40 font-mono text-[11px] leading-relaxed p-2.5 bg-slate-950 text-emerald-400 rounded-lg border border-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-y shadow-inner"
-                    spellCheck={false}
-                  />
-                  <div className="absolute right-2.5 bottom-2.5 text-[8px] font-mono text-slate-600 bg-slate-900/50 px-1 rounded pointer-events-none select-none border border-slate-800">
-                    JS
-                  </div>
-                </div>
-
-                {/* Compilation Error Display */}
-                {scriptError && (
-                  <div className="p-2.5 bg-amber-50 border border-amber-200 text-amber-800 rounded-lg text-[10px] flex gap-1.5 items-start leading-tight">
-                    <span className="font-bold shrink-0">⚠️ Error:</span>
-                    <span className="font-mono text-slate-700 break-all">{scriptError}</span>
-                  </div>
-                )}
-
-                {/* Control Actions Row */}
-                <div className="flex gap-2 items-center justify-between">
-                  <button
-                    onClick={() => setShowApiRef(!showApiRef)}
-                    className="text-[10px] font-semibold text-blue-600 hover:text-blue-700 transition-colors flex items-center gap-1 cursor-pointer"
-                  >
-                    <Info className="w-3.5 h-3.5" />
-                    {showApiRef ? 'Hide API Reference' : 'Show API Reference'}
-                  </button>
-
-                  <button
-                    onClick={handleSaveScript}
-                    className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white rounded-lg text-[11px] font-semibold shadow transition-colors flex items-center gap-1 cursor-pointer"
-                  >
-                    <Zap className="w-3.5 h-3.5" />
-                    Save & Execute
-                  </button>
-                </div>
-
-                {/* API Reference Collapsible */}
-                {showApiRef && (
-                  <div className="text-[10px] bg-slate-50 border border-slate-150 rounded-lg p-2.5 flex flex-col gap-2 font-sans text-slate-600 max-h-64 overflow-y-auto">
-                    <div className="flex items-center justify-between border-b border-slate-200 pb-1 mb-1">
-                      <span className="font-semibold text-slate-700">Available API Methods</span>
-                      <button
-                        type="button"
-                        onClick={() => openDocs('apiref')}
-                        className="text-blue-600 hover:text-blue-700 font-semibold cursor-pointer"
-                      >
-                        Full reference →
-                      </button>
-                    </div>
-                    <p className="text-slate-400 leading-tight -mt-1">
-                      Runs once per physics step. <code className="font-mono">bodyName?</code> defaults to this component.
-                    </p>
-                    {[
-                      { group: 'Read body state', rows: [
-                        ['api.getPosition(bodyName?)', 'World position [x, y, z] in metres.'],
-                        ['api.getVelocity(bodyName?)', 'Linear velocity [vx, vy, vz] in m/s.'],
-                        ['api.getAngularVelocity(bodyName?)', 'Angular velocity [wx, wy, wz] in rad/s.'],
-                        ['api.getOrientation(bodyName?)', 'Rotation as a flat 9-element matrix.'],
-                        ['api.getMass(bodyName?)', 'Body mass in kg.'],
-                      ]},
-                      { group: 'Read joint state', rows: [
-                        ['api.getJointPosition(jointName)', 'Metres for slide, radians for hinge.'],
-                        ['api.getJointVelocity(jointName)', 'm/s for slide, rad/s for hinge.'],
-                      ]},
-                      { group: 'Apply forces', rows: [
-                        ['api.applyForce(forceVec, bodyName?)', 'World-space force [fx, fy, fz] in newtons.'],
-                        ['api.applyTorque(torqueVec, bodyName?)', 'World-space torque [tx, ty, tz] in N·m.'],
-                        ['api.applyJointForce(jointName, value)', 'Force/torque along the joint axis.'],
-                        ['api.setActuatorControl(name, ctrl)', 'Command a motor actuator.'],
-                      ]},
-                      { group: 'Override state', rows: [
-                        ['api.setPosition(pos, bodyName?)', 'Teleport. [x,y,z] for free, number for hinge/slide.'],
-                        ['api.setVelocity(vel, bodyName?)', 'Force a linear velocity, bypassing the solver.'],
-                        ['api.setAngularVelocity(v, bodyName?)', 'Force an angular velocity.'],
-                      ]},
-                      { group: 'Environment & utilities', rows: [
-                        ['api.getTime()', 'Simulation time in seconds.'],
-                        ['api.isKeyPressed(key)', "True while held: 'space', 'w', 'arrowup'…"],
-                        ['api.getWind()', 'Current wind as [windX, windY].'],
-                        ['api.log(msg)', 'Log to the browser console.'],
-                        ['api.id / api.name', "This component's id and display name."],
-                      ]},
-                    ].map(({ group, rows }) => (
-                      <div key={group} className="flex flex-col gap-1.5">
-                        <div className="text-[9px] font-bold uppercase tracking-wider text-slate-400 mt-1">{group}</div>
-                        {rows.map(([sig, desc]) => (
-                          <div key={sig}>
-                            <code className="font-mono text-blue-600 bg-blue-50 px-1 rounded">{sig}</code>
-                            <p className="text-slate-500 mt-0.5">{desc}</p>
-                          </div>
-                        ))}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </>
-          )}
-        </InspectorPanel>
+        <InspectorPanel />
 
         {showAICopilot && (
           <AICopilotPanel
