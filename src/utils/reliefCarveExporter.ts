@@ -2495,21 +2495,28 @@ export function machineSurface(
       interface RingLoop {
         loop: { x: number; y: number }[];
         ring: (typeof rings)[number];
+        island: boolean;
         children: RingLoop[];
       }
       const roots: RingLoop[] = [];
       let previous: RingLoop[] = [];
       for (const ring of rings) {
         const current: RingLoop[] = [];
-        for (const loop of ring.loops) {
-          if (loop.length < 2) continue;
-          const node: RingLoop = { loop, ring, children: [] };
-          // A ring inset from its region's boundary always lies inside the ring
-          // before it; one that does not is a pocket of its own.
-          const parent = previous.find((p) => insideLoop(loop[0], p.loop));
+        ring.loops.forEach((loop, i) => {
+          if (loop.length < 2) return;
+          const island = ring.islands[i];
+          const node: RingLoop = { loop, ring, island, children: [] };
+          // A ring inset from a pocket's outer boundary lies inside the ring
+          // before it. One round an island grows outward instead, so it lies
+          // round the island ring before it, and is hung under that one: it
+          // must not be cut until the ring between it and the island is. One
+          // with neither is a pocket of its own.
+          const parent = island
+            ? previous.find((p) => p.island && insideLoop(p.loop[0], loop))
+            : previous.find((p) => !p.island && insideLoop(loop[0], p.loop));
           (parent ? parent.children : roots).push(node);
           current.push(node);
-        }
+        });
         previous = current;
       }
 

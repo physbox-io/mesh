@@ -145,4 +145,29 @@ describe('Adaptive roughing engagement', () => {
     });
   }
 
+  it('clears round an island from the island outward', () => {
+    // Each ring round the boss needs the ring between it and the boss cut
+    // first, or it is a slot. They used to be hung under the pocket's outer
+    // rings, which they do not lie inside, so the ring hugging the boss came
+    // last, after everything it was meant to open the way for.
+    const res = generateReliefCarveGcode(island, deep);
+    expect(res.success).toBe(true);
+    const c = deep.stockWidthMm / 2;
+    let prev: { d: number; z: number } | null = null;
+    let seen = 0;
+    for (const seg of res.segments.filter((s) => s.type === 'roughing')) {
+      const pts = seg.points;
+      const cheb = pts.map((p) => Math.max(Math.abs(p.x - c), Math.abs(p.y - c)));
+      // Round the 24 mm boss, inside the frame's 76 mm opening.
+      if (Math.max(...cheb) > 24) continue;
+      if (!(pts.some((p) => p.x < c) && pts.some((p) => p.x > c))) continue;
+      const d = cheb.reduce((a, b) => a + b, 0) / cheb.length;
+      const z = Math.min(...pts.map((p) => p.z));
+      // Only a new, deeper layer starts again from the boss.
+      if (prev && d < prev.d - 0.5) expect(z, `ring at ${d.toFixed(2)} after ${prev.d.toFixed(2)}`).toBeLessThan(prev.z - 1e-3);
+      prev = { d, z };
+      seen++;
+    }
+    expect(seen).toBeGreaterThan(3);
+  });
 });

@@ -39,7 +39,7 @@
 import type { Point2D } from './laserCutExporter';
 import { squaredDistanceTransform } from './heightmapMesh';
 import { isoContours } from './marchingSquares';
-import { orientForClimb } from './polygonOffset';
+import { nestingDepths, orientForClimb } from './polygonOffset';
 
 /** Where the tool's centre is allowed to be, on a grid. */
 export interface ClearingRegion {
@@ -69,6 +69,12 @@ export interface ClearingRing {
   engagement: number;
   /** Closed paths in stock coordinates, mm. */
   loops: Point2D[][];
+  /**
+   * Whether each loop runs round an island: ground the region excludes, such as
+   * a boss standing in a pocket. Such a loop grows outward ring by ring, so the
+   * ground already cleared lies inside it and the stock outside.
+   */
+  islands: boolean[];
 }
 
 /**
@@ -132,26 +138,32 @@ export function clearingRings(
     const loops = isoContours(field, region.cols, region.rows, inset);
     if (loops.length === 0) continue;
 
+    const mm = loops.map((loop) => loop.map((p) => ({
+      x: region.originMm.x + p.x * region.mmPerCell,
+      y: region.originMm.y + p.y * region.mmPerCell,
+    })));
+    // A loop inside an odd number of this ring's other loops bounds an island:
+    // the region lies outside it. Told by nesting rather than by winding, which
+    // marching squares does not promise.
+    const islands = nestingDepths(mm).map((depth) => depth % 2 === 1);
+
     rings.push({
       insetMm: inset,
       engagement: k === 0 ? 1 : steadyEngagement,
       /*
        * Wound so the cutter climb-mills. Rings are cut outermost first, so
-       * every one after the first meets stock on its inner side only — the
-       * ring outside it has already gone — and material inside the loop means
-       * cutting it clockwise. Marching squares has no reason to prefer either
-       * winding, so without this the direction is whichever way the contour
-       * tracer happened to walk, and half the rings shave while the other half
-       * rub. Rubbing is heat in the tool, which on aluminium is what welds
-       * swarf to the flutes.
+       * every one after the first meets stock on one side only — the side away
+       * from the ring before it. Round a pocket's outer boundary that is the
+       * inside of the loop, which means cutting it clockwise; round an island
+       * the ring before lies between it and the island, so the stock is on
+       * the outside and the loop runs anticlockwise. Marching squares has no
+       * reason to prefer either winding, so without this the direction is
+       * whichever way the contour tracer happened to walk, and half the rings
+       * shave while the other half rub. Rubbing is heat in the tool, which on
+       * aluminium is what welds swarf to the flutes.
        */
-      loops: loops.map((loop) => orientForClimb(
-        loop.map((p) => ({
-          x: region.originMm.x + p.x * region.mmPerCell,
-          y: region.originMm.y + p.y * region.mmPerCell,
-        })),
-        'inside'
-      )),
+      loops: mm.map((loop, i) => orientForClimb(loop, islands[i] ? 'outside' : 'inside')),
+      islands,
     });
   }
 

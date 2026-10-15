@@ -6,6 +6,7 @@ import {
   stepdownForEngagement,
   type ClearingRegion,
 } from '../src/utils/adaptiveClearing';
+import { signedArea2 } from '../src/utils/polygonOffset';
 
 /** A rectangular pocket of allowed tool-centre positions inside a larger grid. */
 function region(cols: number, rows: number, x0: number, y0: number, w: number, h: number, mmPerCell = 1): ClearingRegion {
@@ -83,6 +84,29 @@ describe('adaptiveClearing', () => {
 
       const rings = clearingRings(withIsland, 2, 6);
       expect(rings[0].loops.length).toBe(2); // outside and round the island
+    });
+
+    it('climb-mills round an island as well as round the outside', () => {
+      // Round the pocket's boundary the stock is inside each ring, which is
+      // clockwise for a climb cut. Round an island the cleared ground is on
+      // the island's side, so the stock is outside and the loop runs the
+      // other way; winding both alike conventional-milled every island ring.
+      const withIsland = region(80, 80, 15, 15, 50, 50);
+      for (let r = 35; r < 45; r++) for (let c = 35; c < 45; c++) withIsland.mask[r * 80 + c] = 0;
+
+      const rings = clearingRings(withIsland, 2, 6);
+      let islandLoops = 0;
+      for (const ring of rings) {
+        ring.loops.forEach((loop, i) => {
+          const round = loop.every((p) => Math.max(Math.abs(p.x - 40), Math.abs(p.y - 40)) < 17);
+          const enclosesCentre = loop.some((p) => p.x < 40) && loop.some((p) => p.x > 40);
+          if (!enclosesCentre) return;
+          expect(ring.islands[i]).toBe(round);
+          if (round) islandLoops++;
+          expect(Math.sign(signedArea2(loop))).toBe(round ? 1 : -1);
+        });
+      }
+      expect(islandLoops).toBeGreaterThan(2);
     });
 
     it('returns nothing for an empty region', () => {
