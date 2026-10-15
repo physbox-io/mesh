@@ -2119,8 +2119,20 @@ export function machineSurface(
    * only at its end point, so a traverse across a crowned sheet runs a straight
    * line under the crown - up to the grid's span below where it should be.
    */
-  const TRAVERSE_CLEARANCE_MM = 1.0
-    + (opts.applyMeshLeveling && opts.meshLevelGrid ? getGridStats(opts.meshLevelGrid).spanZ : 0);
+  const LEVELLING_SPAN_MM =
+    opts.applyMeshLeveling && opts.meshLevelGrid ? getGridStats(opts.meshLevelGrid).spanZ : 0;
+  const TRAVERSE_CLEARANCE_MM = 1.0 + LEVELLING_SPAN_MM;
+  /*
+   * Past this, a traverse flies at the safe height rather than hopping low.
+   *
+   * The low hop is measured against the stock model, which knows the stock
+   * and nothing round it: not the clamps, not the screws, not a warped board's
+   * high corner. A hop to the next run a few millimetres away stays over
+   * ground the job has just cut; a flight across the job to the next pocket
+   * passes whatever holds the work down, and that is what the safe height is
+   * set for.
+   */
+  const LONG_TRAVERSE_MM = 30;
   /** The height the last `leadIn` traversed at, recorded for the preview. */
   let lastTraverseZ = opts.safeZ;
 
@@ -2190,7 +2202,13 @@ export function machineSurface(
       head.z,
       stock.highestAlong(atX, atY, head.x, head.y, cutter.radius)
     );
-    const traverseZ = Math.min(opts.safeZ, Math.min(0, highest) + TRAVERSE_CLEARANCE_MM);
+    // The safe height clears the levelling span too: it used to cap the
+    // clearance and so clipped the span straight back off it.
+    const lowZ = Math.min(0, highest) + TRAVERSE_CLEARANCE_MM;
+    const safeZ = opts.safeZ + LEVELLING_SPAN_MM;
+    const traverseZ = Math.hypot(head.x - atX, head.y - atY) > LONG_TRAVERSE_MM
+      ? Math.max(safeZ, lowZ)
+      : Math.min(safeZ, lowZ);
 
     if (traverseZ > atZ + 1e-6) {
       gcode.push(`G0 Z${f(traverseZ)}`);
