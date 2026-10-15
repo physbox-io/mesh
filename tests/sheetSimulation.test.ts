@@ -121,9 +121,12 @@ describe('sheet parts', () => {
     expect(result.success).toBe(true);
     const res = runSheetJob({ parts: contourSheetParts(result.layers!, 4) });
     const volume = closed(res.positions, res.faces);
-    // Twenty 4 mm discs make an 80 mm ball to within the steps.
+    // Twenty 4 mm discs make an 80 mm ball to within the steps. The reported
+    // volume counts every disc whole; the drawn one is short by the seams that
+    // keep the discs from reading as one solid.
     const ball = (4 / 3) * Math.PI * 40 ** 3;
-    expect(Math.abs(volume - ball) / ball).toBeLessThan(0.03);
+    expect(Math.abs(res.volumeMm3 - ball) / ball).toBeLessThan(0.03);
+    expect(volume).toBeLessThan(res.volumeMm3 * 0.99);
     const node = simulatedBody({ ...res, cellMm: 0, toleranceMm: 0 }, result.stockTransform!, {
       id: 's', name: 's', kind: 'contour', placement: 'overlay',
     });
@@ -133,5 +136,17 @@ describe('sheet parts', () => {
     expect(got.hi[2]).toBeCloseTo(90, 3);
     expect(got.hi[0]).toBeLessThan(40.01);
     expect(got.hi[0]).toBeGreaterThan(39);
+  });
+
+  it('draws stacked identical layers as separate sheets, not one block', () => {
+    const square = [{ x: 0, y: 0 }, { x: 50, y: 0 }, { x: 50, y: 50 }, { x: 0, y: 50 }];
+    const layers = [0, 1, 2].map((index) => ({ index, z: 0, loops: [square], pieceCount: 1, areaMm2: 2500 }));
+    const res = runSheetJob({ parts: contourSheetParts(layers, 20) });
+    // Every sheet but the bottom one stands on a gap, so no two share a face.
+    const zs = new Set<number>();
+    for (let i = 2; i < res.positions.length; i += 3) zs.add(+res.positions[i].toFixed(3));
+    expect([...zs].sort((a, b) => a - b)).toEqual([0, 20, 21, 40, 41, 60]);
+    // The volume is still three whole sheets.
+    expect(res.volumeMm3).toBeCloseTo(3 * 2500 * 20, 0);
   });
 });

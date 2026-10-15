@@ -966,8 +966,21 @@ export function exportContourSliceSvg(
   let emptyLayers = 0;
 
   for (let i = 0; i < layerCount; i++) {
-    const z = zMin + i * step + inset;
-    const loops = contoursAtZ(tris, z, solidIds);
+    // The chosen spot can land in a gap the layer spans — the clearance
+    // between a flask's cope and drag sits exactly at mid-height, so one thick
+    // layer over both used to come out empty and the export failed. The layer
+    // still has material in it, so look elsewhere in its band, nearest first.
+    let z = zMin + i * step + inset;
+    let loops = contoursAtZ(tris, z, solidIds);
+    if (loops.length === 0) {
+      const tries = [0.5, 0.25, 0.75, 0.1, 0.9, 0.02, 0.98]
+        .map((f) => zMin + (i + f) * step)
+        .sort((a, b) => Math.abs(a - z) - Math.abs(b - z));
+      for (const alt of tries) {
+        const found = contoursAtZ(tris, alt, solidIds);
+        if (found.length > 0) { z = alt; loops = found; break; }
+      }
+    }
     if (loops.length === 0) { emptyLayers++; continue; }
 
     let area = 0;

@@ -10,6 +10,7 @@ import { runSettings } from '../utils/runSettings';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
 import { NumberInput } from '@physbox-io/ui';
 import { useStore } from '../store/useStore';
+import { MAX_STOCK_PLAN_MM, MAX_STOCK_THICKNESS_MM, MIN_STOCK_MM } from '../utils/stockSettings';
 import { useSettled } from '../hooks/useSettled';
 import { AddSimulationButton, JobOverrides, JobPauseBanner, JobPreflight, JobProgress, JobResumeBanner, JobTransport } from './MachineJobControls';
 import { MachineFaultBanner } from './MachineFaultBanner';
@@ -161,14 +162,22 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
   scene,
   }) => {
   useEscapeToClose(isOpen, onClose);
-  const [materialThicknessMm, setMaterialThicknessMm] = useState(3.0);
+  /*
+   * The sheet is the bench's stock: its thickness is the slice pitch and its
+   * width and depth are one sheet's cutting area. These used to be local (3 mm,
+   * 600 x 400), so stock set in the status bar never reached this dialog.
+   * Editing them here edits the bench, as the relief dialog does.
+   */
+  const stock = useStore((s) => s.stock);
+  const setStock = useStore((s) => s.setStock);
+  const materialThicknessMm = stock.thicknessMm;
+  const sheetWidthMm = stock.widthMm;
+  const sheetHeightMm = stock.depthMm;
   const [layerOverride, setLayerOverride] = useState('');
   const [slicePosition, setSlicePosition] = useState<ContourSliceOptions['slicePosition']>('middle');
   const [kerfMm, setKerfMm] = useState(0.15);
   const [pinCount, setPinCount] = useState(2);
   const [pinDiameterMm, setPinDiameterMm] = useState(3.0);
-  const [sheetWidthMm, setSheetWidthMm] = useState<number>(600);
-  const [sheetHeightMm, setSheetHeightMm] = useState<number>(400);
   const [autoScale, setAutoScale] = useState<boolean>(false);
   const [maxSheets, setMaxSheets] = useState<number>(2);
   const [customScalePct, setCustomScalePct] = useState<number>(100);
@@ -464,7 +473,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
               <Field
                 className="lg:col-span-2"
                 label="Thickness (mm)"
-                hint="Thickness of the stock. Each layer is one sheet thick, so this also sets how far apart the model is sliced."
+                hint="The stock thickness from the status bar, which this edits. Each layer is one sheet thick, so this also sets how far apart the model is sliced."
               >
                 <NumberInput
                   /*
@@ -475,11 +484,12 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                    * gave 50, and the whole stack was then sliced at the wrong
                    * pitch: wrong layer count, wrong finished height, and a cut
                    * 25 mm short of through. Nothing in `contourSliceExporter`
-                   * has ever had a 50 mm limit.
+                   * has ever had a 50 mm limit. The bounds are now the
+                   * bench stock's, which this field edits.
                    */
-                  step={0.5} min={0.1} max={200}
+                  step={0.5} min={MIN_STOCK_MM} max={MAX_STOCK_THICKNESS_MM}
                   value={materialThicknessMm}
-                  onChange={(v) => v !== undefined && setMaterialThicknessMm(v)}
+                  onChange={(v) => { if (v !== undefined) setStock({ thicknessMm: v }); }}
                   className={inputClass}
                 />
               </Field>
@@ -753,21 +763,21 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
               <Field
                 className="lg:col-span-2"
                 label="Sheet Size (mm)"
-                hint="Usable cutting area of one sheet of stock, width by height. Layers are nested left to right; when a row no longer fits, nesting starts a new sheet below."
+                hint="Usable cutting area of one sheet: the stock width and depth from the status bar, which this edits. Layers are nested left to right; when a row no longer fits, nesting starts a new sheet below."
               >
                 <div className="flex items-center space-x-1.5">
                   <NumberInput
-                    step={10} min={50} max={5000}
+                    step={10} min={50} max={MAX_STOCK_PLAN_MM}
                     value={sheetWidthMm}
-                    onChange={(v) => v !== undefined && setSheetWidthMm(v)}
+                    onChange={(v) => { if (v !== undefined) setStock({ widthMm: v }); }}
                     className={`${inputClass} px-2`}
                     aria-label="Sheet width in mm"
                   />
                   <span className="text-xs font-medium text-slate-400">&times;</span>
                   <NumberInput
-                    step={10} min={50} max={5000}
+                    step={10} min={50} max={MAX_STOCK_PLAN_MM}
                     value={sheetHeightMm}
-                    onChange={(v) => v !== undefined && setSheetHeightMm(v)}
+                    onChange={(v) => { if (v !== undefined) setStock({ depthMm: v }); }}
                     className={`${inputClass} px-2`}
                     aria-label="Sheet height in mm"
                   />

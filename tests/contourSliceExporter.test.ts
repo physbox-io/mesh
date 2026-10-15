@@ -6,7 +6,7 @@ import {
   chainSegments,
   DEFAULT_CONTOUR_OPTIONS,
 } from '../src/utils/contourSliceExporter';
-import { birdhousePreset } from '../src/presets/presetScenes';
+import { birdhousePreset, castingFlaskPreset } from '../src/presets/presetScenes';
 import type { SceneGraph, SceneGeom } from '../src/types/scene';
 
 function bodyWith(geom: Partial<SceneGeom> & { type: SceneGeom['type']; size: number[] }, pos = [0, 0, 0]): SceneGraph {
@@ -302,6 +302,18 @@ describe('Contour Slice Exporter', () => {
     expect(result.sheetCount).toBeGreaterThanOrEqual(1);
     expect(result.mapSvg).toContain('<svg');
     expect(result.mapSvg).toContain('hsl(');
+  });
+
+  it('finds the material in a thick layer whose mid-height falls in a gap', () => {
+    // The flask's cope sits 1 mm above its drag, and that gap is at exactly
+    // half the 121 mm height: one 200 mm layer sampled there came out empty
+    // and the export failed with "no closed contours".
+    for (const mm of [100, 200]) {
+      const result = exportContourSliceSvg(castingFlaskPreset, { materialThickness: mm / 1000, pinHoles: false });
+      expect(result.success).toBe(true);
+      expect(result.layers).toHaveLength(1);
+      expect(result.layers![0].loops.length).toBeGreaterThan(0);
+    }
   });
 
   it('reports a scene with nothing to slice rather than emitting an empty sheet', () => {

@@ -2668,7 +2668,9 @@ export function useMCPBridge() {
           if (msg.kind === 'laser' || msg.kind === 'contour') {
             const router = msg.machine === 'router';
             const routerRadiusMm = router ? (num(msg.bitDiaMm) ?? 3.175) / 2 : 0;
-            const thicknessMm = num(msg.materialThicknessMm) ?? 3;
+            // A contour layer is one sheet of the bench's stock, as in its dialog.
+            const thicknessMm = num(msg.materialThicknessMm)
+              ?? (msg.kind === 'contour' ? useStore.getState().stock.thicknessMm : 3);
             if (msg.kind === 'laser') {
               const result: LaserCutResult = await runJob((c) =>
                 c.run('laser', scene, { ...DEFAULT_LASER_OPTIONS, materialThickness: thicknessMm / 1000 }));

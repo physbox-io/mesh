@@ -31,6 +31,11 @@ export interface SheetPart {
   /** The slab, along u x v from the origin, mm. */
   zFrom: number;
   zTo: number;
+  /**
+   * A gap left off the bottom of the slab so it shows as a separate sheet, mm.
+   * Drawn only: the volume still counts the full slab.
+   */
+  seamMm?: number;
 }
 
 export interface SheetJobOptions {
@@ -80,7 +85,7 @@ export function regionArea(loops: Point2D[][]): number {
 export function runSheetJob(o: SheetJobOptions, onProgress?: (fraction: number) => void): SheetJobResult {
   const positions: number[] = [];
   const faces: number[] = [];
-  let drawnAreaMm2 = 0, cutAreaMm2 = 0;
+  let drawnAreaMm2 = 0, cutAreaMm2 = 0, seamVolumeMm3 = 0;
 
   o.parts.forEach((part, p) => {
     onProgress?.(p / o.parts.length);
@@ -116,8 +121,10 @@ export function runSheetJob(o: SheetJobOptions, onProgress?: (fraction: number) 
 
     // Each loop's vertices, bottom and top, in order.
     const bottom: number[][] = [], top: number[][] = [];
+    const seam = Math.max(0, Math.min(part.seamMm ?? 0, (part.zTo - part.zFrom) / 2));
+    seamVolumeMm3 += regionArea(loops) * seam;
     for (const loop of oriented) {
-      bottom.push(loop.map((pt) => at(pt, part.zFrom)));
+      bottom.push(loop.map((pt) => at(pt, part.zFrom + seam)));
       top.push(loop.map((pt) => at(pt, part.zTo)));
     }
 
@@ -161,7 +168,7 @@ export function runSheetJob(o: SheetJobOptions, onProgress?: (fraction: number) 
 
   const pos = new Float32Array(positions);
   const tri = new Uint32Array(faces);
-  return { positions: pos, faces: tri, volumeMm3: enclosedVolume(pos, tri), drawnAreaMm2, cutAreaMm2 };
+  return { positions: pos, faces: tri, volumeMm3: enclosedVolume(pos, tri) + seamVolumeMm3, drawnAreaMm2, cutAreaMm2 };
 }
 
 /**
@@ -214,9 +221,15 @@ export function laserStockTransform(panels: LaserPanel[], scale: number): StockT
   };
 }
 
-/** Contour layers, each stacked on the one below. */
+/**
+ * Contour layers, each stacked on the one below. Identical layers stacked flush
+ * drew as one solid block, so a stack of six sheets looked like nothing had
+ * been sliced; every layer but the bottom one stands on a hairline seam.
+ */
 export function contourSheetParts(layers: ContourLayer[], thicknessMm: number): SheetPart[] {
+  const seamMm = Math.min(1, thicknessMm * 0.05);
   return layers.map((layer) => ({
+    seamMm: layer.index > 0 ? seamMm : 0,
     loops: layer.loops,
     origin: [0, 0, layer.index * thicknessMm],
     u: [1, 0, 0],
