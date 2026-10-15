@@ -3,11 +3,11 @@ import { Canvas } from '@react-three/fiber';
 import { Grid, Environment, Lightformer } from '@react-three/drei';
 import { DEFAULT_EYE } from './utils/frameScene';
 import { EffectComposer, N8AO } from '@react-three/postprocessing';
-import { SCULPT_BASES, type SculptBaseId } from './utils/sculptBases';
 import SculptPanel from './components/SculptPanel';
 import LatticePanel from './components/LatticePanel';
 import { LeftSidebar } from './components/palette/LeftSidebar';
 import { InspectorPanel } from './components/inspector/InspectorPanel';
+import { ModellingTools } from './components/inspector/ModellingTools';
 import { BodyBasicsCard } from './components/inspector/BodyBasicsCard';
 import { PositionCard } from './components/inspector/PositionCard';
 import { ResizeCard } from './components/inspector/ResizeCard';
@@ -35,7 +35,7 @@ import { useStore } from './store/useStore';
 import { applyShatterPieces } from './store/useStore';
 import type { SceneGraph, SceneNode } from './types/scene';
 import type { WeakSpot } from './utils/printAnalysis';
-import { Play, Square, Settings, Box, X, RotateCcw, Trash2, Zap, Info, Code, Menu, Shapes, Save, Download, Upload, Undo, Redo, PanelRight, Printer, Sparkles, Sun, Moon, Donut, Paintbrush, Grid3x3, Image as ImageIcon, Share2, Copy, Check, Aperture } from 'lucide-react';
+import { Play, Square, Settings, Box, X, RotateCcw, Trash2, Zap, Info, Code, Menu, Save, Download, Upload, Undo, Redo, PanelRight, Printer, Sparkles, Sun, Moon, Donut, Grid3x3, Image as ImageIcon, Share2, Copy, Check, Aperture } from 'lucide-react';
 import { useRef, useMemo, useEffect, useLayoutEffect, useCallback, useState, type ComponentRef } from 'react';
 import AICopilotPanel from './components/AICopilotPanel';
 import { DocsModal } from './components/docs/DocsModal';
@@ -453,8 +453,8 @@ function App() {
     resetSimulation,
     deleteNode,
     updateNodeScript,
-    sculptNodeId, setSculptNodeId, setSculptBase,
-    latticeNodeId, setLatticeNodeId,
+    sculptNodeId,
+    latticeNodeId,
     extraSelectedIds, combineBodies,
     undoStack, redoStack,
   } = useStore(useShallow((s) => ({
@@ -473,8 +473,8 @@ function App() {
     resetSimulation: s.resetSimulation,
     deleteNode: s.deleteNode,
     updateNodeScript: s.updateNodeScript,
-    sculptNodeId: s.sculptNodeId, setSculptNodeId: s.setSculptNodeId, setSculptBase: s.setSculptBase,
-    latticeNodeId: s.latticeNodeId, setLatticeNodeId: s.setLatticeNodeId,
+    sculptNodeId: s.sculptNodeId,
+    latticeNodeId: s.latticeNodeId,
     extraSelectedIds: s.extraSelectedIds, combineBodies: s.combineBodies,
     undoStack: s.undoStack, redoStack: s.redoStack,
   })));
@@ -1512,32 +1512,6 @@ function App() {
     },
     [addComponent],
   );
-
-  /**
-   * Switches a sculpt body to a different base.
-   *
-   * Confirmed only once there is something to lose. Asking before the first
-   * stroke would be a dialog in front of the one action every new sculpt starts
-   * with — trying the shapes to see which one fits.
-   */
-  const handleSculptBaseClick = (node: SceneNode, base: SculptBaseId, label: string) => {
-    if ((node.sculptBase || 'sphere') === base) return;
-    if (node.sculptEdited) {
-      setDialogModal({
-        title: `Start over from the ${label} base?`,
-        confirmLabel: 'Discard & start over',
-        tone: 'amber',
-        body: <p>The sculpting on this body will be discarded. You can undo with Ctrl+Z.</p>,
-        onCancel: () => setDialogModal(null),
-        onConfirm: () => {
-          setDialogModal(null);
-          setSculptBase(node.id, base);
-        },
-      });
-      return;
-    }
-    setSculptBase(node.id, base);
-  };
 
   useMCPBridge();
   useVoltLink();
@@ -2698,121 +2672,7 @@ function App() {
                   </div>
                 )}
 
-                {/* Lattice: only for bodies that ARE one. Unlike sculpting,
-                    this cannot be opened on an arbitrary mesh — the cage is the
-                    document and an imported STL does not have one. */}
-                {selectedNode.isLattice && (
-                  <button
-                    type="button"
-                    onClick={() => setLatticeNodeId(selectedNode.id)}
-                    disabled={latticeNodeId === selectedNode.id}
-                    className="flex items-center justify-center gap-2 w-full py-2 rounded-lg text-xs font-bold transition-all bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-200 dark:disabled:bg-slate-800 disabled:text-slate-400 dark:disabled:text-slate-500 text-white cursor-pointer disabled:cursor-default"
-                    title="Open the lattice tools on this cage. Pauses the simulation."
-                  >
-                    <Grid3x3 className="w-3.5 h-3.5" />
-                    {latticeNodeId === selectedNode.id ? 'Modelling…' : 'Edit Lattice'}
-                  </button>
-                )}
-
-                {/* Why the Edit Lattice button is gone. Without this the body
-                    simply stops offering the tools it offered a minute ago. */}
-                {selectedNode.latticeBaked && !selectedNode.isLattice && (
-                  <p className="text-[10px] leading-snug text-slate-400 px-1">
-                    <strong className="text-slate-500">Lattice applied.</strong> The mesh is now edited
-                    directly; the cage is kept in the file but does not drive the shape.
-                    <span className="whitespace-nowrap"> Ctrl+Z</span> puts it back.
-                  </p>
-                )}
-
-                {/* Sculpt: offered for any body carrying a mesh, not only for one
-                    that started as clay — an imported STL or a boolean result is
-                    a perfectly good thing to push around by hand.
-
-                    On a LATTICE body it first applies the cage. The two tools
-                    cannot share a mesh: the cage rebuilds it from scratch on
-                    every edit, so sculpting under a live cage is work that
-                    disappears the next time a face moves — silently, and long
-                    after the decision that cost it. Baking says so up front,
-                    and it is an ordinary undo step. */}
-                {/* Not on a boolean body: what it shows is a mesh rebuilt from
-                    its primitives on every change, so a stroke on it could
-                    only ever be thrown away by the next compile. */}
-                {!selectedNode.csgEnabled && selectedNode.geoms?.some((g) => g.type === 'mesh' && !g.csgDerived && g.renderVertices?.length) && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (selectedNode.isLattice) {
-                        const targetId = selectedNode.id;
-                        setDialogModal({
-                          title: 'Apply lattice and start sculpting?',
-                          confirmLabel: 'Apply lattice & sculpt',
-                          tone: 'amber',
-                          body: (
-                            <p>
-                              Sculpting applies the lattice: this mesh stops being built from its cage,
-                              and the lattice tools close on it for good. The cage stays in the file, and
-                              Ctrl+Z puts it back.
-                            </p>
-                          ),
-                          onCancel: () => setDialogModal(null),
-                          onConfirm: () => {
-                            setDialogModal(null);
-                            useStore.getState().bakeLattice(targetId);
-                            setSculptNodeId(targetId);
-                          },
-                        });
-                        return;
-                      }
-                      setSculptNodeId(selectedNode.id);
-                    }}
-                    disabled={sculptNodeId === selectedNode.id}
-                    className="flex items-center justify-center gap-2 w-full py-2 rounded-lg text-xs font-bold transition-all bg-sky-600 hover:bg-sky-500 disabled:bg-slate-200 dark:disabled:bg-slate-800 disabled:text-slate-400 dark:disabled:text-slate-500 text-white cursor-pointer disabled:cursor-default"
-                    title={selectedNode.isLattice
-                      ? 'Applies the lattice first: the cage stops driving this mesh, and sculpting takes over. Undoable.'
-                      : 'Open the sculpting tools on this mesh. Pauses the simulation.'}
-                  >
-                    <Paintbrush className="w-3.5 h-3.5" />
-                    {sculptNodeId === selectedNode.id
-                      ? 'Sculpting…'
-                      : selectedNode.isLattice ? 'Apply Lattice & Sculpt' : 'Sculpt This Mesh'}
-                  </button>
-                )}
-
-                {/* Base shape. Only for bodies that started as clay: replacing
-                    the mesh of an imported STL with a humanoid would be a
-                    delete wearing a dropdown's clothes. */}
-                {selectedNode.isSculpt && (
-                  <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-2">
-                    <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 flex items-center gap-1.5">
-                      <Shapes className="w-3.5 h-3.5 text-sky-500" /> Base Shape
-                    </h3>
-                    <div className="grid grid-cols-3 gap-1.5">
-                      {SCULPT_BASES.map((base) => (
-                        <button
-                          key={base.id}
-                          type="button"
-                          onClick={() => handleSculptBaseClick(selectedNode, base.id, base.label)}
-                          title={base.description}
-                          className={`py-1.5 px-1 rounded-lg border text-[10px] font-semibold transition-all cursor-pointer truncate ${
-                            (selectedNode.sculptBase || 'sphere') === base.id
-                              ? 'bg-sky-50 border-sky-400 text-sky-700'
-                              : 'bg-white border-slate-200 text-slate-500 hover:border-slate-300'
-                          }`}
-                        >
-                          {base.label}
-                        </button>
-                      ))}
-                    </div>
-                    <p className="text-[10px] leading-snug text-slate-500">
-                      {(SCULPT_BASES.find((b) => b.id === (selectedNode.sculptBase || 'sphere')) ?? SCULPT_BASES[0]).description}
-                    </p>
-                    {selectedNode.sculptEdited && (
-                      <p className="text-[10px] leading-snug text-amber-600">
-                        This body has been sculpted. Changing the base starts it over.
-                      </p>
-                    )}
-                  </div>
-                )}
+                <ModellingTools node={selectedNode} />
 
               <BodyBasicsCard node={selectedNode} />
 
