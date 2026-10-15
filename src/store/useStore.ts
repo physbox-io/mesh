@@ -28,7 +28,6 @@ import { insetNegatives } from '../utils/scaleNode';
 import type { PaintLayer } from '../utils/vertexPaint';
 import type { FaceSplit, SurfaceTexture } from '../utils/surfaceTexture';
 import type { FacePatternTarget } from '../utils/facePatternPick';
-import type { DocsTabId } from '../utils/docsTabs';
 import type { CameraView } from '../utils/cameraViews';
 import { compileToMJCF } from '../utils/mjcf';
 import { PRESETS, pendulumPreset, generateGearGeoms } from '../presets/presetScenes';
@@ -1693,13 +1692,6 @@ export interface PhysicsState {
   /** The face the pattern-on-a-face dialog is open on, if it is. */
   facePatternTarget: FacePatternTarget | null;
   isMachineConfigOpen: boolean;
-  /**
-   * The reference guide. It lives here rather than in App because the (i)
-   * buttons that deep-link into it are scattered through the property cards,
-   * and threading an opener down to each one is all cost and no benefit.
-   */
-  isDocsOpen: boolean;
-  docsTab: DocsTabId;
   setMachineTarget: (target: MachineTarget) => void;
   setMaterial: (material: MaterialId) => void;
   setFilament: (filament: FilamentId) => void;
@@ -1722,9 +1714,6 @@ export interface PhysicsState {
    */
   loadGeneratedScene: (scene: SceneGraph, carve: Partial<ReliefCarveOptions> | null) => void;
   setMachineConfigOpen: (open: boolean) => void;
-  openDocs: (tab: DocsTabId) => void;
-  setDocsTab: (tab: DocsTabId) => void;
-  closeDocs: () => void;
   setCameraView: (view: CameraView) => void;
   setDimsEnabled: (enabled: boolean) => void;
   setCameraOffAxis: (off: boolean) => void;
@@ -2523,8 +2512,6 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
   patternGeneratorId: null,
   facePatternTarget: null,
   isMachineConfigOpen: false,
-  isDocsOpen: false,
-  docsTab: 'gravity',
   cameraView: 'perspective',
   dimsEnabled: false,
   cameraOffAxis: false,
@@ -2584,9 +2571,6 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
   openFacePattern: (target) => set({ facePatternTarget: target }),
   closeFacePattern: () => set({ facePatternTarget: null }),
   setMachineConfigOpen: (isMachineConfigOpen) => set({ isMachineConfigOpen }),
-  openDocs: (docsTab) => set({ docsTab, isDocsOpen: true }),
-  setDocsTab: (docsTab) => set({ docsTab }),
-  closeDocs: () => set({ isDocsOpen: false }),
   // The token too: choosing the view you are already in, after orbiting off
   // it, is asking for its pose back, and the view alone would not change.
   setCameraView: (view) => set((state) => ({ cameraView: view, cameraOverride: null, cameraResetToken: state.cameraResetToken + 1 })),

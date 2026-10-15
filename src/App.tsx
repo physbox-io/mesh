@@ -126,6 +126,7 @@ import { anthropicUrl, geminiUrl } from './utils/llmEndpoints';
 import { BodyToneMapping } from './components/scene/BodyToneMapping';
 import { StudioBackdrop } from './components/scene/StudioBackdrop';
 import { useViewQuality, usePathTraceStatus } from './store/viewQualityStore';
+import { usePanels } from './store/panelsStore';
 import { SelectionOutline } from './components/scene/SelectionOutline';
 import { PathTracedView } from './components/scene/PathTracedView';
 
@@ -190,14 +191,11 @@ function App() {
 
   const toggleDarkMode = () => setDarkMode(prev => !prev);
 
-  // The reference guide's open state lives in the store: the (i) buttons that
-  // deep-link into it are spread through the property cards, which read it
-  // themselves rather than being handed an opener apiece.
-  const isDocsOpen = useStore((s) => s.isDocsOpen);
-  const docsTab = useStore((s) => s.docsTab);
-  const openDocs = useStore((s) => s.openDocs);
-  const setDocsTab = useStore((s) => s.setDocsTab);
-  const closeDocs = useStore((s) => s.closeDocs);
+  const isDocsOpen = usePanels((s) => s.isDocsOpen);
+  const docsTab = usePanels((s) => s.docsTab);
+  const openDocs = usePanels((s) => s.openDocs);
+  const setDocsTab = usePanels((s) => s.setDocsTab);
+  const closeDocs = usePanels((s) => s.closeDocs);
   useEscapeToClose(isDocsOpen, closeDocs);
   const [showAICopilot, setShowAICopilot] = useState(false);
   // Set when Free is picked for a body that hangs under another: MuJoCo only
@@ -214,18 +212,11 @@ function App() {
   const [meshSimplifierError, setMeshSimplifierError] = useState<string | null>(null);
   const [showApiRef, setShowApiRef] = useState(false);
   const [propertiesWidth, setPropertiesWidth] = useState(380);
-  const [isLeftSidebarOpen, setIsLeftSidebarOpen] = useState(false);
+  const isLeftSidebarOpen = usePanels((s) => s.isLeftSidebarOpen);
+  const setIsLeftSidebarOpen = usePanels((s) => s.setLeftSidebarOpen);
   const coarsePointer = useCoarsePointer();
-  /**
-   * Whether the properties inspector is showing as an overlay drawer.
-   *
-   * Only consulted below the `lg` breakpoint — at desktop width the inspector
-   * is a permanent column and this is ignored, so nothing here can change the
-   * desktop layout. It opens only when the toolbar button is pressed: on a
-   * phone the drawer covers the model, so selecting a body to *see* it would
-   * otherwise immediately hide it behind the panel describing it.
-   */
-  const [isPropertiesOpen, setIsPropertiesOpen] = useState(false);
+  const isPropertiesOpen = usePanels((s) => s.isPropertiesOpen);
+  const setIsPropertiesOpen = usePanels((s) => s.setPropertiesOpen);
   const [isSaveModalOpen, setIsSaveModalOpen] = useState(false);
   // The preset list reads storage during render, so a pull from the account or
   // a save that only the account could take has to ask for a render to show up.

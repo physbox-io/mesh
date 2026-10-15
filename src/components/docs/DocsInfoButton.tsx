@@ -1,5 +1,5 @@
 import { Info } from 'lucide-react';
-import { useStore } from '../../store/useStore';
+import { usePanels } from '../../store/panelsStore';
 import type { DocsTabId } from '../../utils/docsTabs';
 
 /**
@@ -13,7 +13,7 @@ export const DocsInfoButton = ({ tab, className = '', size = 'w-3.5 h-3.5' }: {
   className?: string;
   size?: string;
 }) => {
-  const openDocs = useStore((s) => s.openDocs);
+  const openDocs = usePanels((s) => s.openDocs);
   return (
     <button
       type="button"
