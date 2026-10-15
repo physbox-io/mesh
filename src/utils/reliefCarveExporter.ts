@@ -3390,13 +3390,30 @@ export function addHoldingTabs(
   const isLoose = (id: number) => id >= 0 && id !== main && sizes[id] >= minCells;
   if (!sizes.some((_, id) => isLoose(id))) return { tabs: 0, loose: 0 };
 
+  /*
+   * Grown from where each piece is at least as thick as a tab.
+   *
+   * A piece whose edge tapers to the spoilboard still counts as piece where it
+   * is a tenth of a millimetre thick, and grown from its outermost cells the
+   * seam - and so the tab - sat between the two rims: the piece hung on its
+   * own foil, which tears as soon as the cutter pushes on it. Grown from the
+   * cells that are as thick as the tab, the tab reaches across the taper to
+   * material it can hold. A piece thinner than a tab everywhere is grown from
+   * all of itself, since it has nothing better.
+   */
+  const thickZ = stockBottomZ + Math.max(0.1, tab.heightMm) - 1e-6;
+  const hasThick = new Uint8Array(sizes.length);
+  for (let i = 0; i < z.length; i++) if (label[i] >= 0 && z[i] >= thickZ) hasThick[label[i]] = 1;
+  const seed = (i: number) =>
+    label[i] >= 0 && sizes[label[i]] >= minCells && (z[i] >= thickZ || !hasThick[label[i]]);
+
   // Grow every real piece out across the cut cells, breadth first, so each cut
   // cell learns which piece is nearest and how far away it is.
   const owner = new Int32Array(z.length).fill(-1);
   const dist = new Float32Array(z.length).fill(Infinity);
   let queue: number[] = [];
   for (let i = 0; i < z.length; i++) {
-    if (label[i] >= 0 && sizes[label[i]] >= minCells) {
+    if (seed(i)) {
       owner[i] = label[i];
       dist[i] = 0;
       queue.push(i);
@@ -3425,7 +3442,7 @@ export function addHoldingTabs(
       const a = owner[i], b = owner[n];
       if (a < 0 || b < 0 || a === b || !(isLoose(a) || isLoose(b))) continue;
       const at = dist[i] >= dist[n] ? i : n;
-      if (label[at] >= 0) continue; // a seam is in the slot, not in a piece
+      if (seed(at)) continue; // a seam is in the slot (or a taper), not in a piece
       const key = a < b ? `${a}:${b}` : `${b}:${a}`;
       if (!seams.has(key)) seams.set(key, []);
       seams.get(key)!.push(at);
