@@ -13,20 +13,16 @@ import { useMCPBridge } from './hooks/useMCPBridge';
 import { useShallow } from 'zustand/react/shallow';
 import { useStore } from './store/useStore';
 import { applyShatterPieces } from './store/useStore';
-import type { SceneGraph, SceneNode } from './types/scene';
 import type { WeakSpot } from './utils/printAnalysis';
 import { Play, Square, Settings, Box, X, RotateCcw, Trash2, Zap, Info, Code, Menu, Save, Download, Upload, Undo, Redo, PanelRight, Printer, Sparkles, Sun, Moon, Grid3x3, Image as ImageIcon, Share2, Copy, Check, Aperture } from 'lucide-react';
-import { useRef, useMemo, useEffect, useLayoutEffect, useCallback, useState, type ComponentRef } from 'react';
+import { useRef, useMemo, useLayoutEffect, useCallback, useState, type ComponentRef } from 'react';
 import AICopilotPanel from './components/AICopilotPanel';
 import { DocsModal } from './components/docs/DocsModal';
 import * as THREE from 'three';
-import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js';
-import { exportThreeMf, type ThreeMfMesh } from './utils/threeMfExporter';
-import { loadCompiler, setScadCompileListener } from './utils/openscad';
+import { setScadCompileListener } from './utils/openscad';
 import { useCsgAutoCompile } from './hooks/useCsgCompile';
 import { PRESETS } from './presets/presetScenes';
-import { makePresetNoteCard, type NoteCard } from './utils/noteCards';
-import { physicsGlobals, type CopilotMessage } from './physicsGlobals';
+import { physicsGlobals } from './physicsGlobals';
 import { ImportStlModal } from './components/ImportStlModal';
 import { ImportImageModal } from './components/ImportImageModal';
 import { GeneratePatternModal } from './components/GeneratePatternModal';
@@ -40,13 +36,11 @@ import { ExportSolidMachiningModal } from './components/ExportSolidMachiningModa
 import { ExportCastModal } from './components/ExportCastModal';
 import { SplitForPrintModal } from './components/SplitForPrintModal';
 import { MarqueeSelect } from './components/scene/MarqueeSelect';
-import { layoutOnBed, type PosedPart } from './utils/printPlate';
 import { PulleyRopeMarkers } from './components/scene/PulleyRopes';
 import { SliderValue } from './components/SliderValue';
 import { RangeInput } from './components/RangeInput';
-import { ExportScaleModal } from './components/ExportScaleModal';
-import { downloadBlob } from './utils/downloadBlob';
-import { ConfirmModal } from './components/ConfirmModal';
+import { AppDialogs } from './components/AppDialogs';
+import { useDialogs } from './store/dialogStore';
 import { CompileErrorBanner } from './components/CompileErrorBanner';
 import { VoltLinkBanner } from './components/VoltLinkBanner';
 import { useVoltLink } from './hooks/useVoltLink';
@@ -64,36 +58,17 @@ import {
 } from './components/scene/SceneLayer';
 import { BottomStatusBar, SHOW_EXPORTS_EVENT } from './components/BottomStatusBar';
 import { MachineConfigModal } from './components/MachineConfigModal';
-import { UserProfileButton, SIGN_IN_REQUESTED_EVENT, SIGNED_IN_EVENT } from './components/UserProfileButton';
+import { UserProfileButton, SIGN_IN_REQUESTED_EVENT } from './components/UserProfileButton';
 import { AgentMachineBanner } from './components/AgentMachineBanner';
 import { JobRestoreModal } from './components/JobRestoreModal';
 import { JobSucceededModal } from './components/JobSucceededModal';
-import { MIN_MAX_TOKENS, MAX_MAX_TOKENS, readMaxTokens, writeMaxTokens } from './utils/llmSettings';
+import { MIN_MAX_TOKENS, MAX_MAX_TOKENS } from './utils/llmSettings';
 import { DfmHUD } from './components/DfmHUD';
-import { pushGlobalParameter } from './utils/llmSettings';
-import { saveUserPreset, deleteUserPreset, readUserPreset, listUserPresetNames, cloudOnlyPresetNames, USER_PRESETS_CHANGED_EVENT } from './utils/userPresets';
-import { savePreset } from './utils/presetStorage';
-import { announcePresetSave } from './utils/presetNotices';
+import { deleteUserPreset, listUserPresetNames, cloudOnlyPresetNames } from './utils/userPresets';
 import { PresetSaveNotice } from './components/PresetSaveNotice';
 import { createPortal } from 'react-dom';
-import {
-  buildShareLink,
-  readShareLink,
-  clearShareFragment,
-  buildAccountShareLink,
-  canShareViaAccount,
-  shareTokenInUrl,
-  readAccountShareLink,
-  clearShareToken,
-  ShareTooLargeError,
-  type ShareLink,
-  type SharedScene,
-} from './utils/shareLink';
-import { revokeShare, isProRequired } from './utils/apiClient';
-import { cloudAutosave } from './utils/cloudDocuments';
-import { pushAppParameter } from './utils/cloudSync';
+import { canShareViaAccount } from './utils/shareLink';
 import { useEscapeToClose } from './hooks/useEscapeToClose';
-import { getSyncedSceneGraph } from './utils/mujocoSync';
 import { pressHistoryKey } from './utils/historyKeys';
 import { NoteCardOverlay } from './components/NoteCardOverlay';
 import { AxisLegendDrawer } from './components/AxisLegendDrawer';
@@ -102,16 +77,22 @@ import { PhysicsLoop } from './components/scene/PhysicsLoop';
 import { RenderOnChange } from './components/scene/RenderOnChange';
 import { GridFadeFollowsCamera } from './components/scene/GridFadeFollowsCamera';
 import { GRID_NAME } from './components/scene/gridConstants';
-import { anthropicUrl, geminiUrl } from './utils/llmEndpoints';
 import { BodyToneMapping } from './components/scene/BodyToneMapping';
 import { StudioBackdrop } from './components/scene/StudioBackdrop';
 import { useViewQuality, usePathTraceStatus } from './store/viewQualityStore';
 import { usePanels } from './store/panelsStore';
 import { SelectionOutline } from './components/scene/SelectionOutline';
 import { PathTracedView } from './components/scene/PathTracedView';
+import { useDarkMode } from './hooks/useDarkMode';
+import { useLlmSettings } from './hooks/useLlmSettings';
+import { useSceneDocument } from './hooks/useSceneDocument';
+import { usePresetActions, type PresetEntry } from './hooks/usePresetActions';
+import { useShareScene } from './hooks/useShareScene';
+import { useMeshExport } from './hooks/useMeshExport';
+import { useSceneIo } from './hooks/useSceneIo';
+import { useEditShortcuts, useCompilerPreload } from './hooks/useAppGlobals';
+import { useCardCollapse } from './hooks/useCardCollapse';
 
-type PresetEntry = { name: string; emoji?: string };
-type GeminiModelInfo = { name: string; displayName?: string; supportedGenerationMethods?: string[] };
 
 // The status bar's "SCAD Compiling" pill counts compiles in flight. openscad.ts
 // reports them through a listener rather than importing the store; see there.
@@ -120,9 +101,6 @@ setScadCompileListener((delta) => {
   if (delta > 0) s.incrementScadCompile();
   else s.decrementScadCompile();
 });
-
-/** Marks a clean point whose undo step has not landed yet. See markClean. */
-const PENDING_CLEAN = Symbol('pending');
 
 /**
  * The pose the app opens in, before any scene has been framed. 45° of vertical
@@ -150,26 +128,7 @@ function App() {
     shadow.map.dispose();
     shadow.map = null;
   }, [hiRes]);
-  const [darkMode, setDarkMode] = useState(() => {
-    if (typeof window !== 'undefined') {
-      return localStorage.getItem('physics_dark_mode') === 'true';
-    }
-    return false;
-  });
-
-  useEffect(() => {
-    if (darkMode) {
-      document.documentElement.classList.add('dark');
-      localStorage.setItem('physics_dark_mode', 'true');
-      pushAppParameter('physics_dark_mode', 'true');
-    } else {
-      document.documentElement.classList.remove('dark');
-      localStorage.setItem('physics_dark_mode', 'false');
-      pushAppParameter('physics_dark_mode', 'false');
-    }
-  }, [darkMode]);
-
-  const toggleDarkMode = () => setDarkMode(prev => !prev);
+  const [darkMode, toggleDarkMode] = useDarkMode();
 
   const isDocsOpen = usePanels((s) => s.isDocsOpen);
   const docsTab = usePanels((s) => s.docsTab);
@@ -182,15 +141,6 @@ function App() {
   const setIsLeftSidebarOpen = usePanels((s) => s.setLeftSidebarOpen);
   const isPropertiesOpen = usePanels((s) => s.isPropertiesOpen);
   const setIsPropertiesOpen = usePanels((s) => s.setPropertiesOpen);
-  const [isSaveModalOpen, setIsSaveModalOpen] = useState(false);
-  // The preset list reads storage during render, so a pull from the account or
-  // a save that only the account could take has to ask for a render to show up.
-  const [, setPresetListVersion] = useState(0);
-  useEffect(() => {
-    const bump = () => setPresetListVersion(v => v + 1);
-    window.addEventListener(USER_PRESETS_CHANGED_EVENT, bump);
-    return () => window.removeEventListener(USER_PRESETS_CHANGED_EVENT, bump);
-  }, []);
   const [isImportStlModalOpen, setIsImportStlModalOpen] = useState(false);
   const [isLaserCutModalOpen, setIsLaserCutModalOpen] = useState(false);
   const [isContourSliceModalOpen, setIsContourSliceModalOpen] = useState(false);
@@ -218,132 +168,13 @@ function App() {
     setDroppedImageFile(file);
     setIsImportImageModalOpen(true);
   }, []);
-  const [presetNameInput, setPresetNameInput] = useState('');
   // While anything is in pieces the scene on screen is the document with the
   // broken bodies swapped for their shards. See `shatterPieces` in the store.
   const shatteredBodies = useStore((s) => s.visibleShatteredBodies);
-  const [noteCards, setNoteCards] = useState<NoteCard[]>(() => {
-    const initialPreset = useStore.getState().activePreset;
-    if (initialPreset && !initialPreset.startsWith('user:')) {
-      const card = makePresetNoteCard(initialPreset);
-      return card ? [card] : [];
-    }
-    return [];
-  });
-  const [copilotMessages, setCopilotMessages] = useState<CopilotMessage[]>([]);
-  const [editingCardId, setEditingCardId] = useState<string | null>(null);
+  const doc = useSceneDocument();
+  const { noteCards, setNoteCards, copilotMessages, setCopilotMessages, editingCardId, setEditingCardId, hasUnsavedWork } = doc;
   const axisCanvasRef = useRef<HTMLCanvasElement>(null);
-
-  const [settingsGeminiKey, setSettingsGeminiKey] = useState(() => localStorage.getItem('gemini_api_key') || '');
-  const [settingsClaudeKey, setSettingsClaudeKey] = useState(() => localStorage.getItem('anthropic_api_key') || '');
-  const [settingsSelectedModel, setSettingsSelectedModel] = useState(() => localStorage.getItem('gemini_model') || 'gemini-3.6-flash');
-  const [settingsMaxTokens, setSettingsMaxTokens] = useState(() => readMaxTokens());
-  const [liveSettingsClaudeModels, setLiveSettingsClaudeModels] = useState<{ id: string; name: string }[]>([]);
-  const [liveSettingsGeminiModels, setLiveSettingsGeminiModels] = useState<{ id: string; name: string }[]>([]);
-
-  const fetchSettingsClaudeModels = async (key: string) => {
-    if (!key.trim()) return null;
-    const headers = {
-      'x-api-key': key.trim(),
-      'anthropic-version': '2023-06-01',
-      'anthropic-dangerous-direct-browser-access': 'true'
-    };
-    try {
-      const res = await fetch(anthropicUrl('/v1/models'), { headers });
-      if (res.ok) {
-        const data = await res.json();
-        const rawModels = data.data || data.models || [];
-        if (Array.isArray(rawModels) && rawModels.length > 0) {
-          const formatted = rawModels.map((m: { id: string; name?: string; display_name?: string }) => ({
-            id: m.id,
-            name: m.display_name || m.name || m.id
-          }));
-          setLiveSettingsClaudeModels(formatted);
-          return formatted;
-        }
-      }
-    } catch (e) {
-      console.warn("Failed to fetch Claude models in settings", e);
-    }
-    return null;
-  };
-
-  const fetchSettingsGeminiModels = async (key: string) => {
-    if (!key.trim()) return null;
-    try {
-      const res = await fetch(geminiUrl(`/v1beta/models?key=${key.trim()}`));
-      const data = await res.json();
-      if (data.models && Array.isArray(data.models)) {
-        const validModels = data.models
-          .filter((m: GeminiModelInfo) => !m.supportedGenerationMethods || m.supportedGenerationMethods.includes('generateContent'))
-          .map((m: GeminiModelInfo) => ({
-            id: m.name.replace(/^models\//, ''),
-            name: m.displayName || m.name.replace(/^models\//, '')
-          }));
-        if (validModels.length > 0) {
-          setLiveSettingsGeminiModels(validModels);
-          return validModels;
-        }
-      }
-    } catch (e) {
-      console.warn("Failed to fetch Gemini models in settings", e);
-    }
-    return null;
-  };
-
-  useEffect(() => {
-    const syncSettingsState = () => {
-      const gk = localStorage.getItem('gemini_api_key') || '';
-      const ck = localStorage.getItem('anthropic_api_key') || '';
-      const m = localStorage.getItem('gemini_model') || 'gemini-3.6-flash';
-      setSettingsGeminiKey(gk);
-      setSettingsClaudeKey(ck);
-      setSettingsSelectedModel(m);
-      setSettingsMaxTokens(readMaxTokens());
-      if (gk) fetchSettingsGeminiModels(gk);
-      if (ck) fetchSettingsClaudeModels(ck);
-    };
-
-    syncSettingsState();
-    window.addEventListener('storage', syncSettingsState);
-    return () => window.removeEventListener('storage', syncSettingsState);
-  }, []);
-
-  const handleUpdateClaudeKeyInSettings = async (newKey: string) => {
-    setSettingsClaudeKey(newKey);
-    localStorage.setItem('anthropic_api_key', newKey);
-    pushGlobalParameter('anthropic_api_key', newKey);
-    window.dispatchEvent(new Event('storage'));
-    if (newKey.trim()) {
-      const live = await fetchSettingsClaudeModels(newKey.trim());
-      if (live && live.length > 0) {
-        const topModel = live[0].id;
-        setSettingsSelectedModel(topModel);
-        localStorage.setItem('gemini_model', topModel);
-        pushGlobalParameter('gemini_model', topModel);
-        window.dispatchEvent(new Event('storage'));
-      }
-    }
-  };
-
-  const handleUpdateGeminiKeyInSettings = async (newKey: string) => {
-    setSettingsGeminiKey(newKey);
-    localStorage.setItem('gemini_api_key', newKey);
-    pushGlobalParameter('gemini_api_key', newKey);
-    window.dispatchEvent(new Event('storage'));
-    if (newKey.trim()) {
-      fetchSettingsGeminiModels(newKey.trim());
-    }
-  };
-
-  // Expose noteCards and copilotMessages state to MCP bridge and noteCard manager
-  useEffect(() => {
-    physicsGlobals._physics_getNoteCards = () => noteCards;
-    physicsGlobals._physics_setNoteCards = (cards: typeof noteCards) => setNoteCards(cards);
-    physicsGlobals._physics_getCopilotMessages = () => copilotMessages;
-    physicsGlobals._physics_setCopilotMessages = (msgs: typeof copilotMessages) => setCopilotMessages(msgs);
-    physicsGlobals._physics_store = useStore;
-  }, [noteCards, copilotMessages]);
+  const llm = useLlmSettings();
 
   // Only these fields, compared shallowly. A bare useStore() here re-rendered
   // the whole app, viewport included, on every write to any field of the
@@ -360,7 +191,7 @@ function App() {
     wireframe, toggleWireframe, showEdges, toggleShowEdges, paintMode,
     gridCellSizeMm, setGridCellSizeMm,
     sceneGraph, selectedNodeId, setSelectedNodeId,
-    addComponent, loadPreset, openPatternGenerator, updateScene,
+    addComponent, openPatternGenerator,
     resetSimulation,
     sculptNodeId,
     latticeNodeId,
@@ -378,7 +209,7 @@ function App() {
     wireframe: s.wireframe, toggleWireframe: s.toggleWireframe, showEdges: s.showEdges, toggleShowEdges: s.toggleShowEdges, paintMode: s.paintMode,
     gridCellSizeMm: s.gridCellSizeMm, setGridCellSizeMm: s.setGridCellSizeMm,
     sceneGraph: s.sceneGraph, selectedNodeId: s.selectedNodeId, setSelectedNodeId: s.setSelectedNodeId,
-    addComponent: s.addComponent, loadPreset: s.loadPreset, openPatternGenerator: s.openPatternGenerator, updateScene: s.updateScene,
+    addComponent: s.addComponent, openPatternGenerator: s.openPatternGenerator,
     resetSimulation: s.resetSimulation,
     sculptNodeId: s.sculptNodeId,
     latticeNodeId: s.latticeNodeId,
@@ -386,28 +217,7 @@ function App() {
     undoStack: s.undoStack, redoStack: s.redoStack,
   })));
 
-  /*
-   * Pre-load the OpenSCAD compiler in the background, so the first boolean is
-   * quick — but only once physics is up and the page is idle.
-   *
-   * It is 11 MB of wasm and 8 MB of fonts. On a fixed two-second timer it went
-   * out while MuJoCo's own 9 MB could still be downloading on a slow link, and
-   * the scene the user came to see waited behind a compiler it may never need.
-   * A scene with booleans in it does not wait for this either way: compiling
-   * starts the pool itself.
-   */
-  useEffect(() => {
-    if (!mujoco) return;
-    const preload = () => {
-      loadCompiler().catch(err => console.warn('Failed to pre-load OpenSCAD compiler in background:', err));
-    };
-    if (typeof window.requestIdleCallback === 'function') {
-      const handle = window.requestIdleCallback(preload, { timeout: 10000 });
-      return () => window.cancelIdleCallback(handle);
-    }
-    const timer = setTimeout(preload, 3000);
-    return () => clearTimeout(timer);
-  }, [mujoco]);
+  useCompilerPreload();
 
   // Exactly what the solver was handed, so the picture and the physics cannot
   // disagree about which bodies exist.
@@ -418,586 +228,19 @@ function App() {
 
   const [activeWeakSpot, setActiveWeakSpot] = useState<WeakSpot | null>(null);
 
-  // Keyboard Shortcuts Handler (Delete / Backspace key to delete selected body)
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (['INPUT', 'TEXTAREA', 'SELECT'].includes((e.target as HTMLElement).tagName)) {
-        return;
-      }
-      if ((e.target as HTMLElement)?.isContentEditable) return;
+  useEditShortcuts();
+  useCardCollapse();
 
-      if (e.key === 'Delete' || e.key === 'Backspace') {
-        // Not while a tool has hold of the body. Lattice swallows the key
-        // itself; sculpting, painting, measuring and a keyboard gesture did
-        // not, so a stray Backspace deleted the body being worked on and threw
-        // away its stroke history with it.
-        const s = useStore.getState();
-        if (s.sculptNodeId || s.latticeNodeId || s.paintMode || s.measureMode || s.gestureStatus) return;
-        // Nor from inside a dialog: every modal is a full-screen `fixed inset-0`
-        // overlay, and Backspace on one of its buttons deleted the selected
-        // body hidden behind it.
-        if ((e.target as HTMLElement).closest?.('.fixed.inset-0')) return;
-        const ids = [...(s.selectedNodeId ? [s.selectedNodeId] : []), ...s.extraSelectedIds];
-        if (ids.length > 0) s.deleteNodes(ids);
-        return;
-      }
+  const presets = usePresetActions(doc);
+  const { activePresetLabel, loadPresetWithCard, loadUserPresetWithCard, saveUserPresetByName, handleSavePresetClick, saveModal } = presets;
+  const openDialog = useDialogs((s) => s.openDialog);
+  const closeDialog = useDialogs((s) => s.closeDialog);
+  const showNotice = useDialogs((s) => s.showNotice);
 
-      /*
-        Undo and redo on the keyboard.
-
-        There has been an undo BUTTON in the toolbar since the beginning and
-        never a shortcut for it, which is the one place a person does not look:
-        Ctrl-Z is muscle memory, and when it does nothing the conclusion is that
-        the app cannot undo rather than that it is on a button.
-
-        Bubble phase on purpose. The lattice and sculpt tools each keep their own
-        history and take Ctrl-Z in the CAPTURE phase while they are open, so
-        while you are modelling it takes back modelling; they stop the event only
-        when they actually had something to undo, so once their history runs out
-        it arrives here and steps the document back instead.
-      */
-      if (!(e.metaKey || e.ctrlKey)) return;
-      const key = e.key.toLowerCase();
-      // Ctrl-Y as well as Ctrl-Shift-Z: the first is what Windows does, the
-      // second is what everything else does, and both are cheap to answer.
-      const redoing = key === 'y' || (key === 'z' && e.shiftKey);
-      if (!redoing && key !== 'z') return;
-      e.preventDefault();
-      const store = useStore.getState();
-      if (redoing) store.redo();
-      else store.undo();
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
-
-  /**
-   * Click a card's h3 to fold it away. Both side panels get this: the palette
-   * on the left and the properties inspector on the right are each an
-   * `aside.glass-panel`, and the CSS in index.css is written against that
-   * selector for both.
-   *
-   * This used to reach for `querySelector`, which returns only the first match
-   * in document order — the left sidebar. The inspector's cards were never
-   * wired up at all, so none of its thirty headers folded despite being styled
-   * for it.
-   *
-   * Indicators are injected rather than rendered because the cards are plain
-   * JSX all through the inspector. A MutationObserver picks up the ones that
-   * mount later (a card revealed by a checkbox, a body selected after this
-   * effect ran) — a single timeout only ever caught whatever existed 100ms in.
-   */
-  useEffect(() => {
-    const panels = Array.from(document.querySelectorAll('aside.glass-panel'));
-    if (panels.length === 0) return;
-
-    const decorate = () => {
-      for (const panel of panels) {
-        panel.querySelectorAll('div > h3').forEach((h) => {
-          if (h.querySelector('.collapse-indicator')) return;
-          const indicator = document.createElement('span');
-          indicator.className = 'collapse-indicator text-[9px] font-mono text-slate-400 dark:text-slate-500 font-normal normal-case';
-          indicator.style.userSelect = 'none';
-          // Mirrors the card's current state: a header that mounts inside an
-          // already-folded card has to say [+], not [-].
-          indicator.textContent = h.parentElement?.classList.contains('is-collapsed') ? ' [+]' : ' [−]';
-          // Taken out of the header's flow rather than appended into it. These
-          // headers are flex rows, several of them `justify-between` with a
-          // docs (i) as the last child, so an extra child stops being a
-          // trailing mark and becomes a third column — which shunts the (i)
-          // from the right-hand edge into the middle of the header.
-          const hHtml = h as HTMLElement;
-          indicator.style.position = 'absolute';
-          indicator.style.right = '0';
-          indicator.style.top = '50%';
-          indicator.style.transform = 'translateY(-50%)';
-          hHtml.style.position = 'relative';
-          hHtml.style.paddingRight = '1.1rem';
-          h.appendChild(indicator);
-          hHtml.style.cursor = 'pointer';
-        });
-      }
-    };
-
-    // Coalesced to one pass per frame: the inspector rewrites a lot of DOM
-    // while a slider is being dragged, and every write lands here.
-    let queued = 0;
-    const schedule = () => {
-      if (queued) return;
-      queued = requestAnimationFrame(() => { queued = 0; decorate(); });
-    };
-
-    decorate();
-    const observer = new MutationObserver(schedule);
-    for (const panel of panels) observer.observe(panel, { childList: true, subtree: true });
-
-    const handleHeaderClick = (e: Event) => {
-      const target = e.target as HTMLElement;
-      const header = target.closest('h3');
-      if (!header) return;
-      if (target.closest('button') || target.closest('a') || target.closest('input') || target.closest('select')) return;
-
-      const card = header.parentElement;
-      if (!card) return;
-
-      card.classList.toggle('is-collapsed');
-
-      const indicator = header.querySelector('.collapse-indicator');
-      if (indicator) {
-        indicator.textContent = card.classList.contains('is-collapsed') ? ' [+]' : ' [−]';
-      }
-    };
-
-    for (const panel of panels) panel.addEventListener('click', handleHeaderClick);
-
-    return () => {
-      observer.disconnect();
-      if (queued) cancelAnimationFrame(queued);
-      for (const panel of panels) panel.removeEventListener('click', handleHeaderClick);
-    };
-  }, [selectedNodeId]);
-
-  // What the (always-unselected) preset dropdown shows when closed.
-  const activePresetLabel = useMemo(() => {
-    if (!activePreset) return '✏️ Modified scene';
-    if (activePreset.startsWith('user:')) return `💾 ${activePreset.replace('user:', '')}`;
-    const preset = PRESETS[activePreset as keyof typeof PRESETS] as PresetEntry | undefined;
-    if (!preset) return '✏️ Modified scene';
-    return `${preset.emoji ? `${preset.emoji} ` : ''}${preset.name}`;
-  }, [activePreset]);
-
-  // Load a preset and replace the note card with the preset's built-in card (if any)
-  /*
-   * What the scene looked like when it was last loaded, saved or imported, so
-   * picking another preset can ask before throwing work away. Undo brings the
-   * geometry back after a load, but not the note cards or the copilot chat,
-   * which live here rather than in the store's history.
-   *
-   * An edit is read off the undo stack — a new top entry, or one still being
-   * gathered — rather than off the scene object, which also changes when a
-   * boolean compiles or colliders land without anyone touching anything.
-   */
-  const cleanRef = useRef<{ top: unknown; notes: unknown; chat: unknown } | null>(null);
-  const stopWatchingClean = useRef<(() => void) | null>(null);
-  const markClean = useCallback((notes: unknown, chat: unknown) => {
-    stopWatchingClean.current?.();
-    stopWatchingClean.current = null;
-    // A load's own undo step lands a tick or a build later, so the top of the
-    // stack is only read once nothing is still being gathered; until then the
-    // scene counts as the one just loaded.
-    const clean = { top: PENDING_CLEAN as unknown, notes, chat };
-    cleanRef.current = clean;
-    const settle = (state: { tempUndoState: unknown; undoStack: unknown[] }) => {
-      if (state.tempUndoState !== null) return false;
-      clean.top = state.undoStack.at(-1) ?? null;
-      return true;
-    };
-    if (settle(useStore.getState())) return;
-    const unsubscribe = useStore.subscribe((state) => {
-      if (!settle(state)) return;
-      unsubscribe();
-      stopWatchingClean.current = null;
-    });
-    stopWatchingClean.current = unsubscribe;
-  }, []);
-  const hasUnsavedWork = (): boolean => {
-    const clean = cleanRef.current;
-    const { undoStack: undoNow, tempUndoState } = useStore.getState();
-    if (!clean) return undoNow.length > 0 || copilotMessages.length > 0;
-    if (noteCards !== clean.notes || copilotMessages !== clean.chat) return true;
-    if (clean.top === PENDING_CLEAN) return false;
-    return (undoNow.at(-1) ?? null) !== clean.top || tempUndoState !== null;
-  };
-
-  const loadPresetWithCard = useCallback((name: string) => {
-    loadPreset(name);
-    const builtinKey = name.startsWith('user:') ? null : name;
-    const presetCard = builtinKey ? makePresetNoteCard(builtinKey) : null;
-    const notes = presetCard ? [presetCard] : [];
-    const chat: CopilotMessage[] = [];
-    setNoteCards(notes);
-    setCopilotMessages(chat);
-    setEditingCardId(null);
-    markClean(notes, chat);
-  }, [loadPreset, markClean]);
-
-  // Also load note cards from user presets (stored alongside the scene)
-  const loadUserPresetWithCard = useCallback((name: string) => {
-    loadPreset(name);
-    let notes: NoteCard[] = [];
-    let chat: CopilotMessage[] = [];
-    try {
-      const saved = readUserPreset(name);
-      if (saved && Array.isArray(saved.noteCards)) notes = saved.noteCards;
-      if (saved && Array.isArray(saved.copilotMessages)) chat = saved.copilotMessages as CopilotMessage[];
-    } catch {
-      // Unreadable: it loads with no notes or chat, as before.
-    }
-    setNoteCards(notes);
-    setCopilotMessages(chat);
-    setEditingCardId(null);
-    markClean(notes, chat);
-  }, [loadPreset, markClean]);
-
-  const [dialogModal, setDialogModal] = useState<{
-    title: string;
-    body: React.ReactNode;
-    confirmLabel: string;
-    cancelLabel?: string;
-    hideCancel?: boolean;
-    tone?: 'blue' | 'red' | 'amber';
-    onConfirm: () => void;
-    onCancel?: () => void;
-  } | null>(null);
-
-  const [exportScaleModal, setExportScaleModal] = useState<{
-    title: string;
-    value: string;
-    onConfirm: (targetMm: number) => void;
-  } | null>(null);
-
-  const showNotice = useCallback((title: string, message: string, tone: 'blue' | 'red' | 'amber' = 'amber') => {
-    setDialogModal({
-      title,
-      body: <p>{message}</p>,
-      confirmLabel: 'OK',
-      hideCancel: true,
-      tone,
-      onConfirm: () => setDialogModal(null),
-    });
-  }, []);
-
-  const saveUserPresetByName = useCallback((name: string) => {
-    const trimmed = name.trim();
-    if (!trimmed) return;
-    try {
-      const syncedScene = getSyncedSceneGraph(sceneGraph, model, data, mujoco);
-      const preset = { ...syncedScene, noteCards, copilotMessages };
-      /*
-       * Through savePreset, which says what happened: the browser's storage is
-       * a few megabytes and a sculpted scene can be one of them. This used to
-       * ignore a failed write and then load the preset "just saved" — which,
-       * re-saving under an existing name, put the OLD copy over the work on
-       * screen. And a save that worked is not a load either: the scene on
-       * screen already is the preset, so it is only named as one, leaving the
-       * tools open and the camera where it was.
-       */
-      void savePreset(trimmed, preset).then((result) => {
-        announcePresetSave(trimmed, preset, result);
-        if (result.ok) {
-          useStore.getState().setActivePreset(`user:${trimmed}`);
-          markClean(noteCards, copilotMessages);
-        }
-      });
-      // A deliberate save is also a named revision of the cloud document, which
-      // the pruner never discards — unlike the automatic checkpoints.
-      void cloudAutosave.saveExplicit(trimmed, preset, `Saved as “${trimmed}”`);
-    } catch (e) {
-      console.error('Failed to save user preset', e);
-      showNotice('Could not save preset', `Could not save "${trimmed}": ${e instanceof Error ? e.message : String(e)}`, 'red');
-    }
-  }, [sceneGraph, model, data, mujoco, noteCards, copilotMessages, markClean, showNotice]);
-
-  /*
-   * Cloud auto-save.
-   *
-   * The scene being worked on has never been persisted anywhere: presets are saved
-   * on purpose, and a reload drops back to the default pendulum. This offers it to
-   * the account after every edit.
-   *
-   * It has to live here rather than in the store or in userPresets.ts, because the
-   * serialised form is `getSyncedSceneGraph(...)` — the same function the manual
-   * save and the JSON export use, so an auto-saved scene is byte-for-byte what
-   * saving by hand would have produced — and that needs the live MuJoCo handles,
-   * which only exist in this component.
-   *
-   * Depending on `sceneGraph` rather than on simulation state is deliberate: the
-   * graph changes when somebody edits the scene, which is what is worth saving.
-   * Positions changing sixty times a second while a simulation runs are not edits.
-   *
-   * `cloudAutosave` does nothing at all unless the account is signed in with Pro,
-   * and every local save path is untouched, so nothing here is load-bearing.
-   */
-  useEffect(() => {
-    if (!mujoco) return;
-    try {
-      const name = activePreset?.startsWith('user:') ? activePreset.slice('user:'.length) : 'Untitled scene';
-      // Built only when the save actually serialises it: with auto-save off, or
-      // inside the coalescing window, cloning the scene here was wasted work.
-      cloudAutosave.schedule(name, () => ({
-        ...getSyncedSceneGraph(sceneGraph, model, data, mujoco),
-        noteCards,
-        copilotMessages,
-      }));
-    } catch {
-      // A scene that cannot be synced cannot be saved to anything; the local paths
-      // have the same problem and there is nothing useful to add here.
-    }
-  }, [sceneGraph, noteCards, copilotMessages, model, data, mujoco, activePreset]);
-
-  const handleSavePresetClick = useCallback(() => {
-    const defaultName = activePreset && activePreset.startsWith('user:')
-      ? activePreset.replace('user:', '')
-      : '';
-    setPresetNameInput(defaultName);
-    setIsSaveModalOpen(true);
-  }, [activePreset]);
-
-  // Ctrl+S opens the save dialog, named for the preset that is open, rather
-  // than the browser's "Save page as", which saves the app's HTML and none of
-  // the scene. Everywhere, fields included: the browser's dialog is no more
-  // use from inside one.
-  const savePresetClickRef = useRef(handleSavePresetClick);
-  useEffect(() => {
-    savePresetClickRef.current = handleSavePresetClick;
-  });
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (!(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey || e.key.toLowerCase() !== 's') return;
-      e.preventDefault();
-      savePresetClickRef.current();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, []);
-
-  const handleConfirmSavePreset = useCallback(() => {
-    // Enter with no name used to close the dialog as if it had saved; the
-    // Save button is already disabled for that.
-    if (!presetNameInput.trim()) return;
-    saveUserPresetByName(presetNameInput);
-    setIsSaveModalOpen(false);
-    setPresetNameInput('');
-  }, [presetNameInput, saveUserPresetByName]);
-
-  /*
-   * Sharing the scene as a link.
-   *
-   * The only way to give someone a scene was the JSON file, which is a file:
-   * it goes in an email, not in a message, and the person on the other end has
-   * to save it, find it and import it.
-   */
-  const [share, setShare] = useState<ShareLink | null>(null);
-  const [shareError, setShareError] = useState<string | null>(null);
-  const [shareCopied, setShareCopied] = useState(false);
-  const [shareTooBig, setShareTooBig] = useState<ShareTooLargeError | null>(null);
-  const [shareBusy, setShareBusy] = useState(false);
-
-  const copyShareLink = useCallback(async (url: string) => {
-    try {
-      await navigator.clipboard.writeText(url);
-      setShareCopied(true);
-    } catch {
-      // No clipboard on an insecure origin, and none in some embedded views.
-      // The link is in a selectable field beside this for exactly that case.
-      setShareCopied(false);
-    }
-  }, []);
-
-  /**
-   * Copies a link that opens this scene in someone else's browser.
-   *
-   * `getSyncedSceneGraph` is the same reader the save and the JSON export use,
-   * so a link, a saved preset and a file all carry the same scene — positions
-   * included, which is what "synced" means: the graph on its own still holds
-   * where every body *started*, not where the simulation has put it.
-   *
-   * The copilot conversation is deliberately left out. It is the author's
-   * working notes rather than part of the scene, it is usually the largest
-   * thing in a saved preset, and the person opening the link wants the model,
-   * not the argument that produced it. Note cards do travel: they are
-   * annotations written on the scene.
-   */
-  /** The scene as it would be shared, read the same way the save reads it. */
-  const sceneToShare = useCallback((): SharedScene => {
-    const synced = getSyncedSceneGraph(sceneGraph, model, data, mujoco);
-    const name = activePreset?.startsWith('user:')
-      ? activePreset.slice('user:'.length)
-      : synced.name || 'Shared scene';
-    return { name, nodes: synced.nodes, noteCards };
-  }, [sceneGraph, model, data, mujoco, noteCards, activePreset]);
-
-  const handleShare = useCallback(async () => {
-    setShareError(null);
-    setShareTooBig(null);
-    setShareCopied(false);
-    try {
-      const link = await buildShareLink(sceneToShare());
-      setShare(link);
-      await copyShareLink(link.url);
-    } catch (e) {
-      setShare(null);
-      /*
-       * A scene that will not fit in a link is the ordinary case for anything
-       * sculpted, not an error to apologise for — so it is kept apart from a
-       * real failure. The panel turns it into the offer that actually solves
-       * it: leave the scene with an account and send a short link instead.
-       */
-      if (e instanceof ShareTooLargeError) setShareTooBig(e);
-      else setShareError(e instanceof Error ? e.message : 'That scene could not be made into a link.');
-    }
-  }, [sceneToShare, copyShareLink]);
-
-  /**
-   * Leaves the scene with the account and copies the short link for it.
-   *
-   * Offered only after the link-sized route has failed. It is the heavier
-   * option — it needs an account, and it puts a copy of the scene on a server
-   * — and offering it first would make an account look required for something
-   * that mostly is not.
-   */
-  const handleAccountShare = useCallback(async () => {
-    setShareError(null);
-    setShareBusy(true);
-    try {
-      const link = await buildAccountShareLink(sceneToShare());
-      setShareTooBig(null);
-      setShare(link);
-      await copyShareLink(link.url);
-    } catch (e) {
-      // A free account is expected to work here; sharing is deliberately not a
-      // Pro route. If that ever changes server-side, say so plainly rather than
-      // showing a bare 403.
-      setShareError(
-        isProRequired(e)
-          ? 'Sharing from your account needs PhysBox Pro.'
-          : e instanceof Error
-            ? e.message
-            : 'That scene could not be shared from your account.'
-      );
-    } finally {
-      setShareBusy(false);
-    }
-  }, [sceneToShare, copyShareLink]);
-
-  /*
-   * Signing in was the answer to "this scene is too big for a link", so the
-   * share is finished off rather than leaving the panel sitting there with the
-   * same button on it — the person already said what they wanted.
-   */
-  useEffect(() => {
-    const done = (e: Event) => {
-      if ((e as CustomEvent<{ reason?: string }>).detail?.reason !== 'share') return;
-      void handleAccountShare();
-    };
-    window.addEventListener(SIGNED_IN_EVENT, done);
-    return () => window.removeEventListener(SIGNED_IN_EVENT, done);
-  }, [handleAccountShare]);
-
-  /** Turns off a link that points at the account. A link with the scene inside it cannot be recalled. */
-  const handleStopSharing = useCallback(async (token: string) => {
-    setShareBusy(true);
-    const ok = await revokeShare(token);
-    setShareBusy(false);
-    if (!ok) {
-      setShareError('That link could not be turned off. Try again in a moment.');
-      return;
-    }
-    setShare(null);
-    setShareCopied(false);
-  }, []);
-
-  /**
-   * A scene arriving by link — one this app made, from the share button.
-   *
-   * It is saved under its name and then loaded, rather than pushed straight
-   * into the store. Every other way into a scene goes through the preset
-   * loader, which resets the lattice and sculpt sessions, the camera and the
-   * physics worker in one known order; a second path into `recompile` would be
-   * a second place for that order to drift. It also means a shared scene is
-   * *kept* — a Mesh scene is hours of work to rebuild and losing one to a
-   * reload would be worse than an unasked-for entry in the preset list.
-   *
-   * Declinable, and the fragment stays in the URL until it is accepted, so
-   * "no" means "not now" rather than "thrown away".
-   */
-  /**
-   * Puts a shared scene into the app, however the link carried it.
-   *
-   * Saved under its name and then loaded, rather than pushed into the store.
-   * Every other way into a scene goes through the preset loader, which resets
-   * the lattice and sculpt sessions, the camera and the physics worker in one
-   * known order, and a second path into `recompile` would be a second place for
-   * that order to drift. It also means a shared scene is *kept*: a Mesh scene
-   * is hours of work to rebuild, and losing one to a reload would be worse than
-   * an unasked-for entry in the preset list.
-   */
-  const openSharedScene = useCallback((shared: SharedScene) => {
-    setDialogModal({
-      title: `Open "${shared.name}"?`,
-      confirmLabel: 'Open shared scene',
-      cancelLabel: 'Keep current scene',
-      body: (
-        <>
-          <p>
-            It is saved under that name and replaces the scene on screen. Save what you have first if
-            you want it back.
-          </p>
-          <p>
-            Keeping your current scene leaves the link in the address bar, so you can reload to open
-            it later.
-          </p>
-        </>
-      ),
-      onCancel: () => setDialogModal(null),
-      onConfirm: () => {
-        setDialogModal(null);
-        // Never over the top of a scene already saved under that name: a link from
-        // someone whose "bracket" is not your "bracket" would otherwise overwrite
-        // yours on open, with nothing said.
-        const taken = new Set(listUserPresetNames());
-        let name = shared.name;
-        for (let n = 2; taken.has(name); n++) name = `${shared.name} (${n})`;
-
-        clearShareFragment();
-        clearShareToken();
-        if (!saveUserPreset(name, { nodes: shared.nodes, noteCards: shared.noteCards ?? [] })) {
-          setShareError(
-            `"${name}" opened but could not be saved — browser storage is full. ` +
-              'Export the JSON now if you want to keep it.'
-          );
-        }
-        loadUserPresetWithCard(`user:${name}`);
-      },
-    });
-  }, [loadUserPresetWithCard]);
-
-  /**
-   * A scene arriving as a token — the account route, for scenes too big to put
-   * in a link.
-   *
-   * It lands the same way a fragment-shared scene does, through a save and a
-   * preset load, so there is one way into a shared scene rather than two.
-   * The token is taken out of the address bar only once it is open, so
-   * declining leaves the link where it was.
-   */
-  useEffect(() => {
-    const token = shareTokenInUrl();
-    if (!token) return;
-    readAccountShareLink(token)
-      .then((shared) => openSharedScene(shared))
-      .catch((err) => {
-        clearShareToken();
-        setShareError(err?.message || 'That shared link could not be opened.');
-      });
-    // Once, on mount.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  useEffect(() => {
-    readShareLink()
-      .then((shared) => {
-        if (!shared) return;
-        openSharedScene(shared);
-      })
-      .catch((err) => {
-        clearShareFragment();
-        setShareError(err?.message || 'That link could not be read.');
-      });
-    // Once, on mount: opening the scene takes the fragment out of the URL.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  const {
+    share, shareError, shareCopied, shareTooBig, shareBusy,
+    handleShare, handleAccountShare, handleStopSharing, copyShareLink, dismiss: dismissShare,
+  } = useShareScene(noteCards, loadUserPresetWithCard);
 
   const threeSceneRef = useRef<THREE.Scene | null>(null);
   // The EffectComposer instance, so a screenshot can render through the same
@@ -1006,328 +249,8 @@ function App() {
   // useMCPBridge.
   const composerRef = useRef<ComponentRef<typeof EffectComposer> | null>(null);
 
-  /**
-   * The scene, as meshes ready to be written to a file.
-   *
-   * Shared by every mesh export rather than copied per format: they all want
-   * the same thing — world-space geometry, scaled to a real size, Z-up — and
-   * the only difference between them is what gets written afterwards. Materials
-   * come along, because two of the three formats can carry colour and the one
-   * that cannot simply ignores them.
-   *
-   * Prompts with the in-app export size modal when parts have positive size.
-   */
-  const withExportGroup = useCallback((title: string, onReady: (exportGroup: THREE.Group) => void) => {
-    const scene = threeSceneRef.current;
-    if (!scene) {
-      showNotice('Scene not ready', 'Wait for the 3D scene to finish loading before exporting.');
-      return;
-    }
-
-    // Find the nearest ancestor tagged with a body's nodeId (set on DynamicGeom's
-    // wrapper <group name={nodeId}>), so multi-part scenes (e.g. an enclosure's
-    // box + lid sitting side by side) can be scaled by a single part's size
-    // rather than the combined footprint of everything visible.
-    const findNodeId = (obj: THREE.Object3D): string | null => {
-      let cur: THREE.Object3D | null = obj;
-      while (cur) {
-        if (cur.name) return cur.name;
-        cur = cur.parent;
-      }
-      return null;
-    };
-
-    const exportGroup = new THREE.Group();
-    const partBboxes = new Map<string, THREE.Box3>();
-    let ungroupedIdx = 0;
-    scene.traverse((obj) => {
-      if (!(obj as THREE.Mesh).isMesh) return;
-      const mesh = obj as THREE.Mesh;
-      const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-      const standard = mats.find(m => (m as THREE.MeshStandardMaterial).isMeshStandardMaterial) as THREE.MeshStandardMaterial | undefined;
-      // Only lit surfaces are the model. The brush ring, the CSG ghosts and the
-      // shadow catcher are all basic/shadow materials and stay out of the file.
-      if (!standard) return;
-      mesh.updateWorldMatrix(true, false);
-      const geo = mesh.geometry.clone().applyMatrix4(mesh.matrixWorld);
-      // The material is cloned so that turning the viewport to wireframe does
-      // not export a wireframe — that is a way of looking at the model, not a
-      // property of it.
-      const material = standard.clone();
-      material.wireframe = false;
-      const exported = new THREE.Mesh(geo, material);
-      exported.name = findNodeId(mesh) ?? mesh.name ?? `part_${ungroupedIdx}`;
-      exportGroup.add(exported);
-
-      const partKey = findNodeId(mesh) ?? `__ungrouped_${ungroupedIdx++}`;
-      const meshBbox = new THREE.Box3().setFromBufferAttribute(geo.attributes.position as THREE.BufferAttribute);
-      const existing = partBboxes.get(partKey);
-      if (existing) existing.union(meshBbox);
-      else partBboxes.set(partKey, meshBbox);
-    });
-
-    if (exportGroup.children.length === 0) {
-      showNotice('Nothing to export', 'There are no visible 3D parts in the scene to export.');
-      return;
-    }
-
-    // Normalize: fit the LONGEST SINGLE PART's longest side to a user-specified
-    // target in mm (not the combined bounding box of everything visible), centered
-    // at origin. Also convert from Three.js Y-up (the scene's convention) to the
-    // Z-up convention STL/slicers expect - otherwise the export comes out on its
-    // side even though the on-screen render (Y-up, handled natively by Three.js)
-    // looks correct.
-    const bbox = new THREE.Box3().setFromObject(exportGroup);
-    let longestPartDim = 0;
-    for (const partBbox of partBboxes.values()) {
-      const partSize = partBbox.getSize(new THREE.Vector3());
-      longestPartDim = Math.max(longestPartDim, partSize.x, partSize.y, partSize.z);
-    }
-    if (longestPartDim > 0) {
-      const defaultMm = Math.round(longestPartDim * 1000).toString();
-      setExportScaleModal({
-        title,
-        value: defaultMm,
-        onConfirm: (targetMm) => {
-          const scale = targetMm / longestPartDim;
-          const center = bbox.getCenter(new THREE.Vector3());
-          const transform = new THREE.Matrix4()
-            .makeRotationX(Math.PI / 2)
-            .multiply(new THREE.Matrix4().makeScale(scale, scale, scale))
-            .multiply(new THREE.Matrix4().makeTranslation(-center.x, -center.y, -center.z));
-          for (const child of exportGroup.children) {
-            (child as THREE.Mesh).geometry.applyMatrix4(transform);
-          }
-          onReady(exportGroup);
-        },
-      });
-      return;
-    }
-
-    onReady(exportGroup);
-  }, [showNotice]);
-
-  /** The scene's name, cleaned up into something that can be a filename. */
-  const exportBaseName = useCallback(() => {
-    let baseName = '';
-    if (noteCards && noteCards.length > 0) {
-      for (const card of noteCards) {
-        if (card.markdown) {
-          const match = card.markdown.match(/^\s*#\s+(.+)$/m);
-          const heading = match ? match[1].replace(/[*_`]/g, '').trim() : '';
-          // Not the new-card placeholder, or every export became note.stl.
-          if (heading && heading !== 'Note') {
-            baseName = heading;
-            break;
-          }
-        }
-      }
-    }
-
-    if (!baseName && activePreset) {
-      if (activePreset.startsWith('user:')) {
-        baseName = activePreset.replace('user:', '').trim();
-      } else {
-        const presetObj = PRESETS[activePreset as keyof typeof PRESETS] as PresetEntry | undefined;
-        baseName = presetObj?.name || activePreset;
-      }
-    }
-
-    if (!baseName) {
-      baseName = 'physics_scene';
-    }
-
-    return baseName.toLowerCase().replace(/[^a-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '') || 'physics_scene';
-  }, [noteCards, activePreset]);
-
-  const exportJson = useCallback(() => {
-    try {
-      const syncedScene = getSyncedSceneGraph(sceneGraph, model, data, mujoco);
-      const dataStr = JSON.stringify({ ...syncedScene, noteCards, copilotMessages }, null, 2);
-      const blob = new Blob([dataStr], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${exportBaseName()}.json`;
-      a.click();
-      URL.revokeObjectURL(url);
-    } catch (e) {
-      console.error('Failed to export JSON', e);
-      showNotice('Export failed', 'Failed to export JSON.', 'red');
-    }
-  }, [sceneGraph, model, data, mujoco, noteCards, copilotMessages, exportBaseName, showNotice]);
-
-  const exportStl = useCallback(() => {
-    withExportGroup('Export STL', (exportGroup) => {
-      const exporter = new STLExporter();
-      const result = exporter.parse(exportGroup, { binary: true }) as DataView;
-      downloadBlob(new Blob([result.buffer as ArrayBuffer], { type: 'application/octet-stream' }), `${exportBaseName()}.stl`);
-    });
-  }, [withExportGroup, exportBaseName]);
-
-  /**
-   * The same model, in the format that can carry what it looks like.
-   *
-   * Both halves of the colour go in — per-corner colour for anything that
-   * renders the file, and a filament slot per triangle for a slicer that
-   * prints it. See utils/threeMfExporter.
-   */
-  const exportWholeScene3mf = useCallback(() => {
-    withExportGroup('Export 3MF', (exportGroup) => {
-      const meshes: ThreeMfMesh[] = [];
-      exportGroup.traverse((obj) => {
-        const mesh = obj as THREE.Mesh;
-        if (!mesh.isMesh) return;
-        const material = mesh.material as THREE.MeshStandardMaterial;
-        const position = mesh.geometry.getAttribute('position');
-        if (!position) return;
-        const color = mesh.geometry.getAttribute('color');
-        meshes.push({
-          name: mesh.name || 'part',
-          positions: position.array as Float32Array,
-          indices: (mesh.geometry.getIndex()?.array as Uint32Array | undefined) ?? null,
-          // Present exactly when the body carries paint: the painted material is
-          // white and holds the body's own colour in the attribute instead.
-          colors: material.vertexColors && color ? (color.array as Float32Array) : null,
-          baseColor: [material.color.r, material.color.g, material.color.b],
-        });
-      });
-
-      if (!meshes.length) {
-        showNotice('Nothing to export', 'There are no visible 3D parts in the scene to export.');
-        return;
-      }
-
-      const result = exportThreeMf(meshes);
-      downloadBlob(new Blob([result.data.buffer as ArrayBuffer], { type: 'application/vnd.ms-package.3dmanufacturing-3dmodel+xml' }), `${exportBaseName()}.3mf`);
-
-      // Said out loud because it is the one thing about the file a user cannot
-      // see by looking at it: how many filaments the paint was reduced to.
-      const slots = result.palette.filter(p => p.triangles > 0);
-      if (slots.length > 1) {
-        console.info(`[Export] 3MF written with ${slots.length} filament slots:`,
-          slots.map(p => `${p.extruder}: ${p.hex} (${p.triangles} triangles)`).join(', '));
-      }
-    });
-  }, [withExportGroup, exportBaseName, showNotice]);
-
-  const export3mf = useCallback(() => {
-    // Sections made by Split for Print know which way up they print. When
-    // there are some, offer the print job — each section stood that way and
-    // laid out on the bed — rather than the scene as it stands. No size prompt
-    // for those: they were cut to fit this bed, and rescaling would undo that.
-    const { sceneGraph: graph, printBed } = useStore.getState();
-    const posed: PosedPart[] = [];
-    const walk = (nodes: SceneNode[]) => {
-      for (const n of nodes) {
-        const mesh = n.printPose && (n.geoms || []).find((g) => g.type === 'mesh' && g.role !== 'collision' && g.renderVertices?.length && g.faces?.length);
-        if (n.printPose && mesh) {
-          const c = new THREE.Color().setRGB(mesh.rgba?.[0] ?? 0.8, mesh.rgba?.[1] ?? 0.8, mesh.rgba?.[2] ?? 0.8, THREE.SRGBColorSpace);
-          posed.push({ name: n.name || n.id, positions: mesh.renderVertices!, faces: mesh.faces!, pose: n.printPose, colour: [c.r, c.g, c.b] });
-        }
-        walk(n.children || []);
-      }
-    };
-    walk(graph.nodes);
-    if (posed.length) {
-      setDialogModal({
-        title: `Lay out ${posed.length} split section${posed.length === 1 ? '' : 's'} on the print bed?`,
-        confirmLabel: 'Lay out on bed',
-        cancelLabel: 'Export scene as-is',
-        body: (
-          <>
-            <p>
-              Each split section will be stood the way it prints and arranged across the{' '}
-              <strong>{printBed.widthMm} × {printBed.depthMm} mm</strong> bed.
-            </p>
-            <p>Choose “Export scene as-is” to export the whole scene in its current pose instead.</p>
-          </>
-        ),
-        onConfirm: () => {
-          setDialogModal(null);
-          const plated = layoutOnBed(posed, printBed);
-          const result = exportThreeMf(plated.map((p) => ({
-            name: p.name, positions: p.positions, indices: p.indices, colors: null, baseColor: p.colour,
-          })));
-          downloadBlob(new Blob([result.data.buffer as ArrayBuffer], { type: 'application/vnd.ms-package.3dmanufacturing-3dmodel+xml' }), `${exportBaseName()}_plate.3mf`);
-          const plates = Math.max(...plated.map((p) => p.plate)) + 1;
-          if (plates > 1) console.info(`[Export] ${plates} plates' worth of sections; the extra plates sit beside the bed.`);
-        },
-        onCancel: () => {
-          setDialogModal(null);
-          exportWholeScene3mf();
-        },
-      });
-      return;
-    }
-
-    exportWholeScene3mf();
-  }, [exportWholeScene3mf, exportBaseName]);
-
-  /*
-   * Opens a scene file, from the Import button or dropped on the viewport.
-   *
-   * A drop used to take its own path: a bad file did nothing but log, a good
-   * one replaced the scene without asking — a file dragged across the window
-   * by accident took the work with it — and neither stopped the simulation or
-   * the old chat. And after either, the app still took the imported scene for
-   * the preset that had been open, so the Save button overwrote that preset
-   * with it. The scene is no preset now until it is saved as one.
-   */
-  const importSceneJson = useCallback((text: string, fileName: string, dropped: boolean) => {
-    let parsed: { nodes?: unknown; noteCards?: unknown; copilotMessages?: unknown } | null;
-    try {
-      parsed = JSON.parse(text);
-    } catch {
-      showNotice('Could not read file', `Could not read ${fileName}: it is not valid JSON.`, 'red');
-      return;
-    }
-    if (!parsed || !Array.isArray(parsed.nodes)) {
-      showNotice('Invalid scene file', `${fileName} is not a scene: it has no "nodes" array.`, 'red');
-      return;
-    }
-    const applyImport = () => {
-      const s = useStore.getState();
-      if (s.isPlaying) togglePlay();
-      s.setSculptNodeId(null);
-      s.setLatticeNodeId(null);
-      s.setActivePreset(undefined);
-      updateScene(parsed as SceneGraph);
-      const notes = Array.isArray(parsed.noteCards) ? parsed.noteCards as NoteCard[] : [];
-      const chat = Array.isArray(parsed.copilotMessages) ? parsed.copilotMessages as CopilotMessage[] : [];
-      setNoteCards(notes);
-      setCopilotMessages(chat);
-      setEditingCardId(null);
-      markClean(notes, chat);
-    };
-    if (dropped) {
-      setDialogModal({
-        title: `Replace the current scene with ${fileName}?`,
-        confirmLabel: 'Replace scene',
-        tone: 'amber',
-        body: <p>The current scene on screen will be replaced by the imported file.</p>,
-        onCancel: () => setDialogModal(null),
-        onConfirm: () => {
-          setDialogModal(null);
-          applyImport();
-        },
-      });
-      return;
-    }
-    applyImport();
-  }, [togglePlay, updateScene, markClean, showNotice]);
-
-  const importJson = useCallback(() => {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = '.json';
-    input.onchange = (e: Event) => {
-      const file = (e.target as HTMLInputElement).files?.[0];
-      if (!file) return;
-      void file.text().then((text) => importSceneJson(text, file.name, false));
-    };
-    input.click();
-  }, [importSceneJson]);
+  const { exportStl, export3mf } = useMeshExport(threeSceneRef, noteCards);
+  const { exportJson, importSceneJson, importJson } = useSceneIo(doc);
 
   /*
    * A click on a gizmo handle is a click on a mesh with no R3F handlers, so R3F
@@ -1477,14 +400,14 @@ function App() {
                   else loadPresetWithCard(v);
                 };
                 if (hasUnsavedWork()) {
-                  setDialogModal({
+                  openDialog({
                     title: 'Replace the current scene?',
                     confirmLabel: 'Replace scene',
                     tone: 'amber',
                     body: <p>Its unsaved changes, note cards and copilot chat will be lost.</p>,
-                    onCancel: () => setDialogModal(null),
+                    onCancel: () => closeDialog(),
                     onConfirm: () => {
-                      setDialogModal(null);
+                      closeDialog();
                       applyPresetLoad();
                     },
                   });
@@ -1544,7 +467,7 @@ function App() {
                 <button
                   onClick={() => {
                     const presetName = activePreset.replace('user:', '');
-                    setDialogModal({
+                    openDialog({
                       title: `Delete preset "${presetName}"?`,
                       confirmLabel: 'Delete preset',
                       tone: 'red',
@@ -1554,9 +477,9 @@ function App() {
                           screen will stay open.
                         </p>
                       ),
-                      onCancel: () => setDialogModal(null),
+                      onCancel: () => closeDialog(),
                       onConfirm: () => {
-                        setDialogModal(null);
+                        closeDialog();
                         // The preset goes; the scene on screen stays. Loading the
                         // empty scene here wiped the work, notes and chat as well,
                         // which the question above never mentioned.
@@ -1881,8 +804,8 @@ function App() {
                   <input 
                     type="password" 
                     id="geminiApiKey"
-                    value={settingsGeminiKey} 
-                    onChange={(e) => handleUpdateGeminiKeyInSettings(e.target.value)} 
+                    value={llm.settingsGeminiKey} 
+                    onChange={(e) => llm.handleUpdateGeminiKeyInSettings(e.target.value)} 
                     placeholder="Paste AIzaSy... here" 
                     className="w-full px-2 py-1.5 text-xs border border-slate-200 dark:border-slate-800 rounded bg-white dark:bg-slate-950 text-slate-800 dark:text-slate-200 shadow-inner focus:outline-none focus:ring-1 focus:ring-blue-500 font-mono" 
                   />
@@ -1894,8 +817,8 @@ function App() {
                   <input 
                     type="password" 
                     id="claudeApiKey"
-                    value={settingsClaudeKey} 
-                    onChange={(e) => handleUpdateClaudeKeyInSettings(e.target.value)} 
+                    value={llm.settingsClaudeKey} 
+                    onChange={(e) => llm.handleUpdateClaudeKeyInSettings(e.target.value)} 
                     placeholder="Paste sk-ant-... here" 
                     className="w-full px-2 py-1.5 text-xs border border-slate-200 dark:border-slate-800 rounded bg-white dark:bg-slate-950 text-slate-800 dark:text-slate-200 shadow-inner focus:outline-none focus:ring-1 focus:ring-amber-500 font-mono" 
                   />
@@ -1906,19 +829,13 @@ function App() {
                   </label>
                   <select 
                     id="geminiModel"
-                    value={settingsSelectedModel} 
-                    onChange={(e) => {
-                      const modelId = e.target.value;
-                      setSettingsSelectedModel(modelId);
-                      localStorage.setItem('gemini_model', modelId);
-                      pushGlobalParameter('gemini_model', modelId);
-                      window.dispatchEvent(new Event('storage'));
-                    }} 
+                    value={llm.settingsSelectedModel} 
+                    onChange={(e) => llm.selectModel(e.target.value)} 
                     className="w-full px-2 py-1.5 text-xs border border-slate-200 dark:border-slate-800 rounded bg-white dark:bg-slate-950 text-slate-800 dark:text-slate-200 shadow-inner focus:outline-none focus:ring-1 focus:ring-blue-500 cursor-pointer" 
                   >
                     <optgroup label="Google Gemini">
-                      {liveSettingsGeminiModels.length > 0 ? (
-                        liveSettingsGeminiModels.map(m => (
+                      {llm.liveSettingsGeminiModels.length > 0 ? (
+                        llm.liveSettingsGeminiModels.map(m => (
                           <option key={m.id} value={m.id}>{m.name}</option>
                         ))
                       ) : (
@@ -1930,8 +847,8 @@ function App() {
                       )}
                     </optgroup>
                     <optgroup label="Anthropic Claude">
-                      {liveSettingsClaudeModels.length > 0 ? (
-                        liveSettingsClaudeModels.map(m => (
+                      {llm.liveSettingsClaudeModels.length > 0 ? (
+                        llm.liveSettingsClaudeModels.map(m => (
                           <option key={m.id} value={m.id}>{m.name}</option>
                         ))
                       ) : (
@@ -1949,19 +866,15 @@ function App() {
                 <div className="flex flex-col gap-1">
                   <label htmlFor="copilotMaxTokens" className="text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider flex items-center justify-between gap-1">
                     <span>📏 Copilot Max Response Tokens</span>
-                    <span className="font-mono normal-case tracking-normal text-slate-600 dark:text-slate-300">{settingsMaxTokens.toLocaleString()}</span>
+                    <span className="font-mono normal-case tracking-normal text-slate-600 dark:text-slate-300">{llm.settingsMaxTokens.toLocaleString()}</span>
                   </label>
                   <RangeInput
                     id="copilotMaxTokens"
                     min={MIN_MAX_TOKENS}
                     max={MAX_MAX_TOKENS}
                     step={1000}
-                    value={settingsMaxTokens}
-                    onChange={(v) => {
-                      const next = writeMaxTokens(Math.round(v));
-                      setSettingsMaxTokens(next);
-                      window.dispatchEvent(new Event('storage'));
-                    }}
+                    value={llm.settingsMaxTokens}
+                    onChange={llm.setMaxTokens}
                     className="w-full accent-blue-500 cursor-pointer"
                   />
                   <p className="text-[9px] text-slate-400 dark:text-slate-500 leading-snug">
@@ -2494,11 +1407,7 @@ function App() {
                       : 'Share link'}
               </p>
               <button
-                onClick={() => {
-                  setShare(null);
-                  setShareError(null);
-                  setShareTooBig(null);
-                }}
+                onClick={dismissShare}
                 className="text-slate-400 hover:text-slate-700 dark:hover:text-white font-bold cursor-pointer px-1"
                 title="Dismiss"
               >
@@ -2615,36 +1524,12 @@ function App() {
           document.body
         )}
 
-      {dialogModal && (
-        <ConfirmModal
-          title={dialogModal.title}
-          body={dialogModal.body}
-          confirmLabel={dialogModal.confirmLabel}
-          cancelLabel={dialogModal.cancelLabel}
-          hideCancel={dialogModal.hideCancel}
-          tone={dialogModal.tone}
-          onCancel={dialogModal.onCancel ?? (() => setDialogModal(null))}
-          onConfirm={dialogModal.onConfirm}
-        />
-      )}
+      <AppDialogs />
 
-      {exportScaleModal && (
-        <ExportScaleModal
-          title={exportScaleModal.title}
-          initialMm={exportScaleModal.value}
-          onCancel={() => setExportScaleModal(null)}
-          onConfirm={(targetMm) => {
-            const cb = exportScaleModal.onConfirm;
-            setExportScaleModal(null);
-            cb(targetMm);
-          }}
-        />
-      )}
-
-      {isSaveModalOpen && (
+      {saveModal.isOpen && (
         <div
           className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4"
-          onClick={() => setIsSaveModalOpen(false)}
+          onClick={saveModal.close}
         >
           <div
             className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 shadow-2xl max-w-md w-full p-6 flex flex-col gap-4 animate-in fade-in zoom-in-95 duration-200"
@@ -2663,24 +1548,24 @@ function App() {
               autoFocus
               type="text"
               placeholder="e.g. Double Pendulum Wave"
-              value={presetNameInput}
-              onChange={(e) => setPresetNameInput(e.target.value)}
+              value={saveModal.name}
+              onChange={(e) => saveModal.setName(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === 'Enter') handleConfirmSavePreset();
-                if (e.key === 'Escape') setIsSaveModalOpen(false);
+                if (e.key === 'Enter') saveModal.confirm();
+                if (e.key === 'Escape') saveModal.close();
               }}
               className="w-full px-3 py-2 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-500 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-500"
             />
             <div className="flex justify-end gap-2 text-xs">
               <button
-                onClick={() => setIsSaveModalOpen(false)}
+                onClick={saveModal.close}
                 className="px-4 py-2 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition-colors font-semibold cursor-pointer"
               >
                 Cancel
               </button>
               <button
-                onClick={handleConfirmSavePreset}
-                disabled={!presetNameInput.trim()}
+                onClick={saveModal.confirm}
+                disabled={!saveModal.name.trim()}
                 className="px-4 py-2 font-semibold text-white bg-blue-500 hover:bg-blue-600 disabled:opacity-40 disabled:cursor-not-allowed rounded-lg transition-colors cursor-pointer"
               >
                 Save
