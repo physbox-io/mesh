@@ -219,16 +219,21 @@ export class StockModel {
     const i1 = Math.min(this.cols - 1, Math.floor((x + radius - this.x0) / c));
     const j0 = Math.max(0, Math.floor((y - radius - this.y0) / c));
     const j1 = Math.min(this.rows - 1, Math.floor((y + radius - this.y0) / c));
+    const flat = profile === FLAT_PROFILE;
+    const reachSq = radius * radius;
     let best = -Infinity;
     for (let j = j0; j <= j1; j++) {
       const ya = this.y0 + j * c;
       const dy = y < ya ? ya - y : y > ya + c ? y - ya - c : 0;
+      const row = j * this.cols;
       for (let i = i0; i <= i1; i++) {
         const xa = this.x0 + i * c;
         const dx = x < xa ? xa - x : x > xa + c ? x - xa - c : 0;
-        const d = Math.hypot(dx, dy);
-        if (d > radius) continue;
-        const level = this.z[j * this.cols + i] - profile(d);
+        const dSq = dx * dx + dy * dy;
+        if (dSq > reachSq) continue;
+        // Called for every half cell along every roughing ring: no square
+        // root unless the profile needs the distance.
+        const level = flat ? this.z[row + i] : this.z[row + i] - profile(Math.sqrt(dSq));
         if (level > best) best = level;
       }
     }
