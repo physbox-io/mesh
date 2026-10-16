@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { exportLaserCutSvg, extractPanelsFromScene, DEFAULT_LASER_OPTIONS, type LaserCutResult } from '../src/utils/laserCutExporter';
+import { exportLaserCutSvg, extractPanelsFromScene, simplifyPolygon2D, DEFAULT_LASER_OPTIONS, type LaserCutResult } from '../src/utils/laserCutExporter';
 import { birdhousePreset, birdhouseScadPreset, stackedCubesPreset } from '../src/presets/presetScenes';
 import type { SceneGeom, SceneGraph } from '../src/types/scene';
 
@@ -1150,5 +1150,42 @@ describe('CNC inside-corner relief', () => {
     expect(result.success).toBe(true);
     expect(result.scaleFactor).toBe(1.0);
     expect(result.sheetCount).toBeLessThanOrEqual(2);
+  });
+});
+
+describe('simplifyPolygon2D', () => {
+  it('keeps the shape of an arc whose steps each turn less than the tolerance', () => {
+    // A 100 mm square whose top edge bulges up as a 40 degree arc in 1 degree
+    // steps: 8.8 mm of sagitta that must not be straightened into a chord.
+    const R = 50 / Math.sin((20 * Math.PI) / 180);
+    const cy = 100 - R * Math.cos((20 * Math.PI) / 180);
+    const shape = [{ x: 0, y: 0 }, { x: 100, y: 0 }];
+    for (let a = -20; a <= 20; a++) {
+      const t = (a * Math.PI) / 180;
+      shape.push({ x: 50 - R * Math.sin(t), y: cy + R * Math.cos(t) });
+    }
+    const out = simplifyPolygon2D(shape);
+    expect(out.length).toBeLessThan(shape.length);
+    // Every input point stays within a tenth of a millimetre of the outline.
+    const distToOutline = (p: { x: number; y: number }) => {
+      let best = Infinity;
+      for (let i = 0; i < out.length; i++) {
+        const a = out[i];
+        const b = out[(i + 1) % out.length];
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / (dx * dx + dy * dy)));
+        best = Math.min(best, Math.hypot(p.x - a.x - t * dx, p.y - a.y - t * dy));
+      }
+      return best;
+    };
+    expect(Math.max(...shape.map(distToOutline))).toBeLessThan(0.1);
+  });
+
+  it('still drops the points along a straight edge', () => {
+    const square = [
+      { x: 0, y: 0 }, { x: 25, y: 0 }, { x: 50, y: 0 }, { x: 100, y: 0 },
+      { x: 100, y: 100 }, { x: 0, y: 100 },
+    ];
+    expect(simplifyPolygon2D(square)).toHaveLength(4);
   });
 });

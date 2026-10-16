@@ -327,8 +327,13 @@ function polygonSignedArea(pts: Point2D[]): number {
 /**
  * Simplifies a 2D polygon by collapsing colinear sub-segments.
  * Eliminates micro-step staircase patterns along polygon edges.
+ *
+ * Each point's turn is measured from the last point kept, not from its
+ * neighbour in the input. Measured from the neighbour, a fine arc whose every
+ * step turns less than the tolerance lost all of its points and came out as
+ * one straight chord. Exported for tests.
  */
-function simplifyPolygon2D(pts: Point2D[], tolDegrees: number = 2.0): Point2D[] {
+export function simplifyPolygon2D(pts: Point2D[], tolDegrees: number = 2.0): Point2D[] {
   if (pts.length <= 3) return pts;
 
   // 1. Remove duplicate adjacent vertices
@@ -347,7 +352,7 @@ function simplifyPolygon2D(pts: Point2D[], tolDegrees: number = 2.0): Point2D[] 
   const cosTol = Math.cos(tolDegrees * THREE.MathUtils.DEG2RAD);
 
   for (let i = 0; i < cleaned.length; i++) {
-    const prev = cleaned[(i - 1 + cleaned.length) % cleaned.length];
+    const prev = result.length > 0 ? result[result.length - 1] : cleaned[cleaned.length - 1];
     const curr = cleaned[i];
     const next = cleaned[(i + 1) % cleaned.length];
 
