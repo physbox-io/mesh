@@ -98,4 +98,31 @@ describe('trackPlayhead', () => {
     }
     expect(Math.abs(state.clock - resumeAt)).toBeLessThan(total * 0.02);
   });
+
+  it('does not skip ahead to a later pass that is only a hair closer', () => {
+    // A finishing pass along y = 0 at z -1, then twenty other moves, then a
+    // second pass over the same line 0.04 mm lower. The report sits between
+    // them, just nearer the later one, as a decimated preview leaves it.
+    const raw: TimedMove[] = [{ x1: 0, y1: 0, z1: -1, x2: 60, y2: 0, z2: -1, feed: 800, rapid: false }];
+    for (let k = 0; k < 20; k++) raw.push({ x1: 60, y1: 10 + k, z1: -1, x2: 0, y2: 10 + k, z2: -1, feed: 800, rapid: false });
+    raw.push({ x1: 0, y1: 0, z1: -1.04, x2: 60, y2: 0, z2: -1.04, feed: 800, rapid: false });
+    const path = clockMoves(raw);
+
+    const state = trackPlayhead(path, 30, 0, -1.025, PLAYHEAD_START, []);
+    expect(state.index).toBe(0);
+  });
+
+  it('still moves onto the next raster line when the tool is on it', () => {
+    // Lines 0.2 mm apart: the one being cut is nearer by a full stepover.
+    const raw: TimedMove[] = [];
+    for (let k = 0; k < 10; k++) {
+      raw.push({ x1: k % 2 ? 60 : 0, y1: k * 0.2, z1: -1, x2: k % 2 ? 0 : 60, y2: k * 0.2, z2: -1, feed: 800, rapid: false });
+    }
+    const path = clockMoves(raw);
+    let state: PlayheadState = PLAYHEAD_START;
+    for (let k = 0; k < 10; k++) {
+      state = trackPlayhead(path, 30, k * 0.2, -1, state, []);
+      expect(state.index).toBe(k);
+    }
+  });
 });

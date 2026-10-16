@@ -10,6 +10,16 @@ import type { ClockedMove } from './timeEstimate';
 
 /** How far off the path the machine may report before a match is refused, mm. */
 export const LIVE_SNAP_TOLERANCE_MM = 6;
+/**
+ * How much closer a later move has to be than an earlier one to win, mm.
+ *
+ * The preview is decimated and leaves out lead-ins, so a status report sits a
+ * little off the path, and a pass further on over the same ground (the next
+ * layer, the finishing raster) can come out a hair closer than the pass being
+ * cut. Within this margin the earliest move wins. It is kept under a fine
+ * stepover, so the pass the tool has moved onto still beats the one beside it.
+ */
+export const LIVE_TIE_MM = 0.1;
 /** How many moves ahead of the last match the forward search looks. */
 export const LIVE_SEARCH_WINDOW = 4000;
 /** Half-width of the window searched round each anchor, as a fraction of the path. */
@@ -51,7 +61,10 @@ export function moveIndexAt(moves: ClockedMove[], t: number): number {
   return lo;
 }
 
-/** The nearest move in `[lo, hi)`, or null if none is within the snap tolerance. */
+/**
+ * The nearest move in `[lo, hi)`, or null if none is within the snap tolerance.
+ * Of the moves within `LIVE_TIE_MM` of the nearest, the earliest.
+ */
 function nearestWithin(
   moves: ClockedMove[],
   x: number,
@@ -70,6 +83,11 @@ function nearestWithin(
     }
   }
   if (bestI < 0 || bestD > LIVE_SNAP_TOLERANCE_MM * LIVE_SNAP_TOLERANCE_MM) return null;
+  const tie = (Math.sqrt(bestD) + LIVE_TIE_MM) ** 2;
+  for (let i = Math.max(0, lo); i < bestI; i++) {
+    const d = distanceSqToMove(moves[i], x, y, z);
+    if (d <= tie) return { index: i, distSq: d };
+  }
   return { index: bestI, distSq: bestD };
 }
 
