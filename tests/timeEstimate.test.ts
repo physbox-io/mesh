@@ -157,6 +157,53 @@ describe('reading a G-code program', () => {
     const packed = estimateGcodeTime('G90\nG1X10Y5F800\n');
     expect(packed.seconds).toBeCloseTo(spaced.seconds, 10);
   });
+
+  it('keeps the motion mode across lines that leave out the G word', () => {
+    const est = estimateGcodeTime('G90\nG0 X10\nY10\nG1 X20 F600\nX30\nY20\n');
+    expect(est.rapidDistanceMm).toBeCloseTo(20, 6);
+    expect(est.cutDistanceMm).toBeCloseTo(30, 6);
+  });
+
+  it('does not take an offset or a dwell for a move in the current mode', () => {
+    const est = estimateGcodeTime('G90\nG1 X10 F600\nG10 L20 P1 Z0\nG92 X0\nG4 P1\n');
+    expect(est.cutDistanceMm).toBeCloseTo(10, 6);
+  });
+
+  it('reads parenthesised comments as comments', () => {
+    const est = estimateGcodeTime('G90\n(Pass 1 of 3: G0 Z-2.0) G1 X10 F600\nM0 (PAUSE: X99 Y99)\n');
+    expect(est.cutDistanceMm).toBeCloseTo(10, 6);
+    expect(est.rapidDistanceMm).toBe(0);
+  });
+
+  it('measures a G2/G3 arc along the arc, from I/J or from R', () => {
+    // Chords sag 0.01 mm inside the arc, so the length is short by a few hundredths.
+    // A half circle of radius 10 from (0,0) to (20,0): pi * 10 long, not the 20 mm chord.
+    const ij = estimateGcodeTime('G90 G17\nG2 X20 Y0 I10 J0 F600\n');
+    expect(ij.cutDistanceMm).toBeCloseTo(Math.PI * 10, 1);
+    // A quarter circle by R, both ways round: the short arc and (R < 0) the long one.
+    const short = estimateGcodeTime('G90\nG3 X10 Y10 R10 F600\n');
+    expect(short.cutDistanceMm).toBeCloseTo((Math.PI / 2) * 10, 1);
+    const long = estimateGcodeTime('G90\nG3 X10 Y10 R-10 F600\n');
+    expect(long.cutDistanceMm).toBeCloseTo(1.5 * Math.PI * 10, 1);
+    // A full circle, start and end the same point.
+    const full = estimateGcodeTime('G90\nG0 X10\nG2 X10 Y0 I-10 J0 F600\n');
+    expect(full.cutDistanceMm).toBeCloseTo(2 * Math.PI * 10, 1);
+  });
+
+  it('ends an arc where the program says, and keeps going from there', () => {
+    const est = estimateGcodeTime('G90\nG2 X20 Y0 I10 J0 F600\nG1 X30\n');
+    expect(est.cutDistanceMm).toBeCloseTo(Math.PI * 10 + 10, 1);
+  });
+});
+
+describe('splitting a program line from its comments', () => {
+  it('does not cut a line at a semicolon inside parentheses', () => {
+    expect(prepareJobLines('(Tool 1; 3mm flat) G0 Z5')).toEqual([{ code: 'G0 Z5', note: 'Tool 1; 3mm flat' }]);
+  });
+
+  it('keeps parentheses after a semicolon as comment text', () => {
+    expect(prepareJobLines('G1 X1 ; move (fast)')).toEqual([{ code: 'G1 X1', note: 'move (fast)' }]);
+  });
 });
 
 describe('putting each line of a program on the clock', () => {

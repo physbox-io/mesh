@@ -27,6 +27,7 @@ import {
   maxRateAlong,
   type MotionProfile,
 } from './motionProfile';
+import { splitGcodeComments } from './gcodeComments';
 
 /**
  * GRBL's junction deviation, mm. How far off a corner the machine is allowed to
@@ -296,10 +297,9 @@ export interface GcodeEstimate {
  * machine makes and none of which the old `distance / feedrate` arithmetic in
  * the exporters ever saw.
  *
- * Only the subset these exporters emit is understood — G0/G1 linear moves,
- * G90/G91, G20/G21 and G4 dwells. There are no arcs in anything this app
- * writes; if that changes, a G2/G3 would be timed as the chord, which is short
- * rather than wrong-by-orders-of-magnitude.
+ * Understood: modal G0/G1, G2/G3 arcs in the XY plane (as points along the
+ * arc; in G18/G19 as the chord), G90/G91, G20/G21 and G4 dwells. Lines that
+ * set offsets or home (G10, G92, G28, G30, G53) and probe cycles are not moves.
  */
 export function estimateGcodeTime(gcode: string, opts: TimingOptions = {}): GcodeEstimate {
   const profile = opts.profile ?? DEFAULT_MOTION_PROFILE;
@@ -342,21 +342,50 @@ function readProgram(lines: string[]) {
   const spindleSpeeds: number[] = [];
   let lastS: number | null = null;
 
+  /*
+   * The motion mode is modal: after `G1 X10 F500`, a bare `X20` is another
+   * feed move. It used to be reset on every line, so a program that leaves
+   * out repeated G words lost those moves from its clock and its playhead.
+   * `null` is a mode with no move to count (G80, or a probe cycle).
+   */
+  let motion: 0 | 1 | 2 | 3 | null = null;
+  // Arcs are read in XY (G17) only; in G18/G19 they count as their chord.
+  let xyPlane = true;
+
+  const push = (nx: number, ny: number, nz: number, index: number, rapid: boolean) => {
+    const d = Math.hypot(nx - x, ny - y, nz - z);
+    if (d <= 0) return;
+    if (rapid) rapidDistanceMm += d;
+    else cutDistanceMm += d;
+    moves.push({
+      x1: x, y1: y, z1: z,
+      x2: nx, y2: ny, z2: nz,
+      feed: rapid ? 0 : feed,
+      rapid,
+      line: index,
+    });
+    x = nx; y = ny; z = nz;
+  };
+
   for (let index = 0; index < lines.length; index++) {
-    const raw = lines[index];
-    const semi = raw.indexOf(';');
-    const line = (semi < 0 ? raw : raw.slice(0, semi)).trim().toUpperCase();
+    // Both comment syntaxes, so the `Z-2.0` in `(Pass 1 of 3: Z-2.0mm)` is not a move.
+    const line = splitGcodeComments(lines[index]).code.toUpperCase();
     if (!line) continue;
 
     // Words, so `G1X10Y20F500` reads the same as `G1 X10 Y20 F500`.
     const words = line.match(/[A-Z]-?\d*\.?\d*/g);
     if (!words) continue;
 
-    let motion: 0 | 1 | null = null;
     let tx: number | null = null;
     let ty: number | null = null;
     let tz: number | null = null;
+    let ti: number | null = null;
+    let tj: number | null = null;
+    let tr: number | null = null;
     let spindleOn = false;
+    // G4, G10, G28, G30, G53, G92: the axis words on these lines are not a
+    // move in the current mode (an offset, a dwell, a homing waypoint).
+    let nonModal = false;
 
     for (const w of words) {
       const letter = w[0];
@@ -364,16 +393,22 @@ function readProgram(lines: string[]) {
 
       switch (letter) {
         case 'G':
-          if (value === 0) motion = 0;
-          else if (value === 1) motion = 1;
+          if (value === 0 || value === 1 || value === 2 || value === 3) motion = value as 0 | 1 | 2 | 3;
+          else if (value === 80 || (value >= 38 && value < 39)) motion = null;
           else if (value === 90) absolute = true;
           else if (value === 91) absolute = false;
+          else if (value === 17) xyPlane = true;
+          else if (value === 18 || value === 19) xyPlane = false;
           else if (value === 20) unitScale = 25.4;
           else if (value === 21) unitScale = 1;
+          else if ([4, 10, 28, 30, 53, 92].includes(value)) nonModal = true;
           break;
         case 'X': if (Number.isFinite(value)) tx = value * unitScale; break;
         case 'Y': if (Number.isFinite(value)) ty = value * unitScale; break;
         case 'Z': if (Number.isFinite(value)) tz = value * unitScale; break;
+        case 'I': if (Number.isFinite(value)) ti = value * unitScale; break;
+        case 'J': if (Number.isFinite(value)) tj = value * unitScale; break;
+        case 'R': if (Number.isFinite(value)) tr = value * unitScale; break;
         case 'F': if (Number.isFinite(value) && value > 0) feed = value * unitScale; break;
         case 'S': if (Number.isFinite(value)) lastS = value; break;
         case 'M':
@@ -395,29 +430,75 @@ function readProgram(lines: string[]) {
       if (p) dwells.push({ line: index, seconds: Math.max(0, parseFloat(p[1])) });
     }
 
-    if (motion === null || (tx === null && ty === null && tz === null)) continue;
+    if (nonModal || motion === null || (tx === null && ty === null && tz === null)) continue;
 
     const nx = tx === null ? x : absolute ? tx : x + tx;
     const ny = ty === null ? y : absolute ? ty : y + ty;
     const nz = tz === null ? z : absolute ? tz : z + tz;
 
-    const d = Math.hypot(nx - x, ny - y, nz - z);
-    if (d > 0) {
-      if (motion === 0) rapidDistanceMm += d;
-      else cutDistanceMm += d;
-      moves.push({
-        x1: x, y1: y, z1: z,
-        x2: nx, y2: ny, z2: nz,
-        feed: motion === 0 ? 0 : feed,
-        rapid: motion === 0,
-        line: index,
-      });
+    if ((motion === 2 || motion === 3) && xyPlane) {
+      for (const p of arcPoints(x, y, z, nx, ny, nz, ti, tj, tr, motion === 2)) {
+        push(p[0], p[1], p[2], index, false);
+      }
+    } else {
+      push(nx, ny, nz, index, motion === 0);
     }
-
-    x = nx; y = ny; z = nz;
   }
 
   return { moves, dwells, cutDistanceMm, rapidDistanceMm, operatorStops, spindleSpeeds };
+}
+
+/**
+ * An XY-plane arc (G17) as points along it, ending at the arc's end point.
+ *
+ * Centre from I/J (offsets from the start) or from R, where a negative R asks
+ * for the long way round. Without either it degrades to the chord. Points are
+ * spaced so the chord sags no more than 0.01 mm off the arc, capped at a few
+ * hundred, which is finer than any status report and keeps a big circle cheap.
+ */
+function arcPoints(
+  x0: number, y0: number, z0: number,
+  x1: number, y1: number, z1: number,
+  i: number | null, j: number | null, r: number | null,
+  clockwise: boolean,
+): Array<[number, number, number]> {
+  let cx: number, cy: number;
+  if (i !== null || j !== null) {
+    cx = x0 + (i ?? 0);
+    cy = y0 + (j ?? 0);
+  } else if (r !== null && r !== 0) {
+    const dx = x1 - x0, dy = y1 - y0;
+    const chord = Math.hypot(dx, dy);
+    const radius = Math.abs(r);
+    if (chord === 0 || chord > 2 * radius + 1e-6) return [[x1, y1, z1]];
+    const h = Math.sqrt(Math.max(0, radius * radius - (chord / 2) ** 2));
+    // Which side of the chord the centre lies on: the short arc for R > 0.
+    const side = (clockwise ? -1 : 1) * (r > 0 ? 1 : -1);
+    cx = x0 + dx / 2 - (side * h * dy) / chord;
+    cy = y0 + dy / 2 + (side * h * dx) / chord;
+  } else {
+    return [[x1, y1, z1]];
+  }
+
+  const radius = Math.hypot(x0 - cx, y0 - cy);
+  if (radius === 0) return [[x1, y1, z1]];
+  const a0 = Math.atan2(y0 - cy, x0 - cx);
+  const a1 = Math.atan2(y1 - cy, x1 - cx);
+  let sweep = a1 - a0;
+  if (clockwise) { if (sweep >= -1e-9) sweep -= 2 * Math.PI; }
+  else if (sweep <= 1e-9) sweep += 2 * Math.PI;
+
+  const sagitta = 0.01;
+  const step = radius > sagitta ? 2 * Math.acos(1 - sagitta / radius) : Math.PI / 2;
+  const n = Math.min(360, Math.max(1, Math.ceil(Math.abs(sweep) / step)));
+  const out: Array<[number, number, number]> = [];
+  for (let k = 1; k < n; k++) {
+    const t = k / n;
+    const a = a0 + sweep * t;
+    out.push([cx + radius * Math.cos(a), cy + radius * Math.sin(a), z0 + (z1 - z0) * t]);
+  }
+  out.push([x1, y1, z1]);
+  return out;
 }
 
 /** A program on the clock, line by line. See `programTimeline`. */

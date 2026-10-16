@@ -25,6 +25,7 @@ import {
 } from './machineTransport';
 import { locateExecutedLine, planResume, scanModalState, type ResumeOptions } from './jobResume';
 import { programTimeline, type ProgramTimeline } from './timeEstimate';
+import { splitGcodeComments } from './gcodeComments';
 import {
   CUT_START,
   DEFAULT_PLANNER_BLOCKS,
@@ -313,10 +314,6 @@ export interface JobLine {
 export function prepareJobLines(gcode: string): JobLine[] {
   const out: JobLine[] = [];
   for (const raw of gcode.split('\n')) {
-    const semi = raw.indexOf(';');
-    let code = (semi < 0 ? raw : raw.slice(0, semi)).trim();
-    let note = semi < 0 ? '' : raw.slice(semi + 1).trim();
-
     /*
      * Parenthesised comments count too.
      *
@@ -326,11 +323,8 @@ export function prepareJobLines(gcode: string): JobLine[] {
      * the prompt at the machine said "Programmed stop. Resume when ready." to
      * an operator holding three sheets of ply and no way to tell which one.
      */
-    const parens = [...code.matchAll(/\(([^)]*)\)/g)].map((m) => m[1].trim()).filter(Boolean);
-    if (parens.length > 0) {
-      code = code.replace(/\([^)]*\)/g, ' ').replace(/\s+/g, ' ').trim();
-      note = [note, ...parens].filter(Boolean).join(' ');
-    }
+    const { code, notes } = splitGcodeComments(raw);
+    const note = notes.join(' ');
 
     if (!code) continue;
     out.push({ code, note });
