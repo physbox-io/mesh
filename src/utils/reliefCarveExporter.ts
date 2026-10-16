@@ -3309,7 +3309,11 @@ export function machineSurface(
         segments.push({
           type: 'finishing',
           points: link ? [...link.slice(0, -1), ...pass] : pass,
-          traverseZ: lastTraverseZ,
+          // A linked pass never lifted, so it has no traverse of its own: it
+          // starts where the tool already was. It used to carry the last
+          // `leadIn`'s height, and after a long flight at the safe height the
+          // preview drew and timed that whole lift at every link after it.
+          traverseZ: link ? link[0].z : lastTraverseZ,
         });
       }
     }
