@@ -239,7 +239,7 @@ export interface TimingOptions {
  * it will on the machine, instead of sliding along at a constant rate that
  * makes an hour of raster look like thirty seconds of scribble.
  */
-export function clockMoves(moves: TimedMove[], opts: TimingOptions = {}): ClockedMove[] {
+export function clockMoves<M extends TimedMove>(moves: M[], opts: TimingOptions = {}): Array<M & ClockedMove> {
   if (moves.length === 0) return [];
   const profile = opts.profile ?? DEFAULT_MOTION_PROFILE;
   const jd = opts.junctionDeviationMm ?? profile.junctionDeviation;
@@ -247,7 +247,8 @@ export function clockMoves(moves: TimedMove[], opts: TimingOptions = {}): Clocke
   const limits = moves.map((m) => limitsFor(m, profile));
   const speeds = planSpeeds(limits, jd);
 
-  const out: ClockedMove[] = new Array(moves.length);
+  // Spread, so whatever else a caller tagged its moves with rides along.
+  const out: Array<M & ClockedMove> = new Array(moves.length);
   let t = 0;
   for (let i = 0; i < moves.length; i++) {
     // Never quicker than the controller can take the instruction: on a raster
