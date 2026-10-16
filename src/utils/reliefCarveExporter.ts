@@ -2338,7 +2338,7 @@ export function machineSurface(
     let stated = false;
     for (let k = at - 1; k >= 0; k--) {
       cutTo(stops[k].x, stops[k].y, stops[k].pz);
-      const word = returnRate > 0 && !stated ? ` F${Math.round(returnRate)}` : '';
+      const word: string = returnRate > 0 && !stated ? ` F${Math.round(returnRate)}` : '';
       stated = stated || word !== '';
       gcode.push(`G1 X${f(stops[k].x)} Y${f(stops[k].y)} Z${f(stops[k].pz)}${word}`);
     }
