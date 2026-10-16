@@ -384,6 +384,24 @@ describe('framing a job', () => {
   });
 });
 
+describe('knowing whether the machine has homed', () => {
+  let fake: ReturnType<typeof attachFakeGrbl>;
+  beforeEach(() => { fake = attachFakeGrbl(); });
+  afterEach(() => fake.detach());
+
+  it('is set by a homing cycle finishing and cleared by an alarm', () => {
+    const mgr = webSerialManager as unknown as { handleIncomingLine: (l: string) => void; hasHomed: boolean; state: { hasHomed: boolean } };
+    mgr.hasHomed = false;
+    mgr.state.hasHomed = false;
+    mgr.handleIncomingLine('<Home|MPos:0.000,0.000,0.000|FS:0,0>');
+    expect(webSerialManager.getState().hasHomed).toBe(false);
+    mgr.handleIncomingLine('<Idle|MPos:0.000,0.000,0.000|FS:0,0>');
+    expect(webSerialManager.getState().hasHomed).toBe(true);
+    mgr.handleIncomingLine('<Alarm|MPos:0.000,0.000,0.000|FS:0,0>');
+    expect(webSerialManager.getState().hasHomed).toBe(false);
+  });
+});
+
 describe('setting Z zero by hand', () => {
   let fake: ReturnType<typeof attachFakeGrbl>;
 

@@ -139,6 +139,32 @@ describe('workEnvelope', () => {
       expect(checkJobEnvelope(job(0, 0, 600, 150), noHoming).ok).toBe(false);
     });
 
+    it('does not read a positive-space machine at rest on MPos 0 as negative', () => {
+      // Parked where it homed, zeroed there: position and origin both 0, which
+      // is the edge of either convention. The job fits in 0..400.
+      const atZero = { x: 0, y: 0, z: 0 };
+      const v = checkJobEnvelope(job(0, 0, 200, 150), machine, atZero, atZero);
+      expect(v.placementChecked).toBe(true);
+      expect(v.ok).toBe(true);
+    });
+
+    it('takes the work origin as the witness when the machine sits at 0', () => {
+      // Origin at -100 says the axis runs negative, so a 200 mm job from there overruns by 100.
+      const v = checkJobEnvelope(job(0, 0, 200, 150), machine, { x: -100, y: -200, z: -20 }, { x: 0, y: 0, z: 0 });
+      expect(v.problems[0]).toMatchObject({ axis: 'X', kind: 'runs-off' });
+      expect(v.problems[0].overrunMm).toBeCloseTo(100, 3);
+    });
+
+    it('skips the placement check until the machine has homed this session, and says so', () => {
+      const origin = { x: -100, y: -200, z: -20 };
+      const v = checkJobEnvelope(job(0, 0, 200, 150), machine, origin, parked, false);
+      expect(v.placementChecked).toBe(false);
+      expect(v.ok).toBe(true);
+      expect(v.placementSkippedBecause).toMatch(/not been homed/);
+      // The size check still runs.
+      expect(checkJobEnvelope(job(0, 0, 600, 150), machine, origin, parked, false).ok).toBe(false);
+    });
+
     it('skips the placement check when nothing is connected', () => {
       const v = checkJobEnvelope(job(0, 0, 200, 150), machine);
       expect(v.placementChecked).toBe(false);

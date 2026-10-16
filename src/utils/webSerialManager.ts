@@ -137,6 +137,12 @@ export interface MachineState {
    */
   needsZZero: boolean;
   /**
+   * Whether the machine has homed since it connected or last alarmed. Until
+   * then `MPos` is wherever the steppers were at power-on, and nothing measured
+   * in machine coordinates (the work envelope) means anything.
+   */
+  hasHomed: boolean;
+  /**
    * What this machine can actually do, read from its own `$$` settings.
    *
    * Falls back to the assumed hobby-router profile while nothing is connected,
@@ -785,6 +791,7 @@ class WebSerialManager {
     resume: null,
     park: null,
     guideSpot: false,
+    hasHomed: false,
     controllerSilent: false,
     probePinActive: false,
     probeCircuitSeen: false,
@@ -1167,6 +1174,7 @@ class WebSerialManager {
     this.updateState({
       status: 'DISCONNECTED',
       connected: false,
+      hasHomed: false,
       motion: DEFAULT_MOTION_PROFILE,
       grblSettings: {},
       overrides: { feed: 100, rapid: 100, spindle: 100 },
@@ -1429,6 +1437,7 @@ class WebSerialManager {
     } else if (machineWord === 'Idle' && this.homingInProgress) {
       this.homingInProgress = false;
       this.hasHomed = true;
+      patch.hasHomed = true;
     }
 
     if (machineWord === 'Alarm') {
@@ -1443,6 +1452,7 @@ class WebSerialManager {
       // is: `G53` stops being a safe way to ask for a height until the machine
       // has been homed again.
       this.hasHomed = false;
+      patch.hasHomed = false;
       this.homingInProgress = false;
     } else if (!this.isPaused) {
       // RUNNING here means "a job is streaming", not "the axes are moving" — a

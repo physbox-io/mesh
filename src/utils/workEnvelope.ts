@@ -94,25 +94,37 @@ function mm(v: number): string {
  * Rather than parse the direction mask and its per-axis bits, the convention is
  * read off the machine's own position: wherever it currently is, it is by
  * definition inside its own envelope, so a clearly positive coordinate means
- * the axis runs positive and anything else means it runs negative. That is
- * exactly the evidence the question needs, and it cannot disagree with the
- * machine the way a decoded setting can.
+ * the axis runs positive and a clearly negative one that it runs negative.
+ * The work origin is inside the envelope too, so it is the second witness.
+ *
+ * Both can sit at exactly 0 — a machine parked where it homed, zeroed there —
+ * and 0 is the boundary of either range, so it says nothing. That case returns
+ * both ranges and the caller takes whichever the job fits better; it used to
+ * read as negative, and failed every job on a positive-space machine at rest.
  */
-function axisRange(travel: number, currentPos: number): { lo: number; hi: number } {
-  return currentPos > 1e-6 ? { lo: 0, hi: travel } : { lo: -travel, hi: 0 };
+function axisRanges(travel: number, currentPos: number, origin: number): Array<{ lo: number; hi: number }> {
+  const positive = { lo: 0, hi: travel };
+  const negative = { lo: -travel, hi: 0 };
+  const witness = Math.abs(currentPos) > 1e-6 ? currentPos : origin;
+  if (witness > 1e-6) return [positive];
+  if (witness < -1e-6) return [negative];
+  return [positive, negative];
 }
 
 /**
  * Checks a job against a machine.
  *
  * `origin` and `machinePos` are only needed for the placement check and may be
- * omitted; the size check runs on the profile alone.
+ * omitted; the size check runs on the profile alone. `homed` is whether the
+ * machine has homed this session: before it has, machine coordinates are
+ * wherever it powered on, and placement is not checked.
  */
 export function checkJobEnvelope(
   extent: JobExtent,
   profile: MotionProfile,
   origin?: WorkOrigin,
-  machinePos?: WorkOrigin
+  machinePos?: WorkOrigin,
+  homed = true
 ): EnvelopeVerdict {
   const problems: EnvelopeProblem[] = [];
   const travel = profile.travel;
@@ -163,6 +175,17 @@ export function checkJobEnvelope(
         'homed and where the job lands on the bed cannot be checked. Its size has been.',
     };
   }
+  if (!homed) {
+    return {
+      ok: problems.length === 0,
+      problems,
+      sizeChecked: true,
+      placementChecked: false,
+      placementSkippedBecause:
+        'The machine has not been homed since it connected, so its coordinates are wherever it ' +
+        'powered on and where the job lands on the bed cannot be checked. Home it first. Its size has been checked.',
+    };
+  }
   if (!origin || !machinePos) {
     return {
       ok: problems.length === 0,
@@ -184,9 +207,11 @@ export function checkJobEnvelope(
 
   for (const a of axes) {
     const originOnAxis = a.axis === 'X' ? origin.x : a.axis === 'Y' ? origin.y : origin.z;
-    const range = axisRange(a.travel, a.pos);
     const jobLo = originOnAxis + a.lo;
     const jobHi = originOnAxis + a.hi;
+    const overrunIn = (r: { lo: number; hi: number }) => Math.max(r.lo - jobLo, jobHi - r.hi);
+    const range = axisRanges(a.travel, a.pos, originOnAxis)
+      .reduce((best, r) => (overrunIn(r) < overrunIn(best) ? r : best));
 
     // Only report the worse end, so one badly-placed job is one message.
     const under = range.lo - jobLo;

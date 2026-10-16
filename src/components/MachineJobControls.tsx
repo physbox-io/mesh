@@ -730,7 +730,7 @@ export const JobPreflight: React.FC<{
     z: machineState.mpos.z - machineState.wpos.z,
   };
   const envelope = extent
-    ? checkJobEnvelope(extent, machineState.motion, workOrigin, machineState.mpos)
+    ? checkJobEnvelope(extent, machineState.motion, workOrigin, machineState.mpos, machineState.hasHomed)
     : null;
 
   return (
