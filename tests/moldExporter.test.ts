@@ -343,3 +343,104 @@ describe('Worker boundary', () => {
     client.dispose();
   });
 });
+
+/** A square picture frame, `outer` mm across with `wall` mm sides, 6 mm tall: a part with a hole in it. */
+function frame(outer: number, wall: number): SceneGraph {
+  const h = outer / 2000;
+  const t = wall / 2000;
+  const z = 0.003;
+  const geoms = [
+    { name: 'n', type: 'box', size: [h, t, z], pos: [0, h - t, z] },
+    { name: 's', type: 'box', size: [h, t, z], pos: [0, -h + t, z] },
+    { name: 'e', type: 'box', size: [t, h - 2 * t, z], pos: [h - t, 0, z] },
+    { name: 'w', type: 'box', size: [t, h - 2 * t, z], pos: [-h + t, 0, z] },
+  ] as SceneGeom[];
+  return { nodes: [{ id: 'b1', name: 'frame', type: 'body', pos: [0, 0, 0], geoms, joints: [], children: [] }] };
+}
+
+/**
+ * The openings in a lid's outer face, as cells of a 0.5 mm raster in the
+ * part's frame (the lid's mirror in Y undone), grouped into separate holes.
+ */
+function lidHoles(res: ReturnType<typeof generateMoldMeshes>): Array<Array<{ x: number; y: number }>> {
+  const lid = res.topHalf!;
+  const floorZ = zRange(lid.triangles).min;
+  const cx = (lid.bounds.minX + lid.bounds.maxX) / 2;
+  const step = 0.5;
+  const halfW = res.moldWidthMm / 2;
+  const halfD = res.moldDepthMm / 2;
+  const nc = Math.ceil((2 * halfW) / step);
+  const nr = Math.ceil((2 * halfD) / step);
+  const covered = new Uint8Array(nc * nr);
+  for (const t of lid.triangles) {
+    if ([t.a, t.b, t.c].some((v) => Math.abs(v[2] - floorZ) > 1e-6)) continue;
+    const xs = [t.a[0], t.b[0], t.c[0]].map((x) => x - cx + halfW);
+    const ys = [t.a[1], t.b[1], t.c[1]].map((y) => y + halfD);
+    for (let r = Math.floor(Math.min(...ys) / step); r < Math.ceil(Math.max(...ys) / step) && r < nr; r++) {
+      for (let c = Math.floor(Math.min(...xs) / step); c < Math.ceil(Math.max(...xs) / step) && c < nc; c++) {
+        covered[r * nc + c] = 1;
+      }
+    }
+  }
+  const seen = new Uint8Array(nc * nr);
+  const holes: Array<Array<{ x: number; y: number }>> = [];
+  for (let s = 0; s < nc * nr; s++) {
+    if (covered[s] || seen[s]) continue;
+    const cells: Array<{ x: number; y: number }> = [];
+    const queue = [s];
+    seen[s] = 1;
+    while (queue.length) {
+      const i = queue.pop()!;
+      const c = i % nc;
+      const r = Math.floor(i / nc);
+      // Back into the part's frame: the lid is built mirrored in Y.
+      cells.push({ x: (c + 0.5) * step - halfW, y: -((r + 0.5) * step - halfD) });
+      for (const [dc, dr] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const cc = c + dc;
+        const rr = r + dr;
+        if (cc < 0 || rr < 0 || cc >= nc || rr >= nr) continue;
+        const j = rr * nc + cc;
+        if (!covered[j] && !seen[j]) {
+          seen[j] = 1;
+          queue.push(j);
+        }
+      }
+    }
+    holes.push(cells);
+  }
+  return holes;
+}
+
+describe('Pour channels', () => {
+  const onFrame = (p: { x: number; y: number }, outer: number, wall: number) =>
+    Math.max(Math.abs(p.x), Math.abs(p.y)) < outer / 2 && Math.max(Math.abs(p.x), Math.abs(p.y)) > outer / 2 - wall;
+
+  it('pours and vents into a ring-shaped cavity, not into the hole in its middle', () => {
+    const res = generateMoldMeshes(frame(40, 10), {
+      ...DEFAULT_MOLD_OPTIONS,
+      includeSprue: true,
+      includeVents: true,
+    });
+    const holes = lidHoles(res);
+    expect(holes.length).toBe(3);
+    for (const hole of holes) {
+      for (const cell of hole) expect(onFrame(cell, 40, 10)).toBe(true);
+    }
+  });
+
+  it('opens a 1.5 mm vent on the coarse grid of a large mold', () => {
+    // A 240 mm part gets the 1.5 mm grid, as wide as the vent itself.
+    const res = generateMoldMeshes(frame(240, 40), {
+      ...DEFAULT_MOLD_OPTIONS,
+      includeSprue: false,
+      includeVents: true,
+      ventDiaMm: 1.5,
+    });
+    const holes = lidHoles(res);
+    expect(holes.length).toBe(2);
+    for (const hole of holes) {
+      for (const cell of hole) expect(onFrame(cell, 240, 40)).toBe(true);
+    }
+    expect(unpairedEdges(res.topHalf!.triangles)).toBe(0);
+  });
+});

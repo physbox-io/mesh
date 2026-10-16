@@ -447,6 +447,111 @@ interface HalfFeatures {
 const NO_FEATURES: HalfFeatures = { sockets: [], pins: [], channels: [] };
 
 /**
+ * Where the pour sprue and the vents go: on the part's own footprint, so they
+ * open into the cavity, with the sprue where the cavity is widest and the
+ * vents at the far ends of it from the sprue, which is where the metal or
+ * resin arrives last and the air is pushed to.
+ *
+ * Fixed spots relative to the bounding box missed any part with a hole in it:
+ * the sprue at the box's centre poured into the solid boss a ring's hole
+ * leaves in the mold, and the vents could land in it too.
+ *
+ * Each lands exactly on a grid column, so the column under its axis is void
+ * and the cells around it open. Placed off the grid, a channel narrower than
+ * the grid's diagonal could miss every column and the face closed over it: a
+ * 1.5 mm vent on the 1.5 mm grid of a large mold came out sealed.
+ *
+ * Positions are in the sampling grid's frame, unmirrored.
+ */
+function placePourChannels(
+  field: ColumnField,
+  grid: Grid,
+  ventR: number,
+  ventCount: number
+): { sprue: { x: number; y: number }; vents: Array<{ x: number; y: number }> } {
+  const { cols, rows, stepX, stepY } = grid;
+  const n = cols * rows;
+  // How far each column lies inside the footprint: a two-pass chamfer
+  // distance to the nearest column the part misses.
+  const inside = new Float64Array(n);
+  for (let i = 0; i < n; i++) inside[i] = field.hit[i] ? Infinity : 0;
+  const diag = Math.hypot(stepX, stepY);
+  const relax = (i: number, c: number, r: number, dc: number, dr: number, w: number) => {
+    const cc = c + dc;
+    const rr = r + dr;
+    const d = cc < 0 || rr < 0 || cc >= cols || rr >= rows ? w : inside[rr * cols + cc] + w;
+    if (d < inside[i]) inside[i] = d;
+  };
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const i = r * cols + c;
+      if (inside[i] === 0) continue;
+      relax(i, c, r, -1, 0, stepX);
+      relax(i, c, r, 0, -1, stepY);
+      relax(i, c, r, -1, -1, diag);
+      relax(i, c, r, 1, -1, diag);
+    }
+  }
+  for (let r = rows - 1; r >= 0; r--) {
+    for (let c = cols - 1; c >= 0; c--) {
+      const i = r * cols + c;
+      if (inside[i] === 0) continue;
+      relax(i, c, r, 1, 0, stepX);
+      relax(i, c, r, 0, 1, stepY);
+      relax(i, c, r, 1, 1, diag);
+      relax(i, c, r, -1, 1, diag);
+    }
+  }
+
+  const xOf = (i: number) => -grid.halfW + (i % cols) * stepX;
+  const yOf = (i: number) => -grid.halfD + Math.floor(i / cols) * stepY;
+
+  // The sprue: deepest inside, and of equally deep columns (a bar's whole
+  // spine) the one nearest the middle.
+  let sprue = -1;
+  for (let i = 0; i < n; i++) {
+    if (!field.hit[i]) continue;
+    if (
+      sprue < 0 ||
+      inside[i] > inside[sprue] + 1e-9 ||
+      (inside[i] > inside[sprue] - 1e-9 && Math.hypot(xOf(i), yOf(i)) < Math.hypot(xOf(sprue), yOf(sprue)))
+    ) {
+      sprue = i;
+    }
+  }
+  if (sprue < 0) return { sprue: { x: 0, y: 0 }, vents: [] };
+
+  // Vents want their whole bore over the cavity; on a part too thin for that,
+  // as far in as it goes.
+  const room = ventR + Math.max(stepX, stepY);
+  let candidates: number[] = [];
+  for (const need of [room, ventR, 0]) {
+    candidates = [];
+    for (let i = 0; i < n; i++) if (field.hit[i] && inside[i] >= need) candidates.push(i);
+    if (candidates.length > 0) break;
+  }
+
+  const placed = [sprue];
+  const vents: Array<{ x: number; y: number }> = [];
+  for (let v = 0; v < ventCount; v++) {
+    let best = -1;
+    let bestD = 0;
+    for (const i of candidates) {
+      let d = Infinity;
+      for (const j of placed) d = Math.min(d, Math.hypot(xOf(i) - xOf(j), yOf(i) - yOf(j)));
+      if (d > bestD) {
+        bestD = d;
+        best = i;
+      }
+    }
+    if (best < 0) break;
+    placed.push(best);
+    vents.push({ x: xOf(best), y: yOf(best) });
+  }
+  return { sprue: { x: xOf(sprue), y: yOf(sprue) }, vents };
+}
+
+/**
  * Builds one mold half as a heightfield block, cavity facing up, parting face at
  * Z = 0 and outer face at Z = -blockHeight.
  *
@@ -529,7 +634,6 @@ function buildHalf(
         solid[i00] && solid[i00 + 1] && solid[i00 + grid.cols] && solid[i00 + grid.cols + 1] ? 1 : 0;
     }
   }
-
   const triangles: Triangle3D[] = [];
   const isSolidCell = (c: number, r: number) =>
     c >= 0 && r >= 0 && c < cellCols && r < cellRows && cellSolid[r * cellCols + c] === 1;
@@ -826,20 +930,21 @@ export function generateMoldMeshes(
     channels: [],
   };
 
+  const pour = placePourChannels(field, grid, opts.ventDiaMm / 2, opts.includeVents ? 2 : 0);
   const lidFeatures: HalfFeatures = {
     sockets: [],
     // Mirrored in Y, because the lid is flipped over to close onto the base.
     pins: pinPositions.map(([x, y]) => ({ x, y: -y, baseR: pinBaseR, topR: pinTopR, height: opts.pinHeightMm })),
     channels: [
       ...(opts.includeSprue
-        ? [{ x: 0, y: 0, outerR: opts.sprueTopDiaMm / 2, innerR: Math.min(opts.sprueBottomDiaMm / 2, opts.sprueTopDiaMm / 2 - 0.4) }]
+        ? [{
+            x: pour.sprue.x,
+            y: -pour.sprue.y,
+            outerR: opts.sprueTopDiaMm / 2,
+            innerR: Math.min(opts.sprueBottomDiaMm / 2, opts.sprueTopDiaMm / 2 - 0.4),
+          }]
         : []),
-      ...(opts.includeVents
-        ? [
-            { x: -partHalfW * 0.6, y: partHalfD * 0.6, outerR: opts.ventDiaMm * 0.8, innerR: opts.ventDiaMm / 2 },
-            { x: partHalfW * 0.6, y: -partHalfD * 0.6, outerR: opts.ventDiaMm * 0.8, innerR: opts.ventDiaMm / 2 },
-          ]
-        : []),
+      ...pour.vents.map((v) => ({ x: v.x, y: -v.y, outerR: opts.ventDiaMm * 0.8, innerR: opts.ventDiaMm / 2 })),
     ],
   };
 
