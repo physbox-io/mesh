@@ -557,9 +557,18 @@ function hybridPassGroups(input: FinishingPathInput): Point2D[][][] {
     splitWhere(pass, (p) => !isSteep(p), minRun)
   );
 
-  // Shallow first: it is the bulk of the surface on most reliefs, and finishing
-  // the walls last leaves the crisp edges the least time to be knocked about.
-  return [shallow, steep];
+  /*
+   * Walls first, top down, then the raster.
+   *
+   * It was shallow first, so the walls' crisp edges had the least time to be
+   * knocked about. But roughing leaves its allowance standing up every wall,
+   * and a raster run on the floor at a wall's foot holds the cutter a radius
+   * off the finished wall - inside that allowance, over the wall's whole
+   * height: a side cut as tall as the wall, the same fault as a waterline
+   * cut bottom first. With the walls done, the floor beside them meets only
+   * finished wall, which the dilated surface keeps the cutter off.
+   */
+  return [steep, shallow];
 }
 
 // ---------------------------------------------------------------------------
@@ -581,7 +590,7 @@ export function finishingPasses(
  * exporter has split the passes where they leave the material: it hops across
  * the stock between every two pieces. The exporter re-orders each set, nearest
  * piece next. The sets themselves stay in order where the order means
- * something: a hybrid's raster before its waterline, a crosshatch's first
+ * something: a hybrid's waterline before its raster, a crosshatch's first
  * direction before its second.
  */
 export function finishingPassGroups(

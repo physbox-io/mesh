@@ -57,7 +57,7 @@ const options = {
 };
 
 /** Waterline runs cut below a higher, nearby waterline that was still to come. */
-function upwardSteps(scene: SceneGraph, strategy: 'contour' | 'hybrid') {
+function upwardSteps(scene: SceneGraph, strategy: 'contour' | 'hybrid', rasterToo = false) {
   const res = generateReliefCarveGcode(scene, { ...options, finishingStrategy: strategy, finishingAngleDeg: RASTER_DEG });
   expect(res.success).toBe(true);
   const reach = options.finishingToolDiaMm;
@@ -80,9 +80,10 @@ function upwardSteps(scene: SceneGraph, strategy: 'contour' | 'hybrid') {
       }
       const off = ((angle - RASTER_DEG) % 180 + 180) % 180;
       const straight = longest > 1 && Math.min(off, 180 - off) < 1;
-      return { level, pts: flat, waterline: !straight && flat.length >= 0.8 * s.points.length };
+      const level_ = flat.length >= 0.8 * s.points.length;
+      return { level, pts: flat, waterline: !straight && level_, raster: straight && level_ };
     })
-    .filter((r) => r.waterline && r.level < -0.05);
+    .filter((r) => (r.waterline || (rasterToo && r.raster)) && r.level < -0.05);
 
   const near = (a: { x: number; y: number }[], b: { x: number; y: number }[]) => {
     const step = Math.max(1, Math.floor(a.length / 200));
@@ -98,13 +99,25 @@ function upwardSteps(scene: SceneGraph, strategy: 'contour' | 'hybrid') {
   let bad = 0;
   for (let i = 0; i < runs.length; i++) {
     for (let j = i + 1; j < runs.length; j++) {
-      if (runs[j].level > runs[i].level + 1e-3 && near(runs[i].pts, runs[j].pts)) { bad++; break; }
+      if (runs[j].waterline && runs[j].level > runs[i].level + 1e-3 && near(runs[i].pts, runs[j].pts)) { bad++; break; }
     }
   }
   return { bad, runs: runs.length };
 }
 
 describe('Waterline finishing order', () => {
+  // A flat raster run at the foot of a wall, cut before the wall's own
+  // waterlines, has the cutter's side in the allowance over the wall's whole
+  // height, the same as a waterline cut bottom first. Hybrid cut its raster
+  // first, so it now cuts its walls first.
+  for (const [name, scene] of [['stepped shelf', shelf], ['pocket with an island', island]] as const) {
+    it(`hybrid finishes a wall before the floor at its foot on a ${name}`, () => {
+      const { bad, runs } = upwardSteps(scene, 'hybrid', true);
+      expect(runs).toBeGreaterThan(5);
+      expect(bad).toBe(0);
+    });
+  }
+
   for (const [name, scene] of [['stepped shelf', shelf], ['pocket with an island', island], ['dome', dome]] as const) {
     for (const strategy of ['contour', 'hybrid'] as const) {
       it(`cuts each ${strategy} wall top down on a ${name}`, () => {
