@@ -360,6 +360,11 @@ describe('Relief carve exporter', () => {
   it('still allows a depth-first sweep when it is asked for outright', () => {
     const deep = {
       ...DEFAULT_RELIEF_OPTIONS,
+      // A 60 mm board rather than the default 150: the same 20 mm depth on a
+      // 1.6 mm bit, at a sixth of the raster. On the big board this one test
+      // took 44 s of a 60 s limit and timed out whenever the machine was busy.
+      stockWidthMm: 60,
+      stockDepthMm: 60,
       stockThicknessMm: 40,
       carveDepthMm: 20,
       roughingEnabled: false,
