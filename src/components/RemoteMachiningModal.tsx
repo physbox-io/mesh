@@ -114,7 +114,9 @@ export const RemoteMachiningModal: React.FC<RemoteMachiningModalProps> = ({ isOp
             </div>
           ) : (
             telemetry.map((item, idx) => {
-              const isRunning = item.status === 'running' || item.status === 'Run';
+              // The API stores status as each app posts it: Mesh sends its own
+              // `RUNNING`, other apps `running` or GRBL's `Run`.
+              const isRunning = /^(running|run)$/i.test(item.status ?? '');
               const progress = Math.min(100, Math.max(0, item.progressPercent || 0));
 
               return (
