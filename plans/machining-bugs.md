@@ -110,12 +110,21 @@ retracts between bites.
 - **4.7**: no centre strip left in concentric passes; resample spiral bridges; simplify each run
   once instead of twice.
 
-## Batch 7: geometry helpers and leftovers
+## Batch 7: geometry helpers and leftovers — DONE 44b4355..(2026-10-15, unpushed)
 - **2.10**: interleaved crossings in `splitLoops`; a canonical edge key in marching squares (this
   one can silently drop contours anywhere, so it could be moved forward); the mold sprue and vents
   placed at the cavity and the grid cell kept open; cast gating extended down to Z0.
+  - Done as: `splitLoops` reconnects at every crossing (oriented smoothing). Marching squares joins
+    segment ends by integer grid-edge ID, not quantised coordinates; most drops were two crossings
+    near one corner merging, not the 1-ULP split. Mold sprue/vents are placed on the footprint by a
+    distance transform, snapped to grid columns, so they always break through (no forced-open cell
+    needed: one void corner already opens a cell). Sand sprue and riser stand on Z0; runner/gate
+    beams bridge between them.
 - **4.8**: the `prev` fix in `simplifyPolygon2D` and the simplify after `applyEdgeFeatures`. The
   binary search for auto-scale and the shelf packing are features, so they come last or not at all.
+  - Done: `prev` is the last kept point. The simplify after `applyEdgeFeatures` was not needed: it
+    already merges same-depth runs, and the presets show no vertex under 2 degrees of turn in any
+    joint mode. Auto-scale binary search and shelf packing not done (features).
 
 ## Batch 8: the shared GRBL module (`../machining`, published as `@physbox-io/machining`)
 Batches 1 and 2 fixed the controller protocol in Mesh's own `webSerialManager.ts` (3,543 lines).
