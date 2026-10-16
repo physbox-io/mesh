@@ -344,7 +344,7 @@ function rawOffset(loop: Point2D[], delta: number, opt: Required<OffsetOptions>)
 // Stage 2: split the raw curve into simple loops
 // ---------------------------------------------------------------------------
 
-interface TaggedPoint {
+export interface TaggedPoint {
   x: number;
   y: number;
   /** Non-null when this vertex is one of the two copies of a crossing point. */
@@ -354,8 +354,9 @@ interface TaggedPoint {
 /**
  * The raw curve with every self-crossing inserted as a vertex, so that each
  * crossing appears exactly twice in the sequence carrying the same id.
+ * Exported for tests.
  */
-function insertCrossings(curve: Point2D[]): TaggedPoint[] {
+export function insertCrossings(curve: Point2D[]): TaggedPoint[] {
   const n = curve.length;
   // Per original segment, the crossings that land on it, with the parameter
   // along the segment so they can be threaded back in the right order.
@@ -391,38 +392,50 @@ function insertCrossings(curve: Point2D[]): TaggedPoint[] {
 /**
  * Decomposes the crossing-annotated curve into simple closed loops.
  *
- * Walking the curve and pushing onto a stack, a crossing id met for the second
- * time means everything pushed since the first time forms a closed loop: pop it
- * off and keep walking. What remains on the stack at the end is the last loop.
- * This is the standard decomposition of a closed curve at its own crossings,
- * and it is what turns one folded-over offset into the handful of candidate
- * regions stage 3 then judges.
+ * At every crossing the curve is cut and reconnected the other way: arriving
+ * at one copy of a crossing, the walk carries on from just after the other
+ * copy. Each walk then closes on itself, and the walks together use every
+ * vertex once. Being reconnected with the direction of travel kept, the loops
+ * touch at the crossings but no longer cross, and their signed areas add up
+ * to the curve's; that turns one folded-over offset into the handful of
+ * candidate regions stage 3 then judges.
+ *
+ * This replaced a stack walk that popped a loop off at each crossing's second
+ * copy. That is right while crossings nest, but with two interleaved
+ * (A … B … A … B) popping A's loop took B's first copy with it, so B was never
+ * split: the two loops still crossed there, and stage 3 kept a figure 8 or
+ * threw out a good loop.
+ *
+ * Exported for tests.
  */
-function splitLoops(tagged: TaggedPoint[]): Point2D[][] {
-  const loops: Point2D[][] = [];
-  const stack: TaggedPoint[] = [];
-  const seenAt = new Map<number, number>();
-
-  for (const v of tagged) {
-    if (v.crossId !== null && seenAt.has(v.crossId)) {
-      const start = seenAt.get(v.crossId)!;
-      const loop = stack.slice(start);
-      for (const popped of loop) {
-        if (popped.crossId !== null) seenAt.delete(popped.crossId);
-      }
-      stack.length = start;
-      if (loop.length >= 3) loops.push(loop.map((p) => ({ x: p.x, y: p.y })));
-      // The crossing itself stays on the stack: the curve continues through it
-      // into whatever region comes next.
-      seenAt.set(v.crossId, stack.length);
-      stack.push(v);
-      continue;
+export function splitLoops(tagged: TaggedPoint[]): Point2D[][] {
+  const n = tagged.length;
+  const partner = new Array<number>(n).fill(-1);
+  const firstAt = new Map<number, number>();
+  for (let i = 0; i < n; i++) {
+    const id = tagged[i].crossId;
+    if (id === null) continue;
+    const j = firstAt.get(id);
+    if (j === undefined) {
+      firstAt.set(id, i);
+    } else {
+      partner[i] = j;
+      partner[j] = i;
     }
-    if (v.crossId !== null) seenAt.set(v.crossId, stack.length);
-    stack.push(v);
   }
 
-  if (stack.length >= 3) loops.push(stack.map((p) => ({ x: p.x, y: p.y })));
+  const loops: Point2D[][] = [];
+  const visited = new Array<boolean>(n).fill(false);
+  for (let s = 0; s < n; s++) {
+    if (visited[s]) continue;
+    const loop: Point2D[] = [];
+    for (let i = s; !visited[i]; ) {
+      visited[i] = true;
+      loop.push({ x: tagged[i].x, y: tagged[i].y });
+      i = ((partner[i] >= 0 ? partner[i] : i) + 1) % n;
+    }
+    if (loop.length >= 3) loops.push(loop);
+  }
   return loops;
 }
 

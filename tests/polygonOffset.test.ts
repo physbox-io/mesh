@@ -5,6 +5,8 @@ import {
   offsetRings,
   polygonArea,
   signedArea2,
+  insertCrossings,
+  splitLoops,
 } from '../src/utils/polygonOffset';
 import type { Point2D } from '../src/utils/laserCutExporter';
 
@@ -276,5 +278,38 @@ describe('polygonOffset', () => {
       const rings = offsetRings(rect(1000, 1000), 0.5, 0.5, 50);
       expect(rings.length).toBeLessThanOrEqual(50);
     });
+  });
+});
+
+describe('splitLoops', () => {
+  /** True when no two non-adjacent edges of the loop cross. */
+  function isSimple(loop: Point2D[]): boolean {
+    return insertCrossings(loop).every((p) => p.crossId === null);
+  }
+  const area2 = (loops: Point2D[][]) => loops.reduce((a, l) => a + signedArea2(l), 0);
+
+  it('splits a curve whose crossings interleave into loops that do not cross', () => {
+    // A pentagram drawn as one stroke meets each of its five crossings, then
+    // meets them all again in another order: A … B … A … B.
+    const star: Point2D[] = [0, 2, 4, 1, 3].map((k) => ({
+      x: 10 * Math.cos(Math.PI / 2 + (2 * Math.PI * k) / 5),
+      y: 10 * Math.sin(Math.PI / 2 + (2 * Math.PI * k) / 5),
+    }));
+    const loops = splitLoops(insertCrossings(star));
+    expect(loops.every(isSimple)).toBe(true);
+    // The star's outline, plus the pentagon again where the stroke winds
+    // round twice.
+    expect(loops.map((l) => l.length).sort((a, b) => a - b)).toEqual([5, 10]);
+    expect(area2(loops)).toBeCloseTo(signedArea2(star), 9);
+  });
+
+  it('still splits a figure 8 at its one crossing', () => {
+    const eight: Point2D[] = [
+      { x: 0, y: 0 }, { x: 10, y: 10 }, { x: 10, y: 0 }, { x: 0, y: 10 },
+    ];
+    const loops = splitLoops(insertCrossings(eight));
+    expect(loops).toHaveLength(2);
+    expect(loops.every(isSimple)).toBe(true);
+    expect(loops.map((l) => Math.sign(signedArea2(l))).sort()).toEqual([-1, 1]);
   });
 });
