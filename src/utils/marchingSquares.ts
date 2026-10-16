@@ -47,9 +47,19 @@ const CASE_EDGES: number[][] = [
   [],            // 15
 ];
 
-/** Quantised key for joining segment ends that ought to be the same point. */
-function key(p: Point2D): string {
-  return `${Math.round(p.x * 4096)},${Math.round(p.y * 4096)}`;
+/** A crossing: where the contour cuts a grid edge, and which edge it is. */
+interface Crossing {
+  p: Point2D;
+  /**
+   * The grid edge, as an integer: `2 * (r * cols + c)` for the edge running
+   * right from pixel (c, r), plus one for the edge running down from it. Two
+   * cells sharing an edge name it alike, so segment ends are joined by this
+   * rather than by their coordinates. Joining by quantised coordinates both
+   * split crossings that should meet (a last-bit difference across a rounding
+   * boundary) and merged ones that should not (two crossings near the same
+   * corner), and either way the loop failed to close and was dropped.
+   */
+  edge: number;
 }
 
 /**
@@ -75,7 +85,7 @@ export function isoContours(
    */
   stepRise = Infinity
 ): Point2D[][] {
-  const segments: [Point2D, Point2D][] = [];
+  const segments: [Crossing, Crossing][] = [];
   const at = (c: number, r: number) => field[r * cols + c];
 
   // Interpolated crossing along an edge, so the contour is smooth rather than
@@ -101,15 +111,17 @@ export function isoContours(
         (vd >= level ? 8 : 0);
       if (idx === 0 || idx === 15) continue;
 
-      const edgePoint = (e: number): Point2D => {
+      // Every edge is interpolated in the same direction, left to right or top
+      // to bottom, so both cells that share it compute the same point.
+      const edgePoint = (e: number): Crossing => {
+        const h = 2 * (r * cols + c);
         switch (e) {
-          case 0: return lerp(c, r, va, c + 1, r, vb);
-          case 1: return lerp(c + 1, r, vb, c + 1, r + 1, vc);
-          case 2: return lerp(c + 1, r + 1, vc, c, r + 1, vd);
-          default: return lerp(c, r + 1, vd, c, r, va);
+          case 0: return { p: lerp(c, r, va, c + 1, r, vb), edge: h };
+          case 1: return { p: lerp(c + 1, r, vb, c + 1, r + 1, vc), edge: h + 3 };
+          case 2: return { p: lerp(c, r + 1, vd, c + 1, r + 1, vc), edge: h + 2 * cols };
+          default: return { p: lerp(c, r, va, c, r + 1, vd), edge: h + 1 };
         }
       };
-
       let pairs: number[][];
       if (idx === 5 || idx === 10) {
         const centre = (va + vb + vc + vd) / 4;
@@ -140,13 +152,13 @@ export function isoContours(
  * runs off the edge of the grid — is dropped, since an open path is not
  * something the tool can be sent around.
  */
-function chainSegments(segments: [Point2D, Point2D][]): Point2D[][] {
-  const starts = new Map<string, number[]>();
+function chainSegments(segments: [Crossing, Crossing][]): Point2D[][] {
+  const starts = new Map<number, number[]>();
   const used = new Array(segments.length).fill(false);
 
   segments.forEach((seg, i) => {
     for (const end of [0, 1]) {
-      const k = key(seg[end]);
+      const k = seg[end].edge;
       const list = starts.get(k);
       if (list) list.push(i);
       else starts.set(k, [i]);
@@ -159,12 +171,11 @@ function chainSegments(segments: [Point2D, Point2D][]): Point2D[][] {
     if (used[i]) continue;
     used[i] = true;
 
-    const loop: Point2D[] = [segments[i][0], segments[i][1]];
-    const startKey = key(segments[i][0]);
+    const loop: Crossing[] = [segments[i][0], segments[i][1]];
+    const startKey = segments[i][0].edge;
 
     for (;;) {
-      const tail = loop[loop.length - 1];
-      const k = key(tail);
+      const k = loop[loop.length - 1].edge;
       if (k === startKey && loop.length > 2) break; // closed
 
       const candidates = starts.get(k) ?? [];
@@ -172,9 +183,8 @@ function chainSegments(segments: [Point2D, Point2D][]): Point2D[][] {
       for (const j of candidates) {
         if (used[j]) continue;
         const seg = segments[j];
-        const other = key(seg[0]) === k ? seg[1] : seg[0];
         used[j] = true;
-        loop.push(other);
+        loop.push(seg[0].edge === k ? seg[1] : seg[0]);
         advanced = true;
         break;
       }
@@ -182,12 +192,19 @@ function chainSegments(segments: [Point2D, Point2D][]): Point2D[][] {
     }
 
     // Closed loops only. An open chain means the contour left the grid.
-    if (loop.length >= 4 && key(loop[0]) === key(loop[loop.length - 1])) {
+    if (loop.length >= 4 && loop[0].edge === loop[loop.length - 1].edge) {
       loop.pop();
-      loops.push(loop);
+      // A level that lands exactly on a pixel puts the crossings of both
+      // edges meeting there on that pixel; keep one of them.
+      const points: Point2D[] = [];
+      for (const { p } of loop) {
+        const last = points[points.length - 1];
+        if (!last || last.x !== p.x || last.y !== p.y) points.push(p);
+      }
+      while (points.length > 1 && points[0].x === points[points.length - 1].x && points[0].y === points[points.length - 1].y) points.pop();
+      if (points.length >= 3) loops.push(points);
     }
   }
 
   return loops;
 }
-
