@@ -27,7 +27,6 @@
 
 import type { Point2D } from './laserCutExporter';
 import { isoContours } from './marchingSquares';
-import { offsetRings } from './polygonOffset';
 
 /**
  * How the finishing passes are laid out in plan.
@@ -262,29 +261,54 @@ export function rasterPasses(input: FinishingPathInput, angleDeg: number): Point
 // Concentric and spiral
 // ---------------------------------------------------------------------------
 
-/** Rings stepping inward from the stock boundary, outermost first. */
+/**
+ * Rings stepping inward from the stock boundary, outermost first, and a spine
+ * down the middle where the last ring stops more than half a stepover short.
+ *
+ * The rings are the rectangle's own insets, worked out directly. They came
+ * from the general polygon offsetter, which stops when an inset collapses, and
+ * nothing then covered what lay inside the last ring: a strip up to two
+ * stepovers wide down the centre of the work with no pass of its own.
+ */
 export function concentricPasses(input: FinishingPathInput): Point2D[][] {
-  const { bounds, stepover, resolution } = input;
-  const rect: Point2D[] = [
-    { x: bounds.minX, y: bounds.minY },
-    { x: bounds.maxX, y: bounds.minY },
-    { x: bounds.maxX, y: bounds.maxY },
-    { x: bounds.minX, y: bounds.maxY },
-  ];
+  const { bounds, resolution } = input;
+  const step = Math.max(1e-6, input.stepover);
+  const w = bounds.maxX - bounds.minX;
+  const h = bounds.maxY - bounds.minY;
+  const half = Math.min(w, h) / 2;
 
-  // firstOffset 0 keeps the outermost ring on the boundary itself; `bounds` has
-  // already been inset by the tool radius by the time it gets here.
-  const rings = offsetRings(rect, 0, Math.max(1e-6, stepover));
-  return rings
-    .map((r) => resamplePolyline(closeLoop(r), resolution))
-    .filter((r) => r.length >= 2);
+  // The outermost ring on the boundary itself: `bounds` has already been
+  // inset by the tool radius by the time it gets here.
+  const passes: Point2D[][] = [];
+  let d = 0;
+  for (; d < half - 1e-6; d += step) {
+    const x0 = bounds.minX + d, x1 = bounds.maxX - d;
+    const y0 = bounds.minY + d, y1 = bounds.maxY - d;
+    const ring = [{ x: x0, y: y0 }, { x: x0, y: y1 }, { x: x1, y: y1 }, { x: x1, y: y0 }];
+    passes.push(resamplePolyline(closeLoop(ring), resolution));
+  }
+
+  // What the last ring leaves to the centre line, measured across the narrow way.
+  const left = passes.length > 0 ? half - (d - step) : half;
+  if (left > step / 2 + 1e-6 || passes.length === 0) {
+    const cx = (bounds.minX + bounds.maxX) / 2;
+    const cy = (bounds.minY + bounds.maxY) / 2;
+    // Long enough to reach the inner ring's short sides as well, which on a
+    // square is a stroke across the middle rather than a point.
+    const reach = Math.max(Math.abs(w - h) / 2, left / 2);
+    const spine = w >= h
+      ? [{ x: cx - reach, y: cy }, { x: cx + reach, y: cy }]
+      : [{ x: cx, y: cy - reach }, { x: cx, y: cy + reach }];
+    passes.push(resamplePolyline(spine, resolution));
+  }
+  return passes.filter((r) => r.length >= 2);
 }
 
 /**
  * The concentric rings joined into one continuous path.
  *
  * A true Archimedean spiral would blend the radius continuously, which needs a
- * parametrisation the offsetter does not give us for an arbitrary outline. What
+ * parametrisation the rings do not give. What
  * this does instead is walk each ring in full, then step across to the nearest
  * point on the next ring in and start there — one connected path, with the
  * crossings a stepover long rather than a retract to safe Z. Where the region
@@ -306,9 +330,13 @@ export function spiralPasses(input: FinishingPathInput): Point2D[][] {
     }
 
     const from = current[current.length - 1];
+    const last = ring[ring.length - 1];
+    // The centre spine is an open line, entered from its nearer end; a ring
+    // anywhere round.
+    const open = Math.hypot(last.x - ring[0].x, last.y - ring[0].y) > 1e-9;
     let best = 0;
     let bestDist = Infinity;
-    for (let i = 0; i < ring.length; i++) {
+    for (const i of open ? [0, ring.length - 1] : ring.keys()) {
       const d = Math.hypot(ring[i].x - from.x, ring[i].y - from.y);
       if (d < bestDist) {
         bestDist = d;
@@ -320,6 +348,15 @@ export function spiralPasses(input: FinishingPathInput): Point2D[][] {
     if (bestDist > bridgeLimit) {
       paths.push(current);
       current = [...ring];
+      continue;
+    }
+
+    // Across to it at the resolution, so the bridge follows the surface like
+    // every other part of the pass instead of cutting a chord under it.
+    current.push(...resamplePolyline([from, ring[best]], input.resolution).slice(1, -1));
+
+    if (open) {
+      current.push(...(best === 0 ? ring : [...ring].reverse()));
       continue;
     }
 

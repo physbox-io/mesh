@@ -101,7 +101,7 @@ a sloped relief, a stepped shelf, a pocket with an island, and a two-sided solid
 - **1.12**: check where `item.status` comes from first (it may be API run data, not
   `MachineState`), then compare without regard to case.
 
-## Batch 6: relief efficiency (`reliefCarveExporter.ts`, `stockModel.ts`, `finishingPaths.ts`)
+## Batch 6: relief efficiency (`reliefCarveExporter.ts`, `stockModel.ts`, `finishingPaths.ts`) — DONE (2026-10-15)
 Each one is measured with `reliefPathEfficiency.test.ts`, with new figures added for ramps and
 retracts between bites.
 - **4.1**: query `highestUnder` within the cutter radius, using the cutter's profile. When moving

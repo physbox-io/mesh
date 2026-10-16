@@ -177,6 +177,50 @@ describe('concentric and spiral', () => {
     }
     expect(worst).toBeLessThanOrEqual(stepover * 3 + 1e-6);
   });
+
+  /*
+   * The rings came from the polygon offsetter, which stops when an inset
+   * collapses: on a 10 x 7 stock at a 2 mm stepover the last ring sat 1.5 mm
+   * from the centre line, and nothing cut the strip inside it.
+   */
+  it('leaves no point of the stock more than half a stepover from a pass', () => {
+    for (const bounds of [
+      { minX: 0, minY: 0, maxX: 10, maxY: 7 },
+      { minX: 0, minY: 0, maxX: 7, maxY: 10 },
+      { minX: 0, minY: 0, maxX: 7, maxY: 7 },
+      { minX: 5, minY: -3, maxX: 46.2, maxY: 18.9 },
+    ]) {
+      for (const make of [concentricPasses, spiralPasses]) {
+        const passes = make(input({ bounds, stepover: 2, resolution: 0.25 }));
+        let worst = 0;
+        for (let x = bounds.minX; x <= bounds.maxX + 1e-9; x += 0.25) {
+          for (let y = bounds.minY; y <= bounds.maxY + 1e-9; y += 0.25) {
+            let near = Infinity;
+            for (const pass of passes) {
+              for (const p of pass) near = Math.min(near, Math.hypot(p.x - x, p.y - y));
+            }
+            worst = Math.max(worst, near);
+          }
+        }
+        // Half a stepover, plus what sampling the passes at 0.25 mm can add.
+        expect(worst).toBeLessThan(1 + 0.25);
+      }
+    }
+  });
+
+  it('takes the centre spine into the spiral rather than lifting for it', () => {
+    const bounds = { minX: 0, minY: 0, maxX: 10, maxY: 7 };
+    expect(spiralPasses(input({ bounds, stepover: 2 }))).toHaveLength(1);
+  });
+
+  // A bridge was one straight move, cut as a chord under whatever the surface
+  // did between the two rings.
+  it('samples its bridges at the resolution, like the rings', () => {
+    const [path] = spiralPasses(input({ stepover: 2, resolution: 0.5 }));
+    for (let i = 1; i < path.length; i++) {
+      expect(Math.hypot(path[i].x - path[i - 1].x, path[i].y - path[i - 1].y)).toBeLessThanOrEqual(0.5 + 1e-6);
+    }
+  });
 });
 
 describe('contour (waterline)', () => {
