@@ -3249,7 +3249,7 @@ class WebSerialManager {
     await this.sendLine('G21 G90');
     const retractZ = await this.clampedRetractZ(safeZ);
     await this.sendLine(`G0 Z${retractZ.toFixed(3)}`);
-    await this.sendLine('G0 X0.000 Y0.000 F3000');
+    await this.sendLine('G0 X0.000 Y0.000');
   }
 
   /**
@@ -3372,7 +3372,6 @@ class WebSerialManager {
     const PROBE_SEARCH_MM = 10; // most the tool can plunge before the move ends
     const PROBE_LIFT_MM = 5; // relative lift after each contact, kept for the next hop
     const PROBE_FEED = 50; // slow, so the probe has time to stop the move
-    const LIFT_FEED = 1000;
 
     await this.sendAndWait('G21 G90');
 
@@ -3389,7 +3388,7 @@ class WebSerialManager {
 
         // Across to the point at the current clearance — an XY-only move, no Z
         // word, so the height the operator (or the last lift) set is kept.
-        await this.sendAndWait(`G0 X${x.toFixed(3)} Y${y.toFixed(3)} F3000`);
+        await this.sendAndWait(`G0 X${x.toFixed(3)} Y${y.toFixed(3)}`);
         // Straight down, slowly, until the probe triggers or the search runs
         // out. `probePoint` issues `G91 G38.2 Z-<search>`, a relative plunge.
         const contactZ = await this.probeOnce(PROBE_SEARCH_MM, PROBE_FEED, 120000);
@@ -3416,7 +3415,7 @@ class WebSerialManager {
 
         // Lift clear before the next hop, relative to where it just touched, so
         // the clearance follows the surface instead of an assumed height.
-        await this.sendAndWait(`G91 G0 Z${PROBE_LIFT_MM.toFixed(3)} F${LIFT_FEED}`);
+        await this.sendAndWait(`G91 G0 Z${PROBE_LIFT_MM.toFixed(3)}`);
         await this.sendAndWait('G90');
 
         if (referenceZ === null) referenceZ = contactZ;
@@ -3432,7 +3431,7 @@ class WebSerialManager {
     // Every point contacted (a miss would have thrown), so the tool is one lift
     // above the last one. A final relative lift leaves it clear for the operator
     // — still no absolute Z move.
-    await this.sendAndWait(`G91 G0 Z${PROBE_LIFT_MM.toFixed(3)} F3000`);
+    await this.sendAndWait(`G91 G0 Z${PROBE_LIFT_MM.toFixed(3)}`);
     await this.sendAndWait('G90');
 
     return {
@@ -3479,6 +3478,18 @@ class WebSerialManager {
     const { laserMode = guidePower > 0 && this.laserModeEnabled(), safeZMm = 5 } = opts;
     const { minX, minY, maxX, maxY } = bounds;
 
+    // The retract below is a work height, and with no datum set this session
+    // the work Z reading is whatever an earlier job left: the tool can be on
+    // the stock while it reads +50, so "lift to at least 5" lifts nothing and
+    // the lap drags the bit round the outline.
+    if (!laserMode && this.state.needsZZero) {
+      const message =
+        'Z zero has not been set this session. Set it in Machine Setup before framing — ' +
+        'the lift clear of the stock is measured from that datum.';
+      this.updateState({ lastError: message });
+      throw new Error(message);
+    }
+
     await this.sendLine('G21');
     await this.sendLine('G90');
 
@@ -3488,7 +3499,9 @@ class WebSerialManager {
       await this.sendLine(`G0 Z${retractZ.toFixed(3)}`);
     }
 
-    await this.sendLine(`G0 X${minX.toFixed(3)} Y${minY.toFixed(3)} F3000`);
+    // No F on a rapid: GRBL ignores it for the move but keeps it as the modal
+    // feed, so the next G1 without one of its own would run at it.
+    await this.sendLine(`G0 X${minX.toFixed(3)} Y${minY.toFixed(3)}`);
 
     const corners: Array<[number, number]> = [
       [maxX, minY],
@@ -3498,16 +3511,18 @@ class WebSerialManager {
     ];
 
     if (laserMode) {
-      await this.sendLine(`M3 S${Math.round(guidePower)}`);
+      // A percentage, like the guide spot's, scaled by `$30`: a raw `S5` is
+      // 0.05% duty on a 10000-scale controller, a lap nobody can see.
+      await this.sendLine(`M3 S${this.guidePowerAsS(guidePower)}`);
       for (const [x, y] of corners) {
         await this.sendLine(`G1 X${x.toFixed(3)} Y${y.toFixed(3)} F3000`);
       }
-      await this.sendLine('M5');
+      await this.sendLine('M5 S0');
     } else {
       // No `M3` at all: a program with none in it cannot start a spindle by
       // accident, and there is nothing to cut with here anyway.
       for (const [x, y] of corners) {
-        await this.sendLine(`G0 X${x.toFixed(3)} Y${y.toFixed(3)} F3000`);
+        await this.sendLine(`G0 X${x.toFixed(3)} Y${y.toFixed(3)}`);
       }
     }
   }

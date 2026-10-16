@@ -130,7 +130,7 @@ describe('probeGrid against a live machine', () => {
     // Each point is an XY-only traverse at the current height, a relative
     // plunge, G90 to restore absolute, then a relative lift clear.
     const probeIdx = fake.sent.findIndex(l => l.includes('G38.2'));
-    expect(fake.sent[probeIdx - 1]).toMatch(/^G0 X0\.000 Y0\.000 F3000/);
+    expect(fake.sent[probeIdx - 1]).toBe('G0 X0.000 Y0.000');
     expect(fake.sent[probeIdx]).toMatch(/^G91 G38\.2 Z-10\.000 F50/);
     expect(fake.sent[probeIdx + 1]).toBe('G90');
     expect(fake.sent[probeIdx + 2]).toMatch(/^G91 G0 Z5\.000/);

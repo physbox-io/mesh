@@ -354,6 +354,34 @@ describe('framing a job', () => {
     expect(fake.lines().some((l) => l.startsWith('M3'))).toBe(false);
     expect(fake.lines().some((l) => /^G0 Z/.test(l))).toBe(true);
   });
+
+  it('refuses to frame on a router whose Z zero has not been set this session', async () => {
+    (webSerialManager as unknown as { state: { needsZZero: boolean } }).state.needsZZero = true;
+    await expect(
+      webSerialManager.frameJob({ minX: 0, minY: 0, maxX: 10, maxY: 10 }, 0, { laserMode: false })
+    ).rejects.toThrow(/Z zero/);
+    expect(fake.lines()).toEqual([]);
+  });
+
+  it('lights the lap at the guide percentage of $30 and puts the beam out with S0', async () => {
+    const state = (webSerialManager as unknown as { state: { grblSettings: Record<number, number> } }).state;
+    state.grblSettings = { 30: 10000, 32: 1 };
+    await webSerialManager.frameJob({ minX: 0, minY: 0, maxX: 10, maxY: 10 }, 5, { laserMode: true });
+
+    // 5% of 10000, not a raw S5 (0.05% duty).
+    expect(fake.lines()).toContain('M3 S500');
+    expect(fake.lines()).toContain('M5 S0');
+  });
+
+  it('puts no F word on a rapid, which would overwrite the modal feed', async () => {
+    (webSerialManager as unknown as { state: { grblSettings: Record<number, number> } }).state.grblSettings = { 32: 0 };
+    await webSerialManager.frameJob({ minX: 0, minY: 0, maxX: 10, maxY: 10 }, 0, { laserMode: false });
+    await webSerialManager.gotoWorkOrigin();
+
+    const rapids = fake.lines().filter((l) => /\bG0\b/.test(l));
+    expect(rapids.length).toBeGreaterThan(4);
+    expect(rapids.filter((l) => /F/.test(l))).toEqual([]);
+  });
 });
 
 describe('setting Z zero by hand', () => {
