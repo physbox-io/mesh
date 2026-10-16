@@ -118,6 +118,7 @@ Each dynamic body can run a JavaScript control script inside the physics step lo
 - **`api.getTime()`**: the current simulation time.
 - **`api.getWind()`**: the current wind vector `[windX, windY]`.
 - **`api.log(msg)`**: logs a debug message to the console.
+- **`api.state`**: this body's own persistent object. The script body runs afresh every step, so its local variables do not survive; anything that has to last (an integral, a phase, a timer) goes on `api.state` — `api.state.integral = (api.state.integral || 0) + err * dt`. It survives edits made mid-play and worker recycles (it travels in the seed with qpos/qvel), and is cleared by Reset and by a preset load. The object is fixed: assigning `api.state = …` is ignored. Keep it to plain values, arrays and objects, or it cannot be carried across a worker restart. Implemented in `src/utils/scriptState.ts`; the native desktop app implements the same contract and also rewinds it with its run-ahead buffer.
 
 ---
 

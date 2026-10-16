@@ -5,6 +5,7 @@
 
 import type { SceneGraph } from '../types/scene';
 import type { CoSimChannel } from '../utils/coSimLink';
+import type { ScriptStateMap } from '../utils/scriptState';
 
 /** Explicit state to seed a freshly built model with (a live mirror's copy). */
 export interface SeedState {
@@ -12,6 +13,8 @@ export interface SeedState {
   qvel: number[];
   ctrl?: number[];
   time: number;
+  /** Every scripted body's api.state, so a recycled worker's scripts carry on. */
+  scriptState?: ScriptStateMap;
 }
 
 export interface DragTarget {
@@ -62,6 +65,12 @@ export interface FrameSnapshot extends Partial<SimBuffers> {
    * figure to decide on during a long run, when no build is happening at all.
    */
   heapBytes?: number;
+  /**
+   * Every scripted body's api.state as of this frame (absent when all are
+   * empty). The main thread keeps the latest beside its qpos mirror, so a
+   * worker recycle seeds the new worker with both from the same moment.
+   */
+  scriptState?: ScriptStateMap;
 }
 
 export interface BuiltResult extends Partial<SimBuffers> {

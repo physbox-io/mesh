@@ -834,6 +834,7 @@ const wobble = Math.sin(api.getTime() * 4) * 3;`}
                       <li><strong>Keep it cheap.</strong> This runs ~1000×/second. Avoid allocating large arrays or doing heavy work per step.</li>
                       <li><strong>Errors are silent-ish.</strong> A throwing script is caught and logged to the browser console rather than halting the sim. Use <code className="font-mono">api.log()</code> and open DevTools if nothing seems to happen.</li>
                       <li><strong>Gravity is still on.</strong> To hover you must actively cancel weight (<em>m·g</em>), as in the example above.</li>
+                      <li><strong>Locals reset every step; keep state in <code className="font-mono">api.state</code>.</strong> The script body runs afresh each step, so <code className="font-mono">let total = 0</code> starts at 0 every time. Anything that has to last — an integral, a phase, a timer — goes on <code className="font-mono">api.state</code>: <code className="font-mono">api.state.integral = (api.state.integral || 0) + err * 0.001;</code> It survives edits made mid-play and is cleared by Reset. Keep it to plain values, arrays and objects (no functions), so it can be carried along when the physics engine restarts — and, in the desktop app, rewound with the simulation.</li>
                     </ul>
                   </div>
                 </div>
@@ -892,6 +893,12 @@ const wobble = Math.sin(api.getTime() * 4) * 3;`}
                       ['api.getWind()', 'Current wind as [windX, windY].'],
                       ['api.log(msg)', 'Logs to the browser console, prefixed with the component name.'],
                       ['api.id / api.name', "This component's id and display name, as strings."],
+                    ],
+                  },
+                  {
+                    title: '🧠 Keeping state between steps',
+                    rows: [
+                      ['api.state', "This component's own persistent object: set properties on it (api.state.count = …) to remember anything from one step to the next. Lasts through edits made mid-play; cleared by Reset. It cannot be replaced (api.state = {} is ignored). Plain values, arrays and objects only."],
                     ],
                   },
                 ].map(({ title, rows }) => (

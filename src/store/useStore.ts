@@ -1,3 +1,4 @@
+import type { ScriptStateMap } from '../utils/scriptState';
 import { create, type StateCreator } from 'zustand';
 import { shareUnchanged } from '../utils/shareUnchanged';
 import * as THREE from 'three';
@@ -306,6 +307,9 @@ function bodiesChanged(prev: SceneGraph, next: SceneGraph): boolean {
  * proactive recycle should be deciding on.
  */
 let lastHeapBytes = 0;
+// Every scripted body's api.state as of the latest frame; see onFrame and the
+// recycles that seed from it (utils/scriptState.ts).
+let lastScriptState: ScriptStateMap | undefined;
 
 /**
  * Run something on the next paint, or straight away if there will not be one.
@@ -380,6 +384,9 @@ export const getPhysicsWorkerClient = (): PhysicsWorkerClient => {
       // The heap moves while stepping too, not only across builds — see the
       // periodic recycle at the bottom of this file, which decides on it.
       if (snap.heapBytes) lastHeapBytes = snap.heapBytes;
+      // Kept beside the qpos mirror, from the same frame, so a recycle seeds
+      // the new worker's scripts from the moment its bodies are seeded from.
+      lastScriptState = snap.scriptState;
       const data = useStore.getState().data;
       if (data) {
         data.time = snap.time;
@@ -2203,7 +2210,7 @@ export interface PhysicsState {
   makeDentable: (nodeId: string, geomIndex: number, cfg: DentConfig) => boolean;
   /** Replace a body with its pieces, in the runtime overlay only. */
   shatterNode: (node: SceneNode, event: ImpactEvent, wallM?: number | null) => Promise<void>;
-  recoverFromFatalWorkerError: (message: string, lastState?: { qpos: number[]; qvel: number[]; time: number }) => Promise<void>;
+  recoverFromFatalWorkerError: (message: string, lastState?: { qpos: number[]; qvel: number[]; time: number; scriptState?: ScriptStateMap }) => Promise<void>;
   recycleWorkerSeamlessly: () => Promise<void>;
   incrementMcpActive: () => void;
   decrementMcpActive: () => void;
@@ -5805,6 +5812,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
             qvel: Array.from(live.qvel as Float64Array),
             ctrl: Array.from(live.ctrl as Float64Array),
             time: live.time as number,
+            scriptState: lastScriptState,
           }
         : undefined;
 
@@ -5931,6 +5939,9 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
       qvel: Array.from(data.qvel as Float64Array),
       ctrl: Array.from(data.ctrl as Float64Array),
       time: data.time as number,
+      // A fresh worker is a fresh realm: without this every script's api.state
+      // (and, as ever, its globals) would be wiped mid-play.
+      scriptState: lastScriptState,
     };
     recycleWorker();
     try {

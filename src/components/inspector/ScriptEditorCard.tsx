@@ -213,6 +213,7 @@ api.applyForce([force, 0, 0]);
               ['api.getWind()', 'Current wind as [windX, windY].'],
               ['api.log(msg)', 'Log to the browser console.'],
               ['api.id / api.name', "This component's id and display name."],
+              ['api.state', 'Persistent object for state between steps (locals reset each step). Cleared by Reset.'],
             ]},
           ].map(({ group, rows }) => (
             <div key={group} className="flex flex-col gap-1.5">

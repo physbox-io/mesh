@@ -48,6 +48,7 @@ import type {
 } from './physicsWorkerProtocol';
 import { HistoryRing } from './historyRing';
 import { rebaseShard } from '../utils/runtimeShatter';
+import { ScriptStateStore, attachScriptState, scriptStateForBuild, type ScriptStateMap } from '../utils/scriptState';
 import { canCrumple, crumpleAsWeld, crumpleKey, holdSteps, isBreakable, shatterFloor, weldKey, weldOverload, type WeldBreakConfig } from '../utils/breakThresholds';
 
 type Mujoco = Awaited<ReturnType<typeof load_mujoco>>;
@@ -155,6 +156,9 @@ let geomNameCache: Record<number, string> = {};
 let actuatorIdCache: Record<string, number> = {};
 
 const scriptCache: Record<string, (api: Record<string, unknown>) => void> = {};
+// Each scripted body's api.state; see utils/scriptState.ts. A `let` so a
+// headless run can work on its own without touching the live scene's.
+let scriptState = new ScriptStateStore();
 
 const findNodeById = (nodes: SceneNode[], targetId: string): SceneNode | null => {
   if (!nodes) return null;
@@ -500,6 +504,7 @@ const executeScripts = (nodes: SceneNode[], aeroDiagnostics: Record<string, Aero
         getWind: () => [envWindX || 0, envWindY || 0],
         log: (msg: unknown) => console.log(`[Script:${node.name}]`, msg),
       };
+      attachScriptState(api, scriptState, node.id);
 
       try { fn(api); } catch (e) { console.error(`[Script Runtime Error on node ${node.name}]:`, e); }
     }
@@ -1360,7 +1365,7 @@ const stepOnce = (stepSize: number): boolean => {
   } catch (e) {
     const msg = String((e as Error)?.message || e);
     const fatal = /Aborted|enlarge memory|abort|bad_alloc/i.test(msg);
-    post({ type: 'ERROR', message: msg, fatal, lastState: fatal ? { qpos: Array.from(data.qpos), qvel: Array.from(data.qvel), time: data.time } : undefined });
+    post({ type: 'ERROR', message: msg, fatal, lastState: fatal ? { qpos: Array.from(data.qpos), qvel: Array.from(data.qvel), time: data.time, scriptState: scriptState.snapshot() } : undefined });
     isPlaying = false;
     return false;
   }
@@ -1443,9 +1448,9 @@ const postFrame = () => {
   lastFramePost = performance.now();
   const snap = snapshot();
   if (isSharedSupported) {
-    post({ type: 'FRAME', time: snap.time, heapBytes: snap.heapBytes, isShared: true });
+    post({ type: 'FRAME', time: snap.time, heapBytes: snap.heapBytes, isShared: true, scriptState: scriptState.snapshot() });
   } else {
-    post({ type: 'FRAME', ...snap, isShared: false }, [
+    post({ type: 'FRAME', ...snap, isShared: false, scriptState: scriptState.snapshot() }, [
       snap.qpos.buffer, snap.qvel.buffer, snap.ctrl.buffer,
       snap.xfrc_applied.buffer, snap.qfrc_applied.buffer,
       snap.xpos.buffer, snap.xmat.buffer, snap.cvel.buffer,
@@ -1560,10 +1565,11 @@ const doBuild = (
   xml: string,
   newSceneGraph: SceneGraph,
   preserveState: boolean,
-  seedState?: { qpos: number[]; qvel: number[]; ctrl?: number[]; time: number },
+  seedState?: { qpos: number[]; qvel: number[]; ctrl?: number[]; time: number; scriptState?: ScriptStateMap },
   brokenConstraints?: string[],
 ) => {
   if (brokenConstraints) brokenWeldKeys = new Set(brokenConstraints);
+  scriptStateForBuild(scriptState, preserveState, seedState);
   const oldModel = model;
   const oldData = data;
 
@@ -1872,6 +1878,10 @@ const runHeadless = (
   if (!mujoco) throw new Error('MuJoCo module not loaded yet');
 
   const savedModel = model, savedData = data, savedSceneGraph = sceneGraph;
+  // A headless run starts its scripts from nothing and must not leave its
+  // state in the live scene's.
+  const savedScriptState = scriptState;
+  scriptState = new ScriptStateStore();
   const savedBodyIdCache = bodyIdCache, savedJointIdCache = jointIdCache;
   const savedGeomIdCache = geomIdCache, savedGeomNameCache = geomNameCache, savedActuatorIdCache = actuatorIdCache;
   // breakableWelds holds indices into the LIVE model's equality list, so it has
@@ -1955,6 +1965,7 @@ const runHeadless = (
     if (headlessModel) { try { headlessModel.delete(); } catch { /* ignore */ } }
     if (headlessData) { try { headlessData.delete(); } catch { /* ignore */ } }
     model = savedModel; data = savedData; sceneGraph = savedSceneGraph;
+    scriptState = savedScriptState;
     bodyIdCache = savedBodyIdCache; jointIdCache = savedJointIdCache;
     geomIdCache = savedGeomIdCache; geomNameCache = savedGeomNameCache; actuatorIdCache = savedActuatorIdCache;
     breakableWelds = savedBreakableWelds; brokenWeldKeys = savedBrokenWeldKeys;
@@ -2036,9 +2047,9 @@ self.onmessage = async (evt: MessageEvent) => {
           mujoco.mj_forward(model, data);
           const snap = snapshot();
           if (isSharedSupported) {
-            post({ type: 'FRAME', time: snap.time, heapBytes: snap.heapBytes, isShared: true });
+            post({ type: 'FRAME', time: snap.time, heapBytes: snap.heapBytes, isShared: true, scriptState: scriptState.snapshot() });
           } else {
-            post({ type: 'FRAME', ...snap, isShared: false }, [
+            post({ type: 'FRAME', ...snap, isShared: false, scriptState: scriptState.snapshot() }, [
               snap.qpos.buffer, snap.qvel.buffer, snap.ctrl.buffer,
               snap.xfrc_applied.buffer, snap.qfrc_applied.buffer,
               snap.xpos.buffer, snap.xmat.buffer, snap.cvel.buffer,
