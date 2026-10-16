@@ -2242,7 +2242,15 @@ export function machineSurface(
     for (let i = 1; i < path.length; i++) {
       pathLen += Math.hypot(path[i].x - path[i - 1].x, path[i].y - path[i - 1].y);
     }
-    const rampLen = Math.min(drop / leadInTan, pathLen / 2);
+    /*
+     * Where the ramp does not fit at its angle, it goes back and forth along
+     * the whole run instead, each leg dropping no faster than the angle allows.
+     * It used to be squeezed into half the run whatever that did to the angle,
+     * so a short run was a plunge with a lean to it: 16.5 mm down over 3 mm,
+     * about 80 degrees, on a finishing bit with no roughing ahead of it.
+     */
+    const fits = drop / leadInTan <= pathLen / 2;
+    const rampLen = fits ? drop / leadInTan : pathLen;
     if (rampLen < 0.1) return plunge();
 
     // Walk the pass until the ramp length is used up, splitting the segment it
@@ -2277,14 +2285,49 @@ export function machineSurface(
     }
     if (walk.length === 0) return plunge();
 
-    // Down the ramp, never below the surface the pass is tracing.
-    for (const w of walk) {
-      const z = Math.max(w.pz, entryZ - drop * (w.d / rampLen));
-      cutTo(w.x, w.y, z);
-      gcode.push(`G1 X${f(w.x)} Y${f(w.y)} Z${f(z)} F${Math.round(rate)}`);
-    }
     /*
-     * Back to the head at full depth, clearing what the ramp rode over.
+     * Down the ramp, leg by leg, never below the surface the pass is tracing
+     * and never falling faster than the lead-in angle between two stops.
+     *
+     * The second rule is the one a fixed ramp line broke: over a bump in the
+     * surface the cut rides up on it, and the line was already lower on the
+     * far side, so the cut dropped back to it at whatever angle that took -
+     * 60 degrees off a bump on a dome. Held to the angle from wherever the cut
+     * stands, a stop can be left above the surface at the end of a leg, and
+     * the next leg, back the other way, takes it down further. On ground with
+     * no bump the first leg reaches the surface at its far end, exactly as
+     * the fixed line did.
+     */
+    const stops = [{ x: head.x, y: head.y, pz: head.z, d: 0 }, ...walk];
+    let z = entryZ;
+    let at = 0;
+    let forward = true;
+    // How far above the surface each leg left its stops, to stop when a leg
+    // gains nothing on the one before it the same way.
+    const left: number[] = [];
+    for (let leg = 0; leg < 1000; leg++) {
+      const to = forward ? stops.length - 1 : 0;
+      const step = forward ? 1 : -1;
+      let above = 0;
+      for (let k = at + step; forward ? k <= to : k >= to; k += step) {
+        const seg = Math.abs(stops[k].d - stops[k - step].d);
+        z = Math.max(stops[k].pz, z - seg * leadInTan);
+        // The foot of a straight step down cannot be reached at an angle from
+        // its top, and need not be: the pass drops down it itself, at the
+        // plunge rate, as `squareUpWalls` laid it out.
+        if (seg > 1e-9) above += z - stops[k].pz;
+        cutTo(stops[k].x, stops[k].y, z);
+        gcode.push(`G1 X${f(stops[k].x)} Y${f(stops[k].y)} Z${f(z)} F${Math.round(rate)}`);
+      }
+      at = to;
+      forward = !forward;
+      left.push(above);
+      if (above <= 1e-6 || (leg >= 2 && above >= left[leg - 2] - 1e-6)) break;
+    }
+
+    /*
+     * Back to the head at full depth, clearing what the ramp rode over - or,
+     * where the last leg ended at the head, the pass itself does that.
      *
      * At the cutting feed, not the plunge rate. GRBL holds the last F it was
      * given, so with no F word here the whole return leg inherited the ramp's
@@ -2293,17 +2336,12 @@ export function machineSurface(
      * stated once and then held, the same way the passes themselves do it.
      */
     let stated = false;
-    const withRate = () => {
-      if (returnRate <= 0 || stated) return '';
-      stated = true;
-      return ` F${Math.round(returnRate)}`;
-    };
-    for (let i = walk.length - 2; i >= 0; i--) {
-      cutTo(walk[i].x, walk[i].y, walk[i].pz);
-      gcode.push(`G1 X${f(walk[i].x)} Y${f(walk[i].y)} Z${f(walk[i].pz)}${withRate()}`);
+    for (let k = at - 1; k >= 0; k--) {
+      cutTo(stops[k].x, stops[k].y, stops[k].pz);
+      const word = returnRate > 0 && !stated ? ` F${Math.round(returnRate)}` : '';
+      stated = stated || word !== '';
+      gcode.push(`G1 X${f(stops[k].x)} Y${f(stops[k].y)} Z${f(stops[k].pz)}${word}`);
     }
-    cutTo(head.x, head.y, head.z);
-    gcode.push(`G1 X${f(head.x)} Y${f(head.y)} Z${f(head.z)}${withRate()}`);
   };
   gcode.push('; ---------------------------------------------------------------');
   for (const line of job.header) gcode.push(line);
