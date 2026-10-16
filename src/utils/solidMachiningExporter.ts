@@ -32,6 +32,7 @@ import {
   type ReliefCarveOptions,
   type StockTransform,
   type SurfaceMachiningResult,
+  type ToolpathSegment,
 } from './reliefCarveExporter';
 import { materialSpec, type SpindleRange } from './feedsAndSpeeds';
 
@@ -717,6 +718,39 @@ function pinBore(
 }
 
 /**
+ * What a block of bore lines cuts, for the preview and the cut distance: each
+ * stretch of feed moves between rapids as one segment of tip positions.
+ */
+function boreSegments(lines: string[]): { segments: ToolpathSegment[]; distanceMm: number } {
+  const segments: ToolpathSegment[] = [];
+  let x = 0, y = 0, z = 0, distanceMm = 0;
+  let points: { x: number; y: number; z: number }[] = [];
+  let traverseZ = 0;
+  const word = (line: string, axis: string, was: number) => {
+    const m = new RegExp(`${axis}(-?[\\d.]+)`).exec(line);
+    return m ? parseFloat(m[1]) : was;
+  };
+  for (const raw of lines) {
+    const line = raw.split(';')[0].trim();
+    const g = /^G([01])\b/.exec(line);
+    if (!g) continue;
+    const nx = word(line, 'X', x), ny = word(line, 'Y', y), nz = word(line, 'Z', z);
+    if (g[1] === '1') {
+      if (points.length === 0) points.push({ x, y, z });
+      points.push({ x: nx, y: ny, z: nz });
+      distanceMm += Math.hypot(nx - x, ny - y, nz - z);
+    } else {
+      if (points.length > 1) segments.push({ type: 'roughing', points, traverseZ });
+      points = [];
+      traverseZ = Math.max(z, nz);
+    }
+    x = nx; y = ny; z = nz;
+  }
+  if (points.length > 1) segments.push({ type: 'roughing', points, traverseZ });
+  return { segments, distanceMm };
+}
+
+/**
  * The part's size the way the job will see it, before any of the job is
  * planned: this way up, at this scale, in millimetres.
  *
@@ -1170,7 +1204,17 @@ export function generateSolidMachining(
       warnings
     );
     if (!cut.success) return fail(`Side ${side}: ${cut.error ?? 'no toolpath.'}`);
-    sides.push({ ...cut, side, depthMm: depth });
+    // The pin bores are in the program, so the time estimate has them; the
+    // preview and the cut distance are built from the surface's own moves,
+    // and had nothing of them.
+    const bores = boreSegments(prelude ?? []);
+    sides.push({
+      ...cut,
+      segments: [...bores.segments, ...cut.segments],
+      totalCutDistanceMm: cut.totalCutDistanceMm + bores.distanceMm,
+      side,
+      depthMm: depth,
+    });
   }
 
   if (!twoSided && opts.throughCutMm > 0) {

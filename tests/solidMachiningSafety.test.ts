@@ -90,6 +90,20 @@ describe('Registration pins', () => {
     expect(res.warnings.join('\n')).toMatch(/registration pin/);
   });
 
+  it('shows the pin bores in the preview and counts them in the cut distance', () => {
+    const withPins = generateSolidMachining(block, { ...quick, sides: 2 });
+    const without = generateSolidMachining(block, { ...quick, sides: 2, registrationPins: false });
+    expect(withPins.pins.length).toBe(2);
+    const sideA = withPins.sides[0];
+    const depth = -(withPins.stock.thicknessMm + 8);
+    for (const pin of withPins.pins) {
+      const reached = sideA.segments.some((s) => s.points.some((p) =>
+        Math.hypot(p.x - pin.x, p.y - pin.y) < 4 && p.z <= depth + 1e-3));
+      expect(reached).toBe(true);
+    }
+    expect(sideA.totalCutDistanceMm).toBeGreaterThan(without.sides[0].totalCutDistanceMm + 2 * 30);
+  });
+
   it('does not bore deeper than the holder lets the cutter reach', () => {
     const res = generateSolidMachining(block, {
       ...quick, sides: 2, toolStickoutMm: 18, holderDiaMm: 22,
