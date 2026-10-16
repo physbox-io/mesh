@@ -94,7 +94,12 @@ describe('cutter-offset paths climb-mill', () => {
       resolution: 1,
     });
     expect(passes.length).toBeGreaterThan(2);
-    for (const p of passes) expect(clockwise(p)).toBe(true);
+    // The rings, that is: the spine down the middle is an open line and has
+    // no winding.
+    const closed = (p: Point2D[]) =>
+      Math.hypot(p[0].x - p[p.length - 1].x, p[0].y - p[p.length - 1].y) < 1e-9;
+    expect(passes.filter(closed).length).toBeGreaterThan(2);
+    for (const p of passes.filter(closed)) expect(clockwise(p)).toBe(true);
   });
 });
 
