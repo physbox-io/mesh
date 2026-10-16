@@ -439,3 +439,56 @@ describe('where the feeder goes', () => {
     expect(r.summary.gateAtMm.x).toBeLessThan(-r.summary.patternSizeMm.x / 4);
   });
 });
+
+describe('the sand rig on the print bed', () => {
+  /**
+   * The pattern's separate pieces, each as its lowest Z and how many distinct
+   * vertices it has. The rig's beams are boxes of eight, a few of them sharing
+   * corners; its sprue and riser are cylinders of fifty, and the part is the
+   * part.
+   */
+  function pieces(stl: Uint8Array): Array<{ minZ: number; verts: number }> {
+    const view = new DataView(stl.buffer, stl.byteOffset, stl.byteLength);
+    const count = view.getUint32(80, true);
+    const ids = new Map<string, number>();
+    const z: number[] = [];
+    const parent: number[] = [];
+    const find = (i: number): number => (parent[i] === i ? i : (parent[i] = find(parent[i])));
+    for (let t = 0; t < count; t++) {
+      const vs: number[] = [];
+      for (let v = 0; v < 3; v++) {
+        const o = 84 + t * 50 + 12 + v * 12;
+        const p = [0, 4, 8].map((d) => view.getFloat32(o + d, true));
+        const k = p.map((x) => Math.round(x * 1000)).join(',');
+        let id = ids.get(k);
+        if (id === undefined) {
+          id = z.length;
+          ids.set(k, id);
+          z.push(p[2]);
+          parent.push(id);
+        }
+        vs.push(id);
+      }
+      parent[find(vs[1])] = find(vs[0]);
+      parent[find(vs[2])] = find(vs[0]);
+    }
+    const groups = new Map<number, { minZ: number; verts: number }>();
+    for (let i = 0; i < z.length; i++) {
+      const g = groups.get(find(i)) ?? { minZ: Infinity, verts: 0 };
+      g.minZ = Math.min(g.minZ, z[i]);
+      g.verts++;
+      groups.set(find(i), g);
+    }
+    return [...groups.values()];
+  }
+
+  it('stands the sprue and the riser on the bed when the plane is above it', () => {
+    const r = generateCastPattern(ballOnABar(), { method: 'sand', metalId: 'aluminium', partingFromBaseMm: 5 });
+    expect(r.success, r.error).toBe(true);
+    expect(r.summary.riserDiaMm).toBeGreaterThan(0);
+    const solids = pieces(r.patternStl).filter((p) => p.verts > 24);
+    // The part, the sprue and the riser.
+    expect(solids.length).toBeGreaterThanOrEqual(3);
+    for (const p of solids) expect(p.minZ).toBeCloseTo(0, 3);
+  });
+});

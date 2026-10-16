@@ -759,10 +759,13 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
     const gateG = { x: gateAtPart.x * grow, y: gateAtPart.y * grow };
     const sprueG = { x: sprueAt.x * grow, y: sprueAt.y * grow };
     gateAt.x = gateG.x; gateAt.y = gateG.y;
-    // Downsprue, from the parting plane it pours into up to the top of the
-    // cope. Below the plane it would only be a blind stub in the drag.
-    appendCylinder(pat, sprueG.x, sprueG.y, partingZ, sprueTop, sprueDia / 2);
-    gatingVolumeMm3 += (Math.PI * sprueDia * sprueDia * Math.max(0, sprueTop - partingZ)) / 4;
+    // Downsprue, from the bed up to the top of the cope. The pattern prints as
+    // one piece standing on Z = 0, and started at a parting plane above that
+    // the sprue, and the runner hung off it, printed in mid-air. Below the
+    // plane it moulds a sprue well in the drag, which is no harm: it catches
+    // the first, coldest metal down.
+    appendCylinder(pat, sprueG.x, sprueG.y, 0, sprueTop, sprueDia / 2);
+    gatingVolumeMm3 += (Math.PI * sprueDia * sprueDia * sprueTop) / 4;
     rigTopZ = Math.max(rigTopZ, sprueTop);
     // Runner along the parting plane, from the sprue to the gate — which is on
     // metal, because it was chosen from the columns the plane cuts.
@@ -782,9 +785,11 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
       // top before its metal is called for.
       const riserG = { x: riserStandAt.x * grow, y: riserStandAt.y * grow };
       const neckG = { x: riserPt.x * grow, y: riserPt.y * grow };
+      // It too stands on the bed, for the same reason as the sprue; its
+      // working height is still measured from the plane.
       const riserH = riserDia * 1.5;
-      appendCylinder(pat, riserG.x, riserG.y, partingZ, partingZ + riserH, riserDia / 2);
-      gatingVolumeMm3 += (Math.PI * riserDia * riserDia * riserH) / 4;
+      appendCylinder(pat, riserG.x, riserG.y, 0, partingZ + riserH, riserDia / 2);
+      gatingVolumeMm3 += (Math.PI * riserDia * riserDia * (partingZ + riserH)) / 4;
       rigTopZ = Math.max(rigTopZ, partingZ + riserH);
       const neckLen = Math.hypot(neckG.x - riserG.x, neckG.y - riserG.y);
       appendBeam(pat, riserG.x, riserG.y, neckG.x, neckG.y, runnerH, partingZ, partingZ + runnerH);
