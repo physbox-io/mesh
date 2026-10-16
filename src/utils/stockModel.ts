@@ -17,8 +17,8 @@
  * the stock. A cell is lowered only when the cutter covers all of it — every
  * corner, clipped to the stock, within the radius — to the highest
  * level the cutter leaves anywhere across it. A query counts every cell the
- * footprint could touch — centre within the radius plus half the diagonal. So
- * the model can overstate what is left but never understate it.
+ * footprint reaches any part of, at its full height. So the model can
+ * overstate what is left but never understate it.
  *
  * Sampling cells at their centres was tried, and is not safe: a cell whose
  * centre a pass covers can still hold a wedge the pass missed, and the inside
@@ -199,9 +199,40 @@ export class StockModel {
     return worst;
   }
 
-  /** Highest material a cutter of `radius` centred at (x, y) would touch. */
-  highestUnder(x: number, y: number, radius: number): number {
-    return this.highestAlong(x, y, x, y, radius);
+  /**
+   * The lowest a cutter's tip can sit with its axis at (x, y) and touch
+   * nothing: the highest material within `radius`, less what the cutter's
+   * profile lifts its edge clear of it there.
+   *
+   * Each cell is measured at its nearest point to the axis, so a cell the
+   * footprint does not reach is not counted. It used to be every cell whose
+   * centre lay within the radius plus half a diagonal, which took in a ring of
+   * cells wholly outside the cutter - and since a cell is only lowered once a
+   * pass covers all of it, the ring round every cut stood at whatever was there
+   * before. At the head of a second bite on an adaptive ring that read as the
+   * stock's top face, and the tool lifted out of its own slot and ramped back
+   * down through air.
+   */
+  highestUnder(x: number, y: number, radius: number, profile: CutterProfile = FLAT_PROFILE): number {
+    const c = this.cell;
+    const i0 = Math.max(0, Math.floor((x - radius - this.x0) / c));
+    const i1 = Math.min(this.cols - 1, Math.floor((x + radius - this.x0) / c));
+    const j0 = Math.max(0, Math.floor((y - radius - this.y0) / c));
+    const j1 = Math.min(this.rows - 1, Math.floor((y + radius - this.y0) / c));
+    let best = -Infinity;
+    for (let j = j0; j <= j1; j++) {
+      const ya = this.y0 + j * c;
+      const dy = y < ya ? ya - y : y > ya + c ? y - ya - c : 0;
+      for (let i = i0; i <= i1; i++) {
+        const xa = this.x0 + i * c;
+        const dx = x < xa ? xa - x : x > xa + c ? x - xa - c : 0;
+        const d = Math.hypot(dx, dy);
+        if (d > radius) continue;
+        const level = this.z[j * this.cols + i] - profile(d);
+        if (level > best) best = level;
+      }
+    }
+    return best;
   }
 
   /** Highest material a cutter of `radius` would touch flying from one point to another. */
