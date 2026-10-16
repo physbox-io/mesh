@@ -2157,11 +2157,26 @@ export function machineSurface(
    * deeper the layer the harder it pulls. Descending at a shallow angle along
    * the pass makes the entry an ordinary cut instead.
    *
-   * The ramp runs forward to the ramp length and then back to the head of the
-   * pass at full depth, so the wedge of material it left behind is taken off
-   * before the pass proper starts over it. Where the run is too short to ramp
-   * into — or the angle is set to zero — it plunges, which is what it had to do
-   * anyway.
+   * On an open run the ramp runs forward to the ramp length and then back to
+   * the head of the pass at full depth, so the wedge of material it left behind
+   * is taken off before the pass proper starts over it. Where the run is too
+   * short to ramp into — or the angle is set to zero — it plunges, which is
+   * what it had to do anyway.
+   *
+   * A closed loop has no end to turn round at, and need not: the ramp carries
+   * on forward round the loop, as many times as it takes to get down, and the
+   * pass starts wherever it reached full depth and goes once round from there,
+   * taking off the wedge when it comes back past the head. It used to ramp
+   * out, reverse to the head and reverse again into the pass — two stops, the
+   * return leg cut conventional, and the ramp's stretch cut three times.
+   *
+   * Returns the pass to cut from where the tool now stands: the path itself,
+   * or a closed loop turned to start where the ramp ended.
+   *
+   * `fromHere` says the tool is already at the head of the pass, down in the
+   * slot an earlier pass along the same line cut. It ramps on down from where
+   * it stands: no lift, no rapid, and no reading of the stock model, which
+   * cannot see that the slot is clear right out to the cutter's rim.
    *
    * `entryZ` is the height the material is expected to stand at when the pass
    * begins: the stock's top face on the first layer, the level the previous
@@ -2180,68 +2195,120 @@ export function machineSurface(
     path: PathPoint[],
     expectedEntryZ: number,
     rate: number,
-    returnRate = 0
-  ) => {
+    returnRate = 0,
+    fromHere = false
+  ): PathPoint[] => {
     const head = path[0];
-    const standing = stock.highestUnder(head.x, head.y, cutter.radius);
-    const entryZ = Math.min(0, Math.max(expectedEntryZ, standing));
-    const approachZ = Math.min(opts.safeZ, entryZ + 0.5);
+    const here = fromHere && Math.hypot(head.x - atX, head.y - atY) < 1e-6 && atZ >= head.z - 1e-6;
+    let entryZ = atZ;
+    if (here) {
+      lastTraverseZ = atZ;
+    } else {
+      const standing = stock.highestUnder(head.x, head.y, cutter.radius, cutter.profile);
+      entryZ = Math.min(0, Math.max(expectedEntryZ, standing));
+      const approachZ = Math.min(opts.safeZ, entryZ + 0.5);
 
-    /*
-     * Up only as far as it takes to clear what is in the way.
-     *
-     * Every pass used to end with a full retract to `safeZ` and every one
-     * began by flying back down — a round trip of the whole retract height
-     * between two raster lines a fraction of a millimetre apart. On a typical
-     * relief that is some four hundred retracts and several metres of Z rapid
-     * that cut nothing.
-     *
-     * The height is measured rather than guessed: the stock model is swept
-     * along the line the tool is about to fly, as wide as the cutter, and the
-     * traverse goes a millimetre over the highest thing on it. That is exact
-     * where a rule like "stay low if the next pass is close" is only usually
-     * right — a wall standing between two adjacent passes is precisely the case
-     * such a rule gets wrong, and the cost of being wrong is the cutter driven
-     * through it at rapid. The sweep samples at half a stock cell, so nothing
-     * the model holds can fall between two samples.
-     */
-    const highest = Math.max(
-      head.z,
-      stock.highestAlong(atX, atY, head.x, head.y, cutter.radius)
-    );
-    // The safe height clears the levelling span too: it used to cap the
-    // clearance and so clipped the span straight back off it.
-    const lowZ = Math.min(0, highest) + TRAVERSE_CLEARANCE_MM;
-    const safeZ = opts.safeZ + LEVELLING_SPAN_MM;
-    const traverseZ = Math.hypot(head.x - atX, head.y - atY) > LONG_TRAVERSE_MM
-      ? Math.max(safeZ, lowZ)
-      : Math.min(safeZ, lowZ);
+      /*
+       * Up only as far as it takes to clear what is in the way.
+       *
+       * Every pass used to end with a full retract to `safeZ` and every one
+       * began by flying back down — a round trip of the whole retract height
+       * between two raster lines a fraction of a millimetre apart. On a typical
+       * relief that is some four hundred retracts and several metres of Z rapid
+       * that cut nothing.
+       *
+       * The height is measured rather than guessed: the stock model is swept
+       * along the line the tool is about to fly, as wide as the cutter, and the
+       * traverse goes a millimetre over the highest thing on it. That is exact
+       * where a rule like "stay low if the next pass is close" is only usually
+       * right — a wall standing between two adjacent passes is precisely the case
+       * such a rule gets wrong, and the cost of being wrong is the cutter driven
+       * through it at rapid. The sweep samples at half a stock cell, so nothing
+       * the model holds can fall between two samples.
+       */
+      const highest = Math.max(
+        head.z,
+        stock.highestAlong(atX, atY, head.x, head.y, cutter.radius)
+      );
+      // The safe height clears the levelling span too: it used to cap the
+      // clearance and so clipped the span straight back off it.
+      const lowZ = Math.min(0, highest) + TRAVERSE_CLEARANCE_MM;
+      const safeZ = opts.safeZ + LEVELLING_SPAN_MM;
+      const traverseZ = Math.hypot(head.x - atX, head.y - atY) > LONG_TRAVERSE_MM
+        ? Math.max(safeZ, lowZ)
+        : Math.min(safeZ, lowZ);
 
-    if (traverseZ > atZ + 1e-6) {
-      gcode.push(`G0 Z${f(traverseZ)}`);
-      atZ = traverseZ;
+      if (traverseZ > atZ + 1e-6) {
+        gcode.push(`G0 Z${f(traverseZ)}`);
+        atZ = traverseZ;
+      }
+      gcode.push(`G0 X${f(head.x)} Y${f(head.y)}`);
+      rapidTo(head.x, head.y, atZ);
+      if (approachZ < atZ - 1e-6) {
+        gcode.push(`G0 Z${f(approachZ)}`);
+        atZ = approachZ;
+      }
+      lastTraverseZ = traverseZ;
     }
-    gcode.push(`G0 X${f(head.x)} Y${f(head.y)}`);
-    rapidTo(head.x, head.y, atZ);
-    if (approachZ < atZ - 1e-6) {
-      gcode.push(`G0 Z${f(approachZ)}`);
-      atZ = approachZ;
-    }
-    lastTraverseZ = traverseZ;
 
     const plunge = () => {
       plungeTo(head.z);
       gcode.push(`G1 Z${f(head.z)} F${Math.round(rate)}`);
+      return path;
     };
 
     const drop = entryZ - head.z;
     if (leadInTan <= 0 || drop <= 1e-6) return plunge();
 
-    // Half the run, so the ramp and its return both fit inside the pass.
     let pathLen = 0;
     for (let i = 1; i < path.length; i++) {
       pathLen += Math.hypot(path[i].x - path[i - 1].x, path[i].y - path[i - 1].y);
     }
+
+    const tail = path[path.length - 1];
+    if (
+      path.length > 2 &&
+      Math.hypot(tail.x - head.x, tail.y - head.y) < 1e-6 &&
+      Math.abs(tail.z - head.z) < 1e-6
+    ) {
+      if (pathLen < 0.1) return plunge();
+      /*
+       * Forward round the loop, never below the surface and never falling
+       * faster than the lead-in angle, until the cut stands on the surface at
+       * a point the ground ahead of does not fall away from faster than the
+       * ramp could follow - so the pass proper never starts by diving.
+       */
+      const n = path.length - 1; // path[n] is path[0] again
+      const limit = pathLen * 20 + (2 * drop) / leadInTan;
+      let z = entryZ;
+      let k = 0;
+      for (let travelled = 0; travelled <= limit; ) {
+        const a = path[k];
+        const b = path[k + 1];
+        const seg = Math.hypot(b.x - a.x, b.y - a.y);
+        // Where the descent meets the surface part way along, the pass starts
+        // there: the ramp is not carried on at the plunge rate to the next stop.
+        const closing = seg > 1e-9 ? leadInTan + (b.z - a.z) / seg : 0;
+        if (z > a.z + 1e-6 && closing > 1e-9 && (z - a.z) / closing < seg - 1e-6) {
+          const t = (z - a.z) / closing / seg;
+          const p = { ...a, x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, z: a.z + (b.z - a.z) * t };
+          cutTo(p.x, p.y, p.z);
+          gcode.push(`G1 X${f(p.x)} Y${f(p.y)} Z${f(p.z)} F${Math.round(rate)}`);
+          return [p, ...path.slice(k + 1), ...path.slice(1, k + 1), p];
+        }
+        z = Math.max(b.z, z - seg * leadInTan);
+        cutTo(b.x, b.y, z);
+        gcode.push(`G1 X${f(b.x)} Y${f(b.y)} Z${f(z)} F${Math.round(rate)}`);
+        travelled += seg;
+        k = (k + 1) % n;
+        if (z > b.z + 1e-6) continue;
+        const c = path[k + 1];
+        if (b.z - c.z <= Math.hypot(c.x - b.x, c.y - b.y) * leadInTan + 1e-6) break;
+      }
+      return k === 0 ? path : [...path.slice(k), ...path.slice(1, k + 1)];
+    }
+
+    // Half the run, so the ramp and its return both fit inside the pass.
     /*
      * Where the ramp does not fit at its angle, it goes back and forth along
      * the whole run instead, each leg dropping no faster than the angle allows.
@@ -2342,6 +2409,7 @@ export function machineSurface(
       stated = stated || word !== '';
       gcode.push(`G1 X${f(stops[k].x)} Y${f(stops[k].y)} Z${f(stops[k].pz)}${word}`);
     }
+    return path;
   };
   gcode.push('; ---------------------------------------------------------------');
   for (const line of job.header) gcode.push(line);
@@ -2765,13 +2833,23 @@ export function machineSurface(
         for (let bite = 1; bite <= bites; bite++) {
           const biteFloor = bite === bites ? layerZ : ringTop - (span * bite) / bites;
           const above = ringTop - (span * (bite - 1)) / bites;
-          const path = plan.map((p) => ({ ...p, z: Math.max(biteFloor, p.z) }));
+          let loop = plan.map((p) => ({ ...p, z: Math.max(biteFloor, p.z) }));
+          /*
+           * Every bite after the first starts where the one before it ended,
+           * which is on this same ring, in the slot it has just cut: the ring
+           * is turned to start there and the tool ramps on down. It used to
+           * lift out to wherever the stock model's rim of uncounted cells put
+           * the material - the stock's face, on the first layer - and ramp the
+           * whole way back down through the slot.
+           */
+          const turned = bite > 1 ? startLoopAt(loop, atX, atY) : null;
+          if (turned) loop = turned;
 
           // Ramp in along the ring rather than plunging: the centre of an end
           // mill cuts at zero surface speed, and a deep layer pulls hard on it.
-          leadIn(path, above, opts.roughingPlungeRate, feed);
+          const path = leadIn(loop, above, opts.roughingPlungeRate, feed, turned !== null);
 
-          let lastZ = path[0].z;
+          let lastZ = atZ;
           for (let i = 1; i < path.length; i++) {
             cutTo(path[i].x, path[i].y, path[i].z);
             const z = Math.abs(path[i].z - lastZ) > 1e-6 ? ` Z${f(path[i].z)}` : '';
@@ -3144,12 +3222,13 @@ export function machineSurface(
           // side of it cut, and is too short to ramp into — so it was a plunge
           // to depth, a retract, and nothing to show for either. Layering
           // leaves these where a layer's limit clips a pass to a remnant.
-          const pass = simplifyPass(squareUpWalls(run), PATH_SIMPLIFY_MM);
+          // Measured on the run as traced: it is simplified when it is cut,
+          // once it has been turned to start nearest the tool.
           let runLen = 0;
-          for (let i = 1; i < pass.length; i++) {
-            runLen += Math.hypot(pass[i].x - pass[i - 1].x, pass[i].y - pass[i - 1].y);
+          for (let i = 1; i < run.length; i++) {
+            runLen += Math.hypot(run[i].x - run[i - 1].x, run[i].y - run[i - 1].y);
           }
-          if (pass.length >= 2 && runLen >= stepover - 1e-6) {
+          if (runLen >= stepover - 1e-6) {
             runs.push(run);
             runLevels.push(placedLevels[g][k]);
           }
@@ -3231,7 +3310,7 @@ export function machineSurface(
           r = [...r].reverse();
         }
 
-        const pass = simplifyPass(squareUpWalls(r), PATH_SIMPLIFY_MM);
+        let pass = simplifyPass(squareUpWalls(r), PATH_SIMPLIFY_MM);
         finishingRasterLines++;
         const head = pass[0];
 
@@ -3287,7 +3366,7 @@ export function machineSurface(
            * the height, and cutting the same place twice does not raise it.
            */
           const entryZ = Math.min(0, materialLevelAt(head.x, head.y), prevLimit);
-          leadIn(pass, entryZ, opts.finishingPlungeRate, opts.finishingFeedrate);
+          pass = leadIn(pass, entryZ, opts.finishingPlungeRate, opts.finishingFeedrate);
         }
 
         // GRBL keeps the last feedrate, so it is only stated when it changes:
@@ -3591,6 +3670,29 @@ export function addHoldingTabs(
   }
 
   return { tabs: centres.length, loose: countLoosePieces(surface, stockBottomZ, resolutionMm) };
+}
+
+/**
+ * A closed loop turned to start at (x, y), split there if it falls part way
+ * along a segment; null where the point is not on the loop.
+ */
+function startLoopAt(loop: PathPoint[], x: number, y: number): PathPoint[] | null {
+  for (let i = 0; i + 1 < loop.length; i++) {
+    const a = loop[i];
+    const b = loop[i + 1];
+    const ex = b.x - a.x;
+    const ey = b.y - a.y;
+    const lenSq = ex * ex + ey * ey;
+    let t = lenSq > 1e-12 ? ((x - a.x) * ex + (y - a.y) * ey) / lenSq : 0;
+    t = t < 0 ? 0 : t > 1 ? 1 : t;
+    if (Math.hypot(a.x + ex * t - x, a.y + ey * t - y) > 1e-6) continue;
+    const k = t < 1e-9 ? i : t > 1 - 1e-9 ? i + 1 : -1;
+    if (k === 0 || k === loop.length - 1) return loop;
+    if (k > 0) return [...loop.slice(k), ...loop.slice(1, k + 1)];
+    const p = { ...a, x, y, z: a.z + (b.z - a.z) * t };
+    return [p, ...loop.slice(i + 1), ...loop.slice(1, i + 1), p];
+  }
+  return null;
 }
 
 export function generateReliefCarveGcode(

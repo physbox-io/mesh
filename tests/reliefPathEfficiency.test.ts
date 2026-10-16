@@ -138,6 +138,77 @@ describe('roughing a relief', () => {
   });
 });
 
+/** How roughing gets into its cuts: lifts out, reversals, and ramping at the plunge rate. */
+function entries(gcode: string, plungeRate: number) {
+  let x = 0, y = 0, z = 0, feed = 0, ux = 0, uy = 0;
+  let lifts = 0, reversals = 0, plungeMm = 0;
+  for (const raw of gcode.slice(0, gcode.indexOf('OP 2: finishing')).split('\n')) {
+    const line = raw.split(';')[0];
+    const mode = /^G([01])\b/.exec(line);
+    if (!mode) continue;
+    const word = (k: string, d: number) => {
+      const m = new RegExp(`${k}(-?[\\d.]+)`).exec(line);
+      return m ? parseFloat(m[1]) : d;
+    };
+    const nx = word('X', x), ny = word('Y', y), nz = word('Z', z);
+    feed = word('F', feed);
+    if (mode[1] === '0') {
+      if (nz > z + 1e-9) lifts++;
+      ux = uy = 0;
+    } else {
+      const len = Math.hypot(nx - x, ny - y);
+      if (len > 1e-6) {
+        if ((nx - x) * ux + (ny - y) * uy < -0.9 * len) reversals++;
+        ux = (nx - x) / len;
+        uy = (ny - y) / len;
+      }
+      if (feed === plungeRate) plungeMm += Math.hypot(nx - x, ny - y, nz - z);
+    }
+    x = nx; y = ny; z = nz;
+  }
+  return { lifts, reversals, plungeMm };
+}
+
+/*
+ * Getting into each ring. Every bite after a ring's first used to lift out of
+ * the slot the bite before had just cut - the stock model's rim of uncounted
+ * cells read the stock's face there - and ramp back down through it; and every
+ * ramp into a ring went out, turned round to the head, and turned round again
+ * into the pass. On four stripes that was 47 lifts, 106 dead stops and 1364 mm
+ * at the plunge rate; 17, 0 and 290 once later bites ramp on down from where
+ * the tool stands and a ramp carries on round the loop. Roughing went from
+ * 14.8 to 10.8 minutes.
+ */
+describe('adaptive roughing entries', () => {
+  it('ramps on round each ring, and on down into its next bite', () => {
+    const stripes: SceneGraph = {
+      nodes: [{
+        id: 'b1', name: 'part', type: 'body', pos: [0, 0, 0], joints: [], children: [],
+        geoms: [-0.04, -0.015, 0.01, 0.035].map((x, i) => ({
+          name: `s${i}`, type: 'box', size: [0.006, 0.05, 0.02], pos: [x, 0, 0],
+        })) as never,
+      }],
+    };
+    const res = generateReliefCarveGcode(stripes, {
+      ...DEFAULT_RELIEF_OPTIONS, carveDepthMm: 10, stockWidthMm: 120, stockDepthMm: 120,
+      roughingStrategy: 'adaptive',
+    });
+    const e = entries(res.gcode, DEFAULT_RELIEF_OPTIONS.roughingPlungeRate);
+    expect(e.lifts).toBeLessThan(25);
+    expect(e.reversals).toBeLessThan(10);
+    expect(e.plungeMm).toBeLessThan(400);
+  });
+
+  // 195 mm at the plunge rate and 116 reversals on the dome; 137 and 36. The
+  // reversals left are in the rings themselves, round slivers of the slab.
+  it('a dome: shorter ramps, and no turning round in them', () => {
+    const res = generateReliefCarveGcode(dome, { ...options, roughingStrategy: 'adaptive' });
+    const e = entries(res.gcode, options.roughingPlungeRate);
+    expect(e.plungeMm).toBeLessThan(160);
+    expect(e.reversals).toBeLessThan(50);
+  });
+});
+
 /*
  * Solid machining roughs through the same `machineSurface()`, and had the same
  * fault: on a 60 mm sphere's first side the finisher was left 1.25 mm at the
