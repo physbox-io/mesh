@@ -146,7 +146,8 @@ function attachPlannerGrbl({ reportBf }: { reportBf: boolean }) {
   const mgr = webSerialManager as unknown as {
     transport: unknown;
     state: Record<string, unknown>;
-    handleIncomingLine: (line: string) => void;
+    parseLine: (line: string) => void;
+    lastWco: { x: number; y: number; z: number } | undefined;
   };
   const PLANNER = 15;
   const rx: string[] = [];
@@ -161,10 +162,12 @@ function attachPlannerGrbl({ reportBf }: { reportBf: boolean }) {
   mgr.state.lastError = undefined;
   mgr.state.needsZZero = false;
   mgr.state.elapsedSeconds = 0;
+  // As a fresh connection leaves it: work position read as machine position.
+  mgr.lastWco = { x: 0, y: 0, z: 0 };
 
   const report = () => {
     const bf = reportBf ? `|Bf:${PLANNER - planner.length},128` : '';
-    mgr.handleIncomingLine(
+    mgr.parseLine(
       `<${planner.length ? 'Run' : 'Idle'}|MPos:${pos.x.toFixed(3)},${pos.y.toFixed(3)},${pos.z.toFixed(3)}${bf}|FS:0,0>`
     );
   };
@@ -188,7 +191,7 @@ function attachPlannerGrbl({ reportBf }: { reportBf: boolean }) {
         // A zero-length move is dropped by GRBL, and by the timeline too.
         if (moved) planner.push(to);
       }
-      mgr.handleIncomingLine('ok');
+      mgr.parseLine('ok');
     }
   };
 
@@ -199,7 +202,7 @@ function attachPlannerGrbl({ reportBf }: { reportBf: boolean }) {
     async writeRealtime(byte: number) {
       if (byte === 0x3f) setTimeout(report, 0);
       // A soft reset: the board reboots and says so, and the manager waits for that.
-      if (byte === 0x18) setTimeout(() => mgr.handleIncomingLine("Grbl 1.1h ['$' for help]"), 0);
+      if (byte === 0x18) setTimeout(() => mgr.parseLine("Grbl 1.1h ['$' for help]"), 0);
     },
     async writeLine(line: string) {
       if (line.trim()) rx.push(line.trim());
@@ -250,8 +253,16 @@ for (const reportBf of [true, false]) {
       webSerialManager.startJob(relief());
       // The relief's timeline was built against the default profile, as here.
       let last = 0;
-      while (fake.executed < BLOCKS_BEFORE_M6) {
+      // The stream is asynchronous, so each step yields to let it write. Capped,
+      // so a stream that stalls fails here rather than hanging the run.
+      for (let guard = 0; fake.executed < BLOCKS_BEFORE_M6; guard++) {
+        expect(guard).toBeLessThan(BLOCKS_BEFORE_M6 * 4);
+        await settle();
         fake.step();
+        // Acks are credited a microtask after their `ok`, so a report in the
+        // same turn sees the count before them; the next report, as here, does not.
+        await settle();
+        fake.report();
         const s = seconds();
         const truth = fake.executed > 0 ? TL.moves[fake.executed - 1].t1 : 0;
         expect(s).toBeGreaterThanOrEqual(last);
@@ -295,7 +306,10 @@ describe('job progress on a resumed job', () => {
 
   it('starts at the share of the job its line had reached, not at the old clock', async () => {
     webSerialManager.startJob(relief());
-    for (let i = 0; i < 30; i++) fake.step();
+    for (let i = 0; i < 30; i++) {
+      await settle();
+      fake.step();
+    }
     await webSerialManager.cancelJob();
     const fromLine = TL.moves[200].line;
     const r = webSerialManager.resumeFromLine(fromLine);

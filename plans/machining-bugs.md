@@ -176,8 +176,10 @@ machining 0.5.5 released.** What the 11 failures were:
   - Resume-from-line past a handled `M6` worked; the test gave the fake too few ticks for the preamble.
 Also done: `machineTransport.ts` deleted (only a re-export was left; its test moved to the package),
 USB `autoConnect()` on app open in `MachineConfigModal`, Mesh on `^0.5.5`.
-Left before merging: typecheck and lint on the branch, Etch/Volt bumped to 0.5.5, moving more
-transport-fake tests into the package (optional; Mesh's are green), and **a run on the machine**:
+Merged to main and pushed 2026-10-16 (e29c1c7 fixed two type errors CI found: Mesh's `frameJob`
+signature against the base class, and a stale `probeOnce` argument). Etch 509ffef and Volt a862644
+are on 0.5.5. Still to do: moving more transport-fake tests into the package (optional), and
+**a run on the machine**, which none of this has had yet:
 connect, auto-reconnect after reload, jog, zero, probe, a job with a tool change (lift, park,
 resume), a feed hold and resume, an e-stop.
 
