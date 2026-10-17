@@ -192,7 +192,7 @@ export const raisedPanel: PatternSpec = {
 
 // --- Tiles -------------------------------------------------------------------------
 
-const MOTIFS = ['dome', 'pyramid', 'coffer', 'dimple', 'diamond', 'checker', 'flutes', 'rays', 'quatrefoil'] as const;
+type Motif = 'dome' | 'pyramid' | 'coffer' | 'dimple' | 'diamond' | 'checker' | 'flutes' | 'rays' | 'quatrefoil';
 
 export const tiles: PatternSpec = {
   id: 'tiles',
@@ -230,7 +230,7 @@ export const tiles: PatternSpec = {
     const ch = extent.depthM / ny;
     const gutter = Math.max(0, num(opts, 'gutterMm', 3)) / 1000;
     const chamfer = Math.max(0, num(opts, 'chamferMm', 2)) / 1000;
-    const motif = str(opts, 'motif', 'coffer') as (typeof MOTIFS)[number];
+    const motif = str(opts, 'motif', 'coffer') as Motif;
     const rise = Math.min(1, Math.max(0.05, num(opts, 'rise', 0.65)));
     const flutes = Math.max(1, Math.round(num(opts, 'flutes', 3)));
     const base = 1 - rise;
