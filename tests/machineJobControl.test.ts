@@ -835,3 +835,39 @@ describe('a job that alarms while stopped for a tool change', () => {
     expect(resume!.fromLine).toBeLessThan(reached);
   });
 });
+
+/*
+ * A park lets go of the stream (it is neither running nor feed-held any more),
+ * and the status poll used to read that as an idle machine: the first `Idle`
+ * report, a third of a second later, replaced PAUSED_PARKED with IDLE. The
+ * resume button went with it, and `resumeFromPark` refused, because it asks for
+ * exactly that status. The job could only be started again from the top.
+ */
+describe('a parked job', () => {
+  let fake: ReturnType<typeof attachFakeGrbl>;
+
+  beforeEach(() => {
+    fake = attachFakeGrbl();
+  });
+  afterEach(async () => {
+    webSerialManager.discardPark();
+    await webSerialManager.cancelJob();
+    fake.detach();
+  });
+
+  it('stays parked through the idle reports that follow, and resumes', async () => {
+    webSerialManager.startJob(JOB);
+    await advance(3);
+    fake.board.report = '<Hold:0|MPos:0.000,0.000,0.000|FS:0,0>';
+    expect(await webSerialManager.parkJob({ isLaser: true })).toBe(true);
+    expect(webSerialManager.getState().status).toBe('PAUSED_PARKED');
+
+    fake.board.report = '<Idle|MPos:0.000,0.000,0.000|FS:0,0>';
+    const mgr = webSerialManager as unknown as { handleIncomingLine: (l: string) => void };
+    mgr.handleIncomingLine('<Idle|MPos:0.000,0.000,0.000|FS:0,0>');
+    expect(webSerialManager.getState().status).toBe('PAUSED_PARKED');
+
+    expect(await webSerialManager.resumeFromPark({ isLaser: true })).toBe(true);
+    expect(webSerialManager.getState().status).toBe('RUNNING');
+  });
+});

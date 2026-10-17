@@ -1454,7 +1454,11 @@ class WebSerialManager {
       this.hasHomed = false;
       patch.hasHomed = false;
       this.homingInProgress = false;
-    } else if (!this.isPaused) {
+    } else if (!this.isPaused && this.state.status !== 'PAUSED_PARKED') {
+      // Not out of a park either: a parked job has let go of the stream, so it is
+      // neither running nor paused, and the Idle it sits in read as "no job" —
+      // the next report dropped the status, and with it the way to resume.
+      //
       // RUNNING here means "a job is streaming", not "the axes are moving" — a
       // frame trace or a probing move must not light up the job progress bar.
       // A streaming job likewise stays RUNNING through the Idle reports it sits
