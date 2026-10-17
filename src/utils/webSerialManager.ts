@@ -2739,7 +2739,7 @@ class WebSerialManager extends GrblMachine<MachineState> {
         await this.sendAndWait(`G0 X${x.toFixed(3)} Y${y.toFixed(3)}`);
         // Straight down, slowly, until the probe triggers or the search runs
         // out. `probePoint` issues `G91 G38.2 Z-<search>`, a relative plunge.
-        const contactZ = await this.probeOnce(PROBE_SEARCH_MM, PROBE_FEED, 120000);
+        const contactZ = await this.probeOnce(PROBE_SEARCH_MM, PROBE_FEED);
 
         // A miss means the plunge ran its whole length without the probe
         // triggering: a clip that fell off, a broken wire, a non-conductive
@@ -2814,9 +2814,18 @@ class WebSerialManager extends GrblMachine<MachineState> {
    */
   public async frameJob(
     bounds: { minX: number; minY: number; maxX: number; maxY: number },
-    guidePower = 5,
+    guidePowerOrOptions: number | FrameJobOptions = 5,
     opts: { laserMode?: boolean; safeZMm?: number } = {}
   ): Promise<void> {
+    // The package's form, `(bounds, { retractZmm })`, is a dark lap on a router.
+    // Nothing here calls it that way; it is accepted so this stays a GrblMachine.
+    let guidePower: number;
+    if (typeof guidePowerOrOptions === 'number') {
+      guidePower = guidePowerOrOptions;
+    } else {
+      guidePower = 0;
+      opts = { laserMode: false, safeZMm: guidePowerOrOptions.retractZmm };
+    }
     this.refuseWhileJobHoldsMachine('frame the job');
     // Callers have always said "CNC" by asking for no guide power at all, so
     // that stays the default reading of it. Guide power alone is not enough to
