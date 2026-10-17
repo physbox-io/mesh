@@ -126,7 +126,38 @@ retracts between bites.
     already merges same-depth runs, and the presets show no vertex under 2 degrees of turn in any
     joint mode. Auto-scale binary search and shelf packing not done (features).
 
-## Batch 8: the shared GRBL module (`../machining`, published as `@physbox-io/machining`)
+## Batch 8: the shared GRBL module (`../machining`, published as `@physbox-io/machining`) — IN PROGRESS
+**Done 2026-10-16 (machining 0.4.0, released):** checked every Batch 1-2 item against
+`GrblMachine`. Ported what failed, each with a transport-fake test that failed first: banner wait
+after `0x18` (a05c8b8), `G90 G21` after unlock and no `G90` into an alarm (59badbe), one jog in
+flight with merged clicks and a cancel that drops them (7795702), `G4 P0` before a program pause is
+announced (5dc6f46), and auto-connect (12f6224; `autoConnect()`, wired on open in Etch d248c64 and
+Volt 786ec7a). Etch and Volt are bumped to 0.4.0 (Etch d1f8706 drops its now-duplicate `G21 G90`;
+Volt 7da2849 queues its e-stop `M5`). Mesh is bumped to 0.3.7 (ceab23e, unpushed) and not yet to 0.4.0.
+Nothing to port, because the package has none of the code: guide spot (Etch awaits its `M5` before a
+job and never abandons the queue), park, resume-from-line, `locateExecutedLine`, abandon (1.2.x, 1.8,
+1.11 are Mesh-only features, and they move with Mesh). Etch audit items: all clear in the package
+(180 s ack timeout, `probeDown` rejects a refused line, and Etch's exporter re-raises Z and the spindle
+after `M6`). Volt's double `processQueue`: fixed by `queueRun` (269d645).
+
+**What remains: move Mesh onto `GrblMachine`.** Mesh's manager is a synchronous pump with its own
+`ackQueue`, and the package streams through an async `LineQueue`. Keep the package's shape: it now has
+the hold, generation and `queueRun` guards that make it safe. Package work first, released as 0.5.0:
+  - a send-with-timeout that gives the slot up without shifting later acks (Mesh's `sendAndWait`).
+  - the controller-silence watchdog (`CONTROLLER_SILENCE_MS`); the package has only the 180 s ack timeout.
+  - homed-state tracking (`Home`→`Idle`, dropped on alarm), for the `G53` ceiling of the pause lift.
+  - an async hook that runs before a resumed stream restarts (Mesh's `restoreAfterProgramPause`),
+    and the program comment passed to `describePause` (the sheet number, the tool note).
+  - per-ack program-line credit for a resumed stream (`lineNumberFor` covers most of it).
+  - `LineQueue.abandon()` at job start (it is written but nothing calls it).
+  - maybe: the guide spot (about 160 lines shared between Mesh and Etch) as a second entry point.
+Then Mesh, one commit per area, keeping `machineTransport`, `machineJobControl`, `machineFaults` and
+`webSerialProbe` green: connection and line parsing (→ `parseLine` hooks), status (→ `onStatusReport`),
+jog, zero, unlock and home, probing (`probeOnce`→`probeDown`, `probeGrid`→`probeGridCycle`),
+streaming (`runJob`/pump → `processQueue`, `triggerPause` → `describePause` + `onStreamPaused`),
+then park, resume-from-line and checkpoints rebuilt on top. Telemetry and remote commands stay in
+Mesh. When it is done, move the transport-fake tests into the package; Mesh keeps wiring tests only.
+
 Batches 1 and 2 fixed the controller protocol in Mesh's own `webSerialManager.ts` (3,543 lines).
 Etch and Volt do not use that code. They extend the package's `GrblMachine`
 (`machining/src/machine/grblMachine.ts`, 1,394 lines), so the same faults are probably still
