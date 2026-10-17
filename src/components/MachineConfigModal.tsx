@@ -7,7 +7,7 @@ import { MachineWorkOriginPanel } from './MachineWorkOriginPanel';
 import { ControllerSilenceBanner } from './MachineFaultBanner';
 import { JobOverrides } from './MachineJobControls';
 import { describeMotionProfile } from '../utils/motionProfile';
-import { webSerialUnavailableReason } from '../utils/machineTransport';
+import { webSerialUnavailableReason } from '@physbox-io/machining';
 import { TeknoBoxPicker } from './TeknoBoxPicker';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { NumberInput } from '@physbox-io/ui';
@@ -104,17 +104,23 @@ export const MachineConfigModal: React.FC<{
   /*
    * Pick the machine back up when the app opens.
    *
-   * Only for a Tekno Box, and only one attempt. A cloud link is reconnectable
-   * without anyone present — the box is on the far end waiting — whereas USB
-   * needs a port permission prompt that must never be raised unprompted.
+   * Only one attempt. A cloud link is reconnectable without anyone present —
+   * the box is on the far end waiting. USB reconnects only to the port this
+   * origin was granted last time (`autoConnect`, which matches it by its USB
+   * IDs and gives up if it is missing or ambiguous), since a port permission
+   * prompt must never be raised unprompted.
    *
    * A failure here is silent on purpose: the box may simply be asleep, and an
    * error banner on every launch for a machine nobody is about to use is noise
    * that teaches people to ignore banners.
    */
   useEffect(() => {
-    if (link !== 'cloud' || !selectedDevice) return;
     if (webSerialManager.getState().connected) return;
+    if (link !== 'cloud') {
+      void webSerialManager.autoConnect().catch(() => {});
+      return;
+    }
+    if (!selectedDevice) return;
     void webSerialManager.connect({ kind: 'cloud', deviceId: selectedDevice }).catch(() => {});
     // Once per mount, deliberately: this is a resume, not a retry loop.
     // eslint-disable-next-line react-hooks/exhaustive-deps

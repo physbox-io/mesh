@@ -20,6 +20,7 @@ function attachFakeGrbl() {
     } | null;
     state: Record<string, unknown>;
     parseLine: (line: string) => void;
+    lastWco: { x: number; y: number; z: number } | undefined;
   };
 
   const sent: string[] = [];
@@ -38,6 +39,11 @@ function attachFakeGrbl() {
   mgr.state.status = 'IDLE';
   mgr.state.lastError = undefined;
   mgr.state.needsZZero = false;
+  // As a fresh connection leaves it. A real board follows a G10 with a `WCO:`
+  // in its next report; this one never sends one, so an earlier test's zero
+  // would otherwise leave work Z pinned where it was.
+  mgr.lastWco = { x: 0, y: 0, z: 0 };
+  mgr.state.workOffset = undefined;
 
   // Stands in for a `MachineTransport`. The two write paths are kept apart
   // because that is the distinction the transport interface exists to preserve:
@@ -390,8 +396,7 @@ describe('knowing whether the machine has homed', () => {
   afterEach(() => fake.detach());
 
   it('is set by a homing cycle finishing and cleared by an alarm', () => {
-    const mgr = webSerialManager as unknown as { parseLine: (l: string) => void; hasHomed: boolean; state: { hasHomed: boolean } };
-    mgr.hasHomed = false;
+    const mgr = webSerialManager as unknown as { parseLine: (l: string) => void; state: { hasHomed: boolean } };
     mgr.state.hasHomed = false;
     mgr.parseLine('<Home|MPos:0.000,0.000,0.000|FS:0,0>');
     expect(webSerialManager.getState().hasHomed).toBe(false);
@@ -510,9 +515,8 @@ describe('getting clear of the work for a tool change', () => {
 
   const internals = () =>
     webSerialManager as unknown as {
-      state: { grblSettings: Record<number, number> };
+      state: { grblSettings: Record<number, number>; hasHomed: boolean };
       parseLine: (line: string) => void;
-      hasHomed: boolean;
     };
 
   const TOOL_CHANGE_JOB = 'G21\nG90\nG1 X10 F600\nT2 M6\nG1 X20\n';
@@ -525,7 +529,7 @@ describe('getting clear of the work for a tool change', () => {
     fake.detach();
     // The manager is a singleton, so both of these outlive the fake board.
     internals().state.grblSettings = {};
-    internals().hasHomed = false;
+    internals().state.hasHomed = false;
   });
 
   it('lifts in machine coordinates, under the pull-off point, once homed', async () => {
@@ -567,10 +571,13 @@ describe('getting clear of the work for a tool change', () => {
     await advance(12);
 
     const lines = fake.lines();
-    const m5 = lines.indexOf('M5');
+    // The dwell goes out first and the pause is announced once it is acked;
+    // the spindle stops after it, which on GRBL is the same moment (M5 waits
+    // for the planner to empty anyway).
     const drain = lines.indexOf('G4 P0');
-    expect(m5).toBeGreaterThanOrEqual(0);
-    expect(drain).toBeGreaterThan(m5);
+    const m5 = lines.indexOf('M5');
+    expect(drain).toBeGreaterThanOrEqual(0);
+    expect(m5).toBeGreaterThan(drain);
     // Already at the highest height the job has reached: nothing more to ask.
     expect(lines.some((l) => /^G91 G0 Z/.test(l))).toBe(false);
     expect(lines.some((l) => /G0 Z(2[1-9]|[3-9]\d)/.test(l))).toBe(false);
@@ -639,12 +646,13 @@ describe('getting clear of the work for a tool change', () => {
     // below the datum the program was cut against.
     mgr.parseLine('<Idle|MPos:0.000,0.000,-2.000|FS:0,0>');
     await resumed;
+    await advance(4);
 
     const after = fake.sent.slice(atPause);
     const lift = after.indexOf('G0 Z5.000');
     expect(lift).toBeGreaterThanOrEqual(0);
-    // And before the cycle start that lets the rest of the program go.
-    expect(after.indexOf(String.fromCharCode(0x7e))).toBeGreaterThan(lift);
+    // And before the rest of the program goes.
+    expect(after.indexOf('G1 X20')).toBeGreaterThan(lift);
   });
 
   /** Pauses `program` at its stop, resumes it, and returns what was sent from the resume on. */
@@ -666,7 +674,9 @@ describe('getting clear of the work for a tool change', () => {
       'PAUSED_MATERIAL'
     );
     const at = (l: string) => after.indexOf(l);
-    const go = at(String.fromCharCode(0x7e));
+    // The program's own next line. No `~` here: the machine drained and went
+    // idle at the stop, so there is no hold to release.
+    const go = at('G1 X20');
     expect(at('G0 Z5.000')).toBeGreaterThanOrEqual(0);
     expect(at('M3 S12000')).toBeGreaterThan(at('G0 Z5.000'));
     expect(at('G4 P2')).toBeGreaterThan(at('M3 S12000'));
@@ -674,7 +684,6 @@ describe('getting clear of the work for a tool change', () => {
     expect(at('G1 Z-2.000 F300')).toBeGreaterThan(at('G0 X10.000 Y0.000'));
     expect(at('F600')).toBeGreaterThan(at('G1 Z-2.000 F300'));
     expect(go).toBeGreaterThan(at('F600'));
-    expect(at('G1 X20')).toBeGreaterThan(go);
   });
 
   it('restores inches and incremental mode, which touching off had replaced', async () => {
@@ -682,7 +691,8 @@ describe('getting clear of the work for a tool change', () => {
       'G20\nG90\nG0 Z0.200\nG1 Z-0.050 F10\nG1 X1 F20\nG91\nM0\nG1 X1\n',
       'PAUSED_MATERIAL'
     );
-    const go = after.indexOf(String.fromCharCode(0x7e));
+    const go = after.indexOf('G1 X1');
+    expect(go).toBeGreaterThanOrEqual(0);
     expect(after.indexOf('G20')).toBeGreaterThanOrEqual(0);
     expect(after.indexOf('G20')).toBeLessThan(after.indexOf('G0 Z0.200'));
     // Absolute for the moves back, incremental again for the program's own.
@@ -695,7 +705,8 @@ describe('getting clear of the work for a tool change', () => {
       'G21\nG90\nG0 Z5.000\nM3 S18000\nG1 Z-2.000 F300\nG1 X10 F600\nG0 Z20.000\nT2 M6\nM3 S16000\nG1 X30\n',
       'PAUSED_TOOL'
     );
-    const go = after.indexOf(String.fromCharCode(0x7e));
+    const go = after.indexOf('G1 X30');
+    expect(go).toBeGreaterThanOrEqual(0);
     expect(after.indexOf('M3 S16000')).toBeGreaterThanOrEqual(0);
     expect(after.indexOf('M3 S16000')).toBeLessThan(go);
     expect(after).not.toContain('M3 S18000');
@@ -797,7 +808,8 @@ describe('a job that alarms while stopped for a tool change', () => {
 
     const res = webSerialManager.resumeFromLine(6);
     expect(res.ok).toBe(true);
-    await advance(12);
+    // The preamble alone is ten lines, and this board takes a tick to answer each.
+    await advance(24);
 
     const after = fake.lines().slice(sentBefore);
     expect(after.some((l) => /M6/.test(l))).toBe(false);

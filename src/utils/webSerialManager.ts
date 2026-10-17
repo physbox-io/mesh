@@ -699,6 +699,8 @@ class WebSerialManager extends GrblMachine<MachineState> {
   private zIsSetForResume = false;
   /** A start is waiting on the guide spot or stale replies. See `startJob`. */
   private starting = false;
+  /** Pauses pressed during `starting`, waiting for the stream to begin. See `pauseJob`. */
+  private awaitingStream: Array<() => void> = [];
 
   protected createInitialState(): MachineState {
     return {
@@ -1394,7 +1396,35 @@ class WebSerialManager extends GrblMachine<MachineState> {
       this.updateState({ lastError: err instanceof Error ? err.message : String(err) });
     } finally {
       this.starting = false;
+      this.releaseStreamWaiters();
     }
+  }
+
+  protected onJobStarted(): void {
+    this.releaseStreamWaiters();
+  }
+
+  private releaseStreamWaiters(): void {
+    const waiters = this.awaitingStream;
+    this.awaitingStream = [];
+    waiters.forEach((resolve) => resolve());
+  }
+
+  /**
+   * A feed hold, as the package makes it - including in the moment between
+   * Start and the first line.
+   *
+   * The job shows as running from the click, but the package only takes it as
+   * running once the guide spot is out and stale replies are let go of, up to
+   * a second later. A pause pressed then found no job, did nothing, and the
+   * program started anyway. So it waits for the stream to begin (the stream
+   * has written at most its first line by then) and holds that.
+   */
+  public async pauseJob(): Promise<void> {
+    if (this.starting && !this.isJobRunning) {
+      await new Promise<void>((resolve) => this.awaitingStream.push(resolve));
+    }
+    await super.pauseJob();
   }
 
   /** Mesh refuses an unzeroed start itself, in `runJob`, with its own words. */
