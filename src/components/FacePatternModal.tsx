@@ -4,7 +4,7 @@ import { NumberInput } from '@physbox-io/ui';
 import { useStore } from '../store/useStore';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { findNodeById } from '../utils/sceneTree';
-import { SURFACE_PATTERNS, patternById, type PatternOptions } from '../utils/surfacePatterns';
+import { PATTERN_GROUPS, SURFACE_PATTERNS, patternById, type PatternOptions } from '../utils/surfacePatterns';
 import {
   DEFAULT_TEXTURE_BORDER_M,
   DEFAULT_TEXTURE_CELL_M,
@@ -198,7 +198,14 @@ export const FacePatternModal: React.FC = () => {
       <div className="p-4 overflow-y-auto flex-1 space-y-3">
         <Field label="Pattern" hint={spec.blurb}>
           <select value={spec.id} onChange={(e) => choosePattern(e.target.value)} className={`${inputClass} cursor-pointer`}>
-            {FACE_PATTERNS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
+            {PATTERN_GROUPS.map((group) => {
+              const inGroup = FACE_PATTERNS.filter((p) => (p.group ?? 'Nature') === group);
+              return inGroup.length === 0 ? null : (
+                <optgroup key={group} label={group}>
+                  {inGroup.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
+                </optgroup>
+              );
+            })}
           </select>
         </Field>
         <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">{spec.blurb}</p>

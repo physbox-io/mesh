@@ -29,60 +29,76 @@ export const PatternFields: React.FC<{
   onChange: (key: string, value: number | string | undefined) => void;
 }> = ({ spec, options, onChange: set }) => (
   <>
-    {spec.fields.map((f) => {
-      if (f.kind === 'number') {
-        return (
-          <Field key={f.key} label={f.unit ? `${f.label} (${f.unit})` : f.label} hint={f.hint}>
-            <NumberInput
-              min={f.min}
-              max={f.max}
-              step={f.step}
-              fallbackOnBlur={Number(spec.defaults[f.key])}
-              value={Number(options[f.key])}
-              onChange={(v) => set(f.key, v)}
-              className={inputClass}
-            />
-          </Field>
-        );
-      }
-      if (f.kind === 'choice') {
-        return (
-          <Field key={f.key} label={f.label} hint={f.hint}>
-            <select
-              value={String(options[f.key] ?? '')}
-              onChange={(e) => set(f.key, e.target.value)}
-              className={`${inputClass} cursor-pointer`}
-            >
-              {f.options.map((o) => (
-                <option key={o.value} value={o.value}>{o.label}</option>
-              ))}
-            </select>
-          </Field>
-        );
-      }
-      return (
-        <Field key={f.key} label={f.label} hint={f.hint}>
-          <div className="flex items-center gap-1.5">
-            <NumberInput
-              min={1}
-              max={999999}
-              step={1}
-              fallbackOnBlur={1}
-              value={Number(options[f.key])}
-              onChange={(v) => set(f.key, v)}
-              className={inputClass}
-            />
-            <button
-              type="button"
-              onClick={() => set(f.key, Math.floor(Math.random() * 99999) + 1)}
-              title="Try another one of the same kind"
-              className="p-1.5 rounded-md border border-slate-200 dark:border-slate-700 text-slate-500 hover:text-fuchsia-500 hover:border-fuchsia-500 transition-colors cursor-pointer"
-            >
-              <Shuffle className="w-3.5 h-3.5" />
-            </button>
+    {spec.fields.map((f) => (
+      <React.Fragment key={f.key}>
+        {f.section && (
+          <div className="pt-2 mt-1 border-t border-slate-200 dark:border-slate-800 text-[10px] font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
+            {f.section}
           </div>
-        </Field>
-      );
-    })}
+        )}
+        {fieldControl(spec, f, options, set)}
+      </React.Fragment>
+    ))}
   </>
 );
+
+function fieldControl(
+  spec: PatternSpec,
+  f: PatternSpec['fields'][number],
+  options: PatternOptions,
+  set: (key: string, value: number | string | undefined) => void
+): React.ReactNode {
+  if (f.kind === 'number') {
+    return (
+      <Field key={f.key} label={f.unit ? `${f.label} (${f.unit})` : f.label} hint={f.hint}>
+        <NumberInput
+          min={f.min}
+          max={f.max}
+          step={f.step}
+          fallbackOnBlur={Number(spec.defaults[f.key])}
+          value={Number(options[f.key])}
+          onChange={(v) => set(f.key, v)}
+          className={inputClass}
+        />
+      </Field>
+    );
+  }
+  if (f.kind === 'choice') {
+    return (
+      <Field key={f.key} label={f.label} hint={f.hint}>
+        <select
+          value={String(options[f.key] ?? '')}
+          onChange={(e) => set(f.key, e.target.value)}
+          className={`${inputClass} cursor-pointer`}
+        >
+          {f.options.map((o) => (
+            <option key={o.value} value={o.value}>{o.label}</option>
+          ))}
+        </select>
+      </Field>
+    );
+  }
+  return (
+    <Field key={f.key} label={f.label} hint={f.hint}>
+      <div className="flex items-center gap-1.5">
+        <NumberInput
+          min={1}
+          max={999999}
+          step={1}
+          fallbackOnBlur={1}
+          value={Number(options[f.key])}
+          onChange={(v) => set(f.key, v)}
+          className={inputClass}
+        />
+        <button
+          type="button"
+          onClick={() => set(f.key, Math.floor(Math.random() * 99999) + 1)}
+          title="Try another one of the same kind"
+          className="p-1.5 rounded-md border border-slate-200 dark:border-slate-700 text-slate-500 hover:text-fuchsia-500 hover:border-fuchsia-500 transition-colors cursor-pointer"
+        >
+          <Shuffle className="w-3.5 h-3.5" />
+        </button>
+      </div>
+    </Field>
+  );
+}

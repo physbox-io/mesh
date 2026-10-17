@@ -2,7 +2,7 @@ import { Save, Trash2 } from 'lucide-react';
 import { useStore } from '../../store/useStore';
 import { useDialogs } from '../../store/dialogStore';
 import { PRESETS } from '../../presets/presetScenes';
-import { SURFACE_PATTERNS } from '../../utils/surfacePatterns';
+import { PATTERN_GROUPS, SURFACE_PATTERNS } from '../../utils/surfacePatterns';
 import { deleteUserPreset, listUserPresetNames, cloudOnlyPresetNames } from '../../utils/userPresets';
 import type { PresetActions, PresetEntry } from '../../hooks/usePresetActions';
 
@@ -65,11 +65,17 @@ export function PresetPicker({ presets, hasUnsavedWork }: { presets: PresetActio
         </optgroup>
 
         {/* Generators: patterns built to the size of the stock, not saved scenes. */}
-        <optgroup label="🔧 Generators" className="bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300">
-          {SURFACE_PATTERNS.map((p) => (
-            <option key={p.id} value={`generator:${p.id}`}>{p.label}…</option>
-          ))}
-        </optgroup>
+        {PATTERN_GROUPS.map((group) => {
+          const inGroup = SURFACE_PATTERNS.filter((p) => (p.group ?? 'Nature') === group);
+          if (inGroup.length === 0) return null;
+          return (
+            <optgroup key={group} label={`🔧 Generators: ${group}`} className="bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300">
+              {inGroup.map((p) => (
+                <option key={p.id} value={`generator:${p.id}`}>{p.label}…</option>
+              ))}
+            </optgroup>
+          );
+        })}
 
         {/* User Presets */}
         {(() => {

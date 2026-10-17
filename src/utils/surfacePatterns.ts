@@ -32,186 +32,44 @@ import {
   normaliseGrid,
   valueNoise2D,
 } from './patternNoise';
+import {
+  band,
+  fillGrid,
+  mix,
+  num,
+  rotate,
+  seedField,
+  smoothstep,
+  str,
+  wrap,
+  PATTERN_GROUPS,
+  type PatternOptions,
+  type PatternSpec,
+} from './patternKit';
+import { withLayout } from './patternLayout';
+import { FITTED_PATTERNS } from './patternsFitted';
+import { GEOMETRIC_PATTERNS } from './patternsGeometric';
+import { NATURAL_PATTERNS } from './patternsNatural';
+import { ORNAMENT_PATTERNS } from './patternsOrnament';
 
-// --- The field descriptor the modal renders from ---------------------------
+export {
+  DEFAULT_DEPTH_FRACTION,
+  MIN_SENSIBLE_DEPTH_MM,
+  PATTERN_GROUPS,
+  type PatternExtent,
+  type PatternField,
+  type PatternGroup,
+  type PatternOptions,
+  type PatternRepeat,
+  type PatternSpec,
+} from './patternKit';
 
-/**
- * One control in the generator dialog.
- *
- * The patterns describe their own controls rather than each getting bespoke
- * JSX, so adding a pattern is one object in one file and the modal never grows
- * a branch. `parametricShapes.ts` in Etch reached the same shape for the same
- * reason -- there, because "inner radius" means something different for a star
- * and a gear; here, because "scale" means ring spacing in one pattern and
- * brick length in another.
- */
-export type PatternField =
-  | {
-      kind: 'number';
-      key: string;
-      label: string;
-      min: number;
-      max: number;
-      step: number;
-      /** Shown after the input: 'mm', 'x', and so on. */
-      unit?: string;
-      hint?: string;
-    }
-  | {
-      kind: 'choice';
-      key: string;
-      label: string;
-      options: Array<{ value: string; label: string }>;
-      hint?: string;
-    }
-  | { kind: 'seed'; key: string; label: string; hint?: string };
-
-export type PatternOptions = Record<string, number | string>;
-
-/**
- * The board a pattern is being drawn onto, in **metres**.
- *
- * Pattern space is real space. Every parameter these generators take is a
- * physical size -- a ring spacing, a brick, a stud pitch -- so the space they
- * are evaluated in has to be one too. The first version of this ran x over
- * 0..aspect and y over 0..1, which quietly meant a ring spacing given in
- * millimetres only came out right on a board exactly one metre deep.
- */
-export interface PatternExtent {
-  widthM: number;
-  depthM: number;
-}
-
-export interface PatternSpec {
-  id: string;
-  label: string;
-  /** One line under the title in the dialog: what this is for. */
-  blurb: string;
-  /** Anything the material has to be told about this pattern before it is cut. */
-  caveat?: string;
-  defaults: PatternOptions;
-  fields: PatternField[];
-  /**
-   * Build the height grid over a board of `extent` metres.
-   *
-   * Must return `cols * rows` values, row-major, spanning 0..1.
-   */
-  build(cols: number, rows: number, extent: PatternExtent, opts: PatternOptions): Float32Array;
-  /**
-   * What the surface looks like at a given height, 0..1.
-   *
-   * The same paint the colour sidebar puts on a body, laid down by the
-   * generator instead of by hand: a tiger board that is orange with black bars
-   * says what it is at a glance, where one in a single timber brown is a relief
-   * you have to tilt to read. It is painted per vertex on the top surface, so
-   * the physics, the mesh and every exporter are untouched -- the colour is
-   * only ever a colour.
-   *
-   * Left out where colour would be a lie: a stud plate is whatever the stock
-   * is, and so is a wave.
-   */
-  palette?: (h: number, opts: PatternOptions) => [number, number, number];
-  /** The body's own colour under the paint. */
-  baseRgb?: [number, number, number];
-  /**
-   * How deep the dialog opens at, as a fraction of the stock's thickness.
-   *
-   * Not one number for all of them, because depth is doing a different job in
-   * each. A wood grain or a brick course is read by eye from its shadows, so it
-   * wants to be deep. An animal print is read from its colour and only needs
-   * enough relief to catch the light -- cutting a tiger 8 mm into a board
-   * triples the machining time and puts every black stripe down a trench where
-   * it is in shadow and barely orange any more.
-   */
-  depthFraction?: number;
-  /**
-   * The pattern is two levels with walls between them, rather than a graded
-   * surface.
-   *
-   * Roughing with a flat mill leaves such a pattern already finished: the tops
-   * and floors are flat because the cutter is, and only the walls carry the
-   * roughing layers' steps. The ball-nose finish then spends most of a day
-   * smoothing walls a few millimetres tall, so the dialog offers to stop after
-   * roughing, and opens that way for these.
-   */
-  flatTopped?: boolean;
-  /**
-   * Heights under one half are not the floor of a carve but no material at
-   * all: the pattern is cut right through the stock.
-   *
-   * The panel is then the stock's full thickness, the depth is not the
-   * user's to set, and the relief export is told to go through into the
-   * spoilboard. Whatever the pattern leaves must still hold together -- a
-   * slot that reaches the edge of the board sets a strip loose.
-   */
-  throughCut?: boolean;
-}
-
-/** What the dialog opens at when a pattern does not ask for something else. */
-export const DEFAULT_DEPTH_FRACTION = 1 / 3;
-
-/** The shallowest a carve is worth setting up for, in mm. */
-export const MIN_SENSIBLE_DEPTH_MM = 1.2;
-
-/** Mix two colours. */
-const mix = (
-  a: [number, number, number], b: [number, number, number], t: number
-): [number, number, number] => {
-  const k = clamp01(t);
-  return [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k];
-};
-
-/** A hard edge between two colours, softened just enough not to look aliased. */
-const band = (
-  low: [number, number, number], high: [number, number, number], h: number, edge = 0.5, soft = 0.12
-): [number, number, number] => mix(low, high, (h - (edge - soft)) / (2 * soft));
-
-const num = (opts: PatternOptions, key: string, fallback: number): number => {
-  const v = opts[key];
-  const n = typeof v === 'string' ? Number(v) : v;
-  return typeof n === 'number' && Number.isFinite(n) ? n : fallback;
-};
-
-const str = (opts: PatternOptions, key: string, fallback: string): string => {
-  const v = opts[key];
-  return typeof v === 'string' ? v : fallback;
-};
-
-const seedField = (key = 'seed'): PatternField => ({
-  kind: 'seed',
-  key,
-  label: 'Seed',
-  hint: 'The same seed always gives the same pattern. Change it for a different one of the same kind.',
-});
-
-/**
- * Walk the grid in metres: x across the board's width, y down its depth.
- *
- * Because both axes are in the same real units, a feature is the size it says
- * it is and is never stretched by the board's shape -- a stud is round on a
- * 300x100 plank as well as on a square one.
- */
-function fillGrid(
-  cols: number,
-  rows: number,
-  extent: PatternExtent,
-  fn: (x: number, y: number) => number
-): Float32Array {
-  const out = new Float32Array(cols * rows);
-  for (let r = 0; r < rows; r++) {
-    const y = (rows > 1 ? r / (rows - 1) : 0) * extent.depthM;
-    for (let c = 0; c < cols; c++) {
-      const x = (cols > 1 ? c / (cols - 1) : 0) * extent.widthM;
-      out[r * cols + c] = fn(x, y);
-    }
-  }
-  return out;
-}
 
 // --- Wood grain ------------------------------------------------------------
 
 const woodGrain: PatternSpec = {
   id: 'wood_grain',
+  group: 'Wood & joinery',
   label: 'Wood Grain',
   blurb: 'Exaggerated growth rings, wandering the way real grain does, with knots.',
   defaults: { ringSpacingMm: 9, wander: 0.45, knots: 2, angleDeg: 0, seed: 1 },
@@ -321,6 +179,7 @@ const woodGrain: PatternSpec = {
 
 const waves: PatternSpec = {
   id: 'waves',
+  group: 'Water & terrain',
   label: 'Waves',
   blurb: 'Summed sine waves: a swell, a crossed chop, or rings from point sources.',
   defaults: { wavelengthMm: 25, sources: 3, mode: 'linear', angleDeg: 0, chop: 0.35, seed: 1 },
@@ -392,15 +251,11 @@ const waves: PatternSpec = {
 
 // --- Fluted ----------------------------------------------------------------
 
-/** Turn board coordinates into a frame rotated by `angle`: u across, v along. */
-const rotate = (x: number, y: number, angle: number): [number, number] => {
-  const c = Math.cos(angle);
-  const s = Math.sin(angle);
-  return [x * c + y * s, -x * s + y * c];
-};
 
 const fluted: PatternSpec = {
   id: 'fluted',
+  group: 'Wood & joinery',
+  tile: { repeats: [{ key: 'pitchMm', axis: 'x', edge: 0.5 }], angleKey: 'angleDeg' },
   label: 'Fluted',
   blurb: 'Parallel flutes or reeds, straight or meandering on a sine -- the wavy wall-panel look.',
   defaults: {
@@ -474,6 +329,7 @@ const fluted: PatternSpec = {
 
 const waveSlats: PatternSpec = {
   id: 'wave_slats',
+  group: 'Wood & joinery',
   label: 'Wave Slats',
   blurb: 'A row of slats whose tops rise and fall with a wave running across them.',
   defaults: {
@@ -537,6 +393,7 @@ const waveSlats: PatternSpec = {
 
 const sliced: PatternSpec = {
   id: 'sliced',
+  group: 'Wood & joinery',
   throughCut: true,
   flatTopped: true,
   label: 'Sliced',
@@ -627,6 +484,7 @@ const sliced: PatternSpec = {
 
 const topographic: PatternSpec = {
   id: 'topographic',
+  group: 'Water & terrain',
   flatTopped: true,
   label: 'Topographic',
   blurb: 'A landscape cut into flat terraces, like a contour model.',
@@ -693,6 +551,7 @@ const topographic: PatternSpec = {
 
 const crackedEarth: PatternSpec = {
   id: 'voronoi',
+  group: 'Nature',
   label: 'Cracked Earth',
   blurb: 'Cells with chamfered walls: dried mud, stone, crazed glaze, leather.',
   defaults: { cells: 40, wallWidthMm: 3, profile: 'chamfer', seed: 1 },
@@ -760,6 +619,8 @@ const crackedEarth: PatternSpec = {
 
 const masonry: PatternSpec = {
   id: 'masonry',
+  group: 'Geometric',
+  tile: { repeats: [{ key: 'brickLengthMm', axis: 'x' }, { key: 'brickHeightMm', axis: 'y' }] },
   flatTopped: true,
   label: 'Brick Courses',
   blurb: 'Courses of brick with recessed mortar, in a running, stack or Flemish bond.',
@@ -865,8 +726,6 @@ const masonry: PatternSpec = {
 
 // --- Parquet ---------------------------------------------------------------
 
-/** Positive modulo: `fract` for a period other than 1. */
-const wrap = (a: number, n: number): number => a - Math.floor(a / n) * n;
 
 /**
  * Which stave of a herringbone a point is on, in units of the stave width.
@@ -891,8 +750,9 @@ function herringboneStave(x: number, y: number, n: number): { id: [number, numbe
 
 const parquet: PatternSpec = {
   id: 'parquet',
+  group: 'Wood & joinery',
   flatTopped: true,
-  label: 'Parquet',
+  label: 'Herringbone & Parquet',
   blurb: 'Staves laid in a herringbone, a chevron or a basket weave, with sunk joints.',
   defaults: { layout: 'herringbone', staveLengthMm: 80, staveWidthMm: 20, jointMm: 1.5, jitter: 0.5, seed: 1 },
   baseRgb: [0.66, 0.47, 0.28],
@@ -1002,6 +862,8 @@ function hexOffset(x: number, y: number): [number, number] {
 
 const faceted: PatternSpec = {
   id: 'faceted',
+  group: 'Geometric',
+  tile: { repeats: [{ key: 'cellMm', axis: 'x' }], angleKey: 'angleDeg' },
   label: 'Faceted',
   blurb: 'Fields of pyramids, diamonds or hexagons, or the tumbling-blocks cube illusion.',
   defaults: { form: 'pyramid', cellMm: 30, sharpness: 1, angleDeg: 0 },
@@ -1076,6 +938,8 @@ function segmentDistance(
 
 const kumiko: PatternSpec = {
   id: 'kumiko',
+  group: 'Wood & joinery',
+  tile: { repeats: [{ key: 'cellMm', axis: 'x' }], angleKey: 'angleDeg' },
   label: 'Kumiko',
   blurb: 'Japanese lattice patterns as fine grooves in a flat face: hemp leaf, triangles, or squares and diagonals.',
   depthFraction: 0.15,
@@ -1159,6 +1023,7 @@ const kumiko: PatternSpec = {
 
 const guilloche: PatternSpec = {
   id: 'guilloche',
+  group: 'Geometric',
   label: 'Guilloché',
   blurb: 'Engine-turned interference lines: a moiré of two wavy line sets, or a spirograph rosette.',
   depthFraction: 0.1,
@@ -1236,6 +1101,7 @@ const guilloche: PatternSpec = {
 
 const scales: PatternSpec = {
   id: 'scales',
+  group: 'Geometric',
   label: 'Fish Scales',
   blurb: 'Overlapping round scales in offset rows, each one lifting to its free edge.',
   defaults: { scaleMm: 24, overlap: 0.25, lift: 0.7, jitter: 0.3, angleDeg: 0, seed: 1 },
@@ -1289,6 +1155,7 @@ const scales: PatternSpec = {
 
 const studs: PatternSpec = {
   id: 'studs',
+  group: 'Geometric',
   flatTopped: true,
   label: 'Stud Plate',
   blurb: 'A flat plate with rows of round studs standing proud of it.',
@@ -1375,6 +1242,7 @@ const REACTION_PRESETS: Record<string, { feed: number; kill: number }> = {
 
 const reactionDiffusion: PatternSpec = {
   id: 'reaction_diffusion',
+  group: 'Nature',
   label: 'Turing Pattern',
   blurb: 'Two chemicals, one eating the other: worms, spots and cells settle out of the mix.',
   caveat: 'Iterative, so the preview lags a moment behind the controls. For animal markings use Animal Print — this chemistry has no sense of direction and cannot make parallel stripes.',
@@ -1523,11 +1391,6 @@ const reactionDiffusion: PatternSpec = {
  * lattice so the spacing is even without being a grid.
  */
 
-/** Smoothstep between two edges. */
-const smoothstep = (e0: number, e1: number, x: number): number => {
-  const t = clamp01((x - e0) / Math.max(1e-9, e1 - e0));
-  return t * t * (3 - 2 * t);
-};
 
 /**
  * One band of a striped coat at a point.
@@ -1592,6 +1455,7 @@ function spotAt(
 
 const animalPrint: PatternSpec = {
   id: 'animal_print',
+  group: 'Nature',
   flatTopped: true,
   label: 'Animal Print',
   blurb: 'Tiger and zebra bars, leopard rosettes, cheetah spots, giraffe patches, cow blotches.',
@@ -1704,6 +1568,7 @@ const animalPrint: PatternSpec = {
 
 const foliage: PatternSpec = {
   id: 'foliage',
+  group: 'Nature',
   label: 'Vines & Leaves',
   blurb: 'A climbing vine with leaves, grown branch by branch and carved in relief.',
   defaults: { iterations: 7, branchAngleDeg: 28, decay: 0.76, leafSizeMm: 7, stemWidthMm: 3, seed: 1 },
@@ -1820,7 +1685,7 @@ const foliage: PatternSpec = {
 
 // --- The registry ----------------------------------------------------------
 
-export const SURFACE_PATTERNS: PatternSpec[] = [
+const CORE_PATTERNS: PatternSpec[] = [
   woodGrain,
   masonry,
   parquet,
@@ -1839,6 +1704,26 @@ export const SURFACE_PATTERNS: PatternSpec[] = [
   reactionDiffusion,
   foliage,
 ];
+
+/**
+ * Every pattern, each wrapped with the layout controls (fit, frame, symmetry,
+ * fade, soften) and listed in the order of its menu group.
+ */
+export const SURFACE_PATTERNS: PatternSpec[] = [
+  ...ORNAMENT_PATTERNS,
+  ...FITTED_PATTERNS,
+  ...CORE_PATTERNS,
+  ...GEOMETRIC_PATTERNS,
+  ...NATURAL_PATTERNS,
+]
+  .map((spec, i) => ({ spec, i }))
+  .sort((a, b) => groupRank(a.spec) - groupRank(b.spec) || a.i - b.i)
+  .map(({ spec }) => withLayout(spec));
+
+function groupRank(spec: PatternSpec): number {
+  const i = PATTERN_GROUPS.indexOf(spec.group ?? 'Nature');
+  return i < 0 ? PATTERN_GROUPS.length : i;
+}
 
 export function patternById(id: string): PatternSpec | undefined {
   return SURFACE_PATTERNS.find((p) => p.id === id);

@@ -518,8 +518,21 @@ describe('fluted', () => {
     // Flutes run down the board at angle 0, so a row crosses every one of
     // them. They sit at 0, 12 ... 300 mm; the two on the board's edges are not
     // dips with a neighbour either side, which leaves 300 / 12 - 1.
-    const g = build({ meanderMm: 0, profile: 'v', land: 0 });
+    const g = build({ meanderMm: 0, profile: 'v', land: 0, layoutAlign: 'free' });
     expect(troughs(row(g, 60))).toBe(300 / 12 - 1);
+  });
+
+  it('fitted, ends on a whole flute at both edges', () => {
+    // 290 mm at a 12 mm pitch is 24.2 flutes; fitting makes it 24 at
+    // 12.08 mm, with the board's edges on the lands between flutes.
+    const narrow = { cols: 291, rows: 61, extent: { widthM: 0.29, depthM: 0.06 } };
+    const g = spec.build(narrow.cols, narrow.rows, narrow.extent, {
+      ...spec.defaults, meanderMm: 0, profile: 'v', land: 0,
+    });
+    const r = Array.from({ length: narrow.cols }, (_, c) => g[30 * narrow.cols + c]);
+    expect(troughs(r)).toBe(24);
+    expect(r[0]).toBeCloseTo(1, 1);
+    expect(r[narrow.cols - 1]).toBeCloseTo(1, 1);
   });
 
   it('is the same on every row when straight, and not when it meanders', () => {
