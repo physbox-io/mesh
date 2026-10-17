@@ -19,7 +19,7 @@ function attachFakeGrbl() {
       close: () => Promise<void>;
     } | null;
     state: Record<string, unknown>;
-    handleIncomingLine: (line: string) => void;
+    parseLine: (line: string) => void;
   };
 
   const sent: string[] = [];
@@ -50,10 +50,10 @@ function attachFakeGrbl() {
     async writeRealtime(byte: number) {
       sent.push(String.fromCharCode(byte));
       // A soft reset: the board reboots and says so, and the manager waits for that.
-      if (byte === 0x18) setTimeout(() => mgr.handleIncomingLine("Grbl 1.1h ['$' for help]"), 0);
+      if (byte === 0x18) setTimeout(() => mgr.parseLine("Grbl 1.1h ['$' for help]"), 0);
       if (byte === 0x3f && board.report) {
         const report = board.report;
-        setTimeout(() => mgr.handleIncomingLine(report), 0);
+        setTimeout(() => mgr.parseLine(report), 0);
       }
     },
     async writeLine(line: string) {
@@ -69,7 +69,7 @@ function attachFakeGrbl() {
       // the first time it yields.
       await new Promise<void>((resolve) => setTimeout(() => {
         outstanding -= trimmed.length + 1;
-        mgr.handleIncomingLine('ok');
+        mgr.parseLine('ok');
         resolve();
       }, 0));
     },
@@ -330,10 +330,10 @@ describe('the Z datum across a tool change', () => {
   });
 
   it('still lifts clear at a sheet swap in a program that cuts in Z', async () => {
-    const mgr = webSerialManager as unknown as { handleIncomingLine: (l: string) => void };
+    const mgr = webSerialManager as unknown as { parseLine: (l: string) => void };
     webSerialManager.startJob('G21\nG90\nG0 Z5\nG1 Z-1 F300\nG1 X10 F600\nM0\nG1 X20\n');
     // Seen at the program's clear height on the way in, then down in the cut.
-    mgr.handleIncomingLine('<Run|MPos:0.000,0.000,5.000|FS:0,0>');
+    mgr.parseLine('<Run|MPos:0.000,0.000,5.000|FS:0,0>');
     fake.board.report = '<Idle|MPos:10.000,0.000,-1.000|FS:0,0>';
     await advance(12);
 
@@ -390,14 +390,14 @@ describe('knowing whether the machine has homed', () => {
   afterEach(() => fake.detach());
 
   it('is set by a homing cycle finishing and cleared by an alarm', () => {
-    const mgr = webSerialManager as unknown as { handleIncomingLine: (l: string) => void; hasHomed: boolean; state: { hasHomed: boolean } };
+    const mgr = webSerialManager as unknown as { parseLine: (l: string) => void; hasHomed: boolean; state: { hasHomed: boolean } };
     mgr.hasHomed = false;
     mgr.state.hasHomed = false;
-    mgr.handleIncomingLine('<Home|MPos:0.000,0.000,0.000|FS:0,0>');
+    mgr.parseLine('<Home|MPos:0.000,0.000,0.000|FS:0,0>');
     expect(webSerialManager.getState().hasHomed).toBe(false);
-    mgr.handleIncomingLine('<Idle|MPos:0.000,0.000,0.000|FS:0,0>');
+    mgr.parseLine('<Idle|MPos:0.000,0.000,0.000|FS:0,0>');
     expect(webSerialManager.getState().hasHomed).toBe(true);
-    mgr.handleIncomingLine('<Alarm|MPos:0.000,0.000,0.000|FS:0,0>');
+    mgr.parseLine('<Alarm|MPos:0.000,0.000,0.000|FS:0,0>');
     expect(webSerialManager.getState().hasHomed).toBe(false);
   });
 });
@@ -450,14 +450,14 @@ describe('reading the machine and trimming it live', () => {
   });
 
   it('asks the controller what it is and keeps the answer', async () => {
-    const mgr = webSerialManager as unknown as { handleIncomingLine: (l: string) => void };
+    const mgr = webSerialManager as unknown as { parseLine: (l: string) => void };
     // The dump arrives between the query and its `ok`, as it does on the wire.
     const original = fake.sent.length;
     const query = webSerialManager.refreshMachineSettings(2000);
     // Injected before the `ok` the fake schedules on a timer, which is the
     // order a real controller sends them in: the whole dump, then the ack.
     for (const line of ['$110=8000.000', '$120=750.000', '$122=90.000', '$30=24000']) {
-      mgr.handleIncomingLine(line);
+      mgr.parseLine(line);
     }
     await query;
 
@@ -476,8 +476,8 @@ describe('reading the machine and trimming it live', () => {
   });
 
   it('reads the override percentages off the status report rather than counting clicks', () => {
-    const mgr = webSerialManager as unknown as { handleIncomingLine: (l: string) => void };
-    mgr.handleIncomingLine('<Run|MPos:1.000,2.000,3.000|FS:900,12000|Ov:80,100,115>');
+    const mgr = webSerialManager as unknown as { parseLine: (l: string) => void };
+    mgr.parseLine('<Run|MPos:1.000,2.000,3.000|FS:900,12000|Ov:80,100,115>');
     expect(webSerialManager.getState().overrides).toEqual({ feed: 80, rapid: 100, spindle: 115 });
   });
 
@@ -511,7 +511,7 @@ describe('getting clear of the work for a tool change', () => {
   const internals = () =>
     webSerialManager as unknown as {
       state: { grblSettings: Record<number, number> };
-      handleIncomingLine: (line: string) => void;
+      parseLine: (line: string) => void;
       hasHomed: boolean;
     };
 
@@ -533,8 +533,8 @@ describe('getting clear of the work for a tool change', () => {
     mgr.state.grblSettings = { 23: 0, 132: 80, 27: 2 };
     // A homing cycle, as the controller reports one: `Home` while it runs, and
     // the `Idle` that follows is the moment MPos means something.
-    mgr.handleIncomingLine('<Home|MPos:0.000,0.000,-40.000|FS:0,0>');
-    mgr.handleIncomingLine('<Idle|MPos:0.000,0.000,-2.000|FS:0,0>');
+    mgr.parseLine('<Home|MPos:0.000,0.000,-40.000|FS:0,0>');
+    mgr.parseLine('<Idle|MPos:0.000,0.000,-2.000|FS:0,0>');
 
     webSerialManager.startJob(TOOL_CHANGE_JOB);
     await advance(12);
@@ -561,7 +561,7 @@ describe('getting clear of the work for a tool change', () => {
       'G21\nG90\nG0 Z5.000\nG1 Z-3.500 F300\nG1 X10 F600\nG0 Z20.000\nT2 M6 ; fit the ball nose\nG1 X20\n'
     );
     // The pump stops at the M6 with the tool still in the cut.
-    mgr.handleIncomingLine('<Run|MPos:5.000,0.000,-3.500|FS:600,10000>');
+    mgr.parseLine('<Run|MPos:5.000,0.000,-3.500|FS:600,10000>');
     // By the time the dwell is acked, the retract has run.
     fake.board.report = '<Idle|MPos:10.000,0.000,20.000|FS:0,0>';
     await advance(12);
@@ -581,7 +581,7 @@ describe('getting clear of the work for a tool change', () => {
   it('lifts back up to the highest height the job has been seen at', async () => {
     const mgr = internals();
     webSerialManager.startJob(TOOL_CHANGE_JOB);
-    mgr.handleIncomingLine('<Run|MPos:0.000,0.000,12.000|FS:0,0>');
+    mgr.parseLine('<Run|MPos:0.000,0.000,12.000|FS:0,0>');
     fake.board.report = '<Idle|MPos:10.000,0.000,1.000|FS:0,0>';
     await advance(12);
 
@@ -593,15 +593,15 @@ describe('getting clear of the work for a tool change', () => {
   it('forgets that it was homed when the controller alarms', async () => {
     const mgr = internals();
     mgr.state.grblSettings = { 23: 0, 132: 80 };
-    mgr.handleIncomingLine('<Home|MPos:0.000,0.000,-40.000|FS:0,0>');
-    mgr.handleIncomingLine('<Idle|MPos:0.000,0.000,0.000|FS:0,0>');
+    mgr.parseLine('<Home|MPos:0.000,0.000,-40.000|FS:0,0>');
+    mgr.parseLine('<Idle|MPos:0.000,0.000,0.000|FS:0,0>');
     // A hard limit: the drive is cut rather than decelerated, so the steps
     // between the trip and the stop are gone and MPos is a fiction.
-    mgr.handleIncomingLine('<Alarm|MPos:0.000,0.000,0.000|FS:0,0>');
-    mgr.handleIncomingLine('<Idle|MPos:0.000,0.000,-5.000|FS:0,0>');
+    mgr.parseLine('<Alarm|MPos:0.000,0.000,0.000|FS:0,0>');
+    mgr.parseLine('<Idle|MPos:0.000,0.000,-5.000|FS:0,0>');
 
     webSerialManager.startJob(TOOL_CHANGE_JOB);
-    mgr.handleIncomingLine('<Run|MPos:0.000,0.000,8.000|FS:0,0>');
+    mgr.parseLine('<Run|MPos:0.000,0.000,8.000|FS:0,0>');
     fake.board.report = '<Idle|MPos:10.000,0.000,2.000|FS:0,0>';
     await advance(12);
 
@@ -637,7 +637,7 @@ describe('getting clear of the work for a tool change', () => {
     const resumed = webSerialManager.resumeJob({ zIsSet: true });
     // Standing where the operator touched off: on the work, two millimetres
     // below the datum the program was cut against.
-    mgr.handleIncomingLine('<Idle|MPos:0.000,0.000,-2.000|FS:0,0>');
+    mgr.parseLine('<Idle|MPos:0.000,0.000,-2.000|FS:0,0>');
     await resumed;
 
     const after = fake.sent.slice(atPause);
@@ -735,7 +735,7 @@ describe('a job that alarms while stopped for a tool change', () => {
   let fake: ReturnType<typeof attachFakeGrbl>;
   const mgr = () =>
     webSerialManager as unknown as {
-      handleIncomingLine: (l: string) => void;
+      parseLine: (l: string) => void;
       jobContext: { name?: string };
     };
 
@@ -760,11 +760,11 @@ describe('a job that alarms while stopped for a tool change', () => {
 
   async function alarmAtToolChange() {
     webSerialManager.startJob(PROGRAM);
-    mgr().handleIncomingLine('<Run|MPos:0.000,0.000,5.000|FS:0,0>');
+    mgr().parseLine('<Run|MPos:0.000,0.000,5.000|FS:0,0>');
     fake.board.report = '<Idle|MPos:20.000,0.000,5.000|FS:0,0>';
     await advance(12);
     expect(webSerialManager.getState().status).toBe('PAUSED_TOOL');
-    mgr().handleIncomingLine('<Alarm|MPos:20.000,0.000,26.000|FS:0,0>');
+    mgr().parseLine('<Alarm|MPos:20.000,0.000,26.000|FS:0,0>');
   }
 
   it('offers the tool change line itself, and says what it was waiting for', async () => {
@@ -810,13 +810,13 @@ describe('a job that alarms while stopped for a tool change', () => {
       ...Array.from({ length: 200 }, (_, i) => `G1 X${(i + 1) * 10} F600`)].join('\n');
     webSerialManager.startJob(long);
     await advance(20);
-    mgr().handleIncomingLine('<Alarm|MPos:0.000,0.000,0.000|FS:0,0>');
+    mgr().parseLine('<Alarm|MPos:0.000,0.000,0.000|FS:0,0>');
     await webSerialManager.unlockAlarm();
 
     // Resumed from line 150, and alarmed again a few lines in.
     expect(webSerialManager.resumeFromLine(150).ok).toBe(true);
     await advance(3);
-    mgr().handleIncomingLine('<Alarm|MPos:0.000,0.000,0.000|FS:0,0>');
+    mgr().parseLine('<Alarm|MPos:0.000,0.000,0.000|FS:0,0>');
 
     expect(webSerialManager.getState().resume!.fromLine).toBeGreaterThanOrEqual(150);
   });
@@ -828,7 +828,7 @@ describe('a job that alarms while stopped for a tool change', () => {
     await advance(20);
     // The line last sent, which is what the rewind is measured back from.
     const reached = fake.lines().length;
-    mgr().handleIncomingLine('<Alarm|MPos:0.000,0.000,0.000|FS:0,0>');
+    mgr().parseLine('<Alarm|MPos:0.000,0.000,0.000|FS:0,0>');
 
     const resume = webSerialManager.getState().resume;
     expect(resume?.pendingPause).toBeUndefined();
@@ -863,8 +863,8 @@ describe('a parked job', () => {
     expect(webSerialManager.getState().status).toBe('PAUSED_PARKED');
 
     fake.board.report = '<Idle|MPos:0.000,0.000,0.000|FS:0,0>';
-    const mgr = webSerialManager as unknown as { handleIncomingLine: (l: string) => void };
-    mgr.handleIncomingLine('<Idle|MPos:0.000,0.000,0.000|FS:0,0>');
+    const mgr = webSerialManager as unknown as { parseLine: (l: string) => void };
+    mgr.parseLine('<Idle|MPos:0.000,0.000,0.000|FS:0,0>');
     expect(webSerialManager.getState().status).toBe('PAUSED_PARKED');
 
     expect(await webSerialManager.resumeFromPark({ isLaser: true })).toBe(true);

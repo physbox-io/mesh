@@ -21,7 +21,7 @@ function attachFakeGrbl(options: { ack?: boolean } = {}) {
       close: () => Promise<void>;
     } | null;
     state: Record<string, unknown>;
-    handleIncomingLine: (line: string) => void;
+    parseLine: (line: string) => void;
     sendAndWait: (command: string, timeoutMs?: number) => Promise<void>;
   };
 
@@ -39,7 +39,7 @@ function attachFakeGrbl(options: { ack?: boolean } = {}) {
     async close() {},
     // A soft reset: the board reboots and says so, and the manager waits for that.
     async writeRealtime(byte: number) {
-      if (byte === 0x18) setTimeout(() => mgr.handleIncomingLine("Grbl 1.1h ['$' for help]"), 0);
+      if (byte === 0x18) setTimeout(() => mgr.parseLine("Grbl 1.1h ['$' for help]"), 0);
     },
     async writeLine(line: string) {
       const trimmed = line.trim();
@@ -48,7 +48,7 @@ function attachFakeGrbl(options: { ack?: boolean } = {}) {
       if (!ack) return;
       await new Promise<void>((resolve) =>
         setTimeout(() => {
-          mgr.handleIncomingLine('ok');
+          mgr.parseLine('ok');
           resolve();
         }, 0)
       );
@@ -89,7 +89,7 @@ describe('a line the controller refuses', () => {
     // The refusal *is* the missing `ok`. Nothing more would ever have been
     // sent, and the app used to go on showing RUNNING at whatever percentage
     // it had reached.
-    fake.mgr.handleIncomingLine('error:9');
+    fake.mgr.parseLine('error:9');
     await settle();
 
     const state = webSerialManager.getState();
@@ -134,14 +134,18 @@ describe('an acknowledgement left over from an earlier command', () => {
       fake.sent.push(trimmed);
       await new Promise<void>((resolve) =>
         setTimeout(() => {
-          fake.mgr.handleIncomingLine('ok');
+          fake.mgr.parseLine('ok');
           resolve();
         }, 0)
       );
     };
 
-    webSerialManager.startJob(JOB);
-    for (let i = 0; i < 6; i++) await settle();
+    // The start gives the unanswered line a moment to be answered late before
+    // letting it go, so this waits that out rather than a fixed number of acks.
+    void webSerialManager.startJob(JOB);
+    for (let i = 0; i < 60 && webSerialManager.getState().currentLine <= 1; i++) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
 
     // It got past the first line, which is the whole of the claim.
     expect(fake.sent.length).toBeGreaterThan(1);

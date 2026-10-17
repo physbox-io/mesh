@@ -20,7 +20,7 @@ function attachFakeGrbl(surface: (x: number, y: number) => number | null, opts: 
       close: () => Promise<void>;
     } | null;
     state: { connected: boolean; lastError?: string; probeCircuitSeen: boolean; probePinActive: boolean };
-    handleIncomingLine: (line: string) => void;
+    parseLine: (line: string) => void;
   };
 
   const sent: string[] = [];
@@ -55,13 +55,13 @@ function attachFakeGrbl(surface: (x: number, y: number) => number | null, opts: 
       if (trimmed.includes('G38.2')) {
         const z = surface(x, y);
         if (z === null) {
-          mgr.handleIncomingLine('error:9');
+          mgr.parseLine('error:9');
         } else {
-          mgr.handleIncomingLine(`[PRB:${x.toFixed(3)},${y.toFixed(3)},${z.toFixed(3)}:1]`);
-          mgr.handleIncomingLine('ok');
+          mgr.parseLine(`[PRB:${x.toFixed(3)},${y.toFixed(3)},${z.toFixed(3)}:1]`);
+          mgr.parseLine('ok');
         }
       } else {
-        mgr.handleIncomingLine('ok');
+        mgr.parseLine('ok');
       }
     },
   };
@@ -73,14 +73,14 @@ function attachFakeGrbl(surface: (x: number, y: number) => number | null, opts: 
   if (opts.prove !== false) proveProbeCircuit();
 
   function proveProbeCircuit() {
-    mgr.handleIncomingLine('<Idle|MPos:0,0,0|WCO:0,0,0|Pn:P>');
-    mgr.handleIncomingLine('<Idle|MPos:0,0,0|WCO:0,0,0>');
+    mgr.parseLine('<Idle|MPos:0,0,0|WCO:0,0,0|Pn:P>');
+    mgr.parseLine('<Idle|MPos:0,0,0|WCO:0,0,0>');
   }
 
   return {
     sent,
     proveProbeCircuit,
-    report: (line: string) => mgr.handleIncomingLine(line),
+    report: (line: string) => mgr.parseLine(line),
     state: () => mgr.state,
     detach() {
       mgr.transport = null;

@@ -23,7 +23,7 @@ function attachBoard() {
       close: () => Promise<void>;
     } | null;
     state: Record<string, unknown>;
-    handleIncomingLine: (line: string) => void;
+    parseLine: (line: string) => void;
     ackQueue: unknown[];
     guideSpotRestoreLaserMode: boolean;
   };
@@ -41,7 +41,7 @@ function attachBoard() {
   const lost: string[] = [];
   let rxBytes = 0;
   const peak = { rxBytes: 0 };
-  const reply = (line: string) => setTimeout(() => mgr.handleIncomingLine(line), 0);
+  const reply = (line: string) => setTimeout(() => mgr.parseLine(line), 0);
 
   mgr.state.connected = true;
   mgr.state.status = 'IDLE';
@@ -66,7 +66,7 @@ function attachBoard() {
         rxBytes = 0;
         setTimeout(() => {
           board.booting = false;
-          mgr.handleIncomingLine("Grbl 1.1h ['$' for help]");
+          mgr.parseLine("Grbl 1.1h ['$' for help]");
         }, 5);
       } else if (byte === 0x3f && !board.booting) {
         reply(board.report);
@@ -89,16 +89,16 @@ function attachBoard() {
           board.running--;
           const custom = board.answer?.(trimmed);
           if (custom) {
-            custom.forEach((l) => mgr.handleIncomingLine(l));
+            custom.forEach((l) => mgr.parseLine(l));
           } else if (trimmed === '$X') {
             board.alarm = false;
-            mgr.handleIncomingLine('ok');
+            mgr.parseLine('ok');
           } else if (board.alarm) {
-            mgr.handleIncomingLine('error:9');
+            mgr.parseLine('error:9');
           } else if (trimmed.startsWith('$32=') && board.running > 0) {
-            mgr.handleIncomingLine('error:8');
+            mgr.parseLine('error:8');
           } else {
-            mgr.handleIncomingLine('ok');
+            mgr.parseLine('ok');
           }
           resolve();
         }, 0)
@@ -188,7 +188,7 @@ describe('soft reset', () => {
   it('stops a job the controller restarted underneath, rather than waiting on it', async () => {
     webSerialManager.startJob(JOB);
     await wait();
-    fake.mgr.handleIncomingLine("Grbl 1.1h ['$' for help]");
+    fake.mgr.parseLine("Grbl 1.1h ['$' for help]");
 
     expect(webSerialManager.isRunning()).toBe(false);
     expect(webSerialManager.getState().lastError).toMatch(/restarted/);
