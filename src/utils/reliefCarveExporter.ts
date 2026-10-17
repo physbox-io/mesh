@@ -3790,11 +3790,20 @@ export function generateReliefCarveGcode(
   const fitScale = Math.min(usableW / modelW, usableD / modelD);
   const scaleFactor = opts.fitMode === 'fit' ? fitScale : Math.max(0.01, opts.scalePercent / 100);
 
-  if (opts.fitMode === 'manual' && scaleFactor > fitScale * 1.0001) {
+  // Only a model that runs past the stock itself is cropped. The usable
+  // rectangle above is where the cutter's *centre* may go; the surface is
+  // still sampled, and cut by the cutter's flank, right out to the stock's
+  // edge. Comparing against it made every board the size of its stock -- a
+  // generated pattern panel, always -- report itself as overhanging. Half a
+  // millimetre of slack absorbs a generated board's sub-cell rounding.
+  const OVERHANG_SLACK_MM = 0.5;
+  const overhang = Math.max(modelW * scaleFactor - stockW, modelD * scaleFactor - stockD);
+  if (opts.fitMode === 'manual' && overhang > OVERHANG_SLACK_MM) {
+    const fitsStock = Math.min(stockW / modelW, stockD / modelD);
     warnings.push(
       `At ${opts.scalePercent}% the model is ${(modelW * scaleFactor).toFixed(0)} x ` +
         `${(modelD * scaleFactor).toFixed(0)} mm and overhangs the stock — anything past the edge is ` +
-        `cropped. It fits at ${(fitScale * 100).toFixed(0)}%.`
+        `cropped. It fits at ${Math.floor(fitsStock * 100)}%.`
     );
   }
 

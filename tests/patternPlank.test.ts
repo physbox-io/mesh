@@ -75,12 +75,19 @@ describe('a generated board goes straight through the relief exporter', () => {
     // generator is supposed to have made impossible.
     const result = generateReliefCarveGcode(plankScene('waves'), carveOptions());
     expect(result.success).toBe(true);
-    // The exporter reserves half a cutter all round, so a panel that fills the
-    // stock edge to edge is reported as overhanging: the outer tool-radius band
-    // is left uncut. That is true and worth saying, and it is the price of a
-    // pattern that runs to the edge instead of sitting in a bare border.
-    const complaints = (result.warnings ?? []).filter((w) => !/overhangs the stock/.test(w));
-    expect(complaints).toEqual([]);
+    // A panel that fills the stock edge to edge is not overhanging it: it used
+    // to be reported so, because the check was against the rectangle the
+    // cutter's centre is kept inside rather than against the stock.
+    expect(result.warnings ?? []).toEqual([]);
+  });
+
+  it('still warns when a manually scaled model runs past the stock', () => {
+    const result = generateReliefCarveGcode(plankScene('waves'), carveOptions({ scalePercent: 110 }));
+    const warning = (result.warnings ?? []).find((w) => /overhangs the stock/.test(w));
+    expect(warning).toBeDefined();
+    // 200 x 120 stock under a 200 x 120 board: it fits at 100%, not the
+    // 98% the cutter-centre rectangle would say.
+    expect(warning).toMatch(/fits at 100%/);
   });
 
   it('leaves the high points of the pattern as untouched stock face', () => {
