@@ -140,6 +140,41 @@ job and never abandons the queue), park, resume-from-line, `locateExecutedLine`,
 (180 s ack timeout, `probeDown` rejects a refused line, and Etch's exporter re-raises Z and the spindle
 after `M6`). Volt's double `processQueue`: fixed by `queueRun` (269d645).
 
+**2026-10-16 session 2: package 0.5.0-0.5.4 released; Mesh rewrite on branch `batch8-mesh-on-grblmachine`.**
+Package (all with tests, all released): `sendLine(line, {timeoutMs})` keeping the slot
+(`AckTimeoutError`); `controllerSilent` (raise 3 s, clear after 1.5 s of steady replies - Mesh's
+cleared on any single reply); `hasHomed`; `describePause(kind, line, note)` with a `settling`
+message; `beforeStreamResumes`; progress by queue position (pause lines earn no ack);
+`letGoOfStaleAcks` at job start (waits up to 1 s, then `abandon`); hooks `onLinkLost`,
+`reportProgress`, `onJobFinished`, `failJob(err, {queueIndex})`, `streamProgram`; `jobEpoch` so a
+stop beats a start waiting on stale acks; `resumeJob` returns once streaming restarts (MCP `resume`
+used to hang until the job next stopped). Bugs fixed on the way: `connect()` kept `zDatumTrusted`
+from the last connection; `probeGridCycle` put F on its rapids (modal feed leak); a jog never
+answered held every later click; an unhandled rejection on every e-stop of a running job
+(ack promise unobserved during the write). 0.5.2's publish failed on my own test (fixed in 0.5.3).
+Mesh `main` is on 0.5.0 (2e4ba3f). Separately fixed in Mesh: a parked job lost PAUSED_PARKED to
+the next Idle report, so it could not be resumed (829f833).
+**Etch and Volt are still on ^0.4.0** - bump them to 0.5.4 (the datum and e-stop fixes matter);
+check their `describePause`/`failJob` overrides still type-check.
+
+The branch (one WIP commit) has `webSerialManager.ts` rebuilt on `GrblMachine<MachineState>`
+(Mesh's state extends the package's; `needsZZero` is mirrored from `zDatumTrusted` in
+`updateState`). Machine tests: 67/78 pass. What is left:
+  - 7 tests in machineJobControl assert order against `~`; the package sends `~` only after a
+    feed hold (correct). Re-anchor them on the next program line.
+  - "waits for the buffered moves": expects `M5` before `G4 P0`; it is now after the drain
+    (physically the same moment). Update the assertion.
+  - "leaves a feed hold alone": `G21` is sent after the resume - the pause landed before the
+    stream had started (start now goes through microtasks). Check `pauseJob` during `starting`.
+  - "says what to fit": the tool-change message gets the "not parked" suffix, so the
+    peak-height lift is not seen in that test; same family as the lift tests that now pass alone.
+  - "does not stop for the same tool change again": resume-from-line past a handled M6.
+  - One unhandled rejection left in grblProtocol (probe ALARM:5): package `probeDown`'s contact
+    promise is rejected while it awaits the G38.2 line - mark it handled at creation (0.5.5).
+  - Then: `npx tsc -b --noEmit` (ask first), lint, delete `machineTransport.ts`'s
+    `SerialTransport`/`CloudMachineTransport` (now unused), wire `autoConnect()` on mount, move the
+    transport-fake tests into the package, test on the machine before merging.
+
 **What remains: move Mesh onto `GrblMachine`.** Mesh's manager is a synchronous pump with its own
 `ackQueue`, and the package streams through an async `LineQueue`. Keep the package's shape: it now has
 the hold, generation and `queueRun` guards that make it safe. Package work first, released as 0.5.0:
