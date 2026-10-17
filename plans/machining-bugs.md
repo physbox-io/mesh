@@ -157,23 +157,29 @@ the next Idle report, so it could not be resumed (829f833).
 **Etch and Volt are still on ^0.4.0** - bump them to 0.5.4 (the datum and e-stop fixes matter);
 check their `describePause`/`failJob` overrides still type-check.
 
-The branch (one WIP commit) has `webSerialManager.ts` rebuilt on `GrblMachine<MachineState>`
+The branch has `webSerialManager.ts` rebuilt on `GrblMachine<MachineState>`
 (Mesh's state extends the package's; `needsZZero` is mirrored from `zDatumTrusted` in
-`updateState`). Machine tests: 67/78 pass. What is left:
-  - 7 tests in machineJobControl assert order against `~`; the package sends `~` only after a
-    feed hold (correct). Re-anchor them on the next program line.
-  - "waits for the buffered moves": expects `M5` before `G4 P0`; it is now after the drain
-    (physically the same moment). Update the assertion.
-  - "leaves a feed hold alone": `G21` is sent after the resume - the pause landed before the
-    stream had started (start now goes through microtasks). Check `pauseJob` during `starting`.
-  - "says what to fit": the tool-change message gets the "not parked" suffix, so the
-    peak-height lift is not seen in that test; same family as the lift tests that now pass alone.
-  - "does not stop for the same tool change again": resume-from-line past a handled M6.
-  - One unhandled rejection left in grblProtocol (probe ALARM:5): package `probeDown`'s contact
-    promise is rejected while it awaits the G38.2 line - mark it handled at creation (0.5.5).
-  - Then: `npx tsc -b --noEmit` (ask first), lint, delete `machineTransport.ts`'s
-    `SerialTransport`/`CloudMachineTransport` (now unused), wire `autoConnect()` on mount, move the
-    transport-fake tests into the package, test on the machine before merging.
+`updateState`).
+
+**2026-10-16 session 3: all 75 machine tests pass on the branch (bbcacc5), no unhandled rejections;
+machining 0.5.5 released.** What the 11 failures were:
+  - Test leaks, not code: the tool-change tests reset a `hasHomed` field that is now `state.hasHomed`,
+    and an earlier test's `G10` cleared the package's `lastWco` (a real board sends `WCO:` on its next
+    report; the fake never does). The fake board now resets both.
+  - Re-anchored on the next program line: tests that ordered against `~` (the package sends it only
+    after a feed hold), and `G4 P0` now before `M5`.
+  - A feed hold pressed between Start and the stream starting did nothing: Mesh's `pauseJob` now waits
+    for the stream (it has written at most one line) and holds that.
+  - Package bug (0.5.5): a pause and a resume inside one line's write started a second loop that sent
+    the same line again. A new loop now waits for the old loop's write. Also in 0.5.5: `probeDown`'s
+    contact promise is handled from creation (the probe ALARM:5 unhandled rejection).
+  - Resume-from-line past a handled `M6` worked; the test gave the fake too few ticks for the preamble.
+Also done: `machineTransport.ts` deleted (only a re-export was left; its test moved to the package),
+USB `autoConnect()` on app open in `MachineConfigModal`, Mesh on `^0.5.5`.
+Left before merging: typecheck and lint on the branch, Etch/Volt bumped to 0.5.5, moving more
+transport-fake tests into the package (optional; Mesh's are green), and **a run on the machine**:
+connect, auto-reconnect after reload, jog, zero, probe, a job with a tool change (lift, park,
+resume), a feed hold and resume, an e-stop.
 
 **What remains: move Mesh onto `GrblMachine`.** Mesh's manager is a synchronous pump with its own
 `ackQueue`, and the package streams through an async `LineQueue`. Keep the package's shape: it now has
