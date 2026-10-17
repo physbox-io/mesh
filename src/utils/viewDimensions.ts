@@ -223,8 +223,8 @@ interface Stop { at: number; anchor: number; weight: number; centre?: boolean }
  * edges square to the sheet (a gear's teeth, a grille) is not one a chain of
  * figures explains, and picking some of them would be arbitrary.
  */
-function chainStops(stops: Stop[], lo: number, hi: number, loAnchor: number): Stop[] {
-  const all = [...stops, { at: lo, anchor: loAnchor, weight: Infinity }, { at: hi, anchor: loAnchor, weight: Infinity }]
+function chainStops(stops: Stop[], lo: number, hi: number, loAnchor: number, hiAnchor = loAnchor): Stop[] {
+  const all = [...stops, { at: lo, anchor: loAnchor, weight: Infinity }, { at: hi, anchor: hiAnchor, weight: Infinity }]
     .sort((x, y) => x.at - y.at);
   const merged: Stop[] = [];
   for (const s of all) {
@@ -380,6 +380,15 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
   if (!(u1 - u0 > SAME_M || v1 - v0 > SAME_M)) return null;
   const width = u1 - u0;
   const height = v1 - v0;
+  let u0Anchor = Infinity, u1Anchor = Infinity, v0Anchor = Infinity, v1Anchor = Infinity;
+  for (let i = 0; i < p.length; i += 3) {
+    const q = [p[i], p[i + 1], p[i + 2]];
+    const u = dot(q, U), v = dot(q, V);
+    if (u <= u0 + MERGE_M && v < u0Anchor) u0Anchor = v;
+    if (u >= u1 - MERGE_M && v < u1Anchor) u1Anchor = v;
+    if (v <= v0 + MERGE_M && u < v0Anchor) v0Anchor = u;
+    if (v >= v1 - MERGE_M && u < v1Anchor) v1Anchor = u;
+  }
   const covered = coverage(body.positions, body.faces, axes);
 
   // --- the edges -----------------------------------------------------------
@@ -439,13 +448,20 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
         const ua = dot(e.a, U), ub = dot(e.b, U);
         const va = dot(e.a, V), vb = dot(e.b, V);
         const length = Math.hypot(delta[0], delta[1], delta[2]);
+        // Only an edge where at least one of its two faces stands square to the
+        // measured axis (a step wall) or lies in the sheet (a front/back face)
+        // is a step: a ridge between two banked/slanted faces is not.
+        const faceSquareTo = (axis: Vec3) => candidate.surfaces.some((s) => {
+          const n = found.surfaces[s]?.normal;
+          return !!n && (Math.abs(dot(n, axis)) >= 1 - SQUARE || Math.abs(dot(n, W)) >= 1 - SQUARE);
+        });
         // Runs up the part: a stop across it, reaching down to the width row.
-        if (Math.abs(du) / drawn < SQUARE && drawn >= MIN_EDGE_SHARE * height) {
+        if (Math.abs(du) / drawn < SQUARE && drawn >= MIN_EDGE_SHARE * height && faceSquareTo(U)) {
           uStops.push({ at: (ua + ub) / 2, anchor: Math.min(va, vb), weight: drawn });
           if (Math.abs(dv) / length > 1 - SQUARE) straight.v = true;
         }
         // Runs along the part: a stop up it, reaching left to the height row.
-        if (Math.abs(dv) / drawn < SQUARE && drawn >= MIN_EDGE_SHARE * width) {
+        if (Math.abs(dv) / drawn < SQUARE && drawn >= MIN_EDGE_SHARE * width && faceSquareTo(V)) {
           vStops.push({ at: (va + vb) / 2, anchor: Math.min(ua, ub), weight: drawn });
           if (Math.abs(du) / length > 1 - SQUARE) straight.u = true;
         }
@@ -593,9 +609,9 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
     const c = axis === 'u' ? b.centre[0] : b.centre[1];
     return Math.abs(c - b.radius - lo) < MERGE_M && Math.abs(c + b.radius - hi) < MERGE_M;
   });
-  const rows = (axis: 'u' | 'v', stops: Stop[], lo: number, hi: number, edge: number) => {
+  const rows = (axis: 'u' | 'v', stops: Stop[], lo: number, hi: number, edge: number, loAnchor: number, hiAnchor: number) => {
     if (!(hi - lo > SAME_M)) return;
-    const chain = chainStops(stops, lo, hi, edge);
+    const chain = chainStops(stops, lo, hi, loAnchor, hiAnchor);
     if (sphereSpans(axis, lo, hi)) {
       for (let i = 0; i + 1 < chain.length; i++) {
         if (isDiameter(axis, chain[i].at, chain[i + 1].at)) dims.push(linear(axis, chain[i], chain[i + 1], 1, edge));
@@ -611,8 +627,8 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
     }
     dims.push(linear(axis, chain[0], chain[chain.length - 1], 2, edge));
   };
-  rows('u', uStops, u0, u1, v0);
-  rows('v', vStops, v0, v1, u0);
+  rows('u', uStops, u0, u1, v0, u0Anchor, u1Anchor);
+  rows('v', vStops, v0, v1, u0, v0Anchor, v1Anchor);
 
   // --- the angle -----------------------------------------------------------
   // Measured on the part's long axis, and only when that axis lies in the

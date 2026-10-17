@@ -405,3 +405,52 @@ describe('omittedLink', () => {
     expect(omittedLink([0.06, 0.04, 0.06], [false, true, false])).toBe(2);
   });
 });
+
+describe('banked oval curve track', () => {
+  const makeBankedOval = () => {
+    const nSegs = 24;
+    const rx = 0.45, ry = 0.25, bankDeg = 35;
+    const halfW = 0.09, halfH = 0.008;
+    const parts: ReturnType<typeof body>[] = [];
+    for (let i = 0; i < nSegs; i++) {
+      const t0 = (2 * Math.PI * i) / nSegs;
+      const t1 = (2 * Math.PI * (i + 1)) / nSegs;
+      const tm = (t0 + t1) / 2;
+      const dx = -rx * Math.sin(tm), dy = ry * Math.cos(tm);
+      const yaw = Math.atan2(dy, dx);
+      const chord = Math.hypot(rx * (Math.cos(t1) - Math.cos(t0)), ry * (Math.sin(t1) - Math.sin(t0)));
+      const qYaw = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), yaw);
+      const qRoll = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), (-bankDeg * Math.PI) / 180);
+      const q = qYaw.multiply(qRoll);
+      const g = new THREE.BoxGeometry(chord * 1.05, halfW * 2, halfH * 2);
+      g.applyQuaternion(q);
+      g.translate(rx * Math.cos(tm), ry * Math.sin(tm), 0.06);
+      parts.push(body(g));
+    }
+    return joined('oval_track', parts);
+  };
+
+  it('measures only overall width and height on the sheet axes, with extension anchors reaching the curve tangents', () => {
+    const oval = makeBankedOval();
+    const top = bodyViewDimensions(oval, 'topDown')!;
+    expect(linear(top, 'u', 1)).toEqual([]);
+    expect(linear(top, 'v', 1)).toEqual([]);
+    const topU = linear(top, 'u', 2)[0];
+    const topV = linear(top, 'v', 2)[0];
+    // Leftmost and rightmost tangents of the oval are near y = 0, not down at v0.
+    expect(Math.abs(topU.anchorA)).toBeLessThan(0.05);
+    expect(Math.abs(topU.anchorB)).toBeLessThan(0.05);
+    expect(Math.abs(topV.anchorA)).toBeLessThan(0.08);
+    expect(Math.abs(topV.anchorB)).toBeLessThan(0.08);
+
+    const front = bodyViewDimensions(oval, 'front')!;
+    // No foreshortened chain stops from the banked longitudinal segment edges in front view.
+    expect(linear(front, 'u', 1)).toEqual([]);
+    expect(linear(front, 'v', 1)).toEqual([]);
+    const frontU = linear(front, 'u', 2)[0];
+    // Outer left/right tips of the banked oval sit near the upper rim, well above v0.
+    expect(frontU.anchorA).toBeGreaterThan(front.bounds.v[0] + 0.04);
+    expect(frontU.anchorB).toBeGreaterThan(front.bounds.v[0] + 0.04);
+  });
+});
+
