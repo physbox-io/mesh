@@ -98,25 +98,45 @@ function rodOf({ geometry, matrix }: DrawnPiece): { a: Vec3; b: Vec3; radius: nu
 }
 
 /**
- * A part's own axes: those of its biggest piece that is not a sphere. The piece's frame is the geom's, which is the body's
- * turned by however the geom sits in it — the frame its edges run along.
+ * A part's own axes: those of its biggest piece that is not a sphere, when all
+ * of its non-sphere pieces share those axes. A tilted part has one frame its
+ * edges run along; a curve or gear built from segments turned against one
+ * another has no single piece's frame, and is measured on the sheet's axes.
  */
 function frameOf(pieces: DrawnPiece[]): [Vec3, Vec3, Vec3] | undefined {
   let best: DrawnPiece | null = null;
   let bestSize = -1;
   const size = new THREE.Vector3();
+  const pieceAxes = (piece: DrawnPiece): [Vec3, Vec3, Vec3] => {
+    const e = piece.matrix.elements;
+    const axis = (i: number) => toDoc(new THREE.Vector3(e[i * 4], e[i * 4 + 1], e[i * 4 + 2]).normalize());
+    return [axis(0), axis(1), axis(2)];
+  };
+  const nonSphere: DrawnPiece[] = [];
   for (const piece of pieces) {
     // A true sphere's axes say nothing; an ellipsoid (a sphere scaled unevenly) has its own.
     if (sphereOf(piece)) continue;
+    nonSphere.push(piece);
     if (!piece.geometry.boundingBox) piece.geometry.computeBoundingBox();
     piece.geometry.boundingBox!.getSize(size).multiply(new THREE.Vector3().setFromMatrixScale(piece.matrix));
     const across = size.length();
     if (across > bestSize) { best = piece; bestSize = across; }
   }
   if (!best) return undefined;
-  const e = best.matrix.elements;
-  const axis = (i: number) => toDoc(new THREE.Vector3(e[i * 4], e[i * 4 + 1], e[i * 4 + 2]).normalize());
-  return [axis(0), axis(1), axis(2)];
+  const candidate = pieceAxes(best);
+  for (const piece of nonSphere) {
+    if (piece === best) continue;
+    const axes = pieceAxes(piece);
+    for (const a of axes) {
+      const match = Math.max(
+        Math.abs(dot(a, candidate[0])),
+        Math.abs(dot(a, candidate[1])),
+        Math.abs(dot(a, candidate[2])),
+      );
+      if (match < 0.999) return undefined;
+    }
+  }
+  return candidate;
 }
 
 /**
@@ -307,7 +327,28 @@ function layOut(found: BodyDimensions[], locations: LocationDim[], view: Drawing
     return false;
   };
 
-  for (const body of found) {
+  const edgeU = found.map((b) => b.bounds.u[0]);
+  const edgeV = found.map((b) => b.bounds.v[0]);
+  for (let pass = 0; pass < found.length; pass++) {
+    for (let i = 0; i < found.length; i++) {
+      for (let j = 0; j < found.length; j++) {
+        if (i === j) continue;
+        const a = found[i], b = found[j];
+        if (dot(a.axes.u, b.axes.u) < 0.999 || dot(a.axes.v, b.axes.v) < 0.999) continue;
+        const au = a.bounds.u[1] - a.bounds.u[0], bu = b.bounds.u[1] - b.bounds.u[0];
+        const av = a.bounds.v[1] - a.bounds.v[0], bv = b.bounds.v[1] - b.bounds.v[0];
+        if (au < 0.4 * bu && av < 0.4 * bv) continue;
+        if (a.bounds.u[0] < b.bounds.u[1] - 1e-6 && b.bounds.u[0] < a.bounds.u[1] - 1e-6 &&
+            a.bounds.v[0] < b.bounds.v[1] - 1e-6 && b.bounds.v[0] < a.bounds.v[1] - 1e-6) {
+          edgeU[i] = Math.min(edgeU[i], edgeU[j]);
+          edgeV[i] = Math.min(edgeV[i], edgeV[j]);
+        }
+      }
+    }
+  }
+  const placedLines: { u: Vec3; v: Vec3; axis: 'u' | 'v'; a: number; b: number; rowAt: number }[] = [];
+
+  found.forEach((body, bodyIdx) => {
     const { u: U, v: V, w: W } = body.axes;
     const at = (u: number, v: number): Vec3 => add(add(add([0, 0, 0], U, u), V, v), W, body.depth);
     // A pixel along each of the part's axes, which may be drawn foreshortened.
@@ -334,8 +375,20 @@ function layOut(found: BodyDimensions[], locations: LocationDim[], view: Drawing
         const pt = d.axis === 'u' ? (s: number, t: number) => at(s, t) : (s: number, t: number) => at(t, s);
         const pa = d.axis === 'u' ? pu : pv;
         const pc = d.axis === 'u' ? pv : pu;
-        const rowAt = d.edge - pc(ROW_PX[row]);
+        const baseEdge = Math.min(d.edge, d.axis === 'u' ? edgeV[bodyIdx] : edgeU[bodyIdx]);
+        let rowAt = baseEdge - pc(ROW_PX[row]);
         if (already(d.label, pt(d.a, rowAt), pt(d.b, rowAt))) return;
+        const step = pc(ROW_PX[2] - ROW_PX[1]);
+        const minGap = pc(18);
+        for (let tries = 0; tries < 8; tries++) {
+          const hit = placedLines.find((p) =>
+            p.axis === d.axis && dot(p.u, U) > 0.999 && dot(p.v, V) > 0.999 &&
+            d.a < p.b - 1e-6 && p.a < d.b - 1e-6 &&
+            Math.abs(rowAt - p.rowAt) < minGap);
+          if (!hit) break;
+          rowAt = hit.rowAt - step;
+        }
+        placedLines.push({ u: U, v: V, axis: d.axis, a: d.a, b: d.b, rowAt });
         line(out.lines, pt(d.a, d.anchorA - pc(GAP_PX)), pt(d.a, rowAt - pc(OVERSHOOT_PX)));
         line(out.lines, pt(d.b, d.anchorB - pc(GAP_PX)), pt(d.b, rowAt - pc(OVERSHOOT_PX)));
         line(out.lines, pt(d.a, rowAt), pt(d.b, rowAt));
@@ -382,7 +435,7 @@ function layOut(found: BodyDimensions[], locations: LocationDim[], view: Drawing
         label(key, arcAt(theta / 2, (ARC_PX + 16) * mpp), d.label, 'centre');
       }
     });
-  }
+  });
 
   // Where each part sits: up from the reference origin, then across to the
   // part's. Across goes at the part's own height, inside the drawing, rather
