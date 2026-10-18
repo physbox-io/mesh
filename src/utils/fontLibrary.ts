@@ -103,11 +103,29 @@ export function ensureFontPreview(family: string) {
   styled.add(family);
   const link = document.createElement('link');
   link.rel = 'stylesheet';
+  // Mesh is served cross-origin isolated (COEP require-corp, for MuJoCo's
+  // threads): a stylesheet fetched without CORS is blocked outright.
+  link.crossOrigin = 'anonymous';
   link.href = `https://fonts.googleapis.com/css2?family=${family.replace(/ /g, '+')}&display=swap`;
   document.head.appendChild(link);
 }
 
 export class FontUnavailableError extends Error {}
+
+/**
+ * fetch(), with the host named when the request never gets an answer. The
+ * browser's own "Failed to fetch" says nothing of which request it was, or why.
+ */
+async function reach(url: string): Promise<Response> {
+  try {
+    return await fetch(url);
+  } catch {
+    const host = new URL(url).host;
+    throw new FontUnavailableError(
+      `Could not reach ${host}. Something between the browser and Google is blocking it: no connection, a firewall, or a privacy setting or extension that blocks Google Fonts.`,
+    );
+  }
+}
 
 /** One @font-face of Google's stylesheet: a file and the characters it holds. */
 export interface FontFace {
@@ -166,7 +184,7 @@ function stylesheet(family: string, weight: number): Promise<FontFace[] | null> 
   const hit = sheets.get(key);
   if (hit) return hit;
   const p = (async () => {
-    const res = await fetch(`${GOOGLE_CSS}?family=${encodeURIComponent(family).replace(/%20/g, '+')}:wght@${weight}`);
+    const res = await reach(`${GOOGLE_CSS}?family=${encodeURIComponent(family).replace(/%20/g, '+')}:wght@${weight}`);
     // 400 is Google's answer to a family or a weight it does not have.
     if (res.status === 400) return null;
     if (!res.ok) throw new FontUnavailableError(`Google Fonts did not answer (HTTP ${res.status}).`);
@@ -185,7 +203,7 @@ function fetchFont(url: string): Promise<FontLike> {
   const hit = files.get(url);
   if (hit) return hit;
   const p = (async () => {
-    const res = await fetch(url);
+    const res = await reach(url);
     if (!res.ok) throw new FontUnavailableError(`Could not download a font file (HTTP ${res.status}).`);
     let bytes: Uint8Array = new Uint8Array(await res.arrayBuffer());
     // "wOF2"
