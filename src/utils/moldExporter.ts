@@ -185,7 +185,15 @@ export function exportBinarySTL(triangles: Triangle3D[], headerText = 'PhysBox 3
   return bytes;
 }
 
-/** Add a quad as two triangles. */
+function sameVertex(a: [number, number, number], b: [number, number, number]): boolean {
+  return (
+    Math.abs(a[0] - b[0]) < 1e-6 &&
+    Math.abs(a[1] - b[1]) < 1e-6 &&
+    Math.abs(a[2] - b[2]) < 1e-6
+  );
+}
+
+/** Add a quad as two triangles, skipping degenerate triangles when an edge collapses. */
 function addQuad(
   triangles: Triangle3D[],
   v0: [number, number, number],
@@ -193,8 +201,22 @@ function addQuad(
   v2: [number, number, number],
   v3: [number, number, number]
 ) {
-  triangles.push({ a: v0, b: v1, c: v2, normal: computeNormal(v0, v1, v2) });
-  triangles.push({ a: v0, b: v2, c: v3, normal: computeNormal(v0, v2, v3) });
+  const pinch = sameVertex(v0, v3) || sameVertex(v1, v2);
+  if (!pinch && v1[2] + v3[2] > v0[2] + v2[2] + 1e-6) {
+    if (!sameVertex(v0, v1) && !sameVertex(v1, v3) && !sameVertex(v0, v3)) {
+      triangles.push({ a: v0, b: v1, c: v3, normal: computeNormal(v0, v1, v3) });
+    }
+    if (!sameVertex(v1, v2) && !sameVertex(v2, v3) && !sameVertex(v1, v3)) {
+      triangles.push({ a: v1, b: v2, c: v3, normal: computeNormal(v1, v2, v3) });
+    }
+    return;
+  }
+  if (!sameVertex(v0, v1) && !sameVertex(v1, v2) && !sameVertex(v0, v2)) {
+    triangles.push({ a: v0, b: v1, c: v2, normal: computeNormal(v0, v1, v2) });
+  }
+  if (!sameVertex(v0, v2) && !sameVertex(v2, v3) && !sameVertex(v0, v3)) {
+    triangles.push({ a: v0, b: v2, c: v3, normal: computeNormal(v0, v2, v3) });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -645,7 +667,7 @@ function buildHalf(
     for (let c = 0; c < cellCols; c++) {
       const i00 = r * grid.cols + c;
       cellSolid[r * cellCols + c] =
-        solid[i00] && solid[i00 + 1] && solid[i00 + grid.cols] && solid[i00 + grid.cols + 1] ? 1 : 0;
+        solid[i00] || solid[i00 + 1] || solid[i00 + grid.cols] || solid[i00 + grid.cols + 1] ? 1 : 0;
     }
   }
   const triangles: Triangle3D[] = [];
@@ -978,7 +1000,8 @@ export function generateMoldMeshes(
   const socketRimR = pinBaseR + opts.pinToleranceMm;
   const socketBotR = pinTopR + opts.pinToleranceMm;
   const socketDepth = opts.pinHeightMm + 0.5;
-  const keyOffsetX = Math.min(4, Math.max(2, partHalfW * 0.4));
+  const maxKeyOffsetX = Math.max(0, pinInsetX - socketRimR - 1.5);
+  const keyOffsetX = Math.min(maxKeyOffsetX, Math.min(4, Math.max(2, partHalfW * 0.4)));
 
   const pinPositions: Array<[number, number]> = [
     [-mw2 + pinInsetX + keyOffsetX, -md2 + pinInsetY],

@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { X, AlertCircle, Flame, Download, CheckCircle2, Loader2 } from 'lucide-react';
 import type { SceneGraph } from '../types/scene';
 import {
@@ -422,7 +422,7 @@ export const ExportCastModal: React.FC<Props> = ({ isOpen, onClose, scene }) => 
  * Changing a setting while it is on re-runs it from the originals once the
  * setting stops moving.
  */
-function CastPrepSection({ isOpen, method, partingFromBaseMm }: {
+function CastPrepSection({ isOpen: _isOpen, method, partingFromBaseMm }: {
   isOpen: boolean;
   method: CastMethod;
   partingFromBaseMm: number | 'auto';
@@ -432,7 +432,7 @@ function CastPrepSection({ isOpen, method, partingFromBaseMm }: {
   const clearCastPrep = useStore((s) => s.clearCastPrep);
   const bakeCastPrep = useStore((s) => s.bakeCastPrep);
 
-  const [draftDeg, setDraftDeg] = useState(prep?.draftDeg || 2);
+  const [draftDeg, setDraftDeg] = useState(prep?.draftDeg ?? 2);
   const [draftMode, setDraftMode] = useState<'add' | 'remove'>(prep?.draftMode ?? 'add');
   const [edges, setEdges] = useState(prep ? prep.edges !== null : true);
   const [edgeSizeMm, setEdgeSizeMm] = useState<number | null>(null);
@@ -443,31 +443,26 @@ function CastPrepSection({ isOpen, method, partingFromBaseMm }: {
   const opts: CastPrepOptions = {
     method, draftDeg, draftMode, edges, edgeSizeMm: edgeSizeMm ?? 'auto', partingFromBaseMm,
   };
-  // A string, so the settle timer restarts on a real change and not on every render.
   const key = JSON.stringify(opts);
-  const settledKey = useSettled(key, 400);
-  const applied = useRef<string | null>(null);
+  const [appliedKey, setAppliedKey] = useState<string | null>(() => (prep ? key : null));
+
+  useEffect(() => {
+    if (!prep) setAppliedKey(null);
+    else if (appliedKey === null) setAppliedKey(key);
+  }, [prep, appliedKey, key]);
 
   const run = async (o: CastPrepOptions) => {
-    applied.current = JSON.stringify(o);
+    const k = JSON.stringify(o);
+    setAppliedKey(k);
     setNote(null);
     const r = await runCastPrep(o);
     setReport(r);
   };
 
-  // Re-run from the originals when a setting changes while prep is on.
-  useEffect(() => {
-    if (!isOpen || !prep || busy) return;
-    // Opened onto a scene prepped earlier: take it as it is.
-    if (applied.current === null) { applied.current = settledKey; return; }
-    if (settledKey === applied.current) return;
-    void run(JSON.parse(settledKey) as CastPrepOptions);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen, settledKey, !!prep, busy]);
-
   const switchOn = () => void run(opts);
+  const applyChanges = () => void run(opts);
   const switchOff = () => {
-    applied.current = null;
+    setAppliedKey(null);
     setReport(null);
     const { kept } = clearCastPrep();
     setNote(kept.length > 0
@@ -475,7 +470,7 @@ function CastPrepSection({ isOpen, method, partingFromBaseMm }: {
       : 'Back to the original shapes.');
   };
   const bakeIn = () => {
-    applied.current = null;
+    setAppliedKey(null);
     setReport(null);
     bakeCastPrep();
     setNote('Kept as the model. The originals are gone, so edit the prepared shapes from here — or undo.');
@@ -483,6 +478,7 @@ function CastPrepSection({ isOpen, method, partingFromBaseMm }: {
 
   const on = !!prep;
   const disabled = !!busy;
+  const dirty = on && appliedKey !== null && key !== appliedKey;
 
   return (
     <div className={sectionClass}>
@@ -490,14 +486,25 @@ function CastPrepSection({ isOpen, method, partingFromBaseMm }: {
         <h3 className={sectionTitleClass}>Prepare for Casting</h3>
         <div className="flex items-center gap-2">
           {on && !busy && (
-            <button
-              type="button"
-              onClick={bakeIn}
-              title="Keep the prepared shapes as the model and forget the originals"
-              className="px-2.5 py-1 text-[11px] font-semibold rounded-md text-orange-700 dark:text-orange-300 hover:bg-orange-500/10 transition-colors"
-            >
-              Bake Into Model
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={applyChanges}
+                disabled={!dirty}
+                title="Re-run Prepare for Casting with the updated settings"
+                className="px-2.5 py-1 text-[11px] font-semibold rounded-md bg-orange-500 text-white hover:bg-orange-600 disabled:opacity-40 disabled:pointer-events-none transition-colors"
+              >
+                Apply
+              </button>
+              <button
+                type="button"
+                onClick={bakeIn}
+                title="Keep the prepared shapes as the model and forget the originals"
+                className="px-2.5 py-1 text-[11px] font-semibold rounded-md text-orange-700 dark:text-orange-300 hover:bg-orange-500/10 transition-colors"
+              >
+                Bake Into Model
+              </button>
+            </>
           )}
           <div className="w-32">
             <Segmented

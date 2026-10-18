@@ -11,14 +11,23 @@ import {
   FEED_OVERRIDE_BYTES,
   RAPID_OVERRIDE_BYTES,
   SPINDLE_OVERRIDE_BYTES,
+  normalizeGrid,
   type FrameJobOptions,
   type JobPauseKind,
   type MachineState as BaseMachineState,
   type MachineStatus,
   type OverrideStep,
+  type ProbeGrid,
   type ResolvedFrames,
   type StatusReport,
 } from '@physbox-io/machining';
+
+export class StreamAbortedError extends Error {
+  constructor(readonly reason: string) {
+    super(`Job stream aborted (${reason})`);
+    this.name = 'StreamAbortedError';
+  }
+}
 import {
   machineSocketUrl,
   postMachineTelemetry,
@@ -2202,6 +2211,7 @@ class WebSerialManager extends GrblMachine<MachineState> {
     // controller may still answer those lines (nothing here has reset it), and
     // a reply arriving after its slot was dropped would answer the next command.
     this.queue.hold();
+    this.queue.failAll(new StreamAbortedError(reason));
     this.queue.release();
   }
 
@@ -2627,33 +2637,43 @@ class WebSerialManager extends GrblMachine<MachineState> {
       return { success: false, message: fault };
     }
 
-    await this.sendAndWait('G21 G90');
-    const contactZ = await this.probeOnce(searchDepthMm, feedrate);
-
-    if (contactZ === null) {
-      const message =
-        `Probe never made contact within ${searchDepthMm} mm — Z zero was NOT set. ` +
-        `Check the probe clip and lead, and start with the tool closer to the plate.`;
-      this.updateState({ lastError: message });
-      return { success: false, message };
+    const prevStatus = this.state.status;
+    if (!prevStatus.startsWith('PAUSED')) {
+      this.updateState({ status: 'PROBING' });
     }
+    try {
+      await this.sendAndWait('G21 G90');
+      const contactZ = await this.probeOnce(searchDepthMm, feedrate);
 
-    await this.sendAndWait(`G10 L20 P1 Z${touchPlateThicknessMm.toFixed(3)}`);
-    this.recordZDatum();
-    // Heights seen on the old datum say nothing about this one.
-    this.jobPeakWorkZ = null;
-    // Relative retract: it clears the plate by the same 5 mm wherever the datum
-    // ended up, and does not depend on the offset that was just written.
-    await this.sendAndWait('G91 G0 Z5.000');
-    await this.sendAndWait('G90');
+      if (contactZ === null) {
+        const message =
+          `Probe never made contact within ${searchDepthMm} mm — Z zero was NOT set. ` +
+          `Check the probe clip and lead, and start with the tool closer to the plate.`;
+        this.updateState({ lastError: message });
+        return { success: false, message };
+      }
 
-    return {
-      success: true,
-      machineZ: contactZ,
-      message:
-        `Z zeroed on the touch plate (contact at machine Z ${contactZ.toFixed(3)}). ` +
-        `Work Z 0 is ${touchPlateThicknessMm.toFixed(2)} mm below the plate top — remove the plate before cutting.`,
-    };
+      await this.sendAndWait(`G10 L20 P1 Z${touchPlateThicknessMm.toFixed(3)}`);
+      this.recordZDatum();
+      // Heights seen on the old datum say nothing about this one.
+      this.jobPeakWorkZ = null;
+      // Relative retract: it clears the plate by the same 5 mm wherever the datum
+      // ended up, and does not depend on the offset that was just written.
+      await this.sendAndWait('G91 G0 Z5.000');
+      await this.sendAndWait('G90');
+
+      return {
+        success: true,
+        machineZ: contactZ,
+        message:
+          `Z zeroed on the touch plate (contact at machine Z ${contactZ.toFixed(3)}). ` +
+          `Work Z 0 is ${touchPlateThicknessMm.toFixed(2)} mm below the plate top — remove the plate before cutting.`,
+      };
+    } finally {
+      if (this.state.status === 'PROBING') {
+        this.updateState({ status: prevStatus === 'PROBING' ? 'IDLE' : prevStatus });
+      }
+    }
   }
 
   /**
@@ -2675,7 +2695,7 @@ class WebSerialManager extends GrblMachine<MachineState> {
     gridX = 3,
     gridY = 3,
     onProgress?: (probedCount: number, totalCount: number) => void
-  ): Promise<{ minX: number; minY: number; maxX: number; maxY: number; gridX: number; gridY: number; points: { x: number; y: number; z: number }[][] }> {
+  ): Promise<ProbeGrid> {
     this.refuseWhileJobHoldsMachine('probe the surface');
     const gx = Math.max(2, Math.round(gridX));
     const gy = Math.max(2, Math.round(gridY));
@@ -2701,96 +2721,121 @@ class WebSerialManager extends GrblMachine<MachineState> {
     }
     this.assertProbeCircuit();
 
-    // Every Z move here is relative, and there is not one absolute Z rapid in
-    // the whole routine. That is the safety property that matters: an absolute
-    // `G0 Z<n>` trusts the work datum, and a wrong datum — a Z zeroed on the
-    // wrong face, a G54 offset left over from another job — turns that rapid
-    // into a full-speed plunge through the work before any probe move even
-    // begins. This drove a tool through the plate once; it cannot here, because
-    // nothing moves Z to an assumed height.
-    //
-    // The contract instead: the operator jogs the tool to a small clearance
-    // above the surface (a few mm) before starting. From there the routine only
-    // ever moves XY across at that height and plunges *down* slowly under
-    // `G38.2`, which stops the instant the probe triggers — or, if it never
-    // does, at a bounded search depth, after which the first miss aborts the
-    // whole grid. After each contact it lifts back up by a fixed relative step,
-    // so the clearance tracks the surface from point to point rather than being
-    // trusted to an absolute number.
-    const PROBE_SEARCH_MM = 10; // most the tool can plunge before the move ends
-    const PROBE_LIFT_MM = 5; // relative lift after each contact, kept for the next hop
-    const PROBE_FEED = 50; // slow, so the probe has time to stop the move
-
-    await this.sendAndWait('G21 G90');
-
-    // Machine Z of the first contact. Every later point is reported against it,
-    // so the grid comes out as offsets whatever the tool length or datum.
-    let referenceZ: number | null = null;
-
-    for (let row = 0; row < gy; row++) {
-      const rowPoints: { x: number; y: number; z: number }[] = [];
-      const y = bounds.minY + row * stepY;
-
-      for (let col = 0; col < gx; col++) {
-        const x = bounds.minX + col * stepX;
-
-        // Across to the point at the current clearance — an XY-only move, no Z
-        // word, so the height the operator (or the last lift) set is kept.
-        await this.sendAndWait(`G0 X${x.toFixed(3)} Y${y.toFixed(3)}`);
-        // Straight down, slowly, until the probe triggers or the search runs
-        // out. `probePoint` issues `G91 G38.2 Z-<search>`, a relative plunge.
-        const contactZ = await this.probeOnce(PROBE_SEARCH_MM, PROBE_FEED);
-
-        // A miss means the plunge ran its whole length without the probe
-        // triggering: a clip that fell off, a broken wire, a non-conductive
-        // surface, or a clearance set too high to reach in one search. GRBL is
-        // now in a probe-fail alarm with the tool at the bottom of the move.
-        //
-        // Stop here. Recording the miss and moving on (the old behaviour) drove
-        // the tool down again at every remaining point; aborting on the first
-        // miss makes it a single slow plunge the operator can watch and stop.
-        // Left where it stopped, on purpose: retracting into an alarm is
-        // refused, and jogging clear is the operator's call, not this routine's.
-        if (contactZ === null) {
-          this.updateState({
-            lastError:
-              `Bed probe made no contact at X${x.toFixed(1)} Y${y.toFixed(1)}, so it stopped before ` +
-              `probing further. Check the probe clip and wiring, that the surface is conductive, and ` +
-              `that the tool started within ${PROBE_SEARCH_MM} mm of it — then clear the alarm and try again.`,
-          });
-          throw new Error('Bed probe made no contact — stopped to avoid driving the tool into the work.');
-        }
-
-        // Lift clear before the next hop, relative to where it just touched, so
-        // the clearance follows the surface instead of an assumed height.
-        await this.sendAndWait(`G91 G0 Z${PROBE_LIFT_MM.toFixed(3)}`);
-        await this.sendAndWait('G90');
-
-        if (referenceZ === null) referenceZ = contactZ;
-        const probedZ = parseFloat((contactZ - referenceZ).toFixed(3));
-
-        rowPoints.push({ x, y, z: probedZ });
-        probed++;
-        if (onProgress) onProgress(probed, totalPoints);
-      }
-      points.push(rowPoints);
+    const prevStatus = this.state.status;
+    if (!prevStatus.startsWith('PAUSED')) {
+      this.updateState({ status: 'PROBING' });
     }
+    try {
+      // Every Z move here is relative, and there is not one absolute Z rapid in
+      // the whole routine. That is the safety property that matters: an absolute
+      // `G0 Z<n>` trusts the work datum, and a wrong datum — a Z zeroed on the
+      // wrong face, a G54 offset left over from another job — turns that rapid
+      // into a full-speed plunge through the work before any probe move even
+      // begins. This drove a tool through the plate once; it cannot here, because
+      // nothing moves Z to an assumed height.
+      //
+      // The contract instead: the operator jogs the tool to a small clearance
+      // above the surface (a few mm) before starting. From there the routine only
+      // ever moves XY across at that height and plunges *down* slowly under
+      // `G38.2`, which stops the instant the probe triggers — or, if it never
+      // does, at a bounded search depth, after which the first miss aborts the
+      // whole grid. After each contact it lifts back up by a fixed relative step,
+      // so the clearance tracks the surface from point to point rather than being
+      // trusted to an absolute number.
+      const PROBE_SEARCH_MM = 10; // most the tool can plunge before the move ends
+      const PROBE_LIFT_MM = 5; // relative lift after each contact, kept for the next hop
+      const PROBE_FEED = 50; // slow, so the probe has time to stop the move
 
-    // Every point contacted (a miss would have thrown), so the tool is one lift
-    // above the last one. A final relative lift leaves it clear for the operator
-    // — still no absolute Z move.
-    await this.sendAndWait(`G91 G0 Z${PROBE_LIFT_MM.toFixed(3)}`);
-    await this.sendAndWait('G90');
+      await this.sendAndWait('G21 G90');
 
-    return {
-      minX: bounds.minX,
-      minY: bounds.minY,
-      maxX: bounds.maxX,
-      maxY: bounds.maxY,
-      gridX: gx,
-      gridY: gy,
-      points,
-    };
+      // Machine Z of the first contact. Every later point is reported against it,
+      // so the grid comes out as offsets whatever the tool length or datum.
+      let referenceZ: number | null = null;
+
+      for (let row = 0; row < gy; row++) {
+        const rowPoints: { x: number; y: number; z: number }[] = [];
+        const y = bounds.minY + row * stepY;
+
+        for (let col = 0; col < gx; col++) {
+          const x = bounds.minX + col * stepX;
+
+          // Across to the point at the current clearance — an XY-only move, no Z
+          // word, so the height the operator (or the last lift) set is kept.
+          await this.sendAndWait(`G0 X${x.toFixed(3)} Y${y.toFixed(3)}`);
+          // Straight down, slowly, until the probe triggers or the search runs
+          // out. `probePoint` issues `G91 G38.2 Z-<search>`, a relative plunge.
+          const contactZ = await this.probeOnce(PROBE_SEARCH_MM, PROBE_FEED);
+
+          // A miss means the plunge ran its whole length without the probe
+          // triggering: a clip that fell off, a broken wire, a non-conductive
+          // surface, or a clearance set too high to reach in one search. GRBL is
+          // now in a probe-fail alarm with the tool at the bottom of the move.
+          //
+          // Stop here. Recording the miss and moving on (the old behaviour) drove
+          // the tool down again at every remaining point; aborting on the first
+          // miss makes it a single slow plunge the operator can watch and stop.
+          // Left where it stopped, on purpose: retracting into an alarm is
+          // refused, and jogging clear is the operator's call, not this routine's.
+          if (contactZ === null) {
+            this.updateState({
+              lastError:
+                `Bed probe made no contact at X${x.toFixed(1)} Y${y.toFixed(1)}, so it stopped before ` +
+                `probing further. Check the probe clip and wiring, that the surface is conductive, and ` +
+                `that the tool started within ${PROBE_SEARCH_MM} mm of it — then clear the alarm and try again.`,
+            });
+            throw new Error('Bed probe made no contact — stopped to avoid driving the tool into the work.');
+          }
+
+          // Lift clear before the next hop, relative to where it just touched, so
+          // the clearance follows the surface instead of an assumed height.
+          await this.sendAndWait(`G91 G0 Z${PROBE_LIFT_MM.toFixed(3)}`);
+          await this.sendAndWait('G90');
+
+          if (referenceZ === null) referenceZ = contactZ;
+          const probedZ = parseFloat((contactZ - referenceZ).toFixed(3));
+
+          rowPoints.push({ x, y, z: probedZ });
+          probed++;
+          if (onProgress) onProgress(probed, totalPoints);
+        }
+        points.push(rowPoints);
+      }
+
+      // Every point contacted (a miss would have thrown), so the tool is one lift
+      // above the last one. A final relative lift leaves it clear for the operator
+      // — still no absolute Z move.
+      await this.sendAndWait(`G91 G0 Z${PROBE_LIFT_MM.toFixed(3)}`);
+      await this.sendAndWait('G90');
+
+      const rawGrid: ProbeGrid = {
+        minX: bounds.minX,
+        minY: bounds.minY,
+        maxX: bounds.maxX,
+        maxY: bounds.maxY,
+        gridX: gx,
+        gridY: gy,
+        points,
+      };
+      const datum = this.zDatumWorkXY();
+      if (datum) {
+        const normalized = normalizeGrid(rawGrid, datum.x, datum.y);
+        return {
+          ...normalized,
+          referencedTo: 'z-datum',
+          points: normalized.points.map((row) =>
+            row.map((p) => ({ ...p, z: parseFloat(p.z.toFixed(3)) }))
+          ),
+        };
+      }
+      return {
+        ...rawGrid,
+        referencedTo: 'first-point',
+      };
+    } finally {
+      if (this.state.status === 'PROBING') {
+        this.updateState({ status: prevStatus === 'PROBING' ? 'IDLE' : prevStatus });
+      }
+    }
   }
 
   /**

@@ -193,8 +193,8 @@ function generateWindowGcode(params: {
 
   for (const m of mortises) {
     lines.push(`; Mortise ${m.id}: ${m.thicknessXMm}x${m.widthYMm} mm, ${m.depthMm} mm deep`);
-    const halfX = Math.max(0.1, m.thicknessXMm * 0.5 - rBit);
-    const halfY = Math.max(0.1, m.widthYMm * 0.5 - rBit);
+    const halfX = Math.max(0, m.thicknessXMm * 0.5 - rBit);
+    const halfY = Math.max(0, m.widthYMm * 0.5 - rBit);
     const passes = Math.max(1, Math.ceil(m.depthMm / stepdownMm));
 
     // Rapid over center of mortise
@@ -223,11 +223,12 @@ function generateWindowGcode(params: {
       }
 
       // 4 Dogbone corner relief overcuts so a square bandsawn tenon drops right in
-      if (m.dogbone) {
+      if (m.dogbone && m.thicknessXMm >= cutterDiaMm && m.widthYMm >= cutterDiaMm) {
         const inset = rBit * Math.SQRT1_2;
         const dx = Math.max(0, m.thicknessXMm * 0.5 - inset);
         const dy = Math.max(0, m.widthYMm * 0.5 - inset);
         for (const [sx, sy] of [[-1, -1], [1, -1], [1, 1], [-1, 1]] as const) {
+          lines.push(`G1 X${fmt(m.centerXMm + sx * halfX)} Y${fmt(m.centerYMm + sy * halfY)} F${Math.round(feedRate)}`);
           lines.push(`G1 X${fmt(m.centerXMm + sx * dx)} Y${fmt(m.centerYMm + sy * dy)} F${Math.round(feedRate * 0.75)}`);
           lines.push(`G1 X${fmt(m.centerXMm + sx * halfX)} Y${fmt(m.centerYMm + sy * halfY)}`);
           cuttingDistMm += rBit * 2;
@@ -480,7 +481,7 @@ function buildCncSetupsForPart(
         mortises: win.mortises.map((m) => ({
           id: m.id,
           centerXMm: m.distFromRefEdgeMm,
-          centerYMm: Math.max(m.widthMm * 0.5 + 5, m.distFromTopEndMm - win.startOffsetMm),
+          centerYMm: Math.max(m.widthMm * 0.5, m.distFromTopEndMm - win.startOffsetMm),
           widthYMm: m.widthMm,
           thicknessXMm: m.thicknessMm,
           depthMm: m.depthMm,

@@ -680,8 +680,8 @@ describe('getting clear of the work for a tool change', () => {
     expect(at('G0 Z5.000')).toBeGreaterThanOrEqual(0);
     expect(at('M3 S12000')).toBeGreaterThan(at('G0 Z5.000'));
     expect(at('G4 P2')).toBeGreaterThan(at('M3 S12000'));
-    expect(at('G0 X10.000 Y0.000')).toBeGreaterThan(at('G0 Z5.000'));
-    expect(at('G1 Z-2.000 F300')).toBeGreaterThan(at('G0 X10.000 Y0.000'));
+    expect(at('G0 X10.000')).toBeGreaterThan(at('G0 Z5.000'));
+    expect(at('G1 Z-2.000 F300')).toBeGreaterThan(at('G0 X10.000'));
     expect(at('F600')).toBeGreaterThan(at('G1 Z-2.000 F300'));
     expect(go).toBeGreaterThan(at('F600'));
   });
@@ -696,7 +696,7 @@ describe('getting clear of the work for a tool change', () => {
     expect(after.indexOf('G20')).toBeGreaterThanOrEqual(0);
     expect(after.indexOf('G20')).toBeLessThan(after.indexOf('G0 Z0.200'));
     // Absolute for the moves back, incremental again for the program's own.
-    expect(after.indexOf('G91')).toBeGreaterThan(after.indexOf('G0 X1.000 Y0.000'));
+    expect(after.indexOf('G91')).toBeGreaterThan(after.indexOf('G0 X1.000'));
     expect(after.indexOf('G91')).toBeLessThan(go);
   });
 
@@ -710,6 +710,17 @@ describe('getting clear of the work for a tool change', () => {
     expect(after.indexOf('M3 S16000')).toBeGreaterThanOrEqual(0);
     expect(after.indexOf('M3 S16000')).toBeLessThan(go);
     expect(after).not.toContain('M3 S18000');
+  });
+
+  it('does not rapid back to the previous operation XY or plunge to its Z when resuming an M6 whose next operation positions itself', async () => {
+    const after = await pauseAndResume(
+      'G21\nG90\nG0 Z5.000\nM3 S18000\nG0 X10.000 Y15.000\nG1 Z-3.000 F300\nG1 X40.000 Y45.000 F600\nT2 M6\nM3 S16000\nG0 X80.000 Y90.000\nG1 Z-1.000 F200\n',
+      'PAUSED_TOOL'
+    );
+    expect(after).toContain('G0 Z5.000');
+    expect(after).not.toContain('G0 X40.000 Y45.000');
+    expect(after).not.toContain('G1 Z-3.000 F300');
+    expect(after).toContain('G0 X80.000 Y90.000');
   });
 
   it('waits for every restoring line to be taken before streaming the rest', async () => {
@@ -845,6 +856,20 @@ describe('a job that alarms while stopped for a tool change', () => {
     const resume = webSerialManager.getState().resume;
     expect(resume?.pendingPause).toBeUndefined();
     expect(resume!.fromLine).toBeLessThan(reached);
+  });
+
+  it('clears in-flight queue entries and aborts parked writers on alarm abandonJob', async () => {
+    const long = Array.from({ length: 50 }, (_, i) => `G1 X${(i + 1) * 10} Y${(i + 1) * 10} F600`).join('\n');
+    webSerialManager.startJob(long);
+    await settle();
+    const internalQueue = (webSerialManager as unknown as { queue: { inflightCount(): number; inflightBytes(): number } }).queue;
+    expect(internalQueue.inflightCount()).toBeGreaterThan(0);
+
+    mgr().parseLine('ALARM:1');
+    await settle();
+
+    expect(internalQueue.inflightCount()).toBe(0);
+    expect(internalQueue.inflightBytes()).toBe(0);
   });
 });
 

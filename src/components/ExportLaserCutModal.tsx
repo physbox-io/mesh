@@ -392,6 +392,14 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
   const gcodeResult = useMemo(() => {
     if (!exportResult?.success || !exportResult.panels) return null;
     const f = gcodeFields;
+    const sheetStockThicknessMm = exportResult.sheets?.map((s) => s.thicknessMm);
+    const faceToThickness =
+      f.machineMode === 'cnc' &&
+      !!sheetStockThicknessMm &&
+      exportResult.panels.some((p) => {
+        const stockMm = sheetStockThicknessMm[p.sheetIndex ?? 0];
+        return stockMm !== undefined && stockMm - p.thickness * 1000 > 0.1;
+      });
     const res = generateLaserCutGcode(exportResult.panels, {
       ...DEFAULT_GCODE_OPTIONS,
       machineMode: f.machineMode,
@@ -404,8 +412,9 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
       laserEngravePower: f.engravePower,
       engraveFeedrate: f.engraveFeedrate,
       cutDepthZ: f.materialThicknessMm,
+      faceToThickness,
       // Each sheet's own thickness, for a rack of mixed stock.
-      sheetStockThicknessMm: exportResult.sheets?.map((s) => s.thicknessMm),
+      sheetStockThicknessMm,
       zStepdown: Math.min(f.materialThicknessMm, 3.0),
       attachmentsEnabled: f.attachments,
       attachmentWidthMm: f.attachmentWidthMm,
@@ -1370,7 +1379,13 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                         // A laser has no Z to check; a router sweeps from its
                         // retract height down to the full depth of cut.
                         ...(machineMode === 'cnc'
-                          ? { minZ: -materialThicknessMm, maxZ: DEFAULT_GCODE_OPTIONS.safeZ }
+                          ? {
+                              minZ: -Math.max(
+                                materialThicknessMm,
+                                ...(exportResult?.sheets?.map((s) => s.thicknessMm) ?? [])
+                              ),
+                              maxZ: DEFAULT_GCODE_OPTIONS.safeZ,
+                            }
                           : {}),
                       }
                     : undefined

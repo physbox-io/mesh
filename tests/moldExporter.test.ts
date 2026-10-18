@@ -555,19 +555,23 @@ describe('One-part open mold and parting overhang checks', () => {
     expect(unpairedEdges(res.bottomHalf.triangles)).toBe(0);
     expect(unpairedEdges(res.topHalf!.triangles)).toBe(0);
 
-    // Every pin protrusion vertex (above the base's parting face) must remain outside
-    // the 40 x 40 mm cavity footprint (|x| > 20 or |y| > 20 in the base's local frame).
-    const baseCx = (res.bottomHalf.bounds.minX + res.bottomHalf.bounds.maxX) / 2;
-    const partingFaceZ = res.floorThicknessMm + res.cavityDepthMm;
-    for (const t of res.bottomHalf.triangles) {
+    // Every pin protrusion vertex on the lid (above its 5 mm backing plate parting face)
+    // must remain at least 1.5 mm outside the 40 x 40 mm cavity footprint in both X and Y.
+    const lidCx = (res.topHalf!.bounds.minX + res.topHalf!.bounds.maxX) / 2;
+    const lidPartingFaceZ = res.topHalf!.heightMm - DEFAULT_MOLD_OPTIONS.pinHeightMm;
+    let pinVertexCount = 0;
+    for (const t of res.topHalf!.triangles) {
       for (const v of [t.a, t.b, t.c]) {
-        if (v[2] > partingFaceZ + 0.1) {
-          const lx = Math.abs(v[0] - baseCx);
+        if (v[2] > lidPartingFaceZ + 0.1) {
+          pinVertexCount++;
+          const lx = Math.abs(v[0] - lidCx);
           const ly = Math.abs(v[1]);
-          expect(lx > 20.05 || ly > 20.05).toBe(true);
+          expect(lx).toBeGreaterThan(21);
+          expect(ly).toBeGreaterThan(21);
         }
       }
     }
+    expect(pinVertexCount).toBeGreaterThan(0);
   });
 });
 

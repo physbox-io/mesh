@@ -290,6 +290,76 @@ describe('Timber & Joinery Breakdown (Table, Chair & 3ft Flower Stand)', () => {
       expect(singleSolidRes.parts.filter((p) => p.member.role === 'panel').length).toBe(2);
     }
   });
+
+  it('trims leg-to-panel overlap in member dims, preserves off-center lateral mortise offset, skips mitered tips on shallow non-intersecting mortises, and walks the pocket perimeter between dogbone corners', async () => {
+    const wasm = await loadManifold();
+
+    // 1. A leg that penetrates 10 mm into a 20 mm tabletop (Z = 0..410 mm vs panel Z = 400..420 mm),
+    //    plus two perpendicular rails meeting the leg at the same Z height with shallow 8 mm tenons
+    //    (too shallow to intersect inside a 60x60 mm leg), with one rail shifted off-center (+8 mm).
+    const leg = wasm.Manifold.cube([60, 60, 410], true).translate([0, 0, 205]);
+    const panel = wasm.Manifold.cube([200, 200, 20], true).translate([0, 0, 410]);
+    const railX = wasm.Manifold.cube([160, 20, 40], true).translate([110, 8, 380]); // flush with trimmed leg top Z=400!
+    const railY = wasm.Manifold.cube([20, 160, 40], true).translate([0, 110, 380]);
+
+    const soups = [leg, panel, railX, railY].map(manifoldMmToSoupMetres);
+    leg.delete();
+    panel.delete();
+    railX.delete();
+    railY.delete();
+
+    const res = synthesizeTimberJoinery(wasm, soups, {
+      jointMode: 'mortise_tenon',
+      tenonCornerFit: 'dogbone',
+      cutterDiaMm: 6,
+      tenonLengthMm: 8, // shallow enough that the two perpendicular mortises do NOT intersect inside the 60x60 leg
+      shoulderMm: 4,
+      maxBoardWidthMm: 300,
+      tabletopClips: false,
+    });
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+
+    const legPart = res.parts.find((p) => p.member.role === 'leg')!;
+    // Phase 0 trimmed 10 mm overlap with the panel (410 -> 400 mm), updating member.dimsMm[0] and centerMm[2]
+    expect(legPart.member.dimsMm[0]).toBeCloseTo(400, 1);
+    expect(legPart.member.centerMm[2]).toBeCloseTo(200, 1);
+
+    // Shallow 8 mm tenons in a 60 mm leg do not intersect in 2D, so miteredTip must remain false
+    const rails = res.parts.filter((p) => p.member.role === 'rail');
+    expect(rails.length).toBe(2);
+    for (const r of rails) {
+      for (const t of r.tenons) {
+        expect(t.miteredTip).toBe(false);
+      }
+    }
+
+    // Off-center railX (y = +8 mm on a 60 mm face) has distFromRefEdgeMm != 30 mm (centered)
+    const mortiseDistances = legPart.mortises.map((m) => m.distFromRefEdgeMm);
+    expect(mortiseDistances.some((d) => Math.abs(d - 30) > 4)).toBe(true);
+
+    // Flush-top rail (Z = 360..400 on a 400 mm leg -> distFromTopEndMm = 20 mm, widthMm = 32 mm)
+    // must keep its true centerYMm (Y20) without an artificial +5 mm clamp (which would push it to Y21.075)
+    const cutPlan = buildTimberCutPlan(res, { cncBedMm: [300, 300, 60] });
+    for (const setup of cutPlan.allCncSetups) {
+      expect(setup.gcode).toMatch(/G0 X[\d.]+ Y20\b/);
+      // Dogbone relief must walk along the pocket perimeter (emitting G1 to each corner at F900 before each F675 relief move)
+      const lines = setup.gcode.split('\n');
+      const dogboneIndices = lines
+        .map((l, idx) => (l.endsWith('F675') ? idx : -1))
+        .filter((idx) => idx >= 0);
+      expect(dogboneIndices.length).toBeGreaterThanOrEqual(4);
+      for (const idx of dogboneIndices) {
+        // The line immediately before the diagonal overcut (F675) must be a perimeter walk (F900) to that corner
+        // and the line immediately after returns to that same corner coordinate.
+        const before = lines[idx - 1];
+        const after = lines[idx + 1];
+        expect(before).toMatch(/^G1 X[\d.]+ Y[\d.]+ F900$/);
+        expect(before.replace(/ F900$/, '')).toBe(after);
+      }
+    }
+  });
 });
+
 
 

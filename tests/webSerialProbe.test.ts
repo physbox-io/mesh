@@ -264,4 +264,35 @@ describe('zeroZ from a touch plate', () => {
 
     expect(fake.sent).toContain('$J=G91 G21 X-1.000 Y10.000 F800');
   });
+
+  it('normalizes probeGrid against the recorded zDatumWorkXY when set', async () => {
+    // Surface rises linearly from 0 at (0,0) to 1.0 at (100,0).
+    fake = attachFakeGrbl((x) => -10 + (x / 100) * 1.0);
+    // Simulate zeroing Z at work (50, 0), where surface is -9.5.
+    fake.report('<Idle|MPos:50,0,-9.5|WCO:0,0,0>');
+    await webSerialManager.zeroZ(0);
+    expect(webSerialManager.zDatumWorkXY()).toEqual({ x: 50, y: 0 });
+
+    const grid = await webSerialManager.probeGrid(bounds, 3, 2);
+    // At (50, 0) the normalized height must be 0; at (0, 0) it is -0.5; at (100, 0) it is +0.5.
+    expect(grid.points[0][0].z).toBeCloseTo(-0.5, 3);
+    expect(grid.points[0][1].z).toBeCloseTo(0, 3);
+    expect(grid.points[0][2].z).toBeCloseTo(0.5, 3);
+  });
+
+  it('transitions status to PROBING while zeroZ or probeGrid is in flight', async () => {
+    fake = attachFakeGrbl(() => -5);
+    const seenStatuses: string[] = [];
+    const unsub = webSerialManager.addListener((s) => {
+      seenStatuses.push(s.status);
+    });
+    try {
+      await webSerialManager.zeroZ(10);
+      expect(seenStatuses).toContain('PROBING');
+      expect(webSerialManager.getState().status).toBe('IDLE');
+    } finally {
+      unsub();
+    }
+  });
 });
+

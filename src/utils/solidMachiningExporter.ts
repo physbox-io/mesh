@@ -28,6 +28,7 @@ import {
   DEFAULT_RELIEF_OPTIONS,
   deriveReliefFeeds,
   machineSurface,
+  MAX_REACH_DIAMETERS,
   type Heightmap,
   type ReliefCarveOptions,
   type StockTransform,
@@ -353,14 +354,18 @@ export function sampleColumns(
   // having no plan area and a slanted one is hit twice — and the count of
   // hits comes out wrong for a whole row at a time. Off the line, they don't.
   const NUDGE = 0.0137;
+  const midRow = (rows - 1) * 0.5;
+  const midCol = (cols - 1) * 0.5;
   const hitZ: number[] = [];
   const hitDir: number[] = [];
   const order: number[] = [];
   for (let row = 0; row < rows; row++) {
-    const py = bounds.minY + (row + NUDGE) * stepY;
+    const nudgeY = row < midRow ? NUDGE : row > midRow ? -NUDGE : 0;
+    const py = bounds.minY + (row + nudgeY) * stepY;
     const br = bucketRow(py);
     for (let col = 0; col < cols; col++) {
-      const px = bounds.minX + (col + NUDGE) * stepX;
+      const nudgeX = col < midCol ? NUDGE : col > midCol ? -NUDGE : 0;
+      const px = bounds.minX + (col + nudgeX) * stepX;
       const bucket = buckets[br * side + bucketCol(px)];
       if (bucket.length === 0) continue;
       hitZ.length = 0;
@@ -703,11 +708,17 @@ function pinBore(
   out.push(`G0 X${f(cx + r)} Y${f(cy)}`);
   out.push(`G1 Z0 F${Math.round(plungeRate)}`);
   const turns = Math.max(1, Math.ceil(-toZ / Math.max(0.1, pitchMm)));
+  const turnXY = 2 * Math.PI * r;
+  const turnZ = -toZ / turns;
+  const helixFeed = Math.min(
+    feedRate,
+    Math.max(1, (plungeRate * Math.hypot(turnXY, turnZ)) / Math.max(1e-6, turnZ))
+  );
   const total = turns * segs;
   for (let i = 1; i <= total; i++) {
     const a = (i / segs) * 2 * Math.PI;
     const z = toZ * (i / total);
-    out.push(`G1 X${f(cx + r * Math.cos(a))} Y${f(cy + r * Math.sin(a))} Z${f(z)} F${Math.round(feedRate)}`);
+    out.push(`G1 X${f(cx + r * Math.cos(a))} Y${f(cy + r * Math.sin(a))} Z${f(z)} F${Math.round(helixFeed)}`);
   }
   for (let i = 1; i <= segs; i++) {
     const a = (i / segs) * 2 * Math.PI;
@@ -1007,9 +1018,17 @@ export function generateSolidMachining(
    */
   const tabT = opts.tabThicknessMm;
   const tabZ = tabs.anchors.map((k) => {
-    if (!twoSided) return { topZ: -(stockT - tabT), bottomZ: -stockT };
-    const topZ = Math.min(top[k], Math.max(-stockT / 2 + tabT / 2, bottom[k] + tabT));
-    return { topZ, bottomZ: topZ - tabT };
+    if (!twoSided) {
+      const topZ = Math.min(0, Math.max(floorZ, -(stockT - tabT)));
+      return { topZ, bottomZ: Math.max(floorZ, -stockT) };
+    }
+    let topZ = Math.min(0, Math.min(top[k], Math.max(-stockT / 2 + tabT / 2, bottom[k] + tabT)));
+    let bottomZ = Math.max(-stockT, topZ - tabT);
+    if (top[k] >= floorZ && -stockT - bottom[k] >= floorZ) {
+      topZ = Math.max(floorZ, Math.min(0, topZ));
+      bottomZ = Math.max(-stockT, Math.min(-stockT - floorZ, topZ - tabT));
+    }
+    return { topZ, bottomZ };
   });
 
   // --- Registration pins ----------------------------------------------------
@@ -1036,6 +1055,17 @@ export function generateSolidMachining(
     }
   }
 
+  const reachWarn = (depthMm: number, dia: number, label: string) => {
+    const ratio = depthMm / Math.max(0.05, dia);
+    if (ratio > MAX_REACH_DIAMETERS) {
+      warnings.push(
+        `${label}: a ${depthMm.toFixed(1)} mm bore is ${ratio.toFixed(1)} diameters of stickout for the ` +
+          `${dia} mm bit (past ${MAX_REACH_DIAMETERS}\u00d7D); ensure the cutter's flute and stickout reach ` +
+          `${depthMm.toFixed(1)} mm without the collet hitting the top of the stock.`
+      );
+    }
+  };
+
   // Bored with whichever cutter does the roughing.
   const pinToolDia = opts.roughingEnabled ? opts.roughingToolDiaMm : opts.finishingToolDiaMm;
   if (pins.length > 0) {
@@ -1055,12 +1085,15 @@ export function generateSolidMachining(
           `Fit the cutter longer, or register the flip by hand.`
       );
       pins.length = 0;
-    } else if (opts.pinDiaMm - pinToolDia < 2 * PECK_BELOW_MM) {
-      warnings.push(
-        `The ${opts.pinDiaMm} mm pin holes are barely wider than the ${pinToolDia} mm cutter, so they ` +
-          `are drilled in pecks rather than bored on a helix, and come out the cutter's size. ` +
-          `Use a wider pin for a hole that is cut to size.`
-      );
+    } else {
+      reachWarn(boreDepth, pinToolDia, 'Pin bore');
+      if (opts.pinDiaMm - pinToolDia < 2 * PECK_BELOW_MM) {
+        warnings.push(
+          `The ${opts.pinDiaMm} mm pin holes are barely wider than the ${pinToolDia} mm cutter, so they ` +
+            `are drilled in pecks rather than bored on a helix, and come out the cutter's size. ` +
+            `Use a wider pin for a hole that is cut to size.`
+        );
+      }
     }
   }
 
@@ -1093,9 +1126,13 @@ export function generateSolidMachining(
 
   // --- The two surfaces -------------------------------------------------------
   const material = materialSpec(opts.material);
+  const finishRad = Math.max(0.05, opts.finishingToolDiaMm / 2);
+  const toolClearRad = Math.max(finishRad, opts.roughingEnabled ? opts.roughingToolDiaMm / 2 : 0);
+  const distToMoat = distanceTransform(moatMask, cols, rows);
 
   const surfaceFor = (side: 'A' | 'B'): Heightmap => {
     const z = new Float32Array(cols * rows);
+    const deepSources: number[] = [];
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
         // Side B looks at the block turned over left to right: its column c is
@@ -1110,7 +1147,15 @@ export function generateSolidMachining(
           // pocket deeper than half the part, the lower half of a cone. A
           // 50 mm cup came out with 16 mm of its pocket left in. Only the
           // channel round the part is split between the sides.
-          const h = side === 'A' ? top[src] : -stockT - bottom[src];
+          let h = side === 'A' ? top[src] : -stockT - bottom[src];
+          if (twoSided && h < floorZ && distToMoat[src] * res <= finishRad) {
+            const oppH = side === 'A' ? -stockT - bottom[src] : top[src];
+            if (oppH >= floorZ) {
+              h = Math.max(floorZ, h);
+            } else {
+              deepSources.push(k);
+            }
+          }
           z[k] = Math.min(0, Math.max(-stockT, h));
         } else if (frameMask[src]) {
           z[k] = 0;
@@ -1118,9 +1163,32 @@ export function generateSolidMachining(
           // Side A cuts down to the tab's top; side B, looking up from the
           // underside, up to its bottom.
           const tab = tabZ[tabs.mask[src] - 1];
-          z[k] = side === 'A' ? tab.topZ : -stockT - tab.bottomZ;
+          const hTab = side === 'A' ? tab.topZ : -stockT - tab.bottomZ;
+          z[k] = Math.min(0, Math.max(-stockT, hTab));
+          if (z[k] < floorZ - 1e-6) deepSources.push(k);
         } else {
           z[k] = floorZ;
+        }
+      }
+    }
+    if (deepSources.length > 0) {
+      const clearCells = Math.ceil(toolClearRad / res) + 1;
+      for (const k0 of deepSources) {
+        const r0 = Math.floor(k0 / cols);
+        const c0 = k0 - r0 * cols;
+        const targetZ = z[k0];
+        for (let dr = -clearCells; dr <= clearCells; dr++) {
+          const r = r0 + dr;
+          if (r < 0 || r >= rows) continue;
+          for (let dc = -clearCells; dc <= clearCells; dc++) {
+            if (Math.hypot(dc * stepX, dr * stepY) > toolClearRad + res) continue;
+            const c = c0 + dc;
+            if (c < 0 || c >= cols) continue;
+            const src = side === 'A' ? r * cols + c : r * cols + (cols - 1 - c);
+            if (!moatMask[src] || tabs.mask[src]) continue;
+            const k = r * cols + c;
+            if (targetZ < z[k]) z[k] = targetZ;
+          }
         }
       }
     }
@@ -1200,7 +1268,12 @@ export function generateSolidMachining(
     const depth = deepest > depthA + 1e-3 ? deepest : depthA;
     const cut = machineSurface(
       { surface, bounds, depthMm: depth, resolution: res, header, prelude, noun: 'cut' },
-      { ...carveOpts, carveDepthMm: depth },
+      {
+        ...carveOpts,
+        carveDepthMm: depth,
+        applyMeshLeveling: side === 'A' ? opts.applyMeshLeveling : false,
+        meshLevelGrid: side === 'A' ? opts.meshLevelGrid : null,
+      },
       warnings
     );
     if (!cut.success) return fail(`Side ${side}: ${cut.error ?? 'no toolpath.'}`);

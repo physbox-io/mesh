@@ -194,7 +194,21 @@ export interface CastResult {
 const MAX_ANALYSIS_CELLS = 120_000;
 
 /** Signed volume of a triangle soup (9 numbers per tri), mm³. */
-function triSoupVolume(tris: Float64Array): number {
+function triSoupVolume(tris: Float64Array, solidIds?: number[]): number {
+  if (solidIds && solidIds.length > 0) {
+    const byId = new Map<number, number>();
+    for (let i = 0, t = 0; i < tris.length; i += 9, t++) {
+      const id = solidIds[t] ?? 0;
+      const ax = tris[i], ay = tris[i + 1], az = tris[i + 2];
+      const bx = tris[i + 3], by = tris[i + 4], bz = tris[i + 5];
+      const cx = tris[i + 6], cy = tris[i + 7], cz = tris[i + 8];
+      const dv = ax * (by * cz - bz * cy) - ay * (bx * cz - bz * cx) + az * (bx * cy - by * cx);
+      byId.set(id, (byId.get(id) ?? 0) + dv);
+    }
+    let total = 0;
+    for (const v of byId.values()) total += Math.abs(v) / 6;
+    return total;
+  }
   let v = 0;
   for (let i = 0; i < tris.length; i += 9) {
     const ax = tris[i], ay = tris[i + 1], az = tris[i + 2];
@@ -239,21 +253,41 @@ function appendCylinder(out: number[], cx: number, cy: number, z0: number, z1: n
   }
 }
 
-/** A vertical truncated cone (axis along Z), for the pouring cup. */
-function appendCone(out: number[], cx: number, cy: number, z0: number, z1: number, r0: number, r1: number, seg = 24): void {
-  const top = [cx, cy, z1];
-  const bot = [cx, cy, z0];
+/**
+ * A closed vertical surface of revolution through a monotonic sequence of
+ * `{ z, r }` profile stops, with one bottom cap, continuous frustum/cylinder
+ * walls, and one top cap — avoiding internal coplanar diaphragms or coaxial
+ * overlapping walls when slicing hollow for Lost-PLA burnout.
+ */
+function appendRevolutionStack(
+  out: number[],
+  cx: number,
+  cy: number,
+  stops: Array<{ z: number; r: number }>,
+  seg = 24
+): void {
+  if (stops.length < 2) return;
+  const first = stops[0];
+  const last = stops[stops.length - 1];
+  const bot = [cx, cy, first.z];
+  const top = [cx, cy, last.z];
   for (let i = 0; i < seg; i++) {
     const a0 = (i / seg) * 2 * Math.PI;
     const a1 = ((i + 1) / seg) * 2 * Math.PI;
-    const p0 = [cx + r0 * Math.cos(a0), cy + r0 * Math.sin(a0), z0];
-    const p1 = [cx + r0 * Math.cos(a1), cy + r0 * Math.sin(a1), z0];
-    const q0 = [cx + r1 * Math.cos(a0), cy + r1 * Math.sin(a0), z1];
-    const q1 = [cx + r1 * Math.cos(a1), cy + r1 * Math.sin(a1), z1];
-    pushTri(out, bot, p1, p0);
-    pushTri(out, top, q0, q1);
-    pushTri(out, p0, p1, q1);
-    pushTri(out, p0, q1, q0);
+    const c0 = Math.cos(a0), s0 = Math.sin(a0);
+    const c1 = Math.cos(a1), s1 = Math.sin(a1);
+    pushTri(out, bot, [cx + first.r * c1, cy + first.r * s1, first.z], [cx + first.r * c0, cy + first.r * s0, first.z]);
+    for (let k = 0; k + 1 < stops.length; k++) {
+      const sA = stops[k], sB = stops[k + 1];
+      if (Math.abs(sB.z - sA.z) < 1e-9 && Math.abs(sB.r - sA.r) < 1e-9) continue;
+      const p0 = [cx + sA.r * c0, cy + sA.r * s0, sA.z];
+      const p1 = [cx + sA.r * c1, cy + sA.r * s1, sA.z];
+      const q0 = [cx + sB.r * c0, cy + sB.r * s0, sB.z];
+      const q1 = [cx + sB.r * c1, cy + sB.r * s1, sB.z];
+      pushTri(out, p0, p1, q1);
+      pushTri(out, p0, q1, q0);
+    }
+    pushTri(out, top, [cx + last.r * c0, cy + last.r * s0, last.z], [cx + last.r * c1, cy + last.r * s1, last.z]);
   }
 }
 
@@ -271,9 +305,9 @@ function appendBeam(out: number[], ax: number, ay: number, bx: number, by: numbe
     pushTri(out, p[a], p[b], p[c]);
     pushTri(out, p[a], p[c], p[d]);
   };
-  face(0, 3, 2, 1); face(4, 5, 6, 7);
-  face(0, 1, 5, 4); face(2, 3, 7, 6);
-  face(1, 2, 6, 5); face(3, 0, 4, 7);
+  face(0, 1, 2, 3); face(4, 7, 6, 5);
+  face(0, 4, 5, 1); face(2, 6, 7, 3);
+  face(1, 5, 6, 2); face(3, 7, 4, 0);
 }
 
 /**
@@ -430,7 +464,7 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
     part[i + 2] = sceneTris[i + 2] * 1000 - mnZ;
   }
 
-  const partVolumeMm3 = triSoupVolume(part);
+  const partVolumeMm3 = triSoupVolume(part, solidIds);
   const castWeightG = (partVolumeMm3 / 1000) * metal.densityGcm3;
 
   // --- Draw check: will the pattern pull out of the sand? -------------------
@@ -726,23 +760,38 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
     const step = Math.max(res, 0.5);
     const maxT = Math.hypot(bounds2d.maxX - bounds2d.minX, bounds2d.maxY - bounds2d.minY);
     let exit = 0;
+    let edgeTop = parting + runnerH / grow;
+    let edgeBot = parting;
     for (let t = 0; t <= maxT; t += step) {
       const x = from.x + ux * t, y = from.y + uy * t;
       const i = Math.round(((x - bounds2d.minX) * (cols - 1)) / (bounds2d.maxX - bounds2d.minX));
       const j = Math.round(((y - bounds2d.minY) * (rows - 1)) / (bounds2d.maxY - bounds2d.minY));
       if (i < 0 || j < 0 || i >= cols || j >= rows) break;
-      if (hit[j * cols + i] && thickness[j * cols + i] > 0) exit = t;
+      const k = j * cols + i;
+      if (hit[k] && thickness[k] > 0) {
+        exit = t;
+        edgeTop = top[k];
+        edgeBot = bottom[k];
+      }
     }
-    return { x: from.x + ux * (exit + clearance), y: from.y + uy * (exit + clearance) };
+    return {
+      stand: { x: from.x + ux * (exit + clearance), y: from.y + uy * (exit + clearance) },
+      edge: { x: from.x + ux * exit, y: from.y + uy * exit },
+      exit,
+      edgeTop,
+      edgeBot,
+    };
   };
 
   // Out along the gate-to-riser line, each away from the other, so the rig lies
   // along the length of the casting instead of across whichever axis is X.
   let awayX = gatePt.x - riserPt.x, awayY = gatePt.y - riserPt.y;
   if (Math.hypot(awayX, awayY) < 1e-6) { awayX = 1; awayY = 0; }
-  const sprueAt = standOff(gatePt, awayX, awayY, gap + sprueDia / 2);
-  const gateAtPart = gatePt;
-  const riserStandAt = standOff(riserPt, -awayX, -awayY, gap + riserDia / 2);
+  const sprueStand = standOff(gatePt, awayX, awayY, gap + sprueDia / 2);
+  const sprueAt = sprueStand.stand;
+  const gateAtPart = sprueStand.edge;
+  const riserStand = standOff(riserPt, -awayX, -awayY, gap + riserDia / 2);
+  const riserStandAt = riserStand.stand;
 
   // The plane in pattern coordinates: `parting` is measured on the part, and
   // everything printed has been grown away from it by the shrink allowance.
@@ -767,33 +816,43 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
     appendCylinder(pat, sprueG.x, sprueG.y, 0, sprueTop, sprueDia / 2);
     gatingVolumeMm3 += (Math.PI * sprueDia * sprueDia * sprueTop) / 4;
     rigTopZ = Math.max(rigTopZ, sprueTop);
-    // Runner along the parting plane, from the sprue to the gate — which is on
-    // metal, because it was chosen from the columns the plane cuts.
+    // Runner along the parting plane, from the sprue to the gate — with a short
+    // overlap bite into the rim of the part so it fuses cleanly without an
+    // internal coplanar seam at the outer edge.
     const runLen = Math.hypot(sprueG.x - gateG.x, sprueG.y - gateG.y);
-    appendBeam(pat, gateG.x, gateG.y, sprueG.x, sprueG.y, runnerH, partingZ, partingZ + runnerH);
-    gatingVolumeMm3 += runLen * runnerH * runnerH;
-    // A short gate stub, thinner than the runner so it freezes first and the
-    // runner cannot suck back out of the casting, reaching into the metal.
     const backX = (gateG.x - sprueG.x) / (runLen || 1), backY = (gateG.y - sprueG.y) / (runLen || 1);
-    appendBeam(pat, gateG.x, gateG.y, gateG.x + backX * gateLen, gateG.y + backY * gateLen, runnerH, partingZ, partingZ + runnerH * 0.7);
-    gatingVolumeMm3 += gateLen * runnerH * runnerH * 0.7;
+    const gateBite = Math.min(gateLen, Math.max(1.5, sprueStand.exit * grow * 0.35));
+    const gateEndX = gateG.x + backX * gateBite, gateEndY = gateG.y + backY * gateBite;
+    const partCopeAtGate = Math.max(0, (sprueStand.edgeTop - parting) * grow);
+    const partDragAtGate = Math.max(0, (parting - sprueStand.edgeBot) * grow);
+    const gateRunH = Math.min(runnerH, Math.max(1.5, partCopeAtGate + partDragAtGate));
+    const gateZ0 = partCopeAtGate >= gateRunH ? partingZ : Math.max(0, partingZ + partCopeAtGate - gateRunH);
+    appendBeam(pat, gateEndX, gateEndY, sprueG.x, sprueG.y, runnerH, gateZ0, gateZ0 + gateRunH);
+    gatingVolumeMm3 += (runLen + gateBite) * runnerH * gateRunH;
     if (riserWanted) {
       // Riser on the far side: a side feeder standing on the parting plane and
-      // joined to the casting by a neck along it, 1.5 diameters tall rather
+      // joined to the casting's rim by a neck along it, 1.5 diameters tall rather
       // than as tall as the part happens to be. Feeding is a question of
       // modulus, not of height — a column taller than this has frozen at the
       // top before its metal is called for.
       const riserG = { x: riserStandAt.x * grow, y: riserStandAt.y * grow };
-      const neckG = { x: riserPt.x * grow, y: riserPt.y * grow };
+      const riserEdgeG = { x: riserStand.edge.x * grow, y: riserStand.edge.y * grow };
       // It too stands on the bed, for the same reason as the sprue; its
       // working height is still measured from the plane.
       const riserH = riserDia * 1.5;
       appendCylinder(pat, riserG.x, riserG.y, 0, partingZ + riserH, riserDia / 2);
       gatingVolumeMm3 += (Math.PI * riserDia * riserDia * (partingZ + riserH)) / 4;
       rigTopZ = Math.max(rigTopZ, partingZ + riserH);
-      const neckLen = Math.hypot(neckG.x - riserG.x, neckG.y - riserG.y);
-      appendBeam(pat, riserG.x, riserG.y, neckG.x, neckG.y, runnerH, partingZ, partingZ + runnerH);
-      gatingVolumeMm3 += neckLen * runnerH * runnerH;
+      const neckSpan = Math.hypot(riserEdgeG.x - riserG.x, riserEdgeG.y - riserG.y);
+      const inX = (riserEdgeG.x - riserG.x) / (neckSpan || 1), inY = (riserEdgeG.y - riserG.y) / (neckSpan || 1);
+      const neckBite = Math.min(gateLen, Math.max(1.5, riserStand.exit * grow * 0.35));
+      const neckEndX = riserEdgeG.x + inX * neckBite, neckEndY = riserEdgeG.y + inY * neckBite;
+      const partCopeAtRiser = Math.max(0, (riserStand.edgeTop - parting) * grow);
+      const partDragAtRiser = Math.max(0, (parting - riserStand.edgeBot) * grow);
+      const neckRunH = Math.min(runnerH, Math.max(1.5, partCopeAtRiser + partDragAtRiser));
+      const neckZ0 = partCopeAtRiser >= neckRunH ? partingZ : Math.max(0, partingZ + partCopeAtRiser - neckRunH);
+      appendBeam(pat, riserG.x, riserG.y, neckEndX, neckEndY, runnerH, neckZ0, neckZ0 + neckRunH);
+      gatingVolumeMm3 += (neckSpan + neckBite) * runnerH * neckRunH;
     }
   } else if (opts.addGating && lostPla) {
     // Burnout gating is a different shape of thing, because nothing rams it and
@@ -835,20 +894,58 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
         if (score > bestScore) { bestScore = score; attX = x; attY = y; attTop = top[k]; }
       }
     }
+    // Helper: find the lowest top and highest bottom within a footprint radius
+    // (in part coords) so a sprue or vent embeds below any embossed relief valleys
+    // rather than balancing on the tip of a relief peak, without punching through
+    // the back of a thin part.
+    const footprintZ = (cxPart: number, cyPart: number, rPart: number, fallbackTop: number) => {
+      let minTop = fallbackTop;
+      let maxBot = 0;
+      const rSearch = Math.max(rPart, res * 1.5);
+      for (let j = 0; j < rows; j++) {
+        const y = bounds2d.minY + (j * (bounds2d.maxY - bounds2d.minY)) / (rows - 1);
+        if (Math.abs(y - cyPart) > rSearch) continue;
+        for (let i = 0; i < cols; i++) {
+          const x = bounds2d.minX + (i * (bounds2d.maxX - bounds2d.minX)) / (cols - 1);
+          if (Math.hypot(x - cxPart, y - cyPart) > rSearch) continue;
+          const k = j * cols + i;
+          if (!hit[k] || thickness[k] <= 0) continue;
+          if (top[k] < minTop) minTop = top[k];
+          if (bottom[k] > maxBot) maxBot = bottom[k];
+        }
+      }
+      return { minTop: minTop * grow, maxTop: fallbackTop * grow, maxBot: maxBot * grow };
+    };
     gateAt.x = attX * grow; gateAt.y = attY * grow;
-    const sprueZ0 = Math.max(0, attTop * grow - 2); // buried 2 mm, so it fuses
+    const sprueFp = footprintZ(attX, attY, sprueR / grow, attTop);
+    const sprueZ0 = Math.max(sprueFp.maxBot + 0.8, Math.min(sprueFp.minTop - 1.5, sprueFp.maxTop - 2));
     // The cup has to finish above everything, not just above whatever the sprue
     // happens to stand on: it is the top of the flask and the thing the metal
     // is poured into. A sprue rooted on a low heavy section still rises clear
     // of the tallest part of the pattern first.
     const sprueZ1 = Math.max(attTop * grow, gPartH) + Math.max(12, sprueDia * 2);
-    appendCylinder(pat, attX * grow, attY * grow, sprueZ0, sprueZ1, sprueR);
-    gatingVolumeMm3 += Math.PI * sprueR * sprueR * Math.max(0, sprueZ1 - sprueZ0);
-    // Pouring cup: a cone opening out to three sprue diameters, deep enough to
-    // hold a head of metal over the sprue rather than just catch the stream.
+    // Flared base fillet where the sprue meets the pattern so it cannot snap off
+    // along a single horizontal layer line when pried from the build plate,
+    // and pouring cup cone opening out to three sprue diameters at the top —
+    // emitted as one continuous revolution surface with no internal diaphragms.
+    const sprueFilletZ1 = Math.min(sprueZ1, sprueFp.maxTop + Math.min(2.5, sprueR * 0.6));
     const cupH = Math.max(8, sprueDia * 1.6);
     const cupR = Math.max(sprueR * 3, 9);
-    appendCone(pat, attX * grow, attY * grow, sprueZ1, sprueZ1 + cupH, sprueR, cupR);
+    const sprueStops: Array<{ z: number; r: number }> =
+      sprueFilletZ1 > sprueZ0 + 0.5
+        ? [
+            { z: sprueZ0, r: sprueR * 1.35 },
+            { z: sprueFilletZ1, r: sprueR },
+            ...(sprueZ1 > sprueFilletZ1 + 1e-6 ? [{ z: sprueZ1, r: sprueR }] : []),
+            { z: sprueZ1 + cupH, r: cupR },
+          ]
+        : [
+            { z: sprueZ0, r: sprueR },
+            { z: sprueZ1, r: sprueR },
+            { z: sprueZ1 + cupH, r: cupR },
+          ];
+    appendRevolutionStack(pat, attX * grow, attY * grow, sprueStops, 24);
+    gatingVolumeMm3 += Math.PI * sprueR * sprueR * Math.max(0, sprueZ1 - sprueZ0);
     gatingVolumeMm3 += (Math.PI * cupH * (sprueR * sprueR + sprueR * cupR + cupR * cupR)) / 3;
     rigTopZ = Math.max(rigTopZ, sprueZ1 + cupH);
     // Vents, from the high points furthest from the sprue, up to the cup rim.
@@ -856,22 +953,38 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
     const minVentSpacing = Math.max(8, span * 0.25 * grow);
     // Vents still come off the high points — that is where the air collects,
     // whatever the sprue is doing.
-    const vents: { x: number; y: number; z: number }[] = [];
+    const vents: { x: number; y: number; z: number; xPart: number; yPart: number; topPart: number }[] = [];
     const ordered: number[] = [];
     for (let k = 0; k < hit.length; k++) if (hit[k]) ordered.push(k);
     ordered.sort((a, b) => top[b] - top[a]);
     for (const k of ordered) {
       if (vents.length >= 2) break;
       const i = k % cols, j = Math.floor(k / cols);
-      const x = (bounds2d.minX + (i * (bounds2d.maxX - bounds2d.minX)) / (cols - 1)) * grow;
-      const y = (bounds2d.minY + (j * (bounds2d.maxY - bounds2d.minY)) / (rows - 1)) * grow;
+      const xPart = bounds2d.minX + (i * (bounds2d.maxX - bounds2d.minX)) / (cols - 1);
+      const yPart = bounds2d.minY + (j * (bounds2d.maxY - bounds2d.minY)) / (rows - 1);
+      const x = xPart * grow;
+      const y = yPart * grow;
       if (Math.hypot(x - attX * grow, y - attY * grow) < minVentSpacing) continue;
       if (vents.some((v) => Math.hypot(x - v.x, y - v.y) < minVentSpacing)) continue;
-      vents.push({ x, y, z: top[k] * grow });
+      vents.push({ x, y, z: top[k] * grow, xPart, yPart, topPart: top[k] });
     }
+    const ventR = ventDia / 2;
     for (const v of vents) {
-      const z0 = Math.max(0, v.z - 1.5);
-      appendCylinder(pat, v.x, v.y, z0, rigTopZ, ventDia / 2, 16);
+      const vFp = footprintZ(v.xPart, v.yPart, ventR / grow, v.topPart);
+      const z0 = Math.max(vFp.maxBot + 0.8, Math.min(vFp.minTop - 1.2, vFp.maxTop - 1.5));
+      const ventFilletZ1 = Math.min(rigTopZ, vFp.maxTop + Math.min(2.0, ventR * 0.9));
+      const ventStops: Array<{ z: number; r: number }> =
+        ventFilletZ1 > z0 + 0.4
+          ? [
+              { z: z0, r: ventR * 1.5 },
+              { z: ventFilletZ1, r: ventR },
+              ...(rigTopZ > ventFilletZ1 + 1e-6 ? [{ z: rigTopZ, r: ventR }] : []),
+            ]
+          : [
+              { z: z0, r: ventR },
+              { z: rigTopZ, r: ventR },
+            ];
+      appendRevolutionStack(pat, v.x, v.y, ventStops, 16);
       gatingVolumeMm3 += (Math.PI * ventDia * ventDia * Math.max(0, rigTopZ - z0)) / 4;
     }
     if (vents.length === 0) {

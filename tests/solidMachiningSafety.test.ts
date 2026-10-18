@@ -114,6 +114,25 @@ describe('Registration pins', () => {
     }
     expect(res.warnings.join('\n')).toMatch(/pin/i);
   });
+
+  it('clamps helical pin bore feedrate so vertical descent never exceeds plungeRate', () => {
+    const res = generateSolidMachining(block, {
+      ...quick,
+      sides: 2,
+      pinDiaMm: 8.0, // r = (8.0 - 6.35) / 2 = 0.825 mm >= PECK_BELOW_MM (0.5 mm)
+      plungeRate: 120,
+      roughingFeedrate: 2000,
+    });
+    expect(res.success, res.error).toBe(true);
+    const start = res.sides[0].gcode.indexOf('OP 0: registration pins');
+    const end = res.sides[0].gcode.indexOf('back over the origin before the part');
+    const helixFeeds = [...res.sides[0].gcode.slice(start, end).matchAll(/G1 X[\d.-]+ Y[\d.-]+ Z(-?[\d.]+) F(\d+)/g)]
+      .map((m) => Number(m[2]));
+    expect(helixFeeds.length).toBeGreaterThan(0);
+    for (const f of helixFeeds) {
+      expect(f).toBeLessThan(2000);
+    }
+  });
 });
 
 describe('Holding tabs', () => {

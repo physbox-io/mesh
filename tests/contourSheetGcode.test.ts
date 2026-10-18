@@ -199,4 +199,31 @@ describe('contour stack kerf', () => {
     expect(span(layer.loops[0])).toBeCloseTo(100, 2);
     expect(span(layer.loops[1])).toBeCloseTo(3, 1);
   });
+
+  it('retracts to safeZ in faceLayerLines when hopping across an unfaced gap even if hop <= bitDiameterMm', () => {
+    const rect = (x0: number, y0: number, x1: number, y1: number) => [
+      { x: x0, y: y0 }, { x: x1, y: y0 }, { x: x1, y: y1 }, { x: x0, y: y1 },
+    ];
+    // Two separate islands whose compensated facing rings sit ~4 mm apart (< 6 mm bit diameter)
+    // with an unfaced gap between them at x = 23..27.
+    const twoIslands = {
+      success: true,
+      sheetCount: 1,
+      layers: [{
+        index: 0, z: 0, pieceCount: 2, areaMm2: 800, facedToMm: 7,
+        loops: [rect(0, 0, 20, 20), rect(30, 0, 50, 20)],
+      }],
+    } as unknown as Parameters<typeof generateContourSliceGcode>[0];
+    const g = generateContourSliceGcode(twoIslands, {
+      ...DEFAULT_GCODE_OPTIONS,
+      machineMode: 'cnc',
+      cutDepthZ: 10,
+      zStepdown: 3,
+      bitDiameterMm: 6,
+      attachmentsEnabled: false,
+    });
+    const facePart = g.gcode.slice(g.gcode.indexOf('--- Facing'), g.gcode.indexOf('; Pass 1/'));
+    // Must retract to safeZ at least twice per pass (once for each island), never plowing across the gap at cutting Z.
+    expect((facePart.match(/^G0 X/gm) || []).length).toBeGreaterThanOrEqual(2);
+  });
 });

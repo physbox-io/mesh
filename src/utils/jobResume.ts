@@ -108,10 +108,47 @@ function hasCode(code: string, letter: 'G' | 'M', n: number): boolean {
   return re.test(code);
 }
 
+/** Strips `;` and `(...)` comments from a G-code line. */
+function stripComments(line: string): string {
+  const semi = line.indexOf(';');
+  const body = semi < 0 ? line : line.slice(0, semi);
+  return body.replace(/\([^)]*\)/g, ' ').trim();
+}
+
+/** Whether a line moves in machine coordinates or redefines the work frame. */
+function isNonWorkCoordinateLine(code: string): boolean {
+  return (
+    hasCode(code, 'G', 53) ||
+    hasCode(code, 'G', 10) ||
+    hasCode(code, 'G', 28) ||
+    hasCode(code, 'G', 30) ||
+    hasCode(code, 'G', 92)
+  );
+}
+
 /** Whether a line moves the tool: a motion code, or an axis word under the modal one. */
-function isMotionLine(code: string): boolean {
-  return hasCode(code, 'G', 0) || hasCode(code, 'G', 1) || hasCode(code, 'G', 2) || hasCode(code, 'G', 3)
-    || word(code, 'X') !== null || word(code, 'Y') !== null || word(code, 'Z') !== null;
+function isMotionLine(raw: string): boolean {
+  const code = stripComments(raw);
+  if (!code || isNonWorkCoordinateLine(code) || hasCode(code, 'G', 4)) return false;
+  return (
+    hasCode(code, 'G', 0) ||
+    hasCode(code, 'G', 1) ||
+    hasCode(code, 'G', 2) ||
+    hasCode(code, 'G', 3) ||
+    word(code, 'X') !== null ||
+    word(code, 'Y') !== null ||
+    word(code, 'Z') !== null
+  );
+}
+
+function isToolChangeLine(raw: string): boolean {
+  return /\bM0*6\b/i.test(stripComments(raw));
+}
+
+function isCutLine(raw: string): boolean {
+  const code = stripComments(raw);
+  if (!code || isNonWorkCoordinateLine(code)) return false;
+  return hasCode(code, 'G', 1) || hasCode(code, 'G', 2) || hasCode(code, 'G', 3);
 }
 
 /**
@@ -127,8 +164,11 @@ function spindleAtNextMove(state: ModalState, lines: string[], from: number): Mo
   return probe.spindle;
 }
 
-/** Advances `state` by a single stripped G-code line. */
-function stepModalLine(state: ModalState, code: string): void {
+/** Advances `state` by a single G-code line. */
+function stepModalLine(state: ModalState, raw: string): void {
+  const code = stripComments(raw);
+  if (!code) return;
+
   if (hasCode(code, 'G', 20)) state.units = 'G20';
   if (hasCode(code, 'G', 21)) state.units = 'G21';
   if (hasCode(code, 'G', 90)) state.distance = 'G90';
@@ -162,11 +202,12 @@ function stepModalLine(state: ModalState, code: string): void {
     state.spindle = { ...state.spindle, rpm: s };
   }
 
-  // Only motion words move the tool. A bare `S1000` or `M5` does not.
-  const x = word(code, 'X');
-  const y = word(code, 'Y');
-  const z = word(code, 'Z');
-  if (isMotionLine(code)) {
+  // Only work-coordinate motion words move the tool. A bare `S1000`, `M5`, or
+  // `G53`/`G10`/`G28`/`G30`/`G92` does not update work position.
+  if (!isNonWorkCoordinateLine(code) && isMotionLine(code)) {
+    const x = word(code, 'X');
+    const y = word(code, 'Y');
+    const z = word(code, 'Z');
     const apply = (prev: number | null, next: number | null): number | null => {
       if (next === null) return prev;
       if (state.distance === 'G91') return (prev ?? 0) + next;
@@ -197,8 +238,14 @@ export function scanModalState(lines: string[], upTo: number): ModalState {
   const limit = Math.max(0, Math.min(upTo, lines.length));
 
   // The retract height comes from the whole program, not just the part that ran.
+  let scanDist: 'G90' | 'G91' = 'G90';
   for (const raw of lines) {
-    const z = word(raw, 'Z');
+    const code = stripComments(raw);
+    if (!code) continue;
+    if (hasCode(code, 'G', 90)) scanDist = 'G90';
+    if (hasCode(code, 'G', 91)) scanDist = 'G91';
+    if (scanDist === 'G91' || isNonWorkCoordinateLine(code)) continue;
+    const z = word(code, 'Z');
     if (z !== null && (state.safeZ === null || z > state.safeZ)) state.safeZ = z;
   }
 
@@ -321,9 +368,13 @@ export function buildResumePreamble(
     }
 
     if (state.position.x !== null || state.position.y !== null) {
-      const x = state.position.x ?? 0;
-      const y = state.position.y ?? 0;
-      lines.push(`G0 X${num(x)} Y${num(y)} ; over the point it stopped at`);
+      const axes = [
+        state.position.x !== null ? `X${num(state.position.x)}` : null,
+        state.position.y !== null ? `Y${num(state.position.y)}` : null,
+      ]
+        .filter(Boolean)
+        .join(' ');
+      lines.push(`G0 ${axes} ; over the point it stopped at`);
     }
 
     if (state.position.z !== null && !arrivingAtPause) {
@@ -333,10 +384,14 @@ export function buildResumePreamble(
     }
   } else {
     if (state.position.x !== null || state.position.y !== null) {
-      const x = state.position.x ?? 0;
-      const y = state.position.y ?? 0;
+      const axes = [
+        state.position.x !== null ? `X${num(state.position.x)}` : null,
+        state.position.y !== null ? `Y${num(state.position.y)}` : null,
+      ]
+        .filter(Boolean)
+        .join(' ');
       // Beam still off — this traverse must not mark the work.
-      lines.push(`G0 X${num(x)} Y${num(y)} ; over the point it stopped at, beam off`);
+      lines.push(`G0 ${axes} ; over the point it stopped at, beam off`);
     }
     // Same as the router: a sheet swap's first act is `M5`, so a beam lit here
     // is a beam lit over the work while the operator reaches into it.
@@ -387,8 +442,49 @@ export function planResume(
 ): ResumePlan {
   const clamped = Math.max(0, Math.min(fromLine, lines.length));
   const state = scanModalState(lines, clamped);
-  const descends = !options?.arrivingAtPause && state.position.z !== null;
   const spindle = spindleAtNextMove(state, lines, clamped);
+
+  const onM6 = clamped < lines.length && isToolChangeLine(lines[clamped]);
+  const afterM6 = clamped > 0 && isToolChangeLine(lines[clamped - 1]);
+  if ((options?.arrivingAtPause && onM6) || afterM6) {
+    const lookStart = onM6 ? clamped + 1 : clamped;
+    let upcomingPositionsXY = false;
+    let upcomingStartsSpindle = false;
+    for (let i = lookStart; i < lines.length; i++) {
+      const code = stripComments(lines[i]);
+      if (!code) continue;
+      if (hasCode(code, 'M', 3) || hasCode(code, 'M', 4)) {
+        upcomingStartsSpindle = true;
+      }
+      if (isMotionLine(code)) {
+        if (
+          hasCode(code, 'G', 0) ||
+          (word(code, 'X') !== null && word(code, 'Y') !== null)
+        ) {
+          upcomingPositionsXY = true;
+        }
+        if (isCutLine(code)) break;
+      }
+    }
+    if (upcomingPositionsXY) {
+      const nextState: ModalState = {
+        ...state,
+        spindle: upcomingStartsSpindle ? null : spindle,
+        position: { x: null, y: null, z: null },
+      };
+      return {
+        preamble: buildResumePreamble(nextState, clamped, {
+          ...options,
+          arrivingAtPause: false,
+        }),
+        state,
+        fromLine: clamped,
+        descendsToZ: null,
+      };
+    }
+  }
+
+  const descends = !options?.arrivingAtPause && state.position.z !== null;
   return {
     preamble: buildResumePreamble({ ...state, spindle }, clamped, options),
     state,

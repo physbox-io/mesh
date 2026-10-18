@@ -66,5 +66,15 @@ describe('Relief Inversion (Cameo -> Intaglio)', () => {
     expect(Math.max(...invertedZs)).toBeLessThanOrEqual(0.01);
 
     expect(invertedResult.segments.length).toBeGreaterThan(0);
+
+    // Background corners outside the dome footprint stay uncut at Z = 0 when inverted
+    // so the surrounding stock forms the cavity walls around the intaglio impression.
+    for (const seg of invertedResult.segments) {
+      for (const p of seg.points) {
+        if ( p.z < -0.5) {
+          expect(Math.hypot(p.x - 60, p.y - 60)).toBeLessThan(60);
+        }
+      }
+    }
   });
 });

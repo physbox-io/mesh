@@ -383,6 +383,8 @@ function readProgram(lines: string[]) {
     let ti: number | null = null;
     let tj: number | null = null;
     let tr: number | null = null;
+    let tf: number | null = null;
+    let lineMotion: 0 | 1 | 2 | 3 | null | undefined = undefined;
     let spindleOn = false;
     // G4, G10, G28, G30, G53, G92: the axis words on these lines are not a
     // move in the current mode (an offset, a dwell, a homing waypoint).
@@ -394,8 +396,8 @@ function readProgram(lines: string[]) {
 
       switch (letter) {
         case 'G':
-          if (value === 0 || value === 1 || value === 2 || value === 3) motion = value as 0 | 1 | 2 | 3;
-          else if (value === 80 || (value >= 38 && value < 39)) motion = null;
+          if (value === 0 || value === 1 || value === 2 || value === 3) lineMotion = value as 0 | 1 | 2 | 3;
+          else if (value === 80 || (value >= 38 && value < 39)) lineMotion = null;
           else if (value === 90) absolute = true;
           else if (value === 91) absolute = false;
           else if (value === 17) xyPlane = true;
@@ -404,13 +406,13 @@ function readProgram(lines: string[]) {
           else if (value === 21) unitScale = 1;
           else if ([4, 10, 28, 30, 53, 92].includes(value)) nonModal = true;
           break;
-        case 'X': if (Number.isFinite(value)) tx = value * unitScale; break;
-        case 'Y': if (Number.isFinite(value)) ty = value * unitScale; break;
-        case 'Z': if (Number.isFinite(value)) tz = value * unitScale; break;
-        case 'I': if (Number.isFinite(value)) ti = value * unitScale; break;
-        case 'J': if (Number.isFinite(value)) tj = value * unitScale; break;
-        case 'R': if (Number.isFinite(value)) tr = value * unitScale; break;
-        case 'F': if (Number.isFinite(value) && value > 0) feed = value * unitScale; break;
+        case 'X': if (Number.isFinite(value)) tx = value; break;
+        case 'Y': if (Number.isFinite(value)) ty = value; break;
+        case 'Z': if (Number.isFinite(value)) tz = value; break;
+        case 'I': if (Number.isFinite(value)) ti = value; break;
+        case 'J': if (Number.isFinite(value)) tj = value; break;
+        case 'R': if (Number.isFinite(value)) tr = value; break;
+        case 'F': if (Number.isFinite(value) && value > 0) tf = value; break;
         case 'S': if (Number.isFinite(value)) lastS = value; break;
         case 'M':
           if (value === 0 || value === 1 || value === 6) operatorStops++;
@@ -421,6 +423,15 @@ function readProgram(lines: string[]) {
           break;
       }
     }
+
+    if (lineMotion !== undefined && !nonModal) motion = lineMotion;
+    if (tf !== null) feed = tf * unitScale;
+    if (tx !== null) tx *= unitScale;
+    if (ty !== null) ty *= unitScale;
+    if (tz !== null) tz *= unitScale;
+    if (ti !== null) ti *= unitScale;
+    if (tj !== null) tj *= unitScale;
+    if (tr !== null) tr *= unitScale;
 
     if (spindleOn && lastS !== null && lastS > 0 && !spindleSpeeds.includes(lastS)) {
       spindleSpeeds.push(lastS);

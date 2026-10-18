@@ -228,6 +228,76 @@ describe('Holding attachments', () => {
     const res = generateLaserCutGcode([tiny], { ...attached, machineMode: 'laser', attachmentWidthMm: 6 });
     expect(res.attachmentCount).toBe(0);
   });
+
+  it('widens CNC attachment flats by the bit diameter so the uncut bridge matches attachmentWidthMm', () => {
+    const res = generateLaserCutGcode([squarePanel()], {
+      ...attached,
+      machineMode: 'cnc',
+      bitDiameterMm: 6,
+      attachmentWidthMm: 4,
+      attachmentSpacingMm: 200,
+      attachmentHeightMm: 1.0,
+      cutDepthZ: 3.0,
+      zStepdown: 3.0,
+    });
+    // Flat top is at Z = -2.000; each flat move travels 4 + 6 = 10 mm along the path
+    // so after subtracting the 3 mm cutter radius on each side, 4 mm of uncut bridge remains.
+    const moves = [...res.gcode.matchAll(/G1 X([-\d.]+) Y([-\d.]+)(?: Z([-\d.]+))?/g)];
+    let curZ = -3;
+    const flatLengths: number[] = [];
+    for (let i = 1; i < moves.length; i++) {
+      const z = moves[i][3] !== undefined ? +moves[i][3] : curZ;
+      if (Math.abs(curZ - -2) < 1e-3 && Math.abs(z - -2) < 1e-3) {
+        flatLengths.push(Math.hypot(+moves[i][1] - +moves[i - 1][1], +moves[i][2] - +moves[i - 1][2]));
+      }
+      curZ = z;
+    }
+    expect(flatLengths.length).toBeGreaterThan(0);
+    for (const len of flatLengths) {
+      expect(len).toBeCloseTo(10, 2);
+    }
+  });
+
+  it('never emits zero-length G1 moves at laser attachment boundaries', () => {
+    const res = generateLaserCutGcode([squarePanel()], { ...attached, machineMode: 'laser' });
+    const pts = [...res.gcode.matchAll(/^G[01] X([-\d.]+) Y([-\d.]+)(.*)$/gm)].map((m) => ({
+      x: +m[1],
+      y: +m[2],
+      rest: m[3],
+    }));
+    for (let i = 1; i < pts.length; i++) {
+      if (pts[i].rest.includes('S0') || pts[i].rest.includes('S10000')) {
+        expect(Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y)).toBeGreaterThan(1e-3);
+      }
+    }
+  });
+
+  it('limits the 3D feedrate on CNC attachment exit ramps so vertical descent never exceeds plungeFeedrate', () => {
+    const res = generateLaserCutGcode([squarePanel()], {
+      ...attached,
+      machineMode: 'cnc',
+      cutFeedrate: 2400,
+      plungeFeedrate: 200,
+      cutDepthZ: 3.0,
+      zStepdown: 3.0,
+      attachmentWidthMm: 2.0,
+      attachmentHeightMm: 2.0,
+    });
+    let prevX = 0, prevY = 0, prevZ = -3, curFeed = 2400;
+    for (const line of res.gcode.split('\n')) {
+      const m = /^G1 X([-\d.]+) Y([-\d.]+)(?: Z([-\d.]+))?(?: F([\d.]+))?/.exec(line);
+      if (!m) continue;
+      const x = +m[1], y = +m[2], z = m[3] !== undefined ? +m[3] : prevZ;
+      if (m[4] !== undefined) curFeed = +m[4];
+      if (z < prevZ - 1e-6) {
+        const dz = prevZ - z;
+        const ds = Math.hypot(x - prevX, y - prevY, dz);
+        const vz = curFeed * (dz / ds);
+        expect(vz).toBeLessThanOrEqual(200 + 1);
+      }
+      prevX = x; prevY = y; prevZ = z;
+    }
+  });
 });
 
 describe('Multi-sheet jobs', () => {

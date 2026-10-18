@@ -9,6 +9,7 @@ import type { GeomThreadSpec } from '../utils/metricThreads';
 import { hardwareCutGeoms, hardwareSpecOf, nextHardwareGroup, type HardwareCutSpec } from '../utils/hardwareCuts';
 import type { DataMirror, ModelMirror } from '../types/sceneLayer';
 import { type CombineOp, cageInFrame, geomsForCombine, nodeWorldMatrix } from '../utils/combineBodies';
+import { getGeomFrame } from '../utils/laserCutExporter';
 import { DEFAULT_BRUSH, toSceneGeom, type BrushSettings, type SculptMesh } from '../utils/sculptMesh';
 import { buildSculptBase, DEFAULT_SCULPT_BASE, type SculptBaseId } from '../utils/sculptBases';
 import {
@@ -5005,11 +5006,64 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     // the face again on the new surface, or say it has gone.
     const oldVisual = (node.geoms || []).filter((g: SceneGeom) => g.csgDerived === 'visual' && (g.textures?.length || g.faceSplits?.length));
     const newVisual = result.geoms.filter((g: SceneGeom) => g.csgDerived === 'visual');
+    const oldCentroid = node.csgCentroid ?? [0, 0, 0];
+    const newCentroid = result.centroid ?? [0, 0, 0];
+    const transformMarks = (
+      textures: SceneGeom['textures'],
+      faceSplits: SceneGeom['faceSplits'],
+      mat: THREE.Matrix4 | null,
+      shift: [number, number, number],
+    ): { textures?: SceneGeom['textures']; faceSplits?: SceneGeom['faceSplits'] } => {
+      const pt = (p: [number, number, number]): [number, number, number] => {
+        const v = new THREE.Vector3(p[0], p[1], p[2]);
+        if (mat) v.applyMatrix4(mat);
+        return [v.x + shift[0], v.y + shift[1], v.z + shift[2]];
+      };
+      const dir = (n: [number, number, number]): [number, number, number] => {
+        if (!mat) return n;
+        const v = new THREE.Vector3(n[0], n[1], n[2]).transformDirection(mat);
+        return [v.x, v.y, v.z];
+      };
+      return {
+        textures: textures?.map((t) => ({
+          ...t,
+          seedAt: pt(t.seedAt),
+          seedNormal: t.seedNormal ? dir(t.seedNormal) : t.seedNormal,
+        })),
+        faceSplits: faceSplits?.map((s) =>
+          s.kind === 'plane'
+            ? { ...s, at: pt(s.at), normal: dir(s.normal) }
+            : { ...s, seeds: s.seeds.map(pt) },
+        ),
+      };
+    };
     const geoms = result.geoms.map((g: SceneGeom) => {
-      if (g.csgDerived !== 'visual' || !oldVisual.length) return g;
-      const from = oldVisual.find((o: SceneGeom) => o.name === g.name)
-        ?? (oldVisual.length === 1 && newVisual.length === 1 ? oldVisual[0] : undefined);
-      return from ? { ...g, textures: from.textures, faceSplits: from.faceSplits } : g;
+      if (g.csgDerived !== 'visual') return g;
+      if (oldVisual.length > 0) {
+        const from = oldVisual.find((o: SceneGeom) => o.name === g.name)
+          ?? (oldVisual.length === 1 && newVisual.length === 1 ? oldVisual[0] : undefined);
+        if (!from) return g;
+        const shift: [number, number, number] = [oldCentroid[0] - newCentroid[0], oldCentroid[1] - newCentroid[1], 0];
+        return { ...g, ...transformMarks(from.textures, from.faceSplits, null, shift) };
+      }
+      if (newVisual.length !== 1) return g;
+      const markedSources = source.filter(
+        (s: SceneGeom) => s.csg !== 'difference' && s.role !== 'visual' && (s.textures?.length || s.faceSplits?.length),
+      );
+      if (markedSources.length === 0) return g;
+      const shift: [number, number, number] = [-newCentroid[0], -newCentroid[1], 0];
+      const carriedTextures: NonNullable<SceneGeom['textures']> = [];
+      const carriedSplits: NonNullable<SceneGeom['faceSplits']> = [];
+      for (const s of markedSources) {
+        const m = transformMarks(s.textures, s.faceSplits, getGeomFrame(s).matrix, shift);
+        if (m.textures?.length) carriedTextures.push(...m.textures);
+        if (m.faceSplits?.length) carriedSplits.push(...m.faceSplits);
+      }
+      return {
+        ...g,
+        ...(carriedTextures.length ? { textures: carriedTextures } : {}),
+        ...(carriedSplits.length ? { faceSplits: carriedSplits } : {}),
+      };
     });
     node.geoms = [...source, ...geoms];
     node.csgHash = result.hash;

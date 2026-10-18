@@ -260,12 +260,12 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
 
   const handleFrameTrace = async () => {
     if (!result?.success) return;
-    await webSerialManager.frameJob(result.partBounds, 0, { laserMode: false, safeZMm: options.safeZ });
+    await webSerialManager.frameJob(result.bounds, 0, { laserMode: false, safeZMm: options.safeZ });
   };
 
   const handleProbeBed = () => {
     if (!result?.success) return;
-    void bed.probe(result.partBounds);
+    void bed.probe(result.bounds);
   };
 
   /*

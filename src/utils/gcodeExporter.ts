@@ -289,9 +289,15 @@ interface AttachmentSpan {
  */
 function planAttachments(perimeterMm: number, options: GcodeExportOptions): AttachmentSpan[] {
   if (!options.attachmentsEnabled) return [];
-  const width = Math.max(0.1, options.attachmentWidthMm);
+  const baseWidth = Math.max(0.1, options.attachmentWidthMm);
+  // On a router the cutter's centre stops a full radius inside either end of the
+  // flat span, so the flat has to be a bit-diameter wider to leave the asked-for
+  // bridge of stock behind.
+  const width = options.machineMode === 'cnc'
+    ? baseWidth + Math.max(0, options.bitDiameterMm)
+    : baseWidth;
   const ramp = options.machineMode === 'cnc'
-    ? Math.max(0, Math.min(width, options.attachmentHeightMm))
+    ? Math.max(0.5, options.attachmentHeightMm)
     : 0;
   const span = width + 2 * ramp;
   const spacing = Math.max(span, options.attachmentSpacingMm);
@@ -334,9 +340,9 @@ function resampleLoop(loop: Point2D[], spans: AttachmentSpan[]): LoopPoint[] {
     const b = loop[(i + 1) % loop.length];
     const len = Math.hypot(b.x - a.x, b.y - a.y);
     const end = s + len;
-    while (next < cuts.length && cuts[next] < end) {
+    while (next < cuts.length && cuts[next] < end - 1e-6) {
       const cut = cuts[next++];
-      if (cut <= s || len <= 1e-9) continue; // already past it, or a zero-length edge
+      if (cut <= out[out.length - 1].s + 1e-6 || len <= 1e-9) continue; // already past it, or a zero-length edge
       const t = (cut - s) / len;
       out.push({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, s: cut });
     }
@@ -348,7 +354,7 @@ function resampleLoop(loop: Point2D[], spans: AttachmentSpan[]): LoopPoint[] {
 
 /** Whether an arc-length position falls in the uncut middle of an attachment. */
 function inFlat(s: number, spans: AttachmentSpan[]): boolean {
-  for (const sp of spans) if (s > sp.flatStart - 1e-6 && s < sp.flatEnd + 1e-6) return true;
+  for (const sp of spans) if (s > sp.flatStart + 1e-6 && s < sp.flatEnd - 1e-6) return true;
   return false;
 }
 
@@ -390,7 +396,7 @@ function facingLines(
   removalMm: number,
   options: GcodeExportOptions,
   f: (n: number) => string
-): { lines: string[]; distanceMm: number } {
+): { lines: string[]; distanceMm: number; lastPoint: Point2D } {
   const lines: string[] = [];
   const pos = panel.placedPos2D || { x: 0, y: 0 };
   const bit = Math.max(1, options.facingBitDiameterMm);
@@ -399,14 +405,16 @@ function facingLines(
   const perPass = Math.max(0.1, options.facingDepthPerPassMm);
 
   // The bit's centre has to start and finish a radius outside the footprint, or
-  // the edges of the panel keep a lip of full-thickness stock.
-  const x0 = pos.x - r;
+  // the edges of the panel keep a lip of full-thickness stock; clamped at 0 so a
+  // panel nested near the origin never sends a wide surfacing bit past X0/Y0.
+  const x0 = Math.max(0, pos.x - r);
   const x1 = pos.x + (panel.width2D || 0) + r;
-  const y0 = pos.y - r;
+  const y0 = Math.max(0, pos.y - r);
   const y1 = pos.y + (panel.height2D || 0) + r;
 
   const passes = Math.ceil(removalMm / perPass);
   let distanceMm = 0;
+  let lastPoint: Point2D = { x: x0, y: y0 };
 
   for (let p = 1; p <= passes; p++) {
     const z = -Math.min(removalMm, p * perPass);
@@ -432,12 +440,13 @@ function facingLines(
       }
       lines.push(`G1 X${f(to)} Y${f(yy)} F${Math.round(options.cutFeedrate)}`);
       distanceMm += Math.abs(to - from);
+      lastPoint = { x: to, y: yy };
       forward = !forward;
     }
     lines.push(`G0 Z${f(options.safeZ)}`);
   }
 
-  return { lines, distanceMm };
+  return { lines, distanceMm, lastPoint };
 }
 
 export function generateLaserCutGcode(
@@ -633,6 +642,7 @@ export function generateLaserCutGcode(
         const faced = facingLines(panel, removal, options, f);
         lines.push(...faced.lines);
         totalCutDistanceMm += faced.distanceMm;
+        head = faced.lastPoint;
       }
     }
 
@@ -650,16 +660,16 @@ export function generateLaserCutGcode(
 
       if (radius > 0) {
         const comp = offsetRegion(panel.outerPolygon2D, holePaths, radius);
-        outerPaths = comp.outer;
-        holePaths = comp.holes;
 
         for (const i of comp.droppedHoles) {
-          const dropped = panel.innerCutouts2D[i];
+          const dropped = holePaths[i];
           warnings.push(
             `${panel.name}: a cutout ${f(featureWidth(dropped))}mm across is narrower than the ` +
               `${f(options.bitDiameterMm)}mm cutter and has been left out of the program.`
           );
         }
+        outerPaths = comp.outer;
+        holePaths = comp.holes;
         if (panel.outerPolygon2D.length >= 3 && outerPaths.length === 0) {
           warnings.push(
             `${panel.name}: the whole panel is narrower than the ${f(options.bitDiameterMm)}mm ` +
@@ -992,13 +1002,20 @@ function generateLoopGcode(
       // Only passes that reach below the attachment tops have to ride over them;
       // shallower ones are still cutting stock the attachment keeps anyway.
       const riding = spans.length > 0 && currentZ < attachTopZ - 1e-6;
+      let prevZ = currentZ;
       for (let i = 1; i < path.length; i++) {
         const p = path[i];
         const px = f(offset.x + p.x);
         const py = f(offset.y + p.y);
         if (riding) {
           const z = attachmentZ(p.s, spans, currentZ, attachTopZ);
-          lines.push(`G1 X${px} Y${py} Z${f(z)} F${options.cutFeedrate}`);
+          const ds = Math.hypot(p.x - path[i - 1].x, p.y - path[i - 1].y, z - prevZ);
+          const dz = prevZ - z;
+          const feed = dz > 1e-6
+            ? Math.min(options.cutFeedrate, Math.max(1, Math.round(options.plungeFeedrate * (ds / dz))))
+            : options.cutFeedrate;
+          lines.push(`G1 X${px} Y${py} Z${f(z)} F${feed}`);
+          prevZ = z;
         } else {
           lines.push(`G1 X${px} Y${py} F${options.cutFeedrate}`);
         }
@@ -1027,7 +1044,7 @@ export function generateFramingGcode(
   ];
   // A router has usually just been zeroed on the stock: lift before crossing it.
   if (options.machineMode !== 'laser') lines.push(`G0 Z${formatNum(options.safeZ)}`);
-  lines.push(`G0 X${formatNum(minX)} Y${formatNum(minY)} F${options.travelFeedrate}`);
+  lines.push(`G0 X${formatNum(minX)} Y${formatNum(minY)}`);
 
   if (options.machineMode === 'laser') {
     lines.push(`M3 S${laserGuideS(options)} ; Low power guide dot`);
@@ -1035,9 +1052,8 @@ export function generateFramingGcode(
     lines.push(`G1 X${formatNum(maxX)} Y${formatNum(maxY)} F3000`);
     lines.push(`G1 X${formatNum(minX)} Y${formatNum(maxY)} F3000`);
     lines.push(`G1 X${formatNum(minX)} Y${formatNum(minY)} F3000`);
-    lines.push(`M5 ; Laser OFF`);
+    lines.push(`M5 S0 ; Laser OFF`);
   } else {
-    lines.push(`G0 Z${formatNum(options.safeZ)}`);
     lines.push(`G1 X${formatNum(maxX)} Y${formatNum(minY)} F3000`);
     lines.push(`G1 X${formatNum(maxX)} Y${formatNum(maxY)} F3000`);
     lines.push(`G1 X${formatNum(minX)} Y${formatNum(maxY)} F3000`);
@@ -1079,10 +1095,14 @@ function faceLayerLines(
   offset: Point2D,
   removalMm: number,
   options: GcodeExportOptions
-): { lines: string[]; distanceMm: number } {
+): { lines: string[]; distanceMm: number; lastPoint?: Point2D } {
   const lines: string[] = [];
   const dia = Math.max(0.5, options.bitDiameterMm);
-  const paths = cutPaths.filter((l) => l.length >= 3);
+  const paths0 = cutPaths.filter((l) => l.length >= 3);
+  if (paths0.length === 0) return { lines, distanceMm: 0 };
+  // If cutter compensation was turned off, `cutPaths` are the raw geometry;
+  // expand by half the bit so the facing pass still clears the profile kerf.
+  const paths = compensationRadius(options) > 0 ? paths0 : offsetNestedLoops(paths0, dia / 2).paths;
   if (paths.length === 0) return { lines, distanceMm: 0 };
 
   // The region the tool centre may cover, on a grid fine enough for the bit.
@@ -1118,11 +1138,28 @@ function faceLayerLines(
   const loops = rings.flatMap((r) => r.loops).map((l) => dropCollinear(l, cell * 0.05)).filter((l) => l.length >= 3);
   if (loops.length === 0) return { lines, distanceMm: 0 };
 
+  // Whether the straight segment between two rings stays inside `mask === 1`
+  // (and never cuts across an unfaced hole or island gap).
+  const segmentInMask = (a: Point2D, b: Point2D): boolean => {
+    const dist = Math.hypot(b.x - a.x, b.y - a.y);
+    const steps = Math.max(2, Math.ceil(dist / (cell * 0.5)));
+    for (let s = 1; s < steps; s++) {
+      const t = 0.15 + 0.7 * (s / steps);
+      const x = a.x + (b.x - a.x) * t;
+      const y = a.y + (b.y - a.y) * t;
+      const i = Math.round((x - origin.x) / cell);
+      const j = Math.round((y - origin.y) / cell);
+      if (i < 0 || i >= cols || j < 0 || j >= rows || mask[j * cols + i] !== 1) return false;
+    }
+    return true;
+  };
+
   const perPass = Math.max(0.1, Math.abs(options.zStepdown));
   const passes = Math.ceil(removalMm / perPass - 1e-9);
   const X = (p: Point2D) => f(offset.x + p.x);
   const Y = (p: Point2D) => f(offset.y + p.y);
   let distanceMm = 0;
+  let lastPoint: Point2D | undefined;
 
   for (let pass = 1; pass <= passes; pass++) {
     const above = -Math.min(removalMm, (pass - 1) * perPass);
@@ -1141,7 +1178,7 @@ function faceLayerLines(
       }
       const start = loop[s0];
       const hop = at ? Math.hypot(start.x - at.x, start.y - at.y) : Infinity;
-      if (hop <= dia) {
+      if (at && hop <= dia && segmentInMask(at, start)) {
         // The next ring in, a stepover away across ground this pass just cut.
         lines.push(`G1 X${X(start)} Y${Y(start)} F${Math.round(options.cutFeedrate)}`);
         distanceMm += hop;
@@ -1160,10 +1197,11 @@ function faceLayerLines(
         distanceMm += Math.hypot(p.x - q.x, p.y - q.y);
       }
       at = start;
+      lastPoint = { x: offset.x + start.x, y: offset.y + start.y };
     }
   }
   lines.push(`G0 Z${f(options.safeZ)}`);
-  return { lines, distanceMm };
+  return { lines, distanceMm, lastPoint };
 }
 
 export function generateContourSliceGcode(
@@ -1271,6 +1309,7 @@ export function generateContourSliceGcode(
     // holes in the slice, so the tool goes inside them and outside everything
     // else.
     let cutPaths: Point2D[][] = loops.filter((l) => l.length >= 3);
+    let depths: number[];
     if (radius > 0) {
       const comp = offsetNestedLoops(cutPaths, radius);
       for (const i of comp.dropped) {
@@ -1280,6 +1319,9 @@ export function generateContourSliceGcode(
         );
       }
       cutPaths = comp.paths;
+      depths = comp.depths;
+    } else {
+      depths = nestingDepths(cutPaths);
     }
     const offset: Point2D = layer.placedPos2D && layer.modelOffset2D
       ? {
@@ -1287,24 +1329,6 @@ export function generateContourSliceGcode(
           y: layer.placedPos2D.y - (layer.modelOffset2D.y - (layer.height2D ?? 0)),
         }
       : { x: 0, y: 0 };
-
-    // Innermost first: a hole, dowel hole or island is cut while the layer is
-    // still held by the sheet, and the outline that frees it goes last. Within
-    // one depth, nearest first, each loop started near where the head is.
-    const depths = nestingDepths(cutPaths);
-    const levels = [...new Set(depths)].sort((a, b) => b - a);
-    const ordered: Point2D[][] = [];
-    const cutDepths: number[] = [];
-    for (const level of levels) {
-      const group = cutPaths.filter((_, i) => depths[i] === level);
-      for (const i of nearestFirst(group, head, offset)) {
-        const loop = startNear(group[i], head, offset);
-        head = { x: offset.x + loop[0].x, y: offset.y + loop[0].y };
-        ordered.push(loop);
-        cutDepths.push(level);
-      }
-    }
-    cutPaths = ordered;
 
     /*
      * The top layer of a stack that is not a whole number of sheets finishes
@@ -1328,8 +1352,26 @@ export function generateContourSliceGcode(
       const faced = faceLayerLines(cutPaths, offset, removal, options);
       for (const line of faced.lines) lines.push(line);
       totalCutDistanceMm += faced.distanceMm;
+      if (faced.lastPoint) head = faced.lastPoint;
     }
     const fromDepthMm = removal > 0.1 ? removal : 0;
+
+    // Innermost first: a hole, dowel hole or island is cut while the layer is
+    // still held by the sheet, and the outline that frees it goes last. Within
+    // one depth, nearest first, each loop started near where the head is.
+    const levels = [...new Set(depths)].sort((a, b) => b - a);
+    const ordered: Point2D[][] = [];
+    const cutDepths: number[] = [];
+    for (const level of levels) {
+      const group = cutPaths.filter((_, i) => depths[i] === level);
+      for (const i of nearestFirst(group, head, offset)) {
+        const loop = startNear(group[i], head, offset);
+        head = { x: offset.x + loop[0].x, y: offset.y + loop[0].y };
+        ordered.push(loop);
+        cutDepths.push(level);
+      }
+    }
+    cutPaths = ordered;
 
     for (let cIdx = 0; cIdx < cutPaths.length; cIdx++) {
       const contour = cutPaths[cIdx];

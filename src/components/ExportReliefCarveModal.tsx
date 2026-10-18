@@ -64,7 +64,10 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
       stockDepthMm: stock.depthMm,
       stockThicknessMm: stock.thicknessMm,
     },
-    (o) => o.carveDepthMm
+    (o) =>
+      (o.cutThroughMm ?? 0) > 0
+        ? o.stockThicknessMm + (o.cutThroughMm ?? 0)
+        : Math.min(o.carveDepthMm, Math.max(0.1, o.stockThicknessMm - 1))
   );
 
   /*

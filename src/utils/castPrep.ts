@@ -23,8 +23,8 @@
 import * as THREE from 'three';
 import type { CastPrep, EdgeRoundFeature, SceneGeom, SceneGraph, SceneNode } from '../types/scene';
 import { resolveCsgGeoms } from './csg';
-import { appendSolidTriangles } from './contourSliceExporter';
-import { getNodeWorldTransform } from './laserCutExporter';
+import { appendBaseGeomTriangles } from './geomSurface';
+import { getGeomFrame, getNodeWorldTransform } from './laserCutExporter';
 import { maxSizeFor, sameEdge, suggestedSize, type EdgeCandidate } from './featureEdges';
 
 // ---------------------------------------------------------------------------
@@ -144,6 +144,36 @@ function isDecor(geom: SceneGeom): boolean {
 }
 
 /**
+ * Appends the untextured base triangles of a solid geom in world space, with
+ * outward-facing normals. Surface textures (embossed/engraved relief patterns)
+ * are NOT baked into the drafted base mesh: they stay attached as declarative
+ * `textures` metadata and are generated asynchronously by the surface-texture
+ * worker on top of the drafted solid.
+ */
+function appendBaseSolidTriangles(geom: SceneGeom, bodyWorld: THREE.Matrix4, out: number[]): boolean {
+  const start = out.length;
+  const frame = getGeomFrame(geom);
+  const geomWorld = bodyWorld.clone().multiply(frame.matrix);
+  if (!appendBaseGeomTriangles(geom, frame.halfLen, geomWorld, out)) return false;
+
+  let vol6 = 0;
+  for (let i = start; i + 8 < out.length; i += 9) {
+    const ax = out[i], ay = out[i + 1], az = out[i + 2];
+    const bx = out[i + 3], by = out[i + 4], bz = out[i + 5];
+    const cx = out[i + 6], cy = out[i + 7], cz = out[i + 8];
+    vol6 += ax * (by * cz - bz * cy) + ay * (bz * cx - bx * cz) + az * (bx * cy - by * cx);
+  }
+  if (vol6 < 0) {
+    for (let i = start; i + 8 < out.length; i += 9) {
+      const bx = out[i + 3], by = out[i + 4], bz = out[i + 5];
+      out[i + 3] = out[i + 6]; out[i + 4] = out[i + 7]; out[i + 5] = out[i + 8];
+      out[i + 6] = bx; out[i + 7] = by; out[i + 8] = bz;
+    }
+  }
+  return true;
+}
+
+/**
  * The triangles a body draws, in world space, one run per solid geom and each
  * wound outward. Empty for a body with nothing solid (the ground plane).
  */
@@ -152,7 +182,7 @@ export function bodySolids(node: SceneNode, world: THREE.Matrix4): { geom: Scene
   for (const geom of resolveCsgGeoms(node, 'render')) {
     if (geom.role === 'collision' || isDecor(geom)) continue;
     const tris: number[] = [];
-    if (appendSolidTriangles(geom, world, tris) && tris.length > 0) out.push({ geom, tris });
+    if (appendBaseSolidTriangles(geom, world, tris) && tris.length > 0) out.push({ geom, tris });
   }
   return out;
 }
@@ -286,7 +316,7 @@ export function draftTriangles(
   tris: ArrayLike<number>,
   p: DraftParams,
   extents?: { minZ: number; maxZ: number },
-): { positions: number[]; faces: number[] } {
+): { positions: number[]; faces: number[]; undraftedPositions: number[] } {
   const index = new Map<string, number>();
   const positions: number[] = [];
   const faces: number[] = [];
@@ -362,7 +392,7 @@ export function draftTriangles(
     out[i * 3] += dx * offset;
     out[i * 3 + 1] += dy * offset;
   }
-  return { positions: out, faces };
+  return { positions: out, faces, undraftedPositions: positions };
 }
 
 /** Z-up to Y-up, as the renderer reads `vertices`. Mirrors combineBodies' private copy. */
@@ -389,6 +419,79 @@ function sourceMass(node: SceneNode): number | undefined {
 const BUILD_FIELDS = ['csg', 'csgDerived', 'fromto', 'quat', 'euler', 'latticeGeom', 'paint', 'baseVertices', 'baseRenderVertices', 'stableMesh', 'id'] as const;
 
 /**
+ * Projects a point in world space onto the closest undrafted triangle and
+ * shifts it by the barycentric draft displacement of that triangle's vertices,
+ * so texture seeds and faceSplits on drafted side walls follow the tapered wall.
+ */
+function shiftWorldPointByDraft(
+  pt: THREE.Vector3,
+  undrafted: number[],
+  drafted: number[],
+  faces: number[],
+): THREE.Vector3 {
+  let bestD2 = Infinity;
+  let bestShiftX = 0, bestShiftY = 0, bestShiftZ = 0;
+  for (let f = 0; f < faces.length; f += 3) {
+    const ia = faces[f] * 3, ib = faces[f + 1] * 3, ic = faces[f + 2] * 3;
+    const ax = undrafted[ia], ay = undrafted[ia + 1], az = undrafted[ia + 2];
+    const bx = undrafted[ib], by = undrafted[ib + 1], bz = undrafted[ib + 2];
+    const cx = undrafted[ic], cy = undrafted[ic + 1], cz = undrafted[ic + 2];
+    const abx = bx - ax, aby = by - ay, abz = bz - az;
+    const acx = cx - ax, acy = cy - ay, acz = cz - az;
+    const apx = pt.x - ax, apy = pt.y - ay, apz = pt.z - az;
+    const d1 = abx * apx + aby * apy + abz * apz;
+    const d2 = acx * apx + acy * apy + acz * apz;
+    let u = 1, v = 0, w = 0;
+    if (d1 <= 0 && d2 <= 0) {
+      u = 1; v = 0; w = 0;
+    } else {
+      const bpx = pt.x - bx, bpy = pt.y - by, bpz = pt.z - bz;
+      const d3 = abx * bpx + aby * bpy + abz * bpz;
+      const d4 = acx * bpx + acy * bpy + acz * bpz;
+      if (d3 >= 0 && d4 <= d3) {
+        u = 0; v = 1; w = 0;
+      } else {
+        const vc = d1 * d4 - d3 * d2;
+        if (vc <= 0 && d1 >= 0 && d3 <= 0) {
+          v = d1 / (d1 - d3 || 1); u = 1 - v; w = 0;
+        } else {
+          const cpx = pt.x - cx, cpy = pt.y - cy, cpz = pt.z - cz;
+          const d5 = abx * cpx + aby * cpy + abz * cpz;
+          const d6 = acx * cpx + acy * cpy + acz * cpz;
+          if (d6 >= 0 && d5 <= d6) {
+            u = 0; v = 0; w = 1;
+          } else {
+            const vb = d5 * d2 - d1 * d6;
+            if (vb <= 0 && d2 >= 0 && d6 <= 0) {
+              w = d2 / (d2 - d6 || 1); u = 1 - w; v = 0;
+            } else {
+              const va = d3 * d6 - d5 * d4;
+              if (va <= 0 && (d4 - d3) >= 0 && (d5 - d6) >= 0) {
+                w = (d4 - d3) / ((d4 - d3) + (d5 - d6) || 1); v = 1 - w; u = 0;
+              } else {
+                const denom = 1 / (va + vb + vc || 1);
+                v = vb * denom; w = vc * denom; u = 1 - v - w;
+              }
+            }
+          }
+        }
+      }
+    }
+    const qx = u * ax + v * bx + w * cx;
+    const qy = u * ay + v * by + w * cy;
+    const qz = u * az + v * bz + w * cz;
+    const dist2 = (pt.x - qx) ** 2 + (pt.y - qy) ** 2 + (pt.z - qz) ** 2;
+    if (dist2 < bestD2) {
+      bestD2 = dist2;
+      bestShiftX = u * (drafted[ia] - ax) + v * (drafted[ib] - bx) + w * (drafted[ic] - cx);
+      bestShiftY = u * (drafted[ia + 1] - ay) + v * (drafted[ib + 1] - by) + w * (drafted[ic + 1] - cy);
+      bestShiftZ = u * (drafted[ia + 2] - az) + v * (drafted[ib + 2] - bz) + w * (drafted[ic + 2] - cz);
+    }
+  }
+  return new THREE.Vector3(pt.x + bestShiftX, pt.y + bestShiftY, pt.z + bestShiftZ);
+}
+
+/**
  * One body, drafted: its solid geoms as tapered meshes in its own frame, each
  * keeping the colour, mass and contact settings of the geom it came from.
  * Null when the body has nothing solid to draft.
@@ -402,15 +505,41 @@ export function draftBodyGeoms(node: SceneNode, world: THREE.Matrix4, p: DraftPa
   const toLocal = world.clone().invert();
   const v = new THREE.Vector3();
   return solids.map(({ geom, tris }) => {
-    const { positions, faces } = draftTriangles(tris, p, { minZ, maxZ });
+    const { positions, faces, undraftedPositions } = draftTriangles(tris, p, { minZ, maxZ });
     const local = new Array<number>(positions.length);
     for (let i = 0; i < positions.length; i += 3) {
       v.set(positions[i], positions[i + 1], positions[i + 2]).applyMatrix4(toLocal);
       local[i] = +v.x.toFixed(9); local[i + 1] = +v.y.toFixed(9); local[i + 2] = +v.z.toFixed(9);
     }
+    const geomToWorld = world.clone().multiply(getGeomFrame(geom).matrix);
+    const geomToLocal = getGeomFrame(geom).matrix;
+    const mapPoint = (pt: [number, number, number]): [number, number, number] => {
+      const wp = new THREE.Vector3(pt[0], pt[1], pt[2]).applyMatrix4(geomToWorld);
+      const shifted = shiftWorldPointByDraft(wp, undraftedPositions, positions, faces);
+      shifted.applyMatrix4(toLocal);
+      return [shifted.x, shifted.y, shifted.z];
+    };
+    const mapDir = (dir: [number, number, number]): [number, number, number] => {
+      const d = new THREE.Vector3(dir[0], dir[1], dir[2]).transformDirection(geomToLocal);
+      return [d.x, d.y, d.z];
+    };
     const baked: SceneGeom = { ...geom };
     const rec = baked as unknown as Record<string, unknown>;
     for (const k of BUILD_FIELDS) delete rec[k];
+    if (geom.textures?.length) {
+      baked.textures = geom.textures.map((t) => ({
+        ...t,
+        seedAt: mapPoint(t.seedAt),
+        seedNormal: t.seedNormal ? mapDir(t.seedNormal) : t.seedNormal,
+      }));
+    }
+    if (geom.faceSplits?.length) {
+      baked.faceSplits = geom.faceSplits.map((s) =>
+        s.kind === 'plane'
+          ? { ...s, at: mapPoint(s.at), normal: mapDir(s.normal) }
+          : { ...s, seeds: s.seeds.map(mapPoint) },
+      );
+    }
     if (geom.csgDerived) {
       // A boolean's mesh hands colliding and weight to its colliders, which
       // are about to go. The baked mesh is the body now, so it takes both back:
@@ -420,6 +549,7 @@ export function draftBodyGeoms(node: SceneNode, world: THREE.Matrix4, p: DraftPa
       if (mass !== undefined) baked.mass = mass; else delete baked.mass;
     }
     baked.type = 'mesh';
+    baked.dynamic = true;
     baked.size = [1];
     baked.pos = [0, 0, 0];
     baked.renderVertices = local;

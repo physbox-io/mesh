@@ -158,14 +158,51 @@ describe('facing, then the profile bit', () => {
     expect(r.bounds.minX).toBeLessThanOrEqual(20 - 25 + 1e-6);
     expect(r.bounds.maxY).toBeGreaterThanOrEqual(90 + 25 - 1e-6);
   });
+
+  it('clamps facing toolpath coordinates to non-negative X/Y when a panel is placed near the origin', () => {
+    const nearOrigin = { ...panel(), placedPos2D: { x: 5, y: 5 } };
+    const r = generateLaserCutGcode([nearOrigin], {
+      ...DEFAULT_GCODE_OPTIONS,
+      machineMode: 'cnc',
+      faceToThickness: true,
+      sheetStockThicknessMm: [10],
+      facingBitDiameterMm: 25,
+    });
+    const faceBlock = r.gcode.slice(r.gcode.indexOf('; --- Facing'), r.gcode.indexOf('; --- TOOL CHANGE'));
+    const coords = [...faceBlock.matchAll(/[XY](-?[\d.]+)/g)].map((m) => parseFloat(m[1]));
+    expect(coords.length).toBeGreaterThan(0);
+    expect(Math.min(...coords)).toBeGreaterThanOrEqual(0);
+  });
+
+  it('indexes droppedHoles against filtered holePaths when degenerate cutouts are present', () => {
+    const p = panel();
+    p.innerCutouts2D = [
+      [{ x: 1, y: 1 }, { x: 2, y: 2 }], // degenerate (< 3 points)
+      [{ x: 10, y: 10 }, { x: 14, y: 10 }, { x: 14, y: 14 }, { x: 10, y: 14 }], // 4mm hole, dropped by 6mm bit
+    ];
+    const r = generateLaserCutGcode([p], {
+      ...DEFAULT_GCODE_OPTIONS,
+      machineMode: 'cnc',
+      bitDiameterMm: 6,
+    });
+    expect(r.warnings?.join(' ')).toContain('4.000mm across is narrower than the 6.000mm cutter');
+  });
 });
 
 describe('CNC framing', () => {
-  it('lifts before it moves across the stock', () => {
+  it('lifts before it moves across the stock without duplicate Z lifts or rapid F words', () => {
     const g = generateFramingGcode({ minX: 10, minY: 10, maxX: 50, maxY: 50 }, { ...DEFAULT_GCODE_OPTIONS, machineMode: 'cnc' }).split('\n');
     const lift = g.findIndex((l) => /^G0 Z/.test(l));
     const firstXY = g.findIndex((l) => /^G[01] X/.test(l));
     expect(lift).toBeGreaterThanOrEqual(0);
     expect(lift).toBeLessThan(firstXY);
+    expect(g.filter((l) => /^G0 Z/.test(l))).toHaveLength(1);
+    expect(g.some((l) => /^G0\b.*F/.test(l))).toBe(false);
+  });
+
+  it('turns laser guide beam off with M5 S0 at the end of framing', () => {
+    const g = generateFramingGcode({ minX: 10, minY: 10, maxX: 50, maxY: 50 }, { ...DEFAULT_GCODE_OPTIONS, machineMode: 'laser' });
+    expect(g).toContain('M5 S0');
+    expect(g).not.toMatch(/^G0\b.*F/m);
   });
 });

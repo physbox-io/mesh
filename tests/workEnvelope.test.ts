@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { checkJobEnvelope, describeEnvelope, type JobExtent } from '../src/utils/workEnvelope';
+import { checkJobEnvelope, describeEnvelope, measureGcodeBounds, type JobExtent } from '../src/utils/workEnvelope';
 import { DEFAULT_MOTION_PROFILE, motionProfileFromSettings, parseGrblSettings, type MotionProfile } from '../src/utils/motionProfile';
 
 /** A machine that homes to max, GRBL's default, with a 400x300x80 envelope. */
@@ -181,4 +181,39 @@ describe('workEnvelope', () => {
       expect(unchecked).toMatch(/\$130/);
     });
   });
+
+  describe('measureGcodeBounds', () => {
+    it('tracks G90/G91, G20/G21, ignores G53/G28/G92, and includes arc cardinal extrema', () => {
+      const gcode = [
+        'G21 G90',
+        'G0 X10 Y10 Z5',
+        'G53 G0 X-500 Y-500 Z0',
+        'G28 X0 Y0',
+        'G92 X999 Y999',
+        'G91 G1 X10 Y5 Z-7 F400', // -> (20, 15, -2)
+        'G90',
+        // Semicircle in +Y from (20, 15) to (40, 15) with center at (30, 15), radius 10 -> reaches Y=25
+        'G2 X40 Y15 I10 J0 F600',
+      ].join('\n');
+      const bounds = measureGcodeBounds(gcode);
+      expect(bounds).not.toBeNull();
+      expect(bounds!.minX).toBeCloseTo(10, 4);
+      expect(bounds!.maxX).toBeCloseTo(40, 4);
+      expect(bounds!.minY).toBeCloseTo(10, 4);
+      expect(bounds!.maxY).toBeCloseTo(25, 4);
+      expect(bounds!.minZ).toBeCloseTo(-2, 4);
+      expect(bounds!.maxZ).toBeCloseTo(5, 4);
+    });
+
+    it('converts G20 inch moves to millimetres regardless of word order', () => {
+      const bounds = measureGcodeBounds('G90\nG0 X0 Y0\nG1 X2 Y1 G20 F10\n');
+      expect(bounds).toEqual({
+        minX: 0,
+        minY: 0,
+        maxX: 50.8,
+        maxY: 25.4,
+      });
+    });
+  });
 });
+

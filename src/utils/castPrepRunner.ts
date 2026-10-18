@@ -63,10 +63,21 @@ function findNode(nodes: SceneNode[], id: string): SceneNode | null {
   return null;
 }
 
+function stripTextures(nodes: SceneNode[]): SceneNode[] {
+  return (nodes || []).map((n) => ({
+    ...n,
+    geoms: n.geoms?.map((g) => (g.textures?.length ? { ...g, textures: undefined } : g)),
+    children: n.children?.length ? stripTextures(n.children) : n.children,
+  }));
+}
+
 /** The parting plane the Cast dialog would use, as a world height in metres. */
 export function findPartingZ(scene: SceneGraph, partingFromBaseMm: number | 'auto'): number {
-  // The pattern without its gating is all that is needed to choose a plane.
-  const r = generateCastPattern({ ...scene, castPrep: undefined }, { method: 'sand', addGating: false, partingFromBaseMm });
+  // The pattern without its gating or surface textures is all that is needed to choose a plane.
+  const r = generateCastPattern(
+    { ...scene, nodes: stripTextures(scene.nodes), castPrep: undefined },
+    { method: 'sand', addGating: false, partingFromBaseMm },
+  );
   return r.summary.partingWorldZ;
 }
 

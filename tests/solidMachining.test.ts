@@ -177,13 +177,35 @@ describe('a model far bigger than a part', () => {
 });
 
 describe('bed levelling on a two-sided job', () => {
-  it('says to probe again after the flip', () => {
+  it('says to probe again after the flip and only applies Side A mesh levelling to Side A', () => {
     const grid = { minX: 0, minY: 0, maxX: 200, maxY: 200, gridX: 2, gridY: 2,
-      points: [[{ x: 0, y: 0, z: 0 }, { x: 200, y: 0, z: 0 }], [{ x: 0, y: 200, z: 0 }, { x: 200, y: 200, z: 0 }]] };
+      points: [[{ x: 0, y: 0, z: 0 }, { x: 200, y: 0, z: 1.5 }], [{ x: 0, y: 200, z: 0 }, { x: 200, y: 200, z: 1.5 }]] };
     const opts = { ...quick, applyMeshLeveling: true, meshLevelGrid: grid as never };
     const two = generateSolidMachining(latticeBracketPreset, { ...opts, sides: 2 });
+    const unlevelled = generateSolidMachining(latticeBracketPreset, { ...quick, sides: 2 });
     expect(two.warnings.some((w) => /Probe again after flipping/.test(w))).toBe(true);
+    expect(two.sides[0].gcode).not.toBe(unlevelled.sides[0].gcode);
+    expect(two.sides[1].gcode).toBe(unlevelled.sides[1].gcode);
     const one = generateSolidMachining(latticeBracketPreset, { ...opts, sides: 1 });
     expect(one.warnings.some((w) => /Probe again after flipping/.test(w))).toBe(false);
   });
+
+  it('samples a symmetric part identically across the X flip and keeps outer boundary at floorZ when Side B can reach', () => {
+    const symPart = {
+      nodes: [{
+        id: 'sym', name: 'sym', type: 'body' as const, pos: [0, 0, 0] as [number, number, number],
+        geoms: [{ name: 'g0', type: 'box' as const, size: [0.015, 0.015, 0.01], pos: [0, 0, 0.01] }],
+        joints: [], children: [],
+      }],
+    };
+    const res = generateSolidMachining(symPart, { ...quick, sides: 2 });
+    expect(res.success).toBe(true);
+    // Symmetric box centered in Z has identical cut depth on Side A and Side B,
+    // clamped at floorZ (half the stock + overcut) along the outer perimeter.
+    const floorDepth = res.stock.thicknessMm / 2 + 0.5;
+    expect(res.sides[0].depthMm).toBeCloseTo(floorDepth, 2);
+    expect(res.sides[1].depthMm).toBeCloseTo(floorDepth, 2);
+    expect(res.sides[0].finishingRasterLines).toBe(res.sides[1].finishingRasterLines);
+  });
 });
+

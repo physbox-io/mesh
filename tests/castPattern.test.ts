@@ -400,6 +400,32 @@ describe('lost-PLA cast pattern', () => {
     expect(sand.summary.investmentPowderG).toBe(0);
     expect(sand.summary.patternPlasticG).toBe(0);
   });
+
+  it('fuses sprue+cup and vents as single continuous revolution shells without internal coplanar diaphragms', () => {
+    const view = new DataView(burn.patternStl.buffer, burn.patternStl.byteOffset, burn.patternStl.byteLength);
+    const count = view.getUint32(80, true);
+    // Count horizontal cap triangles (normal.z === +1 or -1) keyed by Z height and XY centroid
+    const capFacesByKey = new Map<string, number[]>();
+    for (let t = 0; t < count; t++) {
+      const o = 84 + t * 50;
+      const nz = view.getFloat32(o + 8, true);
+      if (Math.abs(nz) < 0.999) continue;
+      const ax = view.getFloat32(o + 12, true), ay = view.getFloat32(o + 16, true), az = view.getFloat32(o + 20, true);
+      const bx = view.getFloat32(o + 24, true), by = view.getFloat32(o + 28, true);
+      const cx = view.getFloat32(o + 36, true), cy = view.getFloat32(o + 40, true);
+      // Only check above the pattern top where sprue->cup transition lives
+      if (az <= burn.summary.patternSizeMm.z + 1) continue;
+      const key = `${Math.round(az * 100)}:${Math.round(((ax + bx + cx) / 3) * 10)}:${Math.round(((ay + by + cy) / 3) * 10)}`;
+      const list = capFacesByKey.get(key) ?? [];
+      list.push(Math.sign(nz));
+      capFacesByKey.set(key, list);
+    }
+    for (const [, signs] of capFacesByKey) {
+      const hasUp = signs.includes(1);
+      const hasDown = signs.includes(-1);
+      expect(hasUp && hasDown).toBe(false);
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -491,4 +517,41 @@ describe('the sand rig on the print bed', () => {
     expect(solids.length).toBeGreaterThanOrEqual(3);
     for (const p of solids) expect(p.minZ).toBeCloseTo(0, 3);
   });
+
+  function signedVolumeMm3(stl: Uint8Array): number {
+    const view = new DataView(stl.buffer, stl.byteOffset, stl.byteLength);
+    const count = view.getUint32(80, true);
+    let vol6 = 0;
+    for (let t = 0; t < count; t++) {
+      const o = 84 + t * 50 + 12;
+      const ax = view.getFloat32(o, true), ay = view.getFloat32(o + 4, true), az = view.getFloat32(o + 8, true);
+      const bx = view.getFloat32(o + 12, true), by = view.getFloat32(o + 16, true), bz = view.getFloat32(o + 20, true);
+      const cx = view.getFloat32(o + 24, true), cy = view.getFloat32(o + 28, true), cz = view.getFloat32(o + 32, true);
+      vol6 += ax * (by * cz - bz * cy) + ay * (bz * cx - bx * cz) + az * (bx * cy - by * cx);
+    }
+    return vol6 / 6;
+  }
+
+  it('winds runner and riser neck beams outward so gating adds positive signed volume and stops at the coin rim', () => {
+    const coin: SceneGraph = {
+      nodes: [{
+        id: 'coin',
+        name: 'coin',
+        type: 'body',
+        pos: [0, 0, 0.01],
+        geoms: [{ type: 'cylinder', size: [0.05, 0.01] }],
+      }],
+    };
+    const bare = generateCastPattern(coin, { method: 'sand', metalId: 'bronze', addGating: false });
+    const gated = generateCastPattern(coin, { method: 'sand', metalId: 'bronze', addGating: true });
+    expect(bare.success).toBe(true);
+    expect(gated.success).toBe(true);
+    const bareVol = signedVolumeMm3(bare.patternStl);
+    const gatedVol = signedVolumeMm3(gated.patternStl);
+    // Outward-wound gating must strictly increase the STL's signed volume by ~gatingVolumeMm3.
+    expect(gatedVol - bareVol).toBeGreaterThan(gated.summary.gatingVolumeMm3 * 0.85);
+    // Riser neck must stop near the outer rim (~50 mm radius), not run a slot to the coin center (0, 0).
+    expect(gated.summary.gatingVolumeMm3).toBeLessThan(80000);
+  });
 });
+

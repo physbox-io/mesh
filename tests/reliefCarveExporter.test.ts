@@ -599,9 +599,10 @@ describe('Relief carve exporter', () => {
     // shank is its own diameter — however much finer detail would like to be.
     const deep = recommendReliefTooling({ ...plan, reliefDepthMm: 20 });
     expect(deep.finishingToolDiaMm).toBe(3.175);
-    expect(deep.finishingShankDiaMm).toBe(3.175);
-    // And it has to be a long-reach one, which the recommendation says outright.
-    expect(deep.finishingFluteLengthMm).toBeGreaterThanOrEqual(22);
+    // Left at 0 (auto) so autoShankDia and autoFluteLength remain active if the
+    // user subsequently changes the finishing tool diameter.
+    expect(deep.finishingShankDiaMm).toBe(0);
+    expect(deep.finishingFluteLengthMm).toBe(0);
 
     // Deeper still, and even that will not do.
     const deeper = recommendReliefTooling({ ...plan, reliefDepthMm: 60 });
@@ -961,5 +962,60 @@ describe('Path simplification', () => {
       // reached 1.35 mm.
       expect(closest, label).toBeGreaterThan(20 - 0.75);
     }
+  });
+
+  it('scales zScale smoothly in fill mode when carveDepthMm is clamped to stockThicknessMm - 1 or expanded by cutThroughMm', () => {
+    const clamped = generateReliefCarveGcode(dome, {
+      ...DEFAULT_RELIEF_OPTIONS,
+      stockWidthMm: 80,
+      stockDepthMm: 80,
+      stockThicknessMm: 10,
+      carveDepthMm: 20,
+      verticalScaleMode: 'fill',
+      roughingEnabled: false,
+    });
+    expect(clamped.success).toBe(true);
+    expect(clamped.reliefDepthMm).toBeCloseTo(9, 3);
+    // Model height is 100 mm; in fill mode zScale must match the clamped 9 mm depth (0.09), not 20/100 (0.20).
+    expect(clamped.stockTransform?.scale[2]).toBeCloseTo(9 / 100, 3);
+
+    const through = generateReliefCarveGcode(dome, {
+      ...DEFAULT_RELIEF_OPTIONS,
+      stockWidthMm: 80,
+      stockDepthMm: 80,
+      stockThicknessMm: 10,
+      carveDepthMm: 5,
+      cutThroughMm: 1,
+      verticalScaleMode: 'fill',
+      roughingEnabled: false,
+    });
+    expect(through.success).toBe(true);
+    expect(through.reliefDepthMm).toBeCloseTo(11, 3);
+    expect(through.stockTransform?.scale[2]).toBeCloseTo(11 / 100, 3);
+  });
+
+  it('keeps narrow transverse sunken runs shorter than stepover instead of dropping them', () => {
+    // A thin rib (0.6 mm wide in X, 40 mm in Y) inverted into a narrow sunken groove,
+    // swept along X with a V-bit whose stepover (1.5 mm) is wider than the groove.
+    const thinRib = bodyWith({ type: 'box', size: [0.0003, 0.02, 0.002] }, [0, 0, 0.002]);
+    const res = generateReliefCarveGcode(thinRib, {
+      ...DEFAULT_RELIEF_OPTIONS,
+      stockWidthMm: 60,
+      stockDepthMm: 60,
+      stockThicknessMm: 10,
+      carveDepthMm: 2,
+      fitMode: 'manual',
+      scalePercent: 100,
+      invertRelief: true,
+      roughingEnabled: false,
+      finishingToolType: 'v_bit',
+      finishingVBitAngleDeg: 60,
+      finishingToolDiaMm: 6,
+      finishingStepoverPercent: 25,
+      finishingStrategy: 'raster',
+      finishingDirection: 'x',
+    });
+    expect(res.success).toBe(true);
+    expect(res.finishingRasterLines).toBeGreaterThan(10);
   });
 });

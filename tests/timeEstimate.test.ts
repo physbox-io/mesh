@@ -194,6 +194,20 @@ describe('reading a G-code program', () => {
     const est = estimateGcodeTime('G90\nG2 X20 Y0 I10 J0 F600\nG1 X30\n');
     expect(est.cutDistanceMm).toBeCloseTo(Math.PI * 10 + 10, 1);
   });
+
+  it('applies G20/G21 unit scale regardless of word order on the same line', () => {
+    const g20First = estimateGcodeTime('G90\nG20 G1 X1 F10\n');
+    const g20Last = estimateGcodeTime('G90\nG1 X1 F10 G20\n');
+    expect(g20Last.cutDistanceMm).toBeCloseTo(25.4, 4);
+    expect(g20Last.seconds).toBeCloseTo(g20First.seconds, 4);
+  });
+
+  it('does not let a non-modal G53 rapid clobber an active G1 cutting modal mode', () => {
+    const est = estimateGcodeTime('G90\nG1 X10 F600\nG53 G0 Z0\nX20\n');
+    // X10 (10 mm) + X20 (10 mm) both cut in G1 mode
+    expect(est.cutDistanceMm).toBeCloseTo(20, 6);
+    expect(est.rapidDistanceMm).toBe(0);
+  });
 });
 
 describe('splitting a program line from its comments', () => {

@@ -209,6 +209,44 @@ describe('baking draft into a scene', () => {
     unprepScene(scene);
     expect(scene.nodes[0].isWedge).toBe(true);
   });
+
+  it('drafts the untextured base solid, sets dynamic = true, and preserves surface textures', () => {
+    const coin: SceneNode = {
+      id: 'coin',
+      name: 'coin',
+      type: 'body',
+      pos: [0, 0, 0.15],
+      geoms: [{
+        type: 'cylinder',
+        size: [0.05, 0.01],
+        textures: [{
+          id: 'lotus',
+          pattern: 'lotus_mandala',
+          seedAt: [0, 0, 0.01],
+          seedNormal: [0, 0, 1],
+          scale: 0.05,
+          depth: 0.003,
+          angle: 0,
+          invert: false,
+          fadeMargin: 0.005,
+          cellSize: 0.0004,
+          creaseDeg: 35,
+          maxTiltDeg: 60,
+          aroundClaimed: true,
+        }],
+      }],
+    };
+    const scene: SceneGraph = { nodes: [coin] };
+    scene.castPrep = prepped(scene);
+    bakeDraftInto(scene, scene.castPrep, { deg: 2, mode: 'add', partingZ: 0.14 });
+    const baked = scene.nodes[0].geoms[0];
+    expect(baked.type).toBe('mesh');
+    expect(baked.dynamic).toBe(true);
+    // Base cylinder mesh is 192 faces (not 330,000+ textured faces).
+    expect(baked.faces!.length / 3).toBeLessThan(500);
+    expect(baked.textures).toHaveLength(1);
+    expect(baked.textures![0].pattern).toBe('lotus_mandala');
+  });
 });
 
 describe('planEdgeRounds', () => {

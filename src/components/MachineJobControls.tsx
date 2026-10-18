@@ -66,6 +66,7 @@ export const JobPauseBanner: React.FC<{
 }> = ({ machineState, resumeLabel, showZTools = true, plateThicknessMm = 12.0 }) => {
   const [overridden, setOverridden] = React.useState(false);
   const [overrideFor, setOverrideFor] = React.useState<string | null>(null);
+  const [probingZ, setProbingZ] = React.useState(false);
 
   const paused = machineState.status.startsWith('PAUSED');
   // A fresh pause is a fresh decision: an override given for the last tool
@@ -158,18 +159,28 @@ export const JobPauseBanner: React.FC<{
           <>
             <button
               onClick={() => webSerialManager.zeroZHere()}
+              disabled={probingZ}
               title="Take work Z 0 from where the tool is standing right now"
-              className="px-3 py-1.5 bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-100 text-xs font-semibold rounded-lg flex items-center space-x-1.5 cursor-pointer"
+              className="px-3 py-1.5 bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed text-slate-700 dark:text-slate-100 text-xs font-semibold rounded-lg flex items-center space-x-1.5 cursor-pointer"
             >
               <Hand className="w-3.5 h-3.5 text-emerald-400" />
               <span>Set Z Zero Here</span>
             </button>
             <button
-              onClick={() => webSerialManager.zeroZ(plateThicknessMm)}
-              className="px-3 py-1.5 bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-100 text-xs font-semibold rounded-lg flex items-center space-x-1.5 cursor-pointer"
+              onClick={async () => {
+                if (probingZ) return;
+                setProbingZ(true);
+                try {
+                  await webSerialManager.zeroZ(plateThicknessMm);
+                } finally {
+                  setProbingZ(false);
+                }
+              }}
+              disabled={probingZ}
+              className="px-3 py-1.5 bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed text-slate-700 dark:text-slate-100 text-xs font-semibold rounded-lg flex items-center space-x-1.5 cursor-pointer"
             >
               <ChevronsDown className="w-3.5 h-3.5 text-amber-400" />
-              <span>Probe Z Zero</span>
+              <span>{probingZ ? 'Probing Z…' : 'Probe Z Zero'}</span>
             </button>
           </>
         )}
@@ -177,8 +188,9 @@ export const JobPauseBanner: React.FC<{
         {blocked && !parked && (
           <button
             onClick={allowResume}
+            disabled={probingZ}
             title="Only if the Z datum is already right for the tool now in the spindle"
-            className="px-3 py-1.5 text-amber-700 dark:text-amber-400 hover:underline text-xs font-semibold cursor-pointer"
+            className="px-3 py-1.5 text-amber-700 dark:text-amber-400 hover:underline disabled:opacity-40 disabled:cursor-not-allowed text-xs font-semibold cursor-pointer"
           >
             Z is already set, let me resume
           </button>
@@ -192,7 +204,7 @@ export const JobPauseBanner: React.FC<{
               ? webSerialManager.resumeFromPark({ isLaser: !showZTools })
               : webSerialManager.resumeJob({ zIsSet: overridden }))
           }
-          disabled={blocked}
+          disabled={blocked || probingZ}
           title={blocked ? 'Set Z zero for the new tool first' : undefined}
           className="px-4 py-1.5 bg-amber-500 hover:bg-amber-600 disabled:opacity-40 disabled:cursor-not-allowed text-slate-950 font-bold text-xs rounded-lg flex items-center space-x-1.5 cursor-pointer"
         >

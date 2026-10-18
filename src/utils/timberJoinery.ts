@@ -134,6 +134,8 @@ export interface TenonSpec {
   miteredTip: boolean;
   /** Direction the 45° miter cuts across if `miteredTip` is true. */
   miterNormal?: Vec3;
+  /** 3D intersection of the two perpendicular mortise axes inside the leg if `miteredTip` is true. */
+  miterPivotMm?: Vec3;
   cutMethod: 'bandsaw' | 'cnc';
 }
 
@@ -425,9 +427,11 @@ function buildTenonBoss(wasm: ManifoldToplevel, spec: TenonSpec, cornerFit: Teno
   // If two rails meet at 90° at the same height in a corner leg, slice a 45°
   // miter off the tip of the tenon so the two tenons never collide inside the leg!
   if (spec.miteredTip && spec.miterNormal) {
-    const tipPoint = add3(spec.shoulderCenterMm, scale3(spec.outwardDir, spec.lengthMm));
-    // Cut plane passes through the inner corner of the tenon tip at 45°
-    const planeOffset = dot(spec.miterNormal, tipPoint) - spec.thicknessMm * 0.35;
+    const pivot =
+      spec.miterPivotMm ??
+      add3(spec.shoulderCenterMm, scale3(spec.outwardDir, spec.lengthMm - spec.thicknessMm * 0.35 * Math.SQRT2));
+    // Cut plane passes through the 3D intersection of the mortise axes at 45° with 0.15 mm clearance
+    const planeOffset = dot(spec.miterNormal, pivot) - 0.15;
     const [, kept] = boss.splitByPlane(spec.miterNormal, planeOffset);
     boss.delete();
     boss = kept;
@@ -634,6 +638,28 @@ export function synthesizeTimberJoinery(
             const trimmedPlain = plainSolids[mIdx].subtract(plainSolids[pIdx]);
             plainSolids[mIdx].delete();
             plainSolids[mIdx] = trimmedPlain;
+
+            const mesh = trimmedPlain.getMesh();
+            const p = mesh.numProp;
+            const nVerts = mesh.vertProperties.length / p;
+            if (nVerts > 0) {
+              const aL = members[mIdx].axes[0];
+              const cOld = members[mIdx].centerMm;
+              let minProj = Infinity;
+              let maxProj = -Infinity;
+              for (let v = 0; v < nVerts; v++) {
+                const vx = mesh.vertProperties[v * p] - cOld[0];
+                const vy = mesh.vertProperties[v * p + 1] - cOld[1];
+                const vz = mesh.vertProperties[v * p + 2] - cOld[2];
+                const proj = vx * aL[0] + vy * aL[1] + vz * aL[2];
+                if (proj < minProj) minProj = proj;
+                if (proj > maxProj) maxProj = proj;
+              }
+              const newLen = maxProj - minProj;
+              const midShift = 0.5 * (minProj + maxProj);
+              members[mIdx].dimsMm[0] = +newLen.toFixed(2);
+              members[mIdx].centerMm = add3(cOld, scale3(aL, midShift));
+            }
           } else {
             trimmed.delete();
           }
@@ -712,11 +738,11 @@ export function synthesizeTimberJoinery(
         // Determine the host face normal on `mB` that faces `mA`
         const [, widB, thkB] = mB.dimsMm;
         const [, axisWB, axisTB] = mB.axes;
-        const candNormals: { n: Vec3; depthAvail: number; faceSpread: number }[] = [
-          { n: axisWB, depthAvail: widB, faceSpread: thkB },
-          { n: neg3(axisWB), depthAvail: widB, faceSpread: thkB },
-          { n: axisTB, depthAvail: thkB, faceSpread: widB },
-          { n: neg3(axisTB), depthAvail: thkB, faceSpread: widB },
+        const candNormals: { n: Vec3; depthAvail: number; faceSpread: number; spreadAxis: Vec3 }[] = [
+          { n: axisWB, depthAvail: widB, faceSpread: thkB, spreadAxis: axisTB },
+          { n: neg3(axisWB), depthAvail: widB, faceSpread: thkB, spreadAxis: axisTB },
+          { n: axisTB, depthAvail: thkB, faceSpread: widB, spreadAxis: axisWB },
+          { n: neg3(axisTB), depthAvail: thkB, faceSpread: widB, spreadAxis: axisWB },
         ];
         candNormals.sort((a, b) => dot(b.n, endOutward) - dot(a.n, endOutward));
         // `inwardNormal` points from the rail end INTO the leg `mB`
@@ -728,10 +754,9 @@ export function synthesizeTimberJoinery(
         const distCenterBToFace = chosenHost.depthAvail * 0.5;
         const facePlaneOffset = dot(mB.centerMm, hostFaceNormal) + distCenterBToFace;
         const endDotFace = dot(endCenter, hostFaceNormal);
-        const shoulderCenterMm: Vec3 = add3(
-          endCenter,
-          scale3(hostFaceNormal, facePlaneOffset - endDotFace),
-        );
+        const denom = dot(endOutward, hostFaceNormal);
+        const tAlong = Math.abs(denom) > 1e-6 ? (facePlaneOffset - endDotFace) / denom : 0;
+        const shoulderCenterMm: Vec3 = add3(endCenter, scale3(endOutward, tAlong));
         const trimDepth = Math.max(0, dot(sub3(endCenter, shoulderCenterMm), endOutward));
         if (trimDepth > 0.2) {
           lengthTrimMm[i][endKind === 'start' ? 0 : 1] = trimDepth;
@@ -824,7 +849,12 @@ export function synthesizeTimberJoinery(
         // Compute distance of mortise center from the top end of the host leg
         const hostTopCoord = dot(mB.centerMm, mB.axes[0]) + mB.dimsMm[0] * 0.5;
         const distFromTopEndMm = +(hostTopCoord - dot(shoulderCenterMm, mB.axes[0])).toFixed(1);
-        const distFromRefEdgeMm = +(chosenHost.faceSpread * 0.5).toFixed(1);
+        const mThick = +(nominalTenonThk + options.clearanceMm).toFixed(2);
+        const lateralOffset = dot(sub3(shoulderCenterMm, mB.centerMm), chosenHost.spreadAxis);
+        const distFromRefEdgeMm = +Math.max(
+          mThick * 0.5,
+          Math.min(chosenHost.faceSpread - mThick * 0.5, chosenHost.faceSpread * 0.5 + lateralOffset),
+        ).toFixed(2);
 
         const mortiseSpec: MortiseSpec = {
           id: `M_${mB.id}_${mA.id}`,
@@ -838,7 +868,7 @@ export function synthesizeTimberJoinery(
           uAxis,
           vAxis,
           widthMm: +(nominalTenonWid + options.clearanceMm).toFixed(2),
-          thicknessMm: +(nominalTenonThk + options.clearanceMm).toFixed(2),
+          thicknessMm: mThick,
           depthMm: +(nominalTenonLen + options.glueReliefMm).toFixed(2),
           distFromTopEndMm,
           distFromRefEdgeMm,
@@ -908,17 +938,28 @@ export function synthesizeTimberJoinery(
           const zDiff = Math.abs(m1.distFromTopEndMm - m2.distFromTopEndMm);
           if (zDiff > (m1.widthMm + m2.widthMm) * 0.5) continue;
 
+          // Check if the two perpendicular mortises actually intersect in 2D inside the leg
+          const s1 = dot(sub3(m2.centerMm, m1.centerMm), m1.inwardNormal);
+          const s2 = dot(sub3(m1.centerMm, m2.centerMm), m2.inwardNormal);
+          if (!(s1 > 0 && s2 > 0 && m1.depthMm > s1 - m2.thicknessMm * 0.5 && m2.depthMm > s2 - m1.thicknessMm * 0.5)) {
+            continue;
+          }
+
           // Find their paired TenonSpecs
           const j1 = joints.find((j) => j.id === m1.jointId);
           const j2 = joints.find((j) => j.id === m2.jointId);
           if (!j1?.tenon || !j2?.tenon) continue;
 
+          const miterPivotMm = add3(m1.centerMm, scale3(m1.inwardNormal, s1));
+
           // Mark both tenons as 45° mitered at their tips so they nest together
           // inside the corner of the leg without colliding!
           j1.tenon.miteredTip = true;
           j1.tenon.miterNormal = unit(add3(m1.inwardNormal, neg3(m2.inwardNormal)));
+          j1.tenon.miterPivotMm = miterPivotMm;
           j2.tenon.miteredTip = true;
           j2.tenon.miterNormal = unit(add3(m2.inwardNormal, neg3(m1.inwardNormal)));
+          j2.tenon.miterPivotMm = miterPivotMm;
 
           j1.notes.push(
             `45° mitered tenon tip inside ${members[legIdx].id} so ${j1.memberAId} and ${j2.memberAId} meet at full depth without colliding.`,

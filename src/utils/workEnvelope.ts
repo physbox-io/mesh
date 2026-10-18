@@ -250,3 +250,178 @@ export function describeEnvelope(verdict: EnvelopeVerdict): string {
   }
   return 'Fits the machine, and fits from this work origin.';
 }
+
+/**
+ * Computes the work-coordinate bounding box of a G-code program in millimetres.
+ *
+ * Tracks modal motion (`G0`/`G1`/`G2`/`G3`), distance mode (`G90`/`G91`), and
+ * units (`G20`/`G21`), ignores non-work-coordinate commands (`G53`, `G10`,
+ * `G28`, `G30`, `G92`), and includes cardinal extrema swept by `G2`/`G3` arcs.
+ */
+export function measureGcodeBounds(gcode: string): JobExtent | null {
+  let modalMotion: 'G0' | 'G1' | 'G2' | 'G3' | null = null;
+  let absoluteMode = true;
+  let unitScale = 1;
+  let curX = 0;
+  let curY = 0;
+  let curZ = 0;
+
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  let minZ = Infinity;
+  let maxZ = -Infinity;
+  let hasXY = false;
+  let hasZ = false;
+
+  const includeXY = (x: number, y: number) => {
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+    hasXY = true;
+  };
+
+  for (const rawLine of gcode.split('\n')) {
+    const semi = rawLine.indexOf(';');
+    const body = semi < 0 ? rawLine : rawLine.slice(0, semi);
+    const code = body.replace(/\([^)]*\)/g, ' ').trim();
+    if (!code) continue;
+
+    const tokens = code.toUpperCase().match(/[A-Z][+-]?\d*(?:\.\d+)?/g);
+    if (!tokens) continue;
+
+    let nonModalBypass = false;
+    let lineMotion: 'G0' | 'G1' | 'G2' | 'G3' | null = null;
+    let xVal: number | null = null;
+    let yVal: number | null = null;
+    let zVal: number | null = null;
+    let iVal: number | null = null;
+    let jVal: number | null = null;
+    let rVal: number | null = null;
+
+    for (const tok of tokens) {
+      const letter = tok[0];
+      const numStr = tok.slice(1);
+      const val = parseFloat(numStr);
+      if (!Number.isFinite(val)) continue;
+
+      if (letter === 'G') {
+        if (numStr.includes('.')) continue;
+        const g = Math.round(val);
+        if (g === 90) absoluteMode = true;
+        else if (g === 91) absoluteMode = false;
+        else if (g === 20) unitScale = 25.4;
+        else if (g === 21) unitScale = 1;
+        else if (g === 0 || g === 1 || g === 2 || g === 3) {
+          lineMotion = `G${g}` as 'G0' | 'G1' | 'G2' | 'G3';
+        } else if (g === 53 || g === 10 || g === 28 || g === 30 || g === 92 || g === 4) {
+          nonModalBypass = true;
+        }
+      } else if (letter === 'X') {
+        xVal = val;
+      } else if (letter === 'Y') {
+        yVal = val;
+      } else if (letter === 'Z') {
+        zVal = val;
+      } else if (letter === 'I') {
+        iVal = val;
+      } else if (letter === 'J') {
+        jVal = val;
+      } else if (letter === 'R') {
+        rVal = val;
+      }
+    }
+
+    if (nonModalBypass) continue;
+    if (lineMotion !== null) modalMotion = lineMotion;
+    if (xVal === null && yVal === null && zVal === null) continue;
+
+    if (xVal !== null) xVal *= unitScale;
+    if (yVal !== null) yVal *= unitScale;
+    if (zVal !== null) zVal *= unitScale;
+    if (iVal !== null) iVal *= unitScale;
+    if (jVal !== null) jVal *= unitScale;
+    if (rVal !== null) rVal *= unitScale;
+
+    const cmd = lineMotion ?? modalMotion ?? 'G0';
+    const nx = xVal !== null ? (absoluteMode ? xVal : curX + xVal) : curX;
+    const ny = yVal !== null ? (absoluteMode ? yVal : curY + yVal) : curY;
+    const nz = zVal !== null ? (absoluteMode ? zVal : curZ + zVal) : curZ;
+
+    if (xVal !== null || yVal !== null) {
+      if ((cmd === 'G2' || cmd === 'G3') && (iVal !== null || jVal !== null || rVal !== null)) {
+        includeXY(curX, curY);
+        includeXY(nx, ny);
+        let cx = curX;
+        let cy = curY;
+        let r = 0;
+        if (iVal !== null || jVal !== null) {
+          cx = curX + (iVal ?? 0);
+          cy = curY + (jVal ?? 0);
+          r = Math.hypot(curX - cx, curY - cy);
+        } else if (rVal !== null && Math.abs(rVal) > 1e-9) {
+          const dx = nx - curX;
+          const dy = ny - curY;
+          const d = Math.hypot(dx, dy);
+          r = Math.abs(rVal);
+          if (d > 1e-9 && d <= 2 * r + 1e-6) {
+            const h = Math.sqrt(Math.max(0, r * r - (d * d) / 4));
+            const mx = (curX + nx) / 2;
+            const my = (curY + ny) / 2;
+            const ux = -dy / d;
+            const uy = dx / d;
+            const sign = (cmd === 'G3') === (rVal > 0) ? 1 : -1;
+            cx = mx + sign * h * ux;
+            cy = my + sign * h * uy;
+          }
+        }
+        if (r > 1e-9) {
+          const fullCircle = Math.hypot(nx - curX, ny - curY) < 1e-6;
+          if (fullCircle) {
+            includeXY(cx + r, cy);
+            includeXY(cx - r, cy);
+            includeXY(cx, cy + r);
+            includeXY(cx, cy - r);
+          } else {
+            const startAngle = Math.atan2(curY - cy, curX - cx);
+            const endAngle = Math.atan2(ny - cy, nx - cx);
+            let sweep = cmd === 'G3' ? endAngle - startAngle : startAngle - endAngle;
+            while (sweep <= 1e-9) sweep += 2 * Math.PI;
+            while (sweep > 2 * Math.PI + 1e-9) sweep -= 2 * Math.PI;
+            for (const a of [0, Math.PI / 2, Math.PI, -Math.PI / 2]) {
+              let da = cmd === 'G3' ? a - startAngle : startAngle - a;
+              while (da < 0) da += 2 * Math.PI;
+              while (da >= 2 * Math.PI) da -= 2 * Math.PI;
+              if (da <= sweep + 1e-9) {
+                includeXY(cx + r * Math.cos(a), cy + r * Math.sin(a));
+              }
+            }
+          }
+        }
+      } else {
+        includeXY(nx, ny);
+      }
+    }
+
+    if (zVal !== null) {
+      if (nz < minZ) minZ = nz;
+      if (nz > maxZ) maxZ = nz;
+      hasZ = true;
+    }
+
+    curX = nx;
+    curY = ny;
+    curZ = nz;
+  }
+
+  if (!hasXY) return null;
+  return {
+    minX,
+    minY,
+    maxX,
+    maxY,
+    ...(hasZ ? { minZ, maxZ } : {}),
+  };
+}

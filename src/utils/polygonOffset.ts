@@ -623,24 +623,30 @@ export function offsetNestedLoops(
   loops: Point2D[][],
   delta: number,
   options?: OffsetOptions
-): { paths: Point2D[][]; dropped: number[] } {
-  const depths = nestingDepths(loops);
+): { paths: Point2D[][]; dropped: number[]; depths: number[] } {
+  const rawDepths = nestingDepths(loops);
   const paths: Point2D[][] = [];
   const dropped: number[] = [];
+  const depths: number[] = [];
 
   loops.forEach((loop, i) => {
     if (loop.length < 3) return;
-    const isHole = depths[i] % 2 === 1;
+    const isHole = rawDepths[i] % 2 === 1;
     const dir = isHole ? -delta : delta;
     const res = offsetLoop(loop, dir, options);
     if (res.length === 0) dropped.push(i);
     // The nesting that decided which side to stand off on also decides which
     // side the material is on, and therefore which way round to cut: a hole
     // keeps its material outside it, everything else inside.
-    else paths.push(...res.map((l) => orientForClimb(l, isHole ? 'outside' : 'inside')));
+    else {
+      for (const l of res) {
+        paths.push(orientForClimb(l, isHole ? 'outside' : 'inside'));
+        depths.push(rawDepths[i]);
+      }
+    }
   });
 
-  return { paths, dropped };
+  return { paths, dropped, depths };
 }
 
 /**

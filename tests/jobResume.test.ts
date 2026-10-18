@@ -275,5 +275,41 @@ describe('jobResume', () => {
       expect(planResume(lines, 999999).fromLine).toBe(lines.length);
       expect(planResume(lines, -5).fromLine).toBe(0);
     });
+
+    it('ignores G53 machine coordinates and G91 relative Z when computing safeZ and work position', () => {
+      const prog = [
+        'G21', 'G90', 'G17',
+        'G0 Z5.000',
+        'G53 G0 X-100 Y-200 Z0',
+        'G91 G0 Z20.000',
+        'G90',
+        'M3 S18000',
+        'G0 X10.000 Y20.000',
+        'G1 Z-2.000 F300',
+        'G1 X30.000 Y20.000 F800',
+      ];
+      const state = scanModalState(prog, 8); // after G90, before G0 X10 Y20
+      // G53 X-100 Y-200 must not corrupt work XY
+      expect(state.position.x).toBeNull();
+      expect(state.position.y).toBeNull();
+      // G91 Z20 must not inflate safeZ to 20 (safeZ comes from G90 G0 Z5)
+      expect(state.safeZ).toBe(5);
+    });
+
+    it('emits a single-axis rapid when only X has been commanded so far', () => {
+      const prog = [
+        'G21', 'G90', 'G17',
+        'G0 Z5.000',
+        'M3 S12000',
+        'G0 X25.000',
+        'G1 Z-1.000 F200',
+        'G1 X50.000 F600',
+      ];
+      const plan = planResume(prog, 7);
+      const body = plan.preamble.filter((l) => !l.startsWith(';'));
+      expect(body.some((l) => /^G0 X25\.000\b/.test(l))).toBe(true);
+      expect(body.some((l) => /^G0 .*Y/.test(l))).toBe(false);
+    });
   });
 });
+

@@ -586,7 +586,6 @@ function hybridPassGroups(input: FinishingPathInput): Point2D[][][] {
   }));
   const isSteepNear = (p: Point2D) =>
     isSteep(p) || near.some((o) => isSteep({ x: p.x + o.dx, y: p.y + o.dy }));
-
   // A run shorter than the stepover lies inside what the pass beside it cuts.
   const minRun = Math.max(0, input.stepover);
   const steep = contourPasses(input).flatMap((pass) => splitWhere(pass, isSteepNear, minRun));

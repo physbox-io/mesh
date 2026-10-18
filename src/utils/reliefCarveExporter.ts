@@ -707,10 +707,10 @@ export function recommendReliefTooling(input: ReliefToolingInput): Partial<Relie
     finishingToolDiaMm: finishDia,
     finishingFlutes: flutesFor(finishDia),
     finishingGeometry: 'upcut',
-    // What the bit has to be, not what a catalogue default is: no step behind
-    // the cutter, and enough flute to see the floor.
-    finishingShankDiaMm: finishDia,
-    finishingFluteLengthMm: round2(Math.max(autoFluteLength(finishDia), depth + 2)),
+    // Leave at 0 (auto) so autoShankDia and autoFluteLength track subsequent
+    // diameter changes by the operator.
+    finishingShankDiaMm: 0,
+    finishingFluteLengthMm: 0,
     finishingStepoverPercent: 25,
     finishingFeedrate: finishSpeeds.feedMmMin,
     finishingPlungeRate: finishSpeeds.plungeMmMin,
@@ -1365,8 +1365,14 @@ function toolProbe(
     ) {
       const high = Math.max(z00, z10, z01, z11);
       if (walls === 'clear') return high;
-      if (walls === 'samples') return -Infinity;
       const low = Math.min(z00, z10, z01, z11);
+      if (walls === 'samples') {
+        const rx = Math.round(fx), ry = Math.round(fy);
+        if (Math.abs(fx - rx) < 1e-6 && Math.abs(fy - ry) < 1e-6) {
+          return hm.z[ry * hm.cols + rx];
+        }
+        return low;
+      }
       const here = (z00 * (1 - tx) + z10 * tx) * (1 - ty) + (z01 * (1 - tx) + z11 * tx) * ty;
       return here >= (low + high) / 2 ? high : low;
     }
@@ -2257,7 +2263,10 @@ export function machineSurface(
       return path;
     };
 
-    const drop = entryZ - head.z;
+    const drop = Math.max(
+      entryZ - head.z,
+      here && path.length > 1 ? entryZ - path[1].z : 0
+    );
     if (leadInTan <= 0 || drop <= 1e-6) return plunge();
 
     let pathLen = 0;
@@ -2778,6 +2787,7 @@ export function machineSurface(
         // Along the path as it will be cut, every half cell or so, each flank
         // read square to the move.
         const flank = roughRad * 0.8;
+        const flankRad = roughRad * 0.2;
         let slot = 0;
         let standing = -Infinity;
         let bottom = Infinity;
@@ -2796,8 +2806,8 @@ export function machineSurface(
             standing = Math.max(standing, stock.highestUnder(x, y, roughRad));
             bottom = Math.min(bottom, z);
             if (len <= 1e-9) continue;
-            const left = stock.highestUnder(x + nx * flank, y + ny * flank, 0);
-            const right = stock.highestUnder(x - nx * flank, y - ny * flank, 0);
+            const left = stock.highestUnder(x + nx * flank, y + ny * flank, flankRad);
+            const right = stock.highestUnder(x - nx * flank, y - ny * flank, flankRad);
             slot = Math.max(slot, Math.min(left, right) - z);
           }
         }
@@ -2825,9 +2835,11 @@ export function machineSurface(
          * slot itself, so the boosted depth stands; where it is deeper, every
          * bite is held to the full-width stepdown.
          */
-        const ringStep = slot > baseStepdown
-          ? stepdownForEngagement(opts.roughingToolDiaMm, 1, baseStepdown)
-          : stepdownForEngagement(opts.roughingToolDiaMm, ring.engagement, baseStepdown);
+        const effectiveEngagement = Math.max(
+          ring.engagement,
+          Math.min(1, slot / Math.max(0.1, baseStepdown))
+        );
+        const ringStep = stepdownForEngagement(opts.roughingToolDiaMm, effectiveEngagement, baseStepdown);
         const bites = Math.max(1, Math.ceil((span - 1e-6) / ringStep));
 
         for (let bite = 1; bite <= bites; bite++) {
@@ -2843,7 +2855,23 @@ export function machineSurface(
            * whole way back down through the slot.
            */
           const turned = bite > 1 ? startLoopAt(loop, atX, atY) : null;
-          if (turned) loop = turned;
+          const prePath: PathPoint[] = [];
+          if (turned) {
+            loop = turned;
+            if (loop[0].z >= atZ - 1e-6 && loop.some((p) => p.z < atZ - 1e-6)) {
+              let m = 0;
+              while (m + 1 < loop.length - 1 && loop[m + 1].z >= atZ - 1e-6) m++;
+              for (let i = 1; i <= m; i++) {
+                const z = Math.abs(loop[i].z - atZ) > 1e-6 ? ` Z${f(loop[i].z)}` : '';
+                cutTo(loop[i].x, loop[i].y, loop[i].z);
+                gcode.push(`G1 X${f(loop[i].x)} Y${f(loop[i].y)}${z} F${Math.round(feed)}`);
+                prePath.push(loop[i]);
+              }
+              if (m > 0) {
+                loop = [...loop.slice(m, loop.length - 1), ...loop.slice(0, m), loop[m]];
+              }
+            }
+          }
 
           // Ramp in along the ring rather than plunging: the centre of an end
           // mill cuts at zero surface speed, and a deep layer pulls hard on it.
@@ -2860,7 +2888,11 @@ export function machineSurface(
           // No retract here: the next `leadIn` lifts only as far as it needs
           // to clear what stands between this ring and the one inside it, and
           // the final retract at the end of the program covers the last one.
-          segments.push({ type: 'roughing', points: path, traverseZ: lastTraverseZ });
+          segments.push({
+            type: 'roughing',
+            points: prePath.length > 0 ? [...prePath, ...path] : path,
+            traverseZ: lastTraverseZ,
+          });
         }
       };
 
@@ -3011,6 +3043,8 @@ export function machineSurface(
     gcode.push(`G0 Z${f(Math.max(opts.safeZ, 20))} ; back to travel height after the change`);
     gcode.push(`M3 S${Math.round(opts.spindleRpm)}`);
     gcode.push('G4 P2');
+    atX = 0;
+    atY = 0;
     atZ = Math.max(opts.safeZ, 20);
   }
 
@@ -3216,29 +3250,44 @@ export function machineSurface(
         // no material under them. Flying over them instead of tracing them is what
         // keeps a small model on a big board from costing a full-board raster.
         let run: PathPoint[] = [];
-        const flush = () => {
+        let runStartIdx = 0;
+        const flush = (endIdx: number) => {
           if (run.length === 0) return;
-          // A run shorter than the stepover lies inside what the passes either
-          // side of it cut, and is too short to ramp into — so it was a plunge
-          // to depth, a retract, and nothing to show for either. Layering
-          // leaves these where a layer's limit clips a pass to a remnant.
-          // Measured on the run as traced: it is simplified when it is cut,
-          // once it has been turned to start nearest the tool.
+          if (run.length === 1 && raw.length >= 2) {
+            const p = run[0];
+            const prev = runStartIdx > 0 ? raw[runStartIdx - 1] : p;
+            const next = endIdx < raw.length ? raw[endIdx] : p;
+            const entry =
+              prev !== p
+                ? { x: (prev.x + p.x) / 2, y: (prev.y + p.y) / 2, z: p.z }
+                : p;
+            const exit =
+              next !== p
+                ? { x: (p.x + next.x) / 2, y: (p.y + next.y) / 2, z: p.z }
+                : p;
+            run = entry !== p && exit !== p ? [entry, p, exit] : entry !== p ? [entry, p] : [p, exit];
+          }
           let runLen = 0;
           for (let i = 1; i < run.length; i++) {
             runLen += Math.hypot(run[i].x - run[i - 1].x, run[i].y - run[i - 1].y);
           }
-          if (runLen >= stepover - 1e-6) {
+          const minFlushLen = prevLimit < 0 ? stepover : res * 0.5;
+          if (runLen >= minFlushLen - 1e-6) {
             runs.push(run);
             runLevels.push(placedLevels[g][k]);
           }
           run = [];
         };
-        for (const p of raw) {
-          if (p.z < -1e-6) run.push(p);
-          else flush();
+        for (let idx = 0; idx < raw.length; idx++) {
+          const p = raw[idx];
+          if (p.z < -1e-6) {
+            if (run.length === 0) runStartIdx = idx;
+            run.push(p);
+          } else {
+            flush(idx);
+          }
         }
-        flush();
+        flush(raw.length);
       }
 
       /*
@@ -3277,7 +3326,11 @@ export function machineSurface(
        * A waterline waits for every higher one near it (see
        * `higherWaterlinesNear`); everything else is nearest first as before.
        */
-      const waitingFor = higherWaterlinesNear(runs, runLevels, opts.finishingToolDiaMm);
+      const waterlineReach = Math.max(
+        opts.finishingToolDiaMm,
+        stepover / Math.tan((Math.max(5, opts.finishingSteepAngleDeg || 35) * Math.PI) / 180) + res * 2
+      );
+      const waitingFor = higherWaterlinesNear(runs, runLevels, waterlineReach);
       const pending = waitingFor.map((w) => w.length);
       const releases: number[][] = runs.map(() => []);
       waitingFor.forEach((w, i) => { for (const j of w) releases[j].push(i); });
@@ -3297,6 +3350,7 @@ export function machineSurface(
             }
           }
         }
+        if (best < 0) best = runs.findIndex((_, i) => !used[i]);
         used[best] = 1;
         for (const i of releases[best]) pending[i]--;
         let r = runs[best];
@@ -3820,7 +3874,7 @@ export function generateReliefCarveGcode(
   // being a target and becomes a limit.
   const proportional = opts.verticalScaleMode === 'proportional';
   const exaggeration = Math.max(0.01, opts.verticalExaggeration);
-  const zScale = proportional ? scaleFactor * exaggeration : carveDepth / modelH;
+  let zScale = proportional ? scaleFactor * exaggeration : carveDepth / modelH;
   const wantedDepth = modelH * zScale;
   let reliefDepth = Math.min(carveDepth, wantedDepth);
 
@@ -3859,6 +3913,9 @@ export function generateReliefCarveGcode(
       `A ${reliefDepth.toFixed(1)} mm relief in ${opts.stockThicknessMm} mm stock leaves under 1 mm ` +
         `underneath. Cut the relief depth, lower the exaggeration, or use thicker stock.`
     );
+  }
+  if (!proportional) {
+    zScale = reliefDepth / modelH;
   }
 
 
@@ -3910,7 +3967,7 @@ export function generateReliefCarveGcode(
   if (opts.invertRelief) {
     for (let i = 0; i < surface.z.length; i++) {
       if (surface.z[i] === -Infinity) {
-        surface.z[i] = backgroundZ;
+        surface.z[i] = 0;
       } else {
         const clampedZ = Math.max(floorZ, Math.min(0, surface.z[i]));
         surface.z[i] = -reliefDepth - clampedZ;
