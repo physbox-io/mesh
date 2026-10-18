@@ -178,14 +178,21 @@ export function facesFor(faces: FontFace[], text: string): FontFace[] {
 
 const sheets = new Map<string, Promise<FontFace[] | null>>();
 
-/** Google's stylesheet for one weight of a family; null when the family has no such weight. */
-function stylesheet(family: string, weight: number): Promise<FontFace[] | null> {
-  const key = `${family}::${weight}`;
+/**
+ * Google's stylesheet for one weight of a family, or with no weight for its
+ * default; null when it has no such family or weight.
+ *
+ * Google says so with a 400 that carries no CORS header, which a browser
+ * cannot read: it rejects the request as "Failed to fetch", the same as a
+ * blocked one. Outside a browser it is an ordinary 400. So ask only for a
+ * weight the catalogue lists (see loadFont).
+ */
+function stylesheet(family: string, weight: number | null): Promise<FontFace[] | null> {
+  const key = `${family}::${weight ?? 'default'}`;
   const hit = sheets.get(key);
   if (hit) return hit;
   const p = (async () => {
-    const res = await reach(`${GOOGLE_CSS}?family=${encodeURIComponent(family).replace(/%20/g, '+')}:wght@${weight}`);
-    // 400 is Google's answer to a family or a weight it does not have.
+    const res = await reach(`${GOOGLE_CSS}?family=${encodeURIComponent(family).replace(/%20/g, '+')}${weight ? `:wght@${weight}` : ''}`);
     if (res.status === 400) return null;
     if (!res.ok) throw new FontUnavailableError(`Google Fonts did not answer (HTTP ${res.status}).`);
     const faces = parseFontFaces(await res.text());
@@ -263,19 +270,28 @@ function chain(parts: FontLike[]): FontLike {
  * A Google font at a weight, with the scripts `text` needs. A weight the
  * family lacks becomes its nearest (from the catalogue), then its default.
  */
+/** The weight to ask Google for: the nearest the family has, when the catalogue says. */
+export function weightToAsk(weights: number[] | undefined, weight: number): number {
+  if (!weights?.length) return weight;
+  return weights.reduce((a, b) => (Math.abs(b - weight) < Math.abs(a - weight) ? b : a));
+}
+
 export async function loadFont(family: string, weight = 400, text = ''): Promise<FontLike> {
-  let name = family.trim();
-  let faces = await stylesheet(name, weight);
-  if (!faces) {
-    const entry = (await fetchFontCatalogue()).find((f) => f.name.toLowerCase() === name.toLowerCase());
-    if (entry) name = entry.name;
-    const weights = entry?.weights?.length ? entry.weights : [400];
-    const nearest = weights.reduce((a, b) => (Math.abs(b - weight) < Math.abs(a - weight) ? b : a));
-    for (const w of new Set([nearest, 400])) {
-      if (faces) break;
-      if (w !== weight || name !== family.trim()) faces = await stylesheet(name, w);
-    }
+  const catalogue = await fetchFontCatalogue();
+  const entry = catalogue.find((f) => f.name.toLowerCase() === family.trim().toLowerCase());
+  const name = entry?.name ?? family.trim();
+  // The whole catalogue, not the built-in list it falls back to offline, can say a family does not exist.
+  if (!entry && catalogue !== BUILT_IN_FONTS) {
+    throw new FontUnavailableError(`"${name}" is not in the Google Fonts library.`);
   }
+  let faces: FontFace[] | null = null;
+  try {
+    faces = await stylesheet(name, weightToAsk(entry?.weights, weight));
+  } catch {
+    /* a weight the list was wrong about reads as a failed fetch: try the default */
+  }
+  // With no weight asked for, Google answers with the family's default.
+  faces ??= await stylesheet(name, null);
   if (!faces) throw new FontUnavailableError(`"${name}" is not in the Google Fonts library.`);
   return chain(await Promise.all(facesFor(faces, text).map((f) => fetchFont(f.url))));
 }
