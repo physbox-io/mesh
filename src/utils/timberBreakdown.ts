@@ -448,10 +448,10 @@ function decomposeSingleSolidIntoManifolds(wasm: ManifoldToplevel, solid: Manifo
     const prev = areasZ[i - 1];
     const curr = areasZ[i];
     const prevIsSlab = prev.area > 0.5 * maxAreaZ && prev.count === 1;
-    const currIsLegs = curr.area < 0.38 * maxAreaZ && curr.count >= 2;
+    const currIsFrame = curr.area < 0.42 * maxAreaZ;
     const currIsSlab = curr.area > 0.5 * maxAreaZ && curr.count === 1;
-    const prevIsLegs = prev.area < 0.38 * maxAreaZ && prev.count >= 2;
-    if ((prevIsSlab && currIsLegs) || (prevIsLegs && currIsSlab)) {
+    const prevIsFrame = prev.area < 0.42 * maxAreaZ;
+    if ((prevIsSlab && currIsFrame) || (prevIsFrame && currIsSlab)) {
       // Refine transition height by binary search
       let lo = prev.z, hi = curr.z;
       for (let step = 0; step < 8; step++) {

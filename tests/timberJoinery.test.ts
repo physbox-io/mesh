@@ -229,11 +229,66 @@ describe('Timber & Joinery Breakdown (Table, Chair & 3ft Flower Stand)', () => {
     expect(res.parts.filter((p) => p.member.role === 'panel').length).toBe(2);
 
     const plan = buildTimberCutPlan(res, {
-      cncBedMm: [300, 300, 60],
+      cncBedMm: [300, 200, 60],
       defaultStockLengthMm: 1800,
     });
     expect(plan.partCards.length).toBe(14);
     expect(plan.buildGuideMarkdown).toContain('Leg_FL');
+
+    // Verify every generated G-code command fits strictly inside the 3020 CNC envelope (X <= 300 mm, Y <= 200 mm)
+    for (const setup of plan.allCncSetups) {
+      for (const line of setup.gcode.split('\n')) {
+        if (line.startsWith(';')) continue;
+        const xm = line.match(/X(-?\d+(?:\.\d+)?)/);
+        const ym = line.match(/Y(-?\d+(?:\.\d+)?)/);
+        if (xm) {
+          const x = parseFloat(xm[1]);
+          expect(x).toBeGreaterThanOrEqual(0);
+          expect(x).toBeLessThanOrEqual(300);
+        }
+        if (ym) {
+          const y = parseFloat(ym[1]);
+          expect(y).toBeGreaterThanOrEqual(0);
+          expect(y).toBeLessThanOrEqual(200);
+        }
+      }
+    }
+
+    // Also verify when the user models the entire 3ft flower stand as ONE single unified solid!
+    const solidBoxes: import('manifold-3d').Manifold[] = [
+      wasm.Manifold.cube([380, 380, 24], true).translate([0, 0, 891 + 12]),
+    ];
+    for (const sx of [-1, 1]) {
+      for (const sy of [-1, 1]) {
+        solidBoxes.push(wasm.Manifold.cube([45, 45, 891], true).translate([sx * 147.5, sy * 147.5, 891 / 2]));
+      }
+    }
+    for (const sy of [-1, 1]) {
+      solidBoxes.push(wasm.Manifold.cube([250, 22, 60], true).translate([0, sy * 147.5, 861]));
+      solidBoxes.push(wasm.Manifold.cube([250, 22, 45], true).translate([0, sy * 147.5, 210]));
+    }
+    for (const sx of [-1, 1]) {
+      solidBoxes.push(wasm.Manifold.cube([22, 250, 60], true).translate([sx * 147.5, 0, 861]));
+      solidBoxes.push(wasm.Manifold.cube([22, 250, 45], true).translate([sx * 147.5, 0, 210]));
+    }
+    const unifiedFlowerStand = wasm.Manifold.union(solidBoxes);
+    for (const b of solidBoxes) b.delete();
+    const unifiedSoup = manifoldMmToSoupMetres(unifiedFlowerStand);
+    unifiedFlowerStand.delete();
+
+    const singleSolidRes = synthesizeTimberJoinery(wasm, [unifiedSoup], {
+      jointMode: 'mortise_tenon',
+      tenonCornerFit: 'dogbone',
+      edgeProfile: 'roundover',
+      edgeRadiusMm: 4,
+      maxBoardWidthMm: 200,
+    });
+    expect(singleSolidRes.ok).toBe(true);
+    if (singleSolidRes.ok) {
+      expect(singleSolidRes.parts.filter((p) => p.member.role === 'leg').length).toBe(4);
+      expect(singleSolidRes.parts.filter((p) => p.member.role === 'rail').length).toBe(8);
+      expect(singleSolidRes.parts.filter((p) => p.member.role === 'panel').length).toBe(2);
+    }
   });
 });
 

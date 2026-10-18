@@ -364,7 +364,9 @@ function buildCncSetupsForPart(
   stepdownMm: number,
 ): CncWindowSetup[] {
   const setups: CncWindowSetup[] = [];
-  const maxWindowLenMm = Math.max(120, Math.max(cncBedMm[0], cncBedMm[1]) - 30);
+  // The auxiliary fence runs along the Y-axis (front-to-back pass-through axis on a 3020 CNC
+  // so long legs clear the left/right gantry uprights), so window length is bounded by cncBedMm[1].
+  const maxWindowLenMm = Math.max(120, cncBedMm[1] - 30);
   const partLenMm = part.totalFinishedLengthMm;
 
   // Group mortises by their outward face normal
@@ -407,10 +409,16 @@ function buildCncSetupsForPart(
     }
 
     if (group.zClips.length) {
+      const maxSlotLen = Math.max(...group.zClips.map((zc) => zc.slotLengthMm));
+      const zcTop = Math.max(0, partLenMm * 0.5 - maxSlotLen * 0.5 - 15);
+      const zcBot = partLenMm * 0.5 + maxSlotLen * 0.5 + 15;
+      const zcOffset = zcBot <= maxWindowLenMm ? 0 : Math.floor(zcTop / 10) * 10;
       if (!windows.length) {
-        windows.push({ startOffsetMm: 0, mortises: [], zClips: [...group.zClips] });
-      } else {
+        windows.push({ startOffsetMm: zcOffset, mortises: [], zClips: [...group.zClips] });
+      } else if (zcBot - windows[0].startOffsetMm <= maxWindowLenMm && zcTop >= windows[0].startOffsetMm) {
         windows[0].zClips.push(...group.zClips);
+      } else {
+        windows.push({ startOffsetMm: zcOffset, mortises: [], zClips: [...group.zClips] });
       }
     }
 
