@@ -318,11 +318,14 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
    * still until the typing stops; `layoutPending` is what the preview says
    * meanwhile, so a stale drawing never reads as a finished one.
    */
+  // Only a laser is sent a kerf. A router's G-code stands the bit off by its
+  // own radius, and a kerf on top would loosen every joint a second time.
+  const layoutKerfMm = machineMode === 'laser' ? kerfMm : 0;
   const liveLayoutFields = useMemo(() => ({
-    jointMode, materialThicknessMm, fingerWidthMm, fingerWidthAuto, kerfMm, cornerRelief,
+    jointMode, materialThicknessMm, fingerWidthMm, fingerWidthAuto, kerfMm: layoutKerfMm, cornerRelief,
     bitDiameterMm, tabOverhangMm, jointClearanceMm, sheetWidthMm, sheetHeightMm, extraStock,
     allowThinnerStock, splitOversized, customScalePct, autoScale, maxSheets, annotations,
-  }), [jointMode, materialThicknessMm, fingerWidthMm, fingerWidthAuto, kerfMm, cornerRelief,
+  }), [jointMode, materialThicknessMm, fingerWidthMm, fingerWidthAuto, layoutKerfMm, cornerRelief,
       bitDiameterMm, tabOverhangMm, jointClearanceMm, sheetWidthMm, sheetHeightMm, extraStock,
       allowThinnerStock, splitOversized, customScalePct, autoScale, maxSheets, annotations]);
   const layoutFields = useSettled(liveLayoutFields, 250);
@@ -755,10 +758,13 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
 
               <Field
                 label="Kerf (mm)"
-                hint="Width of material the beam or bit removes. Cut paths are offset by half of it so parts come out at their drawn size."
+                hint={machineMode === 'laser'
+                  ? 'Width of material the beam burns away. Joints are offset by half of it so parts come out at their drawn size.'
+                  : 'Laser only. On a router the paths are offset by half the bit diameter instead.'}
               >
                 <NumberInput
                   step={0.05} min={0} max={2.0}
+                  disabled={machineMode !== 'laser'}
                   value={kerfMm}
                   onChange={(v) => v !== undefined && setKerfMm(v)}
                   className={inputClass}

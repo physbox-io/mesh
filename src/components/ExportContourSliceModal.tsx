@@ -280,10 +280,13 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
    * still until the typing stops; `slicePending` is what the preview says while
    * the wait is on, so an out-of-date drawing never reads as a finished one.
    */
+  // Only a laser is sent a kerf. A router's G-code stands the bit off by its
+  // own radius, and a kerf on top would shrink every dowel hole twice.
+  const slicedKerfMm = machineMode === 'laser' ? kerfMm : 0;
   const liveSliceFields = useMemo(() => ({
-    materialThicknessMm, layerOverride, slicePosition, kerfMm, pinCount, pinDiameterMm,
+    materialThicknessMm, layerOverride, slicePosition, kerfMm: slicedKerfMm, pinCount, pinDiameterMm,
     sheetWidthMm, sheetHeightMm, customScalePct, autoScale, maxSheets, annotations,
-  }), [materialThicknessMm, layerOverride, slicePosition, kerfMm, pinCount, pinDiameterMm,
+  }), [materialThicknessMm, layerOverride, slicePosition, slicedKerfMm, pinCount, pinDiameterMm,
       sheetWidthMm, sheetHeightMm, customScalePct, autoScale, maxSheets, annotations]);
   const sliceFields = useSettled(liveSliceFields, 250);
   // Slicing a big model takes long enough to freeze the tab, so it runs on the
@@ -636,17 +639,13 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
 
               <Field
                 label="Kerf (mm)"
-                hint="Width of material the beam or bit removes. Contours are offset by half of it so each layer comes out at its true size."
+                hint={machineMode === 'laser'
+                  ? 'Width of material the beam burns away. Contours are offset by half of it so each layer comes out at its true size.'
+                  : 'Laser only. On a router the paths are offset by half the bit diameter instead.'}
               >
                 <NumberInput
-                  /*
-                   * The hint says "the beam *or bit* removes", and in routing
-                   * mode the kerf a bit removes is its diameter — 3.175 or 6 mm,
-                   * both past the old ceiling of 2. A router user typing 3.175
-                   * silently got 2, so the dowel holes came out wrong and the
-                   * G-code header then misreported the setting.
-                   */
-                  step={0.05} min={0} max={12}
+                  step={0.05} min={0} max={2}
+                  disabled={machineMode !== 'laser'}
                   value={kerfMm}
                   onChange={(v) => v !== undefined && setKerfMm(v)}
                   className={inputClass}

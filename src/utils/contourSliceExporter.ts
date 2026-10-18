@@ -22,6 +22,7 @@ import {
   type Point2D,
 } from './laserCutExporter';
 import { appendGeomTriangles } from './geomSurface';
+import { nestingDepths, offsetLoop } from './polygonOffset';
 import type { StockTransform } from './reliefCarveExporter';
 
 export interface ContourSliceOptions {
@@ -1216,7 +1217,21 @@ export function exportContourSliceSvg(
     }
 
     for (const layer of layers) {
-      for (const pin of pins) layer.loops.push(circleLoop({ x: pin.x, y: pin.y }, pin.radiusMm));
+      for (const pin of pins) layer.loops.push(circleLoop({ x: pin.x, y: pin.y }, pinRadiusMm));
+    }
+  }
+
+  // ---- kerf ----
+  // A laser burns away half its kerf either side of the line, so every layer
+  // is offset by that much: outlines out, holes (dowel holes among them) in,
+  // and the layer comes out at the size it was modelled. A router is sent no
+  // kerf; its G-code stands the bit off by its own radius instead.
+  const kerfHalfMm = (options.kerf * 1000) / 2;
+  if (kerfHalfMm > 1e-6) {
+    for (const layer of layers) {
+      const depths = nestingDepths(layer.loops);
+      layer.loops = layer.loops.flatMap((loop, i) =>
+        loop.length < 3 ? [loop] : offsetLoop(loop, depths[i] % 2 === 1 ? -kerfHalfMm : kerfHalfMm, { joinStyle: 'miter' }));
     }
   }
 

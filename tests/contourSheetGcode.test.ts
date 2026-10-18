@@ -99,7 +99,7 @@ describe('contour stack nesting', () => {
   it('does not skip a row when a layer is wider than the sheet', () => {
     const result = exportContourSliceSvg(cube, {
       ...DEFAULT_CONTOUR_OPTIONS, materialThickness: 0.01, pinHoles: false,
-      sheetWidth: 0.1, sheetHeight: 0.3,
+      sheetWidth: 0.1, sheetHeight: 0.3, kerf: 0,
     });
     expect(result.layers![0].placedPos2D).toEqual({ x: 8, y: 8 });
     expect(result.layers![1].placedPos2D!.x).toBe(8);
@@ -171,5 +171,32 @@ describe('contour stack dowels', () => {
     const hole = layer.loops[layer.loops.length - 1];
     const xs = hole.map((p) => p.x);
     expect(Math.max(...xs) - Math.min(...xs)).toBeCloseTo(3, 1);
+  });
+});
+
+describe('contour stack kerf', () => {
+  const span = (loop: { x: number }[]) => Math.max(...loop.map((p) => p.x)) - Math.min(...loop.map((p) => p.x));
+
+  it('offsets every layer by half the kerf, so a lasered layer comes out at its true size', () => {
+    const result = exportContourSliceSvg(cube, {
+      ...DEFAULT_CONTOUR_OPTIONS, materialThickness: 0.01, kerf: 0.0002,
+      pinHoles: true, pinCount: 2, pinDiameter: 0.003,
+    });
+    const layer = result.layers![0];
+    // The outline grows by half the 0.2 mm kerf all round, the dowel holes shrink by it.
+    expect(span(layer.loops[0])).toBeCloseTo(100.2, 2);
+    expect(layer.width2D).toBeCloseTo(100.2, 2);
+    expect(span(layer.loops[1])).toBeCloseTo(2.8, 1);
+    expect(span(layer.loops[2])).toBeCloseTo(2.8, 1);
+  });
+
+  it('cuts on the line with no kerf, which is what a router is sent', () => {
+    const result = exportContourSliceSvg(cube, {
+      ...DEFAULT_CONTOUR_OPTIONS, materialThickness: 0.01, kerf: 0,
+      pinHoles: true, pinCount: 2, pinDiameter: 0.003,
+    });
+    const layer = result.layers![0];
+    expect(span(layer.loops[0])).toBeCloseTo(100, 2);
+    expect(span(layer.loops[1])).toBeCloseTo(3, 1);
   });
 });
