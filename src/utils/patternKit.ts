@@ -43,7 +43,24 @@ export type PatternField =
       hint?: string;
       section?: string;
     }
-  | { kind: 'seed'; key: string; label: string; hint?: string; section?: string };
+  | { kind: 'seed'; key: string; label: string; hint?: string; section?: string }
+  | {
+      /** Words, typed in: several lines when `multiline`. */
+      kind: 'text';
+      key: string;
+      label: string;
+      multiline?: boolean;
+      placeholder?: string;
+      hint?: string;
+      section?: string;
+    }
+  | { kind: 'font'; key: string; label: string; hint?: string; section?: string };
+
+/**
+ * A control shown only while another option has one of some values: the arc's
+ * radius only while the text runs on an arc.
+ */
+export type PatternFieldShown = PatternField & { when?: { key: string; is: string[] } };
 
 export type PatternOptions = Record<string, number | string>;
 
@@ -92,7 +109,7 @@ export interface PatternSpec {
   /** Anything the material has to be told about this pattern before it is cut. */
   caveat?: string;
   defaults: PatternOptions;
-  fields: PatternField[];
+  fields: PatternFieldShown[];
   /**
    * Build the height grid over a board of `extent` metres.
    *
@@ -159,13 +176,27 @@ export interface PatternSpec {
   };
   /** Which group the menus list it under. */
   group?: PatternGroup;
+  /**
+   * The pattern is one figure on a plain ground -- lettering -- rather than a
+   * texture. Its 1s are the figure, which engraving sinks and embossing
+   * raises (a texture's 1s are its high ground either way), and it is placed
+   * once, centred, never repeated round a cylinder.
+   */
+  figure?: boolean;
+  /**
+   * Work that cannot happen in `build`, done before the options are saved:
+   * fetching a font and laying the text out. Returns the options to save,
+   * which then build with nothing else to hand. Throws with a message for the
+   * person when it cannot.
+   */
+  prepare?: (opts: PatternOptions) => Promise<PatternOptions>;
 }
 
-export type PatternGroup = 'Ornament' | 'Fitted to the board' | 'Wood & joinery' | 'Geometric' | 'Textile' | 'Water & terrain' | 'Nature';
+export type PatternGroup = 'Lettering' | 'Ornament' | 'Fitted to the board' | 'Wood & joinery' | 'Geometric' | 'Textile' | 'Water & terrain' | 'Nature';
 
 /** The order the menus list the groups in. */
 export const PATTERN_GROUPS: PatternGroup[] = [
-  'Ornament', 'Fitted to the board', 'Wood & joinery', 'Geometric', 'Textile', 'Water & terrain', 'Nature',
+  'Lettering', 'Ornament', 'Fitted to the board', 'Wood & joinery', 'Geometric', 'Textile', 'Water & terrain', 'Nature',
 ];
 
 /** What the dialog opens at when a pattern does not ask for something else. */

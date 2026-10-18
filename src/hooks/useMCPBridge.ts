@@ -594,6 +594,14 @@ const stripMeshArrays = (node: SceneNode): SceneNode => {
       delete rest.renderVertices;
       delete rest.colliderVertices;
       delete rest.colliderFaces;
+      // A text pattern's saved letter outlines are kilobytes of coordinates.
+      if (rest.textures?.some((t) => t.options?.outline)) {
+        rest.textures = rest.textures.map((t) => {
+          if (!t.options?.outline) return t;
+          const { outline: _outline, outlineSig: _sig, ...options } = t.options;
+          return { ...t, options };
+        });
+      }
       return rest;
     });
   }
@@ -1327,7 +1335,8 @@ export async function applySinglePatternToBody(targetId: string, m: Record<strin
     options: { ...spec.defaults, ...(prev?.pattern === spec.id ? prev.options : {}), ...(m.options ?? {}) },
     depthM: ((emboss ? 1 : -1) * depthMm) / 1000,
     borderM: m.borderMm !== undefined ? Math.max(0, m.borderMm) / 1000 : prev?.borderM ?? DEFAULT_TEXTURE_BORDER_M,
-    cellM: m.cellMm !== undefined ? Math.max(0.05, m.cellMm) / 1000 : prev?.cellM ?? DEFAULT_TEXTURE_CELL_M,
+    // Lettering's strokes want finer triangles than a texture does.
+    cellM: m.cellMm !== undefined ? Math.max(0.05, m.cellMm) / 1000 : prev?.cellM ?? (spec.figure ? 0.00025 : DEFAULT_TEXTURE_CELL_M),
     seedAt: prev?.seedAt ?? pick.seedAt,
     seedNormal: prev?.seedNormal ?? pick.seedNormal,
     maxTiltDeg: m.stopAtDeg ?? prev?.maxTiltDeg,
@@ -1335,6 +1344,14 @@ export async function applySinglePatternToBody(targetId: string, m: Record<strin
     twistDeg: m.twistDeg ?? prev?.twistDeg,
     scale: m.scale ?? prev?.scale,
   };
+  // Text fetches its font and is laid out here; the build only fills the outline.
+  if (spec.prepare) {
+    try {
+      texture.options = await spec.prepare(texture.options ?? {});
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  }
   const index = pick.index ?? existing.length;
   const list = [...existing];
   list[index] = texture;
@@ -1358,7 +1375,7 @@ export async function applySinglePatternToBody(targetId: string, m: Record<strin
     index,
     geomName: geom.name,
     pattern: describe({ ...texture, depthM: region.depthM }),
-    options: texture.options,
+    options: Object.fromEntries(Object.entries(texture.options ?? {}).filter(([k]) => k !== 'outline' && k !== 'outlineSig')),
     faceMm: [mm(region.extentM[0]), mm(region.extentM[1])],
     areaMm2: Math.round(region.areaM2 * 1e6),
     projection: region.projection,

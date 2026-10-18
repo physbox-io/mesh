@@ -56,7 +56,8 @@ const GeomPatterns: React.FC<{ node: SceneNode; geom: SceneGeom; named: boolean;
     <>
       {textures.map((t, i) => {
         const report = surface?.regions.find((r) => r.index === i);
-        const label = patternById(t.pattern)?.label ?? t.pattern;
+        const words = t.pattern === 'text' ? String(t.options?.text ?? '').replace(/\s+/g, ' ').trim() : '';
+        const label = words ? `“${words}”` : patternById(t.pattern)?.label ?? t.pattern;
         const how = `${t.depthM > 0 ? 'embossed' : 'engraved'} ${(Math.abs(t.depthM) * 1000).toFixed(1)} mm`;
         return (
           <div key={i} className="flex flex-col gap-0.5">

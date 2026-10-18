@@ -35,17 +35,21 @@ import { Field, PatternFields, inputClass } from './PatternFields';
 const FACE_PATTERNS = SURFACE_PATTERNS.filter((p) => !p.throughCut);
 
 const DEFAULT_DEPTH_MM = 1.5;
+/** Lettering wants finer triangles than a texture: a letter's stroke is a millimetre or two. */
+const FIGURE_CELL_M = 0.00025;
+const FIGURE_DEPTH_MM = 1;
 
 const mm = (m: number) => Math.round(m * 1e5) / 100;
 
 function newTexture(target: FacePatternTarget): SurfaceTexture {
-  const spec = FACE_PATTERNS[0];
+  // The first texture, unless the pick asked for one (Text on a face).
+  const spec = (target.pattern && patternById(target.pattern)) || FACE_PATTERNS.find((p) => !p.figure) || FACE_PATTERNS[0];
   return {
     pattern: spec.id,
     options: { ...spec.defaults },
-    depthM: -DEFAULT_DEPTH_MM / 1000,
+    depthM: -(spec.figure ? FIGURE_DEPTH_MM : DEFAULT_DEPTH_MM) / 1000,
     borderM: DEFAULT_TEXTURE_BORDER_M,
-    cellM: DEFAULT_TEXTURE_CELL_M,
+    cellM: spec.figure ? FIGURE_CELL_M : DEFAULT_TEXTURE_CELL_M,
     seedAt: target.seedAt,
     seedNormal: target.seedNormal,
   };
@@ -93,6 +97,9 @@ export const FacePatternEditor: React.FC = () => {
   // What is in the scene now: the pattern as last applied, or null for none yet.
   const [applied, setApplied] = useState<SurfaceTexture | null>(null);
   const [report, setReport] = useState<TexturedSurface | null>(null);
+  // Fetching a font and laying the text out, before Apply can write it.
+  const [preparing, setPreparing] = useState(false);
+  const [prepError, setPrepError] = useState<string | null>(null);
 
   /*
    * Seeded when the dialog opens on a face, folded in during render as the
@@ -111,6 +118,7 @@ export const FacePatternEditor: React.FC = () => {
       setDraft(editing !== undefined ? existing[editing] : newTexture(target));
       setApplied(editing !== undefined ? existing[editing] : null);
       setReport(null);
+      setPrepError(null);
     } else {
       setDraft(null);
     }
@@ -151,7 +159,16 @@ export const FacePatternEditor: React.FC = () => {
   };
   const choosePattern = (id: string) => {
     const next = patternById(id);
-    if (next) patch({ pattern: id, options: { ...next.defaults } });
+    if (!next) return;
+    // Lettering's finer default, only while the detail is still a default.
+    const cell = draft.cellM ?? DEFAULT_TEXTURE_CELL_M;
+    const stock = cell === DEFAULT_TEXTURE_CELL_M || cell === FIGURE_CELL_M;
+    patch({
+      pattern: id,
+      options: { ...next.defaults },
+      ...(stock ? { cellM: next.figure ? FIGURE_CELL_M : DEFAULT_TEXTURE_CELL_M } : {}),
+    });
+    setPrepError(null);
   };
 
   const emboss = draft.depthM > 0;
@@ -161,16 +178,31 @@ export const FacePatternEditor: React.FC = () => {
   const warnings = (report?.warnings ?? []).filter((w) => w.startsWith(`Pattern ${index + 1}:`) || !w.startsWith('Pattern '));
   const notes = !applied || pending || !region.applied ? [] : layoutNotes(region);
 
-  const apply = () => {
+  const apply = async (): Promise<boolean> => {
+    let ready = draft;
+    if (spec.prepare) {
+      setPreparing(true);
+      setPrepError(null);
+      try {
+        ready = { ...draft, options: await spec.prepare(options) };
+      } catch (e) {
+        setPrepError(e instanceof Error ? e.message : String(e));
+        return false;
+      } finally {
+        setPreparing(false);
+      }
+    }
     const list = [...(before ?? [])];
-    list[index] = draft;
+    list[index] = ready;
     setGeomTextures(target.nodeId, target.geomName, list);
-    setApplied(draft);
+    setDraft(ready);
+    setApplied(ready);
     // The numbers shown were the last build's; these say building until this one is in.
     setReport(null);
+    return true;
   };
-  const done = () => {
-    if (draft !== applied) apply();
+  const done = async () => {
+    if (draft !== applied && !(await apply())) return;
     closeFacePattern();
   };
 
@@ -187,7 +219,7 @@ export const FacePatternEditor: React.FC = () => {
       <div className="flex items-center justify-between px-3 py-2.5 border-b border-slate-200 dark:border-slate-800">
         <div className="flex items-center gap-2">
           <Sparkles className="w-4 h-4 text-fuchsia-500" />
-          <span className="font-bold text-slate-800 dark:text-slate-100 text-sm">Pattern on a face</span>
+          <span className="font-bold text-slate-800 dark:text-slate-100 text-sm">{spec.figure ? 'Text on a face' : 'Pattern on a face'}</span>
         </div>
         <button
           onClick={cancel}
@@ -218,17 +250,19 @@ export const FacePatternEditor: React.FC = () => {
         <div className="pt-1 border-t border-slate-200 dark:border-slate-800" />
 
         <div className="grid grid-cols-2 gap-2">
-          <Field label="Into the face" hint="Engrave sinks the pattern into the face. Emboss stands it proud of it.">
+          <Field label="Into the face" hint={spec.figure
+            ? 'Engrave cuts the letters into the face (intaglio). Emboss raises them from it.'
+            : 'Engrave sinks the pattern into the face. Emboss stands it proud of it.'}>
             <select
               value={emboss ? 'emboss' : 'engrave'}
               onChange={(e) => patch({ depthM: (e.target.value === 'emboss' ? 1 : -1) * Math.abs(draft.depthM) })}
               className={`${inputClass} cursor-pointer`}
             >
-              <option value="engrave">Engrave</option>
-              <option value="emboss">Emboss</option>
+              <option value="engrave">{spec.figure ? 'Engrave (cut in)' : 'Engrave'}</option>
+              <option value="emboss">{spec.figure ? 'Emboss (raised)' : 'Emboss'}</option>
             </select>
           </Field>
-          <Field label="Depth (mm)" hint="How far the deepest point sits below the face, or the highest above it.">
+          <Field label={emboss ? 'Height (mm)' : 'Depth (mm)'} hint="How far the deepest point sits below the face, or the highest above it.">
             <NumberInput
               min={0.1} max={20} step={0.1} fallbackOnBlur={DEFAULT_DEPTH_MM}
               value={depthMm}
@@ -297,6 +331,13 @@ export const FacePatternEditor: React.FC = () => {
           </div>
         </div>
 
+        {prepError && (
+          <div className="flex items-start gap-2 p-2 rounded-lg bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/60">
+            <AlertCircle className="w-4 h-4 text-rose-500 shrink-0 mt-0.5" />
+            <p className="text-[11px] text-rose-700 dark:text-rose-300 leading-relaxed">{prepError}</p>
+          </div>
+        )}
+
         {notes.map((n) => (
           <p key={n} className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">{n}</p>
         ))}
@@ -336,15 +377,16 @@ export const FacePatternEditor: React.FC = () => {
             Cancel
           </button>
           <button
-            onClick={apply}
-            disabled={draft === applied}
+            onClick={() => void apply()}
+            disabled={draft === applied || preparing}
             className="px-3 py-1.5 text-xs font-semibold text-fuchsia-700 dark:text-fuchsia-300 border border-fuchsia-300 dark:border-fuchsia-800 hover:bg-fuchsia-50 dark:hover:bg-fuchsia-950/40 disabled:opacity-40 disabled:hover:bg-transparent disabled:cursor-default rounded-lg transition-colors cursor-pointer"
           >
-            Apply
+            {preparing ? 'Loading font…' : 'Apply'}
           </button>
           <button
-            onClick={done}
-            className="px-4 py-1.5 text-xs font-bold text-white bg-fuchsia-600 hover:bg-fuchsia-500 rounded-lg transition-colors cursor-pointer"
+            onClick={() => void done()}
+            disabled={preparing}
+            className="px-4 py-1.5 text-xs font-bold text-white bg-fuchsia-600 hover:bg-fuchsia-500 disabled:opacity-50 rounded-lg transition-colors cursor-pointer"
           >
             Done
           </button>

@@ -1372,6 +1372,11 @@ function patternLookup(spec: PatternSpec, opts: PatternOptions, scale: number, u
     return { heightAt: r.heightAt, grid: uv.twistDeg === 0 ? r.grid : undefined };
   }
   const C = uv.wrapC;
+  // A figure is placed once, centred opposite the cut -- on the point picked.
+  if (spec.figure) {
+    const r = rectLookup(spec, opts, scale, C, uv.height, cellM, uv.twistDeg);
+    return { heightAt: (u, v) => r.heightAt(mod(u, C), v), wrap: { scaled: 1, blended: false } };
+  }
   const probe = rectLookup(spec, opts, scale, 1.6 * C, uv.height, cellM, uv.twistDeg);
   const repeat = findRepeat(probe.heightAt, C, uv.height, probe.grid.step);
   if (repeat) {
@@ -1727,6 +1732,12 @@ export function applySurfaceTextures(
     const { uv } = job;
     const look = patternLookup(spec, opts, scale, uv, job.cellM);
     if (look.wrap) job.report.wrap = look.wrap;
+    // A figure's 1s are what is cut, so an engraving sinks them rather than the ground.
+    if (spec.figure && job.depthM < 0) {
+      const heightAt = look.heightAt;
+      look.heightAt = (u, v) => 1 - heightAt(u, v);
+      if (look.grid) look.grid = { ...look.grid, data: look.grid.data.map((h) => 1 - h) };
+    }
 
     // Each vertex's place on the pattern, from the coarse face it was cut
     // from. One on a cut has a place on each side; either will do, since the

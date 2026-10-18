@@ -71,7 +71,7 @@ interface ModeChoice {
   hint: string;
   /** A lattice tool to switch to, or a gesture to start. */
   tool?: LatticeTool;
-  gesture?: 'move' | 'rotate' | 'scale' | 'inset' | 'measure-distance' | 'measure-angle' | 'round-edges' | 'pattern' | 'knife';
+  gesture?: 'move' | 'rotate' | 'scale' | 'inset' | 'measure-distance' | 'measure-angle' | 'round-edges' | 'pattern' | 'text' | 'knife';
   /** Put every tool away, leave sculpt or lattice mode, and drop the selection. */
   none?: true;
   /** Open sculpt or lattice mode on the selected body. */
@@ -117,6 +117,7 @@ const SELECT_MULTIPLE: ModeChoice = { key: '⇧', label: 'Select multiple', mult
 
 const ROUND_EDGES: ModeChoice = { key: 'E', label: 'Round edges', gesture: 'round-edges', hint: 'Round or bevel edges of the selected part: click edges or faces, pick a size' };
 const PATTERN_FACE: ModeChoice = { key: 'T', label: 'Pattern a face', gesture: 'pattern', hint: 'Click a face of the selected part to carve or emboss one of the Generators patterns into it' };
+const TEXT_FACE: ModeChoice = { key: '⇧T', label: 'Text on a face', gesture: 'text', hint: 'Click a face of the selected part to engrave or emboss lettering on it, in any Google font, straight or along a curve' };
 
 /**
  * Measuring, which is not modelling and is offered whether anything is selected
@@ -291,7 +292,7 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
         ...(enterChoice ? [enterChoice] : []),
         ...(latticeNodeId ? LATTICE_TOOLS : []),
         ...(canGesture ? [...GESTURES, ...(latticeNodeId ? [LATTICE_INSET] : [BODY_INSET, KNIFE])] : []),
-        ...(selectedNodeId && !latticeNodeId && !sculptNodeId ? [ROUND_EDGES, PATTERN_FACE] : []),
+        ...(selectedNodeId && !latticeNodeId && !sculptNodeId ? [ROUND_EDGES, PATTERN_FACE, TEXT_FACE] : []),
         ...MEASURE,
       ];
 

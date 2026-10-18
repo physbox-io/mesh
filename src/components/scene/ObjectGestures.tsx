@@ -429,14 +429,14 @@ export const ObjectGestureController = () => {
   }, [scene, camera, gl]);
 
   /** Opens the pattern dialog on the face of the selected body under the pointer (T), or says why not. */
-  const pickPatternAt = useCallback((x: number, y: number): boolean => {
+  const pickPatternAt = useCallback((x: number, y: number, pattern?: string): boolean => {
     const at = bodyRayAt(x, y);
     const pick = at && pickPatternFace(at.node, at.origin, at.direction);
     if (!at || !pick) {
-      flash('Point at a face of the selected part to put a pattern on it');
+      flash(pattern === 'text' ? 'Point at a face of the selected part to put text on it' : 'Point at a face of the selected part to put a pattern on it');
       return false;
     }
-    useStore.getState().openFacePattern({ nodeId: at.node.id, ...pick });
+    useStore.getState().openFacePattern({ nodeId: at.node.id, ...pick, ...(pattern ? { pattern } : {}) });
     return true;
   }, [bodyRayAt, flash]);
 
@@ -494,6 +494,8 @@ export const ObjectGestureController = () => {
 
   /** Set by the mode menu's "Pattern a face": the next click picks the face. */
   const patternArmed = useRef(false);
+  /** ...and the pattern it opens with: 'text' from "Text on a face". */
+  const armedPattern = useRef<string | undefined>(undefined);
 
   /**
    * Where the pointer is, on the surface a move is measured against.
@@ -1268,13 +1270,13 @@ export const ObjectGestureController = () => {
       if (useStore.getState().isPlaying) return;
       if (key === 'escape' && patternArmed.current) { patternArmed.current = false; showGlow(null, null, null); setGestureStatus(null); return; }
       if (key === 't') {
-        // A pattern on the face under the pointer. Not while another tool
-        // owns the pointer, for the same reasons as the gestures below.
+        // A pattern on the face under the pointer; with Shift, text. Not while
+        // another tool owns the pointer, for the same reasons as the gestures below.
         const store = useStore.getState();
         if (store.latticeNodeId || store.sculptNodeId || store.paintMode || store.measureMode) return;
         if (!store.selectedNodeId) return;
         event.preventDefault();
-        pickPatternAt(pointer.current.x, pointer.current.y);
+        pickPatternAt(pointer.current.x, pointer.current.y, event.shiftKey ? 'text' : undefined);
         return;
       }
       if (key === 'g' || key === 'm') { begin('move'); return; }
@@ -1295,9 +1297,10 @@ export const ObjectGestureController = () => {
       if (useStore.getState().isPlaying) return;
       // From the menu the pointer is on the menu, not on a face, so the next
       // click on the part is the pick.
-      patternArmed.current = kind === 'pattern';
-      if (kind === 'pattern') {
-        flash('Click a face of the selected part to put a pattern on it');
+      patternArmed.current = kind === 'pattern' || kind === 'text';
+      armedPattern.current = kind === 'text' ? 'text' : undefined;
+      if (patternArmed.current) {
+        flash(kind === 'text' ? 'Click a face of the selected part to put text on it' : 'Click a face of the selected part to put a pattern on it');
         glowUnderPointer(pointer.current.x, pointer.current.y);
       } else showGlow(null, null, null);
       if (kind === 'move' || kind === 'scale' || kind === 'inset') begin(kind);
@@ -1358,7 +1361,7 @@ export const ObjectGestureController = () => {
         if (event.target !== handlers.current.canvas) return;
         event.preventDefault();
         event.stopPropagation();
-        handlers.current.pickPatternAt(event.clientX, event.clientY);
+        handlers.current.pickPatternAt(event.clientX, event.clientY, armedPattern.current);
         return;
       }
       event.preventDefault();

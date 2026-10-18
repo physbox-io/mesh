@@ -2,6 +2,7 @@ import React from 'react';
 import { Shuffle } from 'lucide-react';
 import { NumberInput } from '@physbox-io/ui';
 import type { PatternOptions, PatternSpec } from '../utils/surfacePatterns';
+import { FontPicker } from './FontPicker';
 
 /**
  * A surface pattern's own controls, drawn from its `fields` (see
@@ -29,7 +30,7 @@ export const PatternFields: React.FC<{
   onChange: (key: string, value: number | string | undefined) => void;
 }> = ({ spec, options, onChange: set }) => (
   <>
-    {spec.fields.map((f) => (
+    {spec.fields.filter((f) => !f.when || f.when.is.includes(String(options[f.when.key] ?? ''))).map((f) => (
       <React.Fragment key={f.key}>
         {f.section && (
           <div className="pt-2 mt-1 border-t border-slate-200 dark:border-slate-800 text-[10px] font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
@@ -60,6 +61,36 @@ function fieldControl(
           onChange={(v) => set(f.key, v)}
           className={inputClass}
         />
+      </Field>
+    );
+  }
+  if (f.kind === 'text') {
+    const value = String(options[f.key] ?? '');
+    return (
+      <Field key={f.key} label={f.label} hint={f.hint}>
+        {f.multiline ? (
+          <textarea
+            value={value}
+            rows={Math.min(6, Math.max(2, value.split('\n').length))}
+            placeholder={f.placeholder}
+            onChange={(e) => set(f.key, e.target.value)}
+            className={`${inputClass} resize-y font-medium`}
+          />
+        ) : (
+          <input
+            value={value}
+            placeholder={f.placeholder}
+            onChange={(e) => set(f.key, e.target.value)}
+            className={inputClass}
+          />
+        )}
+      </Field>
+    );
+  }
+  if (f.kind === 'font') {
+    return (
+      <Field key={f.key} label={f.label} hint={f.hint}>
+        <FontPicker value={String(options[f.key] ?? '')} onChange={(family) => set(f.key, family)} />
       </Field>
     );
   }

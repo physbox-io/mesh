@@ -321,6 +321,32 @@ is what makes it cheap: the drawn mesh, the colliders, mass and every exporter g
 
 ---
 
+### Text on a face
+
+Lettering is a surface pattern (`utils/textPattern.ts`, id `text`), so it goes on any face the
+way the T-key patterns do (`utils/surfaceTexture.ts`): wrapped round a cylinder, drawn and
+exported with the part, engraved on the laser's engrave layer, carved by the CNC exporters,
+and never seen by the physics. Shift+T, "Text on a face" in the mode menu or the Texture tab
+opens the pattern editor on it.
+
+- **The font is needed once.** `PatternSpec.prepare` fetches the font, lays the text out
+  (`utils/textOutline.ts`) and saves the outline in the pattern's options as a string
+  (`outline`, with `outlineSig` naming what it was laid out from). `build` only fills that
+  outline in, so the texture worker, exporters, reloaded scenes and tests need no font and no
+  network. Anything that writes a text texture (the editor's Apply, `applySinglePatternToBody`
+  for MCP) must call `prepare` first.
+- **Fonts come from Fontsource, as static files** (`utils/fontLibrary.ts`): one TTF per weight
+  and script subset from jsDelivr, only the subsets the text uses. Not Google's variable
+  files: opentype.js misapplies some glyphs' variation deltas (Montserrat's bold "o" came out
+  a wobbling hairline). The google/fonts repository is only the fallback.
+- **Filled by the nonzero rule.** Glyphs overlap their own pieces; even-odd punches holes.
+- **A figure, not a texture.** `PatternSpec.figure` marks a pattern whose 1s are the figure:
+  engraving sinks them rather than the ground, and round a full wrap it is placed once on the
+  point picked instead of being resized to repeat.
+- Text on a path: straight (lines, alignment, optional box), round a circle (`top` reads
+  clockwise over it, `bottom` left to right under the same ring), a wave, or any SVG path in
+  mm. Each glyph is turned rigidly to the path at its middle.
+
 ### Prepare for Casting (draft and edge breaks)
 
 The Cast dialog's **Prepare for Casting** switch (and `SET_CAST_PREP`) puts what a pattern needs onto

@@ -64,9 +64,9 @@ export function PresetPicker({ presets, hasUnsavedWork }: { presets: PresetActio
           ))}
         </optgroup>
 
-        {/* Generators: patterns built to the size of the stock, not saved scenes. */}
+        {/* Generators: patterns built to the size of the stock, not saved scenes. Text goes on a face instead. */}
         {PATTERN_GROUPS.map((group) => {
-          const inGroup = SURFACE_PATTERNS.filter((p) => (p.group ?? 'Nature') === group);
+          const inGroup = SURFACE_PATTERNS.filter((p) => !p.figure && (p.group ?? 'Nature') === group);
           if (inGroup.length === 0) return null;
           return (
             <optgroup key={group} label={`🔧 Generators: ${group}`} className="bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300">

@@ -183,6 +183,8 @@ function castPatternRay(node: SceneNode, origin: number[], direction: number[]):
 /** The face the pattern dialog is open on. `index` is the pattern being edited; absent for a new one. */
 export interface FacePatternTarget extends PatternPick {
   nodeId: string;
+  /** The pattern a new one starts as, when the way in chose it (Text on a face). */
+  pattern?: string;
 }
 
 /**

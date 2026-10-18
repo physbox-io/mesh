@@ -51,6 +51,7 @@ import { FITTED_PATTERNS } from './patternsFitted';
 import { GEOMETRIC_PATTERNS } from './patternsGeometric';
 import { NATURAL_PATTERNS } from './patternsNatural';
 import { ORNAMENT_PATTERNS } from './patternsOrnament';
+import { TEXT_PATTERN } from './textPattern';
 
 export {
   DEFAULT_DEPTH_FRACTION,
@@ -1707,9 +1708,11 @@ const CORE_PATTERNS: PatternSpec[] = [
 
 /**
  * Every pattern, each wrapped with the layout controls (fit, frame, symmetry,
- * fade, soften) and listed in the order of its menu group.
+ * fade, soften) and listed in the order of its menu group. Text comes first
+ * and is not wrapped: it places itself, and a frame or a mirror is not
+ * something lettering wants.
  */
-export const SURFACE_PATTERNS: PatternSpec[] = [
+export const SURFACE_PATTERNS: PatternSpec[] = [TEXT_PATTERN, ...[
   ...ORNAMENT_PATTERNS,
   ...FITTED_PATTERNS,
   ...CORE_PATTERNS,
@@ -1718,7 +1721,7 @@ export const SURFACE_PATTERNS: PatternSpec[] = [
 ]
   .map((spec, i) => ({ spec, i }))
   .sort((a, b) => groupRank(a.spec) - groupRank(b.spec) || a.i - b.i)
-  .map(({ spec }) => withLayout(spec));
+  .map(({ spec }) => withLayout(spec))];
 
 function groupRank(spec: PatternSpec): number {
   const i = PATTERN_GROUPS.indexOf(spec.group ?? 'Nature');
