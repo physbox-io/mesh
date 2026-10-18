@@ -413,8 +413,12 @@ function facingLines(
     lines.push(`; Facing pass ${p} of ${passes} at Z${f(z)}`);
     let forward = true;
     let first = true;
-    for (let y = y0; y <= y1 + 1e-6; y += stepover) {
-      const yy = Math.min(y, y1);
+    // Rows evenly spaced from edge to edge, none further apart than the
+    // stepover: stepping by the stepover itself stopped short of the far edge.
+    const rows = Math.max(1, Math.ceil((y1 - y0) / stepover - 1e-9));
+    const pitch = (y1 - y0) / rows;
+    for (let row = 0; row <= rows; row++) {
+      const yy = y0 + row * pitch;
       const from = forward ? x0 : x1;
       const to = forward ? x1 : x0;
       if (first) {
@@ -424,7 +428,7 @@ function facingLines(
         first = false;
       } else {
         lines.push(`G1 X${f(from)} Y${f(yy)} F${Math.round(options.cutFeedrate)}`);
-        distanceMm += stepover;
+        distanceMm += pitch;
       }
       lines.push(`G1 X${f(to)} Y${f(yy)} F${Math.round(options.cutFeedrate)}`);
       distanceMm += Math.abs(to - from);
@@ -519,6 +523,39 @@ export function generateLaserCutGcode(
   let totalCutDistanceMm = 0;
   let attachmentCount = 0;
 
+  /*
+   * Facing and profiling are two bits when the facing bit is a surfacing
+   * cutter, and the operator swaps between them: M6 parks and holds the job
+   * (Mesh's streamer lifts, parks and waits), and the new bit is touched off
+   * before it goes on. Whichever is needed first is the one fitted at the start.
+   */
+  const facingBit = Math.max(1, options.facingBitDiameterMm);
+  const twoBits = options.pauseOnToolChange && Math.abs(facingBit - options.bitDiameterMm) > 0.01;
+  let fitted: 'facing' | 'profile' | null = null;
+  const fit = (bit: 'facing' | 'profile', sIdx: number) => {
+    if (fitted !== null && fitted !== bit && twoBits) {
+      const dia = bit === 'facing' ? facingBit : options.bitDiameterMm;
+      const what = bit === 'facing' ? 'facing bit' : 'end mill for the profiles';
+      const toolNumber = bit === 'facing' ? 1 : 2;
+      operations.push({ id: `tool_${operations.length}`, name: `Fit the ${f(dia)}mm ${what}`, type: 'pause_tool', sheetIndex: sIdx, toolNumber });
+      const travel = f(Math.max(options.safeZ, 20));
+      lines.push(``);
+      lines.push(`; --- TOOL CHANGE ---`);
+      lines.push(`G0 Z${travel}`);
+      lines.push(`M5 ; spindle off for the tool change`);
+      lines.push(`G0 X0.000 Y0.000 ; park over the work origin`);
+      lines.push(`T${toolNumber} M6 ; fit the ${f(dia)}mm ${what} and re-zero Z`);
+      // The operator has just touched the new bit off on the work.
+      lines.push(`G0 Z${travel} ; back to travel height after the change`);
+      lines.push(`M3 S${Math.round(options.spindleRpm)}`);
+      lines.push(`G4 P2`);
+    }
+    fitted = bit;
+  };
+  // How far each faced panel's top now is below Z0, so its profile starts there.
+  const facedDownMm = new Map<string, number>();
+  let faceMinX = Infinity, faceMinY = Infinity, faceMaxX = -Infinity, faceMaxY = -Infinity;
+
   for (let sIdx = 0; sIdx < sheetIndices.length; sIdx++) {
     const sKey = sheetIndices[sIdx];
     const sheetPanels = sheetMap.get(sKey)!;
@@ -572,6 +609,15 @@ export function generateLaserCutGcode(
         // goods are not flat enough for the attempt to mean anything.
         if (!(removal > 0.1)) continue;
 
+        fit('facing', sIdx);
+        facedDownMm.set(panel.id, removal);
+        // The facing bit reaches a whole diameter past the panel: its centre
+        // starts a radius outside so that the edges keep no lip.
+        const at = panel.placedPos2D || { x: 0, y: 0 };
+        faceMinX = Math.min(faceMinX, at.x - facingBit);
+        faceMinY = Math.min(faceMinY, at.y - facingBit);
+        faceMaxX = Math.max(faceMaxX, at.x + (panel.width2D || 0) + facingBit);
+        faceMaxY = Math.max(faceMaxY, at.y + (panel.height2D || 0) + facingBit);
         operations.push({
           id: `${panel.id}_facing`,
           name: `${panel.name} — face ${f(stockMm!)}mm down to ${f(target)}mm`,
@@ -588,7 +634,9 @@ export function generateLaserCutGcode(
 
     for (const panel of sheetPanels) {
       const pos = panel.placedPos2D || { x: 0, y: 0 };
+      if (options.machineMode === 'cnc') fit('profile', sIdx);
       lines.push(`; --- Panel: ${panel.name} ---`);
+      const fromDepthMm = facedDownMm.get(panel.id) ?? 0;
 
       // What the tool actually follows. On a laser that is the geometry itself;
       // on a router it stands half a bit outside the outline and half a bit
@@ -650,7 +698,7 @@ export function generateLaserCutGcode(
         });
 
         totalCutDistanceMm += polygonPerimeter(cutout);
-        lines.push(...generateLoopGcode(cutout, pos, sheetOptions));
+        lines.push(...generateLoopGcode(cutout, pos, sheetOptions, [], fromDepthMm));
       }
 
       // 2. Cut outer boundary polygon LAST
@@ -672,7 +720,7 @@ export function generateLaserCutGcode(
         const spans = planAttachments(polygonPerimeter(outline), options);
         attachmentCount += spans.length;
         totalCutDistanceMm += polygonPerimeter(outline);
-        lines.push(...generateLoopGcode(outline, pos, sheetOptions, spans));
+        lines.push(...generateLoopGcode(outline, pos, sheetOptions, spans, fromDepthMm));
       }
     }
   }
@@ -720,10 +768,10 @@ export function generateLaserCutGcode(
     // job really occupies — which is what the framing trace and the travel
     // check downstream both need to know.
     bounds: {
-      minX: minX - radius,
-      minY: minY - radius,
-      maxX: maxX + radius,
-      maxY: maxY + radius,
+      minX: Math.min(minX - radius, faceMinX),
+      minY: Math.min(minY - radius, faceMinY),
+      maxX: Math.max(maxX + radius, faceMaxX),
+      maxY: Math.max(maxY + radius, faceMaxY),
     },
     attachmentCount,
     compensationMm: radius,
@@ -841,8 +889,10 @@ export function generateFramingGcode(
     `; --- LASER FRAMING / GUIDE TRACE ---`,
     `G21 ; mm`,
     `G90 ; absolute`,
-    `G0 X${formatNum(minX)} Y${formatNum(minY)} F${options.travelFeedrate}`,
   ];
+  // A router has usually just been zeroed on the stock: lift before crossing it.
+  if (options.machineMode !== 'laser') lines.push(`G0 Z${formatNum(options.safeZ)}`);
+  lines.push(`G0 X${formatNum(minX)} Y${formatNum(minY)} F${options.travelFeedrate}`);
 
   if (options.machineMode === 'laser') {
     lines.push(`M3 S${laserGuideS(options)} ; Low power guide dot`);
