@@ -398,6 +398,8 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
       laserEngravePower: f.engravePower,
       engraveFeedrate: f.engraveFeedrate,
       cutDepthZ: f.materialThicknessMm,
+      // Each sheet's own thickness, for a rack of mixed stock.
+      sheetStockThicknessMm: exportResult.sheets?.map((s) => s.thicknessMm),
       zStepdown: Math.min(f.materialThicknessMm, 3.0),
       attachmentsEnabled: f.attachments,
       attachmentWidthMm: f.attachmentWidthMm,

@@ -551,6 +551,13 @@ export function generateLaserCutGcode(
     lines.push(`; SHEET ${sIdx + 1} of ${sheetCount}`);
     lines.push(`; ==================================================`);
 
+    // A mixed rack has sheets of different thicknesses, and a router has to go
+    // through each one: the single cut depth is only right for the first row.
+    const sheetStockMm = options.sheetStockThicknessMm?.[sKey];
+    const sheetOptions: GcodeExportOptions = options.machineMode === 'cnc' && sheetStockMm !== undefined
+      ? { ...options, cutDepthZ: sheetStockMm }
+      : options;
+
     /*
      * Facing first, and for the whole sheet before any profile is cut. A panel
      * whose neighbour has already been cut free is a panel sitting on a sheet
@@ -643,7 +650,7 @@ export function generateLaserCutGcode(
         });
 
         totalCutDistanceMm += polygonPerimeter(cutout);
-        lines.push(...generateLoopGcode(cutout, pos, options));
+        lines.push(...generateLoopGcode(cutout, pos, sheetOptions));
       }
 
       // 2. Cut outer boundary polygon LAST
@@ -665,7 +672,7 @@ export function generateLaserCutGcode(
         const spans = planAttachments(polygonPerimeter(outline), options);
         attachmentCount += spans.length;
         totalCutDistanceMm += polygonPerimeter(outline);
-        lines.push(...generateLoopGcode(outline, pos, options, spans));
+        lines.push(...generateLoopGcode(outline, pos, sheetOptions, spans));
       }
     }
   }
