@@ -6,7 +6,7 @@ import type { LaserPanel, Point2D } from './laserCutExporter';
 import type { ContourSliceResult } from './contourSliceExporter';
 import { estimateGcodeTime } from './timeEstimate';
 import { DEFAULT_MOTION_PROFILE, type MotionProfile } from './motionProfile';
-import { offsetRegion, offsetNestedLoops } from './polygonOffset';
+import { offsetRegion, offsetNestedLoops, nestingDepths } from './polygonOffset';
 import { clearingRings } from './adaptiveClearing';
 
 export interface GcodeExportOptions {
@@ -1080,6 +1080,12 @@ export function generateContourSliceGcode(
       }
       cutPaths = comp.paths;
     }
+    // Innermost first: a hole, dowel hole or island is cut while the layer is
+    // still held by the sheet, and the outline that frees it goes last.
+    const depths = nestingDepths(cutPaths);
+    const order = cutPaths.map((_, i) => i).sort((a, b) => depths[b] - depths[a]);
+    const cutDepths = order.map((i) => depths[i]);
+    cutPaths = order.map((i) => cutPaths[i]);
 
     const offset: Point2D = layer.placedPos2D && layer.modelOffset2D
       ? {
@@ -1133,10 +1139,10 @@ export function generateContourSliceGcode(
         maxY = Math.max(maxY, py);
       }
 
-      // Every contour gets attachments, holes included: a slice's holes are voids
-      // in the model rather than joinery, and their slugs are big enough to be
-      // worth holding down.
-      const spans = planAttachments(polygonPerimeter(contour), options);
+      // Only the material's outer edges are held. Tabs in a hole would tie the
+      // slug to the part, to be broken out and pared off inside the hole, and
+      // the holes are cut before the outline, while the layer is still held.
+      const spans = cutDepths[cIdx] % 2 === 0 ? planAttachments(polygonPerimeter(contour), options) : [];
       attachmentCount += spans.length;
       totalCutDistanceMm += polygonPerimeter(contour);
       lines.push(...generateLoopGcode(contour, offset, options, spans, fromDepthMm));

@@ -107,3 +107,52 @@ describe('contour stack nesting', () => {
     expect(result.layers![1].sheetIndex).toBe(0);
   });
 });
+
+describe('contour layer cut order', () => {
+  const square = (lo: number, hi: number) => [
+    { x: lo, y: lo }, { x: hi, y: lo }, { x: hi, y: hi }, { x: lo, y: hi },
+  ];
+  const circle = (cx: number, cy: number, r: number) =>
+    Array.from({ length: 24 }, (_, i) => ({ x: cx + r * Math.cos((i / 24) * 2 * Math.PI), y: cy + r * Math.sin((i / 24) * 2 * Math.PI) }));
+  // A 100 mm square with a 40 mm window and a dowel hole: the outline first in
+  // the list, as the slicer hands it over.
+  const layer = {
+    index: 0, z: 0.005, pieceCount: 1, areaMm2: 8400,
+    loops: [square(0, 100), square(30, 70).reverse(), circle(15, 15, 1.5)],
+    sheetIndex: 0, placedPos2D: { x: 10, y: 10 }, modelOffset2D: { x: 0, y: 100 }, width2D: 100, height2D: 100,
+  };
+  const result = { success: true, layers: [layer], sheetCount: 1 };
+
+  /** The program split into loops, each with how far its points reach from the layer's centre. */
+  function loops(gcode: string) {
+    const out: { reach: number; text: string[] }[] = [];
+    for (const line of gcode.split('\n')) {
+      if (/^G0 X/.test(line)) out.push({ reach: 0, text: [] });
+      const cur = out[out.length - 1];
+      if (!cur) continue;
+      cur.text.push(line);
+      const x = /X(-?[\d.]+)/.exec(line), y = /Y(-?[\d.]+)/.exec(line);
+      if (x && y) cur.reach = Math.max(cur.reach, Math.hypot(parseFloat(x[1]) - 60, parseFloat(y[1]) - 60));
+    }
+    return out.filter((l) => l.text.some((t) => /^G1 X/.test(t)));
+  }
+
+  for (const machineMode of ['cnc', 'laser'] as const) {
+    it(`cuts the holes before the ${machineMode} outline that frees the layer, and holds only the outline`, () => {
+      const g = generateContourSliceGcode(result, {
+        ...DEFAULT_GCODE_OPTIONS, machineMode, cutDepthZ: 6, bitDiameterMm: 1,
+        attachmentsEnabled: true, attachmentWidthMm: 3, attachmentSpacingMm: 40,
+      });
+      const cut = loops(g.gcode);
+      expect(cut).toHaveLength(3);
+      // The outline reaches the corners, ~71 mm out; the window and dowel do not.
+      expect(cut[2].reach).toBeGreaterThan(65);
+      expect(cut[0].reach).toBeLessThan(65);
+      expect(cut[1].reach).toBeLessThan(65);
+      const held = (l: { text: string[] }) => l.text.some((t) => /attachment|Z-[\d.]+ F/.test(t) && /^(M5|G1 X.*Z)/.test(t));
+      expect(held(cut[2])).toBe(true);
+      expect(held(cut[0])).toBe(false);
+      expect(held(cut[1])).toBe(false);
+    });
+  }
+});
