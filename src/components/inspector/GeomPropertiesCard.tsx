@@ -156,7 +156,7 @@ export function GeomPropertiesCard({ node: selectedNode }: { node: SceneNode }) 
             <div className="pt-2 border-t border-slate-100 flex flex-col gap-1 text-[11px] text-slate-600">
               <div className="flex justify-between items-center font-mono text-[10px]">
                 <span>Volume:</span>
-                <span>{(volM3 * 1000).toFixed(2)} L ({(volM3 * 1e6).toFixed(0)} cm³)</span>
+                <span>{(volM3 * 1000).toFixed(2)} L ({Math.round(volM3 * 1e9).toLocaleString()} mm³)</span>
               </div>
               <div className="flex justify-between items-center font-mono text-[10px]">
                 <span>Object Density:</span>
