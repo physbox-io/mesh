@@ -1027,27 +1027,32 @@ export function generateContourSliceGcode(
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   const warnings: string[] = [];
 
+  // Layers are nested several to a sheet, so the operator swaps material when
+  // the sheet changes, not at every layer. An older result without sheets
+  // falls back to one layer per sheet.
+  const sheetOf = (lIdx: number) => layers[lIdx].sheetIndex ?? lIdx;
   for (let lIdx = 0; lIdx < layers.length; lIdx++) {
     const layer = layers[lIdx];
     const loops = layer.loops || [];
+    const sheet = sheetOf(lIdx);
 
-    if (lIdx > 0 && options.pauseBetweenSheets) {
+    if (lIdx > 0 && sheet !== sheetOf(lIdx - 1) && options.pauseBetweenSheets) {
       operations.push({
-        id: `pause_layer_${lIdx + 1}`,
-        name: `Insert Slice Layer ${lIdx + 1} of ${layers.length}`,
+        id: `pause_sheet_${sheet + 1}`,
+        name: `Insert Sheet ${sheet + 1} of ${sheetCount}`,
         type: 'pause_sheet',
-        sheetIndex: lIdx,
+        sheetIndex: sheet,
       });
 
       lines.push(``);
-      lines.push(`; --- PAUSE: CONTOUR LAYER SWAP ---`);
+      lines.push(`; --- PAUSE: SHEET SWAP ---`);
       if (options.machineMode === 'laser') lines.push(`M5`);
       else {
         lines.push(`G0 Z${f(options.safeZ)}`);
         lines.push(`M5`);
       }
       lines.push(`G0 X0.000 Y0.000`);
-      lines.push(`M0 (PAUSE: Insert Slice Layer ${lIdx + 1} of ${layers.length})`);
+      lines.push(`M0 (PAUSE: Insert Sheet ${sheet + 1} of ${sheetCount})`);
       if (options.machineMode === 'cnc') {
         lines.push(`M3 S${Math.round(options.spindleRpm)}`);
         lines.push(`G4 P2`);
@@ -1056,7 +1061,7 @@ export function generateContourSliceGcode(
 
     lines.push(``);
     lines.push(`; ==================================================`);
-    lines.push(`; CONTOUR LAYER ${lIdx + 1} of ${layers.length} (Z = ${f(layer.z * 1000)}mm)`);
+    lines.push(`; CONTOUR LAYER ${lIdx + 1} of ${layers.length} on sheet ${sheet + 1} (Z = ${f(layer.z * 1000)}mm)`);
     lines.push(`; ==================================================`);
 
     // On a router the tool has to stand off each contour by its own radius, and
@@ -1099,7 +1104,7 @@ export function generateContourSliceGcode(
         id: `layer_${lIdx + 1}_facing`,
         name: `Layer ${lIdx + 1} — face ${f(sheetMm)}mm down to ${f(layer.facedToMm!)}mm`,
         type: 'facing',
-        sheetIndex: lIdx,
+        sheetIndex: sheet,
       });
       lines.push(`; --- Facing: ${f(removal)}mm off a ${f(sheetMm)}mm sheet, to ${f(layer.facedToMm!)}mm ---`);
       const faced = faceLayerLines(cutPaths, offset, removal, options);
@@ -1116,7 +1121,7 @@ export function generateContourSliceGcode(
         id: `layer_${lIdx + 1}_contour_${cIdx}`,
         name: `Layer ${lIdx + 1} Contour #${cIdx + 1}`,
         type: 'cut',
-        sheetIndex: lIdx,
+        sheetIndex: sheet,
       });
 
       for (const pt of contour) {

@@ -102,6 +102,9 @@ export interface ContourLayer {
    * and its *maximum* y, because plan-view y runs up and SVG y runs down.
    */
   modelOffset2D?: Point2D;
+  /** Which sheet the layer is cut from, 0 first. */
+  sheetIndex?: number;
+  /** Where the layer sits on its own sheet, mm from that sheet's corner. */
   placedPos2D?: Point2D;
   width2D?: number;
   height2D?: number;
@@ -1253,7 +1256,8 @@ export function exportContourSliceSvg(
       rowHeight = 0;
     }
 
-    layer.placedPos2D = { x: currentX, y: currentY + sheetIndex * sheetHeightMm };
+    layer.sheetIndex = sheetIndex;
+    layer.placedPos2D = { x: currentX, y: currentY };
     currentX += w + marginMm;
     if (h > rowHeight) rowHeight = h;
   }
@@ -1314,10 +1318,12 @@ export function exportContourSliceSvg(
   }
 
   svg += `  <g id="cut-paths" stroke="#FF0000" stroke-width="0.2" fill="none" stroke-linejoin="round" stroke-linecap="round">\n`;
+  // The sheets are drawn one below another, so each layer drops by its sheet.
+  const sheetTop = (layer: ContourLayer) => (layer.sheetIndex ?? 0) * sheetHeightMm;
   for (const layer of layers) {
     const pos = layer.placedPos2D!;
     const off = layer.modelOffset2D!;
-    svg += loopsPath(layer.loops, pos.x - off.x, pos.y + off.y);
+    svg += loopsPath(layer.loops, pos.x - off.x, sheetTop(layer) + pos.y + off.y);
   }
   svg += `  </g>\n\n`;
 
@@ -1329,7 +1335,7 @@ export function exportContourSliceSvg(
       const pos = layer.placedPos2D!;
       const off = layer.modelOffset2D!;
       const x = pos.x - off.x + anchor.x;
-      const y = pos.y + off.y - anchor.y;
+      const y = sheetTop(layer) + pos.y + off.y - anchor.y;
       svg += `    <text x="${x.toFixed(2)}" y="${y.toFixed(2)}">${escapeXml(String(layer.index + 1))}</text>\n`;
     }
     svg += `  </g>\n`;
