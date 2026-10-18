@@ -2963,6 +2963,326 @@ export const castingFlaskPreset: SceneGraph = {
 } as unknown as SceneGraph;
 
 /*
+ * 3 ft (915 mm) Tall Timber Flower Stand — built for the Timber & Joinery
+ * Breakdown pipeline (Bandsaw + Desktop CNC, wood & glue).
+ *
+ * Dimensions (all in metres; 1 m = 1000 mm):
+ * - Total height: 0.915 m (915 mm = 3 ft)
+ * - 4 corner legs: 45 × 45 × 891 mm at (±0.1475, ±0.1475, 0.4455), giving a
+ *   340 × 340 mm leg footprint with 250 mm clear span between inner leg faces
+ * - 4 upper aprons: 60 mm tall × 22 mm thick × 250 mm clear span at Z = 0.861 m
+ *   (flush with leg tops at Z = 0.891 m; outer faces set back 4 mm for a shadow reveal)
+ * - 4 lower anti-racking stretchers: 45 mm tall × 22 mm thick × 250 mm clear span
+ *   at Z = 0.220 m (220 mm off the floor)
+ * - Square plant platform top: 380 × 380 × 24 mm at Z = 0.903 m (20 mm overhang
+ *   past the legs on all four sides, top surface at 915 mm = 3 ft)
+ */
+const FS_LEG_HALF = 0.0225;         // 45 mm square legs
+const FS_LEG_H_HALF = 0.4455;       // 891 mm tall legs (top at 891 mm)
+const FS_LEG_OFFSET = 0.1475;       // outer leg span = 340 mm, inner span = 250 mm
+const FS_RAIL_SPAN_HALF = 0.125;    // 250 mm shoulder-to-shoulder span between legs
+const FS_RAIL_THICK_HALF = 0.011;   // 22 mm rail thickness
+const FS_TENON_LEN = 0.022;         // 22 mm tenon protruding from each rail end
+const FS_TENON_THK_HALF = 0.0048;   // 9.6 mm tenon thickness (fits 10 mm mortise with glue clearance)
+const FS_MORTISE_THK_HALF = 0.005;  // 10 mm mortise width
+const FS_APRON_H_HALF = 0.030;      // 60 mm tall upper aprons
+const FS_APRON_Z = 0.861;           // top of apron flush with top of legs (0.891 m)
+const FS_STRETCHER_H_HALF = 0.0225; // 45 mm tall lower stretchers
+const FS_STRETCHER_Z = 0.220;       // 220 mm centre height for lower stretchers
+
+/**
+ * Build a guaranteed-watertight manifold mesh from a non-uniform 3D rectilinear grid.
+ * Adjacent occupied cells share exact vertex indices; only boundary faces between occupied
+ * and empty cells are emitted with outward-pointing counter-clockwise winding.
+ */
+function buildRectGridMesh(
+  xs: number[],
+  ys: number[],
+  zs: number[],
+  occupied: (ix: number, iy: number, iz: number) => boolean,
+  coordOverride?: (ix: number, iy: number, iz: number, p: [number, number, number]) => [number, number, number],
+): { vertices: number[]; renderVertices: number[]; faces: number[] } {
+  const nx = xs.length - 1;
+  const ny = ys.length - 1;
+  const nz = zs.length - 1;
+  const occ = (ix: number, iy: number, iz: number) =>
+    ix >= 0 && ix < nx && iy >= 0 && iy < ny && iz >= 0 && iz < nz && occupied(ix, iy, iz);
+
+  const vertMap = new Map<number, number>();
+  const renderVertices: number[] = [];
+  const vertices: number[] = [];
+  const faces: number[] = [];
+
+  const strideY = nz + 1;
+  const strideX = (ny + 1) * strideY;
+  const vIdx = (ix: number, iy: number, iz: number): number => {
+    const key = ix * strideX + iy * strideY + iz;
+    const existing = vertMap.get(key);
+    if (existing !== undefined) return existing;
+    const raw: [number, number, number] = [xs[ix], ys[iy], zs[iz]];
+    const [x, y, z] = coordOverride ? coordOverride(ix, iy, iz, raw) : raw;
+    const idx = renderVertices.length / 3;
+    renderVertices.push(x, y, z);
+    vertices.push(x, z, -y);
+    vertMap.set(key, idx);
+    return idx;
+  };
+
+  const addQuad = (a: number, b: number, c: number, d: number) => {
+    faces.push(a, b, c, a, c, d);
+  };
+
+  for (let ix = 0; ix < nx; ix++) {
+    for (let iy = 0; iy < ny; iy++) {
+      for (let iz = 0; iz < nz; iz++) {
+        if (!occ(ix, iy, iz)) continue;
+        // -X face
+        if (!occ(ix - 1, iy, iz)) {
+          addQuad(vIdx(ix, iy, iz), vIdx(ix, iy, iz + 1), vIdx(ix, iy + 1, iz + 1), vIdx(ix, iy + 1, iz));
+        }
+        // +X face
+        if (!occ(ix + 1, iy, iz)) {
+          addQuad(vIdx(ix + 1, iy, iz), vIdx(ix + 1, iy + 1, iz), vIdx(ix + 1, iy + 1, iz + 1), vIdx(ix + 1, iy, iz + 1));
+        }
+        // -Y face
+        if (!occ(ix, iy - 1, iz)) {
+          addQuad(vIdx(ix, iy, iz), vIdx(ix + 1, iy, iz), vIdx(ix + 1, iy, iz + 1), vIdx(ix, iy, iz + 1));
+        }
+        // +Y face
+        if (!occ(ix, iy + 1, iz)) {
+          addQuad(vIdx(ix, iy + 1, iz), vIdx(ix, iy + 1, iz + 1), vIdx(ix + 1, iy + 1, iz + 1), vIdx(ix + 1, iy + 1, iz));
+        }
+        // -Z face
+        if (!occ(ix, iy, iz - 1)) {
+          addQuad(vIdx(ix, iy, iz), vIdx(ix, iy + 1, iz), vIdx(ix + 1, iy + 1, iz), vIdx(ix + 1, iy, iz));
+        }
+        // +Z face
+        if (!occ(ix, iy, iz + 1)) {
+          addQuad(vIdx(ix, iy, iz + 1), vIdx(ix + 1, iy, iz + 1), vIdx(ix + 1, iy + 1, iz + 1), vIdx(ix, iy + 1, iz + 1));
+        }
+      }
+    }
+  }
+
+  return { vertices, renderVertices, faces };
+}
+
+/**
+ * Corner leg mesh (45 × 45 × 891 mm) centered at its own origin with 4 mortise sockets
+ * (2 upper apron mortises + 2 lower stretcher mortises) cut into its two interior faces.
+ */
+function flowerStandLegNode(id: string, name: string, sx: -1 | 1, sy: -1 | 1): SceneNode {
+  const xs = [-FS_LEG_HALF, -FS_MORTISE_THK_HALF, 0, FS_MORTISE_THK_HALF, FS_LEG_HALF];
+  const ys = [-FS_LEG_HALF, -FS_MORTISE_THK_HALF, 0, FS_MORTISE_THK_HALF, FS_LEG_HALF];
+  const loZ = FS_STRETCHER_Z - FS_LEG_H_HALF; // -0.2255 m
+  const hiZ = FS_APRON_Z - FS_LEG_H_HALF;     // +0.4155 m
+  const loMortHalf = FS_STRETCHER_H_HALF - 0.006; // 16.5 mm (33 mm tall mortise)
+  const hiMortHalf = FS_APRON_H_HALF - 0.006;     // 24.0 mm (48 mm tall mortise)
+  const zs = [
+    -FS_LEG_H_HALF,
+    loZ - loMortHalf,
+    loZ + loMortHalf,
+    hiZ - hiMortHalf,
+    hiZ + hiMortHalf,
+    FS_LEG_H_HALF,
+  ];
+
+  const mesh = buildRectGridMesh(xs, ys, zs, (ix, iy, iz) => {
+    const inMortiseBand = iz === 1 || iz === 3;
+    if (!inMortiseBand) return true;
+    const inInnerX = (sx < 0 ? ix >= 2 : ix <= 1) && (iy === 1 || iy === 2);
+    const inInnerY = (sy < 0 ? iy >= 2 : iy <= 1) && (ix === 1 || ix === 2);
+    return !(inInnerX || inInnerY);
+  });
+
+  return {
+    id,
+    name,
+    type: 'body',
+    pos: [sx * FS_LEG_OFFSET, sy * FS_LEG_OFFSET, FS_LEG_H_HALF],
+    joints: [],
+    geoms: [
+      {
+        name: `${id}_mesh`,
+        type: 'mesh',
+        size: [1],
+        dynamic: true,
+        pos: [0, 0, 0],
+        vertices: mesh.vertices,
+        renderVertices: mesh.renderVertices,
+        faces: mesh.faces,
+        rgba: [0.55, 0.37, 0.22, 1],
+      },
+    ],
+    children: [],
+  };
+}
+
+/**
+ * Apron or stretcher rail mesh with 22 mm tenons on both ends, 6 mm all-around
+ * anti-racking shoulders, and 45° mitered tenon tips so perpendicular rails meet
+ * cleanly inside the 45 mm corner legs.
+ */
+function flowerStandRailNode(
+  id: string,
+  name: string,
+  axis: 'x' | 'y',
+  sideSign: -1 | 1,
+  zCenter: number,
+  hHalf: number,
+  rgba: [number, number, number, number],
+): SceneNode {
+  const totalHalf = FS_RAIL_SPAN_HALF + FS_TENON_LEN; // 0.147 m (294 mm total)
+  const tenonHHalf = hHalf - 0.0062;
+  const us = [-totalHalf, -FS_RAIL_SPAN_HALF, FS_RAIL_SPAN_HALF, totalHalf];
+  const vs = [-FS_RAIL_THICK_HALF, -FS_TENON_THK_HALF, FS_TENON_THK_HALF, FS_RAIL_THICK_HALF];
+  const zs = [-hHalf, -tenonHHalf, tenonHHalf, hHalf];
+
+  const xs = axis === 'x' ? us : vs;
+  const ys = axis === 'x' ? vs : us;
+
+  const mesh = buildRectGridMesh(
+    xs,
+    ys,
+    zs,
+    (ix, iy, iz) => {
+      const iu = axis === 'x' ? ix : iy;
+      const iv = axis === 'x' ? iy : ix;
+      if (iu === 1) return true; // main shoulder-to-shoulder body (250 mm)
+      // Tenon ends (iu === 0 or iu === 2): only center thickness & height cell is occupied
+      return iv === 1 && iz === 1;
+    },
+    (ix, iy, _iz, [x, y, z]) => {
+      // Bevel the inner face of each tenon tip at 45° so perpendicular tenons don't collide inside the leg
+      const iu = axis === 'x' ? ix : iy;
+      const iv = axis === 'x' ? iy : ix;
+      const isTipEnd = iu === 0 || iu === 3;
+      const isInnerTenonCheek = sideSign < 0 ? iv === 2 : iv === 1;
+      if (isTipEnd && isInnerTenonCheek) {
+        const miterPullback = FS_TENON_THK_HALF * 2; // 9.6 mm -> exact 45° miter
+        if (axis === 'x') {
+          return [x + (iu === 0 ? miterPullback : -miterPullback), y, z];
+        } else {
+          return [x, y + (iu === 0 ? miterPullback : -miterPullback), z];
+        }
+      }
+      return [x, y, z];
+    },
+  );
+
+  const pos: [number, number, number] =
+    axis === 'x' ? [0, sideSign * FS_LEG_OFFSET, zCenter] : [sideSign * FS_LEG_OFFSET, 0, zCenter];
+
+  return {
+    id,
+    name,
+    type: 'body',
+    pos,
+    joints: [],
+    geoms: [
+      {
+        name: `${id}_mesh`,
+        type: 'mesh',
+        size: [1],
+        dynamic: true,
+        pos: [0, 0, 0],
+        vertices: mesh.vertices,
+        renderVertices: mesh.renderVertices,
+        faces: mesh.faces,
+        rgba,
+      },
+    ],
+    children: [],
+  };
+}
+
+/**
+ * Edge-glued plant platform plank (380 × 190 × 24 mm) with 3 mating alignment tenon/socket
+ * tabs along the center glue seam (Y = 0) so pulling the two top planks apart reveals the joint.
+ */
+function flowerStandPlankNode(id: string, name: string, sideY: -1 | 1, rgba: [number, number, number, number]): SceneNode {
+  const xs = [-0.190, -0.122, -0.098, -0.012, 0.012, 0.098, 0.122, 0.190];
+  // Local Y is centered at sideY * 0.095 m; the seam at world Y = 0 is at local y = -sideY * 0.095.
+  // Tabs protrude 10 mm across the seam from Top_Plank_1 (sideY = -1) into sockets in Top_Plank_2 (sideY = +1).
+  const ys =
+    sideY < 0
+      ? [-0.095, 0.095, 0.105] // front plank: body [-0.095..0.095], tabs [0.095..0.105]
+      : [-0.095, -0.0845, 0.095]; // back plank: socket cutout in [-0.095..-0.0845]
+  const zs = [-0.012, -0.004, 0.004, 0.012];
+
+  const isTabX = (ix: number) => ix === 1 || ix === 3 || ix === 5;
+
+  const mesh = buildRectGridMesh(xs, ys, zs, (ix, iy, iz) => {
+    if (sideY < 0) {
+      if (iy === 0) return true; // main front plank body
+      return isTabX(ix) && iz === 1; // 3 protruding alignment tabs on seam edge
+    } else {
+      if (iy === 1) return true; // main back plank body
+      return !(isTabX(ix) && iz === 1); // 3 matching alignment sockets on seam edge
+    }
+  });
+
+  return {
+    id,
+    name,
+    type: 'body',
+    pos: [0, sideY * 0.095, 0.903],
+    joints: [],
+    geoms: [
+      {
+        name: `${id}_mesh`,
+        type: 'mesh',
+        size: [1],
+        dynamic: true,
+        pos: [0, 0, 0],
+        vertices: mesh.vertices,
+        renderVertices: mesh.renderVertices,
+        faces: mesh.faces,
+        rgba,
+      },
+    ],
+    children: [],
+  };
+}
+
+export const flowerStandPreset: SceneGraph = {
+  nodes: [
+    {
+      id: 'flower_stand',
+      name: '3ft Flower Stand',
+      type: 'body',
+      pos: [0, 0, 0],
+      joints: [],
+      geoms: [],
+      children: [
+        // 4 Corner Legs with Upper & Lower Mortise Sockets
+        flowerStandLegNode('Leg_FL', 'Front-Left Leg (Leg_FL)', -1, -1),
+        flowerStandLegNode('Leg_FR', 'Front-Right Leg (Leg_FR)', 1, -1),
+        flowerStandLegNode('Leg_BL', 'Back-Left Leg (Leg_BL)', -1, 1),
+        flowerStandLegNode('Leg_BR', 'Back-Right Leg (Leg_BR)', 1, 1),
+
+        // 4 Upper Aprons with Shoulders & 45°-Mitered Tenons
+        flowerStandRailNode('Apron_Front', 'Front Apron (Apron_Front)', 'x', -1, FS_APRON_Z, FS_APRON_H_HALF, [0.68, 0.47, 0.29, 1]),
+        flowerStandRailNode('Apron_Back', 'Back Apron (Apron_Back)', 'x', 1, FS_APRON_Z, FS_APRON_H_HALF, [0.68, 0.47, 0.29, 1]),
+        flowerStandRailNode('Apron_Left', 'Left Apron (Apron_Left)', 'y', -1, FS_APRON_Z, FS_APRON_H_HALF, [0.68, 0.47, 0.29, 1]),
+        flowerStandRailNode('Apron_Right', 'Right Apron (Apron_Right)', 'y', 1, FS_APRON_Z, FS_APRON_H_HALF, [0.68, 0.47, 0.29, 1]),
+
+        // 4 Lower Anti-Racking Stretchers with Shoulders & 45°-Mitered Tenons
+        flowerStandRailNode('Stretcher_Front', 'Front Stretcher (Stretcher_Front)', 'x', -1, FS_STRETCHER_Z, FS_STRETCHER_H_HALF, [0.63, 0.43, 0.26, 1]),
+        flowerStandRailNode('Stretcher_Back', 'Back Stretcher (Stretcher_Back)', 'x', 1, FS_STRETCHER_Z, FS_STRETCHER_H_HALF, [0.63, 0.43, 0.26, 1]),
+        flowerStandRailNode('Stretcher_Left', 'Left Stretcher (Stretcher_Left)', 'y', -1, FS_STRETCHER_Z, FS_STRETCHER_H_HALF, [0.63, 0.43, 0.26, 1]),
+        flowerStandRailNode('Stretcher_Right', 'Right Stretcher (Stretcher_Right)', 'y', 1, FS_STRETCHER_Z, FS_STRETCHER_H_HALF, [0.63, 0.43, 0.26, 1]),
+
+        // 2 Edge-Glued Top Platform Planks with Mating Seam Alignment Tabs/Sockets
+        flowerStandPlankNode('Top_Plank_1', 'Top Front Plank (Top_Plank_1)', -1, [0.78, 0.58, 0.36, 1]),
+        flowerStandPlankNode('Top_Plank_2', 'Top Back Plank (Top_Plank_2)', 1, [0.75, 0.55, 0.34, 1]),
+      ],
+    },
+  ],
+};
+
+
+/*
  * Scenes made to be driven from Volt over the link (utils/coSimLink.ts). The
  * joint names are the contract: Volt's "Gripper with Limit Switch" preset
  * binds its motor to jaw_hinge and its limit switch to jaw_hinge's angle;
@@ -3257,6 +3577,12 @@ export const PRESETS = {
     name: 'Shatter',
     emoji: '💥',
     scene: shatterPreset,
+  },
+  flower_stand: {
+    name: '3ft Flower Stand (Joinery)',
+    emoji: '🪴',
+    scene: flowerStandPreset,
+    camera: { position: [0.95, -1.15, 0.82], target: [0, 0, 0.46] } satisfies PresetCamera,
   }
 };
 

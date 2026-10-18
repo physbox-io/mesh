@@ -11,6 +11,7 @@ import { ExportMoldModal } from './ExportMoldModal';
 import { ExportSolidMachiningModal } from './ExportSolidMachiningModal';
 import { ExportCastModal } from './ExportCastModal';
 import { SplitForPrintModal } from './SplitForPrintModal';
+import { TimberBreakdownModal } from './TimberBreakdownModal';
 import { BottomStatusBar } from './BottomStatusBar';
 import { MachineConfigModal } from './MachineConfigModal';
 
@@ -38,6 +39,7 @@ export function FabricationModals({ threeSceneRef, noteCards }: {
   const [isSolidModalOpen, setIsSolidModalOpen] = useState(false);
   const [isCastModalOpen, setIsCastModalOpen] = useState(false);
   const [isSplitModalOpen, setIsSplitModalOpen] = useState(false);
+  const [isJoineryModalOpen, setIsJoineryModalOpen] = useState(false);
   const { exportStl, export3mf } = useMeshExport(threeSceneRef, noteCards);
   return (
     <>
@@ -81,6 +83,10 @@ export function FabricationModals({ threeSceneRef, noteCards }: {
         isOpen={isSplitModalOpen}
         onClose={() => setIsSplitModalOpen(false)}
       />
+      <TimberBreakdownModal
+        isOpen={isJoineryModalOpen}
+        onClose={() => setIsJoineryModalOpen(false)}
+      />
 
       <BottomStatusBar
         onOpenMachineConfig={() => setMachineConfigOpen(true)}
@@ -94,6 +100,7 @@ export function FabricationModals({ threeSceneRef, noteCards }: {
           solid: () => setIsSolidModalOpen(true),
           cast: () => setIsCastModalOpen(true),
           split: () => setIsSplitModalOpen(true),
+          joinery: () => setIsJoineryModalOpen(true),
         }}
       />
 

@@ -79,7 +79,8 @@ function HierarchyRow({ node, depth, ancestorHidden, collapsedIds, onToggleColla
   const select = useSelectRow();
 
   const dimmed = isHidden || ancestorHidden;
-  const showGeoms = !!node.geoms && node.geoms.length > 1 && !node.isCurve;
+  const userGeoms = node.geoms?.filter((g) => !g.csgDerived && g.role !== 'collision') ?? [];
+  const showGeoms = userGeoms.length > 1 && !node.isCurve;
   const hasChildren = !!node.children && node.children.length > 0;
   const collapsible = showGeoms || hasChildren;
   const isCollapsed = collapsible && collapsedIds.has(node.id);
@@ -137,7 +138,7 @@ function HierarchyRow({ node, depth, ancestorHidden, collapsedIds, onToggleColla
               || (!!hw && node.geoms[activeGeomIndex]?.hardware?.group === hw.group));
             // Generated boolean output is derived data, not something to select
             // and edit — the primitives above it are the real controls.
-            if (g.csgDerived) return null;
+            if (g.csgDerived || g.role === 'collision') return null;
 
             return (
               <div

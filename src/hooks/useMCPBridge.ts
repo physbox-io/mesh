@@ -42,6 +42,10 @@ import { getNodeWorldPos } from '../utils/sceneTree';
 import { generateCastPattern, DEFAULT_CAST_OPTIONS, type CastMethod } from '../utils/castPatternExporter';
 import { runCastPrep } from '../utils/castPrepRunner';
 import { cutAlongPlaneOffThread, selectionSoups, splitOffThread, testAssemblyOffThread } from '../utils/printSplitClient';
+import { loadManifold } from '../utils/sculptCut';
+import { collectIndividualPartSoups } from '../utils/timberBreakdown';
+import { synthesizeTimberJoinery, type TenonCornerFit, type TimberEdgeProfile, type TimberJointMode } from '../utils/timberJoinery';
+import { buildTimberCutPlan } from '../utils/timberCutList';
 import { filamentSpec } from '../utils/filaments';
 import { deriveSolidOptions, fittingScalePercent, measurePart, type SolidMachiningResult } from '../utils/solidMachiningExporter';
 import {
@@ -2448,6 +2452,113 @@ export function useMCPBridge() {
             checks,
             ...(assembly ? { assembly } : {}),
             warnings: result.warnings,
+          };
+        }
+
+        /*
+         * Timber & Joinery Breakdown: decompose a table, chair, or flower stand
+         * into mortise-and-tenon parts, stopped edge roundovers, 1D stock bars,
+         * sliding CNC window setups, and a beginner-proof buildGuideMarkdown.
+         */
+        case 'BREAKDOWN_JOINERY': {
+          const bodyId = typeof msg.bodyId === 'string' ? msg.bodyId : store.selectedNodeId;
+          const others = (Array.isArray(msg.withIds) ? msg.withIds : []).filter((v): v is string => typeof v === 'string');
+          const targetIds = bodyId ? [bodyId, ...others] : store.sceneGraph.nodes.map((n) => n.id);
+          if (!targetIds.length) return { ok: false, error: 'Give bodyId, or add a body to the scene first.' };
+          const primary = findNodeInScene(store.sceneGraph.nodes, targetIds[0]);
+          if (!primary) return { ok: false, error: `No body called ${targetIds[0]}.` };
+
+          const { items, absorbed } = collectIndividualPartSoups(store.sceneGraph, targetIds);
+          if (!items.length) return { ok: false, error: `${primary.name} has no solid geometry to break down.` };
+
+          const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+          const jointMode: TimberJointMode =
+            msg.jointMode === 'dowel' || msg.jointMode === 'dado' ? msg.jointMode : 'mortise_tenon';
+          const tenonCornerFit: TenonCornerFit =
+            msg.tenonCornerFit === 'round_tenon' || msg.tenonCornerFit === 'chisel_square' ? msg.tenonCornerFit : 'dogbone';
+          const edgeProfile: TimberEdgeProfile =
+            msg.edgeProfile === 'chamfer' || msg.edgeProfile === 'square' ? msg.edgeProfile : 'roundover';
+
+          const wasm = await loadManifold();
+          const outcome = synthesizeTimberJoinery(
+            wasm,
+            items.map((it) => it.soup),
+            {
+              jointMode,
+              tenonCornerFit,
+              edgeProfile,
+              cutterDiaMm: num(msg.cutterDiaMm),
+              shoulderMm: num(msg.shoulderMm),
+              tenonLengthMm: num(msg.tenonLengthMm),
+              clearanceMm: num(msg.clearanceMm),
+              edgeRadiusMm: num(msg.edgeRadiusMm),
+              stopMarginMm: num(msg.stopMarginMm),
+              maxBoardWidthMm: num(msg.maxBoardWidthMm),
+              tabletopClips: typeof msg.tabletopClips === 'boolean' ? msg.tabletopClips : undefined,
+              tenonCutMethod: msg.tenonCutMethod === 'cnc' ? 'cnc' : 'bandsaw',
+            },
+          );
+          if (!outcome.ok) return outcome;
+
+          const bedArr = Array.isArray(msg.cncBedMm) ? (msg.cncBedMm as number[]) : null;
+          const cncBedMm: [number, number, number] =
+            bedArr && bedArr.length === 3 && bedArr.every((v) => typeof v === 'number' && v > 0)
+              ? [bedArr[0], bedArr[1], bedArr[2]]
+              : [store.stock.widthMm, store.stock.depthMm, Math.max(40, store.stock.thicknessMm * 2)];
+
+          const cutPlan = buildTimberCutPlan(outcome, {
+            cncBedMm,
+            defaultStockLengthMm: num(msg.stockLengthMm) ?? 1800,
+          });
+
+          const names = outcome.parts.map((p) => p.member.id);
+          const ids =
+            msg.apply === true
+              ? store.splitBodyForPrint(primary.id, outcome.sections, absorbed, { plain: false, names, centerOrigin: true })
+              : null;
+
+          return {
+            ok: true,
+            applied: !!ids,
+            parts: outcome.parts.map((p, idx) => ({
+              index: idx,
+              id: p.member.id,
+              ...(ids ? { sceneNodeId: ids[idx] } : {}),
+              title: p.member.title,
+              role: p.member.role,
+              mirrorOf: p.member.mirrorOf,
+              finishedDimsMm: [p.totalFinishedLengthMm, p.crossSectionMm[0], p.crossSectionMm[1]],
+              shoulderToShoulderMm: p.shoulderToShoulderMm,
+              face1: p.member.face1.label,
+              face2: p.member.face2.label,
+              mortiseCount: p.mortises.length,
+              tenonCount: p.tenons.length,
+              zClipSlotCount: p.zClipSlots.length,
+              stoppedEdgeZones: p.stoppedEdgeZones,
+            })),
+            joints: outcome.joints.map((j) => ({
+              id: j.id,
+              kind: j.kind,
+              between: [j.memberAId, j.memberBId],
+              miteredCornerTenon: j.tenon?.miteredTip ?? false,
+              notes: j.notes,
+            })),
+            stockBars: cutPlan.stockBars,
+            hardwareBom: cutPlan.hardwareBom,
+            cncSetups: cutPlan.allCncSetups.map((s) => ({
+              id: s.id,
+              fileName: s.fileName,
+              partId: s.partId,
+              faceUpLabel: s.faceUpLabel,
+              fenceFaceLabel: s.fenceFaceLabel,
+              indexOffsetFromTopMm: s.indexOffsetFromTopMm,
+              overhangMm: s.overhangMm,
+              estimatedMinutes: s.estimatedMinutes,
+              operationsSummary: s.operationsSummary,
+              gcode: s.gcode,
+            })),
+            buildGuideMarkdown: cutPlan.buildGuideMarkdown,
+            warnings: outcome.warnings,
           };
         }
 

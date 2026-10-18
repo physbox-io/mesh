@@ -456,6 +456,24 @@ The scene still says the vase is whole and everything is welded on. Nothing you 
 - Drop the foil's pierce limit to 3 N·s and almost anything goes through it`,
 
   california_relief: `# California Relief Map\n\nThe real state, at real proportions, built to be carved into a **150 mm square** block.\n\n## Geography\n- Projected in **EPSG:3310 "California Albers"**, the state's official projection, equal area everywhere on the block\n- Terrain from open 1 km DEM tiles: **-82 m** at Badwater to **3,973 m** on the Sierra crest\n- Carves **104.0 × 120.0 mm**, 1 mm to about 8.8 km\n\n## Relief Carving\n- Height is exaggerated roughly **18×**; at true scale the Sierra would stand 0.5 mm proud and the board would read as flat\n- The lowest 15% of the depth is a plinth, so the coastline steps up from the background instead of fading into it\n- Set **Fit** to *manual, 100%* to keep the 120 mm size\n\n## Try it\n- Click **Export Relief Carve (G-code)**, rough with a 6.35 mm flat mill, finish with a 3.175 mm ball nose`,
+
+  flower_stand: `# 🪴 3ft Flower Stand (Joinery Breakdown)
+
+A **3 ft (915 mm) tall** hardwood flower stand designed for **Bandsaw + Desktop CNC** construction with only wood and PVA glue.
+
+## Dimensions & Structure
+| Member | Qty | Dimensions | Role |
+|--------|-----|------------|------|
+| **Corner Legs** (\`Leg_FL..BR\`) | 4 | 45 × 45 × 891 mm | Vertical posts with upper & lower mortises on two adjacent inner faces |
+| **Upper Aprons** (\`Apron_Front..Right\`) | 4 | 250 × 22 × 60 mm (clear) | Support the plant platform; 45° mitered tenon tips where two aprons meet inside a 45 mm leg |
+| **Lower Stretchers** (\`Stretcher_Front..Right\`) | 4 | 250 × 22 × 45 mm (clear) | Anti-racking tier 220 mm off the floor |
+| **Plant Platform Top** (\`Stand_Top\`) | 1 (splits to 2 planks) | 380 × 380 × 24 mm | Edge-glued top with alignment dowels and seasonal expansion Z-clip slots |
+
+## How to Break Down into Stock & Cuts
+1. In the bottom status bar, set **Machine** to **\`CNC Router\`**
+2. Click the amber **\`Joinery\`** button on the bottom status bar
+3. Inspect the **exploded 3D mortise-and-tenon preview**, **stopped edge roundovers**, **sliding CNC window setups** (for the 891 mm legs on a 300 mm CNC bed), and **Per-Part Fabrication Cards**
+4. Click **\`Apply Joinery to Scene\`** to replace the block model with the 14 tenoned, mortised, and profiled individual parts`,
 };
 
 
