@@ -920,6 +920,46 @@ function loopsPath(loops: Point2D[][], dx: number, dy: number): string {
   return out;
 }
 
+/**
+ * Lays rectangles out in rows, left to right, top to bottom, starting a new
+ * sheet when a row runs off the bottom. A row or sheet that is still empty is
+ * never left behind: a part too big for it goes there anyway (the caller warns
+ * about it), rather than leaving an empty row or a blank first sheet.
+ */
+export function shelfPack(
+  sizes: { w: number; h: number }[],
+  sheetWidthMm: number,
+  sheetHeightMm: number,
+  marginMm: number,
+): { placed: { sheet: number; x: number; y: number }[]; sheetCount: number } {
+  let x = marginMm;
+  let y = marginMm;
+  let rowHeight = 0;
+  let sheet = 0;
+  const placed = sizes.map(({ w, h }) => {
+    if (x > marginMm && x + w + marginMm > sheetWidthMm) {
+      x = marginMm;
+      y += rowHeight + marginMm;
+      rowHeight = 0;
+    }
+    // On the top row a part too tall for any sheet overflows wherever it goes,
+    // so it stays alongside the others rather than taking a sheet to itself.
+    const tooTall = h + 2 * marginMm > sheetHeightMm;
+    const sheetUsed = x > marginMm || y > marginMm;
+    if (sheetUsed && y + h + marginMm > sheetHeightMm && !(tooTall && y === marginMm)) {
+      sheet++;
+      x = marginMm;
+      y = marginMm;
+      rowHeight = 0;
+    }
+    const at = { sheet, x, y };
+    x += w + marginMm;
+    if (h > rowHeight) rowHeight = h;
+    return at;
+  });
+  return { placed, sheetCount: sheet + 1 };
+}
+
 export function exportContourSliceSvg(
   scene: SceneGraph,
   userOptions?: Partial<ContourSliceOptions>
@@ -1139,10 +1179,7 @@ export function exportContourSliceSvg(
 
   if (options.autoScale || maxSheets > 0) {
     const evaluateScale = (s: number): { sheetCount: number; fitSingleSheet: boolean } => {
-      let currentX = marginMm;
-      let currentY = marginMm;
-      let rowHeight = 0;
-      let sheetIndex = 0;
+      const sizes: { w: number; h: number }[] = [];
       let fitSingleSheet = true;
 
       for (const layer of layers) {
@@ -1156,25 +1193,12 @@ export function exportContourSliceSvg(
         }
         const w = Math.max(1, lmaxX - lminX);
         const h = Math.max(1, lmaxY - lminY);
-
         if (w + 2 * marginMm > sheetWidthMm || h + 2 * marginMm > sheetHeightMm) {
           fitSingleSheet = false;
         }
-        if (currentX + w + marginMm > sheetWidthMm) {
-          currentX = marginMm;
-          currentY += rowHeight + marginMm;
-          rowHeight = 0;
-        }
-        if (currentY + h + marginMm > sheetHeightMm) {
-          sheetIndex++;
-          currentX = marginMm;
-          currentY = marginMm;
-          rowHeight = 0;
-        }
-        currentX += w + marginMm;
-        if (h > rowHeight) rowHeight = h;
+        sizes.push({ w, h });
       }
-      return { sheetCount: sheetIndex + 1, fitSingleSheet };
+      return { sheetCount: shelfPack(sizes, sheetWidthMm, sheetHeightMm, marginMm).sheetCount, fitSingleSheet };
     };
 
     let bestScale = scaleFactor;
@@ -1231,38 +1255,21 @@ export function exportContourSliceSvg(
     layer.modelOffset2D = { x: lminX, y: lmaxY };
   }
 
-  let currentX = marginMm;
-  let currentY = marginMm;
-  let rowHeight = 0;
-  let sheetIndex = 0;
   const oversized: string[] = [];
-
-  for (const layer of layers) {
+  const sizes = layers.map((layer) => {
     const w = layer.width2D || 1;
     const h = layer.height2D || 1;
-
     if (w + 2 * marginMm > sheetWidthMm || h + 2 * marginMm > sheetHeightMm) {
       oversized.push(`layer ${layer.index + 1}`);
     }
-    if (currentX + w + marginMm > sheetWidthMm) {
-      currentX = marginMm;
-      currentY += rowHeight + marginMm;
-      rowHeight = 0;
-    }
-    if (currentY + h + marginMm > sheetHeightMm) {
-      sheetIndex++;
-      currentX = marginMm;
-      currentY = marginMm;
-      rowHeight = 0;
-    }
-
-    layer.sheetIndex = sheetIndex;
-    layer.placedPos2D = { x: currentX, y: currentY };
-    currentX += w + marginMm;
-    if (h > rowHeight) rowHeight = h;
-  }
-
-  const sheetCount = sheetIndex + 1;
+    return { w, h };
+  });
+  const packed = shelfPack(sizes, sheetWidthMm, sheetHeightMm, marginMm);
+  layers.forEach((layer, i) => {
+    layer.sheetIndex = packed.placed[i].sheet;
+    layer.placedPos2D = { x: packed.placed[i].x, y: packed.placed[i].y };
+  });
+  const sheetCount = packed.sheetCount;
 
   if (Math.abs(scaleFactor - 1.0) > 1e-3) {
     warnings.unshift(

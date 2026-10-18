@@ -82,3 +82,28 @@ describe('contour stack sheets', () => {
     expect(g.operations.filter((o) => o.type === 'cut').every((o) => o.sheetIndex! <= 2)).toBe(true);
   });
 });
+
+describe('contour stack nesting', () => {
+  it('starts on the first sheet when a layer is taller than the sheet', () => {
+    // 100 mm layers on a 300 x 100 mm sheet: none fits with its margins.
+    const result = exportContourSliceSvg(cube, {
+      ...DEFAULT_CONTOUR_OPTIONS, materialThickness: 0.01, pinHoles: false,
+      sheetWidth: 0.3, sheetHeight: 0.1,
+    });
+    expect(result.layers![0].sheetIndex).toBe(0);
+    expect(result.layers![0].placedPos2D).toEqual({ x: 8, y: 8 });
+    // Two a sheet across, and no blank sheet in front of them.
+    expect(result.sheetCount).toBe(5);
+  });
+
+  it('does not skip a row when a layer is wider than the sheet', () => {
+    const result = exportContourSliceSvg(cube, {
+      ...DEFAULT_CONTOUR_OPTIONS, materialThickness: 0.01, pinHoles: false,
+      sheetWidth: 0.1, sheetHeight: 0.3,
+    });
+    expect(result.layers![0].placedPos2D).toEqual({ x: 8, y: 8 });
+    expect(result.layers![1].placedPos2D!.x).toBe(8);
+    expect(result.layers![1].placedPos2D!.y).toBeCloseTo(116, 3);
+    expect(result.layers![1].sheetIndex).toBe(0);
+  });
+});
