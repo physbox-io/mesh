@@ -3,7 +3,6 @@ import { usePanels } from '../store/panelsStore';
 import { ImportStlModal } from './ImportStlModal';
 import { ImportImageModal } from './ImportImageModal';
 import { GeneratePatternModal } from './GeneratePatternModal';
-import { FacePatternModal } from './FacePatternModal';
 
 /** The STL and image importers, and the pattern generators. */
 export function ImportModals() {
@@ -29,7 +28,6 @@ export function ImportModals() {
       {/* Surface pattern generators. Reads its own open/closed state from the
           store, so there is nothing to pass and nothing to keep in step. */}
       <GeneratePatternModal />
-      <FacePatternModal />
 
       {/* Image heightmap importer — mounted only while open, like the STL one */}
       {imageImport && (

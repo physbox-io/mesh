@@ -1,4 +1,5 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState, type RefObject } from 'react';
+import type * as THREE from 'three';
 import { SlidersHorizontal, Trash2, X } from 'lucide-react';
 import { useStore } from '../../store/useStore';
 import { usePanels } from '../../store/panelsStore';
@@ -7,9 +8,10 @@ import { InspectorCards } from './InspectorCards';
 
 /**
  * The properties inspector on the right: the drawer, its resize handle and its
- * header, the cards and the Delete button.
+ * header, the cards and the Delete button. `threeSceneRef` is the viewport's
+ * three.js scene, which the per-part STL export reads.
  */
-export function InspectorPanel() {
+export function InspectorPanel({ threeSceneRef }: { threeSceneRef: RefObject<THREE.Scene | null> }) {
   const selectedNode = useSelectedNode();
   const isPlaying = useStore((s) => s.isPlaying);
   const setSelectedNodeId = useStore((s) => s.setSelectedNodeId);
@@ -17,6 +19,22 @@ export function InspectorPanel() {
   const isPropertiesOpen = usePanels((s) => s.isPropertiesOpen);
   const setIsPropertiesOpen = usePanels((s) => s.setPropertiesOpen);
   const [propertiesWidth, setPropertiesWidth] = useState(380);
+
+  // The pattern editor lives in the Texture tab, so a face picked for a
+  // pattern (T, the mode menu, a pattern's Edit…) brings the tab up, and the
+  // drawer with it on a narrow screen. It is put away when its part stops
+  // being the one shown, so it is never left open with nowhere to be seen.
+  const patternTarget = useStore((s) => s.facePatternTarget);
+  const selectedId = selectedNode?.id;
+  useEffect(() => {
+    if (!patternTarget) return;
+    if (isPlaying || selectedId !== patternTarget.nodeId) {
+      useStore.getState().closeFacePattern();
+      return;
+    }
+    usePanels.getState().setInspectorTab('texture');
+    usePanels.getState().setPropertiesOpen(true);
+  }, [patternTarget, selectedId, isPlaying]);
 
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -97,7 +115,7 @@ export function InspectorPanel() {
           </h2>
 
           <div className="flex flex-col gap-4">
-            <InspectorCards node={selectedNode} />
+            <InspectorCards node={selectedNode} threeSceneRef={threeSceneRef} />
 
             {/* Delete Component Button */}
             <button

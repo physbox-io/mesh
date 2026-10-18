@@ -1,16 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import * as THREE from 'three';
-import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js';
-import { Printer, Settings, Zap } from 'lucide-react';
+import { Settings, Zap } from 'lucide-react';
 import { useStore } from '../../store/useStore';
 import { compileCsgNodes } from '../../hooks/useCsgCompile';
 import { compileSCAD, isCompilerReady } from '../../utils/openscad';
 import { generateScadForNode, parseScadVariables, replaceVarInCode } from '../../utils/scadSource';
-import { downloadBlob } from '../../utils/downloadBlob';
 import type { SceneNode } from '../../types/scene';
 import { RangeInput } from '../RangeInput';
-import { ConfirmModal } from '../ConfirmModal';
-import { ExportScaleModal } from '../ExportScaleModal';
 
 /**
  * The OpenSCAD editor, for a body whose shape is OpenSCAD source.
@@ -36,13 +31,6 @@ function ScadEditor({ node }: { node: SceneNode }) {
   const [scadText, setScadText] = useState(node.scad ?? '');
   const [scadError, setScadError] = useState<string | null>(null);
   const [isScadCompiling, setIsScadCompiling] = useState(false);
-  const [isCompilerLoading, setIsCompilerLoading] = useState(false);
-  const [exportScale, setExportScale] = useState<{
-    title: string;
-    value: string;
-    onConfirm: (targetMm: number) => void;
-  } | null>(null);
-  const [exportError, setExportError] = useState<string | null>(null);
 
   // The editor follows the stored source: a compile, an undo or the MCP
   // bridge can each change it underneath the textarea. Only the source — an
@@ -254,70 +242,10 @@ function ScadEditor({ node }: { node: SceneNode }) {
         )}
 
         {/* Action Buttons Row */}
-        <div className="flex gap-2 items-center justify-between">
-          <button
-            onClick={async () => {
-              setIsCompilerLoading(true);
-              try {
-                const compiled = await compileSCAD(scadText);
-                if (!compiled.vertices || compiled.vertices.length === 0) {
-                  throw new Error('Compilation produced no vertices.');
-                }
-
-                const geo = new THREE.BufferGeometry();
-                geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(compiled.vertices), 3));
-                geo.setIndex(new THREE.BufferAttribute(new Uint32Array(compiled.faces), 1));
-                geo.computeVertexNormals();
-
-                const mesh = new THREE.Mesh(geo);
-                const bbox = new THREE.Box3().setFromObject(mesh);
-                const size = bbox.getSize(new THREE.Vector3());
-                const longestSide = Math.max(size.x, size.y, size.z);
-
-                let defaultPrompt = '150';
-                if (longestSide > 0) {
-                  defaultPrompt = Math.round(longestSide * 1000).toString();
-                }
-
-                const filename = `${node.name || 'openscad_shape'}.stl`;
-                setExportScale({
-                  title: 'Export OpenSCAD STL',
-                  value: defaultPrompt,
-                  onConfirm: (targetMm) => {
-                    const scale = targetMm / longestSide;
-                    const center = bbox.getCenter(new THREE.Vector3());
-                    const transform = new THREE.Matrix4()
-                      .makeRotationX(Math.PI / 2)
-                      .multiply(new THREE.Matrix4().makeScale(scale, scale, scale))
-                      .multiply(new THREE.Matrix4().makeTranslation(-center.x, -center.y, -center.z));
-
-                    geo.applyMatrix4(transform);
-
-                    const exportGroup = new THREE.Group();
-                    exportGroup.add(mesh);
-
-                    const exporter = new STLExporter();
-                    const result = exporter.parse(exportGroup, { binary: true }) as DataView;
-                    const blob = new Blob([result.buffer as ArrayBuffer], { type: 'application/octet-stream' });
-                    downloadBlob(blob, filename);
-                  },
-                });
-              } catch (e) {
-                setExportError('Failed to export OpenSCAD STL: ' + (e as Error).message);
-              } finally {
-                setIsCompilerLoading(false);
-              }
-            }}
-            disabled={isCompilerLoading || isScadCompiling}
-            className="text-[10px] font-semibold text-blue-600 hover:text-blue-700 disabled:text-slate-400 transition-colors flex items-center gap-1 cursor-pointer"
-          >
-            <Printer className="w-3.5 h-3.5" />
-            Export STL (3D Print)
-          </button>
-
+        <div className="flex gap-2 items-center justify-end">
           <button
             onClick={handleCompileScad}
-            disabled={isScadCompiling || isCompilerLoading}
+            disabled={isScadCompiling}
             className="px-3 py-1.5 bg-violet-600 hover:bg-violet-700 disabled:bg-slate-400 active:bg-violet-800 text-white rounded-lg text-[11px] font-semibold shadow transition-colors flex items-center gap-1 cursor-pointer"
           >
             <Zap className="w-3.5 h-3.5" />
@@ -325,30 +253,6 @@ function ScadEditor({ node }: { node: SceneNode }) {
           </button>
         </div>
       </div>
-      {exportScale && (
-        <ExportScaleModal
-          title={exportScale.title}
-          initialMm={exportScale.value}
-          onCancel={() => setExportScale(null)}
-          onConfirm={(targetMm) => {
-            const cb = exportScale.onConfirm;
-            setExportScale(null);
-            cb(targetMm);
-          }}
-        />
-      )}
-
-      {exportError && (
-        <ConfirmModal
-          title="OpenSCAD export failed"
-          body={<p>{exportError}</p>}
-          confirmLabel="OK"
-          hideCancel
-          tone="red"
-          onConfirm={() => setExportError(null)}
-          onCancel={() => setExportError(null)}
-        />
-      )}
     </>
   );
 }

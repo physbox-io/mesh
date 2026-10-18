@@ -103,7 +103,7 @@ function App() {
 
         <Viewport threeSceneRef={threeSceneRef} darkMode={darkMode} doc={doc} onImportSceneJson={importSceneJson} />
 
-        <InspectorPanel />
+        <InspectorPanel threeSceneRef={threeSceneRef} />
 
         {isCopilotOpen && (
           <AICopilotPanel

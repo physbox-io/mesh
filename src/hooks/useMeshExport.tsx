@@ -19,108 +19,7 @@ export function useMeshExport(threeSceneRef: RefObject<THREE.Scene | null>, note
   const showNotice = useDialogs((s) => s.showNotice);
   const openDialog = useDialogs((s) => s.openDialog);
   const closeDialog = useDialogs((s) => s.closeDialog);
-  const promptScale = useDialogs((s) => s.promptScale);
-
-  /**
-   * The scene, as meshes ready to be written to a file.
-   *
-   * Shared by every mesh export rather than copied per format: they all want
-   * the same thing — world-space geometry, scaled to a real size, Z-up — and
-   * the only difference between them is what gets written afterwards. Materials
-   * come along, because two of the three formats can carry colour and the one
-   * that cannot simply ignores them.
-   *
-   * Prompts with the in-app export size modal when parts have positive size.
-   */
-  const withExportGroup = useCallback((title: string, onReady: (exportGroup: THREE.Group) => void) => {
-    const scene = threeSceneRef.current;
-    if (!scene) {
-      showNotice('Scene not ready', 'Wait for the 3D scene to finish loading before exporting.');
-      return;
-    }
-
-    // Find the nearest ancestor tagged with a body's nodeId (set on DynamicGeom's
-    // wrapper <group name={nodeId}>), so multi-part scenes (e.g. an enclosure's
-    // box + lid sitting side by side) can be scaled by a single part's size
-    // rather than the combined footprint of everything visible.
-    const findNodeId = (obj: THREE.Object3D): string | null => {
-      let cur: THREE.Object3D | null = obj;
-      while (cur) {
-        if (cur.name) return cur.name;
-        cur = cur.parent;
-      }
-      return null;
-    };
-
-    const exportGroup = new THREE.Group();
-    const partBboxes = new Map<string, THREE.Box3>();
-    let ungroupedIdx = 0;
-    scene.traverse((obj) => {
-      if (!(obj as THREE.Mesh).isMesh) return;
-      const mesh = obj as THREE.Mesh;
-      const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-      const standard = mats.find(m => (m as THREE.MeshStandardMaterial).isMeshStandardMaterial) as THREE.MeshStandardMaterial | undefined;
-      // Only lit surfaces are the model. The brush ring, the CSG ghosts and the
-      // shadow catcher are all basic/shadow materials and stay out of the file.
-      if (!standard) return;
-      mesh.updateWorldMatrix(true, false);
-      const geo = mesh.geometry.clone().applyMatrix4(mesh.matrixWorld);
-      // The material is cloned so that turning the viewport to wireframe does
-      // not export a wireframe — that is a way of looking at the model, not a
-      // property of it.
-      const material = standard.clone();
-      material.wireframe = false;
-      const exported = new THREE.Mesh(geo, material);
-      exported.name = findNodeId(mesh) ?? mesh.name ?? `part_${ungroupedIdx}`;
-      exportGroup.add(exported);
-
-      const partKey = findNodeId(mesh) ?? `__ungrouped_${ungroupedIdx++}`;
-      const meshBbox = new THREE.Box3().setFromBufferAttribute(geo.attributes.position as THREE.BufferAttribute);
-      const existing = partBboxes.get(partKey);
-      if (existing) existing.union(meshBbox);
-      else partBboxes.set(partKey, meshBbox);
-    });
-
-    if (exportGroup.children.length === 0) {
-      showNotice('Nothing to export', 'There are no visible 3D parts in the scene to export.');
-      return;
-    }
-
-    // Normalize: fit the LONGEST SINGLE PART's longest side to a user-specified
-    // target in mm (not the combined bounding box of everything visible), centered
-    // at origin. Also convert from Three.js Y-up (the scene's convention) to the
-    // Z-up convention STL/slicers expect - otherwise the export comes out on its
-    // side even though the on-screen render (Y-up, handled natively by Three.js)
-    // looks correct.
-    const bbox = new THREE.Box3().setFromObject(exportGroup);
-    let longestPartDim = 0;
-    for (const partBbox of partBboxes.values()) {
-      const partSize = partBbox.getSize(new THREE.Vector3());
-      longestPartDim = Math.max(longestPartDim, partSize.x, partSize.y, partSize.z);
-    }
-    if (longestPartDim > 0) {
-      const defaultMm = Math.round(longestPartDim * 1000).toString();
-      promptScale({
-        title,
-        value: defaultMm,
-        onConfirm: (targetMm) => {
-          const scale = targetMm / longestPartDim;
-          const center = bbox.getCenter(new THREE.Vector3());
-          const transform = new THREE.Matrix4()
-            .makeRotationX(Math.PI / 2)
-            .multiply(new THREE.Matrix4().makeScale(scale, scale, scale))
-            .multiply(new THREE.Matrix4().makeTranslation(-center.x, -center.y, -center.z));
-          for (const child of exportGroup.children) {
-            (child as THREE.Mesh).geometry.applyMatrix4(transform);
-          }
-          onReady(exportGroup);
-        },
-      });
-      return;
-    }
-
-    onReady(exportGroup);
-  }, [threeSceneRef, showNotice, promptScale]);
+  const withExportGroup = useExportGroup(threeSceneRef);
 
   const baseName = useCallback(() => exportBaseName(noteCards, activePreset), [noteCards, activePreset]);
 
@@ -232,4 +131,138 @@ export function useMeshExport(threeSceneRef: RefObject<THREE.Scene | null>, note
   }, [exportWholeScene3mf, baseName, openDialog, closeDialog]);
 
   return { exportStl, export3mf };
+}
+
+/**
+ * The scene, as meshes ready to be written to a file.
+ *
+ * Shared by every mesh export rather than copied per format: they all want
+ * the same thing — world-space geometry, scaled to a real size, Z-up — and
+ * the only difference between them is what gets written afterwards. Materials
+ * come along, because two of the three formats can carry colour and the one
+ * that cannot simply ignores them.
+ *
+ * Prompts with the in-app export size modal when parts have positive size.
+ * With `only`, just the meshes drawn for those bodies go in.
+ */
+function useExportGroup(threeSceneRef: RefObject<THREE.Scene | null>) {
+  const showNotice = useDialogs((s) => s.showNotice);
+  const promptScale = useDialogs((s) => s.promptScale);
+
+  return useCallback((title: string, onReady: (exportGroup: THREE.Group) => void, only?: ReadonlySet<string>) => {
+    const scene = threeSceneRef.current;
+    if (!scene) {
+      showNotice('Scene not ready', 'Wait for the 3D scene to finish loading before exporting.');
+      return;
+    }
+
+    // Find the nearest ancestor tagged with a body's nodeId (set on DynamicGeom's
+    // wrapper <group name={nodeId}>), so multi-part scenes (e.g. an enclosure's
+    // box + lid sitting side by side) can be scaled by a single part's size
+    // rather than the combined footprint of everything visible.
+    const findNodeId = (obj: THREE.Object3D): string | null => {
+      let cur: THREE.Object3D | null = obj;
+      while (cur) {
+        if (cur.name) return cur.name;
+        cur = cur.parent;
+      }
+      return null;
+    };
+
+    const exportGroup = new THREE.Group();
+    const partBboxes = new Map<string, THREE.Box3>();
+    let ungroupedIdx = 0;
+    const ownedByOnly = (obj: THREE.Object3D) => {
+      for (let cur: THREE.Object3D | null = obj; cur; cur = cur.parent) {
+        if (only!.has(cur.name)) return true;
+      }
+      return false;
+    };
+    scene.traverse((obj) => {
+      if (!(obj as THREE.Mesh).isMesh) return;
+      if (only && !ownedByOnly(obj)) return;
+      const mesh = obj as THREE.Mesh;
+      const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      const standard = mats.find(m => (m as THREE.MeshStandardMaterial).isMeshStandardMaterial) as THREE.MeshStandardMaterial | undefined;
+      // Only lit surfaces are the model. The brush ring, the CSG ghosts and the
+      // shadow catcher are all basic/shadow materials and stay out of the file.
+      if (!standard) return;
+      mesh.updateWorldMatrix(true, false);
+      const geo = mesh.geometry.clone().applyMatrix4(mesh.matrixWorld);
+      // The material is cloned so that turning the viewport to wireframe does
+      // not export a wireframe — that is a way of looking at the model, not a
+      // property of it.
+      const material = standard.clone();
+      material.wireframe = false;
+      const exported = new THREE.Mesh(geo, material);
+      exported.name = findNodeId(mesh) ?? mesh.name ?? `part_${ungroupedIdx}`;
+      exportGroup.add(exported);
+
+      const partKey = findNodeId(mesh) ?? `__ungrouped_${ungroupedIdx++}`;
+      const meshBbox = new THREE.Box3().setFromBufferAttribute(geo.attributes.position as THREE.BufferAttribute);
+      const existing = partBboxes.get(partKey);
+      if (existing) existing.union(meshBbox);
+      else partBboxes.set(partKey, meshBbox);
+    });
+
+    if (exportGroup.children.length === 0) {
+      showNotice('Nothing to export', only
+        ? 'Nothing is drawn for this part yet, so there is nothing to export.'
+        : 'There are no visible 3D parts in the scene to export.');
+      return;
+    }
+
+    // Normalize: fit the LONGEST SINGLE PART's longest side to a user-specified
+    // target in mm (not the combined bounding box of everything visible), centered
+    // at origin. Also convert from Three.js Y-up (the scene's convention) to the
+    // Z-up convention STL/slicers expect - otherwise the export comes out on its
+    // side even though the on-screen render (Y-up, handled natively by Three.js)
+    // looks correct.
+    const bbox = new THREE.Box3().setFromObject(exportGroup);
+    let longestPartDim = 0;
+    for (const partBbox of partBboxes.values()) {
+      const partSize = partBbox.getSize(new THREE.Vector3());
+      longestPartDim = Math.max(longestPartDim, partSize.x, partSize.y, partSize.z);
+    }
+    if (longestPartDim > 0) {
+      const defaultMm = Math.round(longestPartDim * 1000).toString();
+      promptScale({
+        title,
+        value: defaultMm,
+        onConfirm: (targetMm) => {
+          const scale = targetMm / longestPartDim;
+          const center = bbox.getCenter(new THREE.Vector3());
+          const transform = new THREE.Matrix4()
+            .makeRotationX(Math.PI / 2)
+            .multiply(new THREE.Matrix4().makeScale(scale, scale, scale))
+            .multiply(new THREE.Matrix4().makeTranslation(-center.x, -center.y, -center.z));
+          for (const child of exportGroup.children) {
+            (child as THREE.Mesh).geometry.applyMatrix4(transform);
+          }
+          onReady(exportGroup);
+        },
+      });
+      return;
+    }
+
+    onReady(exportGroup);
+  }, [threeSceneRef, showNotice, promptScale]);
+}
+
+/**
+ * STL of one body, and every body below it in the tree, as the viewport draws
+ * it — for the inspector's Export STL. Named after the body.
+ */
+export function useNodeStlExport(threeSceneRef: RefObject<THREE.Scene | null>) {
+  const withExportGroup = useExportGroup(threeSceneRef);
+  return useCallback((node: SceneNode) => {
+    const ids = new Set<string>();
+    const walk = (n: SceneNode) => { ids.add(n.id); (n.children || []).forEach(walk); };
+    walk(node);
+    withExportGroup(`Export ${node.name || node.id} as STL`, (exportGroup) => {
+      const exporter = new STLExporter();
+      const result = exporter.parse(exportGroup, { binary: true }) as DataView;
+      downloadBlob(new Blob([result.buffer as ArrayBuffer], { type: 'application/octet-stream' }), `${node.name || node.id}.stl`);
+    }, ids);
+  }, [withExportGroup]);
 }

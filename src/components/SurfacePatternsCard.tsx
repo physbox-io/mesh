@@ -31,7 +31,7 @@ export const SurfacePatternsCard: React.FC<{ node: SceneNode }> = ({ node }) => 
       {geoms.map((geom) => (
         <GeomPatterns key={geom.name} node={node} geom={geom} named={geoms.length > 1} disabled={editing || playing} />
       ))}
-      <p className="text-[10px] text-slate-400 leading-snug">Press T over a face to add one, or over a pattern to change it.</p>
+      <p className="text-[10px] text-slate-400 leading-snug">Or press T over a face to add one, or over a pattern to change it.</p>
     </div>
   );
 };

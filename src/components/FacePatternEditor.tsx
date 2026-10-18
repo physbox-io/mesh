@@ -20,11 +20,12 @@ import { Field, PatternFields, inputClass } from './PatternFields';
 
 /**
  * One of the Generators patterns, put on a face of a part that is already in
- * the scene (T, or "Pattern a face" in the mode menu).
+ * the scene (T, "Pattern a face" in the mode menu or the Texture tab).
  *
- * It docks at the side with no backdrop, because the preview IS the part:
- * Apply writes the pattern to the scene, the viewport rebuilds the patterned
- * surface in a worker, and the dialog stays open to change it and apply again.
+ * It sits in the inspector's Texture tab rather than over the model, because
+ * the preview IS the part: Apply writes the pattern to the scene, the viewport
+ * rebuilds the patterned surface in a worker, and the editor stays open to
+ * change it and apply again.
  * Done applies and closes; Cancel puts back what was there. Until something is
  * applied the face picked is lit up, so it is plain which face it is. The
  * physics never sees any of it (see utils/geomSurface).
@@ -74,7 +75,7 @@ function layoutNotes(region: TextureRegionReport): string[] {
 const targetKey = (t: FacePatternTarget | null) =>
   t ? `${t.nodeId}|${t.geomName}|${t.index ?? 'new'}|${t.seedAt.join(',')}` : null;
 
-export const FacePatternModal: React.FC = () => {
+export const FacePatternEditor: React.FC = () => {
   const target = useStore((s) => s.facePatternTarget);
   const closeFacePattern = useStore((s) => s.closeFacePattern);
   const setGeomTextures = useStore((s) => s.setGeomTextures);
@@ -180,11 +181,13 @@ export const FacePatternModal: React.FC = () => {
   };
 
   return (
-    <div className="fixed top-16 right-4 z-50 w-80 max-h-[calc(100dvh-6rem)] flex flex-col bg-white dark:bg-slate-900 rounded-xl shadow-2xl border border-slate-200 dark:border-slate-800 overflow-hidden">
-      <div className="flex items-center justify-between px-4 py-3 border-b border-slate-200 dark:border-slate-800">
+    // No <h3> for the title: the inspector folds any card whose h3 is clicked,
+    // and folding this one would hide its Apply and Done.
+    <div className="flex flex-col bg-white dark:bg-slate-900 rounded-lg shadow-sm border border-fuchsia-200 dark:border-fuchsia-900/60">
+      <div className="flex items-center justify-between px-3 py-2.5 border-b border-slate-200 dark:border-slate-800">
         <div className="flex items-center gap-2">
           <Sparkles className="w-4 h-4 text-fuchsia-500" />
-          <h3 className="font-bold text-slate-800 dark:text-slate-100 text-sm">Pattern on a face</h3>
+          <span className="font-bold text-slate-800 dark:text-slate-100 text-sm">Pattern on a face</span>
         </div>
         <button
           onClick={cancel}
@@ -195,7 +198,7 @@ export const FacePatternModal: React.FC = () => {
         </button>
       </div>
 
-      <div className="p-4 overflow-y-auto flex-1 space-y-3">
+      <div className="p-3 space-y-3">
         <Field label="Pattern" hint={spec.blurb}>
           <select value={spec.id} onChange={(e) => choosePattern(e.target.value)} className={`${inputClass} cursor-pointer`}>
             {PATTERN_GROUPS.map((group) => {
@@ -316,7 +319,7 @@ export const FacePatternModal: React.FC = () => {
         </p>
       </div>
 
-      <div className="flex items-center justify-between gap-2 px-4 py-3 border-t border-slate-200 dark:border-slate-800">
+      <div className="flex items-center justify-between gap-2 px-3 py-2.5 border-t border-slate-200 dark:border-slate-800">
         {editingExisting ? (
           <button
             onClick={remove}

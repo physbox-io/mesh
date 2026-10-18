@@ -7,12 +7,15 @@ import { DocsInfoButton } from '../docs/DocsInfoButton';
 import { MaterialCard } from './MaterialCard';
 import { CouplingCard } from './CouplingCard';
 
-/** Dimensions Resizing and Color Properties */
-export function GeomPropertiesCard({ node: selectedNode }: { node: SceneNode }) {
+/**
+ * The active sub-geom's properties, split by inspector tab: its colour on
+ * Main, its offset on Shape, its mass, contact and material on Physics. Main
+ * puts SubGeomSelector above Resize itself; the other tabs get it here.
+ */
+export function GeomPropertiesCard({ node: selectedNode, part }: { node: SceneNode; part: 'main' | 'shape' | 'physics' }) {
   const activeGeomIndex = useStore((s) => s.activeGeomIndex);
   const density = useStore((s) => s.density);
   const gravityZ = useStore((s) => s.gravityZ);
-  const setActiveGeomIndex = useStore((s) => s.setActiveGeomIndex);
   const updateNodeGeom = useStore((s) => s.updateNodeGeom);
 
   if (!selectedNode.geoms || selectedNode.geoms.length === 0) return null;
@@ -21,36 +24,10 @@ export function GeomPropertiesCard({ node: selectedNode }: { node: SceneNode }) 
   if (!geom) return null;
   return (
     <div className="flex flex-col gap-4">
-      {/* Sub-Geometry dropdown selector if there are multiple geoms */}
-      {selectedNode.geoms.length > 1 && (
-        <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-2">
-          <label className="text-xs font-semibold text-slate-600">Select Sub-Geometry</label>
-          <select
-            value={activeIndex}
-            onChange={(e) => setActiveGeomIndex(parseInt(e.target.value))}
-            className="w-full px-2.5 py-1.5 border border-slate-200 rounded text-xs bg-white text-slate-700 outline-none focus:border-blue-500 cursor-pointer font-medium"
-          >
-            {selectedNode.geoms.map((g, idx) => (
-              // Generated boolean geoms aren't editable — a body with
-              // 16 sector colliders would otherwise bury its two real
-              // shapes at the bottom of this list. Values stay the
-              // real indices so activeGeomIndex still means one thing.
-              g.csgDerived ? null : (
-              <option key={idx} value={idx}>
-                {g.csg === 'difference' ? '\u2796 ' : g.csg === 'intersection' ? '\u2229 ' : ''}{g.name || `Geom ${idx + 1}`} ({g.type})
-              </option>
-              )
-            ))}
-          </select>
-          <div className="text-[10px] text-slate-400 font-semibold px-0.5 flex justify-between uppercase tracking-wider">
-            <span>Type: {geom.type}</span>
-            {geom.name && <span>Name: {geom.name}</span>}
-          </div>
-        </div>
-      )}
+      {part !== 'main' && <SubGeomSelector node={selectedNode} />}
 
       {/* Position Offset Control for Sub-Geom */}
-      {(() => {
+      {part === 'shape' && (() => {
         const pos = geom.pos || [0, 0, 0];
         return (
           // Folded until opened: most bodies never move a sub-geom off its origin.
@@ -112,6 +89,8 @@ export function GeomPropertiesCard({ node: selectedNode }: { node: SceneNode }) 
         );
       })()}
 
+      {part === 'physics' && (
+      <>
       <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-2">
         <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 mb-1 flex items-center gap-1.5">
           <span>Mass</span>
@@ -206,8 +185,10 @@ export function GeomPropertiesCard({ node: selectedNode }: { node: SceneNode }) 
       <MaterialCard node={selectedNode} geom={geom} activeIndex={activeIndex} />
 
       <CouplingCard node={selectedNode} />
+      </>
+      )}
 
-      {(() => {
+      {part === 'main' && (() => {
         const rgba = geom.rgba || [0.5, 0.5, 0.5, 1];
         const rHex = Math.floor((rgba[0] ?? 0.5) * 255).toString(16).padStart(2, '0');
         const gHex = Math.floor((rgba[1] ?? 0.5) * 255).toString(16).padStart(2, '0');
@@ -244,6 +225,41 @@ export function GeomPropertiesCard({ node: selectedNode }: { node: SceneNode }) 
           </div>
         );
       })()}
+    </div>
+  );
+}
+
+/** Which of a multi-geom body's shapes the geom cards below it edit. */
+export function SubGeomSelector({ node: selectedNode }: { node: SceneNode }) {
+  const activeGeomIndex = useStore((s) => s.activeGeomIndex);
+  const setActiveGeomIndex = useStore((s) => s.setActiveGeomIndex);
+  if (!selectedNode.geoms || selectedNode.geoms.length < 2) return null;
+  const activeIndex = (activeGeomIndex >= 0 && activeGeomIndex < selectedNode.geoms.length) ? activeGeomIndex : 0;
+  const geom = selectedNode.geoms[activeIndex];
+  return (
+    <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-2">
+      <label className="text-xs font-semibold text-slate-600">Select Sub-Geometry</label>
+      <select
+        value={activeIndex}
+        onChange={(e) => setActiveGeomIndex(parseInt(e.target.value))}
+        className="w-full px-2.5 py-1.5 border border-slate-200 rounded text-xs bg-white text-slate-700 outline-none focus:border-blue-500 cursor-pointer font-medium"
+      >
+        {selectedNode.geoms.map((g, idx) => (
+          // Generated boolean geoms aren't editable — a body with
+          // 16 sector colliders would otherwise bury its two real
+          // shapes at the bottom of this list. Values stay the
+          // real indices so activeGeomIndex still means one thing.
+          g.csgDerived ? null : (
+          <option key={idx} value={idx}>
+            {g.csg === 'difference' ? '\u2796 ' : g.csg === 'intersection' ? '\u2229 ' : ''}{g.name || `Geom ${idx + 1}`} ({g.type})
+          </option>
+          )
+        ))}
+      </select>
+      <div className="text-[10px] text-slate-400 font-semibold px-0.5 flex justify-between uppercase tracking-wider">
+        <span>Type: {geom.type}</span>
+        {geom.name && <span>Name: {geom.name}</span>}
+      </div>
     </div>
   );
 }

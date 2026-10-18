@@ -11,6 +11,8 @@
 import { create } from 'zustand';
 import type { DocsTabId } from '../utils/docsTabs';
 
+export type InspectorTab = 'main' | 'shape' | 'texture' | 'physics' | 'script';
+
 interface PanelsState {
   isDocsOpen: boolean;
   docsTab: DocsTabId;
@@ -28,6 +30,12 @@ interface PanelsState {
   isPropertiesOpen: boolean;
   setLeftSidebarOpen: (open: boolean) => void;
   setPropertiesOpen: (open: boolean) => void;
+  /**
+   * The inspector's open tab. Kept across selections, so stepping through
+   * parts to set one thing on each stays on the tab that thing is in.
+   */
+  inspectorTab: InspectorTab;
+  setInspectorTab: (tab: InspectorTab) => void;
   /** The AI copilot drawer. */
   isCopilotOpen: boolean;
   setCopilotOpen: (open: boolean) => void;
@@ -53,6 +61,8 @@ export const usePanels = create<PanelsState>((set) => ({
   isPropertiesOpen: false,
   setLeftSidebarOpen: (isLeftSidebarOpen) => set({ isLeftSidebarOpen }),
   setPropertiesOpen: (isPropertiesOpen) => set({ isPropertiesOpen }),
+  inspectorTab: 'main',
+  setInspectorTab: (inspectorTab) => set({ inspectorTab }),
   isCopilotOpen: false,
   setCopilotOpen: (isCopilotOpen) => set({ isCopilotOpen }),
   stlImport: null,
