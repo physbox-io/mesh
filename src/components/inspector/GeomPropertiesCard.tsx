@@ -66,7 +66,7 @@ export function GeomPropertiesCard({ node: selectedNode }: { node: SceneNode }) 
                 <label className="text-xs font-medium text-slate-500 flex justify-between">X Offset <SliderValue value={pos[0]} onChange={(v) => {
                     const val = v;
                     updateNodeGeom(selectedNode.id, { pos: [val, pos[1], pos[2]] }, activeIndex);
-                  }} decimals={3} unit="m" /></label>
+                  }} decimals={1} unit="mm" scale={1000} /></label>
                 <RangeInput 
                   {...sliderSpan(pos[0], -1, 1)}
                   value={pos[0]}
@@ -81,7 +81,7 @@ export function GeomPropertiesCard({ node: selectedNode }: { node: SceneNode }) 
                 <label className="text-xs font-medium text-slate-500 flex justify-between">Y Offset <SliderValue value={pos[1]} onChange={(v) => {
                     const val = v;
                     updateNodeGeom(selectedNode.id, { pos: [pos[0], val, pos[2]] }, activeIndex);
-                  }} decimals={3} unit="m" /></label>
+                  }} decimals={1} unit="mm" scale={1000} /></label>
                 <RangeInput 
                   {...sliderSpan(pos[1], -1, 1)}
                   value={pos[1]}
@@ -96,7 +96,7 @@ export function GeomPropertiesCard({ node: selectedNode }: { node: SceneNode }) 
                 <label className="text-xs font-medium text-slate-500 flex justify-between">Z Offset <SliderValue value={pos[2]} onChange={(v) => {
                     const val = v;
                     updateNodeGeom(selectedNode.id, { pos: [pos[0], pos[1], val] }, activeIndex);
-                  }} decimals={3} unit="m" /></label>
+                  }} decimals={1} unit="mm" scale={1000} /></label>
                 <RangeInput 
                   {...sliderSpan(pos[2], -1, 1)}
                   value={pos[2]}

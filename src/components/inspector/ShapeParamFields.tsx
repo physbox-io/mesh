@@ -23,7 +23,7 @@ export function ShapeParamFields({ node, geom }: { node: SceneNode; geom: SceneG
             <label className="text-xs font-medium text-slate-500 flex justify-between">Base Width (X) <SliderValue value={node.width || 2.0} onChange={(v) => {
                 const val = v;
                 updateWedgeParams(node.id, { width: val });
-              }} decimals={2} unit="m" min={0.01} /></label>
+              }} decimals={1} unit="mm" scale={1000} min={0.01} /></label>
             <RangeInput 
               {...lengthSpan(node.width || 2.0)}
               value={node.width || 2.0}
@@ -38,7 +38,7 @@ export function ShapeParamFields({ node, geom }: { node: SceneNode; geom: SceneG
             <label className="text-xs font-medium text-slate-500 flex justify-between">Depth (Y) <SliderValue value={node.depth || 1.0} onChange={(v) => {
                 const val = v;
                 updateWedgeParams(node.id, { depth: val });
-              }} decimals={2} unit="m" min={0.01} /></label>
+              }} decimals={1} unit="mm" scale={1000} min={0.01} /></label>
             <RangeInput 
               {...lengthSpan(node.depth || 1.0)}
               value={node.depth || 1.0}
@@ -53,7 +53,7 @@ export function ShapeParamFields({ node, geom }: { node: SceneNode; geom: SceneG
             <label className="text-xs font-medium text-slate-500 flex justify-between">Height (Z) <SliderValue value={node.height || 0.5} onChange={(v) => {
                 const val = v;
                 updateWedgeParams(node.id, { height: val });
-              }} decimals={2} unit="m" min={0.01} /></label>
+              }} decimals={1} unit="mm" scale={1000} min={0.01} /></label>
             <RangeInput 
               {...lengthSpan(node.height || 0.5)}
               value={node.height || 0.5}
@@ -90,7 +90,7 @@ export function ShapeParamFields({ node, geom }: { node: SceneNode; geom: SceneG
             <label className="text-xs font-medium text-slate-500 flex justify-between">Base Width (X) <SliderValue value={node.width || 0.5} onChange={(v) => {
                 const val = v;
                 updatePyramidParams(node.id, { width: val });
-              }} decimals={2} unit="m" min={0.01} /></label>
+              }} decimals={1} unit="mm" scale={1000} min={0.01} /></label>
             <RangeInput 
               {...lengthSpan(node.width || 0.5)}
               value={node.width || 0.5}
@@ -105,7 +105,7 @@ export function ShapeParamFields({ node, geom }: { node: SceneNode; geom: SceneG
             <label className="text-xs font-medium text-slate-500 flex justify-between">Base Depth (Y) <SliderValue value={node.depth || 0.5} onChange={(v) => {
                 const val = v;
                 updatePyramidParams(node.id, { depth: val });
-              }} decimals={2} unit="m" min={0.01} /></label>
+              }} decimals={1} unit="mm" scale={1000} min={0.01} /></label>
             <RangeInput 
               {...lengthSpan(node.depth || 0.5)}
               value={node.depth || 0.5}
@@ -120,7 +120,7 @@ export function ShapeParamFields({ node, geom }: { node: SceneNode; geom: SceneG
             <label className="text-xs font-medium text-slate-500 flex justify-between">Height (Z) <SliderValue value={node.height || 0.5} onChange={(v) => {
                 const val = v;
                 updatePyramidParams(node.id, { height: val });
-              }} decimals={2} unit="m" min={0.01} /></label>
+              }} decimals={1} unit="mm" scale={1000} min={0.01} /></label>
             <RangeInput 
               {...lengthSpan(node.height || 0.5)}
               value={node.height || 0.5}
@@ -140,7 +140,7 @@ export function ShapeParamFields({ node, geom }: { node: SceneNode; geom: SceneG
             <label className="text-xs font-medium text-slate-500 flex justify-between">Radius <SliderValue value={node.radius || 0.3} onChange={(v) => {
                 const val = v;
                 updateConeParams(node.id, { radius: val });
-              }} decimals={2} unit="m" min={0.01} /></label>
+              }} decimals={1} unit="mm" scale={1000} min={0.01} /></label>
             <RangeInput 
               {...lengthSpan(node.radius || 0.3)}
               value={node.radius || 0.3}
@@ -155,7 +155,7 @@ export function ShapeParamFields({ node, geom }: { node: SceneNode; geom: SceneG
             <label className="text-xs font-medium text-slate-500 flex justify-between">Height <SliderValue value={node.height || 0.6} onChange={(v) => {
                 const val = v;
                 updateConeParams(node.id, { height: val });
-              }} decimals={2} unit="m" min={0.01} /></label>
+              }} decimals={1} unit="mm" scale={1000} min={0.01} /></label>
             <RangeInput 
               {...lengthSpan(node.height || 0.6)}
               value={node.height || 0.6}
@@ -175,7 +175,7 @@ export function ShapeParamFields({ node, geom }: { node: SceneNode; geom: SceneG
             <label className="text-xs font-medium text-slate-500 flex justify-between">Major Radius (Ring) <SliderValue value={node.majorRadius || 0.4} onChange={(v) => {
                 const val = v;
                 updateTorusParams(node.id, { majorRadius: val });
-              }} decimals={2} unit="m" min={0.01} /></label>
+              }} decimals={1} unit="mm" scale={1000} min={0.01} /></label>
             <RangeInput 
               {...lengthSpan(node.majorRadius || 0.4)}
               value={node.majorRadius || 0.4}
@@ -190,7 +190,7 @@ export function ShapeParamFields({ node, geom }: { node: SceneNode; geom: SceneG
             <label className="text-xs font-medium text-slate-500 flex justify-between">Tube Radius <SliderValue value={node.tubeRadius || 0.1} onChange={(v) => {
                 const val = v;
                 updateTorusParams(node.id, { tubeRadius: val });
-              }} decimals={2} unit="m" min={0.01} /></label>
+              }} decimals={1} unit="mm" scale={1000} min={0.01} /></label>
             <RangeInput 
               {...lengthSpan(node.tubeRadius || 0.1)}
               value={node.tubeRadius || 0.1}
@@ -210,7 +210,7 @@ export function ShapeParamFields({ node, geom }: { node: SceneNode; geom: SceneG
             <label className="text-xs font-medium text-slate-500 flex justify-between">Inner Radius <SliderValue value={node.innerRadius || 0.2} onChange={(v) => {
                 const val = v;
                 updateTubeParams(node.id, { innerRadius: val });
-              }} decimals={2} unit="m" min={0.01} /></label>
+              }} decimals={1} unit="mm" scale={1000} min={0.01} /></label>
             <RangeInput 
               {...lengthSpan(node.innerRadius || 0.2)}
               max={node.outerRadius ? node.outerRadius - 0.01 : 0.29}
@@ -226,7 +226,7 @@ export function ShapeParamFields({ node, geom }: { node: SceneNode; geom: SceneG
             <label className="text-xs font-medium text-slate-500 flex justify-between">Outer Radius <SliderValue value={node.outerRadius || 0.3} onChange={(v) => {
                 const val = v;
                 updateTubeParams(node.id, { outerRadius: val });
-              }} decimals={2} unit="m" /></label>
+              }} decimals={1} unit="mm" scale={1000} /></label>
             <RangeInput 
               {...lengthSpan(node.outerRadius || 0.3)}
               min={node.innerRadius ? node.innerRadius + 0.01 : 0.21}
@@ -242,7 +242,7 @@ export function ShapeParamFields({ node, geom }: { node: SceneNode; geom: SceneG
             <label className="text-xs font-medium text-slate-500 flex justify-between">Height (Z) <SliderValue value={node.height || 0.5} onChange={(v) => {
                 const val = v;
                 updateTubeParams(node.id, { height: val });
-              }} decimals={2} unit="m" min={0.01} /></label>
+              }} decimals={1} unit="mm" scale={1000} min={0.01} /></label>
             <RangeInput 
               {...lengthSpan(node.height || 0.5)}
               value={node.height || 0.5}

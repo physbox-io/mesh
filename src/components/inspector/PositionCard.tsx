@@ -45,8 +45,9 @@ export function PositionCard({ node }: { node: SceneNode }) {
             <SliderValue
               value={node.pos[0]}
               onChange={(v) => handleMove(0, v)}
-              decimals={3}
-              unit="m"
+              decimals={1}
+              unit="mm"
+              scale={1000}
               className="text-xs text-slate-500"
             />
           </div>
@@ -63,8 +64,9 @@ export function PositionCard({ node }: { node: SceneNode }) {
             <SliderValue
               value={node.pos[1]}
               onChange={(v) => handleMove(1, v)}
-              decimals={3}
-              unit="m"
+              decimals={1}
+              unit="mm"
+              scale={1000}
               className="text-xs text-slate-500"
             />
           </div>
@@ -88,13 +90,14 @@ export function PositionCard({ node }: { node: SceneNode }) {
               <div className="flex items-center justify-between">
                 <label className="text-xs text-slate-500 font-medium flex items-center gap-1">
                   Z Position (Height)
-                  {centroidZ > 0 ? <span className="text-slate-300 text-[10px]">(+{centroidZ.toFixed(3)} centroid)</span> : null}
+                  {centroidZ > 0 ? <span className="text-slate-300 text-[10px]">(+{(centroidZ * 1000).toFixed(1)} mm centroid)</span> : null}
                 </label>
                 <SliderValue
                   value={displayZ}
                   onChange={(v) => handleMove(2, v + centroidZ)}
-                  decimals={3}
-                  unit="m"
+                  decimals={1}
+                  unit="mm"
+                  scale={1000}
                   className="text-xs text-slate-500"
                 />
               </div>
