@@ -8,6 +8,7 @@ import { useExportJob } from '../utils/exportWorkerClient';
 import { generateContourSliceGcode, DEFAULT_GCODE_OPTIONS } from '../utils/gcodeExporter';
 import { runSettings } from '../utils/runSettings';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
+import { warpGcode, type ProbeGrid } from '../utils/meshLeveler';
 import { NumberInput } from '@physbox-io/ui';
 import { useStore } from '../store/useStore';
 import { MAX_STOCK_PLAN_MM, MAX_STOCK_THICKNESS_MM, MIN_STOCK_MM } from '../utils/stockSettings';
@@ -178,6 +179,8 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
   const [kerfMm, setKerfMm] = useState(0.15);
   const [pinCount, setPinCount] = useState(2);
   const [pinDiameterMm, setPinDiameterMm] = useState(3.0);
+  const [probedGrid, setProbedGrid] = useState<ProbeGrid | null>(null);
+  const [isProbing, setIsProbing] = useState(false);
   const [autoScale, setAutoScale] = useState<boolean>(false);
   const [maxSheets, setMaxSheets] = useState<number>(2);
   const [customScalePct, setCustomScalePct] = useState<number>(100);
@@ -333,7 +336,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
   const gcodeResult = useMemo(() => {
     if (!exportResult?.success || !exportResult.layers) return null;
     const f = gcodeFields;
-    return generateContourSliceGcode(exportResult, {
+    const res = generateContourSliceGcode(exportResult, {
       ...DEFAULT_GCODE_OPTIONS,
       machineMode: f.machineMode,
       cutFeedrate: f.cutFeedrate,
@@ -350,7 +353,13 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
       attachmentHeightMm: f.attachmentHeightMm,
       bitDiameterMm: f.bitDiameterMm,
     });
-  }, [exportResult, gcodeFields, machineState.motion]);
+    // A through cut on a bed that is not flat either leaves skin under the
+    // low corners or goes into the spoilboard under the high ones.
+    if (res.success && f.machineMode === 'cnc' && probedGrid) {
+      res.gcode = warpGcode(res.gcode, probedGrid);
+    }
+    return res;
+  }, [exportResult, gcodeFields, machineState.motion, probedGrid]);
 
   const previewSvg = useMemo(() => {
     if (!exportResult?.success) return '';
@@ -417,6 +426,17 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
     await webSerialManager.frameJob(gcodeResult.bounds, machineMode === 'laser' ? 5 : 0, {
       laserMode: machineMode === 'laser',
     });
+  };
+
+  /** Probes the bed across the job's bounds, so cut depth follows it. Routing only. */
+  const handleProbeBed = async () => {
+    if (!gcodeResult?.bounds) return;
+    setIsProbing(true);
+    try {
+      setProbedGrid(await webSerialManager.probeGrid(gcodeResult.bounds, 3, 3));
+    } finally {
+      setIsProbing(false);
+    }
   };
 
   const mm = (m?: number) => `${((m ?? 0) * 1000).toFixed(0)} mm`;
@@ -999,6 +1019,19 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                   <RefreshCw className="w-3.5 h-3.5 text-emerald-400" />
                   <span>{machineMode === 'laser' ? 'Frame Laser' : 'Frame Job'}</span>
                 </button>
+                {machineMode === 'cnc' && (
+                  <button
+                    onClick={handleProbeBed}
+                    disabled={!gcodeResult?.bounds || isProbing}
+                    title={probedGrid
+                      ? 'Bed probed: cut depths follow the measured surface'
+                      : 'Probe a 3x3 grid over the job so cut depth follows the bed'}
+                    className="py-1.5 px-2 bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 disabled:opacity-40 text-slate-700 dark:text-slate-200 text-xs font-semibold rounded-lg flex items-center justify-center space-x-1 cursor-pointer"
+                  >
+                    <Layers className={`w-3.5 h-3.5 ${probedGrid ? 'text-emerald-400' : 'text-blue-400'}`} />
+                    <span>{isProbing ? 'Probing…' : probedGrid ? 'Bed Levelled' : 'Probe Bed'}</span>
+                  </button>
+                )}
                 <div className="ml-auto">
                   <JobTransport
                     machineState={machineState}
