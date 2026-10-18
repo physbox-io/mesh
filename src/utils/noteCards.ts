@@ -226,7 +226,7 @@ the shape you want to remove, put it where you want it, and subtract it.
 
   machine: `# Gear Train Machine\n\nA multi-stage gear train demonstrating **torque multiplication**.\n\n## Physics\n- Each meshing pair is proximity-coupled; a driving hinge torque propagates through the chain\n- Output speed = input speed × (product of driver teeth / product of driven teeth)\n- Larger driven gears turn slower but with more torque\n\n## Try it\n- Apply a control script torque to the first gear via \`api.applyJointForce()\`\n- Observe speed reduction at each stage`,
 
-  rack_pinion: `# Rack and Pinion\n\nConverts **rotary motion** (pinion gear) to **linear motion** (rack).\n\n## Physics\n- Pinion hinge rotation is coupled to rack slide translation via a **joint equality constraint** when the bodies are within 0.5 m\n- Linear displacement = pinion angle × pinion pitch radius\n\n## Try it\n- Drive the pinion with a script: \`api.applyJointForce('pinion_hinge', 5)\`\n- Add a load mass to the rack to see force requirements increase`,
+  rack_pinion: `# Rack and Pinion\n\nConverts **rotary motion** (pinion gear) to **linear motion** (rack).\n\n## Physics\n- Pinion hinge rotation is coupled to rack slide translation via a **joint equality constraint** when the bodies are within 500 mm\n- Linear displacement = pinion angle × pinion pitch radius\n\n## Try it\n- Drive the pinion with a script: \`api.applyJointForce('pinion_hinge', 5)\`\n- Add a load mass to the rack to see force requirements increase`,
 
   inclined_plane: `# Inclined Plane\n\nClassic mechanics: a block sliding down a ramp under gravity.\n\n## Physics\n- Net force along the plane: *F = mg sin θ − μmg cos θ*\n- **Static friction** prevents motion when *tan θ < μ*\n- Once sliding, **kinetic friction** is lower than static\n\n## Try it\n- Adjust the wedge angle to find the critical slip angle\n- Change the block's friction coefficient in the properties panel`,
   oval_track: `# Oval Curve Track\n\nA marble circulating on a **banked oval** built from the Curve component, a closed Catmull-Rom spline decomposed into convex box segments.\n\n## Physics\n- **Banked turns**: the −18° bank tilts the contact normal inward, supplying centripetal force\n- Equilibrium speed: *v² = g·r·tan θ*. The marble is launched near this speed\n- Too fast → drifts up the bank; too slow → slides down it (self-correcting within the track width)\n\n## Try it\n- Select the track and **drag the blue control-point handles** to reshape the oval live\n- Adjust Bank Angle in the properties panel and watch the marble's line change\n- Increase the marble's **Launch Velocity** (joint panel) to see it climb the bank`,
@@ -306,7 +306,7 @@ Sector slicing works about a single axis, so the hollow cube's other two shafts 
 - Switch a body's **Collision** mode to \`Convex hull\` and watch the hole stop working
 - Drop a small sphere through the ring's hole while it lies flat`,
 
-  bouncy_balls: `# Bouncy Balls\n\n20 multicolored spheres with **high restitution** colliding under gravity.\n\n## Physics\n- Each ball has a **free joint** (6-DOF) and a unique radius (0.18–0.27 m)\n- Uses MuJoCo's **spring-damper contact model**: \`solref=[timeconst, dampingRatio]\`\n- \`solref=[0.04, 0.2]\` = 40 ms contact spring, 20% damping → lively bounce\n- \`dampingRatio < 1\` = underdamped = bouncy; \`= 1\` = critically damped = no bounce\n\n## Try it\n- Use the **Bounciness slider** in the properties panel to tune each ball\n- Change gravity in Environment settings to see low-gravity chaos`,
+  bouncy_balls: `# Bouncy Balls\n\n20 multicolored spheres with **high restitution** colliding under gravity.\n\n## Physics\n- Each ball has a **free joint** (6-DOF) and a unique radius (180–270 mm)\n- Uses MuJoCo's **spring-damper contact model**: \`solref=[timeconst, dampingRatio]\`\n- \`solref=[0.04, 0.2]\` = 40 ms contact spring, 20% damping → lively bounce\n- \`dampingRatio < 1\` = underdamped = bouncy; \`= 1\` = critically damped = no bounce\n\n## Try it\n- Use the **Bounciness slider** in the properties panel to tune each ball\n- Change gravity in Environment settings to see low-gravity chaos`,
 
   openscad_demo: `# OpenSCAD Showcase\n\nA tray whose shape is written as **code**, not dragged out of a palette.\n\n## How it works\n- The body's \`scad\` source is compiled by **openscad-wasm** into a triangle mesh\n- The mesh is drawn as-is, but MuJoCo collides any mesh as its **convex hull**, so the tray's walls are backed by five plain boxes that do the actual containing\n- Edit the source and it recompiles; the boxes stay where they are\n\n## Try it\n- Open the **SCAD editor** on the container and change a dimension\n- Drop a component in and watch it stay inside the walls, not the hull`,
 
@@ -365,10 +365,10 @@ Lattice modelling is for parts like this: exact coordinates and arbitrary topolo
 
   oak_tree: `# Oak Tree
 
-A young open-grown English oak, **3.0 m** tall with a **3.8 m** crown. Not sculpted: grown, by a recursive branching rule, so the shape is a record of how it got there rather than a lump pushed into a tree silhouette.
+A young open-grown English oak, **3,000 mm** tall with a **3,800 mm** crown. Not sculpted: grown, by a recursive branching rule, so the shape is a record of how it got there rather than a lump pushed into a tree silhouette.
 
 ## What makes it an oak
-- A short, stout bole that forks **low**, at 1 m of a 3 m tree, with a buttressed flare over the bottom 270 mm.
+- A short, stout bole that forks **low**, at 1,000 mm of a 3,000 mm tree, with a buttressed flare over the bottom 270 mm.
 - Five first-order limbs leaving **near horizontal** from a range of heights, reaching out before they turn up. That candelabra is the thing you recognise an oak by from across a field. All the limbs leaving one whorl would give you a palm.
 - Every fork keeps the wood: the children's cross-sections add up to the parent's, so a limb that splits in two drops to about **0.73** of its radius, not half. That one rule is most of why the taper looks right.
 - Branches **wander**. Each is drawn in four sub-segments with a little heading jitter, because a branch drawn as a straight tube reads as a broom handle.
@@ -377,11 +377,11 @@ A young open-grown English oak, **3.0 m** tall with a **3.8 m** crown. Not sculp
 ## Numbers
 | | |
 |---|---|
-| Height | 3.03 m |
-| Crown spread | 3.79 x 3.82 m |
-| Trunk at the base / flare | 0.22 / 0.37 m |
+| Height | 3,030 mm |
+| Crown spread | 3,790 x 3,820 mm |
+| Trunk at the base / flare | 220 / 370 mm |
 | Crown to trunk | 16 : 1 |
-| Lowest foliage | 0.99 m |
+| Lowest foliage | 990 mm |
 | Wood / foliage triangles | 5,850 / 26,320 |
 
 ## Try it
