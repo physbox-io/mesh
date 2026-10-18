@@ -532,9 +532,9 @@ export function analyzeSceneMechanicalWeaknesses(sceneGraph: SceneGraph): Analys
         nodeName: node.name,
         category: 'manufacturing',
         severity: 'critical',
-        title: 'Model Exceeds Build Envelope (>20m)',
-        description: `Model extents are ${maxExtent.toFixed(1)}m wide. Authored in millimeters without scaling to meters.`,
-        recommendation: 'Check model scale units (meters vs millimeters) or scale by 0.001.',
+        title: 'Model Exceeds Build Envelope (>20,000 mm)',
+        description: `Model extents are ${Math.round(maxExtent * 1000).toLocaleString()} mm wide, about 1000 times too big: it was most likely drawn in millimetres and read in as metres.`,
+        recommendation: 'Check the units it was imported with, or scale it by 0.001.',
         position: center,
         surfacePoint: center,
       });

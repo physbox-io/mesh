@@ -2436,7 +2436,7 @@ export function useMCPBridge() {
               supportMm2: round(sec.supportMm2),
               up: sec.up.map((v) => round(v, 4)),
               spinDeg: round(sec.spin * 180 / Math.PI, 2),
-              volumeCm3: round(sec.volumeMm3 / 1000, 2),
+              volumeMm3: round(sec.volumeMm3),
               holes: sec.features.filter((f) => f.kind === 'bore').length,
               pegs: sec.features.filter((f) => f.kind === 'peg').length,
             })),

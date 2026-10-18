@@ -937,7 +937,7 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
     patternPlasticG = (patternVolMm3 / 1000) * 1.24 * 0.33;
     if (patternVolMm3 > 120_000) {
       warnings.push(
-        `That is a lot of plastic to burn out (${Math.round(patternVolMm3 / 1000)} cm³ of pattern). Print it ` +
+        `That is a lot of plastic to burn out (${Math.round(patternVolMm3).toLocaleString()} mm³ of pattern). Print it ` +
           'hollow — two or three walls and about 10% infill — with a drain hole into the sprue, or the PLA ' +
           'expands as it softens and splits the investment before it ever gets a chance to burn.'
       );

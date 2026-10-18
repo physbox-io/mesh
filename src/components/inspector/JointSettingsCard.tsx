@@ -155,7 +155,7 @@ export function JointSettingsCard({ node }: { node: SceneNode }) {
               {(joint.stiffness || 0) > 0 && (joint.type === 'hinge' || joint.type === 'slide') && (
                 <div className="flex flex-col gap-1 mt-1 border-t border-slate-50 pt-2">
                   <label className="text-xs font-medium text-slate-500 flex justify-between">
-                    Spring Rest Position <span>{(joint.springref || 0).toFixed(joint.type === 'slide' ? 2 : 0)}{joint.type === 'slide' ? ' m' : '°'}</span>
+                    Spring Rest Position <span>{joint.type === 'slide' ? `${((joint.springref || 0) * 1000).toFixed(0)} mm` : `${(joint.springref || 0).toFixed(0)}°`}</span>
                   </label>
                   <RangeInput 
                     min={joint.type === 'slide' ? -20.0 : -360} 
@@ -210,7 +210,7 @@ export function JointSettingsCard({ node }: { node: SceneNode }) {
                   <div className="flex flex-col gap-3 mt-1 border-t border-slate-50 pt-2">
                     <div className="flex flex-col gap-1">
                       <label className="text-xs font-medium text-slate-500 flex justify-between">
-                        Minimum Limit <span>{minVal.toFixed(isSlide ? 2 : 0)}{isSlide ? ' m' : '°'}</span>
+                        Minimum Limit <span>{isSlide ? `${(minVal * 1000).toFixed(0)} mm` : `${minVal.toFixed(0)}°`}</span>
                       </label>
                       <RangeInput 
                         min={isSlide ? -20.0 : -360}
@@ -230,7 +230,7 @@ export function JointSettingsCard({ node }: { node: SceneNode }) {
 
                     <div className="flex flex-col gap-1">
                       <label className="text-xs font-medium text-slate-500 flex justify-between">
-                        Maximum Limit <span>{maxVal.toFixed(isSlide ? 2 : 0)}{isSlide ? ' m' : '°'}</span>
+                        Maximum Limit <span>{isSlide ? `${(maxVal * 1000).toFixed(0)} mm` : `${maxVal.toFixed(0)}°`}</span>
                       </label>
                       <RangeInput 
                         min={isSlide ? -20.0 : -360}

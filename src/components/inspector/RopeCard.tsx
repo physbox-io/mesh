@@ -89,7 +89,7 @@ export function RopeCard({ node }: { node: SceneNode }) {
           <option value="">-- None (direct coupling) --</option>
           {allPulleyWheels.map(wheel => (
             <option key={wheel.id} value={wheel.id}>
-              {wheel.id} (r={( wheel.pulleyRadius || 0.4).toFixed(2)}m)
+              {wheel.id} (r={((wheel.pulleyRadius || 0.4) * 1000).toFixed(0)} mm)
             </option>
           ))}
         </select>

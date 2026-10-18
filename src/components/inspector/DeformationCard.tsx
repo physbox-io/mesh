@@ -169,7 +169,7 @@ export function DeformationCard({ node: selectedNode }: { node: SceneNode }) {
             <p className="text-[10px] text-slate-400 leading-snug -mt-1">
               A {(massKg * 1000 < 1000 ? `${Math.round(massKg * 1000)} g` : `${massKg.toFixed(1)} kg`)} body
               stopped from {breakSpeed.toFixed(1)} m/s — a drop of
-              about {(breakSpeed * breakSpeed / 19.62 * 100).toFixed(0)} cm onto something hard
+              about {(breakSpeed * breakSpeed / 19.62 * 1000).toFixed(0)} mm onto something hard
               {selectedNode.shatterThicknessRef
                 ? `, where the wall is ${+(selectedNode.shatterThicknessRef * 1000).toFixed(1)} mm. Thinner breaks sooner: half that wall, half the blow.`
                 : '.'}

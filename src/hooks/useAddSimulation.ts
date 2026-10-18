@@ -56,7 +56,7 @@ const stamp = (d: Date) => {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 };
 
-const cm3 = (mm3: number) => `${(mm3 / 1000).toFixed(mm3 < 10_000 ? 1 : 0)} cm³`;
+const mm3 = (v: number) => `${Math.round(v).toLocaleString()} mm³`;
 
 export async function addSimulationToScene(
   req: AddSimulationRequest,
@@ -111,9 +111,9 @@ export async function addSimulationToScene(
         `${+req.job.widthMm.toFixed(1)} × ${+req.job.depthMm.toFixed(1)} × ${+req.job.thicknessMm.toFixed(1)} mm block${where}`,
       '',
       ...(req.details ?? []).map((d) => `- ${d}`),
-      `- Removes ${cm3(milled.stockVolumeMm3 - milled.volumeMm3)} of ${cm3(milled.stockVolumeMm3)}`,
+      `- Removes ${mm3(milled.stockVolumeMm3 - milled.volumeMm3)} of ${mm3(milled.stockVolumeMm3)}`,
       ...(milled.measuredVolumeMm3 !== undefined && req.modelVolumeMm3
-        ? [`- The part itself: ${cm3(milled.measuredVolumeMm3)}, against ${cm3(req.modelVolumeMm3)} in the model, inside its outline`]
+        ? [`- The part itself: ${mm3(milled.measuredVolumeMm3)}, against ${mm3(req.modelVolumeMm3)} in the model, inside its outline`]
         : []),
       milled.drawnCellMm > milled.cellMm * 1.01
         ? `- Simulated on a ${milled.cellMm.toFixed(2)} mm grid, drawn on a ${milled.drawnCellMm.toFixed(2)} mm one: too much detail to draw finer`
@@ -127,7 +127,7 @@ export async function addSimulationToScene(
       `The ${req.label.toLowerCase()} as exported${where}`,
       '',
       ...(req.details ?? []).map((d) => `- ${d}`),
-      `- ${cm3(mesh.volumeMm3)}`,
+      `- ${mm3(mesh.volumeMm3)}`,
     );
   } else if (sheets && req.sheets) {
     const lost = sheets.drawnAreaMm2 - sheets.cutAreaMm2;
@@ -135,7 +135,7 @@ export async function addSimulationToScene(
       `The ${req.label.toLowerCase()} parts as they come off the machine, ${req.sheets.parts.length} of them${where}`,
       '',
       ...(req.details ?? []).map((d) => `- ${d}`),
-      `- ${cm3(sheets.volumeMm3)} of material in the parts`,
+      `- ${mm3(sheets.volumeMm3)} of material in the parts`,
       ...(req.sheets.routerRadiusMm
         ? [Math.abs(lost) > 0.5
           ? `- The ${(req.sheets.routerRadiusMm * 2).toFixed(2)} mm bit leaves ${Math.round(-lost)} mm² more than drawn, in inside corners and slots it cannot enter`

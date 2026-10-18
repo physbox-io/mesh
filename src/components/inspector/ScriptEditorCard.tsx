@@ -186,14 +186,14 @@ api.applyForce([force, 0, 0]);
           </p>
           {[
             { group: 'Read body state', rows: [
-              ['api.getPosition(bodyName?)', 'World position [x, y, z] in metres.'],
+              ['api.getPosition(bodyName?)', 'World position [x, y, z] in metres (×1000 for mm).'],
               ['api.getVelocity(bodyName?)', 'Linear velocity [vx, vy, vz] in m/s.'],
               ['api.getAngularVelocity(bodyName?)', 'Angular velocity [wx, wy, wz] in rad/s.'],
               ['api.getOrientation(bodyName?)', 'Rotation as a flat 9-element matrix.'],
               ['api.getMass(bodyName?)', 'Body mass in kg.'],
             ]},
             { group: 'Read joint state', rows: [
-              ['api.getJointPosition(jointName)', 'Metres for slide, radians for hinge.'],
+              ['api.getJointPosition(jointName)', 'Metres for slide (×1000 for mm), radians for hinge.'],
               ['api.getJointVelocity(jointName)', 'm/s for slide, rad/s for hinge.'],
             ]},
             { group: 'Apply forces', rows: [

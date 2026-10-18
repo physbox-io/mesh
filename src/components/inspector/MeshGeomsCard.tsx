@@ -57,7 +57,7 @@ export function MeshGeomsCard({ node: selectedNode }: { node: SceneNode }) {
           <span className="text-[10px] text-slate-400">
             {g.type === 'mesh'
               ? (g.vertices ? `mesh · ${g.vertices.length / 3} verts · ${g.faces ? g.faces.length / 3 : 0} tris${g.dynamic ? ' · dynamic' : ' · static'}` : 'mesh · no geometry')
-              : `${g.type} · size [${(g.size || []).map((s: number) => s.toFixed(2)).join(', ')}]`}
+              : `${g.type} · size [${(g.size || []).map((s: number) => (s * 1000).toFixed(1)).join(', ')}] mm`}
           </span>
         </div>
         {g.type === 'mesh' && g.vertices && g.vertices.length > 0 && (

@@ -131,7 +131,7 @@ export const SplitForPrintModal: React.FC<{ isOpen: boolean; onClose: () => void
 
   if (!isOpen) return null;
 
-  const supportCm2 = (split?.sections ?? []).reduce((a, s) => a + s.supportMm2, 0) / 100;
+  const supportMm2 = (split?.sections ?? []).reduce((a, s) => a + s.supportMm2, 0);
   const misfits = (split?.sections ?? []).filter((s) => !s.fits).length;
   const checks = outcome?.checks ?? null;
 
@@ -269,7 +269,7 @@ export const SplitForPrintModal: React.FC<{ isOpen: boolean; onClose: () => void
                 {!busy && split && (
                   <div className="space-y-1">
                     <p className="font-mono text-[11px] text-slate-800 dark:text-slate-100">
-                      {split.sections.length} section{split.sections.length === 1 ? '' : 's'} · {split.cuts.length} cut{split.cuts.length === 1 ? '' : 's'} · {supportCm2.toFixed(1)} cm² of support
+                      {split.sections.length} section{split.sections.length === 1 ? '' : 's'} · {split.cuts.length} cut{split.cuts.length === 1 ? '' : 's'} · {Math.round(supportMm2).toLocaleString()} mm² of support
                       {joinery.kind !== 'none' ? ` · ${pins.length} ${joinery.kind === 'dowel' ? 'dowel' : 'peg'}${pins.length === 1 ? '' : 's'}` : ''}
                     </p>
                     {split.sections.length === 1 && (

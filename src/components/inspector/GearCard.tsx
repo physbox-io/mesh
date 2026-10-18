@@ -36,7 +36,7 @@ export function GearCard({ node }: { node: SceneNode }) {
           Gear Radius <SliderValue value={gearRadius} onChange={(v) => {
             const r = v;
             updateNodeGeom(node.id, { size: [r, node.geoms[0].size[1]] });
-          }} decimals={2} unit="m" min={0.05} max={5.0} />
+          }} decimals={1} unit="mm" scale={1000} min={0.05} max={5.0} />
         </label>
         <RangeInput 
           min="0.05" 
@@ -59,7 +59,7 @@ export function GearCard({ node }: { node: SceneNode }) {
             Peg Offset (Radius) <SliderValue value={pegGeom.pos[0]} onChange={(v) => {
               const offsetVal = v;
               updatePusherPeg(node.id, { offset: offsetVal });
-            }} decimals={2} unit="m" min={0.01} max={5.0} />
+            }} decimals={1} unit="mm" scale={1000} min={0.01} max={5.0} />
           </label>
           <RangeInput 
             min="0.01" 
@@ -73,10 +73,10 @@ export function GearCard({ node }: { node: SceneNode }) {
             className="w-full accent-blue-500 cursor-pointer" 
           />
           <label className="text-xs font-medium text-slate-500 flex justify-between mt-2">
-            Peg Thickness <SliderValue value={pegGeom.size[0]} onChange={(v) => {
+            Peg Diameter <SliderValue value={pegGeom.size[0]} onChange={(v) => {
               const rVal = v;
               updatePusherPeg(node.id, { size: [rVal, pegGeom.size[1]] });
-            }} decimals={3} unit="m" min={0.005} max={0.5} />
+            }} decimals={1} unit="mm" scale={2000} min={0.005} max={0.5} />
           </label>
           <RangeInput 
             min="0.005" 
@@ -93,7 +93,7 @@ export function GearCard({ node }: { node: SceneNode }) {
             Peg Length <SliderValue value={pegGeom.size[1]} onChange={(v) => {
               const hVal = v;
               updatePusherPeg(node.id, { size: [pegGeom.size[0], hVal] });
-            }} decimals={2} unit="m" min={0.01} max={1.0} />
+            }} decimals={1} unit="mm" scale={2000} min={0.01} max={1.0} />
           </label>
           <RangeInput 
             min="0.01" 
