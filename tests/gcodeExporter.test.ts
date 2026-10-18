@@ -280,7 +280,8 @@ describe('Multi-sheet jobs', () => {
     expect(perSheet).toHaveLength(3);
     const strip = (s: string) =>
       s.split('; --- Panel')[1].split('; --- PAUSE')[0].split('; --- PROGRAM END')[0]
-        .replace(/^.*---\n/, ''); // drop the panel's own name line
+        .replace(/^.*---\n/, '') // drop the panel's own name line
+        .replace(/ F\d+/g, ''); // the feed is modal, so only the first sheet states it
     expect(strip(perSheet[1])).toBe(strip(perSheet[0]));
     expect(strip(perSheet[2])).toBe(strip(perSheet[0]));
   });
