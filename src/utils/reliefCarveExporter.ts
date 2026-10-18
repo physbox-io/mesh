@@ -139,7 +139,7 @@ export interface ReliefCarveOptions {
   verticalExaggeration: number;
   /** 'fit' scales the model to the stock; 'manual' honours `scalePercent`. */
   fitMode: 'fit' | 'manual';
-  /** Plan-view scale when `fitMode` is 'manual', as a percentage of 1 m : 1 mm. */
+  /** Plan-view scale when `fitMode` is 'manual', as a percentage of the modelled size (100 = 1:1). */
   scalePercent: number;
   /**
    * What to do with the stock the model does not cover. 'carve' takes the

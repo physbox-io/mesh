@@ -341,7 +341,7 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
               </Field>
               <Field
                 label="Scale (%)"
-                hint="100 cuts the part the size it was drawn, 1 m in the scene to 1 mm on the bench, the same rule as every other export."
+                hint="100 cuts the part at its modelled size, millimetre for millimetre, the same rule as every other export."
               >
                 <NumberInput
                   step={10} min={1} max={10000}
