@@ -42,7 +42,9 @@ export function reliefContours(field: ReliefField, levels = defaultEngraveLevels
   const { origin, u, v } = field;
   return lines2D
     .map((line) => simplify(line, tolerance))
-    .filter((line) => line.length >= 2)
+    // A loop smaller than the tolerance simplifies to its first point twice:
+    // to a laser, a stationary burn. It is below what the pattern can show.
+    .filter((line) => line.length >= 2 && line.some(([x, y]) => Math.hypot(x - line[0][0], y - line[0][1]) > tolerance))
     .map((line) => line.map(([x, y]) => [
       origin[0] + u[0] * x + v[0] * y,
       origin[1] + u[1] * x + v[1] * y,

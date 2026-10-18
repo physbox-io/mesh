@@ -83,6 +83,14 @@ describe('a patterned panel through the laser exporter', () => {
     expect(gcode.warnings?.some((w) => /Relief carve/.test(w))).toBe(true);
   });
 
+  it('has no line too short to draw, which a laser would burn as a pit', () => {
+    const lines = reliefContours(texturedSurfaceOf(sheet(HZ, 1).nodes[0].geoms[0])!.regions[0].field!);
+    for (const line of lines) {
+      const reach = Math.max(...line.map(([x, y, z]) => Math.hypot(x - line[0][0], y - line[0][1], z - line[0][2])));
+      expect(reach).toBeGreaterThan(1e-6);
+    }
+  });
+
   it('cuts a panel patterned underneath face down, so it is never turned over', () => {
     // A hole off to one side tells the two faces apart. Turning a panel over
     // after cutting would put that hole on the wrong side of the assembly.
