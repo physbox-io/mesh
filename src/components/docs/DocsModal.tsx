@@ -397,7 +397,7 @@ api.setAngularVelocity([0, 15.0, 0], 'cart'); // Sets angular velocities`}
                   </div>
                   <div className="text-xs border-t border-slate-150 pt-3">
                     <strong className="text-slate-700">🎯 Spring Rest Position (q₀)</strong>
-                    <p className="text-slate-500 mt-1">The pose the spring pulls toward, in degrees for a hinge or metres for a slider. With K = 0 this has no effect at all.</p>
+                    <p className="text-slate-500 mt-1">The pose the spring pulls toward, in degrees for a hinge or millimetres for a slider. With K = 0 this has no effect at all.</p>
                   </div>
                   <div className="text-xs border-t border-slate-150 pt-3">
                     <strong className="text-slate-700">🤝 Pair it with damping</strong>
@@ -459,8 +459,8 @@ api.setAngularVelocity([0, 15.0, 0], 'cart'); // Sets angular velocities`}
                 </p>
                 <div className="bg-slate-50 border border-slate-200/60 rounded-xl p-4 flex flex-col gap-3">
                   <div className="text-xs">
-                    <strong className="text-slate-700">📐 Half-sizes, not full sizes</strong>
-                    <p className="text-slate-500 mt-1">Following MuJoCo's convention, box dimensions are <strong>half-extents</strong>: a size of 0.2 makes a box 0.4 m wide. Sphere size is a radius; a capsule takes a radius and a half-length.</p>
+                    <strong className="text-slate-700">📐 Full sizes, in millimetres</strong>
+                    <p className="text-slate-500 mt-1">Every size here is in millimetres, and a box's Width, Depth and Height are its <strong>whole</strong> width, depth and height. A cylinder's Length is its whole length; a capsule's is the straight part between its rounded ends. Sphere and cylinder sizes are radii. Underneath, MuJoCo stores half-extents in metres, so a scene file or script that gives a box size 0.02 makes it 40&nbsp;mm wide.</p>
                   </div>
                   <div className="text-xs border-t border-slate-150 pt-3">
                     <strong className="text-slate-700">⚖️ Mass does not follow size</strong>
@@ -480,7 +480,7 @@ api.setAngularVelocity([0, 15.0, 0], 'cart'); // Sets angular velocities`}
                   </div>
                   <div className="text-xs border-t border-slate-150 pt-3">
                     <strong className="text-slate-700">⚠️ Very small geoms</strong>
-                    <p className="text-slate-500 mt-1">Anything below roughly 0.01 m can slip through other objects between timesteps (tunnelling). Prefer scaling the whole scene up over making one part tiny.</p>
+                    <p className="text-slate-500 mt-1">Anything below roughly 10&nbsp;mm can slip through other objects between timesteps (tunnelling). Prefer scaling the whole scene up over making one part tiny.</p>
                   </div>
                 </div>
               </div>
@@ -854,7 +854,7 @@ const wobble = Math.sin(api.getTime() * 4) * 3;`}
                   {
                     title: '📖 Reading body state',
                     rows: [
-                      ['api.getPosition(bodyName?)', 'World position as [x, y, z], in metres.'],
+                      ['api.getPosition(bodyName?)', 'World position as [x, y, z], in metres (×1000 for mm).'],
                       ['api.getVelocity(bodyName?)', 'Linear velocity as [vx, vy, vz], in m/s.'],
                       ['api.getAngularVelocity(bodyName?)', 'Angular velocity as [wx, wy, wz], in rad/s.'],
                       ['api.getOrientation(bodyName?)', 'Orientation as a flat 9-element row-major rotation matrix.'],
@@ -864,7 +864,7 @@ const wobble = Math.sin(api.getTime() * 4) * 3;`}
                   {
                     title: '📖 Reading joint state',
                     rows: [
-                      ['api.getJointPosition(jointName)', 'Joint coordinate: metres for a slide, radians for a hinge.'],
+                      ['api.getJointPosition(jointName)', 'Joint coordinate: metres for a slide (×1000 for mm), radians for a hinge.'],
                       ['api.getJointVelocity(jointName)', 'Joint rate: m/s for a slide, rad/s for a hinge.'],
                     ],
                   },
