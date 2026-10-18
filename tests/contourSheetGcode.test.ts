@@ -156,3 +156,20 @@ describe('contour layer cut order', () => {
     });
   }
 });
+
+describe('contour stack dowels', () => {
+  it('keeps the dowel holes the dowel\'s size when the stack is scaled down', () => {
+    const result = exportContourSliceSvg(cube, {
+      ...DEFAULT_CONTOUR_OPTIONS, materialThickness: 0.01, kerf: 0,
+      pinHoles: true, pinCount: 2, pinDiameter: 0.003, scaleFactor: 0.5,
+    });
+    expect(result.scaleFactor).toBeCloseTo(0.5, 6);
+    expect(result.pins).toHaveLength(2);
+    for (const pin of result.pins!) expect(pin.radiusMm).toBeCloseTo(1.5, 3);
+    const layer = result.layers![0];
+    expect(layer.width2D).toBeCloseTo(50, 1);
+    const hole = layer.loops[layer.loops.length - 1];
+    const xs = hole.map((p) => p.x);
+    expect(Math.max(...xs) - Math.min(...xs)).toBeCloseTo(3, 1);
+  });
+});

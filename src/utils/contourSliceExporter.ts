@@ -1107,7 +1107,67 @@ export function exportContourSliceSvg(
     );
   }
 
-  // ---- model-space bounds, shared by the pin search and the map preview ----
+  // ---- scale ----
+  // Settled before the dowels and labels are placed, because those are real
+  // sizes: a 3 mm dowel needs a 3 mm hole however small the stack is cut.
+  const sheetWidthMm = options.sheetWidth * 1000;
+  const sheetHeightMm = options.sheetHeight * 1000;
+  const marginMm = options.margin * 1000;
+  const maxSheets = options.maxSheets && options.maxSheets > 0 ? options.maxSheets : 0;
+
+  let scaleFactor = Math.max(0.05, Math.min(2.0, options.scaleFactor ?? 1.0));
+
+  if (options.autoScale || maxSheets > 0) {
+    const evaluateScale = (s: number): { sheetCount: number; fitSingleSheet: boolean } => {
+      const sizes: { w: number; h: number }[] = [];
+      let fitSingleSheet = true;
+
+      for (const layer of layers) {
+        let lminX = Infinity, lminY = Infinity, lmaxX = -Infinity, lmaxY = -Infinity;
+        for (const loop of layer.loops) {
+          for (const p of loop) {
+            const sx = p.x * s, sy = p.y * s;
+            if (sx < lminX) lminX = sx; if (sx > lmaxX) lmaxX = sx;
+            if (sy < lminY) lminY = sy; if (sy > lmaxY) lmaxY = sy;
+          }
+        }
+        const w = Math.max(1, lmaxX - lminX);
+        const h = Math.max(1, lmaxY - lminY);
+        if (w + 2 * marginMm > sheetWidthMm || h + 2 * marginMm > sheetHeightMm) {
+          fitSingleSheet = false;
+        }
+        sizes.push({ w, h });
+      }
+      return { sheetCount: shelfPack(sizes, sheetWidthMm, sheetHeightMm, marginMm).sheetCount, fitSingleSheet };
+    };
+
+    let bestScale = scaleFactor;
+    const startScale = options.autoScale ? 1.0 : scaleFactor;
+    for (let s = startScale; s >= 0.05; s = Math.round((s - 0.01) * 100) / 100) {
+      const res = evaluateScale(s);
+      if (res.fitSingleSheet && (maxSheets === 0 || res.sheetCount <= maxSheets)) {
+        bestScale = s;
+        break;
+      }
+      bestScale = s;
+    }
+    scaleFactor = bestScale;
+  }
+
+  // Apply scaleFactor to layer loops
+  if (Math.abs(scaleFactor - 1.0) > 1e-4) {
+    for (const layer of layers) {
+      for (const loop of layer.loops) {
+        for (const p of loop) {
+          p.x *= scaleFactor;
+          p.y *= scaleFactor;
+        }
+      }
+      layer.areaMm2 *= scaleFactor * scaleFactor;
+    }
+  }
+
+  // ---- bounds (as cut, after scaling), shared by the pin search and the map preview ----
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   for (const layer of layers) {
     for (const loop of layer.loops) {
@@ -1170,76 +1230,6 @@ export function exportContourSliceSvg(
   }
 
   // ---- nest onto sheets ----
-  const sheetWidthMm = options.sheetWidth * 1000;
-  const sheetHeightMm = options.sheetHeight * 1000;
-  const marginMm = options.margin * 1000;
-  const maxSheets = options.maxSheets && options.maxSheets > 0 ? options.maxSheets : 0;
-
-  let scaleFactor = Math.max(0.05, Math.min(2.0, options.scaleFactor ?? 1.0));
-
-  if (options.autoScale || maxSheets > 0) {
-    const evaluateScale = (s: number): { sheetCount: number; fitSingleSheet: boolean } => {
-      const sizes: { w: number; h: number }[] = [];
-      let fitSingleSheet = true;
-
-      for (const layer of layers) {
-        let lminX = Infinity, lminY = Infinity, lmaxX = -Infinity, lmaxY = -Infinity;
-        for (const loop of layer.loops) {
-          for (const p of loop) {
-            const sx = p.x * s, sy = p.y * s;
-            if (sx < lminX) lminX = sx; if (sx > lmaxX) lmaxX = sx;
-            if (sy < lminY) lminY = sy; if (sy > lmaxY) lmaxY = sy;
-          }
-        }
-        const w = Math.max(1, lmaxX - lminX);
-        const h = Math.max(1, lmaxY - lminY);
-        if (w + 2 * marginMm > sheetWidthMm || h + 2 * marginMm > sheetHeightMm) {
-          fitSingleSheet = false;
-        }
-        sizes.push({ w, h });
-      }
-      return { sheetCount: shelfPack(sizes, sheetWidthMm, sheetHeightMm, marginMm).sheetCount, fitSingleSheet };
-    };
-
-    let bestScale = scaleFactor;
-    const startScale = options.autoScale ? 1.0 : scaleFactor;
-    for (let s = startScale; s >= 0.05; s = Math.round((s - 0.01) * 100) / 100) {
-      const res = evaluateScale(s);
-      if (res.fitSingleSheet && (maxSheets === 0 || res.sheetCount <= maxSheets)) {
-        bestScale = s;
-        break;
-      }
-      bestScale = s;
-    }
-    scaleFactor = bestScale;
-  }
-
-  // Apply scaleFactor to layer loops
-  if (Math.abs(scaleFactor - 1.0) > 1e-4) {
-    for (const layer of layers) {
-      for (const loop of layer.loops) {
-        for (const p of loop) {
-          p.x *= scaleFactor;
-          p.y *= scaleFactor;
-        }
-      }
-      layer.areaMm2 *= scaleFactor * scaleFactor;
-      if (layer.labelPos2D) {
-        layer.labelPos2D.x *= scaleFactor;
-        layer.labelPos2D.y *= scaleFactor;
-      }
-    }
-    for (const pin of pins) {
-      pin.x *= scaleFactor;
-      pin.y *= scaleFactor;
-      pin.radiusMm *= scaleFactor;
-    }
-    minX *= scaleFactor;
-    minY *= scaleFactor;
-    maxX *= scaleFactor;
-    maxY *= scaleFactor;
-  }
-
   for (const layer of layers) {
     let lminX = Infinity, lminY = Infinity, lmaxX = -Infinity, lmaxY = -Infinity;
     for (const loop of layer.loops) {
