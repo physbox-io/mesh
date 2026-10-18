@@ -149,7 +149,7 @@ describe('contour layer cut order', () => {
       expect(cut[2].reach).toBeGreaterThan(65);
       expect(cut[0].reach).toBeLessThan(65);
       expect(cut[1].reach).toBeLessThan(65);
-      const held = (l: { text: string[] }) => l.text.some((t) => /attachment|Z-[\d.]+ F/.test(t) && /^(M5|G1 X.*Z)/.test(t));
+      const held = (l: { text: string[] }) => l.text.some((t) => /attachment|Z-[\d.]+ F/.test(t) && /^G1 X.*(Z| S0 )/.test(t));
       expect(held(cut[2])).toBe(true);
       expect(held(cut[0])).toBe(false);
       expect(held(cut[1])).toBe(false);

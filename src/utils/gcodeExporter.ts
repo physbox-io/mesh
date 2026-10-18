@@ -626,7 +626,7 @@ export function generateLaserCutGcode(
         const s = laserEngraveS(options);
         for (const line of engraving) {
           lines.push(`G0 X${f(pos.x + line[0].x)} Y${f(pos.y + line[0].y)} F${options.travelFeedrate}`);
-          lines.push(`M3 S${s}`);
+          lines.push(`M4 S${s}`);
           for (let i = 1; i < line.length; i++) {
             lines.push(`G1 X${f(pos.x + line[i].x)} Y${f(pos.y + line[i].y)} F${options.engraveFeedrate}`);
             engravedMm += Math.hypot(line[i].x - line[i - 1].x, line[i].y - line[i - 1].y);
@@ -755,31 +755,37 @@ function generateLoopGcode(
   const path = resampleLoop(loop, spans);
 
   if (options.machineMode === 'laser') {
-    // Laser Mode: G0 to start, M3 S<power>, G1 around loop (once per pass), M5.
-    // The beam stays on between passes — the path is closed, so it ends where the
+    // Laser Mode: G0 to start, M4 S<power>, G1 around loop (once per pass), M5.
+    // M4 is GRBL's dynamic power: the beam scales with the head's speed, so it
+    // does not dwell at full power while the planner slows into a corner. The
+    // beam stays on between passes — the path is closed, so it ends where the
     // next pass begins and there is nothing to re-pierce.
     //
-    // An attachment is just the beam going out for its length. The head keeps
-    // moving at the cut feedrate rather than rapiding across, so the gap really
-    // is the length asked for and the beam comes back on already up to speed.
+    // An attachment is just the beam going out for its length, by S0 on the
+    // move itself. M5/M3 there would stop the head dead either side of every
+    // tab (laser mode syncs the planner on them) and scorch both ends. The head
+    // keeps moving at the cut feedrate, so the gap really is the length asked
+    // for and the beam comes back on already up to speed.
     const passes = laserPassCount(options);
+    const power = laserS(options);
     lines.push(`G0 X${f(startX)} Y${f(startY)} F${options.travelFeedrate}`);
-    lines.push(`M3 S${laserS(options)}`);
+    lines.push(`M4 S${power}`);
+    let beamOn = true;
     for (let pass = 1; pass <= passes; pass++) {
       if (passes > 1) lines.push(`; Pass ${pass}/${passes}`);
-      let beamOn = true;
       for (let i = 1; i < path.length; i++) {
         const p = path[i];
         // A segment is entirely inside or entirely outside an attachment, so its
         // midpoint decides — the resample already split it at every boundary.
         const gap = spans.length > 0 && inFlat((path[i - 1].s + p.s) / 2, spans);
-        if (gap !== !beamOn) {
-          lines.push(gap ? `M5 ; attachment` : `M3 S${laserS(options)}`);
+        const move = `G1 X${f(offset.x + p.x)} Y${f(offset.y + p.y)} F${options.cutFeedrate}`;
+        if (gap === beamOn) {
           beamOn = !gap;
+          lines.push(gap ? `${move} S0 ; attachment` : `${move} S${power}`);
+        } else {
+          lines.push(move);
         }
-        lines.push(`G1 X${f(offset.x + p.x)} Y${f(offset.y + p.y)} F${options.cutFeedrate}`);
       }
-      if (!beamOn) lines.push(`M3 S${laserS(options)}`);
     }
     lines.push(`M5`);
   } else {

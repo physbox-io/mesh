@@ -50,3 +50,32 @@ describe('a mixed stock rack on a router', () => {
     expect(deepestPerSheet(r.gcode)).toEqual([-6, -6]);
   });
 });
+
+describe('laser power mode', () => {
+  const laser = (p: LaserPanel) => generateLaserCutGcode([p], {
+    ...DEFAULT_GCODE_OPTIONS, machineMode: 'laser',
+    attachmentsEnabled: true, attachmentWidthMm: 2, attachmentSpacingMm: 50,
+  });
+
+  it('fires in dynamic power mode, M4, so corners are not charred', () => {
+    const p = panel('p', 3, 0);
+    (p as { engrave2D?: { x: number; y: number }[][] }).engrave2D = [[{ x: 10, y: 10 }, { x: 50, y: 10 }]];
+    const g = laser(p).gcode;
+    expect(g).toMatch(/^M4 S\d+/m);
+    expect(g).not.toMatch(/^M3\b/m);
+  });
+
+  it('crosses a holding tab with S0 on the move, without stopping the head', () => {
+    const lines = laser(panel('p', 3, 0)).gcode.split('\n');
+    const first = lines.findIndex((l) => /^M4/.test(l));
+    const last = lines.lastIndexOf('M5');
+    const loop = lines.slice(first + 1, last);
+    // The beam never toggles with M3/M5 inside the loop: those force a planner stop.
+    expect(loop.some((l) => /^M[35]\b/.test(l))).toBe(false);
+    // It goes out and comes back by S word on the G1 moves.
+    const off = loop.filter((l) => /^G1 .*S0\b/.test(l));
+    const on = loop.filter((l) => /^G1 .*S[1-9]\d*/.test(l));
+    expect(off.length).toBeGreaterThan(0);
+    expect(on.length).toBe(off.length);
+  });
+});
