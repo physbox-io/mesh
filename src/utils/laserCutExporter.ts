@@ -167,8 +167,13 @@ export interface LaserPanel {
    * same local mm frame as the loops above.
    */
   engrave2D?: Point2D[][];
-  /** The pattern is on the face that lies downward as cut; turn the panel over to assemble it. */
+  /**
+   * Patterns on both faces: only the upper one can be engraved as cut, so the
+   * other is engraved on the top too and the panel is turned over for it.
+   */
   engraveUnderside?: boolean;
+  /** Cut face down, because its only pattern is on the face that would lie on the bed. */
+  cutFaceDown?: boolean;
   // 3D edge information for joint matching
   edges3D: LaserPanelEdge[];
   /**
@@ -675,6 +680,7 @@ function attachPatternEngraving(panel: LaserPanel, geom: SceneGeom, geomMatrix: 
   // Both skins of a sheet sit half a thickness off the mid-plane; a shelled
   // box's panel has its outer skin there too.
   const reach = panel.thickness / 2 + 1e-3;
+  const found: { lines: THREE.Vector3[][]; under: boolean }[] = [];
   for (const region of surface.regions) {
     const field = region.applied ? region.field : undefined;
     if (!field) continue;
@@ -684,12 +690,41 @@ function attachPatternEngraving(panel: LaserPanel, geom: SceneGeom, geomMatrix: 
     const at = new THREE.Vector3(...field.origin).applyMatrix4(geomMatrix);
     if (Math.abs(at.clone().sub(origin).dot(n)) > reach) continue;
     const lines = reliefContours(field).map((line) =>
-      line.map((p) => toPanel2D(panel, new THREE.Vector3(p[0], p[1], p[2]).applyMatrix4(geomMatrix))),
+      line.map((p) => new THREE.Vector3(p[0], p[1], p[2]).applyMatrix4(geomMatrix)),
     );
-    if (!lines.length) continue;
-    (panel.engrave2D ??= []).push(...lines);
-    if (facing < 0) panel.engraveUnderside = true;
+    if (lines.length) found.push({ lines, under: facing < 0 });
   }
+  if (!found.length) return;
+
+  /*
+   * A pattern only on the face that would lie on the bed: cut the panel face
+   * down instead, so that face is up under the laser. Its whole frame turns
+   * over — outline, holes and the joints still to come — so it goes into the
+   * assembly exactly as cut. Engraving it on the top and turning the panel
+   * over afterwards put every off-centre hole and joint on the wrong side.
+   */
+  if (found.every((r) => r.under)) {
+    mirrorPanelFrame(panel);
+    panel.cutFaceDown = true;
+  } else if (found.some((r) => r.under)) {
+    panel.engraveUnderside = true;
+  }
+  for (const r of found) {
+    (panel.engrave2D ??= []).push(...r.lines.map((line) => line.map((p) => toPanel2D(panel, p))));
+  }
+}
+
+/**
+ * Views a panel from its other face: u and the normal reverse, and its 2D
+ * loops mirror with them, rewound so an outline stays anticlockwise.
+ */
+function mirrorPanelFrame(panel: LaserPanel): void {
+  const flip = (loop: Point2D[]) => loop.map((p) => ({ x: -p.x, y: p.y })).reverse();
+  panel.uAxis3D = v3(panel.uAxis3D).multiplyScalar(-1);
+  panel.normal3D = v3(panel.normal3D).multiplyScalar(-1);
+  panel.outerPolygon2D = flip(panel.outerPolygon2D);
+  panel.innerCutouts2D = panel.innerCutouts2D.map(flip);
+  if (panel.engrave2D) panel.engrave2D = panel.engrave2D.map((l) => l.map((p) => ({ x: -p.x, y: p.y })));
 }
 
 export function extractPanelsFromScene(
@@ -3009,8 +3044,16 @@ export function exportLaserCutSvg(
   const underside = panels.filter((p) => p.engraveUnderside && p.engrave2D?.length).map((p) => p.name);
   if (underside.length) {
     warnings.push(
-      `${underside.join(', ')}: the pattern is on the face that lies on the bed, so it is engraved ` +
-        `on the top instead. Turn ${underside.length === 1 ? 'that panel' : 'those panels'} over when you assemble.`
+      `${underside.join(', ')}: patterned on both faces. A laser can only reach the upper one, so both ` +
+        `patterns are engraved on it; the other face's lines will be on the wrong side.`
+    );
+  }
+  const faceDown = panels.filter((p) => p.cutFaceDown && p.engrave2D?.length).map((p) => p.name);
+  if (faceDown.length) {
+    warnings.push(
+      `${faceDown.join(', ')}: the pattern is on the face that would lie on the bed, so ` +
+        `${faceDown.length === 1 ? 'that panel is' : 'those panels are'} laid out face down, pattern up. ` +
+        `It goes into the assembly as cut, no turning over.`
     );
   }
 
