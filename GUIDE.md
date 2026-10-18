@@ -335,10 +335,13 @@ opens the pattern editor on it.
   outline in, so the texture worker, exporters, reloaded scenes and tests need no font and no
   network. Anything that writes a text texture (the editor's Apply, `applySinglePatternToBody`
   for MCP) must call `prepare` first.
-- **Fonts come from Fontsource, as static files** (`utils/fontLibrary.ts`): one TTF per weight
-  and script subset from jsDelivr, only the subsets the text uses. Not Google's variable
-  files: opentype.js misapplies some glyphs' variation deltas (Montserrat's bold "o" came out
-  a wobbling hairline). The google/fonts repository is only the fallback.
+- **Fonts come from Google as static files** (`utils/fontLibrary.ts`): the fonts.googleapis.com
+  CSS API names one file per weight and script subset on fonts.gstatic.com, and only the
+  subsets the text uses are fetched. A browser gets woff2, decoded by `woff2-encoder`
+  (WebAssembly, lazily loaded). Not the variable TTFs in the google/fonts repository: opentype.js
+  misapplies some glyphs' variation deltas (Montserrat's bold "o" came out a wobbling
+  hairline). Only the picker's catalogue of names comes from Fontsource's mirror, because
+  Google's own is served without CORS.
 - **Filled by the nonzero rule.** Glyphs overlap their own pieces; even-odd punches holes.
 - **A figure, not a texture.** `PatternSpec.figure` marks a pattern whose 1s are the figure:
   engraving sinks them rather than the ground, and round a full wrap it is placed once on the

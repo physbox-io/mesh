@@ -1,20 +1,21 @@
 // ---------------------------------------------------------------------------
-// Google Fonts, for lettering on a part. The same sources Etch uses:
+// Google Fonts, for lettering on a part.
 //
-// - the catalogue (~1800 families) from Fontsource's API, which mirrors
-//   Google's and, unlike fonts.google.com/metadata, is served with CORS;
-// - the font files as plain TTF from Fontsource's jsDelivr mirror: one file
-//   per weight and per script subset, so only the scripts the text uses are
-//   fetched, and a bold is a real static bold. Not Google's variable files:
-//   opentype.js applies a variable font's deltas wrongly to some glyphs --
-//   Montserrat's bold "o" came out a wobbling hairline ring. Those are only
-//   the fallback, from the google/fonts repository. Never the woff2 on
-//   fonts.gstatic.com: decoding that needs a Brotli decoder whose usual
-//   browser build never initialises (see Etch's textVectorizer.ts);
-// - a fonts.googleapis.com stylesheet, only so the picker can show each
-//   family in its own face.
+// - The font files come from Google: the fonts.googleapis.com CSS API names a
+//   static file per weight and per script subset on fonts.gstatic.com, so a
+//   bold is a real bold and only the scripts the text uses are fetched. Not
+//   the variable TTFs in the google/fonts repository, which Etch reads:
+//   opentype.js misapplies a variable font's deltas to some glyphs --
+//   Montserrat's bold "o" came out a wobbling hairline ring.
+// - A browser is served those files as woff2, which opentype.js cannot read,
+//   so they are decoded by woff2-encoder (WebAssembly, inlined; loaded with
+//   the first lettering). Etch found the usual decoder, wawoff2, never
+//   initialises in a browser; this one does. Anything that is not a browser
+//   is served TTF and needs no decoding.
+// - The catalogue (~1800 family names) is Fontsource's mirror of Google's,
+//   because Google's own (fonts.google.com/metadata) is served without CORS.
+//   Only names and weights come from it.
 //
-// opentype.js is imported lazily, so its weight loads with the first lettering.
 // Browser only: the pattern itself is built from saved outlines (textOutline.ts).
 // ---------------------------------------------------------------------------
 
@@ -50,11 +51,7 @@ export const DEFAULT_FONT = 'Roboto';
 const CATALOGUE_KEY = 'mesh_font_catalogue_v1';
 const CATALOGUE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const CATALOGUE_URL = 'https://api.fontsource.org/v1/fonts';
-const GH_FONTS = 'https://cdn.jsdelivr.net/gh/google/fonts@main';
-const FONTSOURCE_API = 'https://api.fontsource.org/v1/fonts';
-const FONTSOURCE_FILES = 'https://cdn.jsdelivr.net/fontsource/fonts';
-/** google/fonts files each family under its licence. */
-const LICENCE_DIRS = ['ofl', 'apache', 'ufl'];
+const GOOGLE_CSS = 'https://fonts.googleapis.com/css2';
 
 const CATEGORIES: ReadonlySet<string> = new Set(['sans-serif', 'serif', 'display', 'handwriting', 'monospace']);
 const category = (c: string): FontCategory => (CATEGORIES.has(c) ? (c as FontCategory) : 'sans-serif');
@@ -112,81 +109,11 @@ export function ensureFontPreview(family: string) {
 
 export class FontUnavailableError extends Error {}
 
-interface FontFile { url: string; weight: number; style: string; variable: boolean }
-
-const families = new Map<string, Promise<FontFile[]>>();
-
-/**
- * A family's files, from its METADATA.pb: the names cannot be guessed (static
- * `Family-Bold.ttf`, variable `Family[wght].ttf`, `Family[wdth,wght].ttf` ...).
- */
-function familyFiles(family: string): Promise<FontFile[]> {
-  const slug = family.toLowerCase().replace(/[^a-z0-9]/g, '');
-  const hit = families.get(slug);
-  if (hit) return hit;
-  const p = (async () => {
-    for (const licence of LICENCE_DIRS) {
-      const base = `${GH_FONTS}/${licence}/${slug}`;
-      let res: Response;
-      try {
-        res = await fetch(`${base}/METADATA.pb`);
-      } catch {
-        continue;
-      }
-      if (!res.ok) continue;
-      const text = await res.text();
-      const files: FontFile[] = [];
-      for (const block of text.split(/fonts\s*\{/).slice(1)) {
-        const filename = block.match(/filename:\s*"([^"]+)"/)?.[1];
-        if (!filename || !/\.(ttf|otf)$/i.test(filename)) continue;
-        files.push({
-          url: `${base}/${encodeURIComponent(filename)}`,
-          weight: parseInt(block.match(/weight:\s*(\d+)/)?.[1] ?? '400', 10),
-          style: block.match(/style:\s*"([^"]+)"/)?.[1] ?? 'normal',
-          variable: filename.includes('['),
-        });
-      }
-      if (files.length) return files;
-    }
-    throw new FontUnavailableError(`"${family}" is not in the Google Fonts library.`);
-  })();
-  p.catch(() => families.delete(slug));
-  families.set(slug, p);
-  return p;
-}
-
-/** The upright file nearest the weight; a variable one covers them all. */
-function pick(files: FontFile[], weight: number): FontFile {
-  const upright = files.filter((f) => f.style === 'normal');
-  const pool = upright.length ? upright : files;
-  return pool.find((f) => f.variable)
-    ?? pool.reduce((a, b) => (Math.abs(b.weight - weight) < Math.abs(a.weight - weight) ? b : a));
-}
-
-interface FontsourceMeta {
-  id: string;
-  weights: number[];
-  subsets: string[];
-  defSubset: string;
-  unicodeRange?: Record<string, string>;
-}
-
-const metas = new Map<string, Promise<FontsourceMeta>>();
-
-function fontsourceMeta(family: string): Promise<FontsourceMeta> {
-  const id = family.trim().toLowerCase().replace(/\s+/g, '-');
-  const hit = metas.get(id);
-  if (hit) return hit;
-  const p = (async () => {
-    const res = await fetch(`${FONTSOURCE_API}/${encodeURIComponent(id)}`);
-    if (!res.ok) throw new FontUnavailableError(`"${family}" is not in the Google Fonts library.`);
-    const meta = (await res.json()) as FontsourceMeta;
-    if (!meta.weights?.length || !meta.subsets?.length) throw new FontUnavailableError(`"${family}" lists no font files.`);
-    return meta;
-  })();
-  p.catch(() => metas.delete(id));
-  metas.set(id, p);
-  return p;
+/** One @font-face of Google's stylesheet: a file and the characters it holds. */
+export interface FontFace {
+  url: string;
+  /** [from, to] code points; empty when the face holds the whole font. */
+  ranges: [number, number][];
 }
 
 /** "U+0460-052F,U+20B4,U+4??" as [from, to] pairs. */
@@ -201,30 +128,73 @@ export function parseUnicodeRange(range: string): [number, number][] {
   return out;
 }
 
-/** The subsets the text needs: the family's default, then any covering a character it does not. */
-export function subsetsFor(meta: FontsourceMeta, text: string): string[] {
-  const chosen = [meta.defSubset && meta.subsets.includes(meta.defSubset) ? meta.defSubset : meta.subsets[0]];
-  const ranges = new Map(Object.entries(meta.unicodeRange ?? {}).map(([k, v]) => [k, parseUnicodeRange(v)]));
-  const covers = (subset: string, cp: number) => (ranges.get(subset) ?? []).some(([a, b]) => cp >= a && cp <= b);
+/** The @font-face rules of a Google Fonts stylesheet. */
+export function parseFontFaces(css: string): FontFace[] {
+  const faces: FontFace[] = [];
+  for (const block of css.split('@font-face').slice(1)) {
+    const url = block.match(/url\(\s*['"]?([^'")]+)['"]?\s*\)/)?.[1];
+    if (!url) continue;
+    const range = block.match(/unicode-range:\s*([^;}]+)/)?.[1];
+    faces.push({ url, ranges: range ? parseUnicodeRange(range) : [] });
+  }
+  return faces;
+}
+
+const covers = (face: FontFace, cp: number) => !face.ranges.length || face.ranges.some(([a, b]) => cp >= a && cp <= b);
+
+/**
+ * The faces the text needs: the one holding "H" first, whose metrics the
+ * lettering is measured by, then whichever holds each character it does not.
+ */
+export function facesFor(faces: FontFace[], text: string): FontFace[] {
+  if (!faces.length) return [];
+  const chosen = [faces.find((f) => covers(f, 0x48)) ?? faces[0]];
   for (const ch of new Set(text)) {
     const cp = ch.codePointAt(0)!;
-    if (cp < 0x80 || /\s/.test(ch) || chosen.some((sub) => covers(sub, cp))) continue;
-    const extra = meta.subsets.find((sub) => covers(sub, cp));
-    if (extra) chosen.push(extra);
+    if (/\s/.test(ch) || chosen.some((f) => covers(f, cp))) continue;
+    const face = faces.find((f) => covers(f, cp));
+    if (face) chosen.push(face);
   }
   return chosen;
 }
 
+const sheets = new Map<string, Promise<FontFace[] | null>>();
+
+/** Google's stylesheet for one weight of a family; null when the family has no such weight. */
+function stylesheet(family: string, weight: number): Promise<FontFace[] | null> {
+  const key = `${family}::${weight}`;
+  const hit = sheets.get(key);
+  if (hit) return hit;
+  const p = (async () => {
+    const res = await fetch(`${GOOGLE_CSS}?family=${encodeURIComponent(family).replace(/%20/g, '+')}:wght@${weight}`);
+    // 400 is Google's answer to a family or a weight it does not have.
+    if (res.status === 400) return null;
+    if (!res.ok) throw new FontUnavailableError(`Google Fonts did not answer (HTTP ${res.status}).`);
+    const faces = parseFontFaces(await res.text());
+    return faces.length ? faces : null;
+  })();
+  p.catch(() => sheets.delete(key));
+  sheets.set(key, p);
+  return p;
+}
+
 const files = new Map<string, Promise<FontLike>>();
 
+/** One font file, woff2 decoded where it is one. */
 function fetchFont(url: string): Promise<FontLike> {
   const hit = files.get(url);
   if (hit) return hit;
   const p = (async () => {
     const res = await fetch(url);
     if (!res.ok) throw new FontUnavailableError(`Could not download a font file (HTTP ${res.status}).`);
+    let bytes: Uint8Array = new Uint8Array(await res.arrayBuffer());
+    // "wOF2"
+    if (bytes[0] === 0x77 && bytes[1] === 0x4f && bytes[2] === 0x46 && bytes[3] === 0x32) {
+      const { default: decompress } = await import('woff2-encoder/decompress');
+      bytes = await decompress(bytes);
+    }
     const opentype = await import('opentype.js');
-    return opentype.parse(await res.arrayBuffer()) as unknown as FontLike;
+    return opentype.parse(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer) as unknown as FontLike;
   })();
   p.catch(() => files.delete(url));
   files.set(url, p);
@@ -272,24 +242,22 @@ function chain(parts: FontLike[]): FontLike {
 }
 
 /**
- * A Google font at a weight, parsed, with the scripts `text` needs. Static
- * files from Fontsource; the google/fonts files when Fontsource has none.
+ * A Google font at a weight, with the scripts `text` needs. A weight the
+ * family lacks becomes its nearest (from the catalogue), then its default.
  */
 export async function loadFont(family: string, weight = 400, text = ''): Promise<FontLike> {
-  let meta: FontsourceMeta | null = null;
-  try {
-    meta = await fontsourceMeta(family);
-  } catch {
-    /* fall back to google/fonts below */
-  }
-  if (meta) {
-    const w = meta.weights.reduce((a, b) => (Math.abs(b - weight) < Math.abs(a - weight) ? b : a));
-    const urls = subsetsFor(meta, text).map((sub) => `${FONTSOURCE_FILES}/${meta!.id}@latest/${sub}-${w}-normal.ttf`);
-    try {
-      return chain(await Promise.all(urls.map(fetchFont)));
-    } catch {
-      /* fall back to google/fonts below */
+  let name = family.trim();
+  let faces = await stylesheet(name, weight);
+  if (!faces) {
+    const entry = (await fetchFontCatalogue()).find((f) => f.name.toLowerCase() === name.toLowerCase());
+    if (entry) name = entry.name;
+    const weights = entry?.weights?.length ? entry.weights : [400];
+    const nearest = weights.reduce((a, b) => (Math.abs(b - weight) < Math.abs(a - weight) ? b : a));
+    for (const w of new Set([nearest, 400])) {
+      if (faces) break;
+      if (w !== weight || name !== family.trim()) faces = await stylesheet(name, w);
     }
   }
-  return fetchFont(pick(await familyFiles(family), weight).url);
+  if (!faces) throw new FontUnavailableError(`"${name}" is not in the Google Fonts library.`);
+  return chain(await Promise.all(facesFor(faces, text).map((f) => fetchFont(f.url))));
 }
