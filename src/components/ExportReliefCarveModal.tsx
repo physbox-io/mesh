@@ -465,7 +465,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
               <Field
                 className="lg:col-span-2"
                 label="Plan Scale"
-                hint="Fit to Stock sizes the model to the block. Manual holds a fixed scale, where 100% means one metre of scene is one millimetre of stock. Anything hanging over the edge is cropped."
+                hint="Fit to Stock sizes the model to the block. Manual holds a fixed scale, where 100% cuts the model at its modelled size, millimetre for millimetre. Anything hanging over the edge is cropped."
               >
                 <Segmented
                   value={options.fitMode}
@@ -554,7 +554,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                 <span>{result.roughingPassCount} roughing layers</span>
                 <span className="font-mono bg-slate-200 dark:bg-slate-800 px-2 py-0.5 rounded text-[10px] uppercase font-bold text-blue-600 dark:text-blue-400">
                   Est. Time: {formatDuration(result.estimatedTimeSeconds)}
-                  ({(result.totalCutDistanceMm / 1000).toFixed(1)} m cut)
+                  ({Math.round(result.totalCutDistanceMm).toLocaleString()} mm cut)
                 </span>
                 {result.roughingTimeSeconds > 0 && (
                   // The split, because a roughing pass that leaves the work to

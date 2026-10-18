@@ -29,13 +29,20 @@ export const SliderValue: React.FC<{
   onChange: (v: number) => void;
   /** Digits shown when the box is not being edited. */
   decimals?: number;
-  /** Rendered after the number, e.g. "m" or "°". */
+  /** Rendered after the number, e.g. "mm" or "°". */
   unit?: string;
+  /**
+   * Display factor: the box shows `value * scale` and a typed number goes out
+   * as `typed / scale`. Lengths are stored in metres and shown in millimetres,
+   * so a length field passes `scale={1000}` with `unit="mm"`. `min` and `max`
+   * stay in the stored units, like `value`.
+   */
+  scale?: number;
   min?: number;
   max?: number;
   className?: string;
-}> = ({ value, onChange, decimals = 3, unit, min, max, className = '' }) => {
-  const shown = Number.isFinite(value) ? value.toFixed(decimals) : '';
+}> = ({ value, onChange, decimals = 3, unit, scale = 1, min, max, className = '' }) => {
+  const shown = Number.isFinite(value) ? (value * scale).toFixed(decimals) : '';
   const [text, setText] = useState(shown);
   const [editing, setEditing] = useState(false);
   const [seen, setSeen] = useState(value);
@@ -70,7 +77,7 @@ export const SliderValue: React.FC<{
         }}
         onChange={(e) => {
           setText(e.target.value);
-          const n = parseFloat(e.target.value);
+          const n = parseFloat(e.target.value) / scale;
           if (!Number.isFinite(n)) return;
           if (min !== undefined && n < min) return;
           if (max !== undefined && n > max) return;
@@ -85,7 +92,7 @@ export const SliderValue: React.FC<{
             // box whose floor is 0.05 looked like the box ignoring you. Only on
             // blur and Enter: mid-typing, "0" on the way to "0.05" is not a
             // request for the minimum.
-            const n = parseFloat(text);
+            const n = parseFloat(text) / scale;
             if (Number.isFinite(n) && ((min !== undefined && n < min) || (max !== undefined && n > max))) {
               setPending(Math.min(max ?? Infinity, Math.max(min ?? -Infinity, n)));
             }

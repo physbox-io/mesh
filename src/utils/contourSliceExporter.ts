@@ -22,6 +22,7 @@ import {
   type Point2D,
 } from './laserCutExporter';
 import { appendGeomTriangles } from './geomSurface';
+import { nestingDepths, offsetLoop } from './polygonOffset';
 import type { StockTransform } from './reliefCarveExporter';
 
 export interface ContourSliceOptions {
@@ -102,6 +103,9 @@ export interface ContourLayer {
    * and its *maximum* y, because plan-view y runs up and SVG y runs down.
    */
   modelOffset2D?: Point2D;
+  /** Which sheet the layer is cut from, 0 first. */
+  sheetIndex?: number;
+  /** Where the layer sits on its own sheet, mm from that sheet's corner. */
   placedPos2D?: Point2D;
   width2D?: number;
   height2D?: number;
@@ -917,6 +921,46 @@ function loopsPath(loops: Point2D[][], dx: number, dy: number): string {
   return out;
 }
 
+/**
+ * Lays rectangles out in rows, left to right, top to bottom, starting a new
+ * sheet when a row runs off the bottom. A row or sheet that is still empty is
+ * never left behind: a part too big for it goes there anyway (the caller warns
+ * about it), rather than leaving an empty row or a blank first sheet.
+ */
+export function shelfPack(
+  sizes: { w: number; h: number }[],
+  sheetWidthMm: number,
+  sheetHeightMm: number,
+  marginMm: number,
+): { placed: { sheet: number; x: number; y: number }[]; sheetCount: number } {
+  let x = marginMm;
+  let y = marginMm;
+  let rowHeight = 0;
+  let sheet = 0;
+  const placed = sizes.map(({ w, h }) => {
+    if (x > marginMm && x + w + marginMm > sheetWidthMm) {
+      x = marginMm;
+      y += rowHeight + marginMm;
+      rowHeight = 0;
+    }
+    // On the top row a part too tall for any sheet overflows wherever it goes,
+    // so it stays alongside the others rather than taking a sheet to itself.
+    const tooTall = h + 2 * marginMm > sheetHeightMm;
+    const sheetUsed = x > marginMm || y > marginMm;
+    if (sheetUsed && y + h + marginMm > sheetHeightMm && !(tooTall && y === marginMm)) {
+      sheet++;
+      x = marginMm;
+      y = marginMm;
+      rowHeight = 0;
+    }
+    const at = { sheet, x, y };
+    x += w + marginMm;
+    if (h > rowHeight) rowHeight = h;
+    return at;
+  });
+  return { placed, sheetCount: sheet + 1 };
+}
+
 export function exportContourSliceSvg(
   scene: SceneGraph,
   userOptions?: Partial<ContourSliceOptions>
@@ -1064,7 +1108,67 @@ export function exportContourSliceSvg(
     );
   }
 
-  // ---- model-space bounds, shared by the pin search and the map preview ----
+  // ---- scale ----
+  // Settled before the dowels and labels are placed, because those are real
+  // sizes: a 3 mm dowel needs a 3 mm hole however small the stack is cut.
+  const sheetWidthMm = options.sheetWidth * 1000;
+  const sheetHeightMm = options.sheetHeight * 1000;
+  const marginMm = options.margin * 1000;
+  const maxSheets = options.maxSheets && options.maxSheets > 0 ? options.maxSheets : 0;
+
+  let scaleFactor = Math.max(0.05, Math.min(2.0, options.scaleFactor ?? 1.0));
+
+  if (options.autoScale || maxSheets > 0) {
+    const evaluateScale = (s: number): { sheetCount: number; fitSingleSheet: boolean } => {
+      const sizes: { w: number; h: number }[] = [];
+      let fitSingleSheet = true;
+
+      for (const layer of layers) {
+        let lminX = Infinity, lminY = Infinity, lmaxX = -Infinity, lmaxY = -Infinity;
+        for (const loop of layer.loops) {
+          for (const p of loop) {
+            const sx = p.x * s, sy = p.y * s;
+            if (sx < lminX) lminX = sx; if (sx > lmaxX) lmaxX = sx;
+            if (sy < lminY) lminY = sy; if (sy > lmaxY) lmaxY = sy;
+          }
+        }
+        const w = Math.max(1, lmaxX - lminX);
+        const h = Math.max(1, lmaxY - lminY);
+        if (w + 2 * marginMm > sheetWidthMm || h + 2 * marginMm > sheetHeightMm) {
+          fitSingleSheet = false;
+        }
+        sizes.push({ w, h });
+      }
+      return { sheetCount: shelfPack(sizes, sheetWidthMm, sheetHeightMm, marginMm).sheetCount, fitSingleSheet };
+    };
+
+    let bestScale = scaleFactor;
+    const startScale = options.autoScale ? 1.0 : scaleFactor;
+    for (let s = startScale; s >= 0.05; s = Math.round((s - 0.01) * 100) / 100) {
+      const res = evaluateScale(s);
+      if (res.fitSingleSheet && (maxSheets === 0 || res.sheetCount <= maxSheets)) {
+        bestScale = s;
+        break;
+      }
+      bestScale = s;
+    }
+    scaleFactor = bestScale;
+  }
+
+  // Apply scaleFactor to layer loops
+  if (Math.abs(scaleFactor - 1.0) > 1e-4) {
+    for (const layer of layers) {
+      for (const loop of layer.loops) {
+        for (const p of loop) {
+          p.x *= scaleFactor;
+          p.y *= scaleFactor;
+        }
+      }
+      layer.areaMm2 *= scaleFactor * scaleFactor;
+    }
+  }
+
+  // ---- bounds (as cut, after scaling), shared by the pin search and the map preview ----
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   for (const layer of layers) {
     for (const loop of layer.loops) {
@@ -1113,7 +1217,21 @@ export function exportContourSliceSvg(
     }
 
     for (const layer of layers) {
-      for (const pin of pins) layer.loops.push(circleLoop({ x: pin.x, y: pin.y }, pin.radiusMm));
+      for (const pin of pins) layer.loops.push(circleLoop({ x: pin.x, y: pin.y }, pinRadiusMm));
+    }
+  }
+
+  // ---- kerf ----
+  // A laser burns away half its kerf either side of the line, so every layer
+  // is offset by that much: outlines out, holes (dowel holes among them) in,
+  // and the layer comes out at the size it was modelled. A router is sent no
+  // kerf; its G-code stands the bit off by its own radius instead.
+  const kerfHalfMm = (options.kerf * 1000) / 2;
+  if (kerfHalfMm > 1e-6) {
+    for (const layer of layers) {
+      const depths = nestingDepths(layer.loops);
+      layer.loops = layer.loops.flatMap((loop, i) =>
+        loop.length < 3 ? [loop] : offsetLoop(loop, depths[i] % 2 === 1 ? -kerfHalfMm : kerfHalfMm, { joinStyle: 'miter' }));
     }
   }
 
@@ -1127,92 +1245,6 @@ export function exportContourSliceSvg(
   }
 
   // ---- nest onto sheets ----
-  const sheetWidthMm = options.sheetWidth * 1000;
-  const sheetHeightMm = options.sheetHeight * 1000;
-  const marginMm = options.margin * 1000;
-  const maxSheets = options.maxSheets && options.maxSheets > 0 ? options.maxSheets : 0;
-
-  let scaleFactor = Math.max(0.05, Math.min(2.0, options.scaleFactor ?? 1.0));
-
-  if (options.autoScale || maxSheets > 0) {
-    const evaluateScale = (s: number): { sheetCount: number; fitSingleSheet: boolean } => {
-      let currentX = marginMm;
-      let currentY = marginMm;
-      let rowHeight = 0;
-      let sheetIndex = 0;
-      let fitSingleSheet = true;
-
-      for (const layer of layers) {
-        let lminX = Infinity, lminY = Infinity, lmaxX = -Infinity, lmaxY = -Infinity;
-        for (const loop of layer.loops) {
-          for (const p of loop) {
-            const sx = p.x * s, sy = p.y * s;
-            if (sx < lminX) lminX = sx; if (sx > lmaxX) lmaxX = sx;
-            if (sy < lminY) lminY = sy; if (sy > lmaxY) lmaxY = sy;
-          }
-        }
-        const w = Math.max(1, lmaxX - lminX);
-        const h = Math.max(1, lmaxY - lminY);
-
-        if (w + 2 * marginMm > sheetWidthMm || h + 2 * marginMm > sheetHeightMm) {
-          fitSingleSheet = false;
-        }
-        if (currentX + w + marginMm > sheetWidthMm) {
-          currentX = marginMm;
-          currentY += rowHeight + marginMm;
-          rowHeight = 0;
-        }
-        if (currentY + h + marginMm > sheetHeightMm) {
-          sheetIndex++;
-          currentX = marginMm;
-          currentY = marginMm;
-          rowHeight = 0;
-        }
-        currentX += w + marginMm;
-        if (h > rowHeight) rowHeight = h;
-      }
-      return { sheetCount: sheetIndex + 1, fitSingleSheet };
-    };
-
-    let bestScale = scaleFactor;
-    const startScale = options.autoScale ? 1.0 : scaleFactor;
-    for (let s = startScale; s >= 0.05; s = Math.round((s - 0.01) * 100) / 100) {
-      const res = evaluateScale(s);
-      if (res.fitSingleSheet && (maxSheets === 0 || res.sheetCount <= maxSheets)) {
-        bestScale = s;
-        break;
-      }
-      bestScale = s;
-    }
-    scaleFactor = bestScale;
-  }
-
-  // Apply scaleFactor to layer loops
-  if (Math.abs(scaleFactor - 1.0) > 1e-4) {
-    for (const layer of layers) {
-      for (const loop of layer.loops) {
-        for (const p of loop) {
-          p.x *= scaleFactor;
-          p.y *= scaleFactor;
-        }
-      }
-      layer.areaMm2 *= scaleFactor * scaleFactor;
-      if (layer.labelPos2D) {
-        layer.labelPos2D.x *= scaleFactor;
-        layer.labelPos2D.y *= scaleFactor;
-      }
-    }
-    for (const pin of pins) {
-      pin.x *= scaleFactor;
-      pin.y *= scaleFactor;
-      pin.radiusMm *= scaleFactor;
-    }
-    minX *= scaleFactor;
-    minY *= scaleFactor;
-    maxX *= scaleFactor;
-    maxY *= scaleFactor;
-  }
-
   for (const layer of layers) {
     let lminX = Infinity, lminY = Infinity, lmaxX = -Infinity, lmaxY = -Infinity;
     for (const loop of layer.loops) {
@@ -1228,37 +1260,21 @@ export function exportContourSliceSvg(
     layer.modelOffset2D = { x: lminX, y: lmaxY };
   }
 
-  let currentX = marginMm;
-  let currentY = marginMm;
-  let rowHeight = 0;
-  let sheetIndex = 0;
   const oversized: string[] = [];
-
-  for (const layer of layers) {
+  const sizes = layers.map((layer) => {
     const w = layer.width2D || 1;
     const h = layer.height2D || 1;
-
     if (w + 2 * marginMm > sheetWidthMm || h + 2 * marginMm > sheetHeightMm) {
       oversized.push(`layer ${layer.index + 1}`);
     }
-    if (currentX + w + marginMm > sheetWidthMm) {
-      currentX = marginMm;
-      currentY += rowHeight + marginMm;
-      rowHeight = 0;
-    }
-    if (currentY + h + marginMm > sheetHeightMm) {
-      sheetIndex++;
-      currentX = marginMm;
-      currentY = marginMm;
-      rowHeight = 0;
-    }
-
-    layer.placedPos2D = { x: currentX, y: currentY + sheetIndex * sheetHeightMm };
-    currentX += w + marginMm;
-    if (h > rowHeight) rowHeight = h;
-  }
-
-  const sheetCount = sheetIndex + 1;
+    return { w, h };
+  });
+  const packed = shelfPack(sizes, sheetWidthMm, sheetHeightMm, marginMm);
+  layers.forEach((layer, i) => {
+    layer.sheetIndex = packed.placed[i].sheet;
+    layer.placedPos2D = { x: packed.placed[i].x, y: packed.placed[i].y };
+  });
+  const sheetCount = packed.sheetCount;
 
   if (Math.abs(scaleFactor - 1.0) > 1e-3) {
     warnings.unshift(
@@ -1314,10 +1330,12 @@ export function exportContourSliceSvg(
   }
 
   svg += `  <g id="cut-paths" stroke="#FF0000" stroke-width="0.2" fill="none" stroke-linejoin="round" stroke-linecap="round">\n`;
+  // The sheets are drawn one below another, so each layer drops by its sheet.
+  const sheetTop = (layer: ContourLayer) => (layer.sheetIndex ?? 0) * sheetHeightMm;
   for (const layer of layers) {
     const pos = layer.placedPos2D!;
     const off = layer.modelOffset2D!;
-    svg += loopsPath(layer.loops, pos.x - off.x, pos.y + off.y);
+    svg += loopsPath(layer.loops, pos.x - off.x, sheetTop(layer) + pos.y + off.y);
   }
   svg += `  </g>\n\n`;
 
@@ -1329,7 +1347,7 @@ export function exportContourSliceSvg(
       const pos = layer.placedPos2D!;
       const off = layer.modelOffset2D!;
       const x = pos.x - off.x + anchor.x;
-      const y = pos.y + off.y - anchor.y;
+      const y = sheetTop(layer) + pos.y + off.y - anchor.y;
       svg += `    <text x="${x.toFixed(2)}" y="${y.toFixed(2)}">${escapeXml(String(layer.index + 1))}</text>\n`;
     }
     svg += `  </g>\n`;

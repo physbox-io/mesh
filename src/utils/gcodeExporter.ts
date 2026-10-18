@@ -6,7 +6,7 @@ import type { LaserPanel, Point2D } from './laserCutExporter';
 import type { ContourSliceResult } from './contourSliceExporter';
 import { estimateGcodeTime } from './timeEstimate';
 import { DEFAULT_MOTION_PROFILE, type MotionProfile } from './motionProfile';
-import { offsetRegion, offsetNestedLoops } from './polygonOffset';
+import { offsetRegion, offsetNestedLoops, nestingDepths } from './polygonOffset';
 import { clearingRings } from './adaptiveClearing';
 
 export interface GcodeExportOptions {
@@ -413,8 +413,12 @@ function facingLines(
     lines.push(`; Facing pass ${p} of ${passes} at Z${f(z)}`);
     let forward = true;
     let first = true;
-    for (let y = y0; y <= y1 + 1e-6; y += stepover) {
-      const yy = Math.min(y, y1);
+    // Rows evenly spaced from edge to edge, none further apart than the
+    // stepover: stepping by the stepover itself stopped short of the far edge.
+    const rows = Math.max(1, Math.ceil((y1 - y0) / stepover - 1e-9));
+    const pitch = (y1 - y0) / rows;
+    for (let row = 0; row <= rows; row++) {
+      const yy = y0 + row * pitch;
       const from = forward ? x0 : x1;
       const to = forward ? x1 : x0;
       if (first) {
@@ -424,7 +428,7 @@ function facingLines(
         first = false;
       } else {
         lines.push(`G1 X${f(from)} Y${f(yy)} F${Math.round(options.cutFeedrate)}`);
-        distanceMm += stepover;
+        distanceMm += pitch;
       }
       lines.push(`G1 X${f(to)} Y${f(yy)} F${Math.round(options.cutFeedrate)}`);
       distanceMm += Math.abs(to - from);
@@ -519,6 +523,42 @@ export function generateLaserCutGcode(
   let totalCutDistanceMm = 0;
   let attachmentCount = 0;
 
+  /*
+   * Facing and profiling are two bits when the facing bit is a surfacing
+   * cutter, and the operator swaps between them: M6 parks and holds the job
+   * (Mesh's streamer lifts, parks and waits), and the new bit is touched off
+   * before it goes on. Whichever is needed first is the one fitted at the start.
+   */
+  const facingBit = Math.max(1, options.facingBitDiameterMm);
+  const twoBits = options.pauseOnToolChange && Math.abs(facingBit - options.bitDiameterMm) > 0.01;
+  let fitted: 'facing' | 'profile' | null = null;
+  const fit = (bit: 'facing' | 'profile', sIdx: number) => {
+    if (fitted !== null && fitted !== bit && twoBits) {
+      const dia = bit === 'facing' ? facingBit : options.bitDiameterMm;
+      const what = bit === 'facing' ? 'facing bit' : 'end mill for the profiles';
+      const toolNumber = bit === 'facing' ? 1 : 2;
+      operations.push({ id: `tool_${operations.length}`, name: `Fit the ${f(dia)}mm ${what}`, type: 'pause_tool', sheetIndex: sIdx, toolNumber });
+      const travel = f(Math.max(options.safeZ, 20));
+      lines.push(``);
+      lines.push(`; --- TOOL CHANGE ---`);
+      lines.push(`G0 Z${travel}`);
+      lines.push(`M5 ; spindle off for the tool change`);
+      lines.push(`G0 X0.000 Y0.000 ; park over the work origin`);
+      head = { x: 0, y: 0 };
+      lines.push(`T${toolNumber} M6 ; fit the ${f(dia)}mm ${what} and re-zero Z`);
+      // The operator has just touched the new bit off on the work.
+      lines.push(`G0 Z${travel} ; back to travel height after the change`);
+      lines.push(`M3 S${Math.round(options.spindleRpm)}`);
+      lines.push(`G4 P2`);
+    }
+    fitted = bit;
+  };
+  // How far each faced panel's top now is below Z0, so its profile starts there.
+  const facedDownMm = new Map<string, number>();
+  // Where the head is, in sheet coordinates, for choosing what to cut next.
+  let head: Point2D = { x: 0, y: 0 };
+  let faceMinX = Infinity, faceMinY = Infinity, faceMaxX = -Infinity, faceMaxY = -Infinity;
+
   for (let sIdx = 0; sIdx < sheetIndices.length; sIdx++) {
     const sKey = sheetIndices[sIdx];
     const sheetPanels = sheetMap.get(sKey)!;
@@ -539,6 +579,7 @@ export function generateLaserCutGcode(
         lines.push(`M5 ; Spindle OFF`);
       }
       lines.push(`G0 X0.000 Y0.000 ; Park head at origin`);
+      head = { x: 0, y: 0 };
       lines.push(`M0 (PAUSE: Insert Material Sheet ${sIdx + 1} of ${sheetCount})`);
       if (options.machineMode === 'cnc') {
         lines.push(`M3 S${Math.round(options.spindleRpm)}`);
@@ -550,6 +591,13 @@ export function generateLaserCutGcode(
     lines.push(`; ==================================================`);
     lines.push(`; SHEET ${sIdx + 1} of ${sheetCount}`);
     lines.push(`; ==================================================`);
+
+    // A mixed rack has sheets of different thicknesses, and a router has to go
+    // through each one: the single cut depth is only right for the first row.
+    const sheetStockMm = options.sheetStockThicknessMm?.[sKey];
+    const sheetOptions: GcodeExportOptions = options.machineMode === 'cnc' && sheetStockMm !== undefined
+      ? { ...options, cutDepthZ: sheetStockMm }
+      : options;
 
     /*
      * Facing first, and for the whole sheet before any profile is cut. A panel
@@ -565,6 +613,15 @@ export function generateLaserCutGcode(
         // goods are not flat enough for the attempt to mean anything.
         if (!(removal > 0.1)) continue;
 
+        fit('facing', sIdx);
+        facedDownMm.set(panel.id, removal);
+        // The facing bit reaches a whole diameter past the panel: its centre
+        // starts a radius outside so that the edges keep no lip.
+        const at = panel.placedPos2D || { x: 0, y: 0 };
+        faceMinX = Math.min(faceMinX, at.x - facingBit);
+        faceMinY = Math.min(faceMinY, at.y - facingBit);
+        faceMaxX = Math.max(faceMaxX, at.x + (panel.width2D || 0) + facingBit);
+        faceMaxY = Math.max(faceMaxY, at.y + (panel.height2D || 0) + facingBit);
         operations.push({
           id: `${panel.id}_facing`,
           name: `${panel.name} — face ${f(stockMm!)}mm down to ${f(target)}mm`,
@@ -581,7 +638,9 @@ export function generateLaserCutGcode(
 
     for (const panel of sheetPanels) {
       const pos = panel.placedPos2D || { x: 0, y: 0 };
+      if (options.machineMode === 'cnc') fit('profile', sIdx);
       lines.push(`; --- Panel: ${panel.name} ---`);
+      const fromDepthMm = facedDownMm.get(panel.id) ?? 0;
 
       // What the tool actually follows. On a laser that is the geometry itself;
       // on a router it stands half a bit outside the outline and half a bit
@@ -617,9 +676,12 @@ export function generateLaserCutGcode(
         operations.push({ id: `${panel.id}_engrave`, name: `${panel.name} Pattern`, type: 'engrave', sheetIndex: sIdx });
         lines.push(`; Engrave pattern (${engraving.length} lines)`);
         const s = laserEngraveS(options);
-        for (const line of engraving) {
+        const chained = chainLines(engraving, head, pos);
+        const last = chained[chained.length - 1];
+        head = { x: pos.x + last[last.length - 1].x, y: pos.y + last[last.length - 1].y };
+        for (const line of chained) {
           lines.push(`G0 X${f(pos.x + line[0].x)} Y${f(pos.y + line[0].y)} F${options.travelFeedrate}`);
-          lines.push(`M3 S${s}`);
+          lines.push(`M4 S${s}`);
           for (let i = 1; i < line.length; i++) {
             lines.push(`G1 X${f(pos.x + line[i].x)} Y${f(pos.y + line[i].y)} F${options.engraveFeedrate}`);
             engravedMm += Math.hypot(line[i].x - line[i - 1].x, line[i].y - line[i - 1].y);
@@ -630,10 +692,11 @@ export function generateLaserCutGcode(
         skippedEngraving.push(panel.name);
       }
 
-      // 1. Cut inner cutouts/mortises FIRST so material doesn't shift
-      for (let cIdx = 0; cIdx < holePaths.length; cIdx++) {
-        const cutout = holePaths[cIdx];
-        if (cutout.length < 3) continue;
+      // 1. Cut inner cutouts/mortises FIRST so material doesn't shift, nearest first
+      for (const cIdx of nearestFirst(holePaths, head, pos)) {
+        if (holePaths[cIdx].length < 3) continue;
+        const cutout = startNear(holePaths[cIdx], head, pos);
+        head = { x: pos.x + cutout[0].x, y: pos.y + cutout[0].y };
 
         operations.push({
           id: `${panel.id}_cutout_${cIdx}`,
@@ -642,14 +705,15 @@ export function generateLaserCutGcode(
           sheetIndex: sIdx,
         });
 
-        totalCutDistanceMm += polygonPerimeter(cutout);
-        lines.push(...generateLoopGcode(cutout, pos, options));
+        totalCutDistanceMm += polygonPerimeter(cutout) * loopPassCount(sheetOptions, fromDepthMm);
+        lines.push(...generateLoopGcode(cutout, pos, sheetOptions, [], fromDepthMm));
       }
 
       // 2. Cut outer boundary polygon LAST
-      for (let oIdx = 0; oIdx < outerPaths.length; oIdx++) {
-        const outline = outerPaths[oIdx];
-        if (outline.length < 3) continue;
+      for (const oIdx of nearestFirst(outerPaths, head, pos)) {
+        if (outerPaths[oIdx].length < 3) continue;
+        const outline = startNear(outerPaths[oIdx], head, pos);
+        head = { x: pos.x + outline[0].x, y: pos.y + outline[0].y };
 
         operations.push({
           id: outerPaths.length > 1 ? `${panel.id}_outer_${oIdx}` : `${panel.id}_outer`,
@@ -664,8 +728,8 @@ export function generateLaserCutGcode(
         // and a bridge left across a mortise would block the tab meant to enter it.
         const spans = planAttachments(polygonPerimeter(outline), options);
         attachmentCount += spans.length;
-        totalCutDistanceMm += polygonPerimeter(outline);
-        lines.push(...generateLoopGcode(outline, pos, options, spans));
+        totalCutDistanceMm += polygonPerimeter(outline) * loopPassCount(sheetOptions, fromDepthMm);
+        lines.push(...generateLoopGcode(outline, pos, sheetOptions, spans, fromDepthMm));
       }
     }
   }
@@ -693,7 +757,7 @@ export function generateLaserCutGcode(
     );
   }
 
-  const gcodeText = lines.join('\n');
+  const gcodeText = tidyModal(lines).join('\n');
   // Planned the way the controller plans it — accelerate, cruise, brake — not
   // as cut length over feedrate. On a sheet of small parts the head spends most
   // of its time getting up to speed and slowing down again for the next corner,
@@ -713,10 +777,10 @@ export function generateLaserCutGcode(
     // job really occupies — which is what the framing trace and the travel
     // check downstream both need to know.
     bounds: {
-      minX: minX - radius,
-      minY: minY - radius,
-      maxX: maxX + radius,
-      maxY: maxY + radius,
+      minX: Math.min(minX - radius, faceMinX),
+      minY: Math.min(minY - radius, faceMinY),
+      maxX: Math.max(maxX + radius, faceMaxX),
+      maxY: Math.max(maxY + radius, faceMaxY),
     },
     attachmentCount,
     compensationMm: radius,
@@ -732,6 +796,132 @@ export function generateLaserCutGcode(
  * mortise slug is small enough to be harmless, and a bridge across one would
  * stop its tab entering.
  */
+/**
+ * A closed loop restarted at the point on it nearest the head, so the head
+ * does not cross the part to reach a start chosen by array order. The start
+ * is kept off the corners, because a pierce or plunge dwells there twice —
+ * once going in and again where the loop closes — and on a corner that is a
+ * burn or a gouge in the part's edge rather than along a straight one.
+ */
+function startNear(loop: Point2D[], head: Point2D, offset: Point2D): Point2D[] {
+  if (loop.length < 3) return loop;
+  const hx = head.x - offset.x;
+  const hy = head.y - offset.y;
+  let best = { d: Infinity, i: 0, p: loop[0] };
+  for (let i = 0; i < loop.length; i++) {
+    const a = loop[i];
+    const b = loop[(i + 1) % loop.length];
+    const len = Math.hypot(b.x - a.x, b.y - a.y);
+    if (len < 1e-9) continue;
+    // Clear of either end by 2 mm, or the middle of an edge shorter than that.
+    const margin = Math.min(2, len / 2) / len;
+    const t = ((hx - a.x) * (b.x - a.x) + (hy - a.y) * (b.y - a.y)) / (len * len);
+    const tc = Math.min(1 - margin, Math.max(margin, t));
+    const p = { x: a.x + (b.x - a.x) * tc, y: a.y + (b.y - a.y) * tc };
+    const d = Math.hypot(p.x - hx, p.y - hy);
+    if (d < best.d - 1e-9) best = { d, i, p };
+  }
+  const n = loop.length;
+  const out = [best.p];
+  for (let k = 1; k <= n; k++) out.push(loop[(best.i + k) % n]);
+  return out;
+}
+
+/** Indices of `items` in greedy nearest-first order from `head`. */
+function nearestFirst(items: Point2D[][], head: Point2D, offset: Point2D): number[] {
+  const left = items.map((_, i) => i);
+  const order: number[] = [];
+  let at = head;
+  while (left.length) {
+    let bestK = 0, bestD = Infinity;
+    left.forEach((i, k) => {
+      for (const p of items[i]) {
+        const d = Math.hypot(p.x + offset.x - at.x, p.y + offset.y - at.y);
+        if (d < bestD) { bestD = d; bestK = k; }
+      }
+    });
+    const [i] = left.splice(bestK, 1);
+    order.push(i);
+    // A closed loop ends where it starts, near the point it was reached at.
+    const nearest = items[i].reduce((q, p) =>
+      Math.hypot(p.x + offset.x - at.x, p.y + offset.y - at.y) < Math.hypot(q.x + offset.x - at.x, q.y + offset.y - at.y) ? p : q);
+    at = { x: nearest.x + offset.x, y: nearest.y + offset.y };
+  }
+  return order;
+}
+
+/**
+ * Open polylines chained greedily: each next is the one with an end nearest
+ * the head, run from that end. Pattern outlines come out of the contourer in
+ * grid order, and the head used to fly the length of the panel between two
+ * lines that touch.
+ */
+function chainLines(lines: Point2D[][], head: Point2D, offset: Point2D): Point2D[][] {
+  const left = lines.slice();
+  const out: Point2D[][] = [];
+  let at = head;
+  while (left.length) {
+    let bestK = 0, bestD = Infinity, flip = false;
+    left.forEach((l, k) => {
+      const a = l[0], b = l[l.length - 1];
+      const da = Math.hypot(a.x + offset.x - at.x, a.y + offset.y - at.y);
+      const db = Math.hypot(b.x + offset.x - at.x, b.y + offset.y - at.y);
+      if (da < bestD) { bestD = da; bestK = k; flip = false; }
+      if (db < bestD) { bestD = db; bestK = k; flip = true; }
+    });
+    const [l] = left.splice(bestK, 1);
+    const run = flip ? l.slice().reverse() : l;
+    out.push(run);
+    const end = run[run.length - 1];
+    at = { x: end.x + offset.x, y: end.y + offset.y };
+  }
+  return out;
+}
+
+/** How many depth passes `generateLoopGcode` makes around one loop. */
+function loopPassCount(options: GcodeExportOptions, fromDepthMm = 0): number {
+  if (options.machineMode === 'laser') return 1; // the caller multiplies laser passes in once, for everything
+  const totalDepth = Math.abs(options.cutDepthZ);
+  const stepdown = Math.max(0.1, Math.abs(options.zStepdown));
+  const from = Math.min(Math.max(0, fromDepthMm), totalDepth);
+  return Math.max(1, Math.ceil((totalDepth - from) / stepdown - 1e-9));
+}
+
+/**
+ * Modal tidying, applied to a finished program. The feed is modal, so it is
+ * sent only when it changes: on every vertex it was a quarter of the bytes
+ * going down a 128-byte serial buffer, which is lookahead the planner loses
+ * on a dense curve. A rapid carries no F at all (on GRBL it would set the
+ * cutting feed). A lift to the height the tool is already at is dropped,
+ * except after a pause, where the operator may have moved it.
+ */
+function tidyModal(lines: string[]): string[] {
+  const out: string[] = [];
+  let feed: string | null = null;
+  let z: string | null = null;
+  for (const line of lines) {
+    const cut = line.search(/[;(]/);
+    let code = cut >= 0 ? line.slice(0, cut) : line;
+    const rest = cut >= 0 ? line.slice(cut) : '';
+    if (/^\s*M(0|1|2|6|30)\b|\bM6\b/.test(code)) z = null;
+    if (/^G0\b/.test(code)) {
+      code = code.replace(/\s*F-?[\d.]+/, '');
+      const only = /^G0 Z(-?[\d.]+)\s*$/.exec(code);
+      if (only && only[1] === z) continue;
+    } else if (/^G[123]\b/.test(code)) {
+      const m = /\s*F(-?[\d.]+)/.exec(code);
+      if (m) {
+        if (m[1] === feed) code = code.replace(m[0], '');
+        else feed = m[1];
+      }
+    }
+    const zw = /^G[0123]\b.*Z(-?[\d.]+)/.exec(code);
+    if (zw) z = zw[1];
+    out.push(rest ? `${code.trimEnd()} ${rest}`.replace(/^ /, '') : code.trimEnd());
+  }
+  return out;
+}
+
 function generateLoopGcode(
   loop: Point2D[],
   offset: Point2D,
@@ -748,31 +938,37 @@ function generateLoopGcode(
   const path = resampleLoop(loop, spans);
 
   if (options.machineMode === 'laser') {
-    // Laser Mode: G0 to start, M3 S<power>, G1 around loop (once per pass), M5.
-    // The beam stays on between passes — the path is closed, so it ends where the
+    // Laser Mode: G0 to start, M4 S<power>, G1 around loop (once per pass), M5.
+    // M4 is GRBL's dynamic power: the beam scales with the head's speed, so it
+    // does not dwell at full power while the planner slows into a corner. The
+    // beam stays on between passes — the path is closed, so it ends where the
     // next pass begins and there is nothing to re-pierce.
     //
-    // An attachment is just the beam going out for its length. The head keeps
-    // moving at the cut feedrate rather than rapiding across, so the gap really
-    // is the length asked for and the beam comes back on already up to speed.
+    // An attachment is just the beam going out for its length, by S0 on the
+    // move itself. M5/M3 there would stop the head dead either side of every
+    // tab (laser mode syncs the planner on them) and scorch both ends. The head
+    // keeps moving at the cut feedrate, so the gap really is the length asked
+    // for and the beam comes back on already up to speed.
     const passes = laserPassCount(options);
+    const power = laserS(options);
     lines.push(`G0 X${f(startX)} Y${f(startY)} F${options.travelFeedrate}`);
-    lines.push(`M3 S${laserS(options)}`);
+    lines.push(`M4 S${power}`);
+    let beamOn = true;
     for (let pass = 1; pass <= passes; pass++) {
       if (passes > 1) lines.push(`; Pass ${pass}/${passes}`);
-      let beamOn = true;
       for (let i = 1; i < path.length; i++) {
         const p = path[i];
         // A segment is entirely inside or entirely outside an attachment, so its
         // midpoint decides — the resample already split it at every boundary.
         const gap = spans.length > 0 && inFlat((path[i - 1].s + p.s) / 2, spans);
-        if (gap !== !beamOn) {
-          lines.push(gap ? `M5 ; attachment` : `M3 S${laserS(options)}`);
+        const move = `G1 X${f(offset.x + p.x)} Y${f(offset.y + p.y)} F${options.cutFeedrate}`;
+        if (gap === beamOn) {
           beamOn = !gap;
+          lines.push(gap ? `${move} S0 ; attachment` : `${move} S${power}`);
+        } else {
+          lines.push(move);
         }
-        lines.push(`G1 X${f(offset.x + p.x)} Y${f(offset.y + p.y)} F${options.cutFeedrate}`);
       }
-      if (!beamOn) lines.push(`M3 S${laserS(options)}`);
     }
     lines.push(`M5`);
   } else {
@@ -828,8 +1024,10 @@ export function generateFramingGcode(
     `; --- LASER FRAMING / GUIDE TRACE ---`,
     `G21 ; mm`,
     `G90 ; absolute`,
-    `G0 X${formatNum(minX)} Y${formatNum(minY)} F${options.travelFeedrate}`,
   ];
+  // A router has usually just been zeroed on the stock: lift before crossing it.
+  if (options.machineMode !== 'laser') lines.push(`G0 Z${formatNum(options.safeZ)}`);
+  lines.push(`G0 X${formatNum(minX)} Y${formatNum(minY)} F${options.travelFeedrate}`);
 
   if (options.machineMode === 'laser') {
     lines.push(`M3 S${laserGuideS(options)} ; Low power guide dot`);
@@ -1027,27 +1225,35 @@ export function generateContourSliceGcode(
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   const warnings: string[] = [];
 
+  // Layers are nested several to a sheet, so the operator swaps material when
+  // the sheet changes, not at every layer. An older result without sheets
+  // falls back to one layer per sheet.
+  const sheetOf = (lIdx: number) => layers[lIdx].sheetIndex ?? lIdx;
+  // Where the head is, in sheet coordinates, for choosing what to cut next.
+  let head: Point2D = { x: 0, y: 0 };
   for (let lIdx = 0; lIdx < layers.length; lIdx++) {
     const layer = layers[lIdx];
     const loops = layer.loops || [];
+    const sheet = sheetOf(lIdx);
 
-    if (lIdx > 0 && options.pauseBetweenSheets) {
+    if (lIdx > 0 && sheet !== sheetOf(lIdx - 1) && options.pauseBetweenSheets) {
       operations.push({
-        id: `pause_layer_${lIdx + 1}`,
-        name: `Insert Slice Layer ${lIdx + 1} of ${layers.length}`,
+        id: `pause_sheet_${sheet + 1}`,
+        name: `Insert Sheet ${sheet + 1} of ${sheetCount}`,
         type: 'pause_sheet',
-        sheetIndex: lIdx,
+        sheetIndex: sheet,
       });
 
       lines.push(``);
-      lines.push(`; --- PAUSE: CONTOUR LAYER SWAP ---`);
+      lines.push(`; --- PAUSE: SHEET SWAP ---`);
       if (options.machineMode === 'laser') lines.push(`M5`);
       else {
         lines.push(`G0 Z${f(options.safeZ)}`);
         lines.push(`M5`);
       }
       lines.push(`G0 X0.000 Y0.000`);
-      lines.push(`M0 (PAUSE: Insert Slice Layer ${lIdx + 1} of ${layers.length})`);
+      head = { x: 0, y: 0 };
+      lines.push(`M0 (PAUSE: Insert Sheet ${sheet + 1} of ${sheetCount})`);
       if (options.machineMode === 'cnc') {
         lines.push(`M3 S${Math.round(options.spindleRpm)}`);
         lines.push(`G4 P2`);
@@ -1056,7 +1262,7 @@ export function generateContourSliceGcode(
 
     lines.push(``);
     lines.push(`; ==================================================`);
-    lines.push(`; CONTOUR LAYER ${lIdx + 1} of ${layers.length} (Z = ${f(layer.z * 1000)}mm)`);
+    lines.push(`; CONTOUR LAYER ${lIdx + 1} of ${layers.length} on sheet ${sheet + 1} (Z = ${f(layer.z * 1000)}mm)`);
     lines.push(`; ==================================================`);
 
     // On a router the tool has to stand off each contour by its own radius, and
@@ -1075,13 +1281,30 @@ export function generateContourSliceGcode(
       }
       cutPaths = comp.paths;
     }
-
     const offset: Point2D = layer.placedPos2D && layer.modelOffset2D
       ? {
           x: layer.placedPos2D.x - layer.modelOffset2D.x,
           y: layer.placedPos2D.y - (layer.modelOffset2D.y - (layer.height2D ?? 0)),
         }
       : { x: 0, y: 0 };
+
+    // Innermost first: a hole, dowel hole or island is cut while the layer is
+    // still held by the sheet, and the outline that frees it goes last. Within
+    // one depth, nearest first, each loop started near where the head is.
+    const depths = nestingDepths(cutPaths);
+    const levels = [...new Set(depths)].sort((a, b) => b - a);
+    const ordered: Point2D[][] = [];
+    const cutDepths: number[] = [];
+    for (const level of levels) {
+      const group = cutPaths.filter((_, i) => depths[i] === level);
+      for (const i of nearestFirst(group, head, offset)) {
+        const loop = startNear(group[i], head, offset);
+        head = { x: offset.x + loop[0].x, y: offset.y + loop[0].y };
+        ordered.push(loop);
+        cutDepths.push(level);
+      }
+    }
+    cutPaths = ordered;
 
     /*
      * The top layer of a stack that is not a whole number of sheets finishes
@@ -1099,7 +1322,7 @@ export function generateContourSliceGcode(
         id: `layer_${lIdx + 1}_facing`,
         name: `Layer ${lIdx + 1} — face ${f(sheetMm)}mm down to ${f(layer.facedToMm!)}mm`,
         type: 'facing',
-        sheetIndex: lIdx,
+        sheetIndex: sheet,
       });
       lines.push(`; --- Facing: ${f(removal)}mm off a ${f(sheetMm)}mm sheet, to ${f(layer.facedToMm!)}mm ---`);
       const faced = faceLayerLines(cutPaths, offset, removal, options);
@@ -1116,7 +1339,7 @@ export function generateContourSliceGcode(
         id: `layer_${lIdx + 1}_contour_${cIdx}`,
         name: `Layer ${lIdx + 1} Contour #${cIdx + 1}`,
         type: 'cut',
-        sheetIndex: lIdx,
+        sheetIndex: sheet,
       });
 
       for (const pt of contour) {
@@ -1128,12 +1351,12 @@ export function generateContourSliceGcode(
         maxY = Math.max(maxY, py);
       }
 
-      // Every contour gets attachments, holes included: a slice's holes are voids
-      // in the model rather than joinery, and their slugs are big enough to be
-      // worth holding down.
-      const spans = planAttachments(polygonPerimeter(contour), options);
+      // Only the material's outer edges are held. Tabs in a hole would tie the
+      // slug to the part, to be broken out and pared off inside the hole, and
+      // the holes are cut before the outline, while the layer is still held.
+      const spans = cutDepths[cIdx] % 2 === 0 ? planAttachments(polygonPerimeter(contour), options) : [];
       attachmentCount += spans.length;
-      totalCutDistanceMm += polygonPerimeter(contour);
+      totalCutDistanceMm += polygonPerimeter(contour) * loopPassCount(options, fromDepthMm);
       lines.push(...generateLoopGcode(contour, offset, options, spans, fromDepthMm));
     }
   }
@@ -1146,7 +1369,7 @@ export function generateContourSliceGcode(
 
   totalCutDistanceMm *= laserPassCount(options);
 
-  const gcodeText = lines.join('\n');
+  const gcodeText = tidyModal(lines).join('\n');
   const estimatedTimeSeconds = Math.round(
     estimateGcodeTime(gcodeText, { profile: options.motionProfile ?? DEFAULT_MOTION_PROFILE }).seconds
   );

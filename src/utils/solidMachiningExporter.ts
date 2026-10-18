@@ -1217,6 +1217,15 @@ export function generateSolidMachining(
     });
   }
 
+  // The grid is measured on whatever face was up when it was probed. After the
+  // flip that face is underneath, so side B wants a grid of its own.
+  if (twoSided && opts.applyMeshLeveling && opts.meshLevelGrid) {
+    warnings.push(
+      `Bed levelling follows the surface probed before side A. Probe again after flipping the ` +
+        `block, before cutting side B: its top is the other face, and the old grid does not describe it.`
+    );
+  }
+
   if (!twoSided && opts.throughCutMm > 0) {
     warnings.push(
       `The channel goes ${opts.throughCutMm} mm below the bottom of the stock, into whatever is ` +

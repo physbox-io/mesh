@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { exportLaserCutSvg, extractPanelsFromScene, simplifyPolygon2D, DEFAULT_LASER_OPTIONS, type LaserCutResult } from '../src/utils/laserCutExporter';
 import { birdhousePreset, birdhouseScadPreset, stackedCubesPreset } from '../src/presets/presetScenes';
 import type { SceneGeom, SceneGraph } from '../src/types/scene';
+import { offsetLoop } from '../src/utils/polygonOffset';
 
 type Point2D = { x: number; y: number };
 
@@ -934,8 +935,9 @@ describe('CNC inside-corner relief', () => {
   it('dogbones overcut along the corner bisector', () => {
     const loop = pocketLoop({ cornerRelief: 'dogbone', bitDiameter: BIT });
 
-    // Both walls give way, by the bisector reach resolved onto each axis.
-    const reach = (R - 0.05) * Math.SQRT1_2 + R;
+    // The bit is driven down the bisector until its edge is just past the
+    // corner, so each wall gives way by its radius less the centre's offset.
+    const reach = R - (R - 0.05) * Math.SQRT1_2;
     expect(extent(loop, 'x').hi).toBeCloseTo(20 + reach, 1);
     expect(extent(loop, 'y').hi).toBeCloseTo(10 + reach, 1);
     expect(selfIntersects(loop)).toBe(false);
@@ -944,12 +946,11 @@ describe('CNC inside-corner relief', () => {
   it('t-bones hide the overcut in the longer wall, keeping the end faces flat', () => {
     const loop = pocketLoop({ cornerRelief: 'tbone', bitDiameter: BIT });
 
-    // The 40 mm walls take the bite; the 20 mm end faces a tenon seats
-    // against are left exactly where they were.
-    expect(extent(loop, 'y').hi).toBeCloseTo(10 + R, 1);
-    // Flat but for the sliver of deliberate overlap that keeps the union of
-    // circle and rectangle from pinching to nothing at the corner.
-    expect(extent(loop, 'x').hi).toBeCloseTo(20.05, 2);
+    // The 40 mm walls take the bite, a radius deep and a hair more; the 20 mm
+    // end faces a tenon seats against are left exactly where they were.
+    expect(extent(loop, 'y').hi).toBeCloseTo(10 + R + 0.05, 1);
+    // To within the few microns the round ends are drawn outside their circle.
+    expect(extent(loop, 'x').hi).toBeCloseTo(20, 2);
     expect(selfIntersects(loop)).toBe(false);
   });
 
@@ -965,6 +966,21 @@ describe('CNC inside-corner relief', () => {
           Math.abs(p.x) > Math.abs(corner.x) + 0.5 || Math.abs(p.y) > Math.abs(corner.y) + 0.5
         );
         expect(beyond, `${style} relief at ${corner.x},${corner.y}`).toBe(true);
+      }
+    }
+  });
+
+  it('lets the bit itself reach every corner once it is stood off by its radius', () => {
+    // What the G-code does with a relieved pocket: the tool centre follows the
+    // loop shrunk by R. A relief drawn as a polygon inscribed in its circle has
+    // chords inside R, and the shrunk path stops short of the corner.
+    for (const style of ['dogbone', 'tbone'] as const) {
+      const loop = pocketLoop({ cornerRelief: style, bitDiameter: BIT });
+      const path = offsetLoop(loop, -R).flat();
+      expect(path.length).toBeGreaterThan(0);
+      for (const corner of [{ x: 20, y: 10 }, { x: -20, y: 10 }, { x: 20, y: -10 }, { x: -20, y: -10 }]) {
+        const nearest = Math.min(...path.map(p => Math.hypot(p.x - corner.x, p.y - corner.y)));
+        expect(nearest, `${style} at ${corner.x},${corner.y}`).toBeLessThanOrEqual(R + 1e-3);
       }
     }
   });

@@ -198,11 +198,22 @@ describe('audit fixes', () => {
       safeZ: 7,
       cutterCompensation: 'off',
     });
-    const panelBlock = cnc.gcode.slice(cnc.gcode.indexOf('; --- Panel'));
-    const firstSafeZ = panelBlock.indexOf('G0 Z7.000');
-    const firstXY = panelBlock.indexOf('G0 X50.000 Y60.000');
-    expect(firstSafeZ).toBeGreaterThanOrEqual(0);
-    expect(firstXY).toBeGreaterThan(firstSafeZ);
+    // Up at safe Z by the time of the first rapid across the stock, which
+    // lands on the panel where it was placed.
+    let z: number | null = null;
+    const lines = cnc.gcode.split('\n');
+    const firstXY = lines.findIndex((l) => /^G0 X/.test(l));
+    for (const l of lines.slice(0, firstXY)) {
+      const m = /^G[01]\b[^;]*Z(-?[\d.]+)/.exec(l);
+      if (m) z = parseFloat(m[1]);
+    }
+    expect(z).toBe(7);
+    const at = (l: string) => ({ x: parseFloat(/X(-?[\d.]+)/.exec(l)![1]), y: parseFloat(/Y(-?[\d.]+)/.exec(l)![1]) });
+    const p = at(lines[firstXY]);
+    expect(p.x).toBeGreaterThanOrEqual(50);
+    expect(p.x).toBeLessThanOrEqual(70);
+    expect(p.y).toBeGreaterThanOrEqual(60);
+    expect(p.y).toBeLessThanOrEqual(80);
 
     const sliceGcode = generateContourSliceGcode({
       success: true,
@@ -219,7 +230,13 @@ describe('audit fixes', () => {
         },
       ],
     }, { ...DEFAULT_GCODE_OPTIONS, machineMode: 'laser', cutterCompensation: 'off' });
-    expect(sliceGcode.gcode).toContain('G0 X120.000 Y80.000');
+    const first = sliceGcode.gcode.split('\n').find((l) => /^G0 X/.test(l))!;
+    const x = parseFloat(/X(-?[\d.]+)/.exec(first)![1]);
+    const y = parseFloat(/Y(-?[\d.]+)/.exec(first)![1]);
+    expect(x).toBeGreaterThanOrEqual(120);
+    expect(x).toBeLessThanOrEqual(130);
+    expect(y).toBeGreaterThanOrEqual(80);
+    expect(y).toBeLessThanOrEqual(90);
   });
 
   it('7. exportContourSliceSvg scales areaMm2 and labelPos2D when scaleFactor !== 1', () => {

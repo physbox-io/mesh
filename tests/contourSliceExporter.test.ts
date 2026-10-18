@@ -42,6 +42,7 @@ describe('Contour Slice Exporter', () => {
     const result = exportContourSliceSvg(cube, {
       ...DEFAULT_CONTOUR_OPTIONS,
       materialThickness: 0.01,
+      kerf: 0, // a lasered layer is offset by half the kerf; see contourSheetGcode.test.ts
       pinHoles: false,
     });
 

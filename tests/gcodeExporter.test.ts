@@ -17,7 +17,7 @@ describe('G-Code Generator Engine', () => {
     expect(gcodeResult.success).toBe(true);
     expect(gcodeResult.gcode).toContain('G21');
     expect(gcodeResult.gcode).toContain('G90');
-    expect(gcodeResult.gcode).toContain('M3 S10000'); // default $30=10000, full power
+    expect(gcodeResult.gcode).toContain('M4 S10000'); // default $30=10000, full power, dynamic mode
     expect(gcodeResult.gcode).toContain('M5');
     expect(gcodeResult.totalCutDistanceMm).toBeGreaterThan(100);
     expect(gcodeResult.estimatedTimeSeconds).toBeGreaterThan(0);
@@ -71,7 +71,7 @@ describe('G-Code Generator Engine', () => {
     expect(triple.totalCutDistanceMm).toBeCloseTo(single.totalCutDistanceMm * 3, -0.5);
 
     // The beam is struck once per loop, not once per pass.
-    const strikes = (s: string) => (s.match(/^M3 S/gm) || []).length;
+    const strikes = (s: string) => (s.match(/^M4 S/gm) || []).length;
     expect(strikes(triple.gcode)).toBe(strikes(single.gcode));
   });
 
@@ -84,7 +84,7 @@ describe('G-Code Generator Engine', () => {
       laserMaxPower: 10000,
       laserPower: 10000,
     });
-    expect(full.gcode).toContain('M3 S10000');
+    expect(full.gcode).toContain('M4 S10000');
     expect(full.gcode).toContain('$30=10000');
 
     // A power above the machine's ceiling is clamped rather than emitted verbatim.
@@ -94,8 +94,8 @@ describe('G-Code Generator Engine', () => {
       laserMaxPower: 1000,
       laserPower: 10000,
     });
-    expect(overdriven.gcode).toContain('M3 S1000');
-    expect(overdriven.gcode).not.toContain('M3 S10000');
+    expect(overdriven.gcode).toContain('M4 S1000');
+    expect(overdriven.gcode).not.toContain('S10000');
   });
 
   it('rescales the framing guide power to the controller $30 ceiling', () => {
@@ -180,12 +180,14 @@ describe('Holding attachments', () => {
 
     // 800 mm of outline at 100 mm spacing is eight attachments, on the outline only.
     expect(res.attachmentCount).toBe(8);
-    expect((res.gcode.match(/M5 ; attachment/g) || []).length).toBe(8);
+    expect((res.gcode.match(/S0 ; attachment/g) || []).length).toBe(8);
 
-    // Each gap ends with the beam coming back on, and the loop still closes with
-    // the beam lit rather than part-way through a gap.
+    // Each gap ends with the beam coming back on, on the move, and the head is
+    // never stopped by an M3/M5 inside the loop.
     const outline = res.gcode.slice(res.gcode.indexOf('; --- Panel'));
-    expect((outline.match(/M3 S/g) || []).length).toBe(1 + 1 + 8); // cutout + outline start + one resume per gap
+    expect((outline.match(/^M4 S/gm) || []).length).toBe(1 + 1); // cutout + outline start
+    expect((outline.match(/^G1 .* S10000$/gm) || []).length).toBe(8); // one resume per gap
+    expect(outline).not.toMatch(/^M3\b/m);
   });
 
   it('cuts joinery mortises clean through even with attachments on', () => {
@@ -278,7 +280,8 @@ describe('Multi-sheet jobs', () => {
     expect(perSheet).toHaveLength(3);
     const strip = (s: string) =>
       s.split('; --- Panel')[1].split('; --- PAUSE')[0].split('; --- PROGRAM END')[0]
-        .replace(/^.*---\n/, ''); // drop the panel's own name line
+        .replace(/^.*---\n/, '') // drop the panel's own name line
+        .replace(/ F\d+/g, ''); // the feed is modal, so only the first sheet states it
     expect(strip(perSheet[1])).toBe(strip(perSheet[0]));
     expect(strip(perSheet[2])).toBe(strip(perSheet[0]));
   });

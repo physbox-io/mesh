@@ -16,7 +16,7 @@ export function CurveFields({ node }: { node: SceneNode }) {
         <label className="text-xs font-medium text-slate-500 flex justify-between">Track Width <SliderValue value={node.curveWidth || 0.5} onChange={(v) => {
             const val = v;
             updateCurveParams(node.id, { width: val });
-          }} decimals={2} unit="m" min={0.01} /></label>
+          }} decimals={1} unit="mm" scale={1000} min={0.01} /></label>
         <RangeInput
           {...lengthSpan(node.curveWidth || 0.5)}
           value={node.curveWidth || 0.5}
@@ -31,7 +31,7 @@ export function CurveFields({ node }: { node: SceneNode }) {
         <label className="text-xs font-medium text-slate-500 flex justify-between">Thickness <SliderValue value={node.curveThickness || 0.06} onChange={(v) => {
             const val = v;
             updateCurveParams(node.id, { thickness: val });
-          }} decimals={2} unit="m" min={0.01} /></label>
+          }} decimals={1} unit="mm" scale={1000} min={0.01} /></label>
         <RangeInput
           {...lengthSpan(node.curveThickness || 0.06)}
           value={node.curveThickness || 0.06}
@@ -85,17 +85,18 @@ export function CurveFields({ node }: { node: SceneNode }) {
         Closed loop (join ends)
       </label>
       <div className="flex flex-col gap-1.5">
-        <label className="text-xs font-medium text-slate-500">Control Points (x, y, z). Drag the blue handles in the viewport, or edit here.</label>
+        <label className="text-xs font-medium text-slate-500">Control Points (x, y, z, mm). Drag the blue handles in the viewport, or edit here.</label>
         {(node.curvePoints || []).map((pt: number[], pi: number) => (
           <div key={pi} className="flex items-center gap-1">
             {[0, 1, 2].map((axis) => (
               <input
                 key={axis}
                 type="number"
-                step="0.1"
-                value={pt[axis]}
+                step="10"
+                value={Math.round(pt[axis] * 1e5) / 100}
                 onChange={(e) => {
-                  const val = parseFloat(e.target.value);
+                  // Shown in mm, stored in metres.
+                  const val = parseFloat(e.target.value) / 1000;
                   if (isNaN(val)) return;
                   const pts = (node.curvePoints || []).map((p: number[]) => [...p]);
                   pts[pi][axis] = val;

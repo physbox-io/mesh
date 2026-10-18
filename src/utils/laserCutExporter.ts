@@ -167,8 +167,13 @@ export interface LaserPanel {
    * same local mm frame as the loops above.
    */
   engrave2D?: Point2D[][];
-  /** The pattern is on the face that lies downward as cut; turn the panel over to assemble it. */
+  /**
+   * Patterns on both faces: only the upper one can be engraved as cut, so the
+   * other is engraved on the top too and the panel is turned over for it.
+   */
   engraveUnderside?: boolean;
+  /** Cut face down, because its only pattern is on the face that would lie on the bed. */
+  cutFaceDown?: boolean;
   // 3D edge information for joint matching
   edges3D: LaserPanelEdge[];
   /**
@@ -675,6 +680,7 @@ function attachPatternEngraving(panel: LaserPanel, geom: SceneGeom, geomMatrix: 
   // Both skins of a sheet sit half a thickness off the mid-plane; a shelled
   // box's panel has its outer skin there too.
   const reach = panel.thickness / 2 + 1e-3;
+  const found: { lines: THREE.Vector3[][]; under: boolean }[] = [];
   for (const region of surface.regions) {
     const field = region.applied ? region.field : undefined;
     if (!field) continue;
@@ -684,12 +690,41 @@ function attachPatternEngraving(panel: LaserPanel, geom: SceneGeom, geomMatrix: 
     const at = new THREE.Vector3(...field.origin).applyMatrix4(geomMatrix);
     if (Math.abs(at.clone().sub(origin).dot(n)) > reach) continue;
     const lines = reliefContours(field).map((line) =>
-      line.map((p) => toPanel2D(panel, new THREE.Vector3(p[0], p[1], p[2]).applyMatrix4(geomMatrix))),
+      line.map((p) => new THREE.Vector3(p[0], p[1], p[2]).applyMatrix4(geomMatrix)),
     );
-    if (!lines.length) continue;
-    (panel.engrave2D ??= []).push(...lines);
-    if (facing < 0) panel.engraveUnderside = true;
+    if (lines.length) found.push({ lines, under: facing < 0 });
   }
+  if (!found.length) return;
+
+  /*
+   * A pattern only on the face that would lie on the bed: cut the panel face
+   * down instead, so that face is up under the laser. Its whole frame turns
+   * over — outline, holes and the joints still to come — so it goes into the
+   * assembly exactly as cut. Engraving it on the top and turning the panel
+   * over afterwards put every off-centre hole and joint on the wrong side.
+   */
+  if (found.every((r) => r.under)) {
+    mirrorPanelFrame(panel);
+    panel.cutFaceDown = true;
+  } else if (found.some((r) => r.under)) {
+    panel.engraveUnderside = true;
+  }
+  for (const r of found) {
+    (panel.engrave2D ??= []).push(...r.lines.map((line) => line.map((p) => toPanel2D(panel, p))));
+  }
+}
+
+/**
+ * Views a panel from its other face: u and the normal reverse, and its 2D
+ * loops mirror with them, rewound so an outline stays anticlockwise.
+ */
+function mirrorPanelFrame(panel: LaserPanel): void {
+  const flip = (loop: Point2D[]) => loop.map((p) => ({ x: -p.x, y: p.y })).reverse();
+  panel.uAxis3D = v3(panel.uAxis3D).multiplyScalar(-1);
+  panel.normal3D = v3(panel.normal3D).multiplyScalar(-1);
+  panel.outerPolygon2D = flip(panel.outerPolygon2D);
+  panel.innerCutouts2D = panel.innerCutouts2D.map(flip);
+  if (panel.engrave2D) panel.engrave2D = panel.engrave2D.map((l) => l.map((p) => ({ x: -p.x, y: p.y })));
 }
 
 export function extractPanelsFromScene(
@@ -2257,21 +2292,32 @@ function applyEdgeFeatures(poly: Point2D[], features: EdgeFeature[]): Point2D[] 
 const RELIEF_MAX_ANGLE_DEG = 135;
 
 /**
- * How far past the corner the relief circle reaches, in mm. Placing the circle
- * so it merely touches the corner point leaves the union pinched to zero width
- * there, which is not a polygon a cutter can follow; a few hundredths of a
- * millimetre of overlap gives two clean crossings instead.
+ * How much room the relief leaves the bit beyond its own size, in mm: it may
+ * drive this much past the point where its edge reaches the corner, and its
+ * travel is this much wide. A relief exactly the bit's own sweep shrinks, once
+ * the G-code stands the bit off by its radius, to a path of zero width, which
+ * the offset throws away; this keeps it a channel the bit can follow.
  */
 const RELIEF_OVERLAP_MM = 0.05;
+
+/** Segments per full turn on a relief's round ends. */
+const RELIEF_ARC_STEPS = 48;
 
 /**
  * Cuts inside-corner relief into one closed loop.
  *
  * `loop` must be wound with material on the left — outline CCW, hole CW — so
  * that a right turn is a corner the material wraps around, i.e. one the bit has
- * to reach into. At each such corner a circle of the bit's radius is unioned in:
- * the corner vertex is replaced by the two points where the circle crosses the
- * adjacent edges, joined by the arc that runs out into the material.
+ * to reach into. The relief is what the bit sweeps when it is driven on from
+ * where its path turns the corner (a radius off both walls) until its edge
+ * reaches the corner: along the bisector for a dog-bone, square into the
+ * longer wall for a t-bone, so the shorter wall a tenon seats on stays flat.
+ * The corner vertex is replaced by that sweep's outline where it runs out into
+ * the material.
+ *
+ * The sweep is drawn rather than left to the G-code because a stood-off path
+ * cannot find it: offsetting the outline by the bit radius rounds every inside
+ * corner, and the relief is exactly the material that rounding leaves.
  */
 function applyCornerRelief(
   loop: Point2D[],
@@ -2285,15 +2331,18 @@ function applyCornerRelief(
   // Material is on the left of travel either way, so the winding says which
   // side of the loop it is on: enclosed for an outline, outside it for a hole.
   const materialInside = polygonSignedArea(loop) > 0;
+  const slack = RELIEF_OVERLAP_MM;
 
   interface Relief {
     i: number;
-    c: Point2D;      // circle centre
+    /** The bit centre's travel, start and end, widened by `slack`. */
+    travel: Point2D[];
+    /** Where the bit centre stops, the deepest into the material it goes. */
+    end: Point2D;
     qA: Point2D;     // crossing on the outgoing edge
     qB: Point2D;     // crossing on the incoming edge
-    angA: number;
-    angB: number;
-    sweep: number;
+    /** The sweep's outline from qB to qA through the material, both excluded. */
+    chain: Point2D[];
   }
 
   const candidates: Relief[] = [];
@@ -2321,76 +2370,124 @@ function applyCornerRelief(
     const dot = Math.max(-1, Math.min(1, eA.x * eB.x + eA.y * eB.y));
     if (dot < cosLimit) continue; // too shallow to strand material
 
-    let dir: Point2D;
+    const bx = eA.x + eB.x;
+    const by = eA.y + eB.y;
+    const bl = Math.hypot(bx, by);
+    if (bl < 1e-9) continue; // 180 degrees; nothing to relieve
+    const v = { x: bx / bl, y: by / bl }; // bisector, into the void
+    // Where the stood-off path turns the corner: a radius off both walls.
+    const halfAngle = Math.acos(dot) / 2;
+    const o = { x: p.x + v.x * radiusMm / Math.sin(halfAngle), y: p.y + v.y * radiusMm / Math.sin(halfAngle) };
+
+    let end: Point2D;
+    let side: Point2D; // which way the travel is widened
+    let sideBoth: boolean;
     if (style === 'tbone') {
-      // Bite into the longer wall, so the shorter one — the face a tenon seats
-      // against — stays flat.
-      dir = aLen >= bLen ? eA : eB;
+      // Square into the longer wall until the bit's centre is on it; its edge
+      // is then on the corner, and it is still a radius off the shorter wall.
+      const eL = aLen >= bLen ? eA : eB;
+      let nrm = { x: -eL.y, y: eL.x };
+      if (nrm.x * v.x + nrm.y * v.y > 0) nrm = { x: -nrm.x, y: -nrm.y };
+      const toWall = (o.x - p.x) * -nrm.x + (o.y - p.y) * -nrm.y; // o's distance from the long wall
+      end = { x: o.x + nrm.x * (toWall + slack), y: o.y + nrm.y * (toWall + slack) };
+      // Widened away from the shorter wall only, so that wall is not touched.
+      side = eL;
+      sideBoth = false;
     } else {
-      const bx = eA.x + eB.x;
-      const by = eA.y + eB.y;
-      const bl = Math.hypot(bx, by);
-      if (bl < 1e-9) continue; // 180 degrees; nothing to relieve
-      dir = { x: -bx / bl, y: -by / bl }; // bisector, into the material
+      // Down the bisector until the bit's edge is on the corner.
+      end = { x: p.x + v.x * (radiusMm - slack), y: p.y + v.y * (radiusMm - slack) };
+      side = { x: -v.y, y: v.x };
+      sideBoth = true;
     }
+    const w = sideBoth ? slack / 2 : slack;
+    const lo = sideBoth ? -w : 0;
+    const travel = [
+      { x: o.x + side.x * lo, y: o.y + side.y * lo },
+      { x: end.x + side.x * lo, y: end.y + side.y * lo },
+      { x: end.x + side.x * w, y: end.y + side.y * w },
+      { x: o.x + side.x * w, y: o.y + side.y * w },
+    ];
 
-    const d = Math.max(0, radiusMm - RELIEF_OVERLAP_MM);
-    const c = { x: p.x + dir.x * d, y: p.y + dir.y * d };
+    // The sweep: the travel grown by the bit radius. Each round end is drawn
+    // around its circle rather than inside it, so no chord cuts in under the
+    // radius and the stood-off path still fits.
+    const rc = radiusMm / Math.cos(Math.PI / RELIEF_ARC_STEPS);
+    const ring: Point2D[] = [];
+    for (const q of travel) {
+      for (let k = 0; k < RELIEF_ARC_STEPS; k++) {
+        const ang = (k / RELIEF_ARC_STEPS) * Math.PI * 2;
+        ring.push({ x: q.x + Math.cos(ang) * rc, y: q.y + Math.sin(ang) * rc });
+      }
+    }
+    const sweep = convexHull2D(ring);
 
-    // Where each edge leaves the circle, walking out from the corner. The
-    // corner sits inside the circle, so there is exactly one crossing each.
-    const exitAlong = (e: Point2D, limit: number): number | null => {
-      const fx = p.x - c.x;
-      const fy = p.y - c.y;
-      const b = fx * e.x + fy * e.y;
-      const cc = fx * fx + fy * fy - radiusMm * radiusMm;
-      const disc = b * b - cc;
-      if (disc < 0) return null;
-      const t = -b + Math.sqrt(disc);
-      return t > 1e-9 && t < limit ? t : null;
+    // Where each edge leaves the sweep, walking out from the corner. The
+    // corner is inside it and the sweep is convex, so there is one crossing.
+    const exitAlong = (e: Point2D, limit: number): { t: number; k: number } | null => {
+      let best: { t: number; k: number } | null = null;
+      for (let k = 0; k < sweep.length; k++) {
+        const a = sweep[k];
+        const b = sweep[(k + 1) % sweep.length];
+        const t = raySegment(p, e, a, b);
+        if (t !== null && (!best || t > best.t)) best = { t, k };
+      }
+      return best && best.t > 1e-9 && best.t < limit ? best : null;
     };
 
-    const tA = exitAlong(eA, aLen);
-    const tB = exitAlong(eB, bLen);
-    if (tA === null || tB === null) { skipped++; continue; }
+    const xA = exitAlong(eA, aLen);
+    const xB = exitAlong(eB, bLen);
+    if (xA === null || xB === null) { skipped++; continue; }
 
-    const qB = { x: p.x + eB.x * tB, y: p.y + eB.y * tB };
-    const qA = { x: p.x + eA.x * tA, y: p.y + eA.y * tA };
+    const qB = { x: p.x + eB.x * xB.t, y: p.y + eB.y * xB.t };
+    const qA = { x: p.x + eA.x * xA.t, y: p.y + eA.y * xA.t };
 
-    const angB = Math.atan2(qB.y - c.y, qB.x - c.x);
-    const angA = Math.atan2(qA.y - c.y, qA.x - c.x);
+    // Of the two ways round the sweep between the crossings, take the one in
+    // the material — the other runs back through the void the corner opens onto.
+    const walk = (dir: 1 | -1): Point2D[] => {
+      const out: Point2D[] = [];
+      const m = sweep.length;
+      // Edge k runs sweep[k] -> sweep[k+1]; leave qB along it in `dir`.
+      let k = dir === 1 ? (xB.k + 1) % m : xB.k;
+      const stop = dir === 1 ? (xA.k + 1) % m : xA.k;
+      for (let guard = 0; guard <= m && k !== stop; guard++) {
+        out.push(sweep[k]);
+        k = (k + dir + m) % m;
+      }
+      return out;
+    };
+    const fwd = walk(1);
+    const back = walk(-1);
+    const inMaterial = (chain: Point2D[]) => {
+      if (chain.length === 0) return false;
+      const mid = chain[Math.floor(chain.length / 2)];
+      return pointInPolygon2D(loop, mid) === materialInside;
+    };
+    const chain = inMaterial(fwd) ? fwd : back;
 
-    // Of the two arcs between the crossings, take the one lying in the
-    // material — the other one doubles back through the void the corner opens
-    // onto. Distance from the corner does not decide this: for a t-bone, whose
-    // circle straddles the wall it is centred on, both arcs bulge well clear of
-    // the corner and only one of them is cutting anything.
-    let sweep = angA - angB;
-    while (sweep <= 0) sweep += Math.PI * 2;
-    const mid = angB + sweep / 2;
-    const midPt = { x: c.x + Math.cos(mid) * radiusMm, y: c.y + Math.sin(mid) * radiusMm };
-    if (pointInPolygon2D(loop, midPt) !== materialInside) sweep -= Math.PI * 2;
-
-    candidates.push({ i, c, qA, qB, angA, angB, sweep });
+    candidates.push({ i, travel, end, qA, qB, chain });
   }
 
-  // A relief circle is only usable if it stays clear of the rest of the
-  // outline. Two of them can also collide with each other without either
-  // touching a far edge — a mortise shallower than the bit puts one at each end
-  // of its short wall, and the two bites merge into a figure of eight. Both
-  // checks have to run, and a rejected corner is a corner this bit cannot cut.
+  // A relief is only usable if it stays clear of the rest of the outline. Two
+  // of them can also collide with each other without either touching a far
+  // edge — a mortise shallower than the bit puts one at each end of its short
+  // wall, and the two bites merge into a figure of eight. Both checks have to
+  // run, and a rejected corner is a corner this bit cannot cut.
+  const travelDist = (t: Point2D[], a: Point2D, b: Point2D) =>
+    Math.min(...t.map((q, k) => segmentSegmentDist(q, t[(k + 1) % t.length], a, b)));
   const accepted: Relief[] = [];
   for (const r of candidates) {
     let clear = true;
 
     for (let e = 0; e < n && clear; e++) {
-      // The corner's own two edges are what the circle is meant to cross.
+      // The corner's own two edges are what the sweep is meant to cross.
       if (e === r.i || e === (r.i - 1 + n) % n) continue;
-      if (pointSegmentDist(r.c, loop[e], loop[(e + 1) % n]) < radiusMm - 1e-6) clear = false;
+      if (travelDist(r.travel, loop[e], loop[(e + 1) % n]) < radiusMm - 1e-6) clear = false;
     }
 
+    // Only the bites into the material can collide: two sweeps overlapping
+    // in the void the bit is already clearing cost nothing.
     for (const o of accepted) {
-      if (Math.hypot(r.c.x - o.c.x, r.c.y - o.c.y) < radiusMm * 2 - 1e-6) { clear = false; break; }
+      if (Math.hypot(r.end.x - o.end.x, r.end.y - o.end.y) < radiusMm * 2 - 1e-6) { clear = false; break; }
     }
 
     if (clear) accepted.push(r);
@@ -2405,17 +2502,30 @@ function applyCornerRelief(
   for (let i = 0; i < n; i++) {
     const r = byIndex.get(i);
     if (!r) { out.push(loop[i]); continue; }
-
-    const steps = Math.max(4, Math.ceil(Math.abs(r.sweep) / (Math.PI * 2) * 32));
-    out.push(r.qB);
-    for (let k = 1; k < steps; k++) {
-      const ang = r.angB + (r.sweep * k) / steps;
-      out.push({ x: r.c.x + Math.cos(ang) * radiusMm, y: r.c.y + Math.sin(ang) * radiusMm });
-    }
-    out.push(r.qA);
+    out.push(r.qB, ...r.chain, r.qA);
   }
 
   return { loop: out, skipped };
+}
+
+/** How far along the ray p + t·e it meets segment ab, or null if it does not. */
+function raySegment(p: Point2D, e: Point2D, a: Point2D, b: Point2D): number | null {
+  const sx = b.x - a.x;
+  const sy = b.y - a.y;
+  const den = e.x * sy - e.y * sx;
+  if (Math.abs(den) < 1e-12) return null;
+  const ax = a.x - p.x;
+  const ay = a.y - p.y;
+  const t = (ax * sy - ay * sx) / den;
+  const u = (ax * e.y - ay * e.x) / den;
+  return t >= 0 && u >= -1e-9 && u <= 1 + 1e-9 ? t : null;
+}
+
+function segmentSegmentDist(a: Point2D, b: Point2D, c: Point2D, d: Point2D): number {
+  const o = (p: Point2D, q: Point2D, r: Point2D) => (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
+  const d1 = o(a, b, c), d2 = o(a, b, d), d3 = o(c, d, a), d4 = o(c, d, b);
+  if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) return 0;
+  return Math.min(pointSegmentDist(a, c, d), pointSegmentDist(b, c, d), pointSegmentDist(c, a, b), pointSegmentDist(d, a, b));
 }
 
 function pointSegmentDist(p: Point2D, a: Point2D, b: Point2D): number {
@@ -2934,8 +3044,16 @@ export function exportLaserCutSvg(
   const underside = panels.filter((p) => p.engraveUnderside && p.engrave2D?.length).map((p) => p.name);
   if (underside.length) {
     warnings.push(
-      `${underside.join(', ')}: the pattern is on the face that lies on the bed, so it is engraved ` +
-        `on the top instead. Turn ${underside.length === 1 ? 'that panel' : 'those panels'} over when you assemble.`
+      `${underside.join(', ')}: patterned on both faces. A laser can only reach the upper one, so both ` +
+        `patterns are engraved on it; the other face's lines will be on the wrong side.`
+    );
+  }
+  const faceDown = panels.filter((p) => p.cutFaceDown && p.engrave2D?.length).map((p) => p.name);
+  if (faceDown.length) {
+    warnings.push(
+      `${faceDown.join(', ')}: the pattern is on the face that would lie on the bed, so ` +
+        `${faceDown.length === 1 ? 'that panel is' : 'those panels are'} laid out face down, pattern up. ` +
+        `It goes into the assembly as cut, no turning over.`
     );
   }
 

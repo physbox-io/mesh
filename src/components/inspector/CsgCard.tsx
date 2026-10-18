@@ -161,8 +161,8 @@ export function CsgCard({ node: selectedNode }: { node: SceneNode }) {
                 both figures so the number above is a choice, not a guess. */}
             {selectedNode.csgVolume !== undefined && (
               <p className="text-[10px] text-slate-400 leading-snug">
-                True volume <span className="font-mono text-slate-500">{(selectedNode.csgVolume * 1e6).toFixed(1)} cm³</span>
-                {selectedNode.csgHullVolume ? <> · convex hull <span className="font-mono text-slate-500">{(selectedNode.csgHullVolume * 1e6).toFixed(1)} cm³</span></> : null}
+                True volume <span className="font-mono text-slate-500">{Math.round(selectedNode.csgVolume * 1e9).toLocaleString()} mm³</span>
+                {selectedNode.csgHullVolume ? <> · convex hull <span className="font-mono text-slate-500">{Math.round(selectedNode.csgHullVolume * 1e9).toLocaleString()} mm³</span></> : null}
                 {selectedNode.csgVolume > 0 && <> · density <span className="font-mono text-slate-500">{((selectedNode.csgMass ?? 1) / selectedNode.csgVolume).toFixed(0)} kg/m³</span></>}
               </p>
             )}

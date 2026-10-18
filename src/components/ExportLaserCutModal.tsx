@@ -176,7 +176,9 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
    */
   const [fingerWidthAuto, setFingerWidthAuto] = useState<boolean>(true);
   const [kerfMm, setKerfMm] = useState<number>(0.15);
-  const [cornerRelief, setCornerRelief] = useState<'none' | 'dogbone' | 'tbone'>('none');
+  // Unset until the operator picks one: a router then relieves its inside
+  // corners, since a round bit leaves every one too tight for a tab to seat.
+  const [cornerReliefChoice, setCornerRelief] = useState<'none' | 'dogbone' | 'tbone' | null>(null);
   const [bitDiameterMm, setBitDiameterMm] = useState<number>(3.175);
   const [tabOverhangMm, setTabOverhangMm] = useState<number>(0);
   const [jointClearanceMm, setJointClearanceMm] = useState<number>(0);
@@ -238,6 +240,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
    */
   const machineTarget = useStore((s) => s.machineTarget);
   const machineMode: 'laser' | 'cnc' = machineTarget === 'laser' ? 'laser' : 'cnc';
+  const cornerRelief = cornerReliefChoice ?? (machineMode === 'cnc' ? 'dogbone' : 'none');
   const material = useStore((s) => s.material);
   const materialLabel = MATERIALS.find((m) => m.id === material)?.label ?? material;
   const setMachineConfigOpen = useStore((s) => s.setMachineConfigOpen);
@@ -318,11 +321,14 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
    * still until the typing stops; `layoutPending` is what the preview says
    * meanwhile, so a stale drawing never reads as a finished one.
    */
+  // Only a laser is sent a kerf. A router's G-code stands the bit off by its
+  // own radius, and a kerf on top would loosen every joint a second time.
+  const layoutKerfMm = machineMode === 'laser' ? kerfMm : 0;
   const liveLayoutFields = useMemo(() => ({
-    jointMode, materialThicknessMm, fingerWidthMm, fingerWidthAuto, kerfMm, cornerRelief,
+    jointMode, materialThicknessMm, fingerWidthMm, fingerWidthAuto, kerfMm: layoutKerfMm, cornerRelief,
     bitDiameterMm, tabOverhangMm, jointClearanceMm, sheetWidthMm, sheetHeightMm, extraStock,
     allowThinnerStock, splitOversized, customScalePct, autoScale, maxSheets, annotations,
-  }), [jointMode, materialThicknessMm, fingerWidthMm, fingerWidthAuto, kerfMm, cornerRelief,
+  }), [jointMode, materialThicknessMm, fingerWidthMm, fingerWidthAuto, layoutKerfMm, cornerRelief,
       bitDiameterMm, tabOverhangMm, jointClearanceMm, sheetWidthMm, sheetHeightMm, extraStock,
       allowThinnerStock, splitOversized, customScalePct, autoScale, maxSheets, annotations]);
   const layoutFields = useSettled(liveLayoutFields, 250);
@@ -398,6 +404,8 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
       laserEngravePower: f.engravePower,
       engraveFeedrate: f.engraveFeedrate,
       cutDepthZ: f.materialThicknessMm,
+      // Each sheet's own thickness, for a rack of mixed stock.
+      sheetStockThicknessMm: exportResult.sheets?.map((s) => s.thicknessMm),
       zStepdown: Math.min(f.materialThicknessMm, 3.0),
       attachmentsEnabled: f.attachments,
       attachmentWidthMm: f.attachmentWidthMm,
@@ -753,10 +761,13 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
 
               <Field
                 label="Kerf (mm)"
-                hint="Width of material the beam or bit removes. Cut paths are offset by half of it so parts come out at their drawn size."
+                hint={machineMode === 'laser'
+                  ? 'Width of material the beam burns away. Joints are offset by half of it so parts come out at their drawn size.'
+                  : 'Laser only. On a router the paths are offset by half the bit diameter instead.'}
               >
                 <NumberInput
                   step={0.05} min={0} max={2.0}
+                  disabled={machineMode !== 'laser'}
                   value={kerfMm}
                   onChange={(v) => v !== undefined && setKerfMm(v)}
                   className={inputClass}

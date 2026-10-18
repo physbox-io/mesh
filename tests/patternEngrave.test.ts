@@ -72,9 +72,9 @@ describe('a patterned panel through the laser exporter', () => {
     const ops = gcode.operations.map((o) => o.type);
     expect(ops.indexOf('engrave')).toBeGreaterThanOrEqual(0);
     expect(ops.indexOf('engrave')).toBeLessThan(ops.indexOf('cut'));
-    expect(gcode.gcode).toContain('M3 S1500');
+    expect(gcode.gcode).toContain('M4 S1500');
     expect(gcode.gcode).toContain('F2500');
-    expect(gcode.gcode).toContain('M3 S9000');
+    expect(gcode.gcode).toContain('M4 S9000');
   });
 
   it('leaves the pattern out of a router job, and says to carve it instead', () => {
@@ -83,9 +83,44 @@ describe('a patterned panel through the laser exporter', () => {
     expect(gcode.warnings?.some((w) => /Relief carve/.test(w))).toBe(true);
   });
 
-  it('says so when the pattern is on the face that lies on the bed', () => {
-    const under = exportLaserCutSvg(sheet(-HZ, -1));
-    expect(under.panels![0].engrave2D!.length).toBeGreaterThan(0);
-    expect(under.warnings?.some((w) => /lies on the bed/.test(w))).toBe(true);
+  it('has no line too short to draw, which a laser would burn as a pit', () => {
+    const lines = reliefContours(texturedSurfaceOf(sheet(HZ, 1).nodes[0].geoms[0])!.regions[0].field!);
+    for (const line of lines) {
+      const reach = Math.max(...line.map(([x, y, z]) => Math.hypot(x - line[0][0], y - line[0][1], z - line[0][2])));
+      expect(reach).toBeGreaterThan(1e-6);
+    }
+  });
+
+  it('cuts a panel patterned underneath face down, so it is never turned over', () => {
+    // A hole off to one side tells the two faces apart. Turning a panel over
+    // after cutting would put that hole on the wrong side of the assembly.
+    const withHole = (z: number, normal: number) => {
+      const g = sheet(z, normal);
+      g.nodes[0].geoms.push({ name: 'hole', type: 'box', size: [0.005, 0.005, 0.01], pos: [0.03, 0, 0], csg: 'difference' } as SceneGeom);
+      return g;
+    };
+    const holeAt = (r: ReturnType<typeof exportLaserCutSvg>) => {
+      const p = r.panels![0];
+      const xs = p.innerCutouts2D[0].map((q) => q.x);
+      return ((Math.min(...xs) + Math.max(...xs)) / 2) / p.width2D!;
+    };
+    const over = exportLaserCutSvg(withHole(HZ, 1));
+    const under = exportLaserCutSvg(withHole(-HZ, -1));
+    const panel = under.panels![0];
+    expect(panel.engrave2D!.length).toBeGreaterThan(0);
+    // Viewed from below, the hole is on the other side of the panel.
+    expect(holeAt(over)).toBeGreaterThan(0.6);
+    expect(holeAt(under)).toBeLessThan(0.4);
+    expect(panel.normal3D.z).toBeLessThan(0);
+    expect(panel.engraveUnderside).toBeFalsy();
+    expect(under.warnings?.some((w) => /Turn th(at|ose) panels? over/.test(w))).toBe(false);
+    expect(under.warnings?.some((w) => /face down/.test(w))).toBe(true);
+    // The engraving still lands inside the panel.
+    for (const line of panel.engrave2D!) {
+      for (const q of line) {
+        expect(q.x).toBeGreaterThanOrEqual(-1e-6);
+        expect(q.x).toBeLessThanOrEqual(panel.width2D! + 1e-6);
+      }
+    }
   });
 });

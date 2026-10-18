@@ -341,7 +341,7 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
               </Field>
               <Field
                 label="Scale (%)"
-                hint="100 cuts the part the size it was drawn, 1 m in the scene to 1 mm on the bench, the same rule as every other export."
+                hint="100 cuts the part at its modelled size, millimetre for millimetre, the same rule as every other export."
               >
                 <NumberInput
                   step={10} min={1} max={10000}
@@ -440,7 +440,7 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
                 <p className="font-mono text-[11px] text-slate-800 dark:text-slate-100">
                   Stock {result.stock.widthMm.toFixed(1)} × {result.stock.depthMm.toFixed(1)} × {result.stock.thicknessMm.toFixed(1)} mm {materialLabel} ·
                   part {result.partSizeMm.x.toFixed(1)} × {result.partSizeMm.y.toFixed(1)} × {result.partSizeMm.z.toFixed(1)} mm ·
-                  {' '}{(result.partVolumeMm3 / 1000).toFixed(1)} cm³ ·
+                  {' '}{Math.round(result.partVolumeMm3).toLocaleString()} mm³ ·
                   {' '}{result.sides.length === 2 ? 'two setups' : 'one setup'}, {result.sides[0].depthMm.toFixed(1)} mm deep each
                 </p>
                 <p className={`text-[10px] leading-snug ${result.unreachablePercent > 1 ? 'text-amber-600 dark:text-amber-400' : 'text-slate-500 dark:text-slate-400'}`}>

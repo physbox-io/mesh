@@ -13,7 +13,7 @@ export function PulleyWheelCard({ node }: { node: SceneNode }) {
         Pulley Radius <SliderValue value={node.pulleyRadius || 0.4} onChange={(v) => {
           const radVal = v;
           updatePulleyParams(node.id, { pulleyRadius: radVal });
-        }} decimals={2} unit="m" min={0.15} max={1.5} />
+        }} decimals={1} unit="mm" scale={1000} min={0.15} max={1.5} />
       </label>
       <RangeInput 
         min="0.15" 

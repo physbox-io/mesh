@@ -175,3 +175,15 @@ describe('a model far bigger than a part', () => {
     expect(fittingScalePercent(3820)).toBe(5.2);
   });
 });
+
+describe('bed levelling on a two-sided job', () => {
+  it('says to probe again after the flip', () => {
+    const grid = { minX: 0, minY: 0, maxX: 200, maxY: 200, gridX: 2, gridY: 2,
+      points: [[{ x: 0, y: 0, z: 0 }, { x: 200, y: 0, z: 0 }], [{ x: 0, y: 200, z: 0 }, { x: 200, y: 200, z: 0 }]] };
+    const opts = { ...quick, applyMeshLeveling: true, meshLevelGrid: grid as never };
+    const two = generateSolidMachining(latticeBracketPreset, { ...opts, sides: 2 });
+    expect(two.warnings.some((w) => /Probe again after flipping/.test(w))).toBe(true);
+    const one = generateSolidMachining(latticeBracketPreset, { ...opts, sides: 1 });
+    expect(one.warnings.some((w) => /Probe again after flipping/.test(w))).toBe(false);
+  });
+});
