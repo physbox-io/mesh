@@ -188,6 +188,8 @@ export interface ExportActions {
   cast: () => void;
   /** Cut the selected body into sections that fit the printer. */
   split: () => void;
+  /** Break down a furniture/frame model into mortise-and-tenon parts, stock bars, and CNC/bandsaw steps. */
+  joinery?: () => void;
 }
 
 /** Fired by anything that wants the export buttons pointed out — the navbar's print button, for one. */
@@ -419,6 +421,9 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
             ? [
                 { label: 'Relief', title: '3D Relief Carve (CNC Router)', tone: 'text-blue-600 dark:text-blue-400', icon: <Mountain className="w-3.5 h-3.5" />, run: exports.reliefCarve },
                 { label: 'Solid', title: 'Machine the part itself out of a block at true size: one side, flip, the other side', tone: 'text-indigo-600 dark:text-indigo-400', icon: <Cuboid className="w-3.5 h-3.5" />, run: exports.solid },
+                ...(exports.joinery
+                  ? [{ label: 'Joinery', title: 'Break down a table, chair, or stand into mortise-and-tenon parts, stock bars, and a Bandsaw + CNC build guide', tone: 'text-amber-600 dark:text-amber-400', icon: <Puzzle className="w-3.5 h-3.5" />, run: exports.joinery }]
+                  : []),
               ]
             : []),
         ];

@@ -1863,7 +1863,7 @@ export interface PhysicsState {
      * the part's colour and are given no print pose. `carry`, a section
      * each: the patterns and seams it keeps (utils/knife carryAcrossCut).
      */
-    opts?: { plain?: boolean; carry?: { textures?: SurfaceTexture[]; faceSplits?: FaceSplit[] }[] },
+    opts?: { plain?: boolean; carry?: { textures?: SurfaceTexture[]; faceSplits?: FaceSplit[] }[]; names?: string[]; centerOrigin?: boolean },
   ) => string[];
   /** Set how finely contact is resolved (SceneGraph.simFidelity). One undo step. */
   setSimFidelity: (fidelity: 'standard' | 'print') => void;
@@ -3420,11 +3420,55 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
         .map((c) => { c.children = prune(c.children || []); return c; });
       newScene.nodes = prune(newScene.nodes);
     }
+    const recenterSection = (sec: (typeof sections)[number]): { sec: (typeof sections)[number]; offset: [number, number, number] } => {
+      if (!opts.centerOrigin || sec.positions.length < 3) {
+        return { sec, offset: [0, 0, 0] };
+      }
+      let minX = Infinity, maxX = -Infinity;
+      let minY = Infinity, maxY = -Infinity;
+      let minZ = Infinity, maxZ = -Infinity;
+      for (let i = 0; i < sec.positions.length; i += 3) {
+        const x = sec.positions[i], y = sec.positions[i + 1], z = sec.positions[i + 2];
+        if (x < minX) minX = x; if (x > maxX) maxX = x;
+        if (y < minY) minY = y; if (y > maxY) maxY = y;
+        if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
+      }
+      const cx = 0.5 * (minX + maxX);
+      const cy = 0.5 * (minY + maxY);
+      const cz = 0.5 * (minZ + maxZ);
+      const shiftBuf = (buf: Float32Array): Float32Array => {
+        const out = new Float32Array(buf.length);
+        for (let i = 0; i < buf.length; i += 3) {
+          out[i] = buf[i] - cx;
+          out[i + 1] = buf[i + 1] - cy;
+          out[i + 2] = buf[i + 2] - cz;
+        }
+        return out;
+      };
+      return {
+        offset: [cx, cy, cz],
+        sec: {
+          ...sec,
+          positions: shiftBuf(sec.positions),
+          plainPositions: shiftBuf(sec.plainPositions),
+          convexPieces: sec.convexPieces.map((p) => ({ positions: shiftBuf(p.positions), faces: p.faces })),
+          colliders: sec.colliders.map((c) => ({ ...c, pos: [c.pos[0] - cx, c.pos[1] - cy, c.pos[2] - cz] as [number, number, number] })),
+        },
+      };
+    };
+
+    const baseName = first.name || first.id;
+    const basePos: [number, number, number] = [first.pos?.[0] ?? 0, first.pos?.[1] ?? 0, first.pos?.[2] ?? 0];
     strip(first);
-    first.geoms = geomsFor(first.name || first.id, sections[0], 0);
+    const firstCentered = recenterSection(sections[0]);
+    if (opts.centerOrigin) {
+      first.pos = [basePos[0] + firstCentered.offset[0], basePos[1] + firstCentered.offset[1], basePos[2] + firstCentered.offset[2]];
+    }
+    if (opts.names?.[0]) first.name = opts.names[0];
+    first.geoms = geomsFor(first.name || first.id, firstCentered.sec, 0);
     if (opts.plain) delete first.printPose;
-    else first.printPose = poseOf(sections[0]);
-    installPieces(first, sections[0]);
+    else first.printPose = poseOf(firstCentered.sec);
+    installPieces(first, firstCentered.sec);
 
     const siblings = (() => {
       const walk = (list: SceneNode[]): SceneNode[] | null => {
@@ -3438,14 +3482,14 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
       return walk(newScene.nodes) ?? newScene.nodes;
     })();
     const at = siblings.indexOf(first);
-    const baseName = first.name || first.id;
 
     const ids = [nodeId];
-    sections.slice(1).forEach((sec, k) => {
+    sections.slice(1).forEach((rawSec, k) => {
+      const { sec, offset } = recenterSection(rawSec);
       const id = `split_${Math.random().toString(36).substring(2, 10)}`;
       ids.push(id);
       // Named for the part it came from; uniqueNames settles any clash.
-      const name = `${baseName}_part${k + 2}`;
+      const name = opts.names?.[k + 1] || `${baseName}_part${k + 2}`;
       const { children: _children, geoms: _geoms, ...rest } = first;
       void _children; void _geoms;
       const copy: SceneNode = JSON.parse(JSON.stringify(rest));
@@ -3453,6 +3497,9 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
         ...copy,
         id,
         name,
+        pos: opts.centerOrigin
+          ? [basePos[0] + offset[0], basePos[1] + offset[1], basePos[2] + offset[2]]
+          : copy.pos,
         joints: (first.joints || []).map((j: SceneJoint) => ({ ...j, name: `${name}_${String(j.name || 'joint').split('_').pop()}` })),
         // A section cut off a welded part is not welded to anything, and a
         // script written for the whole part does not know about this piece.
