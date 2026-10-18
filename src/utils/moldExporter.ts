@@ -223,7 +223,9 @@ interface ColumnField {
   /** Highest surface point in the column. */
   maxZ: Float64Array;
   hit: Uint8Array;
-  /** Columns whose line enters and leaves the part more than once. */
+  /** 1 where the column's ray enters and leaves the part more than once. */
+  multiCrossings: Uint8Array;
+  /** Columns whose line enters and leaves the part more than once, or floats off the parting plane. */
   undercutColumns: number;
   hitColumns: number;
 }
@@ -270,6 +272,7 @@ function sampleColumns(
   const minZ = new Float64Array(n);
   const maxZ = new Float64Array(n);
   const hit = new Uint8Array(n);
+  const multiCrossings = new Uint8Array(n);
 
   const nx = Math.max(1, Math.min(96, Math.round(Math.sqrt(triCount / 4)) || 1));
   const binned = binTriangles(tris, triCount, partHalfW, partHalfD, nx, nx);
@@ -328,11 +331,14 @@ function sampleColumns(
       // Two crossings is a column that goes in one face and out the other. More
       // than that is an overhang or a hollow, and a heightfield cavity cannot
       // hold it: the mold fills it in solid.
-      if (crossings > 2) undercutColumns++;
+      if (crossings > 2) {
+        multiCrossings[idx] = 1;
+        undercutColumns++;
+      }
     }
   }
 
-  return { minZ, maxZ, hit, undercutColumns, hitColumns };
+  return { minZ, maxZ, hit, multiCrossings, undercutColumns, hitColumns };
 }
 
 /**
@@ -467,7 +473,8 @@ function placePourChannels(
   field: ColumnField,
   grid: Grid,
   ventR: number,
-  ventCount: number
+  ventCount: number,
+  lidSideDepth?: Float64Array
 ): { sprue: { x: number; y: number }; vents: Array<{ x: number; y: number }> } {
   const { cols, rows, stepX, stepY } = grid;
   const n = cols * rows;
@@ -531,16 +538,23 @@ function placePourChannels(
     if (candidates.length > 0) break;
   }
 
+  let maxLidDepth = 0;
+  if (lidSideDepth) {
+    for (let i = 0; i < n; i++) if (lidSideDepth[i] > maxLidDepth) maxLidDepth = lidSideDepth[i];
+  }
+
   const placed = [sprue];
   const vents: Array<{ x: number; y: number }> = [];
   for (let v = 0; v < ventCount; v++) {
     let best = -1;
-    let bestD = 0;
+    let bestScore = 0;
     for (const i of candidates) {
       let d = Infinity;
       for (const j of placed) d = Math.min(d, Math.hypot(xOf(i) - xOf(j), yOf(i) - yOf(j)));
-      if (d > bestD) {
-        bestD = d;
+      const heightBoost = lidSideDepth && maxLidDepth > 1e-6 ? 1 + lidSideDepth[i] / maxLidDepth : 1;
+      const score = d * heightBoost;
+      if (score > bestScore) {
+        bestScore = score;
         best = i;
       }
     }
@@ -845,21 +859,63 @@ export function generateMoldMeshes(
     return emptyMoldResult('The part is too thin along Z for the mold sampler to find a surface.');
   }
 
-  const partingZ = choosePartingZ(field, -partHeightMm / 2, partHeightMm / 2);
+  const zMin = -partHeightMm / 2;
+  const zMax = partHeightMm / 2;
+  const zEps = Math.max(1e-6, partHeightMm * 1e-4);
+
+  // In a one-part open mold there is no lid half, so the open pour face must sit
+  // at one extreme of the part (whichever face has the larger footprint, ties to
+  // the bottom) so the single cavity holds the whole height of the part instead
+  // of slicing it at an interior equator and throwing half away.
+  let partingZ: number;
+  if (opts.moldType === 'open') {
+    let covBottom = 0;
+    let covTop = 0;
+    for (let i = 0; i < field.hit.length; i++) {
+      if (!field.hit[i]) continue;
+      if (field.minZ[i] <= zMin + zEps) covBottom++;
+      if (field.maxZ[i] >= zMax - zEps) covTop++;
+    }
+    partingZ = covTop > covBottom * 1.0001 ? zMax : zMin;
+  } else if (scene.castPrep?.partingZ !== undefined && scene.castPrep.draftDeg > 0) {
+    const preppedZ = (scene.castPrep.partingZ * 1000 - cz) * zScale;
+    partingZ =
+      preppedZ >= zMin - zEps && preppedZ <= zMax + zEps
+        ? Math.max(zMin, Math.min(zMax, preppedZ))
+        : choosePartingZ(field, zMin, zMax);
+  } else {
+    partingZ = choosePartingZ(field, zMin, zMax);
+  }
+
+  if (scene.castPrep && scene.castPrep.draftDeg > 0 && opts.draftAngleDeg > 0) {
+    warnings.push(
+      `The model already carries ${scene.castPrep.draftDeg}\u00b0 of draft from Prepare for Casting; ` +
+      `adding ${opts.draftAngleDeg}\u00b0 here tapers the cavity walls a second time.`
+    );
+  }
 
   // Cavity depth on each side of the parting plane, as a depth below the face
   // that half presents. Columns the part misses stay flat at the parting plane.
+  // Any column whose material does not touch the parting plane at all has air
+  // between the plane and the part that a flat-parted mold fills in solid.
   const n = cols * rows;
   const below = new Float64Array(n);
   const above = new Float64Array(n);
   let volBelow = 0;
   let volAbove = 0;
+  let undercutColumns = field.undercutColumns;
   for (let i = 0; i < n; i++) {
     if (!field.hit[i]) continue;
     below[i] = Math.max(0, partingZ - field.minZ[i]);
     above[i] = Math.max(0, field.maxZ[i] - partingZ);
     volBelow += below[i];
     volAbove += above[i];
+    if (
+      !field.multiCrossings[i] &&
+      (field.minZ[i] > partingZ + zEps || field.maxZ[i] < partingZ - zEps)
+    ) {
+      undercutColumns++;
+    }
   }
 
   // The half holding the most of the part is the one that lies on the bench
@@ -876,22 +932,45 @@ export function generateMoldMeshes(
     return out;
   };
 
-  // The lid is flipped over to mate, so it is built mirrored in Y and its own
-  // features are mirrored with it.
-  const baseDepth = applyDraft(detailIsAbove ? mirrorY(above) : below, grid, opts.draftAngleDeg);
-  const lidDepth = applyDraft(detailIsAbove ? below : mirrorY(above), grid, opts.draftAngleDeg);
+  const rawBaseDepth = detailIsAbove ? mirrorY(above) : below;
+  const rawLidDepth = detailIsAbove ? below : mirrorY(above);
+  let rawCavityDepthMm = 0;
+  for (let i = 0; i < n; i++) {
+    if (rawBaseDepth[i] > rawCavityDepthMm) rawCavityDepthMm = rawBaseDepth[i];
+    if (opts.moldType === 'clamshell' && rawLidDepth[i] > rawCavityDepthMm) rawCavityDepthMm = rawLidDepth[i];
+  }
+
+  // The lid is flipped over to mate, so it is built mirrored in Y relative to
+  // the base half and its own features are mirrored with it.
+  const baseDepth = applyDraft(rawBaseDepth, grid, opts.draftAngleDeg);
+  const lidDepth = applyDraft(rawLidDepth, grid, opts.draftAngleDeg);
 
   let cavityDepthMm = 0;
-  for (let i = 0; i < n; i++) if (baseDepth[i] > cavityDepthMm) cavityDepthMm = baseDepth[i];
-  const minDraftDeg = Math.min(shallowestDraft(baseDepth, grid), shallowestDraft(lidDepth, grid));
+  for (let i = 0; i < n; i++) {
+    if (baseDepth[i] > cavityDepthMm) cavityDepthMm = baseDepth[i];
+    if (opts.moldType === 'clamshell' && lidDepth[i] > cavityDepthMm) cavityDepthMm = lidDepth[i];
+  }
+  if (opts.draftAngleDeg > 0 && cavityDepthMm < rawCavityDepthMm - 0.5) {
+    warnings.push(
+      `A ${opts.draftAngleDeg}\u00b0 draft angle tapered narrow features enough to reduce peak cavity depth ` +
+      `from ${rawCavityDepthMm.toFixed(1)} mm to ${cavityDepthMm.toFixed(1)} mm.`
+    );
+  }
+
+  const minDraftDeg =
+    opts.moldType === 'clamshell'
+      ? Math.min(shallowestDraft(baseDepth, grid), shallowestDraft(lidDepth, grid))
+      : shallowestDraft(baseDepth, grid);
   // A deep pocket with next to no taper grips the casting all the way round, and
   // no amount of release agent argues with that: it wants a mold that can bend.
   // 3 degrees is what rigid tooling is normally drafted to; below that, on a
   // pocket this deep, the mold has to bend to give the casting up.
   const flexibleMoldAdvised = cavityDepthMm >= 8 && minDraftDeg < 3;
 
-  // Registration pins sit in the flange, with one corner keyed inwards so the
-  // halves cannot be closed 180 degrees around.
+  // Registration pins sit in the flange, with one corner keyed along the bottom
+  // flange (shifted in X only, not diagonally into the cavity corner) so the
+  // halves cannot be closed 180 degrees around while keeping full Y clearance
+  // from the cavity.
   const pinInsetX = opts.wallMarginMm / 2;
   const pinInsetY = opts.wallMarginMm / 2;
   const pinBaseR = opts.pinDiameterMm / 2;
@@ -899,24 +978,29 @@ export function generateMoldMeshes(
   const socketRimR = pinBaseR + opts.pinToleranceMm;
   const socketBotR = pinTopR + opts.pinToleranceMm;
   const socketDepth = opts.pinHeightMm + 0.5;
+  const keyOffsetX = Math.min(4, Math.max(2, partHalfW * 0.4));
 
   const pinPositions: Array<[number, number]> = [
-    [-mw2 + pinInsetX + 2, -md2 + pinInsetY + 2],
+    [-mw2 + pinInsetX + keyOffsetX, -md2 + pinInsetY],
     [mw2 - pinInsetX, -md2 + pinInsetY],
     [mw2 - pinInsetX, md2 - pinInsetY],
     [-mw2 + pinInsetX, md2 - pinInsetY],
   ];
 
-  if (opts.moldType === 'clamshell' && opts.wallMarginMm < opts.pinDiameterMm + 2) {
+  const minWallMarginForPins = Math.ceil((opts.pinDiameterMm + 2 * opts.pinToleranceMm + 2) * 10) / 10;
+  if (opts.moldType === 'clamshell' && opts.wallMarginMm < minWallMarginForPins) {
     warnings.push(
-      `A ${opts.wallMarginMm} mm wall margin is narrower than the ${opts.pinDiameterMm} mm pins need; ` +
-      'widen the margin or use smaller pins so the pins stay inside the flange.'
+      `A ${opts.wallMarginMm} mm wall margin is narrower than the ${opts.pinDiameterMm} mm pins and sockets need ` +
+      `(${minWallMarginForPins} mm minimum); widen the margin or use smaller pins so the sockets stay inside the flange.`
     );
   }
 
+  // Pry notches sit at the midpoints of the left and right outer edges along the
+  // parting seam, clear of all four corner registration pins and the cavity.
+  const notchRimR = Math.min(3, Math.max(1.5, opts.wallMarginMm * 0.35));
   const notchPositions: Array<[number, number]> =
     opts.moldType === 'clamshell' && opts.includePryNotches
-      ? [[mw2 - 1, -md2 + 1], [-mw2 + 1, md2 - 1]]
+      ? [[mw2 - 1, 0], [-mw2 + 1, 0]]
       : [];
 
   const baseFeatures: HalfFeatures = {
@@ -924,27 +1008,43 @@ export function generateMoldMeshes(
       ...(opts.moldType === 'clamshell'
         ? pinPositions.map(([x, y]) => ({ x, y, rimR: socketRimR, botR: socketBotR, depth: socketDepth }))
         : []),
-      ...notchPositions.map(([x, y]) => ({ x, y, rimR: 3, botR: 1.5, depth: 1.5 })),
+      ...notchPositions.map(([x, y]) => ({ x, y, rimR: notchRimR, botR: notchRimR * 0.5, depth: 1.5 })),
     ],
     pins: [],
     channels: [],
   };
 
-  const pour = placePourChannels(field, grid, opts.ventDiaMm / 2, opts.includeVents ? 2 : 0);
+  const pour = placePourChannels(
+    field,
+    grid,
+    opts.ventDiaMm / 2,
+    opts.includeVents ? 2 : 0,
+    detailIsAbove ? below : above
+  );
+  // `pour` is in the unmirrored `field` frame. When `detailIsAbove` is true,
+  // `baseDepth` was mirrored in Y (`mirrorY(above)`) and `lidDepth` (`below`)
+  // was NOT mirrored in Y, so on the lid's build grid the part sits at `+y`;
+  // when `detailIsAbove` is false, `lidDepth` (`mirrorY(above)`) is at `-y`.
+  const lidChannelY = (y: number) => (detailIsAbove ? y : -y);
   const lidFeatures: HalfFeatures = {
     sockets: [],
-    // Mirrored in Y, because the lid is flipped over to close onto the base.
+    // `pinPositions` are in `base`'s frame, so the lid always mirrors them in Y.
     pins: pinPositions.map(([x, y]) => ({ x, y: -y, baseR: pinBaseR, topR: pinTopR, height: opts.pinHeightMm })),
     channels: [
       ...(opts.includeSprue
         ? [{
             x: pour.sprue.x,
-            y: -pour.sprue.y,
+            y: lidChannelY(pour.sprue.y),
             outerR: opts.sprueTopDiaMm / 2,
             innerR: Math.min(opts.sprueBottomDiaMm / 2, opts.sprueTopDiaMm / 2 - 0.4),
           }]
         : []),
-      ...pour.vents.map((v) => ({ x: v.x, y: -v.y, outerR: opts.ventDiaMm * 0.8, innerR: opts.ventDiaMm / 2 })),
+      ...pour.vents.map((v) => ({
+        x: v.x,
+        y: lidChannelY(v.y),
+        outerR: opts.ventDiaMm * 0.8,
+        innerR: opts.ventDiaMm / 2,
+      })),
     ],
   };
 
@@ -955,9 +1055,10 @@ export function generateMoldMeshes(
       : null;
 
   // Both halves print cavity up: flat outer face on the bed, no support needed
-  // under the pins, and the detail surface facing the nozzle.
+  // under the pins, and the detail surface facing the nozzle. A single open mold
+  // sits centered at X = 0 on the build plate.
   const plateGapMm = 6;
-  const plateOffset = moldWidthMm / 2 + plateGapMm / 2;
+  const plateOffset = lid ? moldWidthMm / 2 + plateGapMm / 2 : 0;
   const plateBottomTris = toPlate(base.triangles, -plateOffset, base.blockHeightMm);
   const plateTopTris = lid ? toPlate(lid.triangles, plateOffset, lid.blockHeightMm) : [];
 
@@ -974,11 +1075,11 @@ export function generateMoldMeshes(
     lid ? lid.blockHeightMm + lid.pinRiseMm : 0
   );
 
-  if (field.undercutColumns > 0) {
-    const pct = (100 * field.undercutColumns) / field.hitColumns;
+  if (undercutColumns > 0) {
+    const pct = (100 * undercutColumns) / field.hitColumns;
     warnings.push(
       `${pct < 1 ? 'Under 1' : pct.toFixed(0)}% of the part sits behind an overhang or a hollow, which a ` +
-      'two-sided mold cannot reach. Those spots come out filled in on the casting.'
+      `${opts.moldType === 'open' ? 'one-part open' : 'two-sided'} mold cannot reach. Those spots come out filled in on the casting.`
     );
   }
 

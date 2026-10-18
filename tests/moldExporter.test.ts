@@ -443,4 +443,131 @@ describe('Pour channels', () => {
     }
     expect(unpairedEdges(res.topHalf!.triangles)).toBe(0);
   });
+
+  it('aligns lid sprue and vents with an asymmetric Y-offset cavity when closed onto the base', () => {
+    // Two unequal strips in Y: a thin reference bar at y = -15 mm and the main
+    // casting bar at y = +10 mm. Both sit on z = 0 (`detailIsAbove === true`).
+    // In the base half (`mirrorY(above)`), the main bar is at y around -10 mm.
+    // When the lid is flipped around X (`y -> -y`) to close onto the base, a
+    // hole at `y_lid` lands at `y_base = -y_lid`, so `lidHoles` (which records
+    // `-y_lid` in part coordinates) must fall inside the main bar at y > 0.
+    const asymmetricY: ParsedScene = {
+      nodes: [
+        {
+          id: 'b1',
+          name: 'asym',
+          type: 'body',
+          pos: [0, 0, 0],
+          geoms: [
+            { name: 'ref', type: 'box', size: [0.02, 0.0004, 0.004], pos: [0, -0.015, 0.004] } as SceneGeom,
+            { name: 'main', type: 'box', size: [0.02, 0.008, 0.006], pos: [0, 0.01, 0.006] } as SceneGeom,
+          ],
+          joints: [],
+          children: [],
+        },
+      ],
+    };
+    const res = generateMoldMeshes(asymmetricY, {
+      ...DEFAULT_MOLD_OPTIONS,
+      includeSprue: true,
+      includeVents: true,
+    });
+    const holes = lidHoles(res);
+    expect(holes.length).toBeGreaterThanOrEqual(2);
+    // `lidHoles` returns `(x_lid, -y_lid)`, which is the exact `(x_base, y_base)`
+    // coordinate where each hole lands when the lid is flipped around X (`y -> -y`)
+    // to close onto the base. In `base` (`mirrorY(above)`), the `main` bar cavity
+    // sits at `y_base < -2`, so every flipped hole cell must land inside `main`
+    // (`cell.y < -2`), never on the uncarved mold wall at `y_base > 0`.
+    for (const hole of holes) {
+      for (const cell of hole) {
+        expect(cell.y).toBeLessThan(-2);
+      }
+    }
+  });
 });
+
+describe('One-part open mold and parting overhang checks', () => {
+  it('preserves full part height in open mold mode and centers the mesh at X = 0', () => {
+    const res = generateMoldMeshes(dome, {
+      ...DEFAULT_MOLD_OPTIONS,
+      moldType: 'open',
+      draftAngleDeg: 0,
+    });
+    expect(res.success).toBe(true);
+    expect(res.topHalf).toBeUndefined();
+    // Full 60 mm sphere diameter (plus 0.3 mm Z clearance), not 30 mm half-sphere.
+    expect(res.cavityDepthMm).toBeGreaterThan(58);
+    // Centered on X = 0 matching moldBounds.
+    const cx = (res.bottomHalf.bounds.minX + res.bottomHalf.bounds.maxX) / 2;
+    expect(Math.abs(cx)).toBeLessThan(1e-3);
+    expect(res.bottomHalf.bounds.minX).toBeCloseTo(res.moldBounds.minX, 3);
+    expect(res.bottomHalf.bounds.maxX).toBeCloseTo(res.moldBounds.maxX, 3);
+    expect(unpairedEdges(res.bottomHalf.triangles)).toBe(0);
+    // Lower hemisphere undercuts in a 1-part open mold must warn.
+    expect(res.warnings.some((w) => /undercut|overhang/i.test(w))).toBe(true);
+  });
+
+  it('warns when a feature overhangs the parting plane with empty space beneath it', () => {
+    // Base block on z = [0, 10 mm] with an overhanging cantilever arm at z = [6, 10 mm]
+    // sticking out in +X over empty air at z = 0 (parting plane is z = 0).
+    const cantilever: ParsedScene = {
+      nodes: [
+        {
+          id: 'b1',
+          name: 'cantilever',
+          type: 'body',
+          pos: [0, 0, 0],
+          geoms: [
+            { name: 'stem', type: 'box', size: [0.01, 0.01, 0.005], pos: [0, 0, 0.005] } as SceneGeom,
+            { name: 'ledge', type: 'box', size: [0.01, 0.01, 0.002], pos: [0.015, 0, 0.008] } as SceneGeom,
+          ],
+          joints: [],
+          children: [],
+        },
+      ],
+    };
+    const res = generateMoldMeshes(cantilever, DEFAULT_MOLD_OPTIONS);
+    expect(res.warnings.some((w) => /undercut|overhang/i.test(w))).toBe(true);
+  });
+
+  it('keeps the keyed corner pin and side pry notches outside a rectangular cavity', () => {
+    // 40 x 40 x 12 mm rectangular block filling the entire inner footprint.
+    const rectBlock: ParsedScene = {
+      nodes: [
+        {
+          id: 'b1',
+          name: 'block',
+          type: 'body',
+          pos: [0, 0, 0],
+          geoms: [{ name: 'g1', type: 'box', size: [0.02, 0.02, 0.006], pos: [0, 0, 0.006] } as SceneGeom],
+          joints: [],
+          children: [],
+        },
+      ],
+    };
+    const res = generateMoldMeshes(rectBlock, {
+      ...DEFAULT_MOLD_OPTIONS,
+      includeKeys: true,
+      includePryNotches: true,
+    });
+    expect(res.success).toBe(true);
+    expect(unpairedEdges(res.bottomHalf.triangles)).toBe(0);
+    expect(unpairedEdges(res.topHalf!.triangles)).toBe(0);
+
+    // Every pin protrusion vertex (above the base's parting face) must remain outside
+    // the 40 x 40 mm cavity footprint (|x| > 20 or |y| > 20 in the base's local frame).
+    const baseCx = (res.bottomHalf.bounds.minX + res.bottomHalf.bounds.maxX) / 2;
+    const partingFaceZ = res.floorThicknessMm + res.cavityDepthMm;
+    for (const t of res.bottomHalf.triangles) {
+      for (const v of [t.a, t.b, t.c]) {
+        if (v[2] > partingFaceZ + 0.1) {
+          const lx = Math.abs(v[0] - baseCx);
+          const ly = Math.abs(v[1]);
+          expect(lx > 20.05 || ly > 20.05).toBe(true);
+        }
+      }
+    }
+  });
+});
+

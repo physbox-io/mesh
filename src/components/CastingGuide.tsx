@@ -45,8 +45,12 @@ type CastingFacts = Pick<
 /** Deepest lift most casting epoxies will take without cooking themselves, mm. */
 const SAFE_LIFT_MM = 10;
 
-export const CastingGuide: React.FC<{ result: CastingFacts }> = ({ result }) => {
+export const CastingGuide: React.FC<{ result: CastingFacts; moldType?: 'clamshell' | 'open' }> = ({
+  result,
+  moldType = 'clamshell',
+}) => {
   const lifts = Math.max(1, Math.ceil(result.cavityDepthMm / SAFE_LIFT_MM));
+  const isOpen = moldType === 'open';
 
   return (
     <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-800/40 border border-slate-200 dark:border-slate-800 space-y-3 text-xs leading-relaxed text-slate-700 dark:text-slate-300">
@@ -68,8 +72,11 @@ export const CastingGuide: React.FC<{ result: CastingFacts }> = ({ result }) => 
         <li className="flex items-start gap-2">
           <Layers className="w-3.5 h-3.5 shrink-0 mt-0.5 text-purple-500" />
           <span>
-            <strong>Print cavity-up.</strong> Both halves are laid flat outer face down, so nothing
-            needs support. Fine layers on the cavity: every layer line prints itself into the casting.
+            <strong>Print cavity-up.</strong>{' '}
+            {isOpen
+              ? 'The mold is laid flat outer face down, so nothing needs support.'
+              : 'Both halves are laid flat outer face down, so nothing needs support.'}{' '}
+            Fine layers on the cavity: every layer line prints itself into the casting.
             Four walls or more, or resin wicks into the infill.
           </span>
         </li>
@@ -103,11 +110,21 @@ export const CastingGuide: React.FC<{ result: CastingFacts }> = ({ result }) => 
         <li className="flex items-start gap-2">
           <Hand className="w-3.5 h-3.5 shrink-0 mt-0.5 text-purple-500" />
           <span>
-            <strong>Close it, or don't.</strong>{' '}
-            {result.lidIsBackingPlate
-              ? 'The lid holds none of the shape here. Screed the back flush and leave it off, or set it on afterwards as a press for a flat, glossy back. The vents let the excess out.'
-              : 'Seat the lid on the pins, band it lightly closed (there is no injection pressure to fight) and let the excess escape through the vents. Pour through the sprue.'}{' '}
-            Full cure, then pry at the corner notches.
+            {isOpen ? (
+              <>
+                <strong>Pour and level.</strong> Pour into the deepest point of the cavity so the rising
+                level pushes air out ahead of it, then screed flush or let the open back self-level.
+                Full cure, then demold.
+              </>
+            ) : (
+              <>
+                <strong>Close it, or don't.</strong>{' '}
+                {result.lidIsBackingPlate
+                  ? 'The lid holds none of the shape here. Screed the back flush and leave it off, or set it on afterwards as a press for a flat, glossy back. The vents let the excess out.'
+                  : 'Seat the lid on the pins, band it lightly closed (there is no injection pressure to fight) and let the excess escape through the vents. Pour through the sprue.'}{' '}
+                Full cure, then pry at the side notches.
+              </>
+            )}
           </span>
         </li>
       </ol>

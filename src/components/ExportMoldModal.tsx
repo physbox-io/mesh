@@ -277,12 +277,27 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
     };
   }, [isOpen]);
 
+  const effectiveViewMode: PreviewViewMode =
+    options.moldType === 'open' && (viewMode === 'clamshell_exploded' || viewMode === 'top_only')
+      ? 'plate'
+      : viewMode;
+
   // Update Three.js meshes whenever result, viewMode, isXRay, or explodeGap changes
   useEffect(() => {
     const group = contentRef.current;
     if (!group || !result.success) return;
 
-    group.clear();
+    const disposeGroup = (g: THREE.Group) => {
+      g.traverse((o) => {
+        const m = o as THREE.Mesh;
+        m.geometry?.dispose?.();
+        const mat = m.material as THREE.Material | THREE.Material[] | undefined;
+        if (Array.isArray(mat)) mat.forEach((x) => x.dispose());
+        else mat?.dispose?.();
+      });
+      g.clear();
+    };
+    disposeGroup(group);
 
     const bottomBuf = preview?.bottom ?? null;
     const topBuf = preview?.top ?? null;
@@ -308,7 +323,12 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
       side: THREE.DoubleSide,
     });
 
-    if (viewMode === 'plate' || options.moldType === 'open') {
+    const botCenterX = (result.bottomHalf.bounds.minX + result.bottomHalf.bounds.maxX) / 2;
+    const topCenterX = result.topHalf
+      ? (result.topHalf.bounds.minX + result.topHalf.bounds.maxX) / 2
+      : 0;
+
+    if (effectiveViewMode === 'plate') {
       // Build Plate Layout: Both halves flat side-by-side at Z=0
       if (bottomBuf) {
         group.add(new THREE.Mesh(buffersToGeometry(bottomBuf), bottomMat));
@@ -316,34 +336,31 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
       if (topBuf && options.moldType === 'clamshell') {
         group.add(new THREE.Mesh(buffersToGeometry(topBuf), topMat));
       }
-    } else if (viewMode === 'clamshell_exploded') {
+    } else if (effectiveViewMode === 'clamshell_exploded') {
       // Exploded View: Bottom cavity at Z=0, Top core/lid elevated above it facing downward
       if (bottomBuf) {
-        // Center bottom half at origin
         const botMesh = new THREE.Mesh(buffersToGeometry(bottomBuf), bottomMat);
-        const mb = result.moldWidthMm / 2;
-        botMesh.position.set(mb, 0, 0); // Undo plate offset
+        botMesh.position.set(-botCenterX, 0, 0);
         group.add(botMesh);
       }
       if (topBuf) {
-        // Un-plate and position elevated facing down
         const topMesh = new THREE.Mesh(buffersToGeometry(topBuf), topMat);
-        const mb = result.moldWidthMm / 2;
-        // Flip back and lift by explodeGap
+        const botTopZ = result.bottomHalf.bounds.maxZ;
+        const lidTopZ = result.topHalf ? result.topHalf.bounds.maxZ : result.moldHeightMm;
         topMesh.rotation.x = Math.PI;
-        topMesh.position.set(-mb, 0, result.moldHeightMm + explodeGap);
+        topMesh.position.set(-topCenterX, 0, botTopZ + lidTopZ + explodeGap);
         group.add(topMesh);
       }
-    } else if (viewMode === 'bottom_only') {
+    } else if (effectiveViewMode === 'bottom_only') {
       if (bottomBuf) {
         const botMesh = new THREE.Mesh(buffersToGeometry(bottomBuf), bottomMat);
-        botMesh.position.set(result.moldWidthMm / 2, 0, 0);
+        botMesh.position.set(-botCenterX, 0, 0);
         group.add(botMesh);
       }
-    } else if (viewMode === 'top_only') {
+    } else if (effectiveViewMode === 'top_only') {
       if (topBuf) {
         const topMesh = new THREE.Mesh(buffersToGeometry(topBuf), topMat);
-        topMesh.position.set(-result.moldWidthMm / 2, 0, 0);
+        topMesh.position.set(-topCenterX, 0, 0);
         group.add(topMesh);
       }
     }
@@ -353,8 +370,7 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
     const grid = new THREE.GridHelper(gridDim, 24, 0x94a3b8, 0x334155);
     grid.rotation.x = Math.PI / 2; // Lie flat in XY plane
     group.add(grid);
-
-  }, [preview, result, viewMode, isXRay, explodeGap, options.moldType]);
+  }, [preview, result, effectiveViewMode, isXRay, explodeGap, options.moldType]);
 
   const [saving, setSaving] = useState(false);
   const addToScene = useAddSimulation();
@@ -437,7 +453,7 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
                     type="button"
                     onClick={() => setViewMode('clamshell_exploded')}
                     className={`px-2.5 py-1 rounded-md transition-all cursor-pointer font-medium ${
-                      viewMode === 'clamshell_exploded'
+                      effectiveViewMode === 'clamshell_exploded'
                         ? 'bg-white dark:bg-slate-900 text-purple-600 dark:text-purple-400 shadow-xs font-semibold'
                         : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100'
                     }`}
@@ -449,7 +465,7 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
                   type="button"
                   onClick={() => setViewMode('plate')}
                   className={`px-2.5 py-1 rounded-md transition-all cursor-pointer font-medium ${
-                    viewMode === 'plate'
+                    effectiveViewMode === 'plate'
                       ? 'bg-white dark:bg-slate-900 text-purple-600 dark:text-purple-400 shadow-xs font-semibold'
                       : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100'
                   }`}
@@ -460,7 +476,7 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
                   type="button"
                   onClick={() => setViewMode('bottom_only')}
                   className={`px-2.5 py-1 rounded-md transition-all cursor-pointer font-medium ${
-                    viewMode === 'bottom_only'
+                    effectiveViewMode === 'bottom_only'
                       ? 'bg-white dark:bg-slate-900 text-purple-600 dark:text-purple-400 shadow-xs font-semibold'
                       : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100'
                   }`}
@@ -472,7 +488,7 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
                     type="button"
                     onClick={() => setViewMode('top_only')}
                     className={`px-2.5 py-1 rounded-md transition-all cursor-pointer font-medium ${
-                      viewMode === 'top_only'
+                      effectiveViewMode === 'top_only'
                         ? 'bg-white dark:bg-slate-900 text-purple-600 dark:text-purple-400 shadow-xs font-semibold'
                         : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100'
                     }`}
@@ -511,7 +527,7 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
               <div ref={mountRef} className="absolute inset-0 cursor-grab active:cursor-grabbing" />
 
               {/* Explode Distance Slider (when in exploded view) */}
-              {viewMode === 'clamshell_exploded' && options.moldType === 'clamshell' && (
+              {effectiveViewMode === 'clamshell_exploded' && options.moldType === 'clamshell' && (
                 <div className="absolute top-3 left-3 bg-slate-900/85 backdrop-blur-md px-3 py-2 rounded-lg text-xs text-slate-300 border border-slate-700 flex items-center gap-2.5 shadow-lg">
                   <span className="font-semibold text-[11px] text-slate-400">Separation:</span>
                   <input
@@ -787,6 +803,20 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
                     />
                     Include Air Riser Bleed Holes (Prevents Bubbles)
                   </label>
+                  {options.includeVents && (
+                    <div className="pl-5 border-l-2 border-purple-200 dark:border-purple-900">
+                      <Field label="Vent Dia (mm)">
+                        <NumberInput
+                          value={options.ventDiaMm}
+                          min={0.8}
+                          max={6}
+                          step={0.1}
+                          onChange={(v) => set('ventDiaMm', v)}
+                          className={inputClass}
+                        />
+                      </Field>
+                    </div>
+                  )}
 
                   <label className="flex items-center gap-2 text-xs font-semibold cursor-pointer">
                     <input
@@ -795,19 +825,24 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
                       onChange={(e) => set('includePryNotches', e.target.checked)}
                       className="rounded border-slate-300 dark:border-slate-700 text-purple-600 focus:ring-purple-500"
                     />
-                    Include Corner Demolding Pry Slots
+                    Include Side Demolding Pry Slots
                   </label>
                 </div>
               </div>
             )}
-            <CastingGuide result={result} />
+            <CastingGuide result={result} moldType={options.moldType} />
           </div>
         </div>
 
         {/* Footer Actions */}
         <div className="px-6 py-4 border-t border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/50 flex items-center justify-between flex-wrap gap-3">
           <div className="text-xs text-slate-500 dark:text-slate-400">
-            Export layout: <strong className="text-slate-700 dark:text-slate-200">Both halves flat on Z=0 build plate</strong>
+            Export layout:{' '}
+            <strong className="text-slate-700 dark:text-slate-200">
+              {options.moldType === 'open'
+                ? 'Single open mold flat on Z=0 build plate'
+                : 'Both halves flat on Z=0 build plate'}
+            </strong>
           </div>
 
           <div className="flex items-center gap-3">
@@ -828,7 +863,7 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
             />
 
             <button
-              onClick={() => void handleDownload('casting_mold_plate.stl')}
+              onClick={() => void handleDownload(options.moldType === 'open' ? 'casting_mold_open.stl' : 'casting_mold_plate.stl')}
               disabled={!result.success || result.totalTriangles === 0 || busy || saving}
               className="flex items-center gap-2 px-5 py-2 text-xs font-semibold text-white bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 rounded-xl shadow-md hover:shadow-lg disabled:opacity-50 transition-all cursor-pointer"
             >
