@@ -176,7 +176,9 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
    */
   const [fingerWidthAuto, setFingerWidthAuto] = useState<boolean>(true);
   const [kerfMm, setKerfMm] = useState<number>(0.15);
-  const [cornerRelief, setCornerRelief] = useState<'none' | 'dogbone' | 'tbone'>('none');
+  // Unset until the operator picks one: a router then relieves its inside
+  // corners, since a round bit leaves every one too tight for a tab to seat.
+  const [cornerReliefChoice, setCornerRelief] = useState<'none' | 'dogbone' | 'tbone' | null>(null);
   const [bitDiameterMm, setBitDiameterMm] = useState<number>(3.175);
   const [tabOverhangMm, setTabOverhangMm] = useState<number>(0);
   const [jointClearanceMm, setJointClearanceMm] = useState<number>(0);
@@ -238,6 +240,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
    */
   const machineTarget = useStore((s) => s.machineTarget);
   const machineMode: 'laser' | 'cnc' = machineTarget === 'laser' ? 'laser' : 'cnc';
+  const cornerRelief = cornerReliefChoice ?? (machineMode === 'cnc' ? 'dogbone' : 'none');
   const material = useStore((s) => s.material);
   const materialLabel = MATERIALS.find((m) => m.id === material)?.label ?? material;
   const setMachineConfigOpen = useStore((s) => s.setMachineConfigOpen);
