@@ -66,7 +66,12 @@ a sloped relief, a stepped shelf, a pocket with an island, and a two-sided solid
 - **2.1 needs your decision** (see the bottom of this file). Fix the mesh-leveling span being
   clipped by `safeZ` regardless.
 
-## Batch 4: sheet output, laser and CNC (`gcodeExporter.ts`, `contourSliceExporter.ts`, `laserCutExporter.ts`, the two modals)
+## Batch 4: sheet output, laser and CNC (`gcodeExporter.ts`, `contourSliceExporter.ts`, `laserCutExporter.ts`, the two modals) — DONE e08eaf2..1991817 (2026-10-17, branch `batch4-sheet-output`, unpushed)
+Found on the way and fixed: dowel holes shrank with auto-scale (795e959); corner relief never
+reached the G-code at all, because the circle was centred out in the material and the bit-radius
+offset dropped it as a zero-width spike (09484ea: relief is now the bit's own sweep, plus 0.05 mm);
+the side B levelling grid (3.7) was already applied by machineSurface, so it is now a re-probe
+warning. Facing (2.5) is still reachable only through `faceToThickness`, which no modal sets.
 - **3.1 (critical)**: `sheetIndex` goes on `ContourLayer`, and positions stay local to their sheet.
   G-code pauses between sheets, not between layers.
 - **3.2 (critical)**: cut innermost loops first (from `nestingDepths`), and put tabs only on outer
