@@ -17,7 +17,9 @@
 import { describe, it, expect } from 'vitest';
 import {
   generateTubeMeshData, generateTorusMeshData, generateConeMeshData,
-  generatePyramidMeshData, generateWedgeMeshData, type MeshData,
+  generatePyramidMeshData, generateWedgeMeshData,
+  generateExtrudedPolygonMeshData, generateLatheMeshData,
+  normalizeMeshGeomData, analyzeMesh, type MeshData,
 } from '../src/utils/geom';
 
 /** Positive iff every face is wound CCW seen from outside (normals point out). */
@@ -106,6 +108,24 @@ const cases: Array<{ name: string; mesh: MeshData; volume: number; tolerance: nu
     volume: 0.5 * 0.2 * 0.08 * 0.1,
     tolerance: 1e-12,
   },
+  {
+    name: 'extrude (L-bracket with hole)',
+    mesh: generateExtrudedPolygonMeshData(
+      [[0, 0], [0.1, 0], [0.1, 0.04], [0.04, 0.04], [0.04, 0.1], [0, 0.1]],
+      0.02,
+      true,
+      [[[0.01, 0.01], [0.03, 0.01], [0.03, 0.03], [0.01, 0.03]]]
+    ),
+    // L-shape area = 0.1*0.04 + 0.04*0.06 = 0.0064; hole = 0.02*0.02 = 0.0004; net area = 0.006 * height 0.02
+    volume: 0.006 * 0.02,
+    tolerance: 1e-12,
+  },
+  {
+    name: 'lathe (frustum touching axis)',
+    mesh: generateLatheMeshData([[0, -0.05], [0.08, -0.05], [0.04, 0.05], [0, 0.05]], SEG),
+    volume: (0.1 / 3) * (ngonArea(0.08, SEG) + ngonArea(0.04, SEG) + Math.sqrt(ngonArea(0.08, SEG) * ngonArea(0.04, SEG))),
+    tolerance: 1e-9,
+  },
 ];
 
 describe.each(cases)('$name mesh', ({ mesh, volume, tolerance }) => {
@@ -135,6 +155,78 @@ describe.each(cases)('$name mesh', ({ mesh, volume, tolerance }) => {
   });
 });
 
+describe('normalizeMeshGeomData', () => {
+  it('expands parametric cone, pyramid, wedge, torus, tube, extrude, and lathe geoms into watertight meshes', () => {
+    const specs = [
+      { type: 'cone', radius: 0.05, height: 0.1 },
+      { type: 'pyramid', size: [0.04, 0.05, 0.06] },
+      { type: 'wedge', size: [0.05, 0.03, 0.04] },
+      { type: 'torus', radius: 0.08, tubeRadius: 0.02 },
+      { type: 'tube', innerRadius: 0.03, outerRadius: 0.05, height: 0.08 },
+      { type: 'extrude', polygon: [[0, 0], [0.06, 0], [0.03, 0.05]], height: 0.02 },
+      { type: 'lathe', profile: [[0, 0], [0.04, 0], [0.03, 0.06], [0, 0.06]], segments: 24 },
+    ];
+    for (const spec of specs) {
+      const g = normalizeMeshGeomData({ ...spec });
+      expect(g.type).toBe('mesh');
+      expect(g.dynamic).toBe(true);
+      expect(g.vertices?.length).toBeGreaterThan(0);
+      expect(g.renderVertices?.length).toBe(g.vertices.length);
+      expect(g.faces?.length).toBeGreaterThan(0);
+      expect(g.size).toHaveLength(3);
+      expect(windingProblems({
+        vertices: g.vertices,
+        renderVertices: g.renderVertices,
+        faces: g.faces,
+      })).toEqual({ duplicated: 0, unpaired: 0 });
+      expect(signedVolume(g.renderVertices, g.faces)).toBeGreaterThan(0);
+    }
+  });
+
+  it('stitches torus, extrude, and lathe seams by vertex index so analyzeMesh reports closed=true', () => {
+    for (const spec of [
+      { type: 'torus', radius: 0.08, tubeRadius: 0.02 },
+      { type: 'extrude', polygon: [[0, 0], [0.06, 0], [0.03, 0.05]], height: 0.02 },
+      { type: 'lathe', profile: [[0, 0], [0.04, 0], [0.03, 0.06], [0, 0.06]], segments: 24 },
+    ]) {
+      const g = normalizeMeshGeomData({ ...spec });
+      const check = analyzeMesh(g.vertices, g.faces);
+      expect(check?.closed).toBe(true);
+      expect(check?.consistentlyWound).toBe(true);
+      expect(check?.volume).toBeGreaterThan(0);
+    }
+  });
+
+  it('accepts verticesZUp and auto-flips inside-out closed meshes', () => {
+    // Tetrahedron in Z-up with intentionally inverted winding
+    const verticesZUp = [
+      0, 0, 0,
+      0.1, 0, 0,
+      0, 0.1, 0,
+      0, 0, 0.1,
+    ];
+    // Outward winding would be: base [0,2,1], sides [0,1,3], [1,2,3], [2,0,3].
+    // Pass reversed faces so volume is negative:
+    const invertedFaces = [
+      0, 1, 2,
+      0, 3, 1,
+      1, 3, 2,
+      2, 3, 0,
+    ];
+    const g = normalizeMeshGeomData({
+      type: 'mesh',
+      verticesZUp,
+      faces: invertedFaces,
+    });
+    expect(g.dynamic).toBe(true);
+    expect(g.vertices).toHaveLength(12);
+    expect(g.renderVertices).toEqual(verticesZUp);
+    const check = analyzeMesh(g.vertices, g.faces);
+    expect(check?.closed).toBe(true);
+    expect(check?.volume).toBeGreaterThan(0);
+  });
+});
+
 describe('regression: signed volume alone is not enough', () => {
   it("cannot see the cone's base orientation, so the edge check must", () => {
     // The base lies in the plane y=0, which passes through the origin, so every
@@ -153,3 +245,4 @@ describe('regression: signed volume alone is not enough', () => {
     expect(windingProblems(sabotaged).duplicated).toBeGreaterThan(0);
   });
 });
+

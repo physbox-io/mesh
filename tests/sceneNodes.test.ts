@@ -143,6 +143,39 @@ describe('sanitizeAndNormalizeNodes', () => {
     expect(j.limited).toBe(true);
     expect(j.range).toEqual([-0.05, 0.12]);
   });
+
+  it('normalizes parametric mesh geoms and body-level shorthands into watertight meshes', () => {
+    const out = sanitizeAndNormalizeNodes(
+      [
+        {
+          id: 'roof',
+          name: 'roof',
+          type: 'cone',
+          radius: 0.06,
+          height: 0.08,
+          pos: [0, 0, 0.1],
+        },
+        {
+          id: 'plate',
+          name: 'plate',
+          pos: [0, 0, 0.02],
+          geoms: [{
+            name: 'plate_geom',
+            type: 'extrude',
+            polygon: [[-0.04, -0.02], [0.04, -0.02], [0.04, 0.02], [-0.04, 0.02]],
+            height: 0.01,
+          }],
+        },
+      ],
+      []
+    );
+    expect(out[0].geoms[0].type).toBe('mesh');
+    expect(out[0].geoms[0].dynamic).toBe(true);
+    expect(out[0].geoms[0].vertices.length).toBeGreaterThan(0);
+    expect(out[1].geoms[0].type).toBe('mesh');
+    expect(out[1].geoms[0].dynamic).toBe(true);
+    expect(out[1].geoms[0].vertices.length).toBeGreaterThan(0);
+  });
 });
 
 describe('mergeAndNormalizeNodes', () => {

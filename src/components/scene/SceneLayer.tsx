@@ -971,14 +971,35 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
     ) : null;
 
     if (isDynamic) {
+      const hasLocalOffset = geomEntry && !geomEntry.csgDerived && (
+        (Array.isArray(geomEntry.pos) && (geomEntry.pos[0] !== 0 || geomEntry.pos[1] !== 0 || geomEntry.pos[2] !== 0)) ||
+        (Array.isArray(geomEntry.quat) && geomEntry.quat.length === 4) ||
+        (Array.isArray(geomEntry.euler) && (geomEntry.euler[0] !== 0 || geomEntry.euler[1] !== 0 || geomEntry.euler[2] !== 0))
+      );
+      const localPos: [number, number, number] | undefined = hasLocalOffset && Array.isArray(geomEntry?.pos) && geomEntry.pos.length === 3
+        ? [geomEntry.pos[0], geomEntry.pos[1], geomEntry.pos[2]]
+        : undefined;
+      let localQuat: THREE.Quaternion | undefined;
+      if (hasLocalOffset && geomEntry) {
+        if (Array.isArray(geomEntry.quat) && geomEntry.quat.length === 4) {
+          localQuat = new THREE.Quaternion(geomEntry.quat[1], geomEntry.quat[2], geomEntry.quat[3], geomEntry.quat[0]).normalize();
+        } else if (Array.isArray(geomEntry.euler) && geomEntry.euler.length === 3) {
+          const deg = Math.PI / 180;
+          localQuat = new THREE.Quaternion().setFromEuler(
+            new THREE.Euler(geomEntry.euler[0] * deg, geomEntry.euler[1] * deg, geomEntry.euler[2] * deg, 'XYZ')
+          );
+        }
+      }
       return (
         <group name={nodeId} ref={meshRef} position={initialPos} quaternion={initialQuaternion}>
-          <mesh castShadow receiveShadow geometry={shadedGeometry!} {...dragHandlers} {...paintHandlers}>
-            {renderedMaterial}
-            {brushCursor}
-          </mesh>
-          {insideWall}
-          {meshEdges}
+          <group position={localPos} quaternion={localQuat}>
+            <mesh castShadow receiveShadow geometry={shadedGeometry!} {...dragHandlers} {...paintHandlers}>
+              {renderedMaterial}
+              {brushCursor}
+            </mesh>
+            {insideWall}
+            {meshEdges}
+          </group>
         </group>
       );
     }

@@ -6,17 +6,21 @@
 // JSON and the store, and several silent scene-corruption bugs lived here.
 
 import type { SceneGeom, SceneJoint, SceneNode } from '../types/scene';
+import { normalizeMeshGeomData } from './geom';
 
 // What the model hands back: any subset of the scene types, plus the ids the
 // merge keys on. A real SceneNode satisfies RawNode, so the current scene can
 // be passed in as the "existing" side without conversion.
-export type RawGeom = Partial<SceneGeom> & { id?: string };
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type RawGeom = Partial<SceneGeom> & { id?: string; [key: string]: any };
 export type RawJoint = Partial<SceneJoint> & { id?: string };
 export type RawNode = Partial<Omit<SceneNode, 'geoms' | 'joints' | 'children'>> & {
   geoms?: RawGeom[];
   joints?: RawJoint[];
   children?: RawNode[];
   rgba?: number[];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  [key: string]: any;
 };
 
 const randomSuffix = (len: number) => Math.random().toString(36).substring(2, 2 + len);
@@ -72,7 +76,52 @@ export function sanitizeAndNormalizeNodes(rawNodes: RawNode[], existingNodes: Ra
       ? n.euler.map((v: unknown) => typeof v === 'number' ? v : 0)
       : (existingNode?.euler || [0, 0, 0]);
 
-    const geoms = Array.isArray(n.geoms) && n.geoms.length > 0 ? n.geoms.map((g: RawGeom, gIdx: number): RawGeom => {
+    const rawGeomsInput: RawGeom[] | undefined =
+      Array.isArray(n.geoms) && n.geoms.length > 0
+        ? n.geoms
+        : !existingNode?.geoms &&
+            (n.type ||
+              n.size ||
+              n.polygon ||
+              n.profile ||
+              n.vertices ||
+              n.verticesZUp ||
+              n.renderVertices)
+          ? [
+              {
+                type: n.type,
+                size: n.size,
+                rgba: n.rgba,
+                mass: n.mass,
+                radius: n.radius,
+                height: n.height,
+                width: n.width,
+                depth: n.depth,
+                majorRadius: n.majorRadius,
+                minorRadius: n.minorRadius,
+                tubeRadius: n.tubeRadius,
+                innerRadius: n.innerRadius,
+                outerRadius: n.outerRadius,
+                wallThickness: n.wallThickness,
+                segments: n.segments,
+                radialSegments: n.radialSegments,
+                tubularSegments: n.tubularSegments,
+                polygon: n.polygon,
+                holes: n.holes,
+                centered: n.centered,
+                profile: n.profile,
+                vertices: n.vertices,
+                verticesZUp: n.verticesZUp,
+                renderVertices: n.renderVertices,
+                faces: n.faces,
+              },
+            ]
+          : undefined;
+
+    const geoms = Array.isArray(rawGeomsInput) && rawGeomsInput.length > 0 ? rawGeomsInput.map((rawG: RawGeom, gIdx: number): RawGeom => {
+      const g: RawGeom = { ...rawG };
+      normalizeMeshGeomData(g);
+
       let gName = g.name || `${baseName}_geom_${gIdx}`;
       if (usedGeomNames.has(gName)) {
         gName = `${gName}_${randomSuffix(4)}`;
@@ -86,7 +135,7 @@ export function sanitizeAndNormalizeNodes(rawNodes: RawNode[], existingNodes: Ra
 
       const hasMeshData = Array.isArray(vertices) && vertices.length > 0 && Array.isArray(faces) && faces.length > 0;
       let gType = g.type || existingGeom?.type || (scadScript || hasMeshData ? 'mesh' : 'box');
-      if (gType === 'mesh' && !hasMeshData) {
+      if (gType === 'mesh' && !hasMeshData && !scadScript) {
         gType = 'box';
       }
 

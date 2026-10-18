@@ -1,4 +1,8 @@
+import * as THREE from 'three';
 import type { SceneGeom } from '../types/scene';
+import { analyzeMesh } from './meshIntegrity';
+export { analyzeMesh };
+
 export interface MeshData {
   vertices: number[];
   faces: number[];
@@ -102,17 +106,19 @@ export function generateTorusMeshData(
   radialSegments: number = 24,
   tubularSegments: number = 16
 ): MeshData {
+  const nRad = Math.max(3, Math.floor(radialSegments));
+  const nTub = Math.max(3, Math.floor(tubularSegments));
   const vertices: number[] = [];
   const renderVertices: number[] = [];
   const faces: number[] = [];
 
-  for (let i = 0; i <= radialSegments; i++) {
-    const u = (i / radialSegments) * Math.PI * 2;
+  for (let i = 0; i < nRad; i++) {
+    const u = (i / nRad) * Math.PI * 2;
     const cosU = Math.cos(u);
     const sinU = Math.sin(u);
 
-    for (let j = 0; j <= tubularSegments; j++) {
-      const v = (j / tubularSegments) * Math.PI * 2;
+    for (let j = 0; j < nTub; j++) {
+      const v = (j / nTub) * Math.PI * 2;
       const cosV = Math.cos(v);
       const sinV = Math.sin(v);
 
@@ -125,13 +131,14 @@ export function generateTorusMeshData(
     }
   }
 
-  const stride = tubularSegments + 1;
-  for (let i = 0; i < radialSegments; i++) {
-    for (let j = 0; j < tubularSegments; j++) {
-      const a = i * stride + j;
-      const b = i * stride + j + 1;
-      const c = (i + 1) * stride + j;
-      const d = (i + 1) * stride + j + 1;
+  for (let i = 0; i < nRad; i++) {
+    const nextI = (i + 1) % nRad;
+    for (let j = 0; j < nTub; j++) {
+      const nextJ = (j + 1) % nTub;
+      const a = i * nTub + j;
+      const b = i * nTub + nextJ;
+      const c = nextI * nTub + j;
+      const d = nextI * nTub + nextJ;
 
       faces.push(a, b, d);
       faces.push(a, d, c);
@@ -418,3 +425,407 @@ export function generateWedgeMeshData(width: number, depth: number, height: numb
 
   return { vertices, faces, renderVertices };
 }
+
+function cleanRing2D(ring: number[][], wantCCW: boolean): number[][] {
+  const pts: number[][] = [];
+  for (const p of ring) {
+    if (!Array.isArray(p) || p.length < 2) continue;
+    const x = Number(p[0]) || 0;
+    const y = Number(p[1]) || 0;
+    if (pts.length > 0) {
+      const prev = pts[pts.length - 1];
+      if (Math.hypot(x - prev[0], y - prev[1]) < 1e-7) continue;
+    }
+    pts.push([x, y]);
+  }
+  if (pts.length >= 2) {
+    const first = pts[0];
+    const last = pts[pts.length - 1];
+    if (Math.hypot(first[0] - last[0], first[1] - last[1]) < 1e-7) {
+      pts.pop();
+    }
+  }
+  if (pts.length < 3) return pts;
+  let area2 = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[i];
+    const b = pts[(i + 1) % pts.length];
+    area2 += a[0] * b[1] - b[0] * a[1];
+  }
+  const isCCW = area2 > 0;
+  if (isCCW !== wantCCW) {
+    pts.reverse();
+  }
+  return pts;
+}
+
+/**
+ * Extrudes a 2D polygon `[x, y][]` in the MuJoCo XY plane along the Z axis by `height`.
+ * Optionally accepts 2D interior `holes` (`[x, y][][]`).
+ * Produces a watertight, outward-wound mesh in both Y-up (`vertices`) and Z-up (`renderVertices`).
+ */
+export function generateExtrudedPolygonMeshData(
+  polygon: number[][],
+  height: number = 0.1,
+  centered: boolean = true,
+  holes: number[][][] = []
+): MeshData {
+  const outer = cleanRing2D(polygon, true);
+  if (outer.length < 3) {
+    return generatePyramidMeshData(0.1, 0.1, Math.max(0.01, height));
+  }
+  const cleanedHoles = Array.isArray(holes)
+    ? holes.map((h) => cleanRing2D(h, false)).filter((h) => h.length >= 3)
+    : [];
+
+  const h = Math.max(1e-4, Number(height) || 0.1);
+  const zBottom = centered ? -h / 2 : 0;
+  const zTop = centered ? h / 2 : h;
+
+  const contourVec = outer.map(([x, y]) => new THREE.Vector2(x, y));
+  const holeVecs = cleanedHoles.map((ring) => ring.map(([x, y]) => new THREE.Vector2(x, y)));
+  const tris = THREE.ShapeUtils.triangulateShape(contourVec, holeVecs);
+
+  const rings: number[][][] = [outer, ...cleanedHoles];
+  const allPts: number[][] = [];
+  for (const ring of rings) {
+    for (const pt of ring) allPts.push(pt);
+  }
+  const n = allPts.length;
+  const vertices: number[] = [];
+  const renderVertices: number[] = [];
+  const faces: number[] = [];
+
+  // Bottom ring: indices 0 .. n-1
+  for (let i = 0; i < n; i++) {
+    const [rx, ry] = allPts[i];
+    const rz = zBottom;
+    renderVertices.push(rx, ry, rz);
+    vertices.push(rx, rz, -ry);
+  }
+  // Top ring: indices n .. 2n-1
+  for (let i = 0; i < n; i++) {
+    const [rx, ry] = allPts[i];
+    const rz = zTop;
+    renderVertices.push(rx, ry, rz);
+    vertices.push(rx, rz, -ry);
+  }
+
+  for (const tri of tris) {
+    let [i0, i1, i2] = tri;
+    const p0 = allPts[i0], p1 = allPts[i1], p2 = allPts[i2];
+    const cross = (p1[0] - p0[0]) * (p2[1] - p0[1]) - (p1[1] - p0[1]) * (p2[0] - p0[0]);
+    if (cross < 0) {
+      const tmp = i1;
+      i1 = i2;
+      i2 = tmp;
+    }
+    // Top cap (+Z normal)
+    faces.push(n + i0, n + i1, n + i2);
+    // Bottom cap (-Z normal)
+    faces.push(i0, i2, i1);
+  }
+
+  // Side walls for outer ring and each hole ring
+  let offset = 0;
+  for (const ring of rings) {
+    const m = ring.length;
+    for (let i = 0; i < m; i++) {
+      const curr = offset + i;
+      const next = offset + ((i + 1) % m);
+      faces.push(curr, next, n + next);
+      faces.push(curr, n + next, n + curr);
+    }
+    offset += m;
+  }
+
+  return { vertices, faces, renderVertices };
+}
+
+/**
+ * Revolves a 2D `[r, z][]` profile around the Z axis into a watertight 3D mesh.
+ * - If the profile is an open outer contour (start/end have `r > 0` and do not meet),
+ *   flat caps to `r = 0` on the Z axis are added automatically at the bottom and top.
+ * - If the profile is a closed loop in `r > 0` (e.g. a hollow cup or custom ring section),
+ *   it is revolved as a closed toroidal shell.
+ */
+export function generateLatheMeshData(
+  profile: number[][],
+  segments: number = 24
+): MeshData {
+  const nSeg = Math.max(3, Math.floor(segments));
+  const rawPts: [number, number][] = [];
+  for (const p of profile || []) {
+    if (!Array.isArray(p) || p.length < 2) continue;
+    const r = Math.max(0, Number(p[0]) || 0);
+    const z = Number(p[1]) || 0;
+    if (rawPts.length > 0) {
+      const prev = rawPts[rawPts.length - 1];
+      if (Math.hypot(r - prev[0], z - prev[1]) < 1e-7) continue;
+    }
+    rawPts.push([r, z]);
+  }
+  if (rawPts.length < 2) {
+    return generateConeMeshData(0.1, 0.2, nSeg);
+  }
+
+  const EPS = 1e-6;
+  const first = rawPts[0];
+  const last = rawPts[rawPts.length - 1];
+  const isClosedLoop = rawPts.length >= 3 && Math.hypot(first[0] - last[0], first[1] - last[1]) < EPS;
+
+  const pts: [number, number][] = [];
+  if (isClosedLoop) {
+    for (let i = 0; i < rawPts.length - 1; i++) pts.push(rawPts[i]);
+  } else {
+    if (first[0] > EPS) pts.push([0, first[1]]);
+    for (const pt of rawPts) pts.push(pt);
+    if (last[0] > EPS) pts.push([0, last[1]]);
+  }
+
+  const vertices: number[] = [];
+  const renderVertices: number[] = [];
+  const faces: number[] = [];
+
+  // Map each profile station to either a single axis vertex (when r <= EPS)
+  // or a ring of nSeg vertices.
+  const stationIndices: number[][] = [];
+  for (let k = 0; k < pts.length; k++) {
+    const [r, z] = pts[k];
+    if (r <= EPS) {
+      const idx = renderVertices.length / 3;
+      renderVertices.push(0, 0, z);
+      vertices.push(0, z, 0);
+      stationIndices.push([idx]);
+    } else {
+      const ring: number[] = [];
+      for (let s = 0; s < nSeg; s++) {
+        const theta = (s / nSeg) * Math.PI * 2;
+        const rx = r * Math.cos(theta);
+        const ry = r * Math.sin(theta);
+        const rz = z;
+        const idx = renderVertices.length / 3;
+        renderVertices.push(rx, ry, rz);
+        vertices.push(rx, rz, -ry);
+        ring.push(idx);
+      }
+      stationIndices.push(ring);
+    }
+  }
+
+  const spanCount = isClosedLoop ? pts.length : pts.length - 1;
+  for (let k = 0; k < spanCount; k++) {
+    const ringA = stationIndices[k];
+    const ringB = stationIndices[(k + 1) % pts.length];
+    if (ringA.length === 1 && ringB.length === 1) {
+      continue;
+    } else if (ringA.length === 1) {
+      const pole = ringA[0];
+      for (let s = 0; s < nSeg; s++) {
+        const nextS = (s + 1) % nSeg;
+        faces.push(pole, ringB[nextS], ringB[s]);
+      }
+    } else if (ringB.length === 1) {
+      const pole = ringB[0];
+      for (let s = 0; s < nSeg; s++) {
+        const nextS = (s + 1) % nSeg;
+        faces.push(ringA[s], ringA[nextS], pole);
+      }
+    } else {
+      for (let s = 0; s < nSeg; s++) {
+        const nextS = (s + 1) % nSeg;
+        const a0 = ringA[s];
+        const a1 = ringA[nextS];
+        const b0 = ringB[s];
+        const b1 = ringB[nextS];
+        faces.push(a0, a1, b1);
+        faces.push(a0, b1, b0);
+      }
+    }
+  }
+
+  const integrity = analyzeMesh(vertices, faces);
+  if (integrity && integrity.volume < 0) {
+    for (let i = 0; i < faces.length; i += 3) {
+      const tmp = faces[i + 1];
+      faces[i + 1] = faces[i + 2];
+      faces[i + 2] = tmp;
+    }
+  }
+
+  return { vertices, faces, renderVertices };
+}
+
+export const PARAMETRIC_MESH_TYPES = new Set([
+  'cone',
+  'pyramid',
+  'wedge',
+  'torus',
+  'tube',
+  'pipe',
+  'hollow_cylinder',
+  'extrude',
+  'prism',
+  'lathe',
+  'revolve',
+]);
+
+/**
+ * Expands parametric mesh geom types (`cone`, `pyramid`, `wedge`, `torus`, `tube`,
+ * `extrude`/`prism`, `lathe`/`revolve`), normalises `verticesZUp` / `renderVertices` / `vertices`
+ * so agents can author meshes in Z-up without Three.js Y-up confusion, auto-fixes closed
+ * inverted-winding meshes, and computes bounding `size` half-extents.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function normalizeMeshGeomData<T extends Record<string, any>>(g: T): T {
+  if (!g || typeof g !== 'object') return g;
+
+  const rawType = typeof g.type === 'string' ? g.type.toLowerCase() : '';
+  const hasPolygon = Array.isArray(g.polygon) && g.polygon.length >= 3;
+  const hasProfile = Array.isArray(g.profile) && g.profile.length >= 2;
+
+  let generated: MeshData | null = null;
+  if (rawType === 'cone') {
+    const r = Number(g.radius ?? g.size?.[0] ?? 0.15) || 0.15;
+    const h = Number(
+      g.height ?? (Array.isArray(g.size) ? (g.size.length >= 3 ? g.size[2] * 2 : g.size[1] != null ? g.size[1] * 2 : 0.3) : 0.3)
+    ) || 0.3;
+    const segs = Number(g.segments ?? 24) || 24;
+    generated = generateConeMeshData(r, h, segs);
+  } else if (rawType === 'pyramid') {
+    const w = Number(g.width ?? (g.size?.[0] != null ? g.size[0] * 2 : 0.3)) || 0.3;
+    const d = Number(g.depth ?? (g.size?.[1] != null ? g.size[1] * 2 : w)) || w;
+    const h = Number(g.height ?? (g.size?.[2] != null ? g.size[2] * 2 : 0.3)) || 0.3;
+    generated = generatePyramidMeshData(w, d, h);
+  } else if (rawType === 'wedge') {
+    const w = Number(g.width ?? (g.size?.[0] != null ? g.size[0] * 2 : 0.4)) || 0.4;
+    const d = Number(g.depth ?? (g.size?.[1] != null ? g.size[1] * 2 : 0.3)) || 0.3;
+    const h = Number(g.height ?? (g.size?.[2] != null ? g.size[2] * 2 : 0.2)) || 0.2;
+    generated = generateWedgeMeshData(w, d, h);
+  } else if (rawType === 'torus') {
+    const R = Number(g.majorRadius ?? g.radius ?? g.size?.[0] ?? 0.2) || 0.2;
+    const r = Number(g.minorRadius ?? g.tubeRadius ?? g.size?.[1] ?? 0.06) || 0.06;
+    const radSeg = Number(g.radialSegments ?? g.segments ?? 24) || 24;
+    const tubSeg = Number(g.tubularSegments ?? 16) || 16;
+    generated = generateTorusMeshData(R, r, radSeg, tubSeg);
+  } else if (rawType === 'tube' || rawType === 'pipe' || rawType === 'hollow_cylinder') {
+    const outerRadius = Number(g.outerRadius ?? g.radius ?? g.size?.[0] ?? 0.15) || 0.15;
+    const innerRadius = Number(
+      g.innerRadius ??
+      (g.wallThickness != null
+        ? Math.max(0.001, outerRadius - Number(g.wallThickness))
+        : Array.isArray(g.size) && g.size.length >= 3
+          ? g.size[1]
+          : outerRadius * 0.65)
+    ) || outerRadius * 0.65;
+    const height = Number(
+      g.height ??
+      (Array.isArray(g.size)
+        ? g.size.length >= 3
+          ? g.size[2] * 2
+          : g.size[1] != null
+            ? g.size[1] * 2
+            : 0.3
+        : 0.3)
+    ) || 0.3;
+    const segs = Number(g.segments ?? 24) || 24;
+    generated = generateTubeMeshData(Math.min(innerRadius, outerRadius * 0.98), outerRadius, height, segs);
+  } else if (rawType === 'extrude' || rawType === 'prism' || ((rawType === 'mesh' || !rawType) && hasPolygon)) {
+    const h = Number(g.height ?? (g.size?.[2] != null ? g.size[2] * 2 : 0.1)) || 0.1;
+    const centered = g.centered !== false;
+    generated = generateExtrudedPolygonMeshData(g.polygon || [[-0.1, -0.1], [0.1, -0.1], [0, 0.1]], h, centered, g.holes);
+  } else if (rawType === 'lathe' || rawType === 'revolve' || ((rawType === 'mesh' || !rawType) && hasProfile)) {
+    const segs = Number(g.segments ?? 24) || 24;
+    generated = generateLatheMeshData(g.profile || [[0.1, 0], [0.1, 0.2]], segs);
+  }
+
+  if (generated) {
+    g.type = 'mesh';
+    g.vertices = generated.vertices;
+    g.faces = generated.faces;
+    g.renderVertices = generated.renderVertices;
+  }
+
+  // Z-up / Y-up vertex array synchronisation for any mesh geom
+  if (Array.isArray(g.verticesZUp) && g.verticesZUp.length >= 9) {
+    const zUp = g.verticesZUp.map((v: unknown) => Number(v) || 0);
+    const yUp: number[] = [];
+    for (let i = 0; i + 2 < zUp.length; i += 3) {
+      yUp.push(zUp[i], zUp[i + 2], -zUp[i + 1]);
+    }
+    g.renderVertices = zUp;
+    g.vertices = yUp;
+    delete g.verticesZUp;
+    if (!g.type || g.type === 'box') g.type = 'mesh';
+  } else if (
+    Array.isArray(g.renderVertices) &&
+    g.renderVertices.length >= 9 &&
+    (!Array.isArray(g.vertices) || g.vertices.length === 0)
+  ) {
+    const zUp = g.renderVertices.map((v: unknown) => Number(v) || 0);
+    const yUp: number[] = [];
+    for (let i = 0; i + 2 < zUp.length; i += 3) {
+      yUp.push(zUp[i], zUp[i + 2], -zUp[i + 1]);
+    }
+    g.renderVertices = zUp;
+    g.vertices = yUp;
+    if (!g.type || g.type === 'box') g.type = 'mesh';
+  } else if (
+    Array.isArray(g.vertices) &&
+    g.vertices.length >= 9 &&
+    (!Array.isArray(g.renderVertices) || g.renderVertices.length === 0)
+  ) {
+    const yUp = g.vertices.map((v: unknown) => Number(v) || 0);
+    const zUp: number[] = [];
+    for (let i = 0; i + 2 < yUp.length; i += 3) {
+      zUp.push(yUp[i], -yUp[i + 2], yUp[i + 1]);
+    }
+    g.vertices = yUp;
+    g.renderVertices = zUp;
+  }
+
+  if (g.type === 'mesh' && Array.isArray(g.vertices) && g.vertices.length >= 9 && Array.isArray(g.faces) && g.faces.length >= 3) {
+    // Auto-flip closed meshes that were wound consistently inside-out
+    const m = analyzeMesh(g.vertices, g.faces);
+    if (m && m.closed && m.consistentlyWound && m.volume < 0) {
+      const flipped = [...g.faces];
+      for (let i = 0; i + 2 < flipped.length; i += 3) {
+        const tmp = flipped[i + 1];
+        flipped[i + 1] = flipped[i + 2];
+        flipped[i + 2] = tmp;
+      }
+      g.faces = flipped;
+    }
+
+    // Default dynamic = true so static & jointed meshes both render at body.pos / body.quat
+    if (g.dynamic === undefined) {
+      g.dynamic = true;
+    }
+
+    // Populate bounding half-extents in g.size when not explicitly provided
+    if (!Array.isArray(g.size) || g.size.length < 3) {
+      const rv = Array.isArray(g.renderVertices) && g.renderVertices.length >= 9 ? g.renderVertices : g.vertices;
+      let minX = Infinity, maxX = -Infinity;
+      let minY = Infinity, maxY = -Infinity;
+      let minZ = Infinity, maxZ = -Infinity;
+      for (let i = 0; i + 2 < rv.length; i += 3) {
+        const x = rv[i], y = rv[i + 1], z = rv[i + 2];
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+        if (z < minZ) minZ = z;
+        if (z > maxZ) maxZ = z;
+      }
+      if (isFinite(minX)) {
+        g.size = [
+          Math.max(0.005, (maxX - minX) / 2),
+          Math.max(0.005, (maxY - minY) / 2),
+          Math.max(0.005, (maxZ - minZ) / 2),
+        ];
+      }
+    }
+  }
+  return g;
+}
+

@@ -15,7 +15,7 @@ import { analyzeMesh } from '../utils/meshIntegrity';
 import { compileSCAD } from '../utils/openscad';
 import { getLiveCameraPose } from '../utils/liveCamera';
 import { makePresetNoteCard, updateOrCreateNotecard, type NoteCard } from '../utils/noteCards';
-import { generateCurveGeoms, DEFAULT_CURVE_POINTS, DEFAULT_CURVE_WIDTH, DEFAULT_CURVE_THICKNESS, DEFAULT_CURVE_SEGMENTS } from '../utils/geom';
+import { generateCurveGeoms, normalizeMeshGeomData, DEFAULT_CURVE_POINTS, DEFAULT_CURVE_WIDTH, DEFAULT_CURVE_THICKNESS, DEFAULT_CURVE_SEGMENTS } from '../utils/geom';
 import { compileCsgNodes } from './useCsgCompile';
 import { bodyEdges, bodyUp, whyNotRoundable } from '../utils/edgeRoundBase';
 import { maxSizeFor, sameEdge, selectEdges, type EdgeCandidate, type EdgeGroup } from '../utils/featureEdges';
@@ -28,7 +28,7 @@ import {
   paintArgsFromSize, paintResolution, toGeometrySpace,
 } from '../utils/vertexPaint';
 import { saveUserPreset, deleteUserPreset, readUserPreset, listUserPresetNames, type SavedCopilotMessage } from '../utils/userPresets';
-import { SCULPT_BASES, type SculptBaseId } from '../utils/sculptBases';
+import { SCULPT_BASES, buildSculptBase, type SculptBaseId } from '../utils/sculptBases';
 import { fromSceneGeom, toSceneGeom, splitComponents, type BrushType } from '../utils/sculptMesh';
 import { applySculptStroke, probeSurface, sculptSummary, undoSculptStroke, BRUSH_TYPES } from '../utils/sculptCommands';
 import { cutSculptOffThread } from '../utils/sculptCutClient';
@@ -81,7 +81,7 @@ import type { SceneGraph, SceneNode, SceneGeom, SceneJoint, HardwareBore, Hardwa
 import type { RawGeom, RawJoint, RawNode } from '../utils/sceneNodes';
 import { HARDWARE_KINDS, hardwareSpecOf } from '../utils/hardwareCuts';
 import {
-  boxLattice, cloneLattice, deserializeCage, orientFaces, serializeCage, toSceneGeom as latticeToSceneGeom, DEFAULT_UNIT as LATTICE_UNIT,
+  boxLattice, cloneLattice, createLattice, deserializeCage, orientFaces, serializeCage, toSceneGeom as latticeToSceneGeom, DEFAULT_UNIT as LATTICE_UNIT,
   type Axis as LatticeAxis, type Lattice,
 } from '../utils/latticeMesh';
 import type { SculptUndoEntry } from '../utils/sculptMesh';
@@ -200,11 +200,13 @@ const settleScene = async (
   // build racing against the final one below.
   store.updateScene({ nodes }, true);
   await autoCompileScad(nodes);
+  await applyDeclarativePreCsgFeatures(nodes);
   // Boolean bodies compile through the same OpenSCAD pool, and just as
   // asynchronously — a caller that got ok:true before they finished would be
   // told a scene built when its geometry didn't exist yet. skipFinalRecompile:
   // the single build below covers it.
   await compileCsgNodes(true);
+  await applyDeclarativePostCsgFeatures(nodes);
   // This is now the ONLY recompile triggered by this load, so there's nothing
   // left to race against. forceReset is false so recompile() preserves qpos/qvel
   // when the edit didn't change the DOF count (e.g. tweaking a color or adding a
@@ -628,9 +630,149 @@ const toRenderVertices = (vertices: number[]): number[] => {
   return out;
 };
 
-const fillGeomDefaults = (g: RawGeom, bodyName: string, idx: number, bodyIsJointed: boolean): SceneGeom => {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export interface LatticeOpSpec extends Record<string, any> {
+  op?: string;
+  type?: string;
+  kind?: string;
+}
+
+export function runLatticeOps(
+  lattice: Lattice,
+  ops: LatticeOpSpec[],
+  initialSubdiv = 0,
+  initialThicknessMm = 0,
+): { subdiv: number; thicknessMm: number; results: Record<string, unknown>[] } {
+  let subdiv = Math.max(0, Math.min(2, Math.round(Number(initialSubdiv) || 0)));
+  let thicknessMm = Math.max(0, Number(initialThicknessMm) || 0);
+  const results: Record<string, unknown>[] = [];
+  for (const item of ops || []) {
+    if (!item || typeof item !== 'object') continue;
+    const opName = String(item.op ?? item.type ?? item.kind ?? '').toLowerCase();
+    switch (opName) {
+      case 'extrude': {
+        const d = Number(item.distanceMm ?? item.amountMm ?? 10);
+        results.push({ op: 'extrude', ...extrudeMm(lattice, item.face, d, item.axis as LatticeAxis | undefined, item.mirror as LatticeAxis | undefined) });
+        break;
+      }
+      case 'inset': {
+        const amt = Number(item.amountMm ?? item.distanceMm ?? 5);
+        results.push({ op: 'inset', ...insetFaceMm(lattice, item.face, amt, item.mirror as LatticeAxis | undefined) });
+        break;
+      }
+      case 'bevel': {
+        const amt = Number(item.amountMm ?? item.distanceMm ?? 5);
+        results.push({ op: 'bevel', ...bevelFaceMm(lattice, item.face, amt, item.mirror as LatticeAxis | undefined) });
+        break;
+      }
+      case 'bevel_edges':
+      case 'beveledges': {
+        const rad = Number(item.radiusMm ?? item.amountMm ?? item.sizeMm ?? 3);
+        const mode = item.mode === 'fillet' || item.mode === 'round' ? 'fillet' : 'chamfer';
+        results.push({ op: 'bevel_edges', ...bevelEdgesMm(lattice, item.edges, rad, mode, item.mirror as LatticeAxis | undefined, item.loop === true) });
+        break;
+      }
+      case 'faces':
+      case 'add_faces':
+      case 'addfaces': {
+        results.push({ op: 'faces', ...addFacesMm(lattice, item.faces, item.mirror as LatticeAxis | undefined) });
+        break;
+      }
+      case 'delete_faces':
+      case 'deletefaces':
+      case 'remove_faces': {
+        results.push({ op: 'delete_faces', ...removeFacesMm(lattice, item.faces, item.mirror as LatticeAxis | undefined) });
+        break;
+      }
+      case 'sharpen': {
+        results.push({ op: 'sharpen', ...sharpenEdgesMm(lattice, item.edges, item.sharp !== false, item.mirror as LatticeAxis | undefined, item.loop === true) });
+        break;
+      }
+      case 'circle':
+      case 'ring': {
+        results.push({
+          op: 'circle',
+          ...addRingMm(
+            lattice,
+            item.centre ?? item.center,
+            Number(item.diameterMm ?? 10),
+            (item.axis as LatticeAxis) || 'z',
+            typeof item.sides === 'number' ? item.sides : 0,
+            item.mirror as LatticeAxis | undefined,
+          ),
+        });
+        break;
+      }
+      case 'revolve': {
+        results.push({
+          op: 'revolve',
+          ...revolveMm(
+            lattice,
+            item.profile,
+            (item.axis as LatticeAxis) || 'z',
+            typeof item.degrees === 'number' ? item.degrees : 360,
+            {
+              throughMm: Array.isArray(item.throughMm) ? item.throughMm : undefined,
+              segments: typeof item.segments === 'number' ? item.segments : 0,
+              closed: item.closed === true,
+            },
+          ),
+        });
+        break;
+      }
+      case 'bridge': {
+        results.push({ op: 'bridge', ...bridgeFacesMm(lattice, item.faceA, item.faceB) });
+        break;
+      }
+      case 'dimension': {
+        const which = (item.axis === 'x' || item.axis === 'y' || item.axis === 'z') ? item.axis : 'x';
+        const how = item.mode === 'position' ? 'position' : 'size';
+        results.push({ op: 'dimension', ...dimensionSelectionMm(lattice, item.corners, which, how, Number(item.valueMm ?? 10)) });
+        break;
+      }
+      case 'orient': {
+        results.push({ op: 'orient', flipped: orientFaces(lattice) });
+        break;
+      }
+      case 'smooth': {
+        subdiv = Math.max(0, Math.min(2, Math.round(Number(item.level ?? item.subdiv ?? 1))));
+        results.push({ op: 'smooth', level: subdiv });
+        break;
+      }
+      case 'wall': {
+        thicknessMm = Math.max(0, Number(item.thicknessMm ?? 0));
+        results.push({ op: 'wall', thicknessMm });
+        break;
+      }
+      default:
+        throw new Error(
+          `Unknown lattice op '${opName}'. Valid ops: extrude, inset, bevel, bevel_edges, faces, delete_faces, sharpen, circle, revolve, bridge, dimension, orient, smooth, wall`
+        );
+    }
+  }
+  return { subdiv, thicknessMm, results };
+}
+
+interface PendingDeclarativeOps {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  sculptCuts?: Record<string, any>[];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  cuts?: Record<string, any>[];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  roundEdges?: Record<string, any>[];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  patterns?: Record<string, any>[];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  paint?: Record<string, any>[];
+}
+
+const pendingDeclarativeOps = new Map<string, PendingDeclarativeOps>();
+
+export const fillGeomDefaults = (rawG: RawGeom, bodyName: string, idx: number, bodyIsJointed: boolean): SceneGeom => {
+  const g: RawGeom = { ...rawG };
+  normalizeMeshGeomData(g);
   const isMesh = (g.type ?? 'box') === 'mesh';
-  const dynamic = g.dynamic !== undefined ? g.dynamic : (isMesh && bodyIsJointed ? true : undefined);
+  const dynamic = g.dynamic !== undefined ? g.dynamic : (isMesh ? true : (bodyIsJointed ? undefined : undefined));
   const renderVertices = g.renderVertices !== undefined
     ? g.renderVertices
     : (dynamic && Array.isArray(g.vertices) ? toRenderVertices(g.vertices) : undefined);
@@ -683,7 +825,7 @@ const fillJointDefaults = (j: RawJoint, bodyName: string, idx: number): SceneJoi
  * anything above it has a joint, which decides whether its meshes are drawn
  * from the body's transform.
  */
-const fillBodyDefaults = (b: RawNode, parentMoves: boolean | null = null): SceneNode => {
+export const fillBodyDefaults = (b: RawNode, parentMoves: boolean | null = null): SceneNode => {
   const name = b.name ?? b.id ?? `body_${Math.random().toString(36).slice(2, 7)}`;
   const id   = b.id   ?? name;
   const nested = parentMoves !== null;
@@ -718,21 +860,236 @@ const fillBodyDefaults = (b: RawNode, parentMoves: boolean | null = null): Scene
   const resolvedJoints = (b.joints ?? defaultJoints)
     .map((j: RawJoint, i: number) => fillJointDefaults(j, name, i));
   const moves = resolvedJoints.length > 0 || parentMoves === true;
+
+  // Declarative lattice spec on body (`lattice: { sizeMm?, empty?, subdiv?, thicknessMm?, ops?: [...] }`)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const latSpec = (b as any).lattice as {
+    sizeMm?: number;
+    empty?: boolean;
+    subdiv?: number;
+    thicknessMm?: number;
+    ops?: LatticeOpSpec[];
+  } | undefined;
+  let latticeFields: Partial<SceneNode> | null = null;
+  let latticeGeoms: RawGeom[] | null = null;
+  if (latSpec && typeof latSpec === 'object') {
+    const firstOp = Array.isArray(latSpec.ops) && latSpec.ops.length > 0
+      ? String(latSpec.ops[0]?.op ?? latSpec.ops[0]?.type ?? '').toLowerCase()
+      : '';
+    const startEmpty = latSpec.empty === true || latSpec.sizeMm === 0 || (latSpec.sizeMm === undefined && firstOp === 'revolve');
+    const size = typeof latSpec.sizeMm === 'number' && latSpec.sizeMm > 0 ? latSpec.sizeMm : 40;
+    const halfSteps = Math.max(1, Math.round((size / 2) / (LATTICE_UNIT * 1000)));
+    const lat = startEmpty ? createLattice(LATTICE_UNIT) : boxLattice(LATTICE_UNIT, halfSteps);
+    const { subdiv, thicknessMm } = runLatticeOps(
+      lat,
+      Array.isArray(latSpec.ops) ? latSpec.ops : [],
+      Number(latSpec.subdiv ?? b.latticeSubdiv ?? 0),
+      Number(latSpec.thicknessMm ?? (b.latticeThickness ? b.latticeThickness * 1000 : 0)),
+    );
+    const cage = serializeCage(lat);
+    const { vertices, renderVertices, faces, origin } = latticeToSceneGeom(deserializeCage(cage), subdiv, thicknessMm / 1000);
+    latticeFields = {
+      isLattice: true,
+      latticeCage: cage,
+      latticeSubdiv: subdiv,
+      ...(thicknessMm > 0 ? { latticeThickness: thicknessMm / 1000 } : {}),
+      latticeVersion: 1,
+      latticeOrigin: origin,
+    };
+    latticeGeoms = [{
+      name: `${id}_mesh`,
+      type: 'mesh',
+      size: [1],
+      rgba: b.rgba ?? [0.55, 0.68, 0.85, 1],
+      mass: typeof (b as RawGeom).mass === 'number' ? (b as RawGeom).mass : 1,
+      condim: 3,
+      dynamic: true,
+      latticeGeom: true,
+      vertices,
+      faces,
+      renderVertices,
+    }];
+  }
+
+  // Declarative sculpt spec on body (`sculpt: { base?: SculptBaseId, strokes?: [...], cuts?: [...] }`)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const sculptSpec = (b as any).sculpt as {
+    base?: SculptBaseId;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    strokes?: Record<string, any>[];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    cuts?: Record<string, any>[];
+  } | undefined;
+  let sculptFields: Partial<SceneNode> | null = null;
+  let sculptGeoms: RawGeom[] | null = null;
+  if (sculptSpec && typeof sculptSpec === 'object') {
+    const baseId = (sculptSpec.base ?? b.sculptBase ?? 'sphere') as SculptBaseId;
+    if (!SCULPT_BASES.some((sb) => sb.id === baseId)) {
+      throw new Error(`Unknown sculpt base '${baseId}'. Available: ${SCULPT_BASES.map((sb) => sb.id).join(', ')}`);
+    }
+    const mesh = buildSculptBase(baseId);
+    if (Array.isArray(sculptSpec.strokes)) {
+      for (const s of sculptSpec.strokes) {
+        if (!s || typeof s !== 'object') continue;
+        const pts = pointList(s.at);
+        if (!pts.length || pts.some((p: unknown) => !Array.isArray(p) || p.length < 3)) {
+          throw new Error("sculpt stroke 'at' must be [x, y, z] or a list of them, in the body's own frame (metres)");
+        }
+        applySculptStroke(mesh, {
+          brush: s.brush,
+          at: pts,
+          radius: s.radius,
+          strength: s.strength,
+          invert: s.invert,
+          symmetryX: s.symmetryX,
+          symmetry: s.symmetry,
+          detail: s.detail,
+          dynamicTopology: s.dynamicTopology,
+          delta: s.delta,
+        });
+      }
+    }
+    const { vertices, renderVertices, faces } = toSceneGeom(mesh);
+    sculptFields = {
+      isSculpt: true,
+      sculptBase: baseId,
+      sculptEdited: Boolean(sculptSpec.strokes?.length || sculptSpec.cuts?.length),
+      sculptVersion: 1,
+    };
+    sculptGeoms = [{
+      name: `${id}_sculpt`,
+      type: 'mesh',
+      size: [0.12, 0.12, 0.12],
+      rgba: b.rgba ?? [0.82, 0.72, 0.62, 1],
+      mass: typeof (b as RawGeom).mass === 'number' ? (b as RawGeom).mass : 1,
+      condim: 3,
+      dynamic: true,
+      vertices,
+      faces,
+      renderVertices,
+    }];
+  }
+
+  // Record declarative post-body-creation ops (cuts, roundEdges, patterns, paint, sculpt.cuts)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const bAny = b as Record<string, any>;
+  const rawCuts = Array.isArray(bAny.cuts) ? bAny.cuts : undefined;
+  const rawRoundEdges = bAny.roundEdges !== undefined ? bAny.roundEdges : bAny.roundings;
+  const normRoundEdges = Array.isArray(rawRoundEdges)
+    ? rawRoundEdges
+    : rawRoundEdges && typeof rawRoundEdges === 'object'
+      ? [rawRoundEdges]
+      : undefined;
+  const rawPatterns = Array.isArray(bAny.patterns)
+    ? bAny.patterns
+    : bAny.pattern && typeof bAny.pattern === 'object'
+      ? [bAny.pattern]
+      : undefined;
+  const rawPaint = Array.isArray(bAny.paint)
+    ? bAny.paint
+    : bAny.paint && typeof bAny.paint === 'object'
+      ? [bAny.paint]
+      : undefined;
+  const rawSculptCuts = Array.isArray(sculptSpec?.cuts) && sculptSpec!.cuts.length > 0
+    ? sculptSpec!.cuts
+    : undefined;
+
+  if (rawCuts || normRoundEdges || rawPatterns || rawPaint || rawSculptCuts) {
+    pendingDeclarativeOps.set(id, {
+      ...(rawSculptCuts ? { sculptCuts: rawSculptCuts } : {}),
+      ...(rawCuts ? { cuts: rawCuts } : {}),
+      ...(normRoundEdges ? { roundEdges: normRoundEdges } : {}),
+      ...(rawPatterns ? { patterns: rawPatterns } : {}),
+      ...(rawPaint ? { paint: rawPaint } : {}),
+    });
+  }
+
+  // Synthesize single geom when body-level geom properties are supplied without `geoms`
+  const synthesizedSingleGeom: RawGeom[] = b.scad !== undefined
+    ? [{ type: 'mesh', size: [1], dynamic: true, ...(b.rgba ? { rgba: b.rgba } : {}) }]
+    : [{
+        type: (bAny.type && bAny.type !== 'body') ? bAny.type : 'box',
+        ...(bAny.size !== undefined ? { size: bAny.size } : {}),
+        ...(b.rgba !== undefined ? { rgba: b.rgba } : {}),
+        ...(bAny.fromto !== undefined ? { fromto: bAny.fromto } : {}),
+        ...(bAny.mass !== undefined ? { mass: bAny.mass } : {}),
+        ...(bAny.density !== undefined ? { density: bAny.density } : {}),
+        ...(bAny.friction !== undefined ? { friction: bAny.friction } : {}),
+        ...(bAny.contype !== undefined ? { contype: bAny.contype } : {}),
+        ...(bAny.conaffinity !== undefined ? { conaffinity: bAny.conaffinity } : {}),
+        ...(bAny.condim !== undefined ? { condim: bAny.condim } : {}),
+        ...(bAny.solref !== undefined ? { solref: bAny.solref } : {}),
+        ...(bAny.solimp !== undefined ? { solimp: bAny.solimp } : {}),
+        ...(bAny.radius !== undefined ? { radius: bAny.radius } : {}),
+        ...(bAny.height !== undefined ? { height: bAny.height } : {}),
+        ...(bAny.width !== undefined ? { width: bAny.width } : {}),
+        ...(bAny.depth !== undefined ? { depth: bAny.depth } : {}),
+        ...(bAny.majorRadius !== undefined ? { majorRadius: bAny.majorRadius } : {}),
+        ...(bAny.minorRadius !== undefined ? { minorRadius: bAny.minorRadius } : {}),
+        ...(bAny.tubeRadius !== undefined ? { tubeRadius: bAny.tubeRadius } : {}),
+        ...(bAny.innerRadius !== undefined ? { innerRadius: bAny.innerRadius } : {}),
+        ...(bAny.outerRadius !== undefined ? { outerRadius: bAny.outerRadius } : {}),
+        ...(bAny.wallThickness !== undefined ? { wallThickness: bAny.wallThickness } : {}),
+        ...(bAny.segments !== undefined ? { segments: bAny.segments } : {}),
+        ...(bAny.radialSegments !== undefined ? { radialSegments: bAny.radialSegments } : {}),
+        ...(bAny.tubularSegments !== undefined ? { tubularSegments: bAny.tubularSegments } : {}),
+        ...(bAny.polygon !== undefined ? { polygon: bAny.polygon } : {}),
+        ...(bAny.holes !== undefined ? { holes: bAny.holes } : {}),
+        ...(bAny.centered !== undefined ? { centered: bAny.centered } : {}),
+        ...(bAny.profile !== undefined ? { profile: bAny.profile } : {}),
+        ...(bAny.vertices !== undefined ? { vertices: bAny.vertices } : {}),
+        ...(bAny.verticesZUp !== undefined ? { verticesZUp: bAny.verticesZUp } : {}),
+        ...(bAny.renderVertices !== undefined ? { renderVertices: bAny.renderVertices } : {}),
+        ...(bAny.faces !== undefined ? { faces: bAny.faces } : {}),
+        ...(bAny.thread !== undefined ? { thread: bAny.thread } : {}),
+      }];
+
   // As for geoms, the caller's fields are kept (shatter settings, sculpt
-  // flags...) - all but the "does not move" flags above, which are not
-  // SceneNode fields and have been turned into the joints below.
-  const rest = { ...b } as RawNode & { dynamic?: boolean; static?: boolean; fixed?: boolean };
-  delete rest.dynamic; delete rest.static; delete rest.fixed;
+  // flags...) - all but the transient declarative/shorthand fields above.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const rest = { ...b } as Record<string, any>;
+  delete rest.dynamic;
+  delete rest.static;
+  delete rest.fixed;
+  delete rest.lattice;
+  delete rest.sculpt;
+  delete rest.cuts;
+  delete rest.roundEdges;
+  delete rest.roundings;
+  delete rest.patterns;
+  delete rest.pattern;
+  delete rest.paint;
+  delete rest.polygon;
+  delete rest.holes;
+  delete rest.centered;
+  delete rest.profile;
+  delete rest.vertices;
+  delete rest.verticesZUp;
+  delete rest.renderVertices;
+  delete rest.faces;
+  delete rest.majorRadius;
+  delete rest.minorRadius;
+  delete rest.tubeRadius;
+  delete rest.innerRadius;
+  delete rest.outerRadius;
+  delete rest.wallThickness;
+  delete rest.radialSegments;
+  delete rest.tubularSegments;
+
+  const chosenGeoms = curveGeoms ?? latticeGeoms ?? sculptGeoms ?? b.geoms ?? synthesizedSingleGeom;
+  const resolvedGeoms = chosenGeoms.map((g: RawGeom, i: number) => fillGeomDefaults(g, name, i, moves));
+
   return {
     ...(rest as SceneNode),
+    ...(latticeFields ?? {}),
+    ...(sculptFields ?? {}),
     id,
     name,
     type:     'body',
     pos:      b.pos     ?? [0, 0, 1],
     ...(b.quat  !== undefined ? { quat: b.quat }   : {}),
     ...(b.euler !== undefined ? { euler: b.euler } : {}),
-    geoms:    (curveGeoms ?? b.geoms ?? (b.scad !== undefined ? [{ type: 'mesh', size: [1], dynamic: true }] : [{ type: 'box', size: [0.25, 0.25, 0.25] }]))
-                .map((g: RawGeom, i: number) => fillGeomDefaults(g, name, i, moves)),
+    geoms:    resolvedGeoms,
     joints:   resolvedJoints,
     children: (b.children ?? []).map((c) => fillBodyDefaults(c, moves)),
     ...(b.coupleTargetId  !== undefined ? { coupleTargetId: b.coupleTargetId }   : {}),
@@ -758,7 +1115,7 @@ const fillBodyDefaults = (b: RawNode, parentMoves: boolean | null = null): Scene
     // meaningless without it and silently rendering it as a solid is worse.
     // Rounded and bevelled edges are a boolean too (utils/edgeRound.ts), and
     // so is a threaded rod, which MuJoCo can only draw as a plain cylinder.
-    ...((b.csgEnabled === true || (b.geoms || []).some((g: RawGeom) => g.csg === 'difference' || g.csg === 'intersection' ||
+    ...((b.csgEnabled === true || resolvedGeoms.some((g: SceneGeom) => g.csg === 'difference' || g.csg === 'intersection' ||
       (g.type === 'cylinder' && (g.thread?.pitch ?? 0) > 0)) ||
       (Array.isArray(b.edgeRounds) && b.edgeRounds.length > 0))
       ? { csgEnabled: true } : {}),
@@ -784,6 +1141,358 @@ const fillBodyDefaults = (b: RawNode, parentMoves: boolean | null = null): Scene
     } : {}),
   };
 };
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function applySingleCutToBody(targetId: string, spec: Record<string, any>): Record<string, any> {
+  const store = useStore.getState();
+  const { shape, at, normal, diameterMm, widthMm, lengthMm, depthMm, threadPitchMm, threadLeft, threadFitMm, size, bore, fitMm } = spec;
+  const node = findNodeInScene(store.sceneGraph.nodes, targetId);
+  if (!node) return { ok: false, error: `No object with id '${targetId}'` };
+  const spotIn = Array.isArray(at) && at.length >= 3
+    ? {
+      at: [at[0] / 1000, at[1] / 1000, at[2] / 1000],
+      normal: Array.isArray(normal) && normal.length >= 3 ? [...normal] : [0, 0, 1],
+    }
+    : undefined;
+
+  if (typeof shape === 'string' && shape in HARDWARE_KINDS) {
+    const hwKind = shape as HardwareCutKind;
+    const group = store.addHardwareCut(targetId, hwKind, spotIn);
+    if (!group) return { ok: false, error: 'That body has no solid shape to cut into' };
+    if (size !== undefined || bore !== undefined || fitMm !== undefined) {
+      useStore.getState().setHardwareCut(targetId, group, {
+        ...(size !== undefined ? { size: String(size) } : {}),
+        ...(bore !== undefined ? { bore: bore as HardwareBore } : {}),
+        ...(typeof fitMm === 'number' ? { fitMm } : {}),
+      });
+    }
+    const after = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId);
+    const hwSpec = hardwareSpecOf(after?.geoms ?? [], group);
+    const info = HARDWARE_KINDS[hwKind];
+    if (size !== undefined && hwSpec && hwSpec.size !== String(size)) {
+      return { ok: false, error: `${info.label} comes in ${info.sizes.join(', ')}; got '${size}'` };
+    }
+    return {
+      ok: true, id: targetId, group, shape: hwKind, size: hwSpec?.size,
+      ...(hwSpec?.bore ? { bore: hwSpec.bore } : {}),
+      fitMm: hwSpec?.fitMm ?? 0,
+      atMm: (hwSpec?.at ?? []).map((v: number) => Math.round(v * 1000 * 1000) / 1000),
+      normal: hwSpec?.normal,
+      pieces: (after?.geoms ?? []).filter((g) => g.hardware?.group === group).map((g) => g.hardware!.part),
+    };
+  }
+
+  const kind = shape === 'slot' || shape === 'box' ? 'box'
+    : shape === 'dish' || shape === 'sphere' ? 'sphere' : 'cylinder';
+  const index = store.addBodyCut(targetId, kind, spotIn);
+  if (index < 0) return { ok: false, error: 'That body has no solid shape to cut into' };
+
+  if (kind === 'box') {
+    const wide = typeof widthMm === 'number' ? widthMm / 2000 : undefined;
+    const long = typeof lengthMm === 'number' ? lengthMm / 2000 : undefined;
+    if (wide !== undefined || long !== undefined) {
+      const now = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId)?.geoms?.[index];
+      useStore.getState().setCutSection(targetId, index, [
+        wide ?? now?.size?.[0] ?? 0.005,
+        long ?? now?.size?.[1] ?? 0.005,
+      ]);
+    }
+  } else if (typeof diameterMm === 'number') {
+    useStore.getState().setCutSection(targetId, index, [diameterMm / 2000]);
+  }
+  if (typeof depthMm === 'number') useStore.getState().setCutDepth(targetId, index, depthMm);
+  if (typeof threadPitchMm === 'number' && kind === 'cylinder') {
+    useStore.getState().setGeomThread(targetId, index, {
+      pitchMm: threadPitchMm,
+      left: threadLeft === true,
+      fitMm: typeof threadFitMm === 'number' ? threadFitMm : 0,
+    });
+  }
+
+  const cut = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId)?.geoms?.[index];
+  return {
+    ok: true,
+    id: targetId,
+    geomIndex: index,
+    name: cut?.name,
+    shape: kind,
+    atMm: (cut?.cutAt ?? []).map((v: number) => Math.round(v * 1000 * 1000) / 1000),
+    normal: cut?.cutNormal,
+    ...(cut?.thread?.pitch ? {
+      threadPitchMm: Math.round(cut.thread.pitch * 1000 * 1000) / 1000,
+      ...(cut.thread.left ? { threadLeft: true } : {}),
+      ...(cut.thread.fit ? { threadFitMm: Math.round(cut.thread.fit * 1000 * 1000) / 1000 } : {}),
+    } : {}),
+    depthMm: cut?.cutDepth ? Math.round(cut.cutDepth * 1000 * 1000) / 1000 : 0,
+    through: !(cut?.cutDepth && cut.cutDepth > 0),
+  };
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export async function applyRoundEdgesToBody(targetId: string, specs: Record<string, any>[], compileNow = true): Promise<Record<string, any>> {
+  const store = useStore.getState();
+  const node = findNodeInScene(store.sceneGraph.nodes, targetId);
+  const why = whyNotRoundable(node);
+  if (why) return { ok: false, error: node ? why : `No object with id '${targetId}'` };
+  const found = await bodyEdges(node!, bodyUp(store.sceneGraph.nodes, targetId));
+  let totalChanged = 0;
+
+  for (const spec of specs) {
+    const { edges, sizeMm, mode, remove } = spec;
+    const which = Array.isArray(edges) ? edges.map(Number)
+      : edges === undefined ? 'all'
+      : ['all', 'top', 'bottom', 'vertical', 'inside'].includes(String(edges)) ? String(edges) as EdgeGroup : null;
+    if (which === null) return { ok: false, error: "edges must be 'all', 'top', 'bottom', 'vertical', 'inside' or a list of ids from physics_get_edges" };
+    const { picked, unknown } = selectEdges(found.edges, which);
+    if (unknown.length) return { ok: false, error: `No edge with id ${unknown.join(', ')} — physics_get_edges lists them` };
+    if (picked.length === 0) return { ok: false, error: `This part has no ${Array.isArray(which) ? '' : which + ' '}edges that can be rounded` };
+
+    if (remove === true) {
+      useStore.getState().unroundEdges(targetId, picked.map((e) => e.edge));
+    } else {
+      const kind: 'fillet' | 'chamfer' = mode === 'bevel' || mode === 'chamfer' ? 'chamfer' : 'fillet';
+      if (typeof sizeMm !== 'number' || !(sizeMm > 0)) return { ok: false, error: 'sizeMm must be a positive number of millimetres' };
+      const most = maxSizeFor(picked, kind);
+      if (sizeMm / 1000 > most + 1e-9) {
+        return { ok: false, error: `${sizeMm} mm is too big for ${picked.length === 1 ? 'this edge' : 'these edges'} — ${Math.floor(most * 1e5) / 100} mm is the most that fits` };
+      }
+      useStore.getState().roundEdges(targetId, { mode: kind, size: sizeMm / 1000, edges: picked.map((e) => e.edge) });
+    }
+    totalChanged += picked.length;
+  }
+
+  if (compileNow) {
+    await compileCsgNodes(true);
+    await useStore.getState().recompile(useStore.getState().sceneGraph, undefined, false, true);
+  }
+  const after = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId);
+  if (after?.csgError) return { ok: false, error: `Rounding failed: ${after.csgError}` };
+  return {
+    ok: true,
+    id: targetId,
+    edgesChanged: totalChanged,
+    roundings: (after?.edgeRounds ?? []).map((f, i) => ({
+      index: i, mode: f.mode === 'fillet' ? 'round' : 'bevel', sizeMm: Math.round(f.size * 1e5) / 100, edges: f.edges.length,
+    })),
+    ...(after?.csgVolume !== undefined ? { volumeMm3: Math.round(after.csgVolume * 1e9 * 10) / 10 } : {}),
+  };
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export async function applySinglePatternToBody(targetId: string, m: Record<string, any>): Promise<Record<string, any>> {
+  const store = useStore.getState();
+  const node = findNodeInScene(store.sceneGraph.nodes, targetId);
+  if (!node) throw new Error(`No object with id '${targetId}'`);
+  const at = pointList(m.at)[0];
+  if (!at) throw new Error("Missing at: a point [x, y, z] on the face, in the body's own frame in millimetres.");
+  const pick = patternPickAt(node, at.map((v) => v / 1000), Array.isArray(m.normal) ? m.normal : undefined);
+  if (!pick) {
+    throw new Error(`No surface of '${targetId}' within 10 mm of [${at.join(', ')}] mm. Points are in the body's own frame in millimetres; physics_get_object gives the shapes, and normal says which way the face looks.`);
+  }
+  const geom = (node.geoms || []).find((g) => g.name === pick.geomName);
+  if (!geom) throw new Error(`The face picked belongs to '${pick.geomName}', which is not on the body.`);
+  const existing = geom.textures ?? [];
+  const describe = (t: SurfaceTexture) =>
+    `${patternById(t.pattern)?.label ?? t.pattern}, ${t.depthM > 0 ? 'embossed' : 'engraved'} ${(Math.abs(t.depthM) * 1000).toFixed(1)} mm`;
+
+  if (m.remove) {
+    if (pick.index === undefined) return { ok: false, error: 'There is no pattern on the face at that point.' };
+    const list = existing.filter((_, i) => i !== pick.index);
+    if (!m.preview) useStore.getState().setGeomTextures(node.id, geom.name, list.length ? list : undefined);
+    return { ok: true, removed: describe(existing[pick.index]), geomName: geom.name, remaining: list.length };
+  }
+
+  const prev = pick.index !== undefined ? existing[pick.index] : undefined;
+  const faceable = SURFACE_PATTERNS.filter((p) => !p.throughCut);
+  const known = () =>
+    faceable.map((p) => `${p.id} (${p.fields.map((f) => f.key).join(', ')})`).join('; ');
+  const patternId = m.pattern ?? prev?.pattern;
+  if (!patternId) throw new Error(`Missing pattern. One of, with its options: ${known()}.`);
+  const spec = patternById(patternId);
+  if (!spec || spec.throughCut) {
+    throw new Error(`'${patternId}' is not a pattern that goes on a face. One of, with its options: ${known()}.`);
+  }
+  const projections: TextureProjection[] = ['auto', 'planar', 'cylindrical', 'unwrap'];
+  if (m.projection !== undefined && !projections.includes(m.projection as TextureProjection)) {
+    throw new Error(`projection is one of ${projections.join(', ')}.`);
+  }
+  const optionKeys = new Set(spec.fields.map((f) => f.key));
+  const unknown = Object.keys(m.options ?? {}).filter((k) => !optionKeys.has(k));
+  const depthMm = m.depthMm ?? (prev ? Math.abs(prev.depthM) * 1000 : 1.5);
+  if (!(depthMm > 0)) throw new Error('depthMm must be more than 0.');
+  const emboss = m.emboss ?? (prev ? prev.depthM > 0 : false);
+  const projection = (m.projection ?? prev?.projection) as TextureProjection | undefined;
+  const texture: SurfaceTexture = {
+    pattern: spec.id,
+    options: { ...spec.defaults, ...(prev?.pattern === spec.id ? prev.options : {}), ...(m.options ?? {}) },
+    depthM: ((emboss ? 1 : -1) * depthMm) / 1000,
+    borderM: m.borderMm !== undefined ? Math.max(0, m.borderMm) / 1000 : prev?.borderM ?? DEFAULT_TEXTURE_BORDER_M,
+    cellM: m.cellMm !== undefined ? Math.max(0.05, m.cellMm) / 1000 : prev?.cellM ?? DEFAULT_TEXTURE_CELL_M,
+    seedAt: prev?.seedAt ?? pick.seedAt,
+    seedNormal: prev?.seedNormal ?? pick.seedNormal,
+    maxTiltDeg: m.stopAtDeg ?? prev?.maxTiltDeg,
+    projection: projection === 'auto' ? undefined : projection,
+    twistDeg: m.twistDeg ?? prev?.twistDeg,
+    scale: m.scale ?? prev?.scale,
+  };
+  const index = pick.index ?? existing.length;
+  const list = [...existing];
+  list[index] = texture;
+  const surface = await requestTexturedSurface({ ...geom, textures: list }, geomHalfLen(geom));
+  const region = surface?.regions.find((r) => r.index === index);
+  const warnings = [
+    ...(surface?.warnings ?? [])
+      .filter((w) => w.startsWith(`Pattern ${index + 1}:`) || !w.startsWith('Pattern '))
+      .map((w) => w.replace(/^Pattern \d+: /, '')),
+    ...(unknown.length ? [`${spec.label} has no option ${unknown.join(', ')}; it takes ${[...optionKeys].join(', ')}.`] : []),
+  ];
+  if (!region?.applied) {
+    return { ok: false, error: region?.reason ?? 'The pattern could not be laid on that face.', warnings };
+  }
+  if (!m.preview) useStore.getState().setGeomTextures(node.id, geom.name, list);
+  const mm = (v: number) => Math.round(v * 10000) / 10;
+  return {
+    ok: true,
+    preview: !!m.preview,
+    edited: pick.index !== undefined,
+    index,
+    geomName: geom.name,
+    pattern: describe({ ...texture, depthM: region.depthM }),
+    options: texture.options,
+    faceMm: [mm(region.extentM[0]), mm(region.extentM[1])],
+    areaMm2: Math.round(region.areaM2 * 1e6),
+    projection: region.projection,
+    stretchPercent: region.stretch !== undefined && Number.isFinite(region.stretch) ? Math.round(region.stretch * 100) : null,
+    ...(region.wrap ? { wrap: region.wrap } : {}),
+    ...(region.seam ? { seam: true } : {}),
+    ...(region.capped ? { capped: true } : {}),
+    depthMm: mm(Math.abs(region.depthM)),
+    triangles: region.triangles,
+    warnings,
+  };
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function applyPaintStrokeToBody(targetId: string, m: Record<string, any>): Record<string, any> {
+  const store = useStore.getState();
+  const { geomName, at, radius, rgba, flow, erase } = m;
+  const node = findNodeInScene(store.sceneGraph.nodes, targetId);
+  if (!node) throw new Error(`No object with id '${targetId}'`);
+
+  const geom = geomName
+    ? (node.geoms || []).find((g: SceneGeom) => g.name === geomName)
+    : (node.csgEnabled
+        ? (node.geoms || []).find((g: SceneGeom) => g.csgDerived === 'visual' && isPaintable(g.type, !!node.isWedge)) ??
+          (node.geoms || []).find((g: SceneGeom) => isPaintable(g.type, !!node.isWedge))
+        : (node.geoms || []).find((g: SceneGeom) => isPaintable(g.type, !!node.isWedge)));
+  if (!geom) throw new Error(geomName ? `No geom named '${geomName}' on '${targetId}'` : `Nothing paintable on '${targetId}'`);
+  if (!isPaintable(geom.type, !!node.isWedge)) {
+    throw new Error(`A '${geom.type}' geom cannot hold paint — paintable types are box, sphere, ellipsoid, cylinder, capsule and mesh`);
+  }
+  if (!Array.isArray(rgba) || rgba.length < 3) throw new Error('rgba must be [r, g, b], each 0..1');
+
+  const points: number[][] = pointList(at);
+  if (!points.length || points.some((p: unknown) => !Array.isArray(p) || p.length < 3)) {
+    throw new Error("at must be [x, y, z] or a list of them, in the geom's own frame (metres)");
+  }
+  const brush = typeof radius === 'number' ? radius : 0.008;
+
+  const args = paintArgsFromSize(geom.type, geom.size || []);
+  const res = geom.paint?.res?.length ? geom.paint.res : paintResolution(geom.type, args);
+  const built = geom.type === 'mesh' ? null : buildPaintGeometry(geom.type, args, res);
+  const positions: ArrayLike<number> | undefined = geom.type === 'mesh'
+    ? (geom.dynamic ? geom.renderVertices : geom.vertices)
+    : (built?.getAttribute('position')?.array as Float32Array | undefined);
+  if (!positions?.length) throw new Error('That geom has no surface to paint');
+
+  const canvas = canvasFromLayer(geom.paint, positions.length / 3, res);
+  let landed = 0;
+  for (const point of points) {
+    const [x, y, z] = toGeometrySpace(geom.type, point);
+    if (applyDab(canvas, positions, {
+      x, y, z,
+      radius: brush,
+      color: rgba,
+      flow: typeof flow === 'number' ? flow : 1,
+      erase: !!erase,
+    })) landed++;
+  }
+  built?.dispose();
+
+  if (!landed) {
+    throw new Error(`No vertices within ${brush} m of any of those points — the point has to be on the surface, in the geom's own frame`);
+  }
+  useStore.getState().setGeomPaint(targetId, geom.name, layerFromCanvas(canvas));
+  return { ok: true, geomName: geom.name, dabsLanded: landed, dabsRequested: points.length };
+}
+
+async function applyDeclarativePreCsgFeatures(nodes: SceneNode[]): Promise<void> {
+  const walk = async (list: SceneNode[]) => {
+    for (const n of list || []) {
+      const pending = pendingDeclarativeOps.get(n.id);
+      if (pending) {
+        if (pending.sculptCuts && pending.sculptCuts.length > 0) {
+          for (const cutSpec of pending.sculptCuts) {
+            const live = findNodeInScene(useStore.getState().sceneGraph.nodes, n.id);
+            if (!live || !live.isSculpt) break;
+            const geomIndex = Math.max(0, (live.geoms ?? []).findIndex((g: SceneGeom) => g.type === 'mesh'));
+            const mesh = sculptMeshOf(live);
+            const res = await cutSculptOffThread(
+              mesh,
+              { kind: 'polygon', polygon: cutSpec.polygon, direction: cutSpec.direction },
+              { mode: cutSpec.mode, cap: cutSpec.cap },
+            );
+            if (!res.ok) throw new Error(`Sculpt cut on '${n.name}' failed: ${res.error}`);
+            const latest = useStore.getState();
+            latest.updateNode(n.id, { sculptEdited: true, sculptVersion: (live.sculptVersion ?? 1) + 1 });
+            const { vertices, renderVertices, faces } = toSceneGeom(res.mesh);
+            latest.updateNodeGeom(n.id, { vertices, renderVertices, faces }, geomIndex);
+          }
+        }
+        if (pending.cuts && pending.cuts.length > 0) {
+          for (const cutSpec of pending.cuts) {
+            const res = applySingleCutToBody(n.id, cutSpec);
+            if (!res.ok) throw new Error(`Cut on '${n.name}' failed: ${res.error}`);
+          }
+        }
+        if (pending.roundEdges && pending.roundEdges.length > 0) {
+          const res = await applyRoundEdgesToBody(n.id, pending.roundEdges, false);
+          if (!res.ok) throw new Error(`Edge rounding on '${n.name}' failed: ${res.error}`);
+        }
+        if (pending.patterns && pending.patterns.length > 0) {
+          for (const patSpec of pending.patterns) {
+            const res = await applySinglePatternToBody(n.id, patSpec);
+            if (!res.ok) throw new Error(`Pattern on '${n.name}' failed: ${res.error}`);
+          }
+        }
+      }
+      if (n.children && n.children.length > 0) {
+        await walk(n.children);
+      }
+    }
+  };
+  await walk(nodes);
+}
+
+async function applyDeclarativePostCsgFeatures(nodes: SceneNode[]): Promise<void> {
+  const walk = async (list: SceneNode[]) => {
+    for (const n of list || []) {
+      const pending = pendingDeclarativeOps.get(n.id);
+      if (pending) {
+        pendingDeclarativeOps.delete(n.id);
+        if (pending.paint && pending.paint.length > 0) {
+          for (const paintSpec of pending.paint) {
+            applyPaintStrokeToBody(n.id, paintSpec);
+          }
+        }
+      }
+      if (n.children && n.children.length > 0) {
+        await walk(n.children);
+      }
+    }
+  };
+  await walk(nodes);
+}
 
 // Bounding-box diagonal above this (in MuJoCo meters) on a freshly-compiled
 // SCAD mesh almost always means the source forgot the required
@@ -1160,14 +1869,58 @@ export function useMCPBridge() {
 
         case 'UPDATE_OBJECT': {
           const requestedId = typeof msg.targetId === 'string' ? msg.targetId : '';
-          const updates = msg.updates as Partial<SceneNode> & { scad?: string };
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const rawUpdates = msg.updates as Partial<SceneNode> & Record<string, any>;
           if (!requestedId) throw new Error('Missing object id');
-          if (!updates) throw new Error('Missing updates payload');
+          if (!rawUpdates) throw new Error('Missing updates payload');
           // The store edits by id alone and ignores one it doesn't know, which
           // this handler then reported as ok:true.
           const target = findNodeInScene(store.sceneGraph.nodes, requestedId);
           if (!target) return { ok: false, error: `No object with id "${requestedId}"` };
           const targetId = target.id;
+
+          // Extract declarative feature arrays if passed in updates
+          const updates = { ...rawUpdates };
+          const rawCuts = Array.isArray(updates.cuts) ? updates.cuts : undefined;
+          const rawRoundEdges = updates.roundEdges !== undefined ? updates.roundEdges : updates.roundings;
+          const normRoundEdges = Array.isArray(rawRoundEdges)
+            ? rawRoundEdges
+            : rawRoundEdges && typeof rawRoundEdges === 'object'
+              ? [rawRoundEdges]
+              : undefined;
+          const rawPatterns = Array.isArray(updates.patterns)
+            ? updates.patterns
+            : updates.pattern && typeof updates.pattern === 'object'
+              ? [updates.pattern]
+              : undefined;
+          const rawPaint = Array.isArray(updates.paint)
+            ? updates.paint
+            : updates.paint && typeof updates.paint === 'object'
+              ? [updates.paint]
+              : undefined;
+          delete updates.cuts;
+          delete updates.roundEdges;
+          delete updates.roundings;
+          delete updates.patterns;
+          delete updates.pattern;
+          delete updates.paint;
+
+          if (Array.isArray(updates.geoms)) {
+            const moves = (updates.joints ?? target.joints ?? []).length > 0;
+            updates.geoms = updates.geoms.map((g: RawGeom, i: number) => fillGeomDefaults(g, updates.name ?? target.name, i, moves));
+            if (updates.geoms.some((g: SceneGeom) => g.csg === 'difference' || g.csg === 'intersection' || (g.type === 'cylinder' && (g.thread?.pitch ?? 0) > 0))) {
+              updates.csgEnabled = true;
+            }
+          }
+
+          if (rawCuts || normRoundEdges || rawPatterns || rawPaint) {
+            pendingDeclarativeOps.set(targetId, {
+              ...(rawCuts ? { cuts: rawCuts } : {}),
+              ...(normRoundEdges ? { roundEdges: normRoundEdges } : {}),
+              ...(rawPatterns ? { patterns: rawPatterns } : {}),
+              ...(rawPaint ? { paint: rawPaint } : {}),
+            });
+          }
 
           if (updates.scad !== undefined) {
             let compiled: Awaited<ReturnType<typeof compileSCAD>> | null = null;
@@ -1186,22 +1939,27 @@ export function useMCPBridge() {
               }
             }
             if (!compiled) {
+              pendingDeclarativeOps.delete(targetId);
               throw new Error(`Failed to compile SCAD: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`);
             }
             store.updateNodeScad(targetId, updates.scad, compiled, false);
-            // A part with a cut or a rounding is a boolean over this mesh, and
-            // the caller is told ok:true now — so build it now, as below.
+            await applyDeclarativePreCsgFeatures([target]);
             if (findNodeInScene(useStore.getState().sceneGraph.nodes, targetId)?.csgEnabled) {
               await compileCsgNodes(true);
-              await useStore.getState().recompile(useStore.getState().sceneGraph, undefined, false, true);
             }
+            await applyDeclarativePostCsgFeatures([target]);
+            await useStore.getState().recompile(useStore.getState().sceneGraph, undefined, false, true);
           } else {
-            store.updateNode(targetId, updates);
+            if (Object.keys(updates).length > 0) {
+              store.updateNode(targetId, updates);
+            }
+            await applyDeclarativePreCsgFeatures([target]);
             // An update that touches a boolean body (its geoms, its collision
             // mode, a csg marker) invalidates the generated mesh. The editor's
             // debounced auto-compiler would get to it eventually, but an MCP
             // caller is told ok:true synchronously — so do it here and await it.
             const compiled = await compileCsgNodes(true);
+            await applyDeclarativePostCsgFeatures([target]);
             await useStore.getState().recompile(useStore.getState().sceneGraph, undefined, false, true);
             if (compiled > 0) {
               const node = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId);
@@ -1237,60 +1995,24 @@ export function useMCPBridge() {
           //
           // `at` is one point or a list of them, in the geom's own frame — so
           // the five pips of a die face are one call rather than five.
-          const { targetId, geomName, at, radius, rgba, flow, erase } =
-            msg as Msg<{ targetId: string; geomName?: string; radius?: number; rgba: number[]; flow?: number }>;
+          // Also accepts `strokes: [{ geomName?, at, radius?, rgba, flow?, erase? }, ...]`
+          // to apply multiple colours/brushes in one round-trip.
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const { targetId, strokes } = msg as Msg<{ targetId: string; strokes?: Record<string, any>[] }>;
           if (!targetId) throw new Error('Missing targetId');
-          const node = findNodeInScene(store.sceneGraph.nodes, targetId);
-          if (!node) throw new Error(`No object with id '${targetId}'`);
-
-          const geom = geomName
-            ? (node.geoms || []).find((g: SceneGeom) => g.name === geomName)
-            : (node.geoms || []).find((g: SceneGeom) => isPaintable(g.type, !!node.isWedge));
-          if (!geom) throw new Error(geomName ? `No geom named '${geomName}' on '${targetId}'` : `Nothing paintable on '${targetId}'`);
-          if (!isPaintable(geom.type, !!node.isWedge)) {
-            throw new Error(`A '${geom.type}' geom cannot hold paint — paintable types are box, sphere, ellipsoid, cylinder, capsule and mesh`);
+          if (Array.isArray(strokes) && strokes.length > 0) {
+            const results = [];
+            let totalLanded = 0;
+            let totalRequested = 0;
+            for (const s of strokes) {
+              const res = applyPaintStrokeToBody(targetId, s);
+              results.push(res);
+              totalLanded += Number(res.dabsLanded || 0);
+              totalRequested += Number(res.dabsRequested || 0);
+            }
+            return { ok: true, id: targetId, strokesApplied: results.length, dabsLanded: totalLanded, dabsRequested: totalRequested, results };
           }
-          if (!Array.isArray(rgba) || rgba.length < 3) throw new Error('rgba must be [r, g, b], each 0..1');
-
-          const points: number[][] = pointList(at);
-          if (!points.length || points.some((p: unknown) => !Array.isArray(p) || p.length < 3)) {
-            throw new Error("at must be [x, y, z] or a list of them, in the geom's own frame (metres)");
-          }
-          const brush = typeof radius === 'number' ? radius : 0.008;
-
-          // The surface is rebuilt exactly as the renderer builds it, so a dab
-          // placed here lands on the vertices the viewport is drawing. A mesh is
-          // painted on the vertices it already has.
-          const args = paintArgsFromSize(geom.type, geom.size || []);
-          const res = geom.paint?.res?.length ? geom.paint.res : paintResolution(geom.type, args);
-          const built = geom.type === 'mesh' ? null : buildPaintGeometry(geom.type, args, res);
-          const positions: ArrayLike<number> | undefined = geom.type === 'mesh'
-            ? (geom.dynamic ? geom.renderVertices : geom.vertices)
-            : (built?.getAttribute('position')?.array as Float32Array | undefined);
-          if (!positions?.length) throw new Error('That geom has no surface to paint');
-
-          const canvas = canvasFromLayer(geom.paint, positions.length / 3, res);
-          let landed = 0;
-          for (const point of points) {
-            const [x, y, z] = toGeometrySpace(geom.type, point);
-            if (applyDab(canvas, positions, {
-              x, y, z,
-              radius: brush,
-              color: rgba,
-              // An agent places a mark once and expects it to be there, so a dab
-              // covers fully unless asked to be lighter — the opposite default
-              // from the brush in the panel, which is held down and dragged.
-              flow: typeof flow === 'number' ? flow : 1,
-              erase: !!erase,
-            })) landed++;
-          }
-          built?.dispose();
-
-          if (!landed) {
-            throw new Error(`No vertices within ${brush} m of any of those points — the point has to be on the surface, in the geom's own frame`);
-          }
-          store.setGeomPaint(targetId, geom.name, layerFromCanvas(canvas));
-          return { ok: true, geomName: geom.name, dabsLanded: landed, dabsRequested: points.length };
+          return applyPaintStrokeToBody(targetId, msg);
         }
 
         /*
@@ -1369,11 +2091,15 @@ export function useMCPBridge() {
         case 'SCULPT': {
           // Every option below is handed straight to applySculptStroke, which
           // supplies its own default for each one it does not get.
-          const { targetId, brush, at, radius, strength, invert, symmetryX, symmetry, detail, dynamicTopology, delta } =
+          // Also accepts `strokes: [...]` to run a whole batch of brushes/strokes
+          // in a single mesh update & recompile.
+          const { targetId, brush, at, radius, strength, invert, symmetryX, symmetry, detail, dynamicTopology, delta, strokes } =
             msg as Msg<{
               targetId: string; brush?: BrushType; radius?: number; strength?: number;
               invert?: boolean; symmetryX?: boolean; symmetry?: 'x' | 'y' | 'z';
               detail?: number; dynamicTopology?: boolean; delta?: number[];
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              strokes?: Record<string, any>[];
             }>;
           if (!targetId) throw new Error('Missing targetId');
           const node = findNodeInScene(store.sceneGraph.nodes, targetId);
@@ -1381,37 +2107,51 @@ export function useMCPBridge() {
           if (!node.isSculpt) {
             throw new Error(`'${targetId}' is not a sculpt body — make one with physics_create_sculpt, or convert nothing: an imported mesh or a primitive cannot be brushed`);
           }
-          if (brush !== undefined && !BRUSH_TYPES.includes(brush)) {
-            throw new Error(`Unknown brush '${brush}'. Available: ${BRUSH_TYPES.join(', ')}`);
-          }
 
-          const points: number[][] = pointList(at);
-          if (!points.length || points.some((p: unknown) => !Array.isArray(p) || p.length < 3)) {
-            throw new Error("at must be [x, y, z] or a list of them, in the body's own frame (metres)");
-          }
+          const strokeList = Array.isArray(strokes) && strokes.length > 0
+            ? strokes
+            : [{ brush, at, radius, strength, invert, symmetryX, symmetry, detail, dynamicTopology, delta }];
 
           const mesh = sculptMeshOf(node);
-          const sink: { undo?: SculptUndoEntry | null } = {};
-          const result = applySculptStroke(mesh, {
-            brush, at: points, radius, strength, invert, symmetryX, symmetry, detail, dynamicTopology, delta,
-          }, sink);
+          let lastResult: ReturnType<typeof applySculptStroke> | null = null;
+          let totalVerticesChanged = 0;
 
-          if (sink.undo) {
-            const stack = sculptHistory.get(targetId) ?? [];
-            stack.push(sink.undo);
-            while (stack.length > SCULPT_HISTORY_DEPTH) stack.shift();
-            sculptHistory.set(targetId, stack);
+          for (const s of strokeList) {
+            if (s.brush !== undefined && !BRUSH_TYPES.includes(s.brush)) {
+              throw new Error(`Unknown brush '${s.brush}'. Available: ${BRUSH_TYPES.join(', ')}`);
+            }
+            const points: number[][] = pointList(s.at);
+            if (!points.length || points.some((p: unknown) => !Array.isArray(p) || p.length < 3)) {
+              throw new Error("at must be [x, y, z] or a list of them, in the body's own frame (metres)");
+            }
+            const sink: { undo?: SculptUndoEntry | null } = {};
+            lastResult = applySculptStroke(mesh, {
+              brush: s.brush,
+              at: points,
+              radius: s.radius,
+              strength: s.strength,
+              invert: s.invert,
+              symmetryX: s.symmetryX,
+              symmetry: s.symmetry,
+              detail: s.detail,
+              dynamicTopology: s.dynamicTopology,
+              delta: s.delta,
+            }, sink);
+            totalVerticesChanged += lastResult.verticesChanged ?? 0;
+
+            if (sink.undo) {
+              const stack = sculptHistory.get(targetId) ?? [];
+              stack.push(sink.undo);
+              while (stack.length > SCULPT_HISTORY_DEPTH) stack.shift();
+              sculptHistory.set(targetId, stack);
+            }
           }
 
           /*
             Metadata first, geometry second, and no recompile of our own.
             updateNodeGeom treats a change of vertices as structural, so it
             rebuilds immediately and without the debounce; asking for another
-            one here only queued a second build of the same state. The version
-            bump is what tells the viewport to pick the new mesh up rather than
-            carry on drawing the one it holds — the same signal setSculptBase
-            sends when it swaps a base out — and it has to be written before the
-            rebuild rather than after it.
+            one here only queued a second build of the same state.
           */
           store.updateNode(targetId, {
             sculptEdited: true,
@@ -1423,7 +2163,9 @@ export function useMCPBridge() {
 
           const error = useStore.getState().lastCompileError;
           return {
-            ok: !error, ...(error ? { error } : {}), id: targetId, ...result,
+            ok: !error, ...(error ? { error } : {}), id: targetId,
+            ...(lastResult ?? {}),
+            ...(strokeList.length > 1 ? { strokesApplied: strokeList.length, verticesChanged: totalVerticesChanged } : {}),
             undoDepth: (sculptHistory.get(targetId) ?? []).length,
           };
         }
@@ -1539,15 +2281,26 @@ export function useMCPBridge() {
           utils/latticeCommands.ts.
         */
         case 'CREATE_LATTICE': {
-          const { name, pos, sizeMm, edit } = msg;
+          const { name, pos, sizeMm, edit, empty, ops, subdiv: initSubdiv, thicknessMm: initThickness } = msg;
           const parent = resolveParent(useStore.getState().sceneGraph.nodes, msg.parent);
           const position: [number, number, number] = Array.isArray(pos) && pos.length === 3 ? [pos[0], pos[1], pos[2]] : [0, 0, 0.2];
+          const firstOp = Array.isArray(ops) && ops.length > 0
+            ? String(ops[0]?.op ?? ops[0]?.type ?? '').toLowerCase()
+            : '';
+          const startEmpty = empty === true || sizeMm === 0 || (sizeMm === undefined && firstOp === 'revolve');
           const size = typeof sizeMm === 'number' && sizeMm > 0 ? sizeMm : 40;
           const halfSteps = Math.max(1, Math.round((size / 2) / (LATTICE_UNIT * 1000)));
 
           const id = `lattice_${Math.random().toString(36).substring(2, 10)}`;
-          const cage = serializeCage(boxLattice(LATTICE_UNIT, halfSteps));
-          const { vertices, renderVertices, faces, origin } = latticeToSceneGeom(deserializeCage(cage), 0);
+          const lat = startEmpty ? createLattice(LATTICE_UNIT) : boxLattice(LATTICE_UNIT, halfSteps);
+          const { subdiv, thicknessMm } = runLatticeOps(
+            lat,
+            Array.isArray(ops) ? ops : [],
+            typeof initSubdiv === 'number' ? initSubdiv : 0,
+            typeof initThickness === 'number' ? initThickness : 0,
+          );
+          const cage = serializeCage(lat);
+          const { vertices, renderVertices, faces, origin } = latticeToSceneGeom(deserializeCage(cage), subdiv, thicknessMm / 1000);
 
           const newNode: SceneNode = {
             id,
@@ -1573,7 +2326,8 @@ export function useMCPBridge() {
             children: [],
             isLattice: true,
             latticeCage: cage,
-            latticeSubdiv: 0,
+            latticeSubdiv: subdiv,
+            ...(thicknessMm > 0 ? { latticeThickness: thicknessMm / 1000 } : {}),
             latticeVersion: 1,
             latticeOrigin: origin,
           };
@@ -1593,6 +2347,7 @@ export function useMCPBridge() {
           return {
             ok: true, id, name: newNode.name,
             ...(parent ? { parent: parent.id } : {}),
+            ...(Array.isArray(ops) && ops.length > 0 ? { opsApplied: ops.length } : {}),
             ...latticeSummary(deserializeCage(cage)),
           };
         }
@@ -1831,136 +2586,30 @@ export function useMCPBridge() {
         }
 
         case 'ROUND_EDGES': {
-          const { targetId, edges, sizeMm, mode, remove } = msg as Msg<{ targetId: string }>;
-          const node = findNodeInScene(store.sceneGraph.nodes, targetId);
-          const why = whyNotRoundable(node);
-          if (why) return { ok: false, error: node ? why : `No object with id '${targetId}'` };
-          const which = Array.isArray(edges) ? edges.map(Number)
-            : edges === undefined ? 'all'
-            : ['all', 'top', 'bottom', 'vertical', 'inside'].includes(String(edges)) ? String(edges) as EdgeGroup : null;
-          if (which === null) return { ok: false, error: "edges must be 'all', 'top', 'bottom', 'vertical', 'inside' or a list of ids from physics_get_edges" };
-          const found = await bodyEdges(node!, bodyUp(store.sceneGraph.nodes, targetId));
-          const { picked, unknown } = selectEdges(found.edges, which);
-          if (unknown.length) return { ok: false, error: `No edge with id ${unknown.join(', ')} — physics_get_edges lists them` };
-          if (picked.length === 0) return { ok: false, error: `This part has no ${Array.isArray(which) ? '' : which + ' '}edges that can be rounded` };
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const { targetId, roundings } = msg as Msg<{ targetId: string; roundings?: Record<string, any>[] }>;
+          const specs = Array.isArray(roundings) && roundings.length > 0 ? roundings : [msg];
+          return await applyRoundEdgesToBody(targetId, specs, true);
+        }
 
-          if (remove === true) {
-            store.unroundEdges(targetId, picked.map((e) => e.edge));
-          } else {
-            const kind: 'fillet' | 'chamfer' = mode === 'bevel' || mode === 'chamfer' ? 'chamfer' : 'fillet';
-            if (typeof sizeMm !== 'number' || !(sizeMm > 0)) return { ok: false, error: 'sizeMm must be a positive number of millimetres' };
-            const most = maxSizeFor(picked, kind);
-            if (sizeMm / 1000 > most + 1e-9) {
-              return { ok: false, error: `${sizeMm} mm is too big for ${picked.length === 1 ? 'this edge' : 'these edges'} — ${Math.floor(most * 1e5) / 100} mm is the most that fits` };
-            }
-            store.roundEdges(targetId, { mode: kind, size: sizeMm / 1000, edges: picked.map((e) => e.edge) });
+        case 'BODY_CUT': {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const { targetId, cuts } = msg as Msg<{ targetId: string; cuts?: Record<string, any>[] }>;
+          const node = findNodeInScene(store.sceneGraph.nodes, targetId);
+          if (!node) return { ok: false, error: `No object with id '${targetId}'` };
+          const specs = Array.isArray(cuts) && cuts.length > 0 ? cuts : [msg];
+          const results = [];
+          for (const spec of specs) {
+            const res = applySingleCutToBody(targetId, spec);
+            if (!res.ok) return res;
+            results.push(res);
           }
           await compileCsgNodes(true);
           await useStore.getState().recompile(useStore.getState().sceneGraph, undefined, false, true);
           const after = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId);
-          if (after?.csgError) return { ok: false, error: `Rounding failed: ${after.csgError}` };
-          return {
-            ok: true,
-            id: targetId,
-            edgesChanged: picked.length,
-            roundings: (after?.edgeRounds ?? []).map((f, i) => ({
-              index: i, mode: f.mode === 'fillet' ? 'round' : 'bevel', sizeMm: Math.round(f.size * 1e5) / 100, edges: f.edges.length,
-            })),
-            ...(after?.csgVolume !== undefined ? { volumeMm3: Math.round(after.csgVolume * 1e9 * 10) / 10 } : {}),
-          };
-        }
-
-        case 'BODY_CUT': {
-          const { targetId, shape, at, normal, diameterMm, widthMm, lengthMm, depthMm, threadPitchMm, threadLeft, threadFitMm } = msg as Msg<{ targetId: string }>;
-          const node = findNodeInScene(store.sceneGraph.nodes, targetId);
-          if (!node) return { ok: false, error: `No object with id '${targetId}'` };
-          const spotIn = Array.isArray(at) && at.length >= 3
-            ? {
-              at: [at[0] / 1000, at[1] / 1000, at[2] / 1000],
-              normal: Array.isArray(normal) && normal.length >= 3 ? [...normal] : [0, 0, 1],
-            }
-            : undefined;
-
-          // A hardware feature: several cuts made as one, sized from tables.
-          if (typeof shape === 'string' && shape in HARDWARE_KINDS) {
-            const hwKind = shape as HardwareCutKind;
-            const group = store.addHardwareCut(targetId, hwKind, spotIn);
-            if (!group) return { ok: false, error: 'That body has no solid shape to cut into' };
-            const { size, bore, fitMm } = msg as Msg<{ size?: string; bore?: HardwareBore; fitMm?: number }>;
-            if (size !== undefined || bore !== undefined || fitMm !== undefined) {
-              useStore.getState().setHardwareCut(targetId, group, {
-                ...(size !== undefined ? { size: String(size) } : {}),
-                ...(bore !== undefined ? { bore } : {}),
-                ...(typeof fitMm === 'number' ? { fitMm } : {}),
-              });
-            }
-            const after = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId);
-            const spec = hardwareSpecOf(after?.geoms ?? [], group);
-            const info = HARDWARE_KINDS[hwKind];
-            if (size !== undefined && spec && spec.size !== String(size)) {
-              return { ok: false, error: `${info.label} comes in ${info.sizes.join(', ')}; got '${size}'` };
-            }
-            return {
-              ok: true, id: targetId, group, shape: hwKind, size: spec?.size,
-              ...(spec?.bore ? { bore: spec.bore } : {}),
-              fitMm: spec?.fitMm ?? 0,
-              atMm: (spec?.at ?? []).map((v: number) => Math.round(v * 1000 * 1000) / 1000),
-              normal: spec?.normal,
-              pieces: (after?.geoms ?? []).filter((g) => g.hardware?.group === group).map((g) => g.hardware!.part),
-            };
-          }
-
-          const kind = shape === 'slot' || shape === 'box' ? 'box'
-            : shape === 'dish' || shape === 'sphere' ? 'sphere' : 'cylinder';
-          const index = store.addBodyCut(targetId, kind, spotIn);
-          if (index < 0) return { ok: false, error: 'That body has no solid shape to cut into' };
-
-          // Size and depth after the fact, through the same actions the panel
-          // uses, so a cut made here and one made by hand cannot disagree.
-          if (kind === 'box') {
-            const wide = typeof widthMm === 'number' ? widthMm / 2000 : undefined;
-            const long = typeof lengthMm === 'number' ? lengthMm / 2000 : undefined;
-            if (wide !== undefined || long !== undefined) {
-              const now = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId)?.geoms?.[index];
-              store.setCutSection(targetId, index, [
-                wide ?? now?.size?.[0] ?? 0.005,
-                long ?? now?.size?.[1] ?? 0.005,
-              ]);
-            }
-          } else if (typeof diameterMm === 'number') {
-            store.setCutSection(targetId, index, [diameterMm / 2000]);
-          }
-          if (typeof depthMm === 'number') store.setCutDepth(targetId, index, depthMm);
-          // A thread only means something on a round hole; on a slot or a dish
-          // the store drops it, and the reply's missing threadPitchMm says so.
-          if (typeof threadPitchMm === 'number' && kind === 'cylinder') {
-            store.setGeomThread(targetId, index, {
-              pitchMm: threadPitchMm,
-              left: threadLeft === true,
-              fitMm: typeof threadFitMm === 'number' ? threadFitMm : 0,
-            });
-          }
-
-          const cut = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId)?.geoms?.[index];
-          return {
-            ok: true,
-            id: targetId,
-            geomIndex: index,
-            name: cut?.name,
-            shape: kind,
-            // Where it actually landed on the surface, which is not necessarily
-            // the point asked for — the line was cast through it to find the
-            // material, and on a stepped or curved part that moves.
-            atMm: (cut?.cutAt ?? []).map((v: number) => Math.round(v * 1000 * 1000) / 1000),
-            normal: cut?.cutNormal,
-            ...(cut?.thread?.pitch ? {
-              threadPitchMm: Math.round(cut.thread.pitch * 1000 * 1000) / 1000,
-              ...(cut.thread.left ? { threadLeft: true } : {}),
-              ...(cut.thread.fit ? { threadFitMm: Math.round(cut.thread.fit * 1000 * 1000) / 1000 } : {}),
-            } : {}),
-            depthMm: cut?.cutDepth ? Math.round(cut.cutDepth * 1000 * 1000) / 1000 : 0,
-            through: !(cut?.cutDepth && cut.cutDepth > 0),
-          };
+          if (after?.csgError) return { ok: false, error: `Cut boolean failed: ${after.csgError}` };
+          if (results.length === 1) return results[0];
+          return { ok: true, id: targetId, cutsApplied: results.length, cuts: results };
         }
 
         case 'COMBINE_BODIES': {
@@ -1976,7 +2625,10 @@ export function useMCPBridge() {
 
           const before = (target.geoms || []).length;
           store.combineBodies(targetId, sources, how);
+          await compileCsgNodes(true);
+          await useStore.getState().recompile(useStore.getState().sceneGraph, undefined, false, true);
           const after = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId);
+          if (after?.csgError) return { ok: false, error: `Combine boolean failed: ${after.csgError}` };
           return {
             ok: true,
             id: targetId,
@@ -2302,20 +2954,31 @@ export function useMCPBridge() {
           // what the body ended up called.
           const taken = collectNodeIds(store.sceneGraph.nodes);
           if (taken.has(node.id)) {
+            const oldId = node.id;
             let n = 2;
             while (taken.has(`${node.id}_${n}`)) n++;
             node.id = `${node.id}_${n}`;
             if (!raw.name) node.name = node.id;
+            const pending = pendingDeclarativeOps.get(oldId);
+            if (pending) {
+              pendingDeclarativeOps.delete(oldId);
+              pendingDeclarativeOps.set(node.id, pending);
+            }
           }
           const nodes = parent
             ? withChild(store.sceneGraph.nodes, parent.id, node)
             : [...store.sceneGraph.nodes, node];
           store.updateScene({ nodes }, true);
           await autoCompileScad([node]);
+          await applyDeclarativePreCsgFeatures([node]);
           await compileCsgNodes(true);
+          await applyDeclarativePostCsgFeatures([node]);
           await useStore.getState().recompile(useStore.getState().sceneGraph, node.id, false, true);
           const addError = useStore.getState().lastCompileError;
           const landed = findNodeInScene(useStore.getState().sceneGraph.nodes, node.id);
+          if (landed?.csgError) {
+            return { ok: false, error: `Boolean failed: ${landed.csgError}`, id: node.id };
+          }
           return {
             ok: !addError && !!landed,
             ...(addError ? { error: addError } : {}),
@@ -2856,106 +3519,19 @@ export function useMCPBridge() {
         }
 
         case 'APPLY_PATTERN': {
-          const m = msg as Msg<{
-            targetId: string; at?: number[]; normal?: number[]; pattern?: string; options?: PatternOptions;
-            depthMm?: number; emboss?: boolean; borderMm?: number; cellMm?: number; projection?: string;
-            twistDeg?: number; scale?: number; stopAtDeg?: number; remove?: boolean; preview?: boolean;
-          }>;
-          if (!m.targetId) throw new Error('Missing targetId');
-          const node = findNodeInScene(store.sceneGraph.nodes, m.targetId);
-          if (!node) throw new Error(`No object with id '${m.targetId}'`);
-          const at = pointList(m.at)[0];
-          if (!at) throw new Error('Missing at: a point [x, y, z] on the face, in the body\'s own frame in millimetres.');
-          // The face a click there would pick, so a pattern laid here is one
-          // the T key finds again, and editing one keeps its seed.
-          const pick = patternPickAt(node, at.map((v) => v / 1000), Array.isArray(m.normal) ? m.normal : undefined);
-          if (!pick) {
-            throw new Error(`No surface of '${m.targetId}' within 10 mm of [${at.join(', ')}] mm. Points are in the body's own frame in millimetres; physics_get_object gives the shapes, and normal says which way the face looks.`);
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const { targetId, patterns } = msg as Msg<{ targetId: string; patterns?: Record<string, any>[] }>;
+          if (!targetId) throw new Error('Missing targetId');
+          if (Array.isArray(patterns) && patterns.length > 0) {
+            const results = [];
+            for (const p of patterns) {
+              const res = await applySinglePatternToBody(targetId, p);
+              if (!res.ok) return res;
+              results.push(res);
+            }
+            return { ok: true, id: targetId, patternsApplied: results.length, patterns: results };
           }
-          const geom = (node.geoms || []).find((g) => g.name === pick.geomName);
-          if (!geom) throw new Error(`The face picked belongs to '${pick.geomName}', which is not on the body.`);
-          const existing = geom.textures ?? [];
-          const describe = (t: SurfaceTexture) =>
-            `${patternById(t.pattern)?.label ?? t.pattern}, ${t.depthM > 0 ? 'embossed' : 'engraved'} ${(Math.abs(t.depthM) * 1000).toFixed(1)} mm`;
-
-          if (m.remove) {
-            if (pick.index === undefined) return { ok: false, error: 'There is no pattern on the face at that point.' };
-            const list = existing.filter((_, i) => i !== pick.index);
-            if (!m.preview) store.setGeomTextures(node.id, geom.name, list.length ? list : undefined);
-            return { ok: true, removed: describe(existing[pick.index]), geomName: geom.name, remaining: list.length };
-          }
-
-          const prev = pick.index !== undefined ? existing[pick.index] : undefined;
-          const faceable = SURFACE_PATTERNS.filter((p) => !p.throughCut);
-          const known = () =>
-            faceable.map((p) => `${p.id} (${p.fields.map((f) => f.key).join(', ')})`).join('; ');
-          const patternId = m.pattern ?? prev?.pattern;
-          if (!patternId) throw new Error(`Missing pattern. One of, with its options: ${known()}.`);
-          const spec = patternById(patternId);
-          if (!spec || spec.throughCut) {
-            throw new Error(`'${patternId}' is not a pattern that goes on a face. One of, with its options: ${known()}.`);
-          }
-          const projections: TextureProjection[] = ['auto', 'planar', 'cylindrical', 'unwrap'];
-          if (m.projection !== undefined && !projections.includes(m.projection as TextureProjection)) {
-            throw new Error(`projection is one of ${projections.join(', ')}.`);
-          }
-          const optionKeys = new Set(spec.fields.map((f) => f.key));
-          const unknown = Object.keys(m.options ?? {}).filter((k) => !optionKeys.has(k));
-          const depthMm = m.depthMm ?? (prev ? Math.abs(prev.depthM) * 1000 : 1.5);
-          if (!(depthMm > 0)) throw new Error('depthMm must be more than 0.');
-          const emboss = m.emboss ?? (prev ? prev.depthM > 0 : false);
-          const projection = (m.projection ?? prev?.projection) as TextureProjection | undefined;
-          const texture: SurfaceTexture = {
-            pattern: spec.id,
-            options: { ...spec.defaults, ...(prev?.pattern === spec.id ? prev.options : {}), ...(m.options ?? {}) },
-            depthM: ((emboss ? 1 : -1) * depthMm) / 1000,
-            borderM: m.borderMm !== undefined ? Math.max(0, m.borderMm) / 1000 : prev?.borderM ?? DEFAULT_TEXTURE_BORDER_M,
-            cellM: m.cellMm !== undefined ? Math.max(0.05, m.cellMm) / 1000 : prev?.cellM ?? DEFAULT_TEXTURE_CELL_M,
-            // An edit keeps the face it was laid on, wherever on it `at` lands.
-            seedAt: prev?.seedAt ?? pick.seedAt,
-            seedNormal: prev?.seedNormal ?? pick.seedNormal,
-            // Unset, a cylinder's side goes all the way round; see textureRegion.
-            maxTiltDeg: m.stopAtDeg ?? prev?.maxTiltDeg,
-            projection: projection === 'auto' ? undefined : projection,
-            twistDeg: m.twistDeg ?? prev?.twistDeg,
-            scale: m.scale ?? prev?.scale,
-          };
-          const index = pick.index ?? existing.length;
-          const list = [...existing];
-          list[index] = texture;
-          // The same build the viewport draws, in the texture worker.
-          const surface = await requestTexturedSurface({ ...geom, textures: list }, geomHalfLen(geom));
-          const region = surface?.regions.find((r) => r.index === index);
-          const warnings = [
-            ...(surface?.warnings ?? [])
-              .filter((w) => w.startsWith(`Pattern ${index + 1}:`) || !w.startsWith('Pattern '))
-              .map((w) => w.replace(/^Pattern \d+: /, '')),
-            ...(unknown.length ? [`${spec.label} has no option ${unknown.join(', ')}; it takes ${[...optionKeys].join(', ')}.`] : []),
-          ];
-          if (!region?.applied) {
-            return { ok: false, error: region?.reason ?? 'The pattern could not be laid on that face.', warnings };
-          }
-          if (!m.preview) store.setGeomTextures(node.id, geom.name, list);
-          const mm = (v: number) => Math.round(v * 10000) / 10;
-          return {
-            ok: true,
-            preview: !!m.preview,
-            edited: pick.index !== undefined,
-            index,
-            geomName: geom.name,
-            pattern: describe({ ...texture, depthM: region.depthM }),
-            options: texture.options,
-            faceMm: [mm(region.extentM[0]), mm(region.extentM[1])],
-            areaMm2: Math.round(region.areaM2 * 1e6),
-            projection: region.projection,
-            stretchPercent: region.stretch !== undefined && Number.isFinite(region.stretch) ? Math.round(region.stretch * 100) : null,
-            ...(region.wrap ? { wrap: region.wrap } : {}),
-            ...(region.seam ? { seam: true } : {}),
-            ...(region.capped ? { capped: true } : {}),
-            depthMm: mm(Math.abs(region.depthM)),
-            triangles: region.triangles,
-            warnings,
-          };
+          return await applySinglePatternToBody(targetId, msg);
         }
 
         case 'KNIFE': {
@@ -3498,7 +4074,19 @@ export function useMCPBridge() {
 
         case 'GET_SCHEMA':
           return {
-            geomTypes: ['box', 'sphere', 'capsule', 'cylinder', 'ellipsoid', 'plane', 'mesh'],
+            choosingTheRightTool: {
+              ruleOfThumb: 'Build detailed scenes in ONE call to physics_build_scene (or add parts with physics_add_object) using declarative body features instead of making 20 sequential tool calls or hand-writing raw triangle arrays.',
+              mechanicalPartsWithHolesThreadsRounding: 'Use primitive geoms + declarative `cuts: [...]`, `roundEdges: [...]`, `patterns: [...]`, and `paint: [...]` directly on the body descriptor in physics_build_scene / physics_add_object / physics_update_object, OR boolean geoms (`csg: "difference" | "intersection"`).',
+              extruded2DProfilesWithHoles: 'Use `type: "extrude"` (or `"prism"`) with `polygon: [[x,y], ...]` (metres), optional `holes: [[[x,y], ...]]`, and `height` (metres) on a geom or body.',
+              turnedOrAxisymmetricParts: 'Use `type: "lathe"` (or `"revolve"`) with `profile: [[r,z], ...]` (metres) on a geom or body, OR a declarative lattice `{ lattice: { empty: true, subdiv: 1, ops: [{ op: "revolve", profile: [[xMm,0,zMm], ...] }] } }`.',
+              conesWedgesToriTubes: 'Use parametric geom types directly: `cone` (`size: [r, hh]`), `pyramid` (`size: [hx, hy, hh]`), `wedge` (`size: [hx, hy, hz]`), `torus` (`size: [R, r]`), `tube` / `pipe` (`size: [outerR, innerR, hh]`).',
+              subdivisionAndGridPolyhedra: 'Use declarative `lattice: { sizeMm: 40, subdiv: 1, thicknessMm: 0, ops: [{ op: "extrude" | "inset" | "bevel" | "bevel_edges" | "circle" | "revolve" | "bridge" | "faces" | "delete_faces" | "sharpen" | "dimension" | "orient" | "smooth" | "wall", ... }] }` on the body, or pass `ops: [...]` to `physics_create_lattice`.',
+              organicClayShapes: 'Use declarative `sculpt: { base: "sphere" | "Bust" | ..., strokes: [...], cuts: [...] }` on the body, or pass batch `strokes: [...]` to `physics_sculpt`.',
+              curvedTracksAndRamps: 'Set `isCurve: true` and `curvePoints: [[x,y,z], ...]` (Z-up metres) on the body.',
+              ropesCablesChains: 'Set `isComposite: true`, `compositeType: "cable"`, `compositeCount`, `compositeSize` on the body.',
+              customPolyhedra: 'If you must supply raw triangles (`type: "mesh"`), pass `verticesZUp: [x0,y0,z0, ...]` in standard MuJoCo Z-up metres (auto-converted to Y-up `vertices` and `renderVertices`, with inside-out closed meshes auto-flipped). Avoid hand-typing hundreds of coordinates when `extrude`, `lathe`, `lattice`, or `scad` can express the shape in 5 lines.',
+            },
+            geomTypes: ['box', 'sphere', 'capsule', 'cylinder', 'ellipsoid', 'plane', 'cone', 'pyramid', 'wedge', 'torus', 'tube', 'extrude', 'lathe', 'mesh'],
             geomSizes: {
               box:       'half-extents [hx, hy, hz]',
               sphere:    'radius [r]',
@@ -3506,15 +4094,22 @@ export function useMCPBridge() {
               cylinder:  'radius and half-height [r, hh]',
               ellipsoid: 'semi-axes [rx, ry, rz]',
               plane:     'ignored by MuJoCo (infinite plane) — set to [0, 0, 1] or any non-zero',
-              mesh:      'not used — shape defined by vertices+faces. Two modes: STATIC (default, visual only) and DYNAMIC (dynamic:true, full physics+collision). See tips.',
+              cone:      '[radius, halfHeight] (or `radius` and `height` fields in metres) — auto-generates a closed outward-wound cone mesh',
+              pyramid:   '[hx, hy, halfHeight] (or `width`, `depth`, `height` in metres) — 4-sided pyramid mesh',
+              wedge:     '[hx, hy, hz] (or `width`, `depth`, `height` in metres) — right-triangular prism / ramp mesh',
+              torus:     '[majorRadius, tubeRadius] (or `majorRadius`, `tubeRadius` in metres) — watertight torus ring in XY plane around Z axis',
+              tube:      '[outerRadius, innerRadius, halfHeight] (or `outerRadius`, `innerRadius`, `height` in metres; alias `pipe` / `hollow_cylinder`) — hollow cylinder / pipe mesh',
+              extrude:   '2D polygon prism (alias `prism`): provide `polygon: [[x,y], ...]` in metres, optional `holes: [[[x,y], ...]]`, and `height` in metres (or `size: [halfHeight]`). Centered on Z by default (`centered: false` spans z=0..height).',
+              lathe:     'revolved 2D profile around Z axis (alias `revolve`): provide `profile: [[r,z], ...]` in metres and optional `segments` (default 24).',
+              mesh:      'arbitrary triangle mesh via `verticesZUp` (preferred, Z-up metres) or `vertices` (Three.js Y-up metres) + `faces`. Defaults to `dynamic: true` so body `pos`/`euler`/`quat` and geom `pos`/`euler`/`quat` always position the mesh in Z-up space.',
             },
             jointTypes: ['hinge', 'slide', 'ball', 'free'],
             geomFields: {
               name:        'string — unique identifier',
-              type:        'GeomType (see geomTypes)',
+              type:        'GeomType (see geomTypes — includes parametric mesh shorthands cone, pyramid, wedge, torus, tube, extrude, lathe)',
               size:        'number[] — interpretation depends on type (see geomSizes)',
               rgba:        'number[4] — [r, g, b, a] each 0-1, default white opaque',
-              pos:         'number[3] — local offset from body origin, NOT world-space (e.g. a box half-extent 0.4 spans local z -0.4..+0.4 regardless of the body\'s world pos)',
+              pos:         'number[3] — local offset from body origin in Z-up metres, NOT world-space (works on all geoms including dynamic meshes)',
               quat:        'number[4] — [w, x, y, z] rotation quaternion',
               euler:       'number[3] — [roll, pitch, yaw] in degrees, alternative to quat',
               fromto:      'number[6] — [x1,y1,z1, x2,y2,z2] for capsule/cylinder endpoints (overrides size/pos/quat)',
@@ -3525,13 +4120,17 @@ export function useMCPBridge() {
               condim:      'number — contact dimensionality (1, 3, 4, or 6)',
               solref:      'number[2] — [timeconst_s, dampingRatio]. timeconst_s: contact spring time constant in seconds (min 0.005s = 5x timestep, 0.04 is a safe default). dampingRatio: 1.0=no bounce (critically damped), 0.0=max bounce, ~0.2=lively. Contact blends both geoms by averaging — floor has dampingRatio=0.0 so it does not kill ball bounce.',
               solimp:      'number[5] — [d0, d1, width, midpoint, power]. d0/d1: min/max impedance (0.99/0.9999 for hard contact). Typical bouncy: [0.99, 0.9999, 0.0001, 0.5, 2].',
-              vertices:    'number[] — flat array of vertex positions for mesh type: [x0,y0,z0, x1,y1,z1, ...] in Three.js Y-up space',
-              faces:       'number[] — flat array of triangle indices for mesh type: [i0,j0,k0, i1,j1,k1, ...]. WINDING MATTERS: each triangle must read counter-clockwise seen from OUTSIDE the solid, i.e. (v1-v0)x(v2-v0) points away from the interior. The viewport draws mesh geoms single-sided, so a triangle wound the other way is not drawn at all and you see through the surface to the inside of the far wall — which looks like the body is half transparent, not like a winding bug. See the note in presets/californiaRelief.ts, which shipped inside out.',
-              dynamic:     'boolean — if true, mesh participates in simulation and collision; requires renderVertices',
-              csg:         `'union'|'difference'|'intersection' — boolean modifier (default 'union'). A geom marked 'difference' is CUT OUT of the union of the body's other geoms instead of being added to it: one ellipsoid plus a slimmer ellipsoid marked 'difference' is a ring. The body is compiled to a single mesh; set csgCollision on the body to choose how it collides.`,
-              thread:      `{ pitch: number, left?: boolean, fit?: number } — on any cylinder. On one marked 'difference' the hole is tapped; on any other the cylinder becomes a threaded rod (external ISO thread), which makes the body a boolean one (csgEnabled is inferred on add; pass csgEnabled: true when adding a thread through physics_update_object). pitch and fit are in METRES (M6 coarse is 0.001). The cylinder's radius is the thread's MAJOR radius, so an M8 rod (radius 0.004, pitch 0.00125) screws into an M8 tapped hole as drawn. left: left-handed. fit: diametral clearance, taken off a rod and added to a hole; default 0. For holes, physics_cut's threadPitchMm is easier.`,
+              verticesZUp: 'number[] — PREFERRED for custom meshes: flat [x0,y0,z0, x1,y1,z1, ...] in standard MuJoCo Z-up metres. Automatically populates Three.js Y-up `vertices` and `renderVertices`, and auto-flips closed meshes if wound inside-out.',
+              vertices:    'number[] — flat array of vertex positions for mesh type: [x0,y0,z0, x1,y1,z1, ...] in Three.js Y-up space (optional if `verticesZUp` or `renderVertices` is provided)',
+              faces:       'number[] — flat array of triangle indices for mesh type: [i0,j0,k0, i1,j1,k1, ...]. Closed meshes with uniformly inverted winding are automatically flipped outward.',
+              polygon:     'number[][] — for `type: "extrude"`: 2D `[x, y]` vertices in metres',
+              holes:       'number[][][] — for `type: "extrude"`: optional array of 2D `[x, y]` hole loops in metres',
+              profile:     'number[][] — for `type: "lathe"`: 2D `[r, z]` profile points in metres revolved around Z',
+              dynamic:     'boolean — defaults to `true` for all mesh geoms so body `pos`/`euler` work in Z-up space',
+              csg:         `'union'|'difference'|'intersection' — boolean modifier (default 'union'). A geom marked 'difference' is CUT OUT of the union of the body's other geoms instead of being added to it: one ellipsoid plus a slimmer ellipsoid marked 'difference' is a ring. The body is compiled to a single mesh; set collision on the body to choose how it collides.`,
+              thread:      `{ pitch: number, left?: boolean, fit?: number } — on any cylinder. On one marked 'difference' the hole is tapped; on any other the cylinder becomes a threaded rod (external ISO thread), which makes the body a boolean one. pitch and fit are in METRES (M6 coarse is 0.001). The cylinder's radius is the thread's MAJOR radius, so an M8 rod (radius 0.004, pitch 0.00125) screws into an M8 tapped hole as drawn. For holes, declarative cuts or physics_cut's threadPitchMm is easier.`,
               role:        `'visual'|'collision' — 'visual' draws but never collides (contype/conaffinity forced to 0), 'collision' simulates but is never drawn. Default (omitted) is both.`,
-              renderVertices: 'number[] — dynamic mesh only: flat [x0,y0,z0,...] in raw MuJoCo Z-up space. Convert from Y-up vertices: (x,y,z)→(x,-z,y). Do NOT subtract centroid — MuJoCo recenters internally.',
+              renderVertices: 'number[] — flat [x0,y0,z0,...] in raw MuJoCo Z-up space. Auto-derived from `verticesZUp` or `vertices` if omitted.',
             },
             nodeFields: {
               id:            'string — unique body identifier (used in coupling/weld/connect refs)',
@@ -3539,7 +4138,14 @@ export function useMCPBridge() {
               pos:           'number[3] — position relative to parent (world for root nodes)',
               quat:          'number[4] — body orientation quaternion [w,x,y,z]',
               euler:         'number[3] — body orientation in degrees, alternative to quat',
-              geoms:         'SceneGeom[] — one or more geoms composing the body shape',
+              static:        'boolean — if true (or `fixed: true` / `dynamic: false`), omits the default free joint so a top-level body is fixed in world space',
+              geoms:         'SceneGeom[] — one or more geoms composing the body shape (optional if body-level `type`/`size` shorthand, `lattice`, `sculpt`, `isCurve`, or `scad` is used)',
+              cuts:          'DeclarativeCut[] — array of hole/slot/dish/hardware cut specs `{ shape?: "cylinder"|"slot"|"dish"|"counterbore"|"countersink"|"hex_socket"|"nut_trap"|"heat_set_insert"|"bearing_seat"|"o_ring_groove"|"t_slot", at?: [xMm,yMm,zMm], normal?: [nx,ny,nz], diameterMm?, widthMm?, lengthMm?, depthMm?, threadPitchMm?, size?: "M3"|"M4"|..., bore?, fitMm? }` applied automatically when the body is built or updated',
+              roundEdges:    'DeclarativeRound[] | DeclarativeRound — `{ edges?: "all"|"top"|"bottom"|"vertical"|"inside"|number[], sizeMm: number, mode?: "round"|"bevel" }` (or array of them; alias `roundings`) applied automatically after cuts',
+              patterns:      'DeclarativePattern[] — array of surface textures `{ at: [xMm,yMm,zMm], normal?: [nx,ny,nz], pattern: "knurl"|"hex"|"ribs"|"grid"|"wave"|"dimples"|"voronoi"|"flutes"|"threads"|"text", depthMm?: number, emboss?: boolean, options?: {...} }` applied automatically to the body faces',
+              paint:         'DeclarativePaint[] — array of paint strokes `{ at: [x,y,z] | [[x,y,z],...], rgba: [r,g,b,a?], radius?: number, flow?: number, geomName?: string }` (in metres) applied automatically after CSG',
+              lattice:       '`{ sizeMm?: number, empty?: boolean, subdiv?: 0|1|2, thicknessMm?: number, ops?: LatticeOp[] }` — builds a lattice body inline in a single pass. Each op in `ops` is `{ op: "extrude"|"inset"|"bevel"|"bevel_edges"|"circle"|"revolve"|"bridge"|"faces"|"delete_faces"|"sharpen"|"dimension"|"orient"|"smooth"|"wall", ... }` in mm.',
+              sculpt:        '`{ base?: "sphere"|"cube"|"cylinder"|"torus"|"capsule"|"cone"|"Bust"|"Head"|"Hand", strokes?: SculptStroke[], cuts?: SculptCut[] }` — builds a sculpted clay body inline in a single pass.',
               joints:        'SceneJoint[] — joints attaching this body to its parent',
               children:      'SceneNode[] — child bodies (rigidly offset unless they have joints)',
               coupleTargetId:'string — id of another body; couples their first joints with coupleRatio',
@@ -3567,49 +4173,29 @@ export function useMCPBridge() {
               curveClosed:   'boolean — wrap the spline into a seamless closed loop (oval/circuit tracks). Default false.',
               curveBank:     'number — bank (roll) angle in degrees about the travel direction; positive raises the left-of-travel edge. For a counter-clockwise loop use a NEGATIVE bank to raise the outside edge (see the oval_track preset, which uses -18).',
               csgEnabled:    'boolean — evaluate this body\'s geoms as a boolean program (see the geom `csg` field). Inferred automatically when any geom is marked difference/intersection, so you rarely need to set it. The primitives remain the source of truth; the mesh is regenerated whenever they change.',
-              edgeRounds:    'array — rounded (fillet) and bevelled (chamfer) edges, each { mode: "fillet"|"chamfer", size (m), edges }. Written by physics_round_edges; use that rather than authoring edges by hand. Makes the body a boolean.',
+              edgeRounds:    'array — rounded (fillet) and bevelled (chamfer) edges, each { mode: "fillet"|"chamfer", size (m), edges }. Use declarative `roundEdges` on the body or `physics_round_edges` rather than authoring raw edge geometry by hand.',
               collision:     `'auto'|'hull'|'decompose'|'primitives' — how THIS BODY collides, mesh or boolean. MuJoCo collides a mesh as its CONVEX HULL, which fills in any cavity, so a cup, bowl, open-top box, funnel or housing would be solid to contact. 'auto' (the default) measures SOLIDITY — true volume over hull volume — and breaks the shape into convex pieces when it is below ~0.92. A box or sphere is 1.0 and keeps its hull, which is exact and cheap; a cup is around 0.3 and gets decomposed, so a ball dropped in lands INSIDE it. 'hull' forces the old filled-in behaviour. 'decompose' forces the split even for a mesh auto declined (under ~24 triangles, or over ~150k). 'primitives' is boolean-only: the authored positives collide and the mesh is visual. Runs in the background and is cached against the mesh, so it costs nothing until the shape changes. NOTE a decomposed hollow body weighs its true volume rather than its hull's — often a third as much; set mass or collisionMass if you wanted the heavier figure.`,
               collisionHulls: `number — how many convex pieces to break this body into. Default: 8 to 16, scaled by how concave it is. Contact cost between two decomposed bodies is quadratic in this, and accuracy is flat past about 16, so raise it only for a shape whose cavity is genuinely being missed.`,
               collisionMass: `number (kg) — total mass shared across the convex pieces by volume, as csgMass is for a boolean body.`,
-              csgCollision:  `DEPRECATED, use 'collision'. Still read, so older scenes behave as they always did. 'auto'|'decompose'|'primitives'|'hull' — how the boolean result collides. MuJoCo takes the CONVEX HULL of any mesh geom, so a subtracted hole does not exist for contact unless it is decomposed. 'decompose' (and 'auto', when the negative shape is elongated enough to define a hole axis) slices the result into convex angular sectors so the hole is real and things can pass through it. 'primitives' makes the mesh visual-only and collides the source primitives (exact, but holes are solid). 'hull' collides the whole shape as one filled hull. Default 'auto'.`,
+              csgCollision:  `DEPRECATED, use 'collision'. Still read, so older scenes behave as they always did. 'auto'|'decompose'|'primitives'|'hull' — how the boolean result collides.`,
               csgSectors:    'number — sector count for decomposition (default 16). Higher = tighter fit to the hole, more geoms.',
               csgHoleAxis:   `'auto'|'x'|'y'|'z' — axis the hole runs along, for decomposition. 'auto' takes the longest axis of the largest negative geom.`,
               csgMass:       'number — total mass of the boolean solid, split across its colliders by volume. Without this, MuJoCo would derive mass from the hull volume, which for a ring is far more material than there actually is.',
               csgFn:         'number — OpenSCAD $fn (facet count) for the generated primitives (default 32).',
             },
             tips: [
-              'GOTCHA — geom pos is body-local, not world-space: for a body at pos [0,0,0.4] with a box half-extent of 0.4, local z=0 is the box center (world z=0.4) and local z=+0.4 is the top face (world z=0.8). Do not pick pos values as if they were world heights. When placing decoration on a face, set the face-normal coordinate to ~half-extent and keep the other two coordinates well inside ±half-extent.',
+              'ONE-CALL SCENE BUILDING — You can include `cuts`, `roundEdges`, `patterns`, `paint`, `lattice`, and `sculpt` directly on any body inside `physics_build_scene` or `physics_add_object`. Everything compiles in a single pass without needing 20 follow-up tool calls.',
+              'BATCH TOOL CALLS — Existing modification tools also accept batch arrays: `physics_cut(targetId, cuts=[...])`, `physics_round_edges(targetId, roundings=[...])`, `physics_sculpt(targetId, strokes=[...])`, `physics_paint(targetId, strokes=[...])`, `physics_apply_pattern(targetId, patterns=[...])`, and `physics_create_lattice(..., ops=[...])`.',
+              'PARAMETRIC MESH SHORTHANDS — Use `type: "cone" | "pyramid" | "wedge" | "torus" | "tube" | "extrude" | "lathe"` on any geom or body instead of hand-building raw vertex/face arrays.',
+              'Z-UP CUSTOM MESHES — When building custom polyhedra with `type: "mesh"`, supply `verticesZUp: [x0,y0,z0, ...]` in standard MuJoCo Z-up metres. You do NOT need to convert to Three.js Y-up `vertices` or supply `renderVertices`, and closed meshes with negative signed volume are automatically flipped right-side out.',
+              'GOTCHA — geom pos is body-local, not world-space: for a body at pos [0,0,0.4] with a box half-extent of 0.4, local z=0 is the box center (world z=0.4) and local z=+0.4 is the top face (world z=0.8). Do not pick pos values as if they were world heights.',
               'PREFER over manual capsule-chain curves: for rope/cable/mustache/tentacle/vine shapes, set isComposite:true + compositeType:\'cable\' + compositeCount/compositeSize/compositeCurve on one body instead of hand-placing many capsule fromto segments.',
-              'Compound shapes: add multiple geoms to one body with different pos/quat/euler offsets',
-              'Asymmetric shapes: combine box + sphere + cylinder geoms on a single body',
-              'Rings/tubes/holes — PREFER boolean modifiers over hand-built approximations: put two geoms on one body and mark the inner one csg:\'difference\'. E.g. a washer: {type:\'cylinder\',size:[0.12,0.02]} plus {type:\'cylinder\',size:[0.06,0.1],csg:\'difference\'}. A negative that PIERCES right through gives the sharpest collision (exact convex sectors about the hole axis); one that stops inside makes a cavity, which is still collided correctly — it is decomposed like any other concave shape — just approximately rather than exactly.',
-              'A boolean body collides with its holes real by default. Set collision:\'primitives\' if you only care how it looks, or \'hull\' if you want every hole and hollow filled in for contact.',
-              'Torus-like shapes: ring of capsule geoms arranged with pos+euler offsets',
-              'L/T/cross shapes: multiple box geoms with offset positions on one body',
-              'fromto on capsule lets you specify start/end points directly in local space',
-              'Use rgba to color each geom independently for visual variety',
-              'ellipsoid semi-axes let you squash/stretch independently on all 3 axes',
-              'Children without joints are rigid offsets — useful for adding detail geometry',
-              'Arbitrary mesh: type=mesh with vertices=[x0,y0,z0,...] and faces=[i0,j0,k0,...] (triangles)',
-              'CRITICAL — mesh vertex coordinate system: X=right, Y=up (height), Z=toward camera. This is Three.js world space, NOT MuJoCo Z-up. The ground plane is at Y=0.',
-              'Mesh vertical post example: vertices centred at (cx, halfHeight, cz) with hy=halfHeight (tall in Y)',
-              'Mesh flat plank example: box(cx, 0.3, cz, halfSpan, 0.06, halfWidth) — small hy=thickness, large hx=span',
-              'Mesh tetrahedron example: vertices=[0,0,0, 1,0,0, 0.5,1,0, 0.5,0.5,1], faces=[0,2,1, 0,1,3, 1,2,3, 0,3,2] — note the index order of each triangle is chosen so all four face outward, not just written in ascending order.',
-              'CRITICAL — mesh face winding: every triangle must be counter-clockwise viewed from outside the solid. Geoms are drawn single-sided: a backwards triangle is silently culled, and a whole surface built backwards reads as a see-through body rather than as an error. Check by building a heightfield or box one quad at a time and confirming the sum over faces of dot(centroid, cross(v1-v0, v2-v0))/6 (the signed volume) comes out POSITIVE. Beware that signed volume only catches a uniformly inverted solid; a mesh with some faces each way can still sum positive, so derive each triangle\'s order from a rule rather than writing indices in ascending order.',
-              'Static mesh (no dynamic field), on a body with no joint: never moves, but still collides normally (mesh collision doesn\'t depend on dynamic). Vertices in Three.js Y-up world space. Good for scenery and decorative structures.',
-              'Dynamic mesh (dynamic:true, or omitted — a jointed body\'s mesh geoms default to it now): renders synced to the body\'s live xpos/xmat every frame, which any body that actually moves needs. renderVertices is auto-derived from vertices if omitted.',
-              'HOLLOW AND CONCAVE SHAPES JUST WORK — do not build proxy walls. MuJoCo itself collides a mesh as its CONVEX HULL, so a cup, bowl, open-top box, funnel or housing would be solid to contact. The app now decomposes any concave mesh body into convex pieces automatically (`collision:\'auto\'`, the default), so a ball dropped into a cup lands INSIDE it. This applies to every mesh body — imported STL, sculpt, lattice, relief, hand-written SCAD, boolean. Build the shape as the shape; the old advice to hand-assemble a floor plus wall primitives is obsolete and produces worse results.',
-              'collision (on a body): \'auto\'|\'hull\'|\'decompose\'|\'primitives\'. \'auto\' measures SOLIDITY — the body\'s true volume over its convex hull\'s volume — and decomposes when it is below ~0.92, i.e. when the hull would be telling a lie. A box or a sphere is 1.0 and collides as its hull, which is exact and cheap. A cup is around 0.3. \'hull\' forces the old behaviour (cavities solid, cheapest contact); \'decompose\' forces the split even for a mesh \'auto\' declined as too coarse or too dense (over ~150k triangles); \'primitives\' is boolean-only. Decomposition runs in the background and is cached, so it costs nothing until the mesh actually changes. Supersedes csgCollision, which is still read so old scenes behave as they did.',
-              'GOTCHA — decomposing a hollow body makes it LIGHTER. Undecomposed, MuJoCo weighs a mesh with no explicit mass at 1000 kg/m³ times its HULL volume (the solid lump). Decomposed, it weighs the material that is actually there — often a third of that. That is the correct figure, but if you wanted the heavier one, set mass or collisionMass explicitly.',
-              'GOTCHA — rgba alpha is NOT rendered as transparency in this app: the renderer\'s material always uses full opacity regardless of the 4th rgba value, so rgba:[r,g,b,0] does NOT make a geom invisible — it renders as solid opaque black (r=g=b=0), which commonly causes flickering/z-fighting where it overlaps another geom. To hide a primitive collision proxy, do NOT rely on alpha — either color it to match the geom it\'s layered under (e.g. same rgba as a decorative mesh sitting on top of it) or set contype:0/conaffinity:0 on whichever geom you don\'t want colliding and accept both are visible.',
-              'Dynamic mesh renderVertices: just swap Y↔Z on each Y-up vertex: (x,y,z)→(x,-z,y). Do NOT subtract centroid. MuJoCo recenters internally.',
-              'Dynamic mesh face winding: use outward-facing CCW winding. Wrong winding causes inside-out contacts and objects sinking through surfaces.',
-              'Dynamic mesh body pos: set body_pos=[0,0,0] to place mesh where its Y-up base sits. Adjust body_pos.z to raise/lower.',
+              'Compound shapes: add multiple geoms to one body with different pos/quat/euler offsets (works for both primitives and parametric/custom meshes).',
+              'Rings/tubes/holes — use `type: "tube"` / `"torus"`, declarative `cuts: [...]`, or boolean modifiers (`csg: "difference"`).',
+              'HOLLOW AND CONCAVE SHAPES JUST WORK — do not build proxy walls. `collision: "auto"` (the default) measures solidity and decomposes any concave mesh body into convex pieces automatically so balls land inside cups, bowls, funnels, and housings.',
+              'GOTCHA — rgba alpha is NOT rendered as transparency in this app: the renderer\'s material always uses full opacity regardless of the 4th rgba value, so rgba:[r,g,b,0] does NOT make a geom invisible — use `role: "collision"` for invisible colliders or `role: "visual"` for non-colliding visuals.',
               'OpenSCAD shapes: set scad="cube([0.5,0.5,0.5]);" on a body node. If geoms is omitted, it automatically creates a dynamic mesh geom and compiles the SCAD code to vertices/faces.',
-              'A scad body\'s mesh IS the whole part — when converting a primitive-built body to SCAD (or rewriting its SCAD), send an explicit geoms array holding ONLY that mesh geom. UPDATE_OBJECT with a scad payload refills the existing mesh geom but does NOT prune sibling primitives: leftovers still render and still collide over the mesh, and since they are usually unpositioned (pos [0,0,0], no fromto) they pile up as stray blobs at the body origin. A dynamic mesh already collides via its convex hull, so only keep a primitive if it is a deliberate proxy — positioned explicitly, with contype:0/conaffinity:0 on whichever geom must not collide.',
-              'Working example: mesh_collision preset (pyramid + ramp with full collision).',
               'Bouncy objects: set solref=[0.04, 0.2] and solimp=[0.99, 0.9999, 0.0001, 0.5, 2]. dampingRatio 0.2 = lively bounce. The floor has dampingRatio=0.0 so ball+floor averages to 0.1 (still bouncy).',
-              'Contact blending: two geoms in contact average their solref/solimp. Keep this in mind when tuning — a non-bouncy floor (dampingRatio=1.0) will halve any ball\'s effective bounce.',
             ],
           };
 
