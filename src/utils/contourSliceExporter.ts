@@ -1119,6 +1119,7 @@ export function exportContourSliceSvg(
   let scaleFactor = Math.max(0.05, Math.min(2.0, options.scaleFactor ?? 1.0));
 
   if (options.autoScale || maxSheets > 0) {
+    const kerfGrowMm = Math.max(0, options.kerf * 1000);
     const evaluateScale = (s: number): { sheetCount: number; fitSingleSheet: boolean } => {
       const sizes: { w: number; h: number }[] = [];
       let fitSingleSheet = true;
@@ -1132,8 +1133,8 @@ export function exportContourSliceSvg(
             if (sy < lminY) lminY = sy; if (sy > lmaxY) lmaxY = sy;
           }
         }
-        const w = Math.max(1, lmaxX - lminX);
-        const h = Math.max(1, lmaxY - lminY);
+        const w = Math.max(1, lmaxX - lminX + kerfGrowMm);
+        const h = Math.max(1, lmaxY - lminY + kerfGrowMm);
         if (w + 2 * marginMm > sheetWidthMm || h + 2 * marginMm > sheetHeightMm) {
           fitSingleSheet = false;
         }

@@ -240,15 +240,24 @@ function generateWindowGcode(params: {
 
   for (const zc of zClips) {
     lines.push(`; Tabletop Z-Clip Expansion Slot ${zc.id}: ${zc.lengthYMm} mm long, ${zc.depthMm} mm deep`);
+    const halfX = Math.max(0, zc.widthXMm * 0.5 - rBit);
     const halfY = Math.max(0.5, zc.lengthYMm * 0.5 - rBit);
     const passes = Math.max(1, Math.ceil(zc.depthMm / stepdownMm));
-    lines.push(`G0 X${fmt(zc.centerXMm)} Y${fmt(zc.centerYMm - halfY)}`);
+    lines.push(`G0 X${fmt(zc.centerXMm - halfX)} Y${fmt(zc.centerYMm - halfY)}`);
     for (let p = 1; p <= passes; p++) {
       const z = -Math.min(zc.depthMm, p * stepdownMm);
       lines.push(`G1 Z${fmt(z)} F${Math.round(plungeRate)}`);
-      lines.push(`G1 X${fmt(zc.centerXMm)} Y${fmt(zc.centerYMm + halfY)} F${Math.round(feedRate)}`);
-      lines.push(`G1 X${fmt(zc.centerXMm)} Y${fmt(zc.centerYMm - halfY)}`);
-      cuttingDistMm += halfY * 4;
+      if (halfX > 1e-3) {
+        lines.push(`G1 X${fmt(zc.centerXMm + halfX)} Y${fmt(zc.centerYMm - halfY)} F${Math.round(feedRate)}`);
+        lines.push(`G1 X${fmt(zc.centerXMm + halfX)} Y${fmt(zc.centerYMm + halfY)}`);
+        lines.push(`G1 X${fmt(zc.centerXMm - halfX)} Y${fmt(zc.centerYMm + halfY)}`);
+        lines.push(`G1 X${fmt(zc.centerXMm - halfX)} Y${fmt(zc.centerYMm - halfY)}`);
+        cuttingDistMm += (halfX + halfY) * 4;
+      } else {
+        lines.push(`G1 X${fmt(zc.centerXMm)} Y${fmt(zc.centerYMm + halfY)} F${Math.round(feedRate)}`);
+        lines.push(`G1 X${fmt(zc.centerXMm)} Y${fmt(zc.centerYMm - halfY)}`);
+        cuttingDistMm += halfY * 4;
+      }
     }
     lines.push(`G0 Z${fmt(safeZ)}`);
   }
@@ -414,10 +423,11 @@ function buildCncSetupsForPart(
       const zcTop = Math.max(0, partLenMm * 0.5 - maxSlotLen * 0.5 - 15);
       const zcBot = partLenMm * 0.5 + maxSlotLen * 0.5 + 15;
       const zcOffset = zcBot <= maxWindowLenMm ? 0 : Math.floor(zcTop / 10) * 10;
-      if (!windows.length) {
-        windows.push({ startOffsetMm: zcOffset, mortises: [], zClips: [...group.zClips] });
-      } else if (zcBot - windows[0].startOffsetMm <= maxWindowLenMm && zcTop >= windows[0].startOffsetMm) {
-        windows[0].zClips.push(...group.zClips);
+      const hostWin = windows.find(
+        (w) => zcTop >= w.startOffsetMm && zcBot - w.startOffsetMm <= maxWindowLenMm,
+      );
+      if (hostWin) {
+        hostWin.zClips.push(...group.zClips);
       } else {
         windows.push({ startOffsetMm: zcOffset, mortises: [], zClips: [...group.zClips] });
       }

@@ -589,8 +589,30 @@ function hybridPassGroups(input: FinishingPathInput): Point2D[][][] {
   // A run shorter than the stepover lies inside what the pass beside it cuts.
   const minRun = Math.max(0, input.stepover);
   const steep = contourPasses(input).flatMap((pass) => splitWhere(pass, isSteepNear, minRun));
+  const stepX = input.surface.stepX;
+  const stepY = input.surface.stepY;
+  const s = input.surface;
+  const surfaceZAt = (x: number, y: number) => {
+    const c = Math.min(s.cols - 1, Math.max(0, Math.round((x - s.minX) / (s.stepX || 1))));
+    const r = Math.min(s.rows - 1, Math.max(0, Math.round((y - s.minY) / (s.stepY || 1))));
+    return s.z[r * s.cols + c];
+  };
+  const footOffsets = [
+    { dx: stepX, dy: 0 },
+    { dx: -stepX, dy: 0 },
+    { dx: 0, dy: stepY },
+    { dx: 0, dy: -stepY },
+  ];
+  const isShallowOrWallFoot = (p: Point2D) => {
+    if (!isSteep(p)) return true;
+    const zp = surfaceZAt(p.x, p.y);
+    return footOffsets.some((o) => {
+      const q = { x: p.x + o.dx, y: p.y + o.dy };
+      return !isSteep(q) && Math.abs(zp - surfaceZAt(q.x, q.y)) <= 1e-3;
+    });
+  };
   const shallow = rasterPasses(input, input.angleDeg).flatMap((pass) =>
-    splitWhere(pass, (p) => !isSteep(p), minRun)
+    splitWhere(pass, isShallowOrWallFoot, minRun)
   );
 
   /*
