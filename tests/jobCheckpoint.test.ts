@@ -66,7 +66,9 @@ import {
   clearCheckpoint,
   loadCheckpoint,
   getCheckpointStatus,
+  subscribeRemoteJob,
   CHECKPOINT_LIMITS,
+  type RemoteJob,
 } from '../src/utils/jobCheckpoint';
 
 /** A program of roughly the requested size, in lines a G-code parser would take. */
@@ -315,5 +317,102 @@ describe('carrying on after a restore', () => {
     expect(again!.source).toBe('local');
     expect(again!.progress.fromLine).toBe(1400);
     expect(again!.program.gcode).toBe(p.gcode);
+  });
+});
+
+/** What the lookup last said about a job running somewhere else. */
+function remoteJob(): RemoteJob | null {
+  let seen: RemoteJob | null = null;
+  subscribeRemoteJob((j) => (seen = j))();
+  return seen;
+}
+
+/** Rewrites the stored progress record as if another writer had made it. */
+function signLocalProgress(patch: Record<string, unknown>): void {
+  const key = 'physics_job_checkpoint_progress';
+  const rec = JSON.parse(store.getItem(key)!);
+  store.setItem(key, JSON.stringify({ ...rec, ...patch, writer: { ...rec.writer, ...(patch.writer as object) } }));
+}
+
+describe('a job still running somewhere else', () => {
+  it('is not offered as interrupted while another tab of this browser is writing it', async () => {
+    beginCheckpoint({ ...program(4000), jobName: 'Tray' });
+    recordProgress(1500, 'streaming', true);
+    signLocalProgress({ writer: { tab: 'tab_other' } });
+
+    expect(await loadCheckpoint()).toBeNull();
+    expect(remoteJob()).toMatchObject({ jobName: 'Tray', fromLine: 1500, where: 'tab' });
+  });
+
+  it('is offered once that tab has gone quiet', async () => {
+    beginCheckpoint(program(4000));
+    recordProgress(1500, 'streaming', true);
+    signLocalProgress({
+      writer: { tab: 'tab_other' },
+      at: Date.now() - CHECKPOINT_LIMITS.LIVE_LOCAL_MS - 1000,
+    });
+
+    const found = await loadCheckpoint();
+    expect(found).not.toBeNull();
+    expect(found!.progress.fromLine).toBe(1500);
+    expect(remoteJob()).toBeNull();
+  });
+
+  it('offers a job this same tab left behind straight away, as after a reload', async () => {
+    beginCheckpoint(program(4000));
+    recordProgress(800, 'streaming', true);
+
+    expect(await loadCheckpoint()).not.toBeNull();
+    expect(remoteJob()).toBeNull();
+  });
+
+  it('recognises a job another machine on the account is streaming', async () => {
+    account.token = 'tok';
+    account.pro = true;
+    beginCheckpoint({ ...program(4000), jobName: 'Oak tray' });
+    recordProgress(2200, 'streaming', true);
+    await settle();
+
+    // A second computer: nothing local, its own install id.
+    store.clear();
+
+    expect(await loadCheckpoint()).toBeNull();
+    expect(remoteJob()).toMatchObject({ jobName: 'Oak tray', fromLine: 2200, where: 'device' });
+  });
+
+  it('offers the other machine\'s job once its record is stale', async () => {
+    account.token = 'tok';
+    account.pro = true;
+    beginCheckpoint(program(4000));
+    recordProgress(2200, 'streaming', true);
+    await settle();
+    const progressId = [...account.docs.keys()].find((k) => k.startsWith('mesh-job-progress-'))!;
+    const rec = account.docs.get(progressId) as { at: number };
+    account.docs.set(progressId, { ...rec, at: Date.now() - CHECKPOINT_LIMITS.LIVE_CLOUD_MS - 1000 });
+    store.clear();
+
+    const found = await loadCheckpoint();
+    expect(found).not.toBeNull();
+    expect(found!.source).toBe('cloud');
+  });
+
+  it('keeps the record fresh while the job waits at a tool change, and stops once it has stopped', () => {
+    vi.useFakeTimers();
+    beginCheckpoint(program(4000));
+    recordProgress(900, 'streaming', true);
+    const key = 'physics_job_checkpoint_progress';
+    const first = JSON.parse(store.getItem(key)!).at;
+
+    // Twenty minutes standing at a tool change: no lines go out.
+    vi.advanceTimersByTime(20 * 60 * 1000);
+    const later = JSON.parse(store.getItem(key)!);
+    expect(later.at - first).toBeGreaterThan(19 * 60 * 1000);
+    expect(later.fromLine).toBe(900);
+
+    // An alarm ends it; the heartbeat must not dress the stop up as live.
+    recordProgress(950, 'alarm', true);
+    const stopped = JSON.parse(store.getItem(key)!).at;
+    vi.advanceTimersByTime(10 * 60 * 1000);
+    expect(JSON.parse(store.getItem(key)!).at).toBe(stopped);
   });
 });

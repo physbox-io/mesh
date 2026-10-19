@@ -5,6 +5,7 @@
 
 import { useEffect } from 'react';
 import { getStoredAuthToken } from '../utils/apiClient';
+import { tabSession } from '../utils/tabSession';
 import { useStore, getPhysicsWorkerClient } from '../store/useStore';
 import { useDentStore } from '../store/dentStore';
 import { isDentable, needsConversionForDenting } from '../utils/dentMesh';
@@ -1560,22 +1561,8 @@ function describeFiles(files: { name: string; bytes: Uint8Array }[], include: bo
     : { name: f.name, bytes: f.bytes.byteLength });
 }
 
-const TAB_SESSION_KEY = 'physbox_tab_session';
 function tabIdentity(): { sessionId: string; label: string; href: string; startedAt: number } {
-  let id = '';
-  let startedAt = Date.now();
-  try {
-    const stored = sessionStorage.getItem(TAB_SESSION_KEY);
-    if (stored) {
-      const parsed = JSON.parse(stored) as { id?: string; startedAt?: number };
-      if (typeof parsed.id === 'string') id = parsed.id;
-      if (typeof parsed.startedAt === 'number') startedAt = parsed.startedAt;
-    }
-  } catch { /* private mode, or a value we did not write: fall through and make one */ }
-  if (!id) {
-    id = `tab_${Math.random().toString(36).slice(2, 10)}`;
-    try { sessionStorage.setItem(TAB_SESSION_KEY, JSON.stringify({ id, startedAt })); } catch { /* nothing to do */ }
-  }
+  const { id, startedAt } = tabSession();
   const href = typeof location !== 'undefined' ? location.href : '';
   const port = typeof location !== 'undefined' ? location.port : '';
   return { sessionId: id, label: `Mesh :${port} ${id.slice(4)}`, href, startedAt };

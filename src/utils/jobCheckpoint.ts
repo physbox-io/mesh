@@ -44,6 +44,7 @@ import {
   fetchCloudDocuments,
   deleteCloudDocument,
 } from './apiClient';
+import { tabSession } from './tabSession';
 
 /**
  * Which app's documents these are.
@@ -97,6 +98,23 @@ const CLOUD_PROGRESS_MS = 60000;
  */
 const TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
+/**
+ * How recently a job's own tab must have written for it to count as still
+ * running there, by where the record was read from.
+ *
+ * A live job writes on every line while it cuts and on a heartbeat while it
+ * waits (`startHeartbeat`), so a fresh record from another tab or another
+ * machine is a job in progress, not one left behind. Offering it as
+ * "interrupted" is wrong twice over: it is not, and restoring it here would
+ * put a second copy of the program against a machine that is mid-cut.
+ *
+ * The local figure is far above the two-second write because a browser slows
+ * timers in a hidden tab to about one a minute; the cloud one is two and a half
+ * of its one-minute writes.
+ */
+const LIVE_LOCAL_MS = 90_000;
+const LIVE_CLOUD_MS = 150_000;
+
 /** Why the last progress record was written. */
 export type CheckpointReason =
   | 'streaming'
@@ -132,6 +150,12 @@ export interface CheckpointProgress {
    * bit to fit, which is the whole reason Z has to be zeroed again.
    */
   pendingPause?: PendingPause;
+  /**
+   * Who is streaming the job: this browser's install id and the tab's session
+   * id. Absent on records written before it existed, which are never taken as
+   * live.
+   */
+  writer?: { install: string; tab: string };
 }
 
 /** A tool change or programmed stop that a stopped job was waiting at. */
@@ -156,6 +180,17 @@ export interface RestorableCheckpoint {
    * answer is to wind the line back rather than to trust it.
    */
   approximate: boolean;
+}
+
+/** A job another tab or machine is streaming right now, as last heard. */
+export interface RemoteJob {
+  jobName: string | null;
+  fromLine: number;
+  totalLines: number;
+  /** When its tab last wrote. */
+  at: number;
+  /** Another tab of this browser, or another machine on the same account. */
+  where: 'tab' | 'device';
 }
 
 /** What the UI says about where the running job is being kept. */
@@ -198,6 +233,53 @@ let cloudWriteInFlight = false;
  * writes whose loss actually costs anything.
  */
 let cloudPending: CheckpointProgress | null = null;
+
+/** The last line recorded, so the heartbeat can say it again with a fresh time. */
+let lastRecorded: { fromLine: number; reason: CheckpointReason } | null = null;
+let heartbeat: ReturnType<typeof setInterval> | null = null;
+
+let remoteJob: RemoteJob | null = null;
+const remoteListeners = new Set<(j: RemoteJob | null) => void>();
+
+function setRemoteJob(job: RemoteJob | null): void {
+  if (job === null && remoteJob === null) return;
+  remoteJob = job;
+  for (const l of remoteListeners) l(remoteJob);
+}
+
+/** The job running elsewhere that the last lookup found, if any. */
+export function subscribeRemoteJob(fn: (j: RemoteJob | null) => void): () => void {
+  remoteListeners.add(fn);
+  fn(remoteJob);
+  return () => {
+    remoteListeners.delete(fn);
+  };
+}
+
+/**
+ * Keeps the progress record fresh while the job is alive but not cutting.
+ *
+ * The streamer records a line only while lines are going out, so a job
+ * standing at a tool change for twenty minutes would otherwise look exactly
+ * like one whose tab died twenty minutes ago. Stops by itself once the last
+ * record is anything but `streaming` — an alarm, a park, a drop — because then
+ * the job has stopped and the other tabs should be told so.
+ */
+function startHeartbeat(): void {
+  if (heartbeat) return;
+  heartbeat = setInterval(() => {
+    if (!current || !lastRecorded || lastRecorded.reason !== 'streaming') {
+      stopHeartbeat();
+      return;
+    }
+    recordProgress(lastRecorded.fromLine, 'streaming');
+  }, LOCAL_PROGRESS_MS);
+}
+
+function stopHeartbeat(): void {
+  if (heartbeat) clearInterval(heartbeat);
+  heartbeat = null;
+}
 
 function setStatus(patch: Partial<CheckpointStatus>): void {
   status = { ...status, ...patch };
@@ -373,7 +455,11 @@ export function recordProgress(
     fromLine,
     reason,
     ...(pendingPause ? { pendingPause } : {}),
+    writer: { install: installId(), tab: tabSession().id },
   };
+  lastRecorded = { fromLine, reason };
+  if (reason === 'streaming') startHeartbeat();
+  else stopHeartbeat();
 
   if (force || now - lastLocalWrite >= LOCAL_PROGRESS_MS) {
     lastLocalWrite = now;
@@ -424,6 +510,8 @@ function pushCloudProgress(record: CheckpointProgress): void {
  */
 export function clearCheckpoint(): void {
   current = null;
+  lastRecorded = null;
+  stopHeartbeat();
   lastLocalWrite = 0;
   lastCloudWrite = 0;
   cloudPending = null;
@@ -434,6 +522,33 @@ export function clearCheckpoint(): void {
   if (!cloudAvailable()) return;
   void deleteCloudDocument(programDocId());
   void deleteCloudDocument(progressDocId());
+}
+
+/**
+ * The job, if its record says another tab or machine is still streaming it.
+ *
+ * A record this tab wrote is never live elsewhere: if this tab were still
+ * running it, the restore would not have been asked for, so it is a record a
+ * reload of this tab left behind — exactly the job to offer back.
+ */
+function liveElsewhere(
+  program: CheckpointProgram | null,
+  progress: CheckpointProgress | null,
+  source: 'local' | 'cloud'
+): RemoteJob | null {
+  if (!program || !progress || program.id !== progress.id) return null;
+  if (progress.reason !== 'streaming' || !progress.writer) return null;
+  const limit = source === 'local' ? LIVE_LOCAL_MS : LIVE_CLOUD_MS;
+  if (!(Date.now() - progress.at < limit)) return null;
+  const { install, tab } = progress.writer;
+  if (install === installId() && tab === tabSession().id) return null;
+  return {
+    jobName: program.jobName,
+    fromLine: progress.fromLine,
+    totalLines: program.totalLines,
+    at: progress.at,
+    where: install === installId() ? 'tab' : 'device',
+  };
 }
 
 /** Whether a record is recent enough to still describe something on the machine. */
@@ -469,6 +584,18 @@ function usable(program: unknown, progress: unknown): boolean {
  * holds.
  */
 export async function loadCheckpoint(): Promise<RestorableCheckpoint | null> {
+  const found = await findCheckpoint();
+  if (!found) {
+    setRemoteJob(null);
+    return null;
+  }
+  // Still being cut somewhere else: say so, and do not offer it as abandoned.
+  const live = liveElsewhere(found.program, found.progress, found.source);
+  setRemoteJob(live);
+  return live ? null : found;
+}
+
+async function findCheckpoint(): Promise<RestorableCheckpoint | null> {
   const localProgram = readLocal<CheckpointProgram>(PROGRAM_KEY);
   const localProgress = readLocal<CheckpointProgress>(PROGRESS_KEY);
   if (usable(localProgram, localProgress)) {
@@ -551,4 +678,11 @@ export function adoptCheckpoint(program: CheckpointProgram): void {
 }
 
 /** For tests: the ceiling, so a fixture can be built either side of it. */
-export const CHECKPOINT_LIMITS = { MAX_LOCAL_BYTES, LOCAL_PROGRESS_MS, CLOUD_PROGRESS_MS, TTL_MS };
+export const CHECKPOINT_LIMITS = {
+  MAX_LOCAL_BYTES,
+  LOCAL_PROGRESS_MS,
+  CLOUD_PROGRESS_MS,
+  TTL_MS,
+  LIVE_LOCAL_MS,
+  LIVE_CLOUD_MS,
+};

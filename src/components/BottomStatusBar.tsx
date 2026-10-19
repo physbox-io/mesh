@@ -19,6 +19,7 @@ import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { useModifier } from '../hooks/useModifier';
 import { CastPrepGuardModal } from './CastPrepGuardModal';
 import { useJobPause } from '../store/jobPauseStore';
+import { RemoteJobChip } from './RemoteJobChip';
 
 /**
  * What the app is in the middle of, said in one phrase.
@@ -787,6 +788,8 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
             </button>
           </div>
         )}
+
+        <RemoteJobChip />
 
         <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800">
           <span className={`w-2 h-2 rounded-full ${isPlaying ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400'}`} />
