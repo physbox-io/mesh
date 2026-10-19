@@ -360,7 +360,7 @@ export async function decomposeNodeColliders(node: SceneNode): Promise<ColliderR
     : undefined;
 
   let hulls: Hull[];
-  let cavities: FilledCavity[] = [];
+  let cavities: FilledCavity[];
   try {
     hulls = await decomposeMeshOffThread(verts, faces, {
       maxHulls: verdict.maxHulls,
