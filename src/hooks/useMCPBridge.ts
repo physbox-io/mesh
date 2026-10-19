@@ -52,7 +52,7 @@ import { collectIndividualPartSoups } from '../utils/timberBreakdown';
 import { synthesizeTimberJoinery, type TenonCornerFit, type TimberEdgeProfile, type TimberJointMode } from '../utils/timberJoinery';
 import { buildTimberCutPlan } from '../utils/timberCutList';
 import { filamentSpec } from '../utils/filaments';
-import { deriveSolidOptions, fittingScalePercent, measurePart, type SolidMachiningResult } from '../utils/solidMachiningExporter';
+import { deriveSolidOptions, fittingScalePercent, measurePart, type SolidMachiningOptions, type SolidMachiningResult } from '../utils/solidMachiningExporter';
 import {
   APP_RELIEF_DEFAULTS,
   DEFAULT_RELIEF_OPTIONS,
@@ -65,6 +65,7 @@ import { DEFAULT_LASER_OPTIONS, type LaserCutResult } from '../utils/laserCutExp
 import { DEFAULT_CONTOUR_OPTIONS, collectSceneTriangles, type ContourSliceResult } from '../utils/contourSliceExporter';
 import { reliefSimulationTools } from '../utils/simulatedPart';
 import { simulationSetups } from '../utils/solidSetups';
+import { BLOCK_FACES, FACE_NAME, type BlockFace } from '../utils/orient';
 import { contourSheetParts, laserSheetParts, laserStockTransform } from '../utils/sheetSimulation';
 import { addSimulationToScene } from './useAddSimulation';
 import { lastReliefOptions } from '../utils/lastReliefOptions';
@@ -391,6 +392,21 @@ function reliefOptionsFor(msg: Record<string, unknown>): { options: ReliefCarveO
   return { options, fromDialog: !!dialog };
 }
 
+/**
+ * `setups` as an agent may send it: 'auto', 1 or 2, or the faces to cut from
+ * as a list or a comma-separated string ('+z,+x,-x'), named as the block
+ * stands for setup 1. Anything else is left out, which keeps `sides`.
+ */
+function parseSetups(v: unknown): SolidMachiningOptions['setups'] | undefined {
+  if (v === 'auto') return 'auto';
+  if (v === 1 || v === '1') return 1;
+  if (v === 2 || v === '2') return 2;
+  const list = Array.isArray(v) ? v : typeof v === 'string' ? v.split(',') : null;
+  if (!list) return undefined;
+  const faces = list.map((f) => String(f).trim().toLowerCase()).filter((f): f is BlockFace => (BLOCK_FACES as string[]).includes(f));
+  return faces.length > 0 ? faces : undefined;
+}
+
 /** The solid-machining job an MCP command plans. Shared by EXPORT_MACHINING and ADD_SIMULATION. */
 function machiningOptionsFor(msg: Record<string, unknown>, scene: SceneGraph) {
   const dia = typeof msg.toolDiaMm === 'number' && msg.toolDiaMm > 0 ? msg.toolDiaMm : 3;
@@ -404,9 +420,15 @@ function machiningOptionsFor(msg: Record<string, unknown>, scene: SceneGraph) {
   const scalePercent = typeof msg.scalePercent === 'number' && msg.scalePercent > 0
     ? msg.scalePercent
     : fittingScalePercent(natural ? Math.max(natural.x, natural.y, natural.z) : 0);
+  const setups = parseSetups(msg.setups);
   const options = deriveSolidOptions(scene, {
     scalePercent,
     ...(typeof msg.sides === 'number' ? { sides: msg.sides } : {}),
+    ...(setups !== undefined ? { setups } : {}),
+    ...(typeof msg.clearanceMm === 'number' ? { clearanceMm: msg.clearanceMm } : {}),
+    ...(typeof msg.toolStickoutMm === 'number' ? { toolStickoutMm: msg.toolStickoutMm } : {}),
+    ...(typeof msg.stockWidthMm === 'number' ? { stockWidthMm: msg.stockWidthMm } : {}),
+    ...(typeof msg.stockDepthMm === 'number' ? { stockDepthMm: msg.stockDepthMm } : {}),
     ...(typeof msg.stockThicknessMm === 'number' ? { stockThicknessMm: msg.stockThicknessMm } : {}),
     ...(typeof msg.material === 'string' ? { material: msg.material } : {}),
     ...(msg.finishingToolType === 'flat' || msg.finishingToolType === 'ball_nose' || msg.finishingToolType === 'v_bit'
@@ -3519,10 +3541,34 @@ export function useMCPBridge() {
               estimatedTimeSeconds: result.estimatedTimeSeconds,
               totalCutDistanceMm: result.totalCutDistanceMm,
               sides: result.sides.map(s => ({ side: s.side, depthMm: s.depthMm })),
+              // Planned setups (setups: 'auto' or a list of faces), in the order they run.
+              ...(result.plan ? {
+                plan: result.plan.text,
+                upChosen: result.upChosen,
+                remaining: result.plan.remaining,
+                redesignHint: result.plan.redesignHint ?? null,
+                dropped: result.plan.dropped,
+                setups: (result.setups ?? []).map((st) => ({
+                  index: st.index,
+                  face: st.upFace,
+                  faceUp: FACE_NAME[st.upFace],
+                  standingHeightMm: +st.standingHeightMm.toFixed(1),
+                  depthMm: +st.depthMm.toFixed(2),
+                  lengthOverDia: +st.lengthOverDia.toFixed(1),
+                  estimatedTimeSeconds: Math.round(st.estimatedTimeSeconds),
+                  clearedMm3: Math.round(st.clearedMm3),
+                  skinMm: +st.allowanceMm.toFixed(2),
+                  locate: st.locate,
+                  datum: st.datum?.description ?? null,
+                  instructions: st.instructions,
+                })),
+              } : {}),
             },
             warnings: result.warnings ?? [],
             files: describeFiles(
-              result.sides.map(s => ({ name: `machining-side-${s.side}.nc`, bytes: encoder.encode(s.gcode ?? '') })),
+              result.plan && result.setups
+                ? result.setups.map(st => ({ name: `machining-setup-${st.index}-${st.upFace.replace('+', 'p').replace('-', 'm')}.nc`, bytes: encoder.encode(st.gcode ?? '') }))
+                : result.sides.map(s => ({ name: `machining-side-${s.side}.nc`, bytes: encoder.encode(s.gcode ?? '') })),
               msg.includeFiles !== false,
             ),
           };

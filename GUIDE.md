@@ -634,7 +634,7 @@ as the matching export.
 | Dialog | What is simulated |
 | --- | --- |
 | Relief Carve | the program, milled out of a block |
-| Solid Machining | side A from the top, side B mirrored back from the bottom (`cols-1-c`), one solid |
+| Solid Machining | side A from the top, side B mirrored back from the bottom (`cols-1-c`), one solid; with setups on the block's sides, every setup in its own frame (below) |
 | Laser Cut | the panels, extruded at their sheet's thickness, back in their place in the assembly |
 | Contour Slice | the layers, stacked at the sheet thickness |
 | Cast, Mold | **Add to Scene**: the pattern or mold halves, as exported, beside the model |
@@ -664,6 +664,44 @@ as the matching export.
   `collision: 'hull'` so it is never decomposed).
 * The work runs on its own export worker (job kinds `simulate` and `simulateSheets`, with
   progress), started for the job and stopped after it.
+* **Setups on the block's sides** (`utils/multiSetupMesh.ts`): each setup is cut in its own frame,
+  and the part is where `f(p) = min(box, min_k H_k(R_k p + t_k) - z'_k) >= 0`, meshed with surface
+  nets. Only plans that stand the block on a side go this way; one setup and the top/flip pair
+  keep the height-map pair above, unchanged.
+
+---
+
+### Solid machining from any face
+
+`setups: 'auto'` (the dialog's default) plans the setups a part needs; `1` and `2` are the old
+`sides`, byte for byte. Faces are named as the block stands for setup 1: `+z` top, `-y` front,
+`-x` left end.
+
+* **Frames** (`utils/orient.ts`). `setupFrame(face, stock)` turns setup 1's work frame so a face
+  is up, always a rotation (det +1); the yaw keeps setup 1's top/front edge at the new near-left
+  on a turn onto an end. `-z` is side B's flip left to right. `describeTurn` names two faces
+  ("on its left end, right end up, with the front towards you") so it cannot go down mirrored.
+* **Planning** (`utils/setupPlanner.ts`). The part is cast into exact solid spans per column and
+  coarse voxels (`utils/columnSolid.ts`, rays nudged off the grid). What a face can reach is an
+  opening of its first-hit depth by the cutter's disc (the centre may stand off the part, in the
+  channel), within its reach (`toolStickoutMm`, else 8 D). Every air voxel goes to the face it is
+  shallowest under; every subset of faces is scored: setups, depth in diameters, time, and what
+  is left in units of 0.05% of the part's volume. Air no face reaches (corners sharper than the
+  cutter) is reported as a fillet, never chased. The top is the setup that frees the part, last,
+  unless the flip does.
+* **Building** (`utils/solidSetups.ts`). The six ways up are tried and the asked-for one kept
+  unless another is clearly cheaper; the top and flip come from the old exporter; each side setup
+  is a windowed `machineSurface` job in its own frame, never below the part plus a skin for the
+  turn's error (touch-off, a quarter degree of tilt), and only as deep as the plan gave it, widened
+  by the cutter's diameter so it can get down there.
+* **Running.** The runner knows which setup a job is (`JobSetup`). A later setup will not start
+  until Z, and X and Y unless it sits on pins, have been set since the previous one ended, and
+  never over MCP or a relayed device. `setWorkPosition` touches off a face with the bit's side
+  (allowing for paper); `parkHigh` lifts out of the way. `SetupChangeDialog` walks the operator
+  through it; `setupDiagram.ts` draws each setup.
+* **Relief stays one face.** A relief with an undercut as modelled offers *Machine as a part
+  instead*, which opens solid machining with the same block and bits. A feature that runs off the
+  model's edge below the top face is cut past the board edge (`machineSurface`'s `runOff`).
 
 ---
 

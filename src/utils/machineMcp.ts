@@ -90,6 +90,8 @@ function carveOptions(args: Record<string, unknown>) {
   const options = {
     ...DEFAULT_SOLID_OPTIONS,
     ...(typeof args.sides === 'number' ? { sides: args.sides } : {}),
+    // Planned from any face; only setup 1 is ever run from here.
+    ...(args.setups === 'auto' ? { setups: 'auto' as const } : {}),
     ...(stockThicknessMm !== undefined ? { stockThicknessMm } : {}),
     ...(typeof args.material === 'string' ? { material: args.material } : {}),
     roughingToolDiaMm: dia,
@@ -135,11 +137,17 @@ async function carveCurrentScene(args: Record<string, unknown>): Promise<{ summa
     throw new Error(result.error || 'The machining program could not be generated.');
   }
 
-  const wanted = typeof args.side === 'number' ? args.side : result.sides[0]?.side;
-  const side = result.sides.find(s => s.side === wanted);
+  // A planned job is run by setup number; a one- or two-sided one by side, as before.
+  const planned = result.plan && result.setups ? result.setups : null;
+  const wanted = planned ? (typeof args.setup === 'number' ? args.setup : 1) : typeof args.side === 'number' ? args.side : result.sides[0]?.side;
+  const side = planned
+    ? planned.find(s => s.index === wanted)
+    : result.sides.find(s => s.side === wanted);
   if (!side?.gcode) {
     throw new Error(
-      `This program has no side ${wanted}. It cuts ${result.sides.map(s => s.side).join(', ')}.`
+      planned
+        ? `This plan has no setup ${wanted}. It has ${planned.length}.`
+        : `This program has no side ${wanted}. It cuts ${result.sides.map(s => s.side).join(', ')}.`
     );
   }
 
@@ -158,13 +166,13 @@ async function carveCurrentScene(args: Record<string, unknown>): Promise<{ summa
   if (!state.connected) throw new Error('No machine is connected. Connect one first.');
 
   const run = await webSerialManager.runJob(side.gcode, {
-    name: `carve side ${side.side}`,
-    // Side B needs the block turned over by hand, so the runner refuses it here.
+    name: planned ? `carve setup ${wanted}` : `carve side ${side.side}`,
+    // Every setup after the first needs the block turned by hand, so the runner refuses it here.
     origin: 'mcp',
     setup: {
       sequenceId: `mcp-solid-${result.sides[0].gcode.length}`,
-      index: side.side === 'B' ? 2 : 1,
-      of: result.sides.length,
+      index: planned ? Number(wanted) : side.side === 'B' ? 2 : 1,
+      of: planned ? planned.length : result.sides.length,
       locate: result.pins.length > 0 ? 'pins' : 'knownSpot',
     },
     estimatedSeconds: result.estimatedTimeSeconds,
