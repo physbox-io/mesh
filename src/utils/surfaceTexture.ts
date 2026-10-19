@@ -322,16 +322,33 @@ function seedFace(mesh: Mesh, normals: Vec3[], at: Vec3, seedNormal: Vec3 | null
   const n = mesh.faces.length / 3;
   const d2 = new Float64Array(n);
   let best = Infinity;
+  let bestAligned = Infinity;
+  const minDot = Math.cos((25 * Math.PI) / 180);
   for (let f = 0; f < n; f++) {
-    d2[f] = pointTriangleDist2(
+    const dist2 = pointTriangleDist2(
       at,
       vtx(mesh.pos, mesh.faces[3 * f]),
       vtx(mesh.pos, mesh.faces[3 * f + 1]),
       vtx(mesh.pos, mesh.faces[3 * f + 2]),
     );
-    if (d2[f] < best) best = d2[f];
+    d2[f] = dist2;
+    if (dist2 < best) best = dist2;
+    if (seedNormal && dot(normals[f], seedNormal) >= minDot && dist2 < bestAligned) {
+      bestAligned = dist2;
+    }
   }
   if (!(best <= tol * tol)) return -1;
+  if (seedNormal && bestAligned <= tol * tol) {
+    const nearAligned = Math.sqrt(bestAligned) + tol * 1e-3;
+    let pick = -1;
+    let pickScore = -Infinity;
+    for (let f = 0; f < n; f++) {
+      if (d2[f] > nearAligned * nearAligned || dot(normals[f], seedNormal) < minDot) continue;
+      const score = dot(normals[f], seedNormal) - Math.sqrt(d2[f]) / (tol || 1);
+      if (score > pickScore) { pickScore = score; pick = f; }
+    }
+    if (pick >= 0) return pick;
+  }
   const near = Math.sqrt(best) + tol * 1e-3;
   let pick = -1;
   let pickScore = -Infinity;
