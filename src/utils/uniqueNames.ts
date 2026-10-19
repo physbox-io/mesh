@@ -12,7 +12,8 @@ import type { SceneGraph, SceneNode } from '../types/scene';
  * scene it keeps) and the compiler (on every scene it builds). Given the same
  * scene they pick the same names, whichever copy each is holding. The first
  * body or geom to use a name keeps it, in depth-first order; each later one
- * becomes `name_2`, `name_3` … whichever is free first.
+ * becomes `name_2`, `name_3` … whichever is free first. A geom with no name
+ * at all is given one the same way, starting from `<body>_geom`.
  */
 
 type Renames = Map<SceneNode, { name?: string; geoms?: Map<number, string> }>;
@@ -51,12 +52,13 @@ function planRenames(nodes: SceneNode[]): Renames {
         }
         seenBodies.add(bodyName);
         (node.geoms || []).forEach((g, i) => {
-          // An unnamed geom is emitted as `<body>_geom`, so it claims that name.
+          // An unnamed geom is given `<body>_geom` (then `_geom_2` …). It
+          // has to be written back, not just reserved: mjcf.ts emits
+          // `geom.name` as it stands, and two unnamed mesh geoms used to
+          // compile to two assets called "undefined".
           let gName = g.name || `${bodyName}_geom`;
-          if (seenGeoms.has(gName)) {
-            gName = free(gName, geomNames, seenGeoms);
-            (entry.geoms ??= new Map()).set(i, gName);
-          }
+          if (seenGeoms.has(gName)) gName = free(gName, geomNames, seenGeoms);
+          if (gName !== g.name) (entry.geoms ??= new Map()).set(i, gName);
           seenGeoms.add(gName);
         });
         if (entry.name || entry.geoms) renames.set(node, entry);

@@ -57,3 +57,24 @@ describe('compileToMJCF names', () => {
     expect(compileToMJCF({ nodes } as SceneGraph, -9.81, 1, 0, 0, 0, 0)).toBe(xml);
   });
 });
+
+describe('unnamed geoms', () => {
+  const mesh = (name?: string) => ({
+    ...(name ? { name } : {}),
+    type: 'mesh',
+    vertices: [0, 0, 0, 0.01, 0, 0, 0, 0.01, 0, 0, 0, 0.01],
+    faces: [0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3],
+  });
+
+  it('are given a name, so two unnamed meshes do not both compile as "undefined"', () => {
+    const nodes = [
+      { id: 'a', name: 'tray', type: 'body', pos: [0, 0, 0.1], joints: [], children: [], geoms: [mesh(), mesh()] },
+      { id: 'b', name: 'lid', type: 'body', pos: [0, 0, 0.3], joints: [], children: [], geoms: [mesh()] },
+    ] as unknown as SceneNode[];
+    const out = withUniqueNames({ nodes } as SceneGraph);
+    expect(names(out.nodes)).toEqual(['tray', 'tray_geom', 'tray_geom_2', 'lid', 'lid_geom']);
+    const xml = compileToMJCF({ nodes } as SceneGraph, -9.81, 1, 0, 0, 0, 0);
+    expect(xml).not.toContain('"undefined"');
+    expect(xml).toContain('<mesh name="tray_geom_2"');
+  });
+});
