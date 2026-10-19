@@ -1957,7 +1957,20 @@ export function useMCPBridge() {
               pendingDeclarativeOps.delete(targetId);
               throw new Error(`Failed to compile SCAD: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`);
             }
-            store.updateNodeScad(targetId, updates.scad, compiled, false);
+            // Every other field in the same call goes in first: a SCAD body
+            // sent with a new geoms array, a position or a name used to have
+            // all of them dropped while the reply still said ok. The compiled
+            // mesh then lands in the first mesh geom of whatever geoms the
+            // body now has; a geoms array with no mesh in it gets one in front,
+            // rather than having its first primitive overwritten.
+            const { scad, ...rest } = updates;
+            if (Array.isArray(rest.geoms) && !rest.geoms.some((g: SceneGeom) => g.type === 'mesh')) {
+              const name = rest.name ?? target.name;
+              const moves = (rest.joints ?? target.joints ?? []).length > 0;
+              rest.geoms = [{ ...fillGeomDefaults({ type: 'mesh' }, name, 0, moves), name: `${name}_mesh` }, ...rest.geoms];
+            }
+            if (Object.keys(rest).length > 0) store.updateNode(targetId, rest);
+            store.updateNodeScad(targetId, scad, compiled, false);
             await applyDeclarativePreCsgFeatures([target]);
             if (findNodeInScene(useStore.getState().sceneGraph.nodes, targetId)?.csgEnabled) {
               await compileCsgNodes(true);
@@ -1986,7 +1999,8 @@ export function useMCPBridge() {
             nodes: useStore.getState().sceneGraph.nodes
           });
           const error = useStore.getState().lastCompileError;
-          return { ok: !error, ...(error ? { error } : {}) };
+          // Says what was taken, so a caller can see its whole update landed.
+          return { ok: !error, applied: Object.keys(rawUpdates), ...(error ? { error } : {}) };
         }
 
         case 'SET_COLOR': {
