@@ -713,7 +713,7 @@ export const ObjectGestureController = () => {
       // written here would be gone before it was seen. A body with no free
       // joint has no qpos to write, and shows the move when it is kept.
       if (state.joint) {
-        for (let axis = 0; axis < 3; axis++) getPhysicsWorkerClient().setQpos(state.joint, axis, to[axis]);
+        getPhysicsWorkerClient().setQpos(state.joint, 0, to);
       }
       state.to = to;
       const mm = (v: number) => `${(v * 1000).toFixed(1)} mm`;
@@ -833,7 +833,7 @@ export const ObjectGestureController = () => {
     // as well, or a cancelled gesture leaves the body where the pointer left it
     // while the scene graph still says otherwise.
     if (restore && state.kind === 'move' && state.joint && state.startPos) {
-      for (let axis = 0; axis < 3; axis++) getPhysicsWorkerClient().setQpos(state.joint, axis, state.startPos[axis]);
+      getPhysicsWorkerClient().setQpos(state.joint, 0, state.startPos);
     }
     for (const held of state.held) {
       held.object.scale.set(1, 1, 1);
@@ -917,7 +917,7 @@ export const ObjectGestureController = () => {
       // The scene graph now agrees with where the body is; put the live sim
       // there too, since updateNodePos alone would wait for a reset.
       if (state.joint) {
-        for (let axis = 0; axis < 3; axis++) getPhysicsWorkerClient().setQpos(state.joint, axis, to[axis]);
+        getPhysicsWorkerClient().setQpos(state.joint, 0, to);
       }
       return;
     }

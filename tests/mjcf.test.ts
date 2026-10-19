@@ -284,3 +284,81 @@ describe('a rotated mesh body', () => {
     expect(bodyTag(compile([mixed]), 'mixed')).toContain('euler="30 40 50"');
   });
 });
+
+describe('equality constraints and wedge mesh caching', () => {
+  it('expresses <connect> anchor in body1 local frame even when body1 is rotated and body2 has a joint', () => {
+    const b1: SceneNode = {
+      id: 'b1', name: 'b1', type: 'body', pos: [1, 0, 0], euler: [0, 0, 90],
+      connectTargetId: 'b2',
+      connectAnchor: [1, 2, 0],
+      joints: [{ name: 'b1_j', type: 'free' }],
+      geoms: [{ name: 'b1_g', type: 'box', size: [0.1, 0.1, 0.1] }],
+      children: [],
+    };
+    const b2: SceneNode = {
+      id: 'b2', name: 'b2', type: 'body', pos: [5, 5, 5],
+      joints: [{ name: 'b2_j', type: 'free' }],
+      geoms: [{ name: 'b2_g', type: 'box', size: [0.1, 0.1, 0.1] }],
+      children: [],
+    };
+    // World anchor [1, 2, 0] is +2 along world Y from b1 at [1, 0, 0].
+    // Since b1 is rotated +90 deg around Z, its local +X axis points along world +Y,
+    // so the anchor in b1's local frame must be [2, 0, 0].
+    const xml = compileToMJCF({ nodes: [b1, b2] });
+    const match = xml.match(/<connect[^>]*body1="b1" body2="b2" anchor="([^"]+)"/);
+    expect(match).not.toBeNull();
+    const coords = match![1].split(' ').map(Number);
+    expect(coords[0]).toBeCloseTo(2, 5);
+    expect(coords[1]).toBeCloseTo(0, 5);
+    expect(coords[2]).toBeCloseTo(0, 5);
+  });
+
+  it('couples multiple rack-and-pinion mechanisms in the same scene', () => {
+    const makePair = (idx: number, xOffset: number): SceneNode[] => [
+      {
+        id: `pinion_${idx}`, name: `pinion_${idx}`, type: 'body', pos: [xOffset, 0, 0.2],
+        isGear: true, gearRadius: 0.1,
+        joints: [{ name: `pinion_${idx}_hinge`, type: 'hinge', axis: [0, 1, 0] }],
+        geoms: [{ name: `p_${idx}_g`, type: 'cylinder', size: [0.1, 0.02] }],
+        children: [],
+      },
+      {
+        id: `rack_${idx}`, name: `rack_${idx}`, type: 'body', pos: [xOffset, 0, 0.08],
+        isRack: true,
+        joints: [{ name: `rack_${idx}_slide`, type: 'slide', axis: [1, 0, 0] }],
+        geoms: [{ name: `r_${idx}_g`, type: 'box', size: [0.3, 0.02, 0.02] }],
+        children: [],
+      },
+    ];
+    const xml = compile([...makePair(1, 0), ...makePair(2, 5)]);
+    expect(xml).toContain('joint1="pinion_1_hinge" joint2="rack_1_slide"');
+    expect(xml).toContain('joint1="pinion_2_hinge" joint2="rack_2_slide"');
+    expect(xml).not.toContain('joint1="pinion_1_hinge" joint2="rack_2_slide"');
+    expect(xml).not.toContain('joint1="pinion_2_hinge" joint2="rack_1_slide"');
+  });
+
+  it('caches wedge mesh arrays across compileToMJCF calls', () => {
+    const wedgeNode: SceneNode = {
+      id: 'w', name: 'w', type: 'body', pos: [0, 0, 0.2],
+      isWedge: true, width: 0.4, height: 0.2, depth: 0.3,
+      geoms: [{ name: 'w_g', type: 'box', size: [0.2, 0.1, 0.15] }],
+      children: [],
+    };
+    const usedFiles: string[] = [];
+    const ledger = {
+      files: new Map<string, Uint8Array>(),
+      begin: () => {},
+      useFile: (file: string) => {
+        usedFiles.push(file);
+        return true;
+      },
+      holds: (file: string) => ledger.files.has(file),
+    };
+    compileToMJCF({ nodes: [wedgeNode] }, -9.81, 0.5, 0, 0, 0, 0, { meshFiles: ledger as never });
+    compileToMJCF({ nodes: [wedgeNode] }, -9.81, 0.5, 0, 0, 0, 0, { meshFiles: ledger as never });
+    expect(usedFiles.length).toBe(2);
+    expect(usedFiles[0]).toBe(usedFiles[1]);
+    expect(ledger.files.size).toBe(1);
+  });
+});
+

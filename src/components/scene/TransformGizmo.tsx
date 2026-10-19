@@ -638,16 +638,10 @@ export const TransformGizmo = () => {
       // qpos is the body origin. The handles are on its centre, so the move is
       // taken as a delta and applied to where the origin was.
       const origin = originOf(state, position);
-      client.setQpos(state.joint, 0, origin.x);
-      client.setQpos(state.joint, 1, origin.y);
-      client.setQpos(state.joint, 2, origin.z);
       // A free joint's qpos is [x, y, z, qw, qx, qy, qz] — MuJoCo puts the
       // scalar first, Three puts it last.
       const body = bodyQuatOf(state, quaternion);
-      client.setQpos(state.joint, 3, body.w);
-      client.setQpos(state.joint, 4, body.x);
-      client.setQpos(state.joint, 5, body.y);
-      client.setQpos(state.joint, 6, body.z);
+      client.setQpos(state.joint, 0, [origin.x, origin.y, origin.z, body.w, body.x, body.y, body.z]);
       return;
     }
     /*
@@ -1074,7 +1068,7 @@ export const TransformGizmo = () => {
         // same point goes to the two of them in two different frames.
         store.updateNodePos(state.nodeId, toParentFrame(state.nodeId, to));
         if (state.joint) {
-          for (let axis = 0; axis < 3; axis++) getPhysicsWorkerClient().setQpos(state.joint, axis, to[axis]);
+          getPhysicsWorkerClient().setQpos(state.joint, 0, to);
         }
       }
     } else if (!turnOf(state, proxy.quaternion).equals(new THREE.Quaternion())) {
@@ -1110,11 +1104,7 @@ export const TransformGizmo = () => {
       // too rather than waiting for the rebuild to show the turn.
       if (state.joint) {
         const q = bodyQuatOf(state, proxy.quaternion);
-        const client = getPhysicsWorkerClient();
-        client.setQpos(state.joint, 3, q.w);
-        client.setQpos(state.joint, 4, q.x);
-        client.setQpos(state.joint, 5, q.y);
-        client.setQpos(state.joint, 6, q.z);
+        getPhysicsWorkerClient().setQpos(state.joint, 3, [q.w, q.x, q.y, q.z]);
       }
     }
 

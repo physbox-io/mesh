@@ -41,6 +41,7 @@ import type { TexturedSurface } from '../../utils/surfaceTexture';
 import type { GeomType, SceneGraph, SceneNode } from '../../types/scene';
 import type { WeakSpot } from '../../utils/printAnalysis';
 import type { DataMirror, FrameFlagWindow, ModelMirror, MujocoShim, RenderGeom } from '../../types/sceneLayer';
+import { getNodeWorldPos } from '../../utils/sceneTree';
 
 type OrbitControlsImpl = React.ComponentRef<typeof OrbitControls>;
 
@@ -1188,11 +1189,25 @@ export const MouseDragForceRenderer = ({ model, data, mujoco }: { model: ModelMi
       if (name) c[name] = b;
     }
     const sceneGraph = useStore.getState().sceneGraph;
+    const rawIds = { ...c };
+    const findHeaviest = (n: SceneNode): { bId: number; mass: number } => {
+      const ownId = rawIds[n.name] ?? rawIds[n.id];
+      let bestId = ownId ?? -1;
+      let bestMass = bestId !== -1 && model.body_mass ? (model.body_mass[bestId] ?? 0) : 0;
+      for (const ch of n.children || []) {
+        const sub = findHeaviest(ch);
+        if (sub.bId !== -1 && (bestId === -1 || sub.mass > bestMass)) {
+          bestId = sub.bId;
+          bestMass = sub.mass;
+        }
+      }
+      return { bId: bestId, mass: bestMass };
+    };
     const mapIds = (nodes: SceneNode[]) => {
       if (!nodes) return;
       for (const n of nodes) {
-        const bId = c[n.name] ?? c[n.id];
-        if (bId !== undefined) {
+        const { bId } = findHeaviest(n);
+        if (bId !== -1) {
           c[n.id] = bId;
           if (n.name) c[n.name] = bId;
         }
@@ -1276,21 +1291,22 @@ export const CurveControlHandles = () => {
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
   const dragPlane = useRef(new THREE.Plane());
 
-  // Find the selected curve node and its accumulated world offset (curve
-  // bodies are static, so parent offsets are pure translations).
+  // Find the selected curve node and its accumulated world position (accounting
+  // for parent body rotations).
   const found = useMemo(() => {
-    let result: { node: SceneNode; world: number[] } | null = null;
-    const walk = (nodes: SceneNode[], base: number[]) => {
-      if (!nodes || result) return;
-      for (const n of nodes) {
-        const world = [base[0] + (n.pos?.[0] || 0), base[1] + (n.pos?.[1] || 0), base[2] + (n.pos?.[2] || 0)];
-        if (n.id === selectedNodeId && n.isCurve) { result = { node: n, world }; return; }
-        walk(n.children, world);
-        if (result) return;
+    if (!selectedNodeId || !sceneGraph?.nodes) return null;
+    const findCurveNode = (nodes: SceneNode[] | undefined): SceneNode | null => {
+      for (const n of nodes || []) {
+        if (n.id === selectedNodeId && n.isCurve) return n;
+        const child = findCurveNode(n.children);
+        if (child) return child;
       }
+      return null;
     };
-    walk(sceneGraph?.nodes, [0, 0, 0]);
-    return result as { node: SceneNode; world: number[] } | null;
+    const node = findCurveNode(sceneGraph.nodes);
+    if (!node) return null;
+    const world = getNodeWorldPos(sceneGraph.nodes, node.id) || [0, 0, 0];
+    return { node, world };
   }, [sceneGraph, selectedNodeId]);
 
   const splineLine = useMemo(() => {

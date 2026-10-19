@@ -4,6 +4,7 @@ import { analyzeMesh } from './meshIntegrity';
 import { resolveCsgGeoms } from './csg';
 import { encodeMsh, mshFileName, type MeshFileSink } from './meshVfs';
 import { PairMemo } from './arrayMemo';
+import { isNodeRotationBaked, nodeLocalQuat, quatMultiply, quatRotateVec, quatRotateVecInv, type QuatWXYZ } from './sceneTree';
 import { uniquifyNamesInPlace } from './uniqueNames';
 
 /*
@@ -16,6 +17,17 @@ import { uniquifyNamesInPlace } from './uniqueNames';
  */
 const meshFileNames = new PairMemo<string>();
 const meshInertiaAttrs = new PairMemo<string>();
+const wedgeMeshCache = new Map<string, ReturnType<typeof generateWedgeMeshData>>();
+
+const getCachedWedgeMeshData = (w: number, d: number, h: number) => {
+  const key = `${w}:${d}:${h}`;
+  let cached = wedgeMeshCache.get(key);
+  if (!cached) {
+    cached = generateWedgeMeshData(w, d, h);
+    wedgeMeshCache.set(key, cached);
+  }
+  return cached;
+};
 
 const formatGeomSize = (type: string, rawSize: unknown): string => {
   const arr = Array.isArray(rawSize)
@@ -175,16 +187,7 @@ const buildNode = (node: SceneNode): string => {
  * presence of even one non-mesh geom means the same, since the bake only ever
  * runs when every geom is a mesh.
  */
-const rotationIsBaked = (node: SceneNode): boolean => {
-  const geoms = node.geoms || [];
-  if (geoms.length === 0) return false;
-  if (!geoms.every((g) => g.type === 'mesh')) return false;
-  return geoms.some(
-    (g) =>
-      (Array.isArray(g.baseVertices) && g.baseVertices.length > 0) ||
-      (Array.isArray(g.baseRenderVertices) && g.baseRenderVertices.length > 0),
-  );
-};
+const rotationIsBaked = isNodeRotationBaked;
 
 /*
  * Contact classes, as contype/conaffinity bits. Two geoms touch when either's
@@ -356,7 +359,7 @@ export const compileToMJCF = (
           // a thin plate along the slanted face. The top face lands in the same
           // plane either way, so ramps behave as before while the wedge now has
           // real volume to rest and tip on.
-          const { vertices, faces, renderVertices } = generateWedgeMeshData(w, d, h);
+          const { vertices, faces, renderVertices } = getCachedWedgeMeshData(w, d, h);
           const g = node.geoms[0];
           g.type = 'mesh';
           g.vertices = vertices;
@@ -454,24 +457,30 @@ export const compileToMJCF = (
     : '';
 
   const actuators: SceneJoint[] = [];
-  let pinionJoint: string | null = null;
-  let rackJoint: string | null = null;
+  const pinionNodes: { jointName: string; nodeId: string; pos: [number, number, number]; radius: number }[] = [];
+  const rackNodes: { jointName: string; nodeId: string; pos: [number, number, number] }[] = [];
 
-  // First, traverse and compute absolute world positions and sizes for all bodies
-  const nodeWorldData: { [id: string]: { pos: [number, number, number]; size: number[] } } = {};
+  // First, traverse and compute absolute world positions, orientations, and sizes for all bodies
+  const nodeWorldData: { [id: string]: { pos: [number, number, number]; quat: QuatWXYZ; size: number[] } } = {};
 
-  const getAbsolutePositions = (nodes: SceneNode[], parentPos: [number, number, number] = [0, 0, 0]) => {
+  const getAbsolutePositions = (
+    nodes: SceneNode[],
+    parentPos: [number, number, number] = [0, 0, 0],
+    parentQuat: QuatWXYZ = [1, 0, 0, 0],
+  ) => {
     if (!nodes) return;
     for (const node of nodes) {
+      const rotatedOffset = quatRotateVec(parentQuat, node.pos);
       const worldPos: [number, number, number] = [
-        parentPos[0] + node.pos[0],
-        parentPos[1] + node.pos[1],
-        parentPos[2] + node.pos[2]
+        parentPos[0] + rotatedOffset[0],
+        parentPos[1] + rotatedOffset[1],
+        parentPos[2] + rotatedOffset[2],
       ];
+      const worldQuat = quatMultiply(parentQuat, nodeLocalQuat(node));
       const mainGeom = (node.geoms || [])[0];
       const size = mainGeom ? mainGeom.size : [0.1, 0.1, 0.1];
-      nodeWorldData[node.id] = { pos: worldPos, size };
-      getAbsolutePositions(node.children, worldPos);
+      nodeWorldData[node.id] = { pos: worldPos, quat: worldQuat, size };
+      getAbsolutePositions(node.children, worldPos, worldQuat);
     }
   };
   getAbsolutePositions(sceneCopy.nodes);
@@ -535,10 +544,21 @@ export const compileToMJCF = (
           });
         }
         if (couplingAllowed && node.id.includes('pinion') && j.type === 'hinge') {
-          pinionJoint = j.name;
+          const wData = nodeWorldData[node.id];
+          pinionNodes.push({
+            jointName: j.name,
+            nodeId: node.id,
+            pos: wData ? wData.pos : [0, 0, 0],
+            radius: wData ? wData.size[0] : 0.08,
+          });
         }
         if (couplingAllowed && node.id.includes('rack') && j.type === 'slide') {
-          rackJoint = j.name;
+          const wData = nodeWorldData[node.id];
+          rackNodes.push({
+            jointName: j.name,
+            nodeId: node.id,
+            pos: wData ? wData.pos : [0, 0, 0],
+          });
         }
       });
       traverse(node.children, node.name);
@@ -599,21 +619,20 @@ export const compileToMJCF = (
   }
 
   // 2. Pinion and Rack fallback proximity coupling
-  if (pinionJoint && rackJoint) {
-    const pinionData = Object.entries(nodeWorldData).find(([id]) => id.includes('pinion'));
-    const rackData = Object.entries(nodeWorldData).find(([id]) => id.includes('rack'));
-    if (pinionData && rackData) {
-      const [, pInfo] = pinionData;
-      const [, rInfo] = rackData;
-      const dx = pInfo.pos[0] - rInfo.pos[0];
-      const dy = pInfo.pos[1] - rInfo.pos[1];
-      const dz = pInfo.pos[2] - rInfo.pos[2];
+  let pinionRackCouplingCount = 0;
+  for (const p of pinionNodes) {
+    for (const r of rackNodes) {
+      const dx = p.pos[0] - r.pos[0];
+      const dy = p.pos[1] - r.pos[1];
+      const dz = p.pos[2] - r.pos[2];
       const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
       // Only couple if their centers are within 0.5 meters of each other
       if (dist <= 0.5) {
-        const pairKey = [pinionJoint, rackJoint].sort().join('::');
-        if (!explicitlyCoupledJointPairs.has(pairKey)) {
-          const pinionRadius = pInfo ? pInfo.size[0] : 0.08;
+        const pairKey = [p.jointName, r.jointName].sort().join('::');
+        if (!coupledPairs.has(pairKey) && !explicitlyCoupledJointPairs.has(pairKey)) {
+          coupledPairs.add(pairKey);
+          pinionRackCouplingCount++;
+          const pinionRadius = p.radius;
           // MuJoCo's joint equality constrains joint1 = poly(joint2), so this
           // polynomial has to give the PINION ANGLE as a function of the rack's
           // displacement: theta = x / r. It used to emit r itself, which is the
@@ -621,7 +640,10 @@ export const compileToMJCF = (
           // to travel 1/r^2 = 156x too far, so it slammed into its own limit and
           // the whole mechanism bound up instead of driving.
           const turnsPerMetre = pinionRadius > 1e-6 ? 1 / pinionRadius : 12.5;
-          equalityConstraints += `\n    <joint name="pinion_rack_coupling" joint1="${pinionJoint}" joint2="${rackJoint}" polycoef="0 ${turnsPerMetre} 0 0 0" />`;
+          const couplingName = pinionRackCouplingCount === 1
+            ? 'pinion_rack_coupling'
+            : `pinion_rack_coupling_${pinionRackCouplingCount}`;
+          equalityConstraints += `\n    <joint name="${couplingName}" joint1="${p.jointName}" joint2="${r.jointName}" polycoef="0 ${turnsPerMetre} 0 0 0" />`;
         }
       }
     }
@@ -695,23 +717,19 @@ export const compileToMJCF = (
   for (const c of connectConstraintsList) {
     const targetName = nodeNamesMap[c.targetId] || c.targetId;
     const hasJoint = !!jointedNodes[c.targetId];
+    // MuJoCo's <connect> anchor is always specified in body1's local frame,
+    // whether body2 is named or omitted (worldbody).
+    const body1World = nodeWorldData[c.bodyId];
+    const body1Pos = body1World ? body1World.pos : [0, 0, 0];
+    const body1Quat: QuatWXYZ = body1World ? body1World.quat : [1, 0, 0, 0];
+    const localAnchor = quatRotateVecInv(body1Quat, [
+      c.anchor[0] - body1Pos[0],
+      c.anchor[1] - body1Pos[1],
+      c.anchor[2] - body1Pos[2],
+    ]);
     if (hasJoint) {
-      const body2World = nodeWorldData[c.targetId];
-      const body2Pos = body2World ? body2World.pos : [0, 0, 0];
-      const localAnchor = [
-        c.anchor[0] - body2Pos[0],
-        c.anchor[1] - body2Pos[1],
-        c.anchor[2] - body2Pos[2]
-      ];
       equalityConstraints += `\n    <connect name="connect_constraint_${connectIndex++}" body1="${c.bodyName}" body2="${targetName}" anchor="${localAnchor.map(v => v.toFixed(6)).join(' ')}" />`;
     } else {
-      const body1World = nodeWorldData[c.bodyId];
-      const body1Pos = body1World ? body1World.pos : [0, 0, 0];
-      const localAnchor = [
-        c.anchor[0] - body1Pos[0],
-        c.anchor[1] - body1Pos[1],
-        c.anchor[2] - body1Pos[2]
-      ];
       equalityConstraints += `\n    <connect name="connect_constraint_${connectIndex++}" body1="${c.bodyName}" anchor="${localAnchor.map(v => v.toFixed(6)).join(' ')}" />`;
     }
   }

@@ -56,6 +56,7 @@ import { featureGeoms } from '../utils/printAssembly';
 import type { ReliefCarveOptions } from '../utils/reliefCarveExporter';
 import { withUniqueNames } from '../utils/uniqueNames';
 import { envelope } from '../utils/coSimLink';
+import { getNodeWorldPos } from '../utils/sceneTree';
 
 /**
  * What is on the bench.
@@ -1094,22 +1095,6 @@ export const cloneSceneGraph = (sg: SceneGraph): SceneGraph => ({
   ...sg,
   nodes: (sg.nodes || []).map(cloneNode),
 });
-
-const getNodeWorldPos = (nodes: SceneNode[], targetId: string, currentOffset: [number, number, number] = [0, 0, 0]): [number, number, number] | null => {
-  for (const node of nodes) {
-    const nodeWorld: [number, number, number] = [
-      currentOffset[0] + node.pos[0],
-      currentOffset[1] + node.pos[1],
-      currentOffset[2] + node.pos[2]
-    ];
-    if (node.id === targetId) return nodeWorld;
-    if (node.children) {
-      const childResult = getNodeWorldPos(node.children, targetId, nodeWorld);
-      if (childResult) return childResult;
-    }
-  }
-  return null;
-};
 
 const findNode = (nodes: SceneNode[] | undefined, id: string): SceneNode | null => {
   for (const node of nodes || []) {
@@ -5921,7 +5906,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
           }
         : undefined;
 
-      client.setEnv(windX, windY);
+      client.setEnv(windX, windY, density);
       // Something has just broken mid-flight: have the worker wait for this
       // model to be on screen before stepping it. See `holdUntil` in the worker.
       const hold = !!immediate && isRuntimeBuild && !forceReset;
@@ -5947,15 +5932,29 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
         // it. Only reload the page if that also fails.
         try {
           console.warn('MuJoCo WASM heap exhausted — terminating and respawning the physics worker (keeping scene/camera).');
+          const live = !forceReset ? get().data : null;
+          const recoverySeedState = live?.qpos
+            ? {
+                qpos: Array.from(live.qpos as Float64Array),
+                qvel: Array.from(live.qvel as Float64Array),
+                ctrl: Array.from(live.ctrl as Float64Array),
+                time: live.time as number,
+                scriptState: lastScriptState,
+              }
+            : undefined;
           recycleWorker();
           const freshClient = getPhysicsWorkerClient();
-          freshClient.setEnv(windX, windY);
+          freshClient.setEnv(windX, windY, density);
           const xml = compileToMJCF(sceneGraph, gravityZ, floorFriction, windX, windY, density, floorBounce, {
+            sleep,
             meshFiles: freshClient.meshFiles,
           });
-          const built = await freshClient.build(xml, sceneGraph, false, undefined, get().brokenConstraints);
+          const hold = !!immediate && isRuntimeBuild && !forceReset;
+          const built = await freshClient.build(xml, sceneGraph, !forceReset, recoverySeedState, get().brokenConstraints, hold);
+          if (hold && built.ok) heldClient = freshClient;
           if (!built.ok) throw new Error(built.error || 'Unknown physics worker build error', { cause: e });
           applyBuilt(built);
+          if (get().isPlaying) freshClient.setPlaying(true);
           return;
         } catch (recoveryError) {
           console.error('Worker respawn recovery failed, falling back to full page reload:', recoveryError);
@@ -6003,7 +6002,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
         sleep,
         meshFiles: client.meshFiles,
       });
-      client.setEnv(windX, windY);
+      client.setEnv(windX, windY, density);
       const built = await client.build(xml, sceneGraph, false, lastState, get().brokenConstraints);
       if (!built.ok) throw new Error(built.error || 'Unknown physics worker build error');
       set({ mujoco: MUJOCO_SHIM, model: buildModelMirror(built), data: buildDataMirror(built), recompileId: Date.now(), lastCompileError: null });
@@ -6055,7 +6054,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
         sleep,
         meshFiles: client.meshFiles,
       });
-      client.setEnv(windX, windY);
+      client.setEnv(windX, windY, density);
       const built = await client.build(xml, sceneGraph, false, seedState, get().brokenConstraints);
       if (!built.ok) throw new Error(built.error || 'Unknown physics worker build error');
       if (built.heapBytes) lastHeapBytes = built.heapBytes;

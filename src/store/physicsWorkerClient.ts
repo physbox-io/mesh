@@ -340,10 +340,10 @@ export class PhysicsWorkerClient {
   tick(delta: number) { this.worker.postMessage({ type: 'TICK', delta, sentAt: Date.now() }); }
   /** The model a `holdForInstall` build made is on screen; the worker may step it. */
   resume() { this.worker.postMessage({ type: 'RESUME' }); }
-  setEnv(windX: number, windY: number) { this.worker.postMessage({ type: 'SET_ENV', windX, windY }); }
+  setEnv(windX: number, windY: number, density?: number) { this.worker.postMessage({ type: 'SET_ENV', windX, windY, density }); }
   setDrag(nodeId: string | null, target: { x: number; y: number; z: number } | null) { this.worker.postMessage({ type: 'SET_DRAG', nodeId, target }); }
   setKeys(keys: string[]) { this.worker.postMessage({ type: 'SET_KEYS', keys }); }
-  setQpos(jointName: string, axis: number, value: number) { this.worker.postMessage({ type: 'SET_QPOS', jointName, axis, value }); }
+  setQpos(jointName: string, axis: number, value: number | readonly number[]) { this.worker.postMessage({ type: 'SET_QPOS', jointName, axis, value }); }
   setCtrl(actuatorName: string, value: number) { this.worker.postMessage({ type: 'SET_CTRL', actuatorName, value }); }
   updateScript(nodeId: string, script: string) { this.worker.postMessage({ type: 'UPDATE_SCRIPT', nodeId, script }); }
 

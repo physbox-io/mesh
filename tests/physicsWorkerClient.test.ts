@@ -68,4 +68,25 @@ describe('PhysicsWorkerClient worker failure', () => {
     expect(onError).toHaveBeenCalledWith(expect.stringMatching(/failed to load/), false);
     expect(client.hasPendingWork()).toBe(false);
   });
+
+  it('sends batched multi-axis setQpos and density-aware setEnv in single messages', async () => {
+    const { PhysicsWorkerClient } = await import('../src/store/physicsWorkerClient');
+    const client = new PhysicsWorkerClient();
+    client.setQpos('ball_joint', 0, [1, 2, 3, 1, 0, 0, 0]);
+    client.setEnv(2.5, -1.0, 1.8);
+
+    expect(created[0].postMessage).toHaveBeenCalledWith({
+      type: 'SET_QPOS',
+      jointName: 'ball_joint',
+      axis: 0,
+      value: [1, 2, 3, 1, 0, 0, 0],
+    });
+    expect(created[0].postMessage).toHaveBeenCalledWith({
+      type: 'SET_ENV',
+      windX: 2.5,
+      windY: -1.0,
+      density: 1.8,
+    });
+  });
 });
+

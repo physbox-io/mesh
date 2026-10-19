@@ -155,7 +155,12 @@ let geomIdCache: Record<string, number> = {};
 let geomNameCache: Record<number, string> = {};
 let actuatorIdCache: Record<string, number> = {};
 
-const scriptCache: Record<string, (api: Record<string, unknown>) => void> = {};
+interface CachedScript {
+  src: string;
+  fn: (api: Record<string, unknown>) => void;
+  api: Record<string, unknown>;
+}
+let scriptCache: Record<string, CachedScript> = {};
 // Each scripted body's api.state; see utils/scriptState.ts. A `let` so a
 // headless run can work on its own without touching the live scene's.
 let scriptState = new ScriptStateStore();
@@ -216,6 +221,155 @@ const rebuildIdCaches = () => {
   actuatorIdCache = aCache;
 };
 
+const createScriptApi = (node: SceneNode): Record<string, unknown> => {
+  const _resolveBody = (name: string) =>
+    bodyIdCache[name] ?? (mujoco && model ? mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY.value, name) : -1);
+  const _resolveJoint = (name: string) =>
+    jointIdCache[name] ?? (mujoco && model ? mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT.value, name) : -1);
+
+  const api: Record<string, unknown> = {
+    id: node.id,
+    name: node.name,
+    isKeyPressed: (keyName: string) => !!keyName && pressedKeys.has(keyName.toLowerCase()),
+    setPosition: (pos: number[] | number, bodyName = node.id) => {
+      const mdl = model!, dat = data!;
+      const targetNode = findNodeById(sceneGraph.nodes, bodyName);
+      if (!targetNode?.joints?.length) return;
+      const joint = targetNode.joints[0];
+      const jId = _resolveJoint(joint.name);
+      if (jId === -1) return;
+      const qposadr = mdl.jnt_qposadr[jId];
+      pendingWake.add(mdl.jnt_bodyid[jId]);
+      if (joint.type === 'free') {
+        if (Array.isArray(pos) && pos.length >= 3) {
+          dat.qpos[qposadr + 0] = pos[0]; dat.qpos[qposadr + 1] = pos[1]; dat.qpos[qposadr + 2] = pos[2];
+        }
+      } else if (joint.type === 'ball') {
+        if (Array.isArray(pos) && pos.length >= 4) {
+          dat.qpos[qposadr + 0] = pos[0]; dat.qpos[qposadr + 1] = pos[1]; dat.qpos[qposadr + 2] = pos[2]; dat.qpos[qposadr + 3] = pos[3];
+        }
+      } else {
+        dat.qpos[qposadr] = typeof pos === 'number' ? pos : (Array.isArray(pos) ? pos[0] : 0);
+      }
+    },
+    setVelocity: (vel: number[] | number, bodyName = node.id) => {
+      const mdl = model!, dat = data!;
+      const targetNode = findNodeById(sceneGraph.nodes, bodyName);
+      if (!targetNode?.joints?.length) return;
+      const joint = targetNode.joints[0];
+      const jId = _resolveJoint(joint.name);
+      if (jId === -1) return;
+      const dofadr = mdl.jnt_dofadr[jId];
+      pendingWake.add(mdl.jnt_bodyid[jId]);
+      if (joint.type === 'free') {
+        if (Array.isArray(vel) && vel.length >= 3) {
+          dat.qvel[dofadr + 0] = vel[0]; dat.qvel[dofadr + 1] = vel[1]; dat.qvel[dofadr + 2] = vel[2];
+        }
+      } else {
+        dat.qvel[dofadr] = typeof vel === 'number' ? vel : (Array.isArray(vel) ? vel[0] : 0);
+      }
+    },
+    setAngularVelocity: (angvel: number[] | number, bodyName = node.id) => {
+      const mdl = model!, dat = data!;
+      const targetNode = findNodeById(sceneGraph.nodes, bodyName);
+      if (!targetNode?.joints?.length) return;
+      const joint = targetNode.joints[0];
+      const jId = _resolveJoint(joint.name);
+      if (jId === -1) return;
+      const dofadr = mdl.jnt_dofadr[jId];
+      pendingWake.add(mdl.jnt_bodyid[jId]);
+      if (joint.type === 'free') {
+        if (Array.isArray(angvel) && angvel.length >= 3) {
+          dat.qvel[dofadr + 3] = angvel[0]; dat.qvel[dofadr + 4] = angvel[1]; dat.qvel[dofadr + 5] = angvel[2];
+        }
+      } else if (joint.type === 'ball') {
+        if (Array.isArray(angvel) && angvel.length >= 3) {
+          dat.qvel[dofadr + 0] = angvel[0]; dat.qvel[dofadr + 1] = angvel[1]; dat.qvel[dofadr + 2] = angvel[2];
+        }
+      } else if (joint.type === 'hinge') {
+        dat.qvel[dofadr] = typeof angvel === 'number' ? angvel : (Array.isArray(angvel) ? angvel[0] : 0);
+      }
+    },
+    getPosition: (bodyName = node.id) => {
+      const dat = data!;
+      const bId = _resolveBody(bodyName);
+      return bId !== -1 ? [dat.xpos[bId * 3], dat.xpos[bId * 3 + 1], dat.xpos[bId * 3 + 2]] : [0, 0, 0];
+    },
+    getVelocity: (bodyName = node.id) => {
+      const dat = data!;
+      const bId = _resolveBody(bodyName);
+      return bId !== -1 ? [dat.cvel[bId * 6 + 3], dat.cvel[bId * 6 + 4], dat.cvel[bId * 6 + 5]] : [0, 0, 0];
+    },
+    getAngularVelocity: (bodyName = node.id) => {
+      const dat = data!;
+      const bId = _resolveBody(bodyName);
+      return bId !== -1 ? [dat.cvel[bId * 6 + 0], dat.cvel[bId * 6 + 1], dat.cvel[bId * 6 + 2]] : [0, 0, 0];
+    },
+    getMass: (bodyName = node.id) => {
+      const mdl = model!;
+      const bId = _resolveBody(bodyName);
+      return bId !== -1 ? mdl.body_mass[bId] : 0;
+    },
+    getJointPosition: (jointName: string) => {
+      const mdl = model!, dat = data!;
+      const jId = _resolveJoint(jointName);
+      return jId !== -1 ? dat.qpos[mdl.jnt_qposadr[jId]] : 0;
+    },
+    getJointVelocity: (jointName: string) => {
+      const mdl = model!, dat = data!;
+      const jId = _resolveJoint(jointName);
+      return jId !== -1 ? dat.qvel[mdl.jnt_dofadr[jId]] : 0;
+    },
+    applyForce: (forceVec: number[], bodyName = node.id) => {
+      if (!Array.isArray(forceVec)) return;
+      const dat = data!;
+      const bId = _resolveBody(bodyName);
+      if (bId === -1) return;
+      pendingWake.add(bId);
+      dat.xfrc_applied[bId * 6 + 0] += forceVec[0] || 0;
+      dat.xfrc_applied[bId * 6 + 1] += forceVec[1] || 0;
+      dat.xfrc_applied[bId * 6 + 2] += forceVec[2] || 0;
+    },
+    applyTorque: (torqueVec: number[], bodyName = node.id) => {
+      if (!Array.isArray(torqueVec)) return;
+      const dat = data!;
+      const bId = _resolveBody(bodyName);
+      if (bId === -1) return;
+      pendingWake.add(bId);
+      dat.xfrc_applied[bId * 6 + 3] += torqueVec[0] || 0;
+      dat.xfrc_applied[bId * 6 + 4] += torqueVec[1] || 0;
+      dat.xfrc_applied[bId * 6 + 5] += torqueVec[2] || 0;
+    },
+    getOrientation: (bodyName = node.id) => {
+      const dat = data!;
+      const bId = _resolveBody(bodyName);
+      if (bId === -1) return [1, 0, 0, 0, 1, 0, 0, 0, 1];
+      const o = bId * 9;
+      return [dat.xmat[o], dat.xmat[o+1], dat.xmat[o+2], dat.xmat[o+3], dat.xmat[o+4], dat.xmat[o+5], dat.xmat[o+6], dat.xmat[o+7], dat.xmat[o+8]];
+    },
+    applyJointForce: (jointName: string, forceVal: number) => {
+      if (typeof forceVal !== 'number') return;
+      const mdl = model!, dat = data!;
+      const jId = _resolveJoint(jointName);
+      if (jId !== -1) {
+        pendingWake.add(mdl.jnt_bodyid[jId]);
+        dat.qfrc_applied[mdl.jnt_dofadr[jId]] += forceVal;
+      }
+    },
+    setActuatorControl: (actuatorName: string, ctrlVal: number) => {
+      if (typeof ctrlVal !== 'number') return;
+      const dat = data!;
+      const actId = actuatorIdCache[actuatorName] ?? -1;
+      if (actId !== -1) dat.ctrl[actId] = ctrlVal;
+    },
+    getTime: () => (data ? data.time : 0),
+    getWind: () => [envWindX || 0, envWindY || 0],
+    log: (msg: unknown) => console.log(`[Script:${node.name}]`, msg),
+  };
+  attachScriptState(api, scriptState, node.id);
+  return api;
+};
+
 // Ported verbatim from App.tsx's PhysicsLoop.executeScripts (aerodynamics +
 // user control scripts), operating on the worker's own model/data/sceneGraph.
 const executeScripts = (nodes: SceneNode[], aeroDiagnostics: Record<string, AeroDiagnostic>) => {
@@ -223,7 +377,6 @@ const executeScripts = (nodes: SceneNode[], aeroDiagnostics: Record<string, Aero
   // established that the module, model and data are there.
   const mdl = model!;
   const dat = data!;
-  const mj = mujoco!;
   if (!nodes) return;
   for (const node of nodes) {
     if (node.isAerodynamic) {
@@ -292,7 +445,8 @@ const executeScripts = (nodes: SceneNode[], aeroDiagnostics: Record<string, Aero
             const wingArea = (halfX * 2) * (halfY * 2);
             const chord = halfX * 2;
 
-            const q = 0.5 * 1.225 * relSpeed * relSpeed;
+            const airDensity = envDensity > 0 ? envDensity : 1.225;
+            const q = 0.5 * airDensity * relSpeed * relSpeed;
 
             const vhx = airfoilVx / relSpeed;
             const vhy = airfoilVy / relSpeed;
@@ -369,144 +523,20 @@ const executeScripts = (nodes: SceneNode[], aeroDiagnostics: Record<string, Aero
     }
 
     if (node.script && node.script.trim() !== '') {
-      let fn = scriptCache[node.id];
-      if (!fn) {
+      let cached = scriptCache[node.id];
+      if (!cached || cached.src !== node.script) {
+        let fn: (api: Record<string, unknown>) => void;
         try {
           fn = new Function('api', node.script) as (api: Record<string, unknown>) => void;
-          scriptCache[node.id] = fn;
         } catch (e) {
           console.error(`[Script Compilation Error on node ${node.name}]:`, e);
           fn = () => {};
-          scriptCache[node.id] = fn;
         }
+        cached = { src: node.script, fn, api: createScriptApi(node) };
+        scriptCache[node.id] = cached;
       }
 
-      const _resolveBody = (name: string) => bodyIdCache[name] ?? mj.mj_name2id(mdl, mj.mjtObj.mjOBJ_BODY.value, name);
-      const _resolveJoint = (name: string) => jointIdCache[name] ?? mj.mj_name2id(mdl, mj.mjtObj.mjOBJ_JOINT.value, name);
-
-      const api = {
-        id: node.id,
-        name: node.name,
-        isKeyPressed: (keyName: string) => !!keyName && pressedKeys.has(keyName.toLowerCase()),
-        setPosition: (pos: number[] | number, bodyName = node.id) => {
-          const targetNode = findNodeById(sceneGraph.nodes, bodyName);
-          if (!targetNode?.joints?.length) return;
-          const joint = targetNode.joints[0];
-          const jId = _resolveJoint(joint.name);
-          if (jId === -1) return;
-          const qposadr = mdl.jnt_qposadr[jId];
-          pendingWake.add(mdl.jnt_bodyid[jId]);
-          if (joint.type === 'free') {
-            if (Array.isArray(pos) && pos.length >= 3) {
-              dat.qpos[qposadr + 0] = pos[0]; dat.qpos[qposadr + 1] = pos[1]; dat.qpos[qposadr + 2] = pos[2];
-            }
-          } else if (joint.type === 'ball') {
-            if (Array.isArray(pos) && pos.length >= 4) {
-              dat.qpos[qposadr + 0] = pos[0]; dat.qpos[qposadr + 1] = pos[1]; dat.qpos[qposadr + 2] = pos[2]; dat.qpos[qposadr + 3] = pos[3];
-            }
-          } else {
-            dat.qpos[qposadr] = typeof pos === 'number' ? pos : (Array.isArray(pos) ? pos[0] : 0);
-          }
-        },
-        setVelocity: (vel: number[] | number, bodyName = node.id) => {
-          const targetNode = findNodeById(sceneGraph.nodes, bodyName);
-          if (!targetNode?.joints?.length) return;
-          const joint = targetNode.joints[0];
-          const jId = _resolveJoint(joint.name);
-          if (jId === -1) return;
-          const dofadr = mdl.jnt_dofadr[jId];
-          pendingWake.add(mdl.jnt_bodyid[jId]);
-          if (joint.type === 'free') {
-            if (Array.isArray(vel) && vel.length >= 3) {
-              dat.qvel[dofadr + 0] = vel[0]; dat.qvel[dofadr + 1] = vel[1]; dat.qvel[dofadr + 2] = vel[2];
-            }
-          } else {
-            dat.qvel[dofadr] = typeof vel === 'number' ? vel : (Array.isArray(vel) ? vel[0] : 0);
-          }
-        },
-        setAngularVelocity: (angvel: number[] | number, bodyName = node.id) => {
-          const targetNode = findNodeById(sceneGraph.nodes, bodyName);
-          if (!targetNode?.joints?.length) return;
-          const joint = targetNode.joints[0];
-          const jId = _resolveJoint(joint.name);
-          if (jId === -1) return;
-          const dofadr = mdl.jnt_dofadr[jId];
-          pendingWake.add(mdl.jnt_bodyid[jId]);
-          if (joint.type === 'free') {
-            if (Array.isArray(angvel) && angvel.length >= 3) {
-              dat.qvel[dofadr + 3] = angvel[0]; dat.qvel[dofadr + 4] = angvel[1]; dat.qvel[dofadr + 5] = angvel[2];
-            }
-          } else if (joint.type === 'ball') {
-            if (Array.isArray(angvel) && angvel.length >= 3) {
-              dat.qvel[dofadr + 0] = angvel[0]; dat.qvel[dofadr + 1] = angvel[1]; dat.qvel[dofadr + 2] = angvel[2];
-            }
-          } else if (joint.type === 'hinge') {
-            dat.qvel[dofadr] = typeof angvel === 'number' ? angvel : (Array.isArray(angvel) ? angvel[0] : 0);
-          }
-        },
-        getPosition: (bodyName = node.id) => {
-          const bId = _resolveBody(bodyName);
-          return bId !== -1 ? [dat.xpos[bId * 3], dat.xpos[bId * 3 + 1], dat.xpos[bId * 3 + 2]] : [0, 0, 0];
-        },
-        getVelocity: (bodyName = node.id) => {
-          const bId = _resolveBody(bodyName);
-          return bId !== -1 ? [dat.cvel[bId * 6 + 3], dat.cvel[bId * 6 + 4], dat.cvel[bId * 6 + 5]] : [0, 0, 0];
-        },
-        getAngularVelocity: (bodyName = node.id) => {
-          const bId = _resolveBody(bodyName);
-          return bId !== -1 ? [dat.cvel[bId * 6 + 0], dat.cvel[bId * 6 + 1], dat.cvel[bId * 6 + 2]] : [0, 0, 0];
-        },
-        getMass: (bodyName = node.id) => {
-          const bId = _resolveBody(bodyName);
-          return bId !== -1 ? mdl.body_mass[bId] : 0;
-        },
-        getJointPosition: (jointName: string) => {
-          const jId = _resolveJoint(jointName);
-          return jId !== -1 ? dat.qpos[mdl.jnt_qposadr[jId]] : 0;
-        },
-        getJointVelocity: (jointName: string) => {
-          const jId = _resolveJoint(jointName);
-          return jId !== -1 ? dat.qvel[mdl.jnt_dofadr[jId]] : 0;
-        },
-        applyForce: (forceVec: number[], bodyName = node.id) => {
-          if (!Array.isArray(forceVec)) return;
-          const bId = _resolveBody(bodyName);
-          if (bId === -1) return;
-          dat.xfrc_applied[bId * 6 + 0] += forceVec[0] || 0;
-          dat.xfrc_applied[bId * 6 + 1] += forceVec[1] || 0;
-          dat.xfrc_applied[bId * 6 + 2] += forceVec[2] || 0;
-        },
-        applyTorque: (torqueVec: number[], bodyName = node.id) => {
-          if (!Array.isArray(torqueVec)) return;
-          const bId = _resolveBody(bodyName);
-          if (bId === -1) return;
-          dat.xfrc_applied[bId * 6 + 3] += torqueVec[0] || 0;
-          dat.xfrc_applied[bId * 6 + 4] += torqueVec[1] || 0;
-          dat.xfrc_applied[bId * 6 + 5] += torqueVec[2] || 0;
-        },
-        getOrientation: (bodyName = node.id) => {
-          const bId = _resolveBody(bodyName);
-          if (bId === -1) return [1, 0, 0, 0, 1, 0, 0, 0, 1];
-          const o = bId * 9;
-          return [dat.xmat[o], dat.xmat[o+1], dat.xmat[o+2], dat.xmat[o+3], dat.xmat[o+4], dat.xmat[o+5], dat.xmat[o+6], dat.xmat[o+7], dat.xmat[o+8]];
-        },
-        applyJointForce: (jointName: string, forceVal: number) => {
-          if (typeof forceVal !== 'number') return;
-          const jId = _resolveJoint(jointName);
-          if (jId !== -1) dat.qfrc_applied[mdl.jnt_dofadr[jId]] += forceVal;
-        },
-        setActuatorControl: (actuatorName: string, ctrlVal: number) => {
-          if (typeof ctrlVal !== 'number') return;
-          const actId = actuatorIdCache[actuatorName] ?? -1;
-          if (actId !== -1) dat.ctrl[actId] = ctrlVal;
-        },
-        getTime: () => (dat ? dat.time : 0),
-        getWind: () => [envWindX || 0, envWindY || 0],
-        log: (msg: unknown) => console.log(`[Script:${node.name}]`, msg),
-      };
-      attachScriptState(api, scriptState, node.id);
-
-      try { fn(api); } catch (e) { console.error(`[Script Runtime Error on node ${node.name}]:`, e); }
+      try { cached.fn(cached.api); } catch (e) { console.error(`[Script Runtime Error on node ${node.name}]:`, e); }
     }
 
     if (node.children) executeScripts(node.children, aeroDiagnostics);
@@ -608,6 +638,7 @@ const applyDragForce = () => {
 
   const bId = bodyIdCache[targetBodyName] ?? -1;
   if (bId === -1) return;
+  pendingWake.add(bId);
 
   const bx = dat.xpos[bId * 3], by = dat.xpos[bId * 3 + 1], bz = dat.xpos[bId * 3 + 2];
   const vx = dat.cvel[bId * 6 + 3], vy = dat.cvel[bId * 6 + 4], vz = dat.cvel[bId * 6 + 5];
@@ -725,6 +756,7 @@ const buildHistoryEntry = (aeroDiagnostics: Record<string, AeroDiagnostic>): His
 
 let envWindX = 0;
 let envWindY = 0;
+let envDensity = 0;
 
 // Snapshot everything the main thread needs to render + mirror `model`/`data`.
 const snapshot = () => {
@@ -1342,7 +1374,13 @@ const stepOnce = (stepSize: number): boolean => {
     applyFreeJointDamping(sceneGraph.nodes);
     wakeBodies();
 
+    const prevTime = data.time;
     mujoco.mj_step(model, data);
+    if (data.time <= prevTime) {
+      post({ type: 'ERROR', message: 'Simulation diverged (solver auto-reset detected) — simulation stopped.', fatal: false });
+      isPlaying = false;
+      return false;
+    }
     checkConstraintBreaks();
     checkImpacts(stepSize);
     stepCount++;
@@ -1352,13 +1390,22 @@ const stepOnce = (stepSize: number): boolean => {
       history.push(entry);
     }
 
-    // One view, not one per element: every `data.qpos` read is an embind
-    // getter that allocates a fresh Float64Array over the heap.
+    // One view, not one per element: every `data.qpos` / `data.qvel` read is an
+    // embind getter that allocates a fresh Float64Array over the heap.
     const qpos = data.qpos;
     const nq = model.nq;
     for (let j = 0; j < nq; j++) {
-      if (isNaN(qpos[j])) {
-        post({ type: 'ERROR', message: 'NaN detected in qpos — simulation stopped.', fatal: false });
+      if (!Number.isFinite(qpos[j])) {
+        post({ type: 'ERROR', message: 'NaN or Inf detected in qpos — simulation stopped.', fatal: false });
+        isPlaying = false;
+        return false;
+      }
+    }
+    const qvel = data.qvel;
+    const nv = model.nv;
+    for (let j = 0; j < nv; j++) {
+      if (!Number.isFinite(qvel[j])) {
+        post({ type: 'ERROR', message: 'NaN or Inf detected in qvel — simulation stopped.', fatal: false });
         isPlaying = false;
         return false;
       }
@@ -1367,7 +1414,14 @@ const stepOnce = (stepSize: number): boolean => {
   } catch (e) {
     const msg = String((e as Error)?.message || e);
     const fatal = /Aborted|enlarge memory|abort|bad_alloc/i.test(msg);
-    post({ type: 'ERROR', message: msg, fatal, lastState: fatal ? { qpos: Array.from(data.qpos), qvel: Array.from(data.qvel), time: data.time, scriptState: scriptState.snapshot() } : undefined });
+    post({
+      type: 'ERROR',
+      message: msg,
+      fatal,
+      lastState: fatal
+        ? { qpos: Array.from(data.qpos), qvel: Array.from(data.qvel), ctrl: Array.from(data.ctrl), time: data.time, scriptState: scriptState.snapshot() }
+        : undefined,
+    });
     isPlaying = false;
     return false;
   }
@@ -1514,6 +1568,8 @@ interface CarriedState {
   qpos: Float64Array; qvel: Float64Array; ctrl: Float64Array;
   /** Joint name -> where its state lived in the model being replaced. */
   joints: Record<string, { type: number; qposadr: number; dofadr: number }>;
+  /** Actuator name -> control value in the model being replaced. */
+  actuators: Record<string, number>;
 }
 
 /**
@@ -1530,18 +1586,57 @@ const captureState = (mdl: MjModel | null, dat: MjData | null): CarriedState | n
       const id = jointIdCache[name];
       joints[name] = { type: mdl.jnt_type[id], qposadr: mdl.jnt_qposadr[id], dofadr: mdl.jnt_dofadr[id] };
     }
+    const actuators: Record<string, number> = {};
+    for (const name in actuatorIdCache) {
+      const id = actuatorIdCache[name];
+      if (id >= 0 && id < mdl.nu) actuators[name] = dat.ctrl[id];
+    }
     return {
       nq: mdl.nq, nv: mdl.nv, nu: mdl.nu, time: dat.time,
       qpos: Float64Array.from(dat.qpos),
       qvel: Float64Array.from(dat.qvel),
       ctrl: Float64Array.from(dat.ctrl),
       joints,
+      actuators,
     };
   } catch {
     // A handle already gone is not worth failing a build over; the build just
     // falls back to the document pose.
     return null;
   }
+};
+
+const seedActuatorCtrl = (nodes: SceneNode[], targetData: MjData, skipActuators?: Set<string>) => {
+  const actuators: SceneJoint[] = [];
+  const traverse = (list: SceneNode[]) => {
+    if (!list) return;
+    for (const node of list) {
+      node.joints?.forEach((j) => { if (j.actuator) actuators.push(j); });
+      traverse(node.children);
+    }
+  };
+  traverse(nodes);
+  actuators.forEach((j, idx) => {
+    if (!j.actuator || j.actuator.ctrlValue === undefined) return;
+    const actName = `${j.name}_actuator`;
+    if (skipActuators?.has(actName)) return;
+    const actId = actuatorIdCache[actName] ?? idx;
+    if (actId >= 0 && actId < targetData.ctrl.length) targetData.ctrl[actId] = j.actuator.ctrlValue;
+  });
+};
+
+const copyCarriedActuators = (carried: CarriedState, newModel: MjModel, newData: MjData): Set<string> => {
+  const placed = new Set<string>();
+  for (const name in actuatorIdCache) {
+    if (Object.prototype.hasOwnProperty.call(carried.actuators, name)) {
+      const id = actuatorIdCache[name];
+      if (id >= 0 && id < newModel.nu) {
+        newData.ctrl[id] = carried.actuators[name];
+        placed.add(name);
+      }
+    }
+  }
+  return placed;
 };
 
 /**
@@ -1640,7 +1735,7 @@ const doBuild = (
   rebuildBreakableWelds();
   rebuildImpactWatches();
   pendingWake.clear(); // body ids from the old model mean nothing in this one
-  for (const k of Object.keys(scriptCache)) delete scriptCache[k];
+  scriptCache = {};
 
   // Explicit seed state (from the main thread's live mirror) takes priority
   // over the same-worker oldModel/oldData copy-forward below — this is what
@@ -1656,10 +1751,10 @@ const doBuild = (
   } else if (preserveState && carried && carried.nq === newModel.nq && carried.nv === newModel.nv) {
     const nq = Math.min(carried.nq, newModel.nq);
     const nv = Math.min(carried.nv, newModel.nv);
-    const nu = Math.min(carried.nu, newModel.nu);
     for (let i = 0; i < nq; i++) newData.qpos[i] = carried.qpos[i];
     for (let i = 0; i < nv; i++) newData.qvel[i] = carried.qvel[i];
-    for (let i = 0; i < nu; i++) newData.ctrl[i] = carried.ctrl[i];
+    const placedActuators = copyCarriedActuators(carried, newModel, newData);
+    seedActuatorCtrl(sceneGraph.nodes, newData, placedActuators);
     newData.time = carried.time;
     mujoco.mj_forward(newModel, newData);
   } else if (carried && preserveState) {
@@ -1692,7 +1787,8 @@ const doBuild = (
       for (let i = 0; i < nv; i++) newData.qvel[vTo + i] = carried.qvel[from.dofadr + i];
       placed.add(name);
     }
-    for (let i = 0; i < Math.min(carried.nu, newModel.nu); i++) newData.ctrl[i] = carried.ctrl[i];
+    const placedActuators = copyCarriedActuators(carried, newModel, newData);
+    seedActuatorCtrl(sceneGraph.nodes, newData, placedActuators);
     newData.time = carried.time;
     mujoco.mj_forward(newModel, newData);
 
@@ -1745,18 +1841,7 @@ const doBuild = (
     seedNew(sceneGraph.nodes);
     if (seededNew) mujoco.mj_forward(newModel, newData);
   } else {
-    const actuators: SceneJoint[] = [];
-    const traverse = (nodes: SceneNode[]) => {
-      if (!nodes) return;
-      for (const node of nodes) {
-        node.joints?.forEach((j) => { if (j.actuator) actuators.push(j); });
-        traverse(node.children);
-      }
-    };
-    traverse(sceneGraph.nodes);
-    actuators.forEach((j, idx) => {
-      if (j.actuator && j.actuator.ctrlValue !== undefined) newData.ctrl[idx] = j.actuator.ctrlValue;
-    });
+    seedActuatorCtrl(sceneGraph.nodes, newData);
 
     mujoco.mj_forward(newModel, newData);
 
@@ -1881,9 +1966,13 @@ const runHeadless = (
 
   const savedModel = model, savedData = data, savedSceneGraph = sceneGraph;
   // A headless run starts its scripts from nothing and must not leave its
-  // state in the live scene's.
+  // state or compiled closures in the live scene's.
   const savedScriptState = scriptState;
+  const savedScriptCache = scriptCache;
+  const savedPendingWake = new Set(pendingWake);
   scriptState = new ScriptStateStore();
+  scriptCache = {};
+  pendingWake.clear();
   const savedBodyIdCache = bodyIdCache, savedJointIdCache = jointIdCache;
   const savedGeomIdCache = geomIdCache, savedGeomNameCache = geomNameCache, savedActuatorIdCache = actuatorIdCache;
   // breakableWelds holds indices into the LIVE model's equality list, so it has
@@ -1906,6 +1995,7 @@ const runHeadless = (
     brokenWeldKeys = new Set();
     rebuildBreakableWelds();
 
+    seedActuatorCtrl(sceneGraph.nodes, data);
     mujoco.mj_forward(model, data);
 
     const initVelJoints: { name: string; vel: number[] }[] = [];
@@ -1939,11 +2029,18 @@ const runHeadless = (
         lastAero = {};
         executeScripts(sceneGraph.nodes, lastAero);
         applyFreeJointDamping(sceneGraph.nodes);
+        wakeBodies();
         mujoco!.mj_step(model!, data!);
         checkConstraintBreaks();
       },
       time: () => data!.time,
-      isBad: () => model!.nq > 0 && !Number.isFinite(data!.qpos[0]),
+      isBad: () => {
+        const qpos = data!.qpos;
+        for (let i = 0; i < model!.nq; i++) if (!Number.isFinite(qpos[i])) return true;
+        const qvel = data!.qvel;
+        for (let i = 0; i < model!.nv; i++) if (!Number.isFinite(qvel[i])) return true;
+        return false;
+      },
       sample: () => buildHistoryEntry(lastAero),
     });
 
@@ -1968,6 +2065,9 @@ const runHeadless = (
     if (headlessData) { try { headlessData.delete(); } catch { /* ignore */ } }
     model = savedModel; data = savedData; sceneGraph = savedSceneGraph;
     scriptState = savedScriptState;
+    scriptCache = savedScriptCache;
+    pendingWake.clear();
+    for (const id of savedPendingWake) pendingWake.add(id);
     bodyIdCache = savedBodyIdCache; jointIdCache = savedJointIdCache;
     geomIdCache = savedGeomIdCache; geomNameCache = savedGeomNameCache; actuatorIdCache = savedActuatorIdCache;
     breakableWelds = savedBreakableWelds; brokenWeldKeys = savedBrokenWeldKeys;
@@ -1997,6 +2097,7 @@ self.onmessage = async (evt: MessageEvent) => {
       case 'SET_ENV': {
         envWindX = msg.windX ?? envWindX;
         envWindY = msg.windY ?? envWindY;
+        envDensity = msg.density ?? envDensity;
         break;
       }
       case 'SET_PLAYING': {
@@ -2041,23 +2142,19 @@ self.onmessage = async (evt: MessageEvent) => {
         const jId = jointIdCache[msg.jointName] ?? mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT.value, msg.jointName);
         if (jId !== -1) {
           const adr = model.jnt_qposadr[jId];
-          data.qpos[adr + msg.axis] = msg.value;
+          if (Array.isArray(msg.value)) {
+            for (let i = 0; i < msg.value.length; i++) {
+              if (adr + msg.axis + i < model.nq) data.qpos[adr + msg.axis + i] = msg.value[i];
+            }
+          } else {
+            data.qpos[adr + msg.axis] = msg.value;
+          }
           pendingWake.add(model.jnt_bodyid[jId]);
           const vadr = model.jnt_dofadr[jId];
           const nv = JOINT_NV[model.jnt_type[jId]] ?? 1;
           for (let i = 0; i < nv; i++) data.qvel[vadr + i] = 0;
           mujoco.mj_forward(model, data);
-          const snap = snapshot();
-          if (isSharedSupported) {
-            post({ type: 'FRAME', time: snap.time, heapBytes: snap.heapBytes, isShared: true, scriptState: scriptState.snapshot() });
-          } else {
-            post({ type: 'FRAME', ...snap, isShared: false, scriptState: scriptState.snapshot() }, [
-              snap.qpos.buffer, snap.qvel.buffer, snap.ctrl.buffer,
-              snap.xfrc_applied.buffer, snap.qfrc_applied.buffer,
-              snap.xpos.buffer, snap.xmat.buffer, snap.cvel.buffer,
-              snap.geom_xpos.buffer, snap.geom_xmat.buffer
-            ]);
-          }
+          postFrame();
         }
         break;
       }

@@ -1936,13 +1936,16 @@ export function useMCPBridge() {
           // model/data built from the one already-loaded mujoco module, so a
           // headless "what-if" run can never diverge from what's actually
           // rendered live, and never costs a second loaded WASM module.
-          const xml = compileToMJCF(sceneGraph, gravityZ, floorFriction, windX, windY, density, floorBounce);
+          const client = getPhysicsWorkerClient();
+          const xml = compileToMJCF(sceneGraph, gravityZ, floorFriction, windX, windY, density, floorBounce, {
+            meshFiles: client.meshFiles,
+          });
           // Decimated in the worker, not here: a full per-tick, per-body
           // trajectory is ~500KB per 900 ticks, and striding only after the run
           // left the worker's 20,000-frame cap in force, so a long run stopped
           // early and told the caller to raise the stride it had already raised.
           const stride = Math.max(1, Math.floor(Number(msg.stride) || 1));
-          const result: HeadlessResult = await getPhysicsWorkerClient().runHeadless(xml, sceneGraph, ticks, stride);
+          const result: HeadlessResult = await client.runHeadless(xml, sceneGraph, ticks, stride);
           const bodyFilter = Array.isArray(msg.bodies) && msg.bodies.length > 0 ? new Set(msg.bodies as string[]) : null;
           if (result.ok && result.trajectory && bodyFilter) {
             result.trajectory = result.trajectory.map((fr: HistoryEntry) => ({

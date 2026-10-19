@@ -166,16 +166,16 @@ export type MainToWorkerMessage =
        */
       holdForInstall?: boolean;
     }
-  | { type: 'SET_ENV'; windX?: number; windY?: number }
+  | { type: 'SET_ENV'; windX?: number; windY?: number; density?: number }
   | { type: 'SET_PLAYING'; isPlaying: boolean }
   | { type: 'TICK'; delta: number; /** Date.now() when posted, so a backlog can be told apart. */ sentAt?: number }
   | { type: 'RESUME' }
   | { type: 'SET_DRAG'; nodeId: string | null; target: DragTarget | null }
   | { type: 'SET_KEYS'; keys: string[] }
-  | { type: 'SET_QPOS'; jointName: string; axis: number; value: number }
+  | { type: 'SET_QPOS'; jointName: string; axis: number; value: number | readonly number[] }
   | { type: 'SET_CTRL'; actuatorName: string; value: number }
   | { type: 'UPDATE_SCRIPT'; nodeId: string; script: string }
-  | { type: 'RUN_HEADLESS'; id: string; xml: string; sceneGraph: SceneGraph; ticks: number }
+  | { type: 'RUN_HEADLESS'; id: string; xml: string; sceneGraph: SceneGraph; ticks: number; stride?: number }
   | { type: 'GET_HISTORY'; id: string; query?: HistoryQuery }
   | { type: 'GET_TELEMETRY'; id: string }
   | { type: 'CLEAR_HISTORY' }
