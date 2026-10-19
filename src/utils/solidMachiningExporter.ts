@@ -36,7 +36,8 @@ import {
   type ToolpathSegment,
 } from './reliefCarveExporter';
 import { materialSpec, type SpindleRange } from './feedsAndSpeeds';
-import { ORIENT_MATRIX, orient, type UpAxis } from './orient';
+import { ORIENT_MATRIX, orient, type BlockFace, type UpAxis } from './orient';
+import { generateSetups, type SetupPlanSummary, type SolidSetupResult } from './solidSetups';
 
 export type { UpAxis };
 
@@ -121,6 +122,19 @@ export interface SolidMachiningOptions extends Omit<ReliefCarveOptions, ReliefOn
    * left on a skin.
    */
   throughCutMm: number;
+  /**
+   * How many setups, or which faces. Absent, 1 or 2 is `sides` as it has
+   * always been. 'auto' lets the planner choose the way up and the faces,
+   * the fewest that reach the part; a list of faces (named as the block
+   * stands for setup 1) uses those.
+   */
+  setups?: 'auto' | 1 | 2 | BlockFace[];
+  /** With 'auto', at most this many setups. Default 4. */
+  maxSetups?: number;
+  /** With 'auto', whether the planner may choose a different way up. Default true. */
+  autoOrient?: boolean;
+  /** Height free under the spindle above the bed, mm, for a block stood on end. 0 is unknown. */
+  clearanceMm?: number;
 }
 
 export const DEFAULT_SOLID_OPTIONS: SolidMachiningOptions = {
@@ -221,6 +235,16 @@ export interface SolidMachiningResult {
   tabs: { x: number; y: number; topZ: number; bottomZ: number }[];
   /** Registration pin centres in work coordinates, if bored. */
   pins: { x: number; y: number }[];
+  /**
+   * Every setup in the order it runs, when the job was planned (`setups`
+   * 'auto' or a list of faces). The top and the flip are `sides` again, here
+   * with their frames; the turns onto the block's sides are only here.
+   */
+  setups?: SolidSetupResult[];
+  /** What the plan leaves and why, when there is a plan. */
+  plan?: SetupPlanSummary;
+  /** The way up the planner chose, which may not be the one asked for. */
+  upChosen?: UpAxis;
   /**
    * How the model was turned and put in the stock, side A's frame, so a
    * simulated cut can be put back on the model.
@@ -809,10 +833,70 @@ export function sideDepthMm(partHeightMm: number, opts: SolidMachiningOptions): 
   return twoSided ? stockT / 2 + SIDE_OVERLAP_MM : stockT + Math.max(0, opts.throughCutMm);
 }
 
+/** The scene's triangles turned `up` and scaled to mm, with their bounds. */
+export function orientPart(sceneTris: ArrayLike<number>, up: UpAxis, scale: number) {
+  const oriented = new Float64Array(sceneTris.length);
+  let mnX = Infinity, mnY = Infinity, mnZ = Infinity;
+  let mxX = -Infinity, mxY = -Infinity, mxZ = -Infinity;
+  for (let i = 0; i < sceneTris.length; i += 3) {
+    const [x, y, z] = orient(up, sceneTris[i] * scale, sceneTris[i + 1] * scale, sceneTris[i + 2] * scale);
+    oriented[i] = x; oriented[i + 1] = y; oriented[i + 2] = z;
+    if (x < mnX) mnX = x; if (x > mxX) mxX = x;
+    if (y < mnY) mnY = y; if (y > mxY) mxY = y;
+    if (z < mnZ) mnZ = z; if (z > mxZ) mxZ = z;
+  }
+  return { oriented, mnX, mnY, mnZ, mxX, mxY, mxZ, partW: mxX - mnX, partD: mxY - mnY, partH: mxZ - mnZ };
+}
+
+/** The block a part needs: as given, or the part plus channel and frame, and its skins. */
+export function stockFor(partW: number, partD: number, partH: number, opts: SolidMachiningOptions) {
+  const roughDia = opts.roughingEnabled ? opts.roughingToolDiaMm : opts.finishingToolDiaMm;
+  const moat = opts.moatWidthMm > 0 ? opts.moatWidthMm : Math.max(3, roughDia * 1.5);
+  const frame = Math.max(0, opts.frameWidthMm);
+  const twoSided = opts.sides === 2;
+  const skin = Math.max(0, opts.topSkinMm);
+  const stockW = opts.stockWidthMm > 0 ? opts.stockWidthMm : partW + 2 * (moat + frame);
+  const stockD = opts.stockDepthMm > 0 ? opts.stockDepthMm : partD + 2 * (moat + frame);
+  const stockT =
+    opts.stockThicknessMm > 0 ? opts.stockThicknessMm : partH + (twoSided ? 2 * skin : skin);
+  return { stockW, stockD, stockT };
+}
+
+/** Oriented triangles centred in the stock in plan, their top at `topZ`. */
+export function placeInStock(
+  oriented: Float64Array,
+  b: { mnX: number; mnY: number; mxX: number; mxY: number; mxZ: number },
+  stockCx: number,
+  stockCy: number,
+  topZ: number
+): Float64Array {
+  const tris = new Float64Array(oriented.length);
+  for (let i = 0; i < oriented.length; i += 3) {
+    tris[i] = oriented[i] - (b.mnX + b.mxX) / 2 + stockCx;
+    tris[i + 1] = oriented[i + 1] - (b.mnY + b.mxY) / 2 + stockCy;
+    tris[i + 2] = oriented[i + 2] - b.mxZ + topZ;
+  }
+  return tris;
+}
+
 /**
  * Turns a scene into the programs that machine it out of a block.
+ *
+ * One or two sides as solid machining always has, or, with `setups` 'auto'
+ * or a list of faces, as many setups as the part needs (`solidSetups.ts`).
  */
 export function generateSolidMachining(
+  scene: SceneGraph,
+  userOptions?: Partial<SolidMachiningOptions>
+): SolidMachiningResult {
+  const opts: SolidMachiningOptions = { ...DEFAULT_SOLID_OPTIONS, ...userOptions };
+  if (opts.setups === undefined) return generateSolidSides(scene, opts);
+  if (opts.setups === 1 || opts.setups === 2) return generateSolidSides(scene, { ...opts, sides: opts.setups });
+  return generateSetups(scene, opts, { generateSides: generateSolidSides, orientPart, stockFor, placeInStock });
+}
+
+/** One side or two, the top and the flip. */
+function generateSolidSides(
   scene: SceneGraph,
   userOptions?: Partial<SolidMachiningOptions>
 ): SolidMachiningResult {
@@ -844,19 +928,7 @@ export function generateSolidMachining(
 
   // --- The part, the right way up and at size -------------------------------
   const scale = Math.max(0.01, opts.scalePercent / 100) * 1000;
-  const oriented = new Float64Array(sceneTris.length);
-  let mnX = Infinity, mnY = Infinity, mnZ = Infinity;
-  let mxX = -Infinity, mxY = -Infinity, mxZ = -Infinity;
-  for (let i = 0; i < sceneTris.length; i += 3) {
-    const [x, y, z] = orient(opts.up, sceneTris[i] * scale, sceneTris[i + 1] * scale, sceneTris[i + 2] * scale);
-    oriented[i] = x; oriented[i + 1] = y; oriented[i + 2] = z;
-    if (x < mnX) mnX = x; if (x > mxX) mxX = x;
-    if (y < mnY) mnY = y; if (y > mxY) mxY = y;
-    if (z < mnZ) mnZ = z; if (z > mxZ) mxZ = z;
-  }
-  const partW = mxX - mnX;
-  const partD = mxY - mnY;
-  const partH = mxZ - mnZ;
+  const { oriented, mnX, mnY, mxX, mxY, mxZ, partW, partD, partH } = orientPart(sceneTris, opts.up, scale);
   if (partW <= 1e-6 || partD <= 1e-6 || partH <= 1e-6) {
     return fail('The scene has no volume in this orientation, so there is no part to cut.');
   }
@@ -875,12 +947,8 @@ export function generateSolidMachining(
   const moat = opts.moatWidthMm > 0 ? opts.moatWidthMm : Math.max(3, roughDia * 1.5);
   const frame = Math.max(0, opts.frameWidthMm);
   const twoSided = opts.sides === 2;
-  const skin = Math.max(0, opts.topSkinMm);
 
-  const stockW = opts.stockWidthMm > 0 ? opts.stockWidthMm : partW + 2 * (moat + frame);
-  const stockD = opts.stockDepthMm > 0 ? opts.stockDepthMm : partD + 2 * (moat + frame);
-  const stockT =
-    opts.stockThicknessMm > 0 ? opts.stockThicknessMm : partH + (twoSided ? 2 * skin : skin);
+  const { stockW, stockD, stockT } = stockFor(partW, partD, partH, opts);
 
   if (stockW < partW + 2 * moat || stockD < partD + 2 * moat) {
     warnings.push(
@@ -905,12 +973,7 @@ export function generateSolidMachining(
   const stockCx = stockW / 2;
   const stockCy = stockD / 2;
   const topZ = twoSided ? -(stockT - partH) / 2 : -(stockT - partH);
-  const tris = new Float64Array(oriented.length);
-  for (let i = 0; i < oriented.length; i += 3) {
-    tris[i] = oriented[i] - (mnX + mxX) / 2 + stockCx;
-    tris[i + 1] = oriented[i + 1] - (mnY + mxY) / 2 + stockCy;
-    tris[i + 2] = oriented[i + 2] - mxZ + topZ;
-  }
+  const tris = placeInStock(oriented, { mnX, mnY, mxX, mxY, mxZ }, stockCx, stockCy, topZ);
   const partBounds = {
     minX: Math.max(0, stockCx - partW / 2),
     minY: Math.max(0, stockCy - partD / 2),

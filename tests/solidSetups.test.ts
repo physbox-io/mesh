@@ -1,0 +1,105 @@
+import { describe, it, expect } from 'vitest';
+import { generateSolidMachining, deriveSolidOptions } from '../src/utils/solidMachiningExporter';
+import { simulateMilling } from '../src/utils/cutSimulation';
+import { setupFrame } from '../src/utils/orient';
+import type { SceneGraph, SceneGeom } from '../src/types/scene';
+
+/*
+ * Solid machining from any face, end to end: the planner's choice turned into
+ * programs, and each side setup cut back out of its own block.
+ */
+
+const W = 135, D = 138, H = 19;
+
+/** A prism along X over a convex profile in (y, z), mm, as a mesh geom. */
+function prism(name: string, profile: [number, number][]): SceneGeom {
+  const v: number[] = [];
+  for (const x of [0, W]) for (const [y, z] of profile) v.push(x / 1000, y / 1000, z / 1000);
+  const n = profile.length;
+  const faces: number[] = [];
+  for (let i = 1; i < n - 1; i++) faces.push(0, i + 1, i, n, n + i, n + i + 1);
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n;
+    faces.push(i, j, n + j, i, n + j, n + i);
+  }
+  const yup: number[] = [];
+  for (let i = 0; i < v.length; i += 3) yup.push(v[i], v[i + 2], -v[i + 1]);
+  return { name, type: 'mesh', size: [1], renderVertices: v, vertices: yup, faces } as SceneGeom;
+}
+
+function tray(leanDeg: number): SceneGraph {
+  const floor = H - 12;
+  const run = 12 * Math.tan((leanDeg * Math.PI) / 180);
+  return {
+    nodes: [{
+      id: 'b1', name: 'tray', type: 'body', pos: [0, 0, 0],
+      geoms: [
+        prism('base', [[0, 0], [D, 0], [D, floor], [0, floor]]),
+        prism('front', [[0, floor], [60, floor], [60 + run, H], [0, H]]),
+        prism('back', [[72, floor], [D, floor], [D, H], [72 + run, H]]),
+      ],
+      joints: [], children: [],
+    }],
+  };
+}
+
+const tooling = {
+  sides: 1 as const, material: 'softwood' as const,
+  roughingToolDiaMm: 6, finishingToolDiaMm: 6, finishingToolType: 'flat' as const,
+  toolStickoutMm: 80, stockWidthMm: 150, stockDepthMm: 150, stockThicknessMm: 20,
+};
+
+describe('solid machining from any face', () => {
+  const scene = tray(15);
+  const opts = deriveSolidOptions(scene, tooling);
+  const r = generateSolidMachining(scene, { ...opts, setups: 'auto' });
+
+  it('turns the leaning tray onto both ends and frees it from the top last', () => {
+    expect(r.success, r.error).toBe(true);
+    const faces = r.setups!.map((s) => s.upFace);
+    expect(new Set(faces)).toEqual(new Set(['+x', '-x', '+z']));
+    expect(faces[faces.length - 1]).toBe('+z');
+    r.setups!.forEach((s, i) => {
+      expect(s.index).toBe(i + 1);
+      expect(s.of).toBe(3);
+      expect(s.gcode.length).toBeGreaterThan(100);
+      expect(s.instructions.length).toBeGreaterThan(0);
+    });
+    expect(r.plan!.text).toMatch(/3 setups/);
+    expect(r.plan!.redesignHint).toMatch(/vertical/);
+  });
+
+  it('tells the operator how to stand the block, naming two faces', () => {
+    const end = r.setups!.find((s) => s.upFace === '+x')!;
+    expect(end.gcode).toMatch(/Stand the block: Stand the block on its left end, right end up, with the front towards you/);
+    expect(end.datum!.touches.map((t) => t.axis)).toEqual(['x', 'y', 'z']);
+  });
+
+  it('cuts each end into the groove about half way, and never into the part', () => {
+    for (const face of ['+x', '-x'] as const) {
+      const s = r.setups!.find((q) => q.upFace === face)!;
+      const frame = setupFrame(face, r.stock);
+      const cut = simulateMilling(s.gcode, {
+        widthMm: frame.stock.widthMm, depthMm: frame.stock.depthMm, cellMm: 0.25,
+        tools: { 1: { shape: 'flat', diameterMm: 6 }, 2: { shape: 'flat', diameterMm: 6 } },
+      });
+      // Under the front wall's overhang, which the top cannot see: 5 mm above
+      // the groove floor the wall is at model Y 61.3 and its lip covers to 63.2.
+      // 1.6 mm off the wall, past the skin the turn leaves on it.
+      const sliver = frame.toSetup([75, (150 - D) / 2 + 62.9, -(20 - H) - 12 + 5]);
+      expect(cut.at(sliver[0], sliver[1])).toBeLessThan(-60);
+      expect(s.allowanceMm).toBeLessThan(1.5);
+      // Solid tray beside the groove: not cut below the stock face.
+      const solid = frame.toSetup([75, (150 - D) / 2 + 30, -(20 - H) - 6]);
+      expect(cut.at(solid[0], solid[1])).toBeGreaterThan(-1);
+      expect(s.depthMm).toBeLessThan(80);
+    }
+  });
+
+  it('leaves an upright tray to one setup, as it always was', () => {
+    const upright = tray(0);
+    const res = generateSolidMachining(upright, { ...deriveSolidOptions(upright, tooling), setups: 'auto' });
+    expect(res.success, res.error).toBe(true);
+    expect(res.setups!.map((s) => s.upFace)).toEqual(['+z']);
+  });
+});
