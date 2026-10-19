@@ -9,6 +9,7 @@ import { tabSession } from '../utils/tabSession';
 import { useViewQuality } from '../store/viewQualityStore';
 import { summarizeTrajectory } from '../utils/trajectorySummary';
 import { authoredQuat, orientationOf } from '../utils/bodyOrientation';
+import { pocketMesh, type PocketSpec } from '../utils/pocketCutter';
 import { useStore, getPhysicsWorkerClient } from '../store/useStore';
 import { useDentStore } from '../store/dentStore';
 import { isDentable, needsConversionForDenting } from '../utils/dentMesh';
@@ -81,7 +82,7 @@ import { geomHalfLen } from '../utils/geomSurface';
 import { requestTexturedSurface } from '../utils/textureClient';
 import { webSerialManager } from '../utils/webSerialManager';
 import type { Object3D } from 'three';
-import { Vector3 } from 'three';
+import { Quaternion, Vector3 } from 'three';
 import type { SceneGraph, SceneNode, SceneGeom, SceneJoint, HardwareBore, HardwareCutKind } from '../types/scene';
 import type { RawGeom, RawJoint, RawNode } from '../utils/sceneNodes';
 import { HARDWARE_KINDS, hardwareSpecOf } from '../utils/hardwareCuts';
@@ -1230,6 +1231,8 @@ export function applySingleCutToBody(targetId: string, spec: Record<string, any>
     };
   }
 
+  if (shape === 'pocket') return applyPocketCut(targetId, spec, spotIn);
+
   const kind = shape === 'slot' || shape === 'box' ? 'box'
     : shape === 'dish' || shape === 'sphere' ? 'sphere' : 'cylinder';
   const index = store.addBodyCut(targetId, kind, spotIn);
@@ -1273,6 +1276,73 @@ export function applySingleCutToBody(targetId: string, spec: Record<string, any>
     } : {}),
     depthMm: cut?.cutDepth ? Math.round(cut.cutDepth * 1000 * 1000) / 1000 : 0,
     through: !(cut?.cutDepth && cut.cutDepth > 0),
+  };
+}
+
+/**
+ * A smooth pocket: placed the way any cut is (a line cast along `normal`
+ * through `at` finds the surface), then swapped for a dense closed mesh of the
+ * outline, depth and floor asked for, baked into the body's frame. It keeps no
+ * cutAt, so nothing re-derives it as a primitive; what it was made from stays
+ * on it as `pocket`.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function applyPocketCut(targetId: string, spec: Record<string, any>, spotIn?: { at: number[]; normal: number[] }): Record<string, any> {
+  const num = (v: unknown) => (typeof v === 'number' && v > 0 ? v : undefined);
+  const outline = spec.outline === 'ellipse' || spec.outline === 'circle' ? 'ellipse' : 'rect';
+  const widthMm = num(spec.widthMm) ?? num(spec.diameterMm);
+  const lengthMm = num(spec.lengthMm) ?? (outline === 'ellipse' ? widthMm : undefined);
+  const depthMm = num(spec.depthMm);
+  if (!widthMm || !lengthMm || !depthMm) {
+    return { ok: false, error: 'A pocket needs widthMm and lengthMm (or diameterMm for a round one) and depthMm' };
+  }
+  const pocket: PocketSpec = {
+    outline,
+    widthMm,
+    lengthMm,
+    depthMm,
+    ...(num(spec.cornerRadiusMm) ? { cornerRadiusMm: num(spec.cornerRadiusMm) } : {}),
+    floor: spec.floor === 'bowl' ? 'bowl' : 'flat',
+    ...(typeof spec.floorRadiusMm === 'number' ? { floorRadiusMm: spec.floorRadiusMm } : {}),
+  };
+  const store = useStore.getState();
+  const index = store.addBodyCut(targetId, 'cylinder', spotIn);
+  if (index < 0) return { ok: false, error: 'That body has no solid shape to cut into' };
+  const node = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId);
+  const placed = node?.geoms?.[index];
+  if (!node || !placed?.cutAt || !placed.cutNormal) return { ok: false, error: 'The pocket could not be placed' };
+
+  const { verts, faces } = pocketMesh(pocket);
+  const n = new Vector3(...(placed.cutNormal as [number, number, number])).normalize();
+  const turn = new Quaternion().setFromUnitVectors(new Vector3(0, 0, 1), n);
+  const origin = new Vector3(...(placed.cutAt as [number, number, number]));
+  const zup: number[] = [];
+  const v = new Vector3();
+  for (let i = 0; i < verts.length; i += 3) {
+    v.set(verts[i] / 1000, verts[i + 1] / 1000, verts[i + 2] / 1000).applyQuaternion(turn).add(origin);
+    zup.push(v.x, v.y, v.z);
+  }
+  const yup = zup.flatMap((_, i, a) => (i % 3 === 0 ? [a[i], a[i + 2], -a[i + 1]] : []));
+  const mesh: SceneGeom = {
+    name: placed.name,
+    type: 'mesh',
+    csg: 'difference',
+    rgba: placed.rgba,
+    renderVertices: zup,
+    vertices: yup,
+    faces,
+    pocket: { ...pocket, at: [...placed.cutAt], normal: [...placed.cutNormal] },
+  };
+  store.updateNode(targetId, { geoms: node.geoms.map((g, i) => (i === index ? mesh : g)) });
+  return {
+    ok: true,
+    id: targetId,
+    geomIndex: index,
+    name: placed.name,
+    shape: 'pocket',
+    atMm: placed.cutAt.map((c: number) => Math.round(c * 1e6) / 1000),
+    normal: placed.cutNormal,
+    pocket,
   };
 }
 

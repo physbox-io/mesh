@@ -11,6 +11,7 @@
 // keeps the same exported API (loadCompiler / isCompilerReady / compileSCAD).
 
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
+import { SCAD_LIBRARY } from '../utils/scadLibrary';
 // A static import on purpose: Vite follows it into the module graph, splits
 // the Emscripten glue into its own chunk and emits openscad.wasm as an asset
 // next to it, so nothing is fetched from a CDN and the cross-origin isolation
@@ -120,6 +121,12 @@ async function renderToStl(scadCode: string): Promise<Uint8Array> {
       console.debug('[OpenSCAD]:', line);
     },
   });
+  // Mesh's own modules (utils/scadLibrary.ts), so `use <physbox/pocket.scad>` resolves.
+  for (const [path, source] of Object.entries(SCAD_LIBRARY)) {
+    const dir = path.slice(0, path.lastIndexOf('/'));
+    try { instance.FS.mkdir(dir); } catch { /* already there */ }
+    instance.FS.writeFile(path, source);
+  }
   instance.FS.writeFile('/input.scad', scadCode);
   const exit = instance.callMain(['/input.scad', ...BACKEND_ARGS, '-o', '/output.stl']);
   if (exit !== 0) {

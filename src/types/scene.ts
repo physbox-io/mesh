@@ -1,5 +1,6 @@
 import type { PaintLayer } from '../utils/vertexPaint';
 import type { FaceSplit, SurfaceTexture } from '../utils/surfaceTexture';
+import type { PocketSpec } from '../utils/pocketCutter';
 export type GeomType = 'capsule' | 'sphere' | 'box' | 'plane' | 'cylinder' | 'ellipsoid' | 'mesh';
 export type JointType = 'hinge' | 'slide' | 'ball' | 'free';
 
@@ -23,6 +24,12 @@ export type HardwareCutKind = 'nut_trap' | 'counterbore' | 'insert' | 'insert_bo
 export type HardwareBore = 'clearance' | 'tapped' | 'insert';
 
 export interface SceneGeom {
+  /**
+   * A smooth pocket cut (physics_cut shape 'pocket'): the outline, depth and
+   * floor it was built from, and where on the body it was placed. The geom
+   * itself is the mesh pocketMesh made from these.
+   */
+  pocket?: PocketSpec & { at: number[]; normal: number[] };
   /**
    * An id of its own, carried by geoms that came from the copilot (see RawGeom
    * in src/utils/sceneNodes.ts) and by the one the SCAD compile creates. Geoms
