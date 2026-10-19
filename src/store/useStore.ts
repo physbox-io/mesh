@@ -5946,7 +5946,8 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
           const freshClient = getPhysicsWorkerClient();
           freshClient.setEnv(windX, windY, density);
           const xml = compileToMJCF(sceneGraph, gravityZ, floorFriction, windX, windY, density, floorBounce, {
-            sleep,
+            // As the ordinary build above decides it.
+            sleep: Object.keys(pieces).length > 0 && !overrideScene,
             meshFiles: freshClient.meshFiles,
           });
           const hold = !!immediate && isRuntimeBuild && !forceReset;
