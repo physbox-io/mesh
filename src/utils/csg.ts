@@ -2385,8 +2385,20 @@ export async function evaluateNodeCsg(node: SceneNode): Promise<CsgResult | null
     csgDerived: 'visual',
   };
 
+  const computeHullVolume = async (): Promise<number> => {
+    if (zup.length > 3000) {
+      try {
+        const { analyseMeshOffThread } = await import('./vhacdWorkerClient');
+        return (await analyseMeshOffThread(zup, compiled!.faces)).hullVolume;
+      } catch {
+        // Fall through to inline hull under Node or if worker fails.
+      }
+    }
+    return convexHullOf(chunk3(zup))?.volume ?? 0;
+  };
+
   if (requested === 'hull') {
-    hullVolume = convexHullOf(chunk3(zup))?.volume ?? 0;
+    hullVolume = await computeHullVolume();
     return {
       hash, scad, volume, hullVolume, centroid, mode: 'hull',
       geoms: [{ ...visual, mass: totalMass }],
@@ -2420,6 +2432,7 @@ export async function evaluateNodeCsg(node: SceneNode): Promise<CsgResult | null
       const totalHullVol = usable.reduce((s, h) => s + h.volume, 0);
       if (usable.length >= 3 && totalHullVol > 0) {
         mode = 'decompose';
+        hullVolume = convexHullOf(chunk3(usable.flatMap(h => h.verts)))?.volume ?? totalHullVol;
         if (dropped > 0) {
           warning = `Dropped ${dropped} degenerate collider${dropped === 1 ? '' : 's'} from the decomposition; the remaining ${usable.length} carry the full mass.`;
         }
@@ -2432,7 +2445,7 @@ export async function evaluateNodeCsg(node: SceneNode): Promise<CsgResult | null
         // whole part's convex hull instead — MuJoCo hulls a mesh collider
         // anyway, so handing it the visual mesh IS the convex hull of the part.
         return {
-          hash, scad, volume, hullVolume: convexHullOf(chunk3(zup))?.volume ?? 0, centroid, mode: 'hull',
+          hash, scad, volume, hullVolume: await computeHullVolume(), centroid, mode: 'hull',
           warning: `${dropped} of ${hulls.length} decomposition sectors were degenerate (too thin for MuJoCo to hull safely), leaving too few to collide with — colliding as the convex hull of the whole part instead.`,
           geoms: [{ ...visual, mass: totalMass }],
         };
@@ -2453,7 +2466,7 @@ export async function evaluateNodeCsg(node: SceneNode): Promise<CsgResult | null
   // is (utils/convexDecomposition.ts), rather than hulled, which would fill the
   // hole, or left to its square primitives.
   if (mode === 'primitives' && requested === 'auto' && hasEdgeRounds(node)) {
-    const hull = convexHullOf(chunk3(zup))?.volume ?? 0;
+    const hull = await computeHullVolume();
     hullVolume = hull;
     if (hull > 0 && volume / hull >= ROUNDED_HULL_SOLIDITY) {
       return { hash, scad, volume, hullVolume: hull, centroid, mode: 'hull', geoms: [{ ...visual, mass: totalMass }] };
@@ -2482,7 +2495,7 @@ export async function evaluateNodeCsg(node: SceneNode): Promise<CsgResult | null
     // Colliders carry the mass; the visual shell must not double-count it.
     return { hash, scad, volume, hullVolume: hullVolume ?? 0, centroid, mode, warning, geoms: [{ ...visual, role: 'visual', mass: 0 }, ...colliders] };
   }
-  if (hullVolume === null) hullVolume = convexHullOf(chunk3(zup))?.volume ?? 0;
+  if (hullVolume === null) hullVolume = await computeHullVolume();
 
   // 'primitives': the authored positives stay as the colliders (mjcf.ts keeps
   // them and drops the negatives), and the boolean mesh is visual only.

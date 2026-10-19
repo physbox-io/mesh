@@ -81,6 +81,22 @@ export function findPartingZ(scene: SceneGraph, partingFromBaseMm: number | 'aut
   return r.summary.partingWorldZ;
 }
 
+async function findPartingZAsync(scene: SceneGraph, partingFromBaseMm: number | 'auto'): Promise<number> {
+  if (typeof Worker === 'undefined') return findPartingZ(scene, partingFromBaseMm);
+  const { ExportWorkerClient } = await import('./exportWorkerClient');
+  const client = new ExportWorkerClient();
+  try {
+    const r = await client.run(
+      'cast',
+      { ...scene, nodes: stripTextures(scene.nodes), castPrep: undefined },
+      { method: 'sand', addGating: false, partingFromBaseMm },
+    );
+    return r.summary.partingWorldZ;
+  } finally {
+    client.dispose();
+  }
+}
+
 const round2 = (m: number) => Math.round(m * 1e5) / 100;
 
 export async function runCastPrep(opts: CastPrepOptions): Promise<CastPrepReport> {
@@ -111,7 +127,7 @@ export async function runCastPrep(opts: CastPrepOptions): Promise<CastPrepReport
       return { ok: false, error: 'There is no solid part in the scene to prepare.', treated: 0, draftDeg: 0, edges: null, sharpEdges: 0, skipped: skipped.map(({ name, reason }) => ({ name, reason })) };
     }
 
-    const partingZ = sand ? findPartingZ(scene, opts.partingFromBaseMm) : 0;
+    const partingZ = sand ? await findPartingZAsync(scene, opts.partingFromBaseMm) : 0;
     store().beginCastPrep({ draftDeg: 0, draftMode: opts.draftMode, partingZ, edges: null, originals, skipped, sharpEdges: 0 });
 
     // --- Edges -----------------------------------------------------------

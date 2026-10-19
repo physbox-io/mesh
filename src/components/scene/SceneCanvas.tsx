@@ -34,6 +34,9 @@ import {
   SceneCapture, SceneVisuals,
   LatticeEditorLayer,
 } from './SceneLayer';
+import { installMeshBvh } from '../../utils/meshBvh';
+
+installMeshBvh();
 
 /**
  * The pose the app opens in, before any scene has been framed. 45° of vertical

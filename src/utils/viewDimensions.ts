@@ -37,8 +37,11 @@
  * document frame) — the same edge finder the rounding tool uses, which already
  * fits circles exactly. Pure: no three.js, no store.
  */
+import { PairMemo } from './arrayMemo';
 import { findFeatureEdges } from './featureEdges';
 import { VIEW_AXES, type DrawingView } from './cameraViews';
+
+const featureEdgesMemo = new PairMemo<ReturnType<typeof findFeatureEdges>>();
 
 type Vec3 = [number, number, number];
 
@@ -432,7 +435,9 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
   };
 
   if (body.faces.length / 3 <= MAX_DIM_TRIANGLES) {
-    const found = findFeatureEdges(body.positions, body.faces);
+    const found = featureEdgesMemo.get(body.positions, body.faces, () =>
+      findFeatureEdges(body.positions, body.faces),
+    );
     const isBoss = bossTest(body.positions, body.faces, found.triangleSurface);
     for (const candidate of found.edges) {
       const e = candidate.edge;

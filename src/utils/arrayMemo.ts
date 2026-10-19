@@ -9,7 +9,7 @@
 // alone can be kept for as long as its arrays are alive. WeakMaps let go of it
 // when they are not.
 
-type Arr = readonly unknown[];
+type Arr = ArrayLike<unknown>;
 
 /** A cache keyed on a pair of arrays, usually a mesh's vertices and faces. */
 export class PairMemo<V> {

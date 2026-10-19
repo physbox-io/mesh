@@ -5,6 +5,7 @@
 // established and scadWorker predates.
 
 import type { DecomposeParams } from '../utils/vhacd';
+import type { FilledCavity } from '../utils/filledCavities';
 import type { MeshIntegrity } from '../utils/meshIntegrity';
 
 /** What deciding whether to decompose a mesh needs to know about it. */
@@ -29,10 +30,11 @@ export type VhacdRequest =
       verts: Float64Array;
       faces: Uint32Array;
       params: Partial<DecomposeParams>;
+      findCavities?: boolean;
     }
   | { type: 'ANALYSE'; id: number; verts: Float64Array; faces: Uint32Array };
 
 export type VhacdResponse =
-  | { type: 'DECOMPOSED'; id: number; hulls: HullPayload[] }
+  | { type: 'DECOMPOSED'; id: number; hulls: HullPayload[]; cavities?: FilledCavity[] }
   | { type: 'ANALYSED'; id: number; analysis: MeshAnalysis }
   | { type: 'DECOMPOSE_ERROR'; id: number; message: string };

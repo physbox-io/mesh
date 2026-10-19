@@ -12,6 +12,7 @@
 // this. Same split as moldWorker over utils/moldExporter.
 
 import { decomposeMesh } from '../utils/vhacd';
+import { findFilledCavities } from '../utils/filledCavities';
 import { analyseMesh } from '../utils/meshAnalysis';
 import type { VhacdRequest, VhacdResponse } from './vhacdProtocol';
 
@@ -30,11 +31,10 @@ self.onmessage = async (evt: MessageEvent<VhacdRequest>) => {
   }
   if (msg.type !== 'DECOMPOSE') return;
   try {
-    const hulls = await decomposeMesh(
-      Array.from(msg.verts),
-      Array.from(msg.faces),
-      msg.params,
-    );
+    const verts = Array.from(msg.verts);
+    const faces = Array.from(msg.faces);
+    const hulls = await decomposeMesh(verts, faces, msg.params);
+    const cavities = msg.findCavities ? findFilledCavities(verts, faces, hulls) : undefined;
     // Each hull crosses as typed arrays and is transferred rather than copied:
     // a decomposed body is up to 16 of these, and they are the only thing on
     // this boundary big enough to matter.
@@ -45,7 +45,7 @@ self.onmessage = async (evt: MessageEvent<VhacdRequest>) => {
       centroid: h.centroid,
     }));
     post(
-      { type: 'DECOMPOSED', id: msg.id, hulls: payload },
+      { type: 'DECOMPOSED', id: msg.id, hulls: payload, ...(cavities ? { cavities } : {}) },
       payload.flatMap(h => [h.verts.buffer, h.faces.buffer]),
     );
   } catch (err) {

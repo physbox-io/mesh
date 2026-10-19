@@ -27,12 +27,20 @@ function collidersOf(node: SceneNode): SceneGeom[] {
     if (!collides) return false;
     if (!drawn.has(g.name)) return true;
     return (g.rgba?.[3] ?? 1) === 0;
-  }).map((g) =>
+  }).map((g) => {
     // Collider meshes carry Y-up `vertices`; the outline reads Z-up ones.
-    g.type === 'mesh' && !g.renderVertices && g.vertices
-      ? { ...g, renderVertices: g.vertices.flatMap((_, i, v) => (i % 3 === 0 ? [v[i], -v[i + 2], v[i + 1]] : [])) }
-      : g,
-  );
+    if (g.type === 'mesh' && !g.renderVertices && g.vertices) {
+      const v = g.vertices;
+      const renderVertices = new Array<number>(v.length);
+      for (let i = 0; i + 2 < v.length; i += 3) {
+        renderVertices[i] = v[i];
+        renderVertices[i + 1] = -v[i + 2];
+        renderVertices[i + 2] = v[i + 1];
+      }
+      return { ...g, renderVertices };
+    }
+    return g;
+  });
 }
 
 const BodyColliders = ({ node, geoms, model, data, mujoco }: {

@@ -284,7 +284,22 @@ const drawnBox = (groups: THREE.Object3D[]): THREE.Box3 | null => {
   const parent = groups[0].parent;
   if (!parent) return null;
   const box = new THREE.Box3();
-  for (const group of groups) box.union(new THREE.Box3().setFromObject(group));
+  for (const group of groups) {
+    group.updateWorldMatrix(true, true);
+    group.traverse((obj) => {
+      const mesh = obj as THREE.Mesh;
+      if (!mesh.isMesh || !mesh.geometry) return;
+      const pos = mesh.geometry.getAttribute('position');
+      if (pos && pos.count > 512) {
+        if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox();
+        if (mesh.geometry.boundingBox && !mesh.geometry.boundingBox.isEmpty()) {
+          box.union(mesh.geometry.boundingBox.clone().applyMatrix4(mesh.matrixWorld));
+          return;
+        }
+      }
+      box.expandByObject(mesh, true);
+    });
+  }
   if (box.isEmpty()) return null;
   // Group boxes come out in world (Y-up) space; the drag happens in the Z-up
   // frame their parent defines. Mixing the two sent an earlier version's snap

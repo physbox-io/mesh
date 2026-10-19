@@ -46,9 +46,29 @@ import {
   type SimulationJobResult,
 } from './simulatedPart';
 import { runSheetJob, type SheetJobOptions, type SheetJobResult } from './sheetSimulation';
+import {
+  generateContourSliceGcode,
+  type GcodeExportOptions,
+  type GcodeExportResult,
+} from './gcodeExporter';
+import { warpGcode, type ProbeGrid } from './meshLeveler';
+
+export interface ContourGcodeJobOptions {
+  sliceResult: ContourSliceResult;
+  gcodeOptions: GcodeExportOptions;
+  probedGrid?: ProbeGrid | null;
+}
 
 /** Which export a job runs. Add a case here and in `runExportJob`. */
-export type ExportJobKind = 'relief' | 'solid' | 'cast' | 'laser' | 'contour' | 'simulate' | 'simulateSheets';
+export type ExportJobKind =
+  | 'relief'
+  | 'solid'
+  | 'cast'
+  | 'laser'
+  | 'contour'
+  | 'contourGcode'
+  | 'simulate'
+  | 'simulateSheets';
 
 /** The options and result each job takes and returns. */
 export interface ExportJobMap {
@@ -57,6 +77,7 @@ export interface ExportJobMap {
   cast: { options: CastOptions; result: CastResult };
   laser: { options: LaserCutOptions; result: LaserCutResult };
   contour: { options: ContourSliceOptions; result: ContourSliceResult };
+  contourGcode: { options: ContourGcodeJobOptions; result: GcodeExportResult };
   /** Add Simulation: cuts a program out of a block. Takes the program, not the scene. */
   simulate: { options: SimulationJobOptions; result: SimulationJobResult };
   /** The same for sheet parts: outlines extruded at the stock's thickness. */
@@ -87,6 +108,14 @@ export function runExportJob<K extends ExportJobKind>(
       return exportLaserCutSvg(scene, options as ExportJobOptions<'laser'>) as ExportJobResult<K>;
     case 'contour':
       return exportContourSliceSvg(scene, options as ExportJobOptions<'contour'>) as ExportJobResult<K>;
+    case 'contourGcode': {
+      const { sliceResult, gcodeOptions, probedGrid } = options as ContourGcodeJobOptions;
+      const res = generateContourSliceGcode(sliceResult, gcodeOptions);
+      if (res.success && gcodeOptions.machineMode === 'cnc' && probedGrid) {
+        res.gcode = warpGcode(res.gcode, probedGrid);
+      }
+      return res as ExportJobResult<K>;
+    }
     case 'simulate':
       return runSimulationJob(options as SimulationJobOptions, onProgress) as ExportJobResult<K>;
     case 'simulateSheets':

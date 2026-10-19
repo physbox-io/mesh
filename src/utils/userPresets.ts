@@ -65,22 +65,46 @@ export function rememberCloudOnlyPreset(name: string, preset: UserPreset): void 
 
 /** Presets listed only because the account has them, without the `user:` prefix. */
 export function cloudOnlyPresetNames(): string[] {
-  const local = readUserPresets();
+  const local = readCachedPresets();
   return Object.keys(cloudOnly).filter(name => !Object.hasOwn(local, name));
 }
 
-export function readUserPresets(): Record<string, UserPreset> {
+let cachedRaw: string | null = null;
+let cachedParsed: Record<string, UserPreset> = {};
+let cachedSizes: PresetSize[] | null = null;
+
+function readCachedPresets(): Record<string, UserPreset> {
   try {
     const raw = localStorage.getItem(USER_PRESETS_KEY);
-    return raw ? JSON.parse(raw) : {};
+    if (!raw) {
+      cachedRaw = null;
+      cachedParsed = {};
+      cachedSizes = null;
+      return cachedParsed;
+    }
+    if (raw === cachedRaw) {
+      return cachedParsed;
+    }
+    const parsed = JSON.parse(raw);
+    cachedRaw = raw;
+    cachedParsed = parsed && typeof parsed === 'object' ? parsed : {};
+    cachedSizes = null;
+    return cachedParsed;
   } catch {
-    return {};
+    cachedRaw = null;
+    cachedParsed = {};
+    cachedSizes = null;
+    return cachedParsed;
   }
+}
+
+export function readUserPresets(): Record<string, UserPreset> {
+  return { ...readCachedPresets() };
 }
 
 /** Names without the `user:` prefix: this browser's, then any held only by the account. */
 export function listUserPresetNames(): string[] {
-  const names = Object.keys(readUserPresets());
+  const names = Object.keys(readCachedPresets());
   for (const name of Object.keys(cloudOnly)) if (!names.includes(name)) names.push(name);
   return names;
 }
@@ -88,7 +112,7 @@ export function listUserPresetNames(): string[] {
 /** Accepts either `name` or `user:name`, since both forms circulate. */
 export function readUserPreset(name: string): UserPreset | null {
   const key = name.replace(/^user:/, '');
-  const preset = readUserPresets()[key] ?? cloudOnly[key];
+  const preset = readCachedPresets()[key] ?? cloudOnly[key];
   return preset ?? null;
 }
 
@@ -123,14 +147,19 @@ export interface PresetSize { name: string; bytes: number }
  * actually stored.
  */
 export function presetSizes(): PresetSize[] {
-  const presets = readUserPresets();
-  return Object.entries(presets)
+  const presets = readCachedPresets();
+  if (cachedSizes) {
+    return cachedSizes.map(s => ({ ...s }));
+  }
+  const sizes = Object.entries(presets)
     .map(([name, data]) => {
       let bytes: number;
       try { bytes = JSON.stringify(data).length; } catch { bytes = 0; }
       return { name, bytes };
     })
     .sort((a, b) => b.bytes - a.bytes);
+  cachedSizes = sizes;
+  return sizes.map(s => ({ ...s }));
 }
 
 /** Total size of the preset store, in bytes of JSON. */
@@ -144,7 +173,11 @@ export function presetStoreBytes(): number {
 
 function writeAll(presets: Record<string, UserPreset>): boolean {
   try {
-    localStorage.setItem(USER_PRESETS_KEY, JSON.stringify(presets));
+    const serialized = JSON.stringify(presets);
+    localStorage.setItem(USER_PRESETS_KEY, serialized);
+    cachedRaw = serialized;
+    cachedParsed = { ...presets };
+    cachedSizes = null;
     return true;
   } catch (err) {
     console.error('[PhysBox] Could not save presets', err);

@@ -709,30 +709,74 @@ const sameValue = (a: unknown, b: unknown): boolean => {
 // into O(node count). This matters: the old JSON.parse(JSON.stringify(...))
 // ran on every slider tick / handle drag and every undo snapshot, copying
 // potentially megabytes of SCAD mesh data each time.
+const SHARED_GEOM_KEYS = new Set([
+  'vertices',
+  'faces',
+  'renderVertices',
+  'baseVertices',
+  'baseRenderVertices',
+  'colliderVertices',
+  'colliderFaces',
+  'paint',
+]);
+
+const clonePlain = <T>(val: T): T => {
+  if (val === null || typeof val !== 'object') return val;
+  if (Array.isArray(val)) {
+    const len = val.length;
+    const out = new Array(len);
+    for (let i = 0; i < len; i++) {
+      const item = val[i];
+      out[i] = item !== null && typeof item === 'object' ? clonePlain(item) : item;
+    }
+    return out as unknown as T;
+  }
+  const src = val as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const key in src) {
+    if (Object.prototype.hasOwnProperty.call(src, key)) {
+      const v = src[key];
+      if (v !== undefined) {
+        out[key] = v !== null && typeof v === 'object' ? clonePlain(v) : v;
+      }
+    }
+  }
+  return out as T;
+};
+
 const cloneGeom = (g: SceneGeom): SceneGeom => {
   // `paint` joins the mesh arrays in being shared rather than copied, for the
   // same reason: it is thousands of numbers, it is replaced wholesale rather
   // than mutated in place, and this clone runs on every slider tick and every
   // undo snapshot.
-  const { vertices, faces, renderVertices, baseVertices, baseRenderVertices, colliderVertices, colliderFaces, paint, ...rest } = g;
-  const out: WorkingGeom = JSON.parse(JSON.stringify(rest));
-  if (paint !== undefined) out.paint = paint;
-  if (colliderVertices !== undefined) out.colliderVertices = colliderVertices;
-  if (colliderFaces !== undefined) out.colliderFaces = colliderFaces;
-  if (vertices !== undefined) out.vertices = vertices;
-  if (faces !== undefined) out.faces = faces;
-  if (renderVertices !== undefined) out.renderVertices = renderVertices;
-  if (baseVertices !== undefined) out.baseVertices = baseVertices;
-  if (baseRenderVertices !== undefined) out.baseRenderVertices = baseRenderVertices;
-  return out;
+  const src = g as unknown as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const key in src) {
+    if (!Object.prototype.hasOwnProperty.call(src, key)) continue;
+    const v = src[key];
+    if (v === undefined) continue;
+    if (SHARED_GEOM_KEYS.has(key)) {
+      out[key] = v;
+    } else {
+      out[key] = v !== null && typeof v === 'object' ? clonePlain(v) : v;
+    }
+  }
+  return out as unknown as WorkingGeom;
 };
 
 const cloneNode = (n: SceneNode): SceneNode => {
-  const { geoms, children, ...rest } = n;
-  const out: SceneNode = JSON.parse(JSON.stringify(rest));
-  out.geoms = (geoms || []).map(cloneGeom);
-  out.children = (children || []).map(cloneNode);
-  return out;
+  const src = n as unknown as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const key in src) {
+    if (!Object.prototype.hasOwnProperty.call(src, key)) continue;
+    if (key === 'geoms' || key === 'children') continue;
+    const v = src[key];
+    if (v === undefined) continue;
+    out[key] = v !== null && typeof v === 'object' ? clonePlain(v) : v;
+  }
+  out.geoms = (n.geoms || []).map(cloneGeom);
+  out.children = (n.children || []).map(cloneNode);
+  return out as unknown as SceneNode;
 };
 
 /** Depth-first lookup by node id. */

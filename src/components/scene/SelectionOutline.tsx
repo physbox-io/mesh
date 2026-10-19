@@ -23,11 +23,28 @@ import { useStore } from '../../store/useStore';
 export function SelectionOutline() {
   const effect = useRef<OutlineEffect>(null);
   const scene = useThree((s) => s.scene);
+  const lastKeyRef = useRef('');
 
   useFrame(() => {
     const outline = effect.current;
     if (!outline) return;
-    const { selectedNodeId, extraSelectedIds } = useStore.getState();
+    const { selectedNodeId, extraSelectedIds, recompileId } = useStore.getState();
+    const key = `${recompileId}|${selectedNodeId ?? ''}|${extraSelectedIds.join(',')}`;
+    const current = outline.selection;
+    if (key === lastKeyRef.current) {
+      let allMounted = true;
+      for (const obj of current) {
+        if (!obj.parent) {
+          allMounted = false;
+          break;
+        }
+      }
+      if (allMounted && (selectedNodeId || extraSelectedIds.length > 0 ? current.size > 0 : current.size === 0)) {
+        return;
+      }
+    }
+    lastKeyRef.current = key;
+
     const ids = new Set(extraSelectedIds);
     if (selectedNodeId) ids.add(selectedNodeId);
 
@@ -43,7 +60,6 @@ export function SelectionOutline() {
       });
     }
 
-    const current = outline.selection;
     if (current.size === meshes.size && [...meshes].every((m) => current.has(m))) return;
     current.set([...meshes]);
   });

@@ -810,7 +810,8 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
       : new Uint32Array(pattern ? patterned!.faces : faces);
     geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     geo.setIndex(new THREE.BufferAttribute(indices, 1));
-    geo.computeVertexNormals();
+    geo.computeBoundingBox();
+    geo.computeBoundingSphere();
     return geo;
     // `dent` itself is intentionally not a dependency: a new store object is
     // handed out on every dent, and the version is the thing that says whether
@@ -822,14 +823,25 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
   // the edge overlay and the open-sculpt inside wall keep the welded copy.
   const shadedGeometry = useMemo(() => {
     if (!meshBufferGeometry || showPaint) return meshBufferGeometry;
-    const welded = meshBufferGeometry.getAttribute('position').array;
-    const { positions, normals, index } = creasedGeometry(welded, meshBufferGeometry.getIndex()!.array);
+    const sourceVerts = !dent && patterned
+      ? (isDynamic ? patterned.vertices : meshBufferGeometry.getAttribute('position').array)
+      : !dent && vertices
+        ? vertices
+        : meshBufferGeometry.getAttribute('position').array;
+    const sourceFaces = !dent && patterned
+      ? patterned.faces
+      : !dent && faces
+        ? faces
+        : meshBufferGeometry.getIndex()!.array;
+    const { positions, normals, index } = creasedGeometry(sourceVerts, sourceFaces);
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     geo.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
     geo.setIndex(new THREE.BufferAttribute(index, 1));
+    if (meshBufferGeometry.boundingBox) geo.boundingBox = meshBufferGeometry.boundingBox.clone();
+    if (meshBufferGeometry.boundingSphere) geo.boundingSphere = meshBufferGeometry.boundingSphere.clone();
     return geo;
-  }, [meshBufferGeometry, showPaint]);
+  }, [meshBufferGeometry, showPaint, dent, patterned, isDynamic, vertices, faces]);
   useEffect(() => () => {
     if (shadedGeometry && shadedGeometry !== meshBufferGeometry) shadedGeometry.dispose();
   }, [shadedGeometry, meshBufferGeometry]);

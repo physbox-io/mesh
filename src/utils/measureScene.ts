@@ -195,11 +195,13 @@ export function sceneCandidates(
   root: THREE.Object3D,
   world: Vec3,
   radius: number,
-  options: { exclude?: string } = {},
+  options: { exclude?: string; maxMeshVertices?: number; vertexLimit?: number } = {},
 ): SnapCandidate[] {
   const here = new THREE.Vector3(...world);
   const found: SnapCandidate[] = [];
   const exclude = options.exclude;
+  const maxMeshVertices = options.maxMeshVertices ?? 400_000;
+  const vertexLimit = options.vertexLimit ?? 4096;
 
   root.traverse((object) => {
     const mesh = object as THREE.Mesh;
@@ -237,12 +239,12 @@ export function sceneCandidates(
     found.push(...analyticCentres(mesh, nodeId));
 
     const position = mesh.geometry.getAttribute('position');
-    if (!position || position.count > 400_000) return;
+    if (!position || position.count > maxMeshVertices) return;
     const local = mesh.worldToLocal(here.clone());
     const spread = new THREE.Vector3();
     mesh.getWorldScale(spread);
     const perUnit = Math.max(1e-9, (Math.abs(spread.x) + Math.abs(spread.y) + Math.abs(spread.z)) / 3);
-    const near = nearbyVertices(position.array as ArrayLike<number>, [local.x, local.y, local.z], radius / perUnit);
+    const near = nearbyVertices(position.array as ArrayLike<number>, [local.x, local.y, local.z], radius / perUnit, vertexLimit);
 
     for (const point of near) {
       const at = mesh.localToWorld(new THREE.Vector3(...point));

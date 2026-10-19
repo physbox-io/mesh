@@ -26,6 +26,7 @@ export interface BodyEdges extends FeatureEdges {
 }
 
 const cache = new Map<string, BodyEdges>();
+const inflight = new Map<string, Promise<BodyEdges>>();
 const CACHE_LIMIT = 8;
 
 /** Why a body cannot be rounded, in words for the panel; null when it can. */
@@ -52,25 +53,36 @@ export async function bodyEdges(node: SceneNode, up: [number, number, number] = 
   const key = `${up.map((c) => c.toFixed(4)).join(',')}\n${program}`;
   const hit = cache.get(key);
   if (hit) return hit;
+  const pending = inflight.get(key);
+  if (pending) return pending;
 
-  const { compileSCAD } = await import('./openscad');
-  const compiled = await compileSCAD(program);
-  const positions = compiled.renderVertices;
-  const faces = compiled.faces;
-  const found = findFeatureEdges(positions, faces, { up });
+  const work = (async () => {
+    const { compileSCAD } = await import('./openscad');
+    const compiled = await compileSCAD(program);
+    const positions = compiled.renderVertices;
+    const faces = compiled.faces;
+    const found = findFeatureEdges(positions, faces, { up });
 
-  const min = [Infinity, Infinity, Infinity];
-  const max = [-Infinity, -Infinity, -Infinity];
-  for (let i = 0; i < positions.length; i += 3) {
-    for (let k = 0; k < 3; k++) {
-      min[k] = Math.min(min[k], positions[i + k]);
-      max[k] = Math.max(max[k], positions[i + k]);
+    const min = [Infinity, Infinity, Infinity];
+    const max = [-Infinity, -Infinity, -Infinity];
+    for (let i = 0; i < positions.length; i += 3) {
+      for (let k = 0; k < 3; k++) {
+        min[k] = Math.min(min[k], positions[i + k]);
+        max[k] = Math.max(max[k], positions[i + k]);
+      }
     }
-  }
-  const smallestDimension = Math.min(max[0] - min[0], max[1] - min[1], max[2] - min[2]);
+    const smallestDimension = Math.min(max[0] - min[0], max[1] - min[1], max[2] - min[2]);
 
-  const result: BodyEdges = { ...found, positions, faces, smallestDimension };
-  cache.set(key, result);
-  if (cache.size > CACHE_LIMIT) cache.delete(cache.keys().next().value!);
-  return result;
+    const result: BodyEdges = { ...found, positions, faces, smallestDimension };
+    cache.set(key, result);
+    if (cache.size > CACHE_LIMIT) cache.delete(cache.keys().next().value!);
+    return result;
+  })();
+
+  inflight.set(key, work);
+  try {
+    return await work;
+  } finally {
+    inflight.delete(key);
+  }
 }

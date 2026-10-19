@@ -34,10 +34,20 @@ export const RenderOnChange = () => {
     const ask = () => invalidate();
     const onPointer = (e: PointerEvent | WheelEvent) => {
       if (e.buttons !== 0) return invalidate();
-      const target = e.target as Node | null;
-      if (viewport && target && viewport.contains(target)) return invalidate();
       const s = useStore.getState();
-      if (s.gestureStatus || s.measureMode) invalidate();
+      if (
+        s.gestureStatus ||
+        s.measureMode ||
+        s.paintMode ||
+        s.sculptNodeId ||
+        s.edgeRoundSession ||
+        s.latticeNodeId
+      ) {
+        return invalidate();
+      }
+      if (e.type === 'pointermove') return;
+      const target = e.target as Node | null;
+      if (viewport && target && viewport.contains(target)) invalidate();
     };
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;

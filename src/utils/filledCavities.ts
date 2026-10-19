@@ -98,9 +98,31 @@ export function findFilledCavities(verts: number[], faces: number[], hulls: Hull
   }
 
   const hullPlanes = hulls.map(planesOf);
+  const hullBounds = hulls.map((h) => {
+    let minX = Infinity, minY = Infinity, minZ = Infinity;
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+    const v = h.verts;
+    for (let i = 0; i < v.length; i += 3) {
+      if (v[i] < minX) minX = v[i];
+      if (v[i] > maxX) maxX = v[i];
+      if (v[i + 1] < minY) minY = v[i + 1];
+      if (v[i + 1] > maxY) maxY = v[i + 1];
+      if (v[i + 2] < minZ) minZ = v[i + 2];
+      if (v[i + 2] > maxZ) maxZ = v[i + 2];
+    }
+    return { minX, maxX, minY, maxY, minZ, maxZ };
+  });
+  const eps = cell * 0.05;
   const inHull = (x: number, y: number, z: number): number => {
-    const eps = cell * 0.05;
     for (let h = 0; h < hullPlanes.length; h++) {
+      const b = hullBounds[h];
+      if (
+        x < b.minX - eps || x > b.maxX + eps ||
+        y < b.minY - eps || y > b.maxY + eps ||
+        z < b.minZ - eps || z > b.maxZ + eps
+      ) {
+        continue;
+      }
       let inside = true;
       for (const p of hullPlanes[h]) {
         if (p.nx * x + p.ny * y + p.nz * z - p.d > eps) { inside = false; break; }

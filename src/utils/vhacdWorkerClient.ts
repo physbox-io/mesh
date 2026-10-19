@@ -12,6 +12,7 @@
 
 import type { Hull } from './csg';
 import type { DecomposeParams } from './vhacd';
+import type { FilledCavity } from './filledCavities';
 import type { HullPayload, MeshAnalysis, VhacdRequest, VhacdResponse } from '../workers/vhacdProtocol';
 
 /**
@@ -33,6 +34,7 @@ type Settle = { resolve: (value: never) => void; reject: (e: Error) => void; tim
 let worker: Worker | null = null;
 let seq = 0;
 const pending = new Map<number, Settle>();
+const cavitiesByHulls = new WeakMap<Hull[], FilledCavity[]>();
 
 function failAll(message: string) {
   for (const [, s] of pending) { clearTimeout(s.timer); s.reject(new Error(message)); }
@@ -52,7 +54,11 @@ function ensureWorker(): Worker | null {
       clearTimeout(settle.timer);
       if (msg.type === 'DECOMPOSE_ERROR') settle.reject(new Error(msg.message));
       else if (msg.type === 'ANALYSED') (settle.resolve as (a: MeshAnalysis) => void)(msg.analysis);
-      else (settle.resolve as (h: Hull[]) => void)(msg.hulls.map(fromPayload));
+      else {
+        const hulls = msg.hulls.map(fromPayload);
+        if (msg.cavities) cavitiesByHulls.set(hulls, msg.cavities);
+        (settle.resolve as (h: Hull[]) => void)(hulls);
+      }
     };
     // A worker that dies leaves every caller awaiting forever otherwise.
     worker.onerror = () => {
@@ -96,6 +102,28 @@ export async function decomposeMeshOffThread(
     verts: Float64Array.from(verts),
     faces: Uint32Array.from(faces),
   }));
+}
+
+export async function decomposeWithCavitiesOffThread(
+  verts: number[],
+  faces: number[],
+  params: Partial<DecomposeParams> = {},
+): Promise<{ hulls: Hull[]; cavities: FilledCavity[] }> {
+  const w = ensureWorker();
+  if (!w) {
+    const { decomposeMesh } = await import('./vhacd');
+    const { findFilledCavities } = await import('./filledCavities');
+    const hulls = await decomposeMesh(verts, faces, params);
+    return { hulls, cavities: findFilledCavities(verts, faces, hulls) };
+  }
+
+  const hulls = await request<Hull[]>(w, 'Convex decomposition timed out.', DECOMPOSE_TIMEOUT_MS, (id) => ({
+    type: 'DECOMPOSE', id, params, findCavities: true,
+    verts: Float64Array.from(verts),
+    faces: Uint32Array.from(faces),
+  }));
+  const { findFilledCavities } = await import('./filledCavities');
+  return { hulls, cavities: cavitiesByHulls.get(hulls) ?? findFilledCavities(verts, faces, hulls) };
 }
 
 /**

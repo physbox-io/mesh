@@ -31,7 +31,7 @@ import {
   meshChecksum, meshVolumeAndCentroid, type Hull,
 } from './csg';
 import type { CollisionMode, SceneGeom, SceneNode } from '../types/scene';
-import { findFilledCavities, type FilledCavity } from './filledCavities';
+import type { FilledCavity } from './filledCavities';
 import { COLLISION_FLAG, scadProxyHulls, usesCollisionProxies } from './scadColliders';
 
 /**
@@ -301,7 +301,7 @@ export async function decomposeNodeColliders(node: SceneNode): Promise<ColliderR
   // Node and vite-node, where there is no Worker to run. Measuring goes through
   // it too: hulling every vertex of a dense sculpt hitched the viewport after
   // each stroke when it ran here.
-  const { analyseMeshOffThread, decomposeMeshOffThread } = await import('./vhacdWorkerClient');
+  const { analyseMeshOffThread, decomposeWithCavitiesOffThread } = await import('./vhacdWorkerClient');
   let analysis;
   try {
     analysis = await analyseMeshOffThread(verts, faces);
@@ -362,21 +362,23 @@ export async function decomposeNodeColliders(node: SceneNode): Promise<ColliderR
   let hulls: Hull[];
   let cavities: FilledCavity[];
   try {
-    hulls = await decomposeMeshOffThread(verts, faces, {
+    const initial = await decomposeWithCavitiesOffThread(verts, faces, {
       maxHulls: verdict.maxHulls,
       ...(resolution ? { voxelResolution: resolution } : {}),
     });
-    cavities = findFilledCavities(verts, faces, hulls);
+    hulls = initial.hulls;
+    cavities = initial.cavities;
     // A piece bridging a slot looks healthy from the outside — "9 convex
     // pieces" — while the slot is solid. When that is found and nobody has
     // tuned this body, try once finer: on the oak tray 100k voxels and 32
     // hulls cleared a filled phone groove and two filled dishes in 2.3 s.
     if (cavities.length > 0 && !tuned) {
-      const finer = await decomposeMeshOffThread(verts, faces, {
+      const finerRun = await decomposeWithCavitiesOffThread(verts, faces, {
         maxHulls: Math.max(32, verdict.maxHulls),
         voxelResolution: 100_000,
       });
-      const finerCavities = findFilledCavities(verts, faces, finer);
+      const finer = finerRun.hulls;
+      const finerCavities = finerRun.cavities;
       const filled = (list: FilledCavity[]) => list.reduce((sum, c) => sum + c.volumeMm3, 0);
       if (finer.length >= MIN_SURVIVING_HULLS && filled(finerCavities) < filled(cavities)) {
         hulls = finer;

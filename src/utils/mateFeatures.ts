@@ -280,7 +280,7 @@ export function bodyFeatures(groups: THREE.Object3D[], nodeId: string): MateFeat
   const reach = boundsRadius(groups) * 2 + 0.01;
   const at: Vec3 = [centre.x, centre.y, centre.z];
   for (const group of groups) {
-    for (const candidate of sceneCandidates(group, at, reach)) {
+    for (const candidate of sceneCandidates(group, at, reach, { maxMeshVertices: 2000, vertexLimit: 256 })) {
       if (candidate.nodeId !== nodeId) continue;
       const feature = asFeature(candidate);
       if (feature) found.push(feature);
@@ -306,7 +306,7 @@ export function neighbourFeatures(
   const here = toThree(near);
   const found: MateFeature[] = [];
 
-  for (const candidate of sceneCandidates(root, here, radius, { exclude })) {
+  for (const candidate of sceneCandidates(root, here, radius, { exclude, maxMeshVertices: 2000, vertexLimit: 256 })) {
     const feature = asFeature(candidate);
     if (feature) found.push(feature);
   }
@@ -362,7 +362,12 @@ export function transformFeatures(
 /** How far this body reaches from its own middle, in world units. */
 function boundsRadius(groups: THREE.Object3D[]): number {
   const box = new THREE.Box3();
-  for (const group of groups) box.union(new THREE.Box3().setFromObject(group));
+  for (const { mesh } of meshesUnder(groups)) {
+    if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox();
+    if (mesh.geometry.boundingBox && !mesh.geometry.boundingBox.isEmpty()) {
+      box.union(mesh.geometry.boundingBox.clone().applyMatrix4(mesh.matrixWorld));
+    }
+  }
   if (box.isEmpty()) return 0.05;
   return box.getSize(new THREE.Vector3()).length() / 2;
 }

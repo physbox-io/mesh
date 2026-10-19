@@ -5,10 +5,10 @@ import {
 import type { SceneGraph } from '../types/scene';
 import { type ContourSliceOptions, type ContourSliceResult } from '../utils/contourSliceExporter';
 import { useExportJob } from '../utils/exportWorkerClient';
-import { generateContourSliceGcode, DEFAULT_GCODE_OPTIONS } from '../utils/gcodeExporter';
+import { DEFAULT_GCODE_OPTIONS } from '../utils/gcodeExporter';
 import { runSettings } from '../utils/runSettings';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
-import { warpGcode, type ProbeGrid } from '../utils/meshLeveler';
+import { type ProbeGrid } from '../utils/meshLeveler';
 import { NumberInput } from '@physbox-io/ui';
 import { useStore } from '../store/useStore';
 import { MAX_STOCK_PLAN_MM, MAX_STOCK_THICKNESS_MM, MIN_STOCK_MM } from '../utils/stockSettings';
@@ -334,33 +334,38 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
       attachmentHeightMm, bitDiameterMm]);
   const gcodeFields = useSettled(liveGcodeFields, 250);
 
-  const gcodeResult = useMemo(() => {
+  const gcodeJob = useExportJob(isOpen, (client) => {
     if (!exportResult?.success || !exportResult.layers) return null;
     const f = gcodeFields;
-    const res = generateContourSliceGcode(exportResult, {
-      ...DEFAULT_GCODE_OPTIONS,
-      machineMode: f.machineMode,
-      cutFeedrate: f.cutFeedrate,
-      spindleRpm: f.spindleRpm,
-      motionProfile: machineState.motion,
-      laserPower: f.laserPower,
-      laserMaxPower: f.laserMaxPower,
-      laserPasses: f.laserPasses,
-      cutDepthZ: f.materialThicknessMm,
-      zStepdown: Math.min(f.materialThicknessMm, 3.0),
-      attachmentsEnabled: f.attachments,
-      attachmentWidthMm: f.attachmentWidthMm,
-      attachmentSpacingMm: f.attachmentSpacingMm,
-      attachmentHeightMm: f.attachmentHeightMm,
-      bitDiameterMm: f.bitDiameterMm,
+    // Strip heavy svg/mapSvg strings before posting layers to the worker.
+    const slimResult: ContourSliceResult = {
+      ...exportResult,
+      svg: undefined,
+      mapSvg: undefined,
+    };
+    return client.run('contourGcode', scene, {
+      sliceResult: slimResult,
+      gcodeOptions: {
+        ...DEFAULT_GCODE_OPTIONS,
+        machineMode: f.machineMode,
+        cutFeedrate: f.cutFeedrate,
+        spindleRpm: f.spindleRpm,
+        motionProfile: machineState.motion,
+        laserPower: f.laserPower,
+        laserMaxPower: f.laserMaxPower,
+        laserPasses: f.laserPasses,
+        cutDepthZ: f.materialThicknessMm,
+        zStepdown: Math.min(f.materialThicknessMm, 3.0),
+        attachmentsEnabled: f.attachments,
+        attachmentWidthMm: f.attachmentWidthMm,
+        attachmentSpacingMm: f.attachmentSpacingMm,
+        attachmentHeightMm: f.attachmentHeightMm,
+        bitDiameterMm: f.bitDiameterMm,
+      },
+      probedGrid,
     });
-    // A through cut on a bed that is not flat either leaves skin under the
-    // low corners or goes into the spoilboard under the high ones.
-    if (res.success && f.machineMode === 'cnc' && probedGrid) {
-      res.gcode = warpGcode(res.gcode, probedGrid);
-    }
-    return res;
-  }, [exportResult, gcodeFields, machineState.motion, probedGrid]);
+  }, [exportResult, gcodeFields, machineState.motion, probedGrid, scene]);
+  const gcodeResult = exportResult?.success && exportResult.layers ? gcodeJob.result : null;
 
   const previewSvg = useMemo(() => {
     if (!exportResult?.success) return '';

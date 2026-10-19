@@ -134,8 +134,9 @@ export function findFeatureEdges(positions: ArrayLike<number>, faces: ArrayLike<
   }
 
   // --- 2. surfaces -----------------------------------------------------------
-  const edgeTris = new Map<string, number[]>();
-  const edgeKey = (i: number, j: number) => (i < j ? `${i},${j}` : `${j},${i}`);
+  const vStride = Math.max(1, verts.length);
+  const edgeTris = new Map<number, number[]>();
+  const edgeKey = (i: number, j: number) => (i < j ? i * vStride + j : j * vStride + i);
   for (let t = 0; t < triCount; t++) {
     if (!triOk[t]) continue;
     const [a, b, c] = tris[t];
@@ -203,7 +204,8 @@ export function findFeatureEdges(positions: ArrayLike<number>, faces: ArrayLike<
     const sA = triangleSurface[tA];
     const sB = triangleSurface[tB];
     if (sA === sB) continue;
-    const [i, j] = key.split(',').map(Number);
+    const i = Math.floor(key / vStride);
+    const j = key - i * vStride;
     segments.push({ i, j, tA, tB, pair: sA < sB ? `${sA}|${sB}` : `${sB}|${sA}` });
   }
   const atVertex = new Map<number, number[]>();
@@ -432,10 +434,17 @@ function limitByNeighbours(edges: EdgeCandidate[]): void {
     const ends = (e: EdgeCandidate) => (e.closed ? [] : [e.points[0], e.points[e.points.length - 1]]);
     return ends(a).some((p) => ends(b).some((q) => len(sub(p, q)) < 1e-9 + 1e-6 * len(p)));
   };
+  const bySurface = new Map<number, EdgeCandidate[]>();
+  for (const e of edges) {
+    for (const s of e.surfaces) {
+      const list = bySurface.get(s);
+      if (list) list.push(e); else bySurface.set(s, [e]);
+    }
+  }
   for (const e of edges) {
     for (const surface of e.surfaces) {
-      for (const other of edges) {
-        if (other === e || !other.surfaces.includes(surface) || touches(e, other)) continue;
+      for (const other of bySurface.get(surface) ?? []) {
+        if (other === e || touches(e, other)) continue;
         e.maxSetback = Math.min(e.maxSetback, polylineGap(e, other) / 2);
       }
     }
