@@ -1731,7 +1731,11 @@ export function useMCPBridge() {
       switch (cmd) {
         case 'GET_STATE':
           return {
-            sceneGraph:   store.sceneGraph,
+            // Mesh arrays stripped as physics_get_objects strips them: one
+            // carved tray made this reply 2.8 MB. include_meshes asks for them.
+            sceneGraph: msg.includeMeshes === true
+              ? store.sceneGraph
+              : { ...store.sceneGraph, nodes: (store.sceneGraph.nodes || []).map(stripMeshArrays) },
             isPlaying:    store.isPlaying,
             isLoaded:     store.isLoaded,
             gravityZ:     store.gravityZ,
