@@ -50,6 +50,7 @@ import { buildTimberCutPlan } from '../utils/timberCutList';
 import { filamentSpec } from '../utils/filaments';
 import { deriveSolidOptions, fittingScalePercent, measurePart, type SolidMachiningResult } from '../utils/solidMachiningExporter';
 import {
+  APP_RELIEF_DEFAULTS,
   DEFAULT_RELIEF_OPTIONS,
   deriveReliefFeeds,
   describeCutter,
@@ -335,6 +336,7 @@ function reliefOptionsFor(msg: Record<string, unknown>): { options: ReliefCarveO
     ? { ...DEFAULT_RELIEF_OPTIONS, ...dialog }
     : {
         ...DEFAULT_RELIEF_OPTIONS,
+        ...APP_RELIEF_DEFAULTS,
         ...store.carveSettings,
         stockWidthMm: store.stock.widthMm,
         stockDepthMm: store.stock.depthMm,
@@ -356,6 +358,15 @@ function reliefOptionsFor(msg: Record<string, unknown>): { options: ReliefCarveO
     ...(num(msg.stockWidthMm) ? { stockWidthMm: num(msg.stockWidthMm) } : {}),
     ...(num(msg.stockDepthMm) ? { stockDepthMm: num(msg.stockDepthMm) } : {}),
     ...(num(msg.stockThicknessMm) ? { stockThicknessMm: num(msg.stockThicknessMm) } : {}),
+    ...(['auto', 'model', 'fill', 'proportional'].includes(msg.verticalScaleMode as string)
+      ? { verticalScaleMode: msg.verticalScaleMode as ReliefCarveOptions['verticalScaleMode'] }
+      : {}),
+    ...(num(msg.verticalExaggeration) ? { verticalExaggeration: num(msg.verticalExaggeration) } : {}),
+    ...(msg.fitMode === 'fit' || msg.fitMode === 'manual' ? { fitMode: msg.fitMode } : {}),
+    ...(num(msg.scalePercent) ? { scalePercent: num(msg.scalePercent) } : {}),
+    ...(['auto', 'carve', 'skip'].includes(msg.backgroundMode as string)
+      ? { backgroundMode: msg.backgroundMode as ReliefCarveOptions['backgroundMode'] }
+      : {}),
   };
   const merged: ReliefCarveOptions = { ...base, ...asked };
   // The dialog's feeds stand, overrides and all, unless what they were
@@ -3287,8 +3298,18 @@ export function useMCPBridge() {
             summary: {
               stockMm: { width: options.stockWidthMm, depth: options.stockDepthMm, thickness: options.stockThicknessMm },
               material: options.material,
-              carveDepthMm: options.carveDepthMm,
+              heightMode: result.heightMode,
+              scalePercent: Math.round(result.scaleFactor * 1000) / 10,
+              carveDepthMm: result.heightMode === 'model' ? null : options.carveDepthMm,
               reliefDepthMm: result.reliefDepthMm,
+              undercut: result.undercut
+                ? {
+                    areaMm2: Math.round(result.undercut.areaMm2),
+                    volumeMm3: Math.round(result.undercut.volumeMm3),
+                    maxMm: Math.round(result.undercut.maxMm * 10) / 10,
+                    boundsMm: result.undercut.bounds,
+                  }
+                : null,
               roughing: options.roughingEnabled
                 ? {
                     tool: describeCutter(options.roughingToolDiaMm, 'flat', options.roughingFlutes, options.roughingGeometry),

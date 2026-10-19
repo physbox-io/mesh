@@ -3,6 +3,7 @@ import { X, AlertCircle, Cpu, RefreshCw, Layers, Mountain } from 'lucide-react';
 import type { SceneGraph } from '../types/scene';
 import { rememberReliefOptions } from '../utils/lastReliefOptions';
 import {
+  APP_RELIEF_DEFAULTS,
   DEFAULT_RELIEF_OPTIONS,
   recommendReliefTooling,
 } from '../utils/reliefCarveExporter';
@@ -32,6 +33,9 @@ interface Props {
   scene: SceneGraph;
 }
 
+/** Where a relief starts: the model at its own size if it fits the stock. */
+const RELIEF_START = { ...DEFAULT_RELIEF_OPTIONS, ...APP_RELIEF_DEFAULTS };
+
 export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene }) => {
   useEscapeToClose(isOpen, onClose);
   const setMachineConfigOpen = useStore((s) => s.setMachineConfigOpen);
@@ -59,7 +63,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
   } = useCarveTooling(
     isOpen,
     {
-      ...DEFAULT_RELIEF_OPTIONS,
+      ...RELIEF_START,
       ...carveSettings,
       stockWidthMm: stock.widthMm,
       stockDepthMm: stock.depthMm,
@@ -105,7 +109,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
       const next: Record<string, unknown> = { ...prev };
       for (const key of Object.keys(previous ?? {})) {
         if (key.startsWith('stock')) continue;
-        next[key] = (DEFAULT_RELIEF_OPTIONS as unknown as Record<string, unknown>)[key];
+        next[key] = (RELIEF_START as unknown as Record<string, unknown>)[key];
       }
       return { ...(next as typeof prev), ...(carveSettings ?? {}) };
     });
@@ -137,6 +141,12 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
     },
     [scene, settled, probedGrid, machineState.motion]
   );
+
+  // Cut as modelled, asked for or chosen by Auto: the depth and plan scale are
+  // the model's, so their fields only report.
+  const asModelled =
+    options.verticalScaleMode === 'model' ||
+    (options.verticalScaleMode === 'auto' && result?.heightMode === 'model');
 
   // Tooling is a function of the carve, not of the model, so it is derived from
   // what the carve actually came out as — the relief's real depth and the plan
@@ -335,38 +345,46 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
               <Field
                 className="lg:col-span-2"
                 label="Height Scale"
-                hint="Fill Depth stretches the model's height range onto the relief depth, so the carve is always exactly that deep, but Z is then unrelated to X and Y and fitting onto smaller stock raises the exaggeration. Proportional puts Z on the plan scale, so the carve keeps the model's shape and the exaggeration is the number you set."
+                hint="True Size cuts the model exactly as modelled, 1:1 in every direction, as deep as it goes. Auto uses True Size when the model fits the stock and Fill when it does not. Fill stretches the model's height onto the relief depth. Proportional puts Z on the plan scale, times the exaggeration."
               >
                 <Segmented
                   value={options.verticalScaleMode}
                   onChange={(v) => set('verticalScaleMode', v)}
-                  options={[['fill', 'Fill Depth'], ['proportional', 'Proportional']] as const}
+                  options={[['auto', 'Auto'], ['model', 'True Size'], ['fill', 'Fill'], ['proportional', 'Proportional']] as const}
                 />
               </Field>
 
 
               <Field
                 label="Relief Depth (mm)"
-                hint="How deep the lowest point of the carve sits below the top face. The model's whole height is compressed into this."
+                hint={asModelled
+                  ? 'Taken from the model: its top down to the lowest point a cutter can reach from above.'
+                  : "How deep the lowest point of the carve sits below the top face. The model's whole height is compressed into this."}
               >
-                <NumberInput
-                  step={1} min={0.5} max={200}
-                  value={options.carveDepthMm}
-                  onChange={(v) => set('carveDepthMm', v)}
-                  className={inputClass}
-                />
+                {asModelled ? (
+                  <div className={`${inputClass} text-slate-500`}>
+                    {result?.success ? `${result.reliefDepthMm.toFixed(1)} from model` : 'from model'}
+                  </div>
+                ) : (
+                  <NumberInput
+                    step={1} min={0.5} max={200}
+                    value={options.carveDepthMm}
+                    onChange={(v) => set('carveDepthMm', v)}
+                    className={inputClass}
+                  />
+                )}
               </Field>
 
               <Field
                 className="lg:col-span-2"
                 hintAlign="end"
                 label="Background"
-                hint="What happens to the stock the model does not cover. Carve takes it down to the floor so the model stands proud of a flat field; Leave keeps it at full height and only cuts where the model dips, which is far quicker."
+                hint="What happens to the stock the model does not cover. Carve takes it down to the floor so the model stands proud of a flat field; Leave keeps it at full height and only cuts where the model dips, which is far quicker. Auto leaves it for a model cut at true size and carves it otherwise."
               >
                 <Segmented
                   value={options.backgroundMode}
                   onChange={(v) => set('backgroundMode', v)}
-                  options={[['carve', 'Carve Away'], ['skip', 'Leave At Top']] as const}
+                  options={[['auto', 'Auto'], ['carve', 'Carve Away'], ['skip', 'Leave']] as const}
                 />
               </Field>
 
@@ -475,6 +493,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                   value={options.fitMode}
                   onChange={(v) => set('fitMode', v)}
                   options={[['fit', 'Fit to Stock'], ['manual', 'Manual']] as const}
+                  disabled={asModelled}
                 />
               </Field>
               <Field
@@ -483,7 +502,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
               >
                 <NumberInput
                   step={5} min={1} max={1000}
-                  disabled={options.fitMode !== 'manual'}
+                  disabled={asModelled || options.fitMode !== 'manual'}
                   value={options.scalePercent}
                   onChange={(v) => set('scalePercent', v)}
                   className={inputClass}

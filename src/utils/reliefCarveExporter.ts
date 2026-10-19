@@ -129,8 +129,18 @@ export interface ReliefCarveOptions {
    * 'proportional' puts Z on the plan scale, so the model keeps the proportions
    * it was authored with however it is fitted, and `verticalExaggeration` is the
    * only thing that stretches it.
+   *
+   * 'model' cuts the model exactly as it was modelled: 1:1 in X, Y and Z,
+   * centred on the stock, as deep as the lowest point a cutter coming straight
+   * down can see. `carveDepthMm`, `fitMode`, `scalePercent` and the
+   * exaggeration are all ignored, because the model already says every one of
+   * them. This is what a part designed to the size of its board wants — a tray,
+   * a sign, a plate with a pattern on its face.
+   *
+   * 'auto' is 'model' when the model fits the stock (footprint, and depth with
+   * a millimetre under it) and 'fill' when it does not, saying so.
    */
-  verticalScaleMode: 'fill' | 'proportional';
+  verticalScaleMode: 'fill' | 'proportional' | 'model' | 'auto';
   /**
    * Height stretch applied in 'proportional' mode. 1 keeps the model's own
    * proportions; terrain usually wants more, because true-scale terrain over a
@@ -145,8 +155,10 @@ export interface ReliefCarveOptions {
    * What to do with the stock the model does not cover. 'carve' takes the
    * background down to the floor so the model stands proud of it; 'skip' leaves
    * it at full stock height and only cuts where the model actually dips.
+   * 'auto' is 'skip' for a model cut at its own size (the stock round it is
+   * the stock, not part of the design) and 'carve' otherwise.
    */
-  backgroundMode: 'carve' | 'skip';
+  backgroundMode: 'carve' | 'skip' | 'auto';
   /**
    * Cut right through the stock, this far into the spoilboard, in mm. Zero
    * keeps the usual 1 mm of stock under the deepest cut.
@@ -401,6 +413,20 @@ export const DEFAULT_RELIEF_OPTIONS: ReliefCarveOptions = {
   applyMeshLeveling: false,
 };
 
+/**
+ * What the app starts a relief from: the model cut at its own size when it
+ * fits the stock, scaled to fit when it does not.
+ *
+ * Kept apart from `DEFAULT_RELIEF_OPTIONS`, which stays on 'fill' because a
+ * great deal of code and every older test calls the exporter with a model of
+ * no particular size and expects it fitted. The dialog and the MCP export lay
+ * this over the defaults before the scene's own carve settings.
+ */
+export const APP_RELIEF_DEFAULTS: Pick<ReliefCarveOptions, 'verticalScaleMode' | 'backgroundMode'> = {
+  verticalScaleMode: 'auto',
+  backgroundMode: 'auto',
+};
+
 export interface ToolpathSegment {
   type: 'roughing' | 'finishing';
   points: { x: number; y: number; z: number }[];
@@ -464,6 +490,14 @@ export interface ReliefCarveResult {
    * own proportions. What 'fill' mode leaves implicit.
    */
   verticalExaggeration: number;
+  /** The height mode actually used, with 'auto' resolved. */
+  heightMode?: 'fill' | 'proportional' | 'model';
+  /**
+   * Material a cutter coming straight down cannot reach: the space under an
+   * overhang, a leaning slot's far wall. It is left solid. Absent when there is
+   * none worth mentioning.
+   */
+  undercut?: Undercut;
   /** Footprint the model occupies on the stock, in machine mm. */
   carveBounds: { minX: number; minY: number; maxX: number; maxY: number };
   /** The stock block itself. */
@@ -478,6 +512,18 @@ export interface ReliefCarveResult {
 
 /** Beyond this the heightmap costs more than the extra fidelity is worth. */
 const MAX_HEIGHTMAP_CELLS = 260_000;
+
+/** What `findUndercut` reports, in machine mm. */
+export interface Undercut {
+  /** Plan area over hidden space. */
+  areaMm2: number;
+  /** Volume of hidden space that will be left solid. */
+  volumeMm3: number;
+  /** Thickest hidden gap in one column. */
+  maxMm: number;
+  /** Plan extent of the undercut cells. */
+  bounds: { minX: number; minY: number; maxX: number; maxY: number };
+}
 /** Stickout, in tool diameters, past which a bit is too whippy to hold a surface. */
 export const MAX_REACH_DIAMETERS = 4;
 
@@ -1076,7 +1122,14 @@ export function buildHeightmap(
   bounds: { minX: number; minY: number; maxX: number; maxY: number },
   cols: number,
   rows: number,
-  floorZ: number
+  floorZ: number,
+  /**
+   * When given, receives per cell the height of air the ray passed through
+   * *below* the first surface it met — space under an overhang, which a
+   * cutter coming down from above cannot reach. Gaps are only counted down
+   * to `floorZ`. See `hiddenGap`.
+   */
+  hidden?: { gap: Float32Array; floorZ: number }
 ): Heightmap {
   const stepX = cols > 1 ? (bounds.maxX - bounds.minX) / (cols - 1) : 0;
   const stepY = rows > 1 ? (bounds.maxY - bounds.minY) / (rows - 1) : 0;
@@ -1116,6 +1169,10 @@ export function buildHeightmap(
     }
   }
 
+  // Each hit's height, and whether the ray met the triangle's outside (an
+  // up-facing face, where it enters solid) or its inside.
+  const hits: number[] = [];
+  const entering: boolean[] = [];
   for (let row = 0; row < rows; row++) {
     const py = bounds.minY + row * stepY;
     const br = bucketRow(py);
@@ -1126,6 +1183,8 @@ export function buildHeightmap(
       if (bucket.length === 0) continue;
 
       let best = floorZ;
+      hits.length = 0;
+      entering.length = 0;
 
       for (const i of bucket) {
         const ax = tris[i], ay = tris[i + 1], az = tris[i + 2];
@@ -1146,13 +1205,123 @@ export function buildHeightmap(
 
         const hitZ = az + u * (cz - az) + v * (bz - az);
         if (hitZ > best) best = hitZ;
+        if (hidden) {
+          hits.push(hitZ);
+          // `den` is the plan-view cross product of (c - a) and (b - a): the
+          // opposite of the face normal's Z for a counter-clockwise triangle.
+          entering.push(den < 0);
+        }
       }
 
       if (best > floorZ) z[row * cols + col] = best;
+      if (hidden && hits.length >= 3) {
+        hidden.gap[row * cols + col] = hiddenGap(hits, entering, hidden.floorZ);
+      }
     }
   }
 
   return { ...bounds, cols, rows, stepX, stepY, z };
+}
+
+/**
+ * Air under the first surface a vertical ray meets, down to `floorZ`.
+ *
+ * Walking down the ray, an outward-facing (up) face is a way into solid and
+ * an inward one a way out; air is wherever the count is back to zero. A count
+ * rather than plain alternation, because a scene is often several solids that
+ * overlap — a wall box standing in a floor box — and alternation reads the
+ * floor's top inside the wall as a cavity. A ray through an edge two faces
+ * share meets both at one height, so hits at one height facing one way are
+ * counted once. A column whose first face looks inward is from a mesh wound
+ * inside out, and is read with every face flipped.
+ */
+function hiddenGap(hits: number[], entering: boolean[], floorZ: number): number {
+  const order = hits.map((_, i) => i).sort((a, b) => hits[b] - hits[a]);
+  const flip = !entering[order[0]];
+  let depth = 0;
+  let airFrom: number | null = null;
+  let gap = 0;
+  let lastZ = Infinity;
+  let lastIn: boolean | null = null;
+  let started = false;
+  for (const i of order) {
+    const h = hits[i];
+    if (h <= floorZ) break;
+    const into = entering[i] !== flip;
+    if (lastIn === into && lastZ - h < 1e-4) continue;
+    lastZ = h;
+    lastIn = into;
+    depth += into ? 1 : -1;
+    if (!started) {
+      started = true;
+      continue;
+    }
+    if (depth <= 0 && airFrom === null) airFrom = h;
+    else if (depth > 0 && airFrom !== null) {
+      gap += airFrom - h;
+      airFrom = null;
+    }
+  }
+  // Air with no solid under it before the floor is below the model, not
+  // under an overhang of it.
+  return gap;
+}
+
+/**
+ * Totals the hidden gaps `buildHeightmap` found into one figure, ignoring
+ * gaps too thin to matter (a coarse mesh's seams, a tenth of a millimetre of
+ * draft) so the warning means something when it appears.
+ */
+export function findUndercut(
+  gap: Float32Array,
+  hm: Pick<Heightmap, 'cols' | 'rows' | 'minX' | 'minY' | 'stepX' | 'stepY'>,
+  minGapMm = 0.25
+): Undercut | null {
+  let cells = 0;
+  let volume = 0;
+  let maxMm = 0;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  const cellArea = hm.stepX * hm.stepY;
+  for (let i = 0; i < gap.length; i++) {
+    const g = gap[i];
+    if (!(g > minGapMm)) continue;
+    cells++;
+    volume += g * cellArea;
+    if (g > maxMm) maxMm = g;
+    const x = hm.minX + (i % hm.cols) * hm.stepX;
+    const y = hm.minY + Math.floor(i / hm.cols) * hm.stepY;
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  }
+  const areaMm2 = cells * cellArea;
+  // A handful of cells is a mesh artefact, not a feature anybody modelled.
+  if (areaMm2 < 4 || volume < 2) return null;
+  return { areaMm2, volumeMm3: volume, maxMm, bounds: { minX, minY, maxX, maxY } };
+}
+
+/**
+ * The deepest point of a sampled surface that a cutter can actually be asked
+ * to reach: the lowest covered cell whose four neighbours are covered too.
+ * The rim cells are skipped because a ray grazing the foot of a vertical side
+ * wall can hit it at its base, and one such cell would otherwise set the
+ * depth of the whole job to the model's full height.
+ */
+function lowestInteriorZ(hm: Heightmap): number {
+  const { cols, rows, z } = hm;
+  let lowest = Infinity;
+  for (let r = 1; r < rows - 1; r++) {
+    for (let c = 1; c < cols - 1; c++) {
+      const i = r * cols + c;
+      const v = z[i];
+      if (v === -Infinity || v >= lowest) continue;
+      if (z[i - 1] === -Infinity || z[i + 1] === -Infinity) continue;
+      if (z[i - cols] === -Infinity || z[i + cols] === -Infinity) continue;
+      lowest = v;
+    }
+  }
+  return lowest;
 }
 
 /**
@@ -3842,7 +4011,6 @@ export function generateReliefCarveGcode(
   }
 
   const fitScale = Math.min(usableW / modelW, usableD / modelD);
-  const scaleFactor = opts.fitMode === 'fit' ? fitScale : Math.max(0.01, opts.scalePercent / 100);
 
   // Only a model that runs past the stock itself is cropped. The usable
   // rectangle above is where the cutter's *centre* may go; the surface is
@@ -3851,8 +4019,101 @@ export function generateReliefCarveGcode(
   // generated pattern panel, always -- report itself as overhanging. Half a
   // millimetre of slack absorbs a generated board's sub-cell rounding.
   const OVERHANG_SLACK_MM = 0.5;
+  const footprintFits = modelW <= stockW + OVERHANG_SLACK_MM && modelD <= stockD + OVERHANG_SLACK_MM;
+  const cutThrough = Math.max(0, opts.cutThroughMm ?? 0);
+  const maxDepthForStock = Math.max(0.1, opts.stockThicknessMm - 1);
+
+  // Model centre lands on the stock centre; the model's highest point lands on
+  // the stock's top face. Centre of the stock in work coordinates, which with a
+  // corner origin is half the stock rather than zero.
+  const cx = (mnX + mxX) / 2;
+  const cy = (mnY + mxY) / 2;
+  const stockCx = stockW / 2;
+  const stockCy = stockD / 2;
+
+  // --- Sampling grid ---------------------------------------------------------
+  let res = Math.min(stepover, 0.6);
+  let cols = Math.ceil(stockW / res) + 1;
+  let rows = Math.ceil(stockD / res) + 1;
+  if (cols * rows > MAX_HEIGHTMAP_CELLS) {
+    const shrink = Math.sqrt((cols * rows) / MAX_HEIGHTMAP_CELLS);
+    res *= shrink;
+    cols = Math.ceil(stockW / res) + 1;
+    rows = Math.ceil(stockD / res) + 1;
+    warnings.push(
+      `Surface sampled every ${res.toFixed(2)} mm — the stock is too large to sample at the ` +
+        `${stepover.toFixed(2)} mm stepover. Detail finer than that is smoothed out.`
+    );
+  }
+
+  // Puts the model on the stock at a plan scale and a height scale, and
+  // samples it from above. Cells the model does not cover are marked, not
+  // floored, so that a model whose own lowest face sits exactly on the floor
+  // is not mistaken for bare background and left uncut. The hidden gaps are
+  // counted down to the stock's underside: below that nothing is cut anyway.
+  const placeAndSample = (scale: number, zs: number) => {
+    const placed = new Float64Array(sceneTris.length);
+    for (let i = 0; i < sceneTris.length; i += 3) {
+      placed[i] = (sceneTris[i] * 1000 - cx) * scale + stockCx;
+      placed[i + 1] = (sceneTris[i + 1] * 1000 - cy) * scale + stockCy;
+      placed[i + 2] = (sceneTris[i + 2] * 1000 - mxZ) * zs;
+    }
+    const gap = new Float32Array(cols * rows);
+    const hm = buildHeightmap(placed, bounds, cols, rows, -Infinity, {
+      gap,
+      floorZ: -opts.stockThicknessMm,
+    });
+    return { surface: hm, gap };
+  };
+
+  // --- Which height mode -----------------------------------------------------
+  // 'model' needs the sampled surface to know how deep it is, so for 'auto' it
+  // is tried first whenever the footprint fits, and given up only if the
+  // depth then does not.
+  const requested = opts.verticalScaleMode;
+  let heightMode: 'fill' | 'proportional' | 'model' = requested === 'auto' ? 'fill' : requested;
+  let sampled: ReturnType<typeof placeAndSample> | null = null;
+  let modelDepth = 0;
+  if (requested === 'model' || (requested === 'auto' && footprintFits)) {
+    sampled = placeAndSample(1, 1);
+    const lowest = lowestInteriorZ(sampled.surface);
+    modelDepth = Number.isFinite(lowest) ? Math.max(0.1, -lowest) : modelH;
+    if (requested === 'model' || cutThrough > 0 || modelDepth <= maxDepthForStock + 1e-6) {
+      heightMode = 'model';
+    } else {
+      sampled = null;
+      warnings.push(
+        `The model needs ${modelDepth.toFixed(1)} mm of depth and the ${opts.stockThicknessMm} mm stock ` +
+          `has ${maxDepthForStock.toFixed(1)} mm to give, so its height is scaled to fit. Use thicker ` +
+          `stock to cut it at its own size.`
+      );
+    }
+  } else if (requested === 'auto') {
+    warnings.push(
+      `The model (${modelW.toFixed(0)} x ${modelD.toFixed(0)} mm) is bigger than the ${stockW} x ` +
+        `${stockD} mm stock, so it is scaled to fit. Use bigger stock to cut it at its own size.`
+    );
+  }
+  const asModelled = heightMode === 'model';
+
+  const scaleFactor = asModelled
+    ? 1
+    : opts.fitMode === 'fit'
+      ? fitScale
+      : Math.max(0.01, opts.scalePercent / 100);
+
   const overhang = Math.max(modelW * scaleFactor - stockW, modelD * scaleFactor - stockD);
-  if (opts.fitMode === 'manual' && overhang > OVERHANG_SLACK_MM) {
+  if (asModelled && overhang > OVERHANG_SLACK_MM) {
+    const wider = modelW - stockW;
+    const deeper = modelD - stockD;
+    warnings.push(
+      wider >= deeper
+        ? `The model is ${wider.toFixed(1)} mm wider than your stock (${modelW.toFixed(1)} vs ${stockW} mm). ` +
+            `Anything past the edge is cropped.`
+        : `The model is ${deeper.toFixed(1)} mm deeper than your stock (${modelD.toFixed(1)} vs ${stockD} mm). ` +
+            `Anything past the edge is cropped.`
+    );
+  } else if (!asModelled && opts.fitMode === 'manual' && overhang > OVERHANG_SLACK_MM) {
     const fitsStock = Math.min(stockW / modelW, stockD / modelD);
     warnings.push(
       `At ${opts.scalePercent}% the model is ${(modelW * scaleFactor).toFixed(0)} x ` +
@@ -3872,11 +4133,14 @@ export function generateReliefCarveGcode(
   // authored with however it is fitted, and the exaggeration is a number the
   // user sets rather than one that falls out of the stock size. Carve depth stops
   // being a target and becomes a limit.
-  const proportional = opts.verticalScaleMode === 'proportional';
+  //
+  // 'model' is neither: Z is 1:1 and the depth is what the model shows from
+  // above, so there is no number to set at all.
+  const proportional = heightMode === 'proportional';
   const exaggeration = Math.max(0.01, opts.verticalExaggeration);
-  let zScale = proportional ? scaleFactor * exaggeration : carveDepth / modelH;
-  const wantedDepth = modelH * zScale;
-  let reliefDepth = Math.min(carveDepth, wantedDepth);
+  let zScale = asModelled ? 1 : proportional ? scaleFactor * exaggeration : carveDepth / modelH;
+  const wantedDepth = asModelled ? modelDepth : modelH * zScale;
+  let reliefDepth = asModelled ? modelDepth : Math.min(carveDepth, wantedDepth);
 
   if (proportional && wantedDepth > carveDepth + 1e-6) {
     warnings.push(
@@ -3892,8 +4156,6 @@ export function generateReliefCarveGcode(
   // the footprint is — the operator set a stock size, not a depth percentage.
   // 'proportional' ties depth to plan scale and exaggeration instead; clamping it
   // here would silently change that ratio, so it stays a warning to fix by hand.
-  const cutThrough = Math.max(0, opts.cutThroughMm ?? 0);
-  const maxDepthForStock = Math.max(0.1, opts.stockThicknessMm - 1);
   if (cutThrough > 0) {
     // A through-cut is a depth the operator asked for by name, not one to
     // second-guess: the stock and a skim of spoilboard, and no less.
@@ -3902,7 +4164,14 @@ export function generateReliefCarveGcode(
       `Cuts through the ${opts.stockThicknessMm} mm stock and ${cutThrough} mm into the spoilboard. ` +
         `Check the board is down flat on it before you start.`
     );
-  } else if (!proportional && reliefDepth > maxDepthForStock) {
+  } else if (asModelled && reliefDepth > maxDepthForStock) {
+    warnings.push(
+      `The model needs ${reliefDepth.toFixed(1)} mm of depth; the stock is ${opts.stockThicknessMm} mm ` +
+        `and 1 mm is kept under the cut, so everything below ${maxDepthForStock.toFixed(1)} mm is ` +
+        `flattened onto the floor.`
+    );
+    reliefDepth = maxDepthForStock;
+  } else if (!proportional && !asModelled && reliefDepth > maxDepthForStock) {
     warnings.push(
       `Relief depth reduced to ${maxDepthForStock.toFixed(1)} mm to leave 1 mm under the ` +
         `${opts.stockThicknessMm} mm stock (requested ${reliefDepth.toFixed(1)} mm).`
@@ -3914,28 +4183,11 @@ export function generateReliefCarveGcode(
         `underneath. Cut the relief depth, lower the exaggeration, or use thicker stock.`
     );
   }
-  if (!proportional) {
+  if (!proportional && !asModelled) {
     zScale = reliefDepth / modelH;
   }
 
-
-  // Model centre lands on the stock centre; the model's highest point lands on
-  // the stock's top face, and its lowest on the floor of the relief.
-  const cx = (mnX + mxX) / 2;
-  const cy = (mnY + mxY) / 2;
   const floorZ = -reliefDepth;
-
-  // Centre of the stock in work coordinates, which with a corner origin is half
-  // the stock rather than zero.
-  const stockCx = stockW / 2;
-  const stockCy = stockD / 2;
-
-  const tris = new Float64Array(sceneTris.length);
-  for (let i = 0; i < sceneTris.length; i += 3) {
-    tris[i] = (sceneTris[i] * 1000 - cx) * scaleFactor + stockCx;
-    tris[i + 1] = (sceneTris[i + 1] * 1000 - cy) * scaleFactor + stockCy;
-    tris[i + 2] = (sceneTris[i + 2] * 1000 - mxZ) * zScale;
-  }
 
   const carveBounds = {
     minX: Math.max(bounds.minX, stockCx - (modelW * scaleFactor) / 2),
@@ -3945,25 +4197,34 @@ export function generateReliefCarveGcode(
   };
 
   // --- Sample the surface ----------------------------------------------------
-  let res = Math.min(stepover, 0.6);
-  let cols = Math.ceil(stockW / res) + 1;
-  let rows = Math.ceil(stockD / res) + 1;
-  if (cols * rows > MAX_HEIGHTMAP_CELLS) {
-    const shrink = Math.sqrt((cols * rows) / MAX_HEIGHTMAP_CELLS);
-    res *= shrink;
-    cols = Math.ceil(stockW / res) + 1;
-    rows = Math.ceil(stockD / res) + 1;
+  const { surface, gap } = sampled ?? placeAndSample(scaleFactor, zScale);
+
+  // What a cutter from above cannot reach. Said out loud when the model is
+  // being cut as modelled, because then it is the part's real shape being
+  // lost (a phone slot that leans, a lip). A scaled relief is a picture of a
+  // shape, and its undersides were never going to be cut; the figure is still
+  // in the result for anyone who asks.
+  const undercut = findUndercut(gap, surface);
+  if (undercut && asModelled) {
+    const b = undercut.bounds;
     warnings.push(
-      `Surface sampled every ${res.toFixed(2)} mm — the stock is too large to sample at the ` +
-        `${stepover.toFixed(2)} mm stepover. Detail finer than that is smoothed out.`
+      `Part of the model is undercut: about ${Math.round(undercut.areaMm2)} mm² of it, near X ` +
+        `${b.minX.toFixed(0)}–${b.maxX.toFixed(0)} Y ${b.minY.toFixed(0)}–${b.maxY.toFixed(0)} mm, ` +
+        `is hidden under an overhang (up to ${undercut.maxMm.toFixed(1)} mm deep) where a cutter coming ` +
+        `straight down cannot reach. It is left solid — about ${Math.round(undercut.volumeMm3)} mm³ the ` +
+        `model has as empty space. A leaning slot comes out with a vertical wall on its overhanging side.`
     );
   }
 
-  // Cells the model does not cover are marked, not floored, so that a model
-  // whose own lowest face sits exactly on the floor is not mistaken for bare
-  // background and left uncut.
-  const surface = buildHeightmap(tris, bounds, cols, rows, -Infinity);
-  const backgroundZ = opts.backgroundMode === 'skip' ? 0 : floorZ;
+  const backgroundMode =
+    opts.backgroundMode === 'auto' ? (asModelled ? 'skip' : 'carve') : opts.backgroundMode;
+  if (asModelled && backgroundMode === 'skip' && (modelW < stockW - 1 || modelD < stockD - 1)) {
+    warnings.push(
+      `The model (${modelW.toFixed(1)} x ${modelD.toFixed(1)} mm) is smaller than the stock, and the board ` +
+        `round it is left uncut. Set Background to Carve to cut it down to the floor.`
+    );
+  }
+  const backgroundZ = backgroundMode === 'skip' ? 0 : floorZ;
   if (opts.invertRelief) {
     for (let i = 0; i < surface.z.length; i++) {
       if (surface.z[i] === -Infinity) {
@@ -4024,7 +4285,9 @@ export function generateReliefCarveGcode(
     `; Stock       : ${stockW} x ${stockD} x ${opts.stockThicknessMm} mm`,
     `; Relief depth: ${reliefDepth.toFixed(2)} mm below the top face`,
     `; Model scale : ${(scaleFactor * 100).toFixed(1)}% (${(modelW * scaleFactor).toFixed(1)} x ${(modelD * scaleFactor).toFixed(1)} mm)`,
-    `; Height      : ${(zScale / Math.max(1e-9, scaleFactor)).toFixed(1)}x the plan scale`,
+    asModelled
+      ? '; Height      : as modelled, 1:1'
+      : `; Height      : ${(zScale / Math.max(1e-9, scaleFactor)).toFixed(1)}x the plan scale`,
     '; Origin      : near-left corner of the stock, top face, Z0',
     `; Extents     : X0..${f(stockW)}  Y0..${f(stockD)} (all cuts are +X +Y of zero)`,
   ];
@@ -4050,6 +4313,8 @@ export function generateReliefCarveGcode(
     reliefDepthMm: reliefDepth,
     detailMm,
     verticalExaggeration: zScale / Math.max(1e-9, scaleFactor),
+    heightMode,
+    ...(undercut ? { undercut } : {}),
     carveBounds,
     bounds,
     stockTransform: {
