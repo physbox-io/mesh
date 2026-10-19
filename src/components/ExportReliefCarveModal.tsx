@@ -242,7 +242,9 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
     if (!result?.carveBounds) return;
     // A carve is always a router, and it frames at the same clearance height
     // the toolpath itself retracts to.
-    await webSerialManager.frameJob(result.carveBounds, 0, {
+    // Out to the cutter's reach where the cut runs off the board edge, so the
+    // trace shows whether the clamps are clear.
+    await webSerialManager.frameJob(result.frameBounds ?? result.carveBounds, 0, {
       laserMode: false,
       safeZMm: options.safeZ,
     });

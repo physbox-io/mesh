@@ -500,6 +500,12 @@ export interface ReliefCarveResult {
   undercut?: Undercut;
   /** Footprint the model occupies on the stock, in machine mm. */
   carveBounds: { minX: number; minY: number; maxX: number; maxY: number };
+  /**
+   * What Frame Job traces when the cut runs past the board edge (a groove open
+   * at the model's edge): the footprint, grown out to the cutter's reach on
+   * those sides. Absent when the cut stays on the board.
+   */
+  frameBounds?: { minX: number; minY: number; maxX: number; maxY: number };
   /** The stock block itself. */
   bounds: { minX: number; minY: number; maxX: number; maxY: number; minZ: number; maxZ: number };
   /** How the model was put on the stock, so a simulated cut can be put back on the model. */
@@ -1842,6 +1848,60 @@ export interface SurfaceJob {
   prelude?: string[];
   /** What the depth is called in warnings: 'relief' or 'cut'. */
   noun?: string;
+  /**
+   * Sides of the stock the surface runs off below the top face (`openEdges`),
+   * where the tool centre may go past the edge instead of stopping a radius
+   * inside it. Absent, every side holds the cutter on the stock as before.
+   */
+  runOff?: OpenEdges | null;
+}
+
+/** Which sides of the stock a surface leaves at, below its top face. */
+export interface OpenEdges {
+  minX: boolean;
+  maxX: boolean;
+  minY: boolean;
+  maxY: boolean;
+}
+
+/** Below the top face by more than this at the stock's edge, a side is open. */
+const OPEN_EDGE_MM = 0.05;
+/**
+ * How far past an open edge the tool centre goes, mm. A ball or V tip cuts its
+ * full depth only under its centre, so stopping a radius inside the edge left
+ * a groove that runs off the part closed by a ramp at each end.
+ */
+export const OVERRUN_PAST_EDGE_MM = 0.5;
+
+/**
+ * The sides where the finished surface meets the stock's edge below the top
+ * face: a groove or a step that runs off the part. Null when there are none,
+ * which is what keeps a closed model's program unchanged.
+ *
+ * `only` limits it to the sides that may count and the stretch of each edge
+ * to look along: a relief's carved background is below the top face at every
+ * edge, and is not a feature running off the board.
+ */
+export function openEdges(
+  hm: Heightmap,
+  only?: { sides: OpenEdges; span: { minX: number; minY: number; maxX: number; maxY: number } }
+): OpenEdges | null {
+  const below = (k: number) => hm.z[k] < -OPEN_EDGE_MM;
+  const r0 = only ? Math.max(0, Math.ceil((only.span.minY - hm.minY) / (hm.stepY || 1) - 1e-6)) : 0;
+  const r1 = only ? Math.min(hm.rows - 1, Math.floor((only.span.maxY - hm.minY) / (hm.stepY || 1) + 1e-6)) : hm.rows - 1;
+  const c0 = only ? Math.max(0, Math.ceil((only.span.minX - hm.minX) / (hm.stepX || 1) - 1e-6)) : 0;
+  const c1 = only ? Math.min(hm.cols - 1, Math.floor((only.span.maxX - hm.minX) / (hm.stepX || 1) + 1e-6)) : hm.cols - 1;
+  const may = only?.sides ?? { minX: true, maxX: true, minY: true, maxY: true };
+  const sides: OpenEdges = { minX: false, maxX: false, minY: false, maxY: false };
+  for (let r = r0; r <= r1; r++) {
+    if (may.minX && below(r * hm.cols)) sides.minX = true;
+    if (may.maxX && below(r * hm.cols + hm.cols - 1)) sides.maxX = true;
+  }
+  for (let c = c0; c <= c1; c++) {
+    if (may.minY && below(c)) sides.minY = true;
+    if (may.maxY && below((hm.rows - 1) * hm.cols + c)) sides.maxY = true;
+  }
+  return sides.minX || sides.maxX || sides.minY || sides.maxY ? sides : null;
 }
 
 /** What `machineSurface` hands back — the program and the numbers about it. */
@@ -2165,6 +2225,25 @@ export function machineSurface(
     return sections;
   };
 
+  /**
+   * The rectangle the tool *centre* may enter: the stock, inset by the tool's
+   * own radius, except on a side the surface runs off (`job.runOff`), where it
+   * goes past the edge so a feature open at the part's edge comes out open.
+   * Past the edge the dilated map is read at its border, which only ever
+   * holds the cutter higher than it needs to be. On stock narrower than the
+   * cutter it collapses to the centre line rather than inverting.
+   */
+  const centreWindow = (rad: number) => {
+    const open = job.runOff;
+    const midX = (bounds.minX + bounds.maxX) / 2, midY = (bounds.minY + bounds.maxY) / 2;
+    return {
+      minX: open?.minX ? bounds.minX - OVERRUN_PAST_EDGE_MM : Math.min(bounds.minX + rad, midX),
+      maxX: open?.maxX ? bounds.maxX + OVERRUN_PAST_EDGE_MM : Math.max(bounds.maxX - rad, midX),
+      minY: open?.minY ? bounds.minY - OVERRUN_PAST_EDGE_MM : Math.min(bounds.minY + rad, midY),
+      maxY: open?.maxY ? bounds.maxY + OVERRUN_PAST_EDGE_MM : Math.max(bounds.maxY - rad, midY),
+    };
+  };
+
   const finishBody = bodyFor(
     opts.finishingToolDiaMm,
     opts.finishingShankDiaMm,
@@ -2199,15 +2278,7 @@ export function machineSurface(
     const a = z[k], b = z[k + 1], cc = z[k + finishMap.cols], d = z[k + finishMap.cols + 1];
     return Math.max(a, b, cc, d) - Math.min(a, b, cc, d) > wallRise;
   };
-  // The rectangle the tool *centre* may enter: the stock, inset by the tool's
-  // own radius. On stock narrower than the cutter it collapses to the centre
-  // line rather than inverting.
-  const passRect = {
-    minX: Math.min(bounds.minX + finishRad, (bounds.minX + bounds.maxX) / 2),
-    maxX: Math.max(bounds.maxX - finishRad, (bounds.minX + bounds.maxX) / 2),
-    minY: Math.min(bounds.minY + finishRad, (bounds.minY + bounds.maxY) / 2),
-    maxY: Math.max(bounds.maxY - finishRad, (bounds.minY + bounds.maxY) / 2),
-  };
+  const passRect = centreWindow(finishRad);
 
   const holdOffWall = (p: { x: number; y: number }, level: number) => {
     if (!inWallCell(p.x, p.y) || finishTipAt(p.x, p.y) <= level + 1e-3) return { x: p.x, y: p.y, z: level };
@@ -2755,8 +2826,9 @@ export function machineSurface(
       );
     }
 
-    const xs = axisSamples(bounds.minX + roughRad, bounds.maxX - roughRad, res);
-    const ys = axisSamples(bounds.minY + roughRad, bounds.maxY - roughRad, roughStepover);
+    const roughWin = centreWindow(roughRad);
+    const xs = axisSamples(roughWin.minX, roughWin.maxX, res);
+    const ys = axisSamples(roughWin.minY, roughWin.maxY, roughStepover);
 
     /** The lowest the roughing tool's tip may go at a point: its surface plus the allowance. */
     const roughTargetAt = (x: number, y: number) =>
@@ -2782,8 +2854,8 @@ export function machineSurface(
      * the outermost ring of every layer away.
      */
     const layerRegion = (layerTop: number): ClearingRegion => {
-      const gxs = axisSamples(bounds.minX + roughRad, bounds.maxX - roughRad, res);
-      const gys = axisSamples(bounds.minY + roughRad, bounds.maxY - roughRad, res);
+      const gxs = axisSamples(roughWin.minX, roughWin.maxX, res);
+      const gys = axisSamples(roughWin.minY, roughWin.maxY, res);
       const cols = gxs.length + 2;
       const rows = gys.length + 2;
       const mask = new Uint8Array(cols * rows);
@@ -2829,10 +2901,8 @@ export function machineSurface(
      * holds whatever the cell size works out to, and it is the tool's actual
      * constraint stated where the toolpath is written.
      */
-    const safeX = (x: number) =>
-      Math.min(Math.max(x, bounds.minX + roughRad), bounds.maxX - roughRad);
-    const safeY = (y: number) =>
-      Math.min(Math.max(y, bounds.minY + roughRad), bounds.maxY - roughRad);
+    const safeX = (x: number) => Math.min(Math.max(x, roughWin.minX), roughWin.maxX);
+    const safeY = (y: number) => Math.min(Math.max(y, roughWin.minY), roughWin.maxY);
 
     /** Whether a point lies inside a closed loop (even-odd). */
     const insideLoop = (pt: { x: number; y: number }, loop: { x: number; y: number }[]) => {
@@ -3918,6 +3988,114 @@ function startLoopAt(loop: PathPoint[], x: number, y: number): PathPoint[] | nul
   return null;
 }
 
+/**
+ * The sides where the model ends in a face: nearly every sample along the
+ * footprint's edge meets it. A block's end, cut off square, is one, and a
+ * groove running off it is open there. A dome's rim, or a letter's outline,
+ * touches its footprint's edge at a few samples and is not.
+ */
+function endFaces(hm: Heightmap, fp: { minX: number; minY: number; maxX: number; maxY: number }): OpenEdges {
+  const { i0, i1, j0, j1 } = footprintCells(hm, fp);
+  const share = (start: number, step: number, n: number) => {
+    let hit = 0;
+    for (let t = 0; t < n; t++) if (hm.z[start + t * step] !== -Infinity) hit++;
+    return n > 0 ? hit / n : 0;
+  };
+  // Read a sample in from the edge, whose own samples can all graze the face.
+  const FACE = 0.9;
+  if (i1 - i0 < 3 || j1 - j0 < 3) return { minX: false, maxX: false, minY: false, maxY: false };
+  return {
+    minX: share(j0 * hm.cols + i0 + 1, hm.cols, j1 - j0 + 1) >= FACE,
+    maxX: share(j0 * hm.cols + i1 - 1, hm.cols, j1 - j0 + 1) >= FACE,
+    minY: share((j0 + 1) * hm.cols + i0, 1, i1 - i0 + 1) >= FACE,
+    maxY: share((j1 - 1) * hm.cols + i0, 1, i1 - i0 + 1) >= FACE,
+  };
+}
+
+/** The columns and rows of `hm` whose samples lie on the footprint. */
+function footprintCells(hm: Heightmap, fp: { minX: number; minY: number; maxX: number; maxY: number }) {
+  const i0 = Math.max(0, Math.ceil((fp.minX - hm.minX) / (hm.stepX || 1) - 1e-6));
+  const i1 = Math.min(hm.cols - 1, Math.floor((fp.maxX - hm.minX) / (hm.stepX || 1) + 1e-6));
+  const j0 = Math.max(0, Math.ceil((fp.minY - hm.minY) / (hm.stepY || 1) - 1e-6));
+  const j1 = Math.min(hm.rows - 1, Math.floor((fp.maxY - hm.minY) / (hm.stepY || 1) + 1e-6));
+  return { i0, i1, j0, j1 };
+}
+
+/**
+ * A sample on the footprint's own edge casts its ray down the model's end
+ * face, and can miss it: read as background, it held the cutter up within a
+ * radius of every end. Such a miss takes the height of the sample inward, but
+ * only where the surface runs level into the edge (a floor, a top face). A
+ * dome's rim misses there too, and the sample inward of it is on a steep
+ * flank that does not carry on, so only a side that is a face (`endFaces`)
+ * is filled.
+ */
+function fillGrazedEdges(
+  hm: Heightmap,
+  fp: { minX: number; minY: number; maxX: number; maxY: number },
+  faces: OpenEdges
+): void {
+  const { i0, i1, j0, j1 } = footprintCells(hm, fp);
+  if (i1 - i0 < 3 || j1 - j0 < 3) return;
+  const z = hm.z;
+  const take = (k: number, step: number, pitch: number) => {
+    const a = z[k + step], b = z[k + 2 * step];
+    if (z[k] === -Infinity && a !== -Infinity && b !== -Infinity && Math.abs(a - b) <= pitch) z[k] = a;
+  };
+  for (let j = j0; j <= j1; j++) {
+    if (faces.minX) take(j * hm.cols + i0, 1, hm.stepX);
+    if (faces.maxX) take(j * hm.cols + i1, -1, hm.stepX);
+  }
+  for (let i = i0; i <= i1; i++) {
+    if (faces.minY) take(j0 * hm.cols + i, hm.cols, hm.stepY);
+    if (faces.maxY) take(j1 * hm.cols + i, -hm.cols, hm.stepY);
+  }
+}
+
+/**
+ * Carries the model's edge heights out across the margin round it wherever
+ * they are below the top face, so a feature open at the model's edge stays
+ * open through a board left uncut. Returns whether anything changed.
+ *
+ * Only a surface that reaches the edge running level, or near it, is carried
+ * on: a groove's floor, a step. A dome's flank meets its footprint's edge at a
+ * single deep sample with the surface climbing steeply away from it, and
+ * carrying that out would cut a slot across the margin.
+ */
+function extendOpenEdges(
+  hm: Heightmap,
+  fp: { minX: number; minY: number; maxX: number; maxY: number },
+  faces: OpenEdges
+): boolean {
+  const { i0, i1, j0, j1 } = footprintCells(hm, fp);
+  if (i1 - i0 < 1 || j1 - j0 < 1 || (i0 === 0 && j0 === 0 && i1 === hm.cols - 1 && j1 === hm.rows - 1)) return false;
+  const z = hm.z;
+  /** Whether the surface at an edge sample runs on level from the sample inward of it. */
+  const level = (k: number, inward: number, step: number) => Math.abs(z[k] - z[inward]) <= step;
+  let changed = false;
+  for (let r = 0; r < hm.rows; r++) {
+    const rj = Math.min(j1, Math.max(j0, r));
+    const dy = r < j0 ? 1 : r > j1 ? -1 : 0;
+    for (let c = 0; c < hm.cols; c++) {
+      if (r === rj && c >= i0 && c <= i1) continue;
+      const ci = Math.min(i1, Math.max(i0, c));
+      const dx = c < i0 ? 1 : c > i1 ? -1 : 0;
+      const src = rj * hm.cols + ci;
+      if (dx > 0 ? !faces.minX : dx < 0 ? !faces.maxX : false) continue;
+      if (dy > 0 ? !faces.minY : dy < 0 ? !faces.maxY : false) continue;
+      if (dx !== 0 && !level(src, src + dx, hm.stepX)) continue;
+      if (dy !== 0 && !level(src, src + dy * hm.cols, hm.stepY)) continue;
+      const from = z[src];
+      const k = r * hm.cols + c;
+      if (from < -OPEN_EDGE_MM && from < z[k]) {
+        z[k] = from;
+        changed = true;
+      }
+    }
+  }
+  return changed;
+}
+
 export function generateReliefCarveGcode(
   scene: SceneGraph,
   userOptions?: Partial<ReliefCarveOptions>
@@ -4225,6 +4403,8 @@ export function generateReliefCarveGcode(
     );
   }
   const backgroundZ = backgroundMode === 'skip' ? 0 : floorZ;
+  // Which sides of the model end in a face; see `endFaces`.
+  let edgeFaces: OpenEdges = { minX: false, maxX: false, minY: false, maxY: false };
   if (opts.invertRelief) {
     for (let i = 0; i < surface.z.length; i++) {
       if (surface.z[i] === -Infinity) {
@@ -4244,11 +4424,62 @@ export function generateReliefCarveGcode(
       const y = surface.minY + Math.floor(i / surface.cols) * surface.stepY;
       return x >= carveBounds.minX && x <= carveBounds.maxX && y >= carveBounds.minY && y <= carveBounds.maxY;
     };
+    const faces = endFaces(surface, carveBounds);
+    edgeFaces = faces;
+    fillGrazedEdges(surface, carveBounds, faces);
     for (let i = 0; i < surface.z.length; i++) {
       if (surface.z[i] === -Infinity) surface.z[i] = inFootprint(i) ? floorZ : backgroundZ;
       else if (surface.z[i] < floorZ) surface.z[i] = floorZ;
     }
+    // An uncut margin would close every groove that runs off the model, so
+    // what leaves the model below the top face carries on to the board's edge.
+    if (backgroundMode === 'skip' && cutThrough <= 0 && extendOpenEdges(surface, carveBounds, faces)) {
+      warnings.push(
+        'Where the model runs off its edge below the top face, the cut is carried on through the ' +
+          'uncut board to the stock edge, so an open-ended groove comes out open.'
+      );
+    }
   }
+
+  // Sides the cut leaves the stock through, where the cutter runs past the
+  // edge: where the model itself reaches the edge, or was carried out to it
+  // through an uncut margin. A carved background reaching every edge at the
+  // floor is not the model running off.
+  const reaches = (gap: number) => gap <= res;
+  const carried = backgroundMode === 'skip' && cutThrough <= 0;
+  const runOff = opts.invertRelief
+    ? null
+    : openEdges(surface, {
+        sides: {
+          minX: reaches(carveBounds.minX - bounds.minX) || (carried && edgeFaces.minX),
+          maxX: reaches(bounds.maxX - carveBounds.maxX) || (carried && edgeFaces.maxX),
+          minY: reaches(carveBounds.minY - bounds.minY) || (carried && edgeFaces.minY),
+          maxY: reaches(bounds.maxY - carveBounds.maxY) || (carried && edgeFaces.maxY),
+        },
+        span: carveBounds,
+      });
+  const reachRad = Math.max(finishRad, opts.roughingEnabled ? opts.roughingToolDiaMm / 2 : 0);
+  const overrunMm = reachRad + OVERRUN_PAST_EDGE_MM;
+  if (runOff) {
+    const named = [
+      runOff.minX ? 'X0' : null,
+      runOff.maxX ? `X${f(stockW)}` : null,
+      runOff.minY ? 'Y0' : null,
+      runOff.maxY ? `Y${f(stockD)}` : null,
+    ].filter(Boolean);
+    warnings.push(
+      `The cut runs ${overrunMm.toFixed(1)} mm past the board edge at ${named.join(', ')}, where the ` +
+        `model runs off it. Keep clamps clear of ${named.length === 1 ? 'that edge' : 'those edges'}.`
+    );
+  }
+  const frameBounds = runOff
+    ? {
+        minX: runOff.minX ? bounds.minX - overrunMm : carveBounds.minX,
+        minY: runOff.minY ? bounds.minY - overrunMm : carveBounds.minY,
+        maxX: runOff.maxX ? bounds.maxX + overrunMm : carveBounds.maxX,
+        maxY: runOff.maxY ? bounds.maxY + overrunMm : carveBounds.maxY,
+      }
+    : carveBounds;
 
   if (cutThrough > 0) {
     let loose = countLoosePieces(surface, -opts.stockThicknessMm, res);
@@ -4289,11 +4520,13 @@ export function generateReliefCarveGcode(
       ? '; Height      : as modelled, 1:1'
       : `; Height      : ${(zScale / Math.max(1e-9, scaleFactor)).toFixed(1)}x the plan scale`,
     '; Origin      : near-left corner of the stock, top face, Z0',
-    `; Extents     : X0..${f(stockW)}  Y0..${f(stockD)} (all cuts are +X +Y of zero)`,
+    runOff
+      ? `; Extents     : X${f(frameBounds.minX)}..${f(frameBounds.maxX)}  Y${f(frameBounds.minY)}..${f(frameBounds.maxY)} (runs past the board edge where the model does)`
+      : `; Extents     : X0..${f(stockW)}  Y0..${f(stockD)} (all cuts are +X +Y of zero)`,
   ];
 
   const cut = machineSurface(
-    { surface, bounds, depthMm: reliefDepth, resolution: res, header },
+    { surface, bounds, depthMm: reliefDepth, resolution: res, header, runOff },
     opts,
     warnings
   );
@@ -4316,6 +4549,7 @@ export function generateReliefCarveGcode(
     heightMode,
     ...(undercut ? { undercut } : {}),
     carveBounds,
+    ...(runOff ? { frameBounds } : {}),
     bounds,
     stockTransform: {
       modelOriginMm: [cx, cy, mxZ],
