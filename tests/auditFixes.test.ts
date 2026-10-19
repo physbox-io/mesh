@@ -296,9 +296,15 @@ describe('audit fixes', () => {
       .split('\n')
       .filter((line) => /^G1 X[-\d.]+ Y[-\d.]+ Z[-\d.]+/.test(line));
     expect(helicalMoves.length).toBeGreaterThan(0);
+    // The helix is fed so that it comes down no faster than the plunge rate,
+    // which is below the cutting feed; every move still names its feed.
     for (const move of helicalMoves) {
-      expect(move).toContain('F1200');
+      const feed = Number(/ F(\d+)/.exec(move)?.[1]);
+      expect(feed).toBeGreaterThanOrEqual(300);
+      expect(feed).toBeLessThanOrEqual(1200);
     }
+    // The flat lap that trues the hole is cut at the cutting feed.
+    expect(pinSection).toMatch(/^G1 X[-\d.]+ Y[-\d.]+ F1200$/m);
   });
 
   it('9. withoutMeshData strips all mesh vertex buffers and compileToMJCF recognises baseRenderVertices as baked', () => {

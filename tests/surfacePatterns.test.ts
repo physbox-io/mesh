@@ -52,7 +52,9 @@ describe('every surface pattern', () => {
         }
       });
 
-      it('actually has a pattern in it at its own defaults', () => {
+      // A pattern that has to fetch something first (text's font) is blank
+      // until it has; tests/textPattern.test.ts covers it with a font.
+      it.skipIf(!!spec.prepare)('actually has a pattern in it at its own defaults', () => {
         // The failure this catches is silent: a diverged or dead field
         // normalises to a flat board, which carves as nothing at all.
         const grid = spec.build(96, 40, extent, spec.defaults);

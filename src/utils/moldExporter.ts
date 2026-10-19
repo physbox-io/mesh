@@ -666,8 +666,10 @@ function buildHalf(
   for (let r = 0; r < cellRows; r++) {
     for (let c = 0; c < cellCols; c++) {
       const i00 = r * grid.cols + c;
+      // All four corners, not any: a cell with a corner of no thickness has
+      // its top and bottom meet there, and the welded mold comes out open.
       cellSolid[r * cellCols + c] =
-        solid[i00] || solid[i00 + 1] || solid[i00 + grid.cols] || solid[i00 + grid.cols + 1] ? 1 : 0;
+        solid[i00] && solid[i00 + 1] && solid[i00 + grid.cols] && solid[i00 + grid.cols + 1] ? 1 : 0;
     }
   }
   const triangles: Triangle3D[] = [];
