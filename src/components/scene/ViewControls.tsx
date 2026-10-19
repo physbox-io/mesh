@@ -1,4 +1,4 @@
-import { Box, Grid3x3, Aperture } from 'lucide-react';
+import { Box, Grid3x3, Aperture, Shapes } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 import { useStore } from '../../store/useStore';
 import { useViewQuality } from '../../store/viewQualityStore';
@@ -7,6 +7,8 @@ import { useViewQuality } from '../../store/viewQualityStore';
 export function ViewControls() {
   const pathTrace = useViewQuality(s => s.pathTrace);
   const setPathTrace = useViewQuality(s => s.setPathTrace);
+  const showColliders = useViewQuality(s => s.showColliders);
+  const setShowColliders = useViewQuality(s => s.setShowColliders);
   const {
     cameraView, setCameraView,
     dimsEnabled, setDimsEnabled, cameraOffAxis,
@@ -96,6 +98,18 @@ export function ViewControls() {
       >
         <Box className="w-3 h-3" />
         Edges
+      </button>
+      <button
+        onClick={() => setShowColliders(!showColliders)}
+        title="Outline what the physics actually collides: the convex pieces a hollow shape is broken into, and any hidden proxy geoms. A piece bridging a slot shows up at a glance."
+        className={`px-2.5 py-1 rounded text-[10px] font-bold tracking-wide transition-all cursor-pointer flex items-center gap-1 ${
+          showColliders
+            ? 'bg-rose-500 text-white shadow-xs'
+            : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+        }`}
+      >
+        <Shapes className="w-3 h-3" />
+        Colliders
       </button>
       <button
         onClick={() => setPathTrace(!pathTrace)}

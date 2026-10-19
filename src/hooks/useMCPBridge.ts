@@ -6,6 +6,7 @@
 import { useEffect } from 'react';
 import { getStoredAuthToken } from '../utils/apiClient';
 import { tabSession } from '../utils/tabSession';
+import { useViewQuality } from '../store/viewQualityStore';
 import { summarizeTrajectory } from '../utils/trajectorySummary';
 import { authoredQuat, orientationOf } from '../utils/bodyOrientation';
 import { useStore, getPhysicsWorkerClient } from '../store/useStore';
@@ -4006,6 +4007,15 @@ export function useMCPBridge() {
            * frames of empty floor, with the model sitting in the scene the whole
            * time.
            */
+          // The collider overlay, for this frame only: switched, given two
+          // frames to mount and track its bodies, and put back afterwards.
+          const viewQuality = useViewQuality.getState();
+          const restoreColliders = viewQuality.showColliders;
+          if (typeof msg.showColliders === 'boolean' && msg.showColliders !== restoreColliders) {
+            viewQuality.setShowColliders(msg.showColliders);
+            await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+          }
+
           const scene = win._physics_scene;
           const camera = win._physics_camera;
           // The EffectComposer (ambient occlusion) owns the render loop once it's
@@ -4029,6 +4039,9 @@ export function useMCPBridge() {
           }
 
           const dataUrl = gl.domElement.toDataURL('image/png');
+          if (useViewQuality.getState().showColliders !== restoreColliders) {
+            useViewQuality.getState().setShowColliders(restoreColliders);
+          }
           return {
             ok: true,
             dataUrl,

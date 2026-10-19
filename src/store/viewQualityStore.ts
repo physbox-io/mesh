@@ -31,6 +31,9 @@ interface ViewQualityState {
   setHiRes: (hiRes: boolean) => void;
   pathTrace: boolean;
   setPathTrace: (pathTrace: boolean) => void;
+  /** Draw what the contact solver collides: convex pieces and proxy geoms. Never remembered. */
+  showColliders: boolean;
+  setShowColliders: (show: boolean) => void;
 }
 
 export const useViewQuality = create<ViewQualityState>((set) => ({
@@ -45,6 +48,8 @@ export const useViewQuality = create<ViewQualityState>((set) => ({
   },
   pathTrace: false,
   setPathTrace: (pathTrace) => set({ pathTrace }),
+  showColliders: false,
+  setShowColliders: (showColliders) => set({ showColliders }),
 }));
 
 /**

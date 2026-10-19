@@ -17,6 +17,7 @@ import { useStore } from '../../store/useStore';
 import { useOrbitEnable } from './useOrbitEnable';
 import { isGizmoBusy } from './gizmoBusy';
 import { CsgNegativeGhosts } from './CsgGhosts';
+import { ColliderOverlay } from './ColliderOverlay';
 import { FeatureEdges } from './FeatureEdges';
 import { EDGE_THRESHOLD_MESH, EDGE_THRESHOLD_PRIMITIVE, wedgeGeometry } from './edgeView';
 import { dentKey, useDentStore } from '../../store/dentStore';
@@ -1612,6 +1613,7 @@ export const SceneVisuals = React.memo(function SceneVisuals({ model, data, mujo
   // stay in the model, and in knownGeomNames above, so the implicit pass does
   // not draw them back in as unexplained geoms.
   const hiddenNodeIds = useStore((state) => state.hiddenNodeIds);
+  const showColliders = useViewQuality((state) => state.showColliders);
   const geoms = useMemo(() => {
     if (!sceneGraph) return [];
     const hidden = new Set(hiddenNodeIds);
@@ -1775,6 +1777,7 @@ export const SceneVisuals = React.memo(function SceneVisuals({ model, data, mujo
             not drawn twice while it is being edited. */}
         <PulleyRopesRenderer model={model} data={data} mujoco={mujoco} sceneGraph={sceneGraph} />
         <CsgNegativeGhosts model={model} data={data} mujoco={mujoco} sceneGraph={sceneGraph} selectedNodeId={selectedNodeId} />
+        {showColliders && <ColliderOverlay model={model} data={data} mujoco={mujoco} sceneGraph={sceneGraph} />}
         <MouseDragForceRenderer model={model} data={data} mujoco={mujoco} />
         <CurveControlHandles />
         <PrintAnalysisOverlay activeSpotId={activeWeakSpot?.id} onSelectSpot={setActiveWeakSpot} />
