@@ -15,7 +15,8 @@ import { webSerialManager } from '../utils/webSerialManager';
 import { formatDuration } from '../utils/timeEstimate';
 import { NumberInput } from '@physbox-io/ui';
 import { useStore } from '../store/useStore';
-import { AddSimulationButton, JobOverrides, JobPauseBanner, JobPreflight, JobProgress, JobResumeBanner, JobTransport } from './MachineJobControls';
+import { AddSimulationButton, JobOverrides, JobPreflight, JobProgress, JobResumeBanner, JobTransport } from './MachineJobControls';
+import { InlineJobPause } from './JobPauseModal';
 import { MachineFaultBanner } from './MachineFaultBanner';
 import { ToolpathView } from './ToolpathView';
 import {
@@ -722,7 +723,7 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
             )}
 
             <MachineFaultBanner machineState={machineState} />
-            <JobPauseBanner machineState={machineState} resumeLabel="Resume Cut (Cycle Start)" />
+            <InlineJobPause machineState={machineState} resumeLabel="Resume Cut (Cycle Start)" />
             <JobResumeBanner machineState={machineState} />
             <JobProgress machineState={machineState} />
             <JobOverrides machineState={machineState} />

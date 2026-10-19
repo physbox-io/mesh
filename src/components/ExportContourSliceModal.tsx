@@ -13,7 +13,8 @@ import { NumberInput } from '@physbox-io/ui';
 import { useStore } from '../store/useStore';
 import { MAX_STOCK_PLAN_MM, MAX_STOCK_THICKNESS_MM, MIN_STOCK_MM } from '../utils/stockSettings';
 import { useSettled } from '../hooks/useSettled';
-import { AddSimulationButton, JobOverrides, JobPauseBanner, JobPreflight, JobProgress, JobResumeBanner, JobTransport } from './MachineJobControls';
+import { AddSimulationButton, JobOverrides, JobPreflight, JobProgress, JobResumeBanner, JobTransport } from './MachineJobControls';
+import { InlineJobPause } from './JobPauseModal';
 import { MachineFaultBanner } from './MachineFaultBanner';
 import { formatDuration } from '../utils/timeEstimate';
 import {
@@ -1002,7 +1003,7 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                   the Resume and E-Stop it is asking about — so a machine
                   stopped mid-job said so in one place and offered the way out
                   of it in another. */}
-              <JobPauseBanner
+              <InlineJobPause
                 machineState={machineState}
                 resumeLabel="Resume Next Sheet (Cycle Start)"
                 showZTools={machineMode === 'cnc'}

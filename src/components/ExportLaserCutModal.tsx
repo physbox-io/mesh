@@ -12,7 +12,8 @@ import { webSerialManager, type MachineState } from '../utils/webSerialManager';
 import { NumberInput } from '@physbox-io/ui';
 import { useStore } from '../store/useStore';
 import { useSettled } from '../hooks/useSettled';
-import { AddSimulationButton, JobOverrides, JobPauseBanner, JobPreflight, JobProgress, JobResumeBanner, JobTransport } from './MachineJobControls';
+import { AddSimulationButton, JobOverrides, JobPreflight, JobProgress, JobResumeBanner, JobTransport } from './MachineJobControls';
+import { InlineJobPause } from './JobPauseModal';
 import { MachineFaultBanner } from './MachineFaultBanner';
 import { formatDuration } from '../utils/timeEstimate';
 import {
@@ -1314,7 +1315,7 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                   the Resume and E-Stop it is asking about — so a machine
                   stopped mid-job said so in one place and offered the way out
                   of it in another. */}
-              <JobPauseBanner
+              <InlineJobPause
                 machineState={machineState}
                 resumeLabel="Resume Job (Cycle Start)"
                 showZTools={machineMode === 'cnc'}

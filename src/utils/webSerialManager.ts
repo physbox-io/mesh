@@ -1877,6 +1877,11 @@ class WebSerialManager extends GrblMachine<MachineState> {
     }
   }
 
+  /** Whether the loaded job is for a laser, for UI that has no export modal to ask. */
+  public isLaserJob(): boolean {
+    return this.jobIsLaser();
+  }
+
   /**
    * Whether the job is for a laser: the caller's word when it has one, then
    * `$32` laser mode, then a program that never commands a Z.

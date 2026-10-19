@@ -11,7 +11,8 @@ import { webSerialManager } from '../utils/webSerialManager';
 import { formatDuration } from '../utils/timeEstimate';
 import { NumberInput } from '@physbox-io/ui';
 import { useStore } from '../store/useStore';
-import { AddSimulationButton, JobOverrides, JobPauseBanner, JobPreflight, JobProgress, JobResumeBanner, JobTransport } from './MachineJobControls';
+import { AddSimulationButton, JobOverrides, JobPreflight, JobProgress, JobResumeBanner, JobTransport } from './MachineJobControls';
+import { InlineJobPause } from './JobPauseModal';
 import { MachineFaultBanner } from './MachineFaultBanner';
 import { ToolpathView } from './ToolpathView';
 import {
@@ -645,7 +646,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
             {/* The pause prompt belongs with the machine, not a scroll above
                 it: a carve stopped for its tool change said so in one place and
                 offered the way out of it in another. */}
-            <JobPauseBanner machineState={machineState} resumeLabel="Resume Carve (Cycle Start)" />
+            <InlineJobPause machineState={machineState} resumeLabel="Resume Carve (Cycle Start)" />
 
             {/* A relief is the longest job this app produces and the one that
                 hurts most to restart from scratch. */}

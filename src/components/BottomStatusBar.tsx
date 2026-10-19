@@ -18,6 +18,7 @@ import type { SceneNode } from '../types/scene';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { useModifier } from '../hooks/useModifier';
 import { CastPrepGuardModal } from './CastPrepGuardModal';
+import { useJobPause } from '../store/jobPauseStore';
 
 /**
  * What the app is in the middle of, said in one phrase.
@@ -369,6 +370,7 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
 
   const running = machineState.status === 'RUNNING' || machineState.status.startsWith('PAUSED');
   const paused = machineState.status.startsWith('PAUSED');
+  const showPause = useJobPause((st) => st.show);
   const parked = machineState.status === 'PAUSED_PARKED';
   // The same gate the job panel's banner applies: a new bit, and no Z datum for it yet.
   const needsReZero = machineState.status === 'PAUSED_TOOL' && machineState.needsZZero;
@@ -760,9 +762,13 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
                 change is an instruction, and it is no use only in a panel the
                 operator has closed. */}
             {machineState.pauseMessage && (
-              <span className="text-amber-600 dark:text-amber-400 truncate max-w-[22rem]">
+              <button
+                onClick={showPause}
+                title="Open the pause dialog"
+                className="text-amber-600 dark:text-amber-400 truncate max-w-[22rem] hover:underline cursor-pointer"
+              >
                 {machineState.pauseMessage}
-              </span>
+              </button>
             )}
             <button
               onClick={() => void (paused ? webSerialManager.resumeJob() : webSerialManager.pauseJob())}

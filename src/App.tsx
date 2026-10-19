@@ -13,6 +13,7 @@ import { AppDialogs } from './components/AppDialogs';
 import { useVoltLink } from './hooks/useVoltLink';
 import { JobRestoreModal } from './components/JobRestoreModal';
 import { JobSucceededModal } from './components/JobSucceededModal';
+import { JobPauseModal } from './components/JobPauseModal';
 import { PresetSaveNotice } from './components/PresetSaveNotice';
 import { useEscapeToClose } from './hooks/useEscapeToClose';
 import { usePanels } from './store/panelsStore';
@@ -134,6 +135,8 @@ function App() {
       <JobRestoreModal />
       {/* A job that ran to its last line, wherever it was started from. */}
       <JobSucceededModal />
+      {/* A job stopped for a tool or sheet change, over whatever is open. */}
+      <JobPauseModal />
       <PresetSaveNotice />
     </div>
   );
