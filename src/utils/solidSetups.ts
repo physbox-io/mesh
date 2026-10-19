@@ -489,3 +489,10 @@ export function generateSetups(scene: SceneGraph, opts: SolidMachiningOptions, s
     totalCutDistanceMm: setups.reduce((t, s) => t + s.totalCutDistanceMm, 0),
   };
 }
+
+/** A planned job's setups as Add Simulation takes them; undefined for a one- or two-sided job. */
+export function simulationSetups(
+  result: Pick<SolidMachiningResult, 'setups'>
+): { gcode: string; rotation: number[]; translation: [number, number, number]; stock: SolidSetupResult['stock'] }[] | undefined {
+  return result.setups?.map((s) => ({ gcode: s.gcode, rotation: s.rotation, translation: s.translation, stock: s.stock }));
+}

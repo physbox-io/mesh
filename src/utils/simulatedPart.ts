@@ -11,6 +11,7 @@
 
 import { simulateMilling, simulationCellMm, type MoveCut, type SimTool } from './cutSimulation';
 import { buildSimulationMesh, type HeightGrid } from './simulationMesh';
+import { cutSetups, meshField, type SimulationSetup } from './multiSetupMesh';
 import type { CutterShape, ReliefCarveOptions, StockTransform } from './reliefCarveExporter';
 import type { PartFootprint } from './solidMachiningExporter';
 import type { SceneGeom, SceneNode } from '../types/scene';
@@ -42,6 +43,13 @@ export interface SimulationJobOptions {
    * so a round part is measured without the stock in the corners of its box.
    */
   measureMask?: PartFootprint;
+  /**
+   * Every setup of a part machined from several faces, each with its frame.
+   * When any of them stands the block on a side, the part is the region every
+   * setup leaves (`multiSetupMesh.ts`) and `gcode` and `gcodeB` are not read.
+   * The top and the flip alone go the way they always have.
+   */
+  setups?: SimulationSetup[];
 }
 
 export interface SimulationJobResult {
@@ -110,7 +118,49 @@ export function simulateStock(
   return { grid: { ...a, top: a.heights, bottom, widthMm: o.widthMm, depthMm: o.depthMm }, cuts };
 }
 
+/** Whether a setup stands the block on a side, which a top and bottom height map cannot describe. */
+const onASide = (s: SimulationSetup) => Math.abs(Math.abs(s.rotation[8]) - 1) > 1e-9;
+
+/** Several setups, one of them on a side: the region all of them leave. */
+function runFieldJob(o: SimulationJobOptions, setups: SimulationSetup[], onProgress?: (fraction: number) => void): SimulationJobResult {
+  const stock = { widthMm: o.widthMm, depthMm: o.depthMm, thicknessMm: o.thicknessMm };
+  const cut = cutSetups(setups, o.tools, o.initialTool, stock, o.cellMm, onProgress ? (f) => onProgress(f * 0.8) : undefined);
+  const mesh = meshField(cut.field, stock, { minCellMm: cut.heights[0]?.cell, maxTriangles: o.maxTriangles });
+  let measuredVolumeMm3: number | undefined;
+  if (o.measureRect || o.measureMask) {
+    const r = o.measureRect ?? { minX: -Infinity, minY: -Infinity, maxX: Infinity, maxY: Infinity };
+    const m = o.measureMask;
+    measuredVolumeMm3 = mesh.measure((x, y) => {
+      if (x < r.minX || x > r.maxX || y < r.minY || y > r.maxY) return false;
+      if (!m) return true;
+      const c = Math.round((x - m.minX) / (m.stepX || 1)), j = Math.round((y - m.minY) / (m.stepY || 1));
+      return c >= 0 && j >= 0 && c < m.cols && j < m.rows && m.mask[j * m.cols + c] === 1;
+    });
+  }
+  onProgress?.(1);
+  const rapids = cut.cuts.filter((c) => c.rapid);
+  return {
+    positions: mesh.positions,
+    faces: mesh.faces,
+    cellMm: cut.heights[0]?.cell ?? mesh.cellMm,
+    toleranceMm: mesh.cellMm / 2,
+    drawnCellMm: mesh.cellMm,
+    volumeMm3: mesh.volumeMm3,
+    stockVolumeMm3: o.widthMm * o.depthMm * o.thicknessMm,
+    rapidCuts: rapids.length,
+    deepestRapidMm: rapids.reduce((mx, c) => Math.max(mx, c.removedMm), 0),
+    measuredVolumeMm3,
+  };
+}
+
 export function runSimulationJob(o: SimulationJobOptions, onProgress?: (fraction: number) => void): SimulationJobResult {
+  if (o.setups && o.setups.some(onASide)) return runFieldJob(o, o.setups, onProgress);
+  if (o.setups && o.setups.length > 0) {
+    // Only the top and the flip: the height-map pair has always described those exactly.
+    const flip = o.setups.find((s) => s.rotation[8] < 0);
+    const top = o.setups.find((s) => s.rotation[8] > 0);
+    o = { ...o, gcode: top?.gcode ?? o.gcode, gcodeB: flip?.gcode, setups: undefined };
+  }
   // The mesh is a fraction of the time; the cutting is the long part.
   const { grid, cuts } = simulateStock(o, onProgress ? (f) => onProgress(f * 0.8) : undefined);
   const mesh = buildSimulationMesh(grid, { maxTriangles: o.maxTriangles });

@@ -27,6 +27,7 @@ import { toolingOnly, useBedProbe, useCarveTooling, useSettled, type SetTooling 
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { useAddSimulation } from '../hooks/useAddSimulation';
 import { reliefSimulationTools } from '../utils/simulatedPart';
+import { simulationSetups } from '../utils/solidSetups';
 
 interface Props {
   isOpen: boolean;
@@ -250,6 +251,8 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
       job: {
         gcode: a.gcode,
         gcodeB: b?.gcode,
+        // A plan that turns the block onto its sides is simulated setup by setup.
+        setups: simulationSetups(result),
         widthMm: result.stock.widthMm,
         depthMm: result.stock.depthMm,
         thicknessMm: result.stock.thicknessMm,
@@ -263,7 +266,9 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
       label: 'Solid part',
       placement: where,
       details: [
-        result.sides.length === 2 ? 'Two setups, side B flipped left to right' : 'One setup',
+        result.setups && result.setups.length > 0
+          ? result.plan?.text ?? `${result.setups.length} setups`
+          : result.sides.length === 2 ? 'Two setups, side B flipped left to right' : 'One setup',
         settled.roughingEnabled ? `Roughing: ${roughTool}` : null,
         `Finishing: ${finishTool}`,
         `Estimated ${formatDuration(result.estimatedTimeSeconds)} on the machine`,

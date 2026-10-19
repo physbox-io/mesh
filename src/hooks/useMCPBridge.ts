@@ -64,6 +64,7 @@ import {
 import { DEFAULT_LASER_OPTIONS, type LaserCutResult } from '../utils/laserCutExporter';
 import { DEFAULT_CONTOUR_OPTIONS, collectSceneTriangles, type ContourSliceResult } from '../utils/contourSliceExporter';
 import { reliefSimulationTools } from '../utils/simulatedPart';
+import { simulationSetups } from '../utils/solidSetups';
 import { contourSheetParts, laserSheetParts, laserStockTransform } from '../utils/sheetSimulation';
 import { addSimulationToScene } from './useAddSimulation';
 import { lastReliefOptions } from '../utils/lastReliefOptions';
@@ -3587,6 +3588,7 @@ export function useMCPBridge() {
               job: {
                 gcode: result.sides[0].gcode,
                 gcodeB: result.sides[1]?.gcode,
+                setups: simulationSetups(result),
                 widthMm: result.stock.widthMm,
                 depthMm: result.stock.depthMm,
                 thicknessMm: result.stock.thicknessMm,
@@ -3605,6 +3607,7 @@ export function useMCPBridge() {
             return {
               ok: true, id: added.id, name: added.name, kind: 'machining', placement,
               sides: result.sides.length,
+              setups: result.setups?.map((st) => st.upFace) ?? null,
               volumeMm3: Math.round(m.volumeMm3),
               // Inside the part's own outline, so the frame, the tabs and the
               // stock round a part that is not a rectangle are all left out.
