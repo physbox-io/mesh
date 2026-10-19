@@ -784,7 +784,8 @@ class WebSerialManager extends GrblMachine<MachineState> {
    */
   private datumSeq = 0;
   private zZeroedAt = 0;
-  private xyZeroedAt = 0;
+  private xZeroedAt = 0;
+  private yZeroedAt = 0;
   private setupEndedAt = 0;
   /** The setup the job on the wire belongs to, if it is one. */
   private runningSetup: JobSetup | null = null;
@@ -1848,7 +1849,8 @@ class WebSerialManager extends GrblMachine<MachineState> {
       if (!setup.pinsSeated) return `${which}: confirm the block is down on its pins before it runs.`;
       return null;
     }
-    if (this.xyZeroedAt <= this.setupEndedAt || this.xyZeroedAt === 0) {
+    const xy = Math.min(this.xZeroedAt, this.yZeroedAt);
+    if (xy <= this.setupEndedAt || xy === 0) {
       return `${which}: zero X and Y on the spot this setup locates from first. The last setup's X and Y are on a corner that has moved.`;
     }
     return null;
@@ -1860,8 +1862,60 @@ class WebSerialManager extends GrblMachine<MachineState> {
     this.zZeroedAt = ++this.datumSeq;
   }
 
-  private recordXYDatum(): void {
-    this.xyZeroedAt = ++this.datumSeq;
+  private recordXYDatum(axes: { x?: boolean; y?: boolean } = { x: true, y: true }): void {
+    const at = ++this.datumSeq;
+    if (axes.x) this.xZeroedAt = at;
+    if (axes.y) this.yZeroedAt = at;
+  }
+
+  /**
+   * Says where the tool is now, in work coordinates, for any of X, Y and Z:
+   * `G10 L20 P1`, the same persistent G54 offset the zeroing buttons write.
+   *
+   * How a turned block is located on its own faces: the bit's side is brought
+   * up to a face on a slip of paper and that axis is set to minus the bit's
+   * radius (the centre stands a radius outside the face), and Z on the top.
+   * `paperMm` is the feeler's thickness, added on the side away from the work.
+   */
+  public async setWorkPosition(
+    at: { x?: number; y?: number; z?: number },
+    paperMm = 0
+  ): Promise<{ success: boolean; message: string }> {
+    this.refuseWhileJobHoldsMachine('set the work position');
+    if (!this.state.connected) return { success: false, message: 'Not connected to a machine.' };
+    const words: string[] = [];
+    // The paper holds the bit further out from the face it is touching.
+    if (at.x !== undefined) words.push(`X${(at.x + Math.sign(at.x) * paperMm).toFixed(3)}`);
+    if (at.y !== undefined) words.push(`Y${(at.y + Math.sign(at.y) * paperMm).toFixed(3)}`);
+    if (at.z !== undefined) words.push(`Z${(at.z + paperMm).toFixed(3)}`);
+    if (words.length === 0) return { success: false, message: 'No axis given.' };
+    await this.sendAndWait('G21 G90');
+    await this.sendAndWait(`G10 L20 P1 ${words.join(' ')}`);
+    if (at.z !== undefined) {
+      this.recordZDatum();
+      this.jobPeakWorkZ = null;
+    }
+    if (at.x !== undefined || at.y !== undefined) this.recordXYDatum({ x: at.x !== undefined, y: at.y !== undefined });
+    return { success: true, message: `Work position set: ${words.join(' ')}.` };
+  }
+
+  /**
+   * Spindle off and the tool lifted as high as is safe, for turning the block
+   * between setups. Only on a homed machine, where the top of travel is known;
+   * otherwise it says so and the operator jogs up by hand.
+   */
+  public async parkHigh(): Promise<{ success: boolean; message: string }> {
+    this.refuseWhileJobHoldsMachine('park the spindle');
+    if (!this.state.connected) return { success: false, message: 'Not connected to a machine.' };
+    await this.sendAndWait('M5');
+    if (!this.state.hasHomed || this.topOfZTravel() === null) {
+      return {
+        success: false,
+        message: 'The machine has not homed, so the top of its travel is not known. Spindle stopped; jog Z up by hand.',
+      };
+    }
+    await this.retractClearOfWork();
+    return { success: true, message: 'Spindle stopped and the tool lifted to the top of its travel.' };
   }
 
   /** The last line was acknowledged: the job ran to its end. */

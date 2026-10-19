@@ -15,7 +15,8 @@ type Internals = {
   runningSetup: JobSetup | null;
   onJobFinished: () => Record<string, unknown>;
   zZeroedAt: number;
-  xyZeroedAt: number;
+  xZeroedAt: number;
+  yZeroedAt: number;
   setupEndedAt: number;
   datumSeq: number;
 };
@@ -39,7 +40,7 @@ describe('a setup after the first', () => {
     mgr.state.status = 'IDLE';
     mgr.state.lastError = undefined;
     mgr.state.needsZZero = false;
-    mgr.zZeroedAt = mgr.xyZeroedAt = mgr.setupEndedAt = mgr.datumSeq = 0;
+    mgr.zZeroedAt = mgr.xZeroedAt = mgr.yZeroedAt = mgr.setupEndedAt = mgr.datumSeq = 0;
     mgr.transport = {
       label: 'Fake GRBL',
       async open() {},
@@ -112,6 +113,32 @@ describe('a setup after the first', () => {
     // A fresh connection: nothing zeroed, nothing ended.
     const refuse = (mgr as unknown as { refuseSetup: (s: JobSetup, o: string, r: boolean) => string | null }).refuseSetup;
     expect(refuse.call(mgr, sequence(2), 'ui', false)).toMatch(/Z zero/);
+  });
+
+  it('takes a turned block’s datum from touching its faces with the side of the bit', async () => {
+    const sent: string[] = [];
+    mgr.transport!.writeLine = async (l: string) => {
+      sent.push(l.trim());
+      setTimeout(() => mgr.parseLine('ok'), 0);
+    };
+    finishSetup(sequence(1));
+    // A 6 mm bit on 0.1 mm paper: its centre stands 3.1 mm off each face.
+    await webSerialManager.setWorkPosition({ x: -3 }, 0.1);
+    await webSerialManager.setWorkPosition({ y: -3 }, 0.1);
+    await webSerialManager.setWorkPosition({ z: 0 }, 0.1);
+    expect(sent).toContain('G10 L20 P1 X-3.100');
+    expect(sent).toContain('G10 L20 P1 Y-3.100');
+    expect(sent).toContain('G10 L20 P1 Z0.100');
+    const refuse = (mgr as unknown as { refuseSetup: (s: JobSetup, o: string, r: boolean) => string | null }).refuseSetup;
+    expect(refuse.call(mgr, sequence(2), 'ui', false)).toBeNull();
+  });
+
+  it('wants both X and Y, not one of them twice', async () => {
+    finishSetup(sequence(1));
+    await webSerialManager.zeroZHere();
+    await webSerialManager.setWorkPosition({ x: -3 });
+    const refuse = (mgr as unknown as { refuseSetup: (s: JobSetup, o: string, r: boolean) => string | null }).refuseSetup;
+    expect(refuse.call(mgr, sequence(2), 'ui', false)).toMatch(/zero X and Y/);
   });
 
   it('leaves the first setup and ordinary jobs alone', () => {
