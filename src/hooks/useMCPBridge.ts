@@ -523,6 +523,8 @@ function collisionReport(node: SceneNode): Record<string, unknown> {
     return {
       collidesAs: `${colliders.length} convex pieces`,
       ...(node.collisionSolidity !== undefined ? { solidity: node.collisionSolidity } : {}),
+      // Slots and recesses a piece fills in, which the piece count hides.
+      ...(node.collisionCavities?.length ? { cavitiesFilled: node.collisionCavities } : {}),
       ...(node.collisionWarning ? { collisionWarning: node.collisionWarning } : {}),
     };
   }
@@ -1147,6 +1149,7 @@ export const fillBodyDefaults = (b: RawNode, parentMoves: boolean | null = null)
     // csgCollision, which is still accepted above so older callers keep working.
     ...(b.collision      !== undefined ? { collision: b.collision }           : {}),
     ...(b.collisionHulls !== undefined ? { collisionHulls: b.collisionHulls } : {}),
+    ...(b.collisionResolution !== undefined ? { collisionResolution: b.collisionResolution } : {}),
     ...(b.collisionMass  !== undefined ? { collisionMass: b.collisionMass }   : {}),
     ...(b.csgSectors   !== undefined ? { csgSectors: b.csgSectors }     : {}),
     ...(b.csgHoleAxis  !== undefined ? { csgHoleAxis: b.csgHoleAxis }   : {}),
@@ -4253,6 +4256,7 @@ export function useMCPBridge() {
               csgEnabled:    'boolean — evaluate this body\'s geoms as a boolean program (see the geom `csg` field). Inferred automatically when any geom is marked difference/intersection, so you rarely need to set it. The primitives remain the source of truth; the mesh is regenerated whenever they change.',
               edgeRounds:    'array — rounded (fillet) and bevelled (chamfer) edges, each { mode: "fillet"|"chamfer", size (m), edges }. Use declarative `roundEdges` on the body or `physics_round_edges` rather than authoring raw edge geometry by hand.',
               collision:     `'auto'|'hull'|'decompose'|'primitives' — how THIS BODY collides, mesh or boolean. MuJoCo collides a mesh as its CONVEX HULL, which fills in any cavity, so a cup, bowl, open-top box, funnel or housing would be solid to contact. 'auto' (the default) measures SOLIDITY — true volume over hull volume — and breaks the shape into convex pieces when it is below ~0.92. A box or sphere is 1.0 and keeps its hull, which is exact and cheap; a cup is around 0.3 and gets decomposed, so a ball dropped in lands INSIDE it. 'hull' forces the old filled-in behaviour. 'decompose' forces the split even for a mesh auto declined (under ~24 triangles, or over ~150k). 'primitives' is boolean-only: the authored positives collide and the mesh is visual. Runs in the background and is cached against the mesh, so it costs nothing until the shape changes. NOTE a decomposed hollow body weighs its true volume rather than its hull's — often a third as much; set mass or collisionMass if you wanted the heavier figure.`,
+              collisionResolution: `number — V-HACD voxel count for this body's decomposition, 10,000 to 400,000. Default 25,000, with one automatic retry at 100,000 and 32 pieces when the first result fills a cavity in (physics_get_scene_summary reports any left as cavitiesFilled). Raise it for a narrow slot or groove that still comes out solid; it costs decomposition time, not simulation time.`,
               collisionHulls: `number — how many convex pieces to break this body into. Default: 8 to 16, scaled by how concave it is. Contact cost between two decomposed bodies is quadratic in this, and accuracy is flat past about 16, so raise it only for a shape whose cavity is genuinely being missed.`,
               collisionMass: `number (kg) — total mass shared across the convex pieces by volume, as csgMass is for a boolean body.`,
               csgCollision:  `DEPRECATED, use 'collision'. Still read, so older scenes behave as they always did. 'auto'|'decompose'|'primitives'|'hull' — how the boolean result collides.`,

@@ -4,6 +4,22 @@ import { collisionModeOf } from '../../utils/csg';
 import { collidersAreStale, solidMeshGeoms } from '../../utils/convexDecomposition';
 import type { SceneNode } from '../../types/scene';
 
+/** Decomposition detail, as voxel count and piece budget. Standard leaves both to the defaults. */
+const DETAIL = {
+  standard: { collisionResolution: undefined, collisionHulls: undefined },
+  fine: { collisionResolution: 100_000, collisionHulls: 32 },
+  finest: { collisionResolution: 300_000, collisionHulls: 48 },
+} as const;
+
+function detailOf(node: SceneNode): keyof typeof DETAIL | 'custom' {
+  for (const [name, d] of Object.entries(DETAIL)) {
+    if (node.collisionResolution === d.collisionResolution && node.collisionHulls === d.collisionHulls) {
+      return name as keyof typeof DETAIL;
+    }
+  }
+  return 'custom';
+}
+
 /*
  * Collision — how any mesh body reaches MuJoCo's contact solver.
  * A boolean body's equivalent lives in Boolean Modifiers below,
@@ -37,6 +53,22 @@ export function CollisionCard({ node }: { node: SceneNode }) {
         <option value="decompose">Convex pieces</option>
         <option value="hull">Convex hull</option>
       </select>
+      {mode !== 'hull' && (
+        <label className="flex items-center justify-between gap-2 text-[11px] text-slate-600">
+          Detail
+          <select
+            value={detailOf(node)}
+            onChange={(e) => updateNode(node.id, DETAIL[e.target.value as keyof typeof DETAIL])}
+            className="px-2 py-1 border border-slate-200 rounded text-xs bg-white text-slate-700 outline-none focus:border-blue-500 cursor-pointer"
+            title="How finely the shape is broken up. Finer sees narrower slots and grooves, and takes longer to work out. It costs nothing while the simulation runs."
+          >
+            <option value="standard">Standard</option>
+            <option value="fine">Fine</option>
+            <option value="finest">Finest</option>
+            {detailOf(node) === 'custom' && <option value="custom">Custom</option>}
+          </select>
+        </label>
+      )}
       <p className="text-[10px] text-slate-400 leading-snug">
         {colliders.length > 0
           ? `Colliding as ${colliders.length} convex pieces, so anything hollow in this shape is really hollow — a ball dropped into it lands inside.`

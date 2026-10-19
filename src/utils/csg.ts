@@ -2461,7 +2461,13 @@ export async function evaluateNodeCsg(node: SceneNode): Promise<CsgResult | null
     try {
       const { hullBudget, solidityOf } = await import('./convexDecomposition');
       const { decomposeMeshOffThread } = await import('./vhacdWorkerClient');
-      const pieces = await decomposeMeshOffThread(centeredZup, compiled.faces, { maxHulls: hullBudget(solidityOf(volume, hull)) });
+      // The body's own overrides, which this path used to ignore.
+      const pieces = await decomposeMeshOffThread(centeredZup, compiled.faces, {
+        maxHulls: hullBudget(solidityOf(volume, hull), node.collisionHulls),
+        ...(node.collisionResolution !== undefined
+          ? { voxelResolution: Math.max(10_000, Math.min(400_000, Math.round(node.collisionResolution))) }
+          : {}),
+      });
       const usable = usableColliderHulls(pieces);
       if (usable.length >= 2) {
         colliders = hullsToColliderGeoms(usable, baseName, colliderTemplateOf(template, rgba), totalMass);

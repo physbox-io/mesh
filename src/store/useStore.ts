@@ -5103,6 +5103,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     node.collisionHash = result.hash;
     if (result.geoms.length > 0) node.collisionDecomposed = true; else delete node.collisionDecomposed;
     node.collisionSolidity = +result.verdict.solidity.toFixed(4);
+    if (result.cavities?.length) node.collisionCavities = result.cavities; else delete node.collisionCavities;
     if (result.warning) node.collisionWarning = result.warning; else delete node.collisionWarning;
     delete node.collisionError;
     set({ sceneGraph: newScene });

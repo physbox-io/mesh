@@ -31,6 +31,7 @@ import {
   meshChecksum, meshVolumeAndCentroid, type Hull,
 } from './csg';
 import type { CollisionMode, SceneGeom, SceneNode } from '../types/scene';
+import { findFilledCavities, type FilledCavity } from './filledCavities';
 
 /**
  * Above this a mesh is convex enough that its hull is the honest answer, and
@@ -94,6 +95,8 @@ export interface ColliderResult {
   /** Total mass shared across the colliders. */
   mass: number;
   warning?: string;
+  /** Cavities the colliders still fill in, named by the collider covering each. */
+  cavities?: NonNullable<SceneNode['collisionCavities']>;
 }
 
 /** The mesh geoms of a body that are solid enough to collide with. */
@@ -257,6 +260,7 @@ export function collisionHashOf(node: SceneNode): string {
     meshes.map(g => [meshChecksum(colliderSourceOf(g)), g.pos ?? null, g.quat ?? null, g.euler ?? null]),
     collisionModeOf(node),
     node.collisionHulls ?? null,
+    node.collisionResolution ?? null,
     node.collisionMass ?? null,
     meshes.map(g => [g.mass ?? null, g.density ?? null, g.condim ?? null, g.friction ?? null, g.solref ?? null, g.solimp ?? null]),
   ]);
@@ -322,9 +326,36 @@ export async function decomposeNodeColliders(node: SceneNode): Promise<ColliderR
     };
   }
 
+  // Asked for, or left to the defaults with one finer try in reserve.
+  const tuned = node.collisionHulls !== undefined || node.collisionResolution !== undefined;
+  const resolution = node.collisionResolution !== undefined
+    ? Math.max(10_000, Math.min(400_000, Math.round(node.collisionResolution)))
+    : undefined;
+
   let hulls: Hull[];
+  let cavities: FilledCavity[] = [];
   try {
-    hulls = await decomposeMeshOffThread(verts, faces, { maxHulls: verdict.maxHulls });
+    hulls = await decomposeMeshOffThread(verts, faces, {
+      maxHulls: verdict.maxHulls,
+      ...(resolution ? { voxelResolution: resolution } : {}),
+    });
+    cavities = findFilledCavities(verts, faces, hulls);
+    // A piece bridging a slot looks healthy from the outside — "9 convex
+    // pieces" — while the slot is solid. When that is found and nobody has
+    // tuned this body, try once finer: on the oak tray 100k voxels and 32
+    // hulls cleared a filled phone groove and two filled dishes in 2.3 s.
+    if (cavities.length > 0 && !tuned) {
+      const finer = await decomposeMeshOffThread(verts, faces, {
+        maxHulls: Math.max(32, verdict.maxHulls),
+        voxelResolution: 100_000,
+      });
+      const finerCavities = findFilledCavities(verts, faces, finer);
+      const filled = (list: FilledCavity[]) => list.reduce((sum, c) => sum + c.volumeMm3, 0);
+      if (finer.length >= MIN_SURVIVING_HULLS && filled(finerCavities) < filled(cavities)) {
+        hulls = finer;
+        cavities = finerCavities;
+      }
+    }
   } catch (err) {
     // Timed out, or the worker died. A body still has to collide as something.
     return {
@@ -342,11 +373,24 @@ export async function decomposeNodeColliders(node: SceneNode): Promise<ColliderR
     };
   }
 
-  const geoms = hullsToColliderGeoms(hulls, node.name || node.id, colliderTemplateOf(source, source.rgba ?? [0.3, 0.6, 0.9, 1]), mass);
+  const baseName = node.name || node.id;
+  const geoms = hullsToColliderGeoms(hulls, baseName, colliderTemplateOf(source, source.rgba ?? [0.3, 0.6, 0.9, 1]), mass);
+  const named = cavities.map((c) => ({ ...c, coveredBy: `${baseName}_csg_col${c.coveredBy}` }));
   return {
     hash, geoms, verdict, volume, hullVolume, mass,
-    warning: massWarning(node, source, volume, hullVolume),
+    warning: cavityWarning(named) ?? massWarning(node, source, volume, hullVolume),
+    ...(named.length > 0 ? { cavities: named } : {}),
   };
+}
+
+/** Said when a decomposition still fills something in, naming where and which piece. */
+function cavityWarning(cavities: NonNullable<ColliderResult['cavities']>): string | undefined {
+  if (cavities.length === 0) return undefined;
+  const [c] = cavities;
+  const more = cavities.length > 1 ? ` (and ${cavities.length - 1} more)` : '';
+  return `A cavity about ${c.extentMm.map((v) => Math.round(v)).join(' x ')} mm around ` +
+    `(${c.centerMm.map((v) => Math.round(v)).join(', ')}) mm is filled in by ${c.coveredBy}${more}, so it is ` +
+    `solid to contact. Raise Collision Detail (collisionResolution) or the piece count (collisionHulls).`;
 }
 
 /**
