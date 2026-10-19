@@ -1326,6 +1326,8 @@ function applyPocketCut(targetId: string, spec: Record<string, any>, spotIn?: { 
   const mesh: SceneGeom = {
     name: placed.name,
     type: 'mesh',
+    // A mesh geom's size is unused, as for every other mesh geom.
+    size: [1],
     csg: 'difference',
     rgba: placed.rgba,
     renderVertices: zup,
