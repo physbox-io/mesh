@@ -9,6 +9,7 @@ import { ExportContourSliceModal } from './ExportContourSliceModal';
 import { ExportReliefCarveModal } from './ExportReliefCarveModal';
 import { ExportMoldModal } from './ExportMoldModal';
 import { ExportSolidMachiningModal } from './ExportSolidMachiningModal';
+import type { SolidMachiningOptions } from '../utils/solidMachiningExporter';
 import { ExportCastModal } from './ExportCastModal';
 import { SplitForPrintModal } from './SplitForPrintModal';
 import { TimberBreakdownModal } from './TimberBreakdownModal';
@@ -37,6 +38,8 @@ export function FabricationModals({ threeSceneRef, noteCards }: {
   const [isReliefCarveModalOpen, setIsReliefCarveModalOpen] = useState(false);
   const [isMoldModalOpen, setIsMoldModalOpen] = useState(false);
   const [isSolidModalOpen, setIsSolidModalOpen] = useState(false);
+  // What the relief dialog hands solid machining when a model has an undercut.
+  const [solidSeed, setSolidSeed] = useState<Partial<SolidMachiningOptions> | null>(null);
   const [isCastModalOpen, setIsCastModalOpen] = useState(false);
   const [isSplitModalOpen, setIsSplitModalOpen] = useState(false);
   const [isJoineryModalOpen, setIsJoineryModalOpen] = useState(false);
@@ -62,6 +65,11 @@ export function FabricationModals({ threeSceneRef, noteCards }: {
         isOpen={isReliefCarveModalOpen}
         onClose={() => setIsReliefCarveModalOpen(false)}
         scene={sceneGraph}
+        onMachineAsPart={(seed) => {
+          setIsReliefCarveModalOpen(false);
+          setSolidSeed(seed);
+          setIsSolidModalOpen(true);
+        }}
       />
 
       <ExportMoldModal
@@ -71,8 +79,12 @@ export function FabricationModals({ threeSceneRef, noteCards }: {
       />
       <ExportSolidMachiningModal
         isOpen={isSolidModalOpen}
-        onClose={() => setIsSolidModalOpen(false)}
+        onClose={() => {
+          setIsSolidModalOpen(false);
+          setSolidSeed(null);
+        }}
         scene={sceneGraph}
+        seed={solidSeed}
       />
       <ExportCastModal
         isOpen={isCastModalOpen}

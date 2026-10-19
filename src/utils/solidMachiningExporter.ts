@@ -37,7 +37,7 @@ import {
 } from './reliefCarveExporter';
 import { materialSpec, type SpindleRange } from './feedsAndSpeeds';
 import { ORIENT_MATRIX, orient, type BlockFace, type UpAxis } from './orient';
-import { generateSetups, type SetupPlanSummary, type SolidSetupResult } from './solidSetups';
+import { generateSetups, sidesAsSetups, type SetupPlanSummary, type SolidSetupResult } from './solidSetups';
 
 export type { UpAxis };
 
@@ -891,7 +891,10 @@ export function generateSolidMachining(
 ): SolidMachiningResult {
   const opts: SolidMachiningOptions = { ...DEFAULT_SOLID_OPTIONS, ...userOptions };
   if (opts.setups === undefined) return generateSolidSides(scene, opts);
-  if (opts.setups === 1 || opts.setups === 2) return generateSolidSides(scene, { ...opts, sides: opts.setups });
+  if (opts.setups === 1 || opts.setups === 2) {
+    const sided = { ...opts, sides: opts.setups };
+    return sidesAsSetups(generateSolidSides(scene, sided), sided);
+  }
   return generateSetups(scene, opts, { generateSides: generateSolidSides, orientPart, stockFor, placeInStock });
 }
 

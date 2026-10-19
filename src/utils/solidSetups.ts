@@ -496,3 +496,17 @@ export function simulationSetups(
 ): { gcode: string; rotation: number[]; translation: [number, number, number]; stock: SolidSetupResult['stock'] }[] | undefined {
   return result.setups?.map((s) => ({ gcode: s.gcode, rotation: s.rotation, translation: s.translation, stock: s.stock }));
 }
+
+/**
+ * A one- or two-sided job's sides as setups, so a caller can treat every
+ * solid job alike. The programs are the sides' own, unchanged.
+ */
+export function sidesAsSetups(result: SolidMachiningResult, opts: SolidMachiningOptions): SolidMachiningResult {
+  if (!result.success) return result;
+  const built = result.sides.map((side) => asSetup(side, result, null, opts.finishingToolDiaMm));
+  const of = built.length;
+  return {
+    ...result,
+    setups: built.map((s, i) => ({ ...s, index: i + 1, of, instructions: instructionsFor(s, i + 1) })),
+  };
+}

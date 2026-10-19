@@ -26,17 +26,23 @@ import { useExportJob } from '../utils/exportWorkerClient';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { useAddSimulation } from '../hooks/useAddSimulation';
 import { reliefSimulationTools } from '../utils/simulatedPart';
+import type { SolidMachiningOptions } from '../utils/solidMachiningExporter';
 
 interface Props {
   isOpen: boolean;
   onClose: () => void;
   scene: SceneGraph;
+  /**
+   * Opens solid machining on the same block and bits, for a model with an
+   * undercut a relief can only leave solid. Relief stays a single face.
+   */
+  onMachineAsPart?: (seed: Partial<SolidMachiningOptions>) => void;
 }
 
 /** Where a relief starts: the model at its own size if it fits the stock. */
 const RELIEF_START = { ...DEFAULT_RELIEF_OPTIONS, ...APP_RELIEF_DEFAULTS };
 
-export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene }) => {
+export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene, onMachineAsPart }) => {
   useEscapeToClose(isOpen, onClose);
   const setMachineConfigOpen = useStore((s) => s.setMachineConfigOpen);
 
@@ -565,6 +571,32 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                   <span className="leading-relaxed">{w}</span>
                 </div>
               ))}
+              {result.success && result.undercut && result.heightMode === 'model' && onMachineAsPart && (
+                <div className="flex flex-wrap items-center gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => onMachineAsPart({
+                      setups: 'auto',
+                      stockWidthMm: settled.stockWidthMm,
+                      stockDepthMm: settled.stockDepthMm,
+                      stockThicknessMm: settled.stockThicknessMm,
+                      material: settled.material,
+                      roughingEnabled: settled.roughingEnabled,
+                      roughingToolDiaMm: settled.roughingToolDiaMm,
+                      finishingToolType: settled.finishingToolType,
+                      finishingToolDiaMm: settled.finishingToolDiaMm,
+                      toolStickoutMm: settled.toolStickoutMm,
+                      holderDiaMm: settled.holderDiaMm,
+                    })}
+                    className="py-1 px-2.5 rounded-lg text-xs font-bold bg-blue-500 hover:bg-blue-600 text-slate-950 cursor-pointer"
+                  >
+                    Machine as a part instead
+                  </button>
+                  <span className="text-[11px] text-amber-800 dark:text-amber-300">
+                    Solid machining turns the block onto the faces that can reach under the overhang, and shows you each setup.
+                  </span>
+                </div>
+              )}
             </div>
           )}
 

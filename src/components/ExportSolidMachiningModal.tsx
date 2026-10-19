@@ -1,5 +1,5 @@
-import React, { useMemo, useState } from 'react';
-import { X, AlertCircle, Cpu, RefreshCw, Layers, Cuboid, Download } from 'lucide-react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { X, AlertCircle, Cpu, RefreshCw, Layers, Cuboid } from 'lucide-react';
 import type { SceneGraph } from '../types/scene';
 import { recommendReliefTooling } from '../utils/reliefCarveExporter';
 import {
@@ -7,6 +7,7 @@ import {
   sideDepthMm,
   fittingScalePercent,
   DEFAULT_SOLID_OPTIONS,
+  type SolidMachiningOptions,
   type UpAxis,
 } from '../utils/solidMachiningExporter';
 import { useExportJob } from '../utils/exportWorkerClient';
@@ -28,11 +29,15 @@ import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { useAddSimulation } from '../hooks/useAddSimulation';
 import { reliefSimulationTools } from '../utils/simulatedPart';
 import { simulationSetups } from '../utils/solidSetups';
+import { SetupCards } from './SetupCards';
+import { SetupChangeDialog } from './SetupChangeDialog';
 
 interface Props {
   isOpen: boolean;
   onClose: () => void;
   scene: SceneGraph;
+  /** Options to start from, as the relief dialog hands a model with an undercut over. */
+  seed?: Partial<SolidMachiningOptions> | null;
 }
 
 const UP_AXES: readonly (readonly [UpAxis, string])[] = [
@@ -43,6 +48,9 @@ const UP_AXES: readonly (readonly [UpAxis, string])[] = [
   ['+y', '+Y up'],
   ['-y', '−Y up'],
 ];
+
+/** The dialog plans the setups itself unless told how many. */
+const SOLID_DIALOG_DEFAULTS: SolidMachiningOptions = { ...DEFAULT_SOLID_OPTIONS, setups: 'auto' };
 
 /** Hands the browser a file to save. */
 function downloadText(text: string, filename: string) {
@@ -63,12 +71,15 @@ function downloadText(text: string, filename: string) {
  * stock, and what holds one to the other — and down the bottom, where there
  * are two programs to run instead of one.
  */
-export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, scene }) => {
+export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, scene, seed }) => {
   useEscapeToClose(isOpen, onClose);
   const setMachineConfigOpen = useStore((s) => s.setMachineConfigOpen);
-  const [side, setSide] = useState<0 | 1>(0);
-  // Side B on pins only runs once the operator says the block is down on them.
-  const [pinsSeated, setPinsSeated] = useState(false);
+  // Which setup the preview shows and the footer's button cuts.
+  const [sel, setSel] = useState(0);
+  // The setup being turned to, while its step-by-step dialog is open.
+  const [turning, setTurning] = useState<number | null>(null);
+  // With Setups on Auto, whether the planner may also choose the way up.
+  const [autoOrient, setAutoOrient] = useState(true);
 
   // Which way up and how big are not tooling, and the part's height — which
   // the feeds are derated for — depends on them, so they are kept outside the
@@ -123,7 +134,14 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
   const {
     options, setOptions, set, overrides, setOverrides, override, machineState, cuttingRateLimit,
     derived, effective, settled, pending, materialLabel, finishTool, roughTool, speedNote,
-  } = useCarveTooling(isOpen, DEFAULT_SOLID_OPTIONS, (o) => sideDepthMm(partHeight, o));
+  } = useCarveTooling(isOpen, SOLID_DIALOG_DEFAULTS, (o) => sideDepthMm(partHeight, o));
+
+  // Handed over from the relief dialog: the same block and bits, planned for setups.
+  useEffect(() => {
+    if (!isOpen || !seed) return;
+    setOptions((prev) => ({ ...prev, ...seed }));
+    setSel(0);
+  }, [isOpen, seed, setOptions]);
 
   const bed = useBedProbe(() => set('applyMeshLeveling', true));
   const { probedGrid } = bed;
@@ -139,11 +157,12 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
       client.run('solid', scene, {
         ...settled,
         ...settledPlacement,
+        autoOrient,
         motionProfile: machineState.motion,
         meshLevelGrid: probedGrid,
         applyMeshLeveling: settled.applyMeshLeveling && probedGrid !== null,
       }),
-    [scene, settled, settledPlacement, probedGrid, machineState.motion]
+    [scene, settled, settledPlacement, probedGrid, machineState.motion, autoOrient]
   );
 
   const applyRecommendedTooling = () => {
@@ -152,7 +171,7 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
     setOptions((prev) => ({
       ...prev,
       ...toolingOnly(recommendReliefTooling({
-        reliefDepthMm: result.sides[0].depthMm,
+        reliefDepthMm: result.setups?.[0]?.depthMm ?? result.sides[0].depthMm,
         planWidthMm: result.partSizeMm.x,
         planDepthMm: result.partSizeMm.y,
         material: prev.material,
@@ -176,32 +195,39 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
    * this modal renders on every status report — so the live trace was reset
    * several times a second and the view snapped back under any orbit.
    */
-  const current = result?.success ? result.sides[Math.min(side, result.sides.length - 1)] : null;
+  const setups = result?.success ? result.setups ?? [] : [];
+  const current = setups.length > 0 ? setups[Math.min(sel, setups.length - 1)] : null;
+  const turned = !!current && (current.upFace === '+x' || current.upFace === '-x' || current.upFace === '+y' || current.upFace === '-y');
   // One id per generated program, so side B is matched to the side A it follows.
   const sequenceId = useMemo(() => `solid-${Date.now().toString(36)}`, [result]);
   const previewResult = useMemo(
     () =>
       current && result?.success
-        ? { segments: current.segments, estimatedTimeSeconds: current.estimatedTimeSeconds, carveBounds: result.partBounds }
+        ? {
+            segments: current.segments,
+            estimatedTimeSeconds: current.estimatedTimeSeconds,
+            carveBounds: turned ? current.windowBounds : result.partBounds,
+          }
         : null,
-    [current, result]
+    [current, result, turned]
   );
   const previewOptions = useMemo(
     () =>
       result?.success
         ? {
             ...settled,
-            stockWidthMm: result.stock.widthMm,
-            stockDepthMm: result.stock.depthMm,
-            stockThicknessMm: result.stock.thicknessMm,
+            stockWidthMm: current?.stock.widthMm ?? result.stock.widthMm,
+            stockDepthMm: current?.stock.depthMm ?? result.stock.depthMm,
+            stockThicknessMm: current?.stock.thicknessMm ?? result.stock.thicknessMm,
           }
         : null,
-    [settled, result]
+    [settled, result, current]
   );
 
   if (!isOpen) return null;
 
-  const twoSided = options.sides === 2;
+  // Whether the job flips the block over: asked for, or chosen by the plan.
+  const twoSided = options.setups === 2 || (options.setups === 'auto' && setups.some((q) => q.upFace === '-z'));
   const swaps = !!current?.toolChange;
   const preflight = {
     material: materialLabel,
@@ -210,21 +236,14 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
     caveat: speedNote,
   };
   const canCut = !!current && machineState.connected && machineState.status === 'IDLE';
-  const onPins = !!(options.registrationPins && result?.pins.length);
-
-  const handleStart = () => {
-    if (!current?.gcode) return;
-    void webSerialManager.runJob(current.gcode, {
-      name: `Solid part, side ${current.side}`,
-      estimatedSeconds: current.estimatedTimeSeconds,
-      // Side B is refused until the turned block has been zeroed again.
-      setup: {
-        sequenceId,
-        index: current.side === 'B' ? 2 : 1,
-        of: result!.sides.length,
-        locate: onPins ? 'pins' : 'knownSpot',
-        pinsSeated,
-      },
+  /** Runs a setup. A later setup is refused by the runner until the turned block is zeroed again. */
+  const runSetup = (i: number, pinsSeated = false) => {
+    const s = setups[i];
+    if (!s?.gcode) return;
+    void webSerialManager.runJob(s.gcode, {
+      name: `Solid part, setup ${s.index} of ${s.of}`,
+      estimatedSeconds: s.estimatedTimeSeconds,
+      setup: { sequenceId, index: s.index, of: s.of, locate: s.locate, pinsSeated },
       // The same preflight the operator is shown before pressing this, kept
       // for the archive: what it was cut from, with which bits, how hard.
       settings: runSettings({
@@ -237,6 +256,15 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
         plungeRate: settled.finishingPlungeRate,
       }),
     });
+  };
+
+  /** Cut: the first setup straight away, any other through turning the block step by step. */
+  const handleStart = (i = sel) => {
+    const s = setups[i];
+    if (!s) return;
+    setSel(i);
+    if (s.index === 1 && s.upFace === '+z') runSetup(i);
+    else setTurning(i);
   };
 
   /**
@@ -266,9 +294,7 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
       label: 'Solid part',
       placement: where,
       details: [
-        result.setups && result.setups.length > 0
-          ? result.plan?.text ?? `${result.setups.length} setups`
-          : result.sides.length === 2 ? 'Two setups, side B flipped left to right' : 'One setup',
+        result.plan?.text ?? (result.sides.length === 2 ? 'Two setups, side B flipped left to right' : 'One setup'),
         settled.roughingEnabled ? `Roughing: ${roughTool}` : null,
         `Finishing: ${finishTool}`,
         `Estimated ${formatDuration(result.estimatedTimeSeconds)} on the machine`,
@@ -279,7 +305,7 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
 
   const handleFrameTrace = async () => {
     if (!result?.success) return;
-    await webSerialManager.frameJob(result.bounds, 0, { laserMode: false, safeZMm: options.safeZ });
+    await webSerialManager.frameJob(turned && current ? current.windowBounds : result.bounds, 0, { laserMode: false, safeZMm: options.safeZ });
   };
 
   const handleProbeBed = () => {
@@ -313,7 +339,7 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
                 Machine Solid Part on CNC
               </h2>
               <p className="hidden sm:block text-xs text-slate-500 dark:text-slate-400">
-                Cut the model itself out of a block at true size: one side, then flip it and cut the other
+                Cut the model itself out of a block at true size, from as many sides as it needs
               </p>
             </div>
           </div>
@@ -334,25 +360,34 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-4">
               <Field
                 className="lg:col-span-2"
-                label="Sides"
-                hint="A part with a flat bottom (a bracket lying on its plate, a plaque) is finished from one side, held by tabs at the bottom of the channel. Anything with shape underneath needs the block turned over and cut again from the other side. The job tells you below how much of the part one side cannot reach."
+                label="Setups"
+                hint="How many times the block is clamped. Auto looks at the part from all six sides and picks the fewest setups that reach all of it: one for a part with nothing hidden from the top, the flip for shape underneath, and standing it on an end or a side for a slot that leans or a hole that goes in sideways. It shows each setup below with a picture."
               >
                 <Segmented
-                  value={String(options.sides)}
-                  onChange={(v) => set('sides', v === '2' ? 2 : 1)}
-                  options={[['1', 'One Side'], ['2', 'Two Sides (flip)']] as const}
+                  value={String(options.setups ?? 'auto')}
+                  onChange={(v) => {
+                    set('setups', v === 'auto' ? 'auto' : v === '2' ? 2 : 1);
+                    if (v !== 'auto') set('sides', v === '2' ? 2 : 1);
+                    setSel(0);
+                  }}
+                  options={[['auto', 'Auto'], ['1', 'One Side'], ['2', 'Two Sides (flip)']] as const}
                 />
               </Field>
               <Field
                 className="lg:col-span-2"
                 label="Which Way Up"
-                hint="Which axis of the model points at the spindle for the first side. Pick the one that puts the part's flat face down and its tallest dimension across the bed rather than up: the deeper the cut the longer and whippier the cutter has to be."
+                hint="Which way the model lies in the block for the first setup. Auto lets the plan choose, which usually means the face with the most work on it faces the spindle. Otherwise pick the one that puts the part's flat face down and its tallest dimension across the bed rather than up: the deeper the cut the longer and whippier the cutter has to be."
               >
                 <select
-                  value={shown.up}
-                  onChange={(e) => setPlacement((p) => ({ ...p, up: e.target.value as UpAxis }))}
+                  value={options.setups === 'auto' && autoOrient ? 'auto' : shown.up}
+                  onChange={(e) => {
+                    if (e.target.value === 'auto') return setAutoOrient(true);
+                    setAutoOrient(false);
+                    setPlacement((p) => ({ ...p, up: e.target.value as UpAxis }));
+                  }}
                   className={inputClass}
                 >
+                  {options.setups === 'auto' && <option value="auto">Auto (the plan chooses)</option>}
                   {UP_AXES.map(([v, label]) => (
                     <option key={v} value={v}>{label}</option>
                   ))}
@@ -452,6 +487,21 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
                   className={inputClass}
                 />
               </Field>
+              {options.setups === 'auto' && (
+                <Field
+                  label="Room Under Spindle (mm)"
+                  hint="From the bed to the bottom of the collet with Z all the way up. A block stood on its end has to fit under there with the bit in, so Auto will not plan a setup that does not. Leave empty if you do not know; you will be asked to check before the block is stood up."
+                >
+                  <NumberInput
+                    step={5} min={0} max={1000}
+                    allowEmpty
+                    placeholder="unknown"
+                    value={options.clearanceMm || null}
+                    onChange={(v) => set('clearanceMm', v ?? 0)}
+                    className={inputClass}
+                  />
+                </Field>
+              )}
             </div>
 
             {result?.success && (
@@ -460,13 +510,16 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
                   Stock {result.stock.widthMm.toFixed(1)} × {result.stock.depthMm.toFixed(1)} × {result.stock.thicknessMm.toFixed(1)} mm {materialLabel} ·
                   part {result.partSizeMm.x.toFixed(1)} × {result.partSizeMm.y.toFixed(1)} × {result.partSizeMm.z.toFixed(1)} mm ·
                   {' '}{Math.round(result.partVolumeMm3).toLocaleString()} mm³ ·
-                  {' '}{result.sides.length === 2 ? 'two setups' : 'one setup'}, {result.sides[0].depthMm.toFixed(1)} mm deep each
+                  {' '}{setups.length === 1 ? 'one setup' : `${setups.length} setups`}
+                  {result.upChosen && result.upChosen !== shown.up ? `, laid ${result.upChosen} up` : ''}
                 </p>
-                <p className={`text-[10px] leading-snug ${result.unreachablePercent > 1 ? 'text-amber-600 dark:text-amber-400' : 'text-slate-500 dark:text-slate-400'}`}>
-                  {result.unreachablePercent > 1
-                    ? `The part comes out with ${result.unreachablePercent > 100 ? 'more than its own volume again' : `${result.unreachablePercent.toFixed(0)}% of its volume`} in material no side can reach. Turn it, or cut both sides.`
-                    : 'Every part of the model is reachable from the sides being cut.'}
-                </p>
+                {!result.plan && (
+                  <p className={`text-[10px] leading-snug ${result.unreachablePercent > 1 ? 'text-amber-600 dark:text-amber-400' : 'text-slate-500 dark:text-slate-400'}`}>
+                    {result.unreachablePercent > 1
+                      ? `The part comes out with ${result.unreachablePercent > 100 ? 'more than its own volume again' : `${result.unreachablePercent.toFixed(0)}% of its volume`} in material no side can reach. Set Setups to Auto to have it turned onto the faces that can.`
+                      : 'Every part of the model is reachable from the sides being cut.'}
+                  </p>
+                )}
               </div>
             )}
           </div>
@@ -625,45 +678,30 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
           {/* Toolpath preview, one side at a time */}
           {result?.success && current && (
             <div className="space-y-3">
+              <SetupCards
+                setups={setups}
+                firstStock={result.stock}
+                pins={result.pins}
+                plan={result.plan}
+                selected={Math.min(sel, setups.length - 1)}
+                onSelect={setSel}
+                onDownload={(i) => downloadText(setups[i].gcode, `${baseName}_setup_${setups[i].index}_${setups[i].upFace.replace('+', 'p').replace('-', 'm')}.gcode`)}
+                onRun={handleStart}
+                canRun={canCut}
+              />
+
               <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-slate-600 dark:text-slate-400">
-                {result.sides.length > 1 && (
-                  <div className="w-44">
-                    <Segmented
-                      value={String(side)}
-                      onChange={(v) => setSide(v === '1' ? 1 : 0)}
-                      options={[['0', 'Side A'], ['1', 'Side B (flipped)']] as const}
-                    />
-                  </div>
-                )}
                 <span className="flex items-center space-x-1.5 font-medium">
                   <Layers className="w-4 h-4 text-blue-500" />
-                  <span>{current.finishingRasterLines} finishing passes</span>
+                  <span>Setup {current.index}: {current.finishingRasterLines} finishing passes</span>
                 </span>
                 <span>{current.roughingPassCount} roughing layers</span>
-                <span className="font-mono bg-slate-200 dark:bg-slate-800 px-2 py-0.5 rounded text-[10px] uppercase font-bold text-blue-600 dark:text-blue-400">
-                  Side {current.side}: {formatDuration(current.estimatedTimeSeconds)}
-                  {result.sides.length > 1 && ` · both: ${formatDuration(result.estimatedTimeSeconds)}`}
-                </span>
                 {current.toolChange && (
                   <span className="text-amber-600 dark:text-amber-400 font-medium">
                     Pauses for a tool change between passes
                   </span>
                 )}
                 {(busy || pending || !placementSettled) && <span className="text-slate-400 italic">recalculating…</span>}
-                <span className="ml-auto flex items-center gap-2">
-                  {result.sides.map((s) => (
-                    <button
-                      key={s.side}
-                      type="button"
-                      onClick={() => downloadText(s.gcode, `${baseName}_side_${s.side}.gcode`)}
-                      title={`Save side ${s.side}'s program as a G-code file`}
-                      className="py-1 px-2 bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-semibold rounded-lg flex items-center gap-1 cursor-pointer"
-                    >
-                      <Download className="w-3.5 h-3.5 text-blue-400" />
-                      <span>Side {s.side} .gcode</span>
-                    </button>
-                  ))}
-                </span>
               </div>
 
               {previewResult && previewOptions && (
@@ -673,7 +711,7 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
               <div className="flex items-center space-x-4 text-[11px] text-slate-500 dark:text-slate-400">
                 <span>
                   Right-drag orbits, middle-drag pans, scroll zooms. The wireframe box is the stock
-                  {current.side === 'B' ? ', seen after the flip: what was on the left is now on the right' : ''}.
+                  {current.index > 1 ? ' as it stands for this setup, after the turn' : ''}.
                 </span>
               </div>
             </div>
@@ -730,25 +768,12 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
               </div>
             </div>
 
-            {twoSided && (
+            {setups.length > 1 && (
               <p className="text-xs leading-relaxed text-slate-600 dark:text-slate-300">
-                <span className="font-semibold">Between the sides:</span> when side A finishes, leave X and Y zeroed.
-                {options.registrationPins && result?.pins.length
-                  ? ' Push dowels into the two pin holes, lift the block, turn it over left to right, and drop it back onto the dowels.'
-                  : ' Turn the block over left to right and re-zero X and Y on the new near-left corner.'}
-                {' '}Re-zero Z on the new top face, then run side B.
-                {' '}Side B will not start until that is done.
+                <span className="font-semibold">Between setups:</span> leave the machine where it is. Pressing Cut on
+                the next setup walks you through turning the block and finding its zero again, step by step, and it
+                will not start until that is done.
               </p>
-            )}
-            {twoSided && onPins && current?.side === 'B' && (
-              <label className="flex items-center gap-2 text-xs text-slate-700 dark:text-slate-200 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={pinsSeated}
-                  onChange={(e) => setPinsSeated(e.target.checked)}
-                />
-                <span>The block is turned over and sitting down on both pins</span>
-              </label>
             )}
 
             <MachineFaultBanner machineState={machineState} />
@@ -765,7 +790,7 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
               material={preflight.material}
               origin="the near-left corner of the stock's top face"
               caveat={preflight.caveat}
-              extent={result?.success ? result.bounds : undefined}
+              extent={result?.success ? (turned && current ? { ...current.windowBounds, minZ: -current.stock.thicknessMm, maxZ: 0 } : result.bounds) : undefined}
             />
           </div>
         </div>
@@ -773,7 +798,7 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
         {/* Footer */}
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 px-4 sm:px-6 py-3 sm:py-4 border-t border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/50">
           <div className="hidden lg:block text-xs text-slate-500 dark:text-slate-400">
-            Zero the machine on the near-left corner of the stock's top face, then cut side A.
+            Zero the machine on the near-left corner of the stock's top face, then cut setup 1.
           </div>
           <div className="flex flex-wrap items-center justify-end gap-2 sm:gap-3 sm:ml-auto">
             <button
@@ -794,8 +819,8 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
               <JobTransport
                 machineState={machineState}
                 canStart={canCut}
-                onStart={handleStart}
-                startLabel={current ? `Cut Side ${current.side}` : 'Cut'}
+                onStart={() => handleStart()}
+                startLabel={current ? `Cut Setup ${current.index}${current.of > 1 ? ` of ${current.of}` : ''}` : 'Cut'}
               />
             ) : (
               <button
@@ -810,6 +835,25 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
         </div>
 
       </div>
+      {turning !== null && setups[turning] && result?.success && (
+        <SetupChangeDialog
+          setup={setups[turning]}
+          firstStock={result.stock}
+          carved={setups.slice(0, turning).map((q) => q.upFace)}
+          pins={result.pins}
+          toolDiaMm={settled.finishingToolDiaMm}
+          toolLabel={finishTool}
+          stickoutMm={settled.toolStickoutMm}
+          clearanceMm={options.clearanceMm ?? 0}
+          safeZMm={options.safeZ}
+          machineState={machineState}
+          onClose={() => setTurning(null)}
+          onStart={(pinsSeated) => {
+            runSetup(turning, pinsSeated);
+            setTurning(null);
+          }}
+        />
+      )}
     </div>
   );
 };
