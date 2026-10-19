@@ -7,6 +7,7 @@ import { useEffect } from 'react';
 import { getStoredAuthToken } from '../utils/apiClient';
 import { tabSession } from '../utils/tabSession';
 import { summarizeTrajectory } from '../utils/trajectorySummary';
+import { authoredQuat, orientationOf } from '../utils/bodyOrientation';
 import { useStore, getPhysicsWorkerClient } from '../store/useStore';
 import { useDentStore } from '../store/dentStore';
 import { isDentable, needsConversionForDenting } from '../utils/dentMesh';
@@ -2528,6 +2529,35 @@ export function useMCPBridge() {
 
         case 'MEASURE': {
           const { from, to, corner, snap, withinMm } = msg;
+          // Which way a body points, rather than a distance: `body` with an
+          // optional local `axis`. Read from the simulation's latest frame when
+          // it has one, else from the body as authored.
+          if (typeof msg.body === 'string') {
+            const wanted = msg.body;
+            const byName = (list: SceneNode[]): SceneNode | null => {
+              for (const n of list) {
+                if (n.name === wanted) return n;
+                const hit = byName(n.children || []);
+                if (hit) return hit;
+              }
+              return null;
+            };
+            const node = findNodeInScene(store.sceneGraph.nodes, wanted) ?? byName(store.sceneGraph.nodes);
+            if (!node) return { ok: false, error: `No body with id or name "${wanted}"` };
+            const axis = msg.axis === 'x' || msg.axis === 'y' ? msg.axis : 'z';
+            const { frames } = await getPhysicsWorkerClient().getHistory({ last: 1, bodies: [node.id], maxFrames: 1 });
+            const live = frames[frames.length - 1]?.bodies?.[node.id]?.quat;
+            const quat = live ?? authoredQuat(node);
+            return {
+              ok: true,
+              body: node.id,
+              axis,
+              source: live ? 'simulation' : 'authored',
+              ...(live ? { atTime: frames[frames.length - 1].time } : {}),
+              quat,
+              ...orientationOf(quat, axis),
+            };
+          }
           const point = (value: unknown, name: string): [number, number, number] => {
             if (!Array.isArray(value) || value.length < 3 || !value.every((v) => typeof v === 'number' && Number.isFinite(v))) {
               throw new Error(`${name} must be a point [x, y, z] in metres, in the world frame`);
