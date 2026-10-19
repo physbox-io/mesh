@@ -87,7 +87,26 @@ import { withSpindleOverride } from './spindleOverride';
  */
 export type { MachineStatus };
 
+/** Where a job sits in a part machined from more than one face. */
+export interface JobSetup {
+  /** The same for every setup of one part's program. */
+  sequenceId: string;
+  /** 1-based. */
+  index: number;
+  of: number;
+  /** How this setup finds the part again: pins in the bed, or touching off on the block. */
+  locate: 'pins' | 'knownSpot';
+  /** The operator has confirmed the block is down on its pins. Only means something with pins. */
+  pinsSeated?: boolean;
+}
+
 export interface MachineState extends BaseMachineState {
+  /**
+   * The next setup of a part machined from more than one face, once the one
+   * before it has finished: the block has to be turned and re-zeroed before
+   * it runs. Null when nothing is waiting.
+   */
+  setupPending?: { sequenceId: string; next: number; of: number; locate: 'pins' | 'knownSpot' } | null;
   status: MachineStatus;
   connected: boolean;
   portName?: string;
@@ -743,6 +762,7 @@ class WebSerialManager extends GrblMachine<MachineState> {
       probePinActive: false,
       probeCircuitSeen: false,
       lastCompletedJob: null,
+      setupPending: null,
     };
   }
 
@@ -756,6 +776,18 @@ class WebSerialManager extends GrblMachine<MachineState> {
   private telemetryInFlight = false;
   /** What the running job is, as the run archive should remember it. */
   private jobContext: { name?: string; settings?: Record<string, unknown> | null } = {};
+  /**
+   * Datum bookkeeping for parts cut in several setups. Each event takes the
+   * next number, so "zeroed since the last setup ended" is a comparison. Kept
+   * per connection: a reload forgets the setup that ended, and the zeros with
+   * it, so a later setup still needs zeroing in this session.
+   */
+  private datumSeq = 0;
+  private zZeroedAt = 0;
+  private xyZeroedAt = 0;
+  private setupEndedAt = 0;
+  /** The setup the job on the wire belongs to, if it is one. */
+  private runningSetup: JobSetup | null = null;
   private lastTelemetryStatus: MachineStatus | null = null;
 
   protected onStateNotified(state: MachineState): void {
@@ -1254,7 +1286,15 @@ class WebSerialManager extends GrblMachine<MachineState> {
    */
   public async runJob(
     gcode: string,
-    options: { name?: string; estimatedSeconds?: number; settings?: Record<string, unknown> | null } = {}
+    options: {
+      name?: string;
+      estimatedSeconds?: number;
+      settings?: Record<string, unknown> | null;
+      /** Which setup of a several-face part this is. */
+      setup?: JobSetup;
+      /** Who asked. A later setup is only ever started by the operator at the machine. */
+      origin?: 'ui' | 'mcp';
+    } = {}
   ): Promise<{ delivered: boolean; message: string } | null> {
     /*
      * Recorded before anything is sent, and replaced outright by every job.
@@ -1289,6 +1329,15 @@ class WebSerialManager extends GrblMachine<MachineState> {
       this.updateState({ lastError: message });
       return null;
     }
+
+    const setupRefusal = this.refuseSetup(options.setup, options.origin ?? 'ui', !!this.transport.runJob);
+    if (setupRefusal) {
+      this.updateState({ lastError: setupRefusal });
+      return null;
+    }
+    this.runningSetup = options.setup ?? null;
+    // The turn it was waiting for has been made, and its zeros checked.
+    if (options.setup && this.state.setupPending) this.updateState({ setupPending: null });
 
     if (this.transport.runJob) {
       let result: { delivered: boolean; message: string };
@@ -1776,8 +1825,63 @@ class WebSerialManager extends GrblMachine<MachineState> {
     if (done > this.ackedLines) this.ackedLines = done;
   }
 
+  /**
+   * Why a setup after the first cannot start yet, or null when it can.
+   *
+   * Between setups the block has been lifted, turned and put back, so every
+   * datum the last setup ran on is stale. A setup is only allowed to run on
+   * zeros taken after the one before it finished: Z always, and X and Y too
+   * unless the block is down on registration pins, which the operator has to
+   * say. Never from an agent or another device: someone has to be standing at
+   * the machine to turn the block.
+   */
+  private refuseSetup(setup: JobSetup | undefined, origin: 'ui' | 'mcp', relayed: boolean): string | null {
+    if (!setup || setup.index <= 1) return null;
+    const which = `Setup ${setup.index} of ${setup.of}`;
+    if (origin !== 'ui' || relayed) {
+      return `${which} turns the block by hand, so it can only be started from this screen, by someone at the machine.`;
+    }
+    if (this.zZeroedAt <= this.setupEndedAt || this.zZeroedAt === 0) {
+      return `${which}: set Z zero on the new top face first. The last setup's Z is from a face that has moved.`;
+    }
+    if (setup.locate === 'pins') {
+      if (!setup.pinsSeated) return `${which}: confirm the block is down on its pins before it runs.`;
+      return null;
+    }
+    if (this.xyZeroedAt <= this.setupEndedAt || this.xyZeroedAt === 0) {
+      return `${which}: zero X and Y on the spot this setup locates from first. The last setup's X and Y are on a corner that has moved.`;
+    }
+    return null;
+  }
+
+  /** The block's datum has been re-taken, for the setup gate. */
+  protected recordZDatum(): void {
+    super.recordZDatum();
+    this.zZeroedAt = ++this.datumSeq;
+  }
+
+  private recordXYDatum(): void {
+    this.xyZeroedAt = ++this.datumSeq;
+  }
+
   /** The last line was acknowledged: the job ran to its end. */
   protected onJobFinished(): Partial<MachineState> {
+    // A setup with another after it leaves the block to be turned, and every
+    // zero it ran on stale.
+    const setup = this.runningSetup;
+    this.runningSetup = null;
+    let between: Partial<MachineState> = {};
+    if (setup) {
+      this.setupEndedAt = ++this.datumSeq;
+      between =
+        setup.index < setup.of
+          ? {
+              setupPending: { sequenceId: setup.sequenceId, next: setup.index + 1, of: setup.of, locate: setup.locate },
+              needsZZero: true,
+              zDatumTrusted: false,
+            }
+          : { setupPending: null };
+    }
     // Read before the ticker stops, which forgets when the job started.
     const elapsedSeconds = this.jobStartedAt === null
       ? this.state.elapsedSeconds
@@ -1788,6 +1892,7 @@ class WebSerialManager extends GrblMachine<MachineState> {
     // piece that has already come off the bed.
     clearCheckpoint();
     return {
+      ...between,
       currentLine: this.programLength(),
       remainingSeconds: 0,
       resume: null,
@@ -2253,6 +2358,7 @@ class WebSerialManager extends GrblMachine<MachineState> {
   public async zeroXY(): Promise<void> {
     this.refuseWhileJobHoldsMachine('zero XY');
     await super.zeroXY();
+    this.recordXYDatum();
   }
 
 
@@ -2307,6 +2413,7 @@ class WebSerialManager extends GrblMachine<MachineState> {
     this.refuseWhileJobHoldsMachine('zero the axes');
     await this.sendLine('G10 L20 P1 X0 Y0 Z0');
     this.recordZDatum();
+    this.recordXYDatum();
     this.jobPeakWorkZ = null;
   }
 

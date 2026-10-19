@@ -36,9 +36,9 @@ import {
   type ToolpathSegment,
 } from './reliefCarveExporter';
 import { materialSpec, type SpindleRange } from './feedsAndSpeeds';
+import { ORIENT_MATRIX, orient, type UpAxis } from './orient';
 
-/** Which way up the model goes in the first setup. */
-export type UpAxis = '+z' | '-z' | '+x' | '-x' | '+y' | '-y';
+export type { UpAxis };
 
 /** The options that only mean something to a relief, and are not offered here. */
 type ReliefOnly =
@@ -267,34 +267,6 @@ const PECK_CLEAR_MM = 0.5;
 
 function f(num: number): string {
   return (Math.round(num * 1000) / 1000).toFixed(3).replace(/\.?0+$/, '') || '0';
-}
-
-/**
- * Turns the model so the chosen axis points at the spindle.
- *
- * All six are proper rotations rather than mirrors, so a right-handed part
- * stays right-handed: the piece that comes off the machine is the part, not its
- * reflection.
- */
-/** `orient` as a row-major matrix. */
-const ORIENT_MATRIX: Record<UpAxis, number[]> = {
-  '+z': [1, 0, 0, 0, 1, 0, 0, 0, 1],
-  '-z': [1, 0, 0, 0, -1, 0, 0, 0, -1],
-  '+x': [0, 0, -1, 0, 1, 0, 1, 0, 0],
-  '-x': [0, 0, 1, 0, 1, 0, -1, 0, 0],
-  '+y': [1, 0, 0, 0, 0, -1, 0, 1, 0],
-  '-y': [1, 0, 0, 0, 0, 1, 0, -1, 0],
-};
-
-function orient(up: UpAxis, x: number, y: number, z: number): [number, number, number] {
-  switch (up) {
-    case '+z': return [x, y, z];
-    case '-z': return [x, -y, -z];
-    case '+x': return [-z, y, x];
-    case '-x': return [z, y, -x];
-    case '+y': return [x, -z, y];
-    case '-y': return [x, z, -y];
-  }
 }
 
 /**

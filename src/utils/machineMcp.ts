@@ -159,6 +159,14 @@ async function carveCurrentScene(args: Record<string, unknown>): Promise<{ summa
 
   const run = await webSerialManager.runJob(side.gcode, {
     name: `carve side ${side.side}`,
+    // Side B needs the block turned over by hand, so the runner refuses it here.
+    origin: 'mcp',
+    setup: {
+      sequenceId: `mcp-solid-${result.sides[0].gcode.length}`,
+      index: side.side === 'B' ? 2 : 1,
+      of: result.sides.length,
+      locate: result.pins.length > 0 ? 'pins' : 'knownSpot',
+    },
     estimatedSeconds: result.estimatedTimeSeconds,
     // An agent never opens a dialog, so this is the only place the run archive
     // can be told what the program it is about to stream actually cuts.

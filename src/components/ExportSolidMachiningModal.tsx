@@ -66,6 +66,8 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
   useEscapeToClose(isOpen, onClose);
   const setMachineConfigOpen = useStore((s) => s.setMachineConfigOpen);
   const [side, setSide] = useState<0 | 1>(0);
+  // Side B on pins only runs once the operator says the block is down on them.
+  const [pinsSeated, setPinsSeated] = useState(false);
 
   // Which way up and how big are not tooling, and the part's height — which
   // the feeds are derated for — depends on them, so they are kept outside the
@@ -174,6 +176,8 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
    * several times a second and the view snapped back under any orbit.
    */
   const current = result?.success ? result.sides[Math.min(side, result.sides.length - 1)] : null;
+  // One id per generated program, so side B is matched to the side A it follows.
+  const sequenceId = useMemo(() => `solid-${Date.now().toString(36)}`, [result]);
   const previewResult = useMemo(
     () =>
       current && result?.success
@@ -205,12 +209,21 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
     caveat: speedNote,
   };
   const canCut = !!current && machineState.connected && machineState.status === 'IDLE';
+  const onPins = !!(options.registrationPins && result?.pins.length);
 
   const handleStart = () => {
     if (!current?.gcode) return;
     void webSerialManager.runJob(current.gcode, {
       name: `Solid part, side ${current.side}`,
       estimatedSeconds: current.estimatedTimeSeconds,
+      // Side B is refused until the turned block has been zeroed again.
+      setup: {
+        sequenceId,
+        index: current.side === 'B' ? 2 : 1,
+        of: result!.sides.length,
+        locate: onPins ? 'pins' : 'knownSpot',
+        pinsSeated,
+      },
       // The same preflight the operator is shown before pressing this, kept
       // for the archive: what it was cut from, with which bits, how hard.
       settings: runSettings({
@@ -719,7 +732,18 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
                   ? ' Push dowels into the two pin holes, lift the block, turn it over left to right, and drop it back onto the dowels.'
                   : ' Turn the block over left to right and re-zero X and Y on the new near-left corner.'}
                 {' '}Re-zero Z on the new top face, then run side B.
+                {' '}Side B will not start until that is done.
               </p>
+            )}
+            {twoSided && onPins && current?.side === 'B' && (
+              <label className="flex items-center gap-2 text-xs text-slate-700 dark:text-slate-200 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={pinsSeated}
+                  onChange={(e) => setPinsSeated(e.target.checked)}
+                />
+                <span>The block is turned over and sitting down on both pins</span>
+              </label>
             )}
 
             <MachineFaultBanner machineState={machineState} />
