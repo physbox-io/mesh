@@ -172,23 +172,22 @@ function reachFrom(g: VoxelGrid, face: BlockFace, radiusCells: number): Int16Arr
   const at = (m: Int32Array, iu: number, iv: number) =>
     iu < 0 || iv < 0 || iu >= nu || iv >= nv ? 1 << 30 : m[iv * nu + iu];
 
-  const eroded = new Int32Array(nu * nv);
-  for (let iv = 0; iv < nv; iv++) {
-    for (let iu = 0; iu < nu; iu++) {
+  // The cutter's centre may stand off the grid too, in the channel round the
+  // part, so the erosion is worked out over the grid padded by the disc.
+  const pu = nu + 2 * R, pv = nv + 2 * R;
+  const eroded = new Int32Array(pu * pv);
+  for (let iv = 0; iv < pv; iv++) {
+    for (let iu = 0; iu < pu; iu++) {
       let lo = 1 << 30;
-      for (const [a, b] of disc) lo = Math.min(lo, at(first, iu + a, iv + b));
-      eroded[iv * nu + iu] = lo;
+      for (const [a, b] of disc) lo = Math.min(lo, at(first, iu - R + a, iv - R + b));
+      eroded[iv * pu + iu] = lo;
     }
   }
   const opened = new Int32Array(nu * nv);
   for (let iv = 0; iv < nv; iv++) {
     for (let iu = 0; iu < nu; iu++) {
       let hi = 0;
-      for (const [a, b] of disc) {
-        const iu2 = iu + a, iv2 = iv + b;
-        if (iu2 < 0 || iv2 < 0 || iu2 >= nu || iv2 >= nv) continue;
-        hi = Math.max(hi, eroded[iv2 * nu + iu2]);
-      }
+      for (const [a, b] of disc) hi = Math.max(hi, eroded[(iv + R + b) * pu + (iu + R + a)]);
       // Never past the part itself in this column.
       opened[iv * nu + iu] = Math.min(hi, first[iv * nu + iu]);
     }

@@ -103,3 +103,35 @@ describe('solid machining from any face', () => {
     expect(res.setups!.map((s) => s.upFace)).toEqual(['+z']);
   });
 });
+
+describe('choosing the way up', () => {
+  /** A plain block, 80 x 20 x 60 tall, with a pocket only in its front face. */
+  const frontPocket: SceneGraph = {
+    nodes: [{
+      id: 'b', name: 'plate', type: 'body', pos: [0, 0, 0], joints: [], children: [],
+      geoms: [
+        // Back slab, then a frame round a 40 x 30 pocket 8 deep in the front.
+        { name: 'back', type: 'box', pos: [0, 0.006, 0.03], size: [0.04, 0.004, 0.03] },
+        { name: 'l', type: 'box', pos: [-0.03, -0.004, 0.03], size: [0.01, 0.006, 0.03] },
+        { name: 'r', type: 'box', pos: [0.03, -0.004, 0.03], size: [0.01, 0.006, 0.03] },
+        { name: 'b', type: 'box', pos: [0, -0.004, 0.0075], size: [0.02, 0.006, 0.0075] },
+        { name: 't', type: 'box', pos: [0, -0.004, 0.0525], size: [0.02, 0.006, 0.0075] },
+      ] as SceneGeom[],
+    }],
+  };
+
+  it('lays a part with work only on its front face up, in one setup', () => {
+    const o = deriveSolidOptions(frontPocket, { sides: 1, material: 'softwood', finishingToolDiaMm: 3.175, roughingToolDiaMm: 3.175 });
+    const r = generateSolidMachining(frontPocket, { ...o, setups: 'auto' });
+    expect(r.success, r.error).toBe(true);
+    expect(r.setups!.length).toBe(1);
+    // The front (-Y of the model) is what points at the spindle now.
+    expect(r.upChosen).toBe('-y');
+  });
+
+  it('keeps the way up it was asked for when nothing is gained by turning', () => {
+    const o = deriveSolidOptions(tray(0), { ...tooling });
+    const r = generateSolidMachining(tray(0), { ...o, setups: 'auto' });
+    expect(r.upChosen).toBe('+z');
+  });
+});
