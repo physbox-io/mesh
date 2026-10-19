@@ -800,7 +800,7 @@ export const TransformGizmo = () => {
       ],
       fixed: [
         ...neighbourFeatures(scene, target.id, [here.x, here.y, here.z], gatherRadius),
-        ...graphAxes(sceneGraph?.nodes ?? [], bodyPoseOf, {
+        ...graphAxes(useStore.getState().sceneGraph?.nodes ?? [], bodyPoseOf, {
           exclude: target.id, near: [here.x, here.y, here.z], radius: gatherRadius,
         }),
       ],

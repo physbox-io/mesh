@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 import type { useStore } from '../store/useStore';
@@ -15,7 +15,13 @@ export const DropHandler = ({ addComponent, onImportFile, onImportImageFile, onI
   onUnsupportedDrop?: (message: string) => void;
 }) => {
   const { camera, gl } = useThree();
-  
+  // The latest callback, without re-binding the window listeners for it: the
+  // canvas passes a fresh arrow on every render.
+  const unsupportedRef = useRef(onUnsupportedDrop);
+  useEffect(() => {
+    unsupportedRef.current = onUnsupportedDrop;
+  }, [onUnsupportedDrop]);
+
   useEffect(() => {
     const handler = async (e: DragEvent) => {
       e.preventDefault();
@@ -56,7 +62,7 @@ export const DropHandler = ({ addComponent, onImportFile, onImportImageFile, onI
         if (!handled) {
           const names = Array.from(files, (f) => f.name).join(', ');
           const msg = `Mesh can open .json scenes, .stl and .scad models, and images. ${names} ${files.length === 1 ? "isn't" : "aren't"} one of those.`;
-          if (onUnsupportedDrop) onUnsupportedDrop(msg);
+          unsupportedRef.current?.(msg);
         }
         return;
       }
