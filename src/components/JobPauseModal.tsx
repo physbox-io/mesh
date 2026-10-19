@@ -6,7 +6,7 @@ import { JobPauseBanner } from './MachineJobControls';
 import { useJobPause, pauseKey } from '../store/jobPauseStore';
 
 /** Stops that wait on the operator, as opposed to a feed hold they just pressed. */
-export function isOperatorStop(status: MachineState['status']): boolean {
+function isOperatorStop(status: MachineState['status']): boolean {
   return status === 'PAUSED_TOOL' || status === 'PAUSED_MATERIAL' || status === 'PAUSED_PARKED';
 }
 
