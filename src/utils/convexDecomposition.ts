@@ -32,6 +32,7 @@ import {
 } from './csg';
 import type { CollisionMode, SceneGeom, SceneNode } from '../types/scene';
 import { findFilledCavities, type FilledCavity } from './filledCavities';
+import { COLLISION_FLAG, scadProxyHulls, usesCollisionProxies } from './scadColliders';
 
 /**
  * Above this a mesh is convex enough that its hull is the honest answer, and
@@ -79,7 +80,7 @@ export interface DecompositionVerdict {
   triangles: number;
   /** How many convex pieces to ask for, when the strategy is 'decompose'. */
   maxHulls: number;
-  reason: 'no-mesh' | 'too-coarse' | 'too-dense' | 'convex-enough' | 'concave' | 'forced';
+  reason: 'no-mesh' | 'too-coarse' | 'too-dense' | 'convex-enough' | 'concave' | 'forced' | 'scad-proxies';
   warning?: string;
 }
 
@@ -261,6 +262,9 @@ export function collisionHashOf(node: SceneNode): string {
     collisionModeOf(node),
     node.collisionHulls ?? null,
     node.collisionResolution ?? null,
+    // A script that draws its own proxies: they can change with the script
+    // while the part they collide for stays exactly the same shape.
+    usesCollisionProxies(node.scad) ? node.scad : null,
     node.collisionMass ?? null,
     meshes.map(g => [g.mass ?? null, g.density ?? null, g.condim ?? null, g.friction ?? null, g.solref ?? null, g.solimp ?? null]),
   ]);
@@ -308,6 +312,29 @@ export async function decomposeNodeColliders(node: SceneNode): Promise<ColliderR
   const { volume, hullVolume, integrity } = analysis;
   const verdict = decompositionVerdict(node, { volume, hullVolume });
   const mass = colliderMass(node, source, volume);
+
+  // The script's own colliders, when it draws them (utils/scadColliders.ts).
+  if (usesCollisionProxies(node.scad) && collisionModeOf(node) !== 'hull') {
+    try {
+      const proxies = await scadProxyHulls(node.scad!);
+      if (proxies.length > 0) {
+        const geoms = hullsToColliderGeoms(proxies, node.name || node.id, colliderTemplateOf(source, source.rgba ?? [0.3, 0.6, 0.9, 1]), mass);
+        return {
+          hash, geoms, volume, hullVolume, mass,
+          verdict: { ...verdict, strategy: 'decompose', maxHulls: proxies.length, reason: 'scad-proxies' },
+        };
+      }
+      return {
+        hash, geoms: [], verdict: { ...verdict, strategy: 'hull' }, volume, hullVolume, mass,
+        warning: `The script mentions ${COLLISION_FLAG} but draws nothing when it is true, so it collides as its convex hull. Put the collision shapes in an if (${COLLISION_FLAG}) branch.`,
+      };
+    } catch (err) {
+      return {
+        hash, geoms: [], verdict: { ...verdict, strategy: 'hull' }, volume, hullVolume, mass,
+        warning: `The collision version of the script did not compile (${err instanceof Error ? err.message : String(err)}), so it collides as its convex hull.`,
+      };
+    }
+  }
 
   if (verdict.strategy !== 'decompose') {
     return { hash, geoms: [], verdict, volume, hullVolume, mass, warning: verdict.warning };
