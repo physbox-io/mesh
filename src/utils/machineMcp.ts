@@ -8,7 +8,7 @@ import {
 import { webSerialManager, ZERO_SEARCH_MM } from './webSerialManager';
 import type { ResumeOptions } from './jobResume';
 import { fetchMachineDevices } from './apiClient';
-import { generateSolidMachining, DEFAULT_SOLID_OPTIONS } from './solidMachiningExporter';
+import { generateSolidMachining, measurePart, DEFAULT_SOLID_OPTIONS } from './solidMachiningExporter';
 import { MATERIALS } from './feedsAndSpeeds';
 import { runSettings } from './runSettings';
 import type { SceneGraph } from '../types/scene';
@@ -57,9 +57,45 @@ export function subscribeToArming(listener: (state: ArmingState) => void): () =>
  * is answering about, so a carve is always of the scene on screen.
  */
 let currentScene: SceneGraph | null = null;
+/** The bench stock's thickness as the bridge last saw it, in mm. */
+let benchThicknessMm: number | null = null;
+/** What the last carve was asked for, so a framing lap frames that job. */
+let lastCarveArgs: Record<string, unknown> = {};
 
-export function setCurrentScene(scene: SceneGraph | null): void {
+export function setCurrentScene(scene: SceneGraph | null, stock?: { thicknessMm: number }): void {
   currentScene = scene;
+  benchThicknessMm = stock?.thicknessMm ?? null;
+}
+
+/**
+ * The options a carve is cut with: the defaults, what was asked, and the
+ * bench stock's thickness when nothing was asked and the part fits in it —
+ * the board described once on the bench, not re-guessed from the part. A part
+ * taller than the bench stock falls back to stock sized from the part.
+ */
+function carveOptions(args: Record<string, unknown>) {
+  const dia = typeof args.toolDiaMm === 'number' && args.toolDiaMm > 0 ? args.toolDiaMm : 3;
+  let stockThicknessMm: number | undefined;
+  let stockFrom: 'asked' | 'bench' | 'part' = 'part';
+  if (typeof args.stockThicknessMm === 'number') {
+    stockThicknessMm = args.stockThicknessMm;
+    stockFrom = 'asked';
+  } else if (benchThicknessMm && currentScene) {
+    const part = measurePart(currentScene, '+z', 100);
+    if (part && part.z <= benchThicknessMm + 1e-6) {
+      stockThicknessMm = benchThicknessMm;
+      stockFrom = 'bench';
+    }
+  }
+  const options = {
+    ...DEFAULT_SOLID_OPTIONS,
+    ...(typeof args.sides === 'number' ? { sides: args.sides } : {}),
+    ...(stockThicknessMm !== undefined ? { stockThicknessMm } : {}),
+    ...(typeof args.material === 'string' ? { material: args.material } : {}),
+    roughingToolDiaMm: dia,
+    finishingToolDiaMm: dia,
+  } as NonNullable<Parameters<typeof generateSolidMachining>[1]>;
+  return { options, dia, stockFrom };
 }
 
 /**
@@ -71,7 +107,7 @@ export function setCurrentScene(scene: SceneGraph | null): void {
  */
 function jobBounds(): { minX: number; minY: number; maxX: number; maxY: number } | null {
   if (!currentScene?.nodes?.length) return null;
-  const result = generateSolidMachining(currentScene, DEFAULT_SOLID_OPTIONS);
+  const result = generateSolidMachining(currentScene, carveOptions(lastCarveArgs).options);
   if (!result.success || !result.stock) return null;
   const { widthMm, depthMm } = result.stock as { widthMm: number; depthMm: number };
   if (!Number.isFinite(widthMm) || !Number.isFinite(depthMm)) return null;
@@ -91,17 +127,8 @@ async function carveCurrentScene(args: Record<string, unknown>): Promise<{ summa
     throw new Error('The scene is empty — there is nothing to machine.');
   }
 
-  const dia = typeof args.toolDiaMm === 'number' && args.toolDiaMm > 0 ? args.toolDiaMm : 3;
-  const options = {
-    ...DEFAULT_SOLID_OPTIONS,
-    ...(typeof args.sides === 'number' ? { sides: args.sides } : {}),
-    ...(typeof args.stockThicknessMm === 'number'
-      ? { stockThicknessMm: args.stockThicknessMm }
-      : {}),
-    ...(typeof args.material === 'string' ? { material: args.material } : {}),
-    roughingToolDiaMm: dia,
-    finishingToolDiaMm: dia,
-  } as NonNullable<Parameters<typeof generateSolidMachining>[1]>;
+  lastCarveArgs = { ...args };
+  const { options, dia, stockFrom } = carveOptions(args);
 
   const result = generateSolidMachining(currentScene, options);
   if (!result.success) {
@@ -159,7 +186,12 @@ async function carveCurrentScene(args: Record<string, unknown>): Promise<{ summa
   return {
     summary:
       `Cutting side ${side.side} of ${result.sides.length} at depth ${side.depthMm}mm, ` +
-      `${dia}mm tool, roughly ${minutes} minutes. ` +
+      `${dia}mm tool, roughly ${minutes} minutes, ` +
+      (stockFrom === 'bench'
+        ? `in the ${options.stockThicknessMm} mm bench stock. `
+        : stockFrom === 'asked'
+          ? `in ${options.stockThicknessMm} mm stock. `
+          : `in stock sized from the part${benchThicknessMm ? ` (the ${benchThicknessMm} mm bench stock is thinner than it)` : ''}. `) +
       (result.sides.length > 1
         ? `The part has to be re-fixtured and side ${result.sides.find(s => s.side !== side.side)?.side} run separately.`
         : ''),

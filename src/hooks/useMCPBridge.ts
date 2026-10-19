@@ -510,6 +510,28 @@ function meshIntegrity(g: SceneGeom): Record<string, unknown> {
 }
 
 /**
+ * The bench stock against the design: the board every carve uses, and how the
+ * scene's footprint and height compare with it, in plain numbers. Makers think
+ * of their oak as stock, not as part of the design, and "the design is 5 mm
+ * wider than your stock" is the sentence that saves the board.
+ */
+function stockReport(scene: SceneGraph, stock: { widthMm: number; depthMm: number; thicknessMm: number }) {
+  const design = scene.nodes?.length ? measurePart(scene, '+z', 100) : null;
+  if (!design) return { ...stock };
+  const r = (v: number) => Math.round(v * 10) / 10;
+  const over: string[] = [];
+  if (design.x > stock.widthMm + 0.5) over.push(`${r(design.x - stock.widthMm)} mm wider`);
+  if (design.y > stock.depthMm + 0.5) over.push(`${r(design.y - stock.depthMm)} mm deeper`);
+  if (design.z > stock.thicknessMm + 0.05) over.push(`${r(design.z - stock.thicknessMm)} mm taller`);
+  return {
+    ...stock,
+    designMm: { width: r(design.x), depth: r(design.y), height: r(design.z) },
+    fits: over.length === 0,
+    ...(over.length ? { note: `The design is ${over.join(', ')} than your stock.` } : {}),
+  };
+}
+
+/**
  * How a body actually reaches the contact solver.
  *
  * Worth reporting on every body with a mesh, not just one someone asked about:
@@ -1701,7 +1723,7 @@ export function useMCPBridge() {
 
       // The machine handlers outlive any one render, so they are pointed at the
       // scene this call is answering about rather than closing over a stale one.
-      setCurrentScene(store.sceneGraph);
+      setCurrentScene(store.sceneGraph, store.stock);
 
       const machineHandler = machineHandlers[cmd];
       if (machineHandler) {
@@ -1806,6 +1828,7 @@ export function useMCPBridge() {
         case 'GET_SCENE_SUMMARY':
           return {
             nodes: (store.sceneGraph.nodes || []).map(summarizeNode),
+            stock: stockReport(store.sceneGraph, store.stock),
             ...(store.sceneGraph.simFidelity === 'print' ? {
               simFidelity: {
                 mode: 'print',
@@ -4149,8 +4172,15 @@ export function useMCPBridge() {
         }
 
         case 'SET_ENVIRONMENT': {
-          const { gravityZ, windX, windY, density, floorFriction, floorBounce, fidelity } =
-            msg as Msg<{ gravityZ?: number; windX?: number; windY?: number; density?: number; floorFriction?: number; floorBounce?: number; fidelity?: string }>;
+          const { gravityZ, windX, windY, density, floorFriction, floorBounce, fidelity, stockWidthMm, stockDepthMm, stockThicknessMm } =
+            msg as Msg<{ gravityZ?: number; windX?: number; windY?: number; density?: number; floorFriction?: number; floorBounce?: number; fidelity?: string; stockWidthMm?: number; stockDepthMm?: number; stockThicknessMm?: number }>;
+          // The board on the bench: what every carve, export and fit check uses.
+          const stockPatch = {
+            ...(typeof stockWidthMm === 'number' && stockWidthMm > 0 ? { widthMm: stockWidthMm } : {}),
+            ...(typeof stockDepthMm === 'number' && stockDepthMm > 0 ? { depthMm: stockDepthMm } : {}),
+            ...(typeof stockThicknessMm === 'number' && stockThicknessMm > 0 ? { thicknessMm: stockThicknessMm } : {}),
+          };
+          if (Object.keys(stockPatch).length > 0) store.setStock(stockPatch);
           if (fidelity !== undefined) {
             if (fidelity !== 'standard' && fidelity !== 'print') return { ok: false, error: `fidelity must be 'standard' or 'print', not '${fidelity}'.` };
             store.setSimFidelity(fidelity);
@@ -4163,7 +4193,12 @@ export function useMCPBridge() {
           if (floorFriction !== undefined) env.floorFriction = floorFriction;
           if (floorBounce !== undefined) env.floorBounce = floorBounce;
           store.setEnvironment(env);
-          return { ok: true };
+          return {
+            ok: true,
+            ...(Object.keys(stockPatch).length > 0
+              ? { stock: stockReport(useStore.getState().sceneGraph, useStore.getState().stock) }
+              : {}),
+          };
         }
 
         case 'GET_SCHEMA':
