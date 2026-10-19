@@ -512,7 +512,8 @@ export function generateExtrudedPolygonMeshData(
   }
 
   for (const tri of tris) {
-    let [i0, i1, i2] = tri;
+    const i0 = tri[0];
+    let i1 = tri[1], i2 = tri[2];
     const p0 = allPts[i0], p1 = allPts[i1], p2 = allPts[i2];
     const cross = (p1[0] - p0[0]) * (p2[1] - p0[1]) - (p1[1] - p0[1]) * (p2[0] - p0[0]);
     if (cross < 0) {
@@ -677,8 +678,10 @@ export const PARAMETRIC_MESH_TYPES = new Set([
  * inverted-winding meshes, and computes bounding `size` half-extents.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function normalizeMeshGeomData<T extends Record<string, any>>(g: T): T {
-  if (!g || typeof g !== 'object') return g;
+export function normalizeMeshGeomData<T extends Record<string, any>>(geom: T): T {
+  if (!geom || typeof geom !== 'object') return geom;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const g: Record<string, any> = geom;
 
   const rawType = typeof g.type === 'string' ? g.type.toLowerCase() : '';
   const hasPolygon = Array.isArray(g.polygon) && g.polygon.length >= 3;
@@ -826,6 +829,6 @@ export function normalizeMeshGeomData<T extends Record<string, any>>(g: T): T {
       }
     }
   }
-  return g;
+  return geom;
 }
 

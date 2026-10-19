@@ -6,7 +6,6 @@
 import type {
   MemberJoineryPart,
   MortiseSpec,
-  TenonSpec,
   TimberBreakdownResult,
   ZClipSlotSpec,
 } from './timberJoinery';

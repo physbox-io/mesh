@@ -347,7 +347,6 @@ function computeMemberObb(positionsMm: Float32Array, faces: Uint32Array): {
   const thicknessMm = extents[2].span;
 
   // Check if the member tapers along its primary length axis (e.g. a tapered table or stand leg)
-  let topSpan1 = 0, topSpan2 = 0, botSpan1 = 0, botSpan2 = 0;
   let topLo1 = Infinity, topHi1 = -Infinity, topLo2 = Infinity, topHi2 = -Infinity;
   let botLo1 = Infinity, botHi1 = -Infinity, botLo2 = Infinity, botHi2 = -Infinity;
   const lenBand = Math.max(15, lengthMm * 0.12);
@@ -371,10 +370,10 @@ function computeMemberObb(positionsMm: Float32Array, faces: Uint32Array): {
       if (d2 < topLo2) topLo2 = d2; if (d2 > topHi2) topHi2 = d2;
     }
   }
-  topSpan1 = topHi1 - topLo1;
-  topSpan2 = topHi2 - topLo2;
-  botSpan1 = botHi1 - botLo1;
-  botSpan2 = botHi2 - botLo2;
+  const topSpan1 = topHi1 - topLo1;
+  const topSpan2 = topHi2 - topLo2;
+  const botSpan1 = botHi1 - botLo1;
+  const botSpan2 = botHi2 - botLo2;
 
   const minEndW = Math.min(topSpan1, botSpan1);
   const maxEndW = Math.max(topSpan1, botSpan1);
@@ -763,8 +762,8 @@ export function extractTimberMembers(
   }
 
   // Compute overall assembly center for outward reference face assignment.
-  let minAll: Vec3 = [Infinity, Infinity, Infinity];
-  let maxAll: Vec3 = [-Infinity, -Infinity, -Infinity];
+  const minAll: Vec3 = [Infinity, Infinity, Infinity];
+  const maxAll: Vec3 = [-Infinity, -Infinity, -Infinity];
   const prelim = splitPieces.map((sp) => {
     const mesh = manifoldToMeshMm(sp.manifold);
     sp.manifold.delete();
@@ -805,8 +804,8 @@ export function extractTimberMembers(
     const role = plankInfo ? 'panel' : classifyRole(obb.axes, obb.dimsMm);
     const { face1, face2 } = chooseReferenceFaces(role, obb.centerMm, obb.axes, assemblyCenterMm);
 
-    let id = `Part_${index + 1}`;
-    let title = `Part ${index + 1}`;
+    let id: string;
+    let title: string;
     let cornerTag: CornerTag | undefined;
 
     if (role === 'leg') {

@@ -441,7 +441,7 @@ function shiftWorldPointByDraft(
     const apx = pt.x - ax, apy = pt.y - ay, apz = pt.z - az;
     const d1 = abx * apx + aby * apy + abz * apz;
     const d2 = acx * apx + acy * apy + acz * apz;
-    let u = 1, v = 0, w = 0;
+    let u: number, v: number, w: number;
     if (d1 <= 0 && d2 <= 0) {
       u = 1; v = 0; w = 0;
     } else {
@@ -529,16 +529,17 @@ export function draftBodyGeoms(node: SceneNode, world: THREE.Matrix4, p: DraftPa
     if (geom.textures?.length) {
       baked.textures = geom.textures.map((t) => ({
         ...t,
-        seedAt: mapPoint(t.seedAt),
-        seedNormal: t.seedNormal ? mapDir(t.seedNormal) : t.seedNormal,
+        seedAt: mapPoint(t.seedAt as [number, number, number]),
+        seedNormal: t.seedNormal ? mapDir(t.seedNormal as [number, number, number]) : t.seedNormal,
       }));
     }
     if (geom.faceSplits?.length) {
-      baked.faceSplits = geom.faceSplits.map((s) =>
-        s.kind === 'plane'
-          ? { ...s, at: mapPoint(s.at), normal: mapDir(s.normal) }
-          : { ...s, seeds: s.seeds.map(mapPoint) },
-      );
+      baked.faceSplits = geom.faceSplits.map((s) => ({
+        ...s,
+        at: mapPoint(s.at as [number, number, number]),
+        normal: mapDir(s.normal as [number, number, number]),
+        seeds: s.seeds.map((pt) => mapPoint(pt as [number, number, number])),
+      }));
     }
     if (geom.csgDerived) {
       // A boolean's mesh hands colliding and weight to its colliders, which

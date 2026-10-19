@@ -114,7 +114,7 @@ export function sanitizeAndNormalizeNodes(rawNodes: RawNode[], existingNodes: Ra
                 verticesZUp: n.verticesZUp,
                 renderVertices: n.renderVertices,
                 faces: n.faces,
-              },
+              } as RawGeom,
             ]
           : undefined;
 

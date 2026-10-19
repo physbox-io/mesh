@@ -64,7 +64,7 @@ import { lastReliefOptions } from '../utils/lastReliefOptions';
 import { ExportWorkerClient } from '../utils/exportWorkerClient';
 import { patternPickAt, patternSurfaces } from '../utils/facePatternPick';
 import { carryAcrossCut, knifeSoups, seamsAcross } from '../utils/knife';
-import { SURFACE_PATTERNS, patternById, type PatternOptions } from '../utils/surfacePatterns';
+import { SURFACE_PATTERNS, patternById } from '../utils/surfacePatterns';
 import {
   DEFAULT_TEXTURE_BORDER_M,
   DEFAULT_TEXTURE_CELL_M,
@@ -2154,7 +2154,7 @@ export function useMCPBridge() {
               dynamicTopology: s.dynamicTopology,
               delta: s.delta,
             }, sink);
-            totalVerticesChanged += lastResult.verticesChanged ?? 0;
+            totalVerticesChanged += lastResult.moved ?? 0;
 
             if (sink.undo) {
               const stack = sculptHistory.get(targetId) ?? [];

@@ -475,7 +475,7 @@ export function layoutText(font: FontLike, o: TextLayout): Contour[] {
   // On a path: one line, every glyph turned to the path where its middle falls.
   const run = setRun(font, o.text.replace(/\s*\r?\n\s*/g, ' '), em, tracking, o.weight, tol);
   let guide: Guide;
-  let along0 = 0;
+  let along0: number;
   let centreOnBounds = true;
   if (path === 'arc') {
     const side = o.arcSide ?? 'top';

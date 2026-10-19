@@ -447,6 +447,7 @@ function CastPrepSection({ isOpen: _isOpen, method, partingFromBaseMm }: {
   const [appliedKey, setAppliedKey] = useState<string | null>(() => (prep ? key : null));
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (!prep) setAppliedKey(null);
     else if (appliedKey === null) setAppliedKey(key);
   }, [prep, appliedKey, key]);

@@ -3453,7 +3453,9 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
           positions: shiftBuf(sec.positions),
           plainPositions: shiftBuf(sec.plainPositions),
           convexPieces: sec.convexPieces.map((p) => ({ positions: shiftBuf(p.positions), faces: p.faces })),
-          colliders: sec.colliders.map((c) => ({ ...c, pos: [c.pos[0] - cx, c.pos[1] - cy, c.pos[2] - cz] as [number, number, number] })),
+          colliders: sec.colliders.map((c) => (c.shape === 'prism'
+            ? { ...c, positions: c.positions.map((v, i) => v - (i % 3 === 0 ? cx : i % 3 === 1 ? cy : cz)) }
+            : { ...c, pos: [c.pos[0] - cx, c.pos[1] - cy, c.pos[2] - cz] as [number, number, number] })),
         },
       };
     };
@@ -5027,14 +5029,15 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
       return {
         textures: textures?.map((t) => ({
           ...t,
-          seedAt: pt(t.seedAt),
-          seedNormal: t.seedNormal ? dir(t.seedNormal) : t.seedNormal,
+          seedAt: pt(t.seedAt as [number, number, number]),
+          seedNormal: t.seedNormal ? dir(t.seedNormal as [number, number, number]) : t.seedNormal,
         })),
-        faceSplits: faceSplits?.map((s) =>
-          s.kind === 'plane'
-            ? { ...s, at: pt(s.at), normal: dir(s.normal) }
-            : { ...s, seeds: s.seeds.map(pt) },
-        ),
+        faceSplits: faceSplits?.map((s) => ({
+          ...s,
+          at: pt(s.at as [number, number, number]),
+          normal: dir(s.normal as [number, number, number]),
+          seeds: s.seeds.map((p) => pt(p as [number, number, number])),
+        })),
       };
     };
     const geoms = result.geoms.map((g: SceneGeom) => {

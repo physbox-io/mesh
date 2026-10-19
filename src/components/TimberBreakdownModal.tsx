@@ -128,6 +128,7 @@ export const TimberBreakdownModal: React.FC<{ isOpen: boolean; onClose: () => vo
 
   useEffect(() => {
     if (!isOpen || !collected.items.length) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setOutcome(null);
       return;
     }

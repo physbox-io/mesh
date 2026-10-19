@@ -23,8 +23,10 @@ import {
 } from '@physbox-io/machining';
 
 export class StreamAbortedError extends Error {
-  constructor(readonly reason: string) {
+  readonly reason: string;
+  constructor(reason: string) {
     super(`Job stream aborted (${reason})`);
+    this.reason = reason;
     this.name = 'StreamAbortedError';
   }
 }

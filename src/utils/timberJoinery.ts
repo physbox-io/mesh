@@ -20,7 +20,6 @@ import {
   extractTimberMembers,
   manifoldToMeshMm,
   meshMmToManifold,
-  type MemberRole,
   type TimberMember,
 } from './timberBreakdown';
 import type { FeatureCollider, JoineryFeature, SplitSection } from './printSplit';
