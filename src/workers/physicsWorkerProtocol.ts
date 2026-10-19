@@ -106,6 +106,8 @@ export interface BodyHistory {
   vel: number[];
   angvel: number[];
   xfrc_applied: number[];
+  /** World orientation [w, x, y, z], for the tilt a headless run reports. */
+  quat?: number[];
 }
 
 export interface JointHistory {

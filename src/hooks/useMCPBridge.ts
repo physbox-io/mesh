@@ -6,6 +6,7 @@
 import { useEffect } from 'react';
 import { getStoredAuthToken } from '../utils/apiClient';
 import { tabSession } from '../utils/tabSession';
+import { summarizeTrajectory } from '../utils/trajectorySummary';
 import { useStore, getPhysicsWorkerClient } from '../store/useStore';
 import { useDentStore } from '../store/dentStore';
 import { isDentable, needsConversionForDenting } from '../utils/dentMesh';
@@ -1850,6 +1851,10 @@ export function useMCPBridge() {
               ...fr,
               bodies: Object.fromEntries(Object.entries(fr.bodies || {}).filter(([k]) => bodyFilter.has(k))),
             }));
+          }
+          // How it ended, so the trajectory need not be read to find out.
+          if (result.ok && result.trajectory) {
+            return { ...result, final: summarizeTrajectory(result.trajectory) };
           }
           return result;
         }

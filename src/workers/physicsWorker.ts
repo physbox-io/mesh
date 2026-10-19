@@ -660,6 +660,7 @@ const buildHistoryEntry = (aeroDiagnostics: Record<string, AeroDiagnostic>): His
         const cvel = dat.cvel;
         const xfrc = dat.xfrc_applied;
         const xpos = dat.xpos;
+        const xquat = dat.xquat;
         const bodyDofnum = mdl.body_dofnum;
         const bodyParentid = mdl.body_parentid;
         let pId = bId;
@@ -677,6 +678,7 @@ const buildHistoryEntry = (aeroDiagnostics: Record<string, AeroDiagnostic>): His
         const vz = vO_z + (wx * ry - wy * rx);
         bodies[node.id] = {
           pos: [x_pos, y_pos, z_pos], vel: [vx, vy, vz], angvel: [wx, wy, wz],
+          quat: [xquat[bId * 4], xquat[bId * 4 + 1], xquat[bId * 4 + 2], xquat[bId * 4 + 3]],
           xfrc_applied: [
             xfrc[bId * 6 + 0], xfrc[bId * 6 + 1], xfrc[bId * 6 + 2],
             xfrc[bId * 6 + 3], xfrc[bId * 6 + 4], xfrc[bId * 6 + 5],
