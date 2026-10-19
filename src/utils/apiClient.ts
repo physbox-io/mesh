@@ -34,6 +34,8 @@ export interface MachiningTelemetry {
    */
   documentId?: string | null;
   documentRevision?: number | null;
+  /** The document holding the program a browser streamed (Pro only), so the run archive can serve it. */
+  programDocumentId?: string | null;
   settings?: Record<string, unknown> | null;
 }
 

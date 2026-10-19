@@ -52,6 +52,7 @@ import {
   adoptCheckpoint,
   beginCheckpoint,
   clearCheckpoint,
+  getRunProgramDocumentId,
   recordProgress,
   type CheckpointProgram,
   type PendingPause,
@@ -814,6 +815,9 @@ class WebSerialManager extends GrblMachine<MachineState> {
       // document, which is the ordinary case for a free or signed-out session.
       documentId: cloudAutosave.getStatus().documentId,
       documentRevision: cloudAutosave.getStatus().revision,
+      // The program itself, stored as its own document when the account is Pro,
+      // so the archive can say what was cut and not only how it went.
+      programDocumentId: getRunProgramDocumentId(),
     })
       .then((commands) => this.applyRemoteCommands(commands))
       .finally(() => {

@@ -56,6 +56,17 @@ import { tabSession } from './tabSession';
  */
 const APP_ID = 'physics-job';
 
+/**
+ * The archived program of a run, kept after the job ends.
+ *
+ * The checkpoint above is deleted when a job finishes, and its id is the same
+ * for every job on an install, so it cannot be what a run in the archive points
+ * at. This copy is one document per job start, named in telemetry, and served
+ * back by `GET /api/runs/:id/gcode`. Nothing here deletes it; deleting the run
+ * does.
+ */
+const RUN_PROGRAM_APP_ID = 'physics-run-program';
+
 const PROGRAM_KEY = 'physics_job_checkpoint_program';
 const PROGRESS_KEY = 'physics_job_checkpoint_progress';
 /** This browser's identity, so its own records can be found again by id. */
@@ -237,6 +248,8 @@ let cloudPending: CheckpointProgress | null = null;
 /** The last line recorded, so the heartbeat can say it again with a fresh time. */
 let lastRecorded: { fromLine: number; reason: CheckpointReason } | null = null;
 let heartbeat: ReturnType<typeof setInterval> | null = null;
+/** The stored program of the job last started here, once its upload landed. */
+let runProgramDocumentId: string | null = null;
 
 let remoteJob: RemoteJob | null = null;
 const remoteListeners = new Set<(j: RemoteJob | null) => void>();
@@ -353,6 +366,20 @@ function programDocId(): string {
   return `mesh-job-program-${installId()}`;
 }
 
+function runProgramDocId(programId: string): string {
+  return `mesh-run-program-${programId}`;
+}
+
+/**
+ * The document holding the program of the job last started or resumed here, for
+ * telemetry to name. Null until the upload lands, and for a signed-out or free
+ * session, where nothing is uploaded. It outlives the job on purpose: the frame
+ * that closes a run is sent after the job has ended.
+ */
+export function getRunProgramDocumentId(): string | null {
+  return runProgramDocumentId;
+}
+
 function progressDocId(): string {
   return `mesh-job-progress-${installId()}`;
 }
@@ -395,6 +422,7 @@ export function beginCheckpoint(input: {
   lastLocalWrite = 0;
   lastCloudWrite = 0;
   cloudPending = null;
+  runProgramDocumentId = null;
 
   // Measured on the string rather than on `JSON.stringify` of the record: the
   // difference is the escaping, and the point of the number is to be quoted to
@@ -423,6 +451,21 @@ export function beginCheckpoint(input: {
     })
       .then(() => setStatus({ cloud: true }))
       .catch(() => setStatus({ cloud: false }));
+
+    const runDocId = runProgramDocId(program.id);
+    void putCloudDocument({
+      id: runDocId,
+      appId: RUN_PROGRAM_APP_ID,
+      name: program.jobName || 'Untitled job',
+      data: { version: 1, gcode: program.gcode, jobName: program.jobName, startedAt: program.startedAt },
+    })
+      .then(() => {
+        // A later job may have started while this was uploading.
+        if (current?.id === program.id) runProgramDocumentId = runDocId;
+      })
+      .catch(() => {
+        /* the run is archived without its program, as before */
+      });
   }
 
   return getCheckpointStatus();
@@ -654,6 +697,9 @@ export function adoptCheckpoint(program: CheckpointProgram): void {
   lastLocalWrite = 0;
   lastCloudWrite = 0;
   cloudPending = null;
+  // The resumed run is the same program, stored when the job first started. If
+  // that upload never landed the server answers "no longer stored", which is true.
+  runProgramDocumentId = cloudAvailable() ? runProgramDocId(program.id) : null;
 
   /*
    * Written back down, not just remembered.

@@ -66,6 +66,7 @@ import {
   clearCheckpoint,
   loadCheckpoint,
   getCheckpointStatus,
+  getRunProgramDocumentId,
   subscribeRemoteJob,
   CHECKPOINT_LIMITS,
   type RemoteJob,
@@ -288,7 +289,42 @@ describe('a program too big for the browser', () => {
     await settle();
 
     expect(account.deletes).toBeGreaterThan(0);
-    expect(account.docs.size).toBe(0);
+    // Only the run's archived program is left; the checkpoint is gone.
+    expect([...account.docs.keys()].every((id) => id.startsWith('mesh-run-program-'))).toBe(true);
+  });
+});
+
+describe('the program a run archives', () => {
+  it('is stored once per job start and outlives the job', async () => {
+    account.token = 'tok';
+    account.pro = true;
+    const p = program(4000);
+    beginCheckpoint({ ...p, jobName: 'Tray' });
+    expect(getRunProgramDocumentId()).toBeNull();
+    await settle();
+
+    const id = getRunProgramDocumentId();
+    expect(id).toMatch(/^mesh-run-program-/);
+    expect((account.docs.get(id!) as { gcode: string }).gcode).toBe(p.gcode);
+
+    // The frame that closes the run is sent after the job has cleared.
+    clearCheckpoint();
+    await settle();
+    expect(getRunProgramDocumentId()).toBe(id);
+    expect(account.docs.has(id!)).toBe(true);
+
+    beginCheckpoint(program(2000));
+    expect(getRunProgramDocumentId()).toBeNull();
+    await settle();
+    expect(getRunProgramDocumentId()).not.toBe(id);
+  });
+
+  it('is not uploaded for a free account', async () => {
+    account.token = 'tok';
+    account.pro = false;
+    beginCheckpoint(program(4000));
+    await settle();
+    expect(getRunProgramDocumentId()).toBeNull();
   });
 });
 
