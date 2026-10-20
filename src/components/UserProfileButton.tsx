@@ -446,20 +446,26 @@ export const UserProfileButton: React.FC = () => {
           document.body
         )}
 
-      <RemoteMachiningModal isOpen={showRemoteModal} onClose={() => setShowRemoteModal(false)} />
+      {showRemoteModal && (
+        <RemoteMachiningModal isOpen={showRemoteModal} onClose={() => setShowRemoteModal(false)} />
+      )}
 
       {/* Job History Modal */}
-      <JobHistoryModal isOpen={showHistoryModal} onClose={() => setShowHistoryModal(false)} />
+      {showHistoryModal && (
+        <JobHistoryModal isOpen={showHistoryModal} onClose={() => setShowHistoryModal(false)} />
+      )}
 
       {/* Cloud auto-save status. Renders nothing unless there is something to say,
           and mounted here only because this component is always on screen — it
           paints itself into a corner through a portal. */}
       <CloudSaveStatus />
-      <GuestListModal
-        isOpen={showGuestModal}
-        onClose={() => setShowGuestModal(false)}
-        userEmail={user?.email || ''}
-      />
+      {showGuestModal && (
+        <GuestListModal
+          isOpen={showGuestModal}
+          onClose={() => setShowGuestModal(false)}
+          userEmail={user?.email || ''}
+        />
+      )}
     </div>
   );
 };

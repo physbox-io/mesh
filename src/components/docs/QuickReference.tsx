@@ -42,7 +42,7 @@ function Converter() {
   const mmNum = Number(mmText);
   const mmInch = mmText.trim() !== '' && Number.isFinite(mmNum) ? mmNum / MM_PER_INCH : null;
 
-  const inputCls = 'w-28 px-2.5 py-1.5 text-sm font-mono rounded-lg border border-slate-200 focus:outline-none focus:border-blue-400';
+  const inputCls = 'w-28 px-2.5 py-1.5 text-sm font-mono rounded-lg bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100 border border-slate-200 dark:border-slate-700 focus:outline-none focus:border-blue-400';
   return (
     <div className="bg-slate-50 border border-slate-200/60 rounded-xl p-4 flex flex-col gap-3 text-sm">
       <label className="flex items-center gap-2 flex-wrap">

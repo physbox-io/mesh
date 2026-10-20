@@ -27,7 +27,7 @@ export function SettingsPopover() {
     isSettingsOpen: s.isSettingsOpen, setSettingsOpen: s.setSettingsOpen,
     gravityZ: s.gravityZ, windX: s.windX, windY: s.windY, density: s.density, floorFriction: s.floorFriction, floorBounce: s.floorBounce, setEnvironment: s.setEnvironment,
   })));
-  const llm = useLlmSettings();
+  const llm = useLlmSettings(isSettingsOpen);
   if (!isSettingsOpen) return null;
   return (
     /* Anchored to the settings button on a desktop. Below `lg` there is

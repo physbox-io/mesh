@@ -425,7 +425,7 @@ export default function AICopilotPanel({ onClose, messages: propsMessages, setMe
       if (claudeApiKey) {
         void fetchAvailableClaudeModels(claudeApiKey);
       }
-    }, 0);
+    }, 400);
     return () => clearTimeout(timer);
   }, [geminiApiKey, claudeApiKey]);
 
@@ -460,7 +460,6 @@ export default function AICopilotPanel({ onClose, messages: propsMessages, setMe
     localStorage.setItem('gemini_api_key', key);
     pushGlobalParameter('gemini_api_key', key);
     window.dispatchEvent(new Event('storage'));
-    if (key.trim()) fetchAvailableModels(key.trim());
   };
 
   const saveClaudeApiKey = async (key: string) => {

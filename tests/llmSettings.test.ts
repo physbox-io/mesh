@@ -2,10 +2,10 @@
 // will reject, including when localStorage holds junk from an older build or a
 // hand-edited value.
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   DEFAULT_MAX_TOKENS, MIN_MAX_TOKENS, MAX_MAX_TOKENS,
-  MAX_TOKENS_STORAGE_KEY, clampMaxTokens, readMaxTokens, writeMaxTokens,
+  MAX_TOKENS_STORAGE_KEY, clampMaxTokens, readMaxTokens, writeMaxTokens, pushGlobalParameter,
 } from '../src/utils/llmSettings';
 
 let store: Record<string, string> = {};
@@ -78,5 +78,26 @@ describe('readMaxTokens', () => {
     };
     expect(readMaxTokens()).toBe(DEFAULT_MAX_TOKENS);
     expect(writeMaxTokens(50000)).toBe(50000);
+  });
+
+  it('coalesces rapid pushGlobalParameter calls for the same key into a single cloud sync', async () => {
+    vi.useFakeTimers();
+    try {
+      const apiClient = await import('../src/utils/apiClient');
+      const spy = vi.spyOn(apiClient, 'syncCloudParameters').mockResolvedValue();
+
+      pushGlobalParameter('gemini_api_key', 'A');
+      pushGlobalParameter('gemini_api_key', 'AI');
+      pushGlobalParameter('gemini_api_key', 'AIz');
+      pushGlobalParameter('gemini_api_key', 'AIzaSyTest');
+      expect(spy).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(450);
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(spy).toHaveBeenCalledWith('global', { gemini_api_key: 'AIzaSyTest' });
+      spy.mockRestore();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

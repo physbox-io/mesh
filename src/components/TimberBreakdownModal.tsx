@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   AlertTriangle,
   CheckCircle2,
@@ -17,18 +17,17 @@ import { NumberInput } from '@physbox-io/ui';
 import { useStore } from '../store/useStore';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { useSettled } from '../hooks/useSettled';
-import { loadManifold } from '../utils/sculptCut';
+import { useExportJob } from '../utils/exportWorkerClient';
 import { collectIndividualPartSoups } from '../utils/timberBreakdown';
 import {
   DEFAULT_TIMBER_JOINERY_OPTIONS,
-  synthesizeTimberJoinery,
   type TenonCornerFit,
   type TimberBreakdownOutcome,
   type TimberEdgeProfile,
   type TimberJoineryOptions,
   type TimberJointMode,
 } from '../utils/timberJoinery';
-import { buildTimberCutPlan, type CncWindowSetup, type TimberCutPlan } from '../utils/timberCutList';
+import type { CncWindowSetup, TimberCutPlan } from '../utils/timberCutList';
 import { downloadBlob } from '../utils/downloadBlob';
 import { utf8, zipStore } from '../utils/zipStore';
 import { webSerialManager } from '../utils/webSerialManager';
@@ -98,8 +97,6 @@ export const TimberBreakdownModal: React.FC<{ isOpen: boolean; onClose: () => vo
   const [explodeMm, setExplodeMm] = useState(32);
   const [isolatedPartIdx, setIsolatedPartIdx] = useState<number | null>(null);
   const [activeTab, setActiveTab] = useState<'cards' | 'bom' | 'glue'>('cards');
-  const [busy, setBusy] = useState(false);
-  const [outcome, setOutcome] = useState<TimberBreakdownOutcome | null>(null);
 
   // Target multi-selection, a multi-part assembly node, or all root nodes in the scene
   // so clicking a single leg or rail before opening Joinery still includes its mating parts.
@@ -123,47 +120,34 @@ export const TimberBreakdownModal: React.FC<{ isOpen: boolean; onClose: () => vo
     () => (isOpen && targetIds.length ? collectIndividualPartSoups(sceneGraph, targetIds) : { items: [], absorbed: [] }),
     [isOpen, sceneGraph, targetIds],
   );
+  const soups = useMemo(() => collected.items.map((it) => it.soup), [collected.items]);
 
   const settledOpts = useSettled(joineryOpts, 250);
+  const settledStockLengthMm = useSettled(stockLengthMm, 250);
+  const cncBedMm = useMemo<[number, number, number]>(
+    () => [stock.widthMm, stock.depthMm, Math.max(40, stock.thicknessMm * 2)],
+    [stock.widthMm, stock.depthMm, stock.thicknessMm],
+  );
 
-  useEffect(() => {
-    if (!isOpen || !collected.items.length) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setOutcome(null);
-      return;
-    }
-    let cancelled = false;
-    setBusy(true);
-    void loadManifold()
-      .then((wasm) => {
-        if (cancelled) return;
-        const soups = collected.items.map((it) => it.soup);
-        const res = synthesizeTimberJoinery(wasm, soups, settledOpts);
-        if (!cancelled) {
-          setOutcome(res);
-          setBusy(false);
-        }
-      })
-      .catch((err: unknown) => {
-        if (!cancelled) {
-          setOutcome({ ok: false, error: err instanceof Error ? err.message : String(err) });
-          setBusy(false);
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [isOpen, collected, settledOpts]);
+  const { result: timberJob, busy, failure } = useExportJob(
+    isOpen,
+    (client) =>
+      soups.length
+        ? client.run('timber', sceneGraph, {
+            soups,
+            joineryOptions: settledOpts,
+            cncBedMm,
+            defaultStockLengthMm: settledStockLengthMm,
+          })
+        : null,
+    [soups, settledOpts, cncBedMm, settledStockLengthMm],
+  );
 
+  const outcome: TimberBreakdownOutcome | null = failure
+    ? { ok: false, error: failure }
+    : (timberJob?.outcome ?? null);
   const breakdown = outcome?.ok ? outcome : null;
-
-  const cutPlan: TimberCutPlan | null = useMemo(() => {
-    if (!breakdown) return null;
-    return buildTimberCutPlan(breakdown, {
-      cncBedMm: [stock.widthMm, stock.depthMm, Math.max(40, stock.thicknessMm * 2)],
-      defaultStockLengthMm: stockLengthMm,
-    });
-  }, [breakdown, stock.widthMm, stock.depthMm, stock.thicknessMm, stockLengthMm]);
+  const cutPlan: TimberCutPlan | null = timberJob?.cutPlan ?? null;
 
   const previewSections: PreviewSection[] = useMemo(() => {
     if (!breakdown) return [];

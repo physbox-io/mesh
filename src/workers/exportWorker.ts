@@ -24,13 +24,13 @@ type Incoming = {
 
 let scene: SceneGraph = { nodes: [] };
 
-self.onmessage = (evt: MessageEvent<Incoming>) => {
+self.onmessage = async (evt: MessageEvent<Incoming>) => {
   const msg = evt.data;
   if (msg.type !== 'RUN') return;
   if (msg.scene) scene = msg.scene;
   try {
     let last = -1;
-    const result = runExportJob(msg.kind, scene, msg.options, (fraction) => {
+    const result = await runExportJob(msg.kind, scene, msg.options, (fraction) => {
       // Whole percent steps: a message per G-code line would flood the page.
       const pct = Math.floor(fraction * 100);
       if (pct === last) return;

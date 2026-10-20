@@ -1,9 +1,10 @@
-import { useState, type RefObject } from 'react';
+import { useEffect, useState, type RefObject } from 'react';
 import type * as THREE from 'three';
 import { useStore } from '../store/useStore';
 import { usePanels } from '../store/panelsStore';
 import type { NoteCard } from '../utils/noteCards';
 import { useMeshExport } from '../hooks/useMeshExport';
+import { webSerialManager } from '../utils/webSerialManager';
 import { ExportLaserCutModal } from './ExportLaserCutModal';
 import { ExportContourSliceModal } from './ExportContourSliceModal';
 import { ExportReliefCarveModal } from './ExportReliefCarveModal';
@@ -25,7 +26,6 @@ export function FabricationModals({ threeSceneRef, noteCards }: {
   threeSceneRef: RefObject<THREE.Scene | null>;
   noteCards: NoteCard[];
 }) {
-  const sceneGraph = useStore((s) => s.sceneGraph);
   // The machine setup lives in the store rather than in local state: the bottom
   // bar opens it, and the export modals link to it when a job needs a machine
   // that is not connected yet.
@@ -43,62 +43,107 @@ export function FabricationModals({ threeSceneRef, noteCards }: {
   const [isCastModalOpen, setIsCastModalOpen] = useState(false);
   const [isSplitModalOpen, setIsSplitModalOpen] = useState(false);
   const [isJoineryModalOpen, setIsJoineryModalOpen] = useState(false);
+
+  // Subscribe to sceneGraph only while a scene-consuming export modal is open,
+  // so editing the scene does not re-render the bottom bar or closed modals.
+  const anySceneModalOpen =
+    isLaserCutModalOpen ||
+    isContourSliceModalOpen ||
+    isReliefCarveModalOpen ||
+    isMoldModalOpen ||
+    isSolidModalOpen ||
+    isCastModalOpen;
+  const sceneGraph = useStore((s) => (anySceneModalOpen ? s.sceneGraph : null));
+
+  // Resume a previously connected USB or cloud machine once on app startup
+  // even while MachineConfigModal is not mounted.
+  useEffect(() => {
+    if (webSerialManager.getState().connected) return;
+    const link = localStorage.getItem('physbox.machineLink') || 'usb';
+    if (link !== 'cloud') {
+      void webSerialManager.autoConnect().catch(() => {});
+      return;
+    }
+    const selectedDevice = localStorage.getItem('physbox.cloudDeviceId') || '';
+    if (!selectedDevice) return;
+    void webSerialManager.connect({ kind: 'cloud', deviceId: selectedDevice }).catch(() => {});
+  }, []);
+
   const { exportStl, export3mf } = useMeshExport(threeSceneRef, noteCards);
   return (
     <>
-      {/* The zeroing walkthrough is deep-linked from the shared Machine Setup
-          dialog now, rather than from a copy of the machine panel in each of
-          these — see MachineConfigModal below. */}
-      <ExportLaserCutModal
-        isOpen={isLaserCutModalOpen}
-        onClose={() => setIsLaserCutModalOpen(false)}
-        scene={sceneGraph}
-      />
+      {/* Mounted only while open so closed modals do not run hooks, worker
+          settle timers, or scene tree walks on every edit. */}
+      {isLaserCutModalOpen && sceneGraph && (
+        <ExportLaserCutModal
+          isOpen={isLaserCutModalOpen}
+          onClose={() => setIsLaserCutModalOpen(false)}
+          scene={sceneGraph}
+        />
+      )}
 
-      <ExportContourSliceModal
-        isOpen={isContourSliceModalOpen}
-        onClose={() => setIsContourSliceModalOpen(false)}
-        scene={sceneGraph}
-      />
+      {isContourSliceModalOpen && sceneGraph && (
+        <ExportContourSliceModal
+          isOpen={isContourSliceModalOpen}
+          onClose={() => setIsContourSliceModalOpen(false)}
+          scene={sceneGraph}
+        />
+      )}
 
-      <ExportReliefCarveModal
-        isOpen={isReliefCarveModalOpen}
-        onClose={() => setIsReliefCarveModalOpen(false)}
-        scene={sceneGraph}
-        onMachineAsPart={(seed) => {
-          setIsReliefCarveModalOpen(false);
-          setSolidSeed(seed);
-          setIsSolidModalOpen(true);
-        }}
-      />
+      {isReliefCarveModalOpen && sceneGraph && (
+        <ExportReliefCarveModal
+          isOpen={isReliefCarveModalOpen}
+          onClose={() => setIsReliefCarveModalOpen(false)}
+          scene={sceneGraph}
+          onMachineAsPart={(seed) => {
+            setIsReliefCarveModalOpen(false);
+            setSolidSeed(seed);
+            setIsSolidModalOpen(true);
+          }}
+        />
+      )}
 
-      <ExportMoldModal
-        isOpen={isMoldModalOpen}
-        onClose={() => setIsMoldModalOpen(false)}
-        scene={sceneGraph}
-      />
-      <ExportSolidMachiningModal
-        isOpen={isSolidModalOpen}
-        onClose={() => {
-          setIsSolidModalOpen(false);
-          setSolidSeed(null);
-        }}
-        scene={sceneGraph}
-        seed={solidSeed}
-      />
-      <ExportCastModal
-        isOpen={isCastModalOpen}
-        onClose={() => setIsCastModalOpen(false)}
-        scene={sceneGraph}
-      />
-      <SplitForPrintModal
-        isOpen={isSplitModalOpen}
-        onClose={() => setIsSplitModalOpen(false)}
-      />
-      <TimberBreakdownModal
-        isOpen={isJoineryModalOpen}
-        onClose={() => setIsJoineryModalOpen(false)}
-      />
+      {isMoldModalOpen && sceneGraph && (
+        <ExportMoldModal
+          isOpen={isMoldModalOpen}
+          onClose={() => setIsMoldModalOpen(false)}
+          scene={sceneGraph}
+        />
+      )}
+
+      {isSolidModalOpen && sceneGraph && (
+        <ExportSolidMachiningModal
+          isOpen={isSolidModalOpen}
+          onClose={() => {
+            setIsSolidModalOpen(false);
+            setSolidSeed(null);
+          }}
+          scene={sceneGraph}
+          seed={solidSeed}
+        />
+      )}
+
+      {isCastModalOpen && sceneGraph && (
+        <ExportCastModal
+          isOpen={isCastModalOpen}
+          onClose={() => setIsCastModalOpen(false)}
+          scene={sceneGraph}
+        />
+      )}
+
+      {isSplitModalOpen && (
+        <SplitForPrintModal
+          isOpen={isSplitModalOpen}
+          onClose={() => setIsSplitModalOpen(false)}
+        />
+      )}
+
+      {isJoineryModalOpen && (
+        <TimberBreakdownModal
+          isOpen={isJoineryModalOpen}
+          onClose={() => setIsJoineryModalOpen(false)}
+        />
+      )}
 
       <BottomStatusBar
         onOpenMachineConfig={() => setMachineConfigOpen(true)}
@@ -116,12 +161,14 @@ export function FabricationModals({ threeSceneRef, noteCards }: {
         }}
       />
 
-      <MachineConfigModal
-        isOpen={isMachineConfigOpen}
-        onClose={() => setMachineConfigOpen(false)}
-        onOpenDocs={() => openDocs('zeroing')}
-        machineTarget={machineTarget}
-      />
+      {isMachineConfigOpen && (
+        <MachineConfigModal
+          isOpen={isMachineConfigOpen}
+          onClose={() => setMachineConfigOpen(false)}
+          onOpenDocs={() => openDocs('zeroing')}
+          machineTarget={machineTarget}
+        />
+      )}
     </>
   );
 }

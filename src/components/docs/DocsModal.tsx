@@ -18,16 +18,16 @@ export function DocsModal({ tab, onTab, onClose }: {
 }) {
   return (
     <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[60] flex items-center justify-center p-4">
-      <div className="bg-white rounded-2xl border border-slate-100 shadow-2xl max-w-4xl w-full max-h-[85dvh] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+      <div className="docs-modal bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100 rounded-2xl border border-slate-100 dark:border-slate-800 shadow-2xl max-w-4xl w-full max-h-[85dvh] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-200">
         {/* Modal Header */}
-        <div className="px-6 py-4 border-b border-slate-150 flex items-center justify-between bg-slate-50">
+        <div className="px-6 py-4 border-b border-slate-150 dark:border-slate-800 flex items-center justify-between bg-slate-50 dark:bg-slate-950/60">
           <div className="flex items-center gap-2">
             <Info className="w-5 h-5 text-blue-500" />
-            <h2 className="font-bold text-slate-800 text-base">PhysBox Reference Guide</h2>
+            <h2 className="font-bold text-slate-800 dark:text-slate-100 text-base">PhysBox Reference Guide</h2>
           </div>
           <button aria-label="Close" title="Close" 
             onClick={() => onClose()}
-            className="p-1 rounded-lg hover:bg-slate-200 text-slate-400 hover:text-slate-600 transition-colors cursor-pointer"
+            className="p-1 rounded-lg hover:bg-slate-200 dark:hover:bg-slate-800 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-colors cursor-pointer"
           >
             <X className="w-5 h-5" />
           </button>
@@ -39,15 +39,15 @@ export function DocsModal({ tab, onTab, onClose }: {
           {/* The tab rail keeps every section reachable on a phone rather
               than collapsing into a picker, but at a width that leaves the
               prose it navigates worth reading. */}
-          <div className="w-48 max-sm:w-28 bg-slate-50 border-r border-slate-150 p-3 max-sm:p-2 flex flex-col gap-1 shrink-0 overflow-y-auto">
+          <div className="w-48 max-sm:w-28 bg-slate-50 dark:bg-slate-950/60 border-r border-slate-150 dark:border-slate-800 p-3 max-sm:p-2 flex flex-col gap-1 shrink-0 overflow-y-auto">
             {DOCS_TABS.map(({ group, items }) => (
               <div key={group} className="flex flex-col gap-1 mb-1.5">
-                <span className="px-1 pt-1.5 text-[9px] font-bold uppercase tracking-wider text-slate-400">{group}</span>
+                <span className="px-1 pt-1.5 text-[9px] font-bold uppercase tracking-wider text-slate-400 dark:text-slate-500">{group}</span>
                 {items.map(({ id, label }) => (
                   <button
                     key={id}
                     onClick={() => onTab(id)}
-                    className={`px-3 py-1.5 text-left rounded-lg text-xs font-semibold transition-all ${tab === id ? 'bg-blue-500 text-white shadow' : 'text-slate-600 hover:bg-slate-100'}`}
+                    className={`px-3 py-1.5 text-left rounded-lg text-xs font-semibold transition-all ${tab === id ? 'bg-blue-500 text-white shadow' : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'}`}
                   >
                     {label}
                   </button>

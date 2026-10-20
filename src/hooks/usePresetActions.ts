@@ -21,8 +21,8 @@ export type PresetEntry = { name: string; emoji?: string };
  */
 export function usePresetActions(doc: SceneDocument) {
   const { noteCards, copilotMessages, markClean, replaceDocument } = doc;
-  const { model, data, mujoco, activePreset, sceneGraph, loadPreset } = useStore(useShallow((s) => ({
-    model: s.model, data: s.data, mujoco: s.mujoco, activePreset: s.activePreset,
+  const { mujoco, activePreset, sceneGraph, loadPreset } = useStore(useShallow((s) => ({
+    mujoco: s.mujoco, activePreset: s.activePreset,
     sceneGraph: s.sceneGraph, loadPreset: s.loadPreset,
   })));
   const showNotice = useDialogs((s) => s.showNotice);
@@ -79,6 +79,7 @@ export function usePresetActions(doc: SceneDocument) {
     const trimmed = name.trim();
     if (!trimmed) return;
     try {
+      const { model, data } = useStore.getState();
       const syncedScene = getSyncedSceneGraph(sceneGraph, model, data, mujoco);
       const preset = { ...syncedScene, noteCards, copilotMessages };
       /*
@@ -104,7 +105,7 @@ export function usePresetActions(doc: SceneDocument) {
       console.error('Failed to save user preset', e);
       showNotice('Could not save preset', `Could not save "${trimmed}": ${e instanceof Error ? e.message : String(e)}`, 'red');
     }
-  }, [sceneGraph, model, data, mujoco, noteCards, copilotMessages, markClean, showNotice]);
+  }, [sceneGraph, mujoco, noteCards, copilotMessages, markClean, showNotice]);
 
   /*
    * Cloud auto-save.
@@ -132,16 +133,19 @@ export function usePresetActions(doc: SceneDocument) {
       const name = activePreset?.startsWith('user:') ? activePreset.slice('user:'.length) : 'Untitled scene';
       // Built only when the save actually serialises it: with auto-save off, or
       // inside the coalescing window, cloning the scene here was wasted work.
-      cloudAutosave.schedule(name, () => ({
-        ...getSyncedSceneGraph(sceneGraph, model, data, mujoco),
-        noteCards,
-        copilotMessages,
-      }));
+      cloudAutosave.schedule(name, () => {
+        const { model, data } = useStore.getState();
+        return {
+          ...getSyncedSceneGraph(sceneGraph, model, data, mujoco),
+          noteCards,
+          copilotMessages,
+        };
+      });
     } catch {
       // A scene that cannot be synced cannot be saved to anything; the local paths
       // have the same problem and there is nothing useful to add here.
     }
-  }, [sceneGraph, noteCards, copilotMessages, model, data, mujoco, activePreset]);
+  }, [sceneGraph, noteCards, copilotMessages, mujoco, activePreset]);
 
   const handleSavePresetClick = useCallback(() => {
     const defaultName = activePreset && activePreset.startsWith('user:')

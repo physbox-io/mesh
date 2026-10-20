@@ -68,15 +68,26 @@ export const SYNCED_LLM_PARAMETER_KEYS: readonly string[] = [
   MAX_TOKENS_STORAGE_KEY,
 ];
 
+const pendingParamPushes = new Map<string, ReturnType<typeof setTimeout>>();
+
 /**
  * Mirrors one copilot setting to the account.
  *
- * Fire-and-forget, and a no-op when signed out: the local write has already
- * happened by the time this is called, and a failed upload must never be the
- * reason a setting does not stick.
+ * Fire-and-forget, debounced per key so typing an API key or dragging the
+ * token-budget slider coalesces into a single cloud write, and a no-op when
+ * signed out: the local write has already happened by the time this is called,
+ * and a failed upload must never be the reason a setting does not stick.
  */
 export const pushGlobalParameter = (key: string, value: string | number): void => {
-  void import('./apiClient').then(({ syncCloudParameters }) => {
-    void syncCloudParameters('global', { [key]: value });
-  });
+  const prev = pendingParamPushes.get(key);
+  if (prev !== undefined) clearTimeout(prev);
+  pendingParamPushes.set(
+    key,
+    setTimeout(() => {
+      pendingParamPushes.delete(key);
+      void import('./apiClient').then(({ syncCloudParameters }) => {
+        void syncCloudParameters('global', { [key]: value });
+      });
+    }, 400),
+  );
 };

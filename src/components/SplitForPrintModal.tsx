@@ -76,7 +76,16 @@ export const SplitForPrintModal: React.FC<{ isOpen: boolean; onClose: () => void
   );
   const soups = part.soups;
 
-  useEffect(() => { if (isOpen) prewarmPrintSplit(); }, [isOpen]);
+  useEffect(() => {
+    if (isOpen) {
+      prewarmPrintSplit();
+    } else {
+      run.current = null;
+      setLanded(null);
+      setAssembly(null);
+      setReplayRange(null);
+    }
+  }, [isOpen]);
 
   // One object per real change: useSettled waits on identity, and a fresh
   // object each render would never settle.

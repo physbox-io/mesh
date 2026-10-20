@@ -71,7 +71,11 @@ export const MachineConfigModal: React.FC<{
     () => localStorage.getItem('physbox.cloudDeviceId') || ''
   );
 
-  useEffect(() => webSerialManager.addListener(setMachineState), []);
+  useEffect(() => {
+    if (!isOpen) return;
+    setMachineState(webSerialManager.getState());
+    return webSerialManager.addListener(setMachineState);
+  }, [isOpen]);
 
   /*
    * The spindle's real top speed, for a router whose `$30` is not it. The box

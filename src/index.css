@@ -306,9 +306,79 @@ aside.glass-panel .bg-blue-50 {
   color: #fda4af;
 }
 
-.dark aside.glass-panel .bg-sky-50 {
+.dark aside.glass-panel .bg-sky-50,
+.dark .docs-modal .bg-sky-50 {
   background-color: rgba(14, 165, 233, 0.15);
   border-color: rgba(56, 189, 248, 0.45);
+  color: #7dd3fc;
+}
+
+/* Reference Guide (DocsModal) dark mode overrides */
+.dark .docs-modal .bg-white {
+  background-color: #0f172a;
+  border-color: #1e293b;
+}
+.dark .docs-modal .bg-slate-50 {
+  background-color: #090d16;
+  border-color: #1e293b;
+}
+.dark .docs-modal .bg-slate-100 {
+  background-color: #1e293b;
+  color: #e2e8f0;
+}
+.dark .docs-modal .bg-slate-200 {
+  background-color: #334155;
+  color: #f1f5f9;
+}
+.dark .docs-modal .bg-blue-50 {
+  background-color: rgba(2, 132, 199, 0.12);
+  border-color: rgba(56, 189, 248, 0.25);
+  color: #38bdf8;
+}
+.dark .docs-modal .bg-amber-50 {
+  background-color: rgba(245, 158, 11, 0.12);
+  border-color: rgba(245, 158, 11, 0.28);
+  color: #fcd34d;
+}
+.dark .docs-modal .border-slate-200,
+.dark .docs-modal .border-slate-200\/60,
+.dark .docs-modal .border-slate-150,
+.dark .docs-modal .border-slate-100,
+.dark .docs-modal .border-blue-100 {
+  border-color: #1e293b;
+}
+.dark .docs-modal .border-amber-200\/60,
+.dark .docs-modal .border-amber-200\/70 {
+  border-color: rgba(245, 158, 11, 0.28);
+}
+.dark .docs-modal .border-sky-200\/70 {
+  border-color: rgba(56, 189, 248, 0.35);
+}
+.dark .docs-modal .text-slate-800 {
+  color: #f1f5f9;
+}
+.dark .docs-modal .text-slate-700 {
+  color: #e2e8f0;
+}
+.dark .docs-modal .text-slate-600 {
+  color: #cbd5e1;
+}
+.dark .docs-modal .text-slate-500 {
+  color: #94a3b8;
+}
+.dark .docs-modal .text-slate-400 {
+  color: #64748b;
+}
+.dark .docs-modal .text-blue-600 {
+  color: #38bdf8;
+}
+.dark .docs-modal .text-amber-800,
+.dark .docs-modal .text-amber-700\/80,
+.dark .docs-modal .text-amber-900\/70 {
+  color: #fcd34d;
+}
+.dark .docs-modal .text-sky-800,
+.dark .docs-modal .text-sky-900\/70 {
   color: #7dd3fc;
 }
 

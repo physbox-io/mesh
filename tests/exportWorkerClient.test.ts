@@ -35,4 +35,28 @@ describe('the export worker client', () => {
     w.answer(w.sent[1].id);
     await expect(c).resolves.toBe('r3');
   });
+
+  it('dispatches timber joinery jobs through the worker protocol', async () => {
+    const client = new ExportWorkerClient();
+    const scene = { nodes: [] };
+    const promise = client.run('timber', scene, {
+      soups: [],
+      joineryOptions: { jointMode: 'mortise_tenon' },
+      cncBedMm: [300, 200, 60],
+      defaultStockLengthMm: 1800,
+    });
+    const w = FakeWorker.last;
+    expect(w.sent).toHaveLength(1);
+    expect(w.sent[0]).toMatchObject({
+      kind: 'timber',
+      options: {
+        soups: [],
+        joineryOptions: { jointMode: 'mortise_tenon' },
+        cncBedMm: [300, 200, 60],
+        defaultStockLengthMm: 1800,
+      },
+    });
+    w.answer(w.sent[0].id);
+    await expect(promise).resolves.toBe('r1');
+  });
 });
