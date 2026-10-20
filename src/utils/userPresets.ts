@@ -109,11 +109,18 @@ export function listUserPresetNames(): string[] {
   return names;
 }
 
-/** Accepts either `name` or `user:name`, since both forms circulate. */
+/**
+ * Accepts either `name` or `user:name`, since both forms circulate.
+ *
+ * A copy, never the cached object: the loader mutates what it gets
+ * (promoteJointedMeshGeomsDeep) and hands it to the live scene, and the next
+ * save of ANY preset writes the cache back out, so an alias would put the edits
+ * made on screen into the stored preset without anyone saving it.
+ */
 export function readUserPreset(name: string): UserPreset | null {
   const key = name.replace(/^user:/, '');
   const preset = readCachedPresets()[key] ?? cloudOnly[key];
-  return preset ?? null;
+  return preset ? structuredClone(preset) : null;
 }
 
 /**
