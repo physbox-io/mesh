@@ -143,9 +143,10 @@ function sideTool(opts: SolidMachiningOptions): { dia: number; reach: number } {
   return { dia, reach };
 }
 
-function plannerInput(p: Placement, opts: SolidMachiningOptions, only?: BlockFace[]) {
+function plannerInput(p: Placement, opts: SolidMachiningOptions, only?: BlockFace[], cellMm?: number) {
   const tool = sideTool(opts);
   return {
+    cellMm,
     tris: p.tris,
     partBox: p.partBox,
     stock: p.stock,
@@ -174,7 +175,11 @@ function choose(sceneTris: ArrayLike<number>, opts: SolidMachiningOptions, steps
     // the real placement is planned again once the side count is known.
     const p = place(sceneTris, opts, up, true, steps);
     if (!p) continue;
-    const plan = planSetups(plannerInput(p, opts, only));
+    // Searched on a coarser grid, a third of the cutter's diameter: enough to
+    // tell the plans apart, and a fraction of the time. The one chosen is
+    // planned again finely.
+    const size = Math.max(p.partBox.maxX - p.partBox.minX, p.partBox.maxY - p.partBox.minY, p.partBox.maxZ - p.partBox.minZ);
+    const plan = planSetups(plannerInput(p, opts, only, Math.max(sideTool(opts).dia / 3, size / 80)));
     const margin = up === opts.up ? 0 : ORIENTATION_MARGIN;
     if (!best || plan.cost + margin < best.plan.cost - 1e-9) best = { p, plan };
   }
@@ -468,27 +473,33 @@ export function generateSetups(scene: SceneGraph, asked: SolidMachiningOptions, 
   const frames = autoStock
     ? [asked.frameWidthMm, 8, 4].filter((f, i, all) => i === 0 || f < all[0])
     : [asked.frameWidthMm];
-  let opts = asked;
-  let chosen: ReturnType<typeof choose> = null;
-  let exact: Placement | null = null;
-  let plan: SetupPlan | null = null;
-  let failure: string | null = null;
-  for (const frameWidthMm of frames) {
-    opts = { ...asked, frameWidthMm };
-    chosen = choose(sceneTris, opts, steps);
-    if (!chosen) return steps.generateSides(scene, { ...asked, sides: 1 });
+  // Every frame width, every way up: the cheapest plan that makes the part,
+  // the wider frame on a tie (it clamps better). A plan that fails is only
+  // kept to say why when none succeeds.
+  type Candidate = { opts: SolidMachiningOptions; chosen: NonNullable<ReturnType<typeof choose>>; exact: Placement; plan: SetupPlan; failure: string | null; cost: number };
+  let best: Candidate | null = null;
+  let firstFailure: Candidate | null = null;
+  for (const [i, frameWidthMm] of frames.entries()) {
+    const o = { ...asked, frameWidthMm };
+    const c = choose(sceneTris, o, steps);
+    if (!c) continue;
     // The plan again on the exact placement the programs will be made on,
     // held to the faces chosen, so its voxels line up with the part.
-    exact = place(sceneTris, opts, chosen.p.up, chosen.plan.order.includes('-z'), steps)!;
-    plan = planSetups(plannerInput(exact, opts, chosen.plan.order));
-    const g = plan.grid;
+    const ex = place(sceneTris, o, c.p.up, c.plan.order.includes('-z'), steps)!;
+    const pl = planSetups(plannerInput(ex, o, c.plan.order));
+    const g = pl.grid;
     let solid = 0;
-    for (let i = 0; i < g.solid.length; i++) solid += g.solid[i];
-    failure = planFailure(plan, solid * g.cell ** 3);
-    // Only reach is helped by a narrower frame.
-    if (!failure || !plan.longerBit) break;
+    for (let k = 0; k < g.solid.length; k++) solid += g.solid[k];
+    const fail = planFailure(pl, solid * g.cell ** 3);
+    const cand: Candidate = { opts: o, chosen: c, exact: ex, plan: pl, failure: fail, cost: pl.cost + 0.1 * i };
+    if (fail) { firstFailure ??= cand; continue; }
+    if (!best || cand.cost < best.cost) best = cand;
+    // A narrower frame only helps a side reach in; with no side setup, stop.
+    if (best && best.plan.order.every((f) => f === '+z' || f === '-z')) break;
   }
-  if (!chosen || !exact || !plan) return steps.generateSides(scene, { ...asked, sides: 1 });
+  const pick = best ?? firstFailure;
+  if (!pick) return steps.generateSides(scene, { ...asked, sides: 1 });
+  const { opts, chosen, exact, plan, failure } = pick;
   const narrowed = opts.frameWidthMm < asked.frameWidthMm;
 
   const twoSided = plan.order.includes('-z');
