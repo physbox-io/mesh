@@ -187,17 +187,23 @@ export function meshField(
     cellMm: h,
     volumeMm3: enclosedVolume(positions, faceArray),
     measure: (inside) => {
-      // Column by column through the samples: the share of each column's
-      // samples that are material, times its height.
+      // Column by column, the length of each column inside the part: whole
+      // spans between samples that are both inside, and where the surface
+      // crosses a span, the part of it up to the crossing. Counting samples
+      // instead put a whole sample spacing on every column.
       let v = 0;
       for (let j = 1; j < vy - 1; j++) {
         const y = y0 + j * h;
         for (let i = 1; i < vx - 1; i++) {
           const x = x0 + i * h;
           if (!inside(x, y)) continue;
-          let n = 0;
-          for (let k = 0; k < vz; k++) if (f[vi(i, j, k)] >= 0) n++;
-          v += n * h * h * h;
+          let len = 0;
+          for (let k = 0; k + 1 < vz; k++) {
+            const a = f[vi(i, j, k)], b = f[vi(i, j, k + 1)];
+            if (a >= 0 && b >= 0) len += h;
+            else if (a >= 0 || b >= 0) len += (h * Math.max(a, b)) / (Math.abs(a) + Math.abs(b) || 1);
+          }
+          v += len * h * h;
         }
       }
       return v;

@@ -416,21 +416,18 @@ function asSetup(
 
 /** What the operator does before a setup, in order. */
 function instructionsFor(s: Omit<SolidSetupResult, 'index' | 'of' | 'instructions'>, index: number): string[] {
-  if (index === 1) {
-    return [
-      s.upFace === '+z' ? 'Clamp the block flat, top up.' : `Stand the block: ${describeTurn(setupFrame(s.upFace, s.stock))}`,
-      'Zero X and Y on the near-left corner, and Z on the top face.',
-    ];
-  }
+  // describeTurn reads only the rotation, so the stock as it stands now will do.
   const turn = describeTurn(setupFrame(s.upFace, s.stock));
+  const zero = s.datum
+    ? `Zero ${s.datum.description}`
+    : 'Zero X and Y on the near-left corner of the top, and Z on the top face.';
+  if (index === 1) return [s.upFace === '+z' ? 'Clamp the block flat, top up.' : turn, zero];
   const steps = ['Park the spindle high and stop it.', turn];
   if (s.locate === 'pins') {
     steps.push('Drop the block onto the pins, and confirm it is seated.', 'Zero Z on the new top face.');
-  } else if (s.datum) {
-    steps.push(
-      `Touch off ${s.datum.description}`,
-      'Trace the window with Frame Job before cutting.'
-    );
+  } else {
+    // A turned block's zero is found again on its own faces, never kept from the last setup.
+    steps.push(zero, 'Trace the window with Frame Job before cutting.');
   }
   return steps;
 }

@@ -73,6 +73,11 @@ describe('solid machining from any face', () => {
     const end = r.setups!.find((s) => s.upFace === '+x')!;
     expect(end.gcode).toMatch(/Stand the block: Stand the block on its left end, right end up, with the front towards you/);
     expect(end.datum!.touches.map((t) => t.axis)).toEqual(['x', 'y', 'z']);
+    // Every setup says how it is zeroed, and none says a thing twice.
+    for (const s of r.setups!) {
+      expect(s.instructions.some((i) => /^Zero /.test(i))).toBe(true);
+      expect(s.instructions.join(' ')).not.toMatch(/Stand the block: Stand/);
+    }
   });
 
   it('cuts each end into the groove about half way, and never into the part', () => {

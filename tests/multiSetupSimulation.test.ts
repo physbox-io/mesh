@@ -96,6 +96,16 @@ describe('several setups, one of them on a side', () => {
     expect(sim.volumeMm3).toBeGreaterThan(trayMm3 * 0.97);
     expect(sim.volumeMm3).toBeLessThan(stock.widthMm * stock.depthMm * stock.thicknessMm);
 
+    // Over the part's own outline: the model, a fillet in the groove's acute
+    // corner, the skin the ends leave, and the tabs. Within a few percent.
+    const measured = runSimulationJob({
+      gcode: '', widthMm: stock.widthMm, depthMm: stock.depthMm, thicknessMm: stock.thicknessMm,
+      ...tools, setups, cellMm: 0.5, maxTriangles: 150_000,
+      measureRect: result.partBounds, measureMask: result.footprint,
+    }).measuredVolumeMm3!;
+    expect(measured / result.partVolumeMm3).toBeGreaterThan(0.995);
+    expect(measured / result.partVolumeMm3).toBeLessThan(1.03);
+
     const node = simulatedBody(sim, result.stockTransform!, { id: 's', name: 's', kind: 'machining', placement: 'overlay' });
     const v = node.geoms[0].renderVertices!;
     const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
