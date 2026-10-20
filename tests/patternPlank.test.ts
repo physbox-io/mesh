@@ -78,7 +78,10 @@ describe('a generated board goes straight through the relief exporter', () => {
     // A panel that fills the stock edge to edge is not overhanging it: it used
     // to be reported so, because the check was against the rectangle the
     // cutter's centre is kept inside rather than against the stock.
-    expect(result.warnings ?? []).toEqual([]);
+    // Waves run off all four edges, so the cut is carried past them (12a6abb)
+    // and the exporter says so: those two are about the clamps, not a mismatch.
+    const runOff = /runs off its edge below the top face|past the board edge/;
+    expect((result.warnings ?? []).filter((w) => !runOff.test(w))).toEqual([]);
   });
 
   it('still warns when a manually scaled model runs past the stock', () => {
