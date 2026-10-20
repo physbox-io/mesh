@@ -263,6 +263,33 @@ export function writeVertexColors(target: Float32Array, base: number[], canvas: 
   }
 }
 
+/**
+ * The colour attribute for a copy of a painted surface whose vertices were
+ * renumbered but whose triangles kept their order -- what creasedGeometry
+ * hands back. Each corner of the copy takes the colour of the welded vertex
+ * at the same corner of the same triangle.
+ */
+export function colorsForCopy(
+  base: number[],
+  layer: PaintLayer,
+  weldedFaces: ArrayLike<number>,
+  copyIndex: ArrayLike<number>,
+  copyCount: number,
+): Float32Array {
+  let weldedCount = 0;
+  for (let i = 0; i < weldedFaces.length; i++) weldedCount = Math.max(weldedCount, weldedFaces[i] + 1);
+  const welded = new Float32Array(weldedCount * 3);
+  writeVertexColors(welded, base, canvasFromLayer(layer, weldedCount, layer.res));
+  const out = new Float32Array(copyCount * 3);
+  for (let c = 0; c < copyIndex.length; c++) {
+    const from = weldedFaces[c] * 3, to = copyIndex[c] * 3;
+    out[to] = welded[from];
+    out[to + 1] = welded[from + 1];
+    out[to + 2] = welded[from + 2];
+  }
+  return out;
+}
+
 export interface DabOptions {
   /** Centre of the dab, in the surface's own space. */
   x: number; y: number; z: number;

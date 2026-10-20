@@ -127,14 +127,22 @@ interface TriangleColor { r: number; g: number; b: number; }
 /**
  * Reduces every triangle in the export to a handful of filament colours.
  *
- * Frequency-first: the colour the most triangles are, is the body colour, and
+ * Frequency-first: the colour the most corners are, is the body colour, and
  * it becomes filament 1 — so an unpainted body needs no painting at all and a
  * die with pips needs one extra filament rather than two. Everything else snaps
  * to the nearest slot that fits.
+ *
+ * Counted over triangle CORNERS, not triangles. A triangle straddling a mark's
+ * edge averages to a blend of the two colours either side, and the blends were
+ * common enough that red letters on a grey plate took four filaments: grey,
+ * red, and two shades of pink along the outline. A corner is a colour that was
+ * actually laid down; the triangle is then given whichever slot is nearest its
+ * average.
  */
-function buildPalette(triangleColors: TriangleColor[], maxExtruders: number) {
+function buildPalette(cornerColors: number[][], maxExtruders: number) {
   const buckets = new Map<string, { color: TriangleColor; count: number }>();
-  for (const c of triangleColors) {
+  for (const [r, g, b] of cornerColors) {
+    const c = { r, g, b };
     // Quantised to 4 bits a channel before counting, so the soft edge of a
     // brushed mark does not register as a hundred distinct colours.
     const key = `${Math.round(c.r * 15)},${Math.round(c.g * 15)},${Math.round(c.b * 15)}`;
@@ -182,7 +190,7 @@ export function exportThreeMf(meshes: ThreeMfMesh[], options: ThreeMfOptions = {
   }
 
   const prepared: Prepared[] = [];
-  const allTriangleColors: TriangleColor[] = [];
+  const allCornerColors: number[][] = [];
 
   for (const mesh of meshes) {
     const vertexCount = Math.floor(mesh.positions.length / 3);
@@ -216,10 +224,10 @@ export function exportThreeMf(meshes: ThreeMfMesh[], options: ThreeMfOptions = {
     }
 
     prepared.push({ mesh, indices, cornerColors, triangleColors });
-    allTriangleColors.push(...triangleColors);
+    for (const c of cornerColors) allCornerColors.push(c);
   }
 
-  const { slots, assign } = buildPalette(allTriangleColors, maxExtruders);
+  const { slots, assign } = buildPalette(allCornerColors, maxExtruders);
   const slotCounts = new Array(slots.length).fill(0);
 
   // Pass two: the XML. Colours are pooled across the export so one <m:color>

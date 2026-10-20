@@ -17,6 +17,7 @@ import { geomHalfLen } from '../utils/geomSurface';
 import { requestTexturedSurface } from '../utils/textureClient';
 import type { FacePatternGlowEvent, FacePatternTarget } from '../utils/facePatternPick';
 import { Field, PatternFields, inputClass } from './PatternFields';
+import { hexToRgb, rgbToHex } from '../utils/hexColor';
 
 /**
  * One of the Generators patterns, put on a face of a part that is already in
@@ -315,6 +316,28 @@ export const FacePatternEditor: React.FC = () => {
             </select>
           </Field>
         </div>
+
+        <Field label="Colour" hint={`Paints ${spec.figure ? 'the letters' : emboss ? 'what stands proud' : 'what is sunk'} in a colour of its own. It is drawn that way and goes into the 3MF as a second filament.`}>
+          <div className="flex items-center gap-2">
+            <select
+              value={draft.color ? 'own' : 'body'}
+              onChange={(e) => patch({ color: e.target.value === 'own' ? [...useStore.getState().paintColor] : undefined })}
+              className={`${inputClass} cursor-pointer`}
+            >
+              <option value="body">{spec.palette ? 'The pattern\'s own' : 'The body\'s'}</option>
+              <option value="own">{spec.figure ? 'Colour the letters' : 'Colour the pattern'}</option>
+            </select>
+            {draft.color && (
+              <input
+                type="color"
+                value={rgbToHex(draft.color)}
+                onChange={(e) => patch({ color: hexToRgb(e.target.value) })}
+                className="w-8 h-7 p-0 border-0 bg-transparent cursor-pointer shrink-0"
+                aria-label="Pattern colour"
+              />
+            )}
+          </div>
+        </Field>
 
         <div className="grid grid-cols-2 gap-2 text-[11px]">
           <div className="bg-slate-100 dark:bg-slate-800 p-2 rounded-lg">

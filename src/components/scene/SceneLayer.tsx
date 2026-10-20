@@ -29,7 +29,7 @@ import { PrintAnalysisOverlay } from '../PrintAnalysisOverlay';
 import { DfmHeatmap } from './DfmHeatmap';
 import { useCoarsePointer } from '../../hooks/useCoarsePointer';
 import { useVertexPaint } from '../../hooks/useVertexPaint';
-import { buildPaintGeometry, isPaintable, paintArgsFromSize, paintResolution, type PaintLayer } from '../../utils/vertexPaint';
+import { buildPaintGeometry, colorsForCopy, isPaintable, paintArgsFromSize, paintResolution, type PaintLayer } from '../../utils/vertexPaint';
 import { sampleCatmullRom } from '../../utils/geom';
 import { resolveCsgGeoms } from '../../utils/csg';
 import { DEFAULT_UNIT } from '../../utils/latticeMesh';
@@ -528,6 +528,12 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
   // does not have.
   const paintLayer = (patterned ? undefined : geomEntry?.paint) as PaintLayer | undefined;
   const showPaint = !patterned && !!nodeId && isPaintable(type, !!node?.isWedge) && (paintMode || !!paintLayer);
+  // A pattern's own colour (its palette, or the colour chosen for it), on the
+  // patterned mesh's vertices. Drawn per vertex, which is also what puts it in
+  // the 3MF: the exporter reads the colour attribute of a vertex-coloured mesh.
+  const patternPaint = patterned?.paint;
+  const vertexColored = showPaint || !!patternPaint;
+  const [baseR, baseG, baseB] = color ?? [0.8, 0.8, 0.8];
   // A mesh is drawn with crease-aware normals (shadedGeometry below), not the
   // single normal per vertex computeVertexNormals() gives a welded mesh. That
   // one normal averages a flat face into the wall beside it at every corner and
@@ -570,10 +576,10 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
       // own colour is mixed into the attribute instead. That is what keeps the
       // base colour live: change it in the properties panel and the paint stays
       // exactly where it is, over the new colour.
-      ...(showPaint ? { vertexColors: true, color: new THREE.Color(1, 1, 1) } : {}),
+      ...(vertexColored ? { vertexColors: true, color: new THREE.Color(1, 1, 1) } : {}),
       ...(alpha < 1 ? { transparent: true, opacity: alpha, depthWrite: false } : {}),
     };
-  }, [color, isSelected, hiRes, alpha, wireframe, showEdges, showPaint, flatShading]);
+  }, [color, isSelected, hiRes, alpha, wireframe, showEdges, vertexColored, flatShading]);
 
   // Handlers for physical spring dragging, mapped from Three.js coordinates to MuJoCo coordinate space
   const setOrbitEnabled = useOrbitEnable();
@@ -838,10 +844,13 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
     geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     geo.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
     geo.setIndex(new THREE.BufferAttribute(index, 1));
+    if (!dent && patternPaint) {
+      geo.setAttribute('color', new THREE.BufferAttribute(colorsForCopy([baseR, baseG, baseB], patternPaint, sourceFaces, index, positions.length / 3), 3));
+    }
     if (meshBufferGeometry.boundingBox) geo.boundingBox = meshBufferGeometry.boundingBox.clone();
     if (meshBufferGeometry.boundingSphere) geo.boundingSphere = meshBufferGeometry.boundingSphere.clone();
     return geo;
-  }, [meshBufferGeometry, showPaint, dent, patterned, isDynamic, vertices, faces]);
+  }, [meshBufferGeometry, showPaint, dent, patterned, patternPaint, baseR, baseG, baseB, isDynamic, vertices, faces]);
   useEffect(() => () => {
     if (shadedGeometry && shadedGeometry !== meshBufferGeometry) shadedGeometry.dispose();
   }, [shadedGeometry, meshBufferGeometry]);
@@ -911,8 +920,11 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
     geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     geo.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
     geo.setIndex(new THREE.BufferAttribute(index, 1));
+    if (patterned.paint) {
+      geo.setAttribute('color', new THREE.BufferAttribute(colorsForCopy([baseR, baseG, baseB], patterned.paint, patterned.faces, index, positions.length / 3), 3));
+    }
     return geo;
-  }, [type, patterned]);
+  }, [type, patterned, baseR, baseG, baseB]);
   useEffect(() => () => { patternedGeometry?.dispose(); }, [patternedGeometry]);
 
   const { handlers: paintHandlers, cursorRef } = useVertexPaint({
@@ -1035,7 +1047,7 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
   }
 
   const renderedGeomMaterial = (
-    <meshStandardMaterial key={`${alpha < 1 ? 'blend' : 'solid'}:${showPaint}`} {...materialProps} />
+    <meshStandardMaterial key={`${alpha < 1 ? 'blend' : 'solid'}:${vertexColored}`} {...materialProps} />
   );
 
   if (patternedGeometry) {

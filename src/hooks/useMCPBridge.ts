@@ -3,6 +3,7 @@
  * Uses the Zustand store directly (getState/setState) from outside React.
  */
 
+import { hexToRgb, rgbToHex } from '../utils/hexColor';
 import { useEffect } from 'react';
 import { getStoredAuthToken } from '../utils/apiClient';
 import { tabSession } from '../utils/tabSession';
@@ -1465,6 +1466,13 @@ export async function applySinglePatternToBody(targetId: string, m: Record<strin
   if (!(depthMm > 0)) throw new Error('depthMm must be more than 0.');
   const emboss = m.emboss ?? (prev ? prev.depthM > 0 : false);
   const projection = (m.projection ?? prev?.projection) as TextureProjection | undefined;
+  // [r, g, b] 0..1 or '#rrggbb' for the part the pattern moves; null or 'none' clears it.
+  let color: number[] | undefined = prev?.color;
+  if (m.color === null || m.color === 'none') color = undefined;
+  else if (typeof m.color === 'string' && /^#[0-9a-f]{6}$/i.test(m.color)) color = hexToRgb(m.color);
+  else if (Array.isArray(m.color) && m.color.length >= 3 && m.color.slice(0, 3).every((v: unknown) => typeof v === 'number')) {
+    color = m.color.slice(0, 3).map((v: number) => Math.min(1, Math.max(0, v)));
+  } else if (m.color !== undefined) throw new Error("color is [r, g, b] each 0..1, or '#rrggbb', or 'none'.");
   const texture: SurfaceTexture = {
     pattern: spec.id,
     options: { ...spec.defaults, ...(prev?.pattern === spec.id ? prev.options : {}), ...(m.options ?? {}) },
@@ -1478,6 +1486,7 @@ export async function applySinglePatternToBody(targetId: string, m: Record<strin
     projection: projection === 'auto' ? undefined : projection,
     twistDeg: m.twistDeg ?? prev?.twistDeg,
     scale: m.scale ?? prev?.scale,
+    ...(color ? { color } : {}),
   };
   // Text fetches its font and is laid out here; the build only fills the outline.
   if (spec.prepare) {
@@ -1519,6 +1528,7 @@ export async function applySinglePatternToBody(targetId: string, m: Record<strin
     ...(region.seam ? { seam: true } : {}),
     ...(region.capped ? { capped: true } : {}),
     depthMm: mm(Math.abs(region.depthM)),
+    ...(texture.color ? { color: rgbToHex(texture.color) } : {}),
     triangles: region.triangles,
     warnings,
   };

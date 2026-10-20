@@ -73,6 +73,14 @@ export interface SurfaceTexture {
   twistDeg?: number;
   /** Pattern size multiplier: 2 draws every feature twice as big. */
   scale?: number;
+  /**
+   * 0..1 rgb, as a geom's rgba is written, for the part the pattern moves:
+   * the letters of engraved or embossed text, the sunk ground of an
+   * engraving, the raised ground of an embossing. The face it was cut from
+   * keeps the body's colour. Left out, the pattern is the body's colour (or
+   * its palette's, where it has one). It is paint, so it reaches the 3MF.
+   */
+  color?: number[];
 }
 
 /**
@@ -1855,11 +1863,21 @@ export function applySurfaceTextures(
       job.report.field = reliefField(uv.frame, look.grid, dist, uv.segments, border, ramp, depth > 0, !!spec.flatTopped);
     }
 
-    if (spec.palette) {
+    /*
+     * Colour by vertex, hard-edged: a vertex the pattern moved at least half
+     * way is the chosen colour, the rest are not. A slicer prints a triangle
+     * in one filament anyway, by the average of its corners, so a soft edge
+     * would only blur the screen without changing the print.
+     */
+    const fill = job.texture.color;
+    if (spec.palette || fill) {
       for (const v of members[j]) {
-        const [r, g, b] = spec.palette(look.heightAt(vu[v], vv[v]), opts);
+        const h = look.heightAt(vu[v], vv[v]);
+        const moved = (job.depthM < 0 ? 1 - h : h) * fadeAt(vu[v], vv[v]);
+        const rgb = fill && moved >= 0.5 ? fill : spec.palette ? spec.palette(h, opts) : null;
+        if (!rgb) continue;
         paintIdx.push(v);
-        paintRgba.push(Math.round(clamp01(r) * 255), Math.round(clamp01(g) * 255), Math.round(clamp01(b) * 255), 255);
+        paintRgba.push(Math.round(clamp01(rgb[0] ?? 0) * 255), Math.round(clamp01(rgb[1] ?? 0) * 255), Math.round(clamp01(rgb[2] ?? 0) * 255), 255);
       }
     }
   });

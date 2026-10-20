@@ -17,6 +17,7 @@ import { useState } from 'react';
 import { Palette, Pipette, Eraser } from 'lucide-react';
 import { useStore } from '../store/useStore';
 import { ConfirmModal } from './ConfirmModal';
+import { hexToRgb, rgbToHex } from '../utils/hexColor';
 
 /**
  * The palette.
@@ -44,19 +45,6 @@ const SWATCHES: { hex: string; name: string }[] = [
   { hex: '#94a3b8', name: 'Steel' },
   { hex: '#1e293b', name: 'Charcoal' },
 ];
-
-/** '#rrggbb' -> the 0..1 triple a geom's rgba is written in. */
-function hexToRgb(hex: string): [number, number, number] {
-  const value = parseInt(hex.slice(1), 16);
-  return [((value >> 16) & 255) / 255, ((value >> 8) & 255) / 255, (value & 255) / 255];
-}
-
-/** The 0..1 triple back to '#rrggbb', for the swatch and the colour input. */
-function rgbToHex(rgb: [number, number, number]): string {
-  const channel = (v: number) =>
-    Math.round(Math.min(1, Math.max(0, v)) * 255).toString(16).padStart(2, '0');
-  return `#${channel(rgb[0])}${channel(rgb[1])}${channel(rgb[2])}`;
-}
 
 export interface ColoringSectionProps {
   /**

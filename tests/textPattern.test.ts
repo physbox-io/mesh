@@ -14,6 +14,9 @@ import { TEXT_PATTERN, hasFreshOutline, textSignature } from '../src/utils/textP
 import { applySurfaceTextures, type SurfaceTexture } from '../src/utils/surfaceTexture';
 import { patternById } from '../src/utils/surfacePatterns';
 import { analyzeMesh } from '../src/utils/meshIntegrity';
+import { creasedGeometry } from '../src/utils/creasedNormals';
+import { colorsForCopy } from '../src/utils/vertexPaint';
+import { exportThreeMf, linearToSrgbHex } from '../src/utils/threeMfExporter';
 
 /*
  * What these defend: lettering has to come out the right way round, the
@@ -327,6 +330,48 @@ describe('text on a face', () => {
     const out = applySurfaceTextures(part.positions, part.faces, [texture(0.0015)]);
     expect(topAt(out.vertices, 0, 0)).toBeCloseTo(0.0115, 5);
     expect(topAt(out.vertices, 0.015, 0)).toBeCloseTo(0.01, 6);
+  });
+
+  it('colours the letter and not the face round it, through to the 3MF', () => {
+    const red = [0.9, 0.1, 0.1];
+    for (const d of [-0.001, 0.0015]) {
+      const out = applySurfaceTextures(part.positions, part.faces, [{ ...texture(d), color: red }]);
+      const paint = out.paint!;
+      expect(paint).toBeDefined();
+      // Every painted vertex is in the letter's 7.14 x 10 mm block, give or
+      // take a cell, and the letter's middle is painted.
+      const painted = new Set(paint.idx);
+      for (const v of paint.idx) {
+        expect(Math.abs(out.vertices[3 * v])).toBeLessThan(0.0036 + 0.0006);
+        expect(Math.abs(out.vertices[3 * v + 1])).toBeLessThan(0.005 + 0.0006);
+      }
+      let middle = -1, best = Infinity;
+      for (let v = 0; v < out.vertices.length / 3; v++) {
+        const r = Math.hypot(out.vertices[3 * v], out.vertices[3 * v + 1]);
+        if (out.vertices[3 * v + 2] > 0.005 && r < best) { best = r; middle = v; }
+      }
+      expect(painted.has(middle)).toBe(true);
+
+      // Drawn the way SceneLayer draws it, then written as a 3MF: two filament
+      // slots, the letter's triangles in the second.
+      const creased = creasedGeometry(new Float32Array(out.vertices), new Uint32Array(out.faces));
+      const colors = colorsForCopy([0.8, 0.8, 0.8], paint, out.faces, creased.index, creased.positions.length / 3);
+      const result = exportThreeMf([{
+        name: 'plate', positions: creased.positions, indices: creased.index, colors, baseColor: [0.8, 0.8, 0.8],
+      }]);
+      const used = result.palette.filter((p) => p.triangles > 0);
+      expect(used.length).toBe(2);
+      expect(used[0].hex).toBe(linearToSrgbHex([0.8, 0.8, 0.8]));
+      // Paint is stored a byte a channel.
+      expect(used[1].hex).toBe(linearToSrgbHex(red.map((c) => Math.round(c * 255) / 255)));
+      // The letter is ~6 % of the top; its triangles are a share of the part's.
+      expect(used[1].triangles).toBeGreaterThan(50);
+      expect(used[1].triangles).toBeLessThan(used[0].triangles);
+    }
+  });
+
+  it('leaves an uncoloured letter unpainted', () => {
+    expect(applySurfaceTextures(part.positions, part.faces, [texture(-0.001)]).paint).toBeUndefined();
   });
 
   it('draws the laser field as the letter, engraved or embossed', () => {
