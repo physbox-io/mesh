@@ -82,9 +82,12 @@ export function PositionCard({ node }: { node: SceneNode }) {
             // For dynamic mesh bodies, pos[2] = centroid Z, not base Z.
             // Compute centroid offset from renderVertices so slider 0 = base on ground.
             const dynMesh = node.geoms?.find((g) => g.dynamic && g.renderVertices);
-            const centroidZ = dynMesh
-              ? -Math.min(...(dynMesh.renderVertices as number[]).filter((_: number, i: number) => i % 3 === 2))
-              : 0;
+            // A loop, not Math.min(...v): a simulated part has hundreds of
+            // thousands of coordinates, past what a call's arguments can hold.
+            let lowestZ = Infinity;
+            const v = (dynMesh?.renderVertices ?? []) as number[];
+            for (let i = 2; i < v.length; i += 3) if (v[i] < lowestZ) lowestZ = v[i];
+            const centroidZ = dynMesh ? -lowestZ : 0;
             const displayZ = node.pos[2] - centroidZ;
             return (<>
               <div className="flex items-center justify-between">
