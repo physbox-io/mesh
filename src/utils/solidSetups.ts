@@ -207,7 +207,13 @@ function summarise(plan: SetupPlan): SetupPlanSummary {
         : {
             mm3,
             bounds: b,
-            text: `About ${mm3} mm³ is left uncut${where}: no face this job is allowed reaches it.`,
+            text:
+              `About ${mm3} mm³ is left uncut${where}: no face this job is allowed reaches it.` +
+              (plan.longerBit
+                ? ` A bit reaching ${plan.longerBit.reachMm} mm out of the collet would clear about ` +
+                  `${Math.round(plan.longerBit.mm3)} mm³ of it from the ${plan.longerBit.faces.map((f) => FACE_NAME[f]).join(' and ')}: from a side it ` +
+                  `has to go through the channel and frame first. Set its stickout under Advanced.`
+                : ''),
           };
   const sides = plan.order.filter((f) => f !== '+z' && f !== '-z');
   const redesignHint =
@@ -460,7 +466,9 @@ export function generateSetups(scene: SceneGraph, opts: SolidMachiningOptions, s
     invertRelief: false,
   };
 
-  const warnings = [...result.warnings];
+  // The two-sided job's own "neither side can see" figure is the old question;
+  // what the plan leaves is said in its summary instead.
+  const warnings = result.warnings.filter((w) => !/material neither side can see|under a surface the one side cannot see/.test(w));
   const built: Omit<SolidSetupResult, 'index' | 'of' | 'instructions'>[] = [];
   for (const face of plan.order) {
     if (face === '+z') { built.push(asSetup(result.sides[0], result, plan, sidesOpts.finishingToolDiaMm)); continue; }
@@ -482,6 +490,8 @@ export function generateSetups(scene: SceneGraph, opts: SolidMachiningOptions, s
     setups,
     plan: summary,
     upChosen: chosen.p.up,
+    // What the plan leaves, not what the top and flip alone would.
+    unreachablePercent: result.partVolumeMm3 > 0 ? (100 * plan.unreachedMm3) / result.partVolumeMm3 : 0,
     estimatedTimeSeconds: setups.reduce((t, s) => t + s.estimatedTimeSeconds, 0),
     totalCutDistanceMm: setups.reduce((t, s) => t + s.totalCutDistanceMm, 0),
   };

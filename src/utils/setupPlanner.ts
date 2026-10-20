@@ -97,6 +97,12 @@ export interface SetupPlan {
   /** Faces considered and left out, and why. */
   dropped: { face: BlockFace; reason: string }[];
   cost: number;
+  /**
+   * When what is left is out of the bit's reach rather than out of sight: the
+   * side faces that would clear most of it, and how far the bit would have to
+   * reach (most of the way is often through the channel and frame).
+   */
+  longerBit: { faces: BlockFace[]; reachMm: number; mm3: number } | null;
   /** Every choice weighed, cheapest first: what each would leave, and its cost. */
   alternatives: { faces: BlockFace[]; cost: number; unreachedMm3: number }[];
   /** The voxel grid the plan was made on, and per voxel which face clears it. */
@@ -286,18 +292,23 @@ export function planSetups(input: PlannerInput): SetupPlan {
   const air: number[] = [];
   for (let i = 0; i < grid.solid.length; i++) if (!grid.solid[i]) air.push(i);
   const depthMm = new Map<BlockFace, Float32Array>();
+  /** Depth below each side face ignoring the bit's reach, for saying what a longer bit would do. */
+  const unlimitedMm = new Map<BlockFace, Float32Array>();
   for (const f of allowed) {
     const reach = reachFrom(grid, f, radiusCells);
     const d = new Float32Array(air.length);
+    const u = new Float32Array(air.length);
     // The top and underside are cut by solid machining's own surface jobs,
     // which hold the cutter's body clear and warn about reach themselves.
     const limit = f === '+z' || f === '-z' ? Infinity : input.reachMm;
     for (let a = 0; a < air.length; a++) {
       const r = reach[air[a]];
       const mm = r < 0 ? Infinity : (r + 1) * cell + margin[f];
+      u[a] = mm;
       d[a] = mm <= limit ? mm : Infinity;
     }
     depthMm.set(f, d);
+    unlimitedMm.set(f, u);
   }
 
   const voxelMm3 = cell ** 3;
@@ -388,15 +399,49 @@ export function planSetups(input: PlannerInput): SetupPlan {
       : { minX: x, minY: y, minZ: z, maxX: x, maxY: y, maxZ: z };
   }
 
+  // Faces left out that would still have cleared something the plan leaves,
+  // with the reason that is actually true.
   for (const f of allowed) {
     if (pick.chosen.includes(f) || f === '+z') continue;
-    const alone = score(['+z', f]);
-    const gain = (topOnly.unreached - alone.unreached) * voxelMm3;
-    if (gain <= 0) continue;
+    const gain = (pick.s.unreached - score([...pick.chosen, f]).unreached) * voxelMm3;
+    if (gain < MIN_MM3) continue;
     dropped.push({
       face: f,
-      reason: `it would clear ${Math.round(gain)} mm³ the top cannot, not enough to be worth turning the block for`,
+      reason:
+        pick.chosen.length >= maxSetups
+          ? `it would clear ${Math.round(gain)} mm³ more, but the plan is at its ${maxSetups}-setup limit`
+          : `it would clear ${Math.round(gain)} mm³ more, not enough to be worth turning the block for`,
     });
+  }
+
+  // What a longer bit would reach: of what is left, the share a side could
+  // clear if its bit reached far enough, and how far that is.
+  let longerBit: SetupPlan['longerBit'] = null;
+  if (pick.s.unreached > 0) {
+    const leftIdx: number[] = [];
+    const chosenArrays = pick.chosen.map((f) => depthMm.get(f)!);
+    for (let a = 0; a < air.length; a++) if (chosenArrays.every((arr) => arr[a] === Infinity)) leftIdx.push(a);
+    // Each piece left to the side it is shallowest under, as the plan would give it.
+    const best: { a: number; f: BlockFace; mm: number }[] = [];
+    for (const a of leftIdx) {
+      let mm = Infinity, face: BlockFace | null = null;
+      for (const f of sides) {
+        const v = unlimitedMm.get(f)![a];
+        if (v < mm) { mm = v; face = f; }
+      }
+      if (face) best.push({ a, f: face, mm });
+    }
+    if (best.length * voxelMm3 >= MIN_MM3) {
+      // Deep enough for nine tenths of it: the last few voxels are often a sliver at the far end.
+      best.sort((p, q) => p.mm - q.mm);
+      const need = best[Math.min(best.length - 1, Math.floor(best.length * 0.9))].mm;
+      const got = best.filter((b) => b.mm <= need);
+      longerBit = {
+        faces: [...new Set(got.map((b) => b.f))],
+        reachMm: Math.ceil(need),
+        mm3: got.length * voxelMm3,
+      };
+    }
   }
 
   const faces: Record<string, FacePlan> = {};
@@ -422,6 +467,7 @@ export function planSetups(input: PlannerInput): SetupPlan {
     unreachableAnywhereMm3: anyFace.unreached * voxelMm3,
     dropped,
     cost: pick.cost,
+    longerBit,
     alternatives: alternatives.sort((p, q) => p.cost - q.cost),
     grid,
     owner,

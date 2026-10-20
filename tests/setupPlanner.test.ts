@@ -105,6 +105,10 @@ describe('planning setups', () => {
     for (const f of plan.order.filter((f) => f === '+x' || f === '-x')) {
       expect(plan.faces[f].depthMm).toBeLessThanOrEqual(48 + 1e-6);
     }
+    // And says how long a bit would: most of the way to the middle, from an end.
+    expect(new Set(plan.longerBit!.faces)).toEqual(new Set(['+x', '-x']));
+    expect(plan.longerBit!.reachMm).toBeGreaterThan(48);
+    expect(plan.longerBit!.reachMm).toBeLessThan(80);
   });
 
   it('will not stand the block on end where it does not fit under the spindle', () => {
