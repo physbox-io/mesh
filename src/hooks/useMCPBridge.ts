@@ -33,7 +33,7 @@ import {
   applyDab, buildPaintGeometry, canvasFromLayer, isPaintable, layerFromCanvas,
   paintArgsFromSize, paintResolution, toGeometrySpace,
 } from '../utils/vertexPaint';
-import { saveUserPreset, deleteUserPreset, readUserPreset, listUserPresetNames, type SavedCopilotMessage } from '../utils/userPresets';
+import { saveUserPreset, deleteUserPreset, readUserPreset, listUserPresetNames, ensureUserPreset, type SavedCopilotMessage } from '../utils/userPresets';
 import { SCULPT_BASES, buildSculptBase, type SculptBaseId } from '../utils/sculptBases';
 import { fromSceneGeom, toSceneGeom, splitComponents, type BrushType } from '../utils/sculptMesh';
 import { applySculptStroke, probeSurface, sculptSummary, undoSculptStroke, BRUSH_TYPES } from '../utils/sculptCommands';
@@ -3880,8 +3880,14 @@ export function useMCPBridge() {
           if (!name) return { ok: false, error: 'Missing preset name' };
           // loadPreset ignores a name it doesn't know, and this handler used to
           // report ok and then clear the note cards and chat anyway.
-          const known = name.startsWith('user:') ? !!readUserPreset(name) : Object.hasOwn(PRESETS, name);
+          const known = name.startsWith('user:')
+            ? listUserPresetNames().includes(name.slice('user:'.length))
+            : Object.hasOwn(PRESETS, name);
           if (!known) return { ok: false, error: `No preset named "${name}". Call physics_list_presets for the valid names.` };
+          // Listed from the account by name: its data is fetched on first open.
+          if (name.startsWith('user:') && !(await ensureUserPreset(name))) {
+            return { ok: false, error: `Preset "${name}" is in the account but could not be fetched from it. Try again.` };
+          }
           store.loadPreset(name);
           getPhysicsWorkerClient().clearHistory();
           // The preset's boolean bodies build asynchronously, and this used to

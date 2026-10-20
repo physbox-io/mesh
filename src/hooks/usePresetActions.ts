@@ -5,7 +5,7 @@ import { useDialogs } from '../store/dialogStore';
 import { PRESETS } from '../presets/presetScenes';
 import { makePresetNoteCard, type NoteCard } from '../utils/noteCards';
 import type { CopilotMessage } from '../physicsGlobals';
-import { readUserPreset, USER_PRESETS_CHANGED_EVENT } from '../utils/userPresets';
+import { readUserPreset, ensureUserPreset, USER_PRESETS_CHANGED_EVENT } from '../utils/userPresets';
 import { savePreset } from '../utils/presetStorage';
 import { announcePresetSave } from '../utils/presetNotices';
 import { cloudAutosave } from '../utils/cloudDocuments';
@@ -56,7 +56,12 @@ export function usePresetActions(doc: SceneDocument) {
   }, [loadPreset, replaceDocument]);
 
   // Also load note cards from user presets (stored alongside the scene)
-  const loadUserPresetWithCard = useCallback((name: string) => {
+  const loadUserPresetWithCard = useCallback(async (name: string) => {
+    // A preset listed from the account has its data fetched on first open.
+    if (!(await ensureUserPreset(name))) {
+      showNotice('Could not open preset', `"${name.replace(/^user:/, '')}" could not be fetched from your account. Check the connection and try again.`, 'red');
+      return;
+    }
     loadPreset(name);
     let notes: NoteCard[] = [];
     let chat: CopilotMessage[] = [];
@@ -68,7 +73,7 @@ export function usePresetActions(doc: SceneDocument) {
       // Unreadable: it loads with no notes or chat, as before.
     }
     replaceDocument(notes, chat);
-  }, [loadPreset, replaceDocument]);
+  }, [loadPreset, replaceDocument, showNotice]);
 
   const saveUserPresetByName = useCallback((name: string) => {
     const trimmed = name.trim();

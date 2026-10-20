@@ -319,14 +319,40 @@ export interface CloudPreset {
   data?: unknown;
 }
 
-export async function fetchCloudPresets(appId: string): Promise<CloudPreset[]> {
+/** A preset row listed without its data. */
+export interface CloudPresetMeta {
+  id?: string;
+  name?: string;
+  bytes?: number;
+}
+
+/**
+ * The account's presets, names and sizes only.
+ *
+ * Never the data: the list with every preset whole reached 30 MB, then went over
+ * Cloud Run's 32 MiB response cap, and every pull after that failed. A preset's
+ * data is fetched when it is opened (fetchCloudPreset).
+ *
+ * Throws when the account cannot be reached, rather than answering with an
+ * empty list: an empty list is what made the presets vanish while the account
+ * menu said "Account is up to date".
+ */
+export async function fetchCloudPresetList(appId: string): Promise<CloudPresetMeta[]> {
   if (!getStoredAuthToken()) return [];
+  const res = await request<{ presets: CloudPresetMeta[] }>(
+    `/api/presets?app_id=${encodeURIComponent(appId)}&fields=meta`,
+  );
+  return res.presets || [];
+}
+
+/** One preset with its data, by the id the server gave it; null when it cannot be had. */
+export async function fetchCloudPreset(id: string): Promise<CloudPreset | null> {
+  if (!getStoredAuthToken()) return null;
   try {
-    const res = await request<{ presets: CloudPreset[] }>(`/api/presets?app_id=${encodeURIComponent(appId)}`);
-    return res.presets || [];
+    return await request<CloudPreset>(`/api/presets/${encodeURIComponent(id)}`);
   } catch (err) {
-    console.warn('[PhysBox Cloud] Failed to load cloud presets:', err);
-    return [];
+    console.warn('[PhysBox Cloud] Failed to load cloud preset:', err);
+    return null;
   }
 }
 

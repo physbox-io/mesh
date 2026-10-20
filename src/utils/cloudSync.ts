@@ -17,7 +17,7 @@
  * are handed back to the caller.
  */
 
-import { fetchCloudParameters, fetchCloudPresets, syncCloudPreset, deleteCloudPreset } from './apiClient';
+import { fetchCloudParameters, fetchCloudPresetList, fetchCloudPreset, syncCloudPreset, deleteCloudPreset } from './apiClient';
 import { SYNCED_LLM_PARAMETER_KEYS } from './llmSettings';
 import type { UserPreset } from './userPresets';
 import { SPINDLE_MAX_OVERRIDE_KEY } from './spindleOverride';
@@ -100,6 +100,20 @@ export async function removeCloudPreset(name: string): Promise<void> {
 }
 
 /**
+ * Fetches one preset's data from the account, by name.
+ *
+ * The pull lists presets without their data; this is what opening one of them
+ * calls. Null when the account does not have it or cannot be reached.
+ */
+export async function fetchCloudPresetData(name: string): Promise<UserPreset | null> {
+  const id = readPresetIdMap()[name];
+  if (!id) return null;
+  const preset = await fetchCloudPreset(id);
+  const data = preset?.data;
+  return data && typeof data === 'object' ? data as UserPreset : null;
+}
+
+/**
  * Writes a pulled parameter into localStorage.
  *
  * Values arrive JSON-decoded from the server, but everything reading them
@@ -121,12 +135,15 @@ function applyParameter(key: string, value: unknown): boolean {
 export interface CloudPullResult {
   /** Number of settings restored from the account. */
   parameters: number;
-  /** Presets found in the account, keyed by name. */
-  presets: Record<string, UserPreset>;
+  /** Names of the presets the account holds; their data is fetched when opened. */
+  presets: string[];
 }
 
 /**
- * Pulls the signed-in account's settings and presets.
+ * Pulls the signed-in account's settings and the names of its presets.
+ *
+ * Throws if the preset list cannot be fetched, so the caller can say the
+ * account was not reached instead of reporting it up to date.
  *
  * Presets come back for the caller to merge additively: a name already saved in
  * this browser is left alone. Taking the cloud copy instead would be the wrong
@@ -136,12 +153,12 @@ export interface CloudPullResult {
  * later removes the cloud copy too.
  */
 export async function pullCloudState(): Promise<CloudPullResult> {
-  const result: CloudPullResult = { parameters: 0, presets: {} };
+  const result: CloudPullResult = { parameters: 0, presets: [] };
 
   const [appParams, globalParams, presets] = await Promise.all([
     fetchCloudParameters('physics'),
     fetchCloudParameters('global'),
-    fetchCloudPresets('physics'),
+    fetchCloudPresetList('physics'),
   ]);
 
   for (const key of SYNCED_APP_PARAMETER_KEYS) {
@@ -154,9 +171,9 @@ export async function pullCloudState(): Promise<CloudPullResult> {
   }
 
   for (const preset of presets) {
-    if (!preset?.name || !preset?.data) continue;
-    if (preset.id) rememberPresetId(preset.name, preset.id);
-    result.presets[preset.name] = preset.data as UserPreset;
+    if (!preset?.name || !preset.id) continue;
+    rememberPresetId(preset.name, preset.id);
+    result.presets.push(preset.name);
   }
 
   return result;

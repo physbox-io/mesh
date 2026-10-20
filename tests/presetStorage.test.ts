@@ -26,17 +26,17 @@ class FakeStorage {
 const store = new FakeStorage();
 vi.stubGlobal('localStorage', store);
 
-const cloud = { saveCloudPreset: vi.fn(), removeCloudPreset: vi.fn() };
+const cloud = { saveCloudPreset: vi.fn(), removeCloudPreset: vi.fn(), fetchCloudPresetData: vi.fn() };
 vi.mock('../src/utils/cloudSync', () => ({
   saveCloudPreset: (...a: unknown[]) => cloud.saveCloudPreset(...a),
   removeCloudPreset: (...a: unknown[]) => cloud.removeCloudPreset(...a),
+  fetchCloudPresetData: (...a: unknown[]) => cloud.fetchCloudPresetData(...a),
 }));
 
 const account = { token: null as string | null, pro: false, presets: [] as { name: string; data: unknown }[] };
 vi.mock('../src/utils/apiClient', () => ({
   getStoredAuthToken: () => account.token,
   isProAccount: () => account.pro,
-  fetchCloudPresets: async () => account.presets,
 }));
 
 const bigScene = (mb: number) => ({
@@ -54,6 +54,7 @@ beforeEach(async () => {
   account.token = null; account.pro = false; account.presets = [];
   cloud.saveCloudPreset.mockReset().mockResolvedValue(true);
   cloud.removeCloudPreset.mockReset().mockResolvedValue(undefined);
+  cloud.fetchCloudPresetData.mockReset().mockResolvedValue(null);
   vi.resetModules();
   const m = await import('../src/utils/presetStorage');
   savePreset = m.savePreset;
@@ -196,32 +197,58 @@ describe('an account is not tied to this browser', () => {
 });
 
 describe('pulling the account into another browser', () => {
-  it('stores everything when there is room', () => {
-    const r = presets.mergePulledPresets({ a: { nodes: [] }, b: { nodes: [] } });
-    expect(r).toEqual({ added: 2, keptInAccount: 0 });
-    expect(Object.keys(presets.readUserPresets()).sort()).toEqual(['a', 'b']);
+  it('lists the account\'s presets by name, without fetching any', () => {
+    expect(presets.mergePulledPresets(['a', 'b'])).toBe(2);
+    expect(presets.listUserPresetNames().sort()).toEqual(['a', 'b']);
+    expect(presets.cloudOnlyPresetNames().sort()).toEqual(['a', 'b']);
+    expect(presets.readUserPreset('a')).toBeNull();
+    expect(cloud.fetchCloudPresetData).not.toHaveBeenCalled();
   });
 
-  it('does not lose every preset to the one that will not fit', () => {
-    // Room for the two small ones, not for the megabyte.
-    store.limit = 2_000;
-    const r = presets.mergePulledPresets({
-      big: bigScene(1) as never,
-      small1: { nodes: [{ id: 's1' }] } as never,
-      small2: { nodes: [{ id: 's2' }] } as never,
-    });
+  it('fetches a listed preset on open and keeps it here when there is room', async () => {
+    presets.mergePulledPresets(['tray']);
+    cloud.fetchCloudPresetData.mockResolvedValue({ nodes: [{ id: 'cloud' }] });
 
-    expect(r).toEqual({ added: 2, keptInAccount: 1 });
-    expect(Object.keys(presets.readUserPresets()).sort()).toEqual(['small1', 'small2']);
-    expect(presets.listUserPresetNames().sort()).toEqual(['big', 'small1', 'small2']);
+    expect(await presets.ensureUserPreset('user:tray')).toBe(true);
+    expect(presets.readUserPreset('tray')?.nodes?.[0].id).toBe('cloud');
+    expect(Object.keys(presets.readUserPresets())).toEqual(['tray']);
+    expect(presets.cloudOnlyPresetNames()).toEqual([]);
+
+    // Held here now: opening it again does not go back to the account.
+    expect(await presets.ensureUserPreset('tray')).toBe(true);
+    expect(cloud.fetchCloudPresetData).toHaveBeenCalledTimes(1);
+  });
+
+  it('holds a fetched preset for the session when this browser is full', async () => {
+    store.limit = 2_000;
+    presets.mergePulledPresets(['big']);
+    cloud.fetchCloudPresetData.mockResolvedValue(bigScene(1));
+
+    expect(await presets.ensureUserPreset('big')).toBe(true);
+    expect(presets.readUserPresets()).toEqual({});
     expect(presets.cloudOnlyPresetNames()).toEqual(['big']);
     expect(presets.readUserPreset('big')?.nodes?.[0].id).toBe('x');
   });
 
-  it('leaves a preset already saved here alone', () => {
+  it('says so when the account cannot hand a preset over', async () => {
+    presets.mergePulledPresets(['tray']);
+    expect(await presets.ensureUserPreset('tray')).toBe(false);
+    expect(await presets.ensureUserPreset('never-heard-of-it')).toBe(false);
+    expect(presets.listUserPresetNames()).toEqual(['tray']);
+  });
+
+  it('leaves a preset already saved here alone', async () => {
     presets.saveUserPreset('mine', { nodes: [{ id: 'local' }] } as never);
-    const r = presets.mergePulledPresets({ mine: { nodes: [{ id: 'cloud' }] } as never });
-    expect(r).toEqual({ added: 0, keptInAccount: 0 });
+    expect(presets.mergePulledPresets(['mine'])).toBe(0);
+    expect(await presets.ensureUserPreset('mine')).toBe(true);
+    expect(presets.readUserPreset('mine')?.nodes?.[0].id).toBe('local');
+    expect(cloud.fetchCloudPresetData).not.toHaveBeenCalled();
+  });
+
+  it('hands out a copy, so edits to a loaded scene do not reach the stored preset', () => {
+    presets.saveUserPreset('mine', { nodes: [{ id: 'local' }] } as never);
+    presets.readUserPreset('mine')!.nodes![0].id = 'edited';
+    presets.saveUserPreset('other', { nodes: [] });
     expect(presets.readUserPreset('mine')?.nodes?.[0].id).toBe('local');
   });
 });

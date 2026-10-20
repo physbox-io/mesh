@@ -102,15 +102,13 @@ export const UserProfileButton: React.FC = () => {
       // The machine state holds the spindle override already applied, so a
       // value just restored from the account has to be pushed into it.
       webSerialManager.reapplySpindleOverride();
-      const { added, keptInAccount } = mergePulledPresets(presets);
-      const restored = added + keptInAccount;
+      const listed = mergePulledPresets(presets);
       setSyncFailed(false);
       setSyncSummary(
-        parameters === 0 && restored === 0
+        parameters === 0 && listed === 0
           ? 'Account is up to date'
           : `Restored ${parameters} setting${parameters === 1 ? '' : 's'}` +
-              (restored > 0 ? ` and ${restored} preset${restored === 1 ? '' : 's'}` : '') +
-              (keptInAccount > 0 ? ` (${keptInAccount} kept in your account — this browser is full)` : '')
+              (listed > 0 ? ` and listed ${listed} preset${listed === 1 ? '' : 's'} from your account` : '')
       );
     } catch (e) {
       console.warn('[PhysBox Cloud] Could not pull account state:', e);
