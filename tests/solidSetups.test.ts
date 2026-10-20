@@ -151,3 +151,40 @@ describe('choosing the way up', () => {
     expect(r.upChosen).toBe('+z');
   });
 });
+
+describe('a round body with a box tail, flipped and opened from the end', () => {
+  // A display replica of a bomb casing at 67 mm: an ellipsoid body, a tail
+  // cylinder and a square shroud with cross fins. Top and flip reach the
+  // body; only the shroud's open end sees into the box tail.
+  const g = (name: string, type: string, size: number[], pos: number[], quat?: number[]) =>
+    ({ name, type, size, pos, ...(quat ? { quat } : {}) }) as SceneGeom;
+  const replica: SceneGraph = {
+    nodes: [{
+      id: 'b', name: 'replica', type: 'body', pos: [0, 0, 0.034], joints: [], children: [],
+      geoms: [
+        g('body', 'ellipsoid', [0.042, 0.032, 0.032], [0.01, 0, 0]),
+        g('tail', 'cylinder', [0.014, 0.022], [-0.04, 0, 0], [0.7071068, 0, 0.7071068, 0]),
+        g('st', 'box', [0.012, 0.026, 0.0012], [-0.07, 0, 0.0248]),
+        g('sb', 'box', [0.012, 0.026, 0.0012], [-0.07, 0, -0.0248]),
+        g('sl', 'box', [0.012, 0.0012, 0.026], [-0.07, 0.0248, 0]),
+        g('sr', 'box', [0.012, 0.0012, 0.026], [-0.07, -0.0248, 0]),
+        g('fh', 'box', [0.016, 0.025, 0.0012], [-0.066, 0, 0]),
+        g('fv', 'box', [0.016, 0.0012, 0.025], [-0.066, 0, 0]),
+      ],
+    }],
+  };
+
+  it('plans top, the tail end, then the flip, narrowing the frame so a short bit reaches', () => {
+    const o = deriveSolidOptions(replica, {
+      scalePercent: 50, setups: 'auto', material: 'hardwood', toolStickoutMm: 30,
+      roughingToolDiaMm: 3.175, finishingToolDiaMm: 3.175,
+    });
+    const t0 = performance.now();
+    const r = generateSolidMachining(replica, o);
+    expect(r.success, r.error).toBe(true);
+    expect(r.upChosen).toBe('+z');
+    expect(r.setups!.map((s) => s.upFace)).toEqual(['+z', '-x', '-z']);
+    expect(r.plan!.text).toMatch(/frame round the part is \d+ mm/);
+    expect(performance.now() - t0).toBeLessThan(30_000);
+  }, 60_000);
+});

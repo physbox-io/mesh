@@ -104,6 +104,12 @@ const TOUCH_MM = 0.1;
 /** Extra for locating on a face nothing has machined. */
 const UNMACHINED_DATUM_MM = 0.3;
 
+/** A way up and its coarse plan, for the fine plan to be made on. */
+interface UpCandidate {
+  p: Placement;
+  plan: SetupPlan;
+}
+
 interface Placement {
   up: UpAxis;
   twoSided: boolean;
@@ -166,24 +172,26 @@ function plannerInput(p: Placement, opts: SolidMachiningOptions, only?: BlockFac
  * the cheapest kept. The way up asked for wins unless another is clearly
  * cheaper, so a part that is fine as it is stays as it was drawn.
  */
-function choose(sceneTris: ArrayLike<number>, opts: SolidMachiningOptions, steps: SolidSteps) {
+function choose(sceneTris: ArrayLike<number>, opts: SolidMachiningOptions, steps: SolidSteps): UpCandidate[] {
   const ups = opts.setups === 'auto' && opts.autoOrient !== false ? [opts.up, ...UPS.filter((u) => u !== opts.up)] : [opts.up];
   const only = Array.isArray(opts.setups) ? (opts.setups as BlockFace[]) : undefined;
-  let best: { p: Placement; plan: SetupPlan } | null = null;
+  const found: UpCandidate[] = [];
   for (const up of ups) {
     // Planned on the two-sided block, whose skins are the same top and bottom;
     // the real placement is planned again once the side count is known.
     const p = place(sceneTris, opts, up, true, steps);
     if (!p) continue;
-    // Searched on a coarser grid, a third of the cutter's diameter: enough to
-    // tell the plans apart, and a fraction of the time. The one chosen is
-    // planned again finely.
+    // A coarse grid, a third of the cutter's diameter: a shortlist only. Its
+    // costs are not the fine plan's (a thin sliver hardly registers), so the
+    // way up asked for and the best of the rest are planned again finely and
+    // compared there.
     const size = Math.max(p.partBox.maxX - p.partBox.minX, p.partBox.maxY - p.partBox.minY, p.partBox.maxZ - p.partBox.minZ);
     const plan = planSetups(plannerInput(p, opts, only, Math.max(sideTool(opts).dia / 3, size / 80)));
-    const margin = up === opts.up ? 0 : ORIENTATION_MARGIN;
-    if (!best || plan.cost + margin < best.plan.cost - 1e-9) best = { p, plan };
+    found.push({ p, plan });
   }
-  return best;
+  const asked = found.find((c) => c.p.up === opts.up);
+  const others = found.filter((c) => c !== asked).sort((a, b) => a.plan.cost - b.plan.cost);
+  return [asked, others[0]].filter((c): c is UpCandidate => !!c);
 }
 
 /** What to tell the operator a plan leaves, and what would change it. */
@@ -476,24 +484,32 @@ export function generateSetups(scene: SceneGraph, asked: SolidMachiningOptions, 
   // Every frame width, every way up: the cheapest plan that makes the part,
   // the wider frame on a tie (it clamps better). A plan that fails is only
   // kept to say why when none succeeds.
-  type Candidate = { opts: SolidMachiningOptions; chosen: NonNullable<ReturnType<typeof choose>>; exact: Placement; plan: SetupPlan; failure: string | null; cost: number };
+  type Candidate = { opts: SolidMachiningOptions; chosen: UpCandidate; exact: Placement; plan: SetupPlan; failure: string | null; cost: number };
+  const only = Array.isArray(asked.setups) ? (asked.setups as BlockFace[]) : undefined;
   let best: Candidate | null = null;
   let firstFailure: Candidate | null = null;
   for (const [i, frameWidthMm] of frames.entries()) {
     const o = { ...asked, frameWidthMm };
-    const c = choose(sceneTris, o, steps);
-    if (!c) continue;
-    // The plan again on the exact placement the programs will be made on,
-    // held to the faces chosen, so its voxels line up with the part.
-    const ex = place(sceneTris, o, c.p.up, c.plan.order.includes('-z'), steps)!;
-    const pl = planSetups(plannerInput(ex, o, c.plan.order));
-    const g = pl.grid;
-    let solid = 0;
-    for (let k = 0; k < g.solid.length; k++) solid += g.solid[k];
-    const fail = planFailure(pl, solid * g.cell ** 3);
-    const cand: Candidate = { opts: o, chosen: c, exact: ex, plan: pl, failure: fail, cost: pl.cost + 0.1 * i };
-    if (fail) { firstFailure ??= cand; continue; }
-    if (!best || cand.cost < best.cost) best = cand;
+    for (const c of choose(sceneTris, o, steps)) {
+      // Planned finely on the exact placement the programs will be made on.
+      // The placement depends on whether the block is flipped, so it is
+      // redone if the fine plan disagrees with the coarse one about that.
+      let ex = place(sceneTris, o, c.p.up, c.plan.order.includes('-z'), steps)!;
+      let pl = planSetups(plannerInput(ex, o, only));
+      if (pl.order.includes('-z') !== c.plan.order.includes('-z')) {
+        ex = place(sceneTris, o, c.p.up, pl.order.includes('-z'), steps)!;
+        pl = planSetups(plannerInput(ex, o, pl.order));
+      }
+      const g = pl.grid;
+      let solid = 0;
+      for (let k = 0; k < g.solid.length; k++) solid += g.solid[k];
+      const fail = planFailure(pl, solid * g.cell ** 3);
+      // The wider frame on a tie, and the way up asked for unless another is clearly cheaper.
+      const cost = pl.cost + 0.1 * i + (c.p.up === asked.up ? 0 : ORIENTATION_MARGIN);
+      const cand: Candidate = { opts: o, chosen: c, exact: ex, plan: pl, failure: fail, cost };
+      if (fail) { firstFailure ??= cand; continue; }
+      if (!best || cand.cost < best.cost) best = cand;
+    }
     // A narrower frame only helps a side reach in; with no side setup, stop.
     if (best && best.plan.order.every((f) => f === '+z' || f === '-z')) break;
   }
