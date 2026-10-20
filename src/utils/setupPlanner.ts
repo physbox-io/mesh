@@ -89,9 +89,10 @@ export interface SetupPlan {
   /** What the top alone would leave, mm³: the reason any other setup is here. */
   topOnlyUnreachedMm3: number;
   /**
-   * What no face at all can reach with this cutter, mm³: inside corners
-   * sharper than it, a pocket's square corners. Left as a fillet whatever the
-   * plan; a smaller cutter makes it smaller.
+   * Of what the plan leaves, the inside corners, mm³: air a chosen face sees
+   * but its cutter's radius cannot get into. Every router rounds those; the
+   * rest of `unreachedMm3`, if any, is material no chosen face even sees. A
+   * smaller cutter makes the corners smaller.
    */
   unreachableAnywhereMm3: number;
   /** Faces considered and left out, and why. */
@@ -148,7 +149,7 @@ const dims = (g: VoxelGrid): [number, number, number] => [g.nx, g.ny, g.nz];
  * sweeps (a dilation). A sliver under an overhang thinner than the cutter is
  * not reachable on its own, but is when it opens off a slot the cutter fits.
  */
-function reachFrom(g: VoxelGrid, face: BlockFace, radiusCells: number): Int16Array {
+function reachFrom(g: VoxelGrid, face: BlockFace, radiusCells: number): { reach: Int16Array; sight: Int16Array } {
   const n = dims(g);
   const { axis, high, u, v } = VIEW[face];
   const nu = n[u], nv = n[v], nd = n[axis];
@@ -200,13 +201,18 @@ function reachFrom(g: VoxelGrid, face: BlockFace, radiusCells: number): Int16Arr
   }
 
   const out = new Int16Array(g.solid.length).fill(-1);
+  // What a point could see from the face, before the cutter's radius: air left
+  // that a face sees but its cutter cannot get into is a rounded inside corner.
+  const sight = new Int16Array(g.solid.length).fill(-1);
   for (let iv = 0; iv < nv; iv++) {
     for (let iu = 0; iu < nu; iu++) {
       const limit = opened[iv * nu + iu];
       for (let d = 0; d < Math.min(limit, nd); d++) out[index(iu, iv, d)] = d;
+      const seen = first[iv * nu + iu];
+      for (let d = 0; d < Math.min(seen, nd); d++) sight[index(iu, iv, d)] = d;
     }
   }
-  return out;
+  return { reach: out, sight };
 }
 
 /** How far the stock runs past the part on each face, mm. */
@@ -294,10 +300,13 @@ export function planSetups(input: PlannerInput): SetupPlan {
   const depthMm = new Map<BlockFace, Float32Array>();
   /** Depth below each side face ignoring the bit's reach, for saying what a longer bit would do. */
   const unlimitedMm = new Map<BlockFace, Float32Array>();
+  /** Depth below each face at which a point (no cutter radius) sees each air voxel, within reach. */
+  const sightMm = new Map<BlockFace, Float32Array>();
   for (const f of allowed) {
-    const reach = reachFrom(grid, f, radiusCells);
+    const { reach, sight } = reachFrom(grid, f, radiusCells);
     const d = new Float32Array(air.length);
     const u = new Float32Array(air.length);
+    const seen = new Float32Array(air.length);
     // The top and underside are cut by solid machining's own surface jobs,
     // which hold the cutter's body clear and warn about reach themselves.
     const limit = f === '+z' || f === '-z' ? Infinity : input.reachMm;
@@ -306,9 +315,12 @@ export function planSetups(input: PlannerInput): SetupPlan {
       const mm = r < 0 ? Infinity : (r + 1) * cell + margin[f];
       u[a] = mm;
       d[a] = mm <= limit ? mm : Infinity;
+      const sMm = sight[air[a]] < 0 ? Infinity : (sight[air[a]] + 1) * cell + margin[f];
+      seen[a] = sMm <= limit ? sMm : Infinity;
     }
     depthMm.set(f, d);
     unlimitedMm.set(f, u);
+    sightMm.set(f, seen);
   }
 
   const voxelMm3 = cell ** 3;
@@ -321,19 +333,26 @@ export function planSetups(input: PlannerInput): SetupPlan {
     const cleared = new Map<BlockFace, number>(chosen.map((f) => [f, 0]));
     const deepest = new Map<BlockFace, number>(chosen.map((f) => [f, 0]));
     const arrays = chosen.map((f) => depthMm.get(f)!);
+    const sights = chosen.map((f) => sightMm.get(f)!);
     let unreached = 0;
+    // Left and not even seen by a chosen face: not a rounded corner, a wrong part.
+    let hidden = 0;
     for (let a = 0; a < air.length; a++) {
       let best = Infinity, who = -1;
       for (let c = 0; c < arrays.length; c++) {
         const v = arrays[c][a];
         if (v < best) { best = v; who = c; }
       }
-      if (who < 0) { unreached++; continue; }
+      if (who < 0) {
+        unreached++;
+        if (sights.every((r) => r[a] === Infinity)) hidden++;
+        continue;
+      }
       const f = chosen[who];
       cleared.set(f, cleared.get(f)! + 1);
       if (best > deepest.get(f)!) deepest.set(f, best);
     }
-    return { cleared, deepest, unreached };
+    return { cleared, deepest, unreached, hidden };
   };
 
   const topOnly = score(['+z']);
@@ -361,8 +380,10 @@ export function planSetups(input: PlannerInput): SetupPlan {
       // Cutting time, as a share of what the top alone would take: only
       // differences between plans matter here.
       const time = (air.length - s.unreached) / Math.max(1, air.length);
-      const left = ((s.unreached - anyFace.unreached) * voxelMm3) / unit;
-      const cost = (chosen.length - 1) + ld + time + left;
+      const left = (s.hidden * voxelMm3) / unit;
+      // Standing the block on a side is harder to get right than the flip on
+      // pins, so a side costs half a setup more: the flip wins a tie.
+      const cost = (chosen.length - 1) + 0.5 * chosenSides.length + ld + time + left;
       alternatives.push({ faces: chosen, cost, unreachedMm3: s.unreached * voxelMm3 });
       const better =
         !best ||
@@ -416,17 +437,29 @@ export function planSetups(input: PlannerInput): SetupPlan {
 
   // What a longer bit would reach: of what is left, the share a side could
   // clear if its bit reached far enough, and how far that is.
-  // Out of reach of every face however long the bit: corners sharper than it.
-  // Not the same as out of this bit's reach, which a longer bit fixes.
-  let unreachableWhateverTheBit = 0;
-  const unlimited = allowed.map((f) => unlimitedMm.get(f)!);
-  for (let a = 0; a < air.length; a++) if (unlimited.every((u) => u[a] === Infinity)) unreachableWhateverTheBit++;
+  /*
+   * Of what the plan leaves, the inside corners: air a chosen face can see
+   * but its cutter's radius cannot get into. Every router rounds those. What
+   * no chosen face even sees (under a lip, inside a box, out of the bit's
+   * reach) is not a corner, and a plan that leaves it is a part that is wrong.
+   */
+  let cornersLeft = 0;
+  const chosenSight = pick.chosen.map((f) => sightMm.get(f)!);
+  const chosenReach = pick.chosen.map((f) => depthMm.get(f)!);
+  for (let a = 0; a < air.length; a++) {
+    if (chosenReach.some((r) => r[a] < Infinity)) continue;
+    if (chosenSight.some((r) => r[a] < Infinity)) cornersLeft++;
+  }
 
   let longerBit: SetupPlan['longerBit'] = null;
   if (pick.s.unreached > 0) {
     const leftIdx: number[] = [];
     const chosenArrays = pick.chosen.map((f) => depthMm.get(f)!);
-    for (let a = 0; a < air.length; a++) if (chosenArrays.every((arr) => arr[a] === Infinity)) leftIdx.push(a);
+    for (let a = 0; a < air.length; a++) {
+      if (chosenArrays.some((arr) => arr[a] < Infinity)) continue;
+      if (chosenSight.some((r) => r[a] < Infinity)) continue; // a rounded corner, not left
+      leftIdx.push(a);
+    }
     // Each piece left to the side it is shallowest under, as the plan would give it.
     const best: { a: number; f: BlockFace; mm: number }[] = [];
     for (const a of leftIdx) {
@@ -470,7 +503,7 @@ export function planSetups(input: PlannerInput): SetupPlan {
     unreachedMm3: pick.s.unreached * voxelMm3,
     unreachedBounds: lo,
     topOnlyUnreachedMm3: topOnly.unreached * voxelMm3,
-    unreachableAnywhereMm3: unreachableWhateverTheBit * voxelMm3,
+    unreachableAnywhereMm3: cornersLeft * voxelMm3,
     dropped,
     cost: pick.cost,
     longerBit,
