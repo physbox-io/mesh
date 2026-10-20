@@ -83,7 +83,7 @@ export interface SolidSteps {
     up: UpAxis,
     scale: number
   ) => { oriented: Float64Array; mnX: number; mnY: number; mnZ: number; mxX: number; mxY: number; mxZ: number; partW: number; partD: number; partH: number };
-  stockFor: (partW: number, partD: number, partH: number, opts: SolidMachiningOptions) => { stockW: number; stockD: number; stockT: number };
+  stockFor: (partW: number, partD: number, partH: number, opts: SolidMachiningOptions) => { stockW: number; stockD: number; stockT: number; partCx: number; partCy: number };
   placeInStock: (
     oriented: Float64Array,
     b: { mnX: number; mnY: number; mxX: number; mxY: number; mxZ: number },
@@ -122,15 +122,15 @@ function place(sceneTris: ArrayLike<number>, opts: SolidMachiningOptions, up: Up
   const o = steps.orientPart(sceneTris, up, scale);
   if (!(o.partW > 1e-6 && o.partD > 1e-6 && o.partH > 1e-6)) return null;
   const sized = { ...opts, up, sides: (twoSided ? 2 : 1) as 1 | 2 };
-  const { stockW, stockD, stockT } = steps.stockFor(o.partW, o.partD, o.partH, sized);
+  const { stockW, stockD, stockT, partCx, partCy } = steps.stockFor(o.partW, o.partD, o.partH, sized);
   if (stockT < o.partH - 1e-6) return null;
   const topZ = twoSided ? -(stockT - o.partH) / 2 : -(stockT - o.partH);
-  const tris = steps.placeInStock(o.oriented, o, stockW / 2, stockD / 2, topZ);
+  const tris = steps.placeInStock(o.oriented, o, partCx, partCy, topZ);
   const partBox: PartBox = {
-    minX: stockW / 2 - o.partW / 2,
-    maxX: stockW / 2 + o.partW / 2,
-    minY: stockD / 2 - o.partD / 2,
-    maxY: stockD / 2 + o.partD / 2,
+    minX: partCx - o.partW / 2,
+    maxX: partCx + o.partW / 2,
+    minY: partCy - o.partD / 2,
+    maxY: partCy + o.partD / 2,
     minZ: topZ - o.partH,
     maxZ: topZ,
   };
@@ -470,61 +470,55 @@ export function generateSetups(scene: SceneGraph, asked: SolidMachiningOptions, 
   if (sceneTris.length === 0) return steps.generateSides(scene, { ...asked, sides: 1 });
 
   /*
-   * A side setup reaches the part through the stock round it: the channel and
-   * the frame, 20 mm of it by default, which is most of a small bit's reach.
-   * When the block's size is the app's to choose and a side cannot reach, the
-   * frame is narrowed (still enough to clamp and to hold the tabs) before the
-   * part is refused.
+   * A side setup reaches the part through whatever stock is round it: the
+   * channel and the frame, 15-20 mm of it, most of a small bit's reach. When
+   * the block's size is the app's to choose, a side the block is stood on
+   * ends flush with the part instead, as a machinist would square a blank to
+   * it, and the bit goes straight in. Planned with every side flush (only the
+   * reach of a side depends on it), then again with just the chosen ones.
    */
   const autoStock = !(asked.stockWidthMm > 0) && !(asked.stockDepthMm > 0);
-  const frames = autoStock
-    ? [asked.frameWidthMm, 8, 4].filter((f, i, all) => i === 0 || f < all[0])
-    : [asked.frameWidthMm];
-  // Every frame width, every way up: the cheapest plan that makes the part,
-  // the wider frame on a tie (it clamps better). A plan that fails is only
-  // kept to say why when none succeeds.
+  const SIDES: BlockFace[] = ['+x', '-x', '+y', '-y'];
+  const withFlush = (faces: BlockFace[]): SolidMachiningOptions =>
+    autoStock ? { ...asked, flushFaces: faces } : asked;
   type Candidate = { opts: SolidMachiningOptions; chosen: UpCandidate; exact: Placement; plan: SetupPlan; failure: string | null; cost: number };
   const only = Array.isArray(asked.setups) ? (asked.setups as BlockFace[]) : undefined;
   let best: Candidate | null = null;
-  let firstFailure: Candidate | null = null;
-  for (const [i, frameWidthMm] of frames.entries()) {
-    const o = { ...asked, frameWidthMm };
-    for (const c of choose(sceneTris, o, steps)) {
-      // Planned finely on the exact placement the programs will be made on.
-      // The placement depends on whether the block is flipped, so it is
-      // redone if the fine plan disagrees with the coarse one about that.
-      let ex = place(sceneTris, o, c.p.up, c.plan.order.includes('-z'), steps)!;
-      let pl = planSetups(plannerInput(ex, o, only));
-      if (pl.order.includes('-z') !== c.plan.order.includes('-z')) {
-        ex = place(sceneTris, o, c.p.up, pl.order.includes('-z'), steps)!;
-        pl = planSetups(plannerInput(ex, o, pl.order));
-      }
-      const g = pl.grid;
-      let solid = 0;
-      for (let k = 0; k < g.solid.length; k++) solid += g.solid[k];
-      const fail = planFailure(pl, solid * g.cell ** 3);
-      // The wider frame on a tie, and the way up asked for unless another is clearly cheaper.
-      const cost = pl.cost + 0.1 * i + (c.p.up === asked.up ? 0 : ORIENTATION_MARGIN);
-      const cand: Candidate = { opts: o, chosen: c, exact: ex, plan: pl, failure: fail, cost };
-      if (fail) { firstFailure ??= cand; continue; }
-      if (!best || cand.cost < best.cost) best = cand;
+  let leastFailure: Candidate | null = null;
+  const searchOpts = withFlush(SIDES);
+  for (const c of choose(sceneTris, searchOpts, steps)) {
+    const first = planSetups(plannerInput(place(sceneTris, searchOpts, c.p.up, c.plan.order.includes('-z'), steps)!, searchOpts, only));
+    // The block as it will be: flush only where it is stood on a side.
+    const o = withFlush(first.order.filter((f) => f !== '+z' && f !== '-z'));
+    const ex = place(sceneTris, o, c.p.up, first.order.includes('-z'), steps)!;
+    const pl = planSetups(plannerInput(ex, o, first.order));
+    const g = pl.grid;
+    let solid = 0;
+    for (let k = 0; k < g.solid.length; k++) solid += g.solid[k];
+    const fail = planFailure(pl, solid * g.cell ** 3);
+    // The way up asked for unless another is clearly cheaper.
+    const cost = pl.cost + (c.p.up === asked.up ? 0 : ORIENTATION_MARGIN);
+    const cand: Candidate = { opts: o, chosen: c, exact: ex, plan: pl, failure: fail, cost };
+    if (fail) {
+      // Of the failures, the one asking least: the most achievable advice.
+      const need = (q: Candidate) => q.plan.longerBit?.reachMm ?? Infinity;
+      if (!leastFailure || need(cand) < need(leastFailure)) leastFailure = cand;
+      continue;
     }
-    // A narrower frame only helps a side reach in; with no side setup, stop.
-    if (best && best.plan.order.every((f) => f === '+z' || f === '-z')) break;
+    if (!best || cand.cost < best.cost) best = cand;
   }
-  const pick = best ?? firstFailure;
+  const pick = best ?? leastFailure;
   if (!pick) return steps.generateSides(scene, { ...asked, sides: 1 });
   const { opts, chosen, exact, plan, failure } = pick;
-  const narrowed = opts.frameWidthMm < asked.frameWidthMm;
 
   const twoSided = plan.order.includes('-z');
   const sidesOpts: SolidMachiningOptions = {
     ...opts,
     up: chosen.p.up,
     sides: twoSided ? 2 : 1,
-    // A frame narrowed here has no room for pins: the flip is found by touching
-    // off instead, which the turn dialog walks through, not a warning.
-    ...(narrowed && opts.frameWidthMm < opts.pinDiaMm + 2 ? { registrationPins: false } : {}),
+    // Pins go in the frame at the ends; with an end flush there is none, and
+    // the flip is found by touching off, which the turn dialog walks through.
+    ...((opts.flushFaces ?? []).some((f) => f === '+x' || f === '-x') ? { registrationPins: false } : {}),
   };
   const result = steps.generateSides(scene, sidesOpts);
   if (!result.success) return result;
@@ -558,7 +552,10 @@ export function generateSetups(scene: SceneGraph, asked: SolidMachiningOptions, 
   const of = built.length;
   const setups: SolidSetupResult[] = built.map((s, i) => ({ ...s, index: i + 1, of, instructions: instructionsFor(s, i + 1) }));
   const summary = summarise(plan);
-  if (narrowed) summary.text += ` The frame round the part is ${opts.frameWidthMm} mm, so the bit can reach in from the sides.`;
+  const flushed = opts.flushFaces ?? [];
+  if (flushed.length > 0) {
+    summary.text += ` The part runs right up to the block's ${flushed.map((f) => FACE_NAME[f]).join(' and ')}.`;
+  }
   const seen = new Set<string>();
   return {
     ...result,

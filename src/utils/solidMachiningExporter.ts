@@ -135,6 +135,13 @@ export interface SolidMachiningOptions extends Omit<ReliefCarveOptions, ReliefOn
   autoOrient?: boolean;
   /** Height free under the spindle above the bed, mm, for a block stood on end. 0 is unknown. */
   clearanceMm?: number;
+  /**
+   * Sides of an automatically sized block that end flush with the part: no
+   * channel and no frame there. Set by the setup planner for a side the block
+   * is stood on, so the bit goes straight into the part instead of first
+   * through 15-20 mm of stock. The top and flip run off that edge.
+   */
+  flushFaces?: BlockFace[];
 }
 
 export const DEFAULT_SOLID_OPTIONS: SolidMachiningOptions = {
@@ -855,11 +862,22 @@ export function stockFor(partW: number, partD: number, partH: number, opts: Soli
   const frame = Math.max(0, opts.frameWidthMm);
   const twoSided = opts.sides === 2;
   const skin = Math.max(0, opts.topSkinMm);
-  const stockW = opts.stockWidthMm > 0 ? opts.stockWidthMm : partW + 2 * (moat + frame);
-  const stockD = opts.stockDepthMm > 0 ? opts.stockDepthMm : partD + 2 * (moat + frame);
   const stockT =
     opts.stockThicknessMm > 0 ? opts.stockThicknessMm : partH + (twoSided ? 2 * skin : skin);
-  return { stockW, stockD, stockT };
+  const flush = new Set(opts.flushFaces ?? []);
+  if (flush.size === 0) {
+    const stockW = opts.stockWidthMm > 0 ? opts.stockWidthMm : partW + 2 * (moat + frame);
+    const stockD = opts.stockDepthMm > 0 ? opts.stockDepthMm : partD + 2 * (moat + frame);
+    return { stockW, stockD, stockT, partCx: stockW / 2, partCy: stockD / 2 };
+  }
+  // A flush side has no margin; the part sits against it.
+  const m = moat + frame;
+  const lo = (f: BlockFace) => (flush.has(f) ? 0 : m);
+  const stockW = opts.stockWidthMm > 0 ? opts.stockWidthMm : partW + lo('-x') + lo('+x');
+  const stockD = opts.stockDepthMm > 0 ? opts.stockDepthMm : partD + lo('-y') + lo('+y');
+  const partCx = opts.stockWidthMm > 0 ? stockW / 2 : lo('-x') + partW / 2;
+  const partCy = opts.stockDepthMm > 0 ? stockD / 2 : lo('-y') + partD / 2;
+  return { stockW, stockD, stockT, partCx, partCy };
 }
 
 /** Oriented triangles centred in the stock in plan, their top at `topZ`. */
@@ -951,9 +969,10 @@ function generateSolidSides(
   const frame = Math.max(0, opts.frameWidthMm);
   const twoSided = opts.sides === 2;
 
-  const { stockW, stockD, stockT } = stockFor(partW, partD, partH, opts);
+  const { stockW, stockD, stockT, partCx, partCy } = stockFor(partW, partD, partH, opts);
+  const flush = new Set(opts.flushFaces ?? []);
 
-  if (stockW < partW + 2 * moat || stockD < partD + 2 * moat) {
+  if (flush.size === 0 && (stockW < partW + 2 * moat || stockD < partD + 2 * moat)) {
     warnings.push(
       `The ${stockW} x ${stockD} mm stock is too small for the ${partW.toFixed(1)} x ` +
         `${partD.toFixed(1)} mm part with a ${moat.toFixed(1)} mm channel round it; the channel ` +
@@ -969,12 +988,12 @@ function generateSolidSides(
 
   const bounds = { minX: 0, minY: 0, maxX: stockW, maxY: stockD, minZ: -stockT, maxZ: 0 };
 
-  // Where the part sits: centred in plan. Two-sided, it is centred in the
-  // thickness too, so each side faces the same skin and the cuts meet in the
-  // middle. One-sided, it sits on the bed and the spare thickness is all skin
-  // on top.
-  const stockCx = stockW / 2;
-  const stockCy = stockD / 2;
+  // Where the part sits: centred in plan, or against a flush side. Two-sided,
+  // it is centred in the thickness too, so each side faces the same skin and
+  // the cuts meet in the middle. One-sided, it sits on the bed and the spare
+  // thickness is all skin on top.
+  const stockCx = partCx;
+  const stockCy = partCy;
   const topZ = twoSided ? -(stockT - partH) / 2 : -(stockT - partH);
   const tris = placeInStock(oriented, { mnX, mnY, mxX, mxY, mxZ }, stockCx, stockCy, topZ);
   const partBounds = {
@@ -1071,7 +1090,8 @@ function generateSolidSides(
 
   // --- Registration pins ----------------------------------------------------
   const pins: { x: number; y: number }[] = [];
-  if (twoSided && opts.registrationPins) {
+  // Pins go in the frame at the ends, so not with an end flush.
+  if (twoSided && opts.registrationPins && !flush.has('-x') && !flush.has('+x')) {
     const px = [frame / 2, stockW - frame / 2];
     for (const x of px) {
       const c = Math.round(x / stepX);
@@ -1305,7 +1325,21 @@ function generateSolidSides(
     // Past the half only by more than the surface's own float rounding.
     const depth = deepest > depthA + 1e-3 ? deepest : depthA;
     const cut = machineSurface(
-      { surface, bounds, depthMm: depth, resolution: res, header, prelude, noun: 'cut' },
+      {
+        surface, bounds, depthMm: depth, resolution: res, header, prelude, noun: 'cut',
+        // Off a flush side, as the relief runs off an open edge. Side B is
+        // turned left to right, so its ends are the other way round.
+        ...(flush.size > 0
+          ? {
+              runOff: {
+                minX: flush.has(side === 'A' ? '-x' : '+x'),
+                maxX: flush.has(side === 'A' ? '+x' : '-x'),
+                minY: flush.has('-y'),
+                maxY: flush.has('+y'),
+              },
+            }
+          : {}),
+      },
       {
         ...carveOpts,
         carveDepthMm: depth,

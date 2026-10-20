@@ -184,7 +184,7 @@ describe('a round body with a box tail, flipped and opened from the end', () => 
     expect(r.success, r.error).toBe(true);
     expect(r.upChosen).toBe('+z');
     expect(r.setups!.map((s) => s.upFace)).toEqual(['+z', '-x', '-z']);
-    expect(r.plan!.text).toMatch(/frame round the part is \d+ mm/);
+    expect(r.plan!.text).toMatch(/runs right up to the block's left end/);
     expect(performance.now() - t0).toBeLessThan(30_000);
   }, 60_000);
 });
