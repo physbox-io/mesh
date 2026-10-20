@@ -927,7 +927,7 @@ const PATH_SIMPLIFY_MM = 0.01;
  * roughing cuts the surface itself.
  */
 function roughSimplifyMm(allowanceMm: number, resolutionMm = 0): number {
-  return Math.min(0.25, Math.max(0.05, allowanceMm / 2, allowanceMm > 0 ? Math.min(0.18, resolutionMm * 0.4) : 0));
+  return Math.min(0.25, Math.max(0.05, allowanceMm / 2, Math.min(allowanceMm, resolutionMm * 0.4)));
 }
 /** How far the simplifier looks ahead before it commits to a point. */
 const SIMPLIFY_LOOKAHEAD = 48;
@@ -3186,7 +3186,7 @@ export function machineSurface(
                 const right = stock.highestUnder(px + uy * flank, py - ux * flank, flankRad);
                 linkSlot = Math.max(linkSlot, Math.min(left, right) - pz);
               }
-              if (linkSlot <= 0.25) {
+              if (linkSlot <= Math.max(0.1, baseStepdown * 0.1)) {
                 linkIdx = i;
                 break;
               }
@@ -4161,15 +4161,25 @@ function fillGrazedEdges(
  * instead, while features that stay below Z0 into the part (an open groove) or
  * domes without a Z0 rim are left untouched.
  */
-function bridgeOuterEdgeBevel(hm: Heightmap): void {
+function bridgeOuterEdgeBevel(
+  hm: Heightmap,
+  carveBounds: { minX: number; minY: number; maxX: number; maxY: number },
+  reliefDepthMm: number
+): void {
   const { cols, rows, stepX, stepY, z } = hm;
   if (cols < 5 || rows < 5 || !(stepX > 0) || !(stepY > 0)) return;
-  const maxBevelMm = 6;
+  const spanMin = Math.min(carveBounds.maxX - carveBounds.minX, carveBounds.maxY - carveBounds.minY);
+  const maxBevelMm = Math.min(reliefDepthMm * 0.5, spanMin * 0.05);
+  if (!(maxBevelMm > 0)) return;
   const maxDistSq = maxBevelMm * maxBevelMm;
-  const nearC = new Int32Array(cols * rows).fill(-1);
-  const nearR = new Int32Array(cols * rows).fill(-1);
-  const distSq = new Float32Array(cols * rows).fill(Infinity);
-  const queue: number[] = [];
+  const nCells = cols * rows;
+  const nearC = new Int32Array(nCells).fill(-1);
+  const nearR = new Int32Array(nCells).fill(-1);
+  const distSq = new Float32Array(nCells).fill(Infinity);
+  const inQueue = new Uint8Array(nCells);
+  const queue = new Int32Array(nCells);
+  let qHead = 0;
+  let qTail = 0;
 
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
@@ -4184,14 +4194,17 @@ function bridgeOuterEdgeBevel(hm: Heightmap): void {
         (r > 0 && z[k - cols] !== -Infinity) ||
         (r < rows - 1 && z[k + cols] !== -Infinity)
       ) {
-        queue.push(k);
+        inQueue[k] = 1;
+        queue[qTail++] = k;
       }
     }
   }
-  if (queue.length === 0) return;
+  if (qTail === 0) return;
 
-  for (let head = 0; head < queue.length; head++) {
-    const cur = queue[head];
+  while (qHead !== qTail) {
+    const cur = queue[qHead];
+    qHead = (qHead + 1) % nCells;
+    inQueue[cur] = 0;
     const c = cur % cols;
     const r = Math.floor(cur / cols);
     const bc = nearC[cur];
@@ -4211,7 +4224,11 @@ function bridgeOuterEdgeBevel(hm: Heightmap): void {
         distSq[n] = d2;
         nearC[n] = bc;
         nearR[n] = br;
-        queue.push(n);
+        if (!inQueue[n]) {
+          inQueue[n] = 1;
+          queue[qTail] = n;
+          qTail = (qTail + 1) % nCells;
+        }
       }
     }
   }
@@ -4241,7 +4258,12 @@ function bridgeOuterEdgeBevel(hm: Heightmap): void {
         if (zv === -Infinity || zv < prevZ - 0.05) break;
         prevZ = Math.max(prevZ, zv);
         if (zv >= -1e-3) {
-          reachesTop = d <= s + pitch;
+          // Confirm it lands on a flat Z0 rim rather than a narrow ridge crest.
+          const fc = Math.round(bc + (ux * (s + pitch)) / stepX);
+          const fr = Math.round(br + (uy * (s + pitch)) / stepY);
+          const flatRim =
+            fc >= 0 && fc < cols && fr >= 0 && fr < rows && z[fr * cols + fc] >= -1e-3;
+          reachesTop = flatRim && d <= s + pitch;
           break;
         }
       }
@@ -4630,7 +4652,7 @@ export function generateReliefCarveGcode(
     edgeFaces = faces;
     fillGrazedEdges(surface, carveBounds, faces);
     if (backgroundMode === 'skip' && cutThrough <= 0) {
-      bridgeOuterEdgeBevel(surface);
+      bridgeOuterEdgeBevel(surface, carveBounds, reliefDepth);
     }
     for (let i = 0; i < surface.z.length; i++) {
       if (surface.z[i] === -Infinity) surface.z[i] = inFootprint(i) ? floorZ : backgroundZ;
