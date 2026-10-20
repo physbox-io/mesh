@@ -71,9 +71,9 @@ export const MachineConfigModal: React.FC<{
     () => localStorage.getItem('physbox.cloudDeviceId') || ''
   );
 
+  // Subscribed while open; addListener hands over the current state at once.
   useEffect(() => {
     if (!isOpen) return;
-    setMachineState(webSerialManager.getState());
     return webSerialManager.addListener(setMachineState);
   }, [isOpen]);
 

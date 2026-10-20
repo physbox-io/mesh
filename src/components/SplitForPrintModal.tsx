@@ -76,16 +76,22 @@ export const SplitForPrintModal: React.FC<{ isOpen: boolean; onClose: () => void
   );
   const soups = part.soups;
 
+  const run = useRef<object | null>(null);
   useEffect(() => {
-    if (isOpen) {
-      prewarmPrintSplit();
-    } else {
-      run.current = null;
+    if (isOpen) prewarmPrintSplit();
+    else run.current = null;
+  }, [isOpen]);
+  // Closing forgets the last split and its test, so reopening starts clean.
+  // Reset while rendering, when isOpen changes, rather than in an effect.
+  const [openSeen, setOpenSeen] = useState(isOpen);
+  if (openSeen !== isOpen) {
+    setOpenSeen(isOpen);
+    if (!isOpen) {
       setLanded(null);
       setAssembly(null);
       setReplayRange(null);
     }
-  }, [isOpen]);
+  }
 
   // One object per real change: useSettled waits on identity, and a fresh
   // object each render would never settle.
@@ -95,7 +101,6 @@ export const SplitForPrintModal: React.FC<{ isOpen: boolean; onClose: () => void
   );
   const settled = useSettled(options, 300);
   const request = useMemo(() => ({ soups, settled }), [soups, settled]);
-  const run = useRef<object | null>(null);
   useEffect(() => {
     if (!isOpen || !request.soups.length) return;
     run.current = request;
