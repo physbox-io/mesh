@@ -453,21 +453,48 @@ function instructionsFor(s: Omit<SolidSetupResult, 'index' | 'of' | 'instruction
  * way up and the faces (or is told the faces), the top and flip are cut as
  * before, and each side face gets its own setup.
  */
-export function generateSetups(scene: SceneGraph, opts: SolidMachiningOptions, steps: SolidSteps): SolidMachiningResult {
+export function generateSetups(scene: SceneGraph, asked: SolidMachiningOptions, steps: SolidSteps): SolidMachiningResult {
   const { tris: sceneTris } = collectSceneTriangles(scene);
-  const chosen = sceneTris.length > 0 ? choose(sceneTris, opts, steps) : null;
-  if (!chosen) return steps.generateSides(scene, { ...opts, sides: 1 });
+  if (sceneTris.length === 0) return steps.generateSides(scene, { ...asked, sides: 1 });
 
-  const twoSided = chosen.plan.order.includes('-z');
+  /*
+   * A side setup reaches the part through the stock round it: the channel and
+   * the frame, 20 mm of it by default, which is most of a small bit's reach.
+   * When the block's size is the app's to choose and a side cannot reach, the
+   * frame is narrowed (still enough to clamp and to hold the tabs) before the
+   * part is refused.
+   */
+  const autoStock = !(asked.stockWidthMm > 0) && !(asked.stockDepthMm > 0);
+  const frames = autoStock
+    ? [asked.frameWidthMm, 8, 4].filter((f, i, all) => i === 0 || f < all[0])
+    : [asked.frameWidthMm];
+  let opts = asked;
+  let chosen: ReturnType<typeof choose> = null;
+  let exact: Placement | null = null;
+  let plan: SetupPlan | null = null;
+  let failure: string | null = null;
+  for (const frameWidthMm of frames) {
+    opts = { ...asked, frameWidthMm };
+    chosen = choose(sceneTris, opts, steps);
+    if (!chosen) return steps.generateSides(scene, { ...asked, sides: 1 });
+    // The plan again on the exact placement the programs will be made on,
+    // held to the faces chosen, so its voxels line up with the part.
+    exact = place(sceneTris, opts, chosen.p.up, chosen.plan.order.includes('-z'), steps)!;
+    plan = planSetups(plannerInput(exact, opts, chosen.plan.order));
+    const g = plan.grid;
+    let solid = 0;
+    for (let i = 0; i < g.solid.length; i++) solid += g.solid[i];
+    failure = planFailure(plan, solid * g.cell ** 3);
+    // Only reach is helped by a narrower frame.
+    if (!failure || !plan.longerBit) break;
+  }
+  if (!chosen || !exact || !plan) return steps.generateSides(scene, { ...asked, sides: 1 });
+  const narrowed = opts.frameWidthMm < asked.frameWidthMm;
+
+  const twoSided = plan.order.includes('-z');
   const sidesOpts: SolidMachiningOptions = { ...opts, up: chosen.p.up, sides: twoSided ? 2 : 1 };
   const result = steps.generateSides(scene, sidesOpts);
   if (!result.success) return result;
-
-  // The plan again on the placement the programs were made on, held to the
-  // faces chosen, so its voxels line up with the part exactly.
-  const exact = place(sceneTris, opts, chosen.p.up, twoSided, steps)!;
-  const plan = planSetups(plannerInput(exact, opts, chosen.plan.order));
-  const failure = planFailure(plan, result.partVolumeMm3);
   if (failure) return { ...result, success: false, error: failure, warnings: [], setups: undefined };
   const carveOpts: ReliefCarveOptions = {
     ...(sidesOpts as unknown as ReliefCarveOptions),
@@ -486,15 +513,19 @@ export function generateSetups(scene: SceneGraph, opts: SolidMachiningOptions, s
     if (face === '+z') { built.push(asSetup(result.sides[0], result, plan, sidesOpts.finishingToolDiaMm)); continue; }
     if (face === '-z') { built.push(asSetup(result.sides[1], result, plan, sidesOpts.finishingToolDiaMm)); continue; }
     const s = sideSetup(face, exact, plan, sidesOpts, carveOpts, warnings);
+    // A setup the plan needs and cannot have is a part that comes out wrong.
     if ('error' in s) {
-      warnings.push(`The ${FACE_NAME[face]} setup is left out: ${s.error}.`);
-      continue;
+      return {
+        ...result, success: false, warnings: [], setups: undefined,
+        error: `This part can't be cut: the setup with the ${FACE_NAME[face]} up could not be made (${s.error}).`,
+      };
     }
     built.push(s);
   }
   const of = built.length;
   const setups: SolidSetupResult[] = built.map((s, i) => ({ ...s, index: i + 1, of, instructions: instructionsFor(s, i + 1) }));
   const summary = summarise(plan);
+  if (narrowed) summary.text += ` The frame round the part is ${opts.frameWidthMm} mm, so the bit can reach in from the sides.`;
   const seen = new Set<string>();
   return {
     ...result,
