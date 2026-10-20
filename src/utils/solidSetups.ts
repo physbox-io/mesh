@@ -101,8 +101,6 @@ const ORIENTATION_MARGIN = 0.25;
 const TILT_RAD = (0.25 * Math.PI) / 180;
 /** How well a bit's side touches off on paper. */
 const TOUCH_MM = 0.1;
-/** Extra for locating on a face nothing has machined. */
-const UNMACHINED_DATUM_MM = 0.3;
 
 /** A way up and its coarse plan, for the fine plan to be made on. */
 interface UpCandidate {
@@ -326,13 +324,14 @@ function sideSetup(
   const partTop = firstSurface(tris, grid);
 
   /*
-   * The skin a turned setup leaves for the turn's own error: the touch-off,
-   * and a quarter of a degree of tilt over the cutter's depth and over the
-   * part's size. Inflated in plan by the same, so a wall is not shaved either.
-   * Never below the part: each target is max(part + skin, -needed depth).
+   * The skin a turned setup leaves for the turn's own error: the bit touched
+   * off on paper, and a quarter of a degree of tilt over the depth it cuts.
+   * Inflated in plan by the same, so a wall is not shaved either. Kept to
+   * what that error can really be: a feature only this setup cuts keeps the
+   * skin for good, and a millimetre of it inside a small part is a wrong
+   * part. Never below the part: each target is max(part + skin, -needed depth).
    */
-  const size = Math.max(p.partBox.maxX - p.partBox.minX, p.partBox.maxY - p.partBox.minY, p.partBox.maxZ - p.partBox.minZ);
-  const allowance = TOUCH_MM + deepest * Math.tan(TILT_RAD) + size * Math.tan(TILT_RAD) + UNMACHINED_DATUM_MM;
+  const allowance = TOUCH_MM + deepest * Math.tan(TILT_RAD);
   const reachCells = Math.ceil(allowance / Math.min(stepX, stepY));
   const z = new Float32Array(cols * rows);
   for (let j = 0; j < rows; j++) {
@@ -519,7 +518,14 @@ export function generateSetups(scene: SceneGraph, asked: SolidMachiningOptions, 
   const narrowed = opts.frameWidthMm < asked.frameWidthMm;
 
   const twoSided = plan.order.includes('-z');
-  const sidesOpts: SolidMachiningOptions = { ...opts, up: chosen.p.up, sides: twoSided ? 2 : 1 };
+  const sidesOpts: SolidMachiningOptions = {
+    ...opts,
+    up: chosen.p.up,
+    sides: twoSided ? 2 : 1,
+    // A frame narrowed here has no room for pins: the flip is found by touching
+    // off instead, which the turn dialog walks through, not a warning.
+    ...(narrowed && opts.frameWidthMm < opts.pinDiaMm + 2 ? { registrationPins: false } : {}),
+  };
   const result = steps.generateSides(scene, sidesOpts);
   if (!result.success) return result;
   if (failure) return { ...result, success: false, error: failure, warnings: [], setups: undefined };

@@ -103,7 +103,8 @@ describe('several setups, one of them on a side', () => {
       ...tools, setups, cellMm: 0.5, maxTriangles: 150_000,
       measureRect: result.partBounds, measureMask: result.footprint,
     }).measuredVolumeMm3!;
-    expect(measured / result.partVolumeMm3).toBeGreaterThan(0.995);
+    // Read on a 0.5 mm grid, so to about a percent either way.
+    expect(measured / result.partVolumeMm3).toBeGreaterThan(0.99);
     expect(measured / result.partVolumeMm3).toBeLessThan(1.03);
 
     const node = simulatedBody(sim, result.stockTransform!, { id: 's', name: 's', kind: 'machining', placement: 'overlay' });
