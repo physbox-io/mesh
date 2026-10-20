@@ -53,6 +53,21 @@ const UP_AXES: readonly (readonly [UpAxis, string])[] = [
 const SOLID_DIALOG_DEFAULTS: SolidMachiningOptions = { ...DEFAULT_SOLID_OPTIONS, setups: 'auto' };
 
 /** Hands the browser a file to save. */
+/**
+ * One id per generated program, so side B is matched to the side A it
+ * follows. Kept per result rather than made in render: a timestamp taken
+ * during render is not the same value twice.
+ */
+const sequenceIds = new WeakMap<object, string>();
+function sequenceIdFor(result: object): string {
+  let id = sequenceIds.get(result);
+  if (!id) {
+    id = `solid-${Date.now().toString(36)}`;
+    sequenceIds.set(result, id);
+  }
+  return id;
+}
+
 function downloadText(text: string, filename: string) {
   const url = URL.createObjectURL(new Blob([text], { type: 'text/plain' }));
   const a = document.createElement('a');
@@ -139,7 +154,10 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
   // Handed over from the relief dialog: the same block and bits, planned for setups.
   useEffect(() => {
     if (!isOpen || !seed) return;
+    // A one-off handover from another dialog when this one opens, not state
+    // derived during render: the exception JobHistoryModal documents.
     setOptions((prev) => ({ ...prev, ...seed }));
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setSel(0);
   }, [isOpen, seed, setOptions]);
 
@@ -198,8 +216,7 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
   const setups = result?.success ? result.setups ?? [] : [];
   const current = setups.length > 0 ? setups[Math.min(sel, setups.length - 1)] : null;
   const turned = !!current && (current.upFace === '+x' || current.upFace === '-x' || current.upFace === '+y' || current.upFace === '-y');
-  // One id per generated program, so side B is matched to the side A it follows.
-  const sequenceId = useMemo(() => `solid-${Date.now().toString(36)}`, [result]);
+  const sequenceId = result ? sequenceIdFor(result) : 'solid-none';
   const previewResult = useMemo(
     () =>
       current && result?.success

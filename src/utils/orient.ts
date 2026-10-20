@@ -52,6 +52,9 @@ export const FACE_NAME: Record<BlockFace, string> = {
   '-y': 'front',
 };
 
+/** "Right end up", "Top up". */
+export const faceUpLabel = (f: BlockFace) => `${FACE_NAME[f][0].toUpperCase()}${FACE_NAME[f].slice(1)} up`;
+
 const NORMAL: Record<BlockFace, [number, number, number]> = {
   '+z': [0, 0, 1],
   '-z': [0, 0, -1],

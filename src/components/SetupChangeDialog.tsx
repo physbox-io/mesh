@@ -3,10 +3,9 @@ import { X, Check, ArrowUpToLine, Crosshair, RefreshCw, Play } from 'lucide-reac
 import { NumberInput } from '@physbox-io/ui';
 import type { SolidSetupResult } from '../utils/solidSetups';
 import { setupDiagramSvg, hiddenFaces } from '../utils/setupDiagram';
-import { describeTurn, FACE_NAME, setupFrame, type BlockFace, type StockSize } from '../utils/orient';
+import { describeTurn, FACE_NAME, faceUpLabel, setupFrame, type BlockFace, type StockSize } from '../utils/orient';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
 import { JogPad } from './JogPad';
-import { faceUpLabel } from './SetupCards';
 
 /**
  * Turning the block for the next setup, one step at a time.

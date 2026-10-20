@@ -2,11 +2,8 @@ import React from 'react';
 import { Download, Eye, Lightbulb, Play, RotateCw, AlertCircle, CheckCircle2 } from 'lucide-react';
 import type { SolidSetupResult, SetupPlanSummary } from '../utils/solidSetups';
 import { setupDiagramSvg } from '../utils/setupDiagram';
-import { FACE_NAME, type BlockFace, type StockSize } from '../utils/orient';
+import { faceUpLabel, type StockSize } from '../utils/orient';
 import { formatDuration } from '../utils/timeEstimate';
-
-/** "Right end up", "Top up". */
-export const faceUpLabel = (f: BlockFace) => `${FACE_NAME[f][0].toUpperCase()}${FACE_NAME[f].slice(1)} up`;
 
 /**
  * The plan for a part machined from more than one face: one card per setup,
