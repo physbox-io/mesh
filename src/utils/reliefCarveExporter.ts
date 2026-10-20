@@ -2442,8 +2442,7 @@ export function machineSurface(
     expectedEntryZ: number,
     rate: number,
     returnRate = 0,
-    fromHere = false,
-    maxEntryZ = 0
+    fromHere = false
   ): PathPoint[] => {
     const head = path[0];
     const here = fromHere && Math.hypot(head.x - atX, head.y - atY) < 1e-6 && atZ >= head.z - 1e-6;
@@ -2451,13 +2450,8 @@ export function machineSurface(
     if (here) {
       lastTraverseZ = atZ;
     } else {
-      const standing = stock.highestUnder(
-        head.x,
-        head.y,
-        Math.max(0, cutter.radius - (maxEntryZ < 0 ? stock.cell * 1.5 : 0)),
-        cutter.profile
-      );
-      entryZ = Math.min(maxEntryZ, Math.max(expectedEntryZ, standing));
+      const standing = stock.highestUnder(head.x, head.y, cutter.radius, cutter.profile);
+      entryZ = Math.min(0, Math.max(expectedEntryZ, standing));
       const approachZ = Math.min(opts.safeZ, entryZ + 0.5);
 
       /*
@@ -3215,7 +3209,7 @@ export function machineSurface(
           const path =
             turned !== null && Math.hypot(loop[0].x - atX, loop[0].y - atY) < 1e-6 && Math.abs(loop[0].z - atZ) < 1e-6
               ? loop
-              : leadIn(loop, above, opts.roughingPlungeRate, feed, turned !== null, layerTop);
+              : leadIn(loop, above, opts.roughingPlungeRate, feed, turned !== null);
 
           let lastZ = atZ;
           let passFeedStated = false;
@@ -3294,7 +3288,7 @@ export function machineSurface(
             const plan = simplifyPass(run, roughSimplifyMm(allowance, res));
             // The layer above is what the tool is dropping through, so that is
             // where the ramp starts — one layer, not the whole depth so far.
-            const pass = leadIn(plan, top, opts.roughingPlungeRate, opts.roughingFeedrate, false, top);
+            const pass = leadIn(plan, top, opts.roughingPlungeRate, opts.roughingFeedrate);
 
             let lastZ = pass[0].z;
             let passFeedStated = false;
