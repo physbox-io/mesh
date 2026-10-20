@@ -66,7 +66,9 @@ describe('solid machining from any face', () => {
       expect(s.instructions.length).toBeGreaterThan(0);
     });
     expect(r.plan!.text).toMatch(/3 setups/);
-    expect(r.plan!.redesignHint).toMatch(/vertical/);
+    expect(r.plan!.redesignHint).toMatch(/upright/);
+    // What a plan that succeeds says it leaves: only what every router leaves.
+    expect(r.plan!.remaining.text).toMatch(/Inside corners come out rounded|Every surface/);
   });
 
   it('tells the operator how to stand the block, naming two faces', () => {
@@ -99,6 +101,15 @@ describe('solid machining from any face', () => {
       expect(cut.at(solid[0], solid[1])).toBeGreaterThan(-1);
       expect(s.depthMm).toBeLessThan(80);
     }
+  });
+
+  it('refuses, in plain words, a part its bit cannot reach rather than plan it wrong', () => {
+    // A 6 mm bit reaching 48 mm cannot get half way along the groove from either end.
+    const res = generateSolidMachining(scene, { ...opts, toolStickoutMm: 0, setups: 'auto' });
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/^This part can't be cut with this bit/);
+    expect(res.error).toMatch(/at least \d+ mm from its tip to the holder/);
+    expect(res.error).not.toMatch(/mm³|stickout|collet/);
   });
 
   it('leaves an upright tray to one setup, as it always was', () => {

@@ -151,7 +151,7 @@ function plannerInput(p: Placement, opts: SolidMachiningOptions, only?: BlockFac
     stock: p.stock,
     toolDiaMm: tool.dia,
     reachMm: tool.reach,
-    maxSetups: Math.max(1, opts.maxSetups ?? 4),
+    maxSetups: Math.max(1, opts.maxSetups ?? 6),
     allowUnderside: only ? only.includes('-z') : true,
     allowSides: only ? only.some((f) => f !== '+z' && f !== '-z') : true,
     onlyFaces: only,
@@ -188,40 +188,50 @@ function summarise(plan: SetupPlan): SetupPlanSummary {
     names.length === 1
       ? 'One setup, from the top.'
       : `${names.length} setups: ${names.join(', then ')}. The block is turned between them.`;
+  // Only ever what a router always leaves: a plan that left more than that fails instead.
   const mm3 = Math.round(plan.unreachedMm3);
-  const b = plan.unreachedBounds;
-  const where = b
-    ? ` near X ${b.minX.toFixed(0)}–${b.maxX.toFixed(0)}, Y ${b.minY.toFixed(0)}–${b.maxY.toFixed(0)}, Z ${b.minZ.toFixed(0)}–${b.maxZ.toFixed(0)}`
-    : '';
-  const remaining =
-    mm3 < 1
-      ? { mm3: 0, bounds: null, text: 'Every face of the part is reached.' }
-      : plan.unreachedMm3 <= plan.unreachableAnywhereMm3 + 1
-        ? {
-            mm3,
-            bounds: b,
-            text:
-              `About ${mm3} mm³ is left in inside corners sharper than the cutter${where}: a fillet ` +
-              `no face can reach with it. A smaller finishing bit makes it smaller.`,
-          }
-        : {
-            mm3,
-            bounds: b,
-            text:
-              `About ${mm3} mm³ is left uncut${where}: no face this job is allowed reaches it.` +
-              (plan.longerBit
-                ? ` A bit reaching ${plan.longerBit.reachMm} mm out of the collet would clear about ` +
-                  `${Math.round(plan.longerBit.mm3)} mm³ of it from the ${plan.longerBit.faces.map((f) => FACE_NAME[f]).join(' and ')}: from a side it ` +
-                  `has to go through the channel and frame first. Set its stickout under Advanced.`
-                : ''),
-          };
+  const remaining = {
+    mm3,
+    bounds: plan.unreachedBounds,
+    text: mm3 < 1 ? 'Every surface of the part is cut.' : 'Inside corners come out rounded, the size of the bit.',
+  };
   const sides = plan.order.filter((f) => f !== '+z' && f !== '-z');
   const redesignHint =
     sides.length > 0
-      ? `Faces that lean over the part are why the block is turned. Made vertical, or opened to the ` +
-        `top, the part needs ${plan.order.includes('-z') ? 'only the top and the flip' : 'only the top setup'}.`
+      ? `Make the faces that lean over the part upright and it needs ${plan.order.includes('-z') ? 'only the top and the flip' : 'only one setup'}.`
       : undefined;
   return { text, remaining, redesignHint, dropped: plan.dropped };
+}
+
+/**
+ * Why a plan cannot make the part, in words a beginner can act on, or null
+ * when it can. Corners sharper than the bit come out rounded on any router
+ * and are not a reason; anything else left uncut is: a plan that leaves the
+ * part wrong is not offered.
+ */
+function planFailure(plan: SetupPlan, partMm3: number): string | null {
+  const leftOver = plan.unreachedMm3 - plan.unreachableAnywhereMm3;
+  // Small: a sliver under a lip is small next to the part and still stops a
+  // phone going in. Only what is out of this bit's reach counts here, which
+  // has none of the voxel noise along every surface.
+  if (leftOver <= Math.max(20, 0.0002 * partMm3)) return null;
+  if (plan.longerBit) {
+    return (
+      `This part can't be cut with this bit: some of it is deeper than the bit can reach from any ` +
+      `side. Use a bit that reaches at least ${plan.longerBit.reachMm} mm from its tip to the holder, ` +
+      `or make the part smaller.`
+    );
+  }
+  if (plan.dropped.some((d) => /under the spindle/.test(d.reason))) {
+    return (
+      `This part can't be cut on this machine: the block would have to stand on end, and it is too ` +
+      `tall to fit under the spindle. Make the part smaller, or check Room Under Spindle.`
+    );
+  }
+  return (
+    `This part can't be cut on a 3-axis router: some of it can't be reached from the top, the ` +
+    `bottom or any side. Change the model so every surface can be seen from one of them.`
+  );
 }
 
 /**
@@ -457,6 +467,8 @@ export function generateSetups(scene: SceneGraph, opts: SolidMachiningOptions, s
   // faces chosen, so its voxels line up with the part exactly.
   const exact = place(sceneTris, opts, chosen.p.up, twoSided, steps)!;
   const plan = planSetups(plannerInput(exact, opts, chosen.plan.order));
+  const failure = planFailure(plan, result.partVolumeMm3);
+  if (failure) return { ...result, success: false, error: failure, warnings: [], setups: undefined };
   const carveOpts: ReliefCarveOptions = {
     ...(sidesOpts as unknown as ReliefCarveOptions),
     verticalScaleMode: 'proportional',

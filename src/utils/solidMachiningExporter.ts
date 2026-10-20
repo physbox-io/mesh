@@ -129,7 +129,7 @@ export interface SolidMachiningOptions extends Omit<ReliefCarveOptions, ReliefOn
    * stands for setup 1) uses those.
    */
   setups?: 'auto' | 1 | 2 | BlockFace[];
-  /** With 'auto', at most this many setups. Default 4. */
+  /** With 'auto', at most this many setups. Default 6, one per face. */
   maxSetups?: number;
   /** With 'auto', whether the planner may choose a different way up. Default true. */
   autoOrient?: boolean;

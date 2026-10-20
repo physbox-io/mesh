@@ -1,5 +1,5 @@
 import React from 'react';
-import { Download, Eye, Lightbulb, Play, RotateCw, AlertCircle, CheckCircle2 } from 'lucide-react';
+import { Download, Eye, Lightbulb, Play, RotateCw, CheckCircle2 } from 'lucide-react';
 import type { SolidSetupResult, SetupPlanSummary } from '../utils/solidSetups';
 import { setupDiagramSvg } from '../utils/setupDiagram';
 import { faceUpLabel, type StockSize } from '../utils/orient';
@@ -44,8 +44,8 @@ export function SetupCards({
           <span className="font-normal text-slate-500 dark:text-slate-400"> About {formatDuration(total)} on the machine in all.</span>
         </p>
         {plan && (
-          <p className={`flex items-start gap-1.5 text-xs leading-snug ${plan.remaining.mm3 > 0 ? 'text-amber-700 dark:text-amber-300' : 'text-emerald-700 dark:text-emerald-300'}`}>
-            {plan.remaining.mm3 > 0 ? <AlertCircle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" /> : <CheckCircle2 className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />}
+          <p className="flex items-start gap-1.5 text-xs leading-snug text-slate-600 dark:text-slate-300">
+            <CheckCircle2 className="w-3.5 h-3.5 mt-0.5 flex-shrink-0 text-emerald-500" />
             <span>{plan.remaining.text}</span>
           </p>
         )}
@@ -73,7 +73,6 @@ export function SetupCards({
             window: s.upFace === '+z' || s.upFace === '-z' ? undefined : s.windowBounds,
             widthPx: 220,
           });
-          const deep = s.lengthOverDia > 4;
           const isSelected = i === selected;
           return (
             <React.Fragment key={`${s.upFace}-${i}`}>
@@ -104,10 +103,7 @@ export function SetupCards({
                   {s.upFace !== '+z' && s.upFace !== '-z' && (
                     <li>Stands {s.standingHeightMm.toFixed(0)} mm tall</li>
                   )}
-                  <li className={deep ? 'text-amber-700 dark:text-amber-300' : undefined}>
-                    Cuts {s.depthMm.toFixed(1)} mm deep{deep ? `, ${s.lengthOverDia.toFixed(1)}× the bit: go gently` : ''}
-                  </li>
-                  {s.clearedMm3 > 0 && s.index > 1 && <li>Takes off about {Math.round(s.clearedMm3).toLocaleString()} mm³</li>}
+                  <li>Cuts {s.depthMm.toFixed(0)} mm deep</li>
                   {s.allowanceMm > 0 && <li>Leaves {s.allowanceMm.toFixed(1)} mm to sand off where it finishes</li>}
                   <li>{s.locate === 'pins' ? 'Located on the pins' : s.index === 1 ? 'Zero on the near-left corner' : 'Located by touching off the block'}</li>
                 </ul>

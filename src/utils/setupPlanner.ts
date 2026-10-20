@@ -41,7 +41,7 @@ export interface PlannerInput {
    * long-reach one.
    */
   reachMm: number;
-  /** At most this many setups. Default 4. */
+  /** At most this many setups. Default 6, one per face. */
   maxSetups?: number;
   /** Whether the underside may be a setup (the flip). */
   allowUnderside?: boolean;
@@ -314,7 +314,7 @@ export function planSetups(input: PlannerInput): SetupPlan {
   const voxelMm3 = cell ** 3;
   const targetMm3 = air.length * voxelMm3;
   const sides = SIDE_PREFERENCE.filter((f) => allowed.includes(f));
-  const maxSetups = Math.max(1, input.maxSetups ?? 4);
+  const maxSetups = Math.max(1, input.maxSetups ?? 6);
 
   /** Scores one choice of faces. */
   const score = (chosen: BlockFace[]) => {
@@ -416,6 +416,12 @@ export function planSetups(input: PlannerInput): SetupPlan {
 
   // What a longer bit would reach: of what is left, the share a side could
   // clear if its bit reached far enough, and how far that is.
+  // Out of reach of every face however long the bit: corners sharper than it.
+  // Not the same as out of this bit's reach, which a longer bit fixes.
+  let unreachableWhateverTheBit = 0;
+  const unlimited = allowed.map((f) => unlimitedMm.get(f)!);
+  for (let a = 0; a < air.length; a++) if (unlimited.every((u) => u[a] === Infinity)) unreachableWhateverTheBit++;
+
   let longerBit: SetupPlan['longerBit'] = null;
   if (pick.s.unreached > 0) {
     const leftIdx: number[] = [];
@@ -464,7 +470,7 @@ export function planSetups(input: PlannerInput): SetupPlan {
     unreachedMm3: pick.s.unreached * voxelMm3,
     unreachedBounds: lo,
     topOnlyUnreachedMm3: topOnly.unreached * voxelMm3,
-    unreachableAnywhereMm3: anyFace.unreached * voxelMm3,
+    unreachableAnywhereMm3: unreachableWhateverTheBit * voxelMm3,
     dropped,
     cost: pick.cost,
     longerBit,
