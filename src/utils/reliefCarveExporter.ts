@@ -926,8 +926,8 @@ const PATH_SIMPLIFY_MM = 0.01;
  * not the curve any more; floored for a job with no allowance at all, where
  * roughing cuts the surface itself.
  */
-function roughSimplifyMm(allowanceMm: number): number {
-  return Math.min(0.25, Math.max(0.05, allowanceMm / 2));
+function roughSimplifyMm(allowanceMm: number, resolutionMm = 0): number {
+  return Math.min(0.25, Math.max(0.05, allowanceMm / 2, allowanceMm > 0 ? Math.min(0.18, resolutionMm * 0.4) : 0));
 }
 /** How far the simplifier looks ahead before it commits to a point. */
 const SIMPLIFY_LOOKAHEAD = 48;
@@ -2442,7 +2442,8 @@ export function machineSurface(
     expectedEntryZ: number,
     rate: number,
     returnRate = 0,
-    fromHere = false
+    fromHere = false,
+    maxEntryZ = 0
   ): PathPoint[] => {
     const head = path[0];
     const here = fromHere && Math.hypot(head.x - atX, head.y - atY) < 1e-6 && atZ >= head.z - 1e-6;
@@ -2450,8 +2451,13 @@ export function machineSurface(
     if (here) {
       lastTraverseZ = atZ;
     } else {
-      const standing = stock.highestUnder(head.x, head.y, cutter.radius, cutter.profile);
-      entryZ = Math.min(0, Math.max(expectedEntryZ, standing));
+      const standing = stock.highestUnder(
+        head.x,
+        head.y,
+        Math.max(0, cutter.radius - (maxEntryZ < 0 ? stock.cell * 1.5 : 0)),
+        cutter.profile
+      );
+      entryZ = Math.min(maxEntryZ, Math.max(expectedEntryZ, standing));
       const approachZ = Math.min(opts.safeZ, entryZ + 0.5);
 
       /*
@@ -2615,6 +2621,13 @@ export function machineSurface(
      * the fixed line did.
      */
     const stops = [{ x: head.x, y: head.y, pz: head.z, d: 0 }, ...walk];
+    let hasWallStep = false;
+    for (let i = 1; i < stops.length; i++) {
+      if (Math.abs(stops[i].d - stops[i - 1].d) <= 1e-9) {
+        hasWallStep = true;
+        break;
+      }
+    }
     let z = entryZ;
     let at = 0;
     let forward = true;
@@ -2639,6 +2652,14 @@ export function machineSurface(
       forward = !forward;
       left.push(above);
       if (above <= 1e-6 || (leg >= 2 && above >= left[leg - 2] - 1e-6)) break;
+    }
+
+    // Where a ramp on a short run (`!fits`) with no wall step ends at the far
+    // end of the pass at full depth, reversing the pass lets the pass itself
+    // clear what the ramp rode over on the way back to the head, instead of
+    // retracing back to the head and cutting the whole run a third time.
+    if (!fits && !hasWallStep && at === stops.length - 1 && Math.abs(z - stops[at].pz) <= 1e-6) {
+      return [...path].reverse();
     }
 
     /*
@@ -2853,6 +2874,11 @@ export function machineSurface(
      * a relief that fills its stock is exactly the case where that would throw
      * the outermost ring of every layer away.
      */
+    // Where a finishing pass follows, a sliver of a few hundredths of a
+    // millimetre inside the allowance is not worth roughing: it only generates
+    // a single-cell outer ring that skims the surface in air.
+    const minRoughCut = allowance > 0 ? Math.min(0.05, allowance * 0.25) : 1e-6;
+
     const layerRegion = (layerTop: number): ClearingRegion => {
       const gxs = axisSamples(roughWin.minX, roughWin.maxX, res);
       const gys = axisSamples(roughWin.minY, roughWin.maxY, res);
@@ -2869,7 +2895,7 @@ export function machineSurface(
           // and a whole layer of terrace standing between every two, all of it
           // for the finishing tool. The path follows the surface down to the
           // floor instead (see `slabZ`).
-          if (target < layerTop - 1e-6) mask[(j + 1) * cols + (i + 1)] = 1;
+          if (target < layerTop - minRoughCut) mask[(j + 1) * cols + (i + 1)] = 1;
         }
       }
 
@@ -2992,11 +3018,29 @@ export function machineSurface(
         //
         // Each point sits on the surface where that stands above the slab's
         // floor, so the simplifier holds the height as well as the plan shape.
+        // Smooth Z across adjacent marching-squares staircase vertices so a
+        // ring on a 45-degree slope does not bob up and down in Z on every
+        // grid cell while keeping its full XY radius on convex islands.
         const loop = startNearest(node.loop, atX, atY);
-        const onSurface = loop.map((p) => {
+        const rawSurface = loop.map((p) => {
           const x = safeX(p.x);
           const y = safeY(p.y);
           return { x, y, z: slabZ(x, y, layerZ, layerTop) };
+        });
+        const maxStairSeg = res * 1.8;
+        const onSurface = rawSurface.map((p, idx) => {
+          if (allowance <= 0) return p;
+          const prev = rawSurface[(idx + rawSurface.length - 1) % rawSurface.length];
+          const next = rawSurface[(idx + 1) % rawSurface.length];
+          const dPrev = Math.hypot(p.x - prev.x, p.y - prev.y);
+          const dNext = Math.hypot(next.x - p.x, next.y - p.y);
+          if (dPrev <= maxStairSeg && dNext <= maxStairSeg) {
+            const sz = 0.25 * prev.z + 0.5 * p.z + 0.25 * next.z;
+            if (Math.abs(sz - p.z) <= allowance * 0.5) {
+              return { x: p.x, y: p.y, z: Math.min(layerTop, Math.max(layerZ, sz)) };
+            }
+          }
+          return p;
         });
 
         /*
@@ -3020,13 +3064,14 @@ export function machineSurface(
          * three times over in the air at three bite heights that all clamp to
          * the same surface.
          */
-        const plan = simplifyPass([...onSurface, onSurface[0]], roughSimplifyMm(allowance));
+        const plan = simplifyPass([...onSurface, onSurface[0]], roughSimplifyMm(allowance, res));
         if (plan.length < 2) return;
 
         // Along the path as it will be cut, every half cell or so, each flank
         // read square to the move.
         const flank = roughRad * 0.8;
         const flankRad = roughRad * 0.2;
+        const coreRad = Math.max(0, roughRad - stock.cell * 1.5);
         let slot = 0;
         let standing = -Infinity;
         let bottom = Infinity;
@@ -3042,7 +3087,7 @@ export function machineSurface(
             const x = a.x + (b.x - a.x) * t;
             const y = a.y + (b.y - a.y) * t;
             const z = a.z + (b.z - a.z) * t;
-            standing = Math.max(standing, stock.highestUnder(x, y, roughRad));
+            standing = Math.max(standing, stock.highestUnder(x, y, coreRad));
             bottom = Math.min(bottom, z);
             if (len <= 1e-9) continue;
             const left = stock.highestUnder(x + nx * flank, y + ny * flank, flankRad);
@@ -3054,7 +3099,7 @@ export function machineSurface(
         const span = ringTop - bottom;
         // Nothing left standing in this ring's way: the rings outside it took
         // it all.
-        if (!(span > 1e-3)) return;
+        if (!(span > Math.max(1e-3, minRoughCut))) return;
 
         const slotting = slot > Math.max(0.1, baseStepdown * 0.1);
         // A slot is fed for the chip it is actually taking rather than the one
@@ -3074,10 +3119,10 @@ export function machineSurface(
          * slot itself, so the boosted depth stands; where it is deeper, every
          * bite is held to the full-width stepdown.
          */
-        const effectiveEngagement = Math.max(
-          ring.engagement,
-          Math.min(1, slot / Math.max(0.1, baseStepdown))
-        );
+        const effectiveEngagement =
+          slot > baseStepdown + 1e-6
+            ? Math.max(ring.engagement, Math.min(1, slot / Math.max(0.1, baseStepdown)))
+            : ring.engagement;
         const ringStep = stepdownForEngagement(opts.roughingToolDiaMm, effectiveEngagement, baseStepdown);
         const bites = Math.max(1, Math.ceil((span - 1e-6) / ringStep));
 
@@ -3093,35 +3138,93 @@ export function machineSurface(
            * the material - the stock's face, on the first layer - and ramp the
            * whole way back down through the slot.
            */
-          const turned = bite > 1 ? startLoopAt(loop, atX, atY) : null;
+          let turned = bite > 1 ? startLoopAt(loop, atX, atY) : null;
           const prePath: PathPoint[] = [];
           if (turned) {
             loop = turned;
             if (loop[0].z >= atZ - 1e-6 && loop.some((p) => p.z < atZ - 1e-6)) {
               let m = 0;
               while (m + 1 < loop.length - 1 && loop[m + 1].z >= atZ - 1e-6) m++;
+              let preFeedStated = false;
               for (let i = 1; i <= m; i++) {
                 const z = Math.abs(loop[i].z - atZ) > 1e-6 ? ` Z${f(loop[i].z)}` : '';
                 cutTo(loop[i].x, loop[i].y, loop[i].z);
-                gcode.push(`G1 X${f(loop[i].x)} Y${f(loop[i].y)}${z} F${Math.round(feed)}`);
+                gcode.push(`G1 X${f(loop[i].x)} Y${f(loop[i].y)}${z}${preFeedStated ? '' : ` F${Math.round(feed)}`}`);
+                preFeedStated = true;
                 prePath.push(loop[i]);
               }
               if (m > 0) {
                 loop = [...loop.slice(m, loop.length - 1), ...loop.slice(0, m), loop[m]];
               }
             }
+          } else if (
+            bite === 1 &&
+            bites === 1 &&
+            ring.engagement < 1 &&
+            Math.hypot(loop[0].x - atX, loop[0].y - atY) <= roughStepover * 2.5 &&
+            atZ <= layerTop + 1e-6
+          ) {
+            // An inner ring of a pocket whose outer ring has just been cleared:
+            // step tangentially onto a point a few stepovers ahead along the
+            // ring instead of lifting out, rapiding 0.8 mm and ramping back down
+            // through air on every stepover ring.
+            let linkIdx = -1;
+            let walked = 0;
+            for (let i = 1; i < loop.length - 1; i++) {
+              walked += Math.hypot(loop[i].x - loop[i - 1].x, loop[i].y - loop[i - 1].y);
+              if (walked < roughStepover * 1.5) continue;
+              if (walked > roughStepover * 5) break;
+              const target = loop[i];
+              const d = Math.hypot(target.x - atX, target.y - atY);
+              if (d < roughStepover * 1.2 || d > roughStepover * 4.5) continue;
+              if (target.z > atZ + 1e-6) continue;
+              if (atZ - target.z > 1e-6 && (leadInTan <= 0 || (atZ - target.z) / d > leadInTan)) continue;
+              const ux = (target.x - atX) / d;
+              const uy = (target.y - atY) / d;
+              const steps = Math.max(1, Math.ceil(d / (stock.cell / 2)));
+              let linkSlot = 0;
+              for (let s = 1; s <= steps; s++) {
+                const t = s / steps;
+                const px = atX + (target.x - atX) * t;
+                const py = atY + (target.y - atY) * t;
+                const pz = atZ + (target.z - atZ) * t;
+                const left = stock.highestUnder(px - uy * flank, py + ux * flank, flankRad);
+                const right = stock.highestUnder(px + uy * flank, py - ux * flank, flankRad);
+                linkSlot = Math.max(linkSlot, Math.min(left, right) - pz);
+              }
+              if (linkSlot <= 0.25) {
+                linkIdx = i;
+                break;
+              }
+            }
+            if (linkIdx > 0) {
+              const entry = loop[linkIdx];
+              const linkFeed = entry.z < atZ - 1e-6 ? opts.roughingPlungeRate : feed;
+              const z = Math.abs(entry.z - atZ) > 1e-6 ? ` Z${f(entry.z)}` : '';
+              prePath.push({ x: atX, y: atY, z: atZ });
+              cutTo(entry.x, entry.y, entry.z);
+              gcode.push(`G1 X${f(entry.x)} Y${f(entry.y)}${z} F${Math.round(linkFeed)}`);
+              lastTraverseZ = atZ;
+              loop = [...loop.slice(linkIdx, loop.length - 1), ...loop.slice(0, linkIdx), entry];
+              turned = loop;
+            }
           }
 
           // Ramp in along the ring rather than plunging: the centre of an end
           // mill cuts at zero surface speed, and a deep layer pulls hard on it.
-          const path = leadIn(loop, above, opts.roughingPlungeRate, feed, turned !== null);
+          const path =
+            turned !== null && Math.hypot(loop[0].x - atX, loop[0].y - atY) < 1e-6 && Math.abs(loop[0].z - atZ) < 1e-6
+              ? loop
+              : leadIn(loop, above, opts.roughingPlungeRate, feed, turned !== null, layerTop);
 
           let lastZ = atZ;
+          let passFeedStated = false;
           for (let i = 1; i < path.length; i++) {
             cutTo(path[i].x, path[i].y, path[i].z);
             const z = Math.abs(path[i].z - lastZ) > 1e-6 ? ` Z${f(path[i].z)}` : '';
             lastZ = path[i].z;
-            gcode.push(`G1 X${f(path[i].x)} Y${f(path[i].y)}${z} F${Math.round(feed)}`);
+            gcode.push(`G1 X${f(path[i].x)} Y${f(path[i].y)}${z}${passFeedStated ? '' : ` F${Math.round(feed)}`}`);
+            passFeedStated = true;
           }
 
           // No retract here: the next `leadIn` lifts only as far as it needs
@@ -3188,28 +3291,30 @@ export function machineSurface(
         let run: PathPoint[] = [];
         const flushRun = () => {
           if (run.length >= 2) {
-            const plan = simplifyPass(run, roughSimplifyMm(allowance));
+            const plan = simplifyPass(run, roughSimplifyMm(allowance, res));
             // The layer above is what the tool is dropping through, so that is
             // where the ramp starts — one layer, not the whole depth so far.
-            leadIn(plan, top, opts.roughingPlungeRate, opts.roughingFeedrate);
+            const pass = leadIn(plan, top, opts.roughingPlungeRate, opts.roughingFeedrate, false, top);
 
-            let lastZ = plan[0].z;
-            for (let i = 1; i < plan.length; i++) {
-              cutTo(plan[i].x, plan[i].y, plan[i].z);
-              const z = Math.abs(plan[i].z - lastZ) > 1e-6 ? ` Z${f(plan[i].z)}` : '';
-              lastZ = plan[i].z;
-              gcode.push(`G1 X${f(plan[i].x)} Y${f(plan[i].y)}${z} F${Math.round(opts.roughingFeedrate)}`);
+            let lastZ = pass[0].z;
+            let passFeedStated = false;
+            for (let i = 1; i < pass.length; i++) {
+              cutTo(pass[i].x, pass[i].y, pass[i].z);
+              const z = Math.abs(pass[i].z - lastZ) > 1e-6 ? ` Z${f(pass[i].z)}` : '';
+              lastZ = pass[i].z;
+              gcode.push(`G1 X${f(pass[i].x)} Y${f(pass[i].y)}${z}${passFeedStated ? '' : ` F${Math.round(opts.roughingFeedrate)}`}`);
+              passFeedStated = true;
             }
 
             // One segment per run: the preview must not draw a line across the
             // gap the tool actually flew over.
-            segments.push({ type: 'roughing', points: plan, traverseZ: lastTraverseZ });
+            segments.push({ type: 'roughing', points: pass, traverseZ: lastTraverseZ });
           }
           run = [];
         };
 
         for (const x of lineXs) {
-          if (roughTargetAt(x, y) < top - 1e-6) run.push({ x, y, z: slabZ(x, y, layerZ, top) });
+          if (roughTargetAt(x, y) < top - minRoughCut) run.push({ x, y, z: slabZ(x, y, layerZ, top) });
           else flushRun();
         }
         flushRun();
@@ -4053,6 +4158,109 @@ function fillGrazedEdges(
 }
 
 /**
+ * Where the board round a model is left uncut at Z0 (`backgroundMode === 'skip'`),
+ * an outer edge roundover or bevel on the model's perimeter drops from the
+ * model's Z0 top rim down into the `-Infinity` margin — which, once the margin
+ * is filled with Z0, turns that outer roundover into a V-trench all the way
+ * round the part. Any narrow perimeter bevel that climbs monotonically inward
+ * from the uncut boundary to the model's Z0 top face is bridged level at Z0
+ * instead, while features that stay below Z0 into the part (an open groove) or
+ * domes without a Z0 rim are left untouched.
+ */
+function bridgeOuterEdgeBevel(hm: Heightmap): void {
+  const { cols, rows, stepX, stepY, z } = hm;
+  if (cols < 5 || rows < 5 || !(stepX > 0) || !(stepY > 0)) return;
+  const maxBevelMm = 6;
+  const maxDistSq = maxBevelMm * maxBevelMm;
+  const nearC = new Int32Array(cols * rows).fill(-1);
+  const nearR = new Int32Array(cols * rows).fill(-1);
+  const distSq = new Float32Array(cols * rows).fill(Infinity);
+  const queue: number[] = [];
+
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const k = r * cols + c;
+      if (z[k] !== -Infinity) continue;
+      nearC[k] = c;
+      nearR[k] = r;
+      distSq[k] = 0;
+      if (
+        (c > 0 && z[k - 1] !== -Infinity) ||
+        (c < cols - 1 && z[k + 1] !== -Infinity) ||
+        (r > 0 && z[k - cols] !== -Infinity) ||
+        (r < rows - 1 && z[k + cols] !== -Infinity)
+      ) {
+        queue.push(k);
+      }
+    }
+  }
+  if (queue.length === 0) return;
+
+  for (let head = 0; head < queue.length; head++) {
+    const cur = queue[head];
+    const c = cur % cols;
+    const r = Math.floor(cur / cols);
+    const bc = nearC[cur];
+    const br = nearR[cur];
+    const neighbors = [
+      c > 0 ? cur - 1 : -1,
+      c < cols - 1 ? cur + 1 : -1,
+      r > 0 ? cur - cols : -1,
+      r < rows - 1 ? cur + cols : -1,
+    ];
+    for (const n of neighbors) {
+      if (n < 0 || z[n] === -Infinity) continue;
+      const nc = n % cols;
+      const nr = Math.floor(n / cols);
+      const d2 = ((nc - bc) * stepX) ** 2 + ((nr - br) * stepY) ** 2;
+      if (d2 <= maxDistSq && d2 < distSq[n] - 1e-6) {
+        distSq[n] = d2;
+        nearC[n] = bc;
+        nearR[n] = br;
+        queue.push(n);
+      }
+    }
+  }
+
+  const pitch = Math.min(stepX, stepY);
+  const lift = new Uint8Array(cols * rows);
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const k = r * cols + c;
+      if (!(distSq[k] > 0 && distSq[k] <= maxDistSq) || !(z[k] < -1e-4)) continue;
+      const bc = nearC[k];
+      const br = nearR[k];
+      const vx = (c - bc) * stepX;
+      const vy = (r - br) * stepY;
+      const d = Math.hypot(vx, vy);
+      if (d <= 1e-6) continue;
+      const ux = vx / d;
+      const uy = vy / d;
+
+      let prevZ = -Infinity;
+      let reachesTop = false;
+      for (let s = pitch; s <= maxBevelMm + pitch; s += pitch) {
+        const sc = Math.round(bc + (ux * s) / stepX);
+        const sr = Math.round(br + (uy * s) / stepY);
+        if (sc < 0 || sc >= cols || sr < 0 || sr >= rows) break;
+        const zv = z[sr * cols + sc];
+        if (zv === -Infinity || zv < prevZ - 0.05) break;
+        prevZ = Math.max(prevZ, zv);
+        if (zv >= -1e-3) {
+          reachesTop = d <= s + pitch;
+          break;
+        }
+      }
+      if (reachesTop) lift[k] = 1;
+    }
+  }
+
+  for (let i = 0; i < z.length; i++) {
+    if (lift[i]) z[i] = 0;
+  }
+}
+
+/**
  * Carries the model's edge heights out across the margin round it wherever
  * they are below the top face, so a feature open at the model's edge stays
  * open through a board left uncut. Returns whether anything changed.
@@ -4427,6 +4635,9 @@ export function generateReliefCarveGcode(
     const faces = endFaces(surface, carveBounds);
     edgeFaces = faces;
     fillGrazedEdges(surface, carveBounds, faces);
+    if (backgroundMode === 'skip' && cutThrough <= 0) {
+      bridgeOuterEdgeBevel(surface);
+    }
     for (let i = 0; i < surface.z.length; i++) {
       if (surface.z[i] === -Infinity) surface.z[i] = inFootprint(i) ? floorZ : backgroundZ;
       else if (surface.z[i] < floorZ) surface.z[i] = floorZ;
