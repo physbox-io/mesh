@@ -1638,6 +1638,17 @@ export interface PhysicsState {
    * no effect re-runs. A number that only goes up always re-runs.
    */
   cameraResetToken: number;
+  /**
+   * The scene the viewport keeps drawing while a newly loaded one is built.
+   *
+   * Loading writes `sceneGraph` at once, because the CSG compile and the MCP
+   * reply read it straight away, but the model to draw it with comes from the
+   * worker some time later. Drawn against the old model, every new geom has no
+   * id and every old one is unexplained by the new graph, so the implicit-geom
+   * pass drew the outgoing scene again (the pendulum, most often) before the
+   * new one replaced it. Null except during that wait.
+   */
+  outgoingSceneGraph: SceneGraph | null;
   mcpActiveCount: number;
   scadCompileCount: number;
   
@@ -2285,6 +2296,37 @@ function framingPatch(
  */
 const initialFraming = framingPatch(initialScene, null);
 
+/** Which scene swap (a preset or generated board loading) is the latest. */
+let sceneSwapId = 0;
+
+/**
+ * Finish a scene swap once its model is on screen: stop drawing the outgoing
+ * scene, and only now put the camera back and frame the new one. Reset at the
+ * click instead, the camera jumped to the starting view over the OLD scene, and
+ * then jumped again when the new one arrived.
+ *
+ * Registered after the build has queued its own paint, so it lands in the same
+ * frame as the model. A swap that a later one overtook does nothing: the later
+ * one finishes it. Run whether or not the build succeeded, or a failed one
+ * would hold the old scene on screen for good.
+ */
+function finishSceneSwap(
+  id: number,
+  build: Promise<void>,
+  set: (fn: (state: PhysicsState) => Partial<PhysicsState>) => void,
+  framing: () => ReturnType<typeof framingPatch>,
+) {
+  const finish = () => onNextPaint(() => {
+    if (id !== sceneSwapId) return;
+    set((state) => ({
+      outgoingSceneGraph: null,
+      cameraResetToken: state.cameraResetToken + 1,
+      ...framing(),
+    }));
+  });
+  void build.then(finish, finish);
+}
+
 /** The lattice snap (in 0.1 mm grid steps) that matches a grid drawn at `mm`. */
 function snapForGridMm(mm: number): SnapMultiple {
   return (Math.round(mm * 10) || 10) as SnapMultiple;
@@ -2554,6 +2596,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
   cameraOffAxis: false,
   cameraOverride: initialFraming.cameraOverride,
   cameraResetToken: 0,
+  outgoingSceneGraph: null,
   mcpActiveCount: 0,
   scadCompileCount: 0,
   
@@ -2940,7 +2983,6 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
         activePreset: name,
         carveSettings: null,
         cameraOverride: null,
-        cameraResetToken: state.cameraResetToken + 1,
         latticeNodeId: null,
         latticeStats: null,
         sculptNodeId: null,
@@ -2966,12 +3008,11 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
         // an empty scene; recompiling it would throw inside the MJCF builder.
         if (savedScene) {
           promoteJointedMeshGeomsDeep(savedScene.nodes);
-          void get().recompile(savedScene, null, true, true).then(() => {
-            // A saved scene never carries a camera, so it is framed entirely
-            // from its own bounds — the same as a preset that does not state
-            // one. After the rebuild, for the same reason the presets are.
-            if (get().activePreset === name) set(framingPatch(savedScene, null));
-          });
+          // A saved scene never carries a camera, so it is framed entirely
+          // from its own bounds — the same as a preset that does not state
+          // one. After the rebuild, for the same reason the presets are.
+          finishSceneSwap(++sceneSwapId, get().recompile(savedScene, null, true, true), set,
+            () => framingPatch(savedScene, null));
         }
       } catch (e) {
         console.error('Failed to load user preset', e);
@@ -3001,22 +3042,25 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
      * ask for it.
      */
     const framing = preset.camera ?? null;
+    const swap = ++sceneSwapId;
     set((state) => ({
       isPlaying: false,
       selectedNodeId: null,
       hiddenNodeIds: [],
       activePreset: name,
       sceneGraph: scene,
+      // A load that overtakes another still shows what was on screen.
+      outgoingSceneGraph: state.outgoingSceneGraph ?? state.sceneGraph,
       // A preset that does not say how it is cut gets the exporter's defaults
       // back, rather than inheriting the last one's.
       carveSettings: preset.carve ?? null,
       stock: stockFromCarve(preset.carve, state.stock),
+      // Back to the view every scene starts in, once it is on screen (see
+      // finishSceneSwap). Whatever the camera was doing belonged to the scene
+      // that has just gone: a view orbited round a 40 mm part, or zoomed to six
+      // millimetres inside a lattice, frames the next preset as a wall of
+      // geometry across the window.
       cameraOverride: null,
-      // Back to the view every scene starts in. Whatever the camera was doing
-      // belonged to the scene that has just gone: a view orbited round a 40 mm
-      // part, or zoomed to six millimetres inside a lattice, frames the next
-      // preset as a wall of geometry across the window.
-      cameraResetToken: state.cameraResetToken + 1,
       // The modelling tools were open on a body that no longer exists.
       latticeNodeId: null,
       latticeStats: null,
@@ -3032,11 +3076,8 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     } else {
       set({ windX: 0, windY: 0, floorBounce: 0 });
     }
-    void get().recompile(scene, null, true, true).then(() => {
-      // Unless something else has been loaded in the meantime, in which case
-      // this framing belongs to a scene that is no longer on screen.
-      if (get().activePreset === name) set(framingPatch(scene, framing));
-    });
+    finishSceneSwap(swap, get().recompile(scene, null, true, true), set,
+      () => framingPatch(scene, framing));
   },
 
 
@@ -3053,6 +3094,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
   loadGeneratedScene: (scene, carve) => {
     get().prepareForDiscreteChange();
     getPhysicsWorkerClient().setPlaying(false);
+    const swap = ++sceneSwapId;
     set((state) => ({
       isPlaying: false,
       selectedNodeId: null,
@@ -3063,12 +3105,12 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
       // `activePresetLabel` already falls through to.
       activePreset: undefined,
       sceneGraph: scene,
+      outgoingSceneGraph: state.outgoingSceneGraph ?? state.sceneGraph,
       carveSettings: carve,
       stock: stockFromCarve(carve, state.stock),
       patternGeneratorId: null,
       facePatternTarget: null,
       cameraOverride: null,
-      cameraResetToken: state.cameraResetToken + 1,
       latticeNodeId: null,
       latticeStats: null,
       sculptNodeId: null,
@@ -3078,11 +3120,10 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
       windY: 0,
       floorBounce: 0,
     }));
-    void get().recompile(scene, null, true, true).then(() => {
-      // A generated board is sized from the stock it will be cut from, which
-      // is usually a good deal smaller than the default view assumes.
-      if (get().activePreset === undefined) set(framingPatch(scene, null));
-    });
+    // A generated board is sized from the stock it will be cut from, which
+    // is usually a good deal smaller than the default view assumes.
+    finishSceneSwap(swap, get().recompile(scene, null, true, true), set,
+      () => framingPatch(scene, null));
   },
 
   setEnvironment: (env) => {

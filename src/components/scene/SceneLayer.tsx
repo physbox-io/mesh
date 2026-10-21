@@ -1624,9 +1624,10 @@ export const SceneVisuals = React.memo(function SceneVisuals({ model, data, mujo
    * Every body by id, built once per change to the document, so each geom is
    * handed its node instead of searching for it. The document, not the
    * `sceneGraph` prop: that one has shattered bodies swapped for their shards,
-   * and geoms have always looked their node up in the document.
+   * and geoms have always looked their node up in the document — the outgoing
+   * one while a load is being built, as SceneCanvas draws.
    */
-  const documentGraph = useStore((state) => state.sceneGraph);
+  const documentGraph = useStore((state) => state.outgoingSceneGraph ?? state.sceneGraph);
   const nodeById = useMemo(() => {
     const map = new Map<string, SceneNode>();
     const walk = (nodes: SceneNode[]) => {

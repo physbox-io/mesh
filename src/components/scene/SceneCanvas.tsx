@@ -90,11 +90,14 @@ export function SceneCanvas({ threeSceneRef, axisCanvasRef, darkMode, onImportSc
   // While anything is in pieces the scene on screen is the document with the
   // broken bodies swapped for their shards. See `shatterPieces` in the store.
   const shatteredBodies = useStore((s) => s.visibleShatteredBodies);
+  // While a loaded scene is being built, the one the current model was built
+  // from. See `outgoingSceneGraph` in the store.
+  const outgoingGraph = useStore((s) => s.outgoingSceneGraph);
   // Exactly what the solver was handed, so the picture and the physics cannot
   // disagree about which bodies exist.
   const effectiveGraph = useMemo(
-    () => applyShatterPieces(sceneGraph, shatteredBodies),
-    [sceneGraph, shatteredBodies],
+    () => applyShatterPieces(outgoingGraph ?? sceneGraph, shatteredBodies),
+    [outgoingGraph, sceneGraph, shatteredBodies],
   );
   const [activeWeakSpot, setActiveWeakSpot] = useState<WeakSpot | null>(null);
 
