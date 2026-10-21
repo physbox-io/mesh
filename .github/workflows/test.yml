@@ -18,11 +18,15 @@ permissions:
   contents: write
   packages: read
 
-# A second push while the first is still running makes the first irrelevant:
-# only the newest commit on a branch is a deploy candidate.
+# One run per branch at a time, and a push never cancels the run in progress.
+# Several agents push to main at once, and cancelling threw away each push's
+# CI as the next one arrived. A newer push queues instead; GitHub keeps one
+# pending run per group, so a third push replaces the waiting one, never the
+# running one. Each run force-pushes `deploy` as it finishes, so deploys still
+# go out in commit order.
 concurrency:
   group: tests-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   test:
