@@ -78,6 +78,15 @@ export interface SolidMachiningOptions extends Omit<ReliefCarveOptions, ReliefOn
   stockDepthMm: number;
   stockThicknessMm: number;
   /**
+   * The board the operator has, when the block is to be cut from it: what the
+   * dialogs and MCP plan with. Too small for the part and the job is refused;
+   * near enough the block the job wants, it is used as it is, the part
+   * centred in it; much bigger, or bigger where a side setup needs the block
+   * flush with the part, and the job is planned on the block the part needs,
+   * with `boardPrep` saying what to cut the board down to first.
+   */
+  board?: { widthMm: number; depthMm: number; thicknessMm: number } | null;
+  /**
    * Width of the channel cut round the part, down to the floor. 0 derives one
    * from the roughing cutter: wide enough for it to get round every corner
    * with room to clear chips.
@@ -213,6 +222,8 @@ export interface SolidMachiningResult {
   sides: SolidSideResult[];
   /** The stock the job wants, in mm. */
   stock: { widthMm: number; depthMm: number; thicknessMm: number };
+  /** What to cut the board down to before the first setup, when it has to be. */
+  boardPrep?: string;
   /** The stock block in work coordinates, for the preview and the travel check. */
   bounds: { minX: number; minY: number; maxX: number; maxY: number; minZ: number; maxZ: number };
   /** Where the part lands on the stock, plan view. */
@@ -835,8 +846,12 @@ export function deriveSolidOptions(
 export function sideDepthMm(partHeightMm: number, opts: SolidMachiningOptions): number {
   const skin = Math.max(0, opts.topSkinMm);
   const twoSided = opts.sides === 2;
-  const stockT =
-    opts.stockThicknessMm > 0 ? opts.stockThicknessMm : partHeightMm + (twoSided ? 2 * skin : skin);
+  const wantT = partHeightMm + (twoSided ? 2 * skin : skin);
+  const stockT = opts.stockThicknessMm > 0
+    ? opts.stockThicknessMm
+    : opts.board && opts.board.thicknessMm >= partHeightMm && opts.board.thicknessMm <= wantT + BOARD_SLACK_THICK_MM
+      ? opts.board.thicknessMm
+      : wantT;
   return twoSided ? stockT / 2 + SIDE_OVERLAP_MM : stockT + Math.max(0, opts.throughCutMm);
 }
 
@@ -856,7 +871,7 @@ export function orientPart(sceneTris: ArrayLike<number>, up: UpAxis, scale: numb
 }
 
 /** The block a part needs: as given, or the part plus channel and frame, and its skins. */
-export function stockFor(partW: number, partD: number, partH: number, opts: SolidMachiningOptions) {
+function blockFor(partW: number, partD: number, partH: number, opts: SolidMachiningOptions) {
   const roughDia = opts.roughingEnabled ? opts.roughingToolDiaMm : opts.finishingToolDiaMm;
   const moat = opts.moatWidthMm > 0 ? opts.moatWidthMm : Math.max(3, roughDia * 1.5);
   const frame = Math.max(0, opts.frameWidthMm);
@@ -878,6 +893,78 @@ export function stockFor(partW: number, partD: number, partH: number, opts: Soli
   const partCx = opts.stockWidthMm > 0 ? stockW / 2 : lo('-x') + partW / 2;
   const partCy = opts.stockDepthMm > 0 ? stockD / 2 : lo('-y') + partD / 2;
   return { stockW, stockD, stockT, partCx, partCy };
+}
+
+/** A board this much longer or wider than the block the job wants is cut down first. */
+const BOARD_SLACK_PLAN_MM = 50;
+/** A board this much thicker is planed or resawn first, rather than faced off for an hour. */
+const BOARD_SLACK_THICK_MM = 10;
+
+/**
+ * The block the job is planned on. Without a board, `blockFor`. With one: the
+ * board, if it holds the part and its channel and is not much bigger than the
+ * block the part wants; the wanted block, with `prep` saying what to cut the
+ * board down to, if it is much bigger or a side setup needs the block flush
+ * with the part; `tooSmall` if it cannot hold the part at all.
+ */
+export function stockFor(partW: number, partD: number, partH: number, opts: SolidMachiningOptions) {
+  const want = blockFor(partW, partD, partH, opts);
+  const board = opts.board;
+  if (!board) return { ...want, prep: null as string | null, tooSmall: null as string | null };
+
+  const roughDia = opts.roughingEnabled ? opts.roughingToolDiaMm : opts.finishingToolDiaMm;
+  const moat = opts.moatWidthMm > 0 ? opts.moatWidthMm : Math.max(3, roughDia * 1.5);
+  const flush = new Set(opts.flushFaces ?? []);
+  const lo = (face: BlockFace) => (flush.has(face) ? 0 : moat);
+  // Sizes said to the operator are ones a saw can be set to: whole
+  // millimetres, rounded up, or tenths where a side must end flush with the part.
+  const up = (v: number, step: number) => Math.ceil(v / step - 1e-9) * step;
+  const minW = up(partW + lo('-x') + lo('+x'), 1);
+  const minD = up(partD + lo('-y') + lo('+y'), 1);
+  if (board.widthMm < minW - 1e-6 || board.depthMm < minD - 1e-6 || board.thicknessMm < partH - 1e-6) {
+    return {
+      ...want, prep: null,
+      tooSmall:
+        `Your ${f(board.widthMm)} x ${f(board.depthMm)} x ${f(board.thicknessMm)} mm board is too small: ` +
+        `this part needs at least ${minW} x ${minD} x ${up(partH, 1)} mm, and ${up(want.stockW, 1)} x ` +
+        `${up(want.stockD, 1)} x ${up(want.stockT, 1)} mm with a full frame to clamp. Set the board in the status bar.`,
+    };
+  }
+
+  const thick = board.thicknessMm > want.stockT + BOARD_SLACK_THICK_MM;
+  const stockT = thick ? up(want.stockT, 1) : board.thicknessMm;
+  const cutPlan =
+    (flush.size > 0 && (board.widthMm > want.stockW + 0.5 || board.depthMm > want.stockD + 0.5)) ||
+    board.widthMm > want.stockW + BOARD_SLACK_PLAN_MM ||
+    board.depthMm > want.stockD + BOARD_SLACK_PLAN_MM;
+  const step = flush.size > 0 ? 0.1 : 1;
+  const cutW = +up(want.stockW, step).toFixed(1);
+  const cutD = +up(want.stockD, step).toFixed(1);
+  const sizes = [
+    cutPlan ? `${cutW} x ${cutD} mm` : null,
+    thick ? `${stockT} mm thick` : null,
+  ].filter(Boolean).join(', ');
+  const why = flush.size > 0 && cutPlan
+    ? 'the side setups stand it on faces flush with the part'
+    : 'the rest would only be faced and cut away';
+  const prep = sizes ? `Cut the board down to ${sizes} first: ${why}.` : null;
+  if (!cutPlan) {
+    // The board as it is, the part centred in it.
+    return { stockW: board.widthMm, stockD: board.depthMm, stockT, partCx: board.widthMm / 2, partCy: board.depthMm / 2, prep, tooSmall: null };
+  }
+  // What rounding up adds goes on the side away from a flush face, or half
+  // each side when neither is: a flush face stays on the part.
+  const shift = (lo: BlockFace, hi: BlockFace, spare: number) =>
+    flush.has(lo) ? 0 : flush.has(hi) ? spare : spare / 2;
+  return {
+    stockW: cutW,
+    stockD: cutD,
+    stockT,
+    partCx: want.partCx + shift('-x', '+x', cutW - want.stockW),
+    partCy: want.partCy + shift('-y', '+y', cutD - want.stockD),
+    prep,
+    tooSmall: null,
+  };
 }
 
 /** Oriented triangles centred in the stock in plan, their top at `topZ`. */
@@ -969,9 +1056,19 @@ function generateSolidSides(
   const frame = Math.max(0, opts.frameWidthMm);
   const twoSided = opts.sides === 2;
 
-  const { stockW, stockD, stockT, partCx, partCy } = stockFor(partW, partD, partH, opts);
+  const { stockW, stockD, stockT, partCx, partCy, prep, tooSmall } = stockFor(partW, partD, partH, opts);
+  if (tooSmall) return fail(tooSmall);
+  if (prep) warnings.unshift(prep);
   const flush = new Set(opts.flushFaces ?? []);
 
+  if (stockW < partW - 1e-6 || stockD < partD - 1e-6) {
+    const need = blockFor(partW, partD, partH, { ...opts, stockWidthMm: 0, stockDepthMm: 0, stockThicknessMm: 0 });
+    return fail(
+      `The ${stockW} x ${stockD} mm stock is smaller than the ${f(partW)} x ${f(partD)} mm part this way up. ` +
+        `It needs at least ${f(need.stockW)} x ${f(need.stockD)} x ${f(need.stockT)} mm with its channel and frame: ` +
+        `set a bigger board, or size the block to the part.`
+    );
+  }
   if (flush.size === 0 && (stockW < partW + 2 * moat || stockD < partD + 2 * moat)) {
     warnings.push(
       `The ${stockW} x ${stockD} mm stock is too small for the ${partW.toFixed(1)} x ` +
@@ -1388,6 +1485,7 @@ function generateSolidSides(
     warnings: unique,
     sides,
     stock: { widthMm: stockW, depthMm: stockD, thicknessMm: stockT },
+    ...(prep ? { boardPrep: prep } : {}),
     bounds,
     partBounds,
     footprint: { minX: 0, minY: 0, stepX, stepY, cols, rows, mask: hit },

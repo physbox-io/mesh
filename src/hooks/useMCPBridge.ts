@@ -53,7 +53,7 @@ import { collectIndividualPartSoups } from '../utils/timberBreakdown';
 import { synthesizeTimberJoinery, type TenonCornerFit, type TimberEdgeProfile, type TimberJointMode } from '../utils/timberJoinery';
 import { buildTimberCutPlan } from '../utils/timberCutList';
 import { filamentSpec } from '../utils/filaments';
-import { deriveSolidOptions, fittingScalePercent, measurePart, type SolidMachiningOptions, type SolidMachiningResult } from '../utils/solidMachiningExporter';
+import { deriveSolidOptions, measurePart, type SolidMachiningOptions, type SolidMachiningResult } from '../utils/solidMachiningExporter';
 import {
   APP_RELIEF_DEFAULTS,
   DEFAULT_RELIEF_OPTIONS,
@@ -332,12 +332,28 @@ function sculptMeshOf(node: SceneNode | null | undefined) {
 type Msg<T> = Record<string, unknown> & T;
 
 /**
+ * A parameter the dialogs no longer offer, refused rather than ignored, so an
+ * agent that still sends it hears what to do instead. `harmless` is the value
+ * that asks for nothing: older servers send stockThicknessMm 0 on every call,
+ * and 0 always meant "size it to the part".
+ */
+function refuseRetired(msg: Record<string, unknown>, retired: Record<string, [string, unknown]>): void {
+  for (const [key, [instead, harmless]] of Object.entries(retired)) {
+    if (msg[key] !== undefined && msg[key] !== harmless) throw new Error(`${key} is no longer taken. ${instead}`);
+  }
+}
+
+const RESIZE_INSTEAD =
+  'Parts are cut at their modelled size, as in the dialog: resize the part in the scene (physics_update_object).';
+
+/**
  * The relief job an MCP command plans: the dialog's last plan if there is one,
  * else the scene's and the bench's, with the command's own overrides on top.
  * Shared by EXPORT_RELIEF and ADD_SIMULATION, so a simulation is of the
  * program the export would hand over.
  */
 function reliefOptionsFor(msg: Record<string, unknown>): { options: ReliefCarveOptions; fromDialog: boolean } {
+  refuseRetired(msg, { scalePercent: [RESIZE_INSTEAD, 100] });
   const store = useStore.getState();
   const motion = webSerialManager.getState().motion;
   const dialog = lastReliefOptions();
@@ -371,13 +387,14 @@ function reliefOptionsFor(msg: Record<string, unknown>): { options: ReliefCarveO
       ? { verticalScaleMode: msg.verticalScaleMode as ReliefCarveOptions['verticalScaleMode'] }
       : {}),
     ...(num(msg.verticalExaggeration) ? { verticalExaggeration: num(msg.verticalExaggeration) } : {}),
-    ...(msg.fitMode === 'fit' || msg.fitMode === 'manual' ? { fitMode: msg.fitMode } : {}),
-    ...(num(msg.scalePercent) ? { scalePercent: num(msg.scalePercent) } : {}),
+    // 'actual' is the dialog's Actual Size; 'manual' is its old name.
+    ...(msg.fitMode === 'fit' ? { fitMode: 'fit' as const } : {}),
+    ...(msg.fitMode === 'actual' || msg.fitMode === 'manual' ? { fitMode: 'manual' as const } : {}),
     ...(['auto', 'carve', 'skip'].includes(msg.backgroundMode as string)
       ? { backgroundMode: msg.backgroundMode as ReliefCarveOptions['backgroundMode'] }
       : {}),
   };
-  const merged: ReliefCarveOptions = { ...base, ...asked };
+  const merged: ReliefCarveOptions = { ...base, ...asked, scalePercent: 100 };
   // The dialog's feeds stand, overrides and all, unless what they were
   // worked out for has been changed here.
   const rederive = !dialog || ['roughingToolDiaMm', 'finishingToolDiaMm', 'carveDepthMm', 'material']
@@ -417,22 +434,25 @@ function machiningOptionsFor(msg: Record<string, unknown>, scene: SceneGraph) {
   // connected machine, as the dialog does; DEFAULT_SOLID_OPTIONS alone is
   // a wood recipe whatever material is named.
   const motion = webSerialManager.getState().motion;
-  // At the scale asked for, or as the dialog opens it: 100%, unless the model
-  // is too big to mill from solid and a fraction of it makes a part.
-  const natural = measurePart(scene, '+z', 100);
-  const scalePercent = typeof msg.scalePercent === 'number' && msg.scalePercent > 0
-    ? msg.scalePercent
-    : fittingScalePercent(natural ? Math.max(natural.x, natural.y, natural.z) : 0);
+  const boardInstead =
+    'The stock is the bench board, as in the dialog: set it with physics_set_environment.';
+  refuseRetired(msg, {
+    scalePercent: [RESIZE_INSTEAD, 100],
+    stockWidthMm: [boardInstead, 0],
+    stockDepthMm: [boardInstead, 0],
+    stockThicknessMm: [boardInstead, 0],
+  });
   const setups = parseSetups(msg.setups);
   const options = deriveSolidOptions(scene, {
-    scalePercent,
+    scalePercent: 100,
+    board: useStore.getState().stock,
+    stockWidthMm: 0,
+    stockDepthMm: 0,
+    stockThicknessMm: 0,
     ...(typeof msg.sides === 'number' ? { sides: msg.sides } : {}),
     ...(setups !== undefined ? { setups } : {}),
     ...(typeof msg.clearanceMm === 'number' ? { clearanceMm: msg.clearanceMm } : {}),
     ...(typeof msg.toolStickoutMm === 'number' ? { toolStickoutMm: msg.toolStickoutMm } : {}),
-    ...(typeof msg.stockWidthMm === 'number' ? { stockWidthMm: msg.stockWidthMm } : {}),
-    ...(typeof msg.stockDepthMm === 'number' ? { stockDepthMm: msg.stockDepthMm } : {}),
-    ...(typeof msg.stockThicknessMm === 'number' ? { stockThicknessMm: msg.stockThicknessMm } : {}),
     ...(typeof msg.material === 'string' ? { material: msg.material } : {}),
     ...(msg.finishingToolType === 'flat' || msg.finishingToolType === 'ball_nose' || msg.finishingToolType === 'v_bit'
       ? { finishingToolType: msg.finishingToolType }
@@ -3546,6 +3566,7 @@ export function useMCPBridge() {
             ok: true,
             summary: {
               stock: result.stock,
+              ...(result.boardPrep ? { boardPrep: result.boardPrep } : {}),
               partSizeMm: result.partSizeMm,
               partVolumeMm3: result.partVolumeMm3,
               unreachablePercent: result.unreachablePercent,

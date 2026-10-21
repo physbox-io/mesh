@@ -114,12 +114,28 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
     derived, effective, settled, pending, materialLabel, finishTool, roughTool, speedNote,
   } = useCarveTooling(isOpen, SOLID_DIALOG_DEFAULTS, (o) => sideDepthMm(partHeight, o));
 
-  // Handed over from the relief dialog: the same block and bits, planned for setups.
+  /*
+   * The stock is the board on the bench, the status bar's, as for every other
+   * export. The plan refuses it if it cannot hold the part, uses it as it is
+   * if it is about the size the part wants, and otherwise says what to cut it
+   * down to first. Folded in during render, as the relief dialog folds the
+   * board in, so no plan is started against the previous board.
+   */
+  const bench = useStore((s) => s.stock);
+  const [syncedBench, setSyncedBench] = useState<typeof bench | null>(null);
+  if (syncedBench !== bench) {
+    setSyncedBench(bench);
+    setOptions((prev) => ({ ...prev, board: bench, stockWidthMm: 0, stockDepthMm: 0, stockThicknessMm: 0 }));
+  }
+
+  // Handed over from the relief dialog: the same board and bits, planned for setups.
   useEffect(() => {
     if (!isOpen || !seed) return;
     // A one-off handover from another dialog when this one opens, not state
     // derived during render: the exception JobHistoryModal documents.
-    setOptions((prev) => ({ ...prev, ...seed }));
+    // Its board is the bench's, already folded in above.
+    const { stockWidthMm: _w, stockDepthMm: _d, stockThicknessMm: _t, ...rest } = seed;
+    setOptions((prev) => ({ ...prev, ...rest }));
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setSel(0);
   }, [isOpen, seed, setOptions]);
@@ -383,43 +399,19 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
               </Field>
 
               <Field
-                label="Stock W (mm)"
-                hint="Width of the block, or 0 to make it the part plus a channel and a frame on each side. The job needs at least the number shown greyed. Bigger stock is fine: the part is centred in it, and on a two-sided job the pins keep the flip honest whatever size the block is."
+                className="lg:col-span-2"
+                label="Stock (mm)"
+                hint="The board in the status bar, the same one every export uses. If it cannot hold the part the job is refused and says what it needs. If it is much bigger than the part wants, or a side setup needs the block flush with the part, it says what to cut the board down to first."
               >
-                <NumberInput
-                  step={5} min={0} max={2000}
-                  allowEmpty
-                  placeholder={result?.success ? result.stock.widthMm.toFixed(1) : 'auto'}
-                  value={options.stockWidthMm || null}
-                  onChange={(v) => set('stockWidthMm', v ?? 0)}
-                  className={inputClass}
-                />
-              </Field>
-              <Field
-                label="Stock D (mm)"
-                hint="Depth of the block, front to back, or 0 for the part plus channel and frame."
-              >
-                <NumberInput
-                  step={5} min={0} max={2000}
-                  allowEmpty
-                  placeholder={result?.success ? result.stock.depthMm.toFixed(1) : 'auto'}
-                  value={options.stockDepthMm || null}
-                  onChange={(v) => set('stockDepthMm', v ?? 0)}
-                  className={inputClass}
-                />
-              </Field>
-              <Field
-                label="Stock T (mm)"
-                hint="Thickness of the block, or 0 for the part's height plus a skin on every machined face. It must be at least the part's height this way up."
-              >
-                <NumberInput
-                  step={1} min={0} max={300}
-                  allowEmpty
-                  placeholder={result?.success ? result.stock.thicknessMm.toFixed(1) : 'auto'}
-                  value={options.stockThicknessMm || null}
-                  onChange={(v) => set('stockThicknessMm', v ?? 0)}
-                  className={inputClass}
-                />
+                <div className={`${inputClass} bg-slate-100 dark:bg-slate-800/60 border-transparent`}>
+                  {`${bench.widthMm} × ${bench.depthMm} × ${bench.thicknessMm}`}
+                  {result?.success && result.boardPrep
+                    ? ` → ${result.stock.widthMm.toFixed(0)} × ${result.stock.depthMm.toFixed(0)} × ${result.stock.thicknessMm.toFixed(0)}`
+                    : ''}
+                </div>
+                {result?.success && result.boardPrep && (
+                  <p className="mt-1 text-[10px] leading-snug text-amber-600 dark:text-amber-400">{result.boardPrep}</p>
+                )}
               </Field>
               <Field
                 label="Top Skin (mm)"

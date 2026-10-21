@@ -83,7 +83,7 @@ export interface SolidSteps {
     up: UpAxis,
     scale: number
   ) => { oriented: Float64Array; mnX: number; mnY: number; mnZ: number; mxX: number; mxY: number; mxZ: number; partW: number; partD: number; partH: number };
-  stockFor: (partW: number, partD: number, partH: number, opts: SolidMachiningOptions) => { stockW: number; stockD: number; stockT: number; partCx: number; partCy: number };
+  stockFor: (partW: number, partD: number, partH: number, opts: SolidMachiningOptions) => { stockW: number; stockD: number; stockT: number; partCx: number; partCy: number; tooSmall?: string | null };
   placeInStock: (
     oriented: Float64Array,
     b: { mnX: number; mnY: number; mxX: number; mxY: number; mxZ: number },
@@ -122,8 +122,9 @@ function place(sceneTris: ArrayLike<number>, opts: SolidMachiningOptions, up: Up
   const o = steps.orientPart(sceneTris, up, scale);
   if (!(o.partW > 1e-6 && o.partD > 1e-6 && o.partH > 1e-6)) return null;
   const sized = { ...opts, up, sides: (twoSided ? 2 : 1) as 1 | 2 };
-  const { stockW, stockD, stockT, partCx, partCy } = steps.stockFor(o.partW, o.partD, o.partH, sized);
-  if (stockT < o.partH - 1e-6) return null;
+  const { stockW, stockD, stockT, partCx, partCy, tooSmall } = steps.stockFor(o.partW, o.partD, o.partH, sized);
+  // A way up the board cannot hold is no candidate; if none can, the plan fails saying so.
+  if (tooSmall || stockT < o.partH - 1e-6) return null;
   const topZ = twoSided ? -(stockT - o.partH) / 2 : -(stockT - o.partH);
   const tris = steps.placeInStock(o.oriented, o, partCx, partCy, topZ);
   const partBox: PartBox = {
