@@ -211,7 +211,7 @@ export async function simulateCastFromMoldNode(
           const sn = tex.seedNormal && tex.seedNormal.length >= 3 ? tex.seedNormal : [0, 1, 0];
           const nLocal = new THREE.Vector3(sn[0], sn[1], sn[2]).normalize();
           // Default planar u tangent (first non-parallel basis axis)
-          let uLocal = new THREE.Vector3(1, 0, 0);
+          const uLocal = new THREE.Vector3(1, 0, 0);
           if (Math.abs(nLocal.x) > 0.85) uLocal.set(0, 1, 0);
           uLocal.addScaledVector(nLocal, -uLocal.dot(nLocal)).normalize();
           if (tex.twistDeg) {

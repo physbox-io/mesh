@@ -23,7 +23,6 @@ import {
   type MoldSummary,
 } from './moldExporter';
 import {
-  emptyMoldCastResult,
   simulateCastFromMoldNode,
   simulateCastFromMoldResult,
   type MoldCastSimulationOptions,
@@ -118,7 +117,17 @@ export class MoldWorkerClient {
   /** Simulates the cast solid from whatever mold was generated last. */
   async cast(options?: MoldCastSimulationOptions): Promise<MoldCastSimulationResult> {
     if (!this.worker) {
-      if (!this.lastResult) return emptyMoldCastResult('No mold generated yet.');
+      if (!this.lastResult) {
+        return {
+          success: false,
+          error: 'No mold generated yet.',
+          warnings: [],
+          mesh: { positions: new Float32Array(0), faces: new Uint32Array(0) },
+          castVolumeMm3: 0,
+          sizeMm: { width: 0, depth: 0, height: 0 },
+          cavityComponents: 0,
+        };
+      }
       return simulateCastFromMoldResult(this.lastResult, options);
     }
     return this.send<MoldCastSimulationResult>({ type: 'CAST', options });

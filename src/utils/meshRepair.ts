@@ -8,6 +8,10 @@ export interface MeshRepairOptions {
   fillHoles?: boolean;
   /** Whether to orient connected shells consistently and ensure positive signed volume (default: true). */
   fixWinding?: boolean;
+  /** Whether to strip duplicate and opposite-wound zero-volume face pairs (default: true). */
+  removeDuplicates?: boolean;
+  /** Whether to strip zero-area degenerate triangles (default: true). */
+  removeDegenerates?: boolean;
 }
 
 export interface MeshRepairResult {
@@ -945,19 +949,18 @@ export function repairSceneGeom(
 
 export async function runMcpRepairMesh(params: {
   msg: Record<string, unknown>;
-  cmdId?: unknown;
   toId: (s: string) => string;
   nodes: SceneNode[];
   findNodeInScene: (nodes: SceneNode[], id: string) => SceneNode | null;
   updateNode: (id: string, patch: Partial<SceneNode>) => void;
-  compileCsgNodes: () => Promise<void>;
+  compileCsgNodes: () => Promise<unknown>;
 }): Promise<Record<string, unknown>> {
-  const { msg, cmdId, toId, nodes, findNodeInScene, updateNode, compileCsgNodes } = params;
+  const { msg, toId, nodes, findNodeInScene, updateNode, compileCsgNodes } = params;
   const rawId = typeof msg.targetId === 'string'
     ? msg.targetId
     : typeof msg.bodyId === 'string'
       ? msg.bodyId
-      : (typeof msg.id === 'string' && msg.id !== cmdId ? msg.id : undefined);
+      : undefined;
   const targetId = rawId ? toId(rawId) : undefined;
   const geomNameFilter = typeof msg.geomName === 'string' ? msg.geomName : undefined;
   const weldTolM = typeof msg.weldToleranceMm === 'number' && msg.weldToleranceMm >= 0

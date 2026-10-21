@@ -3758,7 +3758,6 @@ export function useMCPBridge() {
         case 'REPAIR_MESH':
           return runMcpRepairMesh({
             msg,
-            cmdId: id,
             toId: (s) => toId(s) as string,
             nodes: store.sceneGraph.nodes,
             findNodeInScene,
