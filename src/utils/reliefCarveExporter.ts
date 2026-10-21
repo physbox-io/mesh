@@ -4520,7 +4520,7 @@ export function generateReliefCarveGcode(
     warnings.push(
       `At ${opts.scalePercent}% the model is ${(modelW * scaleFactor).toFixed(0)} x ` +
         `${(modelD * scaleFactor).toFixed(0)} mm and overhangs the stock — anything past the edge is ` +
-        `cropped. It fits at ${Math.floor(fitsStock * 100)}%.`
+        `cropped. Fit to Stock, or the model resized to ${Math.floor(fitsStock * 100)}%, makes it fit.`
     );
   }
 

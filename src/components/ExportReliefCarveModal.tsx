@@ -468,7 +468,7 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
                 className="lg:col-span-3"
                 hintAlign="end"
                 label="Fitted Size"
-                hint="The footprint the carve actually occupies on the stock at the current scale."
+                hint="The footprint the carve actually occupies on the stock."
               >
                 <div className="px-3 py-1.5 text-xs font-mono text-slate-600 dark:text-slate-300 bg-slate-100 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 rounded-lg">
                   {result?.success
@@ -495,25 +495,13 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
               <Field
                 className="lg:col-span-2"
                 label="Plan Scale"
-                hint="Fit to Stock sizes the model to the block. Manual holds a fixed scale, where 100% cuts the model at its modelled size, millimetre for millimetre. Anything hanging over the edge is cropped."
+                hint="Fit to Stock sizes the model to the block. Actual Size cuts it at its modelled size, millimetre for millimetre, and crops anything hanging over the edge. To cut it at another size, resize it in the scene."
               >
                 <Segmented
                   value={options.fitMode}
                   onChange={(v) => set('fitMode', v)}
-                  options={[['fit', 'Fit to Stock'], ['manual', 'Manual']] as const}
+                  options={[['fit', 'Fit to Stock'], ['manual', 'Actual Size']] as const}
                   disabled={asModelled}
-                />
-              </Field>
-              <Field
-                label="Scale (%)"
-                hint="Manual plan-view scale. The relief depth is set separately, so changing this does not change how deep the carve goes."
-              >
-                <NumberInput
-                  step={5} min={1} max={1000}
-                  disabled={asModelled || options.fitMode !== 'manual'}
-                  value={options.scalePercent}
-                  onChange={(v) => set('scalePercent', v)}
-                  className={inputClass}
                 />
               </Field>
             </Advanced>

@@ -5,7 +5,6 @@ import { recommendReliefTooling } from '../utils/reliefCarveExporter';
 import {
   measurePart,
   sideDepthMm,
-  fittingScalePercent,
   DEFAULT_SOLID_OPTIONS,
   type SolidMachiningOptions,
   type UpAxis,
@@ -96,53 +95,17 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
   // With Setups on Auto, whether the planner may also choose the way up.
   const [autoOrient, setAutoOrient] = useState(true);
 
-  // Which way up and how big are not tooling, and the part's height — which
-  // the feeds are derated for — depends on them, so they are kept outside the
-  // tooling state and measured first.
-  //
-  // The scale is chosen for the model in the scene: 100% for anything a router
-  // can mill from solid, and for something bigger (a tree, a room) the scale
-  // that makes a part of it. Chosen again when a model of a different size
-  // arrives, so the 5% a tree was given is not what the next preset is planned
-  // at; a scale set by hand stays while the same model is edited. `forMm` is
-  // the size of the model the scale was chosen for.
-  type Placement = { up: UpAxis; scalePercent: number; forMm: number | null };
-  const [placement, setPlacement] = useState<Placement>({
-    up: DEFAULT_SOLID_OPTIONS.up,
-    scalePercent: DEFAULT_SOLID_OPTIONS.scalePercent,
-    forMm: null,
-  });
-  const largest = useMemo(() => {
-    if (!isOpen) return null;
-    const natural = measurePart(scene, '+z', 100);
-    return natural ? Math.max(natural.x, natural.y, natural.z) : null;
-  }, [isOpen, scene]);
-  /*
-   * Worked out during render, not in an effect: the first plan starts in the
-   * same commit the dialog opens, and planned at 100% first, a tree failed at
-   * once and showed that failure for the half minute the plan at its real
-   * scale took.
-   */
-  const fitTo = (p: Placement): Placement =>
-    largest === null || (p.forMm !== null && largest < p.forMm * 2 && largest > p.forMm / 2)
-      ? p
-      : { ...p, scalePercent: fittingScalePercent(largest), forMm: largest };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const shown = useMemo(() => fitTo(placement), [placement, largest]);
-  // Kept, so a scale typed in next starts from it. Set during render, as React
-  // has it for state that follows from other state: an effect would render twice.
-  if (shown !== placement) setPlacement(shown);
-  const settledRaw = useSettled(placement, 250);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const settledFit = useMemo(() => fitTo(settledRaw), [settledRaw, largest]);
-  const settledPlacement = useMemo(
-    () => ({ up: settledFit.up, scalePercent: settledFit.scalePercent }),
-    [settledFit.up, settledFit.scalePercent]
-  );
-  const placementSettled = settledPlacement.up === shown.up && settledPlacement.scalePercent === shown.scalePercent;
+  // Which way up is not tooling, and the part's height — which the feeds are
+  // derated for — depends on it, so it is kept outside the tooling state and
+  // measured first. The part is always cut at its modelled size, millimetre
+  // for millimetre: to cut it bigger or smaller, resize it in the scene.
+  const [up, setUp] = useState<UpAxis>(DEFAULT_SOLID_OPTIONS.up);
+  const settledUp = useSettled(up, 250);
+  const settledPlacement = useMemo(() => ({ up: settledUp, scalePercent: 100 }), [settledUp]);
+  const placementSettled = settledUp === up;
   const part = useMemo(
-    () => (isOpen ? measurePart(scene, shown.up, shown.scalePercent) : null),
-    [isOpen, scene, shown.up, shown.scalePercent]
+    () => (isOpen ? measurePart(scene, up, 100) : null),
+    [isOpen, scene, up]
   );
   const partHeight = part?.z ?? 10;
 
@@ -396,11 +359,11 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
                 hint="Which way the model lies in the block for the first setup. Auto lets the plan choose, which usually means the face with the most work on it faces the spindle. Otherwise pick the one that puts the part's flat face down and its tallest dimension across the bed rather than up: the deeper the cut the longer and whippier the cutter has to be."
               >
                 <select
-                  value={options.setups === 'auto' && autoOrient ? 'auto' : shown.up}
+                  value={options.setups === 'auto' && autoOrient ? 'auto' : up}
                   onChange={(e) => {
                     if (e.target.value === 'auto') return setAutoOrient(true);
                     setAutoOrient(false);
-                    setPlacement((p) => ({ ...p, up: e.target.value as UpAxis }));
+                    setUp(e.target.value as UpAxis);
                   }}
                   className={inputClass}
                 >
@@ -411,19 +374,8 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
                 </select>
               </Field>
               <Field
-                label="Scale (%)"
-                hint="100 cuts the part at its modelled size, millimetre for millimetre, the same rule as every other export."
-              >
-                <NumberInput
-                  step={10} min={1} max={10000}
-                  value={shown.scalePercent}
-                  onChange={(v) => v !== undefined && setPlacement((p) => ({ ...p, scalePercent: v }))}
-                  className={inputClass}
-                />
-              </Field>
-              <Field
                 label="Part Size"
-                hint="The part this way up, at this scale, in mm: across, back, and tall. Tall is the depth the cutter has to reach, halved on a two-sided job."
+                hint="The part this way up, in mm: across, back, and tall. It is cut at its modelled size; resize it in the scene to change that. Tall is the depth the cutter has to reach, halved on a two-sided job."
               >
                 <div className={`${inputClass} bg-slate-100 dark:bg-slate-800/60 border-transparent`}>
                   {part ? `${part.x.toFixed(1)} × ${part.y.toFixed(1)} × ${part.z.toFixed(1)}` : '—'}
@@ -528,7 +480,7 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
                   part {result.partSizeMm.x.toFixed(1)} × {result.partSizeMm.y.toFixed(1)} × {result.partSizeMm.z.toFixed(1)} mm ·
                   {' '}{Math.round(result.partVolumeMm3).toLocaleString()} mm³ ·
                   {' '}{setups.length === 1 ? 'one setup' : `${setups.length} setups`}
-                  {result.upChosen && result.upChosen !== shown.up ? `, laid ${result.upChosen} up` : ''}
+                  {result.upChosen && result.upChosen !== up ? `, laid ${result.upChosen} up` : ''}
                 </p>
                 {!result.plan && (
                   <p className={`text-[10px] leading-snug ${result.unreachablePercent > 1 ? 'text-amber-600 dark:text-amber-400' : 'text-slate-500 dark:text-slate-400'}`}>
