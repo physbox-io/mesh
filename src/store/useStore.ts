@@ -2976,7 +2976,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     // a weld whose key the new scene happens to share started out sheared.
     clearBreakage(set);
     if (name.startsWith('user:')) {
-      set((state) => ({
+      set({
         isPlaying: false,
         selectedNodeId: null,
         hiddenNodeIds: [],
@@ -2988,7 +2988,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
         sculptNodeId: null,
         sculptStats: null,
         gestureStatus: null,
-      }));
+      });
       if (typeof window !== 'undefined') {
         window.dispatchEvent(new CustomEvent('physics:preset-loaded', { detail: { name, prev } }));
       }
