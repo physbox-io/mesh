@@ -390,6 +390,7 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
                 </select>
               </Field>
               <Field
+                className="lg:col-span-2"
                 label="Part Size"
                 hint="The part this way up, in mm: across, back, and tall. It is cut at its modelled size; resize it in the scene to change that. Tall is the depth the cutter has to reach, halved on a two-sided job."
               >
