@@ -22,7 +22,7 @@ import { MachineFaultBanner } from './MachineFaultBanner';
 import { ToolpathView } from './ToolpathView';
 import {
   inputClass, sectionClass, sectionTitleClass,
-  Field, Segmented, FinishingPassFields, RoughingPassFields, BedLevellingFields, PreviewPlaceholder,
+  Field, Segmented, PassesField, RoughingPassFields, FinishingPassFields, BedLevellingFields, PreviewPlaceholder,
 } from './CarveFields';
 import { toolingOnly, useBedProbe, useCarveTooling, useSettled, type SetTooling } from './carveTooling';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
@@ -640,6 +640,19 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
             )}
           </div>
 
+          <PassesField options={options} set={setTooling} />
+
+          <RoughingPassFields
+            options={options}
+            effective={effective}
+            derived={derived}
+            overrides={overrides}
+            set={setTooling}
+            override={override}
+            materialLabel={materialLabel}
+            bitePercent={result?.success ? result.sides[0]?.roughingBitePercent ?? null : null}
+          />
+
           <FinishingPassFields
             options={options}
             effective={effective}
@@ -652,17 +665,6 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
             passCount={current ? current.finishingRasterLines : null}
             onSuggestTooling={applyRecommendedTooling}
             canSuggest={!!result?.success}
-          />
-
-          <RoughingPassFields
-            options={options}
-            effective={effective}
-            derived={derived}
-            overrides={overrides}
-            set={setTooling}
-            override={override}
-            materialLabel={materialLabel}
-            bitePercent={result?.success ? result.sides[0]?.roughingBitePercent ?? null : null}
           />
 
           <BedLevellingFields

@@ -18,7 +18,7 @@ import { MachineFaultBanner } from './MachineFaultBanner';
 import { ToolpathView } from './ToolpathView';
 import {
   inputClass, sectionClass, sectionTitleClass,
-  Field, Advanced, Segmented, FinishingPassFields, RoughingPassFields, BedLevellingFields, PreviewPlaceholder,
+  Field, Advanced, Segmented, PassesField, RoughingPassFields, FinishingPassFields, BedLevellingFields, PreviewPlaceholder,
 } from './CarveFields';
 import { toolingOnly, useBedProbe, useCarveTooling } from './carveTooling';
 import { MATERIALS } from '../utils/feedsAndSpeeds';
@@ -519,6 +519,19 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
             </Advanced>
           </div>
 
+          <PassesField options={options} set={set} />
+
+          <RoughingPassFields
+            options={options}
+            effective={effective}
+            derived={derived}
+            overrides={overrides}
+            set={set}
+            override={override}
+            materialLabel={materialLabel}
+            bitePercent={result?.success ? result.roughingBitePercent : null}
+          />
+
           <FinishingPassFields
             options={options}
             effective={effective}
@@ -531,18 +544,6 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
             passCount={result?.success ? result.finishingRasterLines : null}
             onSuggestTooling={applyRecommendedTooling}
             canSuggest={!!result?.success}
-          />
-
-
-          <RoughingPassFields
-            options={options}
-            effective={effective}
-            derived={derived}
-            overrides={overrides}
-            set={set}
-            override={override}
-            materialLabel={materialLabel}
-            bitePercent={result?.success ? result.roughingBitePercent : null}
           />
 
 

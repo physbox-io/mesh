@@ -202,6 +202,8 @@ export function FinishingPassFields({
     options.finishingStrategy === 'crosshatch' ||
     options.finishingStrategy === 'hybrid';
 
+  const off = !options.finishingEnabled;
+
   return (
     <div className={sectionClass}>
       <div className="flex items-center justify-between gap-4">
@@ -219,23 +221,11 @@ export function FinishingPassFields({
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-4">
         <Field
           className="lg:col-span-3"
-          hintAlign="end"
-          label="Finishing"
-          hint="Rough only stops after the flat mill: flat tops and floors, sloped walls stepped by its layers, and a job hours shorter. Finish sends the ball nose over everything for smooth walls."
-        >
-          <Segmented
-            value={options.finishingEnabled ? 'on' : 'off'}
-            onChange={(v) => set('finishingEnabled', v === 'on')}
-            disabled={!options.roughingEnabled}
-            options={[['on', 'Finish'], ['off', 'Rough Only']] as const}
-          />
-        </Field>
-        <Field
-          className="lg:col-span-3"
           label="Cutter Shape"
           hint="A ball nose leaves a smooth surface on curves, and the toolpath is lifted to keep its round tip on the surface. A flat mill has to clear the highest point under its whole diameter, so it rounds off fine detail. A V-bit is a cone: it drops into corners and grooves no round cutter can enter and holds detail far finer than its diameter, so lettering and ornament are cut with one. It only cuts as deep as the cone is tall, and it leaves a ridge between passes."
         >
           <Segmented
+            disabled={off}
             value={options.finishingToolType}
             onChange={(v) => set('finishingToolType', v)}
             options={[['ball_nose', 'Ball-Nose'], ['flat', 'Flat'], ['v_bit', 'V-Bit']] as const}
@@ -248,6 +238,7 @@ export function FinishingPassFields({
             hint="Included point angle, as it is written on the bit (60 for a 60 degree V). It sets two things at once: how deep the bit can cut before the cone runs out and only the shank is left, and how tall a ridge the stepover leaves. Narrow holds finer detail and is more fragile."
           >
             <Segmented
+              disabled={off}
               value={String(options.finishingVBitAngleDeg)}
               onChange={(v) => set('finishingVBitAngleDeg', parseInt(v, 10))}
               options={[['30', '30'], ['60', '60'], ['90', '90']] as const}
@@ -261,18 +252,12 @@ export function FinishingPassFields({
         >
           <NumberInput
             step={0.1} min={0.1} max={60}
+            disabled={off}
             value={options.finishingToolDiaMm}
             onChange={(v) => set('finishingToolDiaMm', v)}
             className={inputClass}
           />
         </Field>
-
-
-
-
-
-
-
       </div>
 
       <DerivedRecipe
@@ -293,6 +278,7 @@ export function FinishingPassFields({
         >
           <NumberInput
             step={1} min={1} max={8} integer
+            disabled={off}
             value={options.finishingFlutes}
             onChange={(v) => set('finishingFlutes', v)}
             className={inputClass}
@@ -304,6 +290,7 @@ export function FinishingPassFields({
           hint="Which way the flutes throw the chip. Upcut lifts it out of the cut and is what clears depth. Downcut presses it down: a clean top edge, but the chips pack into the bottom of a deep relief and burn. Compression is upcut low and downcut high, which in a relief means it never leaves its upcut section. This does not change the coordinates, but it does change what the app will let a feed, a plunge and a stepdown be without warning you."
         >
           <Segmented
+            disabled={off}
             value={options.finishingGeometry}
             onChange={(v) => set('finishingGeometry', v)}
             options={[['upcut', 'Up'], ['downcut', 'Down'], ['compression', 'Compr.'], ['straight', 'Straight']] as const}
@@ -315,6 +302,7 @@ export function FinishingPassFields({
           hint="One Sweep is depth-first: each point is cut to its final height the first time the raster reaches it. It is the quicker one, and the right choice when a roughing pass has already taken the waste out or the relief is shallow. Layered repeats the raster at lower and lower limits so the bit never has to swallow the whole relief at once. It is slower, but keeps a small cutter alive when the finishing pass is clearing the relief on its own. Auto picks One Sweep when roughing is on and Layered when it is off."
         >
           <Segmented
+            disabled={off}
             value={options.finishingDepthMode}
             onChange={(v) => set('finishingDepthMode', v)}
             options={[['auto', 'Auto'], ['single', 'One Sweep'], ['layered', 'Layered']] as const}
@@ -328,6 +316,7 @@ export function FinishingPassFields({
             step={0.5} min={0} max={20}
             allowEmpty
             placeholder={String(derived.finishingStepdownMm)}
+            disabled={off}
             value={overrides.finishingStepdownMm ?? null}
             onChange={(v) => override('finishingStepdownMm', v)}
             className={inputClass}
@@ -349,6 +338,7 @@ export function FinishingPassFields({
             step={5} min={2} max={100}
             allowEmpty
             placeholder={String(derived.finishingStepoverPercent)}
+            disabled={off}
             value={overrides.finishingStepoverPercent ?? null}
             onChange={(v) => override('finishingStepoverPercent', v)}
             className={inputClass}
@@ -362,6 +352,7 @@ export function FinishingPassFields({
             step={100} min={50} max={10000} integer
             allowEmpty
             placeholder={String(derived.finishingFeedrate)}
+            disabled={off}
             value={overrides.finishingFeedrate ?? null}
             onChange={(v) => override('finishingFeedrate', v)}
             className={inputClass}
@@ -373,6 +364,7 @@ export function FinishingPassFields({
           hint="How the finishing passes are laid out. A raster is the fastest to cut and the one whose direction you can see in the finished surface. Waterline follows the surface's own level lines, which is far better on steep ground and useless on flat. Hybrid uses each where it wins and is the default: a raster alone terraces every wall that runs along its passes."
         >
           <select
+            disabled={off}
             value={options.finishingStrategy}
             onChange={(e) => set('finishingStrategy', e.target.value as ReliefCarveOptions['finishingStrategy'])}
             className={inputClass}
@@ -393,7 +385,7 @@ export function FinishingPassFields({
           <Segmented
             value={options.finishingDirection}
             onChange={(v) => set('finishingDirection', v)}
-            disabled={!usesRasterAngle}
+            disabled={off || !usesRasterAngle}
             options={[['x', 'X'], ['y', 'Y']] as const}
           />
         </Field>
@@ -404,7 +396,7 @@ export function FinishingPassFields({
           <NumberInput
             step={5} min={-180} max={180}
             allowEmpty
-            disabled={!usesRasterAngle}
+            disabled={off || !usesRasterAngle}
             placeholder={String(options.finishingDirection === 'y' ? 90 : 0)}
             value={options.finishingAngleDeg ?? null}
             onChange={(v) => set('finishingAngleDeg', v ?? undefined)}
@@ -417,7 +409,7 @@ export function FinishingPassFields({
         >
           <NumberInput
             step={5} min={5} max={85} integer
-            disabled={options.finishingStrategy !== 'hybrid'}
+            disabled={off || options.finishingStrategy !== 'hybrid'}
             value={options.finishingSteepAngleDeg}
             onChange={(v) => set('finishingSteepAngleDeg', v ?? 35)}
             className={inputClass}
@@ -432,6 +424,7 @@ export function FinishingPassFields({
             step={50} min={10} max={2000} integer
             allowEmpty
             placeholder={String(derived.finishingPlungeRate)}
+            disabled={off}
             value={overrides.finishingPlungeRate ?? null}
             onChange={(v) => override('finishingPlungeRate', v)}
             className={inputClass}
@@ -456,6 +449,7 @@ export function FinishingPassFields({
         >
           <NumberInput
             step={0.1} min={0} max={30}
+            disabled={off}
             value={options.finishingShankDiaMm}
             onChange={(v) => set('finishingShankDiaMm', v)}
             className={inputClass}
@@ -468,6 +462,7 @@ export function FinishingPassFields({
         >
           <NumberInput
             step={1} min={0} max={100}
+            disabled={off}
             value={options.finishingFluteLengthMm}
             onChange={(v) => set('finishingFluteLengthMm', v)}
             className={inputClass}
@@ -544,7 +539,39 @@ export function FinishingPassFields({
   );
 }
 
-/** The roughing pass: whether there is one, what it is cut with, and how. */
+/**
+ * Which passes the job cuts: the one switch for what used to be two, one in
+ * each pass's section, that each set the other section's flag and had to
+ * disable one another to keep at least one pass on. There are only three
+ * jobs, so there is one control with three positions.
+ */
+export function PassesField({
+  options, set,
+}: { options: CarveTooling; set: SetTooling }) {
+  const value = !options.roughingEnabled ? 'finish' : options.finishingEnabled ? 'both' : 'rough';
+  return (
+    <div className={sectionClass}>
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-4">
+        <Field
+          className="lg:col-span-3"
+          label="Passes"
+          hint="Rough + Finish clears the bulk with the flat mill, then the finishing bit smooths every wall. Rough only stops after the flat mill: stepped walls, a job hours shorter. Finish only makes the finishing bit take the full depth, which snaps small cutters."
+        >
+          <Segmented
+            value={value}
+            onChange={(v) => {
+              set('roughingEnabled', v !== 'finish');
+              set('finishingEnabled', v !== 'rough');
+            }}
+            options={[['both', 'Rough + Finish'], ['rough', 'Rough only'], ['finish', 'Finish only']] as const}
+          />
+        </Field>
+      </div>
+    </div>
+  );
+}
+
+/** The roughing pass: what it is cut with, and how. */
 export function RoughingPassFields({
   options, effective, derived, overrides, set, override, materialLabel, bitePercent,
 }: RoughingPassFieldsProps) {
@@ -552,22 +579,6 @@ export function RoughingPassFields({
     <div className={sectionClass}>
       <h3 className={sectionTitleClass}>Roughing Pass</h3>
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-4">
-        <Field
-          className="lg:col-span-2"
-          label="Waste Clearing"
-          hint="A layered pass with a bigger flat mill that clears the bulk before the finishing raster. Skipping it means the finishing bit takes the full depth in one go, which snaps small cutters."
-        >
-          <Segmented
-            value={options.roughingEnabled ? 'on' : 'off'}
-            onChange={(v) => {
-              set('roughingEnabled', v === 'on');
-              // Something has to cut: with roughing off the finishing pass is it.
-              if (v === 'off') set('finishingEnabled', true);
-            }}
-            options={[['on', 'Rough First'], ['off', 'Finish Only']] as const}
-          />
-        </Field>
-
         <Field
           label="Flat End Mill Ø (mm)"
           hint="Diameter of the flat end mill used for bulk material removal before the finishing pass."
@@ -633,6 +644,7 @@ export function RoughingPassFields({
           hint="Roughing wants an upcut: the whole job of this pass is to get waste out of a pocket, and upcut is the only geometry that lifts it. A downcut here packs its own chips into the floor it is trying to clear."
         >
           <Segmented
+            disabled={!options.roughingEnabled}
             value={options.roughingGeometry}
             onChange={(v) => set('roughingGeometry', v)}
             options={[['upcut', 'Up'], ['downcut', 'Down'], ['compression', 'Compr.'], ['straight', 'Straight']] as const}
