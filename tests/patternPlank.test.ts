@@ -90,7 +90,7 @@ describe('a generated board goes straight through the relief exporter', () => {
     expect(warning).toBeDefined();
     // 200 x 120 stock under a 200 x 120 board: it fits at 100%, not the
     // 98% the cutter-centre rectangle would say.
-    expect(warning).toMatch(/fits at 100%/);
+    expect(warning).toMatch(/resized to 100%/);
   });
 
   it('leaves the high points of the pattern as untouched stock face', () => {
