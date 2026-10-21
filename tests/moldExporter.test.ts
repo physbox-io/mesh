@@ -10,6 +10,9 @@ import {
 } from '../src/utils/moldExporter';
 import { MoldWorkerClient } from '../src/utils/moldWorkerClient';
 import type { SceneGraph, SceneGeom } from '../src/types/scene';
+import { stlToMesh } from '../src/utils/stlMesh';
+import { analyzeMesh } from '../src/utils/meshIntegrity';
+import { loadManifold } from '../src/utils/sculptCut';
 
 function bodyWith(geom: Partial<SceneGeom> & { type: SceneGeom['type']; size: number[] }, pos = [0, 0, 0]): SceneGraph {
   return {
@@ -451,7 +454,7 @@ describe('Pour channels', () => {
     // When the lid is flipped around X (`y -> -y`) to close onto the base, a
     // hole at `y_lid` lands at `y_base = -y_lid`, so `lidHoles` (which records
     // `-y_lid` in part coordinates) must fall inside the main bar at y > 0.
-    const asymmetricY: ParsedScene = {
+    const asymmetricY: SceneGraph = {
       nodes: [
         {
           id: 'b1',
@@ -511,7 +514,7 @@ describe('One-part open mold and parting overhang checks', () => {
   it('warns when a feature overhangs the parting plane with empty space beneath it', () => {
     // Base block on z = [0, 10 mm] with an overhanging cantilever arm at z = [6, 10 mm]
     // sticking out in +X over empty air at z = 0 (parting plane is z = 0).
-    const cantilever: ParsedScene = {
+    const cantilever: SceneGraph = {
       nodes: [
         {
           id: 'b1',
@@ -533,7 +536,7 @@ describe('One-part open mold and parting overhang checks', () => {
 
   it('keeps the keyed corner pin and side pry notches outside a rectangular cavity', () => {
     // 40 x 40 x 12 mm rectangular block filling the entire inner footprint.
-    const rectBlock: ParsedScene = {
+    const rectBlock: SceneGraph = {
       nodes: [
         {
           id: 'b1',
@@ -548,7 +551,6 @@ describe('One-part open mold and parting overhang checks', () => {
     };
     const res = generateMoldMeshes(rectBlock, {
       ...DEFAULT_MOLD_OPTIONS,
-      includeKeys: true,
       includePryNotches: true,
     });
     expect(res.success).toBe(true);
@@ -572,6 +574,143 @@ describe('One-part open mold and parting overhang checks', () => {
       }
     }
     expect(pinVertexCount).toBeGreaterThan(0);
+  });
+
+  it('exports watertight binary STL with zero boundary edges for plaque and statue-sized mold', () => {
+    // 1. Watertightness check on relief plaque
+    const plaqueRes = generateMoldMeshes(plaque, {
+      ...DEFAULT_MOLD_OPTIONS,
+      wallMarginMm: 4,
+      baseThicknessMm: 3,
+    });
+    expect(plaqueRes.success).toBe(true);
+    const plaqueMesh = stlToMesh(plaqueRes.binarySTL);
+    const plaqueAnalysis = analyzeMesh(Array.from(plaqueMesh.positions), Array.from(plaqueMesh.faces));
+    expect(plaqueAnalysis).not.toBeNull();
+    expect(plaqueAnalysis!.closed).toBe(true);
+    expect(plaqueAnalysis!.boundaryEdges).toBe(0);
+
+    // 2. Watertightness check on statue-sized mold (152.5 x 100 x 303 mm)
+    const statueBox = bodyWith(
+      { type: 'box', size: [0.1445 / 2, 0.092 / 2, 0.297 / 2] },
+      [0, 0, 0.297 / 2]
+    );
+    const tallRes = generateMoldMeshes(statueBox, {
+      ...DEFAULT_MOLD_OPTIONS,
+      wallMarginMm: 4,
+      baseThicknessMm: 3,
+    });
+    expect(tallRes.success).toBe(true);
+    expect(tallRes.moldWidthMm).toBe(152.5);
+    expect(tallRes.moldDepthMm).toBe(100);
+    const tallMesh = stlToMesh(tallRes.binarySTL);
+    const tallAnalysis = analyzeMesh(Array.from(tallMesh.positions), Array.from(tallMesh.faces));
+    expect(tallAnalysis).not.toBeNull();
+    expect(tallAnalysis!.closed).toBe(true);
+    expect(tallAnalysis!.boundaryEdges).toBe(0);
+  });
+
+  it('preserves 3D statue open mold cavity, bores shoulder vents, and produces watertight mesh with wasm', async () => {
+    const wasm = await loadManifold();
+    expect(wasm).toBeDefined();
+
+    const statue: SceneGraph = {
+      nodes: [
+        {
+          id: 'b1',
+          name: 'statue',
+          type: 'body',
+          pos: [0, 0, 0],
+          geoms: [
+            // Pedestal: 100 x 100 x 150 mm at Z = [0, 150 mm]
+            {
+              name: 'pedestal',
+              type: 'box',
+              size: [0.05, 0.05, 0.075],
+              pos: [0, 0, 0.075],
+            } as SceneGeom,
+            // Shoulders: 150 x 90 x 100 mm at Z = [150, 250 mm]
+            {
+              name: 'bust',
+              type: 'box',
+              size: [0.075, 0.045, 0.05],
+              pos: [0, 0, 0.20],
+            } as SceneGeom,
+            // Head: 60 x 60 x 50 mm at Z = [250, 300 mm]
+            {
+              name: 'head',
+              type: 'box',
+              size: [0.03, 0.03, 0.025],
+              pos: [0, 0, 0.275],
+            } as SceneGeom,
+          ],
+          joints: [],
+          children: [],
+        },
+      ],
+    };
+
+    const res = generateMoldMeshes(
+      statue,
+      {
+        ...DEFAULT_MOLD_OPTIONS,
+        moldType: 'open',
+        allowUndercuts: true,
+        draftAngleDeg: 0,
+        includeVents: true,
+        ventDiaMm: 4,
+        wallMarginMm: 10,
+        baseThicknessMm: 5,
+      },
+      wasm
+    );
+
+    expect(res.success).toBe(true);
+    expect(res.topHalf).toBeUndefined();
+    expect(res.bottomHalf).toBeDefined();
+    expect(res.flexibleMoldAdvised).toBe(true);
+    expect(res.warnings.some((w) => /lock onto the casting/i.test(w))).toBe(true);
+
+    // 1. Watertightness: binary STL has 0 boundary edges and is closed
+    const mesh = stlToMesh(res.binarySTL);
+    const analysis = analyzeMesh(Array.from(mesh.positions), Array.from(mesh.faces));
+    expect(analysis).not.toBeNull();
+    expect(analysis!.closed).toBe(true);
+    expect(analysis!.boundaryEdges).toBe(0);
+
+    // 2. Top face opening matches 100 x 100 mm pedestal
+    const moldHeight = res.bottomHalf.heightMm;
+    const topVerts: Array<[number, number]> = [];
+    for (const t of res.bottomHalf.triangles) {
+      for (const v of [t.a, t.b, t.c]) {
+        if (Math.abs(v[2] - moldHeight) < 0.05) {
+          topVerts.push([v[0], v[1]]);
+        }
+      }
+    }
+    expect(topVerts.length).toBeGreaterThan(0);
+
+    const hasTopCorner = (cx: number, cy: number) =>
+      topVerts.some(([x, y]) => Math.abs(x - cx) < 0.5 && Math.abs(y - cy) < 0.5);
+
+    expect(hasTopCorner(-50, -50)).toBe(true);
+    expect(hasTopCorner(-50, 50)).toBe(true);
+    expect(hasTopCorner(50, -50)).toBe(true);
+    expect(hasTopCorner(50, 50)).toBe(true);
+
+    // 3. Blind-pocket vents bored through to the shoulders, never through the bottom floor at Z = 0
+    const ventTopVerts = topVerts.filter(([x, y]) => Math.hypot(x - (-54.4), y - 44) < 5 || Math.hypot(x - 54.4, y - 44) < 5);
+    expect(ventTopVerts.length).toBeGreaterThan(0);
+    const bottomInteriorVerts = res.bottomHalf.triangles.flatMap((t) => [t.a, t.b, t.c]).filter(
+      (v) => Math.abs(v[2]) < 0.05 && Math.abs(v[0]) < 80 && Math.abs(v[1]) < 50
+    );
+    expect(bottomInteriorVerts.length).toBe(0);
+
+    // Shoulder cavity pocket under overhang around Z = 155 mm
+    const shoulderCavityVerts = res.bottomHalf.triangles.flatMap((t) => [t.a, t.b, t.c]).filter(
+      (v) => Math.abs(v[0]) > 55 && Math.abs(v[2] - 155) < 5
+    );
+    expect(shoulderCavityVerts.length).toBeGreaterThan(0);
   });
 });
 

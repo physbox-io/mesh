@@ -69,6 +69,8 @@ import { simulationSetups } from '../utils/solidSetups';
 import { BLOCK_FACES, FACE_NAME, type BlockFace } from '../utils/orient';
 import { contourSheetParts, laserSheetParts, laserStockTransform } from '../utils/sheetSimulation';
 import { addSimulationToScene } from './useAddSimulation';
+import { runMcpMoldSimulation } from '../utils/moldWorkerClient';
+import { runMcpRepairMesh } from '../utils/meshRepair';
 import { lastReliefOptions } from '../utils/lastReliefOptions';
 import { ExportWorkerClient } from '../utils/exportWorkerClient';
 import { patternPickAt, patternSurfaces } from '../utils/facePatternPick';
@@ -3588,11 +3590,23 @@ export function useMCPBridge() {
           // The part a program leaves, added to the scene: the same plan the
           // matching export would hand over, cut back out of its stock.
           const scene = store.sceneGraph;
+          const placement = msg.placement === 'overlay' ? 'overlay' : 'beside';
+          const num = (v: unknown) => (typeof v === 'number' && v > 0 ? v : undefined);
+
+          if (msg.kind === 'mold' || msg.kind === 'mold_cast' || msg.kind === 'cast') {
+            return runMcpMoldSimulation({
+              msg,
+              scene,
+              placement,
+              toId: (s) => toId(s) as string,
+              findNodeInScene,
+            });
+          }
+
           if (!scene.nodes?.some((n) => !n.simulation)) {
             return { ok: false, error: 'The scene has nothing to cut but earlier simulations.' };
           }
-          const placement = msg.placement === 'overlay' ? 'overlay' : 'beside';
-          const num = (v: unknown) => (typeof v === 'number' && v > 0 ? v : undefined);
+
           const runJob = async <T,>(go: (client: ExportWorkerClient) => Promise<T>) => {
             const client = new ExportWorkerClient();
             try { return await go(client); } finally { client.dispose(); }
@@ -3738,8 +3752,18 @@ export function useMCPBridge() {
             };
           }
 
-          return { ok: false, error: "kind must be 'relief', 'machining', 'laser' or 'contour'." };
+          return { ok: false, error: "kind must be 'relief', 'machining', 'laser', 'contour', 'mold' or 'mold_cast'." };
         }
+
+        case 'REPAIR_MESH':
+          return runMcpRepairMesh({
+            msg,
+            toId: (s) => toId(s) as string,
+            nodes: store.sceneGraph.nodes,
+            findNodeInScene,
+            updateNode: (nodeId, patch) => useStore.getState().updateNode(nodeId, patch),
+            compileCsgNodes,
+          });
 
         case 'GET_SCULPT': {
           const { targetId } = msg as Msg<{ targetId: string }>;
