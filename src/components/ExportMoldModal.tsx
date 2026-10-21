@@ -385,7 +385,13 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
   const handleAddToScene = async () => {
     const client = clientRef.current;
     if (!client) return;
-    const bytes = await client.stl();
+    let bytes: Uint8Array;
+    try {
+      bytes = await client.stl();
+    } catch (e) {
+      setFailure((e as Error).message);
+      return;
+    }
     void addToScene.add({
       mesh: stlToMesh(bytes),
       transform: sceneStockTransform(),
@@ -431,6 +437,9 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
     setSaving(true);
     try {
       saveBytes(await client.stl(), filename);
+    } catch (e) {
+      // A worker that died took the mold it held with it.
+      setFailure((e as Error).message);
     } finally {
       setSaving(false);
     }

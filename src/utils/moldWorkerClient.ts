@@ -36,6 +36,7 @@ import { getNodeWorldTransform } from './laserCutExporter';
 import { resolveCsgGeoms } from './csg';
 import { addSimulationToScene, sceneStockTransform } from '../hooks/useAddSimulation';
 import { useStore } from '../store/useStore';
+import { workerStoppedError } from './staleBuild';
 
 export interface MoldPreview {
   summary: MoldSummary;
@@ -52,14 +53,21 @@ export class MoldWorkerClient {
   /** The scene the worker already holds, so a slider drag sends options alone. */
   private sceneSent: SceneGraph | null = null;
   private lastResult: ReturnType<typeof generateMoldMeshes> | null = null;
+  /** Why the worker died, until a request that carries its own inputs starts another. */
+  private stopped: Promise<Error> | null = null;
 
   constructor() {
+    this.spawn();
+  }
+
+  private spawn() {
     if (typeof Worker === 'undefined') return;
     try {
-      this.worker = new Worker(new URL('../workers/moldWorker.ts', import.meta.url), {
+      const worker = new Worker(new URL('../workers/moldWorker.ts', import.meta.url), {
         type: 'module',
       });
-      this.worker.onmessage = (evt: MessageEvent) => {
+      this.worker = worker;
+      worker.onmessage = (evt: MessageEvent) => {
         const msg = evt.data;
         const settle = this.pending.get(msg.id);
         if (!settle) return;
@@ -70,12 +78,21 @@ export class MoldWorkerClient {
         } else if (msg.type === 'STL') settle.resolve(msg.bytes as never);
         else if (msg.type === 'CAST') settle.resolve(msg.result as never);
       };
-      // A worker that dies leaves every caller awaiting forever otherwise.
-      this.worker.onerror = () => {
-        const failed = new Error('The mold worker stopped.');
-        for (const settle of this.pending.values()) settle.reject(failed);
+      // A worker that dies leaves every caller awaiting forever otherwise. It
+      // is replaced, not kept: one that never loaded drops every later message
+      // unanswered. Most often it never loaded because the tab outlived a
+      // deploy, and the error then says so.
+      worker.onerror = () => {
+        const settles = [...this.pending.values()];
         this.pending.clear();
         this.sceneSent = null;
+        worker.terminate();
+        if (this.worker !== worker) return;
+        const stopped = workerStoppedError('The mold worker stopped.');
+        this.stopped = stopped;
+        void stopped.then((failed) => {
+          for (const settle of settles) settle.reject(failed);
+        });
       };
     } catch {
       this.worker = null;
@@ -91,7 +108,18 @@ export class MoldWorkerClient {
     });
   }
 
+  /**
+   * A fresh worker for a request that carries everything it needs. Not started
+   * from onerror, which would loop load-fail-respawn on an out-of-date tab.
+   */
+  private revive() {
+    if (!this.stopped) return;
+    this.stopped = null;
+    this.spawn();
+  }
+
   async generate(scene: SceneGraph, options: Partial<MoldOptions>): Promise<MoldPreview> {
+    this.revive();
     if (!this.worker) {
       const wasm = await loadManifold().catch(() => null);
       const result = generateMoldMeshes(scene, options, wasm);
@@ -109,8 +137,10 @@ export class MoldWorkerClient {
   }
 
   /** The plate as binary STL, encoded from whatever was generated last. */
-  stl(): Promise<Uint8Array> {
-    if (!this.worker) return Promise.resolve(this.lastResult?.binarySTL ?? new Uint8Array(84));
+  async stl(): Promise<Uint8Array> {
+    if (!this.worker) return this.lastResult?.binarySTL ?? new Uint8Array(84);
+    // The mold the dead worker held is gone with it.
+    if (this.stopped) throw await this.stopped;
     return this.send<Uint8Array>({ type: 'STL' });
   }
 
@@ -130,11 +160,14 @@ export class MoldWorkerClient {
       }
       return simulateCastFromMoldResult(this.lastResult, options);
     }
+    // The mold the dead worker held is gone with it.
+    if (this.stopped) throw await this.stopped;
     return this.send<MoldCastSimulationResult>({ type: 'CAST', options });
   }
 
   /** Simulates the cast solid from an existing mold SceneNode off the main thread. */
   async castNode(node: SceneNode, options?: MoldCastSimulationOptions): Promise<MoldCastSimulationResult> {
+    this.revive();
     if (!this.worker) {
       return simulateCastFromMoldNode(node, options);
     }
@@ -146,6 +179,7 @@ export class MoldWorkerClient {
     this.worker = null;
     this.pending.clear();
     this.sceneSent = null;
+    this.stopped = null;
   }
 }
 
