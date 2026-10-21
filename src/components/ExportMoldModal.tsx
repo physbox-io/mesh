@@ -14,6 +14,7 @@ import type { SceneGraph } from '../types/scene';
 import {
   emptyMoldResult,
   moldSummary,
+  rememberMoldOptions,
   DEFAULT_MOLD_OPTIONS,
   type MoldOptions,
   type MoldSummary,
@@ -28,6 +29,7 @@ import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { AddSimulationButton } from './MachineJobControls';
 import { sceneStockTransform, useAddSimulation } from '../hooks/useAddSimulation';
 import { stlToMesh } from '../utils/stlMesh';
+import type { SimulationPlacement } from '../utils/simulatedPart';
 
 interface ExportMoldModalProps {
   isOpen: boolean;
@@ -166,6 +168,7 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
     const client = clientRef.current;
     if (!isOpen || !client) return;
 
+    rememberMoldOptions(settledOptions);
     let live = true;
     setBusy(true);
     client
@@ -373,7 +376,10 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
   }, [preview, result, effectiveViewMode, isXRay, explodeGap, options.moldType]);
 
   const [saving, setSaving] = useState(false);
+  const [castBusy, setCastBusy] = useState(false);
+  const [castError, setCastError] = useState<string | null>(null);
   const addToScene = useAddSimulation();
+  const addCastToScene = useAddSimulation();
 
   /** The halves as they print, flat side by side, beside the part they mold. */
   const handleAddToScene = async () => {
@@ -387,6 +393,36 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
       label: 'Mold',
       placement: 'beside',
     });
+  };
+
+  /** Simulates pouring into the closed mold and adds the resulting cast solid to the scene. */
+  const handleSimulateCast = async (placement: SimulationPlacement) => {
+    const client = clientRef.current;
+    if (!client || !preview || !result.success) return;
+    setCastBusy(true);
+    setCastError(null);
+    try {
+      const castRes = await client.cast();
+      if (!castRes.success) {
+        setCastError(castRes.error || 'Could not simulate cast from mold.');
+        return;
+      }
+      await addCastToScene.add({
+        mesh: castRes.mesh,
+        transform: sceneStockTransform(),
+        kind: 'cast',
+        label: 'Mold cast',
+        placement,
+        details: [
+          `Cast dimensions: ${castRes.sizeMm.width} × ${castRes.sizeMm.depth} × ${castRes.sizeMm.height} mm`,
+          `Mold type: ${options.moldType === 'open' ? 'One-part open mold' : 'Two-part clamshell mold'}`,
+        ],
+      });
+    } catch (e) {
+      setCastError((e as Error)?.message || 'Could not simulate cast from mold.');
+    } finally {
+      setCastBusy(false);
+    }
   };
 
   const handleDownload = async (filename: string) => {
@@ -710,6 +746,16 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
                   />
                 </Field>
               </div>
+
+              <label className="flex items-center gap-2 text-xs font-semibold cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={Boolean(options.allowUndercuts)}
+                  onChange={(e) => set('allowUndercuts', e.target.checked)}
+                  className="rounded border-slate-300 dark:border-slate-700 text-purple-600 focus:ring-purple-500"
+                />
+                Keep 3D Undercuts (Flexible / Silicone Mold)
+              </label>
             </div>
 
             {/* Registration Pins & Tolerances (Clamshell only) */}
@@ -755,69 +801,73 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
             )}
 
             {/* Pour Sprue & Air Bleed Channels */}
-            {options.moldType === 'clamshell' && (
-              <div className={sectionClass}>
-                <div className={sectionTitleClass}>Pouring & Vents</div>
-                <div className="space-y-3 min-w-0">
-                  <label className="flex items-center gap-2 text-xs font-semibold cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={options.includeSprue}
-                      onChange={(e) => set('includeSprue', e.target.checked)}
-                      className="rounded border-slate-300 dark:border-slate-700 text-purple-600 focus:ring-purple-500"
-                    />
-                    Include Tapered Pour Sprue Funnel
-                  </label>
+            <div className={sectionClass}>
+              <div className={sectionTitleClass}>Pouring & Vents</div>
+              <div className="space-y-3 min-w-0">
+                {options.moldType === 'clamshell' && (
+                  <>
+                    <label className="flex items-center gap-2 text-xs font-semibold cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={options.includeSprue}
+                        onChange={(e) => set('includeSprue', e.target.checked)}
+                        className="rounded border-slate-300 dark:border-slate-700 text-purple-600 focus:ring-purple-500"
+                      />
+                      Include Tapered Pour Sprue Funnel
+                    </label>
 
-                  {options.includeSprue && (
-                    <div className="grid grid-cols-2 gap-3 pl-6 min-w-0">
-                      <Field label="Inlet Dia (mm)" hintAlign="start">
-                        <NumberInput
-                          min={4}
-                          max={30}
-                          step={1}
-                          value={options.sprueTopDiaMm}
-                          onChange={(v) => set('sprueTopDiaMm', v)}
-                          className={inputClass}
-                        />
-                      </Field>
-                      <Field label="Outlet Dia (mm)" hintAlign="end">
-                        <NumberInput
-                          min={2}
-                          max={15}
-                          step={0.5}
-                          value={options.sprueBottomDiaMm}
-                          onChange={(v) => set('sprueBottomDiaMm', v)}
-                          className={inputClass}
-                        />
-                      </Field>
-                    </div>
-                  )}
+                    {options.includeSprue && (
+                      <div className="grid grid-cols-2 gap-3 pl-6 min-w-0">
+                        <Field label="Inlet Dia (mm)" hintAlign="start">
+                          <NumberInput
+                            min={4}
+                            max={30}
+                            step={1}
+                            value={options.sprueTopDiaMm}
+                            onChange={(v) => set('sprueTopDiaMm', v)}
+                            className={inputClass}
+                          />
+                        </Field>
+                        <Field label="Outlet Dia (mm)" hintAlign="end">
+                          <NumberInput
+                            min={2}
+                            max={15}
+                            step={0.5}
+                            value={options.sprueBottomDiaMm}
+                            onChange={(v) => set('sprueBottomDiaMm', v)}
+                            className={inputClass}
+                          />
+                        </Field>
+                      </div>
+                    )}
+                  </>
+                )}
 
-                  <label className="flex items-center gap-2 text-xs font-semibold cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={options.includeVents}
-                      onChange={(e) => set('includeVents', e.target.checked)}
-                      className="rounded border-slate-300 dark:border-slate-700 text-purple-600 focus:ring-purple-500"
-                    />
-                    Include Air Riser Bleed Holes (Prevents Bubbles)
-                  </label>
-                  {options.includeVents && (
-                    <div className="pl-5 border-l-2 border-purple-200 dark:border-purple-900">
-                      <Field label="Vent Dia (mm)">
-                        <NumberInput
-                          value={options.ventDiaMm}
-                          min={0.8}
-                          max={6}
-                          step={0.1}
-                          onChange={(v) => set('ventDiaMm', v)}
-                          className={inputClass}
-                        />
-                      </Field>
-                    </div>
-                  )}
+                <label className="flex items-center gap-2 text-xs font-semibold cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={options.includeVents}
+                    onChange={(e) => set('includeVents', e.target.checked)}
+                    className="rounded border-slate-300 dark:border-slate-700 text-purple-600 focus:ring-purple-500"
+                  />
+                  Include Air Riser Bleed Holes (Prevents Bubbles)
+                </label>
+                {options.includeVents && (
+                  <div className="pl-5 border-l-2 border-purple-200 dark:border-purple-900">
+                    <Field label="Vent Dia (mm)">
+                      <NumberInput
+                        value={options.ventDiaMm}
+                        min={0.8}
+                        max={6}
+                        step={0.1}
+                        onChange={(v) => set('ventDiaMm', v)}
+                        className={inputClass}
+                      />
+                    </Field>
+                  </div>
+                )}
 
+                {options.moldType === 'clamshell' && (
                   <label className="flex items-center gap-2 text-xs font-semibold cursor-pointer">
                     <input
                       type="checkbox"
@@ -827,9 +877,9 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
                     />
                     Include Side Demolding Pry Slots
                   </label>
-                </div>
+                )}
               </div>
-            )}
+            </div>
             <CastingGuide result={result} moldType={options.moldType} />
           </div>
         </div>
@@ -854,11 +904,19 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
             </button>
 
             <AddSimulationButton
+              disabled={!result.success || result.totalTriangles === 0 || busy || saving || castBusy}
+              onSimulate={(placement) => void handleSimulateCast(placement)}
+              progress={castBusy ? 0.5 : addCastToScene.progress}
+              error={castError ?? addCastToScene.error}
+              label="Simulate Cast"
+            />
+
+            <AddSimulationButton
               disabled={!result.success || result.totalTriangles === 0 || busy || saving}
               onSimulate={() => void handleAddToScene()}
               progress={addToScene.progress}
               error={addToScene.error}
-              label="Add to Scene"
+              label="Add Mold"
               besideOnly
             />
 

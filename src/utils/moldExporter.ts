@@ -18,6 +18,22 @@
 
 import type { SceneGraph } from '../types/scene';
 import { collectSceneTriangles } from './contourSliceExporter';
+import type { ManifoldToplevel, Manifold } from 'manifold-3d';
+import { toManifold } from './sculptCut';
+import { createSculptMesh } from './sculptMesh';
+import { repairMesh } from './meshRepair';
+
+let lastPlannedOptions: MoldOptions | null = null;
+
+/** Saves the mold options the export dialog last planned with. */
+export function rememberMoldOptions(options: MoldOptions): void {
+  lastPlannedOptions = { ...options };
+}
+
+/** Returns the mold options the export dialog last planned with, or null when it has not this session. */
+export function lastMoldOptions(): MoldOptions | null {
+  return lastPlannedOptions ? { ...lastPlannedOptions } : null;
+}
 
 export interface MoldOptions {
   /** 'clamshell': two-part interlocking split mold; 'open': one-part open pour mold. */
@@ -35,6 +51,12 @@ export interface MoldOptions {
    * lets a rigid mold let go.
    */
   draftAngleDeg: number;
+  /**
+   * Keep 3D overhangs and undercuts inside the mold cavity (for flexible
+   * silicone/TPU molds or sacrificial shells) instead of filling them in solid
+   * so a rigid mold can release the part.
+   */
+  allowUndercuts?: boolean;
   /** Base diameter of alignment pins in mm. */
   pinDiameterMm: number;
   /** Height of alignment pins in mm. */
@@ -61,6 +83,7 @@ export const DEFAULT_MOLD_OPTIONS: MoldOptions = {
   baseThicknessMm: 5,
   cavityDepthMm: 0,
   draftAngleDeg: 0,
+  allowUndercuts: false,
   pinDiameterMm: 6,
   pinHeightMm: 4,
   pinToleranceMm: 0.25,
@@ -86,6 +109,8 @@ export interface MoldMeshHalf {
   widthMm: number;
   depthMm: number;
   heightMm: number;
+  /** Z height of the parting face on the build plate in mm (excludes pin rise). */
+  partingZMm: number;
   triangleCount: number;
 }
 
@@ -250,6 +275,8 @@ interface ColumnField {
   /** Columns whose line enters and leaves the part more than once, or floats off the parting plane. */
   undercutColumns: number;
   hitColumns: number;
+  /** Exact solid Z spans per column as flat (bottom, top) pairs in part Z coords. */
+  spans: Float64Array[];
 }
 
 /**
@@ -295,6 +322,8 @@ function sampleColumns(
   const maxZ = new Float64Array(n);
   const hit = new Uint8Array(n);
   const multiCrossings = new Uint8Array(n);
+  const spans: Float64Array[] = new Array(n);
+  for (let i = 0; i < n; i++) spans[i] = new Float64Array(0);
 
   const nx = Math.max(1, Math.min(96, Math.round(Math.sqrt(triCount / 4)) || 1));
   const binned = binTriangles(tris, triCount, partHalfW, partHalfD, nx, nx);
@@ -302,6 +331,11 @@ function sampleColumns(
   let undercutColumns = 0;
   let hitColumns = 0;
   const eps = 1e-6;
+
+  const hitZ: number[] = [];
+  const hitDir: number[] = [];
+  const order: number[] = [];
+  const colSpans: number[] = [];
 
   for (let r = 0; r < grid.rows; r++) {
     const py = -grid.halfD + r * grid.stepY;
@@ -314,9 +348,9 @@ function sampleColumns(
       const bx = Math.max(0, Math.min(nx - 1, Math.floor(((px + partHalfW) / (2 * partHalfW || 1)) * nx)));
 
       const bucket = binned.bins[by * nx + bx];
-      let lo = Infinity;
-      let hi = -Infinity;
-      let crossings = 0;
+      hitZ.length = 0;
+      hitDir.length = 0;
+      colSpans.length = 0;
 
       for (let k = 0; k < bucket.length; k++) {
         const i = bucket[k];
@@ -339,28 +373,85 @@ function sampleColumns(
         if (u < 0 || v < 0 || u + v > 1) continue;
 
         const z = az + u * (cz - az) + v * (bz - az);
-        if (z < lo) lo = z;
-        if (z > hi) hi = z;
-        crossings++;
+        hitZ.push(z);
+        hitDir.push(den > 0 ? 1 : -1);
       }
 
-      if (crossings === 0) continue;
+      if (hitZ.length === 0) continue;
+
+      order.length = hitZ.length;
+      for (let h = 0; h < order.length; h++) order[h] = h;
+      order.sort((a, b) => hitZ[a] - hitZ[b]);
+
+      const flip = hitDir[order[0]] < 0 ? -1 : 1;
+      let depth = 0;
+      let lastZ = NaN;
+      let lastDir = 0;
+      let enteredAt = 0;
+      let distinctHits = 0;
+
+      for (const h of order) {
+        const z = hitZ[h];
+        const dir = hitDir[h] * flip;
+        if (dir === lastDir && Math.abs(z - lastZ) <= 1e-4) continue;
+        if (lastDir < 0 && dir > 0 && Math.abs(z - lastZ) <= 1e-4) {
+          // Internal coincident interface between touching solids:
+          // The ray exited one solid at lastZ and enters the next at z.
+          // Undo the exit from the previous hit so depth remains > 0 and
+          // neither internal face counts as a surface crossing.
+          depth++;
+          distinctHits--;
+          if (colSpans.length >= 2 && Math.abs(colSpans[colSpans.length - 1] - lastZ) <= 1e-4) {
+            enteredAt = colSpans[colSpans.length - 2];
+            colSpans.length -= 2;
+          }
+          lastZ = z;
+          lastDir = dir;
+          continue;
+        }
+        lastZ = z;
+        lastDir = dir;
+        distinctHits++;
+
+        if (dir > 0) {
+          if (depth === 0) enteredAt = z;
+          depth++;
+        } else if (depth > 0) {
+          depth--;
+          if (depth === 0 && z > enteredAt) {
+            colSpans.push(enteredAt, z);
+          }
+        }
+      }
+
+      if (distinctHits === 0) continue;
+
+      const lo = hitZ[order[0]];
+      const hi = hitZ[order[order.length - 1]];
+
+      if (depth !== 0 || colSpans.length === 0) {
+        colSpans.length = 0;
+        colSpans.push(lo, hi);
+      }
+
       const idx = r * grid.cols + c;
       minZ[idx] = lo;
       maxZ[idx] = hi;
       hit[idx] = 1;
       hitColumns++;
+      spans[idx] = Float64Array.from(colSpans);
+
       // Two crossings is a column that goes in one face and out the other. More
       // than that is an overhang or a hollow, and a heightfield cavity cannot
       // hold it: the mold fills it in solid.
-      if (crossings > 2) {
+      if (distinctHits > 2 || colSpans.length > 2) {
         multiCrossings[idx] = 1;
         undercutColumns++;
       }
     }
   }
 
-  return { minZ, maxZ, hit, multiCrossings, undercutColumns, hitColumns };
+  return { minZ, maxZ, hit, multiCrossings, undercutColumns, hitColumns, spans };
 }
 
 /**
@@ -470,6 +561,8 @@ interface HalfFeatures {
   pins: Array<{ x: number; y: number; baseR: number; topR: number; height: number }>;
   /** Channels bored from the outer face through to the cavity. */
   channels: Array<{ x: number; y: number; outerR: number; innerR: number }>;
+  /** Vents bored from the open top face down to overhanging cavity roof (for open molds). */
+  topVents?: Array<{ x: number; y: number; r: number; zRoof: number }>;
 }
 
 const NO_FEATURES: HalfFeatures = { sockets: [], pins: [], channels: [] };
@@ -496,10 +589,14 @@ function placePourChannels(
   grid: Grid,
   ventR: number,
   ventCount: number,
-  lidSideDepth?: Float64Array
+  lidSideDepth?: Float64Array,
 ): { sprue: { x: number; y: number }; vents: Array<{ x: number; y: number }> } {
   const { cols, rows, stepX, stepY } = grid;
   const n = cols * rows;
+
+  const xOf = (i: number) => -grid.halfW + (i % cols) * stepX;
+  const yOf = (i: number) => -grid.halfD + Math.floor(i / cols) * stepY;
+
   // How far each column lies inside the footprint: a two-pass chamfer
   // distance to the nearest column the part misses.
   const inside = new Float64Array(n);
@@ -531,9 +628,6 @@ function placePourChannels(
       relax(i, c, r, -1, 1, diag);
     }
   }
-
-  const xOf = (i: number) => -grid.halfW + (i % cols) * stepX;
-  const yOf = (i: number) => -grid.halfD + Math.floor(i / cols) * stepY;
 
   // The sprue: deepest inside, and of equally deep columns (a bar's whole
   // spine) the one nearest the middle.
@@ -588,6 +682,97 @@ function placePourChannels(
 }
 
 /**
+ * Places air riser vents for blind undercut pockets in a one-part open mold.
+ * Each column's solid part spans are mapped into depth below the open pour face
+ * (Z = 0 in half-space). Any span separated from the open pour face by mold
+ * material (dStart > 0.1 mm) is a blind pocket; when a column has multiple
+ * blind pockets, the deepest roof (`-max(dStart)`) is used so one riser vents
+ * all of them without ever piercing the bottom floor of the mold.
+ */
+function placeOpenMoldBlindVents(
+  field: ColumnField,
+  grid: Grid,
+  ventCount: number,
+  partingZ: number,
+  detailIsAbove: boolean,
+  moldWidthMm: number,
+): Array<{ x: number; y: number; zRoof: number }> {
+  if (ventCount <= 0) return [];
+  const { cols, rows, stepX, stepY } = grid;
+  const n = cols * rows;
+  const xOf = (i: number) => -grid.halfW + (i % cols) * stepX;
+  const yOf = (i: number) => -grid.halfD + Math.floor(i / cols) * stepY;
+
+  const zRoof = new Float64Array(n).fill(-Infinity);
+  let hasBlindPockets = false;
+
+  for (let i = 0; i < n; i++) {
+    if (!field.hit[i]) continue;
+    const sp = field.spans?.[i];
+    let deepestPocketDepth = -Infinity;
+
+    if (sp && sp.length >= 2) {
+      for (let k = 0; k + 1 < sp.length; k += 2) {
+        const z0 = sp[k];
+        const z1 = sp[k + 1];
+        const dStart = detailIsAbove ? z0 - partingZ : partingZ - z1;
+        if (dStart > 0.1 && dStart > deepestPocketDepth) {
+          deepestPocketDepth = dStart;
+        }
+      }
+    } else {
+      const dStart = detailIsAbove ? field.minZ[i] - partingZ : partingZ - field.maxZ[i];
+      if (dStart > 0.1) {
+        deepestPocketDepth = dStart;
+      }
+    }
+
+    if (deepestPocketDepth > 0.1) {
+      zRoof[i] = -deepestPocketDepth;
+      hasBlindPockets = true;
+    }
+  }
+
+  if (!hasBlindPockets) return [];
+
+  const candidates: number[] = [];
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const i = r * cols + c;
+      if (zRoof[i] <= -Infinity) continue;
+      const val = zRoof[i];
+      let isLocalMax = true;
+      for (const [dc, dr] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
+        const cc = c + dc, rr = r + dr;
+        if (cc >= 0 && cc < cols && rr >= 0 && rr < rows) {
+          const nb = rr * cols + cc;
+          if (zRoof[nb] > val + 1e-4) {
+            isLocalMax = false;
+            break;
+          }
+        }
+      }
+      if (isLocalMax) candidates.push(i);
+    }
+  }
+
+  candidates.sort((a, b) => zRoof[b] - zRoof[a]);
+  const minDist = Math.max(15, moldWidthMm * 0.12);
+  const blindVents: Array<{ x: number; y: number; zRoof: number }> = [];
+
+  for (const i of candidates) {
+    const x = xOf(i);
+    const y = yOf(i);
+    if (blindVents.every((v) => Math.hypot(x - v.x, y - v.y) >= minDist)) {
+      blindVents.push({ x, y, zRoof: zRoof[i] });
+      if (blindVents.length >= ventCount) break;
+    }
+  }
+
+  return blindVents;
+}
+
+/**
  * Builds one mold half as a heightfield block, cavity facing up, parting face at
  * Z = 0 and outer face at Z = -blockHeight.
  *
@@ -602,11 +787,20 @@ function buildHalf(
   grid: Grid,
   depth: Float64Array,
   baseThicknessMm: number,
-  feats: HalfFeatures = NO_FEATURES
+  feats: HalfFeatures = NO_FEATURES,
+  minBlockDepthMm: number = 0
 ): { triangles: Triangle3D[]; blockHeightMm: number; pinRiseMm: number } {
   const n = grid.cols * grid.rows;
 
-  let maxDepth = 0;
+  const xs = new Float64Array(grid.cols);
+  for (let c = 0; c < grid.cols; c++) xs[c] = -grid.halfW + c * grid.stepX;
+  xs[grid.cols - 1] = grid.halfW;
+
+  const ys = new Float64Array(grid.rows);
+  for (let r = 0; r < grid.rows; r++) ys[r] = -grid.halfD + r * grid.stepY;
+  ys[grid.rows - 1] = grid.halfD;
+
+  let maxDepth = minBlockDepthMm;
   for (let i = 0; i < n; i++) if (depth[i] > maxDepth) maxDepth = depth[i];
 
   let socketReach = 0;
@@ -622,9 +816,9 @@ function buildHalf(
   const solid = new Uint8Array(n);
 
   for (let r = 0; r < grid.rows; r++) {
-    const y = -grid.halfD + r * grid.stepY;
+    const y = ys[r];
     for (let c = 0; c < grid.cols; c++) {
-      const x = -grid.halfW + c * grid.stepX;
+      const x = xs[c];
       const i = r * grid.cols + c;
 
       let top = -depth[i];
@@ -641,6 +835,15 @@ function buildHalf(
         if (d >= p.baseR) continue;
         const t = d <= p.topR ? 1 : (p.baseR - d) / (p.baseR - p.topR);
         top = Math.max(top, p.height * t);
+      }
+
+      if (feats.topVents) {
+        for (const v of feats.topVents) {
+          const d = Math.hypot(x - v.x, y - v.y);
+          if (d <= v.r) {
+            top = Math.min(top, v.zRoof);
+          }
+        }
       }
 
       let bot = floorZ;
@@ -677,12 +880,12 @@ function buildHalf(
     c >= 0 && r >= 0 && c < cellCols && r < cellRows && cellSolid[r * cellCols + c] === 1;
 
   for (let r = 0; r < cellRows; r++) {
-    const y0 = -grid.halfD + r * grid.stepY;
-    const y1 = y0 + grid.stepY;
+    const y0 = ys[r];
+    const y1 = ys[r + 1];
     for (let c = 0; c < cellCols; c++) {
       if (!isSolidCell(c, r)) continue;
-      const x0 = -grid.halfW + c * grid.stepX;
-      const x1 = x0 + grid.stepX;
+      const x0 = xs[c];
+      const x1 = xs[c + 1];
 
       const i00 = r * grid.cols + c;
       const i10 = i00 + 1;
@@ -795,10 +998,468 @@ export function emptyMoldResult(message?: string): MoldExportResult {
     minDraftDeg: 90,
     flexibleMoldAdvised: false,
     lidIsBackingPlate: false,
-    bottomHalf: { name: 'bottom', triangles: [], bounds: zero, widthMm: 0, depthMm: 0, heightMm: 0, triangleCount: 0 },
+    bottomHalf: { name: 'bottom', triangles: [], bounds: zero, widthMm: 0, depthMm: 0, heightMm: 0, partingZMm: 0, triangleCount: 0 },
     combinedTriangles: [],
     warnings: message ? [message] : [],
     error: message,
+  };
+}
+
+type Mat4Tuple = [
+  number, number, number, number,
+  number, number, number, number,
+  number, number, number, number,
+  number, number, number, number
+];
+
+function manifoldToTriangles(m: Manifold): Triangle3D[] {
+  const mesh = m.getMesh();
+  const tris: Triangle3D[] = [];
+  const numTris = mesh.triVerts.length / 3;
+  const stride = mesh.numProp;
+  const p = mesh.vertProperties;
+  for (let t = 0; t < numTris; t++) {
+    const i0 = mesh.triVerts[t * 3];
+    const i1 = mesh.triVerts[t * 3 + 1];
+    const i2 = mesh.triVerts[t * 3 + 2];
+    if (i0 === i1 || i1 === i2 || i0 === i2) continue;
+    const a: [number, number, number] = [p[i0 * stride], p[i0 * stride + 1], p[i0 * stride + 2]];
+    const b: [number, number, number] = [p[i1 * stride], p[i1 * stride + 1], p[i1 * stride + 2]];
+    const c: [number, number, number] = [p[i2 * stride], p[i2 * stride + 1], p[i2 * stride + 2]];
+    if (
+      (a[0] === b[0] && a[1] === b[1] && a[2] === b[2]) ||
+      (b[0] === c[0] && b[1] === c[1] && b[2] === c[2]) ||
+      (a[0] === c[0] && a[1] === c[1] && a[2] === c[2])
+    ) {
+      continue;
+    }
+    tris.push({ a, b, c, normal: computeNormal(a, b, c) });
+  }
+  return tris;
+}
+
+function buildPartManifold(
+  wasm: ManifoldToplevel,
+  tris: Float64Array,
+  solidIds?: number[]
+): Manifold | null {
+  const triCount = tris.length / 9;
+  if (triCount === 0) return null;
+
+  const groups = new Map<number, number[]>();
+  for (let t = 0; t < triCount; t++) {
+    const sid = solidIds && solidIds.length === triCount ? solidIds[t] : 0;
+    let g = groups.get(sid);
+    if (!g) {
+      g = [];
+      groups.set(sid, g);
+    }
+    g.push(t);
+  }
+
+  let combined: Manifold | null = null;
+
+  for (const triIndices of groups.values()) {
+    const vMap = new Map<string, number>();
+    const positions: number[] = [];
+    const faces: number[] = [];
+
+    for (const t of triIndices) {
+      const i = t * 9;
+      const ax = tris[i], ay = tris[i + 1], az = tris[i + 2];
+      const bx = tris[i + 3], by = tris[i + 4], bz = tris[i + 5];
+      const cx = tris[i + 6], cy = tris[i + 7], cz = tris[i + 8];
+
+      const d1x = bx - ax, d1y = by - ay, d1z = bz - az;
+      const d2x = cx - ax, d2y = cy - ay, d2z = cz - az;
+      const cpx = d1y * d2z - d1z * d2y;
+      const cpy = d1z * d2x - d1x * d2z;
+      const cpz = d1x * d2y - d1y * d2x;
+      if (cpx * cpx + cpy * cpy + cpz * cpz < 1e-12) continue;
+
+      const ka = `${Math.round(ax * 1000)},${Math.round(ay * 1000)},${Math.round(az * 1000)}`;
+      const kb = `${Math.round(bx * 1000)},${Math.round(by * 1000)},${Math.round(bz * 1000)}`;
+      const kc = `${Math.round(cx * 1000)},${Math.round(cy * 1000)},${Math.round(cz * 1000)}`;
+      if (ka === kb || kb === kc || ka === kc) continue;
+
+      let va = vMap.get(ka);
+      if (va === undefined) {
+        va = positions.length / 3;
+        vMap.set(ka, va);
+        positions.push(ax, ay, az);
+      }
+      let vb = vMap.get(kb);
+      if (vb === undefined) {
+        vb = positions.length / 3;
+        vMap.set(kb, vb);
+        positions.push(bx, by, bz);
+      }
+      let vc = vMap.get(kc);
+      if (vc === undefined) {
+        vc = positions.length / 3;
+        vMap.set(kc, vc);
+        positions.push(cx, cy, cz);
+      }
+      faces.push(va, vb, vc);
+    }
+
+    if (faces.length < 3) continue;
+
+    let solidManifold: Manifold | null = null;
+    const sculptMesh = createSculptMesh(positions, faces);
+    const mRes = toManifold(wasm, sculptMesh);
+    if (mRes.ok) {
+      solidManifold = mRes.manifold;
+    } else {
+      const repaired = repairMesh(positions, faces, {
+        weldTolerance: 0.02,
+        fillHoles: true,
+        fixWinding: true,
+      });
+      if (repaired.faces.length >= 12) {
+        const rMesh = createSculptMesh(repaired.positions, repaired.faces);
+        const rRes = toManifold(wasm, rMesh);
+        if (rRes.ok) {
+          solidManifold = rRes.manifold;
+        }
+      }
+      if (!solidManifold) {
+        try {
+          const direct = new wasm.Manifold(
+            new wasm.Mesh({
+              numProp: 3,
+              vertProperties: Float32Array.from(positions),
+              triVerts: Uint32Array.from(faces),
+            })
+          );
+          if (direct.status() === 'NoError') {
+            solidManifold = direct;
+          } else {
+            direct.delete();
+          }
+        } catch {
+          solidManifold = null;
+        }
+      }
+    }
+
+    if (!solidManifold) continue;
+
+    if (!combined) {
+      combined = solidManifold;
+    } else {
+      const next: Manifold = combined.add(solidManifold);
+      combined.delete();
+      solidManifold.delete();
+      combined = next;
+    }
+  }
+
+  if (combined && combined.status() === 'NoError' && !combined.isEmpty()) {
+    return combined;
+  }
+  combined?.delete();
+  return null;
+}
+
+interface CsgContext {
+  wasm: ManifoldToplevel;
+  tris: Float64Array;
+  solidIds: number[];
+  partingZ: number;
+  detailIsAbove: boolean;
+  moldWidthMm: number;
+  moldDepthMm: number;
+  partHeightMm: number;
+  rawCavityDepthMm: number;
+  opts: MoldOptions;
+  baseFeatures: HalfFeatures;
+  lidFeatures: HalfFeatures;
+  baseBlockHeight: number;
+  lidBlockHeight: number;
+  mnX: number;
+  mxX: number;
+  mnY: number;
+  mxY: number;
+  mnZ: number;
+  mxZ: number;
+  partWidthMm: number;
+  partDepthMm: number;
+  minDraftDeg: number;
+  flexibleMoldAdvised: boolean;
+  lidIsBackingPlate: boolean;
+  undercutColumns: number;
+  warnings: string[];
+}
+
+function buildMoldCSG(ctx: CsgContext): MoldExportResult | null {
+  const {
+    wasm, tris, solidIds, partingZ, detailIsAbove,
+    moldWidthMm, moldDepthMm, partHeightMm, rawCavityDepthMm,
+    opts, baseFeatures, lidFeatures,
+    baseBlockHeight, lidBlockHeight,
+    mnX, mxX, mnY, mxY, mnZ, mxZ,
+    partWidthMm, partDepthMm,
+    minDraftDeg, flexibleMoldAdvised, lidIsBackingPlate,
+    warnings,
+  } = ctx;
+
+  const rawPartManifold = buildPartManifold(wasm, tris, solidIds);
+  if (!rawPartManifold) return null;
+
+  const mw2 = moldWidthMm / 2;
+  const md2 = moldDepthMm / 2;
+
+  if (opts.moldType === 'open') {
+    let partManifold: Manifold;
+    if (detailIsAbove) {
+      const mat: Mat4Tuple = [
+        1, 0, 0, 0,
+        0, -1, 0, 0,
+        0, 0, -1, 0,
+        0, 0, partingZ, 1,
+      ];
+      partManifold = rawPartManifold.transform(mat);
+      rawPartManifold.delete();
+    } else {
+      partManifold = rawPartManifold.translate([0, 0, -partingZ]);
+      rawPartManifold.delete();
+    }
+
+    const blockHeight = partHeightMm + opts.baseThicknessMm;
+    const moldBlock = wasm.Manifold.cube([moldWidthMm, moldDepthMm, blockHeight], false)
+      .translate([-mw2, -md2, -blockHeight]);
+
+    // pour_ext: cross section at open face Z = -0.01 extruded Z in [-0.5, +2.0]
+    let pour_ext: Manifold | null = null;
+    try {
+      let slice = partManifold.slice(-0.01);
+      if (slice.isEmpty()) {
+        slice.delete();
+        slice = partManifold.slice(-0.1);
+      }
+      if (!slice.isEmpty()) {
+        pour_ext = wasm.Manifold.extrude(slice, 2.5).translate([0, 0, -0.5]);
+      }
+      slice.delete();
+    } catch {
+      pour_ext = null;
+    }
+
+    let cutter = partManifold;
+    if (pour_ext) {
+      cutter = partManifold.add(pour_ext);
+      partManifold.delete();
+      pour_ext.delete();
+    }
+
+    let openMold = moldBlock.subtract(cutter);
+    moldBlock.delete();
+    cutter.delete();
+
+    // Subtract vertical vent cylinders for blind pockets (never piercing the bottom floor)
+    if (baseFeatures.topVents && baseFeatures.topVents.length > 0) {
+      for (const v of baseFeatures.topVents) {
+        const zPocket = v.zRoof;
+        if (zPocket < -0.1 && zPocket > -blockHeight + 0.5) {
+          const cylH = 1.0 - zPocket;
+          const cyl = wasm.Manifold.cylinder(cylH, v.r, v.r, 24, false).translate([v.x, v.y, zPocket]);
+          const next = openMold.subtract(cyl);
+          openMold.delete();
+          cyl.delete();
+          openMold = next;
+        }
+      }
+    }
+
+    // Lift onto plate
+    const plated = openMold.translate([0, 0, blockHeight]);
+    openMold.delete();
+
+    const plateBottomTris = manifoldToTriangles(plated);
+    plated.delete();
+
+    let stlBytes: Uint8Array | null = null;
+    const moldBounds = {
+      minX: -moldWidthMm / 2,
+      minY: -moldDepthMm / 2,
+      minZ: 0,
+      maxX: moldWidthMm / 2,
+      maxY: moldDepthMm / 2,
+      maxZ: blockHeight,
+    };
+
+    return {
+      success: true,
+      get binarySTL() {
+        if (!stlBytes) stlBytes = exportBinarySTL(plateBottomTris, 'PhysBox 3D Mold Plate');
+        return stlBytes;
+      },
+      partBounds: { minX: mnX, minY: mnY, minZ: mnZ, maxX: mxX, maxY: mxY, maxZ: mxZ },
+      moldBounds,
+      partWidthMm: Math.round(partWidthMm * 10) / 10,
+      partDepthMm: Math.round(partDepthMm * 10) / 10,
+      partHeightMm: Math.round(partHeightMm * 10) / 10,
+      moldWidthMm: Math.round(moldWidthMm * 10) / 10,
+      moldDepthMm: Math.round(moldDepthMm * 10) / 10,
+      moldHeightMm: Math.round(blockHeight * 10) / 10,
+      totalTriangles: plateBottomTris.length,
+      cavityDepthMm: Math.round(partHeightMm * 10) / 10,
+      minDraftDeg: Math.round(minDraftDeg * 10) / 10,
+      flexibleMoldAdvised,
+      lidIsBackingPlate,
+      bottomHalf: {
+        name: 'Cavity Half',
+        triangles: plateBottomTris,
+        bounds: boundsOf(plateBottomTris),
+        widthMm: moldWidthMm,
+        depthMm: moldDepthMm,
+        heightMm: Math.round(blockHeight * 10) / 10,
+        partingZMm: Math.round(blockHeight * 100) / 100,
+        triangleCount: plateBottomTris.length,
+      },
+      topHalf: undefined,
+      combinedTriangles: plateBottomTris,
+      warnings,
+    };
+  }
+
+  // Clamshell mode in 3D CSG
+  let basePart: Manifold;
+  let lidPart: Manifold;
+
+  if (detailIsAbove) {
+    const mat: Mat4Tuple = [
+      1, 0, 0, 0,
+      0, -1, 0, 0,
+      0, 0, -1, 0,
+      0, 0, partingZ, 1,
+    ];
+    basePart = rawPartManifold.transform(mat);
+    lidPart = rawPartManifold.translate([0, 0, -partingZ]);
+    rawPartManifold.delete();
+  } else {
+    basePart = rawPartManifold.translate([0, 0, -partingZ]);
+    const mat: Mat4Tuple = [
+      1, 0, 0, 0,
+      0, -1, 0, 0,
+      0, 0, -1, 0,
+      0, 0, partingZ, 1,
+    ];
+    lidPart = rawPartManifold.transform(mat);
+    rawPartManifold.delete();
+  }
+
+  const baseBlock = wasm.Manifold.cube([moldWidthMm, moldDepthMm, baseBlockHeight], false)
+    .translate([-mw2, -md2, -baseBlockHeight]);
+
+  let carvedBase = baseBlock.subtract(basePart);
+  baseBlock.delete();
+  basePart.delete();
+
+  for (const s of baseFeatures.sockets) {
+    const sock = wasm.Manifold.cylinder(s.depth + 0.5, s.botR, s.rimR, 24, false)
+      .translate([s.x, s.y, -s.depth]);
+    const next = carvedBase.subtract(sock);
+    carvedBase.delete();
+    sock.delete();
+    carvedBase = next;
+  }
+
+  const lidBlock = wasm.Manifold.cube([moldWidthMm, moldDepthMm, lidBlockHeight], false)
+    .translate([-mw2, -md2, -lidBlockHeight]);
+
+  let carvedLid = lidBlock.subtract(lidPart);
+  lidBlock.delete();
+  lidPart.delete();
+
+  for (const p of lidFeatures.pins) {
+    const pin = wasm.Manifold.cylinder(p.height + 0.5, p.baseR, p.topR, 24, false)
+      .translate([p.x, p.y, -0.5]);
+    const next = carvedLid.add(pin);
+    carvedLid.delete();
+    pin.delete();
+    carvedLid = next;
+  }
+
+  for (const ch of lidFeatures.channels) {
+    const chH = lidBlockHeight + 2;
+    const chan = wasm.Manifold.cylinder(chH, ch.outerR, ch.innerR, 24, false)
+      .translate([ch.x, ch.y, -lidBlockHeight - 1]);
+    const next = carvedLid.subtract(chan);
+    carvedLid.delete();
+    chan.delete();
+    carvedLid = next;
+  }
+
+  const plateGapMm = 6;
+  const plateOffset = moldWidthMm / 2 + plateGapMm / 2;
+  const platedBase = carvedBase.translate([-plateOffset, 0, baseBlockHeight]);
+  carvedBase.delete();
+  const platedLid = carvedLid.translate([plateOffset, 0, lidBlockHeight]);
+  carvedLid.delete();
+
+  const plateBottomTris = manifoldToTriangles(platedBase);
+  platedBase.delete();
+  const plateTopTris = manifoldToTriangles(platedLid);
+  platedLid.delete();
+
+  const combinedTriangles = [...plateBottomTris, ...plateTopTris];
+  let stlBytes: Uint8Array | null = null;
+  const totalWidth = moldWidthMm * 2 + plateGapMm;
+  const totalHeight = Math.max(
+    baseBlockHeight,
+    lidBlockHeight + opts.pinHeightMm
+  );
+
+  return {
+    success: true,
+    get binarySTL() {
+      if (!stlBytes) stlBytes = exportBinarySTL(combinedTriangles, 'PhysBox 3D Mold Plate');
+      return stlBytes;
+    },
+    partBounds: { minX: mnX, minY: mnY, minZ: mnZ, maxX: mxX, maxY: mxY, maxZ: mxZ },
+    moldBounds: {
+      minX: -totalWidth / 2,
+      minY: -moldDepthMm / 2,
+      minZ: 0,
+      maxX: totalWidth / 2,
+      maxY: moldDepthMm / 2,
+      maxZ: totalHeight,
+    },
+    partWidthMm: Math.round(partWidthMm * 10) / 10,
+    partDepthMm: Math.round(partDepthMm * 10) / 10,
+    partHeightMm: Math.round(partHeightMm * 10) / 10,
+    moldWidthMm: Math.round(moldWidthMm * 10) / 10,
+    moldDepthMm: Math.round(moldDepthMm * 10) / 10,
+    moldHeightMm: Math.round(totalHeight * 10) / 10,
+    totalTriangles: combinedTriangles.length,
+    cavityDepthMm: Math.round(rawCavityDepthMm * 10) / 10,
+    minDraftDeg: Math.round(minDraftDeg * 10) / 10,
+    flexibleMoldAdvised,
+    lidIsBackingPlate,
+    bottomHalf: {
+      name: 'Cavity Half',
+      triangles: plateBottomTris,
+      bounds: boundsOf(plateBottomTris),
+      widthMm: moldWidthMm,
+      depthMm: moldDepthMm,
+      heightMm: Math.round(baseBlockHeight * 10) / 10,
+      partingZMm: Math.round(baseBlockHeight * 100) / 100,
+      triangleCount: plateBottomTris.length,
+    },
+    topHalf: {
+      name: 'Lid Half (Pins, Sprue & Vents)',
+      triangles: plateTopTris,
+      bounds: boundsOf(plateTopTris),
+      widthMm: moldWidthMm,
+      depthMm: moldDepthMm,
+      heightMm: Math.round((lidBlockHeight + opts.pinHeightMm) * 10) / 10,
+      partingZMm: Math.round(lidBlockHeight * 100) / 100,
+      triangleCount: plateTopTris.length,
+    },
+    combinedTriangles,
+    warnings,
   };
 }
 
@@ -807,13 +1468,15 @@ export function emptyMoldResult(message?: string): MoldExportResult {
  */
 export function generateMoldMeshes(
   scene: SceneGraph,
-  options: Partial<MoldOptions> = {}
+  options: Partial<MoldOptions> = {},
+  wasm?: ManifoldToplevel | null
 ): MoldExportResult {
   const opts: MoldOptions = { ...DEFAULT_MOLD_OPTIONS, ...options };
   const warnings: string[] = [];
+  const activeWasm = wasm ?? null;
 
   // Extract all world triangles in scene space (metres)
-  const { tris: sceneTris, warnings: sceneWarnings } = collectSceneTriangles(scene);
+  const { tris: sceneTris, solidIds: sceneSolidIds, warnings: sceneWarnings } = collectSceneTriangles(scene);
   if (sceneWarnings?.length) warnings.push(...sceneWarnings);
 
   if (!sceneTris || sceneTris.length === 0) {
@@ -900,7 +1563,7 @@ export function generateMoldMeshes(
       if (field.minZ[i] <= zMin + zEps) covBottom++;
       if (field.maxZ[i] >= zMax - zEps) covTop++;
     }
-    partingZ = covTop > covBottom * 1.0001 ? zMax : zMin;
+    partingZ = covTop > covBottom ? zMax : zMin;
   } else if (scene.castPrep?.partingZ !== undefined && scene.castPrep.draftDeg > 0) {
     const preppedZ = (scene.castPrep.partingZ * 1000 - cz) * zScale;
     partingZ =
@@ -1044,8 +1707,26 @@ export function generateMoldMeshes(
     grid,
     opts.ventDiaMm / 2,
     opts.includeVents ? 2 : 0,
-    detailIsAbove ? below : above
+    detailIsAbove ? below : above,
   );
+
+  if (opts.moldType === 'open' && opts.includeVents && undercutColumns > 0) {
+    const blindVents = placeOpenMoldBlindVents(
+      field,
+      grid,
+      4,
+      partingZ,
+      detailIsAbove,
+      moldWidthMm,
+    );
+    baseFeatures.topVents = blindVents.map((v) => ({
+      x: v.x,
+      y: detailIsAbove ? -v.y : v.y,
+      r: opts.ventDiaMm / 2,
+      zRoof: v.zRoof,
+    }));
+  }
+
   // `pour` is in the unmirrored `field` frame. When `detailIsAbove` is true,
   // `baseDepth` was mirrored in Y (`mirrorY(above)`) and `lidDepth` (`below`)
   // was NOT mirrored in Y, so on the lid's build grid the part sits at `+y`;
@@ -1073,10 +1754,84 @@ export function generateMoldMeshes(
     ],
   };
 
-  const base = buildHalf(grid, baseDepth, opts.baseThicknessMm, baseFeatures);
+  const baseTrueDepth = opts.moldType === 'open' ? partHeightMm : (detailIsAbove ? zMax - partingZ : partingZ - zMin);
+  const lidTrueDepth = detailIsAbove ? partingZ - zMin : zMax - partingZ;
+  const baseBlockHeight = baseTrueDepth + opts.baseThicknessMm;
+  const lidBlockHeight = lidTrueDepth + opts.baseThicknessMm;
+
+  const lidIsBackingPlate = Math.min(volBelow, volAbove) < 1e-6;
+  const useExactCsg = Boolean(activeWasm && opts.allowUndercuts && undercutColumns > 0);
+  const effectiveFlexibleAdvised = flexibleMoldAdvised || useExactCsg;
+
+  if (undercutColumns > 0) {
+    const pct = (100 * undercutColumns) / field.hitColumns;
+    const pctText = pct < 1 ? 'Under 1' : pct.toFixed(0);
+    if (useExactCsg) {
+      warnings.push(
+        `${pctText}% of the part sits behind an overhang or undercut. Because undercuts are kept in the cavity, ` +
+        'a rigid mold will mechanically lock onto the casting — print in flexible TPU, cast a silicone negative, or use a sacrificial shell.'
+      );
+    } else {
+      warnings.push(
+        `${pctText}% of the part sits behind an overhang or a hollow, which a ` +
+        `${opts.moldType === 'open' ? 'one-part open' : 'two-sided'} mold cannot reach. Those spots come out filled in on the casting.`
+      );
+    }
+  }
+
+  if (opts.moldType === 'clamshell' && lidIsBackingPlate) {
+    warnings.push(
+      'The whole part lies on one side of the parting plane, so the lid holds none of its shape and ' +
+      'comes out as a flat backing plate. Print it only if you want a flat, glossy back on the casting; ' +
+      'otherwise switch to the one-part open mold and pour into the cavity half alone.'
+    );
+  }
+
+  if (flexibleMoldAdvised) {
+    warnings.push(
+      `The cavity is ${cavityDepthMm.toFixed(1)} mm deep with only ${minDraftDeg.toFixed(1)}\u00b0 of taper on its ` +
+      'steepest wall, which a rigid PLA or PETG mold will not let go of. Print it in TPU, or cast a ' +
+      'silicone negative off the printed mold and cast into that.'
+    );
+  }
+
+  if (useExactCsg && activeWasm) {
+    const csgRes = buildMoldCSG({
+      wasm: activeWasm,
+      tris,
+      solidIds: sceneSolidIds ?? [],
+      partingZ,
+      detailIsAbove,
+      moldWidthMm,
+      moldDepthMm,
+      partHeightMm,
+      rawCavityDepthMm,
+      opts,
+      baseFeatures,
+      lidFeatures,
+      baseBlockHeight,
+      lidBlockHeight,
+      mnX,
+      mxX,
+      mnY,
+      mxY,
+      mnZ,
+      mxZ,
+      partWidthMm,
+      partDepthMm,
+      minDraftDeg,
+      flexibleMoldAdvised: effectiveFlexibleAdvised,
+      lidIsBackingPlate,
+      undercutColumns,
+      warnings: [...warnings],
+    });
+    if (csgRes) return csgRes;
+  }
+
+  const base = buildHalf(grid, baseDepth, opts.baseThicknessMm, baseFeatures, baseTrueDepth);
   const lid =
     opts.moldType === 'clamshell'
-      ? buildHalf(grid, lidDepth, opts.baseThicknessMm, lidFeatures)
+      ? buildHalf(grid, lidDepth, opts.baseThicknessMm, lidFeatures, lidTrueDepth)
       : null;
 
   // Both halves print cavity up: flat outer face on the bed, no support needed
@@ -1099,31 +1854,6 @@ export function generateMoldMeshes(
     base.blockHeightMm + base.pinRiseMm,
     lid ? lid.blockHeightMm + lid.pinRiseMm : 0
   );
-
-  if (undercutColumns > 0) {
-    const pct = (100 * undercutColumns) / field.hitColumns;
-    warnings.push(
-      `${pct < 1 ? 'Under 1' : pct.toFixed(0)}% of the part sits behind an overhang or a hollow, which a ` +
-      `${opts.moldType === 'open' ? 'one-part open' : 'two-sided'} mold cannot reach. Those spots come out filled in on the casting.`
-    );
-  }
-
-  const lidIsBackingPlate = Math.min(volBelow, volAbove) < 1e-6;
-  if (opts.moldType === 'clamshell' && lidIsBackingPlate) {
-    warnings.push(
-      'The whole part lies on one side of the parting plane, so the lid holds none of its shape and ' +
-      'comes out as a flat backing plate. Print it only if you want a flat, glossy back on the casting; ' +
-      'otherwise switch to the one-part open mold and pour into the cavity half alone.'
-    );
-  }
-
-  if (flexibleMoldAdvised) {
-    warnings.push(
-      `The cavity is ${cavityDepthMm.toFixed(1)} mm deep with only ${minDraftDeg.toFixed(1)}\u00b0 of taper on its ` +
-      'steepest wall, which a rigid PLA or PETG mold will not let go of. Print it in TPU, or cast a ' +
-      'silicone negative off the printed mold and cast into that.'
-    );
-  }
 
   return {
     success: true,
@@ -1158,6 +1888,7 @@ export function generateMoldMeshes(
       widthMm: moldWidthMm,
       depthMm: moldDepthMm,
       heightMm: Math.round((base.blockHeightMm + base.pinRiseMm) * 10) / 10,
+      partingZMm: Math.round(base.blockHeightMm * 100) / 100,
       triangleCount: plateBottomTris.length,
     },
     topHalf: lid
@@ -1168,6 +1899,7 @@ export function generateMoldMeshes(
           widthMm: moldWidthMm,
           depthMm: moldDepthMm,
           heightMm: Math.round((lid.blockHeightMm + lid.pinRiseMm) * 10) / 10,
+          partingZMm: Math.round(lid.blockHeightMm * 100) / 100,
           triangleCount: plateTopTris.length,
         }
       : undefined,
@@ -1231,6 +1963,7 @@ export function moldSummary(r: MoldExportResult): MoldSummary {
     widthMm: h.widthMm,
     depthMm: h.depthMm,
     heightMm: h.heightMm,
+    partingZMm: h.partingZMm,
     triangleCount: h.triangleCount,
   });
 
