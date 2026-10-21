@@ -135,7 +135,9 @@ const EMPTY_SUMMARY: MoldSummary = moldSummary(emptyMoldResult());
 
 export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClose, scene }) => {
   useEscapeToClose(isOpen, onClose);
-  const [options, setOptions] = useState<MoldOptions>(DEFAULT_MOLD_OPTIONS);
+  // 'auto' picks the simplest mold that keeps the part, and the direction it
+  // opens along; both stay overridable below.
+  const [options, setOptions] = useState<MoldOptions>({ ...DEFAULT_MOLD_OPTIONS, moldType: 'auto' });
   const set = <K extends keyof MoldOptions>(key: K, value: MoldOptions[K] | undefined) => {
     if (value === undefined) return;
     setOptions((prev) => ({ ...prev, [key]: value }));
@@ -206,6 +208,9 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
   }, [isOpen, scene, settledOptions]);
 
   const result = preview?.summary ?? EMPTY_SUMMARY;
+  /** The mold actually built: 'auto' resolved by the exporter. */
+  const moldType: 'clamshell' | 'open' =
+    preview?.summary.success ? result.moldType : options.moldType === 'auto' ? 'clamshell' : options.moldType;
 
   // Setup WebGL Three.js Scene and OrbitControls
   useEffect(() => {
@@ -294,7 +299,7 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
   }, [isOpen]);
 
   const effectiveViewMode: PreviewViewMode =
-    options.moldType === 'open' && (viewMode === 'clamshell_exploded' || viewMode === 'top_only')
+    moldType === 'open' && (viewMode === 'clamshell_exploded' || viewMode === 'top_only')
       ? 'plate'
       : viewMode;
 
@@ -380,7 +385,7 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
       if (bottomBuf) {
         group.add(new THREE.Mesh(buffersToGeometry(bottomBuf), bottomMat));
       }
-      if (topBuf && options.moldType === 'clamshell') {
+      if (topBuf && moldType === 'clamshell') {
         group.add(new THREE.Mesh(buffersToGeometry(topBuf), topMat));
       }
     } else if (effectiveViewMode === 'clamshell_exploded') {
@@ -422,7 +427,7 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
     const grid = new THREE.GridHelper(gridDim, 24, 0x94a3b8, 0x334155);
     grid.rotation.x = Math.PI / 2; // Lie flat in XY plane
     group.add(grid);
-  }, [preview, result, effectiveViewMode, isXRay, explodeGap, options.moldType, castPreview]);
+  }, [preview, result, effectiveViewMode, isXRay, explodeGap, moldType, castPreview]);
 
   const [saving, setSaving] = useState(false);
   const [castBusy, setCastBusy] = useState(false);
@@ -470,7 +475,7 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
         placement,
         details: [
           `Cast dimensions: ${castRes.sizeMm.width} × ${castRes.sizeMm.depth} × ${castRes.sizeMm.height} mm`,
-          `Mold type: ${options.moldType === 'open' ? 'One-part open mold' : 'Two-part clamshell mold'}`,
+          `Mold type: ${moldType === 'open' ? 'One-part open mold' : 'Two-part clamshell mold'}`,
         ],
       });
       if (added && castRes.textures && castRes.textures.length > 0) {
@@ -549,7 +554,7 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
             <div className="flex items-center justify-between gap-2 flex-wrap text-xs">
               {/* View mode buttons */}
               <div className="flex bg-slate-200 dark:bg-slate-800 p-0.5 rounded-lg">
-                {options.moldType === 'clamshell' && (
+                {moldType === 'clamshell' && (
                   <button
                     type="button"
                     onClick={() => setViewMode('clamshell_exploded')}
@@ -584,7 +589,7 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
                 >
                   Bottom
                 </button>
-                {options.moldType === 'clamshell' && (
+                {moldType === 'clamshell' && (
                   <button
                     type="button"
                     onClick={() => setViewMode('top_only')}
@@ -639,7 +644,7 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
               <div ref={mountRef} className="absolute inset-0 cursor-grab active:cursor-grabbing" />
 
               {/* Explode Distance Slider (when in exploded view) */}
-              {effectiveViewMode === 'clamshell_exploded' && options.moldType === 'clamshell' && (
+              {effectiveViewMode === 'clamshell_exploded' && moldType === 'clamshell' && (
                 <div className="absolute top-3 left-3 bg-slate-900/85 backdrop-blur-md px-3 py-2 rounded-lg text-xs text-slate-300 border border-slate-700 flex items-center gap-2.5 shadow-lg">
                   <span className="font-semibold text-[11px] text-slate-400">Separation:</span>
                   <input
@@ -705,7 +710,7 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
                       <span className="w-2.5 h-2.5 rounded-full bg-cyan-400" />
                       <span className="text-slate-200">Bottom Cavity</span>
                     </div>
-                    {options.moldType === 'clamshell' && (
+                    {moldType === 'clamshell' && (
                       <div className="flex items-center gap-1.5">
                         <span className="w-2.5 h-2.5 rounded-full bg-purple-400" />
                         <span className="text-slate-200">Top Lid (Pins &amp; Sprue)</span>
@@ -742,6 +747,10 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
               </div>
             </div>
 
+            {result.success && result.setupNote && (
+              <p className="text-[11px] leading-snug text-slate-500 dark:text-slate-400">{result.setupNote}</p>
+            )}
+
             {failure && (
               <div className="flex items-start gap-2 text-[11px] leading-snug rounded-lg px-2.5 py-2 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 text-rose-800 dark:text-rose-200">
                 <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-px" />
@@ -760,7 +769,7 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
                     <span>{w}</span>
                   </div>
                 ))}
-                {result.lidIsBackingPlate && options.moldType === 'clamshell' && (
+                {result.lidIsBackingPlate && moldType === 'clamshell' && (
                   <button
                     type="button"
                     onClick={() => set('moldType', 'open')}
@@ -779,15 +788,35 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
             {/* Mold Style */}
             <div className={sectionClass}>
               <div className={sectionTitleClass}>Mold Architecture</div>
-              <Field label="Mold Style" hint="Two-Part Clamshell creates front and back interlocking halves. One-Part Open creates a single top-fill mold.">
+              <Field label="Mold Style" hint="Auto uses a one-part open mold when that keeps the shape, and two interlocking halves when it does not.">
                 <Segmented
                   value={options.moldType}
                   onChange={(v) => set('moldType', v)}
                   options={[
-                    ['clamshell', 'Two-Part Clamshell'],
-                    ['open', 'One-Part Open Mold'],
+                    ['auto', 'Auto'],
+                    ['clamshell', 'Two-Part'],
+                    ['open', 'One-Part Open'],
                   ] as const}
                 />
+              </Field>
+
+              <Field
+                label="Opens Along"
+                hint="The direction the mold pulls off the part. Auto tries every one and keeps the one that fills in the least of the shape."
+              >
+                <select
+                  value={options.pullDirection ?? 'auto'}
+                  onChange={(e) => set('pullDirection', e.target.value as MoldOptions['pullDirection'])}
+                  className={inputClass}
+                >
+                  <option value="auto">Auto</option>
+                  <option value="+z">Top to bottom (Z)</option>
+                  <option value="+y">Front to back (Y)</option>
+                  <option value="+x">Side to side (X)</option>
+                  <option value="-z">Upside down (−Z)</option>
+                  <option value="-y">Back to front (−Y)</option>
+                  <option value="-x">Other side (−X)</option>
+                </select>
               </Field>
 
               <div className="grid grid-cols-2 gap-3 min-w-0">
@@ -864,7 +893,7 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
             </div>
 
             {/* Registration Pins & Tolerances (Clamshell only) */}
-            {options.moldType === 'clamshell' && (
+            {moldType === 'clamshell' && (
               <div className={sectionClass}>
                 <div className={sectionTitleClass}>Interlocking Registration Pins</div>
                 <div className="grid grid-cols-3 gap-2 min-w-0">
@@ -909,7 +938,7 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
             <div className={sectionClass}>
               <div className={sectionTitleClass}>Pouring & Vents</div>
               <div className="space-y-3 min-w-0">
-                {options.moldType === 'clamshell' && (
+                {moldType === 'clamshell' && (
                   <>
                     <label className="flex items-center gap-2 text-xs font-semibold cursor-pointer">
                       <input
@@ -972,7 +1001,7 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
                   </div>
                 )}
 
-                {options.moldType === 'clamshell' && (
+                {moldType === 'clamshell' && (
                   <label className="flex items-center gap-2 text-xs font-semibold cursor-pointer">
                     <input
                       type="checkbox"
@@ -985,7 +1014,7 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
                 )}
               </div>
             </div>
-            <CastingGuide result={result} moldType={options.moldType} />
+            <CastingGuide result={result} moldType={moldType} />
           </div>
         </div>
 
@@ -994,7 +1023,7 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
           <div className="text-xs text-slate-500 dark:text-slate-400">
             Export layout:{' '}
             <strong className="text-slate-700 dark:text-slate-200">
-              {options.moldType === 'open'
+              {moldType === 'open'
                 ? 'Single open mold flat on Z=0 build plate'
                 : 'Both halves flat on Z=0 build plate'}
             </strong>
@@ -1026,7 +1055,7 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
             />
 
             <button
-              onClick={() => void handleDownload(options.moldType === 'open' ? 'casting_mold_open.stl' : 'casting_mold_plate.stl')}
+              onClick={() => void handleDownload(moldType === 'open' ? 'casting_mold_open.stl' : 'casting_mold_plate.stl')}
               disabled={!result.success || result.totalTriangles === 0 || busy || saving}
               className="flex items-center gap-2 px-5 py-2 text-xs font-semibold text-white bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 rounded-xl shadow-md hover:shadow-lg disabled:opacity-50 transition-all cursor-pointer"
             >

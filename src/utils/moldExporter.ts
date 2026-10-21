@@ -22,6 +22,8 @@ import type { ManifoldToplevel, Manifold } from 'manifold-3d';
 import { toManifold } from './sculptCut';
 import { createSculptMesh } from './sculptMesh';
 import { repairMesh } from './meshRepair';
+import { sampleColumns, choosePartingZ, type Grid, type ColumnField } from './moldColumns';
+import { choosePullDirection, rotateTrianglesForPull, type PullChoice, type PullDirection } from './moldPullDirection';
 
 let lastPlannedOptions: MoldOptions | null = null;
 
@@ -36,8 +38,18 @@ export function lastMoldOptions(): MoldOptions | null {
 }
 
 export interface MoldOptions {
-  /** 'clamshell': two-part interlocking split mold; 'open': one-part open pour mold. */
-  moldType: 'clamshell' | 'open';
+  /**
+   * 'clamshell': two-part interlocking split mold; 'open': one-part open pour
+   * mold; 'auto': the open mold when it keeps the part about as well as a
+   * clamshell would, since it is one print and nothing to line up.
+   */
+  moldType: 'clamshell' | 'open' | 'auto';
+  /**
+   * Which of the part's directions the mold opens along. 'auto' (the default)
+   * tries every axis and takes the one that fills in the least of the part; an
+   * upright bust opens front to back, not top to bottom.
+   */
+  pullDirection?: 'auto' | PullDirection;
   /** Wall thickness around the part in mm. */
   wallMarginMm: number;
   /** Floor/roof slab thickness behind the cavity in mm. */
@@ -79,6 +91,7 @@ export interface MoldOptions {
 
 export const DEFAULT_MOLD_OPTIONS: MoldOptions = {
   moldType: 'clamshell',
+  pullDirection: 'auto',
   wallMarginMm: 10,
   baseThicknessMm: 5,
   cavityDepthMm: 0,
@@ -116,6 +129,20 @@ export interface MoldMeshHalf {
 
 export interface MoldExportResult {
   success: boolean;
+  /** The mold actually built, with 'auto' resolved. */
+  moldType: 'clamshell' | 'open';
+  /** The part's direction the mold opens along ('+z' is as placed). */
+  pullDirection: PullDirection;
+  /** Volume the mold fills in that the part does not have, as a share of the part's volume. */
+  lostFraction: number;
+  /**
+   * True when the cavity half holds the part upside down relative to the pull
+   * frame (it holds the top of the part, mirrored in Y to lie cavity up). The
+   * cast simulation needs it to turn the casting back the way the part stands.
+   */
+  cavityHoldsTop: boolean;
+  /** One plain sentence on how the mold was set up, when it was turned or chosen for the user. */
+  setupNote?: string;
   binarySTL: Uint8Array;
   partBounds: { minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number };
   moldBounds: { minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number };
@@ -242,252 +269,6 @@ function addQuad(
   if (!sameVertex(v0, v2) && !sameVertex(v2, v3) && !sameVertex(v0, v3)) {
     triangles.push({ a: v0, b: v2, c: v3, normal: computeNormal(v0, v2, v3) });
   }
-}
-
-// ---------------------------------------------------------------------------
-// Column sampling
-// ---------------------------------------------------------------------------
-//
-// Everything below works on vertical columns through the part: for each (x, y)
-// on a grid, the lowest and the highest point of the part's surface. A mold half
-// is then a block with one of those surfaces sunk into its face, which is what
-// makes the whole build a heightfield and lets pins, sockets, sprues and vents
-// be written as edits to the same two height arrays.
-
-interface Grid {
-  cols: number;
-  rows: number;
-  stepX: number;
-  stepY: number;
-  /** Half extents of the mold block the grid spans, so x = -halfW + c * stepX. */
-  halfW: number;
-  halfD: number;
-}
-
-interface ColumnField {
-  /** Lowest surface point in the column; only meaningful where hit is 1. */
-  minZ: Float64Array;
-  /** Highest surface point in the column. */
-  maxZ: Float64Array;
-  hit: Uint8Array;
-  /** 1 where the column's ray enters and leaves the part more than once. */
-  multiCrossings: Uint8Array;
-  /** Columns whose line enters and leaves the part more than once, or floats off the parting plane. */
-  undercutColumns: number;
-  hitColumns: number;
-  /** Exact solid Z spans per column as flat (bottom, top) pairs in part Z coords. */
-  spans: Float64Array[];
-}
-
-/**
- * Buckets triangles by their XY footprint so a column only tests the handful
- * that can possibly be over it. Without this the sampler is columns x triangles,
- * which on a terrain relief is hundreds of millions of point-in-triangle tests.
- */
-function binTriangles(tris: Float64Array, triCount: number, halfW: number, halfD: number, nx: number, ny: number) {
-  const bins: number[][] = new Array(nx * ny);
-  for (let i = 0; i < bins.length; i++) bins[i] = [];
-  const spanX = 2 * halfW || 1;
-  const spanY = 2 * halfD || 1;
-
-  for (let t = 0; t < triCount; t++) {
-    const i = t * 9;
-    const minX = Math.min(tris[i], tris[i + 3], tris[i + 6]);
-    const maxX = Math.max(tris[i], tris[i + 3], tris[i + 6]);
-    const minY = Math.min(tris[i + 1], tris[i + 4], tris[i + 7]);
-    const maxY = Math.max(tris[i + 1], tris[i + 4], tris[i + 7]);
-
-    const c0 = Math.max(0, Math.min(nx - 1, Math.floor(((minX + halfW) / spanX) * nx)));
-    const c1 = Math.max(0, Math.min(nx - 1, Math.floor(((maxX + halfW) / spanX) * nx)));
-    const r0 = Math.max(0, Math.min(ny - 1, Math.floor(((minY + halfD) / spanY) * ny)));
-    const r1 = Math.max(0, Math.min(ny - 1, Math.floor(((maxY + halfD) / spanY) * ny)));
-
-    for (let r = r0; r <= r1; r++) {
-      for (let c = c0; c <= c1; c++) bins[r * nx + c].push(i);
-    }
-  }
-  return { bins, nx, ny, spanX, spanY, halfW, halfD };
-}
-
-/** Samples the part's lowest and highest surface over every grid column. */
-function sampleColumns(
-  tris: Float64Array,
-  triCount: number,
-  grid: Grid,
-  partHalfW: number,
-  partHalfD: number
-): ColumnField {
-  const n = grid.cols * grid.rows;
-  const minZ = new Float64Array(n);
-  const maxZ = new Float64Array(n);
-  const hit = new Uint8Array(n);
-  const multiCrossings = new Uint8Array(n);
-  const spans: Float64Array[] = new Array(n);
-  for (let i = 0; i < n; i++) spans[i] = new Float64Array(0);
-
-  const nx = Math.max(1, Math.min(96, Math.round(Math.sqrt(triCount / 4)) || 1));
-  const binned = binTriangles(tris, triCount, partHalfW, partHalfD, nx, nx);
-
-  let undercutColumns = 0;
-  let hitColumns = 0;
-  const eps = 1e-6;
-
-  const hitZ: number[] = [];
-  const hitDir: number[] = [];
-  const order: number[] = [];
-  const colSpans: number[] = [];
-
-  for (let r = 0; r < grid.rows; r++) {
-    const py = -grid.halfD + r * grid.stepY;
-    if (py < -partHalfD - eps || py > partHalfD + eps) continue;
-    const by = Math.max(0, Math.min(nx - 1, Math.floor(((py + partHalfD) / (2 * partHalfD || 1)) * nx)));
-
-    for (let c = 0; c < grid.cols; c++) {
-      const px = -grid.halfW + c * grid.stepX;
-      if (px < -partHalfW - eps || px > partHalfW + eps) continue;
-      const bx = Math.max(0, Math.min(nx - 1, Math.floor(((px + partHalfW) / (2 * partHalfW || 1)) * nx)));
-
-      const bucket = binned.bins[by * nx + bx];
-      hitZ.length = 0;
-      hitDir.length = 0;
-      colSpans.length = 0;
-
-      for (let k = 0; k < bucket.length; k++) {
-        const i = bucket[k];
-        const ax = tris[i], ay = tris[i + 1], az = tris[i + 2];
-        const bxv = tris[i + 3], byv = tris[i + 4], bz = tris[i + 5];
-        const cxv = tris[i + 6], cyv = tris[i + 7], cz = tris[i + 8];
-
-        if (Math.max(ax, bxv, cxv) < px || Math.min(ax, bxv, cxv) > px) continue;
-        if (Math.max(ay, byv, cyv) < py || Math.min(ay, byv, cyv) > py) continue;
-
-        const v0x = cxv - ax, v0y = cyv - ay;
-        const v1x = bxv - ax, v1y = byv - ay;
-        const v2x = px - ax, v2y = py - ay;
-
-        const den = v0x * v1y - v1x * v0y;
-        if (den === 0) continue;
-
-        const u = (v2x * v1y - v1x * v2y) / den;
-        const v = (v0x * v2y - v2x * v0y) / den;
-        if (u < 0 || v < 0 || u + v > 1) continue;
-
-        const z = az + u * (cz - az) + v * (bz - az);
-        hitZ.push(z);
-        hitDir.push(den > 0 ? 1 : -1);
-      }
-
-      if (hitZ.length === 0) continue;
-
-      order.length = hitZ.length;
-      for (let h = 0; h < order.length; h++) order[h] = h;
-      order.sort((a, b) => hitZ[a] - hitZ[b]);
-
-      const flip = hitDir[order[0]] < 0 ? -1 : 1;
-      let depth = 0;
-      let lastZ = NaN;
-      let lastDir = 0;
-      let enteredAt = 0;
-      let distinctHits = 0;
-
-      for (const h of order) {
-        const z = hitZ[h];
-        const dir = hitDir[h] * flip;
-        if (dir === lastDir && Math.abs(z - lastZ) <= 1e-4) continue;
-        if (lastDir < 0 && dir > 0 && Math.abs(z - lastZ) <= 1e-4) {
-          // Internal coincident interface between touching solids:
-          // The ray exited one solid at lastZ and enters the next at z.
-          // Undo the exit from the previous hit so depth remains > 0 and
-          // neither internal face counts as a surface crossing.
-          depth++;
-          distinctHits--;
-          if (colSpans.length >= 2 && Math.abs(colSpans[colSpans.length - 1] - lastZ) <= 1e-4) {
-            enteredAt = colSpans[colSpans.length - 2];
-            colSpans.length -= 2;
-          }
-          lastZ = z;
-          lastDir = dir;
-          continue;
-        }
-        lastZ = z;
-        lastDir = dir;
-        distinctHits++;
-
-        if (dir > 0) {
-          if (depth === 0) enteredAt = z;
-          depth++;
-        } else if (depth > 0) {
-          depth--;
-          if (depth === 0 && z > enteredAt) {
-            colSpans.push(enteredAt, z);
-          }
-        }
-      }
-
-      if (distinctHits === 0) continue;
-
-      const lo = hitZ[order[0]];
-      const hi = hitZ[order[order.length - 1]];
-
-      if (depth !== 0 || colSpans.length === 0) {
-        colSpans.length = 0;
-        colSpans.push(lo, hi);
-      }
-
-      const idx = r * grid.cols + c;
-      minZ[idx] = lo;
-      maxZ[idx] = hi;
-      hit[idx] = 1;
-      hitColumns++;
-      spans[idx] = Float64Array.from(colSpans);
-
-      // Two crossings is a column that goes in one face and out the other. More
-      // than that is an overhang or a hollow, and a heightfield cavity cannot
-      // hold it: the mold fills it in solid.
-      if (distinctHits > 2 || colSpans.length > 2) {
-        multiCrossings[idx] = 1;
-        undercutColumns++;
-      }
-    }
-  }
-
-  return { minZ, maxZ, hit, multiCrossings, undercutColumns, hitColumns, spans };
-}
-
-/**
- * Picks the parting plane: the height whose cross-section covers the most of the
- * part's footprint, which is the plane the two halves pull apart along with the
- * least material trapped behind an edge. Ties go to the lowest such plane, so a
- * relief or any other flat-backed part parts at its flat back and puts all of
- * its detail in one half rather than being sliced through the middle.
- */
-function choosePartingZ(field: ColumnField, zMin: number, zMax: number): number {
-  const span = zMax - zMin;
-  if (!(span > 1e-9)) return zMin;
-
-  const SAMPLES = 128;
-  const eps = span * 1e-6;
-  let best = -1;
-  let bestZ = zMin;
-
-  const coverageAt = (z: number) => {
-    let n = 0;
-    for (let i = 0; i < field.hit.length; i++) {
-      if (field.hit[i] && field.minZ[i] <= z + eps && field.maxZ[i] >= z - eps) n++;
-    }
-    return n;
-  };
-
-  for (let s = 0; s <= SAMPLES; s++) {
-    const z = zMin + (span * s) / SAMPLES;
-    const cov = coverageAt(z);
-    // Strictly greater, so a run of equally good planes keeps the lowest one.
-    if (cov > best * 1.0001) {
-      best = cov;
-      bestZ = z;
-    }
-  }
-  return bestZ;
 }
 
 /**
@@ -984,6 +765,10 @@ export function emptyMoldResult(message?: string): MoldExportResult {
   const zero = { minX: 0, minY: 0, minZ: 0, maxX: 0, maxY: 0, maxZ: 0 };
   return {
     success: false,
+    moldType: 'clamshell',
+    pullDirection: '+z',
+    lostFraction: 0,
+    cavityHoldsTop: false,
     binarySTL: new Uint8Array(84),
     partBounds: zero,
     moldBounds: zero,
@@ -1163,6 +948,7 @@ function buildPartManifold(
 }
 
 interface CsgContext {
+  setup: MoldSetupFields;
   wasm: ManifoldToplevel;
   tris: Float64Array;
   solidIds: number[];
@@ -1291,6 +1077,7 @@ function buildMoldCSG(ctx: CsgContext): MoldExportResult | null {
 
     return {
       success: true,
+      ...ctx.setup,
       get binarySTL() {
         if (!stlBytes) stlBytes = exportBinarySTL(plateBottomTris, 'PhysBox 3D Mold Plate');
         return stlBytes;
@@ -1414,6 +1201,7 @@ function buildMoldCSG(ctx: CsgContext): MoldExportResult | null {
 
   return {
     success: true,
+    ...ctx.setup,
     get binarySTL() {
       if (!stlBytes) stlBytes = exportBinarySTL(combinedTriangles, 'PhysBox 3D Mold Plate');
       return stlBytes;
@@ -1463,6 +1251,99 @@ function buildMoldCSG(ctx: CsgContext): MoldExportResult | null {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Mold setup: which mold, opening which way
+// ---------------------------------------------------------------------------
+
+type MoldSetupFields = Pick<
+  MoldExportResult,
+  'moldType' | 'pullDirection' | 'lostFraction' | 'cavityHoldsTop' | 'setupNote'
+>;
+
+/**
+ * An open mold is one print with nothing to line up, so 'auto' takes it unless
+ * a clamshell keeps more of the part than this share of its volume.
+ */
+const OPEN_MOLD_ALLOWANCE = 0.01;
+
+/**
+ * The search tries every axis over the whole part, a few hundred milliseconds on
+ * a scanned bust, and the dialog regenerates on every option change while the
+ * scene stays put -- so the answer is kept per scene object.
+ */
+const pullCache = new WeakMap<SceneGraph, { open?: PullChoice; clamshell?: PullChoice }>();
+
+function pullChoiceFor(scene: SceneGraph, tris: ArrayLike<number>, type: 'open' | 'clamshell'): PullChoice {
+  let entry = pullCache.get(scene);
+  if (!entry) {
+    entry = {};
+    pullCache.set(scene, entry);
+  }
+  if (!entry[type]) {
+    // Metres in, millimetres to the sampler, whose tolerances are in mm.
+    const mm = new Float64Array(tris.length);
+    for (let i = 0; i < tris.length; i++) mm[i] = tris[i] * 1000;
+    entry[type] = choosePullDirection(mm, type === 'open');
+  }
+  return entry[type];
+}
+
+const AXIS_WORDS: Record<PullDirection, string> = {
+  '+z': 'top to bottom',
+  '-z': 'top to bottom',
+  '+y': 'front to back',
+  '-y': 'front to back',
+  '+x': 'side to side',
+  '-x': 'side to side',
+};
+
+/**
+ * Settles the mold type and the direction it opens along. A part prepared for
+ * casting already has its draft cut for Z, so it keeps Z unless told otherwise.
+ */
+function resolveMoldSetup(
+  scene: SceneGraph,
+  sceneTris: ArrayLike<number>,
+  opts: MoldOptions
+): { moldType: 'clamshell' | 'open'; direction: PullDirection; note?: string } {
+  const prepped = Boolean(scene.castPrep && scene.castPrep.draftDeg > 0);
+  const fixedDirection: PullDirection | null =
+    opts.pullDirection && opts.pullDirection !== 'auto' ? opts.pullDirection : prepped ? '+z' : null;
+
+  const lossOf = (type: 'open' | 'clamshell') => {
+    const choice = pullChoiceFor(scene, sceneTris, type);
+    if (!fixedDirection) return { direction: choice.direction, lost: choice.lostFraction };
+    // A clamshell opens both ways at once, so it was only measured on +axes.
+    const measured = type === 'open' ? fixedDirection : (`+${fixedDirection[1]}` as PullDirection);
+    const c = choice.candidates.find((k) => k.direction === measured);
+    return { direction: fixedDirection, lost: c ? c.lostFraction : choice.lostFraction };
+  };
+
+  let moldType: 'clamshell' | 'open';
+  let direction: PullDirection;
+  if (opts.moldType === 'auto') {
+    const open = lossOf('open');
+    const clam = lossOf('clamshell');
+    moldType = open.lost <= clam.lost + OPEN_MOLD_ALLOWANCE ? 'open' : 'clamshell';
+    direction = moldType === 'open' ? open.direction : clam.direction;
+  } else {
+    moldType = opts.moldType;
+    direction = fixedDirection ?? lossOf(moldType).direction;
+  }
+
+  let note: string | undefined;
+  const turned = !fixedDirection && direction !== '+z' && direction !== '-z';
+  if (opts.moldType === 'auto' || turned) {
+    note =
+      moldType === 'open'
+        ? turned
+          ? `One-part open mold, with the part turned to open ${AXIS_WORDS[direction]}: that way keeps the most of its shape.`
+          : 'One-part open mold: this part comes out of one cleanly.'
+        : `Two-part mold opening ${AXIS_WORDS[direction]}${turned ? ', the way that keeps the most of the shape' : ''}.`;
+  }
+  return { moldType, direction, note };
+}
+
 /**
  * Samples a 3D scene graph into a 2-part clamshell or 1-part open casting mold.
  */
@@ -1483,15 +1364,21 @@ export function generateMoldMeshes(
     return emptyMoldResult('Scene contains no visible 3D geometry to mold.');
   }
 
+  // Everything below builds a mold that opens along +Z, so the part is turned
+  // to put the chosen direction there first.
+  const setup = resolveMoldSetup(scene, sceneTris, opts);
+  opts.moldType = setup.moldType;
+  const partTris = setup.direction === '+z' ? sceneTris : rotateTrianglesForPull(sceneTris, setup.direction);
+
   // Find model bounding box in mm
   let mnX = Infinity, mxX = -Infinity;
   let mnY = Infinity, mxY = -Infinity;
   let mnZ = Infinity, mxZ = -Infinity;
 
-  for (let i = 0; i < sceneTris.length; i += 3) {
-    const x = sceneTris[i] * 1000;
-    const y = sceneTris[i + 1] * 1000;
-    const z = sceneTris[i + 2] * 1000;
+  for (let i = 0; i < partTris.length; i += 3) {
+    const x = partTris[i] * 1000;
+    const y = partTris[i + 1] * 1000;
+    const z = partTris[i + 2] * 1000;
     if (x < mnX) mnX = x;
     if (x > mxX) mxX = x;
     if (y < mnY) mnY = y;
@@ -1511,12 +1398,12 @@ export function generateMoldMeshes(
   const cy = (mnY + mxY) / 2;
   const cz = (mnZ + mxZ) / 2;
 
-  const triCount = sceneTris.length / 9;
-  const tris = new Float64Array(sceneTris.length);
-  for (let i = 0; i < sceneTris.length; i += 3) {
-    tris[i] = sceneTris[i] * 1000 - cx;
-    tris[i + 1] = sceneTris[i + 1] * 1000 - cy;
-    tris[i + 2] = (sceneTris[i + 2] * 1000 - cz) * zScale;
+  const triCount = partTris.length / 9;
+  const tris = new Float64Array(partTris.length);
+  for (let i = 0; i < partTris.length; i += 3) {
+    tris[i] = partTris[i] * 1000 - cx;
+    tris[i + 1] = partTris[i + 1] * 1000 - cy;
+    tris[i + 2] = (partTris[i + 2] * 1000 - cz) * zScale;
   }
 
   const partHalfW = partWidthMm / 2;
@@ -1564,7 +1451,7 @@ export function generateMoldMeshes(
       if (field.maxZ[i] >= zMax - zEps) covTop++;
     }
     partingZ = covTop > covBottom ? zMax : zMin;
-  } else if (scene.castPrep?.partingZ !== undefined && scene.castPrep.draftDeg > 0) {
+  } else if (scene.castPrep?.partingZ !== undefined && scene.castPrep.draftDeg > 0 && setup.direction === '+z') {
     const preppedZ = (scene.castPrep.partingZ * 1000 - cz) * zScale;
     partingZ =
       preppedZ >= zMin - zEps && preppedZ <= zMax + zEps
@@ -1610,6 +1497,25 @@ export function generateMoldMeshes(
   // the pour sprue and the vents, so the sprue stub lands on the back of the
   // casting rather than through the middle of its face.
   const detailIsAbove = volAbove > volBelow;
+
+  // What the mold adds to the casting: each column casts solid from its lowest
+  // surface to its highest (and on to the parting plane), the part only fills
+  // its spans.
+  let partLen = 0;
+  let castLen = 0;
+  for (let i = 0; i < n; i++) {
+    if (!field.hit[i]) continue;
+    const sp = field.spans[i];
+    for (let k = 0; k + 1 < sp.length; k += 2) partLen += sp[k + 1] - sp[k];
+    castLen += Math.max(field.maxZ[i], partingZ) - Math.min(field.minZ[i], partingZ);
+  }
+  const setupFields: MoldSetupFields = {
+    moldType: setup.moldType,
+    pullDirection: setup.direction,
+    lostFraction: partLen > 0 ? Math.max(0, castLen - partLen) / partLen : 0,
+    cavityHoldsTop: detailIsAbove,
+    ...(setup.note ? { setupNote: setup.note } : {}),
+  };
   const mirrorY = (src: Float64Array) => {
     const out = new Float64Array(n);
     for (let r = 0; r < rows; r++) {
@@ -1763,20 +1669,17 @@ export function generateMoldMeshes(
   const useExactCsg = Boolean(activeWasm && opts.allowUndercuts && undercutColumns > 0);
   const effectiveFlexibleAdvised = flexibleMoldAdvised || useExactCsg;
 
-  if (undercutColumns > 0) {
+  // What a rigid mold fills in is shown, not warned about: the pull direction
+  // is already the one that loses least, and Simulate Cast lets the user judge
+  // the result. Keeping undercuts is an expert's choice, and it does lock a
+  // rigid print onto the casting, so that one is said.
+  if (useExactCsg) {
     const pct = (100 * undercutColumns) / field.hitColumns;
     const pctText = pct < 1 ? 'Under 1' : pct.toFixed(0);
-    if (useExactCsg) {
-      warnings.push(
-        `${pctText}% of the part sits behind an overhang or undercut. Because undercuts are kept in the cavity, ` +
-        'a rigid mold will mechanically lock onto the casting — print in flexible TPU, cast a silicone negative, or use a sacrificial shell.'
-      );
-    } else {
-      warnings.push(
-        `${pctText}% of the part sits behind an overhang or a hollow, which a ` +
-        `${opts.moldType === 'open' ? 'one-part open' : 'two-sided'} mold cannot reach. Those spots come out filled in on the casting.`
-      );
-    }
+    warnings.push(
+      `${pctText}% of the part sits behind an overhang or undercut. Because undercuts are kept in the cavity, ` +
+      'a rigid mold will mechanically lock onto the casting — print in flexible TPU, cast a silicone negative, or use a sacrificial shell.'
+    );
   }
 
   if (opts.moldType === 'clamshell' && lidIsBackingPlate) {
@@ -1787,16 +1690,9 @@ export function generateMoldMeshes(
     );
   }
 
-  if (flexibleMoldAdvised) {
-    warnings.push(
-      `The cavity is ${cavityDepthMm.toFixed(1)} mm deep with only ${minDraftDeg.toFixed(1)}\u00b0 of taper on its ` +
-      'steepest wall, which a rigid PLA or PETG mold will not let go of. Print it in TPU, or cast a ' +
-      'silicone negative off the printed mold and cast into that.'
-    );
-  }
-
   if (useExactCsg && activeWasm) {
     const csgRes = buildMoldCSG({
+      setup: setupFields,
       wasm: activeWasm,
       tris,
       solidIds: sceneSolidIds ?? [],
@@ -1857,6 +1753,7 @@ export function generateMoldMeshes(
 
   return {
     success: true,
+    ...setupFields,
     get binarySTL() {
       if (!stlBytes) stlBytes = exportBinarySTL(combinedTriangles, 'PhysBox 3D Mold Plate');
       return stlBytes;
@@ -1969,6 +1866,11 @@ export function moldSummary(r: MoldExportResult): MoldSummary {
 
   return {
     success: r.success,
+    moldType: r.moldType,
+    pullDirection: r.pullDirection,
+    lostFraction: r.lostFraction,
+    cavityHoldsTop: r.cavityHoldsTop,
+    setupNote: r.setupNote,
     error: r.error,
     warnings: r.warnings,
     partBounds: r.partBounds,

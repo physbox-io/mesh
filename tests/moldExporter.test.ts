@@ -273,7 +273,9 @@ describe('Draft', () => {
     expect(res.minDraftDeg).toBeLessThan(3);
     expect(res.cavityDepthMm).toBeCloseTo(14, 1);
     expect(res.flexibleMoldAdvised).toBe(true);
-    expect(res.warnings.join(' ')).toContain('TPU');
+    // Said once, calmly, in the casting guide -- not as a warning that scares a
+    // newcomer off a mold that will come out with some wax and patience.
+    expect(res.warnings.join(' ')).not.toContain('TPU');
   });
 
   it('tapers the walls to the angle asked for without losing cavity depth', () => {
@@ -507,31 +509,64 @@ describe('One-part open mold and parting overhang checks', () => {
     expect(res.bottomHalf.bounds.minX).toBeCloseTo(res.moldBounds.minX, 3);
     expect(res.bottomHalf.bounds.maxX).toBeCloseTo(res.moldBounds.maxX, 3);
     expect(unpairedEdges(res.bottomHalf.triangles)).toBe(0);
-    // Lower hemisphere undercuts in a 1-part open mold must warn.
-    expect(res.warnings.some((w) => /undercut|overhang/i.test(w))).toBe(true);
+    // The lower hemisphere is filled in by a 1-part open mold. That is measured,
+    // and shown by the cast simulation, not warned about.
+    expect(res.lostFraction).toBeGreaterThan(0.05);
+    expect(res.warnings.some((w) => /undercut|overhang/i.test(w))).toBe(false);
   });
 
-  it('warns when a feature overhangs the parting plane with empty space beneath it', () => {
-    // Base block on z = [0, 10 mm] with an overhanging cantilever arm at z = [6, 10 mm]
-    // sticking out in +X over empty air at z = 0 (parting plane is z = 0).
-    const cantilever: SceneGraph = {
+  it('opens the mold along the axis that fills in the least of the part', () => {
+    // A square frame standing upright in XZ, its hole running along Y. Pulled
+    // along Z, every column through the hole meets the top bar and the bottom
+    // bar and the mold fills the hole between them; pulled along Y, nothing.
+    const bar = (name: string, sx: number, sz: number, x: number, z: number) =>
+      ({ name, type: 'box', size: [sx, 0.005, sz], pos: [x, 0, z] }) as SceneGeom;
+    const frame: SceneGraph = {
       nodes: [
         {
-          id: 'b1',
-          name: 'cantilever',
+          id: 'f1',
+          name: 'frame',
           type: 'body',
           pos: [0, 0, 0],
           geoms: [
-            { name: 'stem', type: 'box', size: [0.01, 0.01, 0.005], pos: [0, 0, 0.005] } as SceneGeom,
-            { name: 'ledge', type: 'box', size: [0.01, 0.01, 0.002], pos: [0.015, 0, 0.008] } as SceneGeom,
+            bar('bottom', 0.02, 0.005, 0, 0.005),
+            bar('top', 0.02, 0.005, 0, 0.035),
+            bar('left', 0.005, 0.01, -0.015, 0.02),
+            bar('right', 0.005, 0.01, 0.015, 0.02),
           ],
           joints: [],
           children: [],
         },
       ],
     };
-    const res = generateMoldMeshes(cantilever, DEFAULT_MOLD_OPTIONS);
-    expect(res.warnings.some((w) => /undercut|overhang/i.test(w))).toBe(true);
+
+    const asPlaced = generateMoldMeshes(frame, { ...DEFAULT_MOLD_OPTIONS, pullDirection: '+z' });
+    expect(asPlaced.pullDirection).toBe('+z');
+    expect(asPlaced.lostFraction).toBeGreaterThan(0.3);
+
+    const auto = generateMoldMeshes(frame, DEFAULT_MOLD_OPTIONS);
+    expect(auto.success).toBe(true);
+    expect(auto.pullDirection).toBe('+y');
+    expect(auto.lostFraction).toBeLessThan(0.01);
+    expect(auto.setupNote).toMatch(/front to back/);
+    // Turned on its back the frame is 40 x 10 mm in plan, 40 mm tall: the
+    // frame's height now runs along the mold's Y.
+    expect(auto.partDepthMm).toBeCloseTo(40, 0);
+    expect(auto.partHeightMm).toBeCloseTo(10, 0);
+
+    // Auto also takes the one-part mold here: it keeps the frame as well as
+    // two halves would.
+    const simplest = generateMoldMeshes(frame, { ...DEFAULT_MOLD_OPTIONS, moldType: 'auto' });
+    expect(simplest.moldType).toBe('open');
+    expect(simplest.topHalf).toBeUndefined();
+
+    // Prepare for Casting has already cut draft for a Z pull, so that part
+    // keeps Z rather than being turned away from its own draft.
+    const prepped: SceneGraph = {
+      ...frame,
+      castPrep: { draftDeg: 2, draftMode: 'add', partingZ: 0.02, edges: null } as SceneGraph['castPrep'],
+    };
+    expect(generateMoldMeshes(prepped, DEFAULT_MOLD_OPTIONS).pullDirection).toBe('+z');
   });
 
   it('keeps the keyed corner pin and side pry notches outside a rectangular cavity', () => {
@@ -655,6 +690,8 @@ describe('One-part open mold and parting overhang checks', () => {
       {
         ...DEFAULT_MOLD_OPTIONS,
         moldType: 'open',
+        // This checks the cavity in the statue's own frame.
+        pullDirection: '+z',
         allowUndercuts: true,
         draftAngleDeg: 0,
         includeVents: true,

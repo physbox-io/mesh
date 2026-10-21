@@ -245,4 +245,54 @@ describe('Mold Cast Simulation', () => {
     const vol = computeMeshVolume(positions, faces);
     expect(vol).toBeCloseTo(1000, 1);
   });
+
+  it('stands the casting the way the part stood, after the mold was turned to open front to back', async () => {
+    // An upright square frame (hole along Y) with a lug on its top right
+    // corner, so a casting that came back mirrored or upside down would show it.
+    const box = (name: string, sx: number, sz: number, x: number, z: number) =>
+      ({ name, type: 'box', size: [sx, 0.005, sz], pos: [x, 0, z] }) as SceneGeom;
+    const frame: SceneGraph = {
+      nodes: [
+        {
+          id: 'f1',
+          name: 'frame',
+          type: 'body',
+          pos: [0, 0, 0],
+          geoms: [
+            box('bottom', 0.02, 0.005, 0, 0.005),
+            box('top', 0.02, 0.005, 0, 0.035),
+            box('left', 0.005, 0.01, -0.015, 0.02),
+            box('right', 0.005, 0.01, 0.015, 0.02),
+            box('lug', 0.003, 0.003, 0.016, 0.043),
+          ],
+          joints: [],
+          children: [],
+        },
+      ],
+    };
+
+    for (const moldType of ['clamshell', 'open'] as const) {
+      const mold = generateMoldMeshes(frame, { ...DEFAULT_MOLD_OPTIONS, moldType, includeVents: false });
+      expect(mold.pullDirection === '+y' || mold.pullDirection === '-y').toBe(true);
+      const cast = await simulateCastFromMoldResult(mold, { trimChannels: true });
+      expect(cast.success).toBe(true);
+      // Within a sampling cell of the part's 40 x 46 mm.
+      expect(Math.abs(cast.sizeMm.width - 40)).toBeLessThan(1.5);
+      expect(cast.sizeMm.height).toBeGreaterThan(45);
+      expect(cast.sizeMm.height).toBeLessThan(47.5);
+
+      // The lug is the only material in the top 4 mm, and it is on the right.
+      const pos = cast.mesh.positions;
+      let sumX = 0;
+      let count = 0;
+      for (let i = 0; i < pos.length; i += 3) {
+        if (pos[i + 2] > cast.sizeMm.height - 4) {
+          sumX += pos[i];
+          count++;
+        }
+      }
+      expect(count).toBeGreaterThan(0);
+      expect(sumX / count).toBeGreaterThan(10);
+    }
+  });
 });

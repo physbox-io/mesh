@@ -183,6 +183,8 @@ export class MoldWorkerClient {
   }
 }
 
+const PULL_DIRECTIONS: readonly string[] = ['auto', '+z', '-z', '+y', '-y', '+x', '-x'];
+
 export function moldOptionsFor(msg: Record<string, unknown>): {
   options: Partial<MoldOptions>;
   fromDialog: boolean;
@@ -191,8 +193,15 @@ export function moldOptionsFor(msg: Record<string, unknown>): {
   return {
     fromDialog: Boolean(fromDialog),
     options: {
-      ...(fromDialog ?? DEFAULT_MOLD_OPTIONS),
-      ...(msg.moldType === 'open' || msg.moldType === 'clamshell' ? { moldType: msg.moldType } : {}),
+      // Without the dialog's choice, an agent gets what the dialog would give a
+      // newcomer: the simplest mold that keeps the part.
+      ...(fromDialog ?? { ...DEFAULT_MOLD_OPTIONS, moldType: 'auto' as const }),
+      ...(msg.moldType === 'open' || msg.moldType === 'clamshell' || msg.moldType === 'auto'
+        ? { moldType: msg.moldType }
+        : {}),
+      ...(typeof msg.pullDirection === 'string' && PULL_DIRECTIONS.includes(msg.pullDirection)
+        ? { pullDirection: msg.pullDirection as MoldOptions['pullDirection'] }
+        : {}),
       ...(typeof msg.wallMarginMm === 'number' ? { wallMarginMm: msg.wallMarginMm } : {}),
       ...(typeof msg.baseThicknessMm === 'number' ? { baseThicknessMm: msg.baseThicknessMm } : {}),
       ...(typeof msg.cavityDepthMm === 'number' ? { cavityDepthMm: msg.cavityDepthMm } : {}),
@@ -346,7 +355,7 @@ export async function runMcpMoldSimulation(params: {
       placement,
       details: [
         `Cast dimensions: ${castRes.sizeMm.width} × ${castRes.sizeMm.depth} × ${castRes.sizeMm.height} mm`,
-        `Mold type: ${moldOpts.moldType === 'open' ? 'One-part open mold' : 'Two-part clamshell mold'}`,
+        `Mold type: ${moldRes.moldType === 'open' ? 'One-part open mold' : 'Two-part clamshell mold'}`,
       ],
     });
     if (castRes.textures && castRes.textures.length > 0) {
@@ -363,7 +372,9 @@ export async function runMcpMoldSimulation(params: {
       kind: 'mold_cast',
       placement,
       optionsFrom,
-      moldType: moldOpts.moldType ?? 'clamshell',
+      moldType: moldRes.moldType,
+      pullDirection: moldRes.pullDirection,
+      ...(moldRes.setupNote ? { setupNote: moldRes.setupNote } : {}),
       sizeMm: castRes.sizeMm,
       volumeMm3: Math.round(castRes.castVolumeMm3),
       cavityComponents: castRes.cavityComponents,
@@ -402,7 +413,9 @@ export async function runMcpMoldSimulation(params: {
     kind: 'mold',
     placement: 'beside',
     optionsFrom,
-    moldType: moldOpts.moldType ?? 'clamshell',
+    moldType: moldRes.moldType,
+    pullDirection: moldRes.pullDirection,
+    ...(moldRes.setupNote ? { setupNote: moldRes.setupNote } : {}),
     moldSizeMm: [moldRes.moldWidthMm, moldRes.moldDepthMm, moldRes.moldHeightMm],
     cavityDepthMm: moldRes.cavityDepthMm,
     minDraftDeg: moldRes.minDraftDeg,

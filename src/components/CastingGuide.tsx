@@ -1,5 +1,5 @@
 import React from 'react';
-import { Droplets, Layers, Hand, TriangleAlert } from 'lucide-react';
+import { Droplets, Layers, Hand } from 'lucide-react';
 import type { MoldExportResult } from '../utils/moldExporter';
 
 /** Only the findings are needed here, so a summary from the worker will do. */
@@ -55,18 +55,6 @@ export const CastingGuide: React.FC<{ result: CastingFacts; moldType?: 'clamshel
   return (
     <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-800/40 border border-slate-200 dark:border-slate-800 space-y-3 text-xs leading-relaxed text-slate-700 dark:text-slate-300">
       <h4 className="font-bold text-sm text-slate-800 dark:text-slate-100">Casting into it</h4>
-
-      {result.flexibleMoldAdvised && (
-        <p className="flex items-start gap-2 rounded-lg px-2.5 py-2 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 text-amber-800 dark:text-amber-200">
-          <TriangleAlert className="w-3.5 h-3.5 shrink-0 mt-0.5" />
-          <span>
-            <strong>Steep mold walls detected.</strong> At {result.cavityDepthMm} mm deep with{' '}
-            {result.minDraftDeg}° draft, demolding a rigid print will be difficult. Consider raising{' '}
-            <strong>Draft</strong> to 3°, printing in flexible <strong>TPU</strong>, or casting silicone
-            into this mold to create a flexible negative.
-          </span>
-        </p>
-      )}
 
       <ol className="space-y-2 list-none">
         <li className="flex items-start gap-2">
@@ -127,6 +115,15 @@ export const CastingGuide: React.FC<{ result: CastingFacts; moldType?: 'clamshel
             )}
           </span>
         </li>
+        {result.flexibleMoldAdvised && (
+          <li className="flex items-start gap-2">
+            <Hand className="w-3.5 h-3.5 shrink-0 mt-0.5 text-purple-500" />
+            <span>
+              <strong>If it sticks.</strong> The walls run nearly straight down, so wax them well. If
+              a casting still will not come out, raise <strong>Draft</strong> to 3°.
+            </span>
+          </li>
+        )}
       </ol>
     </div>
   );

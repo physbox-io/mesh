@@ -33,6 +33,7 @@ import { getNodeWorldTransform, getGeomFrame } from './laserCutExporter';
 import { resolveCsgGeoms } from './csg';
 import { repairMesh } from './meshRepair';
 import type { MoldExportResult, MoldSummary } from './moldExporter';
+import { unrotateFromPull } from './moldPullDirection';
 
 export interface MoldCastSimulationOptions {
   /** Whether to trim narrow sprue/vent runner stubs sticking up to the outer mold face (default: false — keeps what the mold actually casts, or true when comparing part volume). */
@@ -363,21 +364,84 @@ export async function simulateCastFromMoldResult(
     assembledTris.set(botTrisMm, 0);
     assembledTris.set(topTrisMm, botTrisMm.length);
 
-    return simulateCastFromMoldTriangles(assembledTris, {
-      ...options,
-      isClamshell: true,
-      partingZ: botPartingZ,
-      halves: [botTrisMm, topTrisMm],
-    });
+    return restorePartFrame(
+      await simulateCastFromMoldTriangles(assembledTris, {
+        ...options,
+        isClamshell: true,
+        partingZ: botPartingZ,
+        halves: [botTrisMm, topTrisMm],
+      }),
+      mold,
+      options,
+    );
   } else {
     // 1-part open mold
-    return simulateCastFromMoldTriangles(botTrisMm, {
-      ...options,
-      isClamshell: false,
-      flipUpright: options?.orientUpright ?? true,
-      halves: [botTrisMm],
-    });
+    return restorePartFrame(
+      await simulateCastFromMoldTriangles(botTrisMm, {
+        ...options,
+        isClamshell: false,
+        flipUpright: options?.orientUpright ?? true,
+        halves: [botTrisMm],
+      }),
+      mold,
+      options,
+    );
   }
+}
+
+/**
+ * Stands the casting the way the part stood in the scene.
+ *
+ * The casting comes out of the mold in the mold's frame: turned so the mold
+ * opens along +Z, then half-turned about X if the cavity half holds the top of
+ * the part, and half-turned again if an open mold's casting was flipped onto its
+ * poured base. Undoing those puts it back beside the part it copies, the same
+ * way up, which is what makes the two easy to compare.
+ */
+function restorePartFrame(
+  res: MoldCastSimulationResult,
+  mold: Pick<MoldSummary, 'moldType' | 'pullDirection' | 'cavityHoldsTop' | 'topHalf'>,
+  options?: MoldCastSimulationOptions,
+): MoldCastSimulationResult {
+  if (!res.success || options?.orientUpright === false || !mold.pullDirection) return res;
+  const open = !mold.topHalf;
+  const halfTurned = Boolean(mold.cavityHoldsTop) !== open;
+  if (!halfTurned && mold.pullDirection === '+z') return res;
+
+  const pos = new Float32Array(res.mesh.positions);
+  let mnX = Infinity, mxX = -Infinity, mnY = Infinity, mxY = -Infinity, mnZ = Infinity, mxZ = -Infinity;
+  for (let i = 0; i < pos.length; i += 3) {
+    let x = pos[i], y = pos[i + 1], z = pos[i + 2];
+    if (halfTurned) {
+      y = -y;
+      z = -z;
+    }
+    [x, y, z] = unrotateFromPull(mold.pullDirection, x, y, z);
+    pos[i] = x;
+    pos[i + 1] = y;
+    pos[i + 2] = z;
+    if (x < mnX) mnX = x;
+    if (x > mxX) mxX = x;
+    if (y < mnY) mnY = y;
+    if (y > mxY) mxY = y;
+    if (z < mnZ) mnZ = z;
+    if (z > mxZ) mxZ = z;
+  }
+  const cx = (mnX + mxX) / 2, cy = (mnY + mxY) / 2;
+  for (let i = 0; i < pos.length; i += 3) {
+    pos[i] -= cx;
+    pos[i + 1] -= cy;
+    pos[i + 2] -= mnZ;
+  }
+  return {
+    ...res,
+    mesh: { positions: pos, faces: res.mesh.faces },
+    sizeMm: {
+      width: Math.round((mxX - mnX) * 100) / 100,
+      depth: Math.round((mxY - mnY) * 100) / 100,
+      height: Math.round((mxZ - mnZ) * 100) / 100,
+    },
+  };
 }
 
 function findPartingZFromPositions(positions: ArrayLike<number>): number {
@@ -446,20 +510,28 @@ export async function simulateCastFromMoldBuffers(
     assembledTris.set(botTrisMm, 0);
     assembledTris.set(topTrisMm, botTrisMm.length);
 
-    return simulateCastFromMoldTriangles(assembledTris, {
-      ...options,
-      isClamshell: true,
-      partingZ: botPartingZ,
-      halves: [botTrisMm, topTrisMm],
-    });
+    return restorePartFrame(
+      await simulateCastFromMoldTriangles(assembledTris, {
+        ...options,
+        isClamshell: true,
+        partingZ: botPartingZ,
+        halves: [botTrisMm, topTrisMm],
+      }),
+      summary,
+      options,
+    );
   }
 
-  return simulateCastFromMoldTriangles(botTrisMm, {
-    ...options,
-    isClamshell: false,
-    flipUpright: options?.orientUpright ?? true,
-    halves: [botTrisMm],
-  });
+  return restorePartFrame(
+    await simulateCastFromMoldTriangles(botTrisMm, {
+      ...options,
+      isClamshell: false,
+      flipUpright: options?.orientUpright ?? true,
+      halves: [botTrisMm],
+    }),
+    summary,
+    options,
+  );
 }
 
 /**
