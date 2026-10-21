@@ -14,6 +14,7 @@ import { NumberInput } from '@physbox-io/ui';
 import type { ReliefCarveOptions, ReliefOverrides, DerivedReliefSettings } from '../utils/reliefCarveExporter';
 import type { GridStats, ProbeGrid } from '../utils/meshLeveler';
 import type { CarveTooling, SetTooling, OverrideTooling } from './carveTooling';
+import { HintAnchor } from './ExportFields';
 
 export const inputClass =
   'w-full px-3 py-1.5 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-lg ' +
@@ -26,12 +27,6 @@ export const sectionClass =
 
 export const sectionTitleClass =
   'text-[11px] font-bold uppercase tracking-wider text-slate-400 dark:text-slate-500';
-
-export const hintBubbleClass =
-  'pointer-events-none absolute top-full z-30 mt-1.5 w-max max-w-[min(14rem,70vw)] rounded-lg ' +
-  'bg-slate-900 dark:bg-slate-950 px-2.5 py-2 text-[11px] font-normal leading-snug text-slate-100 ' +
-  'shadow-xl ring-1 ring-slate-700 opacity-0 transition-opacity ' +
-  'group-hover:opacity-100 group-focus-within:opacity-100';
 
 export function HintIcon() {
   return (
@@ -54,13 +49,13 @@ export function Field({
 }) {
   return (
     <div className={`flex flex-col min-w-0 ${className ?? ''}`}>
-      <div className="group relative flex items-center space-x-1 mb-1.5">
+      {/* Portalled, not absolutely positioned: the dialog body scrolls, and a
+          scroll container clips its positioned descendants, which cut the
+          hints on the right-hand fields off at the dialog's edge. */}
+      <HintAnchor hint={hint} align={hintAlign} className="flex items-center space-x-1 mb-1.5">
         <label className={labelClass}>{label}</label>
         <HintIcon />
-        <span role="tooltip" className={`${hintBubbleClass} ${hintAlign === 'end' ? 'right-0' : 'left-0'}`}>
-          {hint}
-        </span>
-      </div>
+      </HintAnchor>
       <div className="mt-auto">{children}</div>
     </div>
   );

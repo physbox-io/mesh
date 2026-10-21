@@ -24,6 +24,7 @@ import {
   recommendSpeeds,
 } from '../utils/feedsAndSpeeds';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
+import { HintAnchor } from './ExportFields';
 import { useAddSimulation } from '../hooks/useAddSimulation';
 import { contourSheetParts } from '../utils/sheetSimulation';
 
@@ -46,22 +47,6 @@ const sectionClass =
 const sectionTitleClass =
   'text-[11px] font-bold uppercase tracking-wider text-slate-400 dark:text-slate-500';
 
-/**
- * Hover/focus bubble that explains one control, so the labels can stay short.
- *
- * It is positioned against the field's label row rather than the icon, so it
- * starts at the cell's own left edge and a narrow screen cannot push it out of
- * view. Fields in the last column pass `hintAlign="end"` to open leftward: an
- * absolutely positioned child still counts towards its scroll container's
- * width, and a bubble hanging off the right drags a horizontal scrollbar under
- * the whole modal.
- */
-const hintBubbleClass =
-  'pointer-events-none absolute top-full z-30 mt-1.5 w-max max-w-[min(14rem,70vw)] rounded-lg ' +
-  'bg-slate-900 dark:bg-slate-950 px-2.5 py-2 text-[11px] font-normal leading-snug text-slate-100 ' +
-  'shadow-xl ring-1 ring-slate-700 opacity-0 transition-opacity ' +
-  'group-hover:opacity-100 group-focus-within:opacity-100';
-
 function HintIcon() {
   return (
     <Info
@@ -83,13 +68,13 @@ function Field({
 }) {
   return (
     <div className={`flex flex-col min-w-0 ${className ?? ''}`}>
-      <div className="group relative flex items-center space-x-1 mb-1.5">
+      {/* Portalled, not absolutely positioned: the dialog body scrolls, and a
+          scroll container clips its positioned descendants, which cut the
+          hints on the right-hand fields off at the dialog's edge. */}
+      <HintAnchor hint={hint} align={hintAlign} className="flex items-center space-x-1 mb-1.5">
         <label className={labelClass}>{label}</label>
         <HintIcon />
-        <span role="tooltip" className={`${hintBubbleClass} ${hintAlign === 'end' ? 'right-0' : 'left-0'}`}>
-          {hint}
-        </span>
-      </div>
+      </HintAnchor>
       <div className="mt-auto">{children}</div>
     </div>
   );
@@ -840,20 +825,19 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
               </Field>
 
               <div className="flex flex-col min-w-0 lg:col-span-3">
-                <div className="group relative flex justify-between items-center mb-1.5">
-                  <div className="flex items-center space-x-1">
+                <div className="flex justify-between items-center mb-1.5">
+                  <HintAnchor
+                    hint="Manual scale applied to the model before slicing. The layer count follows the model's height, so scaling down cuts smaller, and fewer, layers."
+                    className="flex items-center space-x-1"
+                  >
                     <label className={labelClass}>Scale Factor ({customScalePct}%)</label>
                     <HintIcon />
-                  </div>
+                  </HintAnchor>
                   {exportResult?.scaleFactor && Math.abs(exportResult.scaleFactor - 1.0) > 1e-3 && (
                     <span className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded">
                       Active: {(exportResult.scaleFactor * 100).toFixed(0)}%
                     </span>
                   )}
-                  <span role="tooltip" className={`${hintBubbleClass} left-0`}>
-                    Manual scale applied to the model before slicing. The layer count follows the model's
-                    height, so scaling down cuts smaller, and fewer, layers.
-                  </span>
                 </div>
                 <input
                   type="range" min="10" max="200" step="5"
