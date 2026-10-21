@@ -20,6 +20,7 @@ import type {
   StepForResult,
 } from '../workers/physicsWorkerProtocol';
 import type { CoSimChannel } from '../utils/coSimLink';
+import { noteWorkerStopped } from '../utils/staleBuild';
 
 export type { BuiltResult, FrameSnapshot } from '../workers/physicsWorkerProtocol';
 
@@ -296,6 +297,7 @@ export class PhysicsWorkerClient {
       this.onError?.(message, false);
     };
     this.worker.onerror = (evt: ErrorEvent) => {
+      noteWorkerStopped();
       evt.preventDefault();
       fail(`The physics engine failed to load${evt.message ? `: ${evt.message}` : ''}. Reload the page to try again.`);
     };

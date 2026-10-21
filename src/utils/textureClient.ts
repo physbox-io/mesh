@@ -15,6 +15,7 @@ import {
   texturedSurfaceOf,
 } from './geomSurface';
 import type { TextureRequest, TextureResponse } from '../workers/textureProtocol';
+import { noteWorkerStopped } from './staleBuild';
 
 let worker: Worker | null = null;
 let seq = 0;
@@ -35,6 +36,7 @@ function ensureWorker(): Worker | null {
       settle(msg.type === 'TEXTURE_DONE' ? msg.surface : null);
     };
     worker.onerror = () => {
+      noteWorkerStopped();
       for (const settle of pending.values()) settle(null);
       pending.clear();
       worker?.terminate();

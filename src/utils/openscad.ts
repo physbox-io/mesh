@@ -4,6 +4,8 @@
 // the STL -> mesh conversion; this file does the plumbing and keeps the same
 // exported API this module has always had, so call sites are unchanged.
 
+import { noteWorkerStopped } from './staleBuild';
+
 /*
  * Who hears about compiles starting and ending — the store's "SCAD Compiling"
  * counter, registered by App.
@@ -150,6 +152,7 @@ function spawn(): PoolWorker {
   // drop it; the next dispatch spawns a replacement, which is also what finally
   // reclaims the leaked linear memory that a same-thread compiler never could.
   pw.worker.onerror = () => {
+    noteWorkerStopped();
     const job = pw.job;
     pw.job = null;
     retire(pw);

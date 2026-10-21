@@ -7,6 +7,7 @@
 import { createSculptMesh, type SculptMesh } from './sculptMesh';
 import type { CutOptions, CutResult, PrismSpec } from './sculptCut';
 import type { SculptCutRequest, SculptCutResponse } from '../workers/sculptCutProtocol';
+import { noteWorkerStopped } from './staleBuild';
 
 /**
  * A cut on the densest sculpt takes a couple of seconds. Past this the worker
@@ -49,6 +50,7 @@ function ensureWorker(): Worker | null {
       });
     };
     worker.onerror = () => {
+      noteWorkerStopped();
       failAll('The scissors stopped working. Try the cut again.');
       worker?.terminate();
       worker = null;

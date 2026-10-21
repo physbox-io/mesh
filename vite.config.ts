@@ -51,8 +51,33 @@ function signInWithoutIsolation(): Plugin {
   };
 }
 
+/**
+ * Stamps each production build, so a tab can tell that it has been replaced.
+ *
+ * A deploy swaps every hashed worker and chunk for new names; a tab opened
+ * before it asks for the old ones, finds none, and its workers die on load.
+ * The page carries its own stamp (`__MESH_BUILD__`) and the server's current
+ * one is `/version.json`; `utils/staleBuild.ts` compares them when a worker
+ * dies. Under the dev server the stamp is 'dev' and there is nothing to compare.
+ */
+function buildStamp(): Plugin {
+  const build = new Date().toISOString();
+  let serving = false;
+  return {
+    name: 'build-stamp',
+    config: (_config, { command }) => {
+      serving = command === 'serve';
+      return { define: { __MESH_BUILD__: JSON.stringify(serving ? 'dev' : build) } };
+    },
+    generateBundle() {
+      if (serving) return;
+      this.emitFile({ type: 'asset', fileName: 'version.json', source: JSON.stringify({ build }) });
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: [react(), tailwindcss(), mcpBridgePlugin(), signInWithoutIsolation()],
+  plugins: [react(), tailwindcss(), mcpBridgePlugin(), signInWithoutIsolation(), buildStamp()],
   server: {
     port: 5175,
     strictPort: true,

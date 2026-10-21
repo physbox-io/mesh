@@ -6,9 +6,11 @@ class FakeWorker {
   sent: { id: number; options: unknown; scene?: unknown }[] = [];
   onmessage: ((e: { data: unknown }) => void) | null = null;
   onerror: (() => void) | null = null;
-  constructor() { FakeWorker.last = this; }
+  terminated = false;
+  static count = 0;
+  constructor() { FakeWorker.last = this; FakeWorker.count++; }
   postMessage(m: { id: number; options: unknown; scene?: unknown }) { this.sent.push(m); }
-  terminate() {}
+  terminate() { this.terminated = true; }
   answer(id: number) { this.onmessage?.({ data: { type: 'DONE', id, result: `r${id}` } }); }
 }
 vi.stubGlobal('Worker', FakeWorker);
@@ -58,5 +60,35 @@ describe('the export worker client', () => {
     });
     w.answer(w.sent[0].id);
     await expect(promise).resolves.toBe('r1');
+  });
+
+  /*
+   * A tab left open across a deploy asks for a worker file that no longer
+   * exists, and the worker dies on load. The dialog said "The export worker
+   * stopped." and stayed broken: the dead worker was kept, and swallowed every
+   * later request unanswered.
+   */
+  it('fails what was asked when the worker dies, and the next request gets a new one', async () => {
+    const client = new ExportWorkerClient();
+    const scene = { nodes: [] };
+    const dead = FakeWorker.last;
+    const a = client.run('solid', scene, { n: 1 } as never);
+    const b = client.run('solid', scene, { n: 2 } as never);
+    const before = FakeWorker.count;
+    dead.onerror?.();
+    await expect(a).rejects.toThrow('The export worker stopped.');
+    await expect(b).rejects.toThrow('The export worker stopped.');
+    expect(dead.terminated).toBe(true);
+
+    // Not at once: on an out-of-date tab that would load, die and respawn for good.
+    expect(FakeWorker.count).toBe(before);
+    const c = client.run('solid', scene, { n: 3 } as never);
+    const fresh = FakeWorker.last;
+    expect(fresh).not.toBe(dead);
+    expect(fresh.sent).toHaveLength(1);
+    // The new worker holds no scene, so it is sent again.
+    expect(fresh.sent[0].scene).toBe(scene);
+    fresh.answer(fresh.sent[0].id);
+    await expect(c).resolves.toBe(`r${fresh.sent[0].id}`);
   });
 });

@@ -7,6 +7,7 @@
 import type { FractureCell, SeedOptions } from './fracture';
 import type { FractureRequest, FractureResponse } from '../workers/fractureProtocol';
 import type { HullPayload } from '../workers/vhacdProtocol';
+import { noteWorkerStopped } from './staleBuild';
 
 /**
  * A cut takes tens of milliseconds. Past this the worker is wedged, and a body
@@ -40,6 +41,7 @@ function ensureWorker(): Worker | null {
       else settle.resolve(msg.cells.map(fromPayload));
     };
     worker.onerror = () => {
+      noteWorkerStopped();
       failAll('The fracture worker stopped.');
       worker?.terminate();
       worker = null;

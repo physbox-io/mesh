@@ -15,6 +15,7 @@ import { JobRestoreModal } from './components/JobRestoreModal';
 import { JobSucceededModal } from './components/JobSucceededModal';
 import { JobPauseModal } from './components/JobPauseModal';
 import { PresetSaveNotice } from './components/PresetSaveNotice';
+import { UpdateNotice } from './components/UpdateNotice';
 import { useEscapeToClose } from './hooks/useEscapeToClose';
 import { usePanels } from './store/panelsStore';
 import { useDarkMode } from './hooks/useDarkMode';
@@ -138,6 +139,8 @@ function App() {
       {/* A job stopped for a tool or sheet change, over whatever is open. */}
       <JobPauseModal />
       <PresetSaveNotice />
+      {/* This tab outlived a deploy and its workers no longer load. */}
+      <UpdateNotice />
     </div>
   );
 }

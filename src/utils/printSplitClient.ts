@@ -15,6 +15,7 @@ import { compileToMJCF } from './mjcf';
 import type { PlaneCutResult, SplitChecks, SplitOptions, SplitResult } from './printSplit';
 import { buildAssemblyPlan, type AssemblyPlan, type MujocoLike, type StageResult } from './printAssembly';
 import type { PrintSplitRequest, PrintSplitResponse } from '../workers/printSplitProtocol';
+import { noteWorkerStopped } from './staleBuild';
 
 export type SplitOk = Extract<SplitResult, { ok: true }>;
 export interface SplitOutcome { result: SplitResult; checks: SplitChecks | null }
@@ -154,6 +155,7 @@ function ensureWorker(): Worker | null {
       }
     };
     worker.onerror = () => {
+      noteWorkerStopped();
       failAll('Split for Print stopped working. Try again.');
       worker?.terminate();
       worker = null;

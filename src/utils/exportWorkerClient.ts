@@ -21,6 +21,7 @@ import {
   type ExportJobOptions,
   type ExportJobResult,
 } from './exportJobs';
+import { workerStoppedError } from './staleBuild';
 import type { SceneGraph } from '../types/scene';
 
 type Settle = {
@@ -53,12 +54,19 @@ export class ExportWorkerClient {
    */
   private running: number | null = null;
   private waiting: Job | null = null;
+  /** The worker died; the next request starts another. */
+  private respawn = false;
 
   constructor() {
+    this.spawn();
+  }
+
+  private spawn() {
     if (typeof Worker === 'undefined') return;
     try {
-      this.worker = new Worker(new URL('../workers/exportWorker.ts', import.meta.url), { type: 'module' });
-      this.worker.onmessage = (evt: MessageEvent) => {
+      const worker = new Worker(new URL('../workers/exportWorker.ts', import.meta.url), { type: 'module' });
+      this.worker = worker;
+      worker.onmessage = (evt: MessageEvent) => {
         const msg = evt.data;
         const settle = this.pending.get(msg.id);
         if (!settle) return;
@@ -76,15 +84,24 @@ export class ExportWorkerClient {
           if (next) this.send(next);
         }
       };
-      // A worker that dies leaves every caller awaiting forever otherwise.
-      this.worker.onerror = () => {
-        const failed = new Error('The export worker stopped.');
-        for (const settle of this.pending.values()) settle.reject(failed);
-        this.waiting?.settle.reject(failed);
+      // A worker that dies leaves every caller awaiting forever otherwise. It
+      // is replaced, not kept: one that never loaded drops every later message
+      // unanswered, and the dialog would sit busy for good. Most often it never
+      // loaded because the tab outlived a deploy, and the error then says so.
+      worker.onerror = () => {
+        const settles = [...this.pending.values(), ...(this.waiting ? [this.waiting.settle] : [])];
         this.pending.clear();
         this.waiting = null;
         this.running = null;
         this.sceneSent = null;
+        worker.terminate();
+        if (this.worker !== worker) return;
+        // The next request starts a fresh one; starting it here would loop
+        // load-fail-respawn for as long as the tab is out of date.
+        this.respawn = true;
+        void workerStoppedError('The export worker stopped.').then((failed) => {
+          for (const settle of settles) settle.reject(failed);
+        });
       };
     } catch {
       this.worker = null;
@@ -97,6 +114,10 @@ export class ExportWorkerClient {
     options: ExportJobOptions<K>,
     onProgress?: (fraction: number) => void
   ): Promise<ExportJobResult<K>> {
+    if (this.respawn) {
+      this.respawn = false;
+      this.spawn();
+    }
     if (!this.worker) return Promise.resolve(runExportJob(kind, scene, options, onProgress));
 
     const id = ++this.seq;

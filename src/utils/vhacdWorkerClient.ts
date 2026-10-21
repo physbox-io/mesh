@@ -14,6 +14,7 @@ import type { Hull } from './csg';
 import type { DecomposeParams } from './vhacd';
 import type { FilledCavity } from './filledCavities';
 import type { HullPayload, MeshAnalysis, VhacdRequest, VhacdResponse } from '../workers/vhacdProtocol';
+import { noteWorkerStopped } from './staleBuild';
 
 /**
  * Long enough for any shape that passed the triangle cap, short enough that a
@@ -62,6 +63,7 @@ function ensureWorker(): Worker | null {
     };
     // A worker that dies leaves every caller awaiting forever otherwise.
     worker.onerror = () => {
+      noteWorkerStopped();
       failAll('The convex decomposition worker stopped.');
       worker?.terminate();
       worker = null;
