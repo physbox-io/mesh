@@ -183,6 +183,11 @@ function flipWinding(tris: number[], from: number, to: number): void {
   }
 }
 
+const sceneTrianglesCache = new WeakMap<
+  SceneGraph,
+  { tris: number[]; solidIds: number[]; skipped: string[]; warnings: string[] }
+>();
+
 export function collectSceneTriangles(scene: SceneGraph): {
   tris: number[];
   /** Which solid each triangle came from, one entry per triangle. */
@@ -190,6 +195,15 @@ export function collectSceneTriangles(scene: SceneGraph): {
   skipped: string[];
   warnings: string[];
 } {
+  const cached = sceneTrianglesCache.get(scene);
+  if (cached) {
+    return {
+      tris: cached.tris,
+      solidIds: cached.solidIds,
+      skipped: [...cached.skipped],
+      warnings: [...cached.warnings],
+    };
+  }
   const tris: number[] = [];
   const solidIds: number[] = [];
   const skipped: string[] = [];
@@ -231,7 +245,14 @@ export function collectSceneTriangles(scene: SceneGraph): {
   };
 
   for (const root of scene.nodes) traverse(root);
-  return { tris, solidIds, skipped, warnings };
+  const result = { tris, solidIds, skipped, warnings };
+  sceneTrianglesCache.set(scene, result);
+  return {
+    tris,
+    solidIds,
+    skipped: [...skipped],
+    warnings: [...warnings],
+  };
 }
 
 /**

@@ -4320,6 +4320,11 @@ function extendOpenEdges(
   return changed;
 }
 
+const reliefPlaceSampleCache = new WeakMap<
+  object,
+  Map<string, { surface: Heightmap; gap: Float32Array }>
+>();
+
 export function generateReliefCarveGcode(
   scene: SceneGraph,
   userOptions?: Partial<ReliefCarveOptions>
@@ -4454,6 +4459,20 @@ export function generateReliefCarveGcode(
   // is not mistaken for bare background and left uncut. The hidden gaps are
   // counted down to the stock's underside: below that nothing is cut anyway.
   const placeAndSample = (scale: number, zs: number) => {
+    const cacheKey = `${cx},${cy},${mxZ},${stockCx},${stockCy},${bounds.minX},${bounds.minY},${bounds.maxX},${bounds.maxY},${cols},${rows},${opts.stockThicknessMm},${scale},${zs}`;
+    let perScene = reliefPlaceSampleCache.get(sceneTris);
+    if (perScene) {
+      const cached = perScene.get(cacheKey);
+      if (cached) {
+        return {
+          surface: { ...cached.surface, z: new Float32Array(cached.surface.z) },
+          gap: new Float32Array(cached.gap),
+        };
+      }
+    } else {
+      perScene = new Map();
+      reliefPlaceSampleCache.set(sceneTris, perScene);
+    }
     const placed = new Float64Array(sceneTris.length);
     for (let i = 0; i < sceneTris.length; i += 3) {
       placed[i] = (sceneTris[i] * 1000 - cx) * scale + stockCx;
@@ -4464,6 +4483,14 @@ export function generateReliefCarveGcode(
     const hm = buildHeightmap(placed, bounds, cols, rows, -Infinity, {
       gap,
       floorZ: -opts.stockThicknessMm,
+    });
+    if (perScene.size >= 8) {
+      const oldest = perScene.keys().next().value;
+      if (oldest !== undefined) perScene.delete(oldest);
+    }
+    perScene.set(cacheKey, {
+      surface: { ...hm, z: new Float32Array(hm.z) },
+      gap: new Float32Array(gap),
     });
     return { surface: hm, gap };
   };

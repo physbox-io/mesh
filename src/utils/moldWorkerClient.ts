@@ -349,6 +349,13 @@ export async function runMcpMoldSimulation(params: {
         `Mold type: ${moldOpts.moldType === 'open' ? 'One-part open mold' : 'Two-part clamshell mold'}`,
       ],
     });
+    if (castRes.textures && castRes.textures.length > 0) {
+      const addedNode = findNodeInScene(useStore.getState().sceneGraph.nodes, added.id);
+      const castGeom = addedNode?.geoms?.[0];
+      if (castGeom) {
+        useStore.getState().setGeomTextures(added.id, castGeom.name, castRes.textures);
+      }
+    }
     return {
       ok: true,
       id: added.id,

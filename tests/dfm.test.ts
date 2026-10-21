@@ -170,6 +170,22 @@ describe('cnc analysis', () => {
     expect(undercut!.fix).toMatch(/Flip the part/);
   });
 
+  it('distinguishes side-reachable slots from underside-only overhangs', () => {
+    // A C-channel open on the sides: has both a bottom slab and a top slab, so
+    // flipping alone cannot see between them, but side faces (±X / ±Y) can.
+    const r = analyseDfm(scene([
+      boxBody([0, 0, 0.005], [0.04, 0.04, 0.005], 'bottom'),
+      boxBody([-0.03, 0, 0.025], [0.01, 0.04, 0.015], 'wall'),
+      boxBody([0, 0, 0.045], [0.04, 0.04, 0.005], 'top'),
+    ]), 'cnc');
+
+    const undercut = r.findings.find(f => f.id === 'cnc_undercut');
+    expect(undercut).toBeDefined();
+    expect(undercut!.fix).toMatch(/Flip the part/);
+    expect(undercut!.fix).toMatch(/Setups: Auto/);
+    expect([...r.heat].some(h => Math.abs(h - 0.8) < 1e-3)).toBe(true);
+  });
+
   it('stays quiet about depth a normal bit can reach', () => {
     // Stepping down in passes is ordinary. Warning about every deep part is how
     // a panel teaches people to ignore it.

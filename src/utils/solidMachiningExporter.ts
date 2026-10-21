@@ -321,12 +321,26 @@ function f(num: number): string {
  * top and bottom are the two heightmaps; the thickness, summed over the hits
  * in pairs, is the truth they are compared against.
  */
+const sampleColumnsCache = new WeakMap<
+  Float64Array,
+  Map<string, { top: Float32Array; bottom: Float32Array; thickness: Float32Array; hit: Uint8Array }>
+>();
+
 export function sampleColumns(
   tris: Float64Array,
   bounds: { minX: number; minY: number; maxX: number; maxY: number },
   cols: number,
   rows: number
 ): { top: Float32Array; bottom: Float32Array; thickness: Float32Array; hit: Uint8Array } {
+  const cacheKey = `${bounds.minX},${bounds.minY},${bounds.maxX},${bounds.maxY},${cols},${rows}`;
+  let perTris = sampleColumnsCache.get(tris);
+  if (perTris) {
+    const cached = perTris.get(cacheKey);
+    if (cached) return cached;
+  } else {
+    perTris = new Map();
+    sampleColumnsCache.set(tris, perTris);
+  }
   const stepX = cols > 1 ? (bounds.maxX - bounds.minX) / (cols - 1) : 0;
   const stepY = rows > 1 ? (bounds.maxY - bounds.minY) / (rows - 1) : 0;
   const top = new Float32Array(cols * rows).fill(-Infinity);
@@ -447,7 +461,13 @@ export function sampleColumns(
     }
   }
 
-  return { top, bottom, thickness, hit };
+  const result = { top, bottom, thickness, hit };
+  if (perTris.size >= 16) {
+    const oldest = perTris.keys().next().value;
+    if (oldest !== undefined) perTris.delete(oldest);
+  }
+  perTris.set(cacheKey, result);
+  return result;
 }
 
 /**
@@ -855,8 +875,33 @@ export function sideDepthMm(partHeightMm: number, opts: SolidMachiningOptions): 
   return twoSided ? stockT / 2 + SIDE_OVERLAP_MM : stockT + Math.max(0, opts.throughCutMm);
 }
 
+type OrientedPart = {
+  oriented: Float64Array;
+  mnX: number;
+  mnY: number;
+  mnZ: number;
+  mxX: number;
+  mxY: number;
+  mxZ: number;
+  partW: number;
+  partD: number;
+  partH: number;
+};
+
+const orientPartCache = new WeakMap<object, Map<string, OrientedPart>>();
+
 /** The scene's triangles turned `up` and scaled to mm, with their bounds. */
-export function orientPart(sceneTris: ArrayLike<number>, up: UpAxis, scale: number) {
+export function orientPart(sceneTris: ArrayLike<number>, up: UpAxis, scale: number): OrientedPart {
+  const keyObj = typeof sceneTris === 'object' && sceneTris !== null ? (sceneTris as object) : null;
+  const cacheKey = `${up}:${scale}`;
+  let perScene = keyObj ? orientPartCache.get(keyObj) : undefined;
+  if (perScene) {
+    const cached = perScene.get(cacheKey);
+    if (cached) return cached;
+  } else if (keyObj) {
+    perScene = new Map();
+    orientPartCache.set(keyObj, perScene);
+  }
   const oriented = new Float64Array(sceneTris.length);
   let mnX = Infinity, mnY = Infinity, mnZ = Infinity;
   let mxX = -Infinity, mxY = -Infinity, mxZ = -Infinity;
@@ -867,7 +912,15 @@ export function orientPart(sceneTris: ArrayLike<number>, up: UpAxis, scale: numb
     if (y < mnY) mnY = y; if (y > mxY) mxY = y;
     if (z < mnZ) mnZ = z; if (z > mxZ) mxZ = z;
   }
-  return { oriented, mnX, mnY, mnZ, mxX, mxY, mxZ, partW: mxX - mnX, partD: mxY - mnY, partH: mxZ - mnZ };
+  const result: OrientedPart = { oriented, mnX, mnY, mnZ, mxX, mxY, mxZ, partW: mxX - mnX, partD: mxY - mnY, partH: mxZ - mnZ };
+  if (perScene) {
+    if (perScene.size >= 16) {
+      const oldest = perScene.keys().next().value;
+      if (oldest !== undefined) perScene.delete(oldest);
+    }
+    perScene.set(cacheKey, result);
+  }
+  return result;
 }
 
 /** The block a part needs: as given, or the part plus channel and frame, and its skins. */
@@ -967,6 +1020,8 @@ export function stockFor(partW: number, partD: number, partH: number, opts: Soli
   };
 }
 
+const placeInStockCache = new WeakMap<Float64Array, Map<string, Float64Array>>();
+
 /** Oriented triangles centred in the stock in plan, their top at `topZ`. */
 export function placeInStock(
   oriented: Float64Array,
@@ -975,12 +1030,26 @@ export function placeInStock(
   stockCy: number,
   topZ: number
 ): Float64Array {
+  const cacheKey = `${b.mnX},${b.mxX},${b.mnY},${b.mxY},${b.mxZ},${stockCx},${stockCy},${topZ}`;
+  let perOriented = placeInStockCache.get(oriented);
+  if (perOriented) {
+    const cached = perOriented.get(cacheKey);
+    if (cached) return cached;
+  } else {
+    perOriented = new Map();
+    placeInStockCache.set(oriented, perOriented);
+  }
   const tris = new Float64Array(oriented.length);
   for (let i = 0; i < oriented.length; i += 3) {
     tris[i] = oriented[i] - (b.mnX + b.mxX) / 2 + stockCx;
     tris[i + 1] = oriented[i + 1] - (b.mnY + b.mxY) / 2 + stockCy;
     tris[i + 2] = oriented[i + 2] - b.mxZ + topZ;
   }
+  if (perOriented.size >= 16) {
+    const oldest = perOriented.keys().next().value;
+    if (oldest !== undefined) perOriented.delete(oldest);
+  }
+  perOriented.set(cacheKey, tris);
   return tris;
 }
 

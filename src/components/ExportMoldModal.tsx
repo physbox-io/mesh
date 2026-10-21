@@ -21,6 +21,7 @@ import {
   type MoldHalfBuffers,
 } from '../utils/moldExporter';
 import { MoldWorkerClient, type MoldPreview } from '../utils/moldWorkerClient';
+import type { MoldCastSimulationResult } from '../utils/moldCastSimulation';
 import { NumberInput } from '@physbox-io/ui';
 import { CastingGuide } from './CastingGuide';
 import { HintAnchor } from './ExportFields';
@@ -28,8 +29,9 @@ import { useSettled } from '../hooks/useSettled';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { AddSimulationButton } from './MachineJobControls';
 import { sceneStockTransform, useAddSimulation } from '../hooks/useAddSimulation';
-import { stlToMesh } from '../utils/stlMesh';
+import { stlToMesh, type IndexedMesh } from '../utils/stlMesh';
 import type { SimulationPlacement } from '../utils/simulatedPart';
+import { useStore } from '../store/useStore';
 
 interface ExportMoldModalProps {
   isOpen: boolean;
@@ -37,7 +39,7 @@ interface ExportMoldModalProps {
   scene: SceneGraph;
 }
 
-type PreviewViewMode = 'clamshell_exploded' | 'plate' | 'bottom_only' | 'top_only';
+type PreviewViewMode = 'clamshell_exploded' | 'plate' | 'bottom_only' | 'top_only' | 'cast_preview';
 
 const inputClass =
   'w-full px-3 py-1.5 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-lg ' +
@@ -121,6 +123,14 @@ function buffersToGeometry(buf: MoldHalfBuffers): THREE.BufferGeometry {
   return geo;
 }
 
+function indexedMeshToGeometry(mesh: IndexedMesh): THREE.BufferGeometry {
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(mesh.positions, 3));
+  geo.setIndex(new THREE.BufferAttribute(mesh.faces, 1));
+  geo.computeVertexNormals();
+  return geo;
+}
+
 const EMPTY_SUMMARY: MoldSummary = moldSummary(emptyMoldResult());
 
 export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClose, scene }) => {
@@ -134,6 +144,9 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
   const [viewMode, setViewMode] = useState<PreviewViewMode>('clamshell_exploded');
   const [isXRay, setIsXRay] = useState(false);
   const [explodeGap, setExplodeGap] = useState(30); // mm separation in exploded view
+  const [trimCastChannels, setTrimCastChannels] = useState(false);
+  const [castPreview, setCastPreview] = useState<MoldCastSimulationResult | null>(null);
+  const [castPreviewBusy, setCastPreviewBusy] = useState(false);
 
   const mountRef = useRef<HTMLDivElement | null>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
@@ -285,6 +298,27 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
       ? 'plate'
       : viewMode;
 
+  useEffect(() => {
+    const client = clientRef.current;
+    if (!isOpen || !client || !preview || !result.success || effectiveViewMode !== 'cast_preview') return;
+    let live = true;
+    setCastPreviewBusy(true);
+    client
+      .cast({ trimChannels: trimCastChannels })
+      .then((res) => {
+        if (live) setCastPreview(res);
+      })
+      .catch(() => {
+        if (live) setCastPreview(null);
+      })
+      .finally(() => {
+        if (live) setCastPreviewBusy(false);
+      });
+    return () => {
+      live = false;
+    };
+  }, [isOpen, preview, result.success, effectiveViewMode, trimCastChannels]);
+
   // Update Three.js meshes whenever result, viewMode, isXRay, or explodeGap changes
   useEffect(() => {
     const group = contentRef.current;
@@ -322,6 +356,16 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
       metalness: 0.1,
       transparent: isXRay,
       opacity: isXRay ? 0.4 : 1.0,
+      depthWrite: !isXRay,
+      side: THREE.DoubleSide,
+    });
+
+    const castMat = new THREE.MeshStandardMaterial({
+      color: 0xf59e0b, // Amber / Cast Plaster-Resin
+      roughness: 0.35,
+      metalness: 0.08,
+      transparent: isXRay,
+      opacity: isXRay ? 0.5 : 1.0,
       depthWrite: !isXRay,
       side: THREE.DoubleSide,
     });
@@ -366,6 +410,11 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
         topMesh.position.set(-topCenterX, 0, 0);
         group.add(topMesh);
       }
+    } else if (effectiveViewMode === 'cast_preview') {
+      if (castPreview?.success && castPreview.mesh.positions.length > 0) {
+        const castMesh = new THREE.Mesh(indexedMeshToGeometry(castPreview.mesh), castMat);
+        group.add(castMesh);
+      }
     }
 
     // Grid on Z=0
@@ -373,7 +422,7 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
     const grid = new THREE.GridHelper(gridDim, 24, 0x94a3b8, 0x334155);
     grid.rotation.x = Math.PI / 2; // Lie flat in XY plane
     group.add(grid);
-  }, [preview, result, effectiveViewMode, isXRay, explodeGap, options.moldType]);
+  }, [preview, result, effectiveViewMode, isXRay, explodeGap, options.moldType, castPreview]);
 
   const [saving, setSaving] = useState(false);
   const [castBusy, setCastBusy] = useState(false);
@@ -408,12 +457,12 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
     setCastBusy(true);
     setCastError(null);
     try {
-      const castRes = await client.cast();
+      const castRes = await client.cast({ trimChannels: trimCastChannels });
       if (!castRes.success) {
         setCastError(castRes.error || 'Could not simulate cast from mold.');
         return;
       }
-      await addCastToScene.add({
+      const added = await addCastToScene.add({
         mesh: castRes.mesh,
         transform: sceneStockTransform(),
         kind: 'cast',
@@ -424,6 +473,13 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
           `Mold type: ${options.moldType === 'open' ? 'One-part open mold' : 'Two-part clamshell mold'}`,
         ],
       });
+      if (added && castRes.textures && castRes.textures.length > 0) {
+        const addedNode = useStore.getState().sceneGraph.nodes.find((n) => n.id === added.id);
+        const castGeom = addedNode?.geoms?.[0];
+        if (castGeom) {
+          useStore.getState().setGeomTextures(added.id, castGeom.name, castRes.textures);
+        }
+      }
     } catch (e) {
       setCastError((e as Error)?.message || 'Could not simulate cast from mold.');
     } finally {
@@ -541,6 +597,17 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
                     Top
                   </button>
                 )}
+                <button
+                  type="button"
+                  onClick={() => setViewMode('cast_preview')}
+                  className={`px-2.5 py-1 rounded-md transition-all cursor-pointer font-medium ${
+                    effectiveViewMode === 'cast_preview'
+                      ? 'bg-white dark:bg-slate-900 text-amber-600 dark:text-amber-400 shadow-xs font-semibold'
+                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100'
+                  }`}
+                >
+                  Cast Part
+                </button>
               </div>
 
               {/* X-Ray / Transparent View toggle */}
@@ -588,8 +655,28 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
                 </div>
               )}
 
+              {/* Cast Preview Controls (when in cast_preview view) */}
+              {effectiveViewMode === 'cast_preview' && (
+                <div className="absolute top-3 left-3 bg-slate-900/85 backdrop-blur-md px-3 py-2 rounded-lg text-xs text-slate-300 border border-slate-700 flex items-center gap-3 shadow-lg">
+                  <label className="flex items-center gap-1.5 cursor-pointer font-medium text-[11px]">
+                    <input
+                      type="checkbox"
+                      checked={trimCastChannels}
+                      onChange={(e) => setTrimCastChannels(e.target.checked)}
+                      className="rounded border-slate-600 text-amber-500 focus:ring-amber-500"
+                    />
+                    <span>Trim sprue &amp; vents</span>
+                  </label>
+                  {castPreview?.success && (
+                    <span className="font-mono text-[11px] text-amber-400">
+                      {(castPreview.castVolumeMm3 / 1000).toFixed(1)} cm³
+                    </span>
+                  )}
+                </div>
+              )}
+
               {/* Says the preview is a moment behind, without blanking it. */}
-              {busy && (
+              {(busy || castPreviewBusy) && (
                 <div className="absolute top-3 left-1/2 -translate-x-1/2 bg-slate-900/85 backdrop-blur-md px-2.5 py-1 rounded-md text-[10px] font-semibold text-slate-200 border border-slate-700 flex items-center gap-1.5">
                   <span className="w-2 h-2 rounded-full bg-purple-400 animate-pulse" />
                   Rebuilding
@@ -607,15 +694,24 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClos
 
               {/* Halves Legend */}
               <div className="absolute top-3 right-3 flex flex-col gap-1 text-[11px] bg-slate-900/85 backdrop-blur-md p-2 rounded-lg border border-slate-700 shadow-lg">
-                <div className="flex items-center gap-1.5">
-                  <span className="w-2.5 h-2.5 rounded-full bg-cyan-400" />
-                  <span className="text-slate-200">Bottom Cavity</span>
-                </div>
-                {options.moldType === 'clamshell' && (
+                {effectiveViewMode === 'cast_preview' ? (
                   <div className="flex items-center gap-1.5">
-                    <span className="w-2.5 h-2.5 rounded-full bg-purple-400" />
-                    <span className="text-slate-200">Top Lid (Pins & Sprue)</span>
+                    <span className="w-2.5 h-2.5 rounded-full bg-amber-400" />
+                    <span className="text-slate-200">Simulated Cast Part</span>
                   </div>
+                ) : (
+                  <>
+                    <div className="flex items-center gap-1.5">
+                      <span className="w-2.5 h-2.5 rounded-full bg-cyan-400" />
+                      <span className="text-slate-200">Bottom Cavity</span>
+                    </div>
+                    {options.moldType === 'clamshell' && (
+                      <div className="flex items-center gap-1.5">
+                        <span className="w-2.5 h-2.5 rounded-full bg-purple-400" />
+                        <span className="text-slate-200">Top Lid (Pins &amp; Sprue)</span>
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
             </div>

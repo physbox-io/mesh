@@ -261,6 +261,36 @@ function firstSurface(tris: Float64Array, grid: { minX: number; minY: number; st
   return z;
 }
 
+const setupTrisCache = new WeakMap<Float64Array, Map<string, Float64Array>>();
+
+function toSetupTris(
+  pTris: Float64Array,
+  face: BlockFace,
+  frame: ReturnType<typeof setupFrame>
+): Float64Array {
+  const s = frame.stock;
+  const cacheKey = `${face}:${s.widthMm},${s.depthMm},${s.thicknessMm}`;
+  let perPlacement = setupTrisCache.get(pTris);
+  if (perPlacement) {
+    const cached = perPlacement.get(cacheKey);
+    if (cached) return cached;
+  } else {
+    perPlacement = new Map();
+    setupTrisCache.set(pTris, perPlacement);
+  }
+  const tris = new Float64Array(pTris.length);
+  for (let i = 0; i < pTris.length; i += 3) {
+    const q = frame.toSetup([pTris[i], pTris[i + 1], pTris[i + 2]]);
+    tris[i] = q[0]; tris[i + 1] = q[1]; tris[i + 2] = q[2];
+  }
+  if (perPlacement.size >= 8) {
+    const oldest = perPlacement.keys().next().value;
+    if (oldest !== undefined) perPlacement.delete(oldest);
+  }
+  perPlacement.set(cacheKey, tris);
+  return tris;
+}
+
 /**
  * One side setup: the block stood with `face` up, cut down to the material
  * the plan gave that face and never below the part.
@@ -283,11 +313,7 @@ function sideSetup(
   const need = neededDepth(plan, face, p.stock, p.partBox, tool.dia + 2);
 
   // The part in this setup's frame.
-  const tris = new Float64Array(p.tris.length);
-  for (let i = 0; i < p.tris.length; i += 3) {
-    const q = frame.toSetup([p.tris[i], p.tris[i + 1], p.tris[i + 2]]);
-    tris[i] = q[0]; tris[i + 1] = q[1]; tris[i + 2] = q[2];
-  }
+  const tris = toSetupTris(p.tris, face, frame);
 
   // Where this setup has anything to do, from a coarse look at what it needs.
   const axes = { '+z': [0, 1], '-z': [0, 1], '+x': [1, 2], '-x': [1, 2], '+y': [0, 2], '-y': [0, 2] }[face];

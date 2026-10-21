@@ -186,5 +186,11 @@ describe('a round body with a box tail, flipped and opened from the end', () => 
     expect(r.setups!.map((s) => s.upFace)).toEqual(['+z', '-x', '-z']);
     expect(r.plan!.text).toMatch(/runs right up to the block's left end/);
     expect(performance.now() - t0).toBeLessThan(30_000);
+
+    // Changing only feed rate or safeZ reuses cached triangles, voxels, and setup plans.
+    const r2 = generateSolidMachining(replica, { ...o, safeZMm: o.safeZMm + 5, finishingFeedRate: o.finishingFeedRate + 200 });
+    expect(r2.success).toBe(true);
+    expect(r2.setups!.map((s) => s.upFace)).toEqual(['+z', '-x', '-z']);
+    expect(r2.partVolumeMm3).toBeCloseTo(r.partVolumeMm3, 5);
   }, 60_000);
 });

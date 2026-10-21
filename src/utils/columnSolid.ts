@@ -38,8 +38,19 @@ const NUDGE = 0.0137;
  * overlapping solids that were never merged read as one; coincident hits
  * facing the same way (a ray through an edge two triangles share) count once.
  */
+const columnSpansCache = new WeakMap<Float64Array, Map<string, ColumnSpans>>();
+
 export function castColumnSpans(tris: Float64Array, grid: ColumnGrid): ColumnSpans {
   const { minX, minY, stepX, stepY, cols, rows } = grid;
+  const cacheKey = `${minX},${minY},${stepX},${stepY},${cols},${rows}`;
+  let perTris = columnSpansCache.get(tris);
+  if (perTris) {
+    const cached = perTris.get(cacheKey);
+    if (cached) return cached;
+  } else {
+    perTris = new Map();
+    columnSpansCache.set(tris, perTris);
+  }
   const maxX = minX + stepX * Math.max(0, cols - 1);
   const maxY = minY + stepY * Math.max(0, rows - 1);
   const triCount = tris.length / 9;
@@ -121,7 +132,13 @@ export function castColumnSpans(tris: Float64Array, grid: ColumnGrid): ColumnSpa
     }
   }
   offset[cols * rows] = out.length;
-  return { grid, offset, z: Float32Array.from(out) };
+  const result: ColumnSpans = { grid, offset, z: Float32Array.from(out) };
+  if (perTris.size >= 16) {
+    const oldest = perTris.keys().next().value;
+    if (oldest !== undefined) perTris.delete(oldest);
+  }
+  perTris.set(cacheKey, result);
+  return result;
 }
 
 /** A box of voxels, x fastest, then y, then z. */
@@ -138,6 +155,8 @@ export interface VoxelGrid {
   solid: Uint8Array;
 }
 
+const voxelizeCache = new WeakMap<Float64Array, Map<string, VoxelGrid>>();
+
 /**
  * The part as voxels of `cell` mm over `box`, read off column spans cast
  * through voxel centres. Exact at the voxel centres, which is all a plan that
@@ -148,6 +167,15 @@ export function voxelize(
   box: { minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number },
   cell: number
 ): VoxelGrid {
+  const cacheKey = `${box.minX},${box.minY},${box.minZ},${box.maxX},${box.maxY},${box.maxZ},${cell}`;
+  let perTris = voxelizeCache.get(tris);
+  if (perTris) {
+    const cached = perTris.get(cacheKey);
+    if (cached) return cached;
+  } else {
+    perTris = new Map();
+    voxelizeCache.set(tris, perTris);
+  }
   const nx = Math.max(1, Math.ceil((box.maxX - box.minX) / cell - 1e-9));
   const ny = Math.max(1, Math.ceil((box.maxY - box.minY) / cell - 1e-9));
   const nz = Math.max(1, Math.ceil((box.maxZ - box.minZ) / cell - 1e-9));
@@ -168,5 +196,11 @@ export function voxelize(
       for (let iz = lo; iz <= hi; iz++) solid[iz * plane + k] = 1;
     }
   }
-  return { minX: box.minX, minY: box.minY, minZ: box.minZ, cell, nx, ny, nz, solid };
+  const result: VoxelGrid = { minX: box.minX, minY: box.minY, minZ: box.minZ, cell, nx, ny, nz, solid };
+  if (perTris.size >= 16) {
+    const oldest = perTris.keys().next().value;
+    if (oldest !== undefined) perTris.delete(oldest);
+  }
+  perTris.set(cacheKey, result);
+  return result;
 }

@@ -258,8 +258,26 @@ const SIDE_PREFERENCE: BlockFace[] = ['-y', '-x', '+x', '+y'];
  * thin cutter, the cutting time, and ten times the share left unreached, so a
  * setup is only added when it clears enough to pay for turning the block.
  */
+const setupPlanCache = new WeakMap<Float64Array, Map<string, SetupPlan>>();
+
 export function planSetups(input: PlannerInput): SetupPlan {
   const b = input.partBox;
+  const planKey = [
+    b.minX, b.minY, b.minZ, b.maxX, b.maxY, b.maxZ,
+    input.stock.widthMm, input.stock.depthMm, input.stock.thicknessMm,
+    input.toolDiaMm, input.reachMm, input.maxSetups ?? 6,
+    input.allowUnderside ?? true, input.allowSides ?? true,
+    input.clearanceMm ?? 0, input.stickoutMm ?? 0, input.cellMm ?? 0,
+    input.onlyFaces ? input.onlyFaces.join(',') : '*',
+  ].join('|');
+  let perTris = setupPlanCache.get(input.tris);
+  if (perTris) {
+    const cached = perTris.get(planKey);
+    if (cached) return cached;
+  } else {
+    perTris = new Map();
+    setupPlanCache.set(input.tris, perTris);
+  }
   const size = Math.max(b.maxX - b.minX, b.maxY - b.minY, b.maxZ - b.minZ);
   const volume = (b.maxX - b.minX) * (b.maxY - b.minY) * (b.maxZ - b.minZ);
   // A third of the cutter's radius, so the opening resolves what the cutter
@@ -495,7 +513,7 @@ export function planSetups(input: PlannerInput): SetupPlan {
     };
   }
 
-  return {
+  const result: SetupPlan = {
     order,
     faces,
     freeing: order[order.length - 1],
@@ -511,6 +529,12 @@ export function planSetups(input: PlannerInput): SetupPlan {
     grid,
     owner,
   };
+  if (perTris.size >= 16) {
+    const oldest = perTris.keys().next().value;
+    if (oldest !== undefined) perTris.delete(oldest);
+  }
+  perTris.set(planKey, result);
+  return result;
 }
 
 /**

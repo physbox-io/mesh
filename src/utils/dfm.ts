@@ -584,7 +584,7 @@ function analyseCnc(tris: Float64Array, limits: DfmLimits): Omit<DfmReport, 'pro
 
   const cols = gridFor(b.maxX - b.minX, limits.toolDiaMm);
   const rows = gridFor(b.maxY - b.minY, limits.toolDiaMm);
-  const { top, thickness, hit } = sampleColumns(tris, b, cols, rows);
+  const { top, bottom, thickness, hit } = sampleColumns(tris, b, cols, rows);
   const stepX = (b.maxX - b.minX) / Math.max(1, cols - 1);
   const stepY = (b.maxY - b.minY) / Math.max(1, rows - 1);
   const cellArea = stepX * stepY;
@@ -600,15 +600,53 @@ function analyseCnc(tris: Float64Array, limits: DfmLimits): Omit<DfmReport, 'pro
   // solidMachiningExporter already reports for a finished job.
   let trapped = 0, kept = 0;
   const trappedCell = new Uint8Array(cols * rows);
+  const twoSidedGapCell = new Uint8Array(cols * rows);
   for (let i = 0; i < cols * rows; i++) {
     if (!hit[i]) continue;
     const span = top[i] - b.minZ;
     if (!(span > 0)) continue;
     kept += span * cellArea;
     const gap = span - thickness[i];
-    if (gap > 1e-6) { trapped += gap * cellArea; trappedCell[i] = 1; }
+    if (gap > 1e-6) {
+      trapped += gap * cellArea;
+      trappedCell[i] = 1;
+      if ((top[i] - bottom[i]) - thickness[i] > 1e-6) twoSidedGapCell[i] = 1;
+    }
   }
   const trappedShare = kept > 0 ? trapped / kept : 0;
+
+  // When material is hidden from +Z, check which of the other five block faces
+  // (-Z underside, ±X, ±Y sides) have a clear line of sight to each hidden
+  // triangle so the heatmap and finding distinguish flip-reachable, side-reachable,
+  // and truly enclosed undercuts.
+  let xCols = 0, xRows = 0, xStepU = 1, xStepV = 1;
+  let xBounds = b;
+  let xSample: ReturnType<typeof sampleColumns> | null = null;
+  let yCols = 0, yRows = 0, yStepU = 1, yStepV = 1;
+  let yBounds = b;
+  let ySample: ReturnType<typeof sampleColumns> | null = null;
+  if (trappedShare > 0) {
+    const rotX = rotateAxisToZ(tris, 0); // (x, y, z) -> (y, z, x)
+    xBounds = bounds(rotX);
+    xCols = gridFor(xBounds.maxX - xBounds.minX, limits.toolDiaMm);
+    xRows = gridFor(xBounds.maxY - xBounds.minY, limits.toolDiaMm);
+    xStepU = (xBounds.maxX - xBounds.minX) / Math.max(1, xCols - 1) || 1;
+    xStepV = (xBounds.maxY - xBounds.minY) / Math.max(1, xRows - 1) || 1;
+    xSample = sampleColumns(rotX, xBounds, xCols, xRows);
+
+    const rotY = rotateAxisToZ(tris, 1); // (x, y, z) -> (z, x, y)
+    yBounds = bounds(rotY);
+    yCols = gridFor(yBounds.maxX - yBounds.minX, limits.toolDiaMm);
+    yRows = gridFor(yBounds.maxY - yBounds.minY, limits.toolDiaMm);
+    yStepU = (yBounds.maxX - yBounds.minX) / Math.max(1, yCols - 1) || 1;
+    yStepV = (yBounds.maxY - yBounds.minY) / Math.max(1, yRows - 1) || 1;
+    ySample = sampleColumns(rotY, yBounds, yCols, yRows);
+  }
+
+  const sideFacesUsed = new Set<string>();
+  let sideReachableTris = 0;
+  let trappedAllFacesTris = 0;
+  const nudge = Math.max(stepX, stepY, 1e-4) * 0.5;
 
   // Paint the heat onto the faces that are actually hidden — the ones tucked
   // under something else in their own column.
@@ -622,17 +660,78 @@ function analyseCnc(tris: Float64Array, limits: DfmLimits): Omit<DfmReport, 'pro
     // Only the material BELOW the top surface is out of reach; the top face of
     // the same column is exactly what the cutter does reach.
     if (c[2] > top[i] - 1e-6) continue;
-    heat[t] = 1;
+
+    const tn = triNormal(tris, t);
+    const px = tn ? c[0] + tn.n[0] * nudge : c[0];
+    const py = tn ? c[1] + tn.n[1] * nudge : c[1];
+    const pz = tn ? c[2] + tn.n[2] * nudge : c[2];
+    const tol = nudge * 1.5;
+
+    // 1. Reachable from the underside (-Z) if there is no solid below this point in the column.
+    if (!twoSidedGapCell[i] || pz <= bottom[i] + tol) {
+      heat[t] = 0.6;
+      continue;
+    }
+
+    // 2. Check side faces (±X, ±Y).
+    let sideReached = false;
+    if (xSample) {
+      const xci = Math.min(xCols - 1, Math.max(0, Math.round((py - xBounds.minX) / xStepU)));
+      const xri = Math.min(xRows - 1, Math.max(0, Math.round((pz - xBounds.minY) / xStepV)));
+      const xi = xri * xCols + xci;
+      if (!xSample.hit[xi] || px >= xSample.top[xi] - tol) {
+        sideFacesUsed.add('right (+X)');
+        sideReached = true;
+      } else if (px <= xSample.bottom[xi] + tol) {
+        sideFacesUsed.add('left (-X)');
+        sideReached = true;
+      }
+    }
+    if (ySample) {
+      const yci = Math.min(yCols - 1, Math.max(0, Math.round((pz - yBounds.minX) / yStepU)));
+      const yri = Math.min(yRows - 1, Math.max(0, Math.round((px - yBounds.minY) / yStepV)));
+      const yi = yri * yCols + yci;
+      if (!ySample.hit[yi] || py >= ySample.top[yi] - tol) {
+        sideFacesUsed.add('back (+Y)');
+        sideReached = true;
+      } else if (py <= ySample.bottom[yi] + tol) {
+        sideFacesUsed.add('front (-Y)');
+        sideReached = true;
+      }
+    }
+
+    if (sideReached) {
+      heat[t] = 0.8;
+      sideReachableTris++;
+    } else {
+      heat[t] = 1;
+      trappedAllFacesTris++;
+    }
   }
 
   if (trappedShare > T.undercutShare) {
+    const sideList = [...sideFacesUsed];
+    const reachNote =
+      trappedAllFacesTris > 0
+        ? ` Some of that volume is enclosed from all six faces and cannot be reached by turning the block.`
+        : sideReachableTris > 0
+          ? ` Turning the block onto its ${sideList.join(', ')} face${sideList.length > 1 ? 's' : ''} reaches the side undercuts.`
+          : ` All of it opens to the underside when the block is flipped.`;
+    const fixText =
+      trappedAllFacesTris > 0
+        ? 'Flip the part or use Solid Machining (Setups: Auto) for outer overhangs, and split the part to open internal cavities.'
+        : sideReachableTris > 0
+          ? `Flip the part and cut the second side, or use Solid Machining (Setups: Auto) to turn the block onto its ${sideList.join(', ')} face${sideList.length > 1 ? 's' : ''}.`
+          : 'Flip the part and cut the second side, or split it into two pieces that each open to a cutter.';
     findings.push({
       id: 'cnc_undercut',
       process: 'cnc',
       severity: trappedShare > T.undercutShareCritical ? 'critical' : 'warning',
       title: `${(trappedShare * 100).toFixed(0)}% is under an overhang`,
-      detail: `${(trappedShare * 100).toFixed(0)}% of this part sits beneath something else, where a cutter coming straight down cannot reach it. The machine will leave that material behind.`,
-      fix: 'Flip the part and cut the second side, or split it into two pieces that each open to a cutter.',
+      detail:
+        `${(trappedShare * 100).toFixed(0)}% of this part sits beneath something else, where a cutter coming straight down cannot reach it. ` +
+        `The machine will leave that material behind.${reachNote}`,
+      fix: fixText,
       position: hotSpot(tris, heat, 0.5) ?? [0, 0, b.maxZ],
       metric: trappedShare,
     });
@@ -723,7 +822,7 @@ function analyseCnc(tris: Float64Array, limits: DfmLimits): Omit<DfmReport, 'pro
   return {
     findings,
     heat,
-    legend: 'Red is material a cutter cannot reach from above',
+    legend: 'Amber is reachable by flipping or turning onto a side; red is trapped from every face',
     score: scoreOf(findings),
     summary: findings.length === 0
       ? 'A 3-axis machine can reach all of this from one side.'
