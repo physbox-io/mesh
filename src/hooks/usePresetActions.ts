@@ -111,7 +111,7 @@ export function usePresetActions(doc: SceneDocument) {
    * Cloud auto-save.
    *
    * The scene being worked on has never been persisted anywhere: presets are saved
-   * on purpose, and a reload drops back to the default pendulum. This offers it to
+   * on purpose, and a reload drops back to a blank scene. This offers it to
    * the account after every edit.
    *
    * It has to live in a component rather than in the store or in userPresets.ts,

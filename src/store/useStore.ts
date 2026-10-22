@@ -32,7 +32,7 @@ import type { FaceSplit, SurfaceTexture } from '../utils/surfaceTexture';
 import type { FacePatternTarget } from '../utils/facePatternPick';
 import type { CameraView } from '../utils/cameraViews';
 import { compileToMJCF } from '../utils/mjcf';
-import { PRESETS, pendulumPreset, generateGearGeoms } from '../presets/presetScenes';
+import { PRESETS, pendulumPreset, emptyPreset, generateGearGeoms } from '../presets/presetScenes';
 import { PhysicsWorkerClient, type BuiltResult, type FrameSnapshot } from './physicsWorkerClient';
 import type { ConstraintBrokenEvent, ImpactEvent } from '../workers/physicsWorkerProtocol';
 import { canShatter, dentDepth, dentSpread, pierceVerdict, shatterVerdict } from '../utils/breakThresholds';
@@ -132,7 +132,23 @@ type PhysicsWindow = Window & {
   compiledXML?: string;
 };
 
-const initialScene: SceneGraph = pendulumPreset;
+/**
+ * The pendulum greets a first visit; every load after that opens blank. The
+ * cookie is set on the first one, so a refresh never brings the pendulum back.
+ */
+const SEEN_COOKIE = 'mesh_seen';
+const isFirstVisit = (() => {
+  if (typeof document === 'undefined') return true; // tests: keep the pendulum they were written against
+  try {
+    if (document.cookie.split('; ').some((c) => c.startsWith(`${SEEN_COOKIE}=`))) return false;
+    document.cookie = `${SEEN_COOKIE}=1; max-age=${60 * 60 * 24 * 365 * 5}; path=/; SameSite=Lax`;
+    return true;
+  } catch {
+    return false;
+  }
+})();
+const initialPreset = isFirstVisit ? 'pendulum' : 'empty';
+const initialScene: SceneGraph = isFirstVisit ? pendulumPreset : emptyPreset;
 
 // The live MuJoCo module/model/data now live inside a dedicated Worker (see
 // src/workers/physicsWorker.ts) so that on unrecoverable WASM memory
@@ -2290,8 +2306,8 @@ function framingPatch(
 }
 
 /**
- * The pendulum is what the app opens on, and it is 600mm of stand — taller than
- * the 250mm window the default pose shows. Framed here rather than on load,
+ * The pendulum is what a first visit opens on, and it is 600mm of stand — taller
+ * than the 250mm window the default pose shows. Framed here rather than on load,
  * because nothing loads it: it is the store's initial scene.
  */
 const initialFraming = framingPatch(initialScene, null);
@@ -2613,7 +2629,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
   selectedNodeId: null,
   extraSelectedIds: [],
   hiddenNodeIds: [],
-  activePreset: 'pendulum',
+  activePreset: initialPreset,
   setActivePreset: (name) => set({ activePreset: name }),
   draggedNodeId: null,
   dragTarget: null,
