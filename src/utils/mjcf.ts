@@ -49,10 +49,128 @@ const formatGeomSize = (type: string, rawSize: unknown): string => {
   return `${x} ${y} ${z}`;
 };
 
+/**
+ * A mesh with no volume, which MuJoCo cannot hull: every vertex in one plane
+ * (the first face drawn in an empty lattice), or fewer than four, or all on a
+ * line. A flat one is emitted as a thin box lying in its plane, so it still
+ * collides where it is drawn; anything less is a speck. Null for a mesh with
+ * volume, which compiles as itself. Kept per vertex array, since the asset
+ * pass and the geom pass both ask.
+ */
+const FLAT_HALF_THICKNESS = 0.0005;
+type FlatMesh = 'speck' | { pos: number[]; quat: number[]; size: number[] };
+const flatMeshes = new WeakMap<number[], FlatMesh | null>();
+function flatMesh(vertices: number[]): FlatMesh | null {
+  const cached = flatMeshes.get(vertices);
+  if (cached !== undefined) return cached;
+  // Y-up to MuJoCo's Z-up, as toMjcfVerts does: (x, y, z) -> (x, -z, y).
+  const pts: number[][] = [];
+  for (let i = 0; i + 2 < vertices.length; i += 3) pts.push([vertices[i], -vertices[i + 2], vertices[i + 1]]);
+  const sub = (a: number[], b: number[]) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+  const dot = (a: number[], b: number[]) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const cross = (a: number[], b: number[]) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  const unit = (a: number[]) => { const l = Math.hypot(a[0], a[1], a[2]); return [a[0] / l, a[1] / l, a[2] / l]; };
+  let result: FlatMesh | null = null;
+  if (pts.length < 4) result = 'speck';
+  else {
+    const p0 = pts[0];
+    let p1 = p0;
+    for (const p of pts) if (dot(sub(p, p0), sub(p, p0)) > dot(sub(p1, p0), sub(p1, p0))) p1 = p;
+    const extent = Math.sqrt(dot(sub(p1, p0), sub(p1, p0)));
+    const along = extent > 0 ? unit(sub(p1, p0)) : [1, 0, 0];
+    let normal = [0, 0, 0];
+    for (const p of pts) {
+      const c = cross(along, sub(p, p0));
+      if (dot(c, c) > dot(normal, normal)) normal = c;
+    }
+    const tolerance = Math.max(extent, 1e-9) * 1e-7;
+    if (extent === 0 || Math.sqrt(dot(normal, normal)) <= tolerance) result = 'speck';
+    else {
+      const n = unit(normal);
+      if (pts.every((p) => Math.abs(dot(n, sub(p, p0))) <= tolerance)) {
+        // The box's sides run along the shape's: the grid's axes when the plane
+        // is square to them, as a lattice face nearly always is, and otherwise
+        // the first edge — the diagonal to the far corner would turn the box
+        // 45° off a rectangle and oversize it.
+        const square = [0, 1, 2].findIndex((k) => Math.abs(n[k]) > 0.9999);
+        const first = sub(pts[1], pts[0]);
+        const inPlane = sub(first, n.map((c) => c * dot(first, n)));
+        const u = square !== -1
+          ? [0, 1, 2].map((k) => (k === (square + 1) % 3 ? 1 : 0))
+          : dot(inPlane, inPlane) > 0 ? unit(inPlane) : along;
+        const v = cross(n, u);
+        let uLo = Infinity, uHi = -Infinity, vLo = Infinity, vHi = -Infinity;
+        for (const p of pts) {
+          const d = sub(p, p0);
+          const a = dot(d, u), b = dot(d, v);
+          if (a < uLo) uLo = a; if (a > uHi) uHi = a;
+          if (b < vLo) vLo = b; if (b > vHi) vHi = b;
+        }
+        const um = (uLo + uHi) / 2, vm = (vLo + vHi) / 2;
+        const pos = [0, 1, 2].map((k) => p0[k] + u[k] * um + v[k] * vm);
+        // Rotation with columns u, v, n, as a (w, x, y, z) quaternion.
+        const [m00, m10, m20] = u, [m01, m11, m21] = v, [m02, m12, m22] = n;
+        const trace = m00 + m11 + m22;
+        let q: number[];
+        if (trace > 0) {
+          const k = Math.sqrt(trace + 1) * 2;
+          q = [k / 4, (m21 - m12) / k, (m02 - m20) / k, (m10 - m01) / k];
+        } else if (m00 > m11 && m00 > m22) {
+          const k = Math.sqrt(1 + m00 - m11 - m22) * 2;
+          q = [(m21 - m12) / k, k / 4, (m01 + m10) / k, (m02 + m20) / k];
+        } else if (m11 > m22) {
+          const k = Math.sqrt(1 + m11 - m00 - m22) * 2;
+          q = [(m02 - m20) / k, (m01 + m10) / k, k / 4, (m12 + m21) / k];
+        } else {
+          const k = Math.sqrt(1 + m22 - m00 - m11) * 2;
+          q = [(m10 - m01) / k, (m02 + m20) / k, (m12 + m21) / k, k / 4];
+        }
+        const size = [Math.max((uHi - uLo) / 2, FLAT_HALF_THICKNESS), Math.max((vHi - vLo) / 2, FLAT_HALF_THICKNESS), FLAT_HALF_THICKNESS];
+        result = { pos, quat: q, size };
+      }
+    }
+  }
+  flatMeshes.set(vertices, result);
+  return result;
+}
+
 const buildGeom = (geom: SceneGeom, massless = false) => {
   // A mesh geom is only valid in MJCF if vertex/face array data exists to populate the <asset> block
   const hasMeshData = Array.isArray(geom.vertices) && geom.vertices.length > 0 && Array.isArray(geom.faces) && geom.faces.length > 0;
   const isMesh = geom.type === 'mesh' && hasMeshData;
+  // A mesh whose arrays are there but empty — a lattice with nothing drawn in
+  // it yet — or too thin to hull, still has to give a free body its mass, so
+  // it stands in as a speck that draws nothing and touches nothing. Falling through to the box
+  // below made it a 2 m block, from a mesh's `size: [1]`.
+  const flat = geom.type === 'mesh' && hasMeshData ? flatMesh(geom.vertices!) : null;
+  // A flat mesh turned by its own quat is rare enough to take as a speck
+  // rather than compose the two rotations.
+  const rotated = !!(geom.quat || geom.euler);
+  if (flat && flat !== 'speck' && !rotated) {
+    // Placed in the body's frame: the box's own centre, plus wherever the geom sits.
+    const at = flat.pos.map((c, k) => c + (geom.pos?.[k] ?? 0));
+    let slab = `name="${geom.name}" type="box" size="${flat.size.join(' ')}" pos="${at.join(' ')}" quat="${flat.quat.join(' ')}"`;
+    if (geom.rgba) slab += ` rgba="${geom.rgba.join(' ')}"`;
+    if (geom.mass !== undefined) slab += ` mass="${geom.mass}"`;
+    else if (massless) slab += ` mass="0"`;
+    else if (geom.density !== undefined) slab += ` density="${geom.density}"`;
+    if (geom.role === 'visual') slab += ` contype="0" conaffinity="0"`;
+    else {
+      if (geom.contype !== undefined) slab += ` contype="${geom.contype}"`;
+      if (geom.conaffinity !== undefined) slab += ` conaffinity="${geom.conaffinity}"`;
+    }
+    if (geom.condim !== undefined) slab += ` condim="${geom.condim}"`;
+    if (geom.friction !== undefined) slab += ` friction="${geom.friction.join(' ')}"`;
+    return `<geom ${slab} />`;
+  }
+  const emptyMesh = geom.type === 'mesh' && (flat === 'speck' || (flat !== null && rotated) || (!hasMeshData && Array.isArray(geom.vertices) && geom.vertices.length === 0));
+  if (emptyMesh) {
+    let speck = `name="${geom.name}" type="sphere" size="0.001" rgba="0 0 0 0" contype="0" conaffinity="0"`;
+    if (geom.pos) speck += ` pos="${geom.pos.join(' ')}"`;
+    if (geom.mass !== undefined) speck += ` mass="${geom.mass}"`;
+    else if (massless) speck += ` mass="0"`;
+    return `<geom ${speck} />`;
+  }
   const geomType = isMesh ? 'mesh' : (geom.type === 'mesh' ? 'box' : (geom.type || 'box'));
 
   let attrs = `name="${geom.name}" type="${geomType}"`;
@@ -378,7 +496,9 @@ export const compileToMJCF = (
     if (!nodes) return;
     for (const node of nodes) {
       for (const g of node.geoms || []) {
-        if (g.type === 'mesh' && g.vertices && g.faces) {
+        // MuJoCo refuses a mesh asset it cannot hull — empty, flat, or a line
+        // — so those are left out; buildGeom emits a box or a speck instead.
+        if (g.type === 'mesh' && g.vertices?.length && g.faces?.length && !flatMesh(g.vertices)) {
           meshAssets.push(g);
         }
       }

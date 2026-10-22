@@ -2376,9 +2376,13 @@ function earClip(face: number[], positions: number[]): number[] | null {
  * in one place while it collides in another and swings around a point outside
  * itself when the body turns.
  *
- * An open surface has no volume to speak of, so the corner average stands in;
- * it is not exactly what MuJoCo will do with such a mesh, but nothing is, and
- * an open mesh is not a solid anybody can simulate anyway.
+ * Only for a CLOSED surface, though. An open one — a face drawn on an empty
+ * grid, before it is extruded — still sums to a "volume": the cone from the
+ * origin to the surface, whose centroid is three quarters of the way out to
+ * it. A face drawn 10 mm below the origin centred itself 7.5 mm down, off its
+ * own plane, and one drawn further out took the body's origin further away
+ * still. An open surface balances at its area centroid instead, which is on
+ * it; the corner average is left for one with no area either.
  */
 export function meshCentroid(poly: PolyMesh): [number, number, number] {
   const at = (v: number): [number, number, number] => [poly.positions[v * 3], poly.positions[v * 3 + 1], poly.positions[v * 3 + 2]];
@@ -2402,9 +2406,38 @@ export function meshCentroid(poly: PolyMesh): [number, number, number] {
     }
   }
 
-  if (Math.abs(volume) > 1e-15) {
+  // Closed: every edge has a face on each side.
+  const edgeUses = new Map<string, number>();
+  for (const face of poly.faces) {
+    for (let i = 0; i < face.length; i++) {
+      const a = face[i];
+      const b = face[(i + 1) % face.length];
+      const key = a < b ? `${a}:${b}` : `${b}:${a}`;
+      edgeUses.set(key, (edgeUses.get(key) ?? 0) + 1);
+    }
+  }
+  const closed = edgeUses.size > 0 && [...edgeUses.values()].every((n) => n === 2);
+  if (closed && Math.abs(volume) > 1e-15) {
     return [cx / (4 * volume), cy / (4 * volume), cz / (4 * volume)];
   }
+
+  let area = 0;
+  let ax = 0, ay = 0, az = 0;
+  for (const face of poly.faces) {
+    for (let i = 1; i + 1 < face.length; i++) {
+      const a = at(face[0]);
+      const b = at(face[i]);
+      const c = at(face[i + 1]);
+      const u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+      const w = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+      const t = Math.hypot(u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]);
+      area += t;
+      ax += (a[0] + b[0] + c[0]) * t;
+      ay += (a[1] + b[1] + c[1]) * t;
+      az += (a[2] + b[2] + c[2]) * t;
+    }
+  }
+  if (area > 1e-18) return [ax / (3 * area), ay / (3 * area), az / (3 * area)];
 
   const count = poly.positions.length / 3;
   if (count === 0) return [0, 0, 0];

@@ -1168,3 +1168,18 @@ describe('triangulating a face that is not convex', () => {
     expect(total).toBeLessThan((Math.PI / 2) * (100 ** 2 - 80 ** 2));
   });
 })
+
+describe('where an open surface balances', () => {
+  it('a face drawn off the origin centres on itself, not on the cone to the origin', () => {
+    const l = createLattice(0.001);
+    // An L of three 10-step squares, 10 steps below the origin.
+    const v = (i: number, j: number) => vertexAt(l, i, j, -10);
+    addFace(l, [v(0, 0), v(20, 0), v(20, 10), v(10, 10), v(10, 20), v(0, 20)]);
+    const g = toSceneGeom(l, 0);
+    // On the face's own plane, at its area centroid: the mean of the three
+    // squares' centres, (5,5), (15,5) and (5,15).
+    expect(g.origin[2]).toBeCloseTo(-0.01, 12);
+    expect(g.origin[0]).toBeCloseTo((25 / 3) * 0.001, 12);
+    expect(g.origin[1]).toBeCloseTo((25 / 3) * 0.001, 12);
+  });
+});
