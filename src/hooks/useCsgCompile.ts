@@ -25,6 +25,7 @@ import type { SceneNode } from '../types/scene';
 import { bodyEdges, bodyUp } from '../utils/edgeRoundBase';
 import { keepFoundEdges } from '../utils/edgeRound';
 import { findNodeById } from '../utils/sceneTree';
+import { describeLoadFailure } from '../utils/staleBuild';
 
 const COMPILE_DEBOUNCE_MS = 100;
 
@@ -127,7 +128,7 @@ export async function compileCsgNodes(skipFinalRecompile = false): Promise<numbe
       // scene can't race overlapping MJCF/WASM builds against each other.
       if (result) useStore.getState().applyNodeCsg(node.id, result, true);
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = await describeLoadFailure(err instanceof Error ? err.message : String(err));
       console.error(`CSG evaluation failed for ${node.id}:`, err);
       useStore.getState().setNodeCsgError(node.id, message, hash);
     }
@@ -142,7 +143,7 @@ export async function compileCsgNodes(skipFinalRecompile = false): Promise<numbe
       const result = await decomposeNodeColliders(node);
       if (result) useStore.getState().applyNodeColliders(node.id, result, true);
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = await describeLoadFailure(err instanceof Error ? err.message : String(err));
       console.error(`Convex decomposition failed for ${node.id}:`, err);
       useStore.getState().setNodeCollisionError(node.id, message, collisionHashOf(node));
     }

@@ -3,7 +3,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.stubGlobal('__MESH_BUILD__', '2026-10-20T05:00:00.000Z');
-const { isStaleBuild, workerStoppedError, useUpdateNotice, UPDATED_MESSAGE } = await import('../src/utils/staleBuild');
+const { isStaleBuild, workerStoppedError, describeLoadFailure, useUpdateNotice, UPDATED_MESSAGE } = await import('../src/utils/staleBuild');
 
 const serving = (body: unknown, ok = true) =>
   (async () => ({ ok, json: async () => body })) as unknown as typeof fetch;
@@ -30,5 +30,27 @@ describe('telling a replaced build from a broken worker', () => {
     expect((await workerStoppedError('The export worker stopped.', serving({}, false))).message).toBe('The export worker stopped.');
     expect((await workerStoppedError('The export worker stopped.', serving({ nothing: 1 }))).message).toBe('The export worker stopped.');
     expect(useUpdateNotice.getState().stale).toBe(false);
+  });
+});
+
+describe('a lazy chunk that will not load', () => {
+  beforeEach(() => useUpdateNotice.setState({ stale: false, dismissed: false }));
+  const chrome = 'Failed to fetch dynamically imported module: https://mesh.physbox.io/assets/vhacdWorkerClient-DomvhXuO.js';
+
+  it('says the tab is out of date when a newer build is live', async () => {
+    expect(await describeLoadFailure(chrome, serving({ build: '2026-10-20T06:26:00.000Z' }))).toBe(UPDATED_MESSAGE);
+    expect(useUpdateNotice.getState().stale).toBe(true);
+  });
+
+  it('asks for a reload when the build is current, and names the chunk', async () => {
+    const m = await describeLoadFailure(chrome, serving({ build: '2026-10-20T05:00:00.000Z' }));
+    expect(m).toMatch(/Reload the page/);
+    expect(m).toContain('vhacdWorkerClient');
+    expect(await describeLoadFailure('error loading dynamically imported module: x.js', serving({}))).toMatch(/Reload/);
+    expect(await describeLoadFailure('Importing a module script failed.', serving({}))).toMatch(/Reload/);
+  });
+
+  it('leaves every other error alone', async () => {
+    expect(await describeLoadFailure('V-HACD ran out of memory', serving({ build: 'other' }))).toBe('V-HACD ran out of memory');
   });
 });

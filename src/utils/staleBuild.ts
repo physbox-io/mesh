@@ -67,3 +67,19 @@ export async function workerStoppedError(fallback: string, fetchImpl?: typeof fe
 export function noteWorkerStopped(): void {
   void isStaleBuild();
 }
+
+// What each browser says when a lazy chunk will not load: Chrome, Firefox, Safari.
+const CHUNK_LOAD_FAILURE = /Failed to fetch dynamically imported module|error loading dynamically imported module|Importing a module script failed/i;
+
+/**
+ * A failed `import()` rewritten as something a person (or an agent reading
+ * collisionError) can act on. The raw message names a hashed asset URL and
+ * reads like a bug in the feature; nearly always the tab predates a deploy.
+ * Any other message comes back unchanged.
+ */
+export async function describeLoadFailure(message: string, fetchImpl?: typeof fetch): Promise<string> {
+  if (!CHUNK_LOAD_FAILURE.test(message)) return message;
+  return (await isStaleBuild(fetchImpl))
+    ? UPDATED_MESSAGE
+    : `Part of Mesh did not download (${message}). Reload the page to try again.`;
+}
