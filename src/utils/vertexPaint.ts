@@ -30,6 +30,7 @@
 // ---------------------------------------------------------------------------
 
 import * as THREE from 'three';
+import { srgbToLinear } from './bodyColor';
 
 /**
  * A geom's paint, as it is stored in the scene graph.
@@ -246,20 +247,24 @@ export function layerFromCanvas(canvas: PaintCanvas): PaintLayer | undefined {
 /**
  * Writes the colour attribute the material reads: the body's own colour with
  * whatever paint is on top of it mixed in.
+ *
+ * The body colour and the paint are both sRGB, and are mixed as sRGB, the way
+ * a picker shows them; the attribute is written linear, because three reads a
+ * colour attribute as linear (see bodyColor).
  */
 export function writeVertexColors(target: Float32Array, base: number[], canvas: PaintCanvas) {
   const [br, bg, bb] = [base[0] ?? 0.8, base[1] ?? 0.8, base[2] ?? 0.8];
   for (let v = 0; v < canvas.count; v++) {
     const a = canvas.data[v * 4 + 3];
     if (a <= 0) {
-      target[v * 3] = br;
-      target[v * 3 + 1] = bg;
-      target[v * 3 + 2] = bb;
+      target[v * 3] = srgbToLinear(br);
+      target[v * 3 + 1] = srgbToLinear(bg);
+      target[v * 3 + 2] = srgbToLinear(bb);
       continue;
     }
-    target[v * 3] = br + (canvas.data[v * 4] - br) * a;
-    target[v * 3 + 1] = bg + (canvas.data[v * 4 + 1] - bg) * a;
-    target[v * 3 + 2] = bb + (canvas.data[v * 4 + 2] - bb) * a;
+    target[v * 3] = srgbToLinear(br + (canvas.data[v * 4] - br) * a);
+    target[v * 3 + 1] = srgbToLinear(bg + (canvas.data[v * 4 + 1] - bg) * a);
+    target[v * 3 + 2] = srgbToLinear(bb + (canvas.data[v * 4 + 2] - bb) * a);
   }
 }
 

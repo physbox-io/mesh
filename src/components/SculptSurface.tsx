@@ -16,6 +16,7 @@
 import { useMemo, useRef, useState, useEffect, useCallback } from 'react';
 import { useFrame, useThree, type ThreeEvent } from '@react-three/fiber';
 import * as THREE from 'three';
+import { bodyColor } from '../utils/bodyColor';
 import { useStore } from '../store/useStore';
 import {
   fromSceneGeom,
@@ -739,7 +740,7 @@ export function SculptSurface({
     }
   }, []);
 
-  const rgb = new THREE.Color(color?.[0] ?? 0.82, color?.[1] ?? 0.72, color?.[2] ?? 0.62);
+  const rgb = bodyColor(color, [0.82, 0.72, 0.62]);
 
   return (
     <group ref={groupRef} name={`${nodeId}_sculpt`}>

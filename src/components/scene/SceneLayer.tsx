@@ -10,6 +10,7 @@ import React, { useRef, useMemo, useState, useEffect, useLayoutEffect } from 're
 import { useFrame, useThree, type ThreeEvent } from '@react-three/fiber';
 import { OrbitControls, OrthographicCamera } from '@react-three/drei';
 import * as THREE from 'three';
+import { bodyColor } from '../../utils/bodyColor';
 import { registerLiveCamera } from '../../utils/liveCamera';
 import { DEFAULT_EYE, DEFAULT_TARGET_Y, drawnContentBounds, sceneContentBounds } from '../../utils/frameScene';
 import { isDrawingView, orthoFraming, ORTHO_STANDOFF, SQUARE_TO_VIEW, VIEW_AXES } from '../../utils/cameraViews';
@@ -547,7 +548,7 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
   const materialProps = useMemo(() => {
     const [r, g, b] = color ?? [0.8, 0.8, 0.8];
     return {
-      color: new THREE.Color(r, g, b),
+      color: bodyColor([r, g, b]),
       // The tint marks the selection only with Hi-Res off; with it on, the
       // composer outlines the selection instead (SelectionOutline).
       emissive: isSelected && !hiRes ? '#3b82f6' : '#000',
@@ -866,7 +867,7 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
     [type, node?.isSculpt, faces],
   );
   const insideColor = useMemo(
-    () => new THREE.Color(color?.[0] ?? 0.8, color?.[1] ?? 0.8, color?.[2] ?? 0.8).multiplyScalar(0.45),
+    () => bodyColor(color).multiplyScalar(0.45),
     [color],
   );
 
@@ -1478,7 +1479,7 @@ export const StaticBoxInstances = React.memo(function StaticBoxInstances({ geoms
       mat.multiply(scale.makeScale(model.geom_size[so] * 2, model.geom_size[so + 1] * 2, model.geom_size[so + 2] * 2));
       mesh.setMatrixAt(idx, mat);
       const c = g.rgba || [0.8, 0.8, 0.8, 1];
-      mesh.setColorAt(idx, color.setRGB(c[0], c[1], c[2]));
+      mesh.setColorAt(idx, bodyColor(c, undefined, color));
     });
     mesh.instanceMatrix.needsUpdate = true;
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;

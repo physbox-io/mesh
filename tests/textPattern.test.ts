@@ -16,6 +16,7 @@ import { patternById } from '../src/utils/surfacePatterns';
 import { analyzeMesh } from '../src/utils/meshIntegrity';
 import { creasedGeometry } from '../src/utils/creasedNormals';
 import { colorsForCopy } from '../src/utils/vertexPaint';
+import { srgbToLinear } from '../src/utils/bodyColor';
 import { exportThreeMf, linearToSrgbHex } from '../src/utils/threeMfExporter';
 
 /*
@@ -361,9 +362,10 @@ describe('text on a face', () => {
       }]);
       const used = result.palette.filter((p) => p.triangles > 0);
       expect(used.length).toBe(2);
-      expect(used[0].hex).toBe(linearToSrgbHex([0.8, 0.8, 0.8]));
+      // Both written out as the sRGB they were picked as.
+      expect(used[0].hex).toBe(linearToSrgbHex([0.8, 0.8, 0.8].map(srgbToLinear)));
       // Paint is stored a byte a channel.
-      expect(used[1].hex).toBe(linearToSrgbHex(red.map((c) => Math.round(c * 255) / 255)));
+      expect(used[1].hex).toBe(linearToSrgbHex(red.map((c) => srgbToLinear(Math.round(c * 255) / 255))));
       // The letter is ~6 % of the top; its triangles are a share of the part's.
       expect(used[1].triangles).toBeGreaterThan(50);
       expect(used[1].triangles).toBeLessThan(used[0].triangles);

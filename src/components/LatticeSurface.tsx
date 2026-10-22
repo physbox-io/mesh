@@ -31,6 +31,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useFrame, useThree, type ThreeEvent } from '@react-three/fiber';
 import * as THREE from 'three';
+import { bodyColor } from '../utils/bodyColor';
 import { metresPerPixel as metresPerPixelOf } from '../utils/cameraScale';
 import { useStore } from '../store/useStore';
 import {
@@ -2722,7 +2723,7 @@ export function LatticeSurface({
   // Drawing
   // -----------------------------------------------------------------------
 
-  const rgb = new THREE.Color(color?.[0] ?? 0.55, color?.[1] ?? 0.68, color?.[2] ?? 0.85);
+  const rgb = bodyColor(color, [0.55, 0.68, 0.85]);
 
   /**
    * What catches rays that hit nothing else.

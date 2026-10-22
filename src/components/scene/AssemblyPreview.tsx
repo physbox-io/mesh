@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
+import { bodyColor } from '../../utils/bodyColor';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { Pause, Play } from 'lucide-react';
 import type { Mat3, PrintPose, Vec3 } from '../../utils/printPlate';
@@ -81,7 +82,7 @@ function geometryOf(positions: Float32Array, faces: Uint32Array): THREE.BufferGe
 }
 
 const materialOf = (colour: number[]) => new THREE.MeshStandardMaterial({
-  color: new THREE.Color(colour[0], colour[1], colour[2]),
+  color: bodyColor(colour),
   metalness: 0.05,
   roughness: 0.7,
 });
@@ -476,7 +477,7 @@ export function AssemblyPreview({
                     className="w-2.5 h-2.5 rounded-sm"
                     // Through three's colour management, as the material is, so
                     // the swatch matches the section rather than looking darker.
-                    style={{ background: new THREE.Color(sec.colour[0], sec.colour[1], sec.colour[2]).getStyle() }}
+                    style={{ background: bodyColor(sec.colour).getStyle() }}
                   />
                   {i + 1}
                 </span>

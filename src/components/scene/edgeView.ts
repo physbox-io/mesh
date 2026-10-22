@@ -3,6 +3,7 @@
  * exports a component and fast refresh keeps working.
  */
 import * as THREE from 'three';
+import { bodyColor } from '../../utils/bodyColor';
 
 /**
  * Crease angle, in degrees, above which an edge is drawn.
@@ -17,11 +18,10 @@ export const EDGE_THRESHOLD_PRIMITIVE = 20;
 export const EDGE_THRESHOLD_MESH = 30;
 
 export function edgeColorOf(color: number[] | undefined): THREE.Color {
-  const [r, g, b] = color ?? [0.8, 0.8, 0.8];
   // Darken in HSL rather than scaling RGB: scaling a pale blue toward black
   // desaturates it into grey, whereas dropping lightness keeps the hue so the
   // line still reads as "this body's edge".
-  const c = new THREE.Color(r, g, b);
+  const c = bodyColor(color);
   const hsl = { h: 0, s: 0, l: 0 };
   c.getHSL(hsl);
   c.setHSL(hsl.h, Math.min(1, hsl.s * 1.1), Math.max(0, hsl.l * 0.45));
