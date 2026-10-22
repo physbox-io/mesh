@@ -17,6 +17,7 @@ import { PhysicsLoop } from './PhysicsLoop';
 import { RenderOnChange } from './RenderOnChange';
 import { GridFadeFollowsCamera } from './GridFadeFollowsCamera';
 import { GRID_NAME } from './gridConstants';
+import { OriginGlow } from './OriginGlow';
 import { BodyToneMapping } from './BodyToneMapping';
 import { StudioBackdrop } from './StudioBackdrop';
 import { SelectionOutline } from './SelectionOutline';
@@ -266,6 +267,7 @@ export function SceneCanvas({ threeSceneRef, axisCanvasRef, darkMode, onImportSc
         position={[0, -0.005, 0]}
       />
       <GridFadeFollowsCamera />
+      <OriginGlow darkMode={darkMode} cellSizeMm={gridCellSizeMm} />
 
       {/* Every geom already casts and receives, but until now nothing on
           the ground caught any of it: drei's Grid is a custom shader that
