@@ -1,5 +1,5 @@
 /**
- * The "Edges" view: a thin dark line along every real corner of a body.
+ * The "Edges" view: an ink line along every real corner of a body.
  *
  * Under the scene's light rig two faces meeting at a corner can land on the
  * same brightness, and a cube goes flat — you see a hexagon, not a box. The
@@ -9,27 +9,30 @@
  * degrees, so a box gets twelve lines, a cylinder its two rims, and a sphere
  * nothing at all.
  *
- * The line is a darker tint of the body's own colour rather than black, so an
- * edged scene still reads as the same scene with its corners found, not as a
- * blueprint. The mesh it sits on is pushed back a hair with polygonOffset (see
+ * The line is ink: opaque black, or white in dark mode (see edgeColor), and
+ * on by default, the way a CAD viewport outlines its parts. It stays a plain
+ * 1 px LineSegments rather than a fat Line2: Line2 is a Mesh, and the exports,
+ * measure snapping and path tracer all walk the scene for meshes.
+ *
+ * The mesh it sits on is pushed back a hair with polygonOffset (see
  * materialProps in SceneLayer) — that, not anything here, is what keeps the
  * lines from flickering through the surface they lie on.
  */
 import { useEffect, useMemo } from 'react';
 import * as THREE from 'three';
-import { edgeColorOf } from './edgeView';
+import { edgeColor } from './edgeView';
+import { useDarkClass } from '../../hooks/useDarkClass';
 
 interface Props {
   /** The surface to outline, in the same local frame the lines will be drawn in. */
   geometry: THREE.BufferGeometry | null | undefined;
-  color: number[] | undefined;
   threshold: number;
   /** Passed straight through to the lineSegments so the outline shares the mesh's placement. */
   rotation?: [number, number, number];
   scale?: [number, number, number];
 }
 
-export const FeatureEdges = ({ geometry, color, threshold, rotation, scale }: Props) => {
+export const FeatureEdges = ({ geometry, threshold, rotation, scale }: Props) => {
   const edges = useMemo(() => {
     if (!geometry) return null;
     // A scaled mesh (an ellipsoid) has to have its edge angles taken on the
@@ -43,12 +46,12 @@ export const FeatureEdges = ({ geometry, color, threshold, rotation, scale }: Pr
 
   useEffect(() => () => { edges?.dispose(); }, [edges]);
 
-  const lineColor = useMemo(() => edgeColorOf(color), [color]);
+  const lineColor = edgeColor(useDarkClass());
 
   if (!edges || edges.getAttribute('position').count === 0) return null;
   return (
     <lineSegments geometry={edges} rotation={rotation} raycast={() => null}>
-      <lineBasicMaterial color={lineColor} transparent opacity={0.75} toneMapped={false} />
+      <lineBasicMaterial color={lineColor} toneMapped={false} />
     </lineSegments>
   );
 };

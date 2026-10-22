@@ -1588,7 +1588,7 @@ export interface PhysicsState {
   // --- Viewport display ---------------------------------------------------
   /** Draw every body as the edges of its triangles rather than a shaded solid. */
   wireframe: boolean;
-  /** Draw a dark line along every real corner of every body — see scene/FeatureEdges. */
+  /** Draw an ink line (black, white in dark mode) along every real corner of every body; on by default — see scene/FeatureEdges. */
   showEdges: boolean;
   toggleShowEdges: () => void;
   toggleWireframe: () => void;
@@ -2665,7 +2665,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
 
   wireframe: false,
   toggleWireframe: () => set((state) => ({ wireframe: !state.wireframe })),
-  showEdges: false,
+  showEdges: true,
   toggleShowEdges: () => set((state) => ({ showEdges: !state.showEdges })),
   gridCellSizeMm: initialFraming.gridCellSizeMm,
   // The one grid. The lattice used to have its own step beside this, and two

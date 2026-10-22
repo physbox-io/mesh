@@ -974,7 +974,6 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
   const primitiveEdges = showEdges && edgeGeometry ? (
     <FeatureEdges
       geometry={edgeGeometry}
-      color={color}
       threshold={EDGE_THRESHOLD_PRIMITIVE}
       rotation={type === 'capsule' || type === 'cylinder' ? [Math.PI / 2, 0, 0] : undefined}
       scale={type === 'ellipsoid' ? [geometryArgs[0], geometryArgs[1], geometryArgs[2]] : undefined}
@@ -984,7 +983,7 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
   if (type === 'mesh') {
     if (!meshBufferGeometry) return null;
     const meshEdges = showEdges ? (
-      <FeatureEdges geometry={meshBufferGeometry} color={color} threshold={EDGE_THRESHOLD_MESH} />
+      <FeatureEdges geometry={meshBufferGeometry} threshold={EDGE_THRESHOLD_MESH} />
     ) : null;
     const renderedMaterial = (
       <meshStandardMaterial key={`${alpha < 1 ? 'blend' : 'solid'}:${showPaint}`} {...materialProps} side={THREE.FrontSide} />
