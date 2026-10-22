@@ -116,6 +116,26 @@ export const CameraController = () => {
   const cameraResetToken = useStore(state => state.cameraResetToken);
   const controlsRef = useRef<OrbitControlsImpl>(null);
   const getSize = useThree((state) => state.get);
+  /*
+   * Where a flat view left off when it was orbited out of. Orbiting off Top,
+   * Front or Side is asking for the free view, so letting go of the drag puts
+   * the perspective camera back — looking the same way, at the same point, at
+   * the same scale — instead of leaving an orthographic camera tilted at an
+   * angle no drawing view has. Read once, by the effect below, after the swap.
+   */
+  const handoff = useRef<{ target: THREE.Vector3; direction: THREE.Vector3; height: number } | null>(null);
+  const leaveFlatView = () => {
+    const store = useStore.getState();
+    const controls = controlsRef.current;
+    const live = getSize().camera as THREE.OrthographicCamera;
+    if (!isDrawingView(store.cameraView) || !store.cameraOffAxis || !controls || !live.isOrthographicCamera) return;
+    handoff.current = {
+      target: controls.target.clone(),
+      direction: live.getWorldDirection(new THREE.Vector3()),
+      height: Math.max(1, getSize().size.height) / live.zoom,
+    };
+    store.setCameraView('perspective');
+  };
 
   useEffect(() => {
     // The drawing views swap in an orthographic camera (below), and for one
@@ -150,6 +170,20 @@ export const CameraController = () => {
       );
       live.lookAt(target);
       (live as THREE.OrthographicCamera).zoom = Math.max(1, height) / framing.height;
+      if (controlsRef.current) {
+        controlsRef.current.target.copy(target);
+        controlsRef.current.update();
+      }
+    } else if (handoff.current) {
+      // Back out of a flat view where it was left: far enough back along the
+      // same line of sight that the part is drawn the size it just was.
+      const { target, direction, height } = handoff.current;
+      handoff.current = null;
+      const fov = (live as THREE.PerspectiveCamera).fov ?? 50;
+      const distance = height / (2 * Math.tan((fov * Math.PI) / 360));
+      live.up.set(0, 1, 0);
+      live.position.copy(target).addScaledVector(direction, -distance);
+      live.lookAt(target);
       if (controlsRef.current) {
         controlsRef.current.target.copy(target);
         controlsRef.current.update();
@@ -262,7 +296,7 @@ export const CameraController = () => {
           controls follow whichever is the default. Its frustum is the canvas
           in pixels, so `zoom` is pixels per metre. */}
       {drawing && <OrthographicCamera makeDefault near={0.001} far={1000} />}
-      <OrbitControls enabled={draggedNodeId === null} ref={controlsRef} makeDefault enableDamping dampingFactor={0.1} minDistance={minDistance} mouseButtons={{ LEFT: 99 as THREE.MOUSE, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE }} />
+      <OrbitControls enabled={draggedNodeId === null} ref={controlsRef} onEnd={leaveFlatView} makeDefault enableDamping dampingFactor={0.1} minDistance={minDistance} mouseButtons={{ LEFT: 99 as THREE.MOUSE, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE }} />
     </>
   );
 };

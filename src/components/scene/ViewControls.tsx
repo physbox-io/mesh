@@ -24,11 +24,12 @@ export function ViewControls() {
   })));
   return (
     <div className="absolute bottom-4 right-4 z-10 flex items-center gap-1 bg-white/80 dark:bg-slate-900/80 backdrop-blur-md border border-slate-200 dark:border-slate-800 p-1 rounded-lg shadow-sm">
+      {/* No Perspective button: it is the view everything opens in, and
+          orbiting out of any of these goes back to it (see CameraController). */}
       {([
-        ['perspective', 'Perspective', 'The free view'],
-        ['topDown', 'Top Down', 'Looking straight down, drawn flat (orthographic)'],
-        ['front', 'Front', 'Looking at the front, drawn flat (orthographic)'],
-        ['side', 'Side', 'Looking at the right-hand side, drawn flat (orthographic)'],
+        ['topDown', 'Top Down', 'Looking straight down, drawn flat (orthographic). Orbit to go back to the free view.'],
+        ['front', 'Front', 'Looking at the front, drawn flat (orthographic). Orbit to go back to the free view.'],
+        ['side', 'Side', 'Looking at the right-hand side, drawn flat (orthographic). Orbit to go back to the free view.'],
       ] as const).map(([view, label, title]) => (
         <button
           key={view}
@@ -37,7 +38,7 @@ export function ViewControls() {
           className={`px-2.5 py-1 rounded text-[10px] font-bold tracking-wide transition-all cursor-pointer ${
             // Orbited off a drawing view, its button is no longer lit:
             // the view on screen is not that one, and a click puts it back.
-            cameraView === view && !(view !== 'perspective' && cameraOffAxis)
+            cameraView === view && !cameraOffAxis
               ? 'bg-blue-500 text-white shadow-xs'
               : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
           }`}

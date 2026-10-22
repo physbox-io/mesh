@@ -148,7 +148,7 @@ function frameOf(pieces: DrawnPiece[]): [Vec3, Vec3, Vec3] | undefined {
  * leaves out everything drawn alongside it in the same group — the inside wall
  * of a hollow mesh, the DFM heat map, a brush cursor, cut ghosts.
  */
-function drawnPieces(root: THREE.Object3D, only: string | null): Map<string, { pieces: DrawnPiece[]; signature: string }> {
+function drawnPieces(root: THREE.Object3D, only: Set<string> | null): Map<string, { pieces: DrawnPiece[]; signature: string }> {
   const out = new Map<string, { pieces: DrawnPiece[]; signature: string }>();
   const push = (id: string, geometry: THREE.BufferGeometry, matrix: THREE.Matrix4) => {
     let entry = out.get(id);
@@ -165,7 +165,7 @@ function drawnPieces(root: THREE.Object3D, only: string | null): Map<string, { p
       const ids = (instanced.userData?.nodeIds ?? []) as string[];
       for (let i = 0; i < instanced.count; i++) {
         const id = ids[i];
-        if (!id || (only && id !== only)) continue;
+        if (!id || (only && !only.has(id))) continue;
         const m = new THREE.Matrix4();
         instanced.getMatrixAt(i, m);
         push(id, instanced.geometry, m.premultiply(instanced.matrixWorld));
@@ -173,7 +173,7 @@ function drawnPieces(root: THREE.Object3D, only: string | null): Map<string, { p
       return;
     }
     const id = bodyOf(mesh);
-    if (!id || (only && id !== only)) return;
+    if (!id || (only && !only.has(id))) return;
     push(id, mesh.geometry, mesh.matrixWorld.clone());
   });
   return out;
@@ -226,7 +226,20 @@ function locationLinks(ids: Iterable<string>, nodes: SceneNode[]): { id: string;
     try {
       const b = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY.value, node.name || node.id);
       if (b < 0) return null;
-      return [data.xpos[b * 3], data.xpos[b * 3 + 1], data.xpos[b * 3 + 2]];
+      const at: Vec3 = [data.xpos[b * 3], data.xpos[b * 3 + 1], data.xpos[b * 3 + 2]];
+      // A lattice body's own origin is the middle of its mesh, which moves with
+      // every edit and means nothing to the person drawing it. Where it sits is
+      // where its grid's origin is: the body's position less the offset baked
+      // into the mesh, turned by the body. Unmoved, that is the world origin,
+      // and there is nothing to dimension.
+      const offset = node.isLattice ? node.latticeOrigin : undefined;
+      if (offset) {
+        // xmat is the body's rotation, row-major.
+        const r = (i: number, j: number) => data.xmat[b * 9 + i * 3 + j];
+        const o = [offset[0] ?? 0, offset[1] ?? 0, offset[2] ?? 0];
+        return [0, 1, 2].map((i) => at[i] - (r(i, 0) * o[0] + r(i, 1) * o[1] + r(i, 2) * o[2])) as Vec3;
+      }
+      return at;
     } catch {
       return null;
     }
@@ -528,6 +541,10 @@ export function DimensionOverlay() {
   const cameraView = useStore((s) => s.cameraView);
   const dimsEnabled = useStore((s) => s.dimsEnabled);
   const selectedNodeId = useStore((s) => s.selectedNodeId);
+  // The body open in the lattice editor is measured too, selected or not: it
+  // is the one being drawn, and selecting another to line it up against
+  // should not take its figures away.
+  const latticeNodeId = useStore((s) => s.latticeNodeId);
   const scene = useThree((s) => s.scene);
   const view = isDrawingView(cameraView) ? cameraView : null;
   const on = dimsEnabled && view !== null;
@@ -535,7 +552,7 @@ export function DimensionOverlay() {
   // Tagged with what it was measured for, so a change of view or selection
   // never draws the last one's figures on the new sheet while it re-measures.
   const [found, setFound] = useState<{ key: string; dims: BodyDimensions[]; locations: LocationDim[] }>({ key: '', dims: [], locations: [] });
-  const measuring = `${view}|${selectedNodeId ?? ''}`;
+  const measuring = `${view}|${selectedNodeId ?? ''}|${latticeNodeId ?? ''}`;
   const [mpp, setMpp] = useState(0);
   const [square, setSquare] = useState(false);
   const cache = useRef(new Map<string, { signature: string; dims: BodyDimensions | null }>());
@@ -549,7 +566,7 @@ export function DimensionOverlay() {
     lastSignature.current = '';
     lastPoll.current = 0;
     if (!on) setLiveDimensions([]);
-  }, [on, view, selectedNodeId]);
+  }, [on, view, selectedNodeId, latticeNodeId]);
 
   useFrame(({ camera, size }) => {
     if (!on || !view) return;
@@ -568,7 +585,8 @@ export function DimensionOverlay() {
     const now = performance.now();
     if (now - lastPoll.current < POLL_MS) return;
     lastPoll.current = now;
-    const pieces = drawnPieces(scene, selectedNodeId);
+    const only = selectedNodeId ? new Set([selectedNodeId, ...(latticeNodeId ? [latticeNodeId] : [])]) : null;
+    const pieces = drawnPieces(scene, only);
     let signature = '';
     for (const [id, entry] of pieces) signature += `${id}=${entry.signature.length}:${hashOf(entry.signature)}|`;
     if (signature === lastSignature.current) return;

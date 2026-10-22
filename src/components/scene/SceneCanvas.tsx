@@ -1,6 +1,6 @@
 import { useCallback, useLayoutEffect, useMemo, useRef, useState, type ComponentRef, type RefObject } from 'react';
 import { Canvas } from '@react-three/fiber';
-import { Grid, Environment, Lightformer } from '@react-three/drei';
+import { Environment, Lightformer } from '@react-three/drei';
 import { EffectComposer, N8AO } from '@react-three/postprocessing';
 import * as THREE from 'three';
 import { useShallow } from 'zustand/react/shallow';
@@ -16,7 +16,7 @@ import { AxisLegendDrawer } from '../AxisLegendDrawer';
 import { PhysicsLoop } from './PhysicsLoop';
 import { RenderOnChange } from './RenderOnChange';
 import { GridFadeFollowsCamera } from './GridFadeFollowsCamera';
-import { GRID_NAME } from './gridConstants';
+import { GroundGrid } from './GroundGrid';
 import { OriginGlow } from './OriginGlow';
 import { BodyToneMapping } from './BodyToneMapping';
 import { StudioBackdrop } from './StudioBackdrop';
@@ -254,18 +254,8 @@ export function SceneCanvas({ threeSceneRef, axisCanvasRef, darkMode, onImportSc
           grid mostly solid around the part and spends the rest of the
           fade further out, where it is doing the job of hiding the
           horizon — see GRID_FADE_RATIO for the pair of them. */}
-      <Grid
-        name={GRID_NAME}
-        infiniteGrid
-        side={THREE.DoubleSide}
-        fadeDistance={1.6}
-        fadeStrength={0.8}
-        sectionSize={(gridCellSizeMm / 1000) * 5}
-        cellSize={gridCellSizeMm / 1000}
-        cellColor={darkMode ? '#334155' : '#cbd5e1'}
-        sectionColor={darkMode ? '#64748b' : '#94a3b8'}
-        position={[0, -0.005, 0]}
-      />
+      {/* Stands up behind the part in the Front and Side views. See GroundGrid. */}
+      <GroundGrid cellSizeMm={gridCellSizeMm} darkMode={darkMode} />
       <GridFadeFollowsCamera />
       <OriginGlow darkMode={darkMode} cellSizeMm={gridCellSizeMm} />
 

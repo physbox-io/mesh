@@ -2608,7 +2608,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
   facePatternTarget: null,
   isMachineConfigOpen: false,
   cameraView: 'perspective',
-  dimsEnabled: false,
+  dimsEnabled: true, // only drawn in Top/Front/Side; on, so a flat view arrives measured
   cameraOffAxis: false,
   cameraOverride: initialFraming.cameraOverride,
   cameraResetToken: 0,
