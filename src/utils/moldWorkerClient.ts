@@ -37,6 +37,8 @@ import { resolveCsgGeoms } from './csg';
 import { addSimulationToScene, sceneStockTransform } from '../hooks/useAddSimulation';
 import { useStore } from '../store/useStore';
 import { workerStoppedError } from './staleBuild';
+import { pourNodeFor } from './pourTarget';
+import { POUR_DIRECTIONS, type PourDirection, type PourInfo } from './pourCast';
 
 export interface MoldPreview {
   summary: MoldSummary;
@@ -215,6 +217,106 @@ export function moldOptionsFor(msg: Record<string, unknown>): {
   };
 }
 
+/** Words for the side a pour came from, as the mold stands in the scene. */
+export function pourSideLabel(dir: PourDirection): string {
+  return {
+    '+z': 'from the top',
+    '-z': 'from underneath, the mold turned over',
+    '+x': 'from the +X side, the mold on its side',
+    '-x': 'from the -X side, the mold on its side',
+    '+y': 'from the +Y side, the mold on its side',
+    '-y': 'from the -Y side, the mold on its side',
+  }[dir];
+}
+
+/** The undercut warning, or null when a rigid mold lets go. */
+export function pourUndercutWarning(pour: PourInfo): string | null {
+  return pour.undercutMm2 > 0
+    ? `Undercut (${pour.undercutMm2.toLocaleString()} mm² held in): fine when the mold or the casting is flexible, ` +
+      'like silicone; a rigid mold and a rigid casting will not come apart.'
+    : null;
+}
+
+/** The hole that has to be stopped before pouring, or null. */
+export function pourPlugNote(pour: PourInfo): string | null {
+  return pour.plugMm2
+    ? `Open underneath through ${pour.plugMm2} mm²: plug it before pouring (a wick through it does).`
+    : null;
+}
+
+function pourDetails(pour: PourInfo): string[] {
+  const warning = pourUndercutWarning(pour);
+  const plug = pourPlugNote(pour);
+  return [
+    `Poured ${pourSideLabel(pour.direction)}, ${pour.filledMm} mm deep of ${pour.depthMm} mm`,
+    ...(plug ? [plug] : []),
+    ...(warning ? [warning] : []),
+  ];
+}
+
+/**
+ * Adds what was poured into a mold body (or a group of them) to the scene, set
+ * beside the mold or over it.
+ */
+export async function addPourToScene(
+  moldNode: SceneNode,
+  castRes: MoldCastSimulationResult,
+  placement: 'beside' | 'overlay',
+): Promise<{ id: string; name: string }> {
+  const moldTrisM: number[] = [];
+  const walkMold = (n: SceneNode, parentMat?: ReturnType<typeof getNodeWorldTransform>) => {
+    const mat = getNodeWorldTransform(n, parentMat);
+    for (const g of resolveCsgGeoms(n, 'render')) {
+      if (g.role === 'collision') continue;
+      appendSolidTriangles({ ...g, textures: undefined }, mat, moldTrisM);
+    }
+    for (const ch of n.children || []) walkMold(ch, mat);
+  };
+  walkMold(moldNode);
+  const lo: [number, number, number] = [Infinity, Infinity, Infinity];
+  const hi: [number, number, number] = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < moldTrisM.length; i++) {
+    const v = moldTrisM[i] * 1000;
+    if (v < lo[i % 3]) lo[i % 3] = v;
+    if (v > hi[i % 3]) hi[i % 3] = v;
+  }
+  if (!moldTrisM.length) {
+    lo.fill(0);
+    hi.fill(0);
+  }
+  const moldTransform = {
+    modelOriginMm: [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, lo[2]] as [number, number, number],
+    workOriginMm: [0, 0, 0] as [number, number, number],
+    scale: [1, 1, 1] as [number, number, number],
+    modelMinMm: lo,
+    modelMaxMm: hi,
+  };
+  // A simulated mold's name carries its own 'Simulated:' and time stamp, which
+  // the cast's name would otherwise repeat inside its own.
+  const moldName = moldNode.name
+    .replace(/^Simulated: /, '')
+    .replace(/ \d{4}-\d{2}-\d{2} \d{2}:\d{2}(_\d+)?$/, '');
+  const added = await addSimulationToScene({
+    mesh: castRes.mesh,
+    transform: moldTransform,
+    kind: 'cast',
+    label: `Cast from ${moldName}`,
+    placement,
+    details: [
+      `Simulated casting from mold: ${moldNode.name} (${moldNode.id})`,
+      `Cast dimensions: ${castRes.sizeMm.width} × ${castRes.sizeMm.depth} × ${castRes.sizeMm.height} mm`,
+      ...(castRes.pour ? pourDetails(castRes.pour) : []),
+    ],
+  });
+  if (castRes.textures && castRes.textures.length > 0) {
+    const castGeom = useStore.getState().sceneGraph.nodes.find((n) => n.id === added.id)?.geoms?.[0];
+    if (castGeom) {
+      useStore.getState().setGeomTextures(added.id, castGeom.name, castRes.textures);
+    }
+  }
+  return added;
+}
+
 export async function runMcpMoldSimulation(params: {
   msg: Record<string, unknown>;
   scene: SceneGraph;
@@ -242,9 +344,14 @@ export async function runMcpMoldSimulation(params: {
         : typeof msg.targetId === 'string'
           ? msg.targetId
           : undefined;
-    const targetId = rawBodyId ? toId(rawBodyId) : undefined;
-    if (targetId) {
-      const moldNode = findNodeInScene(scene.nodes, targetId);
+    // Several bodies, comma separated, pour as one mold: a master and its sleeve.
+    const rawIds = rawBodyId ? rawBodyId.split(',').map((s) => s.trim()).filter(Boolean) : [];
+    if (rawIds.length > 0) {
+      const missing = rawIds.filter((id) => !findNodeInScene(scene.nodes, toId(id)));
+      if (missing.length > 0) {
+        return { ok: false, error: `No mold body with id '${missing.join("', '")}'.` };
+      }
+      const moldNode = pourNodeFor(scene.nodes, rawIds.map(toId));
       if (!moldNode) {
         return { ok: false, error: `No mold body with id '${rawBodyId}'.` };
       }
@@ -252,6 +359,10 @@ export async function runMcpMoldSimulation(params: {
         c.castNode(moldNode, {
           trimChannels: msg.trimChannels === true,
           orientUpright: msg.orientUpright !== false,
+          pour: {
+            direction: POUR_DIRECTIONS.includes(msg.pourDirection as PourDirection) ? (msg.pourDirection as PourDirection) : 'auto',
+            ...(typeof msg.fillMm === 'number' && msg.fillMm > 0 ? { fillMm: msg.fillMm } : {}),
+          },
         }),
       );
       if (!castRes.success) {
@@ -261,58 +372,14 @@ export async function runMcpMoldSimulation(params: {
           warnings: castRes.warnings,
         };
       }
-      const moldTrisM: number[] = [];
-      const walkMold = (n: SceneNode, parentMat?: ReturnType<typeof getNodeWorldTransform>) => {
-        const mat = getNodeWorldTransform(n, parentMat);
-        for (const g of resolveCsgGeoms(n, 'render')) {
-          if (g.role === 'collision') continue;
-          appendSolidTriangles({ ...g, textures: undefined }, mat, moldTrisM);
-        }
-        for (const ch of n.children || []) walkMold(ch, mat);
-      };
-      walkMold(moldNode);
-      const lo: [number, number, number] = [Infinity, Infinity, Infinity];
-      const hi: [number, number, number] = [-Infinity, -Infinity, -Infinity];
-      for (let i = 0; i < moldTrisM.length; i++) {
-        const v = moldTrisM[i] * 1000;
-        if (v < lo[i % 3]) lo[i % 3] = v;
-        if (v > hi[i % 3]) hi[i % 3] = v;
-      }
-      if (!moldTrisM.length) {
-        lo.fill(0);
-        hi.fill(0);
-      }
-      const moldTransform = {
-        modelOriginMm: [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, lo[2]] as [number, number, number],
-        workOriginMm: [0, 0, 0] as [number, number, number],
-        scale: [1, 1, 1] as [number, number, number],
-        modelMinMm: lo,
-        modelMaxMm: hi,
-      };
-      const added = await addSimulationToScene({
-        mesh: castRes.mesh,
-        transform: moldTransform,
-        kind: 'cast',
-        label: `Cast from ${moldNode.name}`,
-        placement,
-        details: [
-          `Simulated casting from mold: ${moldNode.name} (${moldNode.id})`,
-          `Cast dimensions: ${castRes.sizeMm.width} × ${castRes.sizeMm.depth} × ${castRes.sizeMm.height} mm`,
-        ],
-      });
-      if (castRes.textures && castRes.textures.length > 0) {
-        const addedNode = findNodeInScene(useStore.getState().sceneGraph.nodes, added.id);
-        const castGeom = addedNode?.geoms?.[0];
-        if (castGeom) {
-          useStore.getState().setGeomTextures(added.id, castGeom.name, castRes.textures);
-        }
-      }
+      const added = await addPourToScene(moldNode, castRes, placement);
       return {
         ok: true,
         id: added.id,
         name: added.name,
         kind: 'mold_cast',
         sourceMoldId: moldNode.id,
+        ...(castRes.pour ? { pour: castRes.pour } : {}),
         placement,
         sizeMm: castRes.sizeMm,
         volumeMm3: Math.round(castRes.castVolumeMm3),

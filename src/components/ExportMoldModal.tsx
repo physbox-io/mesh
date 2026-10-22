@@ -32,6 +32,7 @@ import { sceneStockTransform, useAddSimulation } from '../hooks/useAddSimulation
 import { stlToMesh, type IndexedMesh } from '../utils/stlMesh';
 import type { SimulationPlacement } from '../utils/simulatedPart';
 import { useStore } from '../store/useStore';
+import { PourIntoSelectionModal } from './PourIntoSelectionModal';
 
 interface ExportMoldModalProps {
   isOpen: boolean;
@@ -133,7 +134,27 @@ function indexedMeshToGeometry(mesh: IndexedMesh): THREE.BufferGeometry {
 
 const EMPTY_SUMMARY: MoldSummary = moldSummary(emptyMoldResult());
 
-export const ExportMoldModal: React.FC<ExportMoldModalProps> = ({ isOpen, onClose, scene }) => {
+/**
+ * The Mold button. Bodies selected that already make a mold are poured into;
+ * anything else gets a mold designed for the scene.
+ */
+export const ExportMoldModal: React.FC<ExportMoldModalProps> = (props) => {
+  const { isOpen, onClose } = props;
+  const [pourIds, setPourIds] = useState<string[] | null>(null);
+  useEffect(() => {
+    if (!isOpen) return;
+    const { selectedNodeId, extraSelectedIds } = useStore.getState();
+    setPourIds(selectedNodeId ? [selectedNodeId, ...extraSelectedIds.filter((id) => id !== selectedNodeId)] : []);
+    return () => setPourIds(null);
+  }, [isOpen]);
+  if (!isOpen || pourIds === null) return null;
+  if (pourIds.length > 0) {
+    return <PourIntoSelectionModal ids={pourIds} onClose={onClose} onMakeMold={() => setPourIds([])} />;
+  }
+  return <MoldDesigner {...props} />;
+};
+
+const MoldDesigner: React.FC<ExportMoldModalProps> = ({ isOpen, onClose, scene }) => {
   useEscapeToClose(isOpen, onClose);
   // 'auto' picks the simplest mold that keeps the part, and the direction it
   // opens along; both stay overridable below.

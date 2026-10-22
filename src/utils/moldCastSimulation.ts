@@ -34,6 +34,7 @@ import { resolveCsgGeoms } from './csg';
 import { repairMesh } from './meshRepair';
 import type { MoldExportResult, MoldSummary } from './moldExporter';
 import { unrotateFromPull } from './moldPullDirection';
+import { pourIntoCavity, probeFacesTouched, type PourInfo, type PourOptions } from './pourCast';
 
 export interface MoldCastSimulationOptions {
   /** Whether to trim narrow sprue/vent runner stubs sticking up to the outer mold face (default: false — keeps what the mold actually casts, or true when comparing part volume). */
@@ -42,6 +43,11 @@ export interface MoldCastSimulationOptions {
   orientUpright?: boolean;
   /** Whether to bake high-density surface textures (geom.textures) into the cast mesh triangles (default: false to keep scene graph meshes lightweight). */
   includeSurfaceTextures?: boolean;
+  /**
+   * Pour into bodies that may or may not be a mold: from whichever side holds
+   * a pour (or the one given), to a fill height, failing when nothing does.
+   */
+  pour?: PourOptions;
 }
 
 export interface MoldCastSimulationResult {
@@ -58,6 +64,8 @@ export interface MoldCastSimulationResult {
   cavityComponents: number;
   /** Surface textures transferred and inverted from the mold onto the cast part. */
   textures?: SurfaceTexture[];
+  /** For a pour: the side it came from, how deep, and what a rigid mold would hold. */
+  pour?: PourInfo;
 }
 
 export interface RawMoldTexture {
@@ -738,26 +746,52 @@ export async function simulateCastFromMoldTriangles(
         moldSolid.delete();
       }
 
+      const probe = { minX: boxMinX, maxX: boxMaxX, minY: boxMinY, maxY: boxMaxY, minZ: boxMinZ, maxZ: boxMaxZ };
+      if (options?.pour) {
+        const poured = cavity.isEmpty() ? null : pourIntoCavity(wasm, cavity, probe, options.pour);
+        cavity.delete();
+        if (!poured) {
+          const sides = !options.pour.direction || options.pour.direction === 'auto';
+          return {
+            success: false,
+            error: sides
+              ? 'Nothing here holds a pour: there is no pocket open on one side only.'
+              : `Nothing here holds a pour from ${options.pour.direction}.`,
+            warnings,
+            mesh: { positions: new Float32Array(0), faces: new Uint32Array(0) },
+            castVolumeMm3: 0,
+            sizeMm: { width: 0, depth: 0, height: 0 },
+            cavityComponents: 0,
+          };
+        }
+        const raw = manifoldToMeshMm(poured.casting);
+        poured.casting.delete();
+        // Turned out of the mold onto the face the pour left.
+        const res = finalizeCastMesh(raw.positionsMm, raw.faces, poured.pieces, { ...options, flipUpright: true }, warnings);
+        return { ...res, pour: poured.info };
+      }
+
       if (!cavity.isEmpty()) {
         const parts = cavity.decompose();
         cavity.delete();
         const cavityComponents = parts.length;
 
         if (parts.length > 0) {
-          // Pick component with largest volume
+          // Keep the largest piece that pours: one open on at most one face of
+          // the probe box. Air reaching round the outside of the mold touches
+          // several faces, and round a sleeve it can outweigh the cavity.
           let best = parts[0];
-          let bestVol = best.volume();
-          for (let i = 1; i < parts.length; i++) {
-            const v = parts[i].volume();
-            if (v > bestVol) {
-              bestVol = v;
-              best = parts[i];
+          let bestKey = -Infinity;
+          for (const p of parts) {
+            const key = p.volume() + (probeFacesTouched(p, probe) <= 1 ? 1e15 : 0);
+            if (key > bestKey) {
+              bestKey = key;
+              best = p;
             }
           }
           for (const p of parts) {
             if (p !== best) p.delete();
           }
-
           // Optional trim runner channels
           if (options?.trimChannels) {
             // Sprue and vent channels stick up near the top face of the mold
@@ -812,6 +846,20 @@ export async function simulateCastFromMoldTriangles(
     }
   } catch (err) {
     warnings.push(`Manifold CSG error: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  // A pour picks its side and level from the exact cavity; the column fallback
+  // can do neither, so it would hand back something other than what was asked.
+  if (options?.pour) {
+    return {
+      success: false,
+      error: warnings.find((w) => w.startsWith('Manifold CSG error')) ?? 'The mold is not a closed solid, so nothing can be poured into it.',
+      warnings,
+      mesh: { positions: new Float32Array(0), faces: new Uint32Array(0) },
+      castVolumeMm3: 0,
+      sizeMm: { width: 0, depth: 0, height: 0 },
+      cavityComponents: 0,
+    };
   }
 
   // 4. Fallback Path: Exact Column Spans + meshField
