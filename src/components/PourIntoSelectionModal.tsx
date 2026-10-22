@@ -111,7 +111,6 @@ export const PourIntoSelectionModal: React.FC<PourIntoSelectionModalProps> = ({ 
   const pour = cast?.pour;
   const undercut = pour ? pourUndercutWarning(pour) : null;
   const plug = pour ? pourPlugNote(pour) : null;
-  const size = cast?.sizeMm;
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200">
       <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-800 w-full max-w-md flex flex-col overflow-hidden text-slate-800 dark:text-slate-100">
