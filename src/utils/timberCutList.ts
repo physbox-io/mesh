@@ -41,7 +41,6 @@ export interface PackedStockBar {
 
 export interface CncWindowSetup {
   id: string;
-  fileName: string;
   partId: string;
   partTitle: string;
   windowIndex: number;
@@ -57,7 +56,7 @@ export interface CncWindowSetup {
   cutterDiaMm: number;
   operationsSummary: string[];
   workholdingNotes: string[];
-  /** Ready-to-run GRBL G-code (.nc) for this window setup. */
+  /** Ready-to-run GRBL G-code for this window setup. */
   gcode: string;
   estimatedMinutes: number;
 }
@@ -442,7 +441,6 @@ function buildCncSetupsForPart(
     windows.forEach((win, wIdx) => {
       const winNum = wIdx + 1;
       const setupId = `${part.member.id}_F${faceIdx}_W${winNum}`;
-      const fileName = `${setupId}.nc`;
       const overhangMm = Math.max(0, Math.round(partLenMm - maxWindowLenMm));
 
       const opsSummary: string[] = [];
@@ -508,7 +506,6 @@ function buildCncSetupsForPart(
 
       setups.push({
         id: setupId,
-        fileName,
         partId: part.member.id,
         partTitle: part.member.title,
         windowIndex: winNum,
@@ -721,7 +718,7 @@ export function buildTimberCutPlan(
       cardMdLines.push(``, `#### 2. CNC Router Setups (Cut While Blank is Square)`);
       for (const s of cncSetups) {
         cardMdLines.push(
-          `- [ ] **Setup \`${s.id}\` (\`${s.fileName}\`, ~${s.estimatedMinutes} min, Ø${s.cutterDiaMm} mm end mill):**`,
+          `- [ ] **Setup \`${s.id}\` (~${s.estimatedMinutes} min, Ø${s.cutterDiaMm} mm end mill):**`,
           ...s.workholdingNotes.map((w) => `  - ${w}`),
           ...s.operationsSummary.map((o) => `  - *Cut:* ${o}`),
         );

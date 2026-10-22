@@ -54,6 +54,11 @@ import {
 import { warpGcode, type ProbeGrid } from './meshLeveler';
 import { loadManifold } from './sculptCut';
 import {
+  decomposeSolidIntoPlanks,
+  type TimberPlankBreakdownOutcome,
+  type TimberPlankOptions,
+} from './timberBreakdown';
+import {
   synthesizeTimberJoinery,
   type TimberBreakdownOutcome,
   type TimberJoineryOptions,
@@ -67,8 +72,10 @@ export interface ContourGcodeJobOptions {
 }
 
 export interface TimberJobOptions {
+  mode?: 'frame' | 'planks';
   soups: Float64Array[];
-  joineryOptions: TimberJoineryOptions;
+  joineryOptions?: TimberJoineryOptions;
+  plankOptions?: TimberPlankOptions;
   cncBedMm: [number, number, number];
   defaultStockLengthMm: number;
 }
@@ -76,6 +83,7 @@ export interface TimberJobOptions {
 export interface TimberJobResult {
   outcome: TimberBreakdownOutcome;
   cutPlan: TimberCutPlan | null;
+  plankOutcome: TimberPlankBreakdownOutcome | null;
 }
 
 /** Which export a job runs. Add a case here and in `runExportJob`. */
@@ -162,17 +170,27 @@ export function runExportJob<K extends ExportJobKind>(
       return runSheetJob(options as SheetJobOptions, onProgress) as ExportJobResult<K>;
     case 'timber': {
       const {
+        mode,
         soups = [],
         joineryOptions = {},
+        plankOptions = {},
         cncBedMm = [300, 300, 80],
         defaultStockLengthMm = 1800,
       } = options as TimberJobOptions;
       return loadManifold().then((wasm) => {
-        const outcome = synthesizeTimberJoinery(wasm, soups, joineryOptions);
-        const cutPlan = outcome.ok
-          ? buildTimberCutPlan(outcome, { cncBedMm, defaultStockLengthMm })
-          : null;
-        return { outcome, cutPlan } as ExportJobResult<K>;
+        const outcome: TimberBreakdownOutcome =
+          mode === 'planks'
+            ? { ok: false, error: 'Plank mode active' }
+            : synthesizeTimberJoinery(wasm, soups, joineryOptions);
+        const cutPlan =
+          outcome.ok && mode !== 'planks'
+            ? buildTimberCutPlan(outcome, { cncBedMm, defaultStockLengthMm })
+            : null;
+        const plankOutcome: TimberPlankBreakdownOutcome | null =
+          mode === 'planks' || (outcome.ok && outcome.parts.length <= 1 && outcome.joints.length === 0)
+            ? decomposeSolidIntoPlanks(wasm, soups, plankOptions)
+            : null;
+        return { outcome, cutPlan, plankOutcome } as ExportJobResult<K>;
       });
     }
     default: {

@@ -70,7 +70,7 @@ export const DEFAULT_TIMBER_JOINERY_OPTIONS: Required<TimberJoineryOptions> = {
   edgeProfile: 'roundover',
   edgeRadiusMm: 4,
   stopMarginMm: 12,
-  maxBoardWidthMm: 180,
+  maxBoardWidthMm: 200,
   tenonCutMethod: 'bandsaw',
 };
 
@@ -447,6 +447,7 @@ function applyStoppedEdgeProfiles(
   wasm: ManifoldToplevel,
   solid: Manifold,
   member: TimberMember,
+  allMembers: TimberMember[],
   mortises: MortiseSpec[],
   tenons: TenonSpec[],
   profile: TimberEdgeProfile,
@@ -523,7 +524,8 @@ function applyStoppedEdgeProfiles(
   }
 
   // Subtract 45° chamfer wedges (or multi-facet roundover cutters) along the
-  // 4 longitudinal corners of the member over each active stopped zone!
+  // longitudinal corners of the member over each active stopped zone, skipping
+  // any interior glue-seam edge where two side-by-side panels meet!
   const cutters: Manifold[] = [];
   for (const zone of zones) {
     const spanLen = zone.toMm - zone.fromMm;
@@ -532,6 +534,20 @@ function applyStoppedEdgeProfiles(
     const zoneCenter = add3(member.centerMm, scale3(aL, L * 0.5 - midDistFromTop));
 
     for (const sw of [-1, 1]) {
+      if (member.role === 'panel') {
+        const sideDir = scale3(aW, sw);
+        const abutsAdjacentPanel = allMembers.some((other) => {
+          if (other.index === member.index || other.role !== 'panel') return false;
+          const diff = sub3(other.centerMm, member.centerMm);
+          if (Math.abs(dot(diff, aT)) > (T + other.dimsMm[2]) * 0.5 + 5) return false;
+          if (Math.abs(dot(diff, aL)) > (L + other.dimsMm[0]) * 0.5) return false;
+          const distAlongSide = dot(diff, sideDir);
+          const expectedDist = (W + other.dimsMm[1]) * 0.5;
+          return Math.abs(distAlongSide - expectedDist) <= 12;
+        });
+        if (abutsAdjacentPanel) continue;
+      }
+
       for (const st of [-1, 1]) {
         const cornerCenter = add3(
           zoneCenter,
@@ -587,10 +603,11 @@ export function synthesizeTimberJoinery(
     const raw = meshMmToManifold(wasm, m.positionsMm, m.faces);
     const obbVol = m.dimsMm[0] * m.dimsMm[1] * m.dimsMm[2];
     const fillRatio = m.volumeMm3 / Math.max(1e-6, obbVol);
-    // If a member is a rectangular timber bar that already had mortise pockets or
-    // tenon shoulder rabbets cut into it (fill ratio 70%..99.8%), start from its
-    // clean OBB blank so re-synthesizing joinery with new options doesn't double-cut.
-    if (fillRatio > 0.70 && fillRatio < 0.998) {
+    // If a non-tapered rectangular timber bar already had mortise pockets or
+    // tenon shoulder rabbets cut into it (fill ratio 84%..99.8%, above the π/4 ≈ 78.5%
+    // fill ratio of a circular disc/cylinder), start from its clean OBB blank so
+    // re-synthesizing joinery with new options doesn't double-cut.
+    if (!m.isTapered && fillRatio > 0.84 && fillRatio < 0.998) {
       raw.delete();
       return orientedBoxManifold(wasm, m.centerMm, m.axes[0], m.axes[1], m.axes[2], m.dimsMm);
     }
@@ -600,7 +617,7 @@ export function synthesizeTimberJoinery(
     const raw = meshMmToManifold(wasm, m.positionsMm, m.faces);
     const obbVol = m.dimsMm[0] * m.dimsMm[1] * m.dimsMm[2];
     const fillRatio = m.volumeMm3 / Math.max(1e-6, obbVol);
-    if (fillRatio > 0.70 && fillRatio < 0.998) {
+    if (!m.isTapered && fillRatio > 0.84 && fillRatio < 0.998) {
       raw.delete();
       return orientedBoxManifold(wasm, m.centerMm, m.axes[0], m.axes[1], m.axes[2], m.dimsMm);
     }
@@ -620,12 +637,14 @@ export function synthesizeTimberJoinery(
 
   try {
     // -------------------------------------------------------------------------
-    // 0. Trim Legs & Rails that Overlap into Tabletop / Shelf Panels
+    // 0. Trim Legs & Rails that Overlap into Tabletop / Shelf Panels, and
+    //    Resolve Any Residual Panel-to-Panel Overlaps
     // -------------------------------------------------------------------------
     for (let pIdx = 0; pIdx < members.length; pIdx++) {
       if (members[pIdx].role !== 'panel') continue;
       for (let mIdx = 0; mIdx < members.length; mIdx++) {
-        if (mIdx === pIdx || members[mIdx].role === 'panel') continue;
+        if (mIdx === pIdx) continue;
+        if (members[mIdx].role === 'panel' && mIdx < pIdx) continue;
         const inter = solids[mIdx].intersect(plainSolids[pIdx]);
         const vol = inter.volume();
         inter.delete();
@@ -642,7 +661,8 @@ export function synthesizeTimberJoinery(
             const p = mesh.numProp;
             const nVerts = mesh.vertProperties.length / p;
             if (nVerts > 0) {
-              const aL = members[mIdx].axes[0];
+              const trimAxisIdx = members[mIdx].role === 'panel' ? 1 : 0;
+              const aTrim = members[mIdx].axes[trimAxisIdx];
               const cOld = members[mIdx].centerMm;
               let minProj = Infinity;
               let maxProj = -Infinity;
@@ -650,14 +670,14 @@ export function synthesizeTimberJoinery(
                 const vx = mesh.vertProperties[v * p] - cOld[0];
                 const vy = mesh.vertProperties[v * p + 1] - cOld[1];
                 const vz = mesh.vertProperties[v * p + 2] - cOld[2];
-                const proj = vx * aL[0] + vy * aL[1] + vz * aL[2];
+                const proj = vx * aTrim[0] + vy * aTrim[1] + vz * aTrim[2];
                 if (proj < minProj) minProj = proj;
                 if (proj > maxProj) maxProj = proj;
               }
-              const newLen = maxProj - minProj;
+              const newSpan = maxProj - minProj;
               const midShift = 0.5 * (minProj + maxProj);
-              members[mIdx].dimsMm[0] = +newLen.toFixed(2);
-              members[mIdx].centerMm = add3(cOld, scale3(aL, midShift));
+              members[mIdx].dimsMm[trimAxisIdx] = +newSpan.toFixed(2);
+              members[mIdx].centerMm = add3(cOld, scale3(aTrim, midShift));
             }
           } else {
             trimmed.delete();
@@ -1057,16 +1077,27 @@ export function synthesizeTimberJoinery(
     // -------------------------------------------------------------------------
     // 4. Plank-to-Plank Alignment Dowels for Split Tabletops / Chair Seats
     // -------------------------------------------------------------------------
-    const planks = members.filter((m) => m.plankInfo);
+    const planks = members
+      .filter((m) => m.plankInfo)
+      .sort((a, b) => (a.plankInfo!.index - b.plankInfo!.index));
     for (let p = 0; p + 1 < planks.length; p++) {
       const pA = planks[p];
       const pB = planks[p + 1];
-      const seamCenter: Vec3 = [
+      if (Math.abs(pA.centerMm[2] - pB.centerMm[2]) > 15) continue;
+      const seamNormal = unit(sub3(pB.centerMm, pA.centerMm));
+      const seamCoord = 0.5 * (
+        dot(pA.centerMm, seamNormal) + pA.dimsMm[1] * 0.5 +
+        dot(pB.centerMm, seamNormal) - pB.dimsMm[1] * 0.5
+      );
+      const midAB: Vec3 = [
         0.5 * (pA.centerMm[0] + pB.centerMm[0]),
         0.5 * (pA.centerMm[1] + pB.centerMm[1]),
         0.5 * (pA.centerMm[2] + pB.centerMm[2]),
       ];
-      const seamNormal = unit(sub3(pB.centerMm, pA.centerMm));
+      const seamCenter = add3(
+        midAB,
+        scale3(seamNormal, seamCoord - dot(midAB, seamNormal)),
+      );
       const grainAxis = pA.axes[0];
       const plankLen = Math.min(pA.dimsMm[0], pB.dimsMm[0]);
       const dowelDia = Math.min(8, Math.max(6, Math.round(pA.dimsMm[2] * 0.35)));
@@ -1167,6 +1198,7 @@ export function synthesizeTimberJoinery(
         wasm,
         solids[i],
         members[i],
+        members,
         mortisesByMember[i],
         tenonsByMember[i],
         options.edgeProfile,

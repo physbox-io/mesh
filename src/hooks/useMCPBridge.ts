@@ -49,7 +49,11 @@ import { generateCastPattern, DEFAULT_CAST_OPTIONS, type CastMethod } from '../u
 import { runCastPrep } from '../utils/castPrepRunner';
 import { cutAlongPlaneOffThread, selectionSoups, splitOffThread, testAssemblyOffThread } from '../utils/printSplitClient';
 import { loadManifold } from '../utils/sculptCut';
-import { collectIndividualPartSoups } from '../utils/timberBreakdown';
+import {
+  collectIndividualPartSoups,
+  decomposeSolidIntoPlanks,
+  type PlankJointType,
+} from '../utils/timberBreakdown';
 import { synthesizeTimberJoinery, type TenonCornerFit, type TimberEdgeProfile, type TimberJointMode } from '../utils/timberJoinery';
 import { buildTimberCutPlan } from '../utils/timberCutList';
 import { filamentSpec } from '../utils/filaments';
@@ -3344,13 +3348,29 @@ export function useMCPBridge() {
         }
 
         /*
-         * Timber & Joinery Breakdown: decompose a table, chair, or flower stand
-         * into mortise-and-tenon parts, stopped edge roundovers, 1D stock bars,
-         * sliding CNC window setups, and a beginner-proof buildGuideMarkdown.
+         * Timber & Joinery Breakdown (`physics_timber_breakdown` / `BREAKDOWN_JOINERY`):
+         * Decompose either:
+         *   (a) Large architectural/enclosure/cabinet solids into machinable timber
+         *       planks with interlocking rabbet, miter, finger, or butt joints,
+         *       alignment dowels, hollow interior option, and lay-flat sheet packing; OR
+         *   (b) Framed furniture (table, chair, flower stand) into mortise-and-tenon
+         *       legs & rails, stopped edge roundovers, 1D stock bars, and CNC windows.
          */
+        case 'TIMBER_BREAKDOWN':
+        case 'PHYSICS_TIMBER_BREAKDOWN':
         case 'BREAKDOWN_JOINERY': {
-          const bodyId = typeof msg.bodyId === 'string' ? msg.bodyId : store.selectedNodeId;
-          const others = (Array.isArray(msg.withIds) ? msg.withIds : []).filter((v): v is string => typeof v === 'string');
+          const bodyId =
+            typeof msg.bodyId === 'string'
+              ? msg.bodyId
+              : typeof msg.body_id === 'string'
+                ? msg.body_id
+                : store.selectedNodeId;
+          const rawWithIds = Array.isArray(msg.withIds)
+            ? msg.withIds
+            : Array.isArray(msg.with_ids)
+              ? msg.with_ids
+              : [];
+          const others = rawWithIds.filter((v): v is string => typeof v === 'string');
           const targetIds = bodyId ? [bodyId, ...others] : store.sceneGraph.nodes.map((n) => n.id);
           if (!targetIds.length) return { ok: false, error: 'Give bodyId, or add a body to the scene first.' };
           const primary = findNodeInScene(store.sceneGraph.nodes, targetIds[0]);
@@ -3360,6 +3380,97 @@ export function useMCPBridge() {
           if (!items.length) return { ok: false, error: `${primary.name} has no solid geometry to break down.` };
 
           const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+          const placement: 'replace' | 'beside' = msg.placement === 'beside' ? 'beside' : 'replace';
+
+          const rawJointType = msg.jointType ?? msg.joint_type;
+          const hasPlankSpecificArg =
+            msg.mode === 'planks' ||
+            rawJointType === 'rabbet' ||
+            rawJointType === 'miter' ||
+            rawJointType === 'finger' ||
+            rawJointType === 'butt' ||
+            msg.boardThicknessMm !== undefined ||
+            msg.board_thickness_mm !== undefined ||
+            msg.wallThicknessMm !== undefined ||
+            msg.wall_thickness_mm !== undefined ||
+            msg.hollowInterior !== undefined ||
+            msg.hollow_interior !== undefined ||
+            msg.fingerWidthMm !== undefined ||
+            msg.finger_width_mm !== undefined ||
+            msg.dowelDiaMm !== undefined ||
+            msg.dowel_dia_mm !== undefined ||
+            msg.maxBoardLengthMm !== undefined ||
+            msg.max_board_length_mm !== undefined;
+
+          const wasm = await loadManifold();
+          const soups = items.map((it) => it.soup);
+
+          if (hasPlankSpecificArg && msg.mode !== 'frame') {
+            const jointType: PlankJointType =
+              rawJointType === 'miter' || rawJointType === 'finger' || rawJointType === 'butt'
+                ? rawJointType
+                : 'rabbet';
+            const plankRes = decomposeSolidIntoPlanks(wasm, soups, {
+              boardThicknessMm: num(msg.boardThicknessMm ?? msg.board_thickness_mm),
+              wallThicknessMm: num(msg.wallThicknessMm ?? msg.wall_thickness_mm),
+              maxBoardWidthMm: num(msg.maxBoardWidthMm ?? msg.max_board_width_mm),
+              maxBoardLengthMm: num(msg.maxBoardLengthMm ?? msg.max_board_length_mm),
+              jointType,
+              fingerWidthMm: num(msg.fingerWidthMm ?? msg.finger_width_mm),
+              dowelDiaMm: num(msg.dowelDiaMm ?? msg.dowel_dia_mm),
+              dowelLengthMm: num(msg.dowelLengthMm ?? msg.dowel_length_mm),
+              clearanceMm: num(msg.clearanceMm ?? msg.clearance_mm),
+              hollowInterior:
+                typeof msg.hollowInterior === 'boolean'
+                  ? msg.hollowInterior
+                  : typeof msg.hollow_interior === 'boolean'
+                    ? msg.hollow_interior
+                    : undefined,
+            });
+            if (!plankRes.ok) return plankRes;
+
+            const names = plankRes.planks.map((p) => p.id);
+            const ids =
+              msg.apply === true
+                ? store.splitBodyForPrint(primary.id, plankRes.sections, absorbed, {
+                    plain: false,
+                    names,
+                    centerOrigin: true,
+                    placement,
+                  })
+                : null;
+
+            return {
+              ok: true,
+              mode: 'planks',
+              applied: !!ids,
+              placement: ids ? placement : undefined,
+              options: plankRes.options,
+              totalVolumeMm3: plankRes.totalVolumeMm3,
+              originalVolumeMm3: plankRes.originalVolumeMm3,
+              hollowedVolumeMm3: plankRes.hollowedVolumeMm3,
+              layFlatSheetMm: plankRes.layFlatSheetMm,
+              planks: plankRes.planks.map((p, idx) => ({
+                index: idx,
+                id: p.id,
+                ...(ids ? { sceneNodeId: ids[idx] } : {}),
+                name: p.name,
+                wallFace: p.wallFace,
+                dimensionsMm: p.dimensionsMm,
+                grainAxis: p.grainAxis,
+                volumeMm3: p.volumeMm3,
+                explodedOffsetMm: p.explodedOffsetMm,
+                layFlatOffsetMm: p.layFlatOffsetMm,
+                layFlatSizeMm: p.layFlatSizeMm,
+                dowelCount: p.dowelHoles.length,
+                jointSummary: p.jointSummary,
+                joints: p.joints,
+              })),
+              bomMarkdown: plankRes.bomMarkdown,
+              warnings: plankRes.warnings,
+            };
+          }
+
           const jointMode: TimberJointMode =
             msg.jointMode === 'dowel' || msg.jointMode === 'dado' ? msg.jointMode : 'mortise_tenon';
           const tenonCornerFit: TenonCornerFit =
@@ -3367,10 +3478,9 @@ export function useMCPBridge() {
           const edgeProfile: TimberEdgeProfile =
             msg.edgeProfile === 'chamfer' || msg.edgeProfile === 'square' ? msg.edgeProfile : 'roundover';
 
-          const wasm = await loadManifold();
           const outcome = synthesizeTimberJoinery(
             wasm,
-            items.map((it) => it.soup),
+            soups,
             {
               jointMode,
               tenonCornerFit,
@@ -3388,6 +3498,56 @@ export function useMCPBridge() {
           );
           if (!outcome.ok) return outcome;
 
+          // If auto-mode was called on a single unframed solid block (1 part, 0 joints)
+          // and msg.mode !== 'frame', fall back to hollow-shell / plank breakdown!
+          if (msg.mode !== 'frame' && outcome.parts.length <= 1 && outcome.joints.length === 0 && msg.jointMode === undefined) {
+            const plankRes = decomposeSolidIntoPlanks(wasm, soups, {
+              maxBoardWidthMm: num(msg.maxBoardWidthMm ?? msg.max_board_width_mm),
+              clearanceMm: num(msg.clearanceMm ?? msg.clearance_mm),
+            });
+            if (plankRes.ok && plankRes.planks.length > 1) {
+              const names = plankRes.planks.map((p) => p.id);
+              const ids =
+                msg.apply === true
+                  ? store.splitBodyForPrint(primary.id, plankRes.sections, absorbed, {
+                      plain: false,
+                      names,
+                      centerOrigin: true,
+                      placement,
+                    })
+                  : null;
+              return {
+                ok: true,
+                mode: 'planks',
+                applied: !!ids,
+                placement: ids ? placement : undefined,
+                options: plankRes.options,
+                totalVolumeMm3: plankRes.totalVolumeMm3,
+                originalVolumeMm3: plankRes.originalVolumeMm3,
+                hollowedVolumeMm3: plankRes.hollowedVolumeMm3,
+                layFlatSheetMm: plankRes.layFlatSheetMm,
+                planks: plankRes.planks.map((p, idx) => ({
+                  index: idx,
+                  id: p.id,
+                  ...(ids ? { sceneNodeId: ids[idx] } : {}),
+                  name: p.name,
+                  wallFace: p.wallFace,
+                  dimensionsMm: p.dimensionsMm,
+                  grainAxis: p.grainAxis,
+                  volumeMm3: p.volumeMm3,
+                  explodedOffsetMm: p.explodedOffsetMm,
+                  layFlatOffsetMm: p.layFlatOffsetMm,
+                  layFlatSizeMm: p.layFlatSizeMm,
+                  dowelCount: p.dowelHoles.length,
+                  jointSummary: p.jointSummary,
+                  joints: p.joints,
+                })),
+                bomMarkdown: plankRes.bomMarkdown,
+                warnings: plankRes.warnings,
+              };
+            }
+          }
+
           const bedArr = Array.isArray(msg.cncBedMm) ? (msg.cncBedMm as number[]) : null;
           const cncBedMm: [number, number, number] =
             bedArr && bedArr.length === 3 && bedArr.every((v) => typeof v === 'number' && v > 0)
@@ -3402,12 +3562,19 @@ export function useMCPBridge() {
           const names = outcome.parts.map((p) => p.member.id);
           const ids =
             msg.apply === true
-              ? store.splitBodyForPrint(primary.id, outcome.sections, absorbed, { plain: false, names, centerOrigin: true })
+              ? store.splitBodyForPrint(primary.id, outcome.sections, absorbed, {
+                  plain: false,
+                  names,
+                  centerOrigin: true,
+                  placement,
+                })
               : null;
 
           return {
             ok: true,
+            mode: 'frame',
             applied: !!ids,
+            placement: ids ? placement : undefined,
             parts: outcome.parts.map((p, idx) => ({
               index: idx,
               id: p.member.id,
@@ -3435,7 +3602,6 @@ export function useMCPBridge() {
             hardwareBom: cutPlan.hardwareBom,
             cncSetups: cutPlan.allCncSetups.map((s) => ({
               id: s.id,
-              fileName: s.fileName,
               partId: s.partId,
               faceUpLabel: s.faceUpLabel,
               fenceFaceLabel: s.fenceFaceLabel,

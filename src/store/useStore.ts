@@ -1920,7 +1920,13 @@ export interface PhysicsState {
      * the part's colour and are given no print pose. `carry`, a section
      * each: the patterns and seams it keeps (utils/knife carryAcrossCut).
      */
-    opts?: { plain?: boolean; carry?: { textures?: SurfaceTexture[]; faceSplits?: FaceSplit[] }[]; names?: string[]; centerOrigin?: boolean },
+    opts?: {
+      plain?: boolean;
+      carry?: { textures?: SurfaceTexture[]; faceSplits?: FaceSplit[] }[];
+      names?: string[];
+      centerOrigin?: boolean;
+      placement?: 'replace' | 'beside';
+    },
   ) => string[];
   /** Set how finely contact is resolved (SceneGraph.simFidelity). One undo step. */
   setSimFidelity: (fidelity: 'standard' | 'print') => void;
@@ -3500,7 +3506,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
 
     // The other bodies the sections were cut from — children of this one, or
     // others selected with it — are in the sections now, wherever they hung.
-    if (absorbed.length) {
+    if (opts.placement !== 'beside' && absorbed.length) {
       const gone = new Set(absorbed.filter((id) => id !== nodeId));
       const prune = (list: SceneNode[]): SceneNode[] => list
         .filter((c) => !gone.has(c.id))
@@ -3548,16 +3554,6 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
 
     const baseName = first.name || first.id;
     const basePos: [number, number, number] = [first.pos?.[0] ?? 0, first.pos?.[1] ?? 0, first.pos?.[2] ?? 0];
-    strip(first);
-    const firstCentered = recenterSection(sections[0]);
-    if (opts.centerOrigin) {
-      first.pos = [basePos[0] + firstCentered.offset[0], basePos[1] + firstCentered.offset[1], basePos[2] + firstCentered.offset[2]];
-    }
-    if (opts.names?.[0]) first.name = opts.names[0];
-    first.geoms = geomsFor(first.name || first.id, firstCentered.sec, 0);
-    if (opts.plain) delete first.printPose;
-    else first.printPose = poseOf(firstCentered.sec);
-    installPieces(first, firstCentered.sec);
 
     const siblings = (() => {
       const walk = (list: SceneNode[]): SceneNode[] | null => {
@@ -3571,6 +3567,65 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
       return walk(newScene.nodes) ?? newScene.nodes;
     })();
     const at = siblings.indexOf(first);
+
+    if (opts.placement === 'beside') {
+      // Keep original body untouched and place all split sections beside it along +X.
+      let allMinX = Infinity, allMaxX = -Infinity;
+      for (const s of sections) {
+        for (let i = 0; i < s.positions.length; i += 3) {
+          const x = s.positions[i];
+          if (x < allMinX) allMinX = x;
+          if (x > allMaxX) allMaxX = x;
+        }
+      }
+      const spanX = Number.isFinite(allMaxX - allMinX) ? Math.max(0.05, allMaxX - allMinX) : 0.25;
+      const shiftX = spanX + 0.08;
+      const strippedTemplate: SceneNode = JSON.parse(JSON.stringify(first));
+      strip(strippedTemplate);
+      const { children: _children, geoms: _geoms, ...rest } = strippedTemplate;
+      void _children; void _geoms;
+
+      const ids: string[] = [];
+      sections.forEach((rawSec, k) => {
+        const { sec, offset } = recenterSection(rawSec);
+        const id = `split_${Math.random().toString(36).substring(2, 10)}`;
+        ids.push(id);
+        const name = opts.names?.[k] || `${baseName}_part${k + 1}`;
+        const copy: SceneNode = JSON.parse(JSON.stringify(rest));
+        const section: SceneNode = {
+          ...copy,
+          id,
+          name,
+          pos: opts.centerOrigin
+            ? [basePos[0] + shiftX + offset[0], basePos[1] + offset[1], basePos[2] + offset[2]]
+            : [basePos[0] + shiftX, basePos[1], basePos[2]],
+          joints: (first.joints || []).map((j: SceneJoint) => ({ ...j, name: `${name}_${String(j.name || 'joint').split('_').pop()}` })),
+          weldTargetId: undefined,
+          coupleTargetId: undefined,
+          connectTargetId: undefined,
+          script: undefined,
+          geoms: geomsFor(name, sec, k),
+          printPose: opts.plain ? undefined : poseOf(sec),
+          children: [],
+        };
+        installPieces(section, sec);
+        siblings.splice(at + 1 + k, 0, section);
+      });
+      set({ sceneGraph: newScene, extraSelectedIds: [] });
+      get().recompile(newScene, undefined, true);
+      return ids;
+    }
+
+    strip(first);
+    const firstCentered = recenterSection(sections[0]);
+    if (opts.centerOrigin) {
+      first.pos = [basePos[0] + firstCentered.offset[0], basePos[1] + firstCentered.offset[1], basePos[2] + firstCentered.offset[2]];
+    }
+    if (opts.names?.[0]) first.name = opts.names[0];
+    first.geoms = geomsFor(first.name || first.id, firstCentered.sec, 0);
+    if (opts.plain) delete first.printPose;
+    else first.printPose = poseOf(firstCentered.sec);
+    installPieces(first, firstCentered.sec);
 
     const ids = [nodeId];
     sections.slice(1).forEach((rawSec, k) => {

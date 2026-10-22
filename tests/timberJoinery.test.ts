@@ -224,9 +224,73 @@ describe('Timber & Joinery Breakdown (Table, Chair & 3ft Flower Stand)', () => {
     if (!res.ok) return;
 
     // 4 legs + 8 rails + 2 top planks = 14 parts
+    const panels = res.parts.filter((p) => p.member.role === 'panel');
     expect(res.parts.filter((p) => p.member.role === 'leg').length).toBe(4);
     expect(res.parts.filter((p) => p.member.role === 'rail').length).toBe(8);
-    expect(res.parts.filter((p) => p.member.role === 'panel').length).toBe(2);
+    expect(panels.length).toBe(2);
+
+    // Both top planks must be trimmed to their true 380 x 190 x 24 mm shoulder blank
+    // (stripping the pre-existing 10 mm alignment tabs on Top_Plank_1 so their OBBs meet flush at Y=0)
+    for (const p of panels) {
+      expect(p.member.dimsMm[0]).toBeCloseTo(380, 1);
+      expect(p.member.dimsMm[1]).toBeCloseTo(190, 1);
+      expect(p.member.dimsMm[2]).toBeCloseTo(24, 1);
+    }
+
+    // Verify with exact Manifold 3D boolean intersection that no two finished parts in flowerStandPreset overlap!
+    const presetManifolds = res.parts.map((p) => {
+      const posMm = new Float32Array(p.section.positions.length);
+      for (let i = 0; i < posMm.length; i++) posMm[i] = p.section.positions[i] * MM;
+      return meshMmToManifold(wasm, posMm, p.section.faces);
+    });
+    try {
+      let totalInterferenceMm3 = 0;
+      for (let a = 0; a < presetManifolds.length; a++) {
+        for (let b = a + 1; b < presetManifolds.length; b++) {
+          const inter = presetManifolds[a].intersect(presetManifolds[b]);
+          totalInterferenceMm3 += inter.volume();
+          inter.delete();
+        }
+      }
+      expect(totalInterferenceMm3).toBeLessThan(1.0);
+    } finally {
+      for (const m of presetManifolds) m.delete();
+    }
+
+    // Also verify zero 3D interference when maxBoardWidthMm = 180 splits the top into 4 planks
+    const res4Planks = synthesizeTimberJoinery(
+      wasm,
+      items.map((it) => it.soup),
+      {
+        jointMode: 'mortise_tenon',
+        tenonCornerFit: 'dogbone',
+        edgeProfile: 'roundover',
+        edgeRadiusMm: 4,
+        maxBoardWidthMm: 180,
+      },
+    );
+    expect(res4Planks.ok).toBe(true);
+    if (res4Planks.ok) {
+      expect(res4Planks.parts.filter((p) => p.member.role === 'panel').length).toBe(4);
+      const m4 = res4Planks.parts.map((p) => {
+        const posMm = new Float32Array(p.section.positions.length);
+        for (let i = 0; i < posMm.length; i++) posMm[i] = p.section.positions[i] * MM;
+        return meshMmToManifold(wasm, posMm, p.section.faces);
+      });
+      try {
+        let interference4 = 0;
+        for (let a = 0; a < m4.length; a++) {
+          for (let b = a + 1; b < m4.length; b++) {
+            const inter = m4[a].intersect(m4[b]);
+            interference4 += inter.volume();
+            inter.delete();
+          }
+        }
+        expect(interference4).toBeLessThan(1.0);
+      } finally {
+        for (const m of m4) m.delete();
+      }
+    }
 
     const plan = buildTimberCutPlan(res, {
       cncBedMm: [300, 200, 60],
