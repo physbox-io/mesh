@@ -427,15 +427,20 @@ export function LatticeSurface({
    * How far past the shape a line being drawn has pushed the grid. The grid
    * stays where it is while the pointer moves — a field that followed the
    * pointer was a field that never stood still to be read — and grows only
-   * when a stroke in progress runs up to its edge. Dropped when the stroke
-   * ends: whatever it drew is in the shape by then, and the shape's bounds
-   * carry the grid from there.
+   * when a stroke in progress runs up to its edge. Ignored once the stroke
+   * ends, and dropped on the next move: whatever it drew is in the shape by
+   * then, and the shape's bounds carry the grid from there.
    */
   const [reach, setReach] = useState<{ min: LatticeCoord; max: LatticeCoord } | null>(null);
+  const midStroke = pending.length > 0 || !!stroke || !!shape;
+  const extent = midStroke ? reach : null;
+  /** Grows `reach` towards the pointer; set below, once the field is known. */
+  const growTowards = useRef<((coord: LatticeCoord) => void) | null>(null);
 
   const setHover = useCallback((coord: LatticeCoord | null) => {
     hoverRef.current = coord;
     setHoverState(coord);
+    if (coord) growTowards.current?.(coord);
   }, []);
 
   const setGestureStatus = useStore((s) => s.setGestureStatus);
@@ -723,10 +728,10 @@ export function LatticeSurface({
     // Nothing built yet, the grid sits round the origin.
     const min: LatticeCoord = bounds ? [...bounds.min] : [0, 0, 0];
     const max: LatticeCoord = bounds ? [...bounds.max] : [0, 0, 0];
-    if (reach) {
+    if (extent) {
       for (let k = 0; k < 3; k++) {
-        min[k] = Math.min(min[k], reach.min[k]);
-        max[k] = Math.max(max[k], reach.max[k]);
+        min[k] = Math.min(min[k], extent.min[k]);
+        max[k] = Math.max(max[k], extent.max[k]);
       }
     }
     /*
@@ -752,7 +757,7 @@ export function LatticeSurface({
     });
     while (!fits(step) && step < 1e6) step *= 10;
     return { ranges: [range(0, step), range(1, step), range(2, step)] as const, step, fine: [range(0, gridSnap), range(1, gridSnap), range(2, gridSnap)] as const };
-  }, [lattice, reach, revision, gridSnap]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [lattice, extent, revision, gridSnap]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /**
    * How much of the world one screen pixel covers, at the body being edited.
@@ -882,27 +887,29 @@ export function LatticeSurface({
   /*
    * A stroke run up to the edge of the grid takes the grid with it, a margin's
    * worth at a time, so it grows in a few steps rather than on every move.
+   * Run from the pointer move (see setHover), not from an effect on `hover`:
+   * it is the move that pushes the grid out.
    */
-  const midStroke = pending.length > 0 || !!stroke || !!shape;
   useEffect(() => {
-    if (!midStroke) {
-      setReach(null);
-      return;
-    }
-    if (!hover) return;
-    const near = 2 * gridSnap;
-    const margin = FIELD_MARGIN * gridSnap;
-    let grown: { min: LatticeCoord; max: LatticeCoord } | null = null;
-    for (let k = 0; k < 3; k++) {
-      const { lo, hi } = field.fine[k];
-      const outward = hover[k] < lo + near ? -1 : hover[k] > hi - near ? 1 : 0;
-      if (!outward) continue;
-      grown ??= { min: [...(reach?.min ?? hover)], max: [...(reach?.max ?? hover)] };
-      if (outward < 0) grown.min[k] = Math.min(grown.min[k], hover[k] - margin);
-      else grown.max[k] = Math.max(grown.max[k], hover[k] + margin);
-    }
-    if (grown) setReach(grown);
-  }, [midStroke, field.fine, gridSnap, hover, reach]);
+    growTowards.current = (hover) => {
+      if (!midStroke) {
+        if (reach) setReach(null);
+        return;
+      }
+      const near = 2 * gridSnap;
+      const margin = FIELD_MARGIN * gridSnap;
+      let grown: { min: LatticeCoord; max: LatticeCoord } | null = null;
+      for (let k = 0; k < 3; k++) {
+        const { lo, hi } = field.fine[k];
+        const outward = hover[k] < lo + near ? -1 : hover[k] > hi - near ? 1 : 0;
+        if (!outward) continue;
+        grown ??= { min: [...(reach?.min ?? hover)], max: [...(reach?.max ?? hover)] };
+        if (outward < 0) grown.min[k] = Math.min(grown.min[k], hover[k] - margin);
+        else grown.max[k] = Math.max(grown.max[k], hover[k] + margin);
+      }
+      if (grown) setReach(grown);
+    };
+  });
 
   // -----------------------------------------------------------------------
   // Pointer -> grid
