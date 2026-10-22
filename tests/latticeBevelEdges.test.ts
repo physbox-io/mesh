@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   createLattice, vertexAt, findVertex, addFace, faceCount, isWatertight,
   inconsistentFaces, signedVolume, bevelEdges, isCrease, setCrease,
-  latticeBounds, type Lattice,
+  latticeBounds, addRing, extrudeFace, coordOf, type Lattice,
 } from '../src/utils/latticeMesh';
 
 /** A cube `size` steps on a side, corners on 0 and `size`, wound outwards. */
@@ -229,5 +229,25 @@ describe('chamfer and fillet', () => {
     setCrease(l, a, b, true);
     bevelEdges(l, [[a, b]], 2);
     expect([...l.creases].length).toBe(2); // the chamfer's own two, and nothing else
+  });
+
+  it('bevels the non-45° circular rim of a cylinder cleanly', () => {
+    const l = createLattice(0.001);
+    const base = addRing(l, [0, 0, 0], 20, 'z')!;
+    const { cap } = extrudeFace(l, base, 30)!;
+    const rimVerts = l.faces[cap]!;
+    const rimEdges: [number, number][] = rimVerts.map((v, i) => [v, rimVerts[(i + 1) % rimVerts.length]]);
+    const result = bevelEdges(l, rimEdges, 3, 'chamfer');
+    expect(result).not.toBeNull();
+    expect(result!.strips.length).toBe(rimVerts.length);
+    expect(isWatertight(l)).toBe(true);
+    expect(inconsistentFaces(l)).toBe(0);
+    const topCap = l.faces.find((f) => f && f.every((v) => coordOf(l, v)[2] === 30))!;
+    expect(topCap).toBeDefined();
+    for (const v of topCap) {
+      const [x, y, z] = coordOf(l, v);
+      expect(z).toBe(30);
+      expect(Math.abs(Math.hypot(x, y) - 17)).toBeLessThanOrEqual(1);
+    }
   });
 });

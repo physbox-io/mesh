@@ -6,7 +6,7 @@ import {
   signedVolume, orientFaces, inconsistentFaces, faceCentre, bridgeFaces, insetFace, bevelFace,
   serializeCage, deserializeCage, cloneLattice, restoreLattice, faceCount,
   boxLattice, SNAP_MULTIPLES, DEFAULT_UNIT, setCrease, isCrease, edgeLoop, triangulate,
-  facesAlong, edgeExists, scaleVertices, addWire, type Lattice,
+  facesAlong, edgeExists, scaleVertices, addWire, addRing, type Lattice,
 } from '../src/utils/latticeMesh';
 import { meshCentroid } from '../src/utils/latticeMesh';
 import { subdivide } from '../src/utils/subdivide';
@@ -942,6 +942,27 @@ describe('insetting a face', () => {
     // A 8x8x8 box with a 4x4 tunnel bored along its whole length.
     const step = 0.01;
     expect(signedVolume(l)).toBeCloseTo((8 * step) ** 3 - (4 * step) ** 2 * (8 * step), 12);
+  });
+
+  it('insets a circular ring radially without refusing when corners cross the centre axes', () => {
+    const l = createLattice(0.001);
+    const circle = addRing(l, [0, 0, 0], 20, 'z')!;
+    const result = insetFace(l, circle, 5);
+    expect(result).not.toBeNull();
+    for (const v of l.faces[result!.inner]!) {
+      const [x, y] = coordOf(l, v);
+      expect(Math.abs(Math.hypot(x, y) - 15)).toBeLessThanOrEqual(1);
+    }
+  });
+
+  it('insets a rectilinear face with a collinear vertex on an edge cleanly perpendicular to the edge', () => {
+    const l = createLattice(0.01);
+    const v = (i: number, j: number) => vertexAt(l, i, j, 0);
+    const face = addFace(l, [v(-4, -4), v(0, -4), v(4, -4), v(4, 4), v(-4, 4)]);
+    const result = insetFace(l, face, 1);
+    expect(result).not.toBeNull();
+    const innerCoords = l.faces[result!.inner]!.map((vert) => coordOf(l, vert));
+    expect(innerCoords).toContainEqual([0, -3, 0]);
   });
 });
 

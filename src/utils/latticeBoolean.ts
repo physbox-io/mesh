@@ -626,7 +626,7 @@ export function dissolveCollinearCorners(lattice: Lattice, sharp: [Vec, Vec][] =
  * `b` is expected in `a`'s coordinates already: getting the two into one frame
  * is the caller's job, because only the caller knows where the two bodies sit.
  */
-export function latticeBoolean(a: Lattice, b: Lattice, op: BooleanOp): Lattice | null {
+export function latticeBoolean(a: Lattice, b: Lattice, op: BooleanOp, keepSeams: [Vec, Vec][] = []): Lattice | null {
   if (faceCount(a) === 0 || faceCount(b) === 0) return null;
   if (!isWatertight(a) || !isWatertight(b)) return null;
 
@@ -677,8 +677,9 @@ export function latticeBoolean(a: Lattice, b: Lattice, op: BooleanOp): Lattice |
   // an edge nothing runs along — so a crease set now would be tidied away by
   // the very pass that has to know about it.
   const sharp: [Vec, Vec][] = [...creaseSegments(a), ...creaseSegments(b)];
-  mergeCoplanarFaces(result, sharp);
-  dissolveCollinearCorners(result, sharp);
+  const protectedSeams: [Vec, Vec][] = [...sharp, ...keepSeams];
+  mergeCoplanarFaces(result, protectedSeams);
+  dissolveCollinearCorners(result, protectedSeams);
   orientFaces(result);
   applyCreases(result, sharp);
   return result;

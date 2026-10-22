@@ -679,7 +679,10 @@ export function LatticePanel({ onOpenDocs }: { onOpenDocs?: () => void } = {}) {
             <button
               key={axis}
               type="button"
-              onClick={() => setPlane({ axis, index: 0 })}
+              onClick={() => {
+                setPlaneHold(false);
+                setPlane({ axis, index: 0 });
+              }}
               title={`Work on slices perpendicular to ${axis.toUpperCase()}. Press ${axis.toUpperCase()} to turn the plane; it lands at whatever the pointer is on.`}
               className={`flex-1 py-1 rounded-md text-[11px] font-bold uppercase transition-colors cursor-pointer ${
                 plane.axis === axis

@@ -113,7 +113,7 @@ export function hostFaceOf(lattice: Lattice, inner: number[]): number | null {
   for (let f = 0; f < lattice.faces.length; f++) {
     const verts = lattice.faces[f];
     if (!verts || verts.length < 3) continue;
-    if (inner.every((v) => verts.includes(v))) continue;
+    if (verts.every((v) => innerSet.has(v)) && inner.every((v) => verts.includes(v))) continue;
     const pts = verts.map((v) => coordOf(lattice, v));
     const n = newell(pts);
     if (n[0] === 0 && n[1] === 0 && n[2] === 0) continue;
@@ -127,6 +127,27 @@ export function hostFaceOf(lattice: Lattice, inner: number[]): number | null {
     if (within) return f;
   }
   return null;
+}
+
+/** Candidate vertices that lie strictly inside segment u→w, ordered from u to w. */
+function pointsOnSegment(lattice: Lattice, u: number, w: number, candidates: number[], skip: Set<number>): number[] {
+  const pu = coordOf(lattice, u);
+  const pw = coordOf(lattice, w);
+  const e = [pw[0] - pu[0], pw[1] - pu[1], pw[2] - pu[2]];
+  const len2 = e[0] * e[0] + e[1] * e[1] + e[2] * e[2];
+  if (len2 === 0) return [];
+  const onEdge: { v: number; t: number }[] = [];
+  for (const v of candidates) {
+    if (v === u || v === w || skip.has(v)) continue;
+    const p = coordOf(lattice, v);
+    const d = [p[0] - pu[0], p[1] - pu[1], p[2] - pu[2]];
+    const cross = [e[1] * d[2] - e[2] * d[1], e[2] * d[0] - e[0] * d[2], e[0] * d[1] - e[1] * d[0]];
+    if (cross[0] !== 0 || cross[1] !== 0 || cross[2] !== 0) continue;
+    const t = e[0] * d[0] + e[1] * d[1] + e[2] * d[2];
+    if (t > 0 && t < len2) onEdge.push({ v, t });
+  }
+  onEdge.sort((a, b) => a.t - b.t);
+  return onEdge.map((o) => o.v);
 }
 
 /**
@@ -152,66 +173,95 @@ export function splitHostAround(lattice: Lattice, inner: number[]): { host: numb
    */
   const H: number[] = [];
   const original = lattice.faces[host]!;
+  const originalSet = new Set(original);
   const pos = (v: number) => coordOf(lattice, v);
+  const neighbourSplices: { u: number; w: number; between: number[] }[] = [];
   for (let i = 0; i < original.length; i++) {
     const u = original[i];
     const w = original[(i + 1) % original.length];
     H.push(u);
-    const pu = pos(u); const pw = pos(w);
-    const e = [pw[0] - pu[0], pw[1] - pu[1], pw[2] - pu[2]];
-    const len2 = e[0] * e[0] + e[1] * e[1] + e[2] * e[2];
-    const onEdge: { v: number; t: number }[] = [];
-    for (const v of inner) {
-      if (original.includes(v)) continue;
-      const p = pos(v);
-      const d = [p[0] - pu[0], p[1] - pu[1], p[2] - pu[2]];
-      const cross = [e[1] * d[2] - e[2] * d[1], e[2] * d[0] - e[0] * d[2], e[0] * d[1] - e[1] * d[0]];
-      if (cross[0] !== 0 || cross[1] !== 0 || cross[2] !== 0) continue;
-      const t = e[0] * d[0] + e[1] * d[1] + e[2] * d[2];
-      if (t > 0 && t < len2) onEdge.push({ v, t });
-    }
-    onEdge.sort((a, b) => a.t - b.t);
-    for (const { v } of onEdge) H.push(v);
-    // The face on the other side of that edge has to know about the new
-    // corners too, or the edge is one segment on its side and two on this
-    // one — a crack, and a shape that is no longer watertight.
-    if (onEdge.length > 0) spliceIntoNeighbours(lattice, host, u, w, onEdge.map((o) => o.v));
+    const between = pointsOnSegment(lattice, u, w, inner, originalSet);
+    for (const v of between) H.push(v);
+    if (between.length > 0) neighbourSplices.push({ u, w, between });
   }
   const innerN = newell(I.map((v) => coordOf(lattice, v)));
   if (hostN[0] * innerN[0] + hostN[1] * innerN[1] + hostN[2] * innerN[2] < 0) I = I.reverse();
 
-  const shared = I.filter((v) => H.includes(v));
+  // If an edge of the new face passes straight through a corner of the host
+  // that was not explicitly clicked, splice that corner into I too so the two
+  // boundaries know they meet there.
+  const iSet = new Set(I);
+  const splicedI: number[] = [];
+  for (let i = 0; i < I.length; i++) {
+    const u = I[i];
+    const w = I[(i + 1) % I.length];
+    splicedI.push(u);
+    for (const v of pointsOnSegment(lattice, u, w, H, iSet)) {
+      splicedI.push(v);
+      iSet.add(v);
+    }
+  }
+  I = splicedI;
+
+  const shared = H.filter((v) => I.includes(v));
+  const hostRun = (from: number, to: number) => {
+    const out = [H[from]];
+    for (let k = from; k !== to; k = (k + 1) % H.length) out.push(H[(k + 1) % H.length]);
+    return out;
+  };
+  const islandBack = (from: number, to: number) => {
+    const out = [I[from]];
+    for (let k = from; k !== to; k = (k - 1 + I.length) % I.length) out.push(I[(k - 1 + I.length) % I.length]);
+    return out;
+  };
+  const innerRun = (from: number, to: number) => {
+    const out = [I[from]];
+    for (let k = from; k !== to; k = (k + 1) % I.length) out.push(I[(k + 1) % I.length]);
+    return out;
+  };
+
   let pieces: number[][] | null = null;
 
   if (shared.length >= 2) {
-    // A bite. The shared corners must be one unbroken run of the host's
-    // boundary; rotate the host so that run starts at index 0.
-    const inHost = H.map((v) => I.includes(v));
-    let start = -1;
-    for (let i = 0; i < H.length; i++) {
-      if (inHost[i] && !inHost[(i - 1 + H.length) % H.length]) { start = i; break; }
-    }
-    if (start !== -1) {
-      const rotated = [...H.slice(start), ...H.slice(0, start)];
-      let runEnd = 0;
-      while (runEnd + 1 < rotated.length && I.includes(rotated[runEnd + 1])) runEnd++;
-      const run = rotated.slice(0, runEnd + 1);
-      // One unbroken run, and something of the host left over past it.
-      if (run.length === shared.length && runEnd + 1 < rotated.length) {
-        // The inner face's corners off the host, in the order they run from
-        // the end of the shared run back round to its start.
-        const at = I.indexOf(run[run.length - 1]);
-        const forward = I[(at + 1) % I.length] !== run[run.length - 2] || run.length < 2;
-        const path: number[] = [];
-        for (let k = 1; k < I.length; k++) {
-          const v = forward ? I[(at + k) % I.length] : I[(at - k + I.length) % I.length];
-          if (v === run[0]) break;
-          path.push(v);
-        }
-        if (path.length === I.length - run.length) {
-          pieces = [[run[0], ...[...path].reverse(), run[run.length - 1], ...rotated.slice(runEnd + 1)]];
-        }
+    // Partition both H and I into arcs between consecutive shared vertices.
+    // Every arc where I leaves H's boundary cuts off a simple polygon piece
+    // bounded by H's arc forward and I's arc reversed. This handles single
+    // contiguous bites, strips across the middle of a face, corner cuts, and
+    // inscribed polygons touching multiple edges at single vertices.
+    const sharedSet = new Set(shared);
+    const built: number[][] = [];
+    let valid = true;
+    for (let m = 0; m < shared.length; m++) {
+      const sA = shared[m];
+      const sB = shared[(m + 1) % shared.length];
+      const hArc = hostRun(H.indexOf(sA), H.indexOf(sB));
+      const iArc = innerRun(I.indexOf(sA), I.indexOf(sB));
+      // Shared vertices must appear in the same cyclic order around I and H.
+      if (iArc.slice(1, -1).some((v) => sharedSet.has(v))) {
+        valid = false;
+        break;
       }
+      if (hArc.length === iArc.length && hArc.every((v, idx) => v === iArc[idx])) continue;
+      built.push([...hArc, ...iArc.slice(1, -1).reverse()]);
+    }
+    if (valid && built.length > 0) pieces = built;
+  } else if (shared.length === 1) {
+    // Pinched ring: I touches H at a single corner, which already acts as one
+    // bridge; one bridge on the far side of I cuts the ring into two polygons.
+    const d2 = (a: number, b: number) => {
+      const p = pos(a); const q = pos(b);
+      return (p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2 + (p[2] - q[2]) ** 2;
+    };
+    const h1 = H.indexOf(shared[0]);
+    const i1 = I.indexOf(shared[0]);
+    const i2 = (i1 + Math.floor(I.length / 2)) % I.length;
+    let h2 = -1, best = Infinity;
+    H.forEach((hv, h) => { if (h === h1) return; const d = d2(I[i2], hv); if (d < best) { best = d; h2 = h; } });
+    if (h2 !== -1 && i2 !== i1) {
+      pieces = [
+        [...hostRun(h1, h2), ...islandBack(i2, i1).slice(0, -1)],
+        [...hostRun(h2, h1), ...islandBack(i1, i2).slice(1)],
+      ];
     }
   } else if (shared.length === 0) {
     // An island. Two bridges from the island to the host, at the nearest
@@ -227,8 +277,6 @@ export function splitHostAround(lattice: Lattice, inner: number[]): { host: numb
     let h2 = -1; best = Infinity;
     H.forEach((hv, h) => { if (h === h1) return; const d = d2(I[i2], hv); if (d < best) { best = d; h2 = h; } });
     if (h2 !== -1) {
-      const hostRun = (from: number, to: number) => { const out = [H[from]]; for (let k = from; k !== to; k = (k + 1) % H.length) out.push(H[(k + 1) % H.length]); return out; };
-      const islandBack = (from: number, to: number) => { const out = [I[from]]; for (let k = from; k !== to; k = (k - 1 + I.length) % I.length) out.push(I[(k - 1 + I.length) % I.length]); return out; };
       pieces = [
         [...hostRun(h1, h2), ...islandBack(i2, i1)],
         [...hostRun(h2, h1), ...islandBack(i1, i2)],
@@ -236,6 +284,13 @@ export function splitHostAround(lattice: Lattice, inner: number[]): { host: numb
     }
   }
   if (!pieces || pieces.some((p) => p.length < 3 || new Set(p).size !== p.length)) return null;
+
+  // The face on the other side of any split boundary edge has to know about the
+  // new corners too, or the edge is one segment on its side and two on this
+  // one — a crack, and a shape that is no longer watertight.
+  for (const { u, w, between } of neighbourSplices) {
+    spliceIntoNeighbours(lattice, host, u, w, between);
+  }
 
   // Sharp edges of the host stay sharp on whichever piece keeps them: the
   // pieces go in first so the creases still have an edge to live on when the
@@ -249,6 +304,103 @@ export function splitHostAround(lattice: Lattice, inner: number[]): { host: numb
   removeFace(lattice, host);
   for (const [a, b] of sharp) setCrease(lattice, a, b, true);
   return { host, pieces: added, inner: I };
+}
+
+/**
+ * Splits a host face in two along an open chain (a 2-point line or multi-point
+ * polyline/curve) drawn across it from one point on its boundary to another.
+ *
+ * Any leading or trailing segments that run along the host's boundary before
+ * the chain enters the interior are trimmed first, so drawing a corner box by
+ * starting at the corner, clicking out along one edge, into the face, and onto
+ * the adjacent edge splits the corner cleanly on the final click.
+ *
+ * Returns null, and changes nothing, when the chain is not a chord across a face.
+ */
+export function splitHostByChord(lattice: Lattice, chain: number[]): { host: number; pieces: number[] } | null {
+  if (chain.length < 2 || new Set(chain).size !== chain.length) return null;
+  const host = hostFaceOf(lattice, chain);
+  if (host === null) return null;
+  const original = lattice.faces[host]!;
+  const pts = original.map((v) => coordOf(lattice, v));
+  const hostN = newell(pts);
+  const [uAxis, wAxis] = planeAxes(hostN);
+  const poly = pts.map((p) => [p[uAxis], p[wAxis]] as [number, number]);
+  const pt2d = (v: number): [number, number] => {
+    const c = coordOf(lattice, v);
+    return [c[uAxis], c[wAxis]];
+  };
+  const onBoundary = (v: number) => original.includes(v) || classify(pt2d(v), poly) === 2;
+  const segInside = (a: number, b: number) => {
+    const pa = pt2d(a); const pb = pt2d(b);
+    return classify([(pa[0] + pb[0]) / 2, (pa[1] + pb[1]) / 2], poly) === 1;
+  };
+
+  // Trim any leading/trailing boundary-hugging segments so we are left with the
+  // chord that actually crosses the interior of the host face.
+  let start = 0;
+  while (start + 1 < chain.length && onBoundary(chain[start]) && onBoundary(chain[start + 1]) && !segInside(chain[start], chain[start + 1])) {
+    start++;
+  }
+  let end = chain.length - 1;
+  while (end - 1 > start && onBoundary(chain[end]) && onBoundary(chain[end - 1]) && !segInside(chain[end - 1], chain[end])) {
+    end--;
+  }
+  const chord = chain.slice(start, end + 1);
+  if (chord.length < 2) return null;
+  if (!onBoundary(chord[0]) || !onBoundary(chord[chord.length - 1])) return null;
+  for (let i = 1; i < chord.length - 1; i++) {
+    if (classify(pt2d(chord[i]), poly) !== 1) return null;
+  }
+  for (let i = 0; i < chord.length - 1; i++) {
+    if (!segInside(chord[i], chord[i + 1])) return null;
+  }
+
+  const originalSet = new Set(original);
+  const endpoints = [chord[0], chord[chord.length - 1]];
+  const H: number[] = [];
+  const neighbourSplices: { u: number; w: number; between: number[] }[] = [];
+  for (let i = 0; i < original.length; i++) {
+    const u = original[i];
+    const w = original[(i + 1) % original.length];
+    H.push(u);
+    const between = pointsOnSegment(lattice, u, w, endpoints, originalSet);
+    for (const v of between) H.push(v);
+    if (between.length > 0) neighbourSplices.push({ u, w, between });
+  }
+
+  const hStart = H.indexOf(chord[0]);
+  const hEnd = H.indexOf(chord[chord.length - 1]);
+  if (hStart === -1 || hEnd === -1 || hStart === hEnd) return null;
+
+  const hostRun = (from: number, to: number) => {
+    const out = [H[from]];
+    for (let k = from; k !== to; k = (k + 1) % H.length) out.push(H[(k + 1) % H.length]);
+    return out;
+  };
+  const interior = chord.slice(1, -1);
+  const pieces = [
+    [...hostRun(hStart, hEnd), ...[...interior].reverse()],
+    [...hostRun(hEnd, hStart), ...interior],
+  ];
+  if (pieces.some((p) => p.length < 3 || new Set(p).size !== p.length)) return null;
+  if (pieces.some((p) => {
+    const n = newell(p.map((v) => coordOf(lattice, v)));
+    return n[0] * hostN[0] + n[1] * hostN[1] + n[2] * hostN[2] <= 0;
+  })) return null;
+
+  for (const { u, w, between } of neighbourSplices) {
+    spliceIntoNeighbours(lattice, host, u, w, between);
+  }
+  const sharp: [number, number][] = [];
+  for (let i = 0; i < H.length; i++) {
+    const a = H[i]; const b = H[(i + 1) % H.length];
+    if (isCrease(lattice, a, b)) sharp.push([a, b]);
+  }
+  const added = pieces.map((p) => addFace(lattice, p)).filter((f) => f !== -1);
+  removeFace(lattice, host);
+  for (const [a, b] of sharp) setCrease(lattice, a, b, true);
+  return { host, pieces: added };
 }
 
 /**
@@ -400,6 +552,43 @@ export function prismOf(lattice: Lattice, face: number, steps: number, axis?: Ax
  * body − prism pushed in. Refused (null) when the body is not closed, since
  * a boolean of an open shell means nothing.
  */
+/**
+ * Coplanar seams already present in `lattice` outside `exceptFace`, so a
+ * boolean triggered by extruding one face does not merge away unrelated splits
+ * the user drew elsewhere on the body.
+ */
+function existingCoplanarSeams(lattice: Lattice, exceptFace: number): [Vec, Vec][] {
+  const out: [Vec, Vec][] = [];
+  const faces = lattice.faces;
+  for (let f = 0; f < faces.length; f++) {
+    if (f === exceptFace) continue;
+    const F = faces[f];
+    if (!F || F.length < 3) continue;
+    const nf = newell(F.map((v) => coordOf(lattice, v)));
+    const lf = Math.hypot(nf[0], nf[1], nf[2]);
+    if (lf === 0) continue;
+    for (let g = f + 1; g < faces.length; g++) {
+      if (g === exceptFace) continue;
+      const G = faces[g];
+      if (!G || G.length < 3) continue;
+      const ng = newell(G.map((v) => coordOf(lattice, v)));
+      const lg = Math.hypot(ng[0], ng[1], ng[2]);
+      if (lg === 0) continue;
+      if ((nf[0] * ng[0] + nf[1] * ng[1] + nf[2] * ng[2]) / (lf * lg) < 0.999999) continue;
+      for (let i = 0; i < F.length; i++) {
+        const a = F[i];
+        const b = F[(i + 1) % F.length];
+        const shares = G.some((r, j) => {
+          const s = G[(j + 1) % G.length];
+          return (a === r && b === s) || (a === s && b === r);
+        });
+        if (shares) out.push([coordOf(lattice, a) as Vec, coordOf(lattice, b) as Vec]);
+      }
+    }
+  }
+  return out;
+}
+
 export function resolveExtrusion(before: Lattice, face: number, steps: number, axis?: Axis): Lattice | null {
   if (steps === 0 || !before.faces[face]) return null;
   const trial = cloneLattice(before);
@@ -411,7 +600,7 @@ export function resolveExtrusion(before: Lattice, face: number, steps: number, a
   if (!isWatertight(before)) return null;
   const prism = prismOf(before, face, steps, axis);
   if (!prism) return null;
-  return latticeBoolean(before, prism, steps > 0 ? 'union' : 'difference');
+  return latticeBoolean(before, prism, steps > 0 ? 'union' : 'difference', existingCoplanarSeams(before, face));
 }
 
 /**

@@ -36,7 +36,7 @@ import { metresPerPixel as metresPerPixelOf } from '../utils/cameraScale';
 import { useStore } from '../store/useStore';
 import {
   deserializeCage, serializeCage, cloneLattice, restoreLattice,
-  toSceneGeom, cageEdges, coordOf, vertexAt, findVertex, addFace,
+  toSceneGeom, cageEdges, coordOf, vertexAt, findVertex, addFace, findFace,
   removeFace, removeVertex, moveVertex, moveVertices, flipFace, setCrease, isCrease, creaseEdges, edgeKey, edgeLoop, extrudeFace, mirrorFace, findMirrorFace,
   faceNormal, faceCentre, dominantAxis, latticeStats, latticeBounds, mirrorCoord, orientFaces, vertexCount,
   bridgeFaces, insetFace, insetRefusal, INSET_REFUSAL_TEXT, bevelFace, bevelEdges, scaleVertices, ringCoords, revolveChain, chainFromEdges, triangulate, curveCoords,
@@ -45,7 +45,7 @@ import {
 } from '../utils/latticeMesh';
 import { useModifier } from '../hooks/useModifier';
 import { dimensionMm, selectionBoundsMm } from '../utils/latticeCommands';
-import { splitHostAround, fuseFlushFaces, resolveExtrusion, unionOverlappingPieces } from '../utils/latticeSketch';
+import { splitHostAround, splitHostByChord, fuseFlushFaces, resolveExtrusion, unionOverlappingPieces } from '../utils/latticeSketch';
 import { creasedGeometry } from '../utils/creasedNormals';
 import type { SceneNode } from '../types/scene';
 
@@ -444,6 +444,9 @@ export function LatticeSurface({
   const setGestureStatus = useStore((s) => s.setGestureStatus);
 
   const commit = useCallback(() => {
+    const selectedRings = selectedFaces
+      .map((f) => lattice.faces[f]?.map((v) => coordOf(lattice, v)))
+      .filter((r): r is LatticeCoord[] => !!r);
     // A part pushed into another part of the same body fuses with it — see
     // utils/latticeSketch. Here rather than in the extrude alone, because a
     // move or a typed dimension can land a face flush against another just
@@ -457,14 +460,20 @@ export function LatticeSurface({
       reshaped = true;
     }
     if (reshaped) {
-      setSelectedFaces([]);
+      const keptFaces = selectedRings
+        .map((ring) => {
+          const verts = ring.map(([i, j, k]) => findVertex(lattice, i, j, k));
+          return verts.every((v) => v !== -1) ? findFace(lattice, verts) : -1;
+        })
+        .filter((f) => f !== -1);
+      setSelectedFaces(keptFaces);
       setSelectedEdges([]);
       setSelectedVertices([]);
       setRevision((r) => r + 1);
     }
     applyLattice(nodeId, serializeCage(lattice), subdiv);
     useStore.getState().setLatticeStats(latticeStats(lattice));
-  }, [applyLattice, lattice, nodeId, subdiv]);
+  }, [applyLattice, lattice, nodeId, selectedFaces, subdiv]);
 
   /**
    * Runs an edit with a snapshot taken first, then publishes it.
@@ -557,6 +566,21 @@ export function LatticeSurface({
     return { geometry, origin };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lattice, revision, subdiv, thickness]);
+
+  /**
+   * The `latticeOrigin` baked into the currently compiled MuJoCo `model`.
+   *
+   * `data.xpos` only moves when `recompile` finishes (debounced after `commit`),
+   * whereas `solid.origin` changes on every live drag frame. Anchoring `cageRef`
+   * by `compiledOrigin` — and placing `solid.geometry` at `+solid.origin` inside
+   * `cageRef` — keeps raw lattice space completely stationary in world space
+   * during live drags and across the async recompile window.
+   */
+  const compiledOrigin = useMemo<[number, number, number]>(() => {
+    const o = findLatticeNode(useStore.getState().sceneGraph.nodes, nodeId)?.latticeOrigin;
+    return o ? [o[0] ?? 0, o[1] ?? 0, o[2] ?? 0] : solid.origin;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [model, nodeId]);
 
   /**
    * An invisible copy of the CAGE, for picking faces.
@@ -892,13 +916,10 @@ export function LatticeSurface({
     const dz = ray.direction.z;
 
     const consider = (coord: LatticeCoord, bias: number, fixed: boolean) => {
-      // Locked, a bare grid dot at another depth is not a candidate at all —
-      // which is what stops a click meant for the plane being caught by the
-      // field behind it. A CORNER of the model still is, at any depth: the
-      // plane says where new points are born, never what may be joined to
-      // what, and a held plane is not a reason to make the existing shape
-      // unreachable.
-      if (onlyOnPlane && !fixed && coord[AXIS_INDEX[plane.axis]] !== plane.index) return;
+      // Locked, points at another depth are not candidates at all — which is
+      // what stops a click meant for the locked plane being caught by corners
+      // or grid dots in front of or behind it.
+      if (onlyOnPlane && coord[AXIS_INDEX[plane.axis]] !== plane.index) return;
       // Scalar maths, no vectors: this runs over every dot in the slice on
       // every pointer move, and a slice can be twenty thousand dots.
       const px = coord[0] * unit - ox;
@@ -932,6 +953,59 @@ export function LatticeSurface({
 
     return best ? (best as { coord: LatticeCoord }).coord : null;
   }, [handles, lattice, plane, snap, unit, volume.coords]);
+
+  /**
+   * The plane a drag or slice slide along `axis` is measured on.
+   *
+   * The axis is a line in space and the pointer is on a screen, so the motion
+   * needs a surface to be read off: the one containing the axis and facing the
+   * camera as squarely as it can.
+   */
+  const dragPlane = useCallback((axis: Axis, through: THREE.Vector3) => {
+    const group = cageRef.current!;
+    const camera = getThree().camera;
+    const inverse = new THREE.Matrix4().copy(group.matrixWorld).invert();
+    const eye = camera.position.clone().applyMatrix4(inverse);
+    const view = eye.sub(through).normalize();
+    const a = new THREE.Vector3(axis === 'x' ? 1 : 0, axis === 'y' ? 1 : 0, axis === 'z' ? 1 : 0);
+    const normal = view.clone().sub(a.clone().multiplyScalar(view.dot(a)));
+    if (normal.lengthSq() < 1e-9) normal.set(0, 0, 1); // looking straight down the axis
+    normal.normalize();
+    return new THREE.Plane().setFromNormalAndCoplanarPoint(normal, through);
+  }, [getThree]);
+
+  /**
+   * Where the pointer sits along `targetAxis` while selecting a plane, with the
+   * other two axes held at the middle of the shape.
+   *
+   * Selecting an XY plane (Z) means sliding it up or down along Z; selecting a
+   * YZ plane (X) or XZ plane (Y) means sliding it along X or Y. Reading that
+   * off `dragPlane` gives every grid step (including 1 mm and 0.1 mm) cleanly,
+   * rather than jumping between sparse 3D volume dots.
+   */
+  const snapPlaneAxisFor = useCallback((
+    targetAxis: Axis,
+    ray: { origin: THREE.Vector3; direction: THREE.Vector3 },
+  ): LatticeCoord | null => {
+    const bounds = latticeBounds(lattice);
+    const mid: LatticeCoord = [0, 0, 0];
+    if (bounds) {
+      for (const k of [0, 1, 2] as const) {
+        mid[k] = Math.round(((bounds.min[k] + bounds.max[k]) / 2) / snap) * snap;
+      }
+    }
+    const through = new THREE.Vector3(mid[0] * unit, mid[1] * unit, mid[2] * unit);
+    const surface = dragPlane(targetAxis, through);
+    if (Math.abs(ray.direction.dot(surface.normal)) < 1e-3) return null;
+    const hit = new THREE.Ray(ray.origin, ray.direction).intersectPlane(surface, new THREE.Vector3());
+    if (!hit) return null;
+    const k = AXIS_INDEX[targetAxis];
+    const span = field.fine[k];
+    const raw = Math.round(hit.toArray()[k] / (unit * snap)) * snap;
+    const coord: LatticeCoord = [...mid];
+    coord[k] = Math.max(span.lo, Math.min(span.hi, raw));
+    return coord;
+  }, [dragPlane, field.fine, lattice, snap, unit]);
 
   /** Where the ray crosses the work plane, rounded to the nearest grid node. */
   const snapFromPlane = useCallback((ray: { origin: THREE.Vector3; direction: THREE.Vector3 }): LatticeCoord | null => {
@@ -991,15 +1065,14 @@ export function LatticeSurface({
   }, [lattice, position, snap, unit]);
 
   /**
-   * What the pointer is on: something already there, or the work plane.
-   *
-   * Locked, only points ON the work plane count as "already there" — so
-   * snapping to an existing corner still works, and only the ones at other
-   * depths stop competing for the click.
+   * What the pointer is on: while unlocked (selecting a plane), movement is
+   * limited to sliding the slice along `plane.axis`; once locked to a plane,
+   * the pointer resolves in 2D across that plane (snapping to existing corners
+   * on the plane or grid nodes on the plane).
    */
   const resolve = useCallback((ray: { origin: THREE.Vector3; direction: THREE.Vector3 }): LatticeCoord | null =>
-    pickExisting(ray, locked) ?? snapFromPlane(ray),
-  [locked, pickExisting, snapFromPlane]);
+    locked ? (pickExisting(ray, true) ?? snapFromPlane(ray)) : snapPlaneAxisFor(plane.axis, ray),
+  [locked, pickExisting, plane.axis, snapFromPlane, snapPlaneAxisFor]);
 
   // -----------------------------------------------------------------------
   // Placing
@@ -1138,6 +1211,22 @@ export function LatticeSurface({
        * of drawn outline at least, or a single segment across a face would
        * cap itself into a sliver nobody asked for.
        */
+      if (run.length >= 2) {
+        // A line or polyline drawn across a face from one boundary point to
+        // another divides that face in two along the chord.
+        const chordSplit = splitHostByChord(lattice, run);
+        if (chordSplit) {
+          if (mirror) {
+            const mirroredRun = run.map((v) => {
+              const [i, j, k] = mirrorCoord(coordOf(lattice, v), mirror);
+              return vertexAt(lattice, i, j, k);
+            });
+            splitHostByChord(lattice, mirroredRun);
+          }
+          setPending([]);
+          return;
+        }
+      }
       if (run.length >= 3) {
         const back = shortestWayBack(lattice, run);
         if (back) {
@@ -1151,7 +1240,7 @@ export function LatticeSurface({
       if (run.length < 2) return false; // a lone first corner is not in the cage yet
       wireRef.current = addWire(lattice, run);
     });
-  }, [addOutline, closePending, lattice, mutate]);
+  }, [addOutline, closePending, lattice, mirror, mutate]);
 
   /**
    * How far a grid point is from the shape's centre, IN THE SHAPE'S PLANE.
@@ -1198,26 +1287,6 @@ export function LatticeSurface({
   // -----------------------------------------------------------------------
   // Dragging
   // -----------------------------------------------------------------------
-
-  /**
-   * The plane a drag along `axis` is measured on.
-   *
-   * The axis is a line in space and the pointer is on a screen, so the drag
-   * needs a surface to be read off: the one containing the axis and facing the
-   * camera as squarely as it can.
-   */
-  const dragPlane = useCallback((axis: Axis, through: THREE.Vector3) => {
-    const group = cageRef.current!;
-    const camera = getThree().camera;
-    const inverse = new THREE.Matrix4().copy(group.matrixWorld).invert();
-    const eye = camera.position.clone().applyMatrix4(inverse);
-    const view = eye.sub(through).normalize();
-    const a = new THREE.Vector3(axis === 'x' ? 1 : 0, axis === 'y' ? 1 : 0, axis === 'z' ? 1 : 0);
-    const normal = view.clone().sub(a.clone().multiplyScalar(view.dot(a)));
-    if (normal.lengthSq() < 1e-9) normal.set(0, 0, 1); // looking straight down the axis
-    normal.normalize();
-    return new THREE.Plane().setFromNormalAndCoplanarPoint(normal, through);
-  }, [getThree]);
 
   const beginExtrude = useCallback((face: number, event: ThreeEvent<PointerEvent>) => {
     const normal = faceNormal(lattice, face);
@@ -1338,8 +1407,15 @@ export function LatticeSurface({
       // See utils/latticeSketch. The plain extrude stands when nothing crossed.
       const resolved = resolveExtrusion(state.snapshot, state.face, state.steps);
       if (resolved) {
+        const capRing = lattice.faces[state.face]?.map((v) => coordOf(lattice, v));
         restoreLattice(lattice, resolved);
-        setSelectedFaces([]);
+        const keptCap = capRing
+          ? (() => {
+            const verts = capRing.map(([i, j, k]) => findVertex(lattice, i, j, k));
+            return verts.every((v) => v !== -1) ? findFace(lattice, verts) : -1;
+          })()
+          : -1;
+        setSelectedFaces(keptCap !== -1 ? [keptCap] : []);
         setRevision((r) => r + 1);
       }
     }
@@ -1386,7 +1462,7 @@ export function LatticeSurface({
     // it — which is why selecting a face happens on the way up. Every drag has
     // to be free to start over the model, or a box can only be drawn in the
     // empty space around the thing you are trying to draw it around.
-    if (right - left < 3 && bottom - top < 3) {
+    if (right - left < 7 && bottom - top < 7) {
       if (state.click?.kind === 'face') {
         const face = state.click.face;
         // Shift adds, so a pair can be built up for J — and clicking a face that
@@ -1429,7 +1505,7 @@ export function LatticeSurface({
     // geometry would mean unprojecting it every frame to keep it flat.
     const box = document.createElement('div');
     box.style.cssText = [
-      'position:fixed', 'z-index:50', 'pointer-events:none',
+      'position:fixed', 'z-index:50', 'pointer-events:none', 'display:none',
       'border:1px solid #0ea5e9', 'background:rgba(14,165,233,0.12)', 'border-radius:2px',
       `left:${event.clientX}px`, `top:${event.clientY}px`, 'width:0px', 'height:0px',
     ].join(';');
@@ -1446,11 +1522,14 @@ export function LatticeSurface({
     const move = (event: PointerEvent) => {
       const state = marquee.current;
       if (!state) return;
+      const w = Math.abs(event.clientX - state.x);
+      const h = Math.abs(event.clientY - state.y);
       const { style } = state.box;
+      if (w >= 7 || h >= 7) style.display = 'block';
       style.left = `${Math.min(state.x, event.clientX)}px`;
       style.top = `${Math.min(state.y, event.clientY)}px`;
-      style.width = `${Math.abs(event.clientX - state.x)}px`;
-      style.height = `${Math.abs(event.clientY - state.y)}px`;
+      style.width = `${w}px`;
+      style.height = `${h}px`;
     };
     const up = (event: PointerEvent) => endMarquee(event);
     window.addEventListener('pointermove', move);
@@ -1522,11 +1601,17 @@ export function LatticeSurface({
     if (freehand) return;
     const ray = localRay(event);
     let coord = ray ? resolve(ray) : null;
+    if (coord && !locked) {
+      const axis = AXIS_INDEX[plane.axis];
+      if (coord[axis] !== plane.index) {
+        useStore.getState().setLatticePlane({ axis: plane.axis, index: coord[axis] });
+      }
+    }
     if (coord && tool === 'line' && event.shiftKey && pending.length > 0) {
       coord = constrain(coord, pending[pending.length - 1]);
     }
     setHover(coord);
-  }, [constrain, freehand, localRay, pending, resolve, setHover, tool, updateExtrude, updateVertexDrag]);
+  }, [constrain, freehand, localRay, locked, pending, plane.axis, plane.index, resolve, setHover, tool, updateExtrude, updateVertexDrag]);
 
   /**
    * Finishes a Bézier curve: its grid points go onto the polygon being drawn,
@@ -1559,6 +1644,25 @@ export function LatticeSurface({
       }
       event.stopPropagation();
       beginMarquee(event);
+      return;
+    }
+    // While selecting a plane (unlocked), movement is limited to sliding the
+    // slice along `plane.axis`; a click locks the chosen plane and resolves the
+    // cursor onto that plane so subsequent clicks place points/shapes in 2D.
+    if (!locked && (tool === 'place' || tool === 'shape' || DRAWING_TOOLS.has(tool))) {
+      event.stopPropagation();
+      const chosen = ray ? snapPlaneAxisFor(plane.axis, ray) : hoverRef.current;
+      const axis = AXIS_INDEX[plane.axis];
+      const index = chosen ? chosen[axis] : plane.index;
+      useStore.getState().setLatticePlane({ axis: plane.axis, index });
+      useStore.getState().setLatticePlaneHold(true);
+      if (ray) {
+        const onPlane = pickExisting(ray, true) ?? snapFromPlane(ray);
+        if (onPlane) {
+          onPlane[axis] = index;
+          setHover(onPlane);
+        }
+      }
       return;
     }
     if (tool === 'shape') {
@@ -1632,7 +1736,7 @@ export function LatticeSurface({
       useStore.getState().setLatticePlane({ axis: plane.axis, index: coord[axis] });
     }
     placeAt(coord);
-  }, [addFaceMirrored, beginMarquee, constrain, finishCurve, grown, lattice, localRay, locked, mutate, pending, pickEdge, placeAt, plane, resolve, settle, shape, shapeRadius, shapeSides, stroke, tool]);
+  }, [addFaceMirrored, beginMarquee, constrain, finishCurve, grown, lattice, localRay, locked, mutate, pending, pickEdge, pickExisting, placeAt, plane, resolve, setHover, settle, shape, shapeRadius, shapeSides, snapFromPlane, snapPlaneAxisFor, stroke, tool]);
 
   /*
    * The freehand stroke, followed from the window so it survives leaving the
@@ -1728,11 +1832,16 @@ export function LatticeSurface({
   }, [beginExtrude, beginMarquee, localRay, pick.triangleFace, pickEdge, tool]);
 
   const onFaceMove = useCallback((event: ThreeEvent<PointerEvent>) => {
-    // Only while extruding. Everywhere else the target is a corner or an edge,
-    // and lighting up the whole face behind them says the wrong thing.
-    if (tool !== 'extrude' || drag.current) return;
+    if ((tool !== 'extrude' && tool !== 'select') || drag.current) return;
+    if (tool === 'select') {
+      const ray = localRay(event);
+      if (ray && pickEdge(ray)) {
+        setHoveredFace(null);
+        return;
+      }
+    }
     setHoveredFace(event.faceIndex == null ? null : pick.triangleFace[event.faceIndex] ?? null);
-  }, [pick.triangleFace, tool]);
+  }, [localRay, pick.triangleFace, pickEdge, tool]);
 
   const onHandleDown = useCallback((event: ThreeEvent<PointerEvent>) => {
     if (event.button !== 0 || tool !== 'select' || event.instanceId == null) return;
@@ -2314,19 +2423,24 @@ export function LatticeSurface({
         return;
       }
       if (key === 'enter') {
-        setPending((points) => {
-          if (points.length >= 3) closePending(points);
-          return [];
-        });
+        if (pendingRef.current.length >= 3) {
+          setPending((points) => {
+            if (points.length >= 3) closePending(points);
+            return [];
+          });
+        } else if (!locked) {
+          useStore.getState().setLatticePlaneHold(true);
+        }
         return;
       }
       if (key === 'x' || key === 'y' || key === 'z') {
         const axis = key as Axis;
-        const at = hoverRef.current;
-        // Turning the plane keeps you where you are working. Index 0 was the
-        // world origin, which on a part built anywhere else is a slice through
-        // nothing — the keys worked and felt like they had not, because the lit
-        // slice vanished off the model.
+        const ray = rayFromScreen(pointer.current.x, pointer.current.y);
+        const snapped = ray ? snapPlaneAxisFor(axis, ray) : null;
+        const at = snapped ?? hoverRef.current;
+        // Turning the plane switches to selecting a slice along `axis` (up/down
+        // for Z, along X for X, along Y for Y) and lands at the pointer's
+        // position along that axis.
         let index = at ? at[AXIS_INDEX[axis]] : 0;
         if (!at) {
           const bounds = latticeBounds(lattice);
@@ -2335,7 +2449,9 @@ export function LatticeSurface({
             index = Math.round(middle / snap) * snap;
           }
         }
+        useStore.getState().setLatticePlaneHold(false);
         useStore.getState().setLatticePlane({ axis, index });
+        if (snapped) setHover(snapped);
         return;
       }
       if (key === 'delete' || key === 'backspace') {
@@ -2537,7 +2653,7 @@ export function LatticeSurface({
       window.removeEventListener('keydown', onKey, true);
       window.removeEventListener('physbox:gesture', onAsked);
     };
-  }, [beginGesture, closePending, commit, endGesture, hoverVertex, lattice, mirror, mutate, nudgeLatticePlane, selectedEdges, selectedFaces, selectedVertices, bevelSelectedEdges, snap, updateGesture]);
+  }, [beginGesture, closePending, commit, endGesture, hoverVertex, lattice, locked, mirror, mutate, nudgeLatticePlane, rayFromScreen, selectedEdges, selectedFaces, selectedVertices, setHover, bevelSelectedEdges, snap, snapPlaneAxisFor, updateGesture]);
 
   /**
    * Ctrl (or Cmd) held, tracked on its own.
@@ -2870,11 +2986,12 @@ export function LatticeSurface({
 
   return (
     <group ref={groupRef} name={`${nodeId}_lattice`}>
+      <group ref={cageRef} position={[-compiledOrigin[0], -compiledOrigin[1], -compiledOrigin[2]]}>
       {/* The shape itself, drawn front faces only — as every other renderer in
           the app draws it. Double-sided was a kindness that cost more than it
           gave: an inside-out face looked perfectly solid here and vanished the
           moment the tools were closed. */}
-      <mesh name={geomName} geometry={solid.geometry} castShadow receiveShadow raycast={() => null}>
+      <mesh name={geomName} position={solid.origin} geometry={solid.geometry} castShadow receiveShadow raycast={() => null}>
         <meshStandardMaterial color={rgb} roughness={0.5} metalness={0.02} side={THREE.FrontSide} wireframe={wireframe} />
       </mesh>
 
@@ -2882,11 +2999,10 @@ export function LatticeSurface({
           part. Looking into an open shell you are genuinely seeing the inside of
           it, so this is honest rather than alarming; a face that reads red from
           OUTSIDE is one that will be a hole in the export. */}
-      <mesh geometry={solid.geometry} raycast={() => null}>
+      <mesh position={solid.origin} geometry={solid.geometry} raycast={() => null}>
         <meshStandardMaterial color="#e11d48" roughness={0.9} metalness={0} side={THREE.BackSide} wireframe={wireframe} />
       </mesh>
 
-      <group ref={cageRef} position={[-solid.origin[0], -solid.origin[1], -solid.origin[2]]}>
       {/* The cage over it: the thing actually being edited. */}
       <lineSegments geometry={wire.soft} raycast={() => null}>
         <lineBasicMaterial color="#0f172a" transparent opacity={0.5} depthTest={false} />

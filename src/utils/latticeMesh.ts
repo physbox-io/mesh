@@ -1019,32 +1019,104 @@ export function insetFace(lattice: Lattice, face: number, steps: number): { inne
   if (Math.abs(normal[a]) < 0.999) return null;
 
   const centre = faceCentre(lattice, face)!;
-  const moved: LatticeCoord[] = verts.map((v) => {
-    const coord = coordOf(lattice, v);
-    for (let k = 0; k < 3; k++) {
-      if (k === a) continue;
-      const away = coord[k] - centre[k];
-      // A corner already on the centre line has no side to come in from, so it
-      // stays: insetting a triangle moves two corners and pivots on the third.
-      if (away === 0) continue;
-      coord[k] += away > 0 ? -steps : steps;
-    }
-    return coord;
+  const pts = verts.map((v) => coordOf(lattice, v));
+  const [u, w] = [0, 1, 2].filter((k) => k !== a) as [0 | 1 | 2, 0 | 1 | 2];
+  let area2 = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const p = pts[i];
+    const q = pts[(i + 1) % pts.length];
+    area2 += p[u] * q[w] - q[u] * p[w];
+  }
+  if (area2 === 0) return null;
+  const ccw = area2 > 0 ? 1 : -1;
+
+  const rectilinear = pts.every((p, i) => {
+    const q = pts[(i + 1) % pts.length];
+    return (p[u] === q[u]) !== (p[w] === q[w]);
   });
+
+  let moved: LatticeCoord[];
+  if (rectilinear) {
+    // Every edge is axis-aligned, so its inward normal is an exact unit step.
+    // Offsetting each edge inward by `steps` moves 90° corners (convex and
+    // concave alike) along both incident normals, and moves collinear vertices
+    // spliced into the middle of an edge purely perpendicular to that edge.
+    const edgeInward = pts.map((p, i) => {
+      const q = pts[(i + 1) % pts.length];
+      const tu = Math.sign(q[u] - p[u]);
+      const tw = Math.sign(q[w] - p[w]);
+      return [ccw * -tw, ccw * tu] as [number, number];
+    });
+    moved = pts.map((p, i) => {
+      const prev = edgeInward[(i - 1 + pts.length) % pts.length];
+      const curr = edgeInward[i];
+      const du = prev[0] === curr[0] && prev[1] === curr[1] ? curr[0] : prev[0] + curr[0];
+      const dw = prev[0] === curr[0] && prev[1] === curr[1] ? curr[1] : prev[1] + curr[1];
+      const out: LatticeCoord = [...p];
+      out[u] += du * steps;
+      out[w] += dw * steps;
+      return out;
+    });
+    for (let i = 0; i < pts.length; i++) {
+      const next = (i + 1) % pts.length;
+      const du0 = pts[next][u] - pts[i][u];
+      const dw0 = pts[next][w] - pts[i][w];
+      const du1 = moved[next][u] - moved[i][u];
+      const dw1 = moved[next][w] - moved[i][w];
+      if (du0 * du1 + dw0 * dw1 <= 0) return null;
+    }
+  } else if (verts.length > 4) {
+    // Rings, circles, and bevelled polygons: step radially inward toward the
+    // face centre so every corner retreats by `steps` along its own spoke.
+    for (const p of pts) {
+      const r = Math.hypot(p[u] - centre[u], p[w] - centre[w]);
+      if (r <= steps) return null;
+    }
+    moved = pts.map((p) => {
+      const du = p[u] - centre[u];
+      const dw = p[w] - centre[w];
+      const r = Math.hypot(du, dw);
+      const scale = (r - steps) / r;
+      const out: LatticeCoord = [...p];
+      out[u] = Math.round(centre[u] + du * scale);
+      out[w] = Math.round(centre[w] + dw * scale);
+      return out;
+    });
+  } else {
+    moved = pts.map((p) => {
+      const coord: LatticeCoord = [...p];
+      for (let k = 0; k < 3; k++) {
+        if (k === a) continue;
+        const away = coord[k] - centre[k];
+        // A corner already on the centre line has no side to come in from, so it
+        // stays: insetting a triangle moves two corners and pivots on the third.
+        if (away === 0) continue;
+        coord[k] += away > 0 ? -steps : steps;
+      }
+      return coord;
+    });
+    for (let i = 0; i < verts.length; i++) {
+      const before = pts[i];
+      const after = moved[i];
+      for (let k = 0; k < 3; k++) {
+        if (k === a) continue;
+        const wasAway = before[k] - centre[k];
+        const nowAway = after[k] - centre[k];
+        if (wasAway !== 0 && Math.sign(nowAway) !== Math.sign(wasAway)) return null;
+      }
+    }
+  }
 
   // Pulled in further than it is wide, the ring turns itself inside out.
   const seen = new Set(moved.map(([i, j, k]) => `${i},${j},${k}`));
   if (seen.size !== moved.length) return null;
-  for (let i = 0; i < verts.length; i++) {
-    const before = coordOf(lattice, verts[i]);
-    const after = moved[i];
-    for (let k = 0; k < 3; k++) {
-      if (k === a) continue;
-      const wasAway = before[k] - centre[k];
-      const nowAway = after[k] - centre[k];
-      if (wasAway !== 0 && Math.sign(nowAway) !== Math.sign(wasAway)) return null;
-    }
+  let area2After = 0;
+  for (let i = 0; i < moved.length; i++) {
+    const p = moved[i];
+    const q = moved[(i + 1) % moved.length];
+    area2After += p[u] * q[w] - q[u] * p[w];
   }
+  if (area2After * area2 <= 0) return null;
 
   const inner = moved.map(([i, j, k]) => vertexAt(lattice, i, j, k));
   removeFace(lattice, face);
@@ -1233,33 +1305,59 @@ export function bevelEdges(
   const towards = new Map<string, LatticeCoord>();
   const born = new Map<number, LatticeCoord[]>();
 
+  const bevelStep = (from: LatticeCoord, to: LatticeCoord): { dir: LatticeCoord; length: number; exact: boolean } | null => {
+    const exact = unitStep(from, to);
+    if (exact) return { ...exact, exact: true };
+    const dx = to[0] - from[0];
+    const dy = to[1] - from[1];
+    const dz = to[2] - from[2];
+    const len = Math.hypot(dx, dy, dz);
+    if (len === 0) return null;
+    return { dir: [dx / len, dy / len, dz / len], length: Math.floor(len), exact: false };
+  };
+
   for (const f of affected) {
     const verts = lattice.faces[f];
     if (!verts) return null;
+    const centre = faceCentre(lattice, f);
     for (let i = 0; i < verts.length; i++) {
       const v = verts[i];
       if (!touched.has(v)) continue;
       const p = verts[(i - 1 + verts.length) % verts.length];
       const q = verts[(i + 1) % verts.length];
       const here = coordOf(lattice, v);
-      const toP = unitStep(here, coordOf(lattice, p));
-      const toQ = unitStep(here, coordOf(lattice, q));
+      const toP = bevelStep(here, coordOf(lattice, p));
+      const toQ = bevelStep(here, coordOf(lattice, q));
       if (!toP || !toQ) return null;
-      // Room to cut. An edge whose far end is also being cut has to give up half
-      // to each; one whose far end stays put only has to stop short of it.
-      for (const [neighbour, step] of [[p, toP], [q, toQ]] as const) {
-        const room = touched.has(neighbour) ? step.length / 2 : step.length - 1;
-        if (steps > room) return null;
-      }
-      const along = (dir: LatticeCoord) => here.map((c, k) => c + dir[k] * steps) as LatticeCoord;
       const cutP = selected.has(edgeKey(v, p));
       const cutQ = selected.has(edgeKey(v, q));
+      // Room to cut. An edge whose far end is also being cut has to give up half
+      // to each; one whose far end stays put only has to stop short of it.
+      // When both edges of this face at `v` are being cut (e.g. a circular cap
+      // whose whole rim is beveled), the face retreats inward rather than along
+      // its short rim chords, so check radial room instead of chord length.
+      if (!(cutP && cutQ && (!toP.exact || !toQ.exact))) {
+        for (const [neighbour, step] of [[p, toP], [q, toQ]] as const) {
+          const room = touched.has(neighbour) ? step.length / 2 : step.length - 1;
+          if (steps > room) return null;
+        }
+      }
+      const along = (dir: LatticeCoord) => here.map((c, k) => Math.round(c + dir[k] * steps)) as LatticeCoord;
       // Both of the face's edges here are being cut, so the corner retreats
       // from both at once — diagonally, to a single point. Retreating from each
       // separately would leave the corner notched, and it is that notch, not
       // the tear, that turns a beveled cube's faces into octagons instead of
       // the squares they should stay.
-      const diagonal = here.map((c, k) => c + (toP.dir[k] + toQ.dir[k]) * steps) as LatticeCoord;
+      let diagonal: LatticeCoord;
+      if (toP.exact && toQ.exact) {
+        diagonal = here.map((c, k) => c + (toP.dir[k] + toQ.dir[k]) * steps) as LatticeCoord;
+      } else {
+        if (!centre) return null;
+        const dc = [centre[0] - here[0], centre[1] - here[1], centre[2] - here[2]];
+        const dist = Math.hypot(dc[0], dc[1], dc[2]);
+        if (dist <= steps) return null;
+        diagonal = here.map((c, k) => Math.round(c + (dc[k] / dist) * steps)) as LatticeCoord;
+      }
       const start = cutP && cutQ ? diagonal : cutP ? along(toQ.dir) : along(toP.dir);
       const end = cutP && cutQ ? diagonal : cutQ ? along(toP.dir) : along(toQ.dir);
       towards.set(`${f}:${v}:${p}`, start);

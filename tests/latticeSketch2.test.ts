@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { boxLattice, vertexAt, addFace, extrudeFace, coordOf, latticeStats, setCrease, findVertex, isCrease } from '../src/utils/latticeMesh';
-import { hostFaceOf, splitHostAround } from '../src/utils/latticeSketch';
+import { hostFaceOf, splitHostAround, splitHostByChord } from '../src/utils/latticeSketch';
 
 const top = (l: ReturnType<typeof boxLattice>) => l.faces.findIndex((f) => f && f.every((v) => coordOf(l, v)[2] === 200));
 
@@ -61,6 +61,62 @@ describe('drawing on a face', () => {
   it('leaves a face that is the host itself alone', () => {
     const l = boxLattice(0.0001, 200);
     expect(splitHostAround(l, [...l.faces[top(l)]!])).toBeNull();
+  });
+
+  it('a strip across the middle of a face splits the host into two flanking pieces', () => {
+    const l = boxLattice(0.0001, 200);
+    const strip = [[-50, -200], [50, -200], [50, 200], [-50, 200]].map(([x, y]) => vertexAt(l, x, y, 200));
+    const result = splitHostAround(l, strip);
+    expect(result).not.toBeNull();
+    expect(result!.pieces.length).toBe(2);
+    const added = addFace(l, result!.inner);
+    expect(added).not.toBe(-1);
+    expect(latticeStats(l).faces).toBe(8);
+    expect(latticeStats(l).watertight).toBe(true);
+    expect(extrudeFace(l, added, 50)).not.toBeNull();
+    expect(latticeStats(l).watertight).toBe(true);
+  });
+
+  it('an inscribed diamond touching all four edges cuts the host into four corner triangles', () => {
+    const l = boxLattice(0.0001, 200);
+    const diamond = [[0, -200], [200, 0], [0, 200], [-200, 0]].map(([x, y]) => vertexAt(l, x, y, 200));
+    const result = splitHostAround(l, diamond);
+    expect(result).not.toBeNull();
+    expect(result!.pieces.length).toBe(4);
+    addFace(l, result!.inner);
+    expect(latticeStats(l).watertight).toBe(true);
+  });
+
+  it('a polygon touching the host boundary at a single corner splits the pinched ring into two pieces', () => {
+    const l = boxLattice(0.0001, 200);
+    const singleTouch = [[-200, -200], [0, -100], [0, 0], [-100, 0]].map(([x, y]) => vertexAt(l, x, y, 200));
+    const result = splitHostAround(l, singleTouch);
+    expect(result).not.toBeNull();
+    expect(result!.pieces.length).toBe(2);
+    addFace(l, result!.inner);
+    expect(latticeStats(l).watertight).toBe(true);
+  });
+
+  it('splits a face in two along a 2-point chord from edge to edge or corner to corner', () => {
+    const l = boxLattice(0.0001, 200);
+    const a = vertexAt(l, -200, 0, 200);
+    const b = vertexAt(l, 200, 0, 200);
+    const split = splitHostByChord(l, [a, b]);
+    expect(split).not.toBeNull();
+    expect(split!.pieces.length).toBe(2);
+    expect(latticeStats(l).faces).toBe(7);
+    expect(latticeStats(l).watertight).toBe(true);
+    expect(extrudeFace(l, split!.pieces[0], 50)).not.toBeNull();
+    expect(latticeStats(l).watertight).toBe(true);
+  });
+
+  it('splits a corner off a face along a 3-point L-chord between adjacent edges', () => {
+    const l = boxLattice(0.0001, 200);
+    const chain = [[0, -200], [0, 0], [-200, 0]].map(([x, y]) => vertexAt(l, x, y, 200));
+    const split = splitHostByChord(l, chain);
+    expect(split).not.toBeNull();
+    expect(split!.pieces.length).toBe(2);
+    expect(latticeStats(l).watertight).toBe(true);
   });
 });
 
@@ -152,6 +208,24 @@ describe('pushing a part through another', () => {
     const atMinus200 = result!.faces.filter((f) => f && f.every((v) => coordOf(result!, v)[0] === -200)).length;
     expect(atMinus200).toBeGreaterThan(1);
     expect(result!.faces.some((f) => f && f.every((v) => coordOf(result!, v)[0] === -300))).toBe(false);
+  });
+
+  it('resolveExtrusion preserves unrelated coplanar face splits on the body', async () => {
+    const { resolveExtrusion } = await import('../src/utils/latticeSketch');
+    const l = boxLattice(0.0001, 200);
+    // Split the top face (z=200) along y=0 into two halves.
+    splitHostByChord(l, [vertexAt(l, -200, 0, 200), vertexAt(l, 200, 0, 200)]);
+    // Also split the front half along x=0, then push one top-front quadrant down by 100.
+    const frontHalf = l.faces.findIndex((f) => f && f.every((v) => coordOf(l, v)[2] === 200 && coordOf(l, v)[1] <= 0));
+    expect(frontHalf).not.toBe(-1);
+    splitHostByChord(l, [vertexAt(l, 0, -200, 200), vertexAt(l, 0, 0, 200)]);
+    const quadToPush = l.faces.findIndex((f) => f && f.every((v) => coordOf(l, v)[2] === 200 && coordOf(l, v)[0] <= 0 && coordOf(l, v)[1] <= 0));
+    const result = resolveExtrusion(l, quadToPush, -100)!;
+    expect(result).not.toBeNull();
+    expect(latticeStats(result).watertight).toBe(true);
+    // The remaining two quadrants at z=200 stay two separate faces rather than being merged into an L-gon.
+    const topFaces = result.faces.filter((f) => f && f.every((v) => coordOf(result, v)[2] === 200));
+    expect(topFaces.length).toBe(2);
   });
 
   it('two separate pieces that overlap become one', async () => {
