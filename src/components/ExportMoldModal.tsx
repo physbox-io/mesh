@@ -138,18 +138,17 @@ const EMPTY_SUMMARY: MoldSummary = moldSummary(emptyMoldResult());
  * The Mold button. Bodies selected that already make a mold are poured into;
  * anything else gets a mold designed for the scene.
  */
-export const ExportMoldModal: React.FC<ExportMoldModalProps> = (props) => {
-  const { isOpen, onClose } = props;
-  const [pourIds, setPourIds] = useState<string[] | null>(null);
-  useEffect(() => {
-    if (!isOpen) return;
+export const ExportMoldModal: React.FC<ExportMoldModalProps> = (props) =>
+  props.isOpen ? <OpenMoldModal {...props} /> : null;
+
+/** Mounted each time the dialog opens, so the selection is read afresh. */
+const OpenMoldModal: React.FC<ExportMoldModalProps> = (props) => {
+  const [pourIds, setPourIds] = useState<string[]>(() => {
     const { selectedNodeId, extraSelectedIds } = useStore.getState();
-    setPourIds(selectedNodeId ? [selectedNodeId, ...extraSelectedIds.filter((id) => id !== selectedNodeId)] : []);
-    return () => setPourIds(null);
-  }, [isOpen]);
-  if (!isOpen || pourIds === null) return null;
+    return selectedNodeId ? [selectedNodeId, ...extraSelectedIds.filter((id) => id !== selectedNodeId)] : [];
+  });
   if (pourIds.length > 0) {
-    return <PourIntoSelectionModal ids={pourIds} onClose={onClose} onMakeMold={() => setPourIds([])} />;
+    return <PourIntoSelectionModal ids={pourIds} onClose={props.onClose} onMakeMold={() => setPourIds([])} />;
   }
   return <MoldDesigner {...props} />;
 };
