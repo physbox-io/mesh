@@ -228,6 +228,24 @@ describe('pushing a part through another', () => {
     expect(topFaces.length).toBe(2);
   });
 
+  it('keeps a drawn seam but not the bridges cut to a shape drawn inside a face', async () => {
+    const { existingCoplanarSeams } = await import('../src/utils/latticeSketch');
+    const l = boxLattice(0.0001, 200);
+    // A drawn line across the top, from edge to edge.
+    splitHostByChord(l, [vertexAt(l, -200, 0, 200), vertexAt(l, 200, 0, 200)]);
+    // A square drawn inside the front half, touching nothing: the host is cut
+    // to it with two bridges.
+    const island = [[-50, -150], [50, -150], [50, -50], [-50, -50]].map(([x, y]) => vertexAt(l, x, y, 200));
+    const split = splitHostAround(l, island)!;
+    expect(split).not.toBeNull();
+    const inner = addFace(l, split.inner);
+    const seams = existingCoplanarSeams(l, inner);
+    const onY0 = (s: number[][]) => s.every((p) => p[1] === 0 && p[2] === 200);
+    // The drawn line, whole, and nothing else: no bridge runs to the island.
+    expect(seams.length).toBeGreaterThan(0);
+    expect(seams.every(onY0)).toBe(true);
+  });
+
   it('two separate pieces that overlap become one', async () => {
     const { mergeLattice, latticeBounds } = await import('../src/utils/latticeMesh');
     const { unionOverlappingPieces } = await import('../src/utils/latticeSketch');

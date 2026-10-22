@@ -543,6 +543,132 @@ export function prismOf(lattice: Lattice, face: number, steps: number, axis?: Ax
 }
 
 /**
+ * The seams on the body that a boolean must leave alone: every edge where two
+ * faces lie flat against each other in one plane, unless it dead-ends at the
+ * face being extruded.
+ *
+ * Those are the splits somebody drew — a line across a face is a seam from one
+ * fold of the body to another, and merging it away on the next push would
+ * undo it. The ones left out are the bridges splitHostAround cuts from a host
+ * face to a shape drawn inside it, because a face cannot have a hole: they run
+ * from the host's edge to a corner of the drawn shape and nowhere else, and
+ * once that shape is pushed in or out they are scaffolding the merge should
+ * clear. Seams are followed as chains between folds and junctions, so a drawn
+ * line made of several segments is kept or left whole.
+ */
+export function existingCoplanarSeams(lattice: Lattice, exceptFace: number): [Vec, Vec][] {
+  const faces = lattice.faces;
+  const normals = faces.map((F) => {
+    if (!F || F.length < 3) return null;
+    const n = newell(F.map((v) => coordOf(lattice, v)));
+    const l = Math.hypot(n[0], n[1], n[2]);
+    return l === 0 ? null : [n[0] / l, n[1] / l, n[2] / l];
+  });
+  const edgeFaces = new Map<string, { a: number; b: number; faces: number[] }>();
+  faces.forEach((F, f) => {
+    if (!F || F.length < 3) return;
+    for (let i = 0; i < F.length; i++) {
+      const a = F[i];
+      const b = F[(i + 1) % F.length];
+      const key = a < b ? `${a}:${b}` : `${b}:${a}`;
+      const entry = edgeFaces.get(key);
+      if (entry) entry.faces.push(f);
+      else edgeFaces.set(key, { a, b, faces: [f] });
+    }
+  });
+
+  // Folds: where the body turns a corner (or is open). A seam that reaches one
+  // has reached the edge of the flat region it divides.
+  const fold = new Set<number>();
+  const seamsAt = new Map<number, string[]>();
+  for (const [key, { a, b, faces: fs }] of edgeFaces) {
+    const [f, g] = fs;
+    const nf = normals[f];
+    const ng = g === undefined ? null : normals[g];
+    const flat = fs.length === 2 && !!nf && !!ng && nf[0] * ng[0] + nf[1] * ng[1] + nf[2] * ng[2] >= 0.999999;
+    if (!flat) { fold.add(a); fold.add(b); continue; }
+    if (f === exceptFace || g === exceptFace) continue;
+    for (const v of [a, b]) {
+      const list = seamsAt.get(v);
+      if (list) list.push(key);
+      else seamsAt.set(v, [key]);
+    }
+  }
+  const extruded = new Set(faces[exceptFace] ?? []);
+  const stopsAt = (v: number) => fold.has(v) || (seamsAt.get(v)?.length ?? 0) !== 2;
+
+  const edgeOther = (key: string, v: number) => {
+    const { a, b } = edgeFaces.get(key)!;
+    return a === v ? b : a;
+  };
+  /*
+   * Whether a seam arriving at `v` from `from` carries straight on, along any
+   * edge, to a fold. A drawn line that ends on the extruded face's rim — a
+   * second line run up to the first, with the corner between them the one
+   * being pushed — does: the rest of the first line goes on in the same
+   * direction. A bridge meets the drawn shape at an angle and stops.
+   */
+  const neighbours = new Map<number, number[]>();
+  for (const { a, b } of edgeFaces.values()) {
+    (neighbours.get(a) ?? neighbours.set(a, []).get(a)!).push(b);
+    (neighbours.get(b) ?? neighbours.set(b, []).get(b)!).push(a);
+  }
+  const reachesFold = (v: number, from: number): boolean => {
+    let prev = from;
+    let here = v;
+    for (let guard = 0; guard < faces.length + 4; guard++) {
+      if (fold.has(here)) return true;
+      const p = coordOf(lattice, prev);
+      const h = coordOf(lattice, here);
+      const d = [h[0] - p[0], h[1] - p[1], h[2] - p[2]];
+      const next = (neighbours.get(here) ?? []).find((n) => {
+        if (n === prev) return false;
+        const c = coordOf(lattice, n);
+        const e = [c[0] - h[0], c[1] - h[1], c[2] - h[2]];
+        const cross = [d[1] * e[2] - d[2] * e[1], d[2] * e[0] - d[0] * e[2], d[0] * e[1] - d[1] * e[0]];
+        return cross[0] === 0 && cross[1] === 0 && cross[2] === 0 && d[0] * e[0] + d[1] * e[1] + d[2] * e[2] > 0;
+      });
+      if (next === undefined) return false;
+      prev = here;
+      here = next;
+    }
+    return false;
+  };
+
+  const out: [Vec, Vec][] = [];
+  const seen = new Set<string>();
+  for (const [start] of seamsAt) {
+    for (const first of seamsAt.get(start)!) {
+      if (seen.has(first) || !stopsAt(start)) continue;
+      // Walk from a stopping vertex along the chain to the next one.
+      const chain: string[] = [];
+      let at = start;
+      let key = first;
+      for (;;) {
+        seen.add(key);
+        chain.push(key);
+        const { a, b } = edgeFaces.get(key)!;
+        at = a === at ? b : a;
+        if (stopsAt(at)) break;
+        const next = seamsAt.get(at)!.find((k) => k !== key)!;
+        if (seen.has(next)) break;
+        key = next;
+      }
+      const ends: [number, number][] = [
+        [start, edgeOther(first, start)],
+        [at, edgeOther(key, at)],
+      ];
+      if (ends.some(([v, from]) => extruded.has(v) && !reachesFold(v, from))) continue;
+      for (const k of chain) {
+        const { a, b } = edgeFaces.get(k)!;
+        out.push([coordOf(lattice, a) as Vec, coordOf(lattice, b) as Vec]);
+      }
+    }
+  }
+  return out;
+}
+
+/**
  * The body after extruding `face` by `steps`, where the extrusion runs into
  * the body itself — or null when it does not, and the plain extrude stands.
  *
@@ -552,43 +678,6 @@ export function prismOf(lattice: Lattice, face: number, steps: number, axis?: Ax
  * body − prism pushed in. Refused (null) when the body is not closed, since
  * a boolean of an open shell means nothing.
  */
-/**
- * Coplanar seams already present in `lattice` outside `exceptFace`, so a
- * boolean triggered by extruding one face does not merge away unrelated splits
- * the user drew elsewhere on the body.
- */
-function existingCoplanarSeams(lattice: Lattice, exceptFace: number): [Vec, Vec][] {
-  const out: [Vec, Vec][] = [];
-  const faces = lattice.faces;
-  for (let f = 0; f < faces.length; f++) {
-    if (f === exceptFace) continue;
-    const F = faces[f];
-    if (!F || F.length < 3) continue;
-    const nf = newell(F.map((v) => coordOf(lattice, v)));
-    const lf = Math.hypot(nf[0], nf[1], nf[2]);
-    if (lf === 0) continue;
-    for (let g = f + 1; g < faces.length; g++) {
-      if (g === exceptFace) continue;
-      const G = faces[g];
-      if (!G || G.length < 3) continue;
-      const ng = newell(G.map((v) => coordOf(lattice, v)));
-      const lg = Math.hypot(ng[0], ng[1], ng[2]);
-      if (lg === 0) continue;
-      if ((nf[0] * ng[0] + nf[1] * ng[1] + nf[2] * ng[2]) / (lf * lg) < 0.999999) continue;
-      for (let i = 0; i < F.length; i++) {
-        const a = F[i];
-        const b = F[(i + 1) % F.length];
-        const shares = G.some((r, j) => {
-          const s = G[(j + 1) % G.length];
-          return (a === r && b === s) || (a === s && b === r);
-        });
-        if (shares) out.push([coordOf(lattice, a) as Vec, coordOf(lattice, b) as Vec]);
-      }
-    }
-  }
-  return out;
-}
-
 export function resolveExtrusion(before: Lattice, face: number, steps: number, axis?: Axis): Lattice | null {
   if (steps === 0 || !before.faces[face]) return null;
   const trial = cloneLattice(before);
