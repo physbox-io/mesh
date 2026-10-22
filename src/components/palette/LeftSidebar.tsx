@@ -52,7 +52,8 @@ export function LeftSidebar({ onAddNoteCard }: { onAddNoteCard: () => void }) {
    * go and find the tools afterwards makes two steps out of one intent.
    */
   const handleAddLatticeClick = () => {
-    const id = addComponent('lattice', [0, 0, 0.2], useStore.getState().selectedNodeId);
+    // At the origin, so the empty grid it opens on is centred there.
+    const id = addComponent('lattice', [0, 0, 0], useStore.getState().selectedNodeId);
     close();
     useStore.getState().setLatticeNodeId(id);
   };

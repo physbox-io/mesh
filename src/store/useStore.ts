@@ -13,7 +13,7 @@ import { getGeomFrame } from '../utils/laserCutExporter';
 import { DEFAULT_BRUSH, toSceneGeom, type BrushSettings, type SculptMesh } from '../utils/sculptMesh';
 import { buildSculptBase, DEFAULT_SCULPT_BASE, type SculptBaseId } from '../utils/sculptBases';
 import {
-  boxLattice, deserializeCage, faceCount, serializeCage,
+  createLattice, deserializeCage, faceCount, serializeCage,
   separablePieces, DRAWING_TOOLS, toSceneGeom as latticeToSceneGeom,
   DEFAULT_UNIT as LATTICE_UNIT, type Axis as LatticeAxis, type LatticeCage,
   type SnapMultiple, type LatticeTool,
@@ -5636,10 +5636,10 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
         }];
         joints = [{ name: `${id}_free`, type: 'free' }];
       } else if (type === 'lattice') {
-        // A box on the grid, not a ball of clay: the mode is about placing
-        // points exactly, and the first move is nearly always to push a face
-        // out. See utils/latticeMesh.ts.
-        const cage = serializeCage(boxLattice(LATTICE_UNIT, 200));
+        // An empty grid: the first thing drawn is the user's own, and the
+        // panel's Add cube puts back the box this used to start as. See
+        // utils/latticeMesh.ts.
+        const cage = serializeCage(createLattice(LATTICE_UNIT));
         const { vertices, renderVertices, faces } = latticeToSceneGeom(deserializeCage(cage), 0);
         // Centred on the origin already, so the offset it starts with is zero —
         // but it is written down rather than assumed, because applyLattice
@@ -5756,7 +5756,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
       } : {}),
       ...(type === 'lattice' ? {
         isLattice: true,
-        latticeCage: serializeCage(boxLattice(LATTICE_UNIT, 200)),
+        latticeCage: serializeCage(createLattice(LATTICE_UNIT)),
         latticeSubdiv: 0,
         latticeVersion: 1,
         latticeOrigin: [0, 0, 0],

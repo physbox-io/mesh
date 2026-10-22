@@ -613,6 +613,18 @@ export function LatticePanel({ onOpenDocs }: { onOpenDocs?: () => void } = {}) {
         ))}
       </div>
 
+      {/* A lattice starts empty; this is the box it used to start as, put
+          wherever the grid is now. LatticeSurface does the adding. */}
+      <button
+        type="button"
+        onClick={() => window.dispatchEvent(new CustomEvent('physbox:lattice', { detail: { kind: 'addCube' } }))}
+        title="Add a 40 mm cube at the middle of the grid. Where it overlaps the shape, it joins it."
+        className="flex items-center justify-center gap-1.5 w-full py-1.5 rounded-lg border text-[10px] font-semibold transition-colors cursor-pointer bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:border-slate-300 dark:hover:border-slate-600"
+      >
+        <Boxes className="w-3 h-3" />
+        Add cube
+      </button>
+
       {/* Dimensions. The answer to "make it 40 mm", which the pointer cannot
           give however carefully it is dragged. Always on screen rather than
           folded away: a number you have to go looking for is a number people

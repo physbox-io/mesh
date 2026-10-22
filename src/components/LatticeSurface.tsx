@@ -40,7 +40,7 @@ import {
   removeFace, removeVertex, moveVertex, moveVertices, flipFace, setCrease, isCrease, creaseEdges, edgeKey, edgeLoop, extrudeFace, mirrorFace, findMirrorFace,
   faceNormal, faceCentre, dominantAxis, latticeStats, latticeBounds, mirrorCoord, orientFaces, vertexCount,
   bridgeFaces, insetFace, insetRefusal, INSET_REFUSAL_TEXT, bevelFace, bevelEdges, scaleVertices, ringCoords, revolveChain, chainFromEdges, triangulate, curveCoords,
-  addWire, removeWire, wireEndingAt, removeWireEdge, wireEdges,
+  addWire, removeWire, wireEndingAt, removeWireEdge, wireEdges, boxLattice, mergeLattice,
   AXIS_INDEX, DRAWING_TOOLS, type Axis, type Lattice, type LatticeCage, type LatticeCoord, type SnapMultiple,
 } from '../utils/latticeMesh';
 import { useModifier } from '../hooks/useModifier';
@@ -167,6 +167,12 @@ function findLatticeNode(nodes: SceneNode[], id: string): SceneNode | null {
   return null;
 }
 
+/**
+ * What is being drawn: the line in progress, a shape or curve before it lands,
+ * and the cursor. Not blue, because the grid and the body both are.
+ */
+const DRAWN = '#d946ef';
+
 /** Steps of empty grid drawn around whatever has been built so far. */
 const FIELD_MARGIN = 6;
 
@@ -179,17 +185,6 @@ const FIELD_MARGIN = 6;
  * enough to be a fog is one you cannot pick anything out of anyway.
  */
 const MAX_FIELD_SPAN = 25;
-
-/**
- * How far the lit slice reaches out from where the pointer is working, in grid
- * steps, while the plane is held.
- *
- * Held, the plane is a drawing surface, and a drawing surface that stops at the
- * edge of what has been drawn so far is a sheet of paper the size of the
- * sketch. A slice is two-dimensional, so this can be generous where the volume
- * cannot: sixty steps across is under four thousand dots.
- */
-const SLICE_REACH = 30;
 
 /**
  * Ceiling on dots per row of the lit slice. Squared, not cubed, so it can be
@@ -400,6 +395,8 @@ export function LatticeSurface({
   const [selectedFaces, setSelectedFaces] = useState<number[]>([]);
   /** The face under the pointer, so extrude shows what it is about to move. */
   const [hoveredFace, setHoveredFace] = useState<number | null>(null);
+  /** The edge a select click would take, drawn so it can be seen before it is clicked. */
+  const [hoveredEdge, setHoveredEdge] = useState<[number, number] | null>(null);
   /**
    * The selected corners. Usually one, or a boxful after a drag across them.
    *
@@ -426,20 +423,20 @@ export function LatticeSurface({
     | null
   >(null);
 
-  const [focus, setFocus] = useState<LatticeCoord | null>(null);
+  /**
+   * How far past the shape a line being drawn has pushed the grid. The grid
+   * stays where it is while the pointer moves — a field that followed the
+   * pointer was a field that never stood still to be read — and grows only
+   * when a stroke in progress runs up to its edge. Dropped when the stroke
+   * ends: whatever it drew is in the shape by then, and the shape's bounds
+   * carry the grid from there.
+   */
+  const [reach, setReach] = useState<{ min: LatticeCoord; max: LatticeCoord } | null>(null);
 
   const setHover = useCallback((coord: LatticeCoord | null) => {
     hoverRef.current = coord;
     setHoverState(coord);
-    if (!coord) return;
-    // The field's window follows the pointer in jumps — see `focus` below.
-    const reach = Math.floor(MAX_FIELD_SPAN / 4) * gridSnap;
-    setFocus((current) => (
-      !current || coord.some((c, k) => Math.abs(c - current[k]) > reach)
-        ? coord.map((c) => Math.round(c / gridSnap) * gridSnap) as LatticeCoord
-        : current
-    ));
-  }, [gridSnap]);
+  }, []);
 
   const setGestureStatus = useStore((s) => s.setGestureStatus);
 
@@ -653,6 +650,23 @@ export function LatticeSurface({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [position, revision, selectedEdges]);
 
+  /**
+   * The hovered edge as a bar a few pixels thick. A line is one pixel wide in
+   * WebGL whatever it is asked for, and one pixel of colour on a lit body is
+   * not something anybody can see.
+   */
+  const hoveredEdgeBar = useMemo(() => {
+    if (!hoveredEdge) return null;
+    const a = new THREE.Vector3(...position(hoveredEdge[0]));
+    const b = new THREE.Vector3(...position(hoveredEdge[1]));
+    const along = b.clone().sub(a);
+    const length = along.length();
+    if (length === 0) return null;
+    const quaternion = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), along.normalize());
+    return { middle: a.add(b).multiplyScalar(0.5), quaternion, length };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hoveredEdge, position, revision]);
+
   /** The cage's own vertices, as draggable handles. */
   const handles = useMemo(() => {
     const used = new Set<number>();
@@ -706,8 +720,15 @@ export function LatticeSurface({
    */
   const field = useMemo(() => {
     const bounds = latticeBounds(lattice);
+    // Nothing built yet, the grid sits round the origin.
     const min: LatticeCoord = bounds ? [...bounds.min] : [0, 0, 0];
     const max: LatticeCoord = bounds ? [...bounds.max] : [0, 0, 0];
+    if (reach) {
+      for (let k = 0; k < 3; k++) {
+        min[k] = Math.min(min[k], reach.min[k]);
+        max[k] = Math.max(max[k], reach.max[k]);
+      }
+    }
     /*
      * The volume always covers the whole shape, and gets SPARSER rather than
      * smaller when that is too many dots: the step goes up a decade at a time
@@ -731,7 +752,7 @@ export function LatticeSurface({
     });
     while (!fits(step) && step < 1e6) step *= 10;
     return { ranges: [range(0, step), range(1, step), range(2, step)] as const, step, fine: [range(0, gridSnap), range(1, gridSnap), range(2, gridSnap)] as const };
-  }, [lattice, revision, gridSnap]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [lattice, reach, revision, gridSnap]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /**
    * How much of the world one screen pixel covers, at the body being edited.
@@ -825,32 +846,26 @@ export function LatticeSurface({
   const litIndex = locked || !hover ? plane.index : hover[AXIS_INDEX[plane.axis]];
 
   /**
-   * Held, the slice reaches well past the shape — see SLICE_REACH — and its
-   * dots are kept, because every one of them is somewhere a stroke can land.
+   * The lit slice: the field's own extent on the work plane, at the grid's own
+   * step — a slice is flat, so it can afford what the volume cannot. A part
+   * too many steps across for that is drawn at a coarser decade, as the volume
+   * is, rather than as a window that moves with the pointer: clicks still land
+   * on every step, because the plane answers for them, not the dots.
    */
   const slice = useMemo(() => {
     const positions: number[] = [];
     const coords: LatticeCoord[] = [];
-    const span = (k: 0 | 1 | 2) => {
-      // At the grid's own step over the whole shape — a slice is flat, so it
-      // can afford what the volume cannot — and held, out past it as well.
-      let r = field.fine[k];
-      const at = focus ? focus[k] : (r.lo + r.hi) / 2;
-      const centre = Math.round(at / gridSnap) * gridSnap;
-      if (locked) r = { lo: Math.min(r.lo, centre - SLICE_REACH * gridSnap), hi: Math.max(r.hi, centre + SLICE_REACH * gridSnap) };
-      // Only a part hundreds of steps across gets a window, and then it is a
-      // wide one around the pointer rather than a patch.
-      if ((r.hi - r.lo) / gridSnap + 1 > MAX_SLICE_SPAN) {
-        const half = Math.floor(MAX_SLICE_SPAN / 2) * gridSnap;
-        r = { lo: centre - half, hi: centre + half };
-      }
-      return r;
-    };
-    const ranges = [span(0), span(1), span(2)] as const;
     const axis = AXIS_INDEX[plane.axis];
     const [a, b] = OTHER_AXES[plane.axis];
-    for (let u = ranges[a].lo; u <= ranges[a].hi; u += gridSnap) {
-      for (let v = ranges[b].lo; v <= ranges[b].hi; v += gridSnap) {
+    let at = gridSnap;
+    const fits = (step: number) => [a, b].every((k) => (field.fine[k].hi - field.fine[k].lo) / step + 1 <= MAX_SLICE_SPAN);
+    while (!fits(at) && at < 1e6) at *= 10;
+    const ranges = [0, 1, 2].map((k) => ({
+      lo: Math.floor(field.fine[k].lo / at) * at,
+      hi: Math.ceil(field.fine[k].hi / at) * at,
+    }));
+    for (let u = ranges[a].lo; u <= ranges[a].hi; u += at) {
+      for (let v = ranges[b].lo; v <= ranges[b].hi; v += at) {
         const coord: LatticeCoord = [0, 0, 0];
         coord[axis] = litIndex;
         coord[a] = u;
@@ -862,7 +877,32 @@ export function LatticeSurface({
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
     return { geometry, coords, ranges };
-  }, [field, focus, litIndex, locked, plane.axis, gridSnap, unit]);
+  }, [field, litIndex, plane.axis, gridSnap, unit]);
+
+  /*
+   * A stroke run up to the edge of the grid takes the grid with it, a margin's
+   * worth at a time, so it grows in a few steps rather than on every move.
+   */
+  const midStroke = pending.length > 0 || !!stroke || !!shape;
+  useEffect(() => {
+    if (!midStroke) {
+      setReach(null);
+      return;
+    }
+    if (!hover) return;
+    const near = 2 * gridSnap;
+    const margin = FIELD_MARGIN * gridSnap;
+    let grown: { min: LatticeCoord; max: LatticeCoord } | null = null;
+    for (let k = 0; k < 3; k++) {
+      const { lo, hi } = field.fine[k];
+      const outward = hover[k] < lo + near ? -1 : hover[k] > hi - near ? 1 : 0;
+      if (!outward) continue;
+      grown ??= { min: [...(reach?.min ?? hover)], max: [...(reach?.max ?? hover)] };
+      if (outward < 0) grown.min[k] = Math.min(grown.min[k], hover[k] - margin);
+      else grown.max[k] = Math.max(grown.max[k], hover[k] + margin);
+    }
+    if (grown) setReach(grown);
+  }, [midStroke, field.fine, gridSnap, hover, reach]);
 
   // -----------------------------------------------------------------------
   // Pointer -> grid
@@ -1201,19 +1241,11 @@ export function LatticeSurface({
         setPending([]);
         return;
       }
-      /*
-       * Closed against what is already there. An outline drawn from one
-       * corner of the model to another is an outline whose other side the
-       * model already has: the shortest way back along existing edges — a
-       * face's, or another wire's — completes it. Shortest, because the
-       * question "which way round" has no better answer a click can give,
-       * and the near way round is nearly always the one meant. Two corners
-       * of drawn outline at least, or a single segment across a face would
-       * cap itself into a sliver nobody asked for.
-       */
       if (run.length >= 2) {
-        // A line or polyline drawn across a face from one boundary point to
-        // another divides that face in two along the chord.
+        // A line begun on a face's edge and run across it to another edge
+        // cuts the face in two along that line — so a single segment across a
+        // face is a cut, never the sliver the closing rule below refuses.
+        // Begun anywhere else it is a wire, as it always was.
         const chordSplit = splitHostByChord(lattice, run);
         if (chordSplit) {
           if (mirror) {
@@ -1227,6 +1259,16 @@ export function LatticeSurface({
           return;
         }
       }
+      /*
+       * Closed against what is already there. An outline drawn from one
+       * corner of the model to another is an outline whose other side the
+       * model already has: the shortest way back along existing edges — a
+       * face's, or another wire's — completes it. Shortest, because the
+       * question "which way round" has no better answer a click can give,
+       * and the near way round is nearly always the one meant. Two corners
+       * of drawn outline at least, or a single segment across a face would
+       * cap itself into a sliver nobody asked for.
+       */
       if (run.length >= 3) {
         const back = shortestWayBack(lattice, run);
         if (back) {
@@ -1611,7 +1653,11 @@ export function LatticeSurface({
       coord = constrain(coord, pending[pending.length - 1]);
     }
     setHover(coord);
-  }, [constrain, freehand, localRay, locked, pending, plane.axis, plane.index, resolve, setHover, tool, updateExtrude, updateVertexDrag]);
+    const edge = tool === 'select' && ray ? pickEdge(ray) : null;
+    setHoveredEdge((current) => (
+      current?.[0] === edge?.[0] && current?.[1] === edge?.[1] ? current : edge
+    ));
+  }, [constrain, freehand, localRay, locked, pending, pickEdge, plane.axis, plane.index, resolve, setHover, tool, updateExtrude, updateVertexDrag]);
 
   /**
    * Finishes a Bézier curve: its grid points go onto the polygon being drawn,
@@ -2827,6 +2873,28 @@ export function LatticeSurface({
     mutate(() => { orientFaces(lattice); });
   }, [lattice, mutate, orientRequest]);
 
+  /*
+   * The panel's Add cube: a 40 mm cube (or one grid step, on a grid coarser
+   * than that) centred on the grid as it stands — the middle of the lit slice,
+   * at the slice's depth. Overlapping what is there already, it fuses with it
+   * on the commit like anything else pushed into the shape.
+   */
+  useEffect(() => {
+    const onAsked = (event: Event) => {
+      if ((event as CustomEvent<{ kind: string }>).detail?.kind !== 'addCube') return;
+      const half = Math.max(gridSnap, Math.round(200 / gridSnap) * gridSnap);
+      const axis = AXIS_INDEX[plane.axis];
+      const centre = [0, 1, 2].map((k) => (
+        k === axis ? litIndex : Math.round((field.fine[k].lo + field.fine[k].hi) / 2 / gridSnap) * gridSnap
+      ));
+      mutate(() => {
+        mergeLattice(lattice, boxLattice(lattice.unit, half), (c) => c.map((v, k) => v + centre[k]) as LatticeCoord);
+      });
+    };
+    window.addEventListener('physbox:lattice', onAsked);
+    return () => window.removeEventListener('physbox:lattice', onAsked);
+  }, [field.fine, gridSnap, lattice, litIndex, mutate, plane.axis]);
+
   // A drag left open by an unmount would leave the camera disabled.
   useEffect(() => () => {
     if (drag.current) {
@@ -2985,7 +3053,7 @@ export function LatticeSurface({
   useEffect(() => () => dotTexture.dispose(), [dotTexture]);
 
   return (
-    <group ref={groupRef} name={`${nodeId}_lattice`}>
+    <group ref={groupRef} name={`${nodeId}_lattice`} userData={{ bodyId: nodeId }}>
       <group ref={cageRef} position={[-compiledOrigin[0], -compiledOrigin[1], -compiledOrigin[2]]}>
       {/* The shape itself, drawn front faces only — as every other renderer in
           the app draws it. Double-sided was a kindness that cost more than it
@@ -3015,10 +3083,18 @@ export function LatticeSurface({
       <lineSegments geometry={wire.sharp} raycast={() => null}>
         <lineBasicMaterial color="#f59e0b" depthTest={false} />
       </lineSegments>
+      {/* Selected edges in the selected-corner amber, not blue: blue is the
+          body's own colour, and a chosen edge on it did not show. */}
       {edgeHighlight && (
         <lineSegments geometry={edgeHighlight} raycast={() => null}>
-          <lineBasicMaterial color="#38bdf8" depthTest={false} />
+          <lineBasicMaterial color="#f59e0b" depthTest={false} />
         </lineSegments>
+      )}
+      {hoveredEdgeBar && (
+        <mesh position={hoveredEdgeBar.middle} quaternion={hoveredEdgeBar.quaternion} raycast={() => null} renderOrder={2}>
+          <cylinderGeometry args={[pixels(1.5), pixels(1.5), hoveredEdgeBar.length, 6, 1]} />
+          <meshBasicMaterial color="#f97316" depthTest={false} />
+        </mesh>
       )}
 
       {/* Face picking. Invisible, but not `visible={false}` — that would stop it
@@ -3088,7 +3164,7 @@ export function LatticeSurface({
               three of those a guess. */}
           <sphereGeometry args={[wouldClose || hoverVertex !== -1 ? pixels(5) : pixels(3), 12, 8]} />
           <meshBasicMaterial
-            color={wouldClose ? '#10b981' : hoverVertex !== -1 ? '#f59e0b' : '#38bdf8'}
+            color={wouldClose ? '#10b981' : hoverVertex !== -1 ? '#f59e0b' : DRAWN}
             depthTest={false}
           />
         </mesh>
@@ -3096,26 +3172,26 @@ export function LatticeSurface({
 
       {shape && (
         <lineSegments geometry={shapeLine} raycast={() => null}>
-          <lineBasicMaterial color="#0ea5e9" depthTest={false} transparent opacity={0.9} />
+          <lineBasicMaterial color={DRAWN} depthTest={false} transparent opacity={0.9} />
         </lineSegments>
       )}
       {stroke && (
         <>
           <lineSegments geometry={curvePreview.line} raycast={() => null}>
-            <lineBasicMaterial color="#0ea5e9" depthTest={false} transparent opacity={0.9} />
+            <lineBasicMaterial color={DRAWN} depthTest={false} transparent opacity={0.9} />
           </lineSegments>
           <lineSegments geometry={curvePreview.arms} raycast={() => null}>
             <lineBasicMaterial color="#f59e0b" depthTest={false} transparent opacity={0.5} />
           </lineSegments>
           <mesh position={[stroke.end[0] * unit, stroke.end[1] * unit, stroke.end[2] * unit]} raycast={() => null}>
             <sphereGeometry args={[pixels(3), 12, 8]} />
-            <meshBasicMaterial color="#0ea5e9" depthTest={false} />
+            <meshBasicMaterial color={DRAWN} depthTest={false} />
           </mesh>
         </>
       )}
       {pending.length > 0 && (
         <lineSegments geometry={pendingLine} raycast={() => null}>
-          <lineBasicMaterial color="#38bdf8" linewidth={2} depthTest={false} />
+          <lineBasicMaterial color={DRAWN} linewidth={2} depthTest={false} />
         </lineSegments>
       )}
 
@@ -3124,7 +3200,7 @@ export function LatticeSurface({
         onPointerMove={onPlaneMove}
         onPointerDown={onPlaneDown}
         onPointerUp={endDrag}
-        onPointerLeave={() => { setHover(null); endDrag(); }}
+        onPointerLeave={() => { setHover(null); setHoveredEdge(null); endDrag(); }}
       >
         <boxGeometry args={catcher.size} />
         <meshBasicMaterial colorWrite={false} depthWrite={false} side={THREE.BackSide} />

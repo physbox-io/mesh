@@ -571,7 +571,7 @@ api.setAngularVelocity([0, 15.0, 0], 'cart'); // Sets angular velocities`}
                   Load the <strong>Wall Bracket (Lattice)</strong> preset to see the finished part, or build one:
                 </p>
                 <ol className="text-xs text-slate-600 leading-relaxed list-decimal ml-4 flex flex-col gap-1.5">
-                  <li>Drop in a <strong>Lattice</strong> body. It starts as a 40&nbsp;mm box of six quads.</li>
+                  <li>Drop in a <strong>Lattice</strong> body. It starts as an empty grid at the origin; press <strong>Add cube</strong> in the panel for a 40&nbsp;mm box of six quads.</li>
                   <li>Press <kbd className="font-mono">2</kbd> for <em>Select</em>, click the front face, then drag it with the <em>Extrude</em> tool (<kbd className="font-mono">3</kbd>). It moves in whole grid steps; the status bar counts the millimetres.</li>
                   <li>Set the grid to <strong>1&nbsp;mm</strong> for the details. The coarse corners stay exactly where they are.</li>
                   <li>Select the end face and press <kbd className="font-mono">I</kbd>, then move the pointer to size the inset and click. Extrude the inner face inward for a recess, or straight through for a slot.</li>
