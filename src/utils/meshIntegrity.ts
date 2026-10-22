@@ -17,8 +17,8 @@
 // edge agree about which side is outside exactly when one walks that edge a→b
 // and the other walks it b→a.
 //
-// Edge keys are integers rather than strings because this runs for every mesh
-// in every scene summary and on every recompile.
+// Edge keys are numbers in sorted typed arrays rather than strings or Map keys
+// because this runs for every mesh in every scene summary and on every recompile.
 
 export interface MeshIntegrity {
   /** Every edge shared by exactly two triangles, and no degenerate triangles. */
@@ -33,47 +33,58 @@ export interface MeshIntegrity {
 }
 
 /**
- * Above this the edge map costs more than either caller's whole job, so they
- * are told "not checked" rather than made to wait. A mesh this size is a
- * sculpt or a relief, and both of those are built closed by construction.
+ * Above this the two sorted edge arrays (16 bytes per triangle corner) and their
+ * sorts cost more than either caller's whole job. Two million triangles is about
+ * 100 MB of STL; below it the check takes well under a second, and a big mesh
+ * is exactly the one headed for a printer or a mold with a hole in it.
  */
-export const MAX_CHECKED_TRIANGLES = 200_000;
+export const MAX_CHECKED_TRIANGLES = 2_000_000;
 
 /** `null` when the mesh is empty or too large to check. */
-export function analyzeMesh(positions: number[], faces: number[]): MeshIntegrity | null {
+export function analyzeMesh(positions: ArrayLike<number>, faces: ArrayLike<number>): MeshIntegrity | null {
   const triangles = faces.length / 3;
   if (!triangles || !positions.length) return null;
   if (triangles > MAX_CHECKED_TRIANGLES) return null;
 
+  // One key per triangle corner's edge, undirected and directed, sorted and
+  // then read as runs. A Map and a Set took six times as long (1.2 s against 0.2 s on 456k triangles)
+  // and several times the memory, which is what used to cap this at 200k.
+  // Keys stay below 2^53 for any vertex count under ~94 million.
   const vertexCount = positions.length / 3;
-  const edges = new Map<number, number>();
+  const undirected = new Float64Array(faces.length);
   // Directed, so that a→b and b→a are different keys: a second triangle walking
   // an edge the same way as the first is one of them facing inward.
-  const directed = new Set<number>();
-  let inconsistent = false;
+  const directed = new Float64Array(faces.length);
+  let n = 0;
   let degenerateTriangles = 0;
   let volume = 0;
   for (let i = 0; i < faces.length; i += 3) {
     const t0 = faces[i], t1 = faces[i + 1], t2 = faces[i + 2];
     if (t0 === t1 || t1 === t2 || t0 === t2) { degenerateTriangles++; continue; }
-    const tri = [t0, t1, t2];
-    for (let e = 0; e < 3; e++) {
-      const a = tri[e], b = tri[(e + 1) % 3];
-      const key = a < b ? a * vertexCount + b : b * vertexCount + a;
-      edges.set(key, (edges.get(key) ?? 0) + 1);
-      const dir = a * vertexCount + b;
-      if (directed.has(dir)) inconsistent = true;
-      directed.add(dir);
-    }
+    undirected[n] = t0 < t1 ? t0 * vertexCount + t1 : t1 * vertexCount + t0;
+    directed[n++] = t0 * vertexCount + t1;
+    undirected[n] = t1 < t2 ? t1 * vertexCount + t2 : t2 * vertexCount + t1;
+    directed[n++] = t1 * vertexCount + t2;
+    undirected[n] = t2 < t0 ? t2 * vertexCount + t0 : t0 * vertexCount + t2;
+    directed[n++] = t2 * vertexCount + t0;
     const a = t0 * 3, b = t1 * 3, c = t2 * 3;
     volume += (positions[a] * (positions[b + 1] * positions[c + 2] - positions[b + 2] * positions[c + 1])
       - positions[a + 1] * (positions[b] * positions[c + 2] - positions[b + 2] * positions[c])
       + positions[a + 2] * (positions[b] * positions[c + 1] - positions[b + 1] * positions[c])) / 6;
   }
+  const edges = undirected.subarray(0, n).sort();
+  const walks = directed.subarray(0, n).sort();
+  let inconsistent = false;
+  for (let i = 1; i < n; i++) {
+    if (walks[i] === walks[i - 1]) { inconsistent = true; break; }
+  }
   let boundaryEdges = 0, nonManifoldEdges = 0;
-  for (const n of edges.values()) {
-    if (n === 1) boundaryEdges++;
-    else if (n > 2) nonManifoldEdges++;
+  for (let i = 0; i < n;) {
+    let j = i + 1;
+    while (j < n && edges[j] === edges[i]) j++;
+    if (j - i === 1) boundaryEdges++;
+    else if (j - i > 2) nonManifoldEdges++;
+    i = j;
   }
   return {
     closed: boundaryEdges === 0 && nonManifoldEdges === 0 && degenerateTriangles === 0,
