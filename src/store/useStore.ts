@@ -2802,8 +2802,12 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     get().prepareForDiscreteChange();
     const sceneGraph = get().sceneGraph;
     const newNodes = [...sceneGraph.nodes, hardwareNode];
-    const newGraph = { ...sceneGraph, nodes: newNodes };
-    get().recompile(newGraph, hardwareNode.id);
+    // In the store now, not when the build lands: a build that finds the scene
+    // changed under it keeps the newer scene, so a body that only rode in on the
+    // build was lost to any edit made meanwhile — a collider decomposition
+    // finishing just after a load took a simulated cast that way.
+    set({ sceneGraph: { ...sceneGraph, nodes: newNodes } });
+    get().recompile(get().sceneGraph, hardwareNode.id);
   },
   // An explicit pose is an eye position and a target, which is a perspective
   // pose: the orthographic drawing views are framed by their axis and zoom.
