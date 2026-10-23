@@ -11,7 +11,6 @@ import { ExportReliefCarveModal } from './ExportReliefCarveModal';
 import { ExportMoldModal } from './ExportMoldModal';
 import { ExportSolidMachiningModal } from './ExportSolidMachiningModal';
 import type { SolidMachiningOptions } from '../utils/solidMachiningExporter';
-import type { SceneGraph } from '../types/scene';
 import { ExportCastModal } from './ExportCastModal';
 import { SplitForPrintModal } from './SplitForPrintModal';
 import { TimberBreakdownModal } from './TimberBreakdownModal';
@@ -41,8 +40,6 @@ export function FabricationModals({ threeSceneRef, noteCards }: {
   const [isSolidModalOpen, setIsSolidModalOpen] = useState(false);
   // What the relief dialog hands solid machining when a model has an undercut.
   const [solidSeed, setSolidSeed] = useState<Partial<SolidMachiningOptions> | null>(null);
-  // Single-plank SceneGraph handed over from TimberBreakdownModal ("Machine Selected Plank").
-  const [solidSceneOverride, setSolidSceneOverride] = useState<SceneGraph | null>(null);
   const [isCastModalOpen, setIsCastModalOpen] = useState(false);
   const [isSplitModalOpen, setIsSplitModalOpen] = useState(false);
   const [isJoineryModalOpen, setIsJoineryModalOpen] = useState(false);
@@ -120,9 +117,8 @@ export function FabricationModals({ threeSceneRef, noteCards }: {
           onClose={() => {
             setIsSolidModalOpen(false);
             setSolidSeed(null);
-            setSolidSceneOverride(null);
           }}
-          scene={solidSceneOverride ?? sceneGraph}
+          scene={sceneGraph}
           seed={solidSeed}
         />
       )}
@@ -146,12 +142,6 @@ export function FabricationModals({ threeSceneRef, noteCards }: {
         <TimberBreakdownModal
           isOpen={isJoineryModalOpen}
           onClose={() => setIsJoineryModalOpen(false)}
-          onMachinePlank={(plankScene, seed) => {
-            setIsJoineryModalOpen(false);
-            setSolidSceneOverride(plankScene);
-            setSolidSeed(seed ?? null);
-            setIsSolidModalOpen(true);
-          }}
         />
       )}
 

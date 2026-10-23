@@ -2,7 +2,7 @@ import type { ScriptStateMap } from '../utils/scriptState';
 import { create, type StateCreator } from 'zustand';
 import { shareUnchanged } from '../utils/shareUnchanged';
 import * as THREE from 'three';
-import type { SceneGraph, SceneNode, SceneGeom, SceneJoint, GeomType, CsgOp, EdgeRoundFeature, RoundEdge, CastPrep, HardwareCutKind } from '../types/scene';
+import type { SceneGraph, SceneNode, SceneGeom, SceneJoint, GeomType, CsgOp, EdgeRoundFeature, RoundEdge, CastPrep, HardwareCutKind, ReferenceImage } from '../types/scene';
 import { bakeDraftInto, copyPrep, restoreShape, shapeSignature, unprepScene, type DraftParams } from '../utils/castPrep';
 import { hasEdgeRounds, reconcileEdgeRounds, withRoundFeature, withoutEdges } from '../utils/edgeRound';
 import type { GeomThreadSpec } from '../utils/metricThreads';
@@ -50,7 +50,16 @@ import { framingForBounds, gridCellForBounds, sceneContentBounds } from '../util
 import { DEFAULT_MATERIAL, type MaterialId } from '../utils/feedsAndSpeeds';
 import { DEFAULT_FILAMENT, type FilamentId } from '../utils/filaments';
 import { loadStock, saveStock, clampStock, type StockSize } from '../utils/stockSettings';
-import { loadPrintBed, savePrintBed, clampPrintBed, type PrintBed } from '../utils/printBedSettings';
+import {
+  loadPrintBed,
+  savePrintBed,
+  clampPrintBed,
+  type PrintBed,
+  loadCncBed,
+  saveCncBed,
+  clampCncBed,
+  type CncBed,
+} from '../utils/printBedSettings';
 import type { SplitSection } from '../utils/printSplit';
 import { featureGeoms } from '../utils/printAssembly';
 import type { ReliefCarveOptions } from '../utils/reliefCarveExporter';
@@ -1742,6 +1751,12 @@ export interface PhysicsState {
   printBed: PrintBed;
   setPrintBed: (patch: Partial<PrintBed>) => void;
   /**
+   * The CNC router's working envelope [widthMm, depthMm, heightMm], persisted so
+   * Joinery and Machine Setup know the dimensions of the CNC bed.
+   */
+  cncBed: CncBed;
+  setCncBed: (patch: Partial<CncBed>) => void;
+  /**
    * Carve settings a preset or a generator wants the relief export to open
    * with, or null for the exporter's own defaults.
    *
@@ -1930,6 +1945,12 @@ export interface PhysicsState {
   ) => string[];
   /** Set how finely contact is resolved (SceneGraph.simFidelity). One undo step. */
   setSimFidelity: (fidelity: 'standard' | 'print') => void;
+  /**
+   * Replace the reference images (SceneGraph.referenceImages). Drawn only, so no
+   * recompile. `recordUndo: false` is for the frames of a drag after its first,
+   * so a slider pull is one undo step, not one per pixel.
+   */
+  setReferenceImages: (images: ReferenceImage[], recordUndo?: boolean) => void;
 
   // --- Rounding edges ------------------------------------------------------
   //
@@ -2609,6 +2630,8 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
   stock: loadStock(),
   printBed: loadPrintBed(),
   setPrintBed: (patch) => set((state) => ({ printBed: savePrintBed(clampPrintBed({ ...state.printBed, ...patch })) })),
+  cncBed: loadCncBed(),
+  setCncBed: (patch) => set((state) => ({ cncBed: saveCncBed(clampCncBed({ ...state.cncBed, ...patch })) })),
   carveSettings: null,
   patternGeneratorId: null,
   facePatternTarget: null,
@@ -3339,7 +3362,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
 
   separateSculpt: (nodeId, pieces, geomName) => {
     const node = findNode(get().sceneGraph.nodes, nodeId);
-    if (!node?.isSculpt || pieces.length === 0) return [nodeId];
+    if (!node || pieces.length === 0) return [nodeId];
     get().prepareForDiscreteChange();
     const newScene = cloneSceneGraph(get().sceneGraph);
     const first = findNode(newScene.nodes, nodeId);
@@ -3669,6 +3692,11 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     set({ sceneGraph: newScene, extraSelectedIds: [] });
     get().recompile(newScene, undefined, true);
     return ids;
+  },
+
+  setReferenceImages: (images, recordUndo = true) => {
+    if (recordUndo) get().prepareForDiscreteChange();
+    set({ sceneGraph: { ...get().sceneGraph, referenceImages: images.length ? images : undefined } });
   },
 
   setSimFidelity: (fidelity) => {

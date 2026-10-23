@@ -653,6 +653,7 @@ export default function AICopilotPanel({ onClose, messages: propsMessages, setMe
           if (j.damping) jointObj.damping = roundNum(j.damping);
           if (j.stiffness) jointObj.stiffness = roundNum(j.stiffness);
           if (j.springref !== undefined && j.springref !== 0) jointObj.springref = roundNum(j.springref);
+          if (j.frictionloss) jointObj.frictionloss = roundNum(j.frictionloss);
           if (j.limited !== undefined) jointObj.limited = j.limited;
           if (j.range) jointObj.range = j.range.map(roundNum);
           if (j.actuator) jointObj.actuator = j.actuator;
@@ -926,7 +927,7 @@ Based on these functional clarifications and your physical analysis:
       if (nodes && Array.isArray(nodes)) {
         const merged = mergeAndNormalizeNodes(nodes, sceneGraph.nodes, true);
         if (merged.length > 0) {
-          updateScene({ nodes: merged });
+          updateScene({ ...useStore.getState().sceneGraph, nodes: merged });
           scadFailures = await triggerScadAutoCompile(merged);
           applied = true;
           mergedNodes = merged;
@@ -992,7 +993,7 @@ Based on these functional clarifications and your physical analysis:
       if (nodes && Array.isArray(nodes)) {
         const merged = mergeAndNormalizeNodes(nodes, sceneGraph.nodes, false);
         if (merged.length > 0) {
-          updateScene({ nodes: merged });
+          updateScene({ ...useStore.getState().sceneGraph, nodes: merged });
           scadFailures = await triggerScadAutoCompile(merged);
           applied = true;
           mergedNodes = merged;
@@ -1071,7 +1072,7 @@ CRITICAL INSTRUCTIONS:
       if (nodes && Array.isArray(nodes) && nodes.length > 0) {
         const merged = mergeAndNormalizeNodes(nodes, sceneGraph.nodes, false);
         if (merged.length > 0) {
-          updateScene({ nodes: merged });
+          updateScene({ ...useStore.getState().sceneGraph, nodes: merged });
           const scadFailures = await triggerScadAutoCompile(merged);
           setMessages(prev => prev.map(m => m.id === msgId
             ? { ...m, isImplemented: true, hasError: scadFailures.length > 0, errorMsg: scadFailures.length > 0 ? describeScadFailure(scadFailures) : undefined }
@@ -1140,7 +1141,7 @@ If modifying the 3D scene graph, include the updated "nodes" array in \`\`\`json
       if (nodes && Array.isArray(nodes)) {
         const merged = mergeAndNormalizeNodes(nodes, sceneGraph.nodes, false);
         if (merged.length > 0) {
-          updateScene({ nodes: merged });
+          updateScene({ ...useStore.getState().sceneGraph, nodes: merged });
           scadFailures = await triggerScadAutoCompile(merged);
           applied = true;
           mergedNodes = merged;

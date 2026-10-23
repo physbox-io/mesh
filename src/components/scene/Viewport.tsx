@@ -13,6 +13,7 @@ import SculptPanel from '../SculptPanel';
 import LatticePanel from '../LatticePanel';
 import { DfmHUD } from '../DfmHUD';
 import { NoteCardOverlay } from '../NoteCardOverlay';
+import { ReferenceImagesCard } from '../ReferenceImagesCard';
 import { SceneCanvas } from './SceneCanvas';
 import { ViewControls } from './ViewControls';
 
@@ -123,6 +124,7 @@ export function Viewport({ threeSceneRef, darkMode, doc, onImportSceneJson }: {
       )}
 
       <ViewControls />
+      <ReferenceImagesCard />
 
       {/* Sculpt tool palette — only mounted while a body is open for sculpting */}
       <SculptPanel />

@@ -209,17 +209,23 @@ export function Field({
   label, hint, hintAlign = 'start', className, children,
 }: {
   label: string;
-  hint: string;
+  hint?: string;
   hintAlign?: 'start' | 'end';
   className?: string;
   children: React.ReactNode;
 }) {
   return (
     <div className={`flex flex-col min-w-0 ${className ?? ''}`}>
-      <HintAnchor hint={hint} align={hintAlign} className="relative flex items-center space-x-1 mb-1.5">
-        <label className={labelClass}>{label}</label>
-        <HintIcon />
-      </HintAnchor>
+      {hint ? (
+        <HintAnchor hint={hint} align={hintAlign} className="relative flex items-center space-x-1 mb-1.5">
+          <label className={labelClass}>{label}</label>
+          <HintIcon />
+        </HintAnchor>
+      ) : (
+        <div className="relative flex items-center space-x-1 mb-1.5">
+          <label className={labelClass}>{label}</label>
+        </div>
+      )}
       <div className="mt-auto">{children}</div>
     </div>
   );

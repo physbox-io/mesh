@@ -136,6 +136,7 @@ Every joint constrains motion of the body relative to its parent:
   crumpleRangeDeg: [number, number] <- Optional. How far it may fold once it has given, in degrees.
   crumpleDampingAfter: number <- Optional. Damping written in at the moment it gives, so it settles into its new shape instead of swinging into it.
   stiffness: number <- Spring stiffness force
+  frictionloss: number <- Optional. Dry friction, N*m (hinge) or N (slide): the joint holds still until loaded past this, so a lid, lamp arm or stiff printed hinge stays where it is left. Damping cannot do this (it fades as the joint slows). To hold against gravity it must exceed mass*9.81*lever arm.
   range: [number, number] <- Rotation/translation limits (e.g. [-90, 90] in degrees)
   limited: boolean <- Enable range limits
   actuator: {

@@ -1,7 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { AlertTriangle, Cpu, Home, RefreshCw, ShieldAlert, X, Gauge, Wifi, WifiOff } from 'lucide-react';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
-import { type MachineTarget } from '../store/useStore';
+import { useStore, type MachineTarget } from '../store/useStore';
+import { DEFAULT_CNC_BED, MAX_CNC_BED_MM, MIN_CNC_BED_MM } from '../utils/printBedSettings';
 import { FdmNotice } from './FdmNotice';
 import { MachineWorkOriginPanel } from './MachineWorkOriginPanel';
 import { ControllerSilenceBanner } from './MachineFaultBanner';
@@ -53,6 +54,8 @@ export const MachineConfigModal: React.FC<{
 }> = ({ isOpen, onClose, onOpenDocs, machineTarget }) => {
   useEscapeToClose(isOpen, onClose);
   const [machineState, setMachineState] = useState<MachineState>(webSerialManager.getState());
+  const cncBed = useStore((s) => s.cncBed);
+  const setCncBed = useStore((s) => s.setCncBed);
 
   /*
    * How to reach the machine, remembered between sessions.
@@ -400,6 +403,40 @@ export const MachineConfigModal: React.FC<{
                 For a hand-dialled router. If the controller sets the speed itself, it caps S at $30, so change $30 instead.
               </p>
             </div>
+
+            {machineTarget !== 'fdm' && (
+              <div className="flex flex-wrap items-center gap-2 pt-3 border-t border-slate-200 dark:border-slate-800">
+                <span className="text-xs font-semibold">CNC bed dimensions</span>
+                {(
+                  [
+                    ['widthMm', 'Width X (mm)'],
+                    ['depthMm', 'Depth Y (mm)'],
+                    ['heightMm', 'Height Z (mm)'],
+                  ] as const
+                ).map(([key, label], i) => (
+                  <React.Fragment key={key}>
+                    {i > 0 && <span className="text-xs text-slate-400">×</span>}
+                    <NumberInput
+                      min={MIN_CNC_BED_MM}
+                      max={MAX_CNC_BED_MM}
+                      step={10}
+                      fallbackOnBlur={DEFAULT_CNC_BED[key]}
+                      value={cncBed[key]}
+                      onChange={(v) => {
+                        if (v !== undefined && Number.isFinite(v)) setCncBed({ [key]: v });
+                      }}
+                      className="w-20 px-2 py-1 rounded-lg text-xs font-mono bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800"
+                      aria-label={label}
+                      title={label}
+                    />
+                  </React.Fragment>
+                ))}
+                <span className="text-xs text-slate-500">mm</span>
+                <p className="basis-full text-[11px] leading-relaxed text-slate-500 dark:text-slate-400">
+                  Working envelope of your CNC router (Width × Depth × Height). Saw-cut lumber can be any size; these dimensions only dictate the maximum part cross-section and span that can be attached to the CNC for joinery pockets or finger joints.
+                </p>
+              </div>
+            )}
           </div>
 
           {machineState.connected && (

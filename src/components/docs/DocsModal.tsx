@@ -380,6 +380,10 @@ api.setAngularVelocity([0, 15.0, 0], 'cart'); // Sets angular velocities`}
                     <strong className="text-slate-700">⚠️ Stability</strong>
                     <p className="text-slate-500 mt-1">Very large damping combined with a large timestep can overshoot and oscillate. If a joint starts buzzing, reduce damping before reaching for other fixes.</p>
                   </div>
+                  <div className="text-xs border-t border-slate-150 pt-3">
+                    <strong className="text-slate-700">🤚 Holding friction</strong>
+                    <p className="text-slate-500 mt-1">Damping fades as the joint slows, so a damped lid still falls shut, only later. To make a joint stay where it is left — a propped lid, a lamp arm, a stiff printed hinge — give it <strong>Holding Friction</strong>: it does not move until the load passes that torque. To hold against gravity it must beat <em>m·g·d</em>, the weight times its distance from the hinge.</p>
+                  </div>
                 </div>
               </div>
             )}

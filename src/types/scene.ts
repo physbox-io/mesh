@@ -331,6 +331,12 @@ export interface SceneJoint {
   damping?: number;
   stiffness?: number;
   springref?: number;
+  /**
+   * Dry friction: the torque (N*m, hinge) or force (N, slide) the joint holds
+   * against before it moves, and resists with once it does. Damping fades as
+   * the joint slows, so it can only delay a lid falling shut; this stops it.
+   */
+  frictionloss?: number;
   limited?: boolean;
   range?: number[];
   actuator?: {
@@ -749,6 +755,36 @@ export interface SceneGraph {
    * and undone with the scene it describes.
    */
   simFidelity?: 'standard' | 'print';
+  /**
+   * Pictures pinned in the viewport to model from - a photo of the thing being
+   * copied, a drawing, a sketch. Drawn only: they take no part in the physics,
+   * any export, the DFM checks or picking. See utils/referenceImages.ts.
+   */
+  referenceImages?: ReferenceImage[];
+}
+
+/** Which drawing view a reference image faces, and so which plane it lies in. */
+export type ReferencePlane = 'front' | 'side' | 'top';
+
+/** A picture to model from. World units are MuJoCo's: metres, Z up. */
+export interface ReferenceImage {
+  id: string;
+  name: string;
+  /** The picture as a data URL, already downscaled (see utils/referenceImages.ts). */
+  src: string;
+  /** Width over height of the picture, so the plane is never stretched. */
+  aspect: number;
+  /** 'front' stands in the XZ plane facing -Y, 'side' in YZ facing +X, 'top' in XY facing +Z. */
+  plane: ReferencePlane;
+  /** Centre of the picture, world metres. */
+  pos: [number, number, number];
+  /** Width of the picture in the world, metres. */
+  width: number;
+  /** 0..1. */
+  opacity: number;
+  /** Drawn over the model rather than hidden behind it, so it can be traced. */
+  overlay: boolean;
+  hidden?: boolean;
 }
 
 /**

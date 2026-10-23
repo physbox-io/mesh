@@ -186,8 +186,12 @@ export function runExportJob<K extends ExportJobKind>(
           outcome.ok && mode !== 'planks'
             ? buildTimberCutPlan(outcome, { cncBedMm, defaultStockLengthMm })
             : null;
+        const hasFrameRails =
+          outcome.ok &&
+          outcome.parts.length > 1 &&
+          outcome.parts.some((p) => p.member.role === 'rail');
         const plankOutcome: TimberPlankBreakdownOutcome | null =
-          mode === 'planks' || (outcome.ok && outcome.parts.length <= 1 && outcome.joints.length === 0)
+          mode === 'planks' || (!hasFrameRails && mode !== 'frame')
             ? decomposeSolidIntoPlanks(wasm, soups, plankOptions)
             : null;
         return { outcome, cutPlan, plankOutcome } as ExportJobResult<K>;

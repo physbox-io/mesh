@@ -20,7 +20,7 @@ export function ImportModals() {
         onClose={closeStlImport}
         onImportNode={(newNode) => {
           const currentNodes = useStore.getState().sceneGraph.nodes || [];
-          useStore.getState().updateScene({ nodes: [...currentNodes, newNode] });
+          useStore.getState().updateScene({ ...useStore.getState().sceneGraph, nodes: [...currentNodes, newNode] });
         }}
       />
       )}
@@ -37,7 +37,7 @@ export function ImportModals() {
         onClose={closeImageImport}
         onImportNode={(newNode) => {
           const currentNodes = useStore.getState().sceneGraph.nodes || [];
-          useStore.getState().updateScene({ nodes: [...currentNodes, newNode] });
+          useStore.getState().updateScene({ ...useStore.getState().sceneGraph, nodes: [...currentNodes, newNode] });
         }}
       />
       )}

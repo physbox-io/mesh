@@ -27,7 +27,7 @@ import type { Vec3 } from './printPlate';
 
 const MM = 1000;
 
-export type TimberJointMode = 'mortise_tenon' | 'dowel' | 'dado';
+export type TimberJointMode = 'mortise_tenon' | 'dowel' | 'dado' | 'butt';
 export type TenonCornerFit = 'dogbone' | 'round_tenon' | 'chisel_square';
 export type TimberEdgeProfile = 'square' | 'roundover' | 'chamfer';
 
@@ -161,7 +161,7 @@ export interface StoppedEdgeZone {
 
 export interface SynthesizedJoint {
   id: string;
-  kind: 'mortise_tenon' | 'dowel' | 'dado' | 'plank_dowel' | 'z_clip';
+  kind: 'mortise_tenon' | 'dowel' | 'dado' | 'butt' | 'plank_dowel' | 'z_clip';
   memberAIndex: number;
   memberBIndex: number;
   memberAId: string;
@@ -607,7 +607,7 @@ export function synthesizeTimberJoinery(
     // tenon shoulder rabbets cut into it (fill ratio 84%..99.8%, above the π/4 ≈ 78.5%
     // fill ratio of a circular disc/cylinder), start from its clean OBB blank so
     // re-synthesizing joinery with new options doesn't double-cut.
-    if (!m.isTapered && fillRatio > 0.84 && fillRatio < 0.998) {
+    if (!m.isTapered && fillRatio > 0.84 && fillRatio < 0.9999) {
       raw.delete();
       return orientedBoxManifold(wasm, m.centerMm, m.axes[0], m.axes[1], m.axes[2], m.dimsMm);
     }
@@ -617,7 +617,7 @@ export function synthesizeTimberJoinery(
     const raw = meshMmToManifold(wasm, m.positionsMm, m.faces);
     const obbVol = m.dimsMm[0] * m.dimsMm[1] * m.dimsMm[2];
     const fillRatio = m.volumeMm3 / Math.max(1e-6, obbVol);
-    if (!m.isTapered && fillRatio > 0.84 && fillRatio < 0.998) {
+    if (!m.isTapered && fillRatio > 0.84 && fillRatio < 0.9999) {
       raw.delete();
       return orientedBoxManifold(wasm, m.centerMm, m.axes[0], m.axes[1], m.axes[2], m.dimsMm);
     }
@@ -814,6 +814,22 @@ export function synthesizeTimberJoinery(
 
         const jointId = `J${jointCounter++}`;
         const groupIdx = joints.length;
+
+        if (options.jointMode === 'butt') {
+          explodeByMember[i] = add3(explodeByMember[i], hostFaceNormal);
+          joints.push({
+            id: jointId,
+            kind: 'butt',
+            memberAIndex: i,
+            memberBIndex: bestHostIdx,
+            memberAId: mA.id,
+            memberBId: mB.id,
+            centerMm: shoulderCenterMm,
+            normalAToB: inwardNormal,
+            notes: [`Butt glue joint between ${mA.id} and ${mB.id}.`],
+          });
+          continue;
+        }
 
         if (options.jointMode === 'dowel') {
           // Twin dowels so the rail cannot twist/rack
@@ -1077,9 +1093,12 @@ export function synthesizeTimberJoinery(
     // -------------------------------------------------------------------------
     // 4. Plank-to-Plank Alignment Dowels for Split Tabletops / Chair Seats
     // -------------------------------------------------------------------------
-    const planks = members
-      .filter((m) => m.plankInfo)
-      .sort((a, b) => (a.plankInfo!.index - b.plankInfo!.index));
+    const planks =
+      options.jointMode === 'butt'
+        ? []
+        : members
+            .filter((m) => m.plankInfo)
+            .sort((a, b) => a.plankInfo!.index - b.plankInfo!.index);
     for (let p = 0; p + 1 < planks.length; p++) {
       const pA = planks[p];
       const pB = planks[p + 1];
@@ -1141,7 +1160,7 @@ export function synthesizeTimberJoinery(
     // 5. Tabletop Z-Clip Expansion Slots on Inside of Apron Rails
     // -------------------------------------------------------------------------
     const hasTopPanel = members.some((m) => m.role === 'panel');
-    if (options.tabletopClips && hasTopPanel) {
+    if (options.tabletopClips && hasTopPanel && options.jointMode !== 'dowel' && options.jointMode !== 'butt') {
       for (let i = 0; i < members.length; i++) {
         const m = members[i];
         if (m.role !== 'rail' || !m.id.startsWith('Apron_')) continue;
