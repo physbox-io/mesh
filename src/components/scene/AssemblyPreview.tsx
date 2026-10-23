@@ -395,18 +395,12 @@ export function AssemblyPreview({
     const group = explodedRef.current;
     if (!group) return;
     disposeChildren(group);
-    sections.forEach((s, idx) => {
+    sections.forEach((s) => {
       const mesh = new THREE.Mesh(geometryOf(s.positions, s.faces), materialOf(s.colour));
       mesh.userData.explode = s.explode;
-      const labels: PreviewFaceLabel[] =
-        s.faceLabels ??
-        (sections.length > 1
-          ? [
-              { text: `${idx + 1}`, normal: s.pose.up },
-              { text: `${idx + 1}`, normal: [-s.pose.up[0], -s.pose.up[1], -s.pose.up[2]] },
-            ]
-          : []);
-      for (const lbl of labels) {
+      // Only the sections that ask for labels get them: Split for Print's cut
+      // faces carry its pin markers, which a badge would cover.
+      for (const lbl of s.faceLabels ?? []) {
         const badge = buildFaceLabelMesh(s.positions, lbl);
         if (badge) mesh.add(badge);
       }

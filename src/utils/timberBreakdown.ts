@@ -624,7 +624,7 @@ function classifyRole(axes: [Vec3, Vec3, Vec3], dimsMm: [number, number, number]
   return 'rail';
 }
 
-function directionPhrase(n: Vec3): string {
+export function directionPhrase(n: Vec3): string {
   const ax = Math.abs(n[0]), ay = Math.abs(n[1]), az = Math.abs(n[2]);
   if (az >= ax && az >= ay) return n[2] >= 0 ? 'Top (+Z)' : 'Bottom (-Z)';
   if (ay >= ax) return n[1] >= 0 ? 'Back (+Y)' : 'Front (-Y)';

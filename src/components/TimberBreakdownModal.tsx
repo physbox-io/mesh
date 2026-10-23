@@ -21,6 +21,7 @@ import { useExportJob } from '../utils/exportWorkerClient';
 import {
   collectIndividualPartSoups,
   DEFAULT_TIMBER_PLANK_OPTIONS,
+  directionPhrase,
   packPartsLayFlatMetres,
   type GrainAxis,
   type PlankJointType,
@@ -37,9 +38,8 @@ import {
   type TimberJointMode,
 } from '../utils/timberJoinery';
 import type { CncWindowSetup, TimberCutPlan } from '../utils/timberCutList';
-import type { SolidMachiningOptions } from '../utils/solidMachiningExporter';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
-import type { SceneGraph, SceneNode } from '../types/scene';
+import type { SceneNode } from '../types/scene';
 import type { Vec3 } from '../utils/printPlate';
 import { Advanced, Field, Segmented, inputClass, sectionClass, sectionTitleClass } from './ExportFields';
 import { AssemblyPreview, type PreviewSection } from './scene/AssemblyPreview';
@@ -167,8 +167,6 @@ function describePlankSawCut(
 export interface TimberBreakdownModalProps {
   isOpen: boolean;
   onClose: () => void;
-  /** Optional legacy callback kept for prop compatibility. */
-  onMachinePlank?: (plankScene: SceneGraph, seed?: Partial<SolidMachiningOptions>) => void;
 }
 
 export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
@@ -270,7 +268,7 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
     [cncBed.widthMm, cncBed.depthMm, cncBed.heightMm],
   );
 
-  const workerMode = modeSetting === 'planks' ? 'planks' : undefined;
+  const workerMode = modeSetting === 'auto' ? undefined : modeSetting;
 
   const { result: timberJob, busy, failure } = useExportJob(
     isOpen,
@@ -413,6 +411,7 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
       setMachineConfigOpen(true);
       return;
     }
+    if (machineState.status !== 'IDLE') return;
     void webSerialManager.runJob(setup.gcode, {
       name: setup.id,
       estimatedSeconds: setup.estimatedMinutes * 60,
@@ -553,18 +552,20 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
                           />
                         </Field>
                       </div>
-                      <div className="lg:col-span-2">
-                        <Field
-                          label="CNC"
-                          hint="Optional: finger joints can be cut on a CNC or with a table-saw/router jig."
-                        >
-                          <Segmented
-                            value={useCnc}
-                            onChange={(v) => setUseCnc(v as 'off' | 'on')}
-                            options={USE_CNC_OPTIONS}
-                          />
-                        </Field>
-                      </div>
+                      {plankOpts.jointType === 'finger' && (
+                        <div className="lg:col-span-2">
+                          <Field
+                            label="CNC"
+                            hint="Optional: finger joints can be cut on a CNC or with a table-saw/router jig."
+                          >
+                            <Segmented
+                              value={useCnc}
+                              onChange={(v) => setUseCnc(v as 'off' | 'on')}
+                              options={USE_CNC_OPTIONS}
+                            />
+                          </Field>
+                        </div>
+                      )}
                     </>
                   ) : (
                     <>
@@ -577,18 +578,20 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
                           />
                         </Field>
                       </div>
-                      <div className="lg:col-span-2">
-                        <Field
-                          label="CNC"
-                          hint="Optional: mortises, dadoes, and slots can be cut with shop tools (drill press, router, chisel) or run on a CNC."
-                        >
-                          <Segmented
-                            value={isGlueFrame || isDowelFrame ? 'off' : useCnc}
-                            onChange={(v) => setUseCnc(v as 'off' | 'on')}
-                            options={USE_CNC_OPTIONS}
-                          />
-                        </Field>
-                      </div>
+                      {!isGlueFrame && !isDowelFrame && (
+                        <div className="lg:col-span-2">
+                          <Field
+                            label="CNC"
+                            hint="Optional: mortises, dadoes, and slots can be cut with shop tools (drill press, router, chisel) or run on a CNC."
+                          >
+                            <Segmented
+                              value={useCnc}
+                              onChange={(v) => setUseCnc(v as 'off' | 'on')}
+                              options={USE_CNC_OPTIONS}
+                            />
+                          </Field>
+                        </div>
+                      )}
                       <div className="lg:col-span-2">
                         {!isGlueFrame ? (
                           <Field
@@ -1170,7 +1173,8 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
                                             <button
                                               type="button"
                                               onClick={() => handleSendSetupToMachine(setup)}
-                                              className="flex items-center gap-1 px-2.5 py-0.5 rounded bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-700 dark:text-emerald-300 text-[10px] font-semibold cursor-pointer"
+                                              disabled={machineState.connected && machineState.status !== 'IDLE'}
+                                              className="disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1 px-2.5 py-0.5 rounded bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-700 dark:text-emerald-300 text-[10px] font-semibold cursor-pointer"
                                               title={
                                                 machineState.connected
                                                   ? 'Run this joinery setup directly on the connected CNC'
@@ -1231,65 +1235,50 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
                               </div>
 
                               <div className="grid grid-cols-2 gap-3 p-2.5 rounded-lg bg-slate-50 dark:bg-slate-950/60 border border-slate-200/70 dark:border-slate-800 text-[11px]">
-                                {(
-                                  [
-                                    {
-                                      id: 'Leg_BL',
-                                      title: 'Back-Left (Leg_BL)',
-                                      exterior: 'F1, F2 (Back +Y, Left −X)',
-                                      mortises: 'F3, F4 (Right +X, Front −Y)',
-                                    },
-                                    {
-                                      id: 'Leg_BR',
-                                      title: 'Back-Right (Leg_BR)',
-                                      exterior: 'F1, F2 (Back +Y, Right +X)',
-                                      mortises: 'F3, F4 (Left −X, Front −Y)',
-                                    },
-                                    {
-                                      id: 'Leg_FL',
-                                      title: 'Front-Left (Leg_FL)',
-                                      exterior: 'F1, F2 (Front −Y, Left −X)',
-                                      mortises: 'F3, F4 (Right +X, Back +Y)',
-                                    },
-                                    {
-                                      id: 'Leg_FR',
-                                      title: 'Front-Right (Leg_FR)',
-                                      exterior: 'F1, F2 (Front −Y, Right +X)',
-                                      mortises: 'F3, F4 (Left −X, Back +Y)',
-                                    },
-                                  ] as const
-                                ).map((corner) => {
-                                  const matchCard = cutPlan.partCards.find((c) => c.partId === corner.id);
-                                  const isSel = matchCard && isolatedPartIdx === matchCard.partIndex;
-                                  return (
-                                    <div
-                                      key={corner.id}
-                                      onClick={() => {
-                                        if (matchCard) {
-                                          setIsolatedPartIdx(isSel ? null : matchCard.partIndex);
-                                        }
-                                      }}
-                                      className={`rounded-md border p-2 space-y-0.5 transition-colors ${
-                                        matchCard ? 'cursor-pointer' : ''
-                                      } ${
-                                        isSel
-                                          ? 'border-amber-500 bg-amber-500/10'
-                                          : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900'
-                                      }`}
-                                    >
-                                      <div className="font-bold text-slate-800 dark:text-slate-100 font-mono">
-                                        {matchCard ? `${matchCard.partIndex + 1}. ` : ''}
-                                        {corner.title}
+                                {(breakdown?.parts ?? [])
+                                  .filter((p) => p.member.role === 'leg')
+                                  .map((p) => {
+                                    const { face1, face2 } = p.member;
+                                    const opposite = (n: Vec3): Vec3 => [-n[0], -n[1], -n[2]];
+                                    return {
+                                      id: p.member.id,
+                                      title: p.member.title,
+                                      exterior: `F1, F2 (${directionPhrase(face1.normal)}, ${directionPhrase(face2.normal)})`,
+                                      mortises: `F3, F4 (${directionPhrase(opposite(face1.normal))}, ${directionPhrase(opposite(face2.normal))})`,
+                                    };
+                                  })
+                                  .map((corner) => {
+                                    const matchCard = cutPlan.partCards.find((c) => c.partId === corner.id);
+                                    const isSel = matchCard && isolatedPartIdx === matchCard.partIndex;
+                                    return (
+                                      <div
+                                        key={corner.id}
+                                        onClick={() => {
+                                          if (matchCard) {
+                                            setIsolatedPartIdx(isSel ? null : matchCard.partIndex);
+                                          }
+                                        }}
+                                        className={`rounded-md border p-2 space-y-0.5 transition-colors ${
+                                          matchCard ? 'cursor-pointer' : ''
+                                        } ${
+                                          isSel
+                                            ? 'border-amber-500 bg-amber-500/10'
+                                            : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900'
+                                        }`}
+                                      >
+                                        <div className="font-bold text-slate-800 dark:text-slate-100 font-mono">
+                                          {matchCard ? `${matchCard.partIndex + 1}. ` : ''}
+                                          {corner.title}
+                                        </div>
+                                        <div className="text-[10px] text-slate-500 dark:text-slate-400">
+                                          Show faces: {corner.exterior}
+                                        </div>
+                                        <div className="text-[10px] text-emerald-700 dark:text-emerald-400 font-medium">
+                                          {isGlueFrame ? 'Joint faces' : isDowelFrame ? 'Dowel faces' : isDadoFrame ? 'Dado faces' : 'Mortise faces'}: {corner.mortises}
+                                        </div>
                                       </div>
-                                      <div className="text-[10px] text-slate-500 dark:text-slate-400">
-                                        Show faces: {corner.exterior}
-                                      </div>
-                                      <div className="text-[10px] text-emerald-700 dark:text-emerald-400 font-medium">
-                                        {isGlueFrame ? 'Joint faces' : isDowelFrame ? 'Dowel faces' : isDadoFrame ? 'Dado faces' : 'Mortise faces'}: {corner.mortises}
-                                      </div>
-                                    </div>
-                                  );
-                                })}
+                                    );
+                                  })}
                               </div>
                             </div>
                           )}
@@ -1335,7 +1324,7 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
                               step: '4. Stage 3 — Attach Tabletop / Panel',
                               details: [
                                 'If the top was split into planks, edge-glue the planks together first.',
-                                isGlueFrame || isDowelFrame
+                                !breakdown?.parts.some((p) => p.zClipSlots.length > 0)
                                   ? 'Place the finished top face-down, center the frame on it, and secure with figure-8 expansion washers (do not glue a solid wood top directly to the aprons).'
                                   : 'Place the finished top face-down, center the frame on it, and secure with Z-Clip expansion fasteners in the apron slots (do not glue a solid wood top directly to the aprons).',
                               ],
