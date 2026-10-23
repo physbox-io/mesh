@@ -33,6 +33,7 @@ import { stlToMesh, type IndexedMesh } from '../utils/stlMesh';
 import type { SimulationPlacement } from '../utils/simulatedPart';
 import { useStore } from '../store/useStore';
 import { PourIntoSelectionModal } from './PourIntoSelectionModal';
+import { PourBoxModal } from './PourBoxModal';
 
 interface ExportMoldModalProps {
   isOpen: boolean;
@@ -143,17 +144,23 @@ export const ExportMoldModal: React.FC<ExportMoldModalProps> = (props) =>
 
 /** Mounted each time the dialog opens, so the selection is read afresh. */
 const OpenMoldModal: React.FC<ExportMoldModalProps> = (props) => {
-  const [pourIds, setPourIds] = useState<string[]>(() => {
+  const [selected] = useState<string[]>(() => {
     const { selectedNodeId, extraSelectedIds } = useStore.getState();
     return selectedNodeId ? [selectedNodeId, ...extraSelectedIds.filter((id) => id !== selectedNodeId)] : [];
   });
-  if (pourIds.length > 0) {
-    return <PourIntoSelectionModal ids={pourIds} onClose={props.onClose} onMakeMold={() => setPourIds([])} />;
+  const [mode, setMode] = useState<'pour' | 'box' | 'designer'>(selected.length > 0 ? 'pour' : 'designer');
+  if (mode === 'pour') {
+    return <PourIntoSelectionModal ids={selected} onClose={props.onClose} onMakeMold={() => setMode('designer')} onPourBox={() => setMode('box')} />;
   }
-  return <MoldDesigner {...props} />;
+  if (mode === 'box') {
+    // Nothing selected: the whole scene is the master, as the designer molds it.
+    const ids = selected.length > 0 ? selected : props.scene.nodes.filter((n) => !n.simulation).map((n) => n.id);
+    return <PourBoxModal ids={ids} onClose={props.onClose} onMakeMold={() => setMode('designer')} />;
+  }
+  return <MoldDesigner {...props} onPourBox={() => setMode('box')} />;
 };
 
-const MoldDesigner: React.FC<ExportMoldModalProps> = ({ isOpen, onClose, scene }) => {
+const MoldDesigner: React.FC<ExportMoldModalProps & { onPourBox: () => void }> = ({ isOpen, onClose, scene, onPourBox }) => {
   useEscapeToClose(isOpen, onClose);
   // 'auto' picks the simplest mold that keeps the part, and the direction it
   // opens along; both stay overridable below.
@@ -819,6 +826,10 @@ const MoldDesigner: React.FC<ExportMoldModalProps> = ({ isOpen, onClose, scene }
                   ] as const}
                 />
               </Field>
+              <button type="button" onClick={onPourBox}
+                className="text-xs text-purple-600 dark:text-purple-400 underline cursor-pointer">
+                Casting silicone round a master? Make a pour box
+              </button>
 
               <Field
                 label="Opens Along"

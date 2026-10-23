@@ -25,6 +25,8 @@ interface PourIntoSelectionModalProps {
   ids: string[];
   /** Nothing selected holds a pour, or the user asked for a mold instead. */
   onMakeMold: () => void;
+  /** A printed pour box round the selection, for a silicone mold of it. */
+  onPourBox: () => void;
 }
 
 /**
@@ -33,7 +35,7 @@ interface PourIntoSelectionModalProps {
  * them instead of molding them again. Selected bodies that hold nothing go
  * straight on to the mold designer.
  */
-export const PourIntoSelectionModal: React.FC<PourIntoSelectionModalProps> = ({ onClose, ids, onMakeMold }) => {
+export const PourIntoSelectionModal: React.FC<PourIntoSelectionModalProps> = ({ onClose, ids, onMakeMold, onPourBox }) => {
   useEscapeToClose(true, onClose);
   const [moldNode] = useState<SceneNode | null>(() => pourNodeFor(useStore.getState().sceneGraph.nodes, ids));
   const [cast, setCast] = useState<MoldCastSimulationResult | null>(null);
@@ -198,13 +200,22 @@ export const PourIntoSelectionModal: React.FC<PourIntoSelectionModalProps> = ({ 
         </div>
 
         <div className="flex items-center justify-between gap-3 px-6 py-4 border-t border-slate-200 dark:border-slate-800">
-          <button
-            type="button"
-            onClick={onMakeMold}
-            className="text-xs text-slate-500 hover:text-slate-800 dark:hover:text-slate-200 underline cursor-pointer"
-          >
-            Make a mold instead
-          </button>
+          <div className="flex flex-col items-start gap-1">
+            <button
+              type="button"
+              onClick={onMakeMold}
+              className="text-xs text-slate-500 hover:text-slate-800 dark:hover:text-slate-200 underline cursor-pointer"
+            >
+              Make a mold instead
+            </button>
+            <button
+              type="button"
+              onClick={onPourBox}
+              className="text-xs text-slate-500 hover:text-slate-800 dark:hover:text-slate-200 underline cursor-pointer"
+            >
+              Silicone pour box
+            </button>
+          </div>
           <AddSimulationButton
             disabled={!cast || adding || busy}
             onSimulate={() => void handleAdd()}

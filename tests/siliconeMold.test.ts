@@ -6,7 +6,11 @@ import { loadManifold } from '../src/utils/sculptCut';
 import { buildPourBox, soupVolume, type PourBoxMesh } from '../src/utils/siliconeMold';
 import { analyzeMesh } from '../src/utils/meshIntegrity';
 import { simulateCastFromMoldNode } from '../src/utils/moldCastSimulation';
-import type { SceneGeom, SceneNode } from '../src/types/scene';
+import { planPourBox, sceneWithPourBox } from '../src/utils/pourBoxScene';
+import { pourNodeFor } from '../src/utils/pourTarget';
+import { getNodeWorldTransform } from '../src/utils/laserCutExporter';
+import * as THREE from 'three';
+import type { SceneGeom, SceneGraph, SceneNode } from '../src/types/scene';
 
 let wasm: ManifoldToplevel;
 beforeAll(async () => { wasm = await loadManifold(); });
@@ -136,6 +140,46 @@ describe('a pour box round a long master', () => {
     for (let i = 2; i < lifted.base.positions.length; i += 3) top = Math.max(top, lifted.base.positions[i]);
     expect(top).toBeCloseTo(50, 5);
     expect(lifted.report.fillZMm).toBeCloseTo(78, 5);
+  });
+});
+
+describe('the pour box in the scene', () => {
+  // A 20 mm cube master, moved and turned a quarter round Z: the pin must
+  // still come out on top of it, in the world.
+  const cubeGeom = { name: 'cube', type: 'box', size: [0.01, 0.01, 0.01] } as SceneGeom;
+  const turned = { id: 'm', name: 'cube', type: 'body', pos: [0.1, 0.05, 0.01], quat: [Math.SQRT1_2, 0, 0, Math.SQRT1_2], joints: [], geoms: [cubeGeom], children: [] } as unknown as SceneNode;
+  const scene = { nodes: [turned] } as unknown as SceneGraph;
+
+  it('stands the base and sleeve round the master, and fixes the pin to it', async () => {
+    const box = await planPourBox(scene, ['m'], { pin: true });
+    expect(box.report.fillZMm).toBeCloseTo(28, 3);
+    const out = sceneWithPourBox(scene, ['m'], box);
+    expect(out.scene.nodes).toHaveLength(3);
+    const base = out.scene.nodes.find((n) => n.id === out.baseId)!;
+    // On the middle of the master's footprint, its top where the master stands.
+    expect(base.pos[0]).toBeCloseTo(0.1, 4);
+    expect(base.pos[1]).toBeCloseTo(0.05, 4);
+    expect(base.pos[2]).toBeCloseTo(-0.006, 4);
+    const master = out.scene.nodes.find((n) => n.id === 'm')!;
+    const pin = master.children!.find((c) => c.id === out.pinId)!;
+    expect(pin.joints).toHaveLength(0);
+    // Turned back into the master's frame: in the world it stands straight up
+    // from the middle of the top, from 0.5 mm inside it to 1 mm past the fill.
+    const w = getNodeWorldTransform(pin, getNodeWorldTransform(master));
+    const p = new THREE.Vector3().setFromMatrixPosition(w);
+    expect(p.x).toBeCloseTo(0.1, 4);
+    expect(p.y).toBeCloseTo(0.05, 4);
+    expect(p.z * 1000).toBeCloseTo((19.5 + 29) / 2, 2);
+    expect(new THREE.Vector3(0, 0, 1).transformDirection(w).z).toBeCloseTo(1, 5);
+  });
+
+  it('pours as the scene stands, wick hole and all', async () => {
+    const box = await planPourBox(scene, ['m'], { pin: true });
+    const out = sceneWithPourBox(scene, ['m'], box);
+    const mold = pourNodeFor(out.scene.nodes, ['m', out.baseId, out.sleeveId])!;
+    const silicone = await simulateCastFromMoldNode(mold, { pour: { fillMm: box.report.pourDepthMm } });
+    expect(silicone.success).toBe(true);
+    expect(Math.abs(silicone.castVolumeMm3 - box.report.siliconeMm3) / box.report.siliconeMm3).toBeLessThan(0.03);
   });
 });
 
