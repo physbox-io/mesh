@@ -146,6 +146,7 @@ export function channelCatalogue(mj: Mujoco, model: MjModel): CoSimChannel[] {
       { name: `joint:${j.name}.force.sin(w)`, direction: 'input', unit: force, description: `Force amplitude b, applied as b·sin(w·q) of joint ${j.name}'s position q every step; w in the name, per ${pos}` },
       { name: `joint:${j.name}.armature`, direction: 'input', unit: j.hinge ? 'kg·m²' : 'kg', description: `Inertia added to joint ${j.name} while named in each step: a motor's rotor` },
       { name: `joint:${j.name}.damping`, direction: 'input', unit: j.hinge ? 'N·m·s/rad' : 'N·s/m', description: `Damping added to joint ${j.name} while named in each step: a motor's bearings` },
+      { name: `joint:${j.name}.frictionloss`, direction: 'input', unit: force, description: `Dry friction added to joint ${j.name} while named in each step: a gearbox's breakaway torque` },
       { name: `joint:${j.name}.pos`, direction: 'output', unit: pos, description: `Position of joint ${j.name}` },
       { name: `joint:${j.name}.vel`, direction: 'output', unit: vel, description: `Speed of joint ${j.name}` },
       { name: `joint:${j.name}.inertia`, direction: 'output', unit: j.hinge ? 'kg·m²' : 'kg', description: `What joint ${j.name} has to accelerate: its diagonal of the mass matrix` },
@@ -172,15 +173,21 @@ export function channelCatalogue(mj: Mujoco, model: MjModel): CoSimChannel[] {
  *  - `dof`: a force on a joint, constant or `value·cos(w·q)` / `value·sin(w·q)`
  *    of the joint's own position q, evaluated afresh every step;
  *  - `ctrl`: an actuator's control input;
- *  - `armature` / `damping`: added to the joint's own while named — a
- *    motor's rotor inertia and its bearing friction, coupled to the joint.
+ *  - `armature` / `damping` / `frictionloss`: added to the joint's own while
+ *    named — a motor's rotor inertia, its bearing drag and its gearbox's
+ *    breakaway friction, coupled to the joint.
  */
 export type ResolvedInput =
   | { kind: 'dof'; index: number; qposadr: number; value: number; harmonic?: { fn: 'cos' | 'sin'; w: number } }
   | { kind: 'ctrl'; index: number; value: number }
-  | { kind: 'armature' | 'damping'; index: number; value: number };
+  | { kind: JointParam; index: number; value: number };
 
-const JOINT_INPUT = /^joint:(.+?)\.(force(?:\.(cos|sin)\(([-+0-9.eE]+)\))?|armature|damping)$/;
+type JointParam = 'armature' | 'damping' | 'frictionloss';
+
+const paramArray = (model: MjModel, kind: string) =>
+  kind === 'armature' ? model.dof_armature : kind === 'damping' ? model.dof_damping : model.dof_frictionloss;
+
+const JOINT_INPUT = /^joint:(.+?)\.(force(?:\.(cos|sin)\(([-+0-9.eE]+)\))?|armature|damping|frictionloss)$/;
 const ACTUATOR_INPUT = /^actuator:(.+)$/;
 
 /**
@@ -197,7 +204,7 @@ export function resolveInputs(mj: Mujoco, model: MjModel, inputs: Record<string,
       const id = idOf(mj, model, 'joint', j[1]);
       if (id < 0 || (model.jnt_type[id] !== JOINT_HINGE && model.jnt_type[id] !== JOINT_SLIDE)) { unknown.push(name); continue; }
       const dof = model.jnt_dofadr[id];
-      if (j[2] === 'armature' || j[2] === 'damping') {
+      if (j[2] === 'armature' || j[2] === 'damping' || j[2] === 'frictionloss') {
         resolved.push({ kind: j[2], index: dof, value });
       } else {
         const w = j[4] === undefined ? undefined : Number(j[4]);
@@ -245,7 +252,7 @@ export function applyJointForces(data: MjData, inputs: ResolvedInput[]): void {
 }
 
 /**
- * The armature and damping a link has added, per model: each dof's own value
+ * The armature, damping and friction a link has added, per model: each dof's own value
  * from the scene, and what is on it now.
  */
 const jointParams = new WeakMap<MjModel, Map<string, { base: number; applied: number }>>();
@@ -267,19 +274,22 @@ export function setJointParams(mj: Mujoco, model: MjModel, data: MjData, inputs:
   }
   const wanted = new Map<string, number>();
   for (const i of inputs) {
-    if (i.kind === 'armature' || i.kind === 'damping') wanted.set(`${i.kind}:${i.index}`, Math.max(0, i.value));
+    if (i.kind === 'armature' || i.kind === 'damping' || i.kind === 'frictionloss') wanted.set(`${i.kind}:${i.index}`, Math.max(0, i.value));
   }
   let armatureChanged = false;
   const write = (key: string, value: number) => {
     const [kind, idx] = key.split(':');
-    (kind === 'armature' ? model.dof_armature : model.dof_damping)[Number(idx)] = value;
+    paramArray(model, kind)[Number(idx)] = value;
     if (kind === 'armature') armatureChanged = true;
+    // As mjcf.ts does for a scene's own frictionloss: at the default impedance
+    // a joint held by friction creeps. Harmless to leave once friction is off.
+    if (kind === 'frictionloss') model.dof_solimp.set([0.9999, 0.9999], Number(idx) * 5);
   };
   for (const [key, add] of wanted) {
     let entry = held.get(key);
     if (!entry) {
       const [kind, idx] = key.split(':');
-      const base = (kind === 'armature' ? model.dof_armature : model.dof_damping)[Number(idx)];
+      const base = paramArray(model, kind)[Number(idx)];
       entry = { base, applied: base };
       held.set(key, entry);
     }

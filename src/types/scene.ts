@@ -331,6 +331,12 @@ export interface SceneJoint {
   damping?: number;
   stiffness?: number;
   springref?: number;
+  /**
+   * Dry friction: the torque (N*m, hinge) or force (N, slide) the joint holds
+   * against before it moves, and resists with once it does. Damping fades as
+   * the joint slows, so it can only delay a lid falling shut; this stops it.
+   */
+  frictionloss?: number;
   limited?: boolean;
   range?: number[];
   actuator?: {

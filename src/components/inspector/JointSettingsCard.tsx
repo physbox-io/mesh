@@ -36,6 +36,27 @@ export function JointSettingsCard({ node }: { node: SceneNode }) {
             </div>
           )}
 
+          {(joint.type === 'hinge' || joint.type === 'slide' || joint.type === 'ball') && (
+            <div className="p-3 bg-white rounded-lg border border-slate-200 shadow-sm flex flex-col gap-2">
+              <h3 className="text-sm font-medium text-slate-700 border-b border-slate-100 pb-2 mb-1 flex items-center gap-1.5">
+                <span className="flex items-center gap-1">🤚 Holding Friction</span>
+                <DocsInfoButton tab="damping" />
+              </h3>
+              <div className="flex items-center gap-2">
+                <SettledNumberInput
+                  step={joint.type === 'slide' ? '0.1' : '0.01'} min={0}
+                  value={joint.frictionloss ?? 0}
+                  onChange={(v) => updateNodeJoint(node.id, { frictionloss: v > 0 ? v : undefined }, i)}
+                  className="flex-1 min-w-0 px-2 py-1 border border-slate-200 rounded text-xs bg-white text-slate-700 outline-none focus:border-blue-500"
+                />
+                <span className="text-[10px] text-slate-400 w-8 shrink-0">{joint.type === 'slide' ? 'N' : 'N·m'}</span>
+              </div>
+              <p className="text-[10px] text-slate-400 leading-snug">
+                Stays where it is left until pushed harder than this.
+              </p>
+            </div>
+          )}
+
           {/* Crumple — a joint that is rigid until it is overloaded,
               and then folds and stays folded. Held still by an
               auto-emitted weld; releasing it is the same one-byte write

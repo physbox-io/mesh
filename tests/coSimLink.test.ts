@@ -225,6 +225,18 @@ describe('a force that varies with the joint\'s position', () => {
     data.delete();
     model.delete();
   });
+
+  it('adds friction that holds a joint against a smaller force, and takes it off after', () => {
+    const model = mj.MjModel.from_xml_string(flywheel(1, 0.1));
+    const data = new mj.MjData(model);
+    const held = step(model, data, { 'joint:spin.force': 0.01, 'joint:spin.frictionloss': 0.02 }, 1000, ['joint:spin.pos']);
+    expect(Math.abs(held.outputs['joint:spin.pos'])).toBeLessThan(1e-3);
+    const free = step(model, data, { 'joint:spin.force': 0.01 }, 1000, ['joint:spin.pos']);
+    expect(model.dof_frictionloss[0]).toBe(0);
+    expect(free.outputs['joint:spin.pos']).toBeGreaterThan(0.5);
+    data.delete();
+    model.delete();
+  });
 });
 
 describe('the channel catalogue', () => {
@@ -250,7 +262,7 @@ describe('the channel catalogue', () => {
       for (let id = 0; id < model.njnt; id++) {
         if (model.jnt_type[id] < 2) continue;
         const name = mj.mj_id2name(model, mj.mjtObj.mjOBJ_JOINT.value, id);
-        for (const field of ['force', 'force.cos(w)', 'force.sin(w)', 'armature', 'damping', 'pos', 'vel', 'inertia', 'load']) expect(names, `${name}.${field}`).toContain(`joint:${name}.${field}`);
+        for (const field of ['force', 'force.cos(w)', 'force.sin(w)', 'armature', 'damping', 'frictionloss', 'pos', 'vel', 'inertia', 'load']) expect(names, `${name}.${field}`).toContain(`joint:${name}.${field}`);
       }
       for (let id = 0; id < model.nu; id++) {
         const name = mj.mj_id2name(model, mj.mjtObj.mjOBJ_ACTUATOR.value, id);
