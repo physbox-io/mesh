@@ -20,7 +20,7 @@
 // since the dev server and nginx both send COOP/COEP — the worker paces itself
 // on a 4 ms timer (startWorkerLoop) and posts frames at display rate.
 
-import load_mujoco from '@mujoco/mujoco';
+import type load_mujoco from '@mujoco/mujoco';
 // The same asset the Emscripten glue would fetch by import.meta.url, as a URL.
 // Wanted explicitly so loadMujoco() below can instantiate the module itself and
 // keep hold of its WebAssembly.Memory — this build exports neither HEAPU8 nor
@@ -29,6 +29,9 @@ import load_mujoco from '@mujoco/mujoco';
 // file once; the package's exports map does list ./mujoco.wasm, so a bare
 // specifier resolves (unlike openscad's - see the note in scadWorker.ts).
 import mujocoWasmUrl from '@mujoco/mujoco/mujoco.wasm?url';
+// The multithreaded build, used when the page is cross-origin isolated (the
+// dev server and nginx both send COOP/COEP); see loadMujoco below.
+import mujocoMtWasmUrl from '@mujoco/mujoco/mt/mujoco.wasm?url';
 import {
   applyCtrlInputs, applyJointForces, channelCatalogue, readOutputs, resolveInputs, setJointParams, stepsFor, substepsFor,
   type ResolvedInput,
@@ -79,22 +82,48 @@ const heapBytes = (): number => wasmMemory?.buffer.byteLength ?? 0;
  * `done` for it, which left the load, and the build awaiting it, pending forever.
  */
 let mujocoLoading: Promise<Mujoco> | null = null;
+/**
+ * The multithreaded build, when SharedArrayBuffer is available: the model
+ * compiler processes meshes on several threads and stepping runs on a
+ * two-thread pool (mju_threadpool).
+ */
+const threaded = self.crossOriginIsolated;
+/**
+ * Emscripten starts this many workers at load, and the compiler starts at most
+ * this many threads: both read navigator.hardwareConcurrency. Left at one per
+ * core it starts 12+ idle workers; and in a browser a thread wanted beyond
+ * those started can deadlock, so the two must agree.
+ */
+const MAX_THREADS = 4;
+const STEP_THREADS = 2;
 const loadMujoco = (): Promise<Mujoco> => {
   if (mujoco) return Promise.resolve(mujoco);
-  mujocoLoading ??= new Promise<Mujoco>((resolve, reject) => {
-    load_mujoco({
-      instantiateWasm: (
-        imports: WebAssembly.Imports,
-        done: (instance: WebAssembly.Instance, module: WebAssembly.Module) => void,
-      ) => {
-        WebAssembly.instantiateStreaming(fetch(mujocoWasmUrl), imports).then((result) => {
-          wasmMemory = result.instance.exports.memory as WebAssembly.Memory;
-          done(result.instance, result.module);
-        }, reject);
-        return {};
-      },
-    } as Parameters<typeof load_mujoco>[0]).then((m) => { mujoco = m; resolve(m); }, reject);
-  }).catch((e) => {
+  mujocoLoading ??= (async () => {
+    if (threaded) {
+      Object.defineProperty(self.navigator, 'hardwareConcurrency', {
+        value: Math.min(MAX_THREADS, navigator.hardwareConcurrency || MAX_THREADS),
+        configurable: true,
+      });
+    }
+    const load = (threaded ? await import('@mujoco/mujoco/mt') : await import('@mujoco/mujoco')).default as typeof load_mujoco;
+    return new Promise<Mujoco>((resolve, reject) => {
+      load({
+        instantiateWasm: (
+          imports: WebAssembly.Imports,
+          done: (instance: WebAssembly.Instance, module: WebAssembly.Module) => void,
+        ) => {
+          WebAssembly.instantiateStreaming(fetch(threaded ? mujocoMtWasmUrl : mujocoWasmUrl), imports).then((result) => {
+            // The threaded build imports its (shared) memory rather than exporting it.
+            wasmMemory = (result.instance.exports.memory as WebAssembly.Memory | undefined)
+              ?? Object.values(imports).flatMap((m) => Object.values(m)).find((v): v is WebAssembly.Memory => v instanceof WebAssembly.Memory)
+              ?? null;
+            done(result.instance, result.module);
+          }, reject);
+          return {};
+        },
+      } as Parameters<typeof load_mujoco>[0]).then((m) => { mujoco = m; resolve(m); }, reject);
+    });
+  })().catch((e) => {
     mujocoLoading = null;
     throw new Error(`The physics engine failed to load: ${String((e as Error)?.message || e)}`);
   });
@@ -1727,6 +1756,7 @@ const doBuild = (
 
   const newModel = meshVfs ? mujoco.MjModel.from_xml_string(xml, meshVfs) : mujoco.MjModel.from_xml_string(xml);
   const newData = new mujoco.MjData(newModel);
+  if (threaded) mujoco.mju_threadpool(newData, STEP_THREADS);
 
   model = newModel;
   data = newData;
@@ -1985,8 +2015,10 @@ const runHeadless = (
   let headlessModel: MjModel | null = null;
   let headlessData: MjData | null = null;
   try {
+    if (threaded && savedData) mujoco.mju_threadpool(savedData, 0);
     headlessModel = meshVfs ? mujoco.MjModel.from_xml_string(xml, meshVfs) : mujoco.MjModel.from_xml_string(xml);
     headlessData = new mujoco.MjData(headlessModel);
+    if (threaded) mujoco.mju_threadpool(headlessData, STEP_THREADS);
 
     model = headlessModel;
     data = headlessData;
@@ -2061,8 +2093,9 @@ const runHeadless = (
   } catch (e) {
     return { ok: false, error: String((e as Error)?.message || e), warnings };
   } finally {
-    if (headlessModel) { try { headlessModel.delete(); } catch { /* ignore */ } }
     if (headlessData) { try { headlessData.delete(); } catch { /* ignore */ } }
+    if (headlessModel) { try { headlessModel.delete(); } catch { /* ignore */ } }
+    if (threaded && savedData && mujoco) { try { mujoco.mju_threadpool(savedData, STEP_THREADS); } catch { /* ignore */ } }
     model = savedModel; data = savedData; sceneGraph = savedSceneGraph;
     scriptState = savedScriptState;
     scriptCache = savedScriptCache;
