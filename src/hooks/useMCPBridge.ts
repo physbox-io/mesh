@@ -48,6 +48,9 @@ import { measureInScene } from '../utils/measureScene';
 import { getNodeWorldPos } from '../utils/sceneTree';
 import { generateCastPattern, DEFAULT_CAST_OPTIONS, type CastMethod } from '../utils/castPatternExporter';
 import { runCastPrep } from '../utils/castPrepRunner';
+import { planPourBox } from '../utils/pourBoxScene';
+import { addPourBoxToScene, pourBoxStl } from '../utils/pourBoxActions';
+import { SILICONES, type PourBoxOptions, type SiliconeId } from '../utils/siliconeMold';
 import { cutAlongPlaneOffThread, selectionSoups, splitOffThread, testAssemblyOffThread } from '../utils/printSplitClient';
 import { loadManifold } from '../utils/sculptCut';
 import {
@@ -3216,6 +3219,60 @@ export function useMCPBridge() {
             name: landed?.name ?? node.name,
             ...(parent ? { parent: parent.id } : {}),
             nodeCount: useStore.getState().sceneGraph.nodes.length,
+          };
+        }
+
+        /*
+         * A printed pour box for a silicone mold of the given bodies (default:
+         * the selection, else every body): base with a groove, sleeve, and an
+         * optional wick pin. Reports the fill line and the silicone; apply adds
+         * the pieces to the scene; files come back as for EXPORT_CAST.
+         */
+        case 'MAKE_POUR_BOX': {
+          const raw = typeof msg.bodyId === 'string' ? msg.bodyId.split(',').map((x) => x.trim()).filter(Boolean) : [];
+          const given = raw.length ? raw : store.selectedNodeId ? [store.selectedNodeId, ...store.extraSelectedIds.filter((id) => id !== store.selectedNodeId)] : [];
+          const missing = given.filter((id) => !findNodeInScene(store.sceneGraph.nodes, id));
+          if (missing.length) return { ok: false, error: `No body called ${missing.join(', ')}.` };
+          const ids = given.length
+            ? given.map((id) => findNodeInScene(store.sceneGraph.nodes, id)!.id)
+            : store.sceneGraph.nodes.filter((n) => !n.simulation).map((n) => n.id);
+          if (!ids.length) return { ok: false, error: 'The scene is empty: add the master first.' };
+          const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+          const options: Partial<PourBoxOptions> = {};
+          for (const key of ['coverMm', 'wallMm', 'clearanceMm', 'baseMm', 'grooveMm', 'freeboardMm', 'pinDiaMm'] as const) {
+            const v = num(msg[key]);
+            if (v !== undefined) options[key] = v;
+          }
+          if (msg.shape === 'fit' || msg.shape === 'round' || msg.shape === 'box') options.shape = msg.shape;
+          if (typeof msg.pin === 'boolean') options.pin = msg.pin;
+          if (typeof msg.silicone === 'string') {
+            if (!(msg.silicone in SILICONES)) return { ok: false, error: `silicone is one of ${Object.keys(SILICONES).join(', ')}.` };
+            options.silicone = msg.silicone as SiliconeId;
+          }
+          let box;
+          try {
+            box = await planPourBox(store.sceneGraph, ids, options);
+          } catch (e) {
+            return { ok: false, error: (e as Error).message };
+          }
+          const added = msg.apply === true ? await addPourBoxToScene(ids, options, box) : null;
+          const { warnings, ...summary } = box.report;
+          return {
+            ok: true,
+            summary: {
+              ...summary,
+              master: ids,
+              ...(box.pin ? { pinDiaMm: box.pin.diaMm } : {}),
+              ...(added ? { added: { baseId: added.baseId, sleeveId: added.sleeveId, ...(added.pinId ? { pinId: added.pinId } : {}) } } : {}),
+            },
+            warnings,
+            files: describeFiles(
+              [
+                { name: 'pour-base.stl', bytes: pourBoxStl(box.base, 'base') },
+                { name: 'pour-sleeve.stl', bytes: pourBoxStl(box.sleeve, 'sleeve') },
+              ],
+              msg.includeFiles !== false
+            ),
           };
         }
 
