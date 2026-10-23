@@ -1,0 +1,16 @@
+{
+  "name": "cloth-spike",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "bench": "node bench.mjs",
+    "dev": "vite --port 5185 --host"
+  },
+  "dependencies": {
+    "@mujoco/mujoco": "3.17.0",
+    "three": "0.170.0"
+  },
+  "devDependencies": {
+    "vite": "6.0.7"
+  }
+}
