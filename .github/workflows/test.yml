@@ -51,6 +51,13 @@ jobs:
       #     Manage Actions access), and the built-in token below is enough; or
       #   - set a PACKAGES_TOKEN secret to a PAT with read:packages.
       # Preferring the first: no secret to rotate.
+      # npm ci's postinstall re-inlines the MuJoCo wasm, about two minutes of
+      # wasm-opt (scripts/optimize-mujoco-wasm.mjs); this keeps its output.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/mesh-mujoco-wasm
+          key: mujoco-wasm-${{ hashFiles('package-lock.json', 'scripts/optimize-mujoco-wasm.mjs') }}
+
       - name: Install
         run: npm ci
         env:

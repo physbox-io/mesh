@@ -12,7 +12,8 @@
     "test:watch": "vitest",
     "lint": "eslint .",
     "preview": "vite preview",
-    "export:presets": "npx vite-node scripts/export-presets.ts"
+    "export:presets": "npx vite-node scripts/export-presets.ts",
+    "postinstall": "node scripts/optimize-mujoco-wasm.mjs"
   },
   "dependencies": {
     "@lofcz/openscad-wasm": "^0.0.2",
@@ -44,6 +45,7 @@
     "@types/react-dom": "^19.2.3",
     "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "^6.0.1",
+    "binaryen": "123.0.0",
     "eslint": "^10.3.0",
     "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-plugin-react-refresh": "^0.5.2",
