@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { simulateCastFromMoldNode, simulateCastFromMoldTriangles } from '../src/utils/moldCastSimulation';
-import { pourNodeFor } from '../src/utils/pourTarget';
+import { pourNodeFor, pourSelection } from '../src/utils/pourTarget';
 import type { SceneGeom, SceneNode } from '../src/types/scene';
 
 // A mother mold for a silicone mold, in two bodies the way one is printed: a
@@ -143,5 +143,30 @@ describe('pouring into selected bodies', () => {
     const node = pourNodeFor([parent], ['child']);
     expect(node?.id).toBe('child');
     expect(node?.pos?.[0]).toBeCloseTo(0.1, 6);
+  });
+
+  it('pours only into the bodies that touch the one clicked', () => {
+    // A silicone mold simulated earlier, standing 120 mm to the side.
+    const apart = { ...body('silicone', [box('s', [-21, -21, 0], [21, 21, 47])]), pos: [0.12, 0, 0] } as SceneNode;
+    const both = pourSelection([master, sleeve, apart], ['master', 'sleeve']);
+    expect(both?.apart).toEqual([]);
+    expect(both?.node.id).toBe('master+sleeve');
+
+    const mixed = pourSelection([master, sleeve, apart], ['sleeve', 'silicone']);
+    expect(mixed?.node.id).toBe('sleeve');
+    expect(mixed?.apart.map((n) => n.id)).toEqual(['silicone']);
+
+    // Clicked last, the silicone is the mold, and the sleeve the one left out.
+    const other = pourSelection([master, sleeve, apart], ['silicone', 'master', 'sleeve']);
+    expect(other?.node.id).toBe('silicone');
+    expect(other?.apart.map((n) => n.id).sort()).toEqual(['master', 'sleeve']);
+  });
+
+  it('counts a nested body where it stands in the world when grouping', () => {
+    const child = body('child', [box('c', [0, 0, 0], [10, 10, 10])]);
+    const far = { ...body('parent', []), pos: [0.2, 0, 0], children: [child] } as SceneNode;
+    expect(pourSelection([master, far], ['master', 'child'])?.apart.map((n) => n.id)).toEqual(['child']);
+    const near = { ...far, pos: [0.035, 0, 0] } as SceneNode;
+    expect(pourSelection([master, near], ['master', 'child'])?.apart).toEqual([]);
   });
 });

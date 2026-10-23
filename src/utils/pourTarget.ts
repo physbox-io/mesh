@@ -4,6 +4,7 @@
 import * as THREE from 'three';
 import type { SceneNode } from '../types/scene';
 import { getNodeWorldTransform } from './laserCutExporter';
+import { geomBounds, positiveBounds } from './csg';
 
 /**
  * One body holding copies of the given bodies placed where they stand in the
@@ -12,6 +13,11 @@ import { getNodeWorldTransform } from './laserCutExporter';
  * the ids is in the scene.
  */
 export function pourNodeFor(nodes: SceneNode[], ids: string[]): SceneNode | null {
+  return combined(placedBodies(nodes, ids));
+}
+
+/** Copies of the given bodies placed where they stand in the world. */
+function placedBodies(nodes: SceneNode[], ids: string[]): SceneNode[] {
   const wanted = new Set(ids);
   const children: SceneNode[] = [];
   const walk = (list: SceneNode[], parent: THREE.Matrix4 | undefined) => {
@@ -29,6 +35,10 @@ export function pourNodeFor(nodes: SceneNode[], ids: string[]): SceneNode | null
     }
   };
   walk(nodes, undefined);
+  return children;
+}
+
+function combined(children: SceneNode[]): SceneNode | null {
   if (children.length === 0) return null;
   if (children.length === 1) return children[0];
   return {
@@ -40,4 +50,63 @@ export function pourNodeFor(nodes: SceneNode[], ids: string[]): SceneNode | null
     geoms: [],
     children,
   } as SceneNode;
+}
+
+/** How far apart two bodies' boxes may be and still count as touching, metres. */
+const TOUCH_M = 0.001;
+
+type Box = { min: number[]; max: number[] };
+
+/** A world-placed body's box, its children included: its own bounds' corners carried through its transform. */
+function worldBox(node: SceneNode, parent?: THREE.Matrix4): Box | null {
+  const m = getNodeWorldTransform(node, parent);
+  const out: Box = { min: [Infinity, Infinity, Infinity], max: [-Infinity, -Infinity, -Infinity] };
+  let any = false;
+  const add = (b: Box) => {
+    const p = new THREE.Vector3();
+    for (let k = 0; k < 8; k++) {
+      p.set(k & 1 ? b.max[0] : b.min[0], k & 2 ? b.max[1] : b.min[1], k & 4 ? b.max[2] : b.min[2]).applyMatrix4(m);
+      [p.x, p.y, p.z].forEach((v, a) => {
+        out.min[a] = Math.min(out.min[a], v);
+        out.max[a] = Math.max(out.max[a], v);
+      });
+    }
+    any = true;
+  };
+  const own = positiveBounds(node);
+  if (own) add(own);
+  else for (const g of node.geoms ?? []) { const b = geomBounds(g); if (b && b.min.every(Number.isFinite)) add(b); }
+  for (const c of node.children ?? []) {
+    const b = worldBox(c, m);
+    if (b) { any = true; for (let a = 0; a < 3; a++) { out.min[a] = Math.min(out.min[a], b.min[a]); out.max[a] = Math.max(out.max[a], b.max[a]); } }
+  }
+  return any ? out : null;
+}
+
+const touching = (a: Box, b: Box) => [0, 1, 2].every((k) => a.min[k] <= b.max[k] + TOUCH_M && b.min[k] <= a.max[k] + TOUCH_M);
+
+/**
+ * The selection as a mold to pour into, made of the bodies that touch the
+ * first id (the body clicked), directly or through one another. Bodies that
+ * stand apart from those hold nothing with them, so they are left out and
+ * named in `apart`: a sleeve and a silicone mold 12 cm to one side of it were
+ * poured into as one, and came out a spiky tube that was neither.
+ */
+export function pourSelection(nodes: SceneNode[], ids: string[]): { node: SceneNode; apart: SceneNode[] } | null {
+  const bodies = placedBodies(nodes, ids);
+  if (bodies.length === 0) return null;
+  const boxes = bodies.map((b) => worldBox(b));
+  const first = Math.max(0, bodies.findIndex((b) => b.id === ids[0]));
+  const inGroup = new Set([first]);
+  for (let grew = true; grew;) {
+    grew = false;
+    bodies.forEach((_, i) => {
+      if (inGroup.has(i) || !boxes[i]) return;
+      if ([...inGroup].some((j) => boxes[j] && touching(boxes[i]!, boxes[j]!))) { inGroup.add(i); grew = true; }
+    });
+  }
+  return {
+    node: combined(bodies.filter((_, i) => inGroup.has(i)))!,
+    apart: bodies.filter((_, i) => !inGroup.has(i)),
+  };
 }

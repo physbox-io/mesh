@@ -37,7 +37,7 @@ import { resolveCsgGeoms } from './csg';
 import { addSimulationToScene, sceneStockTransform } from '../hooks/useAddSimulation';
 import { useStore } from '../store/useStore';
 import { workerStoppedError } from './staleBuild';
-import { pourNodeFor } from './pourTarget';
+import { pourSelection } from './pourTarget';
 import { POUR_DIRECTIONS, type PourDirection, type PourInfo } from './pourCast';
 
 export interface MoldPreview {
@@ -351,10 +351,18 @@ export async function runMcpMoldSimulation(params: {
       if (missing.length > 0) {
         return { ok: false, error: `No mold body with id '${missing.join("', '")}'.` };
       }
-      const moldNode = pourNodeFor(scene.nodes, rawIds.map(toId));
-      if (!moldNode) {
+      const picked = pourSelection(scene.nodes, rawIds.map(toId));
+      if (!picked) {
         return { ok: false, error: `No mold body with id '${rawBodyId}'.` };
       }
+      if (picked.apart.length > 0) {
+        return {
+          ok: false,
+          error: `${picked.apart.map((n) => `'${n.id}'`).join(', ')} ${picked.apart.length === 1 ? 'does' : 'do'} not touch '${rawIds[0]}', `
+            + 'so together they hold nothing: pass only bodies that make one mold, such as a master and its sleeve.',
+        };
+      }
+      const moldNode = picked.node;
       const castRes = await withWorker((c) =>
         c.castNode(moldNode, {
           trimChannels: msg.trimChannels === true,

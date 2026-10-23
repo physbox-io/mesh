@@ -7,7 +7,7 @@ import { useStore } from '../store/useStore';
 import { AddSimulationButton } from './MachineJobControls';
 import { MoldWorkerClient, addPourToScene, pourPlugNote, pourSideLabel, pourUndercutWarning } from '../utils/moldWorkerClient';
 import { POUR_DIRECTIONS, type PourDirection } from '../utils/pourCast';
-import { pourNodeFor } from '../utils/pourTarget';
+import { pourSelection } from '../utils/pourTarget';
 import type { MoldCastSimulationResult } from '../utils/moldCastSimulation';
 import type { SceneNode } from '../types/scene';
 
@@ -37,7 +37,11 @@ interface PourIntoSelectionModalProps {
  */
 export const PourIntoSelectionModal: React.FC<PourIntoSelectionModalProps> = ({ onClose, ids, onMakeMold, onPourBox }) => {
   useEscapeToClose(true, onClose);
-  const [moldNode] = useState<SceneNode | null>(() => pourNodeFor(useStore.getState().sceneGraph.nodes, ids));
+  // Only the bodies touching the one clicked: the rest hold nothing with it.
+  const [{ moldNode, apart }] = useState<{ moldNode: SceneNode | null; apart: SceneNode[] }>(() => {
+    const picked = pourSelection(useStore.getState().sceneGraph.nodes, ids);
+    return { moldNode: picked?.node ?? null, apart: picked?.apart ?? [] };
+  });
   const [cast, setCast] = useState<MoldCastSimulationResult | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
@@ -137,6 +141,14 @@ export const PourIntoSelectionModal: React.FC<PourIntoSelectionModalProps> = ({ 
         </div>
 
         <div className="p-6 space-y-3 text-sm">
+          {apart.length > 0 && (
+            <p className="flex gap-2 text-xs text-amber-700 dark:text-amber-400">
+              <AlertTriangle className="w-4 h-4 shrink-0" />
+              <span>
+                Left out {apart.map((n) => n.name).join(', ')}: {apart.length === 1 ? 'it does' : 'they do'} not touch {moldNode?.name}, so {apart.length === 1 ? 'it holds' : 'they hold'} nothing with it.
+              </span>
+            </p>
+          )}
           <div className="grid grid-cols-2 gap-3">
             <label className="space-y-1 text-xs">
               <span className="font-semibold text-slate-600 dark:text-slate-300">Pour from</span>
