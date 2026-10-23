@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "@mujoco/mujoco": "3.17.0",
+    "delaunator": "5.0.1",
     "three": "0.170.0"
   },
   "devDependencies": {

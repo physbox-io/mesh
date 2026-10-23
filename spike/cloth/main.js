@@ -2,8 +2,9 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import load_mujoco from '@mujoco/mujoco';
 import { compileShirt } from './shirtScene.mjs';
+import { compileTshirt } from './tshirt.mjs';
 
-const SEW_TIME = 1.0;
+const SEW_TIME = 1.5;
 const stats = document.getElementById('stats');
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(devicePixelRatio);
@@ -63,7 +64,6 @@ function buildBody(model, data) {
 }
 
 function buildCloth(model) {
-  const colors = [0x3b7bd4, 0x2a5fa8];
   for (let f = 0; f < model.nflex; f++) {
     const vadr = model.flex_vertadr[f], vnum = model.flex_vertnum[f];
     const eadr = model.flex_elemdataadr[f], enum_ = model.flex_elemnum[f];
@@ -71,7 +71,8 @@ function buildCloth(model) {
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(3 * vnum), 3));
     geo.setIndex(idx);
-    const mat = new THREE.MeshStandardMaterial({ color: colors[f % 2], roughness: 0.95, side: THREE.DoubleSide });
+    const rgba = model.flex_rgba.slice(4 * f, 4 * f + 3);
+    const mat = new THREE.MeshStandardMaterial({ color: new THREE.Color(rgba[0], rgba[1], rgba[2]), roughness: 0.95, side: THREE.DoubleSide });
     const mesh = new THREE.Mesh(geo, mat);
     mesh.frustumCulled = false;
     world.add(mesh);
@@ -98,7 +99,8 @@ function restart() {
     const spacing = Number(document.getElementById('spacing').value);
     const selfcollide = document.getElementById('self').checked ? 'auto' : 'none';
     const t = performance.now();
-    sim = compileShirt(mujoco, { spacing, selfcollide });
+    const garment = document.getElementById('garment').value;
+    sim = (garment === 'tshirt' ? compileTshirt : compileShirt)(mujoco, { spacing, selfcollide });
     compileMs = performance.now() - t;
     stepTimes = []; sewDoneAt = null;
     buildBody(sim.model, sim.data);
@@ -109,6 +111,7 @@ function restart() {
 document.getElementById('restart').onclick = restart;
 document.getElementById('spacing').onchange = restart;
 document.getElementById('self').onchange = restart;
+document.getElementById('garment').onchange = restart;
 restart();
 
 let lastFrame = performance.now(), simPerWall = 0;
@@ -132,12 +135,14 @@ function frame(now) {
     simPerWall = 0.9 * simPerWall + 0.1 * ((data.time - simStart) / Math.max(wallDt, 1e-3));
     syncCloth();
     const gap = sim.seamGap() * 1000;
-    if (sewDoneAt === null && gap < 5) sewDoneAt = data.time;
+    if (sewDoneAt === null && gap < 15) sewDoneAt = data.time;
     const ms = stepTimes.reduce((a, b) => a + b, 0) / Math.max(1, stepTimes.length);
     stats.textContent =
       `MuJoCo ${mujoco.mj_versionString?.() ?? ''}\n` +
       `vertices     ${sim.nvert}\n` +
       `seam pairs   ${sim.pairs.length}\n` +
+      (sim.draft ? `sleeve cap   ${(sim.draft.capHeight * 100).toFixed(1)} cm high\n` +
+        `neckband     ${(sim.draft.bandLength * 100).toFixed(1)} cm on a ${(sim.draft.neckline * 100).toFixed(1)} cm neckline\n` : '') +
       `compile      ${compileMs.toFixed(0)} ms\n` +
       `step         ${ms.toFixed(2)} ms (dt ${model.opt.timestep * 1000} ms)\n` +
       `speed        ${(simPerWall * 100).toFixed(0)}% of real time\n` +
