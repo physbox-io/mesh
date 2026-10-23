@@ -24,7 +24,7 @@
 import { MAX_PATTERN_CELLS, patternById, type PatternOptions, type PatternSpec } from './surfacePatterns';
 import { EDGE_CREASE_DEG } from './featureEdges';
 import { planeBasis, type Vec3 } from './measureSnap';
-import { cutToDisc, cylinderAngle, cylinderReference, fitCylinder, lscm, triangleStretch } from './surfaceUv';
+import { cutToDisc, cylinderAngle, cylinderReference, fitCylinder, fitRevolution, lscm, triangleStretch, type RevolutionFit } from './surfaceUv';
 import type { PaintLayer } from './vertexPaint';
 
 /**
@@ -32,7 +32,7 @@ import type { PaintLayer } from './vertexPaint';
  * onto a plane, unrolled round a cylinder's axis, or unwrapped by a conformal
  * map (utils/surfaceUv.ts). 'auto' picks by the shape of the region.
  */
-export type TextureProjection = 'auto' | 'planar' | 'cylindrical' | 'unwrap';
+export type TextureProjection = 'auto' | 'planar' | 'cylindrical' | 'revolved' | 'unwrap';
 
 /**
  * One pattern on one region of a geom: the authoring intent, saved with the
@@ -116,6 +116,12 @@ const PLANAR_TILT_DEG = 25;
 const CYLINDER_LEAN_DEG = 5;
 /** ...and its points sit this close to the fitted circle, as a fraction of the radius. */
 const CYLINDER_ERROR = 0.03;
+/**
+ * How far a region's facet normals may turn round the axis (RMS, as a sine)
+ * and still be taken as a surface of revolution: about 3 degrees, which a
+ * revolved lattice's facets clear by a long way and a free-form blob does not.
+ */
+const REVOLUTION_ERROR = 0.05;
 /** Stretch the modal warns about. */
 export const STRETCH_WARNING = 0.15;
 /**
@@ -1040,6 +1046,109 @@ function cylinderUv(surface: IndexedSurface, faces: number[], fit: NonNullable<R
 }
 
 /**
+ * A surface of revolution that is not a cylinder -- a vase, a bulb, a cone --
+ * wrapped round its axis: u is the angle round it times the region's mean
+ * radius, v the distance along the profile. A picture or a pattern then goes
+ * round once at every height, which is what a band round a vase does, where
+ * the conformal unwrap would cut the region open and leave a plain seam down
+ * it. Null unless the region goes all the way round and its profile is one
+ * curve up the axis (no lip folding back on itself), which leaves anything
+ * else to the unwrap.
+ */
+function revolvedUv(surface: IndexedSurface, faces: number[], fit: RevolutionFit, centroids: Vec3[], seedAt: Vec3, twistDeg: number): RegionUv | null {
+  const { mesh, edges, areas } = surface;
+  const asCylinder = { axis: fit.axis, centre: fit.centre, radius: 1, leanDeg: 0, error: 0, outward: fit.outward };
+  const ref = cylinderReference(asCylinder);
+  const angle = (v: number) => cylinderAngle(asCylinder, ref, vtx(mesh.pos, v));
+  const heightOf = (p: Vec3) => dot(sub(p, fit.centre), fit.axis);
+  const radiusOf = (p: Vec3) => {
+    const d = sub(p, fit.centre), h = dot(d, fit.axis);
+    return len([d[0] - fit.axis[0] * h, d[1] - fit.axis[1] * h, d[2] - fit.axis[2] * h]);
+  };
+
+  const BINS = 720;
+  const covered = new Uint8Array(BINS);
+  const spans = new Map<number, number[]>();
+  for (const f of faces) {
+    const t0 = angle(mesh.faces[3 * f]);
+    const t = [t0, t0 + wrapPi(angle(mesh.faces[3 * f + 1]) - t0), t0 + wrapPi(angle(mesh.faces[3 * f + 2]) - t0)];
+    spans.set(f, t);
+    const lo = Math.min(...t), hi = Math.max(...t);
+    const b0 = Math.ceil((lo / (2 * Math.PI)) * BINS - 0.5), b1 = Math.floor((hi / (2 * Math.PI)) * BINS - 0.5);
+    for (let b = b0; b <= b1; b++) covered[mod(b, BINS)] = 1;
+  }
+  if (!covered.every((c) => c === 1)) return null;
+
+  // The profile: mean radius in bands up the axis, and arc length along it.
+  const verts = new Set<number>();
+  for (const f of faces) for (let k = 0; k < 3; k++) verts.add(mesh.faces[3 * f + k]);
+  let h0 = Infinity, h1 = -Infinity, rMin = Infinity, rMax = 0;
+  for (const v of verts) {
+    const p = vtx(mesh.pos, v), h = heightOf(p), r = radiusOf(p);
+    h0 = Math.min(h0, h); h1 = Math.max(h1, h);
+    rMin = Math.min(rMin, r); rMax = Math.max(rMax, r);
+  }
+  if (!(h1 - h0 > 0)) return null;
+  // A cap over the axis -- a bowl's floor, a cone's tip -- squeezes the whole
+  // way round into a point; the conformal unwrap lays that out better.
+  if (rMin < 0.15 * rMax) return null;
+  const B = Math.max(4, Math.min(256, Math.floor(verts.size / 8)));
+  const sum = new Float64Array(B), cnt = new Float64Array(B), lo = new Float64Array(B).fill(Infinity), hi = new Float64Array(B).fill(-Infinity);
+  const bin = (h: number) => Math.min(B - 1, Math.max(0, Math.floor(((h - h0) / (h1 - h0)) * B)));
+  for (const v of verts) {
+    const p = vtx(mesh.pos, v), r = radiusOf(p), b = bin(heightOf(p));
+    sum[b] += r; cnt[b]++; lo[b] = Math.min(lo[b], r); hi[b] = Math.max(hi[b], r);
+  }
+  const rAt = new Float64Array(B);
+  let last = -1;
+  for (let b = 0; b < B; b++) {
+    if (cnt[b]) {
+      // A band holding two radii far apart is a lip turned back over itself.
+      const mean = sum[b] / cnt[b];
+      if (hi[b] - lo[b] > 0.25 * mean + (h1 - h0) / B * 2) return null;
+      rAt[b] = mean;
+      for (let g = last + 1; g < b; g++) rAt[g] = last < 0 ? mean : rAt[last] + ((rAt[b] - rAt[last]) * (g - last)) / (b - last);
+      last = b;
+    }
+  }
+  for (let g = last + 1; g < B; g++) rAt[g] = rAt[last];
+  // s at each band's middle; a point's v is interpolated from it.
+  const step = (h1 - h0) / B;
+  const sAt = new Float64Array(B);
+  for (let b = 1; b < B; b++) sAt[b] = sAt[b - 1] + Math.hypot(step, rAt[b] - rAt[b - 1]);
+  const along = (p: Vec3) => {
+    const x = (heightOf(p) - h0) / step - 0.5;
+    const b = Math.min(B - 2, Math.max(0, Math.floor(x)));
+    const t = Math.min(1.5, Math.max(-0.5, x - b));
+    return sAt[b] + (sAt[b + 1] - sAt[b]) * t;
+  };
+
+  let areaSum = 0, rSum = 0;
+  faces.forEach((f, i) => { areaSum += areas[f]; rSum += areas[f] * radiusOf(centroids[i]); });
+  const rRef = rSum / (areaSum || 1);
+  const wrapC = 2 * Math.PI * rRef;
+  const cut = cylinderAngle(asCylinder, ref, seedAt) + Math.PI;
+  const side = fit.outward ? 1 : -1;
+  let v0 = Infinity, v1 = -Infinity;
+  const raw = new Map<number, number[]>();
+  for (const f of faces) {
+    const t = spans.get(f)!;
+    const start = mod(t[0] - cut, 2 * Math.PI);
+    const c: number[] = [];
+    for (let k = 0; k < 3; k++) {
+      const v = side * along(vtx(mesh.pos, mesh.faces[3 * f + k]));
+      c.push(rRef * (start + (t[k] - t[0])), v);
+      v0 = Math.min(v0, v); v1 = Math.max(v1, v);
+    }
+    raw.set(f, c);
+  }
+  for (const c of raw.values()) for (let k = 0; k < 3; k++) c[2 * k + 1] -= v0;
+  const segments = edgeSegments(mesh, edges, faces, raw)
+    .flatMap((s) => [s, [s[0] - wrapC, s[1], s[2] - wrapC, s[3]], [s[0] + wrapC, s[1], s[2] + wrapC, s[3]]] as Segment[]);
+  return { kind: 'revolved', corners: raw, width: wrapC, height: v1 - v0, wrapC, twistDeg, segments, seam: [] };
+}
+
+/**
  * Anything else, unwrapped by a conformal map (utils/surfaceUv.ts), with the
  * planar frame's projection as the starting guess and its two farthest points
  * pinned where the projection put them, so the pattern turns the way Rotate
@@ -1148,6 +1257,17 @@ function regionUv(surface: IndexedSurface, faces: number[], normal: Vec3, minCos
     const fit = fitCylinder(points, centroids, faces.map((f) => normals[f]), faces.map((f) => areas[f]));
     const isCylinder = !!fit && fit.leanDeg <= CYLINDER_LEAN_DEG && fit.error <= CYLINDER_ERROR;
     if (fit && (isCylinder || want === 'cylindrical')) return cylinderUv(surface, faces, fit, texture.seedAt as Vec3, twist);
+  }
+  if (want === 'auto' || want === 'revolved') {
+    const centroids = faces.map((f): Vec3 => {
+      const a = vtx(mesh.pos, mesh.faces[3 * f]), b = vtx(mesh.pos, mesh.faces[3 * f + 1]), c = vtx(mesh.pos, mesh.faces[3 * f + 2]);
+      return [(a[0] + b[0] + c[0]) / 3, (a[1] + b[1] + c[1]) / 3, (a[2] + b[2] + c[2]) / 3];
+    });
+    const rev = fitRevolution(centroids, faces.map((f) => normals[f]), faces.map((f) => areas[f]));
+    if (rev && rev.error <= REVOLUTION_ERROR) {
+      const wrapped = revolvedUv(surface, faces, rev, centroids, texture.seedAt as Vec3, twist);
+      if (wrapped) return wrapped;
+    }
   }
   const unwrapped = unwrapUv(surface, faces, frame, texture.seedAt as Vec3);
   if (unwrapped) return unwrapped;

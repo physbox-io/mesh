@@ -173,3 +173,81 @@ describe('the cache key', () => {
     expect(key(a)).toBe(key({ ...a }));
   });
 });
+
+describe('a picture round a vase', () => {
+  // A closed surface of revolution about z: a bulge, wider in the middle.
+  function vase(segments: number, rings: number) {
+    const R = (t: number) => 0.012 * (1 + 0.35 * Math.sin(Math.PI * t));
+    const H = 0.05;
+    const positions: number[] = [];
+    for (let j = 0; j <= rings; j++) {
+      const t = j / rings, r = R(t), z = -H / 2 + H * t;
+      for (let i = 0; i < segments; i++) {
+        const a = (i / segments) * Math.PI * 2;
+        positions.push(r * Math.cos(a), r * Math.sin(a), z);
+      }
+    }
+    const bottom = positions.length / 3;
+    positions.push(0, 0, -H / 2, 0, 0, H / 2);
+    const top = bottom + 1;
+    const faces: number[] = [];
+    const at = (j: number, i: number) => j * segments + (i % segments);
+    for (let j = 0; j < rings; j++) {
+      for (let i = 0; i < segments; i++) {
+        faces.push(at(j, i), at(j, i + 1), at(j + 1, i + 1), at(j, i), at(j + 1, i + 1), at(j + 1, i));
+      }
+    }
+    for (let i = 0; i < segments; i++) {
+      faces.push(bottom, at(0, i + 1), at(0, i));
+      faces.push(top, at(rings, i), at(rings, i + 1));
+    }
+    return { positions, faces, R };
+  }
+  const v = vase(96, 40);
+  const band = optionsFor(200, 20, (x) => (Math.abs(x - 99.5) < 10 ? 1 : 0));
+
+  it('wraps it round the axis, once at every height, with no seam', () => {
+    const check0 = analyzeMesh(v.positions, v.faces)!;
+    expect(check0.closed && check0.volume > 0).toBe(true);
+    const r0 = v.R(0.5);
+    const out = applySurfaceTextures(v.positions, v.faces, [{
+      pattern: 'image', options: band, depthM: 0.001, cellM: 0.001, borderM: 0,
+      seedAt: [r0, 0, 0], seedNormal: [1, 0, 0], maxTiltDeg: 180,
+    }]);
+    const [r] = out.regions;
+    expect(r.applied).toBe(true);
+    expect(r.projection).toBe('revolved');
+    expect(r.wrap).toEqual({ scaled: 1, blended: false });
+    expect(r.seam).toBeFalsy();
+    const check = analyzeMesh(out.vertices, out.faces)!;
+    expect(check.closed && check.consistentlyWound && check.volume > 0).toBe(true);
+    // At the waist and near the neck alike: the band faces the pick, a tenth of the way round.
+    for (const z of [0, 0.018]) {
+      const rz = v.R(0.5 + z / 0.05);
+      let proud = 0, ring = 0, atPick = false;
+      for (let i = 0; i < out.vertices.length; i += 3) {
+        const [x, y, zz] = [out.vertices[i], out.vertices[i + 1], out.vertices[i + 2]];
+        if (Math.abs(zz - z) > 0.0004) continue;
+        const rr = Math.hypot(x, y);
+        ring++;
+        // Measured against the profile, which the bulge tilts: half the depth clears it.
+        if (rr > rz + 0.0004) {
+          proud++;
+          if (Math.abs(Math.atan2(y, x)) < 0.2) atPick = true;
+        }
+      }
+      expect(atPick).toBe(true);
+      expect(proud / ring).toBeGreaterThan(0.06);
+      expect(proud / ring).toBeLessThan(0.15);
+    }
+  });
+
+  it('leaves a cap over the axis to the unwrap', () => {
+    // Picked on the bottom cap: a disc round the axis, not a band.
+    const out = applySurfaceTextures(v.positions, v.faces, [{
+      pattern: 'image', options: band, depthM: -0.0005, cellM: 0.002,
+      seedAt: [0, 0, -0.025], seedNormal: [0, 0, -1], maxTiltDeg: 180,
+    }]);
+    expect(out.regions[0].projection).not.toBe('revolved');
+  });
+});

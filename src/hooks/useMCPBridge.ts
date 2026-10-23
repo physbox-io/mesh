@@ -1486,7 +1486,7 @@ export async function applySinglePatternToBody(targetId: string, m: Record<strin
   if (!spec || spec.throughCut) {
     throw new Error(`'${patternId}' is not a pattern that goes on a face. One of, with its options: ${known()}.`);
   }
-  const projections: TextureProjection[] = ['auto', 'planar', 'cylindrical', 'unwrap'];
+  const projections: TextureProjection[] = ['auto', 'planar', 'cylindrical', 'revolved', 'unwrap'];
   if (m.projection !== undefined && !projections.includes(m.projection as TextureProjection)) {
     throw new Error(`projection is one of ${projections.join(', ')}.`);
   }

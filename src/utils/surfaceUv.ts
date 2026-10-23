@@ -101,6 +101,108 @@ export function cylinderReference(fit: CylinderFit): Vec3 {
   return planeBasis(fit.axis).u;
 }
 
+// --- surfaces of revolution -----------------------------------------------------
+
+export interface RevolutionFit {
+  axis: Vec3;
+  /** A point on the axis. */
+  centre: Vec3;
+  /** Area-weighted RMS of the facet normals' component round the axis (sin of the angle). */
+  error: number;
+  /** The normals point away from the axis. */
+  outward: boolean;
+}
+
+/** Eigenvalues (ascending) and eigenvectors (columns, same order) of a symmetric matrix. */
+function symmetricEigen(m: number[][]): { values: number[]; vectors: number[][] } {
+  const n = m.length;
+  const a = m.map((row) => [...row]);
+  const v = Array.from({ length: n }, (_, i) => Array.from({ length: n }, (_, j) => (i === j ? 1 : 0)));
+  for (let sweep = 0; sweep < 64; sweep++) {
+    let off = 0;
+    for (let p = 0; p < n; p++) for (let q = p + 1; q < n; q++) off += a[p][q] * a[p][q];
+    if (off < 1e-26) break;
+    for (let p = 0; p < n - 1; p++) {
+      for (let q = p + 1; q < n; q++) {
+        if (Math.abs(a[p][q]) < 1e-30) continue;
+        const theta = (a[q][q] - a[p][p]) / (2 * a[p][q]);
+        const t = Math.sign(theta || 1) / (Math.abs(theta) + Math.sqrt(theta * theta + 1));
+        const c = 1 / Math.sqrt(t * t + 1), s = t * c;
+        for (let k = 0; k < n; k++) {
+          const akp = a[k][p], akq = a[k][q];
+          a[k][p] = c * akp - s * akq; a[k][q] = s * akp + c * akq;
+        }
+        for (let k = 0; k < n; k++) {
+          const apk = a[p][k], aqk = a[q][k];
+          a[p][k] = c * apk - s * aqk; a[q][k] = s * apk + c * aqk;
+        }
+        for (let k = 0; k < n; k++) {
+          const vkp = v[k][p], vkq = v[k][q];
+          v[k][p] = c * vkp - s * vkq; v[k][q] = s * vkp + c * vkq;
+        }
+      }
+    }
+  }
+  const order = Array.from({ length: n }, (_, i) => i).sort((i, j) => a[i][i] - a[j][j]);
+  return { values: order.map((i) => a[i][i]), vectors: order.map((i) => v.map((row) => row[i])) };
+}
+
+/**
+ * The axis a surface of revolution turns about -- a vase, a bulb, a cone, as
+ * well as a cylinder -- if the region lies on one.
+ *
+ * On such a surface every facet normal lies in a plane through the axis, so
+ * it has no component round it: n · (a × (p − c)) = 0. With b = c × a that is
+ * a · (p × n) + n · b = 0, linear in the axis's Plücker coordinates (a, b),
+ * and the axis is the smallest eigenvector of the area-weighted sum of
+ * q qᵀ, q = (p × n, n). Null when there is no such axis (a free-form shape) or
+ * more than one (a sphere turns about any line through its centre, and a
+ * plane about any normal).
+ */
+export function fitRevolution(centroids: Vec3[], normals: Vec3[], areas: number[]): RevolutionFit | null {
+  if (normals.length < 8) return null;
+  // Centred and scaled, so p × n and n weigh alike.
+  let W = 0;
+  const mid: Vec3 = [0, 0, 0];
+  centroids.forEach((p, f) => { const w = areas[f] ?? 1; W += w; for (let k = 0; k < 3; k++) mid[k] += w * p[k]; });
+  if (!(W > 0)) return null;
+  for (let k = 0; k < 3; k++) mid[k] /= W;
+  let L = 0;
+  for (const p of centroids) L = Math.max(L, len(sub(p, mid)));
+  if (!(L > 0)) return null;
+
+  const m = Array.from({ length: 6 }, () => [0, 0, 0, 0, 0, 0]);
+  centroids.forEach((p0, f) => {
+    const p: Vec3 = [(p0[0] - mid[0]) / L, (p0[1] - mid[1]) / L, (p0[2] - mid[2]) / L];
+    const n = normals[f];
+    const q = [...cross(p, n), ...n];
+    const w = areas[f] ?? 1;
+    for (let i = 0; i < 6; i++) for (let j = 0; j < 6; j++) m[i][j] += w * q[i] * q[j];
+  });
+  const { values, vectors } = symmetricEigen(m);
+  // A second solution as good as the first: no single axis.
+  if (values[1] < 1e-4 * W) return null;
+  const e = vectors[0];
+  let axis: Vec3 = [e[0], e[1], e[2]];
+  const al = len(axis);
+  if (al < 0.3) return null;
+  axis = [axis[0] / al, axis[1] / al, axis[2] / al];
+  const b: Vec3 = [e[3] / al, e[4] / al, e[5] / al];
+  const c = cross(axis, b);
+  const centre: Vec3 = [mid[0] + L * c[0], mid[1] + L * c[1], mid[2] + L * c[2]];
+
+  let err = 0, out = 0;
+  centroids.forEach((p, f) => {
+    const w = areas[f] ?? 1;
+    const d = sub(p, centre);
+    const radial = sub(d, [axis[0] * dot(d, axis), axis[1] * dot(d, axis), axis[2] * dot(d, axis)]);
+    const round = norm(cross(axis, d));
+    err += w * dot(normals[f], round) ** 2;
+    out += w * dot(radial, normals[f]);
+  });
+  return { axis, centre, error: Math.sqrt(err / W), outward: out >= 0 };
+}
+
 // --- cutting a region open -------------------------------------------------------
 
 export interface DiscRegion {

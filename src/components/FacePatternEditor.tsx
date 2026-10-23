@@ -57,7 +57,7 @@ function newTexture(target: FacePatternTarget): SurfaceTexture {
   };
 }
 
-const LAYOUT_NAMES = { planar: 'Projected flat', cylindrical: 'Unrolled round the cylinder', unwrap: 'Unwrapped' } as const;
+const LAYOUT_NAMES = { planar: 'Projected flat', cylindrical: 'Unrolled round the cylinder', revolved: 'Wrapped round its axis', unwrap: 'Unwrapped' } as const;
 
 /** One line or two on how the face was laid out, when that is worth knowing. */
 function layoutNotes(region: TextureRegionReport): string[] {
@@ -304,7 +304,7 @@ export const FacePatternEditor: React.FC = () => {
               className={inputClass}
             />
           </Field>
-          <Field label="Lay out" hint="How a curved face is flattened for the pattern. Auto picks: flat faces are projected, a cylinder is unrolled, anything else is unwrapped so the pattern's cells stay square.">
+          <Field label="Lay out" hint="How a curved face is flattened for the pattern. Auto picks: flat faces are projected, a cylinder is unrolled, a vase or bulb all the way round is wrapped round its axis, anything else is unwrapped so the pattern's cells stay square.">
             <select
               value={draft.projection ?? 'auto'}
               onChange={(e) => patch({ projection: e.target.value === 'auto' ? undefined : (e.target.value as TextureProjection) })}
@@ -313,6 +313,7 @@ export const FacePatternEditor: React.FC = () => {
               <option value="auto">Auto</option>
               <option value="planar">Flat</option>
               <option value="cylindrical">Wrap round</option>
+              <option value="revolved">Round its axis</option>
               <option value="unwrap">Unwrap</option>
             </select>
           </Field>
