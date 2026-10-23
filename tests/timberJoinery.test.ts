@@ -423,6 +423,81 @@ describe('Timber & Joinery Breakdown (Table, Chair & 3ft Flower Stand)', () => {
       }
     }
   });
+
+  it('produces saw cuts and dowel hole drilling steps with zero CNC mortises or slots when jointMode is dowel', async () => {
+    const wasm = await loadManifold();
+    const { flowerStandPreset } = await import('../src/presets/presetScenes');
+    const { collectIndividualPartSoups } = await import('../src/utils/timberBreakdown');
+
+    const { items } = collectIndividualPartSoups(flowerStandPreset, ['flower_stand']);
+    const res = synthesizeTimberJoinery(
+      wasm,
+      items.map((it) => it.soup),
+      {
+        jointMode: 'dowel',
+        edgeProfile: 'roundover',
+        edgeRadiusMm: 4,
+        maxBoardWidthMm: 200,
+      },
+    );
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+
+    for (const part of res.parts) {
+      expect(part.mortises.length).toBe(0);
+      expect(part.tenons.length).toBe(0);
+      expect(part.zClipSlots.length).toBe(0);
+    }
+
+    const plan = buildTimberCutPlan(res, {
+      cncBedMm: [300, 300, 60],
+      defaultStockLengthMm: 1800,
+    });
+    expect(plan.allCncSetups.length).toBe(0);
+    for (const card of plan.partCards) {
+      expect(card.cncSetups.length).toBe(0);
+      expect(card.bandsawSteps.some((s) => s.includes('dowel hole'))).toBe(true);
+    }
+  });
+
+  it('produces flush glue-only parts with zero mortises, tenons, dowels, or CNC setups when jointMode is butt', async () => {
+    const wasm = await loadManifold();
+    const { flowerStandPreset } = await import('../src/presets/presetScenes');
+    const { collectIndividualPartSoups } = await import('../src/utils/timberBreakdown');
+
+    const { items } = collectIndividualPartSoups(flowerStandPreset, ['flower_stand']);
+    const res = synthesizeTimberJoinery(
+      wasm,
+      items.map((it) => it.soup),
+      {
+        jointMode: 'butt',
+        edgeProfile: 'none',
+        maxBoardWidthMm: 200,
+      },
+    );
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+
+    for (const part of res.parts) {
+      expect(part.mortises.length).toBe(0);
+      expect(part.tenons.length).toBe(0);
+      expect(part.zClipSlots.length).toBe(0);
+    }
+    for (const joint of res.joints) {
+      expect(joint.dowelCentersMm ?? []).toHaveLength(0);
+    }
+
+    const plan = buildTimberCutPlan(res, {
+      cncBedMm: [300, 300, 60],
+    });
+    expect(plan.allCncSetups.length).toBe(0);
+    for (const card of plan.partCards) {
+      expect(card.cncSetups.length).toBe(0);
+      expect(card.bandsawSteps.some((s) => s.includes('Cut to '))).toBe(true);
+      expect(card.bandsawSteps.some((s) => s.includes('from Bar #'))).toBe(false);
+      expect(card.bandsawSteps.some((s) => s.includes('dowel hole'))).toBe(false);
+    }
+  });
 });
 
 

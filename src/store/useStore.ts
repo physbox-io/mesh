@@ -50,7 +50,16 @@ import { framingForBounds, gridCellForBounds, sceneContentBounds } from '../util
 import { DEFAULT_MATERIAL, type MaterialId } from '../utils/feedsAndSpeeds';
 import { DEFAULT_FILAMENT, type FilamentId } from '../utils/filaments';
 import { loadStock, saveStock, clampStock, type StockSize } from '../utils/stockSettings';
-import { loadPrintBed, savePrintBed, clampPrintBed, type PrintBed } from '../utils/printBedSettings';
+import {
+  loadPrintBed,
+  savePrintBed,
+  clampPrintBed,
+  type PrintBed,
+  loadCncBed,
+  saveCncBed,
+  clampCncBed,
+  type CncBed,
+} from '../utils/printBedSettings';
 import type { SplitSection } from '../utils/printSplit';
 import { featureGeoms } from '../utils/printAssembly';
 import type { ReliefCarveOptions } from '../utils/reliefCarveExporter';
@@ -1742,6 +1751,12 @@ export interface PhysicsState {
   printBed: PrintBed;
   setPrintBed: (patch: Partial<PrintBed>) => void;
   /**
+   * The CNC router's working envelope [widthMm, depthMm, heightMm], persisted so
+   * Joinery and Machine Setup know the dimensions of the CNC bed.
+   */
+  cncBed: CncBed;
+  setCncBed: (patch: Partial<CncBed>) => void;
+  /**
    * Carve settings a preset or a generator wants the relief export to open
    * with, or null for the exporter's own defaults.
    *
@@ -2609,6 +2624,8 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
   stock: loadStock(),
   printBed: loadPrintBed(),
   setPrintBed: (patch) => set((state) => ({ printBed: savePrintBed(clampPrintBed({ ...state.printBed, ...patch })) })),
+  cncBed: loadCncBed(),
+  setCncBed: (patch) => set((state) => ({ cncBed: saveCncBed(clampCncBed({ ...state.cncBed, ...patch })) })),
   carveSettings: null,
   patternGeneratorId: null,
   facePatternTarget: null,

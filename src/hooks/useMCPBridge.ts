@@ -3408,7 +3408,7 @@ export function useMCPBridge() {
 
           if (hasPlankSpecificArg && msg.mode !== 'frame') {
             const jointType: PlankJointType =
-              rawJointType === 'miter' || rawJointType === 'finger' || rawJointType === 'butt'
+              rawJointType === 'miter' || rawJointType === 'finger' || rawJointType === 'butt' || rawJointType === 'glue'
                 ? rawJointType
                 : 'rabbet';
             const plankRes = decomposeSolidIntoPlanks(wasm, soups, {
@@ -3473,7 +3473,11 @@ export function useMCPBridge() {
           }
 
           const jointMode: TimberJointMode =
-            msg.jointMode === 'dowel' || msg.jointMode === 'dado' ? msg.jointMode : 'mortise_tenon';
+            msg.jointMode === 'dowel' || msg.jointMode === 'dado' || msg.jointMode === 'butt'
+              ? msg.jointMode
+              : msg.jointMode === 'glue'
+                ? 'butt'
+                : 'mortise_tenon';
           const tenonCornerFit: TenonCornerFit =
             msg.tenonCornerFit === 'round_tenon' || msg.tenonCornerFit === 'chisel_square' ? msg.tenonCornerFit : 'dogbone';
           const edgeProfile: TimberEdgeProfile =
@@ -3553,7 +3557,7 @@ export function useMCPBridge() {
           const cncBedMm: [number, number, number] =
             bedArr && bedArr.length === 3 && bedArr.every((v) => typeof v === 'number' && v > 0)
               ? [bedArr[0], bedArr[1], bedArr[2]]
-              : [store.stock.widthMm, store.stock.depthMm, Math.max(40, store.stock.thicknessMm * 2)];
+              : [store.cncBed.widthMm, store.cncBed.depthMm, store.cncBed.heightMm];
 
           const cutPlan = buildTimberCutPlan(outcome, {
             cncBedMm,

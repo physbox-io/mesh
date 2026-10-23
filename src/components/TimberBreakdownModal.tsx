@@ -1,11 +1,9 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   Box,
   CheckCircle2,
   Cpu,
-  Download,
-  FileText,
   Grid,
   Hammer,
   Layers,
@@ -13,7 +11,6 @@ import {
   Play,
   Puzzle,
   Scissors,
-  Wrench,
   X,
 } from 'lucide-react';
 import { NumberInput } from '@physbox-io/ui';
@@ -22,13 +19,12 @@ import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { useSettled } from '../hooks/useSettled';
 import { useExportJob } from '../utils/exportWorkerClient';
 import {
-  buildSinglePlankScene,
   collectIndividualPartSoups,
   DEFAULT_TIMBER_PLANK_OPTIONS,
-  meshToBinaryStl,
   packPartsLayFlatMetres,
   type GrainAxis,
   type PlankJointType,
+  type TimberPlank,
   type TimberPlankBreakdownOutcome,
   type TimberPlankOptions,
 } from '../utils/timberBreakdown';
@@ -42,15 +38,11 @@ import {
 } from '../utils/timberJoinery';
 import type { CncWindowSetup, TimberCutPlan } from '../utils/timberCutList';
 import type { SolidMachiningOptions } from '../utils/solidMachiningExporter';
-import { downloadBlob } from '../utils/downloadBlob';
-import { utf8, zipStore } from '../utils/zipStore';
-import { webSerialManager } from '../utils/webSerialManager';
+import { webSerialManager, type MachineState } from '../utils/webSerialManager';
 import type { SceneGraph, SceneNode } from '../types/scene';
 import type { Vec3 } from '../utils/printPlate';
 import { Advanced, Field, Segmented, inputClass, sectionClass, sectionTitleClass } from './ExportFields';
 import { AssemblyPreview, type PreviewSection } from './scene/AssemblyPreview';
-
-const MM = 1000;
 
 const PREVIEW_COLOURS = [
   [0.78, 0.56, 0.34],
@@ -81,33 +73,40 @@ function dominantAxisOf(v: Vec3): GrainAxis {
 }
 
 const BREAKDOWN_MODE_OPTIONS = [
-  ['auto', 'Auto-Detect'],
-  ['planks', 'Plank / Shell Breakdown'],
-  ['frame', 'Frame M&T Joinery'],
+  ['auto', 'Auto'],
+  ['frame', 'Frame (Legs & Rails)'],
+  ['planks', 'Box / Planks'],
 ] as const;
 
 const PLANK_JOINT_TYPE_OPTIONS = [
-  ['rabbet', 'Rabbet (Step Lap)'],
+  ['glue', 'Glue'],
+  ['butt', 'Dowels'],
+  ['rabbet', 'Rabbet'],
   ['miter', '45° Miter'],
   ['finger', 'Finger / Box'],
-  ['butt', 'Butt + Dowels'],
 ] as const;
 
 const HOLLOW_INTERIOR_OPTIONS = [
-  ['hollow', 'Hollow 6-Wall Shell'],
-  ['solid', 'Solid Laminated Layers'],
+  ['hollow', 'Hollow Shell'],
+  ['solid', 'Solid Layers'],
 ] as const;
 
 const JOINT_MODE_OPTIONS = [
+  ['butt', 'Glue'],
+  ['dowel', 'Dowels'],
   ['mortise_tenon', 'Mortise & Tenon'],
-  ['dowel', 'Twin Dowels'],
-  ['dado', 'Dado / Housing'],
+  ['dado', 'Dado / Slot'],
+] as const;
+
+const USE_CNC_OPTIONS = [
+  ['off', 'No (Shop Tools)'],
+  ['on', 'Optional CNC'],
 ] as const;
 
 const CORNER_FIT_OPTIONS = [
-  ['dogbone', 'Dogbone (Bandsaw Tenon)'],
-  ['round_tenon', 'Rounded Tenon (CNC Both)'],
-  ['chisel_square', 'Square (Hand Chisel)'],
+  ['dogbone', 'Dogbone (Saw Tenon)'],
+  ['round_tenon', 'Rounded Tenon (CNC)'],
+  ['chisel_square', 'Square (Chisel)'],
 ] as const;
 
 const EDGE_PROFILE_OPTIONS = [
@@ -117,7 +116,7 @@ const EDGE_PROFILE_OPTIONS = [
 ] as const;
 
 const TENON_METHOD_OPTIONS = [
-  ['bandsaw', 'Bandsaw (4 Fence Cuts)'],
+  ['bandsaw', 'Saw (4 Straight Cuts)'],
   ['cnc', 'CNC Router'],
 ] as const;
 
@@ -126,27 +125,68 @@ const PLACEMENT_OPTIONS = [
   ['beside', 'Place Beside'],
 ] as const;
 
+function describePlankSawCut(
+  plank: TimberPlank,
+  opts: Required<TimberPlankOptions>,
+  cncBed: { widthMm: number; depthMm: number; heightMm: number },
+): {
+  sawSteps: string[];
+  cncNote: string | null;
+  exceedsCnc: boolean;
+} {
+  const [L, W, T] = plank.dimensionsMm;
+  const sawSteps: string[] = [
+    `Cut ${L} × ${W} × ${T} mm board (grain along ${plank.grainAxis.toUpperCase()}-axis).`,
+  ];
+  let cncNote: string | null = null;
+  let exceedsCnc = false;
+
+  if (opts.jointType === 'rabbet') {
+    const rabbetDepth = +(T * 0.5).toFixed(1);
+    sawSteps.push(`Cut ${rabbetDepth} × ${rabbetDepth} mm rabbet step along perimeter mating edges on table saw or router table.`);
+  } else if (opts.jointType === 'miter') {
+    sawSteps.push(`Bevel perimeter mating edges at 45° on table or miter saw.`);
+  } else if (opts.jointType === 'finger') {
+    const maxBedSpan = Math.max(cncBed.widthMm, cncBed.depthMm);
+    const fitsCncEdge = W <= maxBedSpan && T <= cncBed.heightMm;
+    exceedsCnc = !fitsCncEdge;
+    cncNote = fitsCncEdge
+      ? `Interlocking ${opts.fingerWidthMm} mm box-joint fingers along ${W} × ${T} mm edge (fits on ${cncBed.widthMm} × ${cncBed.depthMm} × ${cncBed.heightMm} mm CNC bed).`
+      : `Interlocking ${opts.fingerWidthMm} mm box-joint fingers: ${W} × ${T} mm edge exceeds ${cncBed.widthMm} × ${cncBed.depthMm} × ${cncBed.heightMm} mm CNC bed — cut fingers with a table-saw or router box-joint jig.`;
+  }
+
+  if (plank.dowelHoles.length > 0) {
+    sawSteps.push(
+      `Drill ${plank.dowelHoles.length}× Ø${opts.dowelDiaMm} × ${plank.dowelHoles[0].depthMm} mm dowel holes on mating seam edges.`,
+    );
+  }
+
+  return { sawSteps, cncNote, exceedsCnc };
+}
+
 export interface TimberBreakdownModalProps {
   isOpen: boolean;
   onClose: () => void;
-  /** Hand a chosen plank or timber member straight to `ExportSolidMachiningModal`. */
+  /** Optional legacy callback kept for prop compatibility. */
   onMachinePlank?: (plankScene: SceneGraph, seed?: Partial<SolidMachiningOptions>) => void;
 }
 
 export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
   isOpen,
   onClose,
-  onMachinePlank,
 }) => {
   useEscapeToClose(isOpen, onClose);
   const sceneGraph = useStore((s) => s.sceneGraph);
   const selectedNodeId = useStore((s) => s.selectedNodeId);
   const extraSelectedIds = useStore((s) => s.extraSelectedIds);
-  const stock = useStore((s) => s.stock);
-  const setStock = useStore((s) => s.setStock);
+  const cncBed = useStore((s) => s.cncBed);
+  const setMachineConfigOpen = useStore((s) => s.setMachineConfigOpen);
   const splitBodyForPrint = useStore((s) => s.splitBodyForPrint);
+  const [machineState, setMachineState] = useState<MachineState>(webSerialManager.getState());
+  useEffect(() => webSerialManager.addListener(setMachineState), []);
 
   const [modeSetting, setModeSetting] = useState<'auto' | 'planks' | 'frame'>('auto');
+  const [useCnc, setUseCnc] = useState<'off' | 'on'>('on');
   const [plankOpts, setPlankOpts] = useState<Required<TimberPlankOptions>>(DEFAULT_TIMBER_PLANK_OPTIONS);
   const setPlankOpt = <K extends keyof Required<TimberPlankOptions>>(
     key: K,
@@ -160,6 +200,17 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
         ? { wallThicknessMm: value as number }
         : {}),
     }));
+    if (key === 'jointType') {
+      if (value === 'glue') {
+        setJoineryOpts((prev) => ({ ...prev, jointMode: 'butt' }));
+      } else if (value === 'butt') {
+        setJoineryOpts((prev) => ({ ...prev, jointMode: 'dowel' }));
+      } else if (value === 'rabbet') {
+        setJoineryOpts((prev) => ({ ...prev, jointMode: 'dado' }));
+      } else if (value === 'finger' || value === 'miter') {
+        setJoineryOpts((prev) => ({ ...prev, jointMode: 'mortise_tenon' }));
+      }
+    }
   };
 
   const [joineryOpts, setJoineryOpts] = useState<Required<TimberJoineryOptions>>(DEFAULT_TIMBER_JOINERY_OPTIONS);
@@ -169,17 +220,27 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
   ) => {
     if (value === undefined) return;
     setJoineryOpts((prev) => ({ ...prev, [key]: value }));
+    if (key === 'jointMode') {
+      if (value === 'butt') {
+        setPlankOpts((prev) => ({ ...prev, jointType: 'glue' }));
+      } else if (value === 'dowel') {
+        setPlankOpts((prev) => ({ ...prev, jointType: 'butt' }));
+      } else if (value === 'dado') {
+        setPlankOpts((prev) => ({ ...prev, jointType: 'rabbet' }));
+      } else if (value === 'mortise_tenon') {
+        setPlankOpts((prev) =>
+          prev.jointType === 'butt' || prev.jointType === 'glue' ? { ...prev, jointType: 'rabbet' } : prev,
+        );
+      }
+    }
   };
 
-  const [stockLengthMm, setStockLengthMm] = useState(1800);
   const [explodeMm, setExplodeMm] = useState(32);
   const [viewMode, setViewMode] = useState<'3d' | 'sheet'>('3d');
   const [placement, setPlacement] = useState<'replace' | 'beside'>('replace');
   const [isolatedPartIdx, setIsolatedPartIdx] = useState<number | null>(null);
   const [activeTab, setActiveTab] = useState<'cards' | 'bom' | 'glue'>('cards');
 
-  // Target multi-selection, a multi-part assembly node, or all root nodes in the scene
-  // so clicking a single leg or rail before opening Joinery still includes its mating parts.
   const targetIds = useMemo(() => {
     if (selectedNodeId && extraSelectedIds.length > 0) return [selectedNodeId, ...extraSelectedIds];
     if (selectedNodeId) {
@@ -204,10 +265,9 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
 
   const settledJoineryOpts = useSettled(joineryOpts, 250);
   const settledPlankOpts = useSettled(plankOpts, 250);
-  const settledStockLengthMm = useSettled(stockLengthMm, 250);
   const cncBedMm = useMemo<[number, number, number]>(
-    () => [stock.widthMm, stock.depthMm, Math.max(40, stock.thicknessMm * 2)],
-    [stock.widthMm, stock.depthMm, stock.thicknessMm],
+    () => [cncBed.widthMm, cncBed.depthMm, cncBed.heightMm],
+    [cncBed.widthMm, cncBed.depthMm, cncBed.heightMm],
   );
 
   const workerMode = modeSetting === 'planks' ? 'planks' : undefined;
@@ -222,10 +282,10 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
             joineryOptions: settledJoineryOpts,
             plankOptions: settledPlankOpts,
             cncBedMm,
-            defaultStockLengthMm: settledStockLengthMm,
+            defaultStockLengthMm: 2400,
           })
         : null,
-    [workerMode, soups, settledJoineryOpts, settledPlankOpts, cncBedMm, settledStockLengthMm],
+    [workerMode, soups, settledJoineryOpts, settledPlankOpts, cncBedMm],
   );
 
   const frameOutcome: TimberBreakdownOutcome | null = useMemo(
@@ -237,13 +297,14 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
     [failure, timberJob?.plankOutcome],
   );
 
-  // Resolve effective active mode ('planks' vs 'frame'):
-  // In 'auto', if frame extraction found <= 1 part and 0 joints (e.g. a single solid block/box/pedestal),
-  // automatically use Plank / Hollow-Shell Breakdown!
   const effectiveMode: 'planks' | 'frame' = useMemo(() => {
     if (modeSetting === 'planks') return 'planks';
     if (modeSetting === 'frame') return 'frame';
-    if (frameOutcome?.ok && (frameOutcome.parts.length > 1 || frameOutcome.joints.length > 0)) {
+    if (
+      frameOutcome?.ok &&
+      frameOutcome.parts.length > 1 &&
+      frameOutcome.parts.some((p) => p.member.role === 'rail')
+    ) {
       return 'frame';
     }
     if (plankOutcome?.ok) return 'planks';
@@ -271,6 +332,7 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
         .filter((_, idx) => isolatedPartIdx === null || idx === isolatedPartIdx)
         .map((plank, idx) => {
           const origIdx = isolatedPartIdx ?? idx;
+          const partNum = `${origIdx + 1}`;
           const explodeScale = Math.hypot(
             plank.explodedOffsetMm[0],
             plank.explodedOffsetMm[1],
@@ -284,12 +346,20 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
                   plank.explodedOffsetMm[2] / 45,
                 ]
               : plank.section.explode;
+          const n = plank.upNormal;
           return {
             positions: viewMode === 'sheet' ? plank.layFlatPositionsM : plank.section.positions,
             faces: plank.section.faces,
             explode: viewMode === 'sheet' || isolatedPartIdx !== null ? [0, 0, 0] : explodeUnit,
             colour: PREVIEW_COLOURS[origIdx % PREVIEW_COLOURS.length],
             pose: { up: plank.section.up, spin: plank.section.spin },
+            faceLabels:
+              viewMode === 'sheet'
+                ? [{ text: partNum, normal: [0, 0, 1] }]
+                : [
+                    { text: partNum, normal: n },
+                    { text: partNum, normal: [-n[0], -n[1], -n[2]] },
+                  ],
           };
         });
     }
@@ -298,122 +368,55 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
       .filter((_, idx) => isolatedPartIdx === null || idx === isolatedPartIdx)
       .map((p, idx) => {
         const origIdx = isolatedPartIdx ?? idx;
+        const partNum = origIdx + 1;
         const flatPos = frameLayFlat?.layFlatPositionsM[origIdx];
+        const f1 = p.member.face1.normal;
+        const f2 = p.member.face2.normal;
+        const f3: Vec3 = [-f1[0], -f1[1], -f1[2]];
+        const f4: Vec3 = [-f2[0], -f2[1], -f2[2]];
+        const prefix = isolatedPartIdx !== null ? '' : `${partNum}·`;
         return {
           positions: viewMode === 'sheet' && flatPos ? flatPos : p.section.positions,
           faces: p.section.faces,
           explode: viewMode === 'sheet' || isolatedPartIdx !== null ? [0, 0, 0] : p.section.explode,
           colour: PREVIEW_COLOURS[origIdx % PREVIEW_COLOURS.length],
           pose: { up: p.section.up, spin: p.section.spin },
+          faceLabels:
+            viewMode === 'sheet' && flatPos
+              ? [{ text: `${partNum}`, normal: [0, 0, 1] }]
+              : p.member.role === 'panel'
+                ? [
+                    { text: `${partNum}`, normal: f1 },
+                    { text: `${partNum}`, normal: f3 },
+                  ]
+                : [
+                    { text: `${prefix}F1`, normal: f1 },
+                    { text: `${prefix}F2`, normal: f2 },
+                    { text: `${prefix}F3`, normal: f3 },
+                    { text: `${prefix}F4`, normal: f4 },
+                  ],
         };
       });
   }, [effectiveMode, plankBreakdown, breakdown, frameLayFlat, isolatedPartIdx, viewMode]);
 
   if (!isOpen) return null;
 
-  const partListSummary =
+  const partFilterList =
     effectiveMode === 'planks' && plankBreakdown
-      ? plankBreakdown.planks.map((p) => ({
-          id: p.id,
-          name: p.name,
-          positionsMm: p.positionsMm,
-          faces: p.faces,
-          grainAxis: p.grainAxis,
-          upNormal: p.upNormal,
-          dimensionsMm: p.dimensionsMm,
-        }))
+      ? plankBreakdown.planks.map((p) => ({ id: p.id, name: p.name }))
       : breakdown
-        ? breakdown.parts.map((p) => {
-            const posMm = new Float32Array(p.section.positions.length);
-            for (let i = 0; i < posMm.length; i++) posMm[i] = p.section.positions[i] * MM;
-            return {
-              id: p.member.id,
-              name: p.member.title,
-              positionsMm: posMm,
-              faces: p.section.faces,
-              grainAxis: dominantAxisOf(p.member.axes[0]),
-              upNormal: p.member.face1.normal,
-              dimensionsMm: [
-                p.totalFinishedLengthMm,
-                p.crossSectionMm[0],
-                p.crossSectionMm[1],
-              ] as [number, number, number],
-            };
-          })
+        ? breakdown.parts.map((p) => ({ id: p.member.id, name: p.member.title }))
         : [];
 
-  const handleDownloadPlankStl = (idx: number) => {
-    const item = partListSummary[idx];
-    if (!item) return;
-    const stlBytes = meshToBinaryStl(item.positionsMm, item.faces, item.id);
-    downloadBlob(new Blob([stlBytes as unknown as BlobPart], { type: 'model/stl' }), `${item.id}.stl`);
-  };
-
-  const handleMachinePart = (idx: number) => {
-    const item = partListSummary[idx];
-    if (!item || !onMachinePlank) return;
-    const { scene: singleScene, sizeMm } = buildSinglePlankScene(sceneGraph, item);
-    // Ensure bench stock can hold the plank laid flat
-    const nextW = Math.max(stock.widthMm, Math.ceil(sizeMm[0] + 20));
-    const nextD = Math.max(stock.depthMm, Math.ceil(sizeMm[1] + 20));
-    const nextT = Math.max(4, Math.ceil(sizeMm[2]));
-    setStock({ widthMm: nextW, depthMm: nextD, thicknessMm: nextT });
-    onMachinePlank(singleScene, {
-      material: 'hardwood',
-      setups: 'auto',
-    });
-  };
-
-  const handleDownloadGuide = () => {
-    const base = primaryNode?.name || 'timber_project';
-    if (effectiveMode === 'planks' && plankBreakdown) {
-      downloadBlob(
-        new Blob([plankBreakdown.bomMarkdown], { type: 'text/markdown;charset=utf-8' }),
-        `${base}_plank_bom.md`,
-      );
-      return;
-    }
-    if (!cutPlan) return;
-    downloadBlob(
-      new Blob([cutPlan.buildGuideMarkdown], { type: 'text/markdown;charset=utf-8' }),
-      `${base}_build_guide.md`,
-    );
-  };
-
   const handleSendSetupToMachine = (setup: CncWindowSetup) => {
-    void webSerialManager.runJob(setup.gcode);
-  };
-
-  const handleDownloadAllZip = () => {
-    const base = primaryNode?.name || 'timber_project';
-    if (effectiveMode === 'planks' && plankBreakdown) {
-      const entries = [
-        { path: 'PLANK_BOM.md', data: utf8(plankBreakdown.bomMarkdown) },
-        ...plankBreakdown.planks.map((p) => ({
-          path: `stl/${p.id}.stl`,
-          data: meshToBinaryStl(p.positionsMm, p.faces, p.id),
-        })),
-      ];
-      const bytes = zipStore(entries);
-      downloadBlob(
-        new Blob([bytes as unknown as BlobPart], { type: 'application/zip' }),
-        `${base}_planks_stl.zip`,
-      );
+    if (!machineState.connected) {
+      setMachineConfigOpen(true);
       return;
     }
-    if (!cutPlan || !breakdown) return;
-    const entries = [
-      { path: 'BUILD_GUIDE.md', data: utf8(cutPlan.buildGuideMarkdown) },
-      ...partListSummary.map((p) => ({
-        path: `stl/${p.id}.stl`,
-        data: meshToBinaryStl(p.positionsMm, p.faces, p.id),
-      })),
-    ];
-    const bytes = zipStore(entries);
-    downloadBlob(
-      new Blob([bytes as unknown as BlobPart], { type: 'application/zip' }),
-      `${base}_joinery_kit.zip`,
-    );
+    void webSerialManager.runJob(setup.gcode, {
+      name: setup.id,
+      estimatedSeconds: setup.estimatedMinutes * 60,
+    });
   };
 
   const handleApplyToScene = () => {
@@ -453,23 +456,46 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
     (effectiveMode === 'planks' && !!plankBreakdown) ||
     (effectiveMode === 'frame' && !!breakdown);
 
-  const selectedMachiningIdx = isolatedPartIdx ?? 0;
+  const showCnc = useCnc === 'on';
+  const cncPartCount =
+    showCnc && cutPlan ? cutPlan.partCards.filter((c) => c.cncSetups.length > 0).length : 0;
+  const sawOnlyPartCount = cutPlan ? cutPlan.partCards.length - cncPartCount : 0;
+
+  const isGlueFrame = effectiveMode === 'frame' && joineryOpts.jointMode === 'butt';
+  const isDowelFrame = effectiveMode === 'frame' && joineryOpts.jointMode === 'dowel';
+  const isDadoFrame = effectiveMode === 'frame' && joineryOpts.jointMode === 'dado';
+  const headerSubtitle =
+    effectiveMode === 'planks'
+      ? plankOpts.jointType === 'finger' && showCnc
+        ? 'Cut parts to size on a saw — CNC Needed: interlocking finger joints (or cut with a shop jig)'
+        : plankOpts.jointType === 'butt'
+          ? 'Cut parts to size on a saw and drill dowel holes — no CNC needed'
+          : 'Cut parts to size on a saw — no CNC needed'
+      : isGlueFrame
+        ? 'Cut parts to size on a saw and glue — no CNC needed'
+        : isDowelFrame
+          ? 'Cut parts to size on a saw and drill dowel holes — no CNC needed'
+          : !showCnc
+            ? 'Cut parts and joints using shop tools — CNC disabled'
+            : isDadoFrame
+              ? 'Cut parts to size on a saw — CNC Needed (optional): dadoes and slots'
+              : 'Cut parts to size on a saw — CNC Needed (optional): mortises and slots';
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-2 sm:p-4 animate-in fade-in duration-200">
-      <div className="bg-white dark:bg-slate-900 rounded-xl shadow-2xl border border-slate-200 dark:border-slate-800 w-full max-w-5xl max-h-[95dvh] sm:max-h-[90dvh] flex flex-col overflow-hidden">
+      <div className="bg-white dark:bg-slate-900 rounded-xl shadow-2xl border border-slate-200 dark:border-slate-800 w-full max-w-6xl max-h-[95dvh] sm:max-h-[92dvh] flex flex-col overflow-hidden">
         {/* Header */}
-        <div className="flex items-start justify-between gap-3 px-4 sm:px-6 py-3 sm:py-4 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/50">
+        <div className="flex items-start justify-between gap-3 px-4 sm:px-6 py-3 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/50 shrink-0">
           <div className="flex items-center space-x-2.5 min-w-0">
             <div className="hidden sm:block p-2 bg-amber-500/10 text-amber-600 dark:text-amber-400 rounded-lg">
               <Hammer className="w-5 h-5" />
             </div>
             <div>
               <h2 className="text-base sm:text-lg font-bold text-slate-800 dark:text-slate-100">
-                Timber Joinery &amp; Plank Breakdown
+                Wood Cut List &amp; Joinery
               </h2>
               <p className="hidden sm:block text-xs text-slate-500 dark:text-slate-400">
-                Decompose solids or furniture into machinable timber planks (rabbet, miter, finger, butt) or mortise-and-tenon frame members
+                {headerSubtitle}
               </p>
             </div>
           </div>
@@ -484,178 +510,215 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
         </div>
 
         {/* Body */}
-        <div className="flex-1 overflow-y-auto overflow-x-clip p-4 sm:p-6 space-y-5">
+        <div className="flex-1 min-h-0 overflow-y-auto lg:overflow-hidden p-3 sm:p-4 flex flex-col gap-3">
           {!primaryNode || !collected.items.length ? (
-            <p className="text-sm text-slate-500 dark:text-slate-400">
-              Add or select a solid body, table, chair, or frame first, then open Joinery Breakdown.
+            <p className="text-sm text-slate-500 dark:text-slate-400 p-2">
+              Add or select a solid body, table, chair, or box first, then open Wood Cut List &amp; Joinery.
             </p>
           ) : (
             <>
-              {/* Mode Selector & Parameters */}
-              <div className={sectionClass}>
-                <div className="flex flex-wrap items-center justify-between gap-3 pb-1 border-b border-slate-200/70 dark:border-slate-800">
-                  <h3 className={sectionTitleClass}>
-                    {effectiveMode === 'planks'
-                      ? 'Timber Plank & Hollow-Shell Controls'
-                      : 'Frame Joinery & Edge Profiles'}
-                  </h3>
-                  <div className="w-full sm:w-auto min-w-[280px]">
-                    <Segmented
-                      value={modeSetting}
-                      onChange={(v) => {
-                        setModeSetting(v as 'auto' | 'planks' | 'frame');
-                        setIsolatedPartIdx(null);
-                      }}
-                      options={BREAKDOWN_MODE_OPTIONS}
-                    />
+              {/* Compact Settings Bar */}
+              <div className={`${sectionClass} shrink-0 !p-3 !space-y-2.5`}>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-12 gap-3 items-end">
+                  <div className="lg:col-span-3">
+                    <Field label="Breakdown Type">
+                      <Segmented
+                        value={modeSetting}
+                        onChange={(v) => {
+                          setModeSetting(v as 'auto' | 'planks' | 'frame');
+                          setIsolatedPartIdx(null);
+                        }}
+                        options={BREAKDOWN_MODE_OPTIONS}
+                      />
+                    </Field>
                   </div>
+
+                  {effectiveMode === 'planks' ? (
+                    <>
+                      <div className="lg:col-span-5">
+                        <Field label="Joint Style">
+                          <Segmented
+                            value={plankOpts.jointType}
+                            onChange={(v) => setPlankOpt('jointType', v as PlankJointType)}
+                            options={PLANK_JOINT_TYPE_OPTIONS}
+                          />
+                        </Field>
+                      </div>
+                      <div className="lg:col-span-2">
+                        <Field label="Interior">
+                          <Segmented
+                            value={plankOpts.hollowInterior ? 'hollow' : 'solid'}
+                            onChange={(v) => setPlankOpt('hollowInterior', v === 'hollow')}
+                            options={HOLLOW_INTERIOR_OPTIONS}
+                          />
+                        </Field>
+                      </div>
+                      <div className="lg:col-span-2">
+                        <Field
+                          label="CNC"
+                          hint="Optional: finger joints can be cut on a CNC or with a table-saw/router jig."
+                        >
+                          <Segmented
+                            value={useCnc}
+                            onChange={(v) => setUseCnc(v as 'off' | 'on')}
+                            options={USE_CNC_OPTIONS}
+                          />
+                        </Field>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div className="lg:col-span-5">
+                        <Field label="Joint Style">
+                          <Segmented
+                            value={joineryOpts.jointMode}
+                            onChange={(v) => setOpt('jointMode', v as TimberJointMode)}
+                            options={JOINT_MODE_OPTIONS}
+                          />
+                        </Field>
+                      </div>
+                      <div className="lg:col-span-2">
+                        <Field
+                          label="CNC"
+                          hint="Optional: mortises, dadoes, and slots can be cut with shop tools (drill press, router, chisel) or run on a CNC."
+                        >
+                          <Segmented
+                            value={isGlueFrame || isDowelFrame ? 'off' : useCnc}
+                            onChange={(v) => setUseCnc(v as 'off' | 'on')}
+                            options={USE_CNC_OPTIONS}
+                          />
+                        </Field>
+                      </div>
+                      <div className="lg:col-span-2">
+                        {!isGlueFrame ? (
+                          <Field
+                            label={isDowelFrame ? 'Dowel Depth (mm)' : isDadoFrame ? 'Dado Depth (mm)' : 'Tenon Len (mm)'}
+                            hint={
+                              isDowelFrame
+                                ? 'Target engagement depth for dowel pins in each mating member.'
+                                : isDadoFrame
+                                  ? 'How deep each rail tongue seats inside its dado slot.'
+                                  : 'How deep each rail tenon sits inside its leg mortise.'
+                            }
+                          >
+                            <NumberInput
+                              step={1}
+                              min={10}
+                              max={50}
+                              value={joineryOpts.tenonLengthMm}
+                              onChange={(v) => setOpt('tenonLengthMm', v)}
+                              className={inputClass}
+                            />
+                          </Field>
+                        ) : (
+                          <Field label="Edge Profile">
+                            <Segmented
+                              value={joineryOpts.edgeProfile}
+                              onChange={(v) => setOpt('edgeProfile', v as TimberEdgeProfile)}
+                              options={EDGE_PROFILE_OPTIONS}
+                            />
+                          </Field>
+                        )}
+                      </div>
+                    </>
+                  )}
                 </div>
 
                 {effectiveMode === 'planks' ? (
-                  <>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
-                      <Field
-                        label="Corner & Seam Joint Style"
-                        hint="Rabbet cuts an L-step lap along corners; 45° Miter bevels edges; Finger cuts interlocking box tabs; Butt uses flat faces + dowels."
-                      >
-                        <Segmented
-                          value={plankOpts.jointType}
-                          onChange={(v) => setPlankOpt('jointType', v as PlankJointType)}
-                          options={PLANK_JOINT_TYPE_OPTIONS}
-                        />
-                      </Field>
-                      <Field
-                        label="Interior Decomposition"
-                        hint="Hollow Shell cores out the interior into 6 walls of Wall Thickness; Solid Layers slices the full volume into laminated boards."
-                      >
-                        <Segmented
-                          value={plankOpts.hollowInterior ? 'hollow' : 'solid'}
-                          onChange={(v) => setPlankOpt('hollowInterior', v === 'hollow')}
-                          options={HOLLOW_INTERIOR_OPTIONS}
-                        />
-                      </Field>
-                    </div>
-
-                    <div className="grid grid-cols-2 sm:grid-cols-6 gap-3 pt-2">
-                      <Field label="Board Thick (mm)" hint="Nominal lumber thickness (e.g. 18 mm = 3/4 in).">
-                        <NumberInput
-                          step={1}
-                          min={4}
-                          max={100}
-                          value={plankOpts.boardThicknessMm}
-                          onChange={(v) => setPlankOpt('boardThicknessMm', v)}
-                          className={inputClass}
-                        />
-                      </Field>
-                      <Field label="Wall Thick (mm)" hint="Shell wall thickness when Hollow Shell is enabled.">
-                        <NumberInput
-                          step={1}
-                          min={4}
-                          max={120}
-                          value={plankOpts.wallThicknessMm}
-                          onChange={(v) => setPlankOpt('wallThicknessMm', v)}
-                          disabled={!plankOpts.hollowInterior}
-                          className={inputClass}
-                        />
-                      </Field>
-                      <Field label="Max Width (mm)" hint="Walls wider than this are split across the grain into edge-glued planks.">
-                        <NumberInput
-                          step={10}
-                          min={40}
-                          max={600}
-                          value={plankOpts.maxBoardWidthMm}
-                          onChange={(v) => setPlankOpt('maxBoardWidthMm', v)}
-                          className={inputClass}
-                        />
-                      </Field>
-                      <Field label="Max Length (mm)" hint="Maximum board length along the grain before splicing.">
-                        <NumberInput
-                          step={50}
-                          min={100}
-                          max={3600}
-                          value={plankOpts.maxBoardLengthMm}
-                          onChange={(v) => setPlankOpt('maxBoardLengthMm', v)}
-                          className={inputClass}
-                        />
-                      </Field>
-                      <Field label="Finger Width (mm)" hint="Width of interlocking box-joint fingers when Finger / Box is selected.">
-                        <NumberInput
-                          step={2}
-                          min={8}
-                          max={80}
-                          value={plankOpts.fingerWidthMm}
-                          onChange={(v) => setPlankOpt('fingerWidthMm', v)}
-                          disabled={plankOpts.jointType !== 'finger'}
-                          className={inputClass}
-                        />
-                      </Field>
-                      <Field label="Dowel Ø (mm)" hint="Alignment dowel diameter bored across edge seams and butt/rabbet joints (0 to disable).">
-                        <NumberInput
-                          step={1}
-                          min={0}
-                          max={16}
-                          value={plankOpts.dowelDiaMm}
-                          onChange={(v) => setPlankOpt('dowelDiaMm', v)}
-                          className={inputClass}
-                        />
-                      </Field>
-                    </div>
-                  </>
+                  <Advanced>
+                    <Field label="Board Thick (mm)">
+                      <NumberInput
+                        step={1}
+                        min={4}
+                        max={100}
+                        value={plankOpts.boardThicknessMm}
+                        onChange={(v) => setPlankOpt('boardThicknessMm', v)}
+                        className={inputClass}
+                      />
+                    </Field>
+                    <Field label="Wall Thick (mm)" hint="Shell wall thickness when Hollow Shell is enabled.">
+                      <NumberInput
+                        step={1}
+                        min={4}
+                        max={120}
+                        value={plankOpts.wallThicknessMm}
+                        onChange={(v) => setPlankOpt('wallThicknessMm', v)}
+                        disabled={!plankOpts.hollowInterior}
+                        className={inputClass}
+                      />
+                    </Field>
+                    <Field label="Split Wide Boards At (mm)" hint="Optional width limit; wider walls split into edge-glued planks.">
+                      <NumberInput
+                        step={10}
+                        min={40}
+                        max={1200}
+                        value={plankOpts.maxBoardWidthMm}
+                        onChange={(v) => setPlankOpt('maxBoardWidthMm', v)}
+                        className={inputClass}
+                      />
+                    </Field>
+                    <Field label="Max Board Len (mm)" hint="Optional length limit before splicing along the grain.">
+                      <NumberInput
+                        step={50}
+                        min={100}
+                        max={4800}
+                        value={plankOpts.maxBoardLengthMm}
+                        onChange={(v) => setPlankOpt('maxBoardLengthMm', v)}
+                        className={inputClass}
+                      />
+                    </Field>
+                    <Field label="Finger Width (mm)" hint="Box-joint finger width when Finger / Box is selected.">
+                      <NumberInput
+                        step={2}
+                        min={8}
+                        max={80}
+                        value={plankOpts.fingerWidthMm}
+                        onChange={(v) => setPlankOpt('fingerWidthMm', v)}
+                        disabled={plankOpts.jointType !== 'finger'}
+                        className={inputClass}
+                      />
+                    </Field>
+                    <Field label="Dowel Ø (mm)" hint="Alignment dowel diameter across seams (0 to disable).">
+                      <NumberInput
+                        step={1}
+                        min={0}
+                        max={16}
+                        value={plankOpts.dowelDiaMm}
+                        onChange={(v) => setPlankOpt('dowelDiaMm', v)}
+                        disabled={plankOpts.jointType === 'glue'}
+                        className={inputClass}
+                      />
+                    </Field>
+                  </Advanced>
                 ) : (
-                  <>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
-                      <Field label="Joint Style" hint="Mortise & Tenon gives maximum anti-racking stability for tables, chairs, and tall stands.">
-                        <Segmented
-                          value={joineryOpts.jointMode}
-                          onChange={(v) => setOpt('jointMode', v as TimberJointMode)}
-                          options={JOINT_MODE_OPTIONS}
-                        />
-                      </Field>
-                      <Field label="Corner Fit (Zero-Chisel)" hint="Dogbones inside the mortise let a square bandsawn tenon drop straight in and are hidden behind the rail's shoulder.">
-                        <Segmented
-                          value={joineryOpts.tenonCornerFit}
-                          onChange={(v) => setOpt('tenonCornerFit', v as TenonCornerFit)}
-                          options={CORNER_FIT_OPTIONS}
-                        />
-                      </Field>
-                      <Field label="Tenon Cutting" hint="Straight tenons cut fastest on a bandsaw (4 fence cuts); angled chair/stand shoulders automatically switch to CNC.">
-                        <Segmented
-                          value={joineryOpts.tenonCutMethod}
-                          onChange={(v) => setOpt('tenonCutMethod', v as 'bandsaw' | 'cnc')}
-                          options={TENON_METHOD_OPTIONS}
-                        />
-                      </Field>
-                      <Field label="Exposed Edge Profile" hint="Stops automatically before every mortise and joint shoulder so mating faces stay dead flat.">
-                        <Segmented
-                          value={joineryOpts.edgeProfile}
-                          onChange={(v) => setOpt('edgeProfile', v as TimberEdgeProfile)}
-                          options={EDGE_PROFILE_OPTIONS}
-                        />
-                      </Field>
-                    </div>
-
-                    <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 pt-2">
-                      <Field label="End Mill Ø (mm)" hint="CNC router flat bit diameter used for mortises and dogbone corners.">
-                        <NumberInput
-                          step={0.5}
-                          min={3}
-                          max={16}
-                          value={joineryOpts.cutterDiaMm}
-                          onChange={(v) => setOpt('cutterDiaMm', v)}
-                          className={inputClass}
-                        />
-                      </Field>
-                      <Field label="Tenon Length (mm)" hint="How deep the tenon reaches into the leg (auto-mitred at 45° when two corner rails meet).">
-                        <NumberInput
-                          step={1}
-                          min={10}
-                          max={50}
-                          value={joineryOpts.tenonLengthMm}
-                          onChange={(v) => setOpt('tenonLengthMm', v)}
-                          className={inputClass}
-                        />
-                      </Field>
-                      <Field label="Shoulder (mm)" hint="Shoulder setback around the tenon that seats against the leg to prevent racking.">
+                  <Advanced>
+                    {!isDowelFrame && !isGlueFrame && (
+                      <>
+                        <Field className="lg:col-span-2" label={isDadoFrame ? 'Dado Corner Fit' : 'Mortise Corner Fit'}>
+                          <Segmented
+                            value={joineryOpts.tenonCornerFit}
+                            onChange={(v) => setOpt('tenonCornerFit', v as TenonCornerFit)}
+                            options={CORNER_FIT_OPTIONS}
+                          />
+                        </Field>
+                        <Field className="lg:col-span-2" label={isDadoFrame ? 'Tongue Cutting' : 'Tenon Cutting'}>
+                          <Segmented
+                            value={joineryOpts.tenonCutMethod}
+                            onChange={(v) => setOpt('tenonCutMethod', v as 'bandsaw' | 'cnc')}
+                            options={TENON_METHOD_OPTIONS}
+                          />
+                        </Field>
+                      </>
+                    )}
+                    <Field className="lg:col-span-2" label="Edge Profile">
+                      <Segmented
+                        value={joineryOpts.edgeProfile}
+                        onChange={(v) => setOpt('edgeProfile', v as TimberEdgeProfile)}
+                        options={EDGE_PROFILE_OPTIONS}
+                      />
+                    </Field>
+                    {!isDowelFrame && !isGlueFrame && (
+                      <Field label="Shoulder (mm)">
                         <NumberInput
                           step={0.5}
                           min={2}
@@ -665,519 +728,643 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
                           className={inputClass}
                         />
                       </Field>
-                      <Field label="Edge Radius (mm)" hint="Radius of the stopped roundover or chamfer along legs and rails.">
+                    )}
+                    {showCnc && !isDowelFrame && !isGlueFrame && (
+                      <Field
+                        label="CNC Bit Ø (mm)"
+                        hint="End mill diameter used when routing mortises, dadoes, or slots on CNC."
+                      >
                         <NumberInput
                           step={0.5}
-                          min={0}
-                          max={15}
-                          value={joineryOpts.edgeRadiusMm}
-                          onChange={(v) => setOpt('edgeRadiusMm', v)}
+                          min={3}
+                          max={16}
+                          value={joineryOpts.cutterDiaMm}
+                          onChange={(v) => setOpt('cutterDiaMm', v)}
                           className={inputClass}
                         />
                       </Field>
-                      <Field label="Stock Bar Len (mm)" hint="Standard timber board/bar length you are buying (e.g. 1800 mm = 6 ft, 2400 mm = 8 ft).">
-                        <NumberInput
-                          step={100}
-                          min={600}
-                          max={4800}
-                          value={stockLengthMm}
-                          onChange={(v) => v !== undefined && setStockLengthMm(v)}
-                          className={inputClass}
-                        />
-                      </Field>
-                    </div>
-
-                    <Advanced>
-                      <Field className="lg:col-span-2" label="Joint Clearance (mm)" hint="Side clearance added to mortises for a firm hand-push fit with PVA wood glue (default 0.15 mm).">
-                        <NumberInput
-                          step={0.05}
-                          min={0}
-                          max={1}
-                          value={joineryOpts.clearanceMm}
-                          onChange={(v) => setOpt('clearanceMm', v)}
-                          className={inputClass}
-                        />
-                      </Field>
-                      <Field className="lg:col-span-2" label="Stop Margin (mm)" hint="Distance before each mortise or shoulder where the edge roundover stops so the joint lands on a flat square face.">
-                        <NumberInput
-                          step={1}
-                          min={4}
-                          max={30}
-                          value={joineryOpts.stopMarginMm}
-                          onChange={(v) => setOpt('stopMarginMm', v)}
-                          className={inputClass}
-                        />
-                      </Field>
-                      <Field className="lg:col-span-2" label="Max Single Board Width (mm)" hint="Tabletops wider than this are split along the grain into edge-glued planks with alignment dowels.">
-                        <NumberInput
-                          step={10}
-                          min={80}
-                          max={600}
-                          value={joineryOpts.maxBoardWidthMm}
-                          onChange={(v) => setOpt('maxBoardWidthMm', v)}
-                          className={inputClass}
-                        />
-                      </Field>
-                    </Advanced>
-                  </>
+                    )}
+                    <Field label="Edge Radius (mm)">
+                      <NumberInput
+                        step={0.5}
+                        min={0}
+                        max={15}
+                        value={joineryOpts.edgeRadiusMm}
+                        onChange={(v) => setOpt('edgeRadiusMm', v)}
+                        className={inputClass}
+                      />
+                    </Field>
+                    <Field label="Split Wide Panels At (mm)" hint="Tabletops wider than this split into edge-glued planks.">
+                      <NumberInput
+                        step={10}
+                        min={80}
+                        max={1200}
+                        value={joineryOpts.maxBoardWidthMm}
+                        onChange={(v) => setOpt('maxBoardWidthMm', v)}
+                        className={inputClass}
+                      />
+                    </Field>
+                    <Field label="Clearance (mm)">
+                      <NumberInput
+                        step={0.05}
+                        min={0}
+                        max={1}
+                        value={joineryOpts.clearanceMm}
+                        onChange={(v) => setOpt('clearanceMm', v)}
+                        className={inputClass}
+                      />
+                    </Field>
+                  </Advanced>
                 )}
               </div>
 
-              {/* 3D Exploded Preview & Plank Lay-Flat Sheet View */}
-              <div className={sectionClass}>
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <h3 className={sectionTitleClass}>3D Joinery Preview</h3>
-                    <div className="inline-flex rounded-lg border border-slate-200 dark:border-slate-700 overflow-hidden text-[11px] font-semibold">
-                      <button
-                        type="button"
-                        onClick={() => setViewMode('3d')}
-                        className={`flex items-center gap-1 px-2.5 py-1 cursor-pointer transition-colors ${
-                          viewMode === '3d'
-                            ? 'bg-amber-500 text-white'
-                            : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300'
-                        }`}
-                      >
-                        <Box className="w-3 h-3" /> 3D Assembly
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setViewMode('sheet')}
-                        className={`flex items-center gap-1 px-2.5 py-1 cursor-pointer transition-colors ${
-                          viewMode === 'sheet'
-                            ? 'bg-amber-500 text-white'
-                            : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300'
-                        }`}
-                      >
-                        <Grid className="w-3 h-3" /> Plank Lay-Flat Sheet
-                      </button>
-                    </div>
-
-                    {partListSummary.length > 0 && (
-                      <div className="flex flex-wrap items-center gap-1">
+              {/* Side-by-Side: 3D Preview (Left) & Cut List / Instructions (Right) */}
+              <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-12 gap-4 items-stretch">
+                {/* LEFT COLUMN: 3D Joinery Preview */}
+                <div className={`${sectionClass} lg:col-span-5 xl:col-span-6 flex flex-col min-h-0 !p-3 !space-y-2.5`}>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <h3 className={sectionTitleClass}>3D Preview</h3>
+                      <div className="inline-flex rounded-lg border border-slate-200 dark:border-slate-700 overflow-hidden text-[11px] font-semibold">
                         <button
                           type="button"
-                          onClick={() => setIsolatedPartIdx(null)}
-                          className={`px-2 py-0.5 rounded text-[10px] font-semibold cursor-pointer transition-colors ${
-                            isolatedPartIdx === null
+                          onClick={() => setViewMode('3d')}
+                          className={`flex items-center gap-1 px-2 py-1 cursor-pointer transition-colors ${
+                            viewMode === '3d'
                               ? 'bg-amber-500 text-white'
-                              : 'bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-300'
+                              : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300'
                           }`}
                         >
-                          All ({partListSummary.length})
+                          <Box className="w-3 h-3" /> 3D
                         </button>
-                        {partListSummary.map((p, idx) => (
-                          <button
-                            key={p.id}
-                            type="button"
-                            onClick={() => setIsolatedPartIdx(idx)}
-                            className={`px-2 py-0.5 rounded text-[10px] font-mono cursor-pointer transition-colors ${
-                              isolatedPartIdx === idx
-                                ? 'bg-amber-500 text-white'
-                                : 'bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-300 dark:hover:bg-slate-700'
-                            }`}
-                          >
-                            {p.id}
-                          </button>
-                        ))}
+                        <button
+                          type="button"
+                          onClick={() => setViewMode('sheet')}
+                          className={`flex items-center gap-1 px-2 py-1 cursor-pointer transition-colors ${
+                            viewMode === 'sheet'
+                              ? 'bg-amber-500 text-white'
+                              : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300'
+                          }`}
+                        >
+                          <Grid className="w-3 h-3" /> Lay-Flat
+                        </button>
                       </div>
+                    </div>
+
+                    {isolatedPartIdx === null && viewMode === '3d' && (
+                      <label className="flex items-center gap-2 text-[11px] text-slate-500 dark:text-slate-400">
+                        <span>Explode</span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={80}
+                          step={1}
+                          value={explodeMm}
+                          onChange={(e) => setExplodeMm(Number(e.target.value))}
+                          className="w-24 accent-amber-500"
+                        />
+                      </label>
                     )}
                   </div>
 
-                  {isolatedPartIdx === null && viewMode === '3d' && (
-                    <label className="flex items-center gap-2 text-[11px] text-slate-500 dark:text-slate-400">
-                      <span>Assembled ↔ Exploded</span>
-                      <input
-                        type="range"
-                        min={0}
-                        max={80}
-                        step={1}
-                        value={explodeMm}
-                        onChange={(e) => setExplodeMm(Number(e.target.value))}
-                        className="w-28 accent-amber-500"
-                      />
-                    </label>
-                  )}
-                </div>
+                  <AssemblyPreview
+                    sections={previewSections}
+                    pins={[]}
+                    explodeMm={isolatedPartIdx === null && viewMode === '3d' ? explodeMm : 0}
+                    replay={null}
+                  />
 
-                <AssemblyPreview
-                  sections={previewSections}
-                  pins={[]}
-                  explodeMm={isolatedPartIdx === null && viewMode === '3d' ? explodeMm : 0}
-                  replay={null}
-                />
-
-                {busy && (
-                  <p className="flex items-center gap-1.5 text-[11px] text-amber-700 dark:text-amber-300">
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" /> Synthesizing timber planks, interlocking joints, and dowel holes…
-                  </p>
-                )}
-                {!busy && activeError && (
-                  <p className="text-[11px] text-red-600 dark:text-red-400">{activeError}</p>
-                )}
-                {!busy && effectiveMode === 'planks' && plankBreakdown && (
-                  <div className="space-y-1">
-                    <p className="font-mono text-[11px] text-slate-800 dark:text-slate-100">
-                      {plankBreakdown.planks.length} timber plank{plankBreakdown.planks.length === 1 ? '' : 's'} ·{' '}
-                      {plankBreakdown.options.jointType.toUpperCase()} joinery ·{' '}
-                      {(plankBreakdown.totalVolumeMm3 / 1000).toFixed(1)} cm³ board volume
-                      {plankBreakdown.hollowedVolumeMm3 > 0
-                        ? ` (${(plankBreakdown.hollowedVolumeMm3 / 1000).toFixed(1)} cm³ interior hollowed)`
-                        : ''}{' '}
-                      · Lay-flat sheet {plankBreakdown.layFlatSheetMm[0]} × {plankBreakdown.layFlatSheetMm[1]} mm
-                    </p>
-                    {plankBreakdown.warnings.map((w, i) => (
-                      <p key={i} className="flex items-start gap-1.5 text-[11px] text-amber-700 dark:text-amber-400">
-                        <AlertTriangle className="w-3.5 h-3.5 mt-px shrink-0" /> {w}
-                      </p>
-                    ))}
-                  </div>
-                )}
-                {!busy && effectiveMode === 'frame' && breakdown && cutPlan && (
-                  <div className="space-y-1">
-                    <p className="font-mono text-[11px] text-slate-800 dark:text-slate-100">
-                      {breakdown.parts.length} timber part{breakdown.parts.length === 1 ? '' : 's'} ·{' '}
-                      {breakdown.joints.length} structural joint{breakdown.joints.length === 1 ? '' : 's'} ·{' '}
-                      {cutPlan.stockBars.length} stock bar{cutPlan.stockBars.length === 1 ? '' : 's'} ·{' '}
-                      {cutPlan.allCncSetups.length} CNC window setup{cutPlan.allCncSetups.length === 1 ? '' : 's'} (for {stock.widthMm}×{stock.depthMm} mm bed)
-                    </p>
-                    {breakdown.warnings.map((w, i) => (
-                      <p key={i} className="flex items-start gap-1.5 text-[11px] text-amber-700 dark:text-amber-400">
-                        <AlertTriangle className="w-3.5 h-3.5 mt-px shrink-0" /> {w}
-                      </p>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              {/* Plank Bill of Materials Table (Plank Mode) */}
-              {effectiveMode === 'planks' && plankBreakdown && (
-                <div className={sectionClass}>
-                  <div className="flex items-center justify-between gap-2 border-b border-slate-200 dark:border-slate-800 pb-2">
-                    <h3 className={sectionTitleClass}>
-                      Per-Plank Bill of Materials ({plankBreakdown.planks.length} Planks)
-                    </h3>
-                  </div>
-
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-left border-collapse text-xs">
-                      <thead>
-                        <tr className="border-b border-slate-200 dark:border-slate-800 text-[11px] text-slate-500 dark:text-slate-400">
-                          <th className="py-2 pr-3">#</th>
-                          <th className="py-2 pr-3">Plank ID</th>
-                          <th className="py-2 pr-3">Dimensions (L × W × T)</th>
-                          <th className="py-2 pr-3">Grain Axis</th>
-                          <th className="py-2 pr-3">Volume</th>
-                          <th className="py-2 pr-3">Joint Summary</th>
-                          <th className="py-2 text-right">Actions</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-100 dark:divide-slate-800/70 font-mono text-[11px]">
-                        {plankBreakdown.planks.map((plank, idx) => (
-                          <tr
-                            key={plank.id}
-                            className={
-                              isolatedPartIdx === idx
-                                ? 'bg-amber-500/10 dark:bg-amber-500/15'
-                                : 'hover:bg-slate-50 dark:hover:bg-slate-800/40'
-                            }
-                          >
-                            <td className="py-2 pr-3 text-slate-500">{idx + 1}</td>
-                            <td className="py-2 pr-3 font-bold text-slate-800 dark:text-slate-100">
-                              {plank.id}
-                              <span className="block font-sans font-normal text-[10px] text-slate-500">
-                                {plank.name}
-                              </span>
-                            </td>
-                            <td className="py-2 pr-3 text-slate-700 dark:text-slate-200">
-                              {plank.dimensionsMm[0]} × {plank.dimensionsMm[1]} × {plank.dimensionsMm[2]} mm
-                            </td>
-                            <td className="py-2 pr-3 uppercase text-amber-700 dark:text-amber-400">
-                              {plank.grainAxis}-axis
-                            </td>
-                            <td className="py-2 pr-3 text-slate-600 dark:text-slate-300">
-                              {(plank.volumeMm3 / 1000).toFixed(1)} cm³
-                            </td>
-                            <td className="py-2 pr-3 font-sans text-slate-600 dark:text-slate-300">
-                              {plank.jointSummary}
-                            </td>
-                            <td className="py-2 text-right">
-                              <div className="inline-flex items-center gap-1">
-                                <button
-                                  type="button"
-                                  onClick={() => setIsolatedPartIdx(isolatedPartIdx === idx ? null : idx)}
-                                  className="px-2 py-0.5 rounded text-[10px] font-sans font-semibold border border-amber-500/40 text-amber-700 dark:text-amber-300 hover:bg-amber-500/10 cursor-pointer"
-                                >
-                                  {isolatedPartIdx === idx ? 'All' : 'Isolate'}
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => handleDownloadPlankStl(idx)}
-                                  className="flex items-center gap-1 px-2 py-0.5 rounded bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 text-slate-800 dark:text-slate-100 text-[10px] font-sans font-semibold cursor-pointer"
-                                  title={`Download binary STL for ${plank.id}`}
-                                >
-                                  <Download className="w-3 h-3" /> .STL
-                                </button>
-                                {onMachinePlank && (
-                                  <button
-                                    type="button"
-                                    onClick={() => handleMachinePart(idx)}
-                                    className="flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-700 dark:text-emerald-300 text-[10px] font-sans font-semibold cursor-pointer"
-                                    title={`Open ${plank.id} in Solid Machining`}
-                                  >
-                                    <Wrench className="w-3 h-3" /> Machine
-                                  </button>
-                                )}
-                              </div>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              )}
-
-              {/* Shop Sheet & Per-Part Fabrication Cards (Frame Mode) */}
-              {effectiveMode === 'frame' && cutPlan && (
-                <div className={sectionClass}>
-                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 dark:border-slate-800 pb-2">
-                    <div className="flex items-center gap-1.5">
-                      {(
-                        [
-                          ['cards', `Per-Part Build Cards (${cutPlan.partCards.length})`, Scissors],
-                          ['bom', `Stock BOM & Orientation Map (${cutPlan.stockBars.length} Bars)`, Layers],
-                          ['glue', 'Two-Stage Glue-Up Guide', CheckCircle2],
-                        ] as const
-                      ).map(([tabKey, label, Icon]) => (
+                  {partFilterList.length > 0 && (
+                    <div className="flex flex-wrap items-center gap-1 max-h-20 overflow-y-auto">
+                      <button
+                        type="button"
+                        onClick={() => setIsolatedPartIdx(null)}
+                        className={`px-2 py-0.5 rounded text-[10px] font-semibold cursor-pointer transition-colors ${
+                          isolatedPartIdx === null
+                            ? 'bg-amber-500 text-white'
+                            : 'bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-300'
+                        }`}
+                      >
+                        All ({partFilterList.length})
+                      </button>
+                      {partFilterList.map((p, idx) => (
                         <button
-                          key={tabKey}
+                          key={p.id}
                           type="button"
-                          onClick={() => setActiveTab(tabKey)}
-                          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer transition-colors ${
-                            activeTab === tabKey
+                          onClick={() => setIsolatedPartIdx(isolatedPartIdx === idx ? null : idx)}
+                          className={`px-2 py-0.5 rounded text-[10px] font-mono cursor-pointer transition-colors ${
+                            isolatedPartIdx === idx
                               ? 'bg-amber-500 text-white'
-                              : 'bg-slate-200/70 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-300/70 dark:hover:bg-slate-700'
+                              : 'bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-300 dark:hover:bg-slate-700'
                           }`}
                         >
-                          <Icon className="w-3.5 h-3.5" />
-                          <span>{label}</span>
+                          {p.id}
                         </button>
                       ))}
                     </div>
-                  </div>
+                  )}
 
-                  {activeTab === 'cards' && (
-                    <div className="space-y-4 pt-2">
-                      {cutPlan.partCards.map((card) => (
-                        <div
-                          key={card.partId}
-                          className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/70 p-3.5 space-y-2.5"
-                        >
-                          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 dark:border-slate-800 pb-2">
-                            <div>
-                              <span className="font-bold text-xs sm:text-sm text-slate-800 dark:text-slate-100">
-                                Part {card.partIndex + 1}: {card.partTitle}
-                              </span>
-                              {card.mirrorOf && (
-                                <span className="ml-2 px-2 py-0.5 rounded bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 text-[10px] font-mono">
-                                  Mirror pair of {card.mirrorOf}
-                                </span>
-                              )}
-                              <p className="text-[11px] font-mono text-slate-500 dark:text-slate-400">
-                                Finished: {card.finishedDimsMm[0]} × {card.finishedDimsMm[1]} × {card.finishedDimsMm[2]} mm
-                                {card.role === 'rail' ? ` (Shoulder-to-shoulder: ${card.shoulderToShoulderMm} mm)` : ''} · Rough Cut:{' '}
-                                {card.roughBlankDimsMm[0]} × {card.roughBlankDimsMm[1]} × {card.roughBlankDimsMm[2]} mm from {card.stockBarRef}
-                              </p>
-                            </div>
-                            <div className="flex items-center gap-1.5">
-                              <button
-                                type="button"
-                                onClick={() => setIsolatedPartIdx(isolatedPartIdx === card.partIndex ? null : card.partIndex)}
-                                className="px-2.5 py-1 rounded text-[11px] font-semibold border border-amber-500/40 text-amber-700 dark:text-amber-300 hover:bg-amber-500/10 cursor-pointer"
-                              >
-                                {isolatedPartIdx === card.partIndex ? 'Show All in 3D' : 'Isolate in 3D'}
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => handleDownloadPlankStl(card.partIndex)}
-                                className="flex items-center gap-1 px-2.5 py-1 rounded text-[11px] font-semibold bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-300 cursor-pointer"
-                                title="Download binary STL for this part"
-                              >
-                                <Download className="w-3 h-3" /> .STL
-                              </button>
-                              {onMachinePlank && (
-                                <button
-                                  type="button"
-                                  onClick={() => handleMachinePart(card.partIndex)}
-                                  className="flex items-center gap-1 px-2.5 py-1 rounded text-[11px] font-semibold bg-emerald-500/20 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-500/30 cursor-pointer"
-                                  title="Hand this part straight to Solid Machining"
-                                >
-                                  <Wrench className="w-3 h-3" /> Machine Part
-                                </button>
-                              )}
-                            </div>
-                          </div>
-
-                          <div className="rounded bg-amber-50/70 dark:bg-amber-950/30 border border-amber-200/70 dark:border-amber-800/50 px-2.5 py-1.5 text-[11px] text-amber-900 dark:text-amber-200">
-                            <strong>Reference Faces (Mark with Pencil Triangle Δ):</strong> Face 1 = {card.face1Label} · Face 2 = {card.face2Label}
-                          </div>
-
-                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-[11px]">
-                            <div className="space-y-1">
-                              <p className="font-bold text-slate-700 dark:text-slate-200">1. Bandsaw Blank &amp; Tenon Cuts (Self-Cut)</p>
-                              <ul className="list-disc pl-4 space-y-1 text-slate-600 dark:text-slate-300">
-                                {card.bandsawSteps.map((s, k) => (
-                                  <li key={k}>{s.replace(/\*\*/g, '')}</li>
-                                ))}
-                              </ul>
-                            </div>
-
-                            <div className="space-y-1">
-                              <p className="font-bold text-slate-700 dark:text-slate-200">
-                                {card.cncSetups.length ? '2. CNC Mortise & Slot Windows (While Square)' : '2. Tapers & Stopped Edge Profiles'}
-                              </p>
-                              {card.cncSetups.length > 0 ? (
-                                <div className="space-y-2">
-                                  {card.cncSetups.map((setup) => (
-                                    <div
-                                      key={setup.id}
-                                      className="rounded border border-slate-200 dark:border-slate-800 p-2 bg-slate-50 dark:bg-slate-800/40 space-y-1"
-                                    >
-                                      <div className="flex items-center justify-between gap-2">
-                                        <span className="font-mono font-bold text-slate-800 dark:text-slate-100">
-                                          {setup.id} (~{setup.estimatedMinutes} min)
-                                        </span>
-                                        <div className="flex items-center gap-1">
-                                          <button
-                                            type="button"
-                                            onClick={() => handleSendSetupToMachine(setup)}
-                                            className="flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-700 dark:text-emerald-300 text-[10px] font-semibold cursor-pointer"
-                                            title="Stream this window setup directly to the connected CNC router"
-                                          >
-                                            <Play className="w-3 h-3" /> Run
-                                          </button>
-                                        </div>
-                                      </div>
-                                      <ul className="list-disc pl-4 text-[10px] text-slate-600 dark:text-slate-300 space-y-0.5">
-                                        {setup.workholdingNotes.map((n, idx) => (
-                                          <li key={idx}>{n.replace(/\*\*/g, '')}</li>
-                                        ))}
-                                        {setup.operationsSummary.map((o, idx) => (
-                                          <li key={`op_${idx}`} className="text-emerald-700 dark:text-emerald-400">
-                                            {o}
-                                          </li>
-                                        ))}
-                                      </ul>
-                                    </div>
-                                  ))}
-                                </div>
-                              ) : (
-                                <ul className="list-disc pl-4 space-y-1 text-slate-600 dark:text-slate-300">
-                                  {card.taperAndProfileSteps.map((s, k) => (
-                                    <li key={k}>{s.replace(/\*\*/g, '')}</li>
-                                  ))}
-                                </ul>
-                              )}
-                            </div>
-                          </div>
-
-                          {card.cncSetups.length > 0 && (
-                            <div className="pt-1 border-t border-slate-100 dark:border-slate-800 text-[11px]">
-                              <p className="font-bold text-slate-700 dark:text-slate-200">
-                                3. Tapers, Stopped Roundovers &amp; Push-Fit Check (After CNC Mortises)
-                              </p>
-                              <ul className="list-disc pl-4 space-y-0.5 text-slate-600 dark:text-slate-300">
-                                {card.taperAndProfileSteps.map((s, k) => (
-                                  <li key={k}>{s.replace(/\*\*/g, '')}</li>
-                                ))}
-                                {card.fitCheckSteps.map((s, k) => (
-                                  <li key={`fit_${k}`}>{s.replace(/\*\*/g, '')}</li>
-                                ))}
-                              </ul>
-                            </div>
-                          )}
-                        </div>
+                  {busy && (
+                    <p className="flex items-center gap-1.5 text-[11px] text-amber-700 dark:text-amber-300">
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" /> Calculating wood cuts and joinery…
+                    </p>
+                  )}
+                  {!busy && activeError && (
+                    <p className="text-[11px] text-red-600 dark:text-red-400">{activeError}</p>
+                  )}
+                  {!busy && effectiveMode === 'planks' && plankBreakdown && (
+                    <div className="space-y-1">
+                      <p className="font-mono text-[11px] text-slate-700 dark:text-slate-200">
+                        {plankBreakdown.planks.length} board{plankBreakdown.planks.length === 1 ? '' : 's'} ·{' '}
+                        {plankBreakdown.options.jointType === 'glue'
+                          ? 'GLUE edges · Straight saw cuts + glue (no CNC required)'
+                          : plankBreakdown.options.jointType === 'butt'
+                            ? 'DOWEL joints · Saw cuts + dowel holes (no CNC required)'
+                            : plankBreakdown.options.jointType === 'finger'
+                              ? showCnc
+                                ? 'FINGER joints · Saw cut boards + CNC needed for finger joints'
+                                : 'FINGER joints · Saw cut boards + box-joint jig for finger joints'
+                              : `${plankBreakdown.options.jointType.toUpperCase()} edges · Saw cuts only (no CNC required)`}
+                      </p>
+                      {plankBreakdown.warnings.map((w, i) => (
+                        <p key={i} className="flex items-start gap-1.5 text-[11px] text-amber-700 dark:text-amber-400">
+                          <AlertTriangle className="w-3.5 h-3.5 mt-px shrink-0" /> {w}
+                        </p>
                       ))}
                     </div>
                   )}
-
-                  {activeTab === 'bom' && (
-                    <div className="space-y-4 pt-2 text-xs">
-                      <div>
-                        <h4 className="font-bold text-slate-800 dark:text-slate-100 mb-2">
-                          1D Timber Bar Nesting ({cutPlan.stockBars.length} Bar{cutPlan.stockBars.length === 1 ? '' : 's'})
-                        </h4>
-                        <div className="space-y-2">
-                          {cutPlan.stockBars.map((bar) => (
-                            <div
-                              key={bar.barIndex}
-                              className="rounded border border-slate-200 dark:border-slate-800 p-2.5 bg-white dark:bg-slate-900/60 space-y-1.5"
-                            >
-                              <div className="flex items-center justify-between font-mono text-[11px]">
-                                <span className="font-bold text-slate-800 dark:text-slate-100">
-                                  Bar #{bar.barIndex}: {bar.thicknessMm} × {bar.widthMm} × {bar.stockLengthMm} mm
-                                </span>
-                                <span className="text-slate-500">
-                                  Used {bar.usedLengthMm} mm · Offcut {bar.offcutMm} mm ({bar.wastePercent}% waste)
-                                </span>
-                              </div>
-                              <div className="w-full h-5 rounded bg-slate-200 dark:bg-slate-800 overflow-hidden flex">
-                                {bar.cuts.map((c, idx) => (
-                                  <div
-                                    key={`${c.partId}_${idx}`}
-                                    style={{ width: `${Math.max(4, (c.roughCutLengthMm / bar.stockLengthMm) * 100)}%` }}
-                                    className="h-full bg-amber-500/80 border-r border-white dark:border-slate-900 flex items-center justify-center text-[9px] font-mono font-bold text-white truncate px-1"
-                                    title={`${c.partId}: ${c.roughCutLengthMm} mm rough (${c.finishedLengthMm} mm finished)`}
-                                  >
-                                    {c.partId} ({c.roughCutLengthMm})
-                                  </div>
-                                ))}
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-
-                      <div>
-                        <h4 className="font-bold text-slate-800 dark:text-slate-100 mb-1.5">Hardware &amp; Shop Supplies</h4>
-                        <ul className="list-disc pl-5 space-y-1 text-slate-600 dark:text-slate-300">
-                          {cutPlan.hardwareBom.map((h, i) => (
-                            <li key={i}>
-                              <strong>
-                                {h.quantity}× {h.item}
-                              </strong>{' '}
-                              — {h.note}
-                            </li>
-                          ))}
-                        </ul>
-                      </div>
-
-                      {cutPlan.birdsEyeMapMarkdown && (
-                        <div>
-                          <pre className="p-3 rounded-lg bg-slate-900 text-amber-300 font-mono text-[11px] overflow-x-auto leading-snug">
-                            {cutPlan.birdsEyeMapMarkdown}
-                          </pre>
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {activeTab === 'glue' && (
-                    <div className="pt-2">
-                      <pre className="whitespace-pre-wrap font-sans text-xs text-slate-700 dark:text-slate-200 leading-relaxed bg-white dark:bg-slate-900/60 p-4 rounded-lg border border-slate-200 dark:border-slate-800">
-                        {cutPlan.glueUpGuideMarkdown}
-                      </pre>
+                  {!busy && effectiveMode === 'frame' && breakdown && cutPlan && (
+                    <div className="space-y-1">
+                      <p className="font-mono text-[11px] text-slate-700 dark:text-slate-200">
+                        {!showCnc || cncPartCount === 0
+                          ? `${breakdown.parts.length} parts (saw cuts${isGlueFrame ? ' + glue' : isDowelFrame ? ' + dowel holes' : ' + shop joinery'} only, no CNC required)`
+                          : `${breakdown.parts.length} parts (${sawOnlyPartCount} saw-cut only, ${cncPartCount} with CNC Needed)`}
+                        {showCnc && cncPartCount > 0 ? ` · ${cncBed.widthMm}×${cncBed.depthMm}×${cncBed.heightMm} mm CNC bed` : ''}
+                      </p>
+                      {breakdown.warnings.map((w, i) => (
+                        <p key={i} className="flex items-start gap-1.5 text-[11px] text-amber-700 dark:text-amber-400">
+                          <AlertTriangle className="w-3.5 h-3.5 mt-px shrink-0" /> {w}
+                        </p>
+                      ))}
                     </div>
                   )}
                 </div>
-              )}
+
+                {/* RIGHT COLUMN: Side-by-Side Cut List & Instructions */}
+                <div className={`${sectionClass} lg:col-span-7 xl:col-span-6 flex flex-col min-h-0 max-h-[60dvh] lg:max-h-full !p-3 !space-y-2.5 overflow-hidden`}>
+                  {effectiveMode === 'planks' && plankBreakdown && (
+                    <>
+                      <div className="flex items-center justify-between gap-2 border-b border-slate-200 dark:border-slate-800 pb-2 shrink-0">
+                        <div>
+                          <h3 className={sectionTitleClass}>
+                            Cut List &amp; Instructions ({plankBreakdown.planks.length} Boards)
+                          </h3>
+                          <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                            {plankBreakdown.options.jointType === 'finger'
+                              ? showCnc
+                                ? 'Cut boards to size on a saw. CNC Needed only for interlocking finger joints.'
+                                : 'Cut boards to size on a saw and cut finger joints on a box-joint jig.'
+                              : 'Simple saw cuts only — cut each board to Length × Width × Thickness.'}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex-1 min-h-0 overflow-y-auto space-y-2 pr-1">
+                        {plankBreakdown.planks.map((plank, idx) => {
+                          const { sawSteps, cncNote, exceedsCnc } = describePlankSawCut(
+                            plank,
+                            plankBreakdown.options,
+                            cncBed,
+                          );
+                          const showPlankCnc = showCnc && Boolean(cncNote);
+                          const isSelected = isolatedPartIdx === idx;
+                          return (
+                            <div
+                              key={plank.id}
+                              onClick={() => setIsolatedPartIdx(isSelected ? null : idx)}
+                              className={`rounded-lg border p-3 space-y-1.5 transition-colors cursor-pointer ${
+                                isSelected
+                                  ? 'border-amber-500 bg-amber-500/10 dark:bg-amber-500/15'
+                                  : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/70 hover:border-slate-300 dark:hover:border-slate-700'
+                              }`}
+                            >
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <div className="flex items-center gap-2">
+                                  <span
+                                    className="w-2.5 h-2.5 rounded-full shrink-0"
+                                    style={{
+                                      backgroundColor: `rgb(${PREVIEW_COLOURS[idx % PREVIEW_COLOURS.length].map((c) => Math.round(c * 255)).join(',')})`,
+                                    }}
+                                  />
+                                  <span className="font-bold text-xs text-slate-800 dark:text-slate-100">
+                                    {idx + 1}. {plank.name}
+                                  </span>
+                                  <span className="text-[10px] font-mono text-slate-400">({plank.id})</span>
+                                </div>
+
+                                <div className="flex items-center gap-1.5">
+                                  <span className="px-2 py-0.5 rounded bg-amber-500/15 text-amber-800 dark:text-amber-300 font-mono font-bold text-xs">
+                                    Cut: {plank.dimensionsMm[0]} × {plank.dimensionsMm[1]} × {plank.dimensionsMm[2]} mm
+                                  </span>
+                                  <span
+                                    className={`px-2 py-0.5 rounded text-[10px] font-semibold ${
+                                      showPlankCnc && exceedsCnc
+                                        ? 'bg-amber-500/20 text-amber-800 dark:text-amber-300'
+                                        : showPlankCnc
+                                          ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
+                                          : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300'
+                                    }`}
+                                  >
+                                    {showPlankCnc && exceedsCnc
+                                      ? 'Too Large for CNC (Use Jig)'
+                                      : showPlankCnc
+                                        ? 'CNC Needed: Finger Joint'
+                                        : plankBreakdown.options.jointType === 'glue'
+                                          ? 'Saw + Glue'
+                                          : 'Saw Cut Only'}
+                                  </span>
+                                </div>
+                              </div>
+
+                              <ul className="list-disc pl-4 space-y-0.5 text-[11px] text-slate-600 dark:text-slate-300">
+                                {sawSteps.map((step, sIdx) => (
+                                  <li key={sIdx}>{step}</li>
+                                ))}
+                              </ul>
+
+                              {showPlankCnc && cncNote && (
+                                <div
+                                  className={`rounded border px-2.5 py-1.5 text-[11px] ${
+                                    exceedsCnc
+                                      ? 'bg-amber-500/10 border-amber-500/30 text-amber-900 dark:text-amber-200'
+                                      : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-800 dark:text-emerald-200'
+                                  }`}
+                                >
+                                  <strong>{exceedsCnc ? 'Exceeds CNC Capacity:' : 'CNC Needed:'}</strong> {cncNote}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </>
+                  )}
+
+                  {effectiveMode === 'frame' && cutPlan && (
+                    <>
+                      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 dark:border-slate-800 pb-2 shrink-0">
+                        <div className="flex items-center gap-1.5">
+                          {(
+                            [
+                              ['cards', `Cut List & Steps (${cutPlan.partCards.length})`, Scissors],
+                              ['bom', 'Hardware & Orientation', Layers],
+                              ['glue', 'Glue-Up Guide', CheckCircle2],
+                            ] as const
+                          ).map(([tabKey, label, Icon]) => (
+                            <button
+                              key={tabKey}
+                              type="button"
+                              onClick={() => setActiveTab(tabKey)}
+                              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold cursor-pointer transition-colors ${
+                                activeTab === tabKey
+                                  ? 'bg-amber-500 text-white'
+                                  : 'bg-slate-200/70 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-300/70 dark:hover:bg-slate-700'
+                              }`}
+                            >
+                              <Icon className="w-3.5 h-3.5" />
+                              <span>{label}</span>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {activeTab === 'cards' && (
+                        <div className="flex-1 min-h-0 overflow-y-auto space-y-2.5 pr-1">
+                          <div className="rounded-lg bg-slate-100 dark:bg-slate-800/60 px-3 py-2 text-[11px] text-slate-600 dark:text-slate-300">
+                            <strong>How to read this list:</strong> Part numbers (<span className="font-mono font-semibold">1, 2…</span>) and face numbers (<span className="font-mono font-semibold">F1–F4</span>) are shown directly on the 3D preview faces.{' '}
+                            {!showCnc || cncPartCount === 0 ? (
+                              <>
+                                Cut each part to its listed <span className="font-mono font-semibold">L × W × T mm</span> size on a saw
+                                {isGlueFrame
+                                  ? ' and glue the joints flush (no CNC required).'
+                                  : isDowelFrame
+                                    ? ' and drill the listed dowel holes (no CNC required).'
+                                    : ' and cut the listed pockets/slots with shop tools (or switch CNC to Optional CNC).'}
+                              </>
+                            ) : (
+                              <>
+                                Cut each part to its listed <span className="font-mono font-semibold">L × W × T mm</span> size first; CNC bed dimensions (
+                                <span className="font-mono">{cncBed.widthMm} × {cncBed.depthMm} × {cncBed.heightMm} mm</span>) govern how parts with{' '}
+                                <span className="text-emerald-700 dark:text-emerald-400 font-semibold">
+                                  CNC Needed
+                                </span>{' '}
+                                clamp on the bed.
+                              </>
+                            )}
+                          </div>
+
+                          {cutPlan.partCards.map((card) => {
+                            const hasCnc = showCnc && card.cncSetups.length > 0;
+                            const exceedsCnc = showCnc && card.cncAttachment === 'exceeds_cnc';
+                            const isSelected = isolatedPartIdx === card.partIndex;
+                            return (
+                              <div
+                                key={card.partId}
+                                onClick={() => setIsolatedPartIdx(isSelected ? null : card.partIndex)}
+                                className={`rounded-lg border p-3 space-y-2 transition-colors cursor-pointer ${
+                                  isSelected
+                                    ? 'border-amber-500 bg-amber-500/10 dark:bg-amber-500/15'
+                                    : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/70 hover:border-slate-300 dark:hover:border-slate-700'
+                                }`}
+                              >
+                                {/* Part Header + Cut Dimensions Badge */}
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                  <div className="flex items-center gap-2 min-w-0">
+                                    <span
+                                      className="w-2.5 h-2.5 rounded-full shrink-0"
+                                      style={{
+                                        backgroundColor: `rgb(${PREVIEW_COLOURS[card.partIndex % PREVIEW_COLOURS.length].map((c) => Math.round(c * 255)).join(',')})`,
+                                      }}
+                                    />
+                                    <span className="font-bold text-xs text-slate-800 dark:text-slate-100">
+                                      {card.partIndex + 1}. {card.partTitle}
+                                    </span>
+                                  </div>
+
+                                  <div className="flex flex-wrap items-center gap-1.5">
+                                    <span className="px-2 py-0.5 rounded bg-amber-500/15 text-amber-800 dark:text-amber-300 font-mono font-bold text-xs">
+                                      Cut: {card.finishedDimsMm[0]} × {card.finishedDimsMm[1]} × {card.finishedDimsMm[2]} mm
+                                    </span>
+                                    <span
+                                      className={`px-2 py-0.5 rounded text-[10px] font-semibold ${
+                                        exceedsCnc
+                                          ? 'bg-amber-500/20 text-amber-800 dark:text-amber-300'
+                                          : hasCnc
+                                            ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
+                                            : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300'
+                                      }`}
+                                    >
+                                      {exceedsCnc
+                                        ? 'Too Large for CNC'
+                                        : hasCnc
+                                          ? card.cncAttachment === 'sliding_pass_through'
+                                            ? `CNC Needed (Pass-Through, ${card.cncSetups.length} setups)`
+                                            : `CNC Needed (Fits on Bed, ${card.cncSetups.length} setup${card.cncSetups.length === 1 ? '' : 's'})`
+                                          : isGlueFrame
+                                            ? 'Saw + Glue'
+                                            : isDowelFrame
+                                              ? 'Saw + Drill Dowels'
+                                              : 'Saw + Shop Tools'}
+                                    </span>
+                                  </div>
+                                </div>
+
+                                {/* Saw Cuts (Always simple dimensions) */}
+                                <div className="text-[11px] space-y-1">
+                                  <ul className="list-disc pl-4 space-y-0.5 text-slate-600 dark:text-slate-300">
+                                    {card.bandsawSteps.map((s, k) => (
+                                      <li key={k}>{s}</li>
+                                    ))}
+                                    {card.taperAndProfileSteps.map((s, k) => (
+                                      <li key={`tp_${k}`}>{s}</li>
+                                    ))}
+                                  </ul>
+                                </div>
+
+                                {exceedsCnc && card.cncFitNote && (
+                                  <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-[11px] text-amber-900 dark:text-amber-200">
+                                    <strong>Exceeds CNC Attachment Limit:</strong> {card.cncFitNote}
+                                  </div>
+                                )}
+
+                                {/* CNC Joinery (ONLY rendered if CNC is enabled and this part has CNC setups!) */}
+                                {hasCnc && (
+                                  <div
+                                    onClick={(e) => e.stopPropagation()}
+                                    className="rounded-md border border-emerald-500/30 bg-emerald-500/5 p-2.5 space-y-2 text-[11px]"
+                                  >
+                                    <div className="flex flex-wrap items-center justify-between gap-2">
+                                      <span className="font-bold text-emerald-800 dark:text-emerald-300">
+                                        {card.cncSectionTitle}
+                                      </span>
+                                      <span className="text-[10px] text-slate-500">
+                                        Ø{card.cncSetups[0].cutterDiaMm} mm end mill
+                                      </span>
+                                    </div>
+                                    {card.cncFitNote && (
+                                      <p className="text-[10px] text-slate-500 dark:text-slate-400">
+                                        {card.cncFitNote}
+                                      </p>
+                                    )}
+
+                                    <div className="space-y-1.5">
+                                      {card.cncSetups.map((setup) => (
+                                        <div
+                                          key={setup.id}
+                                          className="rounded border border-slate-200 dark:border-slate-800 p-2 bg-white dark:bg-slate-900/80 space-y-1"
+                                        >
+                                          <div className="flex items-center justify-between gap-2">
+                                            <span className="font-mono font-bold text-slate-800 dark:text-slate-100">
+                                              {setup.id} (~{setup.estimatedMinutes} min)
+                                            </span>
+                                            <button
+                                              type="button"
+                                              onClick={() => handleSendSetupToMachine(setup)}
+                                              className="flex items-center gap-1 px-2.5 py-0.5 rounded bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-700 dark:text-emerald-300 text-[10px] font-semibold cursor-pointer"
+                                              title={
+                                                machineState.connected
+                                                  ? 'Run this joinery setup directly on the connected CNC'
+                                                  : 'Open Machine Setup to connect your CNC'
+                                              }
+                                            >
+                                              <Play className="w-3 h-3" />{' '}
+                                              {machineState.connected ? 'Run on CNC' : 'Connect CNC'}
+                                            </button>
+                                          </div>
+                                          <ul className="list-disc pl-4 text-[10px] text-slate-600 dark:text-slate-300 space-y-0.5">
+                                            {setup.operationsSummary.map((o, idx) => (
+                                              <li key={`op_${idx}`} className="font-medium text-emerald-700 dark:text-emerald-400">
+                                                {o}
+                                              </li>
+                                            ))}
+                                            {setup.workholdingNotes.map((n, idx) => (
+                                              <li key={idx}>{n}</li>
+                                            ))}
+                                          </ul>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      {activeTab === 'bom' && (
+                        <div className="flex-1 min-h-0 overflow-y-auto space-y-4 pr-1 text-xs">
+                          <div>
+                            <h4 className="font-bold text-slate-800 dark:text-slate-100 mb-1.5">Hardware &amp; Shop Supplies</h4>
+                            <ul className="list-disc pl-5 space-y-1 text-slate-600 dark:text-slate-300">
+                              {cutPlan.hardwareBom.map((h, i) => (
+                                <li key={i}>
+                                  <strong>
+                                    {h.quantity}× {h.item}
+                                  </strong>{' '}
+                                  — {h.note}
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+
+                          {cutPlan.partCards.some((c) => c.role === 'leg') && (
+                            <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/60 p-3 space-y-2.5">
+                              <div>
+                                <h4 className="font-bold text-slate-800 dark:text-slate-100">
+                                  Corner Leg Orientation (Top-Down View)
+                                </h4>
+                                <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                                  On every leg, faces <strong>F1 &amp; F2</strong> are the outer show faces and faces <strong>F3 &amp; F4</strong> are the inner{' '}
+                                  {isGlueFrame ? 'rail-mating' : isDowelFrame ? 'dowel-drilled' : isDadoFrame ? 'dado' : 'mortised'} faces (shown directly on the 3D preview).
+                                </p>
+                              </div>
+
+                              <div className="grid grid-cols-2 gap-3 p-2.5 rounded-lg bg-slate-50 dark:bg-slate-950/60 border border-slate-200/70 dark:border-slate-800 text-[11px]">
+                                {(
+                                  [
+                                    {
+                                      id: 'Leg_BL',
+                                      title: 'Back-Left (Leg_BL)',
+                                      exterior: 'F1, F2 (Back +Y, Left −X)',
+                                      mortises: 'F3, F4 (Right +X, Front −Y)',
+                                    },
+                                    {
+                                      id: 'Leg_BR',
+                                      title: 'Back-Right (Leg_BR)',
+                                      exterior: 'F1, F2 (Back +Y, Right +X)',
+                                      mortises: 'F3, F4 (Left −X, Front −Y)',
+                                    },
+                                    {
+                                      id: 'Leg_FL',
+                                      title: 'Front-Left (Leg_FL)',
+                                      exterior: 'F1, F2 (Front −Y, Left −X)',
+                                      mortises: 'F3, F4 (Right +X, Back +Y)',
+                                    },
+                                    {
+                                      id: 'Leg_FR',
+                                      title: 'Front-Right (Leg_FR)',
+                                      exterior: 'F1, F2 (Front −Y, Right +X)',
+                                      mortises: 'F3, F4 (Left −X, Back +Y)',
+                                    },
+                                  ] as const
+                                ).map((corner) => {
+                                  const matchCard = cutPlan.partCards.find((c) => c.partId === corner.id);
+                                  const isSel = matchCard && isolatedPartIdx === matchCard.partIndex;
+                                  return (
+                                    <div
+                                      key={corner.id}
+                                      onClick={() => {
+                                        if (matchCard) {
+                                          setIsolatedPartIdx(isSel ? null : matchCard.partIndex);
+                                        }
+                                      }}
+                                      className={`rounded-md border p-2 space-y-0.5 transition-colors ${
+                                        matchCard ? 'cursor-pointer' : ''
+                                      } ${
+                                        isSel
+                                          ? 'border-amber-500 bg-amber-500/10'
+                                          : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900'
+                                      }`}
+                                    >
+                                      <div className="font-bold text-slate-800 dark:text-slate-100 font-mono">
+                                        {matchCard ? `${matchCard.partIndex + 1}. ` : ''}
+                                        {corner.title}
+                                      </div>
+                                      <div className="text-[10px] text-slate-500 dark:text-slate-400">
+                                        Show faces: {corner.exterior}
+                                      </div>
+                                      <div className="text-[10px] text-emerald-700 dark:text-emerald-400 font-medium">
+                                        {isGlueFrame ? 'Joint faces' : isDowelFrame ? 'Dowel faces' : isDadoFrame ? 'Dado faces' : 'Mortise faces'}: {corner.mortises}
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {activeTab === 'glue' && (
+                        <div className="flex-1 min-h-0 overflow-y-auto space-y-2.5 pr-1 text-xs">
+                          <div className="rounded-lg bg-amber-500/10 border border-amber-500/30 px-3 py-2 text-[11px] text-amber-900 dark:text-amber-200">
+                            <strong>Tip:</strong> Wood glue gives you 5–10 minutes of open working time. Never glue all legs and rails at once — glue the two flat side frames first, let them cure, then join them together.
+                          </div>
+
+                          {[
+                            {
+                              step: '1. Complete Full Dry-Fit First (No Glue)',
+                              details: [
+                                'Assemble the entire frame dry without glue and pull the joint shoulders tight with clamps.',
+                                isGlueFrame
+                                  ? 'Confirm every rail end sits square and flush against its mating leg face with no gaps.'
+                                  : isDowelFrame
+                                    ? 'Confirm every dowel pin seats cleanly in its mating leg and rail holes with no gaps or twisted rails.'
+                                    : isDadoFrame
+                                      ? 'Confirm every rail tongue seats cleanly in its dado slot with no gaps or twisted rails.'
+                                      : 'Confirm every tenon seats cleanly in its mortise with no gaps or twisted rails.',
+                              ],
+                            },
+                            {
+                              step: '2. Stage 1 — Glue the Two Flat Side Sub-Assemblies',
+                              details: [
+                                'Glue and clamp the Left Frame (Leg_FL + Leg_BL + Left rails/stretchers) flat on your bench.',
+                                'Glue and clamp the Right Frame (Leg_FR + Leg_BR + Right rails/stretchers) flat on your bench.',
+                                'Wipe squeezed-out glue with a damp cloth and let cure for 30–45 minutes.',
+                              ],
+                            },
+                            {
+                              step: '3. Stage 2 — Join Side Frames with Front & Back Rails',
+                              details: [
+                                'Stand both cured side frames upright on a flat surface and glue the Front and Back rails between them.',
+                                'Measure corner-to-corner diagonals (Leg_FL to Leg_BR vs. Leg_FR to Leg_BL) and adjust clamp pressure until both diagonals match within 1 mm.',
+                              ],
+                            },
+                            {
+                              step: '4. Stage 3 — Attach Tabletop / Panel',
+                              details: [
+                                'If the top was split into planks, edge-glue the planks together first.',
+                                isGlueFrame || isDowelFrame
+                                  ? 'Place the finished top face-down, center the frame on it, and secure with figure-8 expansion washers (do not glue a solid wood top directly to the aprons).'
+                                  : 'Place the finished top face-down, center the frame on it, and secure with Z-Clip expansion fasteners in the apron slots (do not glue a solid wood top directly to the aprons).',
+                              ],
+                            },
+                          ].map((stage) => (
+                            <div
+                              key={stage.step}
+                              className="rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/70 p-3 space-y-1"
+                            >
+                              <h4 className="font-bold text-slate-800 dark:text-slate-100">{stage.step}</h4>
+                              <ul className="list-disc pl-4 space-y-0.5 text-[11px] text-slate-600 dark:text-slate-300">
+                                {stage.details.map((d, idx) => (
+                                  <li key={idx}>{d}</li>
+                                ))}
+                              </ul>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              </div>
             </>
           )}
         </div>
 
         {/* Footer */}
-        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 px-4 sm:px-6 py-3 sm:py-4 border-t border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/50">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 px-4 sm:px-6 py-3 border-t border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/50 shrink-0">
           <div className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
             <Cpu className="w-3.5 h-3.5 text-amber-500 shrink-0" />
             <span className="hidden xl:inline">Scene placement:</span>
@@ -1198,41 +1385,10 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
               Close
             </button>
             <button
-              onClick={handleDownloadGuide}
-              disabled={!hasValidResult || busy}
-              className="flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-lg border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-40 transition-colors cursor-pointer"
-              title="Download the Markdown Bill of Materials & Build Guide"
-            >
-              <FileText className="w-4 h-4" />
-              <span>{effectiveMode === 'planks' ? 'BOM (.md)' : 'Build Guide (.md)'}</span>
-            </button>
-            <button
-              onClick={handleDownloadAllZip}
-              disabled={!hasValidResult || busy}
-              className="flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-lg border border-amber-500/40 text-amber-700 dark:text-amber-300 hover:bg-amber-500/10 disabled:opacity-40 transition-colors cursor-pointer"
-              title="Download ZIP containing all plank/part binary STL meshes and BOM/Build Guide"
-            >
-              <Download className="w-4 h-4" />
-              <span>Download All Planks (STL / ZIP)</span>
-            </button>
-            {onMachinePlank && (
-              <button
-                onClick={() => handleMachinePart(selectedMachiningIdx)}
-                disabled={!hasValidResult || busy || !partListSummary[selectedMachiningIdx]}
-                className="flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-lg border border-emerald-500/40 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-40 transition-colors cursor-pointer"
-                title="Hand the selected/isolated plank straight to Solid Machining"
-              >
-                <Wrench className="w-4 h-4" />
-                <span>
-                  Machine {partListSummary[selectedMachiningIdx]?.id || 'Selected Plank'}
-                </span>
-              </button>
-            )}
-            <button
               onClick={handleApplyToScene}
               disabled={!hasValidResult || busy}
               className="flex items-center gap-1.5 px-4 py-2 bg-amber-500 hover:bg-amber-600 disabled:opacity-40 text-white font-bold text-xs rounded-lg shadow-sm transition-all cursor-pointer"
-              title="Split into individual timber planks/bodies in the scene (one undo step)"
+              title="Split into individual timber parts in the scene (one undo step)"
             >
               <Puzzle className="w-4 h-4" />
               <span>Split into Scene Bodies</span>

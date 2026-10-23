@@ -61,6 +61,8 @@ export interface CncWindowSetup {
   estimatedMinutes: number;
 }
 
+export type CncAttachmentStatus = 'none' | 'fits_bed' | 'sliding_pass_through' | 'exceeds_cnc';
+
 export interface PartFabricationCard {
   partIndex: number;
   partId: string;
@@ -74,6 +76,9 @@ export interface PartFabricationCard {
   face1Label: string;
   face2Label: string;
   bandsawSteps: string[];
+  cncAttachment: CncAttachmentStatus;
+  cncFitNote?: string;
+  cncSectionTitle: string;
   cncSetups: CncWindowSetup[];
   taperAndProfileSteps: string[];
   fitCheckSteps: string[];
@@ -190,7 +195,7 @@ function generateWindowGcode(params: {
   let cuttingDistMm = 0;
 
   for (const m of mortises) {
-    lines.push(`; Mortise ${m.id}: ${m.thicknessXMm}x${m.widthYMm} mm, ${m.depthMm} mm deep`);
+    lines.push(`; Mortise ${m.id}: ${m.thicknessXMm} × ${m.widthYMm} × ${m.depthMm} mm`);
     const halfX = Math.max(0, m.thicknessXMm * 0.5 - rBit);
     const halfY = Math.max(0, m.widthYMm * 0.5 - rBit);
     const passes = Math.max(1, Math.ceil(m.depthMm / stepdownMm));
@@ -237,7 +242,7 @@ function generateWindowGcode(params: {
   }
 
   for (const zc of zClips) {
-    lines.push(`; Tabletop Z-Clip Expansion Slot ${zc.id}: ${zc.lengthYMm} mm long, ${zc.depthMm} mm deep`);
+    lines.push(`; Tabletop Z-Clip Expansion Slot ${zc.id}: ${zc.lengthYMm} × ${zc.widthXMm} × ${zc.depthMm} mm`);
     const halfX = Math.max(0, zc.widthXMm * 0.5 - rBit);
     const halfY = Math.max(0.5, zc.lengthYMm * 0.5 - rBit);
     const passes = Math.max(1, Math.ceil(zc.depthMm / stepdownMm));
@@ -350,11 +355,20 @@ function packStockBars(
   return { bars, partBarMap };
 }
 
-function directionLabel(n: Vec3): string {
-  const ax = Math.abs(n[0]), ay = Math.abs(n[1]), az = Math.abs(n[2]);
-  if (az >= ax && az >= ay) return n[2] >= 0 ? 'Top (+Z)' : 'Bottom (-Z)';
-  if (ay >= ax) return n[1] >= 0 ? 'Back (+Y)' : 'Front (-Y)';
-  return n[0] >= 0 ? 'Right (+X)' : 'Left (-X)';
+/**
+ * Map a face normal on a member to its numbered side face (F1..F4):
+ *   F1 = +face1.normal, F2 = +face2.normal, F3 = -face1.normal, F4 = -face2.normal.
+ */
+export function memberFaceNumber(
+  member: { face1: { normal: Vec3 }; face2: { normal: Vec3 } },
+  normal: Vec3,
+): 1 | 2 | 3 | 4 {
+  const d1 = dot(normal, member.face1.normal);
+  const d2 = dot(normal, member.face2.normal);
+  if (Math.abs(d1) >= Math.abs(d2)) {
+    return d1 >= 0 ? 1 : 3;
+  }
+  return d2 >= 0 ? 2 : 4;
 }
 
 /**
@@ -370,9 +384,18 @@ function buildCncSetupsForPart(
   feedRate: number,
   plungeRate: number,
   stepdownMm: number,
-): CncWindowSetup[] {
+): {
+  setups: CncWindowSetup[];
+  cncAttachment: CncAttachmentStatus;
+  cncFitNote?: string;
+} {
+  const hasCncFeatures = part.mortises.length > 0 || part.zClipSlots.length > 0;
+  if (!hasCncFeatures) {
+    return { setups: [], cncAttachment: 'none' };
+  }
+
   const setups: CncWindowSetup[] = [];
-  // The auxiliary fence runs along the Y-axis (front-to-back pass-through axis on a 3020 CNC
+  // The auxiliary fence runs along the Y-axis (front-to-back pass-through axis on a desktop CNC
   // so long legs clear the left/right gantry uprights), so window length is bounded by cncBedMm[1].
   const maxWindowLenMm = Math.max(120, cncBedMm[1] - 30);
   const partLenMm = part.totalFinishedLengthMm;
@@ -395,7 +418,34 @@ function buildCncSetupsForPart(
     else faceGroups.set(k, { faceNormal, mortises: [], zClips: [zc] });
   }
 
-  let faceIdx = 1;
+  // Check whether this part can physically be attached to the CNC bed:
+  // While lumber of any length can be cut on a saw, attaching a part to the CNC requires its
+  // cross-section on the bed (width across X and height under Z gantry) to fit within cncBedMm[0] and cncBedMm[2].
+  let maxAcrossWidthMm = 0;
+  let maxUpHeightMm = 0;
+  for (const [, group] of faceGroups) {
+    const upAlongWidthAxis = Math.abs(dot(group.faceNormal, part.member.axes[1])) >= 0.7;
+    const acrossWidthMm = upAlongWidthAxis ? part.crossSectionMm[1] : part.crossSectionMm[0];
+    const upHeightMm = upAlongWidthAxis ? part.crossSectionMm[0] : part.crossSectionMm[1];
+    if (acrossWidthMm > maxAcrossWidthMm) maxAcrossWidthMm = acrossWidthMm;
+    if (upHeightMm > maxUpHeightMm) maxUpHeightMm = upHeightMm;
+  }
+
+  if (maxAcrossWidthMm > cncBedMm[0] || maxUpHeightMm > cncBedMm[2]) {
+    const reasons: string[] = [];
+    if (maxAcrossWidthMm > cncBedMm[0]) {
+      reasons.push(`width ${maxAcrossWidthMm} mm exceeds CNC X width ${cncBedMm[0]} mm`);
+    }
+    if (maxUpHeightMm > cncBedMm[2]) {
+      reasons.push(`height ${maxUpHeightMm} mm exceeds CNC Z clearance ${cncBedMm[2]} mm`);
+    }
+    return {
+      setups: [],
+      cncAttachment: 'exceeds_cnc',
+      cncFitNote: `Cannot attach to CNC (${reasons.join('; ')}). Cut these pockets with a hand router or drill press.`,
+    };
+  }
+
   for (const [, group] of faceGroups) {
     const sortedMortises = [...group.mortises].sort((a, b) => a.distFromTopEndMm - b.distFromTopEndMm);
     // Partition mortises along the member's length into windows of span <= maxWindowLenMm
@@ -431,48 +481,36 @@ function buildCncSetupsForPart(
       }
     }
 
-    // Determine which marked Reference Face (Face 1 or Face 2) sits against the Y-axis fence
+    // Determine which numbered face sits UP and which adjacent face sits against the Y-axis fence
+    const faceUpNum = memberFaceNumber(part.member, group.faceNormal);
     const alignWithFace1 = Math.abs(dot(group.faceNormal, part.member.face1.normal)) < 0.5;
-    const fenceFaceLabel = alignWithFace1
-      ? `Face 1 (${part.member.face1.label})`
-      : `Face 2 (${part.member.face2.label})`;
-    const faceUpLabel = `Interior ${directionLabel(group.faceNormal)} Face`;
+    const fenceFaceNum = alignWithFace1 ? 1 : 2;
+    const fenceFaceLabel = `Face F${fenceFaceNum}`;
+    const faceUpLabel = `Face F${faceUpNum}`;
 
     windows.forEach((win, wIdx) => {
       const winNum = wIdx + 1;
-      const setupId = `${part.member.id}_F${faceIdx}_W${winNum}`;
+      const setupId = `${part.member.id}_F${faceUpNum}_W${winNum}`;
       const overhangMm = Math.max(0, Math.round(partLenMm - maxWindowLenMm));
 
       const opsSummary: string[] = [];
       for (const m of win.mortises) {
         opsSummary.push(
-          `Mortise for ${m.matingMemberId}: ${m.thicknessMm} mm wide × ${m.widthMm} mm long × ${m.depthMm} mm deep (at ${m.distFromTopEndMm} mm from top end${m.dogboneDiaMm ? `, Ø${m.dogboneDiaMm} mm dogbone corners` : ''})`,
+          `Mortise for ${m.matingMemberId}: ${m.thicknessMm} × ${m.widthMm} × ${m.depthMm} mm (${m.distFromTopEndMm} mm from top end${m.dogboneDiaMm ? `, Ø${m.dogboneDiaMm} mm dogbone` : ''})`,
         );
       }
       for (const zc of win.zClips) {
         opsSummary.push(
-          `Tabletop Z-Clip slot: ${zc.slotLengthMm} mm long × ${zc.slotWidthMm} mm wide × ${zc.slotDepthMm} mm deep (${zc.distFromTopEdgeMm} mm below top edge)`,
+          `Tabletop Z-Clip slot: ${zc.slotLengthMm} × ${zc.slotWidthMm} × ${zc.slotDepthMm} mm (${zc.distFromTopEdgeMm} mm from top edge)`,
         );
       }
 
       const workholdingNotes: string[] = [
-        `Clamp a straight auxiliary fence along the CNC Y-axis.`,
-        `Place **${faceUpLabel} UP** toward the spindle, and press **${fenceFaceLabel}** tight against the Y-axis fence.`,
+        `${faceUpLabel} UP · ${fenceFaceLabel} against Y fence.`,
+        win.startOffsetMm === 0
+          ? `Butt Top End against Y0 stop.`
+          : `Slide Top End ${win.startOffsetMm} mm past Y0 stop${overhangMm > 120 ? ` (support ${overhangMm} mm overhang)` : ''}.`,
       ];
-      if (win.startOffsetMm === 0) {
-        workholdingNotes.push(
-          `Butt the **Top End** of ${part.member.id} squarely against the Y0 physical end-stop.`,
-        );
-      } else {
-        workholdingNotes.push(
-          `Slide ${part.member.id} along the Y-axis fence until the Top End is exactly **${win.startOffsetMm} mm** past the Y0 stop (use a ${win.startOffsetMm} mm spacer bar or index pin — do not eyeball a freehand pencil mark).`,
-        );
-      }
-      if (overhangMm > 120) {
-        workholdingNotes.push(
-          `**Overhang Support (${overhangMm} mm overhanging bed):** Place a level support block or roller stand under the overhanging end of the ${Math.round(partLenMm)} mm blank so it cannot sag or vibrate.`,
-        );
-      }
 
       const gcodeResult = generateWindowGcode({
         setupId,
@@ -521,11 +559,15 @@ function buildCncSetupsForPart(
         estimatedMinutes: gcodeResult.estimatedMinutes,
       });
     });
-
-    faceIdx++;
   }
 
-  return setups;
+  const needsPassThrough = partLenMm > cncBedMm[1] || setups.some((s) => s.indexOffsetFromTopMm > 0);
+  const cncAttachment: CncAttachmentStatus = needsPassThrough ? 'sliding_pass_through' : 'fits_bed';
+  const cncFitNote = needsPassThrough
+    ? `Cut part to ${partLenMm} × ${part.crossSectionMm[0]} × ${part.crossSectionMm[1]} mm first. ${maxAcrossWidthMm} × ${maxUpHeightMm} mm profile fits CNC (${cncBedMm[0]} × ${cncBedMm[2]} mm); ${partLenMm} mm length slides along the ${cncBedMm[1]} mm bed.`
+    : `Cut part to ${partLenMm} × ${part.crossSectionMm[0]} × ${part.crossSectionMm[1]} mm first; clamps flat inside the ${cncBedMm[0]} × ${cncBedMm[1]} × ${cncBedMm[2]} mm CNC bed.`;
+
+  return { setups, cncAttachment, cncFitNote };
 }
 
 /**
@@ -586,11 +628,18 @@ export function buildTimberCutPlan(
   );
 
   // Compute Hardware BOM
+  const isGlueMode = breakdown.options.jointMode === 'butt';
+  const isDowelMode = breakdown.options.jointMode === 'dowel';
+  const isDadoMode = breakdown.options.jointMode === 'dado';
   const hardwareBom: { item: string; quantity: number; note: string }[] = [
     {
       item: 'PVA Wood Glue (e.g. Titebond II / III)',
       quantity: 1,
-      note: 'Apply a thin even coat to tenon cheeks and mortise walls; never glue the solid tabletop directly to aprons.',
+      note: isGlueMode
+        ? 'Apply an even coat to mating ends and edges and clamp square.'
+        : isDowelMode
+          ? 'Apply a thin even coat to dowel holes, fluted pins, and mating joint faces.'
+          : 'Apply a thin even coat to tenon cheeks and mortise walls; never glue the solid tabletop directly to aprons.',
     },
   ];
   const totalZClips = breakdown.parts.reduce((acc, p) => acc + p.zClipSlots.length, 0);
@@ -599,6 +648,12 @@ export function buildTimberCutPlan(
       item: 'Tabletop Figure-8 / Z-Clip Expansion Fasteners + Wood Screws',
       quantity: totalZClips,
       note: 'Hooks into the 4 mm apron kerf slots so the solid tabletop can expand/contract across the grain without cracking.',
+    });
+  } else if (breakdown.parts.some((p) => p.member.role === 'panel')) {
+    hardwareBom.push({
+      item: 'Figure-8 Desktop Expansion Washers + Wood Screws',
+      quantity: 4,
+      note: 'Screws to the top edge of the aprons so the solid tabletop can expand/contract across the grain without CNC slots.',
     });
   }
   const dowelJoints = breakdown.joints.filter((j) => j.dowelCentersMm?.length);
@@ -636,7 +691,11 @@ export function buildTimberCutPlan(
     ];
     const stockBarRef = partBarMap.get(m.id) ?? 'Custom Stock';
 
-    const cncSetups = buildCncSetupsForPart(
+    const {
+      setups: cncSetups,
+      cncAttachment,
+      cncFitNote,
+    } = buildCncSetupsForPart(
       part,
       cncBedMm,
       breakdown.options.cutterDiaMm,
@@ -647,75 +706,120 @@ export function buildTimberCutPlan(
     );
     allCncSetups.push(...cncSetups);
 
-    // Step 1: Bandsaw Blank & Tenon Preparation
+    // Step 1: Saw cuts (dimensions first; no CNC needed for straight cuts)
     const bandsawSteps: string[] = [
-      `Crosscut rough blank to **${roughLen} mm** from **${stockBarRef}** on the bandsaw, then trim both ends square to exact finished blank length **${part.totalFinishedLengthMm} mm**.`,
-      `Mark **Face 1 (${m.face1.label})** and **Face 2 (${m.face2.label})** in pencil with a cabinetmaker's triangle ($\\Delta$). Always place these marked faces against the bandsaw fence and CNC stop.`,
+      `Cut to ${part.totalFinishedLengthMm} × ${part.crossSectionMm[0]} × ${part.crossSectionMm[1]} mm${m.role === 'rail' && part.tenons.length > 0 ? ` (${part.shoulderToShoulderMm} mm between shoulders)` : ''}.`,
     ];
 
     for (const t of part.tenons) {
+      const miterNote = t.miteredTip ? `, 45° miter on tip` : '';
+      const featureWord = isDadoMode ? 'Dado tongue' : 'Tenon';
       if (t.cutMethod === 'bandsaw') {
         bandsawSteps.push(
-          `**Tenon on \`${t.railEnd}\` end (into ${t.matingMemberId}):** Set bandsaw fence to leave a **${t.thicknessMm} mm** thick × **${t.widthMm} mm** wide × **${t.lengthMm} mm** long tenon (cheek setback **${t.shoulderCheekMm} mm**, top/bottom shoulder setback **${t.shoulderTopBotMm} mm**; shoulder-to-shoulder span = **${part.shoulderToShoulderMm} mm**).`,
+          `${featureWord} on ${t.railEnd} end (into ${t.matingMemberId}): ${t.lengthMm} × ${t.widthMm} × ${t.thicknessMm} mm (${t.shoulderCheekMm} mm shoulder${miterNote}).`,
         );
       } else {
         bandsawSteps.push(
-          `**Angled Tenon on \`${t.railEnd}\` end (${t.shoulderAngleDeg}° shoulder into ${t.matingMemberId}):** Cut the ${t.shoulderAngleDeg}° shoulder and ${t.thicknessMm}×${t.widthMm}×${t.lengthMm} mm tenon on the CNC (or with the bandsaw mitre gauge set to ${t.shoulderAngleDeg}°).`,
-        );
-      }
-      if (t.miteredTip) {
-        bandsawSteps.push(
-          `**Corner Clearance Miter (${t.railEnd} end):** Nip a **$45^\\circ$ miter** off the inside tip of the tenon on the bandsaw so the two meeting corner tenons nest cleanly inside ${t.matingMemberId} without colliding.`,
+          `Angled ${featureWord.toLowerCase()} on ${t.railEnd} end (${t.shoulderAngleDeg}° into ${t.matingMemberId}): ${t.lengthMm} × ${t.widthMm} × ${t.thicknessMm} mm${miterNote}.`,
         );
       }
     }
 
-    // Step 3: Taper & Stopped Edge Roundover (STRICTLY AFTER CNC MORTISES!)
+    for (const mort of part.mortises) {
+      const faceNum = memberFaceNumber(m, mort.faceNormal);
+      const featureWord = isDadoMode ? 'Dado slot' : 'Mortise';
+      bandsawSteps.push(
+        `${featureWord} on Face F${faceNum} (for ${mort.matingMemberId}, ${mort.distFromTopEndMm} mm from top end): ${mort.thicknessMm} × ${mort.widthMm} × ${mort.depthMm} mm.`,
+      );
+    }
+
+    for (const zc of part.zClipSlots) {
+      const faceNormal: Vec3 = [-zc.inwardNormal[0], -zc.inwardNormal[1], -zc.inwardNormal[2]];
+      const faceNum = memberFaceNumber(m, faceNormal);
+      bandsawSteps.push(
+        `Tabletop clip slot on Face F${faceNum} (${zc.distFromTopEdgeMm} mm from top edge): ${zc.slotLengthMm} × ${zc.slotWidthMm} × ${zc.slotDepthMm} mm.`,
+      );
+    }
+
+    // Dowel hole drilling steps (for frame dowel joints and plank seam dowels)
+    for (const j of breakdown.joints) {
+      if (!j.dowelCentersMm?.length) continue;
+      const count = j.dowelCentersMm.length;
+      const dia = j.dowelDiaMm ?? 8;
+      const holeDepth = +((j.dowelLengthMm ?? 30) * 0.5 + 1).toFixed(1);
+      if (j.kind === 'dowel') {
+        if (j.memberAId === m.id) {
+          bandsawSteps.push(
+            `Drill ${count}× Ø${dia} × ${holeDepth} mm dowel hole${count > 1 ? 's' : ''} centered in end grain (into ${j.memberBId}).`,
+          );
+        } else if (j.memberBId === m.id) {
+          const faceNormal: Vec3 = [-j.normalAToB[0], -j.normalAToB[1], -j.normalAToB[2]];
+          const faceNum = memberFaceNumber(m, faceNormal);
+          const hostTopCoord = dot(m.centerMm, m.axes[0]) + m.dimsMm[0] * 0.5;
+          const distFromTopMm = Math.round((hostTopCoord - dot(j.centerMm, m.axes[0])) * 10) / 10;
+          bandsawSteps.push(
+            `Drill ${count}× Ø${dia} × ${holeDepth} mm dowel hole${count > 1 ? 's' : ''} on Face F${faceNum} (${distFromTopMm} mm from top end, for ${j.memberAId}).`,
+          );
+        }
+      } else if (j.kind === 'plank_dowel' && (j.memberAId === m.id || j.memberBId === m.id)) {
+        const otherId = j.memberAId === m.id ? j.memberBId : j.memberAId;
+        bandsawSteps.push(
+          `Drill ${count}× Ø${dia} × ${holeDepth} mm alignment dowel holes along seam edge (mating with ${otherId}).`,
+        );
+      }
+    }
+
+    // Step 2/3: Taper & Stopped Edge Roundover (only when applicable)
     const taperAndProfileSteps: string[] = [];
     if (m.isTapered && m.taperEndMm) {
       taperAndProfileSteps.push(
-        `**ORDER OF OPERATIONS WARNING:** Only cut the leg taper **AFTER** all CNC mortises are finished while the blank is still square!`,
-        `**Bandsaw Leg Taper:** Mark the taper on the two interior faces starting $15\\text{ mm}$ below the lowest mortise down to **${m.taperEndMm[0]} × ${m.taperEndMm[1]} mm** at the foot. Saw just outside the pencil line on the bandsaw and smooth with a sanding block or plane.`,
+        `Taper inner faces from 15 mm below lowest joint to ${m.taperEndMm[0]} × ${m.taperEndMm[1]} mm at foot.`,
       );
     }
-    if (part.stoppedEdgeZones.length > 0) {
+    if (part.stoppedEdgeZones.length > 0 && breakdown.options.edgeProfile !== 'square' && breakdown.options.edgeRadiusMm > 0) {
       const spans = part.stoppedEdgeZones.map((z) => `${z.fromMm}–${z.toMm} mm`).join(', ');
       taperAndProfileSteps.push(
-        `**Stopped ${breakdown.options.edgeProfile === 'roundover' ? 'Roundover' : 'Chamfer'} (${breakdown.options.edgeRadiusMm} mm):** Soften the exposed longitudinal edges over spans **${spans}** (measured from the top/start end), stopping **${breakdown.options.stopMarginMm} mm clear of every mortise and joint shoulder** so the joint faces stay dead flat and crisp.`,
-      );
-    } else {
-      taperAndProfileSteps.push(
-        `Break sharp exterior edges lightly with 180-grit sandpaper while keeping all joint shoulders and mortise mouths crisp and flat.`,
+        `Stopped ${breakdown.options.edgeProfile === 'roundover' ? 'roundover' : 'chamfer'} (${breakdown.options.edgeRadiusMm} mm) along ${spans}, stopping ${breakdown.options.stopMarginMm} mm clear of joints.`,
       );
     }
 
-    // Step 4: Dry-Fit Verification
+    // Dry-Fit Verification
     const fitCheckSteps: string[] = [];
     if (part.tenons.length > 0) {
       fitCheckSteps.push(
-        `Test-fit each tenon into its mating mortise (${part.tenons.map((t) => t.matingMemberId).join(', ')}) using **firm hand pressure only — never pound a dry tenon in with a hammer** (which can split the leg along the grain). If slightly tight from bandsaw blade ripple, lightly kiss the tenon cheeks with 120-grit sandpaper on a flat block.`,
+        `Dry-fit ${isDadoMode ? 'dado tongues' : 'tenons'} into ${part.tenons.map((t) => t.matingMemberId).join(', ')}.`,
       );
+    } else if (isDowelMode) {
+      const matingIds = breakdown.joints
+        .filter((j) => j.kind === 'dowel' && (j.memberAId === m.id || j.memberBId === m.id))
+        .map((j) => (j.memberAId === m.id ? j.memberBId : j.memberAId));
+      if (matingIds.length > 0) {
+        fitCheckSteps.push(`Dry-fit dowels into ${[...new Set(matingIds)].join(', ')}.`);
+      }
     }
-    if (part.mortises.length > 0) {
-      fitCheckSteps.push(
-        `Vacuum wood chips out of ${part.mortises.length} mortise pocket(s) and verify the ${breakdown.options.glueReliefMm} mm glue-relief space at the bottom.`,
-      );
-    }
-    fitCheckSteps.push(`Write **${m.id}** in pencil on the hidden end-grain or underside.`);
+
+    const cncSectionTitle =
+      part.mortises.length > 0 && part.zClipSlots.length > 0
+        ? isDadoMode
+          ? 'CNC Needed: Dadoes & Clip Slots'
+          : 'CNC Needed: Mortises & Slots'
+        : part.mortises.length > 0
+          ? isDadoMode
+            ? 'CNC Needed: Dado Slots'
+            : 'CNC Needed: Mortises'
+          : 'CNC Needed: Tabletop Clip Slots';
 
     const cardMdLines: string[] = [
       `### Part ${part.member.index + 1}: ${m.title}`,
-      `- **Role:** \`${m.role}\`${m.mirrorOf ? ` · **Mirror Pair of:** \`${m.mirrorOf}\`` : ''}`,
-      `- **Finished Blank Size:** \`${finishedDims[0]} × ${finishedDims[1]} × ${finishedDims[2]} mm\`${m.role === 'rail' ? ` *(Shoulder-to-Shoulder: \`${part.shoulderToShoulderMm} mm\`)*` : ''}`,
-      `- **Rough Blank to Cut:** \`${roughDims[0]} × ${roughDims[1]} × ${roughDims[2]} mm\` from **${stockBarRef}**`,
+      `- **Cut Dimensions:** \`${finishedDims[0]} × ${finishedDims[1]} × ${finishedDims[2]} mm\`${m.role === 'rail' && part.tenons.length > 0 ? ` *(Shoulder-to-Shoulder: \`${part.shoulderToShoulderMm} mm\`)*` : ''}`,
       `- **Reference Datum Faces:** **Face 1** = ${m.face1.label} · **Face 2** = ${m.face2.label}`,
       ``,
-      `#### 1. Bandsaw Blank & Tenon Cuts (Self-Cut)`,
+      `#### 1. Cut & Joinery Dimensions`,
       ...bandsawSteps.map((s) => `- [ ] ${s}`),
     ];
 
     if (cncSetups.length > 0) {
-      cardMdLines.push(``, `#### 2. CNC Router Setups (Cut While Blank is Square)`);
+      cardMdLines.push(``, `#### 2. ${cncSectionTitle}`);
       for (const s of cncSetups) {
         cardMdLines.push(
           `- [ ] **Setup \`${s.id}\` (~${s.estimatedMinutes} min, Ø${s.cutterDiaMm} mm end mill):**`,
@@ -725,14 +829,13 @@ export function buildTimberCutPlan(
       }
     }
 
-    cardMdLines.push(
-      ``,
-      `#### ${cncSetups.length > 0 ? '3' : '2'}. Tapers & Stopped Edge Profiles`,
-      ...taperAndProfileSteps.map((s) => `- [ ] ${s}`),
-      ``,
-      `#### ${cncSetups.length > 0 ? '4' : '3'}. Dry-Fit & Labeling`,
-      ...fitCheckSteps.map((s) => `- [ ] ${s}`),
-    );
+    if (taperAndProfileSteps.length > 0) {
+      cardMdLines.push(
+        ``,
+        `#### ${cncSetups.length > 0 ? '3' : '2'}. Tapers & Edge Profiles`,
+        ...taperAndProfileSteps.map((s) => `- [ ] ${s}`),
+      );
+    }
 
     partCards.push({
       partIndex: part.member.index,
@@ -747,6 +850,9 @@ export function buildTimberCutPlan(
       face1Label: m.face1.label,
       face2Label: m.face2.label,
       bandsawSteps,
+      cncAttachment,
+      ...(cncFitNote ? { cncFitNote } : {}),
+      cncSectionTitle,
       cncSetups,
       taperAndProfileSteps,
       fitCheckSteps,

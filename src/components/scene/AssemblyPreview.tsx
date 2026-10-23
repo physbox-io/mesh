@@ -7,6 +7,13 @@ import type { Mat3, PrintPose, Vec3 } from '../../utils/printPlate';
 import { poseMatrix } from '../../utils/printPlate';
 import type { StageFrame, StageSpec } from '../../utils/printAssembly';
 
+export interface PreviewFaceLabel {
+  /** Label text drawn on the face, e.g. '1', '1·F1', 'F1'. */
+  text: string;
+  /** Outward unit normal of the face in the section's frame. */
+  normal: Vec3;
+}
+
 export interface PreviewSection {
   /** Body frame, Z-up, metres. */
   positions: Float32Array;
@@ -15,6 +22,8 @@ export interface PreviewSection {
   explode: Vec3;
   colour: number[];
   pose: PrintPose;
+  /** Optional face numbers/labels rendered directly on the section's 3D faces. */
+  faceLabels?: PreviewFaceLabel[];
 }
 
 export interface PreviewStage {
@@ -94,11 +103,140 @@ function disposeChildren(group: THREE.Object3D) {
       const m = o as THREE.Mesh;
       m.geometry?.dispose?.();
       const mat = m.material as THREE.Material | THREE.Material[] | undefined;
-      if (Array.isArray(mat)) mat.forEach((x) => x.dispose());
-      else mat?.dispose?.();
+      const disposeMat = (x: THREE.Material) => {
+        if ('map' in x && (x as THREE.MeshBasicMaterial).map) {
+          (x as THREE.MeshBasicMaterial).map?.dispose();
+        }
+        x.dispose();
+      };
+      if (Array.isArray(mat)) mat.forEach(disposeMat);
+      else if (mat) disposeMat(mat);
     });
     group.remove(child);
   }
+}
+
+function buildFaceLabelMesh(positions: Float32Array, label: PreviewFaceLabel): THREE.Mesh | null {
+  if (positions.length < 9 || typeof document === 'undefined') return null;
+  const nLen = Math.hypot(label.normal[0], label.normal[1], label.normal[2]);
+  if (nLen < 1e-6) return null;
+  const nx = label.normal[0] / nLen;
+  const ny = label.normal[1] / nLen;
+  const nz = label.normal[2] / nLen;
+
+  // Choose tangent basis (uAxis = right, vAxis = up, n = outward normal)
+  const refUp: Vec3 = Math.abs(nz) < 0.75 ? [0, 0, 1] : [0, nz >= 0 ? 1 : -1, 0];
+  const dotUp = refUp[0] * nx + refUp[1] * ny + refUp[2] * nz;
+  let vx = refUp[0] - dotUp * nx;
+  let vy = refUp[1] - dotUp * ny;
+  let vz = refUp[2] - dotUp * nz;
+  const vLen = Math.hypot(vx, vy, vz) || 1;
+  vx /= vLen;
+  vy /= vLen;
+  vz /= vLen;
+
+  // uAxis = normalize(cross(vAxis, n))
+  let ux = vy * nz - vz * ny;
+  let uy = vz * nx - vx * nz;
+  let uz = vx * ny - vy * nx;
+  const uLen = Math.hypot(ux, uy, uz) || 1;
+  ux /= uLen;
+  uy /= uLen;
+  uz /= uLen;
+
+  // Re-orthogonalize vAxis = cross(n, uAxis)
+  vx = ny * uz - nz * uy;
+  vy = nz * ux - nx * uz;
+  vz = nx * uy - ny * ux;
+
+  let minD = Infinity;
+  let maxD = -Infinity;
+  for (let i = 0; i < positions.length; i += 3) {
+    const d = positions[i] * nx + positions[i + 1] * ny + positions[i + 2] * nz;
+    if (d < minD) minD = d;
+    if (d > maxD) maxD = d;
+  }
+  if (!Number.isFinite(maxD)) return null;
+
+  const tol = Math.max(0.0015, (maxD - minD) * 0.12);
+  let uMin = Infinity, uMax = -Infinity;
+  let vMin = Infinity, vMax = -Infinity;
+  for (let i = 0; i < positions.length; i += 3) {
+    const px = positions[i], py = positions[i + 1], pz = positions[i + 2];
+    const d = px * nx + py * ny + pz * nz;
+    if (d >= maxD - tol) {
+      const u = px * ux + py * uy + pz * uz;
+      const v = px * vx + py * vy + pz * vz;
+      if (u < uMin) uMin = u;
+      if (u > uMax) uMax = u;
+      if (v < vMin) vMin = v;
+      if (v > vMax) vMax = v;
+    }
+  }
+  if (!Number.isFinite(uMin)) return null;
+
+  const uMid = 0.5 * (uMin + uMax);
+  const vMid = 0.5 * (vMin + vMax);
+  const dFace = maxD + 0.0005;
+  const faceW = Math.max(0.012, uMax - uMin);
+  const faceH = Math.max(0.012, vMax - vMin);
+
+  const isCompact = label.text.length <= 2;
+  const cw = isCompact ? 160 : 272;
+  const ch = 144;
+  const canvas = document.createElement('canvas');
+  canvas.width = cw;
+  canvas.height = ch;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return null;
+
+  const pad = 10;
+  const r = (ch - pad * 2) * 0.45;
+  ctx.beginPath();
+  ctx.roundRect(pad, pad, cw - pad * 2, ch - pad * 2, r);
+  ctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
+  ctx.fill();
+  ctx.lineWidth = 7;
+  ctx.strokeStyle = 'rgba(251, 191, 36, 0.95)';
+  ctx.stroke();
+
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 64px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(label.text, cw * 0.5, ch * 0.52);
+
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.needsUpdate = true;
+
+  const aspect = cw / ch;
+  const badgeH = Math.max(0.010, Math.min(0.036, faceH * 0.72, (faceW * 0.82) / aspect));
+  const badgeW = badgeH * aspect;
+
+  const geo = new THREE.PlaneGeometry(badgeW, badgeH);
+  const mat = new THREE.MeshBasicMaterial({
+    map: tex,
+    transparent: true,
+    depthWrite: false,
+    polygonOffset: true,
+    polygonOffsetFactor: -2,
+    polygonOffsetUnits: -2,
+  });
+
+  const labelMesh = new THREE.Mesh(geo, mat);
+  const basis = new THREE.Matrix4().makeBasis(
+    new THREE.Vector3(ux, uy, uz),
+    new THREE.Vector3(vx, vy, vz),
+    new THREE.Vector3(nx, ny, nz),
+  );
+  labelMesh.quaternion.setFromRotationMatrix(basis);
+  labelMesh.position.set(
+    ux * uMid + vx * vMid + nx * dFace,
+    uy * uMid + vy * vMid + ny * dFace,
+    uz * uMid + vz * vMid + nz * dFace,
+  );
+  return labelMesh;
 }
 
 /**
@@ -257,9 +395,21 @@ export function AssemblyPreview({
     const group = explodedRef.current;
     if (!group) return;
     disposeChildren(group);
-    sections.forEach((s) => {
+    sections.forEach((s, idx) => {
       const mesh = new THREE.Mesh(geometryOf(s.positions, s.faces), materialOf(s.colour));
       mesh.userData.explode = s.explode;
+      const labels: PreviewFaceLabel[] =
+        s.faceLabels ??
+        (sections.length > 1
+          ? [
+              { text: `${idx + 1}`, normal: s.pose.up },
+              { text: `${idx + 1}`, normal: [-s.pose.up[0], -s.pose.up[1], -s.pose.up[2]] },
+            ]
+          : []);
+      for (const lbl of labels) {
+        const badge = buildFaceLabelMesh(s.positions, lbl);
+        if (badge) mesh.add(badge);
+      }
       group.add(mesh);
     });
     if (pins.length) {

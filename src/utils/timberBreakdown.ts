@@ -1075,7 +1075,7 @@ export function extractTimberMembers(
 // STL/ZIP, split into scene bodies, or sent directly to Solid Machining.
 // ---------------------------------------------------------------------------
 
-export type PlankJointType = 'rabbet' | 'miter' | 'finger' | 'butt';
+export type PlankJointType = 'rabbet' | 'miter' | 'finger' | 'butt' | 'glue';
 export type GrainAxis = 'x' | 'y' | 'z';
 export type ShellWallFace = '-z' | '+z' | '-x' | '+x' | '-y' | '+y' | 'layer';
 
@@ -1283,7 +1283,7 @@ function buildHollowShellWallTemplates(
     { face: '+y', label: 'Back', normal: [0, 1, 0], grainAxis: frontBackGrain, widthAxis: frontBackWidth, manifold: null },
   ];
 
-  if (jointType === 'butt') {
+  if (jointType === 'butt' || jointType === 'glue') {
     // Priority: Top/Bottom (-Z/+Z) cover full XY; Left/Right (-X/+X) span between Z walls and cover full Y;
     // Front/Back (-Y/+Y) fit inside both X and Z walls.
     specs[0].manifold = aabbBoxManifold(wasm, x0, x3, y0, y3, z0, z1 - c);
@@ -1878,7 +1878,7 @@ export function decomposeSolidIntoPlanks(
     // Bore Alignment Dowel Holes (`dowelDiaMm > 0`) between Adjacent Planks
     // -------------------------------------------------------------------------
     const dowelsByPlank: PlankDowelHole[][] = rawPlanks.map(() => []);
-    if (options.dowelDiaMm > 0) {
+    if (options.dowelDiaMm > 0 && options.jointType !== 'glue') {
       const holeRadius = (options.dowelDiaMm + options.clearanceMm) * 0.5;
       const halfDepth = options.dowelLengthMm * 0.5 + 1.0;
 
@@ -2184,7 +2184,7 @@ export function decomposeSolidIntoPlanks(
       ``,
       `- **Joint Style:** ${options.jointType.toUpperCase()}${options.jointType === 'finger' ? ` (${options.fingerWidthMm} mm fingers)` : ''}`,
       `- **Construction:** ${canHollow ? `Hollow 6-Wall Shell (${options.wallThicknessMm} mm walls)` : `Solid Laminated Planks (${options.boardThicknessMm} mm layers)`}`,
-      `- **Max Board Stock:** ${options.boardThicknessMm} mm thick × ${options.maxBoardWidthMm} mm wide × ${options.maxBoardLengthMm} mm long`,
+      `- **Max Board Stock:** ${options.maxBoardLengthMm} × ${options.maxBoardWidthMm} × ${options.boardThicknessMm} mm`,
       `- **Alignment Dowels:** ${options.dowelDiaMm > 0 ? `${totalDowelPins}× Ø${options.dowelDiaMm}×${options.dowelLengthMm} mm fluted beech/birch dowels` : 'None'}`,
       `- **Total Planks:** ${planks.length} (${(totalVolumeMm3 / 1000).toFixed(1)} cm³ timber)`,
       ``,
