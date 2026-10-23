@@ -99,6 +99,17 @@ describe('building the picture onto a board', () => {
     expect(sharp[near]).toBe(0);
     expect(soft[near]).toBeGreaterThan(0.05);
   });
+
+  it('averages the picture over a cell when the board is coarser than its pixels', () => {
+    // One-pixel stripes, 8 pixels to a board step: sampled at points they
+    // would alias into whatever stripe each point fell on.
+    const o = optionsFor(256, 4, (x) => x % 2);
+    const h = IMAGE_PATTERN.build(33, 3, board, o);
+    for (let c = 1; c < 32; c++) expect(h[33 + c]).toBeCloseTo(0.5, 1);
+    // A board finer than the picture still reads it exactly.
+    const fine = IMAGE_PATTERN.build(65, 3, board, optionsFor(32, 4, (x) => (x < 16 ? 0 : 1)));
+    expect([fine[65 + 2], fine[65 + 62]]).toEqual([0, 1]);
+  });
 });
 
 describe('a picture on a cylinder', () => {

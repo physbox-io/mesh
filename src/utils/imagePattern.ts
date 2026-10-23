@@ -130,6 +130,21 @@ function at(g: ImageGrid, x: number, y: number): number {
   return (d[y0 * w + x0] * (1 - tx) + d[y0 * w + x1] * tx) * (1 - ty) + (d[y1 * w + x0] * (1 - tx) + d[y1 * w + x1] * tx) * ty;
 }
 
+/**
+ * The mean of `kx` x `ky` bilinear samples spread over `rx` x `ry` pixels
+ * either side of (x, y). Used when a mesh cell spans several pixels: sampled
+ * at a point, a 1024-pixel picture on a 0.6 mm mesh aliases, and every steep
+ * edge in it comes out a sawtooth.
+ */
+function cellAt(g: ImageGrid, x: number, y: number, rx: number, ry: number, kx: number, ky: number): number {
+  let s = 0;
+  for (let j = 0; j < ky; j++) {
+    const yy = ky === 1 ? y : y - ry + (2 * ry * (j + 0.5)) / ky;
+    for (let i = 0; i < kx; i++) s += at(g, kx === 1 ? x : x - rx + (2 * rx * (i + 0.5)) / kx, yy);
+  }
+  return s / (kx * ky);
+}
+
 /** How far apart the picture's left and right edges are, 0..1: what a wrap would show as a step. */
 export function edgeMismatch(g: ImageGrid): number {
   let worst = 0;
@@ -211,6 +226,12 @@ export const IMAGE_PATTERN: PatternSpec = {
     const left = (W - pw) / 2 + shift[0], bottom = (D - ph) / 2 + shift[1];
     const invert = str(opts, 'mapping', 'white-high') === 'white-low';
     const dx = cols > 1 ? W / (cols - 1) : 0, dy = rows > 1 ? D / (rows - 1) : 0;
+    // The board is sampled at half the mesh cell, so a box two steps across
+    // is one cell: the picture averaged to what the mesh can carry.
+    const rx = (dx / pw) * (g.width - 1), ry = (dy / ph) * (g.height - 1);
+    // At most a sample a pixel, so the whole board costs about four per pixel of the picture.
+    const samples = (r: number) => (r > 1 ? Math.ceil(2 * r) : 1);
+    const kx = samples(rx), ky = samples(ry);
     for (let r = 0; r < rows; r++) {
       // Board y runs up the face; the picture's row 0 is its top.
       const ty = (r * dy - bottom) / ph;
@@ -219,7 +240,7 @@ export const IMAGE_PATTERN: PatternSpec = {
       for (let c = 0; c < cols; c++) {
         const tx = (c * dx - left) / pw;
         if (tx < 0 || tx > 1) continue;
-        const v = at(g, tx * (g.width - 1), py);
+        const v = cellAt(g, tx * (g.width - 1), py, rx, ry, kx, ky);
         out[r * cols + c] = invert ? 1 - v : v;
       }
     }
