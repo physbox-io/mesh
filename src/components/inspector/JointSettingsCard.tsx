@@ -24,13 +24,13 @@ export function JointSettingsCard({ node }: { node: SceneNode }) {
                 <span className="flex items-center gap-1">🔗 Joint Damping</span>
                 <DocsInfoButton tab="damping" />
               </h3>
-              <label className="text-xs font-medium text-slate-500 flex justify-between">Damping <SliderValue value={joint.damping !== undefined ? joint.damping : 0.0} onChange={(v) => updateNodeJoint(node.id, {damping: v})} decimals={2} min={0} /></label>
+              <label className="text-xs font-medium text-slate-500 flex justify-between">Damping <SliderValue value={joint.damping !== undefined ? joint.damping : 0.0} onChange={(v) => updateNodeJoint(node.id, {damping: v}, i)} decimals={2} min={0} /></label>
               <RangeInput 
                 min="0" 
                 max={joint.type === 'free' ? "5.0" : "500"} 
                 step={joint.type === 'free' ? "0.01" : "0.1"} 
                 value={joint.damping !== undefined ? joint.damping : 0.0} 
-                onChange={(v) => updateNodeJoint(node.id, {damping: v})} 
+                onChange={(v) => updateNodeJoint(node.id, {damping: v}, i)} 
                 className="w-full accent-blue-500 cursor-pointer" 
               />
             </div>
@@ -82,7 +82,7 @@ export function JointSettingsCard({ node }: { node: SceneNode }) {
                     checked={on}
                     onChange={(e) => updateNodeJoint(node.id, e.target.checked
                       ? { crumpleTorqueNm: 10, crumpleRangeDeg: [-80, 0], crumpleDampingAfter: 5 }
-                      : { crumpleTorqueNm: undefined, crumpleRangeDeg: undefined, crumpleDampingAfter: undefined })}
+                      : { crumpleTorqueNm: undefined, crumpleRangeDeg: undefined, crumpleDampingAfter: undefined }, i)}
                     className="accent-amber-500 cursor-pointer"
                   />
                   This joint can take a permanent set
@@ -95,7 +95,7 @@ export function JointSettingsCard({ node }: { node: SceneNode }) {
                       <SettledNumberInput
                         step="1" min={0}
                         value={joint.crumpleTorqueNm ?? 0}
-                        onChange={(v) => updateNodeJoint(node.id, { crumpleTorqueNm: v })}
+                        onChange={(v) => updateNodeJoint(node.id, { crumpleTorqueNm: v }, i)}
                         className="flex-1 min-w-0 px-2 py-1 border border-slate-200 rounded text-xs bg-white text-slate-700 outline-none focus:border-blue-500"
                       />
                       <span className="text-[10px] text-slate-400 w-8 shrink-0">N·m</span>
@@ -105,13 +105,13 @@ export function JointSettingsCard({ node }: { node: SceneNode }) {
                       <SettledNumberInput
                         step="5"
                         value={range[0]}
-                        onChange={(v) => updateNodeJoint(node.id, { crumpleRangeDeg: [v, range[1]] })}
+                        onChange={(v) => updateNodeJoint(node.id, { crumpleRangeDeg: [v, range[1]] }, i)}
                         className="flex-1 min-w-0 px-2 py-1 border border-slate-200 rounded text-xs bg-white text-slate-700 outline-none focus:border-blue-500"
                       />
                       <SettledNumberInput
                         step="5"
                         value={range[1]}
-                        onChange={(v) => updateNodeJoint(node.id, { crumpleRangeDeg: [range[0], v] })}
+                        onChange={(v) => updateNodeJoint(node.id, { crumpleRangeDeg: [range[0], v] }, i)}
                         className="flex-1 min-w-0 px-2 py-1 border border-slate-200 rounded text-xs bg-white text-slate-700 outline-none focus:border-blue-500"
                       />
                       <span className="text-[10px] text-slate-400 w-8 shrink-0">deg</span>
@@ -121,7 +121,7 @@ export function JointSettingsCard({ node }: { node: SceneNode }) {
                       <SettledNumberInput
                         step="1" min={0}
                         value={joint.crumpleDampingAfter ?? 0}
-                        onChange={(v) => updateNodeJoint(node.id, { crumpleDampingAfter: v })}
+                        onChange={(v) => updateNodeJoint(node.id, { crumpleDampingAfter: v }, i)}
                         className="flex-1 min-w-0 px-2 py-1 border border-slate-200 rounded text-xs bg-white text-slate-700 outline-none focus:border-blue-500"
                       />
                       <span className="text-[10px] text-slate-400 w-8 shrink-0">N·m·s</span>
@@ -161,14 +161,14 @@ export function JointSettingsCard({ node }: { node: SceneNode }) {
 
               <div className="flex flex-col gap-1">
                 <label className="text-xs font-medium text-slate-500 flex justify-between">
-                  Spring Stiffness (K) <SliderValue value={joint.stiffness || 0} onChange={(v) => updateNodeJoint(node.id, { stiffness: v })} decimals={0} unit={joint.type === 'slide' ? 'N/m' : 'N·m/rad'} min={0} max={5000} />
+                  Spring Stiffness (K) <SliderValue value={joint.stiffness || 0} onChange={(v) => updateNodeJoint(node.id, { stiffness: v }, i)} decimals={0} unit={joint.type === 'slide' ? 'N/m' : 'N·m/rad'} min={0} max={5000} />
                 </label>
                 <RangeInput 
                   min="0" 
                   max="5000" 
                   step="10" 
                   value={joint.stiffness || 0} 
-                  onChange={(v) => updateNodeJoint(node.id, { stiffness: v })}
+                  onChange={(v) => updateNodeJoint(node.id, { stiffness: v }, i)}
                   className="w-full accent-blue-500 cursor-pointer" 
                 />
               </div>
@@ -186,7 +186,7 @@ export function JointSettingsCard({ node }: { node: SceneNode }) {
                     onChange={(v) => {
                       const raw = v;
                       const val = joint.type === 'slide' ? raw : getStickyRotation(raw);
-                      updateNodeJoint(node.id, { springref: val });
+                      updateNodeJoint(node.id, { springref: val }, i);
                     }}
                     className="w-full accent-blue-500 cursor-pointer" 
                   />
@@ -212,7 +212,7 @@ export function JointSettingsCard({ node }: { node: SceneNode }) {
                     updateNodeJoint(node.id, { 
                       limited: enabled,
                       range: enabled ? (joint.range || defaultRange) : undefined
-                    });
+                    }, i);
                   }}
                   className="w-4 h-4 rounded text-blue-500 focus:ring-blue-400 accent-blue-500 cursor-pointer"
                 />
@@ -243,7 +243,7 @@ export function JointSettingsCard({ node }: { node: SceneNode }) {
                           const raw = v;
                           const val = isSlide ? raw : getStickyRotation(raw);
                           const newMin = Math.min(val, maxVal);
-                          updateNodeJoint(node.id, { range: [newMin, maxVal] });
+                          updateNodeJoint(node.id, { range: [newMin, maxVal] }, i);
                         }}
                         className="w-full accent-blue-500 cursor-pointer" 
                       />
@@ -263,7 +263,7 @@ export function JointSettingsCard({ node }: { node: SceneNode }) {
                           const raw = v;
                           const val = isSlide ? raw : getStickyRotation(raw);
                           const newMax = Math.max(val, minVal);
-                          updateNodeJoint(node.id, { range: [minVal, newMax] });
+                          updateNodeJoint(node.id, { range: [minVal, newMax] }, i);
                         }}
                         className="w-full accent-blue-500 cursor-pointer" 
                       />
@@ -297,7 +297,7 @@ export function JointSettingsCard({ node }: { node: SceneNode }) {
                     if (isPlaying) {
                       getPhysicsWorkerClient().setCtrl(`${joint.name}_actuator`, val);
                     }
-                    updateNodeJoint(node.id, { actuator: { ...joint.actuator!, ctrlValue: val } });
+                    updateNodeJoint(node.id, { actuator: { ...joint.actuator!, ctrlValue: val } }, i);
                   }}
                   className="w-full accent-blue-500 cursor-pointer" 
                 />
