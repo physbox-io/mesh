@@ -69,6 +69,9 @@ export const UserProfileButton: React.FC = () => {
   const avatarSrc = avatarData ?? user?.picture ?? null;
 
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  /** Where the menu hangs at desktop width: under the avatar, right edges aligned. */
+  const [menuAnchor, setMenuAnchor] = useState<{ top: number; right: number } | null>(null);
 
   useEffect(() => {
     fetchCurrentUser().then((u) => {
@@ -79,7 +82,8 @@ export const UserProfileButton: React.FC = () => {
 
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
-      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+      const target = event.target as Node;
+      if (dropdownRef.current && !dropdownRef.current.contains(target) && !menuRef.current?.contains(target)) {
         setDropdownOpen(false);
       }
     }
@@ -234,7 +238,14 @@ export const UserProfileButton: React.FC = () => {
   return (
     <div className="relative" ref={dropdownRef}>
       <button
-        onClick={() => setDropdownOpen(!dropdownOpen)}
+        onClick={(e) => {
+          // Below `lg` the menu is a centred sheet and its classes place it.
+          const r = e.currentTarget.getBoundingClientRect();
+          setMenuAnchor(window.matchMedia('(min-width: 1024px)').matches
+            ? { top: r.bottom + 8, right: window.innerWidth - r.right }
+            : null);
+          setDropdownOpen(!dropdownOpen);
+        }}
         className="relative flex items-center justify-center w-8 h-8 rounded-full border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors focus:outline-none flex-shrink-0 cursor-pointer shadow-xs"
         title={user ? `Account (${user.email})` : 'Sign In / Early Access'}
       >
@@ -265,15 +276,22 @@ export const UserProfileButton: React.FC = () => {
       </button>
 
       {/* Dropdown Menu */}
-      {dropdownOpen && (
+      {dropdownOpen && ReactDOM.createPortal(
         /*
           Anchored to the avatar on a desktop. Below `lg` the top bar wraps, so
           the avatar can end up anywhere along a row — and `right-0` on an 18rem
           panel then hangs it off the edge of the screen. There is nothing to
           measure against reliably, so on a narrow screen it stops being a
           dropdown and becomes a centred sheet, like the settings popover.
+
+          Portalled to the body and positioned from the avatar, because inside
+          the header it shared the header's stacking context, and the
+          properties panel beside it drew over the card.
         */
-        <div className="absolute right-0 mt-2 w-72 max-lg:fixed max-lg:inset-x-2 max-lg:top-1/2 max-lg:mt-0 max-lg:-translate-y-1/2 max-lg:w-auto max-lg:max-h-[85dvh] max-lg:overflow-y-auto bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl shadow-2xl z-50 p-3 space-y-3 text-slate-800 dark:text-slate-100">
+        <div
+          ref={menuRef}
+          style={menuAnchor ? { top: menuAnchor.top, right: menuAnchor.right } : undefined}
+          className="fixed w-72 max-lg:inset-x-2 max-lg:top-1/2 max-lg:mt-0 max-lg:-translate-y-1/2 max-lg:w-auto max-lg:max-h-[85dvh] max-lg:overflow-y-auto bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl shadow-2xl z-[130] p-3 space-y-3 text-slate-800 dark:text-slate-100">
           {user ? (
             <>
               {/* Logged-In Profile Header */}
@@ -387,7 +405,8 @@ export const UserProfileButton: React.FC = () => {
               </button>
             </div>
           )}
-        </div>
+        </div>,
+        document.body,
       )}
 
       {/* Login Modal */}

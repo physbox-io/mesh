@@ -1,8 +1,10 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import ReactDOM from 'react-dom';
 import { Check, Cloud, CloudOff, Loader2, AlertTriangle, Download, Trash2, Sparkles, LogIn } from 'lucide-react';
-import { subscribeToPresetNotices, type PresetNotice } from '../utils/presetNotices';
-import { formatBytes, presetToFile, type PresetRemedy } from '../utils/presetStorage';
+import { subscribeToPresetNotices, announcePresetSave, type PresetNotice } from '../utils/presetNotices';
+import { formatBytes, presetToFile, savePreset, type PresetRemedy } from '../utils/presetStorage';
+import { SIGN_IN_REQUESTED_EVENT, SIGNED_IN_EVENT } from './UserProfileButton';
+import { useStore } from '../store/useStore';
 import { deleteUserPreset } from '../utils/userPresets';
 
 /**
@@ -79,6 +81,33 @@ export const PresetSaveNotice: React.FC = () => {
     // Revoked on the next tick rather than immediately: Safari has not always
     // finished reading the blob by the time click() returns.
     setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }, [notice]);
+
+  /*
+   * Sign in, then save again. The preset waits here rather than on the
+   * notice, which is gone by the time the sign-in window comes back; and the
+   * retry is automatic because signing in to save it was the whole request.
+   */
+  const awaitingSignIn = useRef<PresetNotice | null>(null);
+  useEffect(() => {
+    const done = (e: Event) => {
+      const waiting = awaitingSignIn.current;
+      if (!waiting || (e as CustomEvent<{ reason?: string }>).detail?.reason !== 'preset-save') return;
+      awaitingSignIn.current = null;
+      void savePreset(waiting.name, waiting.preset).then((result) => {
+        announcePresetSave(waiting.name, waiting.preset, result);
+        if (result.ok) useStore.getState().setActivePreset(`user:${waiting.name}`);
+      });
+    };
+    window.addEventListener(SIGNED_IN_EVENT, done);
+    return () => window.removeEventListener(SIGNED_IN_EVENT, done);
+  }, []);
+
+  const signInAndRetry = useCallback(() => {
+    if (!notice) return;
+    awaitingSignIn.current = notice;
+    setNotice(null);
+    window.dispatchEvent(new CustomEvent(SIGN_IN_REQUESTED_EVENT, { detail: { reason: 'preset-save' } }));
   }, [notice]);
 
   const deleteAndRetry = useCallback((names: string[]) => {
@@ -193,9 +222,13 @@ export const PresetSaveNotice: React.FC = () => {
           )}
 
           {remedy('signIn') && (
-            <span className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-xs opacity-80">
-              <LogIn className="w-3.5 h-3.5" /> Sign in from the account menu to keep presets in your account
-            </span>
+            <button
+              onClick={signInAndRetry}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-cyan-300 dark:border-cyan-500/40 text-cyan-700 dark:text-cyan-400 hover:bg-cyan-50 dark:hover:bg-cyan-500/10 font-bold cursor-pointer text-xs"
+              title="Sign in, then save this preset to your account"
+            >
+              <LogIn className="w-3.5 h-3.5" /> Sign in and save
+            </button>
           )}
 
           <button
