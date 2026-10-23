@@ -316,6 +316,11 @@ export function setJointParams(mj: Mujoco, model: MjModel, data: MjData, inputs:
   }
 }
 
+/** The mass matrix's diagonal entry for a dof: the last entry of its row in the CSR `M`. */
+function massDiagonal(model: MjModel, data: MjData, dof: number): number {
+  return data.M[model.M_rowadr[dof] + model.M_rownnz[dof] - 1];
+}
+
 /**
  * How many sub-steps each model step needs so position-dependent forces stay
  * resolved: a stepper held by its coils is a stiff spring (~240Hz on its own
@@ -333,10 +338,9 @@ export function substepsFor(model: MjModel, data: MjData, inputs: ResolvedInput[
     stiffness.set(i.index, (stiffness.get(i.index) ?? 0) + Math.abs(i.value * i.harmonic.w));
   }
   if (stiffness.size === 0) return 1;
-  const qM = data.qM;
   let n = 1;
   for (const [dof, k] of stiffness) {
-    const inertia = Math.max(qM[model.dof_Madr[dof]], 1e-12);
+    const inertia = Math.max(massDiagonal(model, data, dof), 1e-12);
     const omega = Math.sqrt(k / inertia);
     const period = (2 * Math.PI) / omega;
     n = Math.max(n, Math.ceil(timestepS / (period / 20)));
@@ -383,7 +387,7 @@ export function readOutputs(mj: Mujoco, model: MjModel, data: MjData, names: str
       const dof = model.jnt_dofadr[id];
       if (field === 'pos') outputs[name] = data.qpos[model.jnt_qposadr[id]];
       else if (field === 'vel') outputs[name] = data.qvel[dof];
-      else if (field === 'inertia') outputs[name] = data.qM[model.dof_Madr[dof]];
+      else if (field === 'inertia') outputs[name] = massDiagonal(model, data, dof);
       // Everything acting on the dof except what the link itself applied:
       // M·qacc = passive − bias + actuator + constraint + applied.
       else outputs[name] = data.qfrc_passive[dof] - data.qfrc_bias[dof] + data.qfrc_actuator[dof] + data.qfrc_constraint[dof];
