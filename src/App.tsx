@@ -26,6 +26,7 @@ import { useSceneIo } from './hooks/useSceneIo';
 import { useEditShortcuts, useCompilerPreload } from './hooks/useAppGlobals';
 import { useCardCollapse } from './hooks/useCardCollapse';
 import { AppHeader } from './components/header/AppHeader';
+import { SceneBrowser } from './components/files/SceneBrowser';
 import { SettingsPopover } from './components/header/SettingsPopover';
 import { Viewport } from './components/scene/Viewport';
 import { ShareReportPortal } from './components/ShareReportPortal';
@@ -81,7 +82,6 @@ function App() {
     <div className={`flex flex-col h-dvh w-screen transition-colors duration-200 ${darkMode ? 'dark bg-slate-950 text-slate-100' : 'bg-slate-50 text-slate-900'} font-sans`}>
       <AppHeader
         presets={presets}
-        hasUnsavedWork={hasUnsavedWork}
         onExportJson={exportJson}
         onImportJson={importJson}
         onShare={shareState.handleShare}
@@ -125,6 +125,8 @@ function App() {
       <AppDialogs />
 
       <SavePresetModal {...presets.saveModal} />
+
+      <SceneBrowser presets={presets} hasUnsavedWork={hasUnsavedWork} onImportJson={importJson} />
 
       <ImportModals />
 

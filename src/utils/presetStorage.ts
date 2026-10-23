@@ -114,8 +114,14 @@ function biggestToFree(needed: number, exclude: string): { names: string[]; free
  * that is usually the end of it: the preset is saved, it is listed, it loads,
  * and the only difference is that it lives in the account rather than the tab.
  */
-export async function savePreset(name: string, preset: UserPreset): Promise<PresetSaveResult> {
+export async function savePreset(
+  name: string,
+  given: UserPreset,
+  { keepDate = false }: { keepDate?: boolean } = {},
+): Promise<PresetSaveResult> {
   const key = name.replace(/^user:/, '');
+  // When it was saved, for the scene browser; a rename keeps the date it had.
+  const preset: UserPreset = keepDate && typeof given.savedAt === 'number' ? given : { ...given, savedAt: Date.now() };
   let bytes: number;
   try { bytes = JSON.stringify(preset).length; } catch { bytes = 0; }
 

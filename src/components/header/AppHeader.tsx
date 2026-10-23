@@ -13,10 +13,9 @@ import { PresetPicker } from './PresetPicker';
 
 /** The top bar: presets, Run/Reset, files and history, and the app's switches. */
 export function AppHeader({
-  presets, hasUnsavedWork, onExportJson, onImportJson, onShare, darkMode, onToggleDarkMode,
+  presets, onExportJson, onImportJson, onShare, darkMode, onToggleDarkMode,
 }: {
   presets: PresetActions;
-  hasUnsavedWork: () => boolean;
   onExportJson: () => void;
   onImportJson: () => void;
   onShare: () => void;
@@ -72,7 +71,7 @@ export function AppHeader({
 
           <div className="h-5 w-px bg-slate-200 dark:bg-slate-800 hidden md:block" />
 
-          <PresetPicker presets={presets} hasUnsavedWork={hasUnsavedWork} />
+          <PresetPicker presets={presets} />
         </div>
 
         {/* Center/Right: Simulation Toolbar & Files */}

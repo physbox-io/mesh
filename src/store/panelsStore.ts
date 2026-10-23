@@ -49,7 +49,13 @@ interface PanelsState {
   openImageImport: (file?: File) => void;
   closeStlImport: () => void;
   closeImageImport: () => void;
+  /** The scene browser (open, examples, pattern boards), and the tab it is on. */
+  sceneBrowser: SceneBrowserTab | null;
+  openSceneBrowser: (tab?: SceneBrowserTab) => void;
+  closeSceneBrowser: () => void;
 }
+
+export type SceneBrowserTab = 'recent' | 'mine' | 'examples' | 'patterns';
 
 export const usePanels = create<PanelsState>((set) => ({
   isDocsOpen: false,
@@ -71,4 +77,7 @@ export const usePanels = create<PanelsState>((set) => ({
   openImageImport: (file) => set({ imageImport: { file: file ?? null } }),
   closeStlImport: () => set({ stlImport: null }),
   closeImageImport: () => set({ imageImport: null }),
+  sceneBrowser: null,
+  openSceneBrowser: (tab) => set({ sceneBrowser: tab ?? 'examples' }),
+  closeSceneBrowser: () => set({ sceneBrowser: null }),
 }));

@@ -16,6 +16,7 @@
 import { saveCloudPreset, removeCloudPreset, fetchCloudPresetData } from './cloudSync';
 import type { SceneNode } from '../types/scene';
 import type { NoteCard } from './noteCards';
+import { forgetRecent } from './sceneMeta';
 
 export const USER_PRESETS_KEY = 'physics_user_presets';
 
@@ -31,6 +32,15 @@ export interface UserPreset {
   nodes?: SceneNode[];
   noteCards?: NoteCard[];
   copilotMessages?: SavedCopilotMessage[];
+  /** When it was last saved, ms since the epoch. Missing on presets saved before it was kept. */
+  savedAt?: number;
+  /**
+   * A small JPEG of the viewport at the last save, as a data URL, for the
+   * scene browser. Kept with the preset so it travels to the account with it,
+   * but it is the app's, not the scene's: loading takes it off again, so it is
+   * never in the scene graph, a JSON export or a share link.
+   */
+  thumbnail?: string;
   [key: string]: unknown;
 }
 
@@ -272,6 +282,7 @@ export function deleteUserPreset(name: string): boolean {
     if (!writeAll(presets)) return false;
   }
   void removeCloudPreset(key);
+  forgetRecent(`user:${key}`);
   if (wasCloudOnly) announceChange();
   return true;
 }

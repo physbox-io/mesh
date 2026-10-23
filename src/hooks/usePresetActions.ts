@@ -11,6 +11,8 @@ import { announcePresetSave } from '../utils/presetNotices';
 import { cloudAutosave } from '../utils/cloudDocuments';
 import { getSyncedSceneGraph } from '../utils/mujocoSync';
 import type { SceneDocument } from './useSceneDocument';
+import { recordRecent } from '../utils/sceneMeta';
+import { captureViewportThumb } from '../utils/viewportCapture';
 
 export type PresetEntry = { name: string; emoji?: string };
 
@@ -38,7 +40,7 @@ export function usePresetActions(doc: SceneDocument) {
     return () => window.removeEventListener(USER_PRESETS_CHANGED_EVENT, bump);
   }, []);
 
-  // What the (always-unselected) preset dropdown shows when closed.
+  // The open scene's name, on the button that opens the scene browser.
   const activePresetLabel = useMemo(() => {
     if (!activePreset) return '✏️ Modified scene';
     if (activePreset.startsWith('user:')) return `💾 ${activePreset.replace('user:', '')}`;
@@ -50,6 +52,7 @@ export function usePresetActions(doc: SceneDocument) {
   // Load a preset and replace the note card with the preset's built-in card (if any)
   const loadPresetWithCard = useCallback((name: string) => {
     loadPreset(name);
+    recordRecent(name);
     const builtinKey = name.startsWith('user:') ? null : name;
     const presetCard = builtinKey ? makePresetNoteCard(builtinKey) : null;
     replaceDocument(presetCard ? [presetCard] : [], []);
@@ -63,6 +66,7 @@ export function usePresetActions(doc: SceneDocument) {
       return;
     }
     loadPreset(name);
+    recordRecent(name.startsWith('user:') ? name : `user:${name}`);
     let notes: NoteCard[] = [];
     let chat: CopilotMessage[] = [];
     try {
@@ -81,7 +85,9 @@ export function usePresetActions(doc: SceneDocument) {
     try {
       const { model, data } = useStore.getState();
       const syncedScene = getSyncedSceneGraph(sceneGraph, model, data, mujoco);
-      const preset = { ...syncedScene, noteCards, copilotMessages };
+      // The picture for the scene browser, of the scene being saved.
+      const thumbnail = captureViewportThumb();
+      const preset = { ...syncedScene, noteCards, copilotMessages, ...(thumbnail ? { thumbnail } : {}) };
       /*
        * Through savePreset, which says what happened: the browser's storage is
        * a few megabytes and a sculpted scene can be one of them. This used to
@@ -94,6 +100,7 @@ export function usePresetActions(doc: SceneDocument) {
       void savePreset(trimmed, preset).then((result) => {
         announcePresetSave(trimmed, preset, result);
         if (result.ok) {
+          recordRecent(`user:${trimmed}`);
           useStore.getState().setActivePreset(`user:${trimmed}`);
           markClean(noteCards, copilotMessages);
         }

@@ -110,8 +110,9 @@ skips the middleware.
 
 **Several things must be edited in more than one place:**
 
-- A new preset: only the `PRESETS` map in `presets/presetScenes.ts` — the header dropdown
-  is built from it.
+- A new preset: the `PRESETS` map in `presets/presetScenes.ts`, and a shelf for it in
+  `PRESET_SHELF` (`utils/sceneCatalog.ts`) — the scene browser (`components/files/`) is built
+  from both, and `tests/sceneCatalog.test.ts` fails for a preset with no shelf.
 - MCP docs: `mcp-docs.json` here (the server loads it from `~/mesh/` at import) *and* the standalone
   fallback at `physbox_mcp/physbox_mcp/mcp-docs/physics.json`. A new command also needs a handler in
   `useMCPBridge.ts`. **The MCP server must be restarted before any of it takes effect.**

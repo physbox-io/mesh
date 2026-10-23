@@ -3026,8 +3026,12 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
         // fixed still has them one level down. Read either, so those presets are
         // not stranded.
         const nested = (saved as { sceneGraph?: SceneGraph } | null)?.sceneGraph;
+        // The picture and the date belong to the preset, not the scene: left
+        // on, they would ride along in the graph into every export, share
+        // link and later save.
+        const { thumbnail: _thumbnail, savedAt: _savedAt, ...savedGraph } = saved ?? {};
         const savedScene: SceneGraph | null =
-          saved && Array.isArray(saved.nodes) ? (saved as unknown as SceneGraph)
+          saved && Array.isArray(saved.nodes) ? (savedGraph as unknown as SceneGraph)
           : nested && Array.isArray(nested.nodes) ? nested
           : null;
         // A preset with no nodes is a corrupt or half-written entry rather than

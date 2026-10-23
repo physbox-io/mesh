@@ -710,7 +710,7 @@ as the matching export.
 Two places to update:
 
 1. **`src/presets/presetScenes.ts`**: add the `export const myPreset` and add it to the `PRESETS` map at the bottom.
-2. **`src/App.tsx`**: add `<option value="my_preset">My Preset</option>` to the hardcoded `<select>` dropdown (Built-in Presets list). It does not populate from `PRESETS`.
+2. **`src/utils/sceneCatalog.ts`**: put its id on a shelf in `PRESET_SHELF`, which decides where the scene browser lists it under Examples. `tests/sceneCatalog.test.ts` fails for a preset with no shelf.
 
 ---
 

@@ -21,7 +21,7 @@ import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { Field, PatternFields, inputClass } from './PatternFields';
 
 /**
- * The surface pattern generators, in the preset dropdown's Generators group.
+ * The surface pattern generators, opened from the scene browser's Pattern boards.
  *
  * What this makes is not a pattern to be applied to something -- it is the
  * finished board. The body it puts in the scene is exactly the stock's

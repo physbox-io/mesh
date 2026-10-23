@@ -1,102 +1,56 @@
-import { Save, Trash2 } from 'lucide-react';
+import { Save, Trash2, FolderOpen, ChevronDown } from 'lucide-react';
+import { useEffect } from 'react';
 import { useStore } from '../../store/useStore';
 import { useDialogs } from '../../store/dialogStore';
-import { PRESETS } from '../../presets/presetScenes';
-import { PATTERN_GROUPS, SURFACE_PATTERNS } from '../../utils/surfacePatterns';
-import { deleteUserPreset, listUserPresetNames, cloudOnlyPresetNames } from '../../utils/userPresets';
-import type { PresetActions, PresetEntry } from '../../hooks/usePresetActions';
+import { usePanels, type SceneBrowserTab } from '../../store/panelsStore';
+import { listRecent } from '../../utils/sceneMeta';
+import { deleteUserPreset, listUserPresetNames } from '../../utils/userPresets';
+import type { PresetActions } from '../../hooks/usePresetActions';
+
+/** Where the browser opens: what was opened lately, else your own scenes, else the examples. */
+function firstTab(): SceneBrowserTab {
+  if (listRecent().length > 0) return 'recent';
+  try { if (listUserPresetNames().length > 0) return 'mine'; } catch { /* the examples, then */ }
+  return 'examples';
+}
 
 /**
- * The scene preset dropdown, with Update and Delete beside it while a saved
- * preset of the user's is open.
+ * The open scene's name, which opens the scene browser, with Update and
+ * Delete beside it while a saved scene of the user's is open.
  */
-export function PresetPicker({ presets, hasUnsavedWork }: { presets: PresetActions; hasUnsavedWork: () => boolean }) {
-  const { activePresetLabel, loadPresetWithCard, loadUserPresetWithCard, saveUserPresetByName } = presets;
+export function PresetPicker({ presets }: { presets: PresetActions }) {
+  const { activePresetLabel, saveUserPresetByName } = presets;
   const activePreset = useStore((s) => s.activePreset);
-  const openPatternGenerator = useStore((s) => s.openPatternGenerator);
+  const openSceneBrowser = usePanels((s) => s.openSceneBrowser);
+  // Ctrl+O opens the browser, rather than the browser's own "Open file",
+  // which would load a file as a page and leave the app.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey || e.key.toLowerCase() !== 'o') return;
+      e.preventDefault();
+      openSceneBrowser(firstTab());
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [openSceneBrowser]);
   const openDialog = useDialogs((s) => s.openDialog);
   const closeDialog = useDialogs((s) => s.closeDialog);
   const showNotice = useDialogs((s) => s.showNotice);
   return (
     <div className="flex items-center min-w-0 max-lg:flex-1 bg-slate-100 dark:bg-slate-800/80 p-0.5 rounded-lg border border-slate-200/80 dark:border-slate-700/60 shadow-inner">
-      {/* The select never *holds* the active preset: its value is always
-          the placeholder below, so picking any entry — including the one
-          already loaded — is a real change event and reloads the scene.
-          Bound to activePreset instead, re-picking Blank after adding a
-          body fires nothing at all and the scene is never cleared. */}
-      <select
-        aria-label="Scene preset"
-        value=""
-        onChange={(e) => {
-          const v = e.target.value;
-          if (!v) return;
-          // A generator is not a preset: it opens a dialog and builds a
-          // board from the stock already on the bench. It lives in this
-          // list because this is where someone looks for "start me off
-          // with something", which is what it is.
-          if (v.startsWith('generator:')) { openPatternGenerator(v.slice('generator:'.length)); return; }
-          const applyPresetLoad = () => {
-            if (v.startsWith('user:')) loadUserPresetWithCard(v);
-            else loadPresetWithCard(v);
-          };
-          if (hasUnsavedWork()) {
-            openDialog({
-              title: 'Replace the current scene?',
-              confirmLabel: 'Replace scene',
-              tone: 'amber',
-              body: <p>Its unsaved changes, note cards and copilot chat will be lost.</p>,
-              onCancel: () => closeDialog(),
-              onConfirm: () => {
-                closeDialog();
-                applyPresetLoad();
-              },
-            });
-            return;
-          }
-          applyPresetLoad();
-        }}
-        className="bg-transparent text-slate-700 dark:text-slate-100 text-xs rounded-md block px-2 py-1 outline-none font-medium cursor-pointer border-none max-lg:flex-1 max-lg:min-w-0"
+      {/* The current scene's name, and the way to every other one. A button
+          rather than the <select> it replaced: the select had grown to eighty
+          entries, generators included, and could not search. */}
+      <button
+        onClick={() => openSceneBrowser(firstTab())}
+        className="flex items-center gap-1.5 min-w-0 lg:w-[19.5rem] max-lg:flex-1 px-2 py-1 rounded-md text-xs font-medium text-slate-700 dark:text-slate-100 hover:bg-slate-200 dark:hover:bg-slate-700 cursor-pointer"
+        title="Open a scene, an example or a pattern board (Ctrl+O)"
+        aria-label="Open scene"
       >
-        <option value="" disabled hidden>{activePresetLabel}</option>
-        <optgroup label="⬜ Built-in Presets" className="bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300">
-          {Object.entries(PRESETS as Record<string, PresetEntry>).map(([id, p]) => (
-            <option key={id} value={id}>{p.emoji ? `${p.emoji} ` : ''}{p.name}</option>
-          ))}
-        </optgroup>
-
-        {/* Generators: patterns built to the size of the stock, not saved scenes. Text goes on a face instead. */}
-        {PATTERN_GROUPS.map((group) => {
-          const inGroup = SURFACE_PATTERNS.filter((p) => !p.figure && (p.group ?? 'Nature') === group);
-          if (inGroup.length === 0) return null;
-          return (
-            <optgroup key={group} label={`🔧 Generators: ${group}`} className="bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300">
-              {inGroup.map((p) => (
-                <option key={p.id} value={`generator:${p.id}`}>{p.label}…</option>
-              ))}
-            </optgroup>
-          );
-        })}
-
-        {/* User Presets */}
-        {(() => {
-          let keys: string[];
-          let inAccountOnly: Set<string>;
-          try {
-            keys = listUserPresetNames();
-            inAccountOnly = new Set(cloudOnlyPresetNames());
-          } catch {
-            return null;
-          }
-          if (keys.length === 0) return null;
-          return (
-            <optgroup label="📁 Saved Presets" className="bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300">
-              {keys.sort().map(k => (
-                <option key={`user:${k}`} value={`user:${k}`}>{inAccountOnly.has(k) ? '☁️' : '💾'} {k}</option>
-              ))}
-            </optgroup>
-          );
-        })()}
-      </select>
+        <FolderOpen className="w-3.5 h-3.5 shrink-0 text-slate-500 dark:text-slate-400" />
+        <span className="truncate flex-1 text-left">{activePresetLabel}</span>
+        <ChevronDown className="w-3 h-3 shrink-0 text-slate-400" />
+      </button>
 
       {activePreset && activePreset.startsWith('user:') && (
         <>

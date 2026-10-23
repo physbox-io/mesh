@@ -8,6 +8,7 @@ import { useEffect } from 'react';
 import { getStoredAuthToken } from '../utils/apiClient';
 import { tabSession } from '../utils/tabSession';
 import { useViewQuality } from '../store/viewQualityStore';
+import { renderViewportNow, captureViewportThumb } from '../utils/viewportCapture';
 import { summarizeTrajectory } from '../utils/trajectorySummary';
 import { authoredQuat, orientationOf } from '../utils/bodyOrientation';
 import { pocketMesh, type PocketSpec } from '../utils/pocketCutter';
@@ -4150,10 +4151,15 @@ export function useMCPBridge() {
           // `Array.isArray(saved.nodes)` guard found nothing and returned
           // quietly: every preset saved over MCP reported ok and then loaded as
           // an empty scene.
+          // Dated and pictured like a save by hand, so it sits in the scene
+          // browser the same way.
+          const thumbnail = captureViewportThumb();
           const saved = saveUserPreset(userPresetKey, {
             ...store.sceneGraph,
             noteCards: (window as unknown as PhysicsWindow)._physics_getNoteCards?.() || [],
             copilotMessages: (window as unknown as PhysicsWindow)._physics_getCopilotMessages?.() || [],
+            savedAt: Date.now(),
+            ...(thumbnail ? { thumbnail } : {}),
           });
           if (!saved) return { ok: false, error: 'Could not write the preset to local storage' };
           return { ok: true, preset: `user:${userPresetKey}` };
@@ -4390,27 +4396,8 @@ export function useMCPBridge() {
             await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
           }
 
-          const scene = win._physics_scene;
-          const camera = win._physics_camera;
-          // The EffectComposer (ambient occlusion) owns the render loop once it's
-          // mounted, so a raw gl.render() below would draw a frame with no AO
-          // applied — the screenshot would silently disagree with what's on
-          // screen. Render through the composer when it's there.
-          const composer = win._physics_composer;
-          if (composer) {
-            try {
-              composer.render();
-            } catch {
-              // Fall through to the raw render below.
-            }
-          } else if (scene && camera) {
-            try {
-              gl.render(scene, camera);
-            } catch {
-              // A render can throw if the context is lost; the read below will
-              // fail honestly rather than returning a stale frame silently.
-            }
-          }
+          // Through the composer when there is one; see renderViewportNow.
+          renderViewportNow();
 
           const dataUrl = gl.domElement.toDataURL('image/png');
           if (useViewQuality.getState().showColliders !== restoreColliders) {
@@ -4423,7 +4410,7 @@ export function useMCPBridge() {
             height: gl.domElement.height,
             // Says whether the frame was drawn to order or is whatever the
             // canvas happened to be holding.
-            rendered: Boolean(scene && camera),
+            rendered: Boolean(win._physics_scene && win._physics_camera),
           };
         }
 
