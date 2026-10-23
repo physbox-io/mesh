@@ -3390,6 +3390,7 @@ export function useMCPBridge() {
             rawJointType === 'miter' ||
             rawJointType === 'finger' ||
             rawJointType === 'butt' ||
+            rawJointType === 'glue' ||
             msg.boardThicknessMm !== undefined ||
             msg.board_thickness_mm !== undefined ||
             msg.wallThicknessMm !== undefined ||
