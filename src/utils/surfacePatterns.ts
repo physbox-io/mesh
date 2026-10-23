@@ -52,6 +52,7 @@ import { GEOMETRIC_PATTERNS } from './patternsGeometric';
 import { NATURAL_PATTERNS } from './patternsNatural';
 import { ORNAMENT_PATTERNS } from './patternsOrnament';
 import { TEXT_PATTERN } from './textPattern';
+import { IMAGE_PATTERN } from './imagePattern';
 
 export {
   DEFAULT_DEPTH_FRACTION,
@@ -1708,11 +1709,11 @@ const CORE_PATTERNS: PatternSpec[] = [
 
 /**
  * Every pattern, each wrapped with the layout controls (fit, frame, symmetry,
- * fade, soften) and listed in the order of its menu group. Text comes first
- * and is not wrapped: it places itself, and a frame or a mirror is not
- * something lettering wants.
+ * fade, soften) and listed in the order of its menu group. Text and the
+ * picture come first and are not wrapped: they place themselves, and a frame
+ * or a mirror is not something lettering or a height map wants.
  */
-export const SURFACE_PATTERNS: PatternSpec[] = [TEXT_PATTERN, ...[
+export const SURFACE_PATTERNS: PatternSpec[] = [TEXT_PATTERN, IMAGE_PATTERN, ...[
   ...ORNAMENT_PATTERNS,
   ...FITTED_PATTERNS,
   ...CORE_PATTERNS,

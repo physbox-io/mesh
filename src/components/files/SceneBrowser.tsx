@@ -15,8 +15,12 @@ import { renameScene, duplicateScene } from '../../utils/sceneFiles';
 import { SavedSceneList, type SavedScene } from './SavedSceneList';
 import { ExampleGrid, PatternGrid, RecentGrid, SectionHeading, type RecentItem } from './SceneCards';
 
-/** The generators: every pattern but lettering, which goes on a face rather than making a board. */
-const BOARD_PATTERNS = SURFACE_PATTERNS.filter((p) => !p.figure);
+/**
+ * The generators: every pattern but lettering and pictures, which need
+ * `prepare` (a font, a decode) before they build and go on a face instead;
+ * a picture as a board is Import Image.
+ */
+const BOARD_PATTERNS = SURFACE_PATTERNS.filter((p) => !p.figure && !p.prepare);
 const EXAMPLES = exampleEntries();
 
 type SavedSort = 'date' | 'name';

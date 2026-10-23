@@ -143,7 +143,25 @@ export function texturedSurfaceKey(geom: SceneGeom, halfLen?: number): string {
   const base = geom.type === 'mesh'
     ? `mesh:${idOf(geom.renderVertices ?? geom.vertices)}:${idOf(geom.faces)}`
     : `${geom.type}:${(geom.size || []).join(',')}:${halfLen ?? ''}`;
-  return `${base}|${JSON.stringify(geom.textures ?? [])}|${JSON.stringify(geom.faceSplits ?? [])}`;
+  return `${base}|${JSON.stringify(geom.textures ?? [], gridTag)}|${JSON.stringify(geom.faceSplits ?? [])}`;
+}
+
+// A picture pattern carries its pixels as up to a megabyte of base64, and this
+// key is made on every render. A string is the same object however often the
+// scene is cloned, so its tag is looked up rather than the whole of it copied
+// into every key.
+const gridTags = new Map<string, string>();
+function gridTag(key: string, value: unknown): unknown {
+  if (key !== 'imageGrid' || typeof value !== 'string' || value.length < 256) return value;
+  let tag = gridTags.get(value);
+  if (!tag) {
+    let h = 0;
+    for (let i = 0; i < value.length; i += 7) h = (Math.imul(h, 31) + value.charCodeAt(i)) | 0;
+    tag = `grid:${value.length}:${h >>> 0}`;
+    if (gridTags.size > 16) gridTags.clear();
+    gridTags.set(value, tag);
+  }
+  return tag;
 }
 
 /** The cached textured surface, without building it. */

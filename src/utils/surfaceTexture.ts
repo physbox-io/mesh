@@ -1398,7 +1398,8 @@ function patternLookup(spec: PatternSpec, opts: PatternOptions, scale: number, u
   }
   const C = uv.wrapC;
   // A figure is placed once, centred opposite the cut -- on the point picked.
-  if (spec.figure) {
+  // So is a wrapping picture, stretched to the circumference.
+  if (spec.figure || spec.wraps) {
     const r = rectLookup(spec, opts, scale, C, uv.height, cellM, uv.twistDeg);
     return { heightAt: (u, v) => r.heightAt(mod(u, C), v), wrap: { scaled: 1, blended: false } };
   }

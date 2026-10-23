@@ -692,7 +692,7 @@ const stripMeshArrays = (node: SceneNode): SceneNode => {
       if (rest.textures?.some((t) => t.options?.outline)) {
         rest.textures = rest.textures.map((t) => {
           if (!t.options?.outline) return t;
-          const { outline: _outline, outlineSig: _sig, ...options } = t.options;
+          const { outline: _outline, outlineSig: _sig, imageGrid: _grid, ...options } = t.options;
           return { ...t, options };
         });
       }
@@ -1509,7 +1509,7 @@ export async function applySinglePatternToBody(targetId: string, m: Record<strin
     depthM: ((emboss ? 1 : -1) * depthMm) / 1000,
     borderM: m.borderMm !== undefined ? Math.max(0, m.borderMm) / 1000 : prev?.borderM ?? DEFAULT_TEXTURE_BORDER_M,
     // Lettering's strokes want finer triangles than a texture does.
-    cellM: m.cellMm !== undefined ? Math.max(0.05, m.cellMm) / 1000 : prev?.cellM ?? (spec.figure ? 0.00025 : DEFAULT_TEXTURE_CELL_M),
+    cellM: m.cellMm !== undefined ? Math.max(0.05, m.cellMm) / 1000 : prev?.cellM ?? (spec.figure || spec.wraps ? 0.00025 : DEFAULT_TEXTURE_CELL_M),
     seedAt: prev?.seedAt ?? pick.seedAt,
     seedNormal: prev?.seedNormal ?? pick.seedNormal,
     maxTiltDeg: m.stopAtDeg ?? prev?.maxTiltDeg,
@@ -1549,7 +1549,7 @@ export async function applySinglePatternToBody(targetId: string, m: Record<strin
     index,
     geomName: geom.name,
     pattern: describe({ ...texture, depthM: region.depthM }),
-    options: Object.fromEntries(Object.entries(texture.options ?? {}).filter(([k]) => k !== 'outline' && k !== 'outlineSig')),
+    options: Object.fromEntries(Object.entries(texture.options ?? {}).filter(([k]) => k !== 'outline' && k !== 'outlineSig' && k !== 'imageGrid')),
     faceMm: [mm(region.extentM[0]), mm(region.extentM[1])],
     areaMm2: Math.round(region.areaM2 * 1e6),
     projection: region.projection,

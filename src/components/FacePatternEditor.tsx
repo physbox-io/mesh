@@ -36,8 +36,9 @@ import { hexToRgb, rgbToHex } from '../utils/hexColor';
 const FACE_PATTERNS = SURFACE_PATTERNS.filter((p) => !p.throughCut);
 
 const DEFAULT_DEPTH_MM = 1.5;
-/** Lettering wants finer triangles than a texture: a letter's stroke is a millimetre or two. */
+/** Lettering wants finer triangles than a texture: a letter's stroke is a millimetre or two. A picture's detail is a pixel. */
 const FIGURE_CELL_M = 0.00025;
+const fineCell = (spec: { figure?: boolean; wraps?: boolean }) => !!(spec.figure || spec.wraps);
 const FIGURE_DEPTH_MM = 1;
 
 const mm = (m: number) => Math.round(m * 1e5) / 100;
@@ -50,7 +51,7 @@ function newTexture(target: FacePatternTarget): SurfaceTexture {
     options: { ...spec.defaults },
     depthM: -(spec.figure ? FIGURE_DEPTH_MM : DEFAULT_DEPTH_MM) / 1000,
     borderM: DEFAULT_TEXTURE_BORDER_M,
-    cellM: spec.figure ? FIGURE_CELL_M : DEFAULT_TEXTURE_CELL_M,
+    cellM: fineCell(spec) ? FIGURE_CELL_M : DEFAULT_TEXTURE_CELL_M,
     seedAt: target.seedAt,
     seedNormal: target.seedNormal,
   };
@@ -167,7 +168,7 @@ export const FacePatternEditor: React.FC = () => {
     patch({
       pattern: id,
       options: { ...next.defaults },
-      ...(stock ? { cellM: next.figure ? FIGURE_CELL_M : DEFAULT_TEXTURE_CELL_M } : {}),
+      ...(stock ? { cellM: fineCell(next) ? FIGURE_CELL_M : DEFAULT_TEXTURE_CELL_M } : {}),
     });
     setPrepError(null);
   };
@@ -404,7 +405,7 @@ export const FacePatternEditor: React.FC = () => {
             disabled={draft === applied || preparing}
             className="px-3 py-1.5 text-xs font-semibold text-fuchsia-700 dark:text-fuchsia-300 border border-fuchsia-300 dark:border-fuchsia-800 hover:bg-fuchsia-50 dark:hover:bg-fuchsia-950/40 disabled:opacity-40 disabled:hover:bg-transparent disabled:cursor-default rounded-lg transition-colors cursor-pointer"
           >
-            {preparing ? 'Loading font…' : 'Apply'}
+            {preparing ? (spec.figure ? 'Loading font…' : 'Reading picture…') : 'Apply'}
           </button>
           <button
             onClick={() => void done()}

@@ -54,7 +54,15 @@ export type PatternField =
       hint?: string;
       section?: string;
     }
-  | { kind: 'font'; key: string; label: string; hint?: string; section?: string };
+  | { kind: 'font'; key: string; label: string; hint?: string; section?: string }
+  | {
+      /** A picture, picked from a file: stored as a data URL until `prepare` reads it. */
+      kind: 'image';
+      key: string;
+      label: string;
+      hint?: string;
+      section?: string;
+    };
 
 /**
  * A control shown only while another option has one of some values: the arc's
@@ -183,6 +191,12 @@ export interface PatternSpec {
    * once, centred, never repeated round a cylinder.
    */
   figure?: boolean;
+  /**
+   * Placed once round a surface that goes all the way round, the board as
+   * wide as the circumference: a picture drawn as the unrolled side of a
+   * cylinder closes on itself. Unlike a figure, its 1s are high ground.
+   */
+  wraps?: boolean;
   /**
    * Work that cannot happen in `build`, done before the options are saved:
    * fetching a font and laying the text out. Returns the options to save,

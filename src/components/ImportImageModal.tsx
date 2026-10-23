@@ -15,6 +15,7 @@ import { drawHeightmapPreview } from '../utils/heightmapPreview';
 import { useSettled } from '../hooks/useSettled';
 import type { SceneGeom, SceneNode } from '../types/scene';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
+import { decodeImageFile } from '../utils/decodeImage';
 
 interface ImportImageModalProps {
   isOpen: boolean;
@@ -35,33 +36,7 @@ interface LoadedImage {
 }
 
 async function decodeImage(file: File): Promise<LoadedImage> {
-  const url = URL.createObjectURL(file);
-  try {
-    const img = new Image();
-    img.decoding = 'async';
-    await new Promise<void>((resolve, reject) => {
-      img.onload = () => resolve();
-      img.onerror = () => reject(new Error('Browser could not decode this image.'));
-      img.src = url;
-    });
-    const scale = Math.min(1, MAX_DECODE_PX / Math.max(img.naturalWidth, img.naturalHeight));
-    const w = Math.max(1, Math.round(img.naturalWidth * scale));
-    const h = Math.max(1, Math.round(img.naturalHeight * scale));
-    const canvas = document.createElement('canvas');
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    if (!ctx) throw new Error('Could not open a 2D canvas to read the image.');
-    ctx.drawImage(img, 0, 0, w, h);
-    return {
-      name: file.name.replace(/\.[^.]+$/, ''),
-      width: w,
-      height: h,
-      data: ctx.getImageData(0, 0, w, h).data,
-    };
-  } finally {
-    URL.revokeObjectURL(url);
-  }
+  return { name: file.name.replace(/\.[^.]+$/, ''), ...(await decodeImageFile(file, MAX_DECODE_PX)) };
 }
 
 /** Hillshade the sampled height grid so the preview reads as relief, not as a photo. */
