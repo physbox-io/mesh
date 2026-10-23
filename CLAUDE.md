@@ -108,6 +108,10 @@ both agree. Look a geom up by its owning body and name (`sceneTree.patchGeom`), 
 across the whole tree, and don't write `sceneGraph` through `useStore.setState`, which
 skips the middleware.
 
+**`updateScene` replaces the whole graph.** `updateScene({ nodes })` drops everything the scene
+says about itself — `simFidelity`, `castPrep`, `referenceImages`, its `name`. Anything that only
+changes the bodies passes `{ ...sceneGraph, nodes }`; only building a new scene starts clean.
+
 **Several things must be edited in more than one place:**
 
 - A new preset: the `PRESETS` map in `presets/presetScenes.ts`, and a shelf for it in

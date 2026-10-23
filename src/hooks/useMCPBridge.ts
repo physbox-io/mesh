@@ -39,6 +39,8 @@ import { SCULPT_BASES, buildSculptBase, type SculptBaseId } from '../utils/sculp
 import { fromSceneGeom, toSceneGeom, splitComponents, type BrushType } from '../utils/sculptMesh';
 import { applySculptStroke, probeSurface, sculptSummary, undoSculptStroke, BRUSH_TYPES } from '../utils/sculptCommands';
 import { cutSculptOffThread } from '../utils/sculptCutClient';
+import { describeReferenceImage, normalizeReferencePicture, readReferencePatch, upsertReferenceImage } from '../utils/referenceImages';
+import { sceneContentBounds } from '../utils/frameScene';
 import {
   addFacesMm, addRingMm, bevelEdgesMm, bevelFaceMm, bridgeFacesMm, describeLattice,
   dimensionSelectionMm, extrudeMm,
@@ -214,7 +216,9 @@ const settleScene = async (
   // skipRecompile: this initial set uses placeholder (pre-scad) mesh geoms, so
   // an immediate recompile here would be both wasted work and another stale
   // build racing against the final one below.
-  store.updateScene({ nodes }, true);
+  // A caller that only adds a body keeps what the scene says about itself:
+  // print fidelity, cast prep, reference pictures, its name.
+  store.updateScene(replacesScene ? { nodes } : { ...store.sceneGraph, nodes }, true);
   await autoCompileScad(nodes);
   await applyDeclarativePreCsgFeatures(nodes);
   // Boolean bodies compile through the same OpenSCAD pool, and just as
@@ -315,12 +319,46 @@ function commitLattice(node: SceneNode, lattice: Lattice) {
   store.applyLattice(node.id, serializeCage(lattice), node.latticeSubdiv ?? 0);
 }
 
-function sculptMeshOf(node: SceneNode | null | undefined) {
-  const geom = (node?.geoms ?? []).find((g) => g.type === 'mesh');
+function sculptMeshOf(node: SceneNode | null | undefined, geomIndex = sculptGeomIndex(node)) {
+  const geom = node?.geoms?.[geomIndex];
   if (!geom?.renderVertices?.length || !geom?.faces?.length) {
     throw new Error(`'${node?.id}' has no sculptable mesh geom`);
   }
   return fromSceneGeom(geom.renderVertices, geom.faces);
+}
+
+/**
+ * Which geom the brushes work on: a sculpt body's clay, or on any other body
+ * the first mesh it carries that is not the output of a boolean - the rule the
+ * inspector's "Sculpt This Mesh" button uses. -1 when there is none.
+ */
+function sculptGeomIndex(node: SceneNode | null | undefined): number {
+  const geoms = node?.geoms ?? [];
+  if (node?.isSculpt) return geoms.findIndex((g) => g.type === 'mesh');
+  return geoms.findIndex((g) => g.type === 'mesh' && !g.csgDerived && !!g.renderVertices?.length && !!g.faces?.length);
+}
+
+/**
+ * Resolves an id to a body the sculpt tools can work on, and the geom they
+ * work on, or explains why it is not one.
+ *
+ * Any mesh can be brushed: a sculpt body, an imported STL, a generated scene
+ * mesh, a compiled OpenSCAD part. A boolean body cannot - what it draws is
+ * rebuilt from its primitives on every compile, so a stroke would last until
+ * the next one - and neither can a primitive, which has no mesh to move.
+ */
+function sculptTarget(store: ReturnType<typeof useStore.getState>, targetId: string): { node: SceneNode; geomIndex: number } {
+  if (!targetId) throw new Error('Missing targetId');
+  const node = findNodeInScene(store.sceneGraph.nodes, targetId);
+  if (!node) throw new Error(`No object with id '${targetId}'`);
+  if (node.csgEnabled && !node.isSculpt) {
+    throw new Error(`'${targetId}' is a boolean body: its mesh is rebuilt from its primitives on every change, so a stroke would not last. Brush a sculpt body or a mesh instead.`);
+  }
+  const geomIndex = sculptGeomIndex(node);
+  if (geomIndex < 0) {
+    throw new Error(`'${targetId}' has no mesh to sculpt - a primitive (box, sphere, cylinder...) is not one. Start from physics_create_sculpt, or import the shape with physics_import_stl.`);
+  }
+  return { node, geomIndex };
 }
 
 /**
@@ -1969,7 +2007,50 @@ export function useMCPBridge() {
                 note: 'Pins and sockets collide exactly; everything else collides as its hull or convex pieces. A clearance under about 0.1 mm is below what the contact can resolve.',
               },
             } : {}),
+            ...(store.sceneGraph.referenceImages?.length
+              ? { referenceImages: store.sceneGraph.referenceImages.map(describeReferenceImage) }
+              : {}),
           };
+
+        /*
+          A picture pinned in the viewport to model from. Without `imageId` it
+          adds one (`image` required: a data URL or bare base64, which the
+          server reads off disk for `path`); with `imageId` it changes that one.
+          `remove` takes one off, `clear` takes them all. One undo step either
+          way. Not `id`: that is the request's own id on the wire.
+        */
+        case 'SET_REFERENCE_IMAGE': {
+          const { imageId: id, image, remove, clear } = msg as Msg<{ imageId?: string; image?: string; remove?: boolean; clear?: boolean }>;
+          const current = store.sceneGraph.referenceImages ?? [];
+          const listed = (list: typeof current) => list.map(describeReferenceImage);
+          if (clear) {
+            store.setReferenceImages([]);
+            return { ok: true, removed: current.length, referenceImages: [] };
+          }
+          if (remove) {
+            if (!id) throw new Error('remove needs the imageId of the picture to take off');
+            if (!current.some((r) => r.id === id)) throw new Error(`No reference image with id '${id}'`);
+            const rest = current.filter((r) => r.id !== id);
+            store.setReferenceImages(rest);
+            return { ok: true, removed: id, referenceImages: listed(rest) };
+          }
+          const patch: Parameters<typeof upsertReferenceImage>[2] = readReferencePatch(msg);
+          if (msg.height !== undefined && msg.width === undefined) {
+            const h = Number(msg.height);
+            if (!Number.isFinite(h) || h <= 0 || h > 20) throw new Error('height must be more than 0 and at most 20 m');
+            patch.height = h;
+          }
+          if (typeof image === 'string' && image) {
+            Object.assign(patch, await normalizeReferencePicture(image.startsWith('data:') ? image : `data:image/png;base64,${image}`));
+          } else if (!id) {
+            throw new Error('Give path (or image) to add a reference image, or imageId to change one');
+          }
+          const { images, image: placed } = upsertReferenceImage(
+            useStore.getState().sceneGraph.referenceImages, id, patch, sceneContentBounds(store.sceneGraph.nodes),
+          );
+          store.setReferenceImages(images);
+          return { ok: true, ...describeReferenceImage(placed), referenceImages: listed(images) };
+        }
 
         case 'GET_TELEMETRY':
           return getPhysicsWorkerClient().getTelemetry().then(t => t || { error: 'No simulation telemetry available' });
@@ -2302,18 +2383,13 @@ export function useMCPBridge() {
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
               strokes?: Record<string, any>[];
             }>;
-          if (!targetId) throw new Error('Missing targetId');
-          const node = findNodeInScene(store.sceneGraph.nodes, targetId);
-          if (!node) throw new Error(`No object with id '${targetId}'`);
-          if (!node.isSculpt) {
-            throw new Error(`'${targetId}' is not a sculpt body — make one with physics_create_sculpt, or convert nothing: an imported mesh or a primitive cannot be brushed`);
-          }
+          const { node, geomIndex } = sculptTarget(store, targetId);
 
           const strokeList = Array.isArray(strokes) && strokes.length > 0
             ? strokes
             : [{ brush, at, radius, strength, invert, symmetryX, symmetry, detail, dynamicTopology, delta }];
 
-          const mesh = sculptMeshOf(node);
+          const mesh = sculptMeshOf(node, geomIndex);
           let lastResult: ReturnType<typeof applySculptStroke> | null = null;
           let totalVerticesChanged = 0;
 
@@ -2359,7 +2435,6 @@ export function useMCPBridge() {
             sculptVersion: (node.sculptVersion ?? 1) + 1,
           });
           const { vertices, renderVertices, faces } = toSceneGeom(mesh);
-          const geomIndex = Math.max(0, (node.geoms ?? []).findIndex((g: SceneGeom) => g.type === 'mesh'));
           store.updateNodeGeom(targetId, { vertices, renderVertices, faces }, geomIndex);
 
           const error = useStore.getState().lastCompileError;
@@ -2373,21 +2448,17 @@ export function useMCPBridge() {
 
         case 'UNDO_SCULPT': {
           const { targetId } = msg as Msg<{ targetId: string }>;
-          if (!targetId) throw new Error('Missing targetId');
-          const node = findNodeInScene(store.sceneGraph.nodes, targetId);
-          if (!node) throw new Error(`No object with id '${targetId}'`);
-          if (!node.isSculpt) throw new Error(`'${targetId}' is not a sculpt body`);
+          const { node, geomIndex } = sculptTarget(store, targetId);
 
           const stack = sculptHistory.get(targetId) ?? [];
           const entry = stack.pop();
           if (!entry) return { ok: false, error: 'No sculpt stroke of mine left to undo on this body', undoDepth: 0 };
           sculptHistory.set(targetId, stack);
 
-          const mesh = sculptMeshOf(node);
+          const mesh = sculptMeshOf(node, geomIndex);
           undoSculptStroke(mesh, entry);
           store.updateNode(targetId, { sculptVersion: (node.sculptVersion ?? 1) + 1 });
           const { vertices, renderVertices, faces } = toSceneGeom(mesh);
-          const geomIndex = Math.max(0, (node.geoms ?? []).findIndex((g: SceneGeom) => g.type === 'mesh'));
           store.updateNodeGeom(targetId, { vertices, renderVertices, faces }, geomIndex);
 
           return { ok: true, id: targetId, undoDepth: stack.length, ...sculptSummary(mesh) };
@@ -2407,10 +2478,7 @@ export function useMCPBridge() {
           const { targetId, polygon, direction, mode, cap } = msg as Msg<{
             targetId: string; polygon: number[][]; direction?: number[]; mode?: 'remove' | 'keep'; cap?: boolean;
           }>;
-          if (!targetId) throw new Error('Missing targetId');
-          const node = findNodeInScene(store.sceneGraph.nodes, targetId);
-          if (!node) throw new Error(`No object with id '${targetId}'`);
-          if (!node.isSculpt) throw new Error(`'${targetId}' is not a sculpt body`);
+          const { node, geomIndex } = sculptTarget(store, targetId);
           if (!Array.isArray(polygon) || polygon.length < 3 || polygon.some((p: unknown) => !Array.isArray(p) || p.length < 3)) {
             throw new Error("polygon must be three or more [x, y, z] points, in the body's own frame (metres)");
           }
@@ -2421,9 +2489,8 @@ export function useMCPBridge() {
             throw new Error("mode must be 'remove' (take the prism out) or 'keep' (keep only the prism)");
           }
 
-          const geomIndex = Math.max(0, (node.geoms ?? []).findIndex((g: SceneGeom) => g.type === 'mesh'));
           const geomBefore = node.geoms?.[geomIndex];
-          const mesh = sculptMeshOf(node);
+          const mesh = sculptMeshOf(node, geomIndex);
           const result = await cutSculptOffThread(mesh, { kind: 'polygon', polygon, direction }, { mode, cap });
           if (!result.ok) return { ok: false, id: targetId, error: result.error };
 
@@ -2918,15 +2985,12 @@ export function useMCPBridge() {
 
         case 'PROBE_SCULPT': {
           const { targetId, at } = msg as Msg<{ targetId: string }>;
-          if (!targetId) throw new Error('Missing targetId');
-          const node = findNodeInScene(store.sceneGraph.nodes, targetId);
-          if (!node) throw new Error(`No object with id '${targetId}'`);
-          if (!node.isSculpt) throw new Error(`'${targetId}' is not a sculpt body`);
+          const { node, geomIndex } = sculptTarget(store, targetId);
           const points: number[][] = pointList(at);
           if (!points.length || points.some((p: unknown) => !Array.isArray(p) || p.length < 3)) {
             throw new Error("at must be [x, y, z] or a list of them, in the body's own frame (metres)");
           }
-          return { ok: true, id: targetId, points: probeSurface(sculptMeshOf(node), points) };
+          return { ok: true, id: targetId, points: probeSurface(sculptMeshOf(node, geomIndex), points) };
         }
 
         /*
@@ -3198,7 +3262,7 @@ export function useMCPBridge() {
           const nodes = parent
             ? withChild(store.sceneGraph.nodes, parent.id, node)
             : [...store.sceneGraph.nodes, node];
-          store.updateScene({ nodes }, true);
+          store.updateScene({ ...store.sceneGraph, nodes }, true);
           await autoCompileScad([node]);
           await applyDeclarativePreCsgFeatures([node]);
           await compileCsgNodes(true);
@@ -3960,17 +4024,14 @@ export function useMCPBridge() {
 
         case 'GET_SCULPT': {
           const { targetId } = msg as Msg<{ targetId: string }>;
-          if (!targetId) throw new Error('Missing targetId');
-          const node = findNodeInScene(store.sceneGraph.nodes, targetId);
-          if (!node) throw new Error(`No object with id '${targetId}'`);
-          if (!node.isSculpt) throw new Error(`'${targetId}' is not a sculpt body`);
+          const { node, geomIndex } = sculptTarget(store, targetId);
           return {
             ok: true,
             id: targetId,
             name: node.name,
-            base: node.sculptBase,
+            ...(node.isSculpt ? { base: node.sculptBase } : { geom: node.geoms[geomIndex].name }),
             edited: !!node.sculptEdited,
-            ...sculptSummary(sculptMeshOf(node)),
+            ...sculptSummary(sculptMeshOf(node, geomIndex)),
           };
         }
 

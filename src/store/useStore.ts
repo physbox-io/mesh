@@ -2,7 +2,7 @@ import type { ScriptStateMap } from '../utils/scriptState';
 import { create, type StateCreator } from 'zustand';
 import { shareUnchanged } from '../utils/shareUnchanged';
 import * as THREE from 'three';
-import type { SceneGraph, SceneNode, SceneGeom, SceneJoint, GeomType, CsgOp, EdgeRoundFeature, RoundEdge, CastPrep, HardwareCutKind } from '../types/scene';
+import type { SceneGraph, SceneNode, SceneGeom, SceneJoint, GeomType, CsgOp, EdgeRoundFeature, RoundEdge, CastPrep, HardwareCutKind, ReferenceImage } from '../types/scene';
 import { bakeDraftInto, copyPrep, restoreShape, shapeSignature, unprepScene, type DraftParams } from '../utils/castPrep';
 import { hasEdgeRounds, reconcileEdgeRounds, withRoundFeature, withoutEdges } from '../utils/edgeRound';
 import type { GeomThreadSpec } from '../utils/metricThreads';
@@ -1945,6 +1945,12 @@ export interface PhysicsState {
   ) => string[];
   /** Set how finely contact is resolved (SceneGraph.simFidelity). One undo step. */
   setSimFidelity: (fidelity: 'standard' | 'print') => void;
+  /**
+   * Replace the reference images (SceneGraph.referenceImages). Drawn only, so no
+   * recompile. `recordUndo: false` is for the frames of a drag after its first,
+   * so a slider pull is one undo step, not one per pixel.
+   */
+  setReferenceImages: (images: ReferenceImage[], recordUndo?: boolean) => void;
 
   // --- Rounding edges ------------------------------------------------------
   //
@@ -3356,7 +3362,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
 
   separateSculpt: (nodeId, pieces, geomName) => {
     const node = findNode(get().sceneGraph.nodes, nodeId);
-    if (!node?.isSculpt || pieces.length === 0) return [nodeId];
+    if (!node || pieces.length === 0) return [nodeId];
     get().prepareForDiscreteChange();
     const newScene = cloneSceneGraph(get().sceneGraph);
     const first = findNode(newScene.nodes, nodeId);
@@ -3686,6 +3692,11 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     set({ sceneGraph: newScene, extraSelectedIds: [] });
     get().recompile(newScene, undefined, true);
     return ids;
+  },
+
+  setReferenceImages: (images, recordUndo = true) => {
+    if (recordUndo) get().prepareForDiscreteChange();
+    set({ sceneGraph: { ...get().sceneGraph, referenceImages: images.length ? images : undefined } });
   },
 
   setSimFidelity: (fidelity) => {

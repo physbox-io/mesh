@@ -30,6 +30,7 @@ import { isGizmoBusy } from './gizmoBusy';
 import { MeasureTool } from './MeasureTool';
 import { DimensionOverlay } from './DimensionOverlay';
 import { EdgeRoundTool } from './EdgeRoundTool';
+import { ReferenceImages } from './ReferenceImages';
 import {
   PaintStrokeController, CameraController, DragInteractionController,
   SceneCapture, SceneVisuals,
@@ -320,6 +321,8 @@ export function SceneCanvas({ threeSceneRef, axisCanvasRef, darkMode, onImportSc
         setSelectedNodeId={setSelectedNodeId}
       />
   
+      <ReferenceImages />
+
       <AxisLegendDrawer externalRef={axisCanvasRef} />
       <CameraController />
       <DragInteractionController />
