@@ -206,9 +206,9 @@
     },
     "jointTypes": {
       "free": "6-DOF unconstrained; body falls freely under gravity. Use for dropped objects.",
-      "hinge": "1-DOF rotation around axis. Specify axis:[x,y,z]. Use for wheels, doors, pendulums.",
-      "slide": "1-DOF translation along axis. Specify axis:[x,y,z]. Use for pistons, rails.",
-      "ball": "3-DOF rotation (ball-and-socket). Use with stiffness+damping for springs, sway."
+      "hinge": "1-DOF rotation around axis. Specify axis:[x,y,z]. Use for wheels, doors, pendulums. For a bearing, lid or arm that should hold its angle, set frictionloss (dry friction, N*m); damping alone only slows it.",
+      "slide": "1-DOF translation along axis. Specify axis:[x,y,z]. Use for pistons, rails. For a slide that should hold its place, set frictionloss (dry friction, N).",
+      "ball": "3-DOF rotation (ball-and-socket). Use with stiffness+damping for springs, sway, or frictionloss for a joint that holds its pose."
     },
     "geomFields": {
       "name": "string: unique identifier (required)",
@@ -220,7 +220,7 @@
       "euler": "[roll,pitch,yaw] degrees: local rotation, alternative to quat",
       "fromto": "[x1,y1,z1, x2,y2,z2]: capsule/cylinder endpoints in local space, overrides size/pos/quat",
       "mass": "number: override density-based mass for this geom",
-      "density": "number kg/m3: what the geom is made of. MuJoCo weighs a geom by its volume at a default density of 1000 (water), so a hollow or airy shape left at the default comes out absurdly heavy. Ignored when mass is set. Prefer it over mass for anything that may be rescaled, since it keeps weighing the right thing. Oak ~700, pine ~500, concrete ~2400, steel ~7800; a tree crown, a hedge or any other mostly-air volume is single digits.",
+      "density": "number kg/m3: what the geom is made of. MuJoCo weighs a geom by its volume at a default density of 1000 (water), so a hollow or airy shape left at the default comes out absurdly heavy. Ignored when mass is set. Prefer it over mass for anything that may be rescaled, since it keeps weighing the right thing. Oak ~700, pine ~500, concrete ~2400, steel ~7800, acrylic ~1190, PLA ~1240; a tree crown, a hedge or any other mostly-air volume is single digits. DENSITY IS PER GEOM, so one body can mix materials: an acrylic ring with steel bolts is a ring geom at 1190 plus cylinder geoms at 7800 on the same body. A SCAD body compiles to ONE mesh geom with one density, so for a mixed part keep the SCAD for the main material and add the others as extra primitive geoms on that body (a bolt that should not collide can take contype 0 / conaffinity 0), or split the part into bodies welded together. physics_get_scene_summary's inertial.massKg shows the result.",
       "friction": "[slide, spin, roll]: contact friction coefficients. slide: tangential sliding (0=icy, 2=rubbery). spin: torsional around contact normal (typical 0.005). roll: rolling resistance (typical 0.0001).",
       "contype": "integer bitmask: collision group this geom belongs to",
       "conaffinity": "integer bitmask: which groups this geom collides with",
@@ -340,6 +340,7 @@
       "scalingWarning": "MuJoCo units are in meters, whereas standard OpenSCAD designs are in millimeters. You MUST wrap your top-level modules or calls in a scale([0.001, 0.001, 0.001]) block. Failing to do so compiles the mesh 1000x larger, which breaks rendering, zoom bounds, and physics stability. physics_validate_scad will flag this for you: it returns boundingBoxM on every successful compile, plus a `warning` field if the result looks like a forgotten scale().",
       "fontSupport": "Do not letter a part in SCAD. text() is unreliable in this openscad-wasm build (it can silently compile to empty or wrong geometry), and there is no need to hand-build letterforms: build the part in SCAD, then put the lettering on its face with physics_apply_pattern, pattern: 'text' (any Google font, engraved or embossed, straight, arc, wave or SVG path), or as a `patterns` entry on the body. It follows the face, curved or flat, and exports with the part.",
       "smoothRecesses": "`use <physbox/pocket.scad>` and subtract pocket(width, length, depth, corner_r=0, floor=\"flat\", floor_r=-1, outline=\"rect\") (millimetres, rim at z=0 going down, outline \"rect\" or \"ellipse\", floor \"flat\" with a fillet or \"bowl\"). It builds a dense polyhedron, so a shallow wide dish is smooth — a scaled sphere at a normal $fn comes out stepped. Do not hand-write the polyhedron.",
+      "mixedMaterials": "A SCAD body is one mesh geom with one density (or mass). For a part in more than one material, e.g. an acrylic ring with steel bolts, give the SCAD geom the main material's density and add the others as extra primitive geoms on the same body with their own density; set contype 0 and conaffinity 0 on any that should not collide. Splitting each solid of the SCAD output into its own geom is not supported. Check the result in physics_get_scene_summary (inertial.massKg).",
       "collisionProxies": "A SCAD body can draw its OWN collision proxies, so they follow its parameters instead of going stale like hand-placed hidden boxes: mention `$physbox_collision` in the script and put the proxy shapes in `if ($physbox_collision) { ... } else { <the part> }`. The script is compiled a second time with it set true, and each separate solid of that output becomes one convex collider in place of the automatic decomposition (physics_get_scene_summary: collidesAs 'N convex pieces'). Keep each proxy convex (a cube, a hull()) and in the same units and transform as the part. Mass is shared across the proxies by their volume, so set mass if the part's own figure matters."
     },
     "tips": [
