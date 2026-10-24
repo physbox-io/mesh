@@ -2234,6 +2234,7 @@ self.onmessage = async (evt: MessageEvent) => {
           post({ type: 'HEADLESS_RESULT', id: msg.id, ok: false, error: String((e as Error)?.message || e), warnings: [] });
           break;
         }
+        applyMeshFiles(msg.meshFiles, msg.dropMeshes);
         const result = runHeadless(msg.xml, msg.sceneGraph, msg.ticks, msg.stride);
         post({ type: 'HEADLESS_RESULT', id: msg.id, ...result });
         break;

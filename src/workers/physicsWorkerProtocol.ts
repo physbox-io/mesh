@@ -175,7 +175,12 @@ export type MainToWorkerMessage =
   | { type: 'SET_QPOS'; jointName: string; axis: number; value: number | readonly number[] }
   | { type: 'SET_CTRL'; actuatorName: string; value: number }
   | { type: 'UPDATE_SCRIPT'; nodeId: string; script: string }
-  | { type: 'RUN_HEADLESS'; id: string; xml: string; sceneGraph: SceneGraph; ticks: number; stride?: number }
+  | {
+      type: 'RUN_HEADLESS'; id: string; xml: string; sceneGraph: SceneGraph; ticks: number; stride?: number;
+      /** As BUILD's: the headless XML is compiled against the same ledger. */
+      meshFiles?: { name: string; bytes: Uint8Array }[];
+      dropMeshes?: string[];
+    }
   | { type: 'GET_HISTORY'; id: string; query?: HistoryQuery }
   | { type: 'GET_TELEMETRY'; id: string }
   | { type: 'CLEAR_HISTORY' }

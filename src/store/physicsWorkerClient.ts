@@ -355,9 +355,16 @@ export class PhysicsWorkerClient {
   // well would decimate twice.
   runHeadless(xml: string, sceneGraph: SceneGraph, ticks: number, stride = 1): Promise<HeadlessRunResult> {
     const id = Math.random().toString(36).slice(2);
+    // The same ledger as `build`: an XML compiled against it can name a mesh
+    // file the last live build only sent as text (a SCAD body just updated),
+    // and without these the worker fails with "Error opening file m_….msh".
+    const { add, drop } = this.meshFiles.take();
     return new Promise((resolve, reject) => {
       this.pendingHeadless.set(id, { resolve, reject });
-      this.worker.postMessage({ type: 'RUN_HEADLESS', id, xml, sceneGraph: withoutMeshData(sceneGraph), ticks, stride });
+      this.worker.postMessage(
+        { type: 'RUN_HEADLESS', id, xml, sceneGraph: withoutMeshData(sceneGraph), ticks, stride, meshFiles: add, dropMeshes: drop },
+        add.map((f) => f.bytes.buffer as ArrayBuffer),
+      );
     });
   }
 
