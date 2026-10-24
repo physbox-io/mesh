@@ -8,9 +8,11 @@
 // Physics is bit-identical - qpos and qvel after 2000 steps match on every
 // preset - and 3.17 comes out ~7% faster overall, back level with 3.9.
 //
-// It takes about two minutes, so the result is cached by input hash under
-// ~/.cache/mesh-mujoco-wasm: each machine pays once, and CI restores the
-// directory. MESH_SKIP_WASM_OPT=1 leaves the stock wasm in place.
+// It takes minutes (about eight in Cloud Build for both wasms), so the result
+// is cached by input hash under $XDG_CACHE_HOME/mesh-mujoco-wasm: each machine
+// pays once, CI restores the directory with actions/cache, and the deploy
+// trigger restores it from a Cloud Storage bucket (see the Dockerfile).
+// MESH_SKIP_WASM_OPT=1 leaves the stock wasm in place.
 
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';

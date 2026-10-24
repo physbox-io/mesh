@@ -11,6 +11,12 @@ COPY . .
 ARG GITHUB_TOKEN
 ENV GITHUB_TOKEN=$GITHUB_TOKEN
 
+# postinstall's re-optimised MuJoCo wasm (scripts/optimize-mujoco-wasm.mjs)
+# takes ~8 minutes cold. The deploy trigger restores its cache from a Cloud
+# Storage bucket into ./.cache before this build and saves it back after, so
+# point the script at the copy that came in with `COPY . .`.
+ENV XDG_CACHE_HOME=/app/.cache
+
 # Build the frontend application
 # `ci`, not `install`: the lockfile is what the tests ran against, and the
 # shared @physbox-io packages are on a caret range. `npm install` is free to

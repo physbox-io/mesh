@@ -1,0 +1,3 @@
+# Where the deploy trigger copies the wasm cache out of the builder stage;
+# kept out of the context so the final build reuses the builder layers.
+.wasm-cache-out
