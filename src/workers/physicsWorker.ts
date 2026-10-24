@@ -318,7 +318,7 @@ const createScriptApi = (node: SceneNode): Record<string, unknown> => {
     id: node.id,
     name: node.name,
     isKeyPressed: (keyName: string) => !!keyName && pressedKeys.has(keyName.toLowerCase()),
-    setPosition: _guard((pos: number[] | number, bodyName = node.id) => {
+    setPosition: _guard((pos: number[] | number, bodyName: string = node.id) => {
       const mdl = model!, dat = data!;
       const { joint, jId } = _resolveSetterJoint('setPosition', bodyName);
       const qposadr = mdl.jnt_qposadr[jId];
@@ -333,7 +333,7 @@ const createScriptApi = (node: SceneNode): Record<string, unknown> => {
         dat.qpos[qposadr] = _alongAxis('setPosition', pos, joint);
       }
     }),
-    setVelocity: _guard((vel: number[] | number, bodyName = node.id) => {
+    setVelocity: _guard((vel: number[] | number, bodyName: string = node.id) => {
       const mdl = model!, dat = data!;
       const { joint, jId } = _resolveSetterJoint('setVelocity', bodyName);
       const dofadr = mdl.jnt_dofadr[jId];
@@ -347,7 +347,7 @@ const createScriptApi = (node: SceneNode): Record<string, unknown> => {
         dat.qvel[dofadr] = _alongAxis('setVelocity', vel, joint);
       }
     }),
-    setAngularVelocity: _guard((angvel: number[] | number, bodyName = node.id) => {
+    setAngularVelocity: _guard((angvel: number[] | number, bodyName: string = node.id) => {
       const mdl = model!, dat = data!;
       const { joint, jId } = _resolveSetterJoint('setAngularVelocity', bodyName);
       const dofadr = mdl.jnt_dofadr[jId];
