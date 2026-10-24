@@ -617,11 +617,32 @@ function stockReport(scene: SceneGraph, stock: { widthMm: number; depthMm: numbe
   if (design.x > stock.widthMm + 0.5) over.push(`${r(design.x - stock.widthMm)} mm wider`);
   if (design.y > stock.depthMm + 0.5) over.push(`${r(design.y - stock.depthMm)} mm deeper`);
   if (design.z > stock.thicknessMm + 0.05) over.push(`${r(design.z - stock.thicknessMm)} mm taller`);
+  // A design of several parts is usually cut one part at a time, and the box
+  // round the assembly says nothing about whether each fits. The machining
+  // export does take the whole scene, so that figure stays; each part's comes
+  // beside it, turned 90° on the board if that is what it takes.
+  const parts = (scene.nodes?.length ?? 0) > 1
+    ? scene.nodes.flatMap((n) => {
+        const m = measurePart({ ...scene, nodes: [n] }, '+z', 100);
+        if (!m) return [];
+        const fitsPlan = (m.x <= stock.widthMm + 0.5 && m.y <= stock.depthMm + 0.5)
+          || (m.y <= stock.widthMm + 0.5 && m.x <= stock.depthMm + 0.5);
+        const fits = fitsPlan && m.z <= stock.thicknessMm + 0.05;
+        return [{ id: n.id, sizeMm: { width: r(m.x), depth: r(m.y), height: r(m.z) }, fits }];
+      })
+    : [];
+  const misfits = parts.filter((p) => !p.fits).map((p) => p.id);
   return {
     ...stock,
     designMm: { width: r(design.x), depth: r(design.y), height: r(design.z) },
     fits: over.length === 0,
     ...(over.length ? { note: `The design is ${over.join(', ')} than your stock.` } : {}),
+    ...(parts.length ? {
+      parts,
+      partsNote: misfits.length
+        ? `On its own, ${misfits.join(', ')} ${misfits.length === 1 ? 'does' : 'do'} not fit the stock. designMm is the whole scene, which is what physics_export_machining cuts as one piece.`
+        : 'Each part fits the stock on its own. designMm is the whole scene, which is what physics_export_machining cuts as one piece.',
+    } : {}),
   };
 }
 
