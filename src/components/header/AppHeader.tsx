@@ -1,4 +1,4 @@
-import { Play, Square, Settings, X, RotateCcw, Trash2, Info, Menu, Save, Download, Upload, Undo, Redo, PanelRight, Printer, Sparkles, Sun, Moon, Image as ImageIcon, Share2, Frame } from 'lucide-react';
+import { Play, Square, Settings, X, RotateCcw, Trash2, Info, Menu, Save, Download, Upload, Undo, Redo, PanelRight, Printer, Sparkles, Sun, Moon, Image as ImageIcon, Share2 } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 import { useStore } from '../../store/useStore';
 import { usePanels } from '../../store/panelsStore';
@@ -10,8 +10,6 @@ import { AgentMachineBanner } from '../AgentMachineBanner';
 import { UserProfileButton } from '../UserProfileButton';
 import { AppLogo } from './AppLogo';
 import { PresetPicker } from './PresetPicker';
-import { useDialogs } from '../../store/dialogStore';
-import { addReferencePicture } from '../../utils/addReferencePicture';
 
 /** The top bar: presets, Run/Reset, files and history, and the app's switches. */
 export function AppHeader({
@@ -169,26 +167,6 @@ export function AppHeader({
             >
               <ImageIcon className="w-3.5 h-3.5" />
             </button>
-
-            <label
-              className="flex items-center justify-center p-1 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700 text-fuchsia-600 dark:text-fuchsia-400 transition-colors cursor-pointer"
-              title="Reference picture: pin a photo or drawing in the viewport to model from"
-            >
-              <Frame className="w-3.5 h-3.5" />
-              <input
-                type="file"
-                accept="image/*"
-                className="hidden"
-                onChange={(e) => {
-                  const file = e.target.files?.[0];
-                  e.target.value = '';
-                  if (file) {
-                    addReferencePicture(file).catch((err) =>
-                      useDialogs.getState().showNotice('Could not add the picture', String(err?.message ?? err), 'amber'));
-                  }
-                }}
-              />
-            </label>
 
             <button
               onClick={() => openStlImport()}

@@ -12,7 +12,7 @@ const AXES = ['X', 'Y', 'Z'] as const;
 
 /**
  * The scene's reference images, over the viewport above the view buttons.
- * Mounted only while the scene has one; they are added from the header.
+ * Mounted only while the scene has one; they are added from the palette's Others.
  *
  * Every field writes straight through so the picture moves as you type or
  * drag. Focusing a field or pressing on the slider arms one undo step, taken

@@ -10,6 +10,9 @@ import {
   TubeIcon, EllipsoidIcon, RingIcon, SculptIcon, LatticeIcon, CurveIcon, PulleyIcon, RopeIcon, MeshIcon, ScadIcon,
 } from './shapeIcons';
 import { InsertBossIcon, NutTrapIcon, CounterboreIcon, BearingPocketIcon, DShaftHubIcon } from './hardwareIcons';
+import { Frame } from 'lucide-react';
+import { addReferencePicture } from '../../utils/addReferencePicture';
+import { useDialogs } from '../../store/dialogStore';
 
 /** What the palette adds by click: every component but the lattice, which has its own handler. */
 export type PaletteComponentType = Exclude<Parameters<PhysicsState['addComponent']>[0], 'lattice'>;
@@ -207,6 +210,30 @@ export const ComponentPalette: React.FC<ComponentPaletteProps> = ({
               Add Note Card
             </span>
           </div>
+
+          {/* Reference picture - spans 2 cols; the same as the header's frame button */}
+          <label
+            title="Pin a photo or drawing in the viewport to model from"
+            className="col-span-2 p-2 border border-dashed border-fuchsia-300 dark:border-fuchsia-800 rounded-xl bg-gradient-to-r from-fuchsia-50/40 via-white to-fuchsia-50/40 dark:from-fuchsia-950/20 dark:via-slate-900 dark:to-fuchsia-950/20 flex items-center justify-center gap-2 cursor-pointer hover:-translate-y-0.5 hover:shadow-md hover:border-fuchsia-400 dark:hover:border-fuchsia-600 active:translate-y-0 active:scale-[0.98] transition-all duration-150 group select-none"
+          >
+            <Frame className="w-4 h-4 text-fuchsia-600 dark:text-fuchsia-400 group-hover:scale-110 group-hover:-rotate-6 transition-transform duration-200" />
+            <span className="text-[10px] font-bold text-slate-700 dark:text-slate-200 group-hover:text-fuchsia-600 dark:group-hover:text-fuchsia-400 transition-colors">
+              Add Reference Picture
+            </span>
+            <input
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                e.target.value = '';
+                if (file) {
+                  addReferencePicture(file).catch((err) =>
+                    useDialogs.getState().showNotice('Could not add the picture', String(err?.message ?? err), 'amber'));
+                }
+              }}
+            />
+          </label>
         </div>
       </div>
     </>
