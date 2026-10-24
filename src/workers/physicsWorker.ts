@@ -18,7 +18,7 @@
 // memory, stepping is driven by TICK messages from the main thread's own
 // requestAnimationFrame loop (see stepTick below). With it — the usual case,
 // since the dev server and nginx both send COOP/COEP — the worker paces itself
-// on a 4 ms timer (startWorkerLoop) and posts frames at display rate.
+// at display rate (startWorkerLoop): one tick and one frame per 16 ms.
 
 import type load_mujoco from '@mujoco/mujoco';
 // The same asset the Emscripten glue would fetch by import.meta.url, as a URL.
@@ -832,8 +832,8 @@ const post = (msg: WorkerToMainMessage, transfer: Transferable[] = []) => self.p
 // physicsWorkerClient's `tick()`), not by a worker-local setInterval: a
 // worker-local timer runs on its own clock, out of phase with the render loop,
 // and added roughly a frame of latency to dragging a body. With shared memory
-// the TICKs are ignored and the worker's own 4 ms loop steps instead — see
-// startWorkerLoop and FRAME_INTERVAL_MS.
+// the TICKs are ignored and the worker's own display-rate loop steps instead —
+// see startWorkerLoop and FRAME_INTERVAL_MS.
 // ---- Breakable welds ------------------------------------------------------
 //
 // MuJoCo spends a measurable force holding every weld together and reports it in
