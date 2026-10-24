@@ -129,6 +129,11 @@ export function SculptSurface({
   const cutting = useRef(false);
   /** The path a Carve drag has drawn so far, in the mesh's frame, or null when none is open. */
   const carvePath = useRef<number[][] | null>(null);
+  /**
+   * For an Add drag: the plane, through where it started and facing the
+   * camera, that the path follows once it leaves the clay, as Grab's does.
+   */
+  const carvePlane = useRef<THREE.Plane | null>(null);
   /** The drawn path, shown on the clay until the carve is done. */
   const carveLineRef = useRef<THREE.LineSegments>(null);
   const drawCarveLine = useCallback((path: number[][] | null) => {
@@ -381,6 +386,11 @@ export function SculptSurface({
       useStore.getState().setDraggedNodeId(nodeId);
       useStore.getState().setSculptNotice(null);
       carvePath.current = [[point.x, point.y, point.z]];
+      if (brushRef.current.carveAdd) {
+        const inverse = new THREE.Matrix4().copy(groupRef.current!.matrixWorld).invert();
+        const facing = event.ray.direction.clone().transformDirection(inverse).normalize().negate();
+        carvePlane.current = new THREE.Plane().setFromNormalAndCoplanarPoint(facing, new THREE.Vector3(point.x, point.y, point.z));
+      }
       drawCarveLine(carvePath.current);
       showCursor(point);
       return;
@@ -419,6 +429,7 @@ export function SculptSurface({
     event.stopPropagation();
 
     const path = carvePath.current;
+    if (path && carvePlane.current) return; // an Add drag follows its plane; see onGrabMove
     if (path) {
       // A point every half radius: the worker fills in between, and finer
       // is only more hulls for the boolean.
@@ -530,15 +541,19 @@ export function SculptSurface({
       width: b.radius * 2,
       depth: (b.depth ?? 0) > 0 ? b.depth! : DEFAULT_CARVE_DEPTH,
       profile: b.carveProfile ?? 'round',
-      fill: b.carveFill === true && path.length >= 3,
+      fill: b.carveFill === true && !b.carveAdd && path.length >= 3,
       ...(b.symmetryX ? { mirror: b.symmetryAxis ?? 'x' } : {}),
-    }, {});
+      ...(b.carveTaper ? { taper: b.carveTaper } : {}),
+      ...(b.carveAngle ? { tilt: (b.carveAngle * Math.PI) / 180 } : {}),
+      add: b.carveAdd === true,
+    }, { mode: b.carveAdd ? 'add' : 'remove' });
     cutting.current = false;
     return applyCutResult(target, revision, result);
   }, [mesh, applyCutResult]);
 
   const finishStroke = useCallback(() => {
     grabPlane.current = null;
+    carvePlane.current = null;
     const path = carvePath.current;
     if (path) {
       carvePath.current = null;
@@ -578,7 +593,7 @@ export function SculptSurface({
     // means the next dab jumps from wherever the pointer re-enters. Except a
     // grab, which is pulling the surface out past its own edge by design, and
     // ends when the button is let go (onGrabMove's pointerup).
-    if (grabPlane.current) return;
+    if (grabPlane.current || carvePlane.current) return;
     finishStroke();
   }, [showCursor, finishStroke]);
 
@@ -596,6 +611,24 @@ export function SculptSurface({
    * at its silhouette, which is why this listens on the window.
    */
   const onGrabMove = useCallback((event: PointerEvent) => {
+    const addPlane = carvePlane.current, addPath = carvePath.current;
+    if (addPlane && addPath && groupRef.current) {
+      const { camera } = getThree();
+      const rect = gl.domElement.getBoundingClientRect();
+      const ray = new THREE.Raycaster();
+      ray.setFromCamera(new THREE.Vector2(
+        ((event.clientX - rect.left) / rect.width) * 2 - 1,
+        -((event.clientY - rect.top) / rect.height) * 2 + 1,
+      ), camera);
+      const local = ray.ray.clone().applyMatrix4(new THREE.Matrix4().copy(groupRef.current.matrixWorld).invert());
+      const at = local.intersectPlane(addPlane, new THREE.Vector3());
+      const last = addPath[addPath.length - 1];
+      if (at && Math.hypot(at.x - last[0], at.y - last[1], at.z - last[2]) >= brushRef.current.radius * 0.5) {
+        addPath.push([at.x, at.y, at.z]);
+        drawCarveLine(addPath);
+      }
+      return;
+    }
     const plane = grabPlane.current;
     const group = groupRef.current;
     const previous = lastPoint.current;
@@ -615,10 +648,10 @@ export function SculptSurface({
     stamp(previous, { x: at.x - previous.x, y: at.y - previous.y, z: at.z - previous.z });
     lastPoint.current = { ...previous, x: at.x, y: at.y, z: at.z };
     showCursor(lastPoint.current);
-  }, [getThree, gl, stamp, showCursor]);
+  }, [getThree, gl, stamp, showCursor, drawCarveLine]);
 
   useEffect(() => {
-    const up = () => { if (grabPlane.current) { grabPlane.current = null; finishStroke(); } };
+    const up = () => { if (grabPlane.current || carvePlane.current) { grabPlane.current = null; finishStroke(); } };
     window.addEventListener('pointermove', onGrabMove);
     window.addEventListener('pointerup', up);
     return () => {

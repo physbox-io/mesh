@@ -364,13 +364,44 @@ export function SculptPanel() {
             </button>
           ))}
         </div>
-        <Toggle
-          label="Fill outline"
-          active={brush.carveFill === true}
-          onClick={() => setBrush({ carveFill: !brush.carveFill })}
-          icon={PaintBucket}
-          hint="Cut out the whole area inside the loop you drag, to the depth, with a rounded edge: an eye socket, a mouth. Off, only a groove along the line."
+        <div className="flex gap-1.5">
+          <Toggle
+            label="Add"
+            active={brush.carveAdd === true}
+            onClick={() => setBrush({ carveAdd: !brush.carveAdd })}
+            icon={Expand}
+            hint="Add clay along the stroke instead of cutting: a round tube as wide as the brush. Start on the clay and drag off it: a stem, a horn, a handle."
+          />
+          <Toggle
+            label="Fill outline"
+            active={brush.carveFill === true}
+            onClick={() => setBrush({ carveFill: !brush.carveFill })}
+            icon={PaintBucket}
+            hint="Cut out the whole area inside the loop you drag, to the depth, with a rounded edge: an eye socket, a mouth. Off, only a groove along the line."
+          />
+        </div>
+        <Slider
+          label="Taper"
+          value={brush.carveTaper ?? 0}
+          min={0}
+          max={0.5}
+          step={0.05}
+          onChange={(carveTaper) => setBrush({ carveTaper })}
+          format={(v) => (v === 0 ? 'none' : `${Math.round(v * 100)}% each end`)}
+          hint="Narrow and shallow the cut to a point towards both ends of the stroke: a rib that fades into the stem, a stem that thins to its tip."
         />
+        {!brush.carveAdd && (
+          <Slider
+            label="Angle"
+            value={brush.carveAngle ?? 0}
+            min={-60}
+            max={60}
+            step={5}
+            onChange={(carveAngle) => setBrush({ carveAngle })}
+            format={(v) => `${v}°`}
+            hint="Lean the cutter to one side of the stroke: a slanted cut, an undercut lid. 0 cuts straight into the surface."
+          />
+        )}
       </>)}
       {!carving && (
       <Slider
@@ -396,7 +427,7 @@ export function SculptPanel() {
           hint="How much of the brush works at full strength before its edge falls away. Soft blends; hard leaves a crisp edge, for sockets and slits."
         />
       )}
-      {(brush.type === 'draw' || carving) && (
+      {(brush.type === 'draw' || (carving && !brush.carveAdd)) && (
         <Slider
           label="Depth"
           value={(brush.depth ?? 0) * 1000}

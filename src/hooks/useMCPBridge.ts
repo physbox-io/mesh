@@ -39,7 +39,7 @@ import { SCULPT_BASES, buildSculptBase, buildSculptBaseSized, MAX_SCULPT_SIZE, M
 import { fromSceneGeom, toSceneGeom, splitComponents, type BrushType } from '../utils/sculptMesh';
 import { applySculptStroke, probeSurface, sculptSummary, undoSculptStroke, BRUSH_TYPES } from '../utils/sculptCommands';
 import { cutSculptOffThread } from '../utils/sculptCutClient';
-import { grooveAlongSurface, type CarveProfile } from '../utils/sculptCarve';
+import type { CarveProfile } from '../utils/sculptCarve';
 import { describeReferenceImage, normalizeReferencePicture, readReferencePatch, upsertReferenceImage } from '../utils/referenceImages';
 import { sceneContentBounds } from '../utils/frameScene';
 import {
@@ -2696,29 +2696,37 @@ export function useMCPBridge() {
         }
 
         case 'SCULPT_CARVE': {
-          const { targetId, path, widthMm, depthMm, profile = 'round', symmetry, fill } = msg as Msg<{
-            targetId: string; path: number[][]; widthMm: number; depthMm: number;
+          const { targetId, path, widthMm, depthMm, profile = 'round', symmetry, fill, taper, angleDeg, mode = 'cut' } = msg as Msg<{
+            targetId: string; path: number[][]; widthMm: number; depthMm?: number;
             profile?: CarveProfile; symmetry?: 'x' | 'y' | 'z'; fill?: boolean;
+            taper?: number; angleDeg?: number; mode?: 'cut' | 'add';
           }>;
           const { node, geomIndex } = sculptTarget(store, targetId);
           const points = pointList(path);
           if (!points.length || points.some((p: unknown) => !Array.isArray(p) || p.length < 3)) {
             throw new Error("path must be [x, y, z] or a list of them, in the body's own frame (metres)");
           }
-          if (!(widthMm > 0) || !(depthMm > 0)) throw new Error('widthMm and depthMm must be positive millimetres');
+          if (mode !== 'cut' && mode !== 'add') throw new Error("mode must be 'cut' or 'add'");
+          const add = mode === 'add';
+          if (!(widthMm > 0) || (!add && !((depthMm ?? 0) > 0))) throw new Error('widthMm and depthMm must be positive millimetres');
           if (!['round', 'v', 'flat'].includes(profile)) throw new Error("profile must be 'round', 'v' or 'flat'");
           if (symmetry !== undefined && !['x', 'y', 'z'].includes(symmetry)) throw new Error("symmetry must be 'x', 'y' or 'z'");
+          if (taper !== undefined && !(taper >= 0 && taper <= 0.5)) throw new Error('taper is the share of the length at each end, 0 to 0.5');
 
+          // Snapped, filled and cut in the worker, which already holds the
+          // mesh: done here, the closest-point searches on 80 k vertices held
+          // the page long enough for the browser to call it crashed.
           const geomBefore = node.geoms?.[geomIndex];
           const mesh = sculptMeshOf(node, geomIndex);
-          const { spec, missed } = grooveAlongSurface(mesh, points, {
-            width: widthMm / 1000, depth: depthMm / 1000, profile, mirror: symmetry, fill: fill === true,
-          });
-          if (!spec.path.length) {
-            return { ok: false, id: targetId, error: 'No point of the path is on the clay.', missed };
-          }
-          const result = await cutSculptOffThread(mesh, spec, { mode: 'remove', cap: true });
-          return { ...await applySculptCutResult(targetId, geomIndex, geomBefore, mesh, result), ...(missed.length ? { missed } : {}) };
+          const result = await cutSculptOffThread(mesh, {
+            kind: 'carvePath', path: points, width: widthMm / 1000, depth: (depthMm ?? 0) / 1000, profile,
+            ...(symmetry ? { mirror: symmetry } : {}),
+            fill: fill === true && !add,
+            ...(taper ? { taper } : {}),
+            ...(angleDeg ? { tilt: (angleDeg * Math.PI) / 180 } : {}),
+            add,
+          }, { mode: add ? 'add' : 'remove', cap: true });
+          return applySculptCutResult(targetId, geomIndex, geomBefore, mesh, result);
         }
 
         /*

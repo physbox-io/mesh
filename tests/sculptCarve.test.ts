@@ -147,4 +147,41 @@ describe('carving a groove', () => {
     expect(grooveDepthMm()).toBeLessThan(1.6);
     expect(isWatertight(mesh)).toBe(true);
   });
+
+  it('a tapered groove is full depth in the middle and fades towards its ends', () => {
+    const clay = icosphere(R, 4);
+    // Down the -Y face along Z, so depth can be read off by height.
+    const path = Array.from({ length: 21 }, (_, i) => { const a = -0.5 + 0.05 * i; return [0, -R * Math.cos(a), R * Math.sin(a)]; });
+    const { spec } = grooveAlongSurface(clay, path, { width: 0.004, depth: 0.003, profile: 'round', taper: 0.4 });
+    const cut = cutSculptWith(wasm, clay, spec);
+    if (!cut.ok) throw new Error(cut.error);
+    const depthNear = (zc: number) => {
+      let d = 0;
+      for (let i = 0; i < cut.mesh.vertexCount; i++) {
+        const [x, y, z] = [cut.mesh.positions[i * 3], cut.mesh.positions[i * 3 + 1], cut.mesh.positions[i * 3 + 2]];
+        if (y < 0 && Math.abs(x) < 0.001 && Math.abs(z - zc) < 0.0015) d = Math.max(d, R - Math.hypot(x, y, z));
+      }
+      return d * 1000;
+    };
+    const middle = depthNear(0);
+    const end = depthNear(R * Math.sin(0.45));
+    expect(middle).toBeGreaterThan(2.8);
+    expect(end).toBeLessThan(middle * 0.5);
+    expect(isWatertight(cut.mesh)).toBe(true);
+  });
+
+  it('Add joins a tapered tube onto the clay, off the surface as drawn', () => {
+    const clay = icosphere(R, 4);
+    // A stem: from inside the top, straight up 12 mm.
+    const path = [0, 3, 6, 9, 12, 15].map((h) => [0, 0, R - 0.002 + h / 1000]);
+    const { spec } = grooveAlongSurface(clay, path, { width: 0.006, depth: 0, profile: 'round', add: true, taper: 0.3 });
+    const result = cutSculptWith(wasm, clay, spec);
+    if (!result.ok) throw new Error(result.error);
+    let top = 0;
+    for (let i = 0; i < result.mesh.vertexCount; i++) top = Math.max(top, result.mesh.positions[i * 3 + 2]);
+    expect(top * 1000).toBeGreaterThan(R * 1000 + 10);
+    expect(result.pieces).toBe(1);
+    expect(isWatertight(result.mesh)).toBe(true);
+  });
 });
+

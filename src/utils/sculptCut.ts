@@ -76,7 +76,7 @@ export function loadManifold(): Promise<ManifoldToplevel> {
  */
 export type PrismMap = (x: number, y: number, t: number) => [number, number, number];
 
-export type CutMode = 'remove' | 'keep';
+export type CutMode = 'remove' | 'keep' | 'add';
 
 export interface CutOptions {
   /** 'remove' takes the prism out; 'keep' keeps only what is inside it. */
@@ -271,7 +271,7 @@ export function cutSculpt(
 
   let result: ManifoldT | null = null;
   try {
-    result = mode === 'keep' ? clay.intersect(prism) : clay.subtract(prism);
+    result = mode === 'keep' ? clay.intersect(prism) : mode === 'add' ? clay.add(prism) : clay.subtract(prism);
     if (result.isEmpty()) {
       return {
         ok: false,
@@ -476,6 +476,7 @@ export type PrismSpec =
   | {
     kind: 'carvePath'; path: number[][]; width: number; depth: number;
     profile: CarveProfile; mirror?: 'x' | 'y' | 'z'; fill?: boolean;
+    taper?: number; tilt?: number; add?: boolean;
   };
 
 /** Build the prism a spec describes and cut the mesh with it. */
@@ -494,7 +495,7 @@ export function cutSculptWith(
     const groove = buildGroove(wasm, spec);
     if (!groove) return { ok: false, error: 'The carve needs a width, a depth and at least one point on the clay.' };
     try {
-      const result = cutSculpt(wasm, mesh, groove, { mode: 'remove', cap: true });
+      const result = cutSculpt(wasm, mesh, groove, { mode: spec.add ? 'add' : 'remove', cap: true });
       if (result.ok && result.facesAfter === result.facesBefore && result.mesh.vertexCount === mesh.vertexCount) {
         return { ok: false, error: 'The carve did not reach the clay.' };
       }

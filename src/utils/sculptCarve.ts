@@ -43,10 +43,26 @@ export interface GrooveSpec {
    * fill an outline (grooveAlongSurface's `fill`).
    */
   extra?: { path: number[][]; normals: number[][]; profile?: CarveProfile }[];
+  /**
+   * The share of the path's length, at each end, over which the cutter
+   * narrows and shallows to a point (0 to 0.5). A rib valley that fades into
+   * the stem instead of stopping in a round end.
+   */
+  taper?: number;
+  /** Radians the cutter leans sideways, about the path: a slanted cut, an undercut lid. */
+  tilt?: number;
+  /**
+   * Join the swept tool onto the clay instead of cutting it away: a ball of
+   * `width` swept along the path, which here may leave the surface. A
+   * tapered, curving tube: a stem, a horn, a handle.
+   */
+  add?: boolean;
 }
 
 /** Points round the cutter: enough that its facets are under a hair at any size anyone carves. */
 const SEGMENTS = 64;
+/** How big a tapered cutter is at the very ends of its path, as a share of its full size. */
+const TAPER_TIP = 0.15;
 /** Rings down the ball of a round cutter. */
 const BALL_RINGS = 12;
 
@@ -77,17 +93,45 @@ function profileRings(profile: CarveProfile, width: number, depth: number): [num
   return rings;
 }
 
+/** A ball of the given diameter, centred on the path: the tool Add sweeps. */
+function ballRings(width: number): [number, number][] {
+  const r = width / 2;
+  const rings: [number, number][] = [];
+  for (let k = 0; k <= BALL_RINGS * 2; k++) {
+    const phi = (k / (BALL_RINGS * 2)) * Math.PI;
+    rings.push([r * Math.sin(phi), -r * Math.cos(phi)]);
+  }
+  return rings;
+}
+
 /** The cutter's points at one path point, in the sculpt's space. */
-function cutterPoints(rings: [number, number][], p: number[], n: number[]): number[][] {
+function cutterPoints(
+  rings: [number, number][],
+  p: number[],
+  n: number[],
+  scale = 1,
+  tilt = 0,
+  tangent?: number[],
+): number[][] {
   const nl = Math.hypot(n[0], n[1], n[2]) || 1;
-  const w = [n[0] / nl, n[1] / nl, n[2] / nl];
+  let w = [n[0] / nl, n[1] / nl, n[2] / nl];
+  if (tilt && tangent) {
+    // Rodrigues, about the path's direction.
+    const tl = Math.hypot(tangent[0], tangent[1], tangent[2]) || 1;
+    const k = [tangent[0] / tl, tangent[1] / tl, tangent[2] / tl];
+    const c = Math.cos(tilt), s = Math.sin(tilt);
+    const kxw = [k[1] * w[2] - k[2] * w[1], k[2] * w[0] - k[0] * w[2], k[0] * w[1] - k[1] * w[0]];
+    const kdw = k[0] * w[0] + k[1] * w[1] + k[2] * w[2];
+    w = [0, 1, 2].map((i) => w[i] * c + kxw[i] * s + k[i] * kdw * (1 - c));
+  }
   const helper = Math.abs(w[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0];
   const u = [helper[1] * w[2] - helper[2] * w[1], helper[2] * w[0] - helper[0] * w[2], helper[0] * w[1] - helper[1] * w[0]];
   const ul = Math.hypot(u[0], u[1], u[2]);
   u[0] /= ul; u[1] /= ul; u[2] /= ul;
   const v = [w[1] * u[2] - w[2] * u[1], w[2] * u[0] - w[0] * u[2], w[0] * u[1] - w[1] * u[0]];
   const out: number[][] = [];
-  for (const [radius, h] of rings) {
+  for (const [r0, h0] of rings) {
+    const radius = r0 * scale, h = h0 * scale;
     if (radius < 1e-9) {
       out.push([p[0] + w[0] * h, p[1] + w[1] * h, p[2] + w[2] * h]);
       continue;
@@ -116,7 +160,7 @@ function mirrored(points: number[][], axis: 'x' | 'y' | 'z'): number[][] {
  */
 export function buildGroove(wasm: ManifoldToplevel, spec: GrooveSpec): ManifoldT | null {
   const { width, depth, profile } = spec;
-  if (!(width > 0) || !(depth > 0) || spec.path.length === 0 || spec.normals.length !== spec.path.length) return null;
+  if (!(width > 0) || (!(depth > 0) && !spec.add) || spec.path.length === 0 || spec.normals.length !== spec.path.length) return null;
 
   // Points closer than this add nothing but hulls to union.
   const minStep = width * 0.1;
@@ -131,24 +175,48 @@ export function buildGroove(wasm: ManifoldToplevel, spec: GrooveSpec): ManifoldT
     }
     return run;
   };
-  const runs = [
-    { ...thin(spec.path, spec.normals), profile },
-    ...(spec.extra ?? []).map((r) => ({ ...thin(r.path, r.normals), profile: r.profile ?? profile })),
+  // Only the drawn path tapers; the scanlines that fill an outline do not.
+  const runs: { path: number[][]; normals: number[][]; profile: CarveProfile; tapered: boolean }[] = [
+    { ...thin(spec.path, spec.normals), profile, tapered: true },
+    ...(spec.extra ?? []).map((r) => ({ ...thin(r.path, r.normals), profile: r.profile ?? profile, tapered: false })),
   ].filter((r) => r.path.length > 0);
   if (spec.mirror) {
     const axis = spec.mirror;
-    runs.push(...runs.map((r) => ({ path: mirrored(r.path, axis), normals: mirrored(r.normals, axis), profile: r.profile })));
+    runs.push(...runs.map((r) => ({ ...r, path: mirrored(r.path, axis), normals: mirrored(r.normals, axis) })));
   }
   const ringsFor = new Map<CarveProfile, [number, number][]>();
   const cutterRings = (p: CarveProfile) => {
+    if (spec.add) return ballRings(width);
     if (!ringsFor.has(p)) ringsFor.set(p, profileRings(p, width, depth));
     return ringsFor.get(p)!;
+  };
+  const taper = Math.max(0, Math.min(0.5, spec.taper ?? 0));
+  /** The cutter's size at each point of a run: 1, narrowing to TAPER_TIP over `taper` of the length at each end. */
+  const scales = (path: number[][], tapered: boolean): number[] => {
+    if (!tapered || taper <= 0 || path.length < 2) return path.map(() => 1);
+    const along = [0];
+    for (let i = 1; i < path.length; i++) {
+      along.push(along[i - 1] + Math.hypot(path[i][0] - path[i - 1][0], path[i][1] - path[i - 1][1], path[i][2] - path[i - 1][2]));
+    }
+    const total = along[along.length - 1] || 1;
+    return along.map((a) => {
+      const t = Math.min(a / total, 1 - a / total) / taper;
+      const e = Math.min(1, t);
+      return TAPER_TIP + (1 - TAPER_TIP) * e * e * (3 - 2 * e);
+    });
+  };
+  const tangentAt = (path: number[][], i: number): number[] => {
+    const a = path[Math.max(0, i - 1)], b = path[Math.min(path.length - 1, i + 1)];
+    return [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
   };
 
   const pieces: ManifoldT[] = [];
   try {
     for (const run of runs) {
-      const tools = run.path.map((p, i) => cutterPoints(cutterRings(run.profile), p, run.normals[i]));
+      const size = scales(run.path, run.tapered);
+      const tools = run.path.map((p, i) => cutterPoints(
+        cutterRings(run.profile), p, run.normals[i], size[i], run.tapered ? spec.tilt ?? 0 : 0, tangentAt(run.path, i),
+      ));
       if (tools.length === 1) {
         pieces.push(wasm.Manifold.hull(tools[0] as [number, number, number][]));
         continue;
@@ -248,8 +316,23 @@ function longestEdgeOf(mesh: SculptMesh): number {
 export function grooveAlongSurface(
   mesh: SculptMesh,
   path: number[][],
-  options: { width: number; depth: number; profile: CarveProfile; mirror?: 'x' | 'y' | 'z'; reach?: number; fill?: boolean },
+  options: {
+    width: number; depth: number; profile: CarveProfile; mirror?: 'x' | 'y' | 'z'; reach?: number; fill?: boolean;
+    taper?: number; tilt?: number; add?: boolean;
+  },
 ): { spec: GrooveSpec; missed: number[][] } {
+  // Added clay goes where it is drawn, on the surface or off it: a stem
+  // leaves the clay at its first point and runs on into the air.
+  if (options.add) {
+    return {
+      spec: {
+        kind: 'groove', path, normals: path.map(() => [0, 0, 1]), width: options.width, depth: options.depth,
+        profile: 'round', add: true, ...(options.taper ? { taper: options.taper } : {}),
+        ...(options.mirror ? { mirror: options.mirror } : {}),
+      },
+      missed: [],
+    };
+  }
   if (options.fill && path.length >= 3) {
     const first = path[0], last = path[path.length - 1];
     if (Math.hypot(first[0] - last[0], first[1] - last[1], first[2] - last[2]) > 1e-9) path = [...path, first];
@@ -303,6 +386,8 @@ export function grooveAlongSurface(
       profile: options.profile,
       ...(options.mirror ? { mirror: options.mirror } : {}),
       ...(extra.length ? { extra } : {}),
+      ...(options.taper ? { taper: options.taper } : {}),
+      ...(options.tilt ? { tilt: options.tilt } : {}),
     },
     missed,
   };

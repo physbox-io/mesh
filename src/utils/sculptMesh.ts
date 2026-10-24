@@ -818,6 +818,12 @@ export interface BrushSettings {
   carveProfile?: 'round' | 'v' | 'flat';
   /** For 'carve': cut out the whole loop drawn, not just a groove along it. */
   carveFill?: boolean;
+  /** For 'carve': the share of the stroke, at each end, over which the cutter narrows to a point (0 to 0.5). */
+  carveTaper?: number;
+  /** For 'carve': how far the cutter leans sideways, in degrees. */
+  carveAngle?: number;
+  /** For 'carve': add clay along the stroke (a tube, which may leave the surface) instead of cutting it away. */
+  carveAdd?: boolean;
   /**
    * A ceiling on how many vertices dynamic topology may create.
    *

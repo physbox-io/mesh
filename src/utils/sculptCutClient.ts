@@ -13,7 +13,7 @@ import { noteWorkerStopped } from './staleBuild';
  * A cut on the densest sculpt takes a couple of seconds. Past this the worker
  * is wedged, and a refused cut is better than a lasso that never lets go.
  */
-const CUT_TIMEOUT_MS = 30_000;
+const CUT_TIMEOUT_MS = 60_000;
 
 type Settle = { resolve: (result: CutResult) => void; timer: ReturnType<typeof setTimeout>; mesh: SculptMesh };
 
