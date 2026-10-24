@@ -1508,23 +1508,23 @@ const stepTick = (delta: number) => {
   }
 
   if (stepsNeeded > 0) framePending = true;
-  if (framePending && (!isSharedSupported || performance.now() - lastFramePost >= FRAME_INTERVAL_MS)) {
+  if (framePending && (!isSharedSupported || performance.now() - lastFramePost >= FRAME_INTERVAL_MS - 2)) {
     postFrame();
   }
 };
 
 /*
- * How often a frame goes to the main thread when the worker paces itself.
+ * How often the worker steps and posts a frame when it paces itself.
  *
- * With shared memory the worker runs its own 4 ms loop, and it used to copy
- * every array into the shared buffers and post a FRAME on every tick that
- * stepped: about 250 a second, four for each frame the screen can show. Now
- * it posts at most one per display frame, and whatever is pending goes when
- * play stops, so the last pose drawn is the last pose simulated. Without
- * shared memory each TICK comes from the main thread's own frame, so every
- * one is answered.
+ * With shared memory the worker paces itself at display rate (FRAME_INTERVAL_MS):
+ * each tick steps the full frame's burst in one go, updates sharedBuffers, and
+ * posts a FRAME. When a tick finishes ahead of real time (`remaining > 1 ms`),
+ * it sleeps for `remaining` ms until the next frame boundary; when behind real
+ * time (`remaining <= 1 ms`), it yields via MessageChannel (`0 ms` gap) so
+ * incoming messages still run on the event loop without wasting 4+ ms of dead
+ * timer sleep or cooling the step thread pool.
  */
-const FRAME_INTERVAL_MS = 15;
+const FRAME_INTERVAL_MS = 16;
 let lastFramePost = 0;
 let framePending = false;
 
@@ -1544,28 +1544,50 @@ const postFrame = () => {
   }
 };
 
+let workerLoopActive = false;
 let workerTimerId: ReturnType<typeof setTimeout> | null = null;
 let lastTickTime = 0;
+const yieldChannel = new MessageChannel();
+// Bumped by every start and stop. A yield already posted cannot be cancelled,
+// so a stop then start while behind real time would otherwise leave that stale
+// message running a second chain of ticks beside the new one.
+let workerLoopGen = 0;
+
+const workerTick = (gen: number) => {
+  if (gen !== workerLoopGen) return;
+  workerTimerId = null;
+  if (!workerLoopActive || !isPlaying || !model || !data || !mujoco) {
+    workerLoopActive = false;
+    return;
+  }
+  const now = performance.now();
+  const elapsedSeconds = (now - lastTickTime) / 1000;
+  lastTickTime = now;
+
+  stepTick(elapsedSeconds);
+  if (!workerLoopActive || !isPlaying || !model || !data || !mujoco) {
+    workerLoopActive = false;
+    return;
+  }
+  const remaining = FRAME_INTERVAL_MS - (performance.now() - now);
+  if (remaining > 1) {
+    workerTimerId = setTimeout(workerTick, remaining, gen);
+  } else {
+    yieldChannel.port2.postMessage(gen);
+  }
+};
+yieldChannel.port1.onmessage = (e: MessageEvent<number>) => workerTick(e.data);
 
 const startWorkerLoop = () => {
-  if (workerTimerId) return;
+  if (workerLoopActive) return;
+  workerLoopActive = true;
   lastTickTime = performance.now();
-  const workerTick = () => {
-    if (!isPlaying || !model || !data || !mujoco) {
-      workerTimerId = null;
-      return;
-    }
-    const now = performance.now();
-    const elapsedSeconds = (now - lastTickTime) / 1000;
-    lastTickTime = now;
-    
-    stepTick(elapsedSeconds);
-    workerTimerId = setTimeout(workerTick, 4);
-  };
-  workerTimerId = setTimeout(workerTick, 4);
+  workerTimerId = setTimeout(workerTick, FRAME_INTERVAL_MS, ++workerLoopGen);
 };
 
 const stopWorkerLoop = () => {
+  workerLoopActive = false;
+  workerLoopGen++;
   if (workerTimerId) {
     clearTimeout(workerTimerId);
     workerTimerId = null;
