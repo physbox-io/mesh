@@ -1,4 +1,4 @@
-import { Play, Square, Settings, X, RotateCcw, Trash2, Info, Menu, Save, Download, Upload, Undo, Redo, PanelRight, Printer, Sparkles, Sun, Moon, Image as ImageIcon, Share2 } from 'lucide-react';
+import { Play, Square, Settings, X, RotateCcw, Trash2, Info, Menu, Save, Download, Upload, Undo, Redo, PanelRight, Printer, Sparkles, Sun, Moon, Image as ImageIcon, Share2, Braces } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 import { useStore } from '../../store/useStore';
 import { usePanels } from '../../store/panelsStore';
@@ -181,7 +181,7 @@ export function AppHeader({
               className="flex items-center justify-center p-1 rounded-md hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 transition-colors focus:outline-none cursor-pointer"
               title="Import JSON"
             >
-              <Upload className="w-3.5 h-3.5" />
+              <Braces className="w-3.5 h-3.5" />
             </button>
 
             {/* The buttons press Ctrl+Z rather than calling the store, so they
