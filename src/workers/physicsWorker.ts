@@ -190,6 +190,19 @@ interface CachedScript {
   api: Record<string, unknown>;
 }
 let scriptCache: Record<string, CachedScript> = {};
+/*
+ * What scripts got wrong, keyed by body + message so a mistake made every step
+ * is logged once. A headless run clears it first and returns it as warnings;
+ * otherwise it only reaches the console.
+ */
+let scriptProblems = new Map<string, string>();
+const noteScriptProblem = (bodyName: string, message: string) => {
+  const key = `${bodyName}\u0000${message}`;
+  if (scriptProblems.has(key)) return;
+  const text = `Script on '${bodyName}': ${message}`;
+  scriptProblems.set(key, text);
+  console.warn(`[Script:${bodyName}]`, message);
+};
 // Each scripted body's api.state; see utils/scriptState.ts. A `let` so a
 // headless run can work on its own without touching the live scene's.
 let scriptState = new ScriptStateStore();
@@ -256,69 +269,101 @@ const createScriptApi = (node: SceneNode): Record<string, unknown> => {
   const _resolveJoint = (name: string) =>
     jointIdCache[name] ?? (mujoco && model ? mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT.value, name) : -1);
 
+  // The setters used to return quietly on every miss (no such body, no joint,
+  // a joint MuJoCo does not know) and to read only [0] of a vector given to a
+  // one-axis joint, so [0, 0, w] spun a z hinge at 0. A call that asks for
+  // something impossible now does nothing *and says so*, once, in the run's
+  // warnings. It does not throw: that would also stop the rest of the script,
+  // every step, in scenes that have always worked around the miss.
+  const _guard = <A extends unknown[]>(fn: (...args: A) => void) => (...args: A) => {
+    try { fn(...args); } catch (e) { noteScriptProblem(node.name || node.id, (e as Error).message); }
+  };
+  const _resolveSetterJoint = (fnName: string, bodyName: string) => {
+    const targetNode = findNodeById(sceneGraph.nodes, bodyName);
+    if (!targetNode) throw new Error(`${fnName}: no body named '${bodyName}'`);
+    if (!targetNode.joints?.length) {
+      throw new Error(`${fnName}: body '${bodyName}' has no joint, so it cannot move on its own (it is fixed to its parent or the world)`);
+    }
+    const joint = targetNode.joints[0];
+    const jId = _resolveJoint(joint.name);
+    if (jId === -1) throw new Error(`${fnName}: joint '${joint.name}' of body '${bodyName}' is not in the compiled model`);
+    return { joint, jId };
+  };
+  // A one-axis joint (hinge, slide) takes a number. A 3-vector is read as a
+  // rate in the body's frame and projected onto the joint axis, the same frame
+  // the axis is written in.
+  const _alongAxis = (fnName: string, v: number[] | number, joint: SceneJoint): number => {
+    if (typeof v === 'number') return v;
+    if (Array.isArray(v) && v.length === 1) return v[0];
+    if (Array.isArray(v) && v.length >= 3) {
+      const a = joint.axis ?? [0, 0, 1];
+      const len = Math.hypot(a[0], a[1], a[2]) || 1;
+      const along = (v[0] * a[0] + v[1] * a[1] + v[2] * a[2]) / len;
+      const off = Math.sqrt(Math.max(0, v[0] * v[0] + v[1] * v[1] + v[2] * v[2] - along * along));
+      if (off > 1e-6 * Math.max(1, Math.abs(along))) {
+        noteScriptProblem(node.name || node.id, `${fnName}: [${v.slice(0, 3).join(', ')}] is not along ${joint.type} '${joint.name}' axis [${a.join(', ')}]; only its component along the axis (${along.toPrecision(4)}) was applied`);
+      }
+      return along;
+    }
+    throw new Error(`${fnName}: joint '${joint.name}' is a ${joint.type}; pass a number (or a 3-vector to project onto its axis)`);
+  };
+  const _vector = (fnName: string, v: number[] | number, n: number, joint: SceneJoint): number[] => {
+    if (!Array.isArray(v) || v.length < n) {
+      throw new Error(`${fnName}: joint '${joint.name}' is a ${joint.type}; pass an array of ${n} numbers`);
+    }
+    return v;
+  };
+
   const api: Record<string, unknown> = {
     id: node.id,
     name: node.name,
     isKeyPressed: (keyName: string) => !!keyName && pressedKeys.has(keyName.toLowerCase()),
-    setPosition: (pos: number[] | number, bodyName = node.id) => {
+    setPosition: _guard((pos: number[] | number, bodyName = node.id) => {
       const mdl = model!, dat = data!;
-      const targetNode = findNodeById(sceneGraph.nodes, bodyName);
-      if (!targetNode?.joints?.length) return;
-      const joint = targetNode.joints[0];
-      const jId = _resolveJoint(joint.name);
-      if (jId === -1) return;
+      const { joint, jId } = _resolveSetterJoint('setPosition', bodyName);
       const qposadr = mdl.jnt_qposadr[jId];
       pendingWake.add(mdl.jnt_bodyid[jId]);
       if (joint.type === 'free') {
-        if (Array.isArray(pos) && pos.length >= 3) {
-          dat.qpos[qposadr + 0] = pos[0]; dat.qpos[qposadr + 1] = pos[1]; dat.qpos[qposadr + 2] = pos[2];
-        }
+        const p = _vector('setPosition', pos, 3, joint);
+        dat.qpos[qposadr + 0] = p[0]; dat.qpos[qposadr + 1] = p[1]; dat.qpos[qposadr + 2] = p[2];
       } else if (joint.type === 'ball') {
-        if (Array.isArray(pos) && pos.length >= 4) {
-          dat.qpos[qposadr + 0] = pos[0]; dat.qpos[qposadr + 1] = pos[1]; dat.qpos[qposadr + 2] = pos[2]; dat.qpos[qposadr + 3] = pos[3];
-        }
+        const q = _vector('setPosition', pos, 4, joint);
+        dat.qpos[qposadr + 0] = q[0]; dat.qpos[qposadr + 1] = q[1]; dat.qpos[qposadr + 2] = q[2]; dat.qpos[qposadr + 3] = q[3];
       } else {
-        dat.qpos[qposadr] = typeof pos === 'number' ? pos : (Array.isArray(pos) ? pos[0] : 0);
+        dat.qpos[qposadr] = _alongAxis('setPosition', pos, joint);
       }
-    },
-    setVelocity: (vel: number[] | number, bodyName = node.id) => {
+    }),
+    setVelocity: _guard((vel: number[] | number, bodyName = node.id) => {
       const mdl = model!, dat = data!;
-      const targetNode = findNodeById(sceneGraph.nodes, bodyName);
-      if (!targetNode?.joints?.length) return;
-      const joint = targetNode.joints[0];
-      const jId = _resolveJoint(joint.name);
-      if (jId === -1) return;
+      const { joint, jId } = _resolveSetterJoint('setVelocity', bodyName);
       const dofadr = mdl.jnt_dofadr[jId];
       pendingWake.add(mdl.jnt_bodyid[jId]);
       if (joint.type === 'free') {
-        if (Array.isArray(vel) && vel.length >= 3) {
-          dat.qvel[dofadr + 0] = vel[0]; dat.qvel[dofadr + 1] = vel[1]; dat.qvel[dofadr + 2] = vel[2];
-        }
+        const v = _vector('setVelocity', vel, 3, joint);
+        dat.qvel[dofadr + 0] = v[0]; dat.qvel[dofadr + 1] = v[1]; dat.qvel[dofadr + 2] = v[2];
+      } else if (joint.type === 'ball') {
+        throw new Error(`setVelocity: joint '${joint.name}' is a ball joint, which only rotates; use setAngularVelocity`);
       } else {
-        dat.qvel[dofadr] = typeof vel === 'number' ? vel : (Array.isArray(vel) ? vel[0] : 0);
+        dat.qvel[dofadr] = _alongAxis('setVelocity', vel, joint);
       }
-    },
-    setAngularVelocity: (angvel: number[] | number, bodyName = node.id) => {
+    }),
+    setAngularVelocity: _guard((angvel: number[] | number, bodyName = node.id) => {
       const mdl = model!, dat = data!;
-      const targetNode = findNodeById(sceneGraph.nodes, bodyName);
-      if (!targetNode?.joints?.length) return;
-      const joint = targetNode.joints[0];
-      const jId = _resolveJoint(joint.name);
-      if (jId === -1) return;
+      const { joint, jId } = _resolveSetterJoint('setAngularVelocity', bodyName);
       const dofadr = mdl.jnt_dofadr[jId];
       pendingWake.add(mdl.jnt_bodyid[jId]);
       if (joint.type === 'free') {
-        if (Array.isArray(angvel) && angvel.length >= 3) {
-          dat.qvel[dofadr + 3] = angvel[0]; dat.qvel[dofadr + 4] = angvel[1]; dat.qvel[dofadr + 5] = angvel[2];
-        }
+        const w = _vector('setAngularVelocity', angvel, 3, joint);
+        dat.qvel[dofadr + 3] = w[0]; dat.qvel[dofadr + 4] = w[1]; dat.qvel[dofadr + 5] = w[2];
       } else if (joint.type === 'ball') {
-        if (Array.isArray(angvel) && angvel.length >= 3) {
-          dat.qvel[dofadr + 0] = angvel[0]; dat.qvel[dofadr + 1] = angvel[1]; dat.qvel[dofadr + 2] = angvel[2];
-        }
+        const w = _vector('setAngularVelocity', angvel, 3, joint);
+        dat.qvel[dofadr + 0] = w[0]; dat.qvel[dofadr + 1] = w[1]; dat.qvel[dofadr + 2] = w[2];
       } else if (joint.type === 'hinge') {
-        dat.qvel[dofadr] = typeof angvel === 'number' ? angvel : (Array.isArray(angvel) ? angvel[0] : 0);
+        dat.qvel[dofadr] = _alongAxis('setAngularVelocity', angvel, joint);
+      } else {
+        throw new Error(`setAngularVelocity: joint '${joint.name}' is a slide, which cannot rotate; use setVelocity`);
       }
-    },
+    }),
     getPosition: (bodyName = node.id) => {
       const dat = data!;
       const bId = _resolveBody(bodyName);
@@ -558,14 +603,14 @@ const executeScripts = (nodes: SceneNode[], aeroDiagnostics: Record<string, Aero
         try {
           fn = new Function('api', node.script) as (api: Record<string, unknown>) => void;
         } catch (e) {
-          console.error(`[Script Compilation Error on node ${node.name}]:`, e);
+          noteScriptProblem(node.name || node.id, `does not compile: ${(e as Error)?.message ?? e}`);
           fn = () => {};
         }
         cached = { src: node.script, fn, api: createScriptApi(node) };
         scriptCache[node.id] = cached;
       }
 
-      try { cached.fn(cached.api); } catch (e) { console.error(`[Script Runtime Error on node ${node.name}]:`, e); }
+      try { cached.fn(cached.api); } catch (e) { noteScriptProblem(node.name || node.id, `runtime error: ${(e as Error)?.message ?? e}`); }
     }
 
     if (node.children) executeScripts(node.children, aeroDiagnostics);
@@ -1717,6 +1762,8 @@ const doBuild = (
   brokenConstraints?: string[],
 ) => {
   if (brokenConstraints) brokenWeldKeys = new Set(brokenConstraints);
+  // A rebuild is usually an edit: let a mistake that is still there be logged again.
+  scriptProblems = new Map();
   scriptStateForBuild(scriptState, preserveState, seedState);
   const oldModel = model;
   const oldData = data;
@@ -2033,6 +2080,8 @@ const runHeadless = (
   const savedBreakableWelds = breakableWelds, savedBrokenWeldKeys = brokenWeldKeys;
 
   const warnings: string[] = [];
+  const savedScriptProblems = scriptProblems;
+  scriptProblems = new Map();
 
   let headlessModel: MjModel | null = null;
   let headlessData: MjData | null = null;
@@ -2099,6 +2148,7 @@ const runHeadless = (
     });
 
     warnings.push(...collectMujocoWarnings(data));
+    warnings.push(...scriptProblems.values());
     if (outcome.truncationDetail) warnings.push(outcome.truncationDetail);
 
     return {
@@ -2113,7 +2163,7 @@ const runHeadless = (
       warnings,
     };
   } catch (e) {
-    return { ok: false, error: String((e as Error)?.message || e), warnings };
+    return { ok: false, error: String((e as Error)?.message || e), warnings: [...warnings, ...scriptProblems.values()] };
   } finally {
     if (headlessData) { try { headlessData.delete(); } catch { /* ignore */ } }
     if (headlessModel) { try { headlessModel.delete(); } catch { /* ignore */ } }
@@ -2126,6 +2176,7 @@ const runHeadless = (
     bodyIdCache = savedBodyIdCache; jointIdCache = savedJointIdCache;
     geomIdCache = savedGeomIdCache; geomNameCache = savedGeomNameCache; actuatorIdCache = savedActuatorIdCache;
     breakableWelds = savedBreakableWelds; brokenWeldKeys = savedBrokenWeldKeys;
+    scriptProblems = savedScriptProblems;
   }
 };
 
