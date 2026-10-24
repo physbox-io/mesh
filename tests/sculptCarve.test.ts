@@ -2,7 +2,8 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import type { ManifoldToplevel } from 'manifold-3d';
 import { applyBrush, beginStroke, DEFAULT_BRUSH, endStroke, icosphere, isWatertight, recomputeNormals, type SculptMesh } from '../src/utils/sculptMesh';
 import { cutSculptWith, loadManifold } from '../src/utils/sculptCut';
-import { grooveAlongSurface, type CarveProfile, type GrooveSpec } from '../src/utils/sculptCarve';
+import { closestOnSurface, grooveAlongSurface, type CarveProfile, type GrooveSpec } from '../src/utils/sculptCarve';
+import { createSculptMesh } from '../src/utils/sculptMesh';
 
 const R = 0.035; // pumpkin-sized clay
 
@@ -182,6 +183,22 @@ describe('carving a groove', () => {
     expect(top * 1000).toBeGreaterThan(R * 1000 + 10);
     expect(result.pieces).toBe(1);
     expect(isWatertight(result.mesh)).toBe(true);
+  });
+
+  it('snaps to the true nearest point past zero-area slivers', () => {
+    // A unit triangle in z = 0, then a sliver whose corners are in a line
+    // (Manifold leaves these in what it cuts). Its weights divided by zero, the
+    // NaN distance beat nothing and lost to everything after it, and the snap
+    // returned whichever face came last: a carve's path landed millimetres
+    // off, and an eye ring grew a tail.
+    const mesh = createSculptMesh(
+      [0, 0, 0, 0.01, 0, 0, 0, 0.01, 0, 0.02, 0.02, 0.005, 0.03, 0.03, 0.005, 0.04, 0.04, 0.005, 0.05, 0.05, 0.03],
+      [0, 1, 2, 3, 4, 5, 2, 1, 6],
+    );
+    recomputeNormals(mesh);
+    const hit = closestOnSurface(mesh, [0.002, 0.002, 0.001], 0.1)!;
+    expect(hit.distance).toBeCloseTo(0.001, 6);
+    expect(hit.point[2]).toBeCloseTo(0, 6);
   });
 });
 

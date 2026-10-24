@@ -260,7 +260,9 @@ export function closestOnSurface(
     const [u, v, w] = closestBarycentric(P, a, b, c, px, py, pz);
     const q = [0, 1, 2].map((k) => P[a * 3 + k] * u + P[b * 3 + k] * v + P[c * 3 + k] * w);
     const d = Math.hypot(q[0] - px, q[1] - py, q[2] - pz);
-    if (best && d >= best.distance) continue;
+    // Never NaN: a NaN fails every comparison after it, so each later face
+    // replaced it and the snap returned whichever face came last.
+    if (!Number.isFinite(d) || (best && d >= best.distance)) continue;
     const n = [0, 1, 2].map((k) => N[a * 3 + k] * u + N[b * 3 + k] * v + N[c * 3 + k] * w);
     const nl = Math.hypot(n[0], n[1], n[2]) || 1;
     best = { point: q, normal: [n[0] / nl, n[1] / nl, n[2] / nl], distance: d };
@@ -288,7 +290,16 @@ function closestBarycentric(P: Float32Array, a: number, b: number, c: number, px
   if (vb <= 0 && d2 >= 0 && d6 <= 0) { const t = d2 / (d2 - d6); return [1 - t, 0, t]; }
   const va = d3 * d6 - d5 * d4;
   if (va <= 0 && d4 - d3 >= 0 && d5 - d6 >= 0) { const t = (d4 - d3) / ((d4 - d3) + (d5 - d6)); return [0, 1 - t, t]; }
-  const denom = 1 / (va + vb + vc);
+  // A face with no area (Manifold leaves slivers in what it cuts) has no
+  // inside to land in, and its weights divide by zero: the nearest corner.
+  const area2 = va + vb + vc;
+  if (!(Math.abs(area2) > 1e-30)) {
+    const da = ap[0] * ap[0] + ap[1] * ap[1] + ap[2] * ap[2];
+    const db = bp[0] * bp[0] + bp[1] * bp[1] + bp[2] * bp[2];
+    const dc = cp[0] * cp[0] + cp[1] * cp[1] + cp[2] * cp[2];
+    return da <= db && da <= dc ? [1, 0, 0] : db <= dc ? [0, 1, 0] : [0, 0, 1];
+  }
+  const denom = 1 / area2;
   const v = vb * denom, w = vc * denom;
   return [1 - v - w, v, w];
 }
