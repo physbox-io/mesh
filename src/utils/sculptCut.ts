@@ -89,6 +89,9 @@ export type CutResult =
   | { ok: true; mesh: SculptMesh; facesBefore: number; facesAfter: number; pieces: number }
   | { ok: false; error: string };
 
+/** A piece a cut leaves that is smaller than this (1 mm³, in m³) is a speck, and goes. */
+const MIN_PIECE_VOLUME = 1e-9;
+
 /** Loops enclosing less than this (in the loop's own units) are a click, not a cut. */
 const MIN_LOOP_AREA = 1e-8;
 
@@ -278,6 +281,18 @@ export function cutSculpt(
         error: mode === 'keep' ? 'The loop does not cover any of the clay.' : 'That cut would remove all of the clay.',
       };
     }
+    // Specks: a cut that grazes a thin edge (a mouth's corner beside a tooth)
+    // can leave a fleck of clay a tenth of a millimetre across, and a fleck
+    // became a body of its own, with a mass, a collider and a place in the
+    // hierarchy. Anything under a cubic millimetre goes with the cut.
+    const parts = result.decompose();
+    const solid = parts.filter((p) => p.volume() >= MIN_PIECE_VOLUME);
+    if (solid.length > 0 && solid.length < parts.length) {
+      const whole = wasm.Manifold.compose(solid);
+      result.delete();
+      result = whole;
+    }
+    for (const part of parts) part.delete();
 
     const out = result.getMesh();
     const keep = (id: number) => id === clayId || (cap && id !== fillId);

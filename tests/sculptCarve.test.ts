@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import type { ManifoldToplevel } from 'manifold-3d';
 import { applyBrush, beginStroke, DEFAULT_BRUSH, endStroke, icosphere, isWatertight, recomputeNormals, type SculptMesh } from '../src/utils/sculptMesh';
-import { cutSculptWith, loadManifold } from '../src/utils/sculptCut';
+import { cutSculpt, cutSculptWith, loadManifold } from '../src/utils/sculptCut';
 import { closestOnSurface, grooveAlongSurface, type CarveProfile, type GrooveSpec } from '../src/utils/sculptCarve';
 import { createSculptMesh } from '../src/utils/sculptMesh';
 
@@ -199,6 +199,21 @@ describe('carving a groove', () => {
     const hit = closestOnSurface(mesh, [0.002, 0.002, 0.001], 0.1)!;
     expect(hit.distance).toBeCloseTo(0.001, 6);
     expect(hit.point[2]).toBeCloseTo(0, 6);
+  });
+
+  it('a cut that leaves a speck drops it instead of making it a piece', () => {
+    // A block taken out of the front of the clay with a 0.5 mm hollow inside
+    // it: the clay in the hollow is left floating, a speck, and goes too.
+    const block = wasm.Manifold.cube([0.02, 0.02, 0.02], true).translate([0, -R, 0]);
+    const hollow = wasm.Manifold.cube([0.0005, 0.0005, 0.0005], true).translate([0, -R + 0.004, 0]);
+    const cutter = block.subtract(hollow);
+    try {
+      const result = cutSculpt(wasm, icosphere(R, 4), cutter);
+      if (!result.ok) throw new Error(result.error);
+      expect(result.pieces).toBe(1);
+    } finally {
+      block.delete(); hollow.delete(); cutter.delete();
+    }
   });
 });
 

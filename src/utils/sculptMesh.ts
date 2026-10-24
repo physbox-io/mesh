@@ -1087,6 +1087,10 @@ function stampOnce(session: SculptSession, settings: BrushSettings, stamp: Brush
     }
     : undefined;
 
+  // Not for Smooth, which takes detail away and has none to add: refining
+  // under it turned a rim pass on a carved pumpkin from 23 k vertices into
+  // 57 k and held the page for 48 s. It still collapses what it bunches up.
+  const refines = settings.type !== 'smooth';
   if (settings.dynamicTopology && settings.type !== 'grab') {
     // Down to the target before anything moves, not one halving a dab. A pass
     // halves only the edges in reach, so a 3 mm brush landing on new clay's
@@ -1094,7 +1098,7 @@ function stampOnce(session: SculptSession, settings: BrushSettings, stamp: Brush
     // the ragged, crumpled patch small features came out as. Passes stop as
     // soon as one splits nothing, so clay that is already fine pays one scan.
     let split = 0;
-    for (let pass = 0; pass < MAX_REFINE_PASSES && mesh.vertexCount < budget; pass++) {
+    for (let pass = 0; refines && pass < MAX_REFINE_PASSES && mesh.vertexCount < budget; pass++) {
       const n = refineInRadius(mesh, stamp.x, stamp.y, stamp.z, radius, target * 1.5, onMidpoint);
       split += n;
       if (n === 0) break;
