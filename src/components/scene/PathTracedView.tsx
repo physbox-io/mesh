@@ -6,6 +6,7 @@ import { WebGLPathTracer, ShapedAreaLight, DenoiseMaterial } from 'three-gpu-pat
 import { useStore } from '../../store/useStore';
 import { useViewQuality, usePathTraceStatus, type PathTracePhase } from '../../store/viewQualityStore';
 import { preToneMappedColor } from '../../utils/neutralToneMapping';
+import { MeshBvhWorkerClient } from '../../utils/meshBvhWorkerClient';
 
 /** How long the view has to hold still before tracing starts. */
 const SETTLE_MS = 350;
@@ -54,6 +55,7 @@ interface Engine {
   denoise: DenoiseMaterial;
   denoiseQuad: FullScreenQuad;
   floor: THREE.Mesh;
+  bvhWorker: MeshBvhWorkerClient;
 }
 
 function createEngine(gl: THREE.WebGLRenderer): Engine | null {
@@ -66,6 +68,10 @@ function createEngine(gl: THREE.WebGLRenderer): Engine | null {
     // tracer's own fallback would draw the live scene a second time, raw.
     pt.rasterizeScene = false;
     pt.bounces = 5;
+    // The BVH is built in a worker (see workers/meshBvhWorker.ts): a sculpt
+    // and its mould came to 600 k triangles and 3 s of frozen page.
+    const bvhWorker = new MeshBvhWorkerClient();
+    pt.setBVHWorker(bvhWorker);
     pt.tiles.set(TILE_STEPS[0], TILE_STEPS[0]);
     // Softens the fireflies a glossy surface throws off at low sample counts.
     pt.filterGlossyFactor = 0.5;
@@ -98,7 +104,7 @@ function createEngine(gl: THREE.WebGLRenderer): Engine | null {
     floor.updateMatrix();
     floor.matrixAutoUpdate = false;
 
-    return { pathTracer: pt, denoise, denoiseQuad, floor };
+    return { pathTracer: pt, denoise, denoiseQuad, floor, bvhWorker };
   } catch (e) {
     console.error('[PathTracedView] could not start the path tracer', e);
     return null;
@@ -139,6 +145,14 @@ export function PathTracedView({ background }: { background: string }) {
     phase: null as PathTracePhase | null,
     reportedSamples: -1,
     traced: null as THREE.Scene | null,
+    /**
+     * Set for one frame before a build starts, so 'preparing scene' is on
+     * screen before the main-thread part of it (merging every body into one
+     * geometry) holds the page.
+     */
+    buildArmed: false,
+    /** A BVH is building in the worker; the tracer has nothing to draw yet. */
+    building: false,
     instanceMaterials: [] as THREE.Material[],
     /** Index into TILE_STEPS; it only ever goes up, for as long as Render mode is on. */
     tileStep: 0,
@@ -161,6 +175,7 @@ export function PathTracedView({ background }: { background: string }) {
     const s = state.current;
     return () => {
       engineRef.current = null;
+      engine.bvhWorker.dispose();
       engine.pathTracer.dispose();
       engine.denoiseQuad.dispose();
       engine.denoise.dispose();
@@ -169,6 +184,8 @@ export function PathTracedView({ background }: { background: string }) {
       for (const m of s.instanceMaterials) m.dispose();
       s.instanceMaterials = [];
       s.sceneDirty = true;
+      s.buildArmed = false;
+      s.building = false;
     };
   }, [gl]);
 
@@ -238,22 +255,49 @@ export function PathTracedView({ background }: { background: string }) {
       return;
     }
 
+    if (s.building) {
+      report('building', 0);
+      return;
+    }
     if (s.sceneDirty) {
       report('building', 0);
+      if (!s.buildArmed) {
+        s.buildArmed = true;
+        invalidate();
+        return;
+      }
+      s.buildArmed = false;
       for (const m of s.instanceMaterials) m.dispose();
       s.instanceMaterials = [];
-      try {
-        s.traced = buildTracedScene(scene, bodies, floor, background, s.instanceMaterials);
-        pathTracer.setScene(s.traced, camera);
-      } catch (e) {
+      const fail = (e: unknown) => {
         // A geometry the tracer cannot take would otherwise throw on every
         // frame from here on.
         console.error('[PathTracedView] could not build the scene to trace', e);
         useViewQuality.getState().setPathTrace(false);
+      };
+      try {
+        s.traced = buildTracedScene(scene, bodies, floor, background, s.instanceMaterials);
+        const started = performance.now();
+        s.building = true;
+        pathTracer.setSceneAsync(s.traced, camera).then(
+          () => {
+            if (engineRef.current !== engine) return;
+            console.info(`[PathTracedView] scene built in ${Math.round(performance.now() - started)} ms`);
+            s.building = false;
+            invalidate();
+          },
+          (e) => {
+            if (engineRef.current === engine) fail(e);
+          },
+        );
+      } catch (e) {
+        s.building = false;
+        fail(e);
         return;
       }
       s.sceneDirty = false;
       s.cameraDirty = false;
+      return;
     } else if (s.cameraDirty) {
       pathTracer.updateCamera();
       s.cameraDirty = false;
