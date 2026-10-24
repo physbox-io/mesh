@@ -2195,6 +2195,12 @@ export function useMCPBridge() {
             });
           }
 
+          // null or "" detaches the source: the body keeps the mesh it last
+          // compiled to (or whatever geoms came with this call) as a plain
+          // mesh. Compiling it would fail, and used to, leaving deleting and
+          // re-adding the body as the only way out.
+          if (updates.scad === null || updates.scad === '') updates.scad = undefined;
+
           if (updates.scad !== undefined) {
             let compiled: Awaited<ReturnType<typeof compileSCAD>> | null = null;
             let lastErr: unknown = null;
