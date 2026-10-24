@@ -1226,7 +1226,9 @@ export const fillBodyDefaults = (b: RawNode, parentMoves: boolean | null = null)
     id,
     name,
     type:     'body',
-    pos:      b.pos     ?? [0, 0, 1],
+    // A nested body's pos is relative to its parent, so the top-level
+    // default (a metre up, to drop onto the floor) would float it off the part.
+    pos:      b.pos     ?? (nested ? [0, 0, 0] : [0, 0, 1]),
     ...(b.quat  !== undefined ? { quat: b.quat }   : {}),
     ...(b.euler !== undefined ? { euler: b.euler } : {}),
     geoms:    resolvedGeoms,
