@@ -33,6 +33,8 @@ export interface ModelMirror {
   geom_rgba?: number[];
   body_mass?: ArrayLike<number>;
   body_inertia?: ArrayLike<number>;
+  body_ipos?: ArrayLike<number>;
+  body_iquat?: ArrayLike<number>;
   body_dofnum?: ArrayLike<number>;
   body_parentid?: ArrayLike<number>;
   jnt_qposadr?: ArrayLike<number>;

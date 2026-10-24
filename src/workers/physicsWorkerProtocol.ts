@@ -80,6 +80,8 @@ export interface BuiltResult extends Partial<SimBuffers> {
   nq?: number; nv?: number; nu?: number; ngeom?: number; nbody?: number;
   timestep?: number;
   geom_size?: number[]; body_mass?: number[]; body_inertia?: number[];
+  /** Centre of mass and principal-axes frame, in the body frame (3 and 4 per body). */
+  body_ipos?: number[]; body_iquat?: number[];
   body_dofnum?: number[]; body_parentid?: number[];
   geom_type?: number[]; geom_rgba?: number[];
   jnt_qposadr?: number[]; jnt_dofadr?: number[];

@@ -2007,6 +2007,8 @@ const doBuild = (
     geom_rgba: Array.from(newModel.geom_rgba as ArrayLike<number>),
     body_mass: Array.from(newModel.body_mass as ArrayLike<number>),
     body_inertia: Array.from(newModel.body_inertia as ArrayLike<number>),
+    body_ipos: Array.from(newModel.body_ipos as ArrayLike<number>),
+    body_iquat: Array.from(newModel.body_iquat as ArrayLike<number>),
     body_dofnum: Array.from(newModel.body_dofnum as ArrayLike<number>),
     body_parentid: Array.from(newModel.body_parentid as ArrayLike<number>),
     jnt_qposadr: Array.from(newModel.jnt_qposadr as ArrayLike<number>),

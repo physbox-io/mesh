@@ -99,6 +99,7 @@ import { webSerialManager } from '../utils/webSerialManager';
 import type { Object3D } from 'three';
 import { Quaternion, Vector3 } from 'three';
 import type { SceneGraph, SceneNode, SceneGeom, SceneJoint, HardwareBore, HardwareCutKind } from '../types/scene';
+import type { ModelMirror } from '../types/sceneLayer';
 import type { RawGeom, RawJoint, RawNode } from '../utils/sceneNodes';
 import { HARDWARE_KINDS, hardwareSpecOf } from '../utils/hardwareCuts';
 import {
@@ -671,10 +672,29 @@ const summarizeGeom = (g: SceneGeom) => ({
     : { size: g.size }),
 });
 
-const summarizeNode = (node: SceneNode): Record<string, unknown> => ({
+/*
+ * What the solver uses for a body, read back from the compiled model rather
+ * than worked out from the graph: densities, hand-set masses, convex pieces
+ * standing in for a concave mesh and dropped source meshes all end up here,
+ * and a dynamic test was the only other way to check them. The centre of mass
+ * and the principal axes are in the body's own frame.
+ */
+const inertialOf = (model: ModelMirror | null, node: SceneNode): Record<string, unknown> | null => {
+  const bId = model?._idMaps?.body?.[node.id];
+  if (bId === undefined || bId < 0 || !model?.body_mass) return null;
+  const r = (v: number, d: number) => +v.toPrecision(d);
+  const out: Record<string, unknown> = { massKg: r(model.body_mass[bId], 6) };
+  if (model.body_ipos) out.comMm = [0, 1, 2].map(i => +(model.body_ipos![bId * 3 + i] * 1000).toFixed(3));
+  if (model.body_inertia) out.principalInertiaKgM2 = [0, 1, 2].map(i => r(model.body_inertia![bId * 3 + i], 6));
+  if (model.body_iquat) out.principalAxesQuat = [0, 1, 2, 3].map(i => +model.body_iquat![bId * 4 + i].toFixed(6));
+  return out;
+};
+
+const summarizeNode = (node: SceneNode, model: ModelMirror | null = null): Record<string, unknown> => ({
   id: node.id,
   name: node.name,
   pos: node.pos,
+  ...((i) => i ? { inertial: i } : {})(inertialOf(model, node)),
   ...(node.quat ? { quat: node.quat } : {}),
   ...(node.euler ? { euler: node.euler } : {}),
   ...(node.scad ? { hasScad: true } : {}),
@@ -713,7 +733,7 @@ const summarizeNode = (node: SceneNode): Record<string, unknown> => ({
       sockets: (node.geoms || []).filter((g) => g.contactClass === 'socket').length,
     },
   } : {}),
-  children: (node.children || []).map(summarizeNode),
+  children: (node.children || []).map((c) => summarizeNode(c, model)),
 });
 
 const stripMeshArrays = (node: SceneNode): SceneNode => {
@@ -2002,7 +2022,11 @@ export function useMCPBridge() {
 
         case 'GET_SCENE_SUMMARY':
           return {
-            nodes: (store.sceneGraph.nodes || []).map(summarizeNode),
+            nodes: (store.sceneGraph.nodes || []).map((n) => summarizeNode(n, store.model)),
+            ...(store.model?.body_mass ? {
+              // Body 0 is the world.
+              totalMassKg: +Array.from(store.model.body_mass).slice(1).reduce((a, b) => a + b, 0).toPrecision(6),
+            } : {}),
             stock: stockReport(store.sceneGraph, store.stock),
             ...(store.sceneGraph.simFidelity === 'print' ? {
               simFidelity: {

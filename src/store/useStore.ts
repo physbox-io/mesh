@@ -216,6 +216,8 @@ const buildModelMirror = (built: BuiltResult): ModelMirror => ({
   geom_rgba: built.geom_rgba,
   body_mass: built.body_mass,
   body_inertia: built.body_inertia,
+  body_ipos: built.body_ipos,
+  body_iquat: built.body_iquat,
   body_dofnum: built.body_dofnum,
   body_parentid: built.body_parentid,
   jnt_qposadr: built.jnt_qposadr,
