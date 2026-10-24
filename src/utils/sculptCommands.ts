@@ -42,10 +42,14 @@ export interface SculptStrokeRequest {
   brush?: BrushType;
   /** Points in the body's own frame, metres. Each is one dab. */
   at: number[][];
-  /** Brush radius in metres. */
+  /** Brush radius in metres. Omitted, a sixth of the body's longest side. */
   radius?: number;
   /** 0..1. */
   strength?: number;
+  /** For 'draw': the most one stroke raises or carves, in millimetres. 0 or omitted is no limit. */
+  depthMm?: number;
+  /** 0..1: how much of the radius gets the full effect before the edge falls away. */
+  hardness?: number;
   /** Carve in rather than push out. */
   invert?: boolean;
   /** Mirror every dab across a plane through the body's origin. */
@@ -194,6 +198,20 @@ export function nearestSurfacePoint(
   };
 }
 
+/** Consecutive points of a stroke closer than this many radii are joined into a line of dabs. */
+const GAP_RADII = 3;
+
+/**
+ * A sixth of the body's longest side: the radius the docs have always
+ * suggested for a 240 mm base (0.04), kept in proportion now that clay comes
+ * in any size. A fixed 40 mm brush on 70 mm clay moved half of it at once.
+ */
+export function defaultRadiusFor(mesh: SculptMesh): number {
+  const { min, max } = meshBounds(mesh);
+  const longest = Math.max(max[0] - min[0], max[1] - min[1], max[2] - min[2]);
+  return longest > 0 ? longest / 6 : DEFAULT_BRUSH.radius;
+}
+
 /**
  * Apply a stroke to a mesh, in place.
  *
@@ -217,13 +235,15 @@ export function applySculptStroke(
   const settings: BrushSettings = {
     ...DEFAULT_BRUSH,
     type: request.brush ?? 'draw',
-    radius: request.radius ?? DEFAULT_BRUSH.radius,
+    radius: request.radius ?? defaultRadiusFor(mesh),
     strength: request.strength ?? DEFAULT_BRUSH.strength,
     invert: request.invert ?? false,
     symmetryX: request.symmetryX ?? Boolean(request.symmetry),
     symmetryAxis: request.symmetry ?? 'x',
     detail: request.detail ?? DEFAULT_BRUSH.detail,
     dynamicTopology: request.dynamicTopology ?? DEFAULT_BRUSH.dynamicTopology,
+    depth: request.depthMm !== undefined ? Math.max(0, request.depthMm) / 1000 : undefined,
+    hardness: request.hardness !== undefined ? Math.max(0, Math.min(1, request.hardness)) : undefined,
   };
 
   // The mesh arrives from the scene graph with no normals computed; the brush
@@ -239,7 +259,30 @@ export function applySculptStroke(
   const missed: MissedDab[] = [];
   let applied = 0;
 
+  // Between two points of the request that are close enough to be one line,
+  // dabs every quarter radius, as a mouse drag gets (SculptSurface). Given
+  // only the points, a 3 mm brush with dabs 4 mm apart left a row of separate
+  // pits, and the grin it was meant to be came out ragged. Points further
+  // apart than GAP_RADII radii are separate dabs, as before; grab is left
+  // alone, since every dab of it drags by the whole delta.
+  const fill = settings.type !== 'grab';
+  const spacing = Math.max(1e-5, settings.radius * 0.25);
+  let previous: number[] | null = null;
   for (const point of request.at) {
+    if (fill && previous) {
+      const d = Math.hypot(point[0] - previous[0], point[1] - previous[1], point[2] - previous[2]);
+      const steps = d <= settings.radius * GAP_RADII ? Math.min(64, Math.floor(d / spacing)) : 0;
+      for (let k = 1; k < steps; k++) {
+        const t = k / steps;
+        const between = nearestSurfacePoint(mesh, [
+          previous[0] + (point[0] - previous[0]) * t,
+          previous[1] + (point[1] - previous[1]) * t,
+          previous[2] + (point[2] - previous[2]) * t,
+        ]);
+        if (between && between.distance <= reach) applyBrush(session, settings, between.stamp);
+      }
+    }
+    previous = point;
     const found = nearestSurfacePoint(mesh, point);
     if (!found || found.distance > reach) {
       missed.push({

@@ -35,10 +35,11 @@ import {
   paintArgsFromSize, paintResolution, toGeometrySpace,
 } from '../utils/vertexPaint';
 import { saveUserPreset, deleteUserPreset, readUserPreset, listUserPresetNames, ensureUserPreset, type SavedCopilotMessage } from '../utils/userPresets';
-import { SCULPT_BASES, buildSculptBase, type SculptBaseId } from '../utils/sculptBases';
+import { SCULPT_BASES, buildSculptBase, buildSculptBaseSized, MAX_SCULPT_SIZE, MIN_SCULPT_SIZE, type SculptBaseId } from '../utils/sculptBases';
 import { fromSceneGeom, toSceneGeom, splitComponents, type BrushType } from '../utils/sculptMesh';
 import { applySculptStroke, probeSurface, sculptSummary, undoSculptStroke, BRUSH_TYPES } from '../utils/sculptCommands';
 import { cutSculptOffThread } from '../utils/sculptCutClient';
+import { grooveAlongSurface, type CarveProfile } from '../utils/sculptCarve';
 import { describeReferenceImage, normalizeReferencePicture, readReferencePatch, upsertReferenceImage } from '../utils/referenceImages';
 import { sceneContentBounds } from '../utils/frameScene';
 import {
@@ -106,7 +107,7 @@ import {
   boxLattice, cloneLattice, createLattice, deserializeCage, orientFaces, serializeCage, toSceneGeom as latticeToSceneGeom, DEFAULT_UNIT as LATTICE_UNIT,
   type Axis as LatticeAxis, type Lattice,
 } from '../utils/latticeMesh';
-import type { SculptUndoEntry } from '../utils/sculptMesh';
+import type { SculptMesh, SculptUndoEntry } from '../utils/sculptMesh';
 import { CAMERA_VIEWS, type CameraView } from '../utils/cameraViews';
 import { getLiveDimensions } from '../utils/liveDimensions';
 import type { HeadlessResult, HistoryEntry, HistoryQuery } from '../workers/physicsWorkerProtocol';
@@ -131,6 +132,18 @@ interface PhysicsWindow extends Window {
  * Capped because each entry can hold a copy of the mesh.
  */
 const sculptHistory = new Map<string, SculptUndoEntry[]>();
+
+/*
+ * Commands that change a sculpt's clay run one after another, in the order
+ * they arrived. Each reads the mesh, works on it (a cut or a carve in a
+ * worker, for a while), and writes it back; two at once read the same mesh,
+ * and the second to finish found the body changed under it and was refused
+ * ("The body changed while it was being cut"), so an agent sending a face's
+ * features together lost half of them. One queue for all bodies, not one per
+ * body: a body named one way and id'd another would otherwise get two.
+ */
+const SERIAL_SCULPT_COMMANDS = new Set(['SCULPT', 'SCULPT_CUT', 'SCULPT_CARVE', 'UNDO_SCULPT', 'RESIZE_SCULPT', 'SET_SCULPT_BASE']);
+let sculptQueue: Promise<unknown> = Promise.resolve();
 
 /**
  * The last few cages of each lattice body, so an operation can be taken back off.
@@ -351,6 +364,84 @@ function sculptGeomIndex(node: SceneNode | null | undefined): number {
  * rebuilt from its primitives on every compile, so a stroke would last until
  * the next one - and neither can a primitive, which has no mesh to move.
  */
+/**
+ * Puts a cut made off-thread (scissors or carve) onto the body: refused if
+ * the body changed while the worker had it, split into one body per piece if
+ * it came apart, and otherwise one entry in the agent's sculpt history.
+ */
+/** Whether two geoms hold the same mesh: same counts, and the same values at a spread of places. */
+function sameMesh(a: SceneGeom | undefined, b: SceneGeom | undefined): boolean {
+  if (a === b) return true;
+  const av = a?.renderVertices, bv = b?.renderVertices, af = a?.faces, bf = b?.faces;
+  if (!av || !bv || !af || !bf) return false;
+  if (av === bv && af === bf) return true;
+  if (av.length !== bv.length || af.length !== bf.length) return false;
+  const step = Math.max(1, Math.floor(av.length / 997));
+  for (let i = 0; i < av.length; i += step) if (av[i] !== bv[i]) return false;
+  const fstep = Math.max(1, Math.floor(af.length / 997));
+  for (let i = 0; i < af.length; i += fstep) if (af[i] !== bf[i]) return false;
+  return true;
+}
+
+async function applySculptCutResult(
+  targetId: string,
+  geomIndex: number,
+  geomBefore: SceneGeom | undefined,
+  mesh: SculptMesh,
+  result: Awaited<ReturnType<typeof cutSculptOffThread>>,
+) {
+  if (!result.ok) return { ok: false, id: targetId, error: result.error };
+
+  // The worker had it for a while; if the body changed meanwhile, the
+  // cut is of a shape that no longer exists. The clay is found again by its
+  // geom's name and compared by the mesh it holds: the collider pass that
+  // follows every edit rewrites the node and, once the clay is concave, adds
+  // its convex pieces as geoms, so the old index and the old object both
+  // refused the next carve while the clay itself was untouched.
+  const live = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId);
+  const liveIndex = live?.geoms?.findIndex((g) => g.name === geomBefore?.name) ?? -1;
+  if (!live || liveIndex < 0 || !sameMesh(live.geoms[liveIndex], geomBefore)) {
+    return { ok: false, id: targetId, error: 'The body changed while it was being cut; nothing was applied.' };
+  }
+  geomIndex = liveIndex;
+
+  // A cut that splits the clay makes one body per piece, as the
+  // Scissors do in the viewport. That is a change to the document, so
+  // it is the editor's undo that reverses it, not this history.
+  const pieces = splitComponents(result.mesh);
+  if (pieces.length > 1) {
+    const bodies = useStore.getState().separateSculpt(targetId, pieces, geomBefore?.name);
+    sculptHistory.delete(targetId);
+    const error = useStore.getState().lastCompileError;
+    return {
+      ok: !error, ...(error ? { error } : {}), id: targetId,
+      facesBefore: result.facesBefore, facesAfter: pieces[0].faceCount,
+      pieces: pieces.length, bodies,
+      ...sculptSummary(pieces[0]),
+      undoDepth: 0,
+    };
+  }
+
+  const stack = sculptHistory.get(targetId) ?? [];
+  stack.push({ indices: null, positions: null, mesh });
+  while (stack.length > SCULPT_HISTORY_DEPTH) stack.shift();
+  sculptHistory.set(targetId, stack);
+
+  // Metadata first, geometry second — see SCULPT.
+  const latest = useStore.getState();
+  latest.updateNode(targetId, { sculptEdited: true, sculptVersion: (live.sculptVersion ?? 1) + 1 });
+  const { vertices, renderVertices, faces } = toSceneGeom(result.mesh);
+  latest.updateNodeGeom(targetId, { vertices, renderVertices, faces }, geomIndex);
+
+  const error = useStore.getState().lastCompileError;
+  return {
+    ok: !error, ...(error ? { error } : {}), id: targetId,
+    facesBefore: result.facesBefore, facesAfter: result.facesAfter, pieces: result.pieces,
+    ...sculptSummary(result.mesh),
+    undoDepth: stack.length,
+  };
+}
+
 function sculptTarget(store: ReturnType<typeof useStore.getState>, targetId: string): { node: SceneNode; geomIndex: number } {
   if (!targetId) throw new Error('Missing targetId');
   const node = findNodeInScene(store.sceneGraph.nodes, targetId);
@@ -1096,6 +1187,12 @@ export const fillBodyDefaults = (b: RawNode, parentMoves: boolean | null = null)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const sculptSpec = (b as any).sculpt as {
     base?: SculptBaseId;
+    /**
+     * Longest side in mm, applied before the strokes. Omitted, the base stays
+     * at BASE_SIZE (240 mm): scenes written before clay had a size place their
+     * strokes on that, and would miss on anything smaller.
+     */
+    sizeMm?: number;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     strokes?: Record<string, any>[];
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1108,7 +1205,9 @@ export const fillBodyDefaults = (b: RawNode, parentMoves: boolean | null = null)
     if (!SCULPT_BASES.some((sb) => sb.id === baseId)) {
       throw new Error(`Unknown sculpt base '${baseId}'. Available: ${SCULPT_BASES.map((sb) => sb.id).join(', ')}`);
     }
-    const mesh = buildSculptBase(baseId);
+    const mesh = typeof sculptSpec.sizeMm === 'number' && sculptSpec.sizeMm > 0
+      ? buildSculptBaseSized(baseId, sculptSpec.sizeMm / 1000)
+      : buildSculptBase(baseId);
     if (Array.isArray(sculptSpec.strokes)) {
       for (const s of sculptSpec.strokes) {
         if (!s || typeof s !== 'object') continue;
@@ -1119,7 +1218,10 @@ export const fillBodyDefaults = (b: RawNode, parentMoves: boolean | null = null)
         applySculptStroke(mesh, {
           brush: s.brush,
           at: pts,
-          radius: s.radius,
+          // An unsized base keeps the 40 mm brush it always had, so an old
+          // scene's strokes come out as they did; sized clay gets one in
+          // proportion (defaultRadiusFor).
+          radius: s.radius ?? (sculptSpec.sizeMm ? undefined : 0.04),
           strength: s.strength,
           invert: s.invert,
           symmetryX: s.symmetryX,
@@ -1127,6 +1229,8 @@ export const fillBodyDefaults = (b: RawNode, parentMoves: boolean | null = null)
           detail: s.detail,
           dynamicTopology: s.dynamicTopology,
           delta: s.delta,
+          depthMm: s.depthMm,
+          hardness: s.hardness,
         });
       }
     }
@@ -1922,6 +2026,15 @@ export function useMCPBridge() {
      * so the modal is closed again.
      */
     const guardedHandle = async (cmd: string, msg: Record<string, unknown>): Promise<unknown> => {
+      if (SERIAL_SCULPT_COMMANDS.has(cmd)) {
+        const run = sculptQueue.then(() => guardedNow(cmd, msg));
+        sculptQueue = run.catch(() => undefined);
+        return run;
+      }
+      return guardedNow(cmd, msg);
+    };
+
+    const guardedNow = async (cmd: string, msg: Record<string, unknown>): Promise<unknown> => {
       const blockedBefore = useStore.getState().castPrepBlocked;
       const data = await handle(cmd, msg);
       if (useStore.getState().castPrepBlocked === blockedBefore) return data;
@@ -2365,7 +2478,8 @@ export function useMCPBridge() {
           point to the surface and reads the normal there.
         */
         case 'CREATE_SCULPT': {
-          const { name, base, pos } = msg as Msg<{ name?: string; base?: SculptBaseId }>;
+          const { name, base, pos, sizeMm } = msg as Msg<{ name?: string; base?: SculptBaseId; sizeMm?: number }>;
+          if (sizeMm !== undefined && !(typeof sizeMm === 'number' && sizeMm > 0)) throw new Error('sizeMm must be a positive number of millimetres');
           const parent = resolveParent(store.sceneGraph.nodes, msg.parent);
           const position = Array.isArray(pos) && pos.length === 3 ? pos : [0, 0, 0.3];
           if (base !== undefined && !SCULPT_BASES.some(b => b.id === base)) {
@@ -2397,6 +2511,7 @@ export function useMCPBridge() {
           // under one over MCP; the editor's own adds give a child a hinge.
           if (parent) store.updateNodeJointsList(created.id, []);
           if (base && base !== created.sculptBase) store.setSculptBase(created.id, base);
+          if (sizeMm !== undefined) useStore.getState().resizeSculpt(created.id, sizeMm / 1000);
           if (typeof name === 'string' && name.trim()) store.renameNode(created.id, name.trim());
 
           const after = findNodeInScene(useStore.getState().sceneGraph.nodes, created.id);
@@ -2426,14 +2541,41 @@ export function useMCPBridge() {
           return { ok: true, id: targetId, base, ...sculptSummary(sculptMeshOf(after)) };
         }
 
+        case 'RESIZE_SCULPT': {
+          const { targetId, sizeMm } = msg as Msg<{ targetId: string; sizeMm: number | (number | null)[] }>;
+          if (!targetId) throw new Error('Missing targetId');
+          const node = findNodeInScene(store.sceneGraph.nodes, targetId);
+          if (!node) throw new Error(`No object with id '${targetId}'`);
+          if (!node.isSculpt) throw new Error(`'${targetId}' is not a sculpt body`);
+          const limits = [MIN_SCULPT_SIZE * 1000, MAX_SCULPT_SIZE * 1000];
+          const valid = (v: unknown) => typeof v === 'number' && v >= limits[0] && v <= limits[1];
+          // A number is the longest side; [width, depth, height] sizes each
+          // axis, a null keeping that one as it is.
+          if (Array.isArray(sizeMm)) {
+            if (sizeMm.length !== 3 || sizeMm.some((v) => v !== null && !valid(v))) {
+              throw new Error(`sizeMm as a list is [width, depth, height] in mm, each ${limits[0]} to ${limits[1]} or null`);
+            }
+            store.resizeSculpt(targetId, sizeMm.map((v) => (v === null ? null : v / 1000)));
+          } else {
+            if (!valid(sizeMm)) throw new Error(`sizeMm must be between ${limits[0]} and ${limits[1]}, or [width, depth, height]`);
+            store.resizeSculpt(targetId, sizeMm / 1000);
+          }
+          // Delta undo entries hold positions at the old scale; replaying one
+          // would drag those vertices back to it.
+          sculptHistory.delete(targetId);
+          const after = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId);
+          return { ok: true, id: targetId, ...sculptSummary(sculptMeshOf(after)), undoDepth: 0 };
+        }
+
         case 'SCULPT': {
           // Every option below is handed straight to applySculptStroke, which
           // supplies its own default for each one it does not get.
           // Also accepts `strokes: [...]` to run a whole batch of brushes/strokes
           // in a single mesh update & recompile.
-          const { targetId, brush, at, radius, strength, invert, symmetryX, symmetry, detail, dynamicTopology, delta, strokes } =
+          const { targetId, brush, at, radius, strength, invert, symmetryX, symmetry, detail, dynamicTopology, delta, depthMm, hardness, strokes } =
             msg as Msg<{
               targetId: string; brush?: BrushType; radius?: number; strength?: number;
+              depthMm?: number; hardness?: number;
               invert?: boolean; symmetryX?: boolean; symmetry?: 'x' | 'y' | 'z';
               detail?: number; dynamicTopology?: boolean; delta?: number[];
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2443,7 +2585,7 @@ export function useMCPBridge() {
 
           const strokeList = Array.isArray(strokes) && strokes.length > 0
             ? strokes
-            : [{ brush, at, radius, strength, invert, symmetryX, symmetry, detail, dynamicTopology, delta }];
+            : [{ brush, at, radius, strength, invert, symmetryX, symmetry, detail, dynamicTopology, delta, depthMm, hardness }];
 
           const mesh = sculptMeshOf(node, geomIndex);
           let lastResult: ReturnType<typeof applySculptStroke> | null = null;
@@ -2469,6 +2611,8 @@ export function useMCPBridge() {
               detail: s.detail,
               dynamicTopology: s.dynamicTopology,
               delta: s.delta,
+              depthMm: s.depthMm,
+              hardness: s.hardness,
             }, sink);
             totalVerticesChanged += lastResult.moved ?? 0;
 
@@ -2548,50 +2692,33 @@ export function useMCPBridge() {
           const geomBefore = node.geoms?.[geomIndex];
           const mesh = sculptMeshOf(node, geomIndex);
           const result = await cutSculptOffThread(mesh, { kind: 'polygon', polygon, direction }, { mode, cap });
-          if (!result.ok) return { ok: false, id: targetId, error: result.error };
+          return applySculptCutResult(targetId, geomIndex, geomBefore, mesh, result);
+        }
 
-          // The worker had it for a while; if the body changed meanwhile, the
-          // cut is of a shape that no longer exists.
-          const live = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId);
-          if (!live || live.geoms?.[geomIndex] !== geomBefore) {
-            return { ok: false, id: targetId, error: 'The body changed while it was being cut; nothing was applied.' };
+        case 'SCULPT_CARVE': {
+          const { targetId, path, widthMm, depthMm, profile = 'round', symmetry, fill } = msg as Msg<{
+            targetId: string; path: number[][]; widthMm: number; depthMm: number;
+            profile?: CarveProfile; symmetry?: 'x' | 'y' | 'z'; fill?: boolean;
+          }>;
+          const { node, geomIndex } = sculptTarget(store, targetId);
+          const points = pointList(path);
+          if (!points.length || points.some((p: unknown) => !Array.isArray(p) || p.length < 3)) {
+            throw new Error("path must be [x, y, z] or a list of them, in the body's own frame (metres)");
           }
+          if (!(widthMm > 0) || !(depthMm > 0)) throw new Error('widthMm and depthMm must be positive millimetres');
+          if (!['round', 'v', 'flat'].includes(profile)) throw new Error("profile must be 'round', 'v' or 'flat'");
+          if (symmetry !== undefined && !['x', 'y', 'z'].includes(symmetry)) throw new Error("symmetry must be 'x', 'y' or 'z'");
 
-          // A cut that splits the clay makes one body per piece, as the
-          // Scissors do in the viewport. That is a change to the document, so
-          // it is the editor's undo that reverses it, not this history.
-          const pieces = splitComponents(result.mesh);
-          if (pieces.length > 1) {
-            const bodies = useStore.getState().separateSculpt(targetId, pieces, geomBefore?.name);
-            sculptHistory.delete(targetId);
-            const error = useStore.getState().lastCompileError;
-            return {
-              ok: !error, ...(error ? { error } : {}), id: targetId,
-              facesBefore: result.facesBefore, facesAfter: pieces[0].faceCount,
-              pieces: pieces.length, bodies,
-              ...sculptSummary(pieces[0]),
-              undoDepth: 0,
-            };
+          const geomBefore = node.geoms?.[geomIndex];
+          const mesh = sculptMeshOf(node, geomIndex);
+          const { spec, missed } = grooveAlongSurface(mesh, points, {
+            width: widthMm / 1000, depth: depthMm / 1000, profile, mirror: symmetry, fill: fill === true,
+          });
+          if (!spec.path.length) {
+            return { ok: false, id: targetId, error: 'No point of the path is on the clay.', missed };
           }
-
-          const stack = sculptHistory.get(targetId) ?? [];
-          stack.push({ indices: null, positions: null, mesh });
-          while (stack.length > SCULPT_HISTORY_DEPTH) stack.shift();
-          sculptHistory.set(targetId, stack);
-
-          // Metadata first, geometry second — see SCULPT.
-          const latest = useStore.getState();
-          latest.updateNode(targetId, { sculptEdited: true, sculptVersion: (live.sculptVersion ?? 1) + 1 });
-          const { vertices, renderVertices, faces } = toSceneGeom(result.mesh);
-          latest.updateNodeGeom(targetId, { vertices, renderVertices, faces }, geomIndex);
-
-          const error = useStore.getState().lastCompileError;
-          return {
-            ok: !error, ...(error ? { error } : {}), id: targetId,
-            facesBefore: result.facesBefore, facesAfter: result.facesAfter, pieces: result.pieces,
-            ...sculptSummary(result.mesh),
-            undoDepth: stack.length,
-          };
+          const result = await cutSculptOffThread(mesh, spec, { mode: 'remove', cap: true });
+          return { ...await applySculptCutResult(targetId, geomIndex, geomBefore, mesh, result), ...(missed.length ? { missed } : {}) };
         }
 
         /*

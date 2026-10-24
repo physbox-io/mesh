@@ -42,7 +42,12 @@ export type BrushType =
    * Not a brush at all: a lasso that cuts straight through the clay. It never
    * reaches the dab code below — see utils/sculptCut.ts.
    */
-  | 'scissors';
+  | 'scissors'
+  /**
+   * Not a brush either: a cutter dragged along the surface and subtracted,
+   * so its groove has the cutter's own clean walls (utils/sculptCarve.ts).
+   */
+  | 'carve';
 
 export interface SculptMesh {
   /** xyz per vertex, Z-up metres. Length is capacity; `vertexCount` is truth. */
@@ -795,6 +800,25 @@ export interface BrushSettings {
   /** Target edge length as a fraction of the brush radius. */
   detail: number;
   /**
+   * For 'draw': how far one stroke may raise or carve, in metres, measured
+   * along the brush normal from where the surface was when the stroke began.
+   * 0 or absent is no limit. With a limit, the surface stops at it however
+   * long you keep brushing, so a stroke leaves a floor at an exact depth (or a
+   * top at an exact height) instead of a bowl that deepens with every pass.
+   */
+  depth?: number;
+  /**
+   * 0..1: the share of the radius that gets the full effect before the edge
+   * falls away. 0 (the default) is the soft smoothstep across the whole brush;
+   * near 1 is a flat-ended punch with a short, steep wall, for sockets and
+   * slits with crisp edges.
+   */
+  hardness?: number;
+  /** For 'carve': the cutter's shape (see utils/sculptCarve.ts). The radius is half its width, the depth its depth. */
+  carveProfile?: 'round' | 'v' | 'flat';
+  /** For 'carve': cut out the whole loop drawn, not just a groove along it. */
+  carveFill?: boolean;
+  /**
    * A ceiling on how many vertices dynamic topology may create.
    *
    * Refinement is exponential in the detail setting and quadratic in the brush
@@ -813,7 +837,8 @@ export interface BrushSettings {
 
 export const DEFAULT_BRUSH: BrushSettings = {
   type: 'draw',
-  radius: 0.04,
+  // A sixth of new clay (DEFAULT_SCULPT_SIZE in sculptBases.ts).
+  radius: 0.015,
   strength: 0.5,
   invert: false,
   symmetryX: false,
@@ -847,7 +872,9 @@ export interface BrushStamp {
  * itself does not. Smoothstep has zero derivative at both ends, so consecutive
  * stamps blend into a surface instead of a set of overlapping dents.
  */
-function falloff(t: number): number {
+function falloff(t: number, hardness = 0): number {
+  const h = Math.max(0, Math.min(0.95, hardness));
+  if (h > 0) t = (t - h) / (1 - h);
   if (t >= 1) return 0;
   if (t <= 0) return 1;
   const s = 1 - t;
@@ -859,6 +886,9 @@ export interface SculptSession {
   mesh: SculptMesh;
   hash: SpatialHash;
   adjacency: Adjacency;
+  /** For 'smooth': each vertex's share of the surface, and the topology it was measured on. */
+  vertexArea?: Float32Array;
+  vertexAreaTopology?: number;
   /** Vertex index -> its position when the stroke began. */
   undoIndices: number[];
   undoPositions: number[];
@@ -893,10 +923,37 @@ export interface SculptSession {
   stampCount: number;
   /** Set once refinement has been turned away by the vertex budget. */
   hitVertexBudget: boolean;
+  /**
+   * For a depth-limited 'draw': each vertex's position when the stroke first
+   * reached it, and the normal of the dab that reached it, [x, y, z, nx, ny,
+   * nz] — the surface the depth is measured from, and the direction it is
+   * measured in. Null otherwise.
+   */
+  layerStart: Map<number, number[]> | null;
 }
 
+/** A third of the area of every triangle each vertex is a corner of. */
+function vertexAreas(mesh: SculptMesh): Float32Array {
+  const { positions: p, faces: f } = mesh;
+  const area = new Float32Array(mesh.vertexCount);
+  for (let t = 0; t < mesh.faceCount; t++) {
+    const a = f[t * 3], b = f[t * 3 + 1], c = f[t * 3 + 2];
+    const ux = p[b * 3] - p[a * 3], uy = p[b * 3 + 1] - p[a * 3 + 1], uz = p[b * 3 + 2] - p[a * 3 + 2];
+    const vx = p[c * 3] - p[a * 3], vy = p[c * 3 + 1] - p[a * 3 + 1], vz = p[c * 3 + 2] - p[a * 3 + 2];
+    const third = Math.hypot(uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx) / 6;
+    area[a] += third; area[b] += third; area[c] += third;
+  }
+  return area;
+}
+
+/** The sphere Smooth averages each vertex over, as a fraction of the brush radius. */
+const SMOOTH_REACH = 0.6;
+/** Taubin's inflating step as a multiple of the shrinking one. Measured: 1.05 left a carved groove 1.9 of 2 mm deep after three passes; 0 filled it to 0.8 but sank a big brush's middle into coarse clay. 0.8 takes it to 1.4 and still smooths coarse clay. */
+const TAUBIN_MU_RATIO = 0.8;
 /** How many dabs pass between collapse passes. */
 const DECIMATE_EVERY = 4;
+/** Halvings one dab may make: 2^6 takes a 30 mm base edge under 0.5 mm. */
+const MAX_REFINE_PASSES = 6;
 
 export function beginStroke(mesh: SculptMesh, settings: BrushSettings): SculptSession {
   /*
@@ -930,7 +987,33 @@ export function beginStroke(mesh: SculptMesh, settings: BrushSettings): SculptSe
     grabOrigin: [null, null],
     stampCount: 0,
     hitVertexBudget: false,
+    layerStart: isLayered(settings) ? new Map() : null,
   };
+}
+
+function isLayered(settings: BrushSettings): boolean {
+  return settings.type === 'draw' && (settings.depth ?? 0) > 0;
+}
+
+/**
+ * Where a vertex was when the stroke reached it, and the direction its depth
+ * is measured in: now and this dab's normal, if it is new to the stroke.
+ *
+ * The first dab's normal, held, rather than each dab's own or the vertex's.
+ * Each dab's own: a dab landing on the wall of the pit it is carving has a
+ * tilted normal, and the floor sank a quarter further than asked. The vertex's
+ * own: a second stroke into a pit measured its walls along their slope, and
+ * they sank below the floor.
+ */
+function layerStartOf(session: SculptSession, i: number, stamp: BrushStamp): number[] {
+  const start = session.layerStart!;
+  let p = start.get(i);
+  if (!p) {
+    const q = session.mesh.positions;
+    p = [q[i * 3], q[i * 3 + 1], q[i * 3 + 2], stamp.nx, stamp.ny, stamp.nz];
+    start.set(i, p);
+  }
+  return p;
 }
 
 function recordUndo(session: SculptSession, indices: number[]): void {
@@ -953,7 +1036,7 @@ function recordUndo(session: SculptSession, indices: number[]): void {
  * a stroke has been going on.
  */
 export function applyBrush(session: SculptSession, settings: BrushSettings, stamp: BrushStamp): void {
-  if (settings.type === 'scissors') return;
+  if (settings.type === 'scissors' || settings.type === 'carve') return;
   stampOnce(session, settings, stamp);
 
   if (settings.symmetryX) {
@@ -978,21 +1061,47 @@ function stampOnce(session: SculptSession, settings: BrushSettings, stamp: Brush
   const { mesh } = session;
   const radius = Math.max(1e-5, settings.radius);
 
+  // A hard brush leaves a wall as steep as its edge is short, and a wall is
+  // only as straight as the triangles across it: at the usual detail a 3 mm
+  // brush's rim zigzagged with its 0.75 mm edges. So harder is finer, down to
+  // a third of the usual edge.
+  const edgeScale = Math.max(0.35, 1 - (settings.hardness ?? 0));
+  const target = Math.max(1e-5, radius * Math.max(0.05, settings.detail) * edgeScale);
+  const budget = settings.maxVertices ?? DEFAULT_BRUSH.maxVertices;
+  // A midpoint made mid-stroke starts where its parents started, so a depth
+  // limit cannot be measured from a surface that is already partly carved.
+  const onMidpoint = session.layerStart
+    ? (mid: number, a: number, b: number) => {
+      const pa = layerStartOf(session, a, stamp), pb = layerStartOf(session, b, stamp);
+      const nx = pa[3] + pb[3], ny = pa[4] + pb[4], nz = pa[5] + pb[5];
+      const nl = Math.hypot(nx, ny, nz) || 1;
+      session.layerStart!.set(mid, [
+        (pa[0] + pb[0]) / 2, (pa[1] + pb[1]) / 2, (pa[2] + pb[2]) / 2, nx / nl, ny / nl, nz / nl,
+      ]);
+    }
+    : undefined;
+
   if (settings.dynamicTopology && settings.type !== 'grab') {
-    const target = Math.max(1e-5, radius * Math.max(0.05, settings.detail));
-    const budget = settings.maxVertices ?? DEFAULT_BRUSH.maxVertices;
-    const split =
-      mesh.vertexCount >= budget
-        ? 0
-        : refineInRadius(mesh, stamp.x, stamp.y, stamp.z, radius, target * 1.5);
+    // Down to the target before anything moves, not one halving a dab. A pass
+    // halves only the edges in reach, so a 3 mm brush landing on new clay's
+    // 6 mm edges found a few corners in its radius and drove them in alone:
+    // the ragged, crumpled patch small features came out as. Passes stop as
+    // soon as one splits nothing, so clay that is already fine pays one scan.
+    let split = 0;
+    for (let pass = 0; pass < MAX_REFINE_PASSES && mesh.vertexCount < budget; pass++) {
+      const n = refineInRadius(mesh, stamp.x, stamp.y, stamp.z, radius, target * 1.5, onMidpoint);
+      split += n;
+      if (n === 0) break;
+    }
     if (mesh.vertexCount >= budget) session.hitVertexBudget = true;
 
     // Collapsing is a tidy-up, not a correctness step, and it costs a pass over
     // the whole mesh. Every few dabs keeps the density in check without paying
-    // for it on each one.
+    // for it on each one. Not under a depth limit: a collapse renumbers the
+    // vertices, and layerStart is keyed by number.
     session.stampCount++;
     const merged =
-      session.stampCount % DECIMATE_EVERY === 0
+      !session.layerStart && session.stampCount % DECIMATE_EVERY === 0
         ? decimateInRadius(mesh, stamp.x, stamp.y, stamp.z, radius, target * 0.4, session.adjacency)
         : 0;
 
@@ -1025,7 +1134,7 @@ function stampOnce(session: SculptSession, settings: BrushSettings, stamp: Brush
       const dx = mesh.positions[i * 3] - stamp.x;
       const dy = mesh.positions[i * 3 + 1] - stamp.y;
       const dz = mesh.positions[i * 3 + 2] - stamp.z;
-      weights[k] = falloff(Math.hypot(dx, dy, dz) / radius);
+      weights[k] = falloff(Math.hypot(dx, dy, dz) / radius, settings.hardness);
     }
     if (settings.type === 'grab') {
       session.grabbed[channel] = indices;
@@ -1043,7 +1152,11 @@ function stampOnce(session: SculptSession, settings: BrushSettings, stamp: Brush
   const strength = Math.max(0, Math.min(1, settings.strength));
   // Displacement scales with the brush, so a small brush cannot punch a hole
   // through a shape that a large one only dents.
-  const amplitude = radius * 0.18 * strength * sign;
+  // Under a depth limit a dab may go further, since the limit stops it: two or
+  // three dabs reach the floor, where the unlimited brush took a dozen passes
+  // to get a few millimetres down.
+  const depth = isLayered(settings) ? settings.depth! : 0;
+  const amplitude = Math.max(radius * 0.18, depth * 0.5) * strength * sign;
   const positions = mesh.positions;
   const normals = mesh.normals;
 
@@ -1055,6 +1168,22 @@ function stampOnce(session: SculptSession, settings: BrushSettings, stamp: Brush
       for (let k = 0; k < indices.length; k++) {
         const i = indices[k];
         const w = weights[k] * amplitude;
+        if (depth > 0) {
+          // Along the vertex's held direction only, never the dab's: a dab
+          // tilted on the wall of its own groove pushed a little sideways each
+          // time, the limit took back only the depth, and the sideways part
+          // built up over a stroke into a crumpled, folded floor.
+          const p0 = layerStartOf(session, i, stamp);
+          const gone =
+            ((positions[i * 3] - p0[0]) * p0[3] +
+              (positions[i * 3 + 1] - p0[1]) * p0[4] +
+              (positions[i * 3 + 2] - p0[2]) * p0[5]) * sign;
+          const step = Math.min(Math.abs(w), Math.max(0, depth - gone)) * sign;
+          positions[i * 3] += p0[3] * step;
+          positions[i * 3 + 1] += p0[4] * step;
+          positions[i * 3 + 2] += p0[5] * step;
+          continue;
+        }
         positions[i * 3] += stamp.nx * w;
         positions[i * 3 + 1] += stamp.ny * w;
         positions[i * 3 + 2] += stamp.nz * w;
@@ -1074,36 +1203,64 @@ function stampOnce(session: SculptSession, settings: BrushSettings, stamp: Brush
     }
 
     case 'smooth': {
-      // Towards the average of the neighbours. Read from a copy, because
-      // smoothing in place would let a vertex already moved this pass drag its
-      // neighbours further than the strength allows.
-      const { offsets, neighbours } = session.adjacency;
+      // Towards the average of the clay within a sphere a fraction of the
+      // brush across, not of the vertex's own neighbours. Those are one edge
+      // away, so a dab moved a vertex a fraction of an edge: on clay that
+      // dynamic topology had refined to half a millimetre, three passes along
+      // a 2 mm groove left it deeper than they found it. A fixed fraction of
+      // the radius smooths what is the brush's size whatever the mesh is.
+      // Read from a copy, because smoothing in place would let a vertex
+      // already moved this pass drag the others further than asked.
+      // Each vertex counts for the area it stands for, not one each. A carve
+      // leaves its groove thick with vertices and the clay beside it with a
+      // few big triangles, and counted one each the groove outvoted the clay:
+      // the average sat inside the groove, and smoothing stopped a third of
+      // the way to filling it.
+      if (!session.vertexArea || session.vertexAreaTopology !== mesh.topologyRevision) {
+        session.vertexArea = vertexAreas(mesh);
+        session.vertexAreaTopology = mesh.topologyRevision;
+      }
+      const area = session.vertexArea;
+      const reach = radius * SMOOTH_REACH;
+      const reach2 = reach * reach;
       const deltas = new Float32Array(indices.length * 3);
-      const rate = weights.length > 0 ? strength : 0;
-      for (let k = 0; k < indices.length; k++) {
-        const i = indices[k];
-        const from = offsets[i];
-        const to = offsets[i + 1];
-        if (to <= from) continue;
-        let ax = 0, ay = 0, az = 0;
-        for (let j = from; j < to; j++) {
-          const n = neighbours[j];
-          ax += positions[n * 3];
-          ay += positions[n * 3 + 1];
-          az += positions[n * 3 + 2];
+      const near: number[] = [];
+      // One step of averaging, scaled by `factor`. Taubin's pair below: a
+      // step towards the average, then a slightly larger one away from it.
+      // Averaging alone also pulls a curved surface in towards its centre,
+      // and only under the brush, so on coarse clay each dab dug a dent and
+      // the surface got rougher, not smoother. The second step puts the broad
+      // curve back while bumps and grooves narrower than the sphere stay gone.
+      const step = (factor: number) => {
+        for (let k = 0; k < indices.length; k++) {
+          const i = indices[k];
+          const x = positions[i * 3], y = positions[i * 3 + 1], z = positions[i * 3 + 2];
+          near.length = 0;
+          queryRadius(mesh, session.hash, x, y, z, reach, near);
+          let ax = 0, ay = 0, az = 0, total = 0;
+          for (const n of near) {
+            const dx = positions[n * 3] - x, dy = positions[n * 3 + 1] - y, dz = positions[n * 3 + 2] - z;
+            const t = 1 - (dx * dx + dy * dy + dz * dz) / reach2;
+            if (t <= 0) continue;
+            const w = t * t * area[n];
+            ax += positions[n * 3] * w; ay += positions[n * 3 + 1] * w; az += positions[n * 3 + 2] * w;
+            total += w;
+          }
+          const w = total > 0 ? weights[k] * factor : 0;
+          deltas[k * 3] = total > 0 ? (ax / total - x) * w : 0;
+          deltas[k * 3 + 1] = total > 0 ? (ay / total - y) * w : 0;
+          deltas[k * 3 + 2] = total > 0 ? (az / total - z) * w : 0;
         }
-        const count = to - from;
-        const w = weights[k] * rate;
-        deltas[k * 3] = (ax / count - positions[i * 3]) * w;
-        deltas[k * 3 + 1] = (ay / count - positions[i * 3 + 1]) * w;
-        deltas[k * 3 + 2] = (az / count - positions[i * 3 + 2]) * w;
-      }
-      for (let k = 0; k < indices.length; k++) {
-        const i = indices[k];
-        positions[i * 3] += deltas[k * 3];
-        positions[i * 3 + 1] += deltas[k * 3 + 1];
-        positions[i * 3 + 2] += deltas[k * 3 + 2];
-      }
+        for (let k = 0; k < indices.length; k++) {
+          const i = indices[k];
+          positions[i * 3] += deltas[k * 3];
+          positions[i * 3 + 1] += deltas[k * 3 + 1];
+          positions[i * 3 + 2] += deltas[k * 3 + 2];
+        }
+      };
+      const lambda = 0.6 * strength;
+      step(lambda);
+      step(-lambda * TAUBIN_MU_RATIO);
       break;
     }
 
@@ -1176,6 +1333,21 @@ function stampOnce(session: SculptSession, settings: BrushSettings, stamp: Brush
         refineAlongDrag(session, settings, stamp, radius, channel);
       }
       break;
+    }
+  }
+
+  // A depth-limited dab stretches the edges that cross its wall, from the rim
+  // down to the floor; split those too, so the next dab has a wall to shape
+  // instead of a few long slivers. Refining only appends, so layerStart holds.
+  if (session.layerStart && settings.dynamicTopology && mesh.vertexCount < budget) {
+    const split = refineInRadius(mesh, stamp.x, stamp.y, stamp.z, radius, target * 1.5, onMidpoint);
+    if (split > 0) {
+      session.topologyChanged = true;
+      session.hash = buildSpatialHash(mesh, Math.max(radius * 0.5, 1e-4));
+      session.adjacency = buildAdjacency(mesh);
+      recomputeNormals(mesh);
+      mesh.revision++;
+      return;
     }
   }
 

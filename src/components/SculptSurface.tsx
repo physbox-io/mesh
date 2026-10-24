@@ -49,6 +49,9 @@ import { cutSculptOffThread, prewarmSculptCut } from '../utils/sculptCutClient';
 const SPACING_FRACTION = 0.25;
 
 /** Where the pointer went, resolved onto the mesh. */
+/** How deep a Carve cuts when the Depth slider is at 'no limit', metres. */
+const DEFAULT_CARVE_DEPTH = 0.002;
+
 interface SurfacePoint {
   x: number; y: number; z: number;
   nx: number; ny: number; nz: number;
@@ -97,6 +100,7 @@ export function SculptSurface({
   // the live controls through R3F's `get()` rather than a render value, because
   // `makeDefault` registers them after the scene's meshes have mounted.
   const getThree = useThree((state) => state.get);
+  const invalidate = useThree((state) => state.invalidate);
   const setOrbitEnabled = useCallback((on: boolean) => {
     const controls = getThree().controls as { enabled?: boolean } | null;
     if (controls) controls.enabled = on;
@@ -123,6 +127,19 @@ export function SculptSurface({
   const redoStack = useRef<SculptUndoEntry[]>([]);
   /** Set while the scissors' worker has a cut in hand. */
   const cutting = useRef(false);
+  /** The path a Carve drag has drawn so far, in the mesh's frame, or null when none is open. */
+  const carvePath = useRef<number[][] | null>(null);
+  /** The drawn path, shown on the clay until the carve is done. */
+  const carveLineRef = useRef<THREE.LineSegments>(null);
+  const drawCarveLine = useCallback((path: number[][] | null) => {
+    const line = carveLineRef.current;
+    if (!line) return;
+    const pairs: number[] = [];
+    if (path) for (let i = 1; i < path.length; i++) pairs.push(...path[i - 1], ...path[i]);
+    line.geometry.setAttribute('position', new THREE.Float32BufferAttribute(pairs, 3));
+    line.visible = pairs.length > 0;
+    invalidate();
+  }, [invalidate]);
   /** The mesh this component currently holds, for a cut that finishes after it was replaced. */
   const liveMesh = useRef<SculptMesh | null>(null);
 
@@ -358,6 +375,16 @@ export function SculptSurface({
 
     event.stopPropagation();
     gl.domElement.setPointerCapture?.(event.pointerId);
+    if (brushRef.current.type === 'carve') {
+      if (cutting.current) return;
+      setOrbitEnabled(false);
+      useStore.getState().setDraggedNodeId(nodeId);
+      useStore.getState().setSculptNotice(null);
+      carvePath.current = [[point.x, point.y, point.z]];
+      drawCarveLine(carvePath.current);
+      showCursor(point);
+      return;
+    }
     // The camera must not swing while a stroke is being drawn — on a touch
     // screen the drag gesture is the orbit gesture, so this is the difference
     // between sculpting and spinning the model around.
@@ -378,18 +405,31 @@ export function SculptSurface({
     }
     stamp(point);
     showCursor(point);
-  }, [mesh, resolve, stamp, showCursor, gl, setOrbitEnabled, nodeId]);
+  }, [mesh, resolve, stamp, showCursor, gl, setOrbitEnabled, nodeId, drawCarveLine]);
 
   const onPointerMove = useCallback((event: ThreeEvent<PointerEvent>) => {
     if (brushRef.current.type === 'scissors') { showCursor(null); return; }
     const point = resolve(event);
 
-    if (!sessionRef.current) {
+    if (!sessionRef.current && !carvePath.current) {
       showCursor(point);
       return;
     }
     if (!point) return;
     event.stopPropagation();
+
+    const path = carvePath.current;
+    if (path) {
+      // A point every half radius: the worker fills in between, and finer
+      // is only more hulls for the boolean.
+      const last = path[path.length - 1];
+      if (Math.hypot(point.x - last[0], point.y - last[1], point.z - last[2]) >= brushRef.current.radius * 0.5) {
+        path.push([point.x, point.y, point.z]);
+        drawCarveLine(path);
+      }
+      showCursor(point);
+      return;
+    }
 
     const previous = lastPoint.current;
     if (!previous) {
@@ -430,10 +470,83 @@ export function SculptSurface({
 
     if (steps > 0) lastPoint.current = point;
     showCursor(point);
-  }, [resolve, stamp, showCursor]);
+  }, [resolve, stamp, showCursor, drawCarveLine]);
+
+  /** Puts a cut from the worker onto the clay, as one undo step; scissors and carve both end here. */
+  const applyCutResult = useCallback((target: SculptMesh, revision: number, result: Awaited<ReturnType<typeof cutSculptOffThread>>) => {
+    const store = useStore.getState();
+    if (!result.ok) {
+      store.setSculptNotice({ text: result.error, tone: 'error' });
+      return false;
+    }
+    // Something else replaced the mesh while the worker had it — an agent's
+    // stroke, a preset — and a cut of the old shape would overwrite it.
+    if (liveMesh.current !== target || target.revision !== revision) {
+      store.setSculptNotice({ text: 'The clay changed while it was being cut, so the cut was dropped. Draw it again.', tone: 'error' });
+      return false;
+    }
+
+    /*
+      A cut that splits the clay makes one body per piece, so a piece can be
+      selected, moved or deleted on its own — and so a brush on one cannot
+      reach across the gap and drag the other along with it, which it did
+      while they were one mesh. That is a change to the document, not to this
+      mesh: it goes through the store as an ordinary undo step, and this
+      surface reloads with the largest piece. Its own stroke history goes with
+      the reload, so Ctrl+Z falls through to the app's undo, which puts the
+      body back whole.
+    */
+    const pieces = splitComponents(result.mesh);
+    if (pieces.length > 1) {
+      store.separateSculpt(nodeId, pieces, geomName);
+      store.setSculptNotice({
+        text: `Cut into ${pieces.length} separate bodies. Press Done, then select a piece to move or delete it.`,
+        tone: 'info',
+      });
+      return true;
+    }
+
+    // applyUndo is exactly "swap the whole mesh for this one, and hand back
+    // what puts it back", so the cut is one undo step like any stroke.
+    undoStack.current.push(applyUndo(target, { indices: null, positions: null, mesh: result.mesh }));
+    if (undoStack.current.length > 50) undoStack.current.shift();
+    redoStack.current.length = 0;
+    syncGeometry(target);
+    commit();
+    store.setSculptNotice(null);
+    return true;
+  }, [syncGeometry, commit, nodeId, geomName]);
+
+  /** A Carve drag: the cutter swept along the path drawn, in the worker. */
+  const carve = useCallback(async (path: number[][]) => {
+    const target = mesh;
+    const revision = target.revision;
+    const b = brushRef.current;
+    cutting.current = true;
+    useStore.getState().setSculptNotice({ text: 'Carving…', tone: 'busy' });
+    const result = await cutSculptOffThread(target, {
+      kind: 'carvePath',
+      path,
+      width: b.radius * 2,
+      depth: (b.depth ?? 0) > 0 ? b.depth! : DEFAULT_CARVE_DEPTH,
+      profile: b.carveProfile ?? 'round',
+      fill: b.carveFill === true && path.length >= 3,
+      ...(b.symmetryX ? { mirror: b.symmetryAxis ?? 'x' } : {}),
+    }, {});
+    cutting.current = false;
+    return applyCutResult(target, revision, result);
+  }, [mesh, applyCutResult]);
 
   const finishStroke = useCallback(() => {
     grabPlane.current = null;
+    const path = carvePath.current;
+    if (path) {
+      carvePath.current = null;
+      setOrbitEnabled(true);
+      useStore.getState().setDraggedNodeId(null);
+      void carve(path).finally(() => drawCarveLine(null));
+      return;
+    }
     const session = sessionRef.current;
     if (!session) return;
     const entry = endStroke(session);
@@ -450,7 +563,7 @@ export function SculptSurface({
 
     setOrbitEnabled(true);
     useStore.getState().setDraggedNodeId(null);
-  }, [commit, setOrbitEnabled]);
+  }, [commit, setOrbitEnabled, drawCarveLine, carve]);
 
   const onPointerUp = useCallback((event: ThreeEvent<PointerEvent>) => {
     if (gl.domElement.hasPointerCapture?.(event.pointerId)) {
@@ -556,6 +669,7 @@ export function SculptSurface({
 
   useEffect(() => { liveMesh.current = mesh; }, [mesh]);
 
+
   /*
    * The lasso, drawn on the canvas rather than on the surface.
    *
@@ -580,8 +694,7 @@ export function SculptSurface({
     const revision = target.revision;
 
     cutting.current = true;
-    const store = useStore.getState();
-    store.setSculptNotice({ text: 'Cutting…', tone: 'busy' });
+    useStore.getState().setSculptNotice({ text: 'Cutting…', tone: 'busy' });
     const result = await cutSculptOffThread(target, {
       kind: 'view',
       loop,
@@ -589,48 +702,10 @@ export function SculptSurface({
       viewToLocal: Array.from(viewToLocal.elements),
     }, { mode: keep ? 'keep' : 'remove', cap: brushRef.current.capCut ?? true });
     cutting.current = false;
+    return applyCutResult(target, revision, result);
+  }, [mesh, getThree, applyCutResult]);
 
-    if (!result.ok) {
-      store.setSculptNotice({ text: result.error, tone: 'error' });
-      return false;
-    }
-    // Something else replaced the mesh while the worker had it — an agent's
-    // stroke, a preset — and a cut of the old shape would overwrite it.
-    if (liveMesh.current !== target || target.revision !== revision) {
-      store.setSculptNotice({ text: 'The clay changed while it was being cut, so the cut was dropped. Draw it again.', tone: 'error' });
-      return false;
-    }
 
-    /*
-      A cut that splits the clay makes one body per piece, so a piece can be
-      selected, moved or deleted on its own — and so a brush on one cannot
-      reach across the gap and drag the other along with it, which it did
-      while they were one mesh. That is a change to the document, not to this
-      mesh: it goes through the store as an ordinary undo step, and this
-      surface reloads with the largest piece. Its own stroke history goes with
-      the reload, so Ctrl+Z falls through to the app's undo, which puts the
-      body back whole.
-    */
-    const pieces = splitComponents(result.mesh);
-    if (pieces.length > 1) {
-      store.separateSculpt(nodeId, pieces, geomName);
-      store.setSculptNotice({
-        text: `Cut into ${pieces.length} separate bodies. Press Done, then select a piece to move or delete it.`,
-        tone: 'info',
-      });
-      return true;
-    }
-
-    // applyUndo is exactly "swap the whole mesh for this one, and hand back
-    // what puts it back", so the cut is one undo step like any stroke.
-    undoStack.current.push(applyUndo(target, { indices: null, positions: null, mesh: result.mesh }));
-    if (undoStack.current.length > 50) undoStack.current.shift();
-    redoStack.current.length = 0;
-    syncGeometry(target);
-    commit();
-    store.setSculptNotice(null);
-    return true;
-  }, [mesh, getThree, syncGeometry, commit, nodeId, geomName]);
 
   useEffect(() => {
     if (brush.type !== 'scissors') return;
@@ -768,6 +843,11 @@ export function SculptSurface({
           <meshStandardMaterial color={rgb.clone().multiplyScalar(0.45)} roughness={0.95} metalness={0} side={THREE.BackSide} wireframe={wireframe} />
         </mesh>
       )}
+
+      <lineSegments ref={carveLineRef} visible={false} renderOrder={10} frustumCulled={false} raycast={() => null}>
+        <bufferGeometry />
+        <lineBasicMaterial color="#38bdf8" depthTest={false} transparent />
+      </lineSegments>
 
       {/* The brush ring. Drawn on top of the surface so it stays readable in a
           hollow the surface would otherwise occlude it in. */}

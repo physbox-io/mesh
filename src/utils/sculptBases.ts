@@ -25,11 +25,22 @@
 // base can be swapped for any other without the object jumping in scale.
 // ---------------------------------------------------------------------------
 
-import { createSculptMesh, type SculptMesh, icosphere } from './sculptMesh';
+import { createSculptMesh, type SculptMesh, icosphere, meshBounds } from './sculptMesh';
 import { surfaceNets, skeletonField, skeletonBounds, type Bone } from './surfaceNets';
 
 /** Roughly how big any base comes out, longest axis, in metres. */
 export const BASE_SIZE = 0.24;
+
+/**
+ * How big new clay is, longest side, in metres. The bases are built at
+ * BASE_SIZE and scaled to this: 240 mm was most of the default 160 mm view and
+ * twice the size of most things people sculpt here (a pumpkin candle was 70 mm),
+ * and a sculpt could not be made smaller afterwards.
+ */
+export const DEFAULT_SCULPT_SIZE = 0.1;
+/** The sizes the clay can be set to, in metres. */
+export const MIN_SCULPT_SIZE = 0.001;
+export const MAX_SCULPT_SIZE = 2;
 
 export type SculptBaseId =
   | 'sphere'
@@ -497,6 +508,53 @@ export const SCULPT_BASES: SculptBaseDefinition[] = [
 ];
 
 export const DEFAULT_SCULPT_BASE: SculptBaseId = 'sphere';
+
+/** The longest side of a mesh's bounding box, in metres. */
+export function longestSide(mesh: SculptMesh): number {
+  const { min, max } = meshBounds(mesh);
+  return Math.max(max[0] - min[0], max[1] - min[1], max[2] - min[2]);
+}
+
+/**
+ * Scales a mesh about the body origin so its longest side is `size` metres.
+ * About the origin, not the box's centre, so the body stays where it stands
+ * and a base sitting on z = 0 still does.
+ */
+export function resizeSculptMesh(mesh: SculptMesh, size: number): SculptMesh {
+  const current = longestSide(mesh);
+  const target = Math.min(MAX_SCULPT_SIZE, Math.max(MIN_SCULPT_SIZE, size));
+  if (!(current > 0)) return mesh;
+  const k = target / current;
+  for (let i = 0; i < mesh.vertexCount * 3; i++) mesh.positions[i] *= k;
+  mesh.revision++;
+  return mesh;
+}
+
+/**
+ * Scales a mesh about the body origin so it measures `size` along each axis,
+ * [x, y, z] in metres; an entry left null keeps that axis as it is. This is
+ * what makes a ball a pumpkin or an egg: the uniform resize above can only
+ * make a bigger ball.
+ */
+export function resizeSculptMeshAxes(mesh: SculptMesh, size: (number | null)[]): SculptMesh {
+  const { min, max } = meshBounds(mesh);
+  const k = [0, 1, 2].map((i) => {
+    const want = size[i];
+    const extent = max[i] - min[i];
+    if (want == null || !(extent > 0)) return 1;
+    return Math.min(MAX_SCULPT_SIZE, Math.max(MIN_SCULPT_SIZE, want)) / extent;
+  });
+  for (let v = 0; v < mesh.vertexCount; v++) {
+    for (let i = 0; i < 3; i++) mesh.positions[v * 3 + i] *= k[i];
+  }
+  mesh.revision++;
+  return mesh;
+}
+
+/** A base at the given size, longest side in metres. */
+export function buildSculptBaseSized(id: SculptBaseId | undefined, size: number): SculptMesh {
+  return resizeSculptMesh(buildSculptBase(id), size);
+}
 
 /** Builds a base by id, falling back to the sphere for an id we do not know. */
 export function buildSculptBase(id: SculptBaseId | undefined): SculptMesh {

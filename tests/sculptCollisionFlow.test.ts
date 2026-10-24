@@ -93,6 +93,9 @@ function installColliders(nodeId: string) {
   }, true);
 }
 
+/** The top of new clay (a ball DEFAULT_SCULPT_SIZE, 100 mm, across). */
+const TOP = 0.05;
+
 const colliderCount = (node: any) => node.geoms.filter((x: any) => x.csgDerived === 'collider').length;
 
 describe('a decomposed body after a stroke', () => {
@@ -102,7 +105,7 @@ describe('a decomposed body after a stroke', () => {
     installColliders(node.id);
     expect(colliderCount(find(node.id))).toBe(2);
 
-    stroke(node.id, [0, 0, 0.12]);
+    stroke(node.id, [0, 0, TOP]);
     const after = find(node.id);
     // The old pieces are off it, so it collides as its hull — which contains
     // the new mesh — until the new ones land, instead of as its old shape.
@@ -116,7 +119,7 @@ describe('a decomposed body after a stroke', () => {
   it('does not keep the old pieces when the new mesh cannot be decomposed', async () => {
     const node = newSculpt(0.5);
     installColliders(node.id);
-    stroke(node.id, [0, 0, 0.12]);
+    stroke(node.id, [0, 0, TOP]);
     // Put pieces back as though the stroke had kept them, then fail.
     installColliders(node.id);
     useStore.getState().setNodeCollisionError(node.id, 'boom', collisionHashOf(find(node.id)));
@@ -126,9 +129,9 @@ describe('a decomposed body after a stroke', () => {
 
   it('ignores a decomposition of a mesh that has since changed', async () => {
     const node = newSculpt(1);
-    stroke(node.id, [0, 0, 0.12]);
+    stroke(node.id, [0, 0, TOP]);
     const staleHash = collisionHashOf(find(node.id));
-    stroke(node.id, [0.12, 0, 0]);
+    stroke(node.id, [TOP, 0, 0]);
     useStore.getState().applyNodeColliders(node.id, {
       hash: staleHash, geoms: [], verdict: { strategy: 'hull', solidity: 1, triangles: 1, maxHulls: 0, reason: 'convex-enough' },
       volume: 1, hullVolume: 1, mass: 1,
@@ -152,9 +155,9 @@ describe('a failed build', () => {
       if (first) { first = false; return new Promise((_, rej) => { rejectFirst = rej; }); }
       return new Promise((res) => setTimeout(() => res({ ok: true }), 150));
     };
-    stroke(node.id, [0, 0, 0.12]);
+    stroke(node.id, [0, 0, TOP]);
     await sleep(250);
-    const g2 = stroke(node.id, [0.12, 0, 0]);
+    const g2 = stroke(node.id, [TOP, 0, 0]);
     await sleep(220);
     rejectFirst(new Error('The physics worker was recycled before this request completed.'));
     await sleep(20);
@@ -170,7 +173,7 @@ describe('a stroke resets the simulation', () => {
     const node = newSculpt(2);
     await sleep(400);
     builds.length = 0;
-    stroke(node.id, [0, 0, 0.12]);
+    stroke(node.id, [0, 0, TOP]);
     await sleep(110);
     useStore.getState().recompile(useStore.getState().sceneGraph, undefined, false);
     await sleep(400);

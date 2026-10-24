@@ -264,11 +264,25 @@ describe('brushes', () => {
     endStroke(rough);
     recomputeNormals(mesh);
 
+    // Roughness: how far each vertex near the pole sits from the average of
+    // its neighbours. (The spread of their y coordinates, which this used to
+    // measure, is mostly the sphere's own curve, and which vertices count
+    // changes as smoothing moves them.)
     const spread = (m: SculptMesh) => {
-      const ys: number[] = [];
-      for (let i = 0; i < m.vertexCount; i++) if (m.positions[i * 3] > 0.25) ys.push(m.positions[i * 3 + 1]);
-      const mean = ys.reduce((a, b) => a + b, 0) / ys.length;
-      return Math.sqrt(ys.reduce((a, b) => a + (b - mean) ** 2, 0) / ys.length);
+      const { offsets, neighbours } = buildAdjacency(m);
+      let sum = 0, count = 0;
+      for (let i = 0; i < m.vertexCount; i++) {
+        if (m.positions[i * 3] <= 0.25) continue;
+        let ax = 0, ay = 0, az = 0;
+        for (let j = offsets[i]; j < offsets[i + 1]; j++) {
+          const n = neighbours[j];
+          ax += m.positions[n * 3]; ay += m.positions[n * 3 + 1]; az += m.positions[n * 3 + 2];
+        }
+        const k = offsets[i + 1] - offsets[i];
+        sum += Math.hypot(ax / k - m.positions[i * 3], ay / k - m.positions[i * 3 + 1], az / k - m.positions[i * 3 + 2]);
+        count++;
+      }
+      return sum / count;
     };
     const before = spread(mesh);
 

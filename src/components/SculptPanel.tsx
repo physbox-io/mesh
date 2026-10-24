@@ -15,14 +15,16 @@
 // viewport until something downstream refuses the file.
 // ---------------------------------------------------------------------------
 
-import { useEffect } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { NumberInput } from '@physbox-io/ui';
 import {
   Paintbrush, Expand, Waves, Minimize2, Magnet, Hand,
-  FlipHorizontal2, Sparkles, Check, TriangleAlert, Boxes, Scissors, PaintBucket, Loader2, Info,
+  FlipHorizontal2, Sparkles, Check, TriangleAlert, Boxes, Scissors, PaintBucket, Loader2, Info, Slice,
 } from 'lucide-react';
 import { useStore } from '../store/useStore';
 import { fromSceneGeom, splitComponents, type BrushType } from '../utils/sculptMesh';
 import type { SceneGeom, SceneNode } from '../types/scene';
+import { MAX_SCULPT_SIZE, MIN_SCULPT_SIZE } from '../utils/sculptBases';
 
 const findNode = (nodes: SceneNode[] | undefined, id: string): SceneNode | null => {
   for (const node of nodes || []) {
@@ -76,6 +78,7 @@ const BRUSHES: BrushDefinition[] = [
   { type: 'flatten', label: 'Flatten', key: '5', icon: Minimize2, hint: 'Pull the surface onto its own local plane. Makes a facet out of a bulge.' },
   { type: 'pinch', label: 'Pinch', key: '6', icon: Magnet, hint: 'Draw material sideways towards the cursor. Sharpens an edge that smoothing has softened.' },
   { type: 'scissors', label: 'Scissors', key: '7', icon: Scissors, hint: 'Draw a loop, on or off the model: everything inside it is cut away, straight through. Hold Ctrl to keep only the inside.' },
+  { type: 'carve', label: 'Carve', key: '8', icon: Slice, hint: 'Drag a line on the clay and a cutter follows it: a clean groove, as wide as the brush and as deep as Depth. With Fill outline on, drag a loop and the whole area inside is cut out.' },
 ];
 
 const panelClass =
@@ -142,6 +145,79 @@ function Toggle({
   );
 }
 
+/**
+ * The brush's range, in metres. 0.1 mm at the bottom because a resin printer
+ * holds detail finer than that; it used to stop at 2 mm, and a pupil or a wink
+ * slit under it could not be made.
+ */
+const MIN_RADIUS = 0.0001;
+const MAX_RADIUS = 0.3;
+/**
+ * The Size slider is logarithmic: each step of travel scales the brush by the
+ * same ratio. Linear over 0.1-300 mm, everything under a millimetre was the
+ * first pixel of the track.
+ */
+const radiusToSlider = (r: number) => Math.log(r / MIN_RADIUS) / Math.log(MAX_RADIUS / MIN_RADIUS);
+const sliderToRadius = (t: number) => MIN_RADIUS * Math.pow(MAX_RADIUS / MIN_RADIUS, t);
+
+const mm = (v: number) => `${(v * 1000).toFixed(v < 0.001 ? 2 : v < 0.01 ? 1 : 0)} mm`;
+
+/** One axis of the clay's size, typed in mm and applied when committed (Enter or leaving the box). */
+function AxisSize({ label, value, onCommit }: { label: string; value: number; onCommit: (mm: number) => void }) {
+  // Reset from the clay by the key it is rendered with, not by an effect.
+  const shown = +(value * 1000).toFixed(1);
+  const [draft, setDraft] = useState<number | undefined>(shown);
+  return (
+    <label className="flex items-center gap-0.5" title={`${label}: the clay's extent along this axis`}>
+      <span className="text-[9px] font-bold text-slate-400">{label}</span>
+      <NumberInput
+        aria-label={`Clay ${label} (mm)`}
+        value={draft}
+        min={MIN_SCULPT_SIZE * 1000}
+        max={MAX_SCULPT_SIZE * 1000}
+        onChange={setDraft}
+        onCommit={() => {
+          if (draft !== undefined && draft > 0 && Math.abs(draft - shown) > 0.05) onCommit(draft);
+        }}
+        className="w-11 px-1 py-0.5 rounded border border-slate-200 dark:border-slate-700 bg-transparent text-right font-mono tabular-nums text-[10px] text-slate-700 dark:text-slate-200"
+      />
+    </label>
+  );
+}
+
+/**
+ * The clay's size along X, Y and Z, in mm. Each box scales only its own axis,
+ * about the body's origin, so a ball becomes a squat pumpkin or a tall egg;
+ * typing applies on Enter or on leaving the box, so 70 never passes through 7.
+ */
+function ClaySize({ nodeId }: { nodeId: string }) {
+  const geom = useStore((s) => findNode(s.sceneGraph.nodes, nodeId)?.geoms?.find((g: SceneGeom) => g.type === 'mesh' && !g.csgDerived));
+  const resizeSculpt = useStore((s) => s.resizeSculpt);
+  const size = useMemo(() => {
+    const v = geom?.renderVertices;
+    if (!v?.length) return null;
+    const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+    for (let i = 0; i < v.length; i++) { lo[i % 3] = Math.min(lo[i % 3], v[i]); hi[i % 3] = Math.max(hi[i % 3], v[i]); }
+    return [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
+  }, [geom?.renderVertices]);
+  if (!size) return null;
+  const axis = (i: number) => (mm: number) => {
+    const target: (number | null)[] = [null, null, null];
+    target[i] = mm / 1000;
+    resizeSculpt(nodeId, target);
+  };
+  return (
+    <div className="flex items-center justify-between gap-1" title="The clay's size in mm. Each box scales only its own axis, everything sculpted included, about the body's origin.">
+      <span className={labelClass}>Clay mm</span>
+      <span className="flex items-center gap-1">
+        {[0, 1, 2].map((i) => (
+          <AxisSize key={`${i}:${size[i].toFixed(5)}`} label={'XYZ'[i]} value={size[i]} onCommit={axis(i)} />
+        ))}
+      </span>
+    </div>
+  );
+}
+
 export function SculptPanel() {
   const sculptNodeId = useStore((s) => s.sculptNodeId);
   const stats = useStore((s) => s.sculptStats);
@@ -150,6 +226,7 @@ export function SculptPanel() {
   const setSculptNodeId = useStore((s) => s.setSculptNodeId);
   const notice = useStore((s) => s.sculptNotice);
   const scissors = brush.type === 'scissors';
+  const carving = brush.type === 'carve';
 
   // Keyboard: the whole point of the palette is not having to use it.
   useEffect(() => {
@@ -170,10 +247,10 @@ export function SculptPanel() {
       // there has ever been. Multiplicative, so the same keypress feels the
       // same whether the brush is tiny or huge.
       if (event.key === '[') {
-        setBrush({ radius: Math.max(0.002, brush.radius / 1.15) });
+        setBrush({ radius: Math.max(MIN_RADIUS, brush.radius / 1.15) });
         event.preventDefault();
       } else if (event.key === ']') {
-        setBrush({ radius: Math.min(1, brush.radius * 1.15) });
+        setBrush({ radius: Math.min(MAX_RADIUS, brush.radius * 1.15) });
         event.preventDefault();
       } else if (event.key.toLowerCase() === 'x') {
         setBrush({ symmetryX: !brush.symmetryX });
@@ -246,6 +323,8 @@ export function SculptPanel() {
 
       <p className="text-[10px] leading-snug text-slate-500 dark:text-slate-400">{active.hint}</p>
 
+      <ClaySize nodeId={sculptNodeId} />
+
       {scissors ? (
         <div className="flex gap-1.5">
           <Toggle
@@ -259,14 +338,41 @@ export function SculptPanel() {
       ) : (<>
       <Slider
         label="Size"
-        value={brush.radius}
-        min={0.002}
-        max={0.3}
-        step={0.001}
-        onChange={(radius) => setBrush({ radius })}
-        format={(v) => `${(v * 1000).toFixed(0)} mm`}
-        hint="Brush radius. [ and ] resize it without coming back here."
+        value={radiusToSlider(brush.radius)}
+        min={0}
+        max={1}
+        step={0.002}
+        onChange={(t) => setBrush({ radius: sliderToRadius(t) })}
+        format={(t) => (carving ? `${mm(sliderToRadius(t) * 2)} wide` : mm(sliderToRadius(t)))}
+        hint={carving ? 'How wide the cutter is. [ and ] resize it.' : 'Brush radius. [ and ] resize it without coming back here.'}
       />
+      {carving && (<>
+        <div className="flex gap-1">
+          {(['round', 'v', 'flat'] as const).map((p) => (
+            <button
+              key={p}
+              type="button"
+              onClick={() => setBrush({ carveProfile: p })}
+              title={p === 'round' ? 'A ball-nosed U, with a rounded floor' : p === 'v' ? 'A V, for creases and lines' : 'Square walls and a flat floor'}
+              className={`flex-1 py-1 rounded-md text-[10px] font-semibold border ${
+                (brush.carveProfile ?? 'round') === p
+                  ? 'bg-blue-50 dark:bg-blue-950/40 border-blue-400 dark:border-blue-700 text-blue-700 dark:text-blue-300'
+                  : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400'
+              }`}
+            >
+              {p === 'round' ? 'Round' : p === 'v' ? 'V' : 'Flat'}
+            </button>
+          ))}
+        </div>
+        <Toggle
+          label="Fill outline"
+          active={brush.carveFill === true}
+          onClick={() => setBrush({ carveFill: !brush.carveFill })}
+          icon={PaintBucket}
+          hint="Cut out the whole area inside the loop you drag, to the depth, with a rounded edge: an eye socket, a mouth. Off, only a groove along the line."
+        />
+      </>)}
+      {!carving && (
       <Slider
         label="Strength"
         value={brush.strength}
@@ -277,6 +383,33 @@ export function SculptPanel() {
         format={(v) => `${Math.round(v * 100)}%`}
         hint="How far one dab moves the surface. Low and repeated beats high and once."
       />
+      )}
+      {brush.type !== 'grab' && !carving && (
+        <Slider
+          label="Hardness"
+          value={brush.hardness ?? 0}
+          min={0}
+          max={0.9}
+          step={0.05}
+          onChange={(hardness) => setBrush({ hardness })}
+          format={(v) => (v === 0 ? 'soft' : `${Math.round(v * 100)}%`)}
+          hint="How much of the brush works at full strength before its edge falls away. Soft blends; hard leaves a crisp edge, for sockets and slits."
+        />
+      )}
+      {(brush.type === 'draw' || carving) && (
+        <Slider
+          label="Depth"
+          value={(brush.depth ?? 0) * 1000}
+          min={carving ? 0.1 : 0}
+          max={20}
+          step={0.1}
+          onChange={(v) => setBrush({ depth: v / 1000 })}
+          format={(v) => (v === 0 ? (carving ? '2.0 mm' : 'no limit') : `${v.toFixed(1)} mm`)}
+          hint={carving
+            ? 'How deep the cutter goes below the surface where you drag it.'
+            : 'The most one stroke raises or carves, measured from the surface where it started. Brush on and it stops there: a flat floor at an exact depth. Ctrl carves.'}
+        />
+      )}
 
       <div className="flex gap-1.5">
         {/*
@@ -312,16 +445,16 @@ export function SculptPanel() {
         >
           {brush.symmetryAxis ?? 'x'}
         </button>
-        <Toggle
+        {!carving && <Toggle
           label="Detail"
           active={brush.dynamicTopology}
           onClick={() => setBrush({ dynamicTopology: !brush.dynamicTopology })}
           icon={Sparkles}
           hint="Add and remove triangles as the brush passes, so detail follows the tool. Off, the brush can only move the vertices that are already there."
-        />
+        />}
       </div>
 
-      {brush.dynamicTopology && (
+      {brush.dynamicTopology && !carving && (
         <Slider
           label="Detail Size"
           value={brush.detail}
@@ -394,7 +527,9 @@ export function SculptPanel() {
       <p className="text-[10px] leading-snug text-slate-400 dark:text-slate-500 pt-1 border-t border-slate-200 dark:border-slate-800">
         {scissors
           ? 'Drag a loop to cut · Ctrl keeps the inside · Esc drops the loop · Ctrl+Z undoes a cut'
-          : 'Drag on the model to sculpt · Ctrl inverts · Right-drag orbits · Ctrl+Z undoes a stroke'}
+          : carving
+            ? 'Drag on the clay to carve · Right-drag orbits · Ctrl+Z undoes a carve'
+            : 'Drag on the model to sculpt · Ctrl inverts · Right-drag orbits · Ctrl+Z undoes a stroke'}
       </p>
     </div>
   );

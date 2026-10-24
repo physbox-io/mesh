@@ -10,8 +10,8 @@ import { hardwareCutGeoms, hardwareSpecOf, nextHardwareGroup, type HardwareCutSp
 import type { DataMirror, ModelMirror } from '../types/sceneLayer';
 import { type CombineOp, cageInFrame, geomsForCombine, nodeWorldMatrix } from '../utils/combineBodies';
 import { getGeomFrame } from '../utils/laserCutExporter';
-import { DEFAULT_BRUSH, toSceneGeom, type BrushSettings, type SculptMesh } from '../utils/sculptMesh';
-import { buildSculptBase, DEFAULT_SCULPT_BASE, type SculptBaseId } from '../utils/sculptBases';
+import { DEFAULT_BRUSH, fromSceneGeom, toSceneGeom, type BrushSettings, type SculptMesh } from '../utils/sculptMesh';
+import { buildSculptBaseSized, DEFAULT_SCULPT_BASE, DEFAULT_SCULPT_SIZE, longestSide, resizeSculptMesh, resizeSculptMeshAxes, type SculptBaseId } from '../utils/sculptBases';
 import {
   createLattice, deserializeCage, faceCount, serializeCage,
   separablePieces, DRAWING_TOOLS, toSceneGeom as latticeToSceneGeom,
@@ -1914,6 +1914,11 @@ export interface PhysicsState {
   /** Replaces a sculpt body's mesh with a different base shape, discarding the old one. */
   setSculptBase: (nodeId: string, base: SculptBaseId) => void;
   /**
+   * Scales a sculpt body's mesh about its origin: to `size` metres on its
+   * longest side, or with [x, y, z] (null keeps an axis) to that size on each.
+   */
+  resizeSculpt: (nodeId: string, size: number | (number | null)[]) => void;
+  /**
    * Makes a sculpt that is in several pieces one body per piece, as one undo
    * step. `pieces` is the mesh already split, largest first: the first stays
    * on this body, in the geom named `geomName` (default: its sculpt mesh), and
@@ -3348,17 +3353,32 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
 
   // Wholesale replacement, not an edit: the version bump is what tells the
   // viewport to load the new mesh rather than carry on with the one it holds.
+  // At the size the body already is, so swapping a base never jumps in scale.
   setSculptBase: (nodeId, base) => {
-    const mesh = buildSculptBase(base);
-    const { vertices, renderVertices, faces } = toSceneGeom(mesh);
     const node = findNode(get().sceneGraph.nodes, nodeId);
     const geomIndex = Math.max(0, (node?.geoms ?? []).findIndex((g: SceneGeom) => g.type === 'mesh'));
+    const old = node?.geoms?.[geomIndex];
+    const size = old?.renderVertices?.length && old.faces?.length
+      ? longestSide(fromSceneGeom(old.renderVertices, old.faces))
+      : DEFAULT_SCULPT_SIZE;
+    const mesh = buildSculptBaseSized(base, size || DEFAULT_SCULPT_SIZE);
+    const { vertices, renderVertices, faces } = toSceneGeom(mesh);
     get().updateNodeGeom(nodeId, { vertices, renderVertices, faces }, geomIndex);
     get().updateNode(nodeId, {
       sculptBase: base,
       sculptVersion: (node?.sculptVersion ?? 1) + 1,
       sculptEdited: false,
     });
+  },
+  resizeSculpt: (nodeId, size) => {
+    const node = findNode(get().sceneGraph.nodes, nodeId);
+    const geomIndex = (node?.geoms ?? []).findIndex((g: SceneGeom) => g.type === 'mesh' && !g.csgDerived);
+    const geom = geomIndex >= 0 ? node!.geoms[geomIndex] : undefined;
+    if (!geom?.renderVertices?.length || !geom.faces?.length) return;
+    const source = fromSceneGeom(geom.renderVertices, geom.faces);
+    const mesh = Array.isArray(size) ? resizeSculptMeshAxes(source, size) : resizeSculptMesh(source, size);
+    get().updateNodeGeom(nodeId, toSceneGeom(mesh), geomIndex);
+    get().updateNode(nodeId, { sculptVersion: (node?.sculptVersion ?? 1) + 1 });
   },
   setSculptBrush: (patch) => set((state) => ({ sculptBrush: { ...state.sculptBrush, ...patch } })),
 
@@ -5714,7 +5734,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
         // added by the brush as it goes (see utils/sculptMesh.ts), so the base
         // is deliberately coarse — starting dense would only make every stroke
         // slower without making any of them finer.
-        const { vertices, renderVertices, faces } = toSceneGeom(buildSculptBase(DEFAULT_SCULPT_BASE));
+        const { vertices, renderVertices, faces } = toSceneGeom(buildSculptBaseSized(DEFAULT_SCULPT_BASE, DEFAULT_SCULPT_SIZE));
         geoms = [{
           name: `${id}_mesh`,
           type: 'mesh',

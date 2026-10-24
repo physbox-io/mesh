@@ -33,6 +33,7 @@
 
 import type { ManifoldToplevel, Manifold as ManifoldT } from 'manifold-3d';
 import { createSculptMesh, meshBounds, type SculptMesh } from './sculptMesh';
+import { buildGroove, grooveAlongSurface, type CarveProfile, type GrooveSpec } from './sculptCarve';
 
 let loading: Promise<ManifoldToplevel> | null = null;
 
@@ -465,7 +466,17 @@ export function viewPrismMap(mesh: SculptMesh, projectionInverse: Mat4, viewToLo
  */
 export type PrismSpec =
   | { kind: 'view'; loop: [number, number][]; projectionInverse: number[]; viewToLocal: number[] }
-  | { kind: 'polygon'; polygon: number[][]; direction?: number[] };
+  | { kind: 'polygon'; polygon: number[][]; direction?: number[] }
+  /** Not a prism: a cutter swept along the surface (utils/sculptCarve.ts). Always removes, always closed. */
+  | GrooveSpec
+  /**
+   * The same, from a path as drawn: snapped onto the clay, filled in and, for
+   * `fill`, scanned across here, in the worker, where the mesh already is.
+   */
+  | {
+    kind: 'carvePath'; path: number[][]; width: number; depth: number;
+    profile: CarveProfile; mirror?: 'x' | 'y' | 'z'; fill?: boolean;
+  };
 
 /** Build the prism a spec describes and cut the mesh with it. */
 export function cutSculptWith(
@@ -474,6 +485,24 @@ export function cutSculptWith(
   spec: PrismSpec,
   options: CutOptions = {},
 ): CutResult {
+  if (spec.kind === 'carvePath') {
+    const { spec: groove } = grooveAlongSurface(mesh, spec.path, spec);
+    if (!groove.path.length) return { ok: false, error: 'The carve did not reach the clay.' };
+    return cutSculptWith(wasm, mesh, groove, options);
+  }
+  if (spec.kind === 'groove') {
+    const groove = buildGroove(wasm, spec);
+    if (!groove) return { ok: false, error: 'The carve needs a width, a depth and at least one point on the clay.' };
+    try {
+      const result = cutSculpt(wasm, mesh, groove, { mode: 'remove', cap: true });
+      if (result.ok && result.facesAfter === result.facesBefore && result.mesh.vertexCount === mesh.vertexCount) {
+        return { ok: false, error: 'The carve did not reach the clay.' };
+      }
+      return result;
+    } finally {
+      groove.delete();
+    }
+  }
   let loop: [number, number][];
   let map: PrismMap;
   if (spec.kind === 'view') {
