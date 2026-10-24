@@ -117,7 +117,7 @@ export interface RevolutionFit {
 function symmetricEigen(m: number[][]): { values: number[]; vectors: number[][] } {
   const n = m.length;
   const a = m.map((row) => [...row]);
-  const v = Array.from({ length: n }, (_, i) => Array.from({ length: n }, (_, j) => (i === j ? 1 : 0)));
+  const v = Array.from({ length: n }, (_, i) => Array.from({ length: n }, (_, j): number => (i === j ? 1 : 0)));
   for (let sweep = 0; sweep < 64; sweep++) {
     let off = 0;
     for (let p = 0; p < n; p++) for (let q = p + 1; q < n; q++) off += a[p][q] * a[p][q];
