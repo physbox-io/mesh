@@ -25,7 +25,11 @@
 // mistaken for part geometry. Everything reported to the user is in MILLIMETRES,
 // because that is what the fabrication side of this app speaks.
 
-import { collectSceneTriangles } from './contourSliceExporter';
+import * as THREE from 'three';
+import { appendSolidTriangles, collectSceneTriangles } from './contourSliceExporter';
+import { resolveCsgGeoms } from './csg';
+import { getNodeWorldTransform } from './laserCutExporter';
+import { isBoughtIn } from './boughtIn';
 import { hardwareFindings } from './hardwareChecks';
 import { DEFAULT_MATERIAL, materialSpec, type MaterialId } from './feedsAndSpeeds';
 import { DEFAULT_FILAMENT, filamentSpec, type FilamentId } from './filaments';
@@ -795,13 +799,16 @@ function analyseCnc(tris: Float64Array, limits: DfmLimits): Omit<DfmReport, 'pro
   // with, applied to the largest standard diameter.
   const depthMm = (b.maxZ - b.minZ) * 1000;
   if (depthMm > limits.maxToolReachMm) {
+    // Up to twice the reach is a part cut from both sides: an ordinary second
+    // setup, worth knowing and no fault. Past that, no bit gets there at all.
+    const flips = depthMm <= 2 * limits.maxToolReachMm;
     findings.push({
       id: 'cnc_reach',
       process: 'cnc',
-      severity: 'warning',
-      title: `${depthMm.toFixed(0)} mm deep — deeper than a bit reaches`,
+      severity: flips ? 'info' : 'warning',
+      title: flips ? `${depthMm.toFixed(0)} mm deep — cut it from both sides` : `${depthMm.toFixed(0)} mm deep — deeper than a bit reaches`,
       detail: `This part stands ${depthMm.toFixed(0)} mm tall, and the longest standard bit reaches about ${limits.maxToolReachMm.toFixed(0)} mm before its shank is in the cut.`,
-      fix: 'Cut it from both sides, or split it into pieces shallow enough to reach.',
+      fix: flips ? 'Machine one side, turn it over, machine the other.' : 'Split it into pieces shallow enough to reach from two sides.',
       position: [(b.minX + b.maxX) / 2, (b.minY + b.maxY) / 2, b.minZ],
       metric: depthMm,
     });
@@ -848,7 +855,28 @@ function analyseCast(tris: Float64Array, limits: DfmLimits): Omit<DfmReport, 'pr
   // A flat parting plane at mid-height, pulled along ±Z. castPatternExporter
   // searches for a better one; this is the passive check, so it reports what a
   // reasonable default would do rather than optimising behind the user's back.
-  const partingZ = (b.minZ + b.maxZ) / 2;
+  // The parting line goes where a pattern maker would put it: of a spread of
+  // heights from the bottom of the part to the top, the one leaving the least
+  // undercut, mid-height when that is as good as any. A lid with a knob parts
+  // at the step, not across the middle of the knob.
+  const undercutAt = (z: number) => {
+    let area = 0;
+    for (let t = 0; t < count; t++) {
+      const tri = triNormal(tris, t);
+      if (!tri) continue;
+      const deg = draftDeg(tri.n[2], triCentroid(tris, t)[2] >= z);
+      if (deg <= 80 && deg < -UNDERCUT_NOISE_DEG) area += tri.area;
+    }
+    return area;
+  };
+  const mid = (b.minZ + b.maxZ) / 2;
+  let partingZ = mid;
+  let leastUndercut = undercutAt(mid);
+  for (let k = 0; k <= 10 && leastUndercut > 0; k++) {
+    const z = b.minZ + ((b.maxZ - b.minZ) * k) / 10;
+    const area = undercutAt(z);
+    if (area < leastUndercut - 1e-12) { leastUndercut = area; partingZ = z; }
+  }
 
   let undercutArea = 0, dragArea = 0, totalArea = 0, worstDeg = 0;
   for (let t = 0; t < count; t++) {
@@ -860,7 +888,7 @@ function analyseCast(tris: Float64Array, limits: DfmLimits): Omit<DfmReport, 'pr
     // A face square to the pull is the top or the bottom of the part; it comes
     // straight off and has nothing to drag against.
     if (deg > 80) continue;
-    if (deg < 0) {
+    if (deg < -UNDERCUT_NOISE_DEG) {
       heat[t] = 1;
       undercutArea += tri.area;
       if (-deg > worstDeg) worstDeg = -deg;
@@ -882,7 +910,7 @@ function analyseCast(tris: Float64Array, limits: DfmLimits): Omit<DfmReport, 'pr
       process: 'cast',
       severity: 'critical',
       title: `${(undercutShare * 100).toFixed(0)}% undercut — the pattern will not pull`,
-      detail: `${(undercutShare * 100).toFixed(0)}% of the surface leans back over the mould, by up to ${worstDeg.toFixed(0)}°, with the parting plane at mid-height. Those faces lock the pattern in: the sand has to be broken to get it out.`,
+      detail: `${(undercutShare * 100).toFixed(0)}% of the surface leans back over the mould, by up to ${worstDeg.toFixed(0)}°, wherever the parting line goes. Those faces lock the pattern in: the sand has to be broken to get it out.`,
       fix: 'Move the parting line so the undercut falls the other side of it, split the pattern, or add a loose piece for the feature.',
       position: hotSpot(tris, heat, 0.9) ?? [0, 0, partingZ],
       metric: undercutShare,
@@ -934,7 +962,231 @@ function scoreOf(findings: DfmFinding[]): number {
  * on the render side would be a second traversal and, worse, a second chance
  * for the two to disagree about which triangle is which.
  */
+/** The world matrix of the body a node hangs under, or undefined at the top. */
+function parentMatrixOf(nodes: SceneNode[], id: string, parent?: THREE.Matrix4): THREE.Matrix4 | undefined | null {
+  for (const n of nodes) {
+    if (n.id === id) return parent;
+    const found = parentMatrixOf(n.children || [], id, getNodeWorldTransform(n, parent));
+    if (found !== null) return found;
+  }
+  return null;
+}
+
+/** Past this many triangles, faces buried between a part's own shapes are not looked for. */
+const MAX_BURIED_CHECK = 20_000;
+
+/**
+ * A part's triangles less those that lie against another of its own shapes —
+ * the underside of a knob on a lid, a sheet laid on a plate. Two shapes of one
+ * body are one solid once made, so those faces are inside it; judged as
+ * surface, a knob read as a 90° undercut. A face is buried when a short step
+ * out along its own normal is already inside another shape's triangles, which
+ * a ray that far finds facing it back.
+ */
+function outsideFaces(tris: Float64Array, solids: Int32Array): { tris: Float64Array; index: number[] } {
+  const count = tris.length / 9;
+  const all = Array.from({ length: count }, (_, t) => t);
+  if (count > MAX_BURIED_CHECK || new Set(solids).size < 2) return { tris, index: all };
+  const STEP = 0.0003;
+  const keep: number[] = [];
+  const e1 = new THREE.Vector3(), e2 = new THREE.Vector3(), p = new THREE.Vector3(), q = new THREE.Vector3(), s = new THREE.Vector3();
+  const o = new THREE.Vector3(), d = new THREE.Vector3();
+  for (let t = 0; t < count; t++) {
+    const tri = triNormal(tris, t);
+    if (!tri) { keep.push(t); continue; }
+    const c = triCentroid(tris, t);
+    d.set(...tri.n);
+    // From just inside the face, out through it, a little way.
+    o.set(c[0], c[1], c[2]).addScaledVector(d, -STEP * 0.1);
+    let buried = false;
+    for (let u = 0; u < count && !buried; u++) {
+      if (solids[u] === solids[t]) continue;
+      const i = u * 9;
+      e1.set(tris[i + 3] - tris[i], tris[i + 4] - tris[i + 1], tris[i + 5] - tris[i + 2]);
+      e2.set(tris[i + 6] - tris[i], tris[i + 7] - tris[i + 1], tris[i + 8] - tris[i + 2]);
+      // Only a face looking back at this one closes it off.
+      if (e1.clone().cross(e2).dot(d) >= 0) continue;
+      p.crossVectors(d, e2);
+      const det = e1.dot(p);
+      if (Math.abs(det) < 1e-18) continue;
+      const inv = 1 / det;
+      s.set(o.x - tris[i], o.y - tris[i + 1], o.z - tris[i + 2]);
+      const bu = s.dot(p) * inv;
+      if (bu < -1e-9 || bu > 1 + 1e-9) continue;
+      q.crossVectors(s, e1);
+      const bv = d.dot(q) * inv;
+      if (bv < -1e-9 || bu + bv > 1 + 1e-9) continue;
+      const dist = e2.dot(q) * inv;
+      if (dist >= -STEP && dist <= STEP) buried = true;
+    }
+    if (!buried) keep.push(t);
+  }
+  if (keep.length === count) return { tris, index: all };
+  const out = new Float64Array(keep.length * 9);
+  keep.forEach((t, k) => out.set(tris.subarray(t * 9, t * 9 + 9), k * 9));
+  return { tris: out, index: keep };
+}
+
+/** A wall leaning back by less than this is upright: rounding, not an undercut. */
+const UNDERCUT_NOISE_DEG = 0.01;
+
+/** The six ways up a part can be laid on a bed or clamped: which of its own axes points up. */
+const SIDES: { up: [number, number, number]; text: string }[] = [
+  { up: [0, 0, 1], text: '' },
+  { up: [0, 0, -1], text: 'upside down' },
+  { up: [1, 0, 0], text: 'on its side, +X up' },
+  { up: [-1, 0, 0], text: 'on its side, −X up' },
+  { up: [0, 1, 0], text: 'on its side, +Y up' },
+  { up: [0, -1, 0], text: 'on its side, −Y up' },
+];
+/** Past this many triangles a part is judged only as it is placed: six passes would hold the panel up. */
+const MAX_TURNED_TRIANGLES = 50_000;
+
+type Analysis = Omit<DfmReport, 'process' | 'tris' | 'warnings'>;
+
+/**
+ * One part, judged the way up that suits the process best: a slicer, a
+ * fixture and a mould all start by turning the part, so a warning that one
+ * turn would make go away is no warning at all. As placed comes first and
+ * wins a tie.
+ */
+function analyseBestSide(tris: Float64Array, process: DfmProcess, lim: DfmLimits): Analysis & { side: string } {
+  const run = (t: Float64Array) => (process === 'print' ? analysePrint(t, lim) : process === 'cnc' ? analyseCnc(t, lim) : analyseCast(t, lim));
+  const placed = run(tris);
+  if (tris.length / 9 > MAX_TURNED_TRIANGLES || placed.findings.length === 0) return { ...placed, side: '' };
+  const b = bounds(tris);
+  const c = new THREE.Vector3((b.minX + b.maxX) / 2, (b.minY + b.maxY) / 2, (b.minZ + b.maxZ) / 2);
+  let best = { ...placed, side: '' };
+  const badness = (a: Analysis) => 100 - a.score;
+  for (const side of SIDES.slice(1)) {
+    const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(...side.up), new THREE.Vector3(0, 0, 1));
+    const v = new THREE.Vector3();
+    const turned = new Float64Array(tris.length);
+    for (let i = 0; i < tris.length; i += 3) {
+      v.set(tris[i] - c.x, tris[i + 1] - c.y, tris[i + 2] - c.z).applyQuaternion(q);
+      turned[i] = v.x + c.x; turned[i + 1] = v.y + c.y; turned[i + 2] = v.z + c.z;
+    }
+    const a = run(turned);
+    if (badness(a) >= badness(best)) continue;
+    // Where to look is said in the scene as it stands, not in the turned copy.
+    const back = q.clone().invert();
+    a.findings = a.findings.map((f) => {
+      const p = new THREE.Vector3(...f.position).sub(c).applyQuaternion(back).add(c);
+      return { ...f, position: [p.x, p.y, p.z] };
+    });
+    best = { ...a, side: side.text };
+  }
+  return best;
+}
+
+/**
+ * The scene judged part by part, each the way up that suits the process.
+ *
+ * Every body at the top of the tree is a part — with whatever is fixed under
+ * it, and less any bought hardware — because each is made on its own: a
+ * chassis over its wheels is not an overhang, and a cabinet's drawers are not
+ * a pocket in it. With `asPlaced`, the whole scene is judged as one solid,
+ * exactly as it stands, which is what the earlier checks did and what a test
+ * of the geometry itself wants.
+ */
 export function analyseDfm(
+  scene: SceneGraph,
+  process: DfmProcess,
+  bench: Partial<DfmBench & DfmLimits> & { asPlaced?: boolean } = {},
+): DfmReport {
+  if (bench.asPlaced) return analyseDfmAsPlaced(scene, process, bench);
+  const lim: DfmLimits = {
+    ...dfmLimitsFor({
+      material: bench.material ?? DEFAULT_MATERIAL,
+      filament: bench.filament ?? DEFAULT_FILAMENT,
+      stock: bench.stock ?? null,
+      printBed: bench.printBed ?? null,
+    }),
+    ...Object.fromEntries(Object.entries(bench).filter(([k]) => k in DFM_DEFAULTS)),
+  };
+  const target = bench.nodeId ? findNode(scene.nodes || [], bench.nodeId) : null;
+  const collected = collectSceneTriangles(target ? { ...scene, nodes: [target] } : scene);
+  const warnings = [...collected.warnings];
+  if (collected.skipped.length) warnings.push(`Not analysed: ${collected.skipped.join(', ')}.`);
+
+  // Each body is a part, judged in its own frame — a board modelled tilted
+  // is still a board — and put back where it stands for the overlay.
+  const bodies: { node: SceneNode; local: Float64Array; solids: Int32Array; world: THREE.Matrix4 }[] = [];
+  const walk = (nodes: SceneNode[], parent?: THREE.Matrix4) => {
+    for (const n of nodes) {
+      const world = getNodeWorldTransform(n, parent);
+      if (!isBoughtIn(n) && !n.simulation) {
+        const out: number[] = [];
+        const solids: number[] = [];
+        let solid = 0;
+        for (const g of resolveCsgGeoms(n, 'render')) {
+          if (g.role === 'collision') continue;
+          const before = out.length;
+          if (!appendSolidTriangles(g, new THREE.Matrix4(), out)) continue;
+          for (let i = before; i < out.length; i += 9) solids.push(solid);
+          solid++;
+        }
+        if (out.length >= 9) bodies.push({ node: n, local: Float64Array.from(out), solids: Int32Array.from(solids), world });
+      }
+      walk(n.children || [], world);
+    }
+  };
+  const targetParent = target ? parentMatrixOf(scene.nodes || [], target.id) : undefined;
+  walk(target ? [target] : (scene.nodes || []), targetParent);
+
+  const allTris: number[] = [];
+  const allHeat: number[] = [];
+  const findings: DfmFinding[] = [];
+  let legend = '';
+  let summaries: string[] = [];
+  const named = bodies.length > 1;
+  for (const { node, local, solids, world } of bodies) {
+    // Faces where one of the part's shapes sits on another are inside the
+    // part, not on it: judged without them, and given no heat.
+    const kept = outsideFaces(local, solids);
+    const a = analyseBestSide(kept.tris, process, lim);
+    const heat = new Float32Array(local.length / 9);
+    kept.index.forEach((t, k) => { heat[t] = a.heat[k]; });
+    a.heat = heat;
+    const v = new THREE.Vector3();
+    for (let i = 0; i < local.length; i += 3) {
+      v.set(local[i], local[i + 1], local[i + 2]).applyMatrix4(world);
+      allTris.push(v.x, v.y, v.z);
+    }
+    for (const h of a.heat) allHeat.push(h);
+    legend = a.legend;
+    summaries.push(a.summary);
+    for (const f of a.findings) {
+      const p = new THREE.Vector3(...f.position).applyMatrix4(world);
+      findings.push({
+        ...f,
+        id: named ? `${node.id}:${f.id}` : f.id,
+        title: named ? `${node.name}: ${f.title}` : f.title,
+        detail: a.side ? `${f.detail} Judged ${a.side}, the best way up for it.` : f.detail,
+        position: [p.x, p.y, p.z],
+      });
+    }
+  }
+  const parts = bodies.length;
+  // Seals, screws and runners are between parts: every one in the scene is
+  // judged, whichever part is picked — a lid moved off its jar is a seal that
+  // fails, though the lid has no groove of its own.
+  findings.push(...hardwareFindings(scene, process, scene));
+
+  const tris = Float64Array.from(allTris);
+  if (parts === 0) {
+    return { process, tris, warnings, findings, heat: new Float32Array(0), legend: '', score: scoreOf(findings), summary: 'Nothing in the scene to analyse.' };
+  }
+  const open = findings.filter((f) => !f.passed);
+  if (parts > 1) summaries = [open.length === 0 ? `All ${parts} parts come out clean.` : `${open.length} to look at across ${parts} parts.`];
+  return {
+    process, tris, warnings, findings,
+    heat: Float32Array.from(allHeat), legend, score: scoreOf(findings), summary: summaries[0] ?? '',
+  };
+}
+
+/** The whole scene as one solid, as it stands: see `asPlaced` on analyseDfm. */
+function analyseDfmAsPlaced(
   scene: SceneGraph,
   process: DfmProcess,
   bench: Partial<DfmBench & DfmLimits> = {},

@@ -90,7 +90,7 @@ describe('draftDeg', () => {
 
 describe('print analysis', () => {
   it('passes a plain box: every wall is vertical and the bottom is on the plate', () => {
-    const r = analyseDfm(scene([boxBody([0, 0, 0.05], [0.05, 0.05, 0.05])]), 'print');
+    const r = analyseDfm(scene([boxBody([0, 0, 0.05], [0.05, 0.05, 0.05])]), 'print', { asPlaced: true });
     expect(r.findings.find(f => f.id === 'print_overhang')).toBeUndefined();
     expect(r.score).toBeGreaterThan(90);
     expect(r.heat.every(h => h === 0)).toBe(true);
@@ -102,7 +102,7 @@ describe('print analysis', () => {
     const r = analyseDfm(scene([
       boxBody([0, 0, 0.02], [0.01, 0.01, 0.02], 'post'),
       boxBody([0, 0, 0.05], [0.06, 0.06, 0.01], 'slab'),
-    ]), 'print');
+    ]), 'print', { asPlaced: true });
 
     const overhang = r.findings.find(f => f.id === 'print_overhang');
     expect(overhang).toBeDefined();
@@ -116,13 +116,13 @@ describe('print analysis', () => {
   it('ignores the face resting on the build plate', () => {
     // A box's underside points straight down at 90°, but it is printed against
     // glass rather than air. Counting it would flag every part ever drawn.
-    const r = analyseDfm(scene([boxBody([0, 0, 0.05], [0.05, 0.05, 0.05])]), 'print');
+    const r = analyseDfm(scene([boxBody([0, 0, 0.05], [0.05, 0.05, 0.05])]), 'print', { asPlaced: true });
     expect(r.findings).toHaveLength(0);
   });
 
   it('measures a thin wall through whichever axis it is thin in', () => {
     // 0.4 mm thin in X, which a plan-view-only check would never see.
-    const r = analyseDfm(scene([boxBody([0, 0, 0.05], [0.0002, 0.05, 0.05])]), 'print');
+    const r = analyseDfm(scene([boxBody([0, 0, 0.05], [0.0002, 0.05, 0.05])]), 'print', { asPlaced: true });
     const thin = r.findings.find(f => f.id === 'print_thin_wall');
     expect(thin).toBeDefined();
     expect(thin!.metric!).toBeLessThan(DFM_DEFAULTS.minWallMm);
@@ -130,7 +130,7 @@ describe('print analysis', () => {
   });
 
   it('leaves a wall at the limit alone', () => {
-    const r = analyseDfm(scene([boxBody([0, 0, 0.05], [0.002, 0.05, 0.05])]), 'print');
+    const r = analyseDfm(scene([boxBody([0, 0, 0.05], [0.002, 0.05, 0.05])]), 'print', { asPlaced: true });
     expect(r.findings.find(f => f.id === 'print_thin_wall')).toBeUndefined();
   });
 });
@@ -150,7 +150,7 @@ describe('thinnestWall', () => {
 
 describe('cnc analysis', () => {
   it('passes a block: a cutter reaches all of it from above', () => {
-    const r = analyseDfm(scene([boxBody([0, 0, 0.01], [0.05, 0.05, 0.01])]), 'cnc');
+    const r = analyseDfm(scene([boxBody([0, 0, 0.01], [0.05, 0.05, 0.01])]), 'cnc', { asPlaced: true });
     expect(r.findings.find(f => f.id === 'cnc_undercut')).toBeUndefined();
   });
 
@@ -161,7 +161,7 @@ describe('cnc analysis', () => {
     const r = analyseDfm(scene([
       boxBody([0, 0, 0.02], [0.01, 0.01, 0.02], 'stem'),
       boxBody([0, 0, 0.05], [0.06, 0.06, 0.01], 'top'),
-    ]), 'cnc');
+    ]), 'cnc', { asPlaced: true });
 
     const undercut = r.findings.find(f => f.id === 'cnc_undercut');
     expect(undercut).toBeDefined();
@@ -177,7 +177,7 @@ describe('cnc analysis', () => {
       boxBody([0, 0, 0.005], [0.04, 0.04, 0.005], 'bottom'),
       boxBody([-0.03, 0, 0.025], [0.01, 0.04, 0.015], 'wall'),
       boxBody([0, 0, 0.045], [0.04, 0.04, 0.005], 'top'),
-    ]), 'cnc');
+    ]), 'cnc', { asPlaced: true });
 
     const undercut = r.findings.find(f => f.id === 'cnc_undercut');
     expect(undercut).toBeDefined();
@@ -189,12 +189,12 @@ describe('cnc analysis', () => {
   it('stays quiet about depth a normal bit can reach', () => {
     // Stepping down in passes is ordinary. Warning about every deep part is how
     // a panel teaches people to ignore it.
-    const r = analyseDfm(scene([boxBody([0, 0, 0.015], [0.02, 0.02, 0.015])]), 'cnc');
+    const r = analyseDfm(scene([boxBody([0, 0, 0.015], [0.02, 0.02, 0.015])]), 'cnc', { asPlaced: true });
     expect(r.findings.find(f => f.id === 'cnc_reach')).toBeUndefined();
   });
 
   it('speaks up when the part is deeper than any bit reaches', () => {
-    const r = analyseDfm(scene([boxBody([0, 0, 0.05], [0.02, 0.02, 0.05])]), 'cnc');
+    const r = analyseDfm(scene([boxBody([0, 0, 0.05], [0.02, 0.02, 0.05])]), 'cnc', { asPlaced: true });
     const reach = r.findings.find(f => f.id === 'cnc_reach');
     expect(reach).toBeDefined();
     expect(reach!.metric!).toBeCloseTo(100, 0);
@@ -225,7 +225,7 @@ describe('cast analysis', () => {
   it('flags a deep box: its walls are parallel to the pull and will drag', () => {
     // The classic first lesson in pattern making — a plain box has no draft at
     // all, and over enough height every vertical wall scuffs the mould.
-    const r = analyseDfm(scene([boxBody([0, 0, 0.05], [0.05, 0.05, 0.05])]), 'cast');
+    const r = analyseDfm(scene([boxBody([0, 0, 0.05], [0.05, 0.05, 0.05])]), 'cast', { asPlaced: true });
     const draft = r.findings.find(f => f.id === 'cast_draft');
     expect(draft).toBeDefined();
     expect(draft!.detail).toMatch(/2°/);
@@ -233,12 +233,15 @@ describe('cast analysis', () => {
   });
 
   it('finds the undercut on a shape that leans back over the mould', () => {
-    // A slab wider than the base beneath it: pulled up along +Z, the underside
-    // of that overhang faces back down into the drag and locks the pattern in.
+    // A spool: wide at both ends, narrow between. Wherever the parting line
+    // goes, one flange's inner face looks back into the half it is pulled out
+    // of and locks the pattern in. (A slab on a post is not one: it parts at
+    // the step.)
     const r = analyseDfm(scene([
-      boxBody([0, 0, 0.02], [0.01, 0.01, 0.02], 'base'),
-      boxBody([0, 0, 0.05], [0.06, 0.06, 0.01], 'cap'),
-    ]), 'cast');
+      boxBody([0, 0, 0.01], [0.06, 0.06, 0.01], 'foot'),
+      boxBody([0, 0, 0.04], [0.01, 0.01, 0.02], 'waist'),
+      boxBody([0, 0, 0.07], [0.06, 0.06, 0.01], 'cap'),
+    ]), 'cast', { asPlaced: true });
 
     const undercut = r.findings.find(f => f.id === 'cast_undercut');
     expect(undercut).toBeDefined();
@@ -248,11 +251,12 @@ describe('cast analysis', () => {
   });
 
   it('scores a shape with an undercut worse than one that merely drags', () => {
-    const drags = analyseDfm(scene([boxBody([0, 0, 0.05], [0.05, 0.05, 0.05])]), 'cast');
+    const drags = analyseDfm(scene([boxBody([0, 0, 0.05], [0.05, 0.05, 0.05])]), 'cast', { asPlaced: true });
     const locks = analyseDfm(scene([
-      boxBody([0, 0, 0.02], [0.01, 0.01, 0.02], 'base'),
-      boxBody([0, 0, 0.05], [0.06, 0.06, 0.01], 'cap'),
-    ]), 'cast');
+      boxBody([0, 0, 0.01], [0.06, 0.06, 0.01], 'foot'),
+      boxBody([0, 0, 0.04], [0.01, 0.01, 0.02], 'waist'),
+      boxBody([0, 0, 0.07], [0.06, 0.06, 0.01], 'cap'),
+    ]), 'cast', { asPlaced: true });
     expect(locks.score).toBeLessThan(drags.score);
   });
 });
@@ -265,12 +269,12 @@ describe('analyseDfm', () => {
   it('returns the same triangles the heat indexes into', () => {
     // The overlay colours this soup directly, so a mismatch here would paint
     // the wrong faces — and nothing downstream could detect it.
-    const r = analyseDfm(scene([boxBody([0, 0, 0.05], [0.05, 0.05, 0.05])]), 'print');
+    const r = analyseDfm(scene([boxBody([0, 0, 0.05], [0.05, 0.05, 0.05])]), 'print', { asPlaced: true });
     expect(r.heat.length).toBe(r.tris.length / 9);
   });
 
   it('copes with an empty scene', () => {
-    const r = analyseDfm(scene([]), 'cnc');
+    const r = analyseDfm(scene([]), 'cnc', { asPlaced: true });
     expect(r.findings).toEqual([]);
     expect(r.score).toBe(100);
     expect(r.summary).toMatch(/Nothing/);
@@ -279,7 +283,7 @@ describe('analyseDfm', () => {
   it('gives every process an answer for the same hollow part', () => {
     const cup = scene([meshBody(cupMesh())]);
     for (const process of ['print', 'cnc', 'cast'] as const) {
-      const r = analyseDfm(cup, process);
+      const r = analyseDfm(cup, process, { asPlaced: true });
       expect(r.process).toBe(process);
       expect(r.heat.length).toBe(r.tris.length / 9);
       expect(r.legend.length).toBeGreaterThan(0);
@@ -291,8 +295,8 @@ describe('analyseDfm', () => {
 
   it('respects a caller’s limits over the bench', () => {
     const tall = scene([boxBody([0, 0, 0.05], [0.02, 0.02, 0.05])]);
-    expect(analyseDfm(tall, 'cnc', { maxToolReachMm: 500 }).findings.find(f => f.id === 'cnc_reach')).toBeUndefined();
-    expect(analyseDfm(tall, 'cnc', { maxToolReachMm: 5 }).findings.find(f => f.id === 'cnc_reach')).toBeDefined();
+    expect(analyseDfm(tall, 'cnc', { asPlaced: true, maxToolReachMm: 500 }).findings.find(f => f.id === 'cnc_reach')).toBeUndefined();
+    expect(analyseDfm(tall, 'cnc', { asPlaced: true, maxToolReachMm: 5 }).findings.find(f => f.id === 'cnc_reach')).toBeDefined();
   });
 });
 
@@ -302,7 +306,7 @@ describe('analyseDfm', () => {
 
 describe('buildHeatGeometry', () => {
   it('draws nothing when nothing is wrong', () => {
-    const r = analyseDfm(scene([boxBody([0, 0, 0.05], [0.05, 0.05, 0.05])]), 'print');
+    const r = analyseDfm(scene([boxBody([0, 0, 0.05], [0.05, 0.05, 0.05])]), 'print', { asPlaced: true });
     expect(buildHeatGeometry(r)).toBeNull();
   });
 
@@ -310,7 +314,7 @@ describe('buildHeatGeometry', () => {
     const r = analyseDfm(scene([
       boxBody([0, 0, 0.02], [0.01, 0.01, 0.02], 'post'),
       boxBody([0, 0, 0.05], [0.06, 0.06, 0.01], 'slab'),
-    ]), 'print');
+    ]), 'print', { asPlaced: true });
 
     const hot = [...r.heat].filter(h => h > 0.001).length;
     const geom = buildHeatGeometry(r)!;
@@ -331,7 +335,7 @@ describe('buildHeatGeometry', () => {
     const r = analyseDfm(scene([
       boxBody([0, 0, 0.02], [0.01, 0.01, 0.02], 'post'),
       boxBody([0, 0, 0.05], [0.06, 0.06, 0.01], 'slab'),
-    ]), 'print');
+    ]), 'print', { asPlaced: true });
     const col = buildHeatGeometry(r)!.getAttribute('color').array as ArrayLike<number>;
     for (let v = 0; v < 9; v += 3) {
       expect(col[v]).toBeCloseTo(col[0], 6);
@@ -382,23 +386,23 @@ describe('the bench changes the answer', () => {
   ]);
 
   it('flags a flat ceiling in TPU that PLA would simply support', () => {
-    const pla = analyseDfm(overhangingPart(), 'print', { filament: 'pla' });
-    const tpu = analyseDfm(overhangingPart(), 'print', { filament: 'tpu' });
+    const pla = analyseDfm(overhangingPart(), 'print', { asPlaced: true, filament: 'pla' });
+    const tpu = analyseDfm(overhangingPart(), 'print', { asPlaced: true, filament: 'tpu' });
     expect(pla.findings.find(f => f.id === 'print_no_bridge')).toBeUndefined();
     expect(tpu.findings.find(f => f.id === 'print_no_bridge')).toBeDefined();
   });
 
   it('flags a 1 mm rib in MDF and passes the same rib in aluminium', () => {
     const rib = () => scene([boxBody([0, 0, 0.02], [0.0005, 0.04, 0.02])]);
-    expect(analyseDfm(rib(), 'cnc', { material: 'mdf' }).findings.find(f => f.id === 'cnc_thin_wall')).toBeDefined();
-    expect(analyseDfm(rib(), 'cnc', { material: 'aluminium' }).findings.find(f => f.id === 'cnc_thin_wall')).toBeUndefined();
+    expect(analyseDfm(rib(), 'cnc', { asPlaced: true, material: 'mdf' }).findings.find(f => f.id === 'cnc_thin_wall')).toBeDefined();
+    expect(analyseDfm(rib(), 'cnc', { asPlaced: true, material: 'aluminium' }).findings.find(f => f.id === 'cnc_thin_wall')).toBeUndefined();
   });
 
   it('says when the part just misses the board', () => {
     // 200 x 200 mm on a 150 mm board: scale it or split it, and both are real
     // things to do.
     const near = scene([boxBody([0, 0, 0.005], [0.1, 0.1, 0.005])]);
-    const r = analyseDfm(near, 'cnc', { stock: { widthMm: 150, depthMm: 150, thicknessMm: 18 } });
+    const r = analyseDfm(near, 'cnc', { asPlaced: true, stock: { widthMm: 150, depthMm: 150, thicknessMm: 18 } });
     const fit = r.findings.find(f => f.id === 'stock_fit');
     expect(fit).toBeDefined();
     expect(fit!.severity).toBe('critical');
@@ -408,19 +412,19 @@ describe('the bench changes the answer', () => {
     // A 4 m bridge deck does not fit a 150 mm board, and saying so is the kind
     // of true, useless remark that gets a panel switched off.
     const huge = scene([boxBody([0, 0, 0.05], [2, 2, 0.05])]);
-    expect(analyseDfm(huge, 'cnc', { stock: { widthMm: 150, depthMm: 150, thicknessMm: 18 } })
+    expect(analyseDfm(huge, 'cnc', { asPlaced: true, stock: { widthMm: 150, depthMm: 150, thicknessMm: 18 } })
       .findings.find(f => f.id === 'stock_fit')).toBeUndefined();
   });
 
   it('never checks the board on the print lens — nothing knows the bed size', () => {
     const near = scene([boxBody([0, 0, 0.005], [0.1, 0.1, 0.005])]);
-    expect(analyseDfm(near, 'print', { stock: { widthMm: 150, depthMm: 150, thicknessMm: 18 } })
+    expect(analyseDfm(near, 'print', { asPlaced: true, stock: { widthMm: 150, depthMm: 150, thicknessMm: 18 } })
       .findings.find(f => f.id === 'stock_fit')).toBeUndefined();
   });
 
   it('does not invent a stock problem when no stock was given', () => {
     const big = scene([boxBody([0, 0, 0.05], [0.2, 0.2, 0.05])]);
-    expect(analyseDfm(big, 'cnc').findings.find(f => f.id === 'stock_fit')).toBeUndefined();
+    expect(analyseDfm(big, 'cnc', { asPlaced: true }).findings.find(f => f.id === 'stock_fit')).toBeUndefined();
   });
 });
 
@@ -435,7 +439,7 @@ describe('it stays quiet about ordinary parts', () => {
   it('says nothing about a plain block, for any process', () => {
     const block = () => scene([boxBody([0, 0, 0.01], [0.04, 0.04, 0.01])]);
     for (const process of ['print', 'cnc', 'cast'] as const) {
-      expect(analyseDfm(block(), process, { stock: roomy }).findings).toEqual([]);
+      expect(analyseDfm(block(), process, { asPlaced: true, stock: roomy }).findings).toEqual([]);
     }
   });
 
@@ -443,12 +447,12 @@ describe('it stays quiet about ordinary parts', () => {
     // Every box ever modelled has vertical walls. A 40 mm one pulls fine, and
     // flagging it would flag half the scene.
     const domino = scene([boxBody([0, 0, 0.02], [0.01, 0.005, 0.02])]);
-    expect(analyseDfm(domino, 'cast').findings.find(f => f.id === 'cast_draft')).toBeUndefined();
+    expect(analyseDfm(domino, 'cast', { asPlaced: true }).findings.find(f => f.id === 'cast_draft')).toBeUndefined();
   });
 
   it('still mentions draft on a wall deep enough for the drag to cost something', () => {
     const tall = scene([boxBody([0, 0, 0.1], [0.05, 0.05, 0.1])]);
-    expect(analyseDfm(tall, 'cast').findings.find(f => f.id === 'cast_draft')).toBeDefined();
+    expect(analyseDfm(tall, 'cast', { asPlaced: true }).findings.find(f => f.id === 'cast_draft')).toBeDefined();
   });
 
   it('does not warn about the support a normal overhang needs', () => {
@@ -457,14 +461,14 @@ describe('it stays quiet about ordinary parts', () => {
       boxBody([0, 0, 0.02], [0.03, 0.03, 0.02], 'base'),
       boxBody([0, 0, 0.05], [0.035, 0.035, 0.01], 'lip'),
     ]);
-    expect(analyseDfm(modest, 'print', { stock: roomy }).findings
+    expect(analyseDfm(modest, 'print', { asPlaced: true, stock: roomy }).findings
       .find(f => f.id === 'print_overhang')).toBeUndefined();
   });
 
   it('does not call bit-radius corners a problem', () => {
     // Inside corners having the cutter's radius is true of every CNC part.
     const pocketed = scene([boxBody([0, 0, 0.01], [0.05, 0.05, 0.01])]);
-    expect(analyseDfm(pocketed, 'cnc', { stock: roomy }).findings
+    expect(analyseDfm(pocketed, 'cnc', { asPlaced: true, stock: roomy }).findings
       .find(f => f.id === 'cnc_corner_radius')).toBeUndefined();
   });
 
@@ -474,8 +478,13 @@ describe('it stays quiet about ordinary parts', () => {
       boxBody([0, 0, 0.02], [0.01, 0.01, 0.02], 'base'),
       boxBody([0, 0, 0.05], [0.06, 0.06, 0.01], 'cap'),
     ]);
-    expect(analyseDfm(locked, 'cast').findings.find(f => f.id === 'cast_undercut')).toBeDefined();
-    expect(analyseDfm(locked, 'cnc').findings.find(f => f.id === 'cnc_undercut')).toBeDefined();
+    const spool = scene([
+      boxBody([0, 0, 0.01], [0.06, 0.06, 0.01], 'foot'),
+      boxBody([0, 0, 0.04], [0.01, 0.01, 0.02], 'waist'),
+      boxBody([0, 0, 0.07], [0.06, 0.06, 0.01], 'cap'),
+    ]);
+    expect(analyseDfm(spool, 'cast', { asPlaced: true }).findings.find(f => f.id === 'cast_undercut')).toBeDefined();
+    expect(analyseDfm(locked, 'cnc', { asPlaced: true }).findings.find(f => f.id === 'cnc_undercut')).toBeDefined();
   });
 });
 
@@ -487,12 +496,12 @@ describe('curved parts are not paper-thin', () => {
     const ball = meshBody(sphereMesh(0.01));
     const thin = thinnestWall(toSoup(sphereMesh(0.01)), 1.5);
     expect(thin!.mm).toBeGreaterThan(1.5);
-    expect(analyseDfm(scene([ball]), 'cnc').findings.find(f => f.id === 'cnc_thin_wall')).toBeUndefined();
-    expect(analyseDfm(scene([ball]), 'print').findings.find(f => f.id === 'print_thin_wall')).toBeUndefined();
+    expect(analyseDfm(scene([ball]), 'cnc', { asPlaced: true }).findings.find(f => f.id === 'cnc_thin_wall')).toBeUndefined();
+    expect(analyseDfm(scene([ball]), 'print', { asPlaced: true }).findings.find(f => f.id === 'print_thin_wall')).toBeUndefined();
   });
 
   it('still says a sphere cannot be cut from one side, because it cannot', () => {
-    const r = analyseDfm(scene([meshBody(sphereMesh(0.01))]), 'cnc');
+    const r = analyseDfm(scene([meshBody(sphereMesh(0.01))]), 'cnc', { asPlaced: true });
     expect(r.findings.find(f => f.id === 'cnc_undercut')).toBeDefined();
   });
 });
@@ -511,23 +520,23 @@ describe('scoping to one body', () => {
     // Without this, "can I make this?" is answered about the pendulum, the
     // floor and the gear train at once — all true, and all useless.
     const roomy = { widthMm: 400, depthMm: 400, thicknessMm: 100 };
-    const justSmall = analyseDfm(twoBodies(), 'cnc', { nodeId: 'small', stock: roomy });
+    const justSmall = analyseDfm(twoBodies(), 'cnc', { asPlaced: true, nodeId: 'small', stock: roomy });
     expect(justSmall.findings).toEqual([]);
 
-    const whole = analyseDfm(twoBodies(), 'cnc', { stock: roomy });
+    const whole = analyseDfm(twoBodies(), 'cnc', { asPlaced: true, stock: roomy });
     expect(whole.findings.length).toBeGreaterThan(0);
   });
 
   it('measures the heat only over that body’s triangles', () => {
-    const small = analyseDfm(twoBodies(), 'print', { nodeId: 'small' });
-    const both = analyseDfm(twoBodies(), 'print');
+    const small = analyseDfm(twoBodies(), 'print', { asPlaced: true, nodeId: 'small' });
+    const both = analyseDfm(twoBodies(), 'print', { asPlaced: true });
     expect(small.tris.length).toBeLessThan(both.tris.length);
     expect(small.heat.length).toBe(small.tris.length / 9);
   });
 
   it('falls back to the whole scene for an id that is not there', () => {
-    const r = analyseDfm(twoBodies(), 'print', { nodeId: 'nonesuch' });
-    expect(r.tris.length).toBe(analyseDfm(twoBodies(), 'print').tris.length);
+    const r = analyseDfm(twoBodies(), 'print', { asPlaced: true, nodeId: 'nonesuch' });
+    expect(r.tris.length).toBe(analyseDfm(twoBodies(), 'print', { asPlaced: true }).tris.length);
   });
 });
 
@@ -549,7 +558,7 @@ describe('the printer bed', () => {
   const long = () => scene([boxBody([0, 0, 0.05], [0.15, 0.05, 0.05])]);
 
   it('says a part does not fit when no square-on way up fits the bed', () => {
-    const r = analyseDfm(long(), 'print', { printBed: { widthMm: 200, depthMm: 200, heightMm: 200 } });
+    const r = analyseDfm(long(), 'print', { asPlaced: true, printBed: { widthMm: 200, depthMm: 200, heightMm: 200 } });
     const f = r.findings.find((x) => x.id === 'print_exceeds_bed');
     expect(f).toBeDefined();
     expect(f!.fix).toMatch(/Split/);
@@ -557,9 +566,9 @@ describe('the printer bed', () => {
 
   it('is quiet when it fits some way up, and when no bed is given', () => {
     // 300 mm stands up on a bed 320 mm tall.
-    expect(analyseDfm(long(), 'print', { printBed: { widthMm: 200, depthMm: 200, heightMm: 320 } })
+    expect(analyseDfm(long(), 'print', { asPlaced: true, printBed: { widthMm: 200, depthMm: 200, heightMm: 320 } })
       .findings.find((x) => x.id === 'print_exceeds_bed')).toBeUndefined();
-    expect(analyseDfm(long(), 'print').findings.find((x) => x.id === 'print_exceeds_bed')).toBeUndefined();
+    expect(analyseDfm(long(), 'print', { asPlaced: true }).findings.find((x) => x.id === 'print_exceeds_bed')).toBeUndefined();
   });
 
   it('shades exactly the faces Split for Print counts as needing support', () => {
@@ -567,7 +576,7 @@ describe('the printer bed', () => {
     const r = analyseDfm(scene([
       boxBody([0, 0, 0.04], [0.01, 0.01, 0.04], 'stem'),
       boxBody([0, 0, 0.085], [0.05, 0.05, 0.005], 'bar'),
-    ]), 'print');
+    ]), 'print', { asPlaced: true });
     const { area } = supportArea(r.tris, DFM_DEFAULTS.overhangDeg);
     let shaded = 0;
     for (let t = 0; t < r.heat.length; t++) {

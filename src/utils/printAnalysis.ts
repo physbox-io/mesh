@@ -11,6 +11,7 @@
 import type { SceneGraph, SceneNode, SceneGeom } from '../types/scene';
 import { resolveCsgGeoms, positiveBounds } from './csg';
 import { useStore } from '../store/useStore';
+import { isBoughtIn } from './boughtIn';
 import * as THREE from 'three';
 
 export type WeakSpotCategory = 'structural' | 'dynamic' | 'hardware' | 'manufacturing';
@@ -402,6 +403,8 @@ export function analyzeSceneMechanicalWeaknesses(sceneGraph: SceneGraph): Analys
   collect(sceneGraph.nodes);
 
   for (const { node, parentPos } of allNodes) {
+    // A bought bearing or screw is not made here, so has nothing to weaken.
+    if (isBoughtIn(node)) continue;
     const { worldPos, min, max, dimensions, center } = getNodeRealWorldBounds(node, parentPos);
     const [dx, dy, dz] = dimensions;
     const isStatic = !node.joints || node.joints.length === 0;
@@ -431,8 +434,9 @@ export function analyzeSceneMechanicalWeaknesses(sceneGraph: SceneGraph): Analys
         }
       }
 
-      // Fragile Vertical Pins (<3.2mm diameter)
-      if ((g.type === 'cylinder' || g.type === 'capsule') && g.size) {
+      // Fragile Vertical Pins (<3.2mm diameter). A cut cylinder is a hole, not a pin.
+      const cut = g.csg === 'difference';
+      if ((g.type === 'cylinder' || g.type === 'capsule') && g.size && !cut) {
         const diameterMm = g.size[0] * 2 * 1000;
         const lengthMm = g.size[1] * 2 * 1000;
         if (diameterMm < 3.2 && lengthMm > 6.0) {
@@ -453,7 +457,8 @@ export function analyzeSceneMechanicalWeaknesses(sceneGraph: SceneGraph): Analys
       }
 
       // --- NEW 3D PRINT FAILURE MODE 2: Hole-to-Edge / Hole Proximity Breakdown (<1.5mm) ---
-      if ((g.type === 'cylinder' || g.type === 'sphere') && g.size) {
+      // Only a cut is a hole; a ring cut is a groove, which no fastener loads.
+      if ((g.type === 'cylinder' || g.type === 'sphere') && g.size && cut && !g.ringInner) {
         const radius = g.size[0];
         const gPos = gTransform.pos;
         // Check distance from hole center to bounding box perimeter walls
@@ -510,7 +515,7 @@ export function analyzeSceneMechanicalWeaknesses(sceneGraph: SceneGraph): Analys
               nodeId: node.id,
               nodeName: node.name,
               category: 'structural',
-              severity: 'warning',
+              severity: 'info',
               title: 'Unfilleted 90° Notch Stress Riser',
               description: 'Abrupt 90° corner joint between sub-geometries creates high stress concentration under load.',
               recommendation: 'Add a 2mm–4mm fillet radius or angled corner chamfer.',
@@ -553,33 +558,36 @@ export function analyzeSceneMechanicalWeaknesses(sceneGraph: SceneGraph): Analys
       });
     }
 
-    // High Aspect Ratio Column (>8:1)
-    const minCross = Math.min(dx, dy);
-    if (dz > 0.05 && minCross > 0 && dz / minCross > 8.0) {
+    // High Aspect Ratio Column (>8:1): slender whichever way it stands — its
+    // longest side against its middle one, so a board, thin but wide, is not one.
+    const [shortSide, midSide, longSide] = [dx, dy, dz].sort((a, b) => a - b);
+    if (longSide > 0.05 && midSide > 0 && longSide / midSide > 8.0) {
       weakSpots.push({
         id: `buckling_${node.id}`,
         nodeId: node.id,
         nodeName: node.name,
         category: 'structural',
         severity: 'warning',
-        title: `High Aspect Ratio Feature (${(dz / minCross).toFixed(1)}:1 Ratio)`,
-        description: `Tall slender feature (${(dz * 1000).toFixed(0)}mm height vs ${(minCross * 1000).toFixed(0)}mm width). Prone to bending or print wobble.`,
+        title: `High Aspect Ratio Feature (${(longSide / midSide).toFixed(1)}:1 Ratio)`,
+        description: `Slender feature (${(longSide * 1000).toFixed(0)}mm long vs ${(midSide * 1000).toFixed(0)}mm across). Prone to bending or print wobble.`,
         recommendation: 'Consider thicker walls or reinforcing ribs to prevent bending during printing or under load.',
         position: [center[0], center[1], max[2]],
         surfacePoint: [center[0], center[1], max[2]],
       });
     }
 
-    // Cantilever Bending Risk
+    // Cantilever Bending Risk: a long moving beam. A plate — a drawer bottom,
+    // a deck — is wide as well as long, and spreads its load.
     if (dx > 0.15 || dy > 0.15) {
       const horizontalSpan = Math.max(dx, dy);
-      if (horizontalSpan / dz > 4.0 && !isStatic) {
+      const beam = longSide > 4 * midSide;
+      if (horizontalSpan / dz > 4.0 && !isStatic && beam) {
         weakSpots.push({
           id: `cantilever_${node.id}`,
           nodeId: node.id,
           nodeName: node.name,
           category: 'structural',
-          severity: 'warning',
+          severity: 'info',
           title: 'Unsupported Cantilever',
           description: `Long horizontal span (${(horizontalSpan * 1000).toFixed(0)}mm) may sag or deflect.`,
           recommendation: 'Add angled support struts, stiffening ribs, or print supports.',
@@ -589,10 +597,11 @@ export function analyzeSceneMechanicalWeaknesses(sceneGraph: SceneGraph): Analys
       }
     }
 
-    // Weak Bed Contact Footprint
-    if (min[2] <= 0.005 && dz > 0.08) {
-      const baseArea = dx * dy;
-      const height = dz;
+    // Weak Bed Contact Footprint: printed on its broadest face, as a slicer
+    // would lay it, not standing as it sits in the scene.
+    if (longSide > 0.08 && shortSide > 0) {
+      const baseArea = midSide * longSide;
+      const height = shortSide;
       if (baseArea / height < 0.015) {
         weakSpots.push({
           id: `bed_contact_${node.id}`,
@@ -601,7 +610,7 @@ export function analyzeSceneMechanicalWeaknesses(sceneGraph: SceneGraph): Analys
           category: 'manufacturing',
           severity: 'warning',
           title: 'Weak Print Bed Contact Footprint',
-          description: `Minimal ground contact area relative to part height (${(dz * 1000).toFixed(0)}mm tall). High risk of print detachment.`,
+          description: `Minimal ground contact area relative to part height (${(height * 1000).toFixed(0)}mm tall). High risk of print detachment.`,
           recommendation: 'Add a sacrificial print brim/raft or broaden base contact area.',
           position: [center[0], center[1], min[2]],
           surfacePoint: [center[0], center[1], min[2]],

@@ -113,6 +113,22 @@ function worldBox(scene: SceneGraph, node: SceneNode): Box | null {
   return { min: box.min, max: box.max };
 }
 
+/** A body and everything fixed to it (no joint between), less bought hardware: one assembled thing. */
+export function rigidBodies(node: SceneNode): SceneNode[] {
+  const out: SceneNode[] = [node];
+  for (const c of node.children || []) if (!c.joints?.length && !isBoughtIn(c)) out.push(...rigidBodies(c));
+  return out;
+}
+
+/** The box round a body and everything fixed to it: a cabinet built of panels. */
+function assemblyBox(scene: SceneGraph, node: SceneNode): Box | null {
+  const boxes = rigidBodies(node).map((n) => worldBox(scene, n)).filter((b): b is Box => !!b);
+  if (!boxes.length) return null;
+  const min = boxes[0].min.clone(), max = boxes[0].max.clone();
+  for (const b of boxes) { min.min(b.min); max.max(b.max); }
+  return { min, max };
+}
+
 /**
  * A pair of drawer runners for a drawer standing in its cabinet: sized to the
  * drawer's depth, one each side against it, the cabinet members fixed in the
@@ -122,14 +138,19 @@ function worldBox(scene: SceneGraph, node: SceneNode): Box | null {
 export function addDrawerRunners(scene: SceneGraph, drawerId: string, newId: () => string): Outcome {
   const drawer = byId(scene, drawerId);
   if (!drawer || isBoughtIn(drawer)) return { ok: false, problem: 'Select the drawer: runners go on its sides.' };
-  const d = worldBox(scene, drawer);
-  if (!d) return { ok: false, problem: `${drawer.name} has no solid to put runners on.` };
+  // A drawer's plan is its own body's — its bottom, when it is built of boards —
+  // so a face overlaid on the cabinet is not taken for its sides; its height is
+  // everything fixed to it.
+  const own = worldBox(scene, drawer);
+  const whole = assemblyBox(scene, drawer);
+  if (!own || !whole) return { ok: false, problem: `${drawer.name} has no solid to put runners on.` };
+  const d: Box = { min: new THREE.Vector3(own.min.x, own.min.y, whole.min.z), max: new THREE.Vector3(own.max.x, own.max.y, whole.max.z) };
   // The cabinet: the smallest other body round the drawer.
   let carcass: SceneNode | null = null;
   let carcassBox: Box | null = null;
   for (const n of all(scene.nodes)) {
     if (n.id === drawerId || isBoughtIn(n) || all([n]).some((c) => c.id === drawerId) || all([drawer]).some((c) => c.id === n.id)) continue;
-    const b = worldBox(scene, n);
+    const b = assemblyBox(scene, n);
     // Round it in plan and in height: a drawer of the same size above or below is not its cabinet.
     if (!b || !(b.min.x <= d.min.x + 1e-4 && b.min.y <= d.min.y + 1e-4 && b.max.x >= d.max.x - 1e-4 && b.max.y >= d.max.y - 1e-4
       && b.min.z <= d.min.z + 1e-4 && b.max.z >= d.max.z - 1e-4)) continue;

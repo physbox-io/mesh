@@ -35,6 +35,7 @@ import { cordOf, seatFor } from './hardwareParts';
 import { metricThread } from './metricThreads';
 import { rimCentreline } from './sealGrooves';
 import { RUNNER_SIDE_SPACE_MM } from './linearParts';
+import { rigidBodies } from './linearPlacement';
 
 /** Rays per groove: enough to find a lid that misses a corner. */
 const SAMPLES = 16;
@@ -194,9 +195,13 @@ export function runnerFindings(scene: SceneGraph, process: DfmProcess, whole: Sc
     const L = Number(runner.hardwarePart!.size) / 1000;
     const middle = new THREE.Vector3(L / 2, 0, 0).applyMatrix4(world);
     const toward = new THREE.Vector3(0, 1, 0).transformDirection(world);
+    // Against the whole drawer and the whole cabinet: either may be built of boards.
     const reach = (id: string, dir: THREE.Vector3) => {
-      const body = bodies.find((b) => b.id === id);
-      return body ? rayHit(body.tris, middle, dir, 0.05) : Infinity;
+      const root = everything.find((n) => n.id === id);
+      const ids = new Set(root ? rigidBodies(root).map((n) => n.id) : [id]);
+      let best = Infinity;
+      for (const b of bodies) if (ids.has(b.id)) best = Math.min(best, rayHit(b.tris, middle, dir, 0.05));
+      return best;
     };
     const space = (reach(drawer, toward) + reach(carcass, toward.clone().negate())) * 1000;
     if (!Number.isFinite(space)) continue;

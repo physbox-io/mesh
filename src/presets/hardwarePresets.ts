@@ -64,13 +64,16 @@ const CHEST = { inside: 0.4, depth: 0.42, wall: 0.018, drawers: 4, pitch: 0.15 }
 function chestOfDrawers(): SceneGraph {
   const { inside: W, depth: D, wall: t, drawers: N, pitch: P } = CHEST;
   const H = N * P + 0.01;
-  const chest = body('chest', [0, 0, 0], [
-    box('chest_left', [t / 2, D / 2, H / 2 + t], [-W / 2 - t / 2, 0, H / 2 + t], WOOD, 3),
-    box('chest_right', [t / 2, D / 2, H / 2 + t], [W / 2 + t / 2, 0, H / 2 + t], WOOD, 3),
-    box('chest_bottom', [W / 2, D / 2, t / 2], [0, 0, t / 2], WOOD, 2),
-    box('chest_top', [W / 2 + t, D / 2 + t / 2, t / 2], [0, t / 2, H + 1.5 * t], WOOD, 2.5),
-    box('chest_back', [W / 2, t / 2, H / 2], [0, D / 2 + t / 2, t + H / 2], WOOD, 1.5),
-  ], false);
+  // Built as it is made: five boards, each a body of its own, fixed to the
+  // bottom one — so each is judged as the board it is, not as one deep box.
+  const panel = (id: string, half: number[], pos: number[], mass: number) => body(id, pos, [box(`${id}_board`, half, [0, 0, 0], WOOD, mass)], false);
+  const chest = body('chest', [0, 0, 0], [box('chest_bottom', [W / 2, D / 2, t / 2], [0, 0, t / 2], WOOD, 2)], false);
+  chest.children.push(
+    panel('chest_left', [t / 2, D / 2, H / 2 + t], [-W / 2 - t / 2, 0, H / 2 + t], 3),
+    panel('chest_right', [t / 2, D / 2, H / 2 + t], [W / 2 + t / 2, 0, H / 2 + t], 3),
+    panel('chest_top', [W / 2 + t, D / 2 + t / 2, t / 2], [0, t / 2, H + 1.5 * t], 2.5),
+    panel('chest_back', [W / 2, t / 2, H / 2], [0, D / 2 + t / 2, t + H / 2], 1.5),
+  );
   const scene: SceneGraph = { nodes: [chest] } as SceneGraph;
 
   const Wd = W - 2 * 0.0127; // the drawer box: 12.7 mm each side for its runners
@@ -79,12 +82,10 @@ function chestOfDrawers(): SceneGraph {
     const id = `drawer_${i + 1}`;
     const zc = t + 0.02 + i * P + hd / 2;
     const ply = 0.012;
+    // Boards too: the bottom is the drawer's body, its sides, back and front fixed to it.
+    const board = (bid: string, half: number[], pos: number[], mass: number) => body(bid, pos, [box(`${bid}_board`, half, [0, 0, 0], WOOD, mass)], false);
     const drawer = body(id, [0, -D / 2 + 0.2, zc], [
       box(`${id}_bottom`, [Wd / 2, 0.2, ply / 2], [0, 0, -hd / 2 + ply / 2], WOOD, 0.6),
-      box(`${id}_left`, [ply / 2, 0.2, hd / 2], [-Wd / 2 + ply / 2, 0, 0], WOOD, 0.35),
-      box(`${id}_right`, [ply / 2, 0.2, hd / 2], [Wd / 2 - ply / 2, 0, 0], WOOD, 0.35),
-      box(`${id}_back`, [Wd / 2 - ply, ply / 2, hd / 2], [0, 0.2 - ply / 2, 0], WOOD, 0.25),
-      box(`${id}_inner_front`, [Wd / 2 - ply, ply / 2, hd / 2], [0, -0.2 + ply / 2, 0], WOOD, 0.25),
     ], true, {
       // Each drawer opens and shuts in its turn: pulled out, left, pushed home.
       script: `const turn = ${i} * 2;
@@ -92,8 +93,14 @@ const phase = (api.getTime() + 8 - turn) % 8;
 if (phase < 1.2) api.applyForce([0, -14, 0]);
 else if (phase >= 4 && phase < 6) api.applyForce([0, 14, 0]);`,
     });
-    // The face, overlaid on the cabinet's front edges, with a knob: a rigid
-    // child, so the drawer's box alone is what the runners are sized to.
+    drawer.children.push(
+      board(`${id}_left`, [ply / 2, 0.2, hd / 2 - ply / 2], [-Wd / 2 + ply / 2, 0, ply / 2], 0.35),
+      board(`${id}_right`, [ply / 2, 0.2, hd / 2 - ply / 2], [Wd / 2 - ply / 2, 0, ply / 2], 0.35),
+      board(`${id}_back`, [Wd / 2 - ply, ply / 2, hd / 2 - ply / 2], [0, 0.2 - ply / 2, ply / 2], 0.25),
+      board(`${id}_inner_front`, [Wd / 2 - ply, ply / 2, hd / 2 - ply / 2], [0, -0.2 + ply / 2, ply / 2], 0.25),
+    );
+    // The face, overlaid on the cabinet's front edges, with a knob: fixed to
+    // the drawer, and not part of the box the runners are sized to.
     drawer.children.push(body(`${id}_face`, [0, -0.2 - 0.001 - 0.009, (t + i * P + P / 2) - zc], [
       box(`${id}_face_panel`, [(W + 2 * t - 0.003) / 2, 0.009, (P - 0.006) / 2], [0, 0, 0], WOOD_FRONT, 0.6),
       { name: `${id}_knob`, type: 'cylinder', size: [0.012, 0.01], pos: [0, -0.019, 0], quat: [Math.SQRT1_2, Math.SQRT1_2, 0, 0], rgba: [0.75, 0.6, 0.3, 1], mass: 0.05 } as SceneGeom,
@@ -113,7 +120,7 @@ function xyPlotter(): SceneGraph {
   const base = body('base', [0, 0, 0.006], [
     box('base_plate', [0.26, 0.15, 0.006], [0, 0, 0], PLA_GREY, 0.9),
     // The sheet it draws on.
-    box('base_paper', [0.13, 0.09, 0.0002], [0.072, 0.01, 0.0062], [0.97, 0.97, 0.95, 1], 0.01, { contype: 0, conaffinity: 0 }),
+    box('base_paper', [0.13, 0.09, 0.0005], [0.072, 0.01, 0.0065], [0.97, 0.97, 0.95, 1], 0.01, { contype: 0, conaffinity: 0 }),
   ], false);
   const xSeat = cut(base, { kind: 'rail_seat', size: 'MGN15', lengthMm: 450, bore: 'insert', at: [0, -0.11, 0.006], normal: [0, 0, 1] }, 'x_seat');
   const xRail = seat(base, xSeat, { kind: 'mgn_rail', size: 'MGN15', lengthMm: 450 }, 'x_rail');
