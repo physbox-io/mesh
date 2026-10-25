@@ -36,28 +36,23 @@
 // ---------------------------------------------------------------------------
 
 import * as THREE from 'three';
-import type { HardwareCutKind, HardwarePart, HardwarePartKind, SceneGeom, SceneGraph, SceneNode } from '../types/scene';
+import type { CorePartKind, HardwareCutKind, HardwarePart, HardwarePartKind, SceneGeom, SceneGraph, SceneNode } from '../types/scene';
 import { csgFrameOffset, csgSourceGeoms, fromtoFrame, geomMatrixOf, surfaceUnder } from './csg';
 import { hardwareSpecOf } from './hardwareCuts';
 import { getNodeWorldTransform } from './laserCutExporter';
 import { BEARINGS, BOLTS, CAP_SCREW_HEADS, HEX_NUTS, O_RINGS, SCREW_LENGTHS, SEAL_CORDS, SHAFTS, WASHERS, screwLengthAtMost } from './hardwareSizes';
 import { loopLengthMm, rimCentreline } from './sealGrooves';
 import { metricThread } from './metricThreads';
+import {
+  BLACK_OXIDE, BRIGHT, NITRILE, RUBBER, SHIELD, STEEL, circleLoop, cylinderGeom, hexRadius, mm, ringGeom, sweepMesh, visual,
+  type HardwarePartInfo,
+} from './hardwareGeometry';
 import { isBoughtIn } from './boughtIn';
 
-export interface HardwarePartInfo {
-  label: string;
-  sizes: readonly string[];
-  defaultSize: string;
-  /** Lengths it is sold in, mm, when it has a length. */
-  lengths?: readonly number[];
-  defaultLengthMm?: number;
-  hint: string;
-}
 
 const SHAFT_LENGTHS = [10, 16, 20, 25, 30, 40, 50, 60, 80, 100, 120, 150, 200, 250, 300] as const;
 
-export const HARDWARE_PARTS: Record<HardwarePartKind, HardwarePartInfo> = {
+const CORE_PARTS: Record<CorePartKind, HardwarePartInfo> = {
   bearing: {
     label: 'Bearing', sizes: Object.keys(BEARINGS), defaultSize: '608',
     hint: 'A ball bearing. Its inner race turns on a hinge, so whatever is fixed to it spins.',
@@ -80,6 +75,11 @@ export const HARDWARE_PARTS: Record<HardwarePartKind, HardwarePartInfo> = {
   },
 };
 
+/** Every kind of bought part: the core ones here, then each family's from its own module. */
+export const HARDWARE_PARTS: Record<HardwarePartKind, HardwarePartInfo> = {
+  ...CORE_PARTS,
+};
+
 /** An O-ring's cord diameter, mm: a stocked ring's, or the cord's own. */
 export function cordOf(size: string): number {
   return O_RINGS[size]?.[1] ?? Number(size);
@@ -97,136 +97,8 @@ export const PARTS_FOR_CUT: Record<HardwareCutKind, HardwarePartKind[]> = {
 };
 
 export { isBoughtIn };
-
-// ---------------------------------------------------------------------------
-// Geometry
-// ---------------------------------------------------------------------------
-
-const STEEL = 7850; // kg/m³
-const BRIGHT: [number, number, number, number] = [0.74, 0.76, 0.79, 1];
-const BLACK_OXIDE: [number, number, number, number] = [0.17, 0.17, 0.19, 1];
-const SHIELD: [number, number, number, number] = [0.36, 0.38, 0.42, 1];
-const NITRILE: [number, number, number, number] = [0.08, 0.08, 0.09, 1];
-const RUBBER = 1250; // kg/m³
-const mm = (v: number) => +(v / 1000).toFixed(7);
-
-/**
- * A ring standing on +Z about the origin: outside radius by angle, inside
- * radius fixed, height h, centred. Z-up `renderVertices` and Y-up `vertices`,
- * as every mesh geom carries them.
- *
- * Each face's corner order follows from the way that face looks out — up for
- * the top, away from the axis for the outside, toward it for the bore — so the
- * ring is closed and wound outward everywhere (see CLAUDE.md on winding).
- */
-export function ringMesh(outside: (theta: number) => number, inside: number, h: number, segments: number) {
-  const renderVertices: number[] = [];
-  const faces: number[] = [];
-  const hh = h / 2;
-  for (let i = 0; i < segments; i++) {
-    const t = (i / segments) * Math.PI * 2;
-    const c = Math.cos(t), s = Math.sin(t);
-    const ro = outside(t);
-    renderVertices.push(ro * c, ro * s, hh, ro * c, ro * s, -hh, inside * c, inside * s, hh, inside * c, inside * s, -hh);
-  }
-  for (let i = 0; i < segments; i++) {
-    const j = (i + 1) % segments;
-    const [ot, ob, it, ib] = [i * 4, i * 4 + 1, i * 4 + 2, i * 4 + 3];
-    const [otn, obn, itn, ibn] = [j * 4, j * 4 + 1, j * 4 + 2, j * 4 + 3];
-    faces.push(ot, otn, itn, ot, itn, it); // top, looking up
-    faces.push(ob, ibn, obn, ob, ib, ibn); // bottom, looking down
-    faces.push(ob, obn, otn, ob, otn, ot); // outside, away from the axis
-    faces.push(ib, itn, ibn, ib, it, itn); // bore, toward the axis
-  }
-  // Z-up to Y-up, (x, y, z) -> (x, z, -y): a rotation, so the winding holds.
-  const vertices: number[] = [];
-  for (let i = 0; i < renderVertices.length; i += 3) {
-    vertices.push(renderVertices[i], renderVertices[i + 2], -renderVertices[i + 1]);
-  }
-  return {
-    vertices: vertices.map((v) => +v.toFixed(7)),
-    renderVertices: renderVertices.map((v) => +v.toFixed(7)),
-    faces,
-  };
-}
-
-/**
- * A round cord of radius `r` swept along a closed loop in the XY plane,
- * anticlockwise seen from +Z: an O-ring, or cord laid in a groove.
- *
- * Its corner order is worked from the sweep's own frame. Along the loop is u,
- * round the cord is v, starting outward and turning up; with t the loop's
- * direction and N its outward normal, t × N is -Z, so ∂u × ∂v comes out as
- * cos v·N + sin v·Z — the cord's outward normal — for corners taken in u then v.
- */
-export function sweepMesh(loop: number[][], r: number, around = 12) {
-  const n = loop.length;
-  const renderVertices: number[] = [];
-  for (let i = 0; i < n; i++) {
-    const [px, py] = loop[i];
-    const [ax, ay] = loop[(i - 1 + n) % n];
-    const [bx, by] = loop[(i + 1) % n];
-    const tl = Math.hypot(bx - ax, by - ay) || 1;
-    const [tx, ty] = [(bx - ax) / tl, (by - ay) / tl];
-    const [nx, ny] = [ty, -tx]; // right of an anticlockwise loop: outward
-    for (let k = 0; k < around; k++) {
-      const v = (k / around) * Math.PI * 2;
-      const [c, s] = [Math.cos(v), Math.sin(v)];
-      renderVertices.push(px + r * c * nx, py + r * c * ny, r * s);
-    }
-  }
-  const faces: number[] = [];
-  for (let i = 0; i < n; i++) {
-    for (let k = 0; k < around; k++) {
-      const a = i * around + k;
-      const b = ((i + 1) % n) * around + k;
-      const c = ((i + 1) % n) * around + ((k + 1) % around);
-      const d = i * around + ((k + 1) % around);
-      faces.push(a, b, c, a, c, d);
-    }
-  }
-  const vertices: number[] = [];
-  for (let i = 0; i < renderVertices.length; i += 3) vertices.push(renderVertices[i], renderVertices[i + 2], -renderVertices[i + 1]);
-  return { vertices: vertices.map((v) => +v.toFixed(7)), renderVertices: renderVertices.map((v) => +v.toFixed(7)), faces };
-}
-
-/** A circle as a loop, metres. */
-const circleLoop = (radius: number, segments = 48) =>
-  Array.from({ length: segments }, (_, i) => [radius * Math.cos((i / segments) * Math.PI * 2), radius * Math.sin((i / segments) * Math.PI * 2)]);
-
-/** A hexagon's radius at an angle, corners on +X as OpenSCAD's `$fn = 6` puts them. */
-const hexRadius = (flats: number) => (theta: number) => {
-  const sector = ((theta % (Math.PI / 3)) + Math.PI / 3) % (Math.PI / 3);
-  return flats / 2 / Math.cos(sector - Math.PI / 6);
-};
-
-function ringGeom(
-  name: string, outsideR: number, insideR: number, h: number, z: number,
-  rgba: number[], extra: Partial<SceneGeom> = {}, outside?: (theta: number) => number, segments = 32,
-): SceneGeom {
-  const shape = ringMesh(outside ?? (() => outsideR), insideR, h, segments);
-  // Moved in the mesh itself: a mesh geom's vertices are read in the body frame.
-  for (let i = 2; i < shape.renderVertices.length; i += 3) shape.renderVertices[i] = +(shape.renderVertices[i] + z).toFixed(7);
-  for (let i = 1; i < shape.vertices.length; i += 3) shape.vertices[i] = +(shape.vertices[i] + z).toFixed(7);
-  const volume = Math.PI * (outsideR * outsideR - insideR * insideR) * h;
-  return {
-    name, type: 'mesh', size: [1], rgba: [...rgba], dynamic: true,
-    mass: +(volume * STEEL).toFixed(7), condim: 3, ...shape, ...extra,
-  };
-}
-
-function cylinderGeom(name: string, r: number, h: number, z: number, rgba: number[], extra: Partial<SceneGeom> = {}): SceneGeom {
-  return {
-    name, type: 'cylinder', size: [r, h / 2], pos: [0, 0, +z.toFixed(7)], rgba: [...rgba],
-    mass: +(Math.PI * r * r * h * STEEL).toFixed(7), dynamic: true, ...extra,
-  };
-}
-
-/** Drawn only: no contacts and no mass, so it changes nothing the solver sees. */
-function visual(g: SceneGeom): SceneGeom {
-  const { mass: _mass, dynamic: _dynamic, condim: _condim, ...rest } = g;
-  return { ...rest, role: 'visual' };
-}
+export { ringMesh, sweepMesh } from './hardwareGeometry';
+export type { HardwarePartInfo } from './hardwareGeometry';
 
 const sizeOf = (kind: HardwarePartKind, size: string) => {
   const info = HARDWARE_PARTS[kind];
@@ -258,6 +130,7 @@ export function hardwarePartName(spec: HardwarePart): string {
     case 'nut': return `${p.size} nut`;
     case 'shaft': return `Ø${p.size}×${p.lengthMm} shaft`;
     case 'oring': return O_RINGS[p.size] ? `${p.size} O-ring` : `Ø${p.size} cord, ${p.lengthMm ?? 0} mm`;
+    default: return HARDWARE_PARTS[p.kind].name?.(p) ?? HARDWARE_PARTS[p.kind].label;
   }
 }
 
@@ -341,6 +214,8 @@ export function hardwarePartNode(spec: HardwarePart, id: string): SceneNode {
       }];
       break;
     }
+    default:
+      HARDWARE_PARTS[p.kind].build?.(node, p, id);
   }
   return node;
 }
@@ -365,9 +240,14 @@ export function rebuildPart(node: SceneNode, spec: HardwarePart): void {
     ...(spec.fastens ?? was?.fastens ? { fastens: spec.fastens ?? was?.fastens } : {}),
   }, node.id);
   const keptUnder = (n: SceneNode | undefined) => (n?.children || []).filter((c) => !c.hardwarePart?.piece);
-  const oldInner = (node.children || []).find((c) => c.hardwarePart?.piece === 'inner');
-  const freshInner = fresh.children.find((c) => c.hardwarePart?.piece === 'inner');
-  if (freshInner) freshInner.children = keptUnder(oldInner);
+  // What is fixed to each moving piece — a wheel on an inner race, a drawer on
+  // a runner's slide — goes onto the same piece of the new part.
+  const kept = new Map<string, SceneNode[]>();
+  for (const body of partBodies(node).slice(1)) kept.set(body.hardwarePart!.piece!, keptUnder(body));
+  for (const body of partBodies(fresh).slice(1)) {
+    const mine = kept.get(body.hardwarePart!.piece!);
+    if (mine?.length) body.children = [...body.children, ...mine];
+  }
   node.name = fresh.name;
   node.geoms = fresh.geoms;
   node.hardwarePart = fresh.hardwarePart;

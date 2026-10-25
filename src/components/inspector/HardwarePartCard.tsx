@@ -1,5 +1,5 @@
 import { useStore } from '../../store/useStore';
-import type { SceneNode } from '../../types/scene';
+import type { HardwarePart, SceneNode } from '../../types/scene';
 import { HARDWARE_PARTS } from '../../utils/hardwareParts';
 import { O_RINGS, SEAL_CORDS } from '../../utils/hardwareSizes';
 import { findNodeById } from '../../utils/sceneTree';
@@ -20,11 +20,13 @@ export function HardwarePartCard({ node }: { node: SceneNode }) {
   const spec = node.hardwarePart;
   if (!spec) return null;
 
-  if (spec.piece === 'inner') {
-    const owner = findOwner(graph.nodes, node.id);
+  if (spec.piece) {
+    // The part's owner is the body at the top of its pieces.
+    let owner = findOwner(graph.nodes, node.id);
+    while (owner?.hardwarePart?.piece) owner = findOwner(graph.nodes, owner.id);
     return (
       <div className="p-3 bg-slate-50 dark:bg-slate-900/40 border border-slate-200/60 dark:border-slate-800 rounded-lg text-[11px] text-slate-500 dark:text-slate-400">
-        The inner race, which turns on its hinge. Fix a shaft or a part to it and that turns with it.
+        {PIECE_TEXT[spec.piece]}
         {owner && (
           <button type="button" onClick={() => setSelectedNodeId(owner.id)} className="block mt-1 font-semibold text-blue-600 dark:text-blue-400 cursor-pointer">
             Select {owner.name}
@@ -94,6 +96,12 @@ export function HardwarePartCard({ node }: { node: SceneNode }) {
     </div>
   );
 }
+
+const PIECE_TEXT: Record<NonNullable<HardwarePart['piece']>, string> = {
+  inner: 'The inner race, which turns on its hinge. Fix a shaft or a part to it and that turns with it.',
+  carriage: 'The moving part, on a slide along its rail. Fix a part to it and that slides with it, stopping at the ends.',
+  middle: 'The middle member, which slides out from the cabinet member and carries the drawer member out past it.',
+};
 
 /** The menu's lengths, with the one it has now even when it is not a standard one. */
 function withCurrent(lengths: readonly number[], current?: number): number[] {

@@ -29,8 +29,17 @@ export type SealType = 'face' | 'bore' | 'piston';
 /** What goes into a hardware feature's hole: a screw through it, a thread in it, or a heat-set insert. */
 export type HardwareBore = 'clearance' | 'tapped' | 'insert';
 
+/** The moving pieces a bought part can have, each a body of its own on a joint. */
+export type HardwarePartPiece = 'inner' | 'carriage' | 'middle';
+
 /** The bought hardware that can be put in a scene; see utils/hardwareParts.ts. */
-export type HardwarePartKind = 'bearing' | 'screw' | 'nut' | 'shaft' | 'oring';
+export type CorePartKind = 'bearing' | 'screw' | 'nut' | 'shaft' | 'oring';
+/**
+ * Every kind of bought part. Each family past the core ones lives in a module
+ * of its own (utils/linearParts.ts, utils/extrusionParts.ts) and adds its
+ * kinds here.
+ */
+export type HardwarePartKind = CorePartKind;
 
 /**
  * What a body is when it is a piece of bought hardware rather than something
@@ -50,8 +59,11 @@ export interface HardwarePart {
   path?: number[][];
   /** A screw with a plain washer under its head. */
   washer?: boolean;
-  /** A body that is one piece of a larger part: a bearing's inner race. */
-  piece?: 'inner';
+  /**
+   * A body that is one moving piece of a larger part: a bearing's inner race,
+   * the carriage on a rail or a bushing on a rod, a runner's middle member.
+   */
+  piece?: HardwarePartPiece;
   /**
    * The hardware cut in the parent body this sits in. A seated part is rigid to
    * that body, takes no contacts (the cut holds it, not the solver), and follows
