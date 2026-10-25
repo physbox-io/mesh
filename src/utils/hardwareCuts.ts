@@ -16,9 +16,10 @@
 // as one feature with one Size menu, and rebuild them all when it changes.
 // ---------------------------------------------------------------------------
 
-import type { HardwareBore, HardwareCutKind, SceneGeom } from '../types/scene';
+import type { HardwareBore, HardwareCutKind, SceneGeom, SceneNode, SealType } from '../types/scene';
 import { metricThread } from './metricThreads';
-import { BOLTS, HEX_NUTS, CLEARANCE_HOLES, COUNTERBORES, INSERTS, BEARINGS } from './hardwareSizes';
+import { BOLTS, HEX_NUTS, CLEARANCE_HOLES, COUNTERBORES, INSERTS, BEARINGS, O_RINGS, SEAL_CORDS } from './hardwareSizes';
+import { planSealGroove, sealGrooveProblem } from './sealGrooves';
 
 export { HEX_NUTS, CLEARANCE_HOLES, COUNTERBORES, INSERTS, BEARINGS } from './hardwareSizes';
 
@@ -56,7 +57,18 @@ export const HARDWARE_KINDS: Record<HardwareCutKind, HardwareKindInfo> = {
     label: 'Bearing pocket', sizes: Object.keys(BEARINGS), defaultSize: '608', defaultFitMm: 0,
     hint: 'A blind pocket a ball bearing presses into, with a hole through for the shaft that leaves a ledge under the outer race.',
   },
+  oring: {
+    // The default is chosen to fit where it goes, so it has none of its own.
+    label: 'O-ring groove', sizes: Object.keys(O_RINGS), defaultSize: '', defaultFitMm: 0,
+    hint: 'A groove for a stocked O-ring: in a face under a lid, in a bore round a shaft, or round a boss. Sized to fit where it goes.',
+  },
+  seal_cord: {
+    label: 'Rim seal', sizes: SEAL_CORDS, defaultSize: '', defaultFitMm: 0,
+    hint: 'A groove following the rim of a box, for O-ring cord cut to length; in the middle of the wall when there is a cavity under it.',
+  },
 };
+
+export const SEAL_LABELS: Record<SealType, string> = { face: 'Face', bore: 'Bore', piston: 'Piston' };
 
 export const BORE_LABELS: Record<HardwareBore, string> = { clearance: 'Clearance', tapped: 'Tapped', insert: 'Heat-set insert' };
 
@@ -67,6 +79,8 @@ export interface HardwareCutSpec {
   at: number[];
   normal: number[];
   bore?: HardwareBore;
+  /** An O-ring groove's: where it seals. Read off where it is put when left out. */
+  seal?: SealType;
   fitMm?: number;
 }
 
@@ -83,7 +97,22 @@ function tapped(size: string): Pick<SceneGeom, 'size' | 'thread'> | undefined {
  * before the hole bored into it, so the hole finds the boss's top. Each still
  * needs `cutGeometry` for its pos, length and turn.
  */
-export function hardwareCutGeoms(spec: HardwareCutSpec, nodeId: string): SceneGeom[] {
+export function hardwareCutGeoms(spec: HardwareCutSpec, nodeId: string, host?: SceneNode): SceneGeom[] {
+  if (spec.kind === 'oring' || spec.kind === 'seal_cord') {
+    // Worked out from the part, not only the table: see utils/sealGrooves.ts.
+    const plan = host ? planSealGroove({ ...spec, kind: spec.kind }, host) : null;
+    if (!plan || 'problem' in plan) return [];
+    const fit = Math.max(0, spec.fitMm ?? 0);
+    return [{
+      ...plan.geom,
+      name: `${nodeId}_${spec.group}_groove`,
+      hardware: {
+        group: spec.group, kind: spec.kind, size: plan.size, part: 'groove',
+        ...(plan.seal !== 'rim' ? { seal: plan.seal } : {}),
+        ...(fit > 0 ? { fit: m(fit) } : {}),
+      },
+    } as SceneGeom];
+  }
   const info = HARDWARE_KINDS[spec.kind];
   const size = info.sizes.includes(spec.size) ? spec.size : info.defaultSize;
   const bore = spec.bore && info.bores?.includes(spec.bore) ? spec.bore : info.defaultBore;
@@ -154,8 +183,15 @@ export function hardwareSpecOf(geoms: SceneGeom[], group: string): HardwareCutSp
     group, kind: h.kind, size: h.size,
     at: [...(first.cutAt ?? [0, 0, 0])], normal: [...(first.cutNormal ?? [0, 0, 1])],
     ...(h.bore ? { bore: h.bore } : {}),
+    ...(h.seal ? { seal: h.seal } : {}),
     fitMm: h.fit ? +(h.fit * 1000).toFixed(4) : 0,
   };
+}
+
+/** Why a hardware feature cannot be cut where it was asked for, in one sentence, or null. */
+export function hardwareCutProblem(spec: HardwareCutSpec, host: SceneNode): string | null {
+  if (spec.kind === 'oring' || spec.kind === 'seal_cord') return sealGrooveProblem({ ...spec, kind: spec.kind }, host);
+  return null;
 }
 
 /** A group name not yet used on this body: nut_trap1, nut_trap2, … */

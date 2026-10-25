@@ -64,3 +64,49 @@ export function screwLengthAtMost(mm: number): number {
   for (const l of SCREW_LENGTHS) if (l <= mm + 1e-6) best = l;
   return best;
 }
+
+/** From `from` to `to` in steps of `step`. */
+const span = (from: number, to: number, step: number) => Array.from({ length: Math.floor((to - from) / step) + 1 }, (_, i) => from + i * step);
+
+/**
+ * Metric O-rings as they are stocked: cord diameter, mm, to the inside
+ * diameters it comes in. Every millimetre in the small sizes, as the usual
+ * suppliers carry them, thinning out in the large. Named `ID×cord`.
+ */
+const O_RING_STOCK: Record<string, number[]> = {
+  '1.5': span(3, 30, 1),
+  '2': span(4, 60, 1),
+  '2.5': [...span(8, 50, 1), ...span(52, 80, 2)],
+  '3': [...span(10, 50, 1), ...span(52, 100, 2), ...span(105, 150, 5)],
+  '3.5': [...span(20, 100, 2), ...span(105, 200, 5)],
+  '4': [...span(20, 100, 2), ...span(105, 250, 5)],
+  '5': span(40, 300, 5),
+};
+
+/** Every stocked O-ring: name to [inside diameter, cord], mm. Smallest cord first, then by size. */
+export const O_RINGS: Record<string, [id: number, cord: number]> = Object.fromEntries(
+  Object.entries(O_RING_STOCK).flatMap(([cord, ids]) => ids.map((id) => [`${id}×${cord}`, [id, Number(cord)]])),
+);
+
+/** O-ring cord sold by the metre, for a groove that follows a box's rim: its diameter, mm. */
+export const SEAL_CORDS = ['1.5', '2', '2.5', '3', '3.5', '4', '5'] as const;
+
+/**
+ * Static gland [depth, width] for a cord, mm, in a face seal and in a radial
+ * one. A face seal is squeezed about 25% and a radial one about 18%, each
+ * filling its groove about 72%: the middle of what makers' tables say seals
+ * and lets the ring back into its groove when it is taken apart, with room for
+ * a printed groove to come out a little small.
+ */
+export const GLANDS: Record<string, { face: [number, number]; radial: [number, number] }> = {
+  '1.5': { face: [1.1, 2.2], radial: [1.2, 2.0] },
+  '2': { face: [1.5, 2.9], radial: [1.65, 2.7] },
+  '2.5': { face: [1.85, 3.7], radial: [2.05, 3.3] },
+  '3': { face: [2.25, 4.4], radial: [2.45, 4.0] },
+  '3.5': { face: [2.65, 5.0], radial: [2.85, 4.7] },
+  '4': { face: [3.05, 5.7], radial: [3.3, 5.3] },
+  '5': { face: [3.85, 7.1], radial: [4.15, 6.6] },
+};
+
+/** Where a static seal works: squeeze as a share of the cord, how full its groove may be, how far it may be stretched. */
+export const SEAL_LIMITS = { squeezeMin: 0.15, squeezeMax: 0.3, fillMax: 0.85, stretchMax: 0.05 } as const;

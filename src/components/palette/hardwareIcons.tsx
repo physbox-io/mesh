@@ -285,3 +285,21 @@ export const ShaftIcon = () => (
     </g>
   </svg>
 );
+
+export const ORingGrooveIcon = () => (
+  <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none">
+    {/* A face with a round groove in it, and the ring lying in the groove */}
+    <rect x="2.5" y="2.5" width="19" height="19" rx="3" className="fill-rose-100 dark:fill-rose-950/40 stroke-rose-400 dark:stroke-rose-500" strokeWidth="1.2" />
+    <circle cx="12" cy="12" r="6.2" className="stroke-rose-500 dark:stroke-rose-400" strokeWidth="3.4" />
+    <circle cx="12" cy="12" r="6.2" className="stroke-slate-800 dark:stroke-slate-300" strokeWidth="1.8" />
+  </svg>
+);
+
+export const RimSealIcon = () => (
+  <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none">
+    {/* A box's rim, seen from above, with cord following it */}
+    <rect x="2.5" y="4" width="19" height="16" rx="2" className="fill-rose-100 dark:fill-rose-950/40 stroke-rose-400 dark:stroke-rose-500" strokeWidth="1.2" />
+    <rect x="6.5" y="8" width="11" height="8" rx="0.8" className="fill-white dark:fill-slate-900 stroke-rose-300 dark:stroke-rose-600" strokeWidth="0.8" />
+    <rect x="4.5" y="6" width="15" height="12" rx="2.2" className="stroke-slate-800 dark:stroke-slate-300" strokeWidth="1.6" />
+  </svg>
+);

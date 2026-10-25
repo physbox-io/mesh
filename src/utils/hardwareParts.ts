@@ -40,7 +40,8 @@ import type { HardwareCutKind, HardwarePart, HardwarePartKind, SceneGeom, SceneG
 import { csgFrameOffset, csgSourceGeoms, fromtoFrame, geomMatrixOf, surfaceUnder } from './csg';
 import { hardwareSpecOf } from './hardwareCuts';
 import { getNodeWorldTransform } from './laserCutExporter';
-import { BEARINGS, BOLTS, CAP_SCREW_HEADS, HEX_NUTS, SCREW_LENGTHS, SHAFTS, WASHERS, screwLengthAtMost } from './hardwareSizes';
+import { BEARINGS, BOLTS, CAP_SCREW_HEADS, HEX_NUTS, O_RINGS, SCREW_LENGTHS, SEAL_CORDS, SHAFTS, WASHERS, screwLengthAtMost } from './hardwareSizes';
+import { loopLengthMm, rimCentreline } from './sealGrooves';
 import { metricThread } from './metricThreads';
 import { isBoughtIn } from './boughtIn';
 
@@ -73,7 +74,16 @@ export const HARDWARE_PARTS: Record<HardwarePartKind, HardwarePartInfo> = {
     label: 'Shaft', sizes: SHAFTS, defaultSize: '8', lengths: SHAFT_LENGTHS, defaultLengthMm: 50,
     hint: 'A ground steel shaft or dowel pin, for a bearing to carry or a hole to locate on.',
   },
+  oring: {
+    label: 'O-ring', sizes: [...Object.keys(O_RINGS), ...SEAL_CORDS], defaultSize: '20×2',
+    hint: 'A nitrile O-ring, or O-ring cord cut to length, lying in the groove it seals.',
+  },
 };
+
+/** An O-ring's cord diameter, mm: a stocked ring's, or the cord's own. */
+export function cordOf(size: string): number {
+  return O_RINGS[size]?.[1] ?? Number(size);
+}
 
 /** The parts that go in each kind of hardware cut, the one it is made for first. */
 export const PARTS_FOR_CUT: Record<HardwareCutKind, HardwarePartKind[]> = {
@@ -82,6 +92,8 @@ export const PARTS_FOR_CUT: Record<HardwareCutKind, HardwarePartKind[]> = {
   nut_trap: ['nut'],
   insert: ['screw'],
   insert_boss: ['screw'],
+  oring: ['oring'],
+  seal_cord: ['oring'],
 };
 
 export { isBoughtIn };
@@ -94,6 +106,8 @@ const STEEL = 7850; // kg/m³
 const BRIGHT: [number, number, number, number] = [0.74, 0.76, 0.79, 1];
 const BLACK_OXIDE: [number, number, number, number] = [0.17, 0.17, 0.19, 1];
 const SHIELD: [number, number, number, number] = [0.36, 0.38, 0.42, 1];
+const NITRILE: [number, number, number, number] = [0.08, 0.08, 0.09, 1];
+const RUBBER = 1250; // kg/m³
 const mm = (v: number) => +(v / 1000).toFixed(7);
 
 /**
@@ -135,6 +149,50 @@ export function ringMesh(outside: (theta: number) => number, inside: number, h: 
     faces,
   };
 }
+
+/**
+ * A round cord of radius `r` swept along a closed loop in the XY plane,
+ * anticlockwise seen from +Z: an O-ring, or cord laid in a groove.
+ *
+ * Its corner order is worked from the sweep's own frame. Along the loop is u,
+ * round the cord is v, starting outward and turning up; with t the loop's
+ * direction and N its outward normal, t × N is -Z, so ∂u × ∂v comes out as
+ * cos v·N + sin v·Z — the cord's outward normal — for corners taken in u then v.
+ */
+export function sweepMesh(loop: number[][], r: number, around = 12) {
+  const n = loop.length;
+  const renderVertices: number[] = [];
+  for (let i = 0; i < n; i++) {
+    const [px, py] = loop[i];
+    const [ax, ay] = loop[(i - 1 + n) % n];
+    const [bx, by] = loop[(i + 1) % n];
+    const tl = Math.hypot(bx - ax, by - ay) || 1;
+    const [tx, ty] = [(bx - ax) / tl, (by - ay) / tl];
+    const [nx, ny] = [ty, -tx]; // right of an anticlockwise loop: outward
+    for (let k = 0; k < around; k++) {
+      const v = (k / around) * Math.PI * 2;
+      const [c, s] = [Math.cos(v), Math.sin(v)];
+      renderVertices.push(px + r * c * nx, py + r * c * ny, r * s);
+    }
+  }
+  const faces: number[] = [];
+  for (let i = 0; i < n; i++) {
+    for (let k = 0; k < around; k++) {
+      const a = i * around + k;
+      const b = ((i + 1) % n) * around + k;
+      const c = ((i + 1) % n) * around + ((k + 1) % around);
+      const d = i * around + ((k + 1) % around);
+      faces.push(a, b, c, a, c, d);
+    }
+  }
+  const vertices: number[] = [];
+  for (let i = 0; i < renderVertices.length; i += 3) vertices.push(renderVertices[i], renderVertices[i + 2], -renderVertices[i + 1]);
+  return { vertices: vertices.map((v) => +v.toFixed(7)), renderVertices: renderVertices.map((v) => +v.toFixed(7)), faces };
+}
+
+/** A circle as a loop, metres. */
+const circleLoop = (radius: number, segments = 48) =>
+  Array.from({ length: segments }, (_, i) => [radius * Math.cos((i / segments) * Math.PI * 2), radius * Math.sin((i / segments) * Math.PI * 2)]);
 
 /** A hexagon's radius at an angle, corners on +X as OpenSCAD's `$fn = 6` puts them. */
 const hexRadius = (flats: number) => (theta: number) => {
@@ -186,6 +244,8 @@ export function normalizePart(spec: HardwarePart): HardwarePart {
     delete out.lengthMm;
   }
   if (spec.kind !== 'screw' || !spec.washer) delete out.washer;
+  // Cord is cut to the groove it goes in, so its length is the groove's.
+  if (spec.kind === 'oring' && spec.path) out.lengthMm = Math.round(loopLengthMm(spec.path));
   return out;
 }
 
@@ -197,6 +257,7 @@ export function hardwarePartName(spec: HardwarePart): string {
     case 'screw': return `${p.size}×${p.lengthMm} cap screw${p.washer ? ' + washer' : ''}`;
     case 'nut': return `${p.size} nut`;
     case 'shaft': return `Ø${p.size}×${p.lengthMm} shaft`;
+    case 'oring': return O_RINGS[p.size] ? `${p.size} O-ring` : `Ø${p.size} cord, ${p.lengthMm ?? 0} mm`;
   }
 }
 
@@ -268,6 +329,18 @@ export function hardwarePartNode(spec: HardwarePart, id: string): SceneNode {
       node.geoms = [cylinderGeom(`${id}_shaft`, mm(d / 2), mm(p.lengthMm!), 0, BRIGHT)];
       break;
     }
+    case 'oring': {
+      const cord = cordOf(p.size);
+      // Unseated, a stocked ring lies as it comes out of the bag; seated, along its groove.
+      const loop = p.path ?? circleLoop(mm(((O_RINGS[p.size]?.[0] ?? 20) + cord) / 2));
+      const shape = sweepMesh(loop, mm(cord / 2));
+      const volume = Math.PI * mm(cord / 2) ** 2 * mm(loopLengthMm(loop));
+      node.geoms = [{
+        name: `${id}_ring`, type: 'mesh', size: [1], rgba: [...NITRILE], dynamic: true,
+        mass: +(Math.max(volume * RUBBER, 1e-6)).toFixed(7), condim: 3, ...shape,
+      }];
+      break;
+    }
   }
   return node;
 }
@@ -320,7 +393,7 @@ function quiet(node: SceneNode) {
 
 /** The cut piece a part is placed against: the pocket it drops into, or the bore it goes down. */
 const SEAT_PIECE: Record<HardwareCutKind, string> = {
-  bearing: 'pocket', nut_trap: 'pocket', counterbore: 'head', insert: 'bore', insert_boss: 'bore',
+  bearing: 'pocket', nut_trap: 'pocket', counterbore: 'head', insert: 'bore', insert_boss: 'bore', oring: 'groove', seal_cord: 'groove',
 };
 
 export interface Seat {
@@ -343,6 +416,7 @@ export function seatFor(host: SceneNode, group: string, kind?: HardwarePartKind)
   const partKind = kind ?? PARTS_FOR_CUT[spec.kind][0];
   if (!PARTS_FOR_CUT[spec.kind].includes(partKind)) return null;
   const piece = (host.geoms || []).find((g) => g.hardware?.group === group && g.hardware.part === SEAT_PIECE[spec.kind] && !g.csgDerived);
+  if (partKind === 'oring' && piece) return ringSeat(host, piece, spec.size);
   if (!piece?.pos || !piece.size) return null;
 
   const n = new THREE.Vector3(...(spec.normal as [number, number, number])).normalize();
@@ -380,6 +454,41 @@ export function seatFor(host: SceneNode, group: string, kind?: HardwarePartKind)
     default:
       return null;
   }
+}
+
+/**
+ * An O-ring lying in its groove: on the floor of a face or rim groove, round
+ * the floor of a piston groove, against the floor of a bore groove — where it
+ * sits before anything squeezes it.
+ */
+function ringSeat(host: SceneNode, piece: SceneGeom, size: string): Seat | null {
+  const cord = mm(cordOf(size));
+  const offset = csgFrameOffset(host);
+  const at = (p: THREE.Vector3) => [p.x - (offset[0] ?? 0), p.y - (offset[1] ?? 0), p.z - (offset[2] ?? 0)].map((v) => +v.toFixed(7));
+  const n = new THREE.Vector3(...((piece.cutNormal ?? [0, 0, 1]) as [number, number, number])).normalize();
+  const reach = piece.cutDepth ?? 0;
+  const part = (path: number[][]): HardwarePart => ({ kind: 'oring', size, path: path.map(([x, y]) => [+x.toFixed(7), +y.toFixed(7)]) });
+
+  if (piece.type === 'mesh') {
+    // A rim groove's prism is baked into the body frame; its frame is the cut's.
+    const path = rimCentreline(piece);
+    if (!path) return null;
+    const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), n);
+    if (piece.cutTwist) q.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), piece.cutTwist));
+    const under = surfaceUnder(host, piece.cutAt ?? [0, 0, 0], piece.cutNormal ?? [0, 0, 1], piece);
+    const entry = new THREE.Vector3(...((under?.entry ?? piece.cutAt ?? [0, 0, 0]) as [number, number, number]));
+    return { pos: at(entry.addScaledVector(n, -(reach - cord / 2))), quat: [q.w, q.x, q.y, q.z], part: part(path) };
+  }
+  if (!piece.pos || !piece.size || !piece.quat) return null;
+  const outer = piece.size[0];
+  const inner = piece.ringInner ?? 0;
+  const centre = new THREE.Vector3(...(piece.pos as [number, number, number]));
+  const seal = piece.hardware?.seal;
+  if (seal === 'piston') return { pos: at(centre), quat: [...piece.quat], part: part(circleLoop(inner + cord / 2)) };
+  if (seal === 'bore') return { pos: at(centre), quat: [...piece.quat], part: part(circleLoop(outer - cord / 2)) };
+  // A face groove: round the middle of it, on the floor.
+  const entry = centre.addScaledVector(n, reach - (piece.size[1] ?? 0));
+  return { pos: at(entry.addScaledVector(n, -(reach - cord / 2))), quat: [...piece.quat], part: part(circleLoop((outer + inner) / 2)) };
 }
 
 /**
@@ -422,7 +531,10 @@ export function reseatHardware(host: SceneNode): void {
     child.pos = seat.pos;
     child.quat = seat.quat;
     const size = seat.part.size;
-    if (size !== child.hardwarePart!.size) rebuildPart(child, { ...child.hardwarePart!, size });
+    // An O-ring follows its groove's shape as well as its size.
+    const path = seat.part.path;
+    const samePath = !path || JSON.stringify(path) === JSON.stringify(child.hardwarePart!.path);
+    if (size !== child.hardwarePart!.size || !samePath) rebuildPart(child, { ...child.hardwarePart!, size, ...(path ? { path } : {}) });
   }
 }
 

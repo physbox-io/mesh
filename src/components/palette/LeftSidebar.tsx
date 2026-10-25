@@ -2,6 +2,8 @@ import type React from 'react';
 import { X } from 'lucide-react';
 import { useStore } from '../../store/useStore';
 import { usePanels } from '../../store/panelsStore';
+import { useDialogs } from '../../store/dialogStore';
+import { HARDWARE_KINDS } from '../../utils/hardwareCuts';
 import { useCoarsePointer } from '../../hooks/useCoarsePointer';
 import { findNodeById, getNodeWorldPos } from '../../utils/sceneTree';
 import { sourcePositiveBounds } from '../../utils/csg';
@@ -113,7 +115,11 @@ export function LeftSidebar({ onAddNoteCard }: { onAddNoteCard: () => void }) {
           hardwareTarget={selectedNode && sourcePositiveBounds(selectedNode) ? selectedNode.name : null}
           onAddHardwareCut={(kind) => {
             if (!selectedNode) return;
-            useStore.getState().addHardwareCut(selectedNode.id, kind);
+            if (!useStore.getState().addHardwareCut(selectedNode.id, kind)) {
+              // An O-ring groove with no room where it was asked for says why.
+              const why = useStore.getState().hardwareCutProblemAt(selectedNode.id, kind);
+              if (why) useDialogs.getState().showNotice(`No room for the ${HARDWARE_KINDS[kind].label.toLowerCase()} here`, why);
+            }
             close();
           }}
           onAddHardwarePart={(kind) => {

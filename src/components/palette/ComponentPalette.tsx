@@ -10,7 +10,7 @@ import {
   CubeIcon, SphereIcon, CylinderIcon, PoleIcon, GearIcon, WedgeIcon, PyramidIcon, ConeIcon, TorusIcon,
   TubeIcon, EllipsoidIcon, RingIcon, SculptIcon, LatticeIcon, CurveIcon, PulleyIcon, RopeIcon, MeshIcon, ScadIcon,
 } from './shapeIcons';
-import { InsertBossIcon, NutTrapIcon, CounterboreIcon, BearingPocketIcon, DShaftHubIcon, BearingIcon, CapScrewIcon, HexNutIcon, ShaftIcon } from './hardwareIcons';
+import { InsertBossIcon, NutTrapIcon, CounterboreIcon, BearingPocketIcon, DShaftHubIcon, BearingIcon, CapScrewIcon, HexNutIcon, ShaftIcon, ORingGrooveIcon, RimSealIcon } from './hardwareIcons';
 import { Frame } from 'lucide-react';
 import { addReferencePicture } from '../../utils/addReferencePicture';
 import { useDialogs } from '../../store/dialogStore';
@@ -80,6 +80,8 @@ const CUT_TILES: { kind: HardwareCutKind; label: string; color: TileColor; spin:
   { kind: 'nut_trap', label: 'Nut Trap', color: 'blue', spin: 'group-hover:rotate-6', Icon: NutTrapIcon },
   { kind: 'counterbore', label: 'Counterbore', color: 'cyan', spin: 'group-hover:-rotate-3', Icon: CounterboreIcon },
   { kind: 'bearing', label: 'Bearing Pocket', color: 'amber', spin: 'group-hover:rotate-45', slow: true, Icon: BearingPocketIcon },
+  { kind: 'oring', label: 'O-ring Groove', color: 'rose', spin: 'group-hover:rotate-45', slow: true, Icon: ORingGrooveIcon },
+  { kind: 'seal_cord', label: 'Rim Seal', color: 'rose', spin: 'group-hover:-rotate-3', Icon: RimSealIcon },
 ];
 
 /** Bought parts, which go into those cuts or stand on their own. */

@@ -26,6 +26,7 @@
 // because that is what the fabrication side of this app speaks.
 
 import { collectSceneTriangles } from './contourSliceExporter';
+import { hardwareFindings } from './hardwareChecks';
 import { DEFAULT_MATERIAL, materialSpec, type MaterialId } from './feedsAndSpeeds';
 import { DEFAULT_FILAMENT, filamentSpec, type FilamentId } from './filaments';
 import { MAX_AVAILABLE_REACH_DIAMETERS, STANDARD_BIT_DIAS } from './reliefCarveExporter';
@@ -192,6 +193,11 @@ export interface DfmFinding {
   position: [number, number, number];
   /** The number that triggered it, for sorting and for the UI to show. */
   metric?: number;
+  /**
+   * A check that came out fine, listed so it is seen to have been made — a
+   * seal that will seal. It costs nothing in the score.
+   */
+  passed?: true;
 }
 
 export interface DfmReport {
@@ -914,6 +920,7 @@ function analyseCast(tris: Float64Array, limits: DfmLimits): Omit<DfmReport, 'pr
 function scoreOf(findings: DfmFinding[]): number {
   let score = 100;
   for (const f of findings) {
+    if (f.passed) continue;
     score -= f.severity === 'critical' ? 30 : f.severity === 'warning' ? 12 : 4;
   }
   return Math.max(0, Math.min(100, Math.round(score)));
@@ -964,6 +971,12 @@ export function analyseDfm(
   const body = process === 'print' ? analysePrint(tris, lim)
     : process === 'cnc' ? analyseCnc(tris, lim)
       : analyseCast(tris, lim);
+  // Seals and screws are judged the same whatever makes the part.
+  const hardware = hardwareFindings(target ? { ...scene, nodes: [target] } : scene, process, scene);
+  if (hardware.length) {
+    body.findings = [...body.findings, ...hardware];
+    body.score = scoreOf(body.findings);
+  }
 
   return { process, tris, warnings, ...body };
 }

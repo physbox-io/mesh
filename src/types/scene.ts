@@ -19,12 +19,18 @@ export type GeomRole = 'visual' | 'collision';
 export type CollisionMode = 'auto' | 'hull' | 'decompose' | 'primitives';
 
 /** The hardware features a part can have cut into it; see utils/hardwareCuts.ts. */
-export type HardwareCutKind = 'nut_trap' | 'counterbore' | 'insert' | 'insert_boss' | 'bearing';
+export type HardwareCutKind = 'nut_trap' | 'counterbore' | 'insert' | 'insert_boss' | 'bearing' | 'oring' | 'seal_cord';
+/**
+ * Where an O-ring groove seals: in a face, against a lid pressed onto it; in a
+ * bore's wall, around a shaft pushed through; or around a boss, inside the bore
+ * it is pushed into.
+ */
+export type SealType = 'face' | 'bore' | 'piston';
 /** What goes into a hardware feature's hole: a screw through it, a thread in it, or a heat-set insert. */
 export type HardwareBore = 'clearance' | 'tapped' | 'insert';
 
 /** The bought hardware that can be put in a scene; see utils/hardwareParts.ts. */
-export type HardwarePartKind = 'bearing' | 'screw' | 'nut' | 'shaft';
+export type HardwarePartKind = 'bearing' | 'screw' | 'nut' | 'shaft' | 'oring';
 
 /**
  * What a body is when it is a piece of bought hardware rather than something
@@ -33,10 +39,15 @@ export type HardwarePartKind = 'bearing' | 'screw' | 'nut' | 'shaft';
  */
 export interface HardwarePart {
   kind: HardwarePartKind;
-  /** A bolt size (M3), a bearing number (608) or a shaft diameter in mm (8). */
+  /** A bolt size (M3), a bearing number (608), a shaft diameter in mm (8), an O-ring (20×2) or a seal cord's diameter (2). */
   size: string;
-  /** Under the head for a screw, overall for a shaft, mm. */
+  /** Under the head for a screw, overall for a shaft, cut to length for seal cord, mm. */
   lengthMm?: number;
+  /**
+   * The line an O-ring or a length of cord lies along, a closed loop in the
+   * part's own XY plane, metres: the groove it is seated in, as it sits there.
+   */
+  path?: number[][];
   /** A screw with a plain washer under its head. */
   washer?: boolean;
   /** A body that is one piece of a larger part: a bearing's inner race. */
@@ -236,6 +247,17 @@ export interface SceneGeom {
    * mesh, and cutGeometry stands this up as a prism.
    */
   cutOutline?: number[][];
+  /**
+   * Holes in `cutOutline`, each a loop clockwise in the same frame: the prism
+   * becomes a ring the shape of the outline, as a groove that follows a rim is.
+   */
+  cutHoles?: number[][][];
+  /**
+   * A cut that stands on an axis rather than on the face it was put on: a
+   * groove round a bore or a boss. [x, y, z, dx, dy, dz] in the body's frame;
+   * the cylinder is centred on this line at the height along it of `cutAt`.
+   */
+  cutAxis?: number[];
   /** How far a face feature is inset from the face's edges, in metres. */
   cutBorder?: number;
   /**
@@ -264,6 +286,11 @@ export interface SceneGeom {
    */
   facets?: number;
   /**
+   * The inside radius of a cylinder that is a ring rather than a disk, metres:
+   * the cutter of a round O-ring groove. Only the OpenSCAD emitter reads it.
+   */
+  ringInner?: number;
+  /**
    * This cut is one piece of a hardware feature — a nut trap, a counterbore,
    * an insert hole or boss, a bearing pocket (utils/hardwareCuts.ts). Every
    * piece of one feature carries the same `group` and the feature's numbers,
@@ -277,6 +304,8 @@ export interface SceneGeom {
     /** Which piece of the feature this is: 'pocket', 'shank', 'head', 'boss', 'bore', 'shaft'. */
     part: string;
     bore?: HardwareBore;
+    /** An O-ring groove's: where it seals. */
+    seal?: SealType;
     /** Diametral clearance on the fitting diameter, metres. */
     fit?: number;
   };

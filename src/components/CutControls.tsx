@@ -34,10 +34,13 @@
 //   not happen.
 // ---------------------------------------------------------------------------
 
+import { useState } from 'react';
 import { Circle, Square, Donut, Trash2, Move } from 'lucide-react';
 import { SettledNumberField } from './SettledInputs';
 import { ThreadField } from './ThreadField';
-import { BORE_LABELS, HARDWARE_KINDS } from '../utils/hardwareCuts';
+import { BORE_LABELS, HARDWARE_KINDS, SEAL_LABELS, hardwareCutProblem, hardwareSpecOf } from '../utils/hardwareCuts';
+import { loopLengthMm, rimCentreline } from '../utils/sealGrooves';
+import { useDialogs } from '../store/dialogStore';
 import { HARDWARE_PARTS, PARTS_FOR_CUT, seatedIn } from '../utils/hardwareParts';
 import { useStore } from '../store/useStore';
 import { cutDepthOf, sourcePositiveBounds } from '../utils/csg';
@@ -271,6 +274,15 @@ function HardwareRow({ node, geom, index }: {
   const hw = geom.hardware!;
   const info = HARDWARE_KINDS[hw.kind];
   const fitMm = hw.fit ? mm(hw.fit) : 0;
+  const [problem, setProblem] = useState<string | null>(null);
+  // A size that does not fit where the groove is changes nothing; it says why.
+  const setSize = (size: string) => {
+    const spec = hardwareSpecOf(node.geoms, hw.group);
+    const why = spec && hardwareCutProblem({ ...spec, size }, node);
+    setProblem(why || null);
+    if (!why) setHardwareCut(node.id, hw.group, { size });
+  };
+  const centreline = hw.kind === 'seal_cord' ? rimCentreline(geom) : null;
   const elsewhere = spot?.nodeId === node.id
     && (geom.cutAt || []).some((v, a) => Math.abs(v - (spot.at[a] ?? 0)) > 1e-6);
   const grab = () => {
@@ -316,12 +328,22 @@ function HardwareRow({ node, geom, index }: {
           <span className="block text-[9px] font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500">Size</span>
           <select
             value={hw.size}
-            onChange={(e) => setHardwareCut(node.id, hw.group, { size: e.target.value })}
+            onChange={(e) => setSize(e.target.value)}
             className={fieldClass}
           >
-            {info.sizes.map((size) => <option key={size} value={size}>{size}</option>)}
+            {info.sizes.map((size) => <option key={size} value={size}>{hw.kind === 'seal_cord' ? `Ø${size} cord` : size}</option>)}
           </select>
         </label>
+        {hw.seal && (
+          <span className="flex-1 min-w-0 text-[10px] text-slate-500 dark:text-slate-400 pb-1" title="Read off where it is: on a boss it seals in the bore it goes into, in a hole on the shaft through it, on a face under a lid.">
+            Seals: {SEAL_LABELS[hw.seal].toLowerCase()}
+          </span>
+        )}
+        {centreline && (
+          <span className="flex-1 min-w-0 text-[10px] text-slate-500 dark:text-slate-400 pb-1" title="The cord to cut for it, round the middle of the groove.">
+            Cord: {Math.round(loopLengthMm(centreline))} mm
+          </span>
+        )}
         {info.bores && (
           <label className="flex-1 min-w-0" title="What goes in the hole: a screw through it, a thread cut in it, or a heat-set insert.">
             <span className="block text-[9px] font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500">
@@ -344,6 +366,7 @@ function HardwareRow({ node, geom, index }: {
           onChange={(v) => setHardwareCut(node.id, hw.group, { fitMm: v })}
         />
       </div>
+      {problem && <div className="text-[10px] text-rose-600 dark:text-rose-400 leading-snug">{problem}</div>}
       <SeatedPart node={node} group={hw.group} kind={hw.kind} />
     </div>
   );
@@ -383,7 +406,7 @@ function SeatedPart({ node, group, kind }: { node: SceneNode; group: string; kin
   );
 }
 
-const HARDWARE_ORDER: HardwareCutKind[] = ['nut_trap', 'counterbore', 'insert', 'insert_boss', 'bearing'];
+const HARDWARE_ORDER: HardwareCutKind[] = ['nut_trap', 'counterbore', 'insert', 'insert_boss', 'bearing', 'oring', 'seal_cord'];
 
 /**
  * The Cut controls for one body: the shapes you can take out of it, and the
@@ -402,7 +425,14 @@ export function CutControls({ node, disabled, disabledReason, compact }: {
 }) {
   const addBodyCut = useStore((s) => s.addBodyCut);
   const addHardwareCut = useStore((s) => s.addHardwareCut);
+  const showNotice = useDialogs((s) => s.showNotice);
   const bounds = sourcePositiveBounds(node);
+  // A groove with no room where it was asked for says so, rather than doing nothing.
+  const addFeature = (kind: HardwareCutKind) => {
+    if (addHardwareCut(node.id, kind)) return;
+    const why = useStore.getState().hardwareCutProblemAt(node.id, kind);
+    if (why) showNotice(`No room for the ${HARDWARE_KINDS[kind].label.toLowerCase()} here`, why);
+  };
   const cuts = (node.geoms || [])
     .map((geom, index) => ({ geom, index }))
     .filter(({ geom }) => (geom.csg === 'difference' || (geom.csg === 'union' && geom.cutNormal)) && !geom.csgDerived);
@@ -433,7 +463,7 @@ export function CutControls({ node, disabled, disabledReason, compact }: {
             key={kind}
             type="button"
             disabled={disabled || !bounds}
-            onClick={() => addHardwareCut(node.id, kind)}
+            onClick={() => addFeature(kind)}
             title={disabled ? (disabledReason ?? 'There is nothing solid to cut into yet.') : `${HARDWARE_KINDS[kind].hint} Goes where you last clicked on the part.`}
             className={`px-1.5 py-1 rounded-md text-[10px] font-semibold transition-colors ${
               disabled || !bounds

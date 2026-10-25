@@ -279,7 +279,14 @@ export function primitiveToScad(geom: SceneGeom, fn: number = CSG_DEFAULT_FN, in
         const twist = (geom.thread?.left ? 360 : -360) * turns;
         body = `linear_extrude(height=${fmt(length)}, center=true, twist=${fmt(twist)}, slices=${threadSlices(turns)}, convexity=10) polygon([${profile}]);`;
       } else {
-        body = `cylinder(h=${fmt(halfLen * 2)}, r=${fmt(s[0] ?? 0.1)}, center=true, $fn=${geom.facets && geom.facets >= 3 ? Math.round(geom.facets) : fn});`;
+        const $fn = geom.facets && geom.facets >= 3 ? Math.round(geom.facets) : fn;
+        body = `cylinder(h=${fmt(halfLen * 2)}, r=${fmt(s[0] ?? 0.1)}, center=true, $fn=${$fn});`;
+        const inner = geom.ringInner;
+        if (inner && inner > 0 && inner < (s[0] ?? 0.1)) {
+          // A ring: an O-ring groove's cutter. The core is longer than the
+          // ring, so the two never share an end face.
+          body = `difference() { ${body} cylinder(h=${fmt(halfLen * 2 + 0.002)}, r=${fmt(inner)}, center=true, $fn=${$fn}); }`;
+        }
       }
       break;
     }
@@ -946,25 +953,42 @@ function maxPolygonBorder(points: number[][]): number {
  * outward. Flat arrays, the way a mesh geom holds them. Shared by a polygon
  * cut and by the ghost that previews one.
  */
-export function prismMesh(outline: number[][], z0: number, z1: number): { positions: number[]; faces: number[] } {
-  const n = outline.length;
+export function prismMesh(outline: number[][], z0: number, z1: number, holes: number[][][] = []): { positions: number[]; faces: number[] } {
+  // Every loop's points in one list — the outline, then each hole — bottom
+  // ring first and top ring after it, so a point's top is `total` further on.
+  const loops = [outline, ...holes];
+  const all = loops.flat();
+  const total = all.length;
   const positions: number[] = [];
-  for (const [x, y] of outline) positions.push(x, y, z0);
-  for (const [x, y] of outline) positions.push(x, y, z1);
+  for (const [x, y] of all) positions.push(x, y, z0);
+  for (const [x, y] of all) positions.push(x, y, z1);
   const faces: number[] = [];
-  const caps = THREE.ShapeUtils.triangulateShape(outline.map(([x, y]) => new THREE.Vector2(x, y)), []);
+  const caps = THREE.ShapeUtils.triangulateShape(
+    outline.map(([x, y]) => new THREE.Vector2(x, y)),
+    holes.map((h) => h.map(([x, y]) => new THREE.Vector2(x, y))),
+  );
   for (const [a, b, c] of caps) {
     // Whatever order the triangulator hands back, the top faces up and the
     // bottom down.
-    const up = loopArea2([outline[a], outline[b], outline[c]]) > 0;
+    const up = loopArea2([all[a], all[b], all[c]]) > 0;
     const [p, q, r] = up ? [a, b, c] : [a, c, b];
-    faces.push(n + p, n + q, n + r);
+    faces.push(total + p, total + q, total + r);
     faces.push(r, q, p);
   }
-  for (let i = 0; i < n; i++) {
-    const j = (i + 1) % n;
-    faces.push(i, j, n + j, i, n + j, n + i);
-  }
+  // Walls face out of the solid: away from the middle of the outline, and
+  // into each hole. Which way a loop runs decides which order does that.
+  let start = 0;
+  loops.forEach((loop, k) => {
+    const n = loop.length;
+    const outward = (loopArea2(loop) > 0) === (k === 0);
+    for (let i = 0; i < n; i++) {
+      const a = start + i;
+      const b = start + ((i + 1) % n);
+      if (outward) faces.push(a, b, total + b, a, total + b, total + a);
+      else faces.push(b, a, total + a, b, total + a, total + b);
+    }
+    start += n;
+  });
   return { positions, faces };
 }
 
@@ -1369,6 +1393,8 @@ export function cutGeometry(
    * moved anchors instead, and the offset is exactly how far its anchor should
    * have moved: folded back in, it lands on its face again.
    */
+  if (geom.cutAxis && geom.cutAxis.length >= 6 && geom.type === 'cylinder') return axialCut(geom);
+
   const prism = geom.type === 'mesh' && !!geom.cutOutline;
   const drift = prism && geom.pos ? geom.pos : [0, 0, 0];
   const anchor = (geom.cutAt ?? [0, 0, 0]).map((v, a) => v + (drift[a] ?? 0));
@@ -1394,7 +1420,7 @@ export function cutGeometry(
     const reach = boss ? height : through ? (under?.thickness ?? 0) + over : geom.cutDepth!;
     const length = reach + over;
     const centre = entry.clone().addScaledVector(n, boss ? (height - over) / 2 : (over - reach) / 2);
-    const shape = prismMesh(geom.cutOutline, -length / 2, length / 2);
+    const shape = prismMesh(geom.cutOutline, -length / 2, length / 2, geom.cutHoles);
     const m = new THREE.Matrix4().makeRotationFromQuaternion(quat).setPosition(centre);
     const p = new THREE.Vector3();
     const zup: number[] = [];
@@ -1448,6 +1474,25 @@ export function cutGeometry(
     return { pos, size: [s[0] ?? 0.005, s[1] ?? 0.005, length / 2], quat: mjQuat };
   }
   return { pos, size: [s[0] ?? 0.005, length / 2], quat: mjQuat };
+}
+
+/**
+ * A cut standing on an axis instead of on its face: a groove round a bore or a
+ * boss. Centred on the axis at `cutAt`'s height along it, its own +Z down the
+ * axis, as long as the groove is wide — the size is set where it is made, by
+ * the bore or boss it goes round, so only the pose is worked out here.
+ */
+function axialCut(geom: SceneGeom): Partial<SceneGeom> {
+  const [px, py, pz, dx, dy, dz] = geom.cutAxis!;
+  const d = new THREE.Vector3(dx, dy, dz).normalize();
+  const p = new THREE.Vector3(px, py, pz);
+  const at = new THREE.Vector3(...((geom.cutAt ?? [px, py, pz]) as [number, number, number]));
+  const centre = p.addScaledVector(d, at.clone().sub(p).dot(d));
+  const quat = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), d);
+  return {
+    pos: centre.toArray().map((v) => +v.toFixed(6)),
+    quat: [quat.w, quat.x, quat.y, quat.z].map((v) => +v.toFixed(9)),
+  };
 }
 
 /**
@@ -2236,7 +2281,10 @@ function emitsSolid(g: SceneGeom): boolean {
  */
 function geomCsgKey(g: SceneGeom): unknown[] {
   const shape = g.type === 'mesh' ? meshChecksum(g) : g.size;
-  return [g.type, shape, g.pos, g.quat, g.euler, g.fromto, g.csg ?? 'union', g.role ?? null, g.thread ?? null, g.facets ?? null];
+  const key: unknown[] = [g.type, shape, g.pos, g.quat, g.euler, g.fromto, g.csg ?? 'union', g.role ?? null, g.thread ?? null, g.facets ?? null];
+  // Only when set, so that every body without a ring keeps the hash it had.
+  if (g.ringInner) key.push(g.ringInner);
+  return key;
 }
 
 // Every store update checksums every boolean and decomposed mesh (see

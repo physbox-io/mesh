@@ -99,11 +99,12 @@ import { requestTexturedSurface } from '../utils/textureClient';
 import { webSerialManager } from '../utils/webSerialManager';
 import type { Object3D } from 'three';
 import { Quaternion, Vector3 } from 'three';
-import type { SceneGraph, SceneNode, SceneGeom, SceneJoint, HardwareBore, HardwareCutKind, HardwarePartKind } from '../types/scene';
+import type { SceneGraph, SceneNode, SceneGeom, SceneJoint, HardwareBore, HardwareCutKind, HardwarePartKind, SealType } from '../types/scene';
 import type { ModelMirror } from '../types/sceneLayer';
 import type { RawGeom, RawJoint, RawNode } from '../utils/sceneNodes';
-import { HARDWARE_KINDS, hardwareSpecOf } from '../utils/hardwareCuts';
+import { HARDWARE_KINDS, hardwareCutProblem, hardwareSpecOf } from '../utils/hardwareCuts';
 import { HARDWARE_PARTS } from '../utils/hardwareParts';
+import { sealFindings } from '../utils/hardwareChecks';
 import {
   boxLattice, cloneLattice, createLattice, deserializeCage, orientFaces, serializeCage, toSceneGeom as latticeToSceneGeom, DEFAULT_UNIT as LATTICE_UNIT,
   type Axis as LatticeAxis, type Lattice,
@@ -1431,10 +1432,16 @@ export const fillBodyDefaults = (b: RawNode, parentMoves: boolean | null = null)
   };
 };
 
+/** Whether one O-ring groove seals against what is placed round it, as the DFM check says. */
+function sealCheckFor(scene: SceneGraph, nodeId: string, group: string) {
+  const f = sealFindings(scene, 'print').find((x) => x.id === `seal_${nodeId}_${group}`);
+  return f ? { seals: !!f.passed, title: f.title, detail: f.detail, fix: f.fix } : null;
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function applySingleCutToBody(targetId: string, spec: Record<string, any>): Record<string, any> {
   const store = useStore.getState();
-  const { shape, at, normal, diameterMm, widthMm, lengthMm, depthMm, threadPitchMm, threadLeft, threadFitMm, size, bore, fitMm } = spec;
+  const { shape, at, normal, diameterMm, widthMm, lengthMm, depthMm, threadPitchMm, threadLeft, threadFitMm, size, bore, fitMm, seal } = spec;
   const node = findNodeInScene(store.sceneGraph.nodes, targetId);
   if (!node) return { ok: false, error: `No object with id '${targetId}'` };
   const spotIn = Array.isArray(at) && at.length >= 3
@@ -1447,13 +1454,25 @@ export function applySingleCutToBody(targetId: string, spec: Record<string, any>
   if (typeof shape === 'string' && shape in HARDWARE_KINDS) {
     const hwKind = shape as HardwareCutKind;
     const group = store.addHardwareCut(targetId, hwKind, spotIn);
-    if (!group) return { ok: false, error: 'That body has no solid shape to cut into' };
-    if (size !== undefined || bore !== undefined || fitMm !== undefined) {
-      useStore.getState().setHardwareCut(targetId, group, {
+    if (!group) return { ok: false, error: store.hardwareCutProblemAt(targetId, hwKind, spotIn) ?? 'That body has no solid shape to cut into' };
+    if (size !== undefined || bore !== undefined || fitMm !== undefined || seal !== undefined) {
+      const current = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId);
+      const before = current && hardwareSpecOf(current.geoms ?? [], group);
+      const changes = {
         ...(size !== undefined ? { size: String(size) } : {}),
         ...(bore !== undefined ? { bore: bore as HardwareBore } : {}),
         ...(typeof fitMm === 'number' ? { fitMm } : {}),
-      });
+        ...(seal === 'face' || seal === 'bore' || seal === 'piston' ? { seal: seal as SealType } : {}),
+      };
+      // A groove a size cannot fit is not changed: say why rather than hand back the wrong one.
+      const why = current && before && hardwareCutProblem({ ...before, ...changes }, current);
+      if (why) {
+        // Nothing half-made is left behind: the groove added at its own size goes too.
+        const index = (current.geoms ?? []).findIndex((g) => g.hardware?.group === group && !g.csgDerived);
+        if (index >= 0) useStore.getState().deleteNodeGeom(targetId, index);
+        return { ok: false, error: why };
+      }
+      useStore.getState().setHardwareCut(targetId, group, changes);
     }
     const after = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId);
     const hwSpec = hardwareSpecOf(after?.geoms ?? [], group);
@@ -1468,6 +1487,8 @@ export function applySingleCutToBody(targetId: string, spec: Record<string, any>
       atMm: (hwSpec?.at ?? []).map((v: number) => Math.round(v * 1000 * 1000) / 1000),
       normal: hwSpec?.normal,
       pieces: (after?.geoms ?? []).filter((g) => g.hardware?.group === group).map((g) => g.hardware!.part),
+      ...(hwSpec?.seal ? { seal: hwSpec.seal } : {}),
+      ...(hwKind === 'oring' || hwKind === 'seal_cord' ? { sealCheck: sealCheckFor(useStore.getState().sceneGraph, targetId, group) } : {}),
     };
   }
 
@@ -2296,7 +2317,10 @@ export function useMCPBridge() {
             } : {}),
             ...(n.children ? { children: n.children.map(withMeshChecks) } : {}),
           });
-          return stripMeshArrays(withMeshChecks(found));
+          // Every O-ring groove on it, checked against what is round it now.
+          const grooves = [...new Set((found.geoms || []).filter((g) => g.hardware?.part === 'groove').map((g) => g.hardware!.group))];
+          const sealChecks = grooves.map((group) => ({ group, ...sealCheckFor(store.sceneGraph, found.id, group) }));
+          return { ...stripMeshArrays(withMeshChecks(found)), ...(sealChecks.length ? { sealChecks } : {}) };
         }
 
         case 'UPDATE_OBJECT': {
@@ -3144,6 +3168,7 @@ export function useMCPBridge() {
             ...(part.children.some((c) => c.hardwarePart?.piece === 'inner')
               ? { innerRaceId: part.children.find((c) => c.hardwarePart?.piece === 'inner')!.id } : {}),
             posMm: part.pos.map((v) => Math.round(v * 1e6) / 1000),
+            ...(spec.kind === 'oring' && into && spec.seat ? { sealCheck: sealCheckFor(useStore.getState().sceneGraph, into, spec.seat) } : {}),
           };
         }
 

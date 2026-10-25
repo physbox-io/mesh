@@ -1,6 +1,7 @@
 import { useStore } from '../../store/useStore';
 import type { SceneNode } from '../../types/scene';
 import { HARDWARE_PARTS } from '../../utils/hardwareParts';
+import { O_RINGS, SEAL_CORDS } from '../../utils/hardwareSizes';
 import { findNodeById } from '../../utils/sceneTree';
 
 const fieldClass = 'w-full px-1.5 py-1 border border-slate-200 dark:border-slate-700 rounded text-xs bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200';
@@ -38,6 +39,9 @@ export function HardwarePartCard({ node }: { node: SceneNode }) {
   const inner = spec.kind === 'bearing' ? node.children.find((c) => c.hardwarePart?.piece === 'inner') : undefined;
   const hasShaft = !!inner?.children.some((c) => c.hardwarePart?.kind === 'shaft');
   const fastened = spec.fastens ? findNodeById(graph.nodes, spec.fastens) : null;
+  // An O-ring's sizes are its groove's: stocked rings, or cord by the metre.
+  const cord = spec.kind === 'oring' && !O_RINGS[spec.size];
+  const sizes = spec.kind === 'oring' ? (cord ? SEAL_CORDS : Object.keys(O_RINGS)) : info.sizes;
 
   return (
     <div className="flex flex-col gap-2 p-3 bg-slate-50 dark:bg-slate-900/40 border border-slate-200/60 dark:border-slate-800 rounded-lg">
@@ -51,7 +55,7 @@ export function HardwarePartCard({ node }: { node: SceneNode }) {
         <label className="flex-1 min-w-0" title={seatedInCut ? 'Sized by the cut it sits in: this changes the cut too.' : undefined}>
           <span className={labelClass}>Size</span>
           <select value={spec.size} onChange={(e) => setHardwarePart(node.id, { size: e.target.value })} className={fieldClass}>
-            {info.sizes.map((s) => <option key={s} value={s}>{spec.kind === 'shaft' ? `Ø${s} mm` : s}</option>)}
+            {sizes.map((s) => <option key={s} value={s}>{spec.kind === 'shaft' ? `Ø${s} mm` : cord ? `Ø${s} cord` : s}</option>)}
           </select>
         </label>
         {info.lengths && (
@@ -63,6 +67,9 @@ export function HardwarePartCard({ node }: { node: SceneNode }) {
           </label>
         )}
       </div>
+      {cord && spec.lengthMm !== undefined && (
+        <div className="text-[10px] text-slate-500 dark:text-slate-400">Cut {spec.lengthMm} mm of cord, and join its ends with cyanoacrylate.</div>
+      )}
       {spec.kind === 'screw' && !seatedInCut && (
         <label className="flex items-center gap-1.5 text-[11px] text-slate-600 dark:text-slate-300 cursor-pointer" title="A plain ISO 7089 washer under the head. It raises the head by its thickness.">
           <input type="checkbox" checked={!!spec.washer} onChange={(e) => setHardwarePart(node.id, { washer: e.target.checked })} />

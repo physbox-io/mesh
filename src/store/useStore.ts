@@ -6,7 +6,7 @@ import type { SceneGraph, SceneNode, SceneGeom, SceneJoint, GeomType, CsgOp, Edg
 import { bakeDraftInto, copyPrep, restoreShape, shapeSignature, unprepScene, type DraftParams } from '../utils/castPrep';
 import { hasEdgeRounds, reconcileEdgeRounds, withRoundFeature, withoutEdges } from '../utils/edgeRound';
 import type { GeomThreadSpec } from '../utils/metricThreads';
-import { hardwareCutGeoms, hardwareSpecOf, nextHardwareGroup, type HardwareCutSpec } from '../utils/hardwareCuts';
+import { hardwareCutGeoms, hardwareCutProblem, hardwareSpecOf, nextHardwareGroup, type HardwareCutSpec } from '../utils/hardwareCuts';
 import { releaseFastenings, reseatHardware } from '../utils/hardwareParts';
 import { hardwarePartActions, type HardwarePartActions } from './hardwarePartActions';
 import type { DataMirror, ModelMirror } from '../types/sceneLayer';
@@ -1388,7 +1388,9 @@ function writeHardwareGroup(node: SceneNode, spec: HardwareCutSpec): boolean {
   const first = geoms.findIndex((g) => g.hardware?.group === spec.group && !g.csgDerived);
   const kept = geoms.filter((g) => g.hardware?.group !== spec.group);
   const at = first < 0 ? kept.length : geoms.slice(0, first).filter((g) => g.hardware?.group !== spec.group).length;
-  const pieces = hardwareCutGeoms(spec, node.id);
+  const pieces = hardwareCutGeoms(spec, node.id, node);
+  // An O-ring groove that does not fit where it was asked for is no groove.
+  if (pieces.length === 0) return false;
   node.geoms = kept;
   let insertAt = at;
   for (const piece of pieces) {
@@ -2248,6 +2250,8 @@ export interface PhysicsState extends HardwarePartActions {
    * the body has nothing solid to cut into.
    */
   addHardwareCut: (nodeId: string, kind: HardwareCutKind, spot?: CutSpot) => string | null;
+  /** Why addHardwareCut would refuse this — an O-ring groove with no room — in a sentence, or null. */
+  hardwareCutProblemAt: (nodeId: string, kind: HardwareCutKind, spot?: CutSpot) => string | null;
   /** Rebuilds a hardware feature with a new size, bore, fit or spot. */
   setHardwareCut: (nodeId: string, group: string, changes: Partial<Omit<HardwareCutSpec, 'group' | 'kind'>>) => void;
   /** Moves a cut to another spot on the part, square to the surface there. */
@@ -4264,6 +4268,14 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     set({ sceneGraph: newScene, activeGeomIndex: last });
     rebuildAfterGeomEdit(get, newScene, nodeId);
     return group;
+  },
+
+  hardwareCutProblemAt: (nodeId, kind, spot) => {
+    const target = findNode(get().sceneGraph.nodes, nodeId);
+    const bounds = target && sourcePositiveBounds(target);
+    if (!target || !bounds) return 'That part has nothing solid to cut into.';
+    const where = newCutSpot(get, target, bounds, spot, false);
+    return hardwareCutProblem({ group: '', kind, size: '', at: where.at, normal: where.normal }, target);
   },
 
   setHardwareCut: (nodeId, group, changes) => {
