@@ -14,6 +14,9 @@ import { webSerialManager } from '../src/utils/webSerialManager';
  * Replies are on a timer, as from a real read loop.
  */
 function attachBoard() {
+  // These boards report no travel, so the shared bed would stand in for it and
+  // refuse the long test programs; the travel check has its own tests in the package.
+  webSerialManager.setBed(null);
   const mgr = webSerialManager as unknown as {
     transport: {
       label: string;

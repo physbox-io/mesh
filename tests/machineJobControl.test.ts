@@ -10,6 +10,9 @@ import { webSerialManager } from '../src/utils/webSerialManager';
  * be a pause that took a minute to happen.
  */
 function attachFakeGrbl() {
+  // These boards report no travel, so the shared bed would stand in for it and
+  // refuse the long test programs; the travel check has its own tests in the package.
+  webSerialManager.setBed(null);
   const mgr = webSerialManager as unknown as {
     transport: {
       label: string;

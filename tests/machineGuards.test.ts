@@ -42,6 +42,9 @@ let realtime: number[] = [];
 let report = '<Idle|MPos:0,0,0|FS:0,0>';
 
 function attach(extra: Partial<Transport> = {}) {
+  // These boards report no travel, so the shared bed would stand in for it and
+  // refuse the long test programs; the travel check has its own tests in the package.
+  webSerialManager.setBed(null);
   sent = [];
   realtime = [];
   report = '<Idle|MPos:0,0,0|FS:0,0>';
