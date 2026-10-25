@@ -5,7 +5,7 @@
  * measures the section (store/sectionStore, utils/sectionSlice); this only
  * draws it, and only while the overlay is drawing its figures.
  */
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 import { useSection } from '../../store/sectionStore';
@@ -38,14 +38,17 @@ function partMaterials(scene: THREE.Object3D): THREE.Material[] {
 export function SectionCut() {
   const cut = useSection((s) => s.cut);
   const cameraView = useStore((s) => s.cameraView);
-  const plane = useMemo(() => new THREE.Plane(), []);
+  // A ref, not state: the plane is moved in place every frame, and the
+  // materials hold this one object.
+  const planeRef = useRef(new THREE.Plane());
   const scene = useThree((s) => s.scene);
   // Unmounted mid-cut: nothing stays clipped.
   useEffect(() => () => {
+    const plane = planeRef.current;
     for (const m of partMaterials(scene)) {
       if (m.clippingPlanes?.includes(plane)) { m.clippingPlanes = null; m.needsUpdate = true; }
     }
-  }, [scene, plane]);
+  }, [scene]);
   const view = isDrawingView(cameraView) ? cameraView : null;
 
   const geometry = useMemo(() => {
@@ -82,6 +85,7 @@ export function SectionCut() {
   // Clip the parts: keep what lies at or past the plane along the line of
   // sight. Checked every frame, as a part rebuilt mid-cut gets new materials.
   useFrame(({ gl, scene }) => {
+    const plane = planeRef.current;
     if (cut) {
       gl.localClippingEnabled = true;
       plane.normal.set(...toThree(...cut.normal));
