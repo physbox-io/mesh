@@ -430,6 +430,21 @@ function layOut(found: BodyDimensions[], locations: LocationDim[], view: Drawing
         arrow(out.arrows, near, [-k[0], -k[1], -k[2]]);
         arrow(out.arrows, far, k);
         label(key, add(elbow, right, side * (SHOULDER_PX + 3) * mpp), d.label, side > 0 ? 'left' : 'right');
+      } else if (d.kind === 'radius') {
+        // A leader touching the arc at its middle from outside, arrow in, out
+        // to a short shoulder.
+        const [ku, kv] = d.toward;
+        const [cu, cv] = d.centre;
+        const tip = at(cu + ku * d.radius, cv + kv * d.radius);
+        if (already(d.label, at(cu, cv), tip)) return;
+        const k = add(add([0, 0, 0], U, ku), V, kv);
+        const outward = onSheet(k);
+        const elbow = add(tip, outward, LEADER_PX * mpp);
+        const side = dot(outward, right) >= 0 ? 1 : -1;
+        line(out.lines, tip, elbow);
+        line(out.lines, elbow, add(elbow, right, side * SHOULDER_PX * mpp));
+        arrow(out.arrows, tip, [-k[0], -k[1], -k[2]]);
+        label(key, add(elbow, right, side * (SHOULDER_PX + 3) * mpp), d.label, side > 0 ? 'left' : 'right');
       } else {
         // From the sheet's horizontal or vertical round to the part's long
         // axis, both drawn out from the middle of the part.
@@ -521,7 +536,7 @@ function liveList(found: BodyDimensions[], locations: LocationDim[], parents: Ma
           body: b.id, kind: d.kind, direction: d.axis === 'u' ? 'width' : 'height',
           row: d.row === 1 ? 'chain' : 'overall', ...(d.count ? { count: d.count } : {}), label: d.label, valueMm: d.valueMm,
         });
-      } else if (d.kind === 'diameter') {
+      } else if (d.kind === 'diameter' || d.kind === 'radius') {
         keep(`${d.kind}:${d.label}@${spot(at(...d.centre))}`,
           { body: b.id, kind: d.kind, count: d.count, label: d.label, valueMm: d.valueMm });
       } else {

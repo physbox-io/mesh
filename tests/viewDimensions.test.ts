@@ -540,3 +540,32 @@ describe('too many stops for one chain, edges and centres', () => {
     expect(linear(d, 'u', 2).map((x) => x.label)).toEqual(['100']);
   });
 });
+
+describe('radii', () => {
+  // A 60 × 40 plate, 5 thick along Y, its two top corners rounded R6.
+  const plate = () => {
+    const shape = new THREE.Shape();
+    shape.moveTo(0, 0);
+    shape.lineTo(mm(60), 0);
+    shape.lineTo(mm(60), mm(34));
+    shape.absarc(mm(54), mm(34), mm(6), 0, Math.PI / 2, false);
+    shape.lineTo(mm(6), mm(40));
+    shape.absarc(mm(6), mm(34), mm(6), Math.PI / 2, Math.PI, false);
+    shape.closePath();
+    const g = new THREE.ExtrudeGeometry(shape, { depth: mm(5), bevelEnabled: false, curveSegments: 8 });
+    // Shape x, y → X, Z; extruded along +Y.
+    g.applyMatrix4(new THREE.Matrix4().set(1, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1));
+    return body(g);
+  };
+
+  it('front view: equal rounded corners are one label, "2× R6"', () => {
+    const d = bodyViewDimensions(plate(), 'front');
+    const r = (d?.dims ?? []).filter((x) => x.kind === 'radius');
+    expect(r.map((x) => x.label)).toEqual(['2× R6']);
+  });
+
+  it('top view: the arcs are edge on, so no radius', () => {
+    const d = bodyViewDimensions(plate(), 'topDown');
+    expect((d?.dims ?? []).filter((x) => x.kind === 'radius')).toEqual([]);
+  });
+});

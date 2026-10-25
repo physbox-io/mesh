@@ -8,16 +8,19 @@
 export interface LiveDimension {
   body: string;
   /**
-   * 'linear' and 'diameter' are the part's own sizes, along its own axes;
+   * 'linear', 'diameter' and 'radius' are the part's own sizes, along its own axes;
    * 'angle' is how far it is turned in the view; 'location' is where its
    * origin sits from its parent's.
    */
-  kind: 'linear' | 'diameter' | 'angle' | 'location';
+  kind: 'linear' | 'diameter' | 'radius' | 'angle' | 'location';
   /** Linear: 'width' runs across the part, 'height' up it. Location: across the sheet or up it. */
   direction?: 'width' | 'height';
   /** Linear only: 'chain' between face edges, or 'overall'. */
   row?: 'chain' | 'overall';
-  /** Diameter only: how many equal holes the label stands for. */
+  /**
+   * Diameter and radius: how many equal holes or arcs the label stands for.
+   * Linear: how many equal steps a chain link "3× 42" stands for (valueMm is one).
+   */
   count?: number;
   /**
    * Other bodies with this same figure at the same place on the sheet (two

@@ -39,6 +39,7 @@
  */
 import { PairMemo } from './arrayMemo';
 import { findFeatureEdges } from './featureEdges';
+import { fitCircle } from './measureSnap';
 import { VIEW_AXES, type DrawingView } from './cameraViews';
 
 const featureEdgesMemo = new PairMemo<ReturnType<typeof findFeatureEdges>>();
@@ -128,7 +129,22 @@ export interface AngleDim {
   label: string;
 }
 
-export type ViewDim = LinearDim | DiameterDim | AngleDim;
+/**
+ * The radius of a rounded corner or fillet seen square on, on a leader that
+ * touches the arc at its middle: "R6", or "2× R6" for equal ones.
+ */
+export interface RadiusDim {
+  kind: 'radius';
+  centre: [number, number];
+  radius: number;
+  /** From the centre to the middle of the arc, on the part's sheet axes: a unit vector. */
+  toward: [number, number];
+  count: number;
+  valueMm: number;
+  label: string;
+}
+
+export type ViewDim = LinearDim | DiameterDim | RadiusDim | AngleDim;
 
 export interface BodyDimensions {
   id: string;
@@ -358,6 +374,82 @@ function coverage(positions: ArrayLike<number>, faces: ArrayLike<number>, axes: 
 /** A square edge too short to stop a chain alone; `reach` is its far end, along it. */
 type Piece = Stop & { reach: number };
 
+/** A circular arc found in an edge: its centre, axis and radius, its middle, and a few points on it. */
+interface Arc { centre: Vec3; axis: Vec3; radius: number; mid: Vec3; samples: Vec3[] }
+
+/** A vertex turning less than this is straight on; more than this is a corner, not a facet of a round. */
+const ARC_TURN_MIN = (0.5 * Math.PI) / 180;
+const ARC_TURN_MAX = (40 * Math.PI) / 180;
+/** Least an arc must sweep to be one, and how round it must be: RMS radial error as a share of its radius. */
+const ARC_MIN_SWEEP = (20 * Math.PI) / 180;
+const ARC_MAX_ERROR = 0.02;
+
+/**
+ * The arcs in an edge's polyline: the runs where it turns steadily one way, a
+ * little at each vertex as a tessellated round does, each fitted to a circle.
+ * A rounded corner's outline runs straight, round, straight with no crease
+ * between, so the edge finder hands it over whole; this finds the round in it.
+ */
+export function arcsOf(points: Vec3[], closed: boolean): Arc[] {
+  const n = points.length;
+  if (n < 4) return [];
+  const sub3 = (a: Vec3, b: Vec3): Vec3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+  const crossU = (a: Vec3, b: Vec3): Vec3 => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  const count = closed ? n : n - 1;
+  const segs = Array.from({ length: count }, (_, i) => {
+    const d = sub3(points[(i + 1) % n], points[i]);
+    const length = Math.hypot(d[0], d[1], d[2]);
+    return { from: i, length, dir: (length > 0 ? d.map((x) => x / length) : [0, 0, 0]) as Vec3 };
+  });
+  /** The turn from segment a into segment b, and which way it bends. */
+  const turn = (a: number, b: number) => {
+    const c = crossU(segs[a].dir, segs[b].dir);
+    const s3 = Math.hypot(c[0], c[1], c[2]);
+    return { angle: Math.atan2(s3, dot(segs[a].dir, segs[b].dir)), bend: (s3 > 0 ? c.map((x) => x / s3) : [0, 0, 0]) as Vec3 };
+  };
+  // Facets of one round: about the same length, each turned a little from the
+  // last, all the same way. The straight runs either side of a rounded corner
+  // are one long segment each, so they never join.
+  const joins = (a: number, b: number, bend: Vec3 | null) => {
+    const ratio = segs[a].length / segs[b].length;
+    if (!(ratio < 1.5 && ratio > 1 / 1.5)) return null;
+    const t = turn(a, b);
+    if (!(t.angle > ARC_TURN_MIN && t.angle < ARC_TURN_MAX)) return null;
+    if (bend && dot(bend, t.bend) < 0.9) return null;
+    return t;
+  };
+  // A closed ring that is all one round is a circle the edge finder already
+  // has, or something round that is not one (an ellipse): not an arc.
+  if (closed && segs.every((_, i) => joins(i, (i + 1) % count, null))) return [];
+  let begin = 0;
+  if (closed) while (begin < count && joins((begin - 1 + count) % count, begin, null)) begin++;
+  const out: Arc[] = [];
+  for (let k = 0; k < count;) {
+    const run = [(begin + k) % count];
+    let bend: Vec3 | null = null;
+    let sweep = 0;
+    while (k + run.length < count + (closed ? 0 : 0)) {
+      const next = (begin + k + run.length) % count;
+      if (!closed && next < run[run.length - 1]) break;
+      const t = joins(run[run.length - 1], next, bend);
+      if (!t) break;
+      bend = t.bend;
+      sweep += t.angle;
+      run.push(next);
+    }
+    k += run.length;
+    if (run.length < 3 || sweep < ARC_MIN_SWEEP) continue;
+    const pts = [...run.map((i) => points[segs[i].from]), points[(segs[run[run.length - 1]].from + 1) % n]];
+    const fit = fitCircle(pts);
+    if (!fit || fit.error > ARC_MAX_ERROR) continue;
+    const off = Math.max(...pts.map((q) => Math.abs(dot(sub3(q, fit.centre), fit.normal))));
+    if (off > ARC_MAX_ERROR * fit.radius) continue;
+    const mid = pts[Math.floor(pts.length / 2)];
+    out.push({ centre: fit.centre, axis: fit.normal, radius: fit.radius, mid, samples: [pts[1], mid, pts[pts.length - 2]] });
+  }
+  return out;
+}
+
 /**
  * Short square edges that lie on one line, as one edge: a face line broken by
  * a cut (a channel's end where a finger scoop takes its middle out, the same
@@ -572,6 +664,8 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
   // Square edges too short to be a face on their own, kept in case they line
   // up into one that is (see joinPieces).
   const pieces: { u: Piece[]; v: Piece[] } = { u: [], v: [] };
+  // Arcs of the edges, for their radii (see arcsOf).
+  const arcs: Arc[] = [];
   // Rounds standing out of the part whose rims are buried (see proudRound).
   const pegs: { along: 'u' | 'v'; cu: number; cv: number; radius: number }[] = [];
 
@@ -669,6 +763,9 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
         silhouette(along, cu, cv, e.radius, 2 * e.radius);
       }
     }
+    // Edges that are neither line nor circle: an outline running round a
+    // rounded corner, tangent to the faces either side, is one of them.
+    for (const chain of found.other) arcs.push(...arcsOf(chain.points, chain.closed));
   }
 
   uStops.push(...joinPieces(pieces.u, MIN_EDGE_SHARE * height));
@@ -764,6 +861,45 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
       label: `${count > 1 ? `${count}× ` : ''}⌀${formatDim(size.radius * 2)}`,
     });
   }
+  // --- radii: each arc that faces the sheet and shows, one label per size ---
+  // An arc drawn square on is its true radius. Both ends of a rounded plate
+  // draw the same arc, so one per place; one hidden behind the part, none.
+  const radii: { centre: [number, number]; radius: number; toward: [number, number] }[] = [];
+  for (const arc of arcs) {
+    if (Math.abs(dot(arc.axis, W)) <= END_ON) continue;
+    if (!arc.samples.some((q) => !hidden(dot(q, right), dot(q, up), dot(q, forward)))) continue;
+    const centre: [number, number] = [dot(arc.centre, U), dot(arc.centre, V)];
+    if (holes.some((h) => Math.abs(h.radius - arc.radius) < SAME_M &&
+      Math.hypot(h.centre[0] - centre[0], h.centre[1] - centre[1]) < SAME_M)) continue;
+    if (radii.some((r) => Math.abs(r.radius - arc.radius) < SAME_M &&
+      Math.hypot(r.centre[0] - centre[0], r.centre[1] - centre[1]) < MERGE_M)) continue;
+    const du = dot(arc.mid, U) - centre[0], dv = dot(arc.mid, V) - centre[1];
+    const k = Math.hypot(du, dv) || 1;
+    radii.push({ centre, radius: arc.radius, toward: [du / k, dv / k] });
+  }
+  const radiusSizes: { radius: number; members: typeof radii }[] = [];
+  for (const r of radii) {
+    const size = radiusSizes.find((x) => Math.abs(x.radius - r.radius) < SAME_M);
+    if (size) size.members.push(r);
+    else radiusSizes.push({ radius: r.radius, members: [r] });
+  }
+  for (const size of radiusSizes) {
+    // On the arc furthest up and right, as a ⌀ is.
+    const at = size.members.reduce((best, r) =>
+      r.centre[0] + r.toward[0] * r.radius + r.centre[1] + r.toward[1] * r.radius >
+      best.centre[0] + best.toward[0] * best.radius + best.centre[1] + best.toward[1] * best.radius ? r : best);
+    const count = size.members.length;
+    dims.push({
+      kind: 'radius',
+      centre: at.centre,
+      radius: size.radius,
+      toward: at.toward,
+      count,
+      valueMm: Math.round(size.radius * 10000) / 10,
+      label: `${count > 1 ? `${count}× ` : ''}R${formatDim(size.radius)}`,
+    });
+  }
+
   const result = (): BodyDimensions => ({ id: body.id, axes, bounds: { u: [u0, u1], v: [v0, v1] }, depth: (w0 + w1) / 2, dims });
   if (wholeDisc) return result();
 
