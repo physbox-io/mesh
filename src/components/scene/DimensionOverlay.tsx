@@ -543,7 +543,8 @@ function liveList(found: BodyDimensions[], locations: LocationDim[], parents: Ma
         keep(`${d.kind}:${d.label}@${spot(at(...d.centre))}`,
           { body: b.id, kind: d.kind, count: d.count, label: d.label, valueMm: d.valueMm });
       } else {
-        keep(`${d.kind}:${d.label}@${spot(at(...d.centre))}`, { body: b.id, kind: d.kind, label: d.label, valueDeg: d.valueDeg });
+        keep(`${d.kind}:${d.label}@${spot(at(...d.centre))}`,
+          { body: b.id, kind: d.kind, ...(d.count ? { count: d.count } : {}), label: d.label, valueDeg: d.valueDeg });
       }
     }
   }

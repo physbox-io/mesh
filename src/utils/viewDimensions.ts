@@ -126,6 +126,8 @@ export interface AngleDim {
   from: Vec3;
   to: Vec3;
   valueDeg: number;
+  /** How many equal slants the label stands for ("2× 45°"); the part's own turn has none. */
+  count?: number;
   label: string;
 }
 
@@ -373,6 +375,88 @@ function coverage(positions: ArrayLike<number>, faces: ArrayLike<number>, axes: 
 
 /** A square edge too short to stop a chain alone; `reach` is its far end, along it. */
 type Piece = Stop & { reach: number };
+
+/** A slanted outline edge: its ends on the sheet, and in the document frame. */
+interface Slant { a: [number, number]; b: [number, number]; pa: Vec3; pb: Vec3 }
+/** A square edge that shows: its ends on the sheet, and which axis it runs along. */
+interface SquareEdge { a: [number, number]; b: [number, number]; drawn: number; along: 'u' | 'v' }
+
+/** Samples along an edge when finding the run of it that shows. */
+const RUN_SAMPLES = 16;
+
+/**
+ * The longest run along an edge, from 0 to 1, where `seen` holds, its ends
+ * found to a thousandth of the edge. Null when none of it shows.
+ */
+function visibleRun(seen: (t: number) => boolean): [number, number] | null {
+  const ok = Array.from({ length: RUN_SAMPLES + 1 }, (_, i) => seen(i / RUN_SAMPLES));
+  let best: [number, number] | null = null;
+  for (let i = 0; i <= RUN_SAMPLES;) {
+    if (!ok[i]) { i++; continue; }
+    let j = i;
+    while (j + 1 <= RUN_SAMPLES && ok[j + 1]) j++;
+    if (!best || j - i > best[1] - best[0]) best = [i, j];
+    i = j + 1;
+  }
+  if (!best) return null;
+  const edge = (inside: number, outside: number) => {
+    for (let k = 0; k < 10; k++) {
+      const mid = (inside + outside) / 2;
+      if (seen(mid)) inside = mid; else outside = mid;
+    }
+    return inside;
+  };
+  const t0 = best[0] / RUN_SAMPLES, t1 = best[1] / RUN_SAMPLES;
+  return [t0 > 0 ? edge(t0, t0 - 1 / RUN_SAMPLES) : 0, t1 < 1 ? edge(t1, t1 + 1 / RUN_SAMPLES) : 1];
+}
+
+/** Within this of 45°, a slant between a horizontal and a vertical edge is a chamfer. */
+const CHAMFER_TOL_DEG = 0.1;
+/** A chamfer's neighbours run on at least this many times its leg: it cuts a corner off, it is not the side of a triangle. */
+const CHAMFER_SHORTER = 1.5;
+
+/**
+ * What the slanted edges add. A chamfer — 45°, cutting a corner off between a
+ * horizontal edge and a vertical one, both longer than it — is "5 × 45°" and
+ * nothing more, as a drawing gives it. Any other slant puts both its ends in
+ * the chains, which sizes it, and its angle from the nearer of the sheet's
+ * axes, which says which way it runs; equal ones are labelled once.
+ */
+function slantDims(slants: Slant[], squares: SquareEdge[], U: Vec3, V: Vec3): { uStops: Stop[]; vStops: Stop[]; dims: AngleDim[] } {
+  const uStops: Stop[] = [], vStops: Stop[] = [];
+  const found: { label: string; dim: AngleDim }[] = [];
+  const near = (p: [number, number], q: [number, number]) => Math.hypot(p[0] - q[0], p[1] - q[1]) < MERGE_M;
+  const meets = (p: [number, number], along: 'u' | 'v', longer: number) =>
+    squares.some((e) => e.along === along && e.drawn >= longer && (near(e.a, p) || near(e.b, p)));
+  for (const s of slants) {
+    const du = s.b[0] - s.a[0], dv = s.b[1] - s.a[1];
+    const fromLevel = (Math.atan2(Math.abs(dv), Math.abs(du)) * 180) / Math.PI;
+    const leg = Math.abs(du);
+    const chamfer = Math.abs(fromLevel - 45) <= CHAMFER_TOL_DEG &&
+      [[s.a, s.b], [s.b, s.a]].some(([p, q]) => meets(p, 'u', CHAMFER_SHORTER * leg) && meets(q, 'v', CHAMFER_SHORTER * leg));
+    if (!chamfer) {
+      uStops.push({ at: s.a[0], anchor: s.a[1], weight: Math.abs(du) }, { at: s.b[0], anchor: s.b[1], weight: Math.abs(du) });
+      vStops.push({ at: s.a[1], anchor: s.a[0], weight: Math.abs(dv) }, { at: s.b[1], anchor: s.b[0], weight: Math.abs(dv) });
+    }
+    // From the sheet's horizontal when it runs nearer that, else its vertical,
+    // measured at the end the reference line runs out of.
+    const level = fromLevel <= 45;
+    const deg = level ? fromLevel : 90 - fromLevel;
+    const startAtA = level ? s.a[1] <= s.b[1] : s.a[0] <= s.b[0];
+    const [p0, p1] = startAtA ? [s.pa, s.pb] : [s.pb, s.pa];
+    const d = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
+    const k = Math.hypot(d[0], d[1], d[2]);
+    const to: Vec3 = [d[0] / k, d[1] / k, d[2] / k];
+    const axis = level ? U : V;
+    const from: Vec3 = dot(to, axis) >= 0 ? axis : neg(axis);
+    const label = chamfer ? `${formatDim(leg)} × 45°` : formatAngle(deg);
+    const same = found.find((f) => f.label === label);
+    if (same) { same.dim.count = (same.dim.count ?? 1) + 1; continue; }
+    found.push({ label, dim: { kind: 'angle', centre: startAtA ? s.a : s.b, from, to, valueDeg: Math.round(deg * 10) / 10, label } });
+  }
+  for (const f of found) if (f.dim.count) f.dim.label = `${f.dim.count}× ${f.label}`;
+  return { uStops, vStops, dims: found.map((f) => f.dim) };
+}
 
 /** A circular arc found in an edge: its centre, axis and radius, its middle, and a few points on it. */
 interface Arc { centre: Vec3; axis: Vec3; radius: number; mid: Vec3; samples: Vec3[]; sweep: number }
@@ -670,6 +754,10 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
   // Square edges too short to be a face on their own, kept in case they line
   // up into one that is (see joinPieces).
   const pieces: { u: Piece[]; v: Piece[] } = { u: [], v: [] };
+  // Slanted outline edges, for their ends and their angles (see slantDims).
+  const slants: Slant[] = [];
+  // The square edges that show, for telling a chamfer from any other slant.
+  const squares: SquareEdge[] = [];
   // Arcs of the edges, for their radii (see arcsOf).
   const arcs: Arc[] = [];
   // Rounds standing out of the part whose rims are buried (see proudRound).
@@ -695,20 +783,67 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
       findFeatureEdges(body.positions, body.faces),
     );
     const isBoss = bossTest(body.positions, body.faces, found.triangleSurface);
+    /**
+     * A straight edge, judged by how it is drawn on the part's own sheet, not
+     * how it lies: seen along w, an edge tilted away in depth is still a
+     * vertical line at one place across it, and that place is what a
+     * dimension measures to. `outline`: one of its faces lies in the sheet.
+     * `pieces`: one too short to stop a chain may still join others in line.
+     */
+    const straightEdge = (ea: Vec3, eb: Vec3, faceSquareTo: (axis: Vec3) => boolean, outline: boolean, pieces_: boolean) => {
+      const delta = [eb[0] - ea[0], eb[1] - ea[1], eb[2] - ea[2]];
+      const du = dot(delta, U);
+      const dv = dot(delta, V);
+      const drawn = Math.hypot(du, dv);
+      if (!(drawn > SAME_M)) return;
+      const ua = dot(ea, U), ub = dot(eb, U);
+      const va = dot(ea, V), vb = dot(eb, V);
+      const length = Math.hypot(delta[0], delta[1], delta[2]);
+      const point = (t: number): Vec3 => [ea[0] + t * delta[0], ea[1] + t * delta[1], ea[2] + t * delta[2]];
+      const seen = (t: number) => {
+        const q = point(t);
+        return !hidden(dot(q, right), dot(q, up), dot(q, forward));
+      };
+      const square = Math.abs(du) / drawn < SQUARE || Math.abs(dv) / drawn < SQUARE;
+      if (!square) {
+        // Slanted on the sheet: a chamfer, a draft, a dovetail's flank, a
+        // gusset's hypotenuse. Only an outline edge, lying in the sheet
+        // itself so the angle drawn is its true angle — and only the run of
+        // it that shows: a gusset's hypotenuse ends where it meets the plate
+        // and the arm, not at its corners buried in them.
+        const inSheet = Math.abs(dot(delta, W)) / length < IN_SHEET;
+        if (!inSheet || !outline || drawn < MIN_EDGE_SHARE * Math.min(width, height)) return;
+        const run = visibleRun(seen);
+        if (!run) return;
+        const pa = point(run[0]), pb = point(run[1]);
+        slants.push({ a: [dot(pa, U), dot(pa, V)], b: [dot(pb, U), dot(pb, V)], pa, pb });
+        return;
+      }
+      // A hidden edge is not dimensioned (a rib's end buried in the plate it
+      // stiffens): looked at a quarter, half and three quarters along.
+      if (![0.5, 0.25, 0.75].some(seen)) return;
+      const along: 'u' | 'v' = Math.abs(du) / drawn < SQUARE ? 'v' : 'u';
+      const share = MIN_EDGE_SHARE * (along === 'v' ? height : width);
+      if (drawn < share && !pieces_) return;
+      squares.push({ a: [ua, va], b: [ub, vb], drawn, along });
+      // Runs up the part: a stop across it, reaching down to the width row.
+      if (along === 'v' && faceSquareTo(U)) {
+        const stop = { at: (ua + ub) / 2, anchor: Math.min(va, vb), weight: drawn };
+        if (drawn >= share) uStops.push(stop);
+        else pieces.u.push({ ...stop, reach: Math.max(va, vb) });
+        if (drawn >= share && Math.abs(dv) / length > 1 - SQUARE) straight.v = true;
+      }
+      // Runs along the part: a stop up it, reaching left to the height row.
+      if (along === 'u' && faceSquareTo(V)) {
+        const stop = { at: (va + vb) / 2, anchor: Math.min(ua, ub), weight: drawn };
+        if (drawn >= share) vStops.push(stop);
+        else pieces.v.push({ ...stop, reach: Math.max(ua, ub) });
+        if (drawn >= share && Math.abs(du) / length > 1 - SQUARE) straight.u = true;
+      }
+    };
     for (const candidate of found.edges) {
       const e = candidate.edge;
       if (e.kind === 'line') {
-        // Judged by how it is drawn on the part's own sheet, not how it lies:
-        // seen along w, an edge tilted away in depth is still a vertical line at
-        // one place across it, and that place is what a dimension measures to.
-        const delta = [e.b[0] - e.a[0], e.b[1] - e.a[1], e.b[2] - e.a[2]];
-        const du = dot(delta, U);
-        const dv = dot(delta, V);
-        const drawn = Math.hypot(du, dv);
-        if (!(drawn > SAME_M)) continue;
-        const ua = dot(e.a, U), ub = dot(e.b, U);
-        const va = dot(e.a, V), vb = dot(e.b, V);
-        const length = Math.hypot(delta[0], delta[1], delta[2]);
         // Only an edge where at least one of its two faces stands square to the
         // measured axis (a step wall) or lies in the sheet (a front/back face)
         // is a step: a ridge between two banked/slanted faces is not.
@@ -716,20 +851,11 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
           const n = found.surfaces[s]?.normal;
           return !!n && (Math.abs(dot(n, axis)) >= 1 - SQUARE || Math.abs(dot(n, W)) >= 1 - SQUARE);
         });
-        // Runs up the part: a stop across it, reaching down to the width row.
-        if (Math.abs(du) / drawn < SQUARE && faceSquareTo(U)) {
-          const stop = { at: (ua + ub) / 2, anchor: Math.min(va, vb), weight: drawn };
-          if (drawn >= MIN_EDGE_SHARE * height) uStops.push(stop);
-          else pieces.u.push({ ...stop, reach: Math.max(va, vb) });
-          if (drawn >= MIN_EDGE_SHARE * height && Math.abs(dv) / length > 1 - SQUARE) straight.v = true;
-        }
-        // Runs along the part: a stop up it, reaching left to the height row.
-        if (Math.abs(dv) / drawn < SQUARE && faceSquareTo(V)) {
-          const stop = { at: (va + vb) / 2, anchor: Math.min(ua, ub), weight: drawn };
-          if (drawn >= MIN_EDGE_SHARE * width) vStops.push(stop);
-          else pieces.v.push({ ...stop, reach: Math.max(ua, ub) });
-          if (drawn >= MIN_EDGE_SHARE * width && Math.abs(du) / length > 1 - SQUARE) straight.u = true;
-        }
+        const outline = candidate.surfaces.some((s) => {
+          const n = found.surfaces[s]?.normal;
+          return !!n && Math.abs(dot(n, W)) >= 1 - SQUARE;
+        });
+        straightEdge(e.a as Vec3, e.b as Vec3, faceSquareTo, outline, true);
       } else {
         const facing = Math.abs(dot(e.axis, W));
         const cu = dot(e.centre, U), cv = dot(e.centre, V);
@@ -771,11 +897,24 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
     }
     // Edges that are neither line nor circle: an outline running round a
     // rounded corner, tangent to the faces either side, is one of them.
-    for (const chain of found.other) arcs.push(...arcsOf(chain.points, chain.closed));
+    // Its straight runs are edges like any other — the top of a plate between
+    // its two rounded corners — but only whole ones: a round's facets are not.
+    for (const chain of found.other) {
+      arcs.push(...arcsOf(chain.points, chain.closed));
+      const n = chain.points.length;
+      for (let i = 0; i < (chain.closed ? n : n - 1); i++) {
+        straightEdge(chain.points[i] as Vec3, chain.points[(i + 1) % n] as Vec3, () => true, true, false);
+      }
+    }
   }
 
   uStops.push(...joinPieces(pieces.u, MIN_EDGE_SHARE * height));
   vStops.push(...joinPieces(pieces.v, MIN_EDGE_SHARE * width));
+  // A part with no edge square to the sheet is turned in it, not slanted in
+  // places: its slants are its outline at an angle, not features to size.
+  const slanted = squares.length ? slantDims(slants, squares, U, V) : { uStops: [], vStops: [], dims: [] };
+  uStops.push(...slanted.uStops);
+  vStops.push(...slanted.vStops);
 
   // A peg's sides, unless an end-on round of its size is on its axis (a hook's
   // leg in line with its arm seen end-on): that circle already gives its ⌀ and
@@ -845,7 +984,7 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
     Math.abs(2 * h.radius - width) < SAME_M && Math.abs(2 * h.radius - height) < SAME_M &&
     Math.abs(h.centre[0] - (u0 + u1) / 2) < SAME_M && Math.abs(h.centre[1] - (v0 + v1) / 2) < SAME_M);
 
-  const dims: ViewDim[] = [];
+  const dims: ViewDim[] = [...slanted.dims];
   const sizes: { radius: number; members: typeof holes }[] = [];
   for (const h of holes) {
     const size = sizes.find((s) => Math.abs(s.radius - h.radius) < SAME_M);

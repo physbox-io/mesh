@@ -569,3 +569,31 @@ describe('radii', () => {
     expect((d?.dims ?? []).filter((x) => x.kind === 'radius')).toEqual([]);
   });
 });
+
+describe('slanted edges', () => {
+  const labelsOf = (points: [number, number][]) =>
+    labels(bodyViewDimensions(body(profileXZ(points.map(([x, y]) => [mm(x), mm(y)] as [number, number]), mm(10))), 'front'));
+
+  it('a chamfer is "5 × 45°", and two equal ones are said once', () => {
+    expect(labelsOf([[0, 0], [40, 0], [40, 15], [35, 20], [0, 20]])).toEqual(['5 × 45°', '40', '20']);
+    expect(labelsOf([[0, 0], [40, 0], [40, 15], [35, 20], [5, 20], [0, 15]])).toEqual(['2× 5 × 45°', '40', '20']);
+  });
+
+  it('a drafted wall gives its angle and where it ends', () => {
+    expect(labelsOf([[0, 0], [40, 0], [35, 20], [5, 20]])).toEqual(['2× 14°', '5', '30', '40', '20']);
+  });
+
+  it('a dovetail gives its flanks\' angle, its widths and its depth', () => {
+    expect(labelsOf([[0, 0], [60, 0], [60, 20], [45, 20], [50, 10], [10, 10], [15, 20], [0, 20]]))
+      .toEqual(['2× 26.6°', '10', '5', '30', '10', '60', '10', '20']);
+  });
+});
+
+describe('the Wall Bracket preset', () => {
+  it('front view: the gusset\'s 45°, measured from where it shows, and no buried edge', async () => {
+    const { latticeBracketPreset } = await import('../src/presets/latticeBracket');
+    const g = latticeBracketPreset.nodes[0].geoms[0] as unknown as { renderVertices: number[]; faces: number[][] | number[] };
+    const d = bodyViewDimensions({ id: 'bracket', positions: g.renderVertices, faces: (g.faces as number[]).flat() as number[] }, 'front');
+    expect(labels(d)).toEqual(['45°', '24', '21', '50', '24', '31', '60']);
+  });
+});

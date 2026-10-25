@@ -18,7 +18,7 @@ export interface LiveDimension {
   /** Linear only: 'chain' between face edges, or 'overall'. */
   row?: 'chain' | 'overall';
   /**
-   * Diameter and radius: how many equal holes or arcs the label stands for.
+   * Diameter, radius and angle: how many equal holes, arcs or slants the label stands for.
    * Linear: how many equal steps a chain link "3× 42" stands for (valueMm is one).
    */
   count?: number;
