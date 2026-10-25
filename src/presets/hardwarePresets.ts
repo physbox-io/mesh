@@ -200,27 +200,31 @@ api.setActuatorControl('motor_spin_actuator', speed);`,
 // ---------------------------------------------------------------------------
 
 function springLauncher(): SceneGraph {
-  const base = body('base', [0, 0, 0.006], [box('base_plate', [0.05, 0.05, 0.006], [0, 0, 0], PLA_GREY, 0.2)], false);
+  // Where the ball lands, contact is stiff: at the soft default a ball coming
+  // back at nearly 4 m/s sinks tens of millimetres before it is stopped, and
+  // goes straight through a cup floor a few millimetres thick.
+  const HARD = { solref: [0.003, 1] };
+  const base = body('base', [0, 0, 0.006], [box('base_plate', [0.05, 0.05, 0.006], [0, 0, 0], PLA_GREY, 0.2, HARD)], false);
   const spring = hardwarePartNode({ kind: 'spring', size: 'Ø16×50' }, 'spring');
   spring.pos = [0, 0, 0.006];
   spring.joints = [];
   base.children.push(spring);
   // The cup the ball sits in, fixed on the spring's top.
   const top = spring.children[0];
-  top.children.push(body('cup', [0, 0, 0.003], [
-    { name: 'cup_floor', type: 'cylinder', size: [0.02, 0.003], pos: [0, 0, 0], rgba: [...PLA_ORANGE], mass: 0.03 } as SceneGeom,
-    ...[0, 1, 2, 3, 4, 5].map((k) => box(`cup_lip${k}`, [0.004, 0.0015, 0.006], [0.019 * Math.cos((k * Math.PI) / 3), 0.019 * Math.sin((k * Math.PI) / 3), 0.006], PLA_ORANGE, 0.002, {
-      quat: [Math.cos((k * Math.PI) / 6 + Math.PI / 4), 0, 0, Math.sin((k * Math.PI) / 6 + Math.PI / 4)],
+  top.children.push(body('cup', [0, 0, 0.005], [
+    { name: 'cup_floor', type: 'cylinder', size: [0.02, 0.005], pos: [0, 0, 0], rgba: [...PLA_ORANGE], mass: 0.03, ...HARD } as SceneGeom,
+    ...[0, 1, 2, 3, 4, 5].map((k) => box(`cup_lip${k}`, [0.004, 0.0015, 0.008], [0.019 * Math.cos((k * Math.PI) / 3), 0.019 * Math.sin((k * Math.PI) / 3), 0.008], PLA_ORANGE, 0.002, {
+      quat: [Math.cos((k * Math.PI) / 6 + Math.PI / 4), 0, 0, Math.sin((k * Math.PI) / 6 + Math.PI / 4)], ...HARD,
     })),
   ], false));
-  // In the cup: the base's top is 12 mm up, the spring 50 mm on that, the cup's floor 6 mm.
-  const ball = body('ball', [0, 0, 0.012 + 0.05 + 0.006 + 0.0125 + 0.0005], [
-    { name: 'ball_g', type: 'sphere', size: [0.0125], rgba: [0.95, 0.95, 0.95, 1], mass: 0.02 } as SceneGeom,
+  // In the cup: the base's top is 12 mm up, the spring 50 mm on that, the cup's floor 10 mm.
+  const ball = body('ball', [0, 0, 0.012 + 0.05 + 0.01 + 0.0125 + 0.0005], [
+    { name: 'ball_g', type: 'sphere', size: [0.0125], rgba: [0.95, 0.95, 0.95, 1], mass: 0.02, ...HARD } as SceneGeom,
   ], true, {
-    // Cocked down to solid for two seconds, then let go: the spring's own rate
+    // Cocked down 20 mm for two seconds, then let go: the spring's own rate
     // throws the ball, and it falls back into the cup to be thrown again.
     script: `const t = api.getTime() % 4;
-if (t < 2) api.applyJointForce('spring_compress', -90);`,
+if (t < 2) api.applyJointForce('spring_compress', -40);`,
   });
   return { nodes: [base, ball] } as SceneGraph;
 }
@@ -366,7 +370,7 @@ function bearingCart(): SceneGraph {
   const scene = { nodes: [ramp, chassis, deck] } as SceneGraph;
   corners.forEach(([x, y], i) => {
     const group = cut(deck, { kind: 'counterbore', size: 'M3', at: [x, y, 0.005], normal: [0, 0, 1] }, `screw${i}`);
-    const screw = seat(deck, group, { kind: 'screw', size: 'M3' }, `deck_screw${i}`);
+    const screw = seat(deck, group, { kind: 'screw', size: 'M3' }, `deck_bolt${i}`);
     const fit = screwFit(scene, deck, screw, seatFor(deck, group, 'screw')!.gripM!);
     rebuildPart(screw, { ...screw.hardwarePart!, lengthMm: fit.lengthMm });
     if (!fit.target || !fasten(screw, deck, fit.target)) throw new Error('preset: a deck screw reaches nothing');

@@ -124,10 +124,11 @@ describe('spring launcher', () => {
     const s = sim(springLauncherPreset);
     let top = 0;
     s.step(4, () => { if (s.data.time > 2) top = Math.max(top, s.pos('ball')[2]); });
-    expect(top).toBeGreaterThan(0.25);
+    expect(top).toBeGreaterThan(0.15);
     s.step(1.9);
-    // Back in the cup, being cocked again.
+    // Back in the cup, being cocked again: on its floor, not through it.
     expect(Math.hypot(s.pos('ball')[0], s.pos('ball')[1])).toBeLessThan(0.02);
+    expect(s.pos('ball')[2]).toBeGreaterThan(s.pos('cup')[2]);
     s.done();
   }, 60_000);
 });

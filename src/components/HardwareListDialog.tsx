@@ -7,7 +7,7 @@ import { hardwareList, hardwareListCsv } from '../utils/hardwareList';
  * What to buy for the scene: every bought part counted, and bar stock packed
  * onto the lengths it is sold in. Download gives it as CSV.
  */
-export function openHardwareList(baseName = 'hardware') {
+export function openHardwareList(baseName = useStore.getState().activePreset || 'scene') {
   const list = hardwareList(useStore.getState().sceneGraph);
   const { openDialog, closeDialog } = useDialogs.getState();
   openDialog({

@@ -104,6 +104,26 @@ describe('lengthening a seated rail', () => {
   });
 });
 
+describe('a bearing resized with a shaft through it', () => {
+  it('takes the shaft to its new bore', () => {
+    useStore.getState().updateScene({ nodes: [] });
+    const id = useStore.getState().addHardwarePart('bearing', [0, 0, 0.05], null);
+    const shaft = useStore.getState().addHardwarePart('shaft', [0, 0, 0], id);
+    useStore.getState().setHardwarePart(id, { size: '6001' });
+    expect(find(shaft).hardwarePart.size).toBe('12');
+  });
+});
+
+describe('bought parts and the collider decomposition', () => {
+  it('collide as their hull, so a ring is never split into pieces', () => {
+    for (const kind of ['bearing', 'nut', 'oring', 'linear_rod', 'spring']) {
+      const part = hardwarePartNode({ kind, size: kind === 'oring' ? '20×2' : undefined }, 'p');
+      const all = (n: any): any[] => [n, ...(n.children || []).filter((c: any) => c.hardwarePart?.piece).flatMap(all)];
+      for (const body of all(part)) expect(body.collision, `${kind} ${body.id}`).toBe('hull');
+    }
+  });
+});
+
 describe('deleting what something is welded to', () => {
   it('leaves the frame compiling when a profile goes', () => {
     load(presets.extrusionFramePreset);

@@ -230,6 +230,11 @@ export function hardwarePartNode(spec: HardwarePart, id: string): SceneNode {
     default:
       HARDWARE_PARTS[p.kind].build?.(node, p, id);
   }
+  // A bought part collides as the hull of what it is drawn as. A ring is
+  // concave, and left to the app's decomposition it is split into convex
+  // pieces that know nothing of a seated part's silence — and its own mesh is
+  // dropped from the model, which draws it a second time at the origin.
+  for (const body of partBodies(node)) body.collision = 'hull';
   return node;
 }
 
@@ -279,6 +284,17 @@ export function rebuildPart(node: SceneNode, spec: HardwarePart): void {
       }
     }
     if (wasJoint?.actuator?.ctrlValue !== undefined && joint?.actuator) joint.actuator.ctrlValue = wasJoint.actuator.ctrlValue;
+  }
+  // A shaft through a bearing's bore is the bore's size: it follows the bearing.
+  if (fresh.hardwarePart?.kind === 'bearing') {
+    const bore = String(BEARINGS[fresh.hardwarePart.size]?.[1] ?? '');
+    for (const body of partBodies(fresh)) {
+      for (const c of body.children) {
+        if (c.hardwarePart?.kind === 'shaft' && c.hardwarePart.seat === 'bore' && c.hardwarePart.size !== bore && HARDWARE_PARTS.shaft.sizes.includes(bore)) {
+          rebuildPart(c, { ...c.hardwarePart, size: bore });
+        }
+      }
+    }
   }
   node.name = fresh.name;
   node.geoms = fresh.geoms;
