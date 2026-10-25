@@ -42,6 +42,7 @@ import * as THREE from 'three';
 import { sceneCandidates, toMujoco, toThree } from './measureScene';
 import { csgFrameOffset, csgSourceGeoms, geomMatrixOf, fromtoFrame } from './csg';
 import type { SceneGeom, SceneNode } from '../types/scene';
+import { profileSlots } from './extrusionParts';
 import type { SnapCandidate, Vec3 } from './measureSnap';
 import type { AxisFeature, FaceFeature, MateFeature, PointFeature } from './mateSnap';
 
@@ -76,6 +77,19 @@ export interface Pose {
 export function documentAxes(node: SceneNode, pose: Pose): AxisFeature[] {
   const offset = csgFrameOffset(node);
   const out: AxisFeature[] = [];
+
+  // An extrusion's slots run its length: a T-nut, or a screw into one, is put
+  // on that line. The section is drawn only, so its slots are not cut geoms.
+  if (node.hardwarePart?.kind === 'extrusion') {
+    const dir = new THREE.Vector3(0, 0, 1).applyMatrix3(pose.rot).normalize();
+    for (const slot of profileSlots(node.hardwarePart.size)) {
+      const at = new THREE.Vector3(slot.at[0] / 1000, slot.at[1] / 1000, 0).applyMatrix3(pose.rot).add(pose.pos);
+      out.push({
+        kind: 'axis', point: [at.x, at.y, at.z], dir: [dir.x, dir.y, dir.z], radius: slot.width / 2000,
+        label: `slot in ${node.name || node.id}`, nodeId: node.id,
+      });
+    }
+  }
 
   for (const geom of csgSourceGeoms(node)) {
     if (geom.type !== 'cylinder') continue;

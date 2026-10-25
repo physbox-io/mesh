@@ -9,6 +9,7 @@ import type { GeomThreadSpec } from '../utils/metricThreads';
 import { hardwareCutGeoms, hardwareCutProblem, hardwareSpecOf, nextHardwareGroup, type HardwareCutSpec } from '../utils/hardwareCuts';
 import { releaseFastenings, reseatHardware } from '../utils/hardwareParts';
 import { hardwarePartActions, type HardwarePartActions } from './hardwarePartActions';
+import { extrusionActions, type ExtrusionActions } from './extrusionActions';
 import type { DataMirror, ModelMirror } from '../types/sceneLayer';
 import { type CombineOp, cageInFrame, geomsForCombine, nodeWorldMatrix } from '../utils/combineBodies';
 import { getGeomFrame } from '../utils/laserCutExporter';
@@ -1495,7 +1496,7 @@ export interface EdgeRoundSession {
   picked: RoundEdge[];
 }
 
-export interface PhysicsState extends HardwarePartActions {
+export interface PhysicsState extends HardwarePartActions, ExtrusionActions {
   mujoco: typeof MUJOCO_SHIM | null;
   model: ModelMirror | null;
   data: DataMirror | null;
@@ -2420,6 +2421,7 @@ const sharingUnchangedNodes = (config: StateCreator<PhysicsState>): StateCreator
 
 export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) => ({
   ...hardwarePartActions({ set, get, clone: cloneSceneGraph }),
+  ...extrusionActions({ set, get, clone: cloneSceneGraph }),
   mujoco: null,
   model: null,
   data: null,
