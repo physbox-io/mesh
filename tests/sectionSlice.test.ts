@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
 import { bodyViewDimensions, type BodyMesh, type LinearDim } from '../src/utils/viewDimensions';
 import { bestSectionAt, hatchSegments, sectionOf, sectionPlane, sliceLoops } from '../src/utils/sectionSlice';
+import { loadSectionMerge, sectionMerge } from '../src/utils/sectionMerge';
 
 const mm = (v: number) => v / 1000;
 
@@ -87,5 +88,45 @@ describe('hatchSegments', () => {
       expect(segs[i + 1]).toBeGreaterThanOrEqual(-1e-9);
       expect(segs[i + 1]).toBeLessThanOrEqual(mm(10) + 1e-9);
     }
+  });
+});
+
+describe('a part built from overlapping pieces', () => {
+  // A 40 × 20 × 10 box with a ⌀16 cylinder pushed into its right end: two
+  // solids, never merged into one mesh. Cut down the middle from the front,
+  // they make one 48 × 10 outline.
+  const piece = (g: THREE.BufferGeometry): BodyMesh => {
+    const positions = Array.from(g.getAttribute('position').array as ArrayLike<number>);
+    const faces = g.index ? Array.from(g.index.array as ArrayLike<number>) : Array.from({ length: positions.length / 3 }, (_, i) => i);
+    return { id: 'part', positions, faces };
+  };
+  const box = piece(new THREE.BoxGeometry(mm(40), mm(20), mm(10)).translate(0, 0, mm(5)));
+  const cylinder = piece(new THREE.CylinderGeometry(mm(8), mm(8), mm(10), 48).rotateX(Math.PI / 2).translate(mm(20), 0, mm(5)));
+  const whole: BodyMesh = {
+    id: 'part',
+    positions: [...box.positions as number[], ...cylinder.positions as number[]],
+    faces: [...box.faces as number[], ...(cylinder.faces as number[]).map((i) => i + box.positions.length / 3)],
+  };
+  const filled = (fill: number[]) => {
+    let a = 0;
+    for (let i = 0; i < fill.length; i += 9) {
+      const [ax, az, bx, bz, cx, cz] = [0, 2, 3, 5, 6, 8].map((k) => fill[i + k]);
+      a += Math.abs((bx - ax) * (cz - az) - (bz - az) * (cx - ax)) / 2;
+    }
+    return a * 1e6;
+  };
+
+  it('merged, the overlap is material, not a hole', async () => {
+    await loadSectionMerge();
+    const section = sectionOf(whole, 'front', 0, [box, cylinder], sectionMerge()!)!;
+    expect(section.loops).toHaveLength(1);
+    expect(filled(section.fill)).toBeCloseTo(480, 0);
+    const d = bodyViewDimensions(section.body, 'front');
+    expect(linear(d, 'u').filter((x) => x.row === 2).map((x) => x.label)).toEqual(['48']);
+  });
+
+  it('unmerged, the same cut reads the overlap as a hole', () => {
+    const section = sectionOf(whole, 'front', 0)!;
+    expect(filled(section.fill)).toBeLessThan(470);
   });
 });

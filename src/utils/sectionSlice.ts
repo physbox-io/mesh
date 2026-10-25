@@ -89,7 +89,29 @@ export function sliceLoops(positions: ArrayLike<number>, faces: ArrayLike<number
 }
 
 /** A loop on the sheet: its points' (u, v). */
-type Flat = [number, number][];
+export type Flat = [number, number][];
+
+/**
+ * Merges the cuts of a part's pieces into one outline: each piece's loops
+ * in, the union's loops out. A part built from several solids that overlap
+ * (a box with a cylinder pushed into it) is never merged into one mesh, and
+ * its pieces' loops overlap on the cut; told apart by parity alone, the
+ * overlap would read as a hole. The union needs a polygon library, so the
+ * caller brings it (see sectionMerge).
+ */
+export type Merge = (pieces: Flat[][]) => Flat[];
+
+/** The cut's outline on the sheet: every piece's loops, merged into one outline when they are several. */
+function cutOutline(pieces: BodyMesh[], view: DrawingView, offset: number, merge?: Merge): Flat[] {
+  const { w, u, v } = planeAxes(view);
+  const per = pieces
+    .map((piece) => sliceLoops(piece.positions, piece.faces, w, offset)
+      .map((loop) => simplify(loop.map((p) => [dot(p, u), dot(p, v)] as [number, number])))
+      .filter((loop) => loop.length >= 3))
+    .filter((loops) => loops.length);
+  const loops = per.length > 1 && merge ? merge(per).map(simplify) : per.flat();
+  return loops.filter((loop) => loop.length >= 3);
+}
 
 function area(loop: Flat): number {
   let a = 0;
@@ -174,9 +196,7 @@ function hullArea(loop: Flat): number {
  * through the wall between them is not, nor one through a row of pegs, each
  * a solid disc, nor a slice off the tip of a cone.
  */
-function measure(loops: Vec3[][], view: DrawingView): { material: number; hollow: number; box: number } {
-  const { u, v } = planeAxes(view);
-  const flat = loops.map((loop) => loop.map((p) => [dot(p, u), dot(p, v)] as [number, number]));
+function measure(flat: Flat[]): { material: number; hollow: number; box: number } {
   if (!flat.length) return { material: 0, hollow: 0, box: 0 };
   const deep = depths(flat);
   let material = 0, envelope = 0, u0 = Infinity, u1 = -Infinity, v0 = Infinity, v1 = -Infinity;
@@ -209,7 +229,7 @@ export function sectionPlane(body: BodyMesh, view: DrawingView, at: number): { n
  * most — the hollowest cut, and of cuts about as hollow, the one nearest the
  * middle. The answer is a share of the part's depth, 0 at the near side.
  */
-export function bestSectionAt(body: BodyMesh, view: DrawingView): number {
+export function bestSectionAt(body: BodyMesh, view: DrawingView, pieces: BodyMesh[] = [body], merge?: Merge): number {
   // The part's own box on the sheet, which a cut worth showing spans a fair share of.
   const { u, v } = planeAxes(view);
   let u0 = Infinity, u1 = -Infinity, v0 = Infinity, v1 = -Infinity;
@@ -224,8 +244,8 @@ export function bestSectionAt(body: BodyMesh, view: DrawingView): number {
   const scored: { at: number; hollow: number }[] = [];
   for (let k = 1; k <= TRIES; k++) {
     const at = k / (TRIES + 1);
-    const { normal, offset } = sectionPlane(body, view, at);
-    const m = measure(sliceLoops(body.positions, body.faces, normal, offset), view);
+    const { offset } = sectionPlane(body, view, at);
+    const m = measure(cutOutline(pieces, view, offset, merge));
     if (fairCut(m)) scored.push({ at, hollow: m.hollow });
   }
   if (!scored.length) return 0.5;
@@ -241,8 +261,8 @@ export function bestSectionAt(body: BodyMesh, view: DrawingView): number {
   let refined = pick;
   for (let k = -REFINE; k <= REFINE; k++) {
     const at = pick.at + (k / REFINE) * step;
-    const { normal, offset } = sectionPlane(body, view, at);
-    const m = measure(sliceLoops(body.positions, body.faces, normal, offset), view);
+    const { offset } = sectionPlane(body, view, at);
+    const m = measure(cutOutline(pieces, view, offset, merge));
     if (fairCut(m) && m.hollow > refined.hollow + 1e-9) refined = { at, hollow: m.hollow };
   }
   return refined.at;
@@ -260,14 +280,12 @@ export interface Section {
 /**
  * The section of a part on the plane at `offset` along the view's line of
  * sight: its outline, its fill, and the slab that stands for it when it is
- * dimensioned. Null where the plane misses the part.
+ * dimensioned. Null where the plane misses the part. A part drawn as several
+ * pieces is cut piece by piece and the cuts merged by `merge`.
  */
-export function sectionOf(body: BodyMesh, view: DrawingView, offset: number): Section | null {
+export function sectionOf(body: BodyMesh, view: DrawingView, offset: number, pieces: BodyMesh[] = [body], merge?: Merge): Section | null {
   const { w, u, v } = planeAxes(view);
-  const loops = sliceLoops(body.positions, body.faces, w, offset);
-  if (!loops.length) return null;
-  const flat = loops.map((loop) => simplify(loop.map((p) => [dot(p, u), dot(p, v)] as [number, number])))
-    .filter((loop) => loop.length >= 3);
+  const flat = cutOutline(pieces, view, offset, merge);
   if (!flat.length) return null;
   const deep = depths(flat);
   // Material outlines and their holes, each loop turned the way the
@@ -312,7 +330,7 @@ export function sectionOf(body: BodyMesh, view: DrawingView, offset: number): Se
     }
   }
   return {
-    loops,
+    loops: turned.map((loop) => loop.map(([x, y]) => at(x, y, offset))),
     fill,
     body: { id: body.id, positions, faces, frame: body.frame },
   };

@@ -30,6 +30,7 @@ import {
 import { bodyOf } from '../../utils/measureScene';
 import { setLiveDimensions, type LiveDimension } from '../../utils/liveDimensions';
 import { bestSectionAt, sectionOf, sectionPlane } from '../../utils/sectionSlice';
+import { loadSectionMerge, sectionMerge } from '../../utils/sectionMerge';
 import { useSection, type DrawnCut } from '../../store/sectionStore';
 import type { SceneNode } from '../../types/scene';
 import type { DataMirror, ModelMirror, MujocoShim } from '../../types/sceneLayer';
@@ -569,12 +570,20 @@ export function DimensionOverlay() {
   const sectionOn = useSection((s) => s.enabled) && on;
   const sectionAt = useSection((s) => s.at);
   const setCut = useSection((s) => s.setCut);
+  // The merge for parts drawn as overlapping pieces; measured again once it loads.
+  const [mergeReady, setMergeReady] = useState(() => sectionMerge() !== null);
+  useEffect(() => {
+    if (!sectionOn || mergeReady) return;
+    let live = true;
+    loadSectionMerge().then(() => { if (live) setMergeReady(true); }).catch(() => {});
+    return () => { live = false; };
+  }, [sectionOn, mergeReady]);
 
   // Tagged with what it was measured for, so a change of view or selection
   // never draws the last one's figures on the new sheet while it re-measures.
   const [found, setFound] = useState<{ key: string; dims: BodyDimensions[]; locations: LocationDim[]; cut: DrawnCut | null; at: number | null }>(
     { key: '', dims: [], locations: [], cut: null, at: null });
-  const measuring = `${view}|${selectedNodeId ?? ''}|${latticeNodeId ?? ''}|${sectionOn ? `cut:${sectionAt ?? 'auto'}` : ''}`;
+  const measuring = `${view}|${selectedNodeId ?? ''}|${latticeNodeId ?? ''}|${sectionOn ? `cut:${sectionAt ?? 'auto'}:${mergeReady}` : ''}`;
   const [mpp, setMpp] = useState(0);
   const [square, setSquare] = useState(false);
   const cache = useRef(new Map<string, { signature: string; dims: BodyDimensions | null }>());
@@ -588,7 +597,7 @@ export function DimensionOverlay() {
     lastSignature.current = '';
     lastPoll.current = 0;
     if (!on) setLiveDimensions([]);
-  }, [on, view, selectedNodeId, latticeNodeId, sectionOn, sectionAt]);
+  }, [on, view, selectedNodeId, latticeNodeId, sectionOn, sectionAt, mergeReady]);
 
   useFrame(({ camera, size }) => {
     if (!on || !view) return;
@@ -713,20 +722,26 @@ function measureSection(
   view: DrawingView,
   at: number | null,
 ): { dims: BodyDimensions[]; cut: DrawnCut | null; at: number | null } {
-  const meshes = [...pieces].map(([id, entry]) => bodyMesh(id, entry.pieces));
+  // Each part whole, and each of its pieces on its own: a part built from
+  // overlapping solids is cut piece by piece and the cuts merged.
+  const parts3 = [...pieces].map(([id, entry]) => ({
+    mesh: bodyMesh(id, entry.pieces),
+    pieces: entry.pieces.map((piece) => bodyMesh(id, [piece])),
+  }));
+  const merge = sectionMerge() ?? undefined;
   const all: BodyMesh = { id: 'all', positions: [], faces: [] };
-  for (const m of meshes) {
+  for (const { mesh: m } of parts3) {
     const base = (all.positions as number[]).length / 3;
     (all.positions as number[]).push(...(m.positions as number[]));
     (all.faces as number[]).push(...(m.faces as number[]).map((i) => i + base));
   }
   if (!all.faces.length) return { dims: [], cut: null, at: null };
-  const chosen = at ?? bestSectionAt(all, view);
+  const chosen = at ?? bestSectionAt(all, view, parts3.flatMap((p) => p.pieces), merge);
   const { normal, offset } = sectionPlane(all, view, chosen);
   const dims: BodyDimensions[] = [];
   const parts: DrawnCut['parts'] = [];
-  for (const mesh of meshes) {
-    const section = sectionOf(mesh, view, offset);
+  for (const { mesh, pieces: own } of parts3) {
+    const section = sectionOf(mesh, view, offset, own, merge);
     if (!section) continue;
     const d = bodyViewDimensions(section.body, view);
     if (d) dims.push(d);
