@@ -375,14 +375,20 @@ function coverage(positions: ArrayLike<number>, faces: ArrayLike<number>, axes: 
 type Piece = Stop & { reach: number };
 
 /** A circular arc found in an edge: its centre, axis and radius, its middle, and a few points on it. */
-interface Arc { centre: Vec3; axis: Vec3; radius: number; mid: Vec3; samples: Vec3[] }
+interface Arc { centre: Vec3; axis: Vec3; radius: number; mid: Vec3; samples: Vec3[]; sweep: number }
 
 /** A vertex turning less than this is straight on; more than this is a corner, not a facet of a round. */
 const ARC_TURN_MIN = (0.5 * Math.PI) / 180;
 const ARC_TURN_MAX = (40 * Math.PI) / 180;
 /** Least an arc must sweep to be one, and how round it must be: RMS radial error as a share of its radius. */
 const ARC_MIN_SWEEP = (20 * Math.PI) / 180;
-const ARC_MAX_ERROR = 0.02;
+const ARC_MAX_ERROR = 0.005;
+/**
+ * An arc sweeping this far (a channel's round floor, a slot's end) is located
+ * by its centre, as a hole is; a corner's quarter round is placed by the
+ * edges it runs into.
+ */
+const ARC_LOCATED_SWEEP = (150 * Math.PI) / 180;
 
 /**
  * The arcs in an edge's polyline: the runs where it turns steadily one way, a
@@ -445,7 +451,7 @@ export function arcsOf(points: Vec3[], closed: boolean): Arc[] {
     const off = Math.max(...pts.map((q) => Math.abs(dot(sub3(q, fit.centre), fit.normal))));
     if (off > ARC_MAX_ERROR * fit.radius) continue;
     const mid = pts[Math.floor(pts.length / 2)];
-    out.push({ centre: fit.centre, axis: fit.normal, radius: fit.radius, mid, samples: [pts[1], mid, pts[pts.length - 2]] });
+    out.push({ centre: fit.centre, axis: fit.normal, radius: fit.radius, mid, samples: [pts[1], mid, pts[pts.length - 2]], sweep });
   }
   return out;
 }
@@ -876,6 +882,10 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
     const du = dot(arc.mid, U) - centre[0], dv = dot(arc.mid, V) - centre[1];
     const k = Math.hypot(du, dv) || 1;
     radii.push({ centre, radius: arc.radius, toward: [du / k, dv / k] });
+    if (arc.sweep >= ARC_LOCATED_SWEEP) {
+      uStops.push({ at: centre[0], anchor: centre[1], weight: 2 * arc.radius, centre: true });
+      vStops.push({ at: centre[1], anchor: centre[0], weight: 2 * arc.radius, centre: true });
+    }
   }
   const radiusSizes: { radius: number; members: typeof radii }[] = [];
   for (const r of radii) {

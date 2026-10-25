@@ -29,6 +29,8 @@ import {
 } from '../../utils/viewDimensions';
 import { bodyOf } from '../../utils/measureScene';
 import { setLiveDimensions, type LiveDimension } from '../../utils/liveDimensions';
+import { bestSectionAt, sectionOf, sectionPlane } from '../../utils/sectionSlice';
+import { useSection, type DrawnCut } from '../../store/sectionStore';
 import type { SceneNode } from '../../types/scene';
 import type { DataMirror, ModelMirror, MujocoShim } from '../../types/sceneLayer';
 
@@ -563,11 +565,16 @@ export function DimensionOverlay() {
   const scene = useThree((s) => s.scene);
   const view = isDrawingView(cameraView) ? cameraView : null;
   const on = dimsEnabled && view !== null;
+  // A section view dimensions the cut face instead of the outside.
+  const sectionOn = useSection((s) => s.enabled) && on;
+  const sectionAt = useSection((s) => s.at);
+  const setCut = useSection((s) => s.setCut);
 
   // Tagged with what it was measured for, so a change of view or selection
   // never draws the last one's figures on the new sheet while it re-measures.
-  const [found, setFound] = useState<{ key: string; dims: BodyDimensions[]; locations: LocationDim[] }>({ key: '', dims: [], locations: [] });
-  const measuring = `${view}|${selectedNodeId ?? ''}|${latticeNodeId ?? ''}`;
+  const [found, setFound] = useState<{ key: string; dims: BodyDimensions[]; locations: LocationDim[]; cut: DrawnCut | null; at: number | null }>(
+    { key: '', dims: [], locations: [], cut: null, at: null });
+  const measuring = `${view}|${selectedNodeId ?? ''}|${latticeNodeId ?? ''}|${sectionOn ? `cut:${sectionAt ?? 'auto'}` : ''}`;
   const [mpp, setMpp] = useState(0);
   const [square, setSquare] = useState(false);
   const cache = useRef(new Map<string, { signature: string; dims: BodyDimensions | null }>());
@@ -581,7 +588,7 @@ export function DimensionOverlay() {
     lastSignature.current = '';
     lastPoll.current = 0;
     if (!on) setLiveDimensions([]);
-  }, [on, view, selectedNodeId, latticeNodeId]);
+  }, [on, view, selectedNodeId, latticeNodeId, sectionOn, sectionAt]);
 
   useFrame(({ camera, size }) => {
     if (!on || !view) return;
@@ -607,6 +614,13 @@ export function DimensionOverlay() {
     if (signature === lastSignature.current) return;
     lastSignature.current = signature;
 
+    if (sectionOn) {
+      const cut = measureSection(pieces, view, sectionAt);
+      setFound({ key: measuring, dims: cut.dims, locations: [], cut: cut.cut, at: cut.at });
+      setLiveDimensions(liveList(cut.dims, [], new Map(), view));
+      return;
+    }
+
     // Per body, so a sim moving one part re-measures that part alone.
     const next: BodyDimensions[] = [];
     for (const [id, entry] of pieces) {
@@ -622,7 +636,7 @@ export function DimensionOverlay() {
     }
     const links = locationLinks(next.map((d) => d.id), useStore.getState().sceneGraph.nodes);
     const located = selectedNodeId || links.length <= MAX_LOCATIONS ? locationDimensions(links, view) : [];
-    setFound({ key: measuring, dims: next, locations: located });
+    setFound({ key: measuring, dims: next, locations: located, cut: null, at: null });
     setLiveDimensions(liveList(next, located, new Map(links.map((l) => [l.id, l.parent])), view));
   });
 
@@ -630,6 +644,12 @@ export function DimensionOverlay() {
     () => (on && view && square && mpp > 0 && found.key === measuring ? layOut(found.dims, found.locations, view, mpp) : null),
     [on, view, square, mpp, found, measuring],
   );
+  // The cut is drawn by SectionCut, only while the figures are.
+  useEffect(() => {
+    setCut(drawing && found.cut ? found.cut : null, drawing ? found.at : null);
+  }, [drawing, found, setCut]);
+  useEffect(() => () => setCut(null, null), [setCut]);
+
   const geometries = useMemo(() => {
     const make = (array: Float32Array | undefined) => {
       const g = new THREE.BufferGeometry();
@@ -681,6 +701,38 @@ export function DimensionOverlay() {
       ))}
     </group>
   );
+}
+
+/**
+ * The section through the parts: one plane square to the view for all of
+ * them, where `at` says along their depth or, unset, where it shows most; each
+ * part's cut face, dimensioned. Parts the plane misses are left out.
+ */
+function measureSection(
+  pieces: Map<string, { pieces: DrawnPiece[] }>,
+  view: DrawingView,
+  at: number | null,
+): { dims: BodyDimensions[]; cut: DrawnCut | null; at: number | null } {
+  const meshes = [...pieces].map(([id, entry]) => bodyMesh(id, entry.pieces));
+  const all: BodyMesh = { id: 'all', positions: [], faces: [] };
+  for (const m of meshes) {
+    const base = (all.positions as number[]).length / 3;
+    (all.positions as number[]).push(...(m.positions as number[]));
+    (all.faces as number[]).push(...(m.faces as number[]).map((i) => i + base));
+  }
+  if (!all.faces.length) return { dims: [], cut: null, at: null };
+  const chosen = at ?? bestSectionAt(all, view);
+  const { normal, offset } = sectionPlane(all, view, chosen);
+  const dims: BodyDimensions[] = [];
+  const parts: DrawnCut['parts'] = [];
+  for (const mesh of meshes) {
+    const section = sectionOf(mesh, view, offset);
+    if (!section) continue;
+    const d = bodyViewDimensions(section.body, view);
+    if (d) dims.push(d);
+    parts.push({ id: mesh.id, fill: section.fill, loops: section.loops });
+  }
+  return { dims, cut: { normal, offset, parts }, at: chosen };
 }
 
 /** A short fingerprint of a long signature. */

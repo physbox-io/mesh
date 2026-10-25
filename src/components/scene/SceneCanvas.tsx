@@ -29,6 +29,7 @@ import { TransformGizmo } from './TransformGizmo';
 import { isGizmoBusy } from './gizmoBusy';
 import { MeasureTool } from './MeasureTool';
 import { DimensionOverlay } from './DimensionOverlay';
+import { SectionCut } from './SectionCut';
 import { EdgeRoundTool } from './EdgeRoundTool';
 import { ReferenceImages } from './ReferenceImages';
 import {
@@ -331,6 +332,7 @@ export function SceneCanvas({ threeSceneRef, axisCanvasRef, darkMode, onImportSc
       <TransformGizmo />
       <MeasureTool />
       <DimensionOverlay />
+      <SectionCut />
       <EdgeRoundTool />
 
       {/* Subtle contact-shadow AO — reads as "more depth", not a style

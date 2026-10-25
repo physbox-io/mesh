@@ -2,12 +2,18 @@ import { Box, Grid3x3, Aperture, Shapes } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
 import { useStore } from '../../store/useStore';
 import { useViewQuality } from '../../store/viewQualityStore';
+import { useSection } from '../../store/sectionStore';
 
 /** The floating buttons at the viewport's bottom right: camera views, overlays, render modes, grid size. */
 export function ViewControls() {
   const pathTrace = useViewQuality(s => s.pathTrace);
   const setPathTrace = useViewQuality(s => s.setPathTrace);
   const showColliders = useViewQuality(s => s.showColliders);
+  const sectionOn = useSection(s => s.enabled);
+  const setSectionOn = useSection(s => s.setEnabled);
+  const sectionAt = useSection(s => s.at);
+  const setSectionAt = useSection(s => s.setAt);
+  const shownAt = useSection(s => s.shownAt);
   const setShowColliders = useViewQuality(s => s.setShowColliders);
   const {
     cameraView, setCameraView,
@@ -60,6 +66,46 @@ export function ViewControls() {
         >
           Dims
         </button>
+      )}
+      {/* A cut through the parts, dimensioned instead of their outside: what
+          a pocket's depth or a channel's round floor needs. */}
+      {cameraView !== 'perspective' && dimsEnabled && (
+        <button
+          onClick={() => setSectionOn(!sectionOn)}
+          title="Cut through the parts square to this view and dimension the cut face: depths, wall thicknesses, the radius of a round floor"
+          className={`px-2.5 py-1 rounded text-[10px] font-bold tracking-wide transition-all cursor-pointer ${
+            sectionOn
+              ? 'bg-amber-500 text-white shadow-xs'
+              : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+          }`}
+        >
+          Section
+        </button>
+      )}
+      {cameraView !== 'perspective' && dimsEnabled && sectionOn && (
+        <div className="flex items-center gap-1 px-1">
+          <input
+            type="range"
+            min={0.01}
+            max={0.99}
+            step={0.01}
+            value={sectionAt ?? shownAt ?? 0.5}
+            onChange={(e) => setSectionAt(parseFloat(e.target.value))}
+            title="Where to cut, from the near side of the parts to the far side"
+            className="w-20 accent-amber-500 cursor-pointer"
+          />
+          <button
+            onClick={() => setSectionAt(null)}
+            title="Cut where it shows the most"
+            className={`px-1.5 py-1 rounded text-[10px] font-bold tracking-wide transition-all cursor-pointer ${
+              sectionAt === null
+                ? 'text-amber-600 dark:text-amber-400'
+                : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
+            }`}
+          >
+            Auto
+          </button>
+        </div>
       )}
       {/* Checks the selected part against how it will actually be made.
           No process picker: the machine and the material are already
