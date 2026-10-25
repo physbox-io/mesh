@@ -142,6 +142,8 @@ export const MAX_DIM_TRIANGLES = 60000;
 const MERGE_M = 0.0005;
 /** At most this many stops in a chain, the ends included. */
 const MAX_STOPS = 8;
+/** An edge at least this share of the part along its own direction runs its whole span. */
+const FULL_SPAN = 0.9;
 /** An edge shorter than this share of the part along its own direction is detail, not a face. */
 const MIN_EDGE_SHARE = 0.1;
 /** Within about 2°, a straight edge runs straight up or straight along the sheet. */
@@ -221,12 +223,14 @@ export function sheetAxes(frame: [Vec3, Vec3, Vec3] | undefined, view: DrawingVi
 interface Stop { at: number; anchor: number; weight: number; centre?: boolean }
 
 /**
- * Sorted stops with the near-duplicates merged and the ends always in — or just
- * the two ends, when there are more than a chain can hold. A part with that many
- * edges square to the sheet (a gear's teeth, a grille) is not one a chain of
- * figures explains, and picking some of them would be arbitrary.
+ * Sorted stops with the near-duplicates merged and the ends always in — or, when
+ * there are more than a chain can hold, only the edges that run the part's whole
+ * span across (`across`): its own outline, as a tray's back plate is, where the
+ * rest are its channels. A part with that many edges square to the sheet (a
+ * gear's teeth, a grille) is not one a chain of figures explains, and picking
+ * some of them would be arbitrary; the whole-span ones are not a pick.
  */
-function chainStops(stops: Stop[], lo: number, hi: number, loAnchor: number, hiAnchor = loAnchor): Stop[] {
+function chainStops(stops: Stop[], lo: number, hi: number, across: number, loAnchor: number, hiAnchor = loAnchor): Stop[] {
   const all = [...stops, { at: lo, anchor: loAnchor, weight: Infinity }, { at: hi, anchor: hiAnchor, weight: Infinity }]
     .sort((x, y) => x.at - y.at);
   const merged: Stop[] = [];
@@ -253,7 +257,8 @@ function chainStops(stops: Stop[], lo: number, hi: number, loAnchor: number, hiA
       Math.abs(s.at - (prev.at + next.at) / 2) < MERGE_M) merged.splice(i, 1);
   }
   if (merged.length <= MAX_STOPS) return merged;
-  return [merged[0], merged[merged.length - 1]];
+  const outline = merged.filter((s) => s.weight >= FULL_SPAN * across);
+  return outline.length <= MAX_STOPS ? outline : [merged[0], merged[merged.length - 1]];
 }
 
 /**
@@ -288,6 +293,66 @@ function coverage(positions: ArrayLike<number>, faces: ArrayLike<number>, axes: 
       }
     }
     return false;
+  };
+}
+
+/**
+ * Where a round seen side on stands out of the part, found from one of its
+ * rims: the stretch of its axis where it stands proud (its centre line
+ * covered, the sheet just past its radius either side not), from where it
+ * leaves the part to its tip, domed or flat. A peg leaving a plate has a rim
+ * only where it meets the plate, often just inside it, or where its shank
+ * meets its dome, and none at the tip itself. Null when it stands proud on
+ * neither side within a few radii of the rim.
+ */
+function proudRound(
+  covered: (u: number, v: number) => boolean,
+  along: 'u' | 'v',
+  cu: number,
+  cv: number,
+  radius: number,
+): { from: number; tip: number } | null {
+  const centre = along === 'v' ? cv : cu;
+  const at = (s: number, off: number) => along === 'v' ? covered(cu + off, s) : covered(s, cv + off);
+  const onAxis = (s: number) => at(s, 0);
+  const proud = (s: number) => onAxis(s) && !at(s, radius + PAST_M) && !at(s, -radius - PAST_M);
+  /** The boundary between `inside` (test true) and `outside`, to a micron. */
+  const refine = (inside: number, outside: number, test: (s: number) => boolean) => {
+    for (let i = 0; i < 24 && Math.abs(outside - inside) > 1e-6; i++) {
+      const mid = (inside + outside) / 2;
+      if (test(mid)) inside = mid;
+      else outside = mid;
+    }
+    return inside;
+  };
+  const step = radius / 4;
+  /** From `s`, along `dir` while `test` holds: the last step it held and the first it did not. */
+  const walk = (s: number, dir: number, test: (s: number) => boolean) => {
+    let next = s + dir * step;
+    for (let k = 0; k < 100000 && test(next); k++) { s = next; next = s + dir * step; }
+    return { last: s, first: next };
+  };
+  let p: number | null = null;
+  for (let k = 0; k <= 16 && p === null; k++) {
+    for (const dir of [1, -1]) if (p === null && proud(centre + dir * k * step)) p = centre + dir * k * step;
+  }
+  if (p === null) return null;
+  // Each way, out to where it stops standing proud: past the tip, where its
+  // centre line leaves the part; into the part it stands out of, where
+  // material covers it both sides; or into a bend, one side still clear.
+  const clear = (s: number) => !at(s, radius + PAST_M) || !at(s, -radius - PAST_M);
+  const ends = [1, -1].map((dir) => {
+    const { last, first } = walk(p, dir, proud);
+    return { dir, last, first, tip: !onAxis(first), bend: clear(first) };
+  });
+  const tipEnd = ends.find((e) => e.tip) ?? ends.find((e) => e.bend) ??
+    // Into material both ways: the tip is the way its centre line leaves the part sooner.
+    ends.reduce((a, b) => (Math.abs(walk(a.last, a.dir, onAxis).last - p) <= Math.abs(walk(b.last, b.dir, onAxis).last - p) ? a : b));
+  const base = ends.find((e) => e !== tipEnd)!;
+  const out = walk(tipEnd.last, tipEnd.dir, onAxis);
+  return {
+    from: refine(base.last, base.first, base.tip ? onAxis : proud),
+    tip: refine(out.last, out.first, onAxis),
   };
 }
 
@@ -418,6 +483,8 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
   // Whether something straight runs along each axis, which is what makes the
   // part's turn in the view an angle worth giving: a plain disc's is not.
   const straight = { u: false, v: false };
+  // Rounds standing out of the part whose rims are buried (see proudRound).
+  const pegs: { along: 'u' | 'v'; cu: number; cv: number; radius: number }[] = [];
 
   /**
    * A round seen side on, its axis along `along`: its silhouette is a stop each
@@ -490,12 +557,34 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
         const shows = along === 'v'
           ? [cv - PAST_M, cv + PAST_M].some((v) => !covered(cu - r, v) || !covered(cu + r, v))
           : [cu - PAST_M, cu + PAST_M].some((u) => !covered(u, cv - r) || !covered(u, cv + r));
-        if (!shows) continue;
+        if (!shows) {
+          // Covered both sides can still be a peg: the plate on one side, the
+          // peg itself on the other, out to a domed tip that has no edge.
+          const peg = proudRound(covered, along, cu, cv, e.radius);
+          if (!peg) continue;
+          const stops = along === 'v' ? vStops : uStops;
+          const across = along === 'v' ? cu : cv;
+          stops.push(
+            { at: peg.from, anchor: across - e.radius, weight: 2 * e.radius },
+            { at: peg.tip, anchor: across - e.radius, weight: 2 * e.radius },
+          );
+          pegs.push({ along, cu, cv, radius: e.radius });
+          continue;
+        }
         if (along === 'v') vStops.push({ at: cv, anchor: cu - e.radius, weight: 2 * e.radius });
         else uStops.push({ at: cu, anchor: cv - e.radius, weight: 2 * e.radius });
         silhouette(along, cu, cv, e.radius, 2 * e.radius);
       }
     }
+  }
+
+  // A peg's sides, unless an end-on round of its size is on its axis (a hook's
+  // leg in line with its arm seen end-on): that circle already gives its ⌀ and
+  // locates it, and its two sides would crowd the chain past MAX_STOPS.
+  for (const peg of pegs) {
+    const inLine = circles.some((c) => Math.abs(c.radius - peg.radius) < 0.1 * peg.radius &&
+      (peg.along === 'v' ? Math.abs(c.centre[0] - peg.cu) : Math.abs(c.centre[1] - peg.cv)) < MERGE_M);
+    if (!inLine) silhouette(peg.along, peg.cu, peg.cv, peg.radius, 2 * peg.radius);
   }
 
   // Rods: seen end-on, a circle; seen side on, a silhouette each side, and the
@@ -616,7 +705,7 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
   });
   const rows = (axis: 'u' | 'v', stops: Stop[], lo: number, hi: number, edge: number, loAnchor: number, hiAnchor: number) => {
     if (!(hi - lo > SAME_M)) return;
-    const chain = chainStops(stops, lo, hi, loAnchor, hiAnchor);
+    const chain = chainStops(stops, lo, hi, axis === 'u' ? height : width, loAnchor, hiAnchor);
     if (sphereSpans(axis, lo, hi)) {
       for (let i = 0; i + 1 < chain.length; i++) {
         if (isDiameter(axis, chain[i].at, chain[i + 1].at)) dims.push(linear(axis, chain[i], chain[i + 1], 1, edge));

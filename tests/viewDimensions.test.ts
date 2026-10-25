@@ -454,3 +454,49 @@ describe('banked oval curve track', () => {
   });
 });
 
+
+describe('pegboard nubs on a back plate', () => {
+  // The CNC bit tray, side on: a slab and a back plate, a stub and an L-hook
+  // leaving the plate's back face, each ending in a dome. The pegs' rims are
+  // where they meet the plate, covered both sides — by the plate on one and
+  // the peg itself on the other — and their domed tips have no edge at all.
+  const r = mm(2);
+  const alongY = (y0: number, y1: number, z: number) => body(
+    new THREE.CylinderGeometry(r, r, mm(y1 - y0), 32).translate(0, mm((y0 + y1) / 2), mm(z)));
+  const upZ = (y: number, z0: number, z1: number) => body(
+    new THREE.CylinderGeometry(r, r, mm(z1 - z0), 32).rotateX(Math.PI / 2).translate(0, mm(y), mm((z0 + z1) / 2)));
+  const ball = (y: number, z: number) => body(new THREE.SphereGeometry(r, 32, 16).translate(0, mm(y), mm(z)));
+  const tray = () => joined('tray', [
+    body(new THREE.BoxGeometry(mm(60), mm(100), mm(10)).translate(0, mm(50), mm(5))),
+    body(new THREE.BoxGeometry(mm(60), mm(4), mm(40)).translate(0, mm(98), mm(20))),
+    alongY(99, 104, 5), ball(104, 5),
+    alongY(99, 108, 30), ball(108, 30), upZ(108, 30, 36), ball(108, 36),
+  ]);
+
+  it('side view: the pegs get their ⌀ and how far they reach', () => {
+    const d = bodyViewDimensions(tray(), 'side');
+    // Across: to the plate's back face, the plate, the stub's reach; the hook's
+    // last 4 is the overall less the rest.
+    expect(linear(d, 'u', 1).map((x) => x.label)).toEqual(['96', '4', '6']);
+    expect(linear(d, 'u', 2).map((x) => x.label)).toEqual(['110']);
+    // Up: each peg is a diameter, located from the bottom.
+    expect(linear(d, 'v', 1).map((x) => x.label)).toEqual(['3', '⌀4', '18', '⌀4', '8']);
+    expect(linear(d, 'v', 2).map((x) => x.label)).toEqual(['40']);
+  });
+});
+
+describe('a chain with too many stops', () => {
+  it('keeps the edges that run the whole part, not just the overall', () => {
+    // A 100 deep tray with a back wall, and more ribs than a chain can hold.
+    const ribs = [15, 27, 39, 51, 63].map((y) =>
+      body(new THREE.BoxGeometry(mm(60), mm(4), mm(3)).translate(0, mm(y), mm(11.5))));
+    const tray = joined('tray', [
+      body(new THREE.BoxGeometry(mm(100), mm(100), mm(10)).translate(0, mm(50), mm(5))),
+      body(new THREE.BoxGeometry(mm(100), mm(10), mm(30)).translate(0, mm(95), mm(15))),
+      ...ribs,
+    ]);
+    const d = bodyViewDimensions(tray, 'topDown');
+    expect(linear(d, 'v', 1).map((x) => x.label)).toEqual(['90']);
+    expect(linear(d, 'v', 2).map((x) => x.label)).toEqual(['100']);
+  });
+});
