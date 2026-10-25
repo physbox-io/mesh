@@ -37,6 +37,7 @@ export const PRESET_SHELF: Record<string, ExampleShelf> = {
   pendulum: 'Mechanisms',
   stepper_turntable: 'Mechanisms',
   spring_launcher: 'Mechanisms',
+  bearing_cart: 'Mechanisms',
   cubes: 'Mechanisms',
   gears: 'Mechanisms',
   machine: 'Mechanisms',

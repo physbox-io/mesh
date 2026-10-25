@@ -13,7 +13,7 @@ import * as THREE from 'three';
 import type { HardwarePart, SceneGeom, SceneGraph, SceneNode } from '../types/scene';
 import { cutGeometry } from '../utils/csg';
 import { hardwareCutGeoms, type HardwareCutSpec } from '../utils/hardwareCuts';
-import { hardwarePartNode, seatPart } from '../utils/hardwareParts';
+import { fasten, hardwarePartNode, rebuildPart, screwFit, seatFor, seatPart } from '../utils/hardwareParts';
 import { addDrawerRunners, fixToPiece } from '../utils/linearPlacement';
 import { carriageRange, joinPose, meeting, type JoinKind } from '../utils/extrusionParts';
 
@@ -329,7 +329,68 @@ api.applyJointForce('lift_slide', 400 * (target - z) - 25 * v + api.getMass() * 
 }
 
 // ---------------------------------------------------------------------------
+// A cart on skate bearings, its deck screwed on
+// ---------------------------------------------------------------------------
 
+function bearingCart(): SceneGraph {
+  // A ramp falling 10° toward +X, and the cart a quarter of the way down it.
+  const a = (10 * Math.PI) / 180;
+  const tilt = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), a);
+  const down = new THREE.Vector3(1, 0, 0).applyQuaternion(tilt);
+  const up = new THREE.Vector3(0, 0, 1).applyQuaternion(tilt);
+  const rampCentre = new THREE.Vector3(0, 0, 0.4 * Math.sin(a) + 0.01);
+  const ramp = body('ramp', rampCentre.toArray(), [box('ramp_board', [0.42, 0.12, 0.01], [0, 0, 0], WOOD, 2)], false, {
+    quat: [tilt.w, tilt.x, tilt.y, tilt.z],
+  });
+  const onRamp = rampCentre.clone().addScaledVector(down, -0.28).addScaledVector(up, 0.01);
+  const q = [tilt.w, tilt.x, tilt.y, tilt.z];
+  const at = (local: number[]) => onRamp.clone().addScaledVector(up, 0.025).add(new THREE.Vector3(...(local as [number, number, number])).applyQuaternion(tilt)).toArray().map((v) => +v.toFixed(6));
+
+  // The chassis, with four tapping holes for the deck's screws, and the axles drawn.
+  const axles = [-1, 1].map((sx) => ({
+    name: `chassis_axle_${sx > 0 ? 'front' : 'back'}`, type: 'cylinder', size: [0.004, 0.049], pos: [sx * 0.06, 0, 0],
+    quat: [Math.SQRT1_2, -Math.SQRT1_2, 0, 0], rgba: [0.74, 0.76, 0.79, 1], contype: 0, conaffinity: 0, mass: 0.01,
+  } as SceneGeom));
+  const chassis = body('chassis', at([0, 0, 0]), [box('chassis_plate', [0.08, 0.035, 0.006], [0, 0, 0], PLA_GREY, 0.3), ...axles], true, { quat: q });
+  chassis.csgEnabled = true;
+  chassis.csgCollision = 'auto';
+  const corners = [[-0.05, -0.02], [-0.05, 0.02], [0.05, -0.02], [0.05, 0.02]];
+  corners.forEach(([x, y], i) => {
+    const hole = { name: `chassis_tap${i}`, type: 'cylinder', size: [0.00125, 0], csg: 'difference', cutAt: [x, y, 0.006], cutNormal: [0, 0, 1], cutDepth: 0.008, rgba: [0.9, 0.25, 0.35, 1] } as SceneGeom;
+    chassis.geoms.push(hole);
+    Object.assign(hole, cutGeometry(chassis, hole));
+  });
+
+  // The deck, counterbored for M3 cap screws over the chassis's holes.
+  const deck = body('deck', at([0, 0, 0.006 + 0.005]), [box('deck_plate', [0.075, 0.032, 0.005], [0, 0, 0], PLA_ORANGE, 0.08)], true, { quat: q });
+  const scene = { nodes: [ramp, chassis, deck] } as SceneGraph;
+  corners.forEach(([x, y], i) => {
+    const group = cut(deck, { kind: 'counterbore', size: 'M3', at: [x, y, 0.005], normal: [0, 0, 1] }, `screw${i}`);
+    const screw = seat(deck, group, { kind: 'screw', size: 'M3' }, `deck_screw${i}`);
+    const fit = screwFit(scene, deck, screw, seatFor(deck, group, 'screw')!.gripM!);
+    rebuildPart(screw, { ...screw.hardwarePart!, lengthMm: fit.lengthMm });
+    if (!fit.target || !fasten(screw, deck, fit.target)) throw new Error('preset: a deck screw reaches nothing');
+  });
+
+  // Four wheels, each on a 608 pressed into its inner face, the inner race fixed to the chassis.
+  for (const [sx, sy] of [[-1, -1], [-1, 1], [1, -1], [1, 1]]) {
+    const id = `wheel_${sx > 0 ? 'front' : 'back'}_${sy > 0 ? 'left' : 'right'}`;
+    const wheel = body(id, at([sx * 0.06, sy * 0.049, 0]), [
+      { name: `${id}_tyre`, type: 'cylinder', size: [0.025, 0.01], quat: [Math.SQRT1_2, -Math.SQRT1_2, 0, 0], rgba: [0.12, 0.12, 0.13, 1], mass: 0.04 } as SceneGeom,
+    ], true, { quat: q });
+    const group = cut(wheel, { kind: 'bearing', size: '608', at: [0, -sy * 0.01, 0], normal: [0, -sy, 0] }, 'bearing_seat');
+    const bearing = seat(wheel, group, { kind: 'bearing', size: '608' }, `${id}_bearing`);
+    const inner = bearing.children[0];
+    inner.weldTargetId = chassis.id;
+    inner.weldRigid = true;
+    scene.nodes.push(wheel);
+  }
+  return scene;
+}
+
+// ---------------------------------------------------------------------------
+
+export const bearingCartPreset = bearingCart();
 export const chestOfDrawersPreset = chestOfDrawers();
 export const xyPlotterPreset = xyPlotter();
 export const stepperTurntablePreset = stepperTurntable();

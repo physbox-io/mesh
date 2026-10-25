@@ -16,7 +16,7 @@ import { oakTreePreset } from './oakTree';
 import { soapDishPreset } from './soapDish';
 import { shatterPreset } from './shatter';
 import {
-  chestOfDrawersPreset, extrusionFramePreset, sealedJarPreset, springLauncherPreset, stepperTurntablePreset, xyPlotterPreset,
+  bearingCartPreset, chestOfDrawersPreset, extrusionFramePreset, sealedJarPreset, springLauncherPreset, stepperTurntablePreset, xyPlotterPreset,
 } from './hardwarePresets';
 
 export const pendulumPreset: SceneGraph = {
@@ -3616,6 +3616,12 @@ export const PRESETS = {
     emoji: '🫙',
     scene: sealedJarPreset,
     camera: { position: [0.16, -0.22, 0.17], target: [0, 0, 0.045] } satisfies PresetCamera,
+  },
+  bearing_cart: {
+    name: 'Skate Bearing Cart',
+    emoji: '🛹',
+    scene: bearingCartPreset,
+    camera: { position: [0.55, -0.75, 0.42], target: [0.05, 0, 0.06] } satisfies PresetCamera,
   },
   extrusion_frame: {
     name: '2020 Extrusion Frame',

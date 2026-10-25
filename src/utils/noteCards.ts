@@ -540,6 +540,20 @@ A printed jar whose lid seals on a **nitrile O-ring**, in a face groove the app 
 - Lift the lid half a millimetre: it now says the ring is squeezed too little, and how far to bring the lid back down
 - Slide the lid sideways: it says the lid misses part of the ring`,
 
+  bearing_cart: `# 🛹 Skate Bearing Cart
+
+A printed cart rolling down a 10° ramp on four wheels, each on a **608 skate bearing**. Its deck is held on by four **M3 cap screws**.
+
+## What is real here
+- Each bearing is pressed into a pocket in its wheel. Its inner race turns on its own hinge and is fixed to the chassis, so the wheel spins about the axle and nothing else
+- Each screw sits in a counterbore in the deck, is sized to reach into the tapping hole under it, and holds the deck to the chassis
+- Bearings and screws are **bought parts**: they are left out of the print
+
+## Try it
+- Press **Play** and watch it roll
+- Delete a screw: the deck stays on while another holds it. Delete all four and it comes off at the bottom
+- **Parts** lists 4 bearings and 4 screws to buy`,
+
   extrusion_frame: `# 🏗️ 2020 Extrusion Frame
 
 A 300 mm cube of **20 × 20 T-slot extrusion**, held together by **16 corner brackets**. One upright is **V-slot**, with a wheel carriage running up and down it.

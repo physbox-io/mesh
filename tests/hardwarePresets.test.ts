@@ -5,7 +5,7 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import load_mujoco from '@mujoco/mujoco';
 import {
-  chestOfDrawersPreset, extrusionFramePreset, sealedJarPreset, springLauncherPreset, stepperTurntablePreset, xyPlotterPreset,
+  bearingCartPreset, chestOfDrawersPreset, extrusionFramePreset, sealedJarPreset, springLauncherPreset, stepperTurntablePreset, xyPlotterPreset,
 } from '../src/presets/hardwarePresets';
 import { compileToMJCF } from '../src/utils/mjcf';
 import { sealFindings, runnerFindings } from '../src/utils/hardwareChecks';
@@ -139,6 +139,26 @@ describe('sealed jar', () => {
     const lifted = structuredClone(sealedJarPreset);
     lifted.nodes.find((n) => n.id === 'lid')!.pos[2] += 0.0005;
     expect(sealFindings(lifted, 'print')[0].title).toMatch(/squeezed only/);
+  });
+});
+
+describe('skate bearing cart', () => {
+  it('rolls down its ramp on its bearings, deck on and upright', () => {
+    const s = sim(bearingCartPreset);
+    const x0 = s.pos('chassis')[0];
+    const gap0 = s.pos('deck')[2] - s.pos('chassis')[2];
+    s.step(1.5);
+    expect(s.pos('chassis')[0] - x0).toBeGreaterThan(0.15);
+    const spin = s.data.qvel[s.model.jnt_dofadr[s.joint('wheel_front_left_bearing_spin')]];
+    expect(Math.abs(spin)).toBeGreaterThan(5);
+    expect(Math.abs(s.pos('deck')[2] - s.pos('chassis')[2] - gap0)).toBeLessThan(0.002);
+    s.done();
+  }, 60_000);
+
+  it('lists its bearings and screws to buy', () => {
+    const rows = hardwareList(bearingCartPreset).rows;
+    expect(rows.find((r) => r.kind === 'bearing')?.count).toBe(4);
+    expect(rows.find((r) => r.kind === 'screw')?.count).toBe(4);
   });
 });
 
