@@ -9,6 +9,7 @@ import { stlToMesh } from '../src/utils/stlMesh';
 import { analyzeMesh } from '../src/utils/meshIntegrity';
 import { loadManifold } from '../src/utils/sculptCut';
 import type { Grid } from '../src/utils/moldColumns';
+import { moldOptionsFor } from '../src/utils/moldWorkerClient';
 
 const box = (name: string, half: number[], z: number): SceneGeom =>
   ({ name, type: 'box', size: half, pos: [0, 0, z] }) as SceneGeom;
@@ -265,5 +266,14 @@ describe('3MF assemblies', () => {
     const prusa = strFromU8(files['Metadata/Slic3r_PE_model.config']);
     expect(prusa).toMatch(/<object id="2" instances_count="1">[\s\S]*?<volume firstid="0" lastid="3">/);
     expect(strFromU8(files['[Content_Types].xml'])).toContain('Extension="config"');
+  });
+});
+
+describe('MCP mold options', () => {
+  it('passes the liner through, and drops a cast material it does not know', () => {
+    const { options } = moldOptionsFor({ kind: 'mold', dissolvableLiner: true, linerSkinMm: 1.6, castMaterial: 'plaster' });
+    expect(options).toMatchObject({ dissolvableLiner: true, linerSkinMm: 1.6, castMaterial: 'plaster' });
+    expect(moldOptionsFor({ castMaterial: 'chocolate', linerSkinMm: -1 }).options).not.toHaveProperty('castMaterial');
+    expect(moldOptionsFor({ linerSkinMm: -1 }).options).not.toHaveProperty('linerSkinMm');
   });
 });

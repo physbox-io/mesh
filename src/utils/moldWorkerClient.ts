@@ -30,6 +30,7 @@ import {
 } from './moldCastSimulation';
 import type { SceneGraph, SceneNode } from '../types/scene';
 import { loadManifold } from './sculptCut';
+import { isCastMaterial } from './moldLiner';
 import { stlToMesh } from './stlMesh';
 import { appendSolidTriangles } from './contourSliceExporter';
 import { getNodeWorldTransform } from './laserCutExporter';
@@ -226,6 +227,9 @@ export function moldOptionsFor(msg: Record<string, unknown>): {
       ...(typeof msg.includeVents === 'boolean' ? { includeVents: msg.includeVents } : {}),
       ...(typeof msg.ventDiaMm === 'number' ? { ventDiaMm: msg.ventDiaMm } : {}),
       ...(typeof msg.includePryNotches === 'boolean' ? { includePryNotches: msg.includePryNotches } : {}),
+      ...(typeof msg.dissolvableLiner === 'boolean' ? { dissolvableLiner: msg.dissolvableLiner } : {}),
+      ...(typeof msg.linerSkinMm === 'number' && msg.linerSkinMm > 0 ? { linerSkinMm: msg.linerSkinMm } : {}),
+      ...(isCastMaterial(msg.castMaterial) ? { castMaterial: msg.castMaterial } : {}),
     },
   };
 }
@@ -336,8 +340,10 @@ export async function runMcpMoldSimulation(params: {
   placement: 'beside' | 'overlay';
   toId: (s: string) => string;
   findNodeInScene: (nodes: SceneNode[], id: string) => SceneNode | null;
+  /** The bridge's file packer, for a lined mold's 3MF. */
+  describeFiles?: (files: { name: string; bytes: Uint8Array }[], include: boolean) => unknown[];
 }): Promise<Record<string, unknown>> {
-  const { msg, scene, placement, toId, findNodeInScene } = params;
+  const { msg, scene, placement, toId, findNodeInScene, describeFiles } = params;
   const { options: moldOpts, fromDialog } = moldOptionsFor(msg);
   const optionsFrom = fromDialog ? 'the Export Mold dialog' : 'the scene defaults';
 
@@ -474,10 +480,11 @@ export async function runMcpMoldSimulation(params: {
   if (!scene.nodes?.some((n) => !n.simulation)) {
     return { ok: false, error: 'The scene has nothing to cut but earlier simulations.' };
   }
-  const { preview, stl } = await withWorker(async (c) => {
+  const { preview, stl, threeMf } = await withWorker(async (c) => {
     const p = await c.generate(scene, moldOpts);
     const bytes = p.summary.success ? await c.stl() : new Uint8Array(84);
-    return { preview: p, stl: bytes };
+    const lined = p.summary.success && p.summary.liner ? await c.threeMf() : null;
+    return { preview: p, stl: bytes, threeMf: lined };
   });
   const moldRes = preview.summary;
   if (!moldRes.success) {
@@ -508,6 +515,16 @@ export async function runMcpMoldSimulation(params: {
     cavityDepthMm: moldRes.cavityDepthMm,
     minDraftDeg: moldRes.minDraftDeg,
     volumeMm3: Math.round(added.volumeMm3),
+    ...(moldRes.liner ? { liner: moldRes.liner } : {}),
     warnings: moldRes.warnings,
+    // The two-material print file; its bytes only when the caller keeps them.
+    ...(threeMf && describeFiles
+      ? {
+          files: describeFiles(
+            [{ name: moldRes.moldType === 'open' ? 'casting_mold_open_pva.3mf' : 'casting_mold_plate_pva.3mf', bytes: threeMf }],
+            msg.includeFiles === true,
+          ),
+        }
+      : {}),
   };
 }
