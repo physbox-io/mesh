@@ -51,7 +51,7 @@ describe('resume buttons on a laser, whose Z datum is never set', () => {
     });
     const banner = (showZTools: boolean) =>
       renderToStaticMarkup(React.createElement(JobResumeBanner, { machineState: state, showZTools }));
-    expect(disabled(banner(false), 'Resume')).toBe(false);
-    expect(disabled(banner(true), 'Resume')).toBe(true);
+    expect(disabled(banner(false), 'Run From')).toBe(false);
+    expect(disabled(banner(true), 'Run From')).toBe(true);
   });
 });
