@@ -15,8 +15,8 @@
 
 import {
   generateMoldMeshes,
+  moldPreviewBuffers,
   moldSummary,
-  trianglesToBuffers,
   type MoldOptions,
 } from '../utils/moldExporter';
 import {
@@ -30,6 +30,7 @@ import { loadManifold } from '../utils/sculptCut';
 type Incoming =
   | { type: 'GENERATE'; id: number; scene?: SceneGraph; options: Partial<MoldOptions> }
   | { type: 'STL'; id: number }
+  | { type: 'THREEMF'; id: number }
   | { type: 'CAST'; id: number; options?: MoldCastSimulationOptions }
   | { type: 'CAST_NODE'; id: number; node: SceneNode; options?: MoldCastSimulationOptions };
 
@@ -47,13 +48,14 @@ self.onmessage = async (evt: MessageEvent<Incoming>) => {
       const result = generateMoldMeshes(scene, msg.options, wasm);
       last = result;
 
-      const bottom = trianglesToBuffers(result.bottomHalf.triangles);
-      const top = result.topHalf ? trianglesToBuffers(result.topHalf.triangles) : null;
+      const { bottom, top, liner } = moldPreviewBuffers(result);
       const transfer = [bottom.positions.buffer, bottom.normals.buffer];
       if (top) transfer.push(top.positions.buffer, top.normals.buffer);
+      if (liner) transfer.push(liner.bottom.positions.buffer, liner.bottom.normals.buffer);
+      if (liner?.top) transfer.push(liner.top.positions.buffer, liner.top.normals.buffer);
 
       self.postMessage(
-        { type: 'GENERATED', id: msg.id, summary: moldSummary(result), bottom, top },
+        { type: 'GENERATED', id: msg.id, summary: moldSummary(result), bottom, top, liner },
         transfer
       );
     } catch (e) {
@@ -68,6 +70,17 @@ self.onmessage = async (evt: MessageEvent<Incoming>) => {
     // mold however many times the download button is pressed.
     const bytes = last ? last.binarySTL : new Uint8Array(84);
     const copy = new Uint8Array(bytes); // transferred away, so the cache keeps its own
+    self.postMessage({ type: 'STL', id: msg.id, bytes: copy }, [copy.buffer]);
+    return;
+  }
+
+  if (msg.type === 'THREEMF') {
+    const bytes = last?.threeMf;
+    if (!bytes) {
+      self.postMessage({ type: 'FAILED', id: msg.id, message: 'This mold has no liner, so there is no two-material 3MF.' });
+      return;
+    }
+    const copy = new Uint8Array(bytes);
     self.postMessage({ type: 'STL', id: msg.id, bytes: copy }, [copy.buffer]);
     return;
   }

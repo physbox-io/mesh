@@ -17,7 +17,7 @@ import {
   generateMoldMeshes,
   lastMoldOptions,
   moldSummary,
-  trianglesToBuffers,
+  moldPreviewBuffers,
   type MoldHalfBuffers,
   type MoldOptions,
   type MoldSummary,
@@ -42,8 +42,11 @@ import { POUR_DIRECTIONS, type PourDirection, type PourInfo } from './pourCast';
 
 export interface MoldPreview {
   summary: MoldSummary;
+  /** Each half as drawn: with a liner, its PLA shell only. */
   bottom: MoldHalfBuffers;
   top: MoldHalfBuffers | null;
+  /** The PVA liner of each half, when the mold has one. */
+  liner: { bottom: MoldHalfBuffers; top: MoldHalfBuffers | null } | null;
 }
 
 type Settle = { resolve: (v: never) => void; reject: (e: Error) => void };
@@ -76,7 +79,7 @@ export class MoldWorkerClient {
         this.pending.delete(msg.id);
         if (msg.type === 'FAILED') settle.reject(new Error(msg.message));
         else if (msg.type === 'GENERATED') {
-          settle.resolve({ summary: msg.summary, bottom: msg.bottom, top: msg.top } as never);
+          settle.resolve({ summary: msg.summary, bottom: msg.bottom, top: msg.top, liner: msg.liner ?? null } as never);
         } else if (msg.type === 'STL') settle.resolve(msg.bytes as never);
         else if (msg.type === 'CAST') settle.resolve(msg.result as never);
       };
@@ -128,8 +131,7 @@ export class MoldWorkerClient {
       this.lastResult = result;
       return {
         summary: moldSummary(result),
-        bottom: trianglesToBuffers(result.bottomHalf.triangles),
-        top: result.topHalf ? trianglesToBuffers(result.topHalf.triangles) : null,
+        ...moldPreviewBuffers(result),
       };
     }
 
@@ -144,6 +146,17 @@ export class MoldWorkerClient {
     // The mold the dead worker held is gone with it.
     if (this.stopped) throw await this.stopped;
     return this.send<Uint8Array>({ type: 'STL' });
+  }
+
+  /** The lined mold as a two-material 3MF (PLA shell on filament 1, PVA liner on 2). */
+  async threeMf(): Promise<Uint8Array> {
+    if (!this.worker) {
+      const bytes = this.lastResult?.threeMf;
+      if (!bytes) throw new Error('This mold has no liner, so there is no two-material 3MF.');
+      return bytes;
+    }
+    if (this.stopped) throw await this.stopped;
+    return this.send<Uint8Array>({ type: 'THREEMF' });
   }
 
   /** Simulates the cast solid from whatever mold was generated last. */
