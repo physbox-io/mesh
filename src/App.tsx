@@ -13,6 +13,7 @@ import { AppDialogs } from './components/AppDialogs';
 import { useVoltLink } from './hooks/useVoltLink';
 import { JobRestoreModal } from './components/JobRestoreModal';
 import { JobSucceededModal } from './components/JobSucceededModal';
+import { ToolChangeModal } from './components/ToolChangeModal';
 import { JobPauseModal } from './components/JobPauseModal';
 import { PresetSaveNotice } from './components/PresetSaveNotice';
 import { UpdateNotice } from './components/UpdateNotice';
@@ -140,6 +141,7 @@ function App() {
       <JobSucceededModal />
       {/* A job stopped for a tool or sheet change, over whatever is open. */}
       <JobPauseModal />
+      <ToolChangeModal />
       <PresetSaveNotice />
       {/* This tab outlived a deploy and its workers no longer load. */}
       <UpdateNotice />

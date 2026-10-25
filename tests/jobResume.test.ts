@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { scanModalState, buildResumePreamble, planResume, locateExecutedLine } from '../src/utils/jobResume';
+// The planner itself moved to @physbox-io/machining (src/stream/resume.ts),
+// which carries its own unit tests. This file stays for what the package cannot
+// test: resuming a program written by this app's own exporters.
+import { scanModalState, buildResumePreamble, planResume, locateExecutedLine } from '@physbox-io/machining';
 import { prepareJobLines } from '../src/utils/webSerialManager';
 import { generateLaserCutGcode, DEFAULT_GCODE_OPTIONS } from '../src/utils/gcodeExporter';
 import type { LaserPanel, Point2D } from '../src/utils/laserCutExporter';

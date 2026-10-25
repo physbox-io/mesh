@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   Box,
@@ -23,6 +23,7 @@ import {
   DEFAULT_TIMBER_PLANK_OPTIONS,
   directionPhrase,
   packPartsLayFlatMetres,
+  resolveTimberTargetIds,
   type GrainAxis,
   type PlankJointType,
   type TimberPlank,
@@ -37,7 +38,7 @@ import {
   type TimberJoineryOptions,
   type TimberJointMode,
 } from '../utils/timberJoinery';
-import type { CncWindowSetup, TimberCutPlan } from '../utils/timberCutList';
+import { memberFaceNumber, type CncWindowSetup, type TimberCutPlan } from '../utils/timberCutList';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
 import type { SceneNode } from '../types/scene';
 import type { Vec3 } from '../utils/printPlate';
@@ -74,8 +75,8 @@ function dominantAxisOf(v: Vec3): GrainAxis {
 
 const BREAKDOWN_MODE_OPTIONS = [
   ['auto', 'Auto'],
-  ['frame', 'Frame (Legs & Rails)'],
-  ['planks', 'Box / Planks'],
+  ['frame', 'Frame'],
+  ['planks', 'Planks'],
 ] as const;
 
 const PLANK_JOINT_TYPE_OPTIONS = [
@@ -87,8 +88,8 @@ const PLANK_JOINT_TYPE_OPTIONS = [
 ] as const;
 
 const HOLLOW_INTERIOR_OPTIONS = [
-  ['hollow', 'Hollow Shell'],
-  ['solid', 'Solid Layers'],
+  ['hollow', 'Hollow'],
+  ['solid', 'Solid'],
 ] as const;
 
 const JOINT_MODE_OPTIONS = [
@@ -99,24 +100,24 @@ const JOINT_MODE_OPTIONS = [
 ] as const;
 
 const USE_CNC_OPTIONS = [
-  ['off', 'No (Shop Tools)'],
-  ['on', 'Optional CNC'],
+  ['off', 'Off (Shop)'],
+  ['on', 'On'],
 ] as const;
 
 const CORNER_FIT_OPTIONS = [
-  ['dogbone', 'Dogbone (Saw Tenon)'],
-  ['round_tenon', 'Rounded Tenon (CNC)'],
-  ['chisel_square', 'Square (Chisel)'],
+  ['dogbone', 'Dogbone'],
+  ['round_tenon', 'Round Tenon'],
+  ['chisel_square', 'Chisel Square'],
 ] as const;
 
 const EDGE_PROFILE_OPTIONS = [
-  ['roundover', 'Stopped Roundover'],
-  ['chamfer', 'Stopped Chamfer'],
-  ['square', 'Square Edges'],
+  ['roundover', 'Roundover'],
+  ['chamfer', 'Chamfer'],
+  ['square', 'Square'],
 ] as const;
 
 const TENON_METHOD_OPTIONS = [
-  ['bandsaw', 'Saw (4 Straight Cuts)'],
+  ['bandsaw', 'Saw (4 Cuts)'],
   ['cnc', 'CNC Router'],
 ] as const;
 
@@ -197,6 +198,9 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
       ...(key === 'boardThicknessMm' && prev.wallThicknessMm === prev.boardThicknessMm
         ? { wallThicknessMm: value as number }
         : {}),
+      ...(key === 'jointType' && value === 'butt' && prev.dowelDiaMm === 0
+        ? { dowelDiaMm: DEFAULT_TIMBER_PLANK_OPTIONS.dowelDiaMm }
+        : {}),
     }));
     if (key === 'jointType') {
       if (value === 'glue') {
@@ -222,7 +226,11 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
       if (value === 'butt') {
         setPlankOpts((prev) => ({ ...prev, jointType: 'glue' }));
       } else if (value === 'dowel') {
-        setPlankOpts((prev) => ({ ...prev, jointType: 'butt' }));
+        setPlankOpts((prev) => ({
+          ...prev,
+          jointType: 'butt',
+          ...(prev.dowelDiaMm === 0 ? { dowelDiaMm: DEFAULT_TIMBER_PLANK_OPTIONS.dowelDiaMm } : {}),
+        }));
       } else if (value === 'dado') {
         setPlankOpts((prev) => ({ ...prev, jointType: 'rabbet' }));
       } else if (value === 'mortise_tenon') {
@@ -238,17 +246,12 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
   const [placement, setPlacement] = useState<'replace' | 'beside'>('replace');
   const [isolatedPartIdx, setIsolatedPartIdx] = useState<number | null>(null);
   const [activeTab, setActiveTab] = useState<'cards' | 'bom' | 'glue'>('cards');
+  const cardsListRef = useRef<HTMLDivElement | null>(null);
 
-  const targetIds = useMemo(() => {
-    if (selectedNodeId && extraSelectedIds.length > 0) return [selectedNodeId, ...extraSelectedIds];
-    if (selectedNodeId) {
-      const selNode = findNode(sceneGraph.nodes, selectedNodeId);
-      const userGeomCount = selNode?.geoms?.filter((g) => !g.csgDerived && g.role !== 'collision').length ?? 0;
-      const isAssemblyNode = !!selNode && ((selNode.children?.length ?? 0) > 1 || userGeomCount > 1);
-      if (isAssemblyNode || sceneGraph.nodes.length === 1) return [selectedNodeId];
-    }
-    return sceneGraph.nodes.map((n) => n.id);
-  }, [selectedNodeId, extraSelectedIds, sceneGraph.nodes]);
+  const targetIds = useMemo(
+    () => resolveTimberTargetIds(sceneGraph.nodes, selectedNodeId, extraSelectedIds),
+    [selectedNodeId, extraSelectedIds, sceneGraph.nodes],
+  );
 
   const primaryNode = useMemo(
     () => findNode(sceneGraph.nodes, targetIds[0] ?? null),
@@ -313,23 +316,55 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
   const cutPlan: TimberCutPlan | null = effectiveMode === 'frame' ? (timberJob?.cutPlan ?? null) : null;
   const plankBreakdown = effectiveMode === 'planks' && plankOutcome?.ok ? plankOutcome : null;
 
+  const partFilterList = useMemo(
+    () =>
+      effectiveMode === 'planks' && plankBreakdown
+        ? plankBreakdown.planks.map((p) => ({ id: p.id, name: p.name }))
+        : breakdown
+          ? breakdown.parts.map((p) => ({ id: p.member.id, name: p.member.title }))
+          : [],
+    [effectiveMode, plankBreakdown, breakdown],
+  );
+
+  const activeIsolatedIdx =
+    isolatedPartIdx !== null && isolatedPartIdx < partFilterList.length ? isolatedPartIdx : null;
+
+  const selectPartIdx = (idx: number | null, scrollCardIntoView = false) => {
+    setIsolatedPartIdx(idx);
+    if (scrollCardIntoView && idx !== null && typeof document !== 'undefined') {
+      requestAnimationFrame(() => {
+        const el = cardsListRef.current?.querySelector(`[data-part-idx="${idx}"]`);
+        el?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      });
+    }
+  };
+
   const frameLayFlat = useMemo(() => {
     if (!breakdown) return null;
-    return packPartsLayFlatMetres(
-      breakdown.parts.map((p) => ({
+    const upNormals: Vec3[] = breakdown.parts.map((p) => {
+      if (p.mortises.length > 0) return p.mortises[0].faceNormal;
+      if (p.zClipSlots.length > 0) {
+        const n = p.zClipSlots[0].inwardNormal;
+        return [-n[0], -n[1], -n[2]];
+      }
+      return p.member.face1.normal;
+    });
+    const packed = packPartsLayFlatMetres(
+      breakdown.parts.map((p, idx) => ({
         positionsM: p.section.positions,
-        upNormal: p.member.face1.normal,
+        upNormal: upNormals[idx],
         grainAxis: dominantAxisOf(p.member.axes[0]),
       })),
     );
+    return { ...packed, upNormals };
   }, [breakdown]);
 
   const previewSections: PreviewSection[] = useMemo(() => {
     if (effectiveMode === 'planks' && plankBreakdown) {
       return plankBreakdown.planks
-        .filter((_, idx) => isolatedPartIdx === null || idx === isolatedPartIdx)
+        .filter((_, idx) => activeIsolatedIdx === null || idx === activeIsolatedIdx)
         .map((plank, idx) => {
-          const origIdx = isolatedPartIdx ?? idx;
+          const origIdx = activeIsolatedIdx ?? idx;
           const partNum = `${origIdx + 1}`;
           const explodeScale = Math.hypot(
             plank.explodedOffsetMm[0],
@@ -348,7 +383,7 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
           return {
             positions: viewMode === 'sheet' ? plank.layFlatPositionsM : plank.section.positions,
             faces: plank.section.faces,
-            explode: viewMode === 'sheet' || isolatedPartIdx !== null ? [0, 0, 0] : explodeUnit,
+            explode: viewMode === 'sheet' || activeIsolatedIdx !== null ? [0, 0, 0] : explodeUnit,
             colour: PREVIEW_COLOURS[origIdx % PREVIEW_COLOURS.length],
             pose: { up: plank.section.up, spin: plank.section.spin },
             faceLabels:
@@ -363,25 +398,32 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
     }
     if (!breakdown) return [];
     return breakdown.parts
-      .filter((_, idx) => isolatedPartIdx === null || idx === isolatedPartIdx)
+      .filter((_, idx) => activeIsolatedIdx === null || idx === activeIsolatedIdx)
       .map((p, idx) => {
-        const origIdx = isolatedPartIdx ?? idx;
+        const origIdx = activeIsolatedIdx ?? idx;
         const partNum = origIdx + 1;
         const flatPos = frameLayFlat?.layFlatPositionsM[origIdx];
+        const flatUpNormal = frameLayFlat?.upNormals[origIdx] ?? p.member.face1.normal;
+        const flatFaceNum = memberFaceNumber(p.member, flatUpNormal);
         const f1 = p.member.face1.normal;
         const f2 = p.member.face2.normal;
         const f3: Vec3 = [-f1[0], -f1[1], -f1[2]];
         const f4: Vec3 = [-f2[0], -f2[1], -f2[2]];
-        const prefix = isolatedPartIdx !== null ? '' : `${partNum}·`;
+        const prefix = activeIsolatedIdx !== null ? '' : `${partNum}·`;
         return {
           positions: viewMode === 'sheet' && flatPos ? flatPos : p.section.positions,
           faces: p.section.faces,
-          explode: viewMode === 'sheet' || isolatedPartIdx !== null ? [0, 0, 0] : p.section.explode,
+          explode: viewMode === 'sheet' || activeIsolatedIdx !== null ? [0, 0, 0] : p.section.explode,
           colour: PREVIEW_COLOURS[origIdx % PREVIEW_COLOURS.length],
           pose: { up: p.section.up, spin: p.section.spin },
           faceLabels:
             viewMode === 'sheet' && flatPos
-              ? [{ text: `${partNum}`, normal: [0, 0, 1] }]
+              ? [
+                  {
+                    text: p.member.role === 'panel' ? `${partNum}` : `${prefix}F${flatFaceNum}`,
+                    normal: [0, 0, 1],
+                  },
+                ]
               : p.member.role === 'panel'
                 ? [
                     { text: `${partNum}`, normal: f1 },
@@ -395,16 +437,9 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
                   ],
         };
       });
-  }, [effectiveMode, plankBreakdown, breakdown, frameLayFlat, isolatedPartIdx, viewMode]);
+  }, [effectiveMode, plankBreakdown, breakdown, frameLayFlat, activeIsolatedIdx, viewMode]);
 
   if (!isOpen) return null;
-
-  const partFilterList =
-    effectiveMode === 'planks' && plankBreakdown
-      ? plankBreakdown.planks.map((p) => ({ id: p.id, name: p.name }))
-      : breakdown
-        ? breakdown.parts.map((p) => ({ id: p.member.id, name: p.member.title }))
-        : [];
 
   const handleSendSetupToMachine = (setup: CncWindowSetup) => {
     if (!machineState.connected) {
@@ -520,7 +555,10 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
               <div className={`${sectionClass} shrink-0 !p-3 !space-y-2.5`}>
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-12 gap-3 items-end">
                   <div className="lg:col-span-3">
-                    <Field label="Breakdown Type">
+                    <Field
+                      label="Breakdown Type"
+                      hint="Auto picks Frame (legs & rails) for tables, chairs, and stands, or Planks for boxes and solid shells."
+                    >
                       <Segmented
                         value={modeSetting}
                         onChange={(v) => {
@@ -544,7 +582,10 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
                         </Field>
                       </div>
                       <div className="lg:col-span-2">
-                        <Field label="Interior">
+                        <Field
+                          label="Interior"
+                          hint="Hollow cuts a 6-wall box shell; Solid stacks laminated board layers."
+                        >
                           <Segmented
                             value={plankOpts.hollowInterior ? 'hollow' : 'solid'}
                             onChange={(v) => setPlankOpt('hollowInterior', v === 'hollow')}
@@ -592,7 +633,7 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
                           </Field>
                         </div>
                       )}
-                      <div className="lg:col-span-2">
+                      <div className={isGlueFrame ? 'lg:col-span-4' : 'lg:col-span-2'}>
                         {!isGlueFrame ? (
                           <Field
                             label={isDowelFrame ? 'Dowel Depth (mm)' : isDadoFrame ? 'Dado Depth (mm)' : 'Tenon Len (mm)'}
@@ -614,7 +655,10 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
                             />
                           </Field>
                         ) : (
-                          <Field label="Edge Profile">
+                          <Field
+                            label="Edge Profile"
+                            hint="Stopped roundover or chamfer along exposed edges, stopping clear of joints so shoulders seat flush."
+                          >
                             <Segmented
                               value={joineryOpts.edgeProfile}
                               onChange={(v) => setOpt('edgeProfile', v as TimberEdgeProfile)}
@@ -697,14 +741,22 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
                   <Advanced>
                     {!isDowelFrame && !isGlueFrame && (
                       <>
-                        <Field className="lg:col-span-2" label={isDadoFrame ? 'Dado Corner Fit' : 'Mortise Corner Fit'}>
+                        <Field
+                          className="lg:col-span-2"
+                          label={isDadoFrame ? 'Dado Corner Fit' : 'Mortise Corner Fit'}
+                          hint="Dogbone overcuts mortise corners so a straight-sawn tenon drops right in; Round Tenon rounds the tenon; Chisel Square leaves corners for hand chiseling."
+                        >
                           <Segmented
                             value={joineryOpts.tenonCornerFit}
                             onChange={(v) => setOpt('tenonCornerFit', v as TenonCornerFit)}
                             options={CORNER_FIT_OPTIONS}
                           />
                         </Field>
-                        <Field className="lg:col-span-2" label={isDadoFrame ? 'Tongue Cutting' : 'Tenon Cutting'}>
+                        <Field
+                          className="lg:col-span-2"
+                          label={isDadoFrame ? 'Tongue Cutting' : 'Tenon Cutting'}
+                          hint="Cut straight tenon cheeks and shoulders in 4 saw cuts, or mill tenons on the CNC."
+                        >
                           <Segmented
                             value={joineryOpts.tenonCutMethod}
                             onChange={(v) => setOpt('tenonCutMethod', v as 'bandsaw' | 'cnc')}
@@ -713,13 +765,19 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
                         </Field>
                       </>
                     )}
-                    <Field className="lg:col-span-2" label="Edge Profile">
-                      <Segmented
-                        value={joineryOpts.edgeProfile}
-                        onChange={(v) => setOpt('edgeProfile', v as TimberEdgeProfile)}
-                        options={EDGE_PROFILE_OPTIONS}
-                      />
-                    </Field>
+                    {!isGlueFrame && (
+                      <Field
+                        className="lg:col-span-2"
+                        label="Edge Profile"
+                        hint="Stopped roundover or chamfer along exposed edges, stopping clear of joints so shoulders seat flush."
+                      >
+                        <Segmented
+                          value={joineryOpts.edgeProfile}
+                          onChange={(v) => setOpt('edgeProfile', v as TimberEdgeProfile)}
+                          options={EDGE_PROFILE_OPTIONS}
+                        />
+                      </Field>
+                    )}
                     {!isDowelFrame && !isGlueFrame && (
                       <Field label="Shoulder (mm)">
                         <NumberInput
@@ -814,7 +872,7 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
                       </div>
                     </div>
 
-                    {isolatedPartIdx === null && viewMode === '3d' && (
+                    {activeIsolatedIdx === null && viewMode === '3d' && (
                       <label className="flex items-center gap-2 text-[11px] text-slate-500 dark:text-slate-400">
                         <span>Explode</span>
                         <input
@@ -833,7 +891,7 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
                   <AssemblyPreview
                     sections={previewSections}
                     pins={[]}
-                    explodeMm={isolatedPartIdx === null && viewMode === '3d' ? explodeMm : 0}
+                    explodeMm={activeIsolatedIdx === null && viewMode === '3d' ? explodeMm : 0}
                     replay={null}
                   />
 
@@ -841,9 +899,9 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
                     <div className="flex flex-wrap items-center gap-1 max-h-20 overflow-y-auto">
                       <button
                         type="button"
-                        onClick={() => setIsolatedPartIdx(null)}
+                        onClick={() => selectPartIdx(null)}
                         className={`px-2 py-0.5 rounded text-[10px] font-semibold cursor-pointer transition-colors ${
-                          isolatedPartIdx === null
+                          activeIsolatedIdx === null
                             ? 'bg-amber-500 text-white'
                             : 'bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-300'
                         }`}
@@ -854,14 +912,22 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
                         <button
                           key={p.id}
                           type="button"
-                          onClick={() => setIsolatedPartIdx(isolatedPartIdx === idx ? null : idx)}
-                          className={`px-2 py-0.5 rounded text-[10px] font-mono cursor-pointer transition-colors ${
-                            isolatedPartIdx === idx
+                          onClick={() => selectPartIdx(activeIsolatedIdx === idx ? null : idx, true)}
+                          className={`flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono cursor-pointer transition-colors ${
+                            activeIsolatedIdx === idx
                               ? 'bg-amber-500 text-white'
                               : 'bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-300 dark:hover:bg-slate-700'
                           }`}
                         >
-                          {p.id}
+                          <span
+                            className="w-2 h-2 rounded-full shrink-0"
+                            style={{
+                              backgroundColor: `rgb(${PREVIEW_COLOURS[idx % PREVIEW_COLOURS.length].map((c) => Math.round(c * 255)).join(',')})`,
+                            }}
+                          />
+                          <span>
+                            {idx + 1}. {p.id}
+                          </span>
                         </button>
                       ))}
                     </div>
@@ -887,7 +953,9 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
                               ? showCnc
                                 ? 'FINGER joints · Saw cut boards + CNC needed for finger joints'
                                 : 'FINGER joints · Saw cut boards + box-joint jig for finger joints'
-                              : `${plankBreakdown.options.jointType.toUpperCase()} edges · Saw cuts only (no CNC required)`}
+                              : plankBreakdown.planks.some((p) => p.dowelHoles.length > 0)
+                                ? `${plankBreakdown.options.jointType.toUpperCase()} edges · Saw cuts + dowel holes (no CNC required)`
+                                : `${plankBreakdown.options.jointType.toUpperCase()} edges · Saw cuts only (no CNC required)`}
                       </p>
                       {plankBreakdown.warnings.map((w, i) => (
                         <p key={i} className="flex items-start gap-1.5 text-[11px] text-amber-700 dark:text-amber-400">
@@ -930,9 +998,18 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
                               : 'Simple saw cuts only — cut each board to Length × Width × Thickness.'}
                           </p>
                         </div>
+                        {activeIsolatedIdx !== null && (
+                          <button
+                            type="button"
+                            onClick={() => selectPartIdx(null)}
+                            className="text-[11px] font-semibold text-amber-600 dark:text-amber-400 hover:underline cursor-pointer shrink-0"
+                          >
+                            Show All ({plankBreakdown.planks.length})
+                          </button>
+                        )}
                       </div>
 
-                      <div className="flex-1 min-h-0 overflow-y-auto space-y-2 pr-1">
+                      <div ref={cardsListRef} className="flex-1 min-h-0 overflow-y-auto space-y-2 pr-1">
                         {plankBreakdown.planks.map((plank, idx) => {
                           const { sawSteps, cncNote, exceedsCnc } = describePlankSawCut(
                             plank,
@@ -940,11 +1017,12 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
                             cncBed,
                           );
                           const showPlankCnc = showCnc && Boolean(cncNote);
-                          const isSelected = isolatedPartIdx === idx;
+                          const isSelected = activeIsolatedIdx === idx;
                           return (
                             <div
                               key={plank.id}
-                              onClick={() => setIsolatedPartIdx(isSelected ? null : idx)}
+                              data-part-idx={idx}
+                              onClick={() => selectPartIdx(isSelected ? null : idx)}
                               className={`rounded-lg border p-3 space-y-1.5 transition-colors cursor-pointer ${
                                 isSelected
                                   ? 'border-amber-500 bg-amber-500/10 dark:bg-amber-500/15'
@@ -984,7 +1062,9 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
                                         ? 'CNC Needed: Finger Joint'
                                         : plankBreakdown.options.jointType === 'glue'
                                           ? 'Saw + Glue'
-                                          : 'Saw Cut Only'}
+                                          : plank.dowelHoles.length > 0
+                                            ? 'Saw + Dowels'
+                                            : 'Saw Cut Only'}
                                   </span>
                                 </div>
                               </div>
@@ -1039,10 +1119,19 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
                             </button>
                           ))}
                         </div>
+                        {activeIsolatedIdx !== null && (
+                          <button
+                            type="button"
+                            onClick={() => selectPartIdx(null)}
+                            className="text-[11px] font-semibold text-amber-600 dark:text-amber-400 hover:underline cursor-pointer shrink-0"
+                          >
+                            Show All ({cutPlan.partCards.length})
+                          </button>
+                        )}
                       </div>
 
                       {activeTab === 'cards' && (
-                        <div className="flex-1 min-h-0 overflow-y-auto space-y-2.5 pr-1">
+                        <div ref={cardsListRef} className="flex-1 min-h-0 overflow-y-auto space-y-2.5 pr-1">
                           <div className="rounded-lg bg-slate-100 dark:bg-slate-800/60 px-3 py-2 text-[11px] text-slate-600 dark:text-slate-300">
                             <strong>How to read this list:</strong> Part numbers (<span className="font-mono font-semibold">1, 2…</span>) and face numbers (<span className="font-mono font-semibold">F1–F4</span>) are shown directly on the 3D preview faces.{' '}
                             {!showCnc || cncPartCount === 0 ? (
@@ -1052,7 +1141,7 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
                                   ? ' and glue the joints flush (no CNC required).'
                                   : isDowelFrame
                                     ? ' and drill the listed dowel holes (no CNC required).'
-                                    : ' and cut the listed pockets/slots with shop tools (or switch CNC to Optional CNC).'}
+                                    : ' and cut the listed pockets/slots with shop tools (or switch CNC to On).'}
                               </>
                             ) : (
                               <>
@@ -1069,11 +1158,12 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
                           {cutPlan.partCards.map((card) => {
                             const hasCnc = showCnc && card.cncSetups.length > 0;
                             const exceedsCnc = showCnc && card.cncAttachment === 'exceeds_cnc';
-                            const isSelected = isolatedPartIdx === card.partIndex;
+                            const isSelected = activeIsolatedIdx === card.partIndex;
                             return (
                               <div
                                 key={card.partId}
-                                onClick={() => setIsolatedPartIdx(isSelected ? null : card.partIndex)}
+                                data-part-idx={card.partIndex}
+                                onClick={() => selectPartIdx(isSelected ? null : card.partIndex)}
                                 className={`rounded-lg border p-3 space-y-2 transition-colors cursor-pointer ${
                                   isSelected
                                     ? 'border-amber-500 bg-amber-500/10 dark:bg-amber-500/15'
@@ -1249,13 +1339,13 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
                                   })
                                   .map((corner) => {
                                     const matchCard = cutPlan.partCards.find((c) => c.partId === corner.id);
-                                    const isSel = matchCard && isolatedPartIdx === matchCard.partIndex;
+                                    const isSel = matchCard && activeIsolatedIdx === matchCard.partIndex;
                                     return (
                                       <div
                                         key={corner.id}
                                         onClick={() => {
                                           if (matchCard) {
-                                            setIsolatedPartIdx(isSel ? null : matchCard.partIndex);
+                                            selectPartIdx(isSel ? null : matchCard.partIndex);
                                           }
                                         }}
                                         className={`rounded-md border p-2 space-y-0.5 transition-colors ${

@@ -417,7 +417,12 @@ export function AssemblyPreview({
         group.add(m);
       }
     }
-    frameView(group, `exploded:${sections.length}:${sections[0]?.positions.length ?? 0}`);
+    const box = new THREE.Box3().setFromObject(group);
+    const q = (n: number) => (Number.isFinite(n) ? Math.round(n * 40) : 0);
+    const boundsKey = box.isEmpty()
+      ? 'empty'
+      : `${q(box.min.x)},${q(box.min.y)},${q(box.min.z)}:${q(box.max.x)},${q(box.max.y)},${q(box.max.z)}`;
+    frameView(group, `exploded:${sections.length === 1 ? '1' : 'n'}:${boundsKey}`);
   }, [sections, pins]);
 
 

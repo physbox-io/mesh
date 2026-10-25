@@ -15,6 +15,7 @@ import type { ReliefCarveOptions, ReliefOverrides, DerivedReliefSettings } from 
 import type { GridStats, ProbeGrid } from '../utils/meshLeveler';
 import type { CarveTooling, SetTooling, OverrideTooling } from './carveTooling';
 import { HintAnchor } from './ExportFields';
+import { RackToolPicker } from './RackToolPicker';
 
 export const inputClass =
   'w-full px-3 py-1.5 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-lg ' +
@@ -245,13 +246,31 @@ export function FinishingPassFields({
           label="Bit Ø (mm)"
           hint="Diameter of the finishing cutter. It sets both the stepover and how much detail survives: nothing narrower than the bit can be cut. For a V-bit this is the diameter at the top of the cone, which is only reached at full depth."
         >
-          <NumberInput
-            step={0.1} min={0.1} max={60}
-            disabled={off}
-            value={options.finishingToolDiaMm}
-            onChange={(v) => set('finishingToolDiaMm', v)}
-            className={inputClass}
-          />
+          <div className="flex gap-1.5">
+            <NumberInput
+              step={0.1} min={0.1} max={60}
+              disabled={off}
+              value={options.finishingToolDiaMm}
+              onChange={(v) => set('finishingToolDiaMm', v)}
+              className={`${inputClass} min-w-0`}
+            />
+            {/* Not for a V-bit: the rack records a V-bit by its tip, and this
+                field wants the width at the top of the cone. A rack ball nose
+                or flat sets the shape along with the size and edge count. */}
+            {options.finishingToolType !== 'v_bit' && (
+              <RackToolPicker
+                shapes={['ball', 'flat']}
+                shape={options.finishingToolType === 'flat' ? 'flat' : 'ball'}
+                diameterMm={options.finishingToolDiaMm}
+                disabled={off}
+                onPick={(t) => {
+                  set('finishingToolType', t.shape === 'flat' ? 'flat' : 'ball_nose');
+                  set('finishingToolDiaMm', t.diameterMm);
+                  if (t.flutes) set('finishingFlutes', t.flutes);
+                }}
+              />
+            )}
+          </div>
         </Field>
       </div>
 
@@ -578,13 +597,24 @@ export function RoughingPassFields({
           label="Flat End Mill Ø (mm)"
           hint="Diameter of the flat end mill used for bulk material removal before the finishing pass."
         >
-          <NumberInput
-            step={0.1} min={0.1} max={60}
-            disabled={!options.roughingEnabled}
-            value={options.roughingToolDiaMm}
-            onChange={(v) => set('roughingToolDiaMm', v)}
-            className={inputClass}
-          />
+          <div className="flex gap-1.5">
+            <NumberInput
+              step={0.1} min={0.1} max={60}
+              disabled={!options.roughingEnabled}
+              value={options.roughingToolDiaMm}
+              onChange={(v) => set('roughingToolDiaMm', v)}
+              className={`${inputClass} min-w-0`}
+            />
+            <RackToolPicker
+              shapes={['flat']}
+              diameterMm={options.roughingToolDiaMm}
+              disabled={!options.roughingEnabled}
+              onPick={(t) => {
+                set('roughingToolDiaMm', t.diameterMm);
+                if (t.flutes) set('roughingFlutes', t.flutes);
+              }}
+            />
+          </div>
         </Field>
 
         <Field

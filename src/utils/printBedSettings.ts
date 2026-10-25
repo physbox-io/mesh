@@ -1,3 +1,14 @@
+import {
+  CNC_BED_PARAMETER,
+  CNC_BED_STORAGE_KEY,
+  CncBedStore,
+  DEFAULT_CNC_BED,
+  MAX_CNC_BED_MM,
+  MIN_CNC_BED_MM,
+  clampCncBed,
+  type CncBed,
+} from '@physbox-io/machining';
+import { syncCloudParameters } from './apiClient';
 // ---------------------------------------------------------------------------
 // How big the printer's bed is, in millimetres.
 //
@@ -64,54 +75,51 @@ export function savePrintBed(bed: PrintBed): PrintBed {
   return clamped;
 }
 
-export const CNC_BED_STORAGE_KEY = 'mesh_cnc_bed_mm';
+/** Where Mesh kept the bed before it was shared; read once, for the move. */
+const LEGACY_CNC_BED_KEY = 'mesh_cnc_bed_mm';
 
-export interface CncBed {
-  /** X travel of the CNC router bed, mm. */
-  widthMm: number;
-  /** Y travel of the CNC router bed, mm. */
-  depthMm: number;
-  /** Z clearance / travel of the CNC router, mm. */
-  heightMm: number;
-}
+export type { CncBed };
+export { DEFAULT_CNC_BED, MIN_CNC_BED_MM, MAX_CNC_BED_MM, clampCncBed };
 
-/** Standard 3030 / 3020 desktop CNC envelope. */
-export const DEFAULT_CNC_BED: CncBed = { widthMm: 300, depthMm: 300, heightMm: 60 };
-
-export const MIN_CNC_BED_MM = 20;
-export const MAX_CNC_BED_MM = 3000;
-
-const clampCncAxis = (value: unknown, fallback: number): number => {
-  const n = typeof value === 'string' ? Number(value) : value;
-  if (typeof n !== 'number' || !Number.isFinite(n)) return fallback;
-  return Math.min(MAX_CNC_BED_MM, Math.max(MIN_CNC_BED_MM, n));
-};
-
-export function clampCncBed(bed: Partial<CncBed> | null | undefined): CncBed {
-  return {
-    widthMm: clampCncAxis(bed?.widthMm, DEFAULT_CNC_BED.widthMm),
-    depthMm: clampCncAxis(bed?.depthMm, DEFAULT_CNC_BED.depthMm),
-    heightMm: clampCncAxis(bed?.heightMm, DEFAULT_CNC_BED.heightMm),
-  };
-}
+/**
+ * The router's working envelope, shared with Etch and Volt through the account
+ * (it was Mesh's alone, and 300 × 300 here while the other two had none). A
+ * size saved here before it was shared is kept and offered to the others.
+ */
+export const cncBedStore = new CncBedStore(
+  {
+    load: () => {
+      try {
+        return localStorage.getItem(CNC_BED_STORAGE_KEY);
+      } catch {
+        return null;
+      }
+    },
+    save: (text) => {
+      try {
+        localStorage.setItem(CNC_BED_STORAGE_KEY, text);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    push: (bed) => void syncCloudParameters('global', { [CNC_BED_PARAMETER]: bed }),
+  },
+  () => {
+    try {
+      const raw = localStorage.getItem(LEGACY_CNC_BED_KEY);
+      return raw ? (JSON.parse(raw) as Partial<CncBed>) : null;
+    } catch {
+      return null;
+    }
+  }
+);
 
 export function loadCncBed(): CncBed {
-  try {
-    const raw = localStorage.getItem(CNC_BED_STORAGE_KEY);
-    if (!raw) return { ...DEFAULT_CNC_BED };
-    return clampCncBed(JSON.parse(raw) as Partial<CncBed>);
-  } catch {
-    return { ...DEFAULT_CNC_BED };
-  }
+  return cncBedStore.get();
 }
 
 export function saveCncBed(bed: CncBed): CncBed {
-  const clamped = clampCncBed(bed);
-  try {
-    localStorage.setItem(CNC_BED_STORAGE_KEY, JSON.stringify(clamped));
-  } catch {
-    // Non-fatal
-  }
-  return clamped;
+  return cncBedStore.set(bed);
 }
 

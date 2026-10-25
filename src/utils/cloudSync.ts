@@ -21,6 +21,9 @@ import { fetchCloudParameters, fetchCloudPresetList, fetchCloudPreset, syncCloud
 import { SYNCED_LLM_PARAMETER_KEYS } from './llmSettings';
 import type { UserPreset } from './userPresets';
 import { SPINDLE_MAX_OVERRIDE_KEY } from './spindleOverride';
+import { CNC_BED_PARAMETER, TOOL_RACK_PARAMETER } from '@physbox-io/machining';
+import { settleToolRack } from './toolRack';
+import { cncBedStore } from './printBedSettings';
 
 /** UI preferences that follow the account, under this app's own id. */
 export const SYNCED_APP_PARAMETER_KEYS: readonly string[] = ['physics_dark_mode', SPINDLE_MAX_OVERRIDE_KEY];
@@ -169,6 +172,14 @@ export async function pullCloudState(): Promise<CloudPullResult> {
     const value = key in globalParams ? globalParams[key] : appParams[key];
     if (value !== undefined && applyParameter(key, value)) result.parameters += 1;
   }
+
+  // The shared tool rack, newer copy winning either way. A rack edited here
+  // while signed out is newer than the account's and goes up; one edited in
+  // Etch or Volt since comes down. The `global` row is the one the other apps
+  // write, so it is read first.
+  if (settleToolRack(globalParams[TOOL_RACK_PARAMETER] ?? appParams[TOOL_RACK_PARAMETER])) result.parameters += 1;
+  // The machine's envelope is shared with Etch and Volt, like the rack.
+  if (cncBedStore.adoptRemote(globalParams[CNC_BED_PARAMETER] ?? appParams[CNC_BED_PARAMETER])) result.parameters += 1;
 
   for (const preset of presets) {
     if (!preset?.name || !preset.id) continue;

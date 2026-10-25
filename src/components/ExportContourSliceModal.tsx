@@ -25,6 +25,7 @@ import {
 } from '../utils/feedsAndSpeeds';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { HintAnchor } from './ExportFields';
+import { RackToolPicker } from './RackToolPicker';
 import { useAddSimulation } from '../hooks/useAddSimulation';
 import { contourSheetParts } from '../utils/sheetSimulation';
 
@@ -622,14 +623,24 @@ export const ExportContourSliceModal: React.FC<ExportContourSliceModalProps> = (
                 label="Bit Ø (mm)"
                 hint="Routing only. The cutter that will do the cutting. Spindle speed and feed are worked out from its diameter."
               >
-                <NumberInput
-                  /* 60 mm: a 2" surfacing cutter is 50.8 and was unreachable. */
-                  step={0.1} min={0.1} max={60}
-                  disabled={machineMode !== 'cnc'}
-                  value={bitDiameterMm}
-                  onChange={(v) => v !== undefined && setBitDiameterMm(v)}
-                  className={inputClass}
-                />
+                <div className="flex gap-1.5">
+                  <NumberInput
+                    /* 60 mm: a 2" surfacing cutter is 50.8 and was unreachable. */
+                    step={0.1} min={0.1} max={60}
+                    disabled={machineMode !== 'cnc'}
+                    value={bitDiameterMm}
+                    onChange={(v) => v !== undefined && setBitDiameterMm(v)}
+                    className={`${inputClass} min-w-0`}
+                  />
+                  {/* A profile is cut with a flat end mill: anything else
+                      leaves a rounded or bevelled foot on every edge. */}
+                  <RackToolPicker
+                    shapes={['flat']}
+                    diameterMm={bitDiameterMm}
+                    disabled={machineMode !== 'cnc'}
+                    onPick={(t) => setBitDiameterMm(t.diameterMm)}
+                  />
+                </div>
               </Field>
               <Field
                 className="lg:col-span-2"

@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { AlertTriangle, Cpu, Home, RefreshCw, ShieldAlert, X, Gauge, Wifi, WifiOff } from 'lucide-react';
+import { AlertTriangle, Cpu, Home, RefreshCw, ShieldAlert, X, Gauge, Wifi, WifiOff, Wrench } from 'lucide-react';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
 import { useStore, type MachineTarget } from '../store/useStore';
 import { DEFAULT_CNC_BED, MAX_CNC_BED_MM, MIN_CNC_BED_MM } from '../utils/printBedSettings';
@@ -14,6 +14,7 @@ import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { NumberInput } from '@physbox-io/ui';
 import { readSpindleMaxOverride, writeSpindleMaxOverride } from '../utils/spindleOverride';
 import { DEFAULT_SPINDLE_RANGE } from '../utils/feedsAndSpeeds';
+import { ToolRackDialog } from './ToolRackDialog';
 
 /** The three ways this app can reach a machine. */
 type MachineLinkKind = 'usb' | 'cloud';
@@ -52,7 +53,9 @@ export const MachineConfigModal: React.FC<{
    */
   machineTarget: MachineTarget;
 }> = ({ isOpen, onClose, onOpenDocs, machineTarget }) => {
-  useEscapeToClose(isOpen, onClose);
+  const [toolsOpen, setToolsOpen] = useState(false);
+  // Escape closes the rack first, not the whole of Machine Setup under it.
+  useEscapeToClose(isOpen && !toolsOpen, onClose);
   const [machineState, setMachineState] = useState<MachineState>(webSerialManager.getState());
   const cncBed = useStore((s) => s.cncBed);
   const setCncBed = useStore((s) => s.setCncBed);
@@ -85,12 +88,27 @@ export const MachineConfigModal: React.FC<{
    * edits a draft; the value is saved on blur, read from a ref because the
    * input commits in the same handler that reports the final number.
    */
-  const [spindleMax, setSpindleMax] = useState<number | undefined>(() => readSpindleMaxOverride() ?? undefined);
+  // Filed under the controller on the cable, not the account: a hand-dial
+  // router's 24,000 applied to the next machine's 10,000 PWM spindle planned
+  // every feed at 2.4 times its chip load. The draft follows the key, so
+  // plugging in another machine shows that machine's value.
+  const overrideKey = machineState.connected ? webSerialManager.spindleOverrideKey() : null;
+  const [spindleMax, setSpindleMax] = useState<number | undefined>(() => readSpindleMaxOverride(overrideKey) ?? undefined);
+  const [draftKey, setDraftKey] = useState(overrideKey);
   const spindleMaxRef = useRef(spindleMax);
+  if (draftKey !== overrideKey) {
+    setDraftKey(overrideKey);
+    setSpindleMax(readSpindleMaxOverride(overrideKey) ?? undefined);
+  }
+  // Kept in step for the commit-on-blur, so blurring the box after the key
+  // changed does not file the last machine's number under this one.
+  useEffect(() => {
+    spindleMaxRef.current = spindleMax;
+  }, [spindleMax]);
   const commitSpindleMax = (rpm: number | undefined) => {
     spindleMaxRef.current = rpm;
     setSpindleMax(rpm);
-    writeSpindleMaxOverride(rpm ?? null);
+    writeSpindleMaxOverride(rpm ?? null, overrideKey);
     webSerialManager.reapplySpindleOverride();
   };
 
@@ -452,7 +470,22 @@ export const MachineConfigModal: React.FC<{
           )}
         </div>
 
-        <div className="px-6 py-3 border-t border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/50 flex justify-end">
+        <div className="px-6 py-3 border-t border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/50 flex justify-between gap-2">
+          {/* The bits in the drawer belong with the machine, not with any one
+              export: the same rack is offered beside every cutter size, and
+              shared with Etch and Volt. A laser has no bits to list. */}
+          {machineTarget !== 'laser' ? (
+            <button
+              onClick={() => setToolsOpen(true)}
+              title="The bits you own, shared with Etch and Volt. The export dialogs offer them beside every cutter size."
+              className="px-4 py-2 text-xs font-semibold rounded-lg bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 cursor-pointer flex items-center gap-1.5"
+            >
+              <Wrench className="w-3.5 h-3.5" />
+              Tools
+            </button>
+          ) : (
+            <span />
+          )}
           <button
             onClick={onClose}
             className="px-4 py-2 text-xs font-semibold rounded-lg bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 cursor-pointer"
@@ -461,6 +494,8 @@ export const MachineConfigModal: React.FC<{
           </button>
         </div>
       </div>
+
+      <ToolRackDialog open={toolsOpen} onClose={() => setToolsOpen(false)} />
 
       {showSafetyWarning && (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/70 p-4">

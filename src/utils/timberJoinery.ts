@@ -832,9 +832,9 @@ export function synthesizeTimberJoinery(
         }
 
         if (options.jointMode === 'dowel') {
-          // Twin dowels so the rail cannot twist/rack
+          // Twin dowels so the rail cannot twist/rack; nominalTenonLen is the per-side engagement depth
           const dowelDia = Math.min(8, Math.max(6, Math.round(thkA * 0.35)));
-          const dowelLen = Math.min(30, nominalTenonLen * 1.6);
+          const dowelLen = Math.max(16, Math.round(nominalTenonLen * 2));
           const spacing = Math.max(dowelDia + 6, nominalTenonWid * 0.5);
           const centers: Vec3[] = widA >= dowelDia * 2.5 + 8
             ? [

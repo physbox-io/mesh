@@ -47,6 +47,16 @@ function attachBoard() {
   mgr.state.status = 'IDLE';
   mgr.state.lastError = undefined;
   mgr.state.needsZZero = false;
+  // A singleton: an alarm or restart in an earlier test leaves the machine's
+  // position lost, and the package then refuses to stream until X and Y are
+  // homed or zeroed. Each board here starts as one that has been, the way an
+  // operator gets there: a homing cycle, reported as `Home` while it runs and
+  // the `Idle` that ends it.
+  mgr.parseLine('<Home|MPos:0.000,0.000,0.000|FS:0,0>');
+  mgr.parseLine('<Idle|MPos:0.000,0.000,0.000|FS:0,0>');
+  // Homed for the position's sake only. Whether the machine knows its Z
+  // ceiling is something the tests that lift to it decide for themselves.
+  mgr.state.hasHomed = false;
   mgr.state.guideSpot = false;
   mgr.state.probeCircuitSeen = true;
   mgr.state.probePinActive = false;

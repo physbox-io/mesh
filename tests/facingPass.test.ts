@@ -76,11 +76,41 @@ describe('facing', () => {
     expect(r.gcode).not.toContain('Z-2.250');
   });
 
-  it('starts a bit-radius outside the panel, so no lip is left at the edges', () => {
-    const r = run({ facingBitDiameterMm: 20 });
-    // Footprint is x 20..120, y 30..90; a 20 mm bit reaches from x 10 to x 130.
-    expect(r.gcode).toContain('X10.000');
-    expect(r.gcode).toContain('X130.000');
+  it('takes the centre to the footprint edge plus the profile kerf, so no lip is left', () => {
+    const r = run({ facingBitDiameterMm: 20, bitDiameterMm: 4 });
+    // Footprint is x 20..120; the compensated profile's slot is 4 mm wide, so
+    // the centre runs 16..124 and the bit's edge reaches 6..134.
+    expect(r.gcode).toContain('X16.000');
+    expect(r.gcode).toContain('X124.000');
+    expect(r.gcode).not.toContain('X130.000');
+    expect(r.bounds.minX).toBeCloseTo(6, 6);
+    expect(r.bounds.maxX).toBeGreaterThanOrEqual(134);
+  });
+
+  it('keeps the bit edge on the sheet, and says when it faces to the sheet edge', () => {
+    // A 25 mm bit with only 8 mm of margin: the old pass sent its edge 17 mm
+    // past the far edge of the sheet and 12.5 mm past X0.
+    const p = panel();
+    (p as unknown as { placedPos2D: { x: number; y: number } }).placedPos2D = { x: 8, y: 8 };
+    const r = generateLaserCutGcode([p], {
+      ...DEFAULT_GCODE_OPTIONS,
+      machineMode: 'cnc',
+      faceToThickness: true,
+      sheetStockThicknessMm: [10],
+      sheetSizeMm: [{ widthMm: 116, heightMm: 76 }],
+      facingBitDiameterMm: 25,
+    });
+    const faceBlock = r.gcode.slice(r.gcode.indexOf('; --- Facing'), r.gcode.indexOf('; --- TOOL CHANGE'));
+    const xs = [...faceBlock.matchAll(/X(-?[\d.]+)/g)].map((m) => parseFloat(m[1]));
+    expect(xs.length).toBeGreaterThan(0);
+    expect(Math.min(...xs)).toBeGreaterThanOrEqual(12.5 - 1e-9);
+    expect(Math.max(...xs)).toBeLessThanOrEqual(116 - 12.5 + 1e-9);
+    expect(r.warnings?.some((w) => /narrower than the 25.000mm facing bit's radius/.test(w))).toBe(true);
+  });
+
+  it('says nothing about margins when there is room for the bit', () => {
+    const r = run({ facingBitDiameterMm: 20, sheetSizeMm: [{ widthMm: 300, heightMm: 300 }] });
+    expect(r.warnings?.some((w) => /facing bit's radius/.test(w)) ?? false).toBe(false);
   });
 
   it('names the operation with both thicknesses, so the pause list reads plainly', () => {
@@ -138,13 +168,14 @@ describe('facing, then the profile bit', () => {
   });
 
   it('steps evenly across the footprint and reaches its far edge', () => {
-    // Footprint y 30..90 plus a 12.5 mm radius each side: 17.5..102.5, 15 mm stepover.
+    // Footprint y 30..90 plus the default 3.175 mm profile kerf each side:
+    // 26.825..93.175, 15 mm stepover.
     const g = lines(run({ facingBitDiameterMm: 25, facingStepoverFraction: 0.6, facingDepthPerPassMm: 5 }).gcode);
     const start = g.findIndex((l) => /^; Facing pass 1/.test(l));
     const end = g.findIndex((l, i) => i > start && /^G0 Z/.test(l) && i > start + 3);
     const ys = [...new Set(g.slice(start, end).map((l) => /Y(-?[\d.]+)/.exec(l)?.[1]).filter(Boolean).map(Number))];
-    expect(ys[0]).toBeCloseTo(17.5, 3);
-    expect(ys[ys.length - 1]).toBeCloseTo(102.5, 3);
+    expect(ys[0]).toBeCloseTo(26.825, 3);
+    expect(ys[ys.length - 1]).toBeCloseTo(93.175, 3);
     const gaps = ys.slice(1).map((y, i) => y - ys[i]);
     for (const gap of gaps) {
       expect(gap).toBeLessThanOrEqual(15 + 1e-6);
@@ -154,9 +185,10 @@ describe('facing, then the profile bit', () => {
 
   it('reports the facing bit\'s reach in the job bounds', () => {
     const r = run({ facingBitDiameterMm: 25 });
-    // Panel at x 20..120, y 30..90; the facing bit's centre runs 12.5 outside, its edge 25.
-    expect(r.bounds.minX).toBeLessThanOrEqual(20 - 25 + 1e-6);
-    expect(r.bounds.maxY).toBeGreaterThanOrEqual(90 + 25 - 1e-6);
+    // Panel at x 20..120, y 30..90; the facing bit's centre runs a 3.175 mm
+    // kerf outside, its edge a further 12.5.
+    expect(r.bounds.minX).toBeLessThanOrEqual(20 - 3.175 - 12.5 + 1e-6);
+    expect(r.bounds.maxY).toBeGreaterThanOrEqual(90 + 3.175 + 12.5 - 1e-6);
   });
 
   it('clamps facing toolpath coordinates to non-negative X/Y when a panel is placed near the origin', () => {
