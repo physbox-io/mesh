@@ -353,3 +353,19 @@ export const BushingHousingIcon = () => (
     <circle cx="12" cy="12" r="2.6" className="fill-white dark:fill-slate-900 stroke-rose-600" strokeWidth="0.8" />
   </svg>
 );
+
+export const SpringIcon = () => (
+  <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none">
+    <path d="M7 3 H17 M7 21 H17" className="stroke-slate-600 dark:stroke-slate-300" strokeWidth="1.6" strokeLinecap="round" />
+    <path d="M8 5 L16 7.5 L8 10 L16 12.5 L8 15 L16 17.5 L8 19.5" className="stroke-slate-500 dark:stroke-slate-300" strokeWidth="1.4" strokeLinejoin="round" />
+  </svg>
+);
+
+export const StepperIcon = () => (
+  <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none">
+    <rect x="4" y="7" width="13" height="13" rx="1.5" className="fill-slate-800 dark:fill-slate-600 stroke-slate-900 dark:stroke-slate-300" strokeWidth="1" />
+    <rect x="4" y="7" width="13" height="2.5" className="fill-slate-400" />
+    <rect x="9.5" y="2.5" width="2" height="5" rx="0.6" className="fill-slate-300 stroke-slate-500" strokeWidth="0.6" />
+    <path d="M18.5 11 q2.5 2.5 0 5" className="stroke-blue-500" strokeWidth="1.2" strokeLinecap="round" />
+  </svg>
+);

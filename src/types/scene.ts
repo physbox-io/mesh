@@ -41,9 +41,11 @@ export type CorePartKind = 'bearing' | 'screw' | 'nut' | 'shaft' | 'oring';
  * kinds here.
  */
 export type LinearPartKind = 'mgn_rail' | 'linear_rod' | 'drawer_runner';
+/** What pushes back or drives: see utils/motionParts.ts. */
+export type MotionPartKind = 'spring' | 'stepper';
 /** Aluminium extrusion and what joins it; see utils/extrusionParts.ts. */
 export type ExtrusionPartKind = 'extrusion' | 'tnut' | 'corner_bracket' | 'joint_plate' | 'end_tap' | 'vslot_carriage';
-export type HardwarePartKind = CorePartKind | LinearPartKind | ExtrusionPartKind;
+export type HardwarePartKind = CorePartKind | LinearPartKind | ExtrusionPartKind | MotionPartKind;
 
 /**
  * What a body is when it is a piece of bought hardware rather than something
@@ -426,6 +428,8 @@ export interface SceneJoint {
     kv?: number; // For velocity actuators
     gear?: number; // Optional gear ratio
     ctrlValue?: number; // Target speed or force from UI
+    /** The most torque (N*m, hinge) or force (N, slide) it can put out: a stepper's holding torque. */
+    forceLimit?: number;
   };
   initialVelocity?: number[]; // [lin_x, lin_y, lin_z, ang_x, ang_y, ang_z]
   /**

@@ -12,7 +12,8 @@ import {
   TubeIcon, EllipsoidIcon, RingIcon, SculptIcon, LatticeIcon, CurveIcon, PulleyIcon, RopeIcon, MeshIcon, ScadIcon,
 } from './shapeIcons';
 import { InsertBossIcon, NutTrapIcon, CounterboreIcon, BearingPocketIcon, DShaftHubIcon, BearingIcon, CapScrewIcon, HexNutIcon, ShaftIcon, ORingGrooveIcon, RimSealIcon,
-  LinearRailIcon, RodBushingIcon, DrawerRunnerIcon, RailSeatIcon, RodSocketIcon, BushingHousingIcon } from './hardwareIcons';
+  LinearRailIcon, RodBushingIcon, DrawerRunnerIcon, RailSeatIcon, RodSocketIcon, BushingHousingIcon,
+  SpringIcon, StepperIcon } from './hardwareIcons';
 import { Frame } from 'lucide-react';
 import { addReferencePicture } from '../../utils/addReferencePicture';
 import { useDialogs } from '../../store/dialogStore';
@@ -100,6 +101,8 @@ const BOUGHT_TILES: { kind: HardwarePartKind; spin: TileSpin; Icon: () => React.
   { kind: 'mgn_rail', spin: 'group-hover:-rotate-3', Icon: LinearRailIcon },
   { kind: 'linear_rod', spin: 'group-hover:rotate-3', Icon: RodBushingIcon },
   { kind: 'drawer_runner', spin: 'group-hover:-rotate-3', Icon: DrawerRunnerIcon },
+  { kind: 'spring', spin: 'group-hover:rotate-3', Icon: SpringIcon },
+  { kind: 'stepper', spin: 'group-hover:rotate-6', Icon: StepperIcon },
 ];
 
 export const ComponentPalette: React.FC<ComponentPaletteProps> = ({

@@ -231,8 +231,8 @@ const buildJoint = (joint: SceneJoint) => {
   const limited = joint.limited ?? (joint.crumpleRangeDeg ? true : undefined);
   if (limited !== undefined) attrs += ` limited="${limited}"`;
   if (range !== undefined) attrs += ` range="${range.join(' ')}"`;
-  // Steel end stops: a stiff, near-rigid limit. The time constant is kept to
-  // twice the 2 ms timestep, the stiffest MuJoCo will integrate stably.
+  // Steel end stops: a stiff, near-rigid limit, its time constant a few of
+  // the 1 ms timestep — about as stiff as MuJoCo integrates stably.
   if (joint.hardStop) attrs += ` solreflimit="0.004 1" solimplimit="0.99 0.999 0.0002 0.5 2"`;
   return `<joint ${attrs} />`;
 };
@@ -704,6 +704,9 @@ export const compileToMJCF = (
     // A motor's ctrl is its torque. Unlimited, so a linked Volt's stall
     // torque arrives whole rather than clipped to a range nobody set.
     if (act.type === 'motor') attrs += ` ctrllimited="false"`;
+    // What the motor can actually put out: a stepper's holding torque. Only
+    // when set, so every actuator that had none compiles as it did.
+    if (act.forceLimit !== undefined) attrs += ` forcelimited="true" forcerange="${-act.forceLimit} ${act.forceLimit}"`;
     return `    <${act.type} ${attrs} />`;
   }).join('\n');
 

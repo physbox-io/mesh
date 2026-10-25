@@ -49,6 +49,7 @@ import {
 } from './hardwareGeometry';
 import { isBoughtIn } from './boughtIn';
 import { LINEAR_PARTS } from './linearParts';
+import { MOTION_PARTS } from './motionParts';
 import { EXTRUSION_PARTS } from './extrusionParts';
 
 
@@ -81,6 +82,7 @@ const CORE_PARTS: Record<CorePartKind, HardwarePartInfo> = {
 export const HARDWARE_PARTS: Record<HardwarePartKind, HardwarePartInfo> = {
   ...CORE_PARTS,
   ...LINEAR_PARTS,
+  ...MOTION_PARTS,
   ...EXTRUSION_PARTS,
 };
 
