@@ -25,6 +25,11 @@ export interface HardwarePartInfo {
    */
   name?: (p: HardwarePart) => string;
   build?: PartBuilder;
+  /**
+   * Bought as bars of these lengths and cut to size, mm, longest first —
+   * aluminium extrusion. The hardware list packs a part's lengths onto them.
+   */
+  stockBarsMm?: readonly number[];
 }
 
 export const STEEL = 7850; // kg/m³

@@ -13,6 +13,7 @@ import {
 } from '../utils/hardwareParts';
 import { BEARINGS } from '../utils/hardwareSizes';
 import { findNodeById } from '../utils/sceneTree';
+import { addDrawerRunners, fixToPiece, rideOnRod } from '../utils/linearPlacement';
 import type { PhysicsState } from './useStore';
 
 export interface HardwarePartActions {
@@ -30,6 +31,17 @@ export interface HardwarePartActions {
    * size, so that changes the cut, and the part follows.
    */
   setHardwarePart: (partId: string, changes: Partial<Pick<HardwarePart, 'size' | 'lengthMm' | 'washer'>>) => void;
+  /**
+   * Welds a body to a moving piece — a rail's carriage, a rod's bushing, a
+   * runner's drawer member — so it rides it. Returns why not, or null.
+   */
+  fixToPiece: (pieceId: string, bodyId: string) => string | null;
+  /** Takes a body's weld off whatever it rides. */
+  unfixBody: (bodyId: string) => void;
+  /** A part with a bushing housing rides the rod on the housing's line. Returns why not, or null. */
+  rideOnRod: (hostId: string, group: string) => string | null;
+  /** A pair of runners for a drawer standing in its cabinet. Returns their ids, or why not. */
+  addDrawerRunners: (drawerId: string) => string[] | string;
 }
 
 interface Deps {
@@ -103,8 +115,42 @@ export function hardwarePartActions({ set, get, clone }: Deps): HardwarePartActi
     return id;
   };
 
+  /** Runs a pure edit on a clone and keeps it only when it worked. */
+  const attempt = (edit: (scene: SceneGraph) => { ok: true; ids?: string[] } | { ok: false; problem: string }, selectId: string) => {
+    const scene = clone(get().sceneGraph);
+    const result = edit(scene);
+    if (!result.ok) return result;
+    get().prepareForDiscreteChange();
+    commit(scene, result.ids?.[0] ?? selectId, result.ids?.[0] ?? selectId);
+    return result;
+  };
+
   return {
     seatHardwarePart: seatNew,
+
+    fixToPiece: (pieceId, bodyId) => {
+      const r = attempt((scene) => fixToPiece(scene, pieceId, bodyId), pieceId);
+      return r.ok ? null : r.problem;
+    },
+
+    unfixBody: (bodyId) => {
+      if (!findNodeById(get().sceneGraph.nodes, bodyId)?.weldTargetId) return;
+      attempt((scene) => {
+        const body = findNodeById(scene.nodes, bodyId)!;
+        delete body.weldTargetId;
+        return { ok: true };
+      }, bodyId);
+    },
+
+    rideOnRod: (hostId, group) => {
+      const r = attempt((scene) => rideOnRod(scene, hostId, group), hostId);
+      return r.ok ? null : r.problem;
+    },
+
+    addDrawerRunners: (drawerId) => {
+      const r = attempt((scene) => addDrawerRunners(scene, drawerId, () => newId('drawer_runner')), drawerId);
+      return r.ok ? r.ids ?? [] : r.problem;
+    },
 
     addHardwarePart: (kind, position, targetId) => {
       const target = targetId ? findNodeById(get().sceneGraph.nodes, targetId) : null;

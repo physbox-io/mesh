@@ -19,7 +19,8 @@ export type GeomRole = 'visual' | 'collision';
 export type CollisionMode = 'auto' | 'hull' | 'decompose' | 'primitives';
 
 /** The hardware features a part can have cut into it; see utils/hardwareCuts.ts. */
-export type HardwareCutKind = 'nut_trap' | 'counterbore' | 'insert' | 'insert_boss' | 'bearing' | 'oring' | 'seal_cord';
+export type HardwareCutKind = 'nut_trap' | 'counterbore' | 'insert' | 'insert_boss' | 'bearing' | 'oring' | 'seal_cord'
+  | 'rail_seat' | 'rod_clamp' | 'lm_housing';
 /**
  * Where an O-ring groove seals: in a face, against a lid pressed onto it; in a
  * bore's wall, around a shaft pushed through; or around a boss, inside the bore
@@ -39,7 +40,8 @@ export type CorePartKind = 'bearing' | 'screw' | 'nut' | 'shaft' | 'oring';
  * of its own (utils/linearParts.ts, utils/extrusionParts.ts) and adds its
  * kinds here.
  */
-export type HardwarePartKind = CorePartKind;
+export type LinearPartKind = 'mgn_rail' | 'linear_rod' | 'drawer_runner';
+export type HardwarePartKind = CorePartKind | LinearPartKind;
 
 /**
  * What a body is when it is a piece of bought hardware rather than something
@@ -318,6 +320,9 @@ export interface SceneGeom {
     bore?: HardwareBore;
     /** An O-ring groove's: where it seals. */
     seal?: SealType;
+    /** A rail seat's: how long the rail is, metres, and whether it runs across the face instead of along it. */
+    length?: number;
+    turned?: boolean;
     /** Diametral clearance on the fitting diameter, metres. */
     fit?: number;
   };
@@ -408,6 +413,12 @@ export interface SceneJoint {
   frictionloss?: number;
   limited?: boolean;
   range?: number[];
+  /**
+   * The ends of the range are steel stops, not MuJoCo's soft default limit:
+   * a rail carriage or a drawer runner stops at its end instead of sinking
+   * a centimetre past it. Only emitted when set.
+   */
+  hardStop?: boolean;
   actuator?: {
     type: 'velocity' | 'motor';
     kv?: number; // For velocity actuators

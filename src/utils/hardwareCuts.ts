@@ -16,10 +16,12 @@
 // as one feature with one Size menu, and rebuild them all when it changes.
 // ---------------------------------------------------------------------------
 
+import * as THREE from 'three';
 import type { HardwareBore, HardwareCutKind, SceneGeom, SceneNode, SealType } from '../types/scene';
 import { metricThread } from './metricThreads';
 import { BOLTS, HEX_NUTS, CLEARANCE_HOLES, COUNTERBORES, INSERTS, BEARINGS, O_RINGS, SEAL_CORDS } from './hardwareSizes';
 import { planSealGroove, sealGrooveProblem } from './sealGrooves';
+import { LM_UU, MGN } from './linearParts';
 
 export { HEX_NUTS, CLEARANCE_HOLES, COUNTERBORES, INSERTS, BEARINGS } from './hardwareSizes';
 
@@ -66,6 +68,18 @@ export const HARDWARE_KINDS: Record<HardwareCutKind, HardwareKindInfo> = {
     label: 'Rim seal', sizes: SEAL_CORDS, defaultSize: '', defaultFitMm: 0,
     hint: 'A groove following the rim of a box, for O-ring cord cut to length; in the middle of the wall when there is a cavity under it.',
   },
+  rail_seat: {
+    label: 'Rail seat', sizes: Object.keys(MGN), defaultSize: 'MGN12', bores: ['insert', 'tapped', 'clearance'], defaultBore: 'insert', defaultFitMm: 0.1,
+    hint: 'A shallow channel that locates a miniature linear rail straight, with a hole at every one of its bolt holes.',
+  },
+  rod_clamp: {
+    label: 'Rod socket', sizes: Object.keys(LM_UU), defaultSize: '8', defaultFitMm: 0.1,
+    hint: 'A blind socket a ground rod is pushed into, two diameters deep.',
+  },
+  lm_housing: {
+    label: 'Bushing housing', sizes: Object.keys(LM_UU), defaultSize: '8', defaultFitMm: 0.1,
+    hint: 'A pocket for an LM-UU linear bushing, with room for its rod right through, so the part rides on a rod.',
+  },
 };
 
 export const SEAL_LABELS: Record<SealType, string> = { face: 'Face', bore: 'Bore', piston: 'Piston' };
@@ -81,6 +95,9 @@ export interface HardwareCutSpec {
   bore?: HardwareBore;
   /** An O-ring groove's: where it seals. Read off where it is put when left out. */
   seal?: SealType;
+  /** A rail seat's: the rail's length, and whether it runs across the face's first axis rather than along it. */
+  lengthMm?: number;
+  turned?: boolean;
   fitMm?: number;
 }
 
@@ -171,6 +188,46 @@ export function hardwareCutGeoms(spec: HardwareCutSpec, nodeId: string, host?: S
       // which turns, and still under the outer one, which the ledge holds.
       return [cut('pocket', (outside + fit) / 2, width), cut('shaft', (outside + inside) / 4, 0)];
     }
+    case 'rail_seat': {
+      const { rail: [width, , pitch], bolt } = MGN[size];
+      const length = spec.lengthMm && spec.lengthMm > 0 ? spec.lengthMm : 300;
+      const twist = spec.turned ? Math.PI / 2 : 0;
+      const seatTag = { length: m(length), ...(spec.turned ? { turned: true } : {}) };
+      // Deep enough to hold the rail straight, nowhere near as deep as the rail.
+      const SEAT_DEPTH = 1.5;
+      const channel: SceneGeom = {
+        ...cut('channel', 0, SEAT_DEPTH), type: 'box',
+        size: [m((length + 1) / 2), m((width + fit) / 2), 0],
+        ...(twist ? { cutTwist: +twist.toFixed(9) } : {}),
+      };
+      channel.hardware = { ...channel.hardware!, ...seatTag };
+      // The cut's own X, turned onto the face: the line the holes run along.
+      const n = new THREE.Vector3(...(spec.normal as [number, number, number])).normalize();
+      const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), n);
+      if (twist) q.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), twist));
+      const along = new THREE.Vector3(1, 0, 0).applyQuaternion(q);
+      const holes = Math.max(1, Math.floor((length - 8) / pitch) + 1);
+      const first = -((holes - 1) * pitch) / 2;
+      const hole = (i: number): SceneGeom => {
+        const at = new THREE.Vector3(...(spec.at as [number, number, number])).addScaledVector(along, m(first + i * pitch));
+        const piece = bore === 'tapped' ? cut(`hole${i}`, 0, 6 + SEAT_DEPTH, tapped(bolt))
+          : bore === 'clearance' ? cut(`hole${i}`, CLEARANCE_HOLES[bolt] / 2, 0)
+            : cut(`hole${i}`, INSERTS[bolt][0] / 2, INSERTS[bolt][1] + SEAT_DEPTH);
+        return { ...piece, cutAt: at.toArray().map((v) => +v.toFixed(6)), hardware: { ...piece.hardware!, ...seatTag } };
+      };
+      return [channel, ...Array.from({ length: holes }, (_, i) => hole(i))];
+    }
+    case 'rod_clamp': {
+      const d = Number(size);
+      return [cut('bore', (d + fit) / 2, Math.max(12, 2 * d))];
+    }
+    case 'lm_housing': {
+      const [od, length] = LM_UU[size];
+      // The rod goes right through, with room round it: the bushing runs on it, not the part.
+      return [cut('pocket', (od + fit) / 2, length), cut('rod', Number(size) / 2 + 1, 0)];
+    }
+    default:
+      return [];
   }
 }
 
@@ -184,6 +241,8 @@ export function hardwareSpecOf(geoms: SceneGeom[], group: string): HardwareCutSp
     at: [...(first.cutAt ?? [0, 0, 0])], normal: [...(first.cutNormal ?? [0, 0, 1])],
     ...(h.bore ? { bore: h.bore } : {}),
     ...(h.seal ? { seal: h.seal } : {}),
+    ...(h.length ? { lengthMm: +(h.length * 1000).toFixed(3) } : {}),
+    ...(h.turned ? { turned: true } : {}),
     fitMm: h.fit ? +(h.fit * 1000).toFixed(4) : 0,
   };
 }

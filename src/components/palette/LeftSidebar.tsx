@@ -124,6 +124,13 @@ export function LeftSidebar({ onAddNoteCard }: { onAddNoteCard: () => void }) {
           }}
           onAddHardwarePart={(kind) => {
             const { selectedNodeId, sceneGraph } = useStore.getState();
+            // Runners go on a drawer, a pair at a time, sized to it.
+            if (kind === 'drawer_runner' && selectedNodeId && !findNodeById(sceneGraph.nodes, selectedNodeId)?.hardwarePart) {
+              const fitted = useStore.getState().addDrawerRunners(selectedNodeId);
+              if (typeof fitted === 'string') useDialogs.getState().showNotice('No runners for that', fitted);
+              close();
+              return;
+            }
             const at = selectedNodeId ? getNodeWorldPos(sceneGraph.nodes, selectedNodeId) : null;
             // Beside what is selected when it does not go into it, else just above the floor.
             useStore.getState().addHardwarePart(kind, at ? [at[0] + 0.05, at[1], at[2]] : [0, 0, 0.03], selectedNodeId);

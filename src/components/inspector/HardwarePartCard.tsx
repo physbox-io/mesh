@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { useStore } from '../../store/useStore';
 import type { HardwarePart, SceneNode } from '../../types/scene';
 import { HARDWARE_PARTS } from '../../utils/hardwareParts';
@@ -27,6 +28,7 @@ export function HardwarePartCard({ node }: { node: SceneNode }) {
     return (
       <div className="p-3 bg-slate-50 dark:bg-slate-900/40 border border-slate-200/60 dark:border-slate-800 rounded-lg text-[11px] text-slate-500 dark:text-slate-400">
         {PIECE_TEXT[spec.piece]}
+        {spec.piece === 'carriage' && <Riders piece={node} />}
         {owner && (
           <button type="button" onClick={() => setSelectedNodeId(owner.id)} className="block mt-1 font-semibold text-blue-600 dark:text-blue-400 cursor-pointer">
             Select {owner.name}
@@ -41,6 +43,7 @@ export function HardwarePartCard({ node }: { node: SceneNode }) {
   const inner = spec.kind === 'bearing' ? node.children.find((c) => c.hardwarePart?.piece === 'inner') : undefined;
   const hasShaft = !!inner?.children.some((c) => c.hardwarePart?.kind === 'shaft');
   const fastened = spec.fastens ? findNodeById(graph.nodes, spec.fastens) : null;
+  const carriage = findPiece(node, 'carriage');
   // An O-ring's sizes are its groove's: stocked rings, or cord by the metre.
   const cord = spec.kind === 'oring' && !O_RINGS[spec.size];
   const sizes = spec.kind === 'oring' ? (cord ? SEAL_CORDS : Object.keys(O_RINGS)) : info.sizes;
@@ -83,6 +86,7 @@ export function HardwarePartCard({ node }: { node: SceneNode }) {
           {fastened ? <>Holds this part to <span className="font-semibold">{fastened.name}</span>.</> : 'Reaches nothing below to hold yet.'}
         </div>
       )}
+      {carriage && <Riders piece={carriage} />}
       {spec.kind === 'bearing' && !hasShaft && (
         <button
           type="button"
@@ -102,6 +106,56 @@ const PIECE_TEXT: Record<NonNullable<HardwarePart['piece']>, string> = {
   carriage: 'The moving part, on a slide along its rail. Fix a part to it and that slides with it, stopping at the ends.',
   middle: 'The middle member, which slides out from the cabinet member and carries the drawer member out past it.',
 };
+
+/**
+ * What rides a moving piece, and a menu to fix another part to it: the plate
+ * on a rail's carriage, the block on a rod's bushing, the drawer on a runner.
+ */
+function Riders({ piece }: { piece: SceneNode }) {
+  const graph = useStore((s) => s.sceneGraph);
+  const fixToPiece = useStore((s) => s.fixToPiece);
+  const unfixBody = useStore((s) => s.unfixBody);
+  const [problem, setProblem] = useState<string | null>(null);
+  const riding = allNodes(graph.nodes).filter((n) => n.weldTargetId === piece.id);
+  const candidates = allNodes(graph.nodes).filter((n) => !n.hardwarePart && !n.weldTargetId && n.id !== piece.id);
+  return (
+    <div className="mt-1.5 flex flex-col gap-1">
+      {riding.map((r) => (
+        <div key={r.id} className="flex items-center gap-1 text-[10px] text-slate-500 dark:text-slate-400">
+          <span className="flex-1">Rides it: <span className="font-semibold">{r.name}</span></span>
+          <button type="button" onClick={() => unfixBody(r.id)} className="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase cursor-pointer bg-white dark:bg-slate-800 text-slate-400 hover:text-rose-600">Off</button>
+        </div>
+      ))}
+      {candidates.length > 0 && (
+        <select
+          value=""
+          onChange={(e) => { if (e.target.value) setProblem(fixToPiece(piece.id, e.target.value)); }}
+          className={fieldClass}
+          title="Weld a part to the moving piece, so it slides with it"
+        >
+          <option value="">Fix a part to it…</option>
+          {candidates.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+        </select>
+      )}
+      {problem && <div className="text-[10px] text-rose-600 dark:text-rose-400 leading-snug">{problem}</div>}
+    </div>
+  );
+}
+
+function allNodes(nodes: SceneNode[], out: SceneNode[] = []): SceneNode[] {
+  for (const n of nodes) { out.push(n); allNodes(n.children || [], out); }
+  return out;
+}
+
+/** A part's moving piece by name, however deep it is. */
+function findPiece(node: SceneNode, piece: NonNullable<HardwarePart['piece']>): SceneNode | null {
+  for (const c of node.children || []) {
+    if (c.hardwarePart?.piece === piece) return c;
+    const below = c.hardwarePart?.piece ? findPiece(c, piece) : null;
+    if (below) return below;
+  }
+  return null;
+}
 
 /** The menu's lengths, with the one it has now even when it is not a standard one. */
 function withCurrent(lengths: readonly number[], current?: number): number[] {

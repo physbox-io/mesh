@@ -303,3 +303,53 @@ export const RimSealIcon = () => (
     <rect x="4.5" y="6" width="15" height="12" rx="2.2" className="stroke-slate-800 dark:stroke-slate-300" strokeWidth="1.6" />
   </svg>
 );
+
+export const LinearRailIcon = () => (
+  <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none">
+    {/* The rail, end on along the tile, and the carriage riding it */}
+    <rect x="2" y="14" width="20" height="4" rx="0.8" className="fill-slate-300 dark:fill-slate-600 stroke-slate-500 dark:stroke-slate-300" strokeWidth="1" />
+    {[5, 10, 15, 20].map((x) => <circle key={x} cx={x - 1} cy="16" r="0.8" className="fill-slate-600 dark:fill-slate-900" />)}
+    <rect x="7" y="8" width="10" height="7" rx="1.2" className="fill-slate-100 dark:fill-slate-400 stroke-slate-600 dark:stroke-slate-200" strokeWidth="1.1" />
+    <path d="M4 6 H8 M16 6 H20" className="stroke-slate-400" strokeWidth="1" strokeLinecap="round" />
+  </svg>
+);
+
+export const RodBushingIcon = () => (
+  <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none">
+    <rect x="2" y="10.5" width="20" height="3" rx="1.5" className="fill-slate-200 dark:fill-slate-500 stroke-slate-500 dark:stroke-slate-300" strokeWidth="1" />
+    <rect x="8" y="7" width="8" height="10" rx="2" className="fill-slate-400 dark:fill-slate-600 stroke-slate-600 dark:stroke-slate-200" strokeWidth="1.1" />
+    <path d="M10 7 V17 M14 7 V17" className="stroke-slate-600 dark:stroke-slate-300" strokeWidth="0.7" />
+  </svg>
+);
+
+export const DrawerRunnerIcon = () => (
+  <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none">
+    {/* A cabinet, and a drawer on its runners part way out */}
+    <rect x="3" y="4" width="15" height="16" rx="1" className="fill-amber-50 dark:fill-amber-950/30 stroke-amber-700 dark:stroke-amber-500" strokeWidth="1.1" />
+    <rect x="7" y="9" width="14" height="6" rx="0.8" className="fill-amber-200 dark:fill-amber-800 stroke-amber-700 dark:stroke-amber-400" strokeWidth="1.1" />
+    <path d="M4 15.8 H20" className="stroke-slate-500 dark:stroke-slate-300" strokeWidth="1.3" strokeLinecap="round" />
+  </svg>
+);
+
+export const RailSeatIcon = () => (
+  <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none">
+    <rect x="2.5" y="5" width="19" height="14" rx="2" className="fill-rose-100 dark:fill-rose-950/40 stroke-rose-400 dark:stroke-rose-500" strokeWidth="1.2" />
+    <rect x="4" y="10" width="16" height="4" rx="0.5" className="fill-rose-300 dark:fill-rose-700" />
+    {[6, 12, 18].map((x) => <circle key={x} cx={x} cy="12" r="1" className="fill-rose-700 dark:fill-rose-300" />)}
+  </svg>
+);
+
+export const RodSocketIcon = () => (
+  <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none">
+    <rect x="3" y="3" width="18" height="18" rx="3" className="fill-rose-100 dark:fill-rose-950/40 stroke-rose-400 dark:stroke-rose-500" strokeWidth="1.2" />
+    <circle cx="12" cy="12" r="4.2" className="fill-rose-400 dark:fill-rose-700 stroke-rose-600" strokeWidth="1" />
+  </svg>
+);
+
+export const BushingHousingIcon = () => (
+  <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none">
+    <rect x="3" y="3" width="18" height="18" rx="3" className="fill-rose-100 dark:fill-rose-950/40 stroke-rose-400 dark:stroke-rose-500" strokeWidth="1.2" />
+    <circle cx="12" cy="12" r="6.3" className="fill-rose-300 dark:fill-rose-800 stroke-rose-600" strokeWidth="1" />
+    <circle cx="12" cy="12" r="2.6" className="fill-white dark:fill-slate-900 stroke-rose-600" strokeWidth="0.8" />
+  </svg>
+);

@@ -34,6 +34,7 @@ import { GLANDS, O_RINGS, SEAL_LIMITS } from './hardwareSizes';
 import { cordOf, seatFor } from './hardwareParts';
 import { metricThread } from './metricThreads';
 import { rimCentreline } from './sealGrooves';
+import { RUNNER_SIDE_SPACE_MM } from './linearParts';
 
 /** Rays per groove: enough to find a lid that misses a corner. */
 const SAMPLES = 16;
@@ -156,7 +157,62 @@ const mmText = (m: number) => `${(m * 1000).toFixed(2).replace(/\.?0+$/, '')} mm
  * around them in `whole` (the full scene, when only one body is analysed).
  */
 export function hardwareFindings(scene: SceneGraph, process: DfmProcess, whole: SceneGraph = scene): DfmFinding[] {
-  return [...sealFindings(scene, process, whole), ...screwFindings(scene, process, whole)];
+  return [...sealFindings(scene, process, whole), ...screwFindings(scene, process, whole), ...runnerFindings(scene, process, whole)];
+}
+
+/** How far side space may be off a runner's 12.7 mm before the drawer binds or falls off it, mm. */
+const SIDE_SPACE_SLACK_MM = 0.5;
+
+/**
+ * One finding per drawer runner whose side space is wrong: the gap from the
+ * drawer's side to the cabinet's, measured across the runner, against the
+ * 12.7 mm every ball-bearing runner is made for. Too little and the drawer
+ * binds; too much and the runner cannot reach both. The commonest drawer
+ * mistake there is, and one a ruler finds only once it is built.
+ */
+export function runnerFindings(scene: SceneGraph, process: DfmProcess, whole: SceneGraph = scene): DfmFinding[] {
+  const { bodies, worlds } = bodiesOf(whole);
+  const everything: SceneNode[] = [];
+  const collect = (nodes: SceneNode[]) => { for (const n of nodes) { everything.push(n); collect(n.children || []); } };
+  collect(whole.nodes || []);
+  const out: DfmFinding[] = [];
+  const mine: SceneNode[] = [];
+  const pick = (nodes: SceneNode[]) => { for (const n of nodes) { if (n.hardwarePart?.kind === 'drawer_runner' && !n.hardwarePart.piece) mine.push(n); pick(n.children || []); } };
+  pick(scene.nodes || []);
+  const parentOf = new Map<string, string>();
+  const link = (nodes: SceneNode[]) => { for (const n of nodes) { for (const c of n.children || []) parentOf.set(c.id, n.id); link(n.children || []); } };
+  link(whole.nodes || []);
+  for (const runner of mine) {
+    // Fixed in its cabinet, or welded to it.
+    const carcass = parentOf.get(runner.id) ?? runner.weldTargetId;
+    const slide = everything.find((n) => n.id === `${runner.id}_carriage`);
+    // The drawer rides this slide, or the one this slide is coupled to.
+    const led = slide?.coupleTargetId ?? slide?.id;
+    const drawer = led && everything.find((n) => n.weldTargetId === led)?.id;
+    const world = worlds.get(runner.id);
+    if (!carcass || !drawer || !world) continue;
+    const L = Number(runner.hardwarePart!.size) / 1000;
+    const middle = new THREE.Vector3(L / 2, 0, 0).applyMatrix4(world);
+    const toward = new THREE.Vector3(0, 1, 0).transformDirection(world);
+    const reach = (id: string, dir: THREE.Vector3) => {
+      const body = bodies.find((b) => b.id === id);
+      return body ? rayHit(body.tris, middle, dir, 0.05) : Infinity;
+    };
+    const space = (reach(drawer, toward) + reach(carcass, toward.clone().negate())) * 1000;
+    if (!Number.isFinite(space)) continue;
+    const off = space - RUNNER_SIDE_SPACE_MM;
+    if (Math.abs(off) <= SIDE_SPACE_SLACK_MM) continue;
+    const by = `${(Math.abs(off) * 2).toFixed(1)} mm`;
+    out.push({
+      id: `runner_${runner.id}`, process, severity: 'critical',
+      title: `${runner.name}: ${space.toFixed(1)} mm side space`,
+      detail: `Ball-bearing runners take ${RUNNER_SIDE_SPACE_MM} mm each side of the drawer, ±${SIDE_SPACE_SLACK_MM}; this one has ${space.toFixed(1)} mm, so the drawer ${off < 0 ? 'binds' : 'will not reach both runners'}.`,
+      fix: off < 0 ? `Make the drawer ${by} narrower, or the cabinet that much wider inside.` : `Make the drawer ${by} wider, or the cabinet that much narrower inside.`,
+      position: middle.toArray() as [number, number, number],
+      metric: space,
+    });
+  }
+  return out;
 }
 
 /** Plastic under a cap screw's head, in screw diameters, below which it pulls through. */

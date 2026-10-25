@@ -48,6 +48,7 @@ import {
   type HardwarePartInfo,
 } from './hardwareGeometry';
 import { isBoughtIn } from './boughtIn';
+import { LINEAR_PARTS } from './linearParts';
 
 
 const SHAFT_LENGTHS = [10, 16, 20, 25, 30, 40, 50, 60, 80, 100, 120, 150, 200, 250, 300] as const;
@@ -78,6 +79,7 @@ const CORE_PARTS: Record<CorePartKind, HardwarePartInfo> = {
 /** Every kind of bought part: the core ones here, then each family's from its own module. */
 export const HARDWARE_PARTS: Record<HardwarePartKind, HardwarePartInfo> = {
   ...CORE_PARTS,
+  ...LINEAR_PARTS,
 };
 
 /** An O-ring's cord diameter, mm: a stocked ring's, or the cord's own. */
@@ -94,6 +96,10 @@ export const PARTS_FOR_CUT: Record<HardwareCutKind, HardwarePartKind[]> = {
   insert_boss: ['screw'],
   oring: ['oring'],
   seal_cord: ['oring'],
+  rail_seat: ['mgn_rail'],
+  rod_clamp: ['linear_rod'],
+  // A housing takes the bushing of a rod already on its line: see rideOnRod.
+  lm_housing: [],
 };
 
 export { isBoughtIn };
@@ -274,6 +280,7 @@ function quiet(node: SceneNode) {
 /** The cut piece a part is placed against: the pocket it drops into, or the bore it goes down. */
 const SEAT_PIECE: Record<HardwareCutKind, string> = {
   bearing: 'pocket', nut_trap: 'pocket', counterbore: 'head', insert: 'bore', insert_boss: 'bore', oring: 'groove', seal_cord: 'groove',
+  rail_seat: 'channel', rod_clamp: 'bore', lm_housing: 'pocket',
 };
 
 export interface Seat {
@@ -290,11 +297,11 @@ export interface Seat {
  * Where a part goes in one of a body's hardware cuts, and what size it is.
  * Null when the body has no such cut, or the cut takes no part of this kind.
  */
-export function seatFor(host: SceneNode, group: string, kind?: HardwarePartKind): Seat | null {
+export function seatFor(host: SceneNode, group: string, kind?: HardwarePartKind, lengthMm?: number): Seat | null {
   const spec = hardwareSpecOf(host.geoms || [], group);
   if (!spec) return null;
   const partKind = kind ?? PARTS_FOR_CUT[spec.kind][0];
-  if (!PARTS_FOR_CUT[spec.kind].includes(partKind)) return null;
+  if (!partKind || !PARTS_FOR_CUT[spec.kind].includes(partKind)) return null;
   const piece = (host.geoms || []).find((g) => g.hardware?.group === group && g.hardware.part === SEAT_PIECE[spec.kind] && !g.csgDerived);
   if (partKind === 'oring' && piece) return ringSeat(host, piece, spec.size);
   if (!piece?.pos || !piece.size) return null;
@@ -303,7 +310,9 @@ export function seatFor(host: SceneNode, group: string, kind?: HardwarePartKind)
   const reach = piece.cutDepth ?? 0;
   // A blind cut's cutter runs from `reach` inside the surface to the overshoot
   // outside it, so the surface is `reach - half` out from the cutter's centre.
-  const entry = new THREE.Vector3(...(piece.pos as [number, number, number])).addScaledVector(n, reach - (piece.size[1] ?? 0));
+  // A box keeps its half-length third, a cylinder second.
+  const half = (piece.type === 'box' ? piece.size[2] : piece.size[1]) ?? 0;
+  const entry = new THREE.Vector3(...(piece.pos as [number, number, number])).addScaledVector(n, reach - half);
   const offset = csgFrameOffset(host);
   const quat = piece.quat ? [...piece.quat] : (() => {
     const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), n);
@@ -330,6 +339,17 @@ export function seatFor(host: SceneNode, group: string, kind?: HardwarePartKind)
       }
       // Into an insert, from outside: bearing on the surface, as deep as the insert.
       return { pos: at(entry), quat, part: { kind: 'screw', size: spec.size, lengthMm: screwLengthAtMost(reach * 1000) }, gripM: 0 };
+    }
+    case 'mgn_rail': {
+      // Bedded on the channel floor, along it: the channel's turn is the rail's.
+      const floor = entry.clone().addScaledVector(n, -reach);
+      return { pos: at(floor), quat, part: { kind: 'mgn_rail', size: spec.size, lengthMm: spec.lengthMm ?? 300 } };
+    }
+    case 'linear_rod': {
+      // Pushed to the bottom of its socket, standing out of it along the normal.
+      const length = mm(lengthMm ?? HARDWARE_PARTS.linear_rod.defaultLengthMm!);
+      const centre = entry.clone().addScaledVector(n, -reach + length / 2);
+      return { pos: at(centre), quat, part: { kind: 'linear_rod', size: spec.size, lengthMm: +(length * 1000).toFixed(3) } };
     }
     default:
       return null;
@@ -377,7 +397,7 @@ function ringSeat(host: SceneNode, piece: SceneGeom, size: string): Seat | null 
  */
 export function seatPart(node: SceneNode, host: SceneNode, group: string, lengthMm?: number): boolean {
   const kind = node.hardwarePart?.kind;
-  const seat = kind && seatFor(host, group, kind);
+  const seat = kind && seatFor(host, group, kind, node.hardwarePart?.lengthMm);
   if (!seat) return false;
   const part: HardwarePart = { ...node.hardwarePart!, ...seat.part, seat: group };
   if (kind === 'screw') {
@@ -403,7 +423,7 @@ export function reseatHardware(host: SceneNode): void {
   for (const child of host.children || []) {
     const group = child.hardwarePart?.seat;
     if (!group || child.hardwarePart?.piece) continue;
-    const seat = seatFor(host, group, child.hardwarePart!.kind);
+    const seat = seatFor(host, group, child.hardwarePart!.kind, child.hardwarePart!.lengthMm);
     if (!seat) {
       delete child.hardwarePart!.seat;
       continue;
@@ -411,10 +431,14 @@ export function reseatHardware(host: SceneNode): void {
     child.pos = seat.pos;
     child.quat = seat.quat;
     const size = seat.part.size;
-    // An O-ring follows its groove's shape as well as its size.
+    // An O-ring follows its groove's shape as well as its size, a rail its seat's length.
     const path = seat.part.path;
     const samePath = !path || JSON.stringify(path) === JSON.stringify(child.hardwarePart!.path);
-    if (size !== child.hardwarePart!.size || !samePath) rebuildPart(child, { ...child.hardwarePart!, size, ...(path ? { path } : {}) });
+    const length = child.hardwarePart!.kind === 'mgn_rail' ? seat.part.lengthMm : undefined;
+    const sameLength = length === undefined || length === child.hardwarePart!.lengthMm;
+    if (size !== child.hardwarePart!.size || !samePath || !sameLength) {
+      rebuildPart(child, { ...child.hardwarePart!, size, ...(path ? { path } : {}), ...(length !== undefined ? { lengthMm: length } : {}) });
+    }
   }
 }
 

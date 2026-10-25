@@ -105,6 +105,7 @@ import type { RawGeom, RawJoint, RawNode } from '../utils/sceneNodes';
 import { HARDWARE_KINDS, hardwareCutProblem, hardwareSpecOf } from '../utils/hardwareCuts';
 import { HARDWARE_PARTS } from '../utils/hardwareParts';
 import { sealFindings } from '../utils/hardwareChecks';
+import { hardwareList } from '../utils/hardwareList';
 import {
   boxLattice, cloneLattice, createLattice, deserializeCage, orientFaces, serializeCage, toSceneGeom as latticeToSceneGeom, DEFAULT_UNIT as LATTICE_UNIT,
   type Axis as LatticeAxis, type Lattice,
@@ -2179,6 +2180,11 @@ export function useMCPBridge() {
         case 'GET_SCENE_SUMMARY':
           return {
             nodes: (store.sceneGraph.nodes || []).map((n) => summarizeNode(n, store.model)),
+            // What to buy: every bought part counted, bar stock packed.
+            ...(() => {
+              const list = hardwareList(store.sceneGraph);
+              return list.rows.length ? { hardwareList: list } : {};
+            })(),
             ...(store.model?.body_mass ? {
               // Body 0 is the world.
               totalMassKg: +Array.from(store.model.body_mass).slice(1).reduce((a, b) => a + b, 0).toPrecision(6),
@@ -3126,9 +3132,19 @@ export function useMCPBridge() {
         }
 
         case 'ADD_HARDWARE': {
-          const { kind, size, lengthMm, washer, into, group, at } = msg as Msg<{
+          const { kind, size, lengthMm, washer, into, group, at, fixTo, id: existing } = msg as Msg<{
             kind: string; size?: string | number; lengthMm?: number; washer?: boolean; into?: string; group?: string; at?: number[];
+            fixTo?: string; id?: string;
           }>;
+          // A part already in the scene: only fix a body to its moving piece.
+          if (existing) {
+            const part = findNodeInScene(store.sceneGraph.nodes, existing);
+            const piece = part && (part.hardwarePart?.piece === 'carriage' ? part : findNodeInScene(part.children || [], `${part.id}_carriage`));
+            if (!piece) return { ok: false, error: `'${existing}' has no moving piece to fix a body to` };
+            if (!fixTo) return { ok: false, error: 'Give fixTo: the body to weld to its moving piece' };
+            const why = store.fixToPiece(piece.id, fixTo);
+            return why ? { ok: false, error: why } : { ok: true, id: existing, pieceId: piece.id, fixed: fixTo };
+          }
           if (typeof kind !== 'string' || !(kind in HARDWARE_PARTS)) {
             return { ok: false, error: `kind must be one of ${Object.keys(HARDWARE_PARTS).join(', ')}` };
           }
@@ -3139,6 +3155,27 @@ export function useMCPBridge() {
           }
           if (into && !findNodeInScene(store.sceneGraph.nodes, into)) return { ok: false, error: `No object with id '${into}'` };
           let id: string | null;
+          const housing = into && group ? findNodeInScene(store.sceneGraph.nodes, into)?.geoms?.find((g) => g.hardware?.group === group)?.hardware?.kind === 'lm_housing' : false;
+          if (housing) {
+            // A housing takes no part of its own: it rides the rod on its line.
+            const why = store.rideOnRod(into!, group!);
+            if (why) return { ok: false, error: why };
+            const host = findNodeInScene(useStore.getState().sceneGraph.nodes, into!);
+            return { ok: true, id: into, ridesOn: host?.weldTargetId };
+          }
+          if (partKind === 'drawer_runner' && into && !group) {
+            const fitted = store.addDrawerRunners(into);
+            if (typeof fitted === 'string') return { ok: false, error: fitted };
+            await useStore.getState().recompile(useStore.getState().sceneGraph, undefined, false, true);
+            const after = useStore.getState().sceneGraph.nodes;
+            return {
+              ok: true, ids: fitted,
+              runners: fitted.map((rid) => {
+                const r = findNodeInScene(after, rid);
+                return { id: rid, name: r?.name, posMm: r?.pos.map((v) => Math.round(v * 1e6) / 1000), weldedTo: r?.weldTargetId };
+              }),
+            };
+          }
           if (into && group) {
             id = store.seatHardwarePart(into, group, partKind);
             if (!id) return { ok: false, error: `'${into}' has no hardware cut '${group}' that takes a ${info.label.toLowerCase()}` };
@@ -3147,6 +3184,11 @@ export function useMCPBridge() {
             id = store.addHardwarePart(partKind, pos, into ?? null);
           }
           if (!id) return { ok: false, error: 'The part could not be added' };
+          if (fixTo) {
+            const piece = findNodeInScene(useStore.getState().sceneGraph.nodes, `${id}_carriage`);
+            const why = piece ? useStore.getState().fixToPiece(piece.id, fixTo) : `A ${info.label.toLowerCase()} has no moving piece to fix a body to`;
+            if (why) return { ok: false, error: why, id };
+          }
           if (size !== undefined || lengthMm !== undefined || washer !== undefined) {
             useStore.getState().setHardwarePart(id, {
               ...(size !== undefined ? { size: String(size) } : {}),

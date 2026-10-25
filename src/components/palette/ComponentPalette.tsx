@@ -10,7 +10,8 @@ import {
   CubeIcon, SphereIcon, CylinderIcon, PoleIcon, GearIcon, WedgeIcon, PyramidIcon, ConeIcon, TorusIcon,
   TubeIcon, EllipsoidIcon, RingIcon, SculptIcon, LatticeIcon, CurveIcon, PulleyIcon, RopeIcon, MeshIcon, ScadIcon,
 } from './shapeIcons';
-import { InsertBossIcon, NutTrapIcon, CounterboreIcon, BearingPocketIcon, DShaftHubIcon, BearingIcon, CapScrewIcon, HexNutIcon, ShaftIcon, ORingGrooveIcon, RimSealIcon } from './hardwareIcons';
+import { InsertBossIcon, NutTrapIcon, CounterboreIcon, BearingPocketIcon, DShaftHubIcon, BearingIcon, CapScrewIcon, HexNutIcon, ShaftIcon, ORingGrooveIcon, RimSealIcon,
+  LinearRailIcon, RodBushingIcon, DrawerRunnerIcon, RailSeatIcon, RodSocketIcon, BushingHousingIcon } from './hardwareIcons';
 import { Frame } from 'lucide-react';
 import { addReferencePicture } from '../../utils/addReferencePicture';
 import { useDialogs } from '../../store/dialogStore';
@@ -82,6 +83,9 @@ const CUT_TILES: { kind: HardwareCutKind; label: string; color: TileColor; spin:
   { kind: 'bearing', label: 'Bearing Pocket', color: 'amber', spin: 'group-hover:rotate-45', slow: true, Icon: BearingPocketIcon },
   { kind: 'oring', label: 'O-ring Groove', color: 'rose', spin: 'group-hover:rotate-45', slow: true, Icon: ORingGrooveIcon },
   { kind: 'seal_cord', label: 'Rim Seal', color: 'rose', spin: 'group-hover:-rotate-3', Icon: RimSealIcon },
+  { kind: 'rail_seat', label: 'Rail Seat', color: 'rose', spin: 'group-hover:rotate-3', Icon: RailSeatIcon },
+  { kind: 'rod_clamp', label: 'Rod Socket', color: 'rose', spin: 'group-hover:-rotate-3', Icon: RodSocketIcon },
+  { kind: 'lm_housing', label: 'Bushing Housing', color: 'rose', spin: 'group-hover:rotate-6', Icon: BushingHousingIcon },
 ];
 
 /** Bought parts, which go into those cuts or stand on their own. */
@@ -90,6 +94,9 @@ const BOUGHT_TILES: { kind: HardwarePartKind; spin: TileSpin; Icon: () => React.
   { kind: 'screw', spin: 'group-hover:rotate-6', Icon: CapScrewIcon },
   { kind: 'nut', spin: 'group-hover:-rotate-6', Icon: HexNutIcon },
   { kind: 'shaft', spin: 'group-hover:rotate-3', Icon: ShaftIcon },
+  { kind: 'mgn_rail', spin: 'group-hover:-rotate-3', Icon: LinearRailIcon },
+  { kind: 'linear_rod', spin: 'group-hover:rotate-3', Icon: RodBushingIcon },
+  { kind: 'drawer_runner', spin: 'group-hover:-rotate-3', Icon: DrawerRunnerIcon },
 ];
 
 export const ComponentPalette: React.FC<ComponentPaletteProps> = ({
@@ -191,7 +198,7 @@ export const ComponentPalette: React.FC<ComponentPaletteProps> = ({
           />
         </div>
         <p className="text-[10px] leading-snug text-slate-400 dark:text-slate-500 mt-3 mb-2">
-          Bought parts. With a part selected, one goes into its cut for it; a shaft goes through a selected bearing.
+          Bought parts. With a part selected, one goes into its cut for it; a shaft goes through a selected bearing; runners go on a selected drawer.
         </p>
         <div className="grid grid-cols-2 gap-2">
           {BOUGHT_TILES.map((t) => (

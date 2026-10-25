@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import {
-  Box, ChevronUp, Cpu, Cuboid, Flame, Layers, Layers2, MousePointer2, Mountain, Package, Pause, Play, Printer, Puzzle, Scissors, Square, Wrench,
+  Box, ChevronUp, Cpu, Cuboid, Flame, Layers, Layers2, ListChecks, MousePointer2, Mountain, Package, Pause, Play, Printer, Puzzle, Scissors, Square, Wrench,
 } from 'lucide-react';
 import { NumberInput } from '@physbox-io/ui';
 import { useStore, type MachineTarget } from '../store/useStore';
@@ -20,6 +20,7 @@ import { useModifier } from '../hooks/useModifier';
 import { CastPrepGuardModal } from './CastPrepGuardModal';
 import { useJobPause } from '../store/jobPauseStore';
 import { RemoteJobChip } from './RemoteJobChip';
+import { openHardwareList } from './HardwareListDialog';
 
 /**
  * What the app is in the middle of, said in one phrase.
@@ -227,6 +228,11 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
   // Prepare for Casting changes the model itself, so say so where the Cast
   // button is, which is on screen the whole time.
   const castPrep = useStore((s) => s.sceneGraph.castPrep);
+  // Whether there is any bought hardware to list.
+  const hasHardware = useStore((s) => {
+    const any = (nodes: SceneNode[]): boolean => nodes.some((n) => !!n.hardwarePart || any(n.children || []));
+    return any(s.sceneGraph.nodes || []);
+  });
   const setMachineTarget = useStore((s) => s.setMachineTarget);
   const material = useStore((s) => s.material);
   const setMaterial = useStore((s) => s.setMaterial);
@@ -431,6 +437,13 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
               ]
             : []),
         ];
+  // Whatever makes the part, the hardware that goes in it has to be bought.
+  if (hasHardware) {
+    exportButtons.push({
+      label: 'Parts', title: 'The hardware to buy: every bearing, screw, ring and rail in the scene, counted, with bar stock cut to length', tone: 'text-slate-600 dark:text-slate-300',
+      icon: <ListChecks className="w-3.5 h-3.5" />, run: () => openHardwareList(),
+    });
+  }
 
   return (
     /*

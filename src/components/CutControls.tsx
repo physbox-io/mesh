@@ -41,6 +41,7 @@ import { ThreadField } from './ThreadField';
 import { BORE_LABELS, HARDWARE_KINDS, SEAL_LABELS, hardwareCutProblem, hardwareSpecOf } from '../utils/hardwareCuts';
 import { loopLengthMm, rimCentreline } from '../utils/sealGrooves';
 import { useDialogs } from '../store/dialogStore';
+import { findNodeById } from '../utils/sceneTree';
 import { HARDWARE_PARTS, PARTS_FOR_CUT, seatedIn } from '../utils/hardwareParts';
 import { useStore } from '../store/useStore';
 import { cutDepthOf, sourcePositiveBounds } from '../utils/csg';
@@ -339,6 +340,24 @@ function HardwareRow({ node, geom, index }: {
             Seals: {SEAL_LABELS[hw.seal].toLowerCase()}
           </span>
         )}
+        {hw.kind === 'rail_seat' && (
+          <label className="flex-1 min-w-0" title="The rail's length: the seat is a millimetre longer, with a hole at every bolt.">
+            <span className="block text-[9px] font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500">Length</span>
+            <select
+              value={hw.length ? Math.round(hw.length * 1000) : 300}
+              onChange={(e) => setHardwareCut(node.id, hw.group, { lengthMm: Number(e.target.value) })}
+              className={fieldClass}
+            >
+              {(HARDWARE_PARTS.mgn_rail.lengths ?? []).map((l) => <option key={l} value={l}>{l} mm</option>)}
+            </select>
+          </label>
+        )}
+        {hw.kind === 'rail_seat' && (
+          <label className="flex items-center gap-1 text-[10px] text-slate-500 dark:text-slate-400 pb-1 cursor-pointer" title="Run the rail across the face instead of along it">
+            <input type="checkbox" checked={!!hw.turned} onChange={(e) => setHardwareCut(node.id, hw.group, { turned: e.target.checked })} />
+            Across
+          </label>
+        )}
         {centreline && (
           <span className="flex-1 min-w-0 text-[10px] text-slate-500 dark:text-slate-400 pb-1" title="The cord to cut for it, round the middle of the groove.">
             Cord: {Math.round(loopLengthMm(centreline))} mm
@@ -393,7 +412,9 @@ function SeatedPart({ node, group, kind }: { node: SceneNode; group: string; kin
       </button>
     );
   }
+  if (kind === 'lm_housing') return <RideOnRod node={node} group={group} />;
   const part = PARTS_FOR_CUT[kind][0];
+  if (!part) return null;
   return (
     <button
       type="button"
@@ -406,7 +427,42 @@ function SeatedPart({ node, group, kind }: { node: SceneNode; group: string; kin
   );
 }
 
-const HARDWARE_ORDER: HardwareCutKind[] = ['nut_trap', 'counterbore', 'insert', 'insert_boss', 'bearing', 'oring', 'seal_cord'];
+/**
+ * A bushing housing's part rides the rod on its line: the button finds it and
+ * welds the part to its bushing, or says what is missing.
+ */
+function RideOnRod({ node, group }: { node: SceneNode; group: string }) {
+  const rideOnRod = useStore((s) => s.rideOnRod);
+  const unfixBody = useStore((s) => s.unfixBody);
+  const graph = useStore((s) => s.sceneGraph);
+  const [problem, setProblem] = useState<string | null>(null);
+  const riding = node.weldTargetId ? findNodeById(graph.nodes, node.weldTargetId) : null;
+  if (riding?.hardwarePart?.kind === 'linear_rod') {
+    return (
+      <div className="flex items-center gap-1 text-[10px] text-slate-500 dark:text-slate-400">
+        <span className="flex-1">Rides <span className="font-semibold">{riding.name}</span></span>
+        <button type="button" onClick={() => unfixBody(node.id)} className="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase cursor-pointer bg-white dark:bg-slate-800 text-slate-400 hover:text-rose-600">Off</button>
+      </div>
+    );
+  }
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setProblem(rideOnRod(node.id, group))}
+        title="Weld this part to the bushing of the rod that runs through the housing, so it slides along the rod"
+        className="w-full px-1.5 py-0.5 rounded text-[9px] font-bold uppercase cursor-pointer bg-white dark:bg-slate-800 text-slate-400 hover:text-rose-600 transition-colors"
+      >
+        Ride on rod
+      </button>
+      {problem && <div className="text-[10px] text-rose-600 dark:text-rose-400 leading-snug">{problem}</div>}
+    </>
+  );
+}
+
+const HARDWARE_ORDER: HardwareCutKind[] = [
+  'nut_trap', 'counterbore', 'insert', 'insert_boss', 'bearing', 'oring', 'seal_cord', 'rail_seat', 'rod_clamp', 'lm_housing',
+];
 
 /**
  * The Cut controls for one body: the shapes you can take out of it, and the
