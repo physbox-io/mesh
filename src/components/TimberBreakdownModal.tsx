@@ -43,6 +43,7 @@ import { webSerialManager, type MachineState } from '../utils/webSerialManager';
 import type { SceneNode } from '../types/scene';
 import type { Vec3 } from '../utils/printPlate';
 import { Advanced, Field, Segmented, inputClass, sectionClass, sectionTitleClass } from './ExportFields';
+import { RackToolPicker } from './RackToolPicker';
 import { AssemblyPreview, type PreviewSection } from './scene/AssemblyPreview';
 
 const PREVIEW_COLOURS = [
@@ -272,6 +273,10 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
   );
 
   const workerMode = modeSetting === 'auto' ? undefined : modeSetting;
+  const machineLimits = useMemo(() => {
+    const motion = webSerialManager.getState().motion;
+    return { spindle: motion.spindle, maxFeedMmMin: Math.min(motion.maxRate.x, motion.maxRate.y) };
+  }, []);
 
   const { result: timberJob, busy, failure } = useExportJob(
     isOpen,
@@ -284,9 +289,13 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
             plankOptions: settledPlankOpts,
             cncBedMm,
             defaultStockLengthMm: 2400,
+            // The machine's own limits, so the mortising feeds are derived for
+            // it rather than a fixed S12000 F900.
+            spindle: machineLimits.spindle,
+            maxFeedMmMin: machineLimits.maxFeedMmMin,
           })
         : null,
-    [workerMode, soups, settledJoineryOpts, settledPlankOpts, cncBedMm],
+    [workerMode, soups, settledJoineryOpts, settledPlankOpts, cncBedMm, machineLimits],
   );
 
   const frameOutcome: TimberBreakdownOutcome | null = useMemo(
@@ -795,14 +804,23 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
                         label="CNC Bit Ø (mm)"
                         hint="End mill diameter used when routing mortises, dadoes, or slots on CNC."
                       >
-                        <NumberInput
-                          step={0.5}
-                          min={3}
-                          max={16}
-                          value={joineryOpts.cutterDiaMm}
-                          onChange={(v) => setOpt('cutterDiaMm', v)}
-                          className={inputClass}
-                        />
+                        <div className="flex items-center gap-1.5">
+                          <NumberInput
+                            step={0.5}
+                            min={3}
+                            max={16}
+                            value={joineryOpts.cutterDiaMm}
+                            onChange={(v) => setOpt('cutterDiaMm', v)}
+                            className={inputClass}
+                          />
+                          {/* The end mills in the shared rack, so the bit named
+                              here is one that is actually in the drawer. */}
+                          <RackToolPicker
+                            shapes={['flat']}
+                            diameterMm={joineryOpts.cutterDiaMm}
+                            onPick={(t) => setOpt('cutterDiaMm', t.diameterMm)}
+                          />
+                        </div>
                       </Field>
                     )}
                     <Field label="Edge Radius (mm)">
