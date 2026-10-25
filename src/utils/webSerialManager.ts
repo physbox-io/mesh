@@ -8,6 +8,7 @@
 import {
   AckTimeoutError,
   GrblMachine,
+  TelemetryThrottle,
   FEED_OVERRIDE_BYTES,
   RAPID_OVERRIDE_BYTES,
   SPINDLE_OVERRIDE_BYTES,
@@ -34,6 +35,7 @@ import {
   machineSocketUrl,
   postMachineTelemetry,
   submitMachineJob,
+  type MachiningTelemetry,
   type RemoteCommand,
 } from './apiClient';
 import { cloudAutosave } from './cloudDocuments';
@@ -771,9 +773,12 @@ class WebSerialManager extends GrblMachine<MachineState> {
   private guideSpotRestoreLaserMode = false;
   private guideJiggleRunning = false;
 
-  /** When the last telemetry POST went out, and whether one is still in flight. */
-  private lastTelemetryAt = 0;
-  private telemetryInFlight = false;
+  /** Telemetry pacing — see `publishTelemetry`. */
+  private telemetry = new TelemetryThrottle<MachiningTelemetry>({
+    intervalMs: TELEMETRY_INTERVAL_MS,
+    post: (frame) =>
+      postMachineTelemetry('physics', frame).then((commands) => this.applyRemoteCommands(commands)),
+  });
   /** What the running job is, as the run archive should remember it. */
   private jobContext: { name?: string; settings?: Record<string, unknown> | null } = {};
   /**
@@ -789,73 +794,65 @@ class WebSerialManager extends GrblMachine<MachineState> {
   private setupEndedAt = 0;
   /** The setup the job on the wire belongs to, if it is one. */
   private runningSetup: JobSetup | null = null;
-  private lastTelemetryStatus: MachineStatus | null = null;
 
   protected onStateNotified(state: MachineState): void {
     this.publishTelemetry(state);
   }
 
   /**
-   * Streams machine state to api.physbox.io so the remote dashboard has
-   * something to show.
+   * Streams machine state to api.physbox.io so the remote dashboard and the
+   * run archive have something to show.
    *
-   * `RemoteMachiningModal` has always been able to read this endpoint; until now
-   * nothing in this app ever wrote to it, so the dashboard only ever showed
-   * machines driven by the other apps in the ecosystem.
-   *
-   * Three things keep it from becoming a firehose. Nothing is sent while
-   * disconnected, because a browser tab sitting on the editor is not a machine.
-   * Between sends there is a floor of `TELEMETRY_INTERVAL_MS`, so the 5 Hz status
-   * poll does not turn into 5 Hz of HTTP. And a status *change* — the alarm, the
-   * tool-change pause, the end of the job — jumps that floor, because those are
-   * exactly the moments the person watching the dashboard is waiting for, and
-   * making them wait out the interval is how a two-second delay becomes the
-   * reason nobody trusts the dashboard.
+   * Paced by the shared `TelemetryThrottle`. Between sends there is a floor of
+   * `TELEMETRY_INTERVAL_MS`, so the 5 Hz status poll does not turn into 5 Hz of
+   * HTTP. A status *change* — the alarm, the tool-change pause, the end of the
+   * job — jumps that floor, because those are exactly the moments the person
+   * watching is waiting for. Nothing is sent for a browser tab sitting on the
+   * editor with no machine, except the one frame that matters: a controller
+   * dropping off mid-job, which closes the run as the crash it was rather than
+   * leaving it "running" until the server times it out.
    */
   private publishTelemetry(state: MachineState) {
-    if (!state.connected) return;
+    if (!state.connected) {
+      const reason = state.lastError ? ` (${state.lastError})` : '';
+      this.telemetry.connectionLost((last) => ({
+        ...last,
+        status: 'error',
+        lastError: `Lost the connection to the controller at line ${last.currentLine}${reason}.`,
+      }));
+      return;
+    }
 
-    const now = Date.now();
-    const changed = state.status !== this.lastTelemetryStatus;
-    if (!changed && now - this.lastTelemetryAt < TELEMETRY_INTERVAL_MS) return;
-    // One in flight at a time: a stalled network would otherwise queue up a
-    // backlog of stale positions that all land at once when it recovers.
-    if (this.telemetryInFlight) return;
-
-    this.lastTelemetryAt = now;
-    this.lastTelemetryStatus = state.status;
-    this.telemetryInFlight = true;
-
-    void postMachineTelemetry('physics', {
-      status: state.status,
-      // What is being cut, not what it is plugged into. The port name is the
-      // fallback for a program nobody named — a jog or a hand-sent line.
-      jobName: this.jobContext.name || state.portName,
-      // What it is being cut from and with. Without it an archived run says how
-      // long it took and nothing about what it produced.
-      settings: this.jobContext.settings ?? null,
-      progressPercent: state.progressPercent,
-      currentLine: state.currentLine,
-      totalLines: state.totalLines,
-      // Work coordinates, not machine: the dashboard is read against the job,
-      // and the job was posted about the work origin.
-      xyz: { ...state.wpos },
-      feedRate: state.feedRate,
-      spindleSpeed: state.spindleSpeed,
-      lastError: state.lastError ?? null,
-      // Which cloud document this browser is working on, so the archived run points
-      // back at the scene that produced it. Null when the account has no cloud
-      // document, which is the ordinary case for a free or signed-out session.
-      documentId: cloudAutosave.getStatus().documentId,
-      documentRevision: cloudAutosave.getStatus().revision,
-      // The program itself, stored as its own document when the account is Pro,
-      // so the archive can say what was cut and not only how it went.
-      programDocumentId: getRunProgramDocumentId(),
-    })
-      .then((commands) => this.applyRemoteCommands(commands))
-      .finally(() => {
-        this.telemetryInFlight = false;
-      });
+    this.telemetry.offer(
+      {
+        status: state.status,
+        // What is being cut, not what it is plugged into. The port name is the
+        // fallback for a program nobody named — a jog or a hand-sent line.
+        jobName: this.jobContext.name || state.portName,
+        // What it is being cut from and with. Without it an archived run says how
+        // long it took and nothing about what it produced.
+        settings: this.jobContext.settings ?? null,
+        progressPercent: state.progressPercent,
+        currentLine: state.currentLine,
+        totalLines: state.totalLines,
+        // Work coordinates, not machine: the dashboard is read against the job,
+        // and the job was posted about the work origin.
+        xyz: { ...state.wpos },
+        feedRate: state.feedRate,
+        spindleSpeed: state.spindleSpeed,
+        lastError: state.lastError ?? null,
+        // Which cloud document this browser is working on, so the archived run points
+        // back at the scene that produced it. Null when the account has no cloud
+        // document, which is the ordinary case for a free or signed-out session.
+        documentId: cloudAutosave.getStatus().documentId,
+        documentRevision: cloudAutosave.getStatus().revision,
+        // The program itself, stored as its own document when the account is Pro,
+        // so the archive can say what was cut and not only how it went.
+        programDocumentId: getRunProgramDocumentId(),
+      },
+      state.status,
+      this.isJobRunning || this.isPaused
+    );
   }
 
   /**
@@ -1386,10 +1383,18 @@ class WebSerialManager extends GrblMachine<MachineState> {
     if (!this.state.connected) return;
     if (this.isJobRunning || this.isPaused || this.starting) return; // see runJob
 
+    const prepared = prepareJobLines(gcode);
+    // Before anything is set up for it: the package refuses it too, but by
+    // then this job would already read as running.
+    const offTheBed = this.travelBlockedReason(prepared.map((l) => l.code));
+    if (offTheBed) {
+      this.updateState({ lastError: offTheBed });
+      return;
+    }
+
     this.jobStartedAt = Date.now();
     this.startElapsedTicker();
 
-    const prepared = prepareJobLines(gcode);
     this.program = prepared;
     this.gcodeNotes = prepared.map(l => l.note);
     this.jobLineBase = 0;
@@ -1613,6 +1618,10 @@ class WebSerialManager extends GrblMachine<MachineState> {
     });
     const preamble = prepareJobLines(plan.preamble.join('\n'));
     const tail = this.program.slice(plan.fromLine);
+    // From wherever the tool was jogged to, the rest of the job still has to
+    // fit the machine.
+    const offTheBed = this.travelBlockedReason([...preamble, ...tail].map((l) => l.code));
+    if (offTheBed) return { ok: false, message: offTheBed };
 
     this.gcodeNotes = [...preamble.map((l) => l.note), ...tail.map((l) => l.note)];
     // The preamble's lines are not in the program, so the program line that
