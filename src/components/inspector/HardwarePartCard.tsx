@@ -4,6 +4,7 @@ import type { HardwarePart, SceneNode } from '../../types/scene';
 import { HARDWARE_PARTS } from '../../utils/hardwareParts';
 import { O_RINGS, SEAL_CORDS } from '../../utils/hardwareSizes';
 import { findNodeById } from '../../utils/sceneTree';
+import { SettledNumberField } from '../SettledInputs';
 
 const fieldClass = 'w-full px-1.5 py-1 border border-slate-200 dark:border-slate-700 rounded text-xs bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200';
 const labelClass = 'block text-[9px] font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500';
@@ -17,6 +18,7 @@ export function HardwarePartCard({ node }: { node: SceneNode }) {
   const setHardwarePart = useStore((s) => s.setHardwarePart);
   const addHardwarePart = useStore((s) => s.addHardwarePart);
   const setSelectedNodeId = useStore((s) => s.setSelectedNodeId);
+  const addCarriage = useStore((s) => s.addCarriage);
   const graph = useStore((s) => s.sceneGraph);
   const spec = node.hardwarePart;
   if (!spec) return null;
@@ -39,7 +41,10 @@ export function HardwarePartCard({ node }: { node: SceneNode }) {
   }
 
   const info = HARDWARE_PARTS[spec.kind];
-  const seatedInCut = !!spec.seat && spec.seat !== 'bore';
+  // A bracket, plate or end-tap screw is sized by the profiles it joins, a
+  // carriage by its V-slot: neither is in a cut.
+  const joins = spec.seat === 'frame' || spec.seat === 'rail';
+  const seatedInCut = !!spec.seat && spec.seat !== 'bore' && !joins;
   const inner = spec.kind === 'bearing' ? node.children.find((c) => c.hardwarePart?.piece === 'inner') : undefined;
   const hasShaft = !!inner?.children.some((c) => c.hardwarePart?.kind === 'shaft');
   const fastened = spec.fastens ? findNodeById(graph.nodes, spec.fastens) : null;
@@ -57,13 +62,19 @@ export function HardwarePartCard({ node }: { node: SceneNode }) {
         </div>
       </div>
       <div className="flex gap-1.5 items-end">
-        <label className="flex-1 min-w-0" title={seatedInCut ? 'Sized by the cut it sits in: this changes the cut too.' : undefined}>
+        <label className="flex-1 min-w-0" title={joins ? 'Sized by the profiles it joins.' : seatedInCut ? 'Sized by the cut it sits in: this changes the cut too.' : undefined}>
           <span className={labelClass}>Size</span>
-          <select value={spec.size} onChange={(e) => setHardwarePart(node.id, { size: e.target.value })} className={fieldClass}>
+          <select value={spec.size} disabled={joins} onChange={(e) => setHardwarePart(node.id, { size: e.target.value })} className={fieldClass}>
             {sizes.map((s) => <option key={s} value={s}>{spec.kind === 'shaft' ? `Ø${s} mm` : cord ? `Ø${s} cord` : s}</option>)}
           </select>
         </label>
-        {info.lengths && (
+        {info.cutToLength && (
+          <label className="flex-1 min-w-0" title="Cut to any length, mm.">
+            <span className={labelClass}>Length mm</span>
+            <SettledNumberField value={spec.lengthMm ?? 0} min={10} onChange={(v) => v >= 10 && setHardwarePart(node.id, { lengthMm: Math.round(v * 10) / 10 })} className={fieldClass} />
+          </label>
+        )}
+        {info.lengths && !joins && (
           <label className="flex-1 min-w-0" title={spec.kind === 'screw' ? 'Length under the head, as screws are sold.' : 'Overall length.'}>
             <span className={labelClass}>Length</span>
             <select value={spec.lengthMm} onChange={(e) => setHardwarePart(node.id, { lengthMm: Number(e.target.value) })} className={fieldClass}>
@@ -87,6 +98,21 @@ export function HardwarePartCard({ node }: { node: SceneNode }) {
         </div>
       )}
       {carriage && <Riders piece={carriage} />}
+      {joins && fastened && (
+        <div className="text-[10px] text-slate-500 dark:text-slate-400">
+          Holds <span className="font-semibold">{fastened.name}</span> to the profile it is fixed to.
+        </div>
+      )}
+      {spec.kind === 'extrusion' && spec.size === '2020V' && (
+        <button
+          type="button"
+          onClick={() => addCarriage(node.id)}
+          className="w-full py-1 rounded border border-slate-200 dark:border-slate-700 text-[11px] font-semibold text-slate-600 dark:text-slate-300 bg-white dark:bg-slate-800 hover:border-blue-300 cursor-pointer"
+          title="A wheel plate on this profile, sliding along it between its ends"
+        >
+          Add carriage
+        </button>
+      )}
       {spec.kind === 'bearing' && !hasShaft && (
         <button
           type="button"

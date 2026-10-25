@@ -41,7 +41,9 @@ export type CorePartKind = 'bearing' | 'screw' | 'nut' | 'shaft' | 'oring';
  * kinds here.
  */
 export type LinearPartKind = 'mgn_rail' | 'linear_rod' | 'drawer_runner';
-export type HardwarePartKind = CorePartKind | LinearPartKind;
+/** Aluminium extrusion and what joins it; see utils/extrusionParts.ts. */
+export type ExtrusionPartKind = 'extrusion' | 'tnut' | 'corner_bracket' | 'joint_plate' | 'end_tap' | 'vslot_carriage';
+export type HardwarePartKind = CorePartKind | LinearPartKind | ExtrusionPartKind;
 
 /**
  * What a body is when it is a piece of bought hardware rather than something

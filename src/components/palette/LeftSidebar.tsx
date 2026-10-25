@@ -136,6 +136,7 @@ export function LeftSidebar({ onAddNoteCard }: { onAddNoteCard: () => void }) {
             useStore.getState().addHardwarePart(kind, at ? [at[0] + 0.05, at[1], at[2]] : [0, 0, 0.03], selectedNodeId);
             close();
           }}
+          onPlaced={close}
           onAddNoteCard={() => {
             onAddNoteCard();
             close();

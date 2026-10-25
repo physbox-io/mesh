@@ -49,6 +49,7 @@ import {
 } from './hardwareGeometry';
 import { isBoughtIn } from './boughtIn';
 import { LINEAR_PARTS } from './linearParts';
+import { EXTRUSION_PARTS } from './extrusionParts';
 
 
 const SHAFT_LENGTHS = [10, 16, 20, 25, 30, 40, 50, 60, 80, 100, 120, 150, 200, 250, 300] as const;
@@ -80,6 +81,7 @@ const CORE_PARTS: Record<CorePartKind, HardwarePartInfo> = {
 export const HARDWARE_PARTS: Record<HardwarePartKind, HardwarePartInfo> = {
   ...CORE_PARTS,
   ...LINEAR_PARTS,
+  ...EXTRUSION_PARTS,
 };
 
 /** An O-ring's cord diameter, mm: a stocked ring's, or the cord's own. */
@@ -260,6 +262,10 @@ export function rebuildPart(node: SceneNode, spec: HardwarePart): void {
   node.children = [...fresh.children, ...keptUnder(node)];
   if (node.hardwarePart?.seat) quiet(node);
   else if (!node.joints?.length) node.joints = fresh.joints;
+  // What rides on it fits itself to it again: a carriage to a profile's length.
+  for (const child of node.children) {
+    if (child.hardwarePart && !child.hardwarePart.piece) HARDWARE_PARTS[child.hardwarePart.kind].refit?.(child, node);
+  }
 }
 
 /** Takes a part's geoms out of the contact solver; see note 1 at the top. */

@@ -25,11 +25,18 @@ export interface HardwarePartInfo {
    */
   name?: (p: HardwarePart) => string;
   build?: PartBuilder;
+  /** Cut to any length rather than sold in a few: the inspector takes a number. */
+  cutToLength?: boolean;
   /**
    * Bought as bars of these lengths and cut to size, mm, longest first —
    * aluminium extrusion. The hardware list packs a part's lengths onto them.
    */
   stockBarsMm?: readonly number[];
+  /**
+   * Fits a part to the bought part it rides on after that one is rebuilt: a
+   * carriage's travel to its profile's new length.
+   */
+  refit?: (part: SceneNode, parent: SceneNode) => void;
 }
 
 export const STEEL = 7850; // kg/m³
