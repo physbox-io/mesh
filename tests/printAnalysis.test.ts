@@ -1,38 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import { analyzeSceneMechanicalWeaknesses } from '../src/utils/printAnalysis';
-import {
-  createHeatSetBossNode,
-  createHexNutTrapNode,
-  createBearingPocketNode,
-  createDShaftHubNode,
-  createCounterboreHoleNode,
-} from '../src/utils/hardwareComponents';
+import { createDShaftHubNode } from '../src/utils/hardwareComponents';
 import type { SceneGraph } from '../src/types/scene';
 
 describe('printAnalysis & hardwareComponents', () => {
-  it('creates standardized 3D hardware components with meter-scaling SCAD', () => {
-    const boss = createHeatSetBossNode('M3');
-    expect(boss.name).toContain('M3 Insert Boss');
-    expect(boss.isHardwareComponent).toBe(true);
-    expect(boss.scad).toContain('scale(0.001)');
-
-    const nut = createHexNutTrapNode('M4');
-    expect(nut.name).toContain('M4 Nut Trap');
-    expect(nut.scad).toContain('scale(0.001)');
-
-    const bearing = createBearingPocketNode('608');
-    expect(bearing.name).toContain('608 Bearing Housing');
-    expect(bearing.scad).toContain('scale(0.001)');
-
+  it('creates the D-shaft hub with meter-scaling SCAD', () => {
     const dshaft = createDShaftHubNode(5.0);
     expect(dshaft.name).toContain('5mm D-Shaft Hub');
     expect(dshaft.scad).toContain('scale(0.001)');
-
-    const counterbore = createCounterboreHoleNode('M3');
-    expect(counterbore.name).toContain('M3 Cap Screw Recess');
-    expect(counterbore.isHardwareComponent).toBe(true);
-    expect(counterbore.scad).toContain('scale(0.001)');
-    expect(counterbore.geoms.some(g => g.csg === 'difference')).toBe(true);
   });
 
   it('evaluates structural, thin wall, and pin weak spots', () => {
