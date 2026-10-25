@@ -6,6 +6,7 @@ import { createDShaftHubNode } from '../../utils/hardwareComponents';
 import { HARDWARE_KINDS } from '../../utils/hardwareCuts';
 import { HARDWARE_PARTS } from '../../utils/hardwareParts';
 import { PaletteTile, type TileColor, type TileSpin } from './PaletteTile';
+import { ExtrusionTiles } from './ExtrusionTiles';
 import {
   CubeIcon, SphereIcon, CylinderIcon, PoleIcon, GearIcon, WedgeIcon, PyramidIcon, ConeIcon, TorusIcon,
   TubeIcon, EllipsoidIcon, RingIcon, SculptIcon, LatticeIcon, CurveIcon, PulleyIcon, RopeIcon, MeshIcon, ScadIcon,
@@ -35,6 +36,8 @@ export interface ComponentPaletteProps {
   /** Adds a bought part: into the selected body's cut for it when there is one. */
   onAddHardwarePart: (kind: HardwarePartKind) => void;
   onAddNoteCard: () => void;
+  /** After a tile has put something in the scene by itself: the drawer closes. */
+  onPlaced?: () => void;
 }
 
 interface PartTile {
@@ -104,6 +107,7 @@ export const ComponentPalette: React.FC<ComponentPaletteProps> = ({
   onAddHardwareCut,
   onAddHardwarePart,
   onAddNoteCard,
+  onPlaced,
 }) => {
   const cutTile = (kind: HardwareCutKind) => ({
     onClick: () => onAddHardwareCut(kind),
@@ -207,6 +211,7 @@ export const ComponentPalette: React.FC<ComponentPaletteProps> = ({
             />
           ))}
         </div>
+        <ExtrusionTiles onDone={() => onPlaced?.()} />
       </div>
 
       {/* Others */}

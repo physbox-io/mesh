@@ -3126,8 +3126,9 @@ export function useMCPBridge() {
         }
 
         case 'ADD_HARDWARE': {
-          const { kind, size, lengthMm, washer, into, group, at } = msg as Msg<{
+          const { kind, size, lengthMm, washer, into, group, at, between } = msg as Msg<{
             kind: string; size?: string | number; lengthMm?: number; washer?: boolean; into?: string; group?: string; at?: number[];
+            between?: string[];
           }>;
           if (typeof kind !== 'string' || !(kind in HARDWARE_PARTS)) {
             return { ok: false, error: `kind must be one of ${Object.keys(HARDWARE_PARTS).join(', ')}` };
@@ -3139,7 +3140,19 @@ export function useMCPBridge() {
           }
           if (into && !findNodeInScene(store.sceneGraph.nodes, into)) return { ok: false, error: `No object with id '${into}'` };
           let id: string | null;
-          if (into && group) {
+          // Extrusion: a joining piece goes where two profiles meet, a carriage onto its V-slot.
+          const joinKind = kind === 'corner_bracket' || kind === 'joint_plate' || kind === 'end_tap' ? kind : null;
+          if (joinKind) {
+            if (!Array.isArray(between) || between.length !== 2) return { ok: false, error: `A ${info.label.toLowerCase()} joins two profiles: give their ids as between: [a, b]` };
+            const joined = store.joinProfiles(between[0], between[1], joinKind, size !== undefined ? String(size) : undefined);
+            if ('problem' in joined) return { ok: false, error: joined.problem };
+            id = joined.id;
+          } else if (kind === 'vslot_carriage') {
+            if (!into) return { ok: false, error: 'A V-slot carriage runs on a profile: give its id as into' };
+            const placed = store.addCarriage(into);
+            if ('problem' in placed) return { ok: false, error: placed.problem };
+            id = placed.id;
+          } else if (into && group) {
             id = store.seatHardwarePart(into, group, partKind);
             if (!id) return { ok: false, error: `'${into}' has no hardware cut '${group}' that takes a ${info.label.toLowerCase()}` };
           } else {
@@ -3147,7 +3160,7 @@ export function useMCPBridge() {
             id = store.addHardwarePart(partKind, pos, into ?? null);
           }
           if (!id) return { ok: false, error: 'The part could not be added' };
-          if (size !== undefined || lengthMm !== undefined || washer !== undefined) {
+          if (!joinKind && kind !== 'vslot_carriage' && (size !== undefined || lengthMm !== undefined || washer !== undefined)) {
             useStore.getState().setHardwarePart(id, {
               ...(size !== undefined ? { size: String(size) } : {}),
               ...(typeof lengthMm === 'number' ? { lengthMm } : {}),
@@ -3165,6 +3178,7 @@ export function useMCPBridge() {
             ...(spec.washer ? { washer: true } : {}),
             ...(spec.seat ? { seatedIn: spec.seat === 'bore' ? 'bearing bore' : spec.seat } : {}),
             ...(spec.fastens ? { fastens: spec.fastens } : {}),
+            ...(part.weldTargetId ? { weldedTo: part.weldTargetId } : {}),
             ...(part.children.some((c) => c.hardwarePart?.piece === 'inner')
               ? { innerRaceId: part.children.find((c) => c.hardwarePart?.piece === 'inner')!.id } : {}),
             posMm: part.pos.map((v) => Math.round(v * 1e6) / 1000),
