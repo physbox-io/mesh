@@ -273,7 +273,7 @@ export function repeatedRun(at: number[]): { start: number; period: number; coun
  * gear's teeth, a grille) is not one a chain of figures explains, and picking
  * some of them would be arbitrary; the whole-span ones are not a pick.
  */
-function chainStops(stops: Stop[], lo: number, hi: number, across: number, loAnchor: number, hiAnchor = loAnchor): Stop[] {
+function chainStops(stops: Stop[], lo: number, hi: number, across: number, loAnchor: number, hiAnchor = loAnchor): { chain: Stop[]; whole: boolean } {
   const all = [...stops, { at: lo, anchor: loAnchor, weight: Infinity }, { at: hi, anchor: hiAnchor, weight: Infinity }]
     .sort((x, y) => x.at - y.at);
   const merged: Stop[] = [];
@@ -299,7 +299,7 @@ function chainStops(stops: Stop[], lo: number, hi: number, across: number, loAnc
     if (s.centre && !prev.centre && !next.centre && prev.weight !== Infinity && next.weight !== Infinity &&
       Math.abs(s.at - (prev.at + next.at) / 2) < MERGE_M) merged.splice(i, 1);
   }
-  if (merged.length <= MAX_STOPS) return merged;
+  if (merged.length <= MAX_STOPS) return { chain: merged, whole: true };
   // A run that repeats is said once: one repeat's own figures, then the rest
   // as "3× 42" — or, for a row of equal steps, just "8× 10".
   const run = repeatedRun(merged.map((x) => x.at));
@@ -314,10 +314,10 @@ function chainStops(stops: Stop[], lo: number, hi: number, across: number, loAnc
       { ...merged[spelled], repeat: { count: left, pitch } },
       ...merged.slice(end),
     ];
-    if (short.length <= MAX_REPEAT_STOPS) return short;
+    if (short.length <= MAX_REPEAT_STOPS) return { chain: short, whole: true };
   }
   const outline = merged.filter((s) => s.weight >= FULL_SPAN * across);
-  return outline.length <= MAX_STOPS ? outline : [merged[0], merged[merged.length - 1]];
+  return { chain: outline.length <= MAX_STOPS ? outline : [merged[0], merged[merged.length - 1]], whole: false };
 }
 
 /**
@@ -353,6 +353,33 @@ function coverage(positions: ArrayLike<number>, faces: ArrayLike<number>, axes: 
     }
     return false;
   };
+}
+
+/** A square edge too short to stop a chain alone; `reach` is its far end, along it. */
+type Piece = Stop & { reach: number };
+
+/**
+ * Short square edges that lie on one line, as one edge: a face line broken by
+ * a cut (a channel's end where a finger scoop takes its middle out, the same
+ * end on every row of channels) is still the line a drawing measures to. Two
+ * or more pieces whose line runs `min` from the first to the last are a stop,
+ * weighed by that run.
+ */
+function joinPieces(pieces: Piece[], min: number): Stop[] {
+  const out: Stop[] = [];
+  const sorted = [...pieces].sort((a, b) => a.at - b.at);
+  for (let i = 0; i < sorted.length;) {
+    let j = i, lo = Infinity, hi = -Infinity, at = 0;
+    while (j < sorted.length && sorted[j].at - sorted[i].at < MERGE_M) {
+      lo = Math.min(lo, sorted[j].anchor);
+      hi = Math.max(hi, sorted[j].reach);
+      at += sorted[j].at;
+      j++;
+    }
+    if (j - i >= 2 && hi - lo >= min) out.push({ at: at / (j - i), anchor: lo, weight: hi - lo });
+    i = j;
+  }
+  return out;
 }
 
 /**
@@ -542,6 +569,9 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
   // Whether something straight runs along each axis, which is what makes the
   // part's turn in the view an angle worth giving: a plain disc's is not.
   const straight = { u: false, v: false };
+  // Square edges too short to be a face on their own, kept in case they line
+  // up into one that is (see joinPieces).
+  const pieces: { u: Piece[]; v: Piece[] } = { u: [], v: [] };
   // Rounds standing out of the part whose rims are buried (see proudRound).
   const pegs: { along: 'u' | 'v'; cu: number; cv: number; radius: number }[] = [];
 
@@ -587,14 +617,18 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
           return !!n && (Math.abs(dot(n, axis)) >= 1 - SQUARE || Math.abs(dot(n, W)) >= 1 - SQUARE);
         });
         // Runs up the part: a stop across it, reaching down to the width row.
-        if (Math.abs(du) / drawn < SQUARE && drawn >= MIN_EDGE_SHARE * height && faceSquareTo(U)) {
-          uStops.push({ at: (ua + ub) / 2, anchor: Math.min(va, vb), weight: drawn });
-          if (Math.abs(dv) / length > 1 - SQUARE) straight.v = true;
+        if (Math.abs(du) / drawn < SQUARE && faceSquareTo(U)) {
+          const stop = { at: (ua + ub) / 2, anchor: Math.min(va, vb), weight: drawn };
+          if (drawn >= MIN_EDGE_SHARE * height) uStops.push(stop);
+          else pieces.u.push({ ...stop, reach: Math.max(va, vb) });
+          if (drawn >= MIN_EDGE_SHARE * height && Math.abs(dv) / length > 1 - SQUARE) straight.v = true;
         }
         // Runs along the part: a stop up it, reaching left to the height row.
-        if (Math.abs(dv) / drawn < SQUARE && drawn >= MIN_EDGE_SHARE * width && faceSquareTo(V)) {
-          vStops.push({ at: (va + vb) / 2, anchor: Math.min(ua, ub), weight: drawn });
-          if (Math.abs(du) / length > 1 - SQUARE) straight.u = true;
+        if (Math.abs(dv) / drawn < SQUARE && faceSquareTo(V)) {
+          const stop = { at: (va + vb) / 2, anchor: Math.min(ua, ub), weight: drawn };
+          if (drawn >= MIN_EDGE_SHARE * width) vStops.push(stop);
+          else pieces.v.push({ ...stop, reach: Math.max(ua, ub) });
+          if (drawn >= MIN_EDGE_SHARE * width && Math.abs(du) / length > 1 - SQUARE) straight.u = true;
         }
       } else {
         const facing = Math.abs(dot(e.axis, W));
@@ -636,6 +670,9 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
       }
     }
   }
+
+  uStops.push(...joinPieces(pieces.u, MIN_EDGE_SHARE * height));
+  vStops.push(...joinPieces(pieces.v, MIN_EDGE_SHARE * width));
 
   // A peg's sides, unless an end-on round of its size is on its axis (a hook's
   // leg in line with its arm seen end-on): that circle already gives its ⌀ and
@@ -770,19 +807,31 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
   });
   const rows = (axis: 'u' | 'v', stops: Stop[], lo: number, hi: number, edge: number, loAnchor: number, hiAnchor: number) => {
     if (!(hi - lo > SAME_M)) return;
-    const chain = chainStops(stops, lo, hi, axis === 'u' ? height : width, loAnchor, hiAnchor);
+    const across = axis === 'u' ? height : width;
+    const found = chainStops(stops, lo, hi, across, loAnchor, hiAnchor);
+    // Too many for one chain, but the edges and the centres of the holes and
+    // pins each fit their own: two rows, as a drawing gives them, the centres'
+    // drawn the row further out.
+    let chains = [found.chain];
+    if (!found.whole && stops.some((x) => x.centre)) {
+      const edges = chainStops(stops.filter((x) => !x.centre), lo, hi, across, loAnchor, hiAnchor);
+      const centres = chainStops(stops.filter((x) => x.centre), lo, hi, across, loAnchor, hiAnchor);
+      if (edges.whole && centres.whole) chains = [edges.chain, centres.chain];
+    }
+    const chain = chains[0];
     if (sphereSpans(axis, lo, hi)) {
       for (let i = 0; i + 1 < chain.length; i++) {
         if (isDiameter(axis, chain[i].at, chain[i + 1].at)) dims.push(linear(axis, chain[i], chain[i + 1], 1, edge));
       }
       return;
     }
-    if (chain.length > 2) {
-      const links = chain.slice(1).map((stop, i) => stop.at - chain[i].at);
+    for (const links of chains) {
+      if (links.length <= 2) continue;
+      const lengths = links.slice(1).map((stop, i) => stop.at - links[i].at);
       // A repeat is never the one left out: "3× 42" is not a length to subtract.
-      const skip = omittedLink(links, links.map((_, i) => !!chain[i].repeat || isDiameter(axis, chain[i].at, chain[i + 1].at)));
-      for (let i = 0; i + 1 < chain.length; i++) {
-        if (i !== skip) dims.push(linear(axis, chain[i], chain[i + 1], 1, edge, chain[i].repeat));
+      const skip = omittedLink(lengths, lengths.map((_, i) => !!links[i].repeat || isDiameter(axis, links[i].at, links[i + 1].at)));
+      for (let i = 0; i + 1 < links.length; i++) {
+        if (i !== skip) dims.push(linear(axis, links[i], links[i + 1], 1, edge, links[i].repeat));
       }
     }
     dims.push(linear(axis, chain[0], chain[chain.length - 1], 2, edge));

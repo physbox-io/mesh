@@ -514,3 +514,29 @@ describe('a chain with too many stops', () => {
     expect(linear(d, 'v', 2).map((x) => x.label)).toEqual(['100']);
   });
 });
+
+describe('a face line broken into pieces', () => {
+  it('two short pads in line make one line to measure to', () => {
+    // Each pad's ends are 4 long, too short alone on a 100 deep plate; in line, they run 84.
+    const pad = (y: number) => body(new THREE.BoxGeometry(mm(20), mm(4), mm(2)).translate(mm(40), mm(y), mm(6)));
+    const plate = body(new THREE.BoxGeometry(mm(100), mm(100), mm(5)).translate(mm(50), mm(50), mm(2.5)));
+    const alone = bodyViewDimensions(joined('one', [plate, pad(10)]), 'topDown');
+    expect(linear(alone, 'u', 1)).toEqual([]);
+    const d = bodyViewDimensions(joined('two', [
+      body(new THREE.BoxGeometry(mm(100), mm(100), mm(5)).translate(mm(50), mm(50), mm(2.5))), pad(10), pad(92),
+    ]), 'topDown');
+    expect(linear(d, 'u', 1).map((x) => x.label)).toEqual(['30', '50']);
+  });
+});
+
+describe('too many stops for one chain, edges and centres', () => {
+  it('gives the edges and the hole centres a row each', () => {
+    const plate = body(plateWithHoles(mm(100), mm(100), mm(5), [20, 45, 80].map((x) => ({ x: mm(x), y: mm(50), r: mm(3) }))));
+    const rib = (x0: number, x1: number) => body(
+      new THREE.BoxGeometry(mm(x1 - x0), mm(80), mm(3)).translate(mm((x0 + x1) / 2), mm(50), mm(6.5)));
+    const d = bodyViewDimensions(joined('ribbed', [plate, rib(10, 14), rib(30, 36), rib(55, 57)]), 'topDown');
+    const chain = linear(d, 'u', 1).map((x) => x.label);
+    expect(chain).toEqual(['10', '4', '16', '6', '19', '43', '20', '25', '35']);
+    expect(linear(d, 'u', 2).map((x) => x.label)).toEqual(['100']);
+  });
+});
