@@ -9,7 +9,7 @@
 
 import type { HardwarePart, HardwarePartKind, SceneGraph, SceneNode } from '../types/scene';
 import {
-  HARDWARE_PARTS, PARTS_FOR_CUT, fasten, hardwarePartNode, rebuildPart, screwFit, seatFor, seatPart, seatedIn,
+  HARDWARE_PARTS, NO_CUT_SEATS, PARTS_FOR_CUT, fasten, hardwarePartNode, rebuildPart, screwFit, seatFor, seatPart, seatedIn,
 } from '../utils/hardwareParts';
 import { BEARINGS } from '../utils/hardwareSizes';
 import { findNodeById } from '../utils/sceneTree';
@@ -104,13 +104,14 @@ export function hardwarePartActions({ set, get, clone }: Deps): HardwarePartActi
       return h ? PARTS_FOR_CUT[h.kind][0] : undefined;
     })());
     if (!current || !partKind || !seatFor(current, group, partKind)) return null;
-    get().prepareForDiscreteChange();
     const scene = clone(get().sceneGraph);
     const host = findNodeById(scene.nodes, hostId)!;
     const id = newId(partKind);
     const part = hardwarePartNode({ kind: partKind, size: HARDWARE_PARTS[partKind].defaultSize }, id);
     host.children = [...(host.children || []), part];
     if (!seatInScene(scene, host, part, group)) return null;
+    // The undo step once it has worked, so a refusal leaves none behind.
+    get().prepareForDiscreteChange();
     commit(scene, id, id);
     return id;
   };
@@ -190,14 +191,27 @@ export function hardwarePartActions({ set, get, clone }: Deps): HardwarePartActi
       if (!current || !spec || spec.piece) return;
       const host = parentOf(get().sceneGraph.nodes, partId);
       const group = spec.seat;
-      if (changes.size && changes.size !== spec.size && host && group && group !== 'bore') {
-        // The cut is what decides it: resize the cut, and the part follows it
-        // (writeHardwareGroup re-seats whatever sits in a group it rewrites).
-        get().setHardwareCut(host.id, group, { size: changes.size });
+      // Seated in a cut (not through a bearing's bore, nor joining a frame or
+      // riding a rail, which are seats with no cut behind them).
+      const inCut = !!host && !!group && !NO_CUT_SEATS.includes(group);
+      // A joining piece is sized by what it joins, and a shaft by its bore.
+      if (group && NO_CUT_SEATS.includes(group) && changes.size) {
         const { size: _size, ...rest } = changes;
-        if (Object.keys(rest).length === 0) return;
         changes = rest;
       }
+      // The cut is what decides it: resize the cut, and the part follows it
+      // (writeHardwareGroup re-seats whatever sits in a group it rewrites).
+      // A rail's length is its seat's length in the same way.
+      const toCut = {
+        ...(inCut && changes.size && changes.size !== spec.size ? { size: changes.size } : {}),
+        ...(inCut && spec.kind === 'mgn_rail' && changes.lengthMm && changes.lengthMm !== spec.lengthMm ? { lengthMm: changes.lengthMm } : {}),
+      };
+      if (Object.keys(toCut).length) {
+        get().setHardwareCut(host!.id, group!, toCut);
+        const { size: _s, ...rest } = changes;
+        changes = spec.kind === 'mgn_rail' ? (({ lengthMm: _l, ...r }) => r)(rest) : rest;
+      }
+      if (Object.keys(changes).length === 0) return;
       get().recordInteraction('hardware-part');
       const scene = clone(get().sceneGraph);
       const node = findNodeById(scene.nodes, partId)!;

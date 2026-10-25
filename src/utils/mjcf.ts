@@ -218,6 +218,7 @@ const buildJoint = (joint: SceneJoint) => {
   if (joint.damping !== undefined) attrs += ` damping="${joint.damping}"`;
   if (joint.stiffness !== undefined) attrs += ` stiffness="${joint.stiffness}"`;
   if (joint.springref !== undefined) attrs += ` springref="${joint.springref}"`;
+  if (joint.armature !== undefined) attrs += ` armature="${joint.armature}"`;
   // MuJoCo's dry friction is a soft constraint, and at the default impedance
   // (0.9) a joint loaded below its friction still creeps, at a rate that does
   // not depend on the friction at all: a propped lid sagged 0.12 rad/s however

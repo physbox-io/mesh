@@ -35,6 +35,8 @@ export const STEPPERS: Record<string, [number, number, number, number, number, n
 
 /** The 1 ms step every model runs at (mjcf.ts). */
 const TIMESTEP = 0.001;
+/** How far below its set speed a stepper runs at its full holding torque, rad/s. */
+const SPEED_DROOP = 0.5;
 
 const SPRING_STEEL: [number, number, number, number] = [0.55, 0.58, 0.62, 1];
 
@@ -95,9 +97,13 @@ function buildStepper(node: SceneNode, p: HardwarePart, id: string) {
     joints: [{
       name: `${id}_spin`, type: 'hinge', axis: [0, 0, 1], pos: [0, 0, 0], damping: 0.0005,
       // Driven at the speed asked for, with no more than its holding torque to do it.
-      // The gain is a few rotor inertias per step: as stiff as stays steady
-      // once the torque limit is reached.
-      actuator: { type: 'velocity', kv: +((5 * rotorI) / TIMESTEP).toFixed(5), ctrlValue: 0, forceLimit: torque },
+      // Stiff enough to hold its speed to within half a rad/s at full holding
+      // torque. A gain that stiff only stays steady once the torque limit is
+      // reached if the rotor carries more inertia than a step can overturn —
+      // so the joint carries that much as armature: inertia without mass,
+      // which also limits how hard it can accelerate, as a real stepper's is.
+      armature: +(Math.max(rotorI, 1.5 * (torque / SPEED_DROOP) * TIMESTEP)).toFixed(7),
+      actuator: { type: 'velocity', kv: +(torque / SPEED_DROOP).toFixed(4), ctrlValue: 0, forceLimit: torque },
     }],
     children: [],
     hardwarePart: { ...p, piece: 'inner' },

@@ -1014,9 +1014,9 @@ const detachReferencesTo = (nodes: SceneNode[], goneId: string): SceneNode[] =>
       n.weldTargetId === goneId || n.connectTargetId === goneId || n.coupleTargetId === goneId;
     if (!severed && children === n.children) return n;
     const next: SceneNode = { ...n, children };
-    if (next.weldTargetId === goneId) delete next.weldTargetId;
+    if (next.weldTargetId === goneId) { delete next.weldTargetId; delete next.weldRigid; }
     if (next.connectTargetId === goneId) { delete next.connectTargetId; delete next.connectAnchor; }
-    if (next.coupleTargetId === goneId) delete next.coupleTargetId;
+    if (next.coupleTargetId === goneId) { delete next.coupleTargetId; delete next.coupleRatio; }
     return next;
   });
 
@@ -5514,6 +5514,15 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     };
     traverseAndRemove(newScene.nodes);
     if (removed) {
+      // Nothing may go on naming what is gone — a bracket's weld to a deleted
+      // profile, a pen head welded to a deleted rail's carriage — or the
+      // whole scene stops compiling.
+      const gone: string[] = [];
+      const collect = (nodes: SceneNode[]) => {
+        for (const n of nodes) { if (doomed.has(n.id)) { const all = (m: SceneNode) => { gone.push(m.id); (m.children || []).forEach(all); }; all(n); } else collect(n.children || []); }
+      };
+      collect(get().sceneGraph.nodes);
+      for (const id of gone) newScene.nodes = detachReferencesTo(newScene.nodes, id);
       set({ sceneGraph: newScene, selectedNodeId: null, extraSelectedIds: [] });
       get().recompile(newScene, null);
     }

@@ -91,6 +91,9 @@ export function cordOf(size: string): number {
   return O_RINGS[size]?.[1] ?? Number(size);
 }
 
+/** Seats that are not a cut: through a bearing's bore, joining a frame, riding a rail. */
+export const NO_CUT_SEATS: readonly string[] = ['bore', 'frame', 'rail'];
+
 /** The parts that go in each kind of hardware cut, the one it is made for first. */
 export const PARTS_FOR_CUT: Record<HardwareCutKind, HardwarePartKind[]> = {
   bearing: ['bearing'],
@@ -250,20 +253,40 @@ export function rebuildPart(node: SceneNode, spec: HardwarePart): void {
     ...(spec.fastens ?? was?.fastens ? { fastens: spec.fastens ?? was?.fastens } : {}),
   }, node.id);
   const keptUnder = (n: SceneNode | undefined) => (n?.children || []).filter((c) => !c.hardwarePart?.piece);
-  // What is fixed to each moving piece — a wheel on an inner race, a drawer on
-  // a runner's slide — goes onto the same piece of the new part.
-  const kept = new Map<string, SceneNode[]>();
-  for (const body of partBodies(node).slice(1)) kept.set(body.hardwarePart!.piece!, keptUnder(body));
+  // Out of the contact solver before, out of it after: a seated part, or one
+  // fixed rigidly in a body (a runner in its cabinet, a motor under a deck).
+  const wasQuiet = !!node.hardwarePart?.seat || node.geoms.filter((g) => g.role !== 'visual').every((g) => g.contype === 0);
+  // Each moving piece of the new part takes over what the old one had: what
+  // is fixed to it, what it is coupled or welded to, and where along its
+  // joint it starts — a bushing moved to its housing stays there.
+  const old = new Map(partBodies(node).slice(1).map((b) => [b.hardwarePart!.piece!, b]));
   for (const body of partBodies(fresh).slice(1)) {
-    const mine = kept.get(body.hardwarePart!.piece!);
-    if (mine?.length) body.children = [...body.children, ...mine];
+    const was = old.get(body.hardwarePart!.piece!);
+    if (!was) continue;
+    const mine = keptUnder(was);
+    if (mine.length) body.children = [...body.children, ...mine];
+    for (const key of ['coupleTargetId', 'coupleRatio', 'weldTargetId', 'weldRigid', 'weldBreakForceN', 'weldBreakTorqueNm', 'script'] as const) {
+      if (was[key] !== undefined) (body as unknown as Record<string, unknown>)[key] = was[key];
+    }
+    const joint = body.joints[0];
+    const wasJoint = was.joints?.[0];
+    if (joint?.type === 'slide' && joint.axis && joint.range && wasJoint?.type === 'slide') {
+      // Started off its middle: kept there, its range moved to match.
+      const shift = [0, 1, 2].reduce((acc, k) => acc + ((was.pos[k] ?? 0) - (body.pos[k] ?? 0)) * (joint.axis![k] ?? 0), 0);
+      if (Math.abs(shift) > 1e-9) {
+        body.pos = [...was.pos];
+        joint.range = [+(joint.range[0] - shift).toFixed(6), +(joint.range[1] - shift).toFixed(6)];
+      }
+    }
+    if (wasJoint?.actuator?.ctrlValue !== undefined && joint?.actuator) joint.actuator.ctrlValue = wasJoint.actuator.ctrlValue;
   }
   node.name = fresh.name;
   node.geoms = fresh.geoms;
   node.hardwarePart = fresh.hardwarePart;
   node.children = [...fresh.children, ...keptUnder(node)];
-  if (node.hardwarePart?.seat) quiet(node);
-  else if (!node.joints?.length) node.joints = fresh.joints;
+  // The part's own joints are left as they are: free when it stands on its
+  // own, none when it is fixed in something. A rebuild never decides that.
+  if (wasQuiet) quiet(node);
   // What rides on it fits itself to it again: a carriage to a profile's length.
   for (const child of node.children) {
     if (child.hardwarePart && !child.hardwarePart.piece) HARDWARE_PARTS[child.hardwarePart.kind].refit?.(child, node);

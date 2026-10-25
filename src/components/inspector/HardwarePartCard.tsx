@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useStore } from '../../store/useStore';
-import type { HardwarePart, SceneNode } from '../../types/scene';
-import { HARDWARE_PARTS } from '../../utils/hardwareParts';
+import type { HardwarePart, SceneGraph, SceneNode } from '../../types/scene';
+import { HARDWARE_PARTS, fastenTargetFor, seatFor } from '../../utils/hardwareParts';
 import { O_RINGS, SEAL_CORDS } from '../../utils/hardwareSizes';
 import { findNodeById } from '../../utils/sceneTree';
 import { SettledNumberField } from '../SettledInputs';
@@ -94,7 +94,7 @@ export function HardwarePartCard({ node }: { node: SceneNode }) {
       )}
       {spec.kind === 'screw' && seatedInCut && (
         <div className="text-[10px] text-slate-500 dark:text-slate-400">
-          {fastened ? <>Holds this part to <span className="font-semibold">{fastened.name}</span>.</> : 'Reaches nothing below to hold yet.'}
+          {fastened ? <>Holds this part to <span className="font-semibold">{fastened.name}</span>.</> : unheldReason(graph, node)}
         </div>
       )}
       {carriage && <Riders piece={carriage} />}
@@ -181,6 +181,19 @@ function findPiece(node: SceneNode, piece: NonNullable<HardwarePart['piece']>): 
     if (below) return below;
   }
   return null;
+}
+
+/**
+ * Why a seated screw holds nothing: it reaches no other part, or the part it
+ * reaches is already welded to something else, which a screw will not undo.
+ */
+function unheldReason(graph: SceneGraph, screw: SceneNode): string {
+  const host = findOwner(graph.nodes, screw.id);
+  const seat = host && screw.hardwarePart?.seat ? seatFor(host, screw.hardwarePart.seat, 'screw') : null;
+  const target = host && seat?.gripM !== undefined ? fastenTargetFor(graph, host, screw, seat.gripM)?.node : null;
+  if (!target) return 'Reaches nothing below to hold yet.';
+  const other = target.weldTargetId ? findNodeById(graph.nodes, target.weldTargetId) : null;
+  return `Reaches ${target.name}, which is already welded to ${other?.name ?? 'something else'}: take that off for the screw to hold it.`;
 }
 
 /** The menu's lengths, with the one it has now even when it is not a standard one. */

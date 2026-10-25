@@ -1433,6 +1433,18 @@ export const fillBodyDefaults = (b: RawNode, parentMoves: boolean | null = null)
   };
 };
 
+/**
+ * The piece of a part that a body is fixed to, to move with it: a carriage
+ * (rail, rod, runner, spring) first, else whatever else moves — a bearing's
+ * inner race, a stepper's shaft.
+ */
+function movingPieceOf(part: SceneNode): SceneNode | null {
+  const pieces: SceneNode[] = [];
+  const walk = (n: SceneNode) => { for (const c of n.children || []) if (c.hardwarePart?.piece) { pieces.push(c); walk(c); } };
+  walk(part);
+  return pieces.find((p) => p.hardwarePart!.piece === 'carriage') ?? pieces[0] ?? null;
+}
+
 /** Whether one O-ring groove seals against what is placed round it, as the DFM check says. */
 function sealCheckFor(scene: SceneGraph, nodeId: string, group: string) {
   const f = sealFindings(scene, 'print').find((x) => x.id === `seal_${nodeId}_${group}`);
@@ -1442,7 +1454,7 @@ function sealCheckFor(scene: SceneGraph, nodeId: string, group: string) {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function applySingleCutToBody(targetId: string, spec: Record<string, any>): Record<string, any> {
   const store = useStore.getState();
-  const { shape, at, normal, diameterMm, widthMm, lengthMm, depthMm, threadPitchMm, threadLeft, threadFitMm, size, bore, fitMm, seal } = spec;
+  const { shape, at, normal, diameterMm, widthMm, lengthMm, depthMm, threadPitchMm, threadLeft, threadFitMm, size, bore, fitMm, seal, turned } = spec;
   const node = findNodeInScene(store.sceneGraph.nodes, targetId);
   if (!node) return { ok: false, error: `No object with id '${targetId}'` };
   const spotIn = Array.isArray(at) && at.length >= 3
@@ -1456,7 +1468,8 @@ export function applySingleCutToBody(targetId: string, spec: Record<string, any>
     const hwKind = shape as HardwareCutKind;
     const group = store.addHardwareCut(targetId, hwKind, spotIn);
     if (!group) return { ok: false, error: store.hardwareCutProblemAt(targetId, hwKind, spotIn) ?? 'That body has no solid shape to cut into' };
-    if (size !== undefined || bore !== undefined || fitMm !== undefined || seal !== undefined) {
+    const railSeat = hwKind === 'rail_seat' && (typeof lengthMm === 'number' || typeof turned === 'boolean');
+    if (size !== undefined || bore !== undefined || fitMm !== undefined || seal !== undefined || railSeat) {
       const current = findNodeInScene(useStore.getState().sceneGraph.nodes, targetId);
       const before = current && hardwareSpecOf(current.geoms ?? [], group);
       const changes = {
@@ -1464,6 +1477,9 @@ export function applySingleCutToBody(targetId: string, spec: Record<string, any>
         ...(bore !== undefined ? { bore: bore as HardwareBore } : {}),
         ...(typeof fitMm === 'number' ? { fitMm } : {}),
         ...(seal === 'face' || seal === 'bore' || seal === 'piston' ? { seal: seal as SealType } : {}),
+        // A rail seat's own length and direction.
+        ...(hwKind === 'rail_seat' && typeof lengthMm === 'number' ? { lengthMm } : {}),
+        ...(hwKind === 'rail_seat' && typeof turned === 'boolean' ? { turned } : {}),
       };
       // A groove a size cannot fit is not changed: say why rather than hand back the wrong one.
       const why = current && before && hardwareCutProblem({ ...before, ...changes }, current);
@@ -3139,7 +3155,7 @@ export function useMCPBridge() {
           // A part already in the scene: only fix a body to its moving piece.
           if (existing) {
             const part = findNodeInScene(store.sceneGraph.nodes, existing);
-            const piece = part && (part.hardwarePart?.piece === 'carriage' ? part : findNodeInScene(part.children || [], `${part.id}_carriage`));
+            const piece = part && (part.hardwarePart?.piece ? part : movingPieceOf(part));
             if (!piece) return { ok: false, error: `'${existing}' has no moving piece to fix a body to` };
             if (!fixTo) return { ok: false, error: 'Give fixTo: the body to weld to its moving piece' };
             const why = store.fixToPiece(piece.id, fixTo);
@@ -3197,7 +3213,8 @@ export function useMCPBridge() {
           }
           if (!id) return { ok: false, error: 'The part could not be added' };
           if (fixTo) {
-            const piece = findNodeInScene(useStore.getState().sceneGraph.nodes, `${id}_carriage`);
+            const added = findNodeInScene(useStore.getState().sceneGraph.nodes, id);
+            const piece = added && movingPieceOf(added);
             const why = piece ? useStore.getState().fixToPiece(piece.id, fixTo) : `A ${info.label.toLowerCase()} has no moving piece to fix a body to`;
             if (why) return { ok: false, error: why, id };
           }

@@ -31,7 +31,8 @@ import { useCallback, useEffect, useRef } from 'react';
 import { useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 import { useStore, getPhysicsWorkerClient } from '../../store/useStore';
-import type { SceneNode } from '../../types/scene';
+import type { SceneGeom, SceneNode } from '../../types/scene';
+
 import { scaleNodeTree, boreFactors, BORE_OVERSHOOT, type Bore } from '../../utils/scaleNode';
 import {
   pickCutSpot, flatFaceAt, faceUnderFeature, surfaceUnder, regionOutline, prismMesh, csgSourceGeoms,
@@ -39,7 +40,7 @@ import {
 } from '../../utils/csg';
 import { analyzeMesh } from '../../utils/meshIntegrity';
 import { HARDWARE_KINDS } from '../../utils/hardwareCuts';
-import { HARDWARE_PARTS } from '../../utils/hardwareParts';
+import { HARDWARE_PARTS, NO_CUT_SEATS } from '../../utils/hardwareParts';
 import { bodyPoseOf, toParentFrame } from './bodyPose';
 import { bodyParent, bodyToParent, rayInBody } from './bodyRay';
 import { FaceKnife } from './FaceKnife';
@@ -49,6 +50,16 @@ import { snapToFloor, snapThresholdForScale } from '../../utils/floorSnap';
 import { metresPerPixel } from '../../utils/cameraScale';
 import { useOrbitEnable } from './useOrbitEnable';
 import { pickPatternFace, patternFaceGlow, pickedFaceGlow, type PatternFaceGlow, type FacePatternGlowEvent } from '../../utils/facePatternPick';
+
+/** The body a body hangs under, or null at the top. */
+function parentNode(nodes: SceneNode[], id: string, parent: SceneNode | null = null): SceneNode | null {
+  for (const n of nodes) {
+    if (n.id === id) return parent;
+    const found = parentNode(n.children || [], id, n);
+    if (found) return found;
+  }
+  return null;
+}
 
 type Axis = 'x' | 'y' | 'z';
 
@@ -1043,17 +1054,22 @@ export const ObjectGestureController = () => {
     const selected = kind === 'scale' ? findNode(store.sceneGraph.nodes, nodeId) : null;
     const picked = selected?.geoms?.[store.activeGeomIndex];
     const part = selected?.hardwarePart && !selected.hardwarePart.piece ? selected.hardwarePart : null;
+    // A part in a cut is the cut's size: S steps the cut, and the part follows.
+    const host = part?.seat && !NO_CUT_SEATS.includes(part.seat) ? parentNode(store.sceneGraph.nodes, nodeId) : null;
+    const hostCut = host && part?.seat ? host.geoms.find((g) => g.hardware?.group === part.seat && !g.csgDerived)?.hardware : undefined;
+    const cutSizing = (hostId: string, hw: NonNullable<SceneGeom['hardware']>) => ({
+      info: HARDWARE_KINDS[hw.kind], size: hw.size,
+      apply: (size: string) => useStore.getState().setHardwareCut(hostId, hw.group, { size }),
+    });
     const sizing = picked?.hardware && !picked.csgDerived
-      ? (() => {
-          const group = picked.hardware.group;
-          return {
-            info: HARDWARE_KINDS[picked.hardware.kind], size: picked.hardware.size,
-            apply: (size: string) => useStore.getState().setHardwareCut(nodeId, group, { size }),
-          };
-        })()
-      : part
-        ? { info: HARDWARE_PARTS[part.kind], size: part.size, apply: (size: string) => useStore.getState().setHardwarePart(nodeId, { size }) }
-        : null;
+      ? cutSizing(nodeId, picked.hardware)
+      : host && hostCut
+        ? cutSizing(host.id, hostCut)
+        // Joining pieces and a shaft in a bore are sized by what they fit: S leaves them alone.
+        : part && !part.seat
+          ? { info: HARDWARE_PARTS[part.kind], size: part.size, apply: (size: string) => useStore.getState().setHardwarePart(nodeId, { size }) }
+          : null;
+    if (part && !sizing) return;
     if (sizing) {
       const start = Math.max(0, sizing.info.sizes.indexOf(sizing.size));
       gesture.current = {

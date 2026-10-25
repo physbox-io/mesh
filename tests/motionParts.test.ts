@@ -64,6 +64,13 @@ describe('steppers', () => {
     expect(run(0.01, 0.02, 6)).toBeGreaterThan(5);
   });
 
+  it('holds its speed under a load right up to its holding torque', () => {
+    // 0.2 kg at 100 mm is 0.196 N·m, and 0.4 kg is 0.39, against 0.42: it
+    // must hold the speed asked for, not sag or turn backwards, whichever way
+    // round the arm is as it turns. Averaged over whole turns.
+    for (const kg of [0.2, 0.4]) expect(run(kg, 0.1, 6)).toBeGreaterThan(4.5);
+  });
+
   it('cannot lift a load past its holding torque', () => {
     // 1 kg at 100 mm is 0.98 N·m, against 0.42.
     const [, , , , torque] = STEPPERS['NEMA17 40'];

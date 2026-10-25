@@ -423,6 +423,11 @@ export interface SceneJoint {
    * a centimetre past it. Only emitted when set.
    */
   hardStop?: boolean;
+  /**
+   * Inertia added to the joint itself, kg·m² (or kg on a slide): a motor's
+   * rotor as the joint feels it, without the mass. Only emitted when set.
+   */
+  armature?: number;
   actuator?: {
     type: 'velocity' | 'motor';
     kv?: number; // For velocity actuators
