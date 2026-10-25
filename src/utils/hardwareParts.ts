@@ -264,13 +264,19 @@ export function rebuildPart(node: SceneNode, spec: HardwarePart): void {
   // Each moving piece of the new part takes over what the old one had: what
   // is fixed to it, what it is coupled or welded to, and where along its
   // joint it starts — a bushing moved to its housing stays there.
-  const old = new Map(partBodies(node).slice(1).map((b) => [b.hardwarePart!.piece!, b]));
+  // Matched by id, which every builder derives from the part's own: a spring
+  // has many coils, all one kind of piece.
+  const old = new Map(partBodies(node).slice(1).map((b) => [b.id, b]));
   for (const body of partBodies(fresh).slice(1)) {
-    const was = old.get(body.hardwarePart!.piece!);
+    const was = old.get(body.id);
     if (!was) continue;
     const mine = keptUnder(was);
     if (mine.length) body.children = [...body.children, ...mine];
+    // What the builder sets itself (a coil's coupling to its spring's top) is
+    // the builder's; what was added afterwards is carried over.
+    const builderCouples = body.coupleTargetId !== undefined;
     for (const key of ['coupleTargetId', 'coupleRatio', 'weldTargetId', 'weldRigid', 'weldBreakForceN', 'weldBreakTorqueNm', 'script'] as const) {
+      if (builderCouples && (key === 'coupleTargetId' || key === 'coupleRatio')) continue;
       if (was[key] !== undefined) (body as unknown as Record<string, unknown>)[key] = was[key];
     }
     const joint = body.joints[0];

@@ -13,8 +13,8 @@
 // Both build like every other family: see hardwareGeometry.ts.
 // ---------------------------------------------------------------------------
 
-import type { HardwarePart, MotionPartKind, SceneNode } from '../types/scene';
-import { BLACK_OXIDE, BRIGHT, boxGeom, cylinderGeom, mm, sweepMesh, circleLoop, visual, type HardwarePartInfo } from './hardwareGeometry';
+import type { HardwarePart, MotionPartKind, SceneGeom, SceneNode } from '../types/scene';
+import { BLACK_OXIDE, BRIGHT, STEEL, boxGeom, cylinderGeom, mm, sweepMesh, circleLoop, visual, type HardwarePartInfo } from './hardwareGeometry';
 
 /** Compression springs: [outside diameter, free length, wire, rate N/mm, solid length], mm. */
 export const SPRINGS: Record<string, [number, number, number, number, number]> = {
@@ -43,23 +43,33 @@ const SPRING_STEEL: [number, number, number, number] = [0.55, 0.58, 0.62, 1];
 function buildSpring(node: SceneNode, p: HardwarePart, id: string) {
   const [od, free, wire, rate, solid] = SPRINGS[p.size];
   const coils = Math.max(3, Math.round((solid / wire) - 1));
-  const pitch = free / coils;
   const r = (od - wire) / 2;
-  // Drawn as its coils, each a ring of wire: the turns, if not the twist.
-  node.geoms = [
-    cylinderGeom(`${id}_seat`, mm(od / 2), mm(wire), mm(wire / 2), SPRING_STEEL),
-    ...Array.from({ length: coils }, (_, i) => {
-      const shape = sweepMesh(circleLoop(mm(r), 24), mm(wire / 2), 8);
-      const z = mm(wire + (i + 0.5) * pitch * ((free - 2 * wire) / free));
-      return visual({
-        name: `${id}_coil${i}`, type: 'mesh', size: [1], rgba: [...SPRING_STEEL],
-        vertices: shape.vertices.map((v, k) => (k % 3 === 1 ? +(v + z).toFixed(7) : v)),
-        renderVertices: shape.renderVertices.map((v, k) => (k % 3 === 2 ? +(v + z).toFixed(7) : v)),
-        faces: shape.faces,
-      });
-    }),
-  ];
-  node.children = [{
+  node.geoms = [cylinderGeom(`${id}_seat`, mm(od / 2), mm(wire), mm(wire / 2), SPRING_STEEL)];
+  // Each turn is a ring of wire on a slide of its own, coupled to the top in
+  // proportion to how far up the spring it is: the turns close up together as
+  // it compresses and open out as it extends, always reaching from the seat to
+  // the top. Tipped to the pitch angle, the stack reads as a helix.
+  const span = free - 2 * wire;
+  const tilt = Math.atan2(span / coils, Math.PI * (od - wire));
+  const ring = sweepMesh(circleLoop(mm(r), 24), mm(wire / 2), 8);
+  const turns: SceneNode[] = Array.from({ length: coils }, (_, i) => {
+    const z = wire + (i + 0.5) * (span / coils);
+    return {
+      id: `${id}_coil${i}`, name: `${p.size} spring coil ${i + 1}`, type: 'body', pos: [0, 0, mm(z)],
+      quat: [Math.cos(tilt / 2), Math.sin(tilt / 2), 0, 0].map((v) => +v.toFixed(9)),
+      geoms: [{
+        name: `${id}_coil${i}_wire`, type: 'mesh', size: [1], rgba: [...SPRING_STEEL], contype: 0, conaffinity: 0,
+        mass: +(Math.PI * mm(od - wire) * Math.PI * mm(wire / 2) ** 2 * STEEL).toFixed(7), ...ring,
+      } as SceneGeom],
+      // Along the spring's axis, which the tip leans off: in the coil's own frame.
+      joints: [{ name: `${id}_coil${i}_slide`, type: 'slide', axis: [0, Math.sin(tilt), Math.cos(tilt)].map((v) => +v.toFixed(9)), pos: [0, 0, 0], damping: 0.001 }],
+      coupleTargetId: `${id}_carriage`,
+      coupleRatio: +(z / free).toFixed(6),
+      children: [],
+      hardwarePart: { ...p, piece: 'coil' },
+    };
+  });
+  node.children = [...turns, {
     id: `${id}_carriage`, name: `${p.size} spring top`, type: 'body', pos: [0, 0, mm(free)],
     geoms: [{ ...cylinderGeom(`${id}_top`, mm(od / 2), mm(wire), -mm(wire / 2), SPRING_STEEL), contype: 0, conaffinity: 0 }],
     // The rate is the joint's stiffness; at rest at its free length, it stops solid.

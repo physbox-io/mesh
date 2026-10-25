@@ -31,7 +31,7 @@ export type SealType = 'face' | 'bore' | 'piston';
 export type HardwareBore = 'clearance' | 'tapped' | 'insert';
 
 /** The moving pieces a bought part can have, each a body of its own on a joint. */
-export type HardwarePartPiece = 'inner' | 'carriage' | 'middle';
+export type HardwarePartPiece = 'inner' | 'carriage' | 'middle' | 'coil';
 
 /** The bought hardware that can be put in a scene; see utils/hardwareParts.ts. */
 export type CorePartKind = 'bearing' | 'screw' | 'nut' | 'shaft' | 'oring';

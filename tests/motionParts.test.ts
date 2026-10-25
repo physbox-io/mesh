@@ -30,13 +30,23 @@ describe('springs', () => {
     const spring = hardwarePartNode({ kind: 'spring', size: 'Ø12×40' }, 'sp');
     spring.joints = [];
     // A kilo fixed on its top, as a part welded there would be.
-    spring.children[0].geoms.push({ name: 'load', type: 'box', size: [0.02, 0.02, 0.005], pos: [0, 0, 0.005], mass: 1, contype: 0, conaffinity: 0 } as SceneGeom);
+    spring.children.find((c) => c.id === 'sp_carriage')!.geoms.push({ name: 'load', type: 'box', size: [0.02, 0.02, 0.005], pos: [0, 0, 0.005], mass: 1, contype: 0, conaffinity: 0 } as SceneGeom);
     const model = mj.MjModel.from_xml_string(compileToMJCF({ nodes: [spring] } as SceneGraph, -9.81, 1, 0, 0, 0, 0));
     const data = new mj.MjData(model);
     for (let i = 0; i < 3000; i++) mj.mj_step(model, data);
     const q = data.qpos[model.jnt_qposadr[mj.mj_name2id(model, mj.mjtObj.mjOBJ_JOINT.value, 'sp_compress')]];
     const rate = SPRINGS['Ø12×40'][3] * 1000;
     expect(-q).toBeCloseTo((1 + 0.0001) * 9.81 / rate, 3);
+    // Its coils close up with it: every one between the seat and the top,
+    // in order, evenly spaced, the top one just under the top.
+    const z = (name: string) => data.xpos[mj.mj_name2id(model, mj.mjtObj.mjOBJ_BODY.value, name) * 3 + 2];
+    const coils = spring.children.filter((c) => c.hardwarePart?.piece === 'coil').map((c) => z(c.name));
+    const top = z('Ø12×40 spring top');
+    expect(coils.length).toBeGreaterThan(5);
+    for (let i = 1; i < coils.length; i++) expect(coils[i] - coils[i - 1]).toBeCloseTo((coils[1] - coils[0]), 4);
+    expect(coils[0]).toBeGreaterThan(0);
+    expect(top - coils.at(-1)!).toBeGreaterThan(0);
+    expect(top - coils.at(-1)!).toBeLessThan(coils[1] - coils[0]);
     data.delete();
     model.delete();
   });

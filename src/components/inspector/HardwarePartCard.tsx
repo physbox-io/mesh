@@ -131,6 +131,7 @@ const PIECE_TEXT: Record<NonNullable<HardwarePart['piece']>, string> = {
   inner: 'The inner race, which turns on its hinge. Fix a shaft or a part to it and that turns with it.',
   carriage: 'The moving part, on a slide along its rail. Fix a part to it and that slides with it, stopping at the ends.',
   middle: 'The middle member, which slides out from the cabinet member and carries the drawer member out past it.',
+  coil: 'One turn of the spring, carried along with its top as the spring compresses.',
 };
 
 /**

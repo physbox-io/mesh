@@ -210,7 +210,7 @@ function springLauncher(): SceneGraph {
   spring.joints = [];
   base.children.push(spring);
   // The cup the ball sits in, fixed on the spring's top.
-  const top = spring.children[0];
+  const top = spring.children.find((c) => c.id === 'spring_carriage')!;
   top.children.push(body('cup', [0, 0, 0.005], [
     { name: 'cup_floor', type: 'cylinder', size: [0.02, 0.005], pos: [0, 0, 0], rgba: [...PLA_ORANGE], mass: 0.03, ...HARD } as SceneGeom,
     ...[0, 1, 2, 3, 4, 5].map((k) => box(`cup_lip${k}`, [0.004, 0.0015, 0.008], [0.019 * Math.cos((k * Math.PI) / 3), 0.019 * Math.sin((k * Math.PI) / 3), 0.008], PLA_ORANGE, 0.002, {
