@@ -519,7 +519,7 @@ function liveList(found: BodyDimensions[], locations: LocationDim[], parents: Ma
         const pt = d.axis === 'u' ? (s: number) => at(s, d.edge) : (s: number) => at(d.edge, s);
         keep(`${d.kind}:${d.row}:${d.label}@${spot(pt(d.a))};${spot(pt(d.b))}`, {
           body: b.id, kind: d.kind, direction: d.axis === 'u' ? 'width' : 'height',
-          row: d.row === 1 ? 'chain' : 'overall', label: d.label, valueMm: d.valueMm,
+          row: d.row === 1 ? 'chain' : 'overall', ...(d.count ? { count: d.count } : {}), label: d.label, valueMm: d.valueMm,
         });
       } else if (d.kind === 'diameter') {
         keep(`${d.kind}:${d.label}@${spot(at(...d.centre))}`,

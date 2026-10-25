@@ -208,10 +208,12 @@ describe('sphere', () => {
 });
 
 describe('busy parts', () => {
-  it('a plate with a row of nine holes gives no chain, just the size and the holes', () => {
+  it('a plate with a row of nine holes locates them by one pitch, "8× 10"', () => {
     const holes = Array.from({ length: 9 }, (_, i) => ({ x: mm(10 + i * 10), y: mm(10), r: mm(2) }));
     const d = bodyViewDimensions(body(plateWithHoles(mm(100), mm(20), mm(3), holes)), 'topDown');
-    expect(linear(d, 'u', 1)).toEqual([]);
+    // To the first hole, then eight pitches; the last 10 is the overall less the rest.
+    expect(linear(d, 'u', 1).map((x) => x.label)).toEqual(['10', '8× 10']);
+    expect(linear(d, 'u', 1)[1]).toMatchObject({ count: 8, valueMm: 10 });
     expect(linear(d, 'u', 2)[0].valueMm).toBeCloseTo(100, 6);
     expect(diameters(d).map((x) => x.label)).toEqual(['9× ⌀4']);
   });
@@ -486,9 +488,21 @@ describe('pegboard nubs on a back plate', () => {
 });
 
 describe('a chain with too many stops', () => {
-  it('keeps the edges that run the whole part, not just the overall', () => {
-    // A 100 deep tray with a back wall, and more ribs than a chain can hold.
-    const ribs = [15, 27, 39, 51, 63].map((y) =>
+  // A 100 deep tray with a back wall, and more ribs than a chain can hold.
+  const ribbed = (at: number[]) => joined('tray', [
+    body(new THREE.BoxGeometry(mm(100), mm(100), mm(10)).translate(0, mm(50), mm(5))),
+    body(new THREE.BoxGeometry(mm(100), mm(10), mm(30)).translate(0, mm(95), mm(15))),
+    ...at.map((y) => body(new THREE.BoxGeometry(mm(60), mm(4), mm(3)).translate(0, mm(y), mm(11.5)))),
+  ]);
+
+  it('says ribs at a pitch once: one rib, then "3× 12"', () => {
+    const d = bodyViewDimensions(ribbed([15, 27, 39, 51, 63]), 'topDown');
+    expect(linear(d, 'v', 1).map((x) => x.label)).toEqual(['13', '4', '8', '3× 12', '25', '10']);
+    expect(linear(d, 'v', 2).map((x) => x.label)).toEqual(['100']);
+  });
+
+  it('keeps the edges that run the whole part when nothing repeats, not just the overall', () => {
+    const ribs = [12, 21, 33, 48, 66].map((y) =>
       body(new THREE.BoxGeometry(mm(60), mm(4), mm(3)).translate(0, mm(y), mm(11.5))));
     const tray = joined('tray', [
       body(new THREE.BoxGeometry(mm(100), mm(100), mm(10)).translate(0, mm(50), mm(5))),

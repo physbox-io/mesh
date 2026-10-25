@@ -94,6 +94,11 @@ export interface LinearDim {
   edge: number;
   /** 1 = the chain, nearest the part; 2 = the overall size. */
   row: 1 | 2;
+  /**
+   * A run of equal steps stood in for by one figure, "7× 10": how many. Then
+   * valueMm is one step (the pitch), and the line spans them all.
+   */
+  count?: number;
   valueMm: number;
   label: string;
 }
@@ -142,6 +147,11 @@ export const MAX_DIM_TRIANGLES = 60000;
 const MERGE_M = 0.0005;
 /** At most this many stops in a chain, the ends included. */
 const MAX_STOPS = 8;
+/**
+ * A chain whose repeats are each one figure ("3× 42") may run this far: it
+ * reads as fewer figures than its stops.
+ */
+const MAX_REPEAT_STOPS = 10;
 /** An edge at least this share of the part along its own direction runs its whole span. */
 const FULL_SPAN = 0.9;
 /** An edge shorter than this share of the part along its own direction is detail, not a face. */
@@ -220,7 +230,40 @@ export function sheetAxes(frame: [Vec3, Vec3, Vec3] | undefined, view: DrawingVi
 }
 
 /** `centre`: a hole's or pin's centre line, not an edge of the part. */
-interface Stop { at: number; anchor: number; weight: number; centre?: boolean }
+/**
+ * `centre`: a hole's or pin's centre line, not an edge of the part. `repeat`:
+ * the link from this stop to the next stands for `count` equal steps of `pitch`.
+ */
+interface Stop { at: number; anchor: number; weight: number; centre?: boolean; repeat?: { count: number; pitch: number } }
+
+/**
+ * The longest run of a chain that repeats — the same figures again and again,
+ * as a tray's rows (label, gap, channel, wall) or a row of holes — strictly
+ * between its two ends, which are the part's own and never part of a run.
+ * `start` is the first stop, `period` the links in one repeat, `count` the
+ * repeats. Null when nothing repeats enough to save a stop.
+ */
+export function repeatedRun(at: number[]): { start: number; period: number; count: number } | null {
+  const links = at.slice(1).map((x, i) => x - at[i]);
+  const n = links.length;
+  let best: { start: number; period: number; count: number } | null = null;
+  for (let period = 1; 2 * period <= n - 2; period++) {
+    for (let start = 1; start + 2 * period <= n - 1; start++) {
+      let count = 1;
+      const same = (k: number) => {
+        for (let j = 0; j < period; j++) if (Math.abs(links[start + k * period + j] - links[start + j]) > SAME_M) return false;
+        return true;
+      };
+      while (start + (count + 1) * period <= n - 1 && same(count)) count++;
+      // A period of one is a single figure "count× pitch"; longer ones keep
+      // their first repeat spelled out, so they must hide at least two stops.
+      const saved = period === 1 ? count - 1 : (count - 1) * period - 1;
+      if (count < 2 || saved < 2) continue;
+      if (!best || count * period > best.count * best.period) best = { start, period, count };
+    }
+  }
+  return best;
+}
 
 /**
  * Sorted stops with the near-duplicates merged and the ends always in — or, when
@@ -257,6 +300,22 @@ function chainStops(stops: Stop[], lo: number, hi: number, across: number, loAnc
       Math.abs(s.at - (prev.at + next.at) / 2) < MERGE_M) merged.splice(i, 1);
   }
   if (merged.length <= MAX_STOPS) return merged;
+  // A run that repeats is said once: one repeat's own figures, then the rest
+  // as "3× 42" — or, for a row of equal steps, just "8× 10".
+  const run = repeatedRun(merged.map((x) => x.at));
+  if (run) {
+    const { start, period, count } = run;
+    const pitch = merged[start + period].at - merged[start].at;
+    const end = start + count * period;
+    const spelled = period === 1 ? start : start + period;
+    const left = period === 1 ? count : count - 1;
+    const short = [
+      ...merged.slice(0, spelled),
+      { ...merged[spelled], repeat: { count: left, pitch } },
+      ...merged.slice(end),
+    ];
+    if (short.length <= MAX_REPEAT_STOPS) return short;
+  }
   const outline = merged.filter((s) => s.weight >= FULL_SPAN * across);
   return outline.length <= MAX_STOPS ? outline : [merged[0], merged[merged.length - 1]];
 }
@@ -682,7 +741,7 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
   // --- rows ----------------------------------------------------------------
   const isDiameter = (axis: 'u' | 'v', a: number, b: number) =>
     sideOn.some((s) => s.axis === axis && Math.abs(s.lo - a) < MERGE_M && Math.abs(s.hi - b) < MERGE_M);
-  const linear = (axis: 'u' | 'v', a: Stop, b: Stop, row: 1 | 2, edge: number): LinearDim => ({
+  const linear = (axis: 'u' | 'v', a: Stop, b: Stop, row: 1 | 2, edge: number, repeat?: Stop['repeat']): LinearDim => ({
     kind: 'linear',
     axis,
     a: a.at,
@@ -691,8 +750,14 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
     anchorB: b.anchor,
     edge,
     row,
-    valueMm: Math.round((b.at - a.at) * 10000) / 10,
-    label: `${isDiameter(axis, a.at, b.at) ? '⌀' : ''}${formatDim(b.at - a.at)}`,
+    ...(repeat ? {
+      count: repeat.count,
+      valueMm: Math.round(repeat.pitch * 10000) / 10,
+      label: `${repeat.count}× ${formatDim(repeat.pitch)}`,
+    } : {
+      valueMm: Math.round((b.at - a.at) * 10000) / 10,
+      label: `${isDiameter(axis, a.at, b.at) ? '⌀' : ''}${formatDim(b.at - a.at)}`,
+    }),
   });
 
   // A sphere as wide as the part, centred on it (a pendulum's bob on its rod):
@@ -714,9 +779,10 @@ export function bodyViewDimensions(body: BodyMesh, view: DrawingView): BodyDimen
     }
     if (chain.length > 2) {
       const links = chain.slice(1).map((stop, i) => stop.at - chain[i].at);
-      const skip = omittedLink(links, links.map((_, i) => isDiameter(axis, chain[i].at, chain[i + 1].at)));
+      // A repeat is never the one left out: "3× 42" is not a length to subtract.
+      const skip = omittedLink(links, links.map((_, i) => !!chain[i].repeat || isDiameter(axis, chain[i].at, chain[i + 1].at)));
       for (let i = 0; i + 1 < chain.length; i++) {
-        if (i !== skip) dims.push(linear(axis, chain[i], chain[i + 1], 1, edge));
+        if (i !== skip) dims.push(linear(axis, chain[i], chain[i + 1], 1, edge, chain[i].repeat));
       }
     }
     dims.push(linear(axis, chain[0], chain[chain.length - 1], 2, edge));
