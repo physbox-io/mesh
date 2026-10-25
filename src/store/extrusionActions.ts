@@ -69,6 +69,7 @@ export function extrusionActions({ set, get, clone }: Deps): ExtrusionActions {
       quiet(part);
       // The weld is the piece's own: see note 2 in utils/extrusionParts.ts.
       part.weldTargetId = m.a.id;
+      part.weldRigid = true;
       host.children = [...(host.children || []), part];
       commit(scene, id);
       return { id };

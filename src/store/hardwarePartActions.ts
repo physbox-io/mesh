@@ -138,6 +138,7 @@ export function hardwarePartActions({ set, get, clone }: Deps): HardwarePartActi
       attempt((scene) => {
         const body = findNodeById(scene.nodes, bodyId)!;
         delete body.weldTargetId;
+        delete body.weldRigid;
         return { ok: true };
       }, bodyId);
     },

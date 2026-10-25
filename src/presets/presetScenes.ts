@@ -15,6 +15,9 @@ import { latticeBracketPreset } from './latticeBracket';
 import { oakTreePreset } from './oakTree';
 import { soapDishPreset } from './soapDish';
 import { shatterPreset } from './shatter';
+import {
+  chestOfDrawersPreset, extrusionFramePreset, sealedJarPreset, springLauncherPreset, stepperTurntablePreset, xyPlotterPreset,
+} from './hardwarePresets';
 
 export const pendulumPreset: SceneGraph = {
   nodes: [
@@ -3583,6 +3586,42 @@ export const PRESETS = {
     emoji: '🪴',
     scene: flowerStandPreset,
     camera: { position: [0.95, -1.15, 0.82], target: [0, 0, 0.46] } satisfies PresetCamera,
-  }
+  },
+  chest_of_drawers: {
+    name: 'Chest of Drawers (Runners)',
+    emoji: '🗄️',
+    scene: chestOfDrawersPreset,
+    camera: { position: [0.95, -1.35, 0.9], target: [0, -0.05, 0.32] } satisfies PresetCamera,
+  },
+  xy_plotter: {
+    name: 'XY Plotter (Linear Rails)',
+    emoji: '✏️',
+    scene: xyPlotterPreset,
+    camera: { position: [0.38, -0.6, 0.42], target: [0.03, 0.01, 0.03] } satisfies PresetCamera,
+  },
+  stepper_turntable: {
+    name: 'Stepper Turntable (Bearing)',
+    emoji: '💿',
+    scene: stepperTurntablePreset,
+    camera: { position: [0.3, -0.38, 0.3], target: [0, 0, 0.06] } satisfies PresetCamera,
+  },
+  spring_launcher: {
+    name: 'Spring Launcher',
+    emoji: '🎯',
+    scene: springLauncherPreset,
+    camera: { position: [0.32, -0.5, 0.35], target: [0, 0, 0.18] } satisfies PresetCamera,
+  },
+  sealed_jar: {
+    name: 'Sealed Jar (O-ring)',
+    emoji: '🫙',
+    scene: sealedJarPreset,
+    camera: { position: [0.16, -0.22, 0.17], target: [0, 0, 0.045] } satisfies PresetCamera,
+  },
+  extrusion_frame: {
+    name: '2020 Extrusion Frame',
+    emoji: '🏗️',
+    scene: extrusionFramePreset,
+    camera: { position: [0.62, -0.82, 0.55], target: [0, 0, 0.15] } satisfies PresetCamera,
+  },
 };
 

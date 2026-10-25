@@ -474,6 +474,83 @@ A **3 ft (915 mm) tall** hardwood flower stand designed for **Bandsaw + Desktop 
 2. Click the amber **\`Joinery\`** button on the bottom status bar
 3. Inspect the **exploded 3D mortise-and-tenon preview**, **stopped edge roundovers**, **sliding CNC window setups** (for the 891 mm legs on a 300 mm CNC bed), and **Per-Part Fabrication Cards**
 4. Click **\`Apply Joinery to Scene\`** to replace the block model with the 14 tenoned, mortised, and profiled individual parts`,
+
+  chest_of_drawers: `# 🗄️ Chest of Drawers
+
+Four drawers on **400 mm full-extension ball-bearing runners**, eight runners in all, each opening in turn and closing again.
+
+## What is real here
+- Each runner is three steel members on two slides, so a drawer comes out **its own length** and stops
+- The drawer boxes are **25.4 mm narrower** than the cabinet inside: 12.7 mm each side, the side space every ball-bearing runner is made for
+- The runners are fixed in the cabinet. Each drawer is welded to one runner's slide, and the other runner follows it slide for slide
+
+## Try it
+- Press **Play**: the bottom drawer opens first, and each one above it two seconds later
+- Select a drawer and change the cabinet's width: the **DFM** check says how far off the side space is, and by how much to change the drawer
+- **Parts** in the bottom bar lists the runners to buy`,
+
+  xy_plotter: `# ✏️ XY Plotter on Linear Rails
+
+A cross-slide plotter: an **MGN15** rail along X carries a printed cross slide, which carries an **MGN12** rail along Y, which carries the pen.
+
+## What is real here
+- Both carriages run on slides as long as their rails less their own length, with **hard stops** at the ends
+- The rails sit in **rail seats**: 1.5 mm locating channels with a heat-set insert hole at every bolt
+- Each axis is driven the way a belt would drive it, by a force held to a **Lissajous** path
+
+## Try it
+- Press **Play** and watch the pen trace a 3:2 figure on the sheet
+- Select a rail and change its length: its seat, its holes and its travel all follow`,
+
+  stepper_turntable: `# 💿 Stepper Turntable
+
+A **NEMA17** stepper turns a 220 mm platter carried on a **6001 bearing**. Three cubes ride the platter.
+
+## What is real here
+- The bearing's inner race is a body of its own on a hinge; the platter is welded to it
+- The motor's shaft is coupled to the inner race, and its torque is limited to its **0.42 N·m holding torque**
+- The cubes stay on by friction alone (PLA on PLA, about 0.4): the outermost lets go first
+
+## Try it
+- Press **Play**: it spins up over nine seconds, then slows
+- Swap the motor for a **NEMA23** in its card, and the spin-up keeps pace with the speed asked for`,
+
+  spring_launcher: `# 🎯 Spring Launcher
+
+A ball in a cup on a **Ø16 × 50 mm compression spring**, rate **2 N/mm**.
+
+## What is real here
+- The spring's top is on a slide whose stiffness **is** the spring's rate, and it bottoms out at its **18 mm solid height**
+- Every four seconds the cup is held down to solid for two seconds, then let go
+
+## Try it
+- Press **Play** and watch the ball rise and fall back into the cup
+- Change the spring to **Ø20 × 60** (2.6 N/mm) and it throws higher`,
+
+  sealed_jar: `# 🫙 Sealed Jar
+
+A printed jar whose lid seals on a **nitrile O-ring**, in a face groove the app cut to fit the jar's 5 mm wall.
+
+## What is real here
+- The groove is the cord's **static gland**: depth and width from the maker's tables, in the middle of the wall
+- The ring lies in it, and the **DFM** check measures it against the lid: squeeze, how full the groove is, and whether the lid covers the whole ring
+
+## Try it
+- Open **DFM**: the ring **seals**
+- Lift the lid half a millimetre: it now says the ring is squeezed too little, and how far to bring the lid back down
+- Slide the lid sideways: it says the lid misses part of the ring`,
+
+  extrusion_frame: `# 🏗️ 2020 Extrusion Frame
+
+A 300 mm cube of **20 × 20 T-slot extrusion**, held together by **16 corner brackets**. One upright is **V-slot**, with a wheel carriage running up and down it.
+
+## What is real here
+- Each bracket is fixed to one profile and welds the other to it. Take a bracket out and that joint comes apart
+- The profiles are drawn as their real section, and weigh what a metre of it weighs
+
+## Try it
+- Press **Play**: the carriage rides up and down its post
+- **Parts** in the bottom bar packs the twelve profiles onto the bar lengths extrusion is sold in`,
 };
 
 

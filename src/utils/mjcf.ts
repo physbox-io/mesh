@@ -620,7 +620,7 @@ export const compileToMJCF = (
   const jointedNodes: Record<string, string> = {};
   const explicitCouplingNodes: SceneNode[] = [];
   const pulleyRopesList: SceneNode[] = [];
-  const weldConstraintsList: { bodyName: string; targetId: string }[] = [];
+  const weldConstraintsList: { bodyName: string; targetId: string; rigid?: boolean }[] = [];
   /*
    * Crumple zones, as locks.
    *
@@ -652,7 +652,7 @@ export const compileToMJCF = (
         pulleyRopesList.push(node);
       }
       if (node.weldTargetId) {
-        weldConstraintsList.push({ bodyName: node.name, targetId: node.weldTargetId });
+        weldConstraintsList.push({ bodyName: node.name, targetId: node.weldTargetId, ...(node.weldRigid ? { rigid: true } : {}) });
       }
       if (node.isComposite && node.weldLastToId) {
         weldConstraintsList.push({ bodyName: (node.compositePrefix || `${node.name}_`) + 'B_last', targetId: node.weldLastToId });
@@ -842,7 +842,10 @@ export const compileToMJCF = (
   let weldIndex = 1;
   for (const w of weldConstraintsList) {
     const targetName = nodeNamesMap[w.targetId] || w.targetId;
-    equalityConstraints += `\n    <weld name="weld_constraint_${weldIndex++}" body1="${w.bodyName}" body2="${targetName}" />`;
+    // A bolted joint: stiff, where the default weld lets a 3 kg drawer sag
+    // millimetres onto what is under it. Only when asked for.
+    const stiff = w.rigid ? ' solref="0.004 1" solimp="0.99 0.999 0.0002 0.5 2"' : '';
+    equalityConstraints += `\n    <weld name="weld_constraint_${weldIndex++}" body1="${w.bodyName}" body2="${targetName}"${stiff} />`;
   }
 
   // 5. Closed-Loop Connect Joint Constraints

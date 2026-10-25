@@ -49,6 +49,7 @@ export function fixToPiece(scene: SceneGraph, pieceId: string, bodyId: string): 
     return { ok: false, problem: `${body.name} is already welded to ${other?.name ?? body.weldTargetId}; take that off first.` };
   }
   body.weldTargetId = pieceId;
+  body.weldRigid = true;
   return { ok: true };
 }
 
@@ -129,7 +130,9 @@ export function addDrawerRunners(scene: SceneGraph, drawerId: string, newId: () 
   for (const n of all(scene.nodes)) {
     if (n.id === drawerId || isBoughtIn(n) || all([n]).some((c) => c.id === drawerId) || all([drawer]).some((c) => c.id === n.id)) continue;
     const b = worldBox(scene, n);
-    if (!b || !(b.min.x <= d.min.x + 1e-4 && b.min.y <= d.min.y + 1e-4 && b.max.x >= d.max.x - 1e-4 && b.max.y >= d.max.y - 1e-4)) continue;
+    // Round it in plan and in height: a drawer of the same size above or below is not its cabinet.
+    if (!b || !(b.min.x <= d.min.x + 1e-4 && b.min.y <= d.min.y + 1e-4 && b.max.x >= d.max.x - 1e-4 && b.max.y >= d.max.y - 1e-4
+      && b.min.z <= d.min.z + 1e-4 && b.max.z >= d.max.z - 1e-4)) continue;
     const vol = (x: Box) => (x.max.x - x.min.x) * (x.max.y - x.min.y) * (x.max.z - x.min.z);
     if (!carcassBox || vol(b) < vol(carcassBox)) { carcass = n; carcassBox = b; }
   }
@@ -144,7 +147,8 @@ export function addDrawerRunners(scene: SceneGraph, drawerId: string, newId: () 
   const f = new THREE.Vector3(front.axis === 'x' ? front.sign : 0, front.axis === 'y' ? front.sign : 0, 0);
   const across: 'x' | 'y' = front.axis === 'x' ? 'y' : 'x';
   const depthMm = (front.axis === 'x' ? d.max.x - d.min.x : d.max.y - d.min.y) * 1000;
-  const length = [...RUNNER_LENGTHS].reverse().find((l) => Number(l) <= depthMm + 1e-6);
+  // Half a millimetre's grace: a drawer drawn 400 deep measures 399.99… once placed.
+  const length = [...RUNNER_LENGTHS].reverse().find((l) => Number(l) <= depthMm + 0.5);
   if (!length) return { ok: false, problem: `${drawer.name} is ${depthMm.toFixed(0)} mm deep; the shortest runner is ${RUNNER_LENGTHS[0]} mm.` };
 
   const L = Number(length) / 1000;
@@ -193,6 +197,7 @@ export function addDrawerRunners(scene: SceneGraph, drawerId: string, newId: () 
         return { ok: false, problem: `${drawer.name} is already welded to something; take that off first.` };
       }
       drawer.weldTargetId = slide.id;
+      drawer.weldRigid = true;
     } else {
       // The second runner follows the first slide for slide, rather than being
       // welded to the drawer as well: two welds round one loop fight each

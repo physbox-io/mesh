@@ -558,6 +558,7 @@ export function screwFit(scene: SceneGraph, host: SceneNode, screw: SceneNode, g
 export function fasten(screw: SceneNode, host: SceneNode, target: SceneNode): boolean {
   if (target.weldTargetId && target.weldTargetId !== host.id) return false;
   target.weldTargetId = host.id;
+  target.weldRigid = true;
   screw.hardwarePart = { ...screw.hardwarePart!, fastens: target.id };
   return true;
 }
@@ -581,7 +582,10 @@ export function releaseFastenings(scene: SceneGraph, doomed: ReadonlySet<string>
     if (!h.gone) continue;
     if (holds.some((o) => !o.gone && o.host === h.host && o.target === h.target)) continue;
     const target = findPath(scene.nodes, h.target)?.at(-1);
-    if (target && target.weldTargetId === h.host) delete target.weldTargetId;
+    if (target && target.weldTargetId === h.host) {
+      delete target.weldTargetId;
+      delete target.weldRigid;
+    }
   }
 }
 

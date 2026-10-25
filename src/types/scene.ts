@@ -478,6 +478,11 @@ export interface SceneNode {
   coupleTargetId?: string;
   coupleRatio?: number;
   weldTargetId?: string;
+  /**
+   * The weld is a bolted or screwed joint — hardware holding two parts — and
+   * is emitted stiff rather than at MuJoCo's soft default. Only when set.
+   */
+  weldRigid?: boolean;
   connectTargetId?: string;
   connectAnchor?: number[];
   /**
