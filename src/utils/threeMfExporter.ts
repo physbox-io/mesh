@@ -168,6 +168,30 @@ function buildPalette(cornerColors: number[][], maxExtruders: number) {
   return { slots, assign };
 }
 
+/** Zips a 3D model part with the package boilerplate every 3MF carries, plus any extra files. */
+function packModel(model: string, extra: ZipEntry[] = []): Uint8Array {
+  const contentTypes =
+    '<?xml version="1.0" encoding="UTF-8"?>\n' +
+    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+    '<Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>' +
+    (extra.some((e) => e.path.endsWith('.config')) ? '<Default Extension="config" ContentType="text/xml"/>' : '') +
+    '</Types>';
+
+  const rels =
+    '<?xml version="1.0" encoding="UTF-8"?>\n' +
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    `<Relationship Id="rel0" Target="/3D/3dmodel.model" Type="${MODEL_REL}"/>` +
+    '</Relationships>';
+
+  return zipStore([
+    { path: '[Content_Types].xml', data: utf8(contentTypes) },
+    { path: '_rels/.rels', data: utf8(rels) },
+    { path: '3D/3dmodel.model', data: utf8(model) },
+    ...extra,
+  ]);
+}
+
 /**
  * Packs meshes into a .3mf.
  *
@@ -300,32 +324,162 @@ export function exportThreeMf(meshes: ThreeMfMesh[], options: ThreeMfOptions = {
     `<resources><m:colorgroup id="${COLORGROUP_ID}">${colorNodes}</m:colorgroup>${objects.join('')}</resources>` +
     `<build>${items.join('')}</build></model>`;
 
-  const contentTypes =
-    '<?xml version="1.0" encoding="UTF-8"?>\n' +
-    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
-    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
-    '<Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>' +
-    '</Types>';
-
-  const rels =
-    '<?xml version="1.0" encoding="UTF-8"?>\n' +
-    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
-    `<Relationship Id="rel0" Target="/3D/3dmodel.model" Type="${MODEL_REL}"/>` +
-    '</Relationships>';
-
-  const entries: ZipEntry[] = [
-    { path: '[Content_Types].xml', data: utf8(contentTypes) },
-    { path: '_rels/.rels', data: utf8(rels) },
-    { path: '3D/3dmodel.model', data: utf8(model) },
-  ];
-
   return {
-    data: zipStore(entries),
+    data: packModel(model),
     triangles: triangleTotal,
     palette: slots.map((color, i) => ({
       hex: linearToSrgbHex([color.r, color.g, color.b]),
       extruder: i + 1,
       triangles: slotCounts[i],
     })),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Objects made of parts, each part on its own extruder
+// ---------------------------------------------------------------------------
+//
+// Painting (above) colours a SURFACE: a slicer takes a painted triangle a few
+// layers deep and no further. A part that has to be a different material all
+// the way through — a dissolvable liner inside a PLA mold — has to be its own
+// VOLUME, and which extruder prints a volume is not something the 3MF core
+// spec has a word for. Each slicer family keeps it in its own config file:
+//
+//  - Bambu Studio and OrcaSlicer read `Metadata/model_settings.config`. An
+//    object there is a 3MF object built from <components>, and each <part>
+//    names the sub-object (by its id in 3dmodel.model) it configures. A part
+//    given as a triangle range is parsed and then ignored — the importer
+//    (`_generate_volumes_new`) matches parts to sub-objects only — so the
+//    parts have to be objects of their own.
+//  - PrusaSlicer reads `Metadata/Slic3r_PE_model.config`, keyed by MESH object
+//    id. Handed an object built from components it makes each component a
+//    model object of its own, in place, so the shell and the liner arrive as
+//    two objects sitting where they belong, each with its extruder set.
+//
+// Both files are written and each slicer ignores the other's. The formats were
+// read from the importers' source (OrcaSlicer bbs_3mf.cpp, PrusaSlicer
+// 3mf.cpp), not copied from a sample file, and no file from here has yet been
+// opened in a real slicer.
+
+/** One solid of an assembly, already in millimetres, Z-up, where it prints. */
+export interface ThreeMfPart {
+  name: string;
+  /** x,y,z per vertex, in millimetres. */
+  positions: ArrayLike<number>;
+  /** Triangle indices, wound outward. */
+  indices: ArrayLike<number>;
+  /** 1-based extruder (filament slot) that prints this part. */
+  extruder: number;
+}
+
+/** A printed object made of several parts, e.g. a mold shell and its liner. */
+export interface ThreeMfAssembly {
+  name: string;
+  parts: ThreeMfPart[];
+}
+
+export interface ThreeMfAssemblyResult {
+  data: Uint8Array;
+  triangles: number;
+  /** The extruders the file asks for, ascending. */
+  extruders: number[];
+}
+
+/** Packs assemblies into a .3mf whose parts each name their extruder, for Bambu/Orca and PrusaSlicer. */
+export function exportThreeMfAssemblies(
+  assemblies: ThreeMfAssembly[],
+  options: { application?: string } = {},
+): ThreeMfAssemblyResult {
+  let nextId = 1;
+  const objects: string[] = [];
+  const items: string[] = [];
+  const bambuObjects: string[] = [];
+  const prusaObjects: string[] = [];
+  const extruders = new Set<number>();
+  let triangleTotal = 0;
+
+  for (const assembly of assemblies) {
+    const parts = assembly.parts.filter((p) => p.indices.length >= 3);
+    if (parts.length === 0) continue;
+
+    const partIds: number[] = [];
+    const bambuParts: string[] = [];
+    for (const part of parts) {
+      const id = nextId++;
+      partIds.push(id);
+      extruders.add(part.extruder);
+
+      const vertexCount = Math.floor(part.positions.length / 3);
+      const vertexLines: string[] = [];
+      for (let v = 0; v < vertexCount; v++) {
+        vertexLines.push(
+          `<vertex x="${num(part.positions[v * 3])}" y="${num(part.positions[v * 3 + 1])}" z="${num(part.positions[v * 3 + 2])}"/>`
+        );
+      }
+      const triangleCount = Math.floor(part.indices.length / 3);
+      const triangleLines: string[] = [];
+      for (let t = 0; t < triangleCount; t++) {
+        triangleLines.push(
+          `<triangle v1="${part.indices[t * 3]}" v2="${part.indices[t * 3 + 1]}" v3="${part.indices[t * 3 + 2]}"/>`
+        );
+      }
+      triangleTotal += triangleCount;
+
+      objects.push(
+        `<object id="${id}" type="model" name="${xmlEscape(part.name)}">` +
+        `<mesh><vertices>${vertexLines.join('')}</vertices>` +
+        `<triangles>${triangleLines.join('')}</triangles></mesh></object>`
+      );
+      bambuParts.push(
+        `    <part id="${id}" subtype="normal_part">\n` +
+        `      <metadata key="name" value="${xmlEscape(part.name)}"/>\n` +
+        `      <metadata key="extruder" value="${part.extruder}"/>\n` +
+        '    </part>\n'
+      );
+      prusaObjects.push(
+        ` <object id="${id}" instances_count="1">\n` +
+        `  <metadata type="object" key="name" value="${xmlEscape(part.name)}"/>\n` +
+        `  <metadata type="object" key="extruder" value="${part.extruder}"/>\n` +
+        `  <volume firstid="0" lastid="${triangleCount - 1}">\n` +
+        `   <metadata type="volume" key="name" value="${xmlEscape(part.name)}"/>\n` +
+        '   <metadata type="volume" key="volume_type" value="ModelPart"/>\n' +
+        `   <metadata type="volume" key="extruder" value="${part.extruder}"/>\n` +
+        '  </volume>\n' +
+        ' </object>\n'
+      );
+    }
+
+    const assemblyId = nextId++;
+    objects.push(
+      `<object id="${assemblyId}" type="model" name="${xmlEscape(assembly.name)}"><components>` +
+      partIds.map((id) => `<component objectid="${id}"/>`).join('') +
+      '</components></object>'
+    );
+    items.push(`<item objectid="${assemblyId}"/>`);
+    bambuObjects.push(
+      `  <object id="${assemblyId}">\n` +
+      `    <metadata key="name" value="${xmlEscape(assembly.name)}"/>\n` +
+      `    <metadata key="extruder" value="${parts[0].extruder}"/>\n` +
+      bambuParts.join('') +
+      '  </object>\n'
+    );
+  }
+
+  const model =
+    '<?xml version="1.0" encoding="UTF-8"?>\n' +
+    `<model unit="millimeter" xml:lang="en-US" xmlns="${CORE_NS}">` +
+    `<metadata name="Application">${xmlEscape(options.application ?? 'PhysBox Studio')}</metadata>` +
+    `<resources>${objects.join('')}</resources>` +
+    `<build>${items.join('')}</build></model>`;
+
+  const config = (body: string[]) => '<?xml version="1.0" encoding="UTF-8"?>\n<config>\n' + body.join('') + '</config>\n';
+
+  return {
+    data: packModel(model, [
+      { path: 'Metadata/model_settings.config', data: utf8(config(bambuObjects)) },
+      { path: 'Metadata/Slic3r_PE_model.config', data: utf8(config(prusaObjects)) },
+    ]),
+    triangles: triangleTotal,
+    extruders: [...extruders].sort((a, b) => a - b),
   };
 }

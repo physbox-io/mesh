@@ -21,6 +21,7 @@ import {
   type MoldHalfBuffers,
 } from '../utils/moldExporter';
 import { MoldWorkerClient, type MoldPreview } from '../utils/moldWorkerClient';
+import { CAST_MATERIALS, DEFAULT_LINER_SKIN_MM, type CastMaterial } from '../utils/moldLiner';
 import type { MoldCastSimulationResult } from '../utils/moldCastSimulation';
 import { NumberInput } from '@physbox-io/ui';
 import { CastingGuide } from './CastingGuide';
@@ -370,6 +371,8 @@ const MoldDesigner: React.FC<ExportMoldModalProps & { onPourBox: () => void }> =
 
     const bottomBuf = preview?.bottom ?? null;
     const topBuf = preview?.top ?? null;
+    const linerBottomBuf = preview?.liner?.bottom ?? null;
+    const linerTopBuf = preview?.liner?.top ?? null;
 
     // Materials
     const bottomMat = new THREE.MeshStandardMaterial({
@@ -392,6 +395,32 @@ const MoldDesigner: React.FC<ExportMoldModalProps & { onPourBox: () => void }> =
       side: THREE.DoubleSide,
     });
 
+    // The PVA liner: what dissolves, drawn pale so the shell reads as the mold.
+    const linerMat = new THREE.MeshStandardMaterial({
+      color: 0xf1f5f9,
+      roughness: 0.6,
+      metalness: 0,
+      transparent: isXRay,
+      opacity: isXRay ? 0.5 : 1.0,
+      depthWrite: !isXRay,
+      side: THREE.DoubleSide,
+    });
+
+    /** A half's shell, and its liner placed the same way. */
+    const addHalf = (
+      buf: MoldHalfBuffers | null,
+      linerBuf: MoldHalfBuffers | null,
+      mat: THREE.Material,
+      place: (m: THREE.Mesh) => void = () => {},
+    ) => {
+      for (const [b, m] of [[buf, mat], [linerBuf, linerMat]] as const) {
+        if (!b) continue;
+        const mesh = new THREE.Mesh(buffersToGeometry(b), m);
+        place(mesh);
+        group.add(mesh);
+      }
+    };
+
     const castMat = new THREE.MeshStandardMaterial({
       color: 0xf59e0b, // Amber / Cast Plaster-Resin
       roughness: 0.35,
@@ -409,39 +438,23 @@ const MoldDesigner: React.FC<ExportMoldModalProps & { onPourBox: () => void }> =
 
     if (effectiveViewMode === 'plate') {
       // Build Plate Layout: Both halves flat side-by-side at Z=0
-      if (bottomBuf) {
-        group.add(new THREE.Mesh(buffersToGeometry(bottomBuf), bottomMat));
-      }
-      if (topBuf && moldType === 'clamshell') {
-        group.add(new THREE.Mesh(buffersToGeometry(topBuf), topMat));
-      }
+      addHalf(bottomBuf, linerBottomBuf, bottomMat);
+      if (moldType === 'clamshell') addHalf(topBuf, linerTopBuf, topMat);
     } else if (effectiveViewMode === 'clamshell_exploded') {
       // Exploded View: Bottom cavity at Z=0, Top core/lid elevated above it facing downward
-      if (bottomBuf) {
-        const botMesh = new THREE.Mesh(buffersToGeometry(bottomBuf), bottomMat);
-        botMesh.position.set(-botCenterX, 0, 0);
-        group.add(botMesh);
-      }
+      addHalf(bottomBuf, linerBottomBuf, bottomMat, (m) => m.position.set(-botCenterX, 0, 0));
       if (topBuf) {
-        const topMesh = new THREE.Mesh(buffersToGeometry(topBuf), topMat);
         const botTopZ = result.bottomHalf.bounds.maxZ;
         const lidTopZ = result.topHalf ? result.topHalf.bounds.maxZ : result.moldHeightMm;
-        topMesh.rotation.x = Math.PI;
-        topMesh.position.set(-topCenterX, 0, botTopZ + lidTopZ + explodeGap);
-        group.add(topMesh);
+        addHalf(topBuf, linerTopBuf, topMat, (m) => {
+          m.rotation.x = Math.PI;
+          m.position.set(-topCenterX, 0, botTopZ + lidTopZ + explodeGap);
+        });
       }
     } else if (effectiveViewMode === 'bottom_only') {
-      if (bottomBuf) {
-        const botMesh = new THREE.Mesh(buffersToGeometry(bottomBuf), bottomMat);
-        botMesh.position.set(-botCenterX, 0, 0);
-        group.add(botMesh);
-      }
+      addHalf(bottomBuf, linerBottomBuf, bottomMat, (m) => m.position.set(-botCenterX, 0, 0));
     } else if (effectiveViewMode === 'top_only') {
-      if (topBuf) {
-        const topMesh = new THREE.Mesh(buffersToGeometry(topBuf), topMat);
-        topMesh.position.set(-topCenterX, 0, 0);
-        group.add(topMesh);
-      }
+      addHalf(topBuf, linerTopBuf, topMat, (m) => m.position.set(-topCenterX, 0, 0));
     } else if (effectiveViewMode === 'cast_preview') {
       if (castPreview?.success && castPreview.mesh.positions.length > 0) {
         const castMesh = new THREE.Mesh(indexedMeshToGeometry(castPreview.mesh), castMat);
@@ -524,7 +537,8 @@ const MoldDesigner: React.FC<ExportMoldModalProps & { onPourBox: () => void }> =
     if (!client) return;
     setSaving(true);
     try {
-      saveBytes(await client.stl(), filename);
+      // A lined mold is two materials, which only the 3MF can say.
+      saveBytes(result.liner ? await client.threeMf() : await client.stl(), filename);
     } catch (e) {
       // A worker that died took the mold it held with it.
       setFailure((e as Error).message);
@@ -912,15 +926,64 @@ const MoldDesigner: React.FC<ExportMoldModalProps & { onPourBox: () => void }> =
                 </Field>
               </div>
 
-              <label className="flex items-center gap-2 text-xs font-semibold cursor-pointer">
+              <label className={`flex items-center gap-2 text-xs font-semibold ${options.dissolvableLiner ? 'opacity-50' : 'cursor-pointer'}`}>
                 <input
                   type="checkbox"
-                  checked={Boolean(options.allowUndercuts)}
+                  checked={Boolean(options.allowUndercuts) || Boolean(options.dissolvableLiner)}
+                  disabled={Boolean(options.dissolvableLiner)}
                   onChange={(e) => set('allowUndercuts', e.target.checked)}
                   className="rounded border-slate-300 dark:border-slate-700 text-purple-600 focus:ring-purple-500"
                 />
                 Keep 3D Undercuts (Flexible / Silicone Mold)
               </label>
+
+              <HintAnchor hint="PLA mold, PVA where the casting touches it. Every undercut is kept; the PVA dissolves and the PLA lifts off. Needs a two-filament printer.">
+                <label className="flex items-center gap-2 text-xs font-semibold cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(options.dissolvableLiner)}
+                    onChange={(e) => set('dissolvableLiner', e.target.checked)}
+                    className="rounded border-slate-300 dark:border-slate-700 text-purple-600 focus:ring-purple-500"
+                  />
+                  Dissolvable PVA Liner (PLA + PVA 3MF)
+                </label>
+              </HintAnchor>
+              {options.dissolvableLiner && (
+                <div className="grid grid-cols-2 gap-3 pl-6 min-w-0">
+                  <Field label="Casting" hint="What you pour. Water-based casts dissolve PVA, so they cannot use a liner." hintAlign="start">
+                    <select
+                      value={options.castMaterial ?? 'epoxy'}
+                      onChange={(e) => set('castMaterial', e.target.value as CastMaterial)}
+                      className={inputClass}
+                    >
+                      {(Object.keys(CAST_MATERIALS) as CastMaterial[]).map((m) => (
+                        <option key={m} value={m}>{CAST_MATERIALS[m].label}</option>
+                      ))}
+                    </select>
+                  </Field>
+                  <Field label="PVA Skin (mm)" hint="PVA between the casting and the PLA. 1.2 mm is three beads." hintAlign="end">
+                    <NumberInput
+                      min={0.8}
+                      max={4}
+                      step={0.1}
+                      value={options.linerSkinMm ?? DEFAULT_LINER_SKIN_MM}
+                      onChange={(v) => set('linerSkinMm', v)}
+                      className={inputClass}
+                    />
+                  </Field>
+                </div>
+              )}
+              {result.liner && (
+                <div className="pl-6 text-[11px] leading-snug text-slate-600 dark:text-slate-300 space-y-1">
+                  <div>
+                    PVA <strong>{result.liner.pvaGrams} g</strong> · PLA <strong>{result.liner.plaGrams} g</strong> ·
+                    thickest PVA {result.liner.thickestPvaMm} mm, about {result.liner.dissolveHours} h to dissolve
+                  </div>
+                  <ol className="list-decimal pl-4 space-y-0.5 text-slate-500 dark:text-slate-400">
+                    {result.liner.steps.map((step, i) => <li key={i}>{step}</li>)}
+                  </ol>
+                </div>
+              )}
             </div>
 
             {/* Registration Pins & Tolerances (Clamshell only) */}
@@ -1086,12 +1149,18 @@ const MoldDesigner: React.FC<ExportMoldModalProps & { onPourBox: () => void }> =
             />
 
             <button
-              onClick={() => void handleDownload(moldType === 'open' ? 'casting_mold_open.stl' : 'casting_mold_plate.stl')}
+              onClick={() =>
+                void handleDownload(
+                  result.liner
+                    ? moldType === 'open' ? 'casting_mold_open_pva.3mf' : 'casting_mold_plate_pva.3mf'
+                    : moldType === 'open' ? 'casting_mold_open.stl' : 'casting_mold_plate.stl'
+                )
+              }
               disabled={!result.success || result.totalTriangles === 0 || busy || saving}
               className="flex items-center gap-2 px-5 py-2 text-xs font-semibold text-white bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 rounded-xl shadow-md hover:shadow-lg disabled:opacity-50 transition-all cursor-pointer"
             >
               <Download className="w-4 h-4" />
-              <span>{saving ? 'Encoding STL…' : 'Download STL'}</span>
+              <span>{result.liner ? (saving ? 'Encoding 3MF…' : 'Download 3MF') : saving ? 'Encoding STL…' : 'Download STL'}</span>
             </button>
           </div>
         </div>

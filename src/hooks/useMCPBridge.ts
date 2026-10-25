@@ -4174,6 +4174,7 @@ export function useMCPBridge() {
               placement,
               toId: (s) => toId(s) as string,
               findNodeInScene,
+              describeFiles,
             });
           }
 

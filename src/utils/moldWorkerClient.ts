@@ -17,7 +17,7 @@ import {
   generateMoldMeshes,
   lastMoldOptions,
   moldSummary,
-  trianglesToBuffers,
+  moldPreviewBuffers,
   type MoldHalfBuffers,
   type MoldOptions,
   type MoldSummary,
@@ -30,6 +30,7 @@ import {
 } from './moldCastSimulation';
 import type { SceneGraph, SceneNode } from '../types/scene';
 import { loadManifold } from './sculptCut';
+import { isCastMaterial } from './moldLiner';
 import { stlToMesh } from './stlMesh';
 import { appendSolidTriangles } from './contourSliceExporter';
 import { getNodeWorldTransform } from './laserCutExporter';
@@ -42,8 +43,11 @@ import { POUR_DIRECTIONS, type PourDirection, type PourInfo } from './pourCast';
 
 export interface MoldPreview {
   summary: MoldSummary;
+  /** Each half as drawn: with a liner, its PLA shell only. */
   bottom: MoldHalfBuffers;
   top: MoldHalfBuffers | null;
+  /** The PVA liner of each half, when the mold has one. */
+  liner: { bottom: MoldHalfBuffers; top: MoldHalfBuffers | null } | null;
 }
 
 type Settle = { resolve: (v: never) => void; reject: (e: Error) => void };
@@ -76,7 +80,7 @@ export class MoldWorkerClient {
         this.pending.delete(msg.id);
         if (msg.type === 'FAILED') settle.reject(new Error(msg.message));
         else if (msg.type === 'GENERATED') {
-          settle.resolve({ summary: msg.summary, bottom: msg.bottom, top: msg.top } as never);
+          settle.resolve({ summary: msg.summary, bottom: msg.bottom, top: msg.top, liner: msg.liner ?? null } as never);
         } else if (msg.type === 'STL') settle.resolve(msg.bytes as never);
         else if (msg.type === 'CAST') settle.resolve(msg.result as never);
       };
@@ -128,8 +132,7 @@ export class MoldWorkerClient {
       this.lastResult = result;
       return {
         summary: moldSummary(result),
-        bottom: trianglesToBuffers(result.bottomHalf.triangles),
-        top: result.topHalf ? trianglesToBuffers(result.topHalf.triangles) : null,
+        ...moldPreviewBuffers(result),
       };
     }
 
@@ -144,6 +147,17 @@ export class MoldWorkerClient {
     // The mold the dead worker held is gone with it.
     if (this.stopped) throw await this.stopped;
     return this.send<Uint8Array>({ type: 'STL' });
+  }
+
+  /** The lined mold as a two-material 3MF (PLA shell on filament 1, PVA liner on 2). */
+  async threeMf(): Promise<Uint8Array> {
+    if (!this.worker) {
+      const bytes = this.lastResult?.threeMf;
+      if (!bytes) throw new Error('This mold has no liner, so there is no two-material 3MF.');
+      return bytes;
+    }
+    if (this.stopped) throw await this.stopped;
+    return this.send<Uint8Array>({ type: 'THREEMF' });
   }
 
   /** Simulates the cast solid from whatever mold was generated last. */
@@ -213,6 +227,9 @@ export function moldOptionsFor(msg: Record<string, unknown>): {
       ...(typeof msg.includeVents === 'boolean' ? { includeVents: msg.includeVents } : {}),
       ...(typeof msg.ventDiaMm === 'number' ? { ventDiaMm: msg.ventDiaMm } : {}),
       ...(typeof msg.includePryNotches === 'boolean' ? { includePryNotches: msg.includePryNotches } : {}),
+      ...(typeof msg.dissolvableLiner === 'boolean' ? { dissolvableLiner: msg.dissolvableLiner } : {}),
+      ...(typeof msg.linerSkinMm === 'number' && msg.linerSkinMm > 0 ? { linerSkinMm: msg.linerSkinMm } : {}),
+      ...(isCastMaterial(msg.castMaterial) ? { castMaterial: msg.castMaterial } : {}),
     },
   };
 }
@@ -323,8 +340,10 @@ export async function runMcpMoldSimulation(params: {
   placement: 'beside' | 'overlay';
   toId: (s: string) => string;
   findNodeInScene: (nodes: SceneNode[], id: string) => SceneNode | null;
+  /** The bridge's file packer, for a lined mold's 3MF. */
+  describeFiles?: (files: { name: string; bytes: Uint8Array }[], include: boolean) => unknown[];
 }): Promise<Record<string, unknown>> {
-  const { msg, scene, placement, toId, findNodeInScene } = params;
+  const { msg, scene, placement, toId, findNodeInScene, describeFiles } = params;
   const { options: moldOpts, fromDialog } = moldOptionsFor(msg);
   const optionsFrom = fromDialog ? 'the Export Mold dialog' : 'the scene defaults';
 
@@ -461,10 +480,11 @@ export async function runMcpMoldSimulation(params: {
   if (!scene.nodes?.some((n) => !n.simulation)) {
     return { ok: false, error: 'The scene has nothing to cut but earlier simulations.' };
   }
-  const { preview, stl } = await withWorker(async (c) => {
+  const { preview, stl, threeMf } = await withWorker(async (c) => {
     const p = await c.generate(scene, moldOpts);
     const bytes = p.summary.success ? await c.stl() : new Uint8Array(84);
-    return { preview: p, stl: bytes };
+    const lined = p.summary.success && p.summary.liner ? await c.threeMf() : null;
+    return { preview: p, stl: bytes, threeMf: lined };
   });
   const moldRes = preview.summary;
   if (!moldRes.success) {
@@ -495,6 +515,16 @@ export async function runMcpMoldSimulation(params: {
     cavityDepthMm: moldRes.cavityDepthMm,
     minDraftDeg: moldRes.minDraftDeg,
     volumeMm3: Math.round(added.volumeMm3),
+    ...(moldRes.liner ? { liner: moldRes.liner } : {}),
     warnings: moldRes.warnings,
+    // The two-material print file; its bytes only when the caller keeps them.
+    ...(threeMf && describeFiles
+      ? {
+          files: describeFiles(
+            [{ name: moldRes.moldType === 'open' ? 'casting_mold_open_pva.3mf' : 'casting_mold_plate_pva.3mf', bytes: threeMf }],
+            msg.includeFiles === true,
+          ),
+        }
+      : {}),
   };
 }
