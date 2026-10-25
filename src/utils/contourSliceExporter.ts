@@ -24,6 +24,7 @@ import {
 import { appendGeomTriangles } from './geomSurface';
 import { nestingDepths, offsetLoop } from './polygonOffset';
 import type { StockTransform } from './reliefCarveExporter';
+import { isBoughtIn } from './boughtIn';
 
 export interface ContourSliceOptions {
   /** Stock thickness, in meters. One layer is cut per thickness of model height. */
@@ -217,6 +218,12 @@ export function collectSceneTriangles(scene: SceneGraph): {
       return;
     }
     const bodyMatrix = getNodeWorldTransform(node, parentMatrix);
+    // Bought, not made: a bearing in a pocket is not part of what is cut or
+    // printed. What is fixed to it may well be, so its children still are.
+    if (isBoughtIn(node)) {
+      for (const child of node.children || []) traverse(child, bodyMatrix);
+      return;
+    }
 
     // A body whose holes have never been evaluated still lists its cutters as
     // authored geoms, and resolveCsgGeoms drops them. Slicing the un-subtracted

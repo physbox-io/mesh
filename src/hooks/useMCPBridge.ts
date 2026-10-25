@@ -99,10 +99,11 @@ import { requestTexturedSurface } from '../utils/textureClient';
 import { webSerialManager } from '../utils/webSerialManager';
 import type { Object3D } from 'three';
 import { Quaternion, Vector3 } from 'three';
-import type { SceneGraph, SceneNode, SceneGeom, SceneJoint, HardwareBore, HardwareCutKind } from '../types/scene';
+import type { SceneGraph, SceneNode, SceneGeom, SceneJoint, HardwareBore, HardwareCutKind, HardwarePartKind } from '../types/scene';
 import type { ModelMirror } from '../types/sceneLayer';
 import type { RawGeom, RawJoint, RawNode } from '../utils/sceneNodes';
 import { HARDWARE_KINDS, hardwareSpecOf } from '../utils/hardwareCuts';
+import { HARDWARE_PARTS } from '../utils/hardwareParts';
 import {
   boxLattice, cloneLattice, createLattice, deserializeCage, orientFaces, serializeCage, toSceneGeom as latticeToSceneGeom, DEFAULT_UNIT as LATTICE_UNIT,
   type Axis as LatticeAxis, type Lattice,
@@ -3098,6 +3099,52 @@ export function useMCPBridge() {
           if (after?.csgError) return { ok: false, error: `Cut boolean failed: ${after.csgError}` };
           if (results.length === 1) return results[0];
           return { ok: true, id: targetId, cutsApplied: results.length, cuts: results };
+        }
+
+        case 'ADD_HARDWARE': {
+          const { kind, size, lengthMm, washer, into, group, at } = msg as Msg<{
+            kind: string; size?: string | number; lengthMm?: number; washer?: boolean; into?: string; group?: string; at?: number[];
+          }>;
+          if (typeof kind !== 'string' || !(kind in HARDWARE_PARTS)) {
+            return { ok: false, error: `kind must be one of ${Object.keys(HARDWARE_PARTS).join(', ')}` };
+          }
+          const partKind = kind as HardwarePartKind;
+          const info = HARDWARE_PARTS[partKind];
+          if (size !== undefined && !info.sizes.includes(String(size))) {
+            return { ok: false, error: `${info.label} comes in ${info.sizes.join(', ')}; got '${size}'` };
+          }
+          if (into && !findNodeInScene(store.sceneGraph.nodes, into)) return { ok: false, error: `No object with id '${into}'` };
+          let id: string | null;
+          if (into && group) {
+            id = store.seatHardwarePart(into, group, partKind);
+            if (!id) return { ok: false, error: `'${into}' has no hardware cut '${group}' that takes a ${info.label.toLowerCase()}` };
+          } else {
+            const pos = Array.isArray(at) && at.length >= 3 ? at.map((v) => v / 1000) : [0, 0, 0.03];
+            id = store.addHardwarePart(partKind, pos, into ?? null);
+          }
+          if (!id) return { ok: false, error: 'The part could not be added' };
+          if (size !== undefined || lengthMm !== undefined || washer !== undefined) {
+            useStore.getState().setHardwarePart(id, {
+              ...(size !== undefined ? { size: String(size) } : {}),
+              ...(typeof lengthMm === 'number' ? { lengthMm } : {}),
+              ...(typeof washer === 'boolean' ? { washer } : {}),
+            });
+          }
+          await compileCsgNodes(true);
+          await useStore.getState().recompile(useStore.getState().sceneGraph, undefined, false, true);
+          const part = findNodeInScene(useStore.getState().sceneGraph.nodes, id);
+          const spec = part?.hardwarePart;
+          if (!part || !spec) return { ok: false, error: 'The part could not be added' };
+          return {
+            ok: true, id, name: part.name, kind: spec.kind, size: spec.size,
+            ...(spec.lengthMm !== undefined ? { lengthMm: spec.lengthMm } : {}),
+            ...(spec.washer ? { washer: true } : {}),
+            ...(spec.seat ? { seatedIn: spec.seat === 'bore' ? 'bearing bore' : spec.seat } : {}),
+            ...(spec.fastens ? { fastens: spec.fastens } : {}),
+            ...(part.children.some((c) => c.hardwarePart?.piece === 'inner')
+              ? { innerRaceId: part.children.find((c) => c.hardwarePart?.piece === 'inner')!.id } : {}),
+            posMm: part.pos.map((v) => Math.round(v * 1e6) / 1000),
+          };
         }
 
         case 'COMBINE_BODIES': {

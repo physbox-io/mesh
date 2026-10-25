@@ -23,6 +23,34 @@ export type HardwareCutKind = 'nut_trap' | 'counterbore' | 'insert' | 'insert_bo
 /** What goes into a hardware feature's hole: a screw through it, a thread in it, or a heat-set insert. */
 export type HardwareBore = 'clearance' | 'tapped' | 'insert';
 
+/** The bought hardware that can be put in a scene; see utils/hardwareParts.ts. */
+export type HardwarePartKind = 'bearing' | 'screw' | 'nut' | 'shaft';
+
+/**
+ * What a body is when it is a piece of bought hardware rather than something
+ * made. Bought parts are drawn and simulated but never exported for printing
+ * or machining, and never analysed as if they were going to be.
+ */
+export interface HardwarePart {
+  kind: HardwarePartKind;
+  /** A bolt size (M3), a bearing number (608) or a shaft diameter in mm (8). */
+  size: string;
+  /** Under the head for a screw, overall for a shaft, mm. */
+  lengthMm?: number;
+  /** A screw with a plain washer under its head. */
+  washer?: boolean;
+  /** A body that is one piece of a larger part: a bearing's inner race. */
+  piece?: 'inner';
+  /**
+   * The hardware cut in the parent body this sits in. A seated part is rigid to
+   * that body, takes no contacts (the cut holds it, not the solver), and follows
+   * the cut when the cut is moved or resized.
+   */
+  seat?: string;
+  /** A screw's: the body it fastened to the one it sits in, by a weld on that body. */
+  fastens?: string;
+}
+
 export interface SceneGeom {
   /**
    * A smooth pocket cut (physics_cut shape 'pocket'): the outline, depth and
@@ -539,6 +567,7 @@ export interface SceneNode {
   isHardwareComponent?: boolean;
   hardwareType?: string;
   hardwareSpec?: Record<string, number | string>;
+  hardwarePart?: HardwarePart;
   script?: string;
   scad?: string;
   // --- CSG (boolean modifiers) ---------------------------------------------

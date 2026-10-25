@@ -26,6 +26,7 @@ import { resolveCsgGeoms } from './csg';
 import { appendBaseGeomTriangles } from './geomSurface';
 import { getGeomFrame, getNodeWorldTransform } from './laserCutExporter';
 import { maxSizeFor, sameEdge, suggestedSize, type EdgeCandidate } from './featureEdges';
+import { isBoughtIn } from './boughtIn';
 
 // ---------------------------------------------------------------------------
 // The shape of a body, as prep sees it
@@ -114,7 +115,7 @@ export function shapeSignature(node: SceneNode): string {
 
 /** Bodies that are never part of the casting, whatever they are made of. */
 function notAPart(node: SceneNode): string | null {
-  if (node.isHardwareComponent) return 'It is a bought-in component, not a cast part.';
+  if (node.isHardwareComponent || isBoughtIn(node)) return 'It is a bought-in component, not a cast part.';
   if (node.isPulleyRope) return 'A rope is not a cast part.';
   if (node.isComposite) return 'A cable, rope or cloth is not a cast part.';
   return null;

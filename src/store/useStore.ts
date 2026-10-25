@@ -7,6 +7,8 @@ import { bakeDraftInto, copyPrep, restoreShape, shapeSignature, unprepScene, typ
 import { hasEdgeRounds, reconcileEdgeRounds, withRoundFeature, withoutEdges } from '../utils/edgeRound';
 import type { GeomThreadSpec } from '../utils/metricThreads';
 import { hardwareCutGeoms, hardwareSpecOf, nextHardwareGroup, type HardwareCutSpec } from '../utils/hardwareCuts';
+import { releaseFastenings, reseatHardware } from '../utils/hardwareParts';
+import { hardwarePartActions, type HardwarePartActions } from './hardwarePartActions';
 import type { DataMirror, ModelMirror } from '../types/sceneLayer';
 import { type CombineOp, cageInFrame, geomsForCombine, nodeWorldMatrix } from '../utils/combineBodies';
 import { getGeomFrame } from '../utils/laserCutExporter';
@@ -1399,6 +1401,8 @@ function writeHardwareGroup(node: SceneNode, spec: HardwareCutSpec): boolean {
   node.csgEnabled = true;
   if (node.csgCollision === undefined) node.csgCollision = 'auto';
   if (node.csgSectors === undefined) node.csgSectors = CSG_DEFAULT_SECTORS;
+  // A bearing in this pocket goes where the pocket went, and is its new size.
+  reseatHardware(node);
   return true;
 }
 
@@ -1489,7 +1493,7 @@ export interface EdgeRoundSession {
   picked: RoundEdge[];
 }
 
-export interface PhysicsState {
+export interface PhysicsState extends HardwarePartActions {
   mujoco: typeof MUJOCO_SHIM | null;
   model: ModelMirror | null;
   data: DataMirror | null;
@@ -2411,6 +2415,7 @@ const sharingUnchangedNodes = (config: StateCreator<PhysicsState>): StateCreator
   };
 
 export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) => ({
+  ...hardwarePartActions({ set, get, clone: cloneSceneGraph }),
   mujoco: null,
   model: null,
   data: null,
@@ -5275,6 +5280,8 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     node.csgVolume = result.volume;
     node.csgHullVolume = result.hullVolume;
     node.csgCentroid = result.centroid;
+    // The frame the parts seated in it are placed in has moved with the centroid.
+    if (oldCentroid.some((v, a) => Math.abs(v - (newCentroid[a] ?? 0)) > 1e-9)) reseatHardware(node);
     node.csgCollision = node.csgCollision ?? 'auto';
     if (result.warning) node.csgWarning = result.warning; else delete node.csgWarning;
     delete node.csgError;
@@ -5477,6 +5484,8 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     if (doomed.size === 0) return;
     get().prepareForDiscreteChange();
     const newScene = cloneSceneGraph(get().sceneGraph);
+    // A screw taken out lets go of what it held.
+    releaseFastenings(newScene, doomed);
     let removed = false;
     const traverseAndRemove = (nodes: SceneNode[]) => {
       if (!nodes) return;

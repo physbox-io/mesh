@@ -1,15 +1,16 @@
 import React from 'react';
 import type { SceneNode } from '../../types/scene';
 import type { PhysicsState } from '../../store/useStore';
-import type { HardwareCutKind } from '../../types/scene';
+import type { HardwareCutKind, HardwarePartKind } from '../../types/scene';
 import { createDShaftHubNode } from '../../utils/hardwareComponents';
 import { HARDWARE_KINDS } from '../../utils/hardwareCuts';
+import { HARDWARE_PARTS } from '../../utils/hardwareParts';
 import { PaletteTile, type TileColor, type TileSpin } from './PaletteTile';
 import {
   CubeIcon, SphereIcon, CylinderIcon, PoleIcon, GearIcon, WedgeIcon, PyramidIcon, ConeIcon, TorusIcon,
   TubeIcon, EllipsoidIcon, RingIcon, SculptIcon, LatticeIcon, CurveIcon, PulleyIcon, RopeIcon, MeshIcon, ScadIcon,
 } from './shapeIcons';
-import { InsertBossIcon, NutTrapIcon, CounterboreIcon, BearingPocketIcon, DShaftHubIcon } from './hardwareIcons';
+import { InsertBossIcon, NutTrapIcon, CounterboreIcon, BearingPocketIcon, DShaftHubIcon, BearingIcon, CapScrewIcon, HexNutIcon, ShaftIcon } from './hardwareIcons';
 import { Frame } from 'lucide-react';
 import { addReferencePicture } from '../../utils/addReferencePicture';
 import { useDialogs } from '../../store/dialogStore';
@@ -31,6 +32,8 @@ export interface ComponentPaletteProps {
    */
   hardwareTarget: string | null;
   onAddHardwareCut: (kind: HardwareCutKind) => void;
+  /** Adds a bought part: into the selected body's cut for it when there is one. */
+  onAddHardwarePart: (kind: HardwarePartKind) => void;
   onAddNoteCard: () => void;
 }
 
@@ -79,6 +82,14 @@ const CUT_TILES: { kind: HardwareCutKind; label: string; color: TileColor; spin:
   { kind: 'bearing', label: 'Bearing Pocket', color: 'amber', spin: 'group-hover:rotate-45', slow: true, Icon: BearingPocketIcon },
 ];
 
+/** Bought parts, which go into those cuts or stand on their own. */
+const BOUGHT_TILES: { kind: HardwarePartKind; spin: TileSpin; Icon: () => React.JSX.Element }[] = [
+  { kind: 'bearing', spin: 'group-hover:rotate-45', Icon: BearingIcon },
+  { kind: 'screw', spin: 'group-hover:rotate-6', Icon: CapScrewIcon },
+  { kind: 'nut', spin: 'group-hover:-rotate-6', Icon: HexNutIcon },
+  { kind: 'shaft', spin: 'group-hover:rotate-3', Icon: ShaftIcon },
+];
+
 export const ComponentPalette: React.FC<ComponentPaletteProps> = ({
   coarsePointer,
   selectedNodeName,
@@ -89,6 +100,7 @@ export const ComponentPalette: React.FC<ComponentPaletteProps> = ({
   onAddHardwareNode,
   hardwareTarget,
   onAddHardwareCut,
+  onAddHardwarePart,
   onAddNoteCard,
 }) => {
   const cutTile = (kind: HardwareCutKind) => ({
@@ -175,6 +187,23 @@ export const ComponentPalette: React.FC<ComponentPaletteProps> = ({
             icon={<DShaftHubIcon />}
             onClick={() => onAddHardwareNode(createDShaftHubNode(5.0))}
           />
+        </div>
+        <p className="text-[10px] leading-snug text-slate-400 dark:text-slate-500 mt-3 mb-2">
+          Bought parts. With a part selected, one goes into its cut for it; a shaft goes through a selected bearing.
+        </p>
+        <div className="grid grid-cols-2 gap-2">
+          {BOUGHT_TILES.map((t) => (
+            <PaletteTile
+              key={t.kind}
+              button
+              label={HARDWARE_PARTS[t.kind].label}
+              title={HARDWARE_PARTS[t.kind].hint}
+              color="slate"
+              spin={t.spin}
+              icon={<t.Icon />}
+              onClick={() => onAddHardwarePart(t.kind)}
+            />
+          ))}
         </div>
       </div>
 

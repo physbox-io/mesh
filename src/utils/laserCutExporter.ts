@@ -8,6 +8,7 @@ import * as THREE from 'three';
 import { splitPanelsToFit } from './panelSplitter';
 import { texturedSurfaceOf } from './geomSurface';
 import { reliefContours } from './patternEngrave';
+import { isBoughtIn } from './boughtIn';
 
 export interface LaserCutOptions {
   jointMode: 'finger' | 'slot' | 'glue';
@@ -738,6 +739,10 @@ export function extractPanelsFromScene(
 
   function traverseNode(node: SceneNode, parentMatrix?: THREE.Matrix4) {
     const bodyMatrix = getNodeWorldTransform(node, parentMatrix);
+    if (isBoughtIn(node)) {
+      for (const child of node.children || []) traverseNode(child, bodyMatrix);
+      return;
+    }
 
     const rawGeoms = node.geoms || [];
     const diffGeoms = rawGeoms.filter(g => g.csg === 'difference');

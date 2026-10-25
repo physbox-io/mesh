@@ -1,6 +1,7 @@
 import { useCallback, type RefObject } from 'react';
 import * as THREE from 'three';
 import { STLExporter } from 'three/examples/jsm/exporters/STLExporter.js';
+import { isBoughtIn } from '../utils/boughtIn';
 import { useStore } from '../store/useStore';
 import { useDialogs } from '../store/dialogStore';
 import type { SceneNode } from '../types/scene';
@@ -178,9 +179,20 @@ function useExportGroup(threeSceneRef: RefObject<THREE.Scene | null>) {
       }
       return false;
     };
+    // Bought, not made: a bearing or a screw in the part is drawn, but not printed.
+    const bought = new Set<string>();
+    const collectBought = (nodes: SceneNode[]) => {
+      for (const n of nodes) {
+        if (isBoughtIn(n)) bought.add(n.id);
+        collectBought(n.children || []);
+      }
+    };
+    collectBought(useStore.getState().sceneGraph.nodes);
     scene.traverse((obj) => {
       if (!(obj as THREE.Mesh).isMesh) return;
       if (only && !ownedByOnly(obj)) return;
+      const owner = findNodeId(obj);
+      if (owner && bought.has(owner)) return;
       const mesh = obj as THREE.Mesh;
       const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
       const standard = mats.find(m => (m as THREE.MeshStandardMaterial).isMeshStandardMaterial) as THREE.MeshStandardMaterial | undefined;

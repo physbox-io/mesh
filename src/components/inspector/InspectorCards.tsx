@@ -15,6 +15,7 @@ import { CsgCard } from './CsgCard';
 import { DeformationCard } from './DeformationCard';
 import { ExportStlCard } from './ExportStlCard';
 import { GearCard } from './GearCard';
+import { HardwarePartCard } from './HardwarePartCard';
 import { GeomPropertiesCard, SubGeomSelector } from './GeomPropertiesCard';
 import { JointSettingsCard } from './JointSettingsCard';
 import { JointTypeCard } from './JointTypeCard';
@@ -79,6 +80,7 @@ export function InspectorCards({ node, threeSceneRef }: { node: SceneNode; three
       {tab === 'main' && (
         <>
           <BodyBasicsCard node={node} />
+          <HardwarePartCard node={node} />
           <PositionCard node={node} />
           <SubGeomSelector node={node} />
           <ResizeCard node={node} />

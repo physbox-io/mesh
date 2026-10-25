@@ -38,6 +38,7 @@ import { Circle, Square, Donut, Trash2, Move } from 'lucide-react';
 import { SettledNumberField } from './SettledInputs';
 import { ThreadField } from './ThreadField';
 import { BORE_LABELS, HARDWARE_KINDS } from '../utils/hardwareCuts';
+import { HARDWARE_PARTS, PARTS_FOR_CUT, seatedIn } from '../utils/hardwareParts';
 import { useStore } from '../store/useStore';
 import { cutDepthOf, sourcePositiveBounds } from '../utils/csg';
 import type { HardwareCutKind, SceneGeom, SceneNode } from '../types/scene';
@@ -343,7 +344,42 @@ function HardwareRow({ node, geom, index }: {
           onChange={(v) => setHardwareCut(node.id, hw.group, { fitMm: v })}
         />
       </div>
+      <SeatedPart node={node} group={hw.group} kind={hw.kind} />
     </div>
+  );
+}
+
+/**
+ * The bought part in a hardware feature, or the button that puts one there:
+ * a bearing in a bearing pocket, a screw in a counterbore, a nut in a trap.
+ */
+function SeatedPart({ node, group, kind }: { node: SceneNode; group: string; kind: HardwareCutKind }) {
+  const seatHardwarePart = useStore((s) => s.seatHardwarePart);
+  const setSelectedNodeId = useStore((s) => s.setSelectedNodeId);
+  const seated = seatedIn(node, group);
+  if (seated) {
+    const fastened = seated.hardwarePart?.fastens;
+    return (
+      <button
+        type="button"
+        onClick={() => setSelectedNodeId(seated.id)}
+        title={fastened ? 'Select it. It holds this part to the one it screws into.' : 'Select it, to change its length or take it out.'}
+        className="w-full text-left px-1.5 py-0.5 rounded text-[10px] cursor-pointer bg-white dark:bg-slate-800 text-slate-500 dark:text-slate-400 hover:text-rose-600 transition-colors"
+      >
+        In it: <span className="font-semibold">{seated.name}</span>{fastened ? ', fastened' : ''}
+      </button>
+    );
+  }
+  const part = PARTS_FOR_CUT[kind][0];
+  return (
+    <button
+      type="button"
+      onClick={() => seatHardwarePart(node.id, group, part)}
+      title={HARDWARE_PARTS[part].hint}
+      className="w-full px-1.5 py-0.5 rounded text-[9px] font-bold uppercase cursor-pointer bg-white dark:bg-slate-800 text-slate-400 hover:text-rose-600 transition-colors"
+    >
+      Add {HARDWARE_PARTS[part].label.toLowerCase()}
+    </button>
   );
 }
 

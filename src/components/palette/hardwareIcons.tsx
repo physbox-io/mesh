@@ -223,3 +223,65 @@ export const DShaftHubIcon = () => (
     />
   </svg>
 );
+
+// The bought parts that go in those cuts: steel, where the cuts are colour.
+
+export const BearingIcon = () => (
+  <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none">
+    <defs>
+      <linearGradient id="tile-part-bearing-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+        <stop offset="0%" stopColor="#f1f5f9" />
+        <stop offset="55%" stopColor="#94a3b8" />
+        <stop offset="100%" stopColor="#475569" />
+      </linearGradient>
+    </defs>
+    <circle cx="12" cy="12" r="9" fill="url(#tile-part-bearing-grad)" className="stroke-slate-500 dark:stroke-slate-300" strokeWidth="1.3" />
+    {/* The shield, between the races */}
+    <circle cx="12" cy="12" r="6.4" className="fill-slate-600 dark:fill-slate-700 stroke-slate-500" strokeWidth="0.8" />
+    {/* The inner race, which turns */}
+    <circle cx="12" cy="12" r="4" fill="url(#tile-part-bearing-grad)" className="stroke-slate-500 dark:stroke-slate-300" strokeWidth="1" />
+    <circle cx="12" cy="12" r="2.1" className="fill-white dark:fill-slate-900 stroke-slate-500" strokeWidth="0.8" />
+  </svg>
+);
+
+export const CapScrewIcon = () => (
+  <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none">
+    {/* Head, with its hex socket */}
+    <rect x="6.5" y="2.5" width="11" height="6.5" rx="1.2" className="fill-slate-700 dark:fill-slate-500 stroke-slate-800 dark:stroke-slate-300" strokeWidth="1.1" />
+    <path d="M10.2 4.4 H13.8 L14.8 5.75 L13.8 7.1 H10.2 L9.2 5.75 Z" className="fill-slate-900 dark:fill-slate-800" />
+    {/* Threaded shank */}
+    <rect x="9.5" y="9" width="5" height="12.5" className="fill-slate-600 dark:fill-slate-500 stroke-slate-800 dark:stroke-slate-300" strokeWidth="1.1" />
+    {[11, 13.2, 15.4, 17.6, 19.8].map((y) => (
+      <path key={y} d={`M9.5 ${y} L14.5 ${y - 1.2}`} className="stroke-slate-300 dark:stroke-slate-800" strokeWidth="0.8" />
+    ))}
+  </svg>
+);
+
+export const HexNutIcon = () => (
+  <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none">
+    <defs>
+      <linearGradient id="tile-part-nut-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+        <stop offset="0%" stopColor="#f8fafc" />
+        <stop offset="60%" stopColor="#94a3b8" />
+        <stop offset="100%" stopColor="#64748b" />
+      </linearGradient>
+    </defs>
+    <path d="M12 2.5 L20.2 7.25 V16.75 L12 21.5 L3.8 16.75 V7.25 Z" fill="url(#tile-part-nut-grad)" className="stroke-slate-500 dark:stroke-slate-300" strokeWidth="1.3" strokeLinejoin="round" />
+    <circle cx="12" cy="12" r="4.2" className="fill-white dark:fill-slate-900 stroke-slate-500" strokeWidth="1.1" />
+  </svg>
+);
+
+export const ShaftIcon = () => (
+  <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none">
+    <defs>
+      <linearGradient id="tile-part-shaft-grad" x1="0%" y1="0%" x2="0%" y2="100%">
+        <stop offset="0%" stopColor="#f8fafc" />
+        <stop offset="45%" stopColor="#cbd5e1" />
+        <stop offset="100%" stopColor="#64748b" />
+      </linearGradient>
+    </defs>
+    <g transform="rotate(-35 12 12)">
+      <rect x="2.5" y="9.6" width="19" height="4.8" rx="2.4" fill="url(#tile-part-shaft-grad)" className="stroke-slate-500 dark:stroke-slate-300" strokeWidth="1.1" />
+    </g>
+  </svg>
+);

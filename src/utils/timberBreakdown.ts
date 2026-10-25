@@ -26,6 +26,7 @@ import { appendSolidTriangles } from './contourSliceExporter';
 import { getNodeWorldTransform } from './laserCutExporter';
 import { resolveCsgGeoms } from './csg';
 import type { Vec3 } from './printPlate';
+import { isBoughtIn } from './boughtIn';
 
 const MM = 1000;
 
@@ -178,7 +179,7 @@ export function collectIndividualPartSoups(
   const seen = new Set<string>([first.node.id]);
 
   const collectFromNode = (n: SceneNode, frame: THREE.Matrix4) => {
-    const geoms = resolveCsgGeoms(n, 'render').filter((g: SceneGeom) => g.role !== 'collision');
+    const geoms = isBoughtIn(n) ? [] : resolveCsgGeoms(n, 'render').filter((g: SceneGeom) => g.role !== 'collision');
     for (const geom of geoms) {
       const out: number[] = [];
       if (appendSolidTriangles(geom, frame, out) && out.length >= 36) {
@@ -189,7 +190,7 @@ export function collectIndividualPartSoups(
       }
     }
     for (const child of n.children || []) {
-      if (child.joints?.length) continue;
+      if (child.joints?.length || isBoughtIn(child)) continue;
       if (!seen.has(child.id)) {
         seen.add(child.id);
         absorbed.push(child.id);

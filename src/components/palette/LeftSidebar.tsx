@@ -116,6 +116,13 @@ export function LeftSidebar({ onAddNoteCard }: { onAddNoteCard: () => void }) {
             useStore.getState().addHardwareCut(selectedNode.id, kind);
             close();
           }}
+          onAddHardwarePart={(kind) => {
+            const { selectedNodeId, sceneGraph } = useStore.getState();
+            const at = selectedNodeId ? getNodeWorldPos(sceneGraph.nodes, selectedNodeId) : null;
+            // Beside what is selected when it does not go into it, else just above the floor.
+            useStore.getState().addHardwarePart(kind, at ? [at[0] + 0.05, at[1], at[2]] : [0, 0, 0.03], selectedNodeId);
+            close();
+          }}
           onAddNoteCard={() => {
             onAddNoteCard();
             close();

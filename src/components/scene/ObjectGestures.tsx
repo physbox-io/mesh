@@ -39,6 +39,7 @@ import {
 } from '../../utils/csg';
 import { analyzeMesh } from '../../utils/meshIntegrity';
 import { HARDWARE_KINDS } from '../../utils/hardwareCuts';
+import { HARDWARE_PARTS } from '../../utils/hardwareParts';
 import { bodyPoseOf, toParentFrame } from './bodyPose';
 import { bodyParent, bodyToParent, rayInBody } from './bodyRay';
 import { FaceKnife } from './FaceKnife';
@@ -123,7 +124,8 @@ interface Gesture {
    * through the sizes its table has rather than scaling — an M3.7 nut trap
    * holds no nut. The feature is rebuilt live as the pointer crosses a step.
    */
-  hardware?: { group: string; label: string; sizes: readonly string[]; start: number; shown: number; startX: number };
+  /** Hardware-size only: a cut's sizes or a bought part's, and how to put one on. */
+  hardware?: { label: string; sizes: readonly string[]; start: number; shown: number; startX: number; apply: (size: string) => void };
   /** Move-cut only: which of the body's geoms is the cut, and where it is going. */
   geomIndex?: number;
   spot?: CutSpot | null;
@@ -533,7 +535,7 @@ export const ObjectGestureController = () => {
       const index = Math.max(0, Math.min(hw.sizes.length - 1, hw.start + step));
       if (index !== hw.shown) {
         hw.shown = index;
-        useStore.getState().setHardwareCut(state.nodeId, hw.group, { size: hw.sizes[index] });
+        hw.apply(hw.sizes[index]);
       }
       setGestureStatus(`${hw.label} ${hw.sizes[index]} · drag left or right · click to keep, Esc to cancel`);
       return;
@@ -860,7 +862,7 @@ export const ObjectGestureController = () => {
       const hw = state.hardware;
       clear();
       // Previewed by rebuilding as it went, so a cancel has to rebuild back.
-      if (!keep && hw.shown !== hw.start) useStore.getState().setHardwareCut(nodeId, hw.group, { size: hw.sizes[hw.start] });
+      if (!keep && hw.shown !== hw.start) hw.apply(hw.sizes[hw.start]);
       return;
     }
     if (kind === 'face' && state.face) {
@@ -1036,15 +1038,28 @@ export const ObjectGestureController = () => {
     const groups = groupsFor(nodeId);
     if (groups.length === 0) return;
 
-    // S on a hardware feature picked in the hierarchy: its size, not the body's.
-    const picked = kind === 'scale' ? findNode(store.sceneGraph.nodes, nodeId)?.geoms?.[store.activeGeomIndex] : undefined;
-    if (picked?.hardware && !picked.csgDerived) {
-      const info = HARDWARE_KINDS[picked.hardware.kind];
-      const start = Math.max(0, info.sizes.indexOf(picked.hardware.size));
+    // S on a hardware feature picked in the hierarchy, or on a bought part:
+    // its size, not the body's.
+    const selected = kind === 'scale' ? findNode(store.sceneGraph.nodes, nodeId) : null;
+    const picked = selected?.geoms?.[store.activeGeomIndex];
+    const part = selected?.hardwarePart && !selected.hardwarePart.piece ? selected.hardwarePart : null;
+    const sizing = picked?.hardware && !picked.csgDerived
+      ? (() => {
+          const group = picked.hardware.group;
+          return {
+            info: HARDWARE_KINDS[picked.hardware.kind], size: picked.hardware.size,
+            apply: (size: string) => useStore.getState().setHardwareCut(nodeId, group, { size }),
+          };
+        })()
+      : part
+        ? { info: HARDWARE_PARTS[part.kind], size: part.size, apply: (size: string) => useStore.getState().setHardwarePart(nodeId, { size }) }
+        : null;
+    if (sizing) {
+      const start = Math.max(0, sizing.info.sizes.indexOf(sizing.size));
       gesture.current = {
         kind: 'hardwareSize', nodeId, centre: { x: 0, y: 0 }, pivot: new THREE.Vector3(), held: [], ghosts: [],
         axis: null, factor: 1, radius: 0,
-        hardware: { group: picked.hardware.group, label: info.label, sizes: info.sizes, start, shown: start, startX: pointer.current.x },
+        hardware: { label: sizing.info.label, sizes: sizing.info.sizes, start, shown: start, startX: pointer.current.x, apply: sizing.apply },
       };
       setOrbitEnabled(false);
       draw();

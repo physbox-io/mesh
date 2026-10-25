@@ -16,6 +16,7 @@ import type { PlaneCutResult, SplitChecks, SplitOptions, SplitResult } from './p
 import { buildAssemblyPlan, type AssemblyPlan, type MujocoLike, type StageResult } from './printAssembly';
 import type { PrintSplitRequest, PrintSplitResponse } from '../workers/printSplitProtocol';
 import { noteWorkerStopped } from './staleBuild';
+import { isBoughtIn } from './boughtIn';
 
 export type SplitOk = Extract<SplitResult, { ok: true }>;
 export interface SplitOutcome { result: SplitResult; checks: SplitChecks | null }
@@ -44,13 +45,14 @@ export function partSoups(node: SceneNode, frame = new THREE.Matrix4()): { soups
   const soups: Float64Array[] = [];
   const absorbed: string[] = [];
   const add = (n: SceneNode, frame: THREE.Matrix4) => {
-    for (const geom of resolveCsgGeoms(n, 'render')) {
+    for (const geom of isBoughtIn(n) ? [] : resolveCsgGeoms(n, 'render')) {
       if (geom.role === 'collision') continue;
       const out: number[] = [];
       if (appendSolidTriangles(geom, frame, out) && out.length >= 36) soups.push(Float64Array.from(out));
     }
     for (const child of n.children || []) {
-      if (child.joints?.length) continue;
+      // A seated screw has no joint either, but it is bought, not printed.
+      if (child.joints?.length || isBoughtIn(child)) continue;
       absorbed.push(child.id);
       add(child, getNodeWorldTransform(child, frame));
     }
