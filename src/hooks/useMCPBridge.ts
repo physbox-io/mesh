@@ -56,8 +56,7 @@ import { generateCastPattern, DEFAULT_CAST_OPTIONS, type CastMethod } from '../u
 import { runCastPrep } from '../utils/castPrepRunner';
 import { planPourBox } from '../utils/pourBoxScene';
 import { addPourBoxToScene, pourBoxStl } from '../utils/pourBoxActions';
-import type { PourBoxOptions } from '../utils/siliconeMold';
-import { CAST_METALS, SILICONES, isSiliconeId, resolveCastMaterial } from '../utils/castMaterials';
+import { SILICONES, type PourBoxOptions, type SiliconeId } from '../utils/siliconeMold';
 import { cutAlongPlaneOffThread, selectionSoups, splitOffThread, testAssemblyOffThread } from '../utils/printSplitClient';
 import { loadManifold } from '../utils/sculptCut';
 import {
@@ -3883,9 +3882,8 @@ export function useMCPBridge() {
           if (msg.shape === 'fit' || msg.shape === 'round' || msg.shape === 'box') options.shape = msg.shape;
           if (typeof msg.pin === 'boolean') options.pin = msg.pin;
           if (typeof msg.silicone === 'string') {
-            const silicone = resolveCastMaterial(msg.silicone);
-            if (!isSiliconeId(silicone)) return { ok: false, error: `silicone is one of ${SILICONES.map((m) => m.id).join(', ')}.` };
-            options.silicone = silicone;
+            if (!(msg.silicone in SILICONES)) return { ok: false, error: `silicone is one of ${Object.keys(SILICONES).join(', ')}.` };
+            options.silicone = msg.silicone as SiliconeId;
           }
           let box;
           try {
@@ -3929,10 +3927,6 @@ export function useMCPBridge() {
         case 'EXPORT_CAST': {
           const scene = store.sceneGraph;
           if (!scene.nodes?.length) return { ok: false, error: 'The scene is empty — there is nothing to cast.' };
-          const metal = msg.metalId ?? msg.metal;
-          if (metal !== undefined && !CAST_METALS.some((m) => m.id === metal)) {
-            return { ok: false, error: `metal is one of ${CAST_METALS.map((m) => m.id).join(', ')}.` };
-          }
           const options = {
             ...DEFAULT_CAST_OPTIONS,
             // `metal` is what the MCP tool calls it; `metalId` is what the
