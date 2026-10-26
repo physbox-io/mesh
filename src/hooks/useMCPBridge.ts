@@ -3927,6 +3927,10 @@ export function useMCPBridge() {
         case 'EXPORT_CAST': {
           const scene = store.sceneGraph;
           if (!scene.nodes?.length) return { ok: false, error: 'The scene is empty — there is nothing to cast.' };
+          const metal = msg.metalId ?? msg.metal;
+          if (metal !== undefined && !CAST_METALS.some((m) => m.id === metal)) {
+            return { ok: false, error: `metal is one of ${CAST_METALS.map((m) => m.id).join(', ')}.` };
+          }
           const options = {
             ...DEFAULT_CAST_OPTIONS,
             // `metal` is what the MCP tool calls it; `metalId` is what the
@@ -4354,7 +4358,7 @@ export function useMCPBridge() {
         case 'SYNC_PCB_ENCLOSURE':
         case 'PHYSICS_SYNC_PCB_ENCLOSURE': {
           const presetKey = typeof msg.preset === 'string' ? msg.preset : undefined;
-          let spec: PcbMechanicalSpec | null = null;
+          let spec: PcbMechanicalSpec | null;
           if (presetKey && presetKey in PCB_PRESETS) {
             spec = PCB_PRESETS[presetKey];
           } else if (typeof msg.handoff === 'string') {

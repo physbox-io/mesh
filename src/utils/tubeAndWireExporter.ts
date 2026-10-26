@@ -561,7 +561,6 @@ function extractRawStrutsFromScene(scene: SceneGraph): RawStrutSegment[] {
         // Check if elongated strut-like box or full volumetric box
         const dims = [hx * scale[0], hy * scale[1], hz * scale[2]];
         const maxD = Math.max(...dims);
-        const minD = Math.min(...dims);
         const midD = dims.slice().sort((a, b) => a - b)[1];
         if (maxD > midD * 3 && midD < 0.08) {
           // Slender bar box -> treat as single strut along longest axis

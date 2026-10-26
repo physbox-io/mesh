@@ -19,7 +19,6 @@ import {
   buildRackAndPinionPair,
   fourBarMetrics,
   involuteGearMetrics,
-  involuteRackMetrics,
   gt2PulleyMetrics,
   rotateLoop2D,
   type CamProfileKind,
@@ -469,7 +468,7 @@ export const MechanismBuilderModal: React.FC<{ isOpen?: boolean; onClose: () => 
 
   const handleInsert = () => {
     const newScene = cloneSceneGraph(sceneGraph);
-    let addedNodes = [];
+    let addedNodes;
 
     if (family === 'gear_pair') {
       const dSpec = {
