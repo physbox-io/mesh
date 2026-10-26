@@ -7,6 +7,16 @@ import { PairMemo } from './arrayMemo';
 import { isNodeRotationBaked, nodeLocalQuat, quatMultiply, quatRotateVec, quatRotateVecInv, type QuatWXYZ } from './sceneTree';
 import { uniquifyNamesInPlace } from './uniqueNames';
 
+/**
+ * A name as an attribute value. Names are whatever someone typed, and a body
+ * called `Lid & base` or `6" pipe` made the XML unreadable and the build fail.
+ * MuJoCo's parser decodes the entities again, so the model holds the name as
+ * typed and the viewport's lookups by name still find it.
+ */
+function xmlAttr(name: string): string {
+  return String(name).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
 /*
  * Per-mesh work kept across rebuilds. Every build used to re-encode every mesh
  * to .msh bytes and hash them — only to arrive at a file name the worker
@@ -149,7 +159,7 @@ const buildGeom = (geom: SceneGeom, massless = false) => {
   if (flat && flat !== 'speck' && !rotated) {
     // Placed in the body's frame: the box's own centre, plus wherever the geom sits.
     const at = flat.pos.map((c, k) => c + (geom.pos?.[k] ?? 0));
-    let slab = `name="${geom.name}" type="box" size="${flat.size.join(' ')}" pos="${at.join(' ')}" quat="${flat.quat.join(' ')}"`;
+    let slab = `name="${xmlAttr(geom.name)}" type="box" size="${flat.size.join(' ')}" pos="${at.join(' ')}" quat="${flat.quat.join(' ')}"`;
     if (geom.rgba) slab += ` rgba="${geom.rgba.join(' ')}"`;
     if (geom.mass !== undefined) slab += ` mass="${geom.mass}"`;
     else if (massless) slab += ` mass="0"`;
@@ -165,7 +175,7 @@ const buildGeom = (geom: SceneGeom, massless = false) => {
   }
   const emptyMesh = geom.type === 'mesh' && (flat === 'speck' || (flat !== null && rotated) || (!hasMeshData && Array.isArray(geom.vertices) && geom.vertices.length === 0));
   if (emptyMesh) {
-    let speck = `name="${geom.name}" type="sphere" size="0.001" rgba="0 0 0 0" contype="0" conaffinity="0"`;
+    let speck = `name="${xmlAttr(geom.name)}" type="sphere" size="0.001" rgba="0 0 0 0" contype="0" conaffinity="0"`;
     if (geom.pos) speck += ` pos="${geom.pos.join(' ')}"`;
     if (geom.mass !== undefined) speck += ` mass="${geom.mass}"`;
     else if (massless) speck += ` mass="0"`;
@@ -173,11 +183,11 @@ const buildGeom = (geom: SceneGeom, massless = false) => {
   }
   const geomType = isMesh ? 'mesh' : (geom.type === 'mesh' ? 'box' : (geom.type || 'box'));
 
-  let attrs = `name="${geom.name}" type="${geomType}"`;
+  let attrs = `name="${xmlAttr(geom.name)}" type="${geomType}"`;
   if (!isMesh) {
     attrs += ` size="${formatGeomSize(geomType, geom.size)}"`;
   } else {
-    attrs += ` mesh="${geom.name}"`;
+    attrs += ` mesh="${xmlAttr(geom.name)}"`;
   }
   if (geom.rgba) attrs += ` rgba="${geom.rgba.join(' ')}"`;
   if (!isMesh && geom.fromto) attrs += ` fromto="${geom.fromto.join(' ')}"`;
@@ -210,9 +220,9 @@ const buildGeom = (geom: SceneGeom, massless = false) => {
 
 const buildJoint = (joint: SceneJoint) => {
   if (joint.type === 'free') {
-    return `<freejoint name="${joint.name}" />`;
+    return `<freejoint name="${xmlAttr(joint.name)}" />`;
   }
-  let attrs = `name="${joint.name}" type="${joint.type}"`;
+  let attrs = `name="${xmlAttr(joint.name)}" type="${joint.type}"`;
   if (joint.pos) attrs += ` pos="${joint.pos.join(' ')}"`;
   if (joint.axis) attrs += ` axis="${joint.axis.join(' ')}"`;
   if (joint.damping !== undefined) attrs += ` damping="${joint.damping}"`;
@@ -262,9 +272,9 @@ const buildNode = (node: SceneNode): string => {
     const geomSize = geom?.size ? geom.size.join(' ') : '0.02';
     const geomRgba = geom?.rgba ? geom.rgba.join(' ') : '0.8 0.4 0.2 1';
 
-    const compositeXml = `<composite type="${type}" count="${count}" size="${size}" curve="${curve}" prefix="${prefix}"><joint kind="main" damping="${damping}" stiffness="${stiffness}" /><geom type="${geomType}" size="${geomSize}" rgba="${geomRgba}" /></composite>`;
+    const compositeXml = `<composite type="${type}" count="${count}" size="${size}" curve="${curve}" prefix="${xmlAttr(prefix)}"><joint kind="main" damping="${damping}" stiffness="${stiffness}" /><geom type="${geomType}" size="${geomSize}" rgba="${geomRgba}" /></composite>`;
 
-    let attrs = `name="${nameStr}" pos="${posStr}"`;
+    let attrs = `name="${xmlAttr(nameStr)}" pos="${posStr}"`;
     if (node.quat) {
       attrs += ` quat="${node.quat.join(' ')}"`;
     } else if (node.euler) {
@@ -288,7 +298,7 @@ const buildNode = (node: SceneNode): string => {
   (node.geoms || []).forEach(g => innerXml += buildGeom(g, hasSolid && g.role === 'visual'));
   (node.children || []).forEach(c => innerXml += buildNode(c));
   
-  let attrs = `name="${nameStr}" pos="${posStr}"`;
+  let attrs = `name="${xmlAttr(nameStr)}" pos="${posStr}"`;
   if (rotationIsBaked(node)) {
     // Nothing: the vertices already carry it. See `rotationIsBaked`.
   } else if (node.quat) {
@@ -576,11 +586,11 @@ export const compileToMJCF = (
       if (sink.useFile(file, !!g.stableMesh)) {
         // Encoded only if the worker does not have it already.
         if (!sink.holds?.(file)) sink.files.set(file, encoded.bytes ?? encodeMsh(toMjcfVerts(g.vertices!), g.faces!));
-        return `    <mesh name="${g.name}"${meshInertia(g)}${hull} file="${file}" />`;
+        return `    <mesh name="${xmlAttr(g.name)}"${meshInertia(g)}${hull} file="${file}" />`;
       }
     }
     const verts = toMjcfVerts(g.vertices!);
-    return `    <mesh name="${g.name}"${meshInertia(g)}${hull} vertex="${verts.join(' ')}" face="${g.faces!.join(' ')}" />`;
+    return `    <mesh name="${xmlAttr(g.name)}"${meshInertia(g)}${hull} vertex="${verts.join(' ')}" face="${g.faces!.join(' ')}" />`;
   };
 
   const assetXml = meshAssets.length > 0
@@ -699,7 +709,7 @@ export const compileToMJCF = (
 
   const actuatorsXml = actuators.map((j) => {
     const act = j.actuator!;
-    let attrs = `name="${j.name}_actuator" joint="${j.name}"`;
+    let attrs = `name="${xmlAttr(j.name)}_actuator" joint="${xmlAttr(j.name)}"`;
     if (act.kv !== undefined && act.type === 'velocity') attrs += ` kv="${act.kv}"`;
     if (act.gear !== undefined) attrs += ` gear="${act.gear}"`;
     // A motor's ctrl is its torque. Unlimited, so a linked Volt's stall
@@ -725,7 +735,7 @@ export const compileToMJCF = (
       const ratio = node.coupleRatio !== undefined ? node.coupleRatio : -1.0;
       const pairKey = [joint1, joint2].sort().join('::');
       explicitlyCoupledJointPairs.add(pairKey);
-      equalityConstraints += `\n    <joint name="explicit_coupling_${couplingIndex++}" joint1="${joint1}" joint2="${joint2}" polycoef="0 ${ratio} 0 0 0" />`;
+      equalityConstraints += `\n    <joint name="explicit_coupling_${couplingIndex++}" joint1="${xmlAttr(joint1)}" joint2="${xmlAttr(joint2)}" polycoef="0 ${ratio} 0 0 0" />`;
     }
   }
 
@@ -746,7 +756,7 @@ export const compileToMJCF = (
         if (!coupledPairs.has(pairKey) && !explicitlyCoupledJointPairs.has(pairKey)) {
           coupledPairs.add(pairKey);
           const ratio = -(g1.radius / (g2.radius || 0.1));
-          equalityConstraints += `\n    <joint name="gear_coupling_${coupledPairs.size}" joint1="${g1.jointName}" joint2="${g2.jointName}" polycoef="0 ${ratio.toFixed(6)} 0 0 0" />`;
+          equalityConstraints += `\n    <joint name="gear_coupling_${coupledPairs.size}" joint1="${xmlAttr(g1.jointName)}" joint2="${xmlAttr(g2.jointName)}" polycoef="0 ${ratio.toFixed(6)} 0 0 0" />`;
         }
       }
     }
@@ -777,7 +787,7 @@ export const compileToMJCF = (
           const couplingName = pinionRackCouplingCount === 1
             ? 'pinion_rack_coupling'
             : `pinion_rack_coupling_${pinionRackCouplingCount}`;
-          equalityConstraints += `\n    <joint name="${couplingName}" joint1="${p.jointName}" joint2="${r.jointName}" polycoef="0 ${turnsPerMetre} 0 0 0" />`;
+          equalityConstraints += `\n    <joint name="${xmlAttr(couplingName)}" joint1="${xmlAttr(p.jointName)}" joint2="${xmlAttr(r.jointName)}" polycoef="0 ${turnsPerMetre} 0 0 0" />`;
         }
       }
     }
@@ -793,7 +803,7 @@ export const compileToMJCF = (
       
       if (leftJoint && rightJoint) {
         // Linear coupling between weights: ratio is -1.0 (as one goes down, other goes up)
-        equalityConstraints += `\n    <joint name="rope_coupling_linear_${ropeCouplingIndex}" joint1="${leftJoint}" joint2="${rightJoint}" polycoef="0 -1 0 0 0" />`;
+        equalityConstraints += `\n    <joint name="rope_coupling_linear_${ropeCouplingIndex}" joint1="${xmlAttr(leftJoint)}" joint2="${xmlAttr(rightJoint)}" polycoef="0 -1 0 0 0" />`;
         
         // Couple pulley wheel Hinge rotation with the Left weight slide joint
         if (pulleyWheelId) {
@@ -824,7 +834,7 @@ export const compileToMJCF = (
             // mechanism thrashed. (Same mistake as the rack-and-pinion coupling
             // above; both directions of that relationship look plausible in
             // isolation, which is exactly why they need a test asserting x/theta.)
-            equalityConstraints += `\n    <joint name="rope_coupling_angular_${ropeCouplingIndex}" joint1="${leftJoint}" joint2="${wheelJoint}" polycoef="0 ${radius} 0 0 0" />`;
+            equalityConstraints += `\n    <joint name="rope_coupling_angular_${ropeCouplingIndex}" joint1="${xmlAttr(leftJoint)}" joint2="${xmlAttr(wheelJoint)}" polycoef="0 ${radius} 0 0 0" />`;
           }
         }
       }
@@ -835,8 +845,8 @@ export const compileToMJCF = (
   // 3b. Crumple locks. Named after the joint rather than numbered, so the
   //     worker can map a released lock straight back to the joint it froze.
   for (const lock of crumpleLocks) {
-    const target = lock.parentName ? ` body2="${lock.parentName}"` : '';
-    equalityConstraints += `\n    <weld name="crumple_lock_${lock.jointName}" body1="${lock.bodyName}"${target} />`;
+    const target = lock.parentName ? ` body2="${xmlAttr(lock.parentName)}"` : '';
+    equalityConstraints += `\n    <weld name="crumple_lock_${xmlAttr(lock.jointName)}" body1="${xmlAttr(lock.bodyName)}"${target} />`;
   }
 
   // 4. Closed-Loop Weld Constraints
@@ -846,7 +856,7 @@ export const compileToMJCF = (
     // A bolted joint: stiff, where the default weld lets a 3 kg drawer sag
     // millimetres onto what is under it. Only when asked for.
     const stiff = w.rigid ? ' solref="0.004 1" solimp="0.99 0.999 0.0002 0.5 2"' : '';
-    equalityConstraints += `\n    <weld name="weld_constraint_${weldIndex++}" body1="${w.bodyName}" body2="${targetName}"${stiff} />`;
+    equalityConstraints += `\n    <weld name="weld_constraint_${weldIndex++}" body1="${xmlAttr(w.bodyName)}" body2="${xmlAttr(targetName)}"${stiff} />`;
   }
 
   // 5. Closed-Loop Connect Joint Constraints
@@ -865,9 +875,9 @@ export const compileToMJCF = (
       c.anchor[2] - body1Pos[2],
     ]);
     if (hasJoint) {
-      equalityConstraints += `\n    <connect name="connect_constraint_${connectIndex++}" body1="${c.bodyName}" body2="${targetName}" anchor="${localAnchor.map(v => v.toFixed(6)).join(' ')}" />`;
+      equalityConstraints += `\n    <connect name="connect_constraint_${connectIndex++}" body1="${xmlAttr(c.bodyName)}" body2="${xmlAttr(targetName)}" anchor="${localAnchor.map(v => v.toFixed(6)).join(' ')}" />`;
     } else {
-      equalityConstraints += `\n    <connect name="connect_constraint_${connectIndex++}" body1="${c.bodyName}" anchor="${localAnchor.map(v => v.toFixed(6)).join(' ')}" />`;
+      equalityConstraints += `\n    <connect name="connect_constraint_${connectIndex++}" body1="${xmlAttr(c.bodyName)}" anchor="${localAnchor.map(v => v.toFixed(6)).join(' ')}" />`;
     }
   }
 

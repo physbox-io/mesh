@@ -14,26 +14,39 @@ import type { SceneGraph, SceneNode } from '../types/scene';
  * body or geom to use a name keeps it, in depth-first order; each later one
  * becomes `name_2`, `name_3` … whichever is free first. A geom with no name
  * at all is given one the same way, starting from `<body>_geom`.
+ *
+ * Joints follow the same rule: MuJoCo refuses a model with two joints of one
+ * name, and two bodies copied from one another each had a "hinge". So do two
+ * names the compiler writes itself: the world body is `world` and the ground
+ * plane is the geom `floor`, so a body or geom of the user's called that is
+ * renamed as though something earlier had it.
  */
 
-type Renames = Map<SceneNode, { name?: string; geoms?: Map<number, string> }>;
+const RESERVED_BODIES = ['world'];
+const RESERVED_GEOMS = ['floor'];
 
-function allNames(nodes: SceneNode[], bodies: Set<string>, geoms: Set<string>) {
+type Rename = { name?: string; geoms?: Map<number, string>; joints?: Map<number, string> };
+type Renames = Map<SceneNode, Rename>;
+
+function allNames(nodes: SceneNode[], bodies: Set<string>, geoms: Set<string>, joints: Set<string>) {
   for (const node of nodes) {
     if (!node.isPulleyRope) {
       bodies.add(node.name || node.id || 'body');
       for (const g of node.geoms || []) if (g.name) geoms.add(g.name);
+      for (const j of node.joints || []) if (j.name) joints.add(j.name);
     }
-    allNames(node.children || [], bodies, geoms);
+    allNames(node.children || [], bodies, geoms, joints);
   }
 }
 
 function planRenames(nodes: SceneNode[]): Renames {
   const bodyNames = new Set<string>();
   const geomNames = new Set<string>();
-  allNames(nodes, bodyNames, geomNames);
-  const seenBodies = new Set<string>();
-  const seenGeoms = new Set<string>();
+  const jointNames = new Set<string>();
+  allNames(nodes, bodyNames, geomNames, jointNames);
+  const seenBodies = new Set<string>(RESERVED_BODIES);
+  const seenGeoms = new Set<string>(RESERVED_GEOMS);
+  const seenJoints = new Set<string>();
   const free = (name: string, taken: Set<string>, seen: Set<string>) => {
     let k = 2;
     while (taken.has(`${name}_${k}`) || seen.has(`${name}_${k}`)) k++;
@@ -45,7 +58,7 @@ function planRenames(nodes: SceneNode[]): Renames {
       // A pulley rope is not a body of its own in the model; mjcf.ts skips it too.
       if (!node.isPulleyRope) {
         let bodyName = node.name || node.id || 'body';
-        const entry: { name?: string; geoms?: Map<number, string> } = {};
+        const entry: Rename = {};
         if (seenBodies.has(bodyName)) {
           bodyName = free(bodyName, bodyNames, seenBodies);
           entry.name = bodyName;
@@ -61,7 +74,15 @@ function planRenames(nodes: SceneNode[]): Renames {
           if (gName !== g.name) (entry.geoms ??= new Map()).set(i, gName);
           seenGeoms.add(gName);
         });
-        if (entry.name || entry.geoms) renames.set(node, entry);
+        // An unnamed joint stays unnamed: MuJoCo takes any number of those.
+        (node.joints || []).forEach((j, i) => {
+          if (!j.name) return;
+          let jName = j.name;
+          if (seenJoints.has(jName)) jName = free(jName, jointNames, seenJoints);
+          if (jName !== j.name) (entry.joints ??= new Map()).set(i, jName);
+          seenJoints.add(jName);
+        });
+        if (entry.name || entry.geoms || entry.joints) renames.set(node, entry);
       }
       walk(node.children || []);
     }
@@ -72,9 +93,10 @@ function planRenames(nodes: SceneNode[]): Renames {
 
 /** Renames clashing bodies and geoms in place. For a copy that is the caller's to change. */
 export function uniquifyNamesInPlace(nodes: SceneNode[]): void {
-  for (const [node, { name, geoms }] of planRenames(nodes)) {
+  for (const [node, { name, geoms, joints }] of planRenames(nodes)) {
     if (name) node.name = name;
     if (geoms) for (const [i, gName] of geoms) node.geoms[i].name = gName;
+    if (joints) node.joints = node.joints!.map((j, i) => (joints.has(i) ? { ...j, name: joints.get(i)! } : j));
   }
 }
 
@@ -97,6 +119,7 @@ export function withUniqueNames(scene: SceneGraph): SceneGraph {
         ...node,
         ...(r?.name ? { name: r.name } : {}),
         ...(r?.geoms ? { geoms: node.geoms.map((g, i) => (r.geoms!.has(i) ? { ...g, name: r.geoms!.get(i)! } : g)) } : {}),
+        ...(r?.joints ? { joints: node.joints!.map((j, i) => (r.joints!.has(i) ? { ...j, name: r.joints!.get(i)! } : j)) } : {}),
         ...(node.children ? { children } : {}),
       };
     });
