@@ -30,7 +30,7 @@ import { appendSolidTriangles, collectSceneTriangles } from './contourSliceExpor
 import { resolveCsgGeoms } from './csg';
 import { getNodeWorldTransform } from './laserCutExporter';
 import { isBoughtIn } from './boughtIn';
-import { hardwareFindings } from './hardwareChecks';
+import { hardwareFindings, type LivePoses } from './hardwareChecks';
 import { DEFAULT_MATERIAL, materialSpec, type MaterialId } from './feedsAndSpeeds';
 import { DEFAULT_FILAMENT, filamentSpec, type FilamentId } from './filaments';
 import { MAX_AVAILABLE_REACH_DIAMETERS, STANDARD_BIT_DIAS } from './reliefCarveExporter';
@@ -202,6 +202,12 @@ export interface DfmFinding {
    * seal that will seal. It costs nothing in the score.
    */
   passed?: true;
+  /**
+   * From the assembly checks (seals, screws, runners), which read where the
+   * parts sit relative to each other, so can be re-run on live poses; see
+   * withLivePoses.
+   */
+  assembly?: true;
 }
 
 export interface DfmReport {
@@ -1231,4 +1237,14 @@ function analyseDfmAsPlaced(
   }
 
   return { process, tris, warnings, ...body };
+}
+
+/**
+ * The report with its assembly findings measured where the bodies are now
+ * rather than where they were drawn. A part's own shape does not change when
+ * the sim moves it, so only the seals, screws and runners are run again.
+ */
+export function withLivePoses(report: DfmReport, scene: SceneGraph, poses: LivePoses): DfmReport {
+  const findings = [...report.findings.filter((f) => !f.assembly), ...hardwareFindings(scene, report.process, scene, poses)];
+  return { ...report, findings, score: scoreOf(findings) };
 }

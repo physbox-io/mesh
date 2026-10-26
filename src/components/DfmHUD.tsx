@@ -1,7 +1,9 @@
-import { useCallback, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronDown, ChevronRight, ChevronUp, Ruler, X } from 'lucide-react';
 import { useStore } from '../store/useStore';
-import { dfmLensFor, type DfmFinding, type DfmProcess, type DfmReport } from '../utils/dfm';
+import { dfmLensFor, withLivePoses, type DfmFinding, type DfmProcess, type DfmReport } from '../utils/dfm';
+import type { SceneNode } from '../types/scene';
+import { livePoses } from './scene/bodyPose';
 import { type WeakSpot } from '../utils/printAnalysis';
 import { analyseDfmShared, structuralWeakSpots } from '../utils/analysisCache';
 import { materialSpec } from '../utils/feedsAndSpeeds';
@@ -57,6 +59,10 @@ function Findings({ entries }: { entries: Entry[] }) {
     </ul>
   );
 }
+
+/** Whether anything in the scene is judged by where it sits against another part. */
+const hasAssembly = (nodes: SceneNode[]): boolean => nodes.some((n) =>
+  !!n.hardwarePart || (n.geoms || []).some((g) => !!g.hardware) || hasAssembly(n.children || []));
 
 const scoreTone = (score: number) => score >= 85 ? 'text-emerald-600 dark:text-emerald-400'
   : score >= 60 ? 'text-amber-600 dark:text-amber-400'
@@ -138,15 +144,46 @@ export function DfmHUD() {
   }, [sceneGraph, bench]);
 
   const open = dfmEnabled && !panel.minimized;
-  const report = useMemo(
+  const designReport = useMemo(
     () => analyse(lens, open),
     [analyse, lens, open],
   );
   // Only paid for while the section is expanded: sampling the scene again on
   // every keystroke for a section nobody opened is not free.
-  const castReport = useMemo(
+  const designCast = useMemo(
     () => analyse('cast', open && castOpen),
     [analyse, open, castOpen],
+  );
+
+  /*
+   * Seals, screws and runners are about where parts sit against each other,
+   * and a lid knocked askew in the sim no longer seals, whatever the drawing
+   * says. When the sim has moved anything, those checks are read against the
+   * poses it left, taken once as the panel opens: Run closes the panel, so
+   * what it shows is never a pose that has since moved on. A part's own shape
+   * is the same wherever it is, so the rest of the report stays as drawn.
+   */
+  const [live, setLive] = useState<ReturnType<typeof livePoses>>(null);
+  const watch = open && !!sceneGraph && hasAssembly(sceneGraph.nodes || []);
+  useEffect(() => {
+    setLive(watch && sceneGraph ? livePoses(sceneGraph.nodes || []) : null);
+  }, [watch, sceneGraph]);
+
+  // Run closes the panel: its findings are for the parts as they stand, and
+  // they are about to move. Opening it again reads them where they stopped.
+  const isPlaying = useStore(state => state.isPlaying);
+  const wasPlaying = useRef(isPlaying);
+  useEffect(() => {
+    if (isPlaying && !wasPlaying.current && useStore.getState().dfmEnabled) setDfmEnabled(false);
+    wasPlaying.current = isPlaying;
+  }, [isPlaying, setDfmEnabled]);
+  const report = useMemo(
+    () => (live && designReport && sceneGraph ? withLivePoses(designReport, sceneGraph, live) : designReport),
+    [live, designReport, sceneGraph],
+  );
+  const castReport = useMemo(
+    () => (live && designCast && sceneGraph ? withLivePoses(designCast, sceneGraph, live) : designCast),
+    [live, designCast, sceneGraph],
   );
 
   /**
@@ -244,6 +281,12 @@ export function DfmHUD() {
               </p>
               <Findings entries={structural.map(fromWeakSpot)} />
             </>
+          )}
+
+          {live && (
+            <p className="mt-2 text-[10px] leading-snug text-slate-400">
+              Seals, screws and runners are judged where the sim has put the parts. Reset to judge them as drawn.
+            </p>
           )}
 
           {report?.warnings.map(w => (

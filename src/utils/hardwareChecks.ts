@@ -46,12 +46,19 @@ const BACK = 0.0005;
 
 interface Body { id: string; tris: Float64Array }
 
-function bodiesOf(scene: SceneGraph): { bodies: Body[]; worlds: Map<string, THREE.Matrix4> } {
+/**
+ * Where bodies are now, world matrices by node id (MuJoCo Z-up, body origin):
+ * a lid knocked askew in the running sim is judged where it sits, not where
+ * it was drawn. A body missing from it is where the scene graph puts it.
+ */
+export type LivePoses = Map<string, THREE.Matrix4>;
+
+function bodiesOf(scene: SceneGraph, poses?: LivePoses): { bodies: Body[]; worlds: Map<string, THREE.Matrix4> } {
   const bodies: Body[] = [];
   const worlds = new Map<string, THREE.Matrix4>();
   const walk = (nodes: SceneNode[], parent?: THREE.Matrix4) => {
     for (const n of nodes) {
-      const world = getNodeWorldTransform(n, parent);
+      const world = poses?.get(n.id) ?? getNodeWorldTransform(n, parent);
       worlds.set(n.id, world);
       if (!isBoughtIn(n) && !n.simulation) {
         const out: number[] = [];
@@ -157,8 +164,9 @@ const mmText = (m: number) => `${(m * 1000).toFixed(2).replace(/\.?0+$/, '')} mm
  * Every hardware finding for the bodies in `scene`, measured against what is
  * around them in `whole` (the full scene, when only one body is analysed).
  */
-export function hardwareFindings(scene: SceneGraph, process: DfmProcess, whole: SceneGraph = scene): DfmFinding[] {
-  return [...sealFindings(scene, process, whole), ...screwFindings(scene, process, whole), ...runnerFindings(scene, process, whole)];
+export function hardwareFindings(scene: SceneGraph, process: DfmProcess, whole: SceneGraph = scene, poses?: LivePoses): DfmFinding[] {
+  return [...sealFindings(scene, process, whole, poses), ...screwFindings(scene, process, whole, poses), ...runnerFindings(scene, process, whole, poses)]
+    .map((f) => ({ ...f, assembly: true as const }));
 }
 
 /** How far side space may be off a runner's 12.7 mm before the drawer binds or falls off it, mm. */
@@ -171,8 +179,8 @@ const SIDE_SPACE_SLACK_MM = 0.5;
  * binds; too much and the runner cannot reach both. The commonest drawer
  * mistake there is, and one a ruler finds only once it is built.
  */
-export function runnerFindings(scene: SceneGraph, process: DfmProcess, whole: SceneGraph = scene): DfmFinding[] {
-  const { bodies, worlds } = bodiesOf(whole);
+export function runnerFindings(scene: SceneGraph, process: DfmProcess, whole: SceneGraph = scene, poses?: LivePoses): DfmFinding[] {
+  const { bodies, worlds } = bodiesOf(whole, poses);
   const everything: SceneNode[] = [];
   const collect = (nodes: SceneNode[]) => { for (const n of nodes) { everything.push(n); collect(n.children || []); } };
   collect(whole.nodes || []);
@@ -224,8 +232,8 @@ export function runnerFindings(scene: SceneGraph, process: DfmProcess, whole: Sc
 const UNDER_HEAD_DIAMETERS = 1.2;
 
 /** One finding per seated cap screw with too little under its head. */
-export function screwFindings(scene: SceneGraph, process: DfmProcess, whole: SceneGraph = scene): DfmFinding[] {
-  const { worlds } = bodiesOf(whole);
+export function screwFindings(scene: SceneGraph, process: DfmProcess, whole: SceneGraph = scene, poses?: LivePoses): DfmFinding[] {
+  const { worlds } = bodiesOf(whole, poses);
   const out: DfmFinding[] = [];
   const walk = (nodes: SceneNode[]) => {
     for (const host of nodes) {
@@ -255,7 +263,7 @@ export function screwFindings(scene: SceneGraph, process: DfmProcess, whole: Sce
 }
 
 /** One finding per O-ring groove in the scene: whether it seals, and if not, what to change. */
-export function sealFindings(scene: SceneGraph, process: DfmProcess, whole: SceneGraph = scene): DfmFinding[] {
+export function sealFindings(scene: SceneGraph, process: DfmProcess, whole: SceneGraph = scene, poses?: LivePoses): DfmFinding[] {
   const grooves: { host: SceneNode; g: SceneGeom }[] = [];
   const walk = (nodes: SceneNode[]) => {
     for (const n of nodes) {
@@ -268,7 +276,7 @@ export function sealFindings(scene: SceneGraph, process: DfmProcess, whole: Scen
   walk(scene.nodes || []);
   if (!grooves.length) return [];
 
-  const { bodies, worlds } = bodiesOf(whole);
+  const { bodies, worlds } = bodiesOf(whole, poses);
   const out: DfmFinding[] = [];
   for (const { host, g } of grooves) {
     const world = worlds.get(host.id);

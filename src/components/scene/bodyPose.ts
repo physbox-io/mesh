@@ -15,6 +15,7 @@ import * as THREE from 'three';
 import { useStore } from '../../store/useStore';
 import type { DataMirror, ModelMirror, MujocoShim } from '../../types/sceneLayer';
 import type { SceneNode } from '../../types/scene';
+import { getNodeWorldTransform } from '../../utils/laserCutExporter';
 
 export interface BodyPose {
   pos: THREE.Vector3;
@@ -97,4 +98,36 @@ export function toParentFrame(nodeId: string, world: [number, number, number]): 
     .sub(pose.pos)
     .applyMatrix3(pose.rot.clone().transpose());
   return [local.x, local.y, local.z];
+}
+
+/** Moves smaller than these are contact settling, not someone moving a part. */
+const MOVED_M = 0.0002;
+const TURNED_RAD = THREE.MathUtils.degToRad(0.5);
+
+/**
+ * Every body's live world pose, when the sim has moved any of them from where
+ * the scene graph draws it; null when nothing has moved or there is no model.
+ */
+export function livePoses(nodes: SceneNode[]): Map<string, THREE.Matrix4> | null {
+  const poses = new Map<string, THREE.Matrix4>();
+  let moved = false;
+  // A body the model lacks (a rebuild in flight, or one not simulated) stays
+  // where it is drawn, and so does everything on it.
+  const walk = (list: SceneNode[], parent?: THREE.Matrix4) => {
+    for (const n of list) {
+      const drawn = getNodeWorldTransform(n, parent);
+      const pose = bodyPoseOf(n.id, n.pos);
+      if (!pose.live) { walk(n.children ?? [], drawn); continue; }
+      const live = new THREE.Matrix4().setFromMatrix3(pose.rot).setPosition(pose.pos);
+      const at = new THREE.Vector3().setFromMatrixPosition(drawn);
+      const turn = new THREE.Quaternion().setFromRotationMatrix(drawn)
+        .angleTo(new THREE.Quaternion().setFromRotationMatrix(live));
+      if (at.distanceTo(pose.pos) > MOVED_M || turn > TURNED_RAD) moved = true;
+      poses.set(n.id, live);
+      walk(n.children ?? [], live);
+    }
+  };
+  walk(nodes);
+  if (!moved) return null;
+  return poses;
 }

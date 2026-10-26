@@ -13,6 +13,9 @@ import { hardwarePartNode, seatPart, sweepMesh } from '../src/utils/hardwarePart
 import { GLANDS } from '../src/utils/hardwareSizes';
 import { analyzeMesh } from '../src/utils/meshIntegrity';
 import type { SceneGeom, SceneGraph, SceneNode } from '../src/types/scene';
+import * as THREE from 'three';
+import { analyseDfm, withLivePoses, type DfmReport } from '../src/utils/dfm';
+import { sealedJarPreset } from '../src/presets/hardwarePresets';
 
 const body = (id: string, geoms: Partial<SceneGeom>[], pos = [0, 0, 0]): SceneNode => ({
   id, name: id, pos, csgEnabled: true, joints: [], children: [],
@@ -240,3 +243,36 @@ function tubeMesh(r1: number, r2: number, h: number, z: number) {
   for (let i = 0; i < m.positions.length; i += 3) vertices.push(m.positions[i], m.positions[i + 2], -m.positions[i + 1]);
   return { renderVertices: m.positions, vertices, faces: m.faces };
 }
+
+// The sim can move a lid the scene graph still draws seated: judged on the
+// poses the sim left, a lid knocked askew no longer seals.
+describe('the seal check on live poses', () => {
+  const lidAt = (m: THREE.Matrix4) => new Map([['lid', m]]);
+  const seated = () => {
+    const lid = sealedJarPreset.nodes.find((n) => n.id === 'lid')!;
+    return new THREE.Matrix4().setPosition(lid.pos![0], lid.pos![1], lid.pos![2]);
+  };
+  const seal = (r: DfmReport) => r.findings.find((f) => f.id.startsWith('seal_'))!;
+
+  it('passes the jar as drawn', () => {
+    expect(seal(analyseDfm(sealedJarPreset, 'print')).passed).toBe(true);
+  });
+
+  it('fails a lid lifted 2 mm in the sim', () => {
+    const r = withLivePoses(analyseDfm(sealedJarPreset, 'print'), sealedJarPreset, lidAt(seated().premultiply(new THREE.Matrix4().makeTranslation(0, 0, 0.002))));
+    expect(seal(r).severity).toBe('critical');
+    expect(seal(r).title).toMatch(/squeezed only/);
+  });
+
+  it('fails a lid tipped 4° in the sim', () => {
+    const tip = seated().multiply(new THREE.Matrix4().makeRotationX(THREE.MathUtils.degToRad(4)));
+    const r = withLivePoses(analyseDfm(sealedJarPreset, 'print'), sealedJarPreset, lidAt(tip));
+    expect(seal(r).severity).toBe('critical');
+  });
+
+  it('warns when the sim has carried the lid off', () => {
+    const r = withLivePoses(analyseDfm(sealedJarPreset, 'print'), sealedJarPreset, lidAt(new THREE.Matrix4().setPosition(0.2, 0, 0.003)));
+    expect(seal(r).severity).toBe('warning');
+    expect(r.findings.filter((f) => f.id.startsWith('seal_'))).toHaveLength(1);
+  });
+});
