@@ -381,6 +381,11 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
   const parked = machineState.status === 'PAUSED_PARKED';
   // The same gate the job panel's banner applies: a new bit, and no Z datum for it yet.
   const needsReZero = machineState.status === 'PAUSED_TOOL' && machineState.needsZZero;
+  // Moving with no job to stop: a probe, a go-to-origin, homing, a frame. The
+  // job's stop is no use there and jog-cancel does not stop a G0 or a probe,
+  // so this is the one way to halt it short of the power switch.
+  const movingOutsideJob = !running && machineState.connected
+    && /^(Run|Jog|Home|Hold)/.test(machineState.grblState ?? '');
 
   const selectClass =
     'bg-transparent text-slate-800 dark:text-slate-200 font-semibold rounded px-1 py-0.5 outline-none cursor-pointer border-none';
@@ -800,6 +805,17 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
               <Square className="w-3.5 h-3.5" />
             </button>
           </div>
+        )}
+
+        {movingOutsideJob && (
+          <button
+            onClick={() => void webSerialManager.eStop()}
+            title="Soft reset: stops the machine now. If it was moving, the position is lost and it wants homing."
+            className="flex items-center gap-1 px-2 py-0.5 rounded-md bg-red-600 hover:bg-red-700 text-white font-bold cursor-pointer"
+          >
+            <Square className="w-3.5 h-3.5" />
+            <span>Stop machine</span>
+          </button>
         )}
 
         <RemoteJobChip />
