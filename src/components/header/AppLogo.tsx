@@ -60,7 +60,7 @@ export function AppLogo() {
       <div className="hidden md:block">
         <div className="flex items-center gap-2">
           <h1 className="text-base font-extrabold tracking-tight text-slate-900 dark:text-white font-sans">
-            Physbox <span className="text-blue-500 dark:text-blue-400 font-normal">Mesh</span>
+            PhysBox: <span className="text-blue-500 dark:text-blue-400 font-normal">Mesh</span>
           </h1>
           <span className="text-[10px] uppercase font-mono px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-950/80 border border-blue-200 dark:border-blue-800/50 text-blue-700 dark:text-blue-300">
             3D Studio

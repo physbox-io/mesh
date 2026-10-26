@@ -1031,7 +1031,7 @@ const wobble = Math.sin(api.getTime() * 4) * 3;`}
               <div className="flex flex-col gap-4">
                 <h3 className="font-bold text-slate-800 text-lg flex items-center gap-1.5">⚖️ License &amp; Terms</h3>
                 <p className="text-xs text-slate-600 leading-relaxed">
-                  PhysBox Mesh is distributed under the <strong>PhysBox Permissive Public License (PPPL-1.0)</strong>.
+                  PhysBox: Mesh is distributed under the <strong>PhysBox Permissive Public License (PPPL-1.0)</strong>.
                   Commercial use of generated 3D meshes, STL models, contour slices, relief carving toolpaths, and fabricated goods is fully permitted with attribution.
                 </p>
                 <div className="bg-slate-100 p-3.5 rounded-xl border border-slate-200 text-[11px] font-mono text-slate-700 whitespace-pre-wrap leading-relaxed max-h-[50vh] overflow-y-auto">
