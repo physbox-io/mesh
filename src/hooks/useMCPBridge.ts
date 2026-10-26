@@ -3927,10 +3927,6 @@ export function useMCPBridge() {
         case 'EXPORT_CAST': {
           const scene = store.sceneGraph;
           if (!scene.nodes?.length) return { ok: false, error: 'The scene is empty — there is nothing to cast.' };
-          const metal = msg.metalId ?? msg.metal;
-          if (metal !== undefined && !CAST_METALS.some((m) => m.id === metal)) {
-            return { ok: false, error: `metal is one of ${CAST_METALS.map((m) => m.id).join(', ')}.` };
-          }
           const options = {
             ...DEFAULT_CAST_OPTIONS,
             // `metal` is what the MCP tool calls it; `metalId` is what the
@@ -4412,7 +4408,7 @@ export function useMCPBridge() {
         case 'BUILD_MECHANISM':
         case 'PHYSICS_BUILD_MECHANISM': {
           const family = typeof msg.family === 'string' ? msg.family : 'gear_pair';
-          let createdNodes: SceneNode[] = [];
+          let createdNodes: SceneNode[];
           let metrics: Record<string, unknown> = {};
           if (family === 'gear') {
             const node = buildInvoluteGearNode(msg as unknown as InvoluteGearSpec);
