@@ -67,6 +67,8 @@ import type { SplitSection } from '../utils/printSplit';
 import { featureGeoms } from '../utils/printAssembly';
 import type { ReliefCarveOptions } from '../utils/reliefCarveExporter';
 import { withUniqueNames } from '../utils/uniqueNames';
+import { useDialogs } from './dialogStore';
+import { downloadSceneRescue, allowUnload } from '../utils/rescueScene';
 import { envelope } from '../utils/coSimLink';
 import { getNodeWorldPos } from '../utils/sceneTree';
 
@@ -6205,8 +6207,23 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
           return;
         } catch (recoveryError) {
           console.error('Worker respawn recovery failed, falling back to full page reload:', recoveryError);
-          alert('The physics engine ran out of memory and could not recover, even after restarting the physics worker.\n\nThe page will reload to free memory — your scene will be lost unless you saved it first.');
-          window.location.reload();
+          // Asked in the app's own dialog rather than a native alert, and with
+          // the way out of losing the scene on it: the reload drops back to a
+          // blank scene, so the scene is offered as a file first.
+          const reload = () => { allowUnload(); window.location.reload(); };
+          useDialogs.getState().openDialog({
+            title: 'The physics engine ran out of memory',
+            body: 'It could not recover, even after restarting. The page has to reload to free the memory, and the reload starts from a blank scene. Save the scene as a file first; Import opens it again.',
+            confirmLabel: 'Save scene and reload',
+            cancelLabel: 'Reload without saving',
+            tone: 'red',
+            onConfirm: () => {
+              try { downloadSceneRescue(get().sceneGraph, get().activePreset); } catch (err) { console.error('Could not save the scene', err); }
+              // A tick for the download to start before the page goes.
+              setTimeout(reload, 500);
+            },
+            onCancel: reload,
+          });
           done();
           return;
         }

@@ -12,27 +12,7 @@
 import { Component, type ErrorInfo, type ReactNode } from 'react';
 import { AlertTriangle } from 'lucide-react';
 import { useStore } from '../store/useStore';
-import { physicsGlobals } from '../physicsGlobals';
-import { packMeshArrays } from '../utils/meshPacking';
-import { exportBaseName } from '../utils/exportBaseName';
-
-/**
- * The scene as the store holds it, with its note cards and chat. Not the
- * simulated pose: that needs MuJoCo, which may be what broke. The graph is
- * what was edited, which is what is worth keeping.
- */
-function downloadScene(): void {
-  const { sceneGraph, activePreset } = useStore.getState();
-  const noteCards = physicsGlobals._physics_getNoteCards?.() ?? [];
-  const copilotMessages = physicsGlobals._physics_getCopilotMessages?.() ?? [];
-  const text = JSON.stringify(packMeshArrays({ ...sceneGraph, noteCards, copilotMessages }), null, 2);
-  const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `${exportBaseName(noteCards, activePreset)}.json`;
-  a.click();
-  URL.revokeObjectURL(url);
-}
+import { downloadSceneRescue } from '../utils/rescueScene';
 
 function isDark(): boolean {
   try {
@@ -55,7 +35,8 @@ export class AppErrorBoundary extends Component<{ children: ReactNode }, { error
 
   private save = () => {
     try {
-      downloadScene();
+      const { sceneGraph, activePreset } = useStore.getState();
+      downloadSceneRescue(sceneGraph, activePreset);
     } catch (e) {
       console.error('Could not save the scene after a crash', e);
       this.setState({ saveFailed: true });

@@ -3,6 +3,7 @@ import { useStore } from '../store/useStore';
 import { makePresetNoteCard, type NoteCard } from '../utils/noteCards';
 import { physicsGlobals, type CopilotMessage } from '../physicsGlobals';
 import { cloudAutosave } from '../utils/cloudDocuments';
+import { unloadIsAllowed } from '../utils/rescueScene';
 
 /** Marks a clean point whose undo step has not landed yet. See markClean. */
 const PENDING_CLEAN = Symbol('pending');
@@ -90,7 +91,7 @@ export function useSceneDocument() {
   useEffect(() => {
     if (import.meta.env.DEV) return;
     const onBeforeUnload = (e: BeforeUnloadEvent) => {
-      if (!unsavedRef.current() || cloudAutosave.holdsLatest()) return;
+      if (unloadIsAllowed() || !unsavedRef.current() || cloudAutosave.holdsLatest()) return;
       e.preventDefault();
       // Older Chromium and Safari still want the legacy field set.
       e.returnValue = '';
