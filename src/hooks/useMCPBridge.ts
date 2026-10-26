@@ -9,6 +9,8 @@ import { getStoredAuthToken } from '../utils/apiClient';
 import { tabSession } from '../utils/tabSession';
 import { useViewQuality } from '../store/viewQualityStore';
 import { renderViewportNow, captureViewportThumb } from '../utils/viewportCapture';
+import { savePreset } from '../utils/presetStorage';
+import { announcePresetSave } from '../utils/presetNotices';
 import { summarizeTrajectory } from '../utils/trajectorySummary';
 import { authoredQuat, orientationOf } from '../utils/bodyOrientation';
 import { pocketMesh, type PocketSpec } from '../utils/pocketCutter';
@@ -34,7 +36,7 @@ import {
   applyDab, buildPaintGeometry, canvasFromLayer, isPaintable, layerFromCanvas,
   paintArgsFromSize, paintResolution, toGeometrySpace,
 } from '../utils/vertexPaint';
-import { saveUserPreset, deleteUserPreset, readUserPreset, listUserPresetNames, ensureUserPreset, type SavedCopilotMessage } from '../utils/userPresets';
+import { deleteUserPreset, readUserPreset, listUserPresetNames, ensureUserPreset, type SavedCopilotMessage } from '../utils/userPresets';
 import { unpackMeshArrays } from '../utils/meshPacking';
 import { SCULPT_BASES, buildSculptBase, buildSculptBaseSized, MAX_SCULPT_SIZE, MIN_SCULPT_SIZE, type SculptBaseId } from '../utils/sculptBases';
 import { fromSceneGeom, toSceneGeom, splitComponents, type BrushType } from '../utils/sculptMesh';
@@ -4601,9 +4603,10 @@ export function useMCPBridge() {
           const name = String(msg.preset || msg.name || '').trim();
           if (!name) return { ok: false, error: 'Missing preset name' };
           const userPresetKey = name.replace(/^user:/, '');
-          // Through the shared accessor, not localStorage directly: a preset an
-          // agent saves has to reach the account like any other, and this path
-          // is the one that used to bypass sync.
+          // Through savePreset, the path the Save button takes, so an agent's
+          // save lands where a person's would: in this browser and the account,
+          // or the account alone when the browser cannot hold it. This used to
+          // write localStorage only, and a big scene failed signed in or not.
           // The graph is SPREAD, not nested under a `sceneGraph` key. A user
           // preset is read back as `{ nodes, noteCards, ... }` — that is the
           // shape App.tsx's own save writes and the shape loadPreset looks for.
@@ -4611,18 +4614,29 @@ export function useMCPBridge() {
           // `Array.isArray(saved.nodes)` guard found nothing and returned
           // quietly: every preset saved over MCP reported ok and then loaded as
           // an empty scene.
-          // Dated and pictured like a save by hand, so it sits in the scene
-          // browser the same way.
+          // Pictured like a save by hand, so it sits in the scene browser the
+          // same way; savePreset dates it.
           const thumbnail = captureViewportThumb();
-          const saved = saveUserPreset(userPresetKey, {
+          const preset = {
             ...store.sceneGraph,
             noteCards: (window as unknown as PhysicsWindow)._physics_getNoteCards?.() || [],
             copilotMessages: (window as unknown as PhysicsWindow)._physics_getCopilotMessages?.() || [],
-            savedAt: Date.now(),
             ...(thumbnail ? { thumbnail } : {}),
-          });
-          if (!saved) return { ok: false, error: 'Could not write the preset to local storage' };
-          return { ok: true, preset: `user:${userPresetKey}` };
+          };
+          const result = await savePreset(userPresetKey, preset);
+          // The same notice a person's save raises, so the user sees it happen.
+          announcePresetSave(userPresetKey, preset, result);
+          if (!result.ok) return { ok: false, error: result.message, bytes: result.bytes };
+          // Waited for here, unlike the toast: the agent's answer should say
+          // whether the account has it, not that it might.
+          const inAccount = result.savedTo === 'cloud' || (result.cloudPending ? await result.cloudPending : false);
+          return {
+            ok: true,
+            preset: `user:${userPresetKey}`,
+            savedTo: result.savedTo === 'cloud' ? 'account' : inAccount ? 'browser and account' : 'browser',
+            ...(result.signedIn && !inAccount ? { warning: 'Saved in this browser only: the account did not take it.' } : {}),
+            message: result.message,
+          };
         }
 
         case 'DELETE_PRESET': {
