@@ -5,7 +5,6 @@ vi.hoisted(() => { (globalThis as { navigator?: unknown }).navigator ??= { hardw
 
 import { fillBodyDefaults, resolveUpdatedGeoms, applyPaintStrokeToBody } from '../src/hooks/useMCPBridge';
 import { useStore } from '../src/store/useStore';
-import { canvasFromLayer } from '../src/utils/vertexPaint';
 import type { SceneNode } from '../src/types';
 
 describe('fillBodyDefaults pos', () => {
