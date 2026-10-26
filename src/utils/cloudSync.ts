@@ -21,6 +21,7 @@ import { fetchCloudParameters, fetchCloudPresetList, fetchCloudPreset, syncCloud
 import { SYNCED_LLM_PARAMETER_KEYS } from './llmSettings';
 import type { UserPreset } from './userPresets';
 import { packMeshArrays } from './meshPacking';
+import { externalizeMeshes, forgetUploadedBlobs, resolveMeshBlobs } from './meshBlobs';
 import { SPINDLE_MAX_OVERRIDE_KEY } from './spindleOverride';
 import { CNC_BED_PARAMETER, TOOL_RACK_PARAMETER } from '@physbox-io/machining';
 import { settleToolRack } from './toolRack';
@@ -86,7 +87,15 @@ function rememberPresetId(name: string, id: string): void {
  */
 export async function saveCloudPreset(name: string, data: unknown): Promise<boolean> {
   const existingId = readPresetIdMap()[name];
-  const id = await syncCloudPreset('physics', name, packMeshArrays(data), existingId);
+  const packed = packMeshArrays(data);
+  // Big meshes go to the blob store; if it cannot be reached, they go inline.
+  const send = () => externalizeMeshes(packed).catch(() => packed);
+  let id = await syncCloudPreset('physics', name, await send(), existingId);
+  if (!id) {
+    // Refused, perhaps for a blob this session thought it had uploaded: once more, asking afresh.
+    forgetUploadedBlobs();
+    id = await syncCloudPreset('physics', name, await send(), existingId);
+  }
   if (id) rememberPresetId(name, id);
   return !!id;
 }
@@ -114,7 +123,7 @@ export async function fetchCloudPresetData(name: string): Promise<UserPreset | n
   if (!id) return null;
   const preset = await fetchCloudPreset(id);
   const data = preset?.data;
-  return data && typeof data === 'object' ? data as UserPreset : null;
+  return data && typeof data === 'object' ? await resolveMeshBlobs(data as UserPreset, preset?.blobUrls) : null;
 }
 
 /**
@@ -141,6 +150,8 @@ export interface CloudPullResult {
   parameters: number;
   /** Names of the presets the account holds; their data is fetched when opened. */
   presets: string[];
+  /** Each listed preset's picture and save date, for the scene browser. */
+  cards: Record<string, { thumbnail?: string | null; updatedAt?: string }>;
 }
 
 /**
@@ -157,7 +168,7 @@ export interface CloudPullResult {
  * later removes the cloud copy too.
  */
 export async function pullCloudState(): Promise<CloudPullResult> {
-  const result: CloudPullResult = { parameters: 0, presets: [] };
+  const result: CloudPullResult = { parameters: 0, presets: [], cards: {} };
 
   const [appParams, globalParams, presets] = await Promise.all([
     fetchCloudParameters('physics'),
@@ -186,6 +197,7 @@ export async function pullCloudState(): Promise<CloudPullResult> {
     if (!preset?.name || !preset.id) continue;
     rememberPresetId(preset.name, preset.id);
     result.presets.push(preset.name);
+    result.cards[preset.name] = { thumbnail: preset.thumbnail, updatedAt: preset.updatedAt };
   }
 
   return result;

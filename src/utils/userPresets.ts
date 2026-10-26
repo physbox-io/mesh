@@ -64,6 +64,28 @@ export interface UserPreset {
  */
 const cloudOnly: Record<string, UserPreset | null> = {};
 
+/** What the account's list says about each preset: its picture and when it was saved. */
+const cloudCards: Record<string, { thumbnail: string | null; savedAt: number | null }> = {};
+
+export function rememberCloudPresetCard(name: string, card: { thumbnail?: string | null; updatedAt?: string }): void {
+  const at = card.updatedAt ? Date.parse(card.updatedAt) : NaN;
+  cloudCards[name.replace(/^user:/, '')] = { thumbnail: card.thumbnail || null, savedAt: Number.isFinite(at) ? at : null };
+}
+
+/**
+ * A saved scene's picture and date for its card: from this browser's copy, or
+ * a copy fetched from the account, or the account's list for one not fetched.
+ */
+export function presetCard(name: string): { thumbnail: string | null; savedAt: number | null } {
+  const key = name.replace(/^user:/, '');
+  const held = readCachedPresets()[key] ?? cloudOnly[key];
+  const listed = cloudCards[key];
+  return {
+    thumbnail: typeof held?.thumbnail === 'string' ? held.thumbnail : listed?.thumbnail ?? null,
+    savedAt: typeof held?.savedAt === 'number' ? held.savedAt : listed?.savedAt ?? null,
+  };
+}
+
 /** Fired whenever the set of listed presets changes outside a local save. */
 export const USER_PRESETS_CHANGED_EVENT = 'physics:user-presets-changed';
 
@@ -298,7 +320,11 @@ export function deleteUserPreset(name: string): boolean {
  * over the server's response cap and the pull failed outright. Each one is
  * fetched when it is opened (ensureUserPreset). Returns how many were listed.
  */
-export function mergePulledPresets(names: string[]): number {
+export function mergePulledPresets(
+  names: string[],
+  cards: Record<string, { thumbnail?: string | null; updatedAt?: string }> = {},
+): number {
+  for (const [name, card] of Object.entries(cards)) rememberCloudPresetCard(name, card);
   const local = readCachedPresets();
   let listed = 0;
   for (const name of names) {

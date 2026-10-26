@@ -317,6 +317,25 @@ export interface CloudPreset {
   id?: string;
   name?: string;
   data?: unknown;
+  /** Read URLs for the blobs `data` names, by SHA-256 (meshBlobs.ts). */
+  blobUrls?: Record<string, string>;
+}
+
+/** Where to PUT each blob the account does not have yet. */
+export interface BlobUpload {
+  sha256: string;
+  url: string;
+  headers: Record<string, string>;
+}
+
+/**
+ * Asks for upload URLs for these blobs; `present` are the ones the account
+ * already holds. Throws when the blob store cannot be reached.
+ */
+export async function requestBlobUploads(
+  blobs: { sha256: string; size: number }[]
+): Promise<{ present: string[]; uploads: BlobUpload[] }> {
+  return request('/api/blobs/uploads', { method: 'POST', body: JSON.stringify({ blobs }) });
 }
 
 /** A preset row listed without its data. */
@@ -324,6 +343,9 @@ export interface CloudPresetMeta {
   id?: string;
   name?: string;
   bytes?: number;
+  /** The small JPEG saved with it, for the scene browser's card. */
+  thumbnail?: string | null;
+  updatedAt?: string;
 }
 
 /**
@@ -703,8 +725,8 @@ export async function revokeShare(token: string): Promise<boolean> {
  */
 export async function fetchSharedDocument(
   token: string
-): Promise<ShareMeta & { data: unknown }> {
-  const res = await request<{ share: ShareMeta & { data: unknown } }>(
+): Promise<ShareMeta & { data: unknown; blobUrls?: Record<string, string> }> {
+  const res = await request<{ share: ShareMeta & { data: unknown; blobUrls?: Record<string, string> } }>(
     `/api/shared/${encodeURIComponent(token)}`
   );
   return res.share;

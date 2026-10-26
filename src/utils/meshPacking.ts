@@ -38,15 +38,14 @@ const INDEX_KEYS = new Set(['faces', 'colliderFaces']);
 const MIN_PACKED = 96;
 
 function isPacked(v: unknown): v is PackedArray {
-  return typeof v === 'object' && v !== null && typeof (v as PackedArray).$packed === 'string'
-    && typeof (v as PackedArray).b64 === 'string';
+  return typeof v === 'object' && v !== null && typeof (v as PackedArray).$packed === 'string';
 }
 
 // btoa and atob take one character per byte, so the bytes go through in
 // chunks: a 30 MB argument list would overflow the stack.
 const CHUNK = 0x8000;
 
-function toBase64(bytes: Uint8Array): string {
+export function toBase64(bytes: Uint8Array): string {
   const parts: string[] = [];
   for (let i = 0; i < bytes.length; i += CHUNK) {
     parts.push(String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK) as unknown as number[]));
@@ -54,7 +53,7 @@ function toBase64(bytes: Uint8Array): string {
   return btoa(parts.join(''));
 }
 
-function fromBase64(text: string): Uint8Array {
+export function fromBase64(text: string): Uint8Array {
   const bin = atob(text);
   const out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
@@ -100,6 +99,8 @@ function packIndices(values: number[]): PackedArray | null {
 }
 
 function unpackArray(p: PackedArray): number[] {
+  // Its bytes are in the account's blob store (meshBlobs.ts) and were not fetched.
+  if (typeof p.b64 !== 'string') throw new Error('A mesh in this scene is kept in your account and could not be fetched. Check the connection and open it again.');
   const bytes = fromBase64(p.b64);
   const out = new Array<number>(p.n);
   if (p.$packed === 'f32') {

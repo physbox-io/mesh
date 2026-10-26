@@ -8,7 +8,7 @@ import type { PresetActions } from '../../hooks/usePresetActions';
 import { EXAMPLE_SHELVES, exampleEntries, matchesQuery } from '../../utils/sceneCatalog';
 import { PATTERN_GROUPS, SURFACE_PATTERNS } from '../../utils/surfacePatterns';
 import {
-  listUserPresetNames, cloudOnlyPresetNames, presetSizes, readUserPresets, deleteUserPreset, USER_PRESETS_CHANGED_EVENT,
+  listUserPresetNames, cloudOnlyPresetNames, presetSizes, presetCard, deleteUserPreset, USER_PRESETS_CHANGED_EVENT,
 } from '../../utils/userPresets';
 import { listRecent, recordRecent, SCENE_META_CHANGED_EVENT } from '../../utils/sceneMeta';
 import { renameScene, duplicateScene } from '../../utils/sceneFiles';
@@ -29,17 +29,11 @@ function readSavedScenes(sort: SavedSort): SavedScene[] {
   try {
     const cloud = new Set(cloudOnlyPresetNames());
     const sizes = new Map(presetSizes().map((s) => [s.name, s.bytes]));
-    const local = readUserPresets();
     const byName = (a: SavedScene, b: SavedScene) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base', numeric: true });
     return listUserPresetNames()
       .map((name) => {
-        const at = local[name]?.savedAt;
-        const thumb = local[name]?.thumbnail;
-        return {
-          name, cloudOnly: cloud.has(name), bytes: sizes.get(name) ?? null,
-          savedAt: typeof at === 'number' ? at : null,
-          thumbnail: typeof thumb === 'string' ? thumb : null,
-        };
+        const { thumbnail, savedAt } = presetCard(name);
+        return { name, cloudOnly: cloud.has(name), bytes: sizes.get(name) ?? null, savedAt, thumbnail };
       })
       // Newest first, and the undated (saved before dates were kept) after, by name.
       .sort(sort === 'name' ? byName : (a, b) => (b.savedAt ?? -1) - (a.savedAt ?? -1) || byName(a, b));

@@ -26,6 +26,7 @@
 import type { SceneNode } from '../types/scene';
 import type { UserPreset } from './userPresets';
 import { packMeshArrays, unpackMeshArrays } from './meshPacking';
+import { externalizeMeshes, resolveMeshBlobs } from './meshBlobs';
 import { createShare, fetchSharedDocument, getStoredUser } from './apiClient';
 
 /** The only share format understood so far. */
@@ -334,7 +335,9 @@ export async function buildAccountShareLink(
   scene: SharedScene,
   base: string = window.location.href
 ): Promise<ShareLink> {
-  const { token } = await createShare({ appId: 'mesh', name: scene.name, data: packMeshArrays(scene) });
+  const packed = packMeshArrays(scene);
+  const data = await externalizeMeshes(packed).catch(() => packed);
+  const { token } = await createShare({ appId: 'mesh', name: scene.name, data });
 
   const url = new URL(base);
   url.search = '';
@@ -384,7 +387,7 @@ export async function readAccountShareLink(token: string): Promise<SharedScene> 
       `That link is a ${APP_NAMES[share.appId] ?? share.appId} document, not a Mesh scene. Open it in ${APP_NAMES[share.appId] ?? share.appId}.`
     );
   }
-  const scene = unpackMeshArrays(share.data) as SharedScene | null;
+  const scene = unpackMeshArrays(await resolveMeshBlobs(share.data, share.blobUrls)) as SharedScene | null;
   if (!scene || !Array.isArray(scene.nodes) || scene.nodes.length === 0) {
     throw new Error('That shared scene could not be read — it may have been made by a newer version of Mesh.');
   }

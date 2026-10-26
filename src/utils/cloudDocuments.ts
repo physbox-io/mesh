@@ -33,6 +33,7 @@ import {
   fetchCloudDocument,
   PhysBoxApiError,
 } from './apiClient';
+import { externalizableChars, externalizeMeshes, forgetUploadedBlobs } from './meshBlobs';
 
 /** Which app's documents these are. */
 const APP_ID = 'physics';
@@ -177,6 +178,20 @@ function ensureDocumentId(): string {
   return id;
 }
 
+/**
+ * The document as it goes to the account: big meshes uploaded to the blob store
+ * and named by hash (meshBlobs.ts). When the store cannot be reached the
+ * document goes whole, as it did before there was one.
+ */
+async function toCloud(data: unknown): Promise<unknown> {
+  try {
+    return await externalizeMeshes(data);
+  } catch (err) {
+    console.warn('[PhysBox Cloud] Blob store unavailable; saving meshes inline:', err);
+    return data;
+  }
+}
+
 class CloudAutosave {
   private status: AutosaveStatus = {
     state: 'idle',
@@ -309,11 +324,13 @@ class CloudAutosave {
      * The size gate goes here, where the document has just been serialised
      * anyway, so it costs a `.length` rather than a second pass over a scene.
      */
-    if (serialized.length > MAX_DOCUMENT_BYTES) {
+    // What is sent: big meshes go to the blob store, not in the document.
+    const sending = serialized.length - externalizableChars(data);
+    if (sending > MAX_DOCUMENT_BYTES) {
       this.tooLarge = true;
       this.pendingHash = null;
       this.clearTimers();
-      this.set({ state: 'offline', message: tooLargeMessage(serialized.length) });
+      this.set({ state: 'offline', message: tooLargeMessage(sending) });
       return;
     }
     if (this.tooLarge) {
@@ -362,10 +379,10 @@ class CloudAutosave {
   async saveExplicit(name: string, data: unknown, label: string): Promise<void> {
     if (!this.enabled() || this.blocked) return;
     try {
-      const serialized = JSON.stringify(data);
-      if (serialized.length > MAX_DOCUMENT_BYTES) {
+      const sending = JSON.stringify(data).length - externalizableChars(data);
+      if (sending > MAX_DOCUMENT_BYTES) {
         this.tooLarge = true;
-        this.set({ state: 'offline', message: tooLargeMessage(serialized.length) });
+        this.set({ state: 'offline', message: tooLargeMessage(sending) });
         return;
       }
     } catch {
@@ -379,7 +396,7 @@ class CloudAutosave {
         id,
         appId: APP_ID,
         name,
-        data,
+        data: await toCloud(data),
         baseRevision: this.status.revision ?? undefined,
         label,
       });
@@ -455,7 +472,7 @@ class CloudAutosave {
         id,
         appId: APP_ID,
         name,
-        data,
+        data: await toCloud(data),
         // Undefined on the very first write of a session, which is what lets an
         // offline-first document land without knowing the server's revision.
         baseRevision: this.status.revision ?? undefined,
@@ -481,6 +498,16 @@ class CloudAutosave {
   }
 
   private handleFailure(err: unknown): void {
+    if (err instanceof PhysBoxApiError && err.code === 'blobs_missing') {
+      // Not a conflict: a mesh this session took for uploaded is not there.
+      // Ask about every one afresh and try again, on the usual backoff.
+      forgetUploadedBlobs();
+      this.set({ state: 'offline', message: 'Not synced yet — retrying.' });
+      if (this.retryTimer) clearTimeout(this.retryTimer);
+      this.retryTimer = setTimeout(() => this.save(), this.retryDelay);
+      this.retryDelay = Math.min(this.retryDelay * 2, MAX_RETRY_MS);
+      return;
+    }
     if (err instanceof PhysBoxApiError && err.status === 409) {
       /*
        * Somebody else moved the document. Do not write again: last-write-wins

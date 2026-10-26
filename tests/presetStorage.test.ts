@@ -205,6 +205,12 @@ describe('pulling the account into another browser', () => {
     expect(cloud.fetchCloudPresetData).not.toHaveBeenCalled();
   });
 
+  it('gives a preset listed from the account the picture and date the list sent', () => {
+    const thumbnail = 'data:image/jpeg;base64,QQ';
+    presets.mergePulledPresets(['candle'], { candle: { thumbnail, updatedAt: '2026-10-25T17:44:00Z' } });
+    expect(presets.presetCard('user:candle')).toEqual({ thumbnail, savedAt: Date.parse('2026-10-25T17:44:00Z') });
+  });
+
   it('fetches a listed preset on open and keeps it here when there is room', async () => {
     presets.mergePulledPresets(['tray']);
     cloud.fetchCloudPresetData.mockResolvedValue({ nodes: [{ id: 'cloud' }] });

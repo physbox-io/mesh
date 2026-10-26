@@ -102,11 +102,11 @@ export const UserProfileButton: React.FC = () => {
   const pullAccountState = React.useCallback(async () => {
     if (!getStoredAuthToken()) return;
     try {
-      const { parameters, presets } = await pullCloudState();
+      const { parameters, presets, cards } = await pullCloudState();
       // The machine state holds the spindle override already applied, so a
       // value just restored from the account has to be pushed into it.
       webSerialManager.reapplySpindleOverride();
-      const listed = mergePulledPresets(presets);
+      const listed = mergePulledPresets(presets, cards);
       setSyncFailed(false);
       setSyncSummary(
         parameters === 0 && listed === 0
