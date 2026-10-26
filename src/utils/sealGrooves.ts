@@ -276,7 +276,7 @@ function planFace(spec: SealSpec, host: SceneNode, fit: number): Plan {
     return { at, outer, inner, depth, width, cord, line, takes, fits: inner >= lo + WALL_EACH_SIDE && outer <= hi - WALL_EACH_SIDE };
   };
   let size = spec.size;
-  let centred = false;
+  let centred: boolean;
   if (!ringOf(size)) {
     // The thickest cord whose ring takes a groove where the groove should be.
     const ranked = Object.keys(O_RINGS).map((s) => ({ s, g: groove(s, true) })).filter((x) => x.g.fits && x.g.takes)

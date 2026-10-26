@@ -223,7 +223,6 @@ describe('in MuJoCo', () => {
     for (let i = 0; i < steps; i++) mj.mj_step(model, data);
     return { model, data, done: () => { data.delete(); model.delete(); } };
   }
-  const qposOf = (r: { model: any; data: any }, joint: string) => r.data.qpos[r.model.jnt_qposadr[mj.mj_name2id(r.model, mj.mjtObj.mjOBJ_JOINT.value, joint)]];
 
   it('stops an MGN12 carriage at both ends of a 300 mm rail', () => {
     for (const sign of [1, -1]) {
