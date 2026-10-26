@@ -14,6 +14,7 @@
 
 import type { SceneGraph } from '../types/scene';
 import type {
+  DatumNotch,
   SolidMachiningOptions,
   SolidMachiningResult,
   SolidSideResult,
@@ -47,7 +48,13 @@ export interface SolidSetupResult extends SurfaceMachiningResult {
   /** How the block is found again after the turn. */
   locate: 'pins' | 'knownSpot';
   /** Where to touch off, when it is located on the block itself. */
-  datum?: { description: string; touches: { axis: 'x' | 'y' | 'z'; face: string; valueMm: number }[] };
+  /**
+   * How the setup is zeroed. Each touch is the bit's side against a wall
+   * `wallMm` in from the face the axis is measured from (0 for the face
+   * itself, a datum notch's size for its wall), and `valueMm` is the work
+   * position to set there with the planned bit: `wallMm` less its radius.
+   */
+  datum?: { description: string; touches: { axis: 'x' | 'y' | 'z'; face: string; valueMm: number; wallMm?: number }[] };
   /** What the operator does before this setup runs, in order. */
   instructions: string[];
   /** Part of the stock this setup cuts in, its own frame. */
@@ -101,6 +108,82 @@ const ORIENTATION_MARGIN = 0.25;
 const TILT_RAD = (0.25 * Math.PI) / 180;
 /** How well a bit's side touches off on paper. */
 const TOUCH_MM = 0.1;
+
+/** A cube of waste in the block's first frame (x 0..W, y 0..D, z -T..0), mm. */
+export interface NotchBox {
+  x0: number; x1: number;
+  y0: number; y1: number;
+  z0: number; z1: number;
+}
+
+/**
+ * The datum notch a turned setup is zeroed on, or why it has none.
+ *
+ * A turned block is zeroed on its own corner, and a sawn block is neither
+ * square nor the size it says, so the setup lands as far off as the saw was.
+ * The setup that runs first can do better: it cuts a cube out of a corner in
+ * the waste, and after a turn two of that cube's walls stand on the new top
+ * face at a known distance in from the corner, both cut by this machine in
+ * the first setup's frame. Touched off on those, the turned setup lines up
+ * with the first to the accuracy of the machine, not of the saw.
+ *
+ * The corner is where the turned setup's up face, its left or near face and
+ * the first setup's face meet, so the first setup's face has to be its left or
+ * near one: the notch is cut from that face, and only a wall cut from it is
+ * square to it. The bit and a millimetre either side of it each way, so it can
+ * get in and touch; no less than 6 mm. Never where the part is, nor within a
+ * millimetre of it: the notch is cut as part of the setup's target, so the
+ * cutter stays inside the cube and needs no more room than that.
+ */
+export function planDatumNotch(
+  face: BlockFace,
+  first: BlockFace,
+  p: { tris: Float64Array; stock: { widthMm: number; depthMm: number; thicknessMm: number } },
+  toolDiaMm: number
+): { box: NotchBox; sizeMm: number } | { why: string } {
+  if (face === '-z' || face === first) return { why: 'it is not a turned setup' };
+  const { left, near } = setupFrame(face, p.stock).faceAt;
+  const other = left === first ? near : near === first ? left : null;
+  if (!other) return { why: `its corner is not on the ${FACE_NAME[first]}, which the first setup cuts from` };
+  const w = Math.max(6, toolDiaMm + 2);
+  const { widthMm: W, depthMm: D, thicknessMm: T } = p.stock;
+  if (w + 1 > Math.min(W, D, T)) return { why: 'the block is too small for a notch the bit can get into' };
+  const box: Partial<NotchBox> = {};
+  for (const f of [face, first, other]) {
+    if (f === '+x') Object.assign(box, { x0: W - w, x1: W });
+    if (f === '-x') Object.assign(box, { x0: 0, x1: w });
+    if (f === '+y') Object.assign(box, { y0: D - w, y1: D });
+    if (f === '-y') Object.assign(box, { y0: 0, y1: w });
+    if (f === '+z') Object.assign(box, { z0: -w, z1: 0 });
+    if (f === '-z') Object.assign(box, { z0: -T, z1: -T + w });
+  }
+  if ([box.x0, box.y0, box.z0].some((v) => v === undefined)) return { why: 'no corner of the block meets those faces' };
+  const b = box as NotchBox;
+
+  // Clear of the part, all round: the solid spans of the part's columns
+  // over the notch, padded, may not reach into it.
+  const pad = 1;
+  const x0 = Math.max(0, b.x0 - pad), x1 = Math.min(W, b.x1 + pad);
+  const y0 = Math.max(0, b.y0 - pad), y1 = Math.min(D, b.y1 + pad);
+  const step = Math.max(0.25, Math.min(1, w / 12));
+  const cols = Math.ceil((x1 - x0) / step) + 1, rows = Math.ceil((y1 - y0) / step) + 1;
+  const spans = castColumnSpans(p.tris, {
+    minX: x0, minY: y0, stepX: (x1 - x0) / Math.max(1, cols - 1), stepY: (y1 - y0) / Math.max(1, rows - 1), cols, rows,
+  });
+  for (let k = 0; k < cols * rows; k++) {
+    for (let e = spans.offset[k]; e < spans.offset[k + 1]; e += 2) {
+      if (spans.z[e + 1] > b.z0 - pad && spans.z[e] < b.z1 + pad) {
+        return { why: `the part comes within ${(w + pad).toFixed(0)} mm of that corner of the block, where the notch would go` };
+      }
+    }
+  }
+  return { box: b, sizeMm: w };
+}
+
+/** A notch box as the top setup's `datumNotches` take it. */
+function asTopNotch(b: NotchBox): DatumNotch {
+  return { x0: b.x0, x1: b.x1, y0: b.y0, y1: b.y1, depthMm: -b.z0 };
+}
 
 /** A way up and its coarse plan, for the fine plan to be made on. */
 interface UpCandidate {
@@ -301,7 +384,10 @@ function sideSetup(
   plan: SetupPlan,
   opts: SolidMachiningOptions,
   carveOpts: ReliefCarveOptions,
-  warnings: string[]
+  warnings: string[],
+  notchMm?: number,
+  /** Datum notches this setup cuts for the ones after it, in the block's first frame. */
+  cutsNotches: NotchBox[] = []
 ): Omit<SolidSetupResult, 'index' | 'of' | 'instructions'> | { error: string } {
   const frame = setupFrame(face, p.stock);
   const s = frame.stock;
@@ -334,6 +420,20 @@ function sideSetup(
   }
   if (!(deepest > 0)) return { error: `the ${FACE_NAME[face]} has nothing to cut` };
   const pad = r + 2;
+  // The notches, turned into this frame: a box on this setup's top face,
+  // down to its floor.
+  const notches = cutsNotches.map((b) => {
+    const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+    for (const x of [b.x0, b.x1]) for (const y of [b.y0, b.y1]) for (const z of [b.z0, b.z1]) {
+      const q = frame.toSetup([x, y, z]);
+      for (let a = 0; a < 3; a++) { lo[a] = Math.min(lo[a], q[a]); hi[a] = Math.max(hi[a], q[a]); }
+    }
+    return { x0: lo[0], x1: hi[0], y0: lo[1], y1: hi[1], depthMm: -lo[2] };
+  });
+  for (const n of notches) {
+    wx0 = Math.min(wx0, n.x0); wx1 = Math.max(wx1, n.x1);
+    wy0 = Math.min(wy0, n.y0); wy1 = Math.max(wy1, n.y1);
+  }
   const window = {
     minX: Math.max(0, wx0 - pad), minY: Math.max(0, wy0 - pad),
     maxX: Math.min(s.widthMm, wx1 + pad), maxY: Math.min(s.depthMm, wy1 + pad),
@@ -381,6 +481,17 @@ function sideSetup(
       z[k] = Math.min(0, Math.max(-s.thicknessMm, Math.max(kept, -d)));
     }
   }
+  for (const n of notches) {
+    for (let j = 0; j < rows; j++) {
+      const y = window.minY + j * stepY;
+      if (y < n.y0 - 1e-9 || y > n.y1 + 1e-9) continue;
+      for (let i = 0; i < cols; i++) {
+        const x = window.minX + i * stepX;
+        if (x < n.x0 - 1e-9 || x > n.x1 + 1e-9) continue;
+        z[j * cols + i] = Math.min(z[j * cols + i], -n.depthMm);
+      }
+    }
+  }
   const surface: Heightmap = { ...window, cols, rows, stepX, stepY, z };
   let depth = 0;
   for (let k = 0; k < z.length; k++) depth = Math.max(depth, -z[k]);
@@ -391,6 +502,12 @@ function sideSetup(
     `; Stock as it stands: ${s.widthMm.toFixed(1)} x ${s.depthMm.toFixed(1)} x ${s.thicknessMm.toFixed(1)} mm`,
     '; Origin      : near-left corner of the block as it stands now, top face, Z0',
     `; Skin left   : ${allowance.toFixed(2)} mm on what this setup finishes, for the turn`,
+    ...(notchMm
+      ? [`; Zero X, Y   : on the far walls of the ${notchMm.toFixed(1)} mm datum notch setup 1 cut in the near-left corner, not on the sawn faces`]
+      : []),
+    ...notches.map(
+      (n) => `; Datum notch : ${(n.x1 - n.x0).toFixed(1)} mm cube out of the corner at X${n.x0.toFixed(1)}-${n.x1.toFixed(1)} Y${n.y0.toFixed(1)}-${n.y1.toFixed(1)}, the zero for a later turned setup`
+    ),
   ];
   const cut = machineSurface(
     {
@@ -424,16 +541,30 @@ function sideSetup(
     stock: s,
     standingHeightMm: s.thicknessMm,
     locate: 'knownSpot',
-    datum: {
-      description:
-        `X on the ${FACE_NAME[left]} (now on your left), Y on the ${FACE_NAME[near]} (now towards you), ` +
-        `Z on the ${FACE_NAME[face]} (now on top).`,
-      touches: [
-        { axis: 'x', face: FACE_NAME[left], valueMm: -r },
-        { axis: 'y', face: FACE_NAME[near], valueMm: -r },
-        { axis: 'z', face: FACE_NAME[face], valueMm: 0 },
-      ],
-    },
+    // On the notch the top setup cut, when there is one: its far walls are
+    // `notchMm` in from the left and near faces, and the bit touches them
+    // from inside the notch, so its middle is a radius short of that.
+    datum: notchMm
+      ? {
+          description:
+            `X on the datum notch's wall facing your left, Y on its wall facing you (the notch is the cut-out ` +
+            `in the near-left corner), Z on the ${FACE_NAME[face]} (now on top).`,
+          touches: [
+            { axis: 'x', face: 'datum notch, wall facing left', valueMm: notchMm - r, wallMm: notchMm },
+            { axis: 'y', face: 'datum notch, wall facing you', valueMm: notchMm - r, wallMm: notchMm },
+            { axis: 'z', face: FACE_NAME[face], valueMm: 0 },
+          ],
+        }
+      : {
+          description:
+            `X on the ${FACE_NAME[left]} (now on your left), Y on the ${FACE_NAME[near]} (now towards you), ` +
+            `Z on the ${FACE_NAME[face]} (now on top).`,
+          touches: [
+            { axis: 'x', face: FACE_NAME[left], valueMm: -r, wallMm: 0 },
+            { axis: 'y', face: FACE_NAME[near], valueMm: -r, wallMm: 0 },
+            { axis: 'z', face: FACE_NAME[face], valueMm: 0 },
+          ],
+        },
     windowBounds: window,
     clearedMm3: plan.faces[face]?.clearedMm3 ?? 0,
     depthMm: depth,
@@ -447,13 +578,31 @@ function asSetup(
   side: SolidSideResult,
   result: SolidMachiningResult,
   plan: SetupPlan | null,
-  dia: number
+  dia: number,
+  /** The datum notch an earlier setup cut for this one, as in `sideSetup`. */
+  notchMm?: number
 ): Omit<SolidSetupResult, 'index' | 'of' | 'instructions'> {
   const face: BlockFace = side.side === 'A' ? '+z' : '-z';
   const frame = setupFrame(face, result.stock);
   const pins = result.pins.length > 0 && side.side === 'B';
+  const r = dia / 2;
   return {
     ...side,
+    ...(notchMm
+      ? {
+          gcode: `; Zero X, Y   : on the far walls of the ${notchMm.toFixed(1)} mm datum notch setup 1 cut in the near-left corner, not on the sawn faces\n${side.gcode}`,
+          datum: {
+            description:
+              'X on the datum notch\'s wall facing your left, Y on its wall facing you (the notch is the cut-out in ' +
+              'the near-left corner), Z on the top face.',
+            touches: [
+              { axis: 'x' as const, face: 'datum notch, wall facing left', valueMm: notchMm - r, wallMm: notchMm },
+              { axis: 'y' as const, face: 'datum notch, wall facing you', valueMm: notchMm - r, wallMm: notchMm },
+              { axis: 'z' as const, face: FACE_NAME[face], valueMm: 0 },
+            ],
+          },
+        }
+      : {}),
     upFace: face,
     rotation: frame.rotation,
     translation: frame.translation,
@@ -539,8 +688,28 @@ export function generateSetups(scene: SceneGraph, asked: SolidMachiningOptions, 
   const { opts, chosen, exact, plan, failure } = pick;
 
   const twoSided = plan.order.includes('-z');
+  // A notch for each turned setup that can have one, cut by the setup that
+  // runs first, from its own face. See planDatumNotch.
+  const first = plan.order[0];
+  const notchFor = new Map<BlockFace, number>();
+  const notchBoxes: NotchBox[] = [];
+  const notchWarnings: string[] = [];
+  // The top as well as the ends, when it runs later: it is the setup that
+  // cuts the part free, and it has to meet what the turned setups cut.
+  for (const face of first === '-z' ? [] : plan.order.slice(1)) {
+    if (face === '-z') continue;
+    const n = planDatumNotch(face, first, exact, sideTool(opts).dia);
+    if ('why' in n) {
+      notchWarnings.push(`The ${FACE_NAME[face]} setup is zeroed on the block's sawn corner (no datum notch: ${n.why}), so it lines up only as well as the block is square.`);
+      continue;
+    }
+    notchFor.set(face, n.sizeMm);
+    if (!notchBoxes.some((m) => m.x0 === n.box.x0 && m.y0 === n.box.y0 && m.z0 === n.box.z0)) notchBoxes.push(n.box);
+  }
+  const notches = first === '+z' ? notchBoxes.map(asTopNotch) : [];
   const sidesOpts: SolidMachiningOptions = {
     ...opts,
+    ...(notches.length > 0 ? { datumNotches: notches } : {}),
     up: chosen.p.up,
     sides: twoSided ? 2 : 1,
     // Pins go in the frame at the ends; with an end flush there is none, and
@@ -561,12 +730,15 @@ export function generateSetups(scene: SceneGraph, asked: SolidMachiningOptions, 
 
   // The two-sided job's own "neither side can see" figure is the old question;
   // what the plan leaves is said in its summary instead.
-  const warnings = result.warnings.filter((w) => !/material neither side can see|under a surface the one side cannot see/.test(w));
+  const warnings = [
+    ...result.warnings.filter((w) => !/material neither side can see|under a surface the one side cannot see/.test(w)),
+    ...notchWarnings,
+  ];
   const built: Omit<SolidSetupResult, 'index' | 'of' | 'instructions'>[] = [];
   for (const face of plan.order) {
-    if (face === '+z') { built.push(asSetup(result.sides[0], result, plan, sidesOpts.finishingToolDiaMm)); continue; }
+    if (face === '+z') { built.push(asSetup(result.sides[0], result, plan, sidesOpts.finishingToolDiaMm, notchFor.get('+z'))); continue; }
     if (face === '-z') { built.push(asSetup(result.sides[1], result, plan, sidesOpts.finishingToolDiaMm)); continue; }
-    const s = sideSetup(face, exact, plan, sidesOpts, carveOpts, warnings);
+    const s = sideSetup(face, exact, plan, sidesOpts, carveOpts, warnings, notchFor.get(face), face === first ? notchBoxes : []);
     // A setup the plan needs and cannot have is a part that comes out wrong.
     if ('error' in s) {
       return {

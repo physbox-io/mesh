@@ -51,6 +51,18 @@ export function SetupChangeDialog({
   const frame = setupFrame(setup.upFace, firstStock);
   const r = toolDiaMm / 2;
   const onPins = setup.locate === 'pins';
+  /*
+   * Where X and Y are set, from the setup's own datum: a face, or the wall of
+   * the datum notch an earlier setup cut, some way in from the face. The bit
+   * fitted here touches it from outside, so its middle is a radius short.
+   * Never assumed to be the face: on a notch that put the part a notch out.
+   */
+  const touch = (axis: 'x' | 'y') => {
+    const t = setup.datum?.touches.find((d) => d.axis === axis);
+    return { at: (t?.wallMm ?? 0) - r, face: t?.face };
+  };
+  const tx = touch('x'), ty = touch('y');
+  const onNotch = (tx.face ?? '').startsWith('datum notch');
   const connected = machineState.connected && machineState.status === 'IDLE';
 
   const act = async (key: string, run: () => Promise<{ success: boolean; message: string } | void>) => {
@@ -147,18 +159,20 @@ export function SetupChangeDialog({
           body: (
             <div className="space-y-2">
               <p>
-                Jog the side of the bit up to each face with a slip of paper between, until the paper just drags, then
-                press the button. The bit is {toolDiaMm} mm, so its centre is {r.toFixed(2)} mm off the face.
+                {onNotch
+                  ? <>Lower the bit into the notch cut in the near-left corner. Jog its side up to each of the notch's two inner walls with a slip of paper between, until the paper just drags, then press the button. They were cut by this machine in the first setup, so the zero matches it whatever shape the sawn block is.</>
+                  : <>Jog the side of the bit up to each face with a slip of paper between, until the paper just drags, then press the button.</>}
+                {' '}The bit is {toolDiaMm} mm, so its centre is {r.toFixed(2)} mm off what it touches.
               </p>
               <JogPad disabled={!connected} />
               <div className="flex flex-wrap items-center gap-2">
                 <button type="button" disabled={!connected} className={btn}
-                  onClick={() => act('x', () => webSerialManager.setWorkPosition({ x: -r }, paperMm))}>
-                  <Crosshair className="w-3.5 h-3.5" /> Set X on the {FACE_NAME[frame.faceAt.left]} (left) {done.x && <Check className="w-3.5 h-3.5 text-emerald-500" />}
+                  onClick={() => act('x', () => webSerialManager.setWorkPosition({ x: tx.at }, paperMm))}>
+                  <Crosshair className="w-3.5 h-3.5" /> Set X on the {onNotch ? 'notch wall facing left' : `${FACE_NAME[frame.faceAt.left]} (left)`} {done.x && <Check className="w-3.5 h-3.5 text-emerald-500" />}
                 </button>
                 <button type="button" disabled={!connected} className={btn}
-                  onClick={() => act('y', () => webSerialManager.setWorkPosition({ y: -r }, paperMm))}>
-                  <Crosshair className="w-3.5 h-3.5" /> Set Y on the {FACE_NAME[frame.faceAt.near]} (towards you) {done.y && <Check className="w-3.5 h-3.5 text-emerald-500" />}
+                  onClick={() => act('y', () => webSerialManager.setWorkPosition({ y: ty.at }, paperMm))}>
+                  <Crosshair className="w-3.5 h-3.5" /> Set Y on the {onNotch ? 'notch wall facing you' : `${FACE_NAME[frame.faceAt.near]} (towards you)`} {done.y && <Check className="w-3.5 h-3.5 text-emerald-500" />}
                 </button>
               </div>
               <ZTouch paperMm={paperMm} setPaperMm={setPaperMm} connected={connected}

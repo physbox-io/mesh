@@ -381,3 +381,20 @@ Still to do:
 - Push physbox_api, Mesh, physbox_mcp (+ version bump and GitHub release), watch CI and
   Cloud Build. The Mesh tab's SCAD worker had crashed (validate_scad on a cube failed);
   unrelated to this work.
+
+## Progress, 2026-10-25: the datum notch, and why not pins on turns
+
+- **Pins on a 90° turn are dropped.** After a turn the face the block bears on is a side of the
+  original block (the back, an end). A 3-axis router only bores down into whichever face is up, and
+  that face was never up in an earlier setup, so nothing can bore pin holes into it. Pins stay for
+  the −Z flip, where the through holes double as the spoilboard's.
+- **Datum notch, done.** The setup that runs first cuts a cube (bit + 2 mm, at least 6 mm) out of a
+  waste corner, as part of its own target surface. A later setup whose left or near face is the
+  first setup's face is zeroed on two of the cube's inner walls, which stand on its top at a known
+  distance in from its near-left corner (`planDatumNotch`, `solidSetups.ts`). Touches carry
+  `wallMm`; the turn dialog sets `wallMm − r` for the bit fitted (it used to hardcode `−r`, which
+  would have put a notch-zeroed setup a notch out). A later top setup gets one too: it is the setup
+  that frees the part. Where the part comes within the notch + 1 mm of the corner, or the corner is
+  not on the first setup's face (an opposite end), the setup zeroes on the sawn corner and the
+  result says why. Tests: `tests/datumNotch.test.ts` (mills the first setup's program).
+- Left: the user's manual pass on the dialog, the cards, the turn dialog and the relief hand-off.

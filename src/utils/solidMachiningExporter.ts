@@ -151,6 +151,22 @@ export interface SolidMachiningOptions extends Omit<ReliefCarveOptions, ReliefOn
    * through 15-20 mm of stock. The top and flip run off that edge.
    */
   flushFaces?: BlockFace[];
+  /**
+   * Corner notches the first (top) setup cuts into waste, in its own frame
+   * (x 0..width, y 0..depth, z down from the top), so a turned setup can be
+   * zeroed on walls this machine cut rather than on the sawn corner of the
+   * block. Set by the setup planner; see `planDatumNotches`.
+   */
+  datumNotches?: DatumNotch[];
+}
+
+/** A cube of waste cut out of one corner of the block from the top. mm, setup 1's frame. */
+export interface DatumNotch {
+  x0: number;
+  x1: number;
+  y0: number;
+  y1: number;
+  depthMm: number;
 }
 
 export const DEFAULT_SOLID_OPTIONS: SolidMachiningOptions = {
@@ -1416,6 +1432,22 @@ function generateSolidSides(
         }
       }
     }
+    // The datum notches: waste the planner chose for them, cut on side A like
+    // any other, so roughing and finishing take them out with the rest.
+    if (side === 'A') {
+      for (const n of opts.datumNotches ?? []) {
+        for (let r = 0; r < rows; r++) {
+          const y = r * stepY;
+          if (y < n.y0 - 1e-9 || y > n.y1 + 1e-9) continue;
+          for (let c = 0; c < cols; c++) {
+            const x = c * stepX;
+            if (x < n.x0 - 1e-9 || x > n.x1 + 1e-9) continue;
+            const k = r * cols + c;
+            z[k] = Math.min(z[k], -n.depthMm);
+          }
+        }
+      }
+    }
     return { minX: 0, minY: 0, maxX: stockW, maxY: stockD, cols, rows, stepX, stepY, z };
   };
 
@@ -1460,6 +1492,9 @@ function generateSolidSides(
                   }, re-zero Z on the new top face, and run side B`,
                 ]
               : [`; Through cut : ${f(opts.throughCutMm)} mm into the spoilboard`]),
+            ...(opts.datumNotches ?? []).map(
+              (n) => `; Datum notch : ${f(n.x1 - n.x0)} mm cube out of the corner at X${f(n.x0)}-${f(n.x1)} Y${f(n.y0)}-${f(n.y1)}, the zero for a turned setup`
+            ),
           ]
         : [
             '; Solid part machining — SIDE B of 2',
