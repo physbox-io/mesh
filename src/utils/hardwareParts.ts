@@ -99,6 +99,9 @@ export const PARTS_FOR_CUT: Record<HardwareCutKind, HardwarePartKind[]> = {
   bearing: ['bearing'],
   counterbore: ['screw'],
   nut_trap: ['nut'],
+  // Not seated yet: its nut is buried under the face, which the nut seat in
+  // seatFor (measured down from the face) does not place.
+  nut_slot: [],
   insert: ['screw'],
   insert_boss: ['screw'],
   oring: ['oring'],
@@ -332,7 +335,7 @@ function quiet(node: SceneNode) {
 
 /** The cut piece a part is placed against: the pocket it drops into, or the bore it goes down. */
 const SEAT_PIECE: Record<HardwareCutKind, string> = {
-  bearing: 'pocket', nut_trap: 'pocket', counterbore: 'head', insert: 'bore', insert_boss: 'bore', oring: 'groove', seal_cord: 'groove',
+  bearing: 'pocket', nut_trap: 'pocket', nut_slot: 'slot', counterbore: 'head', insert: 'bore', insert_boss: 'bore', oring: 'groove', seal_cord: 'groove',
   rail_seat: 'channel', rod_clamp: 'bore', lm_housing: 'pocket',
 };
 
