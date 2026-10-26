@@ -80,6 +80,29 @@ describe('a job cut short by the controller dropping off', () => {
   });
 });
 
+describe('a job cut short on a machine whose settings had been read', () => {
+  /*
+   * The test above passed while the real thing did not: a live connection has
+   * `$$` in `grblSettings`, so standing the job down and wiping them notified
+   * once more while still connected, offered as "no job", and the throttle
+   * forgot the frame it needed before `connected: false` arrived.
+   */
+  it('still closes its run with an error', async () => {
+    const sent = attach();
+    mgr.state.grblSettings = { 110: 3000, 130: 300 };
+    posted.mockClear();
+    void webSerialManager.startJob(JOB);
+    await vi.waitFor(() => expect(sent.length).toBeGreaterThan(5));
+
+    mgr.handleTransportDisconnect(new Error('The device has been lost.'));
+    await vi.waitFor(() => {
+      const errors = posted.mock.calls.map((c) => c[1]).filter((f) => f?.status === 'error');
+      expect(errors.length).toBe(1);
+      expect(errors[0].lastError).toMatch(/Lost the connection to the controller at line \d+/);
+    });
+  });
+});
+
 describe('a job that would run off the end of an axis', () => {
   it('is refused before anything moves, with the reason', async () => {
     const sent = attach();

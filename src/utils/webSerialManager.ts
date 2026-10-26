@@ -12,7 +12,10 @@ import {
   FEED_OVERRIDE_BYTES,
   RAPID_OVERRIDE_BYTES,
   SPINDLE_OVERRIDE_BYTES,
+  locateExecutedLine,
   normalizeGrid,
+  planResume,
+  scanModalState,
   type FrameJobOptions,
   type JobPauseKind,
   type MachineState as BaseMachineState,
@@ -20,6 +23,7 @@ import {
   type OverrideStep,
   type ProbeGrid,
   type ResolvedFrames,
+  type ResumeOptions,
   type StatusReport,
 } from '@physbox-io/machining';
 
@@ -39,7 +43,7 @@ import {
   type RemoteCommand,
 } from './apiClient';
 import { cloudAutosave } from './cloudDocuments';
-import { locateExecutedLine, planResume, scanModalState, type ResumeOptions } from './jobResume';
+import { cncBedStore } from './printBedSettings';
 import { programTimeline, type ProgramTimeline } from './timeEstimate';
 import { splitGcodeComments } from './gcodeComments';
 import {
@@ -77,7 +81,7 @@ import {
   motionProfileFromSettings,
   type MotionProfile,
 } from './motionProfile';
-import { withSpindleOverride } from './spindleOverride';
+import { readSpindleMaxOverride, spindleCeilingRefusal, withSpindleOverride } from './spindleOverride';
 
 /*
  * One vocabulary across the three apps.
@@ -281,8 +285,28 @@ export interface ParkPoint {
 
 /** A program that stopped early, kept so it can be picked back up. */
 export interface ResumePoint {
-  /** The line it stopped on, in the numbering the progress display counts in. */
+  /**
+   * The line to pick it up from, in the numbering the progress display counts
+   * in. Not the line it stopped on: wound back past anything the controller had
+   * acknowledged but not yet run, and never behind a tool change or programmed
+   * stop. It is the suggestion the Run From field starts at.
+   */
   fromLine: number;
+  /**
+   * The line the stream had reached when it stopped, when that is not
+   * `fromLine`. Shown beside the suggestion so the operator can see how far
+   * back it winds, and judge whether to go back further.
+   */
+  stoppedAtLine?: number;
+  /**
+   * What the controller or the app said when it stopped, in words.
+   *
+   * Kept here rather than read from `lastError`, because unlocking the alarm —
+   * the first thing anyone does next — clears `lastError`, and the offer outlives
+   * it. A refused line said "line 4,210 refused (error:22)" and the banner then
+   * said only "the controller alarmed", which is the wrong failure to go and fix.
+   */
+  message?: string;
   totalLines: number;
   /**
    * What ended it, which is what decides how alarming to make the offer.
@@ -779,6 +803,8 @@ class WebSerialManager extends GrblMachine<MachineState> {
     post: (frame) =>
       postMachineTelemetry('physics', frame).then((commands) => this.applyRemoteCommands(commands)),
   });
+  /** Between `onLinkLost` and the link reading as closed. See `publishTelemetry`. */
+  private linkGoing = false;
   /** What the running job is, as the run archive should remember it. */
   private jobContext: { name?: string; settings?: Record<string, unknown> | null } = {};
   /**
@@ -813,13 +839,12 @@ class WebSerialManager extends GrblMachine<MachineState> {
    * leaving it "running" until the server times it out.
    */
   private publishTelemetry(state: MachineState) {
+    // The link is being torn down: the frames in between describe a job being
+    // stood down by the app, not anything the machine did. See `onLinkLost`.
+    if (this.linkGoing && state.connected) return;
     if (!state.connected) {
-      const reason = state.lastError ? ` (${state.lastError})` : '';
-      this.telemetry.connectionLost((last) => ({
-        ...last,
-        status: 'error',
-        lastError: `Lost the connection to the controller at line ${last.currentLine}${reason}.`,
-      }));
+      this.linkGoing = false;
+      this.closeRunOnLinkLoss(state.lastError);
       return;
     }
 
@@ -853,6 +878,22 @@ class WebSerialManager extends GrblMachine<MachineState> {
       state.status,
       this.isJobRunning || this.isPaused
     );
+  }
+
+  /**
+   * Closes the archived run as the crash it was, if a job was on the wire.
+   *
+   * The throttle only remembers a job frame while frames keep arriving with
+   * the job still active, which is why `onLinkLost` stops offering frames
+   * while it stands the job down.
+   */
+  private closeRunOnLinkLoss(lastError: string | undefined) {
+    const reason = lastError ? ` (${lastError})` : '';
+    this.telemetry.connectionLost((last) => ({
+      ...last,
+      status: 'error',
+      lastError: `Lost the connection to the controller at line ${last.currentLine}${reason}.`,
+    }));
   }
 
   /**
@@ -939,12 +980,37 @@ class WebSerialManager extends GrblMachine<MachineState> {
    */
   private reportedMotion: MotionProfile = DEFAULT_MOTION_PROFILE;
 
+  /**
+   * Which controller this is, for filing the spindle override under — the
+   * cloud device's id, or what `$I` says the board is (its build and any name
+   * set with `$I=`). Null until known, and for a controller that will not say,
+   * which is when the unkeyed override applies. See `spindleOverride.ts`.
+   */
+  private machineKey: string | null = null;
+
+  /** The key the spindle override for the connected controller is filed under. */
+  public spindleOverrideKey(): string | null {
+    return this.machineKey;
+  }
+
+  /**
+   * `[VER:1.1h.20190825:My router]` from `$I`. The whole body is the identity:
+   * the build alone would make every stock board of one release the same
+   * machine, and the name alone is empty on most of them.
+   */
+  protected onUnhandledLine(line: string): void {
+    const ver = /^\[VER:(.*)\]$/.exec(line.trim());
+    if (ver && this.transportMode !== 'wifi') {
+      this.machineKey = `grbl:${ver[1].trim()}`;
+    }
+  }
+
   protected updateState(patch: Partial<MachineState>): void {
     // Every write of the profile goes through the override, so no path that
     // sets it — connect, disconnect, a fresh `$$` — can forget to apply it.
     if (patch.motion) {
       this.reportedMotion = patch.motion;
-      patch = { ...patch, motion: withSpindleOverride(patch.motion) };
+      patch = { ...patch, motion: withSpindleOverride(patch.motion, readSpindleMaxOverride(this.machineKey)) };
     }
     // `needsZZero` is this app's name for the package's `zDatumTrusted`, the
     // other way up. The package sets one (a tool change), the UI reads the
@@ -1002,6 +1068,9 @@ class WebSerialManager extends GrblMachine<MachineState> {
      * this is a new one.
      */
     this.updateState({ lastError: undefined });
+    // A box on the cloud relay is named by its device id before it says
+    // anything; a board on a cable has to be asked (`$I`, after `$$`).
+    this.machineKey = this.transportMode === 'wifi' && this.getCloudDeviceId() ? `cloud:${this.getCloudDeviceId()}` : null;
     const ok = await super.connect(baudRate);
     // A failed connect is shown as disconnected with its reason, as it always
     // was here, rather than as the package's ERROR.
@@ -1034,17 +1103,33 @@ class WebSerialManager extends GrblMachine<MachineState> {
    * disconnect. Either way the same state is left behind.
    */
   protected onLinkLost(): void {
-    // The beam is out because the machine is gone. `$32` cannot be put back
-    // over a wire that has closed, which is what the breadcrumb in local
-    // storage is for — the next connection restores it.
+    // Before anything else: from here until the link reads as closed, nothing
+    // is offered to the telemetry throttle. Standing the job down below clears
+    // `isJobRunning`, and the very next state change — any machine whose `$$`
+    // has been read has a non-empty `grblSettings` to wipe — used to be offered
+    // as "no job" while the link still read as connected. That made the
+    // throttle forget the job's last frame, so when `connected: false` arrived
+    // there was no run left to close, and every real dropped cable left its run
+    // "running" until the server timed it out. Closing the run right here was
+    // tried too: the post was still in flight, and the next "connected, idle"
+    // frame replaced it in the throttle's queue before it went out.
+    //
+    // The job's state as it stands is offered once first, so the frame the run
+    // is closed from is the latest one even if no status report has changed
+    // anything since the last.
+    this.publishTelemetry(this.getState());
+    this.linkGoing = true;
     this.clearGuideSpotTimeout();
     // While the job is still known to be running, so the line it reached is
     // kept: a nudged USB cable is the commonest way a long carve dies, and the
     // program is still right here.
     if (this.isJobRunning || this.isPaused) this.abandonJob('disconnected');
+    this.parkToResume('disconnected');
     // Back to assumptions: the numbers belonged to a machine that is no longer
     // on the other end of the cable, and leaving them in place would have the
-    // next estimate quietly claiming to have been read off nothing.
+    // next estimate quietly claiming to have been read off nothing. Its spindle
+    // override goes with it, for the same reason.
+    this.machineKey = null;
     this.updateState({
       motion: DEFAULT_MOTION_PROFILE,
       grblSettings: {},
@@ -1065,14 +1150,12 @@ class WebSerialManager extends GrblMachine<MachineState> {
    */
   protected onControllerReset(): void {
     if (this.isJobRunning || this.isPaused) {
-      this.abandonJob('alarm');
+      const message =
+        'The controller restarted in the middle of the job, so the job has stopped. ' +
+        'Check where the tool is, re-home if the machine has lost its position, then resume.';
+      this.abandonJob('alarm', message);
       this.stopElapsedTicker();
-      this.updateState({
-        status: 'IDLE',
-        lastError:
-          'The controller restarted in the middle of the job, so the job has stopped. ' +
-          'Check where the tool is, re-home if the machine has lost its position, then resume.',
-      });
+      this.updateState({ status: 'IDLE', lastError: message });
     }
   }
 
@@ -1085,6 +1168,7 @@ class WebSerialManager extends GrblMachine<MachineState> {
    */
   protected onAlarm(): void {
     if (this.isJobRunning || this.isPaused) this.abandonJob('alarm');
+    this.parkToResume('alarm');
   }
 
   /**
@@ -1112,15 +1196,13 @@ class WebSerialManager extends GrblMachine<MachineState> {
     const refused =
       at !== undefined && refusal !== null && refusal.line === this.gcodeQueue[at.queueIndex];
     const line = at !== undefined ? Math.max(0, this.jobLineBase + at.queueIndex + 1) : 0;
-    this.abandonJob('alarm');
+    const message = refused
+      ? `The machine refused line ${line} of the program (${refusal.reply}), so the job has stopped ` +
+        `there. ${describeGrblError(refusal.reply)}`
+      : err.message;
+    this.abandonJob('alarm', message);
     this.stopElapsedTicker();
-    this.updateState({
-      status: 'IDLE',
-      lastError: refused
-        ? `The machine refused line ${line} of the program (${refusal.reply}), so the job has stopped ` +
-          `there. ${describeGrblError(refusal.reply)}`
-        : err.message,
-    });
+    this.updateState({ status: 'IDLE', lastError: message });
   }
 
   /**
@@ -1163,6 +1245,7 @@ class WebSerialManager extends GrblMachine<MachineState> {
     // always send: the job is dropped so nothing streams on into a machine
     // that has lost its position.
     if (machineWord === 'Alarm' && (this.isJobRunning || this.isPaused)) this.abandonJob('alarm');
+    if (machineWord === 'Alarm') this.parkToResume('alarm');
 
     // A job still starting counts: the package marks it running only once its
     // stream begins, and the heights seen meanwhile are this job's.
@@ -1271,6 +1354,22 @@ class WebSerialManager extends GrblMachine<MachineState> {
 
 
   /**
+   * Why this controller cannot run a program as exported, or null.
+   *
+   * The program asking for more spindle than `$30` gives: GRBL clamps `S`, so
+   * a job planned for a 24,000 RPM router run on a 10,000 RPM PWM spindle cuts
+   * every feed at 2.4 times the chip load. Not when the operator has given this
+   * machine a spindle override (its `S` drives nothing), and not on a laser.
+   */
+  private spindleBlockedReason(lines: readonly string[]): string | null {
+    return spindleCeilingRefusal(lines, {
+      maxRpm: this.state.grblSettings[30],
+      laser: this.laserModeEnabled(),
+      overridden: readSpindleMaxOverride(this.machineKey) !== null,
+    });
+  }
+
+  /**
    * Runs a program, whichever way this connection runs programs.
    *
    * Over USB or on the LAN the browser is the streamer and everything below
@@ -1328,6 +1427,22 @@ class WebSerialManager extends GrblMachine<MachineState> {
       return null;
     }
 
+    /*
+     * The checks `startJob` makes before streaming, made here for a job the
+     * box will stream. The package's travel check lives in `streamProgram`,
+     * which a handed-over job never reaches, so a Tekno Box ran programs that
+     * went past the end of an axis that the same machine on a cable refused.
+     * Before the setup bookkeeping below, which a refused job must not touch.
+     */
+    if (this.transport.runJob) {
+      const codes = prepareJobLines(gcode).map((l) => l.code);
+      const refusal = this.travelBlockedReason(codes) ?? this.spindleBlockedReason(codes);
+      if (refusal) {
+        this.updateState({ lastError: refusal });
+        return { delivered: false, message: refusal };
+      }
+    }
+
     const setupRefusal = this.refuseSetup(options.setup, options.origin ?? 'ui', !!this.transport.runJob);
     if (setupRefusal) {
       this.updateState({ lastError: setupRefusal });
@@ -1360,7 +1475,12 @@ class WebSerialManager extends GrblMachine<MachineState> {
         elapsedSeconds: 0,
         progressPercent: 0,
         remainingSeconds: options.estimatedSeconds ?? null,
-        pauseMessage: result.delivered ? undefined : result.message,
+        // A job the box would not take is an error, and goes where errors are
+        // shown. As a pause message on an IDLE machine nothing displayed it,
+        // and the export modals ignore what this returns — so the play button
+        // simply did nothing.
+        pauseMessage: undefined,
+        lastError: result.delivered ? undefined : result.message,
       });
       if (result.delivered) {
         this.jobStartedAt = Date.now();
@@ -1386,9 +1506,10 @@ class WebSerialManager extends GrblMachine<MachineState> {
     const prepared = prepareJobLines(gcode);
     // Before anything is set up for it: the package refuses it too, but by
     // then this job would already read as running.
-    const offTheBed = this.travelBlockedReason(prepared.map((l) => l.code));
-    if (offTheBed) {
-      this.updateState({ lastError: offTheBed });
+    const codes = prepared.map((l) => l.code);
+    const refusal = this.travelBlockedReason(codes) ?? this.spindleBlockedReason(codes);
+    if (refusal) {
+      this.updateState({ lastError: refusal });
       return;
     }
 
@@ -1582,7 +1703,7 @@ class WebSerialManager extends GrblMachine<MachineState> {
    * G-code file means nothing on its own — the units, the coordinate system,
    * the feedrate, the spindle speed and the depth the tool is meant to be at
    * were all established thousands of lines earlier. So the program is replayed
-   * without being sent (see `jobResume`), and what comes back is a short
+   * without being sent (see the package's `stream/resume`), and what comes back is a short
    * preamble that puts the machine into that state: retract, spindle back up to
    * speed, move over the point it stopped at, and only then descend into the
    * cut at a feedrate rather than a rapid.
@@ -1591,11 +1712,10 @@ class WebSerialManager extends GrblMachine<MachineState> {
    * streamed as one job, so a pause or a second failure part way through a
    * resumed job behaves exactly like any other.
    *
-   * What this deliberately does *not* do is check that the operator is ready.
-   * A resume after a snapped cutter is a resume onto a different tool, whose
-   * length is different, which makes the existing Z datum wrong in the
-   * direction of driving the new tool into the work. That is what `needsZZero`
-   * is for, and the caller is expected to have dealt with it.
+   * It refuses, in words, while `resumeBlockedReason` has one: a machine that
+   * has lost its X/Y place, or a router whose Z datum is not trusted. Both are
+   * checked here and not only by the buttons, because an agent's
+   * `resume_from_line` arrives with no button in front of it.
    */
   public resumeFromLine(fromLine: number, options?: ResumeOptions): { ok: boolean; message: string } {
     if (!this.state.connected) {
@@ -1606,6 +1726,15 @@ class WebSerialManager extends GrblMachine<MachineState> {
     }
     if (this.program.length === 0) {
       return { ok: false, message: 'There is no program to resume — nothing has been sent this session.' };
+    }
+    // Before anything is marked RUNNING. The package's `streamProgram` would
+    // refuse a lost position too, but only once this had already set the
+    // status, the clock and the line base, so the job read as running while
+    // nothing was being sent.
+    const blocked = this.resumeBlockedReason(options?.isLaser);
+    if (blocked) {
+      this.updateState({ lastError: blocked });
+      return { ok: false, message: blocked };
     }
 
     fromLine = this.pastHandledToolChange(fromLine);
@@ -1652,6 +1781,30 @@ class WebSerialManager extends GrblMachine<MachineState> {
         ? `Resuming at line ${plan.fromLine}. ${plan.state.uncertainBecause}`
         : `Resuming at line ${plan.fromLine} of ${this.programLength()}.`,
     };
+  }
+
+  /**
+   * Why a stopped job may not be picked up again right now, or null.
+   *
+   * Two things make a resume cut in the wrong place. An alarm, an unrequested
+   * restart or a dropped link mid-job leaves the controller unsure of X and Y —
+   * a hard limit that browns out the board brings it back reading zero wherever
+   * the gantry stopped, while G54 survives in EEPROM — so the package holds
+   * them lost until the machine homes or the operator zeroes them again. And a
+   * router whose Z datum is untrusted (a fresh connection, a new bit) would
+   * descend to the stopped depth measured from the wrong tip. A laser's Z never
+   * moves in a job, so only the first applies to it.
+   */
+  public resumeBlockedReason(isLaser?: boolean): string | null {
+    const position = this.positionBlockedReason();
+    if (position) return position;
+    if (this.state.needsZZero && !this.jobIsLaser(isLaser)) {
+      return (
+        'Z zero has not been set for the tool in the spindle. Zero Z in Machine Setup before resuming — ' +
+        'the resume descends back to the depth the job had reached, measured from that zero.'
+      );
+    }
+    return null;
   }
 
   /**
@@ -1917,7 +2070,7 @@ class WebSerialManager extends GrblMachine<MachineState> {
     this.refuseWhileJobHoldsMachine('park the spindle');
     if (!this.state.connected) return { success: false, message: 'Not connected to a machine.' };
     await this.sendAndWait('M5');
-    if (!this.state.hasHomed || this.topOfZTravel() === null) {
+    if (!this.state.hasHomed || this.zTravelTop() === null) {
       return {
         success: false,
         message: 'The machine has not homed, so the top of its travel is not known. Spindle stopped; jog Z up by hand.',
@@ -2118,6 +2271,25 @@ class WebSerialManager extends GrblMachine<MachineState> {
       pauseMessage: 'Stopping the axes before standing the job down…',
     });
     const stopped = await this.waitForHoldComplete();
+    /*
+     * Never reset a machine that has not confirmed it stopped. This used to
+     * carry on regardless: a reset taken while the axes are still moving is a
+     * reset in motion — ALARM:3, the position gone — and the alarm took the
+     * status out of PAUSED_PARKED, so `resumeFromPark` refused and there was
+     * no resume offer either. The job was stranded. Left in feed hold instead,
+     * it is still the job it was: Resume carries on, and parking can be tried
+     * again once the controller reports the hold complete.
+     */
+    if (!stopped) {
+      this.updateState({
+        status: 'PAUSED_OPERATOR',
+        pauseMessage:
+          'The machine did not confirm the axes had stopped, so the job has been left in feed hold ' +
+          'rather than parked — resetting a machine that may still be moving loses its position. ' +
+          'Resume to carry on, or try parking again in a moment.',
+      });
+      return false;
+    }
 
     // 2. Where it really got to, before the reset throws the buffer away.
     const at = { ...this.state.wpos };
@@ -2145,11 +2317,9 @@ class WebSerialManager extends GrblMachine<MachineState> {
     this.updateState({
       status: 'PAUSED_PARKED',
       park: { fromLine, totalLines: this.programLength(), at },
-      pauseMessage: stopped
-        ? `Job parked at line ${fromLine} of ${this.programLength()}. The machine is free to move — ` +
-          `jog it where you like, then resume.`
-        : `Job parked at line ${fromLine}, but the machine did not confirm it had stopped. Check ` +
-          `where the tool is before resuming.`,
+      pauseMessage:
+        `Job parked at line ${fromLine} of ${this.programLength()}. The machine is free to move — ` +
+        `jog it where you like, then resume.`,
     });
 
     // 4. Out of the cut, once the controller is back up: anything sent before
@@ -2180,11 +2350,47 @@ class WebSerialManager extends GrblMachine<MachineState> {
   public async resumeFromPark(options?: Pick<ResumeOptions, 'isLaser'>): Promise<boolean> {
     const park = this.state.park;
     if (!park || this.state.status !== 'PAUSED_PARKED') return false;
+    // Before the park is cleared below: a refusal from `resumeFromLine` after
+    // that point left no park and no offer, and the job could not be picked up.
+    const blocked = this.resumeBlockedReason(options?.isLaser);
+    if (blocked) {
+      this.updateState({ lastError: blocked });
+      return false;
+    }
 
     // The preamble's retract is clamped to the live Z, so read it from now.
     await this.awaitStatus();
     this.updateState({ park: null, pauseMessage: undefined });
     return this.resumeFromLine(park.fromLine, options).ok;
+  }
+
+  /**
+   * A park ended by something other than Resume or Discard — an alarm (a limit
+   * switch hit while jogging around), or the link dropping.
+   *
+   * The status leaves PAUSED_PARKED with it, and `resumeFromPark` only answers
+   * in that status, so a park left standing was a job nothing could pick up:
+   * no Resume, and no resume offer, after the cable was plugged back in. It
+   * becomes the ordinary resume offer instead, from the line the park had
+   * located, with the reason that decides how hard the banner warns.
+   */
+  private parkToResume(reason: 'alarm' | 'disconnected'): void {
+    const park = this.state.park;
+    if (!park) return;
+    recordProgress(park.fromLine, reason, true);
+    this.updateState({
+      park: null,
+      pauseMessage: undefined,
+      // The park located the executed line from where the tool stood, so the
+      // stop and the restart are the same line.
+      resume: {
+        fromLine: park.fromLine,
+        stoppedAtLine: park.fromLine,
+        totalLines: park.totalLines,
+        reason,
+        jobName: this.jobContext.name ?? null,
+      },
+    });
   }
 
   /** Throws away a parked job without resuming it. */
@@ -2278,6 +2484,18 @@ class WebSerialManager extends GrblMachine<MachineState> {
         continue;
       }
 
+      // Who it is, before the profile is applied, so the spindle override
+      // that goes on top of it is this controller's own and not the last
+      // one's. Not over a running program, which GRBL would refuse (error:8);
+      // a board that does not answer is simply unidentified.
+      if (this.machineKey === null && this.transportMode !== 'wifi' && !this.isJobRunning && !this.isPaused) {
+        try {
+          await this.sendAndWait('$I', Math.min(timeoutMs, 1500));
+        } catch {
+          // Unidentified: the unkeyed override applies.
+        }
+      }
+
       const motion = motionProfileFromSettings(settings);
       this.updateState({
         motion,
@@ -2323,7 +2541,7 @@ class WebSerialManager extends GrblMachine<MachineState> {
    */
   // Never `interrupted`: that one is by definition a job nothing here saw end,
   // so there is no call site in this class that could pass it.
-  private abandonJob(reason: Exclude<ResumePoint['reason'], 'interrupted'> = 'cancelled') {
+  private abandonJob(reason: Exclude<ResumePoint['reason'], 'interrupted'> = 'cancelled', message?: string) {
     // Where it got to, before the queue that knows it is thrown away. The line
     // that was in flight is the one to come back to rather than the one after
     // it: a move that was cut off partway through did not finish, and running
@@ -2342,6 +2560,8 @@ class WebSerialManager extends GrblMachine<MachineState> {
           totalLines: this.programLength(),
           reason,
           pendingPause: { kind: drained.kind, message: drained.message },
+          stoppedAtLine: drained.line,
+          ...(message ? { message } : {}),
           jobName: this.jobContext.name ?? null,
         },
       });
@@ -2370,7 +2590,14 @@ class WebSerialManager extends GrblMachine<MachineState> {
       // be the one write that mattered and did not happen.
       recordProgress(stoppedAt, reason, true);
       this.updateState({
-        resume: { fromLine: stoppedAt, totalLines: this.programLength(), reason, jobName: this.jobContext.name ?? null },
+        resume: {
+          fromLine: stoppedAt,
+          stoppedAtLine: sent,
+          ...(message ? { message } : {}),
+          totalLines: this.programLength(),
+          reason,
+          jobName: this.jobContext.name ?? null,
+        },
       });
     }
 
@@ -2725,24 +2952,6 @@ class WebSerialManager extends GrblMachine<MachineState> {
     }
   }
   /**
-   * The machine Z at the top of Z travel, or null when the settings do not say.
-   *
-   * GRBL homes Z to a limit switch and calls that position machine zero, so on
-   * the usual setup — switch at the top — the whole of Z travel is negative and
-   * the ceiling is 0. `$23` bit 2 inverts the Z homing direction, which puts
-   * the switch at the bottom and the ceiling at `$132` instead. Both are read
-   * off the controller rather than assumed, because guessing the sign here is
-   * guessing which end of the machine the tool gets driven into.
-   */
-  private topOfZTravel(): number | null {
-    const invertMask = this.state.grblSettings[23];
-    if (invertMask === undefined) return null;
-    if ((invertMask & 4) === 0) return 0;
-    const maxTravel = this.state.grblSettings[132];
-    return maxTravel !== undefined && maxTravel > 0 ? maxTravel : null;
-  }
-
-  /**
    * Lifts the tool clear of the work without driving it into the top of travel,
    * and says whether it is now clear of the stock top.
    *
@@ -2763,11 +2972,15 @@ class WebSerialManager extends GrblMachine<MachineState> {
    * from the pause banner if they need more room.
    */
   private async retractClearOfWork(): Promise<boolean> {
-    const top = this.topOfZTravel();
+    // From the package, which takes the top from where homing really came to
+    // rest rather than assuming machine zero (or `$132`) is it. The old local
+    // reading did assume that, and firmware differs on what it calls home: on
+    // one that reports the switch as a positive MPos, a lift to "0 less the
+    // pull-off" was a rapid downward.
+    const top = this.zTravelTop();
 
     if (this.state.hasHomed && top !== null) {
-      const pullOff = this.state.grblSettings[27] ?? 1;
-      await this.sendLine(`G53 G0 Z${(top - Math.max(0, pullOff) - RETRACT_BELOW_PULLOFF_MM).toFixed(3)}`);
+      await this.sendLine(`G53 G0 Z${(top - RETRACT_BELOW_PULLOFF_MM).toFixed(3)}`);
       return true;
     }
 
@@ -3073,18 +3286,24 @@ class WebSerialManager extends GrblMachine<MachineState> {
       throw new Error(message);
     }
 
-    await this.sendLine('G21');
-    await this.sendLine('G90');
+    /*
+     * The whole lap is written out first and checked against the machine's
+     * travel before any of it is sent. It used to go out a line at a time
+     * through `sendLine`, which no travel check sees — only `streamProgram`
+     * runs one — so a frame of a job placed past the end of an axis drove into
+     * the limit, while the job itself would have been refused.
+     */
+    const lap: string[] = ['G21', 'G90'];
 
     if (!laserMode) {
       await this.awaitStatus();
       const retractZ = Math.max(safeZMm, this.state.wpos.z);
-      await this.sendLine(`G0 Z${retractZ.toFixed(3)}`);
+      lap.push(`G0 Z${retractZ.toFixed(3)}`);
     }
 
     // No F on a rapid: GRBL ignores it for the move but keeps it as the modal
     // feed, so the next G1 without one of its own would run at it.
-    await this.sendLine(`G0 X${minX.toFixed(3)} Y${minY.toFixed(3)}`);
+    lap.push(`G0 X${minX.toFixed(3)} Y${minY.toFixed(3)}`);
 
     const corners: Array<[number, number]> = [
       [maxX, minY],
@@ -3096,18 +3315,22 @@ class WebSerialManager extends GrblMachine<MachineState> {
     if (laserMode) {
       // A percentage, like the guide spot's, scaled by `$30`: a raw `S5` is
       // 0.05% duty on a 10000-scale controller, a lap nobody can see.
-      await this.sendLine(`M3 S${this.guidePowerAsS(guidePower)}`);
-      for (const [x, y] of corners) {
-        await this.sendLine(`G1 X${x.toFixed(3)} Y${y.toFixed(3)} F3000`);
-      }
-      await this.sendLine('M5 S0');
+      lap.push(`M3 S${this.guidePowerAsS(guidePower)}`);
+      for (const [x, y] of corners) lap.push(`G1 X${x.toFixed(3)} Y${y.toFixed(3)} F3000`);
+      lap.push('M5 S0');
     } else {
       // No `M3` at all: a program with none in it cannot start a spindle by
       // accident, and there is nothing to cut with here anyway.
-      for (const [x, y] of corners) {
-        await this.sendLine(`G0 X${x.toFixed(3)} Y${y.toFixed(3)}`);
-      }
+      for (const [x, y] of corners) lap.push(`G0 X${x.toFixed(3)} Y${y.toFixed(3)}`);
     }
+
+    const offTheBed = this.travelBlockedReason(lap);
+    if (offTheBed) {
+      this.updateState({ lastError: offTheBed });
+      throw new Error(offTheBed);
+    }
+
+    for (const line of lap) await this.sendLine(line);
   }
 
   /** Emergency stop: a soft reset (Ctrl-X). */
@@ -3137,3 +3360,9 @@ class WebSerialManager extends GrblMachine<MachineState> {
 }
 
 export const webSerialManager = new WebSerialManager();
+
+// The owner's figure for the working envelope, for the travel check wherever
+// the controller has not reported its own; kept current as it is edited or
+// arrives from the account.
+webSerialManager.setBed(cncBedStore.get());
+cncBedStore.subscribe((bed) => webSerialManager.setBed(bed));

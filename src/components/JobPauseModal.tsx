@@ -1,6 +1,6 @@
 import React from 'react';
 import { createPortal } from 'react-dom';
-import { Wrench, Layers, Minus } from 'lucide-react';
+import { Layers, Minus } from 'lucide-react';
 import { webSerialManager, type MachineState } from '../utils/webSerialManager';
 import { JobPauseBanner } from './MachineJobControls';
 import { useJobPause, pauseKey } from '../store/jobPauseStore';
@@ -8,6 +8,11 @@ import { useJobPause, pauseKey } from '../store/jobPauseStore';
 /** Stops that wait on the operator, as opposed to a feed hold they just pressed. */
 function isOperatorStop(status: MachineState['status']): boolean {
   return status === 'PAUSED_TOOL' || status === 'PAUSED_MATERIAL' || status === 'PAUSED_PARKED';
+}
+
+/** A tool change has its own dialog, `ToolChangeModal`. */
+function isNonToolStop(status: MachineState['status']): boolean {
+  return status === 'PAUSED_MATERIAL' || status === 'PAUSED_PARKED';
 }
 
 /**
@@ -36,10 +41,9 @@ export const JobPauseModal: React.FC = () => {
 
   const { status, pauseMessage } = machineState;
   const key = pauseKey(status, pauseMessage);
-  if (!isOperatorStop(status) || hiddenKey === key) return null;
+  if (!isNonToolStop(status) || hiddenKey === key) return null;
 
   const laser = webSerialManager.isLaserJob();
-  const toolChange = status === 'PAUSED_TOOL';
   const resumeLabel =
     status === 'PAUSED_MATERIAL' ? 'Resume Next Sheet (Cycle Start)' : 'Resume Job (Cycle Start)';
 
@@ -56,12 +60,8 @@ export const JobPauseModal: React.FC = () => {
             id="job-pause-title"
             className="font-bold text-slate-800 dark:text-slate-100 text-base flex items-center gap-2"
           >
-            {toolChange ? (
-              <Wrench className="w-5 h-5 text-amber-500" />
-            ) : (
-              <Layers className="w-5 h-5 text-amber-500" />
-            )}
-            {toolChange ? 'Tool change' : status === 'PAUSED_MATERIAL' ? 'Material change' : 'Job parked'}
+            <Layers className="w-5 h-5 text-amber-500" />
+            {status === 'PAUSED_MATERIAL' ? 'Material change' : 'Job parked'}
           </h3>
           <button
             onClick={() => hide(key)}

@@ -59,6 +59,7 @@ import { loadManifold } from '../utils/sculptCut';
 import {
   collectIndividualPartSoups,
   decomposeSolidIntoPlanks,
+  resolveTimberTargetIds,
   type PlankJointType,
 } from '../utils/timberBreakdown';
 import { synthesizeTimberJoinery, type TenonCornerFit, type TimberEdgeProfile, type TimberJointMode } from '../utils/timberJoinery';
@@ -3813,19 +3814,21 @@ export function useMCPBridge() {
         case 'TIMBER_BREAKDOWN':
         case 'PHYSICS_TIMBER_BREAKDOWN':
         case 'BREAKDOWN_JOINERY': {
-          const bodyId =
+          const explicitBodyId =
             typeof msg.bodyId === 'string'
               ? msg.bodyId
               : typeof msg.body_id === 'string'
                 ? msg.body_id
-                : store.selectedNodeId;
+                : null;
           const rawWithIds = Array.isArray(msg.withIds)
             ? msg.withIds
             : Array.isArray(msg.with_ids)
               ? msg.with_ids
               : [];
           const others = rawWithIds.filter((v): v is string => typeof v === 'string');
-          const targetIds = bodyId ? [bodyId, ...others] : store.sceneGraph.nodes.map((n) => n.id);
+          const targetIds = explicitBodyId
+            ? [explicitBodyId, ...others]
+            : resolveTimberTargetIds(store.sceneGraph.nodes, store.selectedNodeId, others);
           if (!targetIds.length) return { ok: false, error: 'Give bodyId, or add a body to the scene first.' };
           const primary = findNodeInScene(store.sceneGraph.nodes, targetIds[0]);
           if (!primary) return { ok: false, error: `No body called ${targetIds[0]}.` };

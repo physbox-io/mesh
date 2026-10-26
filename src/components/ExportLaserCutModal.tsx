@@ -25,6 +25,7 @@ import {
 import { warpGcode, type ProbeGrid } from '../utils/meshLeveler';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { HintAnchor } from './ExportFields';
+import { RackToolPicker } from './RackToolPicker';
 import { useAddSimulation } from '../hooks/useAddSimulation';
 import { laserSheetParts, laserStockTransform } from '../utils/sheetSimulation';
 
@@ -401,6 +402,8 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
       faceToThickness,
       // Each sheet's own thickness, for a rack of mixed stock.
       sheetStockThicknessMm,
+      // And their sizes, so a surfacing bit's edge is kept on the sheet.
+      sheetSizeMm: exportResult.sheets?.map((s) => ({ widthMm: s.widthMm, heightMm: s.heightMm })),
       zStepdown: Math.min(f.materialThicknessMm, 3.0),
       attachmentsEnabled: f.attachments,
       attachmentWidthMm: f.attachmentWidthMm,
@@ -702,13 +705,23 @@ export const ExportLaserCutModal: React.FC<ExportLaserCutModalProps> = ({
                     : 'Diameter of the end mill. It sets how far the relief cuts have to reach into each inside corner. Only read when corner relief is on.'
                 }
               >
-                <NumberInput
-                  step={0.1} min={0.1} max={50}
-                  disabled={machineMode !== 'cnc' && cornerRelief === 'none'}
-                  value={bitDiameterMm}
-                  onChange={(v) => v !== undefined && setBitDiameterMm(v)}
-                  className={inputClass}
-                />
+                <div className="flex gap-1.5">
+                  <NumberInput
+                    step={0.1} min={0.1} max={50}
+                    disabled={machineMode !== 'cnc' && cornerRelief === 'none'}
+                    value={bitDiameterMm}
+                    onChange={(v) => v !== undefined && setBitDiameterMm(v)}
+                    className={`${inputClass} min-w-0`}
+                  />
+                  {/* Every path is offset by half this, so it is the profile
+                      bit's own diameter: a flat end mill. */}
+                  <RackToolPicker
+                    shapes={['flat']}
+                    diameterMm={bitDiameterMm}
+                    disabled={machineMode !== 'cnc' && cornerRelief === 'none'}
+                    onPick={(t) => setBitDiameterMm(t.diameterMm)}
+                  />
+                </div>
               </Field>
               <Field
                 label="Feedrate (mm/m)"

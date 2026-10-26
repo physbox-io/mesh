@@ -427,7 +427,11 @@ describe('Timber & Joinery Breakdown (Table, Chair & 3ft Flower Stand)', () => {
   it('produces saw cuts and dowel hole drilling steps with zero CNC mortises or slots when jointMode is dowel', async () => {
     const wasm = await loadManifold();
     const { flowerStandPreset } = await import('../src/presets/presetScenes');
-    const { collectIndividualPartSoups } = await import('../src/utils/timberBreakdown');
+    const { collectIndividualPartSoups, resolveTimberTargetIds } = await import('../src/utils/timberBreakdown');
+
+    // Selecting a child part (like Leg_FL or Top_Plank_1) in the viewport climbs to the parent assembly ('flower_stand')
+    expect(resolveTimberTargetIds(flowerStandPreset.nodes, 'Leg_FL')).toEqual(['flower_stand']);
+    expect(resolveTimberTargetIds(flowerStandPreset.nodes, 'Top_Plank_1')).toEqual(['flower_stand']);
 
     const { items } = collectIndividualPartSoups(flowerStandPreset, ['flower_stand']);
     const res = synthesizeTimberJoinery(
@@ -435,6 +439,7 @@ describe('Timber & Joinery Breakdown (Table, Chair & 3ft Flower Stand)', () => {
       items.map((it) => it.soup),
       {
         jointMode: 'dowel',
+        tenonLengthMm: 20,
         edgeProfile: 'roundover',
         edgeRadiusMm: 4,
         maxBoardWidthMm: 200,
@@ -458,6 +463,9 @@ describe('Timber & Joinery Breakdown (Table, Chair & 3ft Flower Stand)', () => {
       expect(card.cncSetups.length).toBe(0);
       expect(card.bandsawSteps.some((s) => s.includes('dowel hole'))).toBe(true);
     }
+    // Verify Dowel Depth (tenonLengthMm = 20 mm) yields 40 mm dowel pins and 21 mm hole depth (20 mm + 1 mm relief)
+    const legCard = plan.partCards.find((c) => c.partId === 'Leg_FL')!;
+    expect(legCard.bandsawSteps.some((s) => s.includes('21 mm dowel hole'))).toBe(true);
   });
 
   it('produces flush glue-only parts with zero mortises, tenons, dowels, or CNC setups when jointMode is butt', async () => {

@@ -10,6 +10,9 @@ import { webSerialManager } from '../src/utils/webSerialManager';
  * be a pause that took a minute to happen.
  */
 function attachFakeGrbl() {
+  // These boards report no travel, so the shared bed would stand in for it and
+  // refuse the long test programs; the travel check has its own tests in the package.
+  webSerialManager.setBed(null);
   const mgr = webSerialManager as unknown as {
     transport: {
       label: string;
@@ -39,6 +42,16 @@ function attachFakeGrbl() {
   mgr.state.status = 'IDLE';
   mgr.state.lastError = undefined;
   mgr.state.needsZZero = false;
+  // A singleton: an alarm or restart in an earlier test leaves the machine's
+  // position lost, and the package then refuses to stream until X and Y are
+  // homed or zeroed. Each board here starts as one that has been, the way an
+  // operator gets there: a homing cycle, reported as `Home` while it runs and
+  // the `Idle` that ends it.
+  mgr.parseLine('<Home|MPos:0.000,0.000,0.000|FS:0,0>');
+  mgr.parseLine('<Idle|MPos:0.000,0.000,0.000|FS:0,0>');
+  // Homed for the position's sake only. Whether the machine knows its Z
+  // ceiling is something the tests that lift to it decide for themselves.
+  mgr.state.hasHomed = false;
   // As a fresh connection leaves it. A real board follows a G10 with a `WCO:`
   // in its next report; this one never sends one, so an earlier test's zero
   // would otherwise leave work Z pinned where it was.
@@ -521,6 +534,17 @@ describe('getting clear of the work for a tool change', () => {
 
   const TOOL_CHANGE_JOB = 'G21\nG90\nG1 X10 F600\nT2 M6\nG1 X20\n';
 
+  /**
+   * The controller's settings, as it reports them: `$N=value` lines, which the
+   * package files away and reads the top of Z travel from. Mirrored into the
+   * app's own copy, which the manager fills from the same lines after a `$$`.
+   */
+  const settings = (values: Record<number, number>) => {
+    const mgr = internals();
+    mgr.state.grblSettings = values;
+    for (const [n, v] of Object.entries(values)) mgr.parseLine(`$${n}=${v}`);
+  };
+
   beforeEach(() => {
     fake = attachFakeGrbl();
   });
@@ -528,13 +552,15 @@ describe('getting clear of the work for a tool change', () => {
     await webSerialManager.cancelJob();
     fake.detach();
     // The manager is a singleton, so both of these outlive the fake board.
+    // `$132=0` is a Z span the package will not read a ceiling from.
+    settings({ 23: 0, 27: 1, 132: 0 });
     internals().state.grblSettings = {};
     internals().state.hasHomed = false;
   });
 
   it('lifts in machine coordinates, under the pull-off point, once homed', async () => {
     const mgr = internals();
-    mgr.state.grblSettings = { 23: 0, 132: 80, 27: 2 };
+    settings({ 23: 0, 132: 80, 27: 2 });
     // A homing cycle, as the controller reports one: `Home` while it runs, and
     // the `Idle` that follows is the moment MPos means something.
     mgr.parseLine('<Home|MPos:0.000,0.000,-40.000|FS:0,0>');
@@ -560,7 +586,7 @@ describe('getting clear of the work for a tool change', () => {
    */
   it('waits for the buffered moves to run before lifting, and lifts no higher than the job has been', async () => {
     const mgr = internals();
-    mgr.state.grblSettings = { 23: 0, 132: 80 };
+    settings({ 23: 0, 132: 80, 27: 1 });
     webSerialManager.startJob(
       'G21\nG90\nG0 Z5.000\nG1 Z-3.500 F300\nG1 X10 F600\nG0 Z20.000\nT2 M6 ; fit the ball nose\nG1 X20\n'
     );
@@ -599,7 +625,7 @@ describe('getting clear of the work for a tool change', () => {
 
   it('forgets that it was homed when the controller alarms', async () => {
     const mgr = internals();
-    mgr.state.grblSettings = { 23: 0, 132: 80 };
+    settings({ 23: 0, 132: 80, 27: 1 });
     mgr.parseLine('<Home|MPos:0.000,0.000,-40.000|FS:0,0>');
     mgr.parseLine('<Idle|MPos:0.000,0.000,0.000|FS:0,0>');
     // A hard limit: the drive is cut rather than decelerated, so the steps
@@ -906,5 +932,105 @@ describe('a parked job', () => {
 
     expect(await webSerialManager.resumeFromPark({ isLaser: true })).toBe(true);
     expect(webSerialManager.getState().status).toBe('RUNNING');
+  });
+});
+
+/*
+ * A resume after the machine has lost its place, or onto a Z datum nobody has
+ * confirmed, cuts in the wrong place. The package refuses a lost position in
+ * `streamProgram`, but by then the app had already marked the job RUNNING, set
+ * its clock and dropped the offer, so a refused resume read as a running job
+ * that sent nothing. And the Z check lived only on the buttons, which an
+ * agent's `resume_from_line` never presses.
+ */
+describe('resuming after a reset, an alarm or a new tool', () => {
+  let fake: ReturnType<typeof attachFakeGrbl>;
+  const mgr = () => webSerialManager as unknown as { parseLine: (l: string) => void; state: Record<string, unknown> };
+
+  const ROUTER = ['G21', 'G90', 'G0 Z5.000', 'G1 Z-1.000 F300',
+    ...Array.from({ length: 200 }, (_, i) => `G1 X${(i + 1) * 10} F600`)].join('\n');
+
+  beforeEach(() => {
+    fake = attachFakeGrbl();
+  });
+  afterEach(async () => {
+    webSerialManager.discardPark();
+    await webSerialManager.cancelJob();
+    webSerialManager.clearResumePoint();
+    fake.detach();
+  });
+
+  /** A hard limit mid-cut: the `ALARM:` line, which is what loses the position. */
+  async function hardLimitMidJob() {
+    webSerialManager.startJob(ROUTER);
+    await advance(20);
+    mgr().parseLine('ALARM:1');
+    await settle();
+    await webSerialManager.unlockAlarm();
+  }
+
+  it('keeps the words and the line it stopped at with the offer', async () => {
+    await hardLimitMidJob();
+    const resume = webSerialManager.getState().resume!;
+    // Unlocking cleared lastError; the offer still says what happened.
+    expect(resume.message).toBeTruthy();
+    expect(resume.stoppedAtLine).toBeGreaterThanOrEqual(resume.fromLine);
+  });
+
+  it('refuses until the machine is homed, without marking anything as running', async () => {
+    await hardLimitMidJob();
+    const offer = webSerialManager.getState().resume;
+    const sentBefore = fake.lines().length;
+
+    const refused = webSerialManager.resumeFromLine(offer!.fromLine);
+    expect(refused.ok).toBe(false);
+    expect(refused.message).toMatch(/lost its position/);
+    expect(webSerialManager.resumeBlockedReason()).toMatch(/Home it/);
+    expect(webSerialManager.getState().status).not.toBe('RUNNING');
+    expect(webSerialManager.getState().resume).toEqual(offer);
+    await advance(4);
+    expect(fake.lines().length).toBe(sentBefore);
+
+    mgr().parseLine('<Home|MPos:0.000,0.000,0.000|FS:0,0>');
+    mgr().parseLine('<Idle|MPos:0.000,0.000,0.000|FS:0,0>');
+    expect(webSerialManager.resumeFromLine(offer!.fromLine).ok).toBe(true);
+  });
+
+  it('takes zeroing X and Y again in place of homing', async () => {
+    await hardLimitMidJob();
+    await webSerialManager.zeroXY();
+    expect(webSerialManager.resumeBlockedReason()).toBeNull();
+  });
+
+  it('refuses a router whose Z has not been re-zeroed, from any caller', async () => {
+    webSerialManager.startJob(ROUTER);
+    await advance(20);
+    // The alarm word without the line: the position survives, the bit may not.
+    mgr().parseLine('<Alarm|MPos:0.000,0.000,0.000|FS:0,0>');
+    await webSerialManager.unlockAlarm();
+    mgr().state.needsZZero = true;
+
+    const refused = webSerialManager.resumeFromLine(webSerialManager.getState().resume!.fromLine);
+    expect(refused.ok).toBe(false);
+    expect(refused.message).toMatch(/Z zero/);
+    expect(webSerialManager.getState().status).not.toBe('RUNNING');
+
+    // A laser's Z never moves in a job, so its datum cannot hold it back.
+    expect(webSerialManager.resumeBlockedReason(true)).toBeNull();
+  });
+
+  it('refuses to put a park back on an unzeroed Z, and keeps the park', async () => {
+    webSerialManager.startJob(ROUTER);
+    await advance(3);
+    fake.board.report = '<Hold:0|MPos:0.000,0.000,0.000|FS:0,0>';
+    expect(await webSerialManager.parkJob({ isLaser: true })).toBe(true);
+    fake.board.report = '<Idle|MPos:0.000,0.000,0.000|FS:0,0>';
+    // A new bit while it was parked.
+    mgr().state.needsZZero = true;
+
+    expect(await webSerialManager.resumeFromPark({ isLaser: false })).toBe(false);
+    expect(webSerialManager.getState().status).toBe('PAUSED_PARKED');
+    expect(webSerialManager.getState().park).not.toBeNull();
+    expect(webSerialManager.getState().lastError).toMatch(/Z zero/);
   });
 });

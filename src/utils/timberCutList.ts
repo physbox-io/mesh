@@ -10,6 +10,7 @@ import type {
   ZClipSlotSpec,
 } from './timberJoinery';
 import type { Vec3 } from './printPlate';
+import { DEFAULT_MATERIAL, recommendSpeeds, type MaterialId, type SpindleRange } from './feedsAndSpeeds';
 
 export interface TimberStockBarSpec {
   /** Nominal cross-section [widthMm, thicknessMm]. */
@@ -106,14 +107,68 @@ export interface CutPlanOptions {
   sawKerfMm?: number;
   /** Extra rough-crosscut allowance per part for squaring ends, mm. Default 10 mm. */
   roughAllowanceMm?: number;
-  /** Spindle RPM for CNC G-code. Default 12000. */
+  /**
+   * Spindle RPM for CNC G-code. Derived from the cutter, material and machine
+   * when any of `material`, `spindle` or `maxFeedMmMin` is given; 12000
+   * otherwise.
+   */
   spindleRpm?: number;
-  /** XY feedrate in timber, mm/min. Default 900. */
+  /** XY feedrate in timber, mm/min. Derived as above; 900 otherwise. */
   feedRateMmMin?: number;
-  /** Z plunge rate in timber, mm/min. Default 250. */
+  /** Z plunge rate in timber, mm/min. Derived as above; 250 otherwise. */
   plungeRateMmMin?: number;
-  /** Max Z stepdown per pass, mm. Default 2.5 mm. */
+  /** Max Z stepdown per pass, mm. Derived as above; 2.5 mm otherwise. */
   stepdownMm?: number;
+  /** What the timber is, for deriving feeds and speeds. */
+  material?: MaterialId;
+  /** Flutes on the mortising cutter. Default 2. */
+  cutterFlutes?: number;
+  /** The controller's spindle range (`$30`/`$31`, or the operator's override). */
+  spindle?: SpindleRange | null;
+  /** Fastest the gantry tracks while cutting, mm/min — the lower of `$110`/`$111`. */
+  maxFeedMmMin?: number;
+}
+
+/**
+ * Feeds, speeds and stepdown for mortising, worked out from the cutter, the
+ * timber and the machine when the caller says what they are.
+ *
+ * The plan used to cut every mortise at S12000 F900, plunge 250, 2.5 mm a
+ * pass, whatever was in the collet: a 3 mm bit in oak at 2.5 mm a pass and
+ * full slot width is close to a broken bit, while a 10 mm one barely makes a
+ * chip at that feed — and on a `$30=10000` spindle the S12000 was clamped, so
+ * every feed ran at 1.2 times the chip load. With nothing said about the
+ * machine the old figures stand, so a caller that passes none of this gets
+ * the program it always did.
+ */
+export function mortisingFeeds(cutterDiaMm: number, o: CutPlanOptions) {
+  const derive = o.material !== undefined || o.spindle !== undefined || o.maxFeedMmMin !== undefined;
+  if (!derive) {
+    return {
+      spindleRpm: o.spindleRpm ?? 12000,
+      feedRate: o.feedRateMmMin ?? 900,
+      plungeRate: o.plungeRateMmMin ?? 250,
+      stepdownMm: o.stepdownMm ?? 2.5,
+    };
+  }
+  const material = o.material ?? DEFAULT_MATERIAL;
+  const dia = Math.max(0.5, cutterDiaMm);
+  const rec = recommendSpeeds({
+    diameterMm: dia,
+    flutes: o.cutterFlutes ?? 2,
+    material,
+    spindle: o.spindle,
+    maxFeedMmMin: o.maxFeedMmMin,
+  });
+  // A mortise is a slot, so the bite is a fraction of the cutter: the same
+  // fractions the relief roughing pass uses at full engagement.
+  const fraction = material === 'aluminium' ? 0.1 : material === 'foam' || material === 'softwood' ? 0.4 : 0.3;
+  return {
+    spindleRpm: o.spindleRpm ?? rec.rpm,
+    feedRate: o.feedRateMmMin ?? rec.feedMmMin,
+    plungeRate: o.plungeRateMmMin ?? rec.plungeMmMin,
+    stepdownMm: o.stepdownMm ?? Math.round(Math.max(0.2, dia * fraction) * 100) / 100,
+  };
 }
 
 const dot = (a: ArrayLike<number>, b: ArrayLike<number>) =>
@@ -134,7 +189,7 @@ function fmt(n: number, d = 3): string {
  *     of the window `0..windowLengthMm`).
  *   - Z0 is probed on the top surface of the workpiece; cuts go negative Z.
  */
-function generateWindowGcode(params: {
+export function generateWindowGcode(params: {
   setupId: string;
   partId: string;
   faceUpLabel: string;
@@ -190,6 +245,9 @@ function generateWindowGcode(params: {
     `G21 G90 G17`,
     `G0 Z${fmt(safeZ)}`,
     `M3 S${Math.round(spindleRpm)}`,
+    // Up to speed before the first plunge. GRBL's M3 returns at once, so the
+    // ramp into the first mortise met a spindle still spinning up.
+    `G4 P2`,
   ];
 
   let cuttingDistMm = 0;
@@ -615,10 +673,7 @@ export function buildTimberCutPlan(
   const defaultStockLengthMm = rawOptions.defaultStockLengthMm ?? 1800;
   const sawKerfMm = rawOptions.sawKerfMm ?? 2;
   const roughAllowanceMm = rawOptions.roughAllowanceMm ?? 10;
-  const spindleRpm = rawOptions.spindleRpm ?? 12000;
-  const feedRate = rawOptions.feedRateMmMin ?? 900;
-  const plungeRate = rawOptions.plungeRateMmMin ?? 250;
-  const stepdownMm = rawOptions.stepdownMm ?? 2.5;
+  const { spindleRpm, feedRate, plungeRate, stepdownMm } = mortisingFeeds(breakdown.options.cutterDiaMm, rawOptions);
 
   const { bars: stockBars, partBarMap } = packStockBars(
     breakdown.parts,

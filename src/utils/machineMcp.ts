@@ -6,9 +6,9 @@ import {
   type MachineControl,
 } from '@physbox-io/machining';
 import { webSerialManager, ZERO_SEARCH_MM } from './webSerialManager';
-import type { ResumeOptions } from './jobResume';
+import type { ResumeOptions } from '@physbox-io/machining';
 import { fetchMachineDevices } from './apiClient';
-import { generateSolidMachining, measurePart, DEFAULT_SOLID_OPTIONS } from './solidMachiningExporter';
+import { generateSolidMachining, measurePart, deriveSolidOptions, DEFAULT_SOLID_OPTIONS } from './solidMachiningExporter';
 import { MATERIALS } from './feedsAndSpeeds';
 import { runSettings } from './runSettings';
 import type { SceneGraph } from '../types/scene';
@@ -73,7 +73,7 @@ export function setCurrentScene(scene: SceneGraph | null, stock?: { thicknessMm:
  * the board described once on the bench, not re-guessed from the part. A part
  * taller than the bench stock falls back to stock sized from the part.
  */
-function carveOptions(args: Record<string, unknown>) {
+export function carveOptions(args: Record<string, unknown>) {
   const dia = typeof args.toolDiaMm === 'number' && args.toolDiaMm > 0 ? args.toolDiaMm : 3;
   let stockThicknessMm: number | undefined;
   let stockFrom: 'asked' | 'bench' | 'part' = 'part';
@@ -87,8 +87,13 @@ function carveOptions(args: Record<string, unknown>) {
       stockFrom = 'bench';
     }
   }
-  const options = {
-    ...DEFAULT_SOLID_OPTIONS,
+  // Feeds, speeds and stepdowns worked out for the bit, the material and the
+  // connected machine, as the export dialog does. Spreading
+  // DEFAULT_SOLID_OPTIONS alone cut every carve with the defaults' wood recipe
+  // — M3 S12000 at F1500 whatever bit or material was named — which is about
+  // seven times the feed a 1 mm bit can take in aluminium.
+  const motion = webSerialManager.getState().motion;
+  const asked = {
     ...(typeof args.sides === 'number' ? { sides: args.sides } : {}),
     // Planned from any face; only setup 1 is ever run from here.
     ...(args.setups === 'auto' ? { setups: 'auto' as const } : {}),
@@ -96,7 +101,10 @@ function carveOptions(args: Record<string, unknown>) {
     ...(typeof args.material === 'string' ? { material: args.material } : {}),
     roughingToolDiaMm: dia,
     finishingToolDiaMm: dia,
-  } as NonNullable<Parameters<typeof generateSolidMachining>[1]>;
+  } as Parameters<typeof deriveSolidOptions>[1];
+  const options = currentScene
+    ? deriveSolidOptions(currentScene, asked, motion.spindle, Math.min(motion.maxRate.x, motion.maxRate.y))
+    : { ...DEFAULT_SOLID_OPTIONS, ...asked };
   return { options, dia, stockFrom };
 }
 

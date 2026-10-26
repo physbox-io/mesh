@@ -278,7 +278,7 @@ export function Segmented<T extends string>({
           type="button"
           onClick={() => onChange(v)}
           title={label}
-          className={`flex-1 min-w-0 py-1.5 px-2 rounded-md text-[11px] font-bold transition-all cursor-pointer truncate ${
+          className={`flex-auto min-w-0 py-1.5 px-2 rounded-md text-[11px] font-bold transition-all cursor-pointer truncate ${
             value === v
               ? 'bg-white dark:bg-slate-900 text-emerald-600 dark:text-emerald-400 shadow-sm'
               : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200'

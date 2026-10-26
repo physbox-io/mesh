@@ -3,6 +3,7 @@ import { AlertCircle, Play, Pause, Square, Hand, ChevronsDown, Gauge, RotateCcw,
 import { webSerialManager, type MachineState, type OverrideStep } from '../utils/webSerialManager';
 import { checkJobEnvelope, type JobExtent } from '../utils/workEnvelope';
 import { formatDuration } from '../utils/timeEstimate';
+import { clampRunFromLine, describeStoppedJob, runFromGate } from '../utils/runFrom';
 import { NumberInput } from '@physbox-io/ui';
 import { ProbeCircuitStatus } from './ProbeCircuitStatus';
 import { CheckpointBadge } from './CheckpointBadge';
@@ -247,6 +248,14 @@ export const JobResumeBanner: React.FC<{
   const resume = machineState.resume;
   const [line, setLine] = React.useState<number | null>(null);
   const [error, setError] = React.useState<string | null>(null);
+  // A new stop offers its own line, not the one typed for the last. Derived
+  // during render, as the pause banner's override is.
+  const [lineFor, setLineFor] = React.useState(resume);
+  if (lineFor !== resume) {
+    setLineFor(resume);
+    setLine(null);
+    setError(null);
+  }
 
   const running = machineState.status === 'RUNNING' || machineState.status.startsWith('PAUSED');
   const target = line ?? resume?.fromLine ?? 0;
@@ -262,21 +271,10 @@ export const JobResumeBanner: React.FC<{
 
   const pending = resume.pendingPause;
   const atToolChange = pending?.kind === 'tool-change';
-  const why =
-    pending && resume.reason === 'alarm'
-      // It had already stopped, on purpose, and the alarm came after: a stop
-      // that otherwise reads as random, and a re-zero demand that reads as
-      // arbitrary, until it says what the job was waiting for.
-      ? `It had stopped for ${atToolChange ? 'a tool change' : 'a programmed stop'}, with everything before it cut, when the controller alarmed (a limit switch while lifting clear).`
-      : resume.reason === 'alarm'
-      ? 'The controller alarmed (a limit switch, or a reset part way through).'
-      : resume.reason === 'disconnected'
-        ? 'The connection to the machine dropped.'
-        : resume.reason === 'interrupted'
-          // Nothing in the app saw this one end. The program was read back out
-          // of storage, which is the only reason there is anything to offer.
-          ? 'This browser went away while the job was streaming — a closed tab, a sleeping laptop, or the power going off.'
-          : 'The job was stopped.';
+  const stop = describeStoppedJob(resume);
+  // Read at render, like the preview: homing, zeroing and re-zeroing Z all
+  // arrive as state changes, which re-render this.
+  const gate = runFromGate(machineState, webSerialManager.resumeBlockedReason(!showZTools));
 
   // What the preamble will actually do, not what the program was doing when it
   // stopped: a resume onto a tool change makes no descent at all.
@@ -295,12 +293,23 @@ export const JobResumeBanner: React.FC<{
         <div>
           <h4 className="font-bold text-sm">Job stopped {done}% of the way through</h4>
           <p className="text-xs leading-relaxed font-semibold">
-            {why} It reached line {resume.fromLine.toLocaleString()} of{' '}
-            {resume.totalLines.toLocaleString()}. It can be picked up from there instead of
+            {stop.why} It stopped at line {stop.stoppedAtLine.toLocaleString()} of{' '}
+            {resume.totalLines.toLocaleString()}, and can be picked up from there instead of
             starting again.
           </p>
         </div>
       </div>
+
+      {stop.detail && (
+        <p className="text-[11px] leading-relaxed font-semibold text-red-700 dark:text-red-300">{stop.detail}</p>
+      )}
+
+      <p className="text-[11px] leading-relaxed">
+        Suggested restart: line <span className="font-mono font-semibold">{stop.suggestedLine.toLocaleString()}</span>
+        {stop.windBack > 0
+          ? ' — a little before the stop, because the controller had taken lines it had not yet cut, so nothing is left uncut.'
+          : ' — the line it had reached.'}
+      </p>
 
       {resume.restored && (
         <p className="text-[11px] leading-relaxed font-semibold">
@@ -355,12 +364,12 @@ export const JobResumeBanner: React.FC<{
       <div className="flex flex-wrap items-center justify-end gap-2 pt-2 border-t border-sky-500/30">
         <OpenSetupButton onOpen={onOpenSetup} />
         <label className="flex items-center gap-1.5 text-[11px] font-semibold mr-auto">
-          <span>Resume from line</span>
+          <span>Run from line</span>
           <NumberInput
             min={0}
             max={resume.totalLines}
             value={target}
-            onChange={v => v !== undefined && setLine(Math.max(0, Math.min(resume.totalLines, v)))}
+            onChange={v => v !== undefined && setLine(clampRunFromLine(v, resume.totalLines))}
                       className="w-24 bg-white dark:bg-slate-900 border border-sky-500/40 rounded px-1.5 py-1 font-mono text-[11px] text-slate-800 dark:text-slate-100"
             title="Back this off a little to recut the last stretch, which is usually safer than trying to land exactly on the break"
                       integer
@@ -374,20 +383,15 @@ export const JobResumeBanner: React.FC<{
         </button>
         <button
           onClick={go}
-          // A laser has no Z to zero, so a datum never set this session stays
-          // unset for good, and would hold its resume shut for good.
-          disabled={!machineState.connected || (showZTools && machineState.needsZZero)}
-          title={
-            !machineState.connected
-              ? 'Connect to the machine first'
-              : showZTools && machineState.needsZZero
-                ? 'Set Z zero for the tool that is in the spindle now'
-                : 'Rebuild the machine state and carry on from this line'
-          }
+          // The manager's own refusal, so a laser (no Z to zero) is held back
+          // only by a lost position, and the button never offers what
+          // `resumeFromLine` would then refuse.
+          disabled={gate.disabled}
+          title={gate.title}
           className="px-3 py-1.5 bg-sky-500 hover:bg-sky-600 disabled:opacity-40 disabled:cursor-not-allowed text-slate-950 text-xs font-bold rounded-lg flex items-center space-x-1.5 cursor-pointer"
         >
           <Play className="w-3.5 h-3.5 fill-current" />
-          <span>Resume from line {target.toLocaleString()}</span>
+          <span>Run From line {target.toLocaleString()}</span>
         </button>
       </div>
     </div>
@@ -509,6 +513,7 @@ export const JobTransport: React.FC<{
     // closing the modal and coming back must not turn its button into a Start
     // that silently throws the resume point away.
     if (resume) {
+      const resumeGate = runFromGate(machineState, webSerialManager.resumeBlockedReason(isLaser));
       const which = resume.jobName ? `the ${resume.jobName} job` : 'the stopped job';
       return (
         <div className={variant === 'footer' ? 'flex items-center gap-2' : 'flex items-center gap-2 w-full'}>
@@ -555,10 +560,12 @@ export const JobTransport: React.FC<{
               const res = webSerialManager.resumeFromLine(resume.fromLine, { isLaser });
               if (!res.ok) setResumeError(res.message);
             }}
-            disabled={blockedByZZero}
+            // The same check `resumeFromLine` makes — a lost position as well
+            // as an unzeroed Z — so the button is shut for the reason it gives.
+            disabled={resumeGate.disabled}
             title={
-              blockedByZZero
-                ? 'Set Z zero for the tool that is in the spindle now'
+              resumeGate.disabled
+                ? resumeGate.title
                 : `Carry on${resume.jobName ? ` with ${resume.jobName}` : ''} from line ${resume.fromLine.toLocaleString()}`
             }
             className={`${base} bg-sky-500 hover:bg-sky-600 disabled:opacity-40 disabled:cursor-not-allowed text-slate-950`}

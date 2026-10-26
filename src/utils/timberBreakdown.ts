@@ -152,6 +152,64 @@ export function meshMmToManifold(wasm: ManifoldToplevel, positionsMm: Float32Arr
 }
 
 /**
+ * Climb from `id` to its outermost rigid assembly ancestor (a parent body with
+ * multiple children or positive geoms connected without joints), so clicking a
+ * single leg or plank of a grouped piece of furniture targets the whole piece.
+ */
+export function findRigidAssemblyRoot(nodes: SceneNode[], id: string | null): SceneNode | null {
+  if (!id) return null;
+  const walk = (list: SceneNode[], outerAssembly: SceneNode | null): SceneNode | null => {
+    for (const n of list) {
+      const userGeomCount = n.geoms?.filter((g) => !g.csgDerived && g.role !== 'collision').length ?? 0;
+      const isAssembly = (n.children?.length ?? 0) > 1 || userGeomCount > 1;
+      const nextAssembly = outerAssembly ?? (isAssembly ? n : null);
+      if (n.id === id) return nextAssembly ?? n;
+      for (const c of n.children || []) {
+        const hit = walk([c], c.joints?.length ? null : nextAssembly);
+        if (hit) return hit;
+      }
+    }
+    return null;
+  };
+  return walk(nodes, null);
+}
+
+/**
+ * Resolve which root/assembly node IDs to break down given the current scene
+ * selection.
+ */
+export function resolveTimberTargetIds(
+  nodes: SceneNode[],
+  selectedNodeId: string | null,
+  extraSelectedIds: string[] = [],
+): string[] {
+  if (selectedNodeId && extraSelectedIds.length > 0) {
+    return [selectedNodeId, ...extraSelectedIds];
+  }
+  if (selectedNodeId) {
+    const root = findRigidAssemblyRoot(nodes, selectedNodeId);
+    if (root) {
+      const userGeomCount = root.geoms?.filter((g) => !g.csgDerived && g.role !== 'collision').length ?? 0;
+      const isAssemblyNode = (root.children?.length ?? 0) > 1 || userGeomCount > 1;
+      if (isAssemblyNode || nodes.length === 1 || root.isLattice || root.isSculpt) {
+        return [root.id];
+      }
+      // Only group all root nodes together when every root node is a simple ungrouped box/cylinder primitive
+      const allSimplePrimitives = nodes.every(
+        (n) =>
+          !n.isLattice &&
+          !n.isSculpt &&
+          (n.children?.length ?? 0) === 0 &&
+          (n.geoms?.length ?? 0) > 0 &&
+          n.geoms!.every((g) => g.type === 'box' || g.type === 'cylinder' || g.role === 'collision'),
+      );
+      return allSimplePrimitives ? nodes.map((n) => n.id) : [root.id];
+    }
+  }
+  return nodes.map((n) => n.id);
+}
+
+/**
  * Collect individual geom soups from a selection of scene nodes, preserving
  * per-geom separation when a body is built from multiple positive geoms or
  * child bodies, in the first selected node's local frame (Z-up, metres).

@@ -65,6 +65,7 @@ import {
 } from './timberJoinery';
 import { buildTimberCutPlan, type TimberCutPlan } from './timberCutList';
 
+import type { SpindleRange } from './feedsAndSpeeds';
 export interface ContourGcodeJobOptions {
   sliceResult: ContourSliceResult;
   gcodeOptions: GcodeExportOptions;
@@ -78,6 +79,13 @@ export interface TimberJobOptions {
   plankOptions?: TimberPlankOptions;
   cncBedMm: [number, number, number];
   defaultStockLengthMm: number;
+  /**
+   * The machine's spindle range and cutting-speed ceiling, read on the main
+   * thread (this runs in a worker): with them the mortising feeds are derived
+   * for the cutter and the machine instead of a fixed S12000 F900.
+   */
+  spindle?: SpindleRange | null;
+  maxFeedMmMin?: number;
 }
 
 export interface TimberJobResult {
@@ -176,6 +184,8 @@ export function runExportJob<K extends ExportJobKind>(
         plankOptions = {},
         cncBedMm = [300, 300, 80],
         defaultStockLengthMm = 1800,
+        spindle,
+        maxFeedMmMin,
       } = options as TimberJobOptions;
       return loadManifold().then((wasm) => {
         const outcome: TimberBreakdownOutcome =
@@ -184,7 +194,12 @@ export function runExportJob<K extends ExportJobKind>(
             : synthesizeTimberJoinery(wasm, soups, joineryOptions);
         const cutPlan =
           outcome.ok && mode !== 'planks'
-            ? buildTimberCutPlan(outcome, { cncBedMm, defaultStockLengthMm })
+            ? buildTimberCutPlan(outcome, {
+                cncBedMm,
+                defaultStockLengthMm,
+                ...(spindle !== undefined ? { spindle } : {}),
+                ...(maxFeedMmMin !== undefined ? { maxFeedMmMin } : {}),
+              })
             : null;
         const hasFrameRails =
           outcome.ok &&

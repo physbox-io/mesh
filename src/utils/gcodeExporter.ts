@@ -65,6 +65,11 @@ export interface GcodeExportOptions {
    */
   sheetStockThicknessMm?: number[];
   /**
+   * Each sheet's size, by sheet index, in mm. Only the facing pass reads it,
+   * to keep a surfacing bit's edge on the sheet; without it only X0/Y0 bound it.
+   */
+  sheetSizeMm?: { widthMm: number; heightMm: number }[];
+  /**
    * The bit doing the facing, in mm. A surfacing cutter is what this wants; a
    * plain flat end mill works and simply takes far longer, which is the
    * operator's trade to make rather than a reason to refuse the job.
@@ -395,8 +400,17 @@ function facingLines(
   panel: LaserPanel,
   removalMm: number,
   options: GcodeExportOptions,
-  f: (n: number) => string
-): { lines: string[]; distanceMm: number; lastPoint: Point2D } {
+  f: (n: number) => string,
+  sheet?: { widthMm: number; heightMm: number }
+): {
+  lines: string[];
+  distanceMm: number;
+  lastPoint: Point2D;
+  /** Where the bit's edge reaches, for the job bounds. */
+  reach: { minX: number; minY: number; maxX: number; maxY: number };
+  /** The margin round the panel is narrower than the facing bit's radius on some side. */
+  marginShort: boolean;
+} {
   const lines: string[] = [];
   const pos = panel.placedPos2D || { x: 0, y: 0 };
   const bit = Math.max(1, options.facingBitDiameterMm);
@@ -404,13 +418,34 @@ function facingLines(
   const stepover = Math.max(0.5, bit * Math.min(Math.max(options.facingStepoverFraction, 0.05), 1));
   const perPass = Math.max(0.1, options.facingDepthPerPassMm);
 
-  // The bit's centre has to start and finish a radius outside the footprint, or
-  // the edges of the panel keep a lip of full-thickness stock; clamped at 0 so a
-  // panel nested near the origin never sends a wide surfacing bit past X0/Y0.
-  const x0 = Math.max(0, pos.x - r);
-  const x1 = pos.x + (panel.width2D || 0) + r;
-  const y0 = Math.max(0, pos.y - r);
-  const y1 = pos.y + (panel.height2D || 0) + r;
+  /*
+   * How far the bit's centre travels: to the footprint's edge plus the
+   * profile's kerf. With the centre on the edge the bit already faces a radius
+   * past it; the kerf on top is the slot the profile will cut there, so the
+   * strip between the faced area and the profile is faced too and no lip of
+   * full-thickness stock is left standing against the part. This used to send
+   * the centre a whole radius out, which put the bit's edge a full diameter
+   * past the panel — 17 mm off the sheet with the defaults — and only the
+   * low side was clamped, at the centre, so even there the edge went a radius
+   * past X0/Y0.
+   *
+   * Clamped so the bit's edge stays on the sheet: centre a radius in from
+   * X0/Y0, and from the far edges when the sheet's size is known. The bit
+   * still faces right up to the sheet edge there, which covers the footprint
+   * because the footprint is on the sheet.
+   */
+  const kerf = compensationRadius(options) > 0 ? options.bitDiameterMm : options.machineMode === 'cnc' ? options.bitDiameterMm / 2 : 0;
+  const w = panel.width2D || 0;
+  const h = panel.height2D || 0;
+  const maxCx = sheet && sheet.widthMm > 0 ? sheet.widthMm - r : Infinity;
+  const maxCy = sheet && sheet.heightMm > 0 ? sheet.heightMm - r : Infinity;
+  const x0 = Math.max(r, pos.x - kerf);
+  const x1 = Math.max(x0, Math.min(maxCx, pos.x + w + kerf));
+  const y0 = Math.max(r, pos.y - kerf);
+  const y1 = Math.max(y0, Math.min(maxCy, pos.y + h + kerf));
+  const marginShort =
+    pos.x < r || pos.y < r ||
+    (sheet !== undefined && (sheet.widthMm - (pos.x + w) < r || sheet.heightMm - (pos.y + h) < r));
 
   const passes = Math.ceil(removalMm / perPass);
   let distanceMm = 0;
@@ -446,7 +481,13 @@ function facingLines(
     lines.push(`G0 Z${f(options.safeZ)}`);
   }
 
-  return { lines, distanceMm, lastPoint };
+  return {
+    lines,
+    distanceMm,
+    lastPoint,
+    reach: { minX: x0 - r, minY: y0 - r, maxX: x1 + r, maxY: y1 + r },
+    marginShort,
+  };
 }
 
 export function generateLaserCutGcode(
@@ -624,13 +665,20 @@ export function generateLaserCutGcode(
 
         fit('facing', sIdx);
         facedDownMm.set(panel.id, removal);
-        // The facing bit reaches a whole diameter past the panel: its centre
-        // starts a radius outside so that the edges keep no lip.
-        const at = panel.placedPos2D || { x: 0, y: 0 };
-        faceMinX = Math.min(faceMinX, at.x - facingBit);
-        faceMinY = Math.min(faceMinY, at.y - facingBit);
-        faceMaxX = Math.max(faceMaxX, at.x + (panel.width2D || 0) + facingBit);
-        faceMaxY = Math.max(faceMaxY, at.y + (panel.height2D || 0) + facingBit);
+        const faced = facingLines(panel, removal, options, f, options.sheetSizeMm?.[sKey]);
+        faceMinX = Math.min(faceMinX, faced.reach.minX);
+        faceMinY = Math.min(faceMinY, faced.reach.minY);
+        faceMaxX = Math.max(faceMaxX, faced.reach.maxX);
+        faceMaxY = Math.max(faceMaxY, faced.reach.maxY);
+        // The bit faces right to the sheet's edge there, which is where the
+        // clamps usually are.
+        if (faced.marginShort) {
+          warnings.push(
+            `${panel.name}: the margin around it is narrower than the ${f(facingBit)}mm facing bit's ` +
+              `radius, so facing runs right to the edge of the sheet there. Keep clamps clear of that ` +
+              `edge, or leave a wider margin.`
+          );
+        }
         operations.push({
           id: `${panel.id}_facing`,
           name: `${panel.name} — face ${f(stockMm!)}mm down to ${f(target)}mm`,
@@ -639,7 +687,6 @@ export function generateLaserCutGcode(
         });
         lines.push(``);
         lines.push(`; --- Facing: ${panel.name} (${f(removal)}mm off a ${f(stockMm!)}mm sheet) ---`);
-        const faced = facingLines(panel, removal, options, f);
         lines.push(...faced.lines);
         totalCutDistanceMm += faced.distanceMm;
         head = faced.lastPoint;
