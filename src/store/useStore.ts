@@ -5095,6 +5095,11 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
           if (!meshGeom && node.geoms.length > 0) {
             meshGeom = node.geoms[0];
           }
+          const nodeRgba = (node as { rgba?: number[] }).rgba;
+          const fallbackRgba: [number, number, number, number] =
+            Array.isArray(nodeRgba) && nodeRgba.length >= 3
+              ? [nodeRgba[0], nodeRgba[1], nodeRgba[2], nodeRgba[3] ?? 1]
+              : [0.3, 0.6, 0.9, 1];
           if (!meshGeom) {
             // No `size`: a mesh geom's is unused, the vertices are written a
             // few lines below, and putting a number here would put one in the
@@ -5104,10 +5109,12 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
               name: `${node.name || id}_mesh`,
               type: 'mesh',
               dynamic: true,
-              rgba: [0.3, 0.6, 0.9, 1],
+              rgba: fallbackRgba,
               mass: 1
             } as SceneGeom;
             node.geoms.push(meshGeom);
+          } else if (Array.isArray(nodeRgba) && nodeRgba.length >= 3 && !meshGeom.rgba) {
+            meshGeom.rgba = fallbackRgba;
           }
           meshGeom.type = 'mesh';
           meshGeom.dynamic = true;
@@ -5367,6 +5374,16 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
         if (node.id === id) {
           const wasJointless = !(node.joints?.length > 0);
           Object.assign(node, updates);
+          // Body-level rgba is a shorthand for colouring the body's geoms:
+          // SceneNode has no colour of its own in MJCF or the renderer, so
+          // storing it on the node alone left SCAD and primitive bodies lilac.
+          const rawRgba = (updates as { rgba?: number[] }).rgba;
+          if (updates.geoms === undefined && Array.isArray(rawRgba) && rawRgba.length >= 3 && node.geoms?.length) {
+            for (const geom of node.geoms) {
+              if (geom.csg === 'difference') continue;
+              geom.rgba = [rawRgba[0] ?? 0.8, rawRgba[1] ?? 0.8, rawRgba[2] ?? 0.8, rawRgba[3] ?? geom.rgba?.[3] ?? 1];
+            }
+          }
           // Same trap as updateNodeJointsList: an update that hands this node
           // its first joint (e.g. an MCP physics_update_object call, not just
           // the properties panel) needs its mesh geoms promoted too, or the

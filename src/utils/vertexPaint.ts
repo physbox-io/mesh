@@ -42,7 +42,10 @@ import { srgbToLinear } from './bodyColor';
  * same point on the same face and the pips travel with it.
  */
 export interface PaintLayer {
-  /** Segment counts the surface was built with. Empty for a mesh geom, which is painted at its own density. */
+  /**
+   * Segment counts the surface was built with for a primitive, or `[maxEdgeUm]`
+   * for a subdivided mesh geom (empty on legacy un-subdivided mesh layers).
+   */
   res: number[];
   /** Indices of the vertices carrying paint. */
   idx: number[];
@@ -159,10 +162,203 @@ export function paintArgsFromSize(type: string, size: number[]): number[] {
  * a stripe down a roller — should be able to think in the geom's frame and let
  * this do the turn.
  */
-export function toGeometrySpace(type: string, point: number[]): [number, number, number] {
+export function toGeometrySpace(type: string, point: number[], dynamicMesh = true): [number, number, number] {
   const [x = 0, y = 0, z = 0] = point;
   if (type === 'cylinder' || type === 'capsule') return [x, z, -y];
+  if (type === 'mesh' && !dynamicMesh) return [x, z, -y];
   return [x, y, z];
+}
+
+/** Maximum vertex count for a subdivided paint mesh, so huge parts stay fast. */
+const MAX_MESH_PAINT_VERTICES = 32768;
+const MAX_MESH_SUBDIV_PASSES = 8;
+
+/**
+ * Target edge resolution `[maxEdgeUm]` for painting a mesh geom.
+ *
+ * OpenSCAD, boolean CSG, extruded and CAD-exported meshes have flat faces made
+ * of a handful of large triangles whose vertices sit only at the corners — a
+ * 50 mm cube is eight vertices and twelve triangles, so a brush dab in the
+ * middle of a face found no vertices within reach. Subdividing edges longer
+ * than `max(TARGET_EDGE, span / MAX_SEGMENTS)` gives mesh faces the same
+ * vertex density primitives get from `paintResolution`.
+ */
+export function paintMeshResolution(positions: ArrayLike<number>): number[] {
+  if (!positions || positions.length < 9) return [];
+  let minX = Infinity, maxX = -Infinity;
+  let minY = Infinity, maxY = -Infinity;
+  let minZ = Infinity, maxZ = -Infinity;
+  for (let i = 0; i + 2 < positions.length; i += 3) {
+    const x = positions[i], y = positions[i + 1], z = positions[i + 2];
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+    if (z < minZ) minZ = z;
+    if (z > maxZ) maxZ = z;
+  }
+  const span = Math.max(maxX - minX, maxY - minY, maxZ - minZ);
+  if (!Number.isFinite(span) || span <= 0) return [];
+  const edge = Math.max(TARGET_EDGE, span / MAX_SEGMENTS);
+  return [Math.max(100, Math.round(edge * 1e6))];
+}
+
+/**
+ * Deterministically subdivides triangles of `(positions, faces)` whose edges
+ * exceed `res[0]` micrometres, up to `MAX_MESH_PAINT_VERTICES`.
+ *
+ * When `res` is empty (legacy saved paint layers) or all edges are already
+ * short enough (dense sculpt meshes), the original arrays are returned without
+ * splitting so existing vertex indices stay unchanged.
+ */
+export function subdivideMeshForPaint(
+  positions: ArrayLike<number>,
+  faces: ArrayLike<number>,
+  res: number[],
+): { positions: Float32Array; faces: Uint32Array } {
+  const toF32 = () => (positions instanceof Float32Array ? positions : new Float32Array(positions));
+  const toU32 = () => (faces instanceof Uint32Array ? faces : new Uint32Array(faces));
+  const initVerts = Math.floor((positions?.length ?? 0) / 3);
+  if (!res?.length || res[0] <= 0 || initVerts < 3 || !faces || faces.length < 3 || initVerts >= MAX_MESH_PAINT_VERTICES) {
+    return { positions: toF32(), faces: toU32() };
+  }
+
+  const maxEdge = res[0] / 1e6;
+  const maxEdge2 = maxEdge * maxEdge;
+
+  // Quick check: if no edge exceeds maxEdge, return untouched (e.g. sculpts).
+  let needsSplit = false;
+  for (let t = 0; t + 2 < faces.length; t += 3) {
+    const a = faces[t] * 3, b = faces[t + 1] * 3, c = faces[t + 2] * 3;
+    const ab = (positions[a] - positions[b]) ** 2 + (positions[a + 1] - positions[b + 1]) ** 2 + (positions[a + 2] - positions[b + 2]) ** 2;
+    const bc = (positions[b] - positions[c]) ** 2 + (positions[b + 1] - positions[c + 1]) ** 2 + (positions[b + 2] - positions[c + 2]) ** 2;
+    const ca = (positions[c] - positions[a]) ** 2 + (positions[c + 1] - positions[a + 1]) ** 2 + (positions[c + 2] - positions[a + 2]) ** 2;
+    if (ab > maxEdge2 || bc > maxEdge2 || ca > maxEdge2) {
+      needsSplit = true;
+      break;
+    }
+  }
+  if (!needsSplit) {
+    return { positions: toF32(), faces: toU32() };
+  }
+
+  const posBuf = new Float32Array(MAX_MESH_PAINT_VERTICES * 3);
+  posBuf.set(positions instanceof Float32Array ? positions : Float32Array.from(positions));
+  let vCount = initVerts;
+
+  // Canonical vertex lookup so shared geometric edges split at the same midpoint
+  // even if the source mesh had duplicate seam vertices.
+  const canon = new Int32Array(MAX_MESH_PAINT_VERTICES);
+  const coordMap = new Map<string, number>();
+  for (let v = 0; v < vCount; v++) {
+    const k = `${Math.round(posBuf[v * 3] * 1e6)},${Math.round(posBuf[v * 3 + 1] * 1e6)},${Math.round(posBuf[v * 3 + 2] * 1e6)}`;
+    const existing = coordMap.get(k);
+    if (existing !== undefined) {
+      canon[v] = existing;
+    } else {
+      coordMap.set(k, v);
+      canon[v] = v;
+    }
+  }
+
+  const dist2 = (u: number, v: number): number => {
+    const u3 = u * 3, v3 = v * 3;
+    const dx = posBuf[u3] - posBuf[v3];
+    const dy = posBuf[u3 + 1] - posBuf[v3 + 1];
+    const dz = posBuf[u3 + 2] - posBuf[v3 + 2];
+    return dx * dx + dy * dy + dz * dz;
+  };
+
+  const edgeKey = (u: number, v: number): number => {
+    const cu = canon[u], cv = canon[v];
+    return cu < cv ? (cu << 16) | cv : (cv << 16) | cu;
+  };
+
+  let curFaces = Uint32Array.from(faces);
+
+  for (let pass = 0; pass < MAX_MESH_SUBDIV_PASSES && vCount < MAX_MESH_PAINT_VERTICES; pass++) {
+    const midpoints = new Map<number, number>();
+    const maybeSplitEdge = (u: number, v: number) => {
+      if (dist2(u, v) <= maxEdge2) return;
+      const key = edgeKey(u, v);
+      if (midpoints.has(key) || vCount >= MAX_MESH_PAINT_VERTICES) return;
+      const m = vCount++;
+      const u3 = u * 3, v3 = v * 3, m3 = m * 3;
+      posBuf[m3] = 0.5 * (posBuf[u3] + posBuf[v3]);
+      posBuf[m3 + 1] = 0.5 * (posBuf[u3 + 1] + posBuf[v3 + 1]);
+      posBuf[m3 + 2] = 0.5 * (posBuf[u3 + 2] + posBuf[v3 + 2]);
+      canon[m] = m;
+      midpoints.set(key, m);
+    };
+
+    for (let t = 0; t + 2 < curFaces.length; t += 3) {
+      const a = curFaces[t], b = curFaces[t + 1], c = curFaces[t + 2];
+      maybeSplitEdge(a, b);
+      maybeSplitEdge(b, c);
+      maybeSplitEdge(c, a);
+    }
+
+    if (midpoints.size === 0) break;
+
+    const nextFaces: number[] = [];
+    for (let t = 0; t + 2 < curFaces.length; t += 3) {
+      const a = curFaces[t], b = curFaces[t + 1], c = curFaces[t + 2];
+      const m0 = midpoints.get(edgeKey(a, b));
+      const m1 = midpoints.get(edgeKey(b, c));
+      const m2 = midpoints.get(edgeKey(c, a));
+      const count = (m0 !== undefined ? 1 : 0) + (m1 !== undefined ? 1 : 0) + (m2 !== undefined ? 1 : 0);
+
+      if (count === 0) {
+        nextFaces.push(a, b, c);
+      } else if (count === 3) {
+        nextFaces.push(
+          a, m0!, m2!,
+          m0!, b, m1!,
+          m2!, m1!, c,
+          m0!, m1!, m2!,
+        );
+      } else if (count === 1) {
+        // Rotate (a, b, c) so the single split edge is (u, v) with midpoint m.
+        let u = a, v = b, w = c, m = m0!;
+        if (m1 !== undefined) { u = b; v = c; w = a; m = m1; }
+        else if (m2 !== undefined) { u = c; v = a; w = b; m = m2; }
+        nextFaces.push(u, m, w, m, v, w);
+      } else {
+        // Two split edges: rotate so the UNSPLIT edge is (w, u), and the split
+        // edges are (u, v) at mUV and (v, w) at mVW.
+        let u = a, v = b, w = c, mUV = m0!, mVW = m1!;
+        if (m0 === undefined) { u = b; v = c; w = a; mUV = m1!; mVW = m2!; }
+        else if (m1 === undefined) { u = c; v = a; w = b; mUV = m2!; mVW = m0!; }
+        nextFaces.push(mUV, v, mVW);
+        if (dist2(mUV, w) <= dist2(u, mVW)) {
+          nextFaces.push(u, mUV, w, mUV, mVW, w);
+        } else {
+          nextFaces.push(u, mUV, mVW, u, mVW, w);
+        }
+      }
+    }
+    curFaces = new Uint32Array(nextFaces);
+  }
+
+  return {
+    positions: posBuf.subarray(0, vCount * 3).slice(),
+    faces: curFaces,
+  };
+}
+
+/** Builds a subdivided Three.js BufferGeometry for painting a mesh geom. */
+export function buildMeshPaintGeometry(
+  positions: ArrayLike<number>,
+  faces: ArrayLike<number>,
+  res: number[],
+): THREE.BufferGeometry {
+  const sub = subdivideMeshForPaint(positions, faces, res);
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(sub.positions, 3));
+  geo.setIndex(new THREE.BufferAttribute(sub.faces, 1));
+  geo.computeBoundingBox();
+  geo.computeBoundingSphere();
+  return geo;
 }
 
 /**
@@ -308,6 +504,71 @@ export interface DabOptions {
 }
 
 /**
+ * Closest point on triangle (A, B, C) to P, returning squared distance and
+ * barycentric weights [wa, wb, wc].
+ */
+function closestPointOnTriangleBary(
+  px: number, py: number, pz: number,
+  ax: number, ay: number, az: number,
+  bx: number, by: number, bz: number,
+  cx: number, cy: number, cz: number,
+): { d2: number; wa: number; wb: number; wc: number } {
+  const abx = bx - ax, aby = by - ay, abz = bz - az;
+  const acx = cx - ax, acy = cy - ay, acz = cz - az;
+  const apx = px - ax, apy = py - ay, apz = pz - az;
+
+  const d1 = abx * apx + aby * apy + abz * apz;
+  const d2 = acx * apx + acy * apy + acz * apz;
+  if (d1 <= 0 && d2 <= 0) {
+    return { d2: apx * apx + apy * apy + apz * apz, wa: 1, wb: 0, wc: 0 };
+  }
+
+  const bpx = px - bx, bpy = py - by, bpz = pz - bz;
+  const d3 = abx * bpx + aby * bpy + abz * bpz;
+  const d4 = acx * bpx + acy * bpy + acz * bpz;
+  if (d3 >= 0 && d4 <= d3) {
+    return { d2: bpx * bpx + bpy * bpy + bpz * bpz, wa: 0, wb: 1, wc: 0 };
+  }
+
+  const vc = d1 * d4 - d3 * d2;
+  if (vc <= 0 && d1 >= 0 && d3 <= 0) {
+    const v = d1 / (d1 - d3);
+    const qx = ax + v * abx - px, qy = ay + v * aby - py, qz = az + v * abz - pz;
+    return { d2: qx * qx + qy * qy + qz * qz, wa: 1 - v, wb: v, wc: 0 };
+  }
+
+  const cpx = px - cx, cpy = py - cy, cpz = pz - cz;
+  const d5 = abx * cpx + aby * cpy + abz * cpz;
+  const d6 = acx * cpx + acy * cpy + acz * cpz;
+  if (d6 >= 0 && d5 <= d6) {
+    return { d2: cpx * cpx + cpy * cpy + cpz * cpz, wa: 0, wb: 0, wc: 1 };
+  }
+
+  const vb = d5 * d2 - d1 * d6;
+  if (vb <= 0 && d2 >= 0 && d6 <= 0) {
+    const w = d2 / (d2 - d6);
+    const qx = ax + w * acx - px, qy = ay + w * acy - py, qz = az + w * acz - pz;
+    return { d2: qx * qx + qy * qy + qz * qz, wa: 1 - w, wb: 0, wc: w };
+  }
+
+  const va = d3 * d6 - d5 * d4;
+  if (va <= 0 && (d4 - d3) >= 0 && (d5 - d6) >= 0) {
+    const w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+    const qx = bx + w * (cx - bx) - px, qy = by + w * (cy - by) - py, qz = bz + w * (cz - bz) - pz;
+    return { d2: qx * qx + qy * qy + qz * qz, wa: 0, wb: 1 - w, wc: w };
+  }
+
+  const denom = 1 / (va + vb + vc);
+  const v = vb * denom;
+  const w = vc * denom;
+  const u = 1 - v - w;
+  const qx = ax + abx * v + acx * w - px;
+  const qy = ay + aby * v + acy * w - py;
+  const qz = az + abz * v + acz * w - pz;
+  return { d2: qx * qx + qy * qy + qz * qz, wa: u, wb: v, wc: w };
+}
+
+/**
  * Lays one dab of paint onto the canvas.
  *
  * Returns the vertex range it touched so the caller can upload just that slice
@@ -320,25 +581,14 @@ export function applyDab(
   canvas: PaintCanvas,
   positions: ArrayLike<number>,
   { x, y, z, radius, color, flow, erase }: DabOptions,
+  faces?: ArrayLike<number> | null,
 ): { lo: number; hi: number } | null {
   const r2 = radius * radius;
   let lo = -1;
   let hi = -1;
 
-  for (let v = 0; v < canvas.count; v++) {
-    const dx = positions[v * 3] - x;
-    const dy = positions[v * 3 + 1] - y;
-    const dz = positions[v * 3 + 2] - z;
-    const d2 = dx * dx + dy * dy + dz * dz;
-    if (d2 >= r2) continue;
-
-    // Squared-cosine-ish falloff: full strength under the middle of the brush
-    // and zero *slope* at the edge, so overlapping dabs down a stroke add up to
-    // an even band instead of a row of visible rims.
-    const t = 1 - d2 / r2;
-    const amount = Math.min(1, Math.max(0, t * t * flow));
-    if (amount <= 0) continue;
-
+  const paintVertex = (v: number, amount: number) => {
+    if (amount <= 0 || v < 0 || v >= canvas.count) return;
     const o = v * 4;
     const a = canvas.data[o + 3];
 
@@ -364,6 +614,51 @@ export function applyDab(
 
     if (lo === -1 || v < lo) lo = v;
     if (v > hi) hi = v;
+  };
+
+  for (let v = 0; v < canvas.count; v++) {
+    const dx = positions[v * 3] - x;
+    const dy = positions[v * 3 + 1] - y;
+    const dz = positions[v * 3 + 2] - z;
+    const d2 = dx * dx + dy * dy + dz * dz;
+    if (d2 >= r2) continue;
+
+    // Squared-cosine-ish falloff: full strength under the middle of the brush
+    // and zero *slope* at the edge, so overlapping dabs down a stroke add up to
+    // an even band instead of a row of visible rims.
+    const t = 1 - d2 / r2;
+    const amount = Math.min(1, Math.max(0, t * t * flow));
+    paintVertex(v, amount);
+  }
+
+  // If the brush is smaller than the local triangle spacing and landed inside a
+  // triangle without reaching its corners directly, transfer coverage to the
+  // enclosing triangle's vertices weighted by barycentric coordinates.
+  if (lo === -1 && faces && faces.length >= 3) {
+    let bestD2 = r2;
+    let bestA = -1, bestB = -1, bestC = -1;
+    let bestWa = 0, bestWb = 0, bestWc = 0;
+    for (let t = 0; t + 2 < faces.length; t += 3) {
+      const ia = faces[t], ib = faces[t + 1], ic = faces[t + 2];
+      const a3 = ia * 3, b3 = ib * 3, c3 = ic * 3;
+      const res = closestPointOnTriangleBary(
+        x, y, z,
+        positions[a3], positions[a3 + 1], positions[a3 + 2],
+        positions[b3], positions[b3 + 1], positions[b3 + 2],
+        positions[c3], positions[c3 + 1], positions[c3 + 2],
+      );
+      if (res.d2 < bestD2) {
+        bestD2 = res.d2;
+        bestA = ia; bestB = ib; bestC = ic;
+        bestWa = res.wa; bestWb = res.wb; bestWc = res.wc;
+      }
+    }
+    if (bestA !== -1) {
+      const falloff = (1 - bestD2 / r2) ** 2 * flow;
+      paintVertex(bestA, Math.min(1, Math.max(0, falloff * bestWa)));
+      paintVertex(bestB, Math.min(1, Math.max(0, falloff * bestWb)));
+      paintVertex(bestC, Math.min(1, Math.max(0, falloff * bestWc)));
+    }
   }
 
   return lo === -1 ? null : { lo, hi };

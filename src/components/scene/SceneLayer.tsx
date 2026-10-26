@@ -30,7 +30,7 @@ import { PrintAnalysisOverlay } from '../PrintAnalysisOverlay';
 import { DfmHeatmap } from './DfmHeatmap';
 import { useCoarsePointer } from '../../hooks/useCoarsePointer';
 import { useVertexPaint } from '../../hooks/useVertexPaint';
-import { buildPaintGeometry, colorsForCopy, isPaintable, paintArgsFromSize, paintResolution, type PaintLayer } from '../../utils/vertexPaint';
+import { buildMeshPaintGeometry, buildPaintGeometry, colorsForCopy, isPaintable, paintArgsFromSize, paintMeshResolution, paintResolution, type PaintLayer } from '../../utils/vertexPaint';
 import { sampleCatmullRom } from '../../utils/geom';
 import { resolveCsgGeoms } from '../../utils/csg';
 import { DEFAULT_UNIT } from '../../utils/latticeMesh';
@@ -926,25 +926,35 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
   // vertex N is still the same point on the same face and the pips scale with
   // it instead of being dropped for a length mismatch.
   const paintRes = useMemo(
-    () => (paintLayer?.res?.length ? paintLayer.res : paintResolution(type, paintArgs)),
-    [paintLayer, type, paintArgs]
+    () => (
+      paintLayer
+        ? paintLayer.res
+        : type === 'mesh'
+          ? (vertices?.length ? paintMeshResolution(vertices) : [])
+          : paintResolution(type, paintArgs)
+    ),
+    [paintLayer, type, vertices, paintArgs]
   );
 
   const paintGeometry = useMemo(() => {
     if (!showPaint) return null;
-    // A mesh already has vertices of its own, at whatever density it was made
-    // or sculpted at; there is nothing to re-tessellate.
-    if (type === 'mesh') return meshBufferGeometry;
+    if (type === 'mesh') {
+      if (!meshBufferGeometry || !paintRes.length) return meshBufferGeometry;
+      const pos = meshBufferGeometry.getAttribute('position')?.array as Float32Array | undefined;
+      const idx = meshBufferGeometry.getIndex()?.array as Uint32Array | undefined;
+      if (!pos?.length || !idx?.length) return meshBufferGeometry;
+      return buildMeshPaintGeometry(pos, idx, paintRes);
+    }
     if (!paintArgs.length || paintArgs.some((a: number) => a === undefined || isNaN(a))) return null;
     return buildPaintGeometry(type, paintArgs, paintRes);
   }, [showPaint, type, meshBufferGeometry, paintArgs, paintRes]);
 
   useEffect(() => {
-    // Only the geometries built here are ours to free — the mesh branch hands
-    // back meshBufferGeometry, which has its own cleanup above.
-    if (!paintGeometry || type === 'mesh') return;
+    // Only the geometries built here are ours to free — an un-subdivided mesh
+    // hands back meshBufferGeometry, which has its own cleanup above.
+    if (!paintGeometry || paintGeometry === meshBufferGeometry) return;
     return () => paintGeometry.dispose();
-  }, [paintGeometry, type]);
+  }, [paintGeometry, meshBufferGeometry]);
 
   // A patterned primitive, drawn as the mesh it now is, with crease-aware
   // normals so a fluted face lights as flutes rather than as one smooth blur.
@@ -1053,7 +1063,7 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
       return (
         <group name={nodeId} ref={meshRef} position={initialPos} quaternion={initialQuaternion}>
           <group position={localPos} quaternion={localQuat}>
-            <mesh castShadow receiveShadow geometry={shadedGeometry!} {...dragHandlers} {...paintHandlers}>
+            <mesh castShadow receiveShadow geometry={(showPaint && paintGeometry ? paintGeometry : shadedGeometry)!} {...dragHandlers} {...paintHandlers}>
               {renderedMaterial}
               {brushCursor}
             </mesh>
@@ -1066,7 +1076,7 @@ export const DynamicGeom = React.memo(function DynamicGeom({ nodeId, name, type,
     // Static mesh: vertices baked in Three.js world space — no position/rotation applied.
     return (
       <group name={nodeId}>
-        <mesh castShadow receiveShadow geometry={shadedGeometry!} {...dragHandlers} {...paintHandlers}>
+        <mesh castShadow receiveShadow geometry={(showPaint && paintGeometry ? paintGeometry : shadedGeometry)!} {...dragHandlers} {...paintHandlers}>
           {renderedMaterial}
           {brushCursor}
         </mesh>

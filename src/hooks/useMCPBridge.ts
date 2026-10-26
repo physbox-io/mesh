@@ -33,8 +33,8 @@ import { solidMeshGeoms, SOLIDITY_DECOMPOSE_BELOW } from '../utils/convexDecompo
 import { PRESETS } from '../presets/presetScenes';
 import { parseSTL } from '../utils/stlParser';
 import {
-  applyDab, buildPaintGeometry, canvasFromLayer, isPaintable, layerFromCanvas,
-  paintArgsFromSize, paintResolution, toGeometrySpace,
+  applyDab, buildMeshPaintGeometry, buildPaintGeometry, canvasFromLayer, isPaintable,
+  layerFromCanvas, paintArgsFromSize, paintMeshResolution, paintResolution, toGeometrySpace,
 } from '../utils/vertexPaint';
 import { deleteUserPreset, readUserPreset, listUserPresetNames, ensureUserPreset, type SavedCopilotMessage } from '../utils/userPresets';
 import { unpackMeshArrays } from '../utils/meshPacking';
@@ -1047,6 +1047,19 @@ interface PendingDeclarativeOps {
 
 const pendingDeclarativeOps = new Map<string, PendingDeclarativeOps>();
 
+const normalizeRgba = (
+  rgba: number[] | undefined,
+  fallbackAlpha = 1,
+): [number, number, number, number] | undefined => {
+  if (!Array.isArray(rgba) || rgba.length < 3) return undefined;
+  return [
+    Number(rgba[0]) || 0,
+    Number(rgba[1]) || 0,
+    Number(rgba[2]) || 0,
+    rgba[3] !== undefined ? Number(rgba[3]) : fallbackAlpha,
+  ];
+};
+
 export const fillGeomDefaults = (rawG: RawGeom, bodyName: string, idx: number, bodyIsJointed: boolean): SceneGeom => {
   const g: RawGeom = { ...rawG };
   normalizeMeshGeomData(g);
@@ -1064,7 +1077,7 @@ export const fillGeomDefaults = (rawG: RawGeom, bodyName: string, idx: number, b
     name:    g.name    ?? `${bodyName}_geom_${idx}`,
     type:    g.type    ?? 'box',
     size:    g.size    ?? [0.25, 0.25, 0.25],
-    rgba:    g.rgba    ?? [0.6, 0.6, 0.9, 1],
+    rgba:    normalizeRgba(g.rgba) ?? [0.6, 0.6, 0.9, 1],
     ...(g.pos         !== undefined ? { pos: g.pos }         : {}),
     ...(g.quat        !== undefined ? { quat: g.quat }       : {}),
     ...(g.euler       !== undefined ? { euler: g.euler }     : {}),
@@ -1084,6 +1097,140 @@ export const fillGeomDefaults = (rawG: RawGeom, bodyName: string, idx: number, b
     ...(g.role        !== undefined ? { role: g.role }         : {}),
   };
 };
+
+const GEOM_SHAPE_KEYS = [
+  'type', 'size', 'fromto', 'vertices', 'verticesZUp', 'renderVertices',
+  'radius', 'width', 'height', 'depth', 'polygon', 'profile',
+  'majorRadius', 'minorRadius', 'tubeRadius', 'innerRadius', 'outerRadius',
+] as const;
+
+const GEOM_STRUCTURAL_KEYS = [
+  ...GEOM_SHAPE_KEYS, 'faces', 'pos', 'quat', 'euler', 'csg', 'thread',
+] as const;
+
+/**
+ * Merges `updates.geoms` against `target.geoms` for `physics_update_object`.
+ *
+ * A partial geom (such as `{ name, rgba }` or `{ rgba }`) merges into the
+ * matching existing geom rather than replacing it with a default 0.25 m box;
+ * if a partial geom names a geom that does not exist on the body, the call is
+ * rejected instead of silently destroying the body's geometry.
+ */
+export function resolveUpdatedGeoms(
+  target: SceneNode,
+  rawGeoms: RawGeom[],
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  updates: Record<string, any> = {},
+): { ok: true; geoms: SceneGeom[] } | { ok: false; error: string } {
+  const existingGeoms = target.geoms ?? [];
+  const authoredGeoms = existingGeoms.filter((g) => !g.csgDerived);
+  const indexableGeoms = authoredGeoms.length > 0 ? authoredGeoms : existingGeoms;
+  const moves = (updates.joints ?? target.joints ?? []).length > 0;
+  const bodyName = updates.name ?? target.name ?? target.id;
+  const bodyRgba = normalizeRgba(updates.rgba);
+
+  const resolvedList: SceneGeom[] = [];
+  const matchedMap = new Map<SceneGeom, SceneGeom>();
+  let allPartialPatches = rawGeoms.length > 0;
+  let anyStructuralChange = false;
+
+  for (let i = 0; i < rawGeoms.length; i++) {
+    const g = rawGeoms[i] ?? {};
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const gAny = g as Record<string, any>;
+    const hasOwnShape = GEOM_SHAPE_KEYS.some((k) => gAny[k] !== undefined);
+    const hasStructural = GEOM_STRUCTURAL_KEYS.some((k) => gAny[k] !== undefined);
+    if (hasStructural) anyStructuralChange = true;
+
+    let existing: SceneGeom | undefined;
+    if (typeof g.name === 'string' && g.name.length > 0) {
+      existing = existingGeoms.find((eg) => eg.name === g.name);
+      if (!existing && !hasOwnShape) {
+        const known = indexableGeoms.map((eg) => eg.name).join(', ') || 'none';
+        return {
+          ok: false,
+          error: `Object "${target.id}" has no geom named "${g.name}" (existing geoms: ${known}). Pass an existing geom name to update it, or specify type and size for a new geom.`,
+        };
+      }
+    } else if (!hasOwnShape) {
+      existing = indexableGeoms[i];
+      if (!existing) {
+        return {
+          ok: false,
+          error: `Partial geom at index ${i} has no type or size, and object "${target.id}" has no existing geom at index ${i} to merge into.`,
+        };
+      }
+    } else if (g.name === undefined && g.type === undefined && indexableGeoms[i]) {
+      existing = indexableGeoms[i];
+    }
+
+    if (existing) {
+      const changesType = g.type !== undefined && g.type !== existing.type;
+      const changesVertices =
+        gAny.vertices !== undefined ||
+        gAny.verticesZUp !== undefined ||
+        gAny.renderVertices !== undefined ||
+        gAny.polygon !== undefined ||
+        gAny.profile !== undefined;
+      if (g.type !== undefined) allPartialPatches = false;
+
+      let resolved: SceneGeom;
+      if (!changesType && !changesVertices && existing.type === 'mesh') {
+        const nextRgba = g.rgba !== undefined
+          ? normalizeRgba(g.rgba, existing.rgba?.[3] ?? 1)
+          : (bodyRgba ?? existing.rgba);
+        resolved = {
+          ...existing,
+          ...(g as Partial<SceneGeom>),
+          ...(nextRgba ? { rgba: nextRgba } : {}),
+        };
+      } else {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const base: RawGeom & Record<string, any> = { ...existing, ...g };
+        if (gAny.verticesZUp !== undefined) {
+          delete base.vertices;
+          delete base.renderVertices;
+        } else if (gAny.vertices !== undefined && gAny.renderVertices === undefined) {
+          delete base.renderVertices;
+        } else if (gAny.renderVertices !== undefined && gAny.vertices === undefined) {
+          delete base.vertices;
+        }
+        if (changesType && g.type !== 'mesh') {
+          delete base.vertices;
+          delete base.faces;
+          delete base.renderVertices;
+          delete base.baseVertices;
+          delete base.baseRenderVertices;
+          delete base.paint;
+        }
+        if (g.rgba === undefined && bodyRgba !== undefined) base.rgba = bodyRgba;
+        resolved = fillGeomDefaults(base, bodyName, i, moves);
+      }
+      resolvedList.push(resolved);
+      matchedMap.set(existing, resolved);
+    } else {
+      allPartialPatches = false;
+      const base: RawGeom = { ...g };
+      if (base.rgba === undefined && bodyRgba !== undefined) base.rgba = bodyRgba;
+      resolvedList.push(fillGeomDefaults(base, bodyName, i, moves));
+    }
+  }
+
+  // When every entry was a partial patch onto an existing geom (e.g.
+  // `geoms: [{ name: 'pumpkin_sculpt', rgba: [...] }]`), update those geoms in
+  // place so sibling geoms and non-stale convex colliders on the body are kept.
+  if (allPartialPatches && matchedMap.size === rawGeoms.length) {
+    const baseList = anyStructuralChange
+      ? existingGeoms.filter((eg) => eg.csgDerived !== 'collider')
+      : existingGeoms;
+    return {
+      ok: true,
+      geoms: baseList.map((eg) => matchedMap.get(eg) ?? eg),
+    };
+  }
+
+  return { ok: true, geoms: resolvedList };
+}
 
 const fillJointDefaults = (j: RawJoint, bodyName: string, idx: number): SceneJoint => ({
   // As for geoms: springref and the crumple fields were dropped by a whitelist.
@@ -1296,13 +1443,28 @@ export const fillBodyDefaults = (b: RawNode, parentMoves: boolean | null = null)
     });
   }
 
+  const bodyRgba = normalizeRgba(b.rgba);
+
   // Synthesize single geom when body-level geom properties are supplied without `geoms`
   const synthesizedSingleGeom: RawGeom[] = b.scad !== undefined
-    ? [{ type: 'mesh', size: [1], dynamic: true, ...(b.rgba ? { rgba: b.rgba } : {}) }]
+    ? [{
+        type: 'mesh',
+        size: [1],
+        dynamic: true,
+        ...(bodyRgba !== undefined ? { rgba: bodyRgba } : {}),
+        ...(bAny.mass !== undefined ? { mass: bAny.mass } : {}),
+        ...(bAny.density !== undefined ? { density: bAny.density } : {}),
+        ...(bAny.friction !== undefined ? { friction: bAny.friction } : {}),
+        ...(bAny.contype !== undefined ? { contype: bAny.contype } : {}),
+        ...(bAny.conaffinity !== undefined ? { conaffinity: bAny.conaffinity } : {}),
+        ...(bAny.condim !== undefined ? { condim: bAny.condim } : {}),
+        ...(bAny.solref !== undefined ? { solref: bAny.solref } : {}),
+        ...(bAny.solimp !== undefined ? { solimp: bAny.solimp } : {}),
+      }]
     : [{
         type: (bAny.type && bAny.type !== 'body') ? bAny.type : 'box',
         ...(bAny.size !== undefined ? { size: bAny.size } : {}),
-        ...(b.rgba !== undefined ? { rgba: b.rgba } : {}),
+        ...(bodyRgba !== undefined ? { rgba: bodyRgba } : {}),
         ...(bAny.fromto !== undefined ? { fromto: bAny.fromto } : {}),
         ...(bAny.mass !== undefined ? { mass: bAny.mass } : {}),
         ...(bAny.density !== undefined ? { density: bAny.density } : {}),
@@ -1340,6 +1502,7 @@ export const fillBodyDefaults = (b: RawNode, parentMoves: boolean | null = null)
   // flags...) - all but the transient declarative/shorthand fields above.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const rest = { ...b } as Record<string, any>;
+  if (bodyRgba) rest.rgba = bodyRgba;
   delete rest.dynamic;
   delete rest.static;
   delete rest.fixed;
@@ -1369,7 +1532,16 @@ export const fillBodyDefaults = (b: RawNode, parentMoves: boolean | null = null)
   delete rest.tubularSegments;
 
   const chosenGeoms = curveGeoms ?? latticeGeoms ?? sculptGeoms ?? b.geoms ?? synthesizedSingleGeom;
-  const resolvedGeoms = chosenGeoms.map((g: RawGeom, i: number) => fillGeomDefaults(g, name, i, moves));
+  const resolvedGeoms = chosenGeoms.map((g: RawGeom, i: number) =>
+    fillGeomDefaults(
+      g.rgba === undefined && bodyRgba !== undefined && g.csg !== 'difference'
+        ? { ...g, rgba: bodyRgba }
+        : g,
+      name,
+      i,
+      moves,
+    ),
+  );
 
   return {
     ...(rest as SceneNode),
@@ -1817,25 +1989,40 @@ export function applyPaintStrokeToBody(targetId: string, m: Record<string, any>)
   }
   const brush = typeof radius === 'number' ? radius : 0.008;
 
+  const isDynamicMesh = geom.type === 'mesh' && (geom.dynamic !== false || !geom.vertices?.length);
+  const rawMeshPositions = geom.type === 'mesh'
+    ? (isDynamicMesh ? (geom.renderVertices ?? geom.vertices) : geom.vertices)
+    : undefined;
   const args = paintArgsFromSize(geom.type, geom.size || []);
-  const res = geom.paint?.res?.length ? geom.paint.res : paintResolution(geom.type, args);
-  const built = geom.type === 'mesh' ? null : buildPaintGeometry(geom.type, args, res);
-  const positions: ArrayLike<number> | undefined = geom.type === 'mesh'
-    ? (geom.dynamic ? geom.renderVertices : geom.vertices)
-    : (built?.getAttribute('position')?.array as Float32Array | undefined);
+  const res = geom.paint
+    ? geom.paint.res
+    : geom.type === 'mesh'
+      ? (rawMeshPositions?.length ? paintMeshResolution(rawMeshPositions) : [])
+      : paintResolution(geom.type, args);
+  const built = geom.type === 'mesh'
+    ? (rawMeshPositions?.length && geom.faces?.length && res.length
+        ? buildMeshPaintGeometry(rawMeshPositions, geom.faces, res)
+        : null)
+    : buildPaintGeometry(geom.type, args, res);
+  const positions: ArrayLike<number> | undefined = built
+    ? (built.getAttribute('position')?.array as Float32Array | undefined)
+    : rawMeshPositions;
+  const faces: ArrayLike<number> | undefined = built
+    ? (built.getIndex()?.array as Uint32Array | undefined)
+    : geom.faces;
   if (!positions?.length) throw new Error('That geom has no surface to paint');
 
   const canvas = canvasFromLayer(geom.paint, positions.length / 3, res);
   let landed = 0;
   for (const point of points) {
-    const [x, y, z] = toGeometrySpace(geom.type, point);
+    const [x, y, z] = toGeometrySpace(geom.type, point, isDynamicMesh);
     if (applyDab(canvas, positions, {
       x, y, z,
       radius: brush,
       color: rgba,
       flow: typeof flow === 'number' ? flow : 1,
       erase: !!erase,
-    })) landed++;
+    }, faces)) landed++;
   }
   built?.dispose();
 
@@ -2387,9 +2574,16 @@ export function useMCPBridge() {
           delete updates.pattern;
           delete updates.paint;
 
+          if (updates.rgba !== undefined) {
+            const norm = normalizeRgba(updates.rgba);
+            if (!norm) return { ok: false, error: 'rgba must be [r, g, b] or [r, g, b, a], each 0..1' };
+            updates.rgba = norm;
+          }
+
           if (Array.isArray(updates.geoms)) {
-            const moves = (updates.joints ?? target.joints ?? []).length > 0;
-            updates.geoms = updates.geoms.map((g: RawGeom, i: number) => fillGeomDefaults(g, updates.name ?? target.name, i, moves));
+            const geomResult = resolveUpdatedGeoms(target, updates.geoms, updates);
+            if (!geomResult.ok) return { ok: false, error: geomResult.error };
+            updates.geoms = geomResult.geoms;
             if (updates.geoms.some((g: SceneGeom) => g.csg === 'difference' || g.csg === 'intersection' || (g.type === 'cylinder' && (g.thread?.pitch ?? 0) > 0))) {
               updates.csgEnabled = true;
             }
@@ -2440,7 +2634,8 @@ export function useMCPBridge() {
             if (Array.isArray(rest.geoms) && !rest.geoms.some((g: SceneGeom) => g.type === 'mesh')) {
               const name = rest.name ?? target.name;
               const moves = (rest.joints ?? target.joints ?? []).length > 0;
-              rest.geoms = [{ ...fillGeomDefaults({ type: 'mesh' }, name, 0, moves), name: `${name}_mesh` }, ...rest.geoms];
+              const meshRgba = updates.rgba ?? target.geoms?.find((g: SceneGeom) => g.type === 'mesh')?.rgba;
+              rest.geoms = [{ ...fillGeomDefaults({ type: 'mesh', ...(meshRgba ? { rgba: meshRgba } : {}) }, name, 0, moves), name: `${name}_mesh` }, ...rest.geoms];
             }
             if (Object.keys(rest).length > 0) store.updateNode(targetId, rest);
             store.updateNodeScad(targetId, scad, compiled, false);

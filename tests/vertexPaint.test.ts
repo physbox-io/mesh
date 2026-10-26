@@ -7,8 +7,10 @@ import {
   isPaintable,
   layerFromCanvas,
   paintArgsFromSize,
+  paintMeshResolution,
   paintResolution,
   sampleColor,
+  subdivideMeshForPaint,
   toGeometrySpace,
   writeVertexColors,
 } from '../src/utils/vertexPaint';
@@ -188,5 +190,67 @@ describe('what gets drawn', () => {
 
     expect(onPaint[0]).toBeGreaterThan(0.9);
     expect(offPaint).toEqual([0, 0, 1]);
+  });
+
+  it('subdivides a coarse 8-vertex mesh cube so a dab in the middle of a face lands cleanly', () => {
+    const cubeVerts = [
+      -0.025, -0.025, -0.025,
+       0.025, -0.025, -0.025,
+       0.025,  0.025, -0.025,
+      -0.025,  0.025, -0.025,
+      -0.025, -0.025,  0.025,
+       0.025, -0.025,  0.025,
+       0.025,  0.025,  0.025,
+      -0.025,  0.025,  0.025,
+    ];
+    const cubeFaces = [
+      0, 2, 1, 0, 3, 2,
+      4, 5, 6, 4, 6, 7,
+      0, 1, 5, 0, 5, 4,
+      1, 2, 6, 1, 6, 5,
+      2, 3, 7, 2, 7, 6,
+      3, 0, 4, 3, 4, 7,
+    ];
+    const res = paintMeshResolution(cubeVerts);
+    expect(res.length).toBe(1);
+    const sub = subdivideMeshForPaint(cubeVerts, cubeFaces, res);
+    expect(sub.positions.length / 3).toBeGreaterThan(500);
+
+    const canvas = emptyCanvas(sub.positions.length / 3, res);
+    // Paint a 4 mm pip right in the middle of the top (+Z) face: on the raw
+    // 8-vertex cube, the nearest vertex was 35 mm away at a corner.
+    const touched = applyDab(canvas, sub.positions, {
+      x: 0, y: 0, z: 0.025, radius: 0.004, color: RED, flow: 1,
+    }, sub.faces);
+    expect(touched).not.toBeNull();
+    // All 8 original corner vertices (indices 0..7) remain untouched.
+    for (let c = 0; c < 8; c++) {
+      expect(canvas.data[c * 4 + 3]).toBe(0);
+    }
+  });
+
+  it('falls back to the enclosing triangle when the brush is smaller than the triangle spacing', () => {
+    const triVerts = new Float32Array([
+      -0.02, -0.02, 0,
+       0.02, -0.02, 0,
+       0.0,   0.02, 0,
+    ]);
+    const triFaces = new Uint32Array([0, 1, 2]);
+    const canvas = emptyCanvas(3, []);
+    // Brush radius (1 mm) is much smaller than distance to the 3 corners (>20 mm),
+    // but (0, 0, 0) lies directly on the triangle surface.
+    const touched = applyDab(canvas, triVerts, {
+      x: 0, y: 0, z: 0, radius: 0.001, color: RED, flow: 1,
+    }, triFaces);
+    expect(touched).toEqual({ lo: 0, hi: 2 });
+    expect(canvas.data[3]).toBeGreaterThan(0);
+    expect(canvas.data[4 + 3]).toBeGreaterThan(0);
+    expect(canvas.data[8 + 3]).toBeGreaterThan(0);
+
+    // A point off the triangle surface still misses.
+    const canvas2 = emptyCanvas(3, []);
+    expect(applyDab(canvas2, triVerts, {
+      x: 0, y: 0, z: 0.01, radius: 0.001, color: RED, flow: 1,
+    }, triFaces)).toBeNull();
   });
 });

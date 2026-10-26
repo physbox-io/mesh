@@ -143,7 +143,7 @@ export function useVertexPaint({
       color: paintColor,
       flow: paintFlow,
       erase,
-    }));
+    }, geometry?.getIndex()?.array));
   }, [geometry, upload]);
 
   /** Moves the ring that shows where the brush will land. */
