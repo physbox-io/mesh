@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useStore } from '../store/useStore';
 import { makePresetNoteCard, type NoteCard } from '../utils/noteCards';
 import { physicsGlobals, type CopilotMessage } from '../physicsGlobals';
+import { cloudAutosave } from '../utils/cloudDocuments';
 
 /** Marks a clean point whose undo step has not landed yet. See markClean. */
 const PENDING_CLEAN = Symbol('pending');
@@ -73,6 +74,30 @@ export function useSceneDocument() {
     if (clean.top === PENDING_CLEAN) return false;
     return (undoNow.at(-1) ?? null) !== clean.top || tempUndoState !== null;
   };
+
+  /*
+   * Closing or reloading the tab with unsaved work asks first, as picking
+   * another preset does. A reload starts from a blank scene, so it is the same
+   * loss. Not when the account's autosave already holds the latest scene.
+   * Read through a ref: the listener is bound once, and the check closes over
+   * this render's note cards and chat. Off under the dev server, whose own
+   * full reloads after an edit would stop on the question every time.
+   */
+  const unsavedRef = useRef(hasUnsavedWork);
+  useEffect(() => {
+    unsavedRef.current = hasUnsavedWork;
+  });
+  useEffect(() => {
+    if (import.meta.env.DEV) return;
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (!unsavedRef.current() || cloudAutosave.holdsLatest()) return;
+      e.preventDefault();
+      // Older Chromium and Safari still want the legacy field set.
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+  }, []);
 
   /** A scene just arrived (loaded or imported) with these notes and this chat: show them, and call it clean. */
   const replaceDocument = useCallback((notes: NoteCard[], chat: CopilotMessage[]) => {
