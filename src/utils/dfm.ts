@@ -1137,7 +1137,7 @@ export function analyseDfm(
       walk(n.children || [], world);
     }
   };
-  const targetParent = target ? parentMatrixOf(scene.nodes || [], target.id) : undefined;
+  const targetParent = target ? (parentMatrixOf(scene.nodes || [], target.id) ?? undefined) : undefined;
   walk(target ? [target] : (scene.nodes || []), targetParent);
 
   const allTris: number[] = [];
