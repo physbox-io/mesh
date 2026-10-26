@@ -1372,6 +1372,20 @@ export function surfaceUnder(
 }
 
 /**
+ * Where a line from a point inside the part, going along `n`, comes out of it:
+ * the nearest surface that way. Null when nothing is in that direction, and
+ * the cut then sits on its point.
+ */
+function exitFrom(
+  node: SceneNode, at: number[], n: THREE.Vector3, exclude: SceneGeom,
+): { exit: number[]; distance: number } | null {
+  const hits = probeRay(node, at, n.toArray(), exclude).filter((h) => h.t > 1e-9);
+  if (hits.length === 0) return null;
+  const t = Math.min(...hits.map((h) => h.t));
+  return { exit: [at[0] + n.x * t, at[1] + n.y * t, at[2] + n.z * t], distance: t };
+}
+
+/**
  * `pos`, `size` and `quat` for a cut, from where it enters and how deep it goes.
  *
  * The cross-section comes from the geom's own `size`, so resizing a hole is an
@@ -1398,8 +1412,9 @@ export function cutGeometry(
   const prism = geom.type === 'mesh' && !!geom.cutOutline;
   const drift = prism && geom.pos ? geom.pos : [0, 0, 0];
   const anchor = (geom.cutAt ?? [0, 0, 0]).map((v, a) => v + (drift[a] ?? 0));
-  const under = surfaceUnder(node, anchor, n.toArray(), geom);
-  const entry = new THREE.Vector3(...(under ? under.entry : anchor));
+  const inside = geom.cutInside ? exitFrom(node, anchor, n, geom) : null;
+  const under = inside ? null : surfaceUnder(node, anchor, n.toArray(), geom);
+  const entry = new THREE.Vector3(...(inside ? inside.exit : under ? under.entry : anchor));
   const s = geom.size || [];
   const over = cutOvershoot(node);
 
@@ -1462,8 +1477,11 @@ export function cutGeometry(
   // Through, or in by the depth asked for. Through is measured from the surface
   // to the far side of the part and then some, so both ends are clear of it
   // however thick the part turned out to be.
-  const through = !(geom.cutDepth && geom.cutDepth > 0);
-  const reach = through ? (under?.thickness ?? 0) + over : geom.cutDepth!;
+  // Anchored inside: from the point out to where it leaves the part, plus
+  // `cutDepth` beyond the point. See `cutInside`.
+  const through = !inside && !(geom.cutDepth && geom.cutDepth > 0);
+  const reach = inside ? inside.distance + Math.max(0, geom.cutDepth || 0)
+    : through ? (under?.thickness ?? 0) + over : geom.cutDepth!;
   const length = reach + over;
   const centre = entry.clone().addScaledVector(n, (over - reach) / 2);
   const pos = centre.toArray().map(v => +v.toFixed(6));
@@ -1533,7 +1551,8 @@ export function reconcileCuts(node: SceneNode): boolean {
     if (!next) continue;
     // The anchor follows the surface too, so the next reconcile measures from
     // where the material is now rather than from where it used to be.
-    const under = surfaceUnder(node, geom.cutAt ?? [0, 0, 0], geom.cutNormal!, geom);
+    // Not an anchor inside the part, which is where it is meant to be.
+    const under = geom.cutInside ? null : surfaceUnder(node, geom.cutAt ?? [0, 0, 0], geom.cutNormal!, geom);
     if (under && !next.cutAt) geom.cutAt = under.entry.map(v => +v.toFixed(6));
 
     const same = (a: number[] | undefined, b: number[] | undefined) =>

@@ -19,7 +19,7 @@ export type GeomRole = 'visual' | 'collision';
 export type CollisionMode = 'auto' | 'hull' | 'decompose' | 'primitives';
 
 /** The hardware features a part can have cut into it; see utils/hardwareCuts.ts. */
-export type HardwareCutKind = 'nut_trap' | 'counterbore' | 'insert' | 'insert_boss' | 'bearing' | 'oring' | 'seal_cord'
+export type HardwareCutKind = 'nut_trap' | 'nut_slot' | 'counterbore' | 'insert' | 'insert_boss' | 'bearing' | 'oring' | 'seal_cord'
   | 'rail_seat' | 'rod_clamp' | 'lm_housing';
 /**
  * Where an O-ring groove seals: in a face, against a lid pressed onto it; in a
@@ -255,6 +255,14 @@ export interface SceneGeom {
    */
   cutTwist?: number;
   /**
+   * `cutAt` is a point INSIDE the part, where the cut ends, and the cut runs
+   * from there out along `cutNormal` to the nearest surface, `cutDepth` past
+   * the point. For a pocket buried under the face, such as the slot a nut is
+   * slid into from the side: it stays where the nut is when the part changes
+   * round it, instead of following the face it happens to come out of.
+   */
+  cutInside?: boolean;
+  /**
    * Made by insetting a face (the I gesture): sized to the flat face it sits
    * on, and re-opened by I on that face rather than joined by another.
    */
@@ -327,6 +335,8 @@ export interface SceneGeom {
     /** A rail seat's: how long the rail is, metres, and whether it runs across the face instead of along it. */
     length?: number;
     turned?: boolean;
+    /** A side-entry nut slot's: which way it runs, in quarter turns about the face normal from the face's own X. */
+    quarter?: number;
     /** Diametral clearance on the fitting diameter, metres. */
     fit?: number;
   };

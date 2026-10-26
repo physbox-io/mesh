@@ -35,7 +35,7 @@
 // ---------------------------------------------------------------------------
 
 import { useState } from 'react';
-import { Circle, Square, Donut, Trash2, Move } from 'lucide-react';
+import { Circle, Square, Donut, Trash2, Move, RotateCw } from 'lucide-react';
 import { SettledNumberField } from './SettledInputs';
 import { ThreadField } from './ThreadField';
 import { BORE_LABELS, HARDWARE_KINDS, SEAL_LABELS, hardwareCutProblem, hardwareSpecOf } from '../utils/hardwareCuts';
@@ -358,6 +358,16 @@ function HardwareRow({ node, geom, index }: {
             Across
           </label>
         )}
+        {hw.kind === 'nut_slot' && (
+          <button
+            type="button"
+            onClick={() => setHardwareCut(node.id, hw.group, { quarter: ((hw.quarter ?? 0) + 1) % 4 })}
+            title="Run the slot out of a different side. It starts on the side nearest the nut."
+            className="px-1.5 py-1 mb-0.5 rounded text-[9px] font-bold uppercase cursor-pointer bg-white dark:bg-slate-800 text-slate-500 dark:text-slate-400 hover:text-rose-600 transition-colors flex items-center gap-0.5"
+          >
+            <RotateCw className="w-2.5 h-2.5" />Turn slot
+          </button>
+        )}
         {centreline && (
           <span className="flex-1 min-w-0 text-[10px] text-slate-500 dark:text-slate-400 pb-1" title="The cord to cut for it, round the middle of the groove.">
             Cord: {Math.round(loopLengthMm(centreline))} mm
@@ -461,7 +471,7 @@ function RideOnRod({ node, group }: { node: SceneNode; group: string }) {
 }
 
 const HARDWARE_ORDER: HardwareCutKind[] = [
-  'nut_trap', 'counterbore', 'insert', 'insert_boss', 'bearing', 'oring', 'seal_cord', 'rail_seat', 'rod_clamp', 'lm_housing',
+  'nut_trap', 'nut_slot', 'counterbore', 'insert', 'insert_boss', 'bearing', 'oring', 'seal_cord', 'rail_seat', 'rod_clamp', 'lm_housing',
 ];
 
 /**

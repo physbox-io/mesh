@@ -369,3 +369,18 @@ export const StepperIcon = () => (
     <path d="M18.5 11 q2.5 2.5 0 5" className="stroke-blue-500" strokeWidth="1.2" strokeLinecap="round" />
   </svg>
 );
+
+/** A block cut open to show the slot coming in from its side, a nut in it, and the bolt's hole down through. */
+export const NutSlotIcon = () => (
+  <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none">
+    <ellipse cx="12" cy="20.8" rx="8.5" ry="1.5" className="fill-blue-900/12 dark:fill-black/35" />
+    <rect x="3" y="5" width="18" height="14" rx="1.5" className="fill-blue-200 dark:fill-blue-400/30 stroke-blue-600 dark:stroke-blue-400" strokeWidth="1.3" />
+    {/* The bolt's hole, top to bottom */}
+    <rect x="10.6" y="5" width="2.8" height="14" className="fill-blue-950/70 dark:fill-black/60" />
+    {/* The slot, open to the right-hand side */}
+    <rect x="8" y="9.5" width="13" height="5" className="fill-blue-950/80 dark:fill-black/70" />
+    {/* The nut, slid in */}
+    <polygon points="8.6,12 10,9.9 14,9.9 15.4,12 14,14.1 10,14.1" className="fill-blue-400 dark:fill-blue-500/80 stroke-blue-600 dark:stroke-blue-300" strokeWidth="1" strokeLinejoin="round" />
+    <path d="M18.5 12h3.2m-1.4-1.4 1.4 1.4-1.4 1.4" className="stroke-blue-700 dark:stroke-blue-300" strokeWidth="1.1" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);

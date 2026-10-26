@@ -22,6 +22,7 @@ import { metricThread } from './metricThreads';
 import { BOLTS, HEX_NUTS, CLEARANCE_HOLES, COUNTERBORES, INSERTS, BEARINGS, O_RINGS, SEAL_CORDS } from './hardwareSizes';
 import { planSealGroove, sealGrooveProblem } from './sealGrooves';
 import { LM_UU, MGN } from './linearParts';
+import { probeRay, surfaceUnder } from './csg';
 
 export { HEX_NUTS, CLEARANCE_HOLES, COUNTERBORES, INSERTS, BEARINGS } from './hardwareSizes';
 
@@ -42,6 +43,10 @@ export const HARDWARE_KINDS: Record<HardwareCutKind, HardwareKindInfo> = {
   nut_trap: {
     label: 'Nut trap', sizes: BOLTS, defaultSize: 'M3', defaultFitMm: 0.2,
     hint: 'A hex pocket a nut drops into, so it cannot turn, with a clearance hole for the bolt right through.',
+  },
+  nut_slot: {
+    label: 'Nut slot', sizes: BOLTS, defaultSize: 'M3', defaultFitMm: 0.2,
+    hint: 'A slot a nut slides into from the side of the part, buried under the face so the bolt pulls against material, with a clearance hole for the bolt right through.',
   },
   counterbore: {
     label: 'Counterbore', sizes: BOLTS, defaultSize: 'M3', bores: ['clearance', 'tapped'], defaultBore: 'clearance', defaultFitMm: 0,
@@ -98,7 +103,46 @@ export interface HardwareCutSpec {
   /** A rail seat's: the rail's length, and whether it runs across the face's first axis rather than along it. */
   lengthMm?: number;
   turned?: boolean;
+  /** A nut slot's: which way it runs, quarter turns about the normal. Left out, the nearest side. */
+  quarter?: number;
   fitMm?: number;
+}
+
+/** How much material a nut slot leaves between the face and the nut, mm. */
+export const NUT_SLOT_COVER_MM = 2;
+
+/** The face's own X and Y at a spot: the frame a slot's quarter turns are counted in. */
+function faceAxes(normal: number[]): { n: THREE.Vector3; x: THREE.Vector3; y: THREE.Vector3 } {
+  const n = new THREE.Vector3(...(normal as [number, number, number])).normalize();
+  const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), n);
+  return { n, x: new THREE.Vector3(1, 0, 0).applyQuaternion(q), y: new THREE.Vector3(0, 1, 0).applyQuaternion(q) };
+}
+
+/** The way a slot of `quarter` turns runs, along the face. */
+function slotDirection(normal: number[], quarter: number): THREE.Vector3 {
+  const { x, y } = faceAxes(normal);
+  const a = (((quarter % 4) + 4) % 4) * (Math.PI / 2);
+  return x.multiplyScalar(Math.cos(a)).addScaledVector(y, Math.sin(a)).normalize();
+}
+
+/** Where the nut's middle sits: on the bolt's line, under the cover. */
+function nutCentre(spec: HardwareCutSpec, heightMm: number): THREE.Vector3 {
+  const { n } = faceAxes(spec.normal);
+  const depth = NUT_SLOT_COVER_MM + heightMm / 2;
+  return new THREE.Vector3(...(spec.at as [number, number, number])).addScaledVector(n, -m(depth));
+}
+
+/** The quarter turn whose way out of the part, from the nut, is shortest: the side it is easiest to slide in from. */
+function nearestSide(spec: HardwareCutSpec, host: SceneNode, heightMm: number): number {
+  const c = nutCentre(spec, heightMm).toArray();
+  let best = 0;
+  let bestT = Infinity;
+  for (let quarter = 0; quarter < 4; quarter++) {
+    const hits = probeRay(host, c, slotDirection(spec.normal, quarter).toArray()).filter((h) => h.t > 1e-9);
+    const t = hits.length ? Math.min(...hits.map((h) => h.t)) : Infinity;
+    if (t < bestT - 1e-9) { best = quarter; bestT = t; }
+  }
+  return best;
 }
 
 const m = (mm: number) => +(mm / 1000).toFixed(7);
@@ -130,6 +174,8 @@ export function hardwareCutGeoms(spec: HardwareCutSpec, nodeId: string, host?: S
       },
     } as SceneGeom];
   }
+  // A slot with no room under the face is no slot, as a groove that does not fit is none.
+  if (spec.kind === 'nut_slot' && host && hardwareCutProblem(spec, host)) return [];
   const info = HARDWARE_KINDS[spec.kind];
   const size = info.sizes.includes(spec.size) ? spec.size : info.defaultSize;
   const bore = spec.bore && info.bores?.includes(spec.bore) ? spec.bore : info.defaultBore;
@@ -161,6 +207,34 @@ export function hardwareCutGeoms(spec: HardwareCutSpec, nodeId: string, host?: S
         cut('pocket', (flats + fit) / Math.sqrt(3), height + fit, { facets: 6 }),
         clearance('shank'),
       ];
+    }
+    case 'nut_slot': {
+      const [flats, height] = HEX_NUTS[size];
+      const quarter = spec.quarter ?? (host ? nearestSide(spec, host, height + fit) : 0);
+      const dir = slotDirection(spec.normal, quarter);
+      const { n } = faceAxes(spec.normal);
+      // A box turned so its width lies along the face and its height along the
+      // bolt: as wide as the nut across its flats, so it cannot turn, and as
+      // tall as the nut. It runs from the side of the part in to the nut's far
+      // corner, which is a flats/sqrt(3) out from its middle.
+      const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), dir);
+      const yNow = new THREE.Vector3(0, 1, 0).applyQuaternion(q);
+      const twist = Math.atan2(new THREE.Vector3().crossVectors(yNow, n).dot(dir), yNow.dot(n));
+      const slot: SceneGeom = {
+        ...cut('slot', 0, (flats + fit) / Math.sqrt(3)),
+        type: 'box',
+        size: [m((flats + fit) / 2), m((height + fit) / 2), 0],
+        cutAt: nutCentre(spec, height + fit).toArray().map((v) => +v.toFixed(6)),
+        cutNormal: dir.toArray().map((v) => +v.toFixed(9)),
+        cutInside: true,
+        ...(Math.abs(twist) > 1e-9 ? { cutTwist: +twist.toFixed(9) } : {}),
+      };
+      // The bolt's hole first: the group is read back off its first piece,
+      // and that has to be the one on the face.
+      const shank = clearance('shank');
+      shank.hardware = { ...shank.hardware!, quarter };
+      slot.hardware = { ...slot.hardware!, quarter };
+      return [shank, slot];
     }
     case 'counterbore': {
       const [diameter, depth] = COUNTERBORES[size];
@@ -243,6 +317,7 @@ export function hardwareSpecOf(geoms: SceneGeom[], group: string): HardwareCutSp
     ...(h.seal ? { seal: h.seal } : {}),
     ...(h.length ? { lengthMm: +(h.length * 1000).toFixed(3) } : {}),
     ...(h.turned ? { turned: true } : {}),
+    ...(h.quarter !== undefined ? { quarter: h.quarter } : {}),
     fitMm: h.fit ? +(h.fit * 1000).toFixed(4) : 0,
   };
 }
@@ -250,6 +325,19 @@ export function hardwareSpecOf(geoms: SceneGeom[], group: string): HardwareCutSp
 /** Why a hardware feature cannot be cut where it was asked for, in one sentence, or null. */
 export function hardwareCutProblem(spec: HardwareCutSpec, host: SceneNode): string | null {
   if (spec.kind === 'oring' || spec.kind === 'seal_cord') return sealGrooveProblem({ ...spec, kind: spec.kind }, host);
+  if (spec.kind === 'nut_slot') {
+    const info = HARDWARE_KINDS.nut_slot;
+    const size = info.sizes.includes(spec.size) ? spec.size : info.defaultSize;
+    const [, height] = HEX_NUTS[size];
+    const fit = Math.max(0, spec.fitMm ?? info.defaultFitMm);
+    // Cover over the nut, the nut, and a floor under it for the slot to have a bottom.
+    const needMm = NUT_SLOT_COVER_MM + height + fit + 1;
+    const under = surfaceUnder(host, spec.at, spec.normal);
+    const haveMm = under ? under.thickness * 1000 : 0;
+    if (haveMm < needMm) {
+      return `An ${size} nut slot needs ${needMm.toFixed(1)} mm of material under the face (${NUT_SLOT_COVER_MM} mm over the nut, the nut, 1 mm under it); this is ${haveMm.toFixed(1)} mm. Use a nut trap from the face instead, or a smaller size.`;
+    }
+  }
   return null;
 }
 
