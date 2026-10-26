@@ -1,11 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import { ChevronDown, ChevronRight, ChevronUp, Ruler, X } from 'lucide-react';
 import { useStore } from '../store/useStore';
-import { dfmLensFor, withLivePoses, type DfmFinding, type DfmProcess, type DfmReport } from '../utils/dfm';
+import { dfmLensFor, withLivePoses, type DfmFinding, type DfmProcess } from '../utils/dfm';
 import type { SceneNode } from '../types/scene';
 import { livePoses } from './scene/bodyPose';
 import { type WeakSpot } from '../utils/printAnalysis';
-import { analyseDfmShared, structuralWeakSpots } from '../utils/analysisCache';
+import { useDfmReport, useStructuralWeakSpots } from '../utils/dfmWorkerClient';
 import { materialSpec } from '../utils/feedsAndSpeeds';
 import { filamentSpec } from '../utils/filaments';
 
@@ -38,6 +38,8 @@ const SEVERITY_STYLE: Record<DfmFinding['severity'], string> = {
   warning: 'border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200',
   info: 'border-sky-300 bg-sky-50 text-sky-900 dark:border-sky-800 dark:bg-sky-950/40 dark:text-sky-200',
 };
+
+const NO_WEAK_SPOTS: WeakSpot[] = [];
 
 type Entry = { key: string; severity: DfmFinding['severity']; title: string; detail: string; fix: string };
 
@@ -134,26 +136,13 @@ export function DfmHUD() {
     [material, filament, stock, printBed, selectedNodeId],
   );
 
-  const analyse = useCallback((process: DfmProcess | null, when: boolean): DfmReport | null => {
-    if (!process || !when || !sceneGraph) return null;
-    try {
-      return analyseDfmShared(sceneGraph, process, bench);
-    } catch {
-      return null;
-    }
-  }, [sceneGraph, bench]);
-
   const open = dfmEnabled && !panel.minimized;
-  const designReport = useMemo(
-    () => analyse(lens, open),
-    [analyse, lens, open],
-  );
+  // Worked out off the main thread; an edit leaves the last report standing
+  // until the new one is in.
+  const designReport = useDfmReport(sceneGraph, open ? lens : null, bench);
   // Only paid for while the section is expanded: sampling the scene again on
   // every keystroke for a section nobody opened is not free.
-  const designCast = useMemo(
-    () => analyse('cast', open && castOpen),
-    [analyse, open, castOpen],
-  );
+  const designCast = useDfmReport(sceneGraph, open && castOpen ? 'cast' : null, bench);
 
   /*
    * Seals, screws and runners are about where parts sit against each other,
@@ -192,14 +181,7 @@ export function DfmHUD() {
    * rather than needing a lens of their own. This is where the old "Weak Spots"
    * button's findings went.
    */
-  const structural = useMemo(() => {
-    if (!open || !sceneGraph) return [] as WeakSpot[];
-    try {
-      return structuralWeakSpots(sceneGraph);
-    } catch {
-      return [] as WeakSpot[];
-    }
-  }, [sceneGraph, open]);
+  const structural = useStructuralWeakSpots(sceneGraph, open) ?? NO_WEAK_SPOTS;
 
   if (!dfmEnabled) return null;
 

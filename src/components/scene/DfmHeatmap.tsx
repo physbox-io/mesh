@@ -2,7 +2,7 @@ import { useMemo } from 'react';
 import * as THREE from 'three';
 import { useStore } from '../../store/useStore';
 import { dfmLensFor } from '../../utils/dfm';
-import { analyseDfmShared } from '../../utils/analysisCache';
+import { useDfmReport } from '../../utils/dfmWorkerClient';
 import { buildHeatGeometry } from '../../utils/dfmHeatGeometry';
 
 /**
@@ -32,19 +32,26 @@ export function DfmHeatmap() {
   const printBed = useStore(state => state.printBed);
   const selectedNodeId = useStore(state => state.selectedNodeId);
 
+  // Follows the panel: the casting section takes the colours with it, because
+  // reading about undercuts while the viewport is still shaded for overhangs
+  // is worse than showing neither. Rolled up, it stops sampling entirely.
+  const lens = dfmEnabled && !minimized ? (castOpen ? 'cast' : dfmLensFor(machineTarget)) : null;
+  // The same bench, key for key, as the panel's, so the two share one analysis.
+  const bench = useMemo(
+    () => ({ material, filament, stock, printBed, nodeId: selectedNodeId }),
+    [material, filament, stock, printBed, selectedNodeId],
+  );
+  const report = useDfmReport(sceneGraph, lens, bench);
+
   const geometry = useMemo(() => {
-    // Follows the panel: the casting section takes the colours with it, because
-    // reading about undercuts while the viewport is still shaded for overhangs
-    // is worse than showing neither. Rolled up, it stops sampling entirely.
-    const lens = dfmEnabled && !minimized ? (castOpen ? 'cast' : dfmLensFor(machineTarget)) : null;
-    if (!lens || !sceneGraph) return null;
+    if (!report) return null;
     try {
-      return buildHeatGeometry(analyseDfmShared(sceneGraph, lens, { material, filament, stock, printBed, nodeId: selectedNodeId }));
+      return buildHeatGeometry(report);
     } catch {
       // A scene the analyser cannot read should cost the viewport nothing.
       return null;
     }
-  }, [sceneGraph, dfmEnabled, minimized, castOpen, machineTarget, material, filament, stock, printBed, selectedNodeId]);
+  }, [report]);
 
   if (!geometry) return null;
 

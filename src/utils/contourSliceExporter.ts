@@ -189,6 +189,15 @@ const sceneTrianglesCache = new WeakMap<
   { tris: number[]; solidIds: number[]; skipped: string[]; warnings: string[] }
 >();
 
+/** Said when a body's holes have never been evaluated: its cutters are dropped, so the solid is cut whole. */
+export function uncompiledCsgWarning(node: SceneNode): string | null {
+  return node.csgEnabled &&
+    (node.geoms || []).some(g => g.csg === 'difference') &&
+    !(node.geoms || []).some(g => g.csgDerived === 'visual')
+    ? `${node.name}: CSG has not been compiled, so its holes are not cut.`
+    : null;
+}
+
 export function collectSceneTriangles(scene: SceneGraph): {
   tris: number[];
   /** Which solid each triangle came from, one entry per triangle. */
@@ -228,13 +237,8 @@ export function collectSceneTriangles(scene: SceneGraph): {
     // A body whose holes have never been evaluated still lists its cutters as
     // authored geoms, and resolveCsgGeoms drops them. Slicing the un-subtracted
     // solid silently would hand back layers with no holes in them, so say so.
-    if (
-      node.csgEnabled &&
-      (node.geoms || []).some(g => g.csg === 'difference') &&
-      !(node.geoms || []).some(g => g.csgDerived === 'visual')
-    ) {
-      warnings.push(`${node.name}: CSG has not been compiled, so its holes are not cut.`);
-    }
+    const uncompiled = uncompiledCsgWarning(node);
+    if (uncompiled) warnings.push(uncompiled);
 
     for (const geom of resolveCsgGeoms(node, 'render')) {
       if (geom.role === 'collision') continue;

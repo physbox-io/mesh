@@ -2,9 +2,8 @@
 // answers are known by hand.
 //
 // The engine is pure — it takes a SceneGraph and returns numbers — so all of
-// this runs in plain Node with no store, no worker and no MuJoCo. That is the
-// point of it being a separate module from utils/printAnalysis.ts, which reads
-// live simulation state at module scope.
+// this runs in plain Node with no store, no worker and no MuJoCo. In the
+// browser the same module runs on workers/dfmWorker.ts.
 
 import { describe, it, expect } from 'vitest';
 import {
@@ -297,6 +296,26 @@ describe('analyseDfm', () => {
     const tall = scene([boxBody([0, 0, 0.05], [0.02, 0.02, 0.05])]);
     expect(analyseDfm(tall, 'cnc', { asPlaced: true, maxToolReachMm: 500 }).findings.find(f => f.id === 'cnc_reach')).toBeUndefined();
     expect(analyseDfm(tall, 'cnc', { asPlaced: true, maxToolReachMm: 5 }).findings.find(f => f.id === 'cnc_reach')).toBeDefined();
+  });
+
+  it('says, part by part, what it left out and why', () => {
+    // The per-part walk gathers these itself rather than sampling the whole
+    // scene a second time for its warnings.
+    const uncut: SceneNode = {
+      ...boxBody([0.2, 0, 0.05], [0.05, 0.05, 0.05], 'plate'),
+      csgEnabled: true,
+      geoms: [
+        { name: 'slab', type: 'box', size: [0.05, 0.05, 0.05] } as SceneGeom,
+        { name: 'hole', type: 'cylinder', size: [0.01, 0.06], csg: 'difference' } as SceneGeom,
+      ],
+    };
+    const broken = meshBody({ verts: [], faces: [] }, { id: 'broken', name: 'broken' });
+    const sim = { ...boxBody([-0.2, 0, 0.05], [0.02, 0.02, 0.02], 'cut'), simulation: {} } as SceneNode;
+    const r = analyseDfm(scene([boxBody([0, 0, 0.05], [0.05, 0.05, 0.05]), uncut, broken, sim]), 'print');
+    expect(r.warnings).toContain('plate: CSG has not been compiled, so its holes are not cut.');
+    expect(r.warnings).toContain('cut: a simulated cut, so it is left out.');
+    expect(r.warnings).toContain('Not analysed: broken (part_mesh).');
+    expect(r.heat.length).toBe(r.tris.length / 9);
   });
 });
 

@@ -556,10 +556,14 @@ on ordinary parts; keep it passing when adding a check.
 
 Three things worth knowing before changing it:
 
-* **It is pure and store-free**, unlike `utils/printAnalysis.ts`, which reads live
-  MuJoCo state at module scope and can only run on the main thread. Everything in
-  `dfm.ts` takes a `SceneGraph` and returns numbers, which is why it is tested
-  directly and could move to a worker unchanged.
+* **It runs on a worker, so it has to stay pure and store-free.** Everything in
+  `dfm.ts` takes a `SceneGraph` and returns numbers. `workers/dfmWorker.ts` runs
+  it, and the structural checks, off the main thread; the views ask through
+  `useDfmReport` / `useStructuralWeakSpots` in `utils/dfmWorkerClient.ts`, which
+  run each analysis once per scene and lens, drop jobs a newer edit has
+  overtaken, and keep the last answer on screen until the new one is in. A
+  `useStore` import anywhere under `dfm.ts` or `printAnalysis.ts` drags the
+  whole store into the worker.
 * **The heat map and the analysis share one triangle soup.** `analyseDfm` returns
   the `tris` it measured alongside one `heat` value per triangle, and the overlay
   draws that same array. Re-collecting the scene on the render side would be a
@@ -572,7 +576,7 @@ Three things worth knowing before changing it:
   job.
 
 The structural checks (buckling, thin pins, gear clearance) still come from
-`utils/printAnalysis.ts` and ride along with whichever lens is open, since a
+`utils/printAnalysis.ts` (`structuralWeakSpots`), judged as drawn, and ride along with whichever lens is open, since a
 column that buckles buckles however it was made. That is where the old **Weak
 Spots** button's findings went.
 

@@ -26,7 +26,7 @@
 // because that is what the fabrication side of this app speaks.
 
 import * as THREE from 'three';
-import { appendSolidTriangles, collectSceneTriangles } from './contourSliceExporter';
+import { appendSolidTriangles, collectSceneTriangles, uncompiledCsgWarning } from './contourSliceExporter';
 import { resolveCsgGeoms } from './csg';
 import { getNodeWorldTransform } from './laserCutExporter';
 import { isBoughtIn } from './boughtIn';
@@ -1111,9 +1111,10 @@ export function analyseDfm(
     ...Object.fromEntries(Object.entries(bench).filter(([k]) => k in DFM_DEFAULTS)),
   };
   const target = bench.nodeId ? findNode(scene.nodes || [], bench.nodeId) : null;
-  const collected = collectSceneTriangles(target ? { ...scene, nodes: [target] } : scene);
-  const warnings = [...collected.warnings];
-  if (collected.skipped.length) warnings.push(`Not analysed: ${collected.skipped.join(', ')}.`);
+  // Said as the walk goes, not by sampling the whole scene a second time for
+  // its warnings alone.
+  const warnings: string[] = [];
+  const skipped: string[] = [];
 
   // Each body is a part, judged in its own frame — a board modelled tilted
   // is still a board — and put back where it stands for the overlay.
@@ -1121,14 +1122,20 @@ export function analyseDfm(
   const walk = (nodes: SceneNode[], parent?: THREE.Matrix4) => {
     for (const n of nodes) {
       const world = getNodeWorldTransform(n, parent);
+      if (n.simulation) warnings.push(`${n.name}: a simulated cut, so it is left out.`);
       if (!isBoughtIn(n) && !n.simulation) {
+        const uncompiled = uncompiledCsgWarning(n);
+        if (uncompiled) warnings.push(uncompiled);
         const out: number[] = [];
         const solids: number[] = [];
         let solid = 0;
         for (const g of resolveCsgGeoms(n, 'render')) {
           if (g.role === 'collision') continue;
           const before = out.length;
-          if (!appendSolidTriangles(g, new THREE.Matrix4(), out)) continue;
+          if (!appendSolidTriangles(g, new THREE.Matrix4(), out)) {
+            skipped.push(`${n.name} (${g.name || g.type})`);
+            continue;
+          }
           for (let i = before; i < out.length; i += 9) solids.push(solid);
           solid++;
         }
@@ -1139,6 +1146,7 @@ export function analyseDfm(
   };
   const targetParent = target ? (parentMatrixOf(scene.nodes || [], target.id) ?? undefined) : undefined;
   walk(target ? [target] : (scene.nodes || []), targetParent);
+  if (skipped.length) warnings.push(`Not analysed: ${skipped.join(', ')}.`);
 
   const allTris: number[] = [];
   const allHeat: number[] = [];

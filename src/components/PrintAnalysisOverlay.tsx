@@ -1,8 +1,8 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState } from 'react';
 import { Html, Line } from '@react-three/drei';
 import { useStore } from '../store/useStore';
 import { type WeakSpot } from '../utils/printAnalysis';
-import { structuralWeakSpots } from '../utils/analysisCache';
+import { useStructuralWeakSpots } from '../utils/dfmWorkerClient';
 import { AlertTriangle, Info, AlertOctagon, Wrench, X } from 'lucide-react';
 
 interface PrintAnalysisOverlayProps {
@@ -22,12 +22,9 @@ export const PrintAnalysisOverlay: React.FC<PrintAnalysisOverlayProps> = ({
 
   const [hoveredSpot, setHoveredSpot] = useState<WeakSpot | null>(null);
 
-  const analysis = useMemo(() => {
-    if (!printAnalysisEnabled || !sceneGraph) return null;
-    return { weakSpots: structuralWeakSpots(sceneGraph) };
-  }, [sceneGraph, printAnalysisEnabled]);
+  const weakSpots = useStructuralWeakSpots(sceneGraph, printAnalysisEnabled);
 
-  if (!printAnalysisEnabled || !analysis) return null;
+  if (!printAnalysisEnabled || !weakSpots) return null;
 
   return (
     <group name="print-analysis-overlay" renderOrder={999}>
@@ -44,7 +41,7 @@ export const PrintAnalysisOverlay: React.FC<PrintAnalysisOverlayProps> = ({
       </mesh>
 
       {/* Weak Spot 3D Markers with Anchored Surface Pins & Leader Lines */}
-      {analysis.weakSpots.map((spot) => {
+      {weakSpots.map((spot) => {
         const [mx, my, mz] = spot.position;
         const [sx, sy, sz] = spot.surfacePoint || spot.position;
         const elevatedZ = mz + 0.035; // Elevated 35mm above surface

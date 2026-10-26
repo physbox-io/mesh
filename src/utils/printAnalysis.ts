@@ -10,7 +10,6 @@
 
 import type { SceneGraph, SceneNode, SceneGeom } from '../types/scene';
 import { resolveCsgGeoms, positiveBounds } from './csg';
-import { useStore } from '../store/useStore';
 import { isBoughtIn } from './boughtIn';
 import * as THREE from 'three';
 
@@ -53,67 +52,20 @@ interface GeomTransform {
 }
 
 /**
- * Gets live world 3D position and rotation matrix for a node/geom in raw MuJoCo Z-up space
+ * World position and rotation of a node/geom in raw MuJoCo Z-up space, as
+ * drawn. Never the live sim pose: the DFM lens that shows these closes on Run,
+ * and reading the store here kept this engine off the DFM worker.
  */
 function getGeomWorldTransform(
   node: SceneNode,
   geom: SceneGeom | null,
   parentPos: [number, number, number]
 ): GeomTransform {
-  const store = useStore.getState();
-  const model = store.model;
-  const data = store.data;
-  const mujoco = store.mujoco;
-  const isPlaying = store.isPlaying;
-
   const identityMat: [number, number, number, number, number, number, number, number, number] = [
     1, 0, 0,
     0, 1, 0,
     0, 0, 1,
   ];
-
-  // Live WASM tracking during active physics simulation
-  if (isPlaying && model && data && mujoco) {
-    if (geom && geom.name) {
-      const gid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM.value, geom.name);
-      if (gid !== -1 && gid < model.ngeom && data.geom_xpos && data.geom_xmat) {
-        const offsetP = gid * 3;
-        const offsetM = gid * 9;
-        return {
-          pos: [data.geom_xpos[offsetP], data.geom_xpos[offsetP + 1], data.geom_xpos[offsetP + 2]],
-          mat: [
-            data.geom_xmat[offsetM],     data.geom_xmat[offsetM + 1], data.geom_xmat[offsetM + 2],
-            data.geom_xmat[offsetM + 3], data.geom_xmat[offsetM + 4], data.geom_xmat[offsetM + 5],
-            data.geom_xmat[offsetM + 6], data.geom_xmat[offsetM + 7], data.geom_xmat[offsetM + 8],
-          ],
-          hasRotation: true,
-        };
-      }
-    }
-
-    if (node.name) {
-      const bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY.value, node.name);
-      if (bid !== -1 && bid < model.nbody && data.xpos && data.xmat) {
-        const offsetP = bid * 3;
-        const offsetM = bid * 9;
-        const bodyMat = [
-          data.xmat[offsetM],     data.xmat[offsetM + 1], data.xmat[offsetM + 2],
-          data.xmat[offsetM + 3], data.xmat[offsetM + 4], data.xmat[offsetM + 5],
-          data.xmat[offsetM + 6], data.xmat[offsetM + 7], data.xmat[offsetM + 8],
-        ] as [number, number, number, number, number, number, number, number, number];
-
-        const gx = geom?.pos?.[0] || 0;
-        const gy = geom?.pos?.[1] || 0;
-        const gz = geom?.pos?.[2] || 0;
-
-        const worldX = data.xpos[offsetP] + bodyMat[0] * gx + bodyMat[1] * gy + bodyMat[2] * gz;
-        const worldY = data.xpos[offsetP + 1] + bodyMat[3] * gx + bodyMat[4] * gy + bodyMat[5] * gz;
-        const worldZ = data.xpos[offsetP + 2] + bodyMat[6] * gx + bodyMat[7] * gy + bodyMat[8] * gz;
-
-        return { pos: [worldX, worldY, worldZ], mat: bodyMat, hasRotation: true };
-      }
-    }
-  }
 
   // Scene graph node position & rotation
   const nx = parentPos[0] + (node.pos?.[0] || 0);
@@ -699,4 +651,14 @@ export function analyzeSceneMechanicalWeaknesses(sceneGraph: SceneGraph): Analys
       manufacturing: weakSpots.filter(w => w.category === 'manufacturing').length,
     },
   };
+}
+
+/**
+ * The weak spots the DFM lens shows, in its list and as markers alike: the
+ * structural ones. Overhangs and orientation are analyseDfm's to judge, per
+ * part and on its best side; this engine's as-placed guesses at them put
+ * red pins all over a jar that prints without support.
+ */
+export function structuralWeakSpots(scene: SceneGraph): WeakSpot[] {
+  return analyzeSceneMechanicalWeaknesses(scene).weakSpots.filter((w) => w.category !== 'manufacturing');
 }
