@@ -157,10 +157,9 @@ export async function savePreset(
       return {
         ok: true, savedTo: 'cloud', quotaExceeded: quota, bytes,
         storeBytes: presetStoreBytes(), largest: presetSizes().slice(0, 5), signedIn, pro,
-        message: quota
-          ? `This browser's storage is full, so “${key}” (${formatBytes(bytes)}) was saved to your account instead. `
-            + `It will load normally, but it is not kept in this browser — delete a preset or two to store it here as well.`
-          : `This browser would not store “${key}”, so it was saved to your account instead.`,
+        // Where it went is all there is to say: the account is the place for a
+        // scene this size, and this browser's storage is nobody's business.
+        message: `Saved “${key}” to your account.`,
         remedies: [{ kind: 'delete', ...biggestToFree(bytes, key) }],
         cloudPending: null,
       };
@@ -168,26 +167,27 @@ export async function savePreset(
   }
 
   // Nowhere left to put it. Say what is in the way and what can be done.
-  const freeing = biggestToFree(bytes, key);
-  const remedies: PresetRemedy[] = [];
-  if (quota && freeing.names.length) remedies.push({ kind: 'delete', ...freeing });
-  remedies.push({ kind: 'download' });
-  if (!signedIn) remedies.push({ kind: 'signIn' });
-  else if (!pro) remedies.push({ kind: 'upgrade' });
-
   const store = presetStoreBytes();
-  const message = quota
-    ? `“${key}” is ${formatBytes(bytes)} and this browser's preset storage is full `
-      + `(${formatBytes(store)} in use across ${listUserPresetNames().length} presets). `
-      + `Nothing has been saved. Delete a preset to make room, or download this one as a file`
-      + (signedIn
-        ? pro
-          ? ` — your account could not be reached just now, so it is worth trying again.`
-          : `. Your account did not take it either: PhysBox Pro is what keeps presets in the account rather than `
-            + `this browser, where a scene this size is not a problem.`
-        : `. Signing in from the account menu keeps presets in your account rather than this browser.`)
-    : `“${key}” could not be saved: this browser refused to store it${signedIn ? ' and your account could not be reached' : ''}. `
-      + `Download it as a file so the work is not lost.`;
+  const remedies: PresetRemedy[] = [];
+  let message: string;
+  if (signedIn) {
+    // Signed in, the account is where it goes, any account: presets are not a
+    // Pro feature. Failing here means the account could not be reached, and
+    // how full this browser is has nothing to do with it.
+    remedies.push({ kind: 'download' });
+    message = `“${key}” could not be saved: your account could not be reached. `
+      + `Try again in a moment, or download it as a file so the work is not lost.`;
+  } else {
+    const freeing = biggestToFree(bytes, key);
+    if (quota && freeing.names.length) remedies.push({ kind: 'delete', ...freeing });
+    remedies.push({ kind: 'download' }, { kind: 'signIn' });
+    message = quota
+      ? `“${key}” is ${formatBytes(bytes)} and this browser's preset storage is full `
+        + `(${formatBytes(store)} in use across ${listUserPresetNames().length} presets). `
+        + `Nothing has been saved. Delete a preset to make room, or download this one as a file. `
+        + `Signing in from the account menu keeps presets in your account rather than this browser.`
+      : `“${key}” could not be saved: this browser refused to store it. Download it as a file so the work is not lost.`;
+  }
 
   return {
     ok: false, savedTo: 'nowhere', quotaExceeded: quota, bytes,

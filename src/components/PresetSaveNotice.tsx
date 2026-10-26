@@ -137,11 +137,9 @@ export const PresetSaveNotice: React.FC = () => {
               Saved “{notice.name}”
             </div>
             {toCloud ? (
-              <div className="flex items-start gap-1.5 text-amber-600 dark:text-amber-400">
-                <Cloud className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-                <span>
-                  to your account — this browser is full ({formatBytes(result.storeBytes)} of presets)
-                </span>
+              <div className="flex items-center gap-1.5 text-cyan-600 dark:text-cyan-400">
+                <Cloud className="w-3.5 h-3.5" />
+                <span>to your account</span>
               </div>
             ) : cloud === null && result.cloudPending ? (
               <div className="flex items-center gap-1.5 opacity-70">
@@ -181,7 +179,8 @@ export const PresetSaveNotice: React.FC = () => {
 
         <p className="leading-relaxed text-xs">{result.message}</p>
 
-        {result.largest.length > 0 && (
+        {/* What fills this browser, for the user who can make room in it: a signed-in one saves to the account. */}
+        {!result.signedIn && result.largest.length > 0 && (
           <div className="text-xs rounded-lg border border-slate-200 dark:border-slate-700 divide-y divide-slate-100 dark:divide-slate-800">
             {result.largest.slice(0, 4).map((p) => (
               <div key={p.name} className="flex items-center justify-between px-2.5 py-1.5">

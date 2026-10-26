@@ -130,19 +130,24 @@ describe('saving a preset when the browser is full', () => {
     expect(r.remedies.some(x => x.kind === 'download')).toBe(true);
   });
 
-  it('invites a signed-out user to sign in, and a free account to upgrade', async () => {
+  it('invites a signed-out user to sign in', async () => {
     store.limit = 10;
 
     const out = await savePreset('a', bigScene(1));
     expect(out.remedies.some(x => x.kind === 'signIn')).toBe(true);
     expect(out.remedies.some(x => x.kind === 'upgrade')).toBe(false);
     expect(out.message).toMatch(/Signing in/);
+  });
 
+  it('tells a signed-in user only that the account could not be reached, not about this browser', async () => {
+    store.limit = 10;
     account.token = 'tok';
     cloud.saveCloudPreset.mockResolvedValue(false); // account unreachable
-    const free = await savePreset('b', bigScene(1));
-    expect(free.remedies.some(x => x.kind === 'upgrade')).toBe(true);
-    expect(free.message).toMatch(/PhysBox Pro/);
+    const r = await savePreset('b', bigScene(1));
+    expect(r.ok).toBe(false);
+    expect(r.message).toMatch(/account could not be reached/);
+    expect(r.message).not.toMatch(/storage|full|browser/i);
+    expect(r.remedies.map(x => x.kind)).toEqual(['download']);
   });
 });
 
@@ -158,7 +163,7 @@ describe('an account is not tied to this browser', () => {
     expect(r.savedTo).toBe('cloud');
     expect(r.quotaExceeded).toBe(true);
     expect(cloud.saveCloudPreset).toHaveBeenCalledWith('too_big_for_here', expect.anything());
-    expect(r.message).toMatch(/saved to your account/i);
+    expect(r.message).toBe('Saved “too_big_for_here” to your account.');
   });
 
   it('lists and loads a preset the account took because the browser was full', async () => {
