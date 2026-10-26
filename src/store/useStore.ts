@@ -5096,7 +5096,9 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
             meshGeom = node.geoms[0];
           }
           const nodeRgba = (node as { rgba?: number[] }).rgba;
-          const fallbackRgba: [number, number, number, number] =
+          // number[], as SceneGeom.rgba is: a tuple here made the `as SceneGeom`
+          // below an assertion between unrelated types (TS2352).
+          const fallbackRgba: number[] =
             Array.isArray(nodeRgba) && nodeRgba.length >= 3
               ? [nodeRgba[0], nodeRgba[1], nodeRgba[2], nodeRgba[3] ?? 1]
               : [0.3, 0.6, 0.9, 1];
