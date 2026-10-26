@@ -1,4 +1,5 @@
 import { useRef, type RefObject } from 'react';
+import { SceneOpeningPill } from './SceneOpeningPill';
 import type * as THREE from 'three';
 import { Code, Zap } from 'lucide-react';
 import { useShallow } from 'zustand/react/shallow';
@@ -72,6 +73,7 @@ export function Viewport({ threeSceneRef, darkMode, doc, onImportSceneJson }: {
         <CompileErrorBanner />
         <VoltLinkBanner />
         <EdgeRoundPanel />
+        <SceneOpeningPill />
         {scadCompileCount > 0 && (
           <div className="bg-white/90 dark:bg-slate-900/90 text-slate-800 dark:text-slate-100 border border-slate-200/80 dark:border-slate-800/80 px-3.5 py-1.5 rounded-full shadow-md flex items-center gap-2.5 text-xs font-semibold backdrop-blur-md transition-all duration-300 pointer-events-auto">
             <div className="relative flex h-2 w-2">

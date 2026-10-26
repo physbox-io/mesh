@@ -13,6 +13,7 @@ import { getSyncedSceneGraph } from '../utils/mujocoSync';
 import { packMeshArrays } from '../utils/meshPacking';
 import type { SceneDocument } from './useSceneDocument';
 import { recordRecent } from '../utils/sceneMeta';
+import { openingScene } from '../store/sceneLoadStore';
 import { captureViewportThumb } from '../utils/viewportCapture';
 
 export type PresetEntry = { name: string; emoji?: string };
@@ -52,7 +53,11 @@ export function usePresetActions(doc: SceneDocument) {
 
   // Load a preset and replace the note card with the preset's built-in card (if any)
   const loadPresetWithCard = useCallback((name: string) => {
-    loadPreset(name);
+    const preset = PRESETS[name as keyof typeof PRESETS] as PresetEntry | undefined;
+    void openingScene(preset?.name ?? name, () => {
+      loadPreset(name);
+      return true;
+    });
     recordRecent(name);
     const builtinKey = name.startsWith('user:') ? null : name;
     const presetCard = builtinKey ? makePresetNoteCard(builtinKey) : null;
@@ -61,23 +66,28 @@ export function usePresetActions(doc: SceneDocument) {
 
   // Also load note cards from user presets (stored alongside the scene)
   const loadUserPresetWithCard = useCallback(async (name: string) => {
-    // A preset listed from the account has its data fetched on first open.
-    if (!(await ensureUserPreset(name))) {
-      showNotice('Could not open preset', `"${name.replace(/^user:/, '')}" could not be fetched from your account. Check the connection and try again.`, 'red');
-      return;
-    }
-    loadPreset(name);
-    recordRecent(name.startsWith('user:') ? name : `user:${name}`);
-    let notes: NoteCard[] = [];
-    let chat: CopilotMessage[] = [];
-    try {
-      const saved = readUserPreset(name);
-      if (saved && Array.isArray(saved.noteCards)) notes = saved.noteCards;
-      if (saved && Array.isArray(saved.copilotMessages)) chat = saved.copilotMessages as CopilotMessage[];
-    } catch {
-      // Unreadable: it loads with no notes or chat, as before.
-    }
-    replaceDocument(notes, chat);
+    const label = name.replace(/^user:/, '');
+    // The pill stays up until the scene is drawn; the notes and chat swap in as the load starts.
+    await openingScene(label, async () => {
+      // A preset listed from the account has its data fetched on first open.
+      if (!(await ensureUserPreset(name))) {
+        showNotice('Could not open preset', `"${label}" could not be fetched from your account. Check the connection and try again.`, 'red');
+        return false;
+      }
+      loadPreset(name);
+      recordRecent(name.startsWith('user:') ? name : `user:${name}`);
+      let notes: NoteCard[] = [];
+      let chat: CopilotMessage[] = [];
+      try {
+        const saved = readUserPreset(name);
+        if (saved && Array.isArray(saved.noteCards)) notes = saved.noteCards;
+        if (saved && Array.isArray(saved.copilotMessages)) chat = saved.copilotMessages as CopilotMessage[];
+      } catch {
+        // Unreadable: it loads with no notes or chat, as before.
+      }
+      replaceDocument(notes, chat);
+      return true;
+    });
   }, [loadPreset, replaceDocument, showNotice]);
 
   const saveUserPresetByName = useCallback((name: string) => {
