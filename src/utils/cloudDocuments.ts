@@ -99,11 +99,17 @@ function formatBytes(bytes: number): string {
   return `${Math.round(bytes / 1024)} kB`;
 }
 
-/** What the badge says when the document cannot fit in the account. */
+/**
+ * What the badge says when the document cannot fit in the account.
+ *
+ * It used to end "saved on this device", which nothing here makes true: autosave
+ * writes only to the account, and a scene too big for the account is far too big
+ * for localStorage. Exporting is the one way to keep it, so it says that.
+ */
 function tooLargeMessage(bytes: number): string {
   return `Too big to sync (${formatBytes(bytes)} of ${formatBytes(
     MAX_DOCUMENT_BYTES
-  )}) — saved on this device.`;
+  )}) — not saved. Export JSON to keep a copy.`;
 }
 
 export type AutosaveState =
@@ -521,12 +527,10 @@ class CloudAutosave {
 
     /*
      * Anything else is treated as reachability, and nothing is stashed anywhere.
-     *
-     * There is no need: the app's own local save has already happened, and it is
-     * the durability story. A second copy of the same document under another
-     * localStorage key would be one more thing to keep consistent for no gain.
+     * Nor is the work on this device: autosave has no local copy, only a preset
+     * saved by hand does, so the badge does not claim one.
      */
-    this.set({ state: 'offline', message: 'Not synced — your work is saved on this device.' });
+    this.set({ state: 'offline', message: 'Not synced yet — retrying.' });
 
     if (this.retryTimer) clearTimeout(this.retryTimer);
     this.retryTimer = setTimeout(() => this.save(), this.retryDelay);
