@@ -14,6 +14,10 @@ import type { SolidMachiningOptions } from '../utils/solidMachiningExporter';
 import { ExportCastModal } from './ExportCastModal';
 import { SplitForPrintModal } from './SplitForPrintModal';
 import { TimberBreakdownModal } from './TimberBreakdownModal';
+import { ExportSheetUnfoldModal } from './ExportSheetUnfoldModal';
+import { ImportPcbModal } from './ImportPcbModal';
+import { MechanismBuilderModal } from './MechanismBuilderModal';
+import { ExportTubeAndWireModal } from './ExportTubeAndWireModal';
 import { BottomStatusBar } from './BottomStatusBar';
 import { MachineConfigModal } from './MachineConfigModal';
 
@@ -43,6 +47,10 @@ export function FabricationModals({ threeSceneRef, noteCards }: {
   const [isCastModalOpen, setIsCastModalOpen] = useState(false);
   const [isSplitModalOpen, setIsSplitModalOpen] = useState(false);
   const [isJoineryModalOpen, setIsJoineryModalOpen] = useState(false);
+  const [isSheetUnfoldModalOpen, setIsSheetUnfoldModalOpen] = useState(false);
+  const [isPcbModalOpen, setIsPcbModalOpen] = useState(false);
+  const [isMechanismModalOpen, setIsMechanismModalOpen] = useState(false);
+  const [isTubeAndWireModalOpen, setIsTubeAndWireModalOpen] = useState(false);
 
   // Subscribe to sceneGraph only while a scene-consuming export modal is open,
   // so editing the scene does not re-render the bottom bar or closed modals.
@@ -52,7 +60,9 @@ export function FabricationModals({ threeSceneRef, noteCards }: {
     isReliefCarveModalOpen ||
     isMoldModalOpen ||
     isSolidModalOpen ||
-    isCastModalOpen;
+    isCastModalOpen ||
+    isSheetUnfoldModalOpen ||
+    isTubeAndWireModalOpen;
   const sceneGraph = useStore((s) => (anySceneModalOpen ? s.sceneGraph : null));
 
   // Resume a previously connected USB or cloud machine once on app startup
@@ -145,6 +155,36 @@ export function FabricationModals({ threeSceneRef, noteCards }: {
         />
       )}
 
+      {isSheetUnfoldModalOpen && sceneGraph && (
+        <ExportSheetUnfoldModal
+          isOpen={isSheetUnfoldModalOpen}
+          onClose={() => setIsSheetUnfoldModalOpen(false)}
+          scene={sceneGraph}
+        />
+      )}
+
+      {isPcbModalOpen && (
+        <ImportPcbModal
+          isOpen={isPcbModalOpen}
+          onClose={() => setIsPcbModalOpen(false)}
+        />
+      )}
+
+      {isMechanismModalOpen && (
+        <MechanismBuilderModal
+          isOpen={isMechanismModalOpen}
+          onClose={() => setIsMechanismModalOpen(false)}
+        />
+      )}
+
+      {isTubeAndWireModalOpen && sceneGraph && (
+        <ExportTubeAndWireModal
+          isOpen={isTubeAndWireModalOpen}
+          onClose={() => setIsTubeAndWireModalOpen(false)}
+          scene={sceneGraph}
+        />
+      )}
+
       <BottomStatusBar
         onOpenMachineConfig={() => setMachineConfigOpen(true)}
         exports={{
@@ -158,6 +198,10 @@ export function FabricationModals({ threeSceneRef, noteCards }: {
           cast: () => setIsCastModalOpen(true),
           split: () => setIsSplitModalOpen(true),
           joinery: () => setIsJoineryModalOpen(true),
+          unfold: () => setIsSheetUnfoldModalOpen(true),
+          pcb: () => setIsPcbModalOpen(true),
+          mechanisms: () => setIsMechanismModalOpen(true),
+          pipes: () => setIsTubeAndWireModalOpen(true),
         }}
       />
 

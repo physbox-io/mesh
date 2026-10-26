@@ -79,6 +79,47 @@ import {
 } from '../utils/reliefCarveExporter';
 import { DEFAULT_LASER_OPTIONS, type LaserCutResult } from '../utils/laserCutExporter';
 import { DEFAULT_CONTOUR_OPTIONS, collectSceneTriangles, type ContourSliceResult } from '../utils/contourSliceExporter';
+import { exportSheetUnfold, type SheetUnfoldOptions } from '../utils/sheetUnfoldExporter';
+import {
+  PCB_PRESETS,
+  buildPcbNode,
+  decodePcbHandoff,
+  exportPcbFaceplateSvg,
+  generatePcbEnclosure,
+  type PcbEnclosureFace,
+  type PcbEnclosureOptions,
+  type PcbMechanicalSpec,
+} from '../utils/pcbEnclosureSync';
+import {
+  buildCamMechanism,
+  buildFourBarLinkage,
+  buildGt2BeltDrive,
+  buildInvoluteGearNode,
+  buildLeadscrewDrive,
+  buildMeshingGearPair,
+  buildRackAndPinionPair,
+  type CamSpec,
+  type FourBarSpec,
+  type Gt2BeltDriveSpec,
+  type InvoluteGearSpec,
+  type InvoluteRackSpec,
+  type LeadscrewSpec,
+} from '../utils/mechanismParts';
+import {
+  PIPE_STANDARDS,
+  breakdownPipeFrame,
+  buildAllCustomHubNodes,
+  buildWireBendingJigNode,
+  computeTubeCopeJoint,
+  computeWireBendSchedule,
+  exportTubeCopeSvg,
+  generatePipeStructurePreset,
+  type PipeFrameOptions,
+  type PipeStandardId,
+  type PipeStructurePresetId,
+  type TubeCopeSpec,
+  type WireBendJigOptions,
+} from '../utils/tubeAndWireExporter';
 import { reliefSimulationTools } from '../utils/simulatedPart';
 import { simulationSetups } from '../utils/solidSetups';
 import { BLOCK_FACES, FACE_NAME, type BlockFace } from '../utils/orient';
@@ -4274,6 +4315,219 @@ export function useMCPBridge() {
             buildGuideMarkdown: cutPlan.buildGuideMarkdown,
             warnings: outcome.warnings,
           };
+        }
+
+        case 'EXPORT_SHEET_UNFOLD':
+        case 'PHYSICS_EXPORT_SHEET_UNFOLD': {
+          const targetIds = Array.isArray(msg.targetIds)
+            ? msg.targetIds.filter((x): x is string => typeof x === 'string')
+            : typeof msg.targetId === 'string'
+              ? [msg.targetId]
+              : undefined;
+          const res = exportSheetUnfold(
+            store.sceneGraph,
+            msg as Partial<SheetUnfoldOptions>,
+            targetIds,
+          );
+          return {
+            ok: true,
+            mode: res.options.mode,
+            totalFaces: res.totalFaces,
+            foldCount: res.foldCount,
+            seamCount: res.seamCount,
+            glueTabCount: res.glueTabCount,
+            stitchHoleCount: res.stitchHoleCount,
+            sheetCount: res.sheets.length,
+            islands: res.islands.map((isl) => ({
+              id: isl.id,
+              nodeId: isl.nodeId,
+              nodeName: isl.nodeName,
+              faceCount: isl.faceCount,
+              boundsMm: isl.boundsMm,
+            })),
+            svg: res.svg,
+            etchUrl: res.etchUrl,
+            warnings: res.warnings,
+          };
+        }
+
+        case 'SYNC_PCB_ENCLOSURE':
+        case 'PHYSICS_SYNC_PCB_ENCLOSURE': {
+          const presetKey = typeof msg.preset === 'string' ? msg.preset : undefined;
+          let spec: PcbMechanicalSpec | null = null;
+          if (presetKey && presetKey in PCB_PRESETS) {
+            spec = PCB_PRESETS[presetKey];
+          } else if (typeof msg.handoff === 'string') {
+            spec = decodePcbHandoff(msg.handoff);
+          } else if (msg.spec && typeof msg.spec === 'object') {
+            spec = msg.spec as PcbMechanicalSpec;
+          } else {
+            spec = PCB_PRESETS.arduino_uno;
+          }
+          if (!spec) return { ok: false, error: 'Invalid PCB specification or handoff payload.' };
+
+          const face: PcbEnclosureFace =
+            msg.face === 'front' || msg.face === 'back' || msg.face === 'left' || msg.face === 'right'
+              ? msg.face
+              : 'top';
+          const faceplate = exportPcbFaceplateSvg(spec, face);
+
+          if (msg.pcbOnly === true) {
+            const pcbNode = buildPcbNode(spec);
+            const nextNodes = [...store.sceneGraph.nodes.filter((n) => n.id !== pcbNode.id), pcbNode];
+            await settleScene(nextNodes);
+            return {
+              ok: true,
+              pcbId: pcbNode.id,
+              faceplateSvg: faceplate.svg,
+              etchUrl: faceplate.etchUrl,
+            };
+          }
+
+          const enc = generatePcbEnclosure(spec, msg as Partial<PcbEnclosureOptions>);
+          const addedIds = new Set([enc.baseNode.id, enc.pcbNode.id, ...(enc.lidNode ? [enc.lidNode.id] : [])]);
+          const nextNodes = [
+            ...store.sceneGraph.nodes.filter((n) => !addedIds.has(n.id)),
+            enc.baseNode,
+            enc.pcbNode,
+            ...(enc.lidNode ? [enc.lidNode] : []),
+          ];
+          await settleScene(nextNodes);
+          return {
+            ok: true,
+            baseId: enc.baseNode.id,
+            lidId: enc.lidNode?.id,
+            pcbId: enc.pcbNode.id,
+            cutouts: enc.cutouts,
+            clearanceReport: enc.clearanceReport,
+            faceplateSvg: faceplate.svg,
+            etchUrl: faceplate.etchUrl,
+          };
+        }
+
+        case 'BUILD_MECHANISM':
+        case 'PHYSICS_BUILD_MECHANISM': {
+          const family = typeof msg.family === 'string' ? msg.family : 'gear_pair';
+          let createdNodes: SceneNode[] = [];
+          let metrics: Record<string, unknown> = {};
+          if (family === 'gear') {
+            const node = buildInvoluteGearNode(msg as unknown as InvoluteGearSpec);
+            createdNodes = [node];
+          } else if (family === 'gear_pair') {
+            const driverSpec: InvoluteGearSpec = (msg.driver as InvoluteGearSpec) ?? {
+              moduleMm: typeof msg.moduleMm === 'number' ? msg.moduleMm : 1.5,
+              teeth: typeof msg.driverTeeth === 'number' ? msg.driverTeeth : 16,
+            };
+            const drivenSpec: InvoluteGearSpec = (msg.driven as InvoluteGearSpec) ?? {
+              moduleMm: driverSpec.moduleMm,
+              teeth: typeof msg.drivenTeeth === 'number' ? msg.drivenTeeth : 32,
+            };
+            const pair = buildMeshingGearPair(driverSpec, drivenSpec);
+            createdNodes = [pair.driverNode, pair.drivenNode];
+            metrics = { centerDistanceMm: pair.centerDistanceMm, ratio: pair.ratio, contactRatio: pair.contactRatio };
+          } else if (family === 'rack_pinion') {
+            const pinionSpec: InvoluteGearSpec = (msg.pinion as InvoluteGearSpec) ?? {
+              moduleMm: typeof msg.moduleMm === 'number' ? msg.moduleMm : 1.5,
+              teeth: typeof msg.pinionTeeth === 'number' ? msg.pinionTeeth : 16,
+            };
+            const rackSpec: InvoluteRackSpec = (msg.rack as InvoluteRackSpec) ?? {
+              moduleMm: pinionSpec.moduleMm,
+              teeth: typeof msg.rackTeeth === 'number' ? msg.rackTeeth : 20,
+            };
+            const rp = buildRackAndPinionPair(pinionSpec, rackSpec);
+            createdNodes = [rp.pinionNode, rp.rackNode];
+            metrics = { coupleRatio: rp.coupleRatio, pitchLineOffsetMm: rp.pitchLineOffsetMm };
+          } else if (family === 'gt2_belt') {
+            const belt = buildGt2BeltDrive((msg as unknown as Gt2BeltDriveSpec) ?? { driverTeeth: 20, drivenTeeth: 40, centerDistanceMm: 80 });
+            createdNodes = [belt.driverNode, belt.drivenNode, belt.beltNode];
+            metrics = { beltLengthMm: belt.beltLengthMm, beltTeeth: belt.beltTeeth, coupleRatio: belt.coupleRatio };
+          } else if (family === 'leadscrew') {
+            const ls = buildLeadscrewDrive((msg as unknown as LeadscrewSpec) ?? { lengthMm: 200, leadMm: 8 });
+            createdNodes = [ls.screwNode];
+            metrics = { coupleRatio: ls.coupleRatio, travelMm: ls.travelMm };
+          } else if (family === 'cam_follower') {
+            const cam = buildCamMechanism((msg as unknown as CamSpec) ?? { profile: 'eccentric', baseRadiusMm: 20, liftMm: 8 });
+            createdNodes = [cam.camNode, cam.followerNode];
+            metrics = { maxRadiusMm: cam.maxRadiusMm, minRadiusMm: cam.minRadiusMm, coupleRatio: cam.coupleRatio };
+          } else if (family === 'four_bar') {
+            const fb = buildFourBarLinkage((msg as unknown as FourBarSpec) ?? { groundMm: 100, crankMm: 40, couplerMm: 90, rockerMm: 80 });
+            createdNodes = fb.nodes;
+            metrics = { ...fb.metrics };
+          } else {
+            return { ok: false, error: `Unknown mechanism family '${family}'.` };
+          }
+          const createdIds = new Set(createdNodes.map((n) => n.id));
+          const nextNodes = [...store.sceneGraph.nodes.filter((n) => !createdIds.has(n.id)), ...createdNodes];
+          await settleScene(nextNodes);
+          return {
+            ok: true,
+            family,
+            addedIds: createdNodes.map((n) => n.id),
+            metrics,
+          };
+        }
+
+        case 'BREAKDOWN_PIPE_FRAME':
+        case 'PHYSICS_BREAKDOWN_PIPE_FRAME': {
+          if (typeof msg.preset === 'string') {
+            const presetNodes = generatePipeStructurePreset(msg.preset as PipeStructurePresetId, {
+              pipeStandardId: (typeof msg.pipeStandardId === 'string' && msg.pipeStandardId in PIPE_STANDARDS
+                ? msg.pipeStandardId
+                : 'pvc_sch40_3_4') as PipeStandardId,
+              widthMm: typeof msg.widthMm === 'number' ? msg.widthMm : undefined,
+              depthMm: typeof msg.depthMm === 'number' ? msg.depthMm : undefined,
+              heightMm: typeof msg.heightMm === 'number' ? msg.heightMm : undefined,
+              roofPitchDeg: typeof msg.roofPitchDeg === 'number' ? msg.roofPitchDeg : undefined,
+            });
+            await settleScene(presetNodes);
+          }
+          const bd = breakdownPipeFrame(useStore.getState().sceneGraph, msg as Partial<PipeFrameOptions>);
+          let addedHubIds: string[] = [];
+          if (msg.addPrintableHubs === true) {
+            const hubNodes = buildAllCustomHubNodes(bd);
+            addedHubIds = hubNodes.map((h) => h.id);
+            const hubIdSet = new Set(addedHubIds);
+            const nextNodes = [...useStore.getState().sceneGraph.nodes.filter((n) => !hubIdSet.has(n.id)), ...hubNodes];
+            await settleScene(nextNodes);
+          }
+          return {
+            ok: true,
+            pipeSpec: bd.pipeSpec,
+            strutCount: bd.struts.length,
+            hubCount: bd.hubs.length,
+            sticksRequired: bd.sticksRequired,
+            totalPipeLengthMm: bd.totalPipeLengthMm,
+            shoppingList: bd.shoppingList,
+            sticks: bd.sticks,
+            addedHubIds,
+            warnings: bd.warnings,
+          };
+        }
+
+        case 'EXPORT_TUBE_COPE': {
+          const cope = computeTubeCopeJoint(msg as unknown as TubeCopeSpec);
+          const svgRes = exportTubeCopeSvg([msg as unknown as TubeCopeSpec]);
+          return {
+            ok: true,
+            circumferenceMm: cope.circumferenceMm,
+            peakToValleyOuterMm: cope.peakToValleyOuterMm,
+            peakToValleyInnerMm: cope.peakToValleyInnerMm,
+            peakToValleyCutMm: cope.peakToValleyCutMm,
+            svg: svgRes.svg,
+            warnings: cope.warnings,
+          };
+        }
+
+        case 'COMPUTE_WIRE_BEND': {
+          const pts = Array.isArray(msg.pointsMm) ? (msg.pointsMm as [number, number, number][]) : [[0, 0, 0], [60, 0, 0], [60, 50, 0], [120, 50, 0]];
+          if (msg.addJig === true) {
+            const { jigNode, schedule, isPlanar } = buildWireBendingJigNode(pts, msg as Partial<WireBendJigOptions>);
+            const nextNodes = [...store.sceneGraph.nodes.filter((n) => n.id !== jigNode.id), jigNode];
+            await settleScene(nextNodes);
+            return { ok: true, jigId: jigNode.id, isPlanar, schedule };
+          }
+          const schedule = computeWireBendSchedule(pts, msg as Partial<WireBendJigOptions>);
+          return { ok: true, schedule };
         }
 
         /*
