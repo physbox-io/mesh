@@ -2,6 +2,7 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App.tsx'
+import { AppErrorBoundary } from './components/AppErrorBoundary'
 import { restoreInterruptedJob } from './utils/jobRestore'
 import { noteWorkerStopped } from './utils/staleBuild'
 
@@ -19,6 +20,8 @@ window.addEventListener('vite:preloadError', noteWorkerStopped)
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <App />
+    <AppErrorBoundary>
+      <App />
+    </AppErrorBoundary>
   </StrictMode>,
 )
