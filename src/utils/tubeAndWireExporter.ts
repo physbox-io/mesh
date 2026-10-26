@@ -294,6 +294,8 @@ function makeStrutNode(
     name,
     type: 'body',
     pos: [0, 0, 0],
+    joints: [],
+    children: [],
     geoms: [
       {
         name: id,
@@ -1070,6 +1072,8 @@ export function buildPipeHubNode(
     type: 'body',
     csgEnabled: true,
     pos: [mm(hub.centerMm[0]), mm(hub.centerMm[1]), mm(hub.centerMm[2])],
+    joints: [],
+    children: [],
     geoms,
   };
 }
@@ -1984,6 +1988,8 @@ export function buildWireBendingJigNode(
     type: 'body',
     csgEnabled: true,
     pos: [0, 0, 0],
+    joints: [],
+    children: [],
     geoms,
   };
 
