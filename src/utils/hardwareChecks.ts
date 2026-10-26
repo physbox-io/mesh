@@ -291,7 +291,8 @@ export function sealFindings(scene: SceneGraph, process: DfmProcess, whole: Scen
       if (Number.isFinite(best)) gaps.push(best - BACK);
     }
     if (gaps.length === 0) {
-      out.push(finding('info', `${label}: nothing presses on it yet`,
+      // An open seal is not a sealed one, however good the groove.
+      out.push(finding('warning', `${label}: nothing presses on it`,
         `No part sits within ${mmText(REACH)} of the groove in ${host.name}, so the seal cannot be checked.`,
         geo.radial ? 'Put the part it seals against in place: the bore over the boss, or the shaft through the bore.' : 'Put the lid in place over the groove.'));
       continue;

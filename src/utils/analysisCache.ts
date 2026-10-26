@@ -9,7 +9,7 @@
 
 import type { SceneGraph } from '../types/scene';
 import { analyseDfm, type DfmBench, type DfmLimits, type DfmProcess, type DfmReport } from './dfm';
-import { analyzeSceneMechanicalWeaknesses } from './printAnalysis';
+import { analyzeSceneMechanicalWeaknesses, type WeakSpot } from './printAnalysis';
 
 const dfmReports = new WeakMap<SceneGraph, Map<string, DfmReport>>();
 
@@ -41,4 +41,14 @@ export function analyzeWeaknessesShared(scene: SceneGraph): ReturnType<typeof an
     weaknessReports.set(scene, result);
   }
   return result;
+}
+
+/**
+ * The weak spots the DFM lens shows, in its list and as markers alike: the
+ * structural ones. Overhangs and orientation are analyseDfm's to judge, per
+ * part and on its best side; the old engine's as-placed guesses at them put
+ * red pins all over a jar that prints without support.
+ */
+export function structuralWeakSpots(scene: SceneGraph): WeakSpot[] {
+  return analyzeWeaknessesShared(scene).weakSpots.filter((w) => w.category !== 'manufacturing');
 }

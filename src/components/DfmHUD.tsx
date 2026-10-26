@@ -3,7 +3,7 @@ import { ChevronDown, ChevronRight, ChevronUp, Ruler, X } from 'lucide-react';
 import { useStore } from '../store/useStore';
 import { dfmLensFor, type DfmFinding, type DfmProcess, type DfmReport } from '../utils/dfm';
 import { type WeakSpot } from '../utils/printAnalysis';
-import { analyseDfmShared, analyzeWeaknessesShared } from '../utils/analysisCache';
+import { analyseDfmShared, structuralWeakSpots } from '../utils/analysisCache';
 import { materialSpec } from '../utils/feedsAndSpeeds';
 import { filamentSpec } from '../utils/filaments';
 
@@ -158,8 +158,7 @@ export function DfmHUD() {
   const structural = useMemo(() => {
     if (!open || !sceneGraph) return [] as WeakSpot[];
     try {
-      return analyzeWeaknessesShared(sceneGraph).weakSpots
-        .filter(w => w.category !== 'manufacturing');
+      return structuralWeakSpots(sceneGraph);
     } catch {
       return [] as WeakSpot[];
     }

@@ -171,7 +171,7 @@ describe('the seal check', () => {
     const j = jar();
     cut(j, { at: [0.027, 0, 0.04], normal: [0, 0, 1] });
     const [f] = sealFindings({ nodes: [j] } as SceneGraph, 'print');
-    expect(f.severity).toBe('info');
+    expect(f.severity).toBe('warning');
     expect(f.title).toMatch(/nothing presses/);
   });
 

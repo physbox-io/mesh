@@ -2,7 +2,7 @@ import React, { useState, useMemo } from 'react';
 import { Html, Line } from '@react-three/drei';
 import { useStore } from '../store/useStore';
 import { type WeakSpot } from '../utils/printAnalysis';
-import { analyzeWeaknessesShared } from '../utils/analysisCache';
+import { structuralWeakSpots } from '../utils/analysisCache';
 import { AlertTriangle, Info, AlertOctagon, Wrench, X } from 'lucide-react';
 
 interface PrintAnalysisOverlayProps {
@@ -24,7 +24,7 @@ export const PrintAnalysisOverlay: React.FC<PrintAnalysisOverlayProps> = ({
 
   const analysis = useMemo(() => {
     if (!printAnalysisEnabled || !sceneGraph) return null;
-    return analyzeWeaknessesShared(sceneGraph);
+    return { weakSpots: structuralWeakSpots(sceneGraph) };
   }, [sceneGraph, printAnalysisEnabled]);
 
   if (!printAnalysisEnabled || !analysis) return null;
