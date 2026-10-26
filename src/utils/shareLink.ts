@@ -25,6 +25,7 @@
 
 import type { SceneNode } from '../types/scene';
 import type { UserPreset } from './userPresets';
+import { packMeshArrays, unpackMeshArrays } from './meshPacking';
 import { createShare, fetchSharedDocument, getStoredUser } from './apiClient';
 
 /** The only share format understood so far. */
@@ -202,7 +203,7 @@ async function gunzip(bytes: Uint8Array): Promise<string> {
 
 /** The fragment a scene travels in, without the URL around it. */
 export async function encodeShareFragment(scene: SharedScene): Promise<string> {
-  const json = JSON.stringify(scene);
+  const json = JSON.stringify(packMeshArrays(scene));
   const packed = await gzip(json);
   return new URLSearchParams({
     v: SHARE_VERSION,
@@ -230,7 +231,7 @@ export async function decodeShareFragment(raw: string): Promise<SharedScene | nu
   try {
     const bytes = fromBase64Url(data);
     const json = params.get('gz') === '1' ? await gunzip(bytes) : new TextDecoder().decode(bytes);
-    scene = JSON.parse(json) as SharedScene;
+    scene = unpackMeshArrays(JSON.parse(json)) as SharedScene;
   } catch {
     throw new Error('That link is damaged — it may have been shortened or cut off in transit.');
   }
@@ -333,7 +334,7 @@ export async function buildAccountShareLink(
   scene: SharedScene,
   base: string = window.location.href
 ): Promise<ShareLink> {
-  const { token } = await createShare({ appId: 'mesh', name: scene.name, data: scene });
+  const { token } = await createShare({ appId: 'mesh', name: scene.name, data: packMeshArrays(scene) });
 
   const url = new URL(base);
   url.search = '';
@@ -383,7 +384,7 @@ export async function readAccountShareLink(token: string): Promise<SharedScene> 
       `That link is a ${APP_NAMES[share.appId] ?? share.appId} document, not a Mesh scene. Open it in ${APP_NAMES[share.appId] ?? share.appId}.`
     );
   }
-  const scene = share.data as SharedScene | null;
+  const scene = unpackMeshArrays(share.data) as SharedScene | null;
   if (!scene || !Array.isArray(scene.nodes) || scene.nodes.length === 0) {
     throw new Error('That shared scene could not be read — it may have been made by a newer version of Mesh.');
   }

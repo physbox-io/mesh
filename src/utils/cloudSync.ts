@@ -20,6 +20,7 @@
 import { fetchCloudParameters, fetchCloudPresetList, fetchCloudPreset, syncCloudPreset, deleteCloudPreset } from './apiClient';
 import { SYNCED_LLM_PARAMETER_KEYS } from './llmSettings';
 import type { UserPreset } from './userPresets';
+import { packMeshArrays } from './meshPacking';
 import { SPINDLE_MAX_OVERRIDE_KEY } from './spindleOverride';
 import { CNC_BED_PARAMETER, TOOL_RACK_PARAMETER } from '@physbox-io/machining';
 import { settleToolRack } from './toolRack';
@@ -85,7 +86,7 @@ function rememberPresetId(name: string, id: string): void {
  */
 export async function saveCloudPreset(name: string, data: unknown): Promise<boolean> {
   const existingId = readPresetIdMap()[name];
-  const id = await syncCloudPreset('physics', name, data, existingId);
+  const id = await syncCloudPreset('physics', name, packMeshArrays(data), existingId);
   if (id) rememberPresetId(name, id);
   return !!id;
 }

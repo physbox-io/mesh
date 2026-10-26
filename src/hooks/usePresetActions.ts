@@ -10,6 +10,7 @@ import { savePreset } from '../utils/presetStorage';
 import { announcePresetSave } from '../utils/presetNotices';
 import { cloudAutosave } from '../utils/cloudDocuments';
 import { getSyncedSceneGraph } from '../utils/mujocoSync';
+import { packMeshArrays } from '../utils/meshPacking';
 import type { SceneDocument } from './useSceneDocument';
 import { recordRecent } from '../utils/sceneMeta';
 import { captureViewportThumb } from '../utils/viewportCapture';
@@ -107,7 +108,7 @@ export function usePresetActions(doc: SceneDocument) {
       });
       // A deliberate save is also a named revision of the cloud document, which
       // the pruner never discards — unlike the automatic checkpoints.
-      void cloudAutosave.saveExplicit(trimmed, preset, `Saved as “${trimmed}”`);
+      void cloudAutosave.saveExplicit(trimmed, packMeshArrays(preset), `Saved as “${trimmed}”`);
     } catch (e) {
       console.error('Failed to save user preset', e);
       showNotice('Could not save preset', `Could not save "${trimmed}": ${e instanceof Error ? e.message : String(e)}`, 'red');
@@ -142,11 +143,11 @@ export function usePresetActions(doc: SceneDocument) {
       // inside the coalescing window, cloning the scene here was wasted work.
       cloudAutosave.schedule(name, () => {
         const { model, data } = useStore.getState();
-        return {
+        return packMeshArrays({
           ...getSyncedSceneGraph(sceneGraph, model, data, mujoco),
           noteCards,
           copilotMessages,
-        };
+        });
       });
     } catch {
       // A scene that cannot be synced cannot be saved to anything; the local paths

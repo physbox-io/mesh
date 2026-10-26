@@ -6,6 +6,7 @@ import type { SceneGraph } from '../types/scene';
 import type { NoteCard } from '../utils/noteCards';
 import type { CopilotMessage } from '../physicsGlobals';
 import { getSyncedSceneGraph } from '../utils/mujocoSync';
+import { packMeshArrays, unpackMeshArrays } from '../utils/meshPacking';
 import { exportBaseName } from '../utils/exportBaseName';
 import type { SceneDocument } from './useSceneDocument';
 
@@ -23,7 +24,7 @@ export function useSceneIo(doc: SceneDocument) {
   const exportJson = useCallback(() => {
     try {
       const syncedScene = getSyncedSceneGraph(sceneGraph, model, data, mujoco);
-      const dataStr = JSON.stringify({ ...syncedScene, noteCards, copilotMessages }, null, 2);
+      const dataStr = JSON.stringify(packMeshArrays({ ...syncedScene, noteCards, copilotMessages }), null, 2);
       const blob = new Blob([dataStr], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -50,7 +51,7 @@ export function useSceneIo(doc: SceneDocument) {
   const importSceneJson = useCallback((text: string, fileName: string, dropped: boolean) => {
     let parsed: { nodes?: unknown; noteCards?: unknown; copilotMessages?: unknown } | null;
     try {
-      parsed = JSON.parse(text);
+      parsed = unpackMeshArrays(JSON.parse(text));
     } catch {
       showNotice('Could not read file', `Could not read ${fileName}: it is not valid JSON.`, 'red');
       return;

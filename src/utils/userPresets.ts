@@ -17,6 +17,7 @@ import { saveCloudPreset, removeCloudPreset, fetchCloudPresetData } from './clou
 import type { SceneNode } from '../types/scene';
 import type { NoteCard } from './noteCards';
 import { forgetRecent } from './sceneMeta';
+import { packMeshArrays, unpackMeshArrays } from './meshPacking';
 
 export const USER_PRESETS_KEY = 'physics_user_presets';
 
@@ -159,7 +160,8 @@ export function listUserPresetNames(): string[] {
 export function readUserPreset(name: string): UserPreset | null {
   const key = name.replace(/^user:/, '');
   const preset = readCachedPresets()[key] ?? cloudOnly[key];
-  return preset ? structuredClone(preset) : null;
+  // Stored with its meshes packed (meshPacking.ts); read with them as numbers.
+  return preset ? unpackMeshArrays(structuredClone(preset)) : null;
 }
 
 /**
@@ -257,7 +259,7 @@ export function takeLastWriteError(): unknown {
 export function writeLocalPreset(name: string, preset: UserPreset): boolean {
   const key = name.replace(/^user:/, '');
   const presets = readUserPresets();
-  presets[key] = preset;
+  presets[key] = packMeshArrays(preset);
   if (!writeAll(presets)) return false;
   // Room was made and it is stored here now; the local copy is what reads find.
   delete cloudOnly[key];

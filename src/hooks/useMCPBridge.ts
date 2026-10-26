@@ -35,6 +35,7 @@ import {
   paintArgsFromSize, paintResolution, toGeometrySpace,
 } from '../utils/vertexPaint';
 import { saveUserPreset, deleteUserPreset, readUserPreset, listUserPresetNames, ensureUserPreset, type SavedCopilotMessage } from '../utils/userPresets';
+import { unpackMeshArrays } from '../utils/meshPacking';
 import { SCULPT_BASES, buildSculptBase, buildSculptBaseSized, MAX_SCULPT_SIZE, MIN_SCULPT_SIZE, type SculptBaseId } from '../utils/sculptBases';
 import { fromSceneGeom, toSceneGeom, splitComponents, type BrushType } from '../utils/sculptMesh';
 import { applySculptStroke, probeSurface, sculptSummary, undoSculptStroke, BRUSH_TYPES } from '../utils/sculptCommands';
@@ -4921,7 +4922,7 @@ export function useMCPBridge() {
           // castPrep and simFidelity included, no default-filling - the file came
           // out of this app), its note cards and chat, the sim stopped, and no
           // preset claiming the scene, so Save cannot overwrite one with it.
-          const scene = msg.scene as (SceneGraph & { noteCards?: unknown; copilotMessages?: unknown }) | undefined;
+          const scene = unpackMeshArrays(msg.scene) as (SceneGraph & { noteCards?: unknown; copilotMessages?: unknown }) | undefined;
           if (!scene || !Array.isArray(scene.nodes)) {
             return { ok: false, error: 'The file is not a Mesh scene: it has no "nodes" array.' };
           }

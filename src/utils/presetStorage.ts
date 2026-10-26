@@ -34,6 +34,7 @@ import {
   type UserPreset, type PresetSize,
 } from './userPresets';
 import { saveCloudPreset } from './cloudSync';
+import { packMeshArrays } from './meshPacking';
 import { getStoredAuthToken, isProAccount } from './apiClient';
 
 /** Where a preset ended up. */
@@ -121,7 +122,9 @@ export async function savePreset(
 ): Promise<PresetSaveResult> {
   const key = name.replace(/^user:/, '');
   // When it was saved, for the scene browser; a rename keeps the date it had.
-  const preset: UserPreset = keepDate && typeof given.savedAt === 'number' ? given : { ...given, savedAt: Date.now() };
+  // Packed here as well as where it is written, so `bytes` is what is stored.
+  const dated: UserPreset = keepDate && typeof given.savedAt === 'number' ? given : { ...given, savedAt: Date.now() };
+  const preset = packMeshArrays(dated);
   let bytes: number;
   try { bytes = JSON.stringify(preset).length; } catch { bytes = 0; }
 
