@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { ChevronDown, ChevronRight, ChevronUp, Ruler, X } from 'lucide-react';
 import { useStore } from '../store/useStore';
 import { dfmLensFor, withLivePoses, type DfmFinding, type DfmProcess, type DfmReport } from '../utils/dfm';
@@ -163,11 +163,11 @@ export function DfmHUD() {
    * what it shows is never a pose that has since moved on. A part's own shape
    * is the same wherever it is, so the rest of the report stays as drawn.
    */
-  const [live, setLive] = useState<ReturnType<typeof livePoses>>(null);
   const watch = open && !!sceneGraph && hasAssembly(sceneGraph.nodes || []);
-  useEffect(() => {
-    setLive(watch && sceneGraph ? livePoses(sceneGraph.nodes || []) : null);
-  }, [watch, sceneGraph]);
+  const live = useMemo(
+    () => (watch && sceneGraph ? livePoses(sceneGraph.nodes || []) : null),
+    [watch, sceneGraph],
+  );
 
   // Run closes the panel: its findings are for the parts as they stand, and
   // they are about to move. Opening it again reads them where they stopped.
