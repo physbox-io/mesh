@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo } from 'react';
 import * as THREE from 'three';
 import { useStore } from '../../store/useStore';
 import { dfmLensFor } from '../../utils/dfm';
@@ -52,6 +52,9 @@ export function DfmHeatmap() {
       return null;
     }
   }, [report]);
+  // Passed in as a prop, so react-three-fiber leaves it alone: each edit's
+  // geometry is freed here, or its GPU buffers outlive it.
+  useEffect(() => () => geometry?.dispose(), [geometry]);
 
   if (!geometry) return null;
 
