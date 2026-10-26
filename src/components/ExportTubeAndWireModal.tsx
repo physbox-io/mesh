@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import { useState, useMemo } from 'react';
 import {
     X,
     Wrench,
@@ -53,16 +53,16 @@ export function ExportTubeAndWireModal({
 
     // --- Tab 1: PVC / EMT Pipe Frame State ---
     const [pipeStandardId, setPipeStandardId] = useState<PipeStandardId>(DEFAULT_PIPE_FRAME_OPTIONS.pipeStandardId);
-    const [fitStyle, setFitStyle] = useState<PipeHubFitStyle>(DEFAULT_PIPE_FRAME_OPTIONS.fitStyle);
+    const [fitStyle, setFitStyle] = useState<PipeHubFitStyle>(DEFAULT_PIPE_FRAME_OPTIONS.hubFitStyle);
     const [hubWallMm, setHubWallMm] = useState<number>(DEFAULT_PIPE_FRAME_OPTIONS.hubWallMm);
     const [fitClearanceMm, setFitClearanceMm] = useState<number>(DEFAULT_PIPE_FRAME_OPTIONS.fitClearanceMm);
     const [crossBoltHoleMm, setCrossBoltHoleMm] = useState<number>(DEFAULT_PIPE_FRAME_OPTIONS.crossBoltHoleMm);
-    const [stockLengthMm, setStockLengthMm] = useState<number>(DEFAULT_PIPE_FRAME_OPTIONS.stockLengthMm);
+    const [stockLengthMm, setStockLengthMm] = useState<number>(DEFAULT_PIPE_FRAME_OPTIONS.stockLengthMm ?? 3048);
     const [hubAddedMessage, setHubAddedMessage] = useState<string | null>(null);
 
     const pipeOptions: Partial<PipeFrameOptions> = useMemo(() => ({
         pipeStandardId,
-        fitStyle,
+        hubFitStyle: fitStyle,
         hubWallMm,
         fitClearanceMm,
         crossBoltHoleMm,
@@ -72,7 +72,26 @@ export function ExportTubeAndWireModal({
     const breakdown = useMemo(() => breakdownPipeFrame(scene, pipeOptions), [scene, pipeOptions]);
 
     // --- Tab 2: Tube Coping State ---
-    const sceneJoints = useMemo(() => extractSceneTubeJoints(scene), [scene]);
+    const sceneMembers = useMemo(() => extractSceneTubeJoints(scene), [scene]);
+    const sceneJoints: TubeCopeSpec[] = useMemo(() => {
+        const list: TubeCopeSpec[] = [];
+        for (const m of sceneMembers) {
+            if (m.startCope) list.push(m.startCope.spec);
+            if (m.endCope) list.push(m.endCope.spec);
+            if (!m.startCope && !m.endCope) {
+                list.push({
+                    id: m.id,
+                    name: m.name,
+                    cutTubeOdMm: m.odMm,
+                    cutTubeWallMm: m.wallMm,
+                    targetKind: 'tube',
+                    targetTubeOdMm: m.odMm,
+                    angleDeg: 90,
+                });
+            }
+        }
+        return list;
+    }, [sceneMembers]);
     const [selectedJointIndex, setSelectedJointIndex] = useState<number>(-1);
     const [cutTubeOdMm, setCutTubeOdMm] = useState<number>(33.4);
     const [cutTubeWallMm, setCutTubeWallMm] = useState<number>(3.38);
@@ -89,16 +108,16 @@ export function ExportTubeAndWireModal({
             setCutTubeOdMm(j.cutTubeOdMm);
             setCutTubeWallMm(j.cutTubeWallMm);
             setTargetKind(j.targetKind);
-            setTargetTubeOdMm(j.targetTubeOdMm);
+            setTargetTubeOdMm(j.targetTubeOdMm ?? j.cutTubeOdMm);
             setAngleDeg(j.angleDeg);
-            setOffsetMm(j.offsetMm);
+            setOffsetMm(j.offsetMm ?? 0);
             setClockAngleDeg(j.clockAngleDeg ?? 0);
         }
     };
 
     const copeSpec: TubeCopeSpec = useMemo(() => ({
-        id: selectedJointIndex >= 0 && sceneJoints[selectedJointIndex] ? sceneJoints[selectedJointIndex].id : 'custom_cope',
-        label: selectedJointIndex >= 0 && sceneJoints[selectedJointIndex] ? sceneJoints[selectedJointIndex].label : 'Custom Joint',
+        id: selectedJointIndex >= 0 && sceneJoints[selectedJointIndex]?.id ? sceneJoints[selectedJointIndex].id : 'custom_cope',
+        name: selectedJointIndex >= 0 && sceneJoints[selectedJointIndex]?.name ? sceneJoints[selectedJointIndex].name : 'Custom Joint',
         cutTubeOdMm,
         cutTubeWallMm,
         targetKind,
@@ -109,6 +128,7 @@ export function ExportTubeAndWireModal({
     }), [selectedJointIndex, sceneJoints, cutTubeOdMm, cutTubeWallMm, targetKind, targetTubeOdMm, angleDeg, offsetMm, clockAngleDeg]);
 
     const copeResult = useMemo(() => computeTubeCopeJoint(copeSpec), [copeSpec]);
+    const copeSvgResult = useMemo(() => exportTubeCopeSvg([copeSpec]), [copeSpec]);
 
     // --- Tab 3: Wire Bending State ---
     const sceneWires = useMemo(() => extractSceneWireCurves(scene), [scene]);
@@ -130,7 +150,7 @@ export function ExportTubeAndWireModal({
 
     const activeWirePoints = useMemo(() => {
         if (selectedWireIdx >= 0 && selectedWireIdx < sceneWires.length) {
-            return sceneWires[selectedWireIdx].points;
+            return sceneWires[selectedWireIdx].pointsMm;
         }
         return SAMPLE_BRACKET_POINTS;
     }, [selectedWireIdx, sceneWires, SAMPLE_BRACKET_POINTS]);
@@ -176,8 +196,7 @@ export function ExportTubeAndWireModal({
     };
 
     const handleDownloadCopeSvg = () => {
-        const svgContent = exportTubeCopeSvg(copeResult);
-        const blob = new Blob([svgContent], { type: 'image/svg+xml;charset=utf-8' });
+        const blob = new Blob([copeSvgResult.svg], { type: 'image/svg+xml;charset=utf-8' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
@@ -186,8 +205,8 @@ export function ExportTubeAndWireModal({
         URL.revokeObjectURL(url);
     };
 
-    const handleOpenCopeInEtch = () => {
-        const url = buildTubeCopeEtchUrl(copeResult);
+    const handleOpenCopeInEtch = async () => {
+        const url = await buildTubeCopeEtchUrl(copeSvgResult);
         window.open(url, '_blank', 'noopener,noreferrer');
     };
 
@@ -195,7 +214,7 @@ export function ExportTubeAndWireModal({
         const jigOptions: Partial<WireBendJigOptions> = {
             ...wireOptions,
             baseThicknessMm: jigBaseThicknessMm,
-            postHeightMm: jigPostHeightMm
+            pegHeightMm: jigPostHeightMm
         };
         const { jigNode } = buildWireBendingJigNode(activeWirePoints, jigOptions);
         const state = useStore.getState();
@@ -288,8 +307,8 @@ export function ExportTubeAndWireModal({
                                     <div className="flex flex-wrap gap-2">
                                         {([
                                             { id: 'mini_greenhouse', label: 'Mini Greenhouse' },
-                                            { id: 'yard_pub_canopy', label: 'Yard Pub Canopy' },
-                                            { id: 'carport_frame', label: 'Carport Frame' },
+                                            { id: 'yard_pub', label: 'Yard Pub Canopy' },
+                                            { id: 'carport', label: 'Carport Frame' },
                                             { id: 'geodesic_dome', label: 'Geodesic Dome' }
                                         ] as { id: PipeStructurePresetId; label: string }[]).map(preset => (
                                             <button
@@ -318,7 +337,7 @@ export function ExportTubeAndWireModal({
                                             onChange={e => setPipeStandardId(e.target.value as PipeStandardId)}
                                             className="w-full bg-zinc-900 border border-zinc-700 rounded px-2.5 py-1.5 text-xs text-white"
                                         >
-                                            {PIPE_STANDARDS.map(std => (
+                                            {Object.values(PIPE_STANDARDS).map(std => (
                                                 <option key={std.id} value={std.id}>
                                                     {std.label} (OD {std.odMm}mm / ID {std.idMm}mm)
                                                 </option>
@@ -409,25 +428,25 @@ export function ExportTubeAndWireModal({
                                             <div className="bg-zinc-900/80 rounded p-2 border border-zinc-800">
                                                 <div className="text-zinc-400 text-[11px]">10ft / 3m Sticks</div>
                                                 <div className="text-lg font-bold text-white">
-                                                    {breakdown.shoppingList.totalSticksToBuy}
+                                                    {breakdown.shoppingList.sticksToBuy}
                                                 </div>
                                             </div>
                                             <div className="bg-zinc-900/80 rounded p-2 border border-zinc-800">
                                                 <div className="text-zinc-400 text-[11px]">3D-Print Hubs</div>
                                                 <div className="text-lg font-bold text-amber-300">
-                                                    {breakdown.shoppingList.custom3dPrintedHubCount}
+                                                    {breakdown.shoppingList.customPrintedHubs}
                                                 </div>
                                             </div>
                                             <div className="bg-zinc-900/80 rounded p-2 border border-zinc-800">
                                                 <div className="text-zinc-400 text-[11px]">Std 90° Elbows</div>
                                                 <div className="text-sm font-semibold text-emerald-300">
-                                                    {breakdown.shoppingList.standard90ElbowCount}
+                                                    {breakdown.shoppingList.standardElbows90}
                                                 </div>
                                             </div>
                                             <div className="bg-zinc-900/80 rounded p-2 border border-zinc-800">
                                                 <div className="text-zinc-400 text-[11px]">Std 90° Tees</div>
                                                 <div className="text-sm font-semibold text-emerald-300">
-                                                    {breakdown.shoppingList.standardTeeCount}
+                                                    {breakdown.shoppingList.standardTees90}
                                                 </div>
                                             </div>
                                         </div>
@@ -455,27 +474,27 @@ export function ExportTubeAndWireModal({
                                 <div className="flex items-center justify-between">
                                     <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-300 flex items-center gap-2">
                                         <Layers className="w-4 h-4 text-cyan-400" />
-                                        10-Foot / 3m Stick Cut-List ({breakdown.stickPlans.length} Sticks, {breakdown.struts.length} Cut Struts)
+                                        10-Foot / 3m Stick Cut-List ({breakdown.sticks.length} Sticks, {breakdown.struts.length} Cut Struts)
                                     </h3>
                                     <span className="text-xs text-zinc-400">
-                                        Includes socket end-pullback deduction ({breakdown.pipeStandard.socketDepthMm}mm depth)
+                                        Includes socket end-pullback deduction ({breakdown.pipeSpec.socketDepthMm}mm depth)
                                     </span>
                                 </div>
 
-                                {breakdown.stickPlans.length === 0 ? (
+                                {breakdown.sticks.length === 0 ? (
                                     <div className="text-xs text-zinc-500 py-6 text-center">
                                         No cylindrical struts found in scene. Click one of the Quick Starter Frame Presets above to populate a pipe frame!
                                     </div>
                                 ) : (
                                     <div className="space-y-3">
-                                        {breakdown.stickPlans.map(stick => (
+                                        {breakdown.sticks.map(stick => (
                                             <div key={stick.stickIndex} className="space-y-1">
                                                 <div className="flex items-center justify-between text-xs">
                                                     <span className="font-medium text-zinc-300">
                                                         Stick #{stick.stickIndex} ({stick.stockLengthMm} mm)
                                                     </span>
                                                     <span className="text-zinc-400">
-                                                        Used: {Math.round(stick.usedLengthMm)} mm • Waste: {Math.round(stick.wasteLengthMm)} mm ({stick.wastePercent}%)
+                                                        Used: {Math.round(stick.usedMm)} mm • Waste: {Math.round(stick.wasteMm)} mm ({Math.round(100 - stick.utilizationPct)}%)
                                                     </span>
                                                 </div>
                                                 <div className="w-full h-7 bg-zinc-900 rounded border border-zinc-800 flex overflow-hidden">
@@ -489,7 +508,7 @@ export function ExportTubeAndWireModal({
                                                                 key={`${cut.strutId}_${cIdx}`}
                                                                 style={{ width: `${widthPct}%` }}
                                                                 className="h-full bg-cyan-600/80 hover:bg-cyan-500/90 border-r border-zinc-950 flex items-center justify-center px-1 text-[10px] font-medium text-white truncate"
-                                                                title={`${cut.label}: ${cut.cutLengthMm} mm`}
+                                                                title={`${cut.name}: ${cut.cutLengthMm} mm`}
                                                             >
                                                                 {cut.cutLengthMm}mm
                                                             </div>
@@ -523,8 +542,8 @@ export function ExportTubeAndWireModal({
                                     >
                                         <option value={-1}>Custom Tube Joint Parameters</option>
                                         {sceneJoints.map((j, idx) => (
-                                            <option key={j.id} value={idx}>
-                                                {j.label} ({j.angleDeg}° • OD {j.cutTubeOdMm}mm → {j.targetTubeOdMm}mm)
+                                            <option key={j.id ?? idx} value={idx}>
+                                                {j.name ?? j.id ?? `Joint #${idx + 1}`} ({j.angleDeg}° • OD {j.cutTubeOdMm}mm → {j.targetTubeOdMm ?? j.cutTubeOdMm}mm)
                                             </option>
                                         ))}
                                     </select>
@@ -640,7 +659,7 @@ export function ExportTubeAndWireModal({
                                             1:1 Unrolled Paper Wrap Template Preview
                                         </h3>
                                         <p className="text-[11px] text-zinc-400">
-                                            Circumference: {copeResult.circumferenceMm} mm • Saddle Depth: {copeResult.saddleDepthMm} mm
+                                            Circumference: {copeResult.circumferenceMm} mm • Saddle Depth: {copeResult.peakToValleyOuterMm} mm
                                         </p>
                                     </div>
                                     <div className="flex items-center gap-3 text-[11px]">
@@ -656,7 +675,7 @@ export function ExportTubeAndWireModal({
                                 <div className="bg-white rounded-lg p-3 overflow-auto flex items-center justify-center min-h-[260px]">
                                     <div
                                         className="w-full flex justify-center"
-                                        dangerouslySetInnerHTML={{ __html: copeResult.svgString }}
+                                        dangerouslySetInnerHTML={{ __html: copeSvgResult.svg }}
                                     />
                                 </div>
                             </div>
@@ -680,7 +699,7 @@ export function ExportTubeAndWireModal({
                                     >
                                         {sceneWires.map((w, idx) => (
                                             <option key={w.id} value={idx}>
-                                                Scene Curve: {w.label} ({w.points.length} vertices)
+                                                Scene Curve: {w.name} ({w.pointsMm.length} vertices)
                                             </option>
                                         ))}
                                         <option value={-1}>Sample 3D Multi-Bend Bracket Wire Path</option>
@@ -778,7 +797,7 @@ export function ExportTubeAndWireModal({
                                         LRA (Length • Rotate • Angle) Wire Bending Schedule
                                     </h3>
                                     <span className="text-xs text-zinc-400">
-                                        Tail Straight Feed: {wireSchedule.finalStraightFeedMm} mm
+                                        Tail Straight Feed: {wireSchedule.finalStraightMm} mm
                                     </span>
                                 </div>
 
@@ -804,13 +823,13 @@ export function ExportTubeAndWireModal({
                                                         {step.straightFeedMm}
                                                     </td>
                                                     <td className="py-2 px-3 text-zinc-300 font-mono">
-                                                        {step.rotateDeg}°
+                                                        {step.rotateAngleDeg}°
                                                     </td>
                                                     <td className="py-2 px-3 text-zinc-300 font-mono">
                                                         {step.bendAngleDeg}°
                                                     </td>
                                                     <td className="py-2 px-3 text-amber-300 font-mono">
-                                                        {step.springbackCompensatedAngleDeg}°
+                                                        {step.overbendAngleDeg}°
                                                     </td>
                                                     <td className="py-2 px-3 text-zinc-400 font-mono">
                                                         {step.arcLengthMm}

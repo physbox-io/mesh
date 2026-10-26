@@ -56,7 +56,8 @@ import { generateCastPattern, DEFAULT_CAST_OPTIONS, type CastMethod } from '../u
 import { runCastPrep } from '../utils/castPrepRunner';
 import { planPourBox } from '../utils/pourBoxScene';
 import { addPourBoxToScene, pourBoxStl } from '../utils/pourBoxActions';
-import { SILICONES, type PourBoxOptions, type SiliconeId } from '../utils/siliconeMold';
+import type { PourBoxOptions } from '../utils/siliconeMold';
+import { CAST_METALS, SILICONES, isSiliconeId, resolveCastMaterial } from '../utils/castMaterials';
 import { cutAlongPlaneOffThread, selectionSoups, splitOffThread, testAssemblyOffThread } from '../utils/printSplitClient';
 import { loadManifold } from '../utils/sculptCut';
 import {
@@ -103,7 +104,7 @@ import {
   type Gt2BeltDriveSpec,
   type InvoluteGearSpec,
   type InvoluteRackSpec,
-  type LeadscrewSpec,
+  type LeadscrewDriveSpec,
 } from '../utils/mechanismParts';
 import {
   PIPE_STANDARDS,
@@ -3882,8 +3883,9 @@ export function useMCPBridge() {
           if (msg.shape === 'fit' || msg.shape === 'round' || msg.shape === 'box') options.shape = msg.shape;
           if (typeof msg.pin === 'boolean') options.pin = msg.pin;
           if (typeof msg.silicone === 'string') {
-            if (!(msg.silicone in SILICONES)) return { ok: false, error: `silicone is one of ${Object.keys(SILICONES).join(', ')}.` };
-            options.silicone = msg.silicone as SiliconeId;
+            const silicone = resolveCastMaterial(msg.silicone);
+            if (!isSiliconeId(silicone)) return { ok: false, error: `silicone is one of ${SILICONES.map((m) => m.id).join(', ')}.` };
+            options.silicone = silicone;
           }
           let box;
           try {
@@ -3927,6 +3929,10 @@ export function useMCPBridge() {
         case 'EXPORT_CAST': {
           const scene = store.sceneGraph;
           if (!scene.nodes?.length) return { ok: false, error: 'The scene is empty — there is nothing to cast.' };
+          const metal = msg.metalId ?? msg.metal;
+          if (metal !== undefined && !CAST_METALS.some((m) => m.id === metal)) {
+            return { ok: false, error: `metal is one of ${CAST_METALS.map((m) => m.id).join(', ')}.` };
+          }
           const options = {
             ...DEFAULT_CAST_OPTIONS,
             // `metal` is what the MCP tool calls it; `metalId` is what the
@@ -4331,7 +4337,7 @@ export function useMCPBridge() {
           );
           return {
             ok: true,
-            mode: res.options.mode,
+            mode: res.mode,
             totalFaces: res.totalFaces,
             foldCount: res.foldCount,
             seamCount: res.seamCount,
@@ -4424,7 +4430,7 @@ export function useMCPBridge() {
             };
             const pair = buildMeshingGearPair(driverSpec, drivenSpec);
             createdNodes = [pair.driverNode, pair.drivenNode];
-            metrics = { centerDistanceMm: pair.centerDistanceMm, ratio: pair.ratio, contactRatio: pair.contactRatio };
+            metrics = { centerDistanceMm: pair.centerDistanceMm, ratio: pair.gearRatio, contactRatio: pair.contactRatio };
           } else if (family === 'rack_pinion') {
             const pinionSpec: InvoluteGearSpec = (msg.pinion as InvoluteGearSpec) ?? {
               moduleMm: typeof msg.moduleMm === 'number' ? msg.moduleMm : 1.5,
@@ -4436,19 +4442,19 @@ export function useMCPBridge() {
             };
             const rp = buildRackAndPinionPair(pinionSpec, rackSpec);
             createdNodes = [rp.pinionNode, rp.rackNode];
-            metrics = { coupleRatio: rp.coupleRatio, pitchLineOffsetMm: rp.pitchLineOffsetMm };
+            metrics = { coupleRatio: rp.coupleRatio, pitchRadiusMm: rp.pitchRadiusMm };
           } else if (family === 'gt2_belt') {
             const belt = buildGt2BeltDrive((msg as unknown as Gt2BeltDriveSpec) ?? { driverTeeth: 20, drivenTeeth: 40, centerDistanceMm: 80 });
             createdNodes = [belt.driverNode, belt.drivenNode, belt.beltNode];
-            metrics = { beltLengthMm: belt.beltLengthMm, beltTeeth: belt.beltTeeth, coupleRatio: belt.coupleRatio };
+            metrics = { beltLengthMm: belt.beltLengthMm, beltTeeth: belt.beltTeethRounded, coupleRatio: belt.coupleRatio };
           } else if (family === 'leadscrew') {
-            const ls = buildLeadscrewDrive((msg as unknown as LeadscrewSpec) ?? { lengthMm: 200, leadMm: 8 });
-            createdNodes = [ls.screwNode];
-            metrics = { coupleRatio: ls.coupleRatio, travelMm: ls.travelMm };
+            const ls = buildLeadscrewDrive((msg as unknown as LeadscrewDriveSpec) ?? { lengthMm: 200, leadMm: 8 });
+            createdNodes = [ls.leadscrewNode];
+            metrics = { coupleRatio: ls.coupleRatio, travelRangeMm: ls.travelRangeMm };
           } else if (family === 'cam_follower') {
-            const cam = buildCamMechanism((msg as unknown as CamSpec) ?? { profile: 'eccentric', baseRadiusMm: 20, liftMm: 8 });
+            const cam = buildCamMechanism((msg as unknown as CamSpec) ?? { kind: 'eccentric', baseRadiusMm: 20, liftMm: 8 });
             createdNodes = [cam.camNode, cam.followerNode];
-            metrics = { maxRadiusMm: cam.maxRadiusMm, minRadiusMm: cam.minRadiusMm, coupleRatio: cam.coupleRatio };
+            metrics = { maxRadiusMm: cam.profile.maxRadiusMm, minRadiusMm: cam.profile.minRadiusMm, coupleRatio: cam.coupleRatio };
           } else if (family === 'four_bar') {
             const fb = buildFourBarLinkage((msg as unknown as FourBarSpec) ?? { groundMm: 100, crankMm: 40, couplerMm: 90, rockerMm: 80 });
             createdNodes = fb.nodes;
@@ -4519,7 +4525,7 @@ export function useMCPBridge() {
         }
 
         case 'COMPUTE_WIRE_BEND': {
-          const pts = Array.isArray(msg.pointsMm) ? (msg.pointsMm as [number, number, number][]) : [[0, 0, 0], [60, 0, 0], [60, 50, 0], [120, 50, 0]];
+          const pts: [number, number, number][] = Array.isArray(msg.pointsMm) ? (msg.pointsMm as [number, number, number][]) : [[0, 0, 0], [60, 0, 0], [60, 50, 0], [120, 50, 0]];
           if (msg.addJig === true) {
             const { jigNode, schedule, isPlanar } = buildWireBendingJigNode(pts, msg as Partial<WireBendJigOptions>);
             const nextNodes = [...store.sceneGraph.nodes.filter((n) => n.id !== jigNode.id), jigNode];

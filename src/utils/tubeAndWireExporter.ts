@@ -292,12 +292,11 @@ function makeStrutNode(
   return {
     id,
     name,
-    type: 'mesh',
-    position: [0, 0, 0],
-    rotation: [0, 0, 0],
-    scale: [1, 1, 1],
+    type: 'body',
+    pos: [0, 0, 0],
     geoms: [
       {
+        name: id,
         type: 'cylinder',
         size: [mm(radiusMm), mm(vDist(p1Mm, p2Mm) / 2)],
         fromto: [
@@ -517,7 +516,7 @@ function extractRawStrutsFromScene(scene: SceneGraph): RawStrutSegment[] {
     for (let gIdx = 0; gIdx < geoms.length; gIdx++) {
       const g: SceneGeom = geoms[gIdx];
       if (g.csg === 'difference') continue;
-      const gPos: Vec3 = g.pos ?? [0, 0, 0];
+      const gPos: Vec3 = [g.pos?.[0] ?? 0, g.pos?.[1] ?? 0, g.pos?.[2] ?? 0];
 
       if (g.type === 'cylinder' || g.type === 'capsule') {
         if (g.fromto && g.fromto.length === 6) {
@@ -1068,11 +1067,9 @@ export function buildPipeHubNode(
   return {
     id: `printed_${hub.id}`,
     name: `3D Hub: ${hub.name} (${hub.ports.length}-Way)`,
-    type: 'mesh',
+    type: 'body',
     csgEnabled: true,
-    position: [mm(hub.centerMm[0]), mm(hub.centerMm[1]), mm(hub.centerMm[2])],
-    rotation: [0, 0, 0],
-    scale: [1, 1, 1],
+    pos: [mm(hub.centerMm[0]), mm(hub.centerMm[1]), mm(hub.centerMm[2])],
     geoms,
   };
 }
@@ -1086,7 +1083,7 @@ export function buildAllCustomHubNodes(breakdown: PipeFrameBreakdownResult): Sce
     const node = buildPipeHubNode(hub, breakdown.options);
     // Keep at hub's actual position or provide clean metadata
     node.id = `custom_hub_print_${idx + 1}`;
-    node.position = [mm(hub.centerMm[0]), mm(hub.centerMm[1]), mm(hub.centerMm[2])];
+    node.pos = [mm(hub.centerMm[0]), mm(hub.centerMm[1]), mm(hub.centerMm[2])];
     void spacingMm;
     return node;
   });
@@ -1315,7 +1312,7 @@ export function extractSceneTubeJoints(
       if (g.csg === 'difference') continue;
       if (g.type !== 'cylinder' && g.type !== 'capsule') continue;
 
-      const gPos: Vec3 = g.pos ?? [0, 0, 0];
+      const gPos: Vec3 = [g.pos?.[0] ?? 0, g.pos?.[1] ?? 0, g.pos?.[2] ?? 0];
       const radiusM = (g.size?.[0] ?? 0.015) * ((scale[0] + scale[1]) / 2);
       const odMm = round2(radiusM * 2 * 1000);
 
@@ -1813,7 +1810,7 @@ export function extractSceneWireCurves(
     for (const g of node.geoms ?? []) {
       if (g.csg === 'difference') continue;
       if ((g.type === 'cylinder' || g.type === 'capsule') && g.fromto && g.fromto.length === 6) {
-        const gPos: Vec3 = g.pos ?? [0, 0, 0];
+        const gPos: Vec3 = [g.pos?.[0] ?? 0, g.pos?.[1] ?? 0, g.pos?.[2] ?? 0];
         const p1 = transformPointMm(
           [gPos[0] + g.fromto[0], gPos[1] + g.fromto[1], gPos[2] + g.fromto[2]],
           worldPos,
@@ -1984,11 +1981,9 @@ export function buildWireBendingJigNode(
   const jigNode: SceneNode = {
     id: 'wire_bending_jig',
     name: `Wire Bending Jig (Ø${opts.wireDiameterMm}mm, R${opts.bendRadiusMm}mm)`,
-    type: 'mesh',
+    type: 'body',
     csgEnabled: true,
-    position: [0, 0, 0],
-    rotation: [0, 0, 0],
-    scale: [1, 1, 1],
+    pos: [0, 0, 0],
     geoms,
   };
 
