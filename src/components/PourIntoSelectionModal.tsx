@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { X, Droplet, AlertTriangle } from 'lucide-react';
 import { NumberInput } from '@physbox-io/ui';
 import { useSettled } from '../hooks/useSettled';
@@ -49,7 +49,11 @@ export const PourIntoSelectionModal: React.FC<PourIntoSelectionModalProps> = ({ 
   const [direction, setDirection] = useState<PourDirection | 'auto'>('auto');
   /** Fill depth in mm; null fills to the rim. */
   const [fill, setFill] = useState<number | null>(null);
-  const settled = useSettled({ direction, fill }, 300);
+  // Memoised: a fresh literal each render restarted the settle timer on every
+  // render, so each pour's own busy flag set off the next — the dialog re-poured
+  // about once a second and Simulate Cast blinked disabled with it.
+  const pourOptions = useMemo(() => ({ direction, fill }), [direction, fill]);
+  const settled = useSettled(pourOptions, 300);
   const firstPour = useRef(true);
   // One worker for the dialog's life, not one per change of side or depth.
   const clientRef = useRef<MoldWorkerClient | null>(null);
