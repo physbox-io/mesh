@@ -8,7 +8,7 @@
 // the whole of a solid machining dialog as well: the options, the feeds derived
 // for them, the operator's overrides, and the bed probe.
 
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import {
   deriveReliefFeeds,
   describeCutter,
@@ -63,6 +63,107 @@ export function toolingOnly(patch: Partial<ReliefCarveOptions>): Partial<ReliefC
   const out = { ...patch };
   for (const key of DERIVED_KEYS) delete out[key];
   return out;
+}
+
+/**
+ * The recommended tooling, picked for the job without being asked.
+ *
+ * The dialogs opened on one fixed pair of bits whatever the model, and the
+ * tooling worked out for the job sat behind a "Suggest tooling" button that a
+ * first-timer had no reason to press — so a fine relief was cut with bits too
+ * big for its detail. Now the recommendation is applied to each new result for
+ * as long as the tooling is still the one it picked. Change a tooling field and
+ * it is yours, until Suggest tooling hands it back. A scene that names its own
+ * bits (`chosen`) keeps them.
+ *
+ * Only finished results count: the export job keeps the last one on screen
+ * while the next runs, and a recommendation made from that would be for the
+ * scene before. Applying a patch the options already hold is skipped, since a
+ * new options object would re-run the job for nothing.
+ */
+/** What `useAutoTooling` remembers between results. */
+export interface AutoToolingMemo<T> {
+  /** The patch last applied without being asked, to tell an edit from it. */
+  lastAuto: Partial<T> | null;
+  /** The operator has changed a tooling field since. */
+  manual: boolean;
+  /** The result last acted on, so each is acted on once. */
+  seen: unknown;
+}
+
+/**
+ * Whether `options` still holds every value of `patch`. The material is the
+ * operator's, not the tooling's: the recommendation is handed it and echoes it
+ * back, and changing it must not read as having picked a bit.
+ */
+export function toolingHolds<T extends object>(options: T, patch: Partial<T>): boolean {
+  return Object.entries(patch).every(
+    ([k, v]) => k === 'material' || JSON.stringify((options as Record<string, unknown>)[k]) === JSON.stringify(v)
+  );
+}
+
+/**
+ * One step of `useAutoTooling`, pure: given a finished result, the patch to
+ * apply now (or null), with the memo updated in place.
+ */
+export function autoToolingStep<T extends object>(
+  memo: AutoToolingMemo<T>,
+  result: unknown,
+  busy: boolean,
+  options: T,
+  recommend: () => Partial<T> | null,
+  chosen: boolean
+): Partial<T> | null {
+  if (busy || !result || result === memo.seen) return null;
+  memo.seen = result;
+  if (memo.lastAuto && !toolingHolds(options, memo.lastAuto)) memo.manual = true;
+  if (memo.manual || chosen) return null;
+  const patch = recommend();
+  if (!patch) return null;
+  memo.lastAuto = patch;
+  return toolingHolds(options, patch) ? null : patch;
+}
+
+/**
+ * The recommended tooling, picked for the job without being asked.
+ *
+ * The dialogs opened on one fixed pair of bits whatever the model, and the
+ * tooling worked out for the job sat behind a "Suggest tooling" button that a
+ * first-timer had no reason to press — so a fine relief was cut with bits too
+ * big for its detail. Now the recommendation is applied to each new result for
+ * as long as the tooling is still the one it picked. Change a tooling field and
+ * it is yours, until Suggest tooling hands it back. A scene that names its own
+ * bits (`chosen`) keeps them.
+ *
+ * Only finished results count: the export job keeps the last one on screen
+ * while the next runs, and a recommendation made from that would be for the
+ * scene before. A patch the options already hold is not applied, since a new
+ * options object would re-run the job for nothing.
+ */
+export function useAutoTooling<T extends object>(
+  result: unknown,
+  busy: boolean,
+  options: T,
+  recommend: () => Partial<T> | null,
+  apply: (patch: Partial<T>) => void,
+  chosen: boolean
+): { suggest: () => void } {
+  const memo = useRef<AutoToolingMemo<T>>({ lastAuto: null, manual: false, seen: null });
+
+  useEffect(() => {
+    const patch = autoToolingStep(memo.current, result, busy, options, recommend, chosen);
+    if (patch) apply(patch);
+  });
+
+  return {
+    suggest: () => {
+      const patch = recommend();
+      if (!patch) return;
+      memo.current.manual = false;
+      memo.current.lastAuto = patch;
+      apply(patch);
+    },
+  };
 }
 
 // Lives in `hooks/useSettled.ts` now — every input in the app needs it, not

@@ -20,7 +20,7 @@ import {
   inputClass, sectionClass, sectionTitleClass,
   Field, Advanced, Segmented, PassesField, RoughingPassFields, FinishingPassFields, BedLevellingFields, PreviewPlaceholder,
 } from './CarveFields';
-import { toolingOnly, useBedProbe, useCarveTooling } from './carveTooling';
+import { toolingOnly, useAutoTooling, useBedProbe, useCarveTooling } from './carveTooling';
 import { MATERIALS } from '../utils/feedsAndSpeeds';
 import { useExportJob } from '../utils/exportWorkerClient';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
@@ -157,28 +157,33 @@ export const ExportReliefCarveModal: React.FC<Props> = ({ isOpen, onClose, scene
   // Tooling is a function of the carve, not of the model, so it is derived from
   // what the carve actually came out as — the relief's real depth and the plan
   // it landed on — rather than shipped alongside the mesh.
-  const applyRecommendedTooling = () => {
-    if (!result?.success) return;
+  const recommendTooling = () => {
+    if (!result?.success) return null;
+    // Tooling only. Feeds and speeds follow from it and are derived rather
+    // than stored, so the ones this returns are dropped instead of being
+    // written into state where they would sit shadowed and misleading.
+    return toolingOnly(recommendReliefTooling({
+      reliefDepthMm: result.reliefDepthMm,
+      detailMm: result.detailMm,
+      planWidthMm: result.carveBounds.maxX - result.carveBounds.minX,
+      planDepthMm: result.carveBounds.maxY - result.carveBounds.minY,
+      material: options.material,
+      // What this spindle can be dialled to, from the controller when it said.
+      spindle: machineState.motion.spindle,
+      maxFeedMmMin: cuttingRateLimit,
+    }));
+  };
+  const applyTooling = (patch: Partial<typeof options>) => {
     // Clearing the overrides is the point as much as the tooling is: a feed
     // typed for the old bit must not survive a change of bit.
     setOverrides({});
-    setOptions((prev) => ({
-      ...prev,
-      // Tooling only. Feeds and speeds follow from it and are derived rather
-      // than stored, so the ones this returns are dropped instead of being
-      // written into state where they would sit shadowed and misleading.
-      ...toolingOnly(recommendReliefTooling({
-        reliefDepthMm: result.reliefDepthMm,
-        detailMm: result.detailMm,
-        planWidthMm: result.carveBounds.maxX - result.carveBounds.minX,
-        planDepthMm: result.carveBounds.maxY - result.carveBounds.minY,
-        material: prev.material,
-        // What this spindle can be dialled to, from the controller when it said.
-        spindle: machineState.motion.spindle,
-        maxFeedMmMin: cuttingRateLimit,
-      })),
-    }));
+    setOptions((prev) => ({ ...prev, ...patch }));
   };
+  // A scene whose carve settings name a bit has chosen it already.
+  const sceneChoseTooling = !!carveSettings && ('finishingToolDiaMm' in carveSettings || 'roughingToolDiaMm' in carveSettings || 'finishingToolType' in carveSettings);
+  const { suggest: applyRecommendedTooling } = useAutoTooling(
+    result?.success ? result : null, busy, options, recommendTooling, applyTooling, sceneChoseTooling
+  );
 
   if (!isOpen) return null;
 

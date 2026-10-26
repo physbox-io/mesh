@@ -23,7 +23,7 @@ import {
   inputClass, sectionClass, sectionTitleClass,
   Field, Segmented, PassesField, RoughingPassFields, FinishingPassFields, BedLevellingFields, PreviewPlaceholder,
 } from './CarveFields';
-import { toolingOnly, useBedProbe, useCarveTooling, useSettled, type SetTooling } from './carveTooling';
+import { toolingOnly, useAutoTooling, useBedProbe, useCarveTooling, useSettled, type SetTooling } from './carveTooling';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { useAddSimulation } from '../hooks/useAddSimulation';
 import { reliefSimulationTools } from '../utils/simulatedPart';
@@ -162,26 +162,32 @@ export const ExportSolidMachiningModal: React.FC<Props> = ({ isOpen, onClose, sc
     [scene, settled, settledPlacement, probedGrid, machineState.motion, autoOrient]
   );
 
-  const applyRecommendedTooling = () => {
-    if (!result?.success) return;
-    setOverrides({});
-    setOptions((prev) => ({
-      ...prev,
+  const recommendTooling = () => {
+    if (!result?.success) return null;
+    return {
       ...toolingOnly(recommendReliefTooling({
         reliefDepthMm: result.setups?.[0]?.depthMm ?? result.sides[0].depthMm,
         planWidthMm: result.partSizeMm.x,
         planDepthMm: result.partSizeMm.y,
-        material: prev.material,
+        material: options.material,
         spindle: machineState.motion.spindle,
         maxFeedMmMin: cuttingRateLimit,
       })),
       // A part is machined to size, and a ball nose leaves scallops on every
       // flat and wall it touches. The recommendation is written for reliefs.
-      finishingToolType: 'flat',
+      finishingToolType: 'flat' as const,
       finishingStepoverPercent: 30,
-      finishingStrategy: 'hybrid',
-    }));
+      finishingStrategy: 'hybrid' as const,
+    };
   };
+  const applyTooling = (patch: Partial<typeof options>) => {
+    setOverrides({});
+    setOptions((prev) => ({ ...prev, ...patch }));
+  };
+  // Picked for the part on each new plan until the operator picks; see useAutoTooling.
+  const { suggest: applyRecommendedTooling } = useAutoTooling(
+    result?.success ? result : null, busy, options, recommendTooling, applyTooling, false
+  );
 
   /*
    * The toolpath view's inputs, held still between renders.
