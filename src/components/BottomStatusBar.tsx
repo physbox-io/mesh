@@ -797,12 +797,16 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
             >
               {paused ? <Play className="w-3.5 h-3.5" /> : <Pause className="w-3.5 h-3.5" />}
             </button>
+            {/* Not a twin of Pause: this is a soft reset, which ends the piece
+                and loses the position. Labelled and coloured as the E-Stop it
+                is, and set apart, so it is not the icon hit when Pause was meant. */}
             <button
               onClick={() => webSerialManager.cancelJob()}
-              title="Stop the job"
-              className="p-0.5 text-red-500 hover:text-red-600 cursor-pointer"
+              title="E-Stop: soft reset. Stops the machine now and loses the position. The line it reached is kept, to resume after re-homing and re-zeroing."
+              className="ml-2 flex items-center gap-1 px-2 py-0.5 rounded-md bg-red-600 hover:bg-red-700 text-white font-bold cursor-pointer"
             >
               <Square className="w-3.5 h-3.5" />
+              <span>E-Stop</span>
             </button>
           </div>
         )}
