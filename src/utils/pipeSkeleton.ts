@@ -103,7 +103,10 @@ class Graph {
   nodes: V3[] = [];
   members: Skeleton['members'] = [];
   private keys = new Set<string>();
-  constructor(private weldMm: number) {}
+  private weldMm: number;
+  constructor(weldMm: number) {
+    this.weldMm = weldMm;
+  }
   node(p: V3): number {
     for (let i = 0; i < this.nodes.length; i++) if (len(sub(this.nodes[i], p)) <= this.weldMm) return i;
     this.nodes.push(p);

@@ -799,7 +799,11 @@ export interface SceneNode {
    * something that can be looked at and never edited again.
    */
   isLattice?: boolean;
-  latticeCage?: { unit: number; coords: number[]; faces: number[]; faceSizes: number[] };
+  latticeCage?: {
+    unit: number; coords: number[]; faces: number[]; faceSizes: number[];
+    /** Open strokes (wires), back to back like `faces`; `wireSizes` says where each ends. Absent on cages saved before wires. */
+    wires?: number[]; wireSizes?: number[];
+  };
   /** How many Catmull-Clark passes the mesh geom was built with (0, 1 or 2). */
   latticeSubdiv?: number;
   /**
