@@ -4,6 +4,7 @@ import {
   exportSheetUnfold,
   buildSheetUnfoldEtchUrl,
   computeBendAllowanceMm,
+  bendSetbackMm,
   polygonsOverlap2D,
 } from '../src/utils/sheetUnfoldExporter';
 import { boxLattice, serializeCage, createLattice, vertexAt, addFace } from '../src/utils/latticeMesh';
@@ -279,8 +280,14 @@ describe('sheetUnfoldExporter', () => {
 
     expect(flatShort).toBeCloseTo(150, 2); // 3 * 50 mm
     expect(flatLong).toBeCloseTo(200, 2);  // 4 * 50 mm
-    expect(metalShort).toBeCloseTo(150 + 2 * expectedBaPer90, 2);
-    expect(metalLong).toBeCloseTo(200 + 3 * expectedBaPer90, 2);
+    // The cube is its outside size: each flat stops the outside setback
+    // (R + T) tan 45° short of the corner, and the bend's length goes
+    // between, so each bend takes off the bend deduction 2 * OSSB - BA.
+    const ossb = bendRadiusMm + thicknessMm;
+    expect(bendSetbackMm(90, bendRadiusMm, thicknessMm)).toBeCloseTo(ossb, 9);
+    const deduction = 2 * ossb - expectedBaPer90;
+    expect(metalShort).toBeCloseTo(150 - 2 * deduction, 2);
+    expect(metalLong).toBeCloseTo(200 - 3 * deduction, 2);
 
     // Check bend callouts and relief notches
     for (const fe of metalRes.islands[0].foldEdges) {

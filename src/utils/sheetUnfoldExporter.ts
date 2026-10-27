@@ -1003,6 +1003,51 @@ interface PlacedFaceState {
   polygon2D: Point2D[];
   /** Maps local 2D point of this face into island 2D space. */
   transformPoint: (localPt: Point2D) => Point2D;
+  /**
+   * How far each edge is moved in for a bend's setback, mm (sheet metal). The
+   * face is drawn to the model's outside; the flat stops this short of it.
+   */
+  setbacks: number[];
+}
+
+/**
+ * How far a bend's flat stops short of the model's corner, mm. The model is
+ * the outside of the part, the sheet behind it, so a mountain (convex) bend's
+ * outside is the model side, radius R + T, and a valley's inside is, radius R.
+ * Either way the flat ends where the arc starts, r·tan(θ/2) from the corner.
+ */
+export function bendSetbackMm(angleDeg: number, bendRadiusMm: number, thicknessMm: number): number {
+  const half = (Math.min(170, Math.abs(angleDeg)) * Math.PI) / 360;
+  const r = Math.max(0, bendRadiusMm) + (angleDeg >= 0 ? Math.max(0, thicknessMm) : 0);
+  return r * Math.tan(half);
+}
+
+/**
+ * A face's polygon with each edge moved in by its setback, the corners where
+ * the moved lines meet. Vertex i stays vertex i.
+ */
+function trimPolygon2D(poly: Point2D[], setbacks: number[]): Point2D[] {
+  const n = poly.length;
+  if (!setbacks.some((d) => d > 0)) return poly.map((p) => ({ ...p }));
+  // Each edge as a point and direction, moved left (inward: the face is CCW).
+  const lines = poly.map((p, i) => {
+    const q = poly[(i + 1) % n];
+    const len = Math.hypot(q.x - p.x, q.y - p.y) || 1;
+    const ux = (q.x - p.x) / len, uy = (q.y - p.y) / len;
+    const d = setbacks[i] || 0;
+    return { x: p.x - uy * d, y: p.y + ux * d, ux, uy };
+  });
+  return poly.map((p, i) => {
+    const a = lines[(i - 1 + n) % n], b = lines[i];
+    const det = a.ux * b.uy - a.uy * b.ux;
+    if (Math.abs(det) < 1e-9) {
+      // Straight on: the vertex moves in by the larger of the two.
+      const d = Math.max(setbacks[(i - 1 + n) % n] || 0, setbacks[i] || 0);
+      return { x: p.x - b.uy * d, y: p.y + b.ux * d };
+    }
+    const s = ((b.x - a.x) * b.uy - (b.y - a.y) * b.ux) / det;
+    return { x: a.x + a.ux * s, y: a.y + a.uy * s };
+  });
 }
 
 /**
@@ -1160,6 +1205,9 @@ function unfoldSurfaceToIslands(
       childP1: Point2D;
       childP2: Point2D;
       bendAllowanceMm: number;
+      /** The edge's ends in each face's polygon, to take the trimmed corners from. */
+      parentEnds: [number, number];
+      childEnds: [number, number];
     }[];
   }
 
@@ -1184,6 +1232,7 @@ function unfoldSurfaceToIslands(
       faceIndex: seedFace,
       polygon2D: faces[seedFace].local2D.map((p) => ({ ...p })),
       transformPoint: (pt) => ({ ...pt }),
+      setbacks: faces[seedFace].verts.map(() => 0),
     });
 
     const treeEdges: RawIsland['treeEdges'] = [];
@@ -1214,25 +1263,33 @@ function unfoldSurfaceToIslands(
         const localB_v1 = childFace.local2D[cV1Idx];
         const localB_v2 = childFace.local2D[cV2Idx];
 
-        const baMm =
-          options.mode === 'sheet_metal' && Math.abs(se.angleDeg) >= options.coplanarToleranceDeg
-            ? computeBendAllowanceMm(se.angleDeg, options.bendRadiusMm, options.thicknessMm, options.kFactor)
-            : 0;
+        const bent = options.mode === 'sheet_metal' && Math.abs(se.angleDeg) >= options.coplanarToleranceDeg;
+        const baMm = bent
+          ? computeBendAllowanceMm(se.angleDeg, options.bendRadiusMm, options.thicknessMm, options.kFactor)
+          : 0;
+        // Both flats stop short of the model's corner by the setback, and the
+        // bend's own length goes between them.
+        const setbackMm = bent ? bendSetbackMm(se.angleDeg, options.bendRadiusMm, options.thicknessMm) : 0;
 
         const { transform, targetV1, targetV2 } = buildUnfoldTransform2D(
           placedA_v1,
           placedA_v2,
           localB_v1,
           localB_v2,
-          baMm
+          baMm - 2 * setbackMm
         );
 
         const candidatePoly2D = childFace.local2D.map(transform);
+        const childSetbacks = childFace.verts.map((_, i) => (i === childEdgeIdx ? setbackMm : 0));
+        const parentSetbacks = parentState.setbacks.map((d, i) => (i === parentEdgeIdx ? setbackMm : d));
 
-        // Check if candidatePoly2D overlaps any already-placed face in this island
+        // Check if the candidate overlaps any already-placed face in this island,
+        // each as its flat will be cut: the full faces overlap by the setbacks.
+        const candidateTrimmed = trimPolygon2D(candidatePoly2D, childSetbacks);
         let overlaps = false;
         for (const existing of placedFaces.values()) {
-          if (polygonsOverlap2D(candidatePoly2D, existing.polygon2D)) {
+          const trimmed = trimPolygon2D(existing.polygon2D, existing === parentState ? parentSetbacks : existing.setbacks);
+          if (polygonsOverlap2D(candidateTrimmed, trimmed)) {
             overlaps = true;
             break;
           }
@@ -1247,10 +1304,12 @@ function unfoldSurfaceToIslands(
         usedTreeEdgeIds.add(se.id);
         totalBendAllowanceMm += baMm;
 
+        parentState.setbacks = parentSetbacks;
         placedFaces.set(childIdx, {
           faceIndex: childIdx,
           polygon2D: candidatePoly2D,
           transformPoint: transform,
+          setbacks: childSetbacks,
         });
 
         treeEdges.push({
@@ -1262,10 +1321,24 @@ function unfoldSurfaceToIslands(
           childP1: targetV1,
           childP2: targetV2,
           bendAllowanceMm: baMm,
+          parentEnds: [pV1Idx, pV2Idx],
+          childEnds: [cV1Idx, cV2Idx],
         });
 
         queue.push(childIdx);
       }
+    }
+
+    // The flats as cut: every bent edge in by its setback, and each bend's
+    // zone between the two trimmed edges.
+    for (const st of placedFaces.values()) st.polygon2D = trimPolygon2D(st.polygon2D, st.setbacks);
+    for (const te of treeEdges) {
+      const parent = placedFaces.get(te.parentFace)!.polygon2D;
+      const child = placedFaces.get(te.childFace)!.polygon2D;
+      te.p1 = parent[te.parentEnds[0]];
+      te.p2 = parent[te.parentEnds[1]];
+      te.childP1 = child[te.childEnds[0]];
+      te.childP2 = child[te.childEnds[1]];
     }
 
     rawIslands.push({ placedFaces, treeEdges });
