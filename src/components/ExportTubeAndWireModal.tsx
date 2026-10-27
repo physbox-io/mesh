@@ -36,6 +36,9 @@ import {
     extractSceneWireCurves,
     buildWireBendingJigNode
 } from '../utils/tubeAndWireExporter';
+import { AddSimulationButton } from './MachineJobControls';
+import { sceneStockTransform, useAddSimulation } from '../hooks/useAddSimulation';
+import { tubeSimulationRequest, type TubeSimulationJob } from '../utils/tubeSimulation';
 
 export function ExportTubeAndWireModal({
     isOpen,
@@ -50,6 +53,7 @@ export function ExportTubeAndWireModal({
     const scene = propScene || storeScene;
 
     const [activeTab, setActiveTab] = useState<'pipe' | 'cope' | 'wire'>('pipe');
+    const simulation = useAddSimulation();
 
     // --- Tab 1: PVC / EMT Pipe Frame State ---
     const [pipeStandardId, setPipeStandardId] = useState<PipeStandardId>(DEFAULT_PIPE_FRAME_OPTIONS.pipeStandardId);
@@ -167,6 +171,11 @@ export function ExportTubeAndWireModal({
     );
 
     if (!isOpen) return null;
+
+    /** What this tab hands over, made and put in the scene to measure against the model. */
+    const handleSimulate = (job: TubeSimulationJob, placement: 'beside' | 'overlay') => {
+        void simulation.add({ ...tubeSimulationRequest(job, sceneStockTransform()).request, placement });
+    };
 
     const handleLoadPreset = (presetId: PipeStructurePresetId) => {
         const nodes = generatePipeStructurePreset(presetId, { pipeStandardId });
@@ -460,6 +469,12 @@ export function ExportTubeAndWireModal({
                                         <Plus className="w-4 h-4" />
                                         Add 3D-Printable Hub Connectors to Scene ({breakdown.hubs.length})
                                     </button>
+                                    <AddSimulationButton
+                                        disabled={breakdown.struts.length === 0}
+                                        onSimulate={(placement) => handleSimulate({ frame: breakdown }, placement)}
+                                        progress={simulation.progress}
+                                        error={simulation.error}
+                                    />
                                     {hubAddedMessage && (
                                         <div className="text-xs text-emerald-400 flex items-center gap-1.5">
                                             <Check className="w-3.5 h-3.5" />
@@ -648,6 +663,13 @@ export function ExportTubeAndWireModal({
                                         <ExternalLink className="w-4 h-4 text-cyan-400" />
                                         Open in Etch (2D Laser / Print Layout)
                                     </button>
+                                    <AddSimulationButton
+                                        disabled={false}
+                                        onSimulate={(placement) => handleSimulate({ cope: copeResult }, placement)}
+                                        progress={simulation.progress}
+                                        error={simulation.error}
+                                        besideOnly
+                                    />
                                 </div>
                             </div>
 
@@ -782,6 +804,12 @@ export function ExportTubeAndWireModal({
                                     <Plus className="w-4 h-4" />
                                     Add Printable Wire Bending Jig to Scene
                                 </button>
+                                <AddSimulationButton
+                                    disabled={wireSchedule.pointsMm.length < 2}
+                                    onSimulate={(placement) => handleSimulate({ wire: wireSchedule }, placement)}
+                                    progress={simulation.progress}
+                                    error={simulation.error}
+                                />
                                 {jigAddedMessage && (
                                     <div className="text-xs text-emerald-400 flex items-center gap-1.5">
                                         <Check className="w-3.5 h-3.5" />
