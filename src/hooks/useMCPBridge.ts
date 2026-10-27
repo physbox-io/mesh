@@ -130,7 +130,8 @@ import { reliefSimulationTools } from '../utils/simulatedPart';
 import { simulationSetups } from '../utils/solidSetups';
 import { BLOCK_FACES, FACE_NAME, type BlockFace } from '../utils/orient';
 import { contourSheetParts, laserSheetParts, laserStockTransform } from '../utils/sheetSimulation';
-import { addSimulationToScene, sceneStockTransform } from './useAddSimulation';
+import { addSimulationToScene, sceneStockTransform, simulateTimberOffThread } from './useAddSimulation';
+import { breakdownFrameToWorld, timberSimulationRequest } from '../utils/timberSimulation';
 import { tubeSimulationRequest, type TubeSimulationJob } from '../utils/tubeSimulation';
 import { runMcpMoldSimulation } from '../utils/moldWorkerClient';
 import { runMcpRepairMesh } from '../utils/meshRepair';
@@ -4962,7 +4963,48 @@ export function useMCPBridge() {
             };
           }
 
-          return { ok: false, error: "kind must be 'relief', 'machining', 'laser', 'contour', 'sheet', 'tube', 'mold' or 'mold_cast'." };
+          if (msg.kind === 'timber') {
+            // The frame physics_timber_breakdown plans, made from its cut list
+            // and its window programs, the tenons fitted into what they leave.
+            const others = Array.isArray(msg.withIds) ? msg.withIds.filter((v): v is string => typeof v === 'string') : [];
+            const targetIds = typeof msg.bodyId === 'string'
+              ? [msg.bodyId, ...others]
+              : resolveTimberTargetIds(scene.nodes, store.selectedNodeId, others);
+            if (!targetIds.length) return { ok: false, error: 'Give body_id, or add a body to the scene first.' };
+            const { items } = collectIndividualPartSoups(scene, targetIds);
+            if (!items.length) return { ok: false, error: `${targetIds[0]} has no solid geometry to break down.` };
+            const world = breakdownFrameToWorld(scene.nodes, targetIds[0]);
+            if (!world) return { ok: false, error: `No body called ${targetIds[0]}.` };
+            const n = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+            const planned = await runJob((c) => c.run('timber', scene, {
+              mode: 'frame',
+              soups: items.map((it) => it.soup),
+              joineryOptions: {
+                jointMode: msg.jointMode === 'dado' ? 'dado' : 'mortise_tenon',
+                tenonCornerFit: msg.tenonCornerFit === 'round_tenon' || msg.tenonCornerFit === 'chisel_square' ? msg.tenonCornerFit : 'dogbone',
+                cutterDiaMm: n(msg.cutterDiaMm),
+                shoulderMm: n(msg.shoulderMm),
+                tenonLengthMm: n(msg.tenonLengthMm),
+                clearanceMm: n(msg.clearanceMm),
+                maxBoardWidthMm: n(msg.maxBoardWidthMm),
+              },
+              cncBedMm: [store.cncBed.widthMm, store.cncBed.depthMm, store.cncBed.heightMm],
+              defaultStockLengthMm: n(msg.stockLengthMm) ?? 1800,
+            }));
+            if (!planned.outcome.ok) return { ok: false, error: planned.outcome.error };
+            if (!planned.cutPlan) return { ok: false, error: 'The frame has no cut plan.' };
+            const sim = await simulateTimberOffThread({ breakdown: planned.outcome, cutPlan: planned.cutPlan });
+            const { figures, request } = timberSimulationRequest(sim, world);
+            const added = await addSimulationToScene({ ...request, placement });
+            return {
+              ok: true, id: added.id, name: added.name, kind: 'timber', placement,
+              ...figures,
+              volumeMm3: Math.round(added.volumeMm3),
+              warnings: planned.outcome.warnings,
+            };
+          }
+
+          return { ok: false, error: "kind must be 'relief', 'machining', 'laser', 'contour', 'sheet', 'tube', 'timber', 'mold' or 'mold_cast'." };
         }
 
         case 'REPAIR_MESH':

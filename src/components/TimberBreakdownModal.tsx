@@ -45,6 +45,9 @@ import type { Vec3 } from '../utils/printPlate';
 import { Advanced, Field, Segmented, inputClass, sectionClass, sectionTitleClass } from './ExportFields';
 import { RackToolPicker } from './RackToolPicker';
 import { AssemblyPreview, type PreviewSection } from './scene/AssemblyPreview';
+import { AddSimulationButton } from './MachineJobControls';
+import { simulateTimberOffThread, useAddSimulation } from '../hooks/useAddSimulation';
+import { breakdownFrameToWorld, timberSimulationRequest } from '../utils/timberSimulation';
 
 const PREVIEW_COLOURS = [
   [0.78, 0.56, 0.34],
@@ -248,6 +251,7 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
   const [isolatedPartIdx, setIsolatedPartIdx] = useState<number | null>(null);
   const [activeTab, setActiveTab] = useState<'cards' | 'bom' | 'glue'>('cards');
   const cardsListRef = useRef<HTMLDivElement | null>(null);
+  const simulation = useAddSimulation();
 
   const targetIds = useMemo(
     () => resolveTimberTargetIds(sceneGraph.nodes, selectedNodeId, extraSelectedIds),
@@ -459,6 +463,20 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
     void webSerialManager.runJob(setup.gcode, {
       name: setup.id,
       estimatedSeconds: setup.estimatedMinutes * 60,
+    });
+  };
+
+  /**
+   * The parts made from the cut list and the window programs, the tenons
+   * fitted into the mortises as milled, put back where the model is.
+   */
+  const handleSimulate = (simPlacement: 'beside' | 'overlay') => {
+    if (!breakdown || !cutPlan || !primaryNode) return;
+    const world = breakdownFrameToWorld(sceneGraph.nodes, primaryNode.id);
+    if (!world) return;
+    void simulation.add(async (onProgress) => {
+      const sim = await simulateTimberOffThread({ breakdown, cutPlan }, onProgress);
+      return { ...timberSimulationRequest(sim, world).request, placement: simPlacement };
     });
   };
 
@@ -1481,6 +1499,12 @@ export const TimberBreakdownModal: React.FC<TimberBreakdownModalProps> = ({
             >
               Close
             </button>
+            <AddSimulationButton
+              disabled={effectiveMode !== 'frame' || !breakdown || !cutPlan || busy}
+              onSimulate={handleSimulate}
+              progress={simulation.progress}
+              error={simulation.error}
+            />
             <button
               onClick={handleApplyToScene}
               disabled={!hasValidResult || busy}

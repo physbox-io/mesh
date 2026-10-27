@@ -46,6 +46,7 @@ import {
   type SimulationJobResult,
 } from './simulatedPart';
 import { runSheetJob, type SheetJobOptions, type SheetJobResult } from './sheetSimulation';
+import { runTimberSimulation, type TimberSimJobOptions, type TimberSimJobResult } from './timberSimulation';
 import {
   generateContourSliceGcode,
   type GcodeExportOptions,
@@ -104,6 +105,7 @@ export type ExportJobKind =
   | 'contourGcode'
   | 'simulate'
   | 'simulateSheets'
+  | 'simulateTimber'
   | 'timber';
 
 /** The options and result each job takes and returns. */
@@ -118,6 +120,8 @@ export interface ExportJobMap {
   simulate: { options: SimulationJobOptions; result: SimulationJobResult };
   /** The same for sheet parts: outlines extruded at the stock's thickness. */
   simulateSheets: { options: SheetJobOptions; result: SheetJobResult };
+  /** Timber: the windows' programs milled, the tenons fitted into what they leave. */
+  simulateTimber: { options: TimberSimJobOptions; result: TimberSimJobResult };
   /** Timber joinery synthesis (Manifold 3D CSG) and CNC/bandsaw cut-list planning. */
   timber: { options: TimberJobOptions; result: TimberJobResult };
 }
@@ -129,13 +133,13 @@ export type ExportJobResult<K extends ExportJobKind> = ExportJobMap[K]['result']
  * Runs one export job, by name. The only place that knows every job's exporter.
  * `onProgress`, from 0 to 1, is called by the jobs long enough to need it.
  */
-export function runExportJob(
-  kind: 'timber',
+export function runExportJob<K extends 'timber' | 'simulateTimber'>(
+  kind: K,
   scene: SceneGraph,
-  options: ExportJobOptions<'timber'>,
+  options: ExportJobOptions<K>,
   onProgress?: (fraction: number) => void
-): Promise<ExportJobResult<'timber'>>;
-export function runExportJob<K extends Exclude<ExportJobKind, 'timber'>>(
+): Promise<ExportJobResult<K>>;
+export function runExportJob<K extends Exclude<ExportJobKind, 'timber' | 'simulateTimber'>>(
   kind: K,
   scene: SceneGraph,
   options: ExportJobOptions<K>,
@@ -176,6 +180,9 @@ export function runExportJob<K extends ExportJobKind>(
       return runSimulationJob(options as SimulationJobOptions, onProgress) as ExportJobResult<K>;
     case 'simulateSheets':
       return runSheetJob(options as SheetJobOptions, onProgress) as ExportJobResult<K>;
+    case 'simulateTimber':
+      return loadManifold().then((wasm) =>
+        runTimberSimulation(wasm, options as TimberSimJobOptions, onProgress) as ExportJobResult<K>);
     case 'timber': {
       const {
         mode,

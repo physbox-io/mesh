@@ -14,6 +14,7 @@ import {
   type SimulationPlacement,
 } from '../utils/simulatedPart';
 import type { SheetJobOptions, SheetJobResult } from '../utils/sheetSimulation';
+import type { TimberSimJobOptions, TimberSimJobResult } from '../utils/timberSimulation';
 import type { IndexedMesh } from '../utils/stlMesh';
 import { enclosedVolume } from '../utils/simulationMesh';
 import { collectSceneTriangles } from '../utils/contourSliceExporter';
@@ -158,15 +159,19 @@ export async function addSimulationToScene(
   return { id, name, volumeMm3: mesh.volumeMm3, milled };
 }
 
-/** `addSimulationToScene` with the progress and any failure, for a dialog to show. */
+/**
+ * `addSimulationToScene` with the progress and any failure, for a dialog to
+ * show. `req` can be a step that builds it first (a simulation run on its own
+ * worker job), whose progress is shown the same way.
+ */
 export function useAddSimulation() {
   const [progress, setProgress] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const add = useCallback(async (req: AddSimulationRequest) => {
+  const add = useCallback(async (req: AddSimulationRequest | ((onProgress: (f: number) => void) => Promise<AddSimulationRequest>)) => {
     setError(null);
     setProgress(0);
     try {
-      return await addSimulationToScene(req, setProgress);
+      return await addSimulationToScene(typeof req === 'function' ? await req(setProgress) : req, setProgress);
     } catch (e) {
       setError((e as Error)?.message ?? String(e));
       return null;
@@ -199,4 +204,17 @@ export function sceneStockTransform(): StockTransform {
     modelMinMm: lo as [number, number, number],
     modelMaxMm: hi as [number, number, number],
   };
+}
+
+/** The timber simulation, on its own export worker. */
+export async function simulateTimberOffThread(
+  options: TimberSimJobOptions,
+  onProgress?: (fraction: number) => void
+): Promise<TimberSimJobResult> {
+  const client = new ExportWorkerClient();
+  try {
+    return await client.run('simulateTimber', { nodes: [] }, options, onProgress);
+  } finally {
+    client.dispose();
+  }
 }
