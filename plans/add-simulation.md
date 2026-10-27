@@ -128,6 +128,26 @@ the machine.
 4. MCP command and docs.
 5. Optional: **Add to scene** for the Cast and Mold outputs, which are already geometry.
 
+## Not yet simulated (added 2026-10-26)
+
+Status: relief, solid machining (both sides and multi-face), laser, contour, rigid mold and
+every Mold tab's cast chain all simulate, in the dialogs and through `physics_add_simulation`.
+Three outputs hand over files with nothing that builds the part back from them:
+
+| Dialog | Output | Simulation |
+| --- | --- | --- |
+| Sheet Unfold | flat net: papercraft, sheet metal (K-factor bends), soft goods | fold the exported net back up, from the file's own bend lines and allowances, and set it against the model: a wrong allowance or a missing relief shows as a gap or overlap at the seams |
+| Tube & Wire | cut lengths, cope templates, wire bend schedule, jig | cut each tube to its listed length, cope its ends from the template profile, bend the wire from the schedule (springback included), and assemble: a short tube or a wrong cope angle shows as a gap at the joint |
+| Timber Breakdown | cut list, joinery, mortise G-code | cut each member from its board on the list, mill the joinery from the G-code with the cut simulator, and assemble: a tenon that does not reach its mortise shows |
+
+Each is a new `kind` on `ADD_SIMULATION` (`sheet`, `tube`, `timber`) and an Add Simulation
+button in its dialog, the same `<JobTransport>`-side placement as the others. Like the rest,
+each is built **from the exported file**, not from the model, or it proves nothing. Report
+the largest deviation from the model as the mold chain does.
+
+3D printing (3MF, print split) is left out: the slicer, not Mesh, makes the toolpath, so
+there is nothing of ours to replay. The split's pieces are already geometry in the scene.
+
 ## Later
 
 - **Simulate to a line.** Drive the simulator from the toolpath view's playhead, to show

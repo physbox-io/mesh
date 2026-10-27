@@ -11,13 +11,7 @@ import type { MoldHalfBuffers, MoldSummary } from '../../utils/moldExporter';
 import type { MoldPreview } from '../../utils/moldWorkerClient';
 import type { MoldCastSimulationResult } from '../../utils/moldCastSimulation';
 import type { IndexedMesh } from '../../utils/stlMesh';
-
-export type PreviewViewMode = 'clamshell_exploded' | 'plate' | 'bottom_only' | 'top_only' | 'cast_preview';
-
-/** The view asked for, or the plate where an open mold has no lid to show. */
-export function effectiveMoldView(moldType: 'clamshell' | 'open', viewMode: PreviewViewMode): PreviewViewMode {
-  return moldType === 'open' && (viewMode === 'clamshell_exploded' || viewMode === 'top_only') ? 'plate' : viewMode;
-}
+import { effectiveMoldView, type PreviewViewMode } from './moldViewMode';
 
 /** Wraps the worker's transferred arrays as geometry, without copying them. */
 function buffersToGeometry(buf: MoldHalfBuffers): THREE.BufferGeometry {

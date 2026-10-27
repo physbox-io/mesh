@@ -32,7 +32,8 @@ import { stlToMesh } from '../../utils/stlMesh';
 import type { SimulationPlacement } from '../../utils/simulatedPart';
 import { useStore } from '../../store/useStore';
 import { PanelBody, PanelFooter } from './CastDialogFrame';
-import { MoldPreviewView, effectiveMoldView, type PreviewViewMode } from './MoldPreviewView';
+import { MoldPreviewView } from './MoldPreviewView';
+import { effectiveMoldView, type PreviewViewMode } from './moldViewMode';
 
 const inputClass =
   'w-full px-3 py-1.5 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-lg ' +

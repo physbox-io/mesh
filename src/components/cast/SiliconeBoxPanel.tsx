@@ -11,7 +11,8 @@ import { DEFAULT_POUR_BOX_OPTIONS, HOLE_DIA_MM, holePinMesh, type HolePurpose, t
 import { SILICONES, castMaterialWarnings, type CastMaterialId, type SiliconeId } from '../../utils/castMaterials';
 import { AdvancedBlock, CastTopFields, MaterialNotes } from './CastTopFields';
 import { PanelBody, PanelFooter } from './CastDialogFrame';
-import { ChainResult, useChainRun } from './ChainRun';
+import { ChainResult } from './ChainRun';
+import { useChainRun } from './useChainRun';
 import { AddSimulationButton } from '../MachineJobControls';
 import { addSiliconeChain } from '../../utils/castChainActions';
 
