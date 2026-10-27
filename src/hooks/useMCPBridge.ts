@@ -82,7 +82,8 @@ import {
 } from '../utils/reliefCarveExporter';
 import { DEFAULT_LASER_OPTIONS, type LaserCutResult } from '../utils/laserCutExporter';
 import { DEFAULT_CONTOUR_OPTIONS, collectSceneTriangles, type ContourSliceResult } from '../utils/contourSliceExporter';
-import { exportSheetUnfold, type SheetUnfoldOptions } from '../utils/sheetUnfoldExporter';
+import { DEFAULT_SHEET_UNFOLD_OPTIONS, exportSheetUnfold, type SheetUnfoldOptions } from '../utils/sheetUnfoldExporter';
+import { sheetFoldSimulationRequest } from '../utils/sheetFoldSimulation';
 import {
   PCB_PRESETS,
   buildPcbNode,
@@ -4878,7 +4879,41 @@ export function useMCPBridge() {
             };
           }
 
-          return { ok: false, error: "kind must be 'relief', 'machining', 'laser', 'contour', 'mold' or 'mold_cast'." };
+          if (msg.kind === 'sheet') {
+            // The net physics_export_sheet_unfold would hand over, with the same
+            // options, folded back up along its own lines.
+            const sheetMode = msg.sheetMode ?? msg.mode;
+            const options: SheetUnfoldOptions = {
+              ...DEFAULT_SHEET_UNFOLD_OPTIONS,
+              ...(sheetMode === 'papercraft' || sheetMode === 'sheet_metal' || sheetMode === 'soft_goods' ? { mode: sheetMode } : {}),
+              ...(num(msg.materialThicknessMm) ? { thicknessMm: num(msg.materialThicknessMm) } : {}),
+              ...(num(msg.thicknessMm) ? { thicknessMm: num(msg.thicknessMm) } : {}),
+              ...(typeof msg.bendRadiusMm === 'number' && msg.bendRadiusMm >= 0 ? { bendRadiusMm: msg.bendRadiusMm } : {}),
+              ...(typeof msg.kFactor === 'number' && msg.kFactor >= 0 && msg.kFactor <= 1 ? { kFactor: msg.kFactor } : {}),
+              ...(num(msg.scaleFactor) ? { scaleFactor: num(msg.scaleFactor) } : {}),
+            };
+            const targetIds = Array.isArray(msg.targetIds)
+              ? msg.targetIds.filter((x): x is string => typeof x === 'string')
+              : typeof msg.targetId === 'string' ? [msg.targetId] : undefined;
+            const res = exportSheetUnfold(scene, options, targetIds);
+            if (!res.success) return { ok: false, error: res.error || 'Nothing in the scene unfolds.', warnings: res.warnings };
+            const { fold, request } = sheetFoldSimulationRequest(res, options);
+            const added = await addSimulationToScene({ ...request, placement });
+            return {
+              ok: true, id: added.id, name: added.name, kind: 'sheet', placement,
+              mode: res.mode,
+              pieces: fold.islands,
+              folds: fold.folds,
+              volumeMm3: Math.round(added.volumeMm3),
+              // Fitted to the model: how far a model corner lies off its folded
+              // face, or a cut edge off its folded line.
+              maxDeviationMm: +fold.deviation.maxMm.toFixed(3),
+              meanDeviationMm: +fold.deviation.meanMm.toFixed(3),
+              warnings: res.warnings,
+            };
+          }
+
+          return { ok: false, error: "kind must be 'relief', 'machining', 'laser', 'contour', 'sheet', 'mold' or 'mold_cast'." };
         }
 
         case 'REPAIR_MESH':

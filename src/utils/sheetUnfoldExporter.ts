@@ -95,6 +95,12 @@ export interface UnfoldedFace2D {
   polygon2D: Point2D[];
   centroid2D: Point2D;
   areaMm2: number;
+  /**
+   * The model face this was unfolded from, mm, Z up, at `scaleFactor`: vertex
+   * i is `polygon2D[i]`. Not part of the cut; it is what a simulation folding
+   * the net back up is measured against.
+   */
+  model3DMm: [number, number, number][];
 }
 
 export interface UnfoldFoldEdge {
@@ -841,6 +847,11 @@ function extractSurfacesFromScene(
   }
 
   function traverse(node: SceneNode, parentMatrix?: THREE.Matrix4) {
+    // A folded-up net already in the scene is not part of what is unfolded.
+    if (node.simulation) {
+      warnings.push(`${node.name}: a simulation, so it is left out.`);
+      return;
+    }
     const bodyMatrix = getNodeWorldTransform(node, parentMatrix);
     if (isBoughtIn(node)) {
       for (const child of node.children || []) traverse(child, bodyMatrix);
@@ -1455,6 +1466,7 @@ function unfoldSurfaceToIslands(
         polygon2D: st.polygon2D,
         centroid2D: polygonCentroid2D(st.polygon2D),
         areaMm2: polygonArea2D(st.polygon2D),
+        model3DMm: faces[st.faceIndex].verts.map((v) => [vertices[v].x * 1000, vertices[v].y * 1000, vertices[v].z * 1000]),
       });
     }
 

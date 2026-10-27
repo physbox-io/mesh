@@ -21,6 +21,9 @@ import {
 import { useStore } from '../store/useStore';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { HintAnchor } from './ExportFields';
+import { AddSimulationButton } from './MachineJobControls';
+import { useAddSimulation } from '../hooks/useAddSimulation';
+import { sheetFoldSimulationRequest } from '../utils/sheetFoldSimulation';
 
 export interface ExportSheetUnfoldModalProps {
   isOpen: boolean;
@@ -209,6 +212,8 @@ export const ExportSheetUnfoldModal: React.FC<ExportSheetUnfoldModalProps> = ({
     ]
   );
 
+  const simulation = useAddSimulation();
+
   const exportResult = useMemo(() => {
     if (!isOpen || !scene) return null;
     return exportSheetUnfold(scene, options);
@@ -225,6 +230,12 @@ export const ExportSheetUnfoldModal: React.FC<ExportSheetUnfoldModalProps> = ({
   );
 
   if (!isOpen) return null;
+
+  /** The net folded back up along its own lines, beside or over the model. */
+  const handleSimulate = (placement: 'beside' | 'overlay') => {
+    if (!exportResult?.success) return;
+    void simulation.add({ ...sheetFoldSimulationRequest(exportResult, options).request, placement });
+  };
 
   const handleDownloadSvg = () => {
     if (!exportResult || !exportResult.success || !exportResult.svg) return;
@@ -680,6 +691,12 @@ export const ExportSheetUnfoldModal: React.FC<ExportSheetUnfoldModalProps> = ({
                 {etchError}
               </span>
             )}
+            <AddSimulationButton
+              disabled={!exportResult?.success}
+              onSimulate={handleSimulate}
+              progress={simulation.progress}
+              error={simulation.error}
+            />
             <button
               onClick={handleOpenInEtch}
               disabled={!exportResult || !exportResult.success}

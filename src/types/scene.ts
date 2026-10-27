@@ -836,7 +836,7 @@ export interface SceneNode {
    * way, for the same reason.
    */
   simulation?: {
-    kind: 'relief' | 'machining' | 'laser' | 'contour' | 'cast' | 'mold';
+    kind: 'relief' | 'machining' | 'laser' | 'contour' | 'cast' | 'mold' | 'sheet' | 'tube' | 'timber';
     /** What a cast was poured in (a CastMaterialId): a silicone one is a mold that silicone sticks to. */
     material?: string;
     /** When it was simulated, ISO 8601. */
