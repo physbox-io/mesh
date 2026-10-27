@@ -350,9 +350,23 @@ opens the pattern editor on it.
   clockwise over it, `bottom` left to right under the same ring), a wave, or any SVG path in
   mm. Each glyph is turned rigidly to the path at its middle.
 
+### Mold and Cast
+
+**Mold** is one dialog with a tab per kind of mold: Rigid (the printed mold designer, with the PVA
+liner), Silicone (the pour box), Sand and Lost PLA (the metal pattern). Every tab molds the selected
+part, children included, where it stands, or every non-simulated body when nothing is selected
+(`utils/moldSubject.ts`, which hands the engines a SceneGraph of just that). The tab opens on the one
+last used for the scene, else Rigid, and the material per tab is remembered (`store/castDialogStore.ts`).
+Each tab shows Material and Draft first and the rest under Advanced; `utils/moldTabs.ts` holds the
+defaults and which materials a tab can take. Draft on Sand and Lost PLA tapers the printed pattern
+only (`CastOptions.draftDeg`); if Prepare for Casting has drafted the model, the field shows that
+angle, locked, and nothing is added. **Cast** pours into the selection (a mold, or a master with its
+pour box) and says why when the selection holds nothing. Every material is one entry in
+`utils/castMaterials.ts`, data only: density, shrink, pour temperature, mix and warnings.
+
 ### Prepare for Casting (draft and edge breaks)
 
-The Cast dialog's **Prepare for Casting** switch (and `SET_CAST_PREP`) puts what a pattern needs onto
+The **Prepare for Casting** switch (Mold > Sand or Lost PLA > Advanced, and `SET_CAST_PREP`) puts what a pattern needs onto
 every part, in the model itself, so the viewport and the plain STL export carry it too.
 `utils/castPrep.ts` is the pure half and `utils/castPrepRunner.ts` drives it through the store.
 

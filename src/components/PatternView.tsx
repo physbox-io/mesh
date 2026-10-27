@@ -24,7 +24,7 @@ function stlToPositions(stl: Uint8Array): Float32Array {
 /**
  * A small static viewport for a printed pattern.
  *
- * It shows exactly the STL the Cast dialog will hand you, part plus gating, so
+ * It shows exactly the STL the Mold dialog's Sand or Lost PLA tab will hand you, part plus gating, so
  * you can see the sprue and riser sit where they should before you print. The
  * renderer is built once for as long as the dialog is open and only the mesh is
  * swapped, the same lifecycle as the toolpath preview.

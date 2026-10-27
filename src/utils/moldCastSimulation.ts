@@ -66,6 +66,8 @@ export interface MoldCastSimulationResult {
   textures?: SurfaceTexture[];
   /** For a pour: the side it came from, how deep, and what a rigid mold would hold. */
   pour?: PourInfo;
+  /** How far the cast strays from the part it was molded from, mm, when asked for. */
+  deviation?: { maxMm: number; meanMm: number };
 }
 
 export interface RawMoldTexture {
@@ -242,10 +244,14 @@ export async function simulateCastFromMoldNode(
       appendSolidTriangles(srcGeom, bodyMatrix, geomTrisM);
       if (geomTrisM.length > 0) {
         const geomTrisMm = new Float64Array(geomTrisM.length);
-        const snapPrimitive = geom.type !== 'mesh';
+        // Every shell on the same 0.1 µm grid, meshes too. A primitive needs it
+        // to weld (its rim vertices come out a few ulps apart), and snapping
+        // only primitives left a snapped master and an unsnapped pour box
+        // meeting on faces a hair apart, where the union quietly kept the
+        // master out: the silicone poured into the space the master filled.
         for (let i = 0; i < geomTrisM.length; i++) {
           const rawMm = geomTrisM[i] * 1000;
-          const valMm = snapPrimitive ? Math.round(rawMm * 1e4) / 1e4 : rawMm;
+          const valMm = Math.round(rawMm * 1e4) / 1e4;
           geomTrisMm[i] = valMm;
           allTrisMetres.push(valMm / 1000);
         }

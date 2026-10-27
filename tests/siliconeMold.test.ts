@@ -3,11 +3,14 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import type { ManifoldToplevel } from 'manifold-3d';
 import { loadManifold } from '../src/utils/sculptCut';
-import { buildPourBox, soupVolume, type PourBoxMesh } from '../src/utils/siliconeMold';
+import { buildPourBox, holePinMesh, soupVolume, topZAt, type PourBoxMesh } from '../src/utils/siliconeMold';
 import { analyzeMesh } from '../src/utils/meshIntegrity';
 import { simulateCastFromMoldNode } from '../src/utils/moldCastSimulation';
 import { planPourBox, sceneWithPourBox } from '../src/utils/pourBoxScene';
-import { pourNodeFor } from '../src/utils/pourTarget';
+import { pourBoxIn, pourNodeFor } from '../src/utils/pourTarget';
+import { addPourBoxToScene } from '../src/utils/pourBoxActions';
+import { useStore } from '../src/store/useStore';
+import { moldSubject } from '../src/utils/moldSubject';
 import { getNodeWorldTransform } from '../src/utils/laserCutExporter';
 import * as THREE from 'three';
 import type { SceneGeom, SceneGraph, SceneNode } from '../src/types/scene';
@@ -110,14 +113,58 @@ describe('a pour box round a candle', () => {
     expect(Math.abs(silicone.castVolumeMm3 - box.report.siliconeMm3) / box.report.siliconeMm3).toBeLessThan(0.02);
   });
 
-  it('puts a wick pin on the middle of the top, reaching past the fill line', () => {
-    const box = buildPourBox(wasm, candle, { pin: true, pinDiaMm: 2.5 });
-    expect(box.pin).toBeDefined();
-    expect(box.pin!.footMm[0]).toBeCloseTo(0, 3);
-    expect(box.pin!.footMm[1]).toBeCloseTo(0, 3);
-    expect(box.pin!.footMm[2] + box.pin!.lengthMm).toBeCloseTo(H + 8 + 1, 5);
+  it('puts a wick hole on the middle of the top, reaching past the fill line', () => {
+    const box = buildPourBox(wasm, candle, { hole: 'wick' });
+    expect(box.hole).toMatchObject({ purpose: 'wick', diaMm: 2.5 });
+    expect(box.hole!.footMm[0]).toBeCloseTo(0, 3);
+    expect(box.hole!.footMm[1]).toBeCloseTo(0, 3);
+    expect(box.hole!.footMm[2] + box.hole!.lengthMm).toBeCloseTo(H + 8 + 1, 5);
     const plain = buildPourBox(wasm, candle);
     expect(plain.report.siliconeMm3 - box.report.siliconeMm3).toBeCloseTo(Math.PI * 1.25 ** 2 * 8, -1);
+  });
+});
+
+describe('a hole through the mold', () => {
+  const brick = boxSoup([-40, -10, 0], [40, 10, 20]);
+
+  it('starts at a point picked on the master, and sizes itself by purpose', () => {
+    const box = buildPourBox(wasm, brick, { hole: 'pour', holeAtMm: [25, 0] });
+    expect(box.hole).toMatchObject({ purpose: 'pour', diaMm: 8 });
+    expect(box.hole!.footMm[0]).toBe(25);
+    expect(box.hole!.footMm[2]).toBeCloseTo(19.5, 5);
+    expect(box.report.holeTopMm).toEqual([25, 0, 29]);
+  });
+
+  it('puts the pin on the master, not in the air between two peaks', () => {
+    const twoPosts = [...boxSoup([-20, -5, 0], [-10, 5, 20]), ...boxSoup([10, -5, 0], [20, 5, 20])];
+    const box = buildPourBox(wasm, twoPosts, { hole: 'wick' });
+    expect(topZAt(twoPosts, box.hole!.footMm[0], box.hole!.footMm[1])).toBeCloseTo(20, 5);
+  });
+
+  it('sinks the pin to the lowest point under its rim on a slope', () => {
+    // A wedge rising 1 mm per mm in X, from 10 to 30 mm.
+    const wedge = wedgeSoup();
+    const box = buildPourBox(wasm, wedge, { hole: 'pour', holeAtMm: [0, 0] });
+    // Centre at 20 mm; an 8 mm hole's rim reaches down to 16.
+    expect(box.hole!.footMm[2] + 0.5).toBeCloseTo(16, 1);
+  });
+
+  it('warns about a hole that cannot work', () => {
+    expect(buildPourBox(wasm, brick, { hole: 'pour', holeDiaMm: 4 }).report.warnings.join(' ')).toMatch(/too narrow to pour/);
+    expect(buildPourBox(wasm, brick, { hole: 'wick', holeDiaMm: 7 }).report.warnings.join(' ')).toMatch(/too big to plug/);
+    expect(buildPourBox(wasm, brick, { hole: 'wick' }).report.warnings).toEqual([]);
+  });
+
+  it('makes the pin a closed, outward-wound solid to print', () => {
+    const box = buildPourBox(wasm, brick, { hole: 'fixing' });
+    const pin = holePinMesh(box.hole!);
+    expect(soupVolumeOf(pin)).toBeCloseTo(Math.PI * 1.5 ** 2 * box.hole!.lengthMm, 0);
+    const a = analyzeMesh(pin.positions, pin.faces);
+    expect(a.closed).toBe(true);
+  });
+
+  it('refuses a point that is not over the master', () => {
+    expect(() => buildPourBox(wasm, brick, { hole: 'fixing', holeAtMm: [60, 0] })).toThrow(/not over the master/);
   });
 });
 
@@ -151,7 +198,7 @@ describe('the pour box in the scene', () => {
   const scene = { nodes: [turned] } as unknown as SceneGraph;
 
   it('stands the base and sleeve round the master, and fixes the pin to it', async () => {
-    const box = await planPourBox(scene, ['m'], { pin: true });
+    const box = await planPourBox(scene, ['m'], { hole: 'wick' });
     expect(box.report.fillZMm).toBeCloseTo(28, 3);
     const out = sceneWithPourBox(scene, ['m'], box);
     expect(out.scene.nodes).toHaveLength(3);
@@ -161,7 +208,7 @@ describe('the pour box in the scene', () => {
     expect(base.pos[1]).toBeCloseTo(0.05, 4);
     expect(base.pos[2]).toBeCloseTo(-0.006, 4);
     const master = out.scene.nodes.find((n) => n.id === 'm')!;
-    const pin = master.children!.find((c) => c.id === out.pinId)!;
+    const pin = master.children!.find((c) => c.id === out.holePinId)!;
     expect(pin.joints).toHaveLength(0);
     // Turned back into the master's frame: in the world it stands straight up
     // from the middle of the top, from 0.5 mm inside it to 1 mm past the fill.
@@ -174,7 +221,7 @@ describe('the pour box in the scene', () => {
   });
 
   it('pours as the scene stands, wick hole and all', async () => {
-    const box = await planPourBox(scene, ['m'], { pin: true });
+    const box = await planPourBox(scene, ['m'], { hole: 'wick' });
     const out = sceneWithPourBox(scene, ['m'], box);
     const mold = pourNodeFor(out.scene.nodes, ['m', out.baseId, out.sleeveId])!;
     const silicone = await simulateCastFromMoldNode(mold, { pour: { fillMm: box.report.pourDepthMm } });
@@ -183,8 +230,83 @@ describe('the pour box in the scene', () => {
   });
 });
 
+describe('pouring round a master built from primitives', () => {
+  // The simulation used to snap primitives to a 0.1 µm grid and leave the pour
+  // box's meshes as they were; a cylinder master then met the base a hair off
+  // its face, the union kept the master out, and the silicone filled it.
+  it('keeps a cylinder master out of the silicone', async () => {
+    const cyl = { name: 'c', type: 'cylinder', size: [0.008, 0.008], pos: [0, 0, 0.008] } as SceneGeom;
+    const scene = { nodes: [{ id: 'm', name: 'cyl', type: 'body', pos: [0, 0, 0], joints: [], geoms: [cyl], children: [] }] } as unknown as SceneGraph;
+    const box = await planPourBox(scene, ['m'], {});
+    const out = sceneWithPourBox(scene, ['m'], box);
+    const mold = pourNodeFor(out.scene.nodes, ['m', out.baseId, out.sleeveId])!;
+    const silicone = await simulateCastFromMoldNode(mold, { pour: { fillMm: box.report.pourDepthMm } });
+    expect(silicone.success).toBe(true);
+    expect(Math.abs(silicone.castVolumeMm3 - box.report.siliconeMm3) / box.report.siliconeMm3).toBeLessThan(0.03);
+  });
+});
+
+describe('the hole pin is tooling, not the master', () => {
+  it('leaves the pin out when the box is planned again, or the master molded', async () => {
+    const cube = { name: 'cube', type: 'box', size: [0.01, 0.01, 0.01] } as SceneGeom;
+    const scene = { nodes: [{ id: 'm', name: 'cube', type: 'body', pos: [0, 0, 0.01], joints: [], geoms: [cube], children: [] }] } as unknown as SceneGraph;
+    const box = await planPourBox(scene, ['m'], { hole: 'wick' });
+    const out = sceneWithPourBox(scene, ['m'], box);
+    expect(out.holePinId).toBeDefined();
+    const again = await planPourBox(out.scene, ['m'], { hole: 'wick' });
+    expect(again.report.fillZMm).toBeCloseTo(box.report.fillZMm, 5);
+    expect(again.report.siliconeMm3).toBeCloseTo(box.report.siliconeMm3, -1);
+    const subject = moldSubject(out.scene, []);
+    expect(subject.ids).toEqual(['m']);
+    expect(subject.scene.nodes[0].children ?? []).toHaveLength(0);
+  });
+});
+
+describe('after the pour box is added', () => {
+  const cubeGeom = { name: 'cube', type: 'box', size: [0.01, 0.01, 0.01] } as SceneGeom;
+  const master = { id: 'm', name: 'cube', type: 'body', pos: [0, 0, 0.01], joints: [], geoms: [cubeGeom], children: [] } as unknown as SceneNode;
+
+  it('marks the sleeve with its fill line, which a pour into the box picks up', async () => {
+    const scene = { nodes: [master] } as unknown as SceneGraph;
+    const box = await planPourBox(scene, ['m'], {});
+    const out = sceneWithPourBox(scene, ['m'], box);
+    const sleeve = out.scene.nodes.find((n) => n.id === out.sleeveId)!;
+    expect(sleeve.pourBox).toEqual({ pourDepthMm: box.report.pourDepthMm, silicone: 'platinum' });
+    expect(out.scene.nodes.find((n) => n.id === out.baseId)!.pourBox).toEqual(sleeve.pourBox);
+    expect(pourBoxIn(pourNodeFor(out.scene.nodes, ['m', out.baseId, out.sleeveId])!)).toEqual(sleeve.pourBox);
+    expect(pourBoxIn(master)).toBeNull();
+    // Turned over, the box is not poured as planned, so it offers no fill line.
+    const turned = { ...sleeve, quat: [0, 1, 0, 0] } as SceneNode;
+    expect(pourBoxIn(turned)).toBeNull();
+  });
+
+  it('leaves master, base and sleeve selected, the master first, for Cast', async () => {
+    useStore.getState().updateScene({ nodes: [master] } as unknown as SceneGraph);
+    useStore.getState().selectMany(['m'], false);
+    const added = await addPourBoxToScene(['m'], {});
+    const { selectedNodeId, extraSelectedIds } = useStore.getState();
+    expect(selectedNodeId).toBe('m');
+    expect(extraSelectedIds).toEqual([added.baseId, added.sleeveId]);
+    expect(added.selected).toEqual(['m', added.baseId, added.sleeveId]);
+  });
+});
+
 function soupVolumeOf(m: PourBoxMesh): number {
   const soup: number[] = [];
   for (const f of m.faces) soup.push(m.positions[f * 3], m.positions[f * 3 + 1], m.positions[f * 3 + 2]);
   return soupVolume(soup);
+}
+
+/** A wedge 20 mm long, 10 mm wide, its top rising 1 mm per mm from 10 to 30 mm, wound outward. */
+function wedgeSoup(): number[] {
+  const p = {
+    a: [-10, -5, 0], b: [10, -5, 0], c: [10, 5, 0], d: [-10, 5, 0],
+    e: [-10, -5, 10], f: [10, -5, 30], g: [10, 5, 30], h: [-10, 5, 10],
+  };
+  const quads: (keyof typeof p)[][] = [
+    ['a', 'd', 'c', 'b'], ['e', 'f', 'g', 'h'], ['a', 'b', 'f', 'e'], ['c', 'd', 'h', 'g'], ['b', 'c', 'g', 'f'], ['d', 'a', 'e', 'h'],
+  ];
+  const out: number[] = [];
+  for (const [w, x, y, z] of quads) out.push(...p[w], ...p[x], ...p[y], ...p[w], ...p[y], ...p[z]);
+  return out;
 }

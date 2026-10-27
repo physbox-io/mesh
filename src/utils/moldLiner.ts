@@ -37,21 +37,11 @@ import {
 } from './moldManifold';
 import { exportThreeMfAssemblies, type ThreeMfAssembly, type ThreeMfPart } from './threeMfExporter';
 import type { CsgContext, HalfFeatures, MoldExportResult, MoldMeshHalf } from './moldExporter';
-
-export type CastMaterial = 'epoxy' | 'polyurethane' | 'silicone' | 'wax' | 'plaster' | 'concrete' | 'jesmonite';
-
-export const CAST_MATERIALS: Record<CastMaterial, { label: string; waterBased: boolean }> = {
-  epoxy: { label: 'Epoxy resin', waterBased: false },
-  polyurethane: { label: 'Polyurethane resin', waterBased: false },
-  silicone: { label: 'Silicone', waterBased: false },
-  wax: { label: 'Wax', waterBased: false },
-  plaster: { label: 'Plaster', waterBased: true },
-  concrete: { label: 'Concrete', waterBased: true },
-  jesmonite: { label: 'Jesmonite', waterBased: true },
-};
+import { castMaterial, castMaterialWarnings, type CastMaterialId } from './castMaterials';
 
 export const DEFAULT_LINER_SKIN_MM = 1.2;
 export const WATER_BASED_REFUSAL = 'Water-based casts dissolve PVA while they cure; use the rigid mold or a silicone one.';
+export const METAL_REFUSAL = 'Metal is poured into sand or investment, not a printed mold; make a Sand or Lost PLA pattern instead.';
 export const NO_MANIFOLD_REFUSAL = "Couldn't load the geometry engine; reload the page and try again.";
 
 /** g/cm³, as the filament makers give them. */
@@ -63,14 +53,12 @@ const PLA_DENSITY = 1.24;
  * stated as one in the estimate and nothing is promised by it.
  */
 const PVA_DISSOLVE_MM_PER_HOUR = 1;
-/** Epoxy pours above this exotherm hard enough to soften PLA. */
-const EPOXY_EXOTHERM_ML = 200;
 /** What is left of the PLA floor under the deepest skin, at least. */
 const MIN_FLOOR_MM = 1;
 
 export interface MoldLinerInfo {
   skinMm: number;
-  castMaterial: CastMaterial;
+  castMaterial: CastMaterialId;
   pvaVolumeMm3: number;
   pvaGrams: number;
   plaVolumeMm3: number;
@@ -83,24 +71,12 @@ export interface MoldLinerInfo {
   steps: string[];
 }
 
-export function isCastMaterial(value: unknown): value is CastMaterial {
-  return typeof value === 'string' && value in CAST_MATERIALS;
-}
-
 /** Whether this cast can go in a PVA-lined mold, and anything worth saying about it. */
-export function castMaterialCheck(material: CastMaterial, castVolumeMl: number): { error?: string; warnings: string[] } {
-  if (CAST_MATERIALS[material].waterBased) return { error: WATER_BASED_REFUSAL, warnings: [] };
-  const warnings: string[] = [];
-  if (material === 'epoxy' && castVolumeMl > EPOXY_EXOTHERM_ML) {
-    warnings.push(
-      `A ${Math.round(castVolumeMl)} ml epoxy pour can heat past PLA's ~60 °C softening point as it cures; ` +
-      'pour it in layers or use a slow-curing casting epoxy.'
-    );
-  }
-  if (material === 'wax') {
-    warnings.push('Wax poured hotter than about 60 °C softens the PLA shell; pour it as cool as it will run.');
-  }
-  return { warnings };
+export function castMaterialCheck(material: CastMaterialId, castVolumeMl: number): { error?: string; warnings: string[] } {
+  const m = castMaterial(material);
+  if (m.metal) return { error: METAL_REFUSAL, warnings: [] };
+  if (m.waterBased) return { error: WATER_BASED_REFUSAL, warnings: [] };
+  return { warnings: castMaterialWarnings(material, castVolumeMl, { pla: true }) };
 }
 
 /**
@@ -435,7 +411,7 @@ export interface LinerContext extends CsgContext {
   rawBaseDepth: Float64Array;
   rawLidDepth: Float64Array;
   skinMm: number;
-  castMaterial: CastMaterial;
+  castMaterial: CastMaterialId;
 }
 
 function meshPart(m: Manifold, name: string, extruder: number): ThreeMfPart {
@@ -557,7 +533,7 @@ export function buildLinerMold(ctx: LinerContext): MoldExportResult | { error: s
     dissolveHours,
     steps: [
       'Print with PLA on filament 1 and PVA on filament 2; the 3MF sets both.',
-      `Cast ${CAST_MATERIALS[ctx.castMaterial].label.toLowerCase()} as usual and let it cure.`,
+      `Cast ${castMaterial(ctx.castMaterial).label.toLowerCase()} as usual and let it cure.`,
       'Lift the PLA shell straight off along the pull; if the PVA holds it, soak the mold until it lets go.',
       `Soak the casting in warm (30–40 °C) water, stirred and changed when it clouds, until the PVA is gone: ` +
       `about ${dissolveHours} h for its thickest ${Math.round(thickest * 10) / 10} mm, at a rough 1 mm an hour.`,

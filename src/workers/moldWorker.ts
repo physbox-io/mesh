@@ -26,12 +26,18 @@ import {
 } from '../utils/moldCastSimulation';
 import type { SceneGraph, SceneNode } from '../types/scene';
 import { loadManifold } from '../utils/sculptCut';
+import { deviationMm, masterSoup, metalChain, siliconeChain } from '../utils/castChain';
+import type { CastOptions } from '../utils/castPatternExporter';
+import type { PourBoxOptions } from '../utils/siliconeMold';
+import type { CastMaterialId } from '../utils/castMaterials';
 
 type Incoming =
   | { type: 'GENERATE'; id: number; scene?: SceneGraph; options: Partial<MoldOptions> }
   | { type: 'STL'; id: number }
   | { type: 'THREEMF'; id: number }
-  | { type: 'CAST'; id: number; options?: MoldCastSimulationOptions }
+  | { type: 'CAST'; id: number; options?: MoldCastSimulationOptions; measure?: boolean }
+  | { type: 'CHAIN_SILICONE'; id: number; scene: SceneGraph; ids: string[]; boxOptions: Partial<PourBoxOptions>; material: CastMaterialId }
+  | { type: 'CHAIN_METAL'; id: number; scene: SceneGraph; options: Partial<CastOptions> }
   | { type: 'CAST_NODE'; id: number; node: SceneNode; options?: MoldCastSimulationOptions };
 
 let scene: SceneGraph = { nodes: [] };
@@ -92,10 +98,33 @@ self.onmessage = async (evt: MessageEvent<Incoming>) => {
     }
     try {
       const castResult = await simulateCastFromMoldResult(last, msg.options);
+      // Set against the part it was molded from, both taken as they stand.
+      // The sprue and vent stubs are cut off a casting before anyone compares it
+      // with the part, so the measure is taken on a trimmed one.
+      if (msg.measure && castResult.success) {
+        const measured = msg.options?.trimChannels ? castResult : await simulateCastFromMoldResult(last, { ...msg.options, trimChannels: true });
+        if (measured.success) {
+          const soup = new Float64Array(measured.mesh.faces.length * 3);
+          measured.mesh.faces.forEach((v, i) => soup.set(measured.mesh.positions.subarray(v * 3, v * 3 + 3), i * 3));
+          castResult.deviation = deviationMm(soup, masterSoup(await loadManifold(), scene)) ?? undefined;
+        }
+      }
       const transfer: Transferable[] = [];
       if (castResult.mesh.positions.byteLength > 0) transfer.push(castResult.mesh.positions.buffer);
       if (castResult.mesh.faces.byteLength > 0) transfer.push(castResult.mesh.faces.buffer);
       self.postMessage({ type: 'CAST', id: msg.id, result: castResult }, transfer);
+    } catch (e) {
+      self.postMessage({ type: 'FAILED', id: msg.id, message: (e as Error)?.message ?? String(e) });
+    }
+    return;
+  }
+
+  if (msg.type === 'CHAIN_SILICONE' || msg.type === 'CHAIN_METAL') {
+    try {
+      const result = msg.type === 'CHAIN_SILICONE'
+        ? await siliconeChain(msg.scene, msg.ids, msg.boxOptions, msg.material)
+        : await metalChain(msg.scene, msg.options);
+      self.postMessage({ type: 'CHAIN', id: msg.id, result });
     } catch (e) {
       self.postMessage({ type: 'FAILED', id: msg.id, message: (e as Error)?.message ?? String(e) });
     }

@@ -22,7 +22,8 @@ import type { ManifoldToplevel, Manifold } from 'manifold-3d';
 import { boundsOf, buildPartManifold, computeNormal, exportBinarySTL, manifoldToTriangles, type Mat4Tuple, type Triangle3D } from './moldManifold';
 import { sampleColumns, choosePartingZ, type Grid, type ColumnField } from './moldColumns';
 import { choosePullDirection, rotateTrianglesForPull, type PullChoice, type PullDirection } from './moldPullDirection';
-import { buildLinerMold, DEFAULT_LINER_SKIN_MM, NO_MANIFOLD_REFUSAL, type CastMaterial, type MoldLinerInfo } from './moldLiner';
+import { buildLinerMold, DEFAULT_LINER_SKIN_MM, NO_MANIFOLD_REFUSAL, type MoldLinerInfo } from './moldLiner';
+import type { CastMaterialId } from './castMaterials';
 
 export { computeNormal, exportBinarySTL } from './moldManifold';
 export type { Triangle3D } from './moldManifold';
@@ -80,7 +81,7 @@ export interface MoldOptions {
   /** PVA skin between the PLA shell and the casting, mm (default 1.2, three beads). */
   linerSkinMm?: number;
   /** What is poured, which decides whether a PVA liner can hold it (default epoxy). */
-  castMaterial?: CastMaterial;
+  castMaterial?: CastMaterialId;
   /** Base diameter of alignment pins in mm. */
   pinDiameterMm: number;
   /** Height of alignment pins in mm. */
@@ -1036,7 +1037,7 @@ export type MoldSetupFields = Pick<
  * An open mold is one print with nothing to line up, so 'auto' takes it unless
  * a clamshell keeps more of the part than this share of its volume.
  */
-const OPEN_MOLD_ALLOWANCE = 0.01;
+export const OPEN_MOLD_ALLOWANCE = 0.01;
 
 /**
  * The search tries every axis over the whole part, a few hundred milliseconds on

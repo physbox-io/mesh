@@ -38,26 +38,10 @@
 
 import type { SceneGraph } from '../types/scene';
 import { collectSceneTriangles } from './contourSliceExporter';
-import { sampleColumns } from './solidMachiningExporter';
+import { draftTriangles } from './castPrep';
+import { sampleColumns } from './partColumns';
 
-/** A castable metal: how much it shrinks, and what a cast of it weighs. */
-export interface CastMetal {
-  id: string;
-  label: string;
-  /** Solidification-plus-cooling contraction, as a percent the pattern is grown by. */
-  shrinkPercent: number;
-  /** Density in g/cm³, for the pour-weight estimate. */
-  densityGcm3: number;
-  /** Rough pouring temperature, for the walkthrough. */
-  pourC: number;
-}
-
-export const CAST_METALS: CastMetal[] = [
-  { id: 'aluminium', label: 'Aluminium', shrinkPercent: 1.3, densityGcm3: 2.70, pourC: 720 },
-  { id: 'brass', label: 'Brass', shrinkPercent: 1.5, densityGcm3: 8.5, pourC: 1000 },
-  { id: 'bronze', label: 'Bronze', shrinkPercent: 1.5, densityGcm3: 8.8, pourC: 1150 },
-  { id: 'silver', label: 'Silver', shrinkPercent: 1.6, densityGcm3: 10.5, pourC: 1000 },
-];
+import { castMetal } from './castMaterials';
 
 /**
  * Which of the two routes the pattern is being printed for. They share the
@@ -79,9 +63,6 @@ export const CAST_METHODS: { id: CastMethod; label: string; blurb: string }[] = 
   },
 ];
 
-export function castMetal(id: string): CastMetal {
-  return CAST_METALS.find((m) => m.id === id) ?? CAST_METALS[0];
-}
 
 export interface CastOptions {
   /** Sand (draw the pattern back out) or lost PLA (burn the pattern out). */
@@ -108,6 +89,14 @@ export interface CastOptions {
   riserDiaMm: number;
   /** A riser feeds shrinkage; leave it off only for the thinnest, flattest parts. */
   addRiser: boolean;
+  /**
+   * Draft on the printed pattern, degrees, tapered from the parting plane. The
+   * model is left as it is. Ignored when Prepare for Casting has already put
+   * draft into the model, so it is never applied twice.
+   */
+  draftDeg: number;
+  /** Shrink allowance to grow the pattern by, %, in place of the metal's own. */
+  shrinkPercent?: number;
 }
 
 export const DEFAULT_CAST_OPTIONS: CastOptions = {
@@ -118,6 +107,7 @@ export const DEFAULT_CAST_OPTIONS: CastOptions = {
   sprueDiaMm: 0,
   riserDiaMm: 0,
   addRiser: true,
+  draftDeg: 0,
 };
 
 export interface CastSummary {
@@ -188,6 +178,34 @@ export interface CastResult {
   /** The pattern, gating and all, as a binary STL to print. */
   patternStl: Uint8Array;
   summary: CastSummary;
+}
+
+/** Tapers each solid of a soup on its own, so each leans from its own top and bottom. */
+function draftSolids(
+  part: Float64Array,
+  solidIds: number[],
+  p: { deg: number; mode: 'add' | 'remove'; partingZ: number },
+): { part: Float64Array; solidIds: number[] } {
+  const bySolid = new Map<number, number[]>();
+  for (let t = 0, i = 0; i + 8 < part.length; i += 9, t++) {
+    const id = solidIds[t] ?? 0;
+    let list = bySolid.get(id);
+    if (!list) bySolid.set(id, (list = []));
+    for (let k = 0; k < 9; k++) list.push(part[i + k]);
+  }
+  const out: number[] = [];
+  const ids: number[] = [];
+  for (const [id, tris] of bySolid) {
+    const { positions, faces } = draftTriangles(tris, p);
+    for (let f = 0; f < faces.length; f += 3) {
+      for (let v = 0; v < 3; v++) {
+        const at = faces[f + v] * 3;
+        out.push(positions[at], positions[at + 1], positions[at + 2]);
+      }
+      ids.push(id);
+    }
+  }
+  return { part: Float64Array.from(out), solidIds: ids };
 }
 
 /** Beyond this the draw analysis costs more than the extra fidelity is worth. */
@@ -397,7 +415,13 @@ function trisToBinaryStl(tris: number[]): Uint8Array {
  */
 export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<CastOptions>): CastResult {
   const opts: CastOptions = { ...DEFAULT_CAST_OPTIONS, ...userOptions };
-  const metal = castMetal(opts.metalId);
+  const baseMetal = castMetal(opts.metalId);
+  const metal = opts.shrinkPercent !== undefined && opts.shrinkPercent >= 0
+    ? { ...baseMetal, shrinkPercent: opts.shrinkPercent }
+    : baseMetal;
+  // Draft the model already carries, or what this pattern is given.
+  const bakedDraft = scene.castPrep?.draftDeg ?? 0;
+  const patternDraft = bakedDraft > 0 ? 0 : Math.max(0, Math.min(10, opts.draftDeg || 0));
   const lostPla = opts.method === 'lost-pla';
   const methodLabel = CAST_METHODS.find((m) => m.id === opts.method)?.label ?? CAST_METHODS[0].label;
   const warnings: string[] = [];
@@ -423,7 +447,7 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
       gateAtMm: { x: 0, y: 0 },
       partingFromBaseMm: 0,
       partingWorldZ: 0,
-      draftDeg: scene.castPrep?.draftDeg ?? 0,
+      draftDeg: bakedDraft || patternDraft,
       edgesMm: scene.castPrep?.edges ?? null,
       pourC: metal.pourC,
       undrawablePercent: 0,
@@ -435,7 +459,9 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
     },
   });
 
-  const { tris: sceneTris, solidIds, skipped, warnings: sceneWarnings } = collectSceneTriangles(scene);
+  const collected = collectSceneTriangles(scene);
+  const { tris: sceneTris, skipped, warnings: sceneWarnings } = collected;
+  let solidIds = collected.solidIds;
   warnings.push(...sceneWarnings);
   if (skipped.length > 0) warnings.push(`Skipped (no solid volume to cast): ${skipped.join(', ')}.`);
   if (sceneTris.length === 0) return fail('No solid geometry found in the scene to cast.');
@@ -457,15 +483,15 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
 
   const cx = (mnX + mxX) / 2, cy = (mnY + mxY) / 2;
   // Part triangles in mm, based at Z = 0 and centred in plan.
-  const part = new Float64Array(sceneTris.length);
+  let part: Float64Array = new Float64Array(sceneTris.length);
   for (let i = 0; i < sceneTris.length; i += 3) {
     part[i] = sceneTris[i] * 1000 - cx;
     part[i + 1] = sceneTris[i + 1] * 1000 - cy;
     part[i + 2] = sceneTris[i + 2] * 1000 - mnZ;
   }
 
-  const partVolumeMm3 = triSoupVolume(part, solidIds);
-  const castWeightG = (partVolumeMm3 / 1000) * metal.densityGcm3;
+  let partVolumeMm3 = triSoupVolume(part, solidIds);
+  let castWeightG = (partVolumeMm3 / 1000) * metal.densityGcm3;
 
   // --- Draw check: will the pattern pull out of the sand? -------------------
   // The parting plane splits the mould in two: everything above it comes away
@@ -576,9 +602,24 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
         (preppedDraft
           ? `will not draw cleanly from the sand there. The walls already carry ${preppedDraft.draftDeg}° of draft, ` +
             `so what is left is an undercut that draft cannot fix: change the shape, or switch to Lost PLA.`
-          : `will not draw cleanly from the sand there. Turn on Prepare for Casting to add draft, ` +
-            `move the parting plane, or switch to Lost PLA and burn the pattern out instead of pulling it.`)
+          : patternDraft > 0
+            ? `will not draw cleanly from the sand there, even with ${patternDraft}° of draft: an undercut that draft cannot fix. ` +
+              `Move the parting plane, change the shape, or switch to Lost PLA and burn the pattern out instead of pulling it.`
+            : `will not draw cleanly from the sand there. Add draft, move the parting plane, or switch to Lost PLA ` +
+              `and burn the pattern out instead of pulling it.`)
     );
+  }
+
+  // --- Draft on the pattern alone --------------------------------------------
+  // Each solid leans from the parting plane, its far faces kept and its walls
+  // grown toward the plane, as Prepare for Casting does it in the model. The
+  // casting is the drafted shape, so its volume is measured again.
+  if (patternDraft > 0) {
+    const drafted = draftSolids(part, solidIds, { deg: patternDraft, mode: 'add', partingZ: lostPla ? 0 : parting });
+    part = drafted.part;
+    solidIds = drafted.solidIds;
+    partVolumeMm3 = triSoupVolume(part, solidIds);
+    castWeightG = (partVolumeMm3 / 1000) * metal.densityGcm3;
   }
 
   // --- Shrink the pattern up so the casting comes out to size ----------------
@@ -1103,7 +1144,7 @@ export function generateCastPattern(scene: SceneGraph, userOptions?: Partial<Cas
       gateAtMm: opts.addGating ? { x: gateAt.x, y: gateAt.y } : { x: 0, y: 0 },
       partingFromBaseMm: lostPla ? 0 : parting,
       partingWorldZ: (mnZ + parting) / 1000,
-      draftDeg: scene.castPrep?.draftDeg ?? 0,
+      draftDeg: bakedDraft || patternDraft,
       edgesMm: scene.castPrep?.edges ?? null,
       pourC: metal.pourC,
       undrawablePercent,

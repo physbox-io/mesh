@@ -30,7 +30,15 @@ import {
 } from './moldCastSimulation';
 import type { SceneGraph, SceneNode } from '../types/scene';
 import { loadManifold } from './sculptCut';
-import { isCastMaterial } from './moldLiner';
+import {
+  CAST_MATERIALS,
+  castMaterial as castMaterialSpec,
+  castMaterialWarnings,
+  castWeightG,
+  mixGrams,
+  resolveCastMaterial,
+  type CastMaterialId,
+} from './castMaterials';
 import { stlToMesh } from './stlMesh';
 import { appendSolidTriangles } from './contourSliceExporter';
 import { getNodeWorldTransform } from './laserCutExporter';
@@ -38,7 +46,13 @@ import { resolveCsgGeoms } from './csg';
 import { addSimulationToScene, sceneStockTransform } from '../hooks/useAddSimulation';
 import { useStore } from '../store/useStore';
 import { workerStoppedError } from './staleBuild';
-import { pourSelection } from './pourTarget';
+import { isSiliconeMold, pourBoxIn, pourSelection } from './pourTarget';
+import { mcpMoldSubject } from './moldSubject';
+import { metalChain, siliconeChain, type ChainPiece, type ChainResult, type MetalChain, type SiliconeChain } from './castChain';
+import { addMetalChain, addSiliconeChain } from './castChainActions';
+import { DEFAULT_TAB_DRAFT, DEFAULT_TAB_MATERIAL, materialFitsTab, tabMaterials } from './moldTabs';
+import type { PourBoxOptions } from './siliconeMold';
+import type { CastOptions } from './castPatternExporter';
 import { POUR_DIRECTIONS, type PourDirection, type PourInfo } from './pourCast';
 
 export interface MoldPreview {
@@ -82,7 +96,7 @@ export class MoldWorkerClient {
         else if (msg.type === 'GENERATED') {
           settle.resolve({ summary: msg.summary, bottom: msg.bottom, top: msg.top, liner: msg.liner ?? null } as never);
         } else if (msg.type === 'STL') settle.resolve(msg.bytes as never);
-        else if (msg.type === 'CAST') settle.resolve(msg.result as never);
+        else if (msg.type === 'CAST' || msg.type === 'CHAIN') settle.resolve(msg.result as never);
       };
       // A worker that dies leaves every caller awaiting forever otherwise. It
       // is replaced, not kept: one that never loaded drops every later message
@@ -160,8 +174,25 @@ export class MoldWorkerClient {
     return this.send<Uint8Array>({ type: 'THREEMF' });
   }
 
-  /** Simulates the cast solid from whatever mold was generated last. */
-  async cast(options?: MoldCastSimulationOptions): Promise<MoldCastSimulationResult> {
+  /**
+   * The silicone chain: pour the silicone round the master in its box, turn the
+   * mold over, vent it, and pour the material in (castChain.ts).
+   */
+  async siliconeChain(scene: SceneGraph, ids: string[], boxOptions: Partial<PourBoxOptions>, material: CastMaterialId): Promise<ChainResult<SiliconeChain>> {
+    this.revive();
+    if (!this.worker) return siliconeChain(scene, ids, boxOptions, material);
+    return this.send<ChainResult<SiliconeChain>>({ type: 'CHAIN_SILICONE', scene, ids, boxOptions, material });
+  }
+
+  /** The metal chain: pattern in its flask, filled round, burnt or drawn out, and poured (castChain.ts). */
+  async metalChain(scene: SceneGraph, options: Partial<CastOptions>): Promise<ChainResult<MetalChain>> {
+    this.revive();
+    if (!this.worker) return metalChain(scene, options);
+    return this.send<ChainResult<MetalChain>>({ type: 'CHAIN_METAL', scene, options });
+  }
+
+  /** Simulates the cast solid from whatever mold was generated last; `measure` sets it against the part. */
+  async cast(options?: MoldCastSimulationOptions, measure = false): Promise<MoldCastSimulationResult> {
     if (!this.worker) {
       if (!this.lastResult) {
         return {
@@ -178,7 +209,7 @@ export class MoldWorkerClient {
     }
     // The mold the dead worker held is gone with it.
     if (this.stopped) throw await this.stopped;
-    return this.send<MoldCastSimulationResult>({ type: 'CAST', options });
+    return this.send<MoldCastSimulationResult>({ type: 'CAST', options, measure });
   }
 
   /** Simulates the cast solid from an existing mold SceneNode off the main thread. */
@@ -204,9 +235,16 @@ const PULL_DIRECTIONS: readonly string[] = ['auto', '+z', '-z', '+y', '-y', '+x'
 export function moldOptionsFor(msg: Record<string, unknown>): {
   options: Partial<MoldOptions>;
   fromDialog: boolean;
+  /** Set when an option names something that does not exist. */
+  error?: string;
 } {
   const fromDialog = lastMoldOptions();
+  const castMaterial = resolveCastMaterial(msg.castMaterial);
+  const badMaterial = msg.castMaterial !== undefined && (!castMaterial || castMaterialSpec(castMaterial).metal);
   return {
+    ...(badMaterial
+      ? { error: `cast_material is one of ${CAST_MATERIALS.filter((m) => !m.metal).map((m) => m.id).join(', ')}; metals go in sand or investment (physics_export_cast).` }
+      : {}),
     fromDialog: Boolean(fromDialog),
     options: {
       // Without the dialog's choice, an agent gets what the dialog would give a
@@ -229,7 +267,7 @@ export function moldOptionsFor(msg: Record<string, unknown>): {
       ...(typeof msg.includePryNotches === 'boolean' ? { includePryNotches: msg.includePryNotches } : {}),
       ...(typeof msg.dissolvableLiner === 'boolean' ? { dissolvableLiner: msg.dissolvableLiner } : {}),
       ...(typeof msg.linerSkinMm === 'number' && msg.linerSkinMm > 0 ? { linerSkinMm: msg.linerSkinMm } : {}),
-      ...(isCastMaterial(msg.castMaterial) ? { castMaterial: msg.castMaterial } : {}),
+      ...(castMaterial ? { castMaterial } : {}),
     },
   };
 }
@@ -279,6 +317,7 @@ export async function addPourToScene(
   moldNode: SceneNode,
   castRes: MoldCastSimulationResult,
   placement: 'beside' | 'overlay',
+  material?: CastMaterialId,
 ): Promise<{ id: string; name: string }> {
   const moldTrisM: number[] = [];
   const walkMold = (n: SceneNode, parentMat?: ReturnType<typeof getNodeWorldTransform>) => {
@@ -319,6 +358,7 @@ export async function addPourToScene(
     kind: 'cast',
     label: `Cast from ${moldName}`,
     placement,
+    ...(material ? { material } : {}),
     details: [
       `Simulated casting from mold: ${moldNode.name} (${moldNode.id})`,
       `Cast dimensions: ${castRes.sizeMm.width} × ${castRes.sizeMm.depth} × ${castRes.sizeMm.height} mm`,
@@ -334,6 +374,101 @@ export async function addPourToScene(
   return added;
 }
 
+/** A chain's piece as an MCP reply. */
+function pieceReply(p: ChainPiece): Record<string, unknown> {
+  return {
+    castMaterial: p.material,
+    volumeMm3: p.volumeMm3,
+    weightG: p.weightG,
+    ...(p.mix ? { mixG: { [p.mix.aLabel]: Math.round(p.mix.a * 10) / 10, [p.mix.bLabel]: Math.round(p.mix.b * 10) / 10 } } : {}),
+    ...(p.gating ? { gating: p.gating } : {}),
+    ...(p.deviation ? { deviationMm: p.deviation } : {}),
+    ...(p.notes.length ? { materialNotes: p.notes } : {}),
+  };
+}
+
+/** method 'silicone', 'sand' or 'lost-pla': the whole job to the finished piece. */
+async function runMcpChain(
+  msg: Record<string, unknown>,
+  scene: SceneGraph,
+  pickSubject: () => ReturnType<typeof mcpMoldSubject>,
+): Promise<Record<string, unknown>> {
+  const subject = pickSubject();
+  if ('error' in subject) return { ok: false, error: subject.error };
+  const method = msg.method as 'silicone' | 'sand' | 'lost-pla';
+  const tab = method;
+  const named = resolveCastMaterial(msg.castMaterial);
+  if (msg.castMaterial !== undefined && (!named || !materialFitsTab(tab, named))) {
+    return { ok: false, error: `For method '${method}', cast_material is one of ${tabMaterials(tab).map((m) => m.id).join(', ')}.` };
+  }
+  const material = named ?? DEFAULT_TAB_MATERIAL[tab];
+  const client = new MoldWorkerClient();
+  try {
+    if (method === 'silicone') {
+      // The box at its default sizes (physics_make_pour_box sets those), with
+      // any hole through the silicone asked for.
+      const boxOptions: Partial<PourBoxOptions> = {};
+      if (msg.hole === 'wick' || msg.hole === 'pour' || msg.hole === 'fixing') boxOptions.hole = msg.hole;
+      else if (msg.hole !== undefined && msg.hole !== null && msg.hole !== 'none') {
+        return { ok: false, error: "hole is 'wick', 'pour', 'fixing' or 'none'." };
+      }
+      if (typeof msg.holeDiaMm === 'number' && msg.holeDiaMm > 0) boxOptions.holeDiaMm = msg.holeDiaMm;
+      if (Array.isArray(msg.holeAtMm) && msg.holeAtMm.length === 2 && msg.holeAtMm.every((v) => typeof v === 'number')) {
+        boxOptions.holeAtMm = msg.holeAtMm as [number, number];
+      }
+      const silicone = resolveCastMaterial(msg.silicone);
+      if (silicone && castMaterialSpec(silicone).silicone) boxOptions.silicone = silicone as PourBoxOptions['silicone'];
+      const r = await client.siliconeChain(scene, subject.ids, boxOptions, material);
+      if (!r.ok) return { ok: false, error: r.error };
+      const added = await addSiliconeChain(r);
+      return {
+        ok: true, kind: 'mold_cast', method,
+        molded: { label: subject.label, ids: subject.ids },
+        id: added.piece.id, name: added.piece.name,
+        siliconeMold: { id: added.siliconeMold!.id, name: added.siliconeMold!.name, selected: true, vents: r.vents, silicone: r.silicone },
+        pouredThrough: r.pouredThrough,
+        ...pieceReply(r.piece),
+        warnings: r.warnings,
+      };
+    }
+    const options: Partial<CastOptions> = {
+      method,
+      metalId: material,
+      draftDeg: typeof msg.draftDeg === 'number' ? msg.draftDeg : DEFAULT_TAB_DRAFT[tab],
+      ...(typeof msg.shrinkPercent === 'number' && msg.shrinkPercent >= 0 ? { shrinkPercent: msg.shrinkPercent } : {}),
+      ...(typeof msg.addGating === 'boolean' ? { addGating: msg.addGating } : {}),
+    };
+    const r = await client.metalChain(subject.scene, options);
+    if (!r.ok) return { ok: false, error: r.error };
+    const added = await addMetalChain(r, method);
+    return {
+      ok: true, kind: 'mold_cast', method,
+      molded: { label: subject.label, ids: subject.ids },
+      id: added.piece.id, name: added.piece.name,
+      flask: r.flask,
+      ...(method === 'sand' ? { sandG: r.fillG } : { investmentPowderG: r.fillG }),
+      filledShare: r.filledShare,
+      ...pieceReply(r.piece),
+      warnings: r.warnings,
+    };
+  } finally {
+    client.dispose();
+  }
+}
+
+/** What a pour weighs in this material, and how to mix it. */
+function pourWeight(material: CastMaterialId, volumeMm3: number): Record<string, unknown> {
+  const grams = castWeightG(material, volumeMm3);
+  const mix = mixGrams(material, grams);
+  const notes = castMaterialWarnings(material, volumeMm3 / 1000, { pla: false });
+  return {
+    castMaterial: material,
+    weightG: Math.round(grams * 10) / 10,
+    ...(mix ? { mixG: { [mix.aLabel]: Math.round(mix.a * 10) / 10, [mix.bLabel]: Math.round(mix.b * 10) / 10 } } : {}),
+    ...(notes.length ? { materialNotes: notes } : {}),
+  };
+}
+
 export async function runMcpMoldSimulation(params: {
   msg: Record<string, unknown>;
   scene: SceneGraph;
@@ -343,9 +478,26 @@ export async function runMcpMoldSimulation(params: {
   /** The bridge's file packer, for a lined mold's 3MF. */
   describeFiles?: (files: { name: string; bytes: Uint8Array }[], include: boolean) => unknown[];
 }): Promise<Record<string, unknown>> {
-  const { msg, scene, placement, toId, findNodeInScene, describeFiles } = params;
-  const { options: moldOpts, fromDialog } = moldOptionsFor(msg);
-  const optionsFrom = fromDialog ? 'the Export Mold dialog' : 'the scene defaults';
+  const { msg, placement, toId, findNodeInScene, describeFiles } = params;
+  const fullScene = params.scene;
+  // A new mold is of master_id, else every body.
+  const pickSubject = () => mcpMoldSubject(fullScene, msg.masterId, (id) => findNodeInScene(fullScene.nodes, toId(id)));
+
+  // The Silicone, Sand and Lost PLA tabs' one-click chains: a new mold only,
+  // never a pour into one that body_id names.
+  if (msg.method !== undefined && msg.method !== 'rigid') {
+    if (msg.method !== 'silicone' && msg.method !== 'sand' && msg.method !== 'lost-pla') {
+      return { ok: false, error: "method is 'rigid', 'silicone', 'sand' or 'lost-pla'." };
+    }
+    if (msg.kind !== 'mold_cast' && msg.kind !== 'cast') return { ok: false, error: "method goes with kind 'mold_cast'." };
+    if (msg.bodyId !== undefined || msg.targetId !== undefined) {
+      return { ok: false, error: 'method makes a new mold of the master; body_id pours into one already in the scene. Pass one or the other.' };
+    }
+    return runMcpChain(msg, fullScene, pickSubject);
+  }
+  const { options: moldOpts, fromDialog, error: optionError } = moldOptionsFor(msg);
+  if (optionError) return { ok: false, error: optionError };
+  const optionsFrom = fromDialog ? "the Mold dialog's Rigid tab" : 'the scene defaults';
 
   const withWorker = async <T,>(fn: (c: MoldWorkerClient) => Promise<T>): Promise<T> => {
     const client = new MoldWorkerClient();
@@ -366,11 +518,11 @@ export async function runMcpMoldSimulation(params: {
     // Several bodies, comma separated, pour as one mold: a master and its sleeve.
     const rawIds = rawBodyId ? rawBodyId.split(',').map((s) => s.trim()).filter(Boolean) : [];
     if (rawIds.length > 0) {
-      const missing = rawIds.filter((id) => !findNodeInScene(scene.nodes, toId(id)));
+      const missing = rawIds.filter((id) => !findNodeInScene(fullScene.nodes, toId(id)));
       if (missing.length > 0) {
         return { ok: false, error: `No mold body with id '${missing.join("', '")}'.` };
       }
-      const picked = pourSelection(scene.nodes, rawIds.map(toId));
+      const picked = pourSelection(fullScene.nodes, rawIds.map(toId));
       if (!picked) {
         return { ok: false, error: `No mold body with id '${rawBodyId}'.` };
       }
@@ -382,13 +534,19 @@ export async function runMcpMoldSimulation(params: {
         };
       }
       const moldNode = picked.node;
+      if (msg.castMaterial !== undefined && moldOpts.castMaterial && castMaterialSpec(moldOpts.castMaterial).silicone && isSiliconeMold(moldNode)) {
+        return { ok: false, error: 'That mold is silicone, and silicone sticks to silicone: pour resin, wax, plaster or another cast_material into it.' };
+      }
+      // A master in its pour box fills to the box's line from the top, unless told otherwise.
+      const box = pourBoxIn(moldNode);
+      const fillMm = typeof msg.fillMm === 'number' && msg.fillMm > 0 ? msg.fillMm : box?.pourDepthMm;
       const castRes = await withWorker((c) =>
         c.castNode(moldNode, {
           trimChannels: msg.trimChannels === true,
           orientUpright: msg.orientUpright !== false,
           pour: {
-            direction: POUR_DIRECTIONS.includes(msg.pourDirection as PourDirection) ? (msg.pourDirection as PourDirection) : 'auto',
-            ...(typeof msg.fillMm === 'number' && msg.fillMm > 0 ? { fillMm: msg.fillMm } : {}),
+            direction: POUR_DIRECTIONS.includes(msg.pourDirection as PourDirection) ? (msg.pourDirection as PourDirection) : box ? '+z' : 'auto',
+            ...(fillMm ? { fillMm } : {}),
           },
         }),
       );
@@ -399,7 +557,7 @@ export async function runMcpMoldSimulation(params: {
           warnings: castRes.warnings,
         };
       }
-      const added = await addPourToScene(moldNode, castRes, placement);
+      const added = await addPourToScene(moldNode, castRes, placement, msg.castMaterial !== undefined ? moldOpts.castMaterial : undefined);
       return {
         ok: true,
         id: added.id,
@@ -408,26 +566,27 @@ export async function runMcpMoldSimulation(params: {
         sourceMoldId: moldNode.id,
         ...(castRes.pour ? { pour: castRes.pour } : {}),
         placement,
+        fillFrom: typeof msg.fillMm === 'number' && msg.fillMm > 0 ? 'fill_mm' : box ? 'pour box' : 'rim',
         sizeMm: castRes.sizeMm,
         volumeMm3: Math.round(castRes.castVolumeMm3),
+        ...(moldOpts.castMaterial && msg.castMaterial !== undefined ? pourWeight(moldOpts.castMaterial, castRes.castVolumeMm3) : {}),
         cavityComponents: castRes.cavityComponents,
         warnings: castRes.warnings,
       };
     }
 
-    if (!scene.nodes?.some((n) => !n.simulation)) {
-      return {
-        ok: false,
-        error: 'The scene has nothing to mold but earlier simulations. Pass bodyId to cast from an existing mold body.',
-      };
+    const subject = pickSubject();
+    if ('error' in subject) {
+      return { ok: false, error: subject.error };
     }
+    const scene = subject.scene;
     const { preview, castRes } = await withWorker(async (c) => {
       const p = await c.generate(scene, moldOpts);
       if (!p.summary.success) return { preview: p, castRes: null };
       const cr = await c.cast({
         trimChannels: msg.trimChannels === true,
         orientUpright: msg.orientUpright !== false,
-      });
+      }, true);
       return { preview: p, castRes: cr };
     });
     const moldRes = preview.summary;
@@ -465,21 +624,25 @@ export async function runMcpMoldSimulation(params: {
       name: added.name,
       kind: 'mold_cast',
       placement,
+      molded: { label: subject.label, ids: subject.ids },
       optionsFrom,
+      method: 'rigid',
       moldType: moldRes.moldType,
       pullDirection: moldRes.pullDirection,
       ...(moldRes.setupNote ? { setupNote: moldRes.setupNote } : {}),
       sizeMm: castRes.sizeMm,
       volumeMm3: Math.round(castRes.castVolumeMm3),
+      ...(castRes.deviation ? { deviationMm: castRes.deviation } : {}),
+      ...(moldOpts.castMaterial && msg.castMaterial !== undefined ? pourWeight(moldOpts.castMaterial, castRes.castVolumeMm3) : {}),
       cavityComponents: castRes.cavityComponents,
       warnings: [...moldRes.warnings, ...castRes.warnings],
     };
   }
 
   // msg.kind === 'mold'
-  if (!scene.nodes?.some((n) => !n.simulation)) {
-    return { ok: false, error: 'The scene has nothing to cut but earlier simulations.' };
-  }
+  const subject = pickSubject();
+  if ('error' in subject) return { ok: false, error: subject.error };
+  const scene = subject.scene;
   const { preview, stl, threeMf } = await withWorker(async (c) => {
     const p = await c.generate(scene, moldOpts);
     const bytes = p.summary.success ? await c.stl() : new Uint8Array(84);
@@ -507,6 +670,7 @@ export async function runMcpMoldSimulation(params: {
     name: added.name,
     kind: 'mold',
     placement: 'beside',
+    molded: { label: subject.label, ids: subject.ids },
     optionsFrom,
     moldType: moldRes.moldType,
     pullDirection: moldRes.pullDirection,

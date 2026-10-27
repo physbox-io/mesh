@@ -18,6 +18,7 @@ import type { SceneNode } from '../types/scene';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { useModifier } from '../hooks/useModifier';
 import { CastPrepGuardModal } from './CastPrepGuardModal';
+import { useCastDialog } from '../store/castDialogStore';
 import { useJobPause } from '../store/jobPauseStore';
 import { RemoteJobChip } from './RemoteJobChip';
 import { openHardwareList } from './HardwareListDialog';
@@ -188,7 +189,7 @@ export interface ExportActions {
   reliefCarve: () => void;
   /** Machine the model itself out of a block, one side at a time. */
   solid: () => void;
-  /** Print a casting pattern — sand or burnout — to cast the part in metal. */
+  /** Pour into the selected mold. */
   cast: () => void;
   /** Cut the selected body into sections that fit the printer. */
   split: () => void;
@@ -423,19 +424,23 @@ export const BottomStatusBar: React.FC<{ onOpenMachineConfig: () => void; export
             run: exports.split,
             disabled: !selectedNodeId,
           },
-          { label: 'Mold', title: 'Export 3D Printable Casting Mold (STL)', tone: 'text-purple-600 dark:text-purple-400', icon: <Box className="w-3.5 h-3.5" />, run: exports.mold },
           castPrep
             ? {
-                label: castPrep.draftDeg > 0 ? `Cast · ${castPrep.draftDeg}°` : 'Cast · Prepped',
+                label: castPrep.draftDeg > 0 ? `Mold · ${castPrep.draftDeg}°` : 'Mold · Cast prep',
                 title: castPrep.draftDeg > 0
-                  ? `${castPrep.draftDeg}° of draft is baked into the model, and editing is locked — open Cast to switch it off.`
-                  : 'The model\'s edges are broken for casting — open Cast to switch it off.',
-                tone: 'text-orange-600 dark:text-orange-400',
-                icon: <Flame className="w-3.5 h-3.5" />,
-                run: exports.cast,
+                  ? `${castPrep.draftDeg}° of draft is baked into the model, and editing is locked — open Mold (Sand or Lost PLA, Advanced) to switch it off.`
+                  : 'The model\'s edges are broken for casting — open Mold (Sand or Lost PLA, Advanced) to switch it off.',
+                tone: 'text-purple-600 dark:text-purple-400',
+                icon: <Box className="w-3.5 h-3.5" />,
+                run: () => {
+                  // Straight to where prep is switched off.
+                  useCastDialog.getState().requestTab({ tab: castPrep.draftDeg > 0 ? 'sand' : 'lost-pla', advanced: true });
+                  exports.mold();
+                },
                 ring: true,
               }
-              : { label: 'Cast', title: 'Cast in metal — print a pattern with shrink and gating, for sand or lost PLA', tone: 'text-orange-600 dark:text-orange-400', icon: <Flame className="w-3.5 h-3.5" />, run: exports.cast },
+            : { label: 'Mold', title: 'Make a mold or a casting pattern of the selected part (or the whole scene): rigid, silicone, sand or lost PLA', tone: 'text-purple-600 dark:text-purple-400', icon: <Box className="w-3.5 h-3.5" />, run: exports.mold },
+          { label: 'Cast', title: 'Pour into a mold you have: select it (or a master in its pour box), then Cast', tone: 'text-orange-600 dark:text-orange-400', icon: <Flame className="w-3.5 h-3.5" />, run: exports.cast },
           ...(exports.pipes
             ? [{ label: 'Pipes', title: 'PVC / EMT Conduit Pipe Frame (mini greenhouse, carport, yard pub), 3D-printable multi-way hub connectors, 10ft stick cut list, tube coping & wire jigs', tone: 'text-cyan-600 dark:text-cyan-400', icon: <Wrench className="w-3.5 h-3.5" />, run: exports.pipes }]
             : []),

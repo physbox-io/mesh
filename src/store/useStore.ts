@@ -1810,7 +1810,8 @@ export interface PhysicsState extends HardwarePartActions, ExtrusionActions {
   setDfmEnabled: (enabled: boolean) => void;
   setDfmCastOpen: (open: boolean) => void;
   setDfmPanel: (patch: Partial<{ x: number | null; y: number | null; minimized: boolean }>) => void;
-  addHardwareComponentNode: (hardwareNode: SceneNode) => void;
+  /** Adds a body; it is selected once built unless `select` is false. */
+  addHardwareComponentNode: (hardwareNode: SceneNode, opts?: { select?: boolean }) => void;
   setCameraOverride: (override: { position: [number, number, number]; target: [number, number, number] } | null) => void;
   setEnvironment: (env: Partial<{gravityZ: number, windX: number, windY: number, density: number, floorFriction: number, floorBounce: number}>) => void;
   
@@ -2841,7 +2842,7 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     if (found) set({ sceneGraph: newScene });
   },
 
-  addHardwareComponentNode: (hardwareNode) => {
+  addHardwareComponentNode: (hardwareNode, opts) => {
     get().prepareForDiscreteChange();
     const sceneGraph = get().sceneGraph;
     const newNodes = [...sceneGraph.nodes, hardwareNode];
@@ -2849,8 +2850,10 @@ export const useStore = create<PhysicsState>()(sharingUnchangedNodes((set, get) 
     // changed under it keeps the newer scene, so a body that only rode in on the
     // build was lost to any edit made meanwhile — a collider decomposition
     // finishing just after a load took a simulated cast that way.
-    set({ sceneGraph: { ...sceneGraph, nodes: newNodes } });
-    get().recompile(get().sceneGraph, hardwareNode.id);
+    const select = opts?.select !== false;
+    // Selected, it is the whole selection, not one more body in it.
+    set({ sceneGraph: { ...sceneGraph, nodes: newNodes }, ...(select ? { extraSelectedIds: [] } : {}) });
+    get().recompile(get().sceneGraph, select ? hardwareNode.id : undefined);
   },
   // An explicit pose is an eye position and a target, which is a perspective
   // pose: the orthographic drawing views are framed by their axis and zoom.

@@ -40,6 +40,10 @@ export interface AddSimulationRequest {
   details?: string[];
   /** The model's own volume at the size cut, to set against what `job.measureMask` measures. */
   modelVolumeMm3?: number;
+  /** Select the body once it is built (the default); false leaves the selection to the caller. */
+  select?: boolean;
+  /** What a cast was poured in, kept on the body (`simulation.material`). */
+  material?: string;
 }
 
 export interface AddedSimulation {
@@ -99,9 +103,10 @@ export async function addSimulationToScene(
   );
   // Named here as the store would rename it on the way in, so the card and
   // the caller have the name it ends up with.
+  if (req.material && node.simulation) node.simulation = { ...node.simulation, material: req.material };
   const named = withUniqueNames({ ...store.sceneGraph, nodes: [...store.sceneGraph.nodes, node] });
   const name = named.nodes[named.nodes.length - 1].name;
-  store.addHardwareComponentNode({ ...node, name });
+  store.addHardwareComponentNode({ ...node, name }, { select: req.select !== false });
 
   const where = req.placement === 'overlay' ? ', laid over the model.' : ', at full size beside the model.';
   const lines = [`## ${name}`, ''];

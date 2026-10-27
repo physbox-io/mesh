@@ -13,7 +13,9 @@ export interface AddedPourBox {
   box: PourBox;
   baseId: string;
   sleeveId: string;
-  pinId?: string;
+  holePinId?: string;
+  /** Left selected: master, base and sleeve, which is what Cast pours the silicone into. */
+  selected: string[];
 }
 
 /** Plans the pour box round `ids` and adds it to the scene. */
@@ -24,12 +26,16 @@ export async function addPourBoxToScene(ids: string[], options: Partial<PourBoxO
   useStore.getState().updateScene(out.scene);
 
   const name = findNodeById(out.scene.nodes, ids[0])?.name ?? 'the master';
-  const section = pourBoxNotes(name, box).join('\n');
+  const section = pourBoxNotes(name, box, Boolean(out.holePinId)).join('\n');
   const [card, ...rest] = physicsGlobals._physics_getNoteCards?.() ?? [];
   physicsGlobals._physics_setNoteCards?.(card
     ? [{ ...card, markdown: `${card.markdown.trimEnd()}\n\n${section}` }, ...rest]
     : [{ id: `note_card_${out.baseId}`, markdown: section, minimized: true, x: 16, y: 16 }]);
-  return { box, baseId: out.baseId, sleeveId: out.sleeveId, ...(out.pinId ? { pinId: out.pinId } : {}) };
+  // The next step is pouring the silicone, so the bodies it is poured into are
+  // left selected, the master first.
+  const selected = [...ids, out.baseId, out.sleeveId];
+  useStore.getState().selectMany(selected, false);
+  return { box, baseId: out.baseId, sleeveId: out.sleeveId, ...(out.holePinId ? { holePinId: out.holePinId } : {}), selected };
 }
 
 /** One printed piece as a binary STL, in mm. */

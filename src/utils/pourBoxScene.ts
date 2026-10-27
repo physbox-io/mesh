@@ -1,12 +1,12 @@
 // The pour box (utils/siliconeMold.ts) as bodies in the scene: a base and a
 // sleeve beside the master, where they would stand round it on the bench, and
-// the wick pin fixed to the master as a rigid child. One undo step.
+// a hole's pin fixed to the master as a rigid child. One undo step.
 
 import * as THREE from 'three';
 import type { SceneGeom, SceneGraph, SceneNode } from '../types/scene';
 import { getNodeWorldTransform } from './laserCutExporter';
-import { partSoups } from './printSplitClient';
-import { buildPourBox, type PourBox, type PourBoxMesh, type PourBoxOptions } from './siliconeMold';
+import { partSoups } from './partSoups';
+import { buildPourBox, topZAt, type HolePurpose, type PourBox, type PourBoxMesh, type PourBoxOptions } from './siliconeMold';
 import { loadManifold } from './sculptCut';
 
 /** The selected bodies, rigid children included, as one soup in world mm. */
@@ -86,10 +86,10 @@ function worldOf(nodes: SceneNode[], id: string, parent?: THREE.Matrix4): THREE.
 
 /**
  * The scene with the pour box added. The base and sleeve go in at the top
- * level; the pin goes under the first master, in its frame, with no joint, so
+ * level; a hole's pin goes under the first master, in its frame, with no joint, so
  * it moves with it and prints as part of it.
  */
-export function sceneWithPourBox(scene: SceneGraph, ids: string[], box: PourBox): { scene: SceneGraph; baseId: string; sleeveId: string; pinId?: string } {
+export function sceneWithPourBox(scene: SceneGraph, ids: string[], box: PourBox): { scene: SceneGraph; baseId: string; sleeveId: string; holePinId?: string } {
   const tag = Math.random().toString(36).slice(2, 7);
   const masterName = (() => {
     const find = (nodes: SceneNode[]): SceneNode | null => {
@@ -102,47 +102,69 @@ export function sceneWithPourBox(scene: SceneGraph, ids: string[], box: PourBox)
     };
     return find(scene.nodes)?.name ?? 'master';
   })();
-  const base = meshBody(`pourbase_${tag}`, `${masterName}_pour_base`, box.base, [0.62, 0.64, 0.68, 1]);
+  const pourBox = { pourDepthMm: box.report.pourDepthMm, silicone: box.report.silicone };
+  const base: SceneNode = { ...meshBody(`pourbase_${tag}`, `${masterName}_pour_base`, box.base, [0.62, 0.64, 0.68, 1]), pourBox };
   // Translucent so the master shows through it; it still collides.
-  const sleeve = meshBody(`poursleeve_${tag}`, `${masterName}_pour_sleeve`, box.sleeve, [0.55, 0.75, 0.95, 0.35]);
+  const sleeve: SceneNode = {
+    ...meshBody(`poursleeve_${tag}`, `${masterName}_pour_sleeve`, box.sleeve, [0.55, 0.75, 0.95, 0.35]),
+    pourBox,
+  };
   const nodes = [...scene.nodes, base, sleeve];
-  let pinId: string | undefined;
-  if (box.pin) {
-    const world = worldOf(scene.nodes, ids[0]);
+  let holePinId: string | undefined;
+  if (box.hole) {
+    // On the master the hole is over (the highest there, of several), so it
+    // moves with that one.
+    const [hx, hy] = box.hole.footMm;
+    let pinOn = ids[0];
+    let best = -Infinity;
+    for (const id of ids) {
+      const z = topZAt(masterSoupMm(scene, [id]), hx, hy);
+      if (z !== null && z > best) { best = z; pinOn = id; }
+    }
+    const world = worldOf(scene.nodes, pinOn);
     if (world) {
       const toLocal = world.clone().invert();
-      const { footMm, lengthMm, diaMm } = box.pin;
+      const { footMm, lengthMm, diaMm, purpose } = box.hole;
       const centre = new THREE.Vector3(footMm[0], footMm[1], footMm[2] + lengthMm / 2).multiplyScalar(1 / 1000).applyMatrix4(toLocal);
       const q = new THREE.Quaternion();
       toLocal.decompose(new THREE.Vector3(), q, new THREE.Vector3());
-      pinId = `wickpin_${tag}`;
+      holePinId = `holepin_${tag}`;
       const pin = {
-        id: pinId,
-        name: `${masterName}_wick_pin`,
+        id: holePinId,
+        name: `${masterName}_${purpose}_hole_pin`,
         type: 'body',
         pos: [centre.x, centre.y, centre.z],
         quat: [q.w, q.x, q.y, q.z],
         joints: [],
-        geoms: [{ name: `${masterName}_wick_pin_geom`, type: 'cylinder', size: [diaMm / 2000, lengthMm / 2000], rgba: [0.85, 0.55, 0.2, 1] }],
+        geoms: [{ name: `${masterName}_${purpose}_hole_pin_geom`, type: 'cylinder', size: [diaMm / 2000, lengthMm / 2000], rgba: [0.85, 0.55, 0.2, 1] }],
         children: [],
+        // Tooling, like the base and sleeve: never part of what is molded.
+        pourBox,
       } as unknown as SceneNode;
       const attach = (list: SceneNode[]): SceneNode[] => list.map((n) =>
-        n.id === ids[0] ? { ...n, children: [...(n.children || []), pin] } : { ...n, children: attach(n.children || []) });
+        n.id === pinOn ? { ...n, children: [...(n.children || []), pin] } : { ...n, children: attach(n.children || []) });
       nodes.splice(0, scene.nodes.length, ...attach(scene.nodes));
     }
   }
-  return { scene: { ...scene, nodes }, baseId: base.id, sleeveId: sleeve.id, ...(pinId ? { pinId } : {}) };
+  return { scene: { ...scene, nodes }, baseId: base.id, sleeveId: sleeve.id, ...(holePinId ? { holePinId } : {}) };
 }
 
-/** Lines for the scene's note card. */
-export function pourBoxNotes(name: string, box: PourBox): string[] {
+/** What each hole is for, in the note card's words. */
+const HOLE_USE: Record<HolePurpose, string> = {
+  wick: 'hole through the silicone for a wick; plug it with the wick when you pour.',
+  pour: 'hole through the silicone to pour through, the mold standing as it was made, on the base.',
+  fixing: 'hole through the silicone for a fixing; plug it when you pour.',
+};
+
+/** Lines for the scene's note card; the hole only when its pin went in. */
+export function pourBoxNotes(name: string, box: PourBox, pinAdded = Boolean(box.hole)): string[] {
   const r = box.report;
   return [
     `## Silicone pour box for ${name}`,
     '',
     `- Print the base (${r.baseFootprintMm[0]} × ${r.baseFootprintMm[1]} mm) and the sleeve (${r.sleeveFootprintMm[0]} × ${r.sleeveFootprintMm[1]} × ${r.sleeveHeightMm} mm). Stand the master on the base, inside the groove, and drop the sleeve into the groove.`,
     `- Fill to ${r.fillHeightMm} mm above the base: ${r.siliconeMm3.toLocaleString()} mm³, ${r.siliconeG} g of ${r.siliconeName.toLowerCase()} (${r.partAG} g A + ${r.partBG} g B). Mix 10% extra for what stays in the cup.`,
-    ...(box.pin ? [`- The wick pin stands ${(r.fillZMm + 1 - (box.pin.footMm[2] + 0.5)).toFixed(1)} mm above the master, 1 mm past the fill line, and leaves a ${box.pin.diaMm} mm hole through the silicone.`] : []),
+    ...(box.hole && pinAdded ? [`- Print the ${box.hole.purpose} pin (${box.hole.diaMm} mm across, ${box.hole.lengthMm.toFixed(1)} mm long) and stand it on the master: it rises ${(r.fillZMm + 1 - (box.hole.footMm[2] + 0.5)).toFixed(1)} mm above the master, 1 mm past the fill line, and leaves a ${box.hole.diaMm} mm ${HOLE_USE[box.hole.purpose]}`] : []),
     ...r.warnings.map((w) => `- ${w}`),
   ];
 }

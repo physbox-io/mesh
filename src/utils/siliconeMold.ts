@@ -6,8 +6,9 @@
 //            so the silicone cannot run out underneath;
 //   sleeve — a wall round the master, `coverMm` clear of it on every side,
 //            standing `freeboardMm` above the fill line;
-//   pin    — optional: a wick (or sprue) pin from the master's highest point to
-//            just above the fill line, leaving a hole through the silicone.
+//   pin    — optional: a pin from a point on the master's top (its highest
+//            point unless one is given) to just above the fill line, leaving
+//            a hole through the silicone for a wick, a pour or a fixing.
 // Fill the sleeve to `fillZ`: `coverMm` over the master's top.
 //
 // The master is taken as it stands: it is poured from +Z, and it stands on its
@@ -20,8 +21,20 @@
 // All lengths are millimetres in the world frame, Z up, as moldExporter works.
 
 import type { ManifoldToplevel, CrossSection, Manifold } from 'manifold-3d';
+import { castMaterial, castWeightG, isSiliconeId, mixGrams, type SiliconeId } from './castMaterials';
 
 export type PourBoxShape = 'fit' | 'round' | 'box';
+
+export type HolePurpose = 'wick' | 'pour' | 'fixing';
+
+/** Narrower than this, mm, and a pour will not go in through a hole. */
+export const MIN_POUR_HOLE_MM = 6;
+/** The largest hole a pour through the foot takes as plugged, mm² (pourCast's limit). */
+const MAX_PLUGGED_MM2 = 20;
+const MAX_PLUGGED_DIA_MM = Math.floor(2 * Math.sqrt(MAX_PLUGGED_MM2 / Math.PI) * 10) / 10;
+
+/** A hole's diameter until one is set, mm: a wick's, a pour spout's, a fixing screw's. */
+export const HOLE_DIA_MM: Record<HolePurpose, number> = { wick: 2.5, pour: 8, fixing: 3 };
 
 export interface PourBoxOptions {
   /** Silicone round the sides and over the top of the master. */
@@ -39,9 +52,17 @@ export interface PourBoxOptions {
   /** Base plate past the groove's outer edge. */
   rimMm: number;
   shape: PourBoxShape;
-  /** A wick or sprue pin from the master's top to 1 mm above the fill line. */
-  pin: boolean;
-  pinDiaMm: number;
+  /**
+   * A hole through the silicone above the master, made by a printed pin from
+   * the master's top to 1 mm above the fill line, and what it is for; null for
+   * none. A pour hole is poured through, the mold standing as it was made; a
+   * wick or fixing hole is plugged and the mold poured through the master's foot.
+   */
+  hole: HolePurpose | null;
+  /** The hole across, mm; null takes the purpose's own (HOLE_DIA_MM). */
+  holeDiaMm: number | null;
+  /** Where on the master, in plan (world mm); null for its highest point. */
+  holeAtMm: [number, number] | null;
   silicone: SiliconeId;
 }
 
@@ -54,17 +75,10 @@ export const DEFAULT_POUR_BOX_OPTIONS: PourBoxOptions = {
   freeboardMm: 2,
   rimMm: 3,
   shape: 'fit',
-  pin: false,
-  pinDiaMm: 2.5,
+  hole: null,
+  holeDiaMm: null,
+  holeAtMm: null,
   silicone: 'platinum',
-};
-
-export type SiliconeId = 'platinum' | 'tin';
-
-/** Mold silicones: density, and the A:B mix ratio by weight. */
-export const SILICONES: Record<SiliconeId, { name: string; densityGcm3: number; ratioA: number; ratioB: number }> = {
-  platinum: { name: 'Platinum-cure silicone', densityGcm3: 1.08, ratioA: 1, ratioB: 1 },
-  tin: { name: 'Tin-cure silicone', densityGcm3: 1.15, ratioA: 10, ratioB: 1 },
 };
 
 /** An indexed mesh, millimetres, Z up. */
@@ -93,15 +107,17 @@ export interface PourBoxReport {
   partAG: number;
   partBG: number;
   siliconeName: string;
-  pinTopMm?: [number, number, number];
+  silicone: SiliconeId;
+  /** Where the hole comes out above the fill line, world mm. */
+  holeTopMm?: [number, number, number];
   warnings: string[];
 }
 
 export interface PourBox {
   base: PourBoxMesh;
   sleeve: PourBoxMesh;
-  /** The pin as a cylinder: centre of its foot, length and diameter (mm). */
-  pin?: { footMm: [number, number, number]; lengthMm: number; diaMm: number };
+  /** The hole's pin as a cylinder: centre of its foot, length and diameter (mm), and what it is for. */
+  hole?: { footMm: [number, number, number]; lengthMm: number; diaMm: number; purpose: HolePurpose };
   report: PourBoxReport;
 }
 
@@ -114,6 +130,54 @@ export function soupVolume(soup: ArrayLike<number>): number {
       + soup[i + 2] * (soup[i + 3] * soup[i + 7] - soup[i + 4] * soup[i + 6])) / 6;
   }
   return v;
+}
+
+/**
+ * The hole's pin as a printable mesh, mm, standing on Z = 0: a closed
+ * cylinder, its faces wound outward (the sides from their own direction, the
+ * bottom down, the top up).
+ */
+export function holePinMesh(hole: NonNullable<PourBox['hole']>, segments = 32): PourBoxMesh {
+  const r = hole.diaMm / 2;
+  const h = hole.lengthMm;
+  const positions: number[] = [];
+  for (const z of [0, h]) {
+    for (let k = 0; k < segments; k++) {
+      const a = (k / segments) * 2 * Math.PI;
+      positions.push(r * Math.cos(a), r * Math.sin(a), z);
+    }
+  }
+  const bottomCentre = positions.length / 3;
+  positions.push(0, 0, 0);
+  const topCentre = bottomCentre + 1;
+  positions.push(0, 0, h);
+  const faces: number[] = [];
+  for (let k = 0; k < segments; k++) {
+    const k1 = (k + 1) % segments;
+    // Side, facing out: counter-clockwise seen from outside.
+    faces.push(k, k1, segments + k1, k, segments + k1, segments + k);
+    // Bottom, facing -z; top, facing +z.
+    faces.push(bottomCentre, k1, k);
+    faces.push(topCentre, segments + k, segments + k1);
+  }
+  return { positions, faces };
+}
+
+/** The top of the master's surface over a point in plan, mm, or null when nothing is under it. */
+export function topZAt(soup: ArrayLike<number>, x: number, y: number): number | null {
+  let top: number | null = null;
+  for (let i = 0; i + 8 < soup.length; i += 9) {
+    const ax = soup[i], ay = soup[i + 1], bx = soup[i + 3], by = soup[i + 4], cx = soup[i + 6], cy = soup[i + 7];
+    const d = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy);
+    if (Math.abs(d) < 1e-12) continue;
+    const u = ((by - cy) * (x - cx) + (cx - bx) * (y - cy)) / d;
+    const v = ((cy - ay) * (x - cx) + (ax - cx) * (y - cy)) / d;
+    const w = 1 - u - v;
+    if (u < -1e-9 || v < -1e-9 || w < -1e-9) continue;
+    const z = u * soup[i + 2] + v * soup[i + 5] + w * soup[i + 8];
+    if (top === null || z > top) top = z;
+  }
+  return top;
 }
 
 /** Volume of a closed soup below the plane z = zCut, mm³. */
@@ -176,13 +240,20 @@ export function buildPourBox(wasm: ManifoldToplevel, masterSoup: ArrayLike<numbe
     if (y < yMin) yMin = y; if (y > yMax) yMax = y;
   }
   const cx = (xMin + xMax) / 2, cy = (yMin + yMax) / 2;
-  // The pin rises from the middle of the master's top when the top is a flat
+  // The hole rises from the middle of the master's top when the top is a flat
   // face (a candle), not from whichever corner of it came first.
   let tx = 0, ty = 0, tn = 0;
   for (let i = 0; i + 2 < masterSoup.length; i += 3) {
     if (masterSoup[i + 2] > zTop - 0.05) { tx += masterSoup[i]; ty += masterSoup[i + 1]; tn++; }
   }
-  if (tn) topAt = [tx / tn, ty / tn];
+  // The middle of the flat top, so long as that is on it: two equal peaks or a
+  // U-shaped top average to a point in the air, so then the highest vertex.
+  const highest = topAt;
+  if (tn) {
+    const mid: [number, number] = [tx / tn, ty / tn];
+    const z = topZAt(masterSoup, mid[0], mid[1]);
+    topAt = z !== null && z > zTop - 0.05 ? mid : highest;
+  }
 
   const segs = 96;
   let plan: CrossSection;
@@ -214,9 +285,33 @@ export function buildPourBox(wasm: ManifoldToplevel, masterSoup: ArrayLike<numbe
   const grooveCut = grooveRing.extrude(groove + 0.01).translate([0, 0, zMin - groove]);
   const baseM = plate.subtract(grooveCut);
 
-  const pin = o.pin
-    ? { footMm: [topAt[0], topAt[1], zTop - 0.5] as [number, number, number], lengthMm: fillZ + 1 - (zTop - 0.5), diaMm: Math.max(0.5, o.pinDiaMm) }
-    : undefined;
+  let hole: PourBox['hole'];
+  if (o.hole) {
+    const [hx, hy] = o.holeAtMm ?? topAt;
+    const diaMm = Math.max(0.5, o.holeDiaMm ?? HOLE_DIA_MM[o.hole]);
+    const centreZ = topZAt(masterSoup, hx, hy);
+    if (centreZ === null) throw new Error(`The hole at ${hx.toFixed(1)}, ${hy.toFixed(1)} mm is not over the master: pick a point on it.`);
+    // On a sloped top the pin goes down to the lowest point under its rim, so
+    // no silicone runs in under it and closes the hole.
+    let footZ = centreZ;
+    for (let k = 0; k < 12; k++) {
+      const a = (k / 12) * 2 * Math.PI;
+      const z = topZAt(masterSoup, hx + (diaMm / 2) * Math.cos(a), hy + (diaMm / 2) * Math.sin(a));
+      if (z !== null) footZ = Math.min(footZ, z);
+    }
+    hole = {
+      footMm: [hx, hy, footZ - 0.5],
+      lengthMm: fillZ + 1 - (footZ - 0.5),
+      diaMm,
+      purpose: o.hole,
+    };
+    if (o.hole === 'pour' && diaMm < MIN_POUR_HOLE_MM) {
+      warnings.push(`A pour hole ${diaMm} mm across is too narrow to pour through; make it at least ${MIN_POUR_HOLE_MM} mm.`);
+    }
+    if (o.hole !== 'pour' && Math.PI * (diaMm / 2) ** 2 > MAX_PLUGGED_MM2) {
+      warnings.push(`A ${o.hole} hole ${diaMm} mm across is too big to plug while pouring through the master's foot; keep it under ${MAX_PLUGGED_DIA_MM} mm, or make it a pour hole.`);
+    }
+  }
 
   // Silicone: the sleeve's bore up to the fill line, less the master, less the
   // pin below the line. The same sum build_mold.py made by hand; the pour
@@ -224,17 +319,18 @@ export function buildPourBox(wasm: ManifoldToplevel, masterSoup: ArrayLike<numbe
   const bore = inner.area() * (fillZ - zMin);
   const masterVol = soupVolumeBelow(wasm, masterSoup, fillZ);
   if (masterVol === null) warnings.push('The master is not a closed solid, so its volume is not known and the silicone figure counts it as empty space. Repair it first (physics_repair_mesh) for a true figure.');
-  const pinVol = pin ? Math.PI * (pin.diaMm / 2) ** 2 * cover : 0;
+  const pinVol = hole ? Math.PI * (hole.diaMm / 2) ** 2 * (fillZ - hole.footMm[2] - 0.5) : 0;
   const siliconeMm3 = Math.max(0, bore - (masterVol ?? 0) - pinVol);
-  const s = SILICONES[o.silicone] ?? SILICONES.platinum;
-  const grams = (siliconeMm3 / 1000) * s.densityGcm3;
+  const silicone = isSiliconeId(o.silicone) ? o.silicone : 'platinum';
+  const grams = castWeightG(silicone, siliconeMm3);
+  const parts = mixGrams(silicone, grams);
 
   if (zTop - zMin < 1) warnings.push('The master is less than 1 mm tall.');
 
   const result: PourBox = {
     base: meshOf(baseM),
     sleeve: meshOf(sleeveM),
-    ...(pin ? { pin } : {}),
+    ...(hole ? { hole } : {}),
     report: {
       fillHeightMm: +(fillZ - zMin).toFixed(2),
       fillZMm: +fillZ.toFixed(3),
@@ -244,10 +340,11 @@ export function buildPourBox(wasm: ManifoldToplevel, masterSoup: ArrayLike<numbe
       baseFootprintMm: extent(baseOutline),
       siliconeMm3: Math.round(siliconeMm3),
       siliconeG: Math.round(grams),
-      partAG: Math.round((grams * s.ratioA) / (s.ratioA + s.ratioB)),
-      partBG: Math.round((grams * s.ratioB) / (s.ratioA + s.ratioB)),
-      siliconeName: s.name,
-      ...(pin ? { pinTopMm: [+topAt[0].toFixed(2), +topAt[1].toFixed(2), +(fillZ + 1).toFixed(2)] as [number, number, number] } : {}),
+      partAG: Math.round(parts?.a ?? grams),
+      partBG: Math.round(parts?.b ?? 0),
+      siliconeName: castMaterial(silicone).label,
+      silicone,
+      ...(hole ? { holeTopMm: [+hole.footMm[0].toFixed(2), +hole.footMm[1].toFixed(2), +(fillZ + 1).toFixed(2)] as [number, number, number] } : {}),
       warnings,
     },
   };

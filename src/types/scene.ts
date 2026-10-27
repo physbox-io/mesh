@@ -818,6 +818,17 @@ export interface SceneNode {
    */
   printPose?: { up: [number, number, number]; spin: number };
   /**
+   * Set on a silicone pour box's base and sleeve: printed tooling, never
+   * molded itself, and where the silicone fills to, so a pour into the master
+   * and its box fills to that line, not to the rim.
+   */
+  pourBox?: {
+    /** The fill as a pour measures it, from the lowest point the silicone reaches, mm. */
+    pourDepthMm: number;
+    /** The silicone it was planned for: what a pour into the box pours. */
+    silicone?: 'platinum' | 'tin';
+  };
+  /**
    * Set on a body Add Simulation made: the part a machining program will leave,
    * cut back out of the stock, not part of the design. The exporters leave it
    * out of what they plan, so simulating a job does not change the next one.
@@ -826,6 +837,8 @@ export interface SceneNode {
    */
   simulation?: {
     kind: 'relief' | 'machining' | 'laser' | 'contour' | 'cast' | 'mold';
+    /** What a cast was poured in (a CastMaterialId): a silicone one is a mold that silicone sticks to. */
+    material?: string;
     /** When it was simulated, ISO 8601. */
     createdAt: string;
     /** Simulation grid, mm. */

@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { latticeBracketPreset } from '../src/presets/latticeBracket';
-import { generateCastPattern, castMetal, DEFAULT_CAST_OPTIONS } from '../src/utils/castPatternExporter';
+import { generateCastPattern, DEFAULT_CAST_OPTIONS } from '../src/utils/castPatternExporter';
+import { castMetal } from '../src/utils/castMaterials';
 import { runExportJob } from '../src/utils/exportJobs';
 import type { SceneGraph } from '../src/types/scene';
 

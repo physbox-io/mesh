@@ -38,7 +38,7 @@ export interface CastPrepOptions {
   edges: boolean;
   /** Outside chamfer in mm (the inside fillet is half again), or 'auto' to size from each part. */
   edgeSizeMm: number | 'auto';
-  /** The parting plane, as the Cast dialog takes it: mm above the part's base, or 'auto'. */
+  /** The parting plane, as the Mold dialog's Sand and Lost PLA tabs take it: mm above the part's base, or 'auto'. */
   partingFromBaseMm: number | 'auto';
 }
 
@@ -71,7 +71,7 @@ function stripTextures(nodes: SceneNode[]): SceneNode[] {
   }));
 }
 
-/** The parting plane the Cast dialog would use, as a world height in metres. */
+/** The parting plane the Mold dialog's pattern tabs would use, as a world height in metres. */
 export function findPartingZ(scene: SceneGraph, partingFromBaseMm: number | 'auto'): number {
   // The pattern without its gating or surface textures is all that is needed to choose a plane.
   const r = generateCastPattern(

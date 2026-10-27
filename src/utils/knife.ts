@@ -15,7 +15,7 @@
 import * as THREE from 'three';
 import type { SceneNode } from '../types/scene';
 import { patternSurfaces } from './facePatternPick';
-import { partSoups } from './printSplitClient';
+import { partSoups } from './partSoups';
 import { patternRegionAt, planeSeeds, splitSeams, type FaceSplit, type SurfaceTexture } from './surfaceTexture';
 
 const round = (v: THREE.Vector3 | number[]) => (Array.isArray(v) ? v : v.toArray()).map((x) => +x.toFixed(7));

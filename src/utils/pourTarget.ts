@@ -5,6 +5,7 @@ import * as THREE from 'three';
 import type { SceneNode } from '../types/scene';
 import { getNodeWorldTransform } from './laserCutExporter';
 import { geomBounds, positiveBounds } from './csg';
+import { castMaterial, resolveCastMaterial } from './castMaterials';
 
 /**
  * One body holding copies of the given bodies placed where they stand in the
@@ -50,6 +51,31 @@ function combined(children: SceneNode[]): SceneNode | null {
     geoms: [],
     children,
   } as SceneNode;
+}
+
+/**
+ * The silicone pour box among the bodies poured into, if there is one standing
+ * upright: its fill line. Turned over or on its side, it is not poured as it
+ * was planned, so it has no fill line to offer.
+ */
+export function pourBoxIn(node: SceneNode, parent?: THREE.Matrix4): NonNullable<SceneNode['pourBox']> | null {
+  const world = getNodeWorldTransform(node, parent);
+  if (node.pourBox) {
+    const up = new THREE.Vector3(0, 0, 1).transformDirection(world);
+    return up.z > 0.999 ? node.pourBox : null;
+  }
+  for (const c of node.children ?? []) {
+    const found = pourBoxIn(c, world);
+    if (found) return found;
+  }
+  return null;
+}
+
+/** The mold is, or holds, a cast poured in silicone, which silicone would stick to. */
+export function isSiliconeMold(node: SceneNode): boolean {
+  const m = resolveCastMaterial(node.simulation?.material);
+  if (m && castMaterial(m).silicone) return true;
+  return (node.children ?? []).some(isSiliconeMold);
 }
 
 /** How far apart two bodies' boxes may be and still count as touching, metres. */

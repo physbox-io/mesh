@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import { unzipSync, strFromU8 } from 'three/examples/jsm/libs/fflate.module.js';
 import type { ManifoldToplevel } from 'manifold-3d';
 import { generateMoldMeshes, exportBinarySTL, DEFAULT_MOLD_OPTIONS, moldSummary, type MoldOptions, type Triangle3D } from '../src/utils/moldExporter';
-import { envelopeDepth, envelopeSolid, thickestPvaMm, WATER_BASED_REFUSAL, castMaterialCheck } from '../src/utils/moldLiner';
+import { envelopeDepth, envelopeSolid, thickestPvaMm, WATER_BASED_REFUSAL, METAL_REFUSAL, castMaterialCheck } from '../src/utils/moldLiner';
 import { exportThreeMfAssemblies } from '../src/utils/threeMfExporter';
 import type { SceneGraph, SceneGeom } from '../src/types/scene';
 import { stlToMesh } from '../src/utils/stlMesh';
@@ -163,7 +163,8 @@ describe('PVA-lined mold', () => {
     expect(castMaterialCheck('concrete', 10).error).toBe(WATER_BASED_REFUSAL);
     expect(castMaterialCheck('epoxy', 150).warnings).toHaveLength(0);
     expect(castMaterialCheck('epoxy', 250).warnings[0]).toMatch(/60 °C/);
-    expect(castMaterialCheck('silicone', 900)).toEqual({ warnings: [] });
+    expect(castMaterialCheck('platinum', 900)).toEqual({ warnings: [] });
+    expect(castMaterialCheck('aluminium', 10).error).toBe(METAL_REFUSAL);
   });
 
   it('fails in one sentence without the geometry engine', () => {
@@ -270,10 +271,14 @@ describe('3MF assemblies', () => {
 });
 
 describe('MCP mold options', () => {
-  it('passes the liner through, and drops a cast material it does not know', () => {
+  it('passes the liner through, and refuses a cast material it does not know', () => {
     const { options } = moldOptionsFor({ kind: 'mold', dissolvableLiner: true, linerSkinMm: 1.6, castMaterial: 'plaster' });
     expect(options).toMatchObject({ dissolvableLiner: true, linerSkinMm: 1.6, castMaterial: 'plaster' });
-    expect(moldOptionsFor({ castMaterial: 'chocolate', linerSkinMm: -1 }).options).not.toHaveProperty('castMaterial');
+    const lava = moldOptionsFor({ castMaterial: 'lava', linerSkinMm: -1 });
+    expect(lava.options).not.toHaveProperty('castMaterial');
+    expect(lava.error).toMatch(/cast_material is one of epoxy, polyurethane, platinum/);
+    expect(moldOptionsFor({ castMaterial: 'bronze' }).error).toMatch(/metals go in sand/);
+    expect(moldOptionsFor({ castMaterial: 'silicone' }).options.castMaterial).toBe('platinum');
     expect(moldOptionsFor({ linerSkinMm: -1 }).options).not.toHaveProperty('linerSkinMm');
   });
 });

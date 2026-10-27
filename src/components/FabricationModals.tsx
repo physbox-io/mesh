@@ -137,7 +137,10 @@ export function FabricationModals({ threeSceneRef, noteCards }: {
         <ExportCastModal
           isOpen={isCastModalOpen}
           onClose={() => setIsCastModalOpen(false)}
-          scene={sceneGraph}
+          onOpenMold={() => {
+            setIsCastModalOpen(false);
+            setIsMoldModalOpen(true);
+          }}
         />
       )}
 

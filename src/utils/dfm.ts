@@ -34,7 +34,7 @@ import { hardwareFindings, type LivePoses } from './hardwareChecks';
 import { DEFAULT_MATERIAL, materialSpec, type MaterialId } from './feedsAndSpeeds';
 import { DEFAULT_FILAMENT, filamentSpec, type FilamentId } from './filaments';
 import { MAX_AVAILABLE_REACH_DIAMETERS, STANDARD_BIT_DIAS } from './reliefCarveExporter';
-import { sampleColumns } from './solidMachiningExporter';
+import { sampleColumns } from './partColumns';
 import { squaredDistanceTransform } from './heightmapMesh';
 import { overhangDeg, supportArea } from './printSupport';
 import type { SceneGraph, SceneNode } from '../types/scene';

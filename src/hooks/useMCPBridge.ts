@@ -56,7 +56,10 @@ import { generateCastPattern, DEFAULT_CAST_OPTIONS, type CastMethod } from '../u
 import { runCastPrep } from '../utils/castPrepRunner';
 import { planPourBox } from '../utils/pourBoxScene';
 import { addPourBoxToScene, pourBoxStl } from '../utils/pourBoxActions';
-import { SILICONES, type PourBoxOptions, type SiliconeId } from '../utils/siliconeMold';
+import { holePinMesh, type PourBoxOptions } from '../utils/siliconeMold';
+import { CAST_METALS, SILICONES, isSiliconeId, resolveCastMaterial } from '../utils/castMaterials';
+import { mcpMoldSubject } from '../utils/moldSubject';
+import { DEFAULT_TAB_DRAFT } from '../utils/moldTabs';
 import { cutAlongPlaneOffThread, selectionSoups, splitOffThread, testAssemblyOffThread } from '../utils/printSplitClient';
 import { loadManifold } from '../utils/sculptCut';
 import {
@@ -3860,30 +3863,39 @@ export function useMCPBridge() {
 
         /*
          * A printed pour box for a silicone mold of the given bodies (default:
-         * the selection, else every body): base with a groove, sleeve, and an
-         * optional wick pin. Reports the fill line and the silicone; apply adds
+         * every body): base with a groove, sleeve, and an
+         * optional hole through the silicone (wick, pour or fixing). Reports the fill line and the silicone; apply adds
          * the pieces to the scene; files come back as for EXPORT_CAST.
          */
         case 'MAKE_POUR_BOX': {
-          const raw = typeof msg.bodyId === 'string' ? msg.bodyId.split(',').map((x) => x.trim()).filter(Boolean) : [];
-          const given = raw.length ? raw : store.selectedNodeId ? [store.selectedNodeId, ...store.extraSelectedIds.filter((id) => id !== store.selectedNodeId)] : [];
-          const missing = given.filter((id) => !findNodeInScene(store.sceneGraph.nodes, id));
-          if (missing.length) return { ok: false, error: `No body called ${missing.join(', ')}.` };
-          const ids = given.length
-            ? given.map((id) => findNodeInScene(store.sceneGraph.nodes, id)!.id)
-            : store.sceneGraph.nodes.filter((n) => !n.simulation).map((n) => n.id);
-          if (!ids.length) return { ok: false, error: 'The scene is empty: add the master first.' };
+          // The master: body_id, else every body (never the UI selection, which an agent cannot see).
+          const subject = mcpMoldSubject(store.sceneGraph, msg.bodyId, (id) => findNodeInScene(store.sceneGraph.nodes, id));
+          if ('error' in subject) return { ok: false, error: subject.error };
+          const ids = subject.ids;
           const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
           const options: Partial<PourBoxOptions> = {};
-          for (const key of ['coverMm', 'wallMm', 'clearanceMm', 'baseMm', 'grooveMm', 'freeboardMm', 'pinDiaMm'] as const) {
+          for (const key of ['coverMm', 'wallMm', 'clearanceMm', 'baseMm', 'grooveMm', 'freeboardMm'] as const) {
             const v = num(msg[key]);
             if (v !== undefined) options[key] = v;
           }
           if (msg.shape === 'fit' || msg.shape === 'round' || msg.shape === 'box') options.shape = msg.shape;
-          if (typeof msg.pin === 'boolean') options.pin = msg.pin;
+          // A hole through the silicone and what it is for; `pin` is the older
+          // name for a wick hole, and still means one.
+          if (msg.hole !== undefined && msg.hole !== null && msg.hole !== 'none') {
+            if (msg.hole !== 'wick' && msg.hole !== 'pour' && msg.hole !== 'fixing') {
+              return { ok: false, error: "hole is 'wick', 'pour', 'fixing' or 'none'." };
+            }
+            options.hole = msg.hole;
+          } else if (msg.pin === true) options.hole = 'wick';
+          const holeDia = num(msg.holeDiaMm) ?? num(msg.pinDiaMm);
+          if (holeDia !== undefined) options.holeDiaMm = holeDia;
+          if (Array.isArray(msg.holeAtMm) && msg.holeAtMm.length === 2 && msg.holeAtMm.every((v) => typeof v === 'number')) {
+            options.holeAtMm = msg.holeAtMm as [number, number];
+          }
           if (typeof msg.silicone === 'string') {
-            if (!(msg.silicone in SILICONES)) return { ok: false, error: `silicone is one of ${Object.keys(SILICONES).join(', ')}.` };
-            options.silicone = msg.silicone as SiliconeId;
+            const silicone = resolveCastMaterial(msg.silicone);
+            if (!isSiliconeId(silicone)) return { ok: false, error: `silicone is one of ${SILICONES.map((m) => m.id).join(', ')}.` };
+            options.silicone = silicone;
           }
           let box;
           try {
@@ -3898,14 +3910,15 @@ export function useMCPBridge() {
             summary: {
               ...summary,
               master: ids,
-              ...(box.pin ? { pinDiaMm: box.pin.diaMm } : {}),
-              ...(added ? { added: { baseId: added.baseId, sleeveId: added.sleeveId, ...(added.pinId ? { pinId: added.pinId } : {}) } } : {}),
+              ...(box.hole ? { hole: { purpose: box.hole.purpose, diaMm: box.hole.diaMm } } : {}),
+              ...(added ? { added: { baseId: added.baseId, sleeveId: added.sleeveId, ...(added.holePinId ? { holePinId: added.holePinId } : {}) }, selected: added.selected } : {}),
             },
             warnings,
             files: describeFiles(
               [
                 { name: 'pour-base.stl', bytes: pourBoxStl(box.base, 'base') },
                 { name: 'pour-sleeve.stl', bytes: pourBoxStl(box.sleeve, 'sleeve') },
+                ...(box.hole ? [{ name: `pour-${box.hole.purpose}-pin.stl`, bytes: pourBoxStl(holePinMesh(box.hole), 'pin') }] : []),
               ],
               msg.includeFiles !== false
             ),
@@ -3925,8 +3938,15 @@ export function useMCPBridge() {
          * separated from the summary.
          */
         case 'EXPORT_CAST': {
-          const scene = store.sceneGraph;
-          if (!scene.nodes?.length) return { ok: false, error: 'The scene is empty — there is nothing to cast.' };
+          if (!store.sceneGraph.nodes?.length) return { ok: false, error: 'The scene is empty — there is nothing to cast.' };
+          // What is cast: master_id, else every body.
+          const subject = mcpMoldSubject(store.sceneGraph, msg.masterId, (id) => findNodeInScene(store.sceneGraph.nodes, id));
+          if ('error' in subject) return { ok: false, error: subject.error };
+          const scene = subject.scene;
+          const metal = msg.metalId ?? msg.metal;
+          if (metal !== undefined && !CAST_METALS.some((m) => m.id === metal)) {
+            return { ok: false, error: `metal is one of ${CAST_METALS.map((m) => m.id).join(', ')}.` };
+          }
           const options = {
             ...DEFAULT_CAST_OPTIONS,
             // `metal` is what the MCP tool calls it; `metalId` is what the
@@ -3941,11 +3961,15 @@ export function useMCPBridge() {
             ...(typeof msg.sprueDiaMm === 'number' ? { sprueDiaMm: msg.sprueDiaMm } : {}),
             ...(typeof msg.riserDiaMm === 'number' ? { riserDiaMm: msg.riserDiaMm } : {}),
             ...(typeof msg.addRiser === 'boolean' ? { addRiser: msg.addRiser } : {}),
+            // The Sand tab starts with 2° on the pattern; Lost PLA with none.
+            draftDeg: typeof msg.draftDeg === 'number' ? msg.draftDeg : msg.method === 'lost-pla' ? 0 : DEFAULT_TAB_DRAFT.sand,
+            ...(typeof msg.shrinkPercent === 'number' && msg.shrinkPercent >= 0 ? { shrinkPercent: msg.shrinkPercent } : {}),
           };
           const result = generateCastPattern(scene, options);
           if (!result.success) return { ok: false, error: result.error || 'The cast pattern could not be generated.', warnings: result.warnings ?? [] };
           return {
             ok: true,
+            molded: { label: subject.label, ids: subject.ids },
             summary: result.summary,
             warnings: result.warnings ?? [],
             files: describeFiles(
@@ -4531,7 +4555,7 @@ export function useMCPBridge() {
         }
 
         /*
-         * Prepare for Casting, as the Cast dialog's switch does it: edge
+         * Prepare for Casting, as the switch under Mold > Sand or Lost PLA > Advanced does it: edge
          * breaks on every part, and for sand, draft baked in. See
          * utils/castPrep.ts.
          */
