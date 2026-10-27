@@ -4930,7 +4930,18 @@ export function useMCPBridge() {
               warnings = bd.warnings;
             } else if (tubeJob === 'cope') {
               // The joint as asked, or the scene's first.
-              let spec: TubeCopeSpec | undefined = typeof msg.cutTubeOdMm === 'number' ? (msg as unknown as TubeCopeSpec) : undefined;
+              const n = (v: unknown, d: number) => (typeof v === 'number' && Number.isFinite(v) ? v : d);
+              let spec: TubeCopeSpec | undefined = typeof msg.cutTubeOdMm === 'number'
+                ? {
+                    cutTubeOdMm: msg.cutTubeOdMm,
+                    cutTubeWallMm: n(msg.cutTubeWallMm, 2),
+                    targetKind: msg.targetKind === 'plane' ? 'plane' : 'tube',
+                    targetTubeOdMm: n(msg.targetTubeOdMm, msg.cutTubeOdMm),
+                    angleDeg: n(msg.angleDeg, 90),
+                    offsetMm: n(msg.offsetMm, 0),
+                    clockAngleDeg: n(msg.clockAngleDeg, 0),
+                  }
+                : undefined;
               if (!spec) {
                 const members = extractSceneTubeJoints(scene);
                 const at = typeof msg.jointIndex === 'number' ? msg.jointIndex : 0;

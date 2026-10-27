@@ -656,6 +656,9 @@ as the matching export.
 | Laser Cut | the panels, extruded at their sheet's thickness, back in their place in the assembly |
 | Contour Slice | the layers, stacked at the sheet thickness |
 | Cast, Mold | **Add to Scene**: the pattern or mold halves, as exported, beside the model |
+| Sheet Unfold | the net folded back up along its own lines, fitted to the model and measured |
+| Tube & Wire | the tab's output made up: the frame's tubes seated hub to hub, the cope seated on its target, the wire bent from its schedule |
+| Timber Breakdown | each window's program milled in the frame the part sits in on the bed, each tenon pushed into what it leaves |
 
 * **One simulator for the feature and the tests.** `utils/cutSimulation.ts` sweeps each cutter
   (flat, ball or V, switched at `T<n> M6`) along every G0/G1 through a heightmap, exactly at cell
@@ -680,8 +683,26 @@ as the matching export.
 * **The body is marked** `node.simulation`. `collectSceneTriangles` leaves it out, so simulating a
   job never changes the next plan. It has no joint and does not collide (`contype`/`conaffinity` 0,
   `collision: 'hull'` so it is never decomposed).
-* The work runs on its own export worker (job kinds `simulate` and `simulateSheets`, with
-  progress), started for the job and stopped after it.
+* The work runs on its own export worker (job kinds `simulate`, `simulateSheets` and
+  `simulateTimber`, with progress), started for the job and stopped after it. The sheet fold and
+  Tube & Wire are quick and run on the page.
+* **Built from the output, measured against the model.** Sheet, tube and timber are each made
+  from what the dialog hands over, never from the model, or they would prove nothing; the model
+  comes in only to fit the result to and measure it. Each has found a fault in its exporter:
+  sheet-metal flats that kept the full outside size (no setback), a cope that clipped the target
+  mid-wall, and timber window sheets that put the wrong face against the fence.
+* **Sheet fold** (`utils/sheetFoldSimulation.ts`): a bend's arc is the neutral length
+  (R + K·T)·θ centred on the drawn bend line, about an axis R in from the inside of the bend; the
+  rest of the drawn zone stays flat. The model is the part's outside. The fit is by face normals
+  and edge directions (rotation), then face planes and cut-edge lines (position): none of those
+  move with a setback, which corners do. Each unfolded face carries `model3DMm` for this.
+* **Tube & Wire** (`utils/tubeSimulation.ts`): the cope's target is ray-cast, not read from the
+  template; the wire is bent by `overbend / springback`, so the springback factor itself is
+  only proven by a test bend.
+* **Timber** (`utils/timberSimulation.ts`): with the sheet's face up and the top end at the Y0
+  stop the part lies only one way, so machine X = Y × Z fixes the face at the fence; a sheet
+  naming another is a `setupFault`. Mortises on parts too big for the CNC have no program and
+  are counted, not simulated.
 * **Setups on the block's sides** (`utils/multiSetupMesh.ts`): each setup is cut in its own frame,
   and the part is where `f(p) = min(box, min_k H_k(R_k p + t_k) - z'_k) >= 0`, meshed with surface
   nets. Only plans that stand the block on a side go this way; one setup and the top/flip pair
