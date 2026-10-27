@@ -260,3 +260,28 @@ describe('Manufacturable Mechanism & Transmission Synthesis (mechanismParts)', (
     });
   });
 });
+
+describe('mechanism meshes move with their bodies', () => {
+  // A mesh geom without `dynamic` is drawn from world-baked vertices, so a
+  // gear moved off where it was built kept being drawn at the origin.
+  it('every mesh geom of every family is on the dynamic render path', () => {
+    const families = [
+      buildMeshingGearPair().nodes,
+      buildRackAndPinionPair().nodes,
+      buildGt2BeltDrive().nodes,
+      buildLeadscrewDrive().nodes,
+      buildCamMechanism().nodes,
+      buildFourBarLinkage().nodes,
+    ];
+    const meshes: { name: string; dynamic?: boolean }[] = [];
+    const walk = (nodes: { geoms?: { type: string; name: string; dynamic?: boolean }[]; children?: unknown[] }[]) => {
+      for (const n of nodes) {
+        for (const g of n.geoms ?? []) if (g.type === 'mesh') meshes.push(g);
+        walk((n.children ?? []) as typeof nodes);
+      }
+    };
+    families.forEach((nodes) => walk(nodes));
+    expect(meshes.length).toBeGreaterThan(6);
+    expect(meshes.filter((g) => !g.dynamic).map((g) => g.name)).toEqual([]);
+  });
+});

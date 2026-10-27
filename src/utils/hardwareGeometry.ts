@@ -159,9 +159,13 @@ export function cylinderGeom(name: string, r: number, h: number, z: number, rgba
   };
 }
 
-/** Drawn only: no contacts and no mass, so it changes nothing the solver sees. */
+/**
+ * Drawn only: no contacts and no mass, so it changes nothing the solver sees.
+ * `dynamic` stays: it is not physics but the render path, and a mesh without
+ * it is drawn from world-baked vertices, left at the origin when the body moves.
+ */
 export function visual(g: SceneGeom): SceneGeom {
-  const { mass: _mass, dynamic: _dynamic, condim: _condim, ...rest } = g;
+  const { mass: _mass, condim: _condim, ...rest } = g;
   return { ...rest, role: 'visual' };
 }
 
