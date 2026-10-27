@@ -10,7 +10,6 @@ import {
     Box,
     Compass,
     Layers,
-    Sparkles,
     Check
 } from 'lucide-react';
 import type { SceneGraph } from '../types/scene';
@@ -19,12 +18,10 @@ import {
     PIPE_STANDARDS,
     DEFAULT_PIPE_FRAME_OPTIONS,
     type PipeStandardId,
-    type PipeStructurePresetId,
     type PipeHubFitStyle,
     type PipeFrameOptions,
     breakdownPipeFrame,
     buildAllCustomHubNodes,
-    generatePipeStructurePreset,
     type TubeCopeSpec,
     computeTubeCopeJoint,
     extractSceneTubeJoints,
@@ -177,17 +174,6 @@ export function ExportTubeAndWireModal({
         void simulation.add({ ...tubeSimulationRequest(job, sceneStockTransform()).request, placement });
     };
 
-    const handleLoadPreset = (presetId: PipeStructurePresetId) => {
-        const nodes = generatePipeStructurePreset(presetId, { pipeStandardId });
-        const state = useStore.getState();
-        const nextScene: SceneGraph = {
-            ...state.sceneGraph,
-            nodes
-        };
-        state.updateScene(nextScene);
-        void state.recompile(nextScene);
-    };
-
     const handleAddHubsToScene = () => {
         const hubNodes = buildAllCustomHubNodes(breakdown);
         if (hubNodes.length === 0) return;
@@ -240,23 +226,23 @@ export function ExportTubeAndWireModal({
 
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
-            <div className="bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl w-full max-w-5xl max-h-[90vh] flex flex-col overflow-hidden text-zinc-100">
+            <div className="bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-xl shadow-2xl w-full max-w-5xl max-h-[90vh] flex flex-col overflow-hidden text-slate-800 dark:text-slate-100">
                 {/* Header */}
-                <div className="flex items-center justify-between px-5 py-3.5 border-b border-zinc-800 bg-zinc-950/60">
+                <div className="flex items-center justify-between px-5 py-3.5 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/60">
                     <div className="flex items-center gap-2.5">
-                        <Wrench className="w-5 h-5 text-cyan-400" />
+                        <Wrench className="w-5 h-5 text-cyan-600 dark:text-cyan-400" />
                         <div>
-                            <h2 className="text-base font-semibold text-white">
+                            <h2 className="text-base font-semibold text-slate-900 dark:text-white">
                                 PVC / EMT Pipe Frame, Tube Coping &amp; Wire Bending Studio
                             </h2>
-                            <p className="text-xs text-zinc-400">
+                            <p className="text-xs text-slate-500 dark:text-slate-400">
                                 10ft/3m conduit cut lists, 3D-printable multi-way hubs, 1:1 fish-mouth wrap templates &amp; CNC/3D wire bending jigs
                             </p>
                         </div>
                     </div>
                     <button
                         onClick={onClose}
-                        className="p-1.5 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
+                        className="p-1.5 rounded-lg text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
                         title="Close"
                     >
                         <X className="w-5 h-5" />
@@ -264,13 +250,13 @@ export function ExportTubeAndWireModal({
                 </div>
 
                 {/* Tabs */}
-                <div className="flex border-b border-zinc-800 bg-zinc-950/40 px-5 gap-2 pt-2">
+                <div className="flex border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/40 px-5 gap-2 pt-2">
                     <button
                         onClick={() => setActiveTab('pipe')}
                         className={`px-4 py-2 text-xs font-medium rounded-t-lg border-b-2 transition-colors flex items-center gap-2 ${
                             activeTab === 'pipe'
-                                ? 'border-cyan-400 text-cyan-300 bg-zinc-900'
-                                : 'border-transparent text-zinc-400 hover:text-zinc-200'
+                                ? 'border-cyan-500 dark:border-cyan-400 text-cyan-700 dark:text-cyan-300 bg-white dark:bg-slate-900'
+                                : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
                         }`}
                     >
                         <Box className="w-3.5 h-3.5" />
@@ -280,8 +266,8 @@ export function ExportTubeAndWireModal({
                         onClick={() => setActiveTab('cope')}
                         className={`px-4 py-2 text-xs font-medium rounded-t-lg border-b-2 transition-colors flex items-center gap-2 ${
                             activeTab === 'cope'
-                                ? 'border-cyan-400 text-cyan-300 bg-zinc-900'
-                                : 'border-transparent text-zinc-400 hover:text-zinc-200'
+                                ? 'border-cyan-500 dark:border-cyan-400 text-cyan-700 dark:text-cyan-300 bg-white dark:bg-slate-900'
+                                : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
                         }`}
                     >
                         <Scissors className="w-3.5 h-3.5" />
@@ -291,8 +277,8 @@ export function ExportTubeAndWireModal({
                         onClick={() => setActiveTab('wire')}
                         className={`px-4 py-2 text-xs font-medium rounded-t-lg border-b-2 transition-colors flex items-center gap-2 ${
                             activeTab === 'wire'
-                                ? 'border-cyan-400 text-cyan-300 bg-zinc-900'
-                                : 'border-transparent text-zinc-400 hover:text-zinc-200'
+                                ? 'border-cyan-500 dark:border-cyan-400 text-cyan-700 dark:text-cyan-300 bg-white dark:bg-slate-900'
+                                : 'border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
                         }`}
                     >
                         <Compass className="w-3.5 h-3.5" />
@@ -304,47 +290,19 @@ export function ExportTubeAndWireModal({
                 <div className="flex-1 overflow-y-auto p-5 space-y-5">
                     {activeTab === 'pipe' && (
                         <div className="space-y-5">
-                            {/* Quick Starter Presets */}
-                            <div className="bg-zinc-950/60 border border-zinc-800 rounded-lg p-3.5">
-                                <div className="flex items-center justify-between flex-wrap gap-2">
-                                    <div className="flex items-center gap-2">
-                                        <Sparkles className="w-4 h-4 text-amber-400" />
-                                        <span className="text-xs font-semibold text-zinc-200 uppercase tracking-wider">
-                                            Quick Starter Frame Presets
-                                        </span>
-                                    </div>
-                                    <div className="flex flex-wrap gap-2">
-                                        {([
-                                            { id: 'mini_greenhouse', label: 'Mini Greenhouse' },
-                                            { id: 'yard_pub', label: 'Yard Pub Canopy' },
-                                            { id: 'carport', label: 'Carport Frame' },
-                                            { id: 'geodesic_dome', label: 'Geodesic Dome' }
-                                        ] as { id: PipeStructurePresetId; label: string }[]).map(preset => (
-                                            <button
-                                                key={preset.id}
-                                                onClick={() => handleLoadPreset(preset.id)}
-                                                className="px-3 py-1.5 rounded-md bg-zinc-800 hover:bg-cyan-950/70 border border-zinc-700 hover:border-cyan-500/50 text-xs font-medium text-zinc-200 hover:text-cyan-200 transition-colors"
-                                            >
-                                                {preset.label}
-                                            </button>
-                                        ))}
-                                    </div>
-                                </div>
-                            </div>
-
                             {/* Configuration Grid */}
                             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                                 {/* Pipe Standard & Stock */}
-                                <div className="bg-zinc-950/50 border border-zinc-800 rounded-lg p-4 space-y-3">
-                                    <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-400">
+                                <div className="bg-slate-50 dark:bg-slate-950/50 border border-slate-200 dark:border-slate-800 rounded-lg p-4 space-y-3">
+                                    <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
                                         Hardware Store Pipe Spec
                                     </h3>
                                     <div>
-                                        <label className="block text-xs text-zinc-400 mb-1">Pipe / Conduit Standard</label>
+                                        <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">Pipe / Conduit Standard</label>
                                         <select
                                             value={pipeStandardId}
                                             onChange={e => setPipeStandardId(e.target.value as PipeStandardId)}
-                                            className="w-full bg-zinc-900 border border-zinc-700 rounded px-2.5 py-1.5 text-xs text-white"
+                                            className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded px-2.5 py-1.5 text-xs text-slate-900 dark:text-white"
                                         >
                                             {Object.values(PIPE_STANDARDS).map(std => (
                                                 <option key={std.id} value={std.id}>
@@ -354,11 +312,11 @@ export function ExportTubeAndWireModal({
                                         </select>
                                     </div>
                                     <div>
-                                        <label className="block text-xs text-zinc-400 mb-1">Stock Stick Length</label>
+                                        <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">Stock Stick Length</label>
                                         <select
                                             value={stockLengthMm}
                                             onChange={e => setStockLengthMm(Number(e.target.value))}
-                                            className="w-full bg-zinc-900 border border-zinc-700 rounded px-2.5 py-1.5 text-xs text-white"
+                                            className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded px-2.5 py-1.5 text-xs text-slate-900 dark:text-white"
                                         >
                                             <option value={3048}>10 ft US Standard (3048 mm)</option>
                                             <option value={3000}>3.0 m Metric Standard (3000 mm)</option>
@@ -369,16 +327,16 @@ export function ExportTubeAndWireModal({
                                 </div>
 
                                 {/* 3D Printed Hub Fit Settings */}
-                                <div className="bg-zinc-950/50 border border-zinc-800 rounded-lg p-4 space-y-3">
-                                    <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-400">
+                                <div className="bg-slate-50 dark:bg-slate-950/50 border border-slate-200 dark:border-slate-800 rounded-lg p-4 space-y-3">
+                                    <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
                                         3D-Printed Hub Parameters
                                     </h3>
                                     <div>
-                                        <label className="block text-xs text-zinc-400 mb-1">Hub Fit Style</label>
+                                        <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">Hub Fit Style</label>
                                         <select
                                             value={fitStyle}
                                             onChange={e => setFitStyle(e.target.value as PipeHubFitStyle)}
-                                            className="w-full bg-zinc-900 border border-zinc-700 rounded px-2.5 py-1.5 text-xs text-white"
+                                            className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded px-2.5 py-1.5 text-xs text-slate-900 dark:text-white"
                                         >
                                             <option value="socket">Socket (Slip-Over Outer Sleeve)</option>
                                             <option value="spigot">Spigot (Internal Core Plug)</option>
@@ -386,7 +344,7 @@ export function ExportTubeAndWireModal({
                                     </div>
                                     <div className="grid grid-cols-3 gap-2">
                                         <div>
-                                            <label className="block text-[11px] text-zinc-400 mb-1">Wall (mm)</label>
+                                            <label className="block text-[11px] text-slate-500 dark:text-slate-400 mb-1">Wall (mm)</label>
                                             <input
                                                 type="number"
                                                 step="0.5"
@@ -394,11 +352,11 @@ export function ExportTubeAndWireModal({
                                                 max="12"
                                                 value={hubWallMm}
                                                 onChange={e => setHubWallMm(Number(e.target.value))}
-                                                className="w-full bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs text-white"
+                                                className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded px-2 py-1 text-xs text-slate-900 dark:text-white"
                                             />
                                         </div>
                                         <div>
-                                            <label className="block text-[11px] text-zinc-400 mb-1">Clearance</label>
+                                            <label className="block text-[11px] text-slate-500 dark:text-slate-400 mb-1">Clearance</label>
                                             <input
                                                 type="number"
                                                 step="0.05"
@@ -406,11 +364,11 @@ export function ExportTubeAndWireModal({
                                                 max="2"
                                                 value={fitClearanceMm}
                                                 onChange={e => setFitClearanceMm(Number(e.target.value))}
-                                                className="w-full bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs text-white"
+                                                className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded px-2 py-1 text-xs text-slate-900 dark:text-white"
                                             />
                                         </div>
                                         <div>
-                                            <label className="block text-[11px] text-zinc-400 mb-1">Bolt Ø (mm)</label>
+                                            <label className="block text-[11px] text-slate-500 dark:text-slate-400 mb-1">Bolt Ø (mm)</label>
                                             <input
                                                 type="number"
                                                 step="0.5"
@@ -418,43 +376,43 @@ export function ExportTubeAndWireModal({
                                                 max="12"
                                                 value={crossBoltHoleMm}
                                                 onChange={e => setCrossBoltHoleMm(Number(e.target.value))}
-                                                className="w-full bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs text-white"
+                                                className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded px-2 py-1 text-xs text-slate-900 dark:text-white"
                                             />
                                         </div>
                                     </div>
                                 </div>
 
                                 {/* Store Shopping List Card */}
-                                <div className="bg-cyan-950/20 border border-cyan-800/50 rounded-lg p-4 flex flex-col justify-between space-y-3">
+                                <div className="bg-cyan-50 dark:bg-cyan-950/20 border border-cyan-200 dark:border-cyan-800/50 rounded-lg p-4 flex flex-col justify-between space-y-3">
                                     <div>
                                         <div className="flex items-center gap-2 mb-2">
-                                            <ShoppingCart className="w-4 h-4 text-cyan-400" />
-                                            <h3 className="text-xs font-semibold uppercase tracking-wider text-cyan-300">
+                                            <ShoppingCart className="w-4 h-4 text-cyan-600 dark:text-cyan-400" />
+                                            <h3 className="text-xs font-semibold uppercase tracking-wider text-cyan-700 dark:text-cyan-300">
                                                 Store Shopping List
                                             </h3>
                                         </div>
                                         <div className="grid grid-cols-2 gap-2 text-xs">
-                                            <div className="bg-zinc-900/80 rounded p-2 border border-zinc-800">
-                                                <div className="text-zinc-400 text-[11px]">10ft / 3m Sticks</div>
-                                                <div className="text-lg font-bold text-white">
+                                            <div className="bg-white dark:bg-slate-900/80 rounded p-2 border border-slate-200 dark:border-slate-800">
+                                                <div className="text-slate-500 dark:text-slate-400 text-[11px]">10ft / 3m Sticks</div>
+                                                <div className="text-lg font-bold text-slate-900 dark:text-white">
                                                     {breakdown.shoppingList.sticksToBuy}
                                                 </div>
                                             </div>
-                                            <div className="bg-zinc-900/80 rounded p-2 border border-zinc-800">
-                                                <div className="text-zinc-400 text-[11px]">3D-Print Hubs</div>
-                                                <div className="text-lg font-bold text-amber-300">
+                                            <div className="bg-white dark:bg-slate-900/80 rounded p-2 border border-slate-200 dark:border-slate-800">
+                                                <div className="text-slate-500 dark:text-slate-400 text-[11px]">3D-Print Hubs</div>
+                                                <div className="text-lg font-bold text-amber-700 dark:text-amber-300">
                                                     {breakdown.shoppingList.customPrintedHubs}
                                                 </div>
                                             </div>
-                                            <div className="bg-zinc-900/80 rounded p-2 border border-zinc-800">
-                                                <div className="text-zinc-400 text-[11px]">Std 90° Elbows</div>
-                                                <div className="text-sm font-semibold text-emerald-300">
+                                            <div className="bg-white dark:bg-slate-900/80 rounded p-2 border border-slate-200 dark:border-slate-800">
+                                                <div className="text-slate-500 dark:text-slate-400 text-[11px]">Std 90° Elbows</div>
+                                                <div className="text-sm font-semibold text-emerald-700 dark:text-emerald-300">
                                                     {breakdown.shoppingList.standardElbows90}
                                                 </div>
                                             </div>
-                                            <div className="bg-zinc-900/80 rounded p-2 border border-zinc-800">
-                                                <div className="text-zinc-400 text-[11px]">Std 90° Tees</div>
-                                                <div className="text-sm font-semibold text-emerald-300">
+                                            <div className="bg-white dark:bg-slate-900/80 rounded p-2 border border-slate-200 dark:border-slate-800">
+                                                <div className="text-slate-500 dark:text-slate-400 text-[11px]">Std 90° Tees</div>
+                                                <div className="text-sm font-semibold text-emerald-700 dark:text-emerald-300">
                                                     {breakdown.shoppingList.standardTees90}
                                                 </div>
                                             </div>
@@ -464,7 +422,7 @@ export function ExportTubeAndWireModal({
                                     <button
                                         onClick={handleAddHubsToScene}
                                         disabled={breakdown.hubs.length === 0}
-                                        className="w-full py-2 px-3 rounded-lg bg-cyan-600 hover:bg-cyan-500 disabled:bg-zinc-800 disabled:text-zinc-500 text-xs font-semibold text-white flex items-center justify-center gap-2 transition-colors shadow"
+                                        className="w-full py-2 px-3 rounded-lg bg-cyan-600 hover:bg-cyan-500 disabled:bg-slate-200 dark:disabled:bg-slate-800 disabled:text-slate-400 dark:disabled:text-slate-500 text-xs font-semibold text-white flex items-center justify-center gap-2 transition-colors shadow"
                                     >
                                         <Plus className="w-4 h-4" />
                                         Add 3D-Printable Hub Connectors to Scene ({breakdown.hubs.length})
@@ -476,7 +434,7 @@ export function ExportTubeAndWireModal({
                                         error={simulation.error}
                                     />
                                     {hubAddedMessage && (
-                                        <div className="text-xs text-emerald-400 flex items-center gap-1.5">
+                                        <div className="text-xs text-emerald-600 dark:text-emerald-400 flex items-center gap-1.5">
                                             <Check className="w-3.5 h-3.5" />
                                             {hubAddedMessage}
                                         </div>
@@ -485,34 +443,34 @@ export function ExportTubeAndWireModal({
                             </div>
 
                             {/* Visual 10-Foot / 3m Stick Cut-List */}
-                            <div className="bg-zinc-950/50 border border-zinc-800 rounded-lg p-4 space-y-3">
+                            <div className="bg-slate-50 dark:bg-slate-950/50 border border-slate-200 dark:border-slate-800 rounded-lg p-4 space-y-3">
                                 <div className="flex items-center justify-between">
-                                    <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-300 flex items-center gap-2">
-                                        <Layers className="w-4 h-4 text-cyan-400" />
+                                    <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-600 dark:text-slate-300 flex items-center gap-2">
+                                        <Layers className="w-4 h-4 text-cyan-600 dark:text-cyan-400" />
                                         10-Foot / 3m Stick Cut-List ({breakdown.sticks.length} Sticks, {breakdown.struts.length} Cut Struts)
                                     </h3>
-                                    <span className="text-xs text-zinc-400">
+                                    <span className="text-xs text-slate-500 dark:text-slate-400">
                                         Includes socket end-pullback deduction ({breakdown.pipeSpec.socketDepthMm}mm depth)
                                     </span>
                                 </div>
 
                                 {breakdown.sticks.length === 0 ? (
-                                    <div className="text-xs text-zinc-500 py-6 text-center">
-                                        No cylindrical struts found in scene. Click one of the Quick Starter Frame Presets above to populate a pipe frame!
+                                    <div className="text-xs text-slate-400 dark:text-slate-500 py-6 text-center">
+                                        No struts in the scene. Lay cylinders end to end, one per length of pipe, or open a pipe frame from Examples &gt; Make it.
                                     </div>
                                 ) : (
                                     <div className="space-y-3">
                                         {breakdown.sticks.map(stick => (
                                             <div key={stick.stickIndex} className="space-y-1">
                                                 <div className="flex items-center justify-between text-xs">
-                                                    <span className="font-medium text-zinc-300">
+                                                    <span className="font-medium text-slate-600 dark:text-slate-300">
                                                         Stick #{stick.stickIndex} ({stick.stockLengthMm} mm)
                                                     </span>
-                                                    <span className="text-zinc-400">
+                                                    <span className="text-slate-500 dark:text-slate-400">
                                                         Used: {Math.round(stick.usedMm)} mm • Waste: {Math.round(stick.wasteMm)} mm ({Math.round(100 - stick.utilizationPct)}%)
                                                     </span>
                                                 </div>
-                                                <div className="w-full h-7 bg-zinc-900 rounded border border-zinc-800 flex overflow-hidden">
+                                                <div className="w-full h-7 bg-white dark:bg-slate-900 rounded border border-slate-200 dark:border-slate-800 flex overflow-hidden">
                                                     {stick.cuts.map((cut, cIdx) => {
                                                         const widthPct = Math.max(
                                                             2,
@@ -522,7 +480,7 @@ export function ExportTubeAndWireModal({
                                                             <div
                                                                 key={`${cut.strutId}_${cIdx}`}
                                                                 style={{ width: `${widthPct}%` }}
-                                                                className="h-full bg-cyan-600/80 hover:bg-cyan-500/90 border-r border-zinc-950 flex items-center justify-center px-1 text-[10px] font-medium text-white truncate"
+                                                                className="h-full bg-cyan-600/80 hover:bg-cyan-500/90 border-r border-white dark:border-slate-950 flex items-center justify-center px-1 text-[10px] font-medium text-white truncate"
                                                                 title={`${cut.name}: ${cut.cutLengthMm} mm`}
                                                             >
                                                                 {cut.cutLengthMm}mm
@@ -541,19 +499,19 @@ export function ExportTubeAndWireModal({
                     {activeTab === 'cope' && (
                         <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
                             {/* Left Controls */}
-                            <div className="lg:col-span-5 bg-zinc-950/50 border border-zinc-800 rounded-lg p-4 space-y-3.5">
-                                <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-400">
+                            <div className="lg:col-span-5 bg-slate-50 dark:bg-slate-950/50 border border-slate-200 dark:border-slate-800 rounded-lg p-4 space-y-3.5">
+                                <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
                                     Tube Miter &amp; Fish-Mouth Joint Parameters
                                 </h3>
 
                                 <div>
-                                    <label className="block text-xs text-zinc-400 mb-1">
+                                    <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">
                                         Detected Scene Joint or Custom Spec
                                     </label>
                                     <select
                                         value={selectedJointIndex}
                                         onChange={e => handleSelectSceneJoint(Number(e.target.value))}
-                                        className="w-full bg-zinc-900 border border-zinc-700 rounded px-2.5 py-1.5 text-xs text-white"
+                                        className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded px-2.5 py-1.5 text-xs text-slate-900 dark:text-white"
                                     >
                                         <option value={-1}>Custom Tube Joint Parameters</option>
                                         {sceneJoints.map((j, idx) => (
@@ -566,40 +524,40 @@ export function ExportTubeAndWireModal({
 
                                 <div className="grid grid-cols-2 gap-3">
                                     <div>
-                                        <label className="block text-xs text-zinc-400 mb-1">Cut Tube OD (mm)</label>
+                                        <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">Cut Tube OD (mm)</label>
                                         <input
                                             type="number"
                                             step="0.5"
                                             min="6"
                                             value={cutTubeOdMm}
                                             onChange={e => setCutTubeOdMm(Number(e.target.value))}
-                                            className="w-full bg-zinc-900 border border-zinc-700 rounded px-2.5 py-1.5 text-xs text-white"
+                                            className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded px-2.5 py-1.5 text-xs text-slate-900 dark:text-white"
                                         />
                                     </div>
                                     <div>
-                                        <label className="block text-xs text-zinc-400 mb-1">Wall Thickness (mm)</label>
+                                        <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">Wall Thickness (mm)</label>
                                         <input
                                             type="number"
                                             step="0.2"
                                             min="0.5"
                                             value={cutTubeWallMm}
                                             onChange={e => setCutTubeWallMm(Number(e.target.value))}
-                                            className="w-full bg-zinc-900 border border-zinc-700 rounded px-2.5 py-1.5 text-xs text-white"
+                                            className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded px-2.5 py-1.5 text-xs text-slate-900 dark:text-white"
                                         />
                                     </div>
                                     <div>
-                                        <label className="block text-xs text-zinc-400 mb-1">Target Surface</label>
+                                        <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">Target Surface</label>
                                         <select
                                             value={targetKind}
                                             onChange={e => setTargetKind(e.target.value as 'tube' | 'plane')}
-                                            className="w-full bg-zinc-900 border border-zinc-700 rounded px-2.5 py-1.5 text-xs text-white"
+                                            className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded px-2.5 py-1.5 text-xs text-slate-900 dark:text-white"
                                         >
                                             <option value="tube">Round Collector Tube (Fish-Mouth)</option>
                                             <option value="plane">Flat Plate / Miter Plane</option>
                                         </select>
                                     </div>
                                     <div>
-                                        <label className="block text-xs text-zinc-400 mb-1">Target Tube OD (mm)</label>
+                                        <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">Target Tube OD (mm)</label>
                                         <input
                                             type="number"
                                             step="0.5"
@@ -607,11 +565,11 @@ export function ExportTubeAndWireModal({
                                             disabled={targetKind === 'plane'}
                                             value={targetTubeOdMm}
                                             onChange={e => setTargetTubeOdMm(Number(e.target.value))}
-                                            className="w-full bg-zinc-900 border border-zinc-700 disabled:opacity-50 rounded px-2.5 py-1.5 text-xs text-white"
+                                            className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 disabled:opacity-50 rounded px-2.5 py-1.5 text-xs text-slate-900 dark:text-white"
                                         />
                                     </div>
                                     <div>
-                                        <label className="block text-xs text-zinc-400 mb-1">Joint Angle (°)</label>
+                                        <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">Joint Angle (°)</label>
                                         <input
                                             type="number"
                                             step="1"
@@ -619,23 +577,23 @@ export function ExportTubeAndWireModal({
                                             max="170"
                                             value={angleDeg}
                                             onChange={e => setAngleDeg(Number(e.target.value))}
-                                            className="w-full bg-zinc-900 border border-zinc-700 rounded px-2.5 py-1.5 text-xs text-white"
+                                            className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded px-2.5 py-1.5 text-xs text-slate-900 dark:text-white"
                                         />
                                     </div>
                                     <div>
-                                        <label className="block text-xs text-zinc-400 mb-1">Centerline Offset (mm)</label>
+                                        <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">Centerline Offset (mm)</label>
                                         <input
                                             type="number"
                                             step="0.5"
                                             value={offsetMm}
                                             onChange={e => setOffsetMm(Number(e.target.value))}
-                                            className="w-full bg-zinc-900 border border-zinc-700 rounded px-2.5 py-1.5 text-xs text-white"
+                                            className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded px-2.5 py-1.5 text-xs text-slate-900 dark:text-white"
                                         />
                                     </div>
                                 </div>
 
                                 <div>
-                                    <label className="block text-xs text-zinc-400 mb-1">
+                                    <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">
                                         Clocking Rotation Angle ({clockAngleDeg}°)
                                     </label>
                                     <input
@@ -658,9 +616,9 @@ export function ExportTubeAndWireModal({
                                     </button>
                                     <button
                                         onClick={handleOpenCopeInEtch}
-                                        className="w-full py-2 px-3 rounded-lg bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-xs font-semibold text-zinc-200 flex items-center justify-center gap-2 transition-colors"
+                                        className="w-full py-2 px-3 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 border border-slate-300 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-200 flex items-center justify-center gap-2 transition-colors"
                                     >
-                                        <ExternalLink className="w-4 h-4 text-cyan-400" />
+                                        <ExternalLink className="w-4 h-4 text-cyan-600 dark:text-cyan-400" />
                                         Open in Etch (2D Laser / Print Layout)
                                     </button>
                                     <AddSimulationButton
@@ -674,21 +632,21 @@ export function ExportTubeAndWireModal({
                             </div>
 
                             {/* Right 1:1 SVG Preview */}
-                            <div className="lg:col-span-7 bg-zinc-950/50 border border-zinc-800 rounded-lg p-4 flex flex-col justify-between space-y-3">
+                            <div className="lg:col-span-7 bg-slate-50 dark:bg-slate-950/50 border border-slate-200 dark:border-slate-800 rounded-lg p-4 flex flex-col justify-between space-y-3">
                                 <div className="flex items-center justify-between">
                                     <div>
-                                        <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-300">
+                                        <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-600 dark:text-slate-300">
                                             1:1 Unrolled Paper Wrap Template Preview
                                         </h3>
-                                        <p className="text-[11px] text-zinc-400">
+                                        <p className="text-[11px] text-slate-500 dark:text-slate-400">
                                             Circumference: {copeResult.circumferenceMm} mm • Saddle Depth: {copeResult.peakToValleyOuterMm} mm
                                         </p>
                                     </div>
                                     <div className="flex items-center gap-3 text-[11px]">
-                                        <span className="flex items-center gap-1 text-red-400">
+                                        <span className="flex items-center gap-1 text-red-600 dark:text-red-400">
                                             <span className="w-3 h-0.5 bg-red-500 inline-block" /> Inner-Wall Fit Cut
                                         </span>
-                                        <span className="flex items-center gap-1 text-blue-400">
+                                        <span className="flex items-center gap-1 text-blue-600 dark:text-blue-400">
                                             <span className="w-3 h-0.5 bg-blue-500 inline-block" /> Outer-Wall Bevel
                                         </span>
                                     </div>
@@ -707,17 +665,17 @@ export function ExportTubeAndWireModal({
                     {activeTab === 'wire' && (
                         <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
                             {/* Left Wire Settings */}
-                            <div className="lg:col-span-5 bg-zinc-950/50 border border-zinc-800 rounded-lg p-4 space-y-3.5">
-                                <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-400">
+                            <div className="lg:col-span-5 bg-slate-50 dark:bg-slate-950/50 border border-slate-200 dark:border-slate-800 rounded-lg p-4 space-y-3.5">
+                                <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
                                     Wire &amp; 3D Bending Jig Configuration
                                 </h3>
 
                                 <div>
-                                    <label className="block text-xs text-zinc-400 mb-1">Wire Path Source</label>
+                                    <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">Wire Path Source</label>
                                     <select
                                         value={selectedWireIdx}
                                         onChange={e => setSelectedWireIdx(Number(e.target.value))}
-                                        className="w-full bg-zinc-900 border border-zinc-700 rounded px-2.5 py-1.5 text-xs text-white"
+                                        className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded px-2.5 py-1.5 text-xs text-slate-900 dark:text-white"
                                     >
                                         {sceneWires.map((w, idx) => (
                                             <option key={w.id} value={idx}>
@@ -730,29 +688,29 @@ export function ExportTubeAndWireModal({
 
                                 <div className="grid grid-cols-3 gap-2.5">
                                     <div>
-                                        <label className="block text-xs text-zinc-400 mb-1">Wire Ø (mm)</label>
+                                        <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">Wire Ø (mm)</label>
                                         <input
                                             type="number"
                                             step="0.5"
                                             min="0.5"
                                             value={wireDiameterMm}
                                             onChange={e => setWireDiameterMm(Number(e.target.value))}
-                                            className="w-full bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs text-white"
+                                            className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded px-2 py-1.5 text-xs text-slate-900 dark:text-white"
                                         />
                                     </div>
                                     <div>
-                                        <label className="block text-xs text-zinc-400 mb-1">Bend R (mm)</label>
+                                        <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">Bend R (mm)</label>
                                         <input
                                             type="number"
                                             step="0.5"
                                             min="1"
                                             value={bendRadiusMm}
                                             onChange={e => setBendRadiusMm(Number(e.target.value))}
-                                            className="w-full bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs text-white"
+                                            className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded px-2 py-1.5 text-xs text-slate-900 dark:text-white"
                                         />
                                     </div>
                                     <div>
-                                        <label className="block text-xs text-zinc-400 mb-1">Springback</label>
+                                        <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">Springback</label>
                                         <input
                                             type="number"
                                             step="0.01"
@@ -760,39 +718,39 @@ export function ExportTubeAndWireModal({
                                             max="1.25"
                                             value={springbackFactor}
                                             onChange={e => setSpringbackFactor(Number(e.target.value))}
-                                            className="w-full bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs text-white"
+                                            className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded px-2 py-1.5 text-xs text-slate-900 dark:text-white"
                                         />
                                     </div>
                                 </div>
 
                                 <div className="grid grid-cols-2 gap-2.5">
                                     <div>
-                                        <label className="block text-xs text-zinc-400 mb-1">Jig Base Plate (mm)</label>
+                                        <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">Jig Base Plate (mm)</label>
                                         <input
                                             type="number"
                                             step="1"
                                             min="3"
                                             value={jigBaseThicknessMm}
                                             onChange={e => setJigBaseThicknessMm(Number(e.target.value))}
-                                            className="w-full bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs text-white"
+                                            className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded px-2 py-1.5 text-xs text-slate-900 dark:text-white"
                                         />
                                     </div>
                                     <div>
-                                        <label className="block text-xs text-zinc-400 mb-1">Fulcrum Pin Height (mm)</label>
+                                        <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">Fulcrum Pin Height (mm)</label>
                                         <input
                                             type="number"
                                             step="1"
                                             min="5"
                                             value={jigPostHeightMm}
                                             onChange={e => setJigPostHeightMm(Number(e.target.value))}
-                                            className="w-full bg-zinc-900 border border-zinc-700 rounded px-2 py-1.5 text-xs text-white"
+                                            className="w-full bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded px-2 py-1.5 text-xs text-slate-900 dark:text-white"
                                         />
                                     </div>
                                 </div>
 
-                                <div className="bg-zinc-900/90 border border-zinc-800 rounded-lg p-3 flex items-center justify-between">
-                                    <span className="text-xs text-zinc-400">Total Wire Cut Length:</span>
-                                    <span className="text-sm font-bold text-cyan-300">
+                                <div className="bg-white dark:bg-slate-900/90 border border-slate-200 dark:border-slate-800 rounded-lg p-3 flex items-center justify-between">
+                                    <span className="text-xs text-slate-500 dark:text-slate-400">Total Wire Cut Length:</span>
+                                    <span className="text-sm font-bold text-cyan-700 dark:text-cyan-300">
                                         {wireSchedule.totalCutLengthMm} mm
                                     </span>
                                 </div>
@@ -811,7 +769,7 @@ export function ExportTubeAndWireModal({
                                     error={simulation.error}
                                 />
                                 {jigAddedMessage && (
-                                    <div className="text-xs text-emerald-400 flex items-center gap-1.5">
+                                    <div className="text-xs text-emerald-600 dark:text-emerald-400 flex items-center gap-1.5">
                                         <Check className="w-3.5 h-3.5" />
                                         {jigAddedMessage}
                                     </div>
@@ -819,19 +777,19 @@ export function ExportTubeAndWireModal({
                             </div>
 
                             {/* Right LRA Table */}
-                            <div className="lg:col-span-7 bg-zinc-950/50 border border-zinc-800 rounded-lg p-4 space-y-3">
+                            <div className="lg:col-span-7 bg-slate-50 dark:bg-slate-950/50 border border-slate-200 dark:border-slate-800 rounded-lg p-4 space-y-3">
                                 <div className="flex items-center justify-between">
-                                    <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-300">
+                                    <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-600 dark:text-slate-300">
                                         LRA (Length • Rotate • Angle) Wire Bending Schedule
                                     </h3>
-                                    <span className="text-xs text-zinc-400">
+                                    <span className="text-xs text-slate-500 dark:text-slate-400">
                                         Tail Straight Feed: {wireSchedule.finalStraightMm} mm
                                     </span>
                                 </div>
 
-                                <div className="overflow-x-auto border border-zinc-800 rounded-lg">
+                                <div className="overflow-x-auto border border-slate-200 dark:border-slate-800 rounded-lg">
                                     <table className="w-full text-left text-xs">
-                                        <thead className="bg-zinc-900 text-zinc-400 border-b border-zinc-800">
+                                        <thead className="bg-white dark:bg-slate-900 text-slate-500 dark:text-slate-400 border-b border-slate-200 dark:border-slate-800">
                                             <tr>
                                                 <th className="py-2 px-3">Step</th>
                                                 <th className="py-2 px-3">Straight Feed (mm)</th>
@@ -841,25 +799,25 @@ export function ExportTubeAndWireModal({
                                                 <th className="py-2 px-3">Arc (mm)</th>
                                             </tr>
                                         </thead>
-                                        <tbody className="divide-y divide-zinc-800/70">
+                                        <tbody className="divide-y divide-slate-200 dark:divide-slate-800/70">
                                             {wireSchedule.steps.map(step => (
-                                                <tr key={step.stepIndex} className="hover:bg-zinc-900/50">
-                                                    <td className="py-2 px-3 font-semibold text-cyan-300">
+                                                <tr key={step.stepIndex} className="hover:bg-slate-100 dark:hover:bg-slate-900/50">
+                                                    <td className="py-2 px-3 font-semibold text-cyan-700 dark:text-cyan-300">
                                                         #{step.stepIndex}
                                                     </td>
-                                                    <td className="py-2 px-3 text-white font-mono">
+                                                    <td className="py-2 px-3 text-slate-900 dark:text-white font-mono">
                                                         {step.straightFeedMm}
                                                     </td>
-                                                    <td className="py-2 px-3 text-zinc-300 font-mono">
+                                                    <td className="py-2 px-3 text-slate-600 dark:text-slate-300 font-mono">
                                                         {step.rotateAngleDeg}°
                                                     </td>
-                                                    <td className="py-2 px-3 text-zinc-300 font-mono">
+                                                    <td className="py-2 px-3 text-slate-600 dark:text-slate-300 font-mono">
                                                         {step.bendAngleDeg}°
                                                     </td>
-                                                    <td className="py-2 px-3 text-amber-300 font-mono">
+                                                    <td className="py-2 px-3 text-amber-700 dark:text-amber-300 font-mono">
                                                         {step.overbendAngleDeg}°
                                                     </td>
-                                                    <td className="py-2 px-3 text-zinc-400 font-mono">
+                                                    <td className="py-2 px-3 text-slate-500 dark:text-slate-400 font-mono">
                                                         {step.arcLengthMm}
                                                     </td>
                                                 </tr>
