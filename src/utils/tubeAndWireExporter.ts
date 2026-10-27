@@ -994,6 +994,46 @@ function perpUnitVector(dir: Vec3): Vec3 {
   return vNorm(vCross(dir, ref));
 }
 
+/**
+ * The centre of mass, in X and Y, of a solid made of spheres and `fromto`
+ * cylinders unioned, less the ones marked `difference`: sampled on a grid,
+ * which comes to well under a millimetre on a fitting.
+ */
+export function solidCentroidXY(geoms: SceneGeom[], cells = 40): [number, number] {
+  type Shape = { inside: (p: Vec3) => boolean; lo: Vec3; hi: Vec3; cut: boolean };
+  const shapes: Shape[] = [];
+  for (const g of geoms) {
+    const r = g.size?.[0] ?? 0;
+    if (g.type === 'sphere') {
+      const c: Vec3 = [g.pos?.[0] ?? 0, g.pos?.[1] ?? 0, g.pos?.[2] ?? 0];
+      shapes.push({ inside: (p) => vDist(p, c) <= r, lo: c.map((v) => v - r) as Vec3, hi: c.map((v) => v + r) as Vec3, cut: g.csg === 'difference' });
+    } else if (g.type === 'cylinder' && g.fromto?.length === 6) {
+      const a: Vec3 = [g.fromto[0], g.fromto[1], g.fromto[2]], b: Vec3 = [g.fromto[3], g.fromto[4], g.fromto[5]];
+      const ab = vSub(b, a), L2 = vDot(ab, ab) || 1;
+      shapes.push({
+        inside: (p) => {
+          const t = vDot(vSub(p, a), ab) / L2;
+          return t >= 0 && t <= 1 && vDist(p, vAdd(a, vScale(ab, t))) <= r;
+        },
+        lo: [0, 1, 2].map((k) => Math.min(a[k], b[k]) - r) as Vec3,
+        hi: [0, 1, 2].map((k) => Math.max(a[k], b[k]) + r) as Vec3,
+        cut: g.csg === 'difference',
+      });
+    }
+  }
+  const solid = shapes.filter((x) => !x.cut);
+  if (!solid.length) return [0, 0];
+  const lo = [0, 1, 2].map((k) => Math.min(...solid.map((x) => x.lo[k])));
+  const hi = [0, 1, 2].map((k) => Math.max(...solid.map((x) => x.hi[k])));
+  let n = 0, sx = 0, sy = 0;
+  for (let i = 0; i < cells; i++) for (let j = 0; j < cells; j++) for (let k = 0; k < cells; k++) {
+    const p: Vec3 = [0, 1, 2].map((a, q) => lo[a] + ((([i, j, k][q]) + 0.5) / cells) * (hi[a] - lo[a])) as Vec3;
+    if (!solid.some((x) => x.inside(p)) || shapes.some((x) => x.cut && x.inside(p))) continue;
+    n++; sx += p[0]; sy += p[1];
+  }
+  return n ? [sx / n, sy / n] : [0, 0];
+}
+
 export function buildPipeHubNode(
   hub: PipeFrameHub,
   options?: Partial<PipeFrameOptions>
@@ -1123,12 +1163,22 @@ export function buildPipeHubNode(
     }
   }
 
+  // A compiled body is re-origined on its centre of mass in X and Y (see
+  // csgFrameOffset). An elbow's mass is off towards its arms, so modelled about
+  // the joint it was drawn that far off it, its sockets beside the pipes. So
+  // the hub is modelled about its own centre of mass, and stands there.
+  const [cx, cy] = solidCentroidXY(geoms);
+  for (const g of geoms) {
+    if (g.fromto) g.fromto = [g.fromto[0] - cx, g.fromto[1] - cy, g.fromto[2], g.fromto[3] - cx, g.fromto[4] - cy, g.fromto[5]];
+    else if (g.pos) g.pos = [g.pos[0] - cx, g.pos[1] - cy, g.pos[2]];
+  }
+
   return {
     id: `printed_${hub.id}`,
     name: `3D Hub: ${hub.name} (${hub.ports.length}-Way)`,
     type: 'body',
     csgEnabled: true,
-    pos: [mm(hub.centerMm[0]), mm(hub.centerMm[1]), mm(hub.centerMm[2])],
+    pos: [mm(hub.centerMm[0]) + cx, mm(hub.centerMm[1]) + cy, mm(hub.centerMm[2])],
     joints: [],
     children: [],
     geoms,
@@ -1155,7 +1205,6 @@ export function buildAllCustomHubNodes(breakdown: PipeFrameBreakdownResult): Sce
     // Its own id (`printed_<hub id>`), so adding the hubs again replaces them
     // rather than stacking a second set, and an example's fittings are replaced too.
     void idx;
-    node.pos = [mm(hub.centerMm[0]), mm(hub.centerMm[1]), mm(hub.centerMm[2])];
     void spacingMm;
     return node;
   });

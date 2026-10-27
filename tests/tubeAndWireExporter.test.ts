@@ -109,6 +109,28 @@ describe('tubeAndWireExporter', () => {
       expect(bd.shoppingList.customPrintedHubs).toBe(0);
     });
 
+    it('models an elbow about its centre of mass, so it compiles where its pipes are', async () => {
+      const { solidCentroidXY } = await import('../src/utils/tubeAndWireExporter');
+      const hub = {
+        id: 'hub_1', name: 'Hub 1', centerMm: [100, 200, 300] as [number, number, number], minAngleDeg: 90,
+        classification: '90_elbow' as const, needsCustomPrint: false,
+        ports: [{ strutId: 'a', dir: [-1, 0, 0] as [number, number, number], shoulderOffsetMm: 13 }, { strutId: 'b', dir: [0, -1, 0] as [number, number, number], shoulderOffsetMm: 13 }],
+      };
+      const node = buildPipeHubNode(hub);
+      // Its solid's centre of mass is its origin in X and Y, as the compile makes it.
+      const [cx, cy] = solidCentroidXY(node.geoms!, 60);
+      expect(Math.abs(cx)).toBeLessThan(0.0003);
+      expect(Math.abs(cy)).toBeLessThan(0.0003);
+      // Which is off the joint: an elbow's mass leans towards its arms.
+      expect(node.pos[0]).toBeLessThan(0.1 - 0.002);
+      expect(node.pos[1]).toBeLessThan(0.2 - 0.002);
+      // Yet every socket still starts on the joint's own line, in world space.
+      for (const g of node.geoms!.filter((x) => x.name?.startsWith('sleeve_'))) {
+        expect((g.fromto![0] + node.pos[0]) * 1000).toBeCloseTo(100, 6);
+        expect((g.fromto![1] + node.pos[1]) * 1000).toBeCloseTo(200, 6);
+      }
+    });
+
     it('builds printable CSG hub nodes in both socket and spigot fit styles', () => {
       const ghNodes = generatePipeStructurePreset('mini_greenhouse');
       const bd = breakdownPipeFrame({ nodes: ghNodes });
